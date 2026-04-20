@@ -1,0 +1,23 @@
+{
+  "name": "tagcontactbridge-parallel",
+  "private": true,
+  "version": "0.1.0",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev:control-plane": "node apps/control-plane/src/server.js",
+    "dev:inbound": "node apps/inbound-gateway/src/server.js",
+    "dev:outbound": "node apps/outbound-gateway/src/server.js",
+    "dev:ring": "node apps/ringcentral-cx/src/server.js",
+    "dev:worker": "node apps/event-worker/src/server.js",
+    "smoke": "node scripts/smoke-test.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "mongoose": "^8.13.0"
+  }
+}
