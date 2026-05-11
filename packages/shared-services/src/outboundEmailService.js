@@ -1,6 +1,6 @@
 "use strict";
 
-const { createSendgridClient } = require("../../shared-integrations/src");
+const { sendMail } = require("./mailerService");
 const { getCompanyConfig } = require("../../shared-config/src");
 
 function buildDefaultEmailContent({ name, domain }) {
@@ -11,45 +11,34 @@ function buildDefaultEmailContent({ name, domain }) {
   };
 }
 
-async function sendOutboundEmail({ domain, toEmail, subject, text, html, name }) {
+async function sendOutboundEmail({
+  domain,
+  toEmail,
+  subject,
+  text,
+  html,
+  name,
+  attachments = [],
+}) {
   if (!toEmail) {
     return { ok: false, skipped: true, reason: "missing-email" };
   }
 
   const company = getCompanyConfig(domain);
-  const client = createSendgridClient(domain);
   const fallback = buildDefaultEmailContent({ name, domain });
 
-  await client.sendEmail({
-    from: {
-      email: company.fromEmail,
-      name: company.name,
-    },
-    personalizations: [
-      {
-        to: [{ email: toEmail }],
-        subject: subject || fallback.subject,
-      },
-    ],
-    content: [
-      {
-        type: "text/plain",
-        value: text || fallback.text,
-      },
-      ...(html
-        ? [
-            {
-              type: "text/html",
-              value: html,
-            },
-          ]
-        : []),
-    ],
+  await sendMail(domain, {
+    to: toEmail,
+    subject: subject || fallback.subject,
+    text: text || fallback.text,
+    html: html || undefined,
+    from: `${company.name} <${company.fromEmail}>`,
+    attachments,
   });
 
   return {
     ok: true,
-    provider: "sendgrid",
+    provider: "sendgrid-smtp",
     toEmail,
   };
 }

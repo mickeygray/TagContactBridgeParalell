@@ -1,0 +1,18 @@
+[
+  {
+    "campaignId": 2306,
+    "permissions": [],
+    "campaignName": "Parallel Test Campaign",
+    "campaignDesc": "smoke (PREVIEW+progressive)",
+    "isActive": 1,
+    "customDialZoneGroup": null,
+    "dialGroup": {
+      "id": 963,
+      "description": "Parallel Outbound"
+    },
+    "script": null,
+    "quotaGroup": null,
+    "amdProfileId": null,
+    "personaCallSchedules": []
+  }
+]

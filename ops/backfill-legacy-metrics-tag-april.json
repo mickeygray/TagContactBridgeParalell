@@ -1,0 +1,25 @@
+{
+  "domain": "TAG",
+  "from": "2026-04-01",
+  "to": "2026-04-24",
+  "spend": {
+    "imported": 77,
+    "upserted": 0,
+    "modified": 77
+  },
+  "calls": {
+    "imported": 177,
+    "upserted": 0,
+    "modified": 177,
+    "source": "legacy-contactactivities+callfire"
+  },
+  "payments": {
+    "imported": 92,
+    "upserted": 0,
+    "modified": 92
+  },
+  "snapshots": {
+    "rebuilt": 24
+  },
+  "completedAt": "2026-04-24T22:17:28.669Z"
+}

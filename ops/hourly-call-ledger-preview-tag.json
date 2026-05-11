@@ -1,0 +1,48 @@
+{
+  "previewedAt": "2026-04-24T21:27:25.907Z",
+  "domains": [
+    {
+      "domain": "TAG",
+      "previewedAt": "2026-04-24T21:27:25.907Z",
+      "window": {
+        "from": "2026-04-23T21:27:25.907Z",
+        "to": "2026-04-24T21:27:25.907Z"
+      },
+      "scan": {
+        "callLogsScanned": 0,
+        "groupedCalls": 0,
+        "unmatchedCalls": 0,
+        "caseMatched": 0,
+        "caseFromCallLog": 0,
+        "caseFromHistory": 0,
+        "sourceMatched": 0,
+        "sourceFromCallLog": 0,
+        "sourceFromLegs": 0,
+        "sourceFromCallrail": 0,
+        "sourceFromHistory": 0,
+        "callrailLookups": 0,
+        "operations": 0,
+        "errors": 0
+      },
+      "totals": {
+        "pieces": 0,
+        "uniqueCases": 0,
+        "groupedCalls": 0,
+        "unmatchedCalls": 0
+      },
+      "groups": [],
+      "unmatched": [],
+      "operations": [],
+      "errors": []
+    }
+  ],
+  "summary": {
+    "domains": 1,
+    "callLogsScanned": 0,
+    "groupedCalls": 0,
+    "unmatchedCalls": 0,
+    "pieces": 0,
+    "operations": 0,
+    "errors": 0
+  }
+}

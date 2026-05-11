@@ -1,0 +1,7 @@
+[VENDOR DAILY ROLLUP],TAG,2026-04-30
+
+[BY FAMILY]
+family,leads,calls,calls_over_5min,scored_calls,average_score,hot,warm,cold,dead,fake,deals_today,postdate_today,dnc_today,redline_today,initial_payments,total_collected
+
+[BY SOURCE]
+source,channel,spend,leads,calls,calls_over_5min,scored_calls,average_score,hot,warm,cold,dead,fake,deals_today,postdate_today,dnc_today,redline_today,initial_payments,total_collected

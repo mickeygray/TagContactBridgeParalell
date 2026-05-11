@@ -2,6 +2,10 @@
 
 const mongoose = require("mongoose");
 
+// IDENTIFIER SCOPE: `canonicalKey` is intentionally global — canonical
+// sources span domains by design. "Google Ads" means the same thing whether
+// TAG or WYNN saw the lead. Per-domain attribution is handled via the
+// `domains` array and the `{ sourceIds.domain, sourceIds.sourceId }` index.
 const sourceCanonicalSchema = new mongoose.Schema(
   {
     canonicalKey: { type: String, required: true, unique: true, index: true },
@@ -23,6 +27,7 @@ const sourceCanonicalSchema = new mongoose.Schema(
       mailer: { type: Boolean, default: false },
       digital: { type: Boolean, default: false },
       needsReview: { type: Boolean, default: false },
+      genericMailCatchall: { type: Boolean, default: false },
     },
   },
   { timestamps: true },
@@ -30,6 +35,7 @@ const sourceCanonicalSchema = new mongoose.Schema(
 
 sourceCanonicalSchema.index({ internalName: 1, active: 1 });
 sourceCanonicalSchema.index({ channel: 1, active: 1 });
+sourceCanonicalSchema.index({ "flags.genericMailCatchall": 1, active: 1 });
 sourceCanonicalSchema.index({ "sourceIds.domain": 1, "sourceIds.sourceId": 1 });
 
 module.exports =

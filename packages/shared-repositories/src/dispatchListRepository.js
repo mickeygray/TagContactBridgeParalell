@@ -35,6 +35,18 @@ async function listDispatchLists(domain, filters = {}) {
     .lean();
 }
 
+async function findLatestDispatchListByScheduledBlastKey(domain, scheduledBlastKey) {
+  const key = String(scheduledBlastKey || "").trim();
+  if (!key) return null;
+
+  return DispatchList.findOne({
+    domain: normalizeDomain(domain),
+    "selectors.scheduledBlastKey": key,
+  })
+    .sort({ builtAt: -1, createdAt: -1 })
+    .lean();
+}
+
 async function updateDispatchList(id, update = {}) {
   return DispatchList.findByIdAndUpdate(
     id,
@@ -80,6 +92,7 @@ async function markDispatchListFailed(id, result = {}) {
 
 module.exports = {
   createDispatchList,
+  findLatestDispatchListByScheduledBlastKey,
   findDispatchListById,
   listDispatchLists,
   markDispatchListCompleted,

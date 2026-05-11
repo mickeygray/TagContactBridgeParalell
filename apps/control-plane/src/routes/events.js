@@ -12,6 +12,16 @@ const { toErrorResponse } = require("../../../../packages/shared-errors/src");
 
 function createEventsRouter(auth) {
   const router = express.Router();
+  const internalSecret = String(process.env.INTERNAL_SERVICE_SECRET || process.env.OUTBOUND_GATEWAY_SECRET || "").trim();
+
+  function hasInternalAccess(req) {
+    const provided = String(
+      req.headers["x-service-secret"] ||
+      req.headers["x-internal-secret"] ||
+      "",
+    ).trim();
+    return Boolean(internalSecret && provided && provided === internalSecret);
+  }
 
   router.get("/", auth.requireAuth, auth.requireAdmin, async (req, res) => {
     const events = await listEvents({
@@ -33,10 +43,27 @@ function createEventsRouter(auth) {
     return res.json({ ok: true, event });
   });
 
-  router.post("/intake", auth.requireAuth, async (req, res) => {
+  router.post("/intake", async (req, res) => {
     try {
-      if (!["admin", "service"].includes(req.user?.role)) {
-        return res.status(403).json({ ok: false, error: "Forbidden" });
+      if (!hasInternalAccess(req)) {
+        let authRejected = false;
+        await new Promise((resolve) => {
+          auth.requireAuth(req, res, (error) => {
+            if (error || !req.user) {
+              authRejected = true;
+              return resolve();
+            }
+            return resolve();
+          });
+        });
+
+        if (authRejected || !req.user) {
+          return;
+        }
+
+        if (!["admin", "service"].includes(req.user?.role)) {
+          return res.status(403).json({ ok: false, error: "Forbidden" });
+        }
       }
 
       const result = await createControlPlaneEvent({

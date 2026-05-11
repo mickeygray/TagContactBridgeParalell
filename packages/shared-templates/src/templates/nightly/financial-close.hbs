@@ -1,0 +1,281 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">{{> base-css}}</head>
+<body>
+  <div class="wrap">
+    {{> header}}
+
+    <div class="section">
+      <h2>Today — {{date}}</h2>
+      {{> kpi-tiles tiles=todayTiles}}
+    </div>
+
+    {{#if perDomain.length}}
+    <div class="section">
+      <h2>By company</h2>
+      <table class="data" cellpadding="0" cellspacing="0">
+        <tr>
+          <th>Company</th>
+          <th class="center">Leads</th>
+          <th class="center">Calls</th>
+          <th class="center">Spend</th>
+          <th class="center">Money in</th>
+          <th class="center">Deals</th>
+          <th class="center">Failed pmts</th>
+        </tr>
+        {{#each perDomain}}
+        <tr>
+          <td><strong>{{domain}}</strong></td>
+          <td class="center">{{leads}}</td>
+          <td class="center">{{calls}}</td>
+          <td class="center">{{money spend}}</td>
+          <td class="center">{{money moneyIn}}</td>
+          <td class="center">{{deals}}</td>
+          <td class="center">{{redlines}}</td>
+        </tr>
+        {{/each}}
+      </table>
+    </div>
+    {{/if}}
+
+    <!-- ─────────────────────────  CALLS  ───────────────────────── -->
+    <div class="section">
+      <h2>Calls today</h2>
+      <div class="summary-line">
+        <strong>{{daily.calls.total}}</strong> total calls ·
+        <strong>{{daily.calls.callsOver5}}</strong> over 5 min
+      </div>
+      {{#if daily.calls.byChannel.length}}
+        <table class="data" cellpadding="0" cellspacing="0" style="margin-top:8px;">
+          <tr>
+            <th>Channel</th>
+            <th class="center">Calls</th>
+            <th class="center">5 min+</th>
+            <th class="center">Unique callers</th>
+          </tr>
+          {{#each daily.calls.byChannel}}
+          <tr>
+            <td>{{channel}}</td>
+            <td class="center">{{totalCalls}}</td>
+            <td class="center">{{callsOver5}}</td>
+            <td class="center">{{default uniqueCallers 0}}</td>
+          </tr>
+          {{/each}}
+        </table>
+      {{/if}}
+    </div>
+
+    <!-- ──────────────────  MONEY COLLECTED TODAY  ───────────────── -->
+    <div class="section">
+      <h2>Money collected today</h2>
+      <table class="data" cellpadding="0" cellspacing="0">
+        <tr>
+          <th>Bucket</th>
+          <th class="center">Count</th>
+          <th class="center">Amount</th>
+        </tr>
+        <tr>
+          <td>Initial payments</td>
+          <td class="center">{{daily.payments.initialCount}}</td>
+          <td class="center">{{money daily.payments.initialAmount}}</td>
+        </tr>
+        <tr>
+          <td>Recurring payments</td>
+          <td class="center">{{daily.payments.recurringCount}}</td>
+          <td class="center">{{money daily.payments.recurringAmount}}</td>
+        </tr>
+        <tr>
+          <td><strong>Total</strong></td>
+          <td class="center"><strong>{{daily.payments.totalCount}}</strong></td>
+          <td class="center"><strong>{{money daily.payments.totalAmount}}</strong></td>
+        </tr>
+      </table>
+
+      {{#if dealsBySource.length}}
+        <h2 style="margin-top:14px;">New deals by source</h2>
+        <table class="data" cellpadding="0" cellspacing="0">
+          <tr>
+            <th>Source</th>
+            <th class="center">Deals</th>
+            <th class="center">Initial $</th>
+            <th class="center">Collected $</th>
+          </tr>
+          {{#each dealsBySource}}
+          <tr>
+            <td>{{source}}</td>
+            <td class="center">{{deals}}</td>
+            <td class="center">{{money initialPayments}}</td>
+            <td class="center">{{money totalCollected}}</td>
+          </tr>
+          {{/each}}
+        </table>
+      {{/if}}
+
+      {{#if dealsByCase.length}}
+        <h2 style="margin-top:14px;">Deals — case detail</h2>
+        <table class="data" cellpadding="0" cellspacing="0">
+          <tr>
+            <th>Case</th>
+            <th>Name</th>
+            <th class="center">Amount</th>
+            <th>Attributed source</th>
+            <th class="center">Path</th>
+            <th>Conflict signals</th>
+          </tr>
+          {{#each dealsByCase}}
+          <tr>
+            <td><strong>{{domain}} #{{caseId}}</strong><div class="muted">pmt {{casePaymentId}}</div></td>
+            <td>{{default name "—"}}</td>
+            <td class="center">{{money amount}}</td>
+            <td>
+              {{default sourceName "Unknown"}}
+              {{#if sourceChannel}}<div class="muted">{{sourceChannel}}</div>{{/if}}
+            </td>
+            <td class="center">
+              {{#if conflict}}
+                <span class="pill redline">{{attributionPath}}</span>
+              {{else}}
+                <span class="pill prospect">{{attributionPath}}</span>
+              {{/if}}
+            </td>
+            <td>
+              {{#if conflict}}
+                <span class="muted">
+                  {{#if sourceName_parallel}}P: {{sourceName_parallel}}{{/if}}
+                  {{#if sourceName_legacy}} · L: {{sourceName_legacy}}{{/if}}
+                  {{#if sourceName_profile}} · CP: {{sourceName_profile}}{{/if}}
+                </span>
+              {{/if}}
+            </td>
+          </tr>
+          {{/each}}
+        </table>
+      {{/if}}
+    </div>
+
+    <!-- ──────────────────────  SPEND TODAY  ─────────────────────── -->
+    <div class="section">
+      <h2>Spend today</h2>
+      {{#if daily.spend.total}}
+        <div class="summary-line">
+          <strong>{{money daily.spend.total}}</strong> total ·
+          <strong>{{int daily.spend.pieces}}</strong> pieces ·
+          <strong>{{int daily.spend.leadsReported}}</strong> reported leads
+        </div>
+      {{else}}
+        <div class="muted">No spend rows synced for today.</div>
+      {{/if}}
+      {{#if spendByChannel.length}}
+        <table class="data" cellpadding="0" cellspacing="0" style="margin-top:8px;">
+          <tr>
+            <th>Channel</th>
+            <th class="center">Spend</th>
+            <th class="center">Pieces</th>
+            <th class="center">Reported leads</th>
+          </tr>
+          {{#each spendByChannel}}
+          <tr>
+            <td>{{channel}}</td>
+            <td class="center">{{money spend}}</td>
+            <td class="center">{{int pieces}}</td>
+            <td class="center">{{int leadsReported}}</td>
+          </tr>
+          {{/each}}
+        </table>
+      {{/if}}
+    </div>
+
+    <!-- ────────────────────  FAILED PAYMENTS  ───────────────────── -->
+    <div class="section">
+      <h2>Payments that didn't process today</h2>
+      {{#if failedPayments.length}}
+        <div class="alert-banner" style="margin:0 0 10px; border-radius:6px;">
+          <div class="head">These clients receive a payment-reminder text at 7:00 AM PT tomorrow.</div>
+          <div class="sub">Pull a client off the list before 7 AM if you don't want them contacted.</div>
+        </div>
+        <table class="data" cellpadding="0" cellspacing="0">
+          <tr>
+            <th>Client</th>
+            <th class="center">Case</th>
+            <th class="center">Amount</th>
+            <th class="center">Attempts</th>
+            <th class="center">Status</th>
+            <th>Last comment</th>
+          </tr>
+          {{#each failedPayments}}
+          <tr>
+            <td>
+              <strong>{{default name "Unknown"}}</strong>
+              <div class="muted mono">{{default phoneFormatted phone}}</div>
+            </td>
+            <td class="center">{{domain}} #{{caseId}}</td>
+            <td class="center"><strong class="score-red">{{money declinedAmount}}</strong></td>
+            <td class="center">{{attempts}}</td>
+            <td class="center"><span class="pill redline">{{lastTransactionStatus}}</span></td>
+            <td><span class="muted">{{default lastTransactionComment ""}}</span></td>
+          </tr>
+          {{/each}}
+        </table>
+      {{else}}
+        <div class="muted">No failed payments today.</div>
+      {{/if}}
+    </div>
+
+    <!-- ─────────────────────  MTD ROI BLEND  ────────────────────── -->
+    <div class="section">
+      <h2>Month-to-date ROI — {{mtd.monthStart}} → {{mtd.monthEnd}}</h2>
+      <div class="summary-line">
+        <strong>{{money mtd.spend.total}}</strong> spend ·
+        <strong>{{money mtd.payments.totalAmount}}</strong> collected
+        ({{mtd.payments.totalCount}}) ·
+        <strong>{{money mtd.payments.initialAmount}}</strong> initial
+        ({{mtd.payments.initialCount}})
+      </div>
+      {{#if mtdRoiBySource.length}}
+        <table class="data" cellpadding="0" cellspacing="0" style="margin-top:8px;">
+          <tr>
+            <th>Source</th>
+            <th class="center">Spend</th>
+            <th class="center">Pieces</th>
+            <th class="center">Calls</th>
+            <th class="center">5min+</th>
+            <th class="center">Leads</th>
+            <th class="center">Deals</th>
+            <th class="center">Initials</th>
+            <th class="center">Paid</th>
+            <th class="center">CPL</th>
+            <th class="center">CPA</th>
+            <th class="center">ROAS</th>
+            <th class="center">ROI</th>
+          </tr>
+          {{#each mtdRoiBySource}}
+          <tr>
+            <td>
+              {{source}}
+              {{#if channel}}<div class="muted">{{channel}}</div>{{/if}}
+            </td>
+            <td class="center">{{money spend}}</td>
+            <td class="center">{{int pieces}}</td>
+            <td class="center">{{calls}}</td>
+            <td class="center">{{callsOver5}}</td>
+            <td class="center">{{leads}}</td>
+            <td class="center">{{deals}}</td>
+            <td class="center">{{money initials}}</td>
+            <td class="center">{{money paid}}</td>
+            <td class="center">{{#if cpl}}{{money cpl}}{{else}}—{{/if}}</td>
+            <td class="center">{{#if cpa}}{{money cpa}}{{else}}—{{/if}}</td>
+            <td class="center">{{#if roas}}{{roas}}{{else}}—{{/if}}</td>
+            <td class="center">{{#if roi}}{{roi}}{{else}}—{{/if}}</td>
+          </tr>
+          {{/each}}
+        </table>
+      {{else}}
+        <div class="muted">No MTD ROI rows.</div>
+      {{/if}}
+      <div class="summary-line">
+        Full per-source MTD breakdown attached as <strong>{{csvFilename}}</strong> — same column shape as the metrics page CSV export.
+      </div>
+    </div>
+
+    {{> footer}}
+  </div>
+</body></html>

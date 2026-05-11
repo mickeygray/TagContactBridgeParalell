@@ -1,0 +1,517 @@
+import * as React from "react";
+import { useForm } from "react-hook-form";
+import { zodResolver } from "@hookform/resolvers/zod";
+import { z } from "zod";
+import { Link2 } from "lucide-react";
+import { Input, Label } from "@/components/ui/Input";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/Select";
+import { useUnassignedExtensions } from "@/lib/api/queries/accounts";
+import type {
+  AccountRecord,
+  AuthAudience,
+  AuthRole,
+  CreateAccountInput,
+  CxQueueTier,
+} from "@/lib/api/types";
+
+const ROLE_OPTIONS: Array<{
+  value: AuthRole;
+  label: string;
+  audience: AuthAudience;
+  hint: string;
+}> = [
+  { value: "admin", label: "Admin", audience: "admin", hint: "Full access to every workspace." },
+  {
+    value: "internal-agent",
+    label: "Internal agent",
+    audience: "user",
+    hint: "CX shell with extended read access to contacts.",
+  },
+  {
+    value: "widget-user",
+    label: "CX user",
+    audience: "user",
+    hint: "Narrow CX shell — calls, tasks, Logics, SMS.",
+  },
+];
+
+const CX_QUEUE_TIER_OPTIONS: Array<{
+  value: CxQueueTier;
+  label: string;
+  hint: string;
+}> = [
+  { value: "no_leads", label: "No leads", hint: "Login allowed; automatic lead serving is off." },
+  { value: "red_only", label: "Red only", hint: "Aged leads only." },
+  { value: "old_balanced", label: "Old balanced", hint: "10 blue and 10 red fallback leads." },
+  { value: "fresh_capped", label: "Fresh capped", hint: "Fresh lane with 15 blue and 5 red fallback." },
+  { value: "fresh_priority", label: "Fresh priority", hint: "Higher fresh access with 15 blue and 5 red fallback." },
+];
+
+export const COMPANY_OPTIONS = ["TAG", "WYNN", "AMITY"] as const;
+
+const baseSchema = z.object({
+  email: z.string().email("Enter a valid email"),
+  name: z.string().min(1, "Name is required"),
+  role: z.enum(["admin", "internal-agent", "widget-user"]),
+  company: z.enum(COMPANY_OPTIONS),
+  extensionId: z.string().optional(),
+  extensionNumber: z.string().optional(),
+  cxAgentId: z.string().optional(),
+  stationLabel: z.string().optional(),
+  phone: z.string().optional(),
+  cxQueueTier: z.enum(["no_leads", "red_only", "old_balanced", "fresh_capped", "fresh_priority"]),
+  logicsUserId: z.string().optional(),
+  logicsDisplayName: z.string().optional(),
+  tagLogicsId: z.string().optional(),
+  tagSOId: z.string().optional(),
+  tagEmail: z.string().optional(),
+  tagLogicsName: z.string().optional(),
+  tagLogicsRoles: z.string().optional(),
+  wynnLogicsId: z.string().optional(),
+  wynnSOId: z.string().optional(),
+  wynnEmail: z.string().optional(),
+  wynnLogicsName: z.string().optional(),
+  wynnLogicsRoles: z.string().optional(),
+  logicsCredentialMode: z.string().optional(),
+  logicsCredentialStatus: z.string().optional(),
+  logicsScopes: z.string().optional(),
+  logicsPermissionsLabel: z.string().optional(),
+  logicsExternalSecretRef: z.string().optional(),
+});
+
+export type UserFormValues = z.infer<typeof baseSchema>;
+
+export interface UserFormProps {
+  /** Initial values when editing an existing account. */
+  initial?: Partial<AccountRecord> | null;
+  /** Disable the email field when editing — email is the primary key. */
+  lockEmail?: boolean;
+  /** Called with a fully-normalized payload ready for create/update mutations. */
+  onSubmit: (payload: CreateAccountInput) => Promise<void> | void;
+  /** Render prop for the submit/cancel buttons. */
+  footer: (
+    state: {
+      submit: () => void;
+      isSubmitting: boolean;
+      isDirty: boolean;
+    },
+  ) => React.ReactNode;
+  /**
+   * Optional extra extension to always show in the dropdown, so edit dialogs
+   * can still display the account's currently-paired extension (which is not
+   * returned by the unpaired list).
+   */
+  includeCurrentExtension?: {
+    extensionId: string;
+    name?: string | null;
+  } | null;
+  /** Defer `useUnassignedExtensions` call when the parent already has data. */
+  defaultCompany?: (typeof COMPANY_OPTIONS)[number];
+}
+
+export function UserForm({
+  initial,
+  lockEmail,
+  onSubmit,
+  footer,
+  includeCurrentExtension,
+  defaultCompany = "TAG",
+}: UserFormProps) {
+  // `tagLogicsRoles` / `wynnLogicsRoles` are already comma-separated strings
+  // as stored on the UA (same shape as the Logics roster). No array parsing.
+  const csvArray = (values?: string[] | null) =>
+    values && values.length > 0 ? values.join(", ") : "";
+  const parseNumber = (value?: string) => {
+    if (!value || !value.trim()) return null;
+    const parsed = Number(value.trim());
+    return Number.isFinite(parsed) ? parsed : null;
+  };
+  const parseCsvArray = (value?: string) =>
+    String(value || "")
+      .split(",")
+      .map((item) => item.trim())
+      .filter(Boolean);
+
+  const form = useForm<UserFormValues>({
+    resolver: zodResolver(baseSchema),
+    defaultValues: {
+      email: initial?.email ?? "",
+      name: initial?.name ?? "",
+      role: (initial?.role as UserFormValues["role"]) ?? "internal-agent",
+      company:
+        (COMPANY_OPTIONS.includes(
+          (initial?.company ?? defaultCompany) as (typeof COMPANY_OPTIONS)[number],
+        )
+          ? (initial?.company ?? defaultCompany)
+          : defaultCompany) as (typeof COMPANY_OPTIONS)[number],
+      extensionId: initial?.extensionId ?? "",
+      extensionNumber: initial?.extensionNumber ?? "",
+      cxAgentId: initial?.cxAgentId ?? "",
+      stationLabel: initial?.stationLabel ?? "",
+      phone: initial?.phone ?? "",
+      cxQueueTier:
+        (initial?.cxQueuePolicy?.tier as UserFormValues["cxQueueTier"]) ??
+        (initial?.role === "admin" || initial?.audience === "admin" ? "no_leads" : "fresh_priority"),
+      logicsUserId: initial?.logicsUserId != null ? String(initial.logicsUserId) : "",
+      logicsDisplayName: initial?.logicsDisplayName ?? "",
+      tagLogicsId: initial?.tagLogicsId != null ? String(initial.tagLogicsId) : "",
+      tagSOId: initial?.tagSOId != null ? String(initial.tagSOId) : "",
+      tagEmail: initial?.tagEmail ?? "",
+      tagLogicsName: initial?.tagLogicsName ?? "",
+      tagLogicsRoles: initial?.tagLogicsRoles ?? "",
+      wynnLogicsId: initial?.wynnLogicsId != null ? String(initial.wynnLogicsId) : "",
+      wynnSOId: initial?.wynnSOId != null ? String(initial.wynnSOId) : "",
+      wynnEmail: initial?.wynnEmail ?? "",
+      wynnLogicsName: initial?.wynnLogicsName ?? "",
+      wynnLogicsRoles: initial?.wynnLogicsRoles ?? "",
+      logicsCredentialMode: initial?.logicsAuth?.credentialMode ?? "",
+      logicsCredentialStatus: initial?.logicsAuth?.credentialStatus ?? "",
+      logicsScopes: csvArray(initial?.logicsAuth?.scopes),
+      logicsPermissionsLabel: initial?.logicsAuth?.permissionsLabel ?? "",
+      logicsExternalSecretRef: initial?.logicsAuth?.externalSecretRef ?? "",
+    },
+  });
+
+  const company = form.watch("company");
+  const role = form.watch("role");
+  const cxQueueTier = form.watch("cxQueueTier");
+  const extensionId = form.watch("extensionId") || "";
+  const roleDef = ROLE_OPTIONS.find((r) => r.value === role);
+  const cxQueueTierDef = CX_QUEUE_TIER_OPTIONS.find((tier) => tier.value === cxQueueTier);
+  const extensions = useUnassignedExtensions(company);
+  const lockInlineUnpair = Boolean(initial?.extensionId && includeCurrentExtension?.extensionId);
+
+  const options = React.useMemo(() => {
+    const base = extensions.data ?? [];
+    if (!includeCurrentExtension) return base;
+    const existingIds = new Set(base.map((e) => e.extensionId));
+    if (existingIds.has(includeCurrentExtension.extensionId)) return base;
+    return [
+      {
+        extensionId: includeCurrentExtension.extensionId,
+        name: includeCurrentExtension.name ?? null,
+        company: company,
+        cxAgentId: null,
+        status: null,
+        exPresenceStatus: "paired-to-this-user",
+        lastStatusChange: null,
+        lastEventReceived: null,
+      },
+      ...base,
+    ];
+  }, [extensions.data, includeCurrentExtension, company]);
+
+  const [isSubmitting, setSubmitting] = React.useState(false);
+
+  const submit = form.handleSubmit(async (values) => {
+    setSubmitting(true);
+    try {
+      const audience = roleDef?.audience ?? "user";
+      const sameQueueTier = initial?.cxQueuePolicy?.tier === values.cxQueueTier;
+      const payload: CreateAccountInput = {
+        email: values.email.trim().toLowerCase(),
+        name: values.name.trim(),
+        role: values.role as AuthRole,
+        audience,
+        company: values.company,
+        extensionId: values.extensionId?.trim() || null,
+        extensionNumber: values.extensionNumber?.trim() || null,
+        cxAgentId: values.cxAgentId?.trim() || null,
+        stationLabel: values.stationLabel?.trim() || undefined,
+        phone: values.phone?.trim() || null,
+        cxQueuePolicy: {
+          ...(sameQueueTier ? initial?.cxQueuePolicy || {} : {}),
+          tier: values.cxQueueTier,
+          enabled: values.cxQueueTier !== "no_leads",
+        },
+        logicsUserId: parseNumber(values.logicsUserId),
+        logicsDisplayName: values.logicsDisplayName?.trim() || null,
+        tagLogicsId: parseNumber(values.tagLogicsId),
+        tagSOId: parseNumber(values.tagSOId),
+        tagEmail: values.tagEmail?.trim() || null,
+        tagLogicsName: values.tagLogicsName?.trim() || null,
+        tagLogicsRoles: values.tagLogicsRoles?.trim() || null,
+        wynnLogicsId: parseNumber(values.wynnLogicsId),
+        wynnSOId: parseNumber(values.wynnSOId),
+        wynnEmail: values.wynnEmail?.trim() || null,
+        wynnLogicsName: values.wynnLogicsName?.trim() || null,
+        wynnLogicsRoles: values.wynnLogicsRoles?.trim() || null,
+      };
+      // Build logicsAuth only with fields the admin actually set — mongoose
+      // enum validation rejects `null` on credentialMode/credentialStatus,
+      // so we omit empty keys instead of passing explicit nulls.
+      const mode = values.logicsCredentialMode?.trim();
+      const status = values.logicsCredentialStatus?.trim();
+      const scopes = parseCsvArray(values.logicsScopes);
+      const permissionsLabel = values.logicsPermissionsLabel?.trim();
+      const externalSecretRef = values.logicsExternalSecretRef?.trim();
+      const logicsAuth: NonNullable<CreateAccountInput["logicsAuth"]> = {};
+      if (mode) logicsAuth.credentialMode = mode;
+      if (status) logicsAuth.credentialStatus = status;
+      if (scopes.length > 0) logicsAuth.scopes = scopes;
+      if (permissionsLabel) logicsAuth.permissionsLabel = permissionsLabel;
+      if (externalSecretRef) logicsAuth.externalSecretRef = externalSecretRef;
+      if (Object.keys(logicsAuth).length > 0) {
+        payload.logicsAuth = logicsAuth;
+      }
+      await onSubmit(payload);
+    } finally {
+      setSubmitting(false);
+    }
+  });
+
+  return (
+    <form onSubmit={submit} className="space-y-4">
+      <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+        <Field label="Email" error={form.formState.errors.email?.message}>
+          <Input
+            type="email"
+            autoComplete="email"
+            placeholder="you@taxadvocategroup.com"
+            disabled={lockEmail}
+            autoFocus={!lockEmail}
+            {...form.register("email")}
+          />
+        </Field>
+        <Field label="Name" error={form.formState.errors.name?.message}>
+          <Input
+            autoFocus={lockEmail}
+            placeholder="Jane Agent"
+            {...form.register("name")}
+          />
+        </Field>
+        <Field label="Role">
+          <Select
+            value={role}
+            onValueChange={(v) => form.setValue("role", v as UserFormValues["role"], { shouldDirty: true })}
+          >
+            <SelectTrigger>
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {ROLE_OPTIONS.map((opt) => (
+                <SelectItem key={opt.value} value={opt.value}>
+                  {opt.label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          {roleDef ? (
+            <p className="text-[11px] text-muted-foreground">{roleDef.hint}</p>
+          ) : null}
+        </Field>
+        <Field label="Company">
+          <Select
+            value={company}
+            onValueChange={(v) =>
+              form.setValue("company", v as UserFormValues["company"], { shouldDirty: true })
+            }
+          >
+            <SelectTrigger>
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {COMPANY_OPTIONS.map((c) => (
+                <SelectItem key={c} value={c}>
+                  {c}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </Field>
+      </div>
+
+      <Field
+        label="RingCentral extension"
+        hint={
+          extensions.isLoading
+            ? "Loading unpaired extensions…"
+            : lockInlineUnpair
+              ? "Use the explicit unlink button in the users table to unpair."
+            : options.length === 0
+              ? "No unpaired extensions in this company."
+              : `${options.length} available.`
+        }
+      >
+        <Select
+          value={extensionId || "none"}
+          onValueChange={(v) =>
+            form.setValue("extensionId", v === "none" ? "" : v, { shouldDirty: true })
+          }
+        >
+          <SelectTrigger>
+            <span className="flex items-center gap-2">
+              <Link2 className="h-3.5 w-3.5 text-muted-foreground" />
+              <SelectValue placeholder="Leave unpaired for now" />
+            </span>
+          </SelectTrigger>
+          <SelectContent>
+            {!lockInlineUnpair ? <SelectItem value="none">Leave unpaired</SelectItem> : null}
+            {options.map((ext) => (
+              <SelectItem key={ext.extensionId} value={ext.extensionId}>
+                {(ext.name ?? "ext") + " · "}
+                {ext.extensionId}
+                {ext.exPresenceStatus ? ` · ${ext.exPresenceStatus}` : ""}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      </Field>
+
+      <Field label="CX queue tier" hint={cxQueueTierDef?.hint}>
+        <Select
+          value={cxQueueTier}
+          onValueChange={(v) =>
+            form.setValue("cxQueueTier", v as UserFormValues["cxQueueTier"], { shouldDirty: true })
+          }
+        >
+          <SelectTrigger>
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {CX_QUEUE_TIER_OPTIONS.map((opt) => (
+              <SelectItem key={opt.value} value={opt.value}>
+                {opt.label}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      </Field>
+
+      <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+        <Field label="Ext number">
+          <Input placeholder="101" {...form.register("extensionNumber")} />
+        </Field>
+        <Field label="CX agent id">
+          <Input placeholder="optional" {...form.register("cxAgentId")} />
+        </Field>
+        <Field label="Station label">
+          <Input placeholder="CX Desk 3" {...form.register("stationLabel")} />
+        </Field>
+        <Field label="Phone">
+          <Input placeholder="+1..." {...form.register("phone")} />
+        </Field>
+      </div>
+
+      <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+        <Field label="Primary Logics user id" hint="Legacy fallback when tenant-specific ids are missing.">
+          <Input placeholder="433" {...form.register("logicsUserId")} />
+        </Field>
+        <Field label="Logics display name">
+          <Input placeholder="Phil Olson" {...form.register("logicsDisplayName")} />
+        </Field>
+      </div>
+
+      <div className="rounded-xl border border-border/60 bg-muted/20 p-4 space-y-4">
+        <div>
+          <p className="text-sm font-medium">TAG identity</p>
+          <p className="text-[11px] text-muted-foreground">
+            Used when the agent is acting inside TAG cases/tasks.
+          </p>
+        </div>
+        <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+          <Field label="TAG Logics id">
+            <Input placeholder="433" {...form.register("tagLogicsId")} />
+          </Field>
+          <Field label="TAG SO id" hint="Sent to Logics as SetOfficerID on postdate/deal.">
+            <Input placeholder="433" {...form.register("tagSOId")} />
+          </Field>
+          <Field label="TAG email">
+            <Input placeholder="polson@taxadvocategroup.com" {...form.register("tagEmail")} />
+          </Field>
+          <Field label="TAG name">
+            <Input placeholder="Phil Olson" {...form.register("tagLogicsName")} />
+          </Field>
+          <Field label="TAG roles" hint="Comma-separated.">
+            <Input placeholder="Case Worker, Opener" {...form.register("tagLogicsRoles")} />
+          </Field>
+        </div>
+      </div>
+
+      <div className="rounded-xl border border-border/60 bg-muted/20 p-4 space-y-4">
+        <div>
+          <p className="text-sm font-medium">WYNN identity</p>
+          <p className="text-[11px] text-muted-foreground">
+            Used when the agent is acting inside WYNN cases/tasks.
+          </p>
+        </div>
+        <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+          <Field label="WYNN Logics id">
+            <Input placeholder="38" {...form.register("wynnLogicsId")} />
+          </Field>
+          <Field label="WYNN SO id" hint="Sent to Logics as SetOfficerID on postdate/deal.">
+            <Input placeholder="38" {...form.register("wynnSOId")} />
+          </Field>
+          <Field label="WYNN email">
+            <Input placeholder="agent@wynntaxsolutions.com" {...form.register("wynnEmail")} />
+          </Field>
+          <Field label="WYNN name">
+            <Input placeholder="Agent Name" {...form.register("wynnLogicsName")} />
+          </Field>
+          <Field label="WYNN roles" hint="Comma-separated.">
+            <Input placeholder="Case Manager, Tax Preparer" {...form.register("wynnLogicsRoles")} />
+          </Field>
+        </div>
+      </div>
+
+      <div className="rounded-xl border border-border/60 bg-muted/20 p-4 space-y-4">
+        <div>
+          <p className="text-sm font-medium">Logics credential state</p>
+          <p className="text-[11px] text-muted-foreground">
+            Metadata only for now. Secret material stays elsewhere.
+          </p>
+        </div>
+        <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+          <Field label="Credential mode">
+            <Input placeholder="company or user" {...form.register("logicsCredentialMode")} />
+          </Field>
+          <Field label="Credential status">
+            <Input placeholder="pending / active / revoked" {...form.register("logicsCredentialStatus")} />
+          </Field>
+          <Field label="Scopes" hint="Comma-separated.">
+            <Input placeholder="task.write, activity.write" {...form.register("logicsScopes")} />
+          </Field>
+          <Field label="Permissions label">
+            <Input placeholder="Minimal write" {...form.register("logicsPermissionsLabel")} />
+          </Field>
+          <Field label="Secret reference" hint="Vault key or external secret ref.">
+            <Input placeholder="vault://logics/polson" {...form.register("logicsExternalSecretRef")} />
+          </Field>
+        </div>
+      </div>
+
+      {footer({
+        submit,
+        isSubmitting: isSubmitting || form.formState.isSubmitting,
+        isDirty: form.formState.isDirty,
+      })}
+    </form>
+  );
+}
+
+function Field({
+  label,
+  hint,
+  error,
+  children,
+}: {
+  label: string;
+  hint?: string;
+  error?: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="space-y-1.5">
+      <Label>{label}</Label>
+      {children}
+      {error ? <p className="text-xs text-destructive">{error}</p> : null}
+      {hint && !error ? <p className="text-[11px] text-muted-foreground">{hint}</p> : null}
+    </div>
+  );
+}

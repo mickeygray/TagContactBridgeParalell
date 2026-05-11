@@ -1,0 +1,52 @@
+{
+  "count": 3,
+  "limit": 30,
+  "offset": 0,
+  "records": [
+    {
+      "id": "69d916bbf274c07c06ee5f9a",
+      "created_at": "2026-04-10T15:26:51Z",
+      "updated_at": "2026-04-10T15:26:51Z",
+      "auto_complete_category_ids": [],
+      "hard_capability": 3,
+      "label": "async",
+      "name": "Async",
+      "soft_capability": 1,
+      "source_ids": [],
+      "task_auto_complete_seconds": null,
+      "task_timeout_seconds": 3600,
+      "agent_sla": null,
+      "agent_sla_threshold": 75
+    },
+    {
+      "id": "69d916bbf274c07c06ee5fa5",
+      "created_at": "2026-04-10T15:26:51Z",
+      "updated_at": "2026-04-10T15:26:51Z",
+      "auto_complete_category_ids": [],
+      "hard_capability": 5,
+      "label": "realtime",
+      "name": "Realtime",
+      "soft_capability": 3,
+      "source_ids": [],
+      "task_auto_complete_seconds": null,
+      "task_timeout_seconds": 600,
+      "agent_sla": null,
+      "agent_sla_threshold": 75
+    },
+    {
+      "id": "69d916bbf274c07c06ee5fc9",
+      "created_at": "2026-04-10T15:26:51Z",
+      "updated_at": "2026-04-10T15:26:51Z",
+      "auto_complete_category_ids": [],
+      "hard_capability": 3,
+      "label": "omnichannel",
+      "name": "Omnichannel",
+      "soft_capability": 1,
+      "source_ids": [],
+      "task_auto_complete_seconds": null,
+      "task_timeout_seconds": null,
+      "agent_sla": null,
+      "agent_sla_threshold": 75
+    }
+  ]
+}

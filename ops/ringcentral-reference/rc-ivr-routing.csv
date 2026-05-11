@@ -1,0 +1,3 @@
+IVR_Name,IVR_Ext,IVR_Numbers,Key,Action,Target_Name,Target_Ext
+"WYNN TAX IVR",9368,"",1,Connect,"WYNN TAX SOLUTIONS",
+"WYNN TAX IVR",9368,"",NoInput,Disconnect,"?",

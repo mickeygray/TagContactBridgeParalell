@@ -1,0 +1,30 @@
+{"timestamp":"2026-05-08T23:47:08.258Z","level":"info","scope":"demo-ringout-loop-script","message":"demo-ringout.loop_started","meta":{"count":44,"ringSeconds":120,"pauseSeconds":60,"dryRun":false}}
+{"timestamp":"2026-05-08T23:47:08.944Z","level":"info","scope":"demo-ringout-loop-script","message":"demo-ringout.loop_iteration_fired","meta":{"iteration":1,"count":44,"primary":{"id":"s-a0d16c809dd7fz19e09fce1dez44a83000000"},"external":null}}
+{"timestamp":"2026-05-08T23:50:09.562Z","level":"info","scope":"demo-ringout-loop-script","message":"demo-ringout.loop_iteration_fired","meta":{"iteration":2,"count":44,"primary":{"id":"s-a0d16173576d2z19e09ffa368z44fa6e30000"},"external":null}}
+{"timestamp":"2026-05-08T23:53:10.196Z","level":"info","scope":"demo-ringout-loop-script","message":"demo-ringout.loop_iteration_fired","meta":{"iteration":3,"count":44,"primary":{"id":"s-a0d166c0ab0c5z19e0a026501z44f92f00000"},"external":null}}
+{"timestamp":"2026-05-08T23:56:10.892Z","level":"info","scope":"demo-ringout-loop-script","message":"demo-ringout.loop_iteration_fired","meta":{"iteration":4,"count":44,"primary":{"id":"s-a0d7ab21463e4z19e0a0526d9z44f2d0a0000"},"external":null}}
+{"timestamp":"2026-05-08T23:59:12.109Z","level":"info","scope":"demo-ringout-loop-script","message":"demo-ringout.loop_iteration_fired","meta":{"iteration":5,"count":44,"primary":{"id":"s-a0d16c809dd7fz19e0a07eabcz44bfcb30000"},"external":null}}
+{"timestamp":"2026-05-09T00:01:12.311Z","level":"warn","scope":"demo-ringout-loop-script","message":"demo-ringout.cancel_failed","meta":{"label":"primary","ringOutId":"s-a0d16c809dd7fz19e0a07eabcz44bfcb30000","error":"RingCentral request failed DELETE /restapi/v1.0/account/~/extension/63730035004/ring-out/s-a0d16c809dd7fz19e0a07eabcz44bfcb30000: 429","details":{"service":"ringcentral","method":"DELETE","path":"/restapi/v1.0/account/~/extension/63730035004/ring-out/s-a0d16c809dd7fz19e0a07eabcz44bfcb30000","query":null,"responseStatus":429,"responseBody":{"errorCode":"CMN-301","message":"Request rate exceeded","errors":[{"errorCode":"CMN-301","message":"Request rate exceeded"}]}}}}
+{"timestamp":"2026-05-09T00:02:12.620Z","level":"error","scope":"demo-ringout-loop-script","message":"demo-ringout.failed","meta":{"error":"RingCentral request failed POST /restapi/v1.0/account/~/extension/63730035004/ring-out: 429","details":{"service":"ringcentral","method":"POST","path":"/restapi/v1.0/account/~/extension/63730035004/ring-out","query":null,"responseStatus":429,"responseBody":{"errorCode":"CMN-301","message":"Request rate exceeded","errors":[{"errorCode":"CMN-301","message":"Request rate exceeded"}]}}}}
+{
+  "ok": false,
+  "error": "RingCentral request failed POST /restapi/v1.0/account/~/extension/63730035004/ring-out: 429",
+  "details": {
+    "service": "ringcentral",
+    "method": "POST",
+    "path": "/restapi/v1.0/account/~/extension/63730035004/ring-out",
+    "query": null,
+    "responseStatus": 429,
+    "responseBody": {
+      "errorCode": "CMN-301",
+      "message": "Request rate exceeded",
+      "errors": [
+        {
+          "errorCode": "CMN-301",
+          "message": "Request rate exceeded"
+        }
+      ]
+    }
+  }
+}
+{"timestamp":"2026-05-09T00:02:12.649Z","level":"info","scope":"demo-ringout-loop-script","message":"runtime.shutdown.completed","meta":{"reason":"demo-ringout-loop-script-complete"}}

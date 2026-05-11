@@ -1,20 +1,49 @@
 "use strict";
 
-const { createAnthropicClient } = require("./anthropicClient");
-const { createCallrailClient } = require("./callrailClient");
+const {
+  createAnthropicClient,
+  extractTextBlocks,
+  extractToolUse,
+} = require("./anthropicClient");
+const { createCallFireClient } = require("./callFireClient");
+const {
+  createCallrailClient,
+  resolveCompanyByTrackingNumber,
+  validateCompanyTrackingNumbers,
+} = require("./callrailClient");
 const { createDropClient } = require("./dropClient");
+const { createGoogleDriveClient, isGoogleDriveConfigured } = require("./googleDriveClient");
+const { requestJson } = require("./httpClient");
 const { createLogicsClient } = require("./logicsClient");
+const { createNeverBounceClient } = require("./neverBounceClient");
+const { createRealPhoneValidationClient } = require("./realPhoneValidationClient");
 const { createRingCentralClient } = require("./ringcentralClient");
+const { createRingcxVoiceClient } = require("./ringcxVoiceClient");
 const { createSendgridClient } = require("./sendgridClient");
+const { createTrustedFormClient } = require("./trustedFormClient");
 const { createCompanyRuntime, getCompanyRuntime } = require("./companyRuntime");
+const githubClient = require("./githubClient");
 
 module.exports = {
   createAnthropicClient,
+  extractTextBlocks,
+  extractToolUse,
+  createCallFireClient,
   createCallrailClient,
   createCompanyRuntime,
   createDropClient,
+  createGoogleDriveClient,
   createLogicsClient,
+  createNeverBounceClient,
+  createRealPhoneValidationClient,
   createRingCentralClient,
+  createRingcxVoiceClient,
   createSendgridClient,
+  createTrustedFormClient,
+  githubClient,
   getCompanyRuntime,
+  isGoogleDriveConfigured,
+  requestJson,
+  resolveCompanyByTrackingNumber,
+  validateCompanyTrackingNumbers,
 };

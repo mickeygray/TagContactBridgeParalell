@@ -3,16 +3,25 @@
 const { processNextEvent, createEvent } = require("../../event-core/src");
 const {
   caseProfileRepository,
+  conversationMessageRepository,
+  conversationWorkflowRepository,
   masterProspectRepository,
   metricsSnapshotRepository,
   paymentLedgerRepository,
   reviewQueueRepository,
 } = require("../../shared-repositories/src");
 const {
+  resolveCompanyByTrackingNumber,
+} = require("../../shared-integrations/src");
+const { env, getCompanyConfig } = require("../../shared-config/src");
+const {
   recordConversationAi,
   recordQualityReview,
 } = require("./caseIntelligenceService");
 const { recordWorkflowStage } = require("./workflowStateService");
+const { classifySms, fastStopCheck } = require("./smsClassifierService");
+const { runAutoResponder } = require("./smsAutoResponderService");
+const { sendPlainEmail } = require("./sendgridMailService");
 
 const CONTROL_PLANE_EVENT_TYPES = Object.freeze({
   LEAD_OBSERVED: "control-plane.lead.observed",
@@ -25,6 +34,12 @@ const CONTROL_PLANE_EVENT_TYPES = Object.freeze({
   RINGCENTRAL_TELEPHONY_FORWARDED: "ringcentral.telephony.forwarded",
   QC_REVIEW_OBSERVED: "control-plane.qc-review.observed",
   CONVERSATION_AI_OBSERVED: "control-plane.conversation-ai.observed",
+  // Demo event types. Kept here — and in the same handler map — so the
+  // control-plane worker is the single source of truth for event processing.
+  // These fire via /api/ring/events on 6101 (smoke tests) and similar.
+  DEMO_INBOUND_RECEIVED: "inbound.demo.received",
+  DEMO_OUTBOUND_REQUESTED: "outbound.demo.requested",
+  DEMO_RING_RECEIVED: "ring.demo.received",
 });
 
 function normalizeDomain(value) {
@@ -51,6 +66,61 @@ function requirePayloadFields(payload, fields) {
   if (missing.length > 0) {
     throw new Error(`Missing required payload fields: ${missing.join(", ")}`);
   }
+}
+
+function parseEmailList(value) {
+  return String(value || "")
+    .split(",")
+    .map((entry) => entry.trim().toLowerCase())
+    .filter(Boolean);
+}
+
+function maskPhone(value) {
+  const digits = String(value || "").replace(/\D/g, "");
+  if (digits.length < 4) return digits || "unknown";
+  return `***${digits.slice(-4)}`;
+}
+
+async function sendClientSmsAlert({ domain, phone, body, payload, workflowId, inboundMessageId }) {
+  const normalizedDomain = normalizeDomain(domain);
+  const company = getCompanyConfig(normalizedDomain);
+  const recipients = parseEmailList(
+    env("CLIENT_SMS_ALERT_EMAIL", company.alertEmail || company.toEmail || ""),
+  );
+  if (recipients.length === 0) {
+    return { ok: false, skipped: true, reason: "no-client-sms-alert-recipients" };
+  }
+
+  const text = [
+    `Inbound SMS received on the ${normalizedDomain} line.`,
+    normalizedDomain === "TAG"
+      ? "AI auto-response is disabled for TAG; this is an alert-only notification."
+      : null,
+    "",
+    `From: ${phone || "unknown"}`,
+    `To: ${payload?.destination_number || "unknown"}`,
+    `Workflow: ${workflowId || "none"}`,
+    `Message: ${inboundMessageId || "none"}`,
+    "",
+    "Body:",
+    body || "(empty)",
+  ]
+    .filter((line) => line !== null)
+    .join("\n");
+
+  return sendPlainEmail(normalizedDomain, {
+    personalizations: [
+      {
+        to: recipients.map((email) => ({ email })),
+      },
+    ],
+    from: {
+      email: company.fromEmail || company.alertEmail || undefined,
+      name: `${normalizedDomain} SMS Alerts`,
+    },
+    subject: `[${normalizedDomain} SMS] Reply from ${maskPhone(phone)}`,
+    content: [{ type: "text/plain", value: text }],
+  });
 }
 
 async function createControlPlaneEvent(input = {}) {
@@ -91,6 +161,11 @@ async function handleLeadObserved(event) {
     needsSourceRefresh: payload.needsSourceRefresh !== undefined ? Boolean(payload.needsSourceRefresh) : true,
     metadata: {
       intakeSource: payload.intakeSource || payload.sourceService || event.sourceService || null,
+      sourceName: payload.sourceName || null,
+      sourceChannel: payload.sourceChannel || null,
+      routeCampaignKey: payload.routeCampaignKey || null,
+      routeCampaignName: payload.routeCampaignName || null,
+      vendorSourceName: payload.vendorSourceName || null,
       lastImportBatch: payload.importBatch || null,
       notes: Array.isArray(payload.notes) ? payload.notes : [],
     },
@@ -150,11 +225,25 @@ async function handleCaseProfileObserved(event) {
 
 async function syncCaseProfilePaymentSummary(domain, caseId) {
   const payments = await paymentLedgerRepository.listPaymentsForCase(domain, caseId);
-  const paymentIds = payments.map((payment) => payment._id);
-  const totalPaid = payments.reduce((sum, payment) => sum + (Number(payment.amount) || 0), 0);
-  const sorted = payments
+  const successful = payments.filter(
+    (payment) =>
+      String(payment.transactionStatus || "").trim().toUpperCase() === "SUCCESS",
+  );
+  const paymentIds = successful.map((payment) => payment._id);
+  const totalPaid = successful.reduce(
+    (sum, payment) => sum + (Number(payment.amount) || 0),
+    0,
+  );
+  const sorted = successful
     .slice()
-    .sort((left, right) => new Date(left.paymentDate).getTime() - new Date(right.paymentDate).getTime());
+    .sort((left, right) => {
+      const leftTime = new Date(left.paymentDate).getTime();
+      const rightTime = new Date(right.paymentDate).getTime();
+      if (leftTime !== rightTime) {
+        return leftTime - rightTime;
+      }
+      return (Number(left.casePaymentId) || 0) - (Number(right.casePaymentId) || 0);
+    });
   const first = sorted[0] || null;
   const last = sorted[sorted.length - 1] || null;
 
@@ -334,54 +423,363 @@ async function handleEnrichmentRequested(event) {
 async function handleSmsInboundForwarded(event) {
   const payload = event.payload || {};
   const digits = String(payload.source_number || "").replace(/\D/g, "");
-  const optOutDetected = /\b(stop|unsubscribe|do not text|dont text|remove me)\b/i.test(
-    String(payload.content || payload.message || ""),
-  );
+  const body = String(payload.content || payload.message || "").trim();
 
+  // Resolve company from the destination tracking number first, then
+  // fall back to the payload hint, then TAG. Getting this right matters:
+  // campaign eligibility is scoped per company, so a mis-stamped inbound
+  // could re-engage a Wynn DNC as a TAG prospect.
+  const resolvedByTracking = resolveCompanyByTrackingNumber(
+    payload.destination_number,
+  );
+  const resolvedCompany =
+    resolvedByTracking || payload.domain || payload.company || "TAG";
+  const domain = normalizeDomain(resolvedCompany);
+
+  // If nothing matched our known tracking numbers AND no hint was given,
+  // we're silently falling through to "TAG". That's wrong for Wynn-bound
+  // inbound and downstream DNC/campaign logic will mis-attribute. Queue
+  // a review-queue item so ops can see it — never just default silently.
+  if (!resolvedByTracking && !payload.domain && !payload.company) {
+    try {
+      await reviewQueueRepository.createReviewQueueItem({
+        domain,
+        sourceService: event.sourceService || "control-plane",
+        workflow: "event-intake",
+        category: "sms-inbound-unknown-tracking",
+        severity: "warning",
+        title: "Inbound SMS on unrecognized tracking number",
+        summary: `destination=${payload.destination_number || "?"} defaulted to TAG; please verify company`,
+        primaryPhone: digits || null,
+        happenedAt: new Date(),
+        payload,
+        tags: ["sms", "unknown-tracking", "needs-config"],
+      });
+    } catch {
+      // Non-fatal — ingest continues under the TAG fallback.
+    }
+  }
+
+  // Record the thread-level summary. Status stays "observed" — the
+  // auto-responder does NOT flip status automatically; operators set it
+  // via per-message buttons in the inbox UI.
   await recordConversationAi({
-    domain: normalizeDomain(payload.domain || payload.company || "TAG"),
+    domain,
     caseId: payload.caseId != null ? Number(payload.caseId) : null,
     phone: digits,
     channel: "sms",
-    status: optOutDetected ? "suppressed" : "observed",
-    optOutDetected,
-    optedOutAt: optOutDetected ? new Date() : null,
-    latestInboundText: String(payload.content || payload.message || "").trim() || null,
+    status: "observed",
+    latestInboundText: body || null,
     latestInboundAt: new Date(),
     sourceService: event.sourceService || "control-plane",
-    aiRecommendedAction: optOutDetected ? "suppress_contact" : null,
-    aiSummary: optOutDetected ? "Inbound STOP-like message detected" : "Inbound SMS observed",
-    aiFlags: optOutDetected ? ["opt_out"] : [],
+    aiSummary: "Inbound SMS observed",
     metadata: payload,
   });
 
+  // Fetch the workflow row we just upserted so we can key the per-turn
+  // ConversationMessage row to it (workflowId is the parent pointer).
+  const workflow = await conversationWorkflowRepository.findConversationWorkflow(
+    domain,
+    digits,
+    "sms",
+  );
+  // `findConversationWorkflow` uses .lean() → raw `_id`, not `id`.
+  const workflowId = workflow?._id ? String(workflow._id) : null;
+
+  // TAG is a client line right now: log it, alert humans, but do not
+  // run AI classification or send AI text. Wynn remains the only
+  // AI-supported SMS auto-response lane.
+  if (domain !== "WYNN") {
+    const classification = fastStopCheck(body)
+      ? {
+          intent: "opt_out",
+          tier: "hard_stop",
+          suggestedReply: "",
+          confidence: 1,
+          rationale: "Regex-matched carrier STOP keyword on alert-only client line.",
+          model: "regex-fast-path",
+        }
+      : {
+          intent: "client_sms_alert",
+          tier: "needs_human",
+          suggestedReply: "",
+          confidence: 1,
+          rationale: "Client line has AI auto-response disabled.",
+          model: null,
+        };
+
+    let inboundMessage = null;
+    if (workflowId) {
+      inboundMessage = await conversationMessageRepository.createInboundMessage({
+        workflowId,
+        domain,
+        phone: digits,
+        caseId: payload.caseId != null ? Number(payload.caseId) : null,
+        channel: "sms",
+        body,
+        aiClassification: {
+          intent: classification.intent,
+          tier: classification.tier,
+          suggestedReply: classification.suggestedReply,
+          confidence: classification.confidence,
+          rationale: classification.rationale,
+          model: classification.model,
+        },
+        rawPayload: payload,
+      });
+    }
+
+    const inboundCaseId =
+      payload.caseId != null && Number.isFinite(Number(payload.caseId))
+        ? Number(payload.caseId)
+        : null;
+    if (inboundCaseId) {
+      await caseProfileRepository
+        .appendCommunicationThread(domain, inboundCaseId, "sms", {
+          provider: payload.provider || "callrail",
+          threadKey: workflowId || `${domain}:${digits}`,
+          direction: "inbound",
+          phone: digits,
+          body: body || null,
+          status: "received",
+          workflowId: workflowId || null,
+          conversationMessageId: inboundMessage?.id || null,
+          sentAt: new Date(),
+          source: "sms-inbound",
+          metadata: {
+            aiDisabled: true,
+            aiTier: classification.tier || null,
+            aiIntent: classification.intent || null,
+            aiConfidence: classification.confidence || null,
+            providerMessageId: payload.providerMessageId || null,
+          },
+        })
+        .catch(() => null);
+    }
+
+    let alertResult = null;
+    try {
+      alertResult = await sendClientSmsAlert({
+        domain,
+        phone: digits,
+        body,
+        payload,
+        workflowId,
+        inboundMessageId: inboundMessage?.id || null,
+      });
+    } catch (error) {
+      alertResult = { ok: false, error: error.message };
+    }
+
+    await recordWorkflowStage({
+      domain,
+      family: "conversation",
+      subtype: "sms",
+      stage: "observed",
+      aggregateType: "sms-conversation",
+      aggregateId: String(event.aggregateId || digits || "unknown"),
+      caseId: payload.caseId != null ? Number(payload.caseId) : null,
+      sourceService: event.sourceService,
+      summary: `Inbound SMS alert-only on ${domain}; AI disabled`,
+      payload: {
+        classification,
+        alertResult,
+        inboundMessageId: inboundMessage?.id || null,
+      },
+    });
+
+    await reviewQueueRepository.createReviewQueueItem({
+      domain,
+      caseId: payload.caseId != null ? Number(payload.caseId) : null,
+      sourceService: event.sourceService || "control-plane",
+      workflow: "sms-inbox",
+      category: "tag-sms-alert",
+      severity: alertResult?.ok === false ? "warning" : "info",
+      title: "Client SMS reply received",
+      summary: body.slice(0, 240) || null,
+      primaryPhone: digits || null,
+      happenedAt: new Date(),
+      payload: {
+        raw: payload,
+        classification,
+        workflowId,
+        inboundMessageId: inboundMessage?.id || null,
+        alertResult,
+      },
+      tags: ["sms", "client-line", "ai-disabled", domain.toLowerCase()],
+    });
+
+    return {
+      classification,
+      autoResult: {
+        action: "alert_only",
+        sent: false,
+        reason: "ai-disabled-for-client-line",
+      },
+      alertResult,
+      inboundMessageId: inboundMessage?.id || null,
+    };
+  }
+
+  // Pull recent turns so the classifier has conversational context.
+  const history = workflowId
+    ? await conversationMessageRepository.listMessagesForWorkflow(workflowId, {
+        limit: 8,
+      })
+    : [];
+
+  // Resolve the outbound tracking number for reply-phrasing context.
+  let trackingNumber = null;
+  try {
+    const { getCompanyConfig } = require("../../shared-config/src/companyConfig");
+    trackingNumber = getCompanyConfig(domain)?.integrations?.callrail?.trackingNumber || null;
+  } catch {
+    trackingNumber = null;
+  }
+
+  // Classify with Sonnet (fast regex short-circuit lives inside).
+  const classification = await classifySms({
+    text: body,
+    fromPhone: digits,
+    company: domain,
+    trackingNumber,
+    history: history.map((msg) => ({
+      direction: msg.direction,
+      body: msg.body,
+      createdAt: msg.createdAt,
+    })),
+  });
+
+  // Per-turn inbound row. Stores the snapshot of what the classifier
+  // decided at ingest time — critical for audit when we later change
+  // the prompt or the model.
+  let inboundMessage = null;
+  if (workflowId) {
+    inboundMessage = await conversationMessageRepository.createInboundMessage({
+      workflowId,
+      domain,
+      phone: digits,
+      caseId: payload.caseId != null ? Number(payload.caseId) : null,
+      channel: "sms",
+      body,
+      aiClassification: {
+        intent: classification.intent,
+        tier: classification.tier,
+        suggestedReply: classification.suggestedReply,
+        confidence: classification.confidence,
+        rationale: classification.rationale,
+        model: classification.model,
+      },
+      rawPayload: payload,
+    });
+  }
+
+  // Mirror the inbound onto the case profile's communicationThreads.sms
+  // so the unified comm log (cxCommLogService) shows the reply alongside
+  // outbound texts on a converted case. Skip when there's no caseId yet
+  // — for prospect-stage inbounds the comm log reads ConversationMessage
+  // directly via phone, so the data still surfaces, just from a
+  // different source.
+  const inboundCaseId =
+    payload.caseId != null && Number.isFinite(Number(payload.caseId))
+      ? Number(payload.caseId)
+      : null;
+  if (inboundCaseId) {
+    await caseProfileRepository
+      .appendCommunicationThread(domain, inboundCaseId, "sms", {
+        provider: payload.provider || "callrail",
+        threadKey: workflowId || `${domain}:${digits}`,
+        direction: "inbound",
+        phone: digits,
+        body: body || null,
+        status: "received",
+        workflowId: workflowId || null,
+        conversationMessageId: inboundMessage?.id || null,
+        sentAt: new Date(),
+        source: "sms-inbound",
+        metadata: {
+          aiTier: classification.tier || null,
+          aiIntent: classification.intent || null,
+          aiConfidence: classification.confidence || null,
+          providerMessageId: payload.providerMessageId || null,
+        },
+      })
+      .catch(() => null); // non-fatal: ConversationMessage is the source of truth
+  }
+
+  // Run the auto-responder. It enforces cooldown + the "only two tiers
+  // auto-send" rule + writes outbound ConversationMessage row + DNC
+  // consent record when applicable. Safe to call on needs_human — it
+  // no-ops and leaves the thread for manual review.
+  const autoResult = await runAutoResponder({
+    domain,
+    phone: digits,
+    workflowId,
+    workflow,
+    classification,
+    rawPayload: payload,
+  });
+
   await recordWorkflowStage({
-    domain: normalizeDomain(payload.domain || payload.company || "TAG"),
+    domain,
     family: "conversation",
     subtype: "sms",
-    stage: "observed",
+    // Stage here is a workflow-stage ledger entry (audit-only), not a
+    // status flip on the thread. Keep it descriptive without implying
+    // suppression — the thread status stays "observed" until an
+    // operator touches it.
+    stage: autoResult.sent
+      ? "completed"
+      : classification.tier === "hard_stop"
+        ? "skipped"
+        : "observed",
     aggregateType: "sms-conversation",
     aggregateId: String(event.aggregateId || digits || "unknown"),
     caseId: payload.caseId != null ? Number(payload.caseId) : null,
     sourceService: event.sourceService,
-    summary: "Inbound SMS observed",
-    payload,
+    summary: `Inbound SMS classified ${classification.tier} (${classification.intent})`,
+    payload: {
+      classification,
+      autoResult,
+      inboundMessageId: inboundMessage?.id || null,
+    },
   });
 
-  return reviewQueueRepository.createReviewQueueItem({
-    domain: normalizeDomain(payload.domain || payload.company || "TAG"),
-    caseId: payload.caseId != null ? Number(payload.caseId) : null,
-    sourceService: event.sourceService || "control-plane",
-    workflow: "event-intake",
-    category: "sms-inbound-forwarded",
-    severity: "info",
-    title: "Inbound SMS forwarded to control plane",
-    summary: String(payload.content || payload.message || "").slice(0, 240) || null,
-    primaryPhone: digits || null,
-    happenedAt: new Date(),
-    payload,
-    tags: ["sms", "forwarded"],
-  });
+  // Only queue a review item when a human actually needs to look at it.
+  //   - hard_stop is resolved by CallRail (carrier block) + our cadence
+  //     prune; thread still shows in the inbox list but doesn't demand
+  //     attention, so no review-queue item.
+  //   - dnc_confirm with a successful auto-reply is resolved — the
+  //     outbound bubble + ConsentRecord are the audit trail.
+  //   - Anything else (needs_human, send failures, etc.) queues an item.
+  const bottedClean =
+    classification.tier === "hard_stop" ||
+    (classification.tier === "dnc_confirm" && autoResult.sent) ||
+    (classification.tier === "callback_prompt" && autoResult.sent);
+
+  if (!bottedClean) {
+    return reviewQueueRepository.createReviewQueueItem({
+      domain,
+      caseId: payload.caseId != null ? Number(payload.caseId) : null,
+      sourceService: event.sourceService || "control-plane",
+      workflow: "sms-inbox",
+      category: "sms-inbound-needs-human",
+      severity: classification.intent === "hostile" ? "warning" : "info",
+      title: "Inbound SMS needs human review",
+      summary: body.slice(0, 240) || null,
+      primaryPhone: digits || null,
+      happenedAt: new Date(),
+      payload: {
+        raw: payload,
+        classification,
+        workflowId,
+        inboundMessageId: inboundMessage?.id || null,
+      },
+      tags: ["sms", "inbox", "needs-human", classification.intent || "other"],
+    });
+  }
+
+  return { classification, autoResult, inboundMessageId: inboundMessage?.id || null };
 }
 
 async function handleRingcentralTelephonyForwarded(event) {
@@ -504,6 +902,14 @@ async function handleConversationAiObserved(event) {
   });
 }
 
+async function handleDemoEvent(event) {
+  if (event.payload?.forceError) {
+    throw new Error(`Forced demo failure: ${event.eventType}`);
+  }
+  // Demo events are observed for smoke-test visibility; nothing to persist.
+  return { observed: true, eventType: event.eventType, aggregateId: event.aggregateId };
+}
+
 function buildControlPlaneEventHandlers() {
   return {
     [CONTROL_PLANE_EVENT_TYPES.LEAD_OBSERVED]: handleLeadObserved,
@@ -516,6 +922,9 @@ function buildControlPlaneEventHandlers() {
     [CONTROL_PLANE_EVENT_TYPES.RINGCENTRAL_TELEPHONY_FORWARDED]: handleRingcentralTelephonyForwarded,
     [CONTROL_PLANE_EVENT_TYPES.QC_REVIEW_OBSERVED]: handleQcReviewObserved,
     [CONTROL_PLANE_EVENT_TYPES.CONVERSATION_AI_OBSERVED]: handleConversationAiObserved,
+    [CONTROL_PLANE_EVENT_TYPES.DEMO_INBOUND_RECEIVED]: handleDemoEvent,
+    [CONTROL_PLANE_EVENT_TYPES.DEMO_OUTBOUND_REQUESTED]: handleDemoEvent,
+    [CONTROL_PLANE_EVENT_TYPES.DEMO_RING_RECEIVED]: handleDemoEvent,
   };
 }
 

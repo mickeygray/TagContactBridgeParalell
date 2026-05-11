@@ -37,7 +37,25 @@ function getMongoState() {
   };
 }
 
+async function disconnectMongo() {
+  if (skippedMongo) {
+    connectionPromise = null;
+    return { disconnected: true, skipped: true };
+  }
+
+  if (mongoose.connection.readyState !== 0) {
+    await mongoose.disconnect();
+  }
+  connectionPromise = null;
+
+  return {
+    disconnected: mongoose.connection.readyState === 0,
+    skipped: false,
+  };
+}
+
 module.exports = {
   connectMongo,
+  disconnectMongo,
   getMongoState,
 };

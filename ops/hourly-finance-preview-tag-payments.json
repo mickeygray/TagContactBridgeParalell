@@ -1,0 +1,68 @@
+{
+  "mode": "dry-run",
+  "generatedAt": "2026-04-24T20:21:43.558Z",
+  "date": "2026-04-24",
+  "config": {
+    "ldCostPerLead": 3,
+    "bcdCostPerCall": 4,
+    "maxCasesPerDomain": 1,
+    "includeAllSheetRows": false
+  },
+  "domains": [
+    {
+      "domain": "TAG",
+      "date": "2026-04-24",
+      "payments": {
+        "domain": "TAG",
+        "previewedAt": "2026-04-24T20:21:43.558Z",
+        "summary": {
+          "casesScanned": 1,
+          "casesWithPayments": 0,
+          "newLedgerRows": 0,
+          "flaggedFailures": 0,
+          "reversals": 0,
+          "errors": 0,
+          "totalPaymentsObserved": 0,
+          "totalAmountObserved": 0
+        },
+        "cases": [
+          {
+            "caseId": 555001,
+            "payments": 0,
+            "totalAmountObserved": 0,
+            "newLedgerRows": 0,
+            "flaggedFailures": 0,
+            "reversals": 0,
+            "operations": [],
+            "caseProfileEffects": [],
+            "reviewItems": [],
+            "checkpoint": {
+              "type": "payment-reconcile-checkpoint",
+              "caseId": 555001,
+              "update": {
+                "paymentReconcile": {
+                  "lastCheckedAt": "2026-04-24T20:21:43.558Z",
+                  "lastResult": "no-payments"
+                }
+              }
+            },
+            "error": null
+          }
+        ]
+      },
+      "spend": {
+        "sheets": [],
+        "derived": {
+          "ld": [],
+          "bcd": []
+        },
+        "operations": [],
+        "summary": {
+          "rows": 0,
+          "totalSpend": 0,
+          "byChannel": {}
+        }
+      }
+    }
+  ]
+}

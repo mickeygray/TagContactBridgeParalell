@@ -1,0 +1,533 @@
+{
+  "domain": "TAG",
+  "generatedAt": "2026-04-27T15:10:57.208Z",
+  "caseIds": [
+    261517,
+    283043,
+    295106,
+    300880,
+    305536,
+    311993,
+    315757,
+    316473,
+    319606,
+    319722,
+    320983,
+    322130,
+    326342,
+    328550
+  ],
+  "summary": {
+    "totalCases": 14,
+    "withPhone": 14,
+    "withThisMonthMatch": 8,
+    "withLastMonthMatch": 5,
+    "withAnySourceHint": 12
+  },
+  "cases": [
+    {
+      "caseId": 261517,
+      "foundLegacyCaseProfile": true,
+      "name": "JUSTIN JOHNSON",
+      "email": "justin.j.johnson500@gmail.com",
+      "recordedPhone": "(314)500-3234",
+      "normalizedPhone": "3145003234",
+      "currentSourceName": "ABC",
+      "currentSourceChannel": "mailer",
+      "initialPayment": 500,
+      "firstPaymentDate": "2026-04-16T07:00:00.000Z",
+      "callrail": {
+        "thisMonth": {
+          "error": null,
+          "totalMatches": 0,
+          "calls": []
+        },
+        "lastMonth": {
+          "error": null,
+          "totalMatches": 0,
+          "calls": []
+        }
+      },
+      "sourceHints": []
+    },
+    {
+      "caseId": 283043,
+      "foundLegacyCaseProfile": true,
+      "name": "KAPRESE JACKSON",
+      "email": "jacksonkaprese@yahoo.com",
+      "recordedPhone": "(316)706-3917",
+      "normalizedPhone": "3167063917",
+      "currentSourceName": "ABC",
+      "currentSourceChannel": "mailer",
+      "initialPayment": 100,
+      "firstPaymentDate": "2026-04-01T07:00:00.000Z",
+      "callrail": {
+        "thisMonth": {
+          "error": null,
+          "totalMatches": 1,
+          "calls": [
+            {
+              "id": "CAL019d49d783be7eb6813adc47f31ae636",
+              "customerPhoneNumber": "+13167063917",
+              "trackingPhoneNumber": "+13102999880",
+              "sourceName": "Urgent Third State",
+              "startTime": "2026-04-01T09:19:13.905-07:00",
+              "durationSeconds": 3041,
+              "direction": "inbound"
+            }
+          ]
+        },
+        "lastMonth": {
+          "error": null,
+          "totalMatches": 0,
+          "calls": []
+        }
+      },
+      "sourceHints": [
+        "Urgent Third State"
+      ]
+    },
+    {
+      "caseId": 295106,
+      "foundLegacyCaseProfile": true,
+      "name": "MURIEL GARCIA",
+      "email": "MURIELATIN@GMAIL.COM",
+      "recordedPhone": "(805)323-5558",
+      "normalizedPhone": "8053235558",
+      "currentSourceName": "ABC",
+      "currentSourceChannel": "mailer",
+      "initialPayment": 639.5,
+      "firstPaymentDate": "2026-04-02T07:00:00.000Z",
+      "callrail": {
+        "thisMonth": {
+          "error": null,
+          "totalMatches": 0,
+          "calls": []
+        },
+        "lastMonth": {
+          "error": null,
+          "totalMatches": 1,
+          "calls": [
+            {
+              "id": "CAL019d30aeafe0793184b75d720b7f2a71",
+              "customerPhoneNumber": "+18053235558",
+              "trackingPhoneNumber": "+13108538938",
+              "sourceName": "Affordability Federal",
+              "startTime": "2026-03-27T12:04:07.844-07:00",
+              "durationSeconds": 3105,
+              "direction": "inbound"
+            }
+          ]
+        }
+      },
+      "sourceHints": [
+        "Affordability Federal"
+      ]
+    },
+    {
+      "caseId": 300880,
+      "foundLegacyCaseProfile": true,
+      "name": "JOSEFA TIKO",
+      "email": "TUPOUJTIKO@GMAIL.COM",
+      "recordedPhone": "(916)490-8897",
+      "normalizedPhone": "9164908897",
+      "currentSourceName": "ABC",
+      "currentSourceChannel": "mailer",
+      "initialPayment": 300,
+      "firstPaymentDate": "2026-04-13T07:00:00.000Z",
+      "callrail": {
+        "thisMonth": {
+          "error": null,
+          "totalMatches": 1,
+          "calls": [
+            {
+              "id": "CAL019d8955e3e6700da4e49a0026173fe0",
+              "customerPhoneNumber": "+19164908897",
+              "trackingPhoneNumber": "+13108538938",
+              "sourceName": "Affordability Federal",
+              "startTime": "2026-04-13T17:13:20.679-07:00",
+              "durationSeconds": 2235,
+              "direction": "inbound"
+            }
+          ]
+        },
+        "lastMonth": {
+          "error": null,
+          "totalMatches": 1,
+          "calls": [
+            {
+              "id": "CAL019d2b11d2b27eb68cdb30cd73398126",
+              "customerPhoneNumber": "+19164908897",
+              "trackingPhoneNumber": "+13108538938",
+              "sourceName": "Affordability Federal",
+              "startTime": "2026-03-26T09:54:41.518-07:00",
+              "durationSeconds": 423,
+              "direction": "inbound"
+            }
+          ]
+        }
+      },
+      "sourceHints": [
+        "Affordability Federal"
+      ]
+    },
+    {
+      "caseId": 305536,
+      "foundLegacyCaseProfile": true,
+      "name": "WILLIE NICKSON",
+      "email": "NICKSONWILLIE51@GMAIL.COM",
+      "recordedPhone": "(334)650-3731",
+      "normalizedPhone": "3346503731",
+      "currentSourceName": "ABC",
+      "currentSourceChannel": "mailer",
+      "initialPayment": 575.8,
+      "firstPaymentDate": "2026-04-14T07:00:00.000Z",
+      "callrail": {
+        "thisMonth": {
+          "error": null,
+          "totalMatches": 0,
+          "calls": []
+        },
+        "lastMonth": {
+          "error": null,
+          "totalMatches": 1,
+          "calls": [
+            {
+              "id": "CAL019cd829f3c779dabbb4e9dcaeaa7726",
+              "customerPhoneNumber": "+13346503731",
+              "trackingPhoneNumber": "+18188737443",
+              "sourceName": "3rd Day (Pink) Urgent Third State 800-921-9263",
+              "startTime": "2026-03-10T07:32:33.928-07:00",
+              "durationSeconds": 3574,
+              "direction": "inbound"
+            }
+          ]
+        }
+      },
+      "sourceHints": [
+        "3rd Day (Pink) Urgent Third State 800-921-9263"
+      ]
+    },
+    {
+      "caseId": 311993,
+      "foundLegacyCaseProfile": true,
+      "name": "CASANDRA LANE",
+      "email": "LANE.CASANDRA@YAHOO.COM",
+      "recordedPhone": "(414)202-9793",
+      "normalizedPhone": "4142029793",
+      "currentSourceName": "ABC",
+      "currentSourceChannel": "mailer",
+      "initialPayment": 300,
+      "firstPaymentDate": "2026-04-03T07:00:00.000Z",
+      "callrail": {
+        "thisMonth": {
+          "error": null,
+          "totalMatches": 0,
+          "calls": []
+        },
+        "lastMonth": {
+          "error": null,
+          "totalMatches": 1,
+          "calls": [
+            {
+              "id": "CAL019d412710387d969e226c73f34a5deb",
+              "customerPhoneNumber": "+14142029793",
+              "trackingPhoneNumber": "+18188737443",
+              "sourceName": "3rd Day (Pink) Urgent Third State 800-921-9263",
+              "startTime": "2026-03-30T16:49:32.283-07:00",
+              "durationSeconds": 2592,
+              "direction": "inbound"
+            }
+          ]
+        }
+      },
+      "sourceHints": [
+        "3rd Day (Pink) Urgent Third State 800-921-9263"
+      ]
+    },
+    {
+      "caseId": 315757,
+      "foundLegacyCaseProfile": true,
+      "name": "CARNELL WRIGHT",
+      "email": "CARNELLWRIGHT4@GMAIL.COM",
+      "recordedPhone": "(248)759-0977",
+      "normalizedPhone": "2487590977",
+      "currentSourceName": "ABC",
+      "currentSourceChannel": "mailer",
+      "initialPayment": 300,
+      "firstPaymentDate": "2026-04-09T07:00:00.000Z",
+      "callrail": {
+        "thisMonth": {
+          "error": null,
+          "totalMatches": 0,
+          "calls": []
+        },
+        "lastMonth": {
+          "error": null,
+          "totalMatches": 0,
+          "calls": []
+        }
+      },
+      "sourceHints": []
+    },
+    {
+      "caseId": 316473,
+      "foundLegacyCaseProfile": true,
+      "name": "NICOLE STEN",
+      "email": "NICOLESTEN0918@ICLOUD.COM",
+      "recordedPhone": "(801)666-9290",
+      "normalizedPhone": "8016669290",
+      "currentSourceName": "ABC",
+      "currentSourceChannel": "mailer",
+      "initialPayment": 639.5,
+      "firstPaymentDate": "2026-04-03T07:00:00.000Z",
+      "callrail": {
+        "thisMonth": {
+          "error": null,
+          "totalMatches": 1,
+          "calls": [
+            {
+              "id": "CAL019d5402d87d74df97083210077a3d96",
+              "customerPhoneNumber": "+18016669290",
+              "trackingPhoneNumber": "+18188737443",
+              "sourceName": "3rd Day (Pink) Urgent Third State 800-921-9263",
+              "startTime": "2026-04-03T08:42:45.824-07:00",
+              "durationSeconds": 2160,
+              "direction": "inbound"
+            }
+          ]
+        },
+        "lastMonth": {
+          "error": null,
+          "totalMatches": 0,
+          "calls": []
+        }
+      },
+      "sourceHints": [
+        "3rd Day (Pink) Urgent Third State 800-921-9263"
+      ]
+    },
+    {
+      "caseId": 319606,
+      "foundLegacyCaseProfile": true,
+      "name": "BRIAN HUNT",
+      "email": "LEROY18882@GMAIL.COM",
+      "recordedPhone": "(740)444-1594",
+      "normalizedPhone": "7404441594",
+      "currentSourceName": "ABC",
+      "currentSourceChannel": "mailer",
+      "initialPayment": 150,
+      "firstPaymentDate": "2026-04-09T07:00:00.000Z",
+      "callrail": {
+        "thisMonth": {
+          "error": null,
+          "totalMatches": 1,
+          "calls": [
+            {
+              "id": "CAL019d4a5cc5117ae98817d431a5a2a285",
+              "customerPhoneNumber": "+17404441594",
+              "trackingPhoneNumber": "+13102999880",
+              "sourceName": "Urgent Third State",
+              "startTime": "2026-04-01T11:44:46.920-07:00",
+              "durationSeconds": 1623,
+              "direction": "inbound"
+            }
+          ]
+        },
+        "lastMonth": {
+          "error": null,
+          "totalMatches": 0,
+          "calls": []
+        }
+      },
+      "sourceHints": [
+        "Urgent Third State"
+      ]
+    },
+    {
+      "caseId": 319722,
+      "foundLegacyCaseProfile": true,
+      "name": "PENNY LIVINGSTON",
+      "email": "PENNYLIVINGSTON10@GMAIL.COM",
+      "recordedPhone": "(918)944-3085",
+      "normalizedPhone": "9189443085",
+      "currentSourceName": "ABC",
+      "currentSourceChannel": "mailer",
+      "initialPayment": 479.83,
+      "firstPaymentDate": "2026-04-01T07:00:00.000Z",
+      "callrail": {
+        "thisMonth": {
+          "error": null,
+          "totalMatches": 1,
+          "calls": [
+            {
+              "id": "CAL019d497d9a47705f94d6eb8eaeab992d",
+              "customerPhoneNumber": "+19189443085",
+              "trackingPhoneNumber": "+13102999880",
+              "sourceName": "Urgent Third State",
+              "startTime": "2026-04-01T07:41:01.435-07:00",
+              "durationSeconds": 2446,
+              "direction": "inbound"
+            }
+          ]
+        },
+        "lastMonth": {
+          "error": null,
+          "totalMatches": 0,
+          "calls": []
+        }
+      },
+      "sourceHints": [
+        "Urgent Third State"
+      ]
+    },
+    {
+      "caseId": 320983,
+      "foundLegacyCaseProfile": true,
+      "name": "DONNIE HOLDEN",
+      "email": "DHOLDEN1297@GMAIL.COM",
+      "recordedPhone": "(479)530-2856",
+      "normalizedPhone": "4795302856",
+      "currentSourceName": "ABC",
+      "currentSourceChannel": "mailer",
+      "initialPayment": 3679,
+      "firstPaymentDate": "2026-04-10T07:00:00.000Z",
+      "callrail": {
+        "thisMonth": {
+          "error": null,
+          "totalMatches": 1,
+          "calls": [
+            {
+              "id": "CAL019d73ebdb2e79abbd242b66a94dcb07",
+              "customerPhoneNumber": "+14795302856",
+              "trackingPhoneNumber": "+18188737443",
+              "sourceName": "3rd Day (Pink) Urgent Third State 800-921-9263",
+              "startTime": "2026-04-09T13:25:30.087-07:00",
+              "durationSeconds": 3388,
+              "direction": "inbound"
+            }
+          ]
+        },
+        "lastMonth": {
+          "error": null,
+          "totalMatches": 0,
+          "calls": []
+        }
+      },
+      "sourceHints": [
+        "3rd Day (Pink) Urgent Third State 800-921-9263"
+      ]
+    },
+    {
+      "caseId": 322130,
+      "foundLegacyCaseProfile": true,
+      "name": "CLEVELAND RICH JR",
+      "email": "c.rich24@yahoo.com",
+      "recordedPhone": "(973)207-4458",
+      "normalizedPhone": "9732074458",
+      "currentSourceName": "ABC",
+      "currentSourceChannel": "mailer",
+      "initialPayment": 250,
+      "firstPaymentDate": "2026-04-03T07:00:00.000Z",
+      "callrail": {
+        "thisMonth": {
+          "error": null,
+          "totalMatches": 0,
+          "calls": []
+        },
+        "lastMonth": {
+          "error": null,
+          "totalMatches": 1,
+          "calls": [
+            {
+              "id": "CAL019d3f8016ed7579a63cceb0f6068ac6",
+              "customerPhoneNumber": "+19732074458",
+              "trackingPhoneNumber": "+13105641554",
+              "sourceName": "Citation State",
+              "startTime": "2026-03-30T09:07:32.252-07:00",
+              "durationSeconds": 1686,
+              "direction": "inbound"
+            }
+          ]
+        }
+      },
+      "sourceHints": [
+        "Citation State"
+      ]
+    },
+    {
+      "caseId": 326342,
+      "foundLegacyCaseProfile": true,
+      "name": "MICHAEL FOWLER",
+      "email": "MIKE.FOWLER1961@GMAIL.COM",
+      "recordedPhone": "(270)668-2769",
+      "normalizedPhone": "2706682769",
+      "currentSourceName": "ABC",
+      "currentSourceChannel": "mailer",
+      "initialPayment": 7500,
+      "firstPaymentDate": "2026-04-06T07:00:00.000Z",
+      "callrail": {
+        "thisMonth": {
+          "error": null,
+          "totalMatches": 1,
+          "calls": [
+            {
+              "id": "CAL019d6354e7187a1d8a2d55a1e004a1de",
+              "customerPhoneNumber": "+12706682769",
+              "trackingPhoneNumber": "+13102999880",
+              "sourceName": "Urgent Third State",
+              "startTime": "2026-04-06T08:06:41.758-07:00",
+              "durationSeconds": 5329,
+              "direction": "inbound"
+            }
+          ]
+        },
+        "lastMonth": {
+          "error": null,
+          "totalMatches": 0,
+          "calls": []
+        }
+      },
+      "sourceHints": [
+        "Urgent Third State"
+      ]
+    },
+    {
+      "caseId": 328550,
+      "foundLegacyCaseProfile": true,
+      "name": "KATHERINE ROJAS",
+      "email": "katierojas.kr@gmail.com",
+      "recordedPhone": "(262)672-0654",
+      "normalizedPhone": "2626720654",
+      "currentSourceName": "ABC",
+      "currentSourceChannel": "mailer",
+      "initialPayment": 400,
+      "firstPaymentDate": "2026-04-14T07:00:00.000Z",
+      "callrail": {
+        "thisMonth": {
+          "error": null,
+          "totalMatches": 1,
+          "calls": [
+            {
+              "id": "CAL019d8d7b4c83785ca6382f90a954486c",
+              "customerPhoneNumber": "+12626720654",
+              "trackingPhoneNumber": "+13102999880",
+              "sourceName": "Urgent Third State",
+              "startTime": "2026-04-14T12:32:41.161-07:00",
+              "durationSeconds": 1995,
+              "direction": "inbound"
+            }
+          ]
+        },
+        "lastMonth": {
+          "error": null,
+          "totalMatches": 0,
+          "calls": []
+        }
+      },
+      "sourceHints": [
+        "Urgent Third State"
+      ]
+    }
+  ]
+}

@@ -79,8 +79,16 @@ function createDropClient(companyKey) {
         DateTo: dateTo,
       });
     },
+    // Status endpoint requires ApiKey + ActivityToken. Used by the
+    // async disposition poller — the initial /delivery/ POST returns
+    // ApiStatusCode 1038 ("API Post Accepted") immediately, but the
+    // actual drop outcome (delivered / DNC-rejected / no-voicemail-box
+    // / number-disconnected) only surfaces here on subsequent polls.
+    // DropStatusCode = -1 means still pending; other codes indicate
+    // terminal dispositions (see classifyDropDisposition).
     getDropStatus(activityToken) {
       return post("/VMDropStatus", {
+        ApiKey: integration.apiKey,
         ActivityToken: activityToken,
       });
     },

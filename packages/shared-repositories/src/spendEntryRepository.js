@@ -114,9 +114,70 @@ async function getSpendTotals(domain, filters = {}) {
   };
 }
 
+function buildSpendEntryIdentity(entry = {}) {
+  const identity = {
+    date: String(entry.date || ""),
+    domain: normalizeDomain(entry.domain),
+    channel: String(entry.channel || "").trim(),
+    sheetId: entry.sheetId || null,
+  };
+
+  if (entry.broadcastId) {
+    identity.broadcastId = String(entry.broadcastId);
+  } else if (entry.jobNumber) {
+    identity.jobNumber = String(entry.jobNumber);
+  } else if (entry.metaAdId) {
+    identity.metaAdId = String(entry.metaAdId);
+  } else if (entry.adName || entry.adSet) {
+    identity.campaign = String(entry.campaign || "");
+    identity.adSet = String(entry.adSet || "");
+    identity.adName = String(entry.adName || "");
+  } else if (entry.campaign) {
+    identity.campaign = String(entry.campaign);
+  } else {
+    identity.source = String(entry.source || "");
+  }
+
+  return identity;
+}
+
+async function upsertSpendEntry(entry = {}) {
+  const identity = buildSpendEntryIdentity(entry);
+  return SpendEntry.findOneAndUpdate(
+    identity,
+    { $set: { ...entry, domain: normalizeDomain(entry.domain), syncedAt: entry.syncedAt || new Date() } },
+    { new: true, upsert: true, setDefaultsOnInsert: true },
+  );
+}
+
+async function upsertSpendEntries(entries = []) {
+  if (!Array.isArray(entries) || entries.length === 0) {
+    return { matchedCount: 0, modifiedCount: 0, upsertedCount: 0 };
+  }
+
+  const operations = entries.map((entry) => ({
+    updateOne: {
+      filter: buildSpendEntryIdentity(entry),
+      update: {
+        $set: {
+          ...entry,
+          domain: normalizeDomain(entry.domain),
+          syncedAt: entry.syncedAt || new Date(),
+        },
+      },
+      upsert: true,
+    },
+  }));
+
+  return SpendEntry.bulkWrite(operations, { ordered: false });
+}
+
 module.exports = {
+  buildSpendEntryIdentity,
   getSpendTotals,
   listSpendEntries,
   summarizeMailCosts,
   summarizeSpendBySource,
+  upsertSpendEntries,
+  upsertSpendEntry,
 };

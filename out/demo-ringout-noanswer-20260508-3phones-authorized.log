@@ -1,0 +1,31 @@
+{
+  "event": "plan",
+  "ok": true,
+  "dryRun": false,
+  "mode": "ringout-noanswer-loop",
+  "count": 45,
+  "ringSeconds": 120,
+  "pauseSeconds": 60,
+  "toPhone": "***5148",
+  "targets": [
+    {
+      "extensionId": "63730035004",
+      "phone": "***7884"
+    },
+    {
+      "extensionId": "63730035004",
+      "phone": "***5875"
+    },
+    {
+      "extensionId": "63730035004",
+      "phone": "***3702"
+    }
+  ]
+}
+{"event":"fired","iteration":1,"count":45,"fired":[{"target":"63730035004:***7884","ok":true,"id":"s-a0d7ac818bac8z19e0a04c5fbz445f8b00000","error":null},{"target":"63730035004:***5875","ok":true,"id":"s-a0d16c920fb4az19e0a04c5b9z44b14b40000","error":null},{"target":"63730035004:***3702","ok":true,"id":"s-a0d166c0ab0c5z19e0a04c5b9z44fd2710000","error":null}]}
+{"event":"cancelled","iteration":1,"fired":[{"target":"63730035004:***7884","ok":true,"id":"s-a0d7ac818bac8z19e0a04c5fbz445f8b00000","error":null},{"target":"63730035004:***5875","ok":true,"id":"s-a0d16c920fb4az19e0a04c5b9z44b14b40000","error":null},{"target":"63730035004:***3702","ok":true,"id":"s-a0d166c0ab0c5z19e0a04c5b9z44fd2710000","error":null}],"cancelled":[{"target":"63730035004:***7884","ok":true,"id":"s-a0d7ac818bac8z19e0a04c5fbz445f8b00000","alreadyGone":false,"error":null},{"target":"63730035004:***5875","ok":true,"id":"s-a0d16c920fb4az19e0a04c5b9z44b14b40000","alreadyGone":false,"error":null},{"target":"63730035004:***3702","ok":true,"id":"s-a0d166c0ab0c5z19e0a04c5b9z44fd2710000","alreadyGone":false,"error":null}]}
+{"event":"fired","iteration":2,"count":45,"fired":[{"target":"63730035004:***7884","ok":true,"id":"s-a0d7aab016facz19e0a07877bz44baa310000","error":null},{"target":"63730035004:***5875","ok":true,"id":"s-a0d15ab0a0cf6z19e0a0787bcz454d6180000","error":null},{"target":"63730035004:***3702","ok":true,"id":"s-a0d7ab3178287z19e0a0787c6z43e0c070000","error":null}]}
+{"event":"cancelled","iteration":2,"fired":[{"target":"63730035004:***7884","ok":true,"id":"s-a0d7aab016facz19e0a07877bz44baa310000","error":null},{"target":"63730035004:***5875","ok":true,"id":"s-a0d15ab0a0cf6z19e0a0787bcz454d6180000","error":null},{"target":"63730035004:***3702","ok":true,"id":"s-a0d7ab3178287z19e0a0787c6z43e0c070000","error":null}],"cancelled":[{"target":"63730035004:***7884","ok":true,"id":"s-a0d7aab016facz19e0a07877bz44baa310000","alreadyGone":true,"error":null},{"target":"63730035004:***5875","ok":true,"id":"s-a0d15ab0a0cf6z19e0a0787bcz454d6180000","alreadyGone":true,"error":null},{"target":"63730035004:***3702","ok":true,"id":"s-a0d7ab3178287z19e0a0787c6z43e0c070000","alreadyGone":true,"error":null}]}
+{"event":"fired","iteration":3,"count":45,"fired":[{"target":"63730035004:***7884","ok":false,"id":null,"error":"RingCentral request failed POST /restapi/v1.0/account/~/extension/63730035004/ring-out: 429"},{"target":"63730035004:***5875","ok":false,"id":null,"error":"RingCentral request failed POST /restapi/v1.0/account/~/extension/63730035004/ring-out: 429"},{"target":"63730035004:***3702","ok":false,"id":null,"error":"RingCentral request failed POST /restapi/v1.0/account/~/extension/63730035004/ring-out: 429"}]}
+{"event":"cancelled","iteration":3,"fired":[{"target":"63730035004:***7884","ok":false,"id":null,"error":"RingCentral request failed POST /restapi/v1.0/account/~/extension/63730035004/ring-out: 429"},{"target":"63730035004:***5875","ok":false,"id":null,"error":"RingCentral request failed POST /restapi/v1.0/account/~/extension/63730035004/ring-out: 429"},{"target":"63730035004:***3702","ok":false,"id":null,"error":"RingCentral request failed POST /restapi/v1.0/account/~/extension/63730035004/ring-out: 429"}],"cancelled":[{"target":"63730035004:***7884","ok":false,"id":null,"alreadyGone":false,"error":null},{"target":"63730035004:***5875","ok":false,"id":null,"alreadyGone":false,"error":null},{"target":"63730035004:***3702","ok":false,"id":null,"alreadyGone":false,"error":null}]}
+{"event":"fired","iteration":4,"count":45,"fired":[{"target":"63730035004:***7884","ok":true,"id":"s-a0d16173576d2z19e0a0d0b3dz450e8dc0000","error":null},{"target":"63730035004:***5875","ok":true,"id":"s-a0d7966017cc4z19e0a0d0b34z44946f80000","error":null},{"target":"63730035004:***3702","ok":true,"id":"s-a0d154201513az19e0a0d0af7z4550ce80000","error":null}]}

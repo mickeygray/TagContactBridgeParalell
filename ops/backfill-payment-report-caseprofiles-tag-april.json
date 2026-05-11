@@ -1,0 +1,75 @@
+{
+  "domain": "TAG",
+  "from": "2026-04-01",
+  "to": "2026-04-27",
+  "reportsDir": "C:\\Users\\Admin\\Downloads",
+  "filesScanned": [
+    "PaymentsReport_20250218152021.csv",
+    "PaymentsReport_20250320102734.csv",
+    "PaymentsReport_20250402121819.csv",
+    "PaymentsReport_20250730154616.csv",
+    "PaymentsReport_20251107101500.csv",
+    "PaymentsReport_20260108105213.csv",
+    "PaymentsReport_20260108105413.csv",
+    "PaymentsReport_20260129135409.csv",
+    "PaymentsReport_20260129135739.csv",
+    "PaymentsReport_20260129135844.csv",
+    "PaymentsReport_20260129140037.csv",
+    "PaymentsReport_20260202144010.csv",
+    "PaymentsReport_20260401165930.csv",
+    "PaymentsReport_20260407174922.csv",
+    "PaymentsReport_20260409113716.csv",
+    "PaymentsReport_20260415135025.csv",
+    "PaymentsReport_20260415135038.csv",
+    "PaymentsReport_20260424174518.csv"
+  ],
+  "candidateRows": 5,
+  "uniqueCases": 5,
+  "results": [
+    {
+      "caseId": 101564,
+      "action": "created",
+      "sourceName": "Yellow Line Dialer",
+      "sourceCanonicalId": null,
+      "amount": 500,
+      "paidDate": "2026-04-13",
+      "file": "PaymentsReport_20260415135038.csv"
+    },
+    {
+      "caseId": 101577,
+      "action": "created",
+      "sourceName": "Hand Dialer",
+      "sourceCanonicalId": null,
+      "amount": 500,
+      "paidDate": "2026-04-10",
+      "file": "PaymentsReport_20260415135038.csv"
+    },
+    {
+      "caseId": 103346,
+      "action": "created",
+      "sourceName": "LD Posting",
+      "sourceCanonicalId": null,
+      "amount": 200,
+      "paidDate": "2026-04-09",
+      "file": "PaymentsReport_20260415135038.csv"
+    },
+    {
+      "caseId": 102968,
+      "action": "created",
+      "sourceName": "LD Posting",
+      "sourceCanonicalId": null,
+      "amount": 600,
+      "paidDate": "2026-04-01",
+      "file": "PaymentsReport_20260415135038.csv"
+    },
+    {
+      "caseId": 103266,
+      "action": "created",
+      "sourceName": "LD Posting",
+      "sourceCanonicalId": null,
+      "amount": 300,
+      "paidDate": "2026-04-01",
+      "file": "PaymentsReport_20260415135038.csv"
+    }
+  ]
+}

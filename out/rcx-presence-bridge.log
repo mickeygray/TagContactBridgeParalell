@@ -1,0 +1,671 @@
+14:38:44 🔁 telephony=NoCall          userStatus=Available   → cxRouting.desiredAvailability=available (ex-idle)
+              apply: skipped — no apply path enabled (rerun with --apply-logout to use logout)
+14:39:18 🔁 telephony=Ringing         userStatus=Available   → cxRouting.desiredAvailability=unavailable (ex-busy)
+              apply: skipped — no apply path enabled (rerun with --apply-logout to use logout)
+14:39:25    telephony=CallConnected   userStatus=Available   → cxRouting.desiredAvailability=unavailable (ex-busy)
+14:40:54 🔁 telephony=NoCall          userStatus=Available   → cxRouting.desiredAvailability=available (ex-idle)
+              apply: skipped — no apply path enabled (rerun with --apply-logout to use logout)
+14:42:21  ⚠ poll error: presence 63730035004: 429 {
+  "errorCode" : "CMN-301",
+  "message" : "Request rate exceeded",
+  "errors" : [ {
+    "errorCode" : "CMN-301",
+    "message" : "Request rate exceeded"
+  } ]
+}
+14:42:22  ⚠ poll error: presence 63730035004: 429 {
+  "errorCode" : "CMN-301",
+  "message" : "Request rate exceeded",
+  "errors" : [ {
+    "errorCode" : "CMN-301",
+    "message" : "Request rate exceeded"
+  } ]
+}
+14:42:23  ⚠ poll error: presence 63730035004: 429 {
+  "errorCode" : "CMN-301",
+  "message" : "Request rate exceeded",
+  "errors" : [ {
+    "errorCode" : "CMN-301",
+    "message" : "Request rate exceeded"
+  } ]
+}
+14:42:24  ⚠ poll error: presence 63730035004: 429 {
+  "errorCode" : "CMN-301",
+  "message" : "Request rate exceeded",
+  "errors" : [ {
+    "errorCode" : "CMN-301",
+    "message" : "Request rate exceeded"
+  } ]
+}
+14:42:25  ⚠ poll error: presence 63730035004: 429 {
+  "errorCode" : "CMN-301",
+  "message" : "Request rate exceeded",
+  "errors" : [ {
+    "errorCode" : "CMN-301",
+    "message" : "Request rate exceeded"
+  } ]
+}
+14:42:26  ⚠ poll error: presence 63730035004: 429 {
+  "errorCode" : "CMN-301",
+  "message" : "Request rate exceeded",
+  "errors" : [ {
+    "errorCode" : "CMN-301",
+    "message" : "Request rate exceeded"
+  } ]
+}
+14:42:27  ⚠ poll error: presence 63730035004: 429 {
+  "errorCode" : "CMN-301",
+  "message" : "Request rate exceeded",
+  "errors" : [ {
+    "errorCode" : "CMN-301",
+    "message" : "Request rate exceeded"
+  } ]
+}
+14:42:28  ⚠ poll error: presence 63730035004: 429 {
+  "errorCode" : "CMN-301",
+  "message" : "Request rate exceeded",
+  "errors" : [ {
+    "errorCode" : "CMN-301",
+    "message" : "Request rate exceeded"
+  } ]
+}
+14:42:29  ⚠ poll error: presence 63730035004: 429 {
+  "errorCode" : "CMN-301",
+  "message" : "Request rate exceeded",
+  "errors" : [ {
+    "errorCode" : "CMN-301",
+    "message" : "Request rate exceeded"
+  } ]
+}
+14:42:30  ⚠ poll error: presence 63730035004: 429 {
+  "errorCode" : "CMN-301",
+  "message" : "Request rate exceeded",
+  "errors" : [ {
+    "errorCode" : "CMN-301",
+    "message" : "Request rate exceeded"
+  } ]
+}
+14:42:31  ⚠ poll error: presence 63730035004: 429 {
+  "errorCode" : "CMN-301",
+  "message" : "Request rate exceeded",
+  "errors" : [ {
+    "errorCode" : "CMN-301",
+    "message" : "Request rate exceeded"
+  } ]
+}
+14:42:32  ⚠ poll error: presence 63730035004: 429 {
+  "errorCode" : "CMN-301",
+  "message" : "Request rate exceeded",
+  "errors" : [ {
+    "errorCode" : "CMN-301",
+    "message" : "Request rate exceeded"
+  } ]
+}
+14:42:33  ⚠ poll error: presence 63730035004: 429 {
+  "errorCode" : "CMN-301",
+  "message" : "Request rate exceeded",
+  "errors" : [ {
+    "errorCode" : "CMN-301",
+    "message" : "Request rate exceeded"
+  } ]
+}
+14:42:34  ⚠ poll error: presence 63730035004: 429 {
+  "errorCode" : "CMN-301",
+  "message" : "Request rate exceeded",
+  "errors" : [ {
+    "errorCode" : "CMN-301",
+    "message" : "Request rate exceeded"
+  } ]
+}
+14:42:35  ⚠ poll error: presence 63730035004: 429 {
+  "errorCode" : "CMN-301",
+  "message" : "Request rate exceeded",
+  "errors" : [ {
+    "errorCode" : "CMN-301",
+    "message" : "Request rate exceeded"
+  } ]
+}
+14:42:36  ⚠ poll error: presence 63730035004: 429 {
+  "errorCode" : "CMN-301",
+  "message" : "Request rate exceeded",
+  "errors" : [ {
+    "errorCode" : "CMN-301",
+    "message" : "Request rate exceeded"
+  } ]
+}
+14:42:37  ⚠ poll error: presence 63730035004: 429 {
+  "errorCode" : "CMN-301",
+  "message" : "Request rate exceeded",
+  "errors" : [ {
+    "errorCode" : "CMN-301",
+    "message" : "Request rate exceeded"
+  } ]
+}
+14:42:38  ⚠ poll error: presence 63730035004: 429 {
+  "errorCode" : "CMN-301",
+  "message" : "Request rate exceeded",
+  "errors" : [ {
+    "errorCode" : "CMN-301",
+    "message" : "Request rate exceeded"
+  } ]
+}
+14:42:39  ⚠ poll error: presence 63730035004: 429 {
+  "errorCode" : "CMN-301",
+  "message" : "Request rate exceeded",
+  "errors" : [ {
+    "errorCode" : "CMN-301",
+    "message" : "Request rate exceeded"
+  } ]
+}
+14:42:40  ⚠ poll error: presence 63730035004: 429 {
+  "errorCode" : "CMN-301",
+  "message" : "Request rate exceeded",
+  "errors" : [ {
+    "errorCode" : "CMN-301",
+    "message" : "Request rate exceeded"
+  } ]
+}
+14:42:41  ⚠ poll error: presence 63730035004: 429 {
+  "errorCode" : "CMN-301",
+  "message" : "Request rate exceeded",
+  "errors" : [ {
+    "errorCode" : "CMN-301",
+    "message" : "Request rate exceeded"
+  } ]
+}
+14:42:42  ⚠ poll error: presence 63730035004: 429 {
+  "errorCode" : "CMN-301",
+  "message" : "Request rate exceeded",
+  "errors" : [ {
+    "errorCode" : "CMN-301",
+    "message" : "Request rate exceeded"
+  } ]
+}
+14:42:43  ⚠ poll error: presence 63730035004: 429 {
+  "errorCode" : "CMN-301",
+  "message" : "Request rate exceeded",
+  "errors" : [ {
+    "errorCode" : "CMN-301",
+    "message" : "Request rate exceeded"
+  } ]
+}
+14:42:44  ⚠ poll error: presence 63730035004: 429 {
+  "errorCode" : "CMN-301",
+  "message" : "Request rate exceeded",
+  "errors" : [ {
+    "errorCode" : "CMN-301",
+    "message" : "Request rate exceeded"
+  } ]
+}
+14:42:45  ⚠ poll error: presence 63730035004: 429 {
+  "errorCode" : "CMN-301",
+  "message" : "Request rate exceeded",
+  "errors" : [ {
+    "errorCode" : "CMN-301",
+    "message" : "Request rate exceeded"
+  } ]
+}
+14:42:46  ⚠ poll error: presence 63730035004: 429 {
+  "errorCode" : "CMN-301",
+  "message" : "Request rate exceeded",
+  "errors" : [ {
+    "errorCode" : "CMN-301",
+    "message" : "Request rate exceeded"
+  } ]
+}
+14:42:47  ⚠ poll error: presence 63730035004: 429 {
+  "errorCode" : "CMN-301",
+  "message" : "Request rate exceeded",
+  "errors" : [ {
+    "errorCode" : "CMN-301",
+    "message" : "Request rate exceeded"
+  } ]
+}
+14:42:48  ⚠ poll error: presence 63730035004: 429 {
+  "errorCode" : "CMN-301",
+  "message" : "Request rate exceeded",
+  "errors" : [ {
+    "errorCode" : "CMN-301",
+    "message" : "Request rate exceeded"
+  } ]
+}
+14:42:49  ⚠ poll error: presence 63730035004: 429 {
+  "errorCode" : "CMN-301",
+  "message" : "Request rate exceeded",
+  "errors" : [ {
+    "errorCode" : "CMN-301",
+    "message" : "Request rate exceeded"
+  } ]
+}
+14:42:50  ⚠ poll error: presence 63730035004: 429 {
+  "errorCode" : "CMN-301",
+  "message" : "Request rate exceeded",
+  "errors" : [ {
+    "errorCode" : "CMN-301",
+    "message" : "Request rate exceeded"
+  } ]
+}
+14:42:51  ⚠ poll error: presence 63730035004: 429 {
+  "errorCode" : "CMN-301",
+  "message" : "Request rate exceeded",
+  "errors" : [ {
+    "errorCode" : "CMN-301",
+    "message" : "Request rate exceeded"
+  } ]
+}
+14:42:52  ⚠ poll error: presence 63730035004: 429 {
+  "errorCode" : "CMN-301",
+  "message" : "Request rate exceeded",
+  "errors" : [ {
+    "errorCode" : "CMN-301",
+    "message" : "Request rate exceeded"
+  } ]
+}
+14:42:53  ⚠ poll error: presence 63730035004: 429 {
+  "errorCode" : "CMN-301",
+  "message" : "Request rate exceeded",
+  "errors" : [ {
+    "errorCode" : "CMN-301",
+    "message" : "Request rate exceeded"
+  } ]
+}
+14:42:54  ⚠ poll error: presence 63730035004: 429 {
+  "errorCode" : "CMN-301",
+  "message" : "Request rate exceeded",
+  "errors" : [ {
+    "errorCode" : "CMN-301",
+    "message" : "Request rate exceeded"
+  } ]
+}
+14:42:55  ⚠ poll error: presence 63730035004: 429 {
+  "errorCode" : "CMN-301",
+  "message" : "Request rate exceeded",
+  "errors" : [ {
+    "errorCode" : "CMN-301",
+    "message" : "Request rate exceeded"
+  } ]
+}
+14:42:56  ⚠ poll error: presence 63730035004: 429 {
+  "errorCode" : "CMN-301",
+  "message" : "Request rate exceeded",
+  "errors" : [ {
+    "errorCode" : "CMN-301",
+    "message" : "Request rate exceeded"
+  } ]
+}
+14:42:57  ⚠ poll error: presence 63730035004: 429 {
+  "errorCode" : "CMN-301",
+  "message" : "Request rate exceeded",
+  "errors" : [ {
+    "errorCode" : "CMN-301",
+    "message" : "Request rate exceeded"
+  } ]
+}
+14:42:58  ⚠ poll error: presence 63730035004: 429 {
+  "errorCode" : "CMN-301",
+  "message" : "Request rate exceeded",
+  "errors" : [ {
+    "errorCode" : "CMN-301",
+    "message" : "Request rate exceeded"
+  } ]
+}
+14:42:59  ⚠ poll error: presence 63730035004: 429 {
+  "errorCode" : "CMN-301",
+  "message" : "Request rate exceeded",
+  "errors" : [ {
+    "errorCode" : "CMN-301",
+    "message" : "Request rate exceeded"
+  } ]
+}
+14:43:00  ⚠ poll error: presence 63730035004: 429 {
+  "errorCode" : "CMN-301",
+  "message" : "Request rate exceeded",
+  "errors" : [ {
+    "errorCode" : "CMN-301",
+    "message" : "Request rate exceeded"
+  } ]
+}
+14:43:01  ⚠ poll error: presence 63730035004: 429 {
+  "errorCode" : "CMN-301",
+  "message" : "Request rate exceeded",
+  "errors" : [ {
+    "errorCode" : "CMN-301",
+    "message" : "Request rate exceeded"
+  } ]
+}
+14:43:02  ⚠ poll error: presence 63730035004: 429 {
+  "errorCode" : "CMN-301",
+  "message" : "Request rate exceeded",
+  "errors" : [ {
+    "errorCode" : "CMN-301",
+    "message" : "Request rate exceeded"
+  } ]
+}
+14:43:03  ⚠ poll error: presence 63730035004: 429 {
+  "errorCode" : "CMN-301",
+  "message" : "Request rate exceeded",
+  "errors" : [ {
+    "errorCode" : "CMN-301",
+    "message" : "Request rate exceeded"
+  } ]
+}
+14:43:04  ⚠ poll error: presence 63730035004: 429 {
+  "errorCode" : "CMN-301",
+  "message" : "Request rate exceeded",
+  "errors" : [ {
+    "errorCode" : "CMN-301",
+    "message" : "Request rate exceeded"
+  } ]
+}
+14:43:05  ⚠ poll error: presence 63730035004: 429 {
+  "errorCode" : "CMN-301",
+  "message" : "Request rate exceeded",
+  "errors" : [ {
+    "errorCode" : "CMN-301",
+    "message" : "Request rate exceeded"
+  } ]
+}
+14:43:06  ⚠ poll error: presence 63730035004: 429 {
+  "errorCode" : "CMN-301",
+  "message" : "Request rate exceeded",
+  "errors" : [ {
+    "errorCode" : "CMN-301",
+    "message" : "Request rate exceeded"
+  } ]
+}
+14:43:07  ⚠ poll error: presence 63730035004: 429 {
+  "errorCode" : "CMN-301",
+  "message" : "Request rate exceeded",
+  "errors" : [ {
+    "errorCode" : "CMN-301",
+    "message" : "Request rate exceeded"
+  } ]
+}
+14:43:08  ⚠ poll error: presence 63730035004: 429 {
+  "errorCode" : "CMN-301",
+  "message" : "Request rate exceeded",
+  "errors" : [ {
+    "errorCode" : "CMN-301",
+    "message" : "Request rate exceeded"
+  } ]
+}
+14:43:09  ⚠ poll error: presence 63730035004: 429 {
+  "errorCode" : "CMN-301",
+  "message" : "Request rate exceeded",
+  "errors" : [ {
+    "errorCode" : "CMN-301",
+    "message" : "Request rate exceeded"
+  } ]
+}
+14:43:10  ⚠ poll error: presence 63730035004: 429 {
+  "errorCode" : "CMN-301",
+  "message" : "Request rate exceeded",
+  "errors" : [ {
+    "errorCode" : "CMN-301",
+    "message" : "Request rate exceeded"
+  } ]
+}
+14:43:11  ⚠ poll error: presence 63730035004: 429 {
+  "errorCode" : "CMN-301",
+  "message" : "Request rate exceeded",
+  "errors" : [ {
+    "errorCode" : "CMN-301",
+    "message" : "Request rate exceeded"
+  } ]
+}
+14:43:12  ⚠ poll error: presence 63730035004: 429 {
+  "errorCode" : "CMN-301",
+  "message" : "Request rate exceeded",
+  "errors" : [ {
+    "errorCode" : "CMN-301",
+    "message" : "Request rate exceeded"
+  } ]
+}
+14:43:13  ⚠ poll error: presence 63730035004: 429 {
+  "errorCode" : "CMN-301",
+  "message" : "Request rate exceeded",
+  "errors" : [ {
+    "errorCode" : "CMN-301",
+    "message" : "Request rate exceeded"
+  } ]
+}
+14:43:14  ⚠ poll error: presence 63730035004: 429 {
+  "errorCode" : "CMN-301",
+  "message" : "Request rate exceeded",
+  "errors" : [ {
+    "errorCode" : "CMN-301",
+    "message" : "Request rate exceeded"
+  } ]
+}
+14:43:15  ⚠ poll error: presence 63730035004: 429 {
+  "errorCode" : "CMN-301",
+  "message" : "Request rate exceeded",
+  "errors" : [ {
+    "errorCode" : "CMN-301",
+    "message" : "Request rate exceeded"
+  } ]
+}
+14:43:16  ⚠ poll error: presence 63730035004: 429 {
+  "errorCode" : "CMN-301",
+  "message" : "Request rate exceeded",
+  "errors" : [ {
+    "errorCode" : "CMN-301",
+    "message" : "Request rate exceeded"
+  } ]
+}
+14:43:17  ⚠ poll error: presence 63730035004: 429 {
+  "errorCode" : "CMN-301",
+  "message" : "Request rate exceeded",
+  "errors" : [ {
+    "errorCode" : "CMN-301",
+    "message" : "Request rate exceeded"
+  } ]
+}
+14:43:18  ⚠ poll error: presence 63730035004: 429 {
+  "errorCode" : "CMN-301",
+  "message" : "Request rate exceeded",
+  "errors" : [ {
+    "errorCode" : "CMN-301",
+    "message" : "Request rate exceeded"
+  } ]
+}
+14:43:19  ⚠ poll error: presence 63730035004: 429 {
+  "errorCode" : "CMN-301",
+  "message" : "Request rate exceeded",
+  "errors" : [ {
+    "errorCode" : "CMN-301",
+    "message" : "Request rate exceeded"
+  } ]
+}
+14:43:20  ⚠ poll error: presence 63730035004: 429 {
+  "errorCode" : "CMN-301",
+  "message" : "Request rate exceeded",
+  "errors" : [ {
+    "errorCode" : "CMN-301",
+    "message" : "Request rate exceeded"
+  } ]
+}
+14:43:21  ⚠ poll error: presence 63730035004: 429 {
+  "errorCode" : "CMN-301",
+  "message" : "Request rate exceeded",
+  "errors" : [ {
+    "errorCode" : "CMN-301",
+    "message" : "Request rate exceeded"
+  } ]
+}
+14:43:22  ⚠ poll error: presence 63730035004: 429 {
+  "errorCode" : "CMN-301",
+  "message" : "Request rate exceeded",
+  "errors" : [ {
+    "errorCode" : "CMN-301",
+    "message" : "Request rate exceeded"
+  } ]
+}
+14:43:23  ⚠ poll error: presence 63730035004: 429 {
+  "errorCode" : "CMN-301",
+  "message" : "Request rate exceeded",
+  "errors" : [ {
+    "errorCode" : "CMN-301",
+    "message" : "Request rate exceeded"
+  } ]
+}
+14:43:24  ⚠ poll error: presence 63730035004: 429 {
+  "errorCode" : "CMN-301",
+  "message" : "Request rate exceeded",
+  "errors" : [ {
+    "errorCode" : "CMN-301",
+    "message" : "Request rate exceeded"
+  } ]
+}
+14:43:25  ⚠ poll error: presence 63730035004: 429 {
+  "errorCode" : "CMN-301",
+  "message" : "Request rate exceeded",
+  "errors" : [ {
+    "errorCode" : "CMN-301",
+    "message" : "Request rate exceeded"
+  } ]
+}
+14:43:26  ⚠ poll error: presence 63730035004: 429 {
+  "errorCode" : "CMN-301",
+  "message" : "Request rate exceeded",
+  "errors" : [ {
+    "errorCode" : "CMN-301",
+    "message" : "Request rate exceeded"
+  } ]
+}
+14:43:28  ⚠ poll error: presence 63730035004: 429 {
+  "errorCode" : "CMN-301",
+  "message" : "Request rate exceeded",
+  "errors" : [ {
+    "errorCode" : "CMN-301",
+    "message" : "Request rate exceeded"
+  } ]
+}
+14:43:29  ⚠ poll error: presence 63730035004: 429 {
+  "errorCode" : "CMN-301",
+  "message" : "Request rate exceeded",
+  "errors" : [ {
+    "errorCode" : "CMN-301",
+    "message" : "Request rate exceeded"
+  } ]
+}
+14:43:30  ⚠ poll error: presence 63730035004: 429 {
+  "errorCode" : "CMN-301",
+  "message" : "Request rate exceeded",
+  "errors" : [ {
+    "errorCode" : "CMN-301",
+    "message" : "Request rate exceeded"
+  } ]
+}
+14:43:31  ⚠ poll error: presence 63730035004: 429 {
+  "errorCode" : "CMN-301",
+  "message" : "Request rate exceeded",
+  "errors" : [ {
+    "errorCode" : "CMN-301",
+    "message" : "Request rate exceeded"
+  } ]
+}
+14:43:32  ⚠ poll error: presence 63730035004: 429 {
+  "errorCode" : "CMN-301",
+  "message" : "Request rate exceeded",
+  "errors" : [ {
+    "errorCode" : "CMN-301",
+    "message" : "Request rate exceeded"
+  } ]
+}
+14:43:33  ⚠ poll error: presence 63730035004: 429 {
+  "errorCode" : "CMN-301",
+  "message" : "Request rate exceeded",
+  "errors" : [ {
+    "errorCode" : "CMN-301",
+    "message" : "Request rate exceeded"
+  } ]
+}
+14:43:34  ⚠ poll error: presence 63730035004: 429 {
+  "errorCode" : "CMN-301",
+  "message" : "Request rate exceeded",
+  "errors" : [ {
+    "errorCode" : "CMN-301",
+    "message" : "Request rate exceeded"
+  } ]
+}
+14:43:35  ⚠ poll error: presence 63730035004: 429 {
+  "errorCode" : "CMN-301",
+  "message" : "Request rate exceeded",
+  "errors" : [ {
+    "errorCode" : "CMN-301",
+    "message" : "Request rate exceeded"
+  } ]
+}
+14:43:36  ⚠ poll error: presence 63730035004: 429 {
+  "errorCode" : "CMN-301",
+  "message" : "Request rate exceeded",
+  "errors" : [ {
+    "errorCode" : "CMN-301",
+    "message" : "Request rate exceeded"
+  } ]
+}
+14:43:37  ⚠ poll error: presence 63730035004: 429 {
+  "errorCode" : "CMN-301",
+  "message" : "Request rate exceeded",
+  "errors" : [ {
+    "errorCode" : "CMN-301",
+    "message" : "Request rate exceeded"
+  } ]
+}
+14:43:38  ⚠ poll error: presence 63730035004: 429 {
+  "errorCode" : "CMN-301",
+  "message" : "Request rate exceeded",
+  "errors" : [ {
+    "errorCode" : "CMN-301",
+    "message" : "Request rate exceeded"
+  } ]
+}
+14:43:39  ⚠ poll error: presence 63730035004: 429 {
+  "errorCode" : "CMN-301",
+  "message" : "Request rate exceeded",
+  "errors" : [ {
+    "errorCode" : "CMN-301",
+    "message" : "Request rate exceeded"
+  } ]
+}
+14:43:40  ⚠ poll error: presence 63730035004: 429 {
+  "errorCode" : "CMN-301",
+  "message" : "Request rate exceeded",
+  "errors" : [ {
+    "errorCode" : "CMN-301",
+    "message" : "Request rate exceeded"
+  } ]
+}
+14:43:41  ⚠ poll error: presence 63730035004: 429 {
+  "errorCode" : "CMN-301",
+  "message" : "Request rate exceeded",
+  "errors" : [ {
+    "errorCode" : "CMN-301",
+    "message" : "Request rate exceeded"
+  } ]
+}
+14:43:42  ⚠ poll error: presence 63730035004: 429 {
+  "errorCode" : "CMN-301",
+  "message" : "Request rate exceeded",
+  "errors" : [ {
+    "errorCode" : "CMN-301",
+    "message" : "Request rate exceeded"
+  } ]
+}
+14:43:43  ⚠ poll error: presence 63730035004: 429 {
+  "errorCode" : "CMN-301",
+  "message" : "Request rate exceeded",
+  "errors" : [ {
+    "errorCode" : "CMN-301",
+    "message" : "Request rate exceeded"
+  } ]
+}
+14:43:44  ⚠ poll error: presence 63730035004: 429 {
+  "errorCode" : "CMN-301",
+  "message" : "Request rate exceeded",
+  "errors" : [ {
+    "errorCode" : "CMN-301",
+    "message" : "Request rate exceeded"
+  } ]
+}

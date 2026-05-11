@@ -18,8 +18,25 @@ function envBool(name, fallback = false) {
   return ["1", "true", "yes", "on"].includes(String(value).toLowerCase());
 }
 
+function envRequired(name) {
+  const value = env(name, "");
+  if (value === "") {
+    throw new Error(`Missing required environment variable: ${name}`);
+  }
+  return value;
+}
+
+function ensureConfigValue(name, value) {
+  if (value === undefined || value === null || value === "") {
+    throw new Error(`Missing required config value: ${name}`);
+  }
+  return value;
+}
+
 module.exports = {
   env,
   envBool,
   envInt,
+  envRequired,
+  ensureConfigValue,
 };

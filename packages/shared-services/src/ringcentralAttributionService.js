@@ -4,6 +4,7 @@ const { createEvent } = require("../../event-core/src");
 const { getRingCentralConfig } = require("../../shared-config/src");
 const { createRingCentralClient } = require("../../shared-integrations/src");
 const { sourceCanonicalRepository } = require("../../shared-repositories/src");
+const { emitHourlyJobEvent } = require("./hourlyJobEventService");
 
 const scheduledSessions = new Map();
 
@@ -107,6 +108,7 @@ async function resolveSourceFromDid(phoneNumber) {
   if (!phoneNumber) {
     return {
       matched: false,
+      strategy: "did",
       did: null,
       sourceCanonicalId: null,
       internalName: "unknown",
@@ -118,6 +120,7 @@ async function resolveSourceFromDid(phoneNumber) {
   if (!canonical) {
     return {
       matched: false,
+      strategy: "did",
       did: phoneNumber,
       sourceCanonicalId: null,
       internalName: "unknown",
@@ -127,11 +130,130 @@ async function resolveSourceFromDid(phoneNumber) {
 
   return {
     matched: true,
+    strategy: "did",
     did: phoneNumber,
     sourceCanonicalId: String(canonical._id),
     canonicalKey: canonical.canonicalKey,
     internalName: canonical.internalName,
     channel: canonical.channel,
+    domainHint:
+      Array.isArray(canonical.domains) && canonical.domains.length === 1
+        ? canonical.domains[0]
+        : null,
+  };
+}
+
+/**
+ * Extract candidate extension identifiers from a leg. The resolver tries RC
+ * ID first (`leg.extension.id`) since that's the most stable identifier,
+ * then the short extension number, then any `to.extensionId` fallback.
+ */
+function legExtensionIds(leg = {}) {
+  if (!leg) return [];
+  const ids = new Set();
+  const add = (value) => {
+    const trimmed = String(value || "").trim();
+    if (trimmed) ids.add(trimmed);
+  };
+  add(leg.extension?.id);
+  add(leg.extension?.extensionNumber);
+  add(leg.extensionId);
+  add(leg.to?.extensionId);
+  add(leg.to?.extensionNumber);
+  return [...ids];
+}
+
+/**
+ * Leg-based source resolution. Walk legs in order and return the first
+ * canonical match — first-match-wins matches the "top layers are more
+ * specific" routing rule. Real RC inbound mail calls have legs[0] as an
+ * external ingress (no extension attached) and the mail queue owning the
+ * tracking DID appears on legs[1]. Iterating all legs avoids missing
+ * those entirely, and the first-hit rule still blocks generic hunt-path
+ * legs later in the chain from winning attribution.
+ */
+async function resolveSourceFromLegs(legs = []) {
+  if (!Array.isArray(legs) || legs.length === 0) {
+    return {
+      matched: false,
+      strategy: "legs",
+      legIndex: null,
+      extensionId: null,
+      sourceCanonicalId: null,
+      internalName: "unknown",
+      channel: "unknown",
+    };
+  }
+
+  for (let legIndex = 0; legIndex < legs.length; legIndex += 1) {
+    const leg = legs[legIndex] || {};
+    for (const extensionId of legExtensionIds(leg)) {
+      const canonical =
+        await sourceCanonicalRepository.findSourceCanonicalByRingCentralExtension(
+          extensionId,
+        );
+      if (canonical) {
+        return {
+          matched: true,
+          strategy: `legs[${legIndex}]`,
+          legIndex,
+          extensionId,
+          sourceCanonicalId: String(canonical._id),
+          canonicalKey: canonical.canonicalKey,
+          internalName: canonical.internalName,
+          channel: canonical.channel,
+          domainHint:
+            Array.isArray(canonical.domains) && canonical.domains.length === 1
+              ? canonical.domains[0]
+              : null,
+        };
+      }
+    }
+  }
+
+  return {
+    matched: false,
+    strategy: "legs",
+    legIndex: null,
+    extensionId: null,
+    sourceCanonicalId: null,
+    internalName: "unknown",
+    channel: "unknown",
+  };
+}
+
+/**
+ * Combined resolver that tries legs first (authoritative for mail + BCD),
+ * then falls back to the DID lookup. Returns the matched source plus
+ * `attempts` for audit.
+ */
+async function resolveSourceForCallRecord(record = {}) {
+  const legsSource = await resolveSourceFromLegs(record.legs || []);
+  const didSource = await resolveSourceFromDid(
+    record.to?.phoneNumber || null,
+  );
+
+  const winner = legsSource.matched
+    ? legsSource
+    : didSource.matched
+      ? didSource
+      : { ...didSource, strategy: "none" };
+
+  return {
+    ...winner,
+    attempts: {
+      legs: {
+        matched: legsSource.matched,
+        legIndex: legsSource.legIndex,
+        extensionId: legsSource.extensionId,
+        canonicalKey: legsSource.matched ? legsSource.canonicalKey : null,
+      },
+      did: {
+        matched: didSource.matched,
+        did: didSource.did,
+        canonicalKey: didSource.matched ? didSource.canonicalKey : null,
+      },
+    },
   };
 }
 
@@ -150,7 +272,14 @@ async function fetchCallRecordWithRetry(candidate, options = {}) {
   };
 
   for (let attempt = 1; attempt <= maxRetries; attempt += 1) {
-    await sleep(baseMs * attempt);
+    // First attempt fires immediately; subsequent attempts wait with
+    // increasing backoff. Callers that need pre-sleep settling time
+    // (e.g. the live call-end path) enforce it via `sessionBufferMs`
+    // upstream; the retry-specific delay only kicks in when we're
+    // actually retrying.
+    if (attempt > 1) {
+      await sleep(baseMs * (attempt - 1));
+    }
     try {
       const extensionLookup = await findMatchingCallRecord(
         (lookupQuery) => rc.getExtensionCallLog(candidate.extensionId, lookupQuery),
@@ -182,6 +311,15 @@ async function fetchCallRecordWithRetry(candidate, options = {}) {
         };
       }
     } catch (error) {
+      // RC rate-limits call-log endpoints aggressively (HTTP 429). On 429,
+      // back off for a full minute before retrying — RC's window resets
+      // around that interval. For other errors, fall through to the normal
+      // incremental delay above. Always surface on the final attempt.
+      const status = error?.status || error?.details?.responseStatus || null;
+      if (status === 429 && attempt < maxRetries) {
+        await sleep(60_000);
+        continue;
+      }
       if (attempt === maxRetries) {
         throw error;
       }
@@ -196,7 +334,7 @@ async function fetchCallRecordWithRetry(candidate, options = {}) {
   };
 }
 
-async function processTelephonySessionCandidate(candidate, logger) {
+async function processTelephonySessionCandidate(candidate, logger, options = {}) {
   const lookup = await fetchCallRecordWithRetry(candidate);
   if (!lookup.record) {
     const result = await createEvent({
@@ -215,12 +353,45 @@ async function processTelephonySessionCandidate(candidate, logger) {
       attempts: lookup.attempts,
       eventId: String(result.event._id),
     });
+    await emitHourlyJobEvent({
+      lane: "hourly",
+      domain: "TAG",
+      eventType: "ringcentral.telephony.attribution.reconcile",
+      targetService: "control-plane",
+      handlerKey: "reconcileTelephonySessionAttribution",
+      aggregateType: "telephony-session",
+      aggregateId: candidate.telephonySessionId,
+      caseId: null,
+      payload: {
+        candidate,
+        lookup,
+      },
+      resolutionCheckKey: "telephony-session-attributed",
+      resolutionContext: {
+        telephonySessionId: candidate.telephonySessionId,
+        extensionId: candidate.extensionId || null,
+      },
+      dedupeKey: `telephony-attribution:${candidate.telephonySessionId}`,
+      emittedBy: "ringcentral-cx",
+      priority: 65,
+      severity: "warning",
+      alertSummary: "Telephony attribution missed; hourly reconcile queued",
+      immediateRetryAttempts: 1,
+      immediateRetryDelayMs: 1000,
+      provideSummary: false,
+      firstError: "No call record resolved for telephony session",
+      notify: false,
+    }).catch(() => null);
     return { status: "missed", eventId: String(result.event._id), lookup };
   }
 
-  const source = await resolveSourceFromDid(
-    lookup.record.to?.phoneNumber || candidate.toNumber || null,
-  );
+  const source = options.resolveSource
+    ? await options.resolveSource({
+        record: lookup.record,
+        candidate,
+        telephonySessionId: candidate.telephonySessionId,
+      })
+    : await resolveSourceForCallRecord(lookup.record);
   const result = await createEvent({
     eventType: "ringcentral.attribution.resolved",
     sourceService: "ringcentral-cx",
@@ -255,7 +426,7 @@ async function processTelephonySessionCandidate(candidate, logger) {
     telephonySessionId: candidate.telephonySessionId,
     eventId: String(result.event._id),
     matched: source.matched,
-    did: source.did,
+    strategy: source.strategy,
     sourceName: source.internalName,
   });
 
@@ -266,9 +437,29 @@ async function processTelephonySessionCandidate(candidate, logger) {
   };
 }
 
-async function scheduleTelephonySessionEnvelope(envelope, logger) {
+async function scheduleTelephonySessionEnvelope(envelope, logger, options = {}) {
   const config = getRingCentralConfig();
   const candidates = extractAttributionCandidates(envelope);
+
+  // Default to the unified resolver (Logics → CallRail → legs[0] → DID).
+  // Lazy require to avoid the circular module edge at module-load time.
+  const resolveSource =
+    options.resolveSource ||
+    (async ({ record, candidate: cand, telephonySessionId }) => {
+      // eslint-disable-next-line global-require
+      const { resolveInboundCallSource } = require("./callAttributionResolverService");
+      return resolveInboundCallSource({
+        domain: cand?.domain || envelope?.ownerDomain || "TAG",
+        customerPhone:
+          cand?.fromNumber ||
+          cand?.toNumber ||
+          record?.from?.phoneNumber ||
+          null,
+        record,
+        telephonySessionId,
+        logger,
+      });
+    });
 
   const scheduled = candidates.map((candidate) => {
     const key = buildSessionKey(candidate);
@@ -280,7 +471,7 @@ async function scheduleTelephonySessionEnvelope(envelope, logger) {
     const timeoutId = setTimeout(async () => {
       scheduledSessions.delete(key);
       try {
-        await processTelephonySessionCandidate(candidate, logger);
+        await processTelephonySessionCandidate(candidate, logger, { resolveSource });
       } catch (error) {
         logger?.error("ringcentral.attribution.failed", {
           telephonySessionId: candidate.telephonySessionId,
@@ -292,6 +483,7 @@ async function scheduleTelephonySessionEnvelope(envelope, logger) {
     scheduledSessions.set(key, {
       timeoutId,
       candidate,
+      scheduledAt: new Date(),
     });
 
     return {
@@ -307,6 +499,19 @@ async function scheduleTelephonySessionEnvelope(envelope, logger) {
   };
 }
 
+function clearScheduledTelephonySessions() {
+  for (const entry of scheduledSessions.values()) {
+    clearTimeout(entry.timeoutId);
+  }
+  scheduledSessions.clear();
+}
+
+function getScheduledTelephonySessionState() {
+  return {
+    queued: scheduledSessions.size,
+  };
+}
+
 async function probeTelephonySessionLookup(extensionId, telephonySessionId, eventTime) {
   const candidate = {
     extensionId,
@@ -318,7 +523,7 @@ async function probeTelephonySessionLookup(extensionId, telephonySessionId, even
     retryBaseMs: 0,
   });
   const source = lookup.record
-    ? await resolveSourceFromDid(lookup.record.to?.phoneNumber || null)
+    ? await resolveSourceForCallRecord(lookup.record)
     : null;
 
   return {
@@ -336,5 +541,9 @@ module.exports = {
   probeTelephonySessionLookup,
   processTelephonySessionCandidate,
   resolveSourceFromDid,
+  resolveSourceFromLegs,
+  resolveSourceForCallRecord,
   scheduleTelephonySessionEnvelope,
+  clearScheduledTelephonySessions,
+  getScheduledTelephonySessionState,
 };

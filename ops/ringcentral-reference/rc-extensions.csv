@@ -1,0 +1,157 @@
+Type,Extension,Name,Status,Phone_Numbers,ID
+User,10111,"Tax Group",Enabled,"",2252193005
+User,201,"Tiffany Nicholls",Disabled,"",2362606005
+User,206,"Phone Burner - OG",Enabled,"",2362613005
+User,209,"Anthony Calloway",Enabled,"",2362616005
+User,123,"Conference Room",Enabled,"",2372727005
+User,602,"John Ellis",Enabled,"",2372737005
+User,603,"Lauren Goldman",Disabled,"",2372838005
+User,343,"Monica Cazares - TAG",Enabled,"",2374123005
+Department,505,"Customer Service",Enabled,"",2375402005
+User,13,"Jonathan Pineda",Enabled,"",2375473005
+User,94,"Leo Collins",Enabled,"",2375861005
+User,365,"Andrew Wells",Enabled,"",2375863005
+Department,901,"In House Leads",Enabled,"",2375948005
+User,129,"Jay Olson - TAG",Enabled,"",2378737005
+Department,904,"Complaint Calls - Brand Bidding (866-939-4076)",Enabled,"",2382610005
+User,806,"Victoria Kennedy",Enabled,"",2384856005
+Department,909,"Tax Group Consultants - OG",Enabled,"",2384936005
+User,1032,"Trash B Gone",Enabled,"",2385684005
+User,240,"Kassy Burton",Enabled,"",2405910005
+Department,922,"Dialer Leads",Enabled,"",2405927005
+Department,923,"Tax Prep Marketing Email",Enabled,"",2406050005
+User,320,"Matthew Anderson",Enabled,"",2426116005
+User,815,"Yesenia Valdez",Enabled,"",2427719005
+User,871,"Joe Montes - TAG",Enabled,"",2451812005
+Department,932,"C SNAP Urgent Notice State 800-313-6634",Enabled,"",2458309005
+Department,934,"State Delinquency C-Snap Test 800-517-5417",Enabled,"",2458342005
+Department,935,"Yellow Delinquency Notice State 800-517-9227",Enabled,"",2458352005
+Department,936,"State Delinquency Letter Test  800-517-9215",Enabled,"",2458353005
+Department,945,"Federal Reminder Letter (800) 849-5358",Enabled,"",2479573005
+Department,972,"TAG Website",Enabled,"",2490973005
+User,1035,"Alazey Cordero",Enabled,"",2492354005
+Department,973,"WYNN TAX GOOGLE LEAD",Enabled,"",2494247005
+User,410,"Evan Grant",Enabled,"",2498880005
+Department,199,"AS - 0 Invoice",Enabled,"",63447284004
+User,24,"Phone Burner",Enabled,"",63548213004
+User,565,"Jordan de la Torre",Disabled,"",63548223004
+User,281,"Neyla Ramirez",Enabled,"",63549100004
+User,800,"Alexander Banks",Enabled,"",63551671004
+User,803,"Jakob Beck - TAG",Enabled,"",63551673004
+User,801,"Ryan McCarthy - TAG",Enabled,"",63551675004
+User,996,"Joe Torres - TAG",Disabled,"",63551847004
+Department,900,"Origination",Enabled,"",63551851004
+User,804,"Ryan McCarthy 2",Enabled,"",63551976004
+User,805,"Ryan McCarthy 3",Enabled,"",63551979004
+User,303,"Phone Burner - AS",Enabled,"",63552817004
+User,729,"Tony Olson - TAG",Disabled,"",63552821004
+User,731,"Jonathan Haro - TAG",Enabled,"",63554672004
+Department,300,"Reso",Enabled,"",63554939004
+User,966,"Bruce Allen - TAG",Enabled,"",63555286004
+Department,902,"Dialer Leads",Enabled,"",63562295004
+User,324,"Riley Mills",Enabled,"",63563478004
+Department,444,"Ad Serv Call Queue",Enabled,"",63563773004
+Department,903,"Redline Text",Enabled,"",63563857004
+Department,905,"American Tax Support Website",Enabled,"",63574200004
+Department,910,"Origination BCD",Enabled,"",63577451004
+Department,912,"In House Leads - Live Transfer",Enabled,"",63578818004
+User,995,"Robert Gold",Enabled,"",63581521004
+Department,919,"Live Transfer - Money Line",Enabled,"",63599425004
+Department,920,"Yellows",Enabled,"",63608769004
+User,713,"Michelle Gibson - TAG",Enabled,"",63611118004
+Department,921,"Welcome E-mail",Enabled,"",63613218004
+User,809,"Eva Gray - TAG",Enabled,"",63620577004
+User,810,"Eli Hayes - TAG",Enabled,"",63620597004
+Department,924,"Wynn Tax FB Insta",Enabled,"",63620912004
+Department,925,"TO FU Text Message TAG",Enabled,"",63630413004
+Department,926,"Google Ads Campaign 2 (PHRASE)",Enabled,"",63630425004
+Department,927,"Google Ads Campaign 3 (EXACT)",Enabled,"",63630428004
+User,802,"Matthew Hansen",Enabled,"",63658286004
+User,525,"Dani Pearson",Enabled,"",63667332004
+User,140,"Jake Wallace",Enabled,"",63673444004
+Department,600,"CBD",Enabled,"",63703956004
+User,319,"Phil Olson",Enabled,"",63704036004
+User,111,"Jacqueline Santos",Enabled,"",63708334004
+User,43254,"Hailey Davis",Disabled,"",63711350004
+Department,500,"Mailer",Enabled,"",63712730004
+Department,4353,"WYNN TAX GOOGLE LEAD",Enabled,"",63712999004
+Department,222,"Investigation Test",Enabled,"",63713757004
+Department,928,"Affordability Federal",Enabled,"",63724109004
+Department,929,"Citation State - (800) 517-0470",Enabled,"",63724305004
+Department,930,"Urgent Third Federal - (800) 517-8599",Enabled,"",63724306004
+Department,931,"Urgent Third State - (800) 517-6356",Enabled,"",63724310004
+User,101,"Michael Gray",Enabled,"",63730035004
+Department,937,"OG - Raw Calls",Enabled,"",63731698004
+Department,433,"433a",Enabled,"",63734261004
+Department,938,"3rd Day (Pink) Urgent Third State 800-921-9263",Enabled,"",63751309004
+Department,939,"3rd Day (Pink) Urgent Third Federal 800-590-2477",Enabled,"",63751322004
+User,445,"Sean Lucas - TAG",Enabled,"",63756126004
+User,446,"Lesley Sive",Disabled,"",63761994004
+Department,940,"Consumer Letter State Test - (800) 518-6426",Enabled,"",63762772004
+Department,941,"Aged Urgent 3rd Federal (800) 518-9789",Enabled,"",63763690004
+Department,942,"Aged Urgent 3rd State (800) 518-0098",Enabled,"",63763696004
+User,1034,"Cameron Pierce",Enabled,"",63766278004
+Department,943,"AS Originations",Enabled,"",63767454004
+Department,944,"(800) 513-0704 Consumer 3 month Remail",Enabled,"",63767455004
+User,325,"Jackie Rose",Enabled,"",63769358004
+User,515,"Richard Miller",Enabled,"",63779552004
+Department,946,"800-493-0273 Urgent 3rd 3 month Remail",Enabled,"",63780094004
+Department,950,"Urgent Third PC State",Enabled,"",63787414004
+Department,951,"8006435890 Federal Urgent 3rd 3 Day Pink",Enabled,"",63792436004
+User,813,"David Walker",Enabled,"",63798744004
+Department,952,"Urgent Third PC Pink Day 3",Enabled,"",63800952004
+Department,953,"Urgent Delinquency State",Disabled,"",63800959004
+Department,954,"Urgent 3rd Postcard State",Enabled,"",63800961004
+Department,955,"TAG META LEAD",Enabled,"",63800962004
+Department,956,"Urgent Delinquency Federal",Enabled,"",63800963004
+Department,957,"Wynn Tax FB Insta",Enabled,"",63800966004
+Department,958,"Urgent Third Federal White PC",Enabled,"",63800967004
+Department,959,"Urgent 3rd Pink Day 1",Enabled,"",63800968004
+Department,960,"CNC Letter State",Enabled,"",63800970004
+Department,961,"TAX LIEN PC",Enabled,"",63800971004
+Department,962,"Urgent 3rd Postcard 7 Day State",Enabled,"",63800972004
+Department,963,"Urgent Third PC 7 Day Federal",Enabled,"",63800974004
+Department,964,"Consumer State",Enabled,"",63800976004
+Department,965,"Affordability Pink State",Enabled,"",63800977004
+Department,967,"Must Respond State PC",Enabled,"",63800979004
+Department,968,"Must Respond Postcard Federal",Enabled,"",63800981004
+Department,200,"Origination Call Queue",Enabled,"",63801016004
+Department,970,"New OG",Enabled,"",63801020004
+Department,971,"Overflow OG",Enabled,"",63801022004
+ApplicationExtension,1001,"Customer Service",Enabled,"",63813516004
+ApplicationExtension,1002,"Prospects",Enabled,"",63813519004
+Department,4354,"Live Transfer 2026",Enabled,"",63837652004
+Department,4355,"RVM#2",Enabled,"",63838512004
+Department,9636,"Wynn Tax TikTok",Enabled,"",63843685004
+Department,9637,"WYNN TAX TIKTOK",Enabled,"",63848705004
+CompanyExtension,,"Company",Enabled,"",63863069004
+Department,1234,"WYNN TAX SOLUTIONS",Enabled,"",63879530004
+Department,2345,"WYNN TAX SOLUTIONS - AUTO DIALER",Enabled,"",63879531004
+Department,9638,"WYNN TAX IVR",Enabled,"",63882593004
+IvrMenu,9368,"WYNN TAX IVR",Enabled,"",63882596004
+Department,96392,"Tax Advocate Group AUTO DIALER",Enabled,"",63890374004
+User,3651,"Andrew Wells - Wynn",Enabled,"",63898140004
+User,9661,"Bruce Allen-Wynn",Enabled,"",63898141004
+User,5251,"Dani Pearson - Wynn",Enabled,"",63898143004
+User,8101,"Eli Hayes - Wynn",Enabled,"",63898144004
+User,1401,"Jake Wallace -Wynn",Enabled,"",63898145004
+User,7311,"Jonathan Haro - Wynn",Enabled,"",63898147004
+User,43255,"Matthew Anderson - Wynn",Enabled,"",63898148004
+User,3431,"Monica Cazares - Wynn",Enabled,"",63898149004
+User,2811,"Neyla Ramirez - Wynn",Enabled,"",63898151004
+Department,5051,"Customer Service - Wynn",Enabled,"",63898152004
+Department,5052,"Customer Service - Amity",Enabled,"",63898153004
+User,8031,"Jakob Beck - Wynn",Enabled,"",63898154004
+User,3652,"Andrew Wells - Amity",Enabled,"",63898156004
+User,9662,"Bruce Allen - Amity",Enabled,"",63898159004
+User,5252,"Dani Pearson - Amity",Enabled,"",63898163004
+User,8102,"Eli Hayes - Amity",Enabled,"",63898164004
+User,1402,"Jake Wallace - Amity",Enabled,"",63898165004
+User,8032,"Jakob Beck - Amity",Enabled,"",63898166004
+User,7312,"Jonathan Haro - Amity",Enabled,"",63898167004
+User,2402,"Kassy Burton - Amity",Enabled,"",63898168004
+User,9494,"Leo Collins - Amity",Enabled,"",63898173004
+User,3202,"Matthew Anderson - Amity",Enabled,"",63898174004
+User,3432,"Monica Cazares - Amity",Enabled,"",63898175004
+User,2812,"Neyla Ramirez - Amity",Enabled,"",63898176004
+User,1272,"Amity One",Enabled,"",63898178004

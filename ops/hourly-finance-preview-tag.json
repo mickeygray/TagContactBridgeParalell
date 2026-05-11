@@ -1,0 +1,1044 @@
+{
+  "mode": "dry-run",
+  "generatedAt": "2026-04-24T20:21:54.323Z",
+  "date": "2026-04-24",
+  "config": {
+    "ldCostPerLead": 3,
+    "bcdCostPerCall": 4,
+    "maxCasesPerDomain": 1,
+    "includeAllSheetRows": false
+  },
+  "domains": [
+    {
+      "domain": "TAG",
+      "date": "2026-04-24",
+      "payments": {
+        "domain": "TAG",
+        "previewedAt": "2026-04-24T20:21:54.323Z",
+        "summary": {
+          "casesScanned": 1,
+          "casesWithPayments": 0,
+          "newLedgerRows": 0,
+          "flaggedFailures": 0,
+          "reversals": 0,
+          "errors": 0,
+          "totalPaymentsObserved": 0,
+          "totalAmountObserved": 0
+        },
+        "cases": [
+          {
+            "caseId": 555001,
+            "payments": 0,
+            "totalAmountObserved": 0,
+            "newLedgerRows": 0,
+            "flaggedFailures": 0,
+            "reversals": 0,
+            "operations": [],
+            "caseProfileEffects": [],
+            "reviewItems": [],
+            "checkpoint": {
+              "type": "payment-reconcile-checkpoint",
+              "caseId": 555001,
+              "update": {
+                "paymentReconcile": {
+                  "lastCheckedAt": "2026-04-24T20:21:54.323Z",
+                  "lastResult": "no-payments"
+                }
+              }
+            },
+            "error": null
+          }
+        ]
+      },
+      "spend": {
+        "sheets": [
+          {
+            "id": "mailer-tag",
+            "label": "TAG Mailer Spend",
+            "domain": "TAG",
+            "channel": "mailer",
+            "parsedRowCount": 1987,
+            "selectedRowCount": 5,
+            "operations": [
+              {
+                "collection": "SpendEntry",
+                "filter": {
+                  "date": "2026-04-24",
+                  "domain": "TAG",
+                  "channel": "mailer",
+                  "sheetId": "mailer-tag",
+                  "jobNumber": "83133U3W"
+                },
+                "update": {
+                  "$set": {
+                    "date": "2026-04-24",
+                    "domain": "TAG",
+                    "channel": "mailer",
+                    "source": "Urgent 3rd White",
+                    "mailHouseName": "Urgent 3rd White",
+                    "sheetId": "mailer-tag",
+                    "spend": 393.38,
+                    "postage": 310.06,
+                    "cost": 71.23,
+                    "pieces": 419,
+                    "jobNumber": "83133U3W",
+                    "jobName": "Urgent 3rd White",
+                    "phone": "800-517-6356",
+                    "form": "Letter",
+                    "stream": "state",
+                    "trackingNumber": "+13102999880",
+                    "trackerName": "Urgent Third State",
+                    "rcQueueName": "Urgent Third State - (800) 517-6356",
+                    "rcExt": "931",
+                    "internalMailerName": "Urgent 3rd White",
+                    "ownershipMatched": true,
+                    "raw": {
+                      "Job Number": "83133U3W",
+                      "Drop Date": "24-Apr",
+                      "Data Date": "April 24, 2026",
+                      "Payments": "",
+                      "Pieces": "419",
+                      "State": "419",
+                      "Federal": "0",
+                      "Form": "Letter",
+                      "Job Name": "Urgent 3rd White",
+                      "Phone": "800-517-6356",
+                      "Cost": "$ 71.23",
+                      "Postage": "$310.06",
+                      "CC Service charge on Postage": "$12.09",
+                      "Total": "$393.38",
+                      "Cpostage": "",
+                      "": ""
+                    },
+                    "syncedAt": "2026-04-24T20:21:54.323Z"
+                  }
+                },
+                "meta": {
+                  "source": "sheet",
+                  "sheetId": "mailer-tag",
+                  "label": "TAG Mailer Spend"
+                }
+              },
+              {
+                "collection": "SpendEntry",
+                "filter": {
+                  "date": "2026-04-24",
+                  "domain": "TAG",
+                  "channel": "mailer",
+                  "sheetId": "mailer-tag",
+                  "jobNumber": "83133AFF"
+                },
+                "update": {
+                  "$set": {
+                    "date": "2026-04-24",
+                    "domain": "TAG",
+                    "channel": "mailer",
+                    "source": "Affordability Federal Snap",
+                    "mailHouseName": "Afford Csnap",
+                    "sheetId": "mailer-tag",
+                    "spend": 290.11,
+                    "postage": 228.66,
+                    "cost": 52.53,
+                    "pieces": 309,
+                    "jobNumber": "83133AFF",
+                    "jobName": "Afford Csnap",
+                    "phone": "800-717-8323",
+                    "form": "C Snap",
+                    "stream": "federal",
+                    "trackingNumber": "+13108538938",
+                    "trackerName": "Affordability Federal",
+                    "rcQueueName": "Affordability Federal",
+                    "rcExt": "928",
+                    "internalMailerName": "Affordability Federal Snap",
+                    "ownershipMatched": true,
+                    "raw": {
+                      "Job Number": "83133AFF",
+                      "Drop Date": "24-Apr",
+                      "Data Date": "April 24, 2026",
+                      "Payments": "",
+                      "Pieces": "309",
+                      "State": "0",
+                      "Federal": "309",
+                      "Form": "C Snap",
+                      "Job Name": "Afford Csnap",
+                      "Phone": "800-717-8323",
+                      "Cost": "$ 52.53",
+                      "Postage": "$228.66",
+                      "CC Service charge on Postage": "$8.92",
+                      "Total": "$290.11",
+                      "Cpostage": "",
+                      "": ""
+                    },
+                    "syncedAt": "2026-04-24T20:21:54.323Z"
+                  }
+                },
+                "meta": {
+                  "source": "sheet",
+                  "sheetId": "mailer-tag",
+                  "label": "TAG Mailer Spend"
+                }
+              },
+              {
+                "collection": "SpendEntry",
+                "filter": {
+                  "date": "2026-04-24",
+                  "domain": "TAG",
+                  "channel": "mailer",
+                  "sheetId": "mailer-tag",
+                  "jobNumber": "83133CIT"
+                },
+                "update": {
+                  "$set": {
+                    "date": "2026-04-24",
+                    "domain": "TAG",
+                    "channel": "mailer",
+                    "source": "Citation State PC",
+                    "mailHouseName": "Citation",
+                    "sheetId": "mailer-tag",
+                    "spend": 317.62,
+                    "postage": 255.29,
+                    "cost": 52.38,
+                    "pieces": 419,
+                    "jobNumber": "83133CIT",
+                    "jobName": "Citation",
+                    "phone": "800-517-0470",
+                    "form": "DBL PC",
+                    "stream": "state",
+                    "trackingNumber": "+13105641554",
+                    "trackerName": "Citation State",
+                    "rcQueueName": "Citation State - (800) 517-0470",
+                    "rcExt": "929",
+                    "internalMailerName": "Citation State PC",
+                    "ownershipMatched": true,
+                    "raw": {
+                      "Job Number": "83133CIT",
+                      "Drop Date": "24-Apr",
+                      "Data Date": "April 24, 2026",
+                      "Payments": "",
+                      "Pieces": "419",
+                      "State": "419",
+                      "Federal": "0",
+                      "Form": "DBL PC",
+                      "Job Name": "Citation",
+                      "Phone": "800-517-0470",
+                      "Cost": "$ 52.38",
+                      "Postage": "$255.29",
+                      "CC Service charge on Postage": "$9.96",
+                      "Total": "$317.62",
+                      "Cpostage": "",
+                      "": ""
+                    },
+                    "syncedAt": "2026-04-24T20:21:54.323Z"
+                  }
+                },
+                "meta": {
+                  "source": "sheet",
+                  "sheetId": "mailer-tag",
+                  "label": "TAG Mailer Spend"
+                }
+              },
+              {
+                "collection": "SpendEntry",
+                "filter": {
+                  "date": "2026-04-24",
+                  "domain": "TAG",
+                  "channel": "mailer",
+                  "sheetId": "mailer-tag",
+                  "jobNumber": "83133F3rdP"
+                },
+                "update": {
+                  "$set": {
+                    "date": "2026-04-24",
+                    "domain": "TAG",
+                    "channel": "mailer",
+                    "source": "Urgent Third Pink Federal",
+                    "mailHouseName": "3rd Notice Pink",
+                    "sheetId": "mailer-tag",
+                    "spend": 266.67,
+                    "postage": 206.1,
+                    "cost": 52.53,
+                    "pieces": 309,
+                    "jobNumber": "83133F3rdP",
+                    "jobName": "3rd Notice Pink",
+                    "phone": "800-643-5890",
+                    "form": "Letter",
+                    "stream": "federal",
+                    "trackingNumber": "+13103624563",
+                    "trackerName": "8006435890 Federal Urgent 3rd 3 Day Pink",
+                    "rcQueueName": "8006435890 Federal Urgent 3rd 3 Day Pink",
+                    "rcExt": "951",
+                    "internalMailerName": "Urgent Third Pink Federal",
+                    "ownershipMatched": true,
+                    "raw": {
+                      "Job Number": "83133F3rdP",
+                      "Drop Date": "28-Apr",
+                      "Data Date": "April 24, 2026",
+                      "Payments": "",
+                      "Pieces": "309",
+                      "State": "0",
+                      "Federal": "309",
+                      "Form": "Letter",
+                      "Job Name": "3rd Notice Pink",
+                      "Phone": "800-643-5890",
+                      "Cost": "$ 52.53",
+                      "Postage": "$206.10",
+                      "CC Service charge on Postage": "$8.04",
+                      "Total": "$266.67",
+                      "Cpostage": "485.58",
+                      "": ""
+                    },
+                    "syncedAt": "2026-04-24T20:21:54.323Z"
+                  }
+                },
+                "meta": {
+                  "source": "sheet",
+                  "sheetId": "mailer-tag",
+                  "label": "TAG Mailer Spend"
+                }
+              },
+              {
+                "collection": "SpendEntry",
+                "filter": {
+                  "date": "2026-04-24",
+                  "domain": "TAG",
+                  "channel": "mailer",
+                  "sheetId": "mailer-tag",
+                  "jobNumber": "83133S3rdP"
+                },
+                "update": {
+                  "$set": {
+                    "date": "2026-04-24",
+                    "domain": "TAG",
+                    "channel": "mailer",
+                    "source": "Urgent Third Pink State",
+                    "mailHouseName": "3rd Notice Pink",
+                    "sheetId": "mailer-tag",
+                    "spend": 361.6,
+                    "postage": 279.48,
+                    "cost": 71.23,
+                    "pieces": 419,
+                    "jobNumber": "83133S3rdP",
+                    "jobName": "3rd Notice Pink",
+                    "phone": "800-921-9263",
+                    "form": "Letter",
+                    "stream": "state",
+                    "trackingNumber": "+18188737443",
+                    "trackerName": "3rd Day (Pink) Urgent Third State 800-921-9263",
+                    "rcQueueName": "3rd Day (Pink) Urgent Third State 800-921-9263",
+                    "rcExt": "938",
+                    "internalMailerName": "Urgent Third Pink State",
+                    "ownershipMatched": true,
+                    "raw": {
+                      "Job Number": "83133S3rdP",
+                      "Drop Date": "28-Apr",
+                      "Data Date": "April 24, 2026",
+                      "Payments": "",
+                      "Pieces": "419",
+                      "State": "419",
+                      "Federal": "0",
+                      "Form": "Letter",
+                      "Job Name": "3rd Notice Pink",
+                      "Phone": "800-921-9263",
+                      "Cost": "$ 71.23",
+                      "Postage": "$279.48",
+                      "CC Service charge on Postage": "$10.90",
+                      "Total": "$361.60",
+                      "Cpostage": "",
+                      "": ""
+                    },
+                    "syncedAt": "2026-04-24T20:21:54.323Z"
+                  }
+                },
+                "meta": {
+                  "source": "sheet",
+                  "sheetId": "mailer-tag",
+                  "label": "TAG Mailer Spend"
+                }
+              }
+            ],
+            "summary": {
+              "rows": 5,
+              "totalSpend": 1629.38,
+              "byChannel": {
+                "mailer": {
+                  "rows": 5,
+                  "spend": 1629.38
+                }
+              }
+            }
+          },
+          {
+            "id": "meta-tag",
+            "label": "TAG Meta Spend",
+            "domain": "TAG",
+            "channel": "paid-social",
+            "parsedRowCount": 32,
+            "selectedRowCount": 0,
+            "operations": [],
+            "summary": {
+              "rows": 0,
+              "totalSpend": 0,
+              "byChannel": {}
+            }
+          }
+        ],
+        "derived": {
+          "ld": [
+            {
+              "collection": "SpendEntry",
+              "filter": {
+                "date": "2026-04-24",
+                "domain": "TAG",
+                "channel": "affiliate",
+                "sheetId": "derived-ld-hourly",
+                "source": "AffiliateOne"
+              },
+              "update": {
+                "$set": {
+                  "date": "2026-04-24",
+                  "domain": "TAG",
+                  "channel": "affiliate",
+                  "source": "AffiliateOne",
+                  "sheetId": "derived-ld-hourly",
+                  "sourceCanonicalId": null,
+                  "spend": 3,
+                  "cost": 3,
+                  "leadsReported": 1,
+                  "leadsAccepted": 1,
+                  "costPerLead": 3,
+                  "syncedAt": "2026-04-24T20:21:54.323Z",
+                  "raw": {
+                    "derivedFrom": "lead-cadence-active",
+                    "count": 1,
+                    "intakeSource": "affiliate",
+                    "intakeRoute": "affiliate-lead",
+                    "sampleCaseIds": [
+                      880102
+                    ]
+                  }
+                }
+              },
+              "meta": {
+                "source": "derived",
+                "derivedKind": "ld",
+                "matchedBy": null,
+                "inputSource": "AffiliateOne",
+                "inputChannel": "affiliate"
+              }
+            },
+            {
+              "collection": "SpendEntry",
+              "filter": {
+                "date": "2026-04-24",
+                "domain": "TAG",
+                "channel": "lead-distribution",
+                "sheetId": "derived-ld-hourly",
+                "source": "LD Posting Codex Test"
+              },
+              "update": {
+                "$set": {
+                  "date": "2026-04-24",
+                  "domain": "TAG",
+                  "channel": "lead-distribution",
+                  "source": "LD Posting Codex Test",
+                  "sheetId": "derived-ld-hourly",
+                  "sourceCanonicalId": null,
+                  "spend": 3,
+                  "cost": 3,
+                  "leadsReported": 1,
+                  "leadsAccepted": 1,
+                  "costPerLead": 3,
+                  "syncedAt": "2026-04-24T20:21:54.323Z",
+                  "raw": {
+                    "derivedFrom": "lead-cadence-active",
+                    "count": 1,
+                    "intakeSource": "ld-posting",
+                    "intakeRoute": "ld-posting-lead",
+                    "sampleCaseIds": [
+                      880001
+                    ]
+                  }
+                }
+              },
+              "meta": {
+                "source": "derived",
+                "derivedKind": "ld",
+                "matchedBy": null,
+                "inputSource": "LD Posting Codex Test",
+                "inputChannel": "lead-distribution"
+              }
+            },
+            {
+              "collection": "SpendEntry",
+              "filter": {
+                "date": "2026-04-24",
+                "domain": "TAG",
+                "channel": "lead-distribution",
+                "sheetId": "derived-ld-hourly",
+                "source": "LD Test Lead"
+              },
+              "update": {
+                "$set": {
+                  "date": "2026-04-24",
+                  "domain": "TAG",
+                  "channel": "lead-distribution",
+                  "source": "LD Test Lead",
+                  "sheetId": "derived-ld-hourly",
+                  "sourceCanonicalId": null,
+                  "spend": 3,
+                  "cost": 3,
+                  "leadsReported": 1,
+                  "leadsAccepted": 1,
+                  "costPerLead": 3,
+                  "syncedAt": "2026-04-24T20:21:54.323Z",
+                  "raw": {
+                    "derivedFrom": "lead-cadence-active",
+                    "count": 1,
+                    "intakeSource": "ld-posting",
+                    "intakeRoute": "ld-posting-lead",
+                    "sampleCaseIds": [
+                      999310
+                    ]
+                  }
+                }
+              },
+              "meta": {
+                "source": "derived",
+                "derivedKind": "ld",
+                "matchedBy": null,
+                "inputSource": "LD Test Lead",
+                "inputChannel": "lead-distribution"
+              }
+            },
+            {
+              "collection": "SpendEntry",
+              "filter": {
+                "date": "2026-04-24",
+                "domain": "TAG",
+                "channel": "lead-distribution",
+                "sheetId": "derived-ld-hourly",
+                "source": "LexisVendor"
+              },
+              "update": {
+                "$set": {
+                  "date": "2026-04-24",
+                  "domain": "TAG",
+                  "channel": "lead-distribution",
+                  "source": "LexisVendor",
+                  "sheetId": "derived-ld-hourly",
+                  "sourceCanonicalId": null,
+                  "spend": 3,
+                  "cost": 3,
+                  "leadsReported": 1,
+                  "leadsAccepted": 1,
+                  "costPerLead": 3,
+                  "syncedAt": "2026-04-24T20:21:54.323Z",
+                  "raw": {
+                    "derivedFrom": "lead-cadence-active",
+                    "count": 1,
+                    "intakeSource": "ld",
+                    "intakeRoute": "ld-lead",
+                    "sampleCaseIds": [
+                      880101
+                    ]
+                  }
+                }
+              },
+              "meta": {
+                "source": "derived",
+                "derivedKind": "ld",
+                "matchedBy": null,
+                "inputSource": "LexisVendor",
+                "inputChannel": "lead-distribution"
+              }
+            }
+          ],
+          "bcd": []
+        },
+        "operations": [
+          {
+            "collection": "SpendEntry",
+            "filter": {
+              "date": "2026-04-24",
+              "domain": "TAG",
+              "channel": "mailer",
+              "sheetId": "mailer-tag",
+              "jobNumber": "83133U3W"
+            },
+            "update": {
+              "$set": {
+                "date": "2026-04-24",
+                "domain": "TAG",
+                "channel": "mailer",
+                "source": "Urgent 3rd White",
+                "mailHouseName": "Urgent 3rd White",
+                "sheetId": "mailer-tag",
+                "spend": 393.38,
+                "postage": 310.06,
+                "cost": 71.23,
+                "pieces": 419,
+                "jobNumber": "83133U3W",
+                "jobName": "Urgent 3rd White",
+                "phone": "800-517-6356",
+                "form": "Letter",
+                "stream": "state",
+                "trackingNumber": "+13102999880",
+                "trackerName": "Urgent Third State",
+                "rcQueueName": "Urgent Third State - (800) 517-6356",
+                "rcExt": "931",
+                "internalMailerName": "Urgent 3rd White",
+                "ownershipMatched": true,
+                "raw": {
+                  "Job Number": "83133U3W",
+                  "Drop Date": "24-Apr",
+                  "Data Date": "April 24, 2026",
+                  "Payments": "",
+                  "Pieces": "419",
+                  "State": "419",
+                  "Federal": "0",
+                  "Form": "Letter",
+                  "Job Name": "Urgent 3rd White",
+                  "Phone": "800-517-6356",
+                  "Cost": "$ 71.23",
+                  "Postage": "$310.06",
+                  "CC Service charge on Postage": "$12.09",
+                  "Total": "$393.38",
+                  "Cpostage": "",
+                  "": ""
+                },
+                "syncedAt": "2026-04-24T20:21:54.323Z"
+              }
+            },
+            "meta": {
+              "source": "sheet",
+              "sheetId": "mailer-tag",
+              "label": "TAG Mailer Spend"
+            }
+          },
+          {
+            "collection": "SpendEntry",
+            "filter": {
+              "date": "2026-04-24",
+              "domain": "TAG",
+              "channel": "mailer",
+              "sheetId": "mailer-tag",
+              "jobNumber": "83133AFF"
+            },
+            "update": {
+              "$set": {
+                "date": "2026-04-24",
+                "domain": "TAG",
+                "channel": "mailer",
+                "source": "Affordability Federal Snap",
+                "mailHouseName": "Afford Csnap",
+                "sheetId": "mailer-tag",
+                "spend": 290.11,
+                "postage": 228.66,
+                "cost": 52.53,
+                "pieces": 309,
+                "jobNumber": "83133AFF",
+                "jobName": "Afford Csnap",
+                "phone": "800-717-8323",
+                "form": "C Snap",
+                "stream": "federal",
+                "trackingNumber": "+13108538938",
+                "trackerName": "Affordability Federal",
+                "rcQueueName": "Affordability Federal",
+                "rcExt": "928",
+                "internalMailerName": "Affordability Federal Snap",
+                "ownershipMatched": true,
+                "raw": {
+                  "Job Number": "83133AFF",
+                  "Drop Date": "24-Apr",
+                  "Data Date": "April 24, 2026",
+                  "Payments": "",
+                  "Pieces": "309",
+                  "State": "0",
+                  "Federal": "309",
+                  "Form": "C Snap",
+                  "Job Name": "Afford Csnap",
+                  "Phone": "800-717-8323",
+                  "Cost": "$ 52.53",
+                  "Postage": "$228.66",
+                  "CC Service charge on Postage": "$8.92",
+                  "Total": "$290.11",
+                  "Cpostage": "",
+                  "": ""
+                },
+                "syncedAt": "2026-04-24T20:21:54.323Z"
+              }
+            },
+            "meta": {
+              "source": "sheet",
+              "sheetId": "mailer-tag",
+              "label": "TAG Mailer Spend"
+            }
+          },
+          {
+            "collection": "SpendEntry",
+            "filter": {
+              "date": "2026-04-24",
+              "domain": "TAG",
+              "channel": "mailer",
+              "sheetId": "mailer-tag",
+              "jobNumber": "83133CIT"
+            },
+            "update": {
+              "$set": {
+                "date": "2026-04-24",
+                "domain": "TAG",
+                "channel": "mailer",
+                "source": "Citation State PC",
+                "mailHouseName": "Citation",
+                "sheetId": "mailer-tag",
+                "spend": 317.62,
+                "postage": 255.29,
+                "cost": 52.38,
+                "pieces": 419,
+                "jobNumber": "83133CIT",
+                "jobName": "Citation",
+                "phone": "800-517-0470",
+                "form": "DBL PC",
+                "stream": "state",
+                "trackingNumber": "+13105641554",
+                "trackerName": "Citation State",
+                "rcQueueName": "Citation State - (800) 517-0470",
+                "rcExt": "929",
+                "internalMailerName": "Citation State PC",
+                "ownershipMatched": true,
+                "raw": {
+                  "Job Number": "83133CIT",
+                  "Drop Date": "24-Apr",
+                  "Data Date": "April 24, 2026",
+                  "Payments": "",
+                  "Pieces": "419",
+                  "State": "419",
+                  "Federal": "0",
+                  "Form": "DBL PC",
+                  "Job Name": "Citation",
+                  "Phone": "800-517-0470",
+                  "Cost": "$ 52.38",
+                  "Postage": "$255.29",
+                  "CC Service charge on Postage": "$9.96",
+                  "Total": "$317.62",
+                  "Cpostage": "",
+                  "": ""
+                },
+                "syncedAt": "2026-04-24T20:21:54.323Z"
+              }
+            },
+            "meta": {
+              "source": "sheet",
+              "sheetId": "mailer-tag",
+              "label": "TAG Mailer Spend"
+            }
+          },
+          {
+            "collection": "SpendEntry",
+            "filter": {
+              "date": "2026-04-24",
+              "domain": "TAG",
+              "channel": "mailer",
+              "sheetId": "mailer-tag",
+              "jobNumber": "83133F3rdP"
+            },
+            "update": {
+              "$set": {
+                "date": "2026-04-24",
+                "domain": "TAG",
+                "channel": "mailer",
+                "source": "Urgent Third Pink Federal",
+                "mailHouseName": "3rd Notice Pink",
+                "sheetId": "mailer-tag",
+                "spend": 266.67,
+                "postage": 206.1,
+                "cost": 52.53,
+                "pieces": 309,
+                "jobNumber": "83133F3rdP",
+                "jobName": "3rd Notice Pink",
+                "phone": "800-643-5890",
+                "form": "Letter",
+                "stream": "federal",
+                "trackingNumber": "+13103624563",
+                "trackerName": "8006435890 Federal Urgent 3rd 3 Day Pink",
+                "rcQueueName": "8006435890 Federal Urgent 3rd 3 Day Pink",
+                "rcExt": "951",
+                "internalMailerName": "Urgent Third Pink Federal",
+                "ownershipMatched": true,
+                "raw": {
+                  "Job Number": "83133F3rdP",
+                  "Drop Date": "28-Apr",
+                  "Data Date": "April 24, 2026",
+                  "Payments": "",
+                  "Pieces": "309",
+                  "State": "0",
+                  "Federal": "309",
+                  "Form": "Letter",
+                  "Job Name": "3rd Notice Pink",
+                  "Phone": "800-643-5890",
+                  "Cost": "$ 52.53",
+                  "Postage": "$206.10",
+                  "CC Service charge on Postage": "$8.04",
+                  "Total": "$266.67",
+                  "Cpostage": "485.58",
+                  "": ""
+                },
+                "syncedAt": "2026-04-24T20:21:54.323Z"
+              }
+            },
+            "meta": {
+              "source": "sheet",
+              "sheetId": "mailer-tag",
+              "label": "TAG Mailer Spend"
+            }
+          },
+          {
+            "collection": "SpendEntry",
+            "filter": {
+              "date": "2026-04-24",
+              "domain": "TAG",
+              "channel": "mailer",
+              "sheetId": "mailer-tag",
+              "jobNumber": "83133S3rdP"
+            },
+            "update": {
+              "$set": {
+                "date": "2026-04-24",
+                "domain": "TAG",
+                "channel": "mailer",
+                "source": "Urgent Third Pink State",
+                "mailHouseName": "3rd Notice Pink",
+                "sheetId": "mailer-tag",
+                "spend": 361.6,
+                "postage": 279.48,
+                "cost": 71.23,
+                "pieces": 419,
+                "jobNumber": "83133S3rdP",
+                "jobName": "3rd Notice Pink",
+                "phone": "800-921-9263",
+                "form": "Letter",
+                "stream": "state",
+                "trackingNumber": "+18188737443",
+                "trackerName": "3rd Day (Pink) Urgent Third State 800-921-9263",
+                "rcQueueName": "3rd Day (Pink) Urgent Third State 800-921-9263",
+                "rcExt": "938",
+                "internalMailerName": "Urgent Third Pink State",
+                "ownershipMatched": true,
+                "raw": {
+                  "Job Number": "83133S3rdP",
+                  "Drop Date": "28-Apr",
+                  "Data Date": "April 24, 2026",
+                  "Payments": "",
+                  "Pieces": "419",
+                  "State": "419",
+                  "Federal": "0",
+                  "Form": "Letter",
+                  "Job Name": "3rd Notice Pink",
+                  "Phone": "800-921-9263",
+                  "Cost": "$ 71.23",
+                  "Postage": "$279.48",
+                  "CC Service charge on Postage": "$10.90",
+                  "Total": "$361.60",
+                  "Cpostage": "",
+                  "": ""
+                },
+                "syncedAt": "2026-04-24T20:21:54.323Z"
+              }
+            },
+            "meta": {
+              "source": "sheet",
+              "sheetId": "mailer-tag",
+              "label": "TAG Mailer Spend"
+            }
+          },
+          {
+            "collection": "SpendEntry",
+            "filter": {
+              "date": "2026-04-24",
+              "domain": "TAG",
+              "channel": "affiliate",
+              "sheetId": "derived-ld-hourly",
+              "source": "AffiliateOne"
+            },
+            "update": {
+              "$set": {
+                "date": "2026-04-24",
+                "domain": "TAG",
+                "channel": "affiliate",
+                "source": "AffiliateOne",
+                "sheetId": "derived-ld-hourly",
+                "sourceCanonicalId": null,
+                "spend": 3,
+                "cost": 3,
+                "leadsReported": 1,
+                "leadsAccepted": 1,
+                "costPerLead": 3,
+                "syncedAt": "2026-04-24T20:21:54.323Z",
+                "raw": {
+                  "derivedFrom": "lead-cadence-active",
+                  "count": 1,
+                  "intakeSource": "affiliate",
+                  "intakeRoute": "affiliate-lead",
+                  "sampleCaseIds": [
+                    880102
+                  ]
+                }
+              }
+            },
+            "meta": {
+              "source": "derived",
+              "derivedKind": "ld",
+              "matchedBy": null,
+              "inputSource": "AffiliateOne",
+              "inputChannel": "affiliate"
+            }
+          },
+          {
+            "collection": "SpendEntry",
+            "filter": {
+              "date": "2026-04-24",
+              "domain": "TAG",
+              "channel": "lead-distribution",
+              "sheetId": "derived-ld-hourly",
+              "source": "LD Posting Codex Test"
+            },
+            "update": {
+              "$set": {
+                "date": "2026-04-24",
+                "domain": "TAG",
+                "channel": "lead-distribution",
+                "source": "LD Posting Codex Test",
+                "sheetId": "derived-ld-hourly",
+                "sourceCanonicalId": null,
+                "spend": 3,
+                "cost": 3,
+                "leadsReported": 1,
+                "leadsAccepted": 1,
+                "costPerLead": 3,
+                "syncedAt": "2026-04-24T20:21:54.323Z",
+                "raw": {
+                  "derivedFrom": "lead-cadence-active",
+                  "count": 1,
+                  "intakeSource": "ld-posting",
+                  "intakeRoute": "ld-posting-lead",
+                  "sampleCaseIds": [
+                    880001
+                  ]
+                }
+              }
+            },
+            "meta": {
+              "source": "derived",
+              "derivedKind": "ld",
+              "matchedBy": null,
+              "inputSource": "LD Posting Codex Test",
+              "inputChannel": "lead-distribution"
+            }
+          },
+          {
+            "collection": "SpendEntry",
+            "filter": {
+              "date": "2026-04-24",
+              "domain": "TAG",
+              "channel": "lead-distribution",
+              "sheetId": "derived-ld-hourly",
+              "source": "LD Test Lead"
+            },
+            "update": {
+              "$set": {
+                "date": "2026-04-24",
+                "domain": "TAG",
+                "channel": "lead-distribution",
+                "source": "LD Test Lead",
+                "sheetId": "derived-ld-hourly",
+                "sourceCanonicalId": null,
+                "spend": 3,
+                "cost": 3,
+                "leadsReported": 1,
+                "leadsAccepted": 1,
+                "costPerLead": 3,
+                "syncedAt": "2026-04-24T20:21:54.323Z",
+                "raw": {
+                  "derivedFrom": "lead-cadence-active",
+                  "count": 1,
+                  "intakeSource": "ld-posting",
+                  "intakeRoute": "ld-posting-lead",
+                  "sampleCaseIds": [
+                    999310
+                  ]
+                }
+              }
+            },
+            "meta": {
+              "source": "derived",
+              "derivedKind": "ld",
+              "matchedBy": null,
+              "inputSource": "LD Test Lead",
+              "inputChannel": "lead-distribution"
+            }
+          },
+          {
+            "collection": "SpendEntry",
+            "filter": {
+              "date": "2026-04-24",
+              "domain": "TAG",
+              "channel": "lead-distribution",
+              "sheetId": "derived-ld-hourly",
+              "source": "LexisVendor"
+            },
+            "update": {
+              "$set": {
+                "date": "2026-04-24",
+                "domain": "TAG",
+                "channel": "lead-distribution",
+                "source": "LexisVendor",
+                "sheetId": "derived-ld-hourly",
+                "sourceCanonicalId": null,
+                "spend": 3,
+                "cost": 3,
+                "leadsReported": 1,
+                "leadsAccepted": 1,
+                "costPerLead": 3,
+                "syncedAt": "2026-04-24T20:21:54.323Z",
+                "raw": {
+                  "derivedFrom": "lead-cadence-active",
+                  "count": 1,
+                  "intakeSource": "ld",
+                  "intakeRoute": "ld-lead",
+                  "sampleCaseIds": [
+                    880101
+                  ]
+                }
+              }
+            },
+            "meta": {
+              "source": "derived",
+              "derivedKind": "ld",
+              "matchedBy": null,
+              "inputSource": "LexisVendor",
+              "inputChannel": "lead-distribution"
+            }
+          }
+        ],
+        "summary": {
+          "rows": 9,
+          "totalSpend": 1641.38,
+          "byChannel": {
+            "mailer": {
+              "rows": 5,
+              "spend": 1629.38
+            },
+            "affiliate": {
+              "rows": 1,
+              "spend": 3
+            },
+            "lead-distribution": {
+              "rows": 3,
+              "spend": 9
+            }
+          }
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,335 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Pacing Queue Test Console</title>
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif; margin: 0; padding: 16px; background: #0d1117; color: #c9d1d9; }
+  h1 { font-size: 18px; margin: 0 0 12px; }
+  h2 { font-size: 13px; margin: 16px 0 6px; color: #8b949e; text-transform: uppercase; letter-spacing: 0.05em; }
+  .row { display: flex; gap: 12px; margin-bottom: 8px; align-items: center; flex-wrap: wrap; }
+  input[type="text"], input[type="number"], input[type="datetime-local"] {
+    background: #161b22; color: #c9d1d9; border: 1px solid #30363d; padding: 6px 8px; border-radius: 6px;
+    font-family: inherit; font-size: 13px;
+  }
+  button {
+    background: #21262d; color: #c9d1d9; border: 1px solid #30363d; padding: 6px 12px; border-radius: 6px;
+    cursor: pointer; font-family: inherit; font-size: 13px;
+  }
+  button:hover { background: #30363d; }
+  button.primary { background: #238636; border-color: #2ea043; color: white; }
+  button.primary:hover { background: #2ea043; }
+  button.danger { background: #8b1a1a; border-color: #b62324; color: white; }
+  button.danger:hover { background: #b62324; }
+  button.warn { background: #9e6a03; border-color: #bb8009; color: white; }
+  button.warn:hover { background: #bb8009; }
+  button.info { background: #1f6feb; border-color: #388bfd; color: white; }
+  button.info:hover { background: #388bfd; }
+  .panel { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 12px; margin-bottom: 12px; }
+  .item {
+    background: #0d1117; border: 1px solid #30363d; border-radius: 6px; padding: 8px 10px; margin-bottom: 6px;
+    display: flex; justify-content: space-between; align-items: center;
+  }
+  .item.fresh { border-color: #d29922; }
+  .item.dialing { border-color: #1f6feb; }
+  .badge { display: inline-block; padding: 2px 6px; border-radius: 3px; font-size: 11px; font-weight: 600; margin-right: 6px; }
+  .badge.fresh { background: #d29922; color: black; }
+  .badge.day2_10 { background: #1f6feb; color: white; }
+  .badge.aged { background: #6e7681; color: white; }
+  .badge.dialing { background: #58a6ff; color: black; }
+  .badge.connected { background: #2ea043; color: white; }
+  .badge.idle { background: #6e7681; color: white; }
+  .badge.unavailable { background: #f85149; color: white; }
+  pre { background: #0d1117; border: 1px solid #30363d; border-radius: 6px; padding: 8px; overflow: auto; font-size: 11px; max-height: 240px; }
+  .mono { font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace; font-size: 12px; }
+  .small { font-size: 11px; color: #8b949e; }
+  .err { color: #f85149; }
+  .ok { color: #2ea043; }
+  .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+</style>
+</head>
+<body>
+
+<h1>Pacing Queue Test Console</h1>
+<div class="row small">
+  Provide an internal-service secret (header <span class="mono">x-service-secret</span>) and an agent extension ID, then click Refresh to load state.
+</div>
+
+<div class="panel">
+  <div class="row">
+    <label>x-service-secret:</label>
+    <input id="secret" type="text" size="40" placeholder="(internal_service_secret)">
+    <label>agentId (extensionId):</label>
+    <input id="agentId" type="text" size="14" placeholder="63730035004" value="63730035004">
+    <button class="primary" onclick="refresh()">Refresh</button>
+    <button onclick="autoRefresh.toggle()">Auto-refresh: <span id="auto">OFF</span></button>
+  </div>
+</div>
+
+<div class="grid-2">
+  <div>
+    <h2>Agent</h2>
+    <div class="panel" id="agent-panel">(load to populate)</div>
+
+    <h2>Active Call</h2>
+    <div class="panel" id="active-call-panel">(none)</div>
+
+    <h2>Disposition Buttons</h2>
+    <div class="panel">
+      <div class="row" id="dispo-row">
+        <span class="small">(load disposition map first)</span>
+      </div>
+      <div class="row small">
+        Callback time (only used for "Callback"):
+        <input id="callbackAt" type="datetime-local">
+        Notes: <input id="dispoNotes" type="text" size="30">
+      </div>
+    </div>
+  </div>
+
+  <div>
+    <h2>Slice (non-fresh, max 10)</h2>
+    <div class="panel" id="slice-panel">(none)</div>
+
+    <h2>Fresh assignments (timer-bound)</h2>
+    <div class="panel" id="fresh-panel">(none)</div>
+  </div>
+</div>
+
+<h2>Test seeding</h2>
+<div class="panel">
+  <div class="row">
+    <label>Phone (will be dialed!):</label>
+    <input id="seedPhone" type="text" size="16" value="+13106665997">
+    <label>Count:</label>
+    <input id="seedCount" type="number" min="1" max="50" value="3">
+    <label>Bucket:</label>
+    <select id="seedBucket">
+      <option value="day2_10">day2_10</option>
+      <option value="aged">aged</option>
+      <option value="just_came_in">just_came_in (fresh)</option>
+      <option value="second_contact">second_contact (fresh)</option>
+      <option value="third_contact">third_contact (fresh)</option>
+    </select>
+    <button class="info" onclick="seedTestItems()">Seed Items</button>
+  </div>
+  <div class="row">
+    <button class="info" onclick="runHourly()">Run Hourly Orchestrator (issue slice)</button>
+    <button class="info" onclick="refillPool()">Refill Pool</button>
+  </div>
+</div>
+
+<h2>Output</h2>
+<pre id="log"></pre>
+
+<script>
+let dispositions = [];
+const $ = (id) => document.getElementById(id);
+const logEl = $("log");
+const log = (label, data) => {
+  const ts = new Date().toLocaleTimeString();
+  logEl.textContent = `[${ts}] ${label}\n${JSON.stringify(data, null, 2)}\n\n` + logEl.textContent;
+};
+
+async function api(method, path, body = null) {
+  const headers = { "x-service-secret": $("secret").value };
+  if (body) headers["Content-Type"] = "application/json";
+  try {
+    const r = await fetch(path, { method, headers, body: body ? JSON.stringify(body) : null });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      log(`ERR ${method} ${path} → ${r.status}`, j);
+      return { ok: false, status: r.status, body: j };
+    }
+    return j;
+  } catch (e) {
+    log(`EXCEPTION ${method} ${path}`, { error: e.message });
+    return { ok: false, error: e.message };
+  }
+}
+
+async function loadDispositions() {
+  const r = await api("GET", "/api/queue/dispositions");
+  if (r.ok) {
+    dispositions = r.dispositions || [];
+    renderDispoButtons();
+  }
+}
+
+function renderDispoButtons() {
+  const row = $("dispo-row");
+  row.innerHTML = "";
+  for (const d of dispositions) {
+    const btn = document.createElement("button");
+    btn.textContent = d.label;
+    btn.className = d.isTerminal ? (d.key === "deal" ? "primary" : (d.key === "dnc" ? "danger" : "warn")) : "info";
+    btn.onclick = () => disposeActive(d.key);
+    row.appendChild(btn);
+  }
+}
+
+let activeQueueItemId = null;
+
+async function refresh() {
+  const agentId = $("agentId").value.trim();
+  if (!agentId) return;
+  const r = await api("GET", `/api/agents/${encodeURIComponent(agentId)}/queue`);
+  if (!r.ok) return;
+  log("agent queue", r);
+  renderAgent(r.agent);
+  renderActiveCall(r.activeCall);
+  renderSlice(r.sliceItems || []);
+  renderFresh(r.freshAssigned || []);
+}
+
+function renderAgent(agent) {
+  if (!agent) { $("agent-panel").innerHTML = "(none)"; return; }
+  const stateBadge = `<span class="badge ${agent.activityState}">${agent.activityState}</span>`;
+  const cxStatus = agent.cxRouting?.desiredAvailability === "available" ? "✓ available" : "✗ unavailable";
+  $("agent-panel").innerHTML = `
+    <div><strong>${agent.name}</strong> &middot; ext ${agent.extensionId}</div>
+    <div>${stateBadge} CX: ${cxStatus} (${agent.cxRouting?.reason || "?"})</div>
+    <div class="small">last activity: ${agent.lastActivityAt || "never"}</div>
+    <div class="row" style="margin-top:8px;">
+      <button class="warn" onclick="setUnavailable()">Mark Unavailable</button>
+      <button class="primary" onclick="setAvailable()">Mark Available</button>
+    </div>
+  `;
+}
+
+function renderActiveCall(call) {
+  if (!call) {
+    $("active-call-panel").innerHTML = "<span class='small'>No active call</span>";
+    activeQueueItemId = null;
+    return;
+  }
+  activeQueueItemId = call.queueItemId;
+  $("active-call-panel").innerHTML = `
+    <div><span class="badge ${call.state}">${call.state}</span> ${call.direction} call</div>
+    <div class="mono small">to ${call.phoneNumber} &middot; rcxUii: ${call.rcxUii || "(pending)"}</div>
+    <div class="mono small">started: ${call.startedAt} &middot; connected: ${call.connectedAt || "—"}</div>
+    <div class="small">queueItemId: ${call.queueItemId || "(inbound)"} &middot; leadId: ${call.leadId || "?"}</div>
+  `;
+}
+
+function renderSlice(items) {
+  if (!items.length) { $("slice-panel").innerHTML = "<span class='small'>No slice issued (or empty)</span>"; return; }
+  $("slice-panel").innerHTML = items.map((item) => `
+    <div class="item ${item.state === 'dialing' ? 'dialing' : ''}">
+      <div>
+        <span class="badge ${item.ageBucket}">${item.ageBucket}</span>
+        <strong class="mono">${item.phoneNumber}</strong>
+        <span class="small">leadId: ${item.leadId} &middot; ${item.state}</span>
+      </div>
+      <div>
+        <button class="primary" ${["dialing","completed"].includes(item.state) ? "disabled" : ""}
+          onclick="dialItem('${item._id}')">Dial</button>
+      </div>
+    </div>
+  `).join("");
+}
+
+function renderFresh(items) {
+  if (!items.length) { $("fresh-panel").innerHTML = "<span class='small'>None</span>"; return; }
+  $("fresh-panel").innerHTML = items.map((item) => {
+    const expiresIn = item.expiresAt ? Math.max(0, Math.floor((new Date(item.expiresAt) - Date.now()) / 1000)) : "?";
+    return `
+      <div class="item fresh">
+        <div>
+          <span class="badge fresh">${item.ageBucket}</span>
+          <strong class="mono">${item.phoneNumber}</strong>
+          <span class="small">expires in ${expiresIn}s &middot; ${item.state}</span>
+        </div>
+        <div>
+          <button class="warn" onclick="dialItem('${item._id}')">Dial Now</button>
+        </div>
+      </div>
+    `;
+  }).join("");
+}
+
+async function dialItem(itemId) {
+  const agentId = $("agentId").value.trim();
+  const r = await api("POST", `/api/queue/${itemId}/dial`, { agentId });
+  log(`dial ${itemId}`, r);
+  if (r.ok && r.logicsUrl) {
+    window.open(r.logicsUrl, "_blank");
+  }
+  setTimeout(refresh, 500);
+}
+
+async function disposeActive(dispositionKey) {
+  if (!activeQueueItemId) {
+    log("dispose", { error: "no active queue item id" });
+    return;
+  }
+  const agentId = $("agentId").value.trim();
+  const payload = {};
+  const callbackAt = $("callbackAt").value;
+  if (callbackAt) payload.callbackAt = new Date(callbackAt).toISOString();
+  const notes = $("dispoNotes").value;
+  if (notes) payload.notes = notes;
+  const r = await api("POST", `/api/queue/${activeQueueItemId}/dispose`, {
+    agentId, dispositionKey, payload,
+  });
+  log(`dispose ${dispositionKey}`, r);
+  setTimeout(refresh, 500);
+}
+
+async function setUnavailable() {
+  const agentId = $("agentId").value.trim();
+  const r = await api("POST", `/api/agents/${encodeURIComponent(agentId)}/unavailable`);
+  log("unavailable", r);
+  setTimeout(refresh, 300);
+}
+
+async function setAvailable() {
+  const agentId = $("agentId").value.trim();
+  const r = await api("POST", `/api/agents/${encodeURIComponent(agentId)}/available`);
+  log("available", r);
+  setTimeout(refresh, 300);
+}
+
+async function seedTestItems() {
+  const phoneNumber = $("seedPhone").value;
+  const count = Number($("seedCount").value);
+  const bucket = $("seedBucket").value;
+  const partition = ["just_came_in", "second_contact", "third_contact"].includes(bucket) ? "fresh" : "non_fresh";
+  const r = await api("POST", "/api/admin/pacing/seed-test-items", {
+    count, phoneNumber, partition, ageBucket: bucket,
+  });
+  log("seed", r);
+  setTimeout(refresh, 500);
+}
+
+async function runHourly() {
+  const r = await api("POST", "/api/admin/pacing/run-hourly");
+  log("run-hourly", r);
+  setTimeout(refresh, 500);
+}
+
+async function refillPool() {
+  const r = await api("POST", "/api/admin/pacing/refill", { force: true });
+  log("refill", r);
+  setTimeout(refresh, 500);
+}
+
+const autoRefresh = {
+  on: false,
+  timer: null,
+  toggle() {
+    this.on = !this.on;
+    $("auto").textContent = this.on ? "ON (3s)" : "OFF";
+    if (this.on) {
+      this.timer = setInterval(refresh, 3000);
+    } else {
+      clearInterval(this.timer);
+    }
+  },
+};
+
+loadDispositions();
+</script>
+
+</body>
+</html>

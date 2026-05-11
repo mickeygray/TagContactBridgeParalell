@@ -1,0 +1,242 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    /* Neutral — warm stone/parchment */
+    --background: 36 20% 97%;
+    --foreground: 24 10% 13%;
+
+    --card: 0 0% 100%;
+    --card-foreground: 24 10% 13%;
+
+    --popover: 0 0% 100%;
+    --popover-foreground: 24 10% 13%;
+
+    --muted: 36 14% 94%;
+    --muted-foreground: 24 6% 44%;
+
+    --border: 30 10% 88%;
+    --input: 30 10% 88%;
+    --ring: 24 82% 52%;
+
+    /* Primary — amber/terracotta, brand-neutral and confident */
+    --primary: 24 82% 52%;
+    --primary-foreground: 36 20% 98%;
+
+    --secondary: 30 14% 91%;
+    --secondary-foreground: 24 12% 18%;
+
+    --accent: 30 14% 91%;
+    --accent-foreground: 24 12% 18%;
+
+    /* Semantic */
+    --destructive: 0 72% 51%;
+    --destructive-foreground: 0 0% 98%;
+
+    --success: 152 56% 38%;
+    --success-foreground: 152 30% 97%;
+
+    --warning: 38 92% 50%;
+    --warning-foreground: 24 10% 13%;
+
+    --radius: 0.75rem;
+  }
+
+  /* Dark mode — ports the original ringBridge palette (deep blue-black
+     canvas, cool off-white text) while preserving the TAG brand orange
+     as primary accent so the two themes feel like the same product in
+     different lighting. Semantic tokens map 1:1 with the light block
+     above — adding a new variable? add it to both. */
+  .dark {
+    /* Very dark blue-black canvas (ringBridge #0a0e14) */
+    --background: 216 29% 6%;
+    --foreground: 213 24% 92%;
+
+    /* Slightly lifted surface for cards/modals (ringBridge #12171f) */
+    --card: 217 26% 10%;
+    --card-foreground: 213 24% 92%;
+
+    --popover: 217 26% 10%;
+    --popover-foreground: 213 24% 92%;
+
+    /* Muted surface for dividers + hover rows (ringBridge #1a2029) */
+    --muted: 216 22% 13%;
+    --muted-foreground: 213 13% 60%;
+
+    /* Hairline borders — subtle against surfaces */
+    --border: 216 23% 17%;
+    --input: 216 23% 17%;
+    --ring: 24 82% 58%;
+
+    /* TAG orange boosted slightly for contrast on dark surfaces */
+    --primary: 24 82% 58%;
+    --primary-foreground: 36 20% 98%;
+
+    --secondary: 216 22% 15%;
+    --secondary-foreground: 213 24% 92%;
+
+    --accent: 216 22% 18%;
+    --accent-foreground: 213 24% 92%;
+
+    /* Semantic — brighter so they sing on dark */
+    --destructive: 0 72% 58%;
+    --destructive-foreground: 0 0% 98%;
+
+    --success: 142 60% 50%;
+    --success-foreground: 152 30% 10%;
+
+    --warning: 38 92% 55%;
+    --warning-foreground: 24 15% 10%;
+  }
+
+  * {
+    border-color: hsl(var(--border));
+  }
+
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    background-color: hsl(var(--background));
+    color: hsl(var(--foreground));
+    font-family:
+      "Inter",
+      ui-sans-serif,
+      system-ui,
+      -apple-system,
+      "Segoe UI",
+      Roboto,
+      sans-serif;
+    font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  /* Scrollbar — subtle, inset */
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background-color: hsl(var(--border));
+    border-radius: 9999px;
+    border: 2px solid transparent;
+    background-clip: padding-box;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background-color: hsl(var(--muted-foreground) / 0.4);
+    background-clip: padding-box;
+    border: 2px solid transparent;
+  }
+
+  /* Selection */
+  ::selection {
+    background-color: hsl(var(--primary) / 0.2);
+    color: hsl(var(--foreground));
+  }
+
+  /* Focus ring baseline — Radix + native */
+  :where(button, a, input, select, textarea, [role="button"]):focus-visible {
+    outline: none;
+    box-shadow:
+      0 0 0 2px hsl(var(--background)),
+      0 0 0 4px hsl(var(--ring) / 0.5);
+    border-radius: calc(var(--radius) - 4px);
+  }
+}
+
+/* CX scramble loader — a thin progress stripe that sweeps across the
+   top of the identity strip while lookup/candidates queries are
+   fetching. Used to indicate "scrambling against the database" to the
+   operator without taking up real layout space. */
+@keyframes cx-scramble {
+  0% {
+    transform: translateX(-110%);
+  }
+  100% {
+    transform: translateX(310%);
+  }
+}
+
+/* Subtle fade-in for elements that swap content during a fresh call
+   scramble — keeps the identity strip from "popping" when the new
+   lookup match arrives. */
+@keyframes cx-fade-in {
+  from {
+    opacity: 0.5;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@layer components {
+  .shell-gradient {
+    background:
+      radial-gradient(
+        1200px 600px at 10% -10%,
+        hsl(24 90% 94% / 0.6),
+        transparent 60%
+      ),
+      radial-gradient(
+        900px 500px at 110% 10%,
+        hsl(210 80% 96% / 0.5),
+        transparent 60%
+      ),
+      hsl(var(--background));
+  }
+
+  /* Dark-mode gradient: swap the warm/cool light spots for deep
+     blue-violet highlights that sit on the near-black canvas. Keeps
+     the same off-center depth as the light mode without blowing out. */
+  .dark .shell-gradient {
+    background:
+      radial-gradient(
+        1200px 600px at 10% -10%,
+        hsl(24 60% 12% / 0.55),
+        transparent 60%
+      ),
+      radial-gradient(
+        900px 500px at 110% 10%,
+        hsl(217 70% 14% / 0.55),
+        transparent 60%
+      ),
+      hsl(var(--background));
+  }
+
+  .surface {
+    background-color: hsl(var(--card));
+    border: 1px solid hsl(var(--border));
+    border-radius: var(--radius);
+    box-shadow:
+      0 1px 2px 0 hsl(24 10% 10% / 0.03),
+      0 1px 3px 0 hsl(24 10% 10% / 0.04);
+  }
+
+  .surface-muted {
+    background-color: hsl(var(--muted));
+    border: 1px solid hsl(var(--border));
+    border-radius: var(--radius);
+  }
+
+  .hairline {
+    border-color: hsl(var(--border));
+  }
+
+  .data-table tbody tr:hover {
+    background-color: hsl(var(--muted) / 0.6);
+  }
+
+  .numeric {
+    font-variant-numeric: tabular-nums;
+    font-feature-settings: "tnum" 1;
+  }
+}

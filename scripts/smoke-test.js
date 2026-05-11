@@ -10,7 +10,6 @@ const targets = [
   path.join(root, "apps", "inbound-gateway", "src", "server.js"),
   path.join(root, "apps", "outbound-gateway", "src", "server.js"),
   path.join(root, "apps", "ringcentral-cx", "src", "server.js"),
-  path.join(root, "apps", "event-worker", "src", "server.js"),
 ];
 
 async function runCheck(file) {

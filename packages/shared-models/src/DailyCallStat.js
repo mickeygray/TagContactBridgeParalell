@@ -18,10 +18,17 @@ const dailyCallStatSchema = new mongoose.Schema(
     firstCallTime: { type: String, default: null },
     lastCallTime: { type: String, default: null },
     syncedAt: { type: Date, default: null },
+    raw: { type: mongoose.Schema.Types.Mixed, default: null },
   },
   { timestamps: true },
 );
 
+// IDENTIFIER SCOPE: `piece` is intentionally cross-company. The CallRail
+// account tracks a single namespace of mail pieces that the platform rolls up
+// across TAG / WYNN / AMITY, so `{date, piece}` is the canonical key.
+//
+// If any company ever gets its own CallRail tenant, this becomes
+// `{ date: 1, domain: 1, piece: 1 }` unique.
 dailyCallStatSchema.index({ date: 1, piece: 1 }, { unique: true });
 dailyCallStatSchema.index({ date: 1, channel: 1 });
 dailyCallStatSchema.index({ piece: 1, date: 1 });

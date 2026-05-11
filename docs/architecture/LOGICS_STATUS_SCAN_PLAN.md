@@ -1,5 +1,8 @@
 # Logics Status Scan Plan
 
+For the narrower nighttime money-capture version of this plan, see
+`docs/architecture/NIGHTLY_LOGICS_MONEY_SWEEP_SPEC.md`.
+
 This document captures the first control-plane implementation plan for the
 daily Logics catch-all scan.
 

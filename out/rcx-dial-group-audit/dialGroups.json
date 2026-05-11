@@ -1,0 +1,12 @@
+[
+  {
+    "permissions": [],
+    "dialGroupId": 963,
+    "dialGroupName": "Parallel Outbound",
+    "dialGroupDesc": "PREVIEW with progressiveEnabled — auto-dials after preview window for agent-on-line progressive",
+    "dialMode": "PREVIEW",
+    "isActive": true,
+    "hciEnabled": "DISABLED",
+    "agentDialGroupMembers": null
+  }
+]

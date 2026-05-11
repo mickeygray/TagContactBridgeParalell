@@ -1,0 +1,836 @@
+[
+  {
+    "caseId": 261517,
+    "phone": "3145003234",
+    "recordCount": 3,
+    "records": [
+      {
+        "id": "AMIDbEz8OtgyDs1A",
+        "sessionId": "2345477739004",
+        "telephonySessionId": "s-a0d16ad25e65dz19dc04293fez585a7e0000",
+        "startTime": "2026-04-24T16:11:22.070Z",
+        "direction": "Outbound",
+        "result": "Call connected",
+        "from": {
+          "name": "Anthony Calloway",
+          "phoneNumber": "+18182064601",
+          "extensionId": "2362616005",
+          "device": {
+            "uri": "https://platform.ringcentral.com/restapi/v1.0/account/2252193005/device/803429485005",
+            "id": "803429485005"
+          }
+        },
+        "to": {
+          "name": "JOHNSON JUSTIN ",
+          "phoneNumber": "+13145003234",
+          "location": "Saint Louis, MO"
+        },
+        "legsResult": {
+          "matched": false,
+          "strategy": "legs",
+          "legIndex": null,
+          "extensionId": null,
+          "sourceCanonicalId": null,
+          "internalName": "unknown",
+          "channel": "unknown"
+        },
+        "legs": [
+          {
+            "index": 0,
+            "telephonySessionId": "s-a0d16ad25e65dz19dc04293fez585a7e0000",
+            "sessionId": null,
+            "direction": "Outbound",
+            "action": "VoIP Call",
+            "result": "Call connected",
+            "from": {
+              "name": "Anthony Calloway",
+              "phoneNumber": "+18182064601",
+              "extensionId": "2362616005",
+              "device": {
+                "uri": "https://platform.ringcentral.com/restapi/v1.0/account/2252193005/device/803429485005",
+                "id": "803429485005"
+              }
+            },
+            "to": {
+              "name": "JOHNSON JUSTIN ",
+              "phoneNumber": "+13145003234",
+              "location": "Saint Louis, MO"
+            },
+            "extension": {
+              "uri": "https://platform.ringcentral.com/restapi/v1.0/account/2252193005/extension/2362616005",
+              "id": 2362616005
+            },
+            "startTime": "2026-04-24T16:11:22.070Z",
+            "duration": 351
+          }
+        ]
+      },
+      {
+        "id": "AMH_oZvt022j_M1A",
+        "sessionId": "2345298678004",
+        "telephonySessionId": "s-a0d16bd265a6fz19dc00c172bz407d320000",
+        "startTime": "2026-04-24T15:11:51.097Z",
+        "direction": "Inbound",
+        "result": "Voicemail",
+        "from": {
+          "name": "JOHNSON JUSTIN ",
+          "phoneNumber": "+13145003234",
+          "location": "Saint Louis, MO"
+        },
+        "to": {
+          "phoneNumber": "+18182064601"
+        },
+        "legsResult": {
+          "matched": false,
+          "strategy": "legs",
+          "legIndex": null,
+          "extensionId": null,
+          "sourceCanonicalId": null,
+          "internalName": "unknown",
+          "channel": "unknown"
+        },
+        "legs": [
+          {
+            "index": 0,
+            "telephonySessionId": "s-a0d16bd265a6fz19dc00c172bz407d320000",
+            "sessionId": null,
+            "direction": "Inbound",
+            "action": "Phone Call",
+            "result": "Voicemail",
+            "from": {
+              "name": "JOHNSON JUSTIN ",
+              "phoneNumber": "+13145003234",
+              "location": "Saint Louis, MO"
+            },
+            "to": {
+              "phoneNumber": "+18182064601"
+            },
+            "extension": null,
+            "startTime": "2026-04-24T15:11:51.097Z",
+            "duration": 83
+          },
+          {
+            "index": 1,
+            "telephonySessionId": "s-a0d16bd265a6fz19dc00c172bz407d320000",
+            "sessionId": null,
+            "direction": "Inbound",
+            "action": "Phone Call",
+            "result": "Voicemail",
+            "from": {
+              "name": "JOHNSON JUSTIN ",
+              "phoneNumber": "+13145003234",
+              "location": "Saint Louis, MO"
+            },
+            "to": {
+              "name": "Anthony Calloway",
+              "phoneNumber": "+18182064601",
+              "extensionId": "2362616005"
+            },
+            "extension": {
+              "uri": "https://platform.ringcentral.com/restapi/v1.0/account/2252193005/extension/2362616005",
+              "id": 2362616005
+            },
+            "startTime": "2026-04-24T15:11:51.113Z",
+            "duration": 83
+          },
+          {
+            "index": 2,
+            "telephonySessionId": "s-a0d16bd265a6fz19dc00c172bz407d320000",
+            "sessionId": null,
+            "direction": "Outbound",
+            "action": "VoIP Call",
+            "result": "No Answer",
+            "from": {
+              "name": "Anthony Calloway",
+              "phoneNumber": "+13145003234",
+              "extensionId": "2362616005"
+            },
+            "to": {
+              "phoneNumber": "+18773622426",
+              "extensionNumber": "209"
+            },
+            "extension": {
+              "uri": "https://platform.ringcentral.com/restapi/v1.0/account/2252193005/extension/2362616005",
+              "id": 2362616005
+            },
+            "startTime": "2026-04-24T15:11:55.141Z",
+            "duration": 30
+          },
+          {
+            "index": 3,
+            "telephonySessionId": "s-a0d16bd265a6fz19dc00c172bz407d320000",
+            "sessionId": null,
+            "direction": "Outbound",
+            "action": "VoIP Call",
+            "result": "IP Phone Offline",
+            "from": {
+              "name": "Anthony Calloway",
+              "phoneNumber": "+13145003234",
+              "extensionId": "2362616005"
+            },
+            "to": {
+              "phoneNumber": "+18773622426",
+              "extensionNumber": "209"
+            },
+            "extension": {
+              "uri": "https://platform.ringcentral.com/restapi/v1.0/account/2252193005/extension/2362616005",
+              "id": 2362616005
+            },
+            "startTime": "2026-04-24T15:11:55.146Z",
+            "duration": null
+          },
+          {
+            "index": 4,
+            "telephonySessionId": "s-a0d16bd265a6fz19dc00c172bz407d320000",
+            "sessionId": null,
+            "direction": "Outbound",
+            "action": "FindMe",
+            "result": "No Answer",
+            "from": {
+              "name": "Anthony Calloway",
+              "phoneNumber": "+13145003234",
+              "extensionId": "2362616005",
+              "device": {
+                "uri": "https://platform.ringcentral.com/restapi/v1.0/account/2252193005/device/803429485005",
+                "id": "803429485005"
+              }
+            },
+            "to": {
+              "name": "Anthony Calloway",
+              "phoneNumber": "+18182064601",
+              "location": "Canoga Park, CA"
+            },
+            "extension": {
+              "uri": "https://platform.ringcentral.com/restapi/v1.0/account/2252193005/extension/2362616005",
+              "id": 2362616005
+            },
+            "startTime": "2026-04-24T15:11:55.157Z",
+            "duration": 20
+          }
+        ]
+      },
+      {
+        "id": "bYHQhhuJA8sXDUA",
+        "sessionId": "1323859462005",
+        "telephonySessionId": "s-a7836433269d8z19d97014d6bz4d367d0000",
+        "startTime": "2026-04-16T15:55:38.234Z",
+        "direction": "Inbound",
+        "result": "Accepted",
+        "from": {
+          "name": "JOHNSON JUSTIN ",
+          "phoneNumber": "+13145003234",
+          "location": "Saint Louis, MO"
+        },
+        "to": {
+          "phoneNumber": "+18182064601"
+        },
+        "legsResult": {
+          "matched": false,
+          "strategy": "legs",
+          "legIndex": null,
+          "extensionId": null,
+          "sourceCanonicalId": null,
+          "internalName": "unknown",
+          "channel": "unknown"
+        },
+        "legs": [
+          {
+            "index": 0,
+            "telephonySessionId": "s-a7836433269d8z19d97014d6bz4d367d0000",
+            "sessionId": null,
+            "direction": "Inbound",
+            "action": "Phone Call",
+            "result": "Accepted",
+            "from": {
+              "name": "JOHNSON JUSTIN ",
+              "phoneNumber": "+13145003234",
+              "location": "Saint Louis, MO"
+            },
+            "to": {
+              "phoneNumber": "+18182064601"
+            },
+            "extension": null,
+            "startTime": "2026-04-16T15:55:38.234Z",
+            "duration": 2397
+          },
+          {
+            "index": 1,
+            "telephonySessionId": "s-a7836433269d8z19d97014d6bz4d367d0000",
+            "sessionId": null,
+            "direction": "Inbound",
+            "action": "Phone Call",
+            "result": "Accepted",
+            "from": {
+              "name": "JOHNSON JUSTIN ",
+              "phoneNumber": "+13145003234",
+              "location": "Saint Louis, MO"
+            },
+            "to": {
+              "name": "Anthony Calloway",
+              "phoneNumber": "+18182064601",
+              "extensionId": "2362616005"
+            },
+            "extension": {
+              "uri": "https://platform.ringcentral.com/restapi/v1.0/account/2252193005/extension/2362616005",
+              "id": 2362616005
+            },
+            "startTime": "2026-04-16T15:55:38.248Z",
+            "duration": 2397
+          },
+          {
+            "index": 2,
+            "telephonySessionId": "s-a7836433269d8z19d97014d6bz4d367d0000",
+            "sessionId": null,
+            "direction": "Outbound",
+            "action": "VoIP Call",
+            "result": "Stopped",
+            "from": {
+              "name": "Anthony Calloway",
+              "phoneNumber": "+13145003234",
+              "extensionId": "2362616005"
+            },
+            "to": {
+              "phoneNumber": "+18773622426",
+              "extensionNumber": "209"
+            },
+            "extension": {
+              "uri": "https://platform.ringcentral.com/restapi/v1.0/account/2252193005/extension/2362616005",
+              "id": 2362616005
+            },
+            "startTime": "2026-04-16T15:55:42.292Z",
+            "duration": 9
+          },
+          {
+            "index": 3,
+            "telephonySessionId": "s-a7836433269d8z19d97014d6bz4d367d0000",
+            "sessionId": null,
+            "direction": "Outbound",
+            "action": "VoIP Call",
+            "result": "IP Phone Offline",
+            "from": {
+              "name": "Anthony Calloway",
+              "phoneNumber": "+13145003234",
+              "extensionId": "2362616005"
+            },
+            "to": {
+              "phoneNumber": "+18773622426",
+              "extensionNumber": "209"
+            },
+            "extension": {
+              "uri": "https://platform.ringcentral.com/restapi/v1.0/account/2252193005/extension/2362616005",
+              "id": 2362616005
+            },
+            "startTime": "2026-04-16T15:55:42.298Z",
+            "duration": null
+          },
+          {
+            "index": 4,
+            "telephonySessionId": "s-a7836433269d8z19d97014d6bz4d367d0000",
+            "sessionId": null,
+            "direction": "Outbound",
+            "action": "FindMe",
+            "result": "Call connected",
+            "from": {
+              "name": "Anthony Calloway",
+              "phoneNumber": "+13145003234",
+              "extensionId": "2362616005",
+              "device": {
+                "uri": "https://platform.ringcentral.com/restapi/v1.0/account/2252193005/device/803429485005",
+                "id": "803429485005"
+              }
+            },
+            "to": {
+              "name": "Anthony Calloway",
+              "phoneNumber": "+18182064601",
+              "location": "Canoga Park, CA"
+            },
+            "extension": {
+              "uri": "https://platform.ringcentral.com/restapi/v1.0/account/2252193005/extension/2362616005",
+              "id": 2362616005
+            },
+            "startTime": "2026-04-16T15:55:42.307Z",
+            "duration": 2381
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "caseId": 315757,
+    "phone": "2487590977",
+    "recordCount": 5,
+    "records": [
+      {
+        "id": "AMDAin_wiDtEVM1A",
+        "sessionId": "2330230066004",
+        "telephonySessionId": "s-a0d16c81e7a26z19d7367372cz8757030000",
+        "startTime": "2026-04-09T18:00:37.507Z",
+        "direction": "Outbound",
+        "result": "Call connected",
+        "from": {
+          "name": "Bruce Allen - TAG",
+          "phoneNumber": "+17473077280",
+          "extensionId": "63555286004",
+          "device": {
+            "uri": "https://platform.ringcentral.com/restapi/v1.0/account/2252193005/device/803276876005",
+            "id": "803276876005"
+          }
+        },
+        "to": {
+          "name": "THOMAS T       ",
+          "phoneNumber": "+12487590977",
+          "location": "Rochester, MI"
+        },
+        "legsResult": {
+          "matched": false,
+          "strategy": "legs",
+          "legIndex": null,
+          "extensionId": null,
+          "sourceCanonicalId": null,
+          "internalName": "unknown",
+          "channel": "unknown"
+        },
+        "legs": [
+          {
+            "index": 0,
+            "telephonySessionId": "s-a0d16c81e7a26z19d7367372cz8757030000",
+            "sessionId": null,
+            "direction": "Outbound",
+            "action": "VoIP Call",
+            "result": "Call connected",
+            "from": {
+              "name": "Bruce Allen - TAG",
+              "phoneNumber": "+17473077280",
+              "extensionId": "63555286004",
+              "device": {
+                "uri": "https://platform.ringcentral.com/restapi/v1.0/account/2252193005/device/803276876005",
+                "id": "803276876005"
+              }
+            },
+            "to": {
+              "name": "THOMAS T       ",
+              "phoneNumber": "+12487590977",
+              "location": "Rochester, MI"
+            },
+            "extension": {
+              "uri": "https://platform.ringcentral.com/restapi/v1.0/account/2252193005/extension/63555286004",
+              "id": 63555286004
+            },
+            "startTime": "2026-04-09T18:00:37.507Z",
+            "duration": 33
+          }
+        ]
+      },
+      {
+        "id": "AMDAfvxMJZMvXM1A",
+        "sessionId": "2330227942004",
+        "telephonySessionId": "s-a0d7aa9233a5dz19d7366e304z891c390000",
+        "startTime": "2026-04-09T18:00:15.963Z",
+        "direction": "Outbound",
+        "result": "Call connected",
+        "from": {
+          "name": "Bruce Allen - TAG",
+          "phoneNumber": "+17473077280",
+          "extensionId": "63555286004",
+          "device": {
+            "uri": "https://platform.ringcentral.com/restapi/v1.0/account/2252193005/device/803276876005",
+            "id": "803276876005"
+          }
+        },
+        "to": {
+          "name": "THOMAS T       ",
+          "phoneNumber": "+12487590977",
+          "location": "Rochester, MI"
+        },
+        "legsResult": {
+          "matched": false,
+          "strategy": "legs",
+          "legIndex": null,
+          "extensionId": null,
+          "sourceCanonicalId": null,
+          "internalName": "unknown",
+          "channel": "unknown"
+        },
+        "legs": [
+          {
+            "index": 0,
+            "telephonySessionId": "s-a0d7aa9233a5dz19d7366e304z891c390000",
+            "sessionId": null,
+            "direction": "Outbound",
+            "action": "VoIP Call",
+            "result": "Call connected",
+            "from": {
+              "name": "Bruce Allen - TAG",
+              "phoneNumber": "+17473077280",
+              "extensionId": "63555286004",
+              "device": {
+                "uri": "https://platform.ringcentral.com/restapi/v1.0/account/2252193005/device/803276876005",
+                "id": "803276876005"
+              }
+            },
+            "to": {
+              "name": "THOMAS T       ",
+              "phoneNumber": "+12487590977",
+              "location": "Rochester, MI"
+            },
+            "extension": {
+              "uri": "https://platform.ringcentral.com/restapi/v1.0/account/2252193005/extension/63555286004",
+              "id": 63555286004
+            },
+            "startTime": "2026-04-09T18:00:15.963Z",
+            "duration": 14
+          }
+        ]
+      },
+      {
+        "id": "AMC-CTG1tkH9PM1A",
+        "sessionId": "2330111766004",
+        "telephonySessionId": "s-a0d16bf22ec09z19d7343ead1z774e500000",
+        "startTime": "2026-04-09T17:22:04.209Z",
+        "direction": "Outbound",
+        "result": "Call connected",
+        "from": {
+          "name": "Bruce Allen - TAG",
+          "phoneNumber": "+17473077280",
+          "extensionId": "63555286004",
+          "device": {
+            "uri": "https://platform.ringcentral.com/restapi/v1.0/account/2252193005/device/803276876005",
+            "id": "803276876005"
+          }
+        },
+        "to": {
+          "name": "THOMAS T       ",
+          "phoneNumber": "+12487590977",
+          "location": "Rochester, MI"
+        },
+        "legsResult": {
+          "matched": false,
+          "strategy": "legs",
+          "legIndex": null,
+          "extensionId": null,
+          "sourceCanonicalId": null,
+          "internalName": "unknown",
+          "channel": "unknown"
+        },
+        "legs": [
+          {
+            "index": 0,
+            "telephonySessionId": "s-a0d16bf22ec09z19d7343ead1z774e500000",
+            "sessionId": null,
+            "direction": "Outbound",
+            "action": "VoIP Call",
+            "result": "Call connected",
+            "from": {
+              "name": "Bruce Allen - TAG",
+              "phoneNumber": "+17473077280",
+              "extensionId": "63555286004",
+              "device": {
+                "uri": "https://platform.ringcentral.com/restapi/v1.0/account/2252193005/device/803276876005",
+                "id": "803276876005"
+              }
+            },
+            "to": {
+              "name": "THOMAS T       ",
+              "phoneNumber": "+12487590977",
+              "location": "Rochester, MI"
+            },
+            "extension": {
+              "uri": "https://platform.ringcentral.com/restapi/v1.0/account/2252193005/extension/63555286004",
+              "id": 63555286004
+            },
+            "startTime": "2026-04-09T17:22:04.209Z",
+            "duration": 1337
+          }
+        ]
+      },
+      {
+        "id": "AMC9pSej45sjYM1A",
+        "sessionId": "2330093312004",
+        "telephonySessionId": "s-a0d7ab022e364z19d733e5b1cz75737e0000",
+        "startTime": "2026-04-09T17:15:59.661Z",
+        "direction": "Inbound",
+        "result": "Voicemail",
+        "from": {
+          "name": "THOMAS T       ",
+          "phoneNumber": "+12487590977",
+          "location": "Rochester, MI"
+        },
+        "to": {
+          "phoneNumber": "+17473077280"
+        },
+        "legsResult": {
+          "matched": false,
+          "strategy": "legs",
+          "legIndex": null,
+          "extensionId": null,
+          "sourceCanonicalId": null,
+          "internalName": "unknown",
+          "channel": "unknown"
+        },
+        "legs": [
+          {
+            "index": 0,
+            "telephonySessionId": "s-a0d7ab022e364z19d733e5b1cz75737e0000",
+            "sessionId": null,
+            "direction": "Inbound",
+            "action": "Phone Call",
+            "result": "Voicemail",
+            "from": {
+              "name": "THOMAS T       ",
+              "phoneNumber": "+12487590977",
+              "location": "Rochester, MI"
+            },
+            "to": {
+              "phoneNumber": "+17473077280"
+            },
+            "extension": null,
+            "startTime": "2026-04-09T17:15:59.661Z",
+            "duration": 64
+          },
+          {
+            "index": 1,
+            "telephonySessionId": "s-a0d7ab022e364z19d733e5b1cz75737e0000",
+            "sessionId": null,
+            "direction": "Inbound",
+            "action": "Phone Call",
+            "result": "Voicemail",
+            "from": {
+              "name": "THOMAS T       ",
+              "phoneNumber": "+12487590977",
+              "location": "Rochester, MI"
+            },
+            "to": {
+              "name": "Bruce Allen - TAG",
+              "phoneNumber": "+17473077280",
+              "extensionId": "63555286004"
+            },
+            "extension": {
+              "uri": "https://platform.ringcentral.com/restapi/v1.0/account/2252193005/extension/63555286004",
+              "id": 63555286004
+            },
+            "startTime": "2026-04-09T17:15:59.680Z",
+            "duration": 64
+          },
+          {
+            "index": 2,
+            "telephonySessionId": "s-a0d7ab022e364z19d733e5b1cz75737e0000",
+            "sessionId": null,
+            "direction": "Outbound",
+            "action": "VoIP Call",
+            "result": "No Answer",
+            "from": {
+              "name": "Bruce Allen - TAG",
+              "phoneNumber": "+12487590977",
+              "extensionId": "63555286004"
+            },
+            "to": {
+              "phoneNumber": "+18773622426",
+              "extensionNumber": "966"
+            },
+            "extension": {
+              "uri": "https://platform.ringcentral.com/restapi/v1.0/account/2252193005/extension/63555286004",
+              "id": 63555286004
+            },
+            "startTime": "2026-04-09T17:16:04.005Z",
+            "duration": 30
+          },
+          {
+            "index": 3,
+            "telephonySessionId": "s-a0d7ab022e364z19d733e5b1cz75737e0000",
+            "sessionId": null,
+            "direction": "Outbound",
+            "action": "VoIP Call",
+            "result": "IP Phone Offline",
+            "from": {
+              "name": "Bruce Allen - TAG",
+              "phoneNumber": "+12487590977",
+              "extensionId": "63555286004"
+            },
+            "to": {
+              "phoneNumber": "+18773622426",
+              "extensionNumber": "966"
+            },
+            "extension": {
+              "uri": "https://platform.ringcentral.com/restapi/v1.0/account/2252193005/extension/63555286004",
+              "id": 63555286004
+            },
+            "startTime": "2026-04-09T17:16:04.011Z",
+            "duration": null
+          },
+          {
+            "index": 4,
+            "telephonySessionId": "s-a0d7ab022e364z19d733e5b1cz75737e0000",
+            "sessionId": null,
+            "direction": "Outbound",
+            "action": "FindMe",
+            "result": "No Answer",
+            "from": {
+              "name": "Bruce Allen - TAG",
+              "phoneNumber": "+12487590977",
+              "extensionId": "63555286004",
+              "device": {
+                "uri": "https://platform.ringcentral.com/restapi/v1.0/account/2252193005/device/803276876005",
+                "id": "803276876005"
+              }
+            },
+            "to": {
+              "name": "Bruce Allen - TAG",
+              "phoneNumber": "+17473077280",
+              "location": "Glendale, CA"
+            },
+            "extension": {
+              "uri": "https://platform.ringcentral.com/restapi/v1.0/account/2252193005/extension/63555286004",
+              "id": 63555286004
+            },
+            "startTime": "2026-04-09T17:16:04.021Z",
+            "duration": 20
+          }
+        ]
+      },
+      {
+        "id": "AMC9jygIraBl3M1A",
+        "sessionId": "2330089254004",
+        "telephonySessionId": "s-a0d16c92bfeb1z19d733d81a0z7569610000",
+        "startTime": "2026-04-09T17:15:03.987Z",
+        "direction": "Inbound",
+        "result": "Missed",
+        "from": {
+          "name": "THOMAS T       ",
+          "phoneNumber": "+12487590977",
+          "location": "Rochester, MI"
+        },
+        "to": {
+          "phoneNumber": "+17473077280"
+        },
+        "legsResult": {
+          "matched": false,
+          "strategy": "legs",
+          "legIndex": null,
+          "extensionId": null,
+          "sourceCanonicalId": null,
+          "internalName": "unknown",
+          "channel": "unknown"
+        },
+        "legs": [
+          {
+            "index": 0,
+            "telephonySessionId": "s-a0d16c92bfeb1z19d733d81a0z7569610000",
+            "sessionId": null,
+            "direction": "Inbound",
+            "action": "Phone Call",
+            "result": "Missed",
+            "from": {
+              "name": "THOMAS T       ",
+              "phoneNumber": "+12487590977",
+              "location": "Rochester, MI"
+            },
+            "to": {
+              "phoneNumber": "+17473077280"
+            },
+            "extension": null,
+            "startTime": "2026-04-09T17:15:03.987Z",
+            "duration": 47
+          },
+          {
+            "index": 1,
+            "telephonySessionId": "s-a0d16c92bfeb1z19d733d81a0z7569610000",
+            "sessionId": null,
+            "direction": "Inbound",
+            "action": "Phone Call",
+            "result": "Missed",
+            "from": {
+              "name": "THOMAS T       ",
+              "phoneNumber": "+12487590977",
+              "location": "Rochester, MI"
+            },
+            "to": {
+              "name": "Bruce Allen - TAG",
+              "phoneNumber": "+17473077280",
+              "extensionId": "63555286004"
+            },
+            "extension": {
+              "uri": "https://platform.ringcentral.com/restapi/v1.0/account/2252193005/extension/63555286004",
+              "id": 63555286004
+            },
+            "startTime": "2026-04-09T17:15:04.019Z",
+            "duration": 47
+          },
+          {
+            "index": 2,
+            "telephonySessionId": "s-a0d16c92bfeb1z19d733d81a0z7569610000",
+            "sessionId": null,
+            "direction": "Outbound",
+            "action": "VoIP Call",
+            "result": "No Answer",
+            "from": {
+              "name": "Bruce Allen - TAG",
+              "phoneNumber": "+12487590977",
+              "extensionId": "63555286004"
+            },
+            "to": {
+              "phoneNumber": "+18773622426",
+              "extensionNumber": "966"
+            },
+            "extension": {
+              "uri": "https://platform.ringcentral.com/restapi/v1.0/account/2252193005/extension/63555286004",
+              "id": 63555286004
+            },
+            "startTime": "2026-04-09T17:15:08.399Z",
+            "duration": 30
+          },
+          {
+            "index": 3,
+            "telephonySessionId": "s-a0d16c92bfeb1z19d733d81a0z7569610000",
+            "sessionId": null,
+            "direction": "Outbound",
+            "action": "VoIP Call",
+            "result": "IP Phone Offline",
+            "from": {
+              "name": "Bruce Allen - TAG",
+              "phoneNumber": "+12487590977",
+              "extensionId": "63555286004"
+            },
+            "to": {
+              "phoneNumber": "+18773622426",
+              "extensionNumber": "966"
+            },
+            "extension": {
+              "uri": "https://platform.ringcentral.com/restapi/v1.0/account/2252193005/extension/63555286004",
+              "id": 63555286004
+            },
+            "startTime": "2026-04-09T17:15:08.406Z",
+            "duration": null
+          },
+          {
+            "index": 4,
+            "telephonySessionId": "s-a0d16c92bfeb1z19d733d81a0z7569610000",
+            "sessionId": null,
+            "direction": "Outbound",
+            "action": "FindMe",
+            "result": "No Answer",
+            "from": {
+              "name": "Bruce Allen - TAG",
+              "phoneNumber": "+12487590977",
+              "extensionId": "63555286004",
+              "device": {
+                "uri": "https://platform.ringcentral.com/restapi/v1.0/account/2252193005/device/803276876005",
+                "id": "803276876005"
+              }
+            },
+            "to": {
+              "name": "Bruce Allen - TAG",
+              "phoneNumber": "+17473077280",
+              "location": "Glendale, CA"
+            },
+            "extension": {
+              "uri": "https://platform.ringcentral.com/restapi/v1.0/account/2252193005/extension/63555286004",
+              "id": 63555286004
+            },
+            "startTime": "2026-04-09T17:15:08.415Z",
+            "duration": 20
+          }
+        ]
+      }
+    ]
+  }
+]

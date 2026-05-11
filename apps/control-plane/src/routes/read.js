@@ -12,7 +12,7 @@ const { toErrorResponse } = require("../../../../packages/shared-errors/src");
 function createReadRouter(auth) {
   const router = express.Router();
 
-  router.get("/overview/:domain", auth.requireAuth, async (req, res) => {
+  router.get("/overview/:domain", auth.requireAuth, auth.requireAdmin, async (req, res) => {
     try {
       const result = await buildControlPlaneReadOverview(req.params.domain);
       return res.json({ ok: true, result });
@@ -21,7 +21,7 @@ function createReadRouter(auth) {
     }
   });
 
-  router.get("/prospects/:domain", auth.requireAuth, async (req, res) => {
+  router.get("/prospects/:domain", auth.requireAuth, auth.requireAdmin, async (req, res) => {
     try {
       const result = await listPresentationProspects(req.params.domain, {
         caseId: req.query.caseId,
@@ -37,7 +37,7 @@ function createReadRouter(auth) {
     }
   });
 
-  router.get("/case-profiles/:domain", auth.requireAuth, async (req, res) => {
+  router.get("/case-profiles/:domain", auth.requireAuth, auth.requireAdmin, async (req, res) => {
     try {
       const result = await listPresentationCaseProfiles(req.params.domain, {
         caseId: req.query.caseId,
@@ -53,7 +53,7 @@ function createReadRouter(auth) {
     }
   });
 
-  router.get("/payments/:domain", auth.requireAuth, async (req, res) => {
+  router.get("/payments/:domain", auth.requireAuth, auth.requireAdmin, async (req, res) => {
     try {
       const result = await listPresentationPayments(req.params.domain, {
         caseId: req.query.caseId,

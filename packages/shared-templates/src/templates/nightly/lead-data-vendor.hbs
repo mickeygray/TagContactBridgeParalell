@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">{{> base-css}}</head>
+<body>
+  <div class="wrap">
+    {{> header}}
+
+    <div class="section">
+      <h2>Topline — {{date}}</h2>
+      {{> kpi-tiles tiles=topTiles}}
+    </div>
+
+    <div class="section">
+      <h2>Lead intake by source</h2>
+      {{#if leadEntries.length}}
+        <table class="data" cellpadding="0" cellspacing="0">
+          <tr>
+            <th>Source</th>
+            <th class="center">Leads today</th>
+          </tr>
+          {{#each leadEntries}}
+            <tr>
+              <td>{{source}}</td>
+              <td class="center">{{count}}</td>
+            </tr>
+          {{/each}}
+        </table>
+      {{else}}
+        <div class="muted">No new leads today.</div>
+      {{/if}}
+    </div>
+
+    <div class="section">
+      <h2>Status changes today</h2>
+      {{#if transitions.length}}
+        <table class="data" cellpadding="0" cellspacing="0">
+          <tr>
+            <th>Source</th>
+            <th class="center">Cases</th>
+            <th class="center">→ Deal</th>
+            <th class="center">→ Post-Date</th>
+            <th class="center">→ DNC</th>
+            <th class="center">→ Redline</th>
+          </tr>
+          {{#each transitions}}
+          <tr>
+            <td>{{source}}</td>
+            <td class="center">{{contacted}}</td>
+            <td class="center"><span class="score-green">{{default deal 0}}</span></td>
+            <td class="center"><span class="score-amber">{{default postdate 0}}</span></td>
+            <td class="center"><span class="score-red">{{default dnc 0}}</span></td>
+            <td class="center"><span class="score-red">{{default redline 0}}</span></td>
+          </tr>
+          {{/each}}
+        </table>
+        {{#if outcomeRows.length}}
+          <h2 style="margin-top:14px;">Status change detail</h2>
+          <table class="data" cellpadding="0" cellspacing="0">
+            <tr>
+              <th>Case</th>
+              <th>Client</th>
+              <th>Source</th>
+              <th class="center">Outcome</th>
+              <th class="center">Initial $</th>
+              <th class="center">Collected $</th>
+            </tr>
+            {{#each outcomeRows}}
+            <tr>
+              <td><strong>#{{caseId}}</strong></td>
+              <td>{{default name "Unknown"}}</td>
+              <td>
+                {{sourceName}}
+                {{#if sourceChannel}}<div class="muted">{{sourceChannel}}</div>{{/if}}
+              </td>
+              <td class="center">{{default outcomeTypes statusCategory}}</td>
+              <td class="center">{{money initialCollectedToday}}</td>
+              <td class="center">{{money totalCollectedToday}}</td>
+            </tr>
+            {{/each}}
+          </table>
+        {{/if}}
+      {{else}}
+        <div class="muted">No status changes today.</div>
+      {{/if}}
+    </div>
+
+    <div class="section">
+      <h2>Vendor families — today</h2>
+      {{#if vendorFamilies.length}}
+        <table class="data" cellpadding="0" cellspacing="0">
+          <tr>
+            <th>Family</th>
+            <th class="center">Leads</th>
+            <th class="center">Calls</th>
+            <th class="center">5min+</th>
+            <th class="center">Scored</th>
+            <th class="center">Avg</th>
+            <th class="center">Deals</th>
+            <th class="center">DNC</th>
+            <th class="center">Postdate</th>
+            <th class="center">Initial $</th>
+            <th class="center">Collected $</th>
+          </tr>
+          {{#each vendorFamilies}}
+          <tr>
+            <td>{{familyLabel}}</td>
+            <td class="center">{{leads}}</td>
+            <td class="center">{{calls}}</td>
+            <td class="center">{{callsOver5}}</td>
+            <td class="center">{{scoredCalls}}</td>
+            <td class="center"><span class="{{scoreClass averageScore}}">{{default averageScore "—"}}</span></td>
+            <td class="center"><span class="score-green">{{dealsToday}}</span></td>
+            <td class="center"><span class="score-red">{{dncToday}}</span></td>
+            <td class="center"><span class="score-amber">{{postdateToday}}</span></td>
+            <td class="center">{{money initialPayments}}</td>
+            <td class="center">{{money totalCollected}}</td>
+          </tr>
+          {{/each}}
+        </table>
+      {{else}}
+        <div class="muted">No vendor activity today.</div>
+      {{/if}}
+    </div>
+
+    <div class="section">
+      <h2>Top sources — today</h2>
+      {{#if vendorRows.length}}
+        <table class="data" cellpadding="0" cellspacing="0">
+          <tr>
+            <th>Source</th>
+            <th class="center">Spend</th>
+            <th class="center">Leads</th>
+            <th class="center">Calls</th>
+            <th class="center">Scored</th>
+            <th class="center">Avg score</th>
+            <th class="center">Deals</th>
+            <th class="center">Collected</th>
+          </tr>
+          {{#each vendorRows}}
+          <tr>
+            <td>{{source}}</td>
+            <td class="center">{{money spend}}</td>
+            <td class="center">{{leads}}</td>
+            <td class="center">{{calls}}</td>
+            <td class="center">{{scoredCalls}}</td>
+            <td class="center"><span class="{{scoreClass averageScore}}">{{default averageScore "—"}}</span></td>
+            <td class="center">{{dealsToday}}</td>
+            <td class="center">{{money totalCollected}}</td>
+          </tr>
+          {{/each}}
+        </table>
+      {{else}}
+        <div class="muted">No source activity today.</div>
+      {{/if}}
+    </div>
+
+    <!-- ─────────────────  TODAY'S CALLS — SCORED  ────────────────── -->
+    <div class="section">
+      <h2>Today's calls — scored</h2>
+      {{#if scoredCalls.length}}
+        <div class="summary-line">
+          <strong>{{scoredCounts.total}}</strong> scored ·
+          avg <strong><span class="{{scoreClass scoredCounts.avg}}">{{default scoredCounts.avg "—"}}</span></strong> ·
+          {{#if scoredCounts.hot}}<span class="score-green">{{scoredCounts.hot}} hot</span> · {{/if}}
+          {{#if scoredCounts.warm}}<span class="score-amber">{{scoredCounts.warm}} warm</span> · {{/if}}
+          {{#if scoredCounts.cold}}<span class="score-red">{{scoredCounts.cold}} cold</span> · {{/if}}
+          {{#if scoredCounts.dead}}<span class="score-red">{{scoredCounts.dead}} dead</span> · {{/if}}
+          {{#if scoredCounts.fake}}<span class="score-red">{{scoredCounts.fake}} fake</span>{{/if}}
+        </div>
+        <table class="data" cellpadding="0" cellspacing="0" style="margin-top:8px;">
+          <tr>
+            <th class="center">Score</th>
+            <th>Verdict</th>
+            <th>Caller</th>
+            <th>Source</th>
+            <th class="center">Duration</th>
+            <th>Agent</th>
+            <th class="center">Time</th>
+          </tr>
+          {{#each scoredCalls}}
+          <tr>
+            <td class="center">
+              <span class="score-badge {{scoreClass score}}">{{score}}</span>
+            </td>
+            <td>{{default verdict "—"}}</td>
+            <td>
+              {{#if name}}<strong>{{name}}</strong><br>{{/if}}
+              <span class="mono">{{default phone "—"}}</span>
+              {{#if caseId}}<div class="muted">case #{{caseId}}</div>{{/if}}
+            </td>
+            <td>
+              {{default sourceName "—"}}
+              {{#if sourceChannel}}<div class="muted">{{sourceChannel}}</div>{{/if}}
+            </td>
+            <td class="center">{{duration duration}}</td>
+            <td>{{default agent "—"}}</td>
+            <td class="center"><span class="muted">{{formatTime time}}</span></td>
+          </tr>
+          {{#if summary}}
+          <tr>
+            <td colspan="7" style="padding-top:0;">
+              <div class="ai-summary">{{summary}}</div>
+              {{#if redFlags.length}}
+                <div class="red-flag">
+                  {{#each redFlags}}⚠ {{this}}{{#unless @last}} · {{/unless}}{{/each}}
+                </div>
+              {{/if}}
+            </td>
+          </tr>
+          {{/if}}
+          {{/each}}
+        </table>
+        <div class="summary-line muted">Every scored vendor call is listed above, sorted highest score first. The attached call log CSV has the full source row for each call.</div>
+      {{else}}
+        <div class="muted">No scored calls today.</div>
+      {{/if}}
+    </div>
+
+    <div class="section">
+      <div class="summary-line">
+        Snapshot sources attached:
+        <strong>{{leadReconciliationCsvFilename}}</strong> for accepted leads that reached Logics,
+        <strong>{{callLogCsvFilename}}</strong> for vendor-lead calls and outcomes,
+        and <strong>{{csvFilename}}</strong> for the per-source rollup.
+      </div>
+    </div>
+
+    {{> footer}}
+  </div>
+</body></html>

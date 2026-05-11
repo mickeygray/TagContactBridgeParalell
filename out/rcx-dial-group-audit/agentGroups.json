@@ -1,0 +1,26 @@
+[
+  {
+    "permissions": [],
+    "agentGroupId": 2156,
+    "groupName": "Dialing",
+    "isDefault": false
+  },
+  {
+    "permissions": [],
+    "agentGroupId": 2157,
+    "groupName": null,
+    "isDefault": false
+  },
+  {
+    "permissions": [],
+    "agentGroupId": 2158,
+    "groupName": null,
+    "isDefault": false
+  },
+  {
+    "permissions": [],
+    "agentGroupId": 2187,
+    "groupName": "Tax Support Group",
+    "isDefault": false
+  }
+]

@@ -1,0 +1,48 @@
+{
+  "dryRun": false,
+  "sourceDb": "test",
+  "targetDb": "tagcontactbridge_parallel",
+  "runId": "2026-05-04T19-05-38-913Z",
+  "startedAt": "2026-05-04T19-05-38-913Z",
+  "finishedAt": "2026-05-04T19:05:49.499Z",
+  "totals": {
+    "sourceRows": 7652,
+    "insertedRows": 2,
+    "matchedExistingRows": 7650,
+    "errorCount": 0
+  },
+  "results": [
+    {
+      "sourceName": "consentrecords",
+      "targetName": "consentrecords",
+      "copyIndexes": false,
+      "mode": "same-name-insert-missing-only",
+      "sourceCollection": "consentrecords",
+      "targetCollection": "consentrecords",
+      "sourceCount": 2684,
+      "beforeCount": 2683,
+      "afterCount": 2684,
+      "upserted": 1,
+      "matchedExisting": 2683,
+      "errors": [],
+      "indexes": [],
+      "dryRun": false
+    },
+    {
+      "sourceName": "rb_caseprofiles",
+      "targetName": "rb_caseprofiles",
+      "copyIndexes": false,
+      "mode": "same-name-insert-missing-only",
+      "sourceCollection": "rb_caseprofiles",
+      "targetCollection": "rb_caseprofiles",
+      "sourceCount": 4968,
+      "beforeCount": 4967,
+      "afterCount": 4968,
+      "upserted": 1,
+      "matchedExisting": 4967,
+      "errors": [],
+      "indexes": [],
+      "dryRun": false
+    }
+  ]
+}

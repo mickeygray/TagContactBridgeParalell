@@ -1,0 +1,26 @@
+﻿{
+  "object": "page",
+  "entry": [
+    {
+      "id": "684600241408015",
+      "time": 1777442555,
+      "changes": [
+        {
+          "field": "feed",
+          "value": {
+            "from": {
+              "id": "26914889044774592",
+              "name": "Ronald Fewer"
+            },
+            "post_id": "684600241408015_122159493692933142",
+            "created_time": 1777442549,
+            "item": "reaction",
+            "parent_id": "684600241408015_122159493692933142",
+            "reaction_type": "like",
+            "verb": "add"
+          }
+        }
+      ]
+    }
+  ]
+}

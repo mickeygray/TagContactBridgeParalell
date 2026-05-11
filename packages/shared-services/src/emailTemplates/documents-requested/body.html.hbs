@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8" /><title>{{subject}}</title></head>
+<body style="margin:0;padding:0;background:#f1f5f9;font-family:Helvetica,Arial,sans-serif;">
+<table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="background:#f1f5f9;padding:32px 0;">
+  <tr><td align="center">
+    <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="600" style="background:#ffffff;border-radius:8px;overflow:hidden;box-shadow:0 1px 3px rgba(15,23,42,0.08);">
+      <tr><td>{{>header}}</td></tr>
+      <tr><td style="padding:32px;color:#1f2937;font-size:15px;line-height:1.6;">
+        <p style="margin:0 0 16px;">Hi {{firstName}},</p>
+        <p style="margin:0 0 12px;">To keep things moving on your case, could you send over the items below when you get a chance? Any legible photo or scan works fine.</p>
+        <div style="background:#f8fafc;border-left:3px solid {{brand.accentColor}};padding:12px 16px;margin:16px 0;color:#334155;font-size:14px;white-space:pre-wrap;">{{documentList}}</div>
+        {{#if secureUploadUrl}}<p style="margin:0 0 16px;">You can also drop them here: <a href="{{secureUploadUrl}}" style="color:{{brand.accentColor}};text-decoration:none;">{{secureUploadUrl}}</a></p>{{/if}}
+        <p style="margin:0 0 16px;">If anything on the list doesn't apply or you don't have it handy, just let me know and we'll work around it. Reply here or call me at <a href="tel:{{agentPhone}}" style="color:{{brand.accentColor}};text-decoration:none;">{{agentPhone}}</a>.</p>
+        <p style="margin:0 0 0;">Thanks,</p>
+        {{>signature}}
+      </td></tr>
+      <tr><td>{{>footer}}</td></tr>
+    </table>
+  </td></tr>
+</table>
+</body></html>

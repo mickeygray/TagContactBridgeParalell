@@ -1,10 +1,92 @@
 "use strict";
 
 const {
+  bumpLastActivityAt,
+  deriveActivityState,
+  deriveFreshLeadGate,
   getCxAgentStateByExtensionId,
   listCxAgentStates,
   mirrorAgentState,
+  setActivityState,
+  touchCxWorkspacePresence,
 } = require("./agentAvailabilityService");
+const {
+  isOperatingNow,
+  isChannelOperatingNow,
+  clampToOperatingHours,
+  clampToChannelOperatingHours,
+  nextOperatingMomentAfter,
+  formatHourBucket: formatPacingHourBucket,
+} = require("./businessHoursGuard");
+const {
+  getConfig: getPacingConfig,
+  updateConfig: updatePacingConfig,
+  getHistory: getPacingConfigHistory,
+  validatePatch: validatePacingPatch,
+  bumpCacheVersion: bumpPacingConfigCache,
+} = require("./pacingConfigService");
+const {
+  refillPool,
+  emptinessWatcherTick,
+  refreshPoolOccupancy,
+  enqueueLead,
+} = require("./universalQueueService");
+const {
+  isAgentEligibleForSlice,
+  computeTargetMix,
+  issueSlice,
+  releaseSlice,
+  releaseSliceById,
+  recordItemDispositioned,
+  maybeCompleteSlice,
+} = require("./agentSliceService");
+const {
+  assignOne: assignFreshLead,
+  drainPending: drainPendingFreshLeads,
+  expirySweep: freshLeadExpirySweep,
+  onAgentBecomesEligible,
+  listEligibleIdleAgents,
+} = require("./freshLeadAssignmentService");
+const {
+  reapTick: idleReaperTick,
+} = require("./idleReaperService");
+const {
+  computePacingReport,
+  getReport: getPacingReport,
+  listRecentReports: listRecentPacingReports,
+  formatReportText: formatPacingReportText,
+} = require("./pacingReportService");
+const {
+  runHourly: runHourlyPacing,
+  runMorningPrep: runMorningPacingPrep,
+} = require("./hourlyPacingOrchestrator");
+const {
+  DISPOSITION_MAP,
+  listDispositions,
+  getDisposition,
+  validateDisposition,
+  computeNextTouchAt,
+} = require("./dispositionMapService");
+const cxTokenStorageService = require("./cxTokenStorageService");
+const cxOAuthService = require("./cxOAuthService");
+const {
+  placeCall: dialPlaceCall,
+  terminateAndDispose: dialTerminateAndDispose,
+  reconcileCallEnded: dialReconcileCallEnded,
+  reconcileCallConnected: dialReconcileCallConnected,
+  materializeInboundCall: dialMaterializeInboundCall,
+  sweepStaleStates: dialSweepStaleStates,
+  buildLogicsCaseUrl,
+  sanitizeUsPhone,
+} = require("./dialService");
+const {
+  buildNextAssignmentStats,
+  deriveQueueFamily: deriveCxQueueFamily,
+  listEligibleAgentsForCx,
+  normalizeAssignmentStats,
+  normalizeQueueFamily: normalizeCxQueueFamily,
+  rankAgentsForQueueItem,
+} = require("./cxLoadBalancerService");
 const {
   CONTROL_PLANE_EVENT_TYPES,
   createControlPlaneEvent,
@@ -12,10 +94,145 @@ const {
   processNextControlPlaneEvent,
 } = require("./controlPlaneEventService");
 const {
+  buildCampaignAudience,
+} = require("./campaignAudienceService");
+const {
+  extractCadenceEmailIndex,
+  extractCadenceSmsIndex,
+  resolveCadenceEmailContent,
+  resolveCadenceSmsContent,
+} = require("./cadenceContentService");
+const {
+  evaluateCounterCadenceDueItems,
+  getCounterCadenceCounters,
+  getCounterCadenceLastTouched,
+  getCounterCadenceTemplateKey,
+  isWeekdayBatchTime: isCounterCadenceBatchTime,
+  pollCounterCadenceRvmDispositions,
+  recordCounterCadenceTouch,
+  runCounterCadenceSweep,
+  selectCounterCadenceDueItems,
+} = require("./counterCadenceService");
+const {
+  buildCallLog,
+  buildRingcentralPollingRuntime,
+} = require("./callLogService");
+const {
+  seedRingcentralExtensionsFromCsv,
+} = require("./ringcentralExtensionSeedService");
+const {
+  reconcileUnattributedSessions,
+} = require("./ringcentralReconcileService");
+const {
+  runRingCentralCallLogSweep,
+} = require("./ringcentralCallLogSweepService");
+const {
+  SHORT_CIRCUIT_INTAKE_SOURCES,
+  resolveInboundCallSource,
+} = require("./callAttributionResolverService");
+const { buildMetricsPulse } = require("./metricsPulseService");
+const { emitServiceRequest } = require("./serviceRequestService");
+const {
+  syncUsersFromRcExtensions,
+} = require("./userProvisioningService");
+const {
+  isConfigured: isTranscriptionConfigured,
+  processCallLogRecording,
+} = require("./transcriptionScoringService");
+const {
+  isRecordingArchiveConfigured,
+  processCallRecordingArchive,
+  queueCallRecordingArchiveJob,
+} = require("./recordingArchiveService");
+const {
+  countLegacyContactActivities,
+  listLegacyContactActivities,
+} = require("./legacyContactActivityService");
+const { runProspectSweep } = require("./prospectCleanerService");
+const {
+  ACTION_KEYS: DEPLOY_ACTION_KEYS,
+  buildDeployState,
+  cancelDeployRun,
+  listDeployRuns,
+  triggerDeploy,
+} = require("./deployOrchestrationService");
+const {
+  buildCxCallQueue,
+  buildCxWorkspace,
+  executeCxLogicsCreateCase,
+  executeCxSaveCaseProfileFromLogics,
+  executeCxLogicsFindMatch,
+  executeCxLogicsActivity,
+  executeCxLogicsAmortization,
+  executeCxLogicsInvoice,
+  executeCxLogicsNotes,
+  executeCxLogicsTask,
+  executeCxLogicsUpdateCase,
+  listCxLogicsTasks,
+  listCxTasks,
+  lookupCxLogicsMatch,
+  requestCxAssignCaseToMe,
+  requestCxDial,
+  requestCxEndCall,
+  requestCxDisposition,
+  requestCxEmail,
+  requestCxLogicsCreateCase,
+  requestCxLogicsFindMatch,
+  requestCxLeadStatusUpdate,
+  requestCxReminder,
+  requestCxStatusChange,
+  requestCxTask,
+  requestCxText,
+  searchCxCases,
+  enqueueCxSmokeLead,
+  simulateCxIncomingCall,
+} = require("./cxWorkspaceService");
+const {
+  CX_CADENCE_EVENT_TYPES,
+  buildCxCadenceRuntimeSnapshot,
+  claimNextCxQueueItem,
+  createCxCallPlacedEvent,
+  processCxCadenceEventBatch,
+  processNextCxCadenceEvent,
+  queueCxDialRequest,
+  releaseCxQueueBatch,
+} = require("./cxCadenceService");
+const {
+  computeFreshHotLaneWindow,
+  getFreshHotLaneSnapshot,
+  rebuildFreshHotLane,
+  runFreshHotLaneAllocator,
+} = require("./cxFreshHotLaneService");
+const {
+  buildCxCommLog,
+} = require("./cxCommLogService");
+const {
+  publishQueueItemToRingcx,
+} = require("./ringcxLeadServingService");
+const {
+  executeCxDispatchIntent,
+  executeCxHangupRequest,
+} = require("./ringcxDialExecutionService");
+const {
   buildControlPlaneHealthReport,
   buildProviderHealth,
   recordServiceAlert,
 } = require("./controlPlaneHealthService");
+const {
+  approveInboxWorkflow,
+  cancelInboxWorkflow,
+  dncInboxWorkflow,
+  editSendInboxWorkflow,
+  regenerateInboxWorkflow,
+  sleepInboxWorkflow,
+  wakeInboxWorkflow,
+} = require("./inboxCommandService");
+const {
+  relayControlPlaneEvent,
+  relayMetricObserved,
+  relayReviewItemObserved,
+  relayRingcentralTelephonyForwarded,
+} = require("./controlPlaneRelayService");
 const {
   buildControlPlaneReadOverview,
   listPresentationCaseProfiles,
@@ -24,15 +241,23 @@ const {
 } = require("./controlPlaneReadService");
 const {
   buildClientDetail,
+  buildClientWorkspaceList,
   buildCallrailWorkspace,
   buildDailySummaryWorkspace,
+  buildDeployWorkspace,
+  buildInboxWorkspace,
+  buildLibraryWorkspace,
   buildMailCostWorkspace,
   buildMetricsWorkspace,
   buildMetricSourcesWorkspace,
   buildRedlineWorkspace,
   buildReviewWorkspace,
+  buildRingBridgeWorkspace,
   buildRingCentralWorkspace,
+  buildScheduleHistoryWorkspace,
   buildScheduleWorkspace,
+  buildWorkspaceShell,
+  listRingCentralEvents,
   listReviewWorkspaceItems,
   listScheduleCadence,
   searchClientWorkspace,
@@ -48,6 +273,8 @@ const {
   resolveCanonicalAttribution,
   summarizeSuccessfulPayments,
 } = require("./attributionEnrichmentService");
+const { buildContactLibraryCatalog } = require("./contactLibraryService");
+const { runClientCaseScrub } = require("./clientScrubService");
 const { reviewCaseActivities } = require("./activityAiReviewService");
 const { listLastMonthInboundCalls, lookupInboundCall } = require("./callrailLookupService");
 const { buildControlPlaneSummary, getControlPlaneDomain, listControlPlaneDomains } = require("./controlPlaneService");
@@ -61,6 +288,27 @@ const {
   startDailyDeepCutRun,
   startDailyDeepCutVerification,
 } = require("./dailyDeepCutService");
+const {
+  buildManagementSnapshot,
+  buildMonthToDateSnapshot,
+  buildNightlyClosePlan,
+  buildVendorReport,
+  buildTransitionsBySource,
+  buildDealsBySource,
+  buildSpendByChannel,
+  buildTodaysCalls,
+  buildTodaysPaymentAlerts,
+  buildOpenServiceAlerts,
+  buildGroupedNightlyPayload,
+  executeNightlyCloseRun,
+  runGroupedNightlyClose,
+  sendFinancialCloseEmail,
+  sendLeadDataCloseEmail,
+  sendRedlineAlertEmail,
+  sendOpsStatusEmail,
+  startNightlyCloseRun,
+  wrapHourlyJobs,
+} = require("./nightlyCloseService");
 const { publishDemoEvent } = require("./demoEventService");
 const {
   buildDispatchList,
@@ -68,6 +316,13 @@ const {
   listDispatchLists,
   queueDispatchList,
 } = require("./dispatchListService");
+const {
+  buildScheduledBlastRuntimeSnapshot,
+  previewScheduledBlast,
+  queueScheduledBlast,
+  resolveScheduledBlastRule,
+  runScheduledBlastSweep,
+} = require("./scheduledBlastService");
 const {
   buildWorkList,
   getWorkList,
@@ -79,29 +334,112 @@ const {
   recordWorkflowStage,
 } = require("./workflowStateService");
 const {
+  resolveCaseContactEligibility,
+  stopCaseContact,
+} = require("./contactEligibilityService");
+const {
   buildHourlyHygienePlan,
   listHourlyReviewFeed,
   pushHourlyReviewItem,
 } = require("./hourlyHygieneService");
 const {
+  runHourlyLeadCadenceEnforcement,
+} = require("./hourlyLeadCadenceEnforcementService");
+const {
+  runHourlyMetricsRefresh,
+} = require("./hourlyMetricsRefreshService");
+const {
+  runHourlyCallLogHygiene,
+  runHourlyCallLogHygieneForDomain,
+} = require("./hourlyCallLogHygieneService");
+const {
+  claimNextHourlyJobEvent,
+  computeNextLaneRunAt,
+  emitHourlyJobEvent,
+  listHourlyJobEvents,
+  markHourlyJobCompleted,
+  markHourlyJobFailed,
+  notifyHourlyJobAlert,
+} = require("./hourlyJobEventService");
+const {
+  TEMPLATE_CATALOG: EMAIL_TEMPLATE_CATALOG,
+  listTemplates: listEmailTemplates,
+  renderEmailTemplate,
+} = require("./emailTemplateService");
+const { lookupCxLead, findCxLeadCandidates } = require("./cxLeadLookupService");
+const hourlyJobHandlerRegistry = require("./hourlyJobHandlerRegistry");
+const hourlyJobResolutionCheckRegistry = require("./hourlyJobResolutionCheckRegistry");
+// Requiring the built-in checks + handler modules registers them as a
+// side effect. Handler module uses lazy requires inside each handler
+// so it's safe to load here even though it indirectly references other
+// services in the same package.
+require("./hourlyJobResolutionChecks");
+require("./hourlyJobHandlers");
+const {
+  drainHourlyJobQueue,
+  runHourlySweep,
+  sendResolutionEmails,
+  summarizeHourlySweepResult,
+} = require("./hourlySweeperService");
+const {
+  previewHourlyFinancialSync,
+} = require("./hourlyFinancialPreviewService");
+const {
+  ignoreMetricsAttributionReviewItem,
+  listMetricsAttributionReviewItems,
+  reconcileMetricsAttributionCandidates,
+  reopenMetricsAttributionReviewItem,
+  resolveMetricsAttributionReviewItem,
+} = require("./metricsAttributionReviewService");
+const {
+  previewCallLedgerForDomain,
+  previewHourlyCallLedger,
+} = require("./hourlyCallLedgerPreviewService");
+const {
+  buildCallLedgerEntryFromCallLog,
+  syncCallLedgerBySession,
+  syncCallLedgerFromCallLog,
+} = require("./callLedgerService");
+const {
+  reconcilePaymentsForCase,
+  reconcilePaymentsForDomain,
+} = require("./paymentReconcileService");
+const {
+  runPaymentFieldsSync,
+} = require("./caseProfilePaymentSyncService");
+const {
+  runSubscriptionWatchdog,
+  checkEventSilence: checkRingcentralEventSilence,
+  recordRingcentralEvent,
+  getWatchdogState: getRingcentralWatchdogState,
+} = require("./ringcentralSubscriptionWatchdogService");
+const {
   OUTBOUND_EVENT_TYPES,
   createOutboundEvent,
+  createCadenceSweepEvents,
+  pollOutboundRvmDispositions,
   processNextOutboundEvent,
   processOutboundEventBatch,
 } = require("./outboundDispatchService");
+const { sendOutboundCallFireDial, sendOutboundCallFireDialBatch } = require("./outboundCallFireService");
 const {
+  fireImmediateContact,
   intakeAffiliateLead,
   intakeFacebookLead,
   intakeInstagramLead,
   intakeLdLead,
+  intakeLdPrePing,
   intakeLexisBatch,
   intakeNormalizedLead,
+  notifyAffiliatePostback,
   intakeOrganicLandingLead,
   intakeTikTokLead,
   intakeVfLandingLead,
   intakeWebsiteLead,
+  normalizeAffiliateLeadPayload,
   normalizeFacebookLeadPayload,
   normalizeInstagramLeadPayload,
+  normalizeLdLeadPayload,
   normalizeTikTokLeadPayload,
   normalizeWebsiteLeadPayload,
   validateLeadWebhook,
@@ -115,11 +453,89 @@ const {
   buildCapabilitySummary,
   buildRecommendedWorkflow,
 } = require("./logicsCapabilityService");
+const {
+  getActiveMailers,
+  getMailerConfigState,
+  getMailerHistory,
+  isMailerConfigLoaded,
+  loadMailerConfigCache,
+  reconcileMailerConfigsWithSheet,
+  resolveMailer,
+  resolveMailerAt,
+  resolveMailerByRcExtension,
+  resolveMailerByTrackingNumber,
+} = require("./mailerConfigService");
+const {
+  computeNextRunAt: computeSpendSyncNextRunAt,
+  createSpendSyncRuntime,
+  getSpendSheets,
+  parseCsv: parseSpendCsv,
+  parseMailerRow,
+  parseMetaRow,
+} = require("./spendSyncService");
+const {
+  buildSpendSyncRead,
+} = require("./spendSyncReadService");
+const {
+  buildVendorDailySummary,
+} = require("./vendorDailySummaryService");
+const {
+  runVendorNightlyEmail,
+  runVendorNightlyClosePass,
+  buildVendorCallRows,
+  buildVendorLeadRows,
+  buildVendorOutcomeRows,
+} = require("./vendorNightlyEmailService");
+const {
+  collectFiles,
+  buildRunId,
+  downloadLatestLexisZip,
+  fetchLatestLexisDrop,
+  ingestLatestLexisDrop,
+  mapLexisRowsForIntake,
+  parseLexisCsv,
+  processMailHouseCsv,
+  sendLexisRegionalMail,
+  unzipLexisArchive,
+} = require("./lexisSftpService");
+const {
+  formatDateKey: formatLexisDailyDropDateKey,
+  isLexisDailyDropDelivered,
+  queueLexisDailyDropRetry,
+  readLexisDailyDropState,
+  sendLexisDailyDropMail,
+  summarizeLexisCounts,
+  writeLexisDailyDropState,
+} = require("./lexisDailyDropService");
+const {
+  buildNcoaCreateCasePayload,
+  getNcoaUploadProgress,
+  normalizeNcoaRow,
+  parseNcoaCsv,
+  sweepStaleNcoaBatches,
+  uploadNcoaRows,
+} = require("./ncoaUploadService");
+const {
+  getLegacyMetricsMirrorStatus,
+  syncLegacyMetricsMirror,
+} = require("./legacyMetricsMirrorService");
+const { backfillLegacyMetricsRange } = require("./metricsBackfillService");
+const {
+  canonicalizeMirroredMetrics,
+  syncLegacyAttributionMaps,
+} = require("./legacyAttributionSyncService");
 const { createLogicsFacade, parseLogicsData } = require("./logicsFacadeService");
 const { buildProspectStatusDiff } = require("./logicsStatusDiffService");
 const {
+  clearScheduledTelephonySessions,
   extractAttributionCandidates,
+  fetchCallRecordWithRetry,
+  getScheduledTelephonySessionState,
   probeTelephonySessionLookup,
+  processTelephonySessionCandidate,
+  resolveSourceForCallRecord,
+  resolveSourceFromDid,
+  resolveSourceFromLegs,
   scheduleTelephonySessionEnvelope,
 } = require("./ringcentralAttributionService");
 const {
@@ -130,111 +546,446 @@ const {
 } = require("./ringcentralExService");
 const { listServiceTopology } = require("./serviceCatalog");
 const { sendPlainEmail, sendTestEmail } = require("./sendgridMailService");
+const {
+  sendMail,
+  renderOnly: renderEmailHtml,
+  clearCaches: clearMailerCaches,
+} = require("./mailerService");
 const { listActiveSourceCanonicals, resolveCanonicalSource } = require("./sourceCanonicalService");
+const {
+  buildSocialResponderWorkspace,
+  getMetaWebhookVerifyToken,
+  listMetaWebhookDomains,
+  processMetaSocialWebhook,
+  saveSocialResponderConfig,
+} = require("./socialResponderService");
 const { getWorkspaceForUser } = require("./workspaceService");
+const {
+  classifySms,
+  fastStopCheck,
+  CLASSIFIER_MODEL: SMS_CLASSIFIER_MODEL,
+} = require("./smsClassifierService");
+const {
+  runAutoResponder,
+  evaluateAutoSendGates,
+  enforceReplyConstraints,
+  AUTO_REPLY_COOLDOWN_MS,
+} = require("./smsAutoResponderService");
 
 module.exports = {
+  // Pacing queue (PR: Universal Call Queue)
+  bumpLastActivityAt,
+  deriveActivityState,
+  deriveFreshLeadGate,
+  setActivityState,
+  touchCxWorkspacePresence,
+  isOperatingNow,
+  isChannelOperatingNow,
+  clampToOperatingHours,
+  clampToChannelOperatingHours,
+  nextOperatingMomentAfter,
+  formatPacingHourBucket,
+  getPacingConfig,
+  updatePacingConfig,
+  getPacingConfigHistory,
+  validatePacingPatch,
+  bumpPacingConfigCache,
+  refillPool,
+  emptinessWatcherTick,
+  refreshPoolOccupancy,
+  enqueueLead,
+  isAgentEligibleForSlice,
+  computeTargetMix,
+  issueSlice,
+  releaseSlice,
+  releaseSliceById,
+  recordItemDispositioned,
+  maybeCompleteSlice,
+  assignFreshLead,
+  drainPendingFreshLeads,
+  freshLeadExpirySweep,
+  onAgentBecomesEligible,
+  listEligibleIdleAgents,
+  idleReaperTick,
+  computePacingReport,
+  getPacingReport,
+  listRecentPacingReports,
+  formatPacingReportText,
+  runHourlyPacing,
+  runMorningPacingPrep,
+  DISPOSITION_MAP,
+  listDispositions,
+  getDisposition,
+  validateDisposition,
+  computeNextTouchAt,
+  cxTokenStorageService,
+  cxOAuthService,
+  dialPlaceCall,
+  dialTerminateAndDispose,
+  dialReconcileCallEnded,
+  dialReconcileCallConnected,
+  dialMaterializeInboundCall,
+  dialSweepStaleStates,
+  buildLogicsCaseUrl,
+  sanitizeUsPhone,
+
   getCxAgentStateByExtensionId,
+  buildCxCallQueue,
+  buildCxCadenceRuntimeSnapshot,
+  buildCxCommLog,
+  buildCxWorkspace,
+  computeFreshHotLaneWindow,
+  approveInboxWorkflow,
+  cancelInboxWorkflow,
+  dncInboxWorkflow,
+  editSendInboxWorkflow,
+  executeCxLogicsCreateCase,
+  executeCxSaveCaseProfileFromLogics,
+  executeCxLogicsFindMatch,
+  executeCxLogicsActivity,
+  executeCxLogicsAmortization,
+  executeCxLogicsInvoice,
+  executeCxLogicsNotes,
+  executeCxLogicsTask,
+  executeCxLogicsUpdateCase,
+  enqueueCxSmokeLead,
+  simulateCxIncomingCall,
   reviewCaseActivities,
+  canonicalizeMirroredMetrics,
   CONTROL_PLANE_EVENT_TYPES,
   buildControlPlaneHealthReport,
+  relayControlPlaneEvent,
+  relayMetricObserved,
+  relayReviewItemObserved,
+  relayRingcentralTelephonyForwarded,
   buildControlPlaneReadOverview,
   buildClientDetail,
+  buildClientWorkspaceList,
   buildCallrailWorkspace,
   buildDailySummaryWorkspace,
+  buildDeployWorkspace,
+  buildInboxWorkspace,
+  buildLibraryWorkspace,
   buildMailCostWorkspace,
   buildHourlyHygienePlan,
+  claimNextHourlyJobEvent,
+  computeNextLaneRunAt,
   OUTBOUND_EVENT_TYPES,
+  createCadenceSweepEvents,
+  evaluateCounterCadenceDueItems,
+  getCounterCadenceCounters,
+  getCounterCadenceLastTouched,
+  getCounterCadenceTemplateKey,
+  isCounterCadenceBatchTime,
+  pollCounterCadenceRvmDispositions,
+  recordCounterCadenceTouch,
+  runCounterCadenceSweep,
+  selectCounterCadenceDueItems,
   buildWorkList,
+  fireImmediateContact,
   intakeAffiliateLead,
   intakeFacebookLead,
   intakeInstagramLead,
   intakeLdLead,
   intakeLexisBatch,
   intakeNormalizedLead,
+  notifyAffiliatePostback,
+  normalizeAffiliateLeadPayload,
+  normalizeLdLeadPayload,
   intakeOrganicLandingLead,
   intakeTikTokLead,
   intakeVfLandingLead,
   intakeWebsiteLead,
   listHourlyReviewFeed,
+  listHourlyJobEvents,
   pushHourlyReviewItem,
   classifyActivityForAttribution,
+  buildContactLibraryCatalog,
+  runClientCaseScrub,
+  backfillLegacyMetricsRange,
   listLastMonthInboundCalls,
   lookupInboundCall,
   listCxAgentStates,
+  listEligibleAgentsForCx,
+  previewCallLedgerForDomain,
+  previewHourlyCallLedger,
+  buildCallLedgerEntryFromCallLog,
+  syncCallLedgerBySession,
+  syncCallLedgerFromCallLog,
+  previewHourlyFinancialSync,
+  previewScheduledBlast,
+  listMetricsAttributionReviewItems,
+  reconcileMetricsAttributionCandidates,
+  resolveMetricsAttributionReviewItem,
+  ignoreMetricsAttributionReviewItem,
+  reopenMetricsAttributionReviewItem,
+  listCxLogicsTasks,
+  listCxTasks,
   extractMailerLabel,
   buildDataHygieneOverview,
   buildMetricsWorkspace,
   buildMetricSourcesWorkspace,
   buildRedlineWorkspace,
   buildReviewWorkspace,
+  buildRingBridgeWorkspace,
   buildRingCentralWorkspace,
+  buildScheduleHistoryWorkspace,
   buildScheduleWorkspace,
+  buildWorkspaceShell,
   buildDailyDeepCutDashboard,
   buildDailyDeepCutPlan,
+  buildManagementSnapshot,
+  buildNightlyClosePlan,
   getDailyDeepCutRun,
   listDailyDeepCutRuns,
   recordDailyDeepCutRun,
   startDailyDeepCutRun,
   startDailyDeepCutVerification,
+  buildVendorReport,
   buildControlPlaneSummary,
   createControlPlaneEvent,
   createOutboundEvent,
   buildDispatchList,
+  buildScheduledBlastRuntimeSnapshot,
   getWorkList,
   buildProviderHealth,
   processControlPlaneEventBatch,
   processNextOutboundEvent,
   processOutboundEventBatch,
+  pollOutboundRvmDispositions,
+  sendOutboundCallFireDial,
+  sendOutboundCallFireDialBatch,
   buildCapabilitySummary,
   buildDailyStatusScanWorkflow,
   buildDomainStatusScanPlan,
   buildLogicsScanSummary,
   buildRecommendedWorkflow,
+  buildSpendSyncRead,
+  buildVendorDailySummary,
+  runVendorNightlyEmail,
+  runVendorNightlyClosePass,
+  buildVendorCallRows,
+  buildVendorLeadRows,
+  buildVendorOutcomeRows,
+  getActiveMailers,
+  getMailerConfigState,
+  getMailerHistory,
+  computeSpendSyncNextRunAt,
+  collectFiles,
+  clearScheduledTelephonySessions,
+  claimNextCxQueueItem,
+  createCxCallPlacedEvent,
   createLogicsFacade,
+  downloadLatestLexisZip,
   buildProspectStatusDiff,
   extractAttributionCandidates,
   EX_EVENT_TYPES,
+  fetchCallRecordWithRetry,
+  fetchLatestLexisDrop,
+  processTelephonySessionCandidate,
+  resolveSourceForCallRecord,
+  resolveSourceFromDid,
+  resolveSourceFromLegs,
   getControlPlaneDomain,
   getDispatchList,
+  getScheduledTelephonySessionState,
+  getMetaWebhookVerifyToken,
   getWorkspaceForUser,
+  classifySms,
+  fastStopCheck,
+  SMS_CLASSIFIER_MODEL,
+  runAutoResponder,
+  evaluateAutoSendGates,
+  enforceReplyConstraints,
+  AUTO_REPLY_COOLDOWN_MS,
+  getLegacyMetricsMirrorStatus,
   listActiveSourceCanonicals,
+  listMetaWebhookDomains,
+  isMailerConfigLoaded,
   listPresentationCaseProfiles,
   listPresentationPayments,
   listPresentationProspects,
   listControlPlaneDomains,
   listReviewWorkspaceItems,
+  listRingCentralEvents,
   listScheduleCadence,
   listDispatchLists,
   listWorkLists,
   listServiceTopology,
+  CX_CADENCE_EVENT_TYPES,
+  buildNcoaCreateCasePayload,
+  mapLexisRowsForIntake,
+  normalizeNcoaRow,
+  parseLexisCsv,
+  parseNcoaCsv,
   parseLogicsData,
   parseSuccessfulPayments,
+  processMailHouseCsv,
+  processCxCadenceEventBatch,
+  processNextCxCadenceEvent,
   processNextControlPlaneEvent,
+  publishQueueItemToRingcx,
+  executeCxDispatchIntent,
+  executeCxHangupRequest,
   probeTelephonySessionLookup,
   processPresenceEnvelope,
   publishDemoEvent,
+  queueCxDialRequest,
   queueDispatchList,
+  queueScheduledBlast,
   queueWorkList,
+  regenerateInboxWorkflow,
   recordConversationAi,
   recordQualityReview,
+  resolveCaseContactEligibility,
   recordWorkflowStage,
+  requestCxAssignCaseToMe,
+  requestCxDial,
+  requestCxEndCall,
+  requestCxDisposition,
+  requestCxEmail,
+  requestCxLogicsCreateCase,
+  requestCxLogicsFindMatch,
+  requestCxLeadStatusUpdate,
+  requestCxReminder,
+  requestCxStatusChange,
+  requestCxTask,
+  requestCxText,
+  reconcileMailerConfigsWithSheet,
+  resolveScheduledBlastRule,
   resolveCanonicalAttribution,
   resolveCanonicalSource,
+  resolveMailer,
+  resolveMailerAt,
+  resolveMailerByRcExtension,
+  resolveMailerByTrackingNumber,
+  buildCampaignAudience,
+  extractCadenceEmailIndex,
+  extractCadenceSmsIndex,
+  resolveCadenceEmailContent,
+  resolveCadenceSmsContent,
+  buildCallLog,
+  buildRingcentralPollingRuntime,
+  countLegacyContactActivities,
+  listLegacyContactActivities,
+  seedRingcentralExtensionsFromCsv,
+  reconcileUnattributedSessions,
+  runRingCentralCallLogSweep,
+  resolveInboundCallSource,
+  emitServiceRequest,
+  isRecordingArchiveConfigured,
+  isTranscriptionConfigured,
+  processCallRecordingArchive,
+  processCallLogRecording,
+  queueCallRecordingArchiveJob,
+  rebuildFreshHotLane,
+  processMetaSocialWebhook,
+  syncUsersFromRcExtensions,
+  buildMetricsPulse,
+  SHORT_CIRCUIT_INTAKE_SOURCES,
+  runProspectSweep,
+  runScheduledBlastSweep,
+  DEPLOY_ACTION_KEYS,
+  buildDeployState,
+  buildSocialResponderWorkspace,
+  cancelDeployRun,
+  listDeployRuns,
+  triggerDeploy,
   mirrorAgentState,
+  normalizeAssignmentStats,
+  normalizeCxQueueFamily,
+  rankAgentsForQueueItem,
+  deriveCxQueueFamily,
   normalizeFacebookLeadPayload,
   normalizeInstagramLeadPayload,
   normalizeTikTokLeadPayload,
   normalizeWebsiteLeadPayload,
   runDataHygieneSmoke,
   recordServiceAlert,
+  releaseCxQueueBatch,
+  runFreshHotLaneAllocator,
   scheduleTelephonySessionEnvelope,
+  sleepInboxWorkflow,
   seedPresenceForAgents,
+  sendMail,
   sendPlainEmail,
+  sendFinancialCloseEmail,
+  sendLeadDataCloseEmail,
+  sendRedlineAlertEmail,
+  sendOpsStatusEmail,
+  runGroupedNightlyClose,
+  buildGroupedNightlyPayload,
+  renderEmailHtml,
+  clearMailerCaches,
+  buildMonthToDateSnapshot,
+  buildTransitionsBySource,
+  buildDealsBySource,
+  buildSpendByChannel,
+  buildTodaysCalls,
+  buildTodaysPaymentAlerts,
+  buildOpenServiceAlerts,
+  sendLexisDailyDropMail,
+  sendLexisRegionalMail,
   sendTestEmail,
   searchClientWorkspace,
+  searchCxCases,
+  lookupCxLogicsMatch,
+  getSpendSheets,
+  loadMailerConfigCache,
   startPresencePoller,
+  ingestLatestLexisDrop,
+  readLexisDailyDropState,
+  writeLexisDailyDropState,
+  isLexisDailyDropDelivered,
+  queueLexisDailyDropRetry,
+  formatLexisDailyDropDateKey,
+  summarizeLexisCounts,
+  buildRunId,
+  createSpendSyncRuntime,
+  parseSpendCsv,
+  parseMailerRow,
+  parseMetaRow,
+  emitHourlyJobEvent,
+  executeNightlyCloseRun,
+  markHourlyJobCompleted,
+  markHourlyJobFailed,
+  notifyHourlyJobAlert,
+  EMAIL_TEMPLATE_CATALOG,
+  listEmailTemplates,
+  renderEmailTemplate,
+  lookupCxLead,
+  findCxLeadCandidates,
+  hourlyJobHandlerRegistry,
+  hourlyJobResolutionCheckRegistry,
+  drainHourlyJobQueue,
+  runHourlyLeadCadenceEnforcement,
+  runHourlyCallLogHygiene,
+  runHourlyCallLogHygieneForDomain,
+  runHourlyMetricsRefresh,
+  runHourlySweep,
+  sendResolutionEmails,
+  summarizeHourlySweepResult,
+  reconcilePaymentsForCase,
+  reconcilePaymentsForDomain,
+  runPaymentFieldsSync,
+  runSubscriptionWatchdog,
+  checkRingcentralEventSilence,
+  recordRingcentralEvent,
+  getRingcentralWatchdogState,
+  getFreshHotLaneSnapshot,
   summarizeSuccessfulPayments,
+  syncLegacyAttributionMaps,
+  syncLegacyMetricsMirror,
+  unzipLexisArchive,
+  uploadNcoaRows,
+  getNcoaUploadProgress,
+  sweepStaleNcoaBatches,
+  intakeLdPrePing,
   validateLeadWebhook,
   listWorkflowStages,
+  saveSocialResponderConfig,
+  stopCaseContact,
+  startNightlyCloseRun,
+  wakeInboxWorkflow,
+  wrapHourlyJobs,
 };

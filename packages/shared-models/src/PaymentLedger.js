@@ -2,6 +2,10 @@
 
 const mongoose = require("mongoose");
 
+// IDENTIFIER SCOPE: `casePaymentId` is globally unique because all companies
+// share a single Logics billing tenant — Logics issues a monotonic payment id
+// across the whole account. If a new company joins on its own Logics tenant,
+// this must become `{ domain: 1, casePaymentId: 1 }` unique.
 const paymentLedgerSchema = new mongoose.Schema(
   {
     domain: { type: String, required: true, index: true },

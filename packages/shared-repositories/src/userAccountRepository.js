@@ -1,0 +1,422 @@
+"use strict";
+
+const { UserAccount } = require("../../shared-models/src");
+
+const CX_QUEUE_POLICY_TIERS = new Set([
+  "no_leads",
+  "red_only",
+  "old_balanced",
+  "fresh_capped",
+  "fresh_priority",
+]);
+
+function normalizeEmail(email) {
+  return String(email || "").trim().toLowerCase();
+}
+
+function normalizeExtension(extensionId) {
+  if (extensionId === null || extensionId === undefined) return null;
+  const value = String(extensionId).trim();
+  return value.length > 0 ? value : null;
+}
+
+function normalizePhone(value) {
+  const digits = String(value || "").replace(/\D/g, "");
+  if (!digits) return null;
+  if (digits.length === 11 && digits.startsWith("1")) return digits.slice(1);
+  return digits.length > 10 ? digits.slice(-10) : digits;
+}
+
+function toNullableNumber(value) {
+  if (value === null || value === undefined || value === "") return null;
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+function normalizeCxQueuePolicy(input) {
+  if (input === undefined) return undefined;
+  if (input === null) return null;
+  if (typeof input !== "object") return undefined;
+
+  const tier = String(input.tier || "").trim();
+  const out = {
+    tier: CX_QUEUE_POLICY_TIERS.has(tier) ? tier : null,
+    enabled: input.enabled === undefined ? true : Boolean(input.enabled),
+    fresh: {
+      eligible: input.fresh?.eligible == null ? null : Boolean(input.fresh.eligible),
+      targetOpen: toNullableNumber(input.fresh?.targetOpen),
+      hourlyCap: toNullableNumber(input.fresh?.hourlyCap),
+      priorityWeight: toNullableNumber(input.fresh?.priorityWeight),
+    },
+    day2to15: {
+      targetOpen: toNullableNumber(input.day2to15?.targetOpen),
+    },
+    aged: {
+      targetOpen: toNullableNumber(input.aged?.targetOpen),
+    },
+    updatedAt: input.updatedAt || null,
+    updatedBy: input.updatedBy || null,
+  };
+
+  return out;
+}
+
+function normalizeExShells(shells) {
+  if (!Array.isArray(shells)) return [];
+  return shells
+    .map((shell) => {
+      if (!shell || typeof shell !== "object") return null;
+      const loginPhones = (Array.isArray(shell.loginPhones) ? shell.loginPhones : [])
+        .map(normalizePhone)
+        .filter(Boolean);
+      const primaryPhone = normalizePhone(shell.primaryPhone) || loginPhones[0] || null;
+      const company = String(shell.company || "").trim().toUpperCase();
+      return {
+        company: ["TAG", "WYNN", "AMITY"].includes(company) ? company : "TAG",
+        email: shell.email ? normalizeEmail(shell.email) : null,
+        name: shell.name ? String(shell.name).trim() : null,
+        extensionNumber:
+          shell.extensionNumber != null ? String(shell.extensionNumber).trim() || null : null,
+        loginPhones,
+        primaryPhone,
+        rcExtensionId: normalizeExtension(shell.rcExtensionId),
+        lastResolvedAt: shell.lastResolvedAt || null,
+        source: shell.source ? String(shell.source).trim() : null,
+      };
+    })
+    .filter(Boolean);
+}
+
+function toAccountRecord(doc) {
+  if (!doc) return null;
+  const plain = typeof doc.toObject === "function" ? doc.toObject() : doc;
+  return {
+    id: String(plain._id),
+    email: plain.email,
+    name: plain.name,
+    role: plain.role,
+    permissions: Array.isArray(plain.permissions) ? plain.permissions : [],
+    permissionsUpdatedAt: plain.permissionsUpdatedAt || null,
+    permissionsUpdatedBy: plain.permissionsUpdatedBy || null,
+    audience: plain.audience,
+    workspace: plain.workspace || "general",
+    stationLabel: plain.stationLabel || null,
+    company: plain.company || null,
+    logicsUserId: plain.logicsUserId || null,
+    logicsDisplayName: plain.logicsDisplayName || null,
+    tagLogicsId: plain.tagLogicsId || null,
+    tagSOId: plain.tagSOId || null,
+    tagEmail: plain.tagEmail || null,
+    tagLogicsName: plain.tagLogicsName || null,
+    tagLogicsRoles: plain.tagLogicsRoles || null,
+    wynnLogicsId: plain.wynnLogicsId || null,
+    wynnSOId: plain.wynnSOId || null,
+    wynnEmail: plain.wynnEmail || null,
+    wynnLogicsName: plain.wynnLogicsName || null,
+    wynnLogicsRoles: plain.wynnLogicsRoles || null,
+    logicsAuth: plain.logicsAuth || null,
+    extensionId: plain.extensionId || null,
+    extensionNumber: plain.extensionNumber || null,
+    cxAgentId: plain.cxAgentId || null,
+    phone: plain.phone || null,
+    cxQueuePolicy: normalizeCxQueuePolicy(plain.cxQueuePolicy) || null,
+    cxAuth: plain.cxAuth || null,
+    cxSession: plain.cxSession || null,
+    exShells: normalizeExShells(plain.exShells || []),
+    status: plain.status,
+    source: plain.source || "manual",
+    lastLoginAt: plain.lastLoginAt || null,
+    disabledAt: plain.disabledAt || null,
+    createdAt: plain.createdAt || null,
+    updatedAt: plain.updatedAt || null,
+    metadata: plain.metadata || null,
+  };
+}
+
+async function findUserAccountByEmail(email) {
+  const normalizedEmail = normalizeEmail(email);
+  if (!normalizedEmail) return null;
+  const doc = await UserAccount.findOne({ email: normalizedEmail }).lean();
+  return toAccountRecord(doc);
+}
+
+async function findUserAccountById(id) {
+  if (!id) return null;
+  const doc = await UserAccount.findById(id).lean();
+  return toAccountRecord(doc);
+}
+
+async function findUserAccountByExtensionId(extensionId) {
+  const normalized = normalizeExtension(extensionId);
+  if (!normalized) return null;
+  // Match the canonical primary extensionId OR any sibling extension
+  // tracked in metadata.additionalExtensionIds. Each human has one UA
+  // (keyed by their TAG-domain email) but can be paired to multiple
+  // RC extensions across tenants — the wynn/amity tenant extensions
+  // route to the same UA so dial/cx routing finds the right agent
+  // regardless of which tenant's queue served the call.
+  const doc = await UserAccount.findOne({
+    $or: [
+      { extensionId: normalized },
+      { "metadata.additionalExtensionIds": normalized },
+    ],
+  }).lean();
+  return toAccountRecord(doc);
+}
+
+async function listUserAccounts(filters = {}) {
+  const query = {};
+  if (filters.status) query.status = filters.status;
+  if (filters.role) query.role = filters.role;
+  if (filters.audience) query.audience = filters.audience;
+  if (filters.company) query.company = filters.company;
+  if (filters.search) {
+    const search = String(filters.search).trim();
+    if (search) {
+      const pattern = new RegExp(search.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
+      query.$or = [{ email: pattern }, { name: pattern }];
+    }
+  }
+
+  const limit = Math.min(Number(filters.limit) || 200, 1000);
+  const docs = await UserAccount.find(query).sort({ name: 1, email: 1 }).limit(limit).lean();
+  return docs.map(toAccountRecord);
+}
+
+async function createUserAccount(input = {}) {
+  const payload = {
+    email: normalizeEmail(input.email),
+    name: String(input.name || "").trim(),
+    role: input.role || "widget-user",
+    permissions: Array.isArray(input.permissions) ? input.permissions : [],
+    permissionsUpdatedAt: input.permissionsUpdatedAt || null,
+    permissionsUpdatedBy: input.permissionsUpdatedBy || null,
+    audience: input.audience || (input.role === "admin" ? "admin" : "user"),
+    workspace: input.workspace || "general",
+    stationLabel: input.stationLabel || null,
+    company: input.company || "TAG",
+    logicsUserId: input.logicsUserId != null ? Number(input.logicsUserId) : null,
+    logicsDisplayName: input.logicsDisplayName || null,
+    tagLogicsId: input.tagLogicsId != null ? Number(input.tagLogicsId) || null : null,
+    tagSOId: input.tagSOId != null ? Number(input.tagSOId) || null : null,
+    tagEmail: input.tagEmail ? normalizeEmail(input.tagEmail) : null,
+    tagLogicsName: input.tagLogicsName || null,
+    tagLogicsRoles: input.tagLogicsRoles || null,
+    wynnLogicsId: input.wynnLogicsId != null ? Number(input.wynnLogicsId) || null : null,
+    wynnSOId: input.wynnSOId != null ? Number(input.wynnSOId) || null : null,
+    wynnEmail: input.wynnEmail ? normalizeEmail(input.wynnEmail) : null,
+    wynnLogicsName: input.wynnLogicsName || null,
+    wynnLogicsRoles: input.wynnLogicsRoles || null,
+    logicsAuth: input.logicsAuth || null,
+    extensionId: normalizeExtension(input.extensionId),
+    extensionNumber: input.extensionNumber != null ? String(input.extensionNumber).trim() || null : null,
+    cxAgentId: input.cxAgentId || null,
+    phone: input.phone || null,
+    cxQueuePolicy: normalizeCxQueuePolicy(input.cxQueuePolicy) || null,
+    exShells: normalizeExShells(input.exShells),
+    status: input.status || "active",
+    source: input.source || "manual",
+    metadata: input.metadata || null,
+  };
+
+  if (!payload.email) {
+    const err = new Error("email is required");
+    err.status = 400;
+    throw err;
+  }
+  if (!payload.name) {
+    const err = new Error("name is required");
+    err.status = 400;
+    throw err;
+  }
+
+  try {
+    const doc = await UserAccount.create(payload);
+    return toAccountRecord(doc);
+  } catch (error) {
+    if (error && error.code === 11000) {
+      const err = new Error("An account with that email already exists");
+      err.status = 409;
+      throw err;
+    }
+    throw error;
+  }
+}
+
+async function upsertUserAccount(input = {}) {
+  const email = normalizeEmail(input.email);
+  if (!email) {
+    const err = new Error("email is required");
+    err.status = 400;
+    throw err;
+  }
+
+  const update = { $set: {}, $setOnInsert: {} };
+  const setFields = [
+    "name",
+    "role",
+    "permissions",
+    "permissionsUpdatedAt",
+    "permissionsUpdatedBy",
+    "audience",
+    "workspace",
+    "stationLabel",
+    "company",
+    "logicsUserId",
+    "logicsDisplayName",
+    "tagLogicsId",
+    "tagSOId",
+    "tagEmail",
+    "tagLogicsName",
+    "tagLogicsRoles",
+    "wynnLogicsId",
+    "wynnSOId",
+    "wynnEmail",
+    "wynnLogicsName",
+    "wynnLogicsRoles",
+    "logicsAuth",
+    "extensionId",
+    "extensionNumber",
+    "cxAgentId",
+    "phone",
+    "cxQueuePolicy",
+    "exShells",
+    "status",
+    "metadata",
+  ];
+  for (const key of setFields) {
+    if (input[key] === undefined) continue;
+    update.$set[key] =
+      key === "extensionId"
+        ? normalizeExtension(input[key])
+        : key === "logicsUserId" || key === "tagLogicsId" || key === "tagSOId" || key === "wynnLogicsId" || key === "wynnSOId"
+          ? (input[key] == null ? null : Number(input[key]) || null)
+        : key === "tagEmail" || key === "wynnEmail"
+          ? (input[key] ? normalizeEmail(input[key]) : null)
+          : key === "cxQueuePolicy"
+            ? normalizeCxQueuePolicy(input[key])
+          : key === "exShells"
+            ? normalizeExShells(input[key])
+            : input[key];
+  }
+  update.$setOnInsert.email = email;
+  update.$setOnInsert.source = input.source || "manual";
+  if (Object.keys(update.$set).length === 0) delete update.$set;
+
+  const doc = await UserAccount.findOneAndUpdate({ email }, update, {
+    new: true,
+    upsert: true,
+    setDefaultsOnInsert: true,
+  });
+  return toAccountRecord(doc);
+}
+
+async function updateUserAccount(id, patch = {}) {
+  if (!id) {
+    const err = new Error("id is required");
+    err.status = 400;
+    throw err;
+  }
+
+  const set = {};
+  const editable = [
+    "name",
+    "role",
+    "permissions",
+    "permissionsUpdatedAt",
+    "permissionsUpdatedBy",
+    "audience",
+    "workspace",
+    "stationLabel",
+    "company",
+    "logicsUserId",
+    "logicsDisplayName",
+    "tagLogicsId",
+    "tagSOId",
+    "tagEmail",
+    "tagLogicsName",
+    "tagLogicsRoles",
+    "wynnLogicsId",
+    "wynnSOId",
+    "wynnEmail",
+    "wynnLogicsName",
+    "wynnLogicsRoles",
+    "logicsAuth",
+    "extensionId",
+    "extensionNumber",
+    "cxAgentId",
+    "phone",
+    "cxQueuePolicy",
+    "exShells",
+    "status",
+    "metadata",
+  ];
+  for (const key of editable) {
+    if (patch[key] === undefined) continue;
+    set[key] =
+      key === "extensionId"
+        ? normalizeExtension(patch[key])
+        : key === "logicsUserId" || key === "tagLogicsId" || key === "tagSOId" || key === "wynnLogicsId" || key === "wynnSOId"
+          ? (patch[key] == null ? null : Number(patch[key]) || null)
+        : key === "tagEmail" || key === "wynnEmail"
+          ? (patch[key] ? normalizeEmail(patch[key]) : null)
+          : key === "cxQueuePolicy"
+            ? normalizeCxQueuePolicy(patch[key])
+          : key === "exShells"
+            ? normalizeExShells(patch[key])
+            : patch[key];
+  }
+  for (const [key, value] of Object.entries(patch)) {
+    if (!key.includes(".")) continue;
+    if (
+      key.startsWith("cxAuth.")
+      || key.startsWith("cxSession.")
+    ) {
+      set[key] = value;
+    }
+  }
+  if (patch.status === "disabled" && !patch.disabledAt) {
+    set.disabledAt = new Date();
+  }
+  if (patch.status === "active") {
+    set.disabledAt = null;
+  }
+
+  if (Object.keys(set).length === 0) {
+    const existing = await UserAccount.findById(id).lean();
+    if (!existing) {
+      const err = new Error("Account not found");
+      err.status = 404;
+      throw err;
+    }
+    return toAccountRecord(existing);
+  }
+
+  const doc = await UserAccount.findByIdAndUpdate(id, { $set: set }, { new: true });
+  if (!doc) {
+    const err = new Error("Account not found");
+    err.status = 404;
+    throw err;
+  }
+  return toAccountRecord(doc);
+}
+
+async function touchUserAccountLogin(email) {
+  const normalized = normalizeEmail(email);
+  if (!normalized) return;
+  await UserAccount.updateOne(
+    { email: normalized },
+    { $set: { lastLoginAt: new Date() } },
+  );
+}
+
+module.exports = {
+  createUserAccount,
+  findUserAccountByEmail,
+  findUserAccountById,
+  findUserAccountByExtensionId,
+  listUserAccounts,
+  touchUserAccountLogin,
+  updateUserAccount,
+  upsertUserAccount,
+};

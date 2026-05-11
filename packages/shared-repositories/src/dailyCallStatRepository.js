@@ -31,12 +31,33 @@ async function listDailyCallStats(filters = {}) {
     .lean();
 }
 
+/**
+ * Apply cross-tenant piece filtering. Because DailyCallStat is
+ * cross-company by design (one CallRail account per platform), callers
+ * pass `excludePieces: [string[]]` (piece names owned by other domains)
+ * so we drop rows that explicitly belong elsewhere. Pieces with no
+ * ownership stay visible everywhere — that's the intended cross-tenant
+ * default for mail pieces.
+ */
+function applyPieceFilters(query, filters) {
+  if (Array.isArray(filters.pieces) && filters.pieces.length > 0) {
+    query.piece = { $in: filters.pieces };
+  }
+  if (Array.isArray(filters.excludePieces) && filters.excludePieces.length > 0) {
+    query.piece = Object.assign(query.piece || {}, {
+      $nin: filters.excludePieces,
+    });
+  }
+  return query;
+}
+
 async function summarizeCallStats(filters = {}) {
   const query = {
     ...buildDateRangeQuery(filters),
   };
 
   if (filters.channel) query.channel = normalizeDomainChannel(filters.channel);
+  applyPieceFilters(query, filters);
 
   return DailyCallStat.aggregate([
     { $match: query },
@@ -59,6 +80,8 @@ async function summarizeCallsByChannel(filters = {}) {
   const query = {
     ...buildDateRangeQuery(filters),
   };
+
+  applyPieceFilters(query, filters);
 
   return DailyCallStat.aggregate([
     { $match: query },

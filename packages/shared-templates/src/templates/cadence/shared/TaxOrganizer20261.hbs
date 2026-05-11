@@ -1,0 +1,59 @@
+<!-- tax-01-welcome.hbs -->
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Welcome to Tax Season</title>
+  </head>
+  <body
+    style="font-family: Arial, sans-serif; line-height: 1.6; color: #333; padding: 20px;"
+  >
+    <table
+      style="max-width:600px; width:100%; margin:auto; border-collapse: collapse;"
+    >
+      <tr>
+        <td style="padding: 20px; border: 1px solid #ddd;">
+
+          <img
+            src="cid:emailHeader"
+            width="600"
+            style="display:block;width:100%;max-width:600px;height:auto;"
+            alt="Tax Season"
+          />
+
+          <h2 style="color: #2a7ae2;">Hi {{name}},</h2>
+
+          <h3>Tax season is here — and 2025 is in the books.</h3>
+
+          <p>
+            We’re reaching out as we move into filing season for your
+            <strong>2025 return</strong>. If you think you’ll need help getting
+            organized, gathering documents, or planning next steps, we’re here
+            for you.
+          </p>
+
+          <p>
+            Over the next few weeks we’ll send a few short reminders to keep
+            things simple and on track. If you’d like to get ahead of it now,
+            just give us a call and we’ll walk through what to expect.
+          </p>
+
+          <p style="margin-top: 20px; font-weight: bold;">
+            Call our consultant help line at
+            <a
+              href="tel:+1 {{phone}}"
+              style="color: #2a7ae2; text-decoration: none;"
+            >{{phone}}</a>. If you already have documents ready, you can send
+            them to
+            {{processingEmail}}.
+          </p>
+
+          <div style="margin-top: 30px;">
+            {{{signature}}}
+          </div>
+
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>

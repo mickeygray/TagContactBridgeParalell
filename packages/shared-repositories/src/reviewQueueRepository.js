@@ -33,8 +33,17 @@ async function countReviewQueueItems(domain, filters = {}) {
   return ReviewQueueItem.countDocuments(query);
 }
 
+async function updateReviewQueueItem(id, update = {}) {
+  return ReviewQueueItem.findByIdAndUpdate(
+    id,
+    { $set: update },
+    { new: true },
+  ).lean();
+}
+
 module.exports = {
   countReviewQueueItems,
   createReviewQueueItem,
   listReviewQueueItems,
+  updateReviewQueueItem,
 };

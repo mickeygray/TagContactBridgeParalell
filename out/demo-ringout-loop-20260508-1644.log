@@ -1,0 +1,16 @@
+{"timestamp":"2026-05-08T23:44:04.959Z","level":"info","scope":"demo-ringout-loop-script","message":"demo-ringout.fired","meta":{"ok":true,"dryRun":false,"primary":{"id":"s-a0d161305d554z19e09fa105cz4459aab0000"},"external":null}}
+{
+  "ok": true,
+  "dryRun": false,
+  "primary": {
+    "uri": "https://platform.ringcentral.com/restapi/v1.0/account/2252193005/extension/63730035004/ring-out/s-a0d161305d554z19e09fa105cz4459aab0000",
+    "id": "s-a0d161305d554z19e09fa105cz4459aab0000",
+    "status": {
+      "callStatus": "InProgress",
+      "callerStatus": "InProgress",
+      "calleeStatus": "InProgress"
+    }
+  },
+  "external": null
+}
+{"timestamp":"2026-05-08T23:44:05.363Z","level":"info","scope":"demo-ringout-loop-script","message":"runtime.shutdown.completed","meta":{"reason":"demo-ringout-loop-script-complete"}}

@@ -1,0 +1,32 @@
+{
+  "event": "plan",
+  "ok": true,
+  "dryRun": false,
+  "mode": "ringout-noanswer-loop",
+  "count": 45,
+  "ringSeconds": 120,
+  "pauseSeconds": 60,
+  "toPhone": "***5148",
+  "targets": [
+    {
+      "extensionId": "2426116005",
+      "phone": "***7884"
+    },
+    {
+      "extensionId": "63898174004",
+      "phone": "***5875"
+    },
+    {
+      "extensionId": "63898148004",
+      "phone": "***3702"
+    }
+  ]
+}
+{"event":"fired","iteration":1,"count":45,"fired":[{"target":"2426116005:***7884","ok":false,"id":null,"error":"RingCentral request failed POST /restapi/v1.0/account/~/extension/2426116005/ring-out: 403"},{"target":"63898174004:***5875","ok":false,"id":null,"error":"RingCentral request failed POST /restapi/v1.0/account/~/extension/63898174004/ring-out: 403"},{"target":"63898148004:***3702","ok":false,"id":null,"error":"RingCentral request failed POST /restapi/v1.0/account/~/extension/63898148004/ring-out: 403"}]}
+{"event":"cancelled","iteration":1,"fired":[{"target":"2426116005:***7884","ok":false,"id":null,"error":"RingCentral request failed POST /restapi/v1.0/account/~/extension/2426116005/ring-out: 403"},{"target":"63898174004:***5875","ok":false,"id":null,"error":"RingCentral request failed POST /restapi/v1.0/account/~/extension/63898174004/ring-out: 403"},{"target":"63898148004:***3702","ok":false,"id":null,"error":"RingCentral request failed POST /restapi/v1.0/account/~/extension/63898148004/ring-out: 403"}],"cancelled":[{"target":"2426116005:***7884","ok":false,"id":null,"alreadyGone":false,"error":null},{"target":"63898174004:***5875","ok":false,"id":null,"alreadyGone":false,"error":null},{"target":"63898148004:***3702","ok":false,"id":null,"alreadyGone":false,"error":null}]}
+{"event":"fired","iteration":2,"count":45,"fired":[{"target":"2426116005:***7884","ok":false,"id":null,"error":"RingCentral request failed POST /restapi/v1.0/account/~/extension/2426116005/ring-out: 403"},{"target":"63898174004:***5875","ok":false,"id":null,"error":"RingCentral request failed POST /restapi/v1.0/account/~/extension/63898174004/ring-out: 403"},{"target":"63898148004:***3702","ok":false,"id":null,"error":"RingCentral request failed POST /restapi/v1.0/account/~/extension/63898148004/ring-out: 403"}]}
+{"event":"cancelled","iteration":2,"fired":[{"target":"2426116005:***7884","ok":false,"id":null,"error":"RingCentral request failed POST /restapi/v1.0/account/~/extension/2426116005/ring-out: 403"},{"target":"63898174004:***5875","ok":false,"id":null,"error":"RingCentral request failed POST /restapi/v1.0/account/~/extension/63898174004/ring-out: 403"},{"target":"63898148004:***3702","ok":false,"id":null,"error":"RingCentral request failed POST /restapi/v1.0/account/~/extension/63898148004/ring-out: 403"}],"cancelled":[{"target":"2426116005:***7884","ok":false,"id":null,"alreadyGone":false,"error":null},{"target":"63898174004:***5875","ok":false,"id":null,"alreadyGone":false,"error":null},{"target":"63898148004:***3702","ok":false,"id":null,"alreadyGone":false,"error":null}]}
+{"event":"fired","iteration":3,"count":45,"fired":[{"target":"2426116005:***7884","ok":false,"id":null,"error":"RingCentral request failed POST /restapi/v1.0/account/~/extension/2426116005/ring-out: 429"},{"target":"63898174004:***5875","ok":false,"id":null,"error":"RingCentral request failed POST /restapi/v1.0/account/~/extension/63898174004/ring-out: 429"},{"target":"63898148004:***3702","ok":false,"id":null,"error":"RingCentral request failed POST /restapi/v1.0/account/~/extension/63898148004/ring-out: 429"}]}
+{"event":"cancelled","iteration":3,"fired":[{"target":"2426116005:***7884","ok":false,"id":null,"error":"RingCentral request failed POST /restapi/v1.0/account/~/extension/2426116005/ring-out: 429"},{"target":"63898174004:***5875","ok":false,"id":null,"error":"RingCentral request failed POST /restapi/v1.0/account/~/extension/63898174004/ring-out: 429"},{"target":"63898148004:***3702","ok":false,"id":null,"error":"RingCentral request failed POST /restapi/v1.0/account/~/extension/63898148004/ring-out: 429"}],"cancelled":[{"target":"2426116005:***7884","ok":false,"id":null,"alreadyGone":false,"error":null},{"target":"63898174004:***5875","ok":false,"id":null,"alreadyGone":false,"error":null},{"target":"63898148004:***3702","ok":false,"id":null,"alreadyGone":false,"error":null}]}
+{"event":"fired","iteration":4,"count":45,"fired":[{"target":"2426116005:***7884","ok":false,"id":null,"error":"RingCentral request failed POST /restapi/v1.0/account/~/extension/2426116005/ring-out: 403"},{"target":"63898174004:***5875","ok":false,"id":null,"error":"RingCentral request failed POST /restapi/v1.0/account/~/extension/63898174004/ring-out: 403"},{"target":"63898148004:***3702","ok":false,"id":null,"error":"RingCentral request failed POST /restapi/v1.0/account/~/extension/63898148004/ring-out: 403"}]}
+{"event":"cancelled","iteration":4,"fired":[{"target":"2426116005:***7884","ok":false,"id":null,"error":"RingCentral request failed POST /restapi/v1.0/account/~/extension/2426116005/ring-out: 403"},{"target":"63898174004:***5875","ok":false,"id":null,"error":"RingCentral request failed POST /restapi/v1.0/account/~/extension/63898174004/ring-out: 403"},{"target":"63898148004:***3702","ok":false,"id":null,"error":"RingCentral request failed POST /restapi/v1.0/account/~/extension/63898148004/ring-out: 403"}],"cancelled":[{"target":"2426116005:***7884","ok":false,"id":null,"alreadyGone":false,"error":null},{"target":"63898174004:***5875","ok":false,"id":null,"alreadyGone":false,"error":null},{"target":"63898148004:***3702","ok":false,"id":null,"alreadyGone":false,"error":null}]}

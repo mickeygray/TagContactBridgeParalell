@@ -1,0 +1,53 @@
+{
+  "dateKey": "2026-04-26",
+  "timeZone": "America/Los_Angeles",
+  "startedAt": "2026-04-26T07:00:00.000Z",
+  "endedAt": "2026-04-27T06:59:59.999Z",
+  "dryRun": false,
+  "minDurationSec": 480,
+  "canUpload": true,
+  "configuredFolders": {
+    "OG": "1Pkc3jpJ6MPHgDrWQR7WQachiX5LP7QuS",
+    "AS": "1YAIp7saPCsHEQhL9JhV41jufGaNyfKxq",
+    "CS": "1pfPH2QpxoqZBL7huit2r7Y_pD__ATKzP"
+  },
+  "stats": {
+    "legacyRowsFetched": 0,
+    "rcRecordsFetched": 23,
+    "callrailCallsFetched": 2,
+    "legacyTasks": 0,
+    "rcSupplementTasks": 0,
+    "callrailSupplementTasks": 1,
+    "tasksProcessed": 1,
+    "archived": 1,
+    "skipped": 0
+  },
+  "results": [
+    {
+      "sourceKind": "callrail-direct",
+      "provider": "callrail",
+      "bucket": "OG",
+      "agentName": "Bruce Allen",
+      "phone": "5184076944",
+      "telephonySessionId": "s-a0d16bc16eed5z19dca948bf1z1417e680000",
+      "callrailCallId": "CAL019dca9488d37c3baee36430743547a5",
+      "startedAt": "2026-04-26T09:17:05.174-07:00",
+      "durationSec": 712,
+      "routeHint": "callrail-direct",
+      "routeReason": "callrail-provider",
+      "fileName": "BRUCE-ALLEN__OG__2026-04-26__5184076944__s-a0d16bc16eed5z19dca948bf1z1417e680000.mp3",
+      "localPath": null,
+      "uploaded": true,
+      "deduped": false,
+      "driveFileId": "1eLNcsXM6Z4H9jJdGiltHVMarlh-FKsKN",
+      "driveFolderId": "1Pkc3jpJ6MPHgDrWQR7WQachiX5LP7QuS",
+      "driveWebViewLink": "https://drive.google.com/file/d/1eLNcsXM6Z4H9jJdGiltHVMarlh-FKsKN/view?usp=drivesdk",
+      "sourceUri": "https://app.callrail.com/calls/CAL019dca9488d37c3baee36430743547a5/recording/redirect?access_key=372610b5b91612174fa1"
+    }
+  ],
+  "skipped": [],
+  "email": {
+    "sent": false,
+    "reason": "disabled"
+  }
+}

@@ -24,6 +24,21 @@ async function upsertAgentState(snapshot) {
   );
 }
 
+async function updateAgentState(extensionId, update = {}) {
+  const normalizedExtensionId = String(extensionId || "").trim();
+  if (!normalizedExtensionId) {
+    throw new Error("extensionId is required");
+  }
+
+  return AgentState.findOneAndUpdate(
+    { extensionId: normalizedExtensionId },
+    { $set: update },
+    {
+      new: true,
+    },
+  );
+}
+
 async function findAgentStateByExtensionId(extensionId) {
   return AgentState.findOne({ extensionId: String(extensionId || "").trim() }).lean();
 }
@@ -46,5 +61,6 @@ module.exports = {
   findAgentStateByExtensionId,
   findAgentStateByName,
   listAgentStates,
+  updateAgentState,
   upsertAgentState,
 };

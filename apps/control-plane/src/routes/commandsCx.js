@@ -1,0 +1,272 @@
+"use strict";
+
+const express = require("express");
+const {
+  executeCxLogicsCreateCase,
+  executeCxSaveCaseProfileFromLogics,
+  enqueueCxSmokeLead,
+  executeCxLogicsFindMatch,
+  simulateCxIncomingCall,
+  executeCxLogicsActivity,
+  executeCxLogicsAmortization,
+  executeCxLogicsInvoice,
+  executeCxLogicsNotes,
+  executeCxLogicsTask,
+  executeCxLogicsUpdateCase,
+  requestCxAssignCaseToMe,
+  requestCxDial,
+  requestCxEndCall,
+  requestCxDisposition,
+  requestCxEmail,
+  requestCxLeadStatusUpdate,
+  requestCxReminder,
+  requestCxStatusChange,
+  requestCxTask,
+  requestCxText,
+} = require("../../../../packages/shared-services/src");
+const { toErrorResponse } = require("../../../../packages/shared-errors/src");
+
+function createCommandsCxRouter(auth) {
+  const router = express.Router();
+
+  async function handleSmokeQueue(req, res) {
+    try {
+      const input = req.method === "GET" ? req.query || {} : req.body || {};
+      const result = await enqueueCxSmokeLead(req.params.domain, req.user, input);
+      return res.json({ ok: true, result });
+    } catch (error) {
+      return res.status(error.status || 500).json(toErrorResponse(error));
+    }
+  }
+
+  router.post(
+    "/:domain/set-status",
+    auth.requireAuth,
+    auth.requireUser,
+    auth.requirePermission("agents.toggle-availability"),
+    auth.requireCxOAuth,
+    async (req, res) => {
+      try {
+        const result = await requestCxStatusChange(req.params.domain, req.user, req.body || {});
+        return res.json({ ok: true, result });
+      } catch (error) {
+        return res.status(error.status || 500).json(toErrorResponse(error));
+      }
+    },
+  );
+
+  router.post(
+    "/:domain/disposition",
+    auth.requireAuth,
+    auth.requireUser,
+    auth.requirePermission("queue.dispose"),
+    auth.requireCxOAuth,
+    async (req, res) => {
+      try {
+        const result = await requestCxDisposition(req.params.domain, req.user, req.body || {});
+        return res.json({ ok: true, result });
+      } catch (error) {
+        return res.status(error.status || 500).json(toErrorResponse(error));
+      }
+    },
+  );
+
+  router.post("/:domain/create-task", auth.requireAuth, auth.requireUser, async (req, res) => {
+    try {
+      const result = await requestCxTask(req.params.domain, req.user, req.body || {});
+      return res.json({ ok: true, result });
+    } catch (error) {
+      return res.status(error.status || 500).json(toErrorResponse(error));
+    }
+  });
+
+  router.post("/:domain/create-reminder", auth.requireAuth, auth.requireUser, async (req, res) => {
+    try {
+      const result = await requestCxReminder(req.params.domain, req.user, req.body || {});
+      return res.json({ ok: true, result });
+    } catch (error) {
+      return res.status(error.status || 500).json(toErrorResponse(error));
+    }
+  });
+
+  router.post("/:domain/text", auth.requireAuth, auth.requireUser, async (req, res) => {
+    try {
+      const result = await requestCxText(req.params.domain, req.user, req.body || {});
+      return res.json({ ok: true, result });
+    } catch (error) {
+      return res.status(error.status || 500).json(toErrorResponse(error));
+    }
+  });
+
+  router.post("/:domain/email", auth.requireAuth, auth.requireUser, async (req, res) => {
+    try {
+      const result = await requestCxEmail(req.params.domain, req.user, req.body || {});
+      return res.json({ ok: true, result });
+    } catch (error) {
+      return res.status(error.status || 500).json(toErrorResponse(error));
+    }
+  });
+
+  router.post(
+    "/:domain/assign-case-to-me",
+    auth.requireAuth,
+    auth.requireUser,
+    auth.requirePermission("queue.dispose"),
+    async (req, res) => {
+      try {
+        const result = await requestCxAssignCaseToMe(req.params.domain, req.user, req.body || {});
+        return res.json({ ok: true, result });
+      } catch (error) {
+        return res.status(error.status || 500).json(toErrorResponse(error));
+      }
+    },
+  );
+
+  router.post(
+    "/:domain/dial",
+    auth.requireAuth,
+    auth.requireUser,
+    auth.requirePermission("queue.dial"),
+    auth.requireCxOAuth,
+    async (req, res) => {
+      try {
+        const result = await requestCxDial(req.params.domain, req.user, req.body || {});
+        return res.json({ ok: true, result });
+      } catch (error) {
+        return res.status(error.status || 500).json(toErrorResponse(error));
+      }
+    },
+  );
+
+  router.post(
+    "/:domain/end-call",
+    auth.requireAuth,
+    auth.requireUser,
+    auth.requirePermission("queue.dispose"),
+    auth.requireCxOAuth,
+    async (req, res) => {
+      try {
+        const result = await requestCxEndCall(req.params.domain, req.user, req.body || {});
+        return res.json({ ok: true, result });
+      } catch (error) {
+        return res.status(error.status || 500).json(toErrorResponse(error));
+      }
+    },
+  );
+
+  router.get("/:domain/smoke-queue", auth.requireAuth, auth.requireUser, handleSmokeQueue);
+  router.post("/:domain/smoke-queue", auth.requireAuth, auth.requireUser, handleSmokeQueue);
+
+  router.post("/:domain/logics/create-case", auth.requireAuth, auth.requireUser, async (req, res) => {
+    try {
+      const result = await executeCxLogicsCreateCase(req.params.domain, req.user, req.body || {});
+      return res.json({ ok: true, result });
+    } catch (error) {
+      return res.status(error.status || 500).json(toErrorResponse(error));
+    }
+  });
+
+  // Dev/QA: pretend an inbound RC call is connecting to this agent.
+  // POST { phone, direction? = "inbound", fromName? } and the agent's
+  // state row gets a synthetic currentCall — the CX workspace's
+  // auto-scramble chain (currentCallPhone → useCxLeadLookup) fires on
+  // the next workspace refresh. POST with no phone clears the call.
+  router.post("/:domain/simulate-call", auth.requireAuth, auth.requireUser, async (req, res) => {
+    try {
+      const result = await simulateCxIncomingCall(req.params.domain, req.user, req.body || {});
+      return res.json({ ok: true, result });
+    } catch (error) {
+      return res.status(error.status || 500).json(toErrorResponse(error));
+    }
+  });
+
+  router.post("/:domain/save-case-profile", auth.requireAuth, auth.requireUser, async (req, res) => {
+    try {
+      const result = await executeCxSaveCaseProfileFromLogics(req.params.domain, req.user, req.body || {});
+      return res.json({ ok: true, result });
+    } catch (error) {
+      return res.status(error.status || 500).json(toErrorResponse(error));
+    }
+  });
+
+  router.post("/:domain/logics/find-match", auth.requireAuth, auth.requireUser, async (req, res) => {
+    try {
+      const result = await executeCxLogicsFindMatch(req.params.domain, req.user, req.body || {});
+      return res.json({ ok: true, result });
+    } catch (error) {
+      return res.status(error.status || 500).json(toErrorResponse(error));
+    }
+  });
+
+  router.post("/:domain/logics/update-status", auth.requireAuth, auth.requireUser, async (req, res) => {
+    try {
+      const result = await requestCxLeadStatusUpdate(req.params.domain, req.user, req.body || {});
+      return res.json({ ok: true, result });
+    } catch (error) {
+      return res.status(error.status || 500).json(toErrorResponse(error));
+    }
+  });
+
+  router.post("/:domain/logics/task", auth.requireAuth, auth.requireUser, async (req, res) => {
+    try {
+      const result = await executeCxLogicsTask(req.params.domain, req.user, req.body || {});
+      return res.json({ ok: true, result });
+    } catch (error) {
+      return res.status(error.status || 500).json(toErrorResponse(error));
+    }
+  });
+
+  router.post("/:domain/logics/activity", auth.requireAuth, auth.requireUser, async (req, res) => {
+    try {
+      const result = await executeCxLogicsActivity(req.params.domain, req.user, req.body || {});
+      return res.json({ ok: true, result });
+    } catch (error) {
+      return res.status(error.status || 500).json(toErrorResponse(error));
+    }
+  });
+
+  router.post("/:domain/logics/update-case", auth.requireAuth, auth.requireUser, async (req, res) => {
+    try {
+      const result = await executeCxLogicsUpdateCase(req.params.domain, req.user, req.body || {});
+      return res.json({ ok: true, result });
+    } catch (error) {
+      return res.status(error.status || 500).json(toErrorResponse(error));
+    }
+  });
+
+  // Notes-only update — separate from update-case so it can be permissioned
+  // independently and audited as a distinct subtype. Body: { caseId, notes }
+  // (notes is required; pass empty string to clear).
+  router.post("/:domain/logics/notes", auth.requireAuth, auth.requireUser, async (req, res) => {
+    try {
+      const result = await executeCxLogicsNotes(req.params.domain, req.user, req.body || {});
+      return res.json({ ok: true, result });
+    } catch (error) {
+      return res.status(error.status || 500).json(toErrorResponse(error));
+    }
+  });
+
+  router.post("/:domain/logics/invoice", auth.requireAuth, auth.requireUser, async (req, res) => {
+    try {
+      const result = await executeCxLogicsInvoice(req.params.domain, req.user, req.body || {});
+      return res.json({ ok: true, result });
+    } catch (error) {
+      return res.status(error.status || 500).json(toErrorResponse(error));
+    }
+  });
+
+  router.post("/:domain/logics/amortization", auth.requireAuth, auth.requireUser, async (req, res) => {
+    try {
+      const result = await executeCxLogicsAmortization(req.params.domain, req.user, req.body || {});
+      return res.json({ ok: true, result });
+    } catch (error) {
+      return res.status(error.status || 500).json(toErrorResponse(error));
+    }
+  });
+
+  return router;
+}
+
+module.exports = {
+  createCommandsCxRouter,
+};

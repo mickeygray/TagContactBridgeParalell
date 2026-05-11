@@ -1,0 +1,62 @@
+{
+  "domain": "TAG",
+  "caseIds": [
+    101564,
+    101577,
+    102968,
+    103266,
+    103346
+  ],
+  "results": [
+    {
+      "caseId": 101564,
+      "name": "RICHARD MARTIN",
+      "statusId": 2,
+      "statusCategory": "prospect",
+      "initialPayment": 0,
+      "totalPaid": 0,
+      "paymentsCount": 0,
+      "sourceName": null
+    },
+    {
+      "caseId": 101577,
+      "name": "RAEDELL SHINN",
+      "statusId": 2,
+      "statusCategory": "prospect",
+      "initialPayment": 0,
+      "totalPaid": 0,
+      "paymentsCount": 0,
+      "sourceName": null
+    },
+    {
+      "caseId": 102968,
+      "name": "ANDRE WORRIE",
+      "statusId": 2,
+      "statusCategory": "prospect",
+      "initialPayment": 0,
+      "totalPaid": 0,
+      "paymentsCount": 0,
+      "sourceName": null
+    },
+    {
+      "caseId": 103266,
+      "name": "ROSALVA ORTIZ",
+      "statusId": 2,
+      "statusCategory": "prospect",
+      "initialPayment": 0,
+      "totalPaid": 0,
+      "paymentsCount": 0,
+      "sourceName": null
+    },
+    {
+      "caseId": 103346,
+      "name": "ROBERT PURYEAR",
+      "statusId": 2,
+      "statusCategory": "prospect",
+      "initialPayment": 0,
+      "totalPaid": 0,
+      "paymentsCount": 0,
+      "sourceName": null
+    }
+  ]
+}

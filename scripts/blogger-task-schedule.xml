@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="UTF-16"?>
+<!--
+  Windows Task Scheduler definition for the daily blogger runner.
+
+  Import via:
+    schtasks /Create /XML "C:\Users\Admin\Code\TagContactBridgeParallel\scripts\blogger-task-schedule.xml" /TN "WynnTAGBlogger"
+
+  Or open Task Scheduler GUI → Action → Import Task → pick this file.
+
+  Triggers Mon-Fri at 8:00 AM Pacific. Runs on the local user account
+  with normal (non-admin) priority. Logs go to the user's home /
+  Documents folder via the daily runner's own console output.
+
+  Verify after import:
+    schtasks /Query /TN "WynnTAGBlogger" /V /FO LIST
+-->
+<Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <Description>Wynn Tax Solutions + Tax Advocate Group blog auto-post. Picks topic by day-of-week (enforcement-doc / relief-type / current-event / success-story), writes the blog, generates the header image, deploys to both EC2 instances, and emails a summary.</Description>
+    <Author>Wynn TAG Blogger</Author>
+    <URI>\WynnTAGBlogger</URI>
+  </RegistrationInfo>
+  <Triggers>
+    <CalendarTrigger>
+      <StartBoundary>2026-04-30T08:00:00</StartBoundary>
+      <Enabled>true</Enabled>
+      <ScheduleByWeek>
+        <DaysOfWeek>
+          <Monday />
+          <Tuesday />
+          <Wednesday />
+          <Thursday />
+          <Friday />
+        </DaysOfWeek>
+        <WeeksInterval>1</WeeksInterval>
+      </ScheduleByWeek>
+    </CalendarTrigger>
+  </Triggers>
+  <Principals>
+    <Principal id="Author">
+      <UserId>S-1-5-21-PLACEHOLDER</UserId>
+      <LogonType>InteractiveToken</LogonType>
+      <RunLevel>LeastPrivilege</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <AllowHardTerminate>true</AllowHardTerminate>
+    <StartWhenAvailable>true</StartWhenAvailable>
+    <RunOnlyIfNetworkAvailable>true</RunOnlyIfNetworkAvailable>
+    <IdleSettings>
+      <StopOnIdleEnd>false</StopOnIdleEnd>
+      <RestartOnIdle>false</RestartOnIdle>
+    </IdleSettings>
+    <AllowStartOnDemand>true</AllowStartOnDemand>
+    <Enabled>true</Enabled>
+    <Hidden>false</Hidden>
+    <RunOnlyIfIdle>false</RunOnlyIfIdle>
+    <WakeToRun>false</WakeToRun>
+    <ExecutionTimeLimit>PT2H</ExecutionTimeLimit>
+    <Priority>7</Priority>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>node.exe</Command>
+      <Arguments>C:\Users\Admin\Code\TagContactBridgeParallel\scripts\blogger-daily-runner.js</Arguments>
+      <WorkingDirectory>C:\Users\Admin\Code\TagContactBridgeParallel</WorkingDirectory>
+    </Exec>
+  </Actions>
+</Task>

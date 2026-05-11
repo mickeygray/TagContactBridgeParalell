@@ -110,7 +110,21 @@ function createLogicsFacade(domain) {
       const payload = await client.getCasesByStatus(statusId, options);
       const data = parseLogicsData(payload);
       return Array.isArray(data)
-        ? data.map((value) => Number(value)).filter((value) => Number.isFinite(value))
+        ? data
+            .map((value) => {
+              if (Number.isFinite(Number(value))) return Number(value);
+              if (value && typeof value === "object") {
+                return Number(
+                  value.CaseID
+                  ?? value.caseId
+                  ?? value.ID
+                  ?? value.Id
+                  ?? value.id,
+                );
+              }
+              return Number.NaN;
+            })
+            .filter((value) => Number.isFinite(value))
         : [];
     },
   };

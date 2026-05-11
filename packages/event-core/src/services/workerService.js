@@ -21,9 +21,9 @@ async function processNextEvent({ workerName, handlers, maxAttempts = 3 }) {
   }
 
   try {
-    await handler(event);
+    const handlerResult = await handler(event);
     await markCompleted(event._id, workerName);
-    return { claimed: true, handled: true, eventId: String(event._id) };
+    return { claimed: true, handled: true, eventId: String(event._id), handlerResult };
   } catch (error) {
     await markFailed(event._id, workerName, error, maxAttempts);
     return {

@@ -1,0 +1,37 @@
+{
+  "domain": "TAG",
+  "from": "2026-04-01",
+  "to": "2026-04-24",
+  "scannedLegacy": 40,
+  "scannedCurrent": 44,
+  "updated": 3,
+  "results": [
+    {
+      "caseId": 322130,
+      "previousSourceName": "Citation State PC",
+      "nextSourceName": "Citation State PC",
+      "previousSourceCanonicalId": "69e809d00f352fdfe2e82820",
+      "nextSourceCanonicalId": "69e809d00f352fdfe2e826d4",
+      "usedLegacy": true,
+      "hadCurrent": true
+    },
+    {
+      "caseId": 261517,
+      "previousSourceName": "CallFire",
+      "nextSourceName": "CallFire",
+      "previousSourceCanonicalId": "69e809d00f352fdfe2e82690",
+      "nextSourceCanonicalId": "69e809d00f352fdfe2e82665",
+      "usedLegacy": true,
+      "hadCurrent": true
+    },
+    {
+      "caseId": 315757,
+      "previousSourceName": "ABC",
+      "nextSourceName": "Urgent Third Pink State",
+      "previousSourceCanonicalId": "69e809d00f352fdfe2e826ec",
+      "nextSourceCanonicalId": "69e809d00f352fdfe2e826ec",
+      "usedLegacy": true,
+      "hadCurrent": true
+    }
+  ]
+}

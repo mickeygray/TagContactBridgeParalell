@@ -10,6 +10,11 @@ function computeBackoffMs(attemptCount) {
 }
 
 async function createEvent(input) {
+  // Optional `delayMs` defers `nextAttemptAt` so the sweeper doesn't
+  // claim the event until at least that much time has passed. Useful for
+  // downstream systems that need settling time (e.g. RC call recordings
+  // take 60-120s to finalize before they can be fetched).
+  const delayMs = Number(input.delayMs) || 0;
   const doc = {
     eventType: input.eventType,
     sourceService: input.sourceService,
@@ -18,7 +23,7 @@ async function createEvent(input) {
     payload: input.payload || {},
     status: EVENT_STATUS.PENDING,
     dedupeKey: input.dedupeKey || null,
-    nextAttemptAt: new Date(),
+    nextAttemptAt: new Date(Date.now() + Math.max(delayMs, 0)),
   };
 
   if (doc.dedupeKey) {
@@ -80,21 +85,32 @@ async function claimNextEvent(workerName, options = {}) {
 
 async function markCompleted(eventId, workerName) {
   const now = new Date();
-  const event = await eventRepository.findEventById(eventId);
-  if (!event) return null;
-
-  const lastAttempt = event.attempts[event.attempts.length - 1];
-  if (lastAttempt) {
-    lastAttempt.status = EVENT_STATUS.COMPLETED;
-    lastAttempt.finishedAt = now;
-  }
-
-  event.status = EVENT_STATUS.COMPLETED;
-  event.processedAt = now;
-  event.lastError = null;
-  event.lastWorker = workerName;
-  await event.save();
-  return event;
+  return EventRecord.findOneAndUpdate(
+    {
+      _id: eventId,
+      status: EVENT_STATUS.PROCESSING,
+    },
+    {
+      $set: {
+        status: EVENT_STATUS.COMPLETED,
+        processedAt: now,
+        lastError: null,
+        lastWorker: workerName,
+        "attempts.$[attempt].status": EVENT_STATUS.COMPLETED,
+        "attempts.$[attempt].finishedAt": now,
+      },
+    },
+    {
+      new: true,
+      arrayFilters: [
+        {
+          "attempt.worker": workerName,
+          "attempt.status": EVENT_STATUS.PROCESSING,
+          "attempt.finishedAt": { $exists: false },
+        },
+      ],
+    },
+  );
 }
 
 async function markFailed(eventId, workerName, error, maxAttempts = 3) {
@@ -104,21 +120,36 @@ async function markFailed(eventId, workerName, error, maxAttempts = 3) {
 
   const exhausted = event.attemptCount >= maxAttempts;
   const nextStatus = exhausted ? EVENT_STATUS.DEAD_LETTER : EVENT_STATUS.FAILED;
-  const lastAttempt = event.attempts[event.attempts.length - 1];
-  if (lastAttempt) {
-    lastAttempt.status = nextStatus;
-    lastAttempt.finishedAt = now;
-    lastAttempt.error = error.message;
-  }
-
-  event.status = nextStatus;
-  event.lastWorker = workerName;
-  event.lastError = error.message;
-  event.nextAttemptAt = exhausted
-    ? null
-    : new Date(now.getTime() + computeBackoffMs(event.attemptCount));
-  await event.save();
-  return event;
+  return EventRecord.findOneAndUpdate(
+    {
+      _id: eventId,
+      status: EVENT_STATUS.PROCESSING,
+      attemptCount: event.attemptCount,
+    },
+    {
+      $set: {
+        status: nextStatus,
+        lastWorker: workerName,
+        lastError: error.message,
+        nextAttemptAt: exhausted
+          ? null
+          : new Date(now.getTime() + computeBackoffMs(event.attemptCount)),
+        "attempts.$[attempt].status": nextStatus,
+        "attempts.$[attempt].finishedAt": now,
+        "attempts.$[attempt].error": error.message,
+      },
+    },
+    {
+      new: true,
+      arrayFilters: [
+        {
+          "attempt.worker": workerName,
+          "attempt.status": EVENT_STATUS.PROCESSING,
+          "attempt.finishedAt": { $exists: false },
+        },
+      ],
+    },
+  );
 }
 
 async function replayEvent(eventId, requestedBy) {

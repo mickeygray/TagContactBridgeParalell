@@ -1,0 +1,267 @@
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>The Best Time to Act Is Now</title>
+    <style>
+      body,
+      table,
+      td,
+      p,
+      a {
+        margin: 0;
+        padding: 0;
+      }
+      body {
+        background-color: #f4f6f9;
+        font-family: "Helvetica Neue", Helvetica, Arial, sans-serif;
+      }
+      img {
+        border: 0;
+        display: block;
+        outline: none;
+        text-decoration: none;
+      }
+      .email-wrapper {
+        width: 100%;
+        background-color: #f4f6f9;
+        padding: 30px 0;
+      }
+      .email-container {
+        max-width: 600px;
+        margin: 0 auto;
+        background-color: #ffffff;
+        border-radius: 8px;
+        overflow: hidden;
+        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
+      }
+      .email-header {
+        background-color: #1a2744;
+        padding: 30px 40px;
+        text-align: center;
+      }
+      .email-header img {
+        max-width: 200px;
+        height: auto;
+        margin: 0 auto;
+      }
+      .hero-banner {
+        background: linear-gradient(135deg, #1a2744 0%, #2c4a7c 100%);
+        padding: 28px 40px;
+        text-align: center;
+      }
+      .hero-banner h1 {
+        color: #ffffff;
+        font-size: 22px;
+        font-weight: 700;
+        line-height: 1.3;
+        margin: 0;
+      }
+      .hero-banner p {
+        color: #b8c9e0;
+        font-size: 15px;
+        margin-top: 8px;
+      }
+      .email-body {
+        padding: 36px 40px;
+        color: #333333;
+      }
+      .email-body p {
+        font-size: 15px;
+        line-height: 1.7;
+        margin-bottom: 16px;
+        color: #444444;
+      }
+      .greeting {
+        font-size: 17px;
+        font-weight: 600;
+        color: #1a2744;
+        margin-bottom: 12px;
+      }
+      .highlight-box {
+        background-color: #f0f5fb;
+        border-left: 4px solid #2c4a7c;
+        border-radius: 4px;
+        padding: 20px 24px;
+        margin: 24px 0;
+      }
+      .highlight-box p {
+        margin-bottom: 8px;
+        font-size: 14px;
+        color: #333;
+      }
+      .highlight-box p:last-child {
+        margin-bottom: 0;
+      }
+      .highlight-box strong {
+        color: #1a2744;
+      }
+      .warning-box {
+        background-color: #fef2f2;
+        border-left: 4px solid #c53030;
+        border-radius: 4px;
+        padding: 18px 22px;
+        margin: 24px 0;
+      }
+      .warning-box p {
+        font-size: 14px;
+        color: #742a2a;
+        line-height: 1.6;
+        margin-bottom: 8px;
+      }
+      .warning-box p:last-child {
+        margin-bottom: 0;
+      }
+      .cta-wrapper {
+        text-align: center;
+        margin: 28px 0;
+      }
+      .cta-button {
+        display: inline-block;
+        background-color: #2c4a7c;
+        color: #ffffff !important;
+        font-size: 16px;
+        font-weight: 600;
+        text-decoration: none;
+        padding: 14px 36px;
+        border-radius: 6px;
+      }
+      .divider {
+        border: none;
+        border-top: 1px solid #e8ecf1;
+        margin: 28px 0;
+      }
+      .step-item {
+        margin-bottom: 14px;
+        font-size: 14px;
+        line-height: 1.6;
+        color: #444;
+      }
+      .email-footer {
+        background-color: #1a2744;
+        padding: 28px 40px;
+        text-align: center;
+      }
+      .email-footer p {
+        color: #8fa3bf;
+        font-size: 12px;
+        line-height: 1.7;
+        margin-bottom: 6px;
+      }
+      .email-footer a {
+        color: #b8c9e0;
+        text-decoration: underline;
+      }
+      .footer-phone {
+        font-size: 16px !important;
+        color: #ffffff !important;
+        font-weight: 600;
+        letter-spacing: 0.5px;
+        margin-bottom: 12px !important;
+      }
+      @media only screen and (max-width: 620px) {
+        .email-body,
+        .email-header,
+        .hero-banner,
+        .email-footer {
+          padding-left: 24px !important;
+          padding-right: 24px !important;
+        }
+        .hero-banner h1 {
+          font-size: 20px;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="email-wrapper">
+      <table
+        class="email-container"
+        role="presentation"
+        cellpadding="0"
+        cellspacing="0"
+        width="100%"
+      >
+        <tr><td class="email-header"><img
+              src="cid:emailLogo"
+              alt="Tax Advocate Group"
+            /></td></tr>
+        <tr><td class="hero-banner">
+            <h1>Tax Issues Don't Resolve Themselves &mdash;<br />But We Can Help
+              Resolve Yours</h1>
+            <p>Why taking action sooner protects you more than waiting</p>
+          </td></tr>
+        <tr><td class="email-body">
+            <p class="greeting">Hi {{name}},</p>
+            <p>We've been in touch a few times now, and we want you to know
+              &mdash; whenever you're ready, we're here. There's no pressure and
+              no expiration on our willingness to help. But we also want to be
+              upfront about something our clients wish they'd known sooner:
+              <strong>when it comes to tax issues, time is rarely on your side.</strong></p>
+            <div class="warning-box">
+              <p><strong>What can happen when tax issues go unaddressed:</strong></p>
+              <p>&#10060; Penalties and interest continue to compound daily</p>
+              <p>&#10060; The IRS or state agencies may escalate collection
+                activity</p>
+              <p>&#10060; Certain relief programs have eligibility windows that
+                can close</p>
+              <p>&#10060; Unfiled returns can trigger automatic assessments that
+                overstate what you owe</p>
+            </div>
+            <p>We're not sharing this to alarm you &mdash; we're sharing it
+              because we've seen how much better outcomes tend to be when
+              clients engage early rather than waiting until enforcement has
+              already started. The sooner you have a professional in your
+              corner, the more options are typically available to you.</p>
+            <hr class="divider" />
+            <p
+              style="font-weight:600; color:#1a2744; font-size:16px; margin-bottom:16px;"
+            >What acting now looks like</p>
+            <div class="step-item"><strong>1.</strong>
+              &nbsp; A 15&ndash;20 minute phone conversation with one of our
+              consultants &mdash; free and confidential.</div>
+            <div class="step-item"><strong>2.</strong>
+              &nbsp; We review where things stand and identify which programs or
+              strategies apply to your situation.</div>
+            <div class="step-item"><strong>3.</strong>
+              &nbsp; You walk away with a clear understanding of your options
+              &mdash; whether or not you decide to move forward with us.</div>
+            <div class="highlight-box">
+              <p><strong>There's genuinely no downside to a conversation.</strong></p>
+              <p>Our consultation is complimentary. You'll get honest answers
+                about where you stand, what your options are, and what the
+                realistic timeline looks like. Many clients tell us the hardest
+                part was making the first call &mdash; and that everything felt
+                easier after that.</p>
+            </div>
+            <p>We've helped thousands of people move past their tax problems and
+              get back to focusing on their lives and businesses. We'd like the
+              chance to do the same for you.</p>
+            <div class="cta-wrapper"><a
+                href="{{scheduleUrl}}"
+                class="cta-button"
+              >Schedule Your Free Consultation Now</a></div>
+            <p style="text-align:center; font-size:14px; color:#666;">Or call us
+              toll-free:
+              <strong style="color:#1a2744;">{{phone}}</strong></p>
+            <hr class="divider" />
+            <p style="font-size:13px; color:#888; line-height:1.6;">You're
+              receiving this email because you recently expressed interest in
+              Tax Advocate Group. We'll continue to check in periodically, but
+              if you'd prefer not to hear from us, simply reply and let us know.</p>
+          </td></tr>
+        <tr><td class="email-footer">
+            <p class="footer-phone">&#128222; {{phone}}</p>
+            <p><strong style="color:#fff;">Tax Advocate Group</strong></p>
+            <p>Tax Resolution &amp; Relief Services</p>
+            <p style="margin-top:10px;"><a
+                href="https://www.taxadvocategroup.com"
+              >taxadvocategroup.com</a></p>
+            <p style="margin-top:14px; font-size:11px; color:#6b829e;">&copy;
+              {{year}}
+              Tax Advocate Group. All rights reserved.</p>
+          </td></tr>
+      </table>
+    </div>
+  </body>
+</html>

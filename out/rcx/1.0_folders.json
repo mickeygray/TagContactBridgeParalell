@@ -1,0 +1,163 @@
+{
+  "count": 10,
+  "limit": 30,
+  "offset": 0,
+  "records": [
+    {
+      "id": "69d916bbf274c07c06ee5fb4",
+      "created_at": "2026-04-10T15:26:51Z",
+      "updated_at": "2026-04-10T15:26:51Z",
+      "label": "Drafts",
+      "parent_id": null,
+      "position": 0,
+      "query": "draft_created_by_me:true",
+      "render_threads_count": false,
+      "role_restriction": {},
+      "team_restriction": {},
+      "user_restriction": {}
+    },
+    {
+      "id": "69d916bbf274c07c06ee5fb5",
+      "created_at": "2026-04-10T15:26:51Z",
+      "updated_at": "2026-04-10T15:26:51Z",
+      "label": "New messages",
+      "parent_id": null,
+      "position": 1,
+      "query": "status_in:\"new\"",
+      "render_threads_count": false,
+      "role_restriction": {},
+      "team_restriction": {},
+      "user_restriction": {}
+    },
+    {
+      "id": "69d916bbf274c07c06ee5fb6",
+      "created_at": "2026-04-10T15:26:51Z",
+      "updated_at": "2026-04-10T15:26:51Z",
+      "label": "My inbox",
+      "parent_id": null,
+      "position": 2,
+      "query": "active_and_assigned_to_me:true",
+      "render_threads_count": false,
+      "role_restriction": {
+        "only": []
+      },
+      "team_restriction": {},
+      "user_restriction": {}
+    },
+    {
+      "id": "69d916bbf274c07c06ee5fb7",
+      "created_at": "2026-04-10T15:26:51Z",
+      "updated_at": "2026-04-10T15:26:51Z",
+      "label": "My deferred messages",
+      "parent_id": null,
+      "position": 3,
+      "query": "deferred_and_assigned_to_me:true",
+      "render_threads_count": false,
+      "role_restriction": {
+        "only": []
+      },
+      "team_restriction": {},
+      "user_restriction": {}
+    },
+    {
+      "id": "69d916bbf274c07c06ee5fb8",
+      "created_at": "2026-04-10T15:26:51Z",
+      "updated_at": "2026-04-10T15:26:51Z",
+      "label": "My outbound messages",
+      "parent_id": null,
+      "position": 4,
+      "query": "initiated_by_me:true",
+      "render_threads_count": false,
+      "role_restriction": {
+        "only": []
+      },
+      "team_restriction": {},
+      "user_restriction": {}
+    },
+    {
+      "id": "69d916bbf274c07c06ee5fb9",
+      "created_at": "2026-04-10T15:26:51Z",
+      "updated_at": "2026-04-10T15:26:51Z",
+      "label": "My history",
+      "parent_id": null,
+      "position": 5,
+      "query": "assigned_to_me:true opened_and_assigned:false",
+      "render_threads_count": false,
+      "role_restriction": {
+        "only": []
+      },
+      "team_restriction": {},
+      "user_restriction": {}
+    },
+    {
+      "id": "69d916bbf274c07c06ee5fba",
+      "created_at": "2026-04-10T15:26:51Z",
+      "updated_at": "2026-04-10T15:26:51Z",
+      "label": "Global Inbox",
+      "parent_id": null,
+      "position": 6,
+      "query": "active_and_assigned:true",
+      "render_threads_count": false,
+      "role_restriction": {
+        "only": [
+          "69d916bbf274c07c06ee5fb0",
+          "69d916bbf274c07c06ee5fb1",
+          "69d916bbf274c07c06ee5fb2"
+        ]
+      },
+      "team_restriction": {},
+      "user_restriction": {}
+    },
+    {
+      "id": "69d916bbf274c07c06ee5fbb",
+      "created_at": "2026-04-10T15:26:51Z",
+      "updated_at": "2026-04-10T15:26:51Z",
+      "label": "Deferred follow-up",
+      "parent_id": null,
+      "position": 7,
+      "query": "opened_and_assigned: true active_and_assigned: true",
+      "render_threads_count": false,
+      "role_restriction": {
+        "only": [
+          "69d916bbf274c07c06ee5fb0",
+          "69d916bbf274c07c06ee5fb1",
+          "69d916bbf274c07c06ee5fb2"
+        ]
+      },
+      "team_restriction": {},
+      "user_restriction": {}
+    },
+    {
+      "id": "69d916bbf274c07c06ee5fbc",
+      "created_at": "2026-04-10T15:26:51Z",
+      "updated_at": "2026-04-10T15:26:51Z",
+      "label": "History",
+      "parent_id": null,
+      "position": 8,
+      "query": "assigned:true opened_and_assigned:false",
+      "render_threads_count": false,
+      "role_restriction": {
+        "only": [
+          "69d916bbf274c07c06ee5fb0",
+          "69d916bbf274c07c06ee5fb1",
+          "69d916bbf274c07c06ee5fb2"
+        ]
+      },
+      "team_restriction": {},
+      "user_restriction": {}
+    },
+    {
+      "id": "69d916bbf274c07c06ee5fbd",
+      "created_at": "2026-04-10T15:26:51Z",
+      "updated_at": "2026-04-10T15:26:51Z",
+      "label": "Ignored messages",
+      "parent_id": null,
+      "position": 9,
+      "query": "status_in: ignored",
+      "render_threads_count": false,
+      "role_restriction": {},
+      "team_restriction": {},
+      "user_restriction": {}
+    }
+  ]
+}

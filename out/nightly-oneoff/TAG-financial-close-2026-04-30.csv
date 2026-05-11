@@ -1,0 +1,34 @@
+[FINANCIAL CLOSE],TAG,2026-04-30
+
+metric,today,mtd
+leads_total,1,3081
+spend_total,0.00,54029.99
+spend_pieces,0,64906
+spend_leads_reported,0,11
+payments_total_amount,0.00,194876.37
+payments_total_count,0,105
+payments_initial_amount,0.00,48682.13
+payments_initial_count,0,45
+payments_recurring_amount,0.00,146194.24
+payments_recurring_count,0,60
+calls_total,18,5947
+calls_over_5min,3,225
+scored_calls_total,0,n/a
+pending_redlines_today,0,—
+
+[SPEND BY CHANNEL — TODAY]
+channel,spend,pieces,leads_reported
+
+[NEW DEALS BY SOURCE — TODAY]
+source,deals,initial_amount,total_collected
+
+[LEADS BY SOURCE — TODAY VS MTD]
+source,today,mtd
+NCOA Upload,0,3073
+affiliate,0,1
+ld,0,1
+ld-posting,0,1
+organic,0,1
+smoke-test,0,1
+vf,0,1
+website,1,2

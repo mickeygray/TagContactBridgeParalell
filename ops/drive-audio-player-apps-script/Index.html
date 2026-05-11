@@ -1,0 +1,1512 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <base target="_top">
+    <style>
+      :root {
+        --bg: #f4efe6;
+        --panel: #fffaf2;
+        --ink: #1d1c19;
+        --muted: #6b645a;
+        --accent: #a54a2a;
+        --line: #dccdb8;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        font-family: Georgia, "Times New Roman", serif;
+        background:
+          radial-gradient(circle at top left, rgba(165, 74, 42, 0.12), transparent 28%),
+          linear-gradient(180deg, #f8f2e9 0%, var(--bg) 100%);
+        color: var(--ink);
+      }
+
+      .app {
+        max-width: 1200px;
+        margin: 0 auto;
+        padding: 24px;
+      }
+
+      .hero {
+        display: grid;
+        gap: 8px;
+        margin-bottom: 20px;
+      }
+
+      .eyebrow {
+        font-size: 12px;
+        letter-spacing: 0.16em;
+        text-transform: uppercase;
+        color: var(--accent);
+      }
+
+      h1 {
+        margin: 0;
+        font-size: 34px;
+        line-height: 1.1;
+      }
+
+      .subhead {
+        color: var(--muted);
+        max-width: 760px;
+      }
+
+      .lock-note {
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        padding: 12px 14px;
+        background: rgba(255, 255, 255, 0.72);
+        color: var(--muted);
+        font-size: 14px;
+      }
+
+      .shell {
+        display: grid;
+        grid-template-columns: 320px 1fr;
+        gap: 20px;
+      }
+
+      .panel {
+        background: rgba(255, 250, 242, 0.96);
+        border: 1px solid var(--line);
+        border-radius: 18px;
+        box-shadow: 0 12px 40px rgba(57, 39, 22, 0.08);
+      }
+
+      .sidebar {
+        padding: 18px;
+        display: grid;
+        gap: 16px;
+        align-content: start;
+      }
+
+      .main {
+        padding: 18px;
+        display: grid;
+        gap: 18px;
+      }
+
+      .section-title {
+        font-size: 12px;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+        color: var(--muted);
+      }
+
+      .folder-list {
+        display: grid;
+        gap: 10px;
+      }
+
+      .folder-card {
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        padding: 14px;
+        background: #fff;
+        cursor: pointer;
+        transition: transform 120ms ease, border-color 120ms ease, box-shadow 120ms ease;
+      }
+
+      .folder-card:hover {
+        transform: translateY(-1px);
+        border-color: #c9a58b;
+        box-shadow: 0 8px 18px rgba(57, 39, 22, 0.08);
+      }
+
+      .folder-card.active {
+        border-color: var(--accent);
+        background: linear-gradient(180deg, #fff7f2 0%, #fff 100%);
+      }
+
+      .folder-card h3 {
+        margin: 0 0 6px;
+        font-size: 18px;
+      }
+
+      .folder-meta {
+        color: var(--muted);
+        font-size: 13px;
+      }
+
+      .stats {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 12px;
+      }
+
+      .stat {
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        padding: 14px;
+        background: #fff;
+      }
+
+      .stat-label {
+        font-size: 12px;
+        text-transform: uppercase;
+        letter-spacing: 0.12em;
+        color: var(--muted);
+      }
+
+      .stat-value {
+        margin-top: 8px;
+        font-size: 24px;
+      }
+
+      .player-card {
+        border: 1px solid var(--line);
+        border-radius: 16px;
+        background: #fff;
+        padding: 18px;
+        display: grid;
+        gap: 14px;
+      }
+
+      .now-playing {
+        display: grid;
+        gap: 6px;
+      }
+
+      .track-title {
+        font-size: 24px;
+        line-height: 1.2;
+      }
+
+      .track-meta {
+        color: var(--muted);
+        font-size: 14px;
+      }
+
+      .preview-shell {
+        position: relative;
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        overflow: hidden;
+        background: #f6efe3;
+        min-height: 360px;
+        height: 360px;
+      }
+
+      .preview-frame {
+        width: 100%;
+        height: calc(360px + 56px);
+        border: 0;
+        background: #f6efe3;
+        margin-top: -56px;
+      }
+
+      /* Mobile-friendly native audio player. Used when ?mode=audio is
+         in the URL (auto-set on small viewports) — bypasses the iframe
+         entirely and streams from the Parallel proxy with Range support
+         so seek/scrub works on phones. */
+      .audio-shell {
+        display: grid;
+        gap: 10px;
+        padding: 18px;
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        background: #fff;
+      }
+      .audio-shell audio {
+        width: 100%;
+      }
+      .audio-meta {
+        font-size: 13px;
+        color: var(--muted);
+      }
+      .player-mode-toggle {
+        font-size: 12px;
+        color: var(--accent);
+        text-decoration: underline;
+        background: none;
+        border: 0;
+        padding: 0;
+        cursor: pointer;
+      }
+
+      .preview-mask-top,
+      .preview-mask-corner {
+        position: absolute;
+        z-index: 2;
+        background:
+          linear-gradient(180deg, rgba(246, 239, 227, 0.98) 0%, rgba(246, 239, 227, 0.98) 100%);
+        pointer-events: auto;
+      }
+
+      .preview-mask-top {
+        top: 0;
+        left: 0;
+        right: 0;
+        height: 32px;
+      }
+
+      .preview-mask-corner {
+        top: 0;
+        right: 0;
+        width: 220px;
+        height: 72px;
+      }
+
+      .preview-empty {
+        min-height: 220px;
+        display: grid;
+        place-items: center;
+        padding: 24px;
+        color: var(--muted);
+        text-align: center;
+      }
+
+      .player-actions,
+      .toolbar {
+        display: flex;
+        gap: 10px;
+        flex-wrap: wrap;
+        align-items: center;
+      }
+
+      button,
+      .link-button {
+        border: 1px solid var(--line);
+        background: #fff;
+        color: var(--ink);
+        border-radius: 999px;
+        padding: 10px 14px;
+        font: inherit;
+        cursor: pointer;
+        text-decoration: none;
+      }
+
+      input[type="search"] {
+        flex: 1 1 220px;
+        min-width: 180px;
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        padding: 10px 14px;
+        background: #fff;
+        font: inherit;
+      }
+
+      select#dateSelect,
+      select#agentSelect,
+      select#sortSelect,
+      select#graderSelect {
+        flex: 0 0 auto;
+        min-width: 160px;
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        padding: 10px 14px;
+        background: #fff;
+        font: inherit;
+      }
+      select#dateSelect:disabled,
+      select#agentSelect:disabled,
+      select#sortSelect:disabled,
+      select#graderSelect:disabled {
+        color: var(--muted);
+        background: #faf6ee;
+        cursor: not-allowed;
+      }
+      button#playAllButton {
+        background: var(--accent);
+        color: #fff;
+        border-color: var(--accent);
+      }
+      button#playAllButton:disabled {
+        background: #d8c2b0;
+        border-color: #d8c2b0;
+        color: #fff8f1;
+        cursor: not-allowed;
+      }
+
+      .track-list {
+        display: grid;
+        gap: 10px;
+      }
+
+      .grade-card {
+        border: 1px solid var(--line);
+        border-radius: 16px;
+        background: #fff9f3;
+        padding: 14px;
+        display: grid;
+        gap: 12px;
+      }
+
+      .grade-control-row {
+        display: flex;
+        gap: 10px;
+        align-items: center;
+        flex-wrap: wrap;
+      }
+
+      .star-strip {
+        display: flex;
+        gap: 6px;
+        align-items: center;
+      }
+
+      .star-button {
+        border: 1px solid var(--line);
+        background: #fff;
+        color: #c7b8a3;
+        border-radius: 999px;
+        min-width: 42px;
+        padding: 10px 12px;
+        line-height: 1;
+        font-size: 20px;
+      }
+
+      .star-button.active {
+        color: #d58a20;
+        border-color: #d58a20;
+        background: #fff4de;
+      }
+
+      .star-button:disabled {
+        opacity: 0.6;
+        cursor: not-allowed;
+      }
+
+      .grade-status {
+        font-size: 13px;
+        color: var(--muted);
+      }
+
+      .grade-pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        margin-left: 8px;
+        padding: 3px 8px;
+        border-radius: 999px;
+        background: #fff3e4;
+        color: #8b4a20;
+        border: 1px solid #e9c8a1;
+        font-size: 11px;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+      }
+
+      .track-row {
+        display: grid;
+        grid-template-columns: auto 1fr auto;
+        gap: 12px;
+        align-items: center;
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        background: #fff;
+        padding: 12px 14px;
+      }
+
+      .track-row.active {
+        border-color: var(--accent);
+        background: #fff7f2;
+      }
+
+      .track-index {
+        font-size: 12px;
+        color: var(--muted);
+        width: 22px;
+        text-align: right;
+      }
+
+      .track-name {
+        font-size: 16px;
+      }
+
+      .track-sub {
+        margin-top: 4px;
+        font-size: 12px;
+        color: var(--muted);
+      }
+
+      .status {
+        font-size: 13px;
+        color: var(--muted);
+      }
+
+      .empty {
+        border: 1px dashed var(--line);
+        border-radius: 14px;
+        padding: 18px;
+        color: var(--muted);
+        background: rgba(255,255,255,0.65);
+      }
+
+      @media (max-width: 960px) {
+        .shell {
+          grid-template-columns: 1fr;
+        }
+
+        .stats {
+          grid-template-columns: 1fr;
+        }
+
+        .track-row {
+          grid-template-columns: 1fr;
+        }
+
+        .track-index {
+          display: none;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="app">
+      <div class="hero">
+        <div class="eyebrow">Shared Drive Audio</div>
+        <h1>Recording Player</h1>
+        <div class="subhead">
+          Pick a folder, load the playlist, and listen straight from Drive without opening each file one by one.
+        </div>
+        <div class="lock-note" id="lockNote">
+          Restricted player. Approved Google accounts only.
+        </div>
+      </div>
+
+      <div class="shell">
+        <aside class="panel sidebar">
+          <div>
+            <div class="section-title">Folders</div>
+          </div>
+          <div id="folderList" class="folder-list"></div>
+          <div class="status" id="summaryStatus">Loading folders...</div>
+        </aside>
+
+        <main class="panel main">
+          <div class="stats">
+            <div class="stat">
+              <div class="stat-label">Current Folder</div>
+              <div class="stat-value" id="currentFolderLabel">-</div>
+            </div>
+            <div class="stat">
+              <div class="stat-label">Tracks</div>
+              <div class="stat-value" id="trackCount">0</div>
+            </div>
+            <div class="stat">
+              <div class="stat-label">Selection</div>
+              <div class="stat-value" id="selectionPosition">-</div>
+            </div>
+          </div>
+
+          <section class="player-card">
+            <div class="now-playing">
+              <div class="section-title">Now Playing</div>
+              <div class="track-title" id="nowPlayingTitle">Nothing selected</div>
+              <div class="track-meta" id="nowPlayingMeta">Choose a folder and a file.</div>
+            </div>
+
+            <!-- Iframe player (desktop default) — Drive's native preview
+                 chrome. Doesn't work on mobile due to X-Frame-Options. -->
+            <div class="preview-shell" id="iframeShell">
+              <div class="preview-mask-top" aria-hidden="true"></div>
+              <div class="preview-mask-corner" aria-hidden="true"></div>
+              <iframe
+                id="previewFrame"
+                class="preview-frame"
+                title="Drive preview player"
+                allow="autoplay"
+              ></iframe>
+            </div>
+
+            <!-- Native audio player (mobile + ?mode=audio) — streams
+                 bytes through the Parallel proxy with Range support so
+                 seek/scrub works on phones + lock-screen controls
+                 light up. Hidden in iframe mode. -->
+            <div class="audio-shell" id="audioShell" hidden>
+              <audio id="audioPlayer" controls preload="metadata"></audio>
+              <div class="audio-meta" id="audioMeta">No file loaded yet.</div>
+            </div>
+
+            <div class="player-actions">
+              <button id="prevButton" type="button">Previous</button>
+              <button id="nextButton" type="button">Next</button>
+              <button id="reloadButton" type="button">Reload Folder</button>
+              <button id="modeToggleButton" class="player-mode-toggle" type="button">
+                Switch to mobile player
+              </button>
+            </div>
+
+            <section class="grade-card">
+              <div class="section-title">Human Grade</div>
+              <div class="grade-control-row">
+                <select id="graderSelect" aria-label="Grader">
+                  <option value="">Pick grader</option>
+                </select>
+                <div id="starStrip" class="star-strip" aria-label="Star rating"></div>
+                <button id="clearGradeButton" type="button">Clear grade</button>
+              </div>
+              <div class="grade-status" id="gradeStatus">Choose a call to grade.</div>
+            </section>
+          </section>
+
+          <div class="toolbar">
+            <select id="dateSelect" aria-label="Date" disabled>
+              <option value="">(no folder selected)</option>
+            </select>
+            <select id="agentSelect" aria-label="Agent" disabled>
+              <option value="">(all agents)</option>
+            </select>
+            <select id="sortSelect" aria-label="Sort">
+              <option value="updated_desc">Newest first</option>
+              <option value="grade_desc">Highest grade</option>
+              <option value="grade_asc">Lowest grade</option>
+              <option value="name_asc">Name A-Z</option>
+            </select>
+            <input id="searchInput" type="search" placeholder="Filter by filename">
+            <button id="playAllButton" type="button" disabled>Play all</button>
+            <span class="status" id="folderStatus">Waiting for folder selection.</span>
+          </div>
+          <!-- Hidden preload sidekick: next-up track's bytes get fetched
+               here while the visible audio plays the current one, so
+               Next/auto-advance is instant on phones too. Never has its
+               own controls; just primes the browser cache. -->
+          <audio id="audioPreload" preload="auto" hidden></audio>
+
+          <section id="trackList" class="track-list"></section>
+        </main>
+      </div>
+    </div>
+
+    <script>
+      const state = {
+        folders: [],
+        selectedFolderKey: null,
+        // Date subfolders (after migration): each entry { key, label, folderId }.
+        // Empty = bucket has none yet. Picker hides itself when empty.
+        dates: [],
+        selectedDateKey: null,
+        // True when there are still playable files at the bucket root
+        // (pre-migration flat layout). Surfaces as a "Bucket root (flat)"
+        // option in the date dropdown so the operator can still play
+        // un-migrated audio without leaving the page.
+        hasFlatFiles: false,
+        // Distinct agents derived from the loaded set (filename's first
+        // __-segment), populated client-side after each load. The "all
+        // agents" empty-string sentinel means no agent filter active.
+        agents: [],
+        selectedAgent: "",
+        graderOptions: [],
+        defaultGrader: "",
+        selectedGrader: "",
+        gradeContextTrackId: null,
+        selectedSort: "updated_desc",
+        gradeBusy: false,
+        allTracks: [],
+        filteredTracks: [],
+        currentTrackIndex: -1,
+      };
+
+      const folderListEl = document.getElementById("folderList");
+      const summaryStatusEl = document.getElementById("summaryStatus");
+      const lockNoteEl = document.getElementById("lockNote");
+      const currentFolderLabelEl = document.getElementById("currentFolderLabel");
+      const trackCountEl = document.getElementById("trackCount");
+      const selectionPositionEl = document.getElementById("selectionPosition");
+      const nowPlayingTitleEl = document.getElementById("nowPlayingTitle");
+      const nowPlayingMetaEl = document.getElementById("nowPlayingMeta");
+      const folderStatusEl = document.getElementById("folderStatus");
+      const trackListEl = document.getElementById("trackList");
+      const previewFrameEl = document.getElementById("previewFrame");
+      const iframeShellEl = document.getElementById("iframeShell");
+      const audioShellEl = document.getElementById("audioShell");
+      const audioPlayerEl = document.getElementById("audioPlayer");
+      const audioMetaEl = document.getElementById("audioMeta");
+      const prevButtonEl = document.getElementById("prevButton");
+      const nextButtonEl = document.getElementById("nextButton");
+      const reloadButtonEl = document.getElementById("reloadButton");
+      const modeToggleButtonEl = document.getElementById("modeToggleButton");
+      const searchInputEl = document.getElementById("searchInput");
+      const dateSelectEl = document.getElementById("dateSelect");
+      const agentSelectEl = document.getElementById("agentSelect");
+      const sortSelectEl = document.getElementById("sortSelect");
+      const graderSelectEl = document.getElementById("graderSelect");
+      const starStripEl = document.getElementById("starStrip");
+      const clearGradeButtonEl = document.getElementById("clearGradeButton");
+      const gradeStatusEl = document.getElementById("gradeStatus");
+      const playAllButtonEl = document.getElementById("playAllButton");
+      const audioPreloadEl = document.getElementById("audioPreload");
+
+      // Player mode selection — three sources, last-write-wins:
+      //   1. ?mode=audio / ?mode=iframe URL parameter (manual override)
+      //   2. localStorage `cx-player-mode` (sticky across page loads)
+      //   3. auto-detect mobile via user-agent OR small viewport
+      // Default = iframe on desktop (working since day 1), audio on
+      // mobile (where iframe doesn't work).
+      function detectInitialPlayerMode() {
+        const params = new URLSearchParams(window.location.search);
+        const fromUrl = String(params.get("mode") || "").toLowerCase();
+        if (fromUrl === "audio" || fromUrl === "iframe") return fromUrl;
+        const stored = String(localStorage.getItem("cx-player-mode") || "").toLowerCase();
+        if (stored === "audio" || stored === "iframe") return stored;
+        const isMobile =
+          /android|iphone|ipad|ipod|mobile/i.test(navigator.userAgent) ||
+          window.matchMedia("(max-width: 760px)").matches;
+        return isMobile ? "audio" : "iframe";
+      }
+      state.playerMode = detectInitialPlayerMode();
+
+      function formatBytes(bytes) {
+        const value = Number(bytes || 0);
+        if (!value) return "0 B";
+        const units = ["B", "KB", "MB", "GB"];
+        let size = value;
+        let unit = units[0];
+        for (let index = 0; index < units.length; index += 1) {
+          unit = units[index];
+          if (size < 1024 || index === units.length - 1) break;
+          size /= 1024;
+        }
+        return `${size.toFixed(size >= 100 || unit === "B" ? 0 : 1)} ${unit}`;
+      }
+
+      function formatTimestamp(value) {
+        if (!value) return "Unknown update";
+        const date = new Date(value);
+        if (Number.isNaN(date.getTime())) return "Unknown update";
+        return date.toLocaleString();
+      }
+
+      function setStatus(text) {
+        folderStatusEl.textContent = text;
+      }
+
+      function renderFolders() {
+        folderListEl.innerHTML = "";
+        if (!state.folders.length) {
+          folderListEl.innerHTML = '<div class="empty">No folders are configured yet.</div>';
+          return;
+        }
+
+        state.folders.forEach((folder) => {
+          const card = document.createElement("button");
+          card.type = "button";
+          card.className = `folder-card${folder.key === state.selectedFolderKey ? " active" : ""}`;
+          card.innerHTML = `
+            <h3>${folder.key}</h3>
+            <div class="folder-meta">${folder.label}</div>
+            <div class="folder-meta">${folder.configured ? "Ready" : "Missing folder ID"}</div>
+          `;
+          card.addEventListener("click", () => {
+            if (!folder.configured) return;
+            loadFolder(folder.key);
+          });
+          folderListEl.appendChild(card);
+        });
+      }
+
+      // Pull the agent label out of a filename. The archiver writes
+      // `AGENT__BUCKET__YYYY-MM-DD__phone__id.ext` and sanitizes
+      // hyphens-in-name → spaces, so we reverse the substitution by
+      // turning hyphens back into spaces for display.
+      function extractAgentFromName(name) {
+        const segments = String(name || "").split("__");
+        if (!segments.length) return "";
+        const head = String(segments[0] || "").trim();
+        if (!head) return "";
+        return head.replace(/-/g, " ");
+      }
+
+      function rebuildAgentList() {
+        const seen = new Map();
+        for (const track of state.allTracks) {
+          const agent = extractAgentFromName(track.name);
+          if (!agent) continue;
+          // Preserve casing of first occurrence; agents are uppercase
+          // already from the archiver but be defensive.
+          if (!seen.has(agent.toUpperCase())) {
+            seen.set(agent.toUpperCase(), agent);
+          }
+        }
+        state.agents = [...seen.values()].sort((left, right) =>
+          String(left).localeCompare(String(right)),
+        );
+        renderAgents();
+      }
+
+      function renderAgents() {
+        agentSelectEl.innerHTML = "";
+        const allOpt = document.createElement("option");
+        allOpt.value = "";
+        allOpt.textContent = state.agents.length
+          ? `All agents (${state.agents.length})`
+          : "(no agents)";
+        agentSelectEl.appendChild(allOpt);
+
+        if (!state.agents.length) {
+          agentSelectEl.disabled = true;
+          state.selectedAgent = "";
+          return;
+        }
+        agentSelectEl.disabled = false;
+
+        for (const agent of state.agents) {
+          const opt = document.createElement("option");
+          opt.value = agent.toUpperCase();
+          opt.textContent = agent;
+          if (state.selectedAgent && state.selectedAgent === agent.toUpperCase()) {
+            opt.selected = true;
+          }
+          agentSelectEl.appendChild(opt);
+        }
+        // If the previously-selected agent is no longer in this set,
+        // drop the filter quietly so the list isn't mysteriously empty.
+        const stillPresent = state.agents.some(
+          (agent) => agent.toUpperCase() === state.selectedAgent,
+        );
+        if (state.selectedAgent && !stillPresent) {
+          state.selectedAgent = "";
+          agentSelectEl.value = "";
+        }
+      }
+
+      function formatStars(stars) {
+        const count = Math.max(0, Math.min(5, Number(stars || 0)));
+        return Array.from({ length: 5 }, (_, index) => (index < count ? "★" : "☆")).join("");
+      }
+
+      function getCurrentTrack() {
+        return state.filteredTracks[state.currentTrackIndex] || null;
+      }
+
+      function getTrackGrade(track) {
+        return track && track.humanGrade ? track.humanGrade : null;
+      }
+
+      function compareTracks(left, right) {
+        const leftGrade = Number(left?.humanGrade?.stars || 0);
+        const rightGrade = Number(right?.humanGrade?.stars || 0);
+        const leftUpdated = new Date(left?.updatedAt || 0).getTime();
+        const rightUpdated = new Date(right?.updatedAt || 0).getTime();
+        const nameCompare = String(left?.name || "").localeCompare(String(right?.name || ""));
+
+        switch (state.selectedSort) {
+          case "grade_desc":
+            if (rightGrade !== leftGrade) return rightGrade - leftGrade;
+            if (rightUpdated !== leftUpdated) return rightUpdated - leftUpdated;
+            return nameCompare;
+          case "grade_asc": {
+            const leftMissing = leftGrade === 0;
+            const rightMissing = rightGrade === 0;
+            if (leftMissing !== rightMissing) return leftMissing ? 1 : -1;
+            if (leftGrade !== rightGrade) return leftGrade - rightGrade;
+            if (rightUpdated !== leftUpdated) return rightUpdated - leftUpdated;
+            return nameCompare;
+          }
+          case "name_asc":
+            return nameCompare || (rightUpdated - leftUpdated);
+          case "updated_desc":
+          default:
+            if (rightUpdated !== leftUpdated) return rightUpdated - leftUpdated;
+            return nameCompare;
+        }
+      }
+
+      function renderGraderOptions() {
+        const desired = state.selectedGrader || "";
+        graderSelectEl.innerHTML = "";
+
+        const placeholder = document.createElement("option");
+        placeholder.value = "";
+        placeholder.textContent = "Pick grader";
+        graderSelectEl.appendChild(placeholder);
+
+        for (const grader of state.graderOptions) {
+          const opt = document.createElement("option");
+          opt.value = grader;
+          opt.textContent = grader;
+          if (grader === desired) opt.selected = true;
+          graderSelectEl.appendChild(opt);
+        }
+
+        graderSelectEl.disabled = !state.graderOptions.length || state.gradeBusy || !getCurrentTrack();
+      }
+
+      function initializeStarStrip() {
+        starStripEl.innerHTML = "";
+        for (let stars = 1; stars <= 5; stars += 1) {
+          const button = document.createElement("button");
+          button.type = "button";
+          button.className = "star-button";
+          button.dataset.stars = String(stars);
+          button.textContent = "★";
+          button.title = `${stars} star${stars === 1 ? "" : "s"}`;
+          button.addEventListener("click", () => saveCurrentTrackGrade(stars));
+          starStripEl.appendChild(button);
+        }
+      }
+
+      function renderGradingControls() {
+        const track = getCurrentTrack();
+        const grade = getTrackGrade(track);
+
+        if (!track) {
+          state.gradeContextTrackId = null;
+        } else if (state.gradeContextTrackId !== track.id) {
+          state.gradeContextTrackId = track.id;
+          state.selectedGrader = grade ? grade.grader : (state.defaultGrader || "");
+        } else if (!state.selectedGrader) {
+          state.selectedGrader = grade ? grade.grader : (state.defaultGrader || "");
+        }
+
+        renderGraderOptions();
+
+        const starButtons = starStripEl.querySelectorAll(".star-button");
+        starButtons.forEach((button, index) => {
+          const active = grade ? index < Number(grade.stars || 0) : false;
+          button.classList.toggle("active", active);
+          button.disabled = !track || state.gradeBusy;
+        });
+
+        clearGradeButtonEl.disabled = !track || !grade || state.gradeBusy;
+
+        if (!track) {
+          gradeStatusEl.textContent = "Choose a call to grade.";
+          return;
+        }
+        if (state.gradeBusy) {
+          gradeStatusEl.textContent = "Saving grade...";
+          return;
+        }
+        if (grade) {
+          gradeStatusEl.textContent =
+            `${formatStars(grade.stars)} by ${grade.grader} • ${formatTimestamp(grade.gradedAt)}`;
+          return;
+        }
+        gradeStatusEl.textContent = "No human grade yet. Pick a grader and click stars.";
+      }
+
+      function updateTrackGrade(fileId, grade) {
+        state.allTracks.forEach((track) => {
+          if (track.id === fileId) {
+            track.humanGrade = grade ? { ...grade } : null;
+          }
+        });
+      }
+
+      function saveCurrentTrackGrade(stars) {
+        const track = getCurrentTrack();
+        if (!track) return;
+
+        const grader = String(graderSelectEl.value || state.selectedGrader || "").trim();
+        if (!grader) {
+          gradeStatusEl.textContent = "Pick a grader before saving a score.";
+          graderSelectEl.focus();
+          return;
+        }
+
+        state.gradeBusy = true;
+        state.selectedGrader = grader;
+        renderGradingControls();
+
+        google.script.run
+          .withSuccessHandler((grade) => {
+            state.gradeBusy = false;
+            state.selectedGrader = grade.grader || grader;
+            updateTrackGrade(track.id, grade);
+            setStatus(`Saved ${grade.stars}-star grade for ${track.name}`);
+            applyFilter();
+          })
+          .withFailureHandler((error) => {
+            state.gradeBusy = false;
+            gradeStatusEl.textContent = String(error && error.message ? error.message : error);
+            renderGradingControls();
+          })
+          .saveCallGrade({
+            folderKey: track.folderKey,
+            dateKey: track.dateKey,
+            fileId: track.id,
+            grader: grader,
+            stars: stars,
+          });
+      }
+
+      function clearCurrentTrackGrade() {
+        const track = getCurrentTrack();
+        if (!track || !getTrackGrade(track)) return;
+
+        state.gradeBusy = true;
+        renderGradingControls();
+
+        google.script.run
+          .withSuccessHandler(() => {
+            state.gradeBusy = false;
+            updateTrackGrade(track.id, null);
+            setStatus(`Cleared human grade for ${track.name}`);
+            applyFilter();
+          })
+          .withFailureHandler((error) => {
+            state.gradeBusy = false;
+            gradeStatusEl.textContent = String(error && error.message ? error.message : error);
+            renderGradingControls();
+          })
+          .clearCallGrade({
+            fileId: track.id,
+          });
+      }
+
+      function applyFilter() {
+        const currentTrackId = getCurrentTrack() ? getCurrentTrack().id : null;
+        const query = String(searchInputEl.value || "").trim().toLowerCase();
+        const agentFilter = String(state.selectedAgent || "").trim().toUpperCase();
+
+        state.filteredTracks = state.allTracks.filter((track) => {
+          if (query) {
+            if (!String(track.name || "").toLowerCase().includes(query)) return false;
+          }
+          if (agentFilter) {
+            const trackAgent = extractAgentFromName(track.name).toUpperCase();
+            if (trackAgent !== agentFilter) return false;
+          }
+          return true;
+        });
+
+        state.filteredTracks.sort(compareTracks);
+
+        if (!state.filteredTracks.length) {
+          state.currentTrackIndex = -1;
+        } else {
+          const preservedIndex = currentTrackId
+            ? state.filteredTracks.findIndex((track) => track.id === currentTrackId)
+            : -1;
+          if (preservedIndex >= 0) {
+            state.currentTrackIndex = preservedIndex;
+          } else if (
+            state.currentTrackIndex < 0 ||
+            state.currentTrackIndex >= state.filteredTracks.length
+          ) {
+            state.currentTrackIndex = 0;
+          }
+        }
+
+        if (state.currentTrackIndex < 0 && state.filteredTracks.length > 0) {
+          state.currentTrackIndex = 0;
+        }
+
+        playAllButtonEl.disabled = state.filteredTracks.length === 0;
+        sortSelectEl.disabled = state.filteredTracks.length === 0;
+
+        renderTrackList();
+        updatePlayer();
+      }
+
+      function renderTrackList() {
+        trackListEl.innerHTML = "";
+        trackCountEl.textContent = String(state.filteredTracks.length);
+
+        if (!state.filteredTracks.length) {
+          trackListEl.innerHTML = '<div class="empty">No playable audio files in this view.</div>';
+          return;
+        }
+
+        state.filteredTracks.forEach((track, index) => {
+          const row = document.createElement("div");
+          row.className = `track-row${index === state.currentTrackIndex ? " active" : ""}`;
+          row.innerHTML = `
+            <div class="track-index">${index + 1}</div>
+            <div>
+              <div class="track-name">${track.name}</div>
+              <div class="track-sub">${formatBytes(track.sizeBytes)} • ${formatTimestamp(track.updatedAt)}</div>
+            </div>
+            <div class="player-actions">
+              <button type="button" data-action="play">Play</button>
+            </div>
+          `;
+          row.querySelector('[data-action="play"]').addEventListener("click", () => {
+            state.currentTrackIndex = index;
+            updatePlayer(true);
+            renderTrackList();
+          });
+          trackListEl.appendChild(row);
+        });
+      }
+
+      function applyPlayerModeChrome() {
+        if (state.playerMode === "audio") {
+          iframeShellEl.hidden = true;
+          audioShellEl.hidden = false;
+          modeToggleButtonEl.textContent = "Switch to Drive iframe player";
+          previewFrameEl.removeAttribute("src");
+          previewFrameEl.dataset.fileId = "";
+        } else {
+          iframeShellEl.hidden = false;
+          audioShellEl.hidden = true;
+          modeToggleButtonEl.textContent = "Switch to mobile player";
+          audioPlayerEl.pause();
+          audioPlayerEl.removeAttribute("src");
+          audioPlayerEl.dataset.fileId = "";
+          audioPlayerEl.load();
+        }
+      }
+
+      function setPlayerMode(mode) {
+        if (mode !== "audio" && mode !== "iframe") return;
+        if (state.playerMode === mode) return;
+        state.playerMode = mode;
+        try {
+          localStorage.setItem("cx-player-mode", mode);
+        } catch (err) {
+          // localStorage can throw in private mode — ignore.
+        }
+        applyPlayerModeChrome();
+        updatePlayer();
+      }
+
+      // Prime the hidden preload element with the NEXT track's signed
+      // URL so the browser fetches its first chunks while the user is
+      // still listening to the current one. preload="auto" tells the
+      // browser to fetch as much as it cares to ahead of time —
+      // typically the first 5–15 seconds, enough to start playback
+      // instantly when we swap the visible <audio>'s src on Next.
+      //
+      // We don't preload more than one ahead: each signed URL only
+      // lives 10 minutes, and the browser can't share Range bytes
+      // between two <audio> elements pointing at the same proxy URL
+      // anyway, so a deeper queue would just waste bandwidth.
+      function primePreload() {
+        if (state.playerMode !== "audio") {
+          audioPreloadEl.removeAttribute("src");
+          return;
+        }
+        const nextTrack = state.filteredTracks[state.currentTrackIndex + 1] || null;
+        if (!nextTrack || !nextTrack.streamUrl) {
+          audioPreloadEl.removeAttribute("src");
+          return;
+        }
+        if (audioPreloadEl.getAttribute("src") === nextTrack.streamUrl) return;
+        audioPreloadEl.src = nextTrack.streamUrl;
+        // load() forces the browser to actually start the prefetch —
+        // without it some browsers wait for play().
+        audioPreloadEl.load();
+      }
+
+      function updatePlayer() {
+        const track = state.filteredTracks[state.currentTrackIndex] || null;
+        if (!track) {
+          nowPlayingTitleEl.textContent = "Nothing selected";
+          nowPlayingMetaEl.textContent = "Choose a folder and a file.";
+          selectionPositionEl.textContent = "-";
+          if (state.playerMode === "audio") {
+            audioPlayerEl.removeAttribute("src");
+            audioPlayerEl.load();
+            audioMetaEl.textContent = "No file loaded yet.";
+          } else {
+            previewFrameEl.removeAttribute("src");
+            previewFrameEl.srcdoc =
+              '<div class="preview-empty">Choose a folder and a file to load the Drive preview.</div>';
+          }
+          audioPreloadEl.removeAttribute("src");
+          return;
+        }
+
+        nowPlayingTitleEl.textContent = track.name;
+        nowPlayingMetaEl.textContent = `${track.folderLabel} • ${formatBytes(track.sizeBytes)} • ${formatTimestamp(track.updatedAt)}`;
+        selectionPositionEl.textContent = `${state.currentTrackIndex + 1}/${state.filteredTracks.length}`;
+
+        if (state.playerMode === "audio") {
+          if (!track.streamUrl) {
+            // Streaming proxy not configured (Script Properties missing
+            // PLAYBACK_PROXY_BASE_URL or RECORDING_PLAYBACK_SIGNING_SECRET)
+            // — fall back to iframe so the operator isn't dead in the water.
+            audioMetaEl.textContent =
+              "Streaming proxy not configured. Showing Drive iframe instead.";
+            audioShellEl.hidden = true;
+            iframeShellEl.hidden = false;
+            previewFrameEl.removeAttribute("srcdoc");
+            previewFrameEl.src = track.previewUrl;
+            setStatus(`Loaded Drive preview for ${track.name} (proxy missing)`);
+            return;
+          }
+          audioPlayerEl.src = track.streamUrl;
+          audioPlayerEl.load();
+          audioMetaEl.textContent = `Streaming • ${formatBytes(track.sizeBytes)}`;
+          // Best-effort autoplay — most browsers block until the
+          // operator interacts with the page once. Either way the
+          // controls render and they can hit play themselves.
+          audioPlayerEl.play().catch(() => {
+            audioMetaEl.textContent =
+              `Streaming • ${formatBytes(track.sizeBytes)} (tap play to start)`;
+          });
+          setStatus(`Streaming ${track.name}`);
+          primePreload();
+          return;
+        }
+
+        previewFrameEl.removeAttribute("srcdoc");
+        previewFrameEl.src = track.previewUrl;
+        setStatus(`Loaded Drive preview for ${track.name}`);
+        primePreload();
+      }
+
+      renderTrackList = function () {
+        trackListEl.innerHTML = "";
+        trackCountEl.textContent = String(state.filteredTracks.length);
+
+        if (!state.filteredTracks.length) {
+          trackListEl.innerHTML = '<div class="empty">No playable audio files in this view.</div>';
+          return;
+        }
+
+        state.filteredTracks.forEach((track, index) => {
+          const grade = getTrackGrade(track);
+          const row = document.createElement("div");
+          row.className = `track-row${index === state.currentTrackIndex ? " active" : ""}`;
+          const gradePill = grade
+            ? `<span class="grade-pill">${formatStars(grade.stars)} • ${grade.grader}</span>`
+            : "";
+          const gradeSub = grade
+            ? ` • Human grade ${formatStars(grade.stars)}`
+            : "";
+
+          row.innerHTML = `
+            <div class="track-index">${index + 1}</div>
+            <div>
+              <div class="track-name">${track.name}${gradePill}</div>
+              <div class="track-sub">${formatBytes(track.sizeBytes)} • ${formatTimestamp(track.updatedAt)}${gradeSub}</div>
+            </div>
+            <div class="player-actions">
+              <button type="button" data-action="play">Play</button>
+            </div>
+          `;
+          row.querySelector('[data-action="play"]').addEventListener("click", () => {
+            state.currentTrackIndex = index;
+            updatePlayer();
+            renderTrackList();
+          });
+          trackListEl.appendChild(row);
+        });
+      };
+
+      updatePlayer = function () {
+        const track = getCurrentTrack();
+        if (!track) {
+          nowPlayingTitleEl.textContent = "Nothing selected";
+          nowPlayingMetaEl.textContent = "Choose a folder and a file.";
+          selectionPositionEl.textContent = "-";
+          renderGradingControls();
+          if (state.playerMode === "audio") {
+            audioPlayerEl.removeAttribute("src");
+            audioPlayerEl.dataset.fileId = "";
+            audioPlayerEl.load();
+            audioMetaEl.textContent = "No file loaded yet.";
+          } else {
+            previewFrameEl.removeAttribute("src");
+            previewFrameEl.dataset.fileId = "";
+            previewFrameEl.srcdoc =
+              '<div class="preview-empty">Choose a folder and a file to load the Drive preview.</div>';
+          }
+          audioPreloadEl.removeAttribute("src");
+          return;
+        }
+
+        const grade = getTrackGrade(track);
+        nowPlayingTitleEl.textContent = track.name;
+        nowPlayingMetaEl.textContent = grade
+          ? `${track.folderLabel} • ${formatBytes(track.sizeBytes)} • ${formatTimestamp(track.updatedAt)} • ${formatStars(grade.stars)} by ${grade.grader}`
+          : `${track.folderLabel} • ${formatBytes(track.sizeBytes)} • ${formatTimestamp(track.updatedAt)}`;
+        selectionPositionEl.textContent = `${state.currentTrackIndex + 1}/${state.filteredTracks.length}`;
+        renderGradingControls();
+
+        if (state.playerMode === "audio") {
+          if (!track.streamUrl) {
+            audioMetaEl.textContent =
+              "Streaming proxy not configured. Showing Drive iframe instead.";
+            audioShellEl.hidden = true;
+            iframeShellEl.hidden = false;
+            previewFrameEl.removeAttribute("srcdoc");
+            if (previewFrameEl.dataset.fileId !== track.id) {
+              previewFrameEl.src = track.previewUrl;
+              previewFrameEl.dataset.fileId = track.id;
+            }
+            setStatus(`Loaded Drive preview for ${track.name} (proxy missing)`);
+            return;
+          }
+          if (audioPlayerEl.dataset.fileId !== track.id) {
+            audioPlayerEl.src = track.streamUrl;
+            audioPlayerEl.dataset.fileId = track.id;
+            audioPlayerEl.load();
+            audioMetaEl.textContent = `Streaming • ${formatBytes(track.sizeBytes)}`;
+            audioPlayerEl.play().catch(() => {
+              audioMetaEl.textContent =
+                `Streaming • ${formatBytes(track.sizeBytes)} (tap play to start)`;
+            });
+          } else {
+            audioMetaEl.textContent = `Streaming • ${formatBytes(track.sizeBytes)}`;
+          }
+          setStatus(`Streaming ${track.name}`);
+          primePreload();
+          return;
+        }
+
+        previewFrameEl.removeAttribute("srcdoc");
+        if (previewFrameEl.dataset.fileId !== track.id) {
+          previewFrameEl.src = track.previewUrl;
+          previewFrameEl.dataset.fileId = track.id;
+        }
+        setStatus(`Loaded Drive preview for ${track.name}`);
+        primePreload();
+      };
+
+      function moveTrack(direction) {
+        if (!state.filteredTracks.length) return;
+        const nextIndex = state.currentTrackIndex + direction;
+        if (nextIndex < 0 || nextIndex >= state.filteredTracks.length) return;
+        state.currentTrackIndex = nextIndex;
+        updatePlayer();
+        renderTrackList();
+      }
+
+      function renderDates() {
+        dateSelectEl.innerHTML = "";
+
+        if (state.dates.length === 0 && !state.hasFlatFiles) {
+          const opt = document.createElement("option");
+          opt.value = "";
+          opt.textContent = "(no dates yet)";
+          dateSelectEl.appendChild(opt);
+          dateSelectEl.disabled = true;
+          return;
+        }
+
+        dateSelectEl.disabled = false;
+
+        // Synthetic "All dates" option goes first so cross-day queueing
+        // is one click away. Maps to the `__all__` sentinel which the
+        // change handler routes through the bulk Apps Script call.
+        if (state.dates.length > 0) {
+          const opt = document.createElement("option");
+          opt.value = "__all__";
+          opt.textContent = `All dates (${state.dates.length})`;
+          if (state.selectedDateKey === "__all__") opt.selected = true;
+          dateSelectEl.appendChild(opt);
+        }
+
+        // Surface flat-root files as a synthetic option when migration
+        // hasn't run (or has run but we're still uploading new files
+        // straight into date subfolders mid-cutover). Renders as "Bucket
+        // root" so it's clear it's the legacy layout.
+        if (state.hasFlatFiles) {
+          const opt = document.createElement("option");
+          opt.value = "__flat__";
+          opt.textContent = "Bucket root (legacy)";
+          if (state.selectedDateKey == null) opt.selected = true;
+          dateSelectEl.appendChild(opt);
+        }
+
+        for (const date of state.dates) {
+          const opt = document.createElement("option");
+          opt.value = date.key;
+          opt.textContent = date.label;
+          if (date.key === state.selectedDateKey) opt.selected = true;
+          dateSelectEl.appendChild(opt);
+        }
+      }
+
+      // Top-level click on a bucket: load the date subfolder list,
+      // then auto-load the most recent date's audio. Reuses
+      // `loadFolderAudio` for both the auto-load and any subsequent
+      // date-dropdown change.
+      function loadFolder(folderKey) {
+        state.selectedFolderKey = folderKey;
+        state.dates = [];
+        state.selectedDateKey = null;
+        state.hasFlatFiles = false;
+        state.allTracks = [];
+        state.filteredTracks = [];
+        state.currentTrackIndex = -1;
+        renderFolders();
+        renderDates();
+        setStatus("Loading dates...");
+        currentFolderLabelEl.textContent = folderKey;
+        google.script.run
+          .withSuccessHandler((payload) => {
+            state.dates = Array.isArray(payload.dates) ? payload.dates : [];
+            state.hasFlatFiles = Boolean(payload.hasFlatFiles);
+            currentFolderLabelEl.textContent = payload.folder.label;
+
+            // Default selection: most recent date if there are any;
+            // else fall back to flat-root if it's populated; else stop
+            // and show an empty state.
+            if (state.dates.length > 0) {
+              state.selectedDateKey = state.dates[0].key;
+              renderDates();
+              loadFolderAudio(folderKey, state.selectedDateKey);
+            } else if (state.hasFlatFiles) {
+              state.selectedDateKey = null;
+              renderDates();
+              loadFolderAudio(folderKey, null);
+            } else {
+              renderDates();
+              renderTrackList();
+              updatePlayer();
+              summaryStatusEl.textContent = "No files in this bucket yet";
+              setStatus("Empty bucket. Run the EOD archiver to populate it.");
+            }
+          })
+          .withFailureHandler((error) => {
+            state.dates = [];
+            state.hasFlatFiles = false;
+            state.allTracks = [];
+            state.filteredTracks = [];
+            state.currentTrackIndex = -1;
+            renderDates();
+            renderTrackList();
+            updatePlayer();
+            setStatus(String(error && error.message ? error.message : error));
+          })
+          .listFolderDates(folderKey);
+      }
+
+      // Load audio for a (bucket, date) pair. `dateKey` semantics:
+      //   - "__all__" (string): bulk-load every date subfolder via
+      //     listFolderAudioBulk so the queue can span days
+      //   - YYYY-MM-DD (string): scope to that one subfolder
+      //   - null: bucket root (legacy flat layout)
+      function loadFolderAudio(folderKey, dateKey) {
+        const isAll = dateKey === "__all__";
+        const dateLabel = isAll
+          ? "all dates"
+          : dateKey || "bucket root";
+        setStatus(`Loading ${dateLabel}...`);
+        playAllButtonEl.disabled = true;
+
+        const onSuccess = (payload) => {
+          state.allTracks = Array.isArray(payload.files) ? payload.files : [];
+          summaryStatusEl.textContent = `${payload.total} files for ${dateLabel}`;
+          setStatus(`${payload.total} playable files loaded`);
+          rebuildAgentList();
+          applyFilter();
+        };
+        const onFailure = (error) => {
+          state.allTracks = [];
+          state.filteredTracks = [];
+          state.currentTrackIndex = -1;
+          state.agents = [];
+          renderAgents();
+          renderTrackList();
+          updatePlayer();
+          setStatus(String(error && error.message ? error.message : error));
+        };
+
+        if (isAll) {
+          google.script.run
+            .withSuccessHandler(onSuccess)
+            .withFailureHandler(onFailure)
+            // Empty array tells the server "every date subfolder under
+            // this bucket". A pre-filtered subset of dates would also
+            // work — passing a list of YYYY-MM-DD strings.
+            .listFolderAudioBulk(folderKey, []);
+          return;
+        }
+
+        google.script.run
+          .withSuccessHandler(onSuccess)
+          .withFailureHandler(onFailure)
+          .listFolderAudio(folderKey, dateKey);
+      }
+
+      prevButtonEl.addEventListener("click", () => moveTrack(-1));
+      nextButtonEl.addEventListener("click", () => moveTrack(1));
+      reloadButtonEl.addEventListener("click", () => {
+        if (state.selectedFolderKey) loadFolder(state.selectedFolderKey);
+      });
+      dateSelectEl.addEventListener("change", () => {
+        if (!state.selectedFolderKey) return;
+        const raw = String(dateSelectEl.value || "");
+        // Sentinel mapping:
+        //   ""        — disabled placeholder, no-op
+        //   "__flat__" — bucket root (legacy flat layout)  → dateKey=null
+        //   "__all__"  — every date subfolder              → dateKey="__all__"
+        //   YYYY-MM-DD — scope to that single subfolder    → dateKey=raw
+        if (raw === "") return;
+        let nextKey;
+        if (raw === "__flat__") nextKey = null;
+        else if (raw === "__all__") nextKey = "__all__";
+        else nextKey = raw;
+        state.selectedDateKey = nextKey;
+        loadFolderAudio(state.selectedFolderKey, nextKey);
+      });
+      agentSelectEl.addEventListener("change", () => {
+        state.selectedAgent = String(agentSelectEl.value || "").toUpperCase();
+        // Don't reset currentTrackIndex — applyFilter handles it if the
+        // current track is no longer in the filtered set.
+        applyFilter();
+      });
+      playAllButtonEl.addEventListener("click", () => {
+        if (!state.filteredTracks.length) return;
+        state.currentTrackIndex = 0;
+        renderTrackList();
+        updatePlayer();
+        // Force the audio element to start — updatePlayer already calls
+        // play(), but a user-gesture-triggered play() bypasses any
+        // residual autoplay guard from the implicit page load.
+        if (state.playerMode === "audio") {
+          audioPlayerEl.play().catch(() => {
+            audioMetaEl.textContent =
+              "Tap play to start (autoplay blocked).";
+          });
+        }
+      });
+      modeToggleButtonEl.addEventListener("click", () => {
+        setPlayerMode(state.playerMode === "audio" ? "iframe" : "audio");
+      });
+      // Audio element auto-advance — when the current track ends, move
+      // to the next one. Matches the iframe Next button's intent without
+      // requiring a click.
+      audioPlayerEl.addEventListener("ended", () => moveTrack(1));
+      audioPlayerEl.addEventListener("error", () => {
+        audioMetaEl.textContent =
+          "Playback error. Token may have expired — reload the folder.";
+      });
+      searchInputEl.addEventListener("input", () => applyFilter());
+      sortSelectEl.addEventListener("change", () => {
+        state.selectedSort = String(sortSelectEl.value || "updated_desc");
+        applyFilter();
+      });
+      graderSelectEl.addEventListener("change", () => {
+        state.selectedGrader = String(graderSelectEl.value || "").trim();
+        renderGradingControls();
+      });
+      clearGradeButtonEl.addEventListener("click", () => {
+        clearCurrentTrackGrade();
+      });
+      initializeStarStrip();
+      sortSelectEl.value = state.selectedSort;
+      applyPlayerModeChrome();
+      renderGradingControls();
+      previewFrameEl.srcdoc = '<div class="preview-empty">Choose a folder and a file to load the Drive preview.</div>';
+
+      google.script.run
+        .withSuccessHandler((bootstrap) => {
+          state.folders = Array.isArray(bootstrap.folders) ? bootstrap.folders : [];
+          state.graderOptions = Array.isArray(bootstrap.graderOptions) ? bootstrap.graderOptions : [];
+          state.defaultGrader = String(bootstrap.defaultGrader || "").trim();
+          state.selectedGrader = state.defaultGrader || state.selectedGrader || "";
+          lockNoteEl.textContent = `Restricted player. Signed in as ${bootstrap.viewerEmail}.`;
+          renderGraderOptions();
+          renderGradingControls();
+          renderFolders();
+          const firstReady = state.folders.find((folder) => folder.configured);
+          summaryStatusEl.textContent = firstReady
+            ? `Ready at ${new Date(bootstrap.generatedAt).toLocaleTimeString()}`
+            : "No folders configured yet";
+          if (firstReady) {
+            loadFolder(firstReady.key);
+          } else {
+            setStatus("Set the folder IDs in Script Properties to begin.");
+          }
+        })
+        .withFailureHandler((error) => {
+          summaryStatusEl.textContent = "Failed to load folders";
+          lockNoteEl.textContent = "Restricted player. Access denied.";
+          setStatus(String(error && error.message ? error.message : error));
+        })
+        .getPlayerBootstrap();
+    </script>
+  </body>
+</html>

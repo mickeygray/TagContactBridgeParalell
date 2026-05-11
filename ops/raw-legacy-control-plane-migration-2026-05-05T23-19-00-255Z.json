@@ -1,0 +1,167 @@
+{
+  "mode": "commit",
+  "db": "tagcontactbridge_parallel",
+  "migratedAt": "2026-05-05T23:19:00.255Z",
+  "before": {
+    "rb_caseprofiles": 4968,
+    "controlplanecaseprofiles": 5743,
+    "leadcadences": 3942,
+    "controlplaneleadcadences": 10109,
+    "dailypaymentsummaries": 982,
+    "controlplanepaymentledgers": 1241,
+    "dailyspends": 2801,
+    "controlplanespendentries": 2215,
+    "rb_dailycallstats": 3315,
+    "controlplanedailycallstats": 3666,
+    "rb_contactactivities": 13573,
+    "controlplanecalllogs": 9903,
+    "controlplanemasterprospectindexes": 8504
+  },
+  "sourceLoaded": {
+    "caseProfiles": 4968,
+    "leadCadences": 3942,
+    "payments": 982,
+    "spends": 2801,
+    "dailyCallStats": 3315,
+    "contactActivities": 13573
+  },
+  "transformed": {
+    "caseProfiles": 4968,
+    "leadCadences": 3942,
+    "syntheticLeadCaseIds": 1,
+    "masterProspects": 5619,
+    "payments": 982,
+    "spends": 2801,
+    "dailyCallStats": 3315,
+    "callLogs": 13573
+  },
+  "writeResults": [
+    {
+      "label": "case profiles from rb_caseprofiles",
+      "matchedCount": 4968,
+      "modifiedCount": 4968,
+      "upsertedCount": 0,
+      "errors": []
+    },
+    {
+      "label": "master prospects from profiles + cadences",
+      "matchedCount": 5619,
+      "modifiedCount": 5619,
+      "upsertedCount": 0,
+      "errors": []
+    },
+    {
+      "label": "case profiles from leadcadences",
+      "matchedCount": 3942,
+      "modifiedCount": 651,
+      "upsertedCount": 0,
+      "errors": []
+    },
+    {
+      "label": "lead cadences",
+      "matchedCount": 3942,
+      "modifiedCount": 3942,
+      "upsertedCount": 0,
+      "errors": []
+    },
+    {
+      "label": "payment ledger",
+      "matchedCount": 982,
+      "modifiedCount": 982,
+      "upsertedCount": 0,
+      "errors": []
+    },
+    {
+      "label": "spend entries",
+      "matchedCount": 2771,
+      "modifiedCount": 2771,
+      "upsertedCount": 30,
+      "errors": []
+    },
+    {
+      "label": "daily call stats",
+      "matchedCount": 3315,
+      "modifiedCount": 3315,
+      "upsertedCount": 0,
+      "errors": []
+    },
+    {
+      "label": "call logs from rb_contactactivities",
+      "matchedCount": 13573,
+      "modifiedCount": 0,
+      "upsertedCount": 0,
+      "errors": []
+    }
+  ],
+  "after": {
+    "controlplanecaseprofiles": 5743,
+    "controlplaneleadcadences": 10109,
+    "controlplanepaymentledgers": 1241,
+    "controlplanespendentries": 2245,
+    "controlplanedailycallstats": 3666,
+    "controlplanecalllogs": 9903,
+    "controlplanemasterprospectindexes": 8504
+  },
+  "domains": {
+    "rawCaseProfiles": [
+      {
+        "_id": "TAG",
+        "count": 1649
+      },
+      {
+        "_id": "WYNN",
+        "count": 3319
+      }
+    ],
+    "controlPlaneCaseProfiles": [
+      {
+        "_id": "TAG",
+        "count": 1703
+      },
+      {
+        "_id": "WYNN",
+        "count": 4040
+      }
+    ],
+    "rawLeadCadences": [
+      {
+        "_id": "TAG",
+        "count": 16
+      },
+      {
+        "_id": "WYNN",
+        "count": 3926
+      }
+    ],
+    "controlPlaneLeadCadences": [
+      {
+        "_id": "TAG",
+        "count": 6106
+      },
+      {
+        "_id": "WYNN",
+        "count": 4003
+      }
+    ],
+    "rawContactActivities": [
+      {
+        "_id": "TAG",
+        "count": 12886
+      },
+      {
+        "_id": "WYNN",
+        "count": 687
+      }
+    ],
+    "controlPlaneCallLogs": [
+      {
+        "_id": "TAG",
+        "count": 8512
+      },
+      {
+        "_id": "WYNN",
+        "count": 1391
+      }
+    ]
+  }
+}

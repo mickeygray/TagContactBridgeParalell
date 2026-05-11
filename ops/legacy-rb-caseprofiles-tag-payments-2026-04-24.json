@@ -1,0 +1,171 @@
+{
+  "sourceCollection": "test.rb_caseprofiles",
+  "domain": "TAG",
+  "targetDate": "2026-04-24",
+  "startedAt": "2026-04-24T20:55:25.090Z",
+  "finishedAt": "2026-04-24T20:55:53.459Z",
+  "durationMs": 28369,
+  "scan": {
+    "legacyCaseProfilesScanned": 1536,
+    "apiCallsAttempted": 1536,
+    "casesWithPaymentsToday": 8,
+    "staleLegacyCaseIds404": 1114,
+    "erroredCases": 0,
+    "concurrency": 15
+  },
+  "totals": {
+    "initialCount": 1,
+    "initialAmount": 2879,
+    "recurringCount": 7,
+    "recurringAmount": 2148.09,
+    "totalCount": 8,
+    "totalAmount": 5027.09
+  },
+  "cases": [
+    {
+      "caseId": 310930,
+      "initialCount": 1,
+      "initialAmount": 2879,
+      "recurringCount": 0,
+      "recurringAmount": 0,
+      "totalCount": 1,
+      "totalAmount": 2879,
+      "payments": [
+        {
+          "casePaymentId": 63715,
+          "paymentDateKey": "2026-04-24",
+          "amount": 2879,
+          "paymentType": "initial",
+          "transactionStatus": "SUCCESS"
+        }
+      ]
+    },
+    {
+      "caseId": 273084,
+      "initialCount": 0,
+      "initialAmount": 0,
+      "recurringCount": 1,
+      "recurringAmount": 575,
+      "totalCount": 1,
+      "totalAmount": 575,
+      "payments": [
+        {
+          "casePaymentId": 63666,
+          "paymentDateKey": "2026-04-24",
+          "amount": 575,
+          "paymentType": "recurring",
+          "transactionStatus": "SUCCESS"
+        }
+      ]
+    },
+    {
+      "caseId": 146610,
+      "initialCount": 0,
+      "initialAmount": 0,
+      "recurringCount": 1,
+      "recurringAmount": 500,
+      "totalCount": 1,
+      "totalAmount": 500,
+      "payments": [
+        {
+          "casePaymentId": 63720,
+          "paymentDateKey": "2026-04-24",
+          "amount": 500,
+          "paymentType": "recurring",
+          "transactionStatus": "SUCCESS"
+        }
+      ]
+    },
+    {
+      "caseId": 283202,
+      "initialCount": 0,
+      "initialAmount": 0,
+      "recurringCount": 1,
+      "recurringAmount": 500,
+      "totalCount": 1,
+      "totalAmount": 500,
+      "payments": [
+        {
+          "casePaymentId": 63690,
+          "paymentDateKey": "2026-04-24",
+          "amount": 500,
+          "paymentType": "recurring",
+          "transactionStatus": "SUCCESS"
+        }
+      ]
+    },
+    {
+      "caseId": 100761,
+      "initialCount": 0,
+      "initialAmount": 0,
+      "recurringCount": 1,
+      "recurringAmount": 175,
+      "totalCount": 1,
+      "totalAmount": 175,
+      "payments": [
+        {
+          "casePaymentId": 63676,
+          "paymentDateKey": "2026-04-24",
+          "amount": 175,
+          "paymentType": "recurring",
+          "transactionStatus": "SUCCESS"
+        }
+      ]
+    },
+    {
+      "caseId": 40215,
+      "initialCount": 0,
+      "initialAmount": 0,
+      "recurringCount": 1,
+      "recurringAmount": 150,
+      "totalCount": 1,
+      "totalAmount": 150,
+      "payments": [
+        {
+          "casePaymentId": 63700,
+          "paymentDateKey": "2026-04-24",
+          "amount": 150,
+          "paymentType": "recurring",
+          "transactionStatus": "SUCCESS"
+        }
+      ]
+    },
+    {
+      "caseId": 66556,
+      "initialCount": 0,
+      "initialAmount": 0,
+      "recurringCount": 1,
+      "recurringAmount": 148.09,
+      "totalCount": 1,
+      "totalAmount": 148.09,
+      "payments": [
+        {
+          "casePaymentId": 63675,
+          "paymentDateKey": "2026-04-24",
+          "amount": 148.09,
+          "paymentType": "recurring",
+          "transactionStatus": "SUCCESS"
+        }
+      ]
+    },
+    {
+      "caseId": 271839,
+      "initialCount": 0,
+      "initialAmount": 0,
+      "recurringCount": 1,
+      "recurringAmount": 100,
+      "totalCount": 1,
+      "totalAmount": 100,
+      "payments": [
+        {
+          "casePaymentId": 63689,
+          "paymentDateKey": "2026-04-24",
+          "amount": 100,
+          "paymentType": "recurring",
+          "transactionStatus": "SUCCESS"
+        }
+      ]
+    }
+  ],
+  "errors": []
+}

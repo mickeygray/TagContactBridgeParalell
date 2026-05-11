@@ -1,0 +1,18 @@
+﻿{
+  "first_name": "Jean ",
+  "last_name": "Barney ",
+  "company": "WYNN",
+  "source": "VF Landing Page",
+  "email": "jlbarney29@yahoo.com",
+  "phone": "(504) 864-3984",
+  "state": "Louisiana",
+  "qualification_answers": {
+    "employment": "W-2 Employee",
+    "filing": "Single",
+    "owe": "$10,000 – $29,999",
+    "taxType": "Most of my tax debt is income tax (personal or business)",
+    "extension": "No",
+    "whoFiled": "I filed myself"
+  },
+  "caseId": 111967
+}

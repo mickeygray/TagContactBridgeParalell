@@ -1,0 +1,350 @@
+{
+  "mode": "commit",
+  "db": "tagcontactbridge_parallel",
+  "migratedAt": "2026-05-05T23:13:55.672Z",
+  "before": {
+    "rb_caseprofiles": 4968,
+    "controlplanecaseprofiles": 1123,
+    "leadcadences": 3942,
+    "controlplaneleadcadences": 7071,
+    "dailypaymentsummaries": 982,
+    "controlplanepaymentledgers": 378,
+    "dailyspends": 2801,
+    "controlplanespendentries": 2142,
+    "rb_dailycallstats": 3315,
+    "controlplanedailycallstats": 440,
+    "rb_contactactivities": 13573,
+    "controlplanecalllogs": 1025,
+    "controlplanemasterprospectindexes": 6826
+  },
+  "sourceLoaded": {
+    "caseProfiles": 4968,
+    "leadCadences": 3942,
+    "payments": 982,
+    "spends": 2801,
+    "dailyCallStats": 3315,
+    "contactActivities": 13573
+  },
+  "transformed": {
+    "caseProfiles": 4968,
+    "leadCadences": 3942,
+    "syntheticLeadCaseIds": 1,
+    "masterProspects": 5619,
+    "payments": 982,
+    "spends": 2801,
+    "dailyCallStats": 3315,
+    "callLogs": 13573
+  },
+  "writeResults": [
+    {
+      "label": "case profiles from rb_caseprofiles",
+      "matchedCount": 0,
+      "modifiedCount": 0,
+      "upsertedCount": 0,
+      "errors": [
+        "Updating the path 'updatedAt' would create a conflict at 'updatedAt'",
+        "Updating the path 'updatedAt' would create a conflict at 'updatedAt'",
+        "Updating the path 'updatedAt' would create a conflict at 'updatedAt'",
+        "Updating the path 'updatedAt' would create a conflict at 'updatedAt'",
+        "Updating the path 'updatedAt' would create a conflict at 'updatedAt'",
+        "Updating the path 'updatedAt' would create a conflict at 'updatedAt'",
+        "Updating the path 'updatedAt' would create a conflict at 'updatedAt'",
+        "Updating the path 'updatedAt' would create a conflict at 'updatedAt'",
+        "Updating the path 'updatedAt' would create a conflict at 'updatedAt'",
+        "Updating the path 'updatedAt' would create a conflict at 'updatedAt'",
+        "Updating the path 'updatedAt' would create a conflict at 'updatedAt'",
+        "Updating the path 'updatedAt' would create a conflict at 'updatedAt'",
+        "Updating the path 'updatedAt' would create a conflict at 'updatedAt'",
+        "Updating the path 'updatedAt' would create a conflict at 'updatedAt'",
+        "Updating the path 'updatedAt' would create a conflict at 'updatedAt'",
+        "Updating the path 'updatedAt' would create a conflict at 'updatedAt'",
+        "Updating the path 'updatedAt' would create a conflict at 'updatedAt'",
+        "Updating the path 'updatedAt' would create a conflict at 'updatedAt'",
+        "Updating the path 'updatedAt' would create a conflict at 'updatedAt'",
+        "Updating the path 'updatedAt' would create a conflict at 'updatedAt'",
+        "Updating the path 'updatedAt' would create a conflict at 'updatedAt'",
+        "Updating the path 'updatedAt' would create a conflict at 'updatedAt'",
+        "Updating the path 'updatedAt' would create a conflict at 'updatedAt'",
+        "Updating the path 'updatedAt' would create a conflict at 'updatedAt'",
+        "Updating the path 'updatedAt' would create a conflict at 'updatedAt'",
+        "Updating the path 'updatedAt' would create a conflict at 'updatedAt'",
+        "Updating the path 'updatedAt' would create a conflict at 'updatedAt'",
+        "Updating the path 'updatedAt' would create a conflict at 'updatedAt'",
+        "Updating the path 'updatedAt' would create a conflict at 'updatedAt'",
+        "Updating the path 'updatedAt' would create a conflict at 'updatedAt'",
+        "Updating the path 'updatedAt' would create a conflict at 'updatedAt'",
+        "Updating the path 'updatedAt' would create a conflict at 'updatedAt'",
+        "Updating the path 'updatedAt' would create a conflict at 'updatedAt'",
+        "Updating the path 'updatedAt' would create a conflict at 'updatedAt'",
+        "Updating the path 'updatedAt' would create a conflict at 'updatedAt'",
+        "Updating the path 'updatedAt' would create a conflict at 'updatedAt'",
+        "Updating the path 'updatedAt' would create a conflict at 'updatedAt'",
+        "Updating the path 'updatedAt' would create a conflict at 'updatedAt'",
+        "Updating the path 'updatedAt' would create a conflict at 'updatedAt'",
+        "Updating the path 'updatedAt' would create a conflict at 'updatedAt'",
+        "Updating the path 'updatedAt' would create a conflict at 'updatedAt'",
+        "Updating the path 'updatedAt' would create a conflict at 'updatedAt'",
+        "Updating the path 'updatedAt' would create a conflict at 'updatedAt'",
+        "Updating the path 'updatedAt' would create a conflict at 'updatedAt'",
+        "Updating the path 'updatedAt' would create a conflict at 'updatedAt'",
+        "Updating the path 'updatedAt' would create a conflict at 'updatedAt'",
+        "Updating the path 'updatedAt' would create a conflict at 'updatedAt'",
+        "Updating the path 'updatedAt' would create a conflict at 'updatedAt'",
+        "Updating the path 'updatedAt' would create a conflict at 'updatedAt'",
+        "Updating the path 'updatedAt' would create a conflict at 'updatedAt'",
+        "Updating the path 'updatedAt' would create a conflict at 'updatedAt'",
+        "Updating the path 'updatedAt' would create a conflict at 'updatedAt'",
+        "Updating the path 'updatedAt' would create a conflict at 'updatedAt'",
+        "Updating the path 'updatedAt' would create a conflict at 'updatedAt'",
+        "Updating the path 'updatedAt' would create a conflict at 'updatedAt'",
+        "Updating the path 'updatedAt' would create a conflict at 'updatedAt'",
+        "Updating the path 'updatedAt' would create a conflict at 'updatedAt'",
+        "Updating the path 'updatedAt' would create a conflict at 'updatedAt'",
+        "Updating the path 'updatedAt' would create a conflict at 'updatedAt'",
+        "Updating the path 'updatedAt' would create a conflict at 'updatedAt'"
+      ]
+    },
+    {
+      "label": "master prospects from profiles + cadences",
+      "matchedCount": 0,
+      "modifiedCount": 0,
+      "upsertedCount": 0,
+      "errors": [
+        "Updating the path 'lastSeenAt' would create a conflict at 'lastSeenAt'",
+        "Updating the path 'lastSeenAt' would create a conflict at 'lastSeenAt'",
+        "Updating the path 'lastSeenAt' would create a conflict at 'lastSeenAt'",
+        "Updating the path 'lastSeenAt' would create a conflict at 'lastSeenAt'",
+        "Updating the path 'lastSeenAt' would create a conflict at 'lastSeenAt'",
+        "Updating the path 'lastSeenAt' would create a conflict at 'lastSeenAt'",
+        "Updating the path 'lastSeenAt' would create a conflict at 'lastSeenAt'",
+        "Updating the path 'lastSeenAt' would create a conflict at 'lastSeenAt'",
+        "Updating the path 'lastSeenAt' would create a conflict at 'lastSeenAt'",
+        "Updating the path 'lastSeenAt' would create a conflict at 'lastSeenAt'",
+        "Updating the path 'lastSeenAt' would create a conflict at 'lastSeenAt'",
+        "Updating the path 'lastSeenAt' would create a conflict at 'lastSeenAt'",
+        "Updating the path 'lastSeenAt' would create a conflict at 'lastSeenAt'",
+        "Updating the path 'lastSeenAt' would create a conflict at 'lastSeenAt'",
+        "Updating the path 'lastSeenAt' would create a conflict at 'lastSeenAt'",
+        "Updating the path 'lastSeenAt' would create a conflict at 'lastSeenAt'",
+        "Updating the path 'lastSeenAt' would create a conflict at 'lastSeenAt'",
+        "Updating the path 'lastSeenAt' would create a conflict at 'lastSeenAt'",
+        "Updating the path 'lastSeenAt' would create a conflict at 'lastSeenAt'",
+        "Updating the path 'lastSeenAt' would create a conflict at 'lastSeenAt'",
+        "Updating the path 'lastSeenAt' would create a conflict at 'lastSeenAt'",
+        "Updating the path 'lastSeenAt' would create a conflict at 'lastSeenAt'",
+        "Updating the path 'lastSeenAt' would create a conflict at 'lastSeenAt'",
+        "Updating the path 'lastSeenAt' would create a conflict at 'lastSeenAt'",
+        "Updating the path 'lastSeenAt' would create a conflict at 'lastSeenAt'",
+        "Updating the path 'lastSeenAt' would create a conflict at 'lastSeenAt'",
+        "Updating the path 'lastSeenAt' would create a conflict at 'lastSeenAt'",
+        "Updating the path 'lastSeenAt' would create a conflict at 'lastSeenAt'",
+        "Updating the path 'lastSeenAt' would create a conflict at 'lastSeenAt'",
+        "Updating the path 'lastSeenAt' would create a conflict at 'lastSeenAt'",
+        "Updating the path 'lastSeenAt' would create a conflict at 'lastSeenAt'",
+        "Updating the path 'lastSeenAt' would create a conflict at 'lastSeenAt'",
+        "Updating the path 'lastSeenAt' would create a conflict at 'lastSeenAt'",
+        "Updating the path 'lastSeenAt' would create a conflict at 'lastSeenAt'",
+        "Updating the path 'lastSeenAt' would create a conflict at 'lastSeenAt'",
+        "Updating the path 'lastSeenAt' would create a conflict at 'lastSeenAt'",
+        "Updating the path 'lastSeenAt' would create a conflict at 'lastSeenAt'",
+        "Updating the path 'lastSeenAt' would create a conflict at 'lastSeenAt'",
+        "Updating the path 'lastSeenAt' would create a conflict at 'lastSeenAt'",
+        "Updating the path 'lastSeenAt' would create a conflict at 'lastSeenAt'",
+        "Updating the path 'lastSeenAt' would create a conflict at 'lastSeenAt'",
+        "Updating the path 'lastSeenAt' would create a conflict at 'lastSeenAt'",
+        "Updating the path 'lastSeenAt' would create a conflict at 'lastSeenAt'",
+        "Updating the path 'lastSeenAt' would create a conflict at 'lastSeenAt'",
+        "Updating the path 'lastSeenAt' would create a conflict at 'lastSeenAt'",
+        "Updating the path 'lastSeenAt' would create a conflict at 'lastSeenAt'",
+        "Updating the path 'lastSeenAt' would create a conflict at 'lastSeenAt'",
+        "Updating the path 'lastSeenAt' would create a conflict at 'lastSeenAt'",
+        "Updating the path 'lastSeenAt' would create a conflict at 'lastSeenAt'",
+        "Updating the path 'lastSeenAt' would create a conflict at 'lastSeenAt'",
+        "Updating the path 'lastSeenAt' would create a conflict at 'lastSeenAt'",
+        "Updating the path 'lastSeenAt' would create a conflict at 'lastSeenAt'",
+        "Updating the path 'lastSeenAt' would create a conflict at 'lastSeenAt'",
+        "Updating the path 'lastSeenAt' would create a conflict at 'lastSeenAt'",
+        "Updating the path 'lastSeenAt' would create a conflict at 'lastSeenAt'",
+        "Updating the path 'lastSeenAt' would create a conflict at 'lastSeenAt'",
+        "Updating the path 'lastSeenAt' would create a conflict at 'lastSeenAt'",
+        "Updating the path 'lastSeenAt' would create a conflict at 'lastSeenAt'",
+        "Updating the path 'lastSeenAt' would create a conflict at 'lastSeenAt'",
+        "Updating the path 'lastSeenAt' would create a conflict at 'lastSeenAt'",
+        "Updating the path 'lastSeenAt' would create a conflict at 'lastSeenAt'",
+        "Updating the path 'lastSeenAt' would create a conflict at 'lastSeenAt'",
+        "Updating the path 'lastSeenAt' would create a conflict at 'lastSeenAt'",
+        "Updating the path 'lastSeenAt' would create a conflict at 'lastSeenAt'",
+        "Updating the path 'lastSeenAt' would create a conflict at 'lastSeenAt'",
+        "Updating the path 'lastSeenAt' would create a conflict at 'lastSeenAt'",
+        "Updating the path 'lastSeenAt' would create a conflict at 'lastSeenAt'",
+        "Updating the path 'lastSeenAt' would create a conflict at 'lastSeenAt'",
+        "Updating the path 'lastSeenAt' would create a conflict at 'lastSeenAt'",
+        "Updating the path 'lastSeenAt' would create a conflict at 'lastSeenAt'",
+        "Updating the path 'lastSeenAt' would create a conflict at 'lastSeenAt'",
+        "Updating the path 'lastSeenAt' would create a conflict at 'lastSeenAt'"
+      ]
+    },
+    {
+      "label": "case profiles from leadcadences",
+      "matchedCount": 0,
+      "modifiedCount": 0,
+      "upsertedCount": 0,
+      "errors": [
+        "Updating the path 'updatedAt' would create a conflict at 'updatedAt'",
+        "Updating the path 'updatedAt' would create a conflict at 'updatedAt'",
+        "Updating the path 'updatedAt' would create a conflict at 'updatedAt'",
+        "Updating the path 'updatedAt' would create a conflict at 'updatedAt'",
+        "Updating the path 'updatedAt' would create a conflict at 'updatedAt'",
+        "Updating the path 'updatedAt' would create a conflict at 'updatedAt'",
+        "Updating the path 'updatedAt' would create a conflict at 'updatedAt'",
+        "Updating the path 'updatedAt' would create a conflict at 'updatedAt'",
+        "Updating the path 'updatedAt' would create a conflict at 'updatedAt'",
+        "Updating the path 'updatedAt' would create a conflict at 'updatedAt'",
+        "Updating the path 'updatedAt' would create a conflict at 'updatedAt'",
+        "Updating the path 'updatedAt' would create a conflict at 'updatedAt'",
+        "Updating the path 'updatedAt' would create a conflict at 'updatedAt'",
+        "Updating the path 'updatedAt' would create a conflict at 'updatedAt'",
+        "Updating the path 'updatedAt' would create a conflict at 'updatedAt'",
+        "Updating the path 'updatedAt' would create a conflict at 'updatedAt'",
+        "Updating the path 'updatedAt' would create a conflict at 'updatedAt'",
+        "Updating the path 'updatedAt' would create a conflict at 'updatedAt'",
+        "Updating the path 'updatedAt' would create a conflict at 'updatedAt'",
+        "Updating the path 'updatedAt' would create a conflict at 'updatedAt'",
+        "Updating the path 'updatedAt' would create a conflict at 'updatedAt'",
+        "Updating the path 'updatedAt' would create a conflict at 'updatedAt'",
+        "Updating the path 'updatedAt' would create a conflict at 'updatedAt'",
+        "Updating the path 'updatedAt' would create a conflict at 'updatedAt'",
+        "Updating the path 'updatedAt' would create a conflict at 'updatedAt'",
+        "Updating the path 'updatedAt' would create a conflict at 'updatedAt'",
+        "Updating the path 'updatedAt' would create a conflict at 'updatedAt'",
+        "Updating the path 'updatedAt' would create a conflict at 'updatedAt'",
+        "Updating the path 'updatedAt' would create a conflict at 'updatedAt'",
+        "Updating the path 'updatedAt' would create a conflict at 'updatedAt'",
+        "Updating the path 'updatedAt' would create a conflict at 'updatedAt'",
+        "Updating the path 'updatedAt' would create a conflict at 'updatedAt'",
+        "Updating the path 'updatedAt' would create a conflict at 'updatedAt'",
+        "Updating the path 'updatedAt' would create a conflict at 'updatedAt'",
+        "Updating the path 'updatedAt' would create a conflict at 'updatedAt'",
+        "Updating the path 'updatedAt' would create a conflict at 'updatedAt'",
+        "Updating the path 'updatedAt' would create a conflict at 'updatedAt'",
+        "Updating the path 'updatedAt' would create a conflict at 'updatedAt'",
+        "Updating the path 'updatedAt' would create a conflict at 'updatedAt'",
+        "Updating the path 'updatedAt' would create a conflict at 'updatedAt'",
+        "Updating the path 'updatedAt' would create a conflict at 'updatedAt'",
+        "Updating the path 'updatedAt' would create a conflict at 'updatedAt'",
+        "Updating the path 'updatedAt' would create a conflict at 'updatedAt'",
+        "Updating the path 'updatedAt' would create a conflict at 'updatedAt'",
+        "Updating the path 'updatedAt' would create a conflict at 'updatedAt'",
+        "Updating the path 'updatedAt' would create a conflict at 'updatedAt'",
+        "Updating the path 'updatedAt' would create a conflict at 'updatedAt'",
+        "Updating the path 'updatedAt' would create a conflict at 'updatedAt'"
+      ]
+    },
+    {
+      "label": "lead cadences",
+      "matchedCount": 904,
+      "modifiedCount": 904,
+      "upsertedCount": 3038,
+      "errors": []
+    },
+    {
+      "label": "payment ledger",
+      "matchedCount": 119,
+      "modifiedCount": 119,
+      "upsertedCount": 863,
+      "errors": []
+    },
+    {
+      "label": "spend entries",
+      "matchedCount": 2728,
+      "modifiedCount": 2728,
+      "upsertedCount": 73,
+      "errors": []
+    },
+    {
+      "label": "daily call stats",
+      "matchedCount": 89,
+      "modifiedCount": 89,
+      "upsertedCount": 3226,
+      "errors": []
+    },
+    {
+      "label": "call logs from rb_contactactivities",
+      "matchedCount": 4695,
+      "modifiedCount": 0,
+      "upsertedCount": 8878,
+      "errors": []
+    }
+  ],
+  "after": {
+    "controlplanecaseprofiles": 1123,
+    "controlplaneleadcadences": 10109,
+    "controlplanepaymentledgers": 1241,
+    "controlplanespendentries": 2215,
+    "controlplanedailycallstats": 3666,
+    "controlplanecalllogs": 9903,
+    "controlplanemasterprospectindexes": 6826
+  },
+  "domains": {
+    "rawCaseProfiles": [
+      {
+        "_id": "TAG",
+        "count": 1649
+      },
+      {
+        "_id": "WYNN",
+        "count": 3319
+      }
+    ],
+    "controlPlaneCaseProfiles": [
+      {
+        "_id": "TAG",
+        "count": 133
+      },
+      {
+        "_id": "WYNN",
+        "count": 990
+      }
+    ],
+    "rawLeadCadences": [
+      {
+        "_id": "TAG",
+        "count": 16
+      },
+      {
+        "_id": "WYNN",
+        "count": 3926
+      }
+    ],
+    "controlPlaneLeadCadences": [
+      {
+        "_id": "TAG",
+        "count": 6106
+      },
+      {
+        "_id": "WYNN",
+        "count": 4003
+      }
+    ],
+    "rawContactActivities": [
+      {
+        "_id": "TAG",
+        "count": 12886
+      },
+      {
+        "_id": "WYNN",
+        "count": 687
+      }
+    ],
+    "controlPlaneCallLogs": [
+      {
+        "_id": "TAG",
+        "count": 8512
+      },
+      {
+        "_id": "WYNN",
+        "count": 1391
+      }
+    ]
+  }
+}

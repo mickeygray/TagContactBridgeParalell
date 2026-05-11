@@ -1,0 +1,47 @@
+name: SSH check
+
+# A no-op verification workflow. Press the "Deploy" button in 3001 against the
+# ssh-check target and this runs: it proves the control-plane PAT can reach
+# GitHub, GitHub can reach your EC2 instance over SSH, and the key + host +
+# user are all correct. It never modifies anything on the box.
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "Action (ignored by ssh-check, accepted for API compat)"
+        required: false
+        default: "full"
+      target:
+        description: "Target key (ignored, accepted for API compat)"
+        required: false
+
+jobs:
+  ssh-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Echo inputs (for audit)
+        run: |
+          echo "Dispatched by control-plane"
+          echo "action=${{ inputs.action }}"
+          echo "target=${{ inputs.target }}"
+
+      - name: Verify SSH reaches the instance
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.AWS_HOST }}
+          username: ${{ secrets.AWS_USER }}
+          key: ${{ secrets.AWS_SSH_PRIVATE_KEY }}
+          port: ${{ secrets.AWS_SSH_PORT || 22 }}
+          script_stop: true
+          script: |
+            echo "=== SSH OK ==="
+            echo "user=$(whoami)"
+            echo "host=$(hostname)"
+            echo "uptime=$(uptime -p)"
+            echo "disk:"
+            df -h / | sed 's/^/  /'
+            echo "node=$(command -v node && node -v || echo 'node not installed')"
+            echo "pm2=$(command -v pm2 && pm2 -v || echo 'pm2 not installed')"
+            echo "git=$(command -v git && git --version || echo 'git not installed')"

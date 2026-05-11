@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><style>
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background: #f3f4f6; margin: 0; padding: 20px; color: #111827; }
+  .wrap { max-width: 880px; margin: 0 auto; background: #ffffff; border-radius: 12px; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,0.08); }
+  .hdr { padding: 20px 24px; background: #0f172a; color: #ffffff; }
+  .hdr h1 { margin: 0; font-size: 18px; font-weight: 700; }
+  .hdr .sub { margin-top: 2px; font-size: 13px; color: #94a3b8; }
+  .hdr.danger { background: #7f1d1d; }
+  .hdr.danger .sub { color: #fca5a5; }
+  .section { padding: 16px 24px; border-bottom: 1px solid #e5e7eb; }
+  .section:last-child { border-bottom: none; }
+  .section h2 { font-size: 13px; font-weight: 700; color: #374151; margin: 0 0 8px; text-transform: uppercase; letter-spacing: 0.5px; }
+  .kpi-row { width: 100%; }
+  .kpi { text-align: center; padding: 8px 4px; }
+  .kpi .v { font-size: 26px; font-weight: 800; color: #111827; }
+  .kpi .l { font-size: 10px; color: #9ca3af; text-transform: uppercase; letter-spacing: 1px; margin-top: 2px; }
+  .kpi.green .v { color: #16a34a; }
+  .kpi.amber .v { color: #d97706; }
+  .kpi.red .v   { color: #dc2626; }
+  .kpi.blue .v  { color: #2563eb; }
+  table.data { width: 100%; border-collapse: collapse; font-size: 13px; }
+  table.data th { background: #f9fafb; text-align: left; font-size: 10px; color: #6b7280; text-transform: uppercase; padding: 6px 12px; font-weight: 600; letter-spacing: 0.5px; }
+  table.data th.center { text-align: center; }
+  table.data td { padding: 8px 12px; border-bottom: 1px solid #f3f4f6; vertical-align: top; }
+  table.data td.center { text-align: center; }
+  table.data td.right  { text-align: right; }
+  table.data td.mono   { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; color: #6b7280; }
+  table.data tr:last-child td { border-bottom: none; }
+  .pill { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 600; }
+  .pill.prospect { background: rgba(59,130,246,0.1); color: #2563eb; }
+  .pill.client   { background: rgba(34,197,94,0.1); color: #16a34a; }
+  .pill.dnc      { background: rgba(239,68,68,0.1); color: #dc2626; }
+  .pill.postdate { background: rgba(245,158,11,0.1); color: #d97706; }
+  .pill.redline  { background: rgba(220,38,38,0.15); color: #b91c1c; }
+  .pill.unknown  { background: rgba(107,114,128,0.1); color: #4b5563; }
+  .score-badge { font-weight: 700; font-size: 13px; }
+  .score-green { color: #16a34a; }
+  .score-amber { color: #d97706; }
+  .score-red   { color: #dc2626; }
+  .muted { color: #9ca3af; font-size: 11px; }
+  .alert-banner { padding: 14px 24px; background: #fef2f2; border-bottom: 1px solid #fecaca; }
+  .alert-banner .head { font-size: 13px; color: #991b1b; font-weight: 700; }
+  .alert-banner .sub  { font-size: 12px; color: #b91c1c; margin-top: 4px; }
+  .footer { padding: 14px 24px; background: #f9fafb; text-align: center; }
+  .footer .line { font-size: 11px; color: #9ca3af; }
+  .footer .small { font-size: 11px; color: #d1d5db; margin-top: 2px; }
+  .summary-line { font-size: 12px; color: #4b5563; margin-top: 6px; }
+  .red-flag { font-size: 11px; color: #dc2626; margin-top: 4px; }
+  .ai-summary { font-size: 11px; color: #6b7280; line-height: 1.4; margin-top: 4px; }
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="hdr">
+      <h1>Daily Lead Data + Scoring</h1>
+      <div class="sub">TAG — 2026-04-30</div>
+    </div>
+
+    <div class="section">
+      <h2>Topline — 2026-04-30</h2>
+      <table class="kpi-row" cellpadding="0" cellspacing="0">
+        <tr>
+            <td class="kpi blue">
+              <div class="v">1</div>
+              <div class="l">Leads today</div>
+            </td>
+            <td class="kpi blue">
+              <div class="v">18</div>
+              <div class="l">Calls</div>
+            </td>
+            <td class="kpi blue">
+              <div class="v">3</div>
+              <div class="l">5 min+</div>
+            </td>
+            <td class="kpi blue">
+              <div class="v">0</div>
+              <div class="l">Scored</div>
+            </td>
+            <td class="kpi green">
+              <div class="v">0</div>
+              <div class="l">Deal</div>
+            </td>
+            <td class="kpi amber">
+              <div class="v">0</div>
+              <div class="l">Postdate</div>
+            </td>
+            <td class="kpi red">
+              <div class="v">0</div>
+              <div class="l">DNC</div>
+            </td>
+            <td class="kpi blue">
+              <div class="v">0</div>
+              <div class="l">Contacted</div>
+            </td>
+        </tr>
+      </table>
+    </div>
+
+    <div class="section">
+      <h2>Lead intake by source</h2>
+        <table class="data" cellpadding="0" cellspacing="0">
+          <tr>
+            <th>Source</th>
+            <th class="center">Leads today</th>
+          </tr>
+            <tr>
+              <td>website</td>
+              <td class="center">1</td>
+            </tr>
+        </table>
+    </div>
+
+    <div class="section">
+      <h2>Status changes today</h2>
+        <div class="muted">No status changes today.</div>
+    </div>
+
+    <div class="section">
+      <h2>Vendor families — today</h2>
+        <div class="muted">No vendor activity today.</div>
+    </div>
+
+    <div class="section">
+      <h2>Top sources — today</h2>
+        <div class="muted">No source activity today.</div>
+    </div>
+
+    <div class="section">
+      <h2>Attribution review queue</h2>
+      <div>
+        Held out: <strong>0</strong>
+        &nbsp;·&nbsp; Newly queued: <strong>0</strong>
+        &nbsp;·&nbsp; Resolved: <strong>0</strong>
+        &nbsp;·&nbsp; Ignored: <strong>0</strong>
+      </div>
+      <div class="summary-line">Unresolved rows are excluded from the topline numbers above. Resolve them in the Review workspace to fold them into tomorrow's report.</div>
+    </div>
+
+    <div class="section">
+      <h2>Hourly bug wrap</h2>
+      <table class="data" cellpadding="0" cellspacing="0">
+        <tr>
+          <th>Handler</th>
+          <th>Event</th>
+          <th>Status</th>
+          <th>Last error</th>
+        </tr>
+        <tr>
+          <td>retryCxLogicsAction</td>
+          <td>cx.logics-update-activity.retry</td>
+          <td>dead-letter</td>
+          <td>Logics request failed for TAG POST CaseActivity/Activity: 404</td>
+        </tr>
+        <tr>
+          <td>retryNcoaCreateCase</td>
+          <td>ncoa.logics.create.retry</td>
+          <td>processing</td>
+          <td>Logics did not return CaseID</td>
+        </tr>
+      </table>
+    </div>
+
+    <div class="section">
+      <div class="summary-line">Per-source spreadsheet attached as <strong>TAG-vendor-rollup-2026-04-30.csv</strong>. Today's call log attached as <strong>TAG-call-log-2026-04-30.csv</strong>.</div>
+    </div>
+
+    <div class="footer">
+      <div class="line">Parallel nightly close · 2026-04-30</div>
+      <div class="small">TAG-vendor-rollup-2026-04-30.csv · TAG-call-log-2026-04-30.csv</div>
+    </div>
+  </div>
+</body></html>

@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8" /><title>{{subject}}</title></head>
+<body style="margin:0;padding:0;background:#f1f5f9;font-family:Helvetica,Arial,sans-serif;">
+<table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="background:#f1f5f9;padding:32px 0;">
+  <tr><td align="center">
+    <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="600" style="background:#ffffff;border-radius:8px;overflow:hidden;box-shadow:0 1px 3px rgba(15,23,42,0.08);">
+      <tr><td>{{>header}}</td></tr>
+      <tr><td style="padding:32px;color:#1f2937;font-size:15px;line-height:1.6;">
+        <p style="margin:0 0 16px;">Hi {{firstName}},</p>
+        <p style="margin:0 0 16px;">Confirming our call on <strong>{{scheduledAtLabel}}</strong>. I'll reach out to <strong>{{callbackPhone}}</strong> at that time.</p>
+        <table role="presentation" cellspacing="0" cellpadding="0" border="0" style="margin:16px 0;border-left:3px solid {{brand.accentColor}};padding-left:16px;">
+          <tr><td style="color:#475569;font-size:13px;">When: {{scheduledAtLabel}}</td></tr>
+          <tr><td style="color:#475569;font-size:13px;padding-top:4px;">Phone: {{callbackPhone}}</td></tr>
+        </table>
+        <p style="margin:0 0 16px;">If you need to reschedule, reply to this email or text me at <a href="tel:{{agentPhone}}" style="color:{{brand.accentColor}};text-decoration:none;">{{agentPhone}}</a> and we'll find another time that works for you.</p>
+        <p style="margin:0 0 0;">Looking forward to speaking,</p>
+        {{>signature}}
+      </td></tr>
+      <tr><td>{{>footer}}</td></tr>
+    </table>
+  </td></tr>
+</table>
+</body></html>

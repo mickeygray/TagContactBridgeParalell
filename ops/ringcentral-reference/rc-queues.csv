@@ -1,0 +1,79 @@
+Queue_Name,Extension,Status,Toll_Free_Numbers,Forwards_To,Forward_Label,Members,RC_ID
+"Customer Service",505,Enabled,"",," → transfer to ext 63813516004 → transfer to ext 63813516004","800, 365, 525, 810, 111, 140, 731, 94, 320, 343, 281",2375402005
+"In House Leads",901,Enabled,"",,"","800, 365, 966, 810, 809, 13, 320, 319, 10111",2375948005
+"Complaint Calls - Brand Bidding (866-939-4076)",904,Enabled,"",,"","13, 565",2382610005
+"Tax Group Consultants - OG",909,Enabled,"",,"","966, 813, 809, 319, 445",2384936005
+"Dialer Leads",922,Enabled,"",,"","209, 966, 603, 319, 445",2405927005
+"Tax Prep Marketing Email",923,Enabled,"",,"","365, 525, 810, 111, 140, 13, 240, 320, 343, 10111",2406050005
+"C SNAP Urgent Notice State 800-313-6634",932,Enabled,"",+12134101453,"unconditional","10111",2458309005
+"State Delinquency C-Snap Test 800-517-5417",934,Enabled,"",+12134101453,"unconditional","10111",2458342005
+"Yellow Delinquency Notice State 800-517-9227",935,Enabled,"",+12134101453,"unconditional","10111",2458352005
+"State Delinquency Letter Test  800-517-9215",936,Enabled,"",+12134101453,"unconditional","10111",2458353005
+"Federal Reminder Letter (800) 849-5358",945,Enabled,"",+12134101453,"unconditional","10111",2479573005
+"TAG Website",972,Enabled,"",,"","966, 813, 810, 809, 320, 319, 445",2490973005
+"WYNN TAX GOOGLE LEAD",973,Enabled,"",,"","209, 966, 810, 320, 319, 445",2494247005
+"AS - 0 Invoice",199,Enabled,"",,"","140, 731, 13, 320, 713, 10111",63447284004
+"Origination",900,Enabled,"",,"","800, 803, 13, 801, 804, 201, 729",63551851004
+"Reso",300,Enabled,"",,"","94, 343, 281",63554939004
+"Dialer Leads",902,Enabled,"",,"","209, 966, 810, 319, 445",63562295004
+"Ad Serv Call Queue",444,Enabled,"",,"","365, 966, 525, 810, 140, 731, 320",63563773004
+"Redline Text",903,Enabled,"",,"","365, 966, 810, 809, 43254, 996, 13, 320, 319, 10111",63563857004
+"American Tax Support Website",905,Enabled,"",,"","365, 966, 810, 809, 803, 13, 320, 445, 10111",63574200004
+"Origination BCD",910,Enabled,"",," → transfer to ext 2252193005","365, 209, 966, 810, 320, 101, 319, 445",63577451004
+"In House Leads - Live Transfer",912,Enabled,"",,"","365, 966, 810, 809, 803, 996, 13, 320, 10111",63578818004
+"Live Transfer - Money Line",919,Enabled,"",,"","800, 365, 966, 803, 129, 13, 713, 324, 801, 804, 729",63599425004
+"Yellows",920,Enabled,"",," → transfer to ext 2252193005","966, 813, 810, 809, 803, 13, 320, 319, 10111",63608769004
+"Welcome E-mail",921,Enabled,"",,"","365, 966, 525, 810, 140, 13, 240, 320",63613218004
+"Wynn Tax FB Insta",924,Enabled,"",,"","209, 966, 810, 603, 320, 319, 445",63620912004
+"TO FU Text Message TAG",925,Enabled,"",,"","365, 966, 525, 810, 140, 803, 731, 13, 240, 94, 320, 10111",63630413004
+"Google Ads Campaign 2 (PHRASE)",926,Enabled,"",,"","800, 966, 809, 803, 13, 802, 343, 10111",63630425004
+"Google Ads Campaign 3 (EXACT)",927,Enabled,"",,"","966, 809, 803, 13, 802, 343, 10111",63630428004
+"CBD",600,Enabled,"",,"","966, 810, 809",63703956004
+"Mailer",500,Enabled,"",+12703923043,"unconditional → transfer to ext 63813519004","365, 209, 966, 810, 803, 320, 101, 319, 445",63712730004
+"WYNN TAX GOOGLE LEAD",4353,Enabled,"",+12134101453,"unconditional","320",63712999004
+"Investigation Test",222,Enabled,"",+12134101453,"unconditional","10111",63713757004
+"Affordability Federal",928,Enabled,"",+12134101453,"unconditional","10111",63724109004
+"Citation State - (800) 517-0470",929,Enabled,"",+12134101453,"unconditional","10111",63724305004
+"Urgent Third Federal - (800) 517-8599",930,Enabled,"",+12134101453,"unconditional","10111",63724306004
+"Urgent Third State - (800) 517-6356",931,Enabled,"",+12134101453,"unconditional","10111",63724310004
+"OG - Raw Calls",937,Enabled,"",,"","365, 966, 813, 809, 803, 13, 320, 101, 319, 10111",63731698004
+"433a",433,Enabled,"",,"","",63734261004
+"3rd Day (Pink) Urgent Third State 800-921-9263",938,Enabled,"",,"","",63751309004
+"3rd Day (Pink) Urgent Third Federal 800-590-2477",939,Enabled,"",,"","",63751322004
+"Consumer Letter State Test - (800) 518-6426",940,Enabled,"",,"","",63762772004
+"Aged Urgent 3rd Federal (800) 518-9789",941,Enabled,"",,"","",63763690004
+"Aged Urgent 3rd State (800) 518-0098",942,Enabled,"",,"","",63763696004
+"AS Originations",943,Enabled,"",,"","",63767454004
+"(800) 513-0704 Consumer 3 month Remail",944,Enabled,"",,"","",63767455004
+"800-493-0273 Urgent 3rd 3 month Remail",946,Enabled,"",,"","",63780094004
+"Urgent Third PC State",950,Enabled,"",,"","",63787414004
+"8006435890 Federal Urgent 3rd 3 Day Pink",951,Enabled,"",,"","",63792436004
+"Urgent Third PC Pink Day 3",952,Enabled,"",,"","",63800952004
+"Urgent Delinquency State",953,Disabled,"",,"","",63800959004
+"Urgent 3rd Postcard State",954,Enabled,"",,"","",63800961004
+"TAG META LEAD",955,Enabled,"",,"","",63800962004
+"Urgent Delinquency Federal",956,Enabled,"",,"","",63800963004
+"Wynn Tax FB Insta",957,Enabled,"",,"","",63800966004
+"Urgent Third Federal White PC",958,Enabled,"",,"","",63800967004
+"Urgent 3rd Pink Day 1",959,Enabled,"",,"","",63800968004
+"CNC Letter State",960,Enabled,"",,"","",63800970004
+"TAX LIEN PC",961,Enabled,"",,"","",63800971004
+"Urgent 3rd Postcard 7 Day State",962,Enabled,"",,"","",63800972004
+"Urgent Third PC 7 Day Federal",963,Enabled,"",,"","",63800974004
+"Consumer State",964,Enabled,"",,"","",63800976004
+"Affordability Pink State",965,Enabled,"",,"","",63800977004
+"Must Respond State PC",967,Enabled,"",,"","",63800979004
+"Must Respond Postcard Federal",968,Enabled,"",,"","",63800981004
+"Origination Call Queue",200,Enabled,"",,"","",63801016004
+"New OG",970,Enabled,"",,"","",63801020004
+"Overflow OG",971,Enabled,"",,"","",63801022004
+"Live Transfer 2026",4354,Enabled,"",,"","",63837652004
+"RVM#2",4355,Enabled,"",,"","",63838512004
+"Wynn Tax TikTok",9636,Enabled,"",,"","",63843685004
+"WYNN TAX TIKTOK",9637,Enabled,"",,"","",63848705004
+"WYNN TAX SOLUTIONS",1234,Enabled,"",,"","",63879530004
+"WYNN TAX SOLUTIONS - AUTO DIALER",2345,Enabled,"",,"","",63879531004
+"WYNN TAX IVR",9638,Enabled,"",,"","",63882593004
+"Tax Advocate Group AUTO DIALER",96392,Enabled,"",,"","",63890374004
+"Customer Service - Wynn",5051,Enabled,"",,"","",63898152004
+"Customer Service - Amity",5052,Enabled,"",,"","",63898153004

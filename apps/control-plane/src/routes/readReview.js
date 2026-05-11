@@ -10,7 +10,7 @@ const { toErrorResponse } = require("../../../../packages/shared-errors/src");
 function createReadReviewRouter(auth) {
   const router = express.Router();
 
-  router.get("/overview/:domain", auth.requireAuth, async (req, res) => {
+  router.get("/overview/:domain", auth.requireAuth, auth.requireAdmin, async (req, res) => {
     try {
       const result = await buildReviewWorkspace(req.params.domain);
       return res.json({ ok: true, result });
@@ -19,7 +19,7 @@ function createReadReviewRouter(auth) {
     }
   });
 
-  router.get("/queue/:domain", auth.requireAuth, async (req, res) => {
+  router.get("/queue/:domain", auth.requireAuth, auth.requireAdmin, async (req, res) => {
     try {
       const result = await listReviewWorkspaceItems(req.params.domain, {
         status: req.query.status,

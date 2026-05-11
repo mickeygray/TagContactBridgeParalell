@@ -7,17 +7,44 @@
     "packages/*"
   ],
   "scripts": {
+    "build:web": "npm run build --workspace=web-client",
+    "dev": "npm run dev:preflight && concurrently -k --handle-input -n cp,in,out,rc,web,ngrok -c blue,cyan,magenta,green,yellow,white \"npm:dev:control-plane\" \"npm:dev:inbound\" \"npm:dev:outbound\" \"npm:dev:ring\" \"npm:dev:web\" \"npm:dev:ngrok\"",
+    "dev:no-ngrok": "npm run dev:preflight && concurrently -k --handle-input -n cp,in,out,rc,web -c blue,cyan,magenta,green,yellow \"npm:dev:control-plane\" \"npm:dev:inbound\" \"npm:dev:outbound\" \"npm:dev:ring\" \"npm:dev:web\"",
+    "dev:backend": "npm run dev:preflight && concurrently -k --handle-input -n cp,in,out,rc -c blue,cyan,magenta,green \"npm:dev:control-plane\" \"npm:dev:inbound\" \"npm:dev:outbound\" \"npm:dev:ring\"",
+    "dev:preflight": "node scripts/check-dev-ports.js",
+    "dev:stop": "node scripts/stop-dev-ports.js",
     "dev:control-plane": "node apps/control-plane/src/server.js",
     "dev:inbound": "node apps/inbound-gateway/src/server.js",
     "dev:outbound": "node apps/outbound-gateway/src/server.js",
     "dev:ring": "node apps/ringcentral-cx/src/server.js",
-    "dev:worker": "node apps/event-worker/src/server.js",
+    "dev:web": "npm run dev --workspace=web-client",
+    "dev:ngrok": "node scripts/run-ngrok.js",
+    "ngrok:ensure-parallel": "node scripts/ensure-parallel-ngrok-tunnel.js",
+    "rcx:refresh-platform-token": "node scripts/refresh-rcx-platform-token.js",
+    "clone:legacy-data": "node scripts/clone-legacy-data.js",
+    "backfill:legacy-metrics": "node scripts/backfill-legacy-metrics.js",
+    "archive:eod-recordings": "node scripts/archive-eod-recordings.js",
+    "check:cutover": "node scripts/check-cutover-readiness.js",
+    "preview:hourly-calls": "node scripts/preview-hourly-calls.js",
+    "preview:hourly-finance": "node scripts/preview-hourly-finance.js",
     "smoke": "node scripts/smoke-test.js"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.91.1",
+    "7zip-bin": "^5.2.0",
     "cors": "^2.8.5",
     "dotenv": "^16.4.7",
     "express": "^4.21.2",
-    "mongoose": "^8.13.0"
+    "handlebars": "^4.7.9",
+    "mongoose": "^8.13.0",
+    "multer": "^2.1.1",
+    "music-metadata": "^11.12.3",
+    "node-7z": "^3.0.0",
+    "nodemailer": "^8.0.7",
+    "papaparse": "^5.5.3",
+    "ssh2-sftp-client": "^11.0.0"
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.1"
   }
 }

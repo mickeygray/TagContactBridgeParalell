@@ -1,0 +1,153 @@
+<!-- tax-05-extension.hbs -->
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Act Now or File an Extension</title>
+  </head>
+  <body
+    style="font-family: Arial, sans-serif; line-height: 1.6; color: #333; padding: 20px;"
+  >
+    <table
+      style="max-width:600px; width:100%; margin:auto; border-collapse: collapse;"
+    >
+      <tr>
+        <td style="padding: 20px; border: 1px solid #ddd;">
+
+          <img
+            src="cid:emailHeader"
+            width="600"
+            style="display:block;width:100%;max-width:600px;height:auto;"
+            alt="Act now or file an extension"
+          />
+
+          <h2 style="color: #2a7ae2;">Hi {{name}},</h2>
+
+          <h3>Two options: file now with our help — or request an extension.</h3>
+
+          <p>
+            We’re in the final stretch of tax season. If we haven’t received
+            your organizer and documents, we may not be able to file your
+            <strong>2025 return</strong>
+            on time.
+          </p>
+
+          <p style="margin-top: 16px;"><strong>Please choose one of the options
+              below:</strong></p>
+
+          <table
+            role="presentation"
+            cellpadding="0"
+            cellspacing="0"
+            border="0"
+            style="width:100%; border-collapse:collapse;"
+          >
+            <tr>
+              <td
+                style="width:50%; padding: 12px; border: 1px solid #e5e5e5; vertical-align: top;"
+              >
+                <strong>Option A: File now</strong>
+                <p style="margin: 8px 0 0 0;">
+                  Call us today so we can schedule your organizer review and
+                  finish your filing.
+                </p>
+                <p style="margin: 10px 0 0 0; font-weight: bold;">
+                  Call:
+                  <a
+                    href="tel:+1 {{phone}}"
+                    style="color: #2a7ae2; text-decoration: none;"
+                  >{{phone}}</a>
+                </p>
+              </td>
+
+              <td
+                style="width:50%; padding: 12px; border: 1px solid #e5e5e5; vertical-align: top;"
+              >
+                <strong>Option B: File an extension</strong>
+                <p style="margin: 8px 0 0 0;">
+                  If you’re not ready, request an extension now and then notify
+                  us so we can plan next steps.
+                </p>
+                <p style="margin: 10px 0 0 0; font-weight: bold;">
+                  Extension link:
+                  <a
+                    href="{{extensionLink}}"
+                    style="color:#2a7ae2; text-decoration:none;"
+                  ><strong>{{extensionLink}}</strong></a>
+                </p>
+              </td>
+            </tr>
+          </table>
+
+          <p style="margin-top: 16px;">
+            <strong>If you want us to proceed (file now or after extension), we
+              still need:</strong>
+          </p>
+
+          <table
+            role="presentation"
+            cellpadding="0"
+            cellspacing="0"
+            border="0"
+            style="width:100%; border-collapse:collapse;"
+          >
+            <tr>
+              <th
+                align="left"
+                style="padding:8px 10px; border-bottom:1px solid #e5e5e5; font-size:14px;"
+              >Document</th>
+              <th
+                align="left"
+                style="padding:8px 10px; border-bottom:1px solid #e5e5e5; font-size:14px;"
+              >Where to find it</th>
+            </tr>
+
+            <tr>
+              <td style="padding:8px 10px; border-bottom:1px solid #f0f0f0;">
+                W-2 / 1099 income forms
+              </td>
+              <td style="padding:8px 10px; border-bottom:1px solid #f0f0f0;">
+                Employer + payer portals/mail
+              </td>
+            </tr>
+
+            <tr>
+              <td style="padding:8px 10px; border-bottom:1px solid #f0f0f0;">
+                Estimated tax payments (if paid)
+              </td>
+              <td style="padding:8px 10px; border-bottom:1px solid #f0f0f0;">
+                IRS account + bank statements
+              </td>
+            </tr>
+
+            <tr>
+              <td style="padding:8px 10px;">
+                Completed organizer + callback time
+              </td>
+              <td style="padding:8px 10px;">
+                Use the attached organizer and include the best time to reach
+                you
+              </td>
+            </tr>
+          </table>
+
+          <p style="margin-top: 20px; font-weight: bold;">
+            Send documents to
+            {{processingEmail}}
+            and call
+            <a
+              href="tel:+1 {{phone}}"
+              style="color: #2a7ae2; text-decoration: none;"
+            >{{phone}}</a>
+            so we can confirm your plan (file now vs extension).
+          </p>
+
+          <div style="margin-top: 30px;">
+            {{{signature}}}
+          </div>
+
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>

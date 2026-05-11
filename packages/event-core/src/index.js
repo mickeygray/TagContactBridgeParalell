@@ -2,7 +2,7 @@
 
 const { EVENT_STATUS } = require("./constants");
 const EventRecord = require("./models/EventRecord");
-const { connectMongo, getMongoState } = require("./services/mongo");
+const { connectMongo, disconnectMongo, getMongoState } = require("./services/mongo");
 const {
   computeBackoffMs,
   createEvent,
@@ -21,6 +21,7 @@ module.exports = {
   computeBackoffMs,
   connectMongo,
   createEvent,
+  disconnectMongo,
   getMongoState,
   listEvents,
   markCompleted,

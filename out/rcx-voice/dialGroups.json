@@ -1,0 +1,12 @@
+[
+  {
+    "permissions": [],
+    "dialGroupId": 958,
+    "dialGroupName": "Parallel Outbound",
+    "dialGroupDesc": "Auto-created by scripts/rcx-voice-bootstrap.js",
+    "dialMode": "PREVIEW",
+    "isActive": true,
+    "hciEnabled": "DISABLED",
+    "agentDialGroupMembers": null
+  }
+]

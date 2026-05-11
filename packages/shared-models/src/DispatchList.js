@@ -32,7 +32,7 @@ const dispatchListSchema = new mongoose.Schema(
     channel: {
       type: String,
       required: true,
-      enum: ["sms", "email", "rvm", "phoneburner", "cx"],
+      enum: ["sms", "email", "rvm", "callfire", "phoneburner", "cx"],
       index: true,
     },
     mode: {
@@ -58,6 +58,8 @@ const dispatchListSchema = new mongoose.Schema(
     priorityRule: { type: String, default: null },
     ratePerMinute: { type: Number, default: null },
     maxCount: { type: Number, default: null },
+    pulseSize: { type: Number, default: null },
+    pulseDelayMs: { type: Number, default: null },
     builtAt: { type: Date, default: Date.now, index: true },
     queuedAt: { type: Date, default: null },
     consumedAt: { type: Date, default: null },

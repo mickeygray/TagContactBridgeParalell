@@ -1,0 +1,3069 @@
+{
+  "dryRun": true,
+  "sourceDb": "test",
+  "targetDb": "tagcontactbridge_parallel",
+  "runId": "2026-05-04T18-50-36-946Z",
+  "startedAt": "2026-05-04T18-50-36-946Z",
+  "finishedAt": "2026-05-04T18:50:56.187Z",
+  "totals": {
+    "sourceRows": 255573,
+    "insertedRows": 0,
+    "matchedExistingRows": 0,
+    "errorCount": 0
+  },
+  "results": [
+    {
+      "sourceName": "abandonedsubmissions",
+      "targetName": "abandonedsubmissions",
+      "copyIndexes": true,
+      "mode": "same-name-full-mirror",
+      "sourceCollection": "abandonedsubmissions",
+      "targetCollection": "abandonedsubmissions",
+      "sourceCount": 9,
+      "beforeCount": 0,
+      "afterCount": 0,
+      "upserted": 0,
+      "matchedExisting": 0,
+      "errors": [],
+      "indexes": [
+        {
+          "name": "lastPhase_1",
+          "dryRun": true
+        },
+        {
+          "name": "lastUpdated_-1",
+          "dryRun": true
+        },
+        {
+          "name": "email_1",
+          "dryRun": true
+        },
+        {
+          "name": "phone_1",
+          "dryRun": true
+        },
+        {
+          "name": "followedUp_1",
+          "dryRun": true
+        }
+      ],
+      "dryRun": true
+    },
+    {
+      "sourceName": "agentstates",
+      "targetName": "agentstates",
+      "copyIndexes": false,
+      "mode": "same-name-insert-missing-only",
+      "sourceCollection": "agentstates",
+      "targetCollection": "agentstates",
+      "sourceCount": 3,
+      "beforeCount": 7,
+      "afterCount": 7,
+      "upserted": 0,
+      "matchedExisting": 0,
+      "errors": [],
+      "indexes": [],
+      "dryRun": true
+    },
+    {
+      "sourceName": "agentstates",
+      "targetName": "legacy_raw_agentstates",
+      "copyIndexes": true,
+      "mode": "raw-overlap-preservation",
+      "sourceCollection": "agentstates",
+      "targetCollection": "legacy_raw_agentstates",
+      "sourceCount": 3,
+      "beforeCount": 0,
+      "afterCount": 0,
+      "upserted": 0,
+      "matchedExisting": 0,
+      "errors": [],
+      "indexes": [
+        {
+          "name": "extensionId_1",
+          "dryRun": true
+        },
+        {
+          "name": "cxAgentId_1",
+          "dryRun": true
+        }
+      ],
+      "dryRun": true
+    },
+    {
+      "sourceName": "authotpchallenges",
+      "targetName": "authotpchallenges",
+      "copyIndexes": false,
+      "mode": "same-name-insert-missing-only",
+      "sourceCollection": "authotpchallenges",
+      "targetCollection": "authotpchallenges",
+      "sourceCount": 0,
+      "beforeCount": 13,
+      "afterCount": 13,
+      "upserted": 0,
+      "matchedExisting": 0,
+      "errors": [],
+      "indexes": [],
+      "dryRun": true
+    },
+    {
+      "sourceName": "authotpchallenges",
+      "targetName": "legacy_raw_authotpchallenges",
+      "copyIndexes": true,
+      "mode": "raw-overlap-preservation",
+      "sourceCollection": "authotpchallenges",
+      "targetCollection": "legacy_raw_authotpchallenges",
+      "sourceCount": 0,
+      "beforeCount": 0,
+      "afterCount": 0,
+      "upserted": 0,
+      "matchedExisting": 0,
+      "errors": [],
+      "indexes": [
+        {
+          "name": "accountId_1",
+          "dryRun": true
+        },
+        {
+          "name": "email_1",
+          "dryRun": true
+        },
+        {
+          "name": "expiresAt_1",
+          "dryRun": true
+        },
+        {
+          "name": "status_1",
+          "dryRun": true
+        }
+      ],
+      "dryRun": true
+    },
+    {
+      "sourceName": "clients",
+      "targetName": "clients",
+      "copyIndexes": true,
+      "mode": "same-name-full-mirror",
+      "sourceCollection": "clients",
+      "targetCollection": "clients",
+      "sourceCount": 664,
+      "beforeCount": 0,
+      "afterCount": 0,
+      "upserted": 0,
+      "matchedExisting": 0,
+      "errors": [],
+      "indexes": [
+        {
+          "name": "caseNumber_1",
+          "dryRun": true
+        }
+      ],
+      "dryRun": true
+    },
+    {
+      "sourceName": "consentrecords",
+      "targetName": "consentrecords",
+      "copyIndexes": true,
+      "mode": "same-name-full-mirror",
+      "sourceCollection": "consentrecords",
+      "targetCollection": "consentrecords",
+      "sourceCount": 2683,
+      "beforeCount": 0,
+      "afterCount": 0,
+      "upserted": 0,
+      "matchedExisting": 0,
+      "errors": [],
+      "indexes": [],
+      "dryRun": true
+    },
+    {
+      "sourceName": "controlplaneactivityaireviews",
+      "targetName": "controlplaneactivityaireviews",
+      "copyIndexes": false,
+      "mode": "same-name-insert-missing-only",
+      "sourceCollection": "controlplaneactivityaireviews",
+      "targetCollection": "controlplaneactivityaireviews",
+      "sourceCount": 0,
+      "beforeCount": 4,
+      "afterCount": 4,
+      "upserted": 0,
+      "matchedExisting": 0,
+      "errors": [],
+      "indexes": [],
+      "dryRun": true
+    },
+    {
+      "sourceName": "controlplaneactivityaireviews",
+      "targetName": "legacy_raw_controlplaneactivityaireviews",
+      "copyIndexes": true,
+      "mode": "raw-overlap-preservation",
+      "sourceCollection": "controlplaneactivityaireviews",
+      "targetCollection": "legacy_raw_controlplaneactivityaireviews",
+      "sourceCount": 0,
+      "beforeCount": 0,
+      "afterCount": 0,
+      "upserted": 0,
+      "matchedExisting": 0,
+      "errors": [],
+      "indexes": [
+        {
+          "name": "domain_1",
+          "dryRun": true
+        },
+        {
+          "name": "caseId_1",
+          "dryRun": true
+        },
+        {
+          "name": "reviewType_1",
+          "dryRun": true
+        },
+        {
+          "name": "status_1",
+          "dryRun": true
+        },
+        {
+          "name": "reviewedAt_1",
+          "dryRun": true
+        },
+        {
+          "name": "case_review_latest",
+          "dryRun": true
+        }
+      ],
+      "dryRun": true
+    },
+    {
+      "sourceName": "controlplanecallledgers",
+      "targetName": "controlplanecallledgers",
+      "copyIndexes": false,
+      "mode": "same-name-insert-missing-only",
+      "sourceCollection": "controlplanecallledgers",
+      "targetCollection": "controlplanecallledgers",
+      "sourceCount": 0,
+      "beforeCount": 26,
+      "afterCount": 26,
+      "upserted": 0,
+      "matchedExisting": 0,
+      "errors": [],
+      "indexes": [],
+      "dryRun": true
+    },
+    {
+      "sourceName": "controlplanecallledgers",
+      "targetName": "legacy_raw_controlplanecallledgers",
+      "copyIndexes": true,
+      "mode": "raw-overlap-preservation",
+      "sourceCollection": "controlplanecallledgers",
+      "targetCollection": "legacy_raw_controlplanecallledgers",
+      "sourceCount": 0,
+      "beforeCount": 0,
+      "afterCount": 0,
+      "upserted": 0,
+      "matchedExisting": 0,
+      "errors": [],
+      "indexes": [
+        {
+          "name": "domain_1",
+          "dryRun": true
+        },
+        {
+          "name": "telephonySessionId_1",
+          "dryRun": true
+        },
+        {
+          "name": "date_1",
+          "dryRun": true
+        },
+        {
+          "name": "callStartTime_1",
+          "dryRun": true
+        },
+        {
+          "name": "direction_1",
+          "dryRun": true
+        },
+        {
+          "name": "phone_1",
+          "dryRun": true
+        },
+        {
+          "name": "normalizedPhone_1",
+          "dryRun": true
+        },
+        {
+          "name": "extensionId_1",
+          "dryRun": true
+        },
+        {
+          "name": "caseId_1",
+          "dryRun": true
+        },
+        {
+          "name": "caseDomain_1",
+          "dryRun": true
+        },
+        {
+          "name": "caseProfileId_1",
+          "dryRun": true
+        },
+        {
+          "name": "sourceCanonicalId_1",
+          "dryRun": true
+        },
+        {
+          "name": "sourceName_1",
+          "dryRun": true
+        },
+        {
+          "name": "sourceChannel_1",
+          "dryRun": true
+        },
+        {
+          "name": "mailPieceKey_1",
+          "dryRun": true
+        },
+        {
+          "name": "confidence_1",
+          "dryRun": true
+        }
+      ],
+      "dryRun": true
+    },
+    {
+      "sourceName": "controlplanecalllogs",
+      "targetName": "controlplanecalllogs",
+      "copyIndexes": false,
+      "mode": "same-name-insert-missing-only",
+      "sourceCollection": "controlplanecalllogs",
+      "targetCollection": "controlplanecalllogs",
+      "sourceCount": 0,
+      "beforeCount": 31,
+      "afterCount": 31,
+      "upserted": 0,
+      "matchedExisting": 0,
+      "errors": [],
+      "indexes": [],
+      "dryRun": true
+    },
+    {
+      "sourceName": "controlplanecalllogs",
+      "targetName": "legacy_raw_controlplanecalllogs",
+      "copyIndexes": true,
+      "mode": "raw-overlap-preservation",
+      "sourceCollection": "controlplanecalllogs",
+      "targetCollection": "legacy_raw_controlplanecalllogs",
+      "sourceCount": 0,
+      "beforeCount": 0,
+      "afterCount": 0,
+      "upserted": 0,
+      "matchedExisting": 0,
+      "errors": [],
+      "indexes": [
+        {
+          "name": "domain_1",
+          "dryRun": true
+        },
+        {
+          "name": "telephonySessionId_1",
+          "dryRun": true
+        },
+        {
+          "name": "callStartTime_1",
+          "dryRun": true
+        },
+        {
+          "name": "direction_1",
+          "dryRun": true
+        },
+        {
+          "name": "phone_1",
+          "dryRun": true
+        },
+        {
+          "name": "normalizedPhone_1",
+          "dryRun": true
+        },
+        {
+          "name": "extensionId_1",
+          "dryRun": true
+        },
+        {
+          "name": "caseId_1",
+          "dryRun": true
+        },
+        {
+          "name": "caseDomain_1",
+          "dryRun": true
+        },
+        {
+          "name": "caseProfileId_1",
+          "dryRun": true
+        },
+        {
+          "name": "sourceCanonicalId_1",
+          "dryRun": true
+        },
+        {
+          "name": "mailPieceKey_1",
+          "dryRun": true
+        },
+        {
+          "name": "strategy_1",
+          "dryRun": true
+        },
+        {
+          "name": "confidence_1",
+          "dryRun": true
+        },
+        {
+          "name": "status_1",
+          "dryRun": true
+        },
+        {
+          "name": "resolvedAt_1",
+          "dryRun": true
+        },
+        {
+          "name": "transcription.status_1",
+          "dryRun": true
+        },
+        {
+          "name": "domain_1_telephonySessionId_1",
+          "dryRun": true
+        },
+        {
+          "name": "status_1_retryAttempts_1_createdAt_1",
+          "dryRun": true
+        },
+        {
+          "name": "domain_1_normalizedPhone_1_status_1_callStartTime_-1",
+          "dryRun": true
+        },
+        {
+          "name": "domain_1_caseId_1_callStartTime_-1",
+          "dryRun": true
+        },
+        {
+          "name": "transcription.status_1_createdAt_1",
+          "dryRun": true
+        },
+        {
+          "name": "outboundBufferAged_1",
+          "dryRun": true
+        },
+        {
+          "name": "recordingArchive.status_1",
+          "dryRun": true
+        },
+        {
+          "name": "recordingArchive.status_1_createdAt_1",
+          "dryRun": true
+        }
+      ],
+      "dryRun": true
+    },
+    {
+      "sourceName": "controlplanecaseprofiles",
+      "targetName": "controlplanecaseprofiles",
+      "copyIndexes": false,
+      "mode": "same-name-insert-missing-only",
+      "sourceCollection": "controlplanecaseprofiles",
+      "targetCollection": "controlplanecaseprofiles",
+      "sourceCount": 20,
+      "beforeCount": 63,
+      "afterCount": 63,
+      "upserted": 0,
+      "matchedExisting": 0,
+      "errors": [],
+      "indexes": [],
+      "dryRun": true
+    },
+    {
+      "sourceName": "controlplanecaseprofiles",
+      "targetName": "legacy_raw_controlplanecaseprofiles",
+      "copyIndexes": true,
+      "mode": "raw-overlap-preservation",
+      "sourceCollection": "controlplanecaseprofiles",
+      "targetCollection": "legacy_raw_controlplanecaseprofiles",
+      "sourceCount": 20,
+      "beforeCount": 0,
+      "afterCount": 0,
+      "upserted": 0,
+      "matchedExisting": 0,
+      "errors": [],
+      "indexes": [
+        {
+          "name": "domain_1",
+          "dryRun": true
+        },
+        {
+          "name": "masterProspectId_1",
+          "dryRun": true
+        },
+        {
+          "name": "sourceCanonicalId_1",
+          "dryRun": true
+        },
+        {
+          "name": "statusId_1",
+          "dryRun": true
+        },
+        {
+          "name": "lastStatusCheckAt_1",
+          "dryRun": true
+        },
+        {
+          "name": "statusCategory_1",
+          "dryRun": true
+        },
+        {
+          "name": "convertedAt_1",
+          "dryRun": true
+        },
+        {
+          "name": "aiActivityReview.status_1",
+          "dryRun": true
+        },
+        {
+          "name": "aiCaseReview.status_1",
+          "dryRun": true
+        },
+        {
+          "name": "aiCaseReview.reviewedAt_1",
+          "dryRun": true
+        },
+        {
+          "name": "aiCaseReview.nextEligibleAt_1",
+          "dryRun": true
+        },
+        {
+          "name": "qcSummary.status_1",
+          "dryRun": true
+        },
+        {
+          "name": "conversationAi.status_1",
+          "dryRun": true
+        },
+        {
+          "name": "conversationAi.optOutDetected_1",
+          "dryRun": true
+        },
+        {
+          "name": "scrubSummary.status_1",
+          "dryRun": true
+        },
+        {
+          "name": "scrubSummary.reviewedAt_1",
+          "dryRun": true
+        },
+        {
+          "name": "domain_1_caseId_1",
+          "dryRun": true
+        },
+        {
+          "name": "domain_1_sourceCanonicalId_1_convertedAt_-1",
+          "dryRun": true
+        },
+        {
+          "name": "caseCreatedDate_1",
+          "dryRun": true
+        },
+        {
+          "name": "paymentReconcile.lastCheckedAt_1",
+          "dryRun": true
+        },
+        {
+          "name": "communicationThreads.lastTouchedAt_1",
+          "dryRun": true
+        },
+        {
+          "name": "statusLastChangedAt_1",
+          "dryRun": true
+        },
+        {
+          "name": "callHistorySummary.lastCallAt_1",
+          "dryRun": true
+        }
+      ],
+      "dryRun": true
+    },
+    {
+      "sourceName": "controlplaneconsentrecords",
+      "targetName": "controlplaneconsentrecords",
+      "copyIndexes": false,
+      "mode": "same-name-insert-missing-only",
+      "sourceCollection": "controlplaneconsentrecords",
+      "targetCollection": "controlplaneconsentrecords",
+      "sourceCount": 0,
+      "beforeCount": 29,
+      "afterCount": 29,
+      "upserted": 0,
+      "matchedExisting": 0,
+      "errors": [],
+      "indexes": [],
+      "dryRun": true
+    },
+    {
+      "sourceName": "controlplaneconsentrecords",
+      "targetName": "legacy_raw_controlplaneconsentrecords",
+      "copyIndexes": true,
+      "mode": "raw-overlap-preservation",
+      "sourceCollection": "controlplaneconsentrecords",
+      "targetCollection": "legacy_raw_controlplaneconsentrecords",
+      "sourceCount": 0,
+      "beforeCount": 0,
+      "afterCount": 0,
+      "upserted": 0,
+      "matchedExisting": 0,
+      "errors": [],
+      "indexes": [
+        {
+          "name": "domain_1",
+          "dryRun": true
+        },
+        {
+          "name": "company_1",
+          "dryRun": true
+        },
+        {
+          "name": "source_1",
+          "dryRun": true
+        },
+        {
+          "name": "caseId_1",
+          "dryRun": true
+        },
+        {
+          "name": "email_1",
+          "dryRun": true
+        },
+        {
+          "name": "phone_1",
+          "dryRun": true
+        },
+        {
+          "name": "receivedAt_1",
+          "dryRun": true
+        },
+        {
+          "name": "intakeRoute_1",
+          "dryRun": true
+        },
+        {
+          "name": "intakeSource_1",
+          "dryRun": true
+        },
+        {
+          "name": "domain_1_receivedAt_-1",
+          "dryRun": true
+        },
+        {
+          "name": "domain_1_caseId_1_receivedAt_-1",
+          "dryRun": true
+        },
+        {
+          "name": "domain_1_email_1_phone_1_receivedAt_-1",
+          "dryRun": true
+        }
+      ],
+      "dryRun": true
+    },
+    {
+      "sourceName": "controlplaneconversationmessages",
+      "targetName": "controlplaneconversationmessages",
+      "copyIndexes": false,
+      "mode": "same-name-insert-missing-only",
+      "sourceCollection": "controlplaneconversationmessages",
+      "targetCollection": "controlplaneconversationmessages",
+      "sourceCount": 0,
+      "beforeCount": 319,
+      "afterCount": 319,
+      "upserted": 0,
+      "matchedExisting": 0,
+      "errors": [],
+      "indexes": [],
+      "dryRun": true
+    },
+    {
+      "sourceName": "controlplaneconversationmessages",
+      "targetName": "legacy_raw_controlplaneconversationmessages",
+      "copyIndexes": true,
+      "mode": "raw-overlap-preservation",
+      "sourceCollection": "controlplaneconversationmessages",
+      "targetCollection": "legacy_raw_controlplaneconversationmessages",
+      "sourceCount": 0,
+      "beforeCount": 0,
+      "afterCount": 0,
+      "upserted": 0,
+      "matchedExisting": 0,
+      "errors": [],
+      "indexes": [
+        {
+          "name": "workflowId_1",
+          "dryRun": true
+        },
+        {
+          "name": "domain_1",
+          "dryRun": true
+        },
+        {
+          "name": "phone_1",
+          "dryRun": true
+        },
+        {
+          "name": "caseId_1",
+          "dryRun": true
+        },
+        {
+          "name": "channel_1",
+          "dryRun": true
+        },
+        {
+          "name": "direction_1",
+          "dryRun": true
+        },
+        {
+          "name": "providerMessageId_1",
+          "dryRun": true
+        },
+        {
+          "name": "workflowId_1_createdAt_1",
+          "dryRun": true
+        },
+        {
+          "name": "domain_1_phone_1_createdAt_-1",
+          "dryRun": true
+        }
+      ],
+      "dryRun": true
+    },
+    {
+      "sourceName": "controlplaneconversationworkflows",
+      "targetName": "controlplaneconversationworkflows",
+      "copyIndexes": false,
+      "mode": "same-name-insert-missing-only",
+      "sourceCollection": "controlplaneconversationworkflows",
+      "targetCollection": "controlplaneconversationworkflows",
+      "sourceCount": 0,
+      "beforeCount": 89,
+      "afterCount": 89,
+      "upserted": 0,
+      "matchedExisting": 0,
+      "errors": [],
+      "indexes": [],
+      "dryRun": true
+    },
+    {
+      "sourceName": "controlplaneconversationworkflows",
+      "targetName": "legacy_raw_controlplaneconversationworkflows",
+      "copyIndexes": true,
+      "mode": "raw-overlap-preservation",
+      "sourceCollection": "controlplaneconversationworkflows",
+      "targetCollection": "legacy_raw_controlplaneconversationworkflows",
+      "sourceCount": 0,
+      "beforeCount": 0,
+      "afterCount": 0,
+      "upserted": 0,
+      "matchedExisting": 0,
+      "errors": [],
+      "indexes": [
+        {
+          "name": "domain_1",
+          "dryRun": true
+        },
+        {
+          "name": "caseId_1",
+          "dryRun": true
+        },
+        {
+          "name": "phone_1",
+          "dryRun": true
+        },
+        {
+          "name": "channel_1",
+          "dryRun": true
+        },
+        {
+          "name": "status_1",
+          "dryRun": true
+        },
+        {
+          "name": "optOutDetected_1",
+          "dryRun": true
+        },
+        {
+          "name": "domain_1_phone_1_channel_1",
+          "dryRun": true
+        }
+      ],
+      "dryRun": true
+    },
+    {
+      "sourceName": "controlplanecxdialqueues",
+      "targetName": "controlplanecxdialqueues",
+      "copyIndexes": false,
+      "mode": "same-name-insert-missing-only",
+      "sourceCollection": "controlplanecxdialqueues",
+      "targetCollection": "controlplanecxdialqueues",
+      "sourceCount": 1,
+      "beforeCount": 3,
+      "afterCount": 3,
+      "upserted": 0,
+      "matchedExisting": 0,
+      "errors": [],
+      "indexes": [],
+      "dryRun": true
+    },
+    {
+      "sourceName": "controlplanecxdialqueues",
+      "targetName": "legacy_raw_controlplanecxdialqueues",
+      "copyIndexes": true,
+      "mode": "raw-overlap-preservation",
+      "sourceCollection": "controlplanecxdialqueues",
+      "targetCollection": "legacy_raw_controlplanecxdialqueues",
+      "sourceCount": 1,
+      "beforeCount": 0,
+      "afterCount": 0,
+      "upserted": 0,
+      "matchedExisting": 0,
+      "errors": [],
+      "indexes": [
+        {
+          "name": "domain_1",
+          "dryRun": true
+        },
+        {
+          "name": "caseId_1",
+          "dryRun": true
+        },
+        {
+          "name": "leadCadenceId_1",
+          "dryRun": true
+        },
+        {
+          "name": "intakeSource_1",
+          "dryRun": true
+        },
+        {
+          "name": "state_1",
+          "dryRun": true
+        },
+        {
+          "name": "queueFamily_1",
+          "dryRun": true
+        },
+        {
+          "name": "queueTier_1",
+          "dryRun": true
+        },
+        {
+          "name": "priorityScore_1",
+          "dryRun": true
+        },
+        {
+          "name": "releaseAt_1",
+          "dryRun": true
+        },
+        {
+          "name": "claimUntil_1",
+          "dryRun": true
+        },
+        {
+          "name": "assignment.extensionId_1",
+          "dryRun": true
+        },
+        {
+          "name": "domain_1_caseId_1_state_1",
+          "dryRun": true
+        },
+        {
+          "name": "domain_1_state_1_releaseAt_1_priorityScore_-1",
+          "dryRun": true
+        },
+        {
+          "name": "rcxAccountId_1",
+          "dryRun": true
+        },
+        {
+          "name": "rcxDialGroupId_1",
+          "dryRun": true
+        },
+        {
+          "name": "rcxCampaignId_1",
+          "dryRun": true
+        },
+        {
+          "name": "queueFamilyRank_1",
+          "dryRun": true
+        },
+        {
+          "name": "progressiveStageKey_1",
+          "dryRun": true
+        },
+        {
+          "name": "progressiveStageIndex_1",
+          "dryRun": true
+        }
+      ],
+      "dryRun": true
+    },
+    {
+      "sourceName": "controlplanedailycallstats",
+      "targetName": "controlplanedailycallstats",
+      "copyIndexes": false,
+      "mode": "same-name-insert-missing-only",
+      "sourceCollection": "controlplanedailycallstats",
+      "targetCollection": "controlplanedailycallstats",
+      "sourceCount": 0,
+      "beforeCount": 417,
+      "afterCount": 417,
+      "upserted": 0,
+      "matchedExisting": 0,
+      "errors": [],
+      "indexes": [],
+      "dryRun": true
+    },
+    {
+      "sourceName": "controlplanedailycallstats",
+      "targetName": "legacy_raw_controlplanedailycallstats",
+      "copyIndexes": true,
+      "mode": "raw-overlap-preservation",
+      "sourceCollection": "controlplanedailycallstats",
+      "targetCollection": "legacy_raw_controlplanedailycallstats",
+      "sourceCount": 0,
+      "beforeCount": 0,
+      "afterCount": 0,
+      "upserted": 0,
+      "matchedExisting": 0,
+      "errors": [],
+      "indexes": [
+        {
+          "name": "date_1",
+          "dryRun": true
+        },
+        {
+          "name": "piece_1",
+          "dryRun": true
+        },
+        {
+          "name": "channel_1",
+          "dryRun": true
+        },
+        {
+          "name": "date_1_piece_1",
+          "dryRun": true
+        },
+        {
+          "name": "date_1_channel_1",
+          "dryRun": true
+        },
+        {
+          "name": "piece_1_date_1",
+          "dryRun": true
+        }
+      ],
+      "dryRun": true
+    },
+    {
+      "sourceName": "controlplanedeepcutruns",
+      "targetName": "controlplanedeepcutruns",
+      "copyIndexes": false,
+      "mode": "same-name-insert-missing-only",
+      "sourceCollection": "controlplanedeepcutruns",
+      "targetCollection": "controlplanedeepcutruns",
+      "sourceCount": 0,
+      "beforeCount": 15,
+      "afterCount": 15,
+      "upserted": 0,
+      "matchedExisting": 0,
+      "errors": [],
+      "indexes": [],
+      "dryRun": true
+    },
+    {
+      "sourceName": "controlplanedeepcutruns",
+      "targetName": "legacy_raw_controlplanedeepcutruns",
+      "copyIndexes": true,
+      "mode": "raw-overlap-preservation",
+      "sourceCollection": "controlplanedeepcutruns",
+      "targetCollection": "legacy_raw_controlplanedeepcutruns",
+      "sourceCount": 0,
+      "beforeCount": 0,
+      "afterCount": 0,
+      "upserted": 0,
+      "matchedExisting": 0,
+      "errors": [],
+      "indexes": [
+        {
+          "name": "domain_1",
+          "dryRun": true
+        },
+        {
+          "name": "runType_1",
+          "dryRun": true
+        },
+        {
+          "name": "status_1",
+          "dryRun": true
+        },
+        {
+          "name": "startedAt_1",
+          "dryRun": true
+        },
+        {
+          "name": "completedAt_1",
+          "dryRun": true
+        },
+        {
+          "name": "deep_cut_runs_by_domain",
+          "dryRun": true
+        }
+      ],
+      "dryRun": true
+    },
+    {
+      "sourceName": "controlplaneleadcadences",
+      "targetName": "controlplaneleadcadences",
+      "copyIndexes": false,
+      "mode": "same-name-insert-missing-only",
+      "sourceCollection": "controlplaneleadcadences",
+      "targetCollection": "controlplaneleadcadences",
+      "sourceCount": 2,
+      "beforeCount": 6101,
+      "afterCount": 6101,
+      "upserted": 0,
+      "matchedExisting": 0,
+      "errors": [],
+      "indexes": [],
+      "dryRun": true
+    },
+    {
+      "sourceName": "controlplaneleadcadences",
+      "targetName": "legacy_raw_controlplaneleadcadences",
+      "copyIndexes": true,
+      "mode": "raw-overlap-preservation",
+      "sourceCollection": "controlplaneleadcadences",
+      "targetCollection": "legacy_raw_controlplaneleadcadences",
+      "sourceCount": 2,
+      "beforeCount": 0,
+      "afterCount": 0,
+      "upserted": 0,
+      "matchedExisting": 0,
+      "errors": [],
+      "indexes": [
+        {
+          "name": "domain_1",
+          "dryRun": true
+        },
+        {
+          "name": "externalLeadId_1",
+          "dryRun": true
+        },
+        {
+          "name": "intakeRoute_1",
+          "dryRun": true
+        },
+        {
+          "name": "intakeSource_1",
+          "dryRun": true
+        },
+        {
+          "name": "emailHash_1",
+          "dryRun": true
+        },
+        {
+          "name": "normalizedPhone_1",
+          "dryRun": true
+        },
+        {
+          "name": "active_1",
+          "dryRun": true
+        },
+        {
+          "name": "schedule.nextActionAt_1",
+          "dryRun": true
+        },
+        {
+          "name": "domain_1_caseId_1",
+          "dryRun": true
+        },
+        {
+          "name": "domain_1_active_1_schedule.nextActionAt_1",
+          "dryRun": true
+        }
+      ],
+      "dryRun": true
+    },
+    {
+      "sourceName": "controlplanemailerconfigs",
+      "targetName": "controlplanemailerconfigs",
+      "copyIndexes": false,
+      "mode": "same-name-insert-missing-only",
+      "sourceCollection": "controlplanemailerconfigs",
+      "targetCollection": "controlplanemailerconfigs",
+      "sourceCount": 0,
+      "beforeCount": 28,
+      "afterCount": 28,
+      "upserted": 0,
+      "matchedExisting": 0,
+      "errors": [],
+      "indexes": [],
+      "dryRun": true
+    },
+    {
+      "sourceName": "controlplanemailerconfigs",
+      "targetName": "legacy_raw_controlplanemailerconfigs",
+      "copyIndexes": true,
+      "mode": "raw-overlap-preservation",
+      "sourceCollection": "controlplanemailerconfigs",
+      "targetCollection": "legacy_raw_controlplanemailerconfigs",
+      "sourceCount": 0,
+      "beforeCount": 0,
+      "afterCount": 0,
+      "upserted": 0,
+      "matchedExisting": 0,
+      "errors": [],
+      "indexes": [
+        {
+          "name": "phone_1",
+          "dryRun": true
+        },
+        {
+          "name": "digits_1",
+          "dryRun": true
+        }
+      ],
+      "dryRun": true
+    },
+    {
+      "sourceName": "controlplanemasterprospectindexes",
+      "targetName": "controlplanemasterprospectindexes",
+      "copyIndexes": false,
+      "mode": "same-name-insert-missing-only",
+      "sourceCollection": "controlplanemasterprospectindexes",
+      "targetCollection": "controlplanemasterprospectindexes",
+      "sourceCount": 90954,
+      "beforeCount": 11419,
+      "afterCount": 11419,
+      "upserted": 0,
+      "matchedExisting": 0,
+      "errors": [],
+      "indexes": [],
+      "dryRun": true
+    },
+    {
+      "sourceName": "controlplanemasterprospectindexes",
+      "targetName": "legacy_raw_controlplanemasterprospectindexes",
+      "copyIndexes": true,
+      "mode": "raw-overlap-preservation",
+      "sourceCollection": "controlplanemasterprospectindexes",
+      "targetCollection": "legacy_raw_controlplanemasterprospectindexes",
+      "sourceCount": 90954,
+      "beforeCount": 0,
+      "afterCount": 0,
+      "upserted": 0,
+      "matchedExisting": 0,
+      "errors": [],
+      "indexes": [
+        {
+          "name": "domain_1",
+          "dryRun": true
+        },
+        {
+          "name": "statusId_1",
+          "dryRun": true
+        },
+        {
+          "name": "statusCategory_1",
+          "dryRun": true
+        },
+        {
+          "name": "sourceId_1",
+          "dryRun": true
+        },
+        {
+          "name": "sourceCanonicalId_1",
+          "dryRun": true
+        },
+        {
+          "name": "normalizedPhones_1",
+          "dryRun": true
+        },
+        {
+          "name": "needsStatusRefresh_1",
+          "dryRun": true
+        },
+        {
+          "name": "needsSourceRefresh_1",
+          "dryRun": true
+        },
+        {
+          "name": "convertedAt_1",
+          "dryRun": true
+        },
+        {
+          "name": "caseProfileId_1",
+          "dryRun": true
+        },
+        {
+          "name": "domain_1_telephonySessionIds_1",
+          "dryRun": true
+        },
+        {
+          "name": "domain_1_caseId_1",
+          "dryRun": true
+        },
+        {
+          "name": "domain_1_statusId_1",
+          "dryRun": true
+        },
+        {
+          "name": "domain_1_statusCategory_1",
+          "dryRun": true
+        },
+        {
+          "name": "domain_1_needsStatusRefresh_1_statusCategory_1",
+          "dryRun": true
+        },
+        {
+          "name": "intakeRoute_1",
+          "dryRun": true
+        },
+        {
+          "name": "partnerSource_1",
+          "dryRun": true
+        },
+        {
+          "name": "mailIntake.importBatch_1",
+          "dryRun": true
+        },
+        {
+          "name": "domain_1_lastName_1_firstName_1",
+          "dryRun": true
+        },
+        {
+          "name": "domain_1_address_1",
+          "dryRun": true
+        },
+        {
+          "name": "domain_1_state_1_zip_1",
+          "dryRun": true
+        }
+      ],
+      "dryRun": true
+    },
+    {
+      "sourceName": "controlplanemetricssnapshots",
+      "targetName": "controlplanemetricssnapshots",
+      "copyIndexes": false,
+      "mode": "same-name-insert-missing-only",
+      "sourceCollection": "controlplanemetricssnapshots",
+      "targetCollection": "controlplanemetricssnapshots",
+      "sourceCount": 0,
+      "beforeCount": 42,
+      "afterCount": 42,
+      "upserted": 0,
+      "matchedExisting": 0,
+      "errors": [],
+      "indexes": [],
+      "dryRun": true
+    },
+    {
+      "sourceName": "controlplanemetricssnapshots",
+      "targetName": "legacy_raw_controlplanemetricssnapshots",
+      "copyIndexes": true,
+      "mode": "raw-overlap-preservation",
+      "sourceCollection": "controlplanemetricssnapshots",
+      "targetCollection": "legacy_raw_controlplanemetricssnapshots",
+      "sourceCount": 0,
+      "beforeCount": 0,
+      "afterCount": 0,
+      "upserted": 0,
+      "matchedExisting": 0,
+      "errors": [],
+      "indexes": [
+        {
+          "name": "domain_1",
+          "dryRun": true
+        },
+        {
+          "name": "bucketType_1",
+          "dryRun": true
+        },
+        {
+          "name": "bucketKey_1",
+          "dryRun": true
+        },
+        {
+          "name": "bucketDate_1",
+          "dryRun": true
+        },
+        {
+          "name": "domain_1_bucketType_1_bucketKey_1",
+          "dryRun": true
+        }
+      ],
+      "dryRun": true
+    },
+    {
+      "sourceName": "controlplanepaymentalerts",
+      "targetName": "controlplanepaymentalerts",
+      "copyIndexes": false,
+      "mode": "same-name-insert-missing-only",
+      "sourceCollection": "controlplanepaymentalerts",
+      "targetCollection": "controlplanepaymentalerts",
+      "sourceCount": 0,
+      "beforeCount": 0,
+      "afterCount": 0,
+      "upserted": 0,
+      "matchedExisting": 0,
+      "errors": [],
+      "indexes": [],
+      "dryRun": true
+    },
+    {
+      "sourceName": "controlplanepaymentalerts",
+      "targetName": "legacy_raw_controlplanepaymentalerts",
+      "copyIndexes": true,
+      "mode": "raw-overlap-preservation",
+      "sourceCollection": "controlplanepaymentalerts",
+      "targetCollection": "legacy_raw_controlplanepaymentalerts",
+      "sourceCount": 0,
+      "beforeCount": 0,
+      "afterCount": 0,
+      "upserted": 0,
+      "matchedExisting": 0,
+      "errors": [],
+      "indexes": [
+        {
+          "name": "caseId_1",
+          "dryRun": true
+        },
+        {
+          "name": "domain_1",
+          "dryRun": true
+        },
+        {
+          "name": "paymentDate_1",
+          "dryRun": true
+        },
+        {
+          "name": "textSentAt_1",
+          "dryRun": true
+        },
+        {
+          "name": "caseId_1_domain_1_paymentDate_1",
+          "dryRun": true
+        },
+        {
+          "name": "domain_1_paymentDate_-1_textSentAt_1",
+          "dryRun": true
+        }
+      ],
+      "dryRun": true
+    },
+    {
+      "sourceName": "controlplanepaymentledgers",
+      "targetName": "controlplanepaymentledgers",
+      "copyIndexes": false,
+      "mode": "same-name-insert-missing-only",
+      "sourceCollection": "controlplanepaymentledgers",
+      "targetCollection": "controlplanepaymentledgers",
+      "sourceCount": 0,
+      "beforeCount": 148,
+      "afterCount": 148,
+      "upserted": 0,
+      "matchedExisting": 0,
+      "errors": [],
+      "indexes": [],
+      "dryRun": true
+    },
+    {
+      "sourceName": "controlplanepaymentledgers",
+      "targetName": "legacy_raw_controlplanepaymentledgers",
+      "copyIndexes": true,
+      "mode": "raw-overlap-preservation",
+      "sourceCollection": "controlplanepaymentledgers",
+      "targetCollection": "legacy_raw_controlplanepaymentledgers",
+      "sourceCount": 0,
+      "beforeCount": 0,
+      "afterCount": 0,
+      "upserted": 0,
+      "matchedExisting": 0,
+      "errors": [],
+      "indexes": [
+        {
+          "name": "domain_1",
+          "dryRun": true
+        },
+        {
+          "name": "caseId_1",
+          "dryRun": true
+        },
+        {
+          "name": "casePaymentId_1",
+          "dryRun": true
+        },
+        {
+          "name": "paymentDate_1",
+          "dryRun": true
+        },
+        {
+          "name": "paymentDateKey_1",
+          "dryRun": true
+        },
+        {
+          "name": "transactionStatus_1",
+          "dryRun": true
+        },
+        {
+          "name": "sourceCanonicalId_1",
+          "dryRun": true
+        },
+        {
+          "name": "caseProfileId_1",
+          "dryRun": true
+        },
+        {
+          "name": "masterProspectId_1",
+          "dryRun": true
+        },
+        {
+          "name": "needsSourceReview_1",
+          "dryRun": true
+        },
+        {
+          "name": "domain_1_caseId_1_paymentDate_-1",
+          "dryRun": true
+        },
+        {
+          "name": "domain_1_sourceCanonicalId_1_paymentDate_-1",
+          "dryRun": true
+        },
+        {
+          "name": "paymentDateKey_1_domain_1",
+          "dryRun": true
+        }
+      ],
+      "dryRun": true
+    },
+    {
+      "sourceName": "controlplaneprepings",
+      "targetName": "controlplaneprepings",
+      "copyIndexes": false,
+      "mode": "same-name-insert-missing-only",
+      "sourceCollection": "controlplaneprepings",
+      "targetCollection": "controlplaneprepings",
+      "sourceCount": 0,
+      "beforeCount": 0,
+      "afterCount": 0,
+      "upserted": 0,
+      "matchedExisting": 0,
+      "errors": [],
+      "indexes": [],
+      "dryRun": true
+    },
+    {
+      "sourceName": "controlplaneprepings",
+      "targetName": "legacy_raw_controlplaneprepings",
+      "copyIndexes": true,
+      "mode": "raw-overlap-preservation",
+      "sourceCollection": "controlplaneprepings",
+      "targetCollection": "legacy_raw_controlplaneprepings",
+      "sourceCount": 0,
+      "beforeCount": 0,
+      "afterCount": 0,
+      "upserted": 0,
+      "matchedExisting": 0,
+      "errors": [],
+      "indexes": [
+        {
+          "name": "domain_1",
+          "dryRun": true
+        },
+        {
+          "name": "emailHash_1",
+          "dryRun": true
+        },
+        {
+          "name": "createdAt_1",
+          "dryRun": true
+        },
+        {
+          "name": "domain_1_emailHash_1",
+          "dryRun": true
+        }
+      ],
+      "dryRun": true
+    },
+    {
+      "sourceName": "controlplanequalityreviews",
+      "targetName": "controlplanequalityreviews",
+      "copyIndexes": false,
+      "mode": "same-name-insert-missing-only",
+      "sourceCollection": "controlplanequalityreviews",
+      "targetCollection": "controlplanequalityreviews",
+      "sourceCount": 0,
+      "beforeCount": 2,
+      "afterCount": 2,
+      "upserted": 0,
+      "matchedExisting": 0,
+      "errors": [],
+      "indexes": [],
+      "dryRun": true
+    },
+    {
+      "sourceName": "controlplanequalityreviews",
+      "targetName": "legacy_raw_controlplanequalityreviews",
+      "copyIndexes": true,
+      "mode": "raw-overlap-preservation",
+      "sourceCollection": "controlplanequalityreviews",
+      "targetCollection": "legacy_raw_controlplanequalityreviews",
+      "sourceCount": 0,
+      "beforeCount": 0,
+      "afterCount": 0,
+      "upserted": 0,
+      "matchedExisting": 0,
+      "errors": [],
+      "indexes": [
+        {
+          "name": "domain_1",
+          "dryRun": true
+        },
+        {
+          "name": "caseId_1",
+          "dryRun": true
+        },
+        {
+          "name": "reviewType_1",
+          "dryRun": true
+        },
+        {
+          "name": "externalId_1",
+          "dryRun": true
+        },
+        {
+          "name": "status_1",
+          "dryRun": true
+        },
+        {
+          "name": "reviewedAt_1",
+          "dryRun": true
+        },
+        {
+          "name": "domain_1_caseId_1_reviewType_1_reviewedAt_-1",
+          "dryRun": true
+        }
+      ],
+      "dryRun": true
+    },
+    {
+      "sourceName": "controlplanereviewqueueitems",
+      "targetName": "controlplanereviewqueueitems",
+      "copyIndexes": false,
+      "mode": "same-name-insert-missing-only",
+      "sourceCollection": "controlplanereviewqueueitems",
+      "targetCollection": "controlplanereviewqueueitems",
+      "sourceCount": 0,
+      "beforeCount": 71591,
+      "afterCount": 71591,
+      "upserted": 0,
+      "matchedExisting": 0,
+      "errors": [],
+      "indexes": [],
+      "dryRun": true
+    },
+    {
+      "sourceName": "controlplanereviewqueueitems",
+      "targetName": "legacy_raw_controlplanereviewqueueitems",
+      "copyIndexes": true,
+      "mode": "raw-overlap-preservation",
+      "sourceCollection": "controlplanereviewqueueitems",
+      "targetCollection": "legacy_raw_controlplanereviewqueueitems",
+      "sourceCount": 0,
+      "beforeCount": 0,
+      "afterCount": 0,
+      "upserted": 0,
+      "matchedExisting": 0,
+      "errors": [],
+      "indexes": [
+        {
+          "name": "domain_1",
+          "dryRun": true
+        },
+        {
+          "name": "caseId_1",
+          "dryRun": true
+        },
+        {
+          "name": "sourceService_1",
+          "dryRun": true
+        },
+        {
+          "name": "workflow_1",
+          "dryRun": true
+        },
+        {
+          "name": "category_1",
+          "dryRun": true
+        },
+        {
+          "name": "severity_1",
+          "dryRun": true
+        },
+        {
+          "name": "status_1",
+          "dryRun": true
+        },
+        {
+          "name": "happenedAt_1",
+          "dryRun": true
+        },
+        {
+          "name": "review_queue_open_by_domain",
+          "dryRun": true
+        }
+      ],
+      "dryRun": true
+    },
+    {
+      "sourceName": "controlplanesourcecanonicals",
+      "targetName": "controlplanesourcecanonicals",
+      "copyIndexes": false,
+      "mode": "same-name-insert-missing-only",
+      "sourceCollection": "controlplanesourcecanonicals",
+      "targetCollection": "controlplanesourcecanonicals",
+      "sourceCount": 0,
+      "beforeCount": 81,
+      "afterCount": 81,
+      "upserted": 0,
+      "matchedExisting": 0,
+      "errors": [],
+      "indexes": [],
+      "dryRun": true
+    },
+    {
+      "sourceName": "controlplanesourcecanonicals",
+      "targetName": "legacy_raw_controlplanesourcecanonicals",
+      "copyIndexes": true,
+      "mode": "raw-overlap-preservation",
+      "sourceCollection": "controlplanesourcecanonicals",
+      "targetCollection": "legacy_raw_controlplanesourcecanonicals",
+      "sourceCount": 0,
+      "beforeCount": 0,
+      "afterCount": 0,
+      "upserted": 0,
+      "matchedExisting": 0,
+      "errors": [],
+      "indexes": [
+        {
+          "name": "canonicalKey_1",
+          "dryRun": true
+        },
+        {
+          "name": "internalName_1",
+          "dryRun": true
+        },
+        {
+          "name": "channel_1",
+          "dryRun": true
+        },
+        {
+          "name": "active_1",
+          "dryRun": true
+        },
+        {
+          "name": "internalName_1_active_1",
+          "dryRun": true
+        },
+        {
+          "name": "channel_1_active_1",
+          "dryRun": true
+        },
+        {
+          "name": "sourceIds.domain_1_sourceIds.sourceId_1",
+          "dryRun": true
+        }
+      ],
+      "dryRun": true
+    },
+    {
+      "sourceName": "controlplanespendentries",
+      "targetName": "controlplanespendentries",
+      "copyIndexes": false,
+      "mode": "same-name-insert-missing-only",
+      "sourceCollection": "controlplanespendentries",
+      "targetCollection": "controlplanespendentries",
+      "sourceCount": 0,
+      "beforeCount": 2132,
+      "afterCount": 2132,
+      "upserted": 0,
+      "matchedExisting": 0,
+      "errors": [],
+      "indexes": [],
+      "dryRun": true
+    },
+    {
+      "sourceName": "controlplanespendentries",
+      "targetName": "legacy_raw_controlplanespendentries",
+      "copyIndexes": true,
+      "mode": "raw-overlap-preservation",
+      "sourceCollection": "controlplanespendentries",
+      "targetCollection": "legacy_raw_controlplanespendentries",
+      "sourceCount": 0,
+      "beforeCount": 0,
+      "afterCount": 0,
+      "upserted": 0,
+      "matchedExisting": 0,
+      "errors": [],
+      "indexes": [
+        {
+          "name": "date_1",
+          "dryRun": true
+        },
+        {
+          "name": "domain_1",
+          "dryRun": true
+        },
+        {
+          "name": "channel_1",
+          "dryRun": true
+        },
+        {
+          "name": "source_1",
+          "dryRun": true
+        },
+        {
+          "name": "sheetId_1",
+          "dryRun": true
+        },
+        {
+          "name": "sourceCanonicalId_1",
+          "dryRun": true
+        },
+        {
+          "name": "date_1_domain_1_channel_1_source_1_sheetId_1",
+          "dryRun": true
+        },
+        {
+          "name": "domain_1_channel_1_date_-1",
+          "dryRun": true
+        }
+      ],
+      "dryRun": true
+    },
+    {
+      "sourceName": "controlplaneworkflowrecords",
+      "targetName": "controlplaneworkflowrecords",
+      "copyIndexes": false,
+      "mode": "same-name-insert-missing-only",
+      "sourceCollection": "controlplaneworkflowrecords",
+      "targetCollection": "controlplaneworkflowrecords",
+      "sourceCount": 4,
+      "beforeCount": 95933,
+      "afterCount": 95933,
+      "upserted": 0,
+      "matchedExisting": 0,
+      "errors": [],
+      "indexes": [],
+      "dryRun": true
+    },
+    {
+      "sourceName": "controlplaneworkflowrecords",
+      "targetName": "legacy_raw_controlplaneworkflowrecords",
+      "copyIndexes": true,
+      "mode": "raw-overlap-preservation",
+      "sourceCollection": "controlplaneworkflowrecords",
+      "targetCollection": "legacy_raw_controlplaneworkflowrecords",
+      "sourceCount": 4,
+      "beforeCount": 0,
+      "afterCount": 0,
+      "upserted": 0,
+      "matchedExisting": 0,
+      "errors": [],
+      "indexes": [
+        {
+          "name": "domain_1",
+          "dryRun": true
+        },
+        {
+          "name": "family_1",
+          "dryRun": true
+        },
+        {
+          "name": "subtype_1",
+          "dryRun": true
+        },
+        {
+          "name": "stage_1",
+          "dryRun": true
+        },
+        {
+          "name": "aggregateType_1",
+          "dryRun": true
+        },
+        {
+          "name": "aggregateId_1",
+          "dryRun": true
+        },
+        {
+          "name": "caseId_1",
+          "dryRun": true
+        },
+        {
+          "name": "sourceService_1",
+          "dryRun": true
+        },
+        {
+          "name": "status_1",
+          "dryRun": true
+        },
+        {
+          "name": "happenedAt_1",
+          "dryRun": true
+        },
+        {
+          "name": "family_1_subtype_1_stage_1_happenedAt_-1",
+          "dryRun": true
+        },
+        {
+          "name": "aggregateType_1_aggregateId_1_happenedAt_-1",
+          "dryRun": true
+        }
+      ],
+      "dryRun": true
+    },
+    {
+      "sourceName": "dailypaymentsummaries",
+      "targetName": "dailypaymentsummaries",
+      "copyIndexes": true,
+      "mode": "same-name-full-mirror",
+      "sourceCollection": "dailypaymentsummaries",
+      "targetCollection": "dailypaymentsummaries",
+      "sourceCount": 982,
+      "beforeCount": 0,
+      "afterCount": 0,
+      "upserted": 0,
+      "matchedExisting": 0,
+      "errors": [],
+      "indexes": [
+        {
+          "name": "date_1",
+          "dryRun": true
+        },
+        {
+          "name": "date_1_domain_1",
+          "dryRun": true
+        },
+        {
+          "name": "casePaymentId_1",
+          "dryRun": true
+        },
+        {
+          "name": "date_1_type_1",
+          "dryRun": true
+        },
+        {
+          "name": "needsSourceReview_1_date_-1",
+          "dryRun": true
+        }
+      ],
+      "dryRun": true
+    },
+    {
+      "sourceName": "dailyschedules",
+      "targetName": "dailyschedules",
+      "copyIndexes": true,
+      "mode": "same-name-full-mirror",
+      "sourceCollection": "dailyschedules",
+      "targetCollection": "dailyschedules",
+      "sourceCount": 11,
+      "beforeCount": 0,
+      "afterCount": 0,
+      "upserted": 0,
+      "matchedExisting": 0,
+      "errors": [],
+      "indexes": [
+        {
+          "name": "date_1",
+          "dryRun": true
+        }
+      ],
+      "dryRun": true
+    },
+    {
+      "sourceName": "dailyspends",
+      "targetName": "dailyspends",
+      "copyIndexes": true,
+      "mode": "same-name-full-mirror",
+      "sourceCollection": "dailyspends",
+      "targetCollection": "dailyspends",
+      "sourceCount": 2801,
+      "beforeCount": 0,
+      "afterCount": 0,
+      "upserted": 0,
+      "matchedExisting": 0,
+      "errors": [],
+      "indexes": [
+        {
+          "name": "date_1_domain_1_channel_1_source_1_sheetId_1",
+          "dryRun": true
+        },
+        {
+          "name": "date_1_channel_1",
+          "dryRun": true
+        },
+        {
+          "name": "sheetId_1_date_1",
+          "dryRun": true
+        }
+      ],
+      "dryRun": true
+    },
+    {
+      "sourceName": "dailysummaries",
+      "targetName": "dailysummaries",
+      "copyIndexes": true,
+      "mode": "same-name-full-mirror",
+      "sourceCollection": "dailysummaries",
+      "targetCollection": "dailysummaries",
+      "sourceCount": 87,
+      "beforeCount": 0,
+      "afterCount": 0,
+      "upserted": 0,
+      "matchedExisting": 0,
+      "errors": [],
+      "indexes": [
+        {
+          "name": "date_1",
+          "dryRun": true
+        },
+        {
+          "name": "date_1_source_1_domain_1",
+          "dryRun": true
+        },
+        {
+          "name": "date_1_channel_1",
+          "dryRun": true
+        },
+        {
+          "name": "date_1_domain_1",
+          "dryRun": true
+        }
+      ],
+      "dryRun": true
+    },
+    {
+      "sourceName": "dispatchlists",
+      "targetName": "dispatchlists",
+      "copyIndexes": false,
+      "mode": "same-name-insert-missing-only",
+      "sourceCollection": "dispatchlists",
+      "targetCollection": "dispatchlists",
+      "sourceCount": 0,
+      "beforeCount": 25,
+      "afterCount": 25,
+      "upserted": 0,
+      "matchedExisting": 0,
+      "errors": [],
+      "indexes": [],
+      "dryRun": true
+    },
+    {
+      "sourceName": "dispatchlists",
+      "targetName": "legacy_raw_dispatchlists",
+      "copyIndexes": true,
+      "mode": "raw-overlap-preservation",
+      "sourceCollection": "dispatchlists",
+      "targetCollection": "legacy_raw_dispatchlists",
+      "sourceCount": 0,
+      "beforeCount": 0,
+      "afterCount": 0,
+      "upserted": 0,
+      "matchedExisting": 0,
+      "errors": [],
+      "indexes": [
+        {
+          "name": "domain_1",
+          "dryRun": true
+        },
+        {
+          "name": "family_1",
+          "dryRun": true
+        },
+        {
+          "name": "subtype_1",
+          "dryRun": true
+        },
+        {
+          "name": "channel_1",
+          "dryRun": true
+        },
+        {
+          "name": "mode_1",
+          "dryRun": true
+        },
+        {
+          "name": "status_1",
+          "dryRun": true
+        },
+        {
+          "name": "consumerService_1",
+          "dryRun": true
+        },
+        {
+          "name": "builtAt_1",
+          "dryRun": true
+        },
+        {
+          "name": "expiresAt_1",
+          "dryRun": true
+        },
+        {
+          "name": "domain_1_family_1_channel_1_status_1_builtAt_-1",
+          "dryRun": true
+        }
+      ],
+      "dryRun": true
+    },
+    {
+      "sourceName": "eventrecords",
+      "targetName": "eventrecords",
+      "copyIndexes": false,
+      "mode": "same-name-insert-missing-only",
+      "sourceCollection": "eventrecords",
+      "targetCollection": "eventrecords",
+      "sourceCount": 2,
+      "beforeCount": 70695,
+      "afterCount": 70695,
+      "upserted": 0,
+      "matchedExisting": 0,
+      "errors": [],
+      "indexes": [],
+      "dryRun": true
+    },
+    {
+      "sourceName": "eventrecords",
+      "targetName": "legacy_raw_eventrecords",
+      "copyIndexes": true,
+      "mode": "raw-overlap-preservation",
+      "sourceCollection": "eventrecords",
+      "targetCollection": "legacy_raw_eventrecords",
+      "sourceCount": 2,
+      "beforeCount": 0,
+      "afterCount": 0,
+      "upserted": 0,
+      "matchedExisting": 0,
+      "errors": [],
+      "indexes": [
+        {
+          "name": "eventType_1",
+          "dryRun": true
+        },
+        {
+          "name": "sourceService_1",
+          "dryRun": true
+        },
+        {
+          "name": "aggregateId_1",
+          "dryRun": true
+        },
+        {
+          "name": "status_1",
+          "dryRun": true
+        },
+        {
+          "name": "nextAttemptAt_1",
+          "dryRun": true
+        },
+        {
+          "name": "dedupeKey_1",
+          "dryRun": true
+        },
+        {
+          "name": "sourceService_1_dedupeKey_1",
+          "dryRun": true
+        }
+      ],
+      "dryRun": true
+    },
+    {
+      "sourceName": "formsubmissions",
+      "targetName": "formsubmissions",
+      "copyIndexes": true,
+      "mode": "same-name-full-mirror",
+      "sourceCollection": "formsubmissions",
+      "targetCollection": "formsubmissions",
+      "sourceCount": 106,
+      "beforeCount": 0,
+      "afterCount": 0,
+      "upserted": 0,
+      "matchedExisting": 0,
+      "errors": [],
+      "indexes": [
+        {
+          "name": "formType_1",
+          "dryRun": true
+        },
+        {
+          "name": "status_1",
+          "dryRun": true
+        },
+        {
+          "name": "formType_1_status_1",
+          "dryRun": true
+        },
+        {
+          "name": "formData.email_1",
+          "dryRun": true
+        },
+        {
+          "name": "formData.phone_1",
+          "dryRun": true
+        },
+        {
+          "name": "createdAt_-1",
+          "dryRun": true
+        }
+      ],
+      "dryRun": true
+    },
+    {
+      "sourceName": "hourlyjobevents",
+      "targetName": "hourlyjobevents",
+      "copyIndexes": false,
+      "mode": "same-name-insert-missing-only",
+      "sourceCollection": "hourlyjobevents",
+      "targetCollection": "hourlyjobevents",
+      "sourceCount": 0,
+      "beforeCount": 4,
+      "afterCount": 4,
+      "upserted": 0,
+      "matchedExisting": 0,
+      "errors": [],
+      "indexes": [],
+      "dryRun": true
+    },
+    {
+      "sourceName": "hourlyjobevents",
+      "targetName": "legacy_raw_hourlyjobevents",
+      "copyIndexes": true,
+      "mode": "raw-overlap-preservation",
+      "sourceCollection": "hourlyjobevents",
+      "targetCollection": "legacy_raw_hourlyjobevents",
+      "sourceCount": 0,
+      "beforeCount": 0,
+      "afterCount": 0,
+      "upserted": 0,
+      "matchedExisting": 0,
+      "errors": [],
+      "indexes": [
+        {
+          "name": "lane_1",
+          "dryRun": true
+        },
+        {
+          "name": "eventType_1",
+          "dryRun": true
+        },
+        {
+          "name": "targetService_1",
+          "dryRun": true
+        },
+        {
+          "name": "handlerKey_1",
+          "dryRun": true
+        },
+        {
+          "name": "domain_1",
+          "dryRun": true
+        },
+        {
+          "name": "aggregateType_1",
+          "dryRun": true
+        },
+        {
+          "name": "aggregateId_1",
+          "dryRun": true
+        },
+        {
+          "name": "caseId_1",
+          "dryRun": true
+        },
+        {
+          "name": "resolutionCheckKey_1",
+          "dryRun": true
+        },
+        {
+          "name": "dedupeKey_1",
+          "dryRun": true
+        },
+        {
+          "name": "sourceEventId_1",
+          "dryRun": true
+        },
+        {
+          "name": "sourceWorkflowId_1",
+          "dryRun": true
+        },
+        {
+          "name": "emittedBy_1",
+          "dryRun": true
+        },
+        {
+          "name": "priority_1",
+          "dryRun": true
+        },
+        {
+          "name": "provideSummary_1",
+          "dryRun": true
+        },
+        {
+          "name": "status_1",
+          "dryRun": true
+        },
+        {
+          "name": "nextAttemptAt_1",
+          "dryRun": true
+        },
+        {
+          "name": "hourly_job_event_dedupe",
+          "dryRun": true
+        },
+        {
+          "name": "hourly_job_event_claim",
+          "dryRun": true
+        }
+      ],
+      "dryRun": true
+    },
+    {
+      "sourceName": "leadcadences",
+      "targetName": "leadcadences",
+      "copyIndexes": true,
+      "mode": "same-name-full-mirror",
+      "sourceCollection": "leadcadences",
+      "targetCollection": "leadcadences",
+      "sourceCount": 3941,
+      "beforeCount": 0,
+      "afterCount": 0,
+      "upserted": 0,
+      "matchedExisting": 0,
+      "errors": [],
+      "indexes": [
+        {
+          "name": "active_1",
+          "dryRun": true
+        },
+        {
+          "name": "active_1_createdAt_1",
+          "dryRun": true
+        },
+        {
+          "name": "active_1_createdAt_-1",
+          "dryRun": true
+        },
+        {
+          "name": "active_1_day0Connected_1_createdAt_-1",
+          "dryRun": true
+        },
+        {
+          "name": "active_1_phoneConnected_1",
+          "dryRun": true
+        },
+        {
+          "name": "caseId_company_unique",
+          "dryRun": true
+        },
+        {
+          "name": "company_1",
+          "dryRun": true
+        },
+        {
+          "name": "caseId_1",
+          "dryRun": true
+        },
+        {
+          "name": "active_1_company_1_createdAt_-1",
+          "dryRun": true
+        },
+        {
+          "name": "active_1_nextOutreachType_1",
+          "dryRun": true
+        },
+        {
+          "name": "active_1_caseAge_1",
+          "dryRun": true
+        },
+        {
+          "name": "utmCampaign_1_createdAt_-1",
+          "dryRun": true
+        },
+        {
+          "name": "metaCampaignId_1_createdAt_-1",
+          "dryRun": true
+        }
+      ],
+      "dryRun": true
+    },
+    {
+      "sourceName": "leads",
+      "targetName": "leads",
+      "copyIndexes": true,
+      "mode": "same-name-full-mirror",
+      "sourceCollection": "leads",
+      "targetCollection": "leads",
+      "sourceCount": 0,
+      "beforeCount": 0,
+      "afterCount": 0,
+      "upserted": 0,
+      "matchedExisting": 0,
+      "errors": [],
+      "indexes": [
+        {
+          "name": "email_1",
+          "dryRun": true
+        },
+        {
+          "name": "caseNumber_1",
+          "dryRun": true
+        }
+      ],
+      "dryRun": true
+    },
+    {
+      "sourceName": "mailerconfigs",
+      "targetName": "mailerconfigs",
+      "copyIndexes": true,
+      "mode": "same-name-full-mirror",
+      "sourceCollection": "mailerconfigs",
+      "targetCollection": "mailerconfigs",
+      "sourceCount": 28,
+      "beforeCount": 0,
+      "afterCount": 0,
+      "upserted": 0,
+      "matchedExisting": 0,
+      "errors": [],
+      "indexes": [
+        {
+          "name": "phone_1",
+          "dryRun": true
+        },
+        {
+          "name": "digits_1",
+          "dryRun": true
+        }
+      ],
+      "dryRun": true
+    },
+    {
+      "sourceName": "marketingcontacts",
+      "targetName": "marketingcontacts",
+      "copyIndexes": true,
+      "mode": "same-name-full-mirror",
+      "sourceCollection": "marketingcontacts",
+      "targetCollection": "marketingcontacts",
+      "sourceCount": 0,
+      "beforeCount": 0,
+      "afterCount": 0,
+      "upserted": 0,
+      "matchedExisting": 0,
+      "errors": [],
+      "indexes": [
+        {
+          "name": "pieceName_1",
+          "dryRun": true
+        }
+      ],
+      "dryRun": true
+    },
+    {
+      "sourceName": "periodcontacts",
+      "targetName": "periodcontacts",
+      "copyIndexes": true,
+      "mode": "same-name-full-mirror",
+      "sourceCollection": "periodcontacts",
+      "targetCollection": "periodcontacts",
+      "sourceCount": 1,
+      "beforeCount": 0,
+      "afterCount": 0,
+      "upserted": 0,
+      "matchedExisting": 0,
+      "errors": [],
+      "indexes": [],
+      "dryRun": true
+    },
+    {
+      "sourceName": "prepings",
+      "targetName": "prepings",
+      "copyIndexes": true,
+      "mode": "same-name-full-mirror",
+      "sourceCollection": "prepings",
+      "targetCollection": "prepings",
+      "sourceCount": 162,
+      "beforeCount": 0,
+      "afterCount": 0,
+      "upserted": 0,
+      "matchedExisting": 0,
+      "errors": [],
+      "indexes": [
+        {
+          "name": "emailHash_1",
+          "dryRun": true
+        },
+        {
+          "name": "createdAt_1",
+          "dryRun": true
+        }
+      ],
+      "dryRun": true
+    },
+    {
+      "sourceName": "prospects",
+      "targetName": "prospects",
+      "copyIndexes": true,
+      "mode": "same-name-full-mirror",
+      "sourceCollection": "prospects",
+      "targetCollection": "prospects",
+      "sourceCount": 0,
+      "beforeCount": 0,
+      "afterCount": 0,
+      "upserted": 0,
+      "matchedExisting": 0,
+      "errors": [],
+      "indexes": [
+        {
+          "name": "email_1",
+          "dryRun": true
+        },
+        {
+          "name": "emailLower_1",
+          "dryRun": true
+        },
+        {
+          "name": "phoneDigits_1",
+          "dryRun": true
+        },
+        {
+          "name": "companyKey_1",
+          "dryRun": true
+        },
+        {
+          "name": "caseId_1",
+          "dryRun": true
+        },
+        {
+          "name": "status_1",
+          "dryRun": true
+        },
+        {
+          "name": "nextContactAt_1",
+          "dryRun": true
+        },
+        {
+          "name": "emailLower_1_createdAt_-1",
+          "dryRun": true
+        },
+        {
+          "name": "phoneDigits_1_createdAt_-1",
+          "dryRun": true
+        }
+      ],
+      "dryRun": true
+    },
+    {
+      "sourceName": "rb_agents",
+      "targetName": "rb_agents",
+      "copyIndexes": true,
+      "mode": "same-name-full-mirror",
+      "sourceCollection": "rb_agents",
+      "targetCollection": "rb_agents",
+      "sourceCount": 5,
+      "beforeCount": 0,
+      "afterCount": 0,
+      "upserted": 0,
+      "matchedExisting": 0,
+      "errors": [],
+      "indexes": [
+        {
+          "name": "extensionId_1",
+          "dryRun": true
+        }
+      ],
+      "dryRun": true
+    },
+    {
+      "sourceName": "rb_caseprofiles",
+      "targetName": "rb_caseprofiles",
+      "copyIndexes": true,
+      "mode": "same-name-full-mirror",
+      "sourceCollection": "rb_caseprofiles",
+      "targetCollection": "rb_caseprofiles",
+      "sourceCount": 4967,
+      "beforeCount": 0,
+      "afterCount": 0,
+      "upserted": 0,
+      "matchedExisting": 0,
+      "errors": [],
+      "indexes": [
+        {
+          "name": "caseId_1_domain_1",
+          "dryRun": true
+        },
+        {
+          "name": "sourceChannel_1_createdAt_-1",
+          "dryRun": true
+        },
+        {
+          "name": "sourceId_1_createdAt_-1",
+          "dryRun": true
+        },
+        {
+          "name": "statusCategory_1_createdAt_-1",
+          "dryRun": true
+        },
+        {
+          "name": "domain_1_lastContactAt_-1",
+          "dryRun": true
+        },
+        {
+          "name": "domain_1_statusCategory_1_sourceChannel_1",
+          "dryRun": true
+        },
+        {
+          "name": "wasPostDate_1_domain_1",
+          "dryRun": true
+        },
+        {
+          "name": "isRedline_1_domain_1",
+          "dryRun": true
+        },
+        {
+          "name": "lastMatchedDate_1",
+          "dryRun": true
+        },
+        {
+          "name": "utmCampaign_1_domain_1",
+          "dryRun": true
+        },
+        {
+          "name": "metaCampaignId_1_domain_1",
+          "dryRun": true
+        }
+      ],
+      "dryRun": true
+    },
+    {
+      "sourceName": "rb_contactactivities",
+      "targetName": "rb_contactactivities",
+      "copyIndexes": true,
+      "mode": "same-name-full-mirror",
+      "sourceCollection": "rb_contactactivities",
+      "targetCollection": "rb_contactactivities",
+      "sourceCount": 13570,
+      "beforeCount": 0,
+      "afterCount": 0,
+      "upserted": 0,
+      "matchedExisting": 0,
+      "errors": [],
+      "indexes": [
+        {
+          "name": "extensionId_1",
+          "dryRun": true
+        },
+        {
+          "name": "phone_1",
+          "dryRun": true
+        },
+        {
+          "name": "extensionId_1_createdAt_-1",
+          "dryRun": true
+        },
+        {
+          "name": "phone_1_createdAt_-1",
+          "dryRun": true
+        },
+        {
+          "name": "caseMatch.caseId_1_createdAt_-1",
+          "dryRun": true
+        },
+        {
+          "name": "enrichmentStatus_1_createdAt_-1",
+          "dryRun": true
+        },
+        {
+          "name": "createdAt_-1",
+          "dryRun": true
+        },
+        {
+          "name": "source_1_createdAt_-1",
+          "dryRun": true
+        },
+        {
+          "name": "caseMatch.sourceId_1_createdAt_-1",
+          "dryRun": true
+        },
+        {
+          "name": "caseMatch.sourceChannel_1_createdAt_-1",
+          "dryRun": true
+        }
+      ],
+      "dryRun": true
+    },
+    {
+      "sourceName": "rb_dailycallstats",
+      "targetName": "rb_dailycallstats",
+      "copyIndexes": true,
+      "mode": "same-name-full-mirror",
+      "sourceCollection": "rb_dailycallstats",
+      "targetCollection": "rb_dailycallstats",
+      "sourceCount": 3315,
+      "beforeCount": 0,
+      "afterCount": 0,
+      "upserted": 0,
+      "matchedExisting": 0,
+      "errors": [],
+      "indexes": [
+        {
+          "name": "date_1",
+          "dryRun": true
+        },
+        {
+          "name": "date_1_piece_1",
+          "dryRun": true
+        },
+        {
+          "name": "date_1_channel_1",
+          "dryRun": true
+        },
+        {
+          "name": "piece_1_date_1",
+          "dryRun": true
+        }
+      ],
+      "dryRun": true
+    },
+    {
+      "sourceName": "rb_dailycasehealthsnapshots",
+      "targetName": "rb_dailycasehealthsnapshots",
+      "copyIndexes": true,
+      "mode": "same-name-full-mirror",
+      "sourceCollection": "rb_dailycasehealthsnapshots",
+      "targetCollection": "rb_dailycasehealthsnapshots",
+      "sourceCount": 1,
+      "beforeCount": 0,
+      "afterCount": 0,
+      "upserted": 0,
+      "matchedExisting": 0,
+      "errors": [],
+      "indexes": [
+        {
+          "name": "key_1",
+          "dryRun": true
+        }
+      ],
+      "dryRun": true
+    },
+    {
+      "sourceName": "rb_eventlogs",
+      "targetName": "rb_eventlogs",
+      "copyIndexes": true,
+      "mode": "same-name-full-mirror",
+      "sourceCollection": "rb_eventlogs",
+      "targetCollection": "rb_eventlogs",
+      "sourceCount": 39028,
+      "beforeCount": 0,
+      "afterCount": 0,
+      "upserted": 0,
+      "matchedExisting": 0,
+      "errors": [],
+      "indexes": [
+        {
+          "name": "extensionId_1",
+          "dryRun": true
+        },
+        {
+          "name": "timestamp_-1",
+          "dryRun": true
+        },
+        {
+          "name": "extensionId_1_timestamp_-1",
+          "dryRun": true
+        }
+      ],
+      "dryRun": true
+    },
+    {
+      "sourceName": "rb_paymentalerts",
+      "targetName": "rb_paymentalerts",
+      "copyIndexes": true,
+      "mode": "same-name-full-mirror",
+      "sourceCollection": "rb_paymentalerts",
+      "targetCollection": "rb_paymentalerts",
+      "sourceCount": 77,
+      "beforeCount": 0,
+      "afterCount": 0,
+      "upserted": 0,
+      "matchedExisting": 0,
+      "errors": [],
+      "indexes": [
+        {
+          "name": "caseId_1_domain_1_paymentDate_1",
+          "dryRun": true
+        },
+        {
+          "name": "textSentAt_1_createdAt_-1",
+          "dryRun": true
+        },
+        {
+          "name": "domain_1_paymentDate_1",
+          "dryRun": true
+        }
+      ],
+      "dryRun": true
+    },
+    {
+      "sourceName": "rb_sourcecanonicals",
+      "targetName": "rb_sourcecanonicals",
+      "copyIndexes": true,
+      "mode": "same-name-full-mirror",
+      "sourceCollection": "rb_sourcecanonicals",
+      "targetCollection": "rb_sourcecanonicals",
+      "sourceCount": 80,
+      "beforeCount": 0,
+      "afterCount": 0,
+      "upserted": 0,
+      "matchedExisting": 0,
+      "errors": [],
+      "indexes": [
+        {
+          "name": "canonicalKey_1",
+          "dryRun": true
+        },
+        {
+          "name": "internalName_1",
+          "dryRun": true
+        },
+        {
+          "name": "channel_1",
+          "dryRun": true
+        },
+        {
+          "name": "active_1",
+          "dryRun": true
+        },
+        {
+          "name": "internalName_1_active_1",
+          "dryRun": true
+        },
+        {
+          "name": "sourceIds.domain_1_sourceIds.sourceId_1",
+          "dryRun": true
+        },
+        {
+          "name": "phones.digits_1",
+          "dryRun": true
+        },
+        {
+          "name": "trackingNumbers.digits_1",
+          "dryRun": true
+        },
+        {
+          "name": "ringCentral.ext_1",
+          "dryRun": true
+        }
+      ],
+      "dryRun": true
+    },
+    {
+      "sourceName": "smsconversations",
+      "targetName": "smsconversations",
+      "copyIndexes": true,
+      "mode": "same-name-full-mirror",
+      "sourceCollection": "smsconversations",
+      "targetCollection": "smsconversations",
+      "sourceCount": 344,
+      "beforeCount": 0,
+      "afterCount": 0,
+      "upserted": 0,
+      "matchedExisting": 0,
+      "errors": [],
+      "indexes": [
+        {
+          "name": "customerPhone_1",
+          "dryRun": true
+        },
+        {
+          "name": "customerPhone_1_company_1",
+          "dryRun": true
+        },
+        {
+          "name": "responseStatus_1_autoSendAt_1",
+          "dryRun": true
+        }
+      ],
+      "dryRun": true
+    },
+    {
+      "sourceName": "socialresponderconfigs",
+      "targetName": "socialresponderconfigs",
+      "copyIndexes": false,
+      "mode": "same-name-insert-missing-only",
+      "sourceCollection": "socialresponderconfigs",
+      "targetCollection": "socialresponderconfigs",
+      "sourceCount": 0,
+      "beforeCount": 0,
+      "afterCount": 0,
+      "upserted": 0,
+      "matchedExisting": 0,
+      "errors": [],
+      "indexes": [],
+      "dryRun": true
+    },
+    {
+      "sourceName": "socialresponderconfigs",
+      "targetName": "legacy_raw_socialresponderconfigs",
+      "copyIndexes": true,
+      "mode": "raw-overlap-preservation",
+      "sourceCollection": "socialresponderconfigs",
+      "targetCollection": "legacy_raw_socialresponderconfigs",
+      "sourceCount": 0,
+      "beforeCount": 0,
+      "afterCount": 0,
+      "upserted": 0,
+      "matchedExisting": 0,
+      "errors": [],
+      "indexes": [
+        {
+          "name": "domain_1",
+          "dryRun": true
+        },
+        {
+          "name": "platform_1",
+          "dryRun": true
+        },
+        {
+          "name": "domain_platform_unique",
+          "dryRun": true
+        }
+      ],
+      "dryRun": true
+    },
+    {
+      "sourceName": "taxstewartsubmissions",
+      "targetName": "taxstewartsubmissions",
+      "copyIndexes": true,
+      "mode": "same-name-full-mirror",
+      "sourceCollection": "taxstewartsubmissions",
+      "targetCollection": "taxstewartsubmissions",
+      "sourceCount": 3,
+      "beforeCount": 0,
+      "afterCount": 0,
+      "upserted": 0,
+      "matchedExisting": 0,
+      "errors": [],
+      "indexes": [
+        {
+          "name": "email_1",
+          "dryRun": true
+        },
+        {
+          "name": "phone_1",
+          "dryRun": true
+        },
+        {
+          "name": "createdAt_-1",
+          "dryRun": true
+        },
+        {
+          "name": "status_1",
+          "dryRun": true
+        }
+      ],
+      "dryRun": true
+    },
+    {
+      "sourceName": "tiktokcommentreplies",
+      "targetName": "tiktokcommentreplies",
+      "copyIndexes": true,
+      "mode": "same-name-full-mirror",
+      "sourceCollection": "tiktokcommentreplies",
+      "targetCollection": "tiktokcommentreplies",
+      "sourceCount": 0,
+      "beforeCount": 0,
+      "afterCount": 0,
+      "upserted": 0,
+      "matchedExisting": 0,
+      "errors": [],
+      "indexes": [
+        {
+          "name": "commentId_1",
+          "dryRun": true
+        },
+        {
+          "name": "repliedAt_1",
+          "dryRun": true
+        }
+      ],
+      "dryRun": true
+    },
+    {
+      "sourceName": "tiktoktokens",
+      "targetName": "tiktoktokens",
+      "copyIndexes": true,
+      "mode": "same-name-full-mirror",
+      "sourceCollection": "tiktoktokens",
+      "targetCollection": "tiktoktokens",
+      "sourceCount": 0,
+      "beforeCount": 0,
+      "afterCount": 0,
+      "upserted": 0,
+      "matchedExisting": 0,
+      "errors": [],
+      "indexes": [
+        {
+          "name": "company_1",
+          "dryRun": true
+        }
+      ],
+      "dryRun": true
+    },
+    {
+      "sourceName": "useraccounts",
+      "targetName": "useraccounts",
+      "copyIndexes": false,
+      "mode": "same-name-insert-missing-only",
+      "sourceCollection": "useraccounts",
+      "targetCollection": "useraccounts",
+      "sourceCount": 3,
+      "beforeCount": 8,
+      "afterCount": 8,
+      "upserted": 0,
+      "matchedExisting": 0,
+      "errors": [],
+      "indexes": [],
+      "dryRun": true
+    },
+    {
+      "sourceName": "useraccounts",
+      "targetName": "legacy_raw_useraccounts",
+      "copyIndexes": true,
+      "mode": "raw-overlap-preservation",
+      "sourceCollection": "useraccounts",
+      "targetCollection": "legacy_raw_useraccounts",
+      "sourceCount": 3,
+      "beforeCount": 0,
+      "afterCount": 0,
+      "upserted": 0,
+      "matchedExisting": 0,
+      "errors": [],
+      "indexes": [
+        {
+          "name": "email_1",
+          "dryRun": true
+        },
+        {
+          "name": "role_1",
+          "dryRun": true
+        },
+        {
+          "name": "audience_1",
+          "dryRun": true
+        },
+        {
+          "name": "company_1",
+          "dryRun": true
+        },
+        {
+          "name": "extensionId_1",
+          "dryRun": true
+        },
+        {
+          "name": "cxAgentId_1",
+          "dryRun": true
+        },
+        {
+          "name": "status_1",
+          "dryRun": true
+        },
+        {
+          "name": "logicsUserId_1",
+          "dryRun": true
+        },
+        {
+          "name": "tagLogicsId_1",
+          "dryRun": true
+        },
+        {
+          "name": "wynnLogicsId_1",
+          "dryRun": true
+        }
+      ],
+      "dryRun": true
+    },
+    {
+      "sourceName": "userrequests",
+      "targetName": "userrequests",
+      "copyIndexes": true,
+      "mode": "same-name-full-mirror",
+      "sourceCollection": "userrequests",
+      "targetCollection": "userrequests",
+      "sourceCount": 1,
+      "beforeCount": 0,
+      "afterCount": 0,
+      "upserted": 0,
+      "matchedExisting": 0,
+      "errors": [],
+      "indexes": [
+        {
+          "name": "email_1",
+          "dryRun": true
+        }
+      ],
+      "dryRun": true
+    },
+    {
+      "sourceName": "users",
+      "targetName": "users",
+      "copyIndexes": true,
+      "mode": "same-name-full-mirror",
+      "sourceCollection": "users",
+      "targetCollection": "users",
+      "sourceCount": 4,
+      "beforeCount": 0,
+      "afterCount": 0,
+      "upserted": 0,
+      "matchedExisting": 0,
+      "errors": [],
+      "indexes": [
+        {
+          "name": "email_1",
+          "dryRun": true
+        }
+      ],
+      "dryRun": true
+    },
+    {
+      "sourceName": "validatedphones",
+      "targetName": "validatedphones",
+      "copyIndexes": true,
+      "mode": "same-name-full-mirror",
+      "sourceCollection": "validatedphones",
+      "targetCollection": "validatedphones",
+      "sourceCount": 725,
+      "beforeCount": 0,
+      "afterCount": 0,
+      "upserted": 0,
+      "matchedExisting": 0,
+      "errors": [],
+      "indexes": [
+        {
+          "name": "phone_1",
+          "dryRun": true
+        }
+      ],
+      "dryRun": true
+    }
+  ]
+}

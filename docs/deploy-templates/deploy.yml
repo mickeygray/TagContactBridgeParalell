@@ -1,0 +1,107 @@
+name: Deploy
+
+# Triggered by the 3001 control-plane via GitHub's workflow_dispatch API.
+# Inputs match the contract defined in:
+#   packages/shared-services/src/deployOrchestrationService.js  (triggerDeploy)
+#
+# Switch statement branches to:
+#   full    — git pull, npm ci, build, pm2 restart (everything)
+#   content — rsync / s3 sync static assets only, no service restart
+#   restart — pm2 restart only, no code change
+#
+# Customize the `script` blocks below to match what your repo actually does.
+# Placeholders marked with `# TODO` are the spots you almost certainly need
+# to adjust per-brand.
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "What to deploy: full | content | restart"
+        required: true
+        default: "full"
+        type: choice
+        options:
+          - full
+          - content
+          - restart
+      target:
+        description: "Target key (e.g. tag-site)"
+        required: true
+      brand:
+        description: "Brand (e.g. TAG, WYNN)"
+        required: false
+        default: "TAG"
+
+concurrency:
+  # Prevent overlapping deploys of the same target.
+  group: deploy-${{ inputs.target }}
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Announce
+        run: |
+          echo "target=${{ inputs.target }}"
+          echo "brand=${{ inputs.brand }}"
+          echo "action=${{ inputs.action }}"
+
+      - name: Full deploy
+        if: ${{ inputs.action == 'full' }}
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.AWS_HOST }}
+          username: ${{ secrets.AWS_USER }}
+          key: ${{ secrets.AWS_SSH_PRIVATE_KEY }}
+          port: ${{ secrets.AWS_SSH_PORT || 22 }}
+          script_stop: true
+          script: |
+            set -e
+            # TODO: adjust the repo path if different
+            cd /home/${{ secrets.AWS_USER }}/${{ inputs.target }}
+            echo "=== git pull ==="
+            git fetch --all
+            git reset --hard origin/main
+            echo "=== install ==="
+            npm ci --omit=dev
+            echo "=== build ==="
+            npm run build || echo "no build script — skipping"
+            echo "=== restart ==="
+            pm2 reload ecosystem.config.js --only ${{ inputs.target }} || pm2 restart ${{ inputs.target }}
+            pm2 save
+
+      - name: Content push
+        if: ${{ inputs.action == 'content' }}
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.AWS_HOST }}
+          username: ${{ secrets.AWS_USER }}
+          key: ${{ secrets.AWS_SSH_PRIVATE_KEY }}
+          port: ${{ secrets.AWS_SSH_PORT || 22 }}
+          script_stop: true
+          script: |
+            set -e
+            cd /home/${{ secrets.AWS_USER }}/${{ inputs.target }}
+            echo "=== content-only pull ==="
+            git fetch --all
+            # TODO: narrow this to just your content paths (templates/, public/, etc.)
+            git checkout origin/main -- templates public || true
+            echo "content push complete — no service restart"
+
+      - name: Restart service
+        if: ${{ inputs.action == 'restart' }}
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.AWS_HOST }}
+          username: ${{ secrets.AWS_USER }}
+          key: ${{ secrets.AWS_SSH_PRIVATE_KEY }}
+          port: ${{ secrets.AWS_SSH_PORT || 22 }}
+          script_stop: true
+          script: |
+            set -e
+            pm2 restart ${{ inputs.target }}
+            pm2 save
+            pm2 status

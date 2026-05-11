@@ -3,7 +3,11 @@
 const express = require("express");
 const cors = require("cors");
 const { requireAuth } = require("../../../packages/shared-auth/src");
+const { ROLES } = require("../../../packages/shared-types/src");
+const { createDropClient } = require("../../../packages/shared-integrations/src");
+const { upsertLeadCadence } = require("../../../packages/shared-repositories/src");
 const {
+  getCorsOriginResolver,
   getSharedConfig,
   PORTS,
   SERVICE_NAMES,
@@ -11,9 +15,17 @@ const {
 const { publishDemoEvent } = require("../../../packages/shared-services/src/demoEventService");
 const {
   OUTBOUND_EVENT_TYPES,
+  buildScheduledBlastRuntimeSnapshot,
+  createCadenceSweepEvents,
   createOutboundEvent,
+  pollCounterCadenceRvmDispositions,
+  pollOutboundRvmDispositions,
   processNextOutboundEvent,
   processOutboundEventBatch,
+  recordWorkflowStage,
+  runCounterCadenceSweep,
+  runScheduledBlastSweep,
+  sendOutboundCallFireDial,
 } = require("../../../packages/shared-services/src");
 const { initializeServiceRuntime } = require("../../../packages/shared-runtime/src");
 const { buildServiceHealth } = require("../../../packages/shared-observability/src");
@@ -42,8 +54,41 @@ function buildInternalAccessMiddleware(config) {
       return next();
     }
 
-    return bearerAuth(req, res, next);
+    return bearerAuth(req, res, (error) => {
+      if (error) return next(error);
+      if (req.user?.role === ROLES.ADMIN || req.user?.role === ROLES.SERVICE) {
+        return next();
+      }
+      return res.status(403).json({ ok: false, error: "Forbidden" });
+    });
   };
+}
+
+function buildHealthAccessMiddleware(config) {
+  const expectedToken = String(config.healthToken || "").trim();
+  if (!expectedToken) {
+    return (_req, _res, next) => next();
+  }
+
+  return (req, res, next) => {
+    const provided = String(
+      req.headers["x-health-token"] ||
+      req.headers["x-service-secret"] ||
+      "",
+    ).trim();
+
+    if (provided && provided === expectedToken) {
+      return next();
+    }
+
+    return res.status(401).json({ ok: false, error: "Health token required" });
+  };
+}
+
+function captureRawBody(req, _res, buf) {
+  if (buf?.length) {
+    req.rawBody = Buffer.from(buf);
+  }
 }
 
 function createWorkerState() {
@@ -55,6 +100,19 @@ function createWorkerState() {
     lastCompletedAt: null,
     lastResult: null,
     lastError: null,
+    scheduledBlasts: {
+      lastCheckedAt: null,
+      lastResult: null,
+      lastError: null,
+    },
+    counterCadence: {
+      lastCheckedAt: null,
+      lastResult: null,
+      lastError: null,
+      lastRvmPollAt: null,
+      lastRvmPollResult: null,
+      lastRvmPollError: null,
+    },
     timer: null,
   };
 }
@@ -65,10 +123,54 @@ function asyncHandler(fn) {
   };
 }
 
-function startOutboundWorker({ config, runtime, workerState }) {
+function compactBlastAudience(audience = {}) {
+  const next = { ...audience };
+  delete next.caseIds;
+  return next;
+}
+
+function compactBlastResult(result) {
+  if (!result || typeof result !== "object") return result;
+  if (Array.isArray(result)) return result.map(compactBlastResult);
+
+  const next = { ...result };
+  if (next.audience) {
+    next.audience = compactBlastAudience(next.audience);
+  }
+  if (next.preview) {
+    next.preview = compactBlastResult(next.preview);
+  }
+  if (Array.isArray(next.results)) {
+    next.results = next.results.map(compactBlastResult);
+  }
+  return next;
+}
+
+async function startOutboundWorker({ config, runtime, workerState }) {
   const intervalMs = Math.max(Number(config.outboundWorker?.intervalMs) || 5000, 1000);
   const batchSize = Math.max(Number(config.outboundWorker?.batchSize) || 25, 1);
   const maxAttempts = Math.max(Number(config.outboundWorker?.maxAttempts) || 5, 1);
+  const counterCadenceEnabled = String(
+    process.env.COUNTER_CADENCE_ENABLED ?? config.outboundWorker?.counterCadenceEnabled ?? "true",
+  ).toLowerCase() !== "false";
+  const counterCadenceIntervalMs = Math.max(
+    Number(process.env.COUNTER_CADENCE_WORKER_INTERVAL_MS) ||
+      Number(config.outboundWorker?.counterCadenceIntervalMs) ||
+      60_000,
+    5_000,
+  );
+  const counterCadenceBatchSize = Math.max(
+    Number(process.env.COUNTER_CADENCE_BATCH_SIZE) ||
+      Number(config.outboundWorker?.counterCadenceBatchSize) ||
+      batchSize,
+    1,
+  );
+  const counterCadenceScanLimit = Math.max(
+    Number(process.env.COUNTER_CADENCE_SCAN_LIMIT) ||
+      Number(config.outboundWorker?.counterCadenceScanLimit) ||
+      2000,
+    100,
+  );
 
   workerState.enabled = true;
   workerState.intervalMs = intervalMs;
@@ -79,19 +181,156 @@ function startOutboundWorker({ config, runtime, workerState }) {
     workerState.lastStartedAt = new Date();
 
     try {
+      let counterCadenceResult = null;
+      let counterRvmPollResult = null;
+      if (config.outboundWorker?.cadenceSweepEnabled) {
+        const sweep = await createCadenceSweepEvents({
+          sourceService: config.serviceName,
+        });
+        if (sweep.accepted.length > 0) {
+          runtime.logger.info("outbound.worker.cadence_sweep", {
+            accepted: sweep.accepted,
+            bucket: sweep.bucket,
+          });
+        }
+      }
+      if (counterCadenceEnabled) {
+        const now = new Date();
+        const lastCounterCheck = workerState.counterCadence.lastCheckedAt
+          ? new Date(workerState.counterCadence.lastCheckedAt)
+          : null;
+        const counterDue = !lastCounterCheck ||
+          (now.getTime() - lastCounterCheck.getTime()) >= counterCadenceIntervalMs;
+
+        if (counterDue) {
+          workerState.counterCadence.lastCheckedAt = now;
+          try {
+            counterCadenceResult = await runCounterCadenceSweep({
+              sourceService: config.serviceName,
+              maxDispatches: counterCadenceBatchSize,
+              scanLimit: counterCadenceScanLimit,
+              logger: runtime.logger,
+            });
+            workerState.counterCadence.lastResult = counterCadenceResult;
+            workerState.counterCadence.lastError = null;
+            if (counterCadenceResult.selected > 0 || counterCadenceResult.failed > 0) {
+              runtime.logger.info("outbound.worker.counter_cadence", {
+                selected: counterCadenceResult.selected,
+                sent: counterCadenceResult.sent,
+                failed: counterCadenceResult.failed,
+                skipped: counterCadenceResult.skipped,
+                dailyWindow: counterCadenceResult.dailyWindow,
+              });
+            }
+          } catch (error) {
+            workerState.counterCadence.lastError = error.message;
+            runtime.logger.error("outbound.worker.counter_cadence_failed", {
+              error: error.message,
+            });
+          }
+
+          try {
+            workerState.counterCadence.lastRvmPollAt = now;
+            counterRvmPollResult = await pollCounterCadenceRvmDispositions({ limit: 25 });
+            workerState.counterCadence.lastRvmPollResult = counterRvmPollResult;
+            workerState.counterCadence.lastRvmPollError = null;
+            if (counterRvmPollResult.polled > 0) {
+              runtime.logger.info("outbound.worker.counter_rvm_disposition_poll", {
+                polled: counterRvmPollResult.polled,
+                terminal: counterRvmPollResult.terminal,
+                markedDnc: counterRvmPollResult.markedDnc,
+              });
+            }
+          } catch (error) {
+            workerState.counterCadence.lastRvmPollError = error.message;
+            runtime.logger.error("outbound.worker.counter_rvm_disposition_poll_failed", {
+              error: error.message,
+            });
+          }
+        }
+      }
+      if (config.scheduledBlasts?.enabled) {
+        workerState.scheduledBlasts.lastCheckedAt = new Date();
+        try {
+          const blastResult = await runScheduledBlastSweep({
+            config: config.scheduledBlasts,
+            sourceService: config.serviceName,
+            now: workerState.scheduledBlasts.lastCheckedAt,
+          });
+          workerState.scheduledBlasts.lastResult = compactBlastResult(blastResult);
+          workerState.scheduledBlasts.lastError = null;
+          if (blastResult?.queuedCount > 0) {
+            runtime.logger.info("outbound.worker.scheduled_blasts", {
+              rule: blastResult.rule,
+              queuedCount: blastResult.queuedCount,
+              skippedCount: blastResult.skippedCount,
+            });
+          }
+        } catch (error) {
+          workerState.scheduledBlasts.lastError = error.message;
+          runtime.logger.error("outbound.worker.scheduled_blasts_failed", {
+            error: error.message,
+          });
+        }
+      }
+      // Drop.co RVM disposition polling. Sit alongside the cadence
+      // sweep, gated by a per-token minimum interval (5 min) so a
+      // tick-on-every-5s loop doesn't hammer Drop's API. The
+      // function self-rate-limits by the action's lastPolledAt
+      // field, so we can call it on every tick without paging
+      // through the same tokens repeatedly.
+      try {
+        const dropPoll = await pollOutboundRvmDispositions({ limit: 25 });
+        if (dropPoll.polled > 0) {
+          runtime.logger.info("outbound.worker.drop_disposition_poll", {
+            polled: dropPoll.polled,
+            terminal: dropPoll.terminal,
+            markedDnc: dropPoll.markedDnc,
+          });
+        }
+      } catch (error) {
+        runtime.logger.error("outbound.worker.drop_disposition_poll_failed", {
+          error: error.message,
+        });
+      }
+
       const result = await processOutboundEventBatch({
         workerName: `${config.serviceName}-worker`,
         maxAttempts,
         maxCount: batchSize,
       });
       workerState.lastCompletedAt = new Date();
-      workerState.lastResult = result;
+      workerState.lastResult = {
+        ...result,
+        counterCadence: counterCadenceResult,
+        counterRvmPoll: counterRvmPollResult,
+      };
       workerState.lastError = null;
       if (result.processed > 0) {
         runtime.logger.info("outbound.worker.batch", {
           processed: result.processed,
           handled: result.handled,
         });
+        const failedRuns = (result.results || []).filter((entry) => entry?.claimed && !entry?.handled);
+        for (const failedRun of failedRuns) {
+          runtime.logger.error("outbound.worker.event_failed", {
+            eventId: failedRun.eventId || null,
+            error: failedRun.error || "unknown-error",
+          });
+        }
+        const callfireRuns = (result.results || [])
+          .map((entry) => entry?.handlerResult)
+          .filter((entry) => entry?.channel === "callfire" && entry?.callfireSummary);
+        for (const run of callfireRuns) {
+          runtime.logger.info("outbound.callfire.summary", {
+            mode: run.mode,
+            selected: run.selected,
+            sent: run.sent,
+            failed: run.failed,
+            skipped: run.skipped,
+            ...run.callfireSummary,
+          });
+        }
       }
     } catch (error) {
       workerState.lastCompletedAt = new Date();
@@ -109,7 +348,7 @@ function startOutboundWorker({ config, runtime, workerState }) {
     workerState.timer.unref();
   }
 
-  void tick();
+  await tick();
 }
 
 async function startServer() {
@@ -122,12 +361,16 @@ async function startServer() {
   const runtime = await initializeServiceRuntime(config);
   const workerState = createWorkerState();
   const requireInternalAccess = buildInternalAccessMiddleware(config);
+  const requireHealthAccess = buildHealthAccessMiddleware(config);
+  runtime.installSignalHandlers();
 
   const app = express();
-  app.use(cors());
-  app.use(express.json());
+  app.set("trust proxy", "loopback");
+  app.use(cors({ origin: getCorsOriginResolver(), credentials: true }));
+  app.use(express.json({ limit: "1mb", verify: captureRawBody }));
+  app.use(express.urlencoded({ extended: true, limit: "1mb", verify: captureRawBody }));
 
-  app.get("/health", (_req, res) => {
+  app.get("/health", requireHealthAccess, (_req, res) => {
     res.json({
       ...buildServiceHealth(config, runtime.getMongoState()),
       worker: {
@@ -137,6 +380,33 @@ async function startServer() {
         lastStartedAt: workerState.lastStartedAt,
         lastCompletedAt: workerState.lastCompletedAt,
         lastError: workerState.lastError,
+        scheduledBlasts: buildScheduledBlastRuntimeSnapshot(
+          config.scheduledBlasts,
+          workerState.scheduledBlasts,
+        ),
+        counterCadence: workerState.counterCadence,
+      },
+    });
+  });
+
+  app.get("/status", requireHealthAccess, (_req, res) => {
+    res.json({
+      ok: true,
+      legacyRoute: true,
+      service: config.serviceName,
+      ...buildServiceHealth(config, runtime.getMongoState()),
+      worker: {
+        enabled: workerState.enabled,
+        running: workerState.running,
+        intervalMs: workerState.intervalMs,
+        lastStartedAt: workerState.lastStartedAt,
+        lastCompletedAt: workerState.lastCompletedAt,
+        lastError: workerState.lastError,
+        scheduledBlasts: buildScheduledBlastRuntimeSnapshot(
+          config.scheduledBlasts,
+          workerState.scheduledBlasts,
+        ),
+        counterCadence: workerState.counterCadence,
       },
     });
   });
@@ -152,9 +422,87 @@ async function startServer() {
         lastCompletedAt: workerState.lastCompletedAt,
         lastResult: workerState.lastResult,
         lastError: workerState.lastError,
+        scheduledBlasts: buildScheduledBlastRuntimeSnapshot(
+          config.scheduledBlasts,
+          workerState.scheduledBlasts,
+        ),
+        counterCadence: workerState.counterCadence,
       },
     });
   });
+
+  app.get("/api/outbound/blasts/runtime", requireInternalAccess, (_req, res) => {
+    res.json({
+      ok: true,
+      scheduledBlasts: buildScheduledBlastRuntimeSnapshot(
+        config.scheduledBlasts,
+        workerState.scheduledBlasts,
+      ),
+    });
+  });
+
+  app.post("/api/outbound/blasts/preview", requireInternalAccess, asyncHandler(async (req, res) => {
+    const result = await runScheduledBlastSweep({
+      config: config.scheduledBlasts,
+      sourceService: config.serviceName,
+      domains: req.body?.domains || req.body?.domain || null,
+      forceChannel: req.body?.channel || req.body?.forceChannel || null,
+      now: req.body?.now ? new Date(req.body.now) : new Date(),
+      previewOnly: true,
+      ignoreScheduleWindow: true,
+      maxAudience: req.body?.maxAudience || null,
+    });
+
+    res.json({
+      ok: true,
+      ...compactBlastResult(result),
+    });
+  }));
+
+  app.post("/api/outbound/blasts/run", requireInternalAccess, asyncHandler(async (req, res) => {
+    const result = await runScheduledBlastSweep({
+      config: config.scheduledBlasts,
+      sourceService: config.serviceName,
+      domains: req.body?.domains || req.body?.domain || null,
+      forceChannel: req.body?.channel || req.body?.forceChannel || null,
+      now: req.body?.now ? new Date(req.body.now) : new Date(),
+      previewOnly: false,
+      ignoreScheduleWindow: req.body?.respectScheduleWindow ? false : true,
+      maxAudience: req.body?.maxAudience || null,
+    });
+
+    workerState.scheduledBlasts.lastCheckedAt = new Date();
+    workerState.scheduledBlasts.lastResult = compactBlastResult(result);
+    workerState.scheduledBlasts.lastError = null;
+
+    res.status(result.queuedCount > 0 ? 202 : 200).json({
+      ok: true,
+      ...compactBlastResult(result),
+    });
+  }));
+
+  app.post("/api/outbound/counter-cadence/run", requireInternalAccess, asyncHandler(async (req, res) => {
+    const result = await runCounterCadenceSweep({
+      domain: req.body?.domain || null,
+      domains: Array.isArray(req.body?.domains) ? req.body.domains : null,
+      now: req.body?.now ? new Date(req.body.now) : new Date(),
+      maxDispatches: req.body?.maxDispatches || req.body?.limit || 25,
+      scanLimit: req.body?.scanLimit || undefined,
+      dryRun: Boolean(req.body?.dryRun),
+      forceDaily: Boolean(req.body?.forceDaily),
+      sourceService: `${config.serviceName}-manual`,
+      logger: runtime.logger,
+    });
+
+    workerState.counterCadence.lastCheckedAt = result.checkedAt || new Date();
+    workerState.counterCadence.lastResult = result;
+    workerState.counterCadence.lastError = null;
+
+    res.status(result.sent > 0 ? 202 : 200).json({
+      ok: true,
+      ...result,
+    });
+  }));
 
   app.post("/api/outbound/demo", requireInternalAccess, asyncHandler(async (req, res) => {
     const result = await publishDemoEvent("outbound", config.serviceName, req.body || {});
@@ -180,6 +528,25 @@ async function startServer() {
       aggregateId,
       dedupeKey,
       payload,
+    });
+
+    await recordWorkflowStage({
+      domain: payload?.domain || "TAG",
+      family: "dispatch",
+      subtype: eventType.replace(/^outbound\./, "").replace(/\.requested$/, ""),
+      stage: "requested",
+      aggregateType: payload?.dispatchListId ? "dispatch-list" : "outbound",
+      aggregateId: String(payload?.dispatchListId || aggregateId),
+      caseId: payload?.caseId != null ? Number(payload.caseId) : null,
+      sourceService: config.serviceName,
+      summary: `${eventType} accepted`,
+      payload: {
+        eventType,
+        eventId: String(result.event._id),
+        channel: payload?.channel || null,
+        mode: payload?.mode || null,
+        dispatchListId: payload?.dispatchListId || null,
+      },
     });
 
     return res.status(202).json({
@@ -212,6 +579,15 @@ async function startServer() {
     return acceptOutboundEvent(res, {
       eventType: OUTBOUND_EVENT_TYPES.RVM_ROUND_REQUESTED,
       aggregateId: req.body?.domain || "outbound-rvm-round",
+      dedupeKey: req.body?.dedupeKey || null,
+      payload: req.body || {},
+    });
+  }));
+
+  app.post("/api/outbound/cadence/cx-round", requireInternalAccess, asyncHandler(async (req, res) => {
+    return acceptOutboundEvent(res, {
+      eventType: OUTBOUND_EVENT_TYPES.CX_ROUND_REQUESTED,
+      aggregateId: req.body?.domain || "outbound-cx-round",
       dedupeKey: req.body?.dedupeKey || null,
       payload: req.body || {},
     });
@@ -262,6 +638,47 @@ async function startServer() {
     });
   }));
 
+  app.post("/api/outbound/manual/callfire", requireInternalAccess, asyncHandler(async (req, res) => {
+    return acceptOutboundEvent(res, {
+      eventType: OUTBOUND_EVENT_TYPES.CALLFIRE_MANUAL_REQUESTED,
+      aggregateId: req.body?.domain || "outbound-callfire-manual",
+      dedupeKey: req.body?.dedupeKey || null,
+      payload: req.body || {},
+    });
+  }));
+
+  app.post("/api/outbound/test/callfire", requireInternalAccess, asyncHandler(async (req, res) => {
+    const result = await sendOutboundCallFireDial({
+      toPhone: req.body?.toPhone,
+      name: req.body?.name || "Codex Test Dial",
+      caseId: req.body?.caseId != null ? Number(req.body.caseId) : null,
+      broadcastName: req.body?.broadcastName || null,
+      messageText:
+        req.body?.messageText ||
+        "Hello, this is a test outbound dial from Tag Contact Bridge Parallel.",
+    });
+
+    await recordWorkflowStage({
+      domain: req.body?.domain || "TAG",
+      family: "dispatch",
+      subtype: "callfire-test",
+      stage: result.ok ? "completed" : "failed",
+      aggregateType: "outbound",
+      aggregateId: String(result.broadcastId || req.body?.toPhone || "callfire-test"),
+      caseId: req.body?.caseId != null ? Number(req.body.caseId) : null,
+      sourceService: config.serviceName,
+      summary: result.ok
+        ? `CallFire test dial sent to ${req.body?.toPhone || ""}`.trim()
+        : "CallFire test dial failed",
+      result,
+    });
+
+    res.status(result.ok ? 200 : 500).json({
+      ok: result.ok,
+      ...result,
+    });
+  }));
+
   app.post("/api/outbound/process-next", requireInternalAccess, asyncHandler(async (_req, res) => {
     const result = await processNextOutboundEvent({
       workerName: `${config.serviceName}-manual`,
@@ -279,8 +696,67 @@ async function startServer() {
     res.json({ ok: true, ...result });
   }));
 
+  app.post("/drop-webhook", asyncHandler(async (req, res) => {
+    const payload = req.body || {};
+    const caseId = Number(payload.C1 || payload.caseId);
+    const statusCode = payload.DropStatusCode || payload.statusCode || null;
+    const statusMessage = payload.DropStatusMessage || payload.statusMessage || null;
+    const domain = String(
+      payload.domain || payload.company || req.query.domain || "TAG",
+    ).trim().toUpperCase();
+
+    if (Number.isFinite(caseId) && caseId > 0) {
+      const update = {
+        lastRvmStatus: statusMessage,
+        lastRvmStatusCode: statusCode,
+        lastRvmStatusAt: new Date(),
+      };
+
+      if (String(statusMessage || "").toLowerCase().includes("callback")) {
+        update.day0Connected = true;
+        update.day0ConnectedAt = new Date();
+      }
+
+      await upsertLeadCadence(domain, caseId, update);
+      await recordWorkflowStage({
+        domain,
+        family: "dispatch",
+        subtype: "drop-webhook",
+        stage: "observed",
+        aggregateType: "lead-cadence",
+        aggregateId: String(caseId),
+        caseId,
+        sourceService: config.serviceName,
+        summary: `Drop webhook observed: ${statusMessage || statusCode || "unknown"}`,
+        payload: {
+          statusCode,
+          statusMessage,
+        },
+      });
+    } else {
+      runtime.logger.warn("drop.webhook.missing_case", {
+        statusCode,
+        statusMessage,
+      });
+    }
+
+    res.status(200).json({ ok: true, legacyRoute: true });
+  }));
+
+  app.get("/drop-balance", requireInternalAccess, asyncHandler(async (req, res) => {
+    const domain = String(req.query.domain || "TAG").trim().toUpperCase();
+    const client = createDropClient(domain);
+    const result = await client.checkBalance();
+    res.json({
+      ok: true,
+      legacyRoute: true,
+      domain,
+      ...result,
+    });
+  }));
+
   if (config.outboundWorker.enabled) {
-    startOutboundWorker({ config, runtime, workerState });
+    await startOutboundWorker({ config, runtime, workerState });
   } else {
     workerState.enabled = false;
     runtime.logger.warn("outbound.worker.disabled");
@@ -296,8 +772,8 @@ async function startServer() {
     });
   });
 
-  const server = app.listen(config.port, () => {
-    runtime.logger.info("listening", { port: config.port });
+  const server = app.listen(config.port, config.bindHost, () => {
+    runtime.logger.info("listening", { host: config.bindHost, port: config.port });
   });
 
   function stopWorker() {
@@ -307,7 +783,33 @@ async function startServer() {
     }
   }
 
+  // Block shutdown until any in-flight tick is done OR we hit the
+  // hard ceiling. Without this, mongo disconnect (later in the
+  // shutdown chain) lands while a tick is mid-write â€” partial state
+  // results: an action flipped to `requested` but never to
+  // `completed`/`failed`, channelDnc set without the corresponding
+  // workflow stage, etc. The 25s ceiling is conservative against
+  // NSSM's default 30s SIGKILL window â€” leaves ~5s for the rest of
+  // the cleanup chain.
+  async function waitForWorkerIdle(maxWaitMs = 25_000) {
+    const deadline = Date.now() + maxWaitMs;
+    while (workerState.running && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+    if (workerState.running) {
+      runtime.logger.warn("outbound.worker.shutdown.tick_timeout", {
+        waitedMs: maxWaitMs,
+      });
+    }
+  }
+
   server.on("close", stopWorker);
+
+  runtime.registerCleanup("outbound-server", () => new Promise((resolve) => server.close(() => resolve())));
+  runtime.registerCleanup("outbound-worker", async () => {
+    stopWorker();
+    await waitForWorkerIdle();
+  });
 
   return server;
 }
