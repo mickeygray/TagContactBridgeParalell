@@ -2,9 +2,11 @@
 
 const express = require("express");
 const {
+  backfillCallLogSourceFromLeadCadence,
   backfillLegacyMetricsRange,
   buildSpendSyncRead,
   buildVendorCallRows,
+  computeCxRecordingHourlyWindow,
   ignoreMetricsAttributionReviewItem,
   buildVendorDailySummary,
   buildVendorLeadRows,
@@ -15,6 +17,7 @@ const {
   getMailerConfigState,
   reopenMetricsAttributionReviewItem,
   resolveMetricsAttributionReviewItem,
+  runCxRecordingHourly,
   runVendorNightlyEmail,
   syncLegacyAttributionMaps,
   syncLegacyMetricsMirror,
@@ -166,6 +169,90 @@ function createMetricsRouter(auth, spendSyncRuntime) {
       return res.status(error.status || 500).json(toErrorResponse(error));
     }
   });
+
+  // On-demand source-name backfill — stamps CallLog rows that have a
+  // caseId but no sourceName with the case's LeadCadence attribution.
+  // Same routine the nightly close pass runs automatically; this is the
+  // operator escape hatch (e.g. "I just placed CX calls to LD leads and
+  // want them visible in the live metrics workspace now").
+  router.post(
+    "/vendor-nightly/source-backfill/:domain",
+    auth.requireAuth,
+    auth.requireAdmin,
+    async (req, res) => {
+      try {
+        const result = await backfillCallLogSourceFromLeadCadence({
+          domain: req.params.domain,
+          date: req.body?.date || req.query.date,
+          timezone: req.body?.timezone || req.query.timezone,
+          limit: req.body?.limit,
+        });
+        return res.json({ ok: true, result });
+      } catch (error) {
+        return res.status(error.status || 500).json(toErrorResponse(error));
+      }
+    },
+  );
+
+  // CX recording hourly poller — on-demand. With no body, fires for
+  // "now" (computes the previous :45-to-:45 window automatically).
+  // With { windowStart, windowEnd } in the body, runs that explicit
+  // window — used for historical backfill of a single hour slot.
+  // Optional { domains: ["TAG"] } scopes which tenants to process.
+  //
+  // The hourly sweep already runs this automatically; this route is
+  // the operator handle for "re-run the 14:00 window because the
+  // first attempt 400'd" kind of situations.
+  router.post(
+    "/cx-recording/run",
+    auth.requireAuth,
+    auth.requireAdmin,
+    async (req, res) => {
+      try {
+        const result = await runCxRecordingHourly({
+          fireTime: req.body?.fireTime ? new Date(req.body.fireTime) : new Date(),
+          windowStart: req.body?.windowStart ? new Date(req.body.windowStart) : null,
+          windowEnd: req.body?.windowEnd ? new Date(req.body.windowEnd) : null,
+          domains: Array.isArray(req.body?.domains) ? req.body.domains : undefined,
+          maxRowsPerDomain: req.body?.maxRowsPerDomain,
+        });
+        return res.json({ ok: true, result });
+      } catch (error) {
+        return res.status(error.status || 500).json(toErrorResponse(error));
+      }
+    },
+  );
+
+  // Read-only preview of the window the next CX-recording tick would
+  // pull. Useful for "is the cron lining up the way I expect?"
+  router.get(
+    "/cx-recording/preview-window",
+    auth.requireAuth,
+    auth.requireAdmin,
+    async (req, res) => {
+      try {
+        const fireTime = req.query.fireTime
+          ? new Date(req.query.fireTime)
+          : new Date();
+        const window = computeCxRecordingHourlyWindow(fireTime);
+        return res.json({
+          ok: true,
+          result: {
+            fireTime: window.fireTime.toISOString(),
+            hourBoundary: window.hourBoundary.toISOString(),
+            windowStart: window.windowStart.toISOString(),
+            windowEnd: window.windowEnd.toISOString(),
+            windowDurationMinutes:
+              (window.windowEnd - window.windowStart) / 60_000,
+            youngestCallAgeMinutesAtFire:
+              (window.fireTime - window.windowEnd) / 60_000,
+          },
+        });
+      } catch (error) {
+        return res.status(error.status || 500).json(toErrorResponse(error));
+      }
+    },
+  );
 
   router.get("/mailer-config/status", auth.requireAuth, auth.requireAdmin, async (_req, res) => {
     return res.json({

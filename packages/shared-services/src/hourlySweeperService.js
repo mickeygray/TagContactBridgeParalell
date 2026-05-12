@@ -29,6 +29,9 @@ const {
   runHourlyCallLogHygiene,
 } = require("./hourlyCallLogHygieneService");
 const {
+  runCxRecordingHourly,
+} = require("./cxRecordingHourlyService");
+const {
   reconcileUnattributedSessions,
 } = require("./ringcentralReconcileService");
 const {
@@ -853,6 +856,22 @@ async function runHourlySweep({
             preferLegacyContactActivities: metricsRefreshPreferLegacyContactActivities,
           })
         : { skipped: true, reason: "disabled" },
+      // CX recording archive — pulls the previous :45-to-:45 hour of
+      // CX-platform calls from RingCX's interaction-metadata, downloads
+      // the WAV per segment, and hands off to the existing archive →
+      // transcription → scoring pipeline. Gated by
+      // RINGCX_RECORDING_ENABLED (default false until RC activates
+      // recording on the account). Bottom-of-window is exactly 15
+      // minutes before this tick fires, which matches RingCX's stated
+      // post-call media-readiness threshold. Idempotent: rows already
+      // at terminal recordingArchive.status are skipped.
+      cxRecordingHourly: await runCxRecordingHourly({
+        fireTime: new Date(),
+        logger,
+      }).catch((error) => ({
+        ok: false,
+        error: error.message,
+      })),
       leadCadenceEnforcement: leadCadenceEnforcementEnabled
         ? await runLeadCadenceEnforcement({
             logger,

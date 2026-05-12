@@ -7,6 +7,7 @@ const {
   createCallrailClient,
   createGoogleDriveClient,
   createRingCentralClient,
+  createRingcxVoiceClient,
 } = require("../../shared-integrations/src");
 const { CallLog } = require("../../shared-models/src");
 const {
@@ -185,7 +186,188 @@ function buildRetryError(message) {
 }
 
 function buildProviderOrder(callLog = {}) {
+  const platform = String(callLog?.platform || "").trim().toLowerCase();
+  // CX-platform calls (placed/answered through the RingCX dialer) have
+  // their audio in the RingCX recordings store — neither CallRail nor
+  // RingCentral EX will have it. Try ringcx first; fall through to the
+  // others as defensive backups in case the CX-vs-EX stamp was wrong.
+  if (platform === "cx") return ["ringcx", "ringcentral", "callrail"];
   return ["callrail", "ringcentral"];
+}
+
+// Lazy singleton for the RingCX client. Reused across many calls
+// within a single sweep tick (so the bearer token cache works).
+let _ringcxClient = null;
+function getRingcxClient() {
+  if (!_ringcxClient) {
+    try {
+      _ringcxClient = createRingcxVoiceClient();
+    } catch (error) {
+      // Missing env → recording resolver is a no-op rather than a crash.
+      return null;
+    }
+  }
+  return _ringcxClient;
+}
+
+function isRingcxRecordingEnabled() {
+  const raw = String(process.env.RINGCX_RECORDING_ENABLED || "").trim().toLowerCase();
+  return raw === "true" || raw === "1" || raw === "yes";
+}
+
+function pickBestSegmentForCallLog(segments = [], callLog = {}) {
+  // Per RingCX, an interaction breaks into N segments (one per agent /
+  // IVR / bot leg). The recording lives on the longest agent segment
+  // for outbound dialer calls; for inbound queue-routed calls, the
+  // segment whose agent matches our callLog.agentName / extensionId is
+  // the canonical one. Pick by descending segmentDuration as a safe
+  // default — the longest segment is the actual customer-agent leg in
+  // practice. Filter out segments with no recording URL.
+  const candidates = (Array.isArray(segments) ? segments : []).filter((seg) => {
+    if (!seg) return false;
+    const dialogId = seg.dialogId || seg.dialogID || seg.dialog_id;
+    const segmentId = seg.segmentID || seg.segmentId || seg.segment_id;
+    return Boolean(dialogId && segmentId);
+  });
+  if (candidates.length === 0) return null;
+  if (candidates.length === 1) return candidates[0];
+  const targetExt = String(callLog?.extensionId || "").trim();
+  const targetAgent = normalizeName(callLog?.agentName);
+  function score(seg) {
+    let s = Number(seg.segmentDuration || seg.segmentDurationMs || 0);
+    if (targetExt && String(seg.segmentAgentExtensionId || "").trim() === targetExt) s += 1e9;
+    if (targetAgent && normalizeName(seg.segmentAgentName) === targetAgent) s += 1e8;
+    if (seg.segmentRecordingURL) s += 1e6;
+    return s;
+  }
+  return [...candidates].sort((a, b) => score(b) - score(a))[0];
+}
+
+async function resolveRingcxRecording(callLog, metadataCache = null) {
+  if (!isRingcxRecordingEnabled()) {
+    return { artifact: null, reason: "ringcx-recording-disabled" };
+  }
+  const client = getRingcxClient();
+  if (!client) {
+    return { artifact: null, reason: "ringcx-client-unconfigured" };
+  }
+  const uii = String(callLog?.telephonySessionId || "").trim();
+  if (!uii) return { artifact: null, reason: "missing-uii" };
+
+  // Prefer the pre-fetched batch metadata when available (one POST per
+  // hour-window, shared across all rows in the sweep). Falls back to a
+  // per-call metadata fetch when the cache miss happens — this path is
+  // rate-limited (2 calls/min) so a hot loop would hit the limit fast.
+  let segments = null;
+  if (metadataCache?.byUii && metadataCache.byUii instanceof Map) {
+    const hit = metadataCache.byUii.get(uii);
+    if (Array.isArray(hit)) segments = hit;
+  }
+
+  if (!segments) {
+    // Single-row fallback. Scope the window narrowly around the call's
+    // start time so the metadata POST returns a tractable result set.
+    const start = callLog.callStartTime
+      ? new Date(callLog.callStartTime)
+      : new Date(Date.now() - 2 * 60 * 60 * 1000);
+    const end = callLog.callEndTime
+      ? new Date(new Date(callLog.callEndTime).getTime() + 5 * 60 * 1000)
+      : new Date(start.getTime() + 2 * 60 * 60 * 1000);
+    try {
+      const metadata = await client.fetchInteractionMetadata({
+        startTime: new Date(start.getTime() - 60 * 1000),
+        endTime: end,
+      });
+      segments = extractSegmentsForUii(metadata, uii);
+    } catch (error) {
+      return { artifact: null, reason: "ringcx-metadata-failed", error: error.message };
+    }
+  }
+
+  const segment = pickBestSegmentForCallLog(segments, callLog);
+  if (!segment) {
+    return { artifact: null, reason: "no-ringcx-segment-with-recording" };
+  }
+  const dialogId = segment.dialogId || segment.dialogID || segment.dialog_id;
+  const segmentId = segment.segmentID || segment.segmentId || segment.segment_id;
+  if (!dialogId || !segmentId) {
+    return { artifact: null, reason: "ringcx-segment-missing-ids" };
+  }
+
+  let download;
+  try {
+    download = await client.downloadRecordingBySegment({ dialogId, segmentId });
+  } catch (error) {
+    return { artifact: null, reason: "ringcx-download-failed", error: error.message };
+  }
+
+  return {
+    artifact: {
+      provider: "ringcx",
+      sourceUri: `cx://accounts/sub/recordings/dialogs/${dialogId}/segments/${segmentId}`,
+      mimeType: download.mimeType || "audio/wav",
+      buffer: download.buffer,
+      finalUrl: segment.segmentRecordingURL || null,
+      recordingDuration: Number(segment.segmentDuration || 0) || null,
+      providerMetadata: {
+        dialogId,
+        segmentId,
+        interactionId: segment.interactionId || uii,
+        segmentAgentId: segment.segmentAgentId || null,
+        segmentAgentGroupId: segment.segmentAgentGroupId || null,
+        segmentDurationMs: Number(segment.segmentDuration || 0) || null,
+        interactionDirection: segment.interactionDirection || null,
+      },
+    },
+  };
+}
+
+// Walks the metadata response (whose top-level shape isn't fully
+// pinned down in the docs — different docs show {records:[]} vs
+// {segments:[]} vs raw arrays) and returns segments matching the UII.
+function extractSegmentsForUii(metadata, uii) {
+  const target = String(uii || "").trim();
+  if (!target) return [];
+  const rows = Array.isArray(metadata)
+    ? metadata
+    : Array.isArray(metadata?.records)
+      ? metadata.records
+      : Array.isArray(metadata?.segments)
+        ? metadata.segments
+        : Array.isArray(metadata?.data)
+          ? metadata.data
+          : [];
+  return rows.filter((row) => {
+    const candidate = String(
+      row?.interactionId || row?.uii || row?.UII || row?.dialogId || "",
+    ).trim();
+    return candidate === target;
+  });
+}
+
+// Build a UII → segments map from one bulk metadata response. Caller
+// passes this into resolveRingcxRecording via the metadataCache option
+// so a sweep tick of N rows triggers exactly one metadata POST.
+function buildRingcxMetadataCache(metadata) {
+  const byUii = new Map();
+  const rows = Array.isArray(metadata)
+    ? metadata
+    : Array.isArray(metadata?.records)
+      ? metadata.records
+      : Array.isArray(metadata?.segments)
+        ? metadata.segments
+        : Array.isArray(metadata?.data)
+          ? metadata.data
+          : [];
+  for (const row of rows) {
+    const uii = String(
+      row?.interactionId || row?.uii || row?.UII || "",
+    ).trim();
+    if (!uii) continue;
+    if (!byUii.has(uii)) byUii.set(uii, []);
+    byUii.get(uii).push(row);
+  }
+  return { byUii, totalSegments: rows.length };
 }
 
 async function readBinaryResponse(response) {
@@ -414,12 +596,39 @@ async function resolveRingcentralRecording(callLog, rcRecord = null) {
   };
 }
 
-async function resolveRecordingArtifact(callLog, rcRecord = null, logger = null) {
+async function resolveRecordingArtifact(callLog, rcRecord = null, logger = null, options = {}) {
   const providerOrder = buildProviderOrder(callLog);
   let mutableRecord = rcRecord || null;
   let lastError = null;
+  const ringcxMetadataCache = options.ringcxMetadataCache || null;
 
   for (const provider of providerOrder) {
+    if (provider === "ringcx") {
+      try {
+        const result = await resolveRingcxRecording(callLog, ringcxMetadataCache);
+        if (result?.artifact) {
+          return { artifact: result.artifact, rcRecord: mutableRecord, providerOrder };
+        }
+        // No artifact yet — log the reason for observability and fall
+        // through to the next provider (in case the EX or CallRail path
+        // happens to have a copy).
+        if (result?.reason && result.reason !== "ringcx-recording-disabled") {
+          logger?.warn?.("recording_archive.ringcx_missed", {
+            telephonySessionId: callLog.telephonySessionId,
+            reason: result.reason,
+            error: result.error || null,
+          });
+        }
+      } catch (error) {
+        lastError = error;
+        logger?.warn?.("recording_archive.ringcx_failed", {
+          telephonySessionId: callLog.telephonySessionId,
+          error: error.message,
+        });
+      }
+      continue;
+    }
+
     if (provider === "callrail") {
       try {
         const artifact = await resolveCallrailRecording(callLog);
@@ -828,6 +1037,7 @@ async function processCallRecordingArchive({
   domain,
   telephonySessionId,
   logger = null,
+  ringcxMetadataCache = null,
 } = {}) {
   const normalizedDomain = normalizeDomain(domain);
   const config = getArchiveConfig();
@@ -908,7 +1118,12 @@ async function processCallRecordingArchive({
       }
     }
 
-    const recordingResolution = await resolveRecordingArtifact(callLog, rcRecord, logger);
+    const recordingResolution = await resolveRecordingArtifact(
+      callLog,
+      rcRecord,
+      logger,
+      { ringcxMetadataCache },
+    );
     const artifact = recordingResolution.artifact;
     rcRecord = recordingResolution.rcRecord || rcRecord;
     if (
@@ -1115,7 +1330,10 @@ async function processCallRecordingArchive({
 
 module.exports = {
   isRecordingArchiveConfigured,
+  isRingcxRecordingEnabled,
   isTerminalArchiveStatus,
+  buildRingcxMetadataCache,
   processCallRecordingArchive,
   queueCallRecordingArchiveJob,
+  resolveRingcxRecording,
 };

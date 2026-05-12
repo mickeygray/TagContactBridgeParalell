@@ -25,6 +25,9 @@ const {
   classifyVendorFamily,
 } = require("./vendorDailySummaryService");
 const { buildTimezoneDateWindow } = require("./timezoneDateWindowService");
+const {
+  backfillCallLogSourceFromLeadCadence,
+} = require("./callLogSourceBackfillService");
 
 const DEFAULT_TIMEZONE = "America/Los_Angeles";
 const DEFAULT_MAX_CALL_ROWS = 10000;
@@ -224,6 +227,7 @@ async function runVendorNightlyClosePass(domain, options = {}) {
     domain: normalizedDomain,
     startedAt: new Date(),
     callLogHygiene: null,
+    sourceBackfill: null,
     paymentReconcile: null,
     errors: [],
   };
@@ -251,6 +255,34 @@ async function runVendorNightlyClosePass(domain, options = {}) {
       step: "call-log-hygiene",
       error: error.message,
     });
+  }
+
+  // Source-name backfill: stamps sourceName/sourceChannel on CallLog
+  // rows that have caseId but no source attribution yet — most
+  // commonly CX-cadence outbound stubs to LD/affiliate/social leads,
+  // where the EX resolver never fires. Without this pass, those calls
+  // are invisible to the vendor pipeline (classifier returns "Other"
+  // for null sourceName). Runs against the same date window as the
+  // email so today's CX calls show up in tonight's CSVs.
+  if (options.performSourceBackfill !== false) {
+    try {
+      const dateKey = String(
+        options.date ||
+          formatDateKey(options.now || new Date(), options.timezone || DEFAULT_TIMEZONE),
+      ).trim();
+      result.sourceBackfill = await backfillCallLogSourceFromLeadCadence({
+        domain: normalizedDomain,
+        date: dateKey,
+        timezone: options.timezone || DEFAULT_TIMEZONE,
+        limit: Math.min(Math.max(Number(options.sourceBackfillLimit) || 5000, 1), 50000),
+        logger: options.logger || null,
+      });
+    } catch (error) {
+      result.errors.push({
+        step: "source-backfill",
+        error: error.message,
+      });
+    }
   }
 
   try {
@@ -809,12 +841,23 @@ function buildAttachmentPayload(filename, csv, rowCount) {
 
 async function sendVendorNightlyEmail(domain, report, options = {}) {
   const company = getCompanyConfig(domain);
-  const defaultRecipients = splitRecipients(
+  // 2026-05-12 — pulled the broader distro back to mgray + manderson only
+  // while the LD-lead / LD-call counters get re-plumbed. Once the call-
+  // attribution backfill is verified and the daily CSVs reconcile, the
+  // env-overrides below can expand the list again (NIGHTLY_CLOSE_LEAD_DATA_RECIPIENTS
+  // takes precedence, then options.recipients on a per-call basis).
+  const DEFAULT_VENDOR_RECIPIENTS = Object.freeze([
+    "mgray@taxadvocategroup.com",
+    "manderson@taxadvocategroup.com",
+  ]);
+  const envRecipients = splitRecipients(
     process.env.NIGHTLY_CLOSE_LEAD_DATA_RECIPIENTS ||
       process.env.RB_REPORT_TO ||
-      process.env.ADMIN_EMAIL ||
-      "mgray@taxadvocategroup.com",
+      "",
   );
+  const defaultRecipients = envRecipients.length > 0
+    ? envRecipients
+    : [...DEFAULT_VENDOR_RECIPIENTS];
   const recipients = uniqueStrings(
     Array.isArray(options.recipients) && options.recipients.length > 0
       ? options.recipients

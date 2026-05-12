@@ -1,0 +1,35 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "control-plane",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "dev:control-plane"],
+      "port": 5001
+    },
+    {
+      "name": "inbound-gateway",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "dev:inbound"],
+      "port": 4001
+    },
+    {
+      "name": "outbound-gateway",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "dev:outbound"],
+      "port": 4002
+    },
+    {
+      "name": "ringcentral-cx",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "dev:ring"],
+      "port": 6101
+    },
+    {
+      "name": "web-client",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "dev:web"],
+      "port": 3001
+    }
+  ]
+}

@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Loader2, CheckCircle2, MinusCircle, PhoneCall } from "lucide-react";
+import { Loader2, CheckCircle2, PhoneCall } from "lucide-react";
 import { api, ApiError } from "@/lib/api/client";
 import { queryKeys } from "@/lib/api/queries/keys";
 import { useSession } from "@/lib/auth/useSession";
@@ -84,27 +84,6 @@ export function CxAvailabilityToggle() {
     },
   });
 
-  const setUnavailable = useMutation({
-    mutationFn: () =>
-      api.post<{ ok: true; agent: AgentStateResponse["agent"] }>(
-        `/api/agents/${encodeURIComponent(extensionId)}/unavailable`,
-      ),
-    onSuccess: (response) => {
-      if (response?.agent) {
-        qc.setQueryData(queryKeys.agentState.detail(extensionId), {
-          ok: true,
-          agent: response.agent,
-        });
-      }
-      qc.invalidateQueries({ queryKey: queryKeys.agentState.detail(extensionId) });
-      qc.invalidateQueries({ queryKey: queryKeys.cx.all() });
-    },
-    onError: (err) => {
-      const msg = err instanceof ApiError ? err.message : (err as Error).message;
-      toast.error("Could not mark unavailable", { description: msg });
-    },
-  });
-
   if (!extensionId) return null;
 
   const data = stateQuery.data?.agent;
@@ -112,7 +91,7 @@ export function CxAvailabilityToggle() {
   const platformReady = user?.cxAuth?.oauthRequired === false || Boolean(user?.cxAuth?.isOAuthValidated);
   const cxAvailable = data?.cxRouting?.desiredAvailability === "available";
   const cxUnavailable = data?.cxRouting?.desiredAvailability === "unavailable";
-  const inFlight = setAvailable.isPending || setUnavailable.isPending;
+  const inFlight = setAvailable.isPending;
   const lockedByCall = TOGGLE_DISABLED_STATES.has(activityState);
   const isAvailable = activityState === "idle" && cxAvailable;
   const isUnavailable = activityState === "unavailable" || cxUnavailable;
@@ -142,7 +121,7 @@ export function CxAvailabilityToggle() {
                 : "bg-muted text-muted-foreground hover:bg-emerald-500/10 hover:text-emerald-600",
               inFlight && "opacity-60 cursor-wait",
             )}
-            title={platformReady ? "Mark yourself available for new leads" : "Connect RingCentral first"}
+            title={platformReady ? "Mark yourself available for CX leads" : "Connect RingCentral first"}
           >
             {setAvailable.isPending ? (
               <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -151,26 +130,14 @@ export function CxAvailabilityToggle() {
             )}
             Available
           </button>
-          <button
-            type="button"
-            disabled={inFlight || isUnavailable || !platformReady}
-            onClick={() => setUnavailable.mutate()}
-            className={cn(
-              "inline-flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium transition-colors",
-              isUnavailable
-                ? "bg-amber-500/10 text-amber-600 cursor-default"
-                : "bg-muted text-muted-foreground hover:bg-amber-500/10 hover:text-amber-600",
-              inFlight && "opacity-60 cursor-wait",
-            )}
-            title={platformReady ? "Pause new lead deliveries (you can still finish current calls)" : "Connect RingCentral first"}
-          >
-            {setUnavailable.isPending ? (
-              <Loader2 className="h-3.5 w-3.5 animate-spin" />
-            ) : (
-              <MinusCircle className="h-3.5 w-3.5" />
-            )}
-            Unavailable
-          </button>
+          {isUnavailable ? (
+            <span
+              className="inline-flex items-center gap-1.5 rounded-md bg-amber-500/10 px-2.5 py-1 text-xs font-medium text-amber-600"
+              title="Use the CX workspace controls to pick a timed break."
+            >
+              Break
+            </span>
+          ) : null}
         </>
       )}
     </div>

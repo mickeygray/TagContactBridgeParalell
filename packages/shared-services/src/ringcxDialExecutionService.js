@@ -27,6 +27,10 @@ const {
 const {
   getDisposition,
 } = require("./dispositionMapService");
+const {
+  applyCallEndedDailyStats,
+  normalizeDailyStats,
+} = require("./agentAvailabilityService");
 
 function normalizeDomain(value) {
   return String(value || "").trim().toUpperCase();
@@ -274,7 +278,17 @@ async function resolveAutoDispositionCandidates(client, context = {}) {
   };
 }
 
-async function markAgentAvailableAfterAutoDisposition(extensionId, { logger = null, waitMs = null } = {}) {
+function callIdentity(call = {}) {
+  return normalizeExternalId(
+    call?.telephonySessionId
+      || call?.sessionId
+      || call?.callSessionId
+      || call?.uii
+      || "",
+  );
+}
+
+async function markAgentAvailableAfterAutoDisposition(extensionId, { logger = null, waitMs = null, uii = null } = {}) {
   const normalizedExtensionId = String(extensionId || "").trim();
   if (!normalizedExtensionId) {
     return { skipped: true, reason: "missing-extension-id" };
@@ -283,11 +297,49 @@ async function markAgentAvailableAfterAutoDisposition(extensionId, { logger = nu
   if (Number.isFinite(effectiveWaitMs) && effectiveWaitMs > 0) await sleep(effectiveWaitMs);
   try {
     const now = new Date();
+    const existing = await agentStateRepository
+      .findAgentStateByExtensionId(normalizedExtensionId)
+      .catch(() => null);
+    const existingCall = existing?.currentCall && typeof existing.currentCall === "object"
+      ? existing.currentCall
+      : {};
+    const existingCallChannel = String(existingCall.channel || "").trim().toLowerCase();
+    const existingIdentity = callIdentity(existingCall);
+    const requestedIdentity = normalizeExternalId(uii);
+    if (
+      requestedIdentity
+      && existingIdentity
+      && existingIdentity !== requestedIdentity
+      && String(existing?.activePlatform || "").trim().toUpperCase() === "CX"
+    ) {
+      return {
+        skipped: true,
+        reason: "different-active-cx-call",
+        extensionId: normalizedExtensionId,
+        existingIdentity,
+        requestedIdentity,
+      };
+    }
+    if (existingCallChannel && existingCallChannel !== "cx" && String(existing?.activePlatform || "").trim().toUpperCase() !== "CX") {
+      return {
+        skipped: true,
+        reason: "active-non-cx-call",
+        extensionId: normalizedExtensionId,
+        existingCallChannel,
+      };
+    }
+    const beforeStats = normalizeDailyStats(existing?.dailyStats, now);
+    const dailyStats = applyCallEndedDailyStats(existing || {}, beforeStats, {
+      missed: false,
+      date: now,
+    });
     const updated = await agentStateRepository.updateAgentState(normalizedExtensionId, {
       activityState: "idle",
       status: "available",
       activePlatform: "none",
       currentCall: {},
+      dailyStats,
+      lastCallOutcome: "ringcx-auto-disposition",
       lastCallEndedAt: now,
       lastActivityAt: now,
       "cxRouting.enabled": true,
@@ -304,6 +356,8 @@ async function markAgentAvailableAfterAutoDisposition(extensionId, { logger = nu
       extensionId: normalizedExtensionId,
       activityState: updated?.activityState || null,
       status: updated?.status || null,
+      callEndCounted: Number(dailyStats.goodCalls || 0) > Number(beforeStats.goodCalls || 0)
+        || Number(dailyStats.badCalls || 0) > Number(beforeStats.badCalls || 0),
     };
   } catch (error) {
     logger?.warn?.("ringcx.autoDisposition.agentAvailable.failed", {
@@ -1231,7 +1285,7 @@ async function executeCxDispatchIntent(options = {}) {
       domain,
       family: "cx",
       subtype: "dial-request",
-      stage: "error",
+      stage: "failed",
       aggregateType: "cx-dial-queue",
       aggregateId: String(queueItemId || caseId || phone),
       caseId: Number.isFinite(caseId) ? caseId : null,
@@ -1400,6 +1454,7 @@ async function executeCxDispatchIntent(options = {}) {
             campaignId: publish.campaignId || null,
             dialGroupId: publish.dialGroupId || null,
             externId: publish.externId || null,
+            confirmedCall: Boolean(capturedUii),
             holdUntilDisposition: true,
           },
         }).catch((error) => ({
@@ -1465,7 +1520,7 @@ async function executeCxDispatchIntent(options = {}) {
           domain,
           family: "cx",
           subtype: "dial-request",
-          stage: "error",
+          stage: "failed",
           aggregateType: "cx-dial-queue",
           aggregateId: String(queueItemId || caseId || phone),
           caseId: Number.isFinite(caseId) ? caseId : null,
@@ -1601,6 +1656,7 @@ async function executeCxDispatchIntent(options = {}) {
           phone,
           ucqQueueItemId,
           callSessionId: response.callSessionId || null,
+          confirmedCall: true,
           holdUntilDisposition: true,
         },
       }).catch((error) => ({
@@ -1653,7 +1709,7 @@ async function executeCxDispatchIntent(options = {}) {
         domain,
         family: "cx",
         subtype: "dial-request",
-        stage: "error",
+        stage: "failed",
         aggregateType: "cx-dial-queue",
         aggregateId: String(queueItemId || caseId || phone),
         caseId: Number.isFinite(caseId) ? caseId : null,
@@ -1835,6 +1891,7 @@ async function executeCxHangupRequest(options = {}) {
       autoDispositionRelease = await markAgentAvailableAfterAutoDisposition(extensionId, {
         logger: options.logger || null,
         waitMs: 0,
+        uii,
       });
     }
     if (queueItemId) {
@@ -1957,6 +2014,7 @@ async function executeCxHangupRequest(options = {}) {
       autoDispositionRelease = await markAgentAvailableAfterAutoDisposition(extensionId, {
         logger: options.logger || null,
         waitMs: 0,
+        uii,
       });
     }
   }
@@ -1970,6 +2028,7 @@ async function executeCxHangupRequest(options = {}) {
     autoDispositionRelease = await markAgentAvailableAfterAutoDisposition(extensionId, {
       logger: options.logger || null,
       waitMs: 0,
+      uii,
     });
     if (!autoDispositionAccepted && dispositionStatus !== "accepted") {
       dispositionStatus = hangupStatus === "already-ended"

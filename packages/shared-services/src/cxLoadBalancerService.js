@@ -110,9 +110,10 @@ function resolveAgentQueuePolicy(agentState = null) {
   return resolveAccountQueuePolicy(null);
 }
 
-function resolveEffectiveMaxOpenAssignments(queuePolicy, queueFamily, configuredMax = null) {
+function resolveEffectiveMaxOpenAssignments(queuePolicy, queueFamily, configuredMax = null, options = {}) {
   const policyTarget = getQueueFamilyTargetOpen(queuePolicy, queueFamily);
   const configured = Number(configuredMax);
+  if (options.explicitPolicyTarget === true && policyTarget > 0) return Math.max(policyTarget, 1);
   if (policyTarget > 0 && Number.isFinite(configured) && configured > 0) {
     return Math.max(Math.min(policyTarget, Math.trunc(configured)), 1);
   }
@@ -222,6 +223,9 @@ function buildEligibility(agentState = null, options = {}) {
     queuePolicy,
     queueFamily,
     options.maxOpenAssignments,
+    {
+      explicitPolicyTarget: Boolean(agentState?.cxQueuePolicyExplicit),
+    },
   );
   if (!agentState) {
     return {

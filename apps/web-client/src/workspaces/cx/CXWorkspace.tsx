@@ -1,4 +1,5 @@
 import * as React from "react";
+import { useNavigate } from "react-router-dom";
 import {
   ChevronDown,
   ChevronUp,
@@ -45,9 +46,7 @@ import {
   useCxCaseInvoices,
   useCxCasePayments,
   useCxCaseTasks,
-  useCxCaseLogicsInfo,
   useCxCommLog,
-  useCxLogicsNotes,
   useCxDialAny,
   useCxDisposition,
   useCxEmail,
@@ -75,6 +74,7 @@ import type {
   CxLeadLookupMatch,
   CxLeadLookupSource,
   FreshLeadGate,
+  WorkflowRecord,
 } from "@/lib/api/types";
 import type { CommLogEntry } from "@/lib/api/queries/cx";
 import { KNOWN_DOMAINS, useDomainStore } from "@/lib/domain/domainStore";
@@ -122,10 +122,9 @@ type CaseForm = {
   spouseEmail: string;
   spouseCellPhone: string;
   spouseHomePhone: string;
-  // Legacy fields — still preserved for the lookup ladder + Logics
+  // Legacy source field — still preserved for the lookup ladder + Logics
   // create payload, but no longer surfaced in the identity strip.
   sourceName: string;
-  notes: string;
   caseId: string;
 };
 
@@ -149,45 +148,6 @@ function readString(record: Record<string, unknown>, ...keys: string[]) {
     if (typeof value === "string" && value.trim()) return value;
   }
   return "";
-}
-
-function unwrapMaybeJson(value: unknown): unknown {
-  if (typeof value !== "string") return value;
-  const trimmed = value.trim();
-  if (!trimmed) return "";
-  try {
-    return JSON.parse(trimmed);
-  } catch {
-    return value;
-  }
-}
-
-function extractLogicsFieldText(payload: unknown, ...keys: string[]): string {
-  const outer = asRecord(unwrapMaybeJson(payload));
-  const result = asRecord(unwrapMaybeJson(outer.result));
-  const candidates = [
-    result.data,
-    result.Data,
-    outer.data,
-    outer.Data,
-    payload,
-  ];
-  for (const candidate of candidates) {
-    const unwrapped = unwrapMaybeJson(candidate);
-    if (typeof unwrapped === "string" && unwrapped.trim()) return unwrapped;
-    const record = asRecord(unwrapped);
-    const value = readString(record, ...keys);
-    if (value) return value;
-  }
-  return "";
-}
-
-function extractLogicsNotesText(payload: unknown): string {
-  return extractLogicsFieldText(payload, "Notes", "notes", "CaseNotes", "caseNotes");
-}
-
-function extractLogicsActivityNotesText(payload: unknown): string {
-  return extractLogicsFieldText(payload, "ActivityNotes", "activityNotes");
 }
 
 function normalizeComparablePhone(value: string | null | undefined) {
@@ -364,7 +324,6 @@ function contactFromSearch(match: ClientSearchMatch): ContactContext {
 }
 
 type QueueFamilyKey = "fresh-day1" | "fresh-day2to10" | "aged" | "unassigned";
-type QueueAdvanceMode = "manual" | "auto";
 
 type QueueFamilyDisplay = {
   label: string;
@@ -373,7 +332,18 @@ type QueueFamilyDisplay = {
 };
 
 const AUTO_SERVE_DELAY_SECONDS = 5;
-const QUEUE_ADVANCE_MODE_STORAGE_KEY = "parallel.cx.queueAdvanceMode";
+const AUTO_SERVE_STARTUP_DELAY_SECONDS = 30;
+const SHOW_ADVANCED_CX_DISPOSITIONS = false;
+type AutoServeCountdownMode = "startup" | "next";
+type ResumePromptBreakType = "short-break" | "meal-break" | string;
+const AUTO_SERVE_BLOCKED_AGENT_STATES = new Set([
+  "dialing",
+  "dispositioning",
+  "offline",
+  "oncall",
+  "ringing",
+  "unavailable",
+]);
 
 const QUEUE_FAMILY_DISPLAY: Record<QueueFamilyKey, QueueFamilyDisplay> = {
   "fresh-day1": {
@@ -515,13 +485,33 @@ function pruneQueueSuppressionMap(
   return next;
 }
 
+function extractTerminalOutcomeWorkflow(record: WorkflowRecord | null | undefined) {
+  if (!record) return null;
+  if (record.family !== "cx" || record.subtype !== "terminal-call-outcome") return null;
+  if (record.stage !== "completed") return null;
+  const result = asRecord(record.result);
+  const classification = asRecord(result.classification);
+  const normalizedOutcome = String(classification.normalizedOutcome || "").trim().toLowerCase();
+  if (!["did_not_connect", "voicemail"].includes(normalizedOutcome)) return null;
+  const queueItemId = String(record.aggregateId || "").trim();
+  return {
+    workflowId: String(record._id || `${record.aggregateId || "terminal"}:${record.createdAt || record.happenedAt || ""}`),
+    queueItemId,
+    caseId: record.caseId != null ? String(record.caseId) : "",
+    normalizedOutcome,
+    label: normalizedOutcome === "voicemail" ? "Voicemail" : "No answer",
+  };
+}
+
 function humanizeCxRoutingReason(reason: string | null | undefined) {
   const value = String(reason || "").trim().toLowerCase();
   if (!value) return "";
   if (value === "ex-busy") return "auto-blocked by EX activity";
   if (value === "manual-unavailable") return "manually paused";
   if (value === "manual-available") return "manually resumed";
-  if (value === "ex-idle") return "ready for new CX leads";
+  if (value === "long-call-hold") return "long call pause";
+  if (value === "cx-call-ended") return "call ended";
+  if (value === "ex-idle") return "ready for CX leads";
   if (value === "cx-routing-disabled") return "routing not enabled";
   return value.replace(/[-_]+/g, " ");
 }
@@ -559,15 +549,16 @@ function CxQueueLegend() {
 function AutoServeCountdown({
   remaining,
   totalSeconds = AUTO_SERVE_DELAY_SECONDS,
-  onCancel,
+  mode = "next",
 }: {
   remaining: number | null;
   totalSeconds?: number;
-  onCancel: () => void;
+  mode?: AutoServeCountdownMode;
 }) {
   const safeTotal = Math.max(1, Number(totalSeconds) || AUTO_SERVE_DELAY_SECONDS);
   const safeRemaining = Math.max(0, Math.min(safeTotal, Number(remaining ?? safeTotal)));
   const progress = Math.max(0, Math.min(100, ((safeTotal - safeRemaining) / safeTotal) * 100));
+  const isStartup = mode === "startup";
 
   return (
     <div className="overflow-hidden rounded-md border border-primary/30 bg-primary/5 px-2.5 py-2">
@@ -579,20 +570,15 @@ function AutoServeCountdown({
           </span>
           <div className="min-w-0">
             <div className="truncate text-xs font-semibold text-foreground">
-              Next call in {safeRemaining}s
+              {isStartup ? `Your day begins in ${safeRemaining}s` : `Next call in ${safeRemaining}s`}
             </div>
             <div className="truncate text-[10px] text-muted-foreground">
-              Auto serve is preparing the next lead.
+              {isStartup
+                ? "Make sure your headset and RingCentral are ready."
+                : "Auto serve is preparing the next lead."}
             </div>
           </div>
         </div>
-        <button
-          type="button"
-          onClick={onCancel}
-          className="shrink-0 rounded px-2 py-1 text-[11px] font-medium text-muted-foreground hover:bg-muted hover:text-foreground"
-        >
-          Cancel
-        </button>
       </div>
       <div className="mt-2 h-1 overflow-hidden rounded-full bg-primary/15">
         <div
@@ -601,6 +587,70 @@ function AutoServeCountdown({
         />
       </div>
     </div>
+  );
+}
+
+function BreakResumePrompt({
+  open,
+  breakType,
+  remaining,
+  isResuming,
+  isSigningOut,
+  onResume,
+  onSignOut,
+}: {
+  open: boolean;
+  breakType: ResumePromptBreakType;
+  remaining: number | null;
+  isResuming: boolean;
+  isSigningOut: boolean;
+  onResume: () => void;
+  onSignOut: () => void;
+}) {
+  const safeRemaining = Math.max(0, Number(remaining ?? 0));
+  const title = breakType === "meal-break" ? "15 minute break" : "5 minute break";
+  const minutes = Math.floor(safeRemaining / 60);
+  const seconds = safeRemaining % 60;
+  const display = `${minutes}:${String(seconds).padStart(2, "0")}`;
+
+  return (
+    <Dialog open={open}>
+      <DialogContent className="max-w-sm">
+        <DialogHeader>
+          <DialogTitle>Resume work</DialogTitle>
+          <DialogDescription>
+            {title} is running. Resume before the timer ends or this session signs out and releases your leads.
+          </DialogDescription>
+        </DialogHeader>
+        <div className="rounded-md border border-primary/25 bg-primary/5 px-3 py-3">
+          <div className="text-[11px] font-semibold uppercase text-muted-foreground">
+            Time remaining
+          </div>
+          <div className="mt-1 text-3xl font-semibold tabular-nums text-foreground">
+            {display}
+          </div>
+        </div>
+        <DialogFooter>
+          <Button
+            type="button"
+            variant="secondary"
+            disabled={isResuming || isSigningOut}
+            onClick={onSignOut}
+          >
+            Sign out
+          </Button>
+          <Button
+            type="button"
+            variant="primary"
+            isLoading={isResuming}
+            disabled={isSigningOut}
+            onClick={onResume}
+          >
+            Resume work
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 
@@ -745,7 +795,6 @@ function applyLookupToForm(
   fill("cellPhone", match.phone);
   fill("email", match.email);
   fill("sourceName", match.sourceName);
-  fill("notes", match.notes);
   fill("caseId", match.caseId);
   return next;
 }
@@ -2039,138 +2088,6 @@ function PanelTabs({
   );
 }
 
-function NotesSubsection({
-  domain,
-  resolvedCaseId,
-}: {
-  domain: string;
-  resolvedCaseId: string;
-}) {
-  const caseIdNum = Number(resolvedCaseId);
-  const info = useCxCaseLogicsInfo(domain, caseIdNum);
-  const save = useCxLogicsNotes(domain);
-
-  // Pull current value from the live Logics fetch. The route normalizes
-  // CaseInfo notes plus note-like activity history into a Notes value,
-  // but keep the unwrapping defensive because Logics envelopes vary.
-  const liveValue = React.useMemo(() => {
-    return extractLogicsNotesText(info.data);
-  }, [info.data]);
-  const activityNotesValue = React.useMemo(() => {
-    return extractLogicsActivityNotesText(info.data);
-  }, [info.data]);
-
-  // Local edit state. Initialize from `liveValue` when it first arrives,
-  // and re-sync ONLY when the live value changes externally AND the user
-  // hasn't started editing in this mount. That keeps Logics-side edits
-  // (made in Logics' own UI while this panel is open) from being lost,
-  // without clobbering whatever the agent is typing right now.
-  const [draft, setDraft] = React.useState<string | null>(null);
-  const [dirty, setDirty] = React.useState(false);
-  React.useEffect(() => {
-    if (!dirty) setDraft(liveValue);
-  }, [liveValue, dirty]);
-
-  const value = draft ?? liveValue;
-  const changed = dirty && value !== liveValue;
-
-  async function handleSave() {
-    try {
-      await save.mutateAsync({ caseId: caseIdNum, notes: value });
-      setDirty(false);
-      info.refetch();
-      toast("Notes saved", {
-        description: "Logics Notes updated for this case.",
-      });
-    } catch (error) {
-      const msg = error instanceof Error ? error.message : "Something went wrong.";
-      toast.error("Save failed", { description: msg });
-    }
-  }
-
-  function handleRevert() {
-    setDraft(liveValue);
-    setDirty(false);
-  }
-
-  return (
-    <div className="space-y-2 p-3">
-      {info.isLoading && draft == null ? (
-        <div className="text-[11px] text-muted-foreground">Loading notes…</div>
-      ) : (
-        <>
-          <div className="space-y-1">
-            <div className="text-[10px] font-semibold uppercase tracking-[0.12em] text-muted-foreground">
-              Case notes
-            </div>
-            <textarea
-              className="min-h-[110px] w-full rounded-md border border-input bg-card px-2 py-1.5 text-xs leading-relaxed font-mono"
-              value={value}
-              onChange={(e) => {
-                setDraft(e.target.value);
-                setDirty(true);
-              }}
-              placeholder="No case notes yet."
-              spellCheck
-            />
-          </div>
-          {activityNotesValue ? (
-            <div className="space-y-1">
-              <div className="text-[10px] font-semibold uppercase tracking-[0.12em] text-muted-foreground">
-                Activity notes
-              </div>
-              <textarea
-                className="min-h-[170px] w-full rounded-md border border-border bg-muted/30 px-2 py-1.5 text-xs leading-relaxed font-mono text-foreground"
-                value={activityNotesValue}
-                readOnly
-                spellCheck={false}
-              />
-            </div>
-          ) : null}
-          <div className="flex items-center justify-between gap-2">
-            <div className="text-[11px] text-muted-foreground">
-              {info.isFetching ? (
-                <span>Refreshing…</span>
-              ) : changed ? (
-                <span className="text-amber-600 dark:text-amber-400">Unsaved changes</span>
-              ) : (
-                <span>Synced with Logics</span>
-              )}
-            </div>
-            <div className="flex gap-1.5">
-              <Button
-                size="sm"
-                variant="ghost"
-                onClick={() => info.refetch()}
-                disabled={info.isFetching}
-                title="Pull the latest Notes from Logics (discards unsaved changes if you've not edited)"
-              >
-                Refresh
-              </Button>
-              <Button
-                size="sm"
-                variant="ghost"
-                onClick={handleRevert}
-                disabled={!changed}
-              >
-                Revert
-              </Button>
-              <Button
-                size="sm"
-                variant="primary"
-                onClick={handleSave}
-                disabled={!changed || save.isPending}
-              >
-                {save.isPending ? "Saving…" : "Save"}
-              </Button>
-            </div>
-          </div>
-        </>
-      )}
-    </div>
-  );
-}
-
 function CommLogSubsection({
   domain,
   resolvedCaseId,
@@ -2298,8 +2215,6 @@ function LogicsWorkspaceCard({
   resolvedCaseId: string;
   resolvedPhone: string | null;
 }) {
-  const [notesOpen, setNotesOpen] = React.useState(true);
-
   const [commLogOpen, setCommLogOpen] = React.useState(true);
 
   const [historyOpen, setHistoryOpen] = React.useState(true);
@@ -2312,17 +2227,6 @@ function LogicsWorkspaceCard({
 
   return (
     <div className="space-y-2">
-      {/* Notes — single editable text field on the Logics Case object.
-         Pre-loaded with the live value, save = overwrite. Distinct from
-         the activity-comment chain in the History → Activities tab. */}
-      <Collapsible
-        title="Notes"
-        open={notesOpen}
-        onToggle={() => setNotesOpen((v) => !v)}
-      >
-        <NotesSubsection domain={domain} resolvedCaseId={resolvedCaseId} />
-      </Collapsible>
-
       {/* Communications log — unified read across SMS (case-profile +
          conversation-messages), calls (call-log), and cadence attempts
          (lead-cadence). Newest-first. Source-agnostic so it works
@@ -2392,7 +2296,8 @@ function LogicsWorkspaceCard({
 export function CXWorkspace() {
   const domain = useDomainStore((s) => s.domain || "TAG");
   const setDomain = useDomainStore((s) => s.setDomain);
-  const { user } = useSession();
+  const navigate = useNavigate();
+  const { user, logout } = useSession();
   const isAdminUser = user?.role === "admin" || user?.audience === "admin";
   // Company is one operating group across brands, so CX users can move
   // between all known domains instead of being pinned to account.company.
@@ -2468,7 +2373,6 @@ export function CXWorkspace() {
     spouseCellPhone: "",
     spouseHomePhone: "",
     sourceName: "",
-    notes: "",
     caseId: "",
   };
   const BLANK_DIRTY: CaseFormDirty = {
@@ -2485,7 +2389,6 @@ export function CXWorkspace() {
     spouseCellPhone: false,
     spouseHomePhone: false,
     sourceName: false,
-    notes: false,
     caseId: false,
   };
   const [form, setForm] = React.useState<CaseForm>(BLANK_FORM);
@@ -2496,19 +2399,20 @@ export function CXWorkspace() {
   const [servedQueueActionKey, setServedQueueActionKey] = React.useState<string | null>(null);
   const [servedQueueTicketId, setServedQueueTicketId] = React.useState<string | null>(null);
   const [servedQueueContact, setServedQueueContact] = React.useState<ContactContext | null>(null);
+  const [servedQueueStartedAt, setServedQueueStartedAt] = React.useState<number | null>(null);
   const [suppressedCallSessionId, setSuppressedCallSessionId] = React.useState<string | null>(null);
-  const [queueAdvanceMode, setQueueAdvanceMode] = React.useState<QueueAdvanceMode>(() => {
-    if (typeof window === "undefined") return "manual";
-    try {
-      return localStorage.getItem(QUEUE_ADVANCE_MODE_STORAGE_KEY) === "auto" ? "auto" : "manual";
-    } catch {
-      return "manual";
-    }
-  });
   const [autoServeDueAt, setAutoServeDueAt] = React.useState<number | null>(null);
   const [autoServeRemaining, setAutoServeRemaining] = React.useState<number | null>(null);
+  const [autoServeCountdownMode, setAutoServeCountdownMode] =
+    React.useState<AutoServeCountdownMode>("next");
+  const [startupAutoServeQueued, setStartupAutoServeQueued] = React.useState(false);
+  const [breakResumeDueAt, setBreakResumeDueAt] = React.useState<number | null>(null);
+  const [breakResumeRemaining, setBreakResumeRemaining] = React.useState<number | null>(null);
+  const [breakAutoLogoutRunning, setBreakAutoLogoutRunning] = React.useState(false);
   const [suppressedQueueItems, setSuppressedQueueItems] = React.useState<Record<string, number>>({});
   const autoServeInFlightRef = React.useRef(false);
+  const breakAutoLogoutFiredRef = React.useRef(false);
+  const lastTerminalOutcomeWorkflowRef = React.useRef<string | null>(null);
 
   function clearServedQueueSelection() {
     setServingQueueKey(null);
@@ -2517,6 +2421,7 @@ export function CXWorkspace() {
     setServedQueueActionKey(null);
     setServedQueueTicketId(null);
     setServedQueueContact(null);
+    setServedQueueStartedAt(null);
   }
 
   function clearCasePanelForNextQueueLead() {
@@ -2548,9 +2453,12 @@ export function CXWorkspace() {
     autoServeInFlightRef.current = false;
   }
 
-  function scheduleAutoServe(delaySeconds = AUTO_SERVE_DELAY_SECONDS) {
-    if (queueAdvanceMode !== "auto") return;
+  function scheduleAutoServe(
+    delaySeconds = AUTO_SERVE_DELAY_SECONDS,
+    mode: AutoServeCountdownMode = "next",
+  ) {
     const safeDelay = Math.max(0, Number(delaySeconds) || 0);
+    setAutoServeCountdownMode(mode);
     setAutoServeDueAt(Date.now() + safeDelay * 1000);
     setAutoServeRemaining(safeDelay);
   }
@@ -2595,15 +2503,6 @@ export function CXWorkspace() {
       return next;
     });
   }
-
-  React.useEffect(() => {
-    try {
-      localStorage.setItem(QUEUE_ADVANCE_MODE_STORAGE_KEY, queueAdvanceMode);
-    } catch {
-      // Preference persistence is nice-to-have; the visible toggle remains authoritative.
-    }
-    if (queueAdvanceMode !== "auto") cancelAutoServe();
-  }, [queueAdvanceMode]);
 
   React.useEffect(() => {
     if (autoServeDueAt == null) {
@@ -3091,7 +2990,10 @@ export function CXWorkspace() {
     }
   }
 
-  async function handleCxAvailabilityChange(next: "available" | "unavailable") {
+  async function handleCxAvailabilityChange(
+    next: "available" | "unavailable",
+    breakType?: "short-break" | "meal-break",
+  ) {
     // We can't use the generic `run()` helper here because the success
     // path needs to detect the EX-busy override the server may apply
     // silently — when the agent has an active EX call, the server
@@ -3104,10 +3006,11 @@ export function CXWorkspace() {
       const result = await setCxStatus.mutateAsync({
         status: next,
         reason: next === "available" ? "manual-available" : "manual-unavailable",
+        ...(next === "unavailable" && breakType ? { breakType } : {}),
       });
       const response = (result?.response ?? null) as
         | {
-            cxRouting?: { desiredAvailability?: string; reason?: string } | null;
+            cxRouting?: { desiredAvailability?: string; reason?: string; pauseType?: string | null } | null;
             freshLeadGate?: FreshLeadGate | null;
           }
         | null;
@@ -3126,10 +3029,13 @@ export function CXWorkspace() {
         return;
       }
 
+      const pauseType = String(response?.cxRouting?.pauseType || breakType || "").trim();
       toast(`CX availability set to ${resolvedAvailability || next}`, {
         description: resolvedAvailability === "available"
           ? "You'll start receiving CX leads."
-          : "You won't be served new CX leads until you go available.",
+          : pauseType === "meal-break"
+            ? "You are on a 15 minute break. Held leads release when that window expires."
+            : "You are on a 5 minute break. Held leads release when that window expires.",
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : "Something went wrong.";
@@ -3138,11 +3044,38 @@ export function CXWorkspace() {
         action: {
           label: "Retry",
           onClick: () => {
-            void handleCxAvailabilityChange(next);
+            void handleCxAvailabilityChange(next, breakType);
           },
         },
       });
       throw error;
+    }
+  }
+
+  async function handleResumeWorkFromBreak() {
+    breakAutoLogoutFiredRef.current = false;
+    await handleCxAvailabilityChange("available");
+    setBreakResumeDueAt(null);
+    setBreakResumeRemaining(null);
+    workspace.refetch();
+    callQueue.refetch();
+  }
+
+  async function handleBreakTimeoutLogout(reason = "break-timeout") {
+    if (breakAutoLogoutFiredRef.current) return;
+    breakAutoLogoutFiredRef.current = true;
+    setBreakAutoLogoutRunning(true);
+    cancelAutoServe();
+    try {
+      if (reason === "break-timeout") {
+        toast.warning("Break timer expired", {
+          description: "Signing out and releasing held leads.",
+        });
+      }
+      await logout();
+    } finally {
+      setBreakAutoLogoutRunning(false);
+      navigate("/login", { replace: true });
     }
   }
 
@@ -3187,7 +3120,6 @@ export function CXWorkspace() {
       cellPhone: contact.phone || readString(merged, "cellPhone", "phone", "number"),
       email: contact.email || readString(merged, "email"),
       sourceName: contact.source || readString(merged, "sourceName", "source", "sourceLabel"),
-      notes: readString(merged, "notes", "note"),
       caseId: contact.caseId || readString(merged, "caseId"),
     });
     setServedQueueCaseId(contact.caseId || null);
@@ -3195,6 +3127,7 @@ export function CXWorkspace() {
     setServedQueueActionKey(extractQueueActionKey(item));
     setServedQueueTicketId(item.queueTicketId || null);
     setServedQueueContact(contact);
+    setServedQueueStartedAt(Date.now());
     if (queueDomain && queueDomain !== domain) setDomain(queueDomain);
   }
 
@@ -3202,9 +3135,6 @@ export function CXWorkspace() {
     item: CxCallQueueItem,
     options: { source?: "manual" | "auto" } = {},
   ) {
-    if (queueAdvanceMode === "auto" && options.source !== "auto") {
-      cancelAutoServe();
-    }
     if (options.source !== "auto") cancelAutoServe();
     const contact = contactFromQueue(item);
     const queueKey = buildQueueItemKey(item);
@@ -3325,7 +3255,6 @@ export function CXWorkspace() {
       email: c.email || "",
       cellPhone: phoneToUse,
       sourceName: c.sourceName || "",
-      notes: c.notes || "",
       caseId: c.caseId != null ? String(c.caseId) : "",
     }));
   }
@@ -3435,7 +3364,6 @@ export function CXWorkspace() {
       spouseCellPhone: trim(form.spouseCellPhone),
       spouseHomePhone: trim(form.spouseHomePhone),
       sourceName: trim(form.sourceName),
-      notes: trim(form.notes),
     };
     // Strip explicit undefineds so the JSON serializer doesn't include
     // them — keeps the payload minimal + makes the intent crystal-clear
@@ -3567,7 +3495,7 @@ export function CXWorkspace() {
     setServingQueueKey(buildQueueItemKey(activeServingQueueItem));
     stageQueueLeadInWorkspace(activeServingQueueItem, contact, queueDomain);
     toast.warning("Lead restored for wrap-up", {
-      description: "This call is still waiting for Callback, DNC, Postdate, or Deal.",
+      description: "This call is still waiting for Next call or DNC.",
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
@@ -3576,6 +3504,60 @@ export function CXWorkspace() {
     servedQueueActionKey,
     servingQueueKey,
     servedQueueContact,
+    domain,
+  ]);
+
+  React.useEffect(() => {
+    if (!(servedQueueTicketId || servedQueueCaseId || servingQueueKey || servedQueueContact)) return;
+    const recent = Array.isArray(data?.recentWorkflowStages) ? data.recentWorkflowStages : [];
+    const terminal = recent
+      .map(extractTerminalOutcomeWorkflow)
+      .filter(Boolean)
+      .find((entry) => {
+        if (!entry) return false;
+        if (lastTerminalOutcomeWorkflowRef.current === entry.workflowId) return false;
+        if (servedQueueStartedAt != null) {
+          const record = recent.find((row) => String(row._id || "") === entry.workflowId);
+          const recordAt = record?.createdAt || record?.happenedAt || "";
+          const recordTime = recordAt ? new Date(recordAt).getTime() : NaN;
+          if (Number.isFinite(recordTime) && recordTime + 2_000 < servedQueueStartedAt) return false;
+        }
+        if (servedQueueTicketId && entry.queueItemId && entry.queueItemId === String(servedQueueTicketId)) {
+          return true;
+        }
+        if (servingQueueKey && entry.queueItemId && servingQueueKey.includes(entry.queueItemId)) {
+          return true;
+        }
+        if (servedQueueCaseId && entry.caseId && String(entry.caseId) === String(servedQueueCaseId)) {
+          return true;
+        }
+        return false;
+      });
+    if (!terminal) return;
+
+    lastTerminalOutcomeWorkflowRef.current = terminal.workflowId;
+    toast(terminal.label, {
+      description: "RingCX reported the outcome; moving to the next lead.",
+    });
+    suppressCurrentQueueLead({
+      domain: servedQueueDomain || domain,
+      caseId: terminal.caseId || servedQueueCaseId || "",
+      queueItemId: terminal.queueItemId || servedQueueTicketId || "",
+      response: {
+        queueItemId: terminal.queueItemId || servedQueueTicketId || "",
+      },
+    });
+    clearServedQueueSelection();
+    clearCasePanelForNextQueueLead();
+    scheduleAutoServe(AUTO_SERVE_DELAY_SECONDS, "next");
+  }, [
+    data?.recentWorkflowStages,
+    servedQueueTicketId,
+    servedQueueCaseId,
+    servingQueueKey,
+    servedQueueContact,
+    servedQueueDomain,
+    servedQueueStartedAt,
     domain,
   ]);
 
@@ -3640,14 +3622,42 @@ export function CXWorkspace() {
   const queueHasActiveLead = Boolean(
     servedQueueTicketId || servedQueueActionKey || servingQueueKey || servedQueueContact,
   );
+  const autoServeExState = asRecord(data?.ex);
+  const autoServeRouting = asRecord(autoServeExState.cxRouting);
+  const autoServeDesiredAvailability = String(autoServeRouting.desiredAvailability || "")
+    .trim()
+    .toLowerCase();
+  const autoServeAgentState = String(
+    readString(autoServeExState, "activityState", "status") || "",
+  )
+    .trim()
+    .toLowerCase();
+  const canAutoServeForAgentState =
+    autoServeDesiredAvailability === "available"
+    && !AUTO_SERVE_BLOCKED_AGENT_STATES.has(autoServeAgentState);
   const canAttemptStartQueueLead =
     queueItems.length > 0 &&
+    canAutoServeForAgentState &&
     !dialAny.isPending &&
     !disposition.isPending;
   const canStartNextQueueLead =
     canAttemptStartQueueLead &&
     !queueHasActiveLead &&
     !autoServeInFlightRef.current;
+  const breakPauseType = String(autoServeRouting.pauseType || "").trim();
+  const breakPauseReason = String(autoServeRouting.reason || "").trim().toLowerCase();
+  const breakPauseReleaseAtRaw = autoServeRouting.pauseReleaseAt;
+  const breakPauseReleaseAtMs =
+    typeof breakPauseReleaseAtRaw === "string" || typeof breakPauseReleaseAtRaw === "number"
+      ? new Date(breakPauseReleaseAtRaw).getTime()
+      : breakPauseReleaseAtRaw instanceof Date
+        ? breakPauseReleaseAtRaw.getTime()
+        : NaN;
+  const isManualTimedBreak =
+    autoServeDesiredAvailability === "unavailable" &&
+    breakPauseReason === "manual-unavailable" &&
+    ["short-break", "meal-break"].includes(breakPauseType) &&
+    Number.isFinite(breakPauseReleaseAtMs);
 
   async function startNextQueueLead() {
     if (queueItems.length === 0) {
@@ -3658,6 +3668,13 @@ export function CXWorkspace() {
       toast.warning("Current lead still active", {
         description: "Finish the current lead before starting another one.",
       });
+      return;
+    }
+    if (!canAutoServeForAgentState) {
+      toast.warning("Queue paused", {
+        description: "Resume CX availability before starting the next lead.",
+      });
+      cancelAutoServe();
       return;
     }
     if (dialAny.isPending || disposition.isPending || autoServeInFlightRef.current) return;
@@ -3674,14 +3691,12 @@ export function CXWorkspace() {
   }
 
   React.useEffect(() => {
-    if (queueAdvanceMode !== "auto") return;
     if (autoServeDueAt == null) return;
     if (autoServeRemaining !== 0) return;
     if (!canStartNextQueueLead) return;
     if (autoServeInFlightRef.current) return;
     void startNextQueueLead();
   }, [
-    queueAdvanceMode,
     autoServeDueAt,
     autoServeRemaining,
     canStartNextQueueLead,
@@ -3689,19 +3704,53 @@ export function CXWorkspace() {
   ]);
 
   React.useEffect(() => {
-    if (queueAdvanceMode !== "auto") return;
     if (autoServeDueAt != null) return;
     if (!canStartNextQueueLead) return;
     if (autoServeInFlightRef.current) return;
-    const delaySeconds = AUTO_SERVE_DELAY_SECONDS;
-    setAutoServeDueAt(Date.now() + delaySeconds * 1000);
-    setAutoServeRemaining(delaySeconds);
+    const firstRun = !startupAutoServeQueued;
+    scheduleAutoServe(
+      firstRun ? AUTO_SERVE_STARTUP_DELAY_SECONDS : AUTO_SERVE_DELAY_SECONDS,
+      firstRun ? "startup" : "next",
+    );
+    if (firstRun) setStartupAutoServeQueued(true);
   }, [
-    queueAdvanceMode,
     autoServeDueAt,
     canStartNextQueueLead,
     queueItems.length,
+    startupAutoServeQueued,
   ]);
+
+  React.useEffect(() => {
+    if (!isManualTimedBreak) {
+      setBreakResumeDueAt(null);
+      setBreakResumeRemaining(null);
+      breakAutoLogoutFiredRef.current = false;
+      return;
+    }
+    setBreakResumeDueAt(breakPauseReleaseAtMs);
+    setBreakResumeRemaining(Math.max(0, Math.ceil((breakPauseReleaseAtMs - Date.now()) / 1000)));
+    breakAutoLogoutFiredRef.current = false;
+  }, [isManualTimedBreak, breakPauseReleaseAtMs]);
+
+  React.useEffect(() => {
+    if (breakResumeDueAt == null) {
+      setBreakResumeRemaining(null);
+      return undefined;
+    }
+    const tick = () => {
+      setBreakResumeRemaining(Math.max(0, Math.ceil((breakResumeDueAt - Date.now()) / 1000)));
+    };
+    tick();
+    const interval = window.setInterval(tick, 250);
+    return () => window.clearInterval(interval);
+  }, [breakResumeDueAt]);
+
+  React.useEffect(() => {
+    if (!isManualTimedBreak) return;
+    if (breakResumeDueAt == null) return;
+    if (breakResumeRemaining !== 0) return;
+    void handleBreakTimeoutLogout();
+  }, [isManualTimedBreak, breakResumeDueAt, breakResumeRemaining]);
 
   const queueDebugLine = React.useMemo(() => {
     if (isAdminUser) {
@@ -3791,6 +3840,22 @@ export function CXWorkspace() {
   const currentCallSnapshot = asRecord(data.ex?.currentCall);
   const cxDesiredAvailability = String(cxRouting.desiredAvailability || "").trim().toLowerCase();
   const cxRoutingReason = String(cxRouting.reason || "").trim();
+  const cxPauseType = String(cxRouting.pauseType || "").trim();
+  const cxBreakUsage = asRecord(cxRouting.breakUsage || freshLeadGate.breakUsage);
+  const shortBreaksAllowed = Number(cxBreakUsage.shortBreaksAllowed ?? 2);
+  const shortBreaksUsed = Number(cxBreakUsage.shortBreaksUsed ?? 0);
+  const shortBreaksRemaining = Math.max(
+    (Number.isFinite(shortBreaksAllowed) ? shortBreaksAllowed : 2)
+      - (Number.isFinite(shortBreaksUsed) ? shortBreaksUsed : 0),
+    0,
+  );
+  const mealBreaksAllowed = Number(cxBreakUsage.mealBreaksAllowed ?? 1);
+  const mealBreaksUsed = Number(cxBreakUsage.mealBreaksUsed ?? 0);
+  const mealBreaksRemaining = Math.max(
+    (Number.isFinite(mealBreaksAllowed) ? mealBreaksAllowed : 1)
+      - (Number.isFinite(mealBreaksUsed) ? mealBreaksUsed : 0),
+    0,
+  );
   const currentCallChannel = String(currentCallSnapshot.channel || "").trim().toLowerCase();
   const hasActiveExCall =
     currentCallChannel === "ex" &&
@@ -3818,8 +3883,8 @@ export function CXWorkspace() {
     (exCallGateActive
       ? "This agent is on an EX call, so fresh leads stay off until EX returns idle."
       : freshLeadBlocked
-        ? "Manual pause keeps you out of fresh lead serving."
-        : "EX is idle and this agent profile can receive fresh leads.");
+        ? "Manual pause keeps you out of CX lead serving."
+        : "EX is idle and this agent profile can receive CX leads.");
   const exCallStateLabel = exCallGateActive ? "On EX call" : "Off EX call";
   const cxRoutingReasonLabel = humanizeCxRoutingReason(cxRoutingReason);
 
@@ -3836,7 +3901,21 @@ export function CXWorkspace() {
     searchDropdownOpen && searchText.trim().length >= 2;
 
   return (
-    <div className="flex min-h-[calc(100vh-6rem)] flex-col gap-4">
+    <>
+      <BreakResumePrompt
+        open={isManualTimedBreak && breakResumeDueAt != null}
+        breakType={breakPauseType}
+        remaining={breakResumeRemaining}
+        isResuming={setCxStatus.isPending}
+        isSigningOut={breakAutoLogoutRunning}
+        onResume={() => {
+          void handleResumeWorkFromBreak();
+        }}
+        onSignOut={() => {
+          void handleBreakTimeoutLogout("manual-signout");
+        }}
+      />
+      <div className="flex min-h-[calc(100vh-6rem)] flex-col gap-4">
       {/* ─── TOP BAR: sticky search ─────────────────────────────────────── */}
       <div
         ref={searchRef}
@@ -3921,7 +4000,7 @@ export function CXWorkspace() {
         <div className="mt-2 flex flex-col gap-2 rounded-lg border border-border/70 bg-card/60 px-3 py-2 md:flex-row md:items-center md:justify-between">
           <div className="min-w-0">
             <div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-muted-foreground">
-              Fresh lead gate
+              Lead serving
             </div>
             <div className="mt-1 flex flex-wrap items-center gap-2">
               <StatusPill tone={cxRoutingTone} dotted>
@@ -3942,24 +4021,57 @@ export function CXWorkspace() {
             <div className="mt-1 text-[11px] text-muted-foreground">{cxRoutingHint}</div>
           </div>
           <div className="flex flex-wrap gap-2">
-            <Button
-              size="sm"
-              variant={!freshLeadBlocked ? "primary" : "secondary"}
-              isLoading={setCxStatus.isPending}
-              disabled={exCallGateActive}
-              title={exCallGateActive ? "EX call is active; fresh leads reopen when EX returns idle." : undefined}
-              onClick={() => void handleCxAvailabilityChange("available")}
-            >
-              Receive fresh leads
-            </Button>
-            <Button
-              size="sm"
-              variant={freshLeadBlocked ? "primary" : "secondary"}
-              isLoading={setCxStatus.isPending}
-              onClick={() => void handleCxAvailabilityChange("unavailable")}
-            >
-              Pause fresh leads
-            </Button>
+            {cxDesiredAvailability === "unavailable" ? (
+              <Button
+                size="sm"
+                variant="primary"
+                isLoading={setCxStatus.isPending}
+                disabled={exCallGateActive && cxRoutingReason === "ex-busy"}
+                title={
+                  exCallGateActive && cxRoutingReason === "ex-busy"
+                    ? "EX call is active; CX lead serving reopens when EX returns idle."
+                    : undefined
+                }
+                onClick={() => void handleCxAvailabilityChange("available")}
+              >
+                Resume
+              </Button>
+            ) : (
+              <>
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  isLoading={setCxStatus.isPending && cxPauseType === "short-break"}
+                  disabled={setCxStatus.isPending || shortBreaksRemaining <= 0 || freshLeadBlocked}
+                  title={
+                    shortBreaksRemaining <= 0
+                      ? "Both 5 minute breaks are used for this work block."
+                      : freshLeadBlocked
+                        ? "Lead serving is already blocked."
+                        : "Start a 5 minute break."
+                  }
+                  onClick={() => void handleCxAvailabilityChange("unavailable", "short-break")}
+                >
+                  5 min ({shortBreaksRemaining})
+                </Button>
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  isLoading={setCxStatus.isPending && cxPauseType === "meal-break"}
+                  disabled={setCxStatus.isPending || mealBreaksRemaining <= 0 || freshLeadBlocked}
+                  title={
+                    mealBreaksRemaining <= 0
+                      ? "The 15 minute break is used for this work block."
+                      : freshLeadBlocked
+                        ? "Lead serving is already blocked."
+                        : "Start a 15 minute break."
+                  }
+                  onClick={() => void handleCxAvailabilityChange("unavailable", "meal-break")}
+                >
+                  15 min ({mealBreaksRemaining})
+                </Button>
+              </>
+            )}
           </div>
         </div>
       </div>
@@ -3973,69 +4085,32 @@ export function CXWorkspace() {
               <CardHeader>
                 <div className="flex items-center justify-between gap-2">
                   <CardTitle className="text-sm">CX queue</CardTitle>
-                  <div className="inline-flex rounded-md border border-border bg-muted/30 p-0.5">
-                    <button
-                      type="button"
-                      onClick={() => setQueueAdvanceMode("manual")}
-                      className={cn(
-                        "inline-flex h-7 items-center gap-1 rounded px-2 text-[11px] font-medium",
-                        queueAdvanceMode === "manual"
-                          ? "bg-card text-foreground shadow-sm"
-                          : "text-muted-foreground hover:text-foreground",
-                      )}
-                      title="Click queue cards to dial"
-                    >
-                      <Phone className="h-3 w-3" />
-                      Click
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setQueueAdvanceMode("auto")}
-                      className={cn(
-                        "inline-flex h-7 items-center gap-1 rounded px-2 text-[11px] font-medium",
-                        queueAdvanceMode === "auto"
-                          ? "bg-card text-foreground shadow-sm"
-                          : "text-muted-foreground hover:text-foreground",
-                      )}
-                      title="Serve the next lead after countdown"
-                    >
-                      <Clock3 className="h-3 w-3" />
-                      Auto
-                    </button>
+                  <div
+                    className="inline-flex h-7 items-center gap-1 rounded-md border border-border bg-muted/30 px-2 text-[11px] font-medium text-muted-foreground"
+                    title="Leads are served automatically from the top of the queue."
+                  >
+                    <Clock3 className="h-3 w-3" />
+                    Auto
                   </div>
                 </div>
                 <div className="flex items-center justify-between gap-2">
                   <div className="min-w-0 truncate text-[10px] text-muted-foreground">
                     {queueDebugLine}
                   </div>
-                  {queueAdvanceMode === "auto" ? (
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      className="h-7 px-2 text-[11px]"
-                      disabled={!canAttemptStartQueueLead}
-                      onClick={() => void startNextQueueLead()}
-                      title={
-                        queueHasActiveLead
-                          ? "Finish the active lead first"
-                          : canAttemptStartQueueLead
-                            ? "Start next queued lead"
-                            : "No queued lead is ready"
-                      }
-                    >
-                      <Phone className="h-3 w-3" />
-                      Start
-                    </Button>
-                  ) : null}
                 </div>
                 <CxQueueLegend />
               </CardHeader>
               <CardContent>
-                {queueAdvanceMode === "auto" && autoServeDueAt != null ? (
+                {autoServeDueAt != null ? (
                   <div className="mb-2">
                     <AutoServeCountdown
                       remaining={autoServeRemaining}
-                      onCancel={cancelAutoServe}
+                      totalSeconds={
+                        autoServeCountdownMode === "startup"
+                          ? AUTO_SERVE_STARTUP_DELAY_SECONDS
+                          : AUTO_SERVE_DELAY_SECONDS
+                      }
+                      mode={autoServeCountdownMode}
                     />
                   </div>
                 ) : null}
@@ -4057,7 +4132,7 @@ export function CXWorkspace() {
                     items={queueItems}
                     selectedCaseId={selected?.caseId || servedQueueCaseId}
                     servingQueueKey={servingQueueKey}
-                    clickDisabled={queueAdvanceMode === "auto"}
+                    clickDisabled
                     onSelect={handleSelectFromQueue}
                   />
                 )}
@@ -4068,7 +4143,7 @@ export function CXWorkspace() {
 
         {/* ── CENTER: client management ─────────────────────────────────── */}
         <section className="flex min-w-0 flex-1 flex-col gap-3">
-          {/* Identity strip — quick-glance + inline edits + DNC / Postdate */}
+          {/* Identity strip — quick-glance + inline edits + call outcome */}
           <Card className="relative overflow-hidden">
             {/* Scramble progress bar — a thin animated stripe across the
                 top of the card whenever the lookup query
@@ -4469,7 +4544,7 @@ export function CXWorkspace() {
                     DNC
                   </Button>
                 ) : null}
-                {dispositionCaseId != null ? (
+                {SHOW_ADVANCED_CX_DISPOSITIONS && dispositionCaseId != null ? (
                   <Button
                     size="sm"
                     variant="secondary"
@@ -4493,7 +4568,7 @@ export function CXWorkspace() {
                     Postdate
                   </Button>
                 ) : null}
-                {dispositionCaseId != null ? (
+                {SHOW_ADVANCED_CX_DISPOSITIONS && dispositionCaseId != null ? (
                   <Button
                     size="sm"
                     variant="secondary"
@@ -4513,7 +4588,6 @@ export function CXWorkspace() {
                             `${form.firstName} ${form.lastName}`.trim() ||
                             selected?.name ||
                             undefined,
-                          notes: form.notes || undefined,
                         }),
                       ).catch(() => undefined)
                     }
@@ -4549,7 +4623,7 @@ export function CXWorkspace() {
                     }}
                     title="Finish this lead without a Logics change and recycle it as a callback."
                   >
-                    Call back
+                    Next call
                   </Button>
                 ) : null}
                 <Button
@@ -4888,6 +4962,7 @@ export function CXWorkspace() {
         context={templateContext}
         onInsert={handleEmailInsert}
       />
-    </div>
+      </div>
+    </>
   );
 }

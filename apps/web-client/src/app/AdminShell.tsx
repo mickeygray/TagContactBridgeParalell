@@ -21,7 +21,7 @@ import { Button } from "@/components/ui/Button";
 import { DomainSwitcher } from "@/components/ui/DomainSwitcher";
 import { StatusPill } from "@/components/ui/StatusPill";
 import { ThemeToggle } from "@/components/ui/ThemeToggle";
-import { adminWorkspaces, readinessTone } from "@/app/workspaceRegistry";
+import { adminWorkspaces } from "@/app/workspaceRegistry";
 import { useSession } from "@/lib/auth/useSession";
 import { useControlPlaneHealth } from "@/lib/api/queries/health";
 import { cn } from "@/lib/utils/cn";
@@ -31,11 +31,6 @@ export function AdminShell() {
   const navigate = useNavigate();
   const location = useLocation();
   const health = useControlPlaneHealth();
-
-  const groups: Array<{ key: string; label: string }> = [
-    { key: "workspaces", label: "Workspaces" },
-    { key: "operations", label: "Operations" },
-  ];
 
   return (
     <div className="shell-gradient flex min-h-screen text-foreground">
@@ -58,46 +53,26 @@ export function AdminShell() {
         </div>
 
         <nav className="flex-1 overflow-y-auto px-2 py-3">
-          {groups.map((group) => {
-            const items = adminWorkspaces.filter((w) => w.group === group.key);
-            if (items.length === 0) return null;
-            return (
-              <div key={group.key} className="mb-4">
-                <div className="mb-1 px-2 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
-                  {group.label}
-                </div>
-                <ul className="space-y-0.5">
-                  {items.map((w) => (
-                    <li key={w.key}>
-                      <NavLink
-                        to={w.path}
-                        className={({ isActive }) =>
-                          cn(
-                            "group flex items-center gap-2.5 rounded-md px-2 py-1.5 text-sm transition-colors",
-                            isActive
-                              ? "bg-primary/10 text-foreground font-medium"
-                              : "text-muted-foreground hover:bg-muted hover:text-foreground",
-                          )
-                        }
-                      >
-                        <w.icon className="h-4 w-4 shrink-0" />
-                        <span className="flex-1 truncate">{w.label}</span>
-                        {w.readiness === "gap" ? (
-                          <span className="text-[9px] uppercase tracking-wider text-amber-600">
-                            {readinessTone[w.readiness]}
-                          </span>
-                        ) : w.readiness === "partial" ? (
-                          <span className="text-[9px] uppercase tracking-wider text-sky-600">
-                            {readinessTone[w.readiness]}
-                          </span>
-                        ) : null}
-                      </NavLink>
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            );
-          })}
+          <ul className="space-y-0.5">
+            {adminWorkspaces.map((w) => (
+              <li key={w.key}>
+                <NavLink
+                  to={w.path}
+                  className={({ isActive }) =>
+                    cn(
+                      "group flex items-center gap-2.5 rounded-md px-2 py-1.5 text-sm transition-colors",
+                      isActive
+                        ? "bg-primary/10 text-foreground font-medium"
+                        : "text-muted-foreground hover:bg-muted hover:text-foreground",
+                    )
+                  }
+                >
+                  <w.icon className="h-4 w-4 shrink-0" />
+                  <span className="flex-1 truncate">{w.label}</span>
+                </NavLink>
+              </li>
+            ))}
+          </ul>
         </nav>
 
         <div className="border-t border-border px-3 py-3">

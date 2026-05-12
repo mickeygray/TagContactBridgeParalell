@@ -10,8 +10,11 @@ const {
 } = require("../../shared-integrations/src/ringcentralClient");
 const { agentStateRepository } = require("../../shared-repositories/src");
 const {
+  applyCallEndedDailyStats,
+  applyCallStartedDailyStats,
   deriveActivityState,
   deriveCxRouting,
+  normalizeDailyStats,
 } = require("./agentAvailabilityService");
 // Lazy-required at call-site to avoid a require cycle with
 // presenceBridgeService (which itself requires agentAvailabilityService
@@ -62,10 +65,6 @@ const AWAY_PRESENCE_STATUSES = new Set(["Busy", "DoNotDisturb", "Dnd", "Unavaila
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function todayKey() {
-  return new Date().toISOString().slice(0, 10);
 }
 
 function asDate(value, fallback = new Date()) {
@@ -150,6 +149,18 @@ function callSignature(call = {}) {
   ].join("|");
 }
 
+function routingSignature(routing = {}) {
+  if (!routing || typeof routing !== "object") return "";
+  const unavailableAt = routing.manualUnavailableAt ? new Date(routing.manualUnavailableAt) : null;
+  return [
+    routing.enabled === false ? "disabled" : "enabled",
+    routing.desiredAvailability || "",
+    routing.reason || "",
+    routing.lastSource || "",
+    unavailableAt && !Number.isNaN(unavailableAt.getTime()) ? unavailableAt.toISOString() : "",
+  ].join("|");
+}
+
 function hasPolledStateChanged(previous, next) {
   return (
     previous.status !== next.status
@@ -158,34 +169,12 @@ function hasPolledStateChanged(previous, next) {
     || previous.exPresenceStatus !== next.exPresenceStatus
     || previous.activePlatform !== next.activePlatform
     || callSignature(previous.currentCall) !== callSignature(next.currentCall)
+    || routingSignature(previous.cxRouting) !== routingSignature(next.cxRouting)
   );
 }
 
 function buildDailyStats(existing = {}) {
-  const key = todayKey();
-  if (existing?.date === key) {
-    return {
-      date: key,
-      hot: Number(existing.hot) || 0,
-      day1: Number(existing.day1) || 0,
-      day10: Number(existing.day10) || 0,
-      aged: Number(existing.aged) || 0,
-      totalCalls: Number(existing.totalCalls) || 0,
-      goodCalls: Number(existing.goodCalls) || 0,
-      badCalls: Number(existing.badCalls) || 0,
-    };
-  }
-
-  return {
-    date: key,
-    hot: 0,
-    day1: 0,
-    day10: 0,
-    aged: 0,
-    totalCalls: 0,
-    goodCalls: 0,
-    badCalls: 0,
-  };
+  return normalizeDailyStats(existing);
 }
 
 function snapshotCurrentCall(activeCall = null) {
@@ -288,6 +277,7 @@ function createStateSnapshot(existing = {}, extensionId) {
     lastPresencePollAt: existing.lastPresencePollAt ? asDate(existing.lastPresencePollAt) : null,
     lastPresencePollError: existing.lastPresencePollError || null,
     dailyStats: buildDailyStats(existing.dailyStats),
+    cxRouting: existing.cxRouting || null,
   };
 }
 
@@ -401,9 +391,12 @@ async function processPresenceEnvelope(envelope = {}, logger) {
       next.currentCall = snapshotCurrentCall(activeCall);
     }
     next.lastCallDirection = activeCall?.direction || previous.lastCallDirection || null;
-    if (previous.status !== "onCall") {
-      next.dailyStats.totalCalls += 1;
-    }
+    next.dailyStats = applyCallStartedDailyStats(previous, next.dailyStats, {
+      call: next.currentCall,
+      platform: "ex",
+      direction: activeCall?.direction || next.lastCallDirection || null,
+      date: asDate(eventTime),
+    });
   } else if (telephonyStatus === "NoCall") {
     next.status = targetStatus;
     if (previous.status === "ringing" || previous.status === "onCall") {
@@ -726,13 +719,14 @@ async function processPresenceEnvelope(envelope = {}, logger) {
   ) {
     const endedReason = previous.status === "ringing" ? "missed" : "presence-no-call";
     next.lastCallOutcome = endedReason;
+    next.dailyStats = applyCallEndedDailyStats(previous, next.dailyStats, {
+      missed: endedReason === "missed",
+      date: asDate(eventTime),
+    });
     if (endedReason === "missed") {
-      next.dailyStats.badCalls += 1;
       next.lastMissedCallAt = asDate(eventTime);
       next.lastMissedCallFrom = previousCall.from || null;
       next.lastMissedCallTo = previousCall.to || null;
-    } else {
-      next.dailyStats.goodCalls += 1;
     }
     const finalized = await persistState(next, existing);
 
@@ -934,13 +928,15 @@ async function reconcilePresenceMismatch(agent, presence, logger, options = {}) 
     next.lastCallDirection = previous.currentCall?.direction || next.lastCallDirection || null;
     if (mismatch.type === "stuck_ringing") {
       next.lastCallOutcome = "missed";
+      next.dailyStats = applyCallEndedDailyStats(previous, next.dailyStats, {
+        missed: true,
+      });
       next.lastMissedCallAt = new Date();
       next.lastMissedCallFrom = previous.currentCall?.from || null;
       next.lastMissedCallTo = previous.currentCall?.to || null;
-      next.dailyStats.badCalls += 1;
     } else {
       next.lastCallOutcome = "ended";
-      next.dailyStats.goodCalls += 1;
+      next.dailyStats = applyCallEndedDailyStats(previous, next.dailyStats);
     }
   } else if (mismatch.type === "stuck_disposition") {
     next.status = "available";
@@ -954,7 +950,11 @@ async function reconcilePresenceMismatch(agent, presence, logger, options = {}) 
     next.currentCall = snapshotCurrentCall(mismatch.activeCall);
     next.activePlatform = "EX";
     next.lastStatusChange = new Date();
-    next.dailyStats.totalCalls += 1;
+    next.dailyStats = applyCallStartedDailyStats(previous, next.dailyStats, {
+      call: next.currentCall,
+      platform: "ex",
+      direction: mismatch.activeCall?.direction || null,
+    });
   }
 
   next.exPresenceStatus = presence?.presenceStatus || next.exPresenceStatus;
@@ -1201,17 +1201,22 @@ async function reconcilePolledPresence(agent, presence, logger, options = {}) {
     lastPresencePollAt: new Date(),
     lastPresencePollError: null,
   };
+  next.cxRouting = deriveCxRouting(next, agent?.cxRouting || previous.cxRouting || null);
 
   if (next.status !== previous.status) {
     next.lastStatusChange = new Date();
   }
   if (next.status === "onCall" && previous.status !== "onCall") {
-    next.dailyStats.totalCalls += 1;
+    next.dailyStats = applyCallStartedDailyStats(previous, next.dailyStats, {
+      call: next.currentCall,
+      platform: "ex",
+      direction: activeCall?.direction || next.currentCall?.direction || null,
+    });
   }
   if (previous.status === "onCall" && next.status !== "onCall") {
     next.lastCallEndedAt = new Date();
     next.lastCallOutcome = "ended";
-    next.dailyStats.goodCalls += 1;
+    next.dailyStats = applyCallEndedDailyStats(previous, next.dailyStats);
   }
   if (previous.status === "ringing" && next.status !== "ringing") {
     next.lastCallEndedAt = new Date();
@@ -1219,7 +1224,9 @@ async function reconcilePolledPresence(agent, presence, logger, options = {}) {
     next.lastMissedCallAt = new Date();
     next.lastMissedCallFrom = previous.currentCall?.from || null;
     next.lastMissedCallTo = previous.currentCall?.to || null;
-    next.dailyStats.badCalls += 1;
+    next.dailyStats = applyCallEndedDailyStats(previous, next.dailyStats, {
+      missed: true,
+    });
   }
 
   if (!hasPolledStateChanged(previous, next)) {

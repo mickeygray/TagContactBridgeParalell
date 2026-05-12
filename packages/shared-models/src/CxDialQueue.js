@@ -49,9 +49,9 @@ const cxDialQueueSchema = new mongoose.Schema(
     dailyPlacedCalls: { type: Number, default: 0, index: true },
     callPlan: {
       phaseIndex: { type: Number, default: 0 },
-      delaysMinutes: { type: [Number], default: [5, 30, 120] },
+      delaysMinutes: { type: [Number], default: [0, 15, 15, 15, 15, 15] },
       activeDay: { type: Number, default: 0 },
-      nextDelayMinutes: { type: Number, default: 5 },
+      nextDelayMinutes: { type: Number, default: 0 },
     },
     assignment: {
       extensionId: { type: String, default: null, index: true },
@@ -79,10 +79,24 @@ cxDialQueueSchema.index({ domain: 1, queueFamily: 1, dailyPlacedDateKey: 1, dail
 cxDialQueueSchema.index({
   domain: 1,
   state: 1,
+  queueFamily: 1,
   queueFamilyRank: 1,
+  dailyPlacedCalls: 1,
   progressiveStageIndex: 1,
+  lastPlacedAt: 1,
   releaseAt: 1,
   priorityScore: -1,
+});
+cxDialQueueSchema.index({
+  state: 1,
+  queueFamily: 1,
+  queueFamilyRank: 1,
+  dailyPlacedCalls: 1,
+  progressiveStageIndex: 1,
+  lastPlacedAt: 1,
+  priorityScore: -1,
+  releaseAt: 1,
+  createdAt: 1,
 });
 
 module.exports =

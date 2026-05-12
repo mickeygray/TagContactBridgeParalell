@@ -547,6 +547,213 @@ function createRingcxVoiceClient(options = {}) {
     });
   }
 
+  // ── CX integration v1 (call recordings) ────────────────────────────
+  //
+  // The recordings endpoints live under a DIFFERENT path prefix than
+  // the admin endpoints above:
+  //   /voice/api/cx/integration/v1/accounts/{rcAccountId}/sub-accounts/{subAccountId}/...
+  //
+  // - rcAccountId  = the parent RingCentral account id (the bearer's
+  //                  mainAccountId — `t.mainAccountId` from the token
+  //                  exchange) or the explicit RINGCX_RECORDING_RC_ACCOUNT_ID
+  //                  env override
+  // - subAccountId = our existing RINGCX_VOICE_ACCOUNT_ID (the RingCX
+  //                  sub-account where the call lived)
+  //
+  // Per RingCX docs: 2 calls/min metadata rate limit, 15-min media
+  // processing window after call end, polling only (no webhook).
+  // Recording must be manually activated on the account by RC.
+  //
+  // The base URL is overridable via RINGCX_RECORDING_BASE_URL so we
+  // can point at engage.ringcentral.com if the recordings backend
+  // diverges from ringcx.ringcentral.com.
+  const cxIntegrationBase = (
+    options.cxIntegrationBase
+      || readEnv("RINGCX_RECORDING_BASE_URL")
+      || config.rcxBase
+  ).replace(/\/$/, "");
+  const cxIntegrationPathPrefix = (
+    options.cxIntegrationPathPrefix
+      || readEnv("RINGCX_RECORDING_PATH_PREFIX", "/voice/api/cx/integration/v1")
+  ).replace(/\/$/, "");
+
+  function getRcAccountIdResolver(bearer) {
+    return (
+      options.rcAccountId
+      || readEnv("RINGCX_RECORDING_RC_ACCOUNT_ID")
+      || bearer?.mainAccountId
+      || null
+    );
+  }
+
+  function cxIntegrationPath(suffix, { rcAccountId, subAccountId }) {
+    const tail = suffix.startsWith("/") ? suffix.slice(1) : suffix;
+    return `${cxIntegrationPathPrefix}/accounts/${rcAccountId}/sub-accounts/${subAccountId}/${tail}`;
+  }
+
+  async function cxIntegrationRequest(method, suffix, {
+    body,
+    query,
+    headers = {},
+    acceptBinary = false,
+  } = {}) {
+    const bearer = userBearer
+      ? { accessToken: userBearer.accessToken, tokenType: userBearer.tokenType || "Bearer", mainAccountId: userBearer.mainAccountId }
+      : await resolveBearer(config);
+    const rcAccountId = getRcAccountIdResolver(bearer);
+    ensure(rcAccountId, "rcAccountId (RINGCX_RECORDING_RC_ACCOUNT_ID or bearer.mainAccountId)");
+    const subAccountId = config.accountId;
+    const path = cxIntegrationPath(suffix, { rcAccountId, subAccountId });
+
+    let url = `${cxIntegrationBase}${path}`;
+    if (query && Object.keys(query).length > 0) {
+      const qs = new URLSearchParams();
+      for (const [k, v] of Object.entries(query)) {
+        if (v !== undefined && v !== null) qs.append(k, String(v));
+      }
+      const sep = url.includes("?") ? "&" : "?";
+      url += `${sep}${qs.toString()}`;
+    }
+
+    const init = {
+      method,
+      headers: {
+        Authorization: `${bearer.tokenType} ${bearer.accessToken}`,
+        Accept: acceptBinary ? "audio/wav" : "application/json",
+        "User-Agent": "tagcontactbridge-parallel/0.1 (ringcx-recordings)",
+        ...headers,
+      },
+    };
+    if (body !== undefined && body !== null) {
+      init.headers["Content-Type"] = init.headers["Content-Type"] || "application/json";
+      init.body = typeof body === "string" ? body : JSON.stringify(body);
+    }
+
+    // Inline the fetch — rawFetch always JSON-parses, which would corrupt
+    // a binary WAV download. The metadata POST does want JSON parsing,
+    // so we branch on acceptBinary.
+    const response = await fetch(url, init);
+    if (!response.ok) {
+      const errText = await response.text().catch(() => "");
+      throw new ExternalServiceError("ringcx-voice", `${method} ${suffix} → HTTP ${response.status}`, {
+        status: response.status,
+        retryable: response.status >= 500 || response.status === 429,
+        details: {
+          path: suffix,
+          responseStatus: response.status,
+          responseBody: errText.slice(0, 500),
+          retryAfter: response.headers.get("retry-after"),
+        },
+      });
+    }
+    if (acceptBinary) {
+      const buffer = Buffer.from(await response.arrayBuffer());
+      return {
+        buffer,
+        mimeType: response.headers.get("content-type") || "audio/wav",
+        contentLength: Number(response.headers.get("content-length") || buffer.length) || buffer.length,
+      };
+    }
+    return response.json();
+  }
+
+  // Metadata polling — returns interaction segments in the requested
+  // time window. The metadata endpoint is rate-limited to 2 calls/min,
+  // so callers should pull bulk windows (e.g. the previous hour) not
+  // per-call.
+  //
+  // Empirical request body shape (verified by the 400 validation
+  // response from a live request):
+  //
+  //   {
+  //     "segmentEndTime": "YYYY-MM-DD HH:MM:SS",   // end of window, in
+  //                                                // the supplied timeZone
+  //     "timeInterval":   <seconds>,               // lookback duration,
+  //                                                // e.g. 3600 for 1h
+  //     "timeZone":       "America/Los_Angeles"    // IANA TZ id
+  //   }
+  //
+  // So a 1-hour window ending at 13:45 PT becomes
+  // { segmentEndTime: "2026-05-12 13:45:00", timeInterval: 3600,
+  //   timeZone: "America/Los_Angeles" }.
+  //
+  // Callers can still pass startTime + endTime (Date objects) — we
+  // compute timeInterval from the delta. Or pass segmentEndTime +
+  // timeInterval directly.
+  async function fetchInteractionMetadata({
+    startTime,
+    endTime,
+    segmentEndTime,
+    timeInterval,
+    timeZone = "America/Los_Angeles",
+    agentIds,
+    agentGroupIds,
+    extra = {},
+  } = {}) {
+    function formatLocalTs(date, tz) {
+      // Format YYYY-MM-DD HH:MM:SS in the supplied IANA timeZone (no
+      // offset suffix — RingCX takes the wall-clock time and applies
+      // the timeZone field separately).
+      const fmt = new Intl.DateTimeFormat("en-CA", {
+        timeZone: tz,
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+        hour12: false,
+      });
+      const parts = fmt.formatToParts(date);
+      const pick = (type) => parts.find((p) => p.type === type)?.value || "00";
+      const hour = pick("hour") === "24" ? "00" : pick("hour");
+      return `${pick("year")}-${pick("month")}-${pick("day")} ${hour}:${pick("minute")}:${pick("second")}`;
+    }
+
+    let endTs;
+    let intervalSec;
+
+    if (segmentEndTime && timeInterval) {
+      endTs = segmentEndTime instanceof Date ? segmentEndTime : new Date(segmentEndTime);
+      intervalSec = Number(timeInterval);
+    } else {
+      ensure(startTime, "startTime (or segmentEndTime + timeInterval)");
+      ensure(endTime, "endTime (or segmentEndTime + timeInterval)");
+      const startTs = startTime instanceof Date ? startTime : new Date(startTime);
+      endTs = endTime instanceof Date ? endTime : new Date(endTime);
+      intervalSec = Math.max(Math.round((endTs.getTime() - startTs.getTime()) / 1000), 1);
+    }
+
+    const body = {
+      segmentEndTime: formatLocalTs(endTs, timeZone),
+      timeInterval: intervalSec,
+      timeZone,
+      ...extra,
+    };
+    if (Array.isArray(agentIds) && agentIds.length > 0) {
+      body.agentIds = agentIds.map((id) => Number(id) || id);
+    }
+    if (Array.isArray(agentGroupIds) && agentGroupIds.length > 0) {
+      body.agentGroupIds = agentGroupIds.map((id) => Number(id) || id);
+    }
+
+    return cxIntegrationRequest("POST", "interaction-metadata", { body });
+  }
+
+  // Stream a single segment recording as a WAV buffer. Pair with
+  // fetchInteractionMetadata to get the (dialogId, segmentId) pair —
+  // those come from the metadata response. Returns
+  //   { buffer, mimeType, contentLength }
+  async function downloadRecordingBySegment({ dialogId, segmentId } = {}) {
+    ensure(dialogId, "dialogId");
+    ensure(segmentId, "segmentId");
+    return cxIntegrationRequest(
+      "GET",
+      `recordings/dialogs/${dialogId}/segments/${segmentId}`,
+      { acceptBinary: true },
+    );
+  }
+
   return {
     config,
     auth,
@@ -590,6 +797,10 @@ function createRingcxVoiceClient(options = {}) {
     hangupCall,
     addSessionToCall,
     toggleCallRecording,
+
+    // CX integration v1 — recordings
+    fetchInteractionMetadata,
+    downloadRecordingBySegment,
   };
 }
 

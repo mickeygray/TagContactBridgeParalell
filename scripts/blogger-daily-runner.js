@@ -499,8 +499,16 @@ async function main() {
     }
   }
 
+  // lastRunDate advances regardless of outcome — we don't want to retry
+  // the same day on failure (would re-trigger any deterministic side
+  // effects like commits already pushed to GitHub). lastPostedId only
+  // advances on success so the state file isn't a liar about what's
+  // actually live on the sites — a previous bug here had us claiming
+  // CNC was posted today when preflight had blocked the run entirely.
   state.lastRunDate = today;
-  state.lastPostedId = plan.draft.id;
+  if (!summary.failed) {
+    state.lastPostedId = plan.draft.id;
+  }
   if (dow === 5 && plan.chosenFridayCategory) {
     state.lastFridayCategory = plan.chosenFridayCategory.startsWith(
       "success-story-fallback-",

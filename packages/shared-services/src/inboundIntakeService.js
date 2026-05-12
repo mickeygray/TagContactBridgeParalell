@@ -633,6 +633,28 @@ function forceWynnContactDomain(normalized = {}) {
   };
 }
 
+// Lock contactDomain to whatever resolveCompanyFromPayload already
+// picked off the request body / referer / tracking number. Used by the
+// website-form intake path, where TAG and WYNN sales pages both POST
+// through the same /lead-contact route but stamp `company: "TAG"` /
+// `company: "WYNN"` into the payload. Previously this path always
+// forced WYNN (legacy artifact from when TAG had no public form), which
+// caused TAG sales-page leads to land in the Wynn tenant.
+function lockResolvedContactDomain(normalized = {}) {
+  const resolved = normalized.domain || "WYNN";
+  return {
+    ...normalized,
+    domain: resolved,
+    contactDomain: resolved,
+    lockContactDomain: true,
+    payloadSnapshot: {
+      ...(normalized.payloadSnapshot || {}),
+      contactDomain: resolved,
+      lockContactDomain: true,
+    },
+  };
+}
+
 function normalizeLdLeadPayload(payload = {}, headers = {}, options = {}) {
   const normalized = normalizeWebsiteLeadPayload(payload, headers);
   const prePing = options.prePing || null;
@@ -1822,7 +1844,9 @@ async function intakeNormalizedLead(normalized, options = {}) {
 
 async function intakeWebsiteLead(payload, options = {}) {
   return intakeNormalizedLead(
-    forceWynnContactDomain(normalizeWebsiteLeadPayload(payload, options.headers)),
+    lockResolvedContactDomain(
+      normalizeWebsiteLeadPayload(payload, options.headers),
+    ),
     options,
   );
 }

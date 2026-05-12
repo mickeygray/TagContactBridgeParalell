@@ -2,6 +2,16 @@
 
 const { CxDialQueue } = require("../../shared-models/src");
 
+const TOUCH_BALANCED_QUEUE_SORT = Object.freeze({
+  queueFamilyRank: 1,
+  dailyPlacedCalls: 1,
+  progressiveStageIndex: 1,
+  lastPlacedAt: 1,
+  priorityScore: -1,
+  releaseAt: 1,
+  createdAt: 1,
+});
+
 function normalizeDomain(domain) {
   return String(domain || "").trim().toUpperCase();
 }
@@ -114,13 +124,7 @@ async function releaseDueQueueItems(now = new Date(), limit = 50) {
     state: "queued",
     releaseAt: { $lte: now },
   })
-    .sort({
-      queueFamilyRank: 1,
-      progressiveStageIndex: 1,
-      priorityScore: -1,
-      releaseAt: 1,
-      createdAt: 1,
-    })
+    .sort(TOUCH_BALANCED_QUEUE_SORT)
     .limit(Math.min(Number(limit) || 50, 200));
 
   const released = [];
@@ -138,6 +142,19 @@ async function requeueExpiredClaims(now = new Date(), limit = 50) {
   const docs = await CxDialQueue.find({
     state: "claimed",
     claimUntil: { $ne: null, $lte: now },
+    $and: [
+      { $or: [{ "metadata.servingAt": { $exists: false } }, { "metadata.servingAt": null }] },
+      { $or: [{ "metadata.lastDialExecutionUii": { $exists: false } }, { "metadata.lastDialExecutionUii": null }, { "metadata.lastDialExecutionUii": "" }] },
+      { $or: [{ "metadata.lastQueueAttemptHeldForDisposition": { $ne: true } }, { "metadata.lastQueueAttemptHeldForDisposition": { $exists: false } }] },
+      {
+        $or: [
+          { "metadata.lastDialIntentStatus": { $exists: false } },
+          { "metadata.lastDialIntentStatus": null },
+          { "metadata.lastDialIntentStatus": "" },
+          { "metadata.lastDialIntentStatus": { $in: ["relay-failed", "error", "cancelled"] } },
+        ],
+      },
+    ],
   })
     .sort({ claimUntil: 1 })
     .limit(Math.min(Number(limit) || 50, 200));
@@ -212,11 +229,7 @@ async function claimNextReadyQueueItem(domain = null, claimMinutes = 5, options 
     },
     {
       sort: {
-        queueFamilyRank: 1,
-        progressiveStageIndex: 1,
-        priorityScore: -1,
-        releaseAt: 1,
-        createdAt: 1,
+        ...TOUCH_BALANCED_QUEUE_SORT,
       },
       new: true,
     },
@@ -335,13 +348,7 @@ async function listQueueItems(filters = {}) {
   }
 
   const cursor = CxDialQueue.find(query)
-    .sort({
-      queueFamilyRank: 1,
-      progressiveStageIndex: 1,
-      priorityScore: -1,
-      releaseAt: 1,
-      createdAt: 1,
-    });
+    .sort(TOUCH_BALANCED_QUEUE_SORT);
 
   const unbounded =
     filters.limitAll === true ||

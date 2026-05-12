@@ -19,6 +19,8 @@ const {
 const {
   setActivityState,
   bumpLastActivityAt,
+  applyCallEndedDailyStats,
+  normalizeDailyStats,
 } = require("./agentAvailabilityService");
 const { maybeCompleteSlice } = require("./agentSliceService");
 const {
@@ -56,6 +58,9 @@ const {
 const RCX_API_TIMEOUT_MS = Number(process.env.RCX_API_TIMEOUT_MS) || 15_000;
 const RCX_PLACING_TTL_MS = Number(process.env.RCX_PLACING_TTL_MS) || 2 * 60 * 1000;
 const RCX_RINGING_TTL_MS = Number(process.env.RCX_RINGING_TTL_MS) || 5 * 60 * 1000;
+const DEFAULT_MANUAL_CALL_RING_DURATION_SECONDS = 20;
+const DEFAULT_RCX_ACTIVE_CALL_VERIFY_MS = 25_000;
+const DEFAULT_RCX_ACTIVE_CALL_VERIFY_INTERVAL_MS = 1_000;
 
 // Activity states from which an agent can initiate a new dial.
 const DIAL_ELIGIBLE_ACTIVITY_STATES = new Set(["idle", "dispositioning", "wrapup"]);
@@ -85,6 +90,31 @@ function shouldUseUserBearerForManualCall() {
 
 function shouldSendManualCallerId() {
   return parseBooleanFlag(process.env.RINGCX_MANUAL_CALL_SEND_CALLER_ID, true);
+}
+
+function getManualCallRingDurationSeconds() {
+  const configured = Number(
+    process.env.RINGCX_MANUAL_CALL_RING_DURATION_SECONDS
+      || process.env.RINGCX_MANUAL_CALL_RING_DURATION,
+  );
+  if (Number.isFinite(configured) && configured > 0) return configured;
+  return DEFAULT_MANUAL_CALL_RING_DURATION_SECONDS;
+}
+
+function getManualCallApiTimeoutMs() {
+  return Math.max(RCX_API_TIMEOUT_MS, (getManualCallRingDurationSeconds() * 1000) + 5_000);
+}
+
+function getActiveCallVerifyMs() {
+  const configured = Number(process.env.RCX_ACTIVE_CALL_VERIFY_MS);
+  if (Number.isFinite(configured) && configured > 0) return configured;
+  return DEFAULT_RCX_ACTIVE_CALL_VERIFY_MS;
+}
+
+function getActiveCallVerifyIntervalMs() {
+  const configured = Number(process.env.RCX_ACTIVE_CALL_VERIFY_INTERVAL_MS);
+  if (Number.isFinite(configured) && configured > 0) return configured;
+  return DEFAULT_RCX_ACTIVE_CALL_VERIFY_INTERVAL_MS;
 }
 
 function getAutoDispositionWaitMs() {
@@ -214,7 +244,17 @@ async function resolveAutoDispositionCandidates(client, context = {}) {
   };
 }
 
-async function markAgentAvailableAfterAutoDisposition(extensionId, { logger = null, waitMs = null } = {}) {
+function callIdentity(call = {}) {
+  return normalizeExternalId(
+    call?.telephonySessionId
+      || call?.sessionId
+      || call?.callSessionId
+      || call?.uii
+      || "",
+  );
+}
+
+async function markAgentAvailableAfterAutoDisposition(extensionId, { logger = null, waitMs = null, uii = null } = {}) {
   const normalizedExtensionId = String(extensionId || "").trim();
   if (!normalizedExtensionId) {
     return { skipped: true, reason: "missing-extension-id" };
@@ -223,9 +263,50 @@ async function markAgentAvailableAfterAutoDisposition(extensionId, { logger = nu
   if (Number.isFinite(effectiveWaitMs) && effectiveWaitMs > 0) await sleep(effectiveWaitMs);
   try {
     const now = new Date();
+    const existing = await agentStateRepository
+      .findAgentStateByExtensionId(normalizedExtensionId)
+      .catch(() => null);
+    const existingCall = existing?.currentCall && typeof existing.currentCall === "object"
+      ? existing.currentCall
+      : {};
+    const existingCallChannel = String(existingCall.channel || "").trim().toLowerCase();
+    const existingIdentity = callIdentity(existingCall);
+    const requestedIdentity = normalizeExternalId(uii);
+    if (
+      requestedIdentity
+      && existingIdentity
+      && existingIdentity !== requestedIdentity
+      && String(existing?.activePlatform || "").trim().toUpperCase() === "CX"
+    ) {
+      return {
+        skipped: true,
+        reason: "different-active-cx-call",
+        extensionId: normalizedExtensionId,
+        existingIdentity,
+        requestedIdentity,
+      };
+    }
+    if (existingCallChannel && existingCallChannel !== "cx" && String(existing?.activePlatform || "").trim().toUpperCase() !== "CX") {
+      return {
+        skipped: true,
+        reason: "active-non-cx-call",
+        extensionId: normalizedExtensionId,
+        existingCallChannel,
+      };
+    }
+    const beforeStats = normalizeDailyStats(existing?.dailyStats, now);
+    const dailyStats = applyCallEndedDailyStats(existing || {}, beforeStats, {
+      missed: false,
+      date: now,
+    });
     const updated = await agentStateRepository.updateAgentState(normalizedExtensionId, {
       activityState: "idle",
       status: "available",
+      activePlatform: "none",
+      currentCall: {},
+      dailyStats,
+      lastCallOutcome: "ringcx-auto-disposition",
+      lastCallEndedAt: now,
       lastActivityAt: now,
       "cxRouting.enabled": true,
       "cxRouting.desiredAvailability": "available",
@@ -241,6 +322,8 @@ async function markAgentAvailableAfterAutoDisposition(extensionId, { logger = nu
       extensionId: normalizedExtensionId,
       activityState: updated?.activityState || null,
       status: updated?.status || null,
+      callEndCounted: Number(dailyStats.goodCalls || 0) > Number(beforeStats.goodCalls || 0)
+        || Number(dailyStats.badCalls || 0) > Number(beforeStats.badCalls || 0),
     };
   } catch (error) {
     logger?.warn?.("dial.dispose.autoDisposition.agentAvailable.failed", {
@@ -478,8 +561,8 @@ function findMatchingActiveCall(activeCallsPayload, { destination, callerId } = 
 async function waitForRingcxActiveCall(client, {
   destination,
   callerId,
-  timeoutMs = Number(process.env.RCX_ACTIVE_CALL_VERIFY_MS) || 8_000,
-  intervalMs = Number(process.env.RCX_ACTIVE_CALL_VERIFY_INTERVAL_MS) || 1_000,
+  timeoutMs = getActiveCallVerifyMs(),
+  intervalMs = getActiveCallVerifyIntervalMs(),
   logger = null,
 } = {}) {
   if (!client || typeof client.listActiveCalls !== "function") {
@@ -881,9 +964,9 @@ async function placeCall(agentId, queueItemId, {
         agentEmail,
         destination,
         callerId,
-        ringDuration: 5,
+        ringDuration: getManualCallRingDurationSeconds(),
       }),
-      RCX_API_TIMEOUT_MS,
+      getManualCallApiTimeoutMs(),
       "placeManualCall",
     );
   } catch (error) {
@@ -1190,6 +1273,7 @@ async function terminateAndDispose(callSessionId, dispositionKey, {
         rcxAutoDispositionRelease = await markAgentAvailableAfterAutoDisposition(effectiveAgentId, {
           logger,
           waitMs: 0,
+          uii: session.rcxUii,
         });
       }
     }

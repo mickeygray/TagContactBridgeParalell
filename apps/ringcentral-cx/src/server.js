@@ -33,8 +33,10 @@ const {
   mirrorAgentState,
   rebuildFreshHotLane,
   releaseCxQueueBatch,
+  releaseManualUnavailableAgentQueues,
   relayRingcentralTelephonyForwarded,
   runFreshHotLaneAllocator,
+  runRingcxAgentMonitor,
   scheduleTelephonySessionEnvelope,
   seedPresenceForAgents,
   startPresencePoller,
@@ -672,10 +674,12 @@ async function startServer() {
   const pacingTickState = createWorkerState();
   const pacingMorningPrepState = createWorkerState();
   const staleDialSweepState = createWorkerState();
+  const ringcxAgentMonitorState = createWorkerState();
   let pacingHourlyTimer = null;
   let pacingTickTimer = null;
   let pacingMorningPrepTimer = null;
   let staleDialSweepTimer = null;
+  let ringcxAgentMonitorTimer = null;
 
   if (pacingQueueEnabled) {
     const {
@@ -852,7 +856,12 @@ async function startServer() {
       staleDialSweepState.lastStartedAt = new Date();
       try {
         const { sweepStaleStates } = require("../../../packages/shared-services/src/dialService");
-        staleDialSweepState.lastResult = await sweepStaleStates({ logger: runtime.logger });
+        const [stale] = await Promise.all([
+          sweepStaleStates({ logger: runtime.logger }),
+        ]);
+        staleDialSweepState.lastResult = {
+          stale,
+        };
         staleDialSweepState.lastError = null;
       } catch (error) {
         staleDialSweepState.lastError = error.message;
@@ -868,6 +877,46 @@ async function startServer() {
     });
   } else {
     runtime.logger?.info?.("dial.staleSweep.disabled");
+  }
+
+  const ringcxAgentMonitorEnabled =
+    String(process.env.RINGCX_AGENT_MONITOR_ENABLED || "true").toLowerCase() !== "false";
+  const ringcxAgentMonitorIntervalMs = Math.max(
+    Number(process.env.RINGCX_AGENT_MONITOR_INTERVAL_MS) || 30_000,
+    10_000,
+  );
+  ringcxAgentMonitorState.enabled = ringcxAgentMonitorEnabled;
+  ringcxAgentMonitorState.intervalMs = ringcxAgentMonitorIntervalMs;
+  if (ringcxAgentMonitorEnabled) {
+    ringcxAgentMonitorTimer = setInterval(async () => {
+      if (ringcxAgentMonitorState.running) return;
+      ringcxAgentMonitorState.running = true;
+      ringcxAgentMonitorState.lastStartedAt = new Date();
+      try {
+        const now = new Date();
+        const [ringcxAgentMonitor, pauseRelease] = await Promise.all([
+          runRingcxAgentMonitor({ logger: runtime.logger, now }),
+          releaseManualUnavailableAgentQueues({ now }),
+        ]);
+        ringcxAgentMonitorState.lastResult = {
+          ringcxAgentMonitor,
+          pauseRelease,
+        };
+        ringcxAgentMonitorState.lastError = null;
+      } catch (error) {
+        ringcxAgentMonitorState.lastError = error.message;
+        runtime.logger?.warn?.("ringcx.agentMonitor.failed", { error: error.message });
+      } finally {
+        ringcxAgentMonitorState.lastCompletedAt = new Date();
+        ringcxAgentMonitorState.running = false;
+      }
+    }, ringcxAgentMonitorIntervalMs);
+    if (typeof ringcxAgentMonitorTimer.unref === "function") ringcxAgentMonitorTimer.unref();
+    runtime.logger?.info?.("ringcx.agentMonitor.registered", {
+      intervalMs: ringcxAgentMonitorIntervalMs,
+    });
+  } else {
+    runtime.logger?.info?.("ringcx.agentMonitor.disabled");
   }
 
   app.get("/health", requireHealthAccess, (_req, res) => {
@@ -904,6 +953,14 @@ async function startServer() {
         lastStartedAt: staleDialSweepState.lastStartedAt,
         lastCompletedAt: staleDialSweepState.lastCompletedAt,
         lastError: staleDialSweepState.lastError,
+      },
+      ringcxAgentMonitor: {
+        enabled: ringcxAgentMonitorState.enabled,
+        running: ringcxAgentMonitorState.running,
+        intervalMs: ringcxAgentMonitorState.intervalMs,
+        lastStartedAt: ringcxAgentMonitorState.lastStartedAt,
+        lastCompletedAt: ringcxAgentMonitorState.lastCompletedAt,
+        lastError: ringcxAgentMonitorState.lastError,
       },
     });
   });
@@ -956,6 +1013,15 @@ async function startServer() {
         lastCompletedAt: staleDialSweepState.lastCompletedAt,
         lastResult: staleDialSweepState.lastResult,
         lastError: staleDialSweepState.lastError,
+      },
+      ringcxAgentMonitor: {
+        enabled: ringcxAgentMonitorState.enabled,
+        running: ringcxAgentMonitorState.running,
+        intervalMs: ringcxAgentMonitorState.intervalMs,
+        lastStartedAt: ringcxAgentMonitorState.lastStartedAt,
+        lastCompletedAt: ringcxAgentMonitorState.lastCompletedAt,
+        lastResult: ringcxAgentMonitorState.lastResult,
+        lastError: ringcxAgentMonitorState.lastError,
       },
     });
   });
@@ -1338,6 +1404,7 @@ async function startServer() {
         queueItemId: req.params.queueItemId,
         caseId: req.body?.caseId != null ? Number(req.body.caseId) : null,
         placedAt: req.body?.placedAt || new Date().toISOString(),
+        confirmedCall: true,
         sourceService: config.serviceName,
       };
       const result = await createCxCallPlacedEvent({
@@ -1756,7 +1823,7 @@ async function startServer() {
       });
       return res.status(result.ok ? 200 : 400).json(result);
     } catch (error) {
-      return res.status(500).json({ ok: false, error: error.message });
+      return res.status(error.status || 500).json({ ok: false, error: error.message });
     }
   });
 
@@ -1780,11 +1847,12 @@ async function startServer() {
       const { setActivityState } = require("../../../packages/shared-services/src");
       const updated = await setActivityState(req.params.extensionId, "unavailable", {
         source: "cx-workspace",
+        breakType: req.body?.breakType || "short-break",
       });
       if (!updated) return res.status(404).json({ ok: false, error: "agent-not-found" });
       return res.json({ ok: true, agent: updated });
     } catch (error) {
-      return res.status(500).json({ ok: false, error: error.message });
+      return res.status(error.status || 500).json({ ok: false, error: error.message });
     }
   });
 
@@ -1981,6 +2049,10 @@ async function startServer() {
       clearInterval(staleDialSweepTimer);
       staleDialSweepTimer = null;
     }
+    if (ringcxAgentMonitorTimer) {
+      clearInterval(ringcxAgentMonitorTimer);
+      ringcxAgentMonitorTimer = null;
+    }
     clearInterval(watchdogTimer);
     rc.stopWarmupTimer();
   });
@@ -2011,6 +2083,12 @@ async function startServer() {
     if (staleDialSweepTimer) {
       clearInterval(staleDialSweepTimer);
       staleDialSweepTimer = null;
+    }
+  });
+  runtime.registerCleanup("ringcentral-agent-monitor", async () => {
+    if (ringcxAgentMonitorTimer) {
+      clearInterval(ringcxAgentMonitorTimer);
+      ringcxAgentMonitorTimer = null;
     }
   });
   runtime.registerCleanup("ringcentral-subscription-watchdog", async () => {

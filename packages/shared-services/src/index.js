@@ -140,14 +140,22 @@ const {
   getOrComputeAgentCallStats,
 } = require("./agentCallStatsService");
 const {
+  buildBlogBotStatus,
+} = require("./blogBotStatusService");
+const {
   isConfigured: isTranscriptionConfigured,
   processCallLogRecording,
 } = require("./transcriptionScoringService");
 const {
   isRecordingArchiveConfigured,
+  isRingcxRecordingEnabled,
   processCallRecordingArchive,
   queueCallRecordingArchiveJob,
 } = require("./recordingArchiveService");
+const {
+  computeWindow: computeCxRecordingHourlyWindow,
+  runCxRecordingHourly,
+} = require("./cxRecordingHourlyService");
 const {
   countLegacyContactActivities,
   listLegacyContactActivities,
@@ -198,9 +206,13 @@ const {
   buildCxCadenceRuntimeSnapshot,
   claimNextCxQueueItem,
   createCxCallPlacedEvent,
+  createCxCallTerminalOutcomeEvent,
+  classifyCxTerminalOutcome,
+  handleCxTerminalCallOutcome,
   processCxCadenceEventBatch,
   processNextCxCadenceEvent,
   queueCxDialRequest,
+  releaseManualUnavailableAgentQueues,
   releaseCxQueueBatch,
 } = require("./cxCadenceService");
 const {
@@ -219,6 +231,9 @@ const {
   executeCxDispatchIntent,
   executeCxHangupRequest,
 } = require("./ringcxDialExecutionService");
+const {
+  runRingcxAgentMonitor,
+} = require("./ringcxAgentMonitorService");
 const {
   buildControlPlaneHealthReport,
   buildProviderHealth,
@@ -489,6 +504,9 @@ const {
   buildVendorLeadRows,
   buildVendorOutcomeRows,
 } = require("./vendorNightlyEmailService");
+const {
+  backfillCallLogSourceFromLeadCadence,
+} = require("./callLogSourceBackfillService");
 const {
   collectFiles,
   buildRunId,
@@ -768,6 +786,7 @@ module.exports = {
   buildVendorCallRows,
   buildVendorLeadRows,
   buildVendorOutcomeRows,
+  backfillCallLogSourceFromLeadCadence,
   getActiveMailers,
   getMailerConfigState,
   getMailerHistory,
@@ -776,6 +795,9 @@ module.exports = {
   clearScheduledTelephonySessions,
   claimNextCxQueueItem,
   createCxCallPlacedEvent,
+  createCxCallTerminalOutcomeEvent,
+  classifyCxTerminalOutcome,
+  handleCxTerminalCallOutcome,
   createLogicsFacade,
   downloadLatestLexisZip,
   buildProspectStatusDiff,
@@ -827,6 +849,7 @@ module.exports = {
   publishQueueItemToRingcx,
   executeCxDispatchIntent,
   executeCxHangupRequest,
+  runRingcxAgentMonitor,
   probeTelephonySessionLookup,
   processPresenceEnvelope,
   publishDemoEvent,
@@ -874,15 +897,19 @@ module.exports = {
   resolveInboundCallSource,
   emitServiceRequest,
   isRecordingArchiveConfigured,
+  isRingcxRecordingEnabled,
   isTranscriptionConfigured,
   processCallRecordingArchive,
   processCallLogRecording,
   queueCallRecordingArchiveJob,
+  computeCxRecordingHourlyWindow,
+  runCxRecordingHourly,
   rebuildFreshHotLane,
   processMetaSocialWebhook,
   syncUsersFromRcExtensions,
   buildAgentCallStats,
   getOrComputeAgentCallStats,
+  buildBlogBotStatus,
   buildMetricsPulse,
   SHORT_CIRCUIT_INTAKE_SOURCES,
   runProspectSweep,
@@ -907,6 +934,7 @@ module.exports = {
   runDataHygieneSmoke,
   recordServiceAlert,
   releaseCxQueueBatch,
+  releaseManualUnavailableAgentQueues,
   runFreshHotLaneAllocator,
   scheduleTelephonySessionEnvelope,
   sleepInboxWorkflow,

@@ -110,24 +110,31 @@ test("agent-toggle manual unavailable survives legacy rows", () => {
   assert.equal(r.reason, "manual-unavailable");
 });
 
-test("EX busy overrides manual CX unavailable while the call is active", () => {
-  const r = deriveCxRouting(
-    {
-      cxAgentId: "20563",
-      status: "onCall",
-      exTelephonyStatus: "CallConnected",
-      currentCall: { channel: "ex", sessionId: "abc" },
-    },
-    {
-      enabled: true,
-      desiredAvailability: "unavailable",
-      reason: "manual-unavailable",
-      lastSource: "cx-workspace",
-    },
-  );
+test("manual CX unavailable survives connected EX calls", () => {
+  const original = process.env.RC_CX_EX_BUSY_GATE_ENABLED;
+  process.env.RC_CX_EX_BUSY_GATE_ENABLED = "true";
+  try {
+    const r = deriveCxRouting(
+      {
+        cxAgentId: "20563",
+        status: "onCall",
+        exTelephonyStatus: "CallConnected",
+        currentCall: { channel: "ex", sessionId: "abc" },
+      },
+      {
+        enabled: true,
+        desiredAvailability: "unavailable",
+        reason: "manual-unavailable",
+        lastSource: "cx-workspace",
+      },
+    );
 
-  assert.equal(r.desiredAvailability, "unavailable");
-  assert.equal(r.reason, "ex-busy");
+    assert.equal(r.desiredAvailability, "unavailable");
+    assert.equal(r.reason, "manual-unavailable");
+  } finally {
+    if (original == null) delete process.env.RC_CX_EX_BUSY_GATE_ENABLED;
+    else process.env.RC_CX_EX_BUSY_GATE_ENABLED = original;
+  }
 });
 
 test("EX ringing alone does not suppress CX lead serving", () => {

@@ -17,10 +17,14 @@ const { CxDialQueue, LeadCadence, MasterProspectIndex } = require("../../shared-
 const { recordWorkflowStage } = require("./workflowStateService");
 const { searchClientWorkspace } = require("./frontendReadService");
 const {
+  applyCallEndedDailyStats,
+  buildManualCxRouting,
   deriveActivityState,
-  deriveCxRouting,
   deriveFreshLeadGate,
   bumpLastActivityAt,
+  getBreakUsageSummary,
+  normalizeDailyStats,
+  normalizeCxPauseType,
   setActivityState,
   touchCxWorkspacePresence,
 } = require("./agentAvailabilityService");
@@ -42,7 +46,6 @@ const {
   backfillCxQueueOrdering,
   cancelCxQueueItem,
   completeCxQueueItem,
-  releaseAssignedCxQueueForAgent,
   releaseCxQueueItem,
   rescheduleCxQueueItem,
   stageCxDispatchIntent,
@@ -72,6 +75,16 @@ function normalizeDomain(domain) {
 function normalizeExternalId(value) {
   const normalized = String(value || "").trim();
   return normalized || null;
+}
+
+function callIdentity(call = {}) {
+  return normalizeExternalId(
+    call?.telephonySessionId
+      || call?.sessionId
+      || call?.callSessionId
+      || call?.uii
+      || "",
+  );
 }
 
 function readEnvExternalId(name) {
@@ -851,15 +864,57 @@ function queueCxCallbackBackgroundCleanup({
     });
 }
 
-async function clearAgentCxCallState(extensionId, source = "cx-call-state-clear") {
+async function clearAgentCxCallState(extensionId, source = "cx-call-state-clear", options = {}) {
   const normalizedExtensionId = String(extensionId || "").trim();
   if (!normalizedExtensionId) return null;
   const now = new Date();
-  return agentStateRepository.updateAgentState(normalizedExtensionId, {
+  const existing = await agentStateRepository
+    .findAgentStateByExtensionId(normalizedExtensionId)
+    .catch(() => null);
+  const existingCall = existing?.currentCall && typeof existing.currentCall === "object"
+    ? existing.currentCall
+    : {};
+  const requestedIdentity = normalizeExternalId(options.uii || options.rcxUii || null);
+  const existingIdentity = callIdentity(existingCall);
+  if (
+    requestedIdentity
+    && existingIdentity
+    && existingIdentity !== requestedIdentity
+    && String(existing?.activePlatform || "").trim().toUpperCase() === "CX"
+  ) {
+    return {
+      skipped: true,
+      reason: "different-active-cx-call",
+      extensionId: normalizedExtensionId,
+      existingIdentity,
+      requestedIdentity,
+    };
+  }
+  const dailyStats = applyCallEndedDailyStats(
+    existing || {},
+    normalizeDailyStats(existing?.dailyStats, now),
+    { missed: false, date: now },
+  );
+  const clearLongCallHold =
+    String(existing?.cxRouting?.reason || "").trim().toLowerCase() === "long-call-hold";
+  const updated = await agentStateRepository.updateAgentState(normalizedExtensionId, {
     status: "available",
     activityState: "idle",
     activePlatform: "none",
     currentCall: {},
+    dailyStats,
+    ...(clearLongCallHold
+      ? {
+        "cxRouting.desiredAvailability": "available",
+        "cxRouting.reason": "cx-call-ended",
+        "cxRouting.syncedAt": now,
+        "cxRouting.lastSource": source,
+        "cxRouting.manualUnavailableAt": null,
+        "cxRouting.pauseType": null,
+        "cxRouting.pauseStartedAt": null,
+        "cxRouting.pauseReleaseAt": null,
+      }
+      : {}),
     lastCallEndedAt: now,
     lastCallOutcome: "ended",
     lastActivityAt: now,
@@ -867,6 +922,18 @@ async function clearAgentCxCallState(extensionId, source = "cx-call-state-clear"
     "upstream.source": source,
     "upstream.mirroredAt": now,
   }).catch(() => null);
+  if (
+    updated?.activityState === "idle"
+    && String(updated?.cxRouting?.desiredAvailability || "available").toLowerCase() === "available"
+  ) {
+    try {
+      const { onAgentBecomesEligible } = require("./freshLeadAssignmentService");
+      await onAgentBecomesEligible(normalizedExtensionId);
+    } catch {
+      // Best-effort: call-state cleanup must not fail because lead refill did.
+    }
+  }
+  return updated;
 }
 
 async function ensureCxDealCaseProfile(domain, caseId, input = {}, dealHandoff = {}) {
@@ -1439,6 +1506,38 @@ function getNonNegativeEnvNumber(name, fallback) {
   return Math.max(Number(fallback) || 0, 0);
 }
 
+function readExplicitAccountTargetOpen(account = null, family = null) {
+  const policy = account?.cxQueuePolicy && typeof account.cxQueuePolicy === "object"
+    ? account.cxQueuePolicy
+    : null;
+  if (!policy) return null;
+  const normalizedFamily = normalizeCxQueueFamily(family);
+  const raw =
+    normalizedFamily === "fresh-day1"
+      ? policy.fresh?.targetOpen
+      : normalizedFamily === "fresh-day2to10"
+        ? policy.day2to15?.targetOpen
+        : normalizedFamily === "aged"
+          ? policy.aged?.targetOpen
+          : null;
+  const number = Number(raw);
+  return Number.isFinite(number) && number >= 0 ? Math.trunc(number) : null;
+}
+
+function resolveQueueFamilyTargetOpen(context = {}, queuePolicy = {}, family = null, envName = null) {
+  const explicit = readExplicitAccountTargetOpen(context.account || null, family);
+  if (explicit != null) return explicit;
+  const fallback =
+    normalizeCxQueueFamily(family) === "fresh-day1"
+      ? queuePolicy.fresh?.targetOpen
+      : normalizeCxQueueFamily(family) === "fresh-day2to10"
+        ? queuePolicy.day2to15?.targetOpen
+        : normalizeCxQueueFamily(family) === "aged"
+          ? queuePolicy.aged?.targetOpen
+          : 0;
+  return envName ? getNonNegativeEnvNumber(envName, fallback) : Math.max(Number(fallback) || 0, 0);
+}
+
 const ACTIVE_QUEUE_STATES = ["queued", "ready", "claimed", "serving", "paused"];
 let lastQueueOrderingBackfillAt = 0;
 const NON_DIALABLE_STAGE_PATTERN = /\b(dnc|do not call|post\s*date|post-date|sold|deal|bad inactive|inactive)\b/i;
@@ -1897,13 +1996,13 @@ async function maybeRefillCxQueueForAgent(context, agentExtensionId, visibleQueu
     ["aged"],
   );
   const freshTarget = queuePolicy.fresh.eligible
-    ? getNonNegativeEnvNumber("RC_CX_FRESH_OPEN_ASSIGNMENTS", queuePolicy.fresh.targetOpen)
+    ? resolveQueueFamilyTargetOpen(context, queuePolicy, "fresh-day1", "RC_CX_FRESH_OPEN_ASSIGNMENTS")
     : 0;
   const day2To15Target = Number(queuePolicy.day2to15.targetOpen || 0) > 0
-    ? getNonNegativeEnvNumber("RC_CX_DAY2TO15_OPEN_ASSIGNMENTS", queuePolicy.day2to15.targetOpen)
+    ? resolveQueueFamilyTargetOpen(context, queuePolicy, "fresh-day2to10", "RC_CX_DAY2TO15_OPEN_ASSIGNMENTS")
     : 0;
   const agedTarget = Number(queuePolicy.aged.targetOpen || 0) > 0
-    ? getNonNegativeEnvNumber("RC_CX_AGED_OPEN_ASSIGNMENTS", queuePolicy.aged.targetOpen)
+    ? resolveQueueFamilyTargetOpen(context, queuePolicy, "aged", "RC_CX_AGED_OPEN_ASSIGNMENTS")
     : 0;
   const nonFreshTarget = day2To15Target + agedTarget;
   const freshCurrent = countVisibleQueueItemsByFamily(visibleQueueItems, freshFamilies);
@@ -2877,6 +2976,9 @@ async function requestCxStatusChange(domain, user, input = {}) {
     err.status = 400;
     throw err;
   }
+  const requestedBreakType = desiredAvailability === "unavailable"
+    ? normalizeCxPauseType(input.breakType || input.pauseType) || "short-break"
+    : null;
 
   const context = await ensureCxAgentExtensionContext(await resolveCxUserContext(domain, user), user);
   const requested = await recordCxCommand({
@@ -2890,6 +2992,7 @@ async function requestCxStatusChange(domain, user, input = {}) {
     payload: {
       status: desiredAvailability,
       reason: input.reason || null,
+      breakType: requestedBreakType,
     },
   });
 
@@ -2914,29 +3017,17 @@ async function requestCxStatusChange(domain, user, input = {}) {
       mirroredAt: new Date(),
     },
   };
-  const requestedRouting = {
-    enabled: true,
+  const effectiveRouting = buildManualCxRouting(
+    { ...(context.agentState || {}), ...stateSnapshot, cxRouting: context.agentState?.cxRouting || null },
     desiredAvailability,
-    reason: desiredAvailability === "unavailable" ? "manual-unavailable" : "manual-available",
-    syncedAt: new Date(),
-    lastSource: "cx-workspace",
-    assignmentStats:
-      context.agentState?.cxRouting?.assignmentStats && typeof context.agentState.cxRouting.assignmentStats === "object"
-        ? context.agentState.cxRouting.assignmentStats
-        : null,
-  };
-  const effectiveRouting = deriveCxRouting(stateSnapshot, requestedRouting);
-  if (effectiveRouting.reason === "ex-idle" && desiredAvailability === "available") {
-    effectiveRouting.reason = "manual-available";
-    effectiveRouting.lastSource = "cx-workspace";
-  }
-  if (effectiveRouting.reason === "manual-unavailable") {
-    effectiveRouting.lastSource = "cx-workspace";
-  }
+    { breakType: requestedBreakType },
+  );
+  effectiveRouting.lastQueueReleaseAt = context.agentState?.cxRouting?.lastQueueReleaseAt || null;
   const freshLeadGate = deriveFreshLeadGate(stateSnapshot, effectiveRouting);
   const hasActiveExCall = freshLeadGate.source === "ex-call";
   const effectiveAvailability = effectiveRouting.desiredAvailability;
-  const activityState = hasActiveExCall
+  const platformHoldActive = hasActiveExCall || effectiveRouting.reason === "long-call-hold";
+  const activityState = platformHoldActive
     ? deriveActivityState(stateSnapshot, null)
     : desiredAvailability === "unavailable"
       ? "unavailable"
@@ -2952,17 +3043,41 @@ async function requestCxStatusChange(domain, user, input = {}) {
       mirroredAt: new Date(),
     },
   });
-  const manualUnavailableReleaseEnabled =
-    String(process.env.RC_CX_MANUAL_UNAVAILABLE_RELEASE_ENABLED || "true").toLowerCase() !== "false";
-  const queueRelease = desiredAvailability === "unavailable" && manualUnavailableReleaseEnabled
-    ? await releaseAssignedCxQueueForAgent({
-      extensionId: context.account.extensionId,
-      reason: "manual-unavailable",
-      actorEmail: context.account.email || user.email || null,
-    }).catch((error) => ({ ok: false, error: error.message }))
-    : desiredAvailability === "unavailable"
-      ? { ok: true, released: 0, skipped: true, reason: "manual-unavailable-release-disabled" }
-      : null;
+  const now = new Date();
+  const pauseReleaseAt = updatedState?.cxRouting?.pauseReleaseAt
+    ? new Date(updatedState.cxRouting.pauseReleaseAt)
+    : null;
+  const manualUnavailableReleaseDelayMs =
+    pauseReleaseAt && !Number.isNaN(pauseReleaseAt.getTime())
+      ? Math.max(pauseReleaseAt.getTime() - now.getTime(), 0)
+      : 0;
+  const queueRelease = desiredAvailability === "unavailable"
+    ? {
+      ok: true,
+      pending: true,
+      released: 0,
+      reason: "manual-unavailable-delay",
+      delayMs: manualUnavailableReleaseDelayMs,
+      releaseAt:
+        pauseReleaseAt && !Number.isNaN(pauseReleaseAt.getTime())
+          ? pauseReleaseAt
+          : null,
+    }
+    : null;
+  const breakUsage = getBreakUsageSummary(updatedState?.cxRouting?.breakUsage || {});
+  let eligibilityKick = null;
+  if (
+    desiredAvailability === "available"
+    && updatedState?.activityState === "idle"
+    && updatedState?.cxRouting?.desiredAvailability === "available"
+  ) {
+    try {
+      const { onAgentBecomesEligible } = require("./freshLeadAssignmentService");
+      eligibilityKick = await onAgentBecomesEligible(context.account.extensionId);
+    } catch (error) {
+      eligibilityKick = { ok: false, error: error.message };
+    }
+  }
 
   const completed = await recordWorkflowStage({
     domain: context.domain,
@@ -2984,6 +3099,8 @@ async function requestCxStatusChange(domain, user, input = {}) {
       cxRouting: updatedState?.cxRouting || null,
       freshLeadGate,
       queueRelease,
+      breakUsage,
+      eligibilityKick,
     },
   });
 
@@ -2996,6 +3113,8 @@ async function requestCxStatusChange(domain, user, input = {}) {
       cxRouting: updatedState?.cxRouting || null,
       freshLeadGate,
       queueRelease,
+      breakUsage,
+      eligibilityKick,
     },
   };
 }
@@ -3165,6 +3284,9 @@ async function requestCxDisposition(domain, user, input = {}) {
     await clearAgentCxCallState(
       context.account?.extensionId || user?.extensionId || input.assignedExtensionId || null,
       "cx-callback-eject",
+      {
+        uii: input.uii || input.rcxUii || queueItem?.metadata?.lastDialExecutionUii || null,
+      },
     );
     queueCxCallbackBackgroundCleanup({
       context,
@@ -4240,7 +4362,7 @@ async function hangupCxCallAfterDisposition({
     }).catch(() => null);
   }
   if (relayAccepted && assignedExtensionId) {
-    await clearAgentCxCallState(assignedExtensionId, "cx-disposition-complete");
+    await clearAgentCxCallState(assignedExtensionId, "cx-disposition-complete", { uii });
   }
 
   await recordWorkflowStage({
