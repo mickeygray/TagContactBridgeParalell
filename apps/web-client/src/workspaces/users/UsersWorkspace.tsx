@@ -1,11 +1,14 @@
 import * as React from "react";
 import {
+  Activity,
   CheckCircle2,
+  Headphones,
   Link2,
   Link2Off,
   Lock,
   MailCheck,
   PauseCircle,
+  PhoneCall,
   PlayCircle,
   Search,
   ShieldCheck,
@@ -121,8 +124,10 @@ export function UsersWorkspace() {
   const rows = accounts.data ?? [];
   const active = rows.filter((r) => r.status === "active").length;
   const invited = rows.filter((r) => r.status === "invited").length;
-  const disabled = rows.filter((r) => r.status === "disabled").length;
   const paired = rows.filter((r) => Boolean(r.extensionId)).length;
+  const cxLive = rows.filter((r) => r.agentState?.cxLive?.workspaceFresh).length;
+  const servingCx = rows.filter((r) => r.agentState?.cxLive?.serving).length;
+  const dialingNow = rows.filter((r) => r.agentState?.cxLive?.dialing).length;
 
   const selectedForDetail = rows.find((r) => r.id === detailId) ?? null;
   const selectedForEdit = rows.find((r) => r.id === editId) ?? null;
@@ -304,30 +309,78 @@ export function UsersWorkspace() {
       },
       {
         id: "live",
-        header: "Live",
+        header: "CX live",
         cell: (info) => {
           const state = info.row.original.agentState;
           if (!state) {
             return <span className="text-xs text-muted-foreground">—</span>;
           }
+          const live = state.cxLive;
           const onCall = hasCurrentCall(state.currentCall);
           const gate = resolveFreshLeadGate(state.freshLeadGate);
           const label = onCall
             ? "on call"
             : [state.exPresenceStatus, state.status].filter(Boolean).join("·") ||
               "online";
+          const activity = String(
+            live?.activityState || state.activityState || state.status || "",
+          ).toLowerCase();
+          const activityLabel = live?.dialing
+            ? activity === "dialing"
+              ? "Dialing"
+              : "On call"
+            : live?.wrappingUp
+              ? "Wrap"
+              : live?.activityState || state.activityState || label || "Idle";
+          const workspaceLabel = live?.workspaceFresh
+            ? "CX live"
+            : live?.workspaceActive
+              ? "CX stale"
+              : "CX off";
+          const workspaceTone = live?.workspaceFresh
+            ? "success"
+            : live?.workspaceActive
+              ? "warning"
+              : "neutral";
+          const servingLabel = live?.serving
+            ? "Serving"
+            : live?.desiredAvailability === "unavailable"
+              ? "Paused"
+              : live?.routingEnabled === false
+                ? "Routing off"
+                : gate.blocked
+                  ? "Not serving"
+                  : "Ready";
+          const servingTone = live?.serving
+            ? "success"
+            : live?.routingEnabled === false
+              ? "neutral"
+              : "warning";
+          const openAssignments = Number(live?.openAssignments || 0);
           return (
-            <div className="flex flex-wrap gap-1.5">
+            <div className="flex min-w-[250px] flex-wrap gap-1.5">
               <StatusPill
                 dotted
-                tone={toneFromStatus(
-                  onCall ? "on call" : state.exPresenceStatus ?? state.status ?? "",
-                )}
+                tone={workspaceTone}
+                title={
+                  live?.workspaceLastSeenAt
+                    ? `Last seen ${formatRelative(live.workspaceLastSeenAt)}`
+                    : undefined
+                }
               >
-                {label}
+                {workspaceLabel}
               </StatusPill>
-              <StatusPill dotted tone={gate.blocked ? "warning" : "success"}>
-                {gate.exCallActive ? "On EX call" : gate.label}
+              <StatusPill dotted tone={servingTone}>
+                {servingLabel}
+              </StatusPill>
+              <StatusPill
+                dotted
+                tone={toneFromStatus(onCall ? "on call" : activityLabel)}
+              >
+                {activityLabel}
+              </StatusPill>
+              <StatusPill tone="neutral">
+                Open {openAssignments}
               </StatusPill>
             </div>
           );
@@ -458,12 +511,30 @@ export function UsersWorkspace() {
         actions={<CreateUserDialog />}
       />
 
-      <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
+      <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-6">
         <KpiCard
           label="Active"
           value={active}
           hint={`${rows.length} total shown`}
           icon={<CheckCircle2 className="h-4 w-4" />}
+        />
+        <KpiCard
+          label="CX live"
+          value={cxLive}
+          hint="Workspace seen recently"
+          icon={<Headphones className="h-4 w-4" />}
+        />
+        <KpiCard
+          label="Serving"
+          value={servingCx}
+          hint="Eligible for CX leads"
+          icon={<Activity className="h-4 w-4" />}
+        />
+        <KpiCard
+          label="Dialing"
+          value={dialingNow}
+          hint="Dialing or on call"
+          icon={<PhoneCall className="h-4 w-4" />}
         />
         <KpiCard
           label="Invited"
@@ -476,11 +547,6 @@ export function UsersWorkspace() {
           value={paired}
           hint="With a RingCentral extension"
           icon={<Link2 className="h-4 w-4" />}
-        />
-        <KpiCard
-          label="Disabled"
-          value={disabled}
-          icon={<PauseCircle className="h-4 w-4" />}
         />
       </div>
 

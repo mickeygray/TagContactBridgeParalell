@@ -136,6 +136,10 @@ const {
   syncUsersFromRcExtensions,
 } = require("./userProvisioningService");
 const {
+  buildAgentCallStats,
+  getOrComputeAgentCallStats,
+} = require("./agentCallStatsService");
+const {
   isConfigured: isTranscriptionConfigured,
   processCallLogRecording,
 } = require("./transcriptionScoringService");
@@ -152,8 +156,10 @@ const { runProspectSweep } = require("./prospectCleanerService");
 const {
   ACTION_KEYS: DEPLOY_ACTION_KEYS,
   buildDeployState,
+  buildLocalDeployState,
   cancelDeployRun,
   listDeployRuns,
+  runLocalDeployCommand,
   triggerDeploy,
 } = require("./deployOrchestrationService");
 const {
@@ -254,12 +260,9 @@ const {
   buildReviewWorkspace,
   buildRingBridgeWorkspace,
   buildRingCentralWorkspace,
-  buildScheduleHistoryWorkspace,
-  buildScheduleWorkspace,
   buildWorkspaceShell,
   listRingCentralEvents,
   listReviewWorkspaceItems,
-  listScheduleCadence,
   searchClientWorkspace,
 } = require("./frontendReadService");
 const {
@@ -729,8 +732,6 @@ module.exports = {
   buildReviewWorkspace,
   buildRingBridgeWorkspace,
   buildRingCentralWorkspace,
-  buildScheduleHistoryWorkspace,
-  buildScheduleWorkspace,
   buildWorkspaceShell,
   buildDailyDeepCutDashboard,
   buildDailyDeepCutPlan,
@@ -808,7 +809,6 @@ module.exports = {
   listControlPlaneDomains,
   listReviewWorkspaceItems,
   listRingCentralEvents,
-  listScheduleCadence,
   listDispatchLists,
   listWorkLists,
   listServiceTopology,
@@ -881,15 +881,19 @@ module.exports = {
   rebuildFreshHotLane,
   processMetaSocialWebhook,
   syncUsersFromRcExtensions,
+  buildAgentCallStats,
+  getOrComputeAgentCallStats,
   buildMetricsPulse,
   SHORT_CIRCUIT_INTAKE_SOURCES,
   runProspectSweep,
   runScheduledBlastSweep,
   DEPLOY_ACTION_KEYS,
   buildDeployState,
+  buildLocalDeployState,
   buildSocialResponderWorkspace,
   cancelDeployRun,
   listDeployRuns,
+  runLocalDeployCommand,
   triggerDeploy,
   mirrorAgentState,
   normalizeAssignmentStats,

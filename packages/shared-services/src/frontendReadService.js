@@ -860,7 +860,6 @@ async function buildWorkspaceShell(domain) {
   const normalizedDomain = normalizeDomain(domain);
   const [
     metrics,
-    schedules,
     review,
     ringcentral,
     openConversationCount,
@@ -868,7 +867,6 @@ async function buildWorkspaceShell(domain) {
     recentWorkflowStages,
   ] = await Promise.all([
     buildMetricsWorkspace(normalizedDomain),
-    buildScheduleWorkspace(normalizedDomain),
     buildReviewWorkspace(normalizedDomain),
     buildRingCentralWorkspace(normalizedDomain),
     conversationWorkflowRepository.countConversationWorkflows(normalizedDomain, { status: "observed" }),
@@ -884,7 +882,6 @@ async function buildWorkspaceShell(domain) {
         lifetime: metrics.snapshots.lifetime,
         counts: metrics.counts,
       },
-      schedules: schedules.counts,
       review: review.counts,
       ringcentral: ringcentral.summary,
       inbox: {
@@ -1698,63 +1695,6 @@ async function buildRedlineWorkspace(domain, filters = {}) {
         };
 }
 
-async function buildScheduleWorkspace(domain) {
-  const normalizedDomain = normalizeDomain(domain);
-  const [
-    activeCadenceCount,
-    inactiveCadenceCount,
-    dueSmsCount,
-    dueEmailCount,
-    dueRvmCount,
-    dueCxCount,
-    recentCadence,
-    recentDispatchLists,
-  ] = await Promise.all([
-    leadCadenceRepository.countLeadCadence(normalizedDomain, { active: true }),
-    leadCadenceRepository.countLeadCadence(normalizedDomain, { active: false }),
-    leadCadenceRepository.countDueLeadCadenceByChannel(normalizedDomain, { channel: "sms" }),
-    leadCadenceRepository.countDueLeadCadenceByChannel(normalizedDomain, { channel: "email" }),
-    leadCadenceRepository.countDueLeadCadenceByChannel(normalizedDomain, { channel: "rvm" }),
-    leadCadenceRepository.countDueLeadCadenceByChannel(normalizedDomain, { channel: "cx" }),
-    leadCadenceRepository.listLeadCadence(normalizedDomain, { limit: 10 }),
-    dispatchListRepository.listDispatchLists(normalizedDomain, { limit: 10 }),
-  ]);
-
-  return {
-    domain: normalizedDomain,
-    counts: {
-      activeCadence: activeCadenceCount,
-      inactiveCadence: inactiveCadenceCount,
-      dueByChannel: {
-        sms: dueSmsCount,
-        email: dueEmailCount,
-        rvm: dueRvmCount,
-        cx: dueCxCount,
-      },
-    },
-    recentCadence,
-    recentDispatchLists,
-  };
-}
-
-async function listScheduleCadence(domain, filters = {}) {
-  return leadCadenceRepository.listLeadCadence(normalizeDomain(domain), filters);
-}
-
-async function buildScheduleHistoryWorkspace(domain, filters = {}) {
-  const normalizedDomain = normalizeDomain(domain);
-  return workflowRecordRepository.listWorkflowRecords({
-    domain: normalizedDomain,
-    family: filters.family || "dispatch",
-    subtype: filters.subtype,
-    stage: filters.stage,
-    caseId: filters.caseId,
-    aggregateType: filters.aggregateType,
-    aggregateId: filters.aggregateId,
-    limit: filters.limit || 50,
-  });
-}
-
 async function buildReviewWorkspace(domain) {
   const normalizedDomain = normalizeDomain(domain);
   const [
@@ -2253,11 +2193,8 @@ module.exports = {
   buildReviewWorkspace,
   buildRingBridgeWorkspace,
   buildRingCentralWorkspace,
-  buildScheduleWorkspace,
   buildWorkspaceShell,
-  buildScheduleHistoryWorkspace,
   listRingCentralEvents,
   listReviewWorkspaceItems,
-  listScheduleCadence,
   searchClientWorkspace,
 };

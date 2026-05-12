@@ -157,7 +157,7 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
     // but doesn't have permission for this specific action — propagate
     // as ApiError so the caller can render a permissions warning,
     // without clearing the session.
-    if (response.status === 401 && onUnauthorized) {
+    if (auth && response.status === 401 && onUnauthorized) {
       onUnauthorized();
     }
 

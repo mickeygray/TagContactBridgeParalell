@@ -21,14 +21,8 @@ const InboxWorkspace = React.lazy(() =>
 const ClientsWorkspace = React.lazy(() =>
   import("@/workspaces/clients/ClientsWorkspace").then((m) => ({ default: m.ClientsWorkspace })),
 );
-const ScheduleWorkspace = React.lazy(() =>
-  import("@/workspaces/schedule/ScheduleWorkspace").then((m) => ({ default: m.ScheduleWorkspace })),
-);
 const DispatchWorkspace = React.lazy(() =>
   import("@/workspaces/dispatch/DispatchWorkspace").then((m) => ({ default: m.DispatchWorkspace })),
-);
-const LibraryWorkspace = React.lazy(() =>
-  import("@/workspaces/library/LibraryWorkspace").then((m) => ({ default: m.LibraryWorkspace })),
 );
 const SocialWorkspace = React.lazy(() =>
   import("@/workspaces/social/SocialWorkspace").then((m) => ({ default: m.SocialWorkspace })),
@@ -99,26 +93,10 @@ export function AppRoutes() {
             }
           />
           <Route
-            path="schedule"
-            element={
-              <Suspended>
-                <ScheduleWorkspace />
-              </Suspended>
-            }
-          />
-          <Route
             path="dispatch"
             element={
               <Suspended>
                 <DispatchWorkspace />
-              </Suspended>
-            }
-          />
-          <Route
-            path="library"
-            element={
-              <Suspended>
-                <LibraryWorkspace />
               </Suspended>
             }
           />
@@ -154,7 +132,6 @@ export function AppRoutes() {
               </Suspended>
             }
           />
-          <Route path="settings" element={<SettingsStub />} />
         </Route>
       </Route>
 
@@ -185,14 +162,5 @@ export function AppRoutes() {
 
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
-  );
-}
-
-function SettingsStub() {
-  return (
-    <div className="prose prose-sm max-w-none">
-      <h2>Settings</h2>
-      <p>Placeholder — personal preferences and admin knobs will live here.</p>
-    </div>
   );
 }

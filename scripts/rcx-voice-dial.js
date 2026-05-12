@@ -55,8 +55,13 @@ async function main() {
   const dry = hasFlag(argv, "--dry");
   const manual = hasFlag(argv, "--manual");
   const keepLead = hasFlag(argv, "--keep-lead");
-  const callerId = readFlag(argv, "--caller-id")
-    || (process.env.RING_CENTRAL_RINGOUT_CALLER || "").replace(/\D/g, "").slice(-10);
+  const omitCallerId =
+    hasFlag(argv, "--no-caller-id")
+    || String(process.env.RINGCX_MANUAL_CALL_SEND_CALLER_ID || "").trim().toLowerCase() === "false";
+  const callerId = omitCallerId
+    ? ""
+    : readFlag(argv, "--caller-id")
+      || (process.env.RING_CENTRAL_RINGOUT_CALLER || "").replace(/\D/g, "").slice(-10);
   const campaignId = readFlag(argv, "--campaign-id") || process.env.RINGCX_VOICE_DEFAULT_CAMPAIGN_ID || "";
   const dialGroupId = readFlag(argv, "--dial-group-id") || process.env.RINGCX_VOICE_DEFAULT_DIAL_GROUP_ID || "";
   const agentEmail = readFlag(argv, "--agent-email")

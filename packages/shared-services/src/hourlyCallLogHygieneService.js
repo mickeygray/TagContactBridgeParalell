@@ -1050,7 +1050,14 @@ async function runHourlyCallLogHygieneForDomain(domain, options = {}) {
     });
     if (!payload) continue;
 
-    const upserted = await callLogRepository.upsertCallLog(payload);
+    // Stamp platform="ex" only on insert — RC native call sweep is the
+    // default-EX source. If a CX disposition has already stamped this
+    // row "cx" (via cxWorkspaceService.upsertCallLog), $setOnInsert
+    // won't fire and the "cx" value is preserved.
+    const upserted = await callLogRepository.upsertCallLog({
+      ...payload,
+      setOnInsert: { platform: "ex" },
+    });
     existingBySession.set(sessionId, upserted);
     summary.counts.mirrored += 1;
     if (patch) summary.counts.patched += 1;

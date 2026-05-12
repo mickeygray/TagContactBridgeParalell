@@ -1,5 +1,8 @@
 "use strict";
 
+const fs = require("fs");
+const path = require("path");
+const { execSync } = require("child_process");
 const {
   getGithubConfig,
   resolveTargetAuth,
@@ -9,6 +12,122 @@ const { recordWorkflowStage } = require("./workflowStateService");
 
 const ACTION_KEYS = Object.freeze(["full", "content", "restart"]);
 const DESTRUCTIVE_ACTIONS = new Set(["full", "restart"]);
+const LOCAL_ACTION_KEYS = Object.freeze(["status", "deploy", "restart", "rollback"]);
+const LOCAL_DESTRUCTIVE_ACTIONS = new Set(["deploy", "restart", "rollback"]);
+
+let localDeployServiceCache = undefined;
+
+function loadLocalDeployService() {
+  if (localDeployServiceCache !== undefined) return localDeployServiceCache;
+  try {
+    localDeployServiceCache = require("../../../scripts/deployService");
+  } catch (error) {
+    localDeployServiceCache = { loadError: error };
+  }
+  return localDeployServiceCache;
+}
+
+function sanitizeDeployLog(line) {
+  return String(line || "")
+    .replace(/[^\x09\x0a\x0d\x20-\x7e]/g, "")
+    .slice(0, 1000);
+}
+
+function runGit(repoPath, args) {
+  return execSync(`git ${args}`, {
+    cwd: repoPath,
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "ignore"],
+  }).trim();
+}
+
+function readLocalGitState(repoPath) {
+  if (!repoPath) return { configured: false };
+  const exists = fs.existsSync(repoPath);
+  const gitDirExists = exists && fs.existsSync(path.join(repoPath, ".git"));
+  if (!exists || !gitDirExists) {
+    return {
+      configured: Boolean(repoPath),
+      exists,
+      gitDirExists,
+      error: exists ? "Not a git repository" : "Local repo path does not exist",
+    };
+  }
+
+  try {
+    const branch = runGit(repoPath, "rev-parse --abbrev-ref HEAD");
+    let upstream = null;
+    let ahead = null;
+    let behind = null;
+    try {
+      upstream = runGit(repoPath, "rev-parse --abbrev-ref --symbolic-full-name @{u}");
+      ahead = Number(runGit(repoPath, "rev-list --count @{u}..HEAD")) || 0;
+      behind = Number(runGit(repoPath, "rev-list --count HEAD..@{u}")) || 0;
+    } catch {}
+
+    const dirtyLines = runGit(repoPath, "status --short")
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean);
+
+    return {
+      configured: true,
+      exists: true,
+      gitDirExists: true,
+      branch,
+      upstream,
+      ahead,
+      behind,
+      dirtyCount: dirtyLines.length,
+      dirtyPreview: dirtyLines.slice(0, 8),
+      headSha: runGit(repoPath, "rev-parse --short HEAD"),
+      headMessage: runGit(repoPath, "log -1 --format=%s"),
+      headDate: runGit(repoPath, "log -1 --format=%ci"),
+    };
+  } catch (error) {
+    return {
+      configured: true,
+      exists: true,
+      gitDirExists: true,
+      error: error.message,
+    };
+  }
+}
+
+function summarizeLocalTarget(key, site, history = null) {
+  const pemExists = Boolean(site.pemPath && fs.existsSync(site.pemPath));
+  const repoState = readLocalGitState(site.localRepoPath);
+  const missing = [
+    !site.host && "host",
+    !site.pemPath && "pem",
+    site.pemPath && !pemExists && "pem-file",
+    !site.remotePath && "remote-path",
+    !site.localRepoPath && "local-repo",
+    site.localRepoPath && !repoState.exists && "local-repo-path",
+    repoState.exists && !repoState.gitDirExists && "local-git",
+  ].filter(Boolean);
+  const warnings = [];
+
+  return {
+    key,
+    label: site.label || key.toUpperCase(),
+    url: site.url || null,
+    host: site.host || null,
+    user: site.user || null,
+    remotePath: site.remotePath || null,
+    localRepoPath: site.localRepoPath || null,
+    localBuildPath: site.localBuildPath || null,
+    pm2Process: site.pm2Process || null,
+    branch: site.branch || null,
+    pemConfigured: Boolean(site.pemPath),
+    pemExists,
+    repo: repoState,
+    ready: missing.length === 0,
+    missing,
+    warnings,
+    history: history || null,
+  };
+}
 
 function summarizeRun(run) {
   if (!run) return null;
@@ -148,6 +267,187 @@ async function buildDeployState() {
     recentRuns,
     fetchError,
   };
+}
+
+async function buildLocalDeployState() {
+  const svc = loadLocalDeployService();
+  if (!svc || svc.loadError || !svc.SITES) {
+    return {
+      configured: false,
+      missing: ["scripts/deployService.js"],
+      targets: [],
+      loadError: svc?.loadError?.message || "Local deploy service unavailable",
+    };
+  }
+
+  const targets = Object.entries(svc.SITES).map(([key, site]) =>
+    summarizeLocalTarget(key, site, typeof svc.getStatus === "function" ? svc.getStatus(key) : null),
+  );
+
+  return {
+    configured: targets.some((target) => target.ready),
+    targets,
+    missing: targets.length
+      ? Array.from(new Set(targets.flatMap((target) => target.missing || [])))
+      : ["local deploy targets"],
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+function normalizeLocalAction(action) {
+  const value = String(action || "").toLowerCase();
+  if (!LOCAL_ACTION_KEYS.includes(value)) {
+    const err = new Error(`Unknown local deploy action: ${action}`);
+    err.status = 400;
+    throw err;
+  }
+  return value;
+}
+
+async function recordLocalDeployEvent({
+  targetKey,
+  site,
+  action,
+  stage,
+  actor,
+  note,
+  result,
+  logs,
+  error,
+}) {
+  try {
+    const domain = targetKey === "wynn" ? "WYNN" : "TAG";
+    const workflowRecord = await recordWorkflowStage({
+      domain,
+      family: "deploy",
+      subtype: `local-${action}`,
+      stage,
+      aggregateType: "sales-site",
+      aggregateId: targetKey,
+      sourceService: "control-plane-local-deploy",
+      title: `${site.label || targetKey} local ${action}`,
+      summary:
+        note?.trim?.() ||
+        (error ? `Local ${action} failed: ${error.message}` : `Local ${action} completed`),
+      payload: {
+        actorEmail: actor?.email || null,
+        actorName: actor?.name || null,
+        targetKey,
+        targetLabel: site.label || targetKey,
+        action,
+        stage,
+        note: note || null,
+        result: result || null,
+        error: error
+          ? { message: error.message, status: error.status || null }
+          : null,
+        logs: (logs || []).slice(-80),
+      },
+    });
+    return String(workflowRecord._id);
+  } catch {
+    return null;
+  }
+}
+
+async function runLocalDeployCommand({
+  targetKey,
+  action,
+  actor,
+  note = null,
+  confirm = null,
+}) {
+  const svc = loadLocalDeployService();
+  if (!svc || svc.loadError || !svc.SITES) {
+    const err = new Error(
+      svc?.loadError?.message || "Local deploy service is unavailable.",
+    );
+    err.status = 503;
+    throw err;
+  }
+
+  const key = String(targetKey || "").toLowerCase().trim();
+  const site = svc.SITES[key];
+  if (!site) {
+    const err = new Error(`Unknown local deploy target: ${targetKey}`);
+    err.status = 404;
+    throw err;
+  }
+
+  const normalizedAction = normalizeLocalAction(action);
+  if (
+    LOCAL_DESTRUCTIVE_ACTIONS.has(normalizedAction) &&
+    String(confirm || "").trim() !== key
+  ) {
+    const err = new Error(
+      `Local ${normalizedAction} requires confirmation for ${key}.`,
+    );
+    err.status = 400;
+    throw err;
+  }
+
+  const logs = [];
+  const onLog = (line) => {
+    const clean = sanitizeDeployLog(line);
+    if (clean) logs.push(clean);
+  };
+
+  let result = null;
+  try {
+    if (normalizedAction === "status") {
+      result = await svc.checkRemote(key);
+    } else if (normalizedAction === "deploy") {
+      result = await svc.deployBuild(
+        key,
+        { commitMsg: note ? String(note).trim() : null },
+        onLog,
+      );
+    } else if (normalizedAction === "restart") {
+      if (typeof svc.restartSite !== "function") {
+        const err = new Error("Local restart is not available in deployService.js");
+        err.status = 503;
+        throw err;
+      }
+      result = await svc.restartSite(key, null, onLog);
+    } else if (normalizedAction === "rollback") {
+      result = await svc.rollbackBuild(key, onLog);
+    }
+
+    const workflowRecordId = await recordLocalDeployEvent({
+      targetKey: key,
+      site,
+      action: normalizedAction,
+      stage: result?.ok === false ? "completed-with-warnings" : "completed",
+      actor,
+      note,
+      result,
+      logs,
+    });
+
+    return {
+      ok: true,
+      targetKey: key,
+      action: normalizedAction,
+      label: site.label || key,
+      result,
+      logs: logs.slice(-200),
+      completedAt: new Date().toISOString(),
+      workflowRecordId,
+    };
+  } catch (error) {
+    await recordLocalDeployEvent({
+      targetKey: key,
+      site,
+      action: normalizedAction,
+      stage: "failed",
+      actor,
+      note,
+      logs,
+      error,
+    });
+    error.details = { logs: logs.slice(-200) };
+    throw error;
+  }
 }
 
 function normalizeAction(action) {
@@ -325,8 +625,12 @@ async function cancelDeployRun({ runId, targetKey, actor }) {
 module.exports = {
   ACTION_KEYS,
   DESTRUCTIVE_ACTIONS,
+  LOCAL_ACTION_KEYS,
+  LOCAL_DESTRUCTIVE_ACTIONS,
   buildDeployState,
+  buildLocalDeployState,
   cancelDeployRun,
   listDeployRuns,
+  runLocalDeployCommand,
   triggerDeploy,
 };

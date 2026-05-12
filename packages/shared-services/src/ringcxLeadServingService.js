@@ -173,6 +173,52 @@ function mapQueueFamilyToAgeBucket(queueFamily) {
   return "day2_10";
 }
 
+function isFallbackAfterFirstContactAccount(account = null) {
+  const metadata = account?.metadata && typeof account.metadata === "object"
+    ? account.metadata
+    : {};
+  const mode = String(
+    metadata.cxQueueVisibilityMode
+      || metadata.cxQueueMode
+      || metadata.leadServingMode
+      || "",
+  ).trim().toLowerCase();
+  return mode === "fallback_after_first_contact"
+    || mode === "fallback-after-first-contact"
+    || metadata.cxFallbackAfterFirstContact === true;
+}
+
+function isPostFirstContactQueueItem(queueItem = {}) {
+  const metadata = queueItem?.metadata && typeof queueItem.metadata === "object"
+    ? queueItem.metadata
+    : {};
+  const family = String(queueItem.queueFamily || metadata.queueFamily || "").trim().toLowerCase();
+  if (family === "fresh-day2to10" || family === "aged") return true;
+
+  const stageIndex = Number(queueItem.progressiveStageIndex ?? metadata.progressiveStageIndex);
+  if (Number.isFinite(stageIndex) && stageIndex > 0 && stageIndex < 99) return true;
+
+  const stageKey = String(queueItem.progressiveStageKey || metadata.progressiveStageKey || "")
+    .trim()
+    .toLowerCase();
+  if (["second-contact", "third-contact"].includes(stageKey)) return true;
+
+  const placedCalls = Number(queueItem.placedCalls ?? metadata.placedCalls ?? 0);
+  return Number.isFinite(placedCalls) && placedCalls > 0;
+}
+
+function canBypassQueuePolicyForFallbackDial(account = null, queueItem = {}) {
+  return isFallbackAfterFirstContactAccount(account) && isPostFirstContactQueueItem(queueItem);
+}
+
+function isAgentAvailableForFallbackPublish(agentState = null) {
+  const routing = agentState?.cxRouting && typeof agentState.cxRouting === "object"
+    ? agentState.cxRouting
+    : {};
+  if (routing.enabled === false) return false;
+  return String(routing.desiredAvailability || "").trim().toLowerCase() === "available";
+}
+
 function buildExternId(item = {}) {
   const domain = normalizeDomain(item.domain || "TAG");
   const caseId = Number(item.caseId || 0) || 0;
@@ -834,20 +880,31 @@ async function publishQueueItemToRingcx(options = {}) {
         maxOpenAssignments: 999999,
       });
       if (!eligibility.eligible) {
-        await stampQueueItemSync(queueItemId, {
-          "metadata.rcxVisibilityStatus": "deferred",
-          "metadata.rcxVisibilityReason": `agent-ineligible:${eligibility.reason || "unknown"}`,
-          "metadata.rcxVisibilitySyncedAt": new Date(),
-        });
-        return {
-          ok: true,
-          published: false,
-          deferred: true,
-          reason: `agent-ineligible:${eligibility.reason || "unknown"}`,
-          queueItemId,
-          extensionId: assignedExtensionId,
-          eligibility,
-        };
+        const reason = String(eligibility.reason || "unknown").trim().toLowerCase();
+        const canPublishFallbackDial = reason.startsWith("queue-policy")
+          && canBypassQueuePolicyForFallbackDial(userAccount, queueItem)
+          && isAgentAvailableForFallbackPublish(agentState);
+        if (canPublishFallbackDial) {
+          await stampQueueItemSync(queueItemId, {
+            "metadata.rcxVisibilityFallbackPolicyBypassAt": new Date(),
+            "metadata.rcxVisibilityFallbackPolicyBypassReason": eligibility.reason || "queue-policy",
+          });
+        } else {
+          await stampQueueItemSync(queueItemId, {
+            "metadata.rcxVisibilityStatus": "deferred",
+            "metadata.rcxVisibilityReason": `agent-ineligible:${eligibility.reason || "unknown"}`,
+            "metadata.rcxVisibilitySyncedAt": new Date(),
+          });
+          return {
+            ok: true,
+            published: false,
+            deferred: true,
+            reason: `agent-ineligible:${eligibility.reason || "unknown"}`,
+            queueItemId,
+            extensionId: assignedExtensionId,
+            eligibility,
+          };
+        }
       }
     } catch (error) {
       // Don't fail the publish on a presence-lookup error — log it

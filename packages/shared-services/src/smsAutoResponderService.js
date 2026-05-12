@@ -4,7 +4,7 @@ const {
   createCallrailClient,
   createLogicsClient,
 } = require("../../shared-integrations/src");
-const { resolveExportStatus } = require("../../shared-config/src/statusMap");
+const { resolveExportStatus, resolveStatus } = require("../../shared-config/src/statusMap");
 const {
   caseProfileRepository,
   conversationMessageRepository,
@@ -30,6 +30,101 @@ function normalizePhone(value) {
 
 function normalizeDomain(value) {
   return String(value || "").trim().toUpperCase();
+}
+
+function isClientLikeStatusCategory(value) {
+  const category = String(value || "").trim().toLowerCase();
+  return (
+    category === "client" ||
+    category === "redline" ||
+    /^tier\d*$/.test(category)
+  );
+}
+
+function summarizeCaseContext(source, match = {}, domain) {
+  const statusId = match.statusId ?? match.status ?? null;
+  const resolved = resolveStatus(domain, statusId);
+  return {
+    source,
+    domain: normalizeDomain(match.domain || domain),
+    caseId: match.caseId != null ? Number(match.caseId) : null,
+    statusId: statusId != null ? Number(statusId) : null,
+    statusCategory: match.statusCategory || resolved?.category || null,
+    statusLabel: match.statusLabel || resolved?.label || null,
+    name: match.name || [match.firstName, match.lastName].filter(Boolean).join(" ") || null,
+    saleDate: match.saleDate || null,
+  };
+}
+
+async function resolveSmsContactGuard({ domain, phone, workflow, logger }) {
+  const normalizedDomain = normalizeDomain(domain);
+  const workflowCaseId = Number(workflow?.caseId);
+
+  try {
+    if (Number.isFinite(workflowCaseId) && workflowCaseId > 0) {
+      const profile = await caseProfileRepository.findCaseProfile(normalizedDomain, workflowCaseId);
+      if (profile) {
+        const context = summarizeCaseContext("conversation-workflow-case-profile", profile, normalizedDomain);
+        if (isClientLikeStatusCategory(context.statusCategory)) {
+          return { shouldBlockAutoResponse: true, reason: "existing-client-case", context };
+        }
+      }
+    }
+  } catch (error) {
+    logger?.warn?.("sms.auto.case_guard.workflow_lookup_failed", {
+      domain: normalizedDomain,
+      phone,
+      error: error.message,
+    });
+  }
+
+  try {
+    const profile = await caseProfileRepository.findCaseProfileByPhone(normalizedDomain, phone);
+    if (profile) {
+      const context = summarizeCaseContext("case-profile-phone", profile, normalizedDomain);
+      if (isClientLikeStatusCategory(context.statusCategory)) {
+        return { shouldBlockAutoResponse: true, reason: "existing-client-phone", context };
+      }
+    }
+  } catch (error) {
+    logger?.warn?.("sms.auto.case_guard.case_profile_lookup_failed", {
+      domain: normalizedDomain,
+      phone,
+      error: error.message,
+    });
+  }
+
+  try {
+    const facade = createLogicsFacade(normalizedDomain);
+    const result = await facade.findCaseByPhone(phone);
+    const matches = Array.isArray(result?.matches) ? result.matches : [];
+    for (const match of matches.slice(0, 3)) {
+      const context = summarizeCaseContext("logics-phone-lookup", match, normalizedDomain);
+      if (isClientLikeStatusCategory(context.statusCategory)) {
+        return { shouldBlockAutoResponse: true, reason: "existing-client-logics", context };
+      }
+    }
+    if (matches.length) {
+      return {
+        shouldBlockAutoResponse: false,
+        reason: "case-found-not-client",
+        context: summarizeCaseContext("logics-phone-lookup", matches[0], normalizedDomain),
+      };
+    }
+  } catch (error) {
+    logger?.warn?.("sms.auto.case_guard.logics_lookup_failed", {
+      domain: normalizedDomain,
+      phone,
+      error: error.message,
+    });
+    return {
+      shouldBlockAutoResponse: true,
+      reason: "case-lookup-error",
+      error: error.message,
+    };
+  }
+
+  return { shouldBlockAutoResponse: false, reason: "no-client-case-found" };
 }
 
 /**
@@ -270,7 +365,8 @@ async function markLogicsDncForSms({
   }
 
   const note = [
-    "SMS DNC from inbound reply.",
+    "SMS no-help DNC from inbound reply.",
+    classification?.intent ? `Intent: ${classification.intent}.` : null,
     classification?.rationale ? `Reason: ${classification.rationale}` : null,
     rawPayload?.content || rawPayload?.message
       ? `Inbound: ${String(rawPayload.content || rawPayload.message).slice(0, 240)}`
@@ -342,20 +438,20 @@ async function applyDncConfirmSideEffects({
   rawPayload,
   logger,
 }) {
-  await recordNegativeConsent({
+  const consent = await recordNegativeConsent({
     domain,
     phone,
     reason: classification?.rationale || "dnc_confirm",
     rawPayload,
   });
-  await optOutCadenceChannels({
+  const cadence = await optOutCadenceChannels({
     domain,
     phone,
     channels: ["sms", "email", "rvm", "call"],
     reason: "dnc-confirm",
     logger,
   });
-  return markLogicsDncForSms({
+  const logics = await markLogicsDncForSms({
     domain,
     phone,
     workflow,
@@ -363,6 +459,17 @@ async function applyDncConfirmSideEffects({
     rawPayload,
     logger,
   });
+  return {
+    ok: Boolean(logics?.ok),
+    policy: "logics-dnc-from-no-help-reason",
+    logicsDncAttempted: true,
+    cadenceChannels: ["sms", "email", "rvm", "call"],
+    cadenceMatched: Boolean(cadence),
+    consentRecorded: Boolean(consent && !consent.error),
+    consentId: consent?._id ? String(consent._id) : null,
+    consentError: consent?.error || null,
+    logics,
+  };
 }
 
 /**
@@ -420,7 +527,36 @@ async function runAutoResponder({
       tier: "hard_stop",
       sent: false,
       reason: "carrier-handles-block",
+      policy: "sms-only-carrier-opt-out",
+      logicsDncAttempted: false,
+      cadenceChannels: ["sms"],
       cadenceMatched: Boolean(cadence),
+    };
+  }
+
+  const contactGuard = await resolveSmsContactGuard({
+    domain,
+    phone,
+    workflow,
+    logger,
+  });
+  if (contactGuard.shouldBlockAutoResponse) {
+    logger?.info?.("sms.auto.blocked_by_case_guard", {
+      domain,
+      phone,
+      tier: classification.tier,
+      reason: contactGuard.reason,
+      caseId: contactGuard.context?.caseId || null,
+      statusCategory: contactGuard.context?.statusCategory || null,
+    });
+    return {
+      action: "skipped",
+      tier: classification.tier,
+      sent: false,
+      reason: contactGuard.reason,
+      policy: "case-guard-human-review",
+      logicsDncAttempted: false,
+      contactGuard,
     };
   }
 
@@ -453,6 +589,11 @@ async function runAutoResponder({
       tier: classification.tier,
       sent: false,
       reason: gate.reason,
+      policy:
+        classification.tier === "dnc_confirm"
+          ? "logics-dnc-from-no-help-reason"
+          : "manual-review-or-send-gate",
+      contactGuard,
       dncResult,
     };
   }
@@ -578,9 +719,16 @@ async function runAutoResponder({
     action: sendError ? "send_failed" : "sent",
     tier: classification.tier,
     sent: !sendError,
+    policy:
+      classification.tier === "dnc_confirm"
+        ? "logics-dnc-from-no-help-reason"
+        : classification.tier === "callback_prompt"
+          ? "safe-callback-guidance"
+          : "no-side-effect",
     outboundMessageId: outbound.id,
     providerMessageId: outbound.providerMessageId,
     body: replyBody,
+    contactGuard,
     dncResult,
   };
 }

@@ -5,13 +5,14 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/Card";
 import { StatusPill, toneFromStatus } from "@/components/ui/StatusPill";
 import { ErrorState } from "@/components/ui/ErrorState";
 import { SkeletonRow } from "@/components/ui/Skeleton";
-import { EmptyState, GapCard } from "@/components/ui/EmptyState";
+import { EmptyState } from "@/components/ui/EmptyState";
 import { DataTable, type ColumnDef } from "@/components/ui/DataTable";
 import { useDomainStore } from "@/lib/domain/domainStore";
 import { useDispatchLists, useWorklists } from "@/lib/api/queries/dispatch";
 import { formatDateTime, formatNumber } from "@/lib/utils/format";
 import type { DispatchList } from "@/lib/api/types";
 import { CampaignBuilder } from "./CampaignBuilder";
+import { TemplateLookup } from "./TemplateLookup";
 
 export function DispatchWorkspace() {
   const domain = useDomainStore((s) => s.domain);
@@ -138,26 +139,7 @@ export function DispatchWorkspace() {
         </CardContent>
       </Card>
 
-      <div className="grid grid-cols-1 gap-6 md:grid-cols-2">
-        <GapCard
-          title="Audience builder"
-          description="Build dispatch lists from prospect search or case-profile filters, with range + pacing controls. Today /api/dispatch/build + /queue both expect a full payload, so a UI form (not a per-row button) is the right shape."
-          routes={[
-            "POST /api/commands/dispatch/build-from-search",
-            "POST /api/commands/dispatch/build-from-caseprofiles",
-            "GET /api/read/dispatch/:domain/templates",
-          ]}
-        />
-        <GapCard
-          title="Re-queue an existing list"
-          description="5001's POST /api/dispatch/queue currently builds a fresh list from the body, so there's no way to re-queue an already-built row. Need an id-scoped command."
-          routes={[
-            "POST /api/dispatch/:id/queue",
-            "POST /api/dispatch/:id/cancel",
-            "GET /api/read/dispatch/:domain/history",
-          ]}
-        />
-      </div>
+      <TemplateLookup />
     </div>
   );
 }

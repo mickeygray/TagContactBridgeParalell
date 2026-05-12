@@ -782,43 +782,18 @@ async function handleSmsInboundForwarded(event) {
   return { classification, autoResult, inboundMessageId: inboundMessage?.id || null };
 }
 
-async function handleRingcentralTelephonyForwarded(event) {
-  const payload = event.payload || {};
-  const envelope = payload.envelope || {};
-  const telephonySessionId = String(
-    envelope.body?.telephonySessionId || envelope.body?.sessionId || event.aggregateId || "",
-  ).trim();
-
-  const item = await reviewQueueRepository.createReviewQueueItem({
-    domain: normalizeDomain(payload.domain || "TAG"),
-    sourceService: event.sourceService || "control-plane",
-    workflow: "event-intake",
-    category: "ringcentral-session-forwarded",
-    severity: "info",
-    title: "RingCentral telephony session forwarded",
-    summary: telephonySessionId || "Telephony session envelope received",
-    happenedAt: envelope.body?.eventTime ? new Date(envelope.body.eventTime) : new Date(),
-    payload,
-    tags: ["ringcentral", "telephony-session"],
-  });
-
-  await recordWorkflowStage({
-    domain: normalizeDomain(payload.domain || "TAG"),
-    family: "telephony",
-    subtype: "ringcentral",
-    stage: "observed",
-    aggregateType: "telephony-session",
-    aggregateId: telephonySessionId,
-    sourceService: event.sourceService,
-    title: "RingCentral telephony session forwarded",
-    summary: telephonySessionId || "Telephony session envelope received",
-    payload: {
-      reviewItemId: String(item._id),
-      candidatesCount: Array.isArray(payload.candidates) ? payload.candidates.length : 0,
-    },
-  });
-
-  return item;
+// No-op handler: RC telephony envelopes used to materialize a review-
+// queue item + a workflow-stage row per envelope. That produced ~69K
+// `telephony.ringcentral.observed` workflow rows of pure firehose with
+// zero signal — actual telephony processing happens via
+// `processTelephonySessionCandidate` and the RC subscription native
+// sweep, neither of which depend on these audit rows. Real failure
+// modes (RC 429s, CX-down, subscription stalled) flow through
+// `recordServiceAlert` / the subscription watchdog and are unaffected
+// by this no-op. Kept registered so any in-flight queued events from
+// before deploy don't crash on dequeue.
+async function handleRingcentralTelephonyForwarded(_event) {
+  return null;
 }
 
 async function handleQcReviewObserved(event) {

@@ -3,13 +3,10 @@ import {
   BarChart3,
   Headset,
   Inbox,
-  Library,
   ListChecks,
   Megaphone,
   Rocket,
-  Sparkles,
   Users,
-  CalendarClock,
   UserCog,
   Wrench,
 } from "lucide-react";
@@ -19,9 +16,7 @@ export type WorkspaceKey =
   | "ringbridge"
   | "inbox"
   | "clients"
-  | "schedule"
   | "dispatch"
-  | "library"
   | "social"
   | "cleaning"
   | "users"
@@ -82,32 +77,12 @@ export const adminWorkspaces: WorkspaceDef[] = [
     readiness: "ready",
   },
   {
-    key: "schedule",
-    path: "/admin/schedule",
-    label: "Schedule",
-    description: "Cadence, mail pieces, calendar, range moves.",
-    group: "workspaces",
-    icon: CalendarClock,
-    audience: "admin",
-    readiness: "partial",
-  },
-  {
     key: "dispatch",
     path: "/admin/dispatch",
     label: "Dispatch",
     description: "Manual text / email / RVM campaigns and worklists.",
     group: "workspaces",
     icon: Megaphone,
-    audience: "admin",
-    readiness: "ready",
-  },
-  {
-    key: "library",
-    path: "/admin/library",
-    label: "Contact Library",
-    description: "Text templates, email templates, mail pieces.",
-    group: "workspaces",
-    icon: Library,
     audience: "admin",
     readiness: "ready",
   },
@@ -124,12 +99,12 @@ export const adminWorkspaces: WorkspaceDef[] = [
   {
     key: "cleaning",
     path: "/admin/cleaning",
-    label: "Cleaning & Review",
-    description: "Enrichment, hygiene runs, human review queues.",
+    label: "Lead Intake",
+    description: "NCOA CSV uploads and the TCPA consent vault.",
     group: "workspaces",
-    icon: Sparkles,
+    icon: ListChecks,
     audience: "admin",
-    readiness: "partial",
+    readiness: "ready",
   },
   {
     key: "users",

@@ -12,6 +12,7 @@ const {
 } = require("../../../../packages/shared-data/src/accounts");
 const {
   syncUsersFromRcExtensions,
+  getOrComputeAgentCallStats,
 } = require("../../../../packages/shared-services/src");
 const {
   deriveFreshLeadGate,
@@ -47,19 +48,84 @@ function decorate(record) {
   };
 }
 
+function isRecentDate(value, maxAgeMs) {
+  if (!value) return false;
+  const timestamp = new Date(value).getTime();
+  if (!Number.isFinite(timestamp)) return false;
+  return Date.now() - timestamp <= maxAgeMs;
+}
+
+function deriveCxLiveState(agentState) {
+  if (!agentState) return null;
+  const routing = agentState.cxRouting && typeof agentState.cxRouting === "object"
+    ? agentState.cxRouting
+    : {};
+  const appPresence = agentState.appPresence && typeof agentState.appPresence === "object"
+    ? agentState.appPresence
+    : {};
+  const assignmentStats = routing.assignmentStats && typeof routing.assignmentStats === "object"
+    ? routing.assignmentStats
+    : {};
+  const freshLeadGate = deriveFreshLeadGate(agentState, routing);
+  const activityState = String(agentState.activityState || agentState.status || "").trim();
+  const hasCurrentCall = Boolean(
+    agentState.currentCall?.sessionId
+      || agentState.currentCall?.telephonySessionId
+      || agentState.currentCall?.from
+      || agentState.currentCall?.to,
+  );
+  const workspaceFresh = Boolean(
+    freshLeadGate.workspaceActive
+      || appPresence.cxWorkspaceActive
+      && isRecentDate(appPresence.lastSeenAt || appPresence.updatedAt, 2 * 60 * 1000),
+  );
+  const routingEnabled = routing.enabled !== false;
+  const desiredAvailability = String(
+    routing.desiredAvailability || (routingEnabled ? "available" : "unavailable"),
+  ).trim().toLowerCase();
+  const availableForCx = desiredAvailability === "available";
+  const activePlatform = String(agentState.activePlatform || "").trim().toUpperCase();
+  const activityKey = activityState.toLowerCase();
+  const dialing = hasCurrentCall || ["dialing", "oncall"].includes(activityKey);
+  const wrappingUp = ["dispositioning", "wrapup"].includes(activityKey);
+  const serving = Boolean(freshLeadGate.allowed && workspaceFresh && routingEnabled && availableForCx);
+
+  return {
+    workspaceActive: Boolean(appPresence.cxWorkspaceActive),
+    workspaceFresh,
+    workspaceLastSeenAt: appPresence.lastSeenAt || null,
+    workspaceUserEmail: appPresence.userEmail || null,
+    routingEnabled,
+    desiredAvailability: routing.desiredAvailability || null,
+    serving,
+    dialing,
+    wrappingUp,
+    activityState: agentState.activityState || null,
+    activePlatform: agentState.activePlatform || null,
+    openAssignments: Number(assignmentStats.openAssignments || 0) || 0,
+    totalAssignedToday: Number(assignmentStats.totalAssigned || 0) || 0,
+    lastAssignedAt: assignmentStats.lastAssignedAt || null,
+    lastAssignedQueueFamily: assignmentStats.lastAssignedQueueFamily || null,
+  };
+}
+
 function summarizeAgentState(agentState) {
   if (!agentState) return null;
   return {
     status: agentState.status || null,
+    activityState: agentState.activityState || null,
     exPresenceStatus: agentState.exPresenceStatus || null,
     exTelephonyStatus: agentState.exTelephonyStatus || null,
     cxRouting: agentState.cxRouting || null,
+    cxLive: deriveCxLiveState(agentState),
     freshLeadGate: deriveFreshLeadGate(agentState, agentState.cxRouting || null),
     currentCall: agentState.currentCall || null,
     lastStatusChange: agentState.lastStatusChange || null,
+    lastActivityAt: agentState.lastActivityAt || null,
     lastEventReceived: agentState.lastEventReceived || null,
     dailyStats: agentState.dailyStats || null,
     activePlatform: agentState.activePlatform || null,
+    appPresence: agentState.appPresence || null,
   };
 }
 
@@ -226,6 +292,54 @@ function createAdminAccountsRouter(auth) {
       return res.status(error.status || 500).json(toErrorResponse(error));
     }
   });
+
+  /**
+   * GET /:id/call-stats
+   *
+   * Returns the lazy-computed per-agent call rollups (today / week /
+   * month / lifetime) split by direction (inbound/outbound) and
+   * platform (cx/ex). Backed by `AgentState.callStatsSnapshot` with a
+   * 5-minute staleness window; pass `?refresh=true` to force re-aggregate.
+   *
+   * No platform-side write happens here — the underlying CallLog rows
+   * are stamped at write time via the writers, not via this endpoint.
+   */
+  router.get(
+    "/:id/call-stats",
+    auth.requireAuth,
+    auth.requireAdmin,
+    async (req, res) => {
+      try {
+        const record = await userAccountRepository.findUserAccountById(req.params.id);
+        if (!record) {
+          return res.status(404).json({ ok: false, error: "Account not found" });
+        }
+        const agentState = record.extensionId
+          ? await agentStateRepository.findAgentStateByExtensionId(record.extensionId)
+          : null;
+        const force =
+          String(req.query.refresh || "").toLowerCase() === "true";
+        const { snapshot, cached } = await getOrComputeAgentCallStats({
+          account: record,
+          agentState,
+          force,
+        });
+        return res.json({
+          ok: true,
+          accountId: req.params.id,
+          extensionId: record.extensionId || null,
+          additionalExtensionIds:
+            Array.isArray(record.metadata?.additionalExtensionIds)
+              ? record.metadata.additionalExtensionIds
+              : [],
+          cached,
+          snapshot,
+        });
+      } catch (error) {
+        return res.status(error.status || 500).json(toErrorResponse(error));
+      }
+    },
+  );
 
   router.post("/", auth.requireAuth, auth.requireAdmin, async (req, res) => {
     try {

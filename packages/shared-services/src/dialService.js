@@ -54,6 +54,8 @@ const {
 // is idempotent: calling it twice with the same args is a no-op.
 
 const RCX_API_TIMEOUT_MS = Number(process.env.RCX_API_TIMEOUT_MS) || 15_000;
+const RCX_PLACING_TTL_MS = Number(process.env.RCX_PLACING_TTL_MS) || 2 * 60 * 1000;
+const RCX_RINGING_TTL_MS = Number(process.env.RCX_RINGING_TTL_MS) || 5 * 60 * 1000;
 
 // Activity states from which an agent can initiate a new dial.
 const DIAL_ELIGIBLE_ACTIVITY_STATES = new Set(["idle", "dispositioning", "wrapup"]);
@@ -75,6 +77,14 @@ function shouldForceRingcxDisposition(payload = {}) {
     return parseBooleanFlag(payload.forceRcxDisposition, false);
   }
   return parseBooleanFlag(process.env.RINGCX_FORCE_APP_DISPOSITION, false);
+}
+
+function shouldUseUserBearerForManualCall() {
+  return parseBooleanFlag(process.env.RINGCX_MANUAL_CALL_USE_USER_BEARER, true);
+}
+
+function shouldSendManualCallerId() {
+  return parseBooleanFlag(process.env.RINGCX_MANUAL_CALL_SEND_CALLER_ID, true);
 }
 
 function getAutoDispositionWaitMs() {
@@ -329,20 +339,38 @@ function pickAgentExShell(account = null, domain = "TAG") {
   );
 }
 
+function normalizeAgentIdentifier(value) {
+  return String(value || "").trim().toLowerCase() || null;
+}
+
+function pickFirstAgentIdentifier(values = []) {
+  for (const value of values) {
+    const normalized = normalizeAgentIdentifier(value);
+    if (normalized) return normalized;
+  }
+  return null;
+}
+
 async function resolveAgentDialContext(agent) {
   const account = agent?.extensionId
     ? await userAccountRepository.findUserAccountByExtensionId(agent.extensionId).catch(() => null)
     : null;
   // Email used by RingCX placeManualCall API to identify the agent's
-  // phone session. Prefer the account's RingCX/OAuth identity over the
-  // env fallback so production dials target the human who clicked Go.
-  const agentEmail = agent?.agentEmail
-    || agent?.email
-    || account?.cxSession?.rcxAgentEmail
-    || account?.cxAuth?.rcUserEmail
-    || account?.email
-    || process.env.RINGCX_VOICE_AGENT_EMAIL
-    || null;
+  // phone session. RingCX's manual-call endpoint wants the RingCX
+  // username when the user-managed seat has a generated login such as
+  // acalloway+50810001_9322@..., not merely the office email.
+  const agentEmail = pickFirstAgentIdentifier([
+    account?.metadata?.ringcxUsername,
+    account?.metadata?.ringcxAgentUsername,
+    account?.metadata?.ringcxAgentEmail,
+    account?.metadata?.cxUsername,
+    account?.cxSession?.rcxAgentEmail,
+    account?.cxAuth?.rcUserEmail,
+    account?.email,
+    agent?.agentEmail,
+    agent?.email,
+    process.env.RINGCX_VOICE_AGENT_EMAIL,
+  ]);
   // Caller ID used for outbound. Prefer the user's EX shell number; this
   // is the "one company, one person" behavior we want for CX testing.
   const domain = String(agent?.company || "TAG").toUpperCase();
@@ -545,6 +573,47 @@ async function withTimeout(promiseFactory, timeoutMs, opName) {
 
 // ── placeCall ──────────────────────────────────────────────────────
 
+function getActiveCallStaleCutoff(state, asOf = new Date()) {
+  const normalized = String(state || "").trim().toLowerCase();
+  if (normalized === "placing") return new Date(asOf.getTime() - RCX_PLACING_TTL_MS);
+  if (normalized === "ringing") return new Date(asOf.getTime() - RCX_RINGING_TTL_MS);
+  return null;
+}
+
+function isStaleActiveCallSession(session, asOf = new Date()) {
+  if (!session) return false;
+  const state = String(session.state || "").trim().toLowerCase();
+  const cutoff = getActiveCallStaleCutoff(state, asOf);
+  if (!cutoff) return false;
+  const basis = state === "ringing"
+    ? session.ringingAt || session.startedAt
+    : session.startedAt;
+  if (!basis) return false;
+  const basisDate = new Date(basis);
+  if (Number.isNaN(basisDate.getTime())) return false;
+  return basisDate <= cutoff;
+}
+
+async function clearStaleActiveCallSession(session, agentId, logger = null) {
+  if (!isStaleActiveCallSession(session)) return false;
+  const state = String(session.state || "active").trim().toLowerCase();
+  await callSessionRepository.markFailed(session._id, {
+    failureReason: `${state || "active"}-stale-preflight-timeout`,
+  });
+  if (session.queueItemId) {
+    await safeRelease(rollbackPlaceCall, agentId, session.leadId, session.queueItemId);
+  }
+  logger?.warn?.("dial.placeCall.staleActiveSessionCleared", {
+    agentId,
+    callSessionId: session._id,
+    queueItemId: session.queueItemId || null,
+    state,
+    startedAt: session.startedAt || null,
+    ringingAt: session.ringingAt || null,
+  });
+  return true;
+}
+
 async function placeCall(agentId, queueItemId, {
   logger = null,
   agentEmail: agentEmailOverride = null,
@@ -586,7 +655,13 @@ async function placeCall(agentId, queueItemId, {
   // 2b. Belt-and-suspenders: agent must not have an active CallSession.
   // activityState should already reflect this, but if there's a stale
   // session from a crashed prior process, the CallSession is canonical.
-  const existingActiveCall = await callSessionRepository.findActiveByAgent(agentId);
+  let existingActiveCall = await callSessionRepository.findActiveByAgent(agentId);
+  if (existingActiveCall) {
+    const cleared = await clearStaleActiveCallSession(existingActiveCall, agentId, logger);
+    if (cleared) {
+      existingActiveCall = await callSessionRepository.findActiveByAgent(agentId);
+    }
+  }
   if (existingActiveCall) {
     return {
       ok: false,
@@ -678,7 +753,8 @@ async function placeCall(agentId, queueItemId, {
   // 6. Resolve dial context + place RingCX call
   const dialContext = await resolveAgentDialContext(agent);
   const agentEmail = String(agentEmailOverride || dialContext.agentEmail || "").trim() || null;
-  const callerId = sanitizeUsPhone(callerIdOverride) || dialContext.callerId;
+  const resolvedCallerId = sanitizeUsPhone(callerIdOverride) || dialContext.callerId;
+  const callerId = shouldSendManualCallerId() ? resolvedCallerId : null;
   if (!agentEmail) {
     await rollbackPlaceCall(agentId, leadId, queueItemId);
     return {
@@ -736,10 +812,11 @@ async function placeCall(agentId, queueItemId, {
   // behalf of an agent.
   let placementResponse = null;
   let userBearer = null;
+  let client = null;
   try {
     // eslint-disable-next-line global-require
     const cxStore = require("./cxTokenStorageService");
-    if (cxStore.isConfigured()) {
+    if (shouldUseUserBearerForManualCall() && cxStore.isConfigured()) {
       // Map extensionId → UserAccount to fetch the stored bearer
       // (AgentState ≠ UserAccount; we look up by extensionId on the
       // user-account side to find the right agent's stored token).
@@ -787,7 +864,6 @@ async function placeCall(agentId, queueItemId, {
   }
 
   try {
-    let client;
     try {
       client = userBearer
         ? createRingcxVoiceClient({ userBearer })
@@ -1367,8 +1443,6 @@ async function materializeInboundCall({
 
 async function sweepStaleStates({ asOf = new Date(), logger = null } = {}) {
   const result = { failedSessions: 0, restoredQueueItems: 0, resetAgents: 0, errors: [] };
-  const PLACING_TTL_MS = Number(process.env.RCX_PLACING_TTL_MS) || 2 * 60 * 1000;
-  const RINGING_TTL_MS = Number(process.env.RCX_RINGING_TTL_MS) || 5 * 60 * 1000;
 
   try {
     const { CallSession, QueueItem, AgentState } = require("../../shared-models/src");
@@ -1376,7 +1450,7 @@ async function sweepStaleStates({ asOf = new Date(), logger = null } = {}) {
     // 1+2. Stale placing/ringing CallSessions
     const stalePlacing = await CallSession.find({
       state: "placing",
-      startedAt: { $lte: new Date(asOf.getTime() - PLACING_TTL_MS) },
+      startedAt: { $lte: new Date(asOf.getTime() - RCX_PLACING_TTL_MS) },
     }).limit(50).lean();
     for (const s of stalePlacing) {
       await callSessionRepository.markFailed(s._id, {
@@ -1391,8 +1465,8 @@ async function sweepStaleStates({ asOf = new Date(), logger = null } = {}) {
     const staleRinging = await CallSession.find({
       state: "ringing",
       $or: [
-        { ringingAt: { $lte: new Date(asOf.getTime() - RINGING_TTL_MS) } },
-        { ringingAt: null, startedAt: { $lte: new Date(asOf.getTime() - RINGING_TTL_MS) } },
+        { ringingAt: { $lte: new Date(asOf.getTime() - RCX_RINGING_TTL_MS) } },
+        { ringingAt: null, startedAt: { $lte: new Date(asOf.getTime() - RCX_RINGING_TTL_MS) } },
       ],
     }).limit(50).lean();
     for (const s of staleRinging) {
@@ -1408,7 +1482,7 @@ async function sweepStaleStates({ asOf = new Date(), logger = null } = {}) {
     // 3. QueueItems stuck in "dialing" with no active CallSession
     const dialingItems = await QueueItem.find({
       state: "dialing",
-      assignedAt: { $lte: new Date(asOf.getTime() - PLACING_TTL_MS) },
+      assignedAt: { $lte: new Date(asOf.getTime() - RCX_PLACING_TTL_MS) },
     }).limit(50).lean();
     for (const item of dialingItems) {
       const active = await callSessionRepository.findActiveByQueueItem(item._id);
@@ -1429,7 +1503,7 @@ async function sweepStaleStates({ asOf = new Date(), logger = null } = {}) {
     // 4. AgentStates stuck in "dialing" with no active session
     const dialingAgents = await AgentState.find({
       activityState: "dialing",
-      lastActivityAt: { $lte: new Date(asOf.getTime() - RINGING_TTL_MS) },
+      lastActivityAt: { $lte: new Date(asOf.getTime() - RCX_RINGING_TTL_MS) },
     }).lean();
     for (const a of dialingAgents) {
       const active = await callSessionRepository.findActiveByAgent(a.extensionId);

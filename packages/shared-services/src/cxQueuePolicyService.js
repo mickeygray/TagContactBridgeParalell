@@ -264,6 +264,53 @@ function makePacificDate(year, month, day, hour = 0, minute = 0, second = 0) {
   return new Date(utcMs);
 }
 
+function getPacificBusinessDayParts(date = new Date(), rolloverHour = 16) {
+  const parts = getPacificParts(date);
+  if (parts.hour >= rolloverHour) {
+    return {
+      year: parts.year,
+      month: parts.month,
+      day: parts.day,
+    };
+  }
+  const previousDayGuess = new Date(Date.UTC(parts.year, parts.month - 1, parts.day - 1, 12, 0, 0, 0));
+  const previousParts = getPacificParts(previousDayGuess);
+  return {
+    year: previousParts.year,
+    month: previousParts.month,
+    day: previousParts.day,
+  };
+}
+
+function getPacificBusinessDayStart(date = new Date(), rolloverHour = 16) {
+  const parts = getPacificBusinessDayParts(date, rolloverHour);
+  return makePacificDate(parts.year, parts.month, parts.day, rolloverHour, 0, 0);
+}
+
+function getPacificFreshExpiry(date = new Date(), rolloverHour = 16, graceEndHour = 18) {
+  const parts = getPacificBusinessDayParts(date, rolloverHour);
+  const nextDayGuess = new Date(Date.UTC(parts.year, parts.month - 1, parts.day + 1, 12, 0, 0, 0));
+  const nextParts = getPacificParts(nextDayGuess);
+  return makePacificDate(nextParts.year, nextParts.month, nextParts.day, graceEndHour, 0, 0);
+}
+
+function getPacificBusinessDaySerial(date = new Date(), rolloverHour = 16) {
+  const parts = getPacificBusinessDayParts(date, rolloverHour);
+  return Math.floor(Date.UTC(parts.year, parts.month - 1, parts.day) / (24 * 60 * 60 * 1000));
+}
+
+function getPacificBusinessDayAge(createdAt, asOf = new Date(), rolloverHour = 16, graceEndHour = 18) {
+  const created = createdAt ? new Date(createdAt) : null;
+  const now = asOf ? new Date(asOf) : new Date();
+  if (!created || Number.isNaN(created.getTime()) || Number.isNaN(now.getTime())) return null;
+  const freshExpiresAt = getPacificFreshExpiry(created, rolloverHour, graceEndHour);
+  if (now.getTime() < freshExpiresAt.getTime()) return 0;
+  return Math.max(
+    getPacificBusinessDaySerial(now, rolloverHour) - getPacificBusinessDaySerial(created, rolloverHour),
+    1,
+  );
+}
+
 function getNextPacificDayStart(date = new Date()) {
   const parts = getPacificParts(date);
   const nextNoonGuess = new Date(Date.UTC(parts.year, parts.month - 1, parts.day + 1, 12, 0, 0, 0));
@@ -346,18 +393,28 @@ function resolveQueueDialability(item = {}, now = new Date()) {
 function deriveQueueFamilyFromAgeDays(ageDays) {
   const numericAge = Number(ageDays);
   if (!Number.isFinite(numericAge)) return "fresh-day1";
-  if (numericAge <= 1) return "fresh-day1";
-  if (numericAge <= 15) return "fresh-day2to10";
+  if (numericAge <= 0) return "fresh-day1";
+  if (numericAge <= 14) return "fresh-day2to10";
   return "aged";
+}
+
+function deriveQueueFamilyFromLeadCreatedAt(createdAt, asOf = new Date()) {
+  const businessAge = getPacificBusinessDayAge(createdAt, asOf);
+  if (!Number.isFinite(businessAge)) return null;
+  return deriveQueueFamilyFromAgeDays(businessAge);
 }
 
 module.exports = {
   buildCallAttemptPatch,
   CX_QUEUE_TIER_POLICIES,
   deriveQueueFamilyFromAgeDays,
+  deriveQueueFamilyFromLeadCreatedAt,
   getCooldownReleaseAt,
   getDailyPlacedCalls,
+  getPacificBusinessDayAge,
+  getPacificBusinessDayStart,
   getPacificDateKey,
+  getPacificFreshExpiry,
   getQueueFamilyPolicy,
   getQueueFamilySortRank,
   getQueueFamilyTargetOpen,

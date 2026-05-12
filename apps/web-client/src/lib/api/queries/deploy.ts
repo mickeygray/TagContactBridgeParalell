@@ -3,6 +3,8 @@ import { api } from "@/lib/api/client";
 import type {
   DeployAction,
   DeployActionResult,
+  LocalDeployAction,
+  LocalDeployActionResult,
   DeployRun,
   DeployState,
   DeployWorkspaceData,
@@ -68,6 +70,30 @@ export function useTriggerDeploy() {
       api
         .post<OkEnvelope<DeployActionResult>>(
           `/api/commands/deploy/${COMMAND_PATHS[action]}`,
+          { targetKey, note, confirm },
+        )
+        .then((env) => env.result),
+    onSuccess: () => invalidateDeployScope(qc),
+  });
+}
+
+export function useTriggerLocalDeploy() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      targetKey,
+      action,
+      note,
+      confirm,
+    }: {
+      targetKey: string;
+      action: LocalDeployAction;
+      note?: string;
+      confirm?: string;
+    }) =>
+      api
+        .post<OkEnvelope<LocalDeployActionResult>>(
+          `/api/commands/deploy/local/${encodeURIComponent(action)}`,
           { targetKey, note, confirm },
         )
         .then((env) => env.result),

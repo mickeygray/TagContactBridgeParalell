@@ -44,6 +44,55 @@ function normalizeUsPhone(value) {
   return digits.length >= 10 ? digits.slice(-10) : null;
 }
 
+function envToken(value) {
+  const token = String(value || "").trim();
+  if (!token) return null;
+  const normalized = token
+    .replace(/@/g, "_AT_")
+    .replace(/[^A-Za-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .toUpperCase();
+  return normalized || null;
+}
+
+function readAgentRouteCallerId(dispatchIntent = {}, queueItem = null) {
+  const assignment = queueItem?.assignment && typeof queueItem.assignment === "object"
+    ? queueItem.assignment
+    : {};
+  const metadata = queueItem?.metadata && typeof queueItem.metadata === "object"
+    ? queueItem.metadata
+    : {};
+  const tokens = [
+    dispatchIntent?.assignedExtensionId,
+    dispatchIntent?.dialerExtensionId,
+    dispatchIntent?.agent?.assignedExtensionId,
+    dispatchIntent?.agent?.extensionId,
+    dispatchIntent?.dialerCxAgentId,
+    dispatchIntent?.agent?.cxAgentId,
+    assignment.extensionId,
+    dispatchIntent?.assignedAgentEmail,
+    dispatchIntent?.dialerEmail,
+    dispatchIntent?.agent?.email,
+    assignment.agentEmail,
+    assignment.email,
+    dispatchIntent?.assignedAgentName,
+    dispatchIntent?.dialerName,
+    dispatchIntent?.agent?.name,
+    assignment.agentName,
+    metadata.assignedExtensionId,
+    metadata.assignedAgentEmail,
+    metadata.assignedAgentName,
+    metadata.assignedAgentId,
+  ];
+  for (const token of tokens) {
+    const suffix = envToken(token);
+    if (!suffix) continue;
+    const callerId = normalizeUsPhone(process.env[`RINGCX_AGENT_ROUTE_${suffix}_CALLER_ID`]);
+    if (callerId) return callerId;
+  }
+  return null;
+}
+
 function extractUii(response = null) {
   if (!response || typeof response !== "object") return null;
   const candidates = [response.uii, response.UII, response.callId, response.callID];
@@ -894,33 +943,46 @@ async function resolveQueueItem(options = {}) {
 }
 
 async function resolveAgentEmail(queueItem = null, dispatchIntent = {}) {
-  const explicit = [
-    dispatchIntent?.agent?.email,
-    dispatchIntent?.requestedByUserEmail,
-    queueItem?.metadata?.rcxVisibilityAgentUsername,
-    queueItem?.metadata?.assignedAgentEmail,
-  ]
-    .map((value) => String(value || "").trim().toLowerCase())
-    .find(Boolean);
-  if (explicit) return explicit;
-
   const extensionId = String(
     dispatchIntent?.assignedExtensionId
+      || dispatchIntent?.dialerExtensionId
+      || dispatchIntent?.agent?.assignedExtensionId
+      || dispatchIntent?.agent?.extensionId
       || queueItem?.assignment?.extensionId
       || queueItem?.metadata?.assignedExtensionId
       || "",
   ).trim();
-  if (!extensionId) return null;
 
-  const account = await userAccountRepository.findUserAccountByExtensionId(extensionId).catch(() => null);
-  if (account?.cxSession?.rcxAgentEmail) return String(account.cxSession.rcxAgentEmail).trim().toLowerCase();
-  if (account?.cxAuth?.rcUserEmail) return String(account.cxAuth.rcUserEmail).trim().toLowerCase();
-  if (account?.email) return String(account.email).trim().toLowerCase();
-  return null;
+  const account = extensionId
+    ? await userAccountRepository.findUserAccountByExtensionId(extensionId).catch(() => null)
+    : null;
+
+  const candidates = [
+    account?.metadata?.ringcxUsername,
+    account?.metadata?.ringcxAgentUsername,
+    account?.metadata?.ringcxAgentEmail,
+    account?.metadata?.cxUsername,
+    account?.cxSession?.rcxAgentEmail,
+    dispatchIntent?.agent?.ringcxUsername,
+    dispatchIntent?.agent?.ringcxAgentUsername,
+    queueItem?.metadata?.rcxVisibilityAgentUsername,
+    queueItem?.metadata?.assignedAgentUsername,
+    queueItem?.metadata?.lastDialIntent?.assignedAgentUsername,
+    account?.cxAuth?.rcUserEmail,
+    account?.email,
+    dispatchIntent?.agent?.email,
+    dispatchIntent?.requestedByUserEmail,
+    queueItem?.metadata?.assignedAgentEmail,
+  ];
+
+  return candidates
+    .map((value) => String(value || "").trim().toLowerCase())
+    .find(Boolean) || null;
 }
 
 function buildCallerId(dispatchIntent = {}, queueItem = null) {
   const candidates = [
+    readAgentRouteCallerId(dispatchIntent, queueItem),
     dispatchIntent?.callerId,
     dispatchIntent?.exShell?.primaryPhone,
     queueItem?.metadata?.callerId,

@@ -14,6 +14,7 @@ export const queryKeys = {
     list: (filters?: Record<string, unknown>) =>
       ["accounts", "list", filters ?? {}] as const,
     detail: (id: string) => ["accounts", "detail", id] as const,
+    callStats: (id: string) => ["accounts", "call-stats", id] as const,
     unassignedExtensions: (company?: string) =>
       ["accounts", "unassigned-extensions", company ?? "all"] as const,
   },

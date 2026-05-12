@@ -906,6 +906,9 @@ export interface CxCallQueueItem {
   progressiveStageKey?: string | null;
   progressiveStageIndex?: number | null;
   progressiveStageLabel?: string | null;
+  placedCalls?: number | null;
+  dailyPlacedCalls?: number | null;
+  lastPlacedAt?: string | null;
   payloadSnapshot?: Record<string, unknown> | null;
   leadBody?: Record<string, unknown> | null;
   queueState?: string | null;
@@ -1353,6 +1356,50 @@ export interface DeployState {
   fetchError?: { message: string; status: number | null } | null;
 }
 
+export type LocalDeployAction = "status" | "deploy" | "restart" | "rollback";
+
+export interface LocalDeployTarget {
+  key: string;
+  label: string;
+  url?: string | null;
+  host?: string | null;
+  user?: string | null;
+  remotePath?: string | null;
+  localRepoPath?: string | null;
+  localBuildPath?: string | null;
+  pm2Process?: string | null;
+  branch?: string | null;
+  pemConfigured?: boolean;
+  pemExists?: boolean;
+  ready?: boolean;
+  missing?: string[];
+  warnings?: string[];
+  repo?: {
+    configured?: boolean;
+    exists?: boolean;
+    gitDirExists?: boolean;
+    branch?: string | null;
+    upstream?: string | null;
+    ahead?: number | null;
+    behind?: number | null;
+    dirtyCount?: number | null;
+    dirtyPreview?: string[];
+    headSha?: string | null;
+    headMessage?: string | null;
+    headDate?: string | null;
+    error?: string | null;
+  };
+  history?: Record<string, unknown> | null;
+}
+
+export interface LocalDeployState {
+  configured: boolean;
+  missing?: string[];
+  targets: LocalDeployTarget[];
+  updatedAt?: string;
+  loadError?: string | null;
+}
+
 export interface DeployWorkspaceData {
   domain: string;
   topology?: Record<string, unknown>;
@@ -1360,6 +1407,7 @@ export interface DeployWorkspaceData {
   providerHealth?: Record<string, unknown>;
   recentServiceAlerts?: Array<Record<string, unknown>>;
   deploy?: DeployState;
+  localDeploy?: LocalDeployState;
 }
 
 export interface DeployActionResult {
@@ -1370,6 +1418,17 @@ export interface DeployActionResult {
   ref: string;
   dispatchedAt: string;
   workflowRecordId: string;
+}
+
+export interface LocalDeployActionResult {
+  ok: true;
+  targetKey: string;
+  action: LocalDeployAction;
+  label: string;
+  result?: Record<string, unknown> | null;
+  logs?: string[];
+  completedAt?: string;
+  workflowRecordId?: string | null;
 }
 
 export interface HealthStatus {
@@ -1385,15 +1444,35 @@ export type AccountSource = "seed" | "manual" | "rc-poll";
 
 export interface AccountAgentState {
   status?: string | null;
+  activityState?: string | null;
   exPresenceStatus?: string | null;
   exTelephonyStatus?: string | null;
   cxRouting?: Record<string, unknown> | null;
+  cxLive?: {
+    workspaceActive?: boolean;
+    workspaceFresh?: boolean;
+    workspaceLastSeenAt?: string | null;
+    workspaceUserEmail?: string | null;
+    routingEnabled?: boolean;
+    desiredAvailability?: string | null;
+    serving?: boolean;
+    dialing?: boolean;
+    wrappingUp?: boolean;
+    activityState?: string | null;
+    activePlatform?: string | null;
+    openAssignments?: number;
+    totalAssignedToday?: number;
+    lastAssignedAt?: string | null;
+    lastAssignedQueueFamily?: string | null;
+  } | null;
   freshLeadGate?: FreshLeadGate | null;
   currentCall?: Record<string, unknown> | null;
   lastStatusChange?: string | null;
+  lastActivityAt?: string | null;
   lastEventReceived?: string | null;
   dailyStats?: Record<string, unknown> | null;
   activePlatform?: string | null;
+  appPresence?: Record<string, unknown> | null;
 }
 
 export interface AccountRecord {

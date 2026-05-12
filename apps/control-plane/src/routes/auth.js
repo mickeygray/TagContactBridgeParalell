@@ -143,6 +143,13 @@ function createAuthRouter(config, options = {}) {
     };
   }
 
+  function isAgentLoginWindowLimited(account = {}) {
+    const role = String(account.role || "").trim().toLowerCase();
+    const audience = String(account.audience || "").trim().toLowerCase();
+    if (role === "admin" || role === "manager" || audience === "admin") return false;
+    return role === "internal-agent" || role === "widget-user" || audience === "user";
+  }
+
   router.post(
     "/send-code",
     (req, res, next) => {
@@ -215,7 +222,7 @@ function createAuthRouter(config, options = {}) {
       // ── Agent login window check (non-admins only) ───────────────
       // Agents can only obtain a session inside the configured window.
       // Admins are exempt — they need access for off-hours admin work.
-      if (account.role !== "admin") {
+      if (isAgentLoginWindowLimited(account)) {
         try {
           const { getPacingConfig } = require("../../../../packages/shared-services/src");
           const { isAgentLoginWindowOpen } = require("../../../../packages/shared-services/src/businessHoursGuard");
@@ -257,7 +264,7 @@ function createAuthRouter(config, options = {}) {
       // Clamp JWT expiry to today's window-close for non-admins.
       // SPA's existing 401 handler will auto-logout when the token expires.
       let clampExpiresAt = null;
-      if (latest.role !== "admin") {
+      if (isAgentLoginWindowLimited(latest)) {
         try {
           const { getPacingConfig } = require("../../../../packages/shared-services/src");
           const { todaysAgentLoginWindowClose } = require("../../../../packages/shared-services/src/businessHoursGuard");

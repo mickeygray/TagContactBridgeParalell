@@ -25,6 +25,7 @@ const {
 const {
   buildCallAttemptPatch,
   deriveQueueFamilyFromAgeDays,
+  deriveQueueFamilyFromLeadCreatedAt,
   getCooldownReleaseAt,
   getQueueFamilyPolicy,
   resolveQueueDialability,
@@ -159,6 +160,16 @@ function resolveQueueFamilyForPayload(payload = {}) {
   if (explicit !== "unassigned") return explicit;
 
   if (payload.isAged === true || payload.aged === true) return "aged";
+  const createdAtFamily = deriveQueueFamilyFromLeadCreatedAt(
+    payload.leadCreatedAt
+      || payload.createdAt
+      || payload.payloadSnapshot?.createdAt
+      || payload.metadata?.leadCreatedAt
+      || null,
+    payload.now || new Date(),
+  );
+  if (createdAtFamily) return createdAtFamily;
+
   const leadAgeDays = Number(payload.leadAgeDays);
   if (Number.isFinite(leadAgeDays)) return deriveQueueFamilyFromAgeDays(leadAgeDays);
 
@@ -273,12 +284,6 @@ function buildOpenAssignmentMapsByFamily(queueItems = []) {
 }
 
 function buildQueueProgressionState(payload = {}, queueFamily = null, callPlan = null, placedCalls = null) {
-  const normalizedFamily = normalizeQueueFamily(
-    queueFamily || resolveQueueFamilyForPayload({
-      ...payload,
-      callPlan: callPlan || payload.callPlan,
-    }),
-  );
   const normalizedPlacedCalls = Math.max(
     Number(
       placedCalls
@@ -287,6 +292,18 @@ function buildQueueProgressionState(payload = {}, queueFamily = null, callPlan =
     ) || 0,
     0,
   );
+  const seedFamily = normalizeQueueFamily(
+    queueFamily || resolveQueueFamilyForPayload({
+      ...payload,
+      callPlan: callPlan || payload.callPlan,
+    }),
+  );
+  const normalizedFamily = deriveQueueFamily({
+    ...payload,
+    queueFamily: seedFamily,
+    callPlan: callPlan || payload.callPlan || null,
+    placedCalls: normalizedPlacedCalls,
+  });
   const stage = resolveDayZeroProgressiveStage({
     ...payload,
     queueFamily: normalizedFamily,
@@ -1423,6 +1440,10 @@ async function claimNextCxQueueItem(options = {}) {
       "metadata.assignmentRequestKey": requestKey || null,
       "metadata.assignedAt": assignedAt,
       "metadata.assignmentClaimMinutes": claimMinutes,
+      ...buildClearedDialRuntimeMetadata({
+        now: assignedAt,
+        reason: "new-assignment",
+      }),
     });
     claimedItem = updatedQueueItem?.toObject ? updatedQueueItem.toObject() : updatedQueueItem || claimedItem;
 
@@ -1548,6 +1569,102 @@ function normalizeExtraQueueUpdate(extraUpdate = null) {
   return normalized;
 }
 
+function buildClearedDialRuntimeMetadata({ now = new Date(), reason = null } = {}) {
+  return {
+    "metadata.lastDialIntent": null,
+    "metadata.lastDialIntentAt": null,
+    "metadata.lastDialIntentWorkflowId": null,
+    "metadata.lastDialIntentEventId": null,
+    "metadata.lastDialIntentSource": null,
+    "metadata.lastDialIntentAssignedExtensionId": null,
+    "metadata.lastDialIntentPhone": null,
+    "metadata.lastDialIntentQueueState": null,
+    "metadata.lastDialIntentStatus": null,
+    "metadata.lastDialIntentRelay": null,
+    "metadata.lastDialIntentLocalStage": null,
+    "metadata.lastDialIntentReleaseReason": null,
+    "metadata.lastDialIntentReleasedAt": null,
+    "metadata.lastDialIntentTimeoutAt": null,
+    "metadata.lastDialIntentTimeoutStage": null,
+    "metadata.lastDialExecutionStatus": null,
+    "metadata.lastDialExecutionMode": null,
+    "metadata.lastDialExecutionAt": null,
+    "metadata.lastDialExecutionAgentEmail": null,
+    "metadata.lastDialExecutionDialerExtensionId": null,
+    "metadata.lastDialExecutionDialerCxAgentId": null,
+    "metadata.lastDialExecutionDialerEmail": null,
+    "metadata.lastDialExecutionPhone": null,
+    "metadata.lastDialExecutionCallerId": null,
+    "metadata.lastDialExecutionUii": null,
+    "metadata.lastDialExecutionCallSessionId": null,
+    "metadata.lastDialExecutionUcqQueueItemId": null,
+    "metadata.lastDialExecutionActiveCall": null,
+    "metadata.lastDialExecutionActiveCallCapture": null,
+    "metadata.lastDialExecutionCampaignId": null,
+    "metadata.lastDialExecutionDialGroupId": null,
+    "metadata.lastDialExecutionAccountId": null,
+    "metadata.lastDialExecutionExternId": null,
+    "metadata.lastDialExecutionRingcxPublish": null,
+    "metadata.lastDialExecutionResponse": null,
+    "metadata.lastDialExecutionError": null,
+    "metadata.lastDialExecutionSource": null,
+    "metadata.lastDialExecutionEventId": null,
+    "metadata.rcxVisibilityStatus": null,
+    "metadata.rcxVisibilityReason": null,
+    "metadata.rcxVisibilityAccountId": null,
+    "metadata.rcxVisibilityAgentUsername": null,
+    "metadata.rcxVisibilityAgentId": null,
+    "metadata.rcxVisibilityAssignedExtensionId": null,
+    "metadata.rcxVisibilityCampaignId": null,
+    "metadata.rcxVisibilityDialGroupId": null,
+    "metadata.rcxVisibilityExternId": null,
+    "metadata.rcxVisibilityLastError": null,
+    "metadata.lastHangupActiveCallCapture": null,
+    "metadata.lastHangupActiveCallCaptureAt": null,
+    "metadata.lastHangupRequestStatus": null,
+    "metadata.lastHangupRequestAt": null,
+    "metadata.lastHangupRequestUii": null,
+    "metadata.lastHangupRequestPhone": null,
+    "metadata.lastHangupRequestBy": null,
+    "metadata.lastHangupRequestSource": null,
+    "metadata.lastHangupRequestCampaignId": null,
+    "metadata.lastHangupRequestDialGroupId": null,
+    "metadata.lastHangupRequestResponse": null,
+    "metadata.lastHangupRequestHangupStatus": null,
+    "metadata.lastHangupRequestDisposition": null,
+    "metadata.lastHangupRequestRcxDisposition": null,
+    "metadata.lastHangupRequestRcxDispositionAccepted": null,
+    "metadata.lastHangupRequestDispositionStatus": null,
+    "metadata.lastHangupRequestDispositionResponse": null,
+    "metadata.lastHangupRequestDispositionAttempts": null,
+    "metadata.lastHangupRequestForceRcxDisposition": null,
+    "metadata.lastHangupRequestAutoDispositionRelease": null,
+    "metadata.lastHangupRequestDispositionError": null,
+    "metadata.lastHangupRequestError": null,
+    "metadata.lastHangupIntent": null,
+    "metadata.lastHangupIntentAt": null,
+    "metadata.lastHangupIntentWorkflowId": null,
+    "metadata.lastHangupIntentStatus": null,
+    "metadata.lastHangupIntentRelay": null,
+    "metadata.lastDispositionHangupIntent": null,
+    "metadata.lastDispositionHangupIntentAt": null,
+    "metadata.lastDispositionHangupIntentStatus": null,
+    "metadata.lastDispositionHangupIntentRelay": null,
+    "metadata.lastDispositionHangupBackgroundRelay": null,
+    "metadata.lastDispositionHangupBackgroundRelayAt": null,
+    "metadata.lastDispositionHangupBackgroundRelayAccepted": null,
+    "metadata.lastQueueAttemptHeldForDisposition": null,
+    "metadata.wrapUpRequired": null,
+    "metadata.wrapUpStartedAt": null,
+    "metadata.wrapUpStartedWorkflowId": null,
+    "metadata.wrapUpReason": null,
+    "metadata.assignmentReleasedByHangup": null,
+    "metadata.dealHandoffHold": null,
+    "metadata.dialRuntimeClearedAt": now,
+    "metadata.dialRuntimeClearedReason": reason || "queue-transition",
+  };
+}
+
 async function resolveQueueItemForMutation(options = {}) {
   const queueItemId = String(options.queueItemId || "").trim();
   if (queueItemId) {
@@ -1593,6 +1710,10 @@ async function releaseCxQueueItem(options = {}) {
       assignment: buildClearedAssignment(),
       completedAt: null,
       cancelledAt: null,
+      ...buildClearedDialRuntimeMetadata({
+        now,
+        reason: options.reason || "manual-release",
+      }),
       "metadata.lastReleasedAt": now,
       "metadata.lastReleaseReason": options.reason || "manual-release",
       "metadata.lastReleasedExtensionId": previousAssignment?.extensionId || null,
@@ -1689,10 +1810,18 @@ async function rescheduleCxQueueItem(options = {}) {
   const now = options.now ? new Date(options.now) : new Date();
   const releaseAt = options.releaseAt ? new Date(options.releaseAt) : now;
   const previousAssignment = cloneAssignment(item.assignment);
-  const ringcxCancel = await cancelRingcxPublishedCopyForQueueItem(
-    item,
-    `queue-reschedule:${options.reason || "rescheduled"}`,
-  );
+  const cancelReason = `queue-reschedule:${options.reason || "rescheduled"}`;
+  let ringcxCancel = null;
+  if (options.cancelRingcxInBackground === true) {
+    ringcxCancel = {
+      ok: true,
+      cancelled: false,
+      backgroundPending: true,
+      reason: cancelReason,
+    };
+  } else {
+    ringcxCancel = await cancelRingcxPublishedCopyForQueueItem(item, cancelReason);
+  }
   await cxDialQueueRepository.transitionQueueItemState(
     item._id,
     ["queued", "ready", "claimed", "serving", "paused"],
@@ -1703,6 +1832,10 @@ async function rescheduleCxQueueItem(options = {}) {
       assignment: buildClearedAssignment(),
       completedAt: null,
       cancelledAt: null,
+      ...buildClearedDialRuntimeMetadata({
+        now,
+        reason: options.reason || "rescheduled",
+      }),
       "metadata.lastReleasedAt": now,
       "metadata.lastReleaseReason": options.reason || "rescheduled",
       "metadata.lastReleasedExtensionId": previousAssignment?.extensionId || null,
@@ -1712,6 +1845,25 @@ async function rescheduleCxQueueItem(options = {}) {
       ...normalizeExtraQueueUpdate(options.extraUpdate),
     },
   );
+  if (options.cancelRingcxInBackground === true) {
+    cancelRingcxPublishedCopyForQueueItem(item, cancelReason)
+      .then((backgroundCancel) =>
+        cxDialQueueRepository.updateQueueItem(item._id, {
+          "metadata.lastRingcxReleaseCancel": backgroundCancel,
+          "metadata.lastRingcxReleaseCancelAt": new Date(),
+        }).catch(() => null),
+      )
+      .catch((error) =>
+        cxDialQueueRepository.updateQueueItem(item._id, {
+          "metadata.lastRingcxReleaseCancel": {
+            ok: false,
+            cancelled: false,
+            error: error.message || "ringcx-cancel-copy-failed",
+          },
+          "metadata.lastRingcxReleaseCancelAt": new Date(),
+        }).catch(() => null),
+      );
+  }
   if (isOpenAssignedQueueState(item.state) && previousAssignment?.extensionId) {
     await decrementAgentOpenAssignments(previousAssignment.extensionId).catch(() => null);
   }
@@ -1911,6 +2063,10 @@ async function completeCxQueueItem(options = {}) {
       claimUntil: null,
       assignment: buildClearedAssignment(),
       completedAt: now,
+      ...buildClearedDialRuntimeMetadata({
+        now,
+        reason: options.queueOutcome || "completed",
+      }),
       "metadata.queueOutcome": options.queueOutcome || "completed",
       "metadata.disposition": options.disposition || null,
       "metadata.reflectedLogicsStatusId": options.statusId != null ? Number(options.statusId) : null,
@@ -1952,6 +2108,10 @@ async function cancelCxQueueItem(options = {}) {
       claimUntil: null,
       assignment: buildClearedAssignment(),
       cancelledAt: now,
+      ...buildClearedDialRuntimeMetadata({
+        now,
+        reason: options.reason || "cancelled",
+      }),
       "metadata.cancelReason": options.reason || "cancelled",
       "metadata.queueOutcome": options.queueOutcome || "cancelled",
       "metadata.disposition": options.disposition || null,
@@ -2252,6 +2412,7 @@ module.exports = {
   cancelCxQueueItem,
   CX_CADENCE_EVENT_TYPES,
   buildCxCadenceRuntimeSnapshot,
+  backfillCxQueueOrdering,
   claimNextCxQueueItem,
   completeCxQueueItem,
   createCxCallPlacedEvent,

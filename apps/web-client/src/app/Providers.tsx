@@ -2,6 +2,7 @@ import * as React from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { BrowserRouter } from "react-router-dom";
 import { Toaster } from "@/components/ui/Toaster";
+import { ClientRuntimeSentinel } from "@/app/ClientRuntimeSentinel";
 import { ApiError } from "@/lib/api/client";
 import { ThemeProvider } from "@/lib/theme/ThemeProvider";
 
@@ -34,6 +35,7 @@ export function AppProviders({ children }: { children: React.ReactNode }) {
       <ThemeProvider>
         <BrowserRouter>
           {children}
+          <ClientRuntimeSentinel />
           <Toaster />
         </BrowserRouter>
       </ThemeProvider>

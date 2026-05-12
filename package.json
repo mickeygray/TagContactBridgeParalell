@@ -40,6 +40,7 @@
     "multer": "^2.1.1",
     "music-metadata": "^11.12.3",
     "node-7z": "^3.0.0",
+    "node-ssh": "^13.2.1",
     "nodemailer": "^8.0.7",
     "papaparse": "^5.5.3",
     "ssh2-sftp-client": "^11.0.0"

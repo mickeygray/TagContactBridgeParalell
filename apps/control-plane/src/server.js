@@ -44,7 +44,6 @@ const { createReadRouter } = require("./routes/read");
 const { createReadReviewRouter } = require("./routes/readReview");
 const { createRuntimeRouter } = require("./routes/runtime");
 const { createReadRingcentralRouter } = require("./routes/readRingcentral");
-const { createReadSchedulesRouter } = require("./routes/readSchedules");
 const { createReadSocialRouter } = require("./routes/readSocial");
 const { createReadWorkspaceRouter } = require("./routes/readWorkspace");
 const { createRingCentralRouter } = require("./routes/ringcentral");
@@ -64,6 +63,11 @@ const { toErrorResponse } = require("../../../packages/shared-errors/src");
 const {
   leadCadenceRepository,
 } = require("../../../packages/shared-repositories/src");
+
+const CLIENT_RUNTIME_STARTED_AT = new Date();
+const CLIENT_RUNTIME_ID = `${CLIENT_RUNTIME_STARTED_AT.toISOString()}-${crypto
+  .randomBytes(6)
+  .toString("hex")}`;
 
 // Hard-stop SMS keywords. Match the legacy TCB list for parity. Per
 // the per-channel-DNC design, a HARD STOP marks the lead's `sms`
@@ -257,6 +261,17 @@ function buildCallrailWebhookVerifier(config, runtime) {
 
   return (req, res, next) => {
     const providedSignature = String(req.get("Signature") || "").trim();
+    const providedToken = String(
+      req.headers["x-callrail-webhook-secret"] ||
+        req.headers["x-webhook-secret"] ||
+        req.headers["verification-token"] ||
+        req.headers["x-service-secret"] ||
+        "",
+    ).trim();
+    if (providedToken && safeTimingCompare(providedToken, signingSecret)) {
+      return next();
+    }
+
     if (!providedSignature) {
       return fallbackVerifier(req, res, next);
     }
@@ -752,6 +767,19 @@ async function startServer() {
     });
   });
 
+  app.get("/api/client/runtime", (_req, res) => {
+    res.set("Cache-Control", "no-store");
+    res.json({
+      ok: true,
+      runtime: {
+        service: "control-plane",
+        runtimeId: CLIENT_RUNTIME_ID,
+        startedAt: CLIENT_RUNTIME_STARTED_AT.toISOString(),
+        pid: process.pid,
+      },
+    });
+  });
+
   app.post("/sms/inbound", requireSmsWebhookSignature, async (req, res) => {
     // Ack to CallRail fast â€” they retry on slow responses.
     res.sendStatus(200);
@@ -823,42 +851,25 @@ async function startServer() {
   app.post("/ringcentral/session-events", requireWebhookSecret, async (req, res) => {
     res.sendStatus(200);
 
-    const payload = req.body || {};
-    const telephonySessionId =
-      String(payload.body?.telephonySessionId || payload.body?.sessionId || "").trim() ||
-      "unknown-session";
-    const sequence = String(payload.body?.sequence || "").trim();
-    const timestamp = String(payload.timestamp || payload.body?.eventTime || "").trim();
-    const candidates = extractAttributionCandidates(payload);
-
+    // Audit-only logging. We previously persisted every envelope to
+    // `eventrecords` + `controlplanereviewqueueitems` + a
+    // `telephony.ringcentral.observed` workflow row — pure firehose
+    // (~69K rows, ~150MB) with zero signal. Real telephony processing
+    // runs on the RC subscription native sweep and
+    // `processTelephonySessionCandidate`, both independent of this
+    // endpoint. Failure modes (RC 429s, CX-down, subscription stalled)
+    // surface via `recordServiceAlert` / the subscription watchdog.
     if (config.controlPlaneLogRingCentralSessionEvents) {
+      const payload = req.body || {};
+      const telephonySessionId =
+        String(payload.body?.telephonySessionId || payload.body?.sessionId || "").trim() ||
+        "unknown-session";
       runtime.logger.info("ringcentral.session_event.forwarded", {
         telephonySessionId,
-        sequence: sequence || null,
-        timestamp: timestamp || null,
-        candidatesCount: candidates.length,
+        sequence: String(payload.body?.sequence || "").trim() || null,
+        timestamp: String(payload.timestamp || payload.body?.eventTime || "").trim() || null,
+        candidatesCount: extractAttributionCandidates(payload).length,
       });
-    }
-
-    try {
-      await createEvent({
-        eventType: "ringcentral.telephony.forwarded",
-        sourceService: config.serviceName,
-        aggregateType: "telephony-session",
-        aggregateId: telephonySessionId,
-        dedupeKey: [telephonySessionId, sequence, timestamp].join(":"),
-        payload: {
-          envelope: payload,
-          candidates,
-        },
-      });
-    } catch (error) {
-      if (config.controlPlaneLogRingCentralSessionEvents) {
-        runtime.logger.warn("ringcentral.session_event.persist_failed", {
-          error: error.message,
-          telephonySessionId,
-        });
-      }
     }
   });
 
@@ -925,7 +936,6 @@ async function startServer() {
   app.use("/api/read", createReadRouter(auth));
   app.use("/api/read/review", createReadReviewRouter(auth));
   app.use("/api/read/ringcentral", createReadRingcentralRouter(auth));
-  app.use("/api/read/schedules", createReadSchedulesRouter(auth));
   app.use("/api/read/social", createReadSocialRouter(auth));
   app.use("/api/read/workspace", createReadWorkspaceRouter(auth));
   // Public-but-signed: streaming proxy for the Apps Script audio

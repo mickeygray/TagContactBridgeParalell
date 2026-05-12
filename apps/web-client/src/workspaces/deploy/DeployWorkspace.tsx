@@ -6,10 +6,15 @@ import {
   CircleSlash,
   ExternalLink,
   FileText,
+  GitBranch,
   History,
   Loader2,
   RefreshCcw,
   Rocket,
+  RotateCcw,
+  Server,
+  Terminal,
+  Undo2,
   XCircle,
 } from "lucide-react";
 import { ConfirmDeployDialog } from "./ConfirmDeployDialog";
@@ -22,6 +27,7 @@ import {
   KpiCard,
 } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
+import { Input, Label } from "@/components/ui/Input";
 import { StatusPill, type StatusTone } from "@/components/ui/StatusPill";
 import { SkeletonRow } from "@/components/ui/Skeleton";
 import { ErrorState } from "@/components/ui/ErrorState";
@@ -32,15 +38,37 @@ import {
   useCancelDeployRun,
   useDeployRuns,
   useDeployWorkspace,
+  useTriggerLocalDeploy,
   useTriggerDeploy,
 } from "@/lib/api/queries/deploy";
-import type { DeployAction, DeployRun, DeployTarget } from "@/lib/api/types";
+import type {
+  DeployAction,
+  DeployRun,
+  DeployTarget,
+  LocalDeployAction,
+  LocalDeployActionResult,
+  LocalDeployTarget,
+} from "@/lib/api/types";
 import { formatNumber, formatRelative } from "@/lib/utils/format";
 
 const ACTION_LABEL: Record<DeployAction, string> = {
   full: "Deploy",
   content: "Content push",
   restart: "Restart",
+};
+
+const LOCAL_ACTION_LABEL: Record<LocalDeployAction, string> = {
+  status: "Check",
+  deploy: "Deploy patch",
+  restart: "Restart PM2",
+  rollback: "Rollback",
+};
+
+const LOCAL_ACTION_ICON: Record<LocalDeployAction, React.ReactNode> = {
+  status: <Server className="h-3.5 w-3.5" />,
+  deploy: <Rocket className="h-3.5 w-3.5" />,
+  restart: <RotateCcw className="h-3.5 w-3.5" />,
+  rollback: <Undo2 className="h-3.5 w-3.5" />,
 };
 
 function runTone(run: DeployRun): StatusTone {
@@ -60,6 +88,26 @@ function runTone(run: DeployRun): StatusTone {
     default:
       return "neutral";
   }
+}
+
+function localTargetTone(target: LocalDeployTarget): StatusTone {
+  if (!target.ready) return "warning";
+  if ((target.repo?.dirtyCount ?? 0) > 0) return "info";
+  return "success";
+}
+
+function summarizeLocalCommandResult(result: LocalDeployActionResult | null) {
+  if (!result) return null;
+  const payload = result.result ?? {};
+  const pieces = [
+    payload.error ? `error: ${String(payload.error)}` : null,
+    payload.sha ? `remote ${String(payload.sha)}` : null,
+    payload.newSha ? `deployed ${String(payload.newSha)}` : null,
+    payload.currentSha ? `current ${String(payload.currentSha)}` : null,
+    payload.pm2Backend ? String(payload.pm2Backend) : null,
+    payload.duration ? String(payload.duration) : null,
+  ].filter(Boolean);
+  return pieces.length ? pieces.join(" - ") : `${result.label} ${result.action} completed`;
 }
 
 function runLabel(run: DeployRun): string {
@@ -85,11 +133,14 @@ export function DeployWorkspace() {
   const workspace = useDeployWorkspace(domain);
   const runs = useDeployRuns(null, 20);
   const trigger = useTriggerDeploy();
+  const localTrigger = useTriggerLocalDeploy();
   const cancel = useCancelDeployRun();
 
   const deploy = workspace.data?.deploy;
+  const localDeploy = workspace.data?.localDeploy;
   const configured = deploy?.configured ?? false;
   const targets = deploy?.targets ?? [];
+  const localTargets = localDeploy?.targets ?? [];
   const recentRuns = runs.data?.runs ?? deploy?.recentRuns ?? [];
 
   const running = recentRuns.filter(
@@ -105,6 +156,9 @@ export function DeployWorkspace() {
     target: DeployTarget;
     action: DeployAction;
   } | null>(null);
+  const [localNotes, setLocalNotes] = React.useState<Record<string, string>>({});
+  const [localResult, setLocalResult] =
+    React.useState<LocalDeployActionResult | null>(null);
 
   async function onTrigger(target: DeployTarget, action: DeployAction) {
     if (!target.allowedActions.includes(action)) return;
@@ -149,6 +203,38 @@ export function DeployWorkspace() {
     }
   }
 
+  async function onLocalAction(
+    target: LocalDeployTarget,
+    action: LocalDeployAction,
+  ) {
+    if (!target.ready && action !== "status") return;
+    const destructive = action === "deploy" || action === "restart" || action === "rollback";
+    const note = localNotes[target.key]?.trim() || undefined;
+    if (destructive) {
+      const ok = window.confirm(
+        `${LOCAL_ACTION_LABEL[action]} ${target.label}? This will run against ${target.host ?? "the configured host"}.`,
+      );
+      if (!ok) return;
+    }
+
+    try {
+      const result = await localTrigger.mutateAsync({
+        targetKey: target.key,
+        action,
+        note,
+        confirm: destructive ? target.key : undefined,
+      });
+      setLocalResult(result);
+      toast.success(`${LOCAL_ACTION_LABEL[action]} finished`, {
+        description: summarizeLocalCommandResult(result) ?? target.label,
+      });
+    } catch (err) {
+      toast.error(`${LOCAL_ACTION_LABEL[action]} failed`, {
+        description: (err as Error).message,
+      });
+    }
+  }
+
   async function onCancel(run: DeployRun) {
     if (!run.targetKey) {
       toast.error("Cancel failed", {
@@ -171,14 +257,16 @@ export function DeployWorkspace() {
       <SectionHeader
         eyebrow="Operations"
         title="Deploy"
-        description="One-click GitHub Actions deploys. Every press records a workflow stage on 5001 and triggers the configured workflow_dispatch event."
+        description="Patch and deploy the two sales sites from the local repo workflow, with GitHub Actions status kept as a secondary feed when configured."
         actions={
           <StatusPill
             dotted
             tone={
               workspace.isError
                 ? "danger"
-                : !configured
+                : localDeploy?.configured
+                  ? "success"
+                  : !configured
                   ? "warning"
                   : running > 0
                     ? "info"
@@ -187,7 +275,9 @@ export function DeployWorkspace() {
           >
             {workspace.isError
               ? "Error"
-              : !configured
+              : localDeploy?.configured
+                ? "Local ready"
+                : !configured
                 ? "Not configured"
                 : running > 0
                   ? `${running} running`
@@ -196,9 +286,186 @@ export function DeployWorkspace() {
         }
       />
 
-      {!configured ? (
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center justify-between gap-3">
+            <span>Sales sites</span>
+            <StatusPill
+              tone={localDeploy?.configured ? "success" : "warning"}
+              dotted
+            >
+              {localDeploy?.configured ? "SSH configured" : "Needs local config"}
+            </StatusPill>
+          </CardTitle>
+        </CardHeader>
+        <CardContent className="pt-0">
+          {workspace.isLoading && !workspace.data ? (
+            <SkeletonRow count={2} />
+          ) : localTargets.length === 0 ? (
+            <EmptyState
+              icon={<Terminal />}
+              title="No local sales-site deploy targets"
+              description={
+                localDeploy?.loadError ??
+                "scripts/deployService.js is not available to the control-plane."
+              }
+            />
+          ) : (
+            <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
+              {localTargets.map((target) => {
+                const pendingAction =
+                  localTrigger.isPending &&
+                  localTrigger.variables?.targetKey === target.key
+                    ? localTrigger.variables?.action
+                    : null;
+                return (
+                  <div
+                    key={target.key}
+                    className="rounded-lg border border-border p-4"
+                  >
+                    <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+                      <div className="min-w-0">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="text-sm font-semibold">
+                            {target.label}
+                          </span>
+                          <StatusPill tone={localTargetTone(target)} dotted>
+                            {target.ready
+                              ? (target.repo?.dirtyCount ?? 0) > 0
+                                ? `${target.repo?.dirtyCount} local change(s)`
+                                : "Ready"
+                              : `Needs ${target.missing?.join(" + ") || "config"}`}
+                          </StatusPill>
+                        </div>
+                        <div className="mt-2 grid gap-1 text-xs text-muted-foreground">
+                          <span className="truncate">
+                            <Server className="mr-1 inline h-3.5 w-3.5" />
+                            {target.user}@{target.host}:{target.remotePath}
+                          </span>
+                          <span className="truncate">
+                            <GitBranch className="mr-1 inline h-3.5 w-3.5" />
+                            {target.repo?.branch ?? target.branch ?? "branch?"}
+                            {target.repo?.headSha
+                              ? ` - ${target.repo.headSha} ${target.repo.headMessage ?? ""}`
+                              : ""}
+                          </span>
+                          <span className="truncate font-mono">
+                            {target.localRepoPath || "No local repo path"}
+                          </span>
+                        </div>
+                      </div>
+                      {target.url ? (
+                        <Button asChild size="sm" variant="secondary">
+                          <a
+                            href={target.url}
+                            target="_blank"
+                            rel="noreferrer"
+                          >
+                            <ExternalLink className="h-3.5 w-3.5" />
+                            Open
+                          </a>
+                        </Button>
+                      ) : null}
+                    </div>
+
+                    {target.warnings?.length ? (
+                      <div className="mt-3 rounded-md border border-warning/30 bg-warning/10 p-3 text-xs text-warning-foreground">
+                        {target.warnings.map((warning) => (
+                          <div key={warning}>{warning}</div>
+                        ))}
+                      </div>
+                    ) : null}
+
+                    {target.repo?.dirtyPreview?.length ? (
+                      <div className="mt-3 rounded-md bg-muted p-3">
+                        <div className="text-xs font-medium text-foreground">
+                          Local files waiting on this site
+                        </div>
+                        <pre className="mt-2 max-h-24 overflow-auto text-xs text-muted-foreground">
+                          {target.repo.dirtyPreview.join("\n")}
+                        </pre>
+                      </div>
+                    ) : null}
+
+                    <div className="mt-4 space-y-2">
+                      <Label htmlFor={`deploy-note-${target.key}`}>
+                        Commit note for deploy
+                      </Label>
+                      <Input
+                        id={`deploy-note-${target.key}`}
+                        placeholder="optional, e.g. update sales page copy"
+                        value={localNotes[target.key] ?? ""}
+                        onChange={(event) =>
+                          setLocalNotes((current) => ({
+                            ...current,
+                            [target.key]: event.target.value,
+                          }))
+                        }
+                      />
+                      <p className="text-xs text-muted-foreground">
+                        Leave blank to deploy already committed work. Add a note
+                        to commit local dirty files before deploy.
+                      </p>
+                    </div>
+
+                    <div className="mt-4 flex flex-wrap items-center gap-2">
+                      {(["status", "deploy", "restart", "rollback"] as LocalDeployAction[]).map(
+                        (action) => (
+                          <Button
+                            key={action}
+                            size="sm"
+                            variant={
+                              action === "deploy"
+                                ? "primary"
+                                : action === "rollback"
+                                  ? "destructive"
+                                  : "secondary"
+                            }
+                            disabled={
+                              (action !== "status" && !target.ready) ||
+                              (localTrigger.isPending && pendingAction !== action)
+                            }
+                            isLoading={pendingAction === action}
+                            onClick={() => onLocalAction(target, action)}
+                          >
+                            {LOCAL_ACTION_ICON[action]}
+                            {LOCAL_ACTION_LABEL[action]}
+                          </Button>
+                        ),
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          {localResult ? (
+            <div className="mt-4 rounded-lg border border-border bg-muted/40 p-4">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="text-sm font-semibold">
+                  Last local command: {localResult.label}
+                </div>
+                <StatusPill tone="success">
+                  {LOCAL_ACTION_LABEL[localResult.action]}
+                </StatusPill>
+              </div>
+              <div className="mt-1 text-xs text-muted-foreground">
+                {summarizeLocalCommandResult(localResult)}
+              </div>
+              {localResult.logs?.length ? (
+                <pre className="mt-3 max-h-64 overflow-auto rounded-md bg-background p-3 text-xs text-muted-foreground">
+                  {localResult.logs.slice(-80).join("\n")}
+                </pre>
+              ) : null}
+            </div>
+          ) : null}
+        </CardContent>
+      </Card>
+
+      {!configured && !localDeploy?.configured ? (
         <GapCard
-          title="GitHub is not wired up yet"
+          title="GitHub Actions deploy is not wired up"
           description={
             (deploy?.missing?.length
               ? `Missing: ${deploy.missing.join(", ")}. `
@@ -216,8 +483,9 @@ export function DeployWorkspace() {
 
       <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
         <KpiCard
-          label="Targets"
-          value={formatNumber(targets.length)}
+          label="Sales sites"
+          value={formatNumber(localTargets.length)}
+          hint={`${localTargets.filter((target) => target.ready).length} ready`}
           icon={<Rocket className="h-4 w-4" />}
         />
         <KpiCard
@@ -233,7 +501,7 @@ export function DeployWorkspace() {
           icon={<AlertTriangle className="h-4 w-4" />}
         />
         <KpiCard
-          label="Ready targets"
+          label="GitHub targets"
           value={formatNumber(
             targets.filter((target) => target.ready !== false).length,
           )}

@@ -39,14 +39,20 @@ const {
 } = require("../../shared-integrations/src");
 const {
   assignCxQueueBatch,
+  backfillCxQueueOrdering,
   cancelCxQueueItem,
   completeCxQueueItem,
   releaseAssignedCxQueueForAgent,
+  releaseCxQueueItem,
   rescheduleCxQueueItem,
   stageCxDispatchIntent,
 } = require("./cxCadenceService");
+const { deriveQueueFamily } = require("./cxLoadBalancerService");
 const {
+  deriveQueueFamilyFromLeadCreatedAt,
   getCooldownReleaseAt,
+  getPacificBusinessDayAge,
+  getPacificBusinessDayStart,
   getPacificDateKey,
   resolveAccountQueuePolicy,
 } = require("./cxQueuePolicyService");
@@ -114,16 +120,8 @@ function resolveAgentSpecificRcxRouting(input = {}, queueItem = null, metadata =
     assignment.agentEmail,
     assignment.email,
     assignment.agentName,
-    metadata.rcxVisibilityAssignedExtensionId,
-    metadata.rcxVisibilityAgentId,
-    metadata.rcxVisibilityAgentUsername,
-    metadata.lastDialIntent?.assignedAgentUsername,
-    metadata.lastDialIntent?.assignedAgentEmail,
-    metadata.lastDialIntent?.assignedAgentId,
-    metadata.lastDialIntent?.dialerCxAgentId,
-    metadata.lastDialIntent?.dialerEmail,
-    metadata.lastDialIntent?.agent?.cxAgentId,
-    metadata.lastDialIntent?.agent?.email,
+    metadata.assignedExtensionId,
+    metadata.assignedAgentName,
     metadata.assignedAgentEmail,
     metadata.assignedAgentId,
   ]);
@@ -133,10 +131,12 @@ function resolveAgentSpecificRcxRouting(input = {}, queueItem = null, metadata =
     if (!suffix) continue;
     const dialGroupId = readEnvExternalId(`RINGCX_AGENT_ROUTE_${suffix}_DIAL_GROUP_ID`);
     const campaignId = readEnvExternalId(`RINGCX_AGENT_ROUTE_${suffix}_CAMPAIGN_ID`);
-    if (dialGroupId || campaignId) {
+    const executionMode = readEnvExternalId(`RINGCX_AGENT_ROUTE_${suffix}_EXECUTION_MODE`);
+    if (dialGroupId || campaignId || executionMode) {
       return {
         dialGroupId,
         campaignId,
+        executionMode,
         matchedToken: String(token),
       };
     }
@@ -171,7 +171,6 @@ function resolveRcxRoutingForQueueIntent(input = {}, queueItem = null) {
       || normalizeExternalId(input.accountId)
       || normalizeExternalId(queueItem?.rcxAccountId)
       || normalizeExternalId(metadata.rcxAccountId)
-      || normalizeExternalId(metadata.rcxVisibilityAccountId)
       || readEnvExternalId("RINGCX_VOICE_ACCOUNT_ID"),
     dialGroupId:
       agentRoute?.dialGroupId
@@ -179,7 +178,6 @@ function resolveRcxRoutingForQueueIntent(input = {}, queueItem = null) {
       || normalizeExternalId(input.dialGroupId)
       || normalizeExternalId(queueItem?.rcxDialGroupId)
       || normalizeExternalId(metadata.rcxDialGroupId)
-      || normalizeExternalId(metadata.rcxVisibilityDialGroupId)
       || readEnvExternalId("RINGCX_VOICE_DEFAULT_DIAL_GROUP_ID"),
     campaignId:
       agentRoute?.campaignId
@@ -188,10 +186,13 @@ function resolveRcxRoutingForQueueIntent(input = {}, queueItem = null) {
       || normalizeExternalId(input.queueId)
       || normalizeExternalId(queueItem?.rcxCampaignId)
       || normalizeExternalId(metadata.rcxCampaignId)
-      || normalizeExternalId(metadata.rcxVisibilityCampaignId)
       || familyCampaignId
       || readEnvExternalId("RINGCX_VOICE_DEFAULT_CAMPAIGN_ID")
       || readEnvExternalId("RINGCX_VOICE_NEW_CAMPAIGN_ID"),
+    executionMode:
+      agentRoute?.executionMode
+      || readEnvExternalId("RINGCX_DIAL_EXECUTION_MODE")
+      || "ringcx-campaign-queue",
     agentRoute,
   };
 }
@@ -681,6 +682,17 @@ function resolveCallbackScheduledFor(input = {}) {
   return new Date(Date.now() + 30 * 60 * 1000);
 }
 
+function resolveSafeCallbackReleaseAt(input = {}, queueItem = null, now = new Date()) {
+  const explicit = input.callbackAt || input.scheduledFor || input.followUpAt || null;
+  if (explicit) return resolveCallbackScheduledFor(input);
+  if (queueItem) {
+    const fromQueue = getCooldownReleaseAt(queueItem, now);
+    const parsed = fromQueue ? new Date(fromQueue) : null;
+    if (parsed && !Number.isNaN(parsed.getTime())) return parsed;
+  }
+  return resolveCallbackScheduledFor(input);
+}
+
 async function resolveActiveCxQueueAction(domain, caseId, preferredActionKey = null) {
   const normalizedDomain = normalizeDomain(domain);
   const normalizedCaseId = Number(caseId);
@@ -726,13 +738,7 @@ async function finalizeCxDispositionCallback(domain, input = {}) {
   const actionKey = extractQueueActionKey(input);
   const queueAction = await resolveActiveCxQueueAction(domain, caseId, actionKey);
   const queueItem = await resolveCxDialQueueItem(domain, caseId, input).catch(() => null);
-  const explicitSchedule =
-    input.callbackAt || input.scheduledFor || input.followUpAt || null;
-  const scheduledFor = explicitSchedule
-    ? resolveCallbackScheduledFor(input)
-    : queueItem
-      ? getCooldownReleaseAt(queueItem, new Date())
-      : resolveCallbackScheduledFor(input);
+  const scheduledFor = resolveSafeCallbackReleaseAt(input, queueItem);
   if (queueAction?.actionKey) {
     await leadCadenceRepository.rescheduleScheduledAction(
       domain,
@@ -752,15 +758,115 @@ async function finalizeCxDispositionCallback(domain, input = {}) {
     releaseAt: scheduledFor,
     reason: "callback",
     actorEmail: input.actorEmail || null,
+    cancelRingcxInBackground: true,
+    extraUpdate: {
+      metadata: {
+        lastCallbackEjectedAt: new Date(),
+        lastCallbackEjectedBy: input.actorEmail || null,
+      },
+    },
   }).catch(() => null);
+  const queueItemId =
+    queueItem?._id ? String(queueItem._id) : String(input.queueItemId || input.queueTicketId || "").trim() || null;
+  const callbackEjected = Boolean(queueMutation?.mutated || queueItemId || queueAction?.actionKey);
 
   return {
     caseId,
+    domain,
+    queueItemId,
+    queueTicketId: queueItemId,
     disposition: "Call Back",
-    queueOutcome: queueMutation?.mutated ? "rescheduled" : queueAction?.actionKey ? "rescheduled" : "noop",
+    queueOutcome: callbackEjected ? "rescheduled" : "noop",
+    callbackEjected,
+    queueEjection: queueMutation || null,
     actionKey: queueAction?.actionKey || actionKey || null,
     rescheduledFor: scheduledFor.toISOString(),
   };
+}
+
+function queueCxCallbackBackgroundCleanup({
+  context,
+  user,
+  input = {},
+  queueItem = null,
+  caseId = null,
+  outcome = null,
+  requested = null,
+  title = "Disposition requested",
+  summary = "Apply disposition call back",
+} = {}) {
+  Promise.resolve()
+    .then(async () => {
+      const hangup = await hangupCxCallAfterDisposition({
+        context,
+        user,
+        input: {
+          ...input,
+          callbackAt: input.callbackAt || input.scheduledFor || outcome?.rescheduledFor || null,
+        },
+        queueItem,
+        caseId,
+        disposition: "call-back",
+      });
+      const postHangupEjection = await rescheduleCxQueueItem({
+        domain: context.domain,
+        caseId,
+        queueItemId: outcome?.queueItemId || input.queueItemId || input.queueTicketId || null,
+        releaseAt: outcome?.rescheduledFor || input.callbackAt || input.scheduledFor || input.followUpAt || null,
+        reason: "callback-post-hangup-eject",
+        actorEmail: context.account?.email || user?.email || null,
+        cancelRingcxInBackground: true,
+        extraUpdate: {
+          metadata: {
+            lastCallbackPostHangupEjectedAt: new Date(),
+            lastCallbackPostHangupEjectedBy: context.account?.email || user?.email || null,
+          },
+        },
+      }).catch(() => null);
+      await recordWorkflowStage({
+        domain: context.domain,
+        family: "cx",
+        subtype: "disposition",
+        stage: "completed",
+        aggregateType: "case-profile",
+        aggregateId: input.caseId,
+        caseId: input.caseId,
+        sourceService: "control-plane",
+        title,
+        summary: `${summary} completed`,
+        result: {
+          requested,
+          response: outcome,
+          postHangupEjection,
+          hangup,
+        },
+      });
+    })
+    .catch((error) => {
+      console.warn("[cx-callback-background-cleanup] failed", {
+        caseId,
+        queueItemId: outcome?.queueItemId || input.queueItemId || input.queueTicketId || null,
+        error: error.message || String(error),
+      });
+    });
+}
+
+async function clearAgentCxCallState(extensionId, source = "cx-call-state-clear") {
+  const normalizedExtensionId = String(extensionId || "").trim();
+  if (!normalizedExtensionId) return null;
+  const now = new Date();
+  return agentStateRepository.updateAgentState(normalizedExtensionId, {
+    status: "available",
+    activityState: "idle",
+    activePlatform: "none",
+    currentCall: {},
+    lastCallEndedAt: now,
+    lastCallOutcome: "ended",
+    lastActivityAt: now,
+    lastStatusChange: now,
+    "upstream.source": source,
+    "upstream.mirroredAt": now,
+  }).catch(() => null);
 }
 
 async function ensureCxDealCaseProfile(domain, caseId, input = {}, dealHandoff = {}) {
@@ -893,6 +999,8 @@ async function finalizeCxQueueFromLogicsState(domain, caseId, input = {}, logics
     const queueMutation = await cancelCxQueueItem({
       domain,
       caseId: normalizedCaseId,
+      queueItemId: input.queueItemId || input.queueTicketId || null,
+      queueActionKey: extractQueueActionKey(input),
       reason: statusCategory || "terminal-status",
       queueOutcome: "cancelled",
       disposition,
@@ -929,6 +1037,8 @@ async function finalizeCxQueueFromLogicsState(domain, caseId, input = {}, logics
   const queueMutation = await completeCxQueueItem({
     domain,
     caseId: normalizedCaseId,
+    queueItemId: input.queueItemId || input.queueTicketId || null,
+    queueActionKey: extractQueueActionKey(input),
     queueOutcome: "completed",
     disposition,
     statusId,
@@ -1146,7 +1256,15 @@ function summarizeCallQueueItem(item) {
     payloadSnapshot?.queueTier ||
     payloadSnapshot?.leadQueueFamily ||
     null;
-  const derivedFamily = explicitFamily
+  const createdAtFamily = deriveQueueFamilyFromLeadCreatedAt(
+    payloadSnapshot?.leadCreatedAt
+      || payloadSnapshot?.createdAt
+      || item.leadCreatedAt
+      || item.createdAt
+      || null,
+  );
+  const derivedFamily = createdAtFamily
+    || explicitFamily
     || (activeDay === 0 ? "fresh-day1" : null)
     || (activeDay != null && activeDay > 0 && activeDay <= 15 ? "fresh-day2to10" : null)
     || (String(item.currentStage || "").toLowerCase().includes("aged") ? "aged" : null);
@@ -1192,11 +1310,62 @@ function isCxAdminViewer(user = {}, context = {}) {
   return role === "admin" || audience === "admin";
 }
 
+function isFallbackAfterFirstContactViewer(context = {}) {
+  const account = context?.account && typeof context.account === "object"
+    ? context.account
+    : {};
+  const metadata = account.metadata && typeof account.metadata === "object"
+    ? account.metadata
+    : {};
+  const mode = String(
+    metadata.cxQueueVisibilityMode
+      || metadata.cxQueueMode
+      || "",
+  ).trim().toLowerCase();
+  return (
+    mode === "fallback_after_first_contact"
+    || metadata.cxFallbackAfterFirstContact === true
+  );
+}
+
+function isQueueItemUnassigned(queueItem = {}) {
+  return !String(queueItem?.assignment?.extensionId || "").trim();
+}
+
+function isPostFirstContactQueueItem(queueItem = {}) {
+  const family = normalizeCxQueueFamily(
+    queueItem.queueFamily
+      || queueItem.assignment?.queueFamilySnapshot
+      || queueItem.metadata?.queueFamily
+      || "",
+  );
+  if (family === "fresh-day2to10" || family === "aged") return true;
+
+  const stageIndex = Number(queueItem.progressiveStageIndex);
+  if (Number.isFinite(stageIndex) && stageIndex > 0 && stageIndex < 99) return true;
+
+  const stageKey = String(queueItem.progressiveStageKey || "").trim().toLowerCase();
+  if (["second-contact", "third-contact"].includes(stageKey)) return true;
+
+  const placedCalls = Number(queueItem.placedCalls || queueItem.metadata?.placedCalls || 0);
+  if (Number.isFinite(placedCalls) && placedCalls > 0) return true;
+
+  if (queueItem.metadata?.lastQueueAttemptAt) return true;
+  const phaseIndex = Number(queueItem.callPlan?.phaseIndex || 0);
+  return Number.isFinite(phaseIndex) && phaseIndex > 0;
+}
+
 function canViewQueueItemForAgent(queueItem = {}, context = {}) {
   const agentExtensionId = String(context?.account?.extensionId || "").trim();
   if (!agentExtensionId) return false;
   const assignedExtensionId = String(queueItem?.assignment?.extensionId || "").trim();
-  return Boolean(assignedExtensionId && assignedExtensionId === agentExtensionId);
+  if (assignedExtensionId) return assignedExtensionId === agentExtensionId;
+  return Boolean(
+    isFallbackAfterFirstContactViewer(context)
+      && String(queueItem.state || "").trim().toLowerCase() === "ready"
+      && isQueueItemUnassigned(queueItem)
+      && isPostFirstContactQueueItem(queueItem),
+  );
 }
 
 function parseQueueFamilyList(value, fallback = []) {
@@ -1235,6 +1404,7 @@ async function listActiveCxQueueItemsForAgent(context, agentExtensionId) {
     ...(readAllAssignedDomains ? {} : { domain: context.domain }),
     states: ["queued", "ready", "claimed", "serving", "paused"],
     visibleExtensionId: agentExtensionId,
+    includeUnassignedVisible: isFallbackAfterFirstContactViewer(context),
     limitAll: true,
   });
 }
@@ -1247,12 +1417,7 @@ function buildQueueCadenceKey(domain, caseId) {
 }
 
 function getQueueItemFamily(queueItem = {}) {
-  return normalizeCxQueueFamily(
-    queueItem.queueFamily
-      || queueItem.assignment?.queueFamilySnapshot
-      || queueItem.metadata?.queueFamily
-      || "",
-  );
+  return normalizeCxQueueFamily(deriveQueueFamily(queueItem));
 }
 
 function countVisibleQueueItemsByFamily(visibleQueueItems = [], queueFamilies = []) {
@@ -1275,6 +1440,7 @@ function getNonNegativeEnvNumber(name, fallback) {
 }
 
 const ACTIVE_QUEUE_STATES = ["queued", "ready", "claimed", "serving", "paused"];
+let lastQueueOrderingBackfillAt = 0;
 const NON_DIALABLE_STAGE_PATTERN = /\b(dnc|do not call|post\s*date|post-date|sold|deal|bad inactive|inactive)\b/i;
 
 function getPacificMonthTag(now = new Date()) {
@@ -1289,9 +1455,7 @@ function getPacificMonthTag(now = new Date()) {
 }
 
 function getLeadAgeDays(createdAt, now = new Date()) {
-  const created = createdAt ? new Date(createdAt) : null;
-  if (!created || Number.isNaN(created.getTime())) return null;
-  return Math.max(Math.floor((now.getTime() - created.getTime()) / (24 * 60 * 60 * 1000)), 0);
+  return getPacificBusinessDayAge(createdAt, now);
 }
 
 function pickLeadCadencePhone(doc = {}) {
@@ -1359,8 +1523,9 @@ async function materializeDay2To15QueueItems(domain, neededCount, options = {}) 
 
   const now = options.now || new Date();
   const dayMs = 24 * 60 * 60 * 1000;
-  const windowStart = new Date(now.getTime() - 15 * dayMs);
-  const windowEnd = new Date(now.getTime() - 2 * dayMs);
+  const currentFreshWindowStart = getPacificBusinessDayStart(now);
+  const windowStart = new Date(currentFreshWindowStart.getTime() - 16 * dayMs);
+  const windowEnd = currentFreshWindowStart;
   const dateKey = getPacificDateKey(now);
   const normalizedDomain = normalizeDomain(domain);
   const scanLimit = Math.min(Math.max(count * 8, 40), 300);
@@ -1368,7 +1533,7 @@ async function materializeDay2To15QueueItems(domain, neededCount, options = {}) 
   const candidates = await LeadCadence.find({
     domain: normalizedDomain,
     active: true,
-    createdAt: { $gte: windowStart, $lte: windowEnd },
+    createdAt: { $gte: windowStart, $lt: windowEnd },
     $or: [
       { normalizedPhone: { $nin: [null, ""] } },
       { primaryPhone: { $nin: [null, ""] } },
@@ -1399,7 +1564,9 @@ async function materializeDay2To15QueueItems(domain, neededCount, options = {}) 
     if (await queueActionAlreadyExists(normalizedDomain, caseId, actionKey)) continue;
     if (await activeQueueCaseExists(normalizedDomain, caseId)) continue;
 
-    const activeDay = getLeadAgeDays(cadence.createdAt, now) || 2;
+    const businessAgeDays = getLeadAgeDays(cadence.createdAt, now);
+    if (!Number.isFinite(businessAgeDays) || businessAgeDays < 1 || businessAgeDays > 14) continue;
+    const activeDay = businessAgeDays + 1;
     await cxDialQueueRepository.upsertQueueItem(
       normalizedDomain,
       caseId,
@@ -1815,7 +1982,7 @@ function buildLeadBodyFromQueueSources(queueItem = {}, cadenceDoc = null) {
     sourceName: queueItem.sourceName || cadenceDoc?.sourceName || null,
     intakeSource: queueItem.intakeSource || cadenceDoc?.intakeSource || null,
     intakeRoute: queueItem.intakeRoute || cadenceDoc?.intakeRoute || null,
-    queueFamily: queueItem.queueFamily || null,
+    queueFamily: getQueueItemFamily(queueItem),
     queueTier: queueItem.queueTier || null,
     currentStage: cadenceDoc?.currentStage || null,
     callPlan: queueItem.callPlan || null,
@@ -1827,6 +1994,7 @@ function summarizeServedQueueItem(queueItem, cadenceDoc = null) {
     ? cadenceDoc.payloadSnapshot
     : null;
   const leadBody = buildLeadBodyFromQueueSources(queueItem, cadenceDoc);
+  const effectiveQueueFamily = getQueueItemFamily(queueItem);
   const nextPendingAction = Array.isArray(cadenceDoc?.schedule?.actions)
     ? cadenceDoc.schedule.actions
       .filter((entry) => entry.channel === "cx" && (entry.status === "pending" || entry.status === "requested"))
@@ -1865,10 +2033,13 @@ function summarizeServedQueueItem(queueItem, cadenceDoc = null) {
       status: queueItem.state || null,
     },
     score: queueItem.priorityScore ?? null,
-    queueFamily: queueItem.queueFamily || null,
+    queueFamily: effectiveQueueFamily,
     progressiveStageKey,
     progressiveStageIndex,
     progressiveStageLabel: queueItem.progressiveStageLabel || payloadSnapshot?.progressiveStageLabel || null,
+    placedCalls: Number(queueItem.placedCalls || queueItem.metadata?.placedCalls || 0) || 0,
+    dailyPlacedCalls: Number(queueItem.dailyPlacedCalls || queueItem.metadata?.dailyPlacedCalls || 0) || 0,
+    lastPlacedAt: queueItem.lastPlacedAt || queueItem.metadata?.lastQueueAttemptAt || null,
     queueDayIndex: activeDay,
     payloadSnapshot,
     leadBody,
@@ -1889,6 +2060,10 @@ async function buildCxQueueItems(context, limit = 50) {
   const agentExtensionId = String(context?.account?.extensionId || "").trim();
   if (!agentExtensionId) return [];
   await bumpLastActivityAt(agentExtensionId, { source: "cx-workspace" }).catch(() => null);
+  if (Date.now() - lastQueueOrderingBackfillAt > 60 * 1000) {
+    lastQueueOrderingBackfillAt = Date.now();
+    await backfillCxQueueOrdering(null, 1000).catch(() => null);
+  }
 
   let activeQueueItems = await listActiveCxQueueItemsForAgent(context, agentExtensionId);
   let visibleQueueItems = activeQueueItems.filter((item) =>
@@ -1933,13 +2108,17 @@ async function buildCxQueueItems(context, limit = 50) {
 
   return servedItems
     .sort((left, right) => {
-      const familyOrder = {
-        "fresh-day1": 0,
-        "fresh-day2to10": 1,
-        aged: 2,
+      const queueSortRank = (item) => {
+        const family = String(item.queueFamily || "").trim();
+        const stage = Number.isFinite(Number(item.progressiveStageIndex)) ? Number(item.progressiveStageIndex) : 99;
+        const placedCalls = Number(item.placedCalls || 0) || 0;
+        if (family === "fresh-day1") return stage <= 0 && placedCalls <= 0 ? 0 : 1.5;
+        if (family === "fresh-day2to10") return 1;
+        if (family === "aged") return 2;
+        return 99;
       };
-      const leftFamily = Number(familyOrder[String(left.queueFamily || "").trim()] ?? 99);
-      const rightFamily = Number(familyOrder[String(right.queueFamily || "").trim()] ?? 99);
+      const leftFamily = queueSortRank(left);
+      const rightFamily = queueSortRank(right);
       if (leftFamily !== rightFamily) return leftFamily - rightFamily;
 
       const leftStage = Number.isFinite(Number(left.progressiveStageIndex)) ? Number(left.progressiveStageIndex) : 99;
@@ -2852,7 +3031,7 @@ async function requestCxDisposition(domain, user, input = {}) {
       logicsStatusId: input.logicsStatusId || null,
       notes: input.notes || null,
       phone: input.phone || null,
-      searchPhone: input.phone || null,
+      searchPhone: input.searchPhone || input.phone || null,
       queueActionKey: extractQueueActionKey(input),
       queueItemId: input.queueItemId || input.queueTicketId || null,
       assignedExtensionId: input.assignedExtensionId || null,
@@ -2983,42 +3162,39 @@ async function requestCxDisposition(domain, user, input = {}) {
       ...input,
       actorEmail: context.account?.email || user?.email || null,
     });
-    const hangup = await hangupCxCallAfterDisposition({
+    await clearAgentCxCallState(
+      context.account?.extensionId || user?.extensionId || input.assignedExtensionId || null,
+      "cx-callback-eject",
+    );
+    queueCxCallbackBackgroundCleanup({
       context,
       user,
-      input: {
-        ...input,
-        callbackAt: input.callbackAt || input.scheduledFor || outcome?.rescheduledFor || null,
-      },
+      input,
       queueItem,
       caseId: normalizedCaseId,
-      disposition: "call-back",
-    });
-    const completed = await recordWorkflowStage({
-      domain: context.domain,
-      family: "cx",
-      subtype: "disposition",
-      stage: "completed",
-      aggregateType: "case-profile",
-      aggregateId: input.caseId,
-      caseId: input.caseId,
-      sourceService: "control-plane",
       title,
-      summary: `${summary} completed`,
-      result: {
-        requested,
-        response: outcome,
-      },
+      summary,
+      outcome,
+      requested,
     });
     return {
       ...requested,
       completed: true,
-      completionWorkflowId: String(completed._id),
+      completionWorkflowId: null,
       disposition: outcome?.disposition || "Call Back",
       queueOutcome: outcome?.queueOutcome || null,
       rescheduledFor: outcome?.rescheduledFor || null,
+      callbackEjected: Boolean(outcome?.callbackEjected),
+      queueItemId: outcome?.queueItemId || input.queueItemId || input.queueTicketId || null,
+      queueTicketId: outcome?.queueTicketId || outcome?.queueItemId || input.queueItemId || input.queueTicketId || null,
+      queueEjection: outcome?.queueEjection || null,
       response: outcome,
-      hangup,
+      hangup: {
+        ok: true,
+        acceptedLocally: true,
+        backgroundPending: true,
+        reason: "callback-hangup-backgrounded",
+      },
     };
   }
 
@@ -3609,9 +3785,26 @@ function buildCxDispatchIntent({
     : queueItem?.leadCadenceId
       ? String(queueItem.leadCadenceId)
       : null;
-  const rcxRouting = resolveRcxRoutingForQueueIntent(input, queueItem);
+  const routingInput = {
+    ...input,
+    assignedExtensionId,
+    assignedAgentName,
+    dialerExtensionId: actorExtensionId,
+    dialerEmail: actorEmail,
+    dialerCxAgentId: actorCxAgentId,
+    agent: {
+      ...(input.agent && typeof input.agent === "object" ? input.agent : {}),
+      email: actorEmail,
+      name: actorName,
+      extensionId: actorExtensionId,
+      cxAgentId: actorCxAgentId,
+      assignedExtensionId,
+      assignedAgentName,
+    },
+  };
+  const rcxRouting = resolveRcxRoutingForQueueIntent(routingInput, queueItem);
   const executionMode =
-    String(process.env.RINGCX_DIAL_EXECUTION_MODE || "ringcx-campaign-queue").trim()
+    String(rcxRouting.executionMode || "ringcx-campaign-queue").trim()
     || "ringcx-campaign-queue";
 
   return {
@@ -3656,14 +3849,7 @@ function buildCxDispatchIntent({
     workflowId: requested?.workflowId || null,
     eventId: eventId || null,
     callerIdMode: "ex-number",
-    agent: {
-      email: actorEmail,
-      name: actorName,
-      extensionId: actorExtensionId,
-      cxAgentId: actorCxAgentId,
-      assignedExtensionId,
-      assignedAgentName,
-    },
+    agent: routingInput.agent,
     exShell: activeExShell
       ? {
         company: activeExShell.company || null,
@@ -4054,9 +4240,7 @@ async function hangupCxCallAfterDisposition({
     }).catch(() => null);
   }
   if (relayAccepted && assignedExtensionId) {
-    await setActivityState(assignedExtensionId, "idle", {
-      source: "cx-disposition-complete",
-    }).catch(() => null);
+    await clearAgentCxCallState(assignedExtensionId, "cx-disposition-complete");
   }
 
   await recordWorkflowStage({
@@ -4098,6 +4282,10 @@ async function hangupCxCallAfterDisposition({
       phone: phone || null,
       extensionId: assignedExtensionId,
       executionOwner: "ringcentral-cx",
+      // CX dispositions are the authoritative "this was a CX call" signal.
+      // Use $set (the default in upsertCallLog) so this wins over any
+      // earlier EX-stamp from the hourly RC native sweep.
+      platform: "cx",
       // Mark this as defensively created so the hygiene sweep / resolver
       // knows it's a stub, not a fully-attributed row. The resolver will
       // upgrade it with a real strategy/sourceCanonicalId when it next
@@ -4350,14 +4538,34 @@ async function requestCxDial(domain, user, input = {}) {
       };
     }
     if (effectiveQueueItemId) {
-      await cxDialQueueRepository.updateQueueItem(effectiveQueueItemId, {
-        state: "ready",
-        claimUntil: null,
-        "metadata.lastDialIntentStatus": "relay-failed",
-        "metadata.lastDialIntentReleaseReason": relayResult.reason || "dispatch-relay-failed",
-        "metadata.lastDialIntentReleasedAt": new Date(),
-      }).catch(() => null);
+      await releaseCxQueueItem({
+        queueItemId: effectiveQueueItemId,
+        reason: "dial-relay-failed",
+        actorEmail: context.account?.email || user?.email || null,
+        extraUpdate: {
+          metadata: {
+            lastDialIntentStatus: "relay-failed",
+            lastDialIntentReleaseReason: relayResult.reason || "dispatch-relay-failed",
+            lastDialIntentReleasedAt: new Date(),
+          },
+        },
+      }).catch(() =>
+        cxDialQueueRepository.updateQueueItem(effectiveQueueItemId, {
+          state: "ready",
+          claimUntil: null,
+          assignment: {
+            extensionId: null,
+            agentName: null,
+            assignedAt: null,
+            queueFamilySnapshot: null,
+          },
+          "metadata.lastDialIntentStatus": "relay-failed",
+          "metadata.lastDialIntentReleaseReason": relayResult.reason || "dispatch-relay-failed",
+          "metadata.lastDialIntentReleasedAt": new Date(),
+        }).catch(() => null),
+      );
     }
+    await clearAgentCxCallState(contextExtensionId, "cx-dial-relay-failed");
     const err = new Error(relayResult.reason || "CX dial dispatch failed");
     err.status = relayResult.status || 502;
     err.details = relayResult.details || null;
@@ -5042,6 +5250,11 @@ async function requestCxLeadStatusUpdate(domain, user, input = {}) {
         input.notes ||
         (nextStatus ? `Status updated to ${nextStatus}` : "Status updated from CX workspace"),
       SetOfficerID: settlementOfficerId,
+      queueActionKey: extractQueueActionKey(input),
+      queueItemId: input.queueItemId || input.queueTicketId || null,
+      queueTicketId: input.queueItemId || input.queueTicketId || null,
+      assignedExtensionId: input.assignedExtensionId || null,
+      searchPhone: input.searchPhone || input.phone || null,
     });
   }
 

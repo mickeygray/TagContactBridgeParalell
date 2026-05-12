@@ -721,6 +721,10 @@ async function persistCallLog({ result, ctx }) {
     return await callLogRepository.upsertCallLog({
       domain,
       telephonySessionId: String(telephonySessionId),
+      // Attribution resolver fires on RC EX presence events; stamp
+      // platform via $setOnInsert so a prior CX disposition stamp
+      // (from cxWorkspaceService) is preserved.
+      setOnInsert: { platform: "ex" },
       callSessionId: record?.sessionId || null,
       callStartTime: record?.startTime ? new Date(record.startTime) : null,
       callEndTime: record?.endTime

@@ -456,6 +456,30 @@ function inferQueueFamily(item: CxCallQueueItem): QueueFamilyKey {
   return "unassigned";
 }
 
+function readQueuePlacedCalls(item: CxCallQueueItem) {
+  const snapshot = asRecord(item.payloadSnapshot);
+  const leadBody = asRecord(item.leadBody);
+  const metadata = asRecord(snapshot.metadata);
+  const direct = Number(item.placedCalls ?? leadBody.placedCalls ?? snapshot.placedCalls ?? metadata.placedCalls ?? 0);
+  return Number.isFinite(direct) ? Math.max(direct, 0) : 0;
+}
+
+function isFreshFirstContactQueueItem(item: CxCallQueueItem) {
+  const family = inferQueueFamily(item);
+  if (family !== "fresh-day1") return false;
+  const stageIndex = Number(item.progressiveStageIndex);
+  if (Number.isFinite(stageIndex) && stageIndex > 0) return false;
+  return readQueuePlacedCalls(item) <= 0;
+}
+
+function getQueueSortRank(item: CxCallQueueItem) {
+  const family = inferQueueFamily(item);
+  if (family === "fresh-day1") {
+    return isFreshFirstContactQueueItem(item) ? 0 : 1.5;
+  }
+  return QUEUE_FAMILY_DISPLAY[family].sortRank;
+}
+
 function buildQueueItemKey(item: CxCallQueueItem) {
   const contact = contactFromQueue(item);
   const itemDomain = String(item.domain || "domain").trim().toUpperCase();
@@ -467,6 +491,28 @@ function buildQueueItemKey(item: CxCallQueueItem) {
     contact.phone || "no-phone",
     item.nextActionAt || "no-next-action",
   ].join(":");
+}
+
+function getQueueItemSuppressionKeys(item: CxCallQueueItem) {
+  const keys = new Set<string>();
+  const itemDomain = String(item.domain || "domain").trim().toUpperCase();
+  const ticketId = String(item.queueTicketId || "").trim();
+  if (ticketId) keys.add(`${itemDomain}:queue:${ticketId}`);
+  keys.add(buildQueueItemKey(item));
+  const actionKey = extractQueueActionKey(item);
+  if (item.caseId && actionKey) keys.add(`${itemDomain}:case:${item.caseId}:action:${actionKey}`);
+  return Array.from(keys).filter(Boolean);
+}
+
+function pruneQueueSuppressionMap(
+  entries: Record<string, number>,
+  now = Date.now(),
+) {
+  const next: Record<string, number> = {};
+  for (const [key, expiresAt] of Object.entries(entries)) {
+    if (Number(expiresAt) > now) next[key] = Number(expiresAt);
+  }
+  return next;
 }
 
 function humanizeCxRoutingReason(reason: string | null | undefined) {
@@ -2461,6 +2507,7 @@ export function CXWorkspace() {
   });
   const [autoServeDueAt, setAutoServeDueAt] = React.useState<number | null>(null);
   const [autoServeRemaining, setAutoServeRemaining] = React.useState<number | null>(null);
+  const [suppressedQueueItems, setSuppressedQueueItems] = React.useState<Record<string, number>>({});
   const autoServeInFlightRef = React.useRef(false);
 
   function clearServedQueueSelection() {
@@ -2506,6 +2553,47 @@ export function CXWorkspace() {
     const safeDelay = Math.max(0, Number(delaySeconds) || 0);
     setAutoServeDueAt(Date.now() + safeDelay * 1000);
     setAutoServeRemaining(safeDelay);
+  }
+
+  function suppressCurrentQueueLead(result: Record<string, unknown>) {
+    const now = Date.now();
+    const response = asRecord(result.response);
+    const rescheduledFor = String(result.rescheduledFor || response.rescheduledFor || "").trim();
+    const rescheduledAt = rescheduledFor ? new Date(rescheduledFor).getTime() : NaN;
+    const suppressUntil =
+      Number.isFinite(rescheduledAt) && rescheduledAt > now
+        ? rescheduledAt
+        : now + 2 * 60 * 1000;
+    const keys = new Set<string>();
+    if (servingQueueKey) keys.add(servingQueueKey);
+    const resultDomain = String(result.domain || response.domain || servedQueueDomain || domain || "domain")
+      .trim()
+      .toUpperCase();
+    const resultQueueItemId = String(
+      result.queueItemId ||
+        result.queueTicketId ||
+        response.queueItemId ||
+        response.queueTicketId ||
+        "",
+    ).trim();
+    if (resultQueueItemId) keys.add(`${resultDomain}:queue:${resultQueueItemId}`);
+    if (servedQueueTicketId) {
+      const itemDomain = String(servedQueueDomain || domain || "domain").trim().toUpperCase();
+      keys.add(`${itemDomain}:queue:${servedQueueTicketId}`);
+    }
+    const resultCaseId = String(result.caseId || response.caseId || servedQueueCaseId || "").trim();
+    const resultActionKey = String(result.actionKey || response.actionKey || servedQueueActionKey || "").trim();
+    if (resultCaseId && resultActionKey) keys.add(`${resultDomain}:case:${resultCaseId}:action:${resultActionKey}`);
+    if (servedQueueCaseId && servedQueueActionKey) {
+      const itemDomain = String(servedQueueDomain || domain || "domain").trim().toUpperCase();
+      keys.add(`${itemDomain}:case:${servedQueueCaseId}:action:${servedQueueActionKey}`);
+    }
+    if (keys.size === 0) return;
+    setSuppressedQueueItems((current) => {
+      const next = pruneQueueSuppressionMap(current, now);
+      for (const key of keys) next[key] = suppressUntil;
+      return next;
+    });
   }
 
   React.useEffect(() => {
@@ -3115,10 +3203,7 @@ export function CXWorkspace() {
     options: { source?: "manual" | "auto" } = {},
   ) {
     if (queueAdvanceMode === "auto" && options.source !== "auto") {
-      toast("Auto serve is on", {
-        description: "Use Start, or wait for the countdown after the current lead is finished.",
-      });
-      return;
+      cancelAutoServe();
     }
     if (options.source !== "auto") cancelAutoServe();
     const contact = contactFromQueue(item);
@@ -3263,13 +3348,16 @@ export function CXWorkspace() {
     leadLookup.refetch();
   }
 
-  function releaseQueueAfterSuccess(result: unknown) {
-    if (!servedQueueActionKey && !servedQueueTicketId) return;
+  function releaseQueueAfterSuccess(result: unknown, options: { forceEject?: boolean } = {}) {
+    const forceEject = options.forceEject === true;
+    if (!forceEject && !servedQueueActionKey && !servedQueueTicketId) return;
     const row = asRecord(result);
-    if (row.completed !== true) return;
     if (row.wrapUpRequired === true || row.callHeldOpen === true) return;
+    const response = asRecord(row.response);
     const hangup = asRecord(row.hangup);
     const queueOutcome = String(row.queueOutcome || "").trim().toLowerCase();
+    const responseQueueOutcome = String(response.queueOutcome || "").trim().toLowerCase();
+    const callbackEjected = row.callbackEjected === true || response.callbackEjected === true;
     const releaseableOutcomes = new Set([
       "completed",
       "cancelled",
@@ -3278,11 +3366,40 @@ export function CXWorkspace() {
     ]);
     const cleanupAccepted =
       releaseableOutcomes.has(queueOutcome) ||
+      releaseableOutcomes.has(responseQueueOutcome) ||
+      (forceEject && callbackEjected) ||
       hangup.ok === true ||
       hangup.acceptedLocally === true ||
       String(hangup.reason || "").toLowerCase() === "no-active-call-after-disposition" ||
       String(hangup.reason || "").toLowerCase() === "disposition-hangup-backgrounded";
+    const completed = row.completed === true || cleanupAccepted;
+    if (!completed) return;
     if (!cleanupAccepted) return;
+    suppressCurrentQueueLead(row);
+    if (rawCurrentCallSessionId) {
+      setSuppressedCallSessionId(rawCurrentCallSessionId);
+    }
+    clearServedQueueSelection();
+    clearCasePanelForNextQueueLead();
+    workspace.refetch();
+    callQueue.refetch();
+    for (const query of multiCallQueues) {
+      query.refetch();
+    }
+    scheduleAutoServe();
+  }
+
+  function optimisticallyEjectCallbackLead() {
+    if (!servedQueueActionKey && !servedQueueTicketId && !servedQueueCaseId) return;
+    suppressCurrentQueueLead({
+      domain: servedQueueDomain || domain,
+      caseId: servedQueueCaseId,
+      actionKey: servedQueueActionKey,
+      queueItemId: servedQueueTicketId,
+      queueTicketId: servedQueueTicketId,
+      queueOutcome: "rescheduled",
+      callbackEjected: true,
+    });
     if (rawCurrentCallSessionId) {
       setSuppressedCallSessionId(rawCurrentCallSessionId);
     }
@@ -3423,14 +3540,23 @@ export function CXWorkspace() {
       : ((callQueue.data ?? data?.callQueue ?? []) as CxCallQueueItem[]);
   }, [isAdminUser, multiCallQueues, callQueue.data, data?.callQueue]);
 
+  const isQueueItemLocallySuppressed = React.useCallback(
+    (item: CxCallQueueItem) => {
+      const now = Date.now();
+      return getQueueItemSuppressionKeys(item).some((key) => Number(suppressedQueueItems[key] || 0) > now);
+    },
+    [suppressedQueueItems],
+  );
+
   const activeServingQueueItem = React.useMemo(() => {
     return rawQueueItems.find((item) => {
+      if (isQueueItemLocallySuppressed(item)) return false;
       const itemQueueState = String(item.queueState || "").trim().toLowerCase();
       if (itemQueueState !== "serving") return false;
       const assignedExtensionId = String(item.assignedExtensionId || "").trim();
-      return !assignedExtensionId || !currentExtensionId || assignedExtensionId === currentExtensionId;
+      return !assignedExtensionId || assignedExtensionId === currentExtensionId;
     }) || null;
-  }, [rawQueueItems, currentExtensionId]);
+  }, [rawQueueItems, currentExtensionId, isQueueItemLocallySuppressed]);
 
   React.useEffect(() => {
     if (!activeServingQueueItem) return;
@@ -3458,6 +3584,9 @@ export function CXWorkspace() {
     for (const item of rawQueueItems) {
       const itemDomain = String(item.domain || domain || "TAG").trim().toUpperCase();
       const normalizedItem = itemDomain === item.domain ? item : { ...item, domain: itemDomain };
+      if (isQueueItemLocallySuppressed(normalizedItem)) continue;
+      const assignedExtensionId = String(normalizedItem.assignedExtensionId || "").trim();
+      if (assignedExtensionId && assignedExtensionId !== currentExtensionId) continue;
       const itemQueueState = String(normalizedItem.queueState || "").trim().toLowerCase();
       const key = buildQueueItemKey(normalizedItem);
       if (servingQueueKey && key === servingQueueKey) continue;
@@ -3484,8 +3613,8 @@ export function CXWorkspace() {
     }
 
     return Array.from(deduped.values()).sort((left, right) => {
-      const leftFamily = QUEUE_FAMILY_DISPLAY[inferQueueFamily(left)].sortRank;
-      const rightFamily = QUEUE_FAMILY_DISPLAY[inferQueueFamily(right)].sortRank;
+      const leftFamily = getQueueSortRank(left);
+      const rightFamily = getQueueSortRank(right);
       if (leftFamily !== rightFamily) return leftFamily - rightFamily;
       const leftTime = left.nextActionAt ? new Date(left.nextActionAt).getTime() : Number.MAX_SAFE_INTEGER;
       const rightTime = right.nextActionAt ? new Date(right.nextActionAt).getTime() : Number.MAX_SAFE_INTEGER;
@@ -3505,6 +3634,8 @@ export function CXWorkspace() {
     servedQueueCaseId,
     servedQueueDomain,
     servedQueueActionKey,
+    isQueueItemLocallySuppressed,
+    currentExtensionId,
   ]);
   const queueHasActiveLead = Boolean(
     servedQueueTicketId || servedQueueActionKey || servingQueueKey || servedQueueContact,
@@ -4396,7 +4527,8 @@ export function CXWorkspace() {
                     size="sm"
                     variant="secondary"
                     isLoading={disposition.isPending}
-                    onClick={() =>
+                    onClick={() => {
+                      optimisticallyEjectCallbackLead();
                       void run("Call back", () =>
                         disposition.mutateAsync({
                           caseId: String(callbackDispositionCaseId),
@@ -4408,8 +4540,13 @@ export function CXWorkspace() {
                           queueTicketId: servedQueueTicketId || undefined,
                           assignedExtensionId: currentExtensionId || undefined,
                         }),
-                      ).then(releaseQueueAfterSuccess).catch(() => undefined)
-                    }
+                      )
+                        .then((result) => releaseQueueAfterSuccess(result, { forceEject: true }))
+                        .catch(() => {
+                          workspace.refetch();
+                          callQueue.refetch();
+                        });
+                    }}
                     title="Finish this lead without a Logics change and recycle it as a callback."
                   >
                     Call back

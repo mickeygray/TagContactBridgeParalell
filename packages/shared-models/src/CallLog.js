@@ -49,6 +49,23 @@ const callLogSchema = new mongoose.Schema(
     extensionId: { type: String, default: null, index: true },
     agentName: { type: String, default: null },
 
+    // Telephony platform the call rode on:
+    //   "ex" — RC EX desk app (the agent's normal RC extension)
+    //   "cx" — RingCX queue / dialer
+    // Forward-looking field — historical rows from before this stamp
+    // landed are null. Stamped at write time:
+    //   - CX disposition path (cxWorkspaceService) writes "cx" via $set
+    //     so it always wins on CX-routed calls.
+    //   - EX writers (attribution resolver, native RC sweep) write "ex"
+    //     via $setOnInsert so they don't overwrite a prior CX stamp.
+    // Powers the per-agent call-stats breakdown in the Users drawer.
+    platform: {
+      type: String,
+      enum: ["ex", "cx", null],
+      default: null,
+      index: true,
+    },
+
     // Case binding — nullable until resolver finds a case
     caseId: { type: Number, default: null, index: true },
     caseDomain: { type: String, default: null, index: true },

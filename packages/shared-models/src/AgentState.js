@@ -78,6 +78,26 @@ const agentStateSchema = new mongoose.Schema(
       goodCalls: Number,
       badCalls: Number,
     },
+
+    // Forward-looking per-agent call rollups (today/week/month/lifetime).
+    // Lazy-computed: the GET /api/admin/accounts/:id/call-stats route
+    // recomputes from CallLog (aggregating by extensionId +
+    // metadata.additionalExtensionIds) when this snapshot is older than
+    // 5 minutes or when the operator hits a refresh button, and stamps
+    // the result here. Drawer reads from this field directly.
+    //
+    // Each bucket: { totalCalls, outboundCalls, inboundCalls,
+    //                cxCalls, exCalls, longestCallSec, lastCallAt }
+    // — CX/EX counts only populate from rows written after the
+    // CallLog.platform stamp landed; historical rows count toward
+    // totals but not toward the platform split.
+    callStatsSnapshot: {
+      today: { type: mongoose.Schema.Types.Mixed, default: null },
+      week: { type: mongoose.Schema.Types.Mixed, default: null },
+      month: { type: mongoose.Schema.Types.Mixed, default: null },
+      lifetime: { type: mongoose.Schema.Types.Mixed, default: null },
+      computedAt: { type: Date, default: null },
+    },
     cxRouting: {
       enabled: { type: Boolean, default: false },
       desiredAvailability: {

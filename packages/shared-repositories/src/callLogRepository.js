@@ -111,7 +111,7 @@ function toDate(value) {
  * same session (live → retry sweep → end-of-day recheck), and we want a
  * single row that accumulates attribution rather than fanning out duplicates.
  */
-async function upsertCallLog({ domain, telephonySessionId, ...rest }) {
+async function upsertCallLog({ domain, telephonySessionId, setOnInsert, ...rest }) {
   if (!telephonySessionId) {
     throw new Error("telephonySessionId is required");
   }
@@ -121,6 +121,18 @@ async function upsertCallLog({ domain, telephonySessionId, ...rest }) {
     set.normalizedPhone = normalizeDigits(rest.phone);
   }
 
+  // `setOnInsert` lets callers add fields that should ONLY be written
+  // when the row is first created — useful for stamps like `platform`
+  // where a later writer (e.g. CX disposition path stamping "cx") must
+  // not be overwritten by an earlier writer (e.g. hourly RC sweep
+  // stamping "ex"). Pass `{ platform: "ex" }` here and `platform` will
+  // appear on creation but won't trample a prior `$set`-written value.
+  const insertOnly = {
+    domain: normalizedDomain,
+    telephonySessionId: String(telephonySessionId),
+    ...(setOnInsert && typeof setOnInsert === "object" ? setOnInsert : {}),
+  };
+
   return CallLog.findOneAndUpdate(
     {
       domain: normalizedDomain,
@@ -128,10 +140,7 @@ async function upsertCallLog({ domain, telephonySessionId, ...rest }) {
     },
     {
       $set: set,
-      $setOnInsert: {
-        domain: normalizedDomain,
-        telephonySessionId: String(telephonySessionId),
-      },
+      $setOnInsert: insertOnly,
     },
     { new: true, upsert: true, setDefaultsOnInsert: true },
   );

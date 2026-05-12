@@ -238,6 +238,15 @@ async function main() {
   logKv("dial group id", dialGroupId);
   logKv("campaign id", campaignId || "(not checked)");
 
+  let targetDialGroupName = "";
+  try {
+    const dialGroup = await client.getDialGroup(dialGroupId);
+    targetDialGroupName = dialGroup?.dialGroupName || dialGroup?.name || "";
+    if (targetDialGroupName) logKv("dial group", `${targetDialGroupName} (${dialGroupId})`);
+  } catch (error) {
+    logKv("dial group", `lookup failed: ${error.message}`);
+  }
+
   if (campaignId) {
     const campaign = await client.getCampaign(campaignId, dialGroupId);
     logKv("campaign", `${campaign.campaignName || campaign.name || "(unnamed)"} (${campaign.campaignId || campaign.id})`);
@@ -261,7 +270,9 @@ async function main() {
         name: [agent.firstName, agent.lastName].filter(Boolean).join(" "),
         active: agent.isActive ?? agent.active,
         dialGroupIds: agent.dialGroupIds || [],
-        inTargetDialGroup: (agent.dialGroupIds || []).some((id) => sameId(id, dialGroupId)),
+        phoneLoginDialGroup: agent.phoneLoginDialGroup || null,
+        inTargetDialGroup: (agent.dialGroupIds || []).some((id) => sameId(id, dialGroupId))
+          || sameId(agent.phoneLoginDialGroup?.id, dialGroupId),
       }));
     }
     return;
@@ -317,6 +328,10 @@ async function main() {
         active: true,
         agentType: "AGENT",
         dialGroupIds: [targetDialGroupId],
+        phoneLoginDialGroup: {
+          id: targetDialGroupId,
+          description: targetDialGroupName || String(targetDialGroupId),
+        },
         initLoginBaseState: "AVAILABLE",
         allowInbound: true,
         allowOutbound: true,
@@ -368,7 +383,8 @@ async function main() {
         || row.agent.allowManualCalls !== true
         || row.agent.allowOffHook !== true
         || row.agent.allowLoginControl !== true
-        || row.agent.allowLoginUpdates !== true;
+        || row.agent.allowLoginUpdates !== true
+        || !sameId(row.agent.phoneLoginDialGroup?.id, targetDialGroupId);
       if (alreadyAttached && !needsPermissionPatch) {
         console.log(`  ${label}: already attached and permissions look ready`);
         continue;
@@ -384,10 +400,14 @@ async function main() {
         allowLoginUpdates: true,
         allowOffHook: true,
         dialGroupIds: nextDialGroupIds,
+        phoneLoginDialGroup: {
+          id: targetDialGroupId,
+          description: targetDialGroupName || row.agent.phoneLoginDialGroup?.description || String(targetDialGroupId),
+        },
       };
 
       if (dry) {
-        console.log(`  ${label}: would set dialGroupIds=[${nextDialGroupIds.join(", ")}], allowOffHook=true, allowLoginControl=true`);
+        console.log(`  ${label}: would set dialGroupIds=[${nextDialGroupIds.join(", ")}], phoneLoginDialGroup=${targetDialGroupId}, allowOffHook=true, allowLoginControl=true`);
         continue;
       }
 

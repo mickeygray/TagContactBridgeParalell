@@ -3,6 +3,7 @@
 const express = require("express");
 const {
   cancelDeployRun,
+  runLocalDeployCommand,
   triggerDeploy,
 } = require("../../../../packages/shared-services/src");
 const { toErrorResponse } = require("../../../../packages/shared-errors/src");
@@ -65,6 +66,35 @@ function createCommandsDeployRouter(auth) {
     auth.requireAdmin,
     deployLimit,
     trigger("restart"),
+  );
+
+  router.post(
+    "/local/:action",
+    auth.requireAuth,
+    auth.requireAdmin,
+    deployLimit,
+    async (req, res) => {
+      try {
+        const targetKey = String(
+          req.body?.targetKey || req.body?.target || "",
+        ).trim();
+        if (!targetKey) {
+          return res
+            .status(400)
+            .json({ ok: false, error: "targetKey is required" });
+        }
+        const result = await runLocalDeployCommand({
+          targetKey,
+          action: req.params.action,
+          actor: req.user,
+          note: req.body?.note,
+          confirm: req.body?.confirm,
+        });
+        return res.json({ ok: true, result });
+      } catch (error) {
+        return res.status(error.status || 500).json(toErrorResponse(error));
+      }
+    },
   );
 
   router.post(

@@ -285,16 +285,15 @@ async function getNcoaUploadProgress(domain, importBatch) {
     ...(normalizedDomain ? { domain: normalizedDomain } : {}),
   };
 
-  // Per-row stages (subtype: "ncoa-upload") + batch envelope stages
-  // (subtype: "ncoa-upload-batch") in a single round-trip; we split
-  // them out client-side.
-  const rows = await WorkflowRecord.find(baseQuery, {
-    subtype: 1,
-    stage: 1,
-    happenedAt: 1,
-    payload: 1,
-    result: 1,
-  })
+  // Batch-only mode: we no longer emit per-row stages (subtype:
+  // "ncoa-upload"), so progress reads from the batch envelope rows
+  // (subtype: "ncoa-upload-batch") alone. Counts come from the
+  // terminal row's `result` payload; in-flight uploads show
+  // pending=total with no per-row visibility.
+  const rows = await WorkflowRecord.find(
+    { ...baseQuery, subtype: "ncoa-upload-batch" },
+    { stage: 1, happenedAt: 1, payload: 1, result: 1 },
+  )
     .sort({ happenedAt: 1 })
     .lean();
 
@@ -307,23 +306,29 @@ async function getNcoaUploadProgress(domain, importBatch) {
   let batchFailed = null;
 
   for (const stage of rows) {
-    if (stage.subtype === "ncoa-upload-batch") {
-      if (stage.stage === "requested") {
-        batchStarted = stage.happenedAt || null;
-        const declared = Number(stage.payload?.total);
-        if (Number.isFinite(declared) && declared > 0) total = declared;
-      }
-      if (stage.stage === "completed") {
-        batchCompleted = stage.happenedAt || null;
-      }
-      if (stage.stage === "failed") {
-        batchFailed = stage.happenedAt || null;
-      }
-      continue;
+    if (stage.stage === "requested") {
+      batchStarted = stage.happenedAt || null;
+      const declared = Number(stage.payload?.total);
+      if (Number.isFinite(declared) && declared > 0) total = declared;
     }
-    if (stage.subtype !== "ncoa-upload") continue;
-    if (stage.stage === "completed") succeeded += 1;
-    else if (stage.stage === "failed") failed += 1;
+    if (stage.stage === "completed") {
+      batchCompleted = stage.happenedAt || null;
+      const r = stage.result || {};
+      if (Number.isFinite(Number(r.succeeded))) succeeded = Number(r.succeeded);
+      if (Number.isFinite(Number(r.failed))) failed = Number(r.failed);
+      if (Number.isFinite(Number(r.total)) && Number(r.total) > 0) total = Number(r.total);
+    }
+    if (stage.stage === "failed") {
+      batchFailed = stage.happenedAt || null;
+      const r = stage.result || {};
+      // Failsafe envelope writes succeededBeforeThrow / failedBeforeThrow
+      // rather than succeeded / failed.
+      const s = Number(r.succeeded ?? r.succeededBeforeThrow);
+      const f = Number(r.failed ?? r.failedBeforeThrow);
+      if (Number.isFinite(s)) succeeded = s;
+      if (Number.isFinite(f)) failed = f;
+      if (Number.isFinite(Number(r.total)) && Number(r.total) > 0) total = Number(r.total);
+    }
     if (stage.happenedAt) {
       const ts = new Date(stage.happenedAt).getTime();
       if (!mostRecent || ts > new Date(mostRecent).getTime()) {
@@ -332,9 +337,6 @@ async function getNcoaUploadProgress(domain, importBatch) {
     }
   }
 
-  // Fall back to row-count when the batch envelope hasn't landed yet
-  // (eg the very first poll fires before `requested` stages flush).
-  if (total === 0) total = succeeded + failed;
   const pending = Math.max(total - succeeded - failed, 0);
 
   // Stall detection — gives the UI a way to render "this looks stuck"
@@ -465,31 +467,13 @@ async function processNcoaRow({
       },
     });
 
-    await recordWorkflowStage({
-      domain,
-      family: "lexis",
-      subtype: "ncoa-upload",
-      stage: "completed",
-      aggregateType: "case",
-      aggregateId: String(caseId),
-      caseId,
-      sourceService,
-      title: "NCOA row uploaded to Logics",
-      summary: `${row.firstName || ""} ${row.lastName || ""}`.trim() || "NCOA upload",
-      payload: {
-        importBatch,
-        sourceName: row.sourceName || "ABC",
-        address: row.address,
-        city: row.city,
-        state: row.state,
-        zip: row.zip,
-      },
-      result: {
-        caseId,
-        response,
-      },
-    });
-
+    // Per-row workflow emit deprecated — Logics POST is battle-tested
+    // and per-row failures are essentially never the operative pattern.
+    // The only failure mode worth surfacing is "Logics fully down,"
+    // which materializes as the batch-level `ncoa-upload-batch.failed`
+    // envelope at the end of uploadNcoaRows. Per-row success/failure
+    // counts are accumulated in-memory and stamped on the batch-level
+    // `completed` row's `result` payload.
     return { ok: true, caseId, row, response };
   } catch (error) {
     if (emitRetryOnFailure) {
@@ -523,28 +507,12 @@ async function processNcoaRow({
         notify: false,
       }).catch(() => null);
     }
-    await recordWorkflowStage({
-      domain,
-      family: "lexis",
-      subtype: "ncoa-upload",
-      stage: "failed",
-      aggregateType: "ncoa-upload-row",
-      aggregateId: `${aggregateId}:${row.cell || row.lastName || "unknown"}`,
-      sourceService,
-      status: "failed",
-      title: "NCOA row upload failed",
-      summary: `${row.firstName || ""} ${row.lastName || ""}`.trim() || "NCOA row",
-      payload: {
-        importBatch,
-        address: row.address,
-        city: row.city,
-        state: row.state,
-        zip: row.zip,
-      },
-      result: {
-        error: error.message,
-      },
-    });
+    // Per-row failure workflow emit deprecated. Retry envelope above
+    // (`ncoa.logics.create.retry`) still fires for actual retry
+    // behavior; aggregate counts are stamped on the batch-level
+    // completed/failed row at end of uploadNcoaRows. If Logics is
+    // fully down, every row in the batch will land here and the
+    // batch-level row will reflect failed=total.
     return { ok: false, row, error: error.message };
   }
 }

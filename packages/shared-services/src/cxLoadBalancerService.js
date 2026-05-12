@@ -2,7 +2,7 @@
 
 const { agentStateRepository, userAccountRepository } = require("../../shared-repositories/src");
 const {
-  deriveQueueFamilyFromAgeDays,
+  deriveQueueFamilyFromLeadCreatedAt,
   getQueueFamilyPolicy,
   getQueueFamilySortRank,
   getQueueFamilyTargetOpen,
@@ -168,19 +168,43 @@ function deriveEffectiveActivityState(agentState = null) {
   return "idle";
 }
 
-function deriveAgeFamilyFromCreatedAt(item = {}, now = new Date()) {
+function pickLeadCreatedAt(item = {}, { includeQueueItemCreatedAt = true } = {}) {
   const rawCreatedAt =
     item.metadata?.leadCreatedAt ||
     item.payloadSnapshot?.createdAt ||
     item.leadCreatedAt ||
-    item.createdAt ||
+    (includeQueueItemCreatedAt ? item.createdAt : null) ||
     null;
+  return rawCreatedAt || null;
+}
+
+function deriveAgeFamilyFromCreatedAt(item = {}, now = new Date(), options = {}) {
+  const rawCreatedAt = pickLeadCreatedAt(item, options);
   if (!rawCreatedAt) return null;
   const createdAt = new Date(rawCreatedAt);
   const nowDate = new Date(now);
   if (Number.isNaN(createdAt.getTime()) || Number.isNaN(nowDate.getTime())) return null;
-  const ageDays = Math.floor((nowDate.getTime() - createdAt.getTime()) / (24 * 60 * 60 * 1000));
-  return deriveQueueFamilyFromAgeDays(ageDays);
+  return deriveQueueFamilyFromLeadCreatedAt(createdAt, nowDate);
+}
+
+function isMaterializedBacklogQueueItem(item = {}) {
+  const metadata = item.metadata && typeof item.metadata === "object" ? item.metadata : {};
+  const markers = [
+    metadata.materializedBy,
+    metadata.materializedFrom,
+    metadata.actionKey,
+    item.intakeRoute,
+    item.progressiveStageKey,
+    item.queueTier,
+  ].map((value) => String(value || "").trim().toLowerCase());
+  return markers.some((marker) =>
+    marker.includes("day2to15")
+      || marker.includes("day2-15")
+      || marker.includes("aged")
+      || marker.includes("filler")
+      || marker.includes("cx-workspace-refill")
+      || marker === "later",
+  );
 }
 
 function buildEligibility(agentState = null, options = {}) {
@@ -311,17 +335,35 @@ function resolveDayZeroProgressiveStage(item = {}) {
 }
 
 function deriveQueueFamily(item = {}) {
-  const explicit = normalizeQueueFamily(
+  const asOf = item.now || item.asOf || new Date();
+  const explicitRaw = normalizeQueueFamily(
     item.queueFamily
       || item.assignment?.queueFamilySnapshot
       || item.metadata?.queueFamily
-      || (Number(item.callPlan?.activeDay) > 15
-        ? "aged"
-        : Number(item.callPlan?.activeDay) > 0
-          ? "fresh-day2to10"
-          : "fresh-day1"),
+      || "",
   );
-  const ageFamily = deriveAgeFamilyFromCreatedAt(item);
+  const fallbackFromPlan = normalizeQueueFamily(
+    Number(item.callPlan?.activeDay) > 15
+      ? "aged"
+      : Number(item.callPlan?.activeDay) > 0
+        ? "fresh-day2to10"
+        : "fresh-day1",
+  );
+  const explicit = explicitRaw !== "unassigned" ? explicitRaw : fallbackFromPlan;
+  const trustedAgeFamily = deriveAgeFamilyFromCreatedAt(item, asOf, {
+    includeQueueItemCreatedAt: false,
+  });
+  if (trustedAgeFamily && trustedAgeFamily !== explicit) return trustedAgeFamily;
+
+  const ageFamily = deriveAgeFamilyFromCreatedAt(item, asOf);
+  if (ageFamily && explicitRaw === "unassigned") return ageFamily;
+  if (
+    ageFamily === "fresh-day1"
+    && explicit === "fresh-day2to10"
+    && !isMaterializedBacklogQueueItem(item)
+  ) {
+    return "fresh-day1";
+  }
   if (ageFamily && explicit === "fresh-day1" && ageFamily !== "fresh-day1") return ageFamily;
   if (ageFamily === "aged" && explicit === "fresh-day2to10") return "aged";
   return explicit;

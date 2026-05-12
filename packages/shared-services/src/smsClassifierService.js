@@ -10,20 +10,70 @@ const CLASSIFIER_MODEL = env("SMS_CLASSIFIER_MODEL", "claude-sonnet-4-5-20250929
 const CLASSIFIER_MAX_TOKENS = Number(env("SMS_CLASSIFIER_MAX_TOKENS", 600));
 
 /**
- * Fast carrier-compliant stop-word pass. If this matches, we do not call
- * the LLM. We treat it as `hard_stop` immediately so delivery on any
- * auto-reply cannot look like we ignored a direct opt-out.
+ * Fast carrier-compliant stop-word pass. If this matches after the
+ * no-help/DNC rules below, we do not call the LLM. We treat it as
+ * `hard_stop` immediately so delivery on any auto-reply cannot look
+ * like we ignored a direct opt-out.
  *
  * Scope is intentionally narrow: only literal carrier codes. Other
- * wording ("do not contact me") is handled by the classifier so we
- * can separate SMS-only suppression from a true Logics DNC.
+ * wording with a no-need reason ("stop, I have an attorney") is handled
+ * by fastNoHelpCheck first so it can become a true Logics DNC.
  */
-const HARD_STOP_PATTERN = /\b(stop|stopall|unsubscribe|cancel|end|quit|revoke)\b/i;
+const HARD_STOP_KEYWORDS = new Set([
+  "stop",
+  "stopall",
+  "unsubscribe",
+  "cancel",
+  "end",
+  "quit",
+  "revoke",
+]);
 
 function fastStopCheck(text) {
+  const clean = String(text || "").trim().toLowerCase().replace(/[^a-z]/g, "");
+  return HARD_STOP_KEYWORDS.has(clean);
+}
+
+function soundsAngry(text) {
   const body = String(text || "").trim();
   if (!body) return false;
-  return HARD_STOP_PATTERN.test(body);
+  return (
+    /\b(piss off|fuck|f\W*u|screw you|go away|leave me alone|harass|harassment|lawsuit|sue|report you)\b/i.test(body) ||
+    /!{2,}/.test(body)
+  );
+}
+
+function fastUnrelatedCheck(text) {
+  const body = String(text || "").trim();
+  if (!body) return null;
+  const lower = body.toLowerCase();
+
+  if (/^https?:\/\//i.test(body)) {
+    return {
+      intent: "unrelated_or_noise",
+      rationale: "Inbound appears to be a standalone link, not a tax-help question.",
+    };
+  }
+
+  if (/^.{1,4}$/.test(body) && !/\b(irs|tax|debt|owe|file|call|help)\b/i.test(body)) {
+    return {
+      intent: "unrelated_or_noise",
+      rationale: "Inbound is too short to be a tax-help request.",
+    };
+  }
+
+  if (
+    /\b(block party|concert|tickets?|sale|promo|coupon|appointment reminder|delivery|package)\b/i.test(lower) ||
+    (/^(thanks|thank you|thx|ok|okay)\b/i.test(lower) && !/\b(irs|tax|debt|owe|file|call|help)\b/i.test(lower)) ||
+    /to\s+[“"].+[”"]/i.test(body)
+  ) {
+    return {
+      intent: "unrelated_or_noise",
+      rationale: "Inbound appears unrelated to tax-relief help.",
+    };
+  }
+
+  return null;
 }
 
 function fastNoHelpCheck(text) {
@@ -32,19 +82,30 @@ function fastNoHelpCheck(text) {
 
   const rules = [
     {
+      intent: "no_contact_request",
+      pattern: /\b(stop texting|stop calling|stop contacting|do not contact|don't contact|dont contact|leave me alone|take me off|remove me|remove my number|off your list|not interested)\b/i,
+      rationale: "Prospect is explicitly asking not to be contacted further.",
+      noReply: true,
+    },
+    {
       intent: "wrong_number",
       pattern: /\b(wrong number|not me|this is not me|this isn't me|never applied|did not sign up|didn't sign up)\b/i,
       rationale: "Prospect says this is the wrong person/number or they never requested help.",
     },
     {
       intent: "has_representation",
-      pattern: /\b(already have|have|got)\s+(an?\s+)?(lawyer|attorney|cpa|ea|tax pro|representation|representative)\b/i,
+      pattern: /\b(already have|have|got|working with|represented by)\s+(an?\s+)?(tax\s+)?(lawyer|attorney|cpa|ea|tax pro|representation|representative|firm|company)\b/i,
       rationale: "Prospect says they already have tax representation.",
     },
     {
       intent: "doesnt_owe_taxes",
-      pattern: /\b(do not owe|don't owe|dont owe|no tax debt|no irs debt|no taxes owed|owe nothing)\b/i,
+      pattern: /\b(do not owe|don't owe|dont owe)\s+(any\s+)?(tax(es)?|tax debt|debt|irs|state|anything|nothing)\b|\b(no tax debt|no irs debt|no taxes owed|no debt|owe nothing|owe no debt)\b/i,
       rationale: "Prospect says they do not owe taxes.",
+    },
+    {
+      intent: "doesnt_need_help",
+      pattern: /\b(do not need|don't need|dont need|no longer need|not looking for)\s+(any\s+)?(help|assistance|tax help|tax relief)\b|\bnot interested\b/i,
+      rationale: "Prospect says they do not need or want tax-relief help.",
     },
     {
       intent: "taxes_already_filed",
@@ -115,17 +176,21 @@ const SYSTEM_PROMPT = [
   "",
   "Rules you MUST follow:",
   "  - Signals that mean HARD STOP / SMS ONLY (tier=hard_stop):",
-  "      - Carrier words or plain requests to stop texting/calling, without a reason they do not need help.",
-  "      - Examples: 'STOP', 'unsubscribe', 'stop texting me', 'do not contact me'.",
+  "      - Bare carrier keywords only, such as exactly 'STOP', 'UNSUBSCRIBE', 'CANCEL', 'END', or 'QUIT'.",
   "    Leave suggested_reply empty. This is SMS/channel suppression only, NOT a Logics DNC.",
   "",
   "  - Signals that mean LOGICS DNC (tier=dnc_confirm):",
   "      - They explain why they do not need tax-relief help.",
   "      - Examples: 'my taxes are filed', 'I already resolved it', 'I do not owe taxes', 'I already paid',",
   "        'I have a lawyer/CPA/EA', 'wrong number', 'this is not me', 'I did not sign up', 'never applied'.",
-  "      - Profanity does NOT automatically make this human review if the no-need reason is clear.",
+  "      - Longer no-contact requests such as 'stop texting me', 'do not contact me', 'leave me alone',",
+  "        'remove me', or 'take me off your list' are dnc_confirm, not hard_stop.",
+  "      - If the message contains a stop/no-contact word PLUS a no-need reason, choose dnc_confirm, not hard_stop.",
+  "        Example: 'stop, I already have a tax attorney' is dnc_confirm.",
+  "      - Profanity does NOT block DNC side-effects if the no-need reason is clear.",
   "        Example: 'MY TAXES ARE FILED PISS OFF' is dnc_confirm.",
-  "    Respond once confirming we will update their file, then suppress lead-wide. No sales pitch.",
+  "    If the message sounds angry, hostile, or includes a no-contact request, leave suggested_reply empty.",
+  "    Otherwise respond once confirming we will update their file, then suppress lead-wide. No sales pitch.",
   "",
   "  - Signals that mean CALLBACK PROMPT (tier=callback_prompt):",
   "      - Questions about fees, process, timeline, notices, balances, or whether Wynn can help.",
@@ -135,6 +200,8 @@ const SYSTEM_PROMPT = [
   "",
   "  - Signals that mean HUMAN REVIEW (tier=needs_human):",
   "      - Legal threats, lawsuits, complaints, attorney threats against Wynn.",
+  "      - Angry or hostile messages that do not include a clear DNC/no-help reason.",
+  "      - Messages unrelated to tax help, including event promos, one-word emoji reactions, random links, deliveries, or wrong-thread chatter.",
   "      - Confusing or garbled messages.",
   "      - Hostile messages WITHOUT a clear no-need reason.",
   "      - Anything you're not confident about.",
@@ -174,27 +241,58 @@ async function classifySms(input = {}) {
     };
   }
 
+  const noHelp = fastNoHelpCheck(text);
+  if (noHelp) {
+    const noReply = Boolean(
+      noHelp.noReply ||
+        soundsAngry(text) ||
+        /\b(stop|stopall|unsubscribe|cancel|end|quit|revoke)\b/i.test(text),
+    );
+    return {
+      intent: noHelp.intent,
+      tier: "dnc_confirm",
+      suggestedReply: noReply
+        ? ""
+        : "Understood. We will update your file so you are not contacted about this. - Wynn Tax Solutions",
+      confidence: 0.95,
+      rationale: noReply
+        ? `${noHelp.rationale} No auto-reply because the message is angry or a no-contact request.`
+        : noHelp.rationale,
+      model: "regex-no-help-path",
+    };
+  }
+
   if (fastStopCheck(text)) {
     return {
       intent: "opt_out",
       tier: "hard_stop",
       suggestedReply: "",
       confidence: 1,
-      rationale: "Regex-matched carrier STOP keyword.",
+      rationale: "Regex-matched carrier STOP keyword with no no-help reason.",
       model: "regex-fast-path",
     };
   }
 
-  const noHelp = fastNoHelpCheck(text);
-  if (noHelp) {
+  if (soundsAngry(text)) {
     return {
-      intent: noHelp.intent,
-      tier: "dnc_confirm",
-      suggestedReply:
-        "Understood. We will update your file so you are not contacted about this. - Wynn Tax Solutions",
+      intent: "hostile",
+      tier: "needs_human",
+      suggestedReply: "",
       confidence: 0.95,
-      rationale: noHelp.rationale,
-      model: "regex-no-help-path",
+      rationale: "Inbound sounds angry or hostile; no automated response should be sent.",
+      model: "regex-hostile-path",
+    };
+  }
+
+  const unrelated = fastUnrelatedCheck(text);
+  if (unrelated) {
+    return {
+      intent: unrelated.intent,
+      tier: "needs_human",
+      suggestedReply: "",
+      confidence: 0.9,
+      rationale: unrelated.rationale,
+      model: "regex-unrelated-path",
     };
   }
 
