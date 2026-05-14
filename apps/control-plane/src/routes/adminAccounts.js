@@ -14,9 +14,14 @@ const {
   syncUsersFromRcExtensions,
   getOrComputeAgentCallStats,
 } = require("../../../../packages/shared-services/src");
+const { touchCxWorkspacePresence } = require("../../../../packages/shared-services/src");
+const { releaseAssignedCxQueueForAgent } = require("../../../../packages/shared-services/src/cxCadenceService");
 const {
   deriveFreshLeadGate,
 } = require("../../../../packages/shared-services/src/agentAvailabilityService");
+const { createRingCentralClient, createRingcxVoiceClient } = require("../../../../packages/shared-integrations/src");
+const { findExShellsForEmail } = require("../../../../packages/shared-data/src/exShellDirectory");
+const { findLogicsAgentByEmail } = require("../../../../packages/shared-data/src/logicsAgents");
 const {
   PERMISSIONS_CATALOG,
   ROLE_DEFAULT_PERMISSIONS,
@@ -202,6 +207,497 @@ function sanitizePatch(body = {}) {
   return patch;
 }
 
+function normalizeEmail(value) {
+  return String(value || "").trim().toLowerCase();
+}
+
+function normalizeLookupToken(value) {
+  return String(value || "").trim().toLowerCase();
+}
+
+function compactObject(input = {}) {
+  const out = {};
+  for (const [key, value] of Object.entries(input)) {
+    if (value === undefined || value === null || value === "") continue;
+    out[key] = value;
+  }
+  return out;
+}
+
+function coerceList(payload) {
+  if (Array.isArray(payload)) return payload;
+  if (!payload || typeof payload !== "object") return [];
+  for (const key of ["records", "items", "data", "agents", "content"]) {
+    if (Array.isArray(payload[key])) return payload[key];
+  }
+  return [];
+}
+
+function bestRcExtensionName(extension = {}) {
+  const first = String(extension?.contact?.firstName || "").trim();
+  const last = String(extension?.contact?.lastName || "").trim();
+  const full = `${first} ${last}`.trim();
+  return full || String(extension?.name || "").trim() || null;
+}
+
+function deriveCompanyFromEmail(email) {
+  const domain = normalizeEmail(email).split("@")[1] || "";
+  if (domain === "wynntaxsolutions.com") return "WYNN";
+  if (domain === "taxadvocategroup.com") return "TAG";
+  return null;
+}
+
+function summarizeRcExtension(extension = {}) {
+  const email = normalizeEmail(extension?.contact?.email);
+  return compactObject({
+    extensionId: extension?.id != null ? String(extension.id) : null,
+    extensionNumber: extension?.extensionNumber != null ? String(extension.extensionNumber) : null,
+    name: bestRcExtensionName(extension),
+    email,
+    status: extension?.status || null,
+    company: String(extension?.contact?.company || "").trim().toUpperCase() || deriveCompanyFromEmail(email),
+  });
+}
+
+function summarizeLocalAgentState(agent = {}) {
+  return compactObject({
+    extensionId: agent?.extensionId != null ? String(agent.extensionId) : null,
+    name: agent?.name || null,
+    company: agent?.company || null,
+    cxAgentId: agent?.cxAgentId || null,
+    status: agent?.status || null,
+    exPresenceStatus: agent?.exPresenceStatus || null,
+    activityState: agent?.activityState || null,
+    lastEventReceived: agent?.lastEventReceived || null,
+  });
+}
+
+function readRingcxAgentId(agent = {}) {
+  return String(
+    agent.agentId
+      || agent.id
+      || agent.agentID
+      || agent.agent_id
+      || "",
+  ).trim();
+}
+
+function readRingcxAgentGroupId(agent = {}) {
+  return String(
+    agent.agentGroupId
+      || agent.groupId
+      || agent.agentGroupID
+      || agent.agent_group_id
+      || agent.group?.id
+      || "",
+  ).trim();
+}
+
+function summarizeRingcxAgent(agent = {}) {
+  return compactObject({
+    agentId: readRingcxAgentId(agent) || null,
+    username: normalizeEmail(agent?.username || agent?.email || agent?.login || ""),
+    groupId: readRingcxAgentGroupId(agent) || null,
+    rcUserId: String(agent?.rcUserId || "").trim() || null,
+    firstName: String(agent?.firstName || agent?.first_name || "").trim() || null,
+    lastName: String(agent?.lastName || agent?.last_name || "").trim() || null,
+    name: String(agent?.name || agent?.fullName || "").trim() || null,
+    userManagedByRC: agent?.userManagedByRC === true,
+    active: agent?.active ?? agent?.enabled ?? null,
+  });
+}
+
+async function listRingcxAgentsForAdmin() {
+  const client = createRingcxVoiceClient();
+  const groupIds = [];
+  const defaultGroupId = String(
+    client?.config?.defaultAgentGroupId || process.env.RINGCX_VOICE_DEFAULT_AGENT_GROUP_ID || "",
+  ).trim();
+  if (defaultGroupId) groupIds.push(defaultGroupId);
+
+  if (typeof client.listAgentGroups === "function") {
+    try {
+      for (const group of coerceList(await client.listAgentGroups())) {
+        const groupId = readRingcxAgentGroupId(group) || String(group?.id || "").trim();
+        if (groupId && !groupIds.includes(groupId)) groupIds.push(groupId);
+      }
+    } catch {
+      // The configured default group is enough for the lookup fallback.
+    }
+  }
+
+  const agents = [];
+  for (const groupId of groupIds) {
+    try {
+      const groupAgents = coerceList(await client.listAgents(groupId));
+      for (const agent of groupAgents) {
+        agents.push({
+          ...agent,
+          agentGroupId: readRingcxAgentGroupId(agent) || groupId,
+        });
+      }
+    } catch {
+      // Keep scanning other groups; one locked group should not kill lookup.
+    }
+  }
+  return agents;
+}
+
+function getSettlementOfficerId(block) {
+  return block?.settlementOfficerId || block?.soId || block?.logicsId || null;
+}
+
+function buildLogicsSuggestion(email) {
+  const normalizedEmail = normalizeEmail(email);
+  if (!normalizedEmail) return { found: false, suggestion: {} };
+  const logicsAgent = findLogicsAgentByEmail(normalizedEmail);
+  const exShells = findExShellsForEmail(normalizedEmail);
+  if (!logicsAgent && (!Array.isArray(exShells) || exShells.length === 0)) {
+    return { found: false, suggestion: {} };
+  }
+
+  const tag = logicsAgent?.tag || null;
+  const wynn = logicsAgent?.wynn || null;
+  const primary =
+    tag && normalizeEmail(tag.email) === normalizedEmail
+      ? tag
+      : wynn && normalizeEmail(wynn.email) === normalizedEmail
+        ? wynn
+        : tag || wynn || null;
+
+  return {
+    found: Boolean(logicsAgent),
+    suggestion: compactObject({
+      name: logicsAgent?.name || null,
+      phone: logicsAgent?.phone || null,
+      logicsUserId: primary?.logicsId || null,
+      logicsDisplayName: logicsAgent?.name || null,
+      tagLogicsId: tag?.logicsId || null,
+      tagSOId: getSettlementOfficerId(tag),
+      tagEmail: tag?.email || null,
+      tagLogicsName: tag ? (tag.displayName || logicsAgent?.name || null) : null,
+      tagLogicsRoles: tag?.roles || null,
+      wynnLogicsId: wynn?.logicsId || null,
+      wynnSOId: getSettlementOfficerId(wynn),
+      wynnEmail: wynn?.email || null,
+      wynnLogicsName: wynn ? (wynn.displayName || logicsAgent?.name || null) : null,
+      wynnLogicsRoles: wynn?.roles || null,
+      exShells: Array.isArray(exShells) && exShells.length > 0 ? exShells : null,
+    }),
+  };
+}
+
+function matchRcExtension(extension, input) {
+  const summary = summarizeRcExtension(extension);
+  const tokens = new Set([
+    normalizeLookupToken(input.email),
+    normalizeLookupToken(input.username),
+    normalizeLookupToken(input.name),
+    normalizeLookupToken(input.extensionId),
+    normalizeLookupToken(input.extensionNumber),
+  ].filter(Boolean));
+  if (tokens.has(normalizeLookupToken(summary.email))) return true;
+  if (tokens.has(normalizeLookupToken(summary.extensionId))) return true;
+  if (tokens.has(normalizeLookupToken(summary.extensionNumber))) return true;
+  if (tokens.has(normalizeLookupToken(summary.name))) return true;
+  const username = normalizeLookupToken(input.username);
+  return Boolean(username && summary.email && summary.email === username);
+}
+
+function matchRingcxAgent(agent, input) {
+  const summary = summarizeRingcxAgent(agent);
+  const username = normalizeLookupToken(summary.username);
+  const name = normalizeLookupToken(summary.name || `${summary.firstName || ""} ${summary.lastName || ""}`.trim());
+  const tokens = new Set([
+    normalizeLookupToken(input.email),
+    normalizeLookupToken(input.username),
+    normalizeLookupToken(input.cxUsername),
+    normalizeLookupToken(input.ringcxUsername),
+    normalizeLookupToken(input.name),
+  ].filter(Boolean));
+  if (tokens.has(username)) return true;
+  if (tokens.has(name)) return true;
+  if (input.cxAgentId && normalizeLookupToken(summary.agentId) === normalizeLookupToken(input.cxAgentId)) return true;
+  if (input.extensionId && normalizeLookupToken(summary.rcUserId) === normalizeLookupToken(input.extensionId)) return true;
+  return false;
+}
+
+async function resolveIdentityMatches(body = {}) {
+  const input = {
+    email: normalizeEmail(body.email),
+    username: normalizeEmail(body.username || body.ringcxUsername || body.cxUsername),
+    cxUsername: normalizeEmail(body.cxUsername || body.ringcxUsername || body.username),
+    ringcxUsername: normalizeEmail(body.ringcxUsername || body.cxUsername || body.username),
+    name: String(body.name || "").trim(),
+    company: String(body.company || "").trim().toUpperCase(),
+    extensionId: String(body.extensionId || "").trim(),
+    extensionNumber: String(body.extensionNumber || "").trim(),
+    cxAgentId: String(body.cxAgentId || "").trim(),
+  };
+
+  const lookupTokens = [
+    input.email,
+    input.username,
+    input.name,
+    input.extensionId,
+    input.extensionNumber,
+    input.cxAgentId,
+  ].filter(Boolean);
+  if (lookupTokens.length === 0) {
+    const err = new Error("Provide an email, username, extension, name, or CX agent id to check");
+    err.status = 400;
+    throw err;
+  }
+
+  const checkedAt = new Date();
+  const [agentStates, accounts] = await Promise.all([
+    agentStateRepository.listAgentStates(input.company ? { company: input.company } : {}),
+    userAccountRepository.listUserAccounts({ limit: 1000 }),
+  ]);
+
+  const existing = accounts.find((account) => {
+    const metadata = account.metadata || {};
+    const fields = [
+      account.email,
+      account.name,
+      account.extensionId,
+      account.extensionNumber,
+      account.cxAgentId,
+      metadata.ringcxUsername,
+      metadata.ringcxAgentUsername,
+      metadata.cxUsername,
+      metadata.ringcxAgentId,
+    ].map(normalizeLookupToken);
+    return lookupTokens.some((token) => fields.includes(normalizeLookupToken(token)));
+  }) || null;
+
+  const localEx = agentStates.find((agent) => {
+    const fields = [
+      agent.extensionId,
+      agent.name,
+      agent.cxAgentId,
+    ].map(normalizeLookupToken);
+    return lookupTokens.some((token) => fields.includes(normalizeLookupToken(token)));
+  }) || null;
+
+  let exLookup = { ok: false, source: "ringcentral-ex", match: null, error: null };
+  try {
+    const rc = createRingCentralClient();
+    await rc.reinitializePlatform({ force: false, reason: "admin-user-identity-lookup" });
+    const payload = await rc.listExtensions();
+    const liveMatch = coerceList(payload).find((extension) => matchRcExtension(extension, input));
+    exLookup = {
+      ok: true,
+      source: liveMatch ? "ringcentral-ex-live" : "ringcentral-ex-live",
+      match: liveMatch ? summarizeRcExtension(liveMatch) : null,
+      error: null,
+    };
+  } catch (error) {
+    exLookup = {
+      ok: false,
+      source: "ringcentral-ex-live",
+      match: null,
+      error: error.message,
+    };
+  }
+  if (!exLookup.match && localEx) {
+    exLookup = {
+      ok: true,
+      source: "agent-state-cache",
+      match: summarizeLocalAgentState(localEx),
+      error: exLookup.error,
+    };
+  }
+
+  let cxLookup = { ok: false, source: "ringcx-voice", match: null, error: null };
+  try {
+    const agents = await listRingcxAgentsForAdmin();
+    const cxMatch = agents.find((agent) => matchRingcxAgent(agent, {
+      ...input,
+      extensionId: input.extensionId || exLookup.match?.extensionId,
+      cxAgentId: input.cxAgentId || localEx?.cxAgentId || exLookup.match?.cxAgentId,
+    }));
+    cxLookup = {
+      ok: true,
+      source: "ringcx-voice",
+      match: cxMatch ? summarizeRingcxAgent(cxMatch) : null,
+      error: null,
+    };
+  } catch (error) {
+    cxLookup = {
+      ok: false,
+      source: "ringcx-voice",
+      match: null,
+      error: error.message,
+    };
+  }
+
+  const suggestedEmail =
+    input.email
+    || exLookup.match?.email
+    || (input.username.includes("@") && !input.username.startsWith("+") ? input.username : null)
+    || existing?.email
+    || null;
+  const logics = buildLogicsSuggestion(suggestedEmail);
+  const ringcxUsername =
+    cxLookup.match?.username
+    || input.ringcxUsername
+    || existing?.metadata?.ringcxUsername
+    || existing?.metadata?.ringcxAgentUsername
+    || null;
+  const metadata = compactObject({
+    ...(existing?.metadata && typeof existing.metadata === "object" ? existing.metadata : {}),
+    ringcxUsername,
+    ringcxAgentUsername: ringcxUsername,
+    cxUsername: ringcxUsername,
+    ringcxAgentId: cxLookup.match?.agentId || existing?.metadata?.ringcxAgentId || null,
+    ringcxAgentGroupId: cxLookup.match?.groupId || existing?.metadata?.ringcxAgentGroupId || null,
+    ringcxRcUserId: cxLookup.match?.rcUserId || existing?.metadata?.ringcxRcUserId || null,
+    identityLastCheckedAt: checkedAt,
+    identityCheck: {
+      exMatched: Boolean(exLookup.match),
+      cxMatched: Boolean(cxLookup.match),
+      oauthConfigured: Boolean(cxOAuthService.describeConfig().enabled),
+    },
+  });
+
+  const suggestion = compactObject({
+    ...logics.suggestion,
+    email: suggestedEmail,
+    name: existing?.name || exLookup.match?.name || logics.suggestion.name || input.name || null,
+    company:
+      existing?.company
+      || input.company
+      || exLookup.match?.company
+      || deriveCompanyFromEmail(suggestedEmail)
+      || null,
+    extensionId: existing?.extensionId || exLookup.match?.extensionId || input.extensionId || null,
+    extensionNumber: existing?.extensionNumber || exLookup.match?.extensionNumber || input.extensionNumber || null,
+    cxAgentId:
+      existing?.cxAgentId
+      || localEx?.cxAgentId
+      || cxLookup.match?.agentId
+      || input.cxAgentId
+      || null,
+    metadata,
+  });
+
+  const oauthConfig = cxOAuthService.describeConfig();
+  const session = existing ? await cxTokenStorageService.describe(existing.id).catch(() => null) : null;
+
+  return {
+    checkedAt,
+    input,
+    existing: existing
+      ? compactObject({
+        id: existing.id,
+        email: existing.email,
+        name: existing.name,
+        status: existing.status,
+        extensionId: existing.extensionId,
+        cxAgentId: existing.cxAgentId,
+      })
+      : null,
+    matches: {
+      ex: exLookup,
+      cx: cxLookup,
+      logics: { found: logics.found },
+    },
+    suggestion,
+    oauth: {
+      configured: Boolean(oauthConfig.enabled),
+      config: oauthConfig,
+      session,
+    },
+  };
+}
+
+async function deactivateAccount(accountId, actorEmail = null, reason = "admin-deactivated") {
+  const current = await userAccountRepository.findUserAccountById(accountId);
+  if (!current) {
+    const err = new Error("Account not found");
+    err.status = 404;
+    throw err;
+  }
+  if (HARDENED_ACCOUNT_EMAILS.has(String(current.email || "").toLowerCase())) {
+    const err = new Error("Hard-coded accounts cannot be deactivated");
+    err.status = 400;
+    throw err;
+  }
+
+  const now = new Date();
+  await userAccountRepository.updateUserAccount(accountId, {
+    status: "disabled",
+    metadata: {
+      ...(current.metadata || {}),
+      deactivatedAt: now,
+      deactivatedBy: actorEmail || null,
+      deactivationReason: reason,
+    },
+  });
+
+  const sideEffects = {
+    cxSessionRevoked: false,
+    queueRelease: null,
+    presenceCleared: false,
+    agentPaused: false,
+  };
+
+  try {
+    await cxTokenStorageService.revoke(accountId);
+    sideEffects.cxSessionRevoked = true;
+  } catch (error) {
+    sideEffects.cxSessionError = error.message;
+  }
+
+  const extensionId = String(current.extensionId || "").trim();
+  if (extensionId) {
+    try {
+      await touchCxWorkspacePresence(extensionId, {
+        active: false,
+        source: "admin-deactivate",
+        userEmail: current.email,
+      });
+      sideEffects.presenceCleared = true;
+    } catch (error) {
+      sideEffects.presenceError = error.message;
+    }
+    try {
+      sideEffects.queueRelease = await releaseAssignedCxQueueForAgent({
+        extensionId,
+        actorEmail: actorEmail || current.email,
+        reason: "admin-deactivate",
+      });
+    } catch (error) {
+      sideEffects.queueRelease = { ok: false, error: error.message };
+    }
+    try {
+      await agentStateRepository.updateAgentState(extensionId, {
+        status: "offline",
+        activityState: "offline",
+        lastStatusChange: now,
+        lastActivityAt: now,
+        "cxRouting.enabled": false,
+        "cxRouting.desiredAvailability": "unavailable",
+        "cxRouting.reason": "admin-deactivated",
+        "cxRouting.syncedAt": now,
+        "cxRouting.lastSource": "admin",
+        "cxRouting.pauseType": "deactivated",
+        "cxRouting.pauseStartedAt": now,
+        "cxRouting.pauseReleaseAt": null,
+        "upstream.source": "admin-deactivate",
+        "upstream.mirroredAt": now,
+      });
+      sideEffects.agentPaused = true;
+    } catch (error) {
+      sideEffects.agentPauseError = error.message;
+    }
+  }
+
+  const record = await userAccountRepository.findUserAccountById(accountId);
+  return { account: decorate(record), sideEffects };
+}
+
 function createAdminAccountsRouter(auth) {
   const router = express.Router();
 
@@ -266,6 +762,20 @@ function createAdminAccountsRouter(auth) {
           }));
 
         return res.json({ ok: true, extensions: unassigned });
+      } catch (error) {
+        return res.status(error.status || 500).json(toErrorResponse(error));
+      }
+    },
+  );
+
+  router.post(
+    "/identity/resolve",
+    auth.requireAuth,
+    auth.requireAdmin,
+    async (req, res) => {
+      try {
+        const result = await resolveIdentityMatches(req.body || {});
+        return res.json({ ok: true, ...result });
       } catch (error) {
         return res.status(error.status || 500).json(toErrorResponse(error));
       }
@@ -415,19 +925,30 @@ function createAdminAccountsRouter(auth) {
     auth.requireAdmin,
     async (req, res) => {
       try {
-        const current = await userAccountRepository.findUserAccountById(req.params.id);
-        if (!current) {
-          return res.status(404).json({ ok: false, error: "Account not found" });
-        }
-        if (HARDENED_ACCOUNT_EMAILS.has(String(current.email || "").toLowerCase())) {
-          return res
-            .status(400)
-            .json({ ok: false, error: "Hard-coded accounts cannot be disabled" });
-        }
-        const record = await userAccountRepository.updateUserAccount(req.params.id, {
-          status: "disabled",
-        });
-        return res.json({ ok: true, account: decorate(record) });
+        const result = await deactivateAccount(
+          req.params.id,
+          req.user?.email || null,
+          "admin-disabled",
+        );
+        return res.json({ ok: true, ...result });
+      } catch (error) {
+        return res.status(error.status || 500).json(toErrorResponse(error));
+      }
+    },
+  );
+
+  router.post(
+    "/:id/deactivate",
+    auth.requireAuth,
+    auth.requireAdmin,
+    async (req, res) => {
+      try {
+        const result = await deactivateAccount(
+          req.params.id,
+          req.user?.email || null,
+          String(req.body?.reason || "admin-deactivated"),
+        );
+        return res.json({ ok: true, ...result });
       } catch (error) {
         return res.status(error.status || 500).json(toErrorResponse(error));
       }
@@ -440,8 +961,17 @@ function createAdminAccountsRouter(auth) {
     auth.requireAdmin,
     async (req, res) => {
       try {
+        const current = await userAccountRepository.findUserAccountById(req.params.id);
+        if (!current) {
+          return res.status(404).json({ ok: false, error: "Account not found" });
+        }
         const record = await userAccountRepository.updateUserAccount(req.params.id, {
           status: "active",
+          metadata: {
+            ...(current.metadata || {}),
+            reactivatedAt: new Date(),
+            reactivatedBy: req.user?.email || null,
+          },
         });
         return res.json({ ok: true, account: decorate(record) });
       } catch (error) {

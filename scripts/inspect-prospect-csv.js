@@ -9,10 +9,14 @@
 //     structured "mail-info" block we need to lift into MasterProspect
 
 const fs = require("fs");
+const os = require("os");
 const path = require("path");
 const Papa = require("papaparse");
 
-const file = process.argv[2] || "C:\\Users\\Admin\\Downloads\\CaseFilter_Prospects_20260428191635.csv";
+const file = process.argv[2] || path.join(
+  process.env.LOGICS_EXPORT_DIR || path.join(os.homedir(), "Downloads"),
+  "CaseFilter_Prospects_20260428191635.csv",
+);
 const buf = fs.readFileSync(path.resolve(file));
 // Strip BOM if any, then decode UTF-16 LE → UTF-8 string.
 let csvText = buf.toString("utf16le");

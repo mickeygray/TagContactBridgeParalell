@@ -33,7 +33,7 @@ import { EmptyState } from "@/components/ui/EmptyState";
 import { toast } from "@/components/ui/Toaster";
 import {
   useAccounts,
-  useDisableAccount,
+  useDeactivateAccount,
   useEnableAccount,
   useUnassignedExtensions,
   useUpdateAccount,
@@ -117,7 +117,7 @@ export function UsersWorkspace() {
   const extensions = useUnassignedExtensions(
     company === "all" ? undefined : company,
   );
-  const disable = useDisableAccount();
+  const deactivate = useDeactivateAccount();
   const enable = useEnableAccount();
   const update = useUpdateAccount();
 
@@ -401,7 +401,7 @@ export function UsersWorkspace() {
         cell: (info) => {
           const row = info.row.original;
           const toggling =
-            (disable.isPending && disable.variables === row.id) ||
+            (deactivate.isPending && deactivate.variables === row.id) ||
             (enable.isPending && enable.variables === row.id);
           return (
             <div className="flex justify-end gap-1">
@@ -435,10 +435,10 @@ export function UsersWorkspace() {
                     e.stopPropagation();
                     if (row.isHardened) return;
                     try {
-                      await disable.mutateAsync(row.id);
-                      toast.success("Account disabled", { description: row.email });
+                      await deactivate.mutateAsync(row.id);
+                      toast.success("Account deactivated", { description: row.email });
                     } catch (err) {
-                      toast.error("Disable failed", {
+                      toast.error("Deactivate failed", {
                         description: (err as Error).message,
                       });
                     }
@@ -451,7 +451,7 @@ export function UsersWorkspace() {
                   ) : (
                     <PauseCircle className="h-3.5 w-3.5" />
                   )}
-                  {row.isSeed ? "Seed" : row.isHardened ? "Locked" : "Disable"}
+                  {row.isSeed ? "Seed" : row.isHardened ? "Locked" : "Deactivate"}
                 </Button>
               )}
               {row.extensionId ? (
@@ -482,7 +482,7 @@ export function UsersWorkspace() {
         },
       },
     ],
-    [disable, enable, update, updateQueueTier],
+    [deactivate, enable, update, updateQueueTier],
   );
 
   async function pairExtension(userId: string, extensionId: string) {
@@ -507,7 +507,7 @@ export function UsersWorkspace() {
       <SectionHeader
         eyebrow="Operations"
         title="Users & Agents"
-        description="Create accounts, pair them to RingCentral extensions, and send OTP invites. Seed admins are hardcoded and cannot be disabled."
+        description="Create accounts, pair them to RingCentral extensions, and send OTP invites. Seed admins are hardcoded and cannot be deactivated."
         actions={<CreateUserDialog />}
       />
 

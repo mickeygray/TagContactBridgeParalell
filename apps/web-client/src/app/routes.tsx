@@ -39,6 +39,9 @@ const DeployWorkspace = React.lazy(() =>
 const CXWorkspace = React.lazy(() =>
   import("@/workspaces/cx/CXWorkspace").then((m) => ({ default: m.CXWorkspace })),
 );
+const SalesTrainerWorkspace = React.lazy(() =>
+  import("@/workspaces/trainer/SalesTrainerWorkspace").then((m) => ({ default: m.SalesTrainerWorkspace })),
+);
 
 function WorkspaceFallback() {
   return (
@@ -56,6 +59,14 @@ export function AppRoutes() {
   return (
     <Routes>
       <Route path="/login" element={<LoginPage />} />
+      <Route
+        path="/trainer"
+        element={
+          <Suspended>
+            <SalesTrainerWorkspace />
+          </Suspended>
+        }
+      />
 
       <Route element={<AuthGate audience="admin" />}>
         <Route path="/admin" element={<AdminShell />}>

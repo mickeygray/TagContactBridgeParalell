@@ -1,6 +1,7 @@
 "use strict";
 
 const { UserAccount } = require("../../shared-models/src");
+const { normalizeCxQueuePolicyTier } = require("../../shared-normalizers/src");
 
 const CX_QUEUE_POLICY_TIERS = new Set([
   "no_leads",
@@ -38,7 +39,7 @@ function normalizeCxQueuePolicy(input) {
   if (input === null) return null;
   if (typeof input !== "object") return undefined;
 
-  const tier = String(input.tier || "").trim();
+  const tier = normalizeCxQueuePolicyTier(input.tier);
   const out = {
     tier: CX_QUEUE_POLICY_TIERS.has(tier) ? tier : null,
     enabled: input.enabled === undefined ? true : Boolean(input.enabled),

@@ -8,3 +8,21 @@ dist/
 build/
 coverage/
 runtime/
+
+# Telephony recordings — local cache only. Drive is canonical.
+# Never commit raw call audio; we had 91 MP3s (~614 MB) leak via ops/
+# before this rule existed. git-filter-repo will scrub history; these
+# patterns keep new ones from sneaking back in.
+*.mp3
+*.wav
+*.opus
+*.m4a
+*.aac
+*.flac
+ops/end-of-day-recordings/
+ops/manual-recording-dumps/
+runtime/audio/
+runtime/recordings/
+# Sidecar JSON manifests live next to the recordings — also local-only.
+ops/end-of-day-recordings/**/*.json
+ops/manual-recording-dumps/**/*.json

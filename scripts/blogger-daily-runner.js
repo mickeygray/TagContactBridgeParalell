@@ -38,13 +38,14 @@ require("dotenv").config({
 
 const { publishBlog, runPreflight } = require("./blogger-post-pipeline");
 const { generateCurrentEventBlog } = require("./blogger-current-event");
+const { WYNN_REPO } = require("./blogger-paths");
 
 const DRAFTS_DIR = path.resolve(__dirname, "blog-drafts");
 const POSTED_DIR = path.join(DRAFTS_DIR, "posted");
 const STATE_FILE = path.resolve(__dirname, "blogger-state.json");
 const SUCCESS_STORIES_QUEUE = path.resolve(__dirname, "success-stories-queue.json");
 const SUCCESS_STORIES_POSTED = path.resolve(__dirname, "success-stories-posted.json");
-const WYNN_BLOGDATA = "C:/Users/Admin/Code/WynnTax/client/src/data/blogData.js";
+const WYNN_BLOGDATA = path.join(WYNN_REPO, "client", "src", "data", "blogData.js");
 const RUNTIME_DIR = path.resolve(__dirname, "..", "runtime", "blogger");
 const RUN_LOG_DIR = path.join(RUNTIME_DIR, "runs");
 const CURRENT_EVENT_TIMEOUT_MS = readPositiveIntegerEnv(

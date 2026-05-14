@@ -12,6 +12,10 @@ const {
   ValidationError,
 } = require("../../shared-errors/src");
 const {
+  deriveUcqAgeBucket,
+  deriveUcqPartition,
+} = require("../../shared-normalizers/src");
+const {
   recordWorkflowStage,
 } = require("./workflowStateService");
 const {
@@ -166,11 +170,7 @@ function splitName(value) {
 //   fresh-day1 / fresh-day2to10 / aged
 // Default to day2_10 for unknown values.
 function mapQueueFamilyToAgeBucket(queueFamily) {
-  const f = String(queueFamily || "").trim().toLowerCase();
-  if (f === "fresh-day1" || f === "fresh") return "just_came_in";
-  if (f === "fresh-day2to10") return "day2_10";
-  if (f === "aged") return "aged";
-  return "day2_10";
+  return deriveUcqAgeBucket({ queueFamily });
 }
 
 function isFallbackAfterFirstContactAccount(account = null) {
@@ -759,12 +759,13 @@ async function publishQueueItemToRingcx(options = {}) {
   // ── New path: enqueue into UCQ instead of pushing to RingCX ────
   if (isPacingQueueEnabled() && queueItem?._id) {
     const enqueueLead = getEnqueueLead();
+    const ageBucket = deriveUcqAgeBucket(queueItem);
     const leadPayload = {
       leadId: String(queueItem.caseId || queueItem._id),
       phoneNumber: queueItem.phoneNumber || queueItem.phone || "",
       domain: queueItem.domain || "TAG",
-      partition: queueItem.partition || (queueItem.queueFamily?.startsWith("fresh") ? "fresh" : "non_fresh"),
-      ageBucket: queueItem.ageBucket || mapQueueFamilyToAgeBucket(queueItem.queueFamily),
+      partition: queueItem.partition || deriveUcqPartition(ageBucket),
+      ageBucket,
       cadenceDueAt: queueItem.releaseAt || null,
       sourceCadenceTaskId: String(queueItem._id),
       sourceLogicsCaseId: queueItem.caseId ? String(queueItem.caseId) : null,

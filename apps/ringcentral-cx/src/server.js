@@ -10,6 +10,12 @@ const {
   SERVICE_NAMES,
   getRingCentralConfig,
 } = require("../../../packages/shared-config/src");
+const {
+  buildHealthAccessMiddleware,
+  buildPublicHealthPayload,
+  isDetailedHealthRequest,
+  safeSecretEquals,
+} = require("../../../packages/shared-utils/src");
 const { ROLES } = require("../../../packages/shared-types/src");
 const { createRingCentralClient } = require("../../../packages/shared-integrations/src");
 const { publishDemoEvent } = require("../../../packages/shared-services/src/demoEventService");
@@ -60,25 +66,6 @@ const {
 } = require("../../../packages/shared-services/src/ringcentralSubscriptionWatchdogService");
 const { createEvent } = require("../../../packages/event-core/src");
 
-function buildHealthAccessMiddleware(config) {
-  const expectedToken = String(config.healthToken || "").trim();
-  if (!expectedToken) {
-    return (_req, _res, next) => next();
-  }
-
-  return (req, res, next) => {
-    const provided = String(
-      req.headers["x-health-token"] ||
-      req.headers["x-service-secret"] ||
-      "",
-    ).trim();
-    if (provided && provided === expectedToken) {
-      return next();
-    }
-    return res.status(401).json({ ok: false, error: "Health token required" });
-  };
-}
-
 function buildInternalAccessMiddleware(config) {
   const bearerAuth = requireAuth(config);
   const configuredSecret = String(config.internalServiceSecret || "").trim();
@@ -90,7 +77,7 @@ function buildInternalAccessMiddleware(config) {
       "",
     ).trim();
 
-    if (configuredSecret && providedSecret && providedSecret === configuredSecret) {
+    if (configuredSecret && safeSecretEquals(providedSecret, configuredSecret)) {
       req.user = {
         id: "internal-service",
         role: ROLES.SERVICE,
@@ -131,7 +118,7 @@ function buildAuthenticatedAccessMiddleware(config) {
       "",
     ).trim();
 
-    if (configuredSecret && providedSecret && providedSecret === configuredSecret) {
+    if (configuredSecret && safeSecretEquals(providedSecret, configuredSecret)) {
       // Service identity bypasses bearer auth; mint a synthetic admin-
       // like user so downstream permission checks pass for test scripts
       // / cron callers using the secret. Real production traffic always
@@ -424,14 +411,30 @@ async function startServer() {
           maxOpenAssignments: Math.max(Number(process.env.RC_CX_FRESH_OPEN_ASSIGNMENTS) || 5, 1),
           maxOpenAssignmentsScope: "queue-family",
         });
-        const nonFreshAssignmentBatch = await assignCxQueueBatch({
-          maxCount: Math.max(Number(process.env.RC_CX_NONFRESH_BATCH_SIZE) || 20, 1),
+        const day2To15AssignmentBatch = await assignCxQueueBatch({
+          maxCount: Math.max(Number(process.env.RC_CX_DAY2TO15_BATCH_SIZE) || Number(process.env.RC_CX_NONFRESH_BATCH_SIZE) || 20, 1),
           claimMinutes: Number(process.env.RC_CX_NONFRESH_CLAIM_MINUTES) || 30,
-          queueFamilies: ["fresh-day2to10", "aged"],
+          queueFamilies: ["fresh-day2to10"],
           randomize: true,
-          maxOpenAssignments: Math.max(Number(process.env.RC_CX_NONFRESH_OPEN_ASSIGNMENTS) || 20, 1),
-          maxOpenAssignmentsScope: "non-fresh",
+          maxOpenAssignments: Math.max(Number(process.env.RC_CX_DAY2TO15_OPEN_ASSIGNMENTS) || 15, 1),
+          maxOpenAssignmentsScope: "queue-family",
         });
+        const agedAssignmentBatch = await assignCxQueueBatch({
+          maxCount: Math.max(Number(process.env.RC_CX_AGED_BATCH_SIZE) || Number(process.env.RC_CX_NONFRESH_BATCH_SIZE) || 20, 1),
+          claimMinutes: Number(process.env.RC_CX_AGED_CLAIM_MINUTES) || Number(process.env.RC_CX_NONFRESH_CLAIM_MINUTES) || 30,
+          queueFamilies: ["aged"],
+          randomize: true,
+          maxOpenAssignments: Math.max(Number(process.env.RC_CX_AGED_OPEN_ASSIGNMENTS) || 5, 1),
+          maxOpenAssignmentsScope: "queue-family",
+        });
+        const nonFreshAssignmentBatch = {
+          ok: true,
+          requested: Number(day2To15AssignmentBatch.requested || 0) + Number(agedAssignmentBatch.requested || 0),
+          assigned: Number(day2To15AssignmentBatch.assigned || 0) + Number(agedAssignmentBatch.assigned || 0),
+          skipped: Number(day2To15AssignmentBatch.skipped || 0) + Number(agedAssignmentBatch.skipped || 0),
+          day2To15AssignmentBatch,
+          agedAssignmentBatch,
+        };
         const eventBatch = await processCxCadenceEventBatch({
           workerName: `${config.serviceName}-cx-cadence-worker`,
           maxAttempts,
@@ -445,6 +448,8 @@ async function startServer() {
         cadenceWorkerState.lastResult = {
           queueSweep,
           assignmentBatch,
+          day2To15AssignmentBatch,
+          agedAssignmentBatch,
           nonFreshAssignmentBatch,
           eventBatch,
           requestedCadenceSweep,
@@ -480,6 +485,8 @@ async function startServer() {
             requested: nonFreshAssignmentBatch.requested,
             assigned: nonFreshAssignmentBatch.assigned,
             skipped: nonFreshAssignmentBatch.skipped,
+            day2To15Assigned: day2To15AssignmentBatch.assigned,
+            agedAssigned: agedAssignmentBatch.assigned,
           });
         }
         if (
@@ -919,7 +926,10 @@ async function startServer() {
     runtime.logger?.info?.("ringcx.agentMonitor.disabled");
   }
 
-  app.get("/health", requireHealthAccess, (_req, res) => {
+  app.get("/health", requireHealthAccess, (req, res) => {
+    if (!isDetailedHealthRequest(req)) {
+      return res.json(buildPublicHealthPayload(config, runtime.getMongoState()));
+    }
     res.json({
       ...buildServiceHealth(config, runtime.getMongoState()),
       ringcentral: rc.getAuthStatus(),
@@ -1242,6 +1252,17 @@ async function startServer() {
         dispatchIntent: body,
         source: req.user?.email || body.requestedBy || "ringcentral-cx",
       });
+      if (execution?.ok === false) {
+        return res.status(execution.retryable === false ? 409 : 502).json({
+          ok: false,
+          accepted: false,
+          error: execution.reason || execution.error || "cx-dispatch-execution-failed",
+          result: {
+            staged,
+            execution,
+          },
+        });
+      }
       return res.status(202).json({
         ok: true,
         accepted: true,
@@ -1269,6 +1290,16 @@ async function startServer() {
         dispatchIntent: body,
         source: req.user?.email || body.requestedBy || "ringcentral-cx",
       });
+      if (execution?.ok === false) {
+        return res.status(execution.retryable === false ? 409 : 502).json({
+          ok: false,
+          accepted: false,
+          error: execution.reason || execution.error || "cx-hangup-execution-failed",
+          result: {
+            execution,
+          },
+        });
+      }
       return res.status(202).json({
         ok: true,
         accepted: true,

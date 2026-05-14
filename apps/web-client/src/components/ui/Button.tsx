@@ -46,6 +46,27 @@ export const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
     ref,
   ) => {
     const Comp = asChild ? Slot : "button";
+    // Radix's <Slot> (the asChild target) requires exactly ONE React
+    // element as its child. Rendering `{isLoading ? <Loader2/> : null}
+    // {children}` hands Slot two slots — null counts as a slot here —
+    // and Slot throws "React.Children.only expected to receive a
+    // single React element child". So when asChild is on, we pass
+    // children through unchanged and drop loading-spinner support
+    // (callers using asChild typically wrap an <a>, not a long-running
+    // action button anyway). When asChild is off, the spinner +
+    // children render normally inside a real <button>.
+    if (asChild) {
+      return (
+        <Comp
+          ref={ref}
+          className={cn(buttonVariants({ variant, size, className }))}
+          disabled={disabled || isLoading}
+          {...props}
+        >
+          {children}
+        </Comp>
+      );
+    }
     return (
       <Comp
         ref={ref}

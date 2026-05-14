@@ -12,10 +12,14 @@
 // the missing-day report.
 
 const fs = require("fs");
+const os = require("os");
 const path = require("path");
 const Papa = require("papaparse");
 
-const file = process.argv[2] || "C:\\Users\\Admin\\Downloads\\CaseFilter_Prospects_20260428191635.csv";
+const file = process.argv[2] || path.join(
+  process.env.LOGICS_EXPORT_DIR || path.join(os.homedir(), "Downloads"),
+  "CaseFilter_Prospects_20260428191635.csv",
+);
 const buf = fs.readFileSync(path.resolve(file));
 let csvText = buf.toString("utf16le");
 if (csvText.charCodeAt(0) === 0xFEFF) csvText = csvText.slice(1);

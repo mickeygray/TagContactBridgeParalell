@@ -1,6 +1,7 @@
 "use strict";
 
 const { CxDialQueue } = require("../../shared-models/src");
+const { normalizeLeadQueueFamilyList } = require("../../shared-normalizers/src");
 
 const TOUCH_BALANCED_QUEUE_SORT = Object.freeze({
   queueFamilyRank: 1,
@@ -32,14 +33,7 @@ function activeQueueFilter(domain, caseId, options = {}) {
 }
 
 function normalizeQueueFamilies(value) {
-  const raw = Array.isArray(value) ? value : String(value || "").split(",");
-  return Array.from(
-    new Set(
-      raw
-        .map((entry) => String(entry || "").trim())
-        .filter(Boolean),
-    ),
-  );
+  return normalizeLeadQueueFamilyList(value);
 }
 
 function resolveQueueFamilies(options = {}) {
@@ -87,6 +81,26 @@ function buildClaimPatch(now, claimMinutes) {
   };
 }
 
+function buildExpiredClaimRequeueQuery(now) {
+  return {
+    state: "claimed",
+    claimUntil: { $ne: null, $lte: now },
+    $and: [
+      { $or: [{ "metadata.servingAt": { $exists: false } }, { "metadata.servingAt": null }] },
+      { $or: [{ "metadata.lastDialExecutionUii": { $exists: false } }, { "metadata.lastDialExecutionUii": null }, { "metadata.lastDialExecutionUii": "" }] },
+      { $or: [{ "metadata.lastQueueAttemptHeldForDisposition": { $ne: true } }, { "metadata.lastQueueAttemptHeldForDisposition": { $exists: false } }] },
+      {
+        $or: [
+          { "metadata.lastDialIntentStatus": { $exists: false } },
+          { "metadata.lastDialIntentStatus": null },
+          { "metadata.lastDialIntentStatus": "" },
+          { "metadata.lastDialIntentStatus": { $in: ["relay-failed", "error", "cancelled"] } },
+        ],
+      },
+    ],
+  };
+}
+
 async function findActiveQueueItem(domain, caseId, options = {}) {
   return CxDialQueue.findOne(activeQueueFilter(domain, caseId, options));
 }
@@ -120,42 +134,35 @@ async function upsertQueueItem(domain, caseId, update = {}, options = {}) {
 }
 
 async function releaseDueQueueItems(now = new Date(), limit = 50) {
-  const docs = await CxDialQueue.find({
+  const query = {
     state: "queued",
     releaseAt: { $lte: now },
-  })
+  };
+  const docs = await CxDialQueue.find(query)
     .sort(TOUCH_BALANCED_QUEUE_SORT)
     .limit(Math.min(Number(limit) || 50, 200));
 
   const released = [];
   for (const doc of docs) {
-    doc.state = "ready";
-    doc.claimUntil = null;
-    await doc.save();
-    released.push(doc.toObject());
+    const updated = await CxDialQueue.findOneAndUpdate(
+      { _id: doc._id, ...query },
+      {
+        $set: {
+          state: "ready",
+          claimUntil: null,
+        },
+      },
+      { new: true },
+    );
+    if (updated) released.push(updated.toObject());
   }
 
   return released;
 }
 
 async function requeueExpiredClaims(now = new Date(), limit = 50) {
-  const docs = await CxDialQueue.find({
-    state: "claimed",
-    claimUntil: { $ne: null, $lte: now },
-    $and: [
-      { $or: [{ "metadata.servingAt": { $exists: false } }, { "metadata.servingAt": null }] },
-      { $or: [{ "metadata.lastDialExecutionUii": { $exists: false } }, { "metadata.lastDialExecutionUii": null }, { "metadata.lastDialExecutionUii": "" }] },
-      { $or: [{ "metadata.lastQueueAttemptHeldForDisposition": { $ne: true } }, { "metadata.lastQueueAttemptHeldForDisposition": { $exists: false } }] },
-      {
-        $or: [
-          { "metadata.lastDialIntentStatus": { $exists: false } },
-          { "metadata.lastDialIntentStatus": null },
-          { "metadata.lastDialIntentStatus": "" },
-          { "metadata.lastDialIntentStatus": { $in: ["relay-failed", "error", "cancelled"] } },
-        ],
-      },
-    ],
-  })
+  const query = buildExpiredClaimRequeueQuery(now);
+  const docs = await CxDialQueue.find(query)
     .sort({ claimUntil: 1 })
     .limit(Math.min(Number(limit) || 50, 200));
 
@@ -167,19 +174,29 @@ async function requeueExpiredClaims(now = new Date(), limit = 50) {
         : doc.assignment
           ? { ...doc.assignment }
           : null;
-    doc.state = "ready";
-    doc.claimUntil = null;
-    doc.assignment = undefined;
-    doc.metadata = {
-      ...(doc.metadata || {}),
-      lastReleasedAt: now,
-      lastReleaseReason: "claim-expired",
-      lastReleasedExtensionId: previousAssignment?.extensionId || null,
-      lastReleasedAgentName: previousAssignment?.agentName || null,
-    };
-    await doc.save();
+    const updated = await CxDialQueue.findOneAndUpdate(
+      { _id: doc._id, ...query },
+      {
+        $set: {
+          state: "ready",
+          claimUntil: null,
+          assignment: {
+            extensionId: null,
+            agentName: null,
+            assignedAt: null,
+            queueFamilySnapshot: null,
+          },
+          "metadata.lastReleasedAt": now,
+          "metadata.lastReleaseReason": "claim-expired",
+          "metadata.lastReleasedExtensionId": previousAssignment?.extensionId || null,
+          "metadata.lastReleasedAgentName": previousAssignment?.agentName || null,
+        },
+      },
+      { new: true },
+    );
+    if (!updated) continue;
     requeued.push({
-      ...(doc.toObject()),
+      ...(updated.toObject()),
       previousAssignment,
     });
   }
@@ -273,8 +290,14 @@ async function cancelActiveQueueItems(domain, caseId, reason = null) {
   };
 }
 
-async function updateQueueItem(id, update = {}) {
-  return CxDialQueue.findByIdAndUpdate(id, { $set: update }, { new: true });
+async function updateQueueItem(id, update = {}, options = {}) {
+  const query = { _id: id };
+  if (options.match && typeof options.match === "object") {
+    for (const [key, value] of Object.entries(options.match)) {
+      if (value !== undefined) query[key] = value;
+    }
+  }
+  return CxDialQueue.findOneAndUpdate(query, { $set: update }, { new: true });
 }
 
 async function transitionQueueItemState(id, fromStates = [], update = {}, options = {}) {
@@ -288,6 +311,11 @@ async function transitionQueueItemState(id, fromStates = [], update = {}, option
   const query = { _id: id };
   if (normalizedStates.length > 0) {
     query.state = { $in: normalizedStates };
+  }
+  if (options.match && typeof options.match === "object") {
+    for (const [key, value] of Object.entries(options.match)) {
+      if (value !== undefined) query[key] = value;
+    }
   }
   return CxDialQueue.findOneAndUpdate(
     query,
@@ -323,7 +351,11 @@ async function listQueueItems(filters = {}) {
   if (Array.isArray(filters.states) && filters.states.length > 0) {
     query.state = { $in: filters.states };
   }
-  if (filters.queueFamily) query.queueFamily = filters.queueFamily;
+  if (filters.queueFamily) {
+    const families = normalizeQueueFamilies(filters.queueFamily);
+    if (families.length === 1) query.queueFamily = families[0];
+    if (families.length > 1) query.queueFamily = { $in: families };
+  }
   if (Array.isArray(filters.queueFamilies) && filters.queueFamilies.length > 0) {
     query.queueFamily = { $in: normalizeQueueFamilies(filters.queueFamilies) };
   }
@@ -371,7 +403,11 @@ async function countQueueItems(filters = {}) {
   if (Array.isArray(filters.states) && filters.states.length > 0) {
     query.state = { $in: filters.states };
   }
-  if (filters.queueFamily) query.queueFamily = filters.queueFamily;
+  if (filters.queueFamily) {
+    const families = normalizeQueueFamilies(filters.queueFamily);
+    if (families.length === 1) query.queueFamily = families[0];
+    if (families.length > 1) query.queueFamily = { $in: families };
+  }
   if (Array.isArray(filters.queueFamilies) && filters.queueFamilies.length > 0) {
     query.queueFamily = { $in: normalizeQueueFamilies(filters.queueFamilies) };
   }

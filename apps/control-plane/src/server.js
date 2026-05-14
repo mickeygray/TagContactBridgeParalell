@@ -7,6 +7,12 @@ const express = require("express");
 const cors = require("cors");
 const { getCorsOriginResolver, PORTS } = require("../../../packages/shared-config/src");
 const {
+  buildHealthAccessMiddleware,
+  buildPublicHealthPayload,
+  isDetailedHealthRequest,
+  safeSecretEquals,
+} = require("../../../packages/shared-utils/src");
+const {
   buildServiceHealth,
   buildTopologyHealth,
   redactContent,
@@ -47,6 +53,7 @@ const { createReadRingcentralRouter } = require("./routes/readRingcentral");
 const { createReadSocialRouter } = require("./routes/readSocial");
 const { createReadWorkspaceRouter } = require("./routes/readWorkspace");
 const { createRingCentralRouter } = require("./routes/ringcentral");
+const { createSalesTrainerRouter } = require("./routes/salesTrainer");
 const { createSendgridRouter } = require("./routes/sendgrid");
 const { createWorkflowsRouter } = require("./routes/workflows");
 const { createWorklistsRouter } = require("./routes/worklists");
@@ -241,7 +248,7 @@ function buildWebhookVerifier(config, runtime) {
         req.headers["x-service-secret"] ||
         "",
     ).trim();
-    if (provided && secrets.includes(provided)) {
+    if (secrets.some((secret) => safeSecretEquals(provided, secret))) {
       return next();
     }
     runtime.logger.warn("control-plane.webhook.rejected", {
@@ -307,26 +314,7 @@ function buildCallrailWebhookVerifier(config, runtime) {
   };
 }
 
-function buildHealthAccessMiddleware(config) {
-  const expectedToken = String(config.healthToken || "").trim();
-  if (!expectedToken) {
-    return (_req, _res, next) => next();
-  }
-
-  return (req, res, next) => {
-    const provided = String(
-      req.headers["x-health-token"] ||
-      req.headers["x-service-secret"] ||
-      "",
-    ).trim();
-    if (provided && provided === expectedToken) {
-      return next();
-    }
-    return res.status(401).json({ ok: false, error: "Health token required" });
-  };
-}
-
-function buildServiceProxy({ port, runtime, serviceName, config }) {
+function buildServiceProxy({ port, runtime, serviceName, config, injectServiceSecret = true }) {
   const baseUrl = `http://127.0.0.1:${port}`;
 
   return async (req, res, next) => {
@@ -345,7 +333,7 @@ function buildServiceProxy({ port, runtime, serviceName, config }) {
         }
       }
 
-      if (config.internalServiceSecret) {
+      if (injectServiceSecret && config.internalServiceSecret) {
         headers.set("x-service-secret", String(config.internalServiceSecret));
       }
 
@@ -424,6 +412,7 @@ function attachWebClientBuild(app, runtime) {
   app.get("/login", serveIndex);
   app.get(/^\/admin(?:\/.*)?$/, serveIndex);
   app.get(/^\/cx(?:\/.*)?$/, serveIndex);
+  app.get(/^\/trainer(?:\/.*)?$/, serveIndex);
 
   runtime.logger.info("control-plane.web_client_build.serving", {
     buildDir,
@@ -737,6 +726,13 @@ async function startServer() {
     serviceName: "ringcentral-cx",
     config,
   });
+  const ringcentralUserProxy = buildServiceProxy({
+    port: PORTS.ringcentralCx,
+    runtime,
+    serviceName: "ringcentral-cx",
+    config,
+    injectServiceSecret: false,
+  });
 
   const getRuntimeState = () => ({
     workers: {
@@ -760,7 +756,10 @@ async function startServer() {
   app.use(express.json({ limit: "1mb", verify: captureRawBody }));
   app.use(express.urlencoded({ extended: true, limit: "1mb", verify: captureRawBody }));
 
-  app.get("/health", requireHealthAccess, (_req, res) => {
+  app.get("/health", requireHealthAccess, (req, res) => {
+    if (!isDetailedHealthRequest(req)) {
+      return res.json(buildPublicHealthPayload(config, runtime.getMongoState()));
+    }
     res.json({
       ...buildServiceHealth(config, runtime.getMongoState()),
       ...getRuntimeState(),
@@ -775,7 +774,6 @@ async function startServer() {
         service: "control-plane",
         runtimeId: CLIENT_RUNTIME_ID,
         startedAt: CLIENT_RUNTIME_STARTED_AT.toISOString(),
-        pid: process.pid,
       },
     });
   });
@@ -891,7 +889,7 @@ async function startServer() {
   app.use("/api/ringcentral/reinitialize", auth.requireAdmin, ringcentralProxy);
   app.use("/api/ringcentral/subscription", auth.requireAdmin, ringcentralProxy);
   app.use("/api/ringcentral/presence", auth.requireAdmin, ringcentralProxy);
-  app.use("/api/agents", auth.requireAuth, ringcentralProxy);
+  app.use("/api/agents", auth.requireAuth, ringcentralUserProxy);
   app.all("/ringbridge/agent-state", auth.requireAdmin, ringcentralProxy);
   app.use("/api/ring/events", auth.requireAdmin, ringcentralProxy);
   app.all("/webhook/ex", ringcentralProxy);
@@ -944,11 +942,15 @@ async function startServer() {
   // login flow. See packages/shared-config recordingArchive.playback.
   app.use("/api/recordings", createRecordingPlaybackRouter());
   app.use("/api/ringcentral", createRingCentralRouter(auth));
+  app.use("/api/sales-trainer", createSalesTrainerRouter(auth, config));
   app.use("/api/sendgrid", createSendgridRouter(auth));
   app.use("/api/workflows", createWorkflowsRouter(auth));
   app.use("/api/worklists", createWorklistsRouter(auth));
 
-  app.get("/api/health/services", requireHealthAccess, (_req, res) => {
+  app.get("/api/health/services", requireHealthAccess, (req, res) => {
+    if (!isDetailedHealthRequest(req)) {
+      return res.json(buildPublicHealthPayload(config, runtime.getMongoState()));
+    }
     res.json(buildTopologyHealth(config));
   });
 

@@ -10,7 +10,6 @@ import {
   Phone,
   RefreshCw,
   Save,
-  Search,
   UserCheck,
 } from "lucide-react";
 import { Button } from "@/components/ui/Button";
@@ -38,7 +37,6 @@ import { SkeletonRow } from "@/components/ui/Skeleton";
 import { StatusPill, toneFromStatus } from "@/components/ui/StatusPill";
 import { toast } from "@/components/ui/Toaster";
 import {
-  flattenCxSearch,
   useCxAssignCaseToMe,
   useCxCallQueue,
   useCxCallQueueMulti,
@@ -58,7 +56,6 @@ import {
   useCxLogicsInvoice,
   useCxLogicsTask,
   useCxLogicsUpdateCase,
-  useCxSearch,
   useCxSetStatus,
   useCxSimulateCallAny,
   useCxText,
@@ -68,7 +65,6 @@ import { useClientDetail } from "@/lib/api/queries/clients";
 import type {
   ClientCaseCall,
   ClientCaseMessage,
-  ClientSearchMatch,
   CxCallQueueItem,
   CxLeadCandidate,
   CxLeadLookupMatch,
@@ -81,8 +77,6 @@ import { KNOWN_DOMAINS, useDomainStore } from "@/lib/domain/domainStore";
 import { useSession } from "@/lib/auth/useSession";
 import { formatRelative } from "@/lib/utils/format";
 import { cn } from "@/lib/utils/cn";
-
-type SearchScope = "all" | "prospects" | "clients";
 
 type ContactContext = {
   caseId?: string | null;
@@ -312,17 +306,6 @@ function contactFromCurrentCall(raw: Record<string, unknown> | null | undefined)
   };
 }
 
-function contactFromSearch(match: ClientSearchMatch): ContactContext {
-  return {
-    caseId: match.caseId,
-    name: match.name || null,
-    phone: match.phone || null,
-    email: match.email || null,
-    status: match.status || null,
-    source: match.domain || null,
-  };
-}
-
 type QueueFamilyKey = "fresh-day1" | "fresh-day2to10" | "aged" | "unassigned";
 
 type QueueFamilyDisplay = {
@@ -373,7 +356,20 @@ const QUEUE_LEGEND_FAMILIES: QueueFamilyKey[] = ["fresh-day1", "fresh-day2to10",
 function normalizeQueueFamily(raw: string | null | undefined): QueueFamilyKey | null {
   const value = String(raw || "").trim().toLowerCase();
   if (!value) return null;
-  if (value === "fresh-day1" || value === "day0" || value === "fresh" || value === "hot") {
+  if (
+    value === "fresh-day1"
+    || value === "day0"
+    || value === "day1"
+    || value === "fresh"
+    || value === "hot"
+    || value === "new"
+    || value === "green"
+    || value === "just_came_in"
+    || value === "second_contact"
+    || value === "third_contact"
+    || value.includes("second-contact")
+    || value.includes("third-contact")
+  ) {
     return "fresh-day1";
   }
   if (
@@ -381,10 +377,11 @@ function normalizeQueueFamily(raw: string | null | undefined): QueueFamilyKey | 
     || value === "fresh-day2to15"
     || value === "day2to10"
     || value === "day2to15"
+    || value === "day2_10"
     || value === "day2_15"
-    || value === "day1"
     || value === "day10"
     || value === "day15"
+    || value === "blue"
     || value.includes("day 2")
     || value.includes("day2")
     || value.includes("2-10")
@@ -392,7 +389,7 @@ function normalizeQueueFamily(raw: string | null | undefined): QueueFamilyKey | 
   ) {
     return "fresh-day2to10";
   }
-  if (value === "aged" || value.includes("aged") || value.includes("prospect")) {
+  if (value === "aged" || value === "red" || value.includes("aged") || value.includes("prospect")) {
     return "aged";
   }
   return null;
@@ -404,6 +401,7 @@ function inferQueueFamily(item: CxCallQueueItem): QueueFamilyKey {
   const merged = Object.keys(leadBody).length > 0 ? { ...snapshot, ...leadBody } : snapshot;
   const explicit =
     normalizeQueueFamily(item.queueFamily)
+    || normalizeQueueFamily(item.ageBucket)
     || normalizeQueueFamily(readString(merged, "queueFamily", "queueTier", "leadQueueFamily"))
     || normalizeQueueFamily(item.currentStage)
     || normalizeQueueFamily(item.nextActionType);
@@ -1051,41 +1049,6 @@ function getDomainBadgeStyle(domain: string) {
       label: key || "—",
       className: "border-border bg-muted text-muted-foreground hover:bg-muted/80",
     }
-  );
-}
-
-/**
- * Small badge rendered per search-result row telling the operator
- * which tier the match came from. Logics rows get the loudest tint
- * because they signal "not yet in Mongo — clicking will import it."
- */
-function SearchSourcePill({ source }: { source?: string }) {
-  if (!source) return null;
-  const style =
-    source === "caseProfile"
-      ? { label: "Case", cls: "border-primary/40 bg-primary/10 text-primary" }
-      : source === "masterProspect"
-        ? { label: "Prospect", cls: "border-sky-500/40 bg-sky-500/10 text-sky-700 dark:text-sky-300" }
-        : source === "leadCadence"
-          ? { label: "Cadence", cls: "border-amber-500/40 bg-amber-500/10 text-amber-700 dark:text-amber-300" }
-          : source === "logics"
-            ? { label: "Logics", cls: "border-muted-foreground/40 bg-muted text-muted-foreground" }
-            : null;
-  if (!style) return null;
-  return (
-    <span
-      className={cn(
-        "inline-flex shrink-0 items-center rounded-sm border px-1.5 text-[10px] font-semibold uppercase tracking-wider",
-        style.cls,
-      )}
-      title={
-        source === "logics"
-          ? "Match found in Logics — not yet saved to our database. Click to pull it in."
-          : `Match from ${style.label}`
-      }
-    >
-      {style.label}
-    </span>
   );
 }
 
@@ -2328,10 +2291,6 @@ export function CXWorkspace() {
   // flips this to true and toasts "no matches, click again to confirm".
   // The second click actually POSTs the new case.
   const [confirmCreateNew, setConfirmCreateNew] = React.useState(false);
-  const [searchText, setSearchText] = React.useState("");
-  const [searchScope, setSearchScope] = React.useState<SearchScope>("all");
-  const [searchDropdownOpen, setSearchDropdownOpen] = React.useState(false);
-  const searchRef = React.useRef<HTMLDivElement | null>(null);
 
   // Compose panel state (collapsible — default expanded)
   const [textOpen, setTextOpen] = React.useState(true);
@@ -2523,11 +2482,10 @@ export function CXWorkspace() {
   const workspace = useCxWorkspace(domain);
   const callQueue = useCxCallQueue(domain);
   const multiCallQueues = useCxCallQueueMulti(isAdminUser ? availableDomains : []);
-  const search = useCxSearch(domain, searchText, searchScope);
 
   // The resolved caseId drives everything in the "existing case" part of
   // the center column: it's whichever of the form caseId (operator typed
-  // / auto-populated) or the queue-/search-selected caseId is present.
+  // / auto-populated) or the queue-selected caseId is present.
   const parsedFormCaseId = form.caseId.trim() ? Number(form.caseId.trim()) : null;
   const formCaseIdValid =
     parsedFormCaseId != null && Number.isFinite(parsedFormCaseId) && parsedFormCaseId > 0;
@@ -2561,9 +2519,6 @@ export function CXWorkspace() {
     Boolean(rawCurrentCallSessionId) && rawCurrentCallSessionId === suppressedCallSessionId;
   const currentCall = currentCallIsSuppressed ? null : rawCurrentCall;
   const currentCallPhone = currentCall?.phone || "";
-
-  const textLibrary = React.useMemo(() => buildTextLibrary(domain), [domain]);
-  const emailLibrary = React.useMemo(() => buildEmailLibrary(domain), [domain]);
 
   // detail/selectedPhone/selectedEmail/templateContext + the auto-
   // hydrate effects all need clientDetail.data, which comes from a
@@ -2601,7 +2556,7 @@ export function CXWorkspace() {
       Boolean(servedQueueActionKey || servedQueueTicketId) &&
       normalizeComparablePhone(selected?.phone) === normalizedCurrentCallPhone;
     // Wipe state that could pin the lookup to a stale case:
-    //   • selected (queue/search/old-lookup snapshot)
+    //   • selected (queue/old-lookup snapshot)
     //   • form.caseId (auto-populated from prior match)
     //   • dirty flags (so the new match fully replaces non-typed fields)
     setSelected((current) => {
@@ -2647,17 +2602,6 @@ export function CXWorkspace() {
     servedQueueContact,
   ]);
 
-  // Close search dropdown on outside click.
-  React.useEffect(() => {
-    if (!searchDropdownOpen) return;
-    function onDocClick(evt: MouseEvent) {
-      if (!searchRef.current) return;
-      if (!searchRef.current.contains(evt.target as Node)) setSearchDropdownOpen(false);
-    }
-    document.addEventListener("mousedown", onDocClick);
-    return () => document.removeEventListener("mousedown", onDocClick);
-  }, [searchDropdownOpen]);
-
   // (Old single-domain Logics-match-on-call effect was removed — it
   // hardcoded the active CX switcher domain, hit Logics for that
   // tenant only, and wrote whatever caseId it found into `selected`.
@@ -2670,8 +2614,8 @@ export function CXWorkspace() {
   //   1. case id explicitly typed into the Case ID input (operator
   //      pasted a specific id — most specific intent)
   //   2. live inbound call phone (whoever is on the line RIGHT NOW —
-  //      always wins over a stale selection from the queue/search)
-  //   3. case id from a queue/search selection (fallback — only used
+  //      always wins over a stale queue selection)
+  //   3. case id from a queue selection (fallback — only used
   //      when there's no active call and no typed caseId)
   //   4. selected contact's phone (last resort)
   //
@@ -2784,6 +2728,13 @@ export function CXWorkspace() {
   // the operator happens to be filtering search by.
   const caseDomain =
     (lookupResult as { domain?: string } | undefined)?.domain || domain;
+  const agentContactShell =
+    data?.agent.exShells?.find((shell) => String(shell.company || "").toUpperCase() === caseDomain) ||
+    data?.agent.activeExShell ||
+    data?.agent.requestedExShell ||
+    null;
+  const textLibrary = React.useMemo(() => buildTextLibrary(caseDomain), [caseDomain]);
+  const emailLibrary = React.useMemo(() => buildEmailLibrary(caseDomain), [caseDomain]);
 
   // ── Case-scoped mutations (bound to the case's resolved domain) ──
   const assignCaseToMe = useCxAssignCaseToMe(caseDomain);
@@ -2798,7 +2749,7 @@ export function CXWorkspace() {
   const templateContext = React.useMemo(
     () =>
       buildTemplateContext(
-        domain,
+        caseDomain,
         data?.agent.name || data?.agent.email || "Agent",
         selected
           ? {
@@ -2807,14 +2758,14 @@ export function CXWorkspace() {
               phone: selectedPhone || selected.phone,
             }
           : null,
-        data?.agent.activeExShell?.primaryPhone || "",
+        agentContactShell?.primaryPhone || "",
       ),
     [
-      data?.agent.activeExShell?.primaryPhone,
+      agentContactShell?.primaryPhone,
       data?.agent.email,
       data?.agent.name,
       detail?.name,
-      domain,
+      caseDomain,
       selected,
       selectedPhone,
     ],
@@ -2829,12 +2780,12 @@ export function CXWorkspace() {
   }, [selectedEmail]);
 
   // ── Operator/case-scoped mutations ──
-  // Text routes through the resolved case tenant so the message can be
-  // recorded on the right CaseProfile while still using the logged-in
-  // agent's assigned EX shell. Email/createCase stay on the active tenant.
+  // Text/email route through the resolved case tenant so comms are recorded
+  // and branded against the loaded case, independent of the active switcher.
+  // New-case create stays on the active tenant.
   const setCxStatus = useCxSetStatus(domain);
   const text = useCxText(caseDomain);
-  const email = useCxEmail(domain);
+  const email = useCxEmail(caseDomain);
   const simulateCxCallAny = useCxSimulateCallAny();
   // dialAny accepts { domain, ...body } so a queue pick on a different tenant
   // routes to the correct /api/commands/cx/:domain/dial without waiting for
@@ -3202,22 +3153,6 @@ export function CXWorkspace() {
         },
       });
     }
-  }
-
-  function handleSelectFromSearch(result: ClientSearchMatch) {
-    if (servedQueueTicketId || servedQueueActionKey) {
-      const restored = restoreServedQueueLead();
-      toast.warning("Finish the current lead first", {
-        description: restored
-          ? "I brought the unfinished lead back into the center panel."
-          : "Choose a Logics action or Call back before opening a different case.",
-      });
-      return;
-    }
-    clearServedQueueSelection();
-    setSelected(contactFromSearch(result));
-    setSearchDropdownOpen(false);
-    setSearchText("");
   }
 
   // Operator picked a specific candidate. Pin it so subsequent
@@ -3766,8 +3701,6 @@ export function CXWorkspace() {
     const state = callQueue.isLoading ? "loading" : callQueue.error ? "err" : count;
     return `active ${domain} • ${domain}:${state}`;
   }, [isAdminUser, availableDomains, multiCallQueues, domain, callQueue.data, callQueue.isLoading, callQueue.error, data?.callQueue]);
-  const searchResults = flattenCxSearch(search.data);
-
   const hasAnyDirty = Object.values(dirty).some(Boolean);
   const sourceBadge = sourceBadgeFor(lookupSource);
   const authoritativeLogicsCaseIdNumber: number | null =
@@ -3830,9 +3763,7 @@ export function CXWorkspace() {
   }
 
   const agentTextShell =
-    data.agent.exShells?.find((shell) => String(shell.company || "").toUpperCase() === caseDomain) ||
-    data.agent.activeExShell ||
-    data.agent.requestedExShell ||
+    agentContactShell ||
     null;
   const agentShellPhone = agentTextShell?.primaryPhone || "";
   const cxRouting = asRecord(data.ex?.cxRouting);
@@ -3897,9 +3828,6 @@ export function CXWorkspace() {
     .filter((row) => row.family === "cx")
     .slice(0, 6);
 
-  const showSearchDropdown =
-    searchDropdownOpen && searchText.trim().length >= 2;
-
   return (
     <>
       <BreakResumePrompt
@@ -3916,86 +3844,21 @@ export function CXWorkspace() {
         }}
       />
       <div className="flex min-h-[calc(100vh-6rem)] flex-col gap-4">
-      {/* ─── TOP BAR: sticky search ─────────────────────────────────────── */}
-      <div
-        ref={searchRef}
-        className="sticky top-0 z-30 -mx-4 border-b border-border bg-background/95 px-4 py-3 backdrop-blur supports-[backdrop-filter]:bg-background/80"
-      >
+      {/* ─── TOP BAR: sticky routing controls ───────────────────────────── */}
+      <div className="sticky top-0 z-30 -mx-4 border-b border-border bg-background/95 px-4 py-3 backdrop-blur supports-[backdrop-filter]:bg-background/80">
         <div className="flex flex-col gap-2 md:flex-row md:items-center">
           <CxDomainSwitcher
             domain={domain}
             availableDomains={availableDomains}
             onChange={(next) => {
-              // The switcher only drives search + queue + new-case
+              // The switcher only drives queue + new-case
               // creation. It does NOT unload the active case — a
               // resolved case is bound to its own tenant via the
               // lookup result, so flipping the switcher to a different
-              // tenant just changes what search is filtering, not
-              // what's loaded in the center panel.
+              // tenant does not change the loaded case's comms/actions.
               setDomain(next);
-              setSearchText("");
-              setSearchDropdownOpen(false);
             }}
           />
-          <div className="relative flex-1">
-            <Input
-              value={searchText}
-              onChange={(e) => {
-                setSearchText(e.target.value);
-                setSearchDropdownOpen(true);
-              }}
-              onFocus={() => setSearchDropdownOpen(true)}
-              placeholder="Search cases by name, email, phone, or case id…"
-              leadingIcon={<Search />}
-            />
-            {showSearchDropdown ? (
-              <div className="absolute left-0 right-0 top-full z-40 mt-1 max-h-80 overflow-auto rounded-md border border-border bg-popover p-2 shadow-lg">
-                {search.isFetching ? <SkeletonRow count={2} /> : null}
-                {!search.isFetching && searchResults.length === 0 ? (
-                  <div className="rounded-md border border-dashed border-border p-2 text-xs text-muted-foreground">
-                    No matches.
-                  </div>
-                ) : null}
-                {searchResults.length > 0 ? (
-                  <div className="space-y-1">
-                    {searchResults.slice(0, 12).map((result) => (
-                      <button
-                        key={`${result.caseId}-${result.email || result.phone || result.name || ""}`}
-                        type="button"
-                        onClick={() => handleSelectFromSearch(result)}
-                        className="w-full rounded-md border border-border bg-card p-2 text-left hover:bg-muted/40"
-                      >
-                        <div className="flex items-center justify-between gap-2">
-                          <div className="min-w-0 flex-1 text-sm font-medium text-foreground">
-                            {result.name || `Case ${result.caseId}`}
-                          </div>
-                          <SearchSourcePill source={result.source} />
-                        </div>
-                        <div className="text-[11px] text-muted-foreground">
-                          {[result.phone, result.email, result.caseId ? `Case ${result.caseId}` : ""]
-                            .filter(Boolean)
-                            .join(" · ")}
-                        </div>
-                      </button>
-                    ))}
-                  </div>
-                ) : null}
-              </div>
-            ) : null}
-          </div>
-          <div className="flex gap-1">
-            {(["all", "prospects", "clients"] as SearchScope[]).map((value) => (
-              <Button
-                key={value}
-                type="button"
-                variant={searchScope === value ? "primary" : "secondary"}
-                size="sm"
-                onClick={() => setSearchScope(value)}
-              >
-                {value === "all" ? "All" : value === "prospects" ? "Prospects" : "Clients"}
-              </Button>
-            ))}
-          </div>
         </div>
         <div className="mt-2 flex flex-col gap-2 rounded-lg border border-border/70 bg-card/60 px-3 py-2 md:flex-row md:items-center md:justify-between">
           <div className="min-w-0">
@@ -4879,7 +4742,7 @@ export function CXWorkspace() {
                     onClick={() =>
                       run("Email", () =>
                         email.mutateAsync({
-                          caseId: selected?.caseId,
+                          caseId: textCaseId || undefined,
                           email: emailTo,
                           subject: emailTemplateKey ? "" : emailSubject,
                           body: emailTemplateKey ? "" : emailBody,

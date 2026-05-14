@@ -76,9 +76,9 @@ function Reload-Nginx {
     }
 
     Write-Step "Testing nginx config..."
-    & $NginxExe -t
+    & $NginxExe -p "C:\tools\nginx-1.29.6" -c "conf\nginx.conf" -t
     Write-Step "Reloading nginx..."
-    & $NginxExe -s reload
+    & $NginxExe -p "C:\tools\nginx-1.29.6" -c "conf\nginx.conf" -s reload
 }
 
 function Ensure-ParallelNgrokTunnel {

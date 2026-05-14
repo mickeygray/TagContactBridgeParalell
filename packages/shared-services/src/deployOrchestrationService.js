@@ -2,7 +2,7 @@
 
 const fs = require("fs");
 const path = require("path");
-const { execSync } = require("child_process");
+const { execFileSync } = require("child_process");
 const {
   getGithubConfig,
   resolveTargetAuth,
@@ -34,7 +34,7 @@ function sanitizeDeployLog(line) {
 }
 
 function runGit(repoPath, args) {
-  return execSync(`git ${args}`, {
+  return execFileSync("git", args, {
     cwd: repoPath,
     encoding: "utf8",
     stdio: ["ignore", "pipe", "ignore"],
@@ -55,17 +55,17 @@ function readLocalGitState(repoPath) {
   }
 
   try {
-    const branch = runGit(repoPath, "rev-parse --abbrev-ref HEAD");
+    const branch = runGit(repoPath, ["rev-parse", "--abbrev-ref", "HEAD"]);
     let upstream = null;
     let ahead = null;
     let behind = null;
     try {
-      upstream = runGit(repoPath, "rev-parse --abbrev-ref --symbolic-full-name @{u}");
-      ahead = Number(runGit(repoPath, "rev-list --count @{u}..HEAD")) || 0;
-      behind = Number(runGit(repoPath, "rev-list --count HEAD..@{u}")) || 0;
+      upstream = runGit(repoPath, ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"]);
+      ahead = Number(runGit(repoPath, ["rev-list", "--count", "@{u}..HEAD"])) || 0;
+      behind = Number(runGit(repoPath, ["rev-list", "--count", "HEAD..@{u}"])) || 0;
     } catch {}
 
-    const dirtyLines = runGit(repoPath, "status --short")
+    const dirtyLines = runGit(repoPath, ["status", "--short"])
       .split("\n")
       .map((line) => line.trim())
       .filter(Boolean);
@@ -80,9 +80,9 @@ function readLocalGitState(repoPath) {
       behind,
       dirtyCount: dirtyLines.length,
       dirtyPreview: dirtyLines.slice(0, 8),
-      headSha: runGit(repoPath, "rev-parse --short HEAD"),
-      headMessage: runGit(repoPath, "log -1 --format=%s"),
-      headDate: runGit(repoPath, "log -1 --format=%ci"),
+      headSha: runGit(repoPath, ["rev-parse", "--short", "HEAD"]),
+      headMessage: runGit(repoPath, ["log", "-1", "--format=%s"]),
+      headDate: runGit(repoPath, ["log", "-1", "--format=%ci"]),
     };
   } catch (error) {
     return {

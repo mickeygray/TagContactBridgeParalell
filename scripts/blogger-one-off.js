@@ -24,13 +24,15 @@ require("dotenv").config({
   path: path.resolve(__dirname, "..", ".env"),
 });
 
-const sharp = require(path.resolve(
-  "C:/Users/Admin/Code/WynnTax/client/node_modules/sharp",
-));
+const {
+  loadSharp,
+  npmCommand,
+  TAG_REPO,
+  TCB_DEPLOY_DIR,
+  WYNN_REPO,
+} = require("./blogger-paths");
 
-const WYNN_REPO = "C:/Users/Admin/Code/WynnTax";
-const TAG_REPO = "C:/Users/Admin/Code/TaxAdvocateGroup";
-const DEPLOY_SCRIPT = "C:/Users/Admin/Code/TagContactBridge/scripts/deploy.js";
+const sharp = loadSharp();
 
 const BLOG_ID = "irs-collection-notice-sequence-after-tax-day";
 const TITLE =
@@ -271,17 +273,12 @@ function buildBrand(repoDir) {
   // to git). So the build step has to happen here, before the deploy
   // commits. Without this, EC2 pulls the new blogData.js but serves
   // the stale client/build/ from the last manual rebuild.
-  return execFileSync(
-    "npm",
-    ["run", "build"],
-    {
-      cwd: path.join(repoDir, "client"),
-      stdio: "pipe",
-      encoding: "utf8",
-      maxBuffer: 500 * 1024 * 1024,
-      shell: true,
-    },
-  );
+  return execFileSync(npmCommand(), ["run", "build"], {
+    cwd: path.join(repoDir, "client"),
+    stdio: "pipe",
+    encoding: "utf8",
+    maxBuffer: 500 * 1024 * 1024,
+  });
 }
 
 function deployBrand(brandKey, commitMsg) {
@@ -292,7 +289,7 @@ function deployBrand(brandKey, commitMsg) {
     "node",
     ["scripts/deploy.js", "deploy", brandKey, commitMsg, "--pull"],
     {
-      cwd: "C:/Users/Admin/Code/TagContactBridge",
+      cwd: TCB_DEPLOY_DIR,
       stdio: "pipe",
       encoding: "utf8",
       maxBuffer: 200 * 1024 * 1024,

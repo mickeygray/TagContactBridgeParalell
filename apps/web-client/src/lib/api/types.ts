@@ -902,6 +902,7 @@ export interface CxCallQueueItem {
   cxAction?: Record<string, unknown> | null;
   score?: number | null;
   queueFamily?: string | null;
+  ageBucket?: string | null;
   queueDayIndex?: number | null;
   progressiveStageKey?: string | null;
   progressiveStageIndex?: number | null;
@@ -1555,7 +1556,56 @@ export interface CreateAccountInput {
   wynnLogicsRoles?: string | null;
   logicsAuth?: AccountLogicsAuth | null;
   cxQueuePolicy?: CxQueuePolicy | null;
+  metadata?: Record<string, unknown> | null;
   status?: AccountStatus;
 }
 
 export type UpdateAccountInput = Partial<CreateAccountInput>;
+
+export interface AccountIdentityResolveInput {
+  email?: string | null;
+  username?: string | null;
+  ringcxUsername?: string | null;
+  cxUsername?: string | null;
+  name?: string | null;
+  company?: string | null;
+  extensionId?: string | null;
+  extensionNumber?: string | null;
+  cxAgentId?: string | null;
+}
+
+export interface AccountIdentityResolveResult {
+  ok: true;
+  checkedAt: string;
+  existing?: {
+    id?: string;
+    email?: string;
+    name?: string;
+    status?: AccountStatus;
+    extensionId?: string | null;
+    cxAgentId?: string | null;
+  } | null;
+  matches: {
+    ex: {
+      ok: boolean;
+      source?: string;
+      match?: Record<string, unknown> | null;
+      error?: string | null;
+    };
+    cx: {
+      ok: boolean;
+      source?: string;
+      match?: Record<string, unknown> | null;
+      error?: string | null;
+    };
+    logics?: {
+      found?: boolean;
+    };
+  };
+  suggestion?: Partial<CreateAccountInput> | null;
+  oauth?: {
+    configured?: boolean;
+    config?: Record<string, unknown> | null;
+    session?: Record<string, unknown> | null;
+  } | null;
+}

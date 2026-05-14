@@ -9,6 +9,7 @@ const {
   processNextControlPlaneEvent,
 } = require("../../../../packages/shared-services/src");
 const { toErrorResponse } = require("../../../../packages/shared-errors/src");
+const { safeSecretEquals } = require("../../../../packages/shared-utils/src");
 
 function createEventsRouter(auth) {
   const router = express.Router();
@@ -20,7 +21,7 @@ function createEventsRouter(auth) {
       req.headers["x-internal-secret"] ||
       "",
     ).trim();
-    return Boolean(internalSecret && provided && provided === internalSecret);
+    return safeSecretEquals(provided, internalSecret);
   }
 
   router.get("/", auth.requireAuth, auth.requireAdmin, async (req, res) => {

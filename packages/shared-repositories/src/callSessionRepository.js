@@ -90,13 +90,13 @@ async function markEnded(sessionId, { reason = null } = {}) {
   // Idempotent: works even if already ended (returns existing doc)
   const existing = await CallSession.findById(sessionId).lean();
   if (!existing) return null;
-  if (["ended", "dispositioned"].includes(existing.state)) return existing;
+  if (["ended", "dispositioned", "failed"].includes(existing.state)) return existing;
   const endedAt = new Date();
   const durationMs = existing.connectedAt
     ? endedAt.getTime() - new Date(existing.connectedAt).getTime()
     : null;
-  return CallSession.findOneAndUpdate(
-    { _id: sessionId },
+  const updated = await CallSession.findOneAndUpdate(
+    { _id: sessionId, state: { $in: ["placing", "ringing", "connected"] } },
     {
       $set: {
         state: "ended",
@@ -107,11 +107,12 @@ async function markEnded(sessionId, { reason = null } = {}) {
     },
     { new: true, lean: true },
   );
+  return updated || CallSession.findById(sessionId).lean();
 }
 
 async function markFailed(sessionId, { failureReason, placementError = null } = {}) {
-  return CallSession.findOneAndUpdate(
-    { _id: sessionId },
+  const updated = await CallSession.findOneAndUpdate(
+    { _id: sessionId, state: { $in: ["placing", "ringing", "connected"] } },
     {
       $set: {
         state: "failed",
@@ -122,6 +123,7 @@ async function markFailed(sessionId, { failureReason, placementError = null } = 
     },
     { new: true, lean: true },
   );
+  return updated || CallSession.findById(sessionId).lean();
 }
 
 async function markDispositioned(sessionId, {
@@ -130,8 +132,32 @@ async function markDispositioned(sessionId, {
   dispositionPayload,
   dispositionedBy,
 }) {
-  return CallSession.findOneAndUpdate(
-    { _id: sessionId, state: { $in: ["ended", "connected"] } },
+  const now = new Date();
+  const connected = await CallSession.findById(sessionId).lean();
+  if (!connected) return null;
+  if (connected.state === "dispositioned") return connected;
+  if (!["ended", "connected"].includes(connected.state)) return connected;
+
+  if (connected.state === "connected") {
+    const endedAt = connected.endedAt || now;
+    const durationMs = connected.connectedAt
+      ? endedAt.getTime() - new Date(connected.connectedAt).getTime()
+      : null;
+    await CallSession.findOneAndUpdate(
+      { _id: sessionId, state: "connected" },
+      {
+        $set: {
+          state: "ended",
+          endedAt,
+          durationMs,
+        },
+      },
+      { new: true, lean: true },
+    );
+  }
+
+  const updated = await CallSession.findOneAndUpdate(
+    { _id: sessionId, state: "ended" },
     {
       $set: {
         state: "dispositioned",
@@ -139,12 +165,12 @@ async function markDispositioned(sessionId, {
         rcxDispositionCode,
         dispositionPayload,
         dispositionedBy,
-        dispositionedAt: new Date(),
-        ...(this.endedAt ? {} : { endedAt: new Date() }),
+        dispositionedAt: now,
       },
     },
     { new: true, lean: true },
   );
+  return updated || CallSession.findById(sessionId).lean();
 }
 
 async function recordRcxApiError(sessionId, { op, message }) {

@@ -4,20 +4,26 @@
 #
 # Installs the Parallel app as per-process NSSM-managed Windows services.
 #
-#   1. ParallelControlPlane    - 5001 control-plane / built web edge
-#   2. ParallelInboundGateway  - 4001 public intake service
-#   3. ParallelOutboundGateway - 4002 cadence + outbound worker
-#   4. ParallelRingCentralCx   - 6101 CX / agent-state worker
-#   5. ParallelRestartHelper   - manual restart helper for the Parallel stack
-#   6. ParallelBlogger         - long-running blogger daemon
+#   1. ParallelNginx           - reverse proxy on :80 / :81 (the edge in front
+#                                of ngrok). MUST run with `-g "daemon off;"`
+#                                so NSSM can supervise the master process.
+#   2. ParallelControlPlane    - 5001 control-plane / built web edge
+#   3. ParallelInboundGateway  - 4001 public intake service
+#   4. ParallelOutboundGateway - 4002 cadence + outbound worker
+#   5. ParallelRingCentralCx   - 6101 CX / agent-state worker
+#   6. ParallelRestartHelper   - manual restart helper for the Parallel stack
+#   7. ParallelBlogger         - long-running blogger daemon
 #
 # The old `npm run dev` / concurrently wrapper is intentionally not used here.
 # If one child dies, NSSM should restart that child directly instead of only
 # seeing a wrapper process.
 #
-# nginx is not managed here; it runs as its own Windows service / startup
-# process. The web client is served from apps\web-client\build by the
-# control-plane, so there is no separate Vite service in this install script.
+# nginx was historically launched in-session and silently died whenever a
+# sibling process (e.g. one of the NSSM restart paths) touched the box —
+# leaving the tunnel up but returning 502 from upstream. Adding it here so
+# the same auto-restart safety net applies. The web client is served from
+# apps\web-client\build by the control-plane, so there is no separate Vite
+# service in this install script.
 #
 # Run from an elevated PowerShell:
 #   Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
@@ -44,6 +50,8 @@ $Repo      = "C:\Users\Admin\Code\TagContactBridgeParallel"
 $LogsDir   = "C:\tools\logs"
 $NodeExe   = (Get-Command node).Source
 $PowerShellExe = (Get-Command powershell).Source
+$NginxRoot = "C:\tools\nginx-1.29.6"
+$NginxExe  = Join-Path $NginxRoot "nginx.exe"
 # LocalSystem runs the service without an interactive password step.
 # It has full local-filesystem access (so it can read this repo at
 # C:\Users\Admin\... and write logs to C:\tools\logs\), and the
@@ -62,6 +70,20 @@ $Services = @()
 
 if (-not $OnlyBlogger) {
     $Services += @(
+        @{
+            Name        = "ParallelNginx"
+            Display     = "Parallel - nginx reverse proxy (80/81)"
+            Application = $NginxExe
+            # `-p` sets the prefix so relative paths in the config resolve
+            # against C:\tools\nginx-1.29.6\, not the AppDirectory.
+            # `-g "daemon off;"` keeps the master process in the foreground
+            # so NSSM can supervise it — without this nginx forks and
+            # detaches, NSSM sees the parent exit, and it'd thrash
+            # restart-restart-restart.
+            Arguments   = "-p `"$NginxRoot`" -c conf\nginx.conf -g `"daemon off;`""
+            AppDirectory = $NginxRoot
+            Description = "Reverse proxy on :80/:81. Routes ngrok-terminated traffic to control-plane (5001) and the various Parallel workers."
+        },
         @{
             Name        = "ParallelControlPlane"
             Display     = "Parallel - Control Plane (5001)"
@@ -141,7 +163,8 @@ function Install-NssmService($svc) {
 
     Write-Host "  Installing $name..."
     & $Nssm install $name $svc.Application $svc.Arguments | Out-Null
-    & $Nssm set $name AppDirectory $Repo | Out-Null
+    $appDir = if ($svc.ContainsKey("AppDirectory")) { $svc.AppDirectory } else { $Repo }
+    & $Nssm set $name AppDirectory $appDir | Out-Null
     & $Nssm set $name Description $svc.Description | Out-Null
     & $Nssm set $name DisplayName $svc.Display | Out-Null
     if ($name -in @("ParallelBlogger", "ParallelRestartHelper")) {
@@ -149,6 +172,8 @@ function Install-NssmService($svc) {
     } else {
         & $Nssm set $name Start SERVICE_AUTO_START | Out-Null
     }
+    # nginx doesn't read NODE_ENV; the env var is harmless for it but the
+    # other Node services rely on it. Set it everywhere for consistency.
     & $Nssm set $name AppEnvironmentExtra "NODE_ENV=production" | Out-Null
 
     $base = $name.ToLower()

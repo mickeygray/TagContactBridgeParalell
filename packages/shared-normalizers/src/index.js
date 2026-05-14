@@ -17,8 +17,25 @@ function normalizeCompanyKey(value, fallback = "WYNN") {
   return key || fallback;
 }
 
+const {
+  deriveDayOneAgeBucket,
+  deriveUcqAgeBucket,
+  deriveUcqPartition,
+  normalizeCxQueuePolicyTier,
+  normalizeLeadQueueFamily,
+  normalizeLeadQueueFamilyList,
+  normalizeUcqAgeBucket,
+} = require("./cxLeadServing");
+
 module.exports = {
+  deriveDayOneAgeBucket,
+  deriveUcqAgeBucket,
+  deriveUcqPartition,
   normalizeCompanyKey,
+  normalizeCxQueuePolicyTier,
   normalizeEmail,
+  normalizeLeadQueueFamily,
+  normalizeLeadQueueFamilyList,
   normalizePhone,
+  normalizeUcqAgeBucket,
 };

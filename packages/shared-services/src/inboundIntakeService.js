@@ -2,6 +2,7 @@
 
 const crypto = require("crypto");
 const { createEvent } = require("../../event-core/src");
+const { safeSecretEquals } = require("../../shared-utils/src");
 const {
   createLogicsClient,
   createNeverBounceClient,
@@ -1122,7 +1123,7 @@ function validateLeadWebhook(req) {
       "",
   ).trim();
 
-  return Boolean(provided) && provided === configured;
+  return safeSecretEquals(provided, configured);
 }
 
 function buildLogicsCreatePayload(normalized) {

@@ -117,21 +117,25 @@ async function resolveRcExtensionByEmail(rc, email) {
   ) || null;
 }
 
-async function findRingcxAgent(client, username) {
+async function findRingcxAgent(client, { username, rcUserId, agentGroupId: explicitAgentGroupId } = {}) {
   const target = String(username || "").trim().toLowerCase();
+  const targetRcUserId = rcUserId == null ? null : String(rcUserId).trim();
   const groups = await client.listAgentGroups();
   for (const group of groups || []) {
     const agentGroupId = group.agentGroupId || group.id;
     if (!agentGroupId) continue;
+    if (explicitAgentGroupId && String(agentGroupId) !== String(explicitAgentGroupId)) continue;
     let agents = [];
     try {
       agents = await client.listAgents(agentGroupId);
     } catch {
       continue;
     }
-    const hit = (agents || []).find((agent) =>
-      String(agent.username || agent.email || "").trim().toLowerCase() === target
-    );
+    const hit = (agents || []).find((agent) => {
+      const cxUsername = String(agent.username || agent.email || "").trim().toLowerCase();
+      const cxRcUserId = agent.rcUserId == null ? null : String(agent.rcUserId).trim();
+      return (target && cxUsername === target) || (targetRcUserId && cxRcUserId === targetRcUserId);
+    });
     if (!hit) continue;
     let full = hit;
     try {
@@ -207,6 +211,7 @@ async function main() {
   const loginDestFormat = readFlag(argv, "--login-dest-format") || "direct";
   const explicitDefaultLoginDest = readFlag(argv, "--default-login-dest");
   const explicitCallerId = readFlag(argv, "--caller-id");
+  const explicitAgentGroupId = readFlag(argv, "--agent-group-id");
   const mainNumber = readFlag(argv, "--main-number") || process.env.RING_CENTRAL_MAIN_NUMBER;
   const ringDuration = Number(readFlag(argv, "--ring-duration") || 15);
 
@@ -249,10 +254,14 @@ async function main() {
   logKv("auth rc user", who.rcUser?.email);
   logKv("account id", who.accountId);
 
-  let agentLookup = await findRingcxAgent(client, agentEmail);
+  let agentLookup = await findRingcxAgent(client, {
+    username: agentEmail,
+    rcUserId: rcExtension?.id,
+    agentGroupId: explicitAgentGroupId,
+  });
   if (!agentLookup && createAgent) {
     const groups = await client.listAgentGroups();
-    const agentGroupId = readFlag(argv, "--agent-group-id")
+    const agentGroupId = explicitAgentGroupId
       || process.env.RINGCX_VOICE_DEFAULT_AGENT_GROUP_ID
       || groups?.[0]?.agentGroupId
       || groups?.[0]?.id
@@ -314,6 +323,7 @@ async function main() {
   }
 
   const destination = normalizeDigits(to);
+  const manualCallUsername = agentLookup.agent.username || agentLookup.agent.email || agentEmail;
   if (!destination) {
     logHeader("No call placed");
     console.log("  Provide --to <phone> when you want to fire the live manual CX call.");
@@ -321,7 +331,7 @@ async function main() {
   }
 
   logHeader("Manual CX call");
-  logKv("username", agentEmail);
+  logKv("username", manualCallUsername);
   logKv("destination", toE164(destination));
   logKv("callerId", callerId ? toE164(callerId) : null);
   logKv("ringDuration", ringDuration);
@@ -331,7 +341,7 @@ async function main() {
   }
 
   const response = await client.placeManualCall({
-    agentEmail,
+    agentEmail: manualCallUsername,
     destination,
     callerId: callerId || undefined,
     ringDuration,

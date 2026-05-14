@@ -10,6 +10,9 @@ const {
   userAccountRepository,
 } = require("../../shared-repositories/src");
 const {
+  deriveUcqAgeBucket,
+} = require("../../shared-normalizers/src");
+const {
   recordWorkflowStage,
 } = require("./workflowStateService");
 const {
@@ -1164,19 +1167,16 @@ function resolveDialExecutionMode(options = {}, dispatchIntent = {}) {
 }
 
 function resolveUcqAgeBucket(queueItem = null, dispatchIntent = {}) {
-  const actionKey = String(dispatchIntent.actionKey || queueItem?.metadata?.actionKey || "").trim().toLowerCase();
-  if (actionKey === "cx-day0-1") return "just_came_in";
-  if (actionKey === "cx-day0-2") return "second_contact";
-  if (actionKey === "cx-day0-3") return "third_contact";
-
-  const queueFamily = normalizeQueueFamily(
-    dispatchIntent.queueFamily
-      || queueItem?.queueFamily
-      || queueItem?.metadata?.queueFamily,
-  );
-  if (queueFamily === "fresh-day1") return "just_came_in";
-  if (queueFamily === "aged") return "aged";
-  return "day2_10";
+  const base = queueItem && typeof queueItem === "object" ? queueItem : {};
+  return deriveUcqAgeBucket({
+    ...base,
+    actionKey: dispatchIntent.actionKey || base?.metadata?.actionKey || null,
+    queueFamily: dispatchIntent.queueFamily || base.queueFamily || base?.metadata?.queueFamily || null,
+    metadata: {
+      ...(base.metadata && typeof base.metadata === "object" ? base.metadata : {}),
+      ...(dispatchIntent && typeof dispatchIntent === "object" ? dispatchIntent : {}),
+    },
+  });
 }
 
 function buildUcqQueueItemPayload({

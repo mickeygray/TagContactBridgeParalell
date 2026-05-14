@@ -1,6 +1,7 @@
 import type { ComponentType } from "react";
 import {
   BarChart3,
+  GraduationCap,
   Headset,
   Inbox,
   ListChecks,
@@ -21,6 +22,7 @@ export type WorkspaceKey =
   | "cleaning"
   | "users"
   | "deploy"
+  | "trainer"
   | "cx";
 
 export interface WorkspaceDef {
@@ -98,6 +100,14 @@ export const adminWorkspaces: WorkspaceDef[] = [
     label: "Users & Agents",
     description: "Create users, pair to RingCentral, invite via OTP.",
     icon: UserCog,
+    audience: "admin",
+  },
+  {
+    key: "trainer",
+    path: "/trainer",
+    label: "Sales Trainer",
+    description: "Roleplay calls, voice persona, live coaching.",
+    icon: GraduationCap,
     audience: "admin",
   },
   {

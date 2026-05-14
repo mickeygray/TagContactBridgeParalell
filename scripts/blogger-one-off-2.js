@@ -18,12 +18,15 @@ require("dotenv").config({
   path: path.resolve(__dirname, "..", ".env"),
 });
 
-const sharp = require(path.resolve(
-  "C:/Users/Admin/Code/WynnTax/client/node_modules/sharp",
-));
+const {
+  loadSharp,
+  npmCommand,
+  TAG_REPO,
+  TCB_DEPLOY_DIR,
+  WYNN_REPO,
+} = require("./blogger-paths");
 
-const WYNN_REPO = "C:/Users/Admin/Code/WynnTax";
-const TAG_REPO = "C:/Users/Admin/Code/TaxAdvocateGroup";
+const sharp = loadSharp();
 
 const BLOG_ID = "irs-tax-debt-help-online-tool-launched-april-2026";
 const TITLE =
@@ -211,12 +214,11 @@ async function renderPng(svg, outPath) {
 }
 
 function buildBrand(repoDir) {
-  return execFileSync("npm", ["run", "build"], {
+  return execFileSync(npmCommand(), ["run", "build"], {
     cwd: path.join(repoDir, "client"),
     stdio: "pipe",
     encoding: "utf8",
     maxBuffer: 500 * 1024 * 1024,
-    shell: true,
   });
 }
 
@@ -225,7 +227,7 @@ function deployBrand(brandKey, commitMsg) {
     "node",
     ["scripts/deploy.js", "deploy", brandKey, commitMsg, "--pull"],
     {
-      cwd: "C:/Users/Admin/Code/TagContactBridge",
+      cwd: TCB_DEPLOY_DIR,
       stdio: "pipe",
       encoding: "utf8",
       maxBuffer: 200 * 1024 * 1024,

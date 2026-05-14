@@ -1,8 +1,11 @@
 "use strict";
 
 const fs = require("fs");
+const os = require("os");
 const path = require("path");
 const { resolveExportStatus } = require("../packages/shared-config/src/statusMap");
+
+const EXPORT_DIR = process.env.LOGICS_EXPORT_DIR || path.join(os.homedir(), "Downloads");
 
 function parseCsvLine(line) {
   const values = [];
@@ -85,11 +88,11 @@ function main() {
   const inputs = [
     {
       domain: "TAG",
-      filePath: "C:\\Users\\Admin\\Downloads\\CaseFilter_All_20260417101725.csv",
+      filePath: path.join(EXPORT_DIR, "CaseFilter_All_20260417101725.csv"),
     },
     {
       domain: "WYNN",
-      filePath: "C:\\Users\\Admin\\Downloads\\CaseFilter_All_20260417102000.csv",
+      filePath: path.join(EXPORT_DIR, "CaseFilter_All_20260417102000.csv"),
     },
   ];
 

@@ -10,7 +10,7 @@
 // Schedule via:
 //   schtasks /Create /SC WEEKLY /D MON,TUE,WED,THU,FRI /ST 09:30 \
 //     /TN WynnTAGBloggerHealth \
-//     /TR "node C:\\Users\\Admin\\Code\\TagContactBridgeParallel\\scripts\\blogger-missed-run-check.js"
+//     /TR "node <repo>\\scripts\\blogger-missed-run-check.js"
 
 const fs = require("fs");
 const path = require("path");
@@ -21,6 +21,7 @@ require("dotenv").config({
 });
 
 const STATE_FILE = path.resolve(__dirname, "blogger-state.json");
+const DAILY_RUNNER = path.resolve(__dirname, "blogger-daily-runner.js");
 
 function todayDateKey() {
   return new Intl.DateTimeFormat("en-CA", {
@@ -92,7 +93,7 @@ async function main() {
             "  - Sonnet API outage or other transient error caused the runner to crash before writing state",
             "",
             "To run manually right now:",
-            "  node C:\\Users\\Admin\\Code\\TagContactBridgeParallel\\scripts\\blogger-daily-runner.js",
+            `  node ${DAILY_RUNNER}`,
             "",
             "To check task status:",
             "  schtasks /Query /TN WynnTAGBlogger /V /FO LIST",

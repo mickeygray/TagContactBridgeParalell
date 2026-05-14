@@ -112,6 +112,9 @@ function main() {
     checkTextIncludes(nginxConf, "location = /lead-contact", "nginx lead-contact route");
     checkTextIncludes(nginxConf, "location = /lead-contact/pre-ping", "nginx pre-ping route");
     checkTextIncludes(nginxConf, "location = /sms/inbound", "nginx sms inbound route");
+    checkTextIncludes(nginxConf, "location = /api/client/runtime", "nginx public runtime heartbeat");
+    checkTextIncludes(nginxConf, "location /api/sales-trainer/", "nginx sales trainer route");
+    checkTextIncludes(nginxConf, "client_max_body_size 32m;", "nginx trainer audio body size");
     checkTextIncludes(nginxConf, "server 127.0.0.1:5001;", "nginx 5001 shell upstream");
   }
 

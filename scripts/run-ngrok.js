@@ -95,9 +95,7 @@ if (process.env.NGROK_AUTHTOKEN) {
 
 const child = spawn(ngrokBin, args, {
   stdio: "inherit",
-  // shell:true so paths with spaces resolve cleanly via cmd.exe on
-  // Windows. Harmless on Unix.
-  shell: true,
+  shell: false,
 });
 
 child.on("error", (error) => {

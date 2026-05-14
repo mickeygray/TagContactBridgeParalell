@@ -20,14 +20,15 @@
 const fs = require("fs");
 const path = require("path");
 const { execFileSync } = require("child_process");
+const {
+  loadSharp,
+  npmCommand,
+  TAG_REPO,
+  TCB_DEPLOY_DIR,
+  WYNN_REPO,
+} = require("./blogger-paths");
 
-const sharp = require(path.resolve(
-  "C:/Users/Admin/Code/WynnTax/client/node_modules/sharp",
-));
-
-const WYNN_REPO = "C:/Users/Admin/Code/WynnTax";
-const TAG_REPO = "C:/Users/Admin/Code/TaxAdvocateGroup";
-const TCB_DEPLOY_DIR = "C:/Users/Admin/Code/TagContactBridge";
+const sharp = loadSharp();
 
 // ── Brand interpolation ──────────────────────────────────────────
 
@@ -306,12 +307,11 @@ async function renderHeaderImage(draft) {
 // ── Build + deploy ───────────────────────────────────────────────
 
 function buildClient(repoDir) {
-  return execFileSync("npm", ["run", "build"], {
+  return execFileSync(npmCommand(), ["run", "build"], {
     cwd: path.join(repoDir, "client"),
     stdio: "pipe",
     encoding: "utf8",
     maxBuffer: 500 * 1024 * 1024,
-    shell: true,
   });
 }
 

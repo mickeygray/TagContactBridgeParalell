@@ -78,6 +78,24 @@ function existingQueueItemPatch(payload = {}, options = {}) {
   return patch;
 }
 
+function activeExistingUpdateFilter(existing = {}) {
+  const existingAgent = String(existing.assignedTo || "").trim();
+  const filter = {
+    _id: existing._id,
+    state: { $in: ACTIVE_QUEUE_STATES },
+  };
+  if (existingAgent) {
+    filter.assignedTo = existingAgent;
+  } else {
+    filter.$or = [
+      { assignedTo: { $exists: false } },
+      { assignedTo: null },
+      { assignedTo: "" },
+    ];
+  }
+  return filter;
+}
+
 function listInPool({ partition = null, ageBucket = null, limit = 100 } = {}) {
   const filter = { state: "in_pool" };
   if (partition) filter.partition = partition;
@@ -124,11 +142,17 @@ async function upsertActiveItemForLead(payload, options = {}) {
       const patch = existingQueueItemPatch(stamped, options);
       const updated = Object.keys(patch).length > 0
         ? await QueueItem.findOneAndUpdate(
-          { _id: existing._id, state: { $in: ACTIVE_QUEUE_STATES } },
+          activeExistingUpdateFilter(existing),
           { $set: patch },
           { new: true, lean: true },
         )
         : existing;
+      if (Object.keys(patch).length > 0 && !updated) {
+        const current = await findByLeadId(stamped.leadId);
+        return returnMetadata
+          ? { item: current || existing, inserted: false, skipped: true, reason: "queue-assignment-race" }
+          : (current || existing);
+      }
       return returnMetadata ? { item: updated || existing, inserted: false } : (updated || existing);
     }
   }
@@ -152,11 +176,23 @@ async function upsertActiveItemForLead(payload, options = {}) {
         const patch = existingQueueItemPatch(stamped, options);
         item = Object.keys(patch).length > 0
           ? await QueueItem.findOneAndUpdate(
-            { _id: item._id, state: { $in: ACTIVE_QUEUE_STATES } },
+            activeExistingUpdateFilter(item),
             { $set: patch },
             { new: true, lean: true },
           )
           : item;
+        if (Object.keys(patch).length > 0 && !item) {
+          item = await findByLeadId(stamped.leadId);
+          if (returnMetadata) {
+            return {
+              item,
+              inserted: false,
+              skipped: true,
+              reason: "queue-assignment-race",
+            };
+          }
+          return item;
+        }
       }
       if (!returnMetadata) return item;
       return {

@@ -21,8 +21,17 @@ const path = require("path");
 const { spawn } = require("child_process");
 const { recordWorkflowStage } = require("../../../../packages/shared-services/src");
 
-const LEGACY_SCRIPT_PATH =
-  "C:\\Users\\Admin\\Code\\TagContactBridge\\scripts\\run-pb-morning-rotation.js";
+const LEGACY_SCRIPT_PATH = path.resolve(
+  __dirname,
+  "..",
+  "..",
+  "..",
+  "..",
+  "..",
+  "TagContactBridge",
+  "scripts",
+  "run-pb-morning-rotation.js",
+);
 
 function computeNextRunAt(hour, minute, timezone = "America/Los_Angeles", now = new Date()) {
   const formatter = new Intl.DateTimeFormat("en-CA", {

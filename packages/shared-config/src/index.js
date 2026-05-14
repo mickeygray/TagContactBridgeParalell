@@ -16,6 +16,13 @@ require("dotenv").config({ path: path.resolve(__dirname, "..", "..", "..", ".env
 const { env, envBool, envInt, ensureConfigValue } = require("./env");
 
 const ROOT_DIR = path.resolve(__dirname, "..", "..", "..");
+const DEFAULT_PHONEBURNER_LEGACY_SCRIPT_PATH = path.resolve(
+  ROOT_DIR,
+  "..",
+  "TagContactBridge",
+  "scripts",
+  "run-pb-morning-rotation.js",
+);
 const {
   DEFAULT_COMPANY,
   getCompanyConfig,
@@ -763,7 +770,7 @@ function getSharedConfig(overrides = {}) {
       legacyScriptPath:
         overrides.phoneburnerRotationLegacyScriptPath ||
         process.env.PHONEBURNER_ROTATION_LEGACY_SCRIPT_PATH ||
-        "C:\\Users\\Admin\\Code\\TagContactBridge\\scripts\\run-pb-morning-rotation.js",
+        DEFAULT_PHONEBURNER_LEGACY_SCRIPT_PATH,
     },
     spendSync: {
       enabled: boolFromEnv(

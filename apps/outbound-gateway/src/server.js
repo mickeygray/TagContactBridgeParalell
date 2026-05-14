@@ -12,6 +12,12 @@ const {
   PORTS,
   SERVICE_NAMES,
 } = require("../../../packages/shared-config/src");
+const {
+  buildHealthAccessMiddleware,
+  buildPublicHealthPayload,
+  isDetailedHealthRequest,
+  safeSecretEquals,
+} = require("../../../packages/shared-utils/src");
 const { publishDemoEvent } = require("../../../packages/shared-services/src/demoEventService");
 const {
   OUTBOUND_EVENT_TYPES,
@@ -45,7 +51,7 @@ function buildInternalAccessMiddleware(config) {
       "",
     ).trim();
 
-    if (configuredSecret && providedSecret && providedSecret === configuredSecret) {
+    if (configuredSecret && safeSecretEquals(providedSecret, configuredSecret)) {
       req.user = {
         id: "internal-service",
         role: "service",
@@ -64,25 +70,25 @@ function buildInternalAccessMiddleware(config) {
   };
 }
 
-function buildHealthAccessMiddleware(config) {
-  const expectedToken = String(config.healthToken || "").trim();
-  if (!expectedToken) {
-    return (_req, _res, next) => next();
-  }
-
-  return (req, res, next) => {
-    const provided = String(
-      req.headers["x-health-token"] ||
-      req.headers["x-service-secret"] ||
+function validateDropWebhook(req) {
+  const configured = String(
+    process.env.DROP_WEBHOOK_SECRET ||
+      process.env.DROP_WEBHOOK_KEY ||
       "",
-    ).trim();
+  ).trim();
+  if (!configured) return { ok: true, unsigned: true };
 
-    if (provided && provided === expectedToken) {
-      return next();
-    }
-
-    return res.status(401).json({ ok: false, error: "Health token required" });
-  };
+  const provided = String(
+    req.headers["x-webhook-secret"] ||
+      req.headers["x-webhook-key"] ||
+      req.headers["x-drop-webhook-secret"] ||
+      req.query.secret ||
+      req.headers.authorization?.replace(/^Bearer\s+/i, "") ||
+      "",
+  ).trim();
+  return safeSecretEquals(provided, configured)
+    ? { ok: true }
+    : { ok: false, reason: "invalid_drop_webhook_secret" };
 }
 
 function captureRawBody(req, _res, buf) {
@@ -348,7 +354,7 @@ async function startOutboundWorker({ config, runtime, workerState }) {
     workerState.timer.unref();
   }
 
-  await tick();
+  void tick();
 }
 
 async function startServer() {
@@ -370,7 +376,10 @@ async function startServer() {
   app.use(express.json({ limit: "1mb", verify: captureRawBody }));
   app.use(express.urlencoded({ extended: true, limit: "1mb", verify: captureRawBody }));
 
-  app.get("/health", requireHealthAccess, (_req, res) => {
+  app.get("/health", requireHealthAccess, (req, res) => {
+    if (!isDetailedHealthRequest(req)) {
+      return res.json(buildPublicHealthPayload(config, runtime.getMongoState()));
+    }
     res.json({
       ...buildServiceHealth(config, runtime.getMongoState()),
       worker: {
@@ -389,7 +398,13 @@ async function startServer() {
     });
   });
 
-  app.get("/status", requireHealthAccess, (_req, res) => {
+  app.get("/status", requireHealthAccess, (req, res) => {
+    if (!isDetailedHealthRequest(req)) {
+      return res.json({
+        ...buildPublicHealthPayload(config, runtime.getMongoState()),
+        legacyRoute: true,
+      });
+    }
     res.json({
       ok: true,
       legacyRoute: true,
@@ -697,6 +712,10 @@ async function startServer() {
   }));
 
   app.post("/drop-webhook", asyncHandler(async (req, res) => {
+    const validation = validateDropWebhook(req);
+    if (!validation.ok) {
+      return res.status(401).json({ ok: false, error: validation.reason || "invalid_drop_webhook_secret" });
+    }
     const payload = req.body || {};
     const caseId = Number(payload.C1 || payload.caseId);
     const statusCode = payload.DropStatusCode || payload.statusCode || null;

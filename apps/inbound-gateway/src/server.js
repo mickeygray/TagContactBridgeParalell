@@ -12,6 +12,12 @@ const {
   PORTS,
   SERVICE_NAMES,
 } = require("../../../packages/shared-config/src");
+const {
+  buildHealthAccessMiddleware,
+  buildPublicHealthPayload,
+  isDetailedHealthRequest,
+  safeSecretEquals,
+} = require("../../../packages/shared-utils/src");
 const { prePingRepository } = require("../../../packages/shared-repositories/src");
 const { publishDemoEvent } = require("../../../packages/shared-services/src/demoEventService");
 const {
@@ -169,25 +175,6 @@ function buildWebhookSignatureMiddleware(runtime, verifier, label) {
   };
 }
 
-function buildHealthAccessMiddleware(config) {
-  const expectedToken = String(config.healthToken || "").trim();
-  if (!expectedToken) {
-    return (_req, _res, next) => next();
-  }
-
-  return (req, res, next) => {
-    const provided = String(
-      req.headers["x-health-token"] ||
-      req.headers["x-service-secret"] ||
-      "",
-    ).trim();
-    if (provided && provided === expectedToken) {
-      return next();
-    }
-    return res.status(401).json({ ok: false, error: "Health token required" });
-  };
-}
-
 function validateLegacyLeadWebhook(req) {
   if (validateLeadWebhook(req)) {
     return true;
@@ -199,7 +186,7 @@ function validateLegacyLeadWebhook(req) {
   }
 
   const provided = String(req.headers["x-webhook-key"] || "").trim();
-  return Boolean(provided) && provided === configured;
+  return safeSecretEquals(provided, configured);
 }
 
 function resolveSkipLogicsCreate(req) {
@@ -440,7 +427,10 @@ async function startServer() {
     return next();
   });
 
-  app.get("/health", requireHealthAccess, (_req, res) => {
+  app.get("/health", requireHealthAccess, (req, res) => {
+    if (!isDetailedHealthRequest(req)) {
+      return res.json(buildPublicHealthPayload(config, runtime.getMongoState()));
+    }
     res.json(buildServiceHealth(config, runtime.getMongoState()));
   });
 
@@ -832,7 +822,13 @@ async function startServer() {
     }
   });
 
-  app.get("/status", requireHealthAccess, (_req, res) => {
+  app.get("/status", requireHealthAccess, (req, res) => {
+    if (!isDetailedHealthRequest(req)) {
+      return res.json({
+        ...buildPublicHealthPayload(config, runtime.getMongoState()),
+        legacyRoute: true,
+      });
+    }
     res.json({
       ok: true,
       service: config.serviceName,

@@ -1,8 +1,12 @@
 "use strict";
 
 const fs = require("fs");
+const os = require("os");
+const path = require("path");
 const { createLogicsClient } = require("../packages/shared-integrations/src");
 const { buildDomainStatusScanPlan } = require("../packages/shared-services/src");
+
+const EXPORT_DIR = process.env.LOGICS_EXPORT_DIR || path.join(os.homedir(), "Downloads");
 
 function normalizeResponseData(payload) {
   if (!payload) {
@@ -67,8 +71,8 @@ function parseCsvLine(line) {
 
 function getFallbackSeed(domain) {
   const fileByDomain = {
-    TAG: "C:\\Users\\Admin\\Downloads\\CaseFilter_All_20260417101725.csv",
-    WYNN: "C:\\Users\\Admin\\Downloads\\CaseFilter_All_20260417102000.csv",
+    TAG: path.join(EXPORT_DIR, "CaseFilter_All_20260417101725.csv"),
+    WYNN: path.join(EXPORT_DIR, "CaseFilter_All_20260417102000.csv"),
   };
 
   const filePath = fileByDomain[String(domain || "").toUpperCase()];

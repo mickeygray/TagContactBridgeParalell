@@ -2,8 +2,10 @@ import * as React from "react";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
-import { Link2 } from "lucide-react";
+import { AlertCircle, CheckCircle2, Link2, Search } from "lucide-react";
 import { Input, Label } from "@/components/ui/Input";
+import { Button } from "@/components/ui/Button";
+import { StatusPill } from "@/components/ui/StatusPill";
 import {
   Select,
   SelectContent,
@@ -11,8 +13,9 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/Select";
-import { useUnassignedExtensions } from "@/lib/api/queries/accounts";
+import { useResolveAccountIdentity, useUnassignedExtensions } from "@/lib/api/queries/accounts";
 import type {
+  AccountIdentityResolveResult,
   AccountRecord,
   AuthAudience,
   AuthRole,
@@ -63,6 +66,7 @@ const baseSchema = z.object({
   extensionId: z.string().optional(),
   extensionNumber: z.string().optional(),
   cxAgentId: z.string().optional(),
+  ringcxUsername: z.string().optional(),
   stationLabel: z.string().optional(),
   phone: z.string().optional(),
   cxQueueTier: z.enum(["no_leads", "red_only", "old_balanced", "fresh_capped", "fresh_priority"]),
@@ -137,6 +141,16 @@ export function UserForm({
       .split(",")
       .map((item) => item.trim())
       .filter(Boolean);
+  const initialMetadata =
+    initial?.metadata && typeof initial.metadata === "object"
+      ? (initial.metadata as Record<string, unknown>)
+      : {};
+  const initialRingcxUsername = String(
+    initialMetadata.ringcxUsername ||
+      initialMetadata.ringcxAgentUsername ||
+      initialMetadata.cxUsername ||
+      "",
+  );
 
   const form = useForm<UserFormValues>({
     resolver: zodResolver(baseSchema),
@@ -153,6 +167,7 @@ export function UserForm({
       extensionId: initial?.extensionId ?? "",
       extensionNumber: initial?.extensionNumber ?? "",
       cxAgentId: initial?.cxAgentId ?? "",
+      ringcxUsername: initialRingcxUsername,
       stationLabel: initial?.stationLabel ?? "",
       phone: initial?.phone ?? "",
       cxQueueTier:
@@ -185,6 +200,9 @@ export function UserForm({
   const roleDef = ROLE_OPTIONS.find((r) => r.value === role);
   const cxQueueTierDef = CX_QUEUE_TIER_OPTIONS.find((tier) => tier.value === cxQueueTier);
   const extensions = useUnassignedExtensions(company);
+  const resolveIdentity = useResolveAccountIdentity();
+  const [identityResult, setIdentityResult] =
+    React.useState<AccountIdentityResolveResult | null>(null);
   const lockInlineUnpair = Boolean(initial?.extensionId && includeCurrentExtension?.extensionId);
 
   const options = React.useMemo(() => {
@@ -208,6 +226,77 @@ export function UserForm({
   }, [extensions.data, includeCurrentExtension, company]);
 
   const [isSubmitting, setSubmitting] = React.useState(false);
+
+  const setSuggestedValue = React.useCallback(
+    (
+      key: keyof UserFormValues,
+      value: unknown,
+      { overwrite = false }: { overwrite?: boolean } = {},
+    ) => {
+      const normalized = value == null ? "" : String(value).trim();
+      if (!normalized) return;
+      const current = form.getValues(key);
+      if (!overwrite && String(current || "").trim()) return;
+      form.setValue(key, normalized as never, {
+        shouldDirty: true,
+        shouldValidate: true,
+      });
+    },
+    [form],
+  );
+
+  const applyIdentitySuggestion = React.useCallback(
+    (suggestion?: Partial<CreateAccountInput> | null) => {
+      if (!suggestion) return;
+      setSuggestedValue("email", suggestion.email);
+      setSuggestedValue("name", suggestion.name);
+      if (COMPANY_OPTIONS.includes(suggestion.company as (typeof COMPANY_OPTIONS)[number])) {
+        setSuggestedValue("company", suggestion.company);
+      }
+      setSuggestedValue("extensionId", suggestion.extensionId);
+      setSuggestedValue("extensionNumber", suggestion.extensionNumber);
+      setSuggestedValue("cxAgentId", suggestion.cxAgentId);
+      setSuggestedValue("phone", suggestion.phone);
+      setSuggestedValue("logicsUserId", suggestion.logicsUserId);
+      setSuggestedValue("logicsDisplayName", suggestion.logicsDisplayName);
+      setSuggestedValue("tagLogicsId", suggestion.tagLogicsId);
+      setSuggestedValue("tagSOId", suggestion.tagSOId);
+      setSuggestedValue("tagEmail", suggestion.tagEmail);
+      setSuggestedValue("tagLogicsName", suggestion.tagLogicsName);
+      setSuggestedValue("tagLogicsRoles", suggestion.tagLogicsRoles);
+      setSuggestedValue("wynnLogicsId", suggestion.wynnLogicsId);
+      setSuggestedValue("wynnSOId", suggestion.wynnSOId);
+      setSuggestedValue("wynnEmail", suggestion.wynnEmail);
+      setSuggestedValue("wynnLogicsName", suggestion.wynnLogicsName);
+      setSuggestedValue("wynnLogicsRoles", suggestion.wynnLogicsRoles);
+
+      const metadata =
+        suggestion.metadata && typeof suggestion.metadata === "object"
+          ? (suggestion.metadata as Record<string, unknown>)
+          : {};
+      setSuggestedValue(
+        "ringcxUsername",
+        metadata.ringcxUsername || metadata.ringcxAgentUsername || metadata.cxUsername,
+      );
+    },
+    [setSuggestedValue],
+  );
+
+  const runIdentityLookup = React.useCallback(async () => {
+    const values = form.getValues();
+    const result = await resolveIdentity.mutateAsync({
+      email: values.email,
+      username: values.ringcxUsername || values.email,
+      ringcxUsername: values.ringcxUsername,
+      name: values.name,
+      company: values.company,
+      extensionId: values.extensionId,
+      extensionNumber: values.extensionNumber,
+      cxAgentId: values.cxAgentId,
+    });
+    setIdentityResult(result);
+    applyIdentitySuggestion(result.suggestion);
+  }, [applyIdentitySuggestion, form, resolveIdentity]);
 
   const submit = form.handleSubmit(async (values) => {
     setSubmitting(true);
@@ -243,7 +332,40 @@ export function UserForm({
         wynnLogicsName: values.wynnLogicsName?.trim() || null,
         wynnLogicsRoles: values.wynnLogicsRoles?.trim() || null,
       };
-      // Build logicsAuth only with fields the admin actually set — mongoose
+      // Keep RingCX identity hints in metadata; token material stays only
+      // in the CX OAuth storage subdocs.
+      const metadata = { ...initialMetadata };
+      const ringcxUsername = values.ringcxUsername?.trim().toLowerCase();
+      if (ringcxUsername) {
+        metadata.ringcxUsername = ringcxUsername;
+        metadata.ringcxAgentUsername = ringcxUsername;
+        metadata.cxUsername = ringcxUsername;
+      } else {
+        delete metadata.ringcxUsername;
+        delete metadata.ringcxAgentUsername;
+        delete metadata.cxUsername;
+      }
+      if (identityResult) {
+        metadata.identityLastCheckedAt = identityResult.checkedAt;
+        metadata.identityCheck = {
+          exMatched: Boolean(identityResult.matches.ex.match),
+          cxMatched: Boolean(identityResult.matches.cx.match),
+          oauthConfigured: Boolean(identityResult.oauth?.configured),
+        };
+        const suggestedMetadata =
+          identityResult.suggestion?.metadata &&
+          typeof identityResult.suggestion.metadata === "object"
+            ? (identityResult.suggestion.metadata as Record<string, unknown>)
+            : {};
+        for (const key of ["ringcxAgentId", "ringcxAgentGroupId", "ringcxRcUserId"]) {
+          if (suggestedMetadata[key]) metadata[key] = suggestedMetadata[key];
+        }
+      }
+      if (Object.keys(metadata).length > 0) {
+        payload.metadata = metadata;
+      }
+
+      // Build logicsAuth only with fields the admin actually set; mongoose
       // enum validation rejects `null` on credentialMode/credentialStatus,
       // so we omit empty keys instead of passing explicit nulls.
       const mode = values.logicsCredentialMode?.trim();
@@ -325,6 +447,32 @@ export function UserForm({
             </SelectContent>
           </Select>
         </Field>
+      </div>
+
+      <div className="space-y-3 rounded-md border border-border/60 bg-muted/20 p-3">
+        <div className="grid grid-cols-1 gap-3 md:grid-cols-[1fr_auto] md:items-end">
+          <Field label="RingCX username">
+            <Input
+              placeholder="agent@taxadvocategroup.com"
+              {...form.register("ringcxUsername")}
+            />
+          </Field>
+          <Button
+            type="button"
+            variant="secondary"
+            onClick={() => {
+              void runIdentityLookup().catch(() => undefined);
+            }}
+            isLoading={resolveIdentity.isPending}
+          >
+            <Search className="h-3.5 w-3.5" />
+            Find EX/CX
+          </Button>
+        </div>
+        <IdentityLookupSummary
+          result={identityResult}
+          error={resolveIdentity.error as Error | null}
+        />
       </div>
 
       <Field
@@ -512,6 +660,55 @@ function Field({
       {children}
       {error ? <p className="text-xs text-destructive">{error}</p> : null}
       {hint && !error ? <p className="text-[11px] text-muted-foreground">{hint}</p> : null}
+    </div>
+  );
+}
+
+function IdentityLookupSummary({
+  result,
+  error,
+}: {
+  result: AccountIdentityResolveResult | null;
+  error: Error | null;
+}) {
+  if (error) {
+    return (
+      <div className="flex items-center gap-1.5 text-xs text-destructive">
+        <AlertCircle className="h-3.5 w-3.5" />
+        {error.message}
+      </div>
+    );
+  }
+  if (!result) {
+    return null;
+  }
+
+  const exMatched = Boolean(result.matches.ex.match);
+  const cxMatched = Boolean(result.matches.cx.match);
+  const logicsMatched = Boolean(result.matches.logics?.found);
+  const oauthReady = Boolean(result.oauth?.configured);
+  const existing = result.existing;
+
+  return (
+    <div className="flex flex-wrap items-center gap-1.5">
+      <StatusPill dotted tone={exMatched ? "success" : result.matches.ex.error ? "danger" : "warning"}>
+        EX {exMatched ? "found" : result.matches.ex.error ? "error" : "missing"}
+      </StatusPill>
+      <StatusPill dotted tone={cxMatched ? "success" : result.matches.cx.error ? "danger" : "warning"}>
+        CX {cxMatched ? "found" : result.matches.cx.error ? "error" : "missing"}
+      </StatusPill>
+      <StatusPill dotted tone={logicsMatched ? "success" : "neutral"}>
+        Logics {logicsMatched ? "found" : "none"}
+      </StatusPill>
+      <StatusPill dotted tone={oauthReady ? "success" : "warning"}>
+        OAuth {oauthReady ? "ready" : "not configured"}
+      </StatusPill>
+      {existing ? (
+        <StatusPill tone="accent">
+          <CheckCircle2 className="h-3 w-3" />
+          Existing {existing.status}
+        </StatusPill>
+      ) : null}
     </div>
   );
 }

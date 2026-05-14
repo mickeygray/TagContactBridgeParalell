@@ -34,13 +34,12 @@ export function CreateUserDialog() {
           Add user
         </Button>
       </DialogTrigger>
-      <DialogContent className="max-h-[82vh] max-w-lg overflow-hidden p-0">
+      <DialogContent className="max-h-[82vh] max-w-xl overflow-hidden p-0">
         <DialogHeader className="border-b border-border px-5 pb-3 pt-5">
           <DialogTitle>Add user or agent</DialogTitle>
           <DialogDescription>
-            New accounts start with status{" "}
-            <span className="font-mono text-xs">invited</span>. They can
-            request an OTP on the sign-in page immediately.
+            New accounts start invited; run the EX/CX lookup before creating
+            to pair extension, RingCX username, and OAuth readiness metadata.
           </DialogDescription>
         </DialogHeader>
         <div className="max-h-[calc(82vh-92px)] overflow-y-auto px-5 pb-5 pt-4">

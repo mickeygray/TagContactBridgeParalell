@@ -1,5 +1,10 @@
 "use strict";
 
+const {
+  normalizeCxQueuePolicyTier,
+  normalizeLeadQueueFamily,
+} = require("../../shared-normalizers/src");
+
 const QUEUE_TIMEZONE = "America/Los_Angeles";
 
 // Keep the stored queue-family key stable for existing data. The
@@ -96,7 +101,7 @@ function resolveAccountQueuePolicy(account = null) {
   const rawPolicy = hasAccount && account.cxQueuePolicy && typeof account.cxQueuePolicy === "object"
     ? account.cxQueuePolicy
     : {};
-  const explicitTier = String(rawPolicy.tier || "").trim();
+  const explicitTier = normalizeCxQueuePolicyTier(rawPolicy.tier);
   const defaultTier =
     !hasAccount || account.status === "disabled"
       ? "no_leads"
@@ -171,37 +176,7 @@ function isQueueFamilyAllowedForAccountPolicy(policy = null, queueFamily = null)
 }
 
 function normalizeQueueFamily(value) {
-  const normalized = String(value || "").trim().toLowerCase();
-  if (
-    normalized === "fresh-day1"
-    || normalized === "day0"
-    || normalized === "first-day"
-    || normalized === "fresh"
-    || normalized === "hot"
-    || normalized === "new"
-  ) {
-    return "fresh-day1";
-  }
-  if (
-    normalized === "fresh-day2to10"
-    || normalized === "fresh-day2to15"
-    || normalized === "day2to10"
-    || normalized === "day2to15"
-    || normalized === "day2-10"
-    || normalized === "day2-15"
-    || normalized === "day 2-10"
-    || normalized === "day 2-15"
-    || normalized === "day1"
-    || normalized === "day10"
-    || normalized === "day15"
-    || normalized === "later"
-    || normalized.includes("2-10")
-    || normalized.includes("2-15")
-  ) {
-    return "fresh-day2to10";
-  }
-  if (normalized === "aged" || normalized.includes("aged") || normalized.includes("prospect")) return "aged";
-  return "unassigned";
+  return normalizeLeadQueueFamily(value);
 }
 
 function getQueueFamilySortRank(value) {
@@ -419,6 +394,7 @@ module.exports = {
   getQueueFamilySortRank,
   getQueueFamilyTargetOpen,
   isQueueFamilyAllowedForAccountPolicy,
+  normalizeCxQueuePolicyTier,
   normalizeQueueFamily,
   resolveAccountQueuePolicy,
   resolveQueueDialability,

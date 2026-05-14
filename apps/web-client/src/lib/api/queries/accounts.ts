@@ -1,6 +1,8 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api/client";
 import type {
+  AccountIdentityResolveInput,
+  AccountIdentityResolveResult,
   AccountRecord,
   CreateAccountInput,
   UnassignedExtension,
@@ -135,6 +137,13 @@ export function useCreateAccount() {
   });
 }
 
+export function useResolveAccountIdentity() {
+  return useMutation({
+    mutationFn: (body: AccountIdentityResolveInput) =>
+      api.post<AccountIdentityResolveResult>("/api/admin/accounts/identity/resolve", body),
+  });
+}
+
 export function useUpdateAccount() {
   const qc = useQueryClient();
   return useMutation({
@@ -152,6 +161,19 @@ export function useDisableAccount() {
     mutationFn: (id: string) =>
       api
         .post<SingleResponse>(`/api/admin/accounts/${id}/disable`)
+        .then((r) => r.account),
+    onSuccess: () => invalidateAccountScope(qc),
+  });
+}
+
+export function useDeactivateAccount() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) =>
+      api
+        .post<SingleResponse>(`/api/admin/accounts/${id}/deactivate`, {
+          reason: "admin-deactivated",
+        })
         .then((r) => r.account),
     onSuccess: () => invalidateAccountScope(qc),
   });

@@ -39,6 +39,7 @@
 //   RINGCX_VOICE_AUX_AVAILABLE_STATE_ID              (numeric stateId, see auxStates GET)
 
 const { ExternalServiceError } = require("../../shared-errors/src");
+const { queueRateLimitAlert } = require("./rateLimitAlertService");
 
 const DEFAULT_RC_BASE = "https://platform.ringcentral.com";
 const DEFAULT_RCX_BASE = "https://ringcx.ringcentral.com";
@@ -49,6 +50,8 @@ const DEFAULT_TOKEN_REFRESH_PATH = "/api/auth/token/refresh";
 // fewer than this many ms remain so a long-running orchestrator never
 // catches a 401 mid-batch.
 const TOKEN_REFRESH_HEADROOM_MS = 60 * 1000;
+const DEFAULT_RATE_LIMIT_BACKOFF_MS = 5 * 60 * 1000;
+const DEFAULT_MAX_RATE_LIMIT_BACKOFF_MS = 15 * 60 * 1000;
 
 function readEnv(name, fallback = "") {
   const v = process.env[name];
@@ -80,6 +83,10 @@ function normalizeRingcxPhone(value) {
 // token-exchange calls per invocation). Reset via `client.auth.revoke()`.
 const TOKEN_CACHE = new Map();
 const TOKEN_RESOLVE_IN_FLIGHT = new Map();
+let AUTH_BACKOFF_UNTIL_MS = 0;
+let AUTH_BACKOFF_LAST_ERROR = null;
+let API_BACKOFF_UNTIL_MS = 0;
+let API_BACKOFF_LAST_ERROR = null;
 
 function getCacheKey() {
   return readEnv("RING_CENTRAL_CLIENT_ID", "default");
@@ -90,13 +97,14 @@ function clearCache() {
   TOKEN_RESOLVE_IN_FLIGHT.delete(getCacheKey());
 }
 
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
 function isRateLimitError(error) {
   const status = Number(error?.status || error?.details?.responseStatus || 0);
   return status === 429;
+}
+
+function envDurationMs(name, fallback) {
+  const value = Number(process.env[name]);
+  return Number.isFinite(value) && value >= 0 ? value : fallback;
 }
 
 function parseRetryAfterMs(error) {
@@ -104,42 +112,108 @@ function parseRetryAfterMs(error) {
   if (raw == null || raw === "") return null;
   const seconds = Number(raw);
   if (Number.isFinite(seconds) && seconds >= 0) {
-    return Math.min(seconds * 1000, 20_000);
+    return seconds * 1000;
   }
   const date = new Date(String(raw));
   if (!Number.isNaN(date.getTime())) {
-    return Math.min(Math.max(date.getTime() - Date.now(), 0), 20_000);
+    return Math.max(date.getTime() - Date.now(), 0);
   }
   return null;
 }
 
-function getAuthRetryDelayMs(error, attemptIndex) {
+function getRateLimitBackoffMs(error, envName) {
+  const configured = envDurationMs(
+    envName,
+    envDurationMs("RINGCX_RATE_LIMIT_BACKOFF_MS", DEFAULT_RATE_LIMIT_BACKOFF_MS),
+  );
+  const max = envDurationMs("RINGCX_RATE_LIMIT_MAX_BACKOFF_MS", DEFAULT_MAX_RATE_LIMIT_BACKOFF_MS);
   const retryAfterMs = parseRetryAfterMs(error);
-  if (retryAfterMs != null) return retryAfterMs;
-  const configured = String(process.env.RINGCX_AUTH_RETRY_DELAYS_MS || "")
-    .split(/[,\s]+/)
-    .map((value) => Number(value))
-    .filter((value) => Number.isFinite(value) && value >= 0);
-  const defaults = [2_000, 5_000, 10_000];
-  const delays = configured.length > 0 ? configured : defaults;
-  return delays[Math.min(attemptIndex, delays.length - 1)];
+  return Math.min(Math.max(retryAfterMs ?? configured, configured), max);
+}
+
+function getAuthBackoffMs(error) {
+  return getRateLimitBackoffMs(error, "RINGCX_AUTH_RATE_LIMIT_BACKOFF_MS");
+}
+
+function getApiBackoffMs(error) {
+  return getRateLimitBackoffMs(error, "RINGCX_API_RATE_LIMIT_BACKOFF_MS");
+}
+
+function setAuthBackoff(error) {
+  const delayMs = getAuthBackoffMs(error);
+  AUTH_BACKOFF_UNTIL_MS = Date.now() + delayMs;
+  AUTH_BACKOFF_LAST_ERROR = error?.message || "RingCX auth rate limited";
+  queueRateLimitAlert({
+    platform: "RingCX",
+    service: "ringcx-voice",
+    scope: "auth",
+    openedAt: new Date().toISOString(),
+    nextAttemptAt: new Date(AUTH_BACKOFF_UNTIL_MS).toISOString(),
+    error,
+  });
+}
+
+function setApiBackoff(error) {
+  const delayMs = getApiBackoffMs(error);
+  API_BACKOFF_UNTIL_MS = Date.now() + delayMs;
+  API_BACKOFF_LAST_ERROR = error?.message || "RingCX API rate limited";
+  queueRateLimitAlert({
+    platform: "RingCX",
+    service: "ringcx-voice",
+    scope: "api",
+    openedAt: new Date().toISOString(),
+    nextAttemptAt: new Date(API_BACKOFF_UNTIL_MS).toISOString(),
+    method: error?.details?.method,
+    path: error?.details?.path,
+    error,
+  });
+}
+
+function assertNotInAuthBackoff() {
+  if (!AUTH_BACKOFF_UNTIL_MS || AUTH_BACKOFF_UNTIL_MS <= Date.now()) return;
+  throw new ExternalServiceError(
+    "ringcx-voice",
+    `RingCX auth in rate-limit backoff until ${new Date(AUTH_BACKOFF_UNTIL_MS).toISOString()}`,
+    {
+      status: 429,
+      retryable: true,
+      details: {
+        rateLimitedCircuitOpen: true,
+        scope: "auth",
+        nextAuthAttemptAt: new Date(AUTH_BACKOFF_UNTIL_MS).toISOString(),
+        lastAuthError: AUTH_BACKOFF_LAST_ERROR,
+      },
+    },
+  );
+}
+
+function assertNotInApiBackoff(method, path) {
+  if (!API_BACKOFF_UNTIL_MS || API_BACKOFF_UNTIL_MS <= Date.now()) return;
+  throw new ExternalServiceError(
+    "ringcx-voice",
+    `RingCX API in rate-limit backoff until ${new Date(API_BACKOFF_UNTIL_MS).toISOString()}`,
+    {
+      status: 429,
+      retryable: true,
+      details: {
+        rateLimitedCircuitOpen: true,
+        scope: "api",
+        method,
+        path,
+        nextApiAttemptAt: new Date(API_BACKOFF_UNTIL_MS).toISOString(),
+        lastApiError: API_BACKOFF_LAST_ERROR,
+      },
+    },
+  );
 }
 
 async function retryAuthOperation(operation) {
-  const maxAttempts = Math.max(1, Number(process.env.RINGCX_AUTH_MAX_ATTEMPTS) || 4);
-  let lastError = null;
-  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
-    try {
-      return await operation();
-    } catch (error) {
-      lastError = error;
-      if (!isRateLimitError(error) || attempt >= maxAttempts - 1) {
-        throw error;
-      }
-      await sleep(getAuthRetryDelayMs(error, attempt));
-    }
+  try {
+    return await operation();
+  } catch (error) {
+    if (isRateLimitError(error)) setAuthBackoff(error);
+    throw error;
   }
-  throw lastError;
 }
 
 // ── HTTP helpers ────────────────────────────────────────────────────
@@ -252,6 +326,7 @@ async function resolveBearerUncached(config, cacheKey) {
 
   if (cached?.refreshToken) {
     try {
+      assertNotInAuthBackoff();
       const refreshed = await retryAuthOperation(
         () => refreshRingcxToken(
           config.rcxBase,
@@ -277,6 +352,7 @@ async function resolveBearerUncached(config, cacheKey) {
     }
   }
 
+  assertNotInAuthBackoff();
   const rc = await retryAuthOperation(() => fetchRcAccessToken(config.rcBase));
   const voice = await retryAuthOperation(
     () => exchangeForRingcxToken(
@@ -356,6 +432,7 @@ function createRingcxVoiceClient(options = {}) {
   }
 
   async function request(method, path, { body, query, headers = {} } = {}) {
+    assertNotInApiBackoff(method, path);
     const bearer = userBearer
       ? { accessToken: userBearer.accessToken, tokenType: userBearer.tokenType || "Bearer" }
       : await resolveBearer(config);
@@ -381,9 +458,19 @@ function createRingcxVoiceClient(options = {}) {
       init.headers["Content-Type"] = init.headers["Content-Type"] || "application/json";
       init.body = typeof body === "string" ? body : JSON.stringify(body);
     }
+
+    // First attempt
     const r = await rawFetch(url, init);
-    if (!r.ok) throw asError(method, path, r);
-    return r.json;
+    if (r.ok) return r.json;
+
+    if (r.status === 429) {
+      const error = asError(method, path, r);
+      if (error.details) error.details.rateLimitedCircuitOpened = true;
+      setApiBackoff(error);
+      throw error;
+    }
+
+    throw asError(method, path, r);
   }
 
   // ── auth ──────────────────────────────────────────────────────────
@@ -597,6 +684,7 @@ function createRingcxVoiceClient(options = {}) {
     headers = {},
     acceptBinary = false,
   } = {}) {
+    assertNotInApiBackoff(method, suffix);
     const bearer = userBearer
       ? { accessToken: userBearer.accessToken, tokenType: userBearer.tokenType || "Bearer", mainAccountId: userBearer.mainAccountId }
       : await resolveBearer(config);
@@ -629,13 +717,12 @@ function createRingcxVoiceClient(options = {}) {
       init.body = typeof body === "string" ? body : JSON.stringify(body);
     }
 
-    // Inline the fetch — rawFetch always JSON-parses, which would corrupt
-    // a binary WAV download. The metadata POST does want JSON parsing,
-    // so we branch on acceptBinary.
+    // Inline the fetch because rawFetch always JSON-parses, which would
+    // corrupt a binary WAV download.
     const response = await fetch(url, init);
     if (!response.ok) {
       const errText = await response.text().catch(() => "");
-      throw new ExternalServiceError("ringcx-voice", `${method} ${suffix} → HTTP ${response.status}`, {
+      const err = new ExternalServiceError("ringcx-voice", `${method} ${suffix} → HTTP ${response.status}`, {
         status: response.status,
         retryable: response.status >= 500 || response.status === 429,
         details: {
@@ -643,8 +730,11 @@ function createRingcxVoiceClient(options = {}) {
           responseStatus: response.status,
           responseBody: errText.slice(0, 500),
           retryAfter: response.headers.get("retry-after"),
+          rateLimitedCircuitOpened: response.status === 429 ? true : undefined,
         },
       });
+      if (response.status === 429) setApiBackoff(err);
+      throw err;
     }
     if (acceptBinary) {
       const buffer = Buffer.from(await response.arrayBuffer());

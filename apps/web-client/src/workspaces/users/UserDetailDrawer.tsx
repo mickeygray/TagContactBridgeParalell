@@ -16,7 +16,7 @@ import { Link2Off, Pencil, RefreshCw } from "lucide-react";
 import { toast } from "@/components/ui/Toaster";
 import {
   useAccountCallStats,
-  useDisableAccount,
+  useDeactivateAccount,
   useEnableAccount,
   useRefreshAccountCallStats,
   useUpdateAccount,
@@ -53,7 +53,7 @@ export function UserDetailDrawer({
   onEdit,
 }: UserDetailDrawerProps) {
   const update = useUpdateAccount();
-  const disable = useDisableAccount();
+  const deactivate = useDeactivateAccount();
   const enable = useEnableAccount();
   const callStats = useAccountCallStats(account?.id ?? null);
   const refreshStats = useRefreshAccountCallStats();
@@ -83,8 +83,8 @@ export function UserDetailDrawer({
         await enable.mutateAsync(current.id);
         toast.success("Account enabled");
       } else {
-        await disable.mutateAsync(current.id);
-        toast.success("Account disabled");
+        await deactivate.mutateAsync(current.id);
+        toast.success("Account deactivated");
       }
     } catch (err) {
       toast.error("Status change failed", {
@@ -210,10 +210,10 @@ export function UserDetailDrawer({
               variant="ghost"
               size="sm"
               disabled={Boolean(account.isHardened) && account.status !== "disabled"}
-              isLoading={disable.isPending || enable.isPending}
+              isLoading={deactivate.isPending || enable.isPending}
               onClick={toggleStatus}
             >
-              {account.status === "disabled" ? "Enable" : "Disable"}
+              {account.status === "disabled" ? "Enable" : "Deactivate"}
             </Button>
           </div>
           <div className="flex items-center gap-2">

@@ -2,6 +2,7 @@
 
 const { ExternalServiceError } = require("../../shared-errors/src");
 const { getRingCentralConfig } = require("../../shared-config/src");
+const { queueRateLimitAlert } = require("./rateLimitAlertService");
 
 let tokenState = {
   accessToken: null,
@@ -15,9 +16,17 @@ let authState = {
   refreshIntervalMs: 0,
   lastScheduledSkipAt: null,
   lastScheduledRunAt: null,
+  lastRateLimitedAt: null,
+  nextAuthAttemptAt: null,
+  lastApiRateLimitedAt: null,
+  nextApiAttemptAt: null,
+  lastApiRateLimitError: null,
 };
 let refreshTimer = null;
 let refreshCallback = null;
+
+const DEFAULT_RATE_LIMIT_BACKOFF_MS = 5 * 60 * 1000;
+const DEFAULT_MAX_RATE_LIMIT_BACKOFF_MS = 15 * 60 * 1000;
 
 function hasCredentials(config) {
   return Boolean(config.clientId && config.clientSecret && config.jwtToken);
@@ -147,6 +156,136 @@ function hasFreshToken(minTtlMs = 60000) {
   );
 }
 
+function isRateLimitError(error) {
+  const status = Number(error?.status || error?.details?.responseStatus || 0);
+  return status === 429 || /\b429\b|rate\s+exceeded/i.test(String(error?.message || ""));
+}
+
+function envDurationMs(name, fallback) {
+  const value = Number(process.env[name]);
+  return Number.isFinite(value) && value >= 0 ? value : fallback;
+}
+
+function parseRetryAfterMs(error) {
+  const raw = error?.details?.retryAfter || error?.details?.retryAfterSeconds;
+  const seconds = Number(raw);
+  if (Number.isFinite(seconds) && seconds >= 0) {
+    return seconds * 1000;
+  }
+  const parsed = Date.parse(String(raw || ""));
+  if (Number.isFinite(parsed)) {
+    return Math.max(parsed - Date.now(), 0);
+  }
+  return null;
+}
+
+function getRateLimitBackoffMs(error, envName) {
+  const configured = envDurationMs(
+    envName,
+    envDurationMs("RC_RATE_LIMIT_BACKOFF_MS", DEFAULT_RATE_LIMIT_BACKOFF_MS),
+  );
+  const max = envDurationMs("RC_RATE_LIMIT_MAX_BACKOFF_MS", DEFAULT_MAX_RATE_LIMIT_BACKOFF_MS);
+  const retryAfterMs = parseRetryAfterMs(error);
+  return Math.min(Math.max(retryAfterMs ?? configured, configured), max);
+}
+
+function getAuthBackoffMs(error) {
+  return getRateLimitBackoffMs(error, "RC_AUTH_RATE_LIMIT_BACKOFF_MS");
+}
+
+function getApiBackoffMs(error) {
+  return getRateLimitBackoffMs(error, "RC_API_RATE_LIMIT_BACKOFF_MS");
+}
+
+function recordAuthRateLimit(error) {
+  const nextAttemptAt = new Date(Date.now() + getAuthBackoffMs(error)).toISOString();
+  const lastRateLimitedAt = new Date().toISOString();
+  authState = {
+    ...authState,
+    isAuthenticated: false,
+    lastError: error.message,
+    lastRateLimitedAt,
+    nextAuthAttemptAt: nextAttemptAt,
+  };
+  queueRateLimitAlert({
+    platform: "RingCentral EX",
+    service: "ringcentral",
+    scope: "auth",
+    openedAt: lastRateLimitedAt,
+    nextAttemptAt,
+    error,
+  });
+  return nextAttemptAt;
+}
+
+function recordApiRateLimit(error) {
+  const nextAttemptAt = new Date(Date.now() + getApiBackoffMs(error)).toISOString();
+  const lastRateLimitedAt = new Date().toISOString();
+  authState = {
+    ...authState,
+    lastApiRateLimitedAt: lastRateLimitedAt,
+    nextApiAttemptAt: nextAttemptAt,
+    lastApiRateLimitError: error.message,
+  };
+  queueRateLimitAlert({
+    platform: "RingCentral EX",
+    service: "ringcentral",
+    scope: "api",
+    openedAt: lastRateLimitedAt,
+    nextAttemptAt,
+    method: error?.details?.method,
+    path: error?.details?.path,
+    error,
+  });
+  return nextAttemptAt;
+}
+
+function buildBackoffError(message, details) {
+  return new ExternalServiceError("ringcentral", message, {
+    status: 429,
+    retryable: true,
+    details,
+  });
+}
+
+function assertNotInAuthBackoff() {
+  const nextAuthAttemptAt = authState.nextAuthAttemptAt
+    ? new Date(authState.nextAuthAttemptAt).getTime()
+    : 0;
+  if (Number.isFinite(nextAuthAttemptAt) && nextAuthAttemptAt > Date.now()) {
+    throw buildBackoffError(
+      `RingCentral auth in rate-limit backoff until ${authState.nextAuthAttemptAt}`,
+      {
+        rateLimitedCircuitOpen: true,
+        scope: "auth",
+        nextAuthAttemptAt: authState.nextAuthAttemptAt,
+        lastRateLimitedAt: authState.lastRateLimitedAt,
+        lastError: authState.lastError,
+      },
+    );
+  }
+}
+
+function assertNotInApiBackoff(method, path) {
+  const nextApiAttemptAt = authState.nextApiAttemptAt
+    ? new Date(authState.nextApiAttemptAt).getTime()
+    : 0;
+  if (Number.isFinite(nextApiAttemptAt) && nextApiAttemptAt > Date.now()) {
+    throw buildBackoffError(
+      `RingCentral API in rate-limit backoff until ${authState.nextApiAttemptAt}`,
+      {
+        rateLimitedCircuitOpen: true,
+        scope: "api",
+        method,
+        path,
+        nextApiAttemptAt: authState.nextApiAttemptAt,
+        lastApiRateLimitedAt: authState.lastApiRateLimitedAt,
+        lastApiRateLimitError: authState.lastApiRateLimitError,
+      },
+    );
+  }
+}
+
 async function runRefreshCallback(reason) {
   if (!refreshCallback) return;
   try {
@@ -214,6 +353,23 @@ async function ensureAuthenticated(options = {}) {
   }
 
   const minTtlMs = Math.max(Number(options.minTtlMs) || 60000, 0);
+  const nextAuthAttemptAt = authState.nextAuthAttemptAt
+    ? new Date(authState.nextAuthAttemptAt).getTime()
+    : 0;
+  if (
+    !options.force
+    && !hasFreshToken(minTtlMs)
+    && Number.isFinite(nextAuthAttemptAt)
+    && nextAuthAttemptAt > Date.now()
+  ) {
+    return {
+      ok: true,
+      skipped: true,
+      reason: "auth-rate-limit-backoff",
+      auth: getAuthStatus(),
+      window,
+    };
+  }
   if (!options.force && hasFreshToken(minTtlMs)) {
     return {
       ok: true,
@@ -237,6 +393,15 @@ async function ensureAuthenticated(options = {}) {
       window,
     };
   } catch (error) {
+    const rateLimited = isRateLimitError(error);
+    if (rateLimited) {
+      const nextAuthAttemptMs = authState.nextAuthAttemptAt
+        ? new Date(authState.nextAuthAttemptAt).getTime()
+        : 0;
+      if (!Number.isFinite(nextAuthAttemptMs) || nextAuthAttemptMs <= Date.now()) {
+        recordAuthRateLimit(error);
+      }
+    }
     authState = {
       ...authState,
       isAuthenticated: false,
@@ -266,6 +431,8 @@ async function authenticate(force = false) {
     return tokenState.accessToken;
   }
 
+  assertNotInAuthBackoff();
+
   const body = new URLSearchParams({
     grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer",
     assertion: config.jwtToken,
@@ -282,18 +449,24 @@ async function authenticate(force = false) {
 
   const data = await parseResponse(response);
   if (!response.ok) {
-    throw new ExternalServiceError(
+    const error = new ExternalServiceError(
       "ringcentral",
       `RingCentral authentication failed: ${response.status}`,
       {
-        status: 502,
-        retryable: response.status >= 500,
+        status: response.status === 429 ? 429 : 502,
+        retryable: response.status >= 500 || response.status === 429,
         details: {
           responseStatus: response.status,
           responseBody: data,
+          retryAfter: response.headers?.get?.("retry-after") || null,
+          rateLimitedCircuitOpened: response.status === 429 ? true : undefined,
         },
       },
     );
+    if (response.status === 429) {
+      recordAuthRateLimit(error);
+    }
+    throw error;
   }
 
   tokenState = {
@@ -305,6 +478,7 @@ async function authenticate(force = false) {
     isAuthenticated: true,
     lastAuthenticatedAt: new Date().toISOString(),
     lastError: null,
+    nextAuthAttemptAt: null,
   };
 
   return tokenState.accessToken;
@@ -336,13 +510,29 @@ function stopWarmupTimer() {
 }
 
 async function reinitializePlatform({ force = true, reason = "manual" } = {}) {
-  tokenState = {
-    accessToken: null,
-    expiresAt: 0,
-  };
-  await doLogin(force);
-  await runRefreshCallback(reason);
-  return getAuthStatus();
+  const previousTokenState = { ...tokenState };
+  const previousAuthState = { ...authState };
+
+  try {
+    await doLogin(force);
+    await runRefreshCallback(reason);
+    return getAuthStatus();
+  } catch (error) {
+    const previousTokenFresh = Boolean(
+      previousTokenState.accessToken
+        && previousTokenState.expiresAt
+        && Date.now() < previousTokenState.expiresAt - 60000,
+    );
+    if (previousTokenFresh) {
+      tokenState = previousTokenState;
+      authState = {
+        ...previousAuthState,
+        isAuthenticated: true,
+        lastError: error.message,
+      };
+    }
+    throw error;
+  }
 }
 
 async function warmupPlatform(options = {}) {
@@ -395,6 +585,7 @@ function getAuthStatus() {
 
 async function request(method, path, { query, body, headers } = {}, retry = true) {
   const config = getRingCentralConfig();
+  assertNotInApiBackoff(method, path);
   const token = await authenticate();
   const response = await fetch(buildUrl(config.serverUrl, path, query), {
     method,
@@ -413,11 +604,11 @@ async function request(method, path, { query, body, headers } = {}, retry = true
   }
 
   if (!response.ok) {
-    throw new ExternalServiceError(
+    const error = new ExternalServiceError(
       "ringcentral",
       `RingCentral request failed ${method} ${path}: ${response.status}`,
       {
-        status: 502,
+        status: response.status === 429 ? 429 : 502,
         retryable: response.status >= 500 || response.status === 429,
         details: {
           method,
@@ -425,9 +616,15 @@ async function request(method, path, { query, body, headers } = {}, retry = true
           query: query || null,
           responseStatus: response.status,
           responseBody: data,
+          retryAfter: response.headers?.get?.("retry-after") || null,
+          rateLimitedCircuitOpened: response.status === 429 ? true : undefined,
         },
       },
     );
+    if (response.status === 429) {
+      recordApiRateLimit(error);
+    }
+    throw error;
   }
 
   return data;

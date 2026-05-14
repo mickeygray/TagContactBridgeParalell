@@ -9,11 +9,13 @@
 // Usage:
 //   node scripts/backload-master-prospects.js [csvPath] [--dry-run] [--limit N]
 //
-// Default csvPath: C:\Users\Admin\Downloads\CaseFilter_Prospects_*.csv (latest match)
+// Default csvPath: $LOGICS_EXPORT_DIR/CaseFilter_Prospects_*.csv, or
+// ~/Downloads/CaseFilter_Prospects_*.csv when LOGICS_EXPORT_DIR is unset.
 // --dry-run prints the first 3 normalized records and exits without writing.
 // --limit N processes only the first N rows (useful for smoke tests).
 
 const fs = require("fs");
+const os = require("os");
 const path = require("path");
 const Papa = require("papaparse");
 const mongoose = require("mongoose");
@@ -25,6 +27,10 @@ const { MasterProspectIndex } = require("../packages/shared-models/src");
 const DOMAIN = "TAG";
 const SOURCE_NAME = "ABC";
 const BULK_SIZE = 1000;
+const DEFAULT_CSV_PATH = path.join(
+  process.env.LOGICS_EXPORT_DIR || path.join(os.homedir(), "Downloads"),
+  "CaseFilter_Prospects_20260428191635.csv",
+);
 
 function parseArgs(argv) {
   const args = { dryRun: false, limit: 0, csvPath: null };
@@ -200,7 +206,7 @@ function rowToProspect(row, importBatch) {
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
-  const csvPath = args.csvPath || "C:\\Users\\Admin\\Downloads\\CaseFilter_Prospects_20260428191635.csv";
+  const csvPath = args.csvPath || DEFAULT_CSV_PATH;
   if (!fs.existsSync(csvPath)) {
     // eslint-disable-next-line no-console
     console.error(`CSV not found: ${csvPath}`);

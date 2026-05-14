@@ -25,7 +25,7 @@ export function EditUserDialog({ account, open, onOpenChange }: EditUserDialogPr
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-h-[82vh] max-w-lg overflow-hidden p-0">
+      <DialogContent className="max-h-[82vh] max-w-xl overflow-hidden p-0">
         <DialogHeader className="border-b border-border px-5 pb-3 pt-5">
           <DialogTitle>Edit account</DialogTitle>
           <DialogDescription>

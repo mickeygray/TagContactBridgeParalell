@@ -8,7 +8,7 @@
 const { NodeSSH } = require("node-ssh");
 const fs = require("fs");
 const path = require("path");
-const { execSync, execFileSync } = require("child_process");
+const { execFileSync } = require("child_process");
 
 function shellEscape(val) {
   if (val === undefined || val === null) return "''";
@@ -45,6 +45,15 @@ const SITES = {
 };
 
 const deployHistory = {};
+
+function runGit(repoDir, args, options = {}) {
+  return execFileSync("git", args, {
+    cwd: repoDir,
+    stdio: "pipe",
+    encoding: "utf8",
+    ...options,
+  }).trim();
+}
 
 function getStatus(brand) {
   return (
@@ -83,6 +92,7 @@ async function deployBuild(brand, opts = {}, onLog = console.log) {
   const esc = {
     path: shellEscape(site.remotePath),
     pm2: shellEscape(pm2Name),
+    pm2Pattern: shellEscape(`${pm2Name}.*online`),
     branch: shellEscape(branch),
     url: shellEscape(site.url),
   };
@@ -103,23 +113,15 @@ async function deployBuild(brand, opts = {}, onLog = console.log) {
     if (repoDir && fs.existsSync(path.join(repoDir, ".git"))) {
       let localBranch = "master";
       try {
-        localBranch = execSync("git rev-parse --abbrev-ref HEAD", {
-          cwd: repoDir,
-          stdio: "pipe",
-          encoding: "utf8",
-        }).trim();
+        localBranch = runGit(repoDir, ["rev-parse", "--abbrev-ref", "HEAD"]);
       } catch {}
       onLog(`[DEPLOY:${brand}]   Branch: ${localBranch}`);
 
       if (commitMsg) {
         onLog(`[DEPLOY:${brand}]   Committing: "${commitMsg}"`);
         try {
-          execSync("git add -A", { cwd: repoDir, stdio: "pipe" });
-          const staged = execSync("git diff --cached --stat", {
-            cwd: repoDir,
-            stdio: "pipe",
-            encoding: "utf8",
-          }).trim();
+          runGit(repoDir, ["add", "-A"]);
+          const staged = runGit(repoDir, ["diff", "--cached", "--stat"]);
           if (staged) {
             const fileCount = staged.split("\n").length - 1;
             onLog(`[DEPLOY:${brand}]   Staged: ${fileCount} file(s)`);
@@ -140,18 +142,15 @@ async function deployBuild(brand, opts = {}, onLog = console.log) {
       }
 
       try {
-        const unpushed = execSync(
-          `git log origin/${localBranch}..HEAD --oneline`,
-          {
-            cwd: repoDir,
-            stdio: "pipe",
-            encoding: "utf8",
-          },
-        ).trim();
+        const unpushed = runGit(repoDir, [
+          "log",
+          `origin/${localBranch}..HEAD`,
+          "--oneline",
+        ]);
         if (unpushed) {
           const count = unpushed.split("\n").length;
           onLog(`[DEPLOY:${brand}]   Pushing ${count} commit(s)...`);
-          execSync("git push", { cwd: repoDir, stdio: "pipe", timeout: 30000 });
+          runGit(repoDir, ["push"], { timeout: 30000 });
           onLog(`[DEPLOY:${brand}]   ✓ Pushed`);
         } else {
           onLog(`[DEPLOY:${brand}]   Already pushed`);
@@ -163,11 +162,7 @@ async function deployBuild(brand, opts = {}, onLog = console.log) {
       }
 
       try {
-        const info = execSync('git log -1 --format="%h %s (%cr)"', {
-          cwd: repoDir,
-          stdio: "pipe",
-          encoding: "utf8",
-        }).trim();
+        const info = runGit(repoDir, ["log", "-1", "--format=%h %s (%cr)"]);
         onLog(`[DEPLOY:${brand}]   Deploying: ${info}`);
       } catch {}
     } else {
@@ -302,7 +297,7 @@ async function deployBuild(brand, opts = {}, onLog = console.log) {
 
       sleep 3
 
-      PM2_BACKEND_ONLINE=$(pm2 list 2>/dev/null | grep -E "${pm2Name}.*online" | wc -l | tr -d ' ')
+      PM2_BACKEND_ONLINE=$(pm2 list 2>/dev/null | grep -E ${esc.pm2Pattern} | wc -l | tr -d ' ')
       PM2_ALL_ONLINE=$(pm2 list 2>/dev/null | grep -c "online" || echo "0")
       echo "PM2_BACKEND_ONLINE:$PM2_BACKEND_ONLINE"
       echo "PM2_ALL_ONLINE:$PM2_ALL_ONLINE"
@@ -318,7 +313,7 @@ async function deployBuild(brand, opts = {}, onLog = console.log) {
       echo "PAGES:$PAGE_COUNT"
       echo "CSS:$CSS_COUNT"
       echo "JS:$JS_COUNT"
-    `.replace("${pm2Name}", pm2Name),
+    `,
     );
 
     const output = deployResult.stdout;
@@ -376,7 +371,7 @@ async function deployBuild(brand, opts = {}, onLog = console.log) {
       );
       await new Promise((r) => setTimeout(r, 5000));
       const pm2Retry = await ssh.execCommand(
-        `pm2 list 2>/dev/null | grep -E "${pm2Name}.*online" | wc -l | tr -d ' '`,
+        `pm2 list 2>/dev/null | grep -E ${esc.pm2Pattern} | wc -l | tr -d ' '`,
       );
       finalBackendOnline = parseInt(pm2Retry.stdout.trim() || "0");
     }
@@ -464,6 +459,7 @@ async function rollbackBuild(brand, onLog = console.log) {
   const esc = {
     path: shellEscape(site.remotePath),
     pm2: shellEscape(pm2Name),
+    pm2Pattern: shellEscape(`${pm2Name}.*online`),
     url: shellEscape(site.url),
   };
 
@@ -516,7 +512,7 @@ async function rollbackBuild(brand, onLog = console.log) {
       pm2 start ${esc.pm2} 2>/dev/null || pm2 restart ${esc.pm2} 2>/dev/null || true
 
       sleep 2
-      PM2_BACKEND_ONLINE=$(pm2 list 2>/dev/null | grep -E "${pm2Name}.*online" | wc -l | tr -d ' ')
+      PM2_BACKEND_ONLINE=$(pm2 list 2>/dev/null | grep -E ${esc.pm2Pattern} | wc -l | tr -d ' ')
       PAGE_COUNT=0
       if [ -n "$BUILD_DIR" ]; then
         PAGE_COUNT=$(find "$BUILD_DIR" -name 'index.html' 2>/dev/null | wc -l)
@@ -645,7 +641,10 @@ async function checkRemote(brand) {
       readyTimeout: 30000,
     });
 
-    const esc = { path: shellEscape(site.remotePath) };
+    const esc = {
+      path: shellEscape(site.remotePath),
+      pm2Pattern: shellEscape(`${pm2Name}.*online`),
+    };
     const result = await ssh.execCommand(
       `
       set -e
@@ -674,9 +673,9 @@ async function checkRemote(brand) {
       echo "DISK:$(df -h ${esc.path} | tail -1 | awk '{print $4}')"
       echo "NGINX:$(sudo nginx -t 2>&1 | tail -1)"
       echo "PM2_ALL:$(pm2 list 2>/dev/null | grep -c 'online' || echo 0) online"
-      echo "PM2_BACKEND:$(pm2 list 2>/dev/null | grep -E '${pm2Name}.*online' | wc -l | tr -d ' ')"
+      echo "PM2_BACKEND:$(pm2 list 2>/dev/null | grep -E ${esc.pm2Pattern} | wc -l | tr -d ' ')"
       echo "RECENT:$(git log --oneline -5 2>/dev/null || echo none)"
-    `.replace("${pm2Name}", pm2Name),
+    `,
     );
 
     const output = result.stdout;

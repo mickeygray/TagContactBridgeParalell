@@ -22,6 +22,7 @@
 const fs = require("fs");
 const path = require("path");
 const { execFileSync } = require("child_process");
+const { TAG_REPO, WYNN_REPO } = require("../../../scripts/blogger-paths");
 
 const PARALLEL_ROOT = path.resolve(__dirname, "..", "..", "..");
 const STATE_FILE = path.join(PARALLEL_ROOT, "scripts", "blogger-state.json");
@@ -32,9 +33,6 @@ const RECOVERY_AUDIT_DIR = path.join(
   "blogger",
   "recovery-audit",
 );
-
-const WYNN_REPO = "C:/Users/Admin/Code/WynnTax";
-const TAG_REPO = "C:/Users/Admin/Code/TaxAdvocateGroup";
 
 function safeReadJson(filePath) {
   try {

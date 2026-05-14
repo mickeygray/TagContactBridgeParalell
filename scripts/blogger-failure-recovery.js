@@ -45,8 +45,7 @@ require("dotenv").config({
 
 const SONNET_MODEL = "claude-sonnet-4-5-20250929";
 
-const WYNN_REPO = "C:/Users/Admin/Code/WynnTax";
-const TAG_REPO = "C:/Users/Admin/Code/TaxAdvocateGroup";
+const { TAG_REPO, WYNN_REPO } = require("./blogger-paths");
 const PARALLEL_ROOT = path.resolve(__dirname, "..");
 
 const STATE_FILE = path.join(PARALLEL_ROOT, "scripts", "blogger-state.json");

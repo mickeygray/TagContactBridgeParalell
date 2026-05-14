@@ -42,6 +42,11 @@ const {
   createSendgridClient,
 } = require("../../shared-integrations/src");
 const {
+  deriveUcqAgeBucket,
+  normalizeLeadQueueFamily,
+  normalizeLeadQueueFamilyList,
+} = require("../../shared-normalizers/src");
+const {
   assignCxQueueBatch,
   backfillCxQueueOrdering,
   cancelCxQueueItem,
@@ -1349,6 +1354,12 @@ function summarizeCallQueueItem(item) {
           progressiveStageKey === "second-contact" ? 1 :
             progressiveStageKey === "third-contact" ? 2 :
               99;
+  const ageBucket = deriveUcqAgeBucket({
+    ...item,
+    queueFamily: derivedFamily,
+    progressiveStageKey,
+    progressiveStageIndex,
+  });
 
   return {
     domain: item.domain,
@@ -1362,6 +1373,7 @@ function summarizeCallQueueItem(item) {
     cxAction: nextAction || null,
     score: item.priorityScore || null,
     queueFamily: derivedFamily,
+    ageBucket,
     progressiveStageKey,
     progressiveStageIndex,
     progressiveStageLabel: item.progressiveStageLabel || payloadSnapshot?.progressiveStageLabel || null,
@@ -1436,11 +1448,7 @@ function canViewQueueItemForAgent(queueItem = {}, context = {}) {
 }
 
 function parseQueueFamilyList(value, fallback = []) {
-  const raw = Array.isArray(value) ? value : String(value || "").split(",");
-  const families = raw
-    .map((entry) => String(entry || "").trim())
-    .filter(Boolean);
-  return families.length > 0 ? families : fallback;
+  return normalizeLeadQueueFamilyList(value, fallback);
 }
 
 function parseDomainList(value, fallback = []) {
@@ -2115,6 +2123,12 @@ function summarizeServedQueueItem(queueItem, cadenceDoc = null) {
           progressiveStageKey === "second-contact" ? 1 :
             progressiveStageKey === "third-contact" ? 2 :
               99;
+  const ageBucket = deriveUcqAgeBucket({
+    ...queueItem,
+    queueFamily: effectiveQueueFamily,
+    progressiveStageKey,
+    progressiveStageIndex,
+  });
   return {
     domain: queueItem.domain,
     caseId: String(queueItem.caseId),
@@ -2133,6 +2147,7 @@ function summarizeServedQueueItem(queueItem, cadenceDoc = null) {
     },
     score: queueItem.priorityScore ?? null,
     queueFamily: effectiveQueueFamily,
+    ageBucket,
     progressiveStageKey,
     progressiveStageIndex,
     progressiveStageLabel: queueItem.progressiveStageLabel || payloadSnapshot?.progressiveStageLabel || null,
@@ -2232,34 +2247,8 @@ async function buildCxQueueItems(context, limit = 50) {
 }
 
 function normalizeCxQueueFamily(value) {
-  const normalized = String(value || "").trim().toLowerCase();
-  if (
-    normalized === "fresh-day1"
-    || normalized === "day0"
-    || normalized === "first-day"
-    || normalized === "fresh"
-    || normalized === "hot"
-  ) {
-    return "fresh-day1";
-  }
-  if (
-    normalized === "fresh-day2to10"
-    || normalized === "fresh-day2to15"
-    || normalized === "day2to10"
-    || normalized === "day2to15"
-    || normalized === "day2_15"
-    || normalized === "day2-10"
-    || normalized === "day2-15"
-    || normalized === "day 2-10"
-    || normalized === "day 2-15"
-    || normalized === "day1"
-    || normalized === "day10"
-    || normalized === "day15"
-  ) {
-    return "fresh-day2to10";
-  }
-  if (normalized === "aged") return "aged";
-  return "fresh-day1";
+  const family = normalizeLeadQueueFamily(value);
+  return family === "unassigned" ? "fresh-day1" : family;
 }
 
 function getSmokeQueueFamilyConfig(queueFamily) {
@@ -2275,7 +2264,7 @@ function getSmokeQueueFamilyConfig(queueFamily) {
     case "aged":
       return {
         queueFamily: "aged",
-        queueTier: "aged",
+        queueTier: "later",
         activeDay: 30,
         currentStage: "aged",
         nextActionType: "cx:aged",
@@ -3799,11 +3788,29 @@ async function requestCxEmail(domain, user, input = {}) {
 }
 
 async function resolveCxDialQueueItem(domain, caseId, input = {}) {
+  const expectedDomain = normalizeDomain(domain);
+  const expectedCaseId = Number(caseId);
   const queueItemId = String(input.queueItemId || input.queueTicketId || "").trim();
   if (queueItemId) {
     const byId = await cxDialQueueRepository.findQueueItemById(queueItemId);
     if (byId) {
-      return byId.toObject ? byId.toObject() : byId;
+      const item = byId.toObject ? byId.toObject() : byId;
+      const actualDomain = normalizeDomain(item.domain);
+      if (expectedDomain && actualDomain && expectedDomain !== actualDomain) {
+        const err = new Error("CX queue item does not belong to the requested domain.");
+        err.status = 409;
+        throw err;
+      }
+      if (
+        Number.isFinite(expectedCaseId)
+        && Number.isFinite(Number(item.caseId))
+        && Number(item.caseId) !== expectedCaseId
+      ) {
+        const err = new Error("CX queue item does not belong to the requested case.");
+        err.status = 409;
+        throw err;
+      }
+      return item;
     }
   }
 
@@ -4577,11 +4584,7 @@ async function requestCxDial(domain, user, input = {}) {
     dispatchIntent,
     source: "control-plane",
     status: "queued",
-  }).catch((error) => ({
-    ok: false,
-    staged: false,
-    reason: error.message,
-  }));
+  });
 
   const effectiveQueueItemId = String(
     localStageResult?.queueItemId || dispatchIntent.queueItemId || "",
@@ -4860,8 +4863,21 @@ async function requestCxEndCall(domain, user, input = {}) {
   }
 
   const wrapUpAt = new Date();
+  const wrapUpMatch = {
+    domain: effectiveDomain,
+    ...(Number.isFinite(normalizedCaseId) ? { caseId: normalizedCaseId } : {}),
+    ...(queueAssignedExtensionId
+      ? { "assignment.extensionId": queueAssignedExtensionId }
+      : {
+        $or: [
+          { "assignment.extensionId": { $exists: false } },
+          { "assignment.extensionId": null },
+          { "assignment.extensionId": "" },
+        ],
+      }),
+  };
   const queueOutcome = queueItemId
-    ? await cxDialQueueRepository.updateQueueItem(queueItemId, {
+    ? await cxDialQueueRepository.transitionQueueItemState(queueItemId, ["claimed", "serving"], {
         state: "serving",
         claimUntil: null,
         "metadata.lastQueueAttemptHeldForDisposition": true,
@@ -4870,6 +4886,9 @@ async function requestCxEndCall(domain, user, input = {}) {
         "metadata.wrapUpStartedWorkflowId": requested?.workflowId || null,
         "metadata.wrapUpReason": "agent-ended-call",
         "metadata.assignmentReleasedByHangup": false,
+      }, {
+        match: wrapUpMatch,
+        returnNew: true,
       }).then((updated) => ({
         ok: true,
         mutated: Boolean(updated),
@@ -4887,7 +4906,7 @@ async function requestCxEndCall(domain, user, input = {}) {
       }))
     : null;
 
-  if (contextExtensionId) {
+  if (contextExtensionId && (!queueItemId || queueOutcome?.mutated)) {
     await setActivityState(contextExtensionId, "dispositioning", {
       source: "cx-end-call-wrap-up",
     }).catch(() => null);

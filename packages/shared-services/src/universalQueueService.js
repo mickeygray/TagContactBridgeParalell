@@ -5,6 +5,7 @@ const {
   poolBudgetRepository,
   leadCadenceRepository,
 } = require("../../shared-repositories/src");
+const { deriveUcqAgeBucket } = require("../../shared-normalizers/src");
 const { getConfig } = require("./pacingConfigService");
 const { formatHourBucket, isOperatingNow } = require("./businessHoursGuard");
 
@@ -60,19 +61,7 @@ function buildQueueLeadId({ domain = null, caseId = null, fallbackId = null, exp
 }
 
 function resolveAgeBucketFromAction(action = {}, cadence = {}) {
-  const key = String(action.key || "").trim().toLowerCase();
-  if (key === "cx-day0-1") return "just_came_in";
-  if (key === "cx-day0-2") return "second_contact";
-  if (key === "cx-day0-3") return "third_contact";
-
-  const activeDay = Number(cadence.schedule?.callPlan?.activeDay ?? cadence.callPlan?.activeDay);
-  if (Number.isFinite(activeDay)) {
-    if (activeDay <= 0) return "just_came_in";
-    if (activeDay <= 15) return "day2_10";
-    return "aged";
-  }
-
-  return key.includes("day0") || key.includes("day1") ? "just_came_in" : "day2_10";
+  return deriveUcqAgeBucket(action, cadence);
 }
 
 function extractLeadCadencePhone(cadence = {}) {
@@ -350,4 +339,5 @@ module.exports = {
   leadToQueueItemPayload,
   buildQueueLeadId,
   readDueLeads,
+  resolveAgeBucketFromAction,
 };

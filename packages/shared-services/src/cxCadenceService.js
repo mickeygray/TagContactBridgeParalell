@@ -1388,10 +1388,9 @@ async function handleCxCallPlaced(payload = {}) {
   }
   const queueState = String(queueItem.state || "").trim().toLowerCase();
   if (["completed", "cancelled"].includes(queueState)) {
-    await cxDialQueueRepository.updateQueueItem(queueItem._id, {
+    await cxDialQueueRepository.updateQueueItem(queueItem._id, normalizeExtraQueueUpdate({
       ...attemptQueuePatch,
       metadata: {
-        ...(queueItem.metadata || {}),
         dailyPlacedDateKey: attemptPatch.dailyPlacedDateKey,
         dailyPlacedCalls: attemptPatch.dailyPlacedCalls,
         ...touchMetadata,
@@ -1400,7 +1399,7 @@ async function handleCxCallPlaced(payload = {}) {
         lastQueueAttemptUii: payload.uii || null,
         lastQueueAttemptPhone: payload.phone || queueItem.phone || null,
       },
-    }).catch(() => null);
+    })).catch(() => null);
     return {
       ok: true,
       queueItemId: String(queueItem._id),
@@ -1411,10 +1410,9 @@ async function handleCxCallPlaced(payload = {}) {
     };
   }
   if (queueState !== "serving" && String(queueItem.metadata?.lastReleaseReason || "") === "callback") {
-    await cxDialQueueRepository.updateQueueItem(queueItem._id, {
+    await cxDialQueueRepository.updateQueueItem(queueItem._id, normalizeExtraQueueUpdate({
       ...attemptQueuePatch,
       metadata: {
-        ...(queueItem.metadata || {}),
         dailyPlacedDateKey: attemptPatch.dailyPlacedDateKey,
         dailyPlacedCalls: attemptPatch.dailyPlacedCalls,
         ...touchMetadata,
@@ -1424,7 +1422,7 @@ async function handleCxCallPlaced(payload = {}) {
         lastQueueAttemptUii: payload.uii || null,
         lastQueueAttemptPhone: payload.phone || queueItem.phone || null,
       },
-    }).catch(() => null);
+    })).catch(() => null);
     return {
       ok: true,
       queueItemId: String(queueItem._id),
@@ -1457,7 +1455,7 @@ async function handleCxCallPlaced(payload = {}) {
     || queueItem.metadata?.dealHandoffHold === true;
 
   if (holdUntilDisposition) {
-    await cxDialQueueRepository.updateQueueItem(queueItem._id, {
+    await cxDialQueueRepository.updateQueueItem(queueItem._id, normalizeExtraQueueUpdate({
       state: "serving",
       claimUntil: null,
       ...attemptQueuePatch,
@@ -1467,7 +1465,6 @@ async function handleCxCallPlaced(payload = {}) {
       progressiveStageIndex: progression.progressiveStageIndex,
       progressiveStageLabel: progression.progressiveStageLabel,
       metadata: {
-        ...(queueItem.metadata || {}),
         ...(progression.metadata || {}),
         dailyPlacedDateKey: attemptPatch.dailyPlacedDateKey,
         dailyPlacedCalls: attemptPatch.dailyPlacedCalls,
@@ -1476,6 +1473,11 @@ async function handleCxCallPlaced(payload = {}) {
         lastQueueAttemptHeldForDisposition: true,
         lastQueueAttemptUii: payload.uii || null,
         lastQueueAttemptPhone: payload.phone || queueItem.phone || null,
+      },
+    }), {
+      match: {
+        ...buildQueueItemMutationMatch(queueItem, { matchAssignment: false }),
+        ...(queueState ? { state: queueState } : {}),
       },
     });
   } else if (nextDelayMinutes == null) {
@@ -1490,7 +1492,6 @@ async function handleCxCallPlaced(payload = {}) {
         progressiveStageIndex: progression.progressiveStageIndex,
         progressiveStageLabel: progression.progressiveStageLabel,
         metadata: {
-          ...(queueItem.metadata || {}),
           ...(progression.metadata || {}),
           dailyPlacedDateKey: attemptPatch.dailyPlacedDateKey,
           dailyPlacedCalls: attemptPatch.dailyPlacedCalls,
@@ -1517,7 +1518,6 @@ async function handleCxCallPlaced(payload = {}) {
         progressiveStageIndex: progression.progressiveStageIndex,
         progressiveStageLabel: progression.progressiveStageLabel,
         metadata: {
-          ...(queueItem.metadata || {}),
           ...(progression.metadata || {}),
           dailyPlacedDateKey: attemptPatch.dailyPlacedDateKey,
           dailyPlacedCalls: attemptPatch.dailyPlacedCalls,
@@ -2118,7 +2118,7 @@ async function claimNextCxQueueItem(options = {}) {
       break;
     }
 
-    await cxDialQueueRepository.updateQueueItem(claimedObject._id, {
+    await cxDialQueueRepository.transitionQueueItemState(claimedObject._id, ["claimed"], {
       state: "queued",
       claimUntil: null,
       releaseAt: dialability.nextEligibleAt || new Date(Date.now() + 30 * 60 * 1000),
@@ -2129,6 +2129,8 @@ async function claimNextCxQueueItem(options = {}) {
       "metadata.lastPolicyHoldDailyCount": dialability.dailyCount,
       "metadata.lastPolicyHoldDailyMax": dialability.dailyMax,
       "metadata.lastPolicyHoldReleaseAt": dialability.nextEligibleAt || null,
+    }, {
+      match: buildQueueItemMutationMatch(claimedObject),
     }).catch(() => null);
     policySkipped.push({
       queueItemId: claimedObject?._id ? String(claimedObject._id) : null,
@@ -2174,10 +2176,12 @@ async function claimNextCxQueueItem(options = {}) {
 
   const timing = evaluateChannelContactTime(item.domain, "cx", new Date());
   if (!timing.allowed) {
-    await cxDialQueueRepository.updateQueueItem(item._id, {
+    await cxDialQueueRepository.transitionQueueItemState(item._id, ["claimed"], {
       state: "queued",
       claimUntil: null,
       releaseAt: timing.nextAllowedAt,
+    }, {
+      match: buildQueueItemMutationMatch(item),
     });
     return {
       ok: true,
@@ -2216,9 +2220,11 @@ async function claimNextCxQueueItem(options = {}) {
       scopedOpenAssignmentMap: true,
     });
     if (!ranking.selected) {
-      await cxDialQueueRepository.updateQueueItem(item._id, {
+      await cxDialQueueRepository.transitionQueueItemState(item._id, ["claimed"], {
         state: "ready",
         claimUntil: null,
+      }, {
+        match: buildQueueItemMutationMatch(item),
       });
       return {
         ok: true,
@@ -2241,7 +2247,7 @@ async function claimNextCxQueueItem(options = {}) {
       1,
     );
 
-    const updatedQueueItem = await cxDialQueueRepository.updateQueueItem(item._id, {
+    const updatedQueueItem = await cxDialQueueRepository.transitionQueueItemState(item._id, ["claimed"], {
       assignment: {
         extensionId: selectedAgent.extensionId,
         agentName: selectedAgent.name || null,
@@ -2260,7 +2266,22 @@ async function claimNextCxQueueItem(options = {}) {
         now: assignedAt,
         reason: "new-assignment",
       }),
+    }, {
+      match: buildQueueItemMutationMatch(item),
+      returnNew: true,
     });
+    if (!updatedQueueItem) {
+      await decrementAgentOpenAssignments(selectedAgent.extensionId).catch(() => null);
+      return {
+        ok: true,
+        claimed: false,
+        skipped: true,
+        reason: "queue-assignment-race",
+        detail: "The queue item changed before assignment could be finalized.",
+        queueFamily: assignedQueueFamily,
+        rankedAgents: formatRankedAgents(ranking, openAssignmentMap),
+      };
+    }
     claimedItem = updatedQueueItem?.toObject ? updatedQueueItem.toObject() : updatedQueueItem || claimedItem;
 
     assignment = {
@@ -2481,11 +2502,54 @@ function buildClearedDialRuntimeMetadata({ now = new Date(), reason = null } = {
   };
 }
 
+function assertQueueItemMatchesMutationContext(item = null, options = {}) {
+  if (!item) return;
+  const expectedDomain = normalizeDomain(options.domain);
+  const actualDomain = normalizeDomain(item.domain);
+  if (expectedDomain && actualDomain && expectedDomain !== actualDomain) {
+    const error = new Error("CX queue item does not belong to the requested domain");
+    error.status = 409;
+    throw error;
+  }
+
+  const expectedCaseId = Number(options.caseId);
+  const actualCaseId = Number(item.caseId);
+  if (
+    Number.isFinite(expectedCaseId)
+    && Number.isFinite(actualCaseId)
+    && expectedCaseId !== actualCaseId
+  ) {
+    const error = new Error("CX queue item does not belong to the requested case");
+    error.status = 409;
+    throw error;
+  }
+}
+
+function buildQueueItemMutationMatch(item = null, options = {}) {
+  const match = {};
+  const domain = normalizeDomain(options.domain || item?.domain);
+  if (domain) match.domain = domain;
+  const caseId = Number(options.caseId ?? item?.caseId);
+  if (Number.isFinite(caseId)) match.caseId = caseId;
+  const assignedExtensionId = String(item?.assignment?.extensionId || "").trim();
+  if (assignedExtensionId) match["assignment.extensionId"] = assignedExtensionId;
+  else if (options.matchAssignment !== false) {
+    match.$or = [
+      { "assignment.extensionId": { $exists: false } },
+      { "assignment.extensionId": null },
+      { "assignment.extensionId": "" },
+    ];
+  }
+  return match;
+}
+
 async function resolveQueueItemForMutation(options = {}) {
   const queueItemId = String(options.queueItemId || "").trim();
   if (queueItemId) {
     const item = await cxDialQueueRepository.findQueueItemById(queueItemId);
-    return item ? (item.toObject ? item.toObject() : item) : null;
+    const queueItem = item ? (item.toObject ? item.toObject() : item) : null;
+    assertQueueItemMatchesMutationContext(queueItem, options);
+    return queueItem;
   }
 
   const domain = normalizeDomain(options.domain);
@@ -2516,7 +2580,7 @@ async function releaseCxQueueItem(options = {}) {
     item,
     `queue-release:${options.reason || "manual-release"}`,
   );
-  await cxDialQueueRepository.transitionQueueItemState(
+  const updated = await cxDialQueueRepository.transitionQueueItemState(
     item._id,
     ["queued", "ready", "claimed", "serving", "paused"],
     {
@@ -2538,14 +2602,18 @@ async function releaseCxQueueItem(options = {}) {
       "metadata.lastRingcxReleaseCancel": ringcxCancel,
       ...normalizeExtraQueueUpdate(options.extraUpdate),
     },
+    {
+      match: buildQueueItemMutationMatch(item, options),
+      returnNew: true,
+    },
   );
-  if (isOpenAssignedQueueState(item.state) && previousAssignment?.extensionId) {
+  if (updated && isOpenAssignedQueueState(item.state) && previousAssignment?.extensionId) {
     await decrementAgentOpenAssignments(previousAssignment.extensionId).catch(() => null);
   }
 
   return {
     ok: true,
-    mutated: true,
+    mutated: Boolean(updated),
     state: "ready",
     queueItemId: String(item._id),
     caseId: Number(item.caseId),
@@ -2758,7 +2826,7 @@ async function rescheduleCxQueueItem(options = {}) {
   } else {
     ringcxCancel = await cancelRingcxPublishedCopyForQueueItem(item, cancelReason);
   }
-  await cxDialQueueRepository.transitionQueueItemState(
+  const updated = await cxDialQueueRepository.transitionQueueItemState(
     item._id,
     ["queued", "ready", "claimed", "serving", "paused"],
     {
@@ -2780,8 +2848,12 @@ async function rescheduleCxQueueItem(options = {}) {
       "metadata.lastRingcxReleaseCancel": ringcxCancel,
       ...normalizeExtraQueueUpdate(options.extraUpdate),
     },
+    {
+      match: buildQueueItemMutationMatch(item, options),
+      returnNew: true,
+    },
   );
-  if (options.cancelRingcxInBackground === true) {
+  if (updated && options.cancelRingcxInBackground === true) {
     cancelRingcxPublishedCopyForQueueItem(item, cancelReason)
       .then((backgroundCancel) =>
         cxDialQueueRepository.updateQueueItem(item._id, {
@@ -2800,13 +2872,13 @@ async function rescheduleCxQueueItem(options = {}) {
         }).catch(() => null),
       );
   }
-  if (isOpenAssignedQueueState(item.state) && previousAssignment?.extensionId) {
+  if (updated && isOpenAssignedQueueState(item.state) && previousAssignment?.extensionId) {
     await decrementAgentOpenAssignments(previousAssignment.extensionId).catch(() => null);
   }
 
   return {
     ok: true,
-    mutated: true,
+    mutated: Boolean(updated),
     state: "queued",
     queueItemId: String(item._id),
     caseId: Number(item.caseId),
@@ -2912,7 +2984,12 @@ async function stageCxDispatchIntent(options = {}) {
 
   let updated = null;
   if (item?._id) {
-    updated = await cxDialQueueRepository.updateQueueItem(item._id, {
+    const allowedStates = markServing
+      ? ["claimed", "serving"]
+      : markClaimed
+        ? ["ready", "claimed"]
+        : ["queued", "ready", "claimed", "serving", "paused"];
+    updated = await cxDialQueueRepository.transitionQueueItemState(item._id, allowedStates, {
       ...(assignedExtensionId
         ? {
           assignment: {
@@ -2949,7 +3026,18 @@ async function stageCxDispatchIntent(options = {}) {
       "metadata.lastDialIntentPhone": dispatchIntent.phone || null,
       "metadata.lastDialIntentQueueState": dispatchIntent.queueState || item.state || null,
       "metadata.lastDialIntentStatus": options.status || "staged",
+    }, {
+      match: buildQueueItemMutationMatch(item, {
+        domain: normalizedDomain,
+        caseId: Number.isFinite(normalizedCaseId) ? normalizedCaseId : null,
+      }),
+      returnNew: true,
     });
+    if (!updated) {
+      const error = new Error("CX queue item changed before dispatch intent could be staged");
+      error.status = 409;
+      throw error;
+    }
   }
 
   const effectiveItem = updated?.toObject ? updated.toObject() : updated || item || null;
@@ -2991,7 +3079,7 @@ async function completeCxQueueItem(options = {}) {
 
   const now = options.now ? new Date(options.now) : new Date();
   const previousAssignment = cloneAssignment(item.assignment);
-  await cxDialQueueRepository.transitionQueueItemState(
+  const updated = await cxDialQueueRepository.transitionQueueItemState(
     item._id,
     ["queued", "ready", "claimed", "serving", "paused"],
     {
@@ -3012,14 +3100,18 @@ async function completeCxQueueItem(options = {}) {
       "metadata.completionWorkflowId": options.workflowId || null,
       ...normalizeExtraQueueUpdate(options.extraUpdate),
     },
+    {
+      match: buildQueueItemMutationMatch(item, options),
+      returnNew: true,
+    },
   );
-  if (isOpenAssignedQueueState(item.state) && previousAssignment?.extensionId) {
+  if (updated && isOpenAssignedQueueState(item.state) && previousAssignment?.extensionId) {
     await decrementAgentOpenAssignments(previousAssignment.extensionId).catch(() => null);
   }
 
   return {
     ok: true,
-    mutated: true,
+    mutated: Boolean(updated),
     state: "completed",
     queueItemId: String(item._id),
     caseId: Number(item.caseId),
@@ -3036,7 +3128,7 @@ async function cancelCxQueueItem(options = {}) {
 
   const now = options.now ? new Date(options.now) : new Date();
   const previousAssignment = cloneAssignment(item.assignment);
-  await cxDialQueueRepository.transitionQueueItemState(
+  const updated = await cxDialQueueRepository.transitionQueueItemState(
     item._id,
     ["queued", "ready", "claimed", "serving", "paused"],
     {
@@ -3058,14 +3150,18 @@ async function cancelCxQueueItem(options = {}) {
       "metadata.completionWorkflowId": options.workflowId || null,
       ...normalizeExtraQueueUpdate(options.extraUpdate),
     },
+    {
+      match: buildQueueItemMutationMatch(item, options),
+      returnNew: true,
+    },
   );
-  if (isOpenAssignedQueueState(item.state) && previousAssignment?.extensionId) {
+  if (updated && isOpenAssignedQueueState(item.state) && previousAssignment?.extensionId) {
     await decrementAgentOpenAssignments(previousAssignment.extensionId).catch(() => null);
   }
 
   return {
     ok: true,
-    mutated: true,
+    mutated: Boolean(updated),
     state: "cancelled",
     queueItemId: String(item._id),
     caseId: Number(item.caseId),
