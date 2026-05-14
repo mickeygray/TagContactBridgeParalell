@@ -5,7 +5,7 @@ const {
   hourlyJobEventRepository,
   reviewQueueRepository,
 } = require("../../shared-repositories/src");
-const { getCompanyConfig } = require("../../shared-config/src");
+const { getInternalFromEmail } = require("../../shared-config/src");
 const { sendPlainEmail } = require("./sendgridMailService");
 const { recordWorkflowStage } = require("./workflowStateService");
 
@@ -75,13 +75,13 @@ function shouldEmailAlert(input = {}) {
 async function notifyHourlyJobAlert(job, options = {}) {
   const domain = normalizeDomain(job.domain);
   const toEmail = options.toEmail || DEFAULT_ALERT_EMAIL;
-  const company = getCompanyConfig(domain);
-  const fromEmail = company.fromEmail || `${domain.toLowerCase()}@example.com`;
-
+  // Internal job-failure alert — sent from the Parallel-internal
+  // sender so replies hit a human inbox, not the per-domain branded
+  // `team@` mailbox.
   try {
     await sendPlainEmail(domain, {
       personalizations: [{ to: [{ email: toEmail }] }],
-      from: { email: fromEmail, name: `${domain} Parallel` },
+      from: { email: getInternalFromEmail(), name: `${domain} Parallel` },
       subject: buildAlertSubject(job),
       content: [
         {

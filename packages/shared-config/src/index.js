@@ -1156,6 +1156,19 @@ function validateSharedConfig(config = {}) {
   return config;
 }
 
+/**
+ * From-address for INTERNAL Parallel emails (SMS alerts to ogleads,
+ * job-failure notifications, sweeper alerts, intake alerts, Lexis ops
+ * mail). Single source of truth so flipping the sender later is one
+ * env-var change. Per-domain branded senders (`company.fromEmail` /
+ * `WYNN_FROM_EMAIL` / `TAG_FROM_EMAIL`) are still used for
+ * prospect-facing cadence + outbound mail — DO NOT replace those with
+ * this helper.
+ */
+function getInternalFromEmail() {
+  return env("INTERNAL_FROM_EMAIL", "mgray@taxadvocategroup.com");
+}
+
 module.exports = {
   DEFAULT_COMPANY,
   PORTS,
@@ -1167,6 +1180,7 @@ module.exports = {
   getCorsOriginResolver,
   getGithubConfig,
   getIgPageToken,
+  getInternalFromEmail,
   getRingCentralConfig,
   getSharedConfig,
   resolveCompanyFromFbPageId,

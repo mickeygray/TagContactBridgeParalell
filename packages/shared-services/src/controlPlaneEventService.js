@@ -13,7 +13,7 @@ const {
 const {
   resolveCompanyByTrackingNumber,
 } = require("../../shared-integrations/src");
-const { env, getCompanyConfig } = require("../../shared-config/src");
+const { env, getCompanyConfig, getInternalFromEmail } = require("../../shared-config/src");
 const {
   recordConversationAi,
   recordQualityReview,
@@ -21,6 +21,7 @@ const {
 const { recordWorkflowStage } = require("./workflowStateService");
 const { classifySms, fastStopCheck } = require("./smsClassifierService");
 const { runAutoResponder } = require("./smsAutoResponderService");
+const { autoRouteHotInboundWorkflow } = require("./hotIntentRouterService");
 const { sendPlainEmail } = require("./sendgridMailService");
 
 const CONTROL_PLANE_EVENT_TYPES = Object.freeze({
@@ -81,21 +82,68 @@ function maskPhone(value) {
   return `***${digits.slice(-4)}`;
 }
 
-async function sendClientSmsAlert({ domain, phone, body, payload, workflowId, inboundMessageId }) {
+async function sendClientSmsAlert({ domain, phone, body, payload, workflowId, inboundMessageId, classification, hotRoutingResult }) {
   const normalizedDomain = normalizeDomain(domain);
   const company = getCompanyConfig(normalizedDomain);
+
+  // Per-domain recipient resolution. Order of preference:
+  //   1. {DOMAIN}_SMS_ALERT_EMAIL  e.g. WYNN_SMS_ALERT_EMAIL / TAG_SMS_ALERT_EMAIL
+  //   2. CLIENT_SMS_ALERT_EMAIL    (legacy; still honored — used for TAG today)
+  //   3. company.alertEmail        (from per-company config)
+  //   4. company.toEmail           (last-resort fallback)
+  //
+  // WYNN is prospecting — alerts go to lead-handlers (ogleads etc.) so a
+  // rep can claim the conversation and reply manually before the AI
+  // auto-fallback runs. TAG is client traffic — alerts go to the
+  // designated client-team escalation list.
+  const domainSpecificEnv = `${normalizedDomain}_SMS_ALERT_EMAIL`;
   const recipients = parseEmailList(
-    env("CLIENT_SMS_ALERT_EMAIL", company.alertEmail || company.toEmail || ""),
+    env(domainSpecificEnv, "")
+      || env("CLIENT_SMS_ALERT_EMAIL", "")
+      || company.alertEmail
+      || company.toEmail
+      || "",
   );
   if (recipients.length === 0) {
     return { ok: false, skipped: true, reason: "no-client-sms-alert-recipients" };
   }
 
+  // Domain-aware footer. TAG alerts are explicitly "AI is disabled, you
+  // own this reply." WYNN alerts say "you have first crack; AI fallback
+  // fires after the response window if nobody claims." Both surface the
+  // classifier's call so the recipient knows what kind of message it is.
+  const classificationLine = classification
+    ? `Classification: ${classification.tier || "unknown"} (${classification.intent || "—"}, conf ${classification.confidence ?? "—"})`
+    : null;
+
+  const hotIntent = classification?.hotIntent?.detected === true;
+  // Hot-intent routing summary — surfaces who (if anyone) the auto-router
+  // dropped this on. Recipients of the alert are the operations team, so
+  // they see "routed to Sean" before they bother paging anyone.
+  let hotIntentLine = null;
+  if (hotIntent) {
+    if (hotRoutingResult?.routed && hotRoutingResult.agent?.name) {
+      hotIntentLine = `🔥 HOT INTENT: ${classification.hotIntent.reason || "buying signal"} — routed to ${hotRoutingResult.agent.name}.`;
+    } else if (hotRoutingResult?.skipReason === "already-routed-and-fresh") {
+      hotIntentLine = `🔥 HOT INTENT: ${classification.hotIntent.reason || "buying signal"} — already with ${hotRoutingResult.agent?.name || "assigned rep"}.`;
+    } else if (hotRoutingResult?.skipReason === "no-available-agents") {
+      hotIntentLine = `🔥 HOT INTENT: ${classification.hotIntent.reason || "buying signal"} — UNASSIGNED (no agents available right now).`;
+    } else {
+      hotIntentLine = `🔥 HOT INTENT: ${classification.hotIntent.reason || "buying signal"}.`;
+    }
+  }
+
+  const footerLine = normalizedDomain === "TAG"
+    ? "AI auto-response is disabled for TAG — please reply via the inbox."
+    : normalizedDomain === "WYNN"
+      ? "WYNN: the inbox auto-routes hot leads to the next available rep. If the AI flagged this hot, the rep below already owns it."
+      : null;
+
   const text = [
     `Inbound SMS received on the ${normalizedDomain} line.`,
-    normalizedDomain === "TAG"
-      ? "AI auto-response is disabled for TAG; this is an alert-only notification."
-      : null,
+    hotIntentLine,
+    footerLine,
+    classificationLine,
     "",
     `From: ${phone || "unknown"}`,
     `To: ${payload?.destination_number || "unknown"}`,
@@ -108,17 +156,23 @@ async function sendClientSmsAlert({ domain, phone, body, payload, workflowId, in
     .filter((line) => line !== null)
     .join("\n");
 
+  const subjectPrefix = hotIntent ? "🔥 HOT " : "";
+
   return sendPlainEmail(normalizedDomain, {
     personalizations: [
       {
         to: recipients.map((email) => ({ email })),
       },
     ],
+    // Internal alert → always send from the Parallel-internal sender
+    // (mgray@ by default) so replies land somewhere a human reads.
+    // The brand-aware `${normalizedDomain} SMS Alerts` name still
+    // tells the recipient which line the inbound hit.
     from: {
-      email: company.fromEmail || company.alertEmail || undefined,
+      email: getInternalFromEmail(),
       name: `${normalizedDomain} SMS Alerts`,
     },
-    subject: `[${normalizedDomain} SMS] Reply from ${maskPhone(phone)}`,
+    subject: `${subjectPrefix}[${normalizedDomain} SMS] Reply from ${maskPhone(phone)}`,
     content: [{ type: "text/plain", value: text }],
   });
 }
@@ -707,6 +761,71 @@ async function handleSmsInboundForwarded(event) {
       .catch(() => null); // non-fatal: ConversationMessage is the source of truth
   }
 
+  // Hot-intent stamp + auto-route. Runs BEFORE alert + auto-responder
+  // so the alert email can carry a "🔥 routed to Sean" footer and the
+  // rep sees ownership in the inbox immediately on their next poll.
+  //
+  // - Classifier sets classification.hotIntent.detected when the
+  //   prospect shows buying intent.
+  // - On a hot inbound we (a) stamp aiHotIntent/Reason/DetectedAt on
+  //   the workflow, (b) round-robin pick the next available rep and
+  //   stamp routedToAgentId/Name/At.
+  // - If no agent is available (everyone toggled off / shift over),
+  //   the workflow still carries aiHotIntent=true so it surfaces in
+  //   the inbox with a "HOT - unassigned" indicator. The next rep to
+  //   log in sees it pinned.
+  let hotRoutingResult = null;
+  if (classification.hotIntent?.detected) {
+    await recordConversationAi({
+      domain,
+      caseId: payload.caseId != null ? Number(payload.caseId) : null,
+      phone: digits,
+      channel: "sms",
+      status: "observed",
+      latestInboundText: body || null,
+      latestInboundAt: new Date(),
+      sourceService: event.sourceService || "control-plane",
+      aiSummary: "Inbound SMS observed (hot intent)",
+      aiHotIntent: true,
+      aiHotIntentReason: classification.hotIntent.reason || null,
+      metadata: payload,
+    });
+    try {
+      hotRoutingResult = await autoRouteHotInboundWorkflow({
+        workflowId,
+        domain,
+        reason: classification.hotIntent.reason || null,
+      });
+    } catch (error) {
+      hotRoutingResult = { routed: false, skipReason: `error:${error.message}` };
+    }
+  }
+
+  // Alert the WYNN response team before the AI takes any action. Reps
+  // see the inbound, get a chance to claim the thread in the inbox, and
+  // can manually reply via CallRail OR move the lead into their CX
+  // queue to call directly. If nobody claims and the auto-responder
+  // proceeds below, the AI fallback fires (currently inline; will be
+  // delayed once the human-response window worker lands).
+  //
+  // Done with `.catch` not await so a SendGrid hiccup never blocks
+  // ingestion; alert delivery is reported in the return payload.
+  let wynnAlertResult = null;
+  try {
+    wynnAlertResult = await sendClientSmsAlert({
+      domain,
+      phone: digits,
+      body,
+      payload,
+      workflowId,
+      inboundMessageId: inboundMessage?.id || null,
+      classification,
+      hotRoutingResult,
+    });
+  } catch (error) {
+    wynnAlertResult = { ok: false, error: error.message };
+  }
+
   // Run the auto-responder. It enforces cooldown + the "only two tiers
   // auto-send" rule + writes outbound ConversationMessage row + DNC
   // consent record when applicable. Safe to call on needs_human — it
@@ -779,7 +898,12 @@ async function handleSmsInboundForwarded(event) {
     });
   }
 
-  return { classification, autoResult, inboundMessageId: inboundMessage?.id || null };
+  return {
+    classification,
+    autoResult,
+    alertResult: wynnAlertResult,
+    inboundMessageId: inboundMessage?.id || null,
+  };
 }
 
 // No-op handler: RC telephony envelopes used to materialize a review-

@@ -1750,7 +1750,15 @@ async function buildInboxWorkspace(domain, filters = {}) {
       channel: filters.channel,
       search: filters.search,
       limit: filters.limit,
+      // includeAutoResponded: legacy flag — let auto-handled threads
+      //   (dnc_confirm / callback_prompt) appear in the list.
+      // includeOptedOut:     show opted-out threads in the live view.
+      // includeTerminated:   show suppressed/closed threads in the
+      //   live view (audit / "all" tab).
       includeAutoResponded: Boolean(filters.includeAutoResponded),
+      includeOptedOut: Boolean(filters.includeOptedOut),
+      includeTerminated: Boolean(filters.includeTerminated),
+      optOutDetected: filters.optOutDetected,
     }),
     reviewQueueRepository.listReviewQueueItems(normalizedDomain, {
       workflow: filters.workflow || "conversation-ai",

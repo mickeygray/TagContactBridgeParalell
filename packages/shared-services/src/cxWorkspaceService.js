@@ -82,6 +82,76 @@ function normalizeExternalId(value) {
   return normalized || null;
 }
 
+function plainObject(value) {
+  return value && typeof value === "object" && !Array.isArray(value) ? value : {};
+}
+
+function resolveRingcxActiveCallRoute(queueItem = null, input = {}, workflowRoute = {}) {
+  const metadata = plainObject(queueItem?.metadata);
+  const lastPublishedRoute = plainObject(metadata.lastRingcxPublishedRoute);
+  const lastExecutionPublish = plainObject(metadata.lastDialExecutionRingcxPublish);
+  const publishedWorkflowRoute = plainObject(workflowRoute);
+
+  return {
+    campaignId:
+      normalizeExternalId(metadata.lastRingcxPublishedCampaignId)
+      || normalizeExternalId(lastPublishedRoute.campaignId)
+      || normalizeExternalId(lastExecutionPublish.campaignId)
+      || normalizeExternalId(metadata.lastDialExecutionCampaignId)
+      || normalizeExternalId(metadata.rcxVisibilityCampaignId)
+      || normalizeExternalId(publishedWorkflowRoute.campaignId)
+      || normalizeExternalId(input.campaignId)
+      || normalizeExternalId(input.rcxCampaignId)
+      || normalizeExternalId(queueItem?.rcxCampaignId)
+      || normalizeExternalId(metadata.rcxCampaignId),
+    dialGroupId:
+      normalizeExternalId(metadata.lastRingcxPublishedDialGroupId)
+      || normalizeExternalId(lastPublishedRoute.dialGroupId)
+      || normalizeExternalId(lastExecutionPublish.dialGroupId)
+      || normalizeExternalId(metadata.lastDialExecutionDialGroupId)
+      || normalizeExternalId(metadata.rcxVisibilityDialGroupId)
+      || normalizeExternalId(publishedWorkflowRoute.dialGroupId)
+      || normalizeExternalId(input.dialGroupId)
+      || normalizeExternalId(input.rcxDialGroupId)
+      || normalizeExternalId(queueItem?.rcxDialGroupId)
+      || normalizeExternalId(metadata.rcxDialGroupId),
+    externId:
+      normalizeExternalId(metadata.lastRingcxPublishedExternId)
+      || normalizeExternalId(lastPublishedRoute.externId)
+      || normalizeExternalId(lastExecutionPublish.externId)
+      || normalizeExternalId(metadata.lastDialExecutionExternId)
+      || normalizeExternalId(metadata.rcxVisibilityExternId)
+      || normalizeExternalId(publishedWorkflowRoute.externId)
+      || normalizeExternalId(input.externId),
+  };
+}
+
+async function resolveLastPublishedRouteFromWorkflow(queueItemId) {
+  const id = normalizeExternalId(queueItemId);
+  if (!id) return {};
+  const records = await workflowRecordRepository.listWorkflowRecords({
+    family: "cx",
+    subtype: "dial-request",
+    stage: "completed",
+    aggregateType: "cx-dial-queue",
+    aggregateId: id,
+    limit: 5,
+  }).catch(() => []);
+
+  for (const record of records) {
+    const payload = plainObject(record?.payload);
+    const publish = plainObject(payload.publish);
+    const route = {
+      campaignId: normalizeExternalId(publish.campaignId || payload.campaignId),
+      dialGroupId: normalizeExternalId(publish.dialGroupId || payload.dialGroupId),
+      accountId: normalizeExternalId(publish.accountId || payload.accountId),
+      externId: normalizeExternalId(publish.externId || payload.externId),
+    };
+    if (route.campaignId || route.dialGroupId || route.externId) return route;
+  }
+  return {};
+}
+
 function callIdentity(call = {}) {
   return normalizeExternalId(
     call?.telephonySessionId
@@ -2226,7 +2296,8 @@ async function buildCxQueueItems(context, limit = 50) {
         const family = String(item.queueFamily || "").trim();
         const stage = Number.isFinite(Number(item.progressiveStageIndex)) ? Number(item.progressiveStageIndex) : 99;
         const placedCalls = Number(item.placedCalls || 0) || 0;
-        if (family === "fresh-day1") return stage <= 0 && placedCalls <= 0 ? 0 : 1.5;
+        // Green first-contact stays first; green follow-ups still outrank blue.
+        if (family === "fresh-day1") return stage <= 0 && placedCalls <= 0 ? 0 : 0.5;
         if (family === "fresh-day2to10") return 1;
         if (family === "aged") return 2;
         return 99;
@@ -4414,6 +4485,8 @@ async function hangupCxCallAfterDisposition({
       user?.extensionId ||
       "",
   ).trim() || null;
+  const workflowPublishedRoute = await resolveLastPublishedRouteFromWorkflow(queueItemId);
+  const activeCallRoute = resolveRingcxActiveCallRoute(queueItem, input, workflowPublishedRoute);
 
   const payload = {
     domain: context.domain,
@@ -4424,24 +4497,9 @@ async function hangupCxCallAfterDisposition({
     assignedExtensionId,
     phone,
     uii,
-    campaignId:
-      input.campaignId ||
-      input.rcxCampaignId ||
-      queueItem?.rcxCampaignId ||
-      queueItem?.metadata?.rcxCampaignId ||
-      queueItem?.metadata?.lastDialExecutionCampaignId ||
-      null,
-    dialGroupId:
-      input.dialGroupId ||
-      input.rcxDialGroupId ||
-      queueItem?.rcxDialGroupId ||
-      queueItem?.metadata?.rcxDialGroupId ||
-      queueItem?.metadata?.lastDialExecutionDialGroupId ||
-      null,
-    externId:
-      queueItem?.metadata?.lastDialExecutionExternId ||
-      queueItem?.metadata?.rcxVisibilityExternId ||
-      null,
+    campaignId: activeCallRoute.campaignId,
+    dialGroupId: activeCallRoute.dialGroupId,
+    externId: activeCallRoute.externId,
     dialerEmail: context.account?.email || user?.email || null,
     dialerCxAgentId: context.account?.cxAgentId || context.agentState?.cxAgentId || user?.cxAgentId || null,
     callbackAt: input.callbackAt || input.scheduledFor || input.followUpAt || null,
@@ -4962,6 +5020,8 @@ async function requestCxEndCall(domain, user, input = {}) {
     },
     reviewCategory: "cx-end-call",
   });
+  const workflowPublishedRoute = await resolveLastPublishedRouteFromWorkflow(queueItemId);
+  const activeCallRoute = resolveRingcxActiveCallRoute(queueItem, input, workflowPublishedRoute);
 
   const requestPayload = {
     domain: effectiveDomain,
@@ -4973,15 +5033,9 @@ async function requestCxEndCall(domain, user, input = {}) {
       String(queueAssignedExtensionId || contextExtensionId || "").trim() || null,
     phone,
     uii,
-    campaignId:
-      queueItem?.metadata?.lastDialExecutionCampaignId ||
-      queueItem?.rcxCampaignId ||
-      queueItem?.metadata?.rcxCampaignId ||
-      null,
-    externId:
-      queueItem?.metadata?.lastDialExecutionExternId ||
-      queueItem?.metadata?.rcxVisibilityExternId ||
-      null,
+    campaignId: activeCallRoute.campaignId,
+    dialGroupId: activeCallRoute.dialGroupId,
+    externId: activeCallRoute.externId,
     dialerEmail: context.account?.email || user?.email || null,
     dialerCxAgentId: context.account?.cxAgentId || context.agentState?.cxAgentId || user?.cxAgentId || null,
     requestedBy: "cx-workspace",

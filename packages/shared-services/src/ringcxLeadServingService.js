@@ -989,6 +989,21 @@ async function publishQueueItemToRingcx(options = {}) {
       "metadata.rcxVisibilityLoadSummary": summary,
       "metadata.rcxVisibilityLastError": null,
       "metadata.rcxVisibilityReservation": reservation,
+      "metadata.lastRingcxPublishedAt": now,
+      "metadata.lastRingcxPublishedCampaignId": campaignId,
+      "metadata.lastRingcxPublishedDialGroupId": dialGroupId,
+      "metadata.lastRingcxPublishedAccountId": accountId,
+      "metadata.lastRingcxPublishedExternId": externId,
+      "metadata.lastRingcxPublishedRoute": {
+        campaignId,
+        dialGroupId,
+        accountId,
+        externId,
+        assignedExtensionId: assignedExtensionId || null,
+        agentUsername,
+        agentId: agentIdentity?.agentId || null,
+        routeMatchedToken: routing.agentRoute?.matchedToken || null,
+      },
     });
 
     await recordWorkflowStage({

@@ -161,8 +161,18 @@ const CLASSIFIER_TOOL = {
         description:
           "One sentence, under 180 chars, explaining why you picked this tier. This gets logged for admin audit.",
       },
+      hot_intent_detected: {
+        type: "boolean",
+        description:
+          "True when the prospect shows ANY signal of interest in tax help that a human rep should respond to NOW. Examples that should set this TRUE: asks a question about their tax situation, asks about pricing/process/timeline, says 'I need help' or 'I need to do something', asks 'can you help me', expresses confusion they want resolved, references an IRS notice or letter, asks 'when can we talk' or 'call me back'. Err on the side of TRUE — borderline interest beats missing a hot lead. Set FALSE for opt-outs, DNC confirms, hostility, spam, deliveries, totally unrelated chatter.",
+      },
+      hot_intent_reason: {
+        type: "string",
+        description:
+          "If hot_intent_detected is true, a 4-12 word phrase the rep will see (e.g. 'Asked about pricing', 'Has IRS notice, wants help', 'Ready to talk now'). Empty string when hot_intent_detected is false.",
+      },
     },
-    required: ["intent", "tier", "suggested_reply", "confidence", "rationale"],
+    required: ["intent", "tier", "suggested_reply", "confidence", "rationale", "hot_intent_detected", "hot_intent_reason"],
   },
 };
 
@@ -214,6 +224,21 @@ const SYSTEM_PROMPT = [
   "  - Never ask for SSN, bank info, or sensitive data over SMS.",
   "  - Tone: professional, warm, brief. No exclamation points. No emoji.",
   "",
+  "Hot-intent flag (orthogonal to tier — set independently):",
+  "  - Set hot_intent_detected=true when the prospect shows ANY signal of interest in tax help right now.",
+  "  - Examples that ARE hot intent:",
+  "      'How much do you charge?' / 'What does this cost?'",
+  "      'I got an IRS letter, can you help?'",
+  "      'I need to do something about my taxes'",
+  "      'Can you call me?' / 'When can we talk?'",
+  "      'What do you guys do?' (curiosity = interest)",
+  "      'I owe X thousand, what are my options?'",
+  "      'I think I need help with this'",
+  "  - Err HIGH. Borderline interest beats missing a hot lead — a rep can dismiss a false positive in one click.",
+  "  - Set hot_intent_detected=false for: hard_stop opt-outs, dnc_confirm replies, hostile / threatening messages, totally unrelated chatter, package deliveries, event promos.",
+  "  - hot_intent_reason is shown to the rep as a chip on the thread. Keep it 4-12 words, written as a fragment (no leading capital required), describing WHY they're hot.",
+  "  - A 'callback_prompt' tier should almost always also be hot_intent=true. They can coexist.",
+  "",
   "Always call the classify_sms tool. Do not return free-text.",
 ].join("\n");
 
@@ -229,6 +254,11 @@ const SYSTEM_PROMPT = [
  *   prior turns in this conversation for context (most-recent last).
  */
 async function classifySms(input = {}) {
+  // All regex short-circuits below are by definition NOT hot-intent
+  // (they're STOPs, DNCs, hostility, or noise). Bake the empty hotIntent
+  // shape into a shared helper so every return path conforms.
+  const noHot = { detected: false, reason: "" };
+
   const text = String(input.text || "").trim();
   if (!text) {
     return {
@@ -237,6 +267,7 @@ async function classifySms(input = {}) {
       suggestedReply: "",
       confidence: 1,
       rationale: "Empty inbound text.",
+      hotIntent: noHot,
       model: null,
     };
   }
@@ -258,6 +289,7 @@ async function classifySms(input = {}) {
       rationale: noReply
         ? `${noHelp.rationale} No auto-reply because the message is angry or a no-contact request.`
         : noHelp.rationale,
+      hotIntent: noHot,
       model: "regex-no-help-path",
     };
   }
@@ -269,6 +301,7 @@ async function classifySms(input = {}) {
       suggestedReply: "",
       confidence: 1,
       rationale: "Regex-matched carrier STOP keyword with no no-help reason.",
+      hotIntent: noHot,
       model: "regex-fast-path",
     };
   }
@@ -280,6 +313,7 @@ async function classifySms(input = {}) {
       suggestedReply: "",
       confidence: 0.95,
       rationale: "Inbound sounds angry or hostile; no automated response should be sent.",
+      hotIntent: noHot,
       model: "regex-hostile-path",
     };
   }
@@ -292,6 +326,7 @@ async function classifySms(input = {}) {
       suggestedReply: "",
       confidence: 0.9,
       rationale: unrelated.rationale,
+      hotIntent: noHot,
       model: "regex-unrelated-path",
     };
   }
@@ -340,6 +375,7 @@ async function classifySms(input = {}) {
       suggestedReply: "",
       confidence: 0,
       rationale: `Classifier call failed: ${error.message}`.slice(0, 180),
+      hotIntent: noHot,
       model: null,
     };
   }
@@ -352,24 +388,39 @@ async function classifySms(input = {}) {
       suggestedReply: "",
       confidence: 0,
       rationale: "Model returned no tool_use block.",
+      hotIntent: noHot,
       model: response?.model || null,
     };
   }
 
   const raw = toolUse.input || {};
+  const tier =
+    raw.tier === "hard_stop" ||
+    raw.tier === "dnc_confirm" ||
+    raw.tier === "callback_prompt"
+      ? raw.tier
+      : "needs_human";
+  // Hot-intent only makes sense for live prospects. Force-clear it on
+  // the suppression tiers so a model false positive can't route a STOP
+  // into a rep's queue.
+  const hotIntentDetected =
+    tier === "hard_stop" || tier === "dnc_confirm"
+      ? false
+      : Boolean(raw.hot_intent_detected);
   return {
     intent: String(raw.intent || "unknown"),
-    tier:
-      raw.tier === "hard_stop" ||
-      raw.tier === "dnc_confirm" ||
-      raw.tier === "callback_prompt"
-        ? raw.tier
-        : "needs_human",
+    tier,
     suggestedReply: String(raw.suggested_reply || "").trim(),
     confidence: Number.isFinite(Number(raw.confidence))
       ? Number(raw.confidence)
       : 0,
     rationale: String(raw.rationale || "").slice(0, 240),
+    hotIntent: {
+      detected: hotIntentDetected,
+      reason: hotIntentDetected
+        ? String(raw.hot_intent_reason || "").slice(0, 80)
+        : "",
+    },
     model: response?.model || null,
   };
 }

@@ -52,7 +52,7 @@ async function recordQualityReview(input = {}) {
 async function recordConversationAi(input = {}) {
   const domain = normalizeDomain(input.domain);
   const phone = String(input.phone || "").replace(/\D/g, "");
-  const workflow = await conversationWorkflowRepository.upsertConversationWorkflow(domain, phone, {
+  const baseUpdate = {
     caseId: input.caseId != null ? Number(input.caseId) : null,
     channel: input.channel || "sms",
     status: input.status || "observed",
@@ -67,7 +67,33 @@ async function recordConversationAi(input = {}) {
     aiSummary: input.aiSummary || null,
     sourceService: input.sourceService || "control-plane",
     metadata: input.metadata || null,
-  });
+  };
+
+  // Hot-intent: only stamp on inbound. Caller passes
+  //   aiHotIntent: true + aiHotIntentReason: "..." when the classifier
+  //   flagged buying intent. Don't clobber existing hot-intent state
+  //   when the caller omits these — only update if explicit.
+  if (input.aiHotIntent === true) {
+    baseUpdate.aiHotIntent = true;
+    baseUpdate.aiHotIntentReason = input.aiHotIntentReason || null;
+    baseUpdate.aiHotIntentDetectedAt = new Date();
+  } else if (input.aiHotIntent === false) {
+    // Explicit clear (used when the hot inbound has been worked).
+    baseUpdate.aiHotIntent = false;
+    baseUpdate.aiHotIntentReason = null;
+    baseUpdate.aiHotIntentDetectedAt = null;
+  }
+
+  // Soft-lock auto-clear on every inbound: the prospect replied, so
+  // ownership resets. Skip when caller explicitly says not to (e.g.
+  // updates that aren't from a new inbound).
+  if (input.clearSmsLock !== false) {
+    baseUpdate.smsLockedByAgentId = null;
+    baseUpdate.smsLockedByAgentName = null;
+    baseUpdate.smsLockedAt = null;
+  }
+
+  const workflow = await conversationWorkflowRepository.upsertConversationWorkflow(domain, phone, baseUpdate);
 
   if (workflow.caseId != null) {
     await caseProfileRepository.upsertCaseProfile(domain, workflow.caseId, {

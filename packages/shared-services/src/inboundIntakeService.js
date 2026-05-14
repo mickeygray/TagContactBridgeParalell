@@ -10,7 +10,7 @@ const {
   resolveCompanyByTrackingNumber,
   createTrustedFormClient,
 } = require("../../shared-integrations/src");
-const { env, getCompanyConfig, resolveCompanyFromPayload } = require("../../shared-config/src");
+const { env, getCompanyConfig, getInternalFromEmail, resolveCompanyFromPayload } = require("../../shared-config/src");
 const {
   consentRecordRepository,
   leadCadenceRepository,
@@ -53,6 +53,61 @@ function extractFirstValue(...values) {
     if (next) return next;
   }
   return null;
+}
+
+function extractLeadEmail(payload = {}) {
+  return extractFirstValue(
+    payload.email,
+    payload.Email,
+    payload.emailAddress,
+    payload.email_address,
+    payload.em,
+  );
+}
+
+function extractLeadPhone(payload = {}) {
+  return normalizePhone(
+    payload.phone ||
+      payload.primaryPhone ||
+      payload.cellPhone ||
+      payload.mobile ||
+      payload.tel ||
+      payload.phoneNumber ||
+      payload.phone_number ||
+      payload.ph,
+  );
+}
+
+function extractLeadCity(payload = {}) {
+  return extractFirstValue(payload.city, payload.City, payload.ct);
+}
+
+function extractLeadState(payload = {}) {
+  return extractFirstValue(payload.state, payload.State, payload.st);
+}
+
+function extractLeadZip(payload = {}) {
+  return extractFirstValue(
+    payload.zip,
+    payload.Zip,
+    payload.zipCode,
+    payload.zip_code,
+    payload.postalCode,
+    payload.postal_code,
+    payload.zi,
+  );
+}
+
+function extractLeadAddress(payload = {}) {
+  return extractFirstValue(
+    payload.address,
+    payload.address1,
+    payload.street,
+    payload.streetAddress,
+    payload.street_address,
+    payload.addr,
+    payload.ad,
+  );
 }
 
 function extractTrustedFormCertUrl(payload = {}) {
@@ -173,6 +228,12 @@ function extractVendorSourceName(payload = {}) {
     payload.source,
     payload.trafficSource,
     payload.utm_source,
+    payload.pubid,
+    payload.campid,
+    payload.compid,
+    payload.affid,
+    payload.subid,
+    payload.url,
   );
 }
 
@@ -185,6 +246,12 @@ function extractPartnerSourceName(payload = {}) {
     payload.trafficSource,
     payload.utm_source,
     payload.sourceName,
+    payload.pubid,
+    payload.campid,
+    payload.compid,
+    payload.affid,
+    payload.subid,
+    payload.url,
   );
 }
 
@@ -262,10 +329,14 @@ function buildLeadAlertText(normalized = {}, caseId, validation = {}, companyCon
 async function sendInboundLeadAlertEmail(normalized = {}, caseId, validation = {}, options = {}) {
   const companyConfig = options.companyConfig || getCompanyConfig(normalized.domain);
   const toEmail = cleanString(companyConfig?.toEmail) || cleanString(companyConfig?.alertEmail);
-  const fromEmail = cleanString(companyConfig?.alertEmail) || cleanString(companyConfig?.fromEmail);
-  if (!toEmail || !fromEmail) {
+  if (!toEmail) {
     return { ok: false, skipped: true, reason: "missing-alert-address" };
   }
+  // Internal new-lead alert (channel: "lead-alert") — replies should
+  // route to a human inbox, not a branded `team@` shared box. Send
+  // from the Parallel-internal sender; brand still appears in the
+  // "$NAME Leads" display name + the [DOMAIN] subject tag.
+  const fromEmail = getInternalFromEmail();
 
   const source = describeLeadSource(normalized, companyConfig);
   const subject =
@@ -530,9 +601,30 @@ function splitName(fullName) {
 }
 
 function deriveNameFields(payload = {}) {
-  const firstName = normalizeNamePart(payload.firstName || payload.first_name || payload.firstname);
-  const lastName = normalizeNamePart(payload.lastName || payload.last_name || payload.lastname);
-  const fullName = normalizeFullName(payload.name || payload.fullName || payload.full_name);
+  const firstName = normalizeNamePart(
+    extractFirstValue(
+      payload.firstName,
+      payload.first_name,
+      payload.firstname,
+      payload.givenName,
+      payload.given_name,
+      payload.fname,
+      payload.fn,
+    ),
+  );
+  const lastName = normalizeNamePart(
+    extractFirstValue(
+      payload.lastName,
+      payload.last_name,
+      payload.lastname,
+      payload.surname,
+      payload.lname,
+      payload.ln,
+    ),
+  );
+  const fullName = normalizeFullName(
+    extractFirstValue(payload.name, payload.fullName, payload.full_name, payload.nm),
+  );
 
   if (firstName || lastName) {
     const resolvedLastName = lastName || "Prospect";
@@ -548,7 +640,16 @@ function deriveNameFields(payload = {}) {
 
 function buildExternalLeadId(prefix, payload = {}) {
   const explicit = cleanString(
-    payload.externalLeadId || payload.lead_id || payload.leadId || payload.id || payload.contactId,
+    payload.externalLeadId ||
+      payload.external_id ||
+      payload.lead_id ||
+      payload.leadId ||
+      payload.id ||
+      payload.contactId ||
+      payload.contact_id ||
+      payload.subid ||
+      payload.clickId ||
+      payload.clickid,
   );
 
   if (explicit) return explicit;
@@ -565,30 +666,49 @@ function buildExternalLeadId(prefix, payload = {}) {
 function normalizeWebsiteLeadPayload(payload = {}, headers = {}) {
   const domain = resolveCompanyFromTrackingOrPayload(payload, headers);
   const nameFields = deriveNameFields(payload);
-  const phone = normalizePhone(
-    payload.phone || payload.primaryPhone || payload.cellPhone || payload.mobile || payload.tel,
-  );
+  const phone = extractLeadPhone(payload);
+  const email = extractLeadEmail(payload);
+  const city = extractLeadCity(payload);
+  const state = extractLeadState(payload);
 
   return {
     domain,
     intakeRoute: "website-post",
     intakeSource: "website",
-    partnerSource: cleanString(payload.source || payload.utm_source || payload.website || "website"),
+    partnerSource:
+      extractPartnerSourceName(payload) || cleanString(payload.website || "website"),
     sourceChannel: "website",
-    sourceName: cleanString(payload.sourceName || payload.source || payload.form_name || "Website Lead"),
+    sourceName: cleanString(
+      payload.sourceName ||
+        payload.source ||
+        payload.form_name ||
+        payload.campid ||
+        payload.pubid ||
+        "Website Lead",
+    ),
     logicsSourceName: cleanString(payload.logicsSourceName || payload.SourceName),
     sourceId: Number.isFinite(Number(payload.sourceId)) ? Number(payload.sourceId) : null,
     routeCampaignKey: cleanString(payload.routeCampaignKey || payload.campaignKey),
-    routeCampaignName: cleanString(payload.routeCampaignName || payload.campaignName || payload.campaign),
+    routeCampaignName: cleanString(
+      payload.routeCampaignName || payload.campaignName || payload.campaign || payload.campid,
+    ),
     vendorSourceName: extractVendorSourceName(payload),
     externalLeadId: buildExternalLeadId("website", payload),
     firstName: nameFields.firstName,
     lastName: nameFields.lastName,
     name: nameFields.name,
-    email: cleanString(payload.email),
+    email,
     primaryPhone: phone,
-    city: cleanString(payload.city),
-    state: cleanString(payload.state),
+    city,
+    state,
+    address: extractLeadAddress(payload),
+    zip: extractLeadZip(payload),
+    dateOfBirth: extractFirstValue(payload.dateOfBirth, payload.date_of_birth, payload.dob, payload.DOB),
+    gender: extractFirstValue(payload.gender, payload.gn),
+    sourceUrl: extractFirstValue(payload.sourceUrl, payload.source_url, payload.url, payload.referer),
+    vendorCampaignId: extractFirstValue(payload.vendorCampaignId, payload.campaignId, payload.campid),
+    vendorPublisherId: extractFirstValue(payload.vendorPublisherId, payload.publisherId, payload.pubid),
+    vendorCompanyId: extractFirstValue(payload.vendorCompanyId, payload.companyId, payload.compid),
     trustedFormCertUrl: extractTrustedFormCertUrl(payload),
     jornayaLeadId: extractJornayaLeadId(payload),
     receivedIp: extractClientIp(headers),
@@ -1021,14 +1141,14 @@ async function checkEmailHashExists(domain, emailHash, options = {}) {
 async function intakeLdPrePing(payload = {}, options = {}) {
   const domain = "WYNN";
   const companyConfig = options.companyConfig || getCompanyConfig(domain);
-  const state = normalizeState(payload.State || payload.state);
+  const state = normalizeState(extractLeadState(payload));
   const dob = cleanString(
     payload["Date Of Birth"] ||
       payload["Date  Of  Birth"] ||
       payload.dob ||
       payload.DOB,
   );
-  const rawEmail = cleanString(payload.email || payload.Email || payload.emailAddress);
+  const rawEmail = extractLeadEmail(payload);
   const suppliedHash = cleanString(
     payload.email_hash ||
       payload.emailHash ||

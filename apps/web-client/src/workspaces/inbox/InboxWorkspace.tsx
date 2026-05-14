@@ -1,5 +1,5 @@
 import * as React from "react";
-import { Inbox, MessageCircleWarning, MessageSquareText, Search, ShieldAlert } from "lucide-react";
+import { Flame, Inbox, Lock, MessageCircleWarning, MessageSquareText, Search, ShieldAlert, UserCheck } from "lucide-react";
 import { Button } from "@/components/ui/Button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle, KpiCard } from "@/components/ui/Card";
 import { CaseLink } from "@/components/ui/CaseLink";
@@ -22,6 +22,7 @@ import {
   useInboxWake,
   useInboxWorkspace,
 } from "@/lib/api/queries/inbox";
+import { useSession } from "@/lib/auth/useSession";
 import type {
   ConversationMessage,
   ConversationMessageDispositionLabel,
@@ -32,8 +33,18 @@ import { useDomainStore } from "@/lib/domain/domainStore";
 import { presentImportantWorkflowRecords } from "@/lib/events/presentation";
 import { formatDateTime, formatNumber, formatRelative } from "@/lib/utils/format";
 
-export function InboxWorkspace() {
-  const domain = useDomainStore((s) => s.domain);
+interface InboxWorkspaceProps {
+  /**
+   * Lock the inbox to a specific domain (e.g. "WYNN") and bypass the
+   * global domain switcher. Used by the agent-facing CX shell where the
+   * SMS inbox is intentionally scoped to one company.
+   */
+  forcedDomain?: string;
+}
+
+export function InboxWorkspace({ forcedDomain }: InboxWorkspaceProps = {}) {
+  const storedDomain = useDomainStore((s) => s.domain);
+  const domain = forcedDomain ?? storedDomain;
   const [search, setSearch] = React.useState("");
   const [statusFilter, setStatusFilter] = React.useState("all");
   const [channelFilter, setChannelFilter] = React.useState("all");
@@ -49,6 +60,9 @@ export function InboxWorkspace() {
   const [note, setNote] = React.useState("");
   const [sleepUntil, setSleepUntil] = React.useState("");
   const [commandMessage, setCommandMessage] = React.useState<string | null>(null);
+  // When another rep holds the soft-lock, the rep must click "Take over"
+  // to flip this true. It auto-resets when the selected thread changes.
+  const [forceOverride, setForceOverride] = React.useState(false);
 
   const approve = useInboxApprove(domain);
   const cancel = useInboxCancel(domain);
@@ -58,6 +72,12 @@ export function InboxWorkspace() {
   const wake = useInboxWake(domain);
   const dnc = useInboxDnc(domain);
   const dispose = useInboxMessageDisposition(domain);
+  const { user } = useSession();
+  // We compare against the email since that's the identifier reps see
+  // on routedToAgentName/smsLockedByAgentName. The router stamps by
+  // extensionId on the backend, but the UI surfaces names — close
+  // enough for the "Routed to you" / "you have the lock" indicators.
+  const currentRepName = user?.name || user?.email || "";
 
   const workflows = inbox.data?.workflows ?? [];
   const selected =
@@ -97,8 +117,23 @@ export function InboxWorkspace() {
     if (selected?._id) {
       setDraft(selected.aiDraftReply ?? "");
       setSelectedId(selected._id);
+      // Reset the override toggle whenever the rep navigates to a
+      // different thread, so the affordance has to be explicit each
+      // time. Locks evaporate on inbound anyway — usually this just
+      // means the rep moved on.
+      setForceOverride(false);
     }
   }, [selected?._id, selected?.aiDraftReply]);
+
+  // Soft-lock derived state. `lockedByOther` is true when ANOTHER rep
+  // is currently authoring on this thread; the rep can hit "Take over"
+  // to flip forceOverride on, which sends override:true with the next
+  // approve/edit/regenerate call.
+  const lockedByOther = Boolean(
+    selected?.smsLockedByAgentName &&
+      selected.smsLockedByAgentName !== currentRepName,
+  );
+  const replyDisabled = lockedByOther && !forceOverride;
 
   async function runCommand(
     action: () => Promise<{ action: string; status: string; sleepUntil?: string | Date | null }>,
@@ -203,6 +238,30 @@ export function InboxWorkspace() {
                       <div className="mt-1 text-[11px] text-muted-foreground">
                         {workflow.latestInboundAt ? formatRelative(workflow.latestInboundAt) : "Awaiting inbound activity"}
                       </div>
+                      <div className="mt-1 flex flex-wrap items-center gap-1.5">
+                        {workflow.aiHotIntent ? (
+                          <span className="inline-flex items-center gap-1 rounded-full bg-rose-500/15 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-rose-700 dark:text-rose-300">
+                            <Flame className="h-2.5 w-2.5" /> hot
+                          </span>
+                        ) : null}
+                        {workflow.routedToAgentName ? (
+                          workflow.routedToAgentName === currentRepName ? (
+                            <span className="inline-flex items-center gap-1 rounded-full bg-emerald-500/15 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-700 dark:text-emerald-300">
+                              <UserCheck className="h-2.5 w-2.5" /> you
+                            </span>
+                          ) : (
+                            <span className="text-[10px] text-muted-foreground">
+                              → {workflow.routedToAgentName}
+                            </span>
+                          )
+                        ) : null}
+                        {workflow.smsLockedByAgentName &&
+                        workflow.smsLockedByAgentName !== currentRepName ? (
+                          <span className="inline-flex items-center gap-1 rounded-full bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-medium text-amber-700 dark:text-amber-300">
+                            <Lock className="h-2.5 w-2.5" /> {workflow.smsLockedByAgentName}
+                          </span>
+                        ) : null}
+                      </div>
                     </button>
                   </li>
                 ))}
@@ -256,6 +315,43 @@ export function InboxWorkspace() {
                 {selectedSleepUntil ? (
                   <div className="rounded-md border border-border bg-muted/40 px-3 py-2 text-sm text-muted-foreground">
                     Snoozed until {formatDateTime(selectedSleepUntil)}
+                  </div>
+                ) : null}
+
+                {selected.aiHotIntent ? (
+                  <div className="flex flex-wrap items-center gap-2 rounded-md border border-rose-300/70 bg-rose-50 px-3 py-2 text-xs text-rose-900 dark:border-rose-500/40 dark:bg-rose-950/40 dark:text-rose-100">
+                    <Flame className="h-3.5 w-3.5" />
+                    <span className="font-semibold uppercase tracking-wide">Hot intent</span>
+                    {selected.aiHotIntentReason ? (
+                      <span className="font-medium">· {selected.aiHotIntentReason}</span>
+                    ) : null}
+                    {selected.routedToAgentName ? (
+                      selected.routedToAgentName === currentRepName ? (
+                        <span className="ml-auto inline-flex items-center gap-1 rounded-full bg-emerald-500/20 px-2 py-0.5 text-[11px] font-semibold text-emerald-900 dark:text-emerald-200">
+                          <UserCheck className="h-3 w-3" /> Routed to you
+                        </span>
+                      ) : (
+                        <span className="ml-auto">· routed to {selected.routedToAgentName}</span>
+                      )
+                    ) : (
+                      <span className="ml-auto italic">unassigned</span>
+                    )}
+                  </div>
+                ) : null}
+
+                {selected.smsLockedByAgentName &&
+                selected.smsLockedByAgentName !== currentRepName ? (
+                  <div className="flex flex-wrap items-center gap-2 rounded-md border border-amber-300/60 bg-amber-50 px-3 py-2 text-xs text-amber-900 dark:border-amber-500/40 dark:bg-amber-950/40 dark:text-amber-100">
+                    <Lock className="h-3.5 w-3.5" />
+                    <span className="font-medium">
+                      {selected.smsLockedByAgentName} is replying
+                    </span>
+                    {selected.smsLockedAt ? (
+                      <span>· {formatRelative(selected.smsLockedAt)}</span>
+                    ) : null}
+                    <span className="ml-auto italic">
+                      Lock clears on the prospect's next reply, or use Take over.
+                    </span>
                   </div>
                 ) : null}
 
@@ -318,11 +414,11 @@ export function InboxWorkspace() {
                           placeholder="Why you changed this thread"
                         />
                       </div>
-                      <div className="flex flex-wrap gap-2">
+                      <div className="flex flex-wrap items-center gap-2">
                         <Button
                           size="sm"
                           isLoading={approve.isPending}
-                          disabled={!selectedWorkflowId}
+                          disabled={!selectedWorkflowId || replyDisabled}
                           onClick={() =>
                             selectedWorkflowId
                               ? runCommand(() =>
@@ -330,6 +426,7 @@ export function InboxWorkspace() {
                                     workflowId: selectedWorkflowId,
                                     draft,
                                     note,
+                                    override: forceOverride || undefined,
                                   }),
                                 )
                               : undefined
@@ -341,7 +438,7 @@ export function InboxWorkspace() {
                           size="sm"
                           variant="secondary"
                           isLoading={editSend.isPending}
-                          disabled={!selectedWorkflowId}
+                          disabled={!selectedWorkflowId || replyDisabled}
                           onClick={() =>
                             selectedWorkflowId
                               ? runCommand(() =>
@@ -349,6 +446,7 @@ export function InboxWorkspace() {
                                     workflowId: selectedWorkflowId,
                                     draft,
                                     note,
+                                    override: forceOverride || undefined,
                                   }),
                                 )
                               : undefined
@@ -360,13 +458,14 @@ export function InboxWorkspace() {
                           size="sm"
                           variant="secondary"
                           isLoading={regenerate.isPending}
-                          disabled={!selectedWorkflowId}
+                          disabled={!selectedWorkflowId || replyDisabled}
                           onClick={() =>
                             selectedWorkflowId
                               ? runCommand(() =>
                                   regenerate.mutateAsync({
                                     workflowId: selectedWorkflowId,
                                     seed: note || draft,
+                                    override: forceOverride || undefined,
                                   }),
                                 )
                               : undefined
@@ -374,7 +473,28 @@ export function InboxWorkspace() {
                         >
                           Regenerate
                         </Button>
+                        {lockedByOther ? (
+                          <Button
+                            size="sm"
+                            variant={forceOverride ? "primary" : "secondary"}
+                            onClick={() => setForceOverride((current) => !current)}
+                            title={
+                              forceOverride
+                                ? "Override active — your next reply will steal the lock from " +
+                                  selected.smsLockedByAgentName
+                                : "Take the lock from " + selected.smsLockedByAgentName
+                            }
+                          >
+                            <Lock className="h-3.5 w-3.5" />
+                            {forceOverride ? "Override armed" : "Take over"}
+                          </Button>
+                        ) : null}
                       </div>
+                      {replyDisabled ? (
+                        <p className="text-[11px] text-amber-700 dark:text-amber-300">
+                          {selected.smsLockedByAgentName} is replying — wait for the prospect's next inbound or click <strong>Take over</strong> to send anyway.
+                        </p>
+                      ) : null}
                     </div>
 
                     <div className="space-y-3 rounded-md border border-border p-4">

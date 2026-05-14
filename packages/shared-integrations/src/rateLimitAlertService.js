@@ -73,11 +73,21 @@ function formatAlertText(payload) {
     "",
     `Service: ${payload.service || "unknown"}`,
     `Scope: ${payload.scope || "unknown"}`,
+    `Usage group: ${payload.usageGroup || details.rateLimitHeaders?.group || "unknown"}`,
     `Opened at: ${payload.openedAt || new Date().toISOString()}`,
     `Next attempt: ${payload.nextAttemptAt || "unknown"}`,
     `Status: ${details.responseStatus || payload.error?.status || "429"}`,
     `Retry-After: ${details.retryAfter || "not provided"}`,
   ];
+
+  if (details.rateLimitHeaders) {
+    lines.push(
+      `Limit: ${details.rateLimitHeaders.limit || "unknown"}`,
+      `Remaining: ${details.rateLimitHeaders.remaining || "unknown"}`,
+      `Window: ${details.rateLimitHeaders.window || "unknown"}`,
+      `Header group: ${details.rateLimitHeaders.group || "unknown"}`,
+    );
+  }
 
   if (details.method || payload.method) lines.push(`Method: ${details.method || payload.method}`);
   if (details.path || payload.path) lines.push(`Path: ${details.path || payload.path}`);

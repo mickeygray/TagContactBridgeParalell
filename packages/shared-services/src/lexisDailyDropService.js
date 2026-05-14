@@ -4,6 +4,7 @@ const fs = require("fs");
 const path = require("path");
 const {
   env,
+  getInternalFromEmail,
 } = require("../../shared-config/src");
 const { sendPlainEmail } = require("./sendgridMailService");
 const { recordWorkflowStage } = require("./workflowStateService");
@@ -341,11 +342,11 @@ async function sendLexisDailyDropMail(options = {}) {
           subject: options.subject || "Daily Drop",
         })),
         from: {
-          email: options.fromEmail || env("ADMIN_EMAIL", ""),
+          email: options.fromEmail || getInternalFromEmail(),
           name: options.fromName || "Lexis Daily Drop",
         },
         reply_to: {
-          email: options.replyToEmail || options.fromEmail || env("ADMIN_EMAIL", ""),
+          email: options.replyToEmail || options.fromEmail || getInternalFromEmail(),
           name: options.replyToName || options.fromName || "Lexis Daily Drop",
         },
         content: [
@@ -375,11 +376,11 @@ async function sendLexisDailyDropMail(options = {}) {
           subject: options.alertSubject || `Daily Drop - ${dateKey}`,
         })),
         from: {
-          email: options.fromEmail || env("ADMIN_EMAIL", ""),
+          email: options.fromEmail || getInternalFromEmail(),
           name: options.fromName || "Lexis Daily Drop",
         },
         reply_to: {
-          email: options.replyToEmail || options.fromEmail || env("ADMIN_EMAIL", ""),
+          email: options.replyToEmail || options.fromEmail || getInternalFromEmail(),
           name: options.replyToName || options.fromName || "Lexis Daily Drop",
         },
         content: [

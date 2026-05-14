@@ -249,6 +249,11 @@ const {
   wakeInboxWorkflow,
 } = require("./inboxCommandService");
 const {
+  autoRouteHotInboundWorkflow,
+  isAvailableForHotIntent,
+  listAvailableHotIntentAgents,
+} = require("./hotIntentRouterService");
+const {
   relayControlPlaneEvent,
   relayMetricObserved,
   relayReviewItemObserved,
@@ -660,6 +665,9 @@ module.exports = {
   cancelInboxWorkflow,
   dncInboxWorkflow,
   editSendInboxWorkflow,
+  autoRouteHotInboundWorkflow,
+  isAvailableForHotIntent,
+  listAvailableHotIntentAgents,
   executeCxLogicsCreateCase,
   executeCxSaveCaseProfileFromLogics,
   executeCxLogicsFindMatch,

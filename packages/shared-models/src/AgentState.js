@@ -125,6 +125,11 @@ const agentStateSchema = new mongoose.Schema(
         lastBreakReleaseAt: { type: Date, default: null },
       },
       lastQueueReleaseAt: { type: Date, default: null },
+      // Round-robin cursor for hot-intent SMS routing. The
+      // hotIntentRouterService picks the available rep with the OLDEST
+      // value here (so a never-routed rep wins first), then bumps it
+      // to now. Natural round-robin without a separate counter doc.
+      lastHotIntentRoutedAt: { type: Date, default: null },
       assignmentStats: {
         date: { type: String, default: null },
         totalAssigned: { type: Number, default: 0 },

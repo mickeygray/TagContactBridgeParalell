@@ -7,8 +7,9 @@
 // /voice/api/v1/admin/accounts/{accountId}/...
 //
 // RingCX live agent/IQ session endpoints are kept separate from the
-// campaign/lead/gate/active-call surface. RC support guidance lists
-// those as /v1/admin/accounts/{accountId}/... endpoints.
+// campaign/lead/gate/active-call surface. In the live tenant these sit
+// under /voice/api/v1/admin/accounts/{accountId}/...; the bare /v1/admin
+// path returns the RingCX web app shell instead of JSON.
 //
 // Higher-level orchestrators (cxCampaignService) consume this client
 // and stitch together the "build campaign / load lead / dial / etc"
@@ -49,13 +50,13 @@ const DEFAULT_RC_BASE = "https://platform.ringcentral.com";
 const DEFAULT_RCX_BASE = "https://ringcx.ringcentral.com";
 const DEFAULT_TOKEN_EXCHANGE_PATH = "/api/auth/login/rc/accesstoken";
 const DEFAULT_TOKEN_REFRESH_PATH = "/api/auth/token/refresh";
-const DEFAULT_SESSION_ADMIN_PATH_PREFIX = "/v1/admin";
+const DEFAULT_SESSION_ADMIN_PATH_PREFIX = "/voice/api/v1/admin";
 
 // RingCX bearer expires every 5 minutes. We refresh proactively when
 // fewer than this many ms remain so a long-running orchestrator never
 // catches a 401 mid-batch.
 const TOKEN_REFRESH_HEADROOM_MS = 60 * 1000;
-const DEFAULT_RATE_LIMIT_BACKOFF_MS = 5 * 60 * 1000;
+const DEFAULT_RATE_LIMIT_BACKOFF_MS = 60 * 1000;
 const DEFAULT_MAX_RATE_LIMIT_BACKOFF_MS = 15 * 60 * 1000;
 const DEFAULT_REQUEST_MIN_INTERVALS_MS = {
   "admin-read": 750,
@@ -93,6 +94,19 @@ function normalizeRingcxPhone(value) {
   if (!digits) return null;
   if (digits.length === 11 && digits.startsWith("1")) return digits.slice(1);
   return digits;
+}
+
+function normalizeRingcxUsername(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return null;
+  if (/%[0-9a-f]{2}/i.test(raw)) {
+    try {
+      return decodeURIComponent(raw);
+    } catch {
+      return raw;
+    }
+  }
+  return raw;
 }
 
 // ── Token cache ──────────────────────────────────────────────────────
@@ -163,6 +177,40 @@ function classifyApiScope(method, path) {
   return verb === "GET" ? "admin-read" : "admin-write";
 }
 
+function normalizeRateLimitGroup(value) {
+  const normalized = String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return normalized || null;
+}
+
+function classifyApiUsageGroups(scope) {
+  const normalized = String(scope || "api").toLowerCase();
+  const groups = ["ringcx-api"];
+  if (["active-call-list", "active-call-control", "manual-outbound"].includes(normalized)) {
+    groups.push("active-calls");
+  } else if (["campaign-read", "campaign-write", "lead-action"].includes(normalized)) {
+    groups.push("campaigns");
+  } else if (["agent-read", "agent-write"].includes(normalized)) {
+    groups.push("agents");
+  } else if (normalized.startsWith("recording-")) {
+    groups.push("recordings");
+  }
+  return [...new Set(groups)];
+}
+
+function apiBackoffKeys(scope, error = null) {
+  const keys = [String(scope || "api")];
+  const headerGroup = normalizeRateLimitGroup(error?.details?.rateLimitHeaders?.group);
+  if (headerGroup) keys.push(`group:${headerGroup}`);
+  for (const group of classifyApiUsageGroups(scope)) {
+    keys.push(`group:${group}`);
+  }
+  return [...new Set(keys)];
+}
+
 function getScopeMinIntervalMs(scope) {
   const fallback = DEFAULT_REQUEST_MIN_INTERVALS_MS[scope]
     ?? DEFAULT_REQUEST_MIN_INTERVALS_MS["admin-write"];
@@ -196,9 +244,10 @@ function getRateLimitBackoffMs(error, envName, fallbackEnvName = "RINGCX_RATE_LI
     envDurationMs(fallbackEnvName, envDurationMs("RINGCX_RATE_LIMIT_BACKOFF_MS", DEFAULT_RATE_LIMIT_BACKOFF_MS)),
   );
   const max = envDurationMs("RINGCX_RATE_LIMIT_MAX_BACKOFF_MS", DEFAULT_MAX_RATE_LIMIT_BACKOFF_MS);
+  const minPenalty = envDurationMs("RINGCX_RATE_LIMIT_MIN_BACKOFF_MS", DEFAULT_RATE_LIMIT_BACKOFF_MS);
   const retryAfterMs = parseRetryAfterMs(error);
-  const candidate = retryAfterMs ?? configured;
-  return Math.min(Math.max(candidate, 1000), max);
+  const candidate = retryAfterMs == null ? configured : Math.max(retryAfterMs, minPenalty);
+  return Math.min(Math.max(candidate, minPenalty), max);
 }
 
 function getAuthBackoffMs(error) {
@@ -231,16 +280,22 @@ function setApiBackoff(error, scope = "api") {
   const delayMs = getApiBackoffMs(error, scope);
   const untilMs = Date.now() + delayMs;
   const lastError = error?.message || "RingCX API rate limited";
-  API_BACKOFF_BY_SCOPE.set(scope, {
-    untilMs,
-    lastError,
-    method: error?.details?.method || null,
-    path: error?.details?.path || null,
-  });
+  const keys = apiBackoffKeys(scope, error);
+  for (const key of keys) {
+    API_BACKOFF_BY_SCOPE.set(key, {
+      untilMs,
+      lastError,
+      method: error?.details?.method || null,
+      path: error?.details?.path || null,
+      scope,
+      usageGroup: key.startsWith("group:") ? key.slice("group:".length) : null,
+    });
+  }
   queueRateLimitAlert({
     platform: "RingCX",
     service: "ringcx-voice",
     scope,
+    usageGroup: keys.filter((key) => key.startsWith("group:")).map((key) => key.slice("group:".length)).join(", "),
     openedAt: new Date().toISOString(),
     nextAttemptAt: new Date(untilMs).toISOString(),
     method: error?.details?.method,
@@ -268,28 +323,31 @@ function assertNotInAuthBackoff() {
 }
 
 function assertNotInApiBackoff(method, path, scope = "api") {
-  const record = API_BACKOFF_BY_SCOPE.get(scope);
-  if (!record) return;
-  if (record.untilMs <= Date.now()) {
-    API_BACKOFF_BY_SCOPE.delete(scope);
-    return;
-  }
-  throw new ExternalServiceError(
-    "ringcx-voice",
-    `RingCX ${scope} in rate-limit backoff until ${new Date(record.untilMs).toISOString()}`,
-    {
-      status: 429,
-      retryable: true,
-      details: {
-        rateLimitedCircuitOpen: true,
-        scope,
-        method,
-        path,
-        nextApiAttemptAt: new Date(record.untilMs).toISOString(),
-        lastApiError: record.lastError,
+  for (const key of apiBackoffKeys(scope)) {
+    const record = API_BACKOFF_BY_SCOPE.get(key);
+    if (!record) continue;
+    if (record.untilMs <= Date.now()) {
+      API_BACKOFF_BY_SCOPE.delete(key);
+      continue;
+    }
+    throw new ExternalServiceError(
+      "ringcx-voice",
+      `RingCX ${record.scope || scope} in rate-limit backoff until ${new Date(record.untilMs).toISOString()}`,
+      {
+        status: 429,
+        retryable: true,
+        details: {
+          rateLimitedCircuitOpen: true,
+          scope: record.scope || scope,
+          usageGroup: record.usageGroup,
+          method,
+          path,
+          nextApiAttemptAt: new Date(record.untilMs).toISOString(),
+          lastApiError: record.lastError,
+        },
       },
-    },
-  );
+    );
+  }
 }
 
 async function withApiThrottle(scope, operation) {
@@ -326,6 +384,8 @@ function getRateLimitState() {
       lastApiError: record.lastError,
       method: record.method,
       path: record.path,
+      scope: record.scope || scope,
+      usageGroup: record.usageGroup || null,
     };
   }
   return {
@@ -819,14 +879,17 @@ function createRingcxVoiceClient(options = {}) {
   // ── active calls ──────────────────────────────────────────────────
   // placeManualCall kicks an outbound dial through whatever device the
   // logged-in agent has selected. Agent must be in AVAILABLE state on
-  // the dashboard for this to succeed.
-  async function placeManualCall({ agentEmail, destination, callerId, ringDuration = 5 } = {}) {
-    // Resolution order: explicit arg → AGENT_EMAIL (ballen) → RC_USER_EMAIL (mgray fallback)
-    const username = agentEmail || config.agentEmail || config.rcUserEmail;
+  // the dashboard for this to succeed. RingCX support specifically
+  // wants the generated RingCX username here, not the plain office email.
+  async function placeManualCall({ username: usernameArg, agentEmail, destination, callerId, ringDuration = 5 } = {}) {
+    // Resolution order: explicit username → legacy agentEmail arg →
+    // AGENT_EMAIL (ballen) → RC_USER_EMAIL (mgray fallback).
+    const username = normalizeRingcxUsername(usernameArg || agentEmail || config.agentEmail || config.rcUserEmail);
     const normalizedDestination = normalizeRingcxPhone(destination);
     const normalizedCallerId = normalizeRingcxPhone(callerId);
-    ensure(username, "agentEmail (or RINGCX_VOICE_AGENT_EMAIL / _RC_USER_EMAIL)");
+    ensure(username, "username (or RINGCX_VOICE_AGENT_EMAIL / _RC_USER_EMAIL)");
     ensure(normalizedDestination, "destination");
+    // URLSearchParams encodes this query once: "+" -> "%2B", "@" -> "%40".
     return request("POST", adminPath("activeCalls/createManualAgentCall"), {
       query: {
         username,
@@ -954,6 +1017,13 @@ function createRingcxVoiceClient(options = {}) {
     const response = await fetch(url, init);
     if (!response.ok) {
       const errText = await response.text().catch(() => "");
+      const rateLimitHeaders = response.status === 429 ? {
+        retryAfter: response.headers?.get?.("retry-after") || null,
+        limit:      response.headers?.get?.("x-rate-limit-limit") || null,
+        remaining:  response.headers?.get?.("x-rate-limit-remaining") || null,
+        window:     response.headers?.get?.("x-rate-limit-window") || null,
+        group:      response.headers?.get?.("x-rate-limit-group") || null,
+      } : null;
       const err = new ExternalServiceError("ringcx-voice", `${method} ${suffix} → HTTP ${response.status}`, {
         status: response.status,
         retryable: response.status >= 500 || response.status === 429,
@@ -964,6 +1034,7 @@ function createRingcxVoiceClient(options = {}) {
           responseStatus: response.status,
           responseBody: errText.slice(0, 500),
           retryAfter: response.headers.get("retry-after"),
+          rateLimitHeaders,
           rateLimitedCircuitOpened: response.status === 429 ? true : undefined,
         },
       });

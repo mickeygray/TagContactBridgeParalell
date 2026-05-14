@@ -443,7 +443,8 @@ function isFreshFirstContactQueueItem(item: CxCallQueueItem) {
 function getQueueSortRank(item: CxCallQueueItem) {
   const family = inferQueueFamily(item);
   if (family === "fresh-day1") {
-    return isFreshFirstContactQueueItem(item) ? 0 : 1.5;
+    // Green first-contact stays first; green follow-ups still outrank blue.
+    return isFreshFirstContactQueueItem(item) ? 0 : 0.5;
   }
   return QUEUE_FAMILY_DISPLAY[family].sortRank;
 }

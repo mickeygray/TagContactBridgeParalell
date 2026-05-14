@@ -30,38 +30,64 @@ const DISPOSITION_LABELS = new Set([
 function createCommandsInboxRouter(auth) {
   const router = express.Router();
 
-  router.use(auth.requireAuth, auth.requireAdmin);
+  // ── Rep-accessible reply actions ────────────────────────────────────
+  // Approve / Edit-send / Regenerate are mounted with requireUser
+  // (admin-or-user audience) BEFORE the admin gate so reps in the CX
+  // shell can reply to hot-routed leads. The soft-lock check inside
+  // each service (assertSmsLockAvailable) keeps two reps from racing.
+  // Admins still pass through requireUser via its admin-superset
+  // shortcut, so admin behaviour is unchanged.
+  router.post(
+    "/:domain/:workflowId/approve",
+    auth.requireAuth,
+    auth.requireUser,
+    async (req, res) => {
+      try {
+        const result = await approveInboxWorkflow(req.params.domain, req.params.workflowId, req.user, req.body || {});
+        return res.json({ ok: true, result });
+      } catch (error) {
+        return res.status(error.status || 500).json(toErrorResponse(error));
+      }
+    },
+  );
 
-  router.post("/:domain/:workflowId/approve", async (req, res) => {
-    try {
-      const result = await approveInboxWorkflow(req.params.domain, req.params.workflowId, req.user, req.body || {});
-      return res.json({ ok: true, result });
-    } catch (error) {
-      return res.status(error.status || 500).json(toErrorResponse(error));
-    }
-  });
+  router.post(
+    "/:domain/:workflowId/edit-send",
+    auth.requireAuth,
+    auth.requireUser,
+    async (req, res) => {
+      try {
+        const result = await editSendInboxWorkflow(req.params.domain, req.params.workflowId, req.user, req.body || {});
+        return res.json({ ok: true, result });
+      } catch (error) {
+        return res.status(error.status || 500).json(toErrorResponse(error));
+      }
+    },
+  );
+
+  router.post(
+    "/:domain/:workflowId/regenerate",
+    auth.requireAuth,
+    auth.requireUser,
+    async (req, res) => {
+      try {
+        const result = await regenerateInboxWorkflow(req.params.domain, req.params.workflowId, req.user, req.body || {});
+        return res.json({ ok: true, result });
+      } catch (error) {
+        return res.status(error.status || 500).json(toErrorResponse(error));
+      }
+    },
+  );
+
+  // ── Admin-only policy actions ───────────────────────────────────────
+  // Cancel / DNC / Sleep / Wake have lead-suppression / status-flip
+  // side effects that should stay behind the admin gate. Reps escalate
+  // these via review-queue items.
+  router.use(auth.requireAuth, auth.requireAdmin);
 
   router.post("/:domain/:workflowId/cancel", async (req, res) => {
     try {
       const result = await cancelInboxWorkflow(req.params.domain, req.params.workflowId, req.user, req.body || {});
-      return res.json({ ok: true, result });
-    } catch (error) {
-      return res.status(error.status || 500).json(toErrorResponse(error));
-    }
-  });
-
-  router.post("/:domain/:workflowId/edit-send", async (req, res) => {
-    try {
-      const result = await editSendInboxWorkflow(req.params.domain, req.params.workflowId, req.user, req.body || {});
-      return res.json({ ok: true, result });
-    } catch (error) {
-      return res.status(error.status || 500).json(toErrorResponse(error));
-    }
-  });
-
-  router.post("/:domain/:workflowId/regenerate", async (req, res) => {
-    try {
-      const result = await regenerateInboxWorkflow(req.params.domain, req.params.workflowId, req.user, req.body || {});
       return res.json({ ok: true, result });
     } catch (error) {
       return res.status(error.status || 500).json(toErrorResponse(error));

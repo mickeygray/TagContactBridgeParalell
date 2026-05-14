@@ -8,7 +8,7 @@ const Papa = require("papaparse");
 const SftpClient = require("ssh2-sftp-client");
 const Seven = require("node-7z");
 const { path7za } = require("7zip-bin");
-const { env } = require("../../shared-config/src");
+const { env, getInternalFromEmail } = require("../../shared-config/src");
 const { sendPlainEmail } = require("./sendgridMailService");
 const { intakeLexisBatch } = require("./inboundIntakeService");
 const { recordWorkflowStage } = require("./workflowStateService");
@@ -402,7 +402,10 @@ async function sendLexisRegionalMail(options = {}) {
 
     await sendPlainEmail(domain, {
       from: {
-        email: options.fromEmail || env("ADMIN_EMAIL", ""),
+        // Internal ops mail — fall through to the Parallel-internal
+        // sender so replies hit a human inbox. Explicit options.fromEmail
+        // still wins for callers who know what they want.
+        email: options.fromEmail || getInternalFromEmail(),
         name: options.fromName || "Lexis Regional Drop",
       },
       personalizations: recipients.map((email) => ({

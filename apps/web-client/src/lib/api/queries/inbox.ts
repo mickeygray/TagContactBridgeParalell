@@ -86,6 +86,11 @@ function buildInboxCommandHook(
         draft?: string;
         seed?: string;
         sleepUntil?: string;
+        // Set true to bypass the soft-lock (used by the "Take over"
+        // affordance when another rep has the thread). Server returns
+        // 409 with code:"sms-lock-held" when the lock is held and
+        // override isn't sent.
+        override?: boolean;
       }) =>
         api
           .post<OkEnvelope<InboxCommandResult>>(pathBuilder(domain, workflowId), body)

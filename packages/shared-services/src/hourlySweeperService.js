@@ -53,7 +53,7 @@ const {
   leadCadenceRepository,
 } = require("../../shared-repositories/src");
 const { sendPlainEmail } = require("./sendgridMailService");
-const { getCompanyConfig } = require("../../shared-config/src");
+const { getCompanyConfig, getInternalFromEmail } = require("../../shared-config/src");
 const { getCompanyKeys } = require("../../shared-config/src/companyConfig");
 
 const DEFAULT_BATCH_CAP = 50;
@@ -684,13 +684,13 @@ async function sendResolutionEmails({
       .filter(Boolean)
       .join("\n");
 
-    const company = getCompanyConfig(domain);
-    const fromEmail = company.fromEmail || `${domain.toLowerCase()}@taxadvocategroup.com`;
-
+    // Internal sweeper alert — send from the Parallel-internal sender
+    // (mgray@) regardless of brand. The `${domain} Parallel` display
+    // name still shows which brand's sweeper fired.
     try {
       await sendPlainEmail(domain, {
         personalizations: [{ to: [{ email: recipient }] }],
-        from: { email: fromEmail, name: `${domain} Parallel` },
+        from: { email: getInternalFromEmail(), name: `${domain} Parallel` },
         subject,
         content: [{ type: "text/plain", value: body }],
       });

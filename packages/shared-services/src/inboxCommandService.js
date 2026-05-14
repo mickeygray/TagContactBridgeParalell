@@ -15,6 +15,52 @@ function toCaseId(value) {
   return Number.isFinite(next) ? next : null;
 }
 
+// How long a soft-lock from a rep's outbound stays "fresh" before it
+// auto-expires. Belt-and-suspenders for the inbound-clears-lock path:
+// if the prospect never replies, the lock evaporates 15 min after the
+// last outbound so the thread isn't permanently held.
+const SMS_LOCK_FRESH_MS = 15 * 60 * 1000;
+
+function userIdForLock(user) {
+  return String(user?.id || user?._id || user?.email || "unknown");
+}
+
+function userNameForLock(user) {
+  return String(user?.name || user?.email || "rep");
+}
+
+/**
+ * Throws a 409 if another rep currently holds the soft-lock on this
+ * thread. Admins and the lock owner pass through. Caller can opt out
+ * by passing body.override: true (used by an explicit "Take over"
+ * affordance in the UI).
+ */
+function assertSmsLockAvailable(workflow, user, body = {}) {
+  if (body?.override === true) return;
+  if (user?.role === "admin") return;
+  const lockedBy = workflow.smsLockedByAgentId;
+  if (!lockedBy) return;
+  const currentUserId = userIdForLock(user);
+  if (lockedBy === currentUserId) return;
+  const lockedAt = workflow.smsLockedAt ? new Date(workflow.smsLockedAt).getTime() : 0;
+  if (!lockedAt || Date.now() - lockedAt > SMS_LOCK_FRESH_MS) return;
+  const error = new Error(
+    `${workflow.smsLockedByAgentName || "Another rep"} is currently replying to this thread. Wait for the next inbound or use the "Take over" override.`,
+  );
+  error.status = 409;
+  error.code = "sms-lock-held";
+  error.lockedByName = workflow.smsLockedByAgentName || null;
+  throw error;
+}
+
+function stampSmsLockUpdate(user) {
+  return {
+    smsLockedByAgentId: userIdForLock(user),
+    smsLockedByAgentName: userNameForLock(user),
+    smsLockedAt: new Date(),
+  };
+}
+
 async function loadWorkflow(domain, workflowId) {
   const normalizedDomain = normalizeDomain(domain);
   const workflow = await conversationWorkflowRepository.findConversationWorkflowById(workflowId);
@@ -85,12 +131,14 @@ async function completeInboxAction({
 async function approveInboxWorkflow(domain, workflowId, user, body = {}) {
   const normalizedDomain = normalizeDomain(domain);
   const workflow = await loadWorkflow(normalizedDomain, workflowId);
+  assertSmsLockAvailable(workflow, user, body);
   const nextDraft = body.draft != null ? String(body.draft).trim() : workflow.aiDraftReply || null;
 
   const updated = await conversationWorkflowRepository.updateConversationWorkflowById(workflowId, {
     status: "drafted",
     aiDraftReply: nextDraft,
     aiRecommendedAction: "approve-send",
+    ...stampSmsLockUpdate(user),
     metadata: {
       ...(workflow.metadata || {}),
       inboxState: "approved",
@@ -174,6 +222,7 @@ async function cancelInboxWorkflow(domain, workflowId, user, body = {}) {
 async function editSendInboxWorkflow(domain, workflowId, user, body = {}) {
   const normalizedDomain = normalizeDomain(domain);
   const workflow = await loadWorkflow(normalizedDomain, workflowId);
+  assertSmsLockAvailable(workflow, user, body);
   const nextDraft = String(body.draft || "").trim();
   if (!nextDraft) {
     const error = new Error("Draft is required");
@@ -184,6 +233,7 @@ async function editSendInboxWorkflow(domain, workflowId, user, body = {}) {
   const updated = await conversationWorkflowRepository.updateConversationWorkflowById(workflowId, {
     status: "drafted",
     aiDraftReply: nextDraft,
+    ...stampSmsLockUpdate(user),
     metadata: {
       ...(workflow.metadata || {}),
       inboxState: "edited",
@@ -404,6 +454,12 @@ async function dncInboxWorkflow(domain, workflowId, user, body = {}) {
     workflowRecordId: String(workflowRecord._id),
   };
 }
+
+// Manual "send to my campaign" was removed when the inbox shifted from
+// rep-pull to AI-push routing. The hot-intent classifier + round-robin
+// in hotIntentRouterService.js now stamp routedToAgentId at ingest time,
+// so reps don't claim — they consume. See ConversationWorkflow.aiHotIntent
+// and routedToAgentId for the new ownership model.
 
 module.exports = {
   approveInboxWorkflow,

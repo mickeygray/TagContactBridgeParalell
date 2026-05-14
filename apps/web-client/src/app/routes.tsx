@@ -39,6 +39,11 @@ const DeployWorkspace = React.lazy(() =>
 const CXWorkspace = React.lazy(() =>
   import("@/workspaces/cx/CXWorkspace").then((m) => ({ default: m.CXWorkspace })),
 );
+const WynnInboxWorkspace = React.lazy(() =>
+  import("@/workspaces/inbox/WynnInboxWorkspace").then((m) => ({
+    default: m.WynnInboxWorkspace,
+  })),
+);
 const SalesTrainerWorkspace = React.lazy(() =>
   import("@/workspaces/trainer/SalesTrainerWorkspace").then((m) => ({ default: m.SalesTrainerWorkspace })),
 );
@@ -161,6 +166,14 @@ export function AppRoutes() {
             element={
               <Suspended>
                 <ClientsWorkspace />
+              </Suspended>
+            }
+          />
+          <Route
+            path="inbox"
+            element={
+              <Suspended>
+                <WynnInboxWorkspace />
               </Suspended>
             }
           />

@@ -8,6 +8,7 @@ const {
   cxDialQueueRepository,
   queueItemRepository,
   userAccountRepository,
+  workflowRecordRepository,
 } = require("../../shared-repositories/src");
 const {
   deriveUcqAgeBucket,
@@ -127,6 +128,188 @@ function parseBooleanFlag(value, fallback = false) {
   if (["1", "true", "yes", "y", "on"].includes(normalized)) return true;
   if (["0", "false", "no", "n", "off"].includes(normalized)) return false;
   return fallback;
+}
+
+function isDialTraceEnabled() {
+  return parseBooleanFlag(process.env.RINGCX_DIAL_EXECUTION_VERBOSE_LOGS, true);
+}
+
+function dialTraceLog(logger, level, event, payload = {}) {
+  if (!logger || typeof logger[level] !== "function") return;
+  if (level === "info" && !isDialTraceEnabled()) return;
+  logger[level](event, payload);
+}
+
+function buildDialTraceId(options = {}, dispatchIntent = {}) {
+  return normalizeExternalId(
+    options.traceId
+      || dispatchIntent.traceId
+      || dispatchIntent.eventId
+      || dispatchIntent.requestId,
+  ) || `cx-dial-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function maskPhoneForLog(value) {
+  const digits = String(value || "").replace(/\D/g, "");
+  if (!digits) return null;
+  return `***${digits.slice(-4)}`;
+}
+
+function maskEmailForLog(value) {
+  const text = String(value || "").trim();
+  if (!text) return null;
+  const [local, domain] = text.split("@");
+  if (!domain) return text;
+  return `${local.slice(0, 3)}***@${domain}`;
+}
+
+function summarizeQueueItemForDialLog(queueItem = null) {
+  if (!queueItem || typeof queueItem !== "object") return null;
+  return {
+    id: queueItem._id ? String(queueItem._id) : null,
+    domain: queueItem.domain || null,
+    caseId: queueItem.caseId || null,
+    state: queueItem.state || null,
+    queueFamily: queueItem.queueFamily || queueItem.metadata?.queueFamily || null,
+    actionKey: queueItem.metadata?.actionKey || queueItem.actionKey || null,
+    campaignId: queueItem.rcxCampaignId || queueItem.metadata?.rcxCampaignId || null,
+    dialGroupId: queueItem.rcxDialGroupId || queueItem.metadata?.rcxDialGroupId || null,
+    agentEmail: maskEmailForLog(queueItem.assignment?.agentEmail || queueItem.metadata?.assignedAgentEmail),
+    extensionId: queueItem.assignment?.extensionId || queueItem.metadata?.assignedExtensionId || null,
+    phone: maskPhoneForLog(queueItem.phone),
+  };
+}
+
+function summarizeAgentStateForDialLog(agentState = null) {
+  if (!agentState || typeof agentState !== "object") return null;
+  return {
+    extensionId: agentState.extensionId || null,
+    company: agentState.company || null,
+    activityState: agentState.activityState || null,
+    activePlatform: agentState.activePlatform || null,
+    desiredAvailability: agentState.cxRouting?.desiredAvailability || null,
+    currentCall: agentState.currentCall
+      ? {
+          channel: agentState.currentCall.channel || null,
+          uii: agentState.currentCall.uii || agentState.currentCall.rcxUii || null,
+          phone: maskPhoneForLog(agentState.currentCall.phone || agentState.currentCall.phoneNumber),
+        }
+      : null,
+  };
+}
+
+function summarizePublishForDialLog(publish = null) {
+  if (!publish || typeof publish !== "object") return publish || null;
+  return {
+    ok: publish.ok,
+    published: publish.published,
+    skipped: publish.skipped,
+    reason: publish.reason || null,
+    campaignId: publish.campaignId || null,
+    dialGroupId: publish.dialGroupId || null,
+    accountId: publish.accountId || null,
+    externId: publish.externId || null,
+    leadId: publish.leadId || publish.ringcxLeadId || null,
+    agentUsername: maskEmailForLog(publish.agentUsername),
+  };
+}
+
+function plainObject(value) {
+  return value && typeof value === "object" && !Array.isArray(value) ? value : {};
+}
+
+function resolveRingcxRouteForActiveCall(queueItem = null, options = {}, dispatchIntent = {}, workflowRoute = {}) {
+  const metadata = plainObject(queueItem?.metadata);
+  const lastPublishedRoute = plainObject(metadata.lastRingcxPublishedRoute);
+  const lastExecutionPublish = plainObject(metadata.lastDialExecutionRingcxPublish);
+  const publishedWorkflowRoute = plainObject(workflowRoute);
+
+  return {
+    campaignId: normalizeExternalId(
+      metadata.lastRingcxPublishedCampaignId
+        || lastPublishedRoute.campaignId
+        || lastExecutionPublish.campaignId
+        || metadata.lastDialExecutionCampaignId
+        || metadata.rcxVisibilityCampaignId
+        || publishedWorkflowRoute.campaignId
+        || options.campaignId
+        || options.rcxCampaignId
+        || dispatchIntent.campaignId
+        || dispatchIntent.rcxCampaignId
+        || queueItem?.rcxCampaignId
+        || metadata.rcxCampaignId
+        || "",
+    ),
+    dialGroupId: normalizeExternalId(
+      metadata.lastRingcxPublishedDialGroupId
+        || lastPublishedRoute.dialGroupId
+        || lastExecutionPublish.dialGroupId
+        || metadata.lastDialExecutionDialGroupId
+        || metadata.rcxVisibilityDialGroupId
+        || publishedWorkflowRoute.dialGroupId
+        || options.dialGroupId
+        || options.rcxDialGroupId
+        || dispatchIntent.dialGroupId
+        || dispatchIntent.rcxDialGroupId
+        || queueItem?.rcxDialGroupId
+        || metadata.rcxDialGroupId
+        || process.env.RINGCX_VOICE_DEFAULT_DIAL_GROUP_ID
+        || "",
+    ),
+    accountId: normalizeExternalId(
+      metadata.lastRingcxPublishedAccountId
+        || lastPublishedRoute.accountId
+        || lastExecutionPublish.accountId
+        || metadata.lastDialExecutionAccountId
+        || metadata.rcxVisibilityAccountId
+        || publishedWorkflowRoute.accountId
+        || options.accountId
+        || options.rcxAccountId
+        || dispatchIntent.accountId
+        || dispatchIntent.rcxAccountId
+        || queueItem?.rcxAccountId
+        || metadata.rcxAccountId
+        || process.env.RINGCX_VOICE_ACCOUNT_ID
+        || "",
+    ),
+    externId: normalizeExternalId(
+      metadata.lastRingcxPublishedExternId
+        || lastPublishedRoute.externId
+        || lastExecutionPublish.externId
+        || metadata.lastDialExecutionExternId
+        || metadata.rcxVisibilityExternId
+        || publishedWorkflowRoute.externId
+        || options.externId
+        || dispatchIntent.externId
+        || "",
+    ),
+  };
+}
+
+async function resolveLastPublishedRouteFromWorkflow(queueItemId) {
+  const id = normalizeExternalId(queueItemId);
+  if (!id) return {};
+  const records = await workflowRecordRepository.listWorkflowRecords({
+    family: "cx",
+    subtype: "dial-request",
+    stage: "completed",
+    aggregateType: "cx-dial-queue",
+    aggregateId: id,
+    limit: 5,
+  }).catch(() => []);
+
+  for (const record of records) {
+    const payload = plainObject(record?.payload);
+    const publish = plainObject(payload.publish);
+    const route = {
+      campaignId: normalizeExternalId(publish.campaignId || payload.campaignId),
+      dialGroupId: normalizeExternalId(publish.dialGroupId || payload.dialGroupId),
+      accountId: normalizeExternalId(publish.accountId || payload.accountId),
+      externId: normalizeExternalId(publish.externId || payload.externId),
+    };
+    if (route.campaignId || route.dialGroupId || route.externId) return route;
+  }
+  return {};
 }
 
 function shouldForceRingcxDisposition(options = {}, dispatchIntent = {}) {
@@ -1233,6 +1416,7 @@ async function executeCxDispatchIntent(options = {}) {
     options.dispatchIntent && typeof options.dispatchIntent === "object"
       ? { ...options.dispatchIntent }
       : {};
+  const traceId = buildDialTraceId(options, dispatchIntent);
   const queueItem = await resolveQueueItem({
     queueItemId: options.queueItemId,
     domain: options.domain,
@@ -1278,6 +1462,15 @@ async function executeCxDispatchIntent(options = {}) {
     && !Number.isNaN(recentDialAt.getTime())
     && Date.now() - recentDialAt.getTime() < 30_000
   ) {
+    dialTraceLog(options.logger, "info", "ringcx.dialExecution.reuseRecentAccepted", {
+      traceId,
+      queueItemId,
+      caseId: Number.isFinite(caseId) ? caseId : null,
+      phone: maskPhoneForLog(phone),
+      recentUii,
+      recentDialAt: recentDialAt.toISOString(),
+      ageMs: Date.now() - recentDialAt.getTime(),
+    });
     return {
       ok: true,
       executed: true,
@@ -1291,6 +1484,14 @@ async function executeCxDispatchIntent(options = {}) {
 
   const extensionId = resolveAgentExtensionId(queueItem, dispatchIntent);
   if (!extensionId) {
+    dialTraceLog(options.logger, "warn", "ringcx.dialExecution.missingAgentExtension", {
+      traceId,
+      queueItemId,
+      domain,
+      caseId: Number.isFinite(caseId) ? caseId : null,
+      phone: maskPhoneForLog(phone),
+      queueItem: summarizeQueueItemForDialLog(queueItem),
+    });
     await recordWorkflowStage({
       domain,
       family: "cx",
@@ -1325,9 +1526,46 @@ async function executeCxDispatchIntent(options = {}) {
     ? await agentStateRepository.findAgentStateByExtensionId(extensionId).catch(() => null)
     : null;
   const executionMode = resolveDialExecutionMode(options, dispatchIntent);
+  dialTraceLog(options.logger, "info", "ringcx.dialExecution.start", {
+    traceId,
+    executionMode,
+    source: options.source || "ringcentral-cx",
+    queueItemId,
+    domain,
+    caseId: Number.isFinite(caseId) ? caseId : null,
+    phone: maskPhoneForLog(phone),
+    extensionId,
+    agentEmail: maskEmailForLog(agentEmail),
+    agentCxAgentId,
+    callerId: maskPhoneForLog(callerId),
+    queueItem: summarizeQueueItemForDialLog(queueItem),
+    agentState: summarizeAgentStateForDialLog(agentState),
+    dispatchIntent: {
+      eventId: dispatchIntent.eventId || null,
+      actionKey: dispatchIntent.actionKey || null,
+      queueFamily: dispatchIntent.queueFamily || null,
+      executionMode: dispatchIntent.executionMode || null,
+      dialerEmail: maskEmailForLog(dispatchIntent.dialerEmail || dispatchIntent.requestedByUserEmail),
+      rcxCampaignId: dispatchIntent.rcxCampaignId || null,
+      rcxDialGroupId: dispatchIntent.rcxDialGroupId || null,
+    },
+  });
 
   if (executionMode === "ringcx-campaign-queue") {
     try {
+      dialTraceLog(options.logger, "info", "ringcx.dialExecution.campaign.start", {
+        traceId,
+        queueItemId,
+        domain,
+        caseId: Number.isFinite(caseId) ? caseId : null,
+        phone: maskPhoneForLog(phone),
+        extensionId,
+        agentEmail: maskEmailForLog(agentEmail),
+        agentCxAgentId,
+        callerId: maskPhoneForLog(callerId),
+        respectPresenceGate: options.respectPresenceGate !== false,
+        queueItem: summarizeQueueItemForDialLog(queueItem),
+      });
       if (!queueItemId || !queueItem) {
         const error = new Error("ringcx-campaign-queue-requires-cx-queue-item");
         error.details = {
@@ -1352,6 +1590,11 @@ async function executeCxDispatchIntent(options = {}) {
         allowedStates: ["claimed", "serving"],
         respectPresenceGate: options.respectPresenceGate !== false,
       });
+      dialTraceLog(options.logger, "info", "ringcx.dialExecution.campaign.publishResult", {
+        traceId,
+        queueItemId,
+        publish: summarizePublishForDialLog(publish),
+      });
 
       if (!publish?.ok || publish.published !== true) {
         const error = new Error(
@@ -1373,6 +1616,18 @@ async function executeCxDispatchIntent(options = {}) {
       if (captureTimeoutMs !== 0) {
         try {
           const captureClient = createRingcxVoiceClient();
+          dialTraceLog(options.logger, "info", "ringcx.dialExecution.campaign.capture.start", {
+            traceId,
+            queueItemId,
+            phone: maskPhoneForLog(phone),
+            campaignId: publish.campaignId || null,
+            externId: publish.externId || null,
+            agentEmail: maskEmailForLog(agentEmail || publish.agentUsername),
+            agentCxAgentId,
+            timeoutMs: Number.isFinite(captureTimeoutMs) && captureTimeoutMs > 0
+              ? captureTimeoutMs
+              : null,
+          });
           activeCallCapture = await waitForRingcxCampaignCall(captureClient, {
             phone,
             campaignId: publish.campaignId || null,
@@ -1392,11 +1647,40 @@ async function executeCxDispatchIntent(options = {}) {
           };
         }
       }
+      dialTraceLog(options.logger, activeCallCapture?.ok ? "info" : "warn", "ringcx.dialExecution.campaign.capture.result", {
+        traceId,
+        queueItemId,
+        activeCallCapture: {
+          ...activeCallCapture,
+          activeCall: activeCallCapture?.activeCallSummary || null,
+        },
+      });
       const capturedUii = normalizeExternalId(activeCallCapture?.uii);
+      const publishedDialGroupId =
+        publish.dialGroupId
+        || dispatchIntent.rcxDialGroupId
+        || queueItem?.rcxDialGroupId
+        || queueItem?.metadata?.rcxDialGroupId
+        || null;
+      const publishedAccountId =
+        publish.accountId
+        || dispatchIntent.rcxAccountId
+        || queueItem?.rcxAccountId
+        || queueItem?.metadata?.rcxAccountId
+        || null;
+      const publishedRoute = {
+        campaignId: publish.campaignId || null,
+        dialGroupId: publishedDialGroupId,
+        accountId: publishedAccountId,
+        externId: publish.externId || null,
+        agentUsername: publish.agentUsername || agentEmail || null,
+        agentCxAgentId: agentCxAgentId || null,
+      };
 
       if (queueItemId) {
         await cxDialQueueRepository.updateQueueItem(queueItemId, {
           "metadata.lastDialExecutionStatus": capturedUii ? "accepted" : "queued",
+          "metadata.lastDialExecutionTraceId": traceId,
           "metadata.lastDialExecutionMode": executionMode,
           "metadata.lastDialExecutionAt": requestedAt,
           "metadata.lastDialExecutionAgentEmail": agentEmail,
@@ -1410,12 +1694,16 @@ async function executeCxDispatchIntent(options = {}) {
           "metadata.lastDialExecutionActiveCall": activeCallCapture?.activeCallSummary || null,
           "metadata.lastDialExecutionActiveCallCapture": activeCallCapture || null,
           "metadata.lastDialExecutionCampaignId": publish.campaignId || null,
-          "metadata.lastDialExecutionDialGroupId":
-            publish.dialGroupId || dispatchIntent.rcxDialGroupId || queueItem.rcxDialGroupId || queueItem.metadata?.rcxDialGroupId || null,
-          "metadata.lastDialExecutionAccountId":
-            publish.accountId || dispatchIntent.rcxAccountId || queueItem.rcxAccountId || queueItem.metadata?.rcxAccountId || null,
+          "metadata.lastDialExecutionDialGroupId": publishedDialGroupId,
+          "metadata.lastDialExecutionAccountId": publishedAccountId,
           "metadata.lastDialExecutionExternId": publish.externId || null,
           "metadata.lastDialExecutionRingcxPublish": publish,
+          "metadata.lastRingcxPublishedAt": requestedAt,
+          "metadata.lastRingcxPublishedCampaignId": publish.campaignId || null,
+          "metadata.lastRingcxPublishedDialGroupId": publishedDialGroupId,
+          "metadata.lastRingcxPublishedAccountId": publishedAccountId,
+          "metadata.lastRingcxPublishedExternId": publish.externId || null,
+          "metadata.lastRingcxPublishedRoute": publishedRoute,
           "metadata.lastDialExecutionSource": options.source || "ringcentral-cx",
           "metadata.lastDialExecutionEventId": dispatchIntent.eventId || null,
           "metadata.lastDialIntentStatus": capturedUii ? "accepted" : "queued-in-ringcx",
@@ -1473,6 +1761,16 @@ async function executeCxDispatchIntent(options = {}) {
         }));
       }
 
+      dialTraceLog(options.logger, "info", "ringcx.dialExecution.campaign.completed", {
+        traceId,
+        queueItemId,
+        queued: true,
+        capturedUii,
+        campaignId: publish.campaignId || null,
+        dialGroupId: publish.dialGroupId || null,
+        externId: publish.externId || null,
+      });
+
       return {
         ok: true,
         executed: true,
@@ -1502,9 +1800,21 @@ async function executeCxDispatchIntent(options = {}) {
           : "Lead was loaded into the RingCX campaign queue. RingCX will dial it when the agent is AVAILABLE in the selected dial group.",
       };
     } catch (error) {
+      dialTraceLog(options.logger, "warn", "ringcx.dialExecution.campaign.failed", {
+        traceId,
+        queueItemId,
+        domain,
+        caseId: Number.isFinite(caseId) ? caseId : null,
+        phone: maskPhoneForLog(phone),
+        extensionId,
+        agentEmail: maskEmailForLog(agentEmail),
+        callerId: maskPhoneForLog(callerId),
+        error: serializeError(error, "ringcx-campaign-queue-failed"),
+      });
       if (queueItemId) {
         await cxDialQueueRepository.updateQueueItem(queueItemId, {
           "metadata.lastDialExecutionStatus": "error",
+          "metadata.lastDialExecutionTraceId": traceId,
           "metadata.lastDialExecutionMode": executionMode,
           "metadata.lastDialExecutionAt": requestedAt,
           "metadata.lastDialExecutionAgentEmail": agentEmail,
@@ -1569,6 +1879,20 @@ async function executeCxDispatchIntent(options = {}) {
   }
 
   try {
+    dialTraceLog(options.logger, "info", "ringcx.dialExecution.manual.start", {
+      traceId,
+      executionMode,
+      queueItemId,
+      domain,
+      caseId: Number.isFinite(caseId) ? caseId : null,
+      phone: maskPhoneForLog(phone),
+      extensionId,
+      agentEmail: maskEmailForLog(agentEmail),
+      agentCxAgentId,
+      callerId: maskPhoneForLog(callerId),
+      fallbackCandidate: executionMode === "manual-then-campaign",
+      queueItem: summarizeQueueItemForDialLog(queueItem),
+    });
     await assertDispatchDialerMatchesQueue({
       queueItem,
       dispatchIntent,
@@ -1594,11 +1918,39 @@ async function executeCxDispatchIntent(options = {}) {
       error.details = { ucqPayload };
       throw error;
     }
+    dialTraceLog(options.logger, "info", "ringcx.dialExecution.manual.ucqReady", {
+      traceId,
+      queueItemId,
+      ucqQueueItemId,
+      ucqState: ucqQueueItem.state || null,
+      ucqPartition: ucqQueueItem.partition || null,
+      ucqAgeBucket: ucqQueueItem.ageBucket || null,
+    });
 
+    dialTraceLog(options.logger, "info", "ringcx.dialExecution.manual.placeCall.start", {
+      traceId,
+      queueItemId,
+      ucqQueueItemId,
+      extensionId,
+      agentEmail: maskEmailForLog(agentEmail),
+      callerId: maskPhoneForLog(callerId),
+      phone: maskPhoneForLog(phone),
+    });
     const response = await placeCall(extensionId, ucqQueueItemId, {
       logger: options.logger || null,
       agentEmail,
       callerId,
+    });
+    dialTraceLog(options.logger, response?.ok ? "info" : "warn", "ringcx.dialExecution.manual.placeCall.result", {
+      traceId,
+      queueItemId,
+      ucqQueueItemId,
+      ok: response?.ok !== false,
+      error: response?.error || null,
+      callSessionId: response?.callSessionId || null,
+      rcxUii: response?.rcxUii || null,
+      hint: response?.hint || null,
+      details: response?.details || null,
     });
     if (!response?.ok) {
       const error = new Error(response?.error || "dial-service-place-call-failed");
@@ -1611,6 +1963,8 @@ async function executeCxDispatchIntent(options = {}) {
     if (queueItemId) {
       await cxDialQueueRepository.updateQueueItem(queueItemId, {
         "metadata.lastDialExecutionStatus": "accepted",
+        "metadata.lastDialExecutionTraceId": traceId,
+        "metadata.lastDialExecutionMode": executionMode,
         "metadata.lastDialExecutionAt": requestedAt,
         "metadata.lastDialExecutionUii": uii,
         "metadata.lastDialExecutionCallSessionId": response.callSessionId || null,
@@ -1675,6 +2029,16 @@ async function executeCxDispatchIntent(options = {}) {
       }));
     }
 
+    dialTraceLog(options.logger, "info", "ringcx.dialExecution.manual.completed", {
+      traceId,
+      queueItemId,
+      ucqQueueItemId,
+      callSessionId: response.callSessionId || null,
+      uii,
+      agentEmail: maskEmailForLog(agentEmail),
+      phone: maskPhoneForLog(phone),
+    });
+
     return {
       ok: true,
       executed: true,
@@ -1696,9 +2060,25 @@ async function executeCxDispatchIntent(options = {}) {
       agentAvailability: agentState?.cxRouting?.desiredAvailability || null,
     };
   } catch (error) {
+    dialTraceLog(options.logger, "warn", "ringcx.dialExecution.manual.failed", {
+      traceId,
+      executionMode,
+      queueItemId,
+      domain,
+      caseId: Number.isFinite(caseId) ? caseId : null,
+      phone: maskPhoneForLog(phone),
+      extensionId,
+      agentEmail: maskEmailForLog(agentEmail),
+      callerId: maskPhoneForLog(callerId),
+      fallbackCandidate: executionMode === "manual-then-campaign",
+      fallbackAttempted: false,
+      error: serializeError(error, "manual-call-failed"),
+    });
     if (queueItemId) {
       await cxDialQueueRepository.updateQueueItem(queueItemId, {
         "metadata.lastDialExecutionStatus": "error",
+        "metadata.lastDialExecutionTraceId": traceId,
+        "metadata.lastDialExecutionMode": executionMode,
         "metadata.lastDialExecutionAt": requestedAt,
         "metadata.lastDialExecutionAgentEmail": agentEmail,
         "metadata.lastDialExecutionPhone": phone,
@@ -1804,31 +2184,16 @@ async function executeCxHangupRequest(options = {}) {
     requestedByUserEmail: requestedBy,
   });
   const agentCxAgentId = await resolveAgentCxAgentId(queueItem, dispatchIntent, extensionId);
-  const campaignId = normalizeExternalId(
-    options.campaignId
-      || dispatchIntent.campaignId
-      || queueItem?.rcxCampaignId
-      || queueItem?.metadata?.rcxCampaignId
-      || queueItem?.metadata?.lastDialExecutionCampaignId
-      || "",
+  const workflowPublishedRoute = await resolveLastPublishedRouteFromWorkflow(queueItemId);
+  const activeCallRoute = resolveRingcxRouteForActiveCall(
+    queueItem,
+    options,
+    dispatchIntent,
+    workflowPublishedRoute,
   );
-  const dialGroupId = normalizeExternalId(
-    options.dialGroupId
-      || dispatchIntent.dialGroupId
-      || dispatchIntent.rcxDialGroupId
-      || queueItem?.rcxDialGroupId
-      || queueItem?.metadata?.rcxDialGroupId
-      || queueItem?.metadata?.lastDialExecutionDialGroupId
-      || process.env.RINGCX_VOICE_DEFAULT_DIAL_GROUP_ID
-      || "",
-  );
-  const externId = normalizeExternalId(
-    options.externId
-      || dispatchIntent.externId
-      || queueItem?.metadata?.lastDialExecutionExternId
-      || queueItem?.metadata?.rcxVisibilityExternId
-      || "",
-  );
+  const campaignId = activeCallRoute.campaignId;
+  const dialGroupId = activeCallRoute.dialGroupId;
+  const externId = activeCallRoute.externId;
   let uii = normalizeExternalId(
     options.uii
       || dispatchIntent.uii

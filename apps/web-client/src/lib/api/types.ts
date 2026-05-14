@@ -1106,6 +1106,21 @@ export interface ConversationWorkflowSummary {
   updatedAt?: string;
   createdAt?: string;
   metadata?: Record<string, unknown> | null;
+  // AI-flagged buying intent — set by the SMS classifier on inbound.
+  // The hot-intent router then round-robins routedToAgentId. UI shows
+  // a 🔥 pill on hot threads + "Routed to you" on matching rep.
+  aiHotIntent?: boolean;
+  aiHotIntentReason?: string | null;
+  aiHotIntentDetectedAt?: string | null;
+  routedToAgentId?: string | null;
+  routedToAgentName?: string | null;
+  routedAt?: string | null;
+  // Soft-lock on SMS authoring: rep who replied owns the thread until
+  // the next inbound clears it. Other reps see a "Sean is replying"
+  // badge + must explicitly override to send.
+  smsLockedByAgentId?: string | null;
+  smsLockedByAgentName?: string | null;
+  smsLockedAt?: string | null;
 }
 
 export interface InboxWorkspaceData {

@@ -77,6 +77,67 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function isManualDialVerboseLoggingEnabled() {
+  return parseBooleanFlag(process.env.RINGCX_MANUAL_DIAL_VERBOSE_LOGS, true);
+}
+
+function manualDialLog(logger, level, event, payload = {}) {
+  if (!logger || typeof logger[level] !== "function") return;
+  if (level === "info" && !isManualDialVerboseLoggingEnabled()) return;
+  logger[level](event, payload);
+}
+
+function maskPhoneForLog(value) {
+  const digits = String(value || "").replace(/\D/g, "");
+  if (!digits) return null;
+  return `***${digits.slice(-4)}`;
+}
+
+function maskEmailForLog(value) {
+  const text = String(value || "").trim();
+  if (!text) return null;
+  const [local, domain] = text.split("@");
+  if (!domain) return text;
+  return `${local.slice(0, 3)}***@${domain}`;
+}
+
+function summarizeActiveCallForLog(call = {}) {
+  if (!call || typeof call !== "object") return null;
+  return {
+    uii: extractActiveCallUii(call) || null,
+    destination: maskPhoneForLog(
+      call.dnis || call.destination || call.destinationPhone || call.leadPhone || call.phone,
+    ),
+    caller: maskPhoneForLog(call.ani || call.callerId || call.sourcePhone),
+    campaignId: call.campaignId || call.campaign_id || null,
+    dialGroupId: call.dialGroupId || call.dial_group_id || null,
+    agentId: call.agentId || call.agent_id || call.agentLoginId || null,
+    agentEmail: maskEmailForLog(call.agentEmail || call.username || call.userName),
+    state: call.state || call.status || call.callState || null,
+  };
+}
+
+function summarizeActiveCallsForLog(payload) {
+  const calls = coerceActiveCallList(payload);
+  return {
+    count: calls.length,
+    sample: calls.slice(0, 5).map(summarizeActiveCallForLog).filter(Boolean),
+  };
+}
+
+function summarizeManualCallResponseForLog(response = null) {
+  if (!response || typeof response !== "object") {
+    return response == null ? null : { valueType: typeof response };
+  }
+  return {
+    uii: extractRcxUii(response),
+    callId: response.callId || response.callID || response.UII || response.data?.callId || null,
+    status: response.status || response.callStatus || response.state || response.data?.status || null,
+    message: response.message || response.error || response.data?.message || null,
+    keys: Object.keys(response).slice(0, 20),
+  };
+}
+
 function shouldForceRingcxDisposition(payload = {}) {
   if (payload.forceRcxDisposition !== undefined) {
     return parseBooleanFlag(payload.forceRcxDisposition, false);
@@ -434,12 +495,49 @@ function normalizeAgentIdentifier(value) {
   return String(value || "").trim().toLowerCase() || null;
 }
 
-function pickFirstAgentIdentifier(values = []) {
-  for (const value of values) {
-    const normalized = normalizeAgentIdentifier(value);
-    if (normalized) return normalized;
+function normalizeRingcxUsername(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return null;
+  if (/%[0-9a-f]{2}/i.test(raw)) {
+    try {
+      return decodeURIComponent(raw);
+    } catch {
+      return raw;
+    }
   }
-  return null;
+  return raw;
+}
+
+function isGeneratedRingcxUsername(value) {
+  const username = normalizeRingcxUsername(value);
+  return Boolean(username && /\+[^@\s]+@/.test(username));
+}
+
+function pickManualUsername(candidates = []) {
+  const normalized = candidates
+    .map((candidate) => ({
+      source: candidate?.source || "unknown",
+      value: normalizeRingcxUsername(candidate?.value),
+    }))
+    .filter((candidate) => candidate.value);
+  return (
+    normalized.find((candidate) => isGeneratedRingcxUsername(candidate.value))
+    || normalized[0]
+    || { value: null, source: null }
+  );
+}
+
+function pickFirstAgentIdentifierWithSource(candidates = []) {
+  for (const candidate of candidates) {
+    const normalized = normalizeAgentIdentifier(candidate?.value);
+    if (normalized) {
+      return {
+        value: normalized,
+        source: candidate.source || "unknown",
+      };
+    }
+  }
+  return { value: null, source: null };
 }
 
 async function resolveAgentDialContext(agent) {
@@ -450,27 +548,43 @@ async function resolveAgentDialContext(agent) {
   // phone session. RingCX's manual-call endpoint wants the RingCX
   // username when the user-managed seat has a generated login such as
   // acalloway+50810001_9322@..., not merely the office email.
-  const agentEmail = pickFirstAgentIdentifier([
-    account?.metadata?.ringcxUsername,
-    account?.metadata?.ringcxAgentUsername,
-    account?.metadata?.ringcxAgentEmail,
-    account?.metadata?.cxUsername,
-    account?.cxSession?.rcxAgentEmail,
-    account?.cxAuth?.rcUserEmail,
-    account?.email,
-    agent?.agentEmail,
-    agent?.email,
-    process.env.RINGCX_VOICE_AGENT_EMAIL,
+  const agentEmailPick = pickFirstAgentIdentifierWithSource([
+    { source: "account.metadata.ringcxUsername", value: account?.metadata?.ringcxUsername },
+    { source: "account.metadata.ringcxAgentUsername", value: account?.metadata?.ringcxAgentUsername },
+    { source: "account.metadata.ringcxAgentEmail", value: account?.metadata?.ringcxAgentEmail },
+    { source: "account.metadata.cxUsername", value: account?.metadata?.cxUsername },
+    { source: "account.cxSession.rcxAgentEmail", value: account?.cxSession?.rcxAgentEmail },
+    { source: "account.cxAuth.rcUserEmail", value: account?.cxAuth?.rcUserEmail },
+    { source: "account.email", value: account?.email },
+    { source: "agent.agentEmail", value: agent?.agentEmail },
+    { source: "agent.email", value: agent?.email },
+    { source: "env.RINGCX_VOICE_AGENT_EMAIL", value: process.env.RINGCX_VOICE_AGENT_EMAIL },
   ]);
+  const agentEmail = agentEmailPick.value;
   // Caller ID used for outbound. Prefer the user's EX shell number; this
   // is the "one company, one person" behavior we want for CX testing.
   const domain = String(agent?.company || "TAG").toUpperCase();
   const exShell = pickAgentExShell(account, domain);
+  const callerIdSource = exShell?.primaryPhone
+    ? "exShell.primaryPhone"
+    : account?.phone
+      ? "account.phone"
+      : domain === "WYNN"
+        ? "env.WYNN_PROSPECT_CONTACT_PHONE/WYNN_RINGOUT_CALLER"
+        : "env.TAG_CLIENT_CONTACT_PHONE/TAG_RINGOUT_CALLER";
   const callerId = domain === "WYNN"
     ? (exShell?.primaryPhone || account?.phone || process.env.WYNN_PROSPECT_CONTACT_PHONE || process.env.WYNN_RINGOUT_CALLER || null)
     : (exShell?.primaryPhone || account?.phone || process.env.TAG_CLIENT_CONTACT_PHONE || process.env.TAG_RINGOUT_CALLER || null);
   const agentLoginDest = exShell?.primaryPhone || null;
-  return { agentEmail, callerId, agentLoginDest, account, exShell };
+  return {
+    agentEmail,
+    agentEmailSource: agentEmailPick.source,
+    callerId,
+    callerIdSource,
+    agentLoginDest,
+    account,
+    exShell,
+  };
 }
 
 function normalizeCxIdentifier(value) {
@@ -538,6 +652,21 @@ function stringifyState(value) {
   return "";
 }
 
+function extractRingcxUsernameFromPayload(value) {
+  return normalizeRingcxUsername(firstFieldValue(value, [
+    "username",
+    "userName",
+    "agentUsername",
+    "agentUserName",
+    "agentLoginUsername",
+    "loginUsername",
+    "loginName",
+    "agentLogin",
+    "agentEmail",
+    "email",
+  ]));
+}
+
 function boolFromLooseValue(value) {
   if (value === null || value === undefined || value === "") return null;
   if (typeof value === "boolean") return value;
@@ -570,11 +699,33 @@ function summarizeRingcxLoginPayload(login = null) {
     "agentState",
     "agentBaseState",
   ]));
+  const auxState = stringifyState(firstFieldValue(login, [
+    "agentAuxState",
+    "auxState",
+    "auxiliaryState",
+  ]));
+  const loginType = stringifyState(firstFieldValue(login, [
+    "agentLoginType",
+    "loginType",
+  ]));
+  const username = extractRingcxUsernameFromPayload(login);
+  const ghostLoginValue = firstFieldValue(login, [
+    "isGhostLogin",
+    "ghostLogin",
+  ]);
+  const pendingDispositionValue = firstFieldValue(login, [
+    "pendingDisposition",
+    "pending_disposition",
+    "pendingDisp",
+    "pendingDispTime",
+  ]);
   const loggedInValue = firstFieldValue(login, [
     "loggedIn",
     "isLoggedIn",
     "agentLoggedIn",
     "login",
+    "agentLoginId",
+    "loginDts",
   ]);
   const offHookValue = firstFieldValue(login, [
     "offHook",
@@ -588,6 +739,7 @@ function summarizeRingcxLoginPayload(login = null) {
     "voiceConnection",
   ]);
   const registeredPhone = stringifyState(firstFieldValue(login, [
+    "agentPhone",
     "registeredPhone",
     "registered_phone",
     "phone",
@@ -596,27 +748,55 @@ function summarizeRingcxLoginPayload(login = null) {
     "defaultLoginDest",
     "destination",
   ]));
+  const defaultLoginDest = stringifyState(firstFieldValue(login, [
+    "defaultLoginDest",
+    "agentDefaultLoginDest",
+    "defaultDestination",
+    "defaultPhone",
+  ]));
+  const enableSoftphone = boolFromLooseValue(firstFieldValue(login, [
+    "enableSoftphone",
+    "softphoneEnabled",
+    "softPhoneEnabled",
+    "allowSoftphone",
+    "softphone",
+  ]));
   const sessionId = stringifyState(firstFieldValue(login, [
     "sessionId",
     "sessionID",
+    "agentLoginId",
     "offHookSessionId",
     "offhookSessionId",
+    "iqServerId",
+    "loginHashcode",
     "connectionId",
   ]));
+  const iqServerId = stringifyState(firstFieldValue(login, [
+    "iqServerId",
+    "iqServer",
+  ]));
 
-  const statusLower = status.toLowerCase();
+  const statusLower = `${status} ${auxState} ${loginType}`.toLowerCase();
   const loggedIn = boolFromLooseValue(loggedInValue);
   const offHook = boolFromLooseValue(offHookValue);
+  const ghostLogin = boolFromLooseValue(ghostLoginValue);
+  const pendingDisposition = boolFromLooseValue(pendingDispositionValue);
   const failures = [];
   const warnings = [];
 
+  if (ghostLogin === true) {
+    failures.push("agent-login-is-ghost");
+  }
   if (loggedIn === false || /logged[\s_-]*out|not[\s_-]*logged|offline|signed[\s_-]*out/.test(statusLower)) {
     failures.push("agent-not-logged-into-cx");
   }
   if (offHook === false || /no[\s_-]*off[\s_-]*hook|not[\s_-]*off[\s_-]*hook|disconnected/.test(statusLower)) {
     failures.push("agent-has-no-offhook-session");
   }
-  if (/busy|on[\s_-]*call|dialing|ringing/.test(statusLower)) {
+  if (pendingDisposition === true) {
+    failures.push("agent-pending-disposition");
+  }
+  if (/busy|engaged|working|wrap|disposition|on[\s_-]*call|dialing|ringing/.test(statusLower)) {
     failures.push("agent-session-busy");
   }
   if (loggedIn === null && !status) {
@@ -633,11 +813,19 @@ function summarizeRingcxLoginPayload(login = null) {
     ready: failures.length === 0,
     failures,
     warnings,
+    username,
     status: status || null,
+    auxState: auxState || null,
+    loginType: loginType || null,
     loggedIn,
     offHook,
+    ghostLogin,
+    pendingDisposition,
     registeredPhone: registeredPhone || null,
+    defaultLoginDest: defaultLoginDest || null,
+    enableSoftphone,
     sessionId: sessionId || null,
+    iqServerId: iqServerId || null,
   };
 }
 
@@ -655,25 +843,90 @@ async function checkRingcxManualCallPreflight(client, {
 
   const strict = isManualCallPreflightStrict();
   const wiring = resolveRingcxAgentWiring(agent, dialContext);
+  const wiringUsername = normalizeRingcxUsername(wiring.username);
   if (!wiring.agentId || !wiring.agentGroupId) {
+    manualDialLog(logger, strict ? "warn" : "info", "dial.placeCall.ringcxPreflight.missingWiring", {
+      agentId: agent?.extensionId || null,
+      ringcxAgentId: wiring.agentId,
+      ringcxAgentGroupId: wiring.agentGroupId,
+      username: maskEmailForLog(wiringUsername),
+      strict,
+    });
     return {
       ok: !strict,
       skipped: true,
       blocking: strict,
       reason: "missing-ringcx-agent-wiring",
       wiring,
+      manualUsername: wiringUsername,
+      manualUsernameSource: wiringUsername ? "wiring" : null,
       hint: "Pair this user to a RingCX agent id and agent group id to enable preflight.",
     };
   }
 
   try {
+    manualDialLog(logger, "info", "dial.placeCall.ringcxPreflight.start", {
+      agentId: agent?.extensionId || null,
+      ringcxAgentId: wiring.agentId,
+      ringcxAgentGroupId: wiring.agentGroupId,
+      username: maskEmailForLog(wiringUsername),
+      defaultLoginDest: maskPhoneForLog(wiring.defaultLoginDest),
+      preferredLoginDest: maskPhoneForLog(wiring.preferredLoginDest),
+      strict,
+    });
     const login = await client.getAgentLogin(wiring.agentId, wiring.agentGroupId);
     const summary = summarizeRingcxLoginPayload(login);
+    let agentRecordUsername = null;
+    let agentRecordLookup = null;
+    if (!summary.username && typeof client.getAgent === "function") {
+      try {
+        const agentRecord = await client.getAgent(wiring.agentId, wiring.agentGroupId);
+        agentRecordUsername = extractRingcxUsernameFromPayload(agentRecord);
+        agentRecordLookup = {
+          ok: true,
+          usernameFound: Boolean(agentRecordUsername),
+          username: maskEmailForLog(agentRecordUsername),
+        };
+      } catch (agentRecordError) {
+        agentRecordLookup = {
+          ok: false,
+          error: agentRecordError.message || "agent-record-lookup-failed",
+          status: agentRecordError.status || agentRecordError.details?.responseStatus || null,
+        };
+      }
+    }
+    const manualUsernamePick = pickManualUsername([
+      { source: "agent-login", value: summary.username },
+      { source: "agent-record", value: agentRecordUsername },
+      { source: "wiring", value: wiringUsername },
+    ]);
+    const manualUsername = manualUsernamePick.value;
+    const manualUsernameSource = manualUsernamePick.source;
+    manualDialLog(logger, summary.ready ? "info" : "warn", "dial.placeCall.ringcxPreflight.result", {
+      agentId: agent?.extensionId || null,
+      ringcxAgentId: wiring.agentId,
+      ringcxAgentGroupId: wiring.agentGroupId,
+      username: maskEmailForLog(wiringUsername),
+      manualUsername: maskEmailForLog(manualUsername),
+      manualUsernameSource,
+      agentRecordLookup,
+      ready: summary.ready,
+      reason: summary.ready ? "ringcx-agent-ready" : summary.failures[0] || "ringcx-agent-not-ready",
+      login: {
+        ...summary,
+        registeredPhone: maskPhoneForLog(summary.registeredPhone),
+        defaultLoginDest: maskPhoneForLog(summary.defaultLoginDest),
+        username: maskEmailForLog(summary.username),
+      },
+    });
     return {
       ok: summary.ready,
       blocking: !summary.ready,
       reason: summary.ready ? "ringcx-agent-ready" : summary.failures[0] || "ringcx-agent-not-ready",
       wiring,
+      manualUsername,
+      manualUsernameSource,
+      agentRecordLookup,
       login: summary,
       hint: summary.ready
         ? null
@@ -687,18 +940,23 @@ async function checkRingcxManualCallPreflight(client, {
       retryable,
       reason: retryable ? "ringcx-login-preflight-rate-limited" : "ringcx-login-preflight-failed",
       wiring,
+      manualUsername: wiringUsername,
+      manualUsernameSource: wiringUsername ? "wiring" : null,
       error: error.message || "ringcx-login-preflight-failed",
       details: error.details || null,
       hint: retryable
         ? "RingCX login preflight is temporarily throttled; wait for the CX cooldown before trying again."
         : "Could not verify the CX voice session. Strict mode blocks this; non-strict mode lets the call attempt continue.",
     };
-    logger?.warn?.("dial.placeCall.ringcxPreflight.failed", {
+    manualDialLog(logger, "warn", "dial.placeCall.ringcxPreflight.failed", {
       reason: result.reason,
       agentId: agent?.extensionId || null,
       ringcxAgentId: wiring.agentId,
       ringcxAgentGroupId: wiring.agentGroupId,
+      username: maskEmailForLog(wiringUsername),
       error: error.message,
+      status: error.status || error.details?.responseStatus || null,
+      retryable,
     });
     return result;
   }
@@ -809,30 +1067,68 @@ async function waitForRingcxActiveCall(client, {
   }
   const startedAt = Date.now();
   let lastError = null;
+  let attempts = 0;
+  let lastActiveCallSummary = null;
+  manualDialLog(logger, "info", "dial.placeCall.activeCallVerify.start", {
+    destination: maskPhoneForLog(destination),
+    callerId: maskPhoneForLog(callerId),
+    timeoutMs,
+    intervalMs,
+  });
   do {
     try {
+      attempts += 1;
       const activeCalls = await client.listActiveCalls();
+      lastActiveCallSummary = summarizeActiveCallsForLog(activeCalls);
       const match = findMatchingActiveCall(activeCalls, { destination, callerId });
+      manualDialLog(logger, "info", "dial.placeCall.activeCallVerify.poll", {
+        attempt: attempts,
+        elapsedMs: Date.now() - startedAt,
+        destination: maskPhoneForLog(destination),
+        callerId: maskPhoneForLog(callerId),
+        activeCallCount: lastActiveCallSummary.count,
+        matched: Boolean(match),
+        sample: lastActiveCallSummary.sample,
+      });
       if (match) {
         return {
           ok: true,
           activeCall: match,
           rcxUii: extractActiveCallUii(match),
+          attempts,
+          elapsedMs: Date.now() - startedAt,
+          activeCallSummary: summarizeActiveCallForLog(match),
         };
       }
     } catch (error) {
       lastError = error;
-      logger?.warn?.("dial.placeCall.activeCallVerify.failed", {
+      manualDialLog(logger, "warn", "dial.placeCall.activeCallVerify.failed", {
+        attempt: attempts,
+        elapsedMs: Date.now() - startedAt,
         error: error.message,
+        status: error.status || error.details?.responseStatus || null,
+        retryable: Boolean(error.retryable),
       });
     }
     if (Date.now() - startedAt >= timeoutMs) break;
     await new Promise((resolve) => setTimeout(resolve, intervalMs));
   } while (Date.now() - startedAt < timeoutMs);
+  manualDialLog(logger, "warn", "dial.placeCall.activeCallVerify.missed", {
+    attempts,
+    elapsedMs: Date.now() - startedAt,
+    destination: maskPhoneForLog(destination),
+    callerId: maskPhoneForLog(callerId),
+    reason: lastError ? "active-call-list-error" : "active-call-not-found",
+    error: lastError ? lastError.message : null,
+    lastActiveCallSummary,
+  });
   return {
     ok: false,
     reason: lastError ? "active-call-list-error" : "active-call-not-found",
     error: lastError ? lastError.message : null,
+    attempts,
+    elapsedMs: Date.now() - startedAt,
+    lastActiveCallSummary,
   };
 }
 
@@ -1077,6 +1373,46 @@ async function placeCall(agentId, queueItemId, {
   const agentEmail = String(agentEmailOverride || dialContext.agentEmail || "").trim() || null;
   const resolvedCallerId = sanitizeUsPhone(callerIdOverride) || dialContext.callerId;
   const callerId = shouldSendManualCallerId() ? resolvedCallerId : null;
+  manualDialLog(logger, "info", "dial.placeCall.context", {
+    agentId,
+    queueItemId,
+    leadId,
+    queueDomain,
+    logicsCaseId,
+    queueItemState: queueItem.state || null,
+    queuePartition: queueItem.partition || null,
+    agentName: agent.name || null,
+    agentCompany: agent.company || null,
+    agentEmail: maskEmailForLog(agentEmail),
+    agentEmailSource: agentEmailOverride ? "override" : dialContext.agentEmailSource,
+    destination: maskPhoneForLog(queueItem.phoneNumber),
+    callerId: maskPhoneForLog(callerId),
+    callerIdSource: callerIdOverride ? "override" : dialContext.callerIdSource,
+    sendCallerId: shouldSendManualCallerId(),
+    agentLoginDest: maskPhoneForLog(dialContext.agentLoginDest),
+    account: dialContext.account
+      ? {
+          id: String(dialContext.account._id || dialContext.account.id || ""),
+          email: maskEmailForLog(dialContext.account.email),
+          extensionId: dialContext.account.extensionId || null,
+          cxAgentId: dialContext.account.cxAgentId || dialContext.account.metadata?.ringcxAgentId || null,
+          hasCxAuth: Boolean(dialContext.account.cxAuth?.refreshTokenEnc),
+          hasCxSession: Boolean(dialContext.account.cxSession?.bearerEnc || dialContext.account.cxSession?.rcxAgentEmail),
+          ringcxUsername: maskEmailForLog(
+            dialContext.account.metadata?.ringcxUsername
+              || dialContext.account.metadata?.ringcxAgentUsername
+              || dialContext.account.metadata?.cxUsername,
+          ),
+        }
+      : null,
+    exShell: dialContext.exShell
+      ? {
+          company: dialContext.exShell.company || null,
+          extensionId: dialContext.exShell.extensionId || null,
+          primaryPhone: maskPhoneForLog(dialContext.exShell.primaryPhone),
+        }
+      : null,
+  });
   if (!agentEmail) {
     await rollbackPlaceCall(agentId, leadId, queueItemId);
     return {
@@ -1135,20 +1471,47 @@ async function placeCall(agentId, queueItemId, {
   let placementResponse = null;
   let userBearer = null;
   let client = null;
+  let manualClient = null;
+  let manualAuthMode = "admin-bearer";
+  let manualUsername = normalizeRingcxUsername(agentEmail);
+  let manualUsernameSource = agentEmailOverride ? "override" : dialContext.agentEmailSource;
   try {
     // eslint-disable-next-line global-require
     const cxStore = require("./cxTokenStorageService");
+    manualDialLog(logger, "info", "dial.placeCall.userBearer.lookup.start", {
+      agentId,
+      queueItemId,
+      enabled: shouldUseUserBearerForManualCall(),
+      storeConfigured: cxStore.isConfigured(),
+    });
     if (shouldUseUserBearerForManualCall() && cxStore.isConfigured()) {
       // Map extensionId → UserAccount to fetch the stored bearer
       // (AgentState ≠ UserAccount; we look up by extensionId on the
       // user-account side to find the right agent's stored token).
       const userAccount = await userAccountRepository.findUserAccountByExtensionId(agentId);
+      manualDialLog(logger, "info", "dial.placeCall.userBearer.account", {
+        agentId,
+        queueItemId,
+        found: Boolean(userAccount),
+        userAccountId: userAccount ? String(userAccount._id || userAccount.id || "") : null,
+        email: maskEmailForLog(userAccount?.email),
+        hasRefreshToken: Boolean(userAccount?.cxAuth?.refreshTokenEnc),
+      });
       if (userAccount) {
         const userAccountId = String(userAccount._id || userAccount.id);
         let session = await cxStore.getRcxSession(userAccountId);
         const bearerExpiresInMs = session?.bearerExpiresAt
           ? new Date(session.bearerExpiresAt).getTime() - Date.now()
           : 0;
+        manualDialLog(logger, "info", "dial.placeCall.userBearer.session", {
+          agentId,
+          queueItemId,
+          userAccountId,
+          hasBearer: Boolean(session?.bearer),
+          bearerExpiresInMs,
+          bearerExpiresAt: session?.bearerExpiresAt || null,
+          rcxAgentEmail: maskEmailForLog(session?.rcxAgentEmail),
+        });
         if ((!session?.bearer || bearerExpiresInMs <= 30_000) && userAccount?.cxAuth?.refreshTokenEnc) {
           try {
             // eslint-disable-next-line global-require
@@ -1157,15 +1520,17 @@ async function placeCall(agentId, queueItemId, {
             if (refreshed?.ok) {
               session = await cxStore.getRcxSession(userAccountId);
             } else {
-              logger?.warn?.("dial.userBearer.refreshFailed", {
+              manualDialLog(logger, "warn", "dial.userBearer.refreshFailed", {
                 agentId,
+                queueItemId,
                 userAccountId,
                 error: refreshed?.error || "unknown",
               });
             }
           } catch (refreshError) {
-            logger?.warn?.("dial.userBearer.refreshException", {
+            manualDialLog(logger, "warn", "dial.userBearer.refreshException", {
               agentId,
+              queueItemId,
               userAccountId,
               error: refreshError.message,
             });
@@ -1178,24 +1543,36 @@ async function placeCall(agentId, queueItemId, {
             tokenType: "Bearer",
             expiresAt: new Date(session.bearerExpiresAt).getTime(),
           };
+          manualDialLog(logger, "info", "dial.placeCall.userBearer.selected", {
+            agentId,
+            queueItemId,
+            userAccountId,
+            bearerExpiresAt: new Date(userBearer.expiresAt).toISOString(),
+          });
         }
       }
     }
   } catch (cxStoreErr) {
-    logger?.warn?.("dial.userBearer.lookupFailed", { error: cxStoreErr.message });
+    manualDialLog(logger, "warn", "dial.userBearer.lookupFailed", {
+      agentId,
+      queueItemId,
+      error: cxStoreErr.message,
+    });
   }
 
   try {
     try {
-      client = userBearer
-        ? createRingcxVoiceClient({ userBearer })
-        : createRingcxVoiceClient();
+      client = createRingcxVoiceClient();
+      manualClient = userBearer ? createRingcxVoiceClient({ userBearer }) : client;
+      manualAuthMode = userBearer ? "user-bearer" : "admin-bearer";
     } catch (clientError) {
       throw new Error(`ringcx-client-init-failed: ${clientError.message}`);
     }
-    logger?.info?.("dial.placeCall.bearerSelection", {
+    manualDialLog(logger, "info", "dial.placeCall.bearerSelection", {
       agentId,
+      queueItemId,
       userBearerActive: Boolean(userBearer),
+      manualAuthMode,
       bearerExpiresAt: userBearer?.expiresAt ? new Date(userBearer.expiresAt).toISOString() : null,
     });
     const preflight = await checkRingcxManualCallPreflight(client, {
@@ -1203,6 +1580,8 @@ async function placeCall(agentId, queueItemId, {
       dialContext,
       logger,
     });
+    manualUsername = normalizeRingcxUsername(preflight.manualUsername || manualUsername);
+    manualUsernameSource = preflight.manualUsernameSource || manualUsernameSource;
     if (!preflight.ok && preflight.blocking !== false) {
       const preflightError = new Error(`ringcx-manual-preflight-failed:${preflight.reason || "not-ready"}`);
       preflightError.status = preflight.retryable ? 429 : 409;
@@ -1210,16 +1589,43 @@ async function placeCall(agentId, queueItemId, {
       preflightError.details = preflight;
       throw preflightError;
     }
-    logger?.info?.("dial.placeCall.ringcxPreflight", {
+    manualDialLog(logger, "info", "dial.placeCall.ringcxPreflight", {
       agentId,
+      queueItemId,
       ok: preflight.ok,
       skipped: Boolean(preflight.skipped),
       reason: preflight.reason || null,
-      login: preflight.login || null,
+      manualUsername: maskEmailForLog(manualUsername),
+      manualUsernameSource,
+      usernameEncoding: "URLSearchParams",
+      login: preflight.login
+        ? {
+            ...preflight.login,
+            registeredPhone: maskPhoneForLog(preflight.login.registeredPhone),
+            defaultLoginDest: maskPhoneForLog(preflight.login.defaultLoginDest),
+            username: maskEmailForLog(preflight.login.username),
+          }
+        : null,
     });
-    placementResponse = await withTimeout(
-      () => client.placeManualCall({
-        agentEmail,
+    const manualCallStartedAt = Date.now();
+    manualDialLog(logger, "info", "dial.placeCall.ringcxManualCall.start", {
+      agentId,
+      queueItemId,
+      callSessionId: String(callSession._id || ""),
+      agentEmail: maskEmailForLog(agentEmail),
+      manualUsername: maskEmailForLog(manualUsername),
+      manualUsernameSource,
+      destination: maskPhoneForLog(destination),
+      callerId: maskPhoneForLog(callerId),
+      ringDuration: getManualCallRingDurationSeconds(),
+      apiTimeoutMs: getManualCallApiTimeoutMs(),
+      userBearerActive: Boolean(userBearer),
+      manualAuthMode,
+      usernameEncoding: "URLSearchParams",
+    });
+    const placeManualCallWithClient = (targetClient) => withTimeout(
+      () => targetClient.placeManualCall({
+        username: manualUsername,
         destination,
         callerId,
         ringDuration: getManualCallRingDurationSeconds(),
@@ -1227,6 +1633,35 @@ async function placeCall(agentId, queueItemId, {
       getManualCallApiTimeoutMs(),
       "placeManualCall",
     );
+    try {
+      placementResponse = await placeManualCallWithClient(manualClient);
+    } catch (manualError) {
+      const manualStatus = Number(manualError?.status || manualError?.details?.responseStatus || 0);
+      if (userBearer && (manualStatus === 401 || manualStatus === 403)) {
+        manualDialLog(logger, "warn", "dial.placeCall.ringcxManualCall.userBearerRejected", {
+          agentId,
+          queueItemId,
+          callSessionId: String(callSession._id || ""),
+          manualAuthMode,
+          status: manualStatus,
+          error: manualError.message,
+        });
+        manualAuthMode = "admin-bearer-after-user-bearer-rejected";
+        placementResponse = await placeManualCallWithClient(client);
+      } else {
+        throw manualError;
+      }
+    }
+    manualDialLog(logger, "info", "dial.placeCall.ringcxManualCall.response", {
+      agentId,
+      queueItemId,
+      callSessionId: String(callSession._id || ""),
+      elapsedMs: Date.now() - manualCallStartedAt,
+      manualAuthMode,
+      manualUsername: maskEmailForLog(manualUsername),
+      manualUsernameSource,
+      response: summarizeManualCallResponseForLog(placementResponse),
+    });
   } catch (error) {
     // Roll back: mark CallSession failed, release lock, recycle queue item back to in_slice.
     // safeSerializeError captures the error.details (with responseBody) so the
@@ -1240,8 +1675,21 @@ async function placeCall(agentId, queueItemId, {
       placementError: safeError,
     });
     await rollbackPlaceCall(agentId, leadId, queueItemId);
-    logger?.warn?.("dial.placeCall.failed", {
-      agentId, queueItemId, error: error.message,
+    manualDialLog(logger, "warn", "dial.placeCall.failed", {
+      agentId,
+      queueItemId,
+      callSessionId: String(callSession._id || ""),
+      agentEmail: maskEmailForLog(agentEmail),
+      manualUsername: maskEmailForLog(manualUsername),
+      manualUsernameSource,
+      destination: maskPhoneForLog(destination),
+      callerId: maskPhoneForLog(callerId),
+      userBearerActive: Boolean(userBearer),
+      manualAuthMode,
+      error: error.message,
+      status: error.status || error.details?.responseStatus || null,
+      retryable: Boolean(error.retryable),
+      details: safeError.details || error.details || null,
     });
     return {
       ok: false,
@@ -1254,6 +1702,15 @@ async function placeCall(agentId, queueItemId, {
 
   // 9. Capture rcxUii (RingCX call ID) from the response if present.
   let rcxUii = extractRcxUii(placementResponse);
+  manualDialLog(logger, "info", "dial.placeCall.ringcxManualCall.uiiExtracted", {
+    agentId,
+    queueItemId,
+    callSessionId: String(callSession._id || ""),
+    rcxUii: rcxUii || null,
+    response: summarizeManualCallResponseForLog(placementResponse),
+    manualAuthMode,
+    manualUsername: maskEmailForLog(manualUsername),
+  });
   if (rcxUii) {
     await safeRelease(callSessionRepository.attachRcIds, callSession._id, { rcxUii });
   } else {
@@ -1278,10 +1735,17 @@ async function placeCall(agentId, queueItemId, {
         placementError: safeError,
       });
       await rollbackPlaceCall(agentId, leadId, queueItemId);
-      logger?.warn?.("dial.placeCall.unverified", {
+      manualDialLog(logger, "warn", "dial.placeCall.unverified", {
         agentId,
         queueItemId,
-        callSessionId: callSession._id,
+        callSessionId: String(callSession._id || ""),
+        agentEmail: maskEmailForLog(agentEmail),
+        manualUsername: maskEmailForLog(manualUsername),
+        manualUsernameSource,
+        destination: maskPhoneForLog(destination),
+        callerId: maskPhoneForLog(callerId),
+        manualAuthMode,
+        response: summarizeManualCallResponseForLog(placementResponse),
         verification: activeCallVerification,
       });
       return {
@@ -1294,14 +1758,28 @@ async function placeCall(agentId, queueItemId, {
     // No uii in response — we placed the call but can't terminate via
     // RingCX API. Log so we know to investigate; presence webhooks will
     // still drive state.
-    logger?.warn?.("dial.placeCall.noRcxUii", {
-      callSessionId: callSession._id, response: safeSerializeError({ response: placementResponse }),
+    manualDialLog(logger, "warn", "dial.placeCall.noRcxUii", {
+      agentId,
+      queueItemId,
+      callSessionId: String(callSession._id || ""),
+      manualAuthMode,
+      manualUsername: maskEmailForLog(manualUsername),
+      response: summarizeManualCallResponseForLog(placementResponse),
     });
   }
 
   await safeRelease(bumpLastActivityAt, agentId);
-  logger?.info?.("dial.placeCall.placed", {
-    agentId, queueItemId, callSessionId: callSession._id, rcxUii,
+  manualDialLog(logger, "info", "dial.placeCall.placed", {
+    agentId,
+    queueItemId,
+    callSessionId: String(callSession._id || ""),
+    agentEmail: maskEmailForLog(agentEmail),
+    manualUsername: maskEmailForLog(manualUsername),
+    manualUsernameSource,
+    destination: maskPhoneForLog(destination),
+    callerId: maskPhoneForLog(callerId),
+    manualAuthMode,
+    rcxUii,
   });
 
   return {

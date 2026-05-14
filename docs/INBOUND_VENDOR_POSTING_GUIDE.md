@@ -101,15 +101,17 @@ Accepted aliases:
 | Meaning | Accepted fields |
 | --- | --- |
 | Company | `company`, `Company` |
-| First name | `firstName`, `first_name`, `firstname` |
-| Last name | `lastName`, `last_name`, `lastname` |
-| Full name | `name`, `fullName`, `full_name` |
-| Phone | `phone`, `primaryPhone`, `cellPhone`, `mobile`, `tel` |
-| Email | `email` |
-| City | `city` |
-| State | `state`, `State` |
-| Vendor/source | `partner`, `vendor`, `affiliate`, `source`, `trafficSource`, `utm_source`, `sourceName` |
-| External id | `externalLeadId`, `lead_id`, `leadId`, `id`, `contactId` |
+| First name | `firstName`, `first_name`, `firstname`, `givenName`, `given_name`, `fname`, `fn` |
+| Last name | `lastName`, `last_name`, `lastname`, `surname`, `lname`, `ln` |
+| Full name | `name`, `fullName`, `full_name`, `nm` |
+| Phone | `phone`, `primaryPhone`, `cellPhone`, `mobile`, `tel`, `phoneNumber`, `phone_number`, `ph` |
+| Email | `email`, `Email`, `emailAddress`, `email_address`, `em` |
+| City | `city`, `City`, `ct` |
+| State | `state`, `State`, `st` |
+| ZIP/postal | `zip`, `Zip`, `zipCode`, `zip_code`, `postalCode`, `postal_code`, `zi` |
+| Street address | `address`, `address1`, `street`, `streetAddress`, `street_address`, `addr`, `ad` |
+| Vendor/source | `partner`, `vendor`, `affiliate`, `source`, `trafficSource`, `utm_source`, `sourceName`, `pubid`, `campid`, `compid`, `affid`, `subid`, `url` |
+| External id | `externalLeadId`, `external_id`, `lead_id`, `leadId`, `id`, `contactId`, `contact_id`, `subid`, `clickId`, `clickid` |
 | TrustedForm | `trustedFormCertUrl`, `trustedform_cert_url`, `trusted_form_cert_url`, `xxTrustedFormCertUrl`, `xxTrustedFormCertURL`, `tcpa_cert_url`, `trustedFormUrl`, `tf` |
 | Jornaya | `jornayaLeadId`, `jornaya_lead_id`, `leadid_token`, `leadIdToken`, `jornayaId`, `jl` |
 | Tracking number | `trackingNumber`, `tracking_number`, `destination_number`, `destinationNumber`, `callrailTrackingNumber`, `callrail_tracking_number` |
@@ -264,6 +266,10 @@ POST /api/inbound/ld/lead
 ```
 
 Use this for LD full post after pre-ping or for direct LD posts.
+
+The LD full lead route also accepts legacy Opta/CA-style GET or URL-encoded form posts with query-style short fields such as `ph`, `em`, `ct`, `st`, `zi`, `tf`, `pubid`, `campid`, and `compid`.
+Prefer JSON POST with the normal `x-webhook-secret` header.
+If a vendor can only send query-string posts, configure a scoped query credential in `LD_POSTING_AUTH` or `OPTA_LD_POSTING_AUTH` and send it as `ld_posting_auth`, `posting_auth`, `webhook_secret`, or `auth`; the route strips matching credential values before storing the payload snapshot.
 
 If a matching pre-ping exists for the same email hash, the route becomes `ld-posting-lead` and the Logics source becomes `LD Posting Lead`. Otherwise the route is `ld-lead` and the Logics source is `LD Lead`.
 

@@ -39,7 +39,7 @@ let authState = {
 let refreshTimer = null;
 let refreshCallback = null;
 
-const DEFAULT_RATE_LIMIT_BACKOFF_MS = 5 * 60 * 1000;
+const DEFAULT_RATE_LIMIT_BACKOFF_MS = 60 * 1000;
 const DEFAULT_MAX_RATE_LIMIT_BACKOFF_MS = 15 * 60 * 1000;
 
 function hasCredentials(config) {
@@ -199,8 +199,10 @@ function getRateLimitBackoffMs(error, envName) {
     envDurationMs("RC_RATE_LIMIT_BACKOFF_MS", DEFAULT_RATE_LIMIT_BACKOFF_MS),
   );
   const max = envDurationMs("RC_RATE_LIMIT_MAX_BACKOFF_MS", DEFAULT_MAX_RATE_LIMIT_BACKOFF_MS);
+  const minPenalty = envDurationMs("RC_RATE_LIMIT_MIN_BACKOFF_MS", DEFAULT_RATE_LIMIT_BACKOFF_MS);
   const retryAfterMs = parseRetryAfterMs(error);
-  return Math.min(Math.max(retryAfterMs ?? configured, configured), max);
+  const candidate = retryAfterMs == null ? configured : Math.max(retryAfterMs, minPenalty);
+  return Math.min(Math.max(candidate, minPenalty), max);
 }
 
 function getAuthBackoffMs(error) {
@@ -225,6 +227,7 @@ function recordAuthRateLimit(error) {
     platform: "RingCentral EX",
     service: "ringcentral",
     scope: "auth",
+    usageGroup: error?.details?.rateLimitHeaders?.group || "auth",
     openedAt: lastRateLimitedAt,
     nextAttemptAt,
     error,
@@ -245,6 +248,7 @@ function recordApiRateLimit(error) {
     platform: "RingCentral EX",
     service: "ringcentral",
     scope: "api",
+    usageGroup: error?.details?.rateLimitHeaders?.group || "api",
     openedAt: lastRateLimitedAt,
     nextAttemptAt,
     method: error?.details?.method,

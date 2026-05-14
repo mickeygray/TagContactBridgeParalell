@@ -210,6 +210,9 @@ function scoreQueueItemForActiveCall(queueItem = {}, call = {}) {
   }
 
   for (const value of [
+    metadata.lastRingcxPublishedExternId,
+    metadata.lastRingcxPublishedRoute?.externId,
+    metadata.lastDialExecutionRingcxPublish?.externId,
     metadata.lastDialExecutionExternId,
     metadata.rcxVisibilityExternId,
   ]) {
@@ -232,13 +235,29 @@ function scoreQueueItemForActiveCall(queueItem = {}, call = {}) {
     score += 5;
     reasons.push("agentId");
   }
-  if (metadata.lastDialExecutionCampaignId && activeCallContainsText(call, metadata.lastDialExecutionCampaignId)) {
-    score += 3;
-    reasons.push("campaignId");
+  for (const campaignId of [
+    metadata.lastRingcxPublishedCampaignId,
+    metadata.lastRingcxPublishedRoute?.campaignId,
+    metadata.lastDialExecutionRingcxPublish?.campaignId,
+    metadata.lastDialExecutionCampaignId,
+  ]) {
+    if (campaignId && activeCallContainsText(call, campaignId)) {
+      score += 3;
+      reasons.push("campaignId");
+      break;
+    }
   }
-  if (metadata.lastDialExecutionDialGroupId && activeCallContainsText(call, metadata.lastDialExecutionDialGroupId)) {
-    score += 3;
-    reasons.push("dialGroupId");
+  for (const dialGroupId of [
+    metadata.lastRingcxPublishedDialGroupId,
+    metadata.lastRingcxPublishedRoute?.dialGroupId,
+    metadata.lastDialExecutionRingcxPublish?.dialGroupId,
+    metadata.lastDialExecutionDialGroupId,
+  ]) {
+    if (dialGroupId && activeCallContainsText(call, dialGroupId)) {
+      score += 3;
+      reasons.push("dialGroupId");
+      break;
+    }
   }
 
   return { score, reasons };

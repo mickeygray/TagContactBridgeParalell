@@ -13,6 +13,10 @@ function createReadInboxRouter(auth) {
 
   router.get("/:domain", auth.requireAuth, auth.requireAdmin, async (req, res) => {
     try {
+      const truthy = (value) =>
+        ["true", "1", "yes", "on"].includes(
+          String(value || "").trim().toLowerCase(),
+        );
       const result = await buildInboxWorkspace(req.params.domain, {
         status: req.query.status,
         channel: req.query.channel,
@@ -20,10 +24,20 @@ function createReadInboxRouter(auth) {
         workflow: req.query.workflow,
         family: req.query.family,
         limit: req.query.limit,
-        // Flag lets admin views reveal the auto-responded threads that
-        // the default filter hides.
-        includeAutoResponded:
-          String(req.query.includeAutoResponded || "").toLowerCase() === "true",
+        // Default inbox view hides auto-responded threads + opted-out
+        // threads + suppressed/closed threads so reps see only live
+        // work. The three flags let admin / audit views opt back in.
+        //   ?includeAutoResponded=true  → show auto-handled threads
+        //   ?includeOptedOut=true       → show opted-out threads
+        //   ?includeTerminated=true     → show suppressed + closed
+        //   ?optOutDetected=true        → JUST the opted-out list
+        includeAutoResponded: truthy(req.query.includeAutoResponded),
+        includeOptedOut: truthy(req.query.includeOptedOut),
+        includeTerminated: truthy(req.query.includeTerminated),
+        optOutDetected:
+          req.query.optOutDetected != null
+            ? truthy(req.query.optOutDetected)
+            : undefined,
       });
       return res.json({ ok: true, result });
     } catch (error) {

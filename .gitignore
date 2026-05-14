@@ -9,6 +9,10 @@ build/
 coverage/
 runtime/
 
+# Local diagnostic bundles. Commit sanitized summaries in docs/ instead.
+out/rcx-manual-test-report-*.log
+out/rcx-manual-dial-ticket-summary-*.md
+
 # Telephony recordings — local cache only. Drive is canonical.
 # Never commit raw call audio; we had 91 MP3s (~614 MB) leak via ops/
 # before this rule existed. git-filter-repo will scrub history; these

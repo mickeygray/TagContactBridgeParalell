@@ -189,6 +189,86 @@ function validateLegacyLeadWebhook(req) {
   return safeSecretEquals(provided, configured);
 }
 
+function requestLeadPayload(req) {
+  const query =
+    req.query && typeof req.query === "object" && !Array.isArray(req.query) ? req.query : {};
+  const body =
+    req.body &&
+    typeof req.body === "object" &&
+    !Buffer.isBuffer(req.body) &&
+    !Array.isArray(req.body)
+      ? req.body
+      : {};
+  return { ...query, ...body };
+}
+
+function configuredLdPostingQuerySecrets() {
+  return [
+    process.env.LD_POSTING_AUTH,
+    process.env.OPTA_LD_POSTING_AUTH,
+  ]
+    .map((value) => String(value || "").trim())
+    .filter(Boolean);
+}
+
+function payloadFirstValue(payload = {}, keys = []) {
+  for (const key of keys) {
+    const value = payload[key];
+    if (Array.isArray(value)) {
+      const arrayValue = value.map((item) => String(item || "").trim()).find(Boolean);
+      if (arrayValue) return arrayValue;
+      continue;
+    }
+    const next = String(value || "").trim();
+    if (next) return next;
+  }
+  return "";
+}
+
+function validateLdPostingWebhook(req, payload = requestLeadPayload(req)) {
+  if (validateLegacyLeadWebhook(req)) {
+    return true;
+  }
+
+  const configured = configuredLdPostingQuerySecrets();
+  if (!configured.length) {
+    return false;
+  }
+
+  const provided = payloadFirstValue(payload, [
+    "ldPostingAuth",
+    "ld_posting_auth",
+    "posting_auth",
+    "webhook_secret",
+    "auth",
+  ]);
+  if (!provided) {
+    return false;
+  }
+
+  return configured.some((expected) => safeSecretEquals(provided, expected));
+}
+
+function scrubLdPostingSecrets(payload = {}) {
+  const configured = configuredLdPostingQuerySecrets();
+  if (!configured.length) {
+    return payload;
+  }
+
+  const next = { ...payload };
+  for (const key of ["ldPostingAuth", "ld_posting_auth", "posting_auth", "webhook_secret", "auth"]) {
+    const value = next[key];
+    if (!value) continue;
+    const provided = Array.isArray(value)
+      ? value.map((item) => String(item || "").trim()).find(Boolean)
+      : String(value || "").trim();
+    if (provided && configured.some((expected) => safeSecretEquals(provided, expected))) {
+      delete next[key];
+    }
+  }
+  return next;
+}
+
 function resolveSkipLogicsCreate(req) {
   const requested = String(req.query.doCase || "").trim().toLowerCase() === "false";
   if (!requested) {
@@ -593,13 +673,14 @@ async function startServer() {
     }
   });
 
-  app.post("/api/inbound/ld/lead", vendorRateLimit, async (req, res) => {
-    if (!validateLeadWebhook(req)) {
+  const handleLdLead = async (req, res) => {
+    const rawPayload = requestLeadPayload(req);
+    if (!validateLdPostingWebhook(req, rawPayload)) {
       return res.status(401).json({ ok: false, error: "invalid_webhook_secret" });
     }
 
     try {
-      const result = await intakeLdLead(req.body || {}, {
+      const result = await intakeLdLead(scrubLdPostingSecrets(rawPayload), {
         headers: req.headers,
         sourceService: config.serviceName,
         skipLogicsCreate: req.skipLogicsCreate === true,
@@ -609,7 +690,10 @@ async function startServer() {
       runtime.logger.error("ld lead intake failed", { message: error.message });
       return res.status(500).json({ ok: false, error: error.message });
     }
-  });
+  };
+
+  app.get("/api/inbound/ld/lead", vendorRateLimit, handleLdLead);
+  app.post("/api/inbound/ld/lead", vendorRateLimit, handleLdLead);
 
   app.post("/api/inbound/ld/pre-ping", vendorRateLimit, async (req, res) => {
     if (!validateLeadWebhook(req)) {

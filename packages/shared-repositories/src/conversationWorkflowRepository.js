@@ -16,9 +16,27 @@ function buildQuery(domain, filters = {}) {
   };
 
   if (filters.channel) query.channel = filters.channel;
-  if (filters.status) query.status = filters.status;
   if (filters.caseId != null) query.caseId = Number(filters.caseId);
-  if (filters.optOutDetected != null) query.optOutDetected = Boolean(filters.optOutDetected);
+
+  // optOutDetected: explicit caller wins. Otherwise default-hide so
+  // opted-out threads don't clog the live inbox. Admin views can pass
+  // includeOptedOut: true to bring them back (or filter explicitly on
+  // optOutDetected: true to get just the DNC list for audit).
+  if (filters.optOutDetected != null) {
+    query.optOutDetected = Boolean(filters.optOutDetected);
+  } else if (!filters.includeOptedOut) {
+    query.optOutDetected = { $ne: true };
+  }
+
+  // Status filter: explicit caller wins. Default view hides terminal
+  // states (suppressed / closed) so the inbox surfaces only live work.
+  // The `status` enum is: observed | drafted | manual-review | sent |
+  // suppressed | closed.
+  if (filters.status) {
+    query.status = filters.status;
+  } else if (!filters.includeTerminated) {
+    query.status = { $nin: ["suppressed", "closed"] };
+  }
 
   // By default, hide threads the auto-responder already handled —
   // operator attention should go to needs_human / error / un-drafted
