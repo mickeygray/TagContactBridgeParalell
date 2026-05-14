@@ -1380,6 +1380,27 @@ function startPresencePoller(logger) {
     state.running = true;
     state.lastStartedAt = new Date();
     try {
+      // Hard cutover kill-switch. Same flag used in ringcentralClient
+      // and ringcxVoiceClient — a single env entry stops all RC traffic
+      // from this process. The presence poller's setInterval still ticks,
+      // but the body short-circuits so we make zero HTTP calls to RC.
+      const suspendedFlag = String(process.env.PARALLEL_RC_SUSPENDED || "").trim().toLowerCase();
+      if (["1", "true", "yes", "on"].includes(suspendedFlag)) {
+        state.lastCompletedAt = new Date();
+        state.lastSkippedAt = new Date();
+        state.lastSkippedReason = "parallel-rc-suspended";
+        state.lastResult = {
+          skipped: true,
+          reason: "parallel-rc-suspended",
+          checked: 0,
+          changed: 0,
+          staleCount: 0,
+          results: [],
+        };
+        state.lastError = null;
+        return;
+      }
+
       const businessWindow = getRingCentralBusinessWindow(config, new Date(), "presencePoll");
       state.businessWindow = businessWindow;
       if (!businessWindow.active) {

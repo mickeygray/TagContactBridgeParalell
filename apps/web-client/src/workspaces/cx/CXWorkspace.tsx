@@ -2809,6 +2809,35 @@ export function CXWorkspace() {
       return false;
     }
   }, []);
+  const cxDialExecutionModeOverride = React.useMemo<"manual" | "manual-then-campaign" | "ringcx-campaign-queue" | null>(() => {
+    if (typeof window === "undefined") return null;
+    const normalize = (value: string | null) => {
+      const raw = String(value || "").trim().toLowerCase();
+      if (["manual", "manual-oneoff", "active-call", "active-calls"].includes(raw)) return "manual";
+      if ([
+        "manual-then-campaign",
+        "manual-fallback",
+        "manual-fallback-campaign",
+        "try-manual",
+        "try-manual-then-campaign",
+        "hybrid",
+      ].includes(raw)) {
+        return "manual-then-campaign";
+      }
+      if (["campaign", "campaign-queue", "ringcx-campaign-queue", "progressive"].includes(raw)) {
+        return "ringcx-campaign-queue";
+      }
+      return null;
+    };
+    const params = new URLSearchParams(window.location.search);
+    const fromQuery = normalize(params.get("cxDialExecutionMode") || params.get("cxDialMode"));
+    if (fromQuery) return fromQuery;
+    try {
+      return normalize(localStorage.getItem("cxDialExecutionMode"));
+    } catch {
+      return null;
+    }
+  }, []);
 
   // Repopulate the form when a new lookup resolves, preserving any fields
   // the operator has already touched since the last populate. We key the
@@ -3107,7 +3136,10 @@ export function CXWorkspace() {
     // current `domain`. `setDomain(queueDomain)` below is async — using
     // `domain` here would post the dial to the wrong tenant when the user
     // clicks a queue item from a different domain than the active switcher.
-    const dialRequest = buildQueueDialRequest(item, queueDomain, contact);
+    const dialRequest = {
+      ...buildQueueDialRequest(item, queueDomain, contact),
+      ...(cxDialExecutionModeOverride ? { executionMode: cxDialExecutionModeOverride } : {}),
+    };
     stageQueueLeadInWorkspace(item, contact, queueDomain);
     if (!contact.phone) return;
     setServingQueueKey(queueKey);
@@ -3133,7 +3165,11 @@ export function CXWorkspace() {
         });
       } else {
         await dialAny.mutateAsync({ domain: queueDomain, ...dialRequest });
-        toast("CX dial queued", {
+        toast(cxDialExecutionModeOverride === "manual"
+          ? "CX manual dial requested"
+          : cxDialExecutionModeOverride === "manual-then-campaign"
+            ? "CX hybrid dial requested"
+            : "CX dial queued", {
           description: `Outbound dial requested for ${contact.name || contact.phone}.`,
         });
       }

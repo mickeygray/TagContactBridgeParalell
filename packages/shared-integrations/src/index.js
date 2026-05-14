@@ -18,7 +18,10 @@ const { createLogicsClient } = require("./logicsClient");
 const { createNeverBounceClient } = require("./neverBounceClient");
 const { createRealPhoneValidationClient } = require("./realPhoneValidationClient");
 const { createRingCentralClient } = require("./ringcentralClient");
-const { createRingcxVoiceClient } = require("./ringcxVoiceClient");
+const {
+  createRingcxVoiceClient,
+  getRingcxVoiceRateLimitState,
+} = require("./ringcxVoiceClient");
 const { createSendgridClient } = require("./sendgridClient");
 const { createTrustedFormClient } = require("./trustedFormClient");
 const { createCompanyRuntime, getCompanyRuntime } = require("./companyRuntime");
@@ -38,6 +41,7 @@ module.exports = {
   createRealPhoneValidationClient,
   createRingCentralClient,
   createRingcxVoiceClient,
+  getRingcxVoiceRateLimitState,
   createSendgridClient,
   createTrustedFormClient,
   githubClient,

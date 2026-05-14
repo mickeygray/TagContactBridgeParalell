@@ -1160,6 +1160,16 @@ function resolveDialExecutionMode(options = {}, dispatchIntent = {}) {
   if (["manual", "manual-oneoff", "active-call", "active-calls"].includes(raw)) {
     return "manual";
   }
+  if ([
+    "manual-then-campaign",
+    "manual-fallback",
+    "manual-fallback-campaign",
+    "try-manual",
+    "try-manual-then-campaign",
+    "hybrid",
+  ].includes(raw)) {
+    return "manual-then-campaign";
+  }
   if (["campaign", "campaign-queue", "ringcx-campaign-queue", "progressive"].includes(raw)) {
     return "ringcx-campaign-queue";
   }

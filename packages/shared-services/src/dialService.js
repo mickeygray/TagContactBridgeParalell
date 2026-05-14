@@ -92,6 +92,14 @@ function shouldSendManualCallerId() {
   return parseBooleanFlag(process.env.RINGCX_MANUAL_CALL_SEND_CALLER_ID, true);
 }
 
+function isManualCallPreflightEnabled() {
+  return parseBooleanFlag(process.env.RINGCX_MANUAL_CALL_PREFLIGHT_ENABLED, true);
+}
+
+function isManualCallPreflightStrict() {
+  return parseBooleanFlag(process.env.RINGCX_MANUAL_CALL_PREFLIGHT_STRICT, false);
+}
+
 function getManualCallRingDurationSeconds() {
   const configured = Number(
     process.env.RINGCX_MANUAL_CALL_RING_DURATION_SECONDS
@@ -463,6 +471,237 @@ async function resolveAgentDialContext(agent) {
     : (exShell?.primaryPhone || account?.phone || process.env.TAG_CLIENT_CONTACT_PHONE || process.env.TAG_RINGOUT_CALLER || null);
   const agentLoginDest = exShell?.primaryPhone || null;
   return { agentEmail, callerId, agentLoginDest, account, exShell };
+}
+
+function normalizeCxIdentifier(value) {
+  const normalized = String(value || "").trim();
+  return normalized || null;
+}
+
+function resolveRingcxAgentWiring(agent = null, dialContext = {}) {
+  const account = dialContext?.account || null;
+  const metadata = account?.metadata && typeof account.metadata === "object" ? account.metadata : {};
+  return {
+    agentId: normalizeCxIdentifier(
+      account?.cxAgentId
+        || metadata.ringcxAgentId
+        || metadata.cxAgentId
+        || agent?.cxAgentId
+        || "",
+    ),
+    agentGroupId: normalizeCxIdentifier(
+      metadata.ringcxAgentGroupId
+        || metadata.cxAgentGroupId
+        || agent?.cxAgentGroupId
+        || process.env.RINGCX_VOICE_DEFAULT_AGENT_GROUP_ID
+        || "",
+    ),
+    username: normalizeCxIdentifier(dialContext?.agentEmail || account?.email || agent?.agentEmail || agent?.email),
+    defaultLoginDest: normalizeCxIdentifier(metadata.ringcxDefaultLoginDest || metadata.cxDefaultLoginDest),
+    preferredLoginDest: normalizeCxIdentifier(dialContext?.agentLoginDest),
+  };
+}
+
+function collectFieldValuesByName(value, names, output = [], depth = 0) {
+  if (value === null || value === undefined || depth > 5 || output.length > 20) return output;
+  if (Array.isArray(value)) {
+    for (const item of value.slice(0, 20)) collectFieldValuesByName(item, names, output, depth + 1);
+    return output;
+  }
+  if (typeof value !== "object") return output;
+  const wanted = new Set(names.map((name) => String(name).toLowerCase()));
+  for (const [key, child] of Object.entries(value)) {
+    const normalizedKey = String(key || "").toLowerCase();
+    if (wanted.has(normalizedKey)) output.push(child);
+    collectFieldValuesByName(child, names, output, depth + 1);
+    if (output.length > 20) break;
+  }
+  return output;
+}
+
+function firstFieldValue(value, names) {
+  return collectFieldValuesByName(value, names)[0];
+}
+
+function stringifyState(value) {
+  if (value === null || value === undefined) return "";
+  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+    return String(value).trim();
+  }
+  if (typeof value === "object") {
+    for (const key of ["status", "state", "name", "label", "value", "id"]) {
+      if (value[key] !== undefined && value[key] !== null && value[key] !== "") {
+        return String(value[key]).trim();
+      }
+    }
+  }
+  return "";
+}
+
+function boolFromLooseValue(value) {
+  if (value === null || value === undefined || value === "") return null;
+  if (typeof value === "boolean") return value;
+  if (typeof value === "number") return value > 0;
+  if (typeof value === "object") {
+    const nested = firstFieldValue(value, ["connected", "active", "available", "offHook", "loggedIn"]);
+    const nestedBool = nested === value ? null : boolFromLooseValue(nested);
+    if (nestedBool !== null) return nestedBool;
+    if (Object.keys(value).length === 0) return false;
+    return true;
+  }
+  const normalized = String(value).trim().toLowerCase();
+  if (!normalized) return null;
+  if (["true", "yes", "y", "1", "on", "logged_in", "loggedin", "available", "connected", "active", "offhook", "off-hook"].includes(normalized)) {
+    return true;
+  }
+  if (["false", "no", "n", "0", "off", "logged_out", "loggedout", "offline", "disconnected", "inactive", "none", "null"].includes(normalized)) {
+    return false;
+  }
+  return null;
+}
+
+function summarizeRingcxLoginPayload(login = null) {
+  const status = stringifyState(firstFieldValue(login, [
+    "loginStatus",
+    "loginState",
+    "status",
+    "state",
+    "baseState",
+    "agentState",
+    "agentBaseState",
+  ]));
+  const loggedInValue = firstFieldValue(login, [
+    "loggedIn",
+    "isLoggedIn",
+    "agentLoggedIn",
+    "login",
+  ]);
+  const offHookValue = firstFieldValue(login, [
+    "offHook",
+    "offhook",
+    "isOffHook",
+    "offHookSession",
+    "offhookSession",
+    "hasOffHookSession",
+    "phoneSession",
+    "iqConnection",
+    "voiceConnection",
+  ]);
+  const registeredPhone = stringifyState(firstFieldValue(login, [
+    "registeredPhone",
+    "registered_phone",
+    "phone",
+    "phoneNumber",
+    "loginDest",
+    "defaultLoginDest",
+    "destination",
+  ]));
+  const sessionId = stringifyState(firstFieldValue(login, [
+    "sessionId",
+    "sessionID",
+    "offHookSessionId",
+    "offhookSessionId",
+    "connectionId",
+  ]));
+
+  const statusLower = status.toLowerCase();
+  const loggedIn = boolFromLooseValue(loggedInValue);
+  const offHook = boolFromLooseValue(offHookValue);
+  const failures = [];
+  const warnings = [];
+
+  if (loggedIn === false || /logged[\s_-]*out|not[\s_-]*logged|offline|signed[\s_-]*out/.test(statusLower)) {
+    failures.push("agent-not-logged-into-cx");
+  }
+  if (offHook === false || /no[\s_-]*off[\s_-]*hook|not[\s_-]*off[\s_-]*hook|disconnected/.test(statusLower)) {
+    failures.push("agent-has-no-offhook-session");
+  }
+  if (/busy|on[\s_-]*call|dialing|ringing/.test(statusLower)) {
+    failures.push("agent-session-busy");
+  }
+  if (loggedIn === null && !status) {
+    warnings.push("login-status-unknown");
+  }
+  if (offHook === null && !sessionId) {
+    warnings.push("offhook-session-unknown");
+  }
+  if (!registeredPhone) {
+    warnings.push("registered-phone-unknown");
+  }
+
+  return {
+    ready: failures.length === 0,
+    failures,
+    warnings,
+    status: status || null,
+    loggedIn,
+    offHook,
+    registeredPhone: registeredPhone || null,
+    sessionId: sessionId || null,
+  };
+}
+
+async function checkRingcxManualCallPreflight(client, {
+  agent = null,
+  dialContext = {},
+  logger = null,
+} = {}) {
+  if (!isManualCallPreflightEnabled()) {
+    return { ok: true, skipped: true, reason: "manual-call-preflight-disabled" };
+  }
+  if (!client || typeof client.getAgentLogin !== "function") {
+    return { ok: true, skipped: true, reason: "ringcx-login-preflight-unavailable" };
+  }
+
+  const strict = isManualCallPreflightStrict();
+  const wiring = resolveRingcxAgentWiring(agent, dialContext);
+  if (!wiring.agentId || !wiring.agentGroupId) {
+    return {
+      ok: !strict,
+      skipped: true,
+      blocking: strict,
+      reason: "missing-ringcx-agent-wiring",
+      wiring,
+      hint: "Pair this user to a RingCX agent id and agent group id to enable preflight.",
+    };
+  }
+
+  try {
+    const login = await client.getAgentLogin(wiring.agentId, wiring.agentGroupId);
+    const summary = summarizeRingcxLoginPayload(login);
+    return {
+      ok: summary.ready,
+      blocking: !summary.ready,
+      reason: summary.ready ? "ringcx-agent-ready" : summary.failures[0] || "ringcx-agent-not-ready",
+      wiring,
+      login: summary,
+      hint: summary.ready
+        ? null
+        : "Open the RingCX agent app, select the intended hard phone or softphone, and go AVAILABLE before dialing from Parallel.",
+    };
+  } catch (error) {
+    const retryable = Boolean(error.retryable) || Number(error.status || error.details?.responseStatus || 0) === 429;
+    const result = {
+      ok: !strict && !retryable,
+      blocking: strict || retryable,
+      retryable,
+      reason: retryable ? "ringcx-login-preflight-rate-limited" : "ringcx-login-preflight-failed",
+      wiring,
+      error: error.message || "ringcx-login-preflight-failed",
+      details: error.details || null,
+      hint: retryable
+        ? "RingCX login preflight is temporarily throttled; wait for the CX cooldown before trying again."
+        : "Could not verify the CX voice session. Strict mode blocks this; non-strict mode lets the call attempt continue.",
+    };
+    logger?.warn?.("dial.placeCall.ringcxPreflight.failed", {
+      reason: result.reason,
+      agentId: agent?.extensionId || null,
+      ringcxAgentId: wiring.agentId,
+      ringcxAgentGroupId: wiring.agentGroupId,
+      error: error.message,
+    });
+    return result;
+  }
 }
 
 function sanitizeUsPhone(value) {
@@ -959,6 +1198,25 @@ async function placeCall(agentId, queueItemId, {
       userBearerActive: Boolean(userBearer),
       bearerExpiresAt: userBearer?.expiresAt ? new Date(userBearer.expiresAt).toISOString() : null,
     });
+    const preflight = await checkRingcxManualCallPreflight(client, {
+      agent,
+      dialContext,
+      logger,
+    });
+    if (!preflight.ok && preflight.blocking !== false) {
+      const preflightError = new Error(`ringcx-manual-preflight-failed:${preflight.reason || "not-ready"}`);
+      preflightError.status = preflight.retryable ? 429 : 409;
+      preflightError.retryable = Boolean(preflight.retryable);
+      preflightError.details = preflight;
+      throw preflightError;
+    }
+    logger?.info?.("dial.placeCall.ringcxPreflight", {
+      agentId,
+      ok: preflight.ok,
+      skipped: Boolean(preflight.skipped),
+      reason: preflight.reason || null,
+      login: preflight.login || null,
+    });
     placementResponse = await withTimeout(
       () => client.placeManualCall({
         agentEmail,
@@ -989,6 +1247,8 @@ async function placeCall(agentId, queueItemId, {
       ok: false,
       error: `placement-failed: ${error.message}`,
       callSessionId: callSession._id,
+      details: safeError.details || error.details || null,
+      hint: error.details?.hint || null,
     };
   }
 
@@ -1620,6 +1880,9 @@ module.exports = {
   sweepStaleStates,
   // exposed for tests / debug:
   resolveAgentDialContext,
+  resolveRingcxAgentWiring,
+  summarizeRingcxLoginPayload,
+  checkRingcxManualCallPreflight,
   sanitizeUsPhone,
   buildLogicsCaseUrl,
   extractRcxUii,

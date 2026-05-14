@@ -17,7 +17,10 @@ const {
   safeSecretEquals,
 } = require("../../../packages/shared-utils/src");
 const { ROLES } = require("../../../packages/shared-types/src");
-const { createRingCentralClient } = require("../../../packages/shared-integrations/src");
+const {
+  createRingCentralClient,
+  getRingcxVoiceRateLimitState,
+} = require("../../../packages/shared-integrations/src");
 const { publishDemoEvent } = require("../../../packages/shared-services/src/demoEventService");
 const { initializeServiceRuntime } = require("../../../packages/shared-runtime/src");
 const { buildServiceHealth } = require("../../../packages/shared-observability/src");
@@ -933,6 +936,9 @@ async function startServer() {
     res.json({
       ...buildServiceHealth(config, runtime.getMongoState()),
       ringcentral: rc.getAuthStatus(),
+      ringcxVoice: {
+        rateLimits: getRingcxVoiceRateLimitState(),
+      },
       subscriptionWatchdog: {
         enabled: watchdogEnabled,
         ...getWatchdogState(),
@@ -1235,6 +1241,7 @@ async function startServer() {
   });
 
   app.post("/api/ringcentral/cx-serving/dispatch-intent", requireInternalAccess, async (req, res) => {
+    const startedAt = Date.now();
     try {
       const body = req.body && typeof req.body === "object" ? req.body : {};
       const staged = await stageCxDispatchIntent({
@@ -1245,12 +1252,29 @@ async function startServer() {
         source: req.user?.email || body.requestedBy || "ringcentral-cx",
         status: "staged",
       });
+      const stagedAt = Date.now();
       const execution = await executeCxDispatchIntent({
         queueItemId: staged?.queueItemId || body.queueItemId || body.queueTicketId || null,
         domain: body.domain || null,
         caseId: body.caseId != null ? Number(body.caseId) : null,
         dispatchIntent: body,
         source: req.user?.email || body.requestedBy || "ringcentral-cx",
+        logger: runtime.logger,
+      });
+      runtime.logger.info("ringcentral.cx_dispatch_intent.completed", {
+        queueItemId: staged?.queueItemId || body.queueItemId || body.queueTicketId || null,
+        domain: body.domain || null,
+        caseId: body.caseId != null ? Number(body.caseId) : null,
+        executionMode: body.executionMode || execution?.mode || null,
+        ok: execution?.ok !== false,
+        queued: Boolean(execution?.queued),
+        uii: execution?.uii || null,
+        callSessionId: execution?.callSessionId || null,
+        activeCallCaptureReason: execution?.activeCallCapture?.reason || null,
+        activeCallCaptureOk: execution?.activeCallCapture?.ok ?? null,
+        stagedMs: stagedAt - startedAt,
+        executionMs: Date.now() - stagedAt,
+        totalMs: Date.now() - startedAt,
       });
       if (execution?.ok === false) {
         return res.status(execution.retryable === false ? 409 : 502).json({
@@ -1272,6 +1296,14 @@ async function startServer() {
         },
       });
     } catch (error) {
+      runtime.logger.warn("ringcentral.cx_dispatch_intent.failed", {
+        queueItemId: req.body?.queueItemId || req.body?.queueTicketId || null,
+        domain: req.body?.domain || null,
+        caseId: req.body?.caseId != null ? Number(req.body.caseId) : null,
+        executionMode: req.body?.executionMode || null,
+        error: error.message,
+        totalMs: Date.now() - startedAt,
+      });
       return res.status(error.status || 500).json({ ok: false, error: error.message });
     }
   });

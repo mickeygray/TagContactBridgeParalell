@@ -35,12 +35,18 @@ const {
 const { getRingCentralConfig } = require("./ringCentralConfig");
 const { getGithubConfig } = require("./githubConfig");
 
+// Default ports for the Parallel stack. Each is overridable via env
+// so a host can bump them without editing source — useful for:
+//   - dev environments running multiple Parallel checkouts side-by-side
+//   - cutover bring-up where the new machine briefly co-exists with the
+//     old one on the same network before ethernet swap
+//   - container/VM deployments that need to remap onto host ports
 const PORTS = Object.freeze({
-  webClient: 3001,
-  controlPlane: 5001,
-  inboundGateway: 4001,
-  outboundGateway: 4002,
-  ringcentralCx: 6101,
+  webClient: envInt("WEB_CLIENT_PORT", 3001),
+  controlPlane: envInt("CONTROL_PLANE_PORT", 5001),
+  inboundGateway: envInt("INBOUND_GATEWAY_PORT", 4001),
+  outboundGateway: envInt("OUTBOUND_GATEWAY_PORT", 4002),
+  ringcentralCx: envInt("RINGCENTRAL_CX_PORT", 6101),
   brandSshGateway: envInt("BRAND_SSH_PORT", 3333),
 });
 

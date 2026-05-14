@@ -4,6 +4,20 @@ const { ExternalServiceError } = require("../../shared-errors/src");
 const { getRingCentralConfig } = require("../../shared-config/src");
 const { queueRateLimitAlert } = require("./rateLimitAlertService");
 
+// Cutover kill-switch. When set, this process makes ZERO calls to
+// RingCentral — no token refresh, no presence, no recordings, no
+// subscriptions. Used during machine cutover so two hosts don't fight
+// over the same OAuth token (which causes auth-endpoint 429 cascades).
+//
+// Accepts: 1, true, yes, on (case-insensitive). Anything else = enabled.
+//
+// Read on every call (not cached) so the operator can flip it via env
+// + service restart without rebuilding.
+function rcSuspendedByEnv() {
+  const raw = String(process.env.PARALLEL_RC_SUSPENDED || "").trim().toLowerCase();
+  return raw === "1" || raw === "true" || raw === "yes" || raw === "on";
+}
+
 let tokenState = {
   accessToken: null,
   expiresAt: 0,
@@ -334,6 +348,25 @@ async function runScheduledReinitialize(reason = "scheduled-refresh") {
 
 async function ensureAuthenticated(options = {}) {
   const config = getRingCentralConfig();
+
+  // Hard kill-switch for cutover scenarios. When PARALLEL_RC_SUSPENDED
+  // is truthy (any of: 1, true, yes, on), this process makes ZERO calls
+  // to RingCentral — no token refresh, no presence polls, no recording
+  // downloads. The flag exists for the new-machine bring-up during
+  // cutover: the new host runs the full app but stays silent toward RC
+  // until the operator flips this flag off. Two simultaneous machines
+  // refreshing the same OAuth token = the 429 snowball we saw on
+  // 2026-05-13. This is the single gate that prevents it.
+  if (rcSuspendedByEnv()) {
+    return {
+      ok: true,
+      skipped: true,
+      reason: "parallel-rc-suspended",
+      auth: getAuthStatus(),
+      window: { active: false, reason: "parallel-rc-suspended" },
+    };
+  }
+
   const businessHoursOnly = Boolean(options.businessHoursOnly);
   const window = businessHoursOnly
     ? getRingCentralBusinessWindow(config, new Date(), options.windowPrefix || "autoReinit")
@@ -449,6 +482,18 @@ async function authenticate(force = false) {
 
   const data = await parseResponse(response);
   if (!response.ok) {
+    // On 429, capture all of RC's rate-limit headers — without these
+    // we have no visibility into what the actual configured limits are.
+    // RC may send: Retry-After (seconds OR HTTP date), X-Rate-Limit-Limit
+    // (the ceiling), X-Rate-Limit-Remaining, X-Rate-Limit-Window (period),
+    // X-Rate-Limit-Group (Light/Medium/Heavy/Auth).
+    const rateLimitHeaders = response.status === 429 ? {
+      retryAfter: response.headers?.get?.("retry-after") || null,
+      limit:      response.headers?.get?.("x-rate-limit-limit") || null,
+      remaining:  response.headers?.get?.("x-rate-limit-remaining") || null,
+      window:     response.headers?.get?.("x-rate-limit-window") || null,
+      group:      response.headers?.get?.("x-rate-limit-group") || null,
+    } : null;
     const error = new ExternalServiceError(
       "ringcentral",
       `RingCentral authentication failed: ${response.status}`,
@@ -459,6 +504,7 @@ async function authenticate(force = false) {
           responseStatus: response.status,
           responseBody: data,
           retryAfter: response.headers?.get?.("retry-after") || null,
+          rateLimitHeaders,
           rateLimitedCircuitOpened: response.status === 429 ? true : undefined,
         },
       },
@@ -604,6 +650,16 @@ async function request(method, path, { query, body, headers } = {}, retry = true
   }
 
   if (!response.ok) {
+    // Capture full rate-limit header set on 429 for forensics. RC's
+    // X-Rate-Limit-Group tells us which bucket fired (Light/Medium/
+    // Heavy/Auth), Limit + Window give the actual configured ceiling.
+    const rateLimitHeaders = response.status === 429 ? {
+      retryAfter: response.headers?.get?.("retry-after") || null,
+      limit:      response.headers?.get?.("x-rate-limit-limit") || null,
+      remaining:  response.headers?.get?.("x-rate-limit-remaining") || null,
+      window:     response.headers?.get?.("x-rate-limit-window") || null,
+      group:      response.headers?.get?.("x-rate-limit-group") || null,
+    } : null;
     const error = new ExternalServiceError(
       "ringcentral",
       `RingCentral request failed ${method} ${path}: ${response.status}`,
@@ -617,6 +673,7 @@ async function request(method, path, { query, body, headers } = {}, retry = true
           responseStatus: response.status,
           responseBody: data,
           retryAfter: response.headers?.get?.("retry-after") || null,
+          rateLimitHeaders,
           rateLimitedCircuitOpened: response.status === 429 ? true : undefined,
         },
       },

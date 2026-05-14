@@ -45,13 +45,57 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$Nssm      = "C:\Users\admin\nssm\nssm-2.24-101-g897c7ad\win64\nssm.exe"
-$Repo      = "C:\Users\Admin\Code\TagContactBridgeParallel"
-$LogsDir   = "C:\tools\logs"
+# --- Path discovery ---------------------------------------------------------
+# nssm.exe location varies per machine. Try env override first, then known
+# candidate paths in priority order. Fail loud if none exist so a fresh
+# machine surfaces the missing-binary error immediately instead of
+# silently installing nothing.
+function Find-Nssm {
+    if ($env:NSSM_EXE -and (Test-Path $env:NSSM_EXE)) { return $env:NSSM_EXE }
+    $candidates = @(
+        "C:\tools\nssm-2.24\win64\nssm.exe",
+        "C:\tools\nssm\win64\nssm.exe",
+        "C:\Users\$env:USERNAME\nssm\nssm-2.24-101-g897c7ad\win64\nssm.exe",
+        "C:\Users\admin\nssm\nssm-2.24-101-g897c7ad\win64\nssm.exe"
+    )
+    foreach ($c in $candidates) {
+        if (Test-Path $c) { return $c }
+    }
+    $onPath = Get-Command nssm.exe -ErrorAction SilentlyContinue
+    if ($onPath) { return $onPath.Source }
+    throw "nssm.exe not found. Set `$env:NSSM_EXE or extract NSSM to C:\tools\nssm-2.24\win64\."
+}
+
+$Nssm      = Find-Nssm
+$Repo      = if ($env:PARALLEL_REPO_ROOT) { $env:PARALLEL_REPO_ROOT } else { "C:\Users\$env:USERNAME\Code\TagContactBridgeParallel" }
+if (-not (Test-Path $Repo)) {
+    # Fall back to the original admin path if the per-user path doesn't exist.
+    if (Test-Path "C:\Users\Admin\Code\TagContactBridgeParallel") {
+        $Repo = "C:\Users\Admin\Code\TagContactBridgeParallel"
+    }
+}
+$LogsDir   = if ($env:PARALLEL_LOGS_DIR) { $env:PARALLEL_LOGS_DIR } else { "C:\tools\logs" }
 $NodeExe   = (Get-Command node).Source
 $PowerShellExe = (Get-Command powershell).Source
-$NginxRoot = "C:\tools\nginx-1.29.6"
+$NginxRoot = if ($env:NGINX_ROOT -and (Test-Path $env:NGINX_ROOT)) { $env:NGINX_ROOT } else { "C:\tools\nginx-1.29.6" }
 $NginxExe  = Join-Path $NginxRoot "nginx.exe"
+
+# --- Port discovery ---------------------------------------------------------
+# Pull from env so service Display + Description match what the apps will
+# actually bind to. Defaults match packages/shared-config/src/index.js so
+# nothing changes for a vanilla install.
+function Get-PortEnv($name, $default) {
+    $raw = [Environment]::GetEnvironmentVariable($name, "Process")
+    if (-not $raw) { $raw = [Environment]::GetEnvironmentVariable($name, "Machine") }
+    if ($raw -and $raw -match '^\d+$') { return [int]$raw }
+    return $default
+}
+$ControlPlanePort     = Get-PortEnv "CONTROL_PLANE_PORT"     5001
+$InboundGatewayPort   = Get-PortEnv "INBOUND_GATEWAY_PORT"   4001
+$OutboundGatewayPort  = Get-PortEnv "OUTBOUND_GATEWAY_PORT"  4002
+$RingcentralCxPort    = Get-PortEnv "RINGCENTRAL_CX_PORT"    6101
+Write-Host "Ports: cp=$ControlPlanePort, in=$InboundGatewayPort, out=$OutboundGatewayPort, cx=$RingcentralCxPort"
+Write-Host "Paths: Repo=$Repo, Logs=$LogsDir, Nssm=$Nssm, Nginx=$NginxRoot"
 # LocalSystem runs the service without an interactive password step.
 # It has full local-filesystem access (so it can read this repo at
 # C:\Users\Admin\... and write logs to C:\tools\logs\), and the
@@ -82,35 +126,35 @@ if (-not $OnlyBlogger) {
             # restart-restart-restart.
             Arguments   = "-p `"$NginxRoot`" -c conf\nginx.conf -g `"daemon off;`""
             AppDirectory = $NginxRoot
-            Description = "Reverse proxy on :80/:81. Routes ngrok-terminated traffic to control-plane (5001) and the various Parallel workers."
+            Description = "Reverse proxy on :80/:81. Routes ngrok-terminated traffic to control-plane ($ControlPlanePort) and the various Parallel workers."
         },
         @{
             Name        = "ParallelControlPlane"
-            Display     = "Parallel - Control Plane (5001)"
+            Display     = "Parallel - Control Plane ($ControlPlanePort)"
             Application = $NodeExe
             Arguments   = "apps\control-plane\src\server.js"
-            Description = "Runs the Parallel control-plane on port 5001 and serves the built web client."
+            Description = "Runs the Parallel control-plane on port $ControlPlanePort and serves the built web client."
         },
         @{
             Name        = "ParallelInboundGateway"
-            Display     = "Parallel - Inbound Gateway (4001)"
+            Display     = "Parallel - Inbound Gateway ($InboundGatewayPort)"
             Application = $NodeExe
             Arguments   = "apps\inbound-gateway\src\server.js"
-            Description = "Runs the Parallel inbound gateway on port 4001."
+            Description = "Runs the Parallel inbound gateway on port $InboundGatewayPort."
         },
         @{
             Name        = "ParallelOutboundGateway"
-            Display     = "Parallel - Outbound Gateway (4002)"
+            Display     = "Parallel - Outbound Gateway ($OutboundGatewayPort)"
             Application = $NodeExe
             Arguments   = "apps\outbound-gateway\src\server.js"
-            Description = "Runs the Parallel outbound gateway on port 4002."
+            Description = "Runs the Parallel outbound gateway on port $OutboundGatewayPort."
         },
         @{
             Name        = "ParallelRingCentralCx"
-            Display     = "Parallel - RingCentral CX (6101)"
+            Display     = "Parallel - RingCentral CX ($RingcentralCxPort)"
             Application = $NodeExe
             Arguments   = "apps\ringcentral-cx\src\server.js"
-            Description = "Runs the Parallel RingCentral CX worker on port 6101."
+            Description = "Runs the Parallel RingCentral CX worker on port $RingcentralCxPort."
         },
         @{
             Name        = "ParallelRestartHelper"
@@ -235,7 +279,7 @@ if ($RunAsUser -eq "LocalSystem") {
     Write-Host "  Services run as LocalSystem - no password step needed."
     Write-Host ""
     Write-Host "  1. Stop your current 'npm run dev' if still running"
-    Write-Host "     (frees ports 5001/4001/4002/3001/6101)"
+    Write-Host "     (frees ports $ControlPlanePort/$InboundGatewayPort/$OutboundGatewayPort/$RingcentralCxPort + web-client 3001 if dev)"
     Write-Host "  2. Start-Service ParallelControlPlane"
     Write-Host "  3. Start-Service ParallelInboundGateway"
     Write-Host "  4. Start-Service ParallelOutboundGateway"

@@ -6,6 +6,10 @@
 // token cache + auto-refresh, and the raw HTTP methods scoped to
 // /voice/api/v1/admin/accounts/{accountId}/...
 //
+// RingCX live agent/IQ session endpoints are kept separate from the
+// campaign/lead/gate/active-call surface. RC support guidance lists
+// those as /v1/admin/accounts/{accountId}/... endpoints.
+//
 // Higher-level orchestrators (cxCampaignService) consume this client
 // and stitch together the "build campaign / load lead / dial / etc"
 // lifecycle. Callers should generally NOT hit `client.post(path, …)`
@@ -45,6 +49,7 @@ const DEFAULT_RC_BASE = "https://platform.ringcentral.com";
 const DEFAULT_RCX_BASE = "https://ringcx.ringcentral.com";
 const DEFAULT_TOKEN_EXCHANGE_PATH = "/api/auth/login/rc/accesstoken";
 const DEFAULT_TOKEN_REFRESH_PATH = "/api/auth/token/refresh";
+const DEFAULT_SESSION_ADMIN_PATH_PREFIX = "/v1/admin";
 
 // RingCX bearer expires every 5 minutes. We refresh proactively when
 // fewer than this many ms remain so a long-running orchestrator never
@@ -52,6 +57,20 @@ const DEFAULT_TOKEN_REFRESH_PATH = "/api/auth/token/refresh";
 const TOKEN_REFRESH_HEADROOM_MS = 60 * 1000;
 const DEFAULT_RATE_LIMIT_BACKOFF_MS = 5 * 60 * 1000;
 const DEFAULT_MAX_RATE_LIMIT_BACKOFF_MS = 15 * 60 * 1000;
+const DEFAULT_REQUEST_MIN_INTERVALS_MS = {
+  "admin-read": 750,
+  "admin-write": 1500,
+  "agent-read": 750,
+  "agent-write": 1500,
+  "active-call-list": 1000,
+  "active-call-control": 1250,
+  "manual-outbound": 1500,
+  "lead-action": 1500,
+  "campaign-read": 750,
+  "campaign-write": 1500,
+  "recording-metadata": 31 * 1000,
+  "recording-download": 2500,
+};
 
 function readEnv(name, fallback = "") {
   const v = process.env[name];
@@ -85,8 +104,8 @@ const TOKEN_CACHE = new Map();
 const TOKEN_RESOLVE_IN_FLIGHT = new Map();
 let AUTH_BACKOFF_UNTIL_MS = 0;
 let AUTH_BACKOFF_LAST_ERROR = null;
-let API_BACKOFF_UNTIL_MS = 0;
-let API_BACKOFF_LAST_ERROR = null;
+const API_BACKOFF_BY_SCOPE = new Map();
+const API_THROTTLE_BY_SCOPE = new Map();
 
 function getCacheKey() {
   return readEnv("RING_CENTRAL_CLIENT_ID", "default");
@@ -107,6 +126,56 @@ function envDurationMs(name, fallback) {
   return Number.isFinite(value) && value >= 0 ? value : fallback;
 }
 
+function parseBooleanFlag(value, fallback = false) {
+  if (value === undefined || value === null || value === "") return fallback;
+  const normalized = String(value).trim().toLowerCase();
+  if (["1", "true", "yes", "y", "on"].includes(normalized)) return true;
+  if (["0", "false", "no", "n", "off"].includes(normalized)) return false;
+  return fallback;
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function scopeToEnvToken(scope) {
+  return String(scope || "api")
+    .replace(/[^A-Za-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .toUpperCase() || "API";
+}
+
+function classifyApiScope(method, path) {
+  const verb = String(method || "GET").toUpperCase();
+  const p = String(path || "").toLowerCase();
+  if (p.includes("interaction-metadata")) return "recording-metadata";
+  if (p.includes("recordings/dialogs/")) return "recording-download";
+  if (p.includes("activecalls/createmanualagentcall")) return "manual-outbound";
+  if (p.includes("activecalls/list")) return "active-call-list";
+  if (p.includes("activecalls/")) return "active-call-control";
+  if (p.includes("campaignleads/actions")) return "lead-action";
+  if (p.includes("/campaigns") || p.includes("dialgroups")) {
+    return verb === "GET" ? "campaign-read" : "campaign-write";
+  }
+  if (p.includes("agentgroups") || p.includes("gategroups")) {
+    return verb === "GET" ? "agent-read" : "agent-write";
+  }
+  return verb === "GET" ? "admin-read" : "admin-write";
+}
+
+function getScopeMinIntervalMs(scope) {
+  const fallback = DEFAULT_REQUEST_MIN_INTERVALS_MS[scope]
+    ?? DEFAULT_REQUEST_MIN_INTERVALS_MS["admin-write"];
+  return envDurationMs(
+    `RINGCX_${scopeToEnvToken(scope)}_MIN_INTERVAL_MS`,
+    envDurationMs("RINGCX_API_MIN_INTERVAL_MS", fallback),
+  );
+}
+
+function isProactiveThrottleEnabled() {
+  return parseBooleanFlag(process.env.RINGCX_PROACTIVE_THROTTLE_ENABLED, true);
+}
+
 function parseRetryAfterMs(error) {
   const raw = error?.details?.retryAfter || error?.details?.retryAfterSeconds;
   if (raw == null || raw === "") return null;
@@ -121,22 +190,27 @@ function parseRetryAfterMs(error) {
   return null;
 }
 
-function getRateLimitBackoffMs(error, envName) {
+function getRateLimitBackoffMs(error, envName, fallbackEnvName = "RINGCX_RATE_LIMIT_BACKOFF_MS") {
   const configured = envDurationMs(
     envName,
-    envDurationMs("RINGCX_RATE_LIMIT_BACKOFF_MS", DEFAULT_RATE_LIMIT_BACKOFF_MS),
+    envDurationMs(fallbackEnvName, envDurationMs("RINGCX_RATE_LIMIT_BACKOFF_MS", DEFAULT_RATE_LIMIT_BACKOFF_MS)),
   );
   const max = envDurationMs("RINGCX_RATE_LIMIT_MAX_BACKOFF_MS", DEFAULT_MAX_RATE_LIMIT_BACKOFF_MS);
   const retryAfterMs = parseRetryAfterMs(error);
-  return Math.min(Math.max(retryAfterMs ?? configured, configured), max);
+  const candidate = retryAfterMs ?? configured;
+  return Math.min(Math.max(candidate, 1000), max);
 }
 
 function getAuthBackoffMs(error) {
   return getRateLimitBackoffMs(error, "RINGCX_AUTH_RATE_LIMIT_BACKOFF_MS");
 }
 
-function getApiBackoffMs(error) {
-  return getRateLimitBackoffMs(error, "RINGCX_API_RATE_LIMIT_BACKOFF_MS");
+function getApiBackoffMs(error, scope) {
+  return getRateLimitBackoffMs(
+    error,
+    `RINGCX_${scopeToEnvToken(scope)}_RATE_LIMIT_BACKOFF_MS`,
+    "RINGCX_API_RATE_LIMIT_BACKOFF_MS",
+  );
 }
 
 function setAuthBackoff(error) {
@@ -153,16 +227,22 @@ function setAuthBackoff(error) {
   });
 }
 
-function setApiBackoff(error) {
-  const delayMs = getApiBackoffMs(error);
-  API_BACKOFF_UNTIL_MS = Date.now() + delayMs;
-  API_BACKOFF_LAST_ERROR = error?.message || "RingCX API rate limited";
+function setApiBackoff(error, scope = "api") {
+  const delayMs = getApiBackoffMs(error, scope);
+  const untilMs = Date.now() + delayMs;
+  const lastError = error?.message || "RingCX API rate limited";
+  API_BACKOFF_BY_SCOPE.set(scope, {
+    untilMs,
+    lastError,
+    method: error?.details?.method || null,
+    path: error?.details?.path || null,
+  });
   queueRateLimitAlert({
     platform: "RingCX",
     service: "ringcx-voice",
-    scope: "api",
+    scope,
     openedAt: new Date().toISOString(),
-    nextAttemptAt: new Date(API_BACKOFF_UNTIL_MS).toISOString(),
+    nextAttemptAt: new Date(untilMs).toISOString(),
     method: error?.details?.method,
     path: error?.details?.path,
     error,
@@ -187,24 +267,80 @@ function assertNotInAuthBackoff() {
   );
 }
 
-function assertNotInApiBackoff(method, path) {
-  if (!API_BACKOFF_UNTIL_MS || API_BACKOFF_UNTIL_MS <= Date.now()) return;
+function assertNotInApiBackoff(method, path, scope = "api") {
+  const record = API_BACKOFF_BY_SCOPE.get(scope);
+  if (!record) return;
+  if (record.untilMs <= Date.now()) {
+    API_BACKOFF_BY_SCOPE.delete(scope);
+    return;
+  }
   throw new ExternalServiceError(
     "ringcx-voice",
-    `RingCX API in rate-limit backoff until ${new Date(API_BACKOFF_UNTIL_MS).toISOString()}`,
+    `RingCX ${scope} in rate-limit backoff until ${new Date(record.untilMs).toISOString()}`,
     {
       status: 429,
       retryable: true,
       details: {
         rateLimitedCircuitOpen: true,
-        scope: "api",
+        scope,
         method,
         path,
-        nextApiAttemptAt: new Date(API_BACKOFF_UNTIL_MS).toISOString(),
-        lastApiError: API_BACKOFF_LAST_ERROR,
+        nextApiAttemptAt: new Date(record.untilMs).toISOString(),
+        lastApiError: record.lastError,
       },
     },
   );
+}
+
+async function withApiThrottle(scope, operation) {
+  if (!isProactiveThrottleEnabled()) return operation();
+  const minIntervalMs = getScopeMinIntervalMs(scope);
+  if (!minIntervalMs) return operation();
+
+  let limiter = API_THROTTLE_BY_SCOPE.get(scope);
+  if (!limiter) {
+    limiter = { nextAt: 0, tail: Promise.resolve() };
+    API_THROTTLE_BY_SCOPE.set(scope, limiter);
+  }
+
+  const run = limiter.tail.catch(() => {}).then(async () => {
+    const waitMs = Math.max(limiter.nextAt - Date.now(), 0);
+    if (waitMs > 0) await sleep(waitMs);
+    limiter.nextAt = Date.now() + minIntervalMs;
+    return operation();
+  });
+  limiter.tail = run.catch(() => {});
+  return run;
+}
+
+function getRateLimitState() {
+  const now = Date.now();
+  const api = {};
+  for (const [scope, record] of API_BACKOFF_BY_SCOPE.entries()) {
+    if (!record || record.untilMs <= now) {
+      API_BACKOFF_BY_SCOPE.delete(scope);
+      continue;
+    }
+    api[scope] = {
+      nextApiAttemptAt: new Date(record.untilMs).toISOString(),
+      lastApiError: record.lastError,
+      method: record.method,
+      path: record.path,
+    };
+  }
+  return {
+    auth: AUTH_BACKOFF_UNTIL_MS > now
+      ? {
+          nextAuthAttemptAt: new Date(AUTH_BACKOFF_UNTIL_MS).toISOString(),
+          lastAuthError: AUTH_BACKOFF_LAST_ERROR,
+        }
+      : null,
+    api,
+    proactiveThrottleEnabled: isProactiveThrottleEnabled(),
+    minIntervalsMs: Object.fromEntries(
+      Object.keys(DEFAULT_REQUEST_MIN_INTERVALS_MS).map((scope) => [scope, getScopeMinIntervalMs(scope)]),
+    ),
+  };
 }
 
 async function retryAuthOperation(operation) {
@@ -232,6 +368,17 @@ async function rawFetch(url, init = {}) {
 }
 
 function asError(method, path, response) {
+  // On 429, capture all of RC's rate-limit headers so we have visibility
+  // into the actual configured ceiling on the next throttle event.
+  // X-Rate-Limit-Group tells us which bucket (Light/Medium/Heavy/Auth)
+  // fired; Limit + Window give the configured rate.
+  const rateLimitHeaders = response.status === 429 ? {
+    retryAfter: response.headers?.get?.("retry-after") || null,
+    limit:      response.headers?.get?.("x-rate-limit-limit") || null,
+    remaining:  response.headers?.get?.("x-rate-limit-remaining") || null,
+    window:     response.headers?.get?.("x-rate-limit-window") || null,
+    group:      response.headers?.get?.("x-rate-limit-group") || null,
+  } : null;
   return new ExternalServiceError(
     "ringcx-voice",
     `${method} ${path} failed: ${response.status}`,
@@ -244,6 +391,7 @@ function asError(method, path, response) {
         responseStatus: response.status,
         responseBody: response.json || response.text,
         retryAfter: response.headers?.get?.("retry-after") || null,
+        rateLimitHeaders,
       },
     },
   );
@@ -374,7 +522,22 @@ async function resolveBearerUncached(config, cacheKey) {
   return next;
 }
 
+// Cutover kill-switch — when PARALLEL_RC_SUSPENDED is set, refuse to
+// resolve any bearer token. Same flag as ringcentralClient so a single
+// env entry silences ALL RC traffic from this process during cutover.
+function rcSuspendedByEnv() {
+  const raw = String(process.env.PARALLEL_RC_SUSPENDED || "").trim().toLowerCase();
+  return raw === "1" || raw === "true" || raw === "yes" || raw === "on";
+}
+
 async function resolveBearer(config) {
+  if (rcSuspendedByEnv()) {
+    const err = new Error("RingCX suspended via PARALLEL_RC_SUSPENDED");
+    err.code = "PARALLEL_RC_SUSPENDED";
+    err.status = 503;
+    throw err;
+  }
+
   const key = getCacheKey();
   const cached = TOKEN_CACHE.get(key);
   const now = Date.now();
@@ -403,6 +566,10 @@ function createRingcxVoiceClient(options = {}) {
     rcxBase: (options.rcxBase || readEnv("RINGCX_VOICE_BASE_URL", DEFAULT_RCX_BASE)).replace(/\/$/, ""),
     exchangePath: options.exchangePath || readEnv("RINGCX_VOICE_TOKEN_EXCHANGE_PATH", DEFAULT_TOKEN_EXCHANGE_PATH),
     refreshPath: options.refreshPath || readEnv("RINGCX_VOICE_TOKEN_REFRESH_PATH", DEFAULT_TOKEN_REFRESH_PATH),
+    sessionAdminPathPrefix: (
+      options.sessionAdminPathPrefix
+      || readEnv("RINGCX_SESSION_ADMIN_PATH_PREFIX", DEFAULT_SESSION_ADMIN_PATH_PREFIX)
+    ).replace(/\/$/, ""),
     accountId: options.accountId || ensure(readEnv("RINGCX_VOICE_ACCOUNT_ID"), "RINGCX_VOICE_ACCOUNT_ID"),
     defaultDialGroupId: options.defaultDialGroupId || readEnv("RINGCX_VOICE_DEFAULT_DIAL_GROUP_ID"),
     defaultCampaignId: options.defaultCampaignId || readEnv("RINGCX_VOICE_DEFAULT_CAMPAIGN_ID"),
@@ -431,46 +598,62 @@ function createRingcxVoiceClient(options = {}) {
     return `/voice/api/v1/admin/accounts/${config.accountId}/${tail}`;
   }
 
-  async function request(method, path, { body, query, headers = {} } = {}) {
-    assertNotInApiBackoff(method, path);
-    const bearer = userBearer
-      ? { accessToken: userBearer.accessToken, tokenType: userBearer.tokenType || "Bearer" }
-      : await resolveBearer(config);
-    let url = `${config.rcxBase}${path}`;
-    if (query && Object.keys(query).length > 0) {
-      const qs = new URLSearchParams();
-      for (const [k, v] of Object.entries(query)) {
-        if (v !== undefined && v !== null) qs.append(k, String(v));
+  function sessionAdminPath(suffix) {
+    const tail = suffix.startsWith("/") ? suffix.slice(1) : suffix;
+    return `${config.sessionAdminPathPrefix}/accounts/${config.accountId}/${tail}`;
+  }
+
+  function pathSegment(value, name) {
+    const normalized = String(ensure(value, name)).trim();
+    return encodeURIComponent(normalized);
+  }
+
+  async function request(method, path, { body, query, headers = {}, scope } = {}) {
+    const apiScope = scope || classifyApiScope(method, path);
+    assertNotInApiBackoff(method, path, apiScope);
+    return withApiThrottle(apiScope, async () => {
+      assertNotInApiBackoff(method, path, apiScope);
+      const bearer = userBearer
+        ? { accessToken: userBearer.accessToken, tokenType: userBearer.tokenType || "Bearer" }
+        : await resolveBearer(config);
+      let url = `${config.rcxBase}${path}`;
+      if (query && Object.keys(query).length > 0) {
+        const qs = new URLSearchParams();
+        for (const [k, v] of Object.entries(query)) {
+          if (v !== undefined && v !== null) qs.append(k, String(v));
+        }
+        const sep = url.includes("?") ? "&" : "?";
+        url += `${sep}${qs.toString()}`;
       }
-      const sep = url.includes("?") ? "&" : "?";
-      url += `${sep}${qs.toString()}`;
-    }
-    const init = {
-      method,
-      headers: {
-        Authorization: `${bearer.tokenType} ${bearer.accessToken}`,
-        Accept: "application/json",
-        "User-Agent": "tagcontactbridge-parallel/0.1 (ringcx-voice)",
-        ...headers,
-      },
-    };
-    if (body !== undefined && body !== null) {
-      init.headers["Content-Type"] = init.headers["Content-Type"] || "application/json";
-      init.body = typeof body === "string" ? body : JSON.stringify(body);
-    }
+      const init = {
+        method,
+        headers: {
+          Authorization: `${bearer.tokenType} ${bearer.accessToken}`,
+          Accept: "application/json",
+          "User-Agent": "tagcontactbridge-parallel/0.1 (ringcx-voice)",
+          ...headers,
+        },
+      };
+      if (body !== undefined && body !== null) {
+        init.headers["Content-Type"] = init.headers["Content-Type"] || "application/json";
+        init.body = typeof body === "string" ? body : JSON.stringify(body);
+      }
 
-    // First attempt
-    const r = await rawFetch(url, init);
-    if (r.ok) return r.json;
+      const r = await rawFetch(url, init);
+      if (r.ok) return r.json;
 
-    if (r.status === 429) {
-      const error = asError(method, path, r);
-      if (error.details) error.details.rateLimitedCircuitOpened = true;
-      setApiBackoff(error);
-      throw error;
-    }
+      if (r.status === 429) {
+        const error = asError(method, path, r);
+        if (error.details) {
+          error.details.rateLimitedCircuitOpened = true;
+          error.details.scope = apiScope;
+        }
+        setApiBackoff(error, apiScope);
+        throw error;
+      }
 
-    throw asError(method, path, r);
+      throw asError(method, path, r);
+    });
   }
 
   // ── auth ──────────────────────────────────────────────────────────
@@ -509,6 +692,13 @@ function createRingcxVoiceClient(options = {}) {
   }
   async function updateDialGroup(dialGroupId, patch) {
     return request("PUT", adminPath(`dialGroups/${dialGroupId}`), { body: patch });
+  }
+  async function assignAgentsToDialGroup(dialGroupId, payload = {}) {
+    return request(
+      "PUT",
+      adminPath(`dialGroups/${pathSegment(dialGroupId, "dialGroupId")}/assignAgents`),
+      { body: payload },
+    );
   }
 
   // ── campaigns (nested under dial groups) ──────────────────────────
@@ -581,6 +771,44 @@ function createRingcxVoiceClient(options = {}) {
   async function updateAgent(agentId, patch, agentGroupId = config.defaultAgentGroupId) {
     ensure(agentGroupId, "agentGroupId");
     return request("PUT", adminPath(`agentGroups/${agentGroupId}/agents/${agentId}`), { body: patch });
+  }
+  async function getAgentLogin(agentId, agentGroupId = config.defaultAgentGroupId) {
+    ensure(agentGroupId, "agentGroupId");
+    return request(
+      "GET",
+      sessionAdminPath(`agentGroups/${pathSegment(agentGroupId, "agentGroupId")}/agents/${pathSegment(agentId, "agentId")}/login`),
+    );
+  }
+  async function setAgentState(agentId, state, agentGroupId = config.defaultAgentGroupId) {
+    ensure(agentGroupId, "agentGroupId");
+    ensure(state, "state");
+    return request(
+      "POST",
+      sessionAdminPath(`agentGroups/${pathSegment(agentGroupId, "agentGroupId")}/agents/${pathSegment(agentId, "agentId")}/setAgentState`),
+      { query: { state } },
+    );
+  }
+  async function setAgentStateByUsername(username, state) {
+    ensure(username, "username");
+    ensure(state, "state");
+    return request(
+      "POST",
+      sessionAdminPath(`agentGroups/setStateByUsername/${pathSegment(username, "username")}`),
+      { query: { state } },
+    );
+  }
+  async function updateAgentLoginDialGroup(dialGroupId, payload = {}) {
+    return request(
+      "POST",
+      sessionAdminPath(`agentGroups/updateAgentLoginDialGroup/${pathSegment(dialGroupId, "dialGroupId")}`),
+      { body: payload },
+    );
+  }
+  async function listGateAgentAccessLogin({ gateGroupId, gateId } = {}) {
+    return request(
+      "GET",
+      adminPath(`gateGroups/${pathSegment(gateGroupId, "gateGroupId")}/gates/${pathSegment(gateId, "gateId")}/gateAgentAccessLogin`),
+    );
   }
 
   // ── agent state (auxStates) ───────────────────────────────────────
@@ -684,7 +912,11 @@ function createRingcxVoiceClient(options = {}) {
     headers = {},
     acceptBinary = false,
   } = {}) {
-    assertNotInApiBackoff(method, suffix);
+    const apiScope = classifyApiScope(method, suffix);
+    assertNotInApiBackoff(method, suffix, apiScope);
+    await withApiThrottle(apiScope, async () => {
+      assertNotInApiBackoff(method, suffix, apiScope);
+    });
     const bearer = userBearer
       ? { accessToken: userBearer.accessToken, tokenType: userBearer.tokenType || "Bearer", mainAccountId: userBearer.mainAccountId }
       : await resolveBearer(config);
@@ -726,14 +958,16 @@ function createRingcxVoiceClient(options = {}) {
         status: response.status,
         retryable: response.status >= 500 || response.status === 429,
         details: {
+          method,
           path: suffix,
+          scope: apiScope,
           responseStatus: response.status,
           responseBody: errText.slice(0, 500),
           retryAfter: response.headers.get("retry-after"),
           rateLimitedCircuitOpened: response.status === 429 ? true : undefined,
         },
       });
-      if (response.status === 429) setApiBackoff(err);
+      if (response.status === 429) setApiBackoff(err, apiScope);
       throw err;
     }
     if (acceptBinary) {
@@ -847,6 +1081,7 @@ function createRingcxVoiceClient(options = {}) {
   return {
     config,
     auth,
+    getRateLimitState,
     // raw escape hatches
     request,
     get: (path, options) => request("GET", path, options),
@@ -860,6 +1095,7 @@ function createRingcxVoiceClient(options = {}) {
     getDialGroup,
     createDialGroup,
     updateDialGroup,
+    assignAgentsToDialGroup,
 
     listCampaigns,
     getCampaign,
@@ -878,6 +1114,11 @@ function createRingcxVoiceClient(options = {}) {
     getAgent,
     createAgent,
     updateAgent,
+    getAgentLogin,
+    setAgentState,
+    setAgentStateByUsername,
+    updateAgentLoginDialGroup,
+    listGateAgentAccessLogin,
 
     listAuxStates,
 
@@ -896,6 +1137,7 @@ function createRingcxVoiceClient(options = {}) {
 
 module.exports = {
   createRingcxVoiceClient,
+  getRingcxVoiceRateLimitState: getRateLimitState,
   normalizeRingcxPhone,
   // Exported for the discovery/bootstrap scripts so they can clear the
   // cache between runs without instantiating a client first.

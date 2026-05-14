@@ -4099,6 +4099,118 @@ async function relayCxDispatchIntentToServing(dispatchIntent) {
   }
 }
 
+function isManualThenCampaignCxDialMode(value) {
+  const raw = String(value || "").trim().toLowerCase();
+  return [
+    "manual-then-campaign",
+    "manual-fallback",
+    "manual-fallback-campaign",
+    "try-manual",
+    "try-manual-then-campaign",
+    "hybrid",
+  ].includes(raw);
+}
+
+function boolEnv(name, fallback = false) {
+  const raw = process.env[name];
+  if (raw === undefined || raw === null || raw === "") return fallback;
+  const normalized = String(raw).trim().toLowerCase();
+  if (["1", "true", "yes", "y", "on"].includes(normalized)) return true;
+  if (["0", "false", "no", "n", "off"].includes(normalized)) return false;
+  return fallback;
+}
+
+function shouldFallbackOnUnverifiedManualCxDial() {
+  return boolEnv("CX_DIAL_FALLBACK_ON_UNVERIFIED", true);
+}
+
+function summarizeCxDialRelayFailure(relayResult = {}) {
+  const details = relayResult?.details && typeof relayResult.details === "object"
+    ? relayResult.details
+    : null;
+  const execution =
+    details?.result?.execution ||
+    details?.result?.result?.execution ||
+    details?.execution ||
+    null;
+  return {
+    ok: Boolean(relayResult?.ok),
+    skipped: Boolean(relayResult?.skipped),
+    status: relayResult?.status || null,
+    reason: relayResult?.reason || null,
+    responseError: details?.error || details?.message || null,
+    execution: execution && typeof execution === "object"
+      ? {
+        ok: execution.ok ?? null,
+        skipped: Boolean(execution.skipped),
+        status: execution.status || null,
+        reason: execution.reason || null,
+        error: execution.error || null,
+        retryable: execution.retryable ?? null,
+        details: execution.details || null,
+      }
+      : null,
+  };
+}
+
+function stringifyCxDialRelayFailure(relayResult = {}) {
+  try {
+    return JSON.stringify(summarizeCxDialRelayFailure(relayResult)).toLowerCase();
+  } catch {
+    return String(relayResult?.reason || "").toLowerCase();
+  }
+}
+
+function shouldFallbackManualCxDial(relayResult = {}) {
+  if (!relayResult || relayResult.ok) return false;
+  const haystack = stringifyCxDialRelayFailure(relayResult);
+  if (!haystack) return false;
+  const disallowed = [
+    "timed out",
+    "timeout",
+    "contact-blocked",
+    "contact blocked",
+    "dialer mismatch",
+    "dialer-mismatch",
+    "currently assigned",
+    "assigned-to-other",
+    "queue-item-assigned",
+    "missing-phone",
+    "phone is required",
+    "not paired",
+    "missing-agent-extension",
+    "different-active-cx-call",
+  ];
+  if (!shouldFallbackOnUnverifiedManualCxDial()) {
+    disallowed.push("placement-unverified", "unverified");
+  }
+  if (disallowed.some((needle) => haystack.includes(needle))) return false;
+  const manualSessionFailures = [
+    "ringcx-manual-preflight-failed",
+    "manual preflight",
+    "agent-not-logged-into-cx",
+    "not logged into cx",
+    "agent-has-no-offhook-session",
+    "no offhook",
+    "no off-hook",
+    "no live session",
+    "no voice session",
+    "no phone session",
+    "createmanualagentcall",
+    "placeManualCall failed".toLowerCase(),
+    "manual-call",
+    "manual outbound",
+    "manual-outbound",
+  ];
+  if (
+    shouldFallbackOnUnverifiedManualCxDial()
+    && (haystack.includes("placement-unverified") || haystack.includes("no-active-ringcx-call"))
+  ) {
+    return true;
+  }
+  return manualSessionFailures.some((needle) => haystack.includes(needle));
+}
+
 async function relayCxEndCallToServing(payload) {
   const config = getSharedConfig();
   const secret = String(config.internalServiceSecret || "").trim();
@@ -4601,7 +4713,42 @@ async function requestCxDial(domain, user, input = {}) {
     };
   }
 
-  const relayResult = await relayCxDispatchIntentToServing(dispatchIntent);
+  const originalExecutionMode = dispatchIntent.executionMode;
+  let relayResult = await relayCxDispatchIntentToServing(dispatchIntent);
+  if (
+    !relayResult.ok
+    && isManualThenCampaignCxDialMode(originalExecutionMode)
+    && shouldFallbackManualCxDial(relayResult)
+  ) {
+    const manualAttempt = summarizeCxDialRelayFailure(relayResult);
+    const fallbackDispatchIntent = {
+      ...dispatchIntent,
+      mode: "campaign-queue",
+      executionMode: "ringcx-campaign-queue",
+      requestedExecutionMode: originalExecutionMode,
+      manualFallback: {
+        attempted: true,
+        attemptedAt: new Date().toISOString(),
+        originalExecutionMode,
+        reason: manualAttempt.reason || manualAttempt.responseError || null,
+        relay: manualAttempt,
+      },
+      scramble: {
+        ...(dispatchIntent.scramble || {}),
+        executionMode: "ringcx-campaign-queue",
+        requestedExecutionMode: originalExecutionMode,
+      },
+    };
+    const fallbackRelayResult = await relayCxDispatchIntentToServing(fallbackDispatchIntent);
+    dispatchIntent = fallbackDispatchIntent;
+    relayResult = {
+      ...fallbackRelayResult,
+      fallbackFromManual: true,
+      originalExecutionMode,
+      fallbackExecutionMode: "ringcx-campaign-queue",
+      manualAttempt,
+    };
+  }
   if (effectiveQueueItemId) {
     await cxDialQueueRepository.updateQueueItem(effectiveQueueItemId, {
       "metadata.lastDialIntent": dispatchIntent,
@@ -4610,6 +4757,9 @@ async function requestCxDial(domain, user, input = {}) {
       "metadata.lastDialIntentEventId": eventId,
       "metadata.lastDialIntentStatus": relayResult.ok ? "relayed" : "relay-failed",
       "metadata.lastDialIntentRelay": relayResult,
+      "metadata.lastDialIntentFallbackFromManual": Boolean(relayResult.fallbackFromManual),
+      "metadata.lastDialIntentManualAttempt": relayResult.manualAttempt || null,
+      "metadata.lastDialIntentOriginalExecutionMode": relayResult.originalExecutionMode || null,
       "metadata.lastDialIntentLocalStage": localStageResult || null,
       ...(relayResult.ok ? {
         "metadata.lastDialIntentReleaseReason": null,
