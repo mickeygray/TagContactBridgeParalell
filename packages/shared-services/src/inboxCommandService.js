@@ -1,10 +1,14 @@
 "use strict";
 
 const {
+  caseProfileRepository,
+  conversationMessageRepository,
   conversationWorkflowRepository,
   reviewQueueRepository,
 } = require("../../shared-repositories/src");
+const { createCallrailClient } = require("../../shared-integrations/src");
 const { recordWorkflowStage } = require("./workflowStateService");
+const { enforceReplyConstraints } = require("./smsAutoResponderService");
 
 function normalizeDomain(domain) {
   return String(domain || "").trim().toUpperCase();
@@ -13,6 +17,14 @@ function normalizeDomain(domain) {
 function toCaseId(value) {
   const next = Number(value);
   return Number.isFinite(next) ? next : null;
+}
+
+function normalizePhone(value) {
+  return String(value || "").replace(/\D/g, "");
+}
+
+function buildProviderThreadKey(domain, phone, workflowId) {
+  return `${normalizeDomain(domain)}:sms-inbox:${workflowId || normalizePhone(phone) || "unknown"}`;
 }
 
 // How long a soft-lock from a rep's outbound stays "fresh" before it
@@ -101,6 +113,98 @@ async function recordInboxReviewItem(domain, workflow, action, user, body, sever
   });
 }
 
+async function recordManualSmsSend({
+  domain,
+  workflow,
+  user,
+  draft,
+  providerStatus,
+  providerMessageId = null,
+  providerError = null,
+}) {
+  const workflowId = String(workflow._id || workflow.id || "");
+  const caseId = toCaseId(workflow.caseId);
+  const outbound = await conversationMessageRepository.createOutboundMessage({
+    workflowId,
+    domain,
+    phone: workflow.phone,
+    caseId,
+    channel: "sms",
+    body: draft,
+    provider: "callrail",
+    providerMessageId,
+    providerStatus,
+    providerError,
+    autoResponded: false,
+    approvedByEmail: user?.email || null,
+  });
+
+  if (caseId) {
+    await caseProfileRepository
+      .appendCommunicationThread(domain, caseId, "sms", {
+        provider: "callrail",
+        providerMessageId,
+        providerError,
+        threadKey: providerMessageId || buildProviderThreadKey(domain, workflow.phone, workflowId),
+        direction: "outbound",
+        phone: workflow.phone,
+        body: draft,
+        status: providerStatus,
+        workflowId,
+        conversationMessageId: outbound?.id || null,
+        sentAt: outbound?.createdAt || new Date(),
+        source: "sms-inbox-manual",
+        actorEmail: user?.email || null,
+        actorName: user?.name || user?.email || null,
+        metadata: {
+          inboxAction: "approve",
+          autoResponded: false,
+        },
+      })
+      .catch(() => null);
+  }
+
+  return outbound;
+}
+
+async function sendApprovedSmsReply(domain, workflow, user, draft) {
+  const phone = normalizePhone(workflow.phone);
+  if (!phone) {
+    const error = new Error("Conversation phone is missing");
+    error.status = 400;
+    throw error;
+  }
+  const client = createCallrailClient(domain);
+  let sendResult = null;
+  let sendError = null;
+  try {
+    sendResult = await client.sendSms({ phone, text: draft });
+  } catch (error) {
+    sendError = error;
+  }
+
+  const providerMessageId = sendResult?.providerMessageId || null;
+  const providerStatus = sendError ? "failed" : "sent";
+  const outbound = await recordManualSmsSend({
+    domain,
+    workflow,
+    user,
+    draft,
+    providerStatus,
+    providerMessageId,
+    providerError: sendError?.message || null,
+  });
+
+  return {
+    ok: !sendError,
+    response: sendResult || null,
+    error: sendError,
+    providerMessageId,
+    providerStatus,
+    outboundMessageId: outbound?.id || null,
+  };
+}
+
 async function completeInboxAction({
   domain,
   workflow,
@@ -132,49 +236,94 @@ async function approveInboxWorkflow(domain, workflowId, user, body = {}) {
   const normalizedDomain = normalizeDomain(domain);
   const workflow = await loadWorkflow(normalizedDomain, workflowId);
   assertSmsLockAvailable(workflow, user, body);
-  const nextDraft = body.draft != null ? String(body.draft).trim() : workflow.aiDraftReply || null;
+  const rawDraft = body.draft != null ? String(body.draft).trim() : workflow.aiDraftReply || null;
+  if (!rawDraft) {
+    const error = new Error("Draft is required");
+    error.status = 400;
+    throw error;
+  }
+  const nextDraft = enforceReplyConstraints(rawDraft, normalizedDomain);
+  if (workflow.optOutDetected) {
+    const error = new Error("This conversation is opted out. Do not send SMS.");
+    error.status = 409;
+    throw error;
+  }
+
+  const sendResult = await sendApprovedSmsReply(normalizedDomain, workflow, user, nextDraft);
 
   const updated = await conversationWorkflowRepository.updateConversationWorkflowById(workflowId, {
-    status: "drafted",
+    status: sendResult.ok ? "sent" : "manual-review",
     aiDraftReply: nextDraft,
-    aiRecommendedAction: "approve-send",
+    aiRecommendedAction: sendResult.ok ? "manual_approved_send" : "manual_send_failed",
     ...stampSmsLockUpdate(user),
     metadata: {
       ...(workflow.metadata || {}),
-      inboxState: "approved",
+      inboxState: sendResult.ok ? "sent" : "send-failed",
       lastInboxAction: "approve",
       lastInboxActionAt: new Date(),
       lastInboxActionBy: user?.email || null,
+      provider: "callrail",
+      providerMessageId: sendResult.providerMessageId || null,
+      outboundMessageId: sendResult.outboundMessageId || null,
+      sendError: sendResult.error?.message || null,
     },
   });
 
-  const reviewItem = await recordInboxReviewItem(normalizedDomain, workflow, "approve", user, body);
+  const reviewItem = await recordInboxReviewItem(
+    normalizedDomain,
+    workflow,
+    sendResult.ok ? "approve-send" : "approve-send-failed",
+    user,
+    body,
+    sendResult.ok ? "info" : "warning",
+  );
   const workflowRecord = await completeInboxAction({
     domain: normalizedDomain,
     workflow,
     action: "approve",
-    stage: "completed",
-    title: "Inbox draft approved",
-    summary: "Draft approved for outbound send handling",
+    stage: sendResult.ok ? "completed" : "failed",
+    title: sendResult.ok ? "Inbox reply sent" : "Inbox reply failed",
+    summary: sendResult.ok
+      ? "Approved SMS reply sent through CallRail"
+      : `Approved SMS reply failed: ${sendResult.error?.message || "unknown error"}`,
     payload: {
       actorEmail: user?.email || null,
       note: body.note || null,
       draft: nextDraft,
     },
     result: {
-      status: updated?.status || "drafted",
+      status: updated?.status || (sendResult.ok ? "sent" : "manual-review"),
       reviewItemId: String(reviewItem._id),
+      outboundMessageId: sendResult.outboundMessageId || null,
+      providerMessageId: sendResult.providerMessageId || null,
+      providerStatus: sendResult.providerStatus,
+      error: sendResult.error?.message || null,
     },
   });
+
+  if (!sendResult.ok) {
+    const error = new Error(sendResult.error?.message || "SMS send failed");
+    error.status = sendResult.error?.status || 502;
+    error.details = {
+      workflowId: String(workflow._id),
+      reviewItemId: String(reviewItem._id),
+      workflowRecordId: String(workflowRecord._id),
+      outboundMessageId: sendResult.outboundMessageId || null,
+    };
+    throw error;
+  }
 
   return {
     domain: normalizedDomain,
     workflowId: String(workflow._id),
     action: "approve",
-    status: updated?.status || "drafted",
+    status: updated?.status || "sent",
+    completed: true,
     reviewItemId: String(reviewItem._id),
     workflowRecordId: String(workflowRecord._id),
     draft: updated?.aiDraftReply || null,
+    outboundMessageId: sendResult.outboundMessageId || null,
+    providerMessageId: sendResult.providerMessageId || null,
   };
 }
 
@@ -229,10 +378,11 @@ async function editSendInboxWorkflow(domain, workflowId, user, body = {}) {
     error.status = 400;
     throw error;
   }
+  const constrainedDraft = enforceReplyConstraints(nextDraft, normalizedDomain);
 
   const updated = await conversationWorkflowRepository.updateConversationWorkflowById(workflowId, {
     status: "drafted",
-    aiDraftReply: nextDraft,
+    aiDraftReply: constrainedDraft,
     ...stampSmsLockUpdate(user),
     metadata: {
       ...(workflow.metadata || {}),
@@ -252,7 +402,7 @@ async function editSendInboxWorkflow(domain, workflowId, user, body = {}) {
     summary: "Draft updated for outbound send handling",
     payload: {
       actorEmail: user?.email || null,
-      draft: nextDraft,
+      draft: constrainedDraft,
       note: body.note || null,
     },
     result: {
@@ -268,13 +418,14 @@ async function editSendInboxWorkflow(domain, workflowId, user, body = {}) {
     status: updated?.status || "drafted",
     reviewItemId: String(reviewItem._id),
     workflowRecordId: String(workflowRecord._id),
-    draft: updated?.aiDraftReply || null,
+    draft: updated?.aiDraftReply || constrainedDraft,
   };
 }
 
 async function regenerateInboxWorkflow(domain, workflowId, user, body = {}) {
   const normalizedDomain = normalizeDomain(domain);
   const workflow = await loadWorkflow(normalizedDomain, workflowId);
+  assertSmsLockAvailable(workflow, user, body);
   const seed = String(body.seed || body.note || "").trim();
   const nextDraft = seed
     ? `${workflow.aiDraftReply || workflow.latestInboundText || ""}\n\n${seed}`.trim()
@@ -284,6 +435,7 @@ async function regenerateInboxWorkflow(domain, workflowId, user, body = {}) {
     status: "manual-review",
     aiDraftReply: nextDraft || workflow.aiDraftReply || null,
     aiRecommendedAction: "regenerate",
+    ...stampSmsLockUpdate(user),
     metadata: {
       ...(workflow.metadata || {}),
       inboxState: "regeneration-requested",

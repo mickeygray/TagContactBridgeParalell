@@ -27,9 +27,11 @@ const {
   buildCallAttemptPatch,
   deriveQueueFamilyFromAgeDays,
   deriveQueueFamilyFromLeadCreatedAt,
+  deriveQueueFamilyFromLeadTouchState,
   getCooldownReleaseAt,
   getPacificDateKey,
   getQueueFamilyPolicy,
+  getTouchAgeFreshWindowDays,
   resolveQueueDialability,
 } = require("./cxQueuePolicyService");
 const { evaluateChannelContactTime } = require("./contactTimingPolicyService");
@@ -232,7 +234,8 @@ function getFreshMinimumDailyTouches() {
       || process.env.RC_CX_FRESH_MIN_DAILY_TOUCHES,
   );
   if (Number.isFinite(configured) && configured > 0) return Math.trunc(configured);
-  return 6;
+  const dailyMax = Number(getQueueFamilyPolicy("fresh-day1").dailyMax);
+  return Number.isFinite(dailyMax) && dailyMax > 0 ? Math.trunc(dailyMax) : 5;
 }
 
 function getFreshRetryDelayMinutes() {
@@ -308,8 +311,21 @@ async function maybeRunFreshHotLaneImmediate(queueItem = null, queueFamily = nul
   }
 }
 
+function isImmediateSmsHotIntentPayload(payload = {}) {
+  const metadata = payload?.metadata && typeof payload.metadata === "object" ? payload.metadata : {};
+  return (
+    String(payload.priorityLane || "").trim().toLowerCase() === "sms-hot-intent"
+    || String(payload.intakeRoute || "").trim().toLowerCase() === "sms-hot-intent-now"
+    || String(metadata.smsCallbackUrgency || "").trim().toLowerCase() === "immediate-hot"
+  );
+}
+
 function computePriorityScore(payload = {}) {
+  const explicit = Number(payload.priorityScore ?? payload.metadata?.priorityScore);
+  if (Number.isFinite(explicit)) return explicit;
+  if (isImmediateSmsHotIntentPayload(payload)) return 500;
   const source = String(payload.intakeSource || payload.sourceName || "").toLowerCase();
+  if (source.includes("sms-hot-intent")) return 350;
   if (source.includes("ld")) return 300;
   if (source.includes("affiliate")) return 250;
   if (source.includes("organic")) return 175;
@@ -332,11 +348,30 @@ function resolveQueueFamilyForPayload(payload = {}) {
       || payload.metadata?.leadCreatedAt
       || null,
     payload.now || new Date(),
+    {
+      placedCalls:
+        payload.placedCalls
+        ?? payload.metadata?.placedCalls
+        ?? payload.payloadSnapshot?.placedCalls
+        ?? payload.payloadSnapshot?.metadata?.placedCalls
+        ?? 0,
+    },
   );
   if (createdAtFamily) return createdAtFamily;
 
   const leadAgeDays = Number(payload.leadAgeDays);
-  if (Number.isFinite(leadAgeDays)) return deriveQueueFamilyFromAgeDays(leadAgeDays);
+  if (Number.isFinite(leadAgeDays)) {
+    return deriveQueueFamilyFromLeadTouchState({
+      ageDays: leadAgeDays,
+      asOf: payload.now || new Date(),
+      placedCalls:
+        payload.placedCalls
+        ?? payload.metadata?.placedCalls
+        ?? payload.payloadSnapshot?.placedCalls
+        ?? payload.payloadSnapshot?.metadata?.placedCalls
+        ?? 0,
+    }) || deriveQueueFamilyFromAgeDays(leadAgeDays);
+  }
 
   const queueTier = String(payload.queueTier || "").trim().toLowerCase();
   if (queueTier === "later") return "fresh-day2to10";
@@ -477,6 +512,24 @@ function buildQueueProgressionState(payload = {}, queueFamily = null, callPlan =
     actionKey: payload.actionKey || payload.metadata?.actionKey || null,
   });
 
+  if (normalizedFamily === "fresh-day1" && isImmediateSmsHotIntentPayload(payload)) {
+    return {
+      queueFamily: normalizedFamily,
+      queueFamilyRank: -1,
+      progressiveStageKey: "sms-hot-intent",
+      progressiveStageIndex: -1,
+      progressiveStageLabel: "SMS hot intent",
+      metadata: {
+        queueFamily: normalizedFamily,
+        queueFamilyRank: -1,
+        progressiveStageKey: "sms-hot-intent",
+        progressiveStageIndex: -1,
+        progressiveStageLabel: "SMS hot intent",
+        smsCallbackUrgency: "immediate-hot",
+      },
+    };
+  }
+
   return {
     queueFamily: normalizedFamily,
     queueFamilyRank: getQueueFamilySortRank(normalizedFamily),
@@ -490,6 +543,24 @@ function buildQueueProgressionState(payload = {}, queueFamily = null, callPlan =
       progressiveStageIndex: stage.progressiveStageIndex,
       progressiveStageLabel: stage.progressiveStageLabel,
     },
+  };
+}
+
+function parseRequestedReleaseAt(value) {
+  if (!value) return null;
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function resolveRequestedReleaseTiming(domain, requestedReleaseAt = null) {
+  const now = new Date();
+  const target = requestedReleaseAt || now;
+  const timing = evaluateChannelContactTime(domain, "cx", target);
+  const releaseAt = timing.nextAllowedAt || target;
+  return {
+    timing,
+    releaseAt,
+    state: releaseAt.getTime() <= now.getTime() + 1000 ? "ready" : "queued",
   };
 }
 
@@ -1090,11 +1161,35 @@ async function buildClaimedOpenAssignmentFamilyMaps(domain = null, options = {})
 }
 
 async function backfillCxQueueOrdering(domain = null, limit = 250) {
-  const queueItems = await cxDialQueueRepository.listQueueItems({
-    domain: domain || null,
-    states: ["queued", "ready", "claimed", "serving", "paused"],
-    limit,
-  });
+  const normalizedLimit = Math.min(Math.max(Number(limit) || 250, 25), 5000);
+  const recentTouchAgeLimit = Math.min(
+    Math.max(Number(process.env.RC_CX_TOUCH_AGE_BACKFILL_LIMIT) || 750, 50),
+    5000,
+  );
+  const touchAgeWindowDays = Math.max(Number(getTouchAgeFreshWindowDays()) || 5, 1);
+  const touchAgeCutoff = new Date(Date.now() - (touchAgeWindowDays + 2) * 24 * 60 * 60 * 1000);
+  const [orderedItems, recentLowTouchItems] = await Promise.all([
+    cxDialQueueRepository.listQueueItems({
+      domain: domain || null,
+      states: ["queued", "ready", "claimed", "serving", "paused"],
+      limit: normalizedLimit,
+    }),
+    cxDialQueueRepository.listQueueItems({
+      domain: domain || null,
+      states: ["queued", "ready", "claimed", "serving", "paused"],
+      queueFamilies: ["fresh-day2to10"],
+      createdAtGte: touchAgeCutoff,
+      limit: recentTouchAgeLimit,
+    }),
+  ]);
+
+  const byId = new Map();
+  for (const item of [...orderedItems, ...recentLowTouchItems]) {
+    const id = item?._id ? String(item._id) : "";
+    if (!id || byId.has(id)) continue;
+    byId.set(id, item);
+  }
+  const queueItems = [...byId.values()];
 
   for (const item of queueItems) {
     const progression = buildQueueProgressionState(
@@ -1174,6 +1269,10 @@ async function queueCxDialRequest(payload = {}) {
     const existingObject = existing.toObject ? existing.toObject() : existing;
     const existingActionKey = normalizeActionKey(existingObject?.metadata?.actionKey);
     const existingRouting = readStoredRcxQueueRouting(existingObject);
+    const requestedReleaseAt = parseRequestedReleaseAt(payload.releaseAt);
+    const requestedReleaseTiming = requestedReleaseAt
+      ? resolveRequestedReleaseTiming(domain, requestedReleaseAt)
+      : null;
     const requestedRouting = resolveRcxQueueRouting(existingObject.queueFamily, {
       ...existingObject,
       ...payload,
@@ -1189,27 +1288,51 @@ async function queueCxDialRequest(payload = {}) {
       || normalizeExternalId(existingRouting.rcxDialGroupId) !== normalizeExternalId(requestedRouting.rcxDialGroupId)
       || normalizeExternalId(existingRouting.rcxAccountId) !== normalizeExternalId(requestedRouting.rcxAccountId)
     );
-    if (needsMetadataPatch) {
-      const existingCallPlan = normalizeCallPlanForQueueFamily(
-        existingObject.callPlan || null,
-        existingObject.queueFamily || payload.queueFamily,
-      );
-      const progression = buildQueueProgressionState(
-        {
-          ...existingObject,
-          ...payload,
+    const existingCallPlan = normalizeCallPlanForQueueFamily(
+      existingObject.callPlan || null,
+      existingObject.queueFamily || payload.queueFamily,
+    );
+    const progression = buildQueueProgressionState(
+      {
+        ...existingObject,
+        ...payload,
+        actionKey: actionKey || existingActionKey || null,
+        metadata: {
+          ...(existingObject.metadata || {}),
+          ...(payload.metadata || {}),
           actionKey: actionKey || existingActionKey || null,
-          metadata: {
-            ...(existingObject.metadata || {}),
-            ...(payload.metadata || {}),
-            actionKey: actionKey || existingActionKey || null,
-          },
         },
-        existingObject.queueFamily,
-        existingCallPlan,
-        existingObject.placedCalls,
-      );
-      const patched = await cxDialQueueRepository.updateQueueItem(existingObject._id, {
+      },
+      existingObject.queueFamily,
+      existingCallPlan,
+      existingObject.placedCalls,
+    );
+    const existingReleaseAt = existingObject.releaseAt ? new Date(existingObject.releaseAt).getTime() : null;
+    const requestedReleaseAtMs = requestedReleaseTiming?.releaseAt
+      ? new Date(requestedReleaseTiming.releaseAt).getTime()
+      : null;
+    const releasePatchAllowed = ["queued", "ready"].includes(
+      String(existingObject.state || "").trim().toLowerCase(),
+    );
+    const needsReleasePatch = Boolean(
+      requestedReleaseTiming
+        && releasePatchAllowed
+        && Number.isFinite(requestedReleaseAtMs)
+        && existingReleaseAt !== requestedReleaseAtMs,
+    );
+    const needsOrderingPatch = (
+      normalizeQueueFamily(existingObject.queueFamily) !== progression.queueFamily
+      || Number(existingObject.queueFamilyRank ?? -1) !== progression.queueFamilyRank
+      || String(existingObject.progressiveStageKey || "") !== String(progression.progressiveStageKey || "")
+      || Number(existingObject.progressiveStageIndex ?? -1) !== progression.progressiveStageIndex
+      || String(existingObject.progressiveStageLabel || "") !== String(progression.progressiveStageLabel || "")
+    );
+    const requestedPriorityScore = computePriorityScore(payload);
+    const needsPriorityPatch =
+      Number.isFinite(requestedPriorityScore)
+      && Number(existingObject.priorityScore ?? -1) !== requestedPriorityScore;
+    if (needsMetadataPatch || needsOrderingPatch || needsReleasePatch || needsPriorityPatch) {
+      const patch = {
         leadCadenceId: existingObject.leadCadenceId || payload.leadCadenceId || null,
         rcxAccountId: requestedRouting.rcxAccountId,
         rcxDialGroupId: requestedRouting.rcxDialGroupId,
@@ -1219,16 +1342,26 @@ async function queueCxDialRequest(payload = {}) {
         progressiveStageKey: progression.progressiveStageKey,
         progressiveStageIndex: progression.progressiveStageIndex,
         progressiveStageLabel: progression.progressiveStageLabel,
+        priorityScore: requestedPriorityScore,
         callPlan: existingCallPlan,
         metadata: {
           ...(existingObject.metadata || {}),
+          ...(payload.metadata || {}),
           ...(progression.metadata || {}),
           actionKey: actionKey || existingActionKey || null,
           rcxAccountId: requestedRouting.rcxAccountId,
           rcxDialGroupId: requestedRouting.rcxDialGroupId,
           rcxCampaignId: requestedRouting.rcxCampaignId,
         },
-      });
+      };
+      if (needsReleasePatch) {
+        patch.releaseAt = requestedReleaseTiming.releaseAt;
+        patch.state = requestedReleaseTiming.state;
+        patch.claimUntil = null;
+        patch.metadata.requestedReleaseAt = requestedReleaseAt;
+        patch.metadata.requestedReleaseTimingReason = payload.metadata?.callbackQueueTimingReason || null;
+      }
+      const patched = await cxDialQueueRepository.updateQueueItem(existingObject._id, patch);
       return { queued: true, deduped: true, queueItem: patched?.toObject ? patched.toObject() : patched };
     }
     return { queued: true, deduped: true, queueItem: existingObject };
@@ -1253,11 +1386,12 @@ async function queueCxDialRequest(payload = {}) {
     payload.placedCalls || 0,
   );
   const queueTier = queueFamily === "fresh-day1" ? "day0" : queueFamily === "fresh-day2to10" ? "later" : "later";
-  const timing = evaluateChannelContactTime(
+  const requestedReleaseAt = parseRequestedReleaseAt(payload.releaseAt);
+  const releaseTiming = resolveRequestedReleaseTiming(
     domain,
-    "cx",
-    new Date(now.getTime() + callPlan.nextDelayMinutes * 60 * 1000),
+    requestedReleaseAt || new Date(now.getTime() + callPlan.nextDelayMinutes * 60 * 1000),
   );
+  const timing = releaseTiming.timing;
   const queueItem = await cxDialQueueRepository.upsertQueueItem(domain, caseId, {
     leadCadenceId: payload.leadCadenceId || null,
     phone: payload.phone || null,
@@ -1268,7 +1402,7 @@ async function queueCxDialRequest(payload = {}) {
     rcxAccountId: rcxRouting.rcxAccountId,
     rcxDialGroupId: rcxRouting.rcxDialGroupId,
     rcxCampaignId: rcxRouting.rcxCampaignId,
-    state: timing.allowed ? "ready" : "queued",
+    state: releaseTiming.state,
     queueFamily: progression.queueFamily,
     queueFamilyRank: progression.queueFamilyRank,
     queueTier,
@@ -1276,7 +1410,7 @@ async function queueCxDialRequest(payload = {}) {
     progressiveStageIndex: progression.progressiveStageIndex,
     progressiveStageLabel: progression.progressiveStageLabel,
     priorityScore: computePriorityScore(payload),
-    releaseAt: timing.nextAllowedAt,
+    releaseAt: releaseTiming.releaseAt,
     callPlan,
     metadata: {
       requestedBy: payload.requestedBy || "cadence-engine",
@@ -1286,10 +1420,13 @@ async function queueCxDialRequest(payload = {}) {
       requestedWorkflowId: payload.workflowId || null,
       requestedByUserEmail: payload.requestedByUserEmail || null,
       leadCreatedAt: payload.leadCreatedAt || payload.createdAt || payload.payloadSnapshot?.createdAt || null,
+      requestedReleaseAt: requestedReleaseAt || null,
+      ...(payload.metadata || {}),
+      ...(progression.metadata || {}),
+      actionKey,
       rcxAccountId: rcxRouting.rcxAccountId,
       rcxDialGroupId: rcxRouting.rcxDialGroupId,
       rcxCampaignId: rcxRouting.rcxCampaignId,
-      ...(progression.metadata || {}),
     },
   }, actionKey ? { actionKey } : {});
 
@@ -1393,6 +1530,8 @@ async function handleCxCallPlaced(payload = {}) {
       metadata: {
         dailyPlacedDateKey: attemptPatch.dailyPlacedDateKey,
         dailyPlacedCalls: attemptPatch.dailyPlacedCalls,
+        hourlyPlacedHourKey: attemptPatch.hourlyPlacedHourKey,
+        hourlyPlacedCalls: attemptPatch.hourlyPlacedCalls,
         ...touchMetadata,
         lastQueueAttemptAt: placedAt,
         lastQueueAttemptIgnoredState: queueState,
@@ -1415,6 +1554,8 @@ async function handleCxCallPlaced(payload = {}) {
       metadata: {
         dailyPlacedDateKey: attemptPatch.dailyPlacedDateKey,
         dailyPlacedCalls: attemptPatch.dailyPlacedCalls,
+        hourlyPlacedHourKey: attemptPatch.hourlyPlacedHourKey,
+        hourlyPlacedCalls: attemptPatch.hourlyPlacedCalls,
         ...touchMetadata,
         lastQueueAttemptAt: placedAt,
         lastQueueAttemptIgnoredState: queueState,
@@ -1468,6 +1609,8 @@ async function handleCxCallPlaced(payload = {}) {
         ...(progression.metadata || {}),
         dailyPlacedDateKey: attemptPatch.dailyPlacedDateKey,
         dailyPlacedCalls: attemptPatch.dailyPlacedCalls,
+        hourlyPlacedHourKey: attemptPatch.hourlyPlacedHourKey,
+        hourlyPlacedCalls: attemptPatch.hourlyPlacedCalls,
         ...touchMetadata,
         lastQueueAttemptAt: placedAt,
         lastQueueAttemptHeldForDisposition: true,
@@ -1495,6 +1638,8 @@ async function handleCxCallPlaced(payload = {}) {
           ...(progression.metadata || {}),
           dailyPlacedDateKey: attemptPatch.dailyPlacedDateKey,
           dailyPlacedCalls: attemptPatch.dailyPlacedCalls,
+          hourlyPlacedHourKey: attemptPatch.hourlyPlacedHourKey,
+          hourlyPlacedCalls: attemptPatch.hourlyPlacedCalls,
           ...touchMetadata,
           lastQueueAttemptAt: placedAt,
         },
@@ -1521,6 +1666,8 @@ async function handleCxCallPlaced(payload = {}) {
           ...(progression.metadata || {}),
           dailyPlacedDateKey: attemptPatch.dailyPlacedDateKey,
           dailyPlacedCalls: attemptPatch.dailyPlacedCalls,
+          hourlyPlacedHourKey: attemptPatch.hourlyPlacedHourKey,
+          hourlyPlacedCalls: attemptPatch.hourlyPlacedCalls,
           ...touchMetadata,
           lastQueueAttemptAt: placedAt,
         },
@@ -2128,6 +2275,8 @@ async function claimNextCxQueueItem(options = {}) {
       "metadata.queueFamily": claimedFamily,
       "metadata.lastPolicyHoldDailyCount": dialability.dailyCount,
       "metadata.lastPolicyHoldDailyMax": dialability.dailyMax,
+      "metadata.lastPolicyHoldHourlyCount": dialability.hourlyCount,
+      "metadata.lastPolicyHoldHourlyMax": dialability.hourlyMax,
       "metadata.lastPolicyHoldReleaseAt": dialability.nextEligibleAt || null,
     }, {
       match: buildQueueItemMutationMatch(claimedObject),
@@ -2138,6 +2287,10 @@ async function claimNextCxQueueItem(options = {}) {
       queueFamily: deriveQueueFamily(claimedObject),
       reason: dialability.reason,
       releaseAt: dialability.nextEligibleAt || null,
+      dailyCount: dialability.dailyCount,
+      dailyMax: dialability.dailyMax,
+      hourlyCount: dialability.hourlyCount,
+      hourlyMax: dialability.hourlyMax,
     });
   }
   if (!item) {

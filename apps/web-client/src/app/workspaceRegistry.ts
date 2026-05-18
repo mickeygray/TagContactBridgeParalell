@@ -1,6 +1,7 @@
 import type { ComponentType } from "react";
 import {
   BarChart3,
+  CalendarClock,
   GraduationCap,
   Headset,
   Inbox,
@@ -18,6 +19,7 @@ export type WorkspaceKey =
   | "inbox"
   | "clients"
   | "dispatch"
+  | "postdates"
   | "social"
   | "cleaning"
   | "users"
@@ -76,6 +78,14 @@ export const adminWorkspaces: WorkspaceDef[] = [
     label: "Dispatch",
     description: "Manual text / email / RVM campaigns and worklists.",
     icon: Megaphone,
+    audience: "admin",
+  },
+  {
+    key: "postdates",
+    path: "/admin/postdates",
+    label: "Post Dates",
+    description: "Post-date holds, releases, and payment checks.",
+    icon: CalendarClock,
     audience: "admin",
   },
   {

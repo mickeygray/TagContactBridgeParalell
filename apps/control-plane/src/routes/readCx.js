@@ -7,6 +7,7 @@ const {
   buildCxCommLog,
   buildCxWorkspace,
   listCxLogicsTasks,
+  listCxPostDateHolds,
   listCxTasks,
   lookupCxLead,
   findCxLeadCandidates,
@@ -268,6 +269,23 @@ function createReadCxRouter(auth) {
   router.get("/call-queue/:domain", auth.requireAuth, auth.requireUser, requireCxDomainAccess, async (req, res) => {
     try {
       const result = await buildCxCallQueue(req.params.domain, req.user);
+      return res.json({ ok: true, result });
+    } catch (error) {
+      return res.status(error.status || 500).json(toErrorResponse(error));
+    }
+  });
+
+  router.get("/postdates/:domain", auth.requireAuth, auth.requireAdmin, requireCxDomainAccess, async (req, res) => {
+    try {
+      const result = await listCxPostDateHolds(req.params.domain, req.user, {
+        status: req.query.status || "active",
+        date: req.query.date || null,
+        from: req.query.from || null,
+        to: req.query.to || null,
+        firstPaymentDueOnOrBefore: req.query.firstPaymentDueOnOrBefore || null,
+        caseId: req.query.caseId || null,
+        limit: req.query.limit || null,
+      });
       return res.json({ ok: true, result });
     } catch (error) {
       return res.status(error.status || 500).json(toErrorResponse(error));

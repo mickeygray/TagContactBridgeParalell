@@ -4,6 +4,10 @@ const {
   normalizeCxQueuePolicyTier,
   normalizeLeadQueueFamily,
 } = require("../../shared-normalizers/src");
+const {
+  buildCxHourlyAttemptPatch,
+  getCxHourlyPacingStatus,
+} = require("./cxQueueFairnessService");
 
 const QUEUE_TIMEZONE = "America/Los_Angeles";
 
@@ -22,21 +26,21 @@ const QUEUE_FAMILY_POLICIES = Object.freeze({
     label: "New",
     claimMinutes: 15,
     cooldownMinutes: 15,
-    dailyMax: null,
+    dailyMax: 5,
   },
   "fresh-day2to10": {
     key: "fresh-day2to10",
     label: "2-15",
     claimMinutes: 30,
     cooldownMinutes: 25,
-    dailyMax: 20,
+    dailyMax: 3,
   },
   aged: {
     key: "aged",
     label: "Aged",
     claimMinutes: 60,
     cooldownMinutes: 60,
-    dailyMax: 3,
+    dailyMax: 1,
   },
   unassigned: {
     key: "unassigned",
@@ -69,23 +73,23 @@ const CX_QUEUE_TIER_POLICIES = Object.freeze({
     label: "Old balanced",
     enabled: true,
     fresh: { eligible: false, targetOpen: 0, priorityWeight: 0 },
-    day2to15: { targetOpen: 10 },
-    aged: { targetOpen: 10 },
+    day2to15: { targetOpen: 25 },
+    aged: { targetOpen: 5 },
   },
   fresh_capped: {
     tier: "fresh_capped",
     label: "Fresh capped",
     enabled: true,
-    fresh: { eligible: true, targetOpen: 1, priorityWeight: 50 },
-    day2to15: { targetOpen: 15 },
+    fresh: { eligible: true, targetOpen: 5, priorityWeight: 50 },
+    day2to15: { targetOpen: 25 },
     aged: { targetOpen: 5 },
   },
   fresh_priority: {
     tier: "fresh_priority",
     label: "Fresh priority",
     enabled: true,
-    fresh: { eligible: true, targetOpen: 5, priorityWeight: 100 },
-    day2to15: { targetOpen: 15 },
+    fresh: { eligible: true, targetOpen: 10, priorityWeight: 100 },
+    day2to15: { targetOpen: 25 },
     aged: { targetOpen: 5 },
   },
 });
@@ -94,6 +98,42 @@ function readPolicyNumber(value, fallback) {
   if (value === null || value === undefined || value === "") return fallback;
   const number = Number(value);
   return Number.isFinite(number) && number >= 0 ? Math.trunc(number) : fallback;
+}
+
+function readEnvNumber(names, fallback) {
+  const list = Array.isArray(names) ? names : [names];
+  for (const name of list) {
+    if (!Object.prototype.hasOwnProperty.call(process.env, name)) continue;
+    const number = Number(process.env[name]);
+    if (Number.isFinite(number) && number >= 0) return Math.trunc(number);
+  }
+  return fallback;
+}
+
+function readEnvBoolean(names, fallback) {
+  const list = Array.isArray(names) ? names : [names];
+  for (const name of list) {
+    if (!Object.prototype.hasOwnProperty.call(process.env, name)) continue;
+    const raw = String(process.env[name] || "").trim().toLowerCase();
+    if (!raw) continue;
+    if (["1", "true", "yes", "on"].includes(raw)) return true;
+    if (["0", "false", "no", "off"].includes(raw)) return false;
+  }
+  return fallback;
+}
+
+function resolveQueueFamilyDailyMax(queueFamily, fallback) {
+  const normalizedFamily = normalizeQueueFamily(queueFamily);
+  if (normalizedFamily === "fresh-day1") {
+    return readEnvNumber(["RC_CX_GREEN_DAILY_MAX", "RC_CX_FRESH_DAILY_MAX"], fallback);
+  }
+  if (normalizedFamily === "fresh-day2to10") {
+    return readEnvNumber(["RC_CX_BLUE_DAILY_MAX", "RC_CX_DAY2TO15_DAILY_MAX"], fallback);
+  }
+  if (normalizedFamily === "aged") {
+    return readEnvNumber(["RC_CX_RED_DAILY_MAX", "RC_CX_AGED_DAILY_MAX"], fallback);
+  }
+  return fallback;
 }
 
 function resolveAccountQueuePolicy(account = null) {
@@ -186,7 +226,11 @@ function getQueueFamilySortRank(value) {
 
 function getQueueFamilyPolicy(value) {
   const normalized = normalizeQueueFamily(value);
-  return QUEUE_FAMILY_POLICIES[normalized] || QUEUE_FAMILY_POLICIES.unassigned;
+  const policy = QUEUE_FAMILY_POLICIES[normalized] || QUEUE_FAMILY_POLICIES.unassigned;
+  return {
+    ...policy,
+    dailyMax: resolveQueueFamilyDailyMax(normalized, policy.dailyMax),
+  };
 }
 
 function getPacificDateKey(date = new Date()) {
@@ -286,6 +330,78 @@ function getPacificBusinessDayAge(createdAt, asOf = new Date(), rolloverHour = 1
   );
 }
 
+function normalizePlacedCallCount(...values) {
+  for (const value of values) {
+    if (value === null || value === undefined || value === "") continue;
+    const number = Number(value);
+    if (Number.isFinite(number)) return Math.max(Math.trunc(number), 0);
+  }
+  return null;
+}
+
+function getTouchAgeFreshWindowDays() {
+  return readEnvNumber(
+    [
+      "RC_CX_TOUCH_AGE_FRESH_WINDOW_DAYS",
+      "RC_CX_FIRST_TOUCH_WINDOW_DAYS",
+    ],
+    5,
+  );
+}
+
+function getTouchAgeFreshMaxCalls() {
+  return readEnvNumber(
+    [
+      "RC_CX_TOUCH_AGE_FRESH_MAX_CALLS",
+      "RC_CX_FIRST_TOUCH_GREEN_MAX_CALLS",
+    ],
+    Math.max(readEnvNumber(["RC_CX_GREEN_DAILY_MAX", "RC_CX_FRESH_DAILY_MAX"], 5) - 1, 0),
+  );
+}
+
+function isTouchAgeBucketingEnabled() {
+  return readEnvBoolean(
+    [
+      "RC_CX_TOUCH_AGE_ENABLED",
+      "RC_CX_FIRST_TOUCH_AGE_ENABLED",
+    ],
+    true,
+  );
+}
+
+function deriveQueueFamilyFromLeadTouchState(input = {}) {
+  const asOf = input.asOf || new Date();
+  const numericAge = Number(input.ageDays);
+  const businessAge = Number.isFinite(numericAge)
+    ? numericAge
+    : getPacificBusinessDayAge(
+      input.createdAt,
+      asOf,
+      input.rolloverHour,
+      input.graceEndHour,
+    );
+  if (!Number.isFinite(businessAge)) return null;
+
+  const ageFamily = deriveQueueFamilyFromAgeDays(businessAge);
+  if (!isTouchAgeBucketingEnabled() || ageFamily === "aged") return ageFamily;
+
+  const placedCalls = normalizePlacedCallCount(
+    input.placedCalls,
+    input.totalPlacedCalls,
+    input.totalCalls,
+    input.callCount,
+  );
+  if (placedCalls == null) return ageFamily;
+
+  const freshWindowDays = Math.max(getTouchAgeFreshWindowDays(), 0);
+  const freshMaxCalls = Math.max(getTouchAgeFreshMaxCalls(), 0);
+  if (businessAge <= freshWindowDays && placedCalls <= freshMaxCalls) {
+    return "fresh-day1";
+  }
+
+  return ageFamily;
+}
+
 function getNextPacificDayStart(date = new Date()) {
   const parts = getPacificParts(date);
   const nextNoonGuess = new Date(Date.UTC(parts.year, parts.month - 1, parts.day + 1, 12, 0, 0, 0));
@@ -316,7 +432,16 @@ function buildCallAttemptPatch(item = {}, placedAt = new Date()) {
     "metadata.dailyPlacedDateKey": dateKey,
     "metadata.dailyPlacedCalls": nextDailyCount,
     "metadata.lastQueueAttemptAt": placedAt,
+    ...buildCxHourlyAttemptPatch(item, placedAt),
   };
+}
+
+function maxDate(...dates) {
+  const times = dates
+    .map((date) => date ? new Date(date).getTime() : Number.NaN)
+    .filter((time) => Number.isFinite(time));
+  if (times.length === 0) return null;
+  return new Date(Math.max(...times));
 }
 
 function getCooldownReleaseAt(item = {}, now = new Date()) {
@@ -330,6 +455,7 @@ function getCooldownReleaseAt(item = {}, now = new Date()) {
 function resolveQueueDialability(item = {}, now = new Date()) {
   const policy = getQueueFamilyPolicy(item.queueFamily || item.metadata?.queueFamily);
   const dailyCount = getDailyPlacedCalls(item, now);
+  const nextByCooldown = getCooldownReleaseAt(item, now);
   if (policy.dailyMax != null && dailyCount >= Number(policy.dailyMax)) {
     return {
       ok: false,
@@ -342,7 +468,22 @@ function resolveQueueDialability(item = {}, now = new Date()) {
     };
   }
 
-  const nextByCooldown = getCooldownReleaseAt(item, now);
+  const hourlyPacing = getCxHourlyPacingStatus(item, now);
+  if (hourlyPacing.capped) {
+    return {
+      ok: false,
+      reason: "hourly-cap-reached",
+      detail: `${policy.label} hourly contact cap reached`,
+      nextEligibleAt: maxDate(hourlyPacing.nextEligibleAt, nextByCooldown),
+      dailyCount,
+      dailyMax: policy.dailyMax,
+      hourlyCount: hourlyPacing.count,
+      hourlyMax: hourlyPacing.cap,
+      hourlyPacing,
+      policy,
+    };
+  }
+
   if (item.lastPlacedAt && nextByCooldown.getTime() > new Date(now).getTime()) {
     return {
       ok: false,
@@ -361,6 +502,8 @@ function resolveQueueDialability(item = {}, now = new Date()) {
     nextEligibleAt: null,
     dailyCount,
     dailyMax: policy.dailyMax,
+    hourlyCount: hourlyPacing.count,
+    hourlyMax: hourlyPacing.cap,
     policy,
   };
 }
@@ -373,10 +516,12 @@ function deriveQueueFamilyFromAgeDays(ageDays) {
   return "aged";
 }
 
-function deriveQueueFamilyFromLeadCreatedAt(createdAt, asOf = new Date()) {
-  const businessAge = getPacificBusinessDayAge(createdAt, asOf);
-  if (!Number.isFinite(businessAge)) return null;
-  return deriveQueueFamilyFromAgeDays(businessAge);
+function deriveQueueFamilyFromLeadCreatedAt(createdAt, asOf = new Date(), options = {}) {
+  return deriveQueueFamilyFromLeadTouchState({
+    ...options,
+    createdAt,
+    asOf,
+  });
 }
 
 module.exports = {
@@ -384,6 +529,7 @@ module.exports = {
   CX_QUEUE_TIER_POLICIES,
   deriveQueueFamilyFromAgeDays,
   deriveQueueFamilyFromLeadCreatedAt,
+  deriveQueueFamilyFromLeadTouchState,
   getCooldownReleaseAt,
   getDailyPlacedCalls,
   getPacificBusinessDayAge,
@@ -393,9 +539,13 @@ module.exports = {
   getQueueFamilyPolicy,
   getQueueFamilySortRank,
   getQueueFamilyTargetOpen,
+  getTouchAgeFreshMaxCalls,
+  getTouchAgeFreshWindowDays,
   isQueueFamilyAllowedForAccountPolicy,
+  isTouchAgeBucketingEnabled,
   normalizeCxQueuePolicyTier,
   normalizeQueueFamily,
+  normalizePlacedCallCount,
   resolveAccountQueuePolicy,
   resolveQueueDialability,
   QUEUE_FAMILY_POLICIES,

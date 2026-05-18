@@ -68,6 +68,8 @@ async function main() {
     const { sendPlainEmail } = require(
       "../packages/shared-services/src/sendgridMailService",
     );
+    const { getInternalFromEmail } = require("../packages/shared-config/src");
+    const fromEmail = getInternalFromEmail();
     await sendPlainEmail("TAG", {
       personalizations: [
         {
@@ -75,8 +77,8 @@ async function main() {
           custom_args: { channel: "blogger-health", today },
         },
       ],
-      from: { email: "mgray@taxadvocategroup.com", name: "Blogger Health Check" },
-      reply_to: { email: "mgray@taxadvocategroup.com", name: "Blogger Health Check" },
+      from: { email: fromEmail, name: "Blogger Health Check" },
+      reply_to: { email: fromEmail, name: "Blogger Health Check" },
       subject: `[BLOGGER ALERT] Daily run missed — ${today}`,
       content: [
         {

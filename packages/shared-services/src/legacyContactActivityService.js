@@ -1,6 +1,10 @@
 "use strict";
 
 const mongoose = require("mongoose");
+const {
+  legacyReadDb,
+  resolveLegacyReadDbName,
+} = require("../../shared-repositories/src/legacyReadDb");
 
 /**
  * Read-only view of the legacy app's RB_ContactActivity collection. The
@@ -15,14 +19,12 @@ const mongoose = require("mongoose");
  */
 
 function getLegacyDbName() {
-  return String(process.env.LEGACY_APP_DB_NAME || "test").trim() || "test";
+  return resolveLegacyReadDbName(mongoose);
 }
 
 function getLegacyCollection() {
   // Mongoose default pluralization: `RB_ContactActivity` → `rb_contactactivities`.
-  return mongoose.connection
-    .useDb(getLegacyDbName(), { useCache: true })
-    .collection("rb_contactactivities");
+  return legacyReadDb(mongoose).collection("rb_contactactivities");
 }
 
 function normalizeDomain(domain) {

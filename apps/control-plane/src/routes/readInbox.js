@@ -8,10 +8,44 @@ const {
 } = require("../../../../packages/shared-repositories/src");
 const { toErrorResponse } = require("../../../../packages/shared-errors/src");
 
+function normalizeDomain(value) {
+  return String(value || "").trim().toUpperCase();
+}
+
+function allowedInboxDomainsForUser(user = {}) {
+  const domains = new Set();
+  const add = (value) => {
+    const domain = normalizeDomain(value);
+    if (domain) domains.add(domain);
+  };
+  add(user.company);
+  for (const shell of Array.isArray(user.exShells) ? user.exShells : []) {
+    add(shell?.company);
+  }
+  if (user.tagLogicsId || user.tagEmail) add("TAG");
+  if (user.wynnLogicsId || user.wynnEmail) add("WYNN");
+  return domains;
+}
+
+function requireInboxDomainAccess(req, res, next) {
+  const requestedDomain = normalizeDomain(req.params?.domain);
+  if (!requestedDomain) {
+    return res.status(400).json({ ok: false, error: "domain is required" });
+  }
+  if (req.user?.role === "admin") return next();
+  if (!req.user?.permissions?.includes?.("inbox.read")) {
+    return res.status(403).json({ ok: false, error: "Inbox access required" });
+  }
+  if (!allowedInboxDomainsForUser(req.user).has(requestedDomain)) {
+    return res.status(403).json({ ok: false, error: "Inbox domain access denied" });
+  }
+  return next();
+}
+
 function createReadInboxRouter(auth) {
   const router = express.Router();
 
-  router.get("/:domain", auth.requireAuth, auth.requireAdmin, async (req, res) => {
+  router.get("/:domain", auth.requireAuth, auth.requireUser, requireInboxDomainAccess, async (req, res) => {
     try {
       const truthy = (value) =>
         ["true", "1", "yes", "on"].includes(
@@ -52,7 +86,8 @@ function createReadInboxRouter(auth) {
   router.get(
     "/:domain/threads/:workflowId/messages",
     auth.requireAuth,
-    auth.requireAdmin,
+    auth.requireUser,
+    requireInboxDomainAccess,
     async (req, res) => {
       try {
         const workflow = await conversationWorkflowRepository.findConversationWorkflowById(

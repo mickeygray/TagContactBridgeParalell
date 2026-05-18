@@ -51,10 +51,55 @@ const CX_QUEUE_TIER_OPTIONS: Array<{
 }> = [
   { value: "no_leads", label: "No leads", hint: "Login allowed; automatic lead serving is off." },
   { value: "red_only", label: "Red only", hint: "Aged leads only." },
-  { value: "old_balanced", label: "Old balanced", hint: "10 blue and 10 red fallback leads." },
-  { value: "fresh_capped", label: "Fresh capped", hint: "Fresh lane with 15 blue and 5 red fallback." },
-  { value: "fresh_priority", label: "Fresh priority", hint: "Higher fresh access with 15 blue and 5 red fallback." },
+  { value: "old_balanced", label: "Old balanced", hint: "Blue/red pack without day-0 hot lane." },
+  { value: "fresh_capped", label: "Fresh capped", hint: "Small green pack with larger blue fallback." },
+  { value: "fresh_priority", label: "Fresh priority", hint: "Larger green pack with blue fallback." },
 ];
+
+const CX_QUEUE_TIER_DEFAULTS: Record<
+  CxQueueTier,
+  {
+    freshEligible: boolean;
+    freshTargetOpen: number;
+    day2to15TargetOpen: number;
+    agedTargetOpen: number;
+  }
+> = {
+  no_leads: {
+    freshEligible: false,
+    freshTargetOpen: 0,
+    day2to15TargetOpen: 0,
+    agedTargetOpen: 0,
+  },
+  red_only: {
+    freshEligible: false,
+    freshTargetOpen: 0,
+    day2to15TargetOpen: 0,
+    agedTargetOpen: 20,
+  },
+  old_balanced: {
+    freshEligible: false,
+    freshTargetOpen: 0,
+    day2to15TargetOpen: 25,
+    agedTargetOpen: 5,
+  },
+  fresh_capped: {
+    freshEligible: true,
+    freshTargetOpen: 5,
+    day2to15TargetOpen: 25,
+    agedTargetOpen: 5,
+  },
+  fresh_priority: {
+    freshEligible: true,
+    freshTargetOpen: 10,
+    day2to15TargetOpen: 25,
+    agedTargetOpen: 5,
+  },
+};
+
+function getCxQueueTierDefaults(tier: CxQueueTier) {
+  return CX_QUEUE_TIER_DEFAULTS[tier] || CX_QUEUE_TIER_DEFAULTS.fresh_priority;
+}
 
 export const COMPANY_OPTIONS = ["TAG", "WYNN", "AMITY"] as const;
 
@@ -70,6 +115,10 @@ const baseSchema = z.object({
   stationLabel: z.string().optional(),
   phone: z.string().optional(),
   cxQueueTier: z.enum(["no_leads", "red_only", "old_balanced", "fresh_capped", "fresh_priority"]),
+  cxFreshEligible: z.boolean().optional(),
+  cxFreshTargetOpen: z.string().optional(),
+  cxDay2To15TargetOpen: z.string().optional(),
+  cxAgedTargetOpen: z.string().optional(),
   logicsUserId: z.string().optional(),
   logicsDisplayName: z.string().optional(),
   tagLogicsId: z.string().optional(),
@@ -136,6 +185,10 @@ export function UserForm({
     const parsed = Number(value.trim());
     return Number.isFinite(parsed) ? parsed : null;
   };
+  const parseNonNegativeNumber = (value?: string) => {
+    const parsed = parseNumber(value);
+    return parsed == null ? null : Math.max(Math.trunc(parsed), 0);
+  };
   const parseCsvArray = (value?: string) =>
     String(value || "")
       .split(",")
@@ -151,6 +204,11 @@ export function UserForm({
       initialMetadata.cxUsername ||
       "",
   );
+  const initialCxQueueTier = (
+    (initial?.cxQueuePolicy?.tier as UserFormValues["cxQueueTier"] | undefined) ??
+    (initial?.role === "admin" || initial?.audience === "admin" ? "no_leads" : "fresh_priority")
+  );
+  const initialCxQueueDefaults = getCxQueueTierDefaults(initialCxQueueTier);
 
   const form = useForm<UserFormValues>({
     resolver: zodResolver(baseSchema),
@@ -170,9 +228,20 @@ export function UserForm({
       ringcxUsername: initialRingcxUsername,
       stationLabel: initial?.stationLabel ?? "",
       phone: initial?.phone ?? "",
-      cxQueueTier:
-        (initial?.cxQueuePolicy?.tier as UserFormValues["cxQueueTier"]) ??
-        (initial?.role === "admin" || initial?.audience === "admin" ? "no_leads" : "fresh_priority"),
+      cxQueueTier: initialCxQueueTier,
+      cxFreshEligible: initial?.cxQueuePolicy?.fresh?.eligible ?? initialCxQueueDefaults.freshEligible,
+      cxFreshTargetOpen:
+        initial?.cxQueuePolicy?.fresh?.targetOpen != null
+          ? String(initial.cxQueuePolicy?.fresh?.targetOpen)
+          : String(initialCxQueueDefaults.freshTargetOpen),
+      cxDay2To15TargetOpen:
+        initial?.cxQueuePolicy?.day2to15?.targetOpen != null
+          ? String(initial.cxQueuePolicy?.day2to15?.targetOpen)
+          : String(initialCxQueueDefaults.day2to15TargetOpen),
+      cxAgedTargetOpen:
+        initial?.cxQueuePolicy?.aged?.targetOpen != null
+          ? String(initial.cxQueuePolicy?.aged?.targetOpen)
+          : String(initialCxQueueDefaults.agedTargetOpen),
       logicsUserId: initial?.logicsUserId != null ? String(initial.logicsUserId) : "",
       logicsDisplayName: initial?.logicsDisplayName ?? "",
       tagLogicsId: initial?.tagLogicsId != null ? String(initial.tagLogicsId) : "",
@@ -318,6 +387,19 @@ export function UserForm({
           ...(sameQueueTier ? initial?.cxQueuePolicy || {} : {}),
           tier: values.cxQueueTier,
           enabled: values.cxQueueTier !== "no_leads",
+          fresh: {
+            ...(sameQueueTier ? initial?.cxQueuePolicy?.fresh || {} : {}),
+            eligible: Boolean(values.cxFreshEligible),
+            targetOpen: parseNonNegativeNumber(values.cxFreshTargetOpen),
+          },
+          day2to15: {
+            ...(sameQueueTier ? initial?.cxQueuePolicy?.day2to15 || {} : {}),
+            targetOpen: parseNonNegativeNumber(values.cxDay2To15TargetOpen),
+          },
+          aged: {
+            ...(sameQueueTier ? initial?.cxQueuePolicy?.aged || {} : {}),
+            targetOpen: parseNonNegativeNumber(values.cxAgedTargetOpen),
+          },
         },
         logicsUserId: parseNumber(values.logicsUserId),
         logicsDisplayName: values.logicsDisplayName?.trim() || null,
@@ -515,9 +597,15 @@ export function UserForm({
       <Field label="CX queue tier" hint={cxQueueTierDef?.hint}>
         <Select
           value={cxQueueTier}
-          onValueChange={(v) =>
-            form.setValue("cxQueueTier", v as UserFormValues["cxQueueTier"], { shouldDirty: true })
-          }
+          onValueChange={(v) => {
+            const nextTier = v as UserFormValues["cxQueueTier"];
+            const nextDefaults = getCxQueueTierDefaults(nextTier);
+            form.setValue("cxQueueTier", nextTier, { shouldDirty: true });
+            form.setValue("cxFreshEligible", nextDefaults.freshEligible, { shouldDirty: true });
+            form.setValue("cxFreshTargetOpen", String(nextDefaults.freshTargetOpen), { shouldDirty: true });
+            form.setValue("cxDay2To15TargetOpen", String(nextDefaults.day2to15TargetOpen), { shouldDirty: true });
+            form.setValue("cxAgedTargetOpen", String(nextDefaults.agedTargetOpen), { shouldDirty: true });
+          }}
         >
           <SelectTrigger>
             <SelectValue />
@@ -531,6 +619,43 @@ export function UserForm({
           </SelectContent>
         </Select>
       </Field>
+
+      <div className="grid grid-cols-1 gap-4 rounded-md border border-border/60 bg-muted/20 p-3 md:grid-cols-4">
+        <Field label="Day-0">
+          <label className="flex h-10 items-center gap-2 rounded-md border border-input bg-background px-3 text-sm">
+            <input
+              type="checkbox"
+              className="h-4 w-4"
+              {...form.register("cxFreshEligible")}
+            />
+            Eligible
+          </label>
+        </Field>
+        <Field label="Green pack">
+          <Input
+            type="number"
+            min={0}
+            step={1}
+            {...form.register("cxFreshTargetOpen")}
+          />
+        </Field>
+        <Field label="Blue pack">
+          <Input
+            type="number"
+            min={0}
+            step={1}
+            {...form.register("cxDay2To15TargetOpen")}
+          />
+        </Field>
+        <Field label="Red pack">
+          <Input
+            type="number"
+            min={0}
+            step={1}
+            {...form.register("cxAgedTargetOpen")}
+          />
+        </Field>
+      </div>
 
       <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
         <Field label="Ext number">

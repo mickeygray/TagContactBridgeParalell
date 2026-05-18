@@ -303,6 +303,8 @@ async function sendSummaryEmail(summary) {
   const { sendPlainEmail } = require(
     "../packages/shared-services/src/sendgridMailService",
   );
+  const { getInternalFromEmail } = require("../packages/shared-config/src");
+  const fromEmail = getInternalFromEmail();
   const subject = `Blog auto-posted: ${summary.id}`;
   const lines = [
     `Topic: ${summary.title}`,
@@ -324,8 +326,8 @@ async function sendSummaryEmail(summary) {
         custom_args: { channel: "blogger-bot", blogId: summary.id },
       },
     ],
-    from: { email: "mgray@taxadvocategroup.com", name: "Blogger Bot" },
-    reply_to: { email: "mgray@taxadvocategroup.com", name: "Blogger Bot" },
+    from: { email: fromEmail, name: "Blogger Bot" },
+    reply_to: { email: fromEmail, name: "Blogger Bot" },
     subject,
     content: [{ type: "text/plain", value: lines }],
   });

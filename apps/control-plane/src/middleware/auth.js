@@ -86,6 +86,7 @@ async function loadLiveAccount(req, res) {
     cxAgentId: account.cxAgentId || req.user.cxAgentId,
     cxAuth: account.cxAuth || null,
     cxSession: account.cxSession || null,
+    exShells: Array.isArray(account.exShells) ? account.exShells : [],
     accountStatus: account.status,
   };
   req._liveAccountLoaded = true;

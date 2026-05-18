@@ -332,6 +332,10 @@ async function sendInboundLeadAlertEmail(normalized = {}, caseId, validation = {
   if (!toEmail) {
     return { ok: false, skipped: true, reason: "missing-alert-address" };
   }
+  const mailerCompany =
+    cleanString(options.mailerCompany) ||
+    cleanString(env("INBOUND_LEAD_ALERT_EMAIL_COMPANY", "TAG")) ||
+    "TAG";
   // Internal new-lead alert (channel: "lead-alert") — replies should
   // route to a human inbox, not a branded `team@` shared box. Send
   // from the Parallel-internal sender; brand still appears in the
@@ -344,12 +348,13 @@ async function sendInboundLeadAlertEmail(normalized = {}, caseId, validation = {
     `${caseId ? `| Case #${caseId}` : "| No Case ID"}`;
   const text = buildLeadAlertText(normalized, caseId, validation, companyConfig);
 
-  await sendPlainEmail(normalized.domain, {
+  await sendPlainEmail(mailerCompany, {
     personalizations: [
       {
         to: [{ email: toEmail }],
         custom_args: {
           company: normalized.domain,
+          mailerCompany,
           channel: "lead-alert",
           intakeSource: cleanString(normalized.intakeSource) || "unknown",
           intakeRoute: cleanString(normalized.intakeRoute) || "unknown",
@@ -374,7 +379,7 @@ async function sendInboundLeadAlertEmail(normalized = {}, caseId, validation = {
     ],
   });
 
-  return { ok: true, toEmail, subject };
+  return { ok: true, toEmail, subject, mailerCompany };
 }
 
 async function sendAffiliatePostback(postbackUrl, body, options = {}) {

@@ -669,3 +669,5 @@
     "message" : "Request rate exceeded"
   } ]
 }
+12:30:35 🔁 telephony=CallConnected   userStatus=Available   → cxRouting.desiredAvailability=unavailable (ex-busy)
+              apply: skipped — no apply path enabled (rerun with --apply-logout to use logout)

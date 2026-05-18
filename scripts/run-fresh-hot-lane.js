@@ -75,7 +75,10 @@ function summarizeResult(result = {}) {
 }
 
 async function connectMongo() {
-  const uri = process.env.MONGO_URI || "mongodb://127.0.0.1:27017/tagcontactbridge_parallel";
+  const uri = process.env.MONGO_URI;
+  if (!uri) {
+    throw new Error("MONGO_URI is required; this app uses the Atlas database, not a local Mongo fallback.");
+  }
   const dbName = process.env.PARALLEL_DB_NAME || "tagcontactbridge_parallel";
   await mongoose.connect(uri, { dbName });
   return dbName;

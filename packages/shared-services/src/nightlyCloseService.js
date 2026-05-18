@@ -13,10 +13,14 @@ const {
   masterProspectRepository,
   paymentAlertRepository,
   paymentLedgerRepository,
+  postDateHoldRepository,
   reviewQueueRepository,
   sourceCanonicalRepository,
   spendEntryRepository,
 } = require("../../shared-repositories/src");
+const {
+  legacyReadDb,
+} = require("../../shared-repositories/src/legacyReadDb");
 const mongoose = require("mongoose");
 const {
   summarizeCallStats,
@@ -251,6 +255,7 @@ async function runNightlyLeadCadenceCaseRefresh(domains, dateKey, options = {}) 
 
 async function runNightlyFinalClosePass(domains, options = {}) {
   const selectedDomains = normalizeNightlyDomains(domains);
+  const dateKey = options.dateKey || options.date || formatDateKey(new Date(), options.timezone || "America/Los_Angeles");
   let spendSync = null;
 
   if (options.spendSyncRuntime?.syncAll) {
@@ -319,15 +324,29 @@ async function runNightlyFinalClosePass(domains, options = {}) {
     ? { skipped: true, reason: "disabled" }
     : await runNightlyLeadCadenceCaseRefresh(
         selectedDomains,
-        options.dateKey || options.date || formatDateKey(new Date(), options.timezone || "America/Los_Angeles"),
+        dateKey,
         options,
       );
+  let postDateSweep = { skipped: true, reason: "disabled" };
+  if (options.postDateSweepEnabled !== false) {
+    try {
+      const { runPostDateHoldEodSweep } = require("./cxWorkspaceService");
+      postDateSweep = await runPostDateHoldEodSweep(selectedDomains, {
+        dateKey,
+        dryRun: Boolean(options.postDateSweepDryRun),
+        limit: options.postDateSweepLimit || 250,
+      });
+    } catch (error) {
+      postDateSweep = { ok: false, error: error.message, dateKey };
+    }
+  }
 
   return {
     domains: selectedDomains,
     spendSync,
     hourlySweep,
     leadCadenceCaseRefresh,
+    postDateSweep,
     paymentSweep: summarizePaymentSweepForOps(
       hourlySweep?.phaseA?.paymentReconcile || [],
       selectedDomains,
@@ -444,6 +463,57 @@ function getRecipientPool(poolKey) {
 
 function formatMoney(value) {
   return `$${toNumber(value).toFixed(2)}`;
+}
+
+async function buildPostDateHoldEmailRows(domains, dateKey) {
+  const selectedDomains = normalizeNightlyDomains(domains);
+  const byId = new Map();
+  for (const domain of selectedDomains) {
+    const [active, today] = await Promise.all([
+      postDateHoldRepository.listPostDateHolds(domain, {
+        status: "active",
+        limit: 500,
+      }).catch(() => []),
+      postDateHoldRepository.listPostDateHolds(domain, {
+        status: "all",
+        date: dateKey,
+        limit: 500,
+      }).catch(() => []),
+    ]);
+    for (const hold of [...active, ...today]) {
+      const id = String(hold._id || `${hold.domain}:${hold.caseId}:${hold.status}`);
+      byId.set(id, hold);
+    }
+  }
+  return [...byId.values()]
+    .sort((left, right) => {
+      const leftActive = left.status === "active" ? 0 : 1;
+      const rightActive = right.status === "active" ? 0 : 1;
+      if (leftActive !== rightActive) return leftActive - rightActive;
+      return String(left.firstPaymentDateKey || "9999-99-99").localeCompare(
+        String(right.firstPaymentDateKey || "9999-99-99"),
+      );
+    })
+    .map((hold) => ({
+      id: String(hold._id || ""),
+      domain: hold.domain,
+      caseId: hold.caseId,
+      status: hold.status,
+      caseName: hold.caseName || `Case ${hold.caseId}`,
+      phone: hold.phone || "",
+      sourceName: hold.sourceName || "",
+      postDatedDateKey: hold.postDatedDateKey || "",
+      postDatedBy: hold.postDatedByName || hold.postDatedByEmail || "",
+      firstPaymentDateKey: hold.firstPaymentDateKey || "",
+      paymentScheduleStatus: hold.paymentScheduleStatus || "",
+      releaseReason: hold.releaseReason || "",
+      rowType:
+        hold.status === "active"
+          ? hold.postDatedDateKey === dateKey
+            ? "active today"
+            : "active carryover"
+          : `today ${String(hold.status || "").replace(/_/g, " ")}`,
+    }));
 }
 
 async function buildLeadSummary(domain, dateKey, timeZone = "America/Los_Angeles") {
@@ -930,8 +1000,7 @@ async function _legacy_buildDealsByCase_unused(domain, dateKey) {
     .lean();
 
   // Legacy side — `dailypaymentsummaries` with type=initial.
-  const legacyRows = await mongoose.connection
-    .useDb(String(process.env.LEGACY_APP_DB_NAME || "test"), { useCache: true })
+  const legacyRows = await legacyReadDb(mongoose)
     .collection("dailypaymentsummaries")
     .find({
       domain: normalizedDomain,
@@ -988,8 +1057,7 @@ async function _legacy_buildDealsByCase_unused(domain, dateKey) {
   );
 
   const legacyProfiles = caseIds.length > 0
-    ? await mongoose.connection
-        .useDb(String(process.env.LEGACY_APP_DB_NAME || "test"), { useCache: true })
+    ? await legacyReadDb(mongoose)
         .collection("rb_caseprofiles")
         .find(
           { domain: normalizedDomain, caseId: { $in: caseIds } },
@@ -1159,10 +1227,7 @@ async function _legacy_buildMtdRoiBySource_unused(domains, dateKey, options = {}
     ? domains
     : ["TAG", "WYNN"]).map(normalizeDomain);
   const monthStart = `${dateKey.slice(0, 7)}-01`;
-  const legacyDb = mongoose.connection.useDb(
-    String(process.env.LEGACY_APP_DB_NAME || "test"),
-    { useCache: true },
-  );
+  const legacyDb = legacyReadDb(mongoose);
 
   // ── Spend (Parallel + legacy) — group by source/channel ──────────
   const bySourceKey = new Map();
@@ -1365,8 +1430,7 @@ async function _legacy_buildPaymentsByCase_unused(domain, dateKey) {
     transactionStatus: "SUCCESS",
   }).lean();
 
-  const legacyRows = await mongoose.connection
-    .useDb(String(process.env.LEGACY_APP_DB_NAME || "test"), { useCache: true })
+  const legacyRows = await legacyReadDb(mongoose)
     .collection("dailypaymentsummaries")
     .find({
       domain: normalizedDomain,
@@ -2077,7 +2141,16 @@ async function buildGroupedNightlyPayload(domains, dateKey, options = {}) {
   };
 }
 
-function buildFinancialEmailBody(domain, dateKey, daily, mtd) {
+function buildFinancialEmailBody(domain, dateKey, daily, mtd, extras = {}) {
+  const postDateHolds = extras.postDateHolds || [];
+  const postDateSweep = extras.postDateSweep || null;
+  const postDateLines = postDateHolds.length > 0
+    ? postDateHolds
+        .slice(0, 20)
+        .map((row) =>
+          `  ${row.domain} #${row.caseId} ${row.caseName || ""} | ${row.status} | first payment ${row.firstPaymentDateKey || "n/a"} | ${row.rowType || ""}`.trim(),
+        )
+    : ["  (no active or newly touched post-date holds)"];
   // Plain-text fallback only — used when an HTML client can't render.
   // The HTML version is rendered from `nightly/financial-close.hbs`.
   return [
@@ -2089,6 +2162,10 @@ function buildFinancialEmailBody(domain, dateKey, daily, mtd) {
     `  Payments: ${formatMoney(daily.payments.totalAmount)} (${daily.payments.totalCount}) — initial ${formatMoney(daily.payments.initialAmount)} (${daily.payments.initialCount}), recurring ${formatMoney(daily.payments.recurringAmount)} (${daily.payments.recurringCount})`,
     `  Pending redlines: ${daily.alerts.pendingRedlines}`,
     `  Review redlines (open): ${daily.alerts.reviewRedlines}`,
+    "",
+    "Post-date holds",
+    `  Sweep: checked ${toNumber(postDateSweep?.checked)}, verified ${toNumber(postDateSweep?.verified)}, released ${toNumber(postDateSweep?.released)}, review ${toNumber(postDateSweep?.review)}, errors ${toNumber(postDateSweep?.errors)}`,
+    ...postDateLines,
     "",
     `Month-to-date (${mtd.monthStart} → ${mtd.monthEnd})`,
     `  Leads: ${mtd.leads.total}`,
@@ -2243,6 +2320,8 @@ async function sendFinancialCloseEmail(domain, payload, options = {}) {
   const failedPayments = payload.failedPayments || [];
   const mtdRoiBySource = payload.mtdRoiBySource || [];
   const hygiene = payload.hygiene || {};
+  const postDateHolds = payload.postDateHolds || [];
+  const postDateSweep = payload.postDateSweep || null;
 
   const csv = buildFinancialCsv({
     domain,
@@ -2253,6 +2332,7 @@ async function sendFinancialCloseEmail(domain, payload, options = {}) {
     dealsByCase,
     spendByChannel,
     failedPayments,
+    postDateHolds,
     mtdRoiBySource,
   });
 
@@ -2281,6 +2361,8 @@ async function sendFinancialCloseEmail(domain, payload, options = {}) {
     dealsByCase,
     spendByChannel,
     failedPayments,
+    postDateHolds,
+    postDateSweep,
     mtdRoiBySource,
     hygiene,
     perDomain: payload.perDomain || null,
@@ -2291,7 +2373,7 @@ async function sendFinancialCloseEmail(domain, payload, options = {}) {
     subject: financialSubject(domain, payload.date, daily, payload.groupLabel),
     template: "nightly/financial-close",
     data,
-    text: buildFinancialEmailBody(domain, payload.date, daily, mtd),
+    text: buildFinancialEmailBody(domain, payload.date, daily, mtd, { postDateHolds, postDateSweep }),
     attachments: [csv],
   });
 
@@ -2710,6 +2792,7 @@ async function runGroupedNightlyClose(domains, options = {}) {
     timezone: options.timezone,
     vendorDomain,
   });
+  const postDateHolds = await buildPostDateHoldEmailRows(selectedDomains, dateKey);
 
   const results = {};
 
@@ -2727,6 +2810,8 @@ async function runGroupedNightlyClose(domains, options = {}) {
         dealsByCase: payload.dealsByCase,
         spendByChannel: payload.spendByChannel,
         failedPayments: payload.todaysAlerts || [],
+        postDateHolds,
+        postDateSweep: finalClose.postDateSweep || null,
         mtdRoiBySource: payload.mtdRoiBySource || [],
         hygiene: {
           prunedResolved: toNumber(payload.bugWrap?.prunedResolved),
@@ -2867,6 +2952,7 @@ async function executeNightlyCloseRun(runId, domain, options = {}) {
   let monthToDateSnapshot;
   let vendorReport;
   let bugWrap;
+  let postDateSweep = null;
   let financialEmailResult = null;
   let leadDataEmailResult = null;
 
@@ -2893,10 +2979,24 @@ async function executeNightlyCloseRun(runId, domain, options = {}) {
       maxCases: Number(options.maxCases) || 500,
       staleAfterMs: 0,
     });
+    if (options.postDateSweepEnabled !== false) {
+      try {
+        const { runPostDateHoldEodSweep } = require("./cxWorkspaceService");
+        postDateSweep = await runPostDateHoldEodSweep([domain], {
+          dateKey,
+          dryRun: Boolean(options.postDateSweepDryRun),
+          limit: options.postDateSweepLimit || 250,
+        });
+      } catch (error) {
+        postDateSweep = { ok: false, error: error.message, dateKey };
+      }
+    } else {
+      postDateSweep = { skipped: true, reason: "disabled", dateKey };
+    }
     await setSection("final-reconcile", {
       status: "completed",
-      summary: `Spend sync: ${spendSyncResult?.ok === false ? `skipped/error (${spendSyncResult?.error || spendSyncResult?.reason || "unknown"})` : "ok"}. Payment sweep: ${paymentSweep.newLedgerRows || 0} new ledger rows; ${paymentSweep.flaggedFailures || 0} flagged.`,
-      metrics: { spendSync: spendSyncResult, paymentSweep },
+      summary: `Spend sync: ${spendSyncResult?.ok === false ? `skipped/error (${spendSyncResult?.error || spendSyncResult?.reason || "unknown"})` : "ok"}. Payment sweep: ${paymentSweep.newLedgerRows || 0} new ledger rows; ${paymentSweep.flaggedFailures || 0} flagged. Post-date sweep: ${toNumber(postDateSweep?.checked)} checked, ${toNumber(postDateSweep?.released)} released.`,
+      metrics: { spendSync: spendSyncResult, paymentSweep, postDateSweep },
     });
 
     await setSection("management-snapshot", { status: "running" });
@@ -2954,6 +3054,7 @@ async function executeNightlyCloseRun(runId, domain, options = {}) {
       todaysCalls,
       todaysAlerts,
       openServiceAlerts,
+      postDateHolds,
     ] = await Promise.all([
       buildTransitionsBySource(domain, dateKey, timeZone).catch(() => []),
       buildDealsBySource(domain, dateKey).catch(() => []),
@@ -2961,6 +3062,7 @@ async function executeNightlyCloseRun(runId, domain, options = {}) {
       buildTodaysCalls(domain, dateKey, timeZone).catch(() => []),
       buildTodaysPaymentAlerts(domain, dateKey).catch(() => []),
       buildOpenServiceAlerts(domain, 15).catch(() => []),
+      buildPostDateHoldEmailRows([domain], dateKey).catch(() => []),
     ]);
 
     const hygiene = {
@@ -2988,6 +3090,8 @@ async function executeNightlyCloseRun(runId, domain, options = {}) {
           dealsBySource,
           spendByChannel,
           failedPayments: todaysAlerts,
+          postDateHolds,
+          postDateSweep,
           hygiene,
         }, options.financialEmail || options.email || {});
       } catch (error) {

@@ -73,6 +73,7 @@ export function InboxWorkspace({ forcedDomain }: InboxWorkspaceProps = {}) {
   const dnc = useInboxDnc(domain);
   const dispose = useInboxMessageDisposition(domain);
   const { user } = useSession();
+  const canUsePolicyActions = user?.role === "admin";
   // We compare against the email since that's the identifier reps see
   // on routedToAgentName/smsLockedByAgentName. The router stamps by
   // extensionId on the backend, but the UI surfaces names — close
@@ -432,7 +433,7 @@ export function InboxWorkspace({ forcedDomain }: InboxWorkspaceProps = {}) {
                               : undefined
                           }
                         >
-                          Approve
+                          Approve & send
                         </Button>
                         <Button
                           size="sm"
@@ -497,100 +498,102 @@ export function InboxWorkspace({ forcedDomain }: InboxWorkspaceProps = {}) {
                       ) : null}
                     </div>
 
-                    <div className="space-y-3 rounded-md border border-border p-4">
-                      <div className="space-y-1">
-                        <Label htmlFor="inbox-sleep">Sleep until</Label>
-                        <Input
-                          id="inbox-sleep"
-                          type="datetime-local"
-                          value={sleepUntil}
-                          onChange={(event) => setSleepUntil(event.target.value)}
-                        />
-                      </div>
-                      <div className="flex flex-wrap gap-2">
-                        <Button
-                          size="sm"
-                          variant="secondary"
-                          isLoading={sleep.isPending}
-                          disabled={!selectedWorkflowId}
-                          onClick={() =>
-                            selectedWorkflowId
-                              ? runCommand(() =>
-                                  sleep.mutateAsync({
-                                    workflowId: selectedWorkflowId,
-                                    note,
-                                    sleepUntil: sleepUntil || undefined,
-                                  }),
-                                )
-                              : undefined
-                          }
-                        >
-                          Sleep
-                        </Button>
-                        <Button
-                          size="sm"
-                          variant="secondary"
-                          isLoading={wake.isPending}
-                          disabled={!selectedWorkflowId}
-                          onClick={() =>
-                            selectedWorkflowId
-                              ? runCommand(() =>
-                                  wake.mutateAsync({
-                                    workflowId: selectedWorkflowId,
-                                    note,
-                                  }),
-                                )
-                              : undefined
-                          }
-                        >
-                          Wake
-                        </Button>
-                        <Button
-                          size="sm"
-                          variant="secondary"
-                          isLoading={cancel.isPending}
-                          disabled={!selectedWorkflowId}
-                          onClick={() =>
-                            selectedWorkflowId
-                              ? runCommand(() =>
-                                  cancel.mutateAsync({
-                                    workflowId: selectedWorkflowId,
-                                    note,
-                                  }),
-                                )
-                              : undefined
-                          }
-                        >
-                          Cancel
-                        </Button>
-                        <Button
-                          size="sm"
-                          variant="destructive"
-                          isLoading={dnc.isPending}
-                          disabled={!selectedWorkflowId}
-                          onClick={() =>
-                            selectedWorkflowId
-                              ? runCommand(() =>
-                                  dnc.mutateAsync({
-                                    workflowId: selectedWorkflowId,
-                                    reason: note || "Marked DNC from inbox",
-                                  }),
-                                )
-                              : undefined
-                          }
-                        >
-                          DNC
-                        </Button>
-                      </div>
-                      <CardDescription>
-                        These commands update the workflow, record review history, and leave the thread readable through 5001 even before provider-side automation finishes maturing.
-                      </CardDescription>
-                      {commandMessage ? (
-                        <div className="rounded-md bg-muted px-3 py-2 text-xs text-muted-foreground">
-                          {commandMessage}
+                    {canUsePolicyActions ? (
+                      <div className="space-y-3 rounded-md border border-border p-4">
+                        <div className="space-y-1">
+                          <Label htmlFor="inbox-sleep">Sleep until</Label>
+                          <Input
+                            id="inbox-sleep"
+                            type="datetime-local"
+                            value={sleepUntil}
+                            onChange={(event) => setSleepUntil(event.target.value)}
+                          />
                         </div>
-                      ) : null}
-                    </div>
+                        <div className="flex flex-wrap gap-2">
+                          <Button
+                            size="sm"
+                            variant="secondary"
+                            isLoading={sleep.isPending}
+                            disabled={!selectedWorkflowId}
+                            onClick={() =>
+                              selectedWorkflowId
+                                ? runCommand(() =>
+                                    sleep.mutateAsync({
+                                      workflowId: selectedWorkflowId,
+                                      note,
+                                      sleepUntil: sleepUntil || undefined,
+                                    }),
+                                  )
+                                : undefined
+                            }
+                          >
+                            Sleep
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="secondary"
+                            isLoading={wake.isPending}
+                            disabled={!selectedWorkflowId}
+                            onClick={() =>
+                              selectedWorkflowId
+                                ? runCommand(() =>
+                                    wake.mutateAsync({
+                                      workflowId: selectedWorkflowId,
+                                      note,
+                                    }),
+                                  )
+                                : undefined
+                            }
+                          >
+                            Wake
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="secondary"
+                            isLoading={cancel.isPending}
+                            disabled={!selectedWorkflowId}
+                            onClick={() =>
+                              selectedWorkflowId
+                                ? runCommand(() =>
+                                    cancel.mutateAsync({
+                                      workflowId: selectedWorkflowId,
+                                      note,
+                                    }),
+                                  )
+                                : undefined
+                            }
+                          >
+                            Cancel
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="destructive"
+                            isLoading={dnc.isPending}
+                            disabled={!selectedWorkflowId}
+                            onClick={() =>
+                              selectedWorkflowId
+                                ? runCommand(() =>
+                                    dnc.mutateAsync({
+                                      workflowId: selectedWorkflowId,
+                                      reason: note || "Marked DNC from inbox",
+                                    }),
+                                  )
+                                : undefined
+                            }
+                          >
+                            DNC
+                          </Button>
+                        </div>
+                        <CardDescription>
+                          These commands update the workflow, record review history, and leave the thread readable through 5001 even before provider-side automation finishes maturing.
+                        </CardDescription>
+                      </div>
+                    ) : null}
+                    {commandMessage ? (
+                      <div className="rounded-md bg-muted px-3 py-2 text-xs text-muted-foreground">
+                        {commandMessage}
+                      </div>
+                    ) : null}
                   </div>
                 </Section>
 
@@ -668,6 +671,10 @@ function autoResponderChip(
       return { tone: "danger", label: "Auto-suppressed" };
     case "auto_callback_prompt":
       return { tone: "info", label: "Auto-callback sent" };
+    case "auto_soft_defer":
+      return { tone: "warning", label: "Soft defer sent" };
+    case "soft_defer_callback":
+      return { tone: "warning", label: "Callback window" };
     case "suppress_contact":
       return { tone: "danger", label: "Carrier STOP" };
     default:

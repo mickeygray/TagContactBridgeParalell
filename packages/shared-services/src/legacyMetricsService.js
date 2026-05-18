@@ -5,17 +5,29 @@ const {
   listManualDailySummaryRows,
   listManualMetricSourceRows,
 } = require("./metricsManualOverlayService");
+const {
+  legacyReadDb,
+  resolveLegacyReadDbName,
+} = require("../../shared-repositories/src/legacyReadDb");
 
 function getLegacyDbName() {
-  return String(process.env.LEGACY_APP_DB_NAME || "test").trim() || "test";
+  return resolveLegacyReadDbName(mongoose);
 }
 
 function getLegacyDb() {
-  return mongoose.connection.useDb(getLegacyDbName(), { useCache: true });
+  return legacyReadDb(mongoose);
 }
 
 function getMirrorDb() {
   return mongoose.connection.db;
+}
+
+function currentDbName() {
+  return String(
+    mongoose.connection.name ||
+      process.env.PARALLEL_DB_NAME ||
+      "tagcontactbridge_parallel",
+  ).trim();
 }
 
 function normalizeDomain(domain) {
@@ -172,6 +184,14 @@ async function listLegacyRoiPaymentRows(domain, paymentCollection, match = {}) {
 }
 
 async function resolveMetricsCollection(collectionName, match = {}) {
+  const legacyDbName = getLegacyDbName();
+  if (legacyDbName === currentDbName()) {
+    return {
+      collection: getLegacyDb().collection(collectionName),
+      source: "cloned-legacy",
+    };
+  }
+
   const mirrorCollection = getMirrorDb().collection(buildMirrorCollectionName(collectionName));
   const hasMirrorRows = await mirrorCollection.countDocuments(match, { limit: 1 });
   if (hasMirrorRows > 0) {

@@ -82,7 +82,58 @@ function maskPhone(value) {
   return `***${digits.slice(-4)}`;
 }
 
-async function sendClientSmsAlert({ domain, phone, body, payload, workflowId, inboundMessageId, classification, hotRoutingResult }) {
+function inboxActionForSmsClassification(classification = {}) {
+  if (classification.tier === "hard_stop") return "suppress_contact";
+  if (classification.tier === "dnc_confirm") {
+    return "auto_dnc_confirm";
+  }
+  if (classification.tier === "soft_defer") {
+    return classification.callbackWindow ? "soft_defer_callback" : "auto_soft_defer";
+  }
+  if (classification.tier === "callback_prompt") {
+    return "auto_callback_prompt";
+  }
+  return "needs_human";
+}
+
+function inboxStatusForSmsClassification(classification = {}) {
+  if (classification.tier === "needs_human") return "manual-review";
+  if (classification.suggestedReply) return "drafted";
+  if (classification.tier === "dnc_confirm") return "suppressed";
+  return "observed";
+}
+
+function inboxFlagsForSmsClassification(classification = {}) {
+  const flags = [];
+  if (classification.tier) flags.push(`tier:${classification.tier}`);
+  if (classification.intent) flags.push(`intent:${classification.intent}`);
+  if (classification.prospectState) flags.push(`state:${classification.prospectState}`);
+  if (classification.callbackWindow) flags.push("callback-window");
+  if (classification.hotIntent?.detected) flags.push("hot-intent");
+  return flags;
+}
+
+function smsAlertSubject({ domain, phone, classification = {} }) {
+  const reason = classification.hotIntent?.reason || classification.rationale || "unclear";
+  const window = classification.callbackWindow || "no window given";
+  const prospect = maskPhone(phone);
+  switch (classification.tier) {
+    case "callback_prompt":
+      return `[${domain} SMS] Callback queued: ${prospect} - ${reason}`;
+    case "soft_defer":
+      return `[${domain} SMS] Soft defer: ${prospect} - ${window}`;
+    case "dnc_confirm":
+      return `[${domain} SMS] DNC fired: ${prospect} - ${reason}`;
+    case "needs_human":
+      return `[${domain} SMS] Reply needed: ${prospect} - ${reason}`;
+    case "hard_stop":
+      return `[${domain} SMS] STOP received: ${prospect}`;
+    default:
+      return `[${domain} SMS] Reply from ${prospect}`;
+  }
+}
+
+async function sendClientSmsAlert({ domain, phone, body, payload, workflowId, inboundMessageId, classification, hotRoutingResult, autoResult }) {
   const normalizedDomain = normalizeDomain(domain);
   const company = getCompanyConfig(normalizedDomain);
 
@@ -108,35 +159,40 @@ async function sendClientSmsAlert({ domain, phone, body, payload, workflowId, in
     return { ok: false, skipped: true, reason: "no-client-sms-alert-recipients" };
   }
 
-  // Domain-aware footer. TAG alerts are explicitly "AI is disabled, you
-  // own this reply." WYNN alerts say "you have first crack; AI fallback
-  // fires after the response window if nobody claims." Both surface the
-  // classifier's call so the recipient knows what kind of message it is.
   const classificationLine = classification
-    ? `Classification: ${classification.tier || "unknown"} (${classification.intent || "—"}, conf ${classification.confidence ?? "—"})`
+    ? `Classification: ${classification.tier || "unknown"} (${classification.intent || "-"}, conf ${classification.confidence ?? "-"})`
+    : null;
+  const stateLine = classification?.prospectState
+    ? `Prospect state: ${classification.prospectState}`
+    : null;
+  const callbackWindowLine = classification?.callbackWindow
+    ? `Callback window: ${classification.callbackWindow}`
+    : null;
+  const replyLine = classification?.suggestedReply
+    ? `Opus reply: ${classification.suggestedReply}`
+    : "Opus reply: (none)";
+  const autoLine = autoResult
+    ? `Action result: ${autoResult.action || "unknown"} (${autoResult.reason || autoResult.policy || "ok"})`
     : null;
 
   const hotIntent = classification?.hotIntent?.detected === true;
-  // Hot-intent routing summary — surfaces who (if anyone) the auto-router
-  // dropped this on. Recipients of the alert are the operations team, so
-  // they see "routed to Sean" before they bother paging anyone.
   let hotIntentLine = null;
   if (hotIntent) {
     if (hotRoutingResult?.routed && hotRoutingResult.agent?.name) {
-      hotIntentLine = `🔥 HOT INTENT: ${classification.hotIntent.reason || "buying signal"} — routed to ${hotRoutingResult.agent.name}.`;
+      hotIntentLine = `HOT INTENT: ${classification.hotIntent.reason || "buying signal"} - routed to ${hotRoutingResult.agent.name}.`;
     } else if (hotRoutingResult?.skipReason === "already-routed-and-fresh") {
-      hotIntentLine = `🔥 HOT INTENT: ${classification.hotIntent.reason || "buying signal"} — already with ${hotRoutingResult.agent?.name || "assigned rep"}.`;
+      hotIntentLine = `HOT INTENT: ${classification.hotIntent.reason || "buying signal"} - already with ${hotRoutingResult.agent?.name || "assigned rep"}.`;
     } else if (hotRoutingResult?.skipReason === "no-available-agents") {
-      hotIntentLine = `🔥 HOT INTENT: ${classification.hotIntent.reason || "buying signal"} — UNASSIGNED (no agents available right now).`;
+      hotIntentLine = `HOT INTENT: ${classification.hotIntent.reason || "buying signal"} - UNASSIGNED (no agents available right now).`;
     } else {
-      hotIntentLine = `🔥 HOT INTENT: ${classification.hotIntent.reason || "buying signal"}.`;
+      hotIntentLine = `HOT INTENT: ${classification.hotIntent.reason || "buying signal"}.`;
     }
   }
 
   const footerLine = normalizedDomain === "TAG"
-    ? "AI auto-response is disabled for TAG — please reply via the inbox."
+    ? "AI auto-response is disabled for TAG - please reply via the inbox."
     : normalizedDomain === "WYNN"
-      ? "WYNN: the inbox auto-routes hot leads to the next available rep. If the AI flagged this hot, the rep below already owns it."
+      ? "WYNN: Opus is first-line on SMS. This alert is the rep brief for callback/follow-through."
       : null;
 
   const text = [
@@ -144,6 +200,9 @@ async function sendClientSmsAlert({ domain, phone, body, payload, workflowId, in
     hotIntentLine,
     footerLine,
     classificationLine,
+    stateLine,
+    callbackWindowLine,
+    autoLine,
     "",
     `From: ${phone || "unknown"}`,
     `To: ${payload?.destination_number || "unknown"}`,
@@ -152,12 +211,17 @@ async function sendClientSmsAlert({ domain, phone, body, payload, workflowId, in
     "",
     "Body:",
     body || "(empty)",
+    "",
+    replyLine,
+    "",
+    "Rationale:",
+    classification?.rationale || "(none)",
+    "",
+    "Raw Opus tool call:",
+    JSON.stringify(classification || {}, null, 2),
   ]
     .filter((line) => line !== null)
     .join("\n");
-
-  const subjectPrefix = hotIntent ? "🔥 HOT " : "";
-
   return sendPlainEmail(normalizedDomain, {
     personalizations: [
       {
@@ -172,7 +236,7 @@ async function sendClientSmsAlert({ domain, phone, body, payload, workflowId, in
       email: getInternalFromEmail(),
       name: `${normalizedDomain} SMS Alerts`,
     },
-    subject: `${subjectPrefix}[${normalizedDomain} SMS] Reply from ${maskPhone(phone)}`,
+    subject: smsAlertSubject({ domain: normalizedDomain, phone, classification }),
     content: [{ type: "text/plain", value: text }],
   });
 }
@@ -532,7 +596,7 @@ async function handleSmsInboundForwarded(event) {
 
   // Fetch the workflow row we just upserted so we can key the per-turn
   // ConversationMessage row to it (workflowId is the parent pointer).
-  const workflow = await conversationWorkflowRepository.findConversationWorkflow(
+  let workflow = await conversationWorkflowRepository.findConversationWorkflow(
     domain,
     digits,
     "sms",
@@ -574,10 +638,13 @@ async function handleSmsInboundForwarded(event) {
         aiClassification: {
           intent: classification.intent,
           tier: classification.tier,
+          prospectState: classification.prospectState || null,
           suggestedReply: classification.suggestedReply,
+          callbackWindow: classification.callbackWindow || null,
           confidence: classification.confidence,
           rationale: classification.rationale,
           model: classification.model,
+          validationError: classification.validationError || null,
         },
         rawPayload: payload,
       });
@@ -704,6 +771,30 @@ async function handleSmsInboundForwarded(event) {
     })),
   });
 
+  workflow = await recordConversationAi({
+    domain,
+    caseId: payload.caseId != null ? Number(payload.caseId) : null,
+    phone: digits,
+    channel: "sms",
+    status: inboxStatusForSmsClassification(classification),
+    latestInboundText: body || null,
+    latestInboundAt: new Date(),
+    sourceService: event.sourceService || "control-plane",
+    aiRecommendedAction: inboxActionForSmsClassification(classification),
+    aiDraftReply: classification.suggestedReply || null,
+    aiConfidence: classification.confidence != null ? String(classification.confidence) : null,
+    aiFlags: inboxFlagsForSmsClassification(classification),
+    aiSummary: classification.rationale || null,
+    clearSmsLock: false,
+    metadata: {
+      ...(payload || {}),
+      classification,
+      aiModel: classification.model || null,
+      prospectState: classification.prospectState || null,
+      callbackWindow: classification.callbackWindow || null,
+    },
+  });
+
   // Per-turn inbound row. Stores the snapshot of what the classifier
   // decided at ingest time — critical for audit when we later change
   // the prompt or the model.
@@ -719,10 +810,13 @@ async function handleSmsInboundForwarded(event) {
       aiClassification: {
         intent: classification.intent,
         tier: classification.tier,
+        prospectState: classification.prospectState || null,
         suggestedReply: classification.suggestedReply,
+        callbackWindow: classification.callbackWindow || null,
         confidence: classification.confidence,
         rationale: classification.rationale,
         model: classification.model,
+        validationError: classification.validationError || null,
       },
       rawPayload: payload,
     });
@@ -754,6 +848,8 @@ async function handleSmsInboundForwarded(event) {
         metadata: {
           aiTier: classification.tier || null,
           aiIntent: classification.intent || null,
+          aiProspectState: classification.prospectState || null,
+          callbackWindow: classification.callbackWindow || null,
           aiConfidence: classification.confidence || null,
           providerMessageId: payload.providerMessageId || null,
         },
@@ -761,69 +857,48 @@ async function handleSmsInboundForwarded(event) {
       .catch(() => null); // non-fatal: ConversationMessage is the source of truth
   }
 
-  // Hot-intent stamp + auto-route. Runs BEFORE alert + auto-responder
-  // so the alert email can carry a "🔥 routed to Sean" footer and the
-  // rep sees ownership in the inbox immediately on their next poll.
+  // Hot-intent stamp. Callback routing happens after the SMS send
+  // succeeds so a failed provider send does not put a callback on a
+  // rep's plate before the prospect ever sees our reply.
   //
   // - Classifier sets classification.hotIntent.detected when the
   //   prospect shows buying intent.
-  // - On a hot inbound we (a) stamp aiHotIntent/Reason/DetectedAt on
-  //   the workflow, (b) round-robin pick the next available rep and
-  //   stamp routedToAgentId/Name/At.
+  // - On a hot inbound we stamp aiHotIntent/Reason/DetectedAt on
+  //   the workflow, then route only if the outbound send succeeds.
   // - If no agent is available (everyone toggled off / shift over),
   //   the workflow still carries aiHotIntent=true so it surfaces in
   //   the inbox with a "HOT - unassigned" indicator. The next rep to
   //   log in sees it pinned.
   let hotRoutingResult = null;
-  if (classification.hotIntent?.detected) {
+  const shouldRouteCallback =
+    classification.hotIntent?.detected ||
+    classification.tier === "callback_prompt" ||
+    (classification.tier === "soft_defer" && Boolean(classification.callbackWindow));
+  if (shouldRouteCallback) {
     await recordConversationAi({
       domain,
       caseId: payload.caseId != null ? Number(payload.caseId) : null,
       phone: digits,
       channel: "sms",
-      status: "observed",
+      status: inboxStatusForSmsClassification(classification),
       latestInboundText: body || null,
       latestInboundAt: new Date(),
       sourceService: event.sourceService || "control-plane",
-      aiSummary: "Inbound SMS observed (hot intent)",
-      aiHotIntent: true,
-      aiHotIntentReason: classification.hotIntent.reason || null,
-      metadata: payload,
+      aiRecommendedAction: inboxActionForSmsClassification(classification),
+      aiDraftReply: classification.suggestedReply || null,
+      aiConfidence: classification.confidence != null ? String(classification.confidence) : null,
+      aiFlags: inboxFlagsForSmsClassification(classification),
+      aiSummary: classification.rationale || "Inbound SMS observed (hot intent)",
+      aiHotIntent: Boolean(classification.hotIntent?.detected),
+      aiHotIntentReason: classification.hotIntent?.reason || classification.callbackWindow || null,
+      clearSmsLock: false,
+      metadata: {
+        ...(payload || {}),
+        classification,
+        prospectState: classification.prospectState || null,
+        callbackWindow: classification.callbackWindow || null,
+      },
     });
-    try {
-      hotRoutingResult = await autoRouteHotInboundWorkflow({
-        workflowId,
-        domain,
-        reason: classification.hotIntent.reason || null,
-      });
-    } catch (error) {
-      hotRoutingResult = { routed: false, skipReason: `error:${error.message}` };
-    }
-  }
-
-  // Alert the WYNN response team before the AI takes any action. Reps
-  // see the inbound, get a chance to claim the thread in the inbox, and
-  // can manually reply via CallRail OR move the lead into their CX
-  // queue to call directly. If nobody claims and the auto-responder
-  // proceeds below, the AI fallback fires (currently inline; will be
-  // delayed once the human-response window worker lands).
-  //
-  // Done with `.catch` not await so a SendGrid hiccup never blocks
-  // ingestion; alert delivery is reported in the return payload.
-  let wynnAlertResult = null;
-  try {
-    wynnAlertResult = await sendClientSmsAlert({
-      domain,
-      phone: digits,
-      body,
-      payload,
-      workflowId,
-      inboundMessageId: inboundMessage?.id || null,
-      classification,
-      hotRoutingResult,
-    });
-  } catch (error) {
-    wynnAlertResult = { ok: false, error: error.message };
   }
 
   // Run the auto-responder. It enforces cooldown + the "only two tiers
@@ -837,7 +912,45 @@ async function handleSmsInboundForwarded(event) {
     workflow,
     classification,
     rawPayload: payload,
+    threadHistory: history,
   });
+
+  if (shouldRouteCallback) {
+    if (autoResult.sent) {
+      try {
+        hotRoutingResult = await autoRouteHotInboundWorkflow({
+          workflowId,
+          domain,
+          reason: classification.hotIntent?.reason || classification.callbackWindow || null,
+          callbackWindow: classification.callbackWindow || "",
+          classification,
+        });
+      } catch (error) {
+        hotRoutingResult = { routed: false, skipReason: `error:${error.message}` };
+      }
+    } else {
+      hotRoutingResult = { routed: false, skipReason: "sms-not-sent" };
+    }
+  }
+
+  // Alert after the action path runs so the email is a true rep brief:
+  // inbound, Opus decision, sent/skipped/DNC result, and callback route.
+  let wynnAlertResult = null;
+  try {
+    wynnAlertResult = await sendClientSmsAlert({
+      domain,
+      phone: digits,
+      body,
+      payload,
+      workflowId,
+      inboundMessageId: inboundMessage?.id || null,
+      classification,
+      hotRoutingResult,
+      autoResult,
+    });
+  } catch (error) {
+    wynnAlertResult = { ok: false, error: error.message };
+  }
 
   await recordWorkflowStage({
     domain,
@@ -849,6 +962,8 @@ async function handleSmsInboundForwarded(event) {
     // operator touches it.
     stage: autoResult.sent
       ? "completed"
+      : autoResult.dncResult?.ok
+        ? "completed"
       : classification.tier === "hard_stop"
         ? "skipped"
         : "observed",
@@ -873,7 +988,8 @@ async function handleSmsInboundForwarded(event) {
   //   - Anything else (needs_human, send failures, etc.) queues an item.
   const bottedClean =
     classification.tier === "hard_stop" ||
-    (classification.tier === "dnc_confirm" && autoResult.sent) ||
+    (classification.tier === "dnc_confirm" && autoResult.dncResult?.ok) ||
+    (classification.tier === "soft_defer" && autoResult.sent) ||
     (classification.tier === "callback_prompt" && autoResult.sent);
 
   if (!bottedClean) {

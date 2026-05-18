@@ -13,6 +13,7 @@ const CxDialQueue = require("./CxDialQueue");
 const DailyCallStat = require("./DailyCallStat");
 const DeepCutRun = require("./DeepCutRun");
 const DispatchList = require("./DispatchList");
+const DncAudit = require("./DncAudit");
 const EventRecord = require("../../event-core/src/models/EventRecord");
 const HourlyJobEvent = require("./HourlyJobEvent");
 const LeadCadence = require("./LeadCadence");
@@ -27,6 +28,7 @@ const PacingConfig = require("./PacingConfig");
 const PacingReport = require("./PacingReport");
 const PaymentAlert = require("./PaymentAlert");
 const PaymentLedger = require("./PaymentLedger");
+const PostDateHold = require("./PostDateHold");
 const PoolBudget = require("./PoolBudget");
 const PrePing = require("./PrePing");
 const QualityReview = require("./QualityReview");
@@ -54,6 +56,7 @@ const MODEL_REGISTRY = Object.freeze({
   DailyCallStat,
   DeepCutRun,
   DispatchList,
+  DncAudit,
   EventRecord,
   HourlyJobEvent,
   LeadCadence,
@@ -67,6 +70,7 @@ const MODEL_REGISTRY = Object.freeze({
   PacingReport,
   PaymentAlert,
   PaymentLedger,
+  PostDateHold,
   PoolBudget,
   PrePing,
   QualityReview,
@@ -100,6 +104,7 @@ module.exports = {
   DailyCallStat,
   DeepCutRun,
   DispatchList,
+  DncAudit,
   EventRecord,
   HourlyJobEvent,
   LeadCadence,
@@ -114,6 +119,7 @@ module.exports = {
   PaymentAlert,
   MODEL_REGISTRY,
   PaymentLedger,
+  PostDateHold,
   PoolBudget,
   PrePing,
   QualityReview,

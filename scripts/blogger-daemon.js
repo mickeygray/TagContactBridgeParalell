@@ -243,6 +243,8 @@ async function maybeSendHealthAlert(now, state) {
     const { sendPlainEmail } = require(
       "../packages/shared-services/src/sendgridMailService",
     );
+    const { getInternalFromEmail } = require("../packages/shared-config/src");
+    const fromEmail = getInternalFromEmail();
     await sendPlainEmail("TAG", {
       personalizations: [
         {
@@ -250,8 +252,8 @@ async function maybeSendHealthAlert(now, state) {
           custom_args: { channel: "blogger-daemon-health", today: now.dateKey },
         },
       ],
-      from: { email: "mgray@taxadvocategroup.com", name: "Blogger Daemon" },
-      reply_to: { email: "mgray@taxadvocategroup.com", name: "Blogger Daemon" },
+      from: { email: fromEmail, name: "Blogger Daemon" },
+      reply_to: { email: fromEmail, name: "Blogger Daemon" },
       subject: `[BLOGGER ALERT] Daemon hasn't posted in ${weekdayMissing} weekdays`,
       content: [
         {

@@ -314,8 +314,9 @@ type QueueFamilyDisplay = {
   dotClassName: string;
 };
 
-const AUTO_SERVE_DELAY_SECONDS = 5;
-const AUTO_SERVE_STARTUP_DELAY_SECONDS = 30;
+const AUTO_SERVE_DELAY_SECONDS = 1;
+const AUTO_SERVE_STARTUP_DELAY_SECONDS = 8;
+const SHOW_POSTDATE_DISPOSITION = true;
 const SHOW_ADVANCED_CX_DISPOSITIONS = false;
 type AutoServeCountdownMode = "startup" | "next";
 type ResumePromptBreakType = "short-break" | "meal-break" | string;
@@ -440,11 +441,48 @@ function isFreshFirstContactQueueItem(item: CxCallQueueItem) {
   return readQueuePlacedCalls(item) <= 0;
 }
 
-function getQueueSortRank(item: CxCallQueueItem) {
+function getPacificHourKey(now = new Date()) {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/Los_Angeles",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(now);
+  const lookup = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+  return `${lookup.year}-${lookup.month}-${lookup.day}T${lookup.hour}`;
+}
+
+function readQueueHourlyPlacedCalls(item: CxCallQueueItem, now = new Date()) {
+  const snapshot = asRecord(item.payloadSnapshot);
+  const leadBody = asRecord(item.leadBody);
+  const metadata = asRecord(snapshot.metadata);
+  const hourKey = getPacificHourKey(now);
+  const itemHourKey = String(
+    item.hourlyPlacedHourKey
+      ?? leadBody.hourlyPlacedHourKey
+      ?? snapshot.hourlyPlacedHourKey
+      ?? metadata.hourlyPlacedHourKey
+      ?? "",
+  ).trim();
+  if (itemHourKey !== hourKey) return 0;
+  const count = Number(
+    item.hourlyPlacedCalls
+      ?? leadBody.hourlyPlacedCalls
+      ?? snapshot.hourlyPlacedCalls
+      ?? metadata.hourlyPlacedCalls
+      ?? 0,
+  );
+  return Number.isFinite(count) ? Math.max(Math.trunc(count), 0) : 0;
+}
+
+function getQueueSortRank(item: CxCallQueueItem, now = new Date()) {
   const family = inferQueueFamily(item);
   if (family === "fresh-day1") {
-    // Green first-contact stays first; green follow-ups still outrank blue.
-    return isFreshFirstContactQueueItem(item) ? 0 : 0.5;
+    if (isFreshFirstContactQueueItem(item)) return 0;
+    return readQueueHourlyPlacedCalls(item, now) >= 2 ? 1 : 0.5;
   }
   return QUEUE_FAMILY_DISPLAY[family].sortRank;
 }
@@ -3566,9 +3604,10 @@ export function CXWorkspace() {
       if (!deduped.has(key)) deduped.set(key, normalizedItem);
     }
 
+    const sortNow = new Date();
     return Array.from(deduped.values()).sort((left, right) => {
-      const leftFamily = getQueueSortRank(left);
-      const rightFamily = getQueueSortRank(right);
+      const leftFamily = getQueueSortRank(left, sortNow);
+      const rightFamily = getQueueSortRank(right, sortNow);
       if (leftFamily !== rightFamily) return leftFamily - rightFamily;
       const leftTime = left.nextActionAt ? new Date(left.nextActionAt).getTime() : Number.MAX_SAFE_INTEGER;
       const rightTime = right.nextActionAt ? new Date(right.nextActionAt).getTime() : Number.MAX_SAFE_INTEGER;
@@ -4444,7 +4483,7 @@ export function CXWorkspace() {
                     DNC
                   </Button>
                 ) : null}
-                {SHOW_ADVANCED_CX_DISPOSITIONS && dispositionCaseId != null ? (
+                {SHOW_POSTDATE_DISPOSITION && dispositionCaseId != null ? (
                   <Button
                     size="sm"
                     variant="secondary"

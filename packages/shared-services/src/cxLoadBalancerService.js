@@ -58,6 +58,15 @@ function getTodayKey() {
   }).format(new Date());
 }
 
+function readBooleanEnv(name, fallback) {
+  const raw = process.env[name];
+  if (raw == null || raw === "") return fallback;
+  const normalized = String(raw).trim().toLowerCase();
+  if (["1", "true", "yes", "on"].includes(normalized)) return true;
+  if (["0", "false", "no", "off"].includes(normalized)) return false;
+  return fallback;
+}
+
 function emptyAssignmentStats(date = getTodayKey()) {
   return {
     date,
@@ -185,7 +194,23 @@ function deriveAgeFamilyFromCreatedAt(item = {}, now = new Date(), options = {})
   const createdAt = new Date(rawCreatedAt);
   const nowDate = new Date(now);
   if (Number.isNaN(createdAt.getTime()) || Number.isNaN(nowDate.getTime())) return null;
-  return deriveQueueFamilyFromLeadCreatedAt(createdAt, nowDate);
+  return deriveQueueFamilyFromLeadCreatedAt(createdAt, nowDate, {
+    placedCalls:
+      item.placedCalls
+      ?? item.metadata?.placedCalls
+      ?? item.payloadSnapshot?.placedCalls
+      ?? item.payloadSnapshot?.metadata?.placedCalls
+      ?? 0,
+  });
+}
+
+function isZeroContactFreshQueueItem(item = {}) {
+  if (deriveQueueFamily(item) !== "fresh-day1") return false;
+  const placedCalls = Number(item.placedCalls ?? item.dailyPlacedCalls ?? item.metadata?.placedCalls ?? 0);
+  if (Number.isFinite(placedCalls) && placedCalls > 0) return false;
+  const stageIndex = Number(item.progressiveStageIndex);
+  if (Number.isFinite(stageIndex) && stageIndex > 0) return false;
+  return true;
 }
 
 function isMaterializedBacklogQueueItem(item = {}) {
@@ -240,9 +265,14 @@ function buildEligibility(agentState = null, options = {}) {
       queuePolicy,
     };
   }
+  const zeroContactFreshAllowed =
+    options.zeroContactFresh === true
+    && queueFamily === "fresh-day1"
+    && queuePolicy.fresh?.eligible === true;
   if (
     queueFamily !== "unassigned"
     && !isQueueFamilyAllowedForAccountPolicy(queuePolicy, queueFamily)
+    && !zeroContactFreshAllowed
   ) {
     return {
       eligible: false,
@@ -278,6 +308,14 @@ function buildEligibility(agentState = null, options = {}) {
       queuePolicy,
     };
   }
+  if (options.drainBeforeRefill === true && openAssignments > 0) {
+    return {
+      eligible: false,
+      reason: "drain-before-refill",
+      queuePolicy,
+      maxOpenAssignments,
+    };
+  }
   if (isCxWorkspacePresenceRequired() && !isCxWorkspacePresenceActive(agentState)) {
     return {
       eligible: false,
@@ -293,7 +331,7 @@ function buildEligibility(agentState = null, options = {}) {
       queuePolicy,
     };
   }
-  if (openAssignments >= maxOpenAssignments) {
+  if (options.ignoreMaxOpenAssignments !== true && openAssignments >= maxOpenAssignments) {
     return {
       eligible: false,
       reason: "cx-saturated",
@@ -375,6 +413,13 @@ function deriveQueueFamily(item = {}) {
 
 function rankAgentsForQueueItem(agentStates = [], item = {}, options = {}) {
   const queueFamily = deriveQueueFamily(item);
+  const zeroContactFresh = isZeroContactFreshQueueItem(item);
+  const drainBeforeRefill =
+    readBooleanEnv("RC_CX_DRAIN_BEFORE_REFILL_ENABLED", true)
+    && !zeroContactFresh;
+  const ignoreMaxOpenAssignments =
+    zeroContactFresh
+    && readBooleanEnv("RC_CX_ZERO_CONTACT_BYPASS_PACK_CAP_ENABLED", true);
   const today = getTodayKey();
   const familyOpenAssignmentMap = getOpenAssignmentMapForFamily(
     options.openAssignmentFamilyMaps,
@@ -404,6 +449,9 @@ function rankAgentsForQueueItem(agentStates = [], item = {}, options = {}) {
       openAssignments,
       maxOpenAssignments: options.maxOpenAssignments,
       queueFamily,
+      drainBeforeRefill,
+      ignoreMaxOpenAssignments,
+      zeroContactFresh: zeroContactFresh,
     });
     const policyTargetOpen = getQueueFamilyTargetOpen(queuePolicy, queueFamily);
     const targetFillRatio = policyTargetOpen > 0

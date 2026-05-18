@@ -1,0 +1,4269 @@
+{
+  "db": "tagcontactbridge_parallel",
+  "generatedAt": "2026-05-16T16:48:07.347Z",
+  "auditedCollections": 108,
+  "dbStats": {
+    "collections": 108,
+    "objects": 305027,
+    "dataSize": 440100034,
+    "storageSize": 229289984,
+    "indexSize": 337145856,
+    "dataSizeHuman": "420 MB",
+    "storageSizeHuman": "219 MB",
+    "indexSizeHuman": "322 MB"
+  },
+  "topByCount": [
+    {
+      "name": "legacy_raw_controlplanemasterprospectindexes",
+      "count": 90954,
+      "storage": "14 MB",
+      "indexes": "55 MB",
+      "riskNotes": [
+        "high row count",
+        "temporary/legacy-looking name"
+      ]
+    },
+    {
+      "name": "controlplanereviewqueueitems",
+      "count": 39928,
+      "storage": "36 MB",
+      "indexes": "28 MB",
+      "riskNotes": [
+        "append-only-looking collection without TTL"
+      ]
+    },
+    {
+      "name": "rb_eventlogs",
+      "count": 39030,
+      "storage": "6.9 MB",
+      "indexes": "4.8 MB",
+      "riskNotes": [
+        "append-only-looking collection without TTL"
+      ]
+    },
+    {
+      "name": "controlplaneleadcadences",
+      "count": 15955,
+      "storage": "9.0 MB",
+      "indexes": "4.0 MB"
+    },
+    {
+      "name": "eventrecords",
+      "count": 15373,
+      "storage": "40 MB",
+      "indexes": "24 MB",
+      "riskNotes": [
+        "append-only-looking collection without TTL"
+      ]
+    },
+    {
+      "name": "controlplanecalllogs",
+      "count": 15367,
+      "storage": "12 MB",
+      "indexes": "9.0 MB",
+      "riskNotes": [
+        "append-only-looking collection without TTL"
+      ]
+    },
+    {
+      "name": "rb_contactactivities",
+      "count": 13573,
+      "storage": "4.9 MB",
+      "indexes": "6.2 MB"
+    },
+    {
+      "name": "controlplanecaseprofiles",
+      "count": 11842,
+      "storage": "4.9 MB",
+      "indexes": "6.1 MB"
+    },
+    {
+      "name": "controlplanemasterprospectindexes",
+      "count": 7206,
+      "storage": "31 MB",
+      "indexes": "101 MB"
+    },
+    {
+      "name": "controlplanemailimports",
+      "count": 5436,
+      "storage": "2.7 MB",
+      "indexes": "1.8 MB"
+    },
+    {
+      "name": "controlplanepaymentledgers",
+      "count": 5268,
+      "storage": "2.0 MB",
+      "indexes": "1.5 MB"
+    },
+    {
+      "name": "rb_caseprofiles",
+      "count": 4968,
+      "storage": "1.9 MB",
+      "indexes": "2.2 MB"
+    },
+    {
+      "name": "leadcadences",
+      "count": 3942,
+      "storage": "1.0 MB",
+      "indexes": "1.9 MB"
+    },
+    {
+      "name": "controlplanedailycallstats",
+      "count": 3835,
+      "storage": "1.1 MB",
+      "indexes": "916 KB"
+    },
+    {
+      "name": "controlplanecallledgers",
+      "count": 3594,
+      "storage": "944 KB",
+      "indexes": "2.0 MB"
+    },
+    {
+      "name": "legacy_rb_dailycallstats",
+      "count": 3315,
+      "storage": "544 KB",
+      "indexes": "116 KB",
+      "riskNotes": [
+        "temporary/legacy-looking name"
+      ]
+    },
+    {
+      "name": "rb_dailycallstats",
+      "count": 3315,
+      "storage": "444 KB",
+      "indexes": "720 KB"
+    },
+    {
+      "name": "controlplaneconsentrecords",
+      "count": 3136,
+      "storage": "500 KB",
+      "indexes": "1.7 MB",
+      "riskNotes": [
+        "append-only-looking collection without TTL"
+      ]
+    },
+    {
+      "name": "dailyspends",
+      "count": 2801,
+      "storage": "672 KB",
+      "indexes": "748 KB"
+    },
+    {
+      "name": "consentrecords",
+      "count": 2684,
+      "storage": "272 KB",
+      "indexes": "136 KB",
+      "riskNotes": [
+        "append-only-looking collection without TTL"
+      ]
+    },
+    {
+      "name": "controlplanespendentries",
+      "count": 2682,
+      "storage": "1.2 MB",
+      "indexes": "864 KB"
+    },
+    {
+      "name": "legacy_dailyspends",
+      "count": 2182,
+      "storage": "480 KB",
+      "indexes": "88 KB",
+      "riskNotes": [
+        "temporary/legacy-looking name"
+      ]
+    },
+    {
+      "name": "hourlyjobevents",
+      "count": 1726,
+      "storage": "956 KB",
+      "indexes": "1.5 MB",
+      "riskNotes": [
+        "append-only-looking collection without TTL"
+      ]
+    },
+    {
+      "name": "dailypaymentsummaries",
+      "count": 982,
+      "storage": "88 KB",
+      "indexes": "296 KB"
+    },
+    {
+      "name": "controlplanecxdialqueues",
+      "count": 806,
+      "storage": "2.0 MB",
+      "indexes": "1.5 MB"
+    },
+    {
+      "name": "validatedphones",
+      "count": 725,
+      "storage": "60 KB",
+      "indexes": "100 KB"
+    },
+    {
+      "name": "clients",
+      "count": 664,
+      "storage": "120 KB",
+      "indexes": "116 KB"
+    },
+    {
+      "name": "legacy_dailypaymentsummaries",
+      "count": 508,
+      "storage": "100 KB",
+      "indexes": "28 KB",
+      "riskNotes": [
+        "temporary/legacy-looking name"
+      ]
+    },
+    {
+      "name": "controlplaneconversationmessages",
+      "count": 415,
+      "storage": "140 KB",
+      "indexes": "384 KB"
+    },
+    {
+      "name": "callsessions",
+      "count": 383,
+      "storage": "156 KB",
+      "indexes": "552 KB"
+    }
+  ],
+  "topByStorage": [
+    {
+      "name": "eventrecords",
+      "count": 15373,
+      "storage": "40 MB",
+      "indexes": "24 MB",
+      "avgObj": "1.8 KB",
+      "riskNotes": [
+        "append-only-looking collection without TTL"
+      ]
+    },
+    {
+      "name": "controlplaneworkflowrecords",
+      "count": 9,
+      "storage": "40 MB",
+      "indexes": "55 MB",
+      "avgObj": "1.0 KB",
+      "riskNotes": [
+        "workflow/receipt collection"
+      ]
+    },
+    {
+      "name": "controlplanereviewqueueitems",
+      "count": 39928,
+      "storage": "36 MB",
+      "indexes": "28 MB",
+      "avgObj": "681 B",
+      "riskNotes": [
+        "append-only-looking collection without TTL"
+      ]
+    },
+    {
+      "name": "controlplanemasterprospectindexes",
+      "count": 7206,
+      "storage": "31 MB",
+      "indexes": "101 MB",
+      "avgObj": "863 B"
+    },
+    {
+      "name": "legacy_raw_controlplanemasterprospectindexes",
+      "count": 90954,
+      "storage": "14 MB",
+      "indexes": "55 MB",
+      "avgObj": "1.1 KB",
+      "riskNotes": [
+        "high row count",
+        "temporary/legacy-looking name"
+      ]
+    },
+    {
+      "name": "controlplanecalllogs",
+      "count": 15367,
+      "storage": "12 MB",
+      "indexes": "9.0 MB",
+      "avgObj": "3.8 KB",
+      "riskNotes": [
+        "append-only-looking collection without TTL"
+      ]
+    },
+    {
+      "name": "controlplaneleadcadences",
+      "count": 15955,
+      "storage": "9.0 MB",
+      "indexes": "4.0 MB",
+      "avgObj": "3.0 KB"
+    },
+    {
+      "name": "rb_eventlogs",
+      "count": 39030,
+      "storage": "6.9 MB",
+      "indexes": "4.8 MB",
+      "avgObj": "1.4 KB",
+      "riskNotes": [
+        "append-only-looking collection without TTL"
+      ]
+    },
+    {
+      "name": "controlplanecaseprofiles",
+      "count": 11842,
+      "storage": "4.9 MB",
+      "indexes": "6.1 MB",
+      "avgObj": "2.0 KB"
+    },
+    {
+      "name": "rb_contactactivities",
+      "count": 13573,
+      "storage": "4.9 MB",
+      "indexes": "6.2 MB",
+      "avgObj": "1.2 KB"
+    },
+    {
+      "name": "controlplanemailimports",
+      "count": 5436,
+      "storage": "2.7 MB",
+      "indexes": "1.8 MB",
+      "avgObj": "2.4 KB"
+    },
+    {
+      "name": "controlplanepaymentledgers",
+      "count": 5268,
+      "storage": "2.0 MB",
+      "indexes": "1.5 MB",
+      "avgObj": "1.4 KB"
+    },
+    {
+      "name": "controlplanecxdialqueues",
+      "count": 806,
+      "storage": "2.0 MB",
+      "indexes": "1.5 MB",
+      "avgObj": "7.6 KB"
+    },
+    {
+      "name": "rb_caseprofiles",
+      "count": 4968,
+      "storage": "1.9 MB",
+      "indexes": "2.2 MB",
+      "avgObj": "1.6 KB"
+    },
+    {
+      "name": "controlplanespendentries",
+      "count": 2682,
+      "storage": "1.2 MB",
+      "indexes": "864 KB",
+      "avgObj": "1.1 KB"
+    },
+    {
+      "name": "controlplanedailycallstats",
+      "count": 3835,
+      "storage": "1.1 MB",
+      "indexes": "916 KB",
+      "avgObj": "679 B"
+    },
+    {
+      "name": "leadcadences",
+      "count": 3942,
+      "storage": "1.0 MB",
+      "indexes": "1.9 MB",
+      "avgObj": "1.2 KB"
+    },
+    {
+      "name": "hourlyjobevents",
+      "count": 1726,
+      "storage": "956 KB",
+      "indexes": "1.5 MB",
+      "avgObj": "1.2 KB",
+      "riskNotes": [
+        "append-only-looking collection without TTL"
+      ]
+    },
+    {
+      "name": "controlplanecallledgers",
+      "count": 3594,
+      "storage": "944 KB",
+      "indexes": "2.0 MB",
+      "avgObj": "922 B"
+    },
+    {
+      "name": "dailyspends",
+      "count": 2801,
+      "storage": "672 KB",
+      "indexes": "748 KB",
+      "avgObj": "1.1 KB"
+    },
+    {
+      "name": "dispatchlists",
+      "count": 31,
+      "storage": "640 KB",
+      "indexes": "432 KB",
+      "avgObj": "52 KB"
+    },
+    {
+      "name": "legacy_rb_dailycallstats",
+      "count": 3315,
+      "storage": "544 KB",
+      "indexes": "116 KB",
+      "avgObj": "493 B",
+      "riskNotes": [
+        "temporary/legacy-looking name"
+      ]
+    },
+    {
+      "name": "controlplaneconsentrecords",
+      "count": 3136,
+      "storage": "500 KB",
+      "indexes": "1.7 MB",
+      "avgObj": "678 B",
+      "riskNotes": [
+        "append-only-looking collection without TTL"
+      ]
+    },
+    {
+      "name": "legacy_dailyspends",
+      "count": 2182,
+      "storage": "480 KB",
+      "indexes": "88 KB",
+      "avgObj": "911 B",
+      "riskNotes": [
+        "temporary/legacy-looking name"
+      ]
+    },
+    {
+      "name": "rb_dailycallstats",
+      "count": 3315,
+      "storage": "444 KB",
+      "indexes": "720 KB",
+      "avgObj": "550 B"
+    },
+    {
+      "name": "consentrecords",
+      "count": 2684,
+      "storage": "272 KB",
+      "indexes": "136 KB",
+      "avgObj": "401 B",
+      "riskNotes": [
+        "append-only-looking collection without TTL"
+      ]
+    },
+    {
+      "name": "callsessions",
+      "count": 383,
+      "storage": "156 KB",
+      "indexes": "552 KB",
+      "avgObj": "1.4 KB"
+    },
+    {
+      "name": "controlplaneconversationmessages",
+      "count": 415,
+      "storage": "140 KB",
+      "indexes": "384 KB",
+      "avgObj": "1.1 KB"
+    },
+    {
+      "name": "clients",
+      "count": 664,
+      "storage": "120 KB",
+      "indexes": "116 KB",
+      "avgObj": "595 B"
+    },
+    {
+      "name": "smsconversations",
+      "count": 344,
+      "storage": "112 KB",
+      "indexes": "112 KB",
+      "avgObj": "1.0 KB"
+    }
+  ],
+  "appendOnlyNoTtl": [
+    {
+      "name": "consentrecords",
+      "count": 2684,
+      "storage": "272 KB",
+      "latestDates": {
+        "receivedAt": "2026-05-04T18:55:26.550Z"
+      }
+    },
+    {
+      "name": "controlplanecalllogs",
+      "count": 15367,
+      "storage": "12 MB",
+      "latestDates": {
+        "createdAt": "2026-05-16T15:44:11.240Z",
+        "updatedAt": "2026-05-16T16:05:21.151Z",
+        "resolvedAt": "2026-05-16T16:05:21.150Z",
+        "lastRetryAt": "2026-05-01T22:42:30.896Z"
+      }
+    },
+    {
+      "name": "controlplaneconsentrecords",
+      "count": 3136,
+      "storage": "500 KB",
+      "latestDates": {
+        "createdAt": "2026-05-16T16:41:42.430Z",
+        "updatedAt": "2026-05-16T16:41:42.430Z",
+        "receivedAt": "2026-05-16T16:41:38.212Z"
+      }
+    },
+    {
+      "name": "controlplanereviewqueueitems",
+      "count": 39928,
+      "storage": "36 MB",
+      "latestDates": {
+        "createdAt": "2026-05-16T16:05:18.590Z",
+        "updatedAt": "2026-05-16T16:05:18.590Z",
+        "happenedAt": "2026-05-16T00:04:17.497Z"
+      }
+    },
+    {
+      "name": "eventrecords",
+      "count": 15373,
+      "storage": "40 MB",
+      "latestDates": {
+        "createdAt": "2026-05-16T16:41:43.495Z",
+        "updatedAt": "2026-05-16T16:41:47.328Z",
+        "processedAt": "2026-05-16T16:41:47.328Z",
+        "nextAttemptAt": "2026-05-16T16:41:43.418Z"
+      }
+    },
+    {
+      "name": "hourlyjobevents",
+      "count": 1726,
+      "storage": "956 KB",
+      "latestDates": {
+        "createdAt": "2026-05-14T06:55:13.433Z",
+        "updatedAt": "2026-05-14T06:57:01.946Z",
+        "completedAt": "2026-05-14T06:57:01.946Z",
+        "nextAttemptAt": "2026-05-14T09:00:00.000Z"
+      }
+    },
+    {
+      "name": "rb_eventlogs",
+      "count": 39030,
+      "storage": "6.9 MB",
+      "latestDates": {}
+    }
+  ],
+  "temporaryOrLegacyNames": [
+    {
+      "name": "controlplanepostdateholds",
+      "count": 0,
+      "storage": "4.0 KB"
+    },
+    {
+      "name": "legacy_dailypaymentsummaries",
+      "count": 508,
+      "storage": "100 KB"
+    },
+    {
+      "name": "legacy_dailyspends",
+      "count": 2182,
+      "storage": "480 KB"
+    },
+    {
+      "name": "legacy_dailysummaries",
+      "count": 40,
+      "storage": "36 KB"
+    },
+    {
+      "name": "legacy_mailerconfigs",
+      "count": 28,
+      "storage": "24 KB"
+    },
+    {
+      "name": "legacy_metrics_sync_state",
+      "count": 1,
+      "storage": "20 KB"
+    },
+    {
+      "name": "legacy_raw_agentstates",
+      "count": 3,
+      "storage": "20 KB"
+    },
+    {
+      "name": "legacy_raw_authotpchallenges",
+      "count": 0,
+      "storage": "4.0 KB"
+    },
+    {
+      "name": "legacy_raw_controlplaneactivityaireviews",
+      "count": 0,
+      "storage": "4.0 KB"
+    },
+    {
+      "name": "legacy_raw_controlplanecallledgers",
+      "count": 0,
+      "storage": "4.0 KB"
+    },
+    {
+      "name": "legacy_raw_controlplanecalllogs",
+      "count": 0,
+      "storage": "4.0 KB"
+    },
+    {
+      "name": "legacy_raw_controlplanecaseprofiles",
+      "count": 20,
+      "storage": "24 KB"
+    },
+    {
+      "name": "legacy_raw_controlplaneconsentrecords",
+      "count": 0,
+      "storage": "4.0 KB"
+    },
+    {
+      "name": "legacy_raw_controlplaneconversationmessages",
+      "count": 0,
+      "storage": "4.0 KB"
+    },
+    {
+      "name": "legacy_raw_controlplaneconversationworkflows",
+      "count": 0,
+      "storage": "4.0 KB"
+    },
+    {
+      "name": "legacy_raw_controlplanecxdialqueues",
+      "count": 1,
+      "storage": "20 KB"
+    },
+    {
+      "name": "legacy_raw_controlplanedailycallstats",
+      "count": 0,
+      "storage": "4.0 KB"
+    },
+    {
+      "name": "legacy_raw_controlplanedeepcutruns",
+      "count": 0,
+      "storage": "4.0 KB"
+    },
+    {
+      "name": "legacy_raw_controlplaneleadcadences",
+      "count": 2,
+      "storage": "20 KB"
+    },
+    {
+      "name": "legacy_raw_controlplanemailerconfigs",
+      "count": 0,
+      "storage": "4.0 KB"
+    },
+    {
+      "name": "legacy_raw_controlplanemasterprospectindexes",
+      "count": 90954,
+      "storage": "14 MB"
+    },
+    {
+      "name": "legacy_raw_controlplanemetricssnapshots",
+      "count": 0,
+      "storage": "4.0 KB"
+    },
+    {
+      "name": "legacy_raw_controlplanepaymentalerts",
+      "count": 0,
+      "storage": "4.0 KB"
+    },
+    {
+      "name": "legacy_raw_controlplanepaymentledgers",
+      "count": 0,
+      "storage": "4.0 KB"
+    },
+    {
+      "name": "legacy_raw_controlplaneprepings",
+      "count": 0,
+      "storage": "4.0 KB"
+    },
+    {
+      "name": "legacy_raw_controlplanequalityreviews",
+      "count": 0,
+      "storage": "4.0 KB"
+    },
+    {
+      "name": "legacy_raw_controlplanereviewqueueitems",
+      "count": 0,
+      "storage": "4.0 KB"
+    },
+    {
+      "name": "legacy_raw_controlplanesourcecanonicals",
+      "count": 0,
+      "storage": "4.0 KB"
+    },
+    {
+      "name": "legacy_raw_controlplanespendentries",
+      "count": 0,
+      "storage": "4.0 KB"
+    },
+    {
+      "name": "legacy_raw_controlplaneworkflowrecords",
+      "count": 4,
+      "storage": "20 KB"
+    },
+    {
+      "name": "legacy_raw_dispatchlists",
+      "count": 0,
+      "storage": "4.0 KB"
+    },
+    {
+      "name": "legacy_raw_eventrecords",
+      "count": 2,
+      "storage": "20 KB"
+    },
+    {
+      "name": "legacy_raw_hourlyjobevents",
+      "count": 0,
+      "storage": "4.0 KB"
+    },
+    {
+      "name": "legacy_raw_socialresponderconfigs",
+      "count": 0,
+      "storage": "4.0 KB"
+    },
+    {
+      "name": "legacy_raw_useraccounts",
+      "count": 3,
+      "storage": "20 KB"
+    },
+    {
+      "name": "legacy_rb_dailycallstats",
+      "count": 3315,
+      "storage": "544 KB"
+    },
+    {
+      "name": "legacy_rb_paymentalerts",
+      "count": 50,
+      "storage": "24 KB"
+    },
+    {
+      "name": "legacy_rb_sourcecanonicals",
+      "count": 80,
+      "storage": "40 KB"
+    }
+  ],
+  "collectionsWithTtl": [
+    {
+      "name": "controlplaneprepings",
+      "ttlIndexes": [
+        {
+          "name": "createdAt_1",
+          "key": {
+            "createdAt": 1
+          },
+          "expireAfterSeconds": 300
+        }
+      ],
+      "count": 191
+    },
+    {
+      "name": "controlplanerunlocks",
+      "ttlIndexes": [
+        {
+          "name": "lockedUntil_1",
+          "key": {
+            "lockedUntil": 1
+          },
+          "expireAfterSeconds": 0
+        }
+      ],
+      "count": 0
+    },
+    {
+      "name": "controlplaneworkflowrecords",
+      "ttlIndexes": [
+        {
+          "name": "outbound_ttl_happenedAt",
+          "key": {
+            "happenedAt": 1
+          },
+          "expireAfterSeconds": 172800
+        }
+      ],
+      "count": 9
+    },
+    {
+      "name": "legacy_raw_controlplaneprepings",
+      "ttlIndexes": [
+        {
+          "name": "createdAt_1",
+          "key": {
+            "createdAt": 1
+          },
+          "expireAfterSeconds": 300
+        }
+      ],
+      "count": 0
+    },
+    {
+      "name": "prepings",
+      "ttlIndexes": [
+        {
+          "name": "createdAt_1",
+          "key": {
+            "createdAt": 1
+          },
+          "expireAfterSeconds": 300
+        }
+      ],
+      "count": 0
+    },
+    {
+      "name": "tiktokcommentreplies",
+      "ttlIndexes": [
+        {
+          "name": "repliedAt_1",
+          "key": {
+            "repliedAt": 1
+          },
+          "expireAfterSeconds": 7776000
+        }
+      ],
+      "count": 0
+    }
+  ],
+  "duplicateChecks": [
+    {
+      "collection": "controlplanemasterprospectindexes",
+      "key": "domain+caseId",
+      "duplicateGroups": 0,
+      "duplicateDocsBeyondFirst": 0,
+      "worstCount": 0,
+      "examples": []
+    },
+    {
+      "collection": "controlplaneleadcadences",
+      "key": "domain+caseId",
+      "duplicateGroups": 0,
+      "duplicateDocsBeyondFirst": 0,
+      "worstCount": 0,
+      "examples": []
+    },
+    {
+      "collection": "controlplanecaseprofiles",
+      "key": "domain+caseId",
+      "duplicateGroups": 0,
+      "duplicateDocsBeyondFirst": 0,
+      "worstCount": 0,
+      "examples": []
+    },
+    {
+      "collection": "controlplanemailimports",
+      "key": "domain+caseId",
+      "duplicateGroups": 0,
+      "duplicateDocsBeyondFirst": 0,
+      "worstCount": 0,
+      "examples": []
+    },
+    {
+      "collection": "controlplanecalllogs",
+      "key": "domain+telephonySessionId",
+      "duplicateGroups": 0,
+      "duplicateDocsBeyondFirst": 0,
+      "worstCount": 0,
+      "examples": []
+    },
+    {
+      "collection": "controlplanepaymentledgers",
+      "key": "casePaymentId",
+      "duplicateGroups": 0,
+      "duplicateDocsBeyondFirst": 0,
+      "worstCount": 0,
+      "examples": []
+    },
+    {
+      "collection": "controlplanesourcecanonicals",
+      "key": "canonicalKey",
+      "duplicateGroups": 0,
+      "duplicateDocsBeyondFirst": 0,
+      "worstCount": 0,
+      "examples": []
+    },
+    {
+      "collection": "controlplaneconversationworkflows",
+      "key": "domain+phone+channel",
+      "duplicateGroups": 0,
+      "duplicateDocsBeyondFirst": 0,
+      "worstCount": 0,
+      "examples": []
+    },
+    {
+      "collection": "hourlyjobevents",
+      "key": "lane+dedupeKey",
+      "duplicateGroups": 0,
+      "duplicateDocsBeyondFirst": 0,
+      "worstCount": 0,
+      "examples": []
+    },
+    {
+      "collection": "eventrecords",
+      "key": "sourceService+dedupeKey",
+      "duplicateGroups": 0,
+      "duplicateDocsBeyondFirst": 0,
+      "worstCount": 0,
+      "examples": []
+    },
+    {
+      "collection": "queueitems",
+      "key": "active leadId",
+      "duplicateGroups": 0,
+      "duplicateDocsBeyondFirst": 0,
+      "worstCount": 0,
+      "examples": []
+    }
+  ],
+  "targetedHealth": {
+    "hourlyJobEvents": {
+      "byStatus": [
+        {
+          "value": "pending",
+          "count": 993
+        },
+        {
+          "value": "completed",
+          "count": 725
+        },
+        {
+          "value": "dead-letter",
+          "count": 7
+        },
+        {
+          "value": "processing",
+          "count": 1
+        }
+      ],
+      "byLane": [
+        {
+          "value": "nightly",
+          "count": 1693
+        },
+        {
+          "value": "hourly",
+          "count": 33
+        }
+      ],
+      "byTargetService": [
+        {
+          "value": "control-plane",
+          "count": 1705
+        },
+        {
+          "value": "outbound-gateway",
+          "count": 17
+        },
+        {
+          "value": "inbound-gateway",
+          "count": 4
+        }
+      ],
+      "actionNeeded": {
+        "pendingPastDue": 993,
+        "processingOlderThan6h": 1,
+        "failedOrDeadLetter": 7
+      }
+    },
+    "eventRecords": {
+      "byStatus": [
+        {
+          "value": "pending",
+          "count": 9635
+        },
+        {
+          "value": "completed",
+          "count": 5497
+        },
+        {
+          "value": "dead-letter",
+          "count": 222
+        },
+        {
+          "value": "failed",
+          "count": 10
+        },
+        {
+          "value": "processing",
+          "count": 7
+        },
+        {
+          "value": "replayed",
+          "count": 2
+        }
+      ],
+      "bySourceService": [
+        {
+          "value": "ringcentral-cx",
+          "count": 8847
+        },
+        {
+          "value": "attribution-resolver",
+          "count": 2918
+        },
+        {
+          "value": "control-plane",
+          "count": 1341
+        },
+        {
+          "value": "inbound-gateway",
+          "count": 1280
+        },
+        {
+          "value": "outbound-gateway",
+          "count": 907
+        },
+        {
+          "value": "mgray@taxadvocategroup.com",
+          "count": 22
+        },
+        {
+          "value": "inbound-gateway-smoke",
+          "count": 15
+        },
+        {
+          "value": "gate-smoke-test",
+          "count": 6
+        }
+      ],
+      "actionNeeded": {
+        "pendingPastDue": 9635,
+        "processingOlderThan6h": 7,
+        "failed": 10
+      }
+    },
+    "callLogs": {
+      "byStatus": [
+        {
+          "value": "resolved",
+          "count": 10046
+        },
+        {
+          "value": "pending-retry",
+          "count": 2922
+        },
+        {
+          "value": "unresolvable",
+          "count": 2399
+        }
+      ],
+      "byPlatform": [
+        {
+          "value": "ex",
+          "count": 1652
+        },
+        {
+          "value": "cx",
+          "count": 950
+        }
+      ],
+      "byTranscriptionStatus": [
+        {
+          "value": "pending",
+          "count": 11027
+        },
+        {
+          "value": "completed",
+          "count": 2422
+        },
+        {
+          "value": "transcription_failed",
+          "count": 1695
+        },
+        {
+          "value": "no_recording",
+          "count": 140
+        },
+        {
+          "value": "no_transcript",
+          "count": 47
+        },
+        {
+          "value": "download_failed",
+          "count": 25
+        },
+        {
+          "value": "processing",
+          "count": 11
+        }
+      ],
+      "byArchiveStatus": [
+        {
+          "value": "not_queued",
+          "count": 6486
+        }
+      ],
+      "actionNeeded": {
+        "pendingRetryOlderThan7d": 1097,
+        "transcriptionProcessingOlderThan6h": 11,
+        "archiveProcessingOlderThan6h": 0
+      }
+    },
+    "leadCadences": {
+      "byActive": [
+        {
+          "value": false,
+          "count": 14639
+        },
+        {
+          "value": true,
+          "count": 1316
+        }
+      ],
+      "byMode": [
+        {
+          "value": "scheduled-actions",
+          "count": 5437
+        },
+        {
+          "value": "legacy-time-count",
+          "count": 4428
+        }
+      ],
+      "byNextActionType": [
+        {
+          "value": "rvm",
+          "count": 922
+        }
+      ],
+      "actionNeeded": {
+        "activeOverdueNextAction": 0,
+        "activeWithoutNextAction": 1316
+      }
+    },
+    "masterProspects": {
+      "byDomain": [
+        {
+          "value": "TAG",
+          "count": 4016
+        },
+        {
+          "value": "WYNN",
+          "count": 3190
+        }
+      ],
+      "byPoolTag": [
+        {
+          "value": "filler-2026-05",
+          "count": 6826
+        }
+      ],
+      "byStatusCategory": [
+        {
+          "value": "prospect",
+          "count": 7206
+        }
+      ],
+      "actionNeeded": {
+        "needsStatusRefresh": 226,
+        "needsSourceRefresh": 7206,
+        "inCurrentPools": 6826
+      }
+    },
+    "conversationMessages": {
+      "byDirection": [
+        {
+          "value": "inbound",
+          "count": 370
+        },
+        {
+          "value": "outbound",
+          "count": 45
+        }
+      ],
+      "byChannel": [
+        {
+          "value": "sms",
+          "count": 415
+        }
+      ],
+      "byProviderStatus": [
+        {
+          "value": "sent",
+          "count": 43
+        },
+        {
+          "value": "failed",
+          "count": 2
+        }
+      ],
+      "byAiTier": [
+        {
+          "value": "hard_stop",
+          "count": 246
+        },
+        {
+          "value": "needs_human",
+          "count": 72
+        },
+        {
+          "value": "dnc_confirm",
+          "count": 28
+        },
+        {
+          "value": "callback_prompt",
+          "count": 24
+        }
+      ],
+      "actionNeeded": {
+        "outboundFailed": 2,
+        "inboundNeedsHuman": 72
+      }
+    },
+    "mailImports": {
+      "byImportBatch": [
+        {
+          "value": "83216 NCOA Updates.csv",
+          "count": 1695
+        },
+        {
+          "value": "83180 NCOA Updates.csv",
+          "count": 1622
+        },
+        {
+          "value": "83168 NCOA Updates.csv",
+          "count": 913
+        },
+        {
+          "value": "83182 NCOA Updates.csv",
+          "count": 753
+        },
+        {
+          "value": "83204 NCOA Updates.csv",
+          "count": 291
+        },
+        {
+          "value": "83194 NCOA Updates.csv",
+          "count": 162
+        }
+      ],
+      "byDomain": [
+        {
+          "value": "TAG",
+          "count": 5436
+        }
+      ]
+    },
+    "runLocks": {
+      "total": 0,
+      "expiredButStillPresent": 0,
+      "ttlNote": "expired rows can linger briefly until Mongo's TTL monitor runs"
+    }
+  },
+  "allCollections": [
+    {
+      "name": "abandonedsubmissions",
+      "count": 9,
+      "sizeBytes": 8213,
+      "storageBytes": 20480,
+      "indexBytes": 122880,
+      "avgObjBytes": 912,
+      "indexCount": 6,
+      "uniqueIndexes": [],
+      "ttlIndexes": [],
+      "latestDates": {
+        "createdAt": "2026-02-14T17:13:01.605Z",
+        "updatedAt": "2026-02-14T17:13:01.605Z",
+        "startedAt": "2026-02-14T17:12:16.803Z"
+      },
+      "statusTop": [],
+      "domainTop": [],
+      "riskNotes": []
+    },
+    {
+      "name": "agentslices",
+      "count": 1,
+      "sizeBytes": 423,
+      "storageBytes": 20480,
+      "indexBytes": 143360,
+      "avgObjBytes": 423,
+      "indexCount": 7,
+      "uniqueIndexes": [
+        {
+          "name": "sliceId_1",
+          "key": {
+            "sliceId": 1
+          }
+        }
+      ],
+      "ttlIndexes": [],
+      "latestDates": {
+        "createdAt": "2026-05-04T21:26:11.876Z",
+        "updatedAt": "2026-05-04T21:26:11.876Z"
+      },
+      "statusTop": [],
+      "domainTop": [],
+      "riskNotes": []
+    },
+    {
+      "name": "agentstates",
+      "count": 10,
+      "sizeBytes": 17440,
+      "storageBytes": 45056,
+      "indexBytes": 110592,
+      "avgObjBytes": 1744,
+      "indexCount": 3,
+      "uniqueIndexes": [
+        {
+          "name": "extensionId_1",
+          "key": {
+            "extensionId": 1
+          }
+        }
+      ],
+      "ttlIndexes": [],
+      "latestDates": {
+        "createdAt": "2026-05-11T20:06:24.178Z",
+        "updatedAt": "2026-05-16T16:42:12.706Z"
+      },
+      "statusTop": [
+        {
+          "value": "available",
+          "count": 8
+        },
+        {
+          "value": "offline",
+          "count": 2
+        }
+      ],
+      "domainTop": [],
+      "riskNotes": []
+    },
+    {
+      "name": "authotpchallenges",
+      "count": 131,
+      "sizeBytes": 61742,
+      "storageBytes": 69632,
+      "indexBytes": 184320,
+      "avgObjBytes": 471,
+      "indexCount": 5,
+      "uniqueIndexes": [],
+      "ttlIndexes": [],
+      "latestDates": {
+        "createdAt": "2026-05-15T22:28:41.823Z",
+        "updatedAt": "2026-05-15T22:28:58.237Z"
+      },
+      "statusTop": [
+        {
+          "value": "used",
+          "count": 114
+        },
+        {
+          "value": "expired",
+          "count": 16
+        },
+        {
+          "value": "pending",
+          "count": 1
+        }
+      ],
+      "domainTop": [],
+      "riskNotes": []
+    },
+    {
+      "name": "callsessions",
+      "count": 383,
+      "sizeBytes": 558751,
+      "storageBytes": 159744,
+      "indexBytes": 565248,
+      "avgObjBytes": 1458,
+      "indexCount": 14,
+      "uniqueIndexes": [],
+      "ttlIndexes": [],
+      "latestDates": {
+        "createdAt": "2026-05-14T20:40:59.022Z",
+        "updatedAt": "2026-05-14T20:40:59.022Z",
+        "startedAt": "2026-05-14T20:40:59.021Z"
+      },
+      "statusTop": [],
+      "domainTop": [
+        {
+          "value": "WYNN",
+          "count": 382
+        },
+        {
+          "value": "TAG",
+          "count": 1
+        }
+      ],
+      "riskNotes": []
+    },
+    {
+      "name": "clients",
+      "count": 664,
+      "sizeBytes": 395444,
+      "storageBytes": 122880,
+      "indexBytes": 118784,
+      "avgObjBytes": 595,
+      "indexCount": 2,
+      "uniqueIndexes": [
+        {
+          "name": "caseNumber_1",
+          "key": {
+            "caseNumber": 1
+          }
+        }
+      ],
+      "ttlIndexes": [],
+      "latestDates": {},
+      "statusTop": [
+        {
+          "value": "inReview",
+          "count": 508
+        },
+        {
+          "value": "active",
+          "count": 156
+        }
+      ],
+      "domainTop": [
+        {
+          "value": "TAG",
+          "count": 664
+        }
+      ],
+      "riskNotes": []
+    },
+    {
+      "name": "consentrecords",
+      "count": 2684,
+      "sizeBytes": 1076859,
+      "storageBytes": 278528,
+      "indexBytes": 139264,
+      "avgObjBytes": 401,
+      "indexCount": 1,
+      "uniqueIndexes": [],
+      "ttlIndexes": [],
+      "latestDates": {
+        "receivedAt": "2026-05-04T18:55:26.550Z"
+      },
+      "statusTop": [],
+      "domainTop": [],
+      "riskNotes": [
+        "append-only-looking collection without TTL"
+      ]
+    },
+    {
+      "name": "controlplaneactivityaireviews",
+      "count": 4,
+      "sizeBytes": 12126,
+      "storageBytes": 36864,
+      "indexBytes": 258048,
+      "avgObjBytes": 3031,
+      "indexCount": 7,
+      "uniqueIndexes": [],
+      "ttlIndexes": [],
+      "latestDates": {
+        "createdAt": "2026-04-23T18:13:37.892Z",
+        "updatedAt": "2026-04-23T18:13:37.892Z"
+      },
+      "statusTop": [
+        {
+          "value": "allow_contact",
+          "count": 4
+        }
+      ],
+      "domainTop": [
+        {
+          "value": "TAG",
+          "count": 4
+        }
+      ],
+      "riskNotes": []
+    },
+    {
+      "name": "controlplanecallledgers",
+      "count": 3594,
+      "sizeBytes": 3314483,
+      "storageBytes": 966656,
+      "indexBytes": 2142208,
+      "avgObjBytes": 922,
+      "indexCount": 25,
+      "uniqueIndexes": [
+        {
+          "name": "domain_1_telephonySessionId_1",
+          "key": {
+            "domain": 1,
+            "telephonySessionId": 1
+          }
+        }
+      ],
+      "ttlIndexes": [],
+      "latestDates": {
+        "createdAt": "2026-05-16T02:03:56.484Z",
+        "updatedAt": "2026-05-16T02:03:56.484Z",
+        "resolvedAt": "2026-05-16T02:03:55.880Z"
+      },
+      "statusTop": [
+        {
+          "value": "resolved",
+          "count": 2733
+        },
+        {
+          "value": "pending-retry",
+          "count": 861
+        }
+      ],
+      "domainTop": [
+        {
+          "value": "TAG",
+          "count": 2184
+        },
+        {
+          "value": "WYNN",
+          "count": 1410
+        }
+      ],
+      "riskNotes": []
+    },
+    {
+      "name": "controlplanecalllogs",
+      "count": 15367,
+      "sizeBytes": 59787718,
+      "storageBytes": 12312576,
+      "indexBytes": 9388032,
+      "avgObjBytes": 3890,
+      "indexCount": 27,
+      "uniqueIndexes": [
+        {
+          "name": "domain_1_telephonySessionId_1",
+          "key": {
+            "domain": 1,
+            "telephonySessionId": 1
+          }
+        }
+      ],
+      "ttlIndexes": [],
+      "latestDates": {
+        "createdAt": "2026-05-16T15:44:11.240Z",
+        "updatedAt": "2026-05-16T16:05:21.151Z",
+        "resolvedAt": "2026-05-16T16:05:21.150Z",
+        "lastRetryAt": "2026-05-01T22:42:30.896Z"
+      },
+      "statusTop": [
+        {
+          "value": "resolved",
+          "count": 10046
+        },
+        {
+          "value": "pending-retry",
+          "count": 2922
+        },
+        {
+          "value": "unresolvable",
+          "count": 2399
+        }
+      ],
+      "domainTop": [
+        {
+          "value": "TAG",
+          "count": 10454
+        },
+        {
+          "value": "WYNN",
+          "count": 4913
+        }
+      ],
+      "riskNotes": [
+        "append-only-looking collection without TTL"
+      ]
+    },
+    {
+      "name": "controlplanecaseprofiles",
+      "count": 11842,
+      "sizeBytes": 24844552,
+      "storageBytes": 5144576,
+      "indexBytes": 6443008,
+      "avgObjBytes": 2098,
+      "indexCount": 33,
+      "uniqueIndexes": [
+        {
+          "name": "domain_1_caseId_1",
+          "key": {
+            "domain": 1,
+            "caseId": 1
+          }
+        }
+      ],
+      "ttlIndexes": [],
+      "latestDates": {
+        "createdAt": "2026-05-15T23:08:20.116Z",
+        "updatedAt": "2026-05-16T16:05:19.142Z",
+        "lastStatusCheckAt": "2026-05-15T23:10:05.202Z"
+      },
+      "statusTop": [],
+      "domainTop": [
+        {
+          "value": "TAG",
+          "count": 7426
+        },
+        {
+          "value": "WYNN",
+          "count": 4416
+        }
+      ],
+      "riskNotes": []
+    },
+    {
+      "name": "controlplaneconsentrecords",
+      "count": 3136,
+      "sizeBytes": 2126329,
+      "storageBytes": 512000,
+      "indexBytes": 1777664,
+      "avgObjBytes": 678,
+      "indexCount": 13,
+      "uniqueIndexes": [],
+      "ttlIndexes": [],
+      "latestDates": {
+        "createdAt": "2026-05-16T16:41:42.430Z",
+        "updatedAt": "2026-05-16T16:41:42.430Z",
+        "receivedAt": "2026-05-16T16:41:38.212Z"
+      },
+      "statusTop": [],
+      "domainTop": [
+        {
+          "value": "WYNN",
+          "count": 3117
+        },
+        {
+          "value": "TAG",
+          "count": 19
+        }
+      ],
+      "riskNotes": [
+        "append-only-looking collection without TTL"
+      ]
+    },
+    {
+      "name": "controlplaneconversationmessages",
+      "count": 415,
+      "sizeBytes": 463750,
+      "storageBytes": 143360,
+      "indexBytes": 393216,
+      "avgObjBytes": 1117,
+      "indexCount": 10,
+      "uniqueIndexes": [],
+      "ttlIndexes": [],
+      "latestDates": {
+        "createdAt": "2026-05-15T21:05:53.158Z",
+        "updatedAt": "2026-05-15T21:05:53.158Z"
+      },
+      "statusTop": [],
+      "domainTop": [
+        {
+          "value": "WYNN",
+          "count": 386
+        },
+        {
+          "value": "TAG",
+          "count": 29
+        }
+      ],
+      "riskNotes": []
+    },
+    {
+      "name": "controlplaneconversationworkflows",
+      "count": 160,
+      "sizeBytes": 134266,
+      "storageBytes": 90112,
+      "indexBytes": 479232,
+      "avgObjBytes": 839,
+      "indexCount": 13,
+      "uniqueIndexes": [
+        {
+          "name": "domain_1_phone_1_channel_1",
+          "key": {
+            "domain": 1,
+            "phone": 1,
+            "channel": 1
+          }
+        }
+      ],
+      "ttlIndexes": [],
+      "latestDates": {
+        "createdAt": "2026-05-15T21:05:52.816Z",
+        "updatedAt": "2026-05-15T21:05:53.440Z"
+      },
+      "statusTop": [
+        {
+          "value": "observed",
+          "count": 128
+        },
+        {
+          "value": "suppressed",
+          "count": 16
+        },
+        {
+          "value": "sent",
+          "count": 15
+        },
+        {
+          "value": "drafted",
+          "count": 1
+        }
+      ],
+      "domainTop": [
+        {
+          "value": "WYNN",
+          "count": 115
+        },
+        {
+          "value": "TAG",
+          "count": 45
+        }
+      ],
+      "riskNotes": [
+        "workflow/receipt collection"
+      ]
+    },
+    {
+      "name": "controlplanecxdialqueues",
+      "count": 806,
+      "sizeBytes": 6260104,
+      "storageBytes": 2097152,
+      "indexBytes": 1601536,
+      "avgObjBytes": 7766,
+      "indexCount": 31,
+      "uniqueIndexes": [
+        {
+          "name": "uq_cxdialqueue_active_action",
+          "key": {
+            "domain": 1,
+            "caseId": 1,
+            "metadata.actionKey": 1
+          }
+        }
+      ],
+      "ttlIndexes": [],
+      "latestDates": {
+        "createdAt": "2026-05-16T16:41:50.287Z",
+        "updatedAt": "2026-05-16T16:47:19.212Z",
+        "completedAt": "2026-05-15T23:28:11.761Z"
+      },
+      "statusTop": [],
+      "domainTop": [
+        {
+          "value": "WYNN",
+          "count": 801
+        },
+        {
+          "value": "TAG",
+          "count": 5
+        }
+      ],
+      "riskNotes": []
+    },
+    {
+      "name": "controlplanedailycallstats",
+      "count": 3835,
+      "sizeBytes": 2606711,
+      "storageBytes": 1171456,
+      "indexBytes": 937984,
+      "avgObjBytes": 679,
+      "indexCount": 7,
+      "uniqueIndexes": [
+        {
+          "name": "date_1_piece_1",
+          "key": {
+            "date": 1,
+            "piece": 1
+          }
+        }
+      ],
+      "ttlIndexes": [],
+      "latestDates": {
+        "createdAt": "2026-05-16T15:44:35.771Z",
+        "updatedAt": "2026-05-16T16:05:40.138Z"
+      },
+      "statusTop": [],
+      "domainTop": [],
+      "riskNotes": []
+    },
+    {
+      "name": "controlplanedeepcutruns",
+      "count": 15,
+      "sizeBytes": 250452,
+      "storageBytes": 90112,
+      "indexBytes": 258048,
+      "avgObjBytes": 16696,
+      "indexCount": 7,
+      "uniqueIndexes": [],
+      "ttlIndexes": [],
+      "latestDates": {
+        "createdAt": "2026-05-04T04:34:16.861Z",
+        "updatedAt": "2026-05-04T04:37:29.123Z",
+        "startedAt": "2026-05-04T04:34:16.859Z",
+        "completedAt": "2026-05-04T04:37:29.123Z"
+      },
+      "statusTop": [
+        {
+          "value": "completed",
+          "count": 15
+        }
+      ],
+      "domainTop": [
+        {
+          "value": "TAG",
+          "count": 9
+        },
+        {
+          "value": "WYNN",
+          "count": 6
+        }
+      ],
+      "riskNotes": []
+    },
+    {
+      "name": "controlplanedncaudits",
+      "count": 0,
+      "sizeBytes": 0,
+      "storageBytes": 4096,
+      "indexBytes": 32768,
+      "avgObjBytes": 0,
+      "indexCount": 8,
+      "uniqueIndexes": [],
+      "ttlIndexes": [],
+      "latestDates": {},
+      "statusTop": [],
+      "domainTop": [],
+      "riskNotes": []
+    },
+    {
+      "name": "controlplaneleadcadences",
+      "count": 15955,
+      "sizeBytes": 48965564,
+      "storageBytes": 9433088,
+      "indexBytes": 4243456,
+      "avgObjBytes": 3068,
+      "indexCount": 14,
+      "uniqueIndexes": [
+        {
+          "name": "domain_1_caseId_1",
+          "key": {
+            "domain": 1,
+            "caseId": 1
+          }
+        }
+      ],
+      "ttlIndexes": [],
+      "latestDates": {
+        "createdAt": "2026-05-16T16:41:42.075Z",
+        "updatedAt": "2026-05-16T16:41:49.886Z"
+      },
+      "statusTop": [],
+      "domainTop": [
+        {
+          "value": "TAG",
+          "count": 11540
+        },
+        {
+          "value": "WYNN",
+          "count": 4415
+        }
+      ],
+      "riskNotes": []
+    },
+    {
+      "name": "controlplanemailerconfigs",
+      "count": 28,
+      "sizeBytes": 23189,
+      "storageBytes": 24576,
+      "indexBytes": 61440,
+      "avgObjBytes": 828,
+      "indexCount": 3,
+      "uniqueIndexes": [
+        {
+          "name": "phone_1",
+          "key": {
+            "phone": 1
+          }
+        },
+        {
+          "name": "digits_1",
+          "key": {
+            "digits": 1
+          }
+        }
+      ],
+      "ttlIndexes": [],
+      "latestDates": {
+        "createdAt": "2026-04-21T23:35:43.657Z",
+        "updatedAt": "2026-04-21T23:35:43.657Z"
+      },
+      "statusTop": [],
+      "domainTop": [],
+      "riskNotes": []
+    },
+    {
+      "name": "controlplanemailimports",
+      "count": 5436,
+      "sizeBytes": 13109302,
+      "storageBytes": 2850816,
+      "indexBytes": 1900544,
+      "avgObjBytes": 2411,
+      "indexCount": 9,
+      "uniqueIndexes": [
+        {
+          "name": "domain_1_caseId_1",
+          "key": {
+            "domain": 1,
+            "caseId": 1
+          }
+        }
+      ],
+      "ttlIndexes": [],
+      "latestDates": {
+        "createdAt": "2026-05-12T23:32:17.538Z",
+        "updatedAt": "2026-05-12T23:32:17.538Z"
+      },
+      "statusTop": [],
+      "domainTop": [
+        {
+          "value": "TAG",
+          "count": 5436
+        }
+      ],
+      "riskNotes": []
+    },
+    {
+      "name": "controlplanemasterprospectindexes",
+      "count": 7206,
+      "sizeBytes": 6224259,
+      "storageBytes": 32608256,
+      "indexBytes": 106188800,
+      "avgObjBytes": 863,
+      "indexCount": 25,
+      "uniqueIndexes": [
+        {
+          "name": "domain_1_caseId_1",
+          "key": {
+            "domain": 1,
+            "caseId": 1
+          }
+        }
+      ],
+      "ttlIndexes": [],
+      "latestDates": {
+        "createdAt": "2026-05-16T16:41:41.959Z",
+        "updatedAt": "2026-05-16T16:41:46.827Z",
+        "lastSeenAt": "2026-05-16T16:41:46.826Z",
+        "firstSeenAt": "2026-05-16T16:41:38.212Z",
+        "lastStatusCheckAt": "2026-05-16T16:41:46.826Z"
+      },
+      "statusTop": [],
+      "domainTop": [
+        {
+          "value": "TAG",
+          "count": 4016
+        },
+        {
+          "value": "WYNN",
+          "count": 3190
+        }
+      ],
+      "riskNotes": []
+    },
+    {
+      "name": "controlplanemetricssnapshots",
+      "count": 64,
+      "sizeBytes": 34340,
+      "storageBytes": 53248,
+      "indexBytes": 221184,
+      "avgObjBytes": 536,
+      "indexCount": 6,
+      "uniqueIndexes": [
+        {
+          "name": "domain_1_bucketType_1_bucketKey_1",
+          "key": {
+            "domain": 1,
+            "bucketType": 1,
+            "bucketKey": 1
+          }
+        }
+      ],
+      "ttlIndexes": [],
+      "latestDates": {
+        "createdAt": "2026-05-16T15:44:36.013Z",
+        "updatedAt": "2026-05-16T16:41:49.804Z"
+      },
+      "statusTop": [],
+      "domainTop": [
+        {
+          "value": "TAG",
+          "count": 42
+        },
+        {
+          "value": "WYNN",
+          "count": 22
+        }
+      ],
+      "riskNotes": []
+    },
+    {
+      "name": "controlplanepaymentalerts",
+      "count": 0,
+      "sizeBytes": 0,
+      "storageBytes": 4096,
+      "indexBytes": 28672,
+      "avgObjBytes": 0,
+      "indexCount": 7,
+      "uniqueIndexes": [
+        {
+          "name": "caseId_1_domain_1_paymentDate_1",
+          "key": {
+            "caseId": 1,
+            "domain": 1,
+            "paymentDate": 1
+          }
+        }
+      ],
+      "ttlIndexes": [],
+      "latestDates": {},
+      "statusTop": [],
+      "domainTop": [],
+      "riskNotes": []
+    },
+    {
+      "name": "controlplanepaymentledgers",
+      "count": 5268,
+      "sizeBytes": 7322713,
+      "storageBytes": 2146304,
+      "indexBytes": 1601536,
+      "avgObjBytes": 1390,
+      "indexCount": 14,
+      "uniqueIndexes": [
+        {
+          "name": "casePaymentId_1",
+          "key": {
+            "casePaymentId": 1
+          }
+        }
+      ],
+      "ttlIndexes": [],
+      "latestDates": {
+        "createdAt": "2026-05-16T16:05:17.494Z",
+        "updatedAt": "2026-05-16T16:05:19.058Z"
+      },
+      "statusTop": [],
+      "domainTop": [
+        {
+          "value": "TAG",
+          "count": 5206
+        },
+        {
+          "value": "WYNN",
+          "count": 62
+        }
+      ],
+      "riskNotes": []
+    },
+    {
+      "name": "controlplanepostdateholds",
+      "count": 0,
+      "sizeBytes": 0,
+      "storageBytes": 4096,
+      "indexBytes": 65536,
+      "avgObjBytes": 0,
+      "indexCount": 16,
+      "uniqueIndexes": [
+        {
+          "name": "domain_1_caseId_1_status_1",
+          "key": {
+            "domain": 1,
+            "caseId": 1,
+            "status": 1
+          }
+        }
+      ],
+      "ttlIndexes": [],
+      "latestDates": {},
+      "statusTop": [],
+      "domainTop": [],
+      "riskNotes": [
+        "temporary/legacy-looking name"
+      ]
+    },
+    {
+      "name": "controlplaneprepings",
+      "count": 191,
+      "sizeBytes": 28888,
+      "storageBytes": 94208,
+      "indexBytes": 323584,
+      "avgObjBytes": 151,
+      "indexCount": 5,
+      "uniqueIndexes": [
+        {
+          "name": "domain_1_emailHash_1",
+          "key": {
+            "domain": 1,
+            "emailHash": 1
+          }
+        }
+      ],
+      "ttlIndexes": [
+        {
+          "name": "createdAt_1",
+          "key": {
+            "createdAt": 1
+          },
+          "expireAfterSeconds": 300
+        }
+      ],
+      "latestDates": {
+        "createdAt": "2026-05-16T16:47:44.673Z"
+      },
+      "statusTop": [],
+      "domainTop": [
+        {
+          "value": "WYNN",
+          "count": 191
+        }
+      ],
+      "riskNotes": []
+    },
+    {
+      "name": "controlplanequalityreviews",
+      "count": 2,
+      "sizeBytes": 1620,
+      "storageBytes": 36864,
+      "indexBytes": 294912,
+      "avgObjBytes": 810,
+      "indexCount": 8,
+      "uniqueIndexes": [],
+      "ttlIndexes": [],
+      "latestDates": {
+        "createdAt": "2026-04-20T22:59:07.248Z",
+        "updatedAt": "2026-04-20T22:59:07.248Z"
+      },
+      "statusTop": [
+        {
+          "value": "reviewed",
+          "count": 2
+        }
+      ],
+      "domainTop": [
+        {
+          "value": "WYNN",
+          "count": 2
+        }
+      ],
+      "riskNotes": []
+    },
+    {
+      "name": "controlplanereviewqueueitems",
+      "count": 39928,
+      "sizeBytes": 27221627,
+      "storageBytes": 38252544,
+      "indexBytes": 29859840,
+      "avgObjBytes": 681,
+      "indexCount": 10,
+      "uniqueIndexes": [],
+      "ttlIndexes": [],
+      "latestDates": {
+        "createdAt": "2026-05-16T16:05:18.590Z",
+        "updatedAt": "2026-05-16T16:05:18.590Z",
+        "happenedAt": "2026-05-16T00:04:17.497Z"
+      },
+      "statusTop": [
+        {
+          "value": "open",
+          "count": 39928
+        }
+      ],
+      "domainTop": [
+        {
+          "value": "TAG",
+          "count": 35453
+        },
+        {
+          "value": "WYNN",
+          "count": 4475
+        }
+      ],
+      "riskNotes": [
+        "append-only-looking collection without TTL"
+      ]
+    },
+    {
+      "name": "controlplanerunlocks",
+      "count": 0,
+      "sizeBytes": 0,
+      "storageBytes": 36864,
+      "indexBytes": 73728,
+      "avgObjBytes": 0,
+      "indexCount": 2,
+      "uniqueIndexes": [],
+      "ttlIndexes": [
+        {
+          "name": "lockedUntil_1",
+          "key": {
+            "lockedUntil": 1
+          },
+          "expireAfterSeconds": 0
+        }
+      ],
+      "latestDates": {},
+      "statusTop": [],
+      "domainTop": [],
+      "riskNotes": []
+    },
+    {
+      "name": "controlplanesourcecanonicals",
+      "count": 81,
+      "sizeBytes": 44295,
+      "storageBytes": 53248,
+      "indexBytes": 319488,
+      "avgObjBytes": 546,
+      "indexCount": 9,
+      "uniqueIndexes": [
+        {
+          "name": "canonicalKey_1",
+          "key": {
+            "canonicalKey": 1
+          }
+        }
+      ],
+      "ttlIndexes": [],
+      "latestDates": {
+        "createdAt": "2026-04-22T23:05:22.632Z",
+        "updatedAt": "2026-04-27T17:27:47.092Z"
+      },
+      "statusTop": [],
+      "domainTop": [],
+      "riskNotes": []
+    },
+    {
+      "name": "controlplanespendentries",
+      "count": 2682,
+      "sizeBytes": 3128735,
+      "storageBytes": 1212416,
+      "indexBytes": 884736,
+      "avgObjBytes": 1166,
+      "indexCount": 9,
+      "uniqueIndexes": [],
+      "ttlIndexes": [],
+      "latestDates": {
+        "createdAt": "2026-05-15T17:11:03.037Z",
+        "updatedAt": "2026-05-16T16:09:11.981Z"
+      },
+      "statusTop": [],
+      "domainTop": [
+        {
+          "value": "TAG",
+          "count": 2103
+        },
+        {
+          "value": "WYNN",
+          "count": 579
+        }
+      ],
+      "riskNotes": []
+    },
+    {
+      "name": "controlplaneworkflowrecords",
+      "count": 9,
+      "sizeBytes": 9614,
+      "storageBytes": 41787392,
+      "indexBytes": 57757696,
+      "avgObjBytes": 1068,
+      "indexCount": 16,
+      "uniqueIndexes": [
+        {
+          "name": "dedupeKey_1",
+          "key": {
+            "dedupeKey": 1
+          }
+        }
+      ],
+      "ttlIndexes": [
+        {
+          "name": "outbound_ttl_happenedAt",
+          "key": {
+            "happenedAt": 1
+          },
+          "expireAfterSeconds": 172800
+        }
+      ],
+      "latestDates": {
+        "createdAt": "2026-05-16T16:41:50.402Z",
+        "updatedAt": "2026-05-16T16:41:50.402Z",
+        "happenedAt": "2026-05-16T16:41:50.402Z"
+      },
+      "statusTop": [
+        {
+          "value": "ok",
+          "count": 9
+        }
+      ],
+      "domainTop": [
+        {
+          "value": "WYNN",
+          "count": 9
+        }
+      ],
+      "riskNotes": [
+        "workflow/receipt collection"
+      ]
+    },
+    {
+      "name": "dailypaymentsummaries",
+      "count": 982,
+      "sizeBytes": 383076,
+      "storageBytes": 90112,
+      "indexBytes": 303104,
+      "avgObjBytes": 390,
+      "indexCount": 6,
+      "uniqueIndexes": [
+        {
+          "name": "casePaymentId_1",
+          "key": {
+            "casePaymentId": 1
+          }
+        }
+      ],
+      "ttlIndexes": [],
+      "latestDates": {
+        "createdAt": "2026-05-04T18:03:46.806Z",
+        "updatedAt": "2026-05-04T18:03:46.806Z"
+      },
+      "statusTop": [],
+      "domainTop": [
+        {
+          "value": "TAG",
+          "count": 959
+        },
+        {
+          "value": "WYNN",
+          "count": 23
+        }
+      ],
+      "riskNotes": []
+    },
+    {
+      "name": "dailyschedules",
+      "count": 11,
+      "sizeBytes": 124650,
+      "storageBytes": 57344,
+      "indexBytes": 40960,
+      "avgObjBytes": 11331,
+      "indexCount": 2,
+      "uniqueIndexes": [
+        {
+          "name": "date_1",
+          "key": {
+            "date": 1
+          }
+        }
+      ],
+      "ttlIndexes": [],
+      "latestDates": {
+        "createdAt": "2025-06-27T16:18:12.846Z",
+        "updatedAt": "2025-06-27T20:10:32.025Z"
+      },
+      "statusTop": [],
+      "domainTop": [],
+      "riskNotes": []
+    },
+    {
+      "name": "dailyspends",
+      "count": 2801,
+      "sizeBytes": 3151579,
+      "storageBytes": 688128,
+      "indexBytes": 765952,
+      "avgObjBytes": 1125,
+      "indexCount": 4,
+      "uniqueIndexes": [],
+      "ttlIndexes": [],
+      "latestDates": {
+        "createdAt": "2026-05-01T17:03:08.684Z",
+        "updatedAt": "2026-05-04T19:01:25.264Z"
+      },
+      "statusTop": [],
+      "domainTop": [
+        {
+          "value": "TAG",
+          "count": 2222
+        },
+        {
+          "value": "WYNN",
+          "count": 579
+        }
+      ],
+      "riskNotes": []
+    },
+    {
+      "name": "dailysummaries",
+      "count": 87,
+      "sizeBytes": 45028,
+      "storageBytes": 28672,
+      "indexBytes": 106496,
+      "avgObjBytes": 517,
+      "indexCount": 5,
+      "uniqueIndexes": [
+        {
+          "name": "date_1_source_1_domain_1",
+          "key": {
+            "date": 1,
+            "source": 1,
+            "domain": 1
+          }
+        }
+      ],
+      "ttlIndexes": [],
+      "latestDates": {
+        "createdAt": "2026-04-14T16:00:26.741Z",
+        "updatedAt": "2026-04-14T16:00:27.300Z"
+      },
+      "statusTop": [],
+      "domainTop": [
+        {
+          "value": "WYNN",
+          "count": 47
+        },
+        {
+          "value": "TAG",
+          "count": 40
+        }
+      ],
+      "riskNotes": []
+    },
+    {
+      "name": "dispatchlists",
+      "count": 31,
+      "sizeBytes": 1662739,
+      "storageBytes": 655360,
+      "indexBytes": 442368,
+      "avgObjBytes": 53636,
+      "indexCount": 12,
+      "uniqueIndexes": [],
+      "ttlIndexes": [],
+      "latestDates": {
+        "createdAt": "2026-05-06T19:58:33.540Z",
+        "updatedAt": "2026-05-06T20:28:06.047Z",
+        "queuedAt": "2026-05-06T19:58:33.880Z"
+      },
+      "statusTop": [
+        {
+          "value": "completed",
+          "count": 13
+        },
+        {
+          "value": "consuming",
+          "count": 9
+        },
+        {
+          "value": "cancelled",
+          "count": 4
+        },
+        {
+          "value": "failed",
+          "count": 3
+        },
+        {
+          "value": "ready",
+          "count": 2
+        }
+      ],
+      "domainTop": [
+        {
+          "value": "WYNN",
+          "count": 30
+        },
+        {
+          "value": "TAG",
+          "count": 1
+        }
+      ],
+      "riskNotes": []
+    },
+    {
+      "name": "eventrecords",
+      "count": 15373,
+      "sizeBytes": 28273757,
+      "storageBytes": 41832448,
+      "indexBytes": 25337856,
+      "avgObjBytes": 1839,
+      "indexCount": 8,
+      "uniqueIndexes": [
+        {
+          "name": "sourceService_1_dedupeKey_1",
+          "key": {
+            "sourceService": 1,
+            "dedupeKey": 1
+          }
+        }
+      ],
+      "ttlIndexes": [],
+      "latestDates": {
+        "createdAt": "2026-05-16T16:41:43.495Z",
+        "updatedAt": "2026-05-16T16:41:47.328Z",
+        "processedAt": "2026-05-16T16:41:47.328Z",
+        "nextAttemptAt": "2026-05-16T16:41:43.418Z"
+      },
+      "statusTop": [
+        {
+          "value": "pending",
+          "count": 9635
+        },
+        {
+          "value": "completed",
+          "count": 5497
+        },
+        {
+          "value": "dead-letter",
+          "count": 222
+        },
+        {
+          "value": "failed",
+          "count": 10
+        },
+        {
+          "value": "processing",
+          "count": 7
+        }
+      ],
+      "domainTop": [],
+      "riskNotes": [
+        "append-only-looking collection without TTL"
+      ]
+    },
+    {
+      "name": "formsubmissions",
+      "count": 106,
+      "sizeBytes": 59812,
+      "storageBytes": 28672,
+      "indexBytes": 143360,
+      "avgObjBytes": 564,
+      "indexCount": 7,
+      "uniqueIndexes": [],
+      "ttlIndexes": [],
+      "latestDates": {
+        "createdAt": "2026-05-04T15:07:49.315Z",
+        "updatedAt": "2026-05-04T15:07:49.315Z"
+      },
+      "statusTop": [
+        {
+          "value": "abandoned",
+          "count": 106
+        }
+      ],
+      "domainTop": [],
+      "riskNotes": []
+    },
+    {
+      "name": "hourlyjobevents",
+      "count": 1726,
+      "sizeBytes": 2174300,
+      "storageBytes": 978944,
+      "indexBytes": 1576960,
+      "avgObjBytes": 1259,
+      "indexCount": 20,
+      "uniqueIndexes": [
+        {
+          "name": "hourly_job_event_dedupe",
+          "key": {
+            "lane": 1,
+            "dedupeKey": 1
+          }
+        }
+      ],
+      "ttlIndexes": [],
+      "latestDates": {
+        "createdAt": "2026-05-14T06:55:13.433Z",
+        "updatedAt": "2026-05-14T06:57:01.946Z",
+        "completedAt": "2026-05-14T06:57:01.946Z",
+        "nextAttemptAt": "2026-05-14T09:00:00.000Z"
+      },
+      "statusTop": [
+        {
+          "value": "pending",
+          "count": 993
+        },
+        {
+          "value": "completed",
+          "count": 725
+        },
+        {
+          "value": "dead-letter",
+          "count": 7
+        },
+        {
+          "value": "processing",
+          "count": 1
+        }
+      ],
+      "domainTop": [
+        {
+          "value": "WYNN",
+          "count": 1081
+        },
+        {
+          "value": "TAG",
+          "count": 645
+        }
+      ],
+      "riskNotes": [
+        "append-only-looking collection without TTL"
+      ]
+    },
+    {
+      "name": "leadactivities",
+      "count": 341,
+      "sizeBytes": 154385,
+      "storageBytes": 102400,
+      "indexBytes": 233472,
+      "avgObjBytes": 452,
+      "indexCount": 6,
+      "uniqueIndexes": [
+        {
+          "name": "leadId_1",
+          "key": {
+            "leadId": 1
+          }
+        }
+      ],
+      "ttlIndexes": [],
+      "latestDates": {
+        "createdAt": "2026-05-14T20:40:58.606Z",
+        "updatedAt": "2026-05-14T20:40:58.606Z",
+        "lastTouchedAt": "2026-05-14T20:40:58.606Z",
+        "lockedAt": "2026-05-14T20:40:58.606Z"
+      },
+      "statusTop": [],
+      "domainTop": [],
+      "riskNotes": []
+    },
+    {
+      "name": "leadcadences",
+      "count": 3942,
+      "sizeBytes": 4804280,
+      "storageBytes": 1048576,
+      "indexBytes": 2015232,
+      "avgObjBytes": 1218,
+      "indexCount": 14,
+      "uniqueIndexes": [
+        {
+          "name": "caseId_company_unique",
+          "key": {
+            "caseId": 1,
+            "company": 1
+          }
+        }
+      ],
+      "ttlIndexes": [],
+      "latestDates": {
+        "createdAt": "2026-05-04T18:55:22.322Z",
+        "updatedAt": "2026-05-04T19:01:43.791Z"
+      },
+      "statusTop": [],
+      "domainTop": [],
+      "riskNotes": []
+    },
+    {
+      "name": "leads",
+      "count": 0,
+      "sizeBytes": 0,
+      "storageBytes": 4096,
+      "indexBytes": 12288,
+      "avgObjBytes": 0,
+      "indexCount": 3,
+      "uniqueIndexes": [
+        {
+          "name": "email_1",
+          "key": {
+            "email": 1
+          }
+        },
+        {
+          "name": "caseNumber_1",
+          "key": {
+            "caseNumber": 1
+          }
+        }
+      ],
+      "ttlIndexes": [],
+      "latestDates": {},
+      "statusTop": [],
+      "domainTop": [],
+      "riskNotes": []
+    },
+    {
+      "name": "legacy_dailypaymentsummaries",
+      "count": 508,
+      "sizeBytes": 162389,
+      "storageBytes": 102400,
+      "indexBytes": 28672,
+      "avgObjBytes": 319,
+      "indexCount": 1,
+      "uniqueIndexes": [],
+      "ttlIndexes": [],
+      "latestDates": {
+        "createdAt": "2026-04-21T23:05:37.561Z",
+        "updatedAt": "2026-04-21T23:05:37.561Z"
+      },
+      "statusTop": [],
+      "domainTop": [
+        {
+          "value": "TAG",
+          "count": 508
+        }
+      ],
+      "riskNotes": [
+        "temporary/legacy-looking name"
+      ]
+    },
+    {
+      "name": "legacy_dailyspends",
+      "count": 2182,
+      "sizeBytes": 1988353,
+      "storageBytes": 491520,
+      "indexBytes": 90112,
+      "avgObjBytes": 911,
+      "indexCount": 1,
+      "uniqueIndexes": [],
+      "ttlIndexes": [],
+      "latestDates": {
+        "createdAt": "2026-04-21T17:03:03.312Z",
+        "updatedAt": "2026-04-21T23:03:46.007Z"
+      },
+      "statusTop": [],
+      "domainTop": [
+        {
+          "value": "TAG",
+          "count": 2182
+        }
+      ],
+      "riskNotes": [
+        "temporary/legacy-looking name"
+      ]
+    },
+    {
+      "name": "legacy_dailysummaries",
+      "count": 40,
+      "sizeBytes": 17671,
+      "storageBytes": 36864,
+      "indexBytes": 20480,
+      "avgObjBytes": 441,
+      "indexCount": 1,
+      "uniqueIndexes": [],
+      "ttlIndexes": [],
+      "latestDates": {
+        "createdAt": "2026-04-14T16:00:26.175Z",
+        "updatedAt": "2026-04-14T16:00:27.142Z"
+      },
+      "statusTop": [],
+      "domainTop": [
+        {
+          "value": "TAG",
+          "count": 40
+        }
+      ],
+      "riskNotes": [
+        "temporary/legacy-looking name"
+      ]
+    },
+    {
+      "name": "legacy_mailerconfigs",
+      "count": 28,
+      "sizeBytes": 24267,
+      "storageBytes": 24576,
+      "indexBytes": 20480,
+      "avgObjBytes": 866,
+      "indexCount": 1,
+      "uniqueIndexes": [],
+      "ttlIndexes": [],
+      "latestDates": {
+        "createdAt": "2026-04-06T18:28:28.599Z",
+        "updatedAt": "2026-04-13T23:13:49.616Z"
+      },
+      "statusTop": [],
+      "domainTop": [],
+      "riskNotes": [
+        "temporary/legacy-looking name"
+      ]
+    },
+    {
+      "name": "legacy_metrics_sync_state",
+      "count": 1,
+      "sizeBytes": 1123,
+      "storageBytes": 20480,
+      "indexBytes": 20480,
+      "avgObjBytes": 1123,
+      "indexCount": 1,
+      "uniqueIndexes": [],
+      "ttlIndexes": [],
+      "latestDates": {},
+      "statusTop": [],
+      "domainTop": [
+        {
+          "value": "TAG",
+          "count": 1
+        }
+      ],
+      "riskNotes": [
+        "temporary/legacy-looking name"
+      ]
+    },
+    {
+      "name": "legacy_raw_agentstates",
+      "count": 3,
+      "sizeBytes": 2983,
+      "storageBytes": 20480,
+      "indexBytes": 61440,
+      "avgObjBytes": 994,
+      "indexCount": 3,
+      "uniqueIndexes": [
+        {
+          "name": "extensionId_1",
+          "key": {
+            "extensionId": 1
+          }
+        }
+      ],
+      "ttlIndexes": [],
+      "latestDates": {
+        "createdAt": "2026-05-01T21:12:54.942Z",
+        "updatedAt": "2026-05-01T21:13:10.320Z"
+      },
+      "statusTop": [
+        {
+          "value": "available",
+          "count": 3
+        }
+      ],
+      "domainTop": [],
+      "riskNotes": [
+        "temporary/legacy-looking name"
+      ]
+    },
+    {
+      "name": "legacy_raw_authotpchallenges",
+      "count": 0,
+      "sizeBytes": 0,
+      "storageBytes": 4096,
+      "indexBytes": 20480,
+      "avgObjBytes": 0,
+      "indexCount": 5,
+      "uniqueIndexes": [],
+      "ttlIndexes": [],
+      "latestDates": {},
+      "statusTop": [],
+      "domainTop": [],
+      "riskNotes": [
+        "temporary/legacy-looking name"
+      ]
+    },
+    {
+      "name": "legacy_raw_controlplaneactivityaireviews",
+      "count": 0,
+      "sizeBytes": 0,
+      "storageBytes": 4096,
+      "indexBytes": 28672,
+      "avgObjBytes": 0,
+      "indexCount": 7,
+      "uniqueIndexes": [],
+      "ttlIndexes": [],
+      "latestDates": {},
+      "statusTop": [],
+      "domainTop": [],
+      "riskNotes": [
+        "temporary/legacy-looking name"
+      ]
+    },
+    {
+      "name": "legacy_raw_controlplanecallledgers",
+      "count": 0,
+      "sizeBytes": 0,
+      "storageBytes": 4096,
+      "indexBytes": 69632,
+      "avgObjBytes": 0,
+      "indexCount": 17,
+      "uniqueIndexes": [],
+      "ttlIndexes": [],
+      "latestDates": {},
+      "statusTop": [],
+      "domainTop": [],
+      "riskNotes": [
+        "temporary/legacy-looking name"
+      ]
+    },
+    {
+      "name": "legacy_raw_controlplanecalllogs",
+      "count": 0,
+      "sizeBytes": 0,
+      "storageBytes": 4096,
+      "indexBytes": 106496,
+      "avgObjBytes": 0,
+      "indexCount": 26,
+      "uniqueIndexes": [
+        {
+          "name": "domain_1_telephonySessionId_1",
+          "key": {
+            "domain": 1,
+            "telephonySessionId": 1
+          }
+        }
+      ],
+      "ttlIndexes": [],
+      "latestDates": {},
+      "statusTop": [],
+      "domainTop": [],
+      "riskNotes": [
+        "temporary/legacy-looking name"
+      ]
+    },
+    {
+      "name": "legacy_raw_controlplanecaseprofiles",
+      "count": 20,
+      "sizeBytes": 29800,
+      "storageBytes": 24576,
+      "indexBytes": 491520,
+      "avgObjBytes": 1490,
+      "indexCount": 24,
+      "uniqueIndexes": [
+        {
+          "name": "domain_1_caseId_1",
+          "key": {
+            "domain": 1,
+            "caseId": 1
+          }
+        }
+      ],
+      "ttlIndexes": [],
+      "latestDates": {
+        "createdAt": "2026-04-22T23:43:20.168Z",
+        "updatedAt": "2026-04-22T23:43:20.168Z",
+        "lastStatusCheckAt": "2026-04-22T23:43:20.168Z"
+      },
+      "statusTop": [],
+      "domainTop": [
+        {
+          "value": "TAG",
+          "count": 20
+        }
+      ],
+      "riskNotes": [
+        "temporary/legacy-looking name"
+      ]
+    },
+    {
+      "name": "legacy_raw_controlplaneconsentrecords",
+      "count": 0,
+      "sizeBytes": 0,
+      "storageBytes": 4096,
+      "indexBytes": 53248,
+      "avgObjBytes": 0,
+      "indexCount": 13,
+      "uniqueIndexes": [],
+      "ttlIndexes": [],
+      "latestDates": {},
+      "statusTop": [],
+      "domainTop": [],
+      "riskNotes": [
+        "temporary/legacy-looking name"
+      ]
+    },
+    {
+      "name": "legacy_raw_controlplaneconversationmessages",
+      "count": 0,
+      "sizeBytes": 0,
+      "storageBytes": 4096,
+      "indexBytes": 40960,
+      "avgObjBytes": 0,
+      "indexCount": 10,
+      "uniqueIndexes": [],
+      "ttlIndexes": [],
+      "latestDates": {},
+      "statusTop": [],
+      "domainTop": [],
+      "riskNotes": [
+        "temporary/legacy-looking name"
+      ]
+    },
+    {
+      "name": "legacy_raw_controlplaneconversationworkflows",
+      "count": 0,
+      "sizeBytes": 0,
+      "storageBytes": 4096,
+      "indexBytes": 32768,
+      "avgObjBytes": 0,
+      "indexCount": 8,
+      "uniqueIndexes": [
+        {
+          "name": "domain_1_phone_1_channel_1",
+          "key": {
+            "domain": 1,
+            "phone": 1,
+            "channel": 1
+          }
+        }
+      ],
+      "ttlIndexes": [],
+      "latestDates": {},
+      "statusTop": [],
+      "domainTop": [],
+      "riskNotes": [
+        "temporary/legacy-looking name"
+      ]
+    },
+    {
+      "name": "legacy_raw_controlplanecxdialqueues",
+      "count": 1,
+      "sizeBytes": 2165,
+      "storageBytes": 20480,
+      "indexBytes": 409600,
+      "avgObjBytes": 2165,
+      "indexCount": 20,
+      "uniqueIndexes": [],
+      "ttlIndexes": [],
+      "latestDates": {
+        "createdAt": "2026-05-01T21:10:41.321Z",
+        "updatedAt": "2026-05-01T21:15:08.560Z"
+      },
+      "statusTop": [],
+      "domainTop": [
+        {
+          "value": "WYNN",
+          "count": 1
+        }
+      ],
+      "riskNotes": [
+        "temporary/legacy-looking name"
+      ]
+    },
+    {
+      "name": "legacy_raw_controlplanedailycallstats",
+      "count": 0,
+      "sizeBytes": 0,
+      "storageBytes": 4096,
+      "indexBytes": 28672,
+      "avgObjBytes": 0,
+      "indexCount": 7,
+      "uniqueIndexes": [
+        {
+          "name": "date_1_piece_1",
+          "key": {
+            "date": 1,
+            "piece": 1
+          }
+        }
+      ],
+      "ttlIndexes": [],
+      "latestDates": {},
+      "statusTop": [],
+      "domainTop": [],
+      "riskNotes": [
+        "temporary/legacy-looking name"
+      ]
+    },
+    {
+      "name": "legacy_raw_controlplanedeepcutruns",
+      "count": 0,
+      "sizeBytes": 0,
+      "storageBytes": 4096,
+      "indexBytes": 28672,
+      "avgObjBytes": 0,
+      "indexCount": 7,
+      "uniqueIndexes": [],
+      "ttlIndexes": [],
+      "latestDates": {},
+      "statusTop": [],
+      "domainTop": [],
+      "riskNotes": [
+        "temporary/legacy-looking name"
+      ]
+    },
+    {
+      "name": "legacy_raw_controlplaneleadcadences",
+      "count": 2,
+      "sizeBytes": 4435,
+      "storageBytes": 20480,
+      "indexBytes": 225280,
+      "avgObjBytes": 2217,
+      "indexCount": 11,
+      "uniqueIndexes": [
+        {
+          "name": "domain_1_caseId_1",
+          "key": {
+            "domain": 1,
+            "caseId": 1
+          }
+        }
+      ],
+      "ttlIndexes": [],
+      "latestDates": {
+        "createdAt": "2026-04-28T17:14:54.401Z",
+        "updatedAt": "2026-04-28T17:14:54.401Z"
+      },
+      "statusTop": [],
+      "domainTop": [
+        {
+          "value": "WYNN",
+          "count": 2
+        }
+      ],
+      "riskNotes": [
+        "temporary/legacy-looking name"
+      ]
+    },
+    {
+      "name": "legacy_raw_controlplanemailerconfigs",
+      "count": 0,
+      "sizeBytes": 0,
+      "storageBytes": 4096,
+      "indexBytes": 12288,
+      "avgObjBytes": 0,
+      "indexCount": 3,
+      "uniqueIndexes": [
+        {
+          "name": "phone_1",
+          "key": {
+            "phone": 1
+          }
+        },
+        {
+          "name": "digits_1",
+          "key": {
+            "digits": 1
+          }
+        }
+      ],
+      "ttlIndexes": [],
+      "latestDates": {},
+      "statusTop": [],
+      "domainTop": [],
+      "riskNotes": [
+        "temporary/legacy-looking name"
+      ]
+    },
+    {
+      "name": "legacy_raw_controlplanemasterprospectindexes",
+      "count": 90954,
+      "sizeBytes": 102055199,
+      "storageBytes": 14827520,
+      "indexBytes": 57155584,
+      "avgObjBytes": 1122,
+      "indexCount": 22,
+      "uniqueIndexes": [
+        {
+          "name": "domain_1_caseId_1",
+          "key": {
+            "domain": 1,
+            "caseId": 1
+          }
+        }
+      ],
+      "ttlIndexes": [],
+      "latestDates": {
+        "createdAt": "2026-04-29T00:33:52.016Z",
+        "updatedAt": "2026-04-29T00:33:52.016Z",
+        "lastSeenAt": "2026-04-29T06:42:31.000Z",
+        "firstSeenAt": "2026-04-28T23:59:16.000Z"
+      },
+      "statusTop": [],
+      "domainTop": [
+        {
+          "value": "TAG",
+          "count": 90954
+        }
+      ],
+      "riskNotes": [
+        "high row count",
+        "temporary/legacy-looking name"
+      ]
+    },
+    {
+      "name": "legacy_raw_controlplanemetricssnapshots",
+      "count": 0,
+      "sizeBytes": 0,
+      "storageBytes": 4096,
+      "indexBytes": 24576,
+      "avgObjBytes": 0,
+      "indexCount": 6,
+      "uniqueIndexes": [
+        {
+          "name": "domain_1_bucketType_1_bucketKey_1",
+          "key": {
+            "domain": 1,
+            "bucketType": 1,
+            "bucketKey": 1
+          }
+        }
+      ],
+      "ttlIndexes": [],
+      "latestDates": {},
+      "statusTop": [],
+      "domainTop": [],
+      "riskNotes": [
+        "temporary/legacy-looking name"
+      ]
+    },
+    {
+      "name": "legacy_raw_controlplanepaymentalerts",
+      "count": 0,
+      "sizeBytes": 0,
+      "storageBytes": 4096,
+      "indexBytes": 28672,
+      "avgObjBytes": 0,
+      "indexCount": 7,
+      "uniqueIndexes": [
+        {
+          "name": "caseId_1_domain_1_paymentDate_1",
+          "key": {
+            "caseId": 1,
+            "domain": 1,
+            "paymentDate": 1
+          }
+        }
+      ],
+      "ttlIndexes": [],
+      "latestDates": {},
+      "statusTop": [],
+      "domainTop": [],
+      "riskNotes": [
+        "temporary/legacy-looking name"
+      ]
+    },
+    {
+      "name": "legacy_raw_controlplanepaymentledgers",
+      "count": 0,
+      "sizeBytes": 0,
+      "storageBytes": 4096,
+      "indexBytes": 57344,
+      "avgObjBytes": 0,
+      "indexCount": 14,
+      "uniqueIndexes": [
+        {
+          "name": "casePaymentId_1",
+          "key": {
+            "casePaymentId": 1
+          }
+        }
+      ],
+      "ttlIndexes": [],
+      "latestDates": {},
+      "statusTop": [],
+      "domainTop": [],
+      "riskNotes": [
+        "temporary/legacy-looking name"
+      ]
+    },
+    {
+      "name": "legacy_raw_controlplaneprepings",
+      "count": 0,
+      "sizeBytes": 0,
+      "storageBytes": 4096,
+      "indexBytes": 20480,
+      "avgObjBytes": 0,
+      "indexCount": 5,
+      "uniqueIndexes": [
+        {
+          "name": "domain_1_emailHash_1",
+          "key": {
+            "domain": 1,
+            "emailHash": 1
+          }
+        }
+      ],
+      "ttlIndexes": [
+        {
+          "name": "createdAt_1",
+          "key": {
+            "createdAt": 1
+          },
+          "expireAfterSeconds": 300
+        }
+      ],
+      "latestDates": {},
+      "statusTop": [],
+      "domainTop": [],
+      "riskNotes": [
+        "temporary/legacy-looking name"
+      ]
+    },
+    {
+      "name": "legacy_raw_controlplanequalityreviews",
+      "count": 0,
+      "sizeBytes": 0,
+      "storageBytes": 4096,
+      "indexBytes": 32768,
+      "avgObjBytes": 0,
+      "indexCount": 8,
+      "uniqueIndexes": [],
+      "ttlIndexes": [],
+      "latestDates": {},
+      "statusTop": [],
+      "domainTop": [],
+      "riskNotes": [
+        "temporary/legacy-looking name"
+      ]
+    },
+    {
+      "name": "legacy_raw_controlplanereviewqueueitems",
+      "count": 0,
+      "sizeBytes": 0,
+      "storageBytes": 4096,
+      "indexBytes": 40960,
+      "avgObjBytes": 0,
+      "indexCount": 10,
+      "uniqueIndexes": [],
+      "ttlIndexes": [],
+      "latestDates": {},
+      "statusTop": [],
+      "domainTop": [],
+      "riskNotes": [
+        "temporary/legacy-looking name"
+      ]
+    },
+    {
+      "name": "legacy_raw_controlplanesourcecanonicals",
+      "count": 0,
+      "sizeBytes": 0,
+      "storageBytes": 4096,
+      "indexBytes": 32768,
+      "avgObjBytes": 0,
+      "indexCount": 8,
+      "uniqueIndexes": [
+        {
+          "name": "canonicalKey_1",
+          "key": {
+            "canonicalKey": 1
+          }
+        }
+      ],
+      "ttlIndexes": [],
+      "latestDates": {},
+      "statusTop": [],
+      "domainTop": [],
+      "riskNotes": [
+        "temporary/legacy-looking name"
+      ]
+    },
+    {
+      "name": "legacy_raw_controlplanespendentries",
+      "count": 0,
+      "sizeBytes": 0,
+      "storageBytes": 4096,
+      "indexBytes": 36864,
+      "avgObjBytes": 0,
+      "indexCount": 9,
+      "uniqueIndexes": [],
+      "ttlIndexes": [],
+      "latestDates": {},
+      "statusTop": [],
+      "domainTop": [],
+      "riskNotes": [
+        "temporary/legacy-looking name"
+      ]
+    },
+    {
+      "name": "legacy_raw_controlplaneworkflowrecords",
+      "count": 4,
+      "sizeBytes": 2709,
+      "storageBytes": 20480,
+      "indexBytes": 266240,
+      "avgObjBytes": 677,
+      "indexCount": 13,
+      "uniqueIndexes": [],
+      "ttlIndexes": [],
+      "latestDates": {
+        "createdAt": "2026-05-01T21:13:10.588Z",
+        "updatedAt": "2026-05-01T21:13:10.588Z",
+        "happenedAt": "2026-05-01T21:13:10.584Z"
+      },
+      "statusTop": [
+        {
+          "value": "ok",
+          "count": 4
+        }
+      ],
+      "domainTop": [
+        {
+          "value": "WYNN",
+          "count": 4
+        }
+      ],
+      "riskNotes": [
+        "temporary/legacy-looking name",
+        "workflow/receipt collection"
+      ]
+    },
+    {
+      "name": "legacy_raw_dispatchlists",
+      "count": 0,
+      "sizeBytes": 0,
+      "storageBytes": 4096,
+      "indexBytes": 45056,
+      "avgObjBytes": 0,
+      "indexCount": 11,
+      "uniqueIndexes": [],
+      "ttlIndexes": [],
+      "latestDates": {},
+      "statusTop": [],
+      "domainTop": [],
+      "riskNotes": [
+        "temporary/legacy-looking name"
+      ]
+    },
+    {
+      "name": "legacy_raw_eventrecords",
+      "count": 2,
+      "sizeBytes": 1843,
+      "storageBytes": 20480,
+      "indexBytes": 163840,
+      "avgObjBytes": 921,
+      "indexCount": 8,
+      "uniqueIndexes": [
+        {
+          "name": "sourceService_1_dedupeKey_1",
+          "key": {
+            "sourceService": 1,
+            "dedupeKey": 1
+          }
+        }
+      ],
+      "ttlIndexes": [],
+      "latestDates": {
+        "createdAt": "2026-04-16T19:27:41.559Z",
+        "updatedAt": "2026-04-16T19:29:07.793Z",
+        "processedAt": "2026-04-16T19:26:14.545Z",
+        "nextAttemptAt": "2026-04-16T19:26:12.858Z"
+      },
+      "statusTop": [
+        {
+          "value": "dead-letter",
+          "count": 1
+        },
+        {
+          "value": "completed",
+          "count": 1
+        }
+      ],
+      "domainTop": [],
+      "riskNotes": [
+        "temporary/legacy-looking name"
+      ]
+    },
+    {
+      "name": "legacy_raw_hourlyjobevents",
+      "count": 0,
+      "sizeBytes": 0,
+      "storageBytes": 4096,
+      "indexBytes": 81920,
+      "avgObjBytes": 0,
+      "indexCount": 20,
+      "uniqueIndexes": [
+        {
+          "name": "hourly_job_event_dedupe",
+          "key": {
+            "lane": 1,
+            "dedupeKey": 1
+          }
+        }
+      ],
+      "ttlIndexes": [],
+      "latestDates": {},
+      "statusTop": [],
+      "domainTop": [],
+      "riskNotes": [
+        "temporary/legacy-looking name"
+      ]
+    },
+    {
+      "name": "legacy_raw_socialresponderconfigs",
+      "count": 0,
+      "sizeBytes": 0,
+      "storageBytes": 4096,
+      "indexBytes": 16384,
+      "avgObjBytes": 0,
+      "indexCount": 4,
+      "uniqueIndexes": [
+        {
+          "name": "domain_platform_unique",
+          "key": {
+            "domain": 1,
+            "platform": 1
+          }
+        }
+      ],
+      "ttlIndexes": [],
+      "latestDates": {},
+      "statusTop": [],
+      "domainTop": [],
+      "riskNotes": [
+        "temporary/legacy-looking name"
+      ]
+    },
+    {
+      "name": "legacy_raw_useraccounts",
+      "count": 3,
+      "sizeBytes": 2759,
+      "storageBytes": 20480,
+      "indexBytes": 225280,
+      "avgObjBytes": 919,
+      "indexCount": 11,
+      "uniqueIndexes": [
+        {
+          "name": "email_1",
+          "key": {
+            "email": 1
+          }
+        }
+      ],
+      "ttlIndexes": [],
+      "latestDates": {
+        "createdAt": "2026-05-01T21:12:54.335Z",
+        "updatedAt": "2026-05-01T21:12:54.335Z"
+      },
+      "statusTop": [
+        {
+          "value": "active",
+          "count": 3
+        }
+      ],
+      "domainTop": [],
+      "riskNotes": [
+        "temporary/legacy-looking name"
+      ]
+    },
+    {
+      "name": "legacy_rb_dailycallstats",
+      "count": 3315,
+      "sizeBytes": 1636364,
+      "storageBytes": 557056,
+      "indexBytes": 118784,
+      "avgObjBytes": 493,
+      "indexCount": 1,
+      "uniqueIndexes": [],
+      "ttlIndexes": [],
+      "latestDates": {
+        "createdAt": "2026-04-13T21:34:46.027Z",
+        "updatedAt": "2026-04-13T21:34:46.027Z"
+      },
+      "statusTop": [],
+      "domainTop": [],
+      "riskNotes": [
+        "temporary/legacy-looking name"
+      ]
+    },
+    {
+      "name": "legacy_rb_paymentalerts",
+      "count": 50,
+      "sizeBytes": 34467,
+      "storageBytes": 24576,
+      "indexBytes": 20480,
+      "avgObjBytes": 689,
+      "indexCount": 1,
+      "uniqueIndexes": [],
+      "ttlIndexes": [],
+      "latestDates": {
+        "createdAt": "2026-04-21T03:35:05.159Z",
+        "updatedAt": "2026-04-21T14:00:21.946Z"
+      },
+      "statusTop": [],
+      "domainTop": [
+        {
+          "value": "TAG",
+          "count": 50
+        }
+      ],
+      "riskNotes": [
+        "temporary/legacy-looking name"
+      ]
+    },
+    {
+      "name": "legacy_rb_sourcecanonicals",
+      "count": 80,
+      "sizeBytes": 97980,
+      "storageBytes": 40960,
+      "indexBytes": 20480,
+      "avgObjBytes": 1224,
+      "indexCount": 1,
+      "uniqueIndexes": [],
+      "ttlIndexes": [],
+      "latestDates": {
+        "createdAt": "2026-04-15T17:22:10.074Z",
+        "updatedAt": "2026-04-15T18:12:25.936Z"
+      },
+      "statusTop": [],
+      "domainTop": [],
+      "riskNotes": [
+        "temporary/legacy-looking name"
+      ]
+    },
+    {
+      "name": "mailerconfigs",
+      "count": 28,
+      "sizeBytes": 26675,
+      "storageBytes": 24576,
+      "indexBytes": 61440,
+      "avgObjBytes": 952,
+      "indexCount": 3,
+      "uniqueIndexes": [
+        {
+          "name": "phone_1",
+          "key": {
+            "phone": 1
+          }
+        },
+        {
+          "name": "digits_1",
+          "key": {
+            "digits": 1
+          }
+        }
+      ],
+      "ttlIndexes": [],
+      "latestDates": {
+        "createdAt": "2026-04-06T18:28:28.599Z",
+        "updatedAt": "2026-04-13T23:13:49.616Z"
+      },
+      "statusTop": [],
+      "domainTop": [],
+      "riskNotes": []
+    },
+    {
+      "name": "marketingcontacts",
+      "count": 0,
+      "sizeBytes": 0,
+      "storageBytes": 4096,
+      "indexBytes": 8192,
+      "avgObjBytes": 0,
+      "indexCount": 2,
+      "uniqueIndexes": [
+        {
+          "name": "pieceName_1",
+          "key": {
+            "pieceName": 1
+          }
+        }
+      ],
+      "ttlIndexes": [],
+      "latestDates": {},
+      "statusTop": [],
+      "domainTop": [],
+      "riskNotes": []
+    },
+    {
+      "name": "pacingconfigs",
+      "count": 1,
+      "sizeBytes": 1452,
+      "storageBytes": 36864,
+      "indexBytes": 73728,
+      "avgObjBytes": 1452,
+      "indexCount": 2,
+      "uniqueIndexes": [
+        {
+          "name": "singletonKey_1",
+          "key": {
+            "singletonKey": 1
+          }
+        }
+      ],
+      "ttlIndexes": [],
+      "latestDates": {
+        "createdAt": "2026-05-04T21:37:09.088Z",
+        "updatedAt": "2026-05-07T23:30:35.843Z"
+      },
+      "statusTop": [],
+      "domainTop": [],
+      "riskNotes": []
+    },
+    {
+      "name": "pacingreports",
+      "count": 0,
+      "sizeBytes": 0,
+      "storageBytes": 4096,
+      "indexBytes": 12288,
+      "avgObjBytes": 0,
+      "indexCount": 3,
+      "uniqueIndexes": [
+        {
+          "name": "hourBucket_1",
+          "key": {
+            "hourBucket": 1
+          }
+        }
+      ],
+      "ttlIndexes": [],
+      "latestDates": {},
+      "statusTop": [],
+      "domainTop": [],
+      "riskNotes": []
+    },
+    {
+      "name": "periodcontacts",
+      "count": 1,
+      "sizeBytes": 16499,
+      "storageBytes": 24576,
+      "indexBytes": 20480,
+      "avgObjBytes": 16499,
+      "indexCount": 1,
+      "uniqueIndexes": [],
+      "ttlIndexes": [],
+      "latestDates": {},
+      "statusTop": [],
+      "domainTop": [],
+      "riskNotes": []
+    },
+    {
+      "name": "poolbudgets",
+      "count": 0,
+      "sizeBytes": 0,
+      "storageBytes": 4096,
+      "indexBytes": 8192,
+      "avgObjBytes": 0,
+      "indexCount": 2,
+      "uniqueIndexes": [
+        {
+          "name": "singletonKey_1",
+          "key": {
+            "singletonKey": 1
+          }
+        }
+      ],
+      "ttlIndexes": [],
+      "latestDates": {},
+      "statusTop": [],
+      "domainTop": [],
+      "riskNotes": []
+    },
+    {
+      "name": "prepings",
+      "count": 0,
+      "sizeBytes": 0,
+      "storageBytes": 49152,
+      "indexBytes": 126976,
+      "avgObjBytes": 0,
+      "indexCount": 3,
+      "uniqueIndexes": [
+        {
+          "name": "emailHash_1",
+          "key": {
+            "emailHash": 1
+          }
+        }
+      ],
+      "ttlIndexes": [
+        {
+          "name": "createdAt_1",
+          "key": {
+            "createdAt": 1
+          },
+          "expireAfterSeconds": 300
+        }
+      ],
+      "latestDates": {},
+      "statusTop": [],
+      "domainTop": [],
+      "riskNotes": []
+    },
+    {
+      "name": "prospects",
+      "count": 0,
+      "sizeBytes": 0,
+      "storageBytes": 4096,
+      "indexBytes": 40960,
+      "avgObjBytes": 0,
+      "indexCount": 10,
+      "uniqueIndexes": [
+        {
+          "name": "email_1",
+          "key": {
+            "email": 1
+          }
+        }
+      ],
+      "ttlIndexes": [],
+      "latestDates": {},
+      "statusTop": [],
+      "domainTop": [],
+      "riskNotes": []
+    },
+    {
+      "name": "queueitems",
+      "count": 353,
+      "sizeBytes": 182124,
+      "storageBytes": 102400,
+      "indexBytes": 622592,
+      "avgObjBytes": 515,
+      "indexCount": 16,
+      "uniqueIndexes": [
+        {
+          "name": "uq_queueitems_active_lead",
+          "key": {
+            "leadId": 1
+          }
+        }
+      ],
+      "ttlIndexes": [],
+      "latestDates": {
+        "createdAt": "2026-05-14T20:40:58.028Z",
+        "updatedAt": "2026-05-14T20:40:58.690Z"
+      },
+      "statusTop": [],
+      "domainTop": [
+        {
+          "value": "WYNN",
+          "count": 351
+        },
+        {
+          "value": "TAG",
+          "count": 2
+        }
+      ],
+      "riskNotes": []
+    },
+    {
+      "name": "rb_agents",
+      "count": 5,
+      "sizeBytes": 3339,
+      "storageBytes": 20480,
+      "indexBytes": 40960,
+      "avgObjBytes": 667,
+      "indexCount": 2,
+      "uniqueIndexes": [
+        {
+          "name": "extensionId_1",
+          "key": {
+            "extensionId": 1
+          }
+        }
+      ],
+      "ttlIndexes": [],
+      "latestDates": {
+        "createdAt": "2026-03-31T17:51:09.890Z",
+        "updatedAt": "2026-05-04T18:57:56.893Z"
+      },
+      "statusTop": [
+        {
+          "value": "available",
+          "count": 5
+        }
+      ],
+      "domainTop": [],
+      "riskNotes": []
+    },
+    {
+      "name": "rb_caseprofiles",
+      "count": 4968,
+      "sizeBytes": 8393198,
+      "storageBytes": 2007040,
+      "indexBytes": 2273280,
+      "avgObjBytes": 1689,
+      "indexCount": 12,
+      "uniqueIndexes": [
+        {
+          "name": "caseId_1_domain_1",
+          "key": {
+            "caseId": 1,
+            "domain": 1
+          }
+        }
+      ],
+      "ttlIndexes": [],
+      "latestDates": {
+        "createdAt": "2026-05-04T19:05:09.764Z",
+        "updatedAt": "2026-05-04T19:05:11.276Z"
+      },
+      "statusTop": [],
+      "domainTop": [
+        {
+          "value": "WYNN",
+          "count": 3319
+        },
+        {
+          "value": "TAG",
+          "count": 1649
+        }
+      ],
+      "riskNotes": []
+    },
+    {
+      "name": "rb_contactactivities",
+      "count": 13573,
+      "sizeBytes": 16396334,
+      "storageBytes": 5087232,
+      "indexBytes": 6471680,
+      "avgObjBytes": 1208,
+      "indexCount": 11,
+      "uniqueIndexes": [],
+      "ttlIndexes": [],
+      "latestDates": {
+        "createdAt": "2026-05-04T18:55:35.082Z",
+        "updatedAt": "2026-05-04T18:55:38.625Z"
+      },
+      "statusTop": [],
+      "domainTop": [],
+      "riskNotes": []
+    },
+    {
+      "name": "rb_dailycallstats",
+      "count": 3315,
+      "sizeBytes": 1824375,
+      "storageBytes": 454656,
+      "indexBytes": 737280,
+      "avgObjBytes": 550,
+      "indexCount": 5,
+      "uniqueIndexes": [
+        {
+          "name": "date_1_piece_1",
+          "key": {
+            "date": 1,
+            "piece": 1
+          }
+        }
+      ],
+      "ttlIndexes": [],
+      "latestDates": {
+        "createdAt": "2026-04-13T21:34:46.027Z",
+        "updatedAt": "2026-04-13T21:34:46.027Z"
+      },
+      "statusTop": [],
+      "domainTop": [],
+      "riskNotes": []
+    },
+    {
+      "name": "rb_dailycasehealthsnapshots",
+      "count": 1,
+      "sizeBytes": 1437,
+      "storageBytes": 20480,
+      "indexBytes": 40960,
+      "avgObjBytes": 1437,
+      "indexCount": 2,
+      "uniqueIndexes": [
+        {
+          "name": "key_1",
+          "key": {
+            "key": 1
+          }
+        }
+      ],
+      "ttlIndexes": [],
+      "latestDates": {
+        "createdAt": "2026-04-16T03:51:27.815Z",
+        "updatedAt": "2026-05-02T04:07:12.105Z"
+      },
+      "statusTop": [],
+      "domainTop": [],
+      "riskNotes": []
+    },
+    {
+      "name": "rb_eventlogs",
+      "count": 39030,
+      "sizeBytes": 57579562,
+      "storageBytes": 7274496,
+      "indexBytes": 5029888,
+      "avgObjBytes": 1475,
+      "indexCount": 4,
+      "uniqueIndexes": [],
+      "ttlIndexes": [],
+      "latestDates": {},
+      "statusTop": [],
+      "domainTop": [],
+      "riskNotes": [
+        "append-only-looking collection without TTL"
+      ]
+    },
+    {
+      "name": "rb_paymentalerts",
+      "count": 77,
+      "sizeBytes": 59390,
+      "storageBytes": 28672,
+      "indexBytes": 81920,
+      "avgObjBytes": 771,
+      "indexCount": 4,
+      "uniqueIndexes": [
+        {
+          "name": "caseId_1_domain_1_paymentDate_1",
+          "key": {
+            "caseId": 1,
+            "domain": 1,
+            "paymentDate": 1
+          }
+        }
+      ],
+      "ttlIndexes": [],
+      "latestDates": {
+        "createdAt": "2026-05-02T03:58:01.039Z",
+        "updatedAt": "2026-05-02T03:58:01.039Z"
+      },
+      "statusTop": [],
+      "domainTop": [
+        {
+          "value": "TAG",
+          "count": 76
+        },
+        {
+          "value": "WYNN",
+          "count": 1
+        }
+      ],
+      "riskNotes": []
+    },
+    {
+      "name": "rb_sourcecanonicals",
+      "count": 80,
+      "sizeBytes": 105340,
+      "storageBytes": 40960,
+      "indexBytes": 204800,
+      "avgObjBytes": 1316,
+      "indexCount": 10,
+      "uniqueIndexes": [
+        {
+          "name": "canonicalKey_1",
+          "key": {
+            "canonicalKey": 1
+          }
+        }
+      ],
+      "ttlIndexes": [],
+      "latestDates": {
+        "createdAt": "2026-04-15T17:22:10.074Z",
+        "updatedAt": "2026-04-15T18:12:25.936Z"
+      },
+      "statusTop": [],
+      "domainTop": [],
+      "riskNotes": []
+    },
+    {
+      "name": "rcoauthstates",
+      "count": 17,
+      "sizeBytes": 8850,
+      "storageBytes": 36864,
+      "indexBytes": 221184,
+      "avgObjBytes": 520,
+      "indexCount": 6,
+      "uniqueIndexes": [
+        {
+          "name": "state_1",
+          "key": {
+            "state": 1
+          }
+        }
+      ],
+      "ttlIndexes": [],
+      "latestDates": {
+        "createdAt": "2026-05-13T22:41:31.435Z"
+      },
+      "statusTop": [],
+      "domainTop": [],
+      "riskNotes": []
+    },
+    {
+      "name": "smsconversations",
+      "count": 344,
+      "sizeBytes": 367295,
+      "storageBytes": 114688,
+      "indexBytes": 114688,
+      "avgObjBytes": 1067,
+      "indexCount": 4,
+      "uniqueIndexes": [],
+      "ttlIndexes": [],
+      "latestDates": {
+        "createdAt": "2026-05-04T17:31:22.949Z",
+        "updatedAt": "2026-05-04T17:31:24.001Z"
+      },
+      "statusTop": [],
+      "domainTop": [],
+      "riskNotes": []
+    },
+    {
+      "name": "socialresponderconfigs",
+      "count": 0,
+      "sizeBytes": 0,
+      "storageBytes": 4096,
+      "indexBytes": 16384,
+      "avgObjBytes": 0,
+      "indexCount": 4,
+      "uniqueIndexes": [
+        {
+          "name": "domain_platform_unique",
+          "key": {
+            "domain": 1,
+            "platform": 1
+          }
+        }
+      ],
+      "ttlIndexes": [],
+      "latestDates": {},
+      "statusTop": [],
+      "domainTop": [],
+      "riskNotes": []
+    },
+    {
+      "name": "taxstewartsubmissions",
+      "count": 3,
+      "sizeBytes": 9980,
+      "storageBytes": 24576,
+      "indexBytes": 102400,
+      "avgObjBytes": 3326,
+      "indexCount": 5,
+      "uniqueIndexes": [],
+      "ttlIndexes": [],
+      "latestDates": {
+        "createdAt": "2026-02-11T20:17:23.745Z",
+        "updatedAt": "2026-02-11T20:17:24.924Z"
+      },
+      "statusTop": [
+        {
+          "value": "submitted",
+          "count": 3
+        }
+      ],
+      "domainTop": [],
+      "riskNotes": []
+    },
+    {
+      "name": "tiktokcommentreplies",
+      "count": 0,
+      "sizeBytes": 0,
+      "storageBytes": 4096,
+      "indexBytes": 12288,
+      "avgObjBytes": 0,
+      "indexCount": 3,
+      "uniqueIndexes": [
+        {
+          "name": "commentId_1",
+          "key": {
+            "commentId": 1
+          }
+        }
+      ],
+      "ttlIndexes": [
+        {
+          "name": "repliedAt_1",
+          "key": {
+            "repliedAt": 1
+          },
+          "expireAfterSeconds": 7776000
+        }
+      ],
+      "latestDates": {},
+      "statusTop": [],
+      "domainTop": [],
+      "riskNotes": []
+    },
+    {
+      "name": "tiktoktokens",
+      "count": 0,
+      "sizeBytes": 0,
+      "storageBytes": 4096,
+      "indexBytes": 8192,
+      "avgObjBytes": 0,
+      "indexCount": 2,
+      "uniqueIndexes": [
+        {
+          "name": "company_1",
+          "key": {
+            "company": 1
+          }
+        }
+      ],
+      "ttlIndexes": [],
+      "latestDates": {},
+      "statusTop": [],
+      "domainTop": [],
+      "riskNotes": []
+    },
+    {
+      "name": "useraccounts",
+      "count": 9,
+      "sizeBytes": 27928,
+      "storageBytes": 53248,
+      "indexBytes": 552960,
+      "avgObjBytes": 3103,
+      "indexCount": 15,
+      "uniqueIndexes": [
+        {
+          "name": "email_1",
+          "key": {
+            "email": 1
+          }
+        }
+      ],
+      "ttlIndexes": [],
+      "latestDates": {
+        "createdAt": "2026-05-11T17:49:48.924Z",
+        "updatedAt": "2026-05-16T16:41:58.814Z"
+      },
+      "statusTop": [
+        {
+          "value": "active",
+          "count": 9
+        }
+      ],
+      "domainTop": [],
+      "riskNotes": []
+    },
+    {
+      "name": "userrequests",
+      "count": 1,
+      "sizeBytes": 414,
+      "storageBytes": 20480,
+      "indexBytes": 40960,
+      "avgObjBytes": 414,
+      "indexCount": 2,
+      "uniqueIndexes": [
+        {
+          "name": "email_1",
+          "key": {
+            "email": 1
+          }
+        }
+      ],
+      "ttlIndexes": [],
+      "latestDates": {
+        "createdAt": "2025-04-01T19:57:25.000Z"
+      },
+      "statusTop": [
+        {
+          "value": "registered",
+          "count": 1
+        }
+      ],
+      "domainTop": [],
+      "riskNotes": []
+    },
+    {
+      "name": "users",
+      "count": 4,
+      "sizeBytes": 1418,
+      "storageBytes": 20480,
+      "indexBytes": 40960,
+      "avgObjBytes": 354,
+      "indexCount": 2,
+      "uniqueIndexes": [
+        {
+          "name": "email_1",
+          "key": {
+            "email": 1
+          }
+        }
+      ],
+      "ttlIndexes": [],
+      "latestDates": {
+        "createdAt": "2026-04-15T21:38:32.930Z"
+      },
+      "statusTop": [],
+      "domainTop": [],
+      "riskNotes": []
+    },
+    {
+      "name": "validatedphones",
+      "count": 725,
+      "sizeBytes": 163850,
+      "storageBytes": 61440,
+      "indexBytes": 102400,
+      "avgObjBytes": 226,
+      "indexCount": 2,
+      "uniqueIndexes": [
+        {
+          "name": "phone_1",
+          "key": {
+            "phone": 1
+          }
+        }
+      ],
+      "ttlIndexes": [],
+      "latestDates": {
+        "createdAt": "2025-08-13T20:53:06.363Z",
+        "updatedAt": "2025-08-13T20:53:06.363Z"
+      },
+      "statusTop": [],
+      "domainTop": [],
+      "riskNotes": []
+    }
+  ],
+  "elapsedMs": 29799
+}

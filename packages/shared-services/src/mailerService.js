@@ -191,7 +191,6 @@ function getTransport(domainKey) {
   const apiKey =
     company?.integrations?.sendgrid?.apiKey ||
     process.env[`${key}_API_KEY`] ||
-    process.env.WYNN_API_KEY ||
     "";
 
   if (!apiKey) {
@@ -219,7 +218,7 @@ function getTransport(domainKey) {
 //   1. explicit `options.from` (callers who know what they want)
 //   2. company-config `fromEmail` + `name`
 //   3. process.env.<DOMAIN>_EMAIL_NAME / <DOMAIN>_EMAIL_ADDRESS (legacy)
-//   4. literal "Parallel <mgray@taxadvocategroup.com>" so dev sends still
+//   4. literal "Parallel <team@taxadvocategroup.com>" so dev sends still
 //      go through with whatever sender SendGrid has authorized
 function resolveFrom(domainKey, explicitFrom) {
   if (explicitFrom) return explicitFrom;
@@ -229,7 +228,7 @@ function resolveFrom(domainKey, explicitFrom) {
     company?.fromEmail ||
     process.env[`${key}_EMAIL_ADDRESS`] ||
     process.env[`${key}_FROM_EMAIL`] ||
-    "mgray@taxadvocategroup.com";
+    "team@taxadvocategroup.com";
   const fromName =
     process.env[`${key}_EMAIL_NAME`] ||
     company?.name ||

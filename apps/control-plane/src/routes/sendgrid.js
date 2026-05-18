@@ -2,6 +2,7 @@
 
 const express = require("express");
 const { sendTestEmail } = require("../../../../packages/shared-services/src");
+const { getInternalFromEmail } = require("../../../../packages/shared-config/src");
 const { toErrorResponse } = require("../../../../packages/shared-errors/src");
 
 function createSendgridRouter(auth) {
@@ -11,7 +12,7 @@ function createSendgridRouter(auth) {
     try {
       const domain = String(req.params.domain || "TAG").toUpperCase();
       const payload = await sendTestEmail(domain, {
-        fromEmail: req.body?.fromEmail || "mgray@taxadvocategroup.com",
+        fromEmail: req.body?.fromEmail || getInternalFromEmail(),
         toEmail: req.body?.toEmail || "mgray@taxadvocategroup.com",
         subject: req.body?.subject,
         text: req.body?.text || "test",

@@ -47,6 +47,8 @@ const cxDialQueueSchema = new mongoose.Schema(
     lastPlacedAt: { type: Date, default: null },
     dailyPlacedDateKey: { type: String, default: null, index: true },
     dailyPlacedCalls: { type: Number, default: 0, index: true },
+    hourlyPlacedHourKey: { type: String, default: null, index: true },
+    hourlyPlacedCalls: { type: Number, default: 0, index: true },
     callPlan: {
       phaseIndex: { type: Number, default: 0 },
       delaysMinutes: { type: [Number], default: [0, 15, 15, 15, 15, 15] },

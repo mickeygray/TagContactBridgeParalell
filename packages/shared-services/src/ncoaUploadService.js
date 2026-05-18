@@ -720,7 +720,10 @@ async function sweepStaleNcoaBatches({
       family: "lexis",
       subtype: "ncoa-upload-batch",
       stage: { $in: ["completed", "failed"] },
-      "payload.importBatch": importBatch,
+      $or: [
+        { "payload.importBatch": importBatch },
+        { "result.importBatch": importBatch },
+      ],
     }).lean();
     if (terminal) continue;
     candidates.push({ importBatch, requestedAt: stage.happenedAt, payload: stage.payload, domain: stage.domain });
@@ -746,10 +749,17 @@ async function sweepStaleNcoaBatches({
       subtype: "ncoa-upload-batch",
       stage: "failed",
       aggregateType: "ncoa-upload",
-      aggregateId: `${candidate.importBatch}-stale-sweep-${now.getTime()}`,
+      aggregateId: `${candidate.importBatch}-stale-sweep`,
       sourceService,
+      status: "warning",
       title: "NCOA upload aborted by stale-sweep",
       summary: `No row activity in >${Math.round(maxStaleMs / 60000)}m; closing batch envelope`,
+      dedupeKey: `ncoa-stale-sweep:${candidate.importBatch}`,
+      payload: {
+        importBatch: candidate.importBatch,
+        requestedAt: candidate.requestedAt,
+        reason: "stale-no-activity",
+      },
       result: {
         importBatch: candidate.importBatch,
         requestedAt: candidate.requestedAt,

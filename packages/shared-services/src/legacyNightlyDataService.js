@@ -15,13 +15,17 @@ const mongoose = require("mongoose");
 const {
   listLegacyContactActivityDocs,
 } = require("./legacyContactActivityService");
+const {
+  legacyReadDb,
+  resolveLegacyReadDbName,
+} = require("../../shared-repositories/src/legacyReadDb");
 
 function getLegacyDbName() {
-  return String(process.env.LEGACY_APP_DB_NAME || "test").trim() || "test";
+  return resolveLegacyReadDbName(mongoose);
 }
 
 function getLegacyDb() {
-  return mongoose.connection.useDb(getLegacyDbName(), { useCache: true });
+  return legacyReadDb(mongoose);
 }
 
 function normalizeDomain(domain) {

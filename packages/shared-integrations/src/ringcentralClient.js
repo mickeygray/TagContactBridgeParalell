@@ -560,6 +560,16 @@ function stopWarmupTimer() {
 }
 
 async function reinitializePlatform({ force = true, reason = "manual" } = {}) {
+  if (rcSuspendedByEnv()) {
+    authState = {
+      ...authState,
+      isAuthenticated: false,
+      lastScheduledSkipAt: new Date().toISOString(),
+      lastError: null,
+    };
+    return getAuthStatus();
+  }
+
   const previousTokenState = { ...tokenState };
   const previousAuthState = { ...authState };
 
@@ -594,6 +604,16 @@ async function warmupPlatform(options = {}) {
     ...authState,
     refreshIntervalMs,
   };
+
+  if (rcSuspendedByEnv()) {
+    authState = {
+      ...authState,
+      isAuthenticated: false,
+      lastScheduledSkipAt: new Date().toISOString(),
+      lastError: null,
+    };
+    return getAuthStatus();
+  }
 
   if (refreshIntervalMs > 0) {
     refreshTimer = setInterval(async () => {

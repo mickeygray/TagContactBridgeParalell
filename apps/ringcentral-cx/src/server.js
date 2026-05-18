@@ -411,22 +411,22 @@ async function startServer() {
           maxCount: batchSize,
           claimMinutes: Number(process.env.RC_CX_FRESH_CLAIM_MINUTES) || 15,
           queueFamilies: ["fresh-day1"],
-          maxOpenAssignments: Math.max(Number(process.env.RC_CX_FRESH_OPEN_ASSIGNMENTS) || 5, 1),
+          maxOpenAssignments: Math.max(Number(process.env.RC_CX_FRESH_OPEN_ASSIGNMENTS) || 10, 1),
           maxOpenAssignmentsScope: "queue-family",
         });
         const day2To15AssignmentBatch = await assignCxQueueBatch({
-          maxCount: Math.max(Number(process.env.RC_CX_DAY2TO15_BATCH_SIZE) || Number(process.env.RC_CX_NONFRESH_BATCH_SIZE) || 20, 1),
+          maxCount: Math.max(Number(process.env.RC_CX_DAY2TO15_BATCH_SIZE) || Number(process.env.RC_CX_NONFRESH_BATCH_SIZE) || 25, 1),
           claimMinutes: Number(process.env.RC_CX_NONFRESH_CLAIM_MINUTES) || 30,
           queueFamilies: ["fresh-day2to10"],
-          randomize: true,
-          maxOpenAssignments: Math.max(Number(process.env.RC_CX_DAY2TO15_OPEN_ASSIGNMENTS) || 15, 1),
+          randomize: false,
+          maxOpenAssignments: Math.max(Number(process.env.RC_CX_DAY2TO15_OPEN_ASSIGNMENTS) || 25, 1),
           maxOpenAssignmentsScope: "queue-family",
         });
         const agedAssignmentBatch = await assignCxQueueBatch({
           maxCount: Math.max(Number(process.env.RC_CX_AGED_BATCH_SIZE) || Number(process.env.RC_CX_NONFRESH_BATCH_SIZE) || 20, 1),
           claimMinutes: Number(process.env.RC_CX_AGED_CLAIM_MINUTES) || Number(process.env.RC_CX_NONFRESH_CLAIM_MINUTES) || 30,
           queueFamilies: ["aged"],
-          randomize: true,
+          randomize: false,
           maxOpenAssignments: Math.max(Number(process.env.RC_CX_AGED_OPEN_ASSIGNMENTS) || 5, 1),
           maxOpenAssignmentsScope: "queue-family",
         });

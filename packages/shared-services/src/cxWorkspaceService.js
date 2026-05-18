@@ -9,6 +9,8 @@ const {
   conversationWorkflowRepository,
   cxDialQueueRepository,
   leadCadenceRepository,
+  paymentLedgerRepository,
+  postDateHoldRepository,
   reviewQueueRepository,
   userAccountRepository,
   workflowRecordRepository,
@@ -53,8 +55,10 @@ const {
   completeCxQueueItem,
   releaseCxQueueItem,
   rescheduleCxQueueItem,
+  queueCxDialRequest,
   stageCxDispatchIntent,
 } = require("./cxCadenceService");
+const { extractPaymentRows } = require("./paymentReconcileService");
 const { deriveQueueFamily } = require("./cxLoadBalancerService");
 const {
   deriveQueueFamilyFromLeadCreatedAt,
@@ -64,6 +68,9 @@ const {
   getPacificDateKey,
   resolveAccountQueuePolicy,
 } = require("./cxQueuePolicyService");
+const {
+  getCxQueueServeRank,
+} = require("./cxQueueFairnessService");
 const { getRingCentralConfig, getSharedConfig, PORTS } = require("../../shared-config/src");
 const { getCompanyConfig } = require("../../shared-config/src/companyConfig");
 const { resolveExportStatus, resolveStatus } = require("../../shared-config/src/statusMap");
@@ -686,6 +693,212 @@ function resolveRequestedStatus(domain, input = {}) {
   if (!statusText) return null;
   const resolved = resolveExportStatus(domain, statusText);
   return resolved?.statusId ?? null;
+}
+
+function normalizePostDateText(value) {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[_-]+/g, " ")
+    .replace(/\s+/g, " ");
+}
+
+function isPostDateStatusRequest(domain, input = {}, result = {}) {
+  const statusId =
+    result.statusId != null
+      ? Number(result.statusId)
+      : resolveRequestedStatus(domain, input);
+  const resolved = Number.isFinite(statusId) ? resolveStatus(domain, statusId) : null;
+  if (resolved?.category === "postdate") return true;
+  const statusText = normalizePostDateText(
+    input.status || input.logicsStatus || result.disposition || result.statusLabel || "",
+  );
+  return statusText === "postdate" || statusText === "post date" || statusText.includes("post date");
+}
+
+function readPaymentScheduleDate(row = {}) {
+  const raw =
+    row.PaidDate
+    || row.PaymentDate
+    || row.ScheduledDate
+    || row.ScheduleDate
+    || row.ProcessDate
+    || row.DueDate
+    || row.Date
+    || null;
+  if (!raw) return null;
+  const date = new Date(raw);
+  if (Number.isNaN(date.getTime())) return null;
+  return date;
+}
+
+function summarizePaymentScheduleRow(row = {}) {
+  const date = readPaymentScheduleDate(row);
+  return {
+    casePaymentId: row.CasePaymentID != null ? Number(row.CasePaymentID) : null,
+    amount: row.Amount != null ? Number(row.Amount) : null,
+    paymentType: row.PaymentType || row.PaymentTypeName || row.Type || null,
+    transactionStatus: row.TransactionStatus || null,
+    date: date ? date.toISOString() : null,
+    dateKey:
+      String(
+        row.PaidDate
+        || row.PaymentDate
+        || row.ScheduledDate
+        || row.ScheduleDate
+        || row.ProcessDate
+        || row.DueDate
+        || row.Date
+        || "",
+      ).slice(0, 10) || (date ? date.toISOString().slice(0, 10) : null),
+  };
+}
+
+function pickFirstPaymentScheduleRow(rows = [], now = new Date()) {
+  const todayKey = getPacificDateKey(now);
+  const candidates = rows
+    .map((row) => ({ raw: row, summary: summarizePaymentScheduleRow(row) }))
+    .filter((entry) => entry.summary.dateKey)
+    .sort((left, right) => {
+      const leftKey = left.summary.dateKey || "";
+      const rightKey = right.summary.dateKey || "";
+      if (leftKey !== rightKey) return leftKey < rightKey ? -1 : 1;
+      return (Number(left.summary.casePaymentId) || 0) - (Number(right.summary.casePaymentId) || 0);
+    });
+  if (candidates.length === 0) return null;
+  return candidates.find((entry) => String(entry.summary.dateKey) >= todayKey) || candidates[0];
+}
+
+async function resolvePostDatePaymentSchedule(domain, caseId) {
+  const client = createLogicsClient(domain);
+  try {
+    const rawPayments = await client.getCasePayments(caseId);
+    const rows = extractPaymentRows(rawPayments);
+    const picked = pickFirstPaymentScheduleRow(rows);
+    const compactRows = rows
+      .map(summarizePaymentScheduleRow)
+      .filter((row) => row.dateKey)
+      .sort((left, right) => String(left.dateKey).localeCompare(String(right.dateKey)))
+      .slice(0, 8);
+    if (!picked) {
+      return {
+        status: rows.length > 0 ? "no-dated-payments" : "no-payments",
+        firstPaymentDate: null,
+        firstPaymentDateKey: null,
+        snapshot: {
+          source: "logics-case-payments",
+          rowCount: rows.length,
+          rows: compactRows,
+        },
+      };
+    }
+    return {
+      status: "found",
+      firstPaymentDate: picked.summary.date ? new Date(picked.summary.date) : null,
+      firstPaymentDateKey: picked.summary.dateKey || null,
+      snapshot: {
+        source: "logics-case-payments",
+        rowCount: rows.length,
+        selected: picked.summary,
+        rows: compactRows,
+      },
+    };
+  } catch (error) {
+    if (error?.details?.responseStatus === 404) {
+      return {
+        status: "no-payments",
+        firstPaymentDate: null,
+        firstPaymentDateKey: null,
+        snapshot: {
+          source: "logics-case-payments",
+          rowCount: 0,
+          rows: [],
+        },
+      };
+    }
+    return {
+      status: "logics-error",
+      firstPaymentDate: null,
+      firstPaymentDateKey: null,
+      snapshot: {
+        source: "logics-case-payments",
+        error: error.message,
+      },
+    };
+  }
+}
+
+async function recordCxPostDateHold(domain, user, input = {}, result = {}) {
+  const normalizedDomain = normalizeDomain(domain);
+  const caseId = Number(input.caseId ?? input.CaseID);
+  if (!normalizedDomain || !Number.isFinite(caseId)) return null;
+
+  const now = new Date();
+  const [profile, queueItem, schedule] = await Promise.all([
+    caseProfileRepository.findCaseProfile(normalizedDomain, caseId).catch(() => null),
+    (input.queueItemId || input.queueTicketId)
+      ? cxDialQueueRepository.findQueueItemById(input.queueItemId || input.queueTicketId).catch(() => null)
+      : cxDialQueueRepository.findActiveQueueItem(normalizedDomain, caseId).catch(() => null),
+    resolvePostDatePaymentSchedule(normalizedDomain, caseId),
+  ]);
+  const queueObject = queueItem && typeof queueItem.toObject === "function"
+    ? queueItem.toObject()
+    : queueItem;
+  const statusId = result.statusId != null
+    ? Number(result.statusId)
+    : resolveRequestedStatus(normalizedDomain, input);
+  const statusInfo = Number.isFinite(statusId) ? resolveStatus(normalizedDomain, statusId) : null;
+  const caseName =
+    profile?.name
+    || [profile?.firstName, profile?.lastName].filter(Boolean).join(" ").trim()
+    || input.leadName
+    || input.name
+    || null;
+  const phone =
+    input.phone
+    || input.searchPhone
+    || profile?.primaryPhone
+    || queueObject?.phone
+    || null;
+
+  return postDateHoldRepository.upsertActivePostDateHold(normalizedDomain, caseId, {
+    postDatedAt: now,
+    postDatedDateKey: getPacificDateKey(now),
+    postDatedByEmail: user?.email || null,
+    postDatedByName: user?.name || null,
+    caseName,
+    phone,
+    email: profile?.email || input.email || null,
+    sourceName: profile?.sourceName || queueObject?.sourceName || input.sourceName || null,
+    intakeSource: queueObject?.intakeSource || input.intakeSource || null,
+    intakeRoute: queueObject?.intakeRoute || input.intakeRoute || null,
+    queueFamily: queueObject?.queueFamily || queueObject?.metadata?.queueFamily || input.queueFamily || null,
+    queueItemId: input.queueItemId || input.queueTicketId || (queueObject?._id ? String(queueObject._id) : null),
+    queueActionKey: extractQueueActionKey(input) || queueObject?.metadata?.actionKey || null,
+    logicsStatusId: Number.isFinite(statusId) ? statusId : null,
+    logicsStatusLabel: statusInfo?.label || result.disposition || "Post-Date",
+    settlementOfficerId: result.settlementOfficerId || resolveInputSettlementOfficerId(input) || null,
+    statusWorkflowId: result.completionWorkflowId || result.workflowId || null,
+    firstPaymentDate: schedule.firstPaymentDate || null,
+    firstPaymentDateKey: schedule.firstPaymentDateKey || null,
+    paymentScheduleStatus: schedule.status,
+    paymentScheduleSnapshot: schedule.snapshot,
+    metadata: {
+      source: "cx-logics-status-update",
+      queueOutcome: result.queueOutcome || null,
+      statusCategory: result.statusCategory || statusInfo?.category || null,
+    },
+    historyEntry: {
+      type: "postdate-recorded",
+      actorEmail: user?.email || null,
+      note: "Post-date status set in Logics.",
+      payload: {
+        workflowId: result.completionWorkflowId || result.workflowId || null,
+        firstPaymentDateKey: schedule.firstPaymentDateKey || null,
+        paymentScheduleStatus: schedule.status,
+      },
+    },
+  });
 }
 
 function normalizeCxDisposition(value) {
@@ -1404,6 +1617,15 @@ function summarizeCallQueueItem(item) {
       || item.leadCreatedAt
       || item.createdAt
       || null,
+    new Date(),
+    {
+      placedCalls:
+        item.placedCalls
+        ?? item.metadata?.placedCalls
+        ?? payloadSnapshot?.placedCalls
+        ?? payloadSnapshot?.metadata?.placedCalls
+        ?? 0,
+    },
   );
   const derivedFamily = createdAtFamily
     || explicitFamily
@@ -1574,6 +1796,15 @@ function countVisibleQueueItemsByFamily(visibleQueueItems = [], queueFamilies = 
 
 function getPositiveEnvNumber(name, fallback) {
   return Math.max(Number(process.env[name]) || fallback, 1);
+}
+
+function readBooleanEnv(name, fallback) {
+  const raw = process.env[name];
+  if (raw == null || raw === "") return fallback;
+  const normalized = String(raw).trim().toLowerCase();
+  if (["1", "true", "yes", "on"].includes(normalized)) return true;
+  if (["0", "false", "no", "off"].includes(normalized)) return false;
+  return fallback;
 }
 
 function getNonNegativeEnvNumber(name, fallback) {
@@ -1927,6 +2158,18 @@ async function refillQueueFamilyForAgent({
   requestKeyPrefix,
 }) {
   const deficit = Math.max(targetCount - currentCount, 0);
+  if (readBooleanEnv("RC_CX_DRAIN_BEFORE_REFILL_ENABLED", true) && currentCount > 0) {
+    return {
+      ok: true,
+      assigned: 0,
+      materialized: 0,
+      skipped: true,
+      reason: "drain-before-refill",
+      currentCount,
+      targetCount,
+      queueFamilies,
+    };
+  }
   if (deficit <= 0) {
     return {
       ok: true,
@@ -1997,6 +2240,17 @@ async function refillFreshHotLaneForAgent({
   requestKeyPrefix,
 }) {
   const deficit = Math.max(targetCount - currentCount, 0);
+  if (readBooleanEnv("RC_CX_DRAIN_BEFORE_REFILL_ENABLED", true) && currentCount > 0) {
+    return {
+      ok: true,
+      assigned: 0,
+      skipped: true,
+      reason: "drain-before-refill",
+      currentCount,
+      targetCount,
+      queueFamilies: ["fresh-day1"],
+    };
+  }
   if (deficit <= 0) {
     return {
       ok: true,
@@ -2105,8 +2359,8 @@ async function maybeRefillCxQueueForAgent(context, agentExtensionId, visibleQueu
     currentCount: day2To15Current,
     targetCount: day2To15Target,
     countEnvName: "RC_CX_DAY2TO15_REFILL_COUNT",
-    claimMinutes: Number(process.env.RC_CX_NONFRESH_CLAIM_MINUTES) || 480,
-    randomize: true,
+    claimMinutes: Number(process.env.RC_CX_NONFRESH_CLAIM_MINUTES) || 30,
+    randomize: false,
     maxOpenAssignmentsScope: "queue-family",
     requestKeyPrefix: `cx-day2to15-queue-refill:${context.domain}:${agentExtensionId}:${timestamp}`,
   }));
@@ -2118,8 +2372,8 @@ async function maybeRefillCxQueueForAgent(context, agentExtensionId, visibleQueu
     currentCount: agedCurrent,
     targetCount: agedTarget,
     countEnvName: "RC_CX_AGED_REFILL_COUNT",
-    claimMinutes: Number(process.env.RC_CX_AGED_CLAIM_MINUTES) || 480,
-    randomize: true,
+    claimMinutes: Number(process.env.RC_CX_AGED_CLAIM_MINUTES) || Number(process.env.RC_CX_NONFRESH_CLAIM_MINUTES) || 30,
+    randomize: false,
     maxOpenAssignmentsScope: "queue-family",
     requestKeyPrefix: `cx-aged-queue-refill:${context.domain}:${agentExtensionId}:${timestamp}`,
   }));
@@ -2223,6 +2477,12 @@ function summarizeServedQueueItem(queueItem, cadenceDoc = null) {
     progressiveStageLabel: queueItem.progressiveStageLabel || payloadSnapshot?.progressiveStageLabel || null,
     placedCalls: Number(queueItem.placedCalls || queueItem.metadata?.placedCalls || 0) || 0,
     dailyPlacedCalls: Number(queueItem.dailyPlacedCalls || queueItem.metadata?.dailyPlacedCalls || 0) || 0,
+    hourlyPlacedHourKey: queueItem.hourlyPlacedHourKey || queueItem.metadata?.hourlyPlacedHourKey || null,
+    hourlyPlacedCalls: Number(queueItem.hourlyPlacedCalls || queueItem.metadata?.hourlyPlacedCalls || 0) || 0,
+    smsCallbackUrgency: queueItem.metadata?.smsCallbackUrgency || null,
+    callbackWindow: queueItem.metadata?.callbackWindow || null,
+    callbackQueueMode: queueItem.metadata?.callbackQueueMode || null,
+    hotIntentReason: queueItem.metadata?.hotIntentReason || null,
     lastPlacedAt: queueItem.lastPlacedAt || queueItem.metadata?.lastQueueAttemptAt || null,
     queueDayIndex: activeDay,
     payloadSnapshot,
@@ -2290,20 +2550,12 @@ async function buildCxQueueItems(context, limit = 50) {
       cadenceByCaseId.get(buildQueueCadenceKey(item.domain || context.domain, item.caseId)) || null,
     ));
 
+  const sortNow = new Date();
+
   return servedItems
     .sort((left, right) => {
-      const queueSortRank = (item) => {
-        const family = String(item.queueFamily || "").trim();
-        const stage = Number.isFinite(Number(item.progressiveStageIndex)) ? Number(item.progressiveStageIndex) : 99;
-        const placedCalls = Number(item.placedCalls || 0) || 0;
-        // Green first-contact stays first; green follow-ups still outrank blue.
-        if (family === "fresh-day1") return stage <= 0 && placedCalls <= 0 ? 0 : 0.5;
-        if (family === "fresh-day2to10") return 1;
-        if (family === "aged") return 2;
-        return 99;
-      };
-      const leftFamily = queueSortRank(left);
-      const rightFamily = queueSortRank(right);
+      const leftFamily = getCxQueueServeRank(left, { now: sortNow });
+      const rightFamily = getCxQueueServeRank(right, { now: sortNow });
       if (leftFamily !== rightFamily) return leftFamily - rightFamily;
 
       const leftStage = Number.isFinite(Number(left.progressiveStageIndex)) ? Number(left.progressiveStageIndex) : 99;
@@ -6172,15 +6424,35 @@ async function executeCxLogicsUpdateCase(domain, user, input = {}) {
         result?.response,
       ).catch(() => null)
       : null;
+  const statusCategory =
+    queueOutcome?.statusCategory
+    || (statusId != null ? resolveStatus(domain, statusId)?.category : null)
+    || null;
+  let postDateHold = null;
+  if (resolvedCaseId && (statusCategory === "postdate" || isPostDateStatusRequest(domain, input, queueOutcome || result))) {
+    postDateHold = await recordCxPostDateHold(domain, user, {
+      ...input,
+      caseId: resolvedCaseId,
+    }, {
+      ...result,
+      ...(queueOutcome || {}),
+      statusId,
+      settlementOfficerId: settlementOfficerId || null,
+    }).catch((error) => ({
+      ok: false,
+      error: error.message,
+    }));
+  }
 
   return {
     ...result,
     disposition: queueOutcome?.disposition || null,
     queueOutcome: queueOutcome?.queueOutcome || null,
     rescheduledFor: queueOutcome?.rescheduledFor || null,
-    statusId: queueOutcome?.statusId || null,
-    statusCategory: queueOutcome?.statusCategory || null,
+    statusId: queueOutcome?.statusId || statusId || null,
+    statusCategory,
     settlementOfficerId: settlementOfficerId || null,
+    postDateHold,
   };
 }
 
@@ -6251,6 +6523,324 @@ async function executeCxLogicsAmortization(domain, user, input = {}) {
   });
 }
 
+function resolvePostDateReleaseStatus(domain) {
+  const normalizedDomain = normalizeDomain(domain);
+  const envSpecific = process.env[`POSTDATE_RELEASE_STATUS_ID_${normalizedDomain}`];
+  const envGlobal = process.env.POSTDATE_RELEASE_STATUS_ID;
+  const explicit = Number(envSpecific || envGlobal);
+  if (Number.isFinite(explicit) && explicit > 0) {
+    return {
+      statusId: explicit,
+      ...resolveStatus(normalizedDomain, explicit),
+      matchedBy: envSpecific ? `env-POSTDATE_RELEASE_STATUS_ID_${normalizedDomain}` : "env-POSTDATE_RELEASE_STATUS_ID",
+    };
+  }
+  const candidates = normalizedDomain === "WYNN"
+    ? ["active prospect opened", "opened", "prospect"]
+    : ["prospect", "new lead", "opened"];
+  for (const candidate of candidates) {
+    const resolved = resolveExportStatus(normalizedDomain, candidate);
+    if (resolved?.statusId) return resolved;
+  }
+  return {
+    statusId: 2,
+    ...resolveStatus(normalizedDomain, 2),
+    matchedBy: "fallback",
+  };
+}
+
+function getPostDateHoldDisplayName(hold = {}) {
+  return (
+    hold.caseName
+    || [hold.firstName, hold.lastName].filter(Boolean).join(" ").trim()
+    || `Case ${hold.caseId}`
+  );
+}
+
+async function requeueReleasedPostDateHold(domain, hold = {}, user = {}) {
+  const normalizedDomain = normalizeDomain(domain || hold.domain);
+  const caseId = Number(hold.caseId);
+  if (!normalizedDomain || !Number.isFinite(caseId)) {
+    return { queued: false, skipped: true, reason: "invalid-case" };
+  }
+  const now = new Date();
+  const existing = await leadCadenceRepository.findLeadCadence(normalizedDomain, caseId).catch(() => null);
+  const actionKey = `postdate-release:${caseId}:${now.getTime()}`;
+  const preservedActions = Array.isArray(existing?.schedule?.actions)
+    ? existing.schedule.actions.filter((action) => {
+        if (String(action?.key || "").startsWith("postdate-release:")) return false;
+        return !(action?.channel === "cx" && ["pending", "requested"].includes(String(action?.status || "")));
+      })
+    : [];
+  const releaseAction = {
+    key: actionKey,
+    type: "dial",
+    channel: "cx",
+    scheduledFor: now,
+    status: "pending",
+  };
+  const schedule = {
+    planVersion: existing?.schedule?.planVersion || "postdate-release-v1",
+    timezone: existing?.schedule?.timezone || "America/Los_Angeles",
+    nextActionType: "dial",
+    nextActionAt: now,
+    actions: [releaseAction, ...preservedActions].sort(
+      (left, right) => new Date(left.scheduledFor).getTime() - new Date(right.scheduledFor).getTime(),
+    ),
+  };
+  const leadBody = {
+    caseId: String(caseId),
+    name: getPostDateHoldDisplayName(hold),
+    phone: hold.phone || existing?.primaryPhone || null,
+    email: hold.email || existing?.email || null,
+    sourceName: hold.sourceName || existing?.sourceName || null,
+    intakeSource: hold.intakeSource || existing?.intakeSource || hold.sourceName || null,
+    intakeRoute: hold.intakeRoute || existing?.intakeRoute || "postdate-release",
+    queueFamily: hold.queueFamily || "fresh-day2to10",
+    queueTier: "later",
+    currentStage: "cx-postdate-released",
+  };
+  const cadence = await leadCadenceRepository.upsertLeadCadence(normalizedDomain, caseId, {
+    active: true,
+    name: leadBody.name,
+    email: leadBody.email,
+    primaryPhone: leadBody.phone,
+    normalizedPhone: normalizePhone(leadBody.phone),
+    sourceName: leadBody.sourceName,
+    intakeSource: leadBody.intakeSource,
+    intakeRoute: leadBody.intakeRoute,
+    currentStage: "cx-postdate-released",
+    schedule,
+    payloadSnapshot: {
+      ...(existing?.payloadSnapshot || {}),
+      ...leadBody,
+      leadBody,
+      postDateRelease: {
+        holdId: hold._id ? String(hold._id) : null,
+        releasedAt: now,
+        releasedByEmail: user?.email || null,
+      },
+    },
+  });
+  const queueResult = await queueCxDialRequest({
+    domain: normalizedDomain,
+    caseId,
+    actionKey,
+    leadCadenceId: cadence?._id ? String(cadence._id) : null,
+    phone: leadBody.phone,
+    name: leadBody.name,
+    intakeSource: leadBody.intakeSource,
+    intakeRoute: leadBody.intakeRoute,
+    sourceName: leadBody.sourceName,
+    queueFamily: leadBody.queueFamily,
+    queueTier: "later",
+    requestedBy: "postdate-release",
+    requestedByUserEmail: user?.email || null,
+    payloadSnapshot: {
+      ...leadBody,
+      postDateHoldId: hold._id ? String(hold._id) : null,
+    },
+  }).catch((error) => ({
+    queued: false,
+    error: error.message,
+  }));
+
+  return {
+    actionKey,
+    cadenceId: cadence?._id ? String(cadence._id) : null,
+    queueResult,
+  };
+}
+
+async function listCxPostDateHolds(domain, _user, filters = {}) {
+  const normalizedDomain = normalizeDomain(domain);
+  const items = await postDateHoldRepository.listPostDateHolds(normalizedDomain, filters);
+  const summary = items.reduce(
+    (acc, item) => {
+      acc.total += 1;
+      acc[item.status] = (acc[item.status] || 0) + 1;
+      if (item.firstPaymentDateKey) acc.withFirstPaymentDate += 1;
+      if (item.status === "active" && !item.firstPaymentDateKey) acc.needsScheduleReview += 1;
+      return acc;
+    },
+    {
+      total: 0,
+      active: 0,
+      released: 0,
+      payment_verified: 0,
+      review: 0,
+      release_failed: 0,
+      withFirstPaymentDate: 0,
+      needsScheduleReview: 0,
+    },
+  );
+  return {
+    domain: normalizedDomain,
+    filters,
+    summary,
+    items,
+  };
+}
+
+async function releaseCxPostDateHold(domain, user, input = {}) {
+  const normalizedDomain = normalizeDomain(domain);
+  const hold = await postDateHoldRepository.findPostDateHold(
+    normalizedDomain,
+    input.holdId || input.id || input.caseId,
+  );
+  if (!hold) {
+    const err = new Error("Active post-date hold not found");
+    err.status = 404;
+    throw err;
+  }
+  const releaseStatus = resolvePostDateReleaseStatus(normalizedDomain);
+  const releaseReason = String(input.reason || "Released from post-date hold").trim();
+  let logicsResult = null;
+  try {
+    logicsResult = await executeCxLogicsUpdateCase(normalizedDomain, user, {
+      caseId: hold.caseId,
+      CaseID: hold.caseId,
+      StatusID: releaseStatus.statusId,
+      Notes: input.notes || undefined,
+      skipQueueFinalize: true,
+    });
+  } catch (error) {
+    await postDateHoldRepository.markPostDateHoldReleaseFailed(hold._id, {
+      checkedAt: new Date(),
+      releasedByEmail: user?.email || null,
+      releaseReason,
+      releaseStatusId: releaseStatus.statusId,
+      releaseStatusLabel: releaseStatus.label || null,
+      error: error.message,
+    }).catch(() => null);
+    throw error;
+  }
+
+  const queueResult = await requeueReleasedPostDateHold(normalizedDomain, hold, user);
+  const updated = await postDateHoldRepository.markPostDateHoldReleased(hold._id, {
+    releasedAt: new Date(),
+    releasedByEmail: user?.email || null,
+    releaseReason,
+    releaseWorkflowId: logicsResult?.completionWorkflowId || logicsResult?.workflowId || null,
+    releaseStatusId: releaseStatus.statusId,
+    releaseStatusLabel: releaseStatus.label || null,
+    releaseQueueResult: queueResult,
+  });
+
+  return {
+    ok: true,
+    domain: normalizedDomain,
+    hold: updated,
+    logicsResult,
+    releaseStatus,
+    queueResult,
+  };
+}
+
+function findSuccessfulFirstPayment(payments = [], targetDateKey) {
+  const target = String(targetDateKey || "").trim();
+  if (!target) return null;
+  return (payments || [])
+    .filter((payment) => {
+      const status = String(payment.transactionStatus || "").trim().toUpperCase();
+      return status === "SUCCESS" && String(payment.paymentDateKey || "") === target;
+    })
+    .sort((left, right) => (Number(left.casePaymentId) || 0) - (Number(right.casePaymentId) || 0))[0] || null;
+}
+
+async function runPostDateHoldEodSweep(domains, options = {}) {
+  const normalizedDomains = (Array.isArray(domains) ? domains : [domains])
+    .map(normalizeDomain)
+    .filter(Boolean);
+  const dateKey = options.dateKey || getPacificDateKey(options.now || new Date());
+  const actor = options.user || {
+    email: "postdate-eod@parallel.local",
+    name: "Post-date EOD sweep",
+  };
+  const summary = {
+    dateKey,
+    domains: normalizedDomains,
+    checked: 0,
+    verified: 0,
+    released: 0,
+    review: 0,
+    errors: 0,
+    items: [],
+  };
+
+  for (const selectedDomain of normalizedDomains) {
+    const activeHolds = await postDateHoldRepository.listPostDateHolds(selectedDomain, {
+      status: "active",
+      limit: options.limit || 250,
+    });
+    const holds = activeHolds.filter(
+      (hold) => !hold.firstPaymentDateKey || String(hold.firstPaymentDateKey) <= String(dateKey),
+    );
+    for (const hold of holds) {
+      summary.checked += 1;
+      if (!hold.firstPaymentDateKey) {
+        const updated = await postDateHoldRepository.markPostDateHoldReview(hold._id, {
+          checkedAt: new Date(),
+          reviewReason: "missing-first-payment-date",
+        });
+        summary.review += 1;
+        summary.items.push({ caseId: hold.caseId, domain: selectedDomain, outcome: "review", hold: updated });
+        continue;
+      }
+      try {
+        const { reconcilePaymentsForCase } = require("./paymentReconcileService");
+        await reconcilePaymentsForCase({
+          domain: selectedDomain,
+          caseId: hold.caseId,
+          lane: "nightly",
+        }).catch(() => null);
+        const payments = await paymentLedgerRepository.listPayments(selectedDomain, {
+          caseId: hold.caseId,
+          limit: 500,
+        });
+        const success = findSuccessfulFirstPayment(payments, hold.firstPaymentDateKey);
+        if (success) {
+          const updated = await postDateHoldRepository.markPostDateHoldPaymentVerified(hold._id, {
+            checkedAt: new Date(),
+            "paymentCheck.successfulCasePaymentId": success.casePaymentId,
+            "paymentCheck.successfulAmount": success.amount,
+            "paymentCheck.successfulPaymentDateKey": success.paymentDateKey,
+          });
+          summary.verified += 1;
+          summary.items.push({ caseId: hold.caseId, domain: selectedDomain, outcome: "payment_verified", hold: updated });
+          continue;
+        }
+        if (options.dryRun) {
+          summary.items.push({ caseId: hold.caseId, domain: selectedDomain, outcome: "would-release" });
+          continue;
+        }
+        const released = await releaseCxPostDateHold(selectedDomain, actor, {
+          holdId: hold._id,
+          reason: `First payment was not successful by EOD ${dateKey}`,
+        });
+        summary.released += 1;
+        summary.items.push({ caseId: hold.caseId, domain: selectedDomain, outcome: "released", hold: released.hold });
+      } catch (error) {
+        summary.errors += 1;
+        await postDateHoldRepository.markPostDateHoldReleaseFailed(hold._id, {
+          checkedAt: new Date(),
+          releasedByEmail: actor.email,
+          releaseReason: `First payment was not successful by EOD ${dateKey}`,
+          error: error.message,
+        }).catch(() => null);
+        summary.items.push({
+          caseId: hold.caseId,
+          domain: selectedDomain,
+          outcome: "error",
+          error: error.message,
+        });
+      }
+    }
+  }
+
+  return summary;
+}
+
 // Notes are a single free-form text field on the Logics Case object,
 // distinct from the activity-comment chain (see `executeCxLogicsActivity`).
 // Save semantics are OVERWRITE: the SPA pre-loads the existing value into
@@ -6317,6 +6907,7 @@ module.exports = {
   executeCxLogicsNotes,
   executeCxLogicsTask,
   executeCxLogicsUpdateCase,
+  listCxPostDateHolds,
   listCxTasks,
   listCxLogicsTasks,
   lookupCxLogicsMatch,
@@ -6328,11 +6919,13 @@ module.exports = {
   requestCxLogicsCreateCase,
   requestCxLogicsFindMatch,
   requestCxLeadStatusUpdate,
+  releaseCxPostDateHold,
   requestCxReminder,
   requestCxStatusChange,
   requestCxTask,
   requestCxText,
   searchCxCases,
+  runPostDateHoldEodSweep,
   syncCaseProfileFromLogics,
   enqueueCxSmokeLead,
   simulateCxIncomingCall,

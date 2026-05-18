@@ -6,10 +6,18 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$Repo = "C:\Users\Admin\Code\TagContactBridgeParallel"
+$Repo = if ($env:PARALLEL_REPO_ROOT) {
+    $env:PARALLEL_REPO_ROOT
+} else {
+    Resolve-Path (Join-Path $PSScriptRoot "..\..")
+}
 $NginxExe = $env:NGINX_EXE
 if (-not $NginxExe) {
     $NginxExe = "C:\tools\nginx-1.29.6\nginx.exe"
+}
+$NginxRoot = $env:NGINX_ROOT
+if (-not $NginxRoot) {
+    $NginxRoot = Split-Path -Parent $NginxExe
 }
 
 $NodeExe = (Get-Command node).Source
@@ -63,7 +71,7 @@ function Restart-OrStartService($name) {
 
 function Reload-Nginx {
     if ($SkipNginx) {
-        Write-Step "Skipping nginx reload"
+        Write-Step "Skipping nginx restart"
         return
     }
     if (-not (Test-Path $NginxExe)) {
@@ -71,19 +79,23 @@ function Reload-Nginx {
     }
 
     if ($DryRun) {
-        Write-Step "DRY RUN: would test and reload nginx via $NginxExe"
+        Write-Step "DRY RUN: would test nginx config and restart ParallelNginx"
         return
     }
 
     Write-Step "Testing nginx config..."
-    & $NginxExe -p "C:\tools\nginx-1.29.6" -c "conf\nginx.conf" -t
-    Write-Step "Reloading nginx..."
-    & $NginxExe -p "C:\tools\nginx-1.29.6" -c "conf\nginx.conf" -s reload
+    & $NginxExe -p $NginxRoot -c "conf\nginx.conf" -t
+    Restart-OrStartService -name "ParallelNginx"
 }
 
 function Ensure-ParallelNgrokTunnel {
     if ($SkipNgrok) {
-        Write-Step "Skipping ngrok tunnel ensure"
+        Write-Step "Skipping ngrok restart"
+        return
+    }
+    $ngrokService = Get-Service -Name "ParallelNgrok" -ErrorAction SilentlyContinue
+    if ($ngrokService) {
+        Restart-OrStartService -name "ParallelNgrok"
         return
     }
     if (-not (Test-Path $NgrokEnsureScript)) {
@@ -105,7 +117,7 @@ function Ensure-ParallelNgrokTunnel {
 }
 
 Write-Step "Parallel restart helper starting"
-Write-Step "Scope: Parallel core only (legacy and old blogger daemon untouched)"
+Write-Step "Scope: Parallel core + nginx + ngrok (legacy and old blogger daemon untouched)"
 
 foreach ($serviceName in $ServiceOrder) {
     Restart-OrStartService -name $serviceName

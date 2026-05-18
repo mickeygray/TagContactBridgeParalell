@@ -2,6 +2,7 @@
 
 const { createSendgridClient } = require("../../shared-integrations/src");
 const { mailerConfigRepository } = require("../../shared-repositories/src");
+const { getInternalFromEmail } = require("../../shared-config/src");
 
 let cache = {};
 let digitIndex = {};
@@ -128,6 +129,7 @@ async function sendMailerReconcileEmail(lines = []) {
   if (!lines.length) return { ok: false, skipped: true };
 
   const client = createSendgridClient("TAG");
+  const fromEmail = getInternalFromEmail();
   const payload = {
     personalizations: [
       {
@@ -139,8 +141,8 @@ async function sendMailerReconcileEmail(lines = []) {
       },
     ],
     from: {
-      email: "mgray@taxadvocategroup.com",
-      name: "Matt Gray",
+      email: fromEmail,
+      name: "Mailer Reconcile",
     },
     subject: "Mailer Config Reconciliation",
     content: [

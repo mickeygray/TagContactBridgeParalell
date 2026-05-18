@@ -24,6 +24,9 @@ const {
 const {
   caseProfileRepository,
 } = require("../../shared-repositories/src");
+const {
+  legacyReadDb,
+} = require("../../shared-repositories/src/legacyReadDb");
 
 function normalizeDomain(domain) {
   return String(domain || "").trim().toUpperCase();
@@ -35,10 +38,7 @@ function toNumber(value) {
 }
 
 function getLegacyDb() {
-  return mongoose.connection.useDb(
-    String(process.env.LEGACY_APP_DB_NAME || "test"),
-    { useCache: true },
-  );
+  return legacyReadDb(mongoose);
 }
 
 function boolFromEnv(value, fallback = false) {

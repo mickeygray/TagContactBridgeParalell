@@ -334,6 +334,8 @@ async function sendSummaryEmail(summary) {
   const { sendPlainEmail } = require(
     "../packages/shared-services/src/sendgridMailService",
   );
+  const { getInternalFromEmail } = require("../packages/shared-config/src");
+  const fromEmail = getInternalFromEmail();
   const subject = summary.rolledBack
     ? `Blog auto-post ROLLED BACK: ${summary.id}`
     : summary.failed
@@ -391,8 +393,8 @@ async function sendSummaryEmail(summary) {
         custom_args: { channel: "blogger-bot", blogId: summary.id },
       },
     ],
-    from: { email: "mgray@taxadvocategroup.com", name: "Blogger Bot" },
-    reply_to: { email: "mgray@taxadvocategroup.com", name: "Blogger Bot" },
+    from: { email: fromEmail, name: "Blogger Bot" },
+    reply_to: { email: fromEmail, name: "Blogger Bot" },
     subject,
     content: [{ type: "text/plain", value: lines }],
   });
@@ -507,6 +509,26 @@ function checkDeployCliConfigured() {
   const scriptPath = path.join(TCB_DEPLOY_DIR, "scripts", "deploy.js");
   if (!fs.existsSync(scriptPath)) {
     return { ok: false, reason: `deploy CLI not found: ${scriptPath}` };
+  }
+  const requiredPaths = [
+    { name: "DEPLOY_WYNN_PEM", value: process.env.DEPLOY_WYNN_PEM, kind: "file" },
+    { name: "DEPLOY_TAG_PEM", value: process.env.DEPLOY_TAG_PEM, kind: "file" },
+    { name: "DEPLOY_WYNN_REPO", value: process.env.DEPLOY_WYNN_REPO || WYNN_REPO, kind: "dir" },
+    { name: "DEPLOY_TAG_REPO", value: process.env.DEPLOY_TAG_REPO || TAG_REPO, kind: "dir" },
+  ];
+  const missingPaths = requiredPaths
+    .map(({ name, value, kind }) => {
+      const resolved = String(value || "").trim();
+      if (!resolved) return `${name} is not set`;
+      if (!fs.existsSync(resolved)) return `${name} ${kind} not found: ${resolved}`;
+      return null;
+    })
+    .filter(Boolean);
+  if (missingPaths.length > 0) {
+    return {
+      ok: false,
+      reason: `deploy prerequisites missing:\n${missingPaths.map((item) => `- ${item}`).join("\n")}`,
+    };
   }
   try {
     const output = execFileSync("node", ["scripts/deploy.js", "sites"], {

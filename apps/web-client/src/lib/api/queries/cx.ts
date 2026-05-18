@@ -8,6 +8,7 @@ import type {
   CxSearchData,
   CxTaskListData,
   CxWorkspaceData,
+  PostDateHoldsResult,
 } from "@/lib/api/types";
 import { queryKeys } from "@/lib/api/queries/keys";
 
@@ -34,13 +35,10 @@ export function useCxWorkspace(domain: string) {
     // on it, so polling cadence directly drives how fast a fresh
     // inbound surfaces in the UI.
     //
-    // Was 4s — slowed to 8s to halve the per-tab Mongo load on
-    // workspace aggregation + per-request user lookup. Operator-visible
-    // delta: a new inbound call's auto-scramble lands ~4s later in the
-    // worst case. RC's webhook is the upstream source of truth; if the
-    // delay matters more than DB cost, drop this back to 4s.
-    staleTime: 6_000,
-    refetchInterval: 8_000,
+    // This drives live call/scramble state in the CX workspace. Keep it
+    // tight while the tab is active so progressive dialing feels snappy.
+    staleTime: 1_500,
+    refetchInterval: 3_000,
     refetchIntervalInBackground: false,
   });
 }
@@ -57,8 +55,8 @@ export function useCxCallQueue(domain: string) {
     enabled: Boolean(domain),
     // Tight polling so queue items popping off / new dial requests
     // landing show up promptly while the operator is on a call.
-    staleTime: 3_000,
-    refetchInterval: 6_000,
+    staleTime: 1_000,
+    refetchInterval: 2_000,
   });
 }
 
@@ -81,9 +79,47 @@ export function useCxCallQueueMulti(domains: string[]) {
           )
           .then((r) => r.result.items),
       enabled: Boolean(domain),
-      staleTime: 3_000,
-      refetchInterval: 6_000,
+      staleTime: 1_000,
+      refetchInterval: 2_000,
     })),
+  });
+}
+
+export function useCxPostDateHolds(
+  domain: string,
+  filters: { status?: string; date?: string; from?: string; to?: string; caseId?: string } = {},
+) {
+  return useQuery({
+    queryKey: queryKeys.cx.postdates(domain, filters),
+    queryFn: () =>
+      api
+        .get<{ ok: true; result: PostDateHoldsResult }>(`/api/read/cx/postdates/${domain}`, {
+          query: {
+            status: filters.status || "active",
+            date: filters.date || undefined,
+            from: filters.from || undefined,
+            to: filters.to || undefined,
+            caseId: filters.caseId || undefined,
+          },
+        })
+        .then((r) => r.result),
+    enabled: Boolean(domain),
+    staleTime: 10_000,
+    refetchInterval: 30_000,
+  });
+}
+
+export function useCxReleasePostDateHold(domain: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: { holdId?: string; caseId?: number; reason?: string }) =>
+      api
+        .post<{ ok: true; result: unknown }>(`/api/commands/cx/${domain}/postdates/release`, body)
+        .then((r) => r.result),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: queryKeys.cx.all() });
+      qc.invalidateQueries({ queryKey: queryKeys.cx.postdates(domain) });
+    },
   });
 }
 

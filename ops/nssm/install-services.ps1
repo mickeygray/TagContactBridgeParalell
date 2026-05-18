@@ -67,11 +67,19 @@ function Find-Nssm {
 }
 
 $Nssm      = Find-Nssm
-$Repo      = if ($env:PARALLEL_REPO_ROOT) { $env:PARALLEL_REPO_ROOT } else { "C:\Users\$env:USERNAME\Code\TagContactBridgeParallel" }
+$InferredRepo = Resolve-Path (Join-Path $PSScriptRoot "..\..") | Select-Object -ExpandProperty Path
+$Repo      = if ($env:PARALLEL_REPO_ROOT) { $env:PARALLEL_REPO_ROOT } else { $InferredRepo }
 if (-not (Test-Path $Repo)) {
-    # Fall back to the original admin path if the per-user path doesn't exist.
-    if (Test-Path "C:\Users\Admin\Code\TagContactBridgeParallel") {
-        $Repo = "C:\Users\Admin\Code\TagContactBridgeParallel"
+    $repoCandidates = @(
+        "C:\code\TagContactBridgeParalell",
+        "C:\Users\$env:USERNAME\Code\TagContactBridgeParallel",
+        "C:\Users\Admin\Code\TagContactBridgeParallel"
+    )
+    foreach ($candidate in $repoCandidates) {
+        if (Test-Path $candidate) {
+            $Repo = $candidate
+            break
+        }
     }
 }
 $LogsDir   = if ($env:PARALLEL_LOGS_DIR) { $env:PARALLEL_LOGS_DIR } else { "C:\tools\logs" }
@@ -117,15 +125,16 @@ if (-not $OnlyBlogger) {
         @{
             Name        = "ParallelNginx"
             Display     = "Parallel - nginx reverse proxy (80/81)"
-            Application = $NginxExe
+            Application = $PowerShellExe
             # `-p` sets the prefix so relative paths in the config resolve
             # against C:\tools\nginx-1.29.6\, not the AppDirectory.
             # `-g "daemon off;"` keeps the master process in the foreground
             # so NSSM can supervise it — without this nginx forks and
             # detaches, NSSM sees the parent exit, and it'd thrash
-            # restart-restart-restart.
-            Arguments   = "-p `"$NginxRoot`" -c conf\nginx.conf -g `"daemon off;`""
-            AppDirectory = $NginxRoot
+            # restart-restart-restart. The wrapper avoids NSSM stripping
+            # quotes around the `daemon off;` global directive.
+            Arguments   = "-NoProfile -ExecutionPolicy Bypass -File $Repo\ops\nssm\run-nginx.ps1 -NginxRoot $NginxRoot"
+            AppDirectory = $Repo
             Description = "Reverse proxy on :80/:81. Routes ngrok-terminated traffic to control-plane ($ControlPlanePort) and the various Parallel workers."
         },
         @{
@@ -160,8 +169,8 @@ if (-not $OnlyBlogger) {
             Name        = "ParallelRestartHelper"
             Display     = "Parallel - Restart Helper"
             Application = $PowerShellExe
-            Arguments   = "-NoProfile -ExecutionPolicy Bypass -File `"$Repo\\ops\\nssm\\restart-parallel-stack.ps1`""
-            Description = "Manual helper that restarts the Parallel core services, reloads nginx, and re-ensures the Parallel ngrok tunnel. Legacy and the old blogger daemon are untouched."
+            Arguments   = "-NoProfile -ExecutionPolicy Bypass -File `"$Repo\\ops\\nssm\\restart-parallel-all.ps1`""
+            Description = "Manual helper that restarts the Atlas-backed Parallel app workers, blogger, nginx, and ngrok. Legacy is untouched."
         }
     )
 }
@@ -178,10 +187,31 @@ if (-not $OnlyStack) {
 
 function Stop-ServiceIfRunning($name) {
     $svc = Get-Service -Name $name -ErrorAction SilentlyContinue
-    if ($svc -and $svc.Status -eq "Running") {
+    if ($svc -and $svc.Status -ne "Stopped") {
         Write-Host "  Stopping $name..."
-        Stop-Service $name -Force
-        Start-Sleep -Seconds 2
+        try {
+            Stop-Service $name -Force -ErrorAction Stop
+        } catch {
+            & sc.exe stop $name | Out-Null
+        }
+        $svc.WaitForStatus("Stopped", [TimeSpan]::FromSeconds(30))
+    }
+}
+
+function Wait-ServiceRemoved($name) {
+    $deadline = (Get-Date).AddSeconds(30)
+    while ((Get-Service -Name $name -ErrorAction SilentlyContinue) -and (Get-Date) -lt $deadline) {
+        Start-Sleep -Milliseconds 500
+    }
+    if (Get-Service -Name $name -ErrorAction SilentlyContinue) {
+        throw "Service $name still exists after removal attempt"
+    }
+}
+
+function Invoke-Nssm([string[]]$Arguments) {
+    & $Nssm @Arguments | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw "nssm $($Arguments -join ' ') failed with exit code $LASTEXITCODE"
     }
 }
 
@@ -194,6 +224,11 @@ function Remove-NssmService($name) {
     Stop-ServiceIfRunning $name
     Write-Host "  Removing $name..."
     & $Nssm remove $name confirm | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "  nssm remove failed for $name; trying sc.exe delete..." -ForegroundColor Yellow
+        & sc.exe delete $name | Out-Null
+    }
+    Wait-ServiceRemoved $name
 }
 
 function Install-NssmService($svc) {
@@ -203,42 +238,52 @@ function Install-NssmService($svc) {
         Stop-ServiceIfRunning $name
         Write-Host "  Removing existing $name..."
         & $Nssm remove $name confirm | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "  nssm remove failed for $name; trying sc.exe delete..." -ForegroundColor Yellow
+            & sc.exe delete $name | Out-Null
+        }
+        Wait-ServiceRemoved $name
     }
 
     Write-Host "  Installing $name..."
-    & $Nssm install $name $svc.Application $svc.Arguments | Out-Null
+    Invoke-Nssm @("install", $name, $svc.Application)
+    if (-not (Get-Service -Name $name -ErrorAction SilentlyContinue)) {
+        throw "Service $name was not created by NSSM"
+    }
     $appDir = if ($svc.ContainsKey("AppDirectory")) { $svc.AppDirectory } else { $Repo }
-    & $Nssm set $name AppDirectory $appDir | Out-Null
-    & $Nssm set $name Description $svc.Description | Out-Null
-    & $Nssm set $name DisplayName $svc.Display | Out-Null
-    if ($name -in @("ParallelBlogger", "ParallelRestartHelper")) {
-        & $Nssm set $name Start SERVICE_DEMAND_START | Out-Null
+    Invoke-Nssm @("set", $name, "AppParameters", $svc.Arguments)
+    Invoke-Nssm @("set", $name, "AppDirectory", $appDir)
+    Invoke-Nssm @("set", $name, "Description", $svc.Description)
+    Invoke-Nssm @("set", $name, "DisplayName", $svc.Display)
+    if ($name -eq "ParallelRestartHelper") {
+        Invoke-Nssm @("set", $name, "Start", "SERVICE_DEMAND_START")
     } else {
-        & $Nssm set $name Start SERVICE_AUTO_START | Out-Null
+        Invoke-Nssm @("set", $name, "Start", "SERVICE_AUTO_START")
     }
     # nginx doesn't read NODE_ENV; the env var is harmless for it but the
     # other Node services rely on it. Set it everywhere for consistency.
-    & $Nssm set $name AppEnvironmentExtra "NODE_ENV=production" | Out-Null
+    Invoke-Nssm @("set", $name, "AppEnvironmentExtra", "NODE_ENV=production")
 
     $base = $name.ToLower()
-    & $Nssm set $name AppStdout "$LogsDir\parallel-$base.out.log" | Out-Null
-    & $Nssm set $name AppStderr "$LogsDir\parallel-$base.err.log" | Out-Null
-    & $Nssm set $name AppRotateFiles 1 | Out-Null
-    & $Nssm set $name AppRotateOnline 1 | Out-Null
-    & $Nssm set $name AppRotateBytes 10485760 | Out-Null
+    Invoke-Nssm @("set", $name, "AppStdout", "$LogsDir\parallel-$base.out.log")
+    Invoke-Nssm @("set", $name, "AppStderr", "$LogsDir\parallel-$base.err.log")
+    Invoke-Nssm @("set", $name, "AppRotateFiles", "1")
+    Invoke-Nssm @("set", $name, "AppRotateOnline", "1")
+    Invoke-Nssm @("set", $name, "AppRotateBytes", "10485760")
+    Invoke-Nssm @("set", $name, "AppKillProcessTree", "1")
 
     if ($name -eq "ParallelRestartHelper") {
-        & $Nssm set $name AppExit Default Ignore | Out-Null
+        Invoke-Nssm @("set", $name, "AppExit", "Default", "Exit")
     } else {
-        & $Nssm set $name AppExit Default Restart | Out-Null
+        Invoke-Nssm @("set", $name, "AppExit", "Default", "Restart")
     }
-    & $Nssm set $name AppRestartDelay 5000 | Out-Null
+    Invoke-Nssm @("set", $name, "AppRestartDelay", "5000")
 
     if ($RunAsUser -eq "LocalSystem") {
         # LocalSystem doesn't take a password — single-arg ObjectName.
-        & $Nssm set $name ObjectName $RunAsUser | Out-Null
+        Invoke-Nssm @("set", $name, "ObjectName", $RunAsUser)
     } else {
-        & $Nssm set $name ObjectName $RunAsUser | Out-Null
+        Invoke-Nssm @("set", $name, "ObjectName", $RunAsUser)
         Write-Host "    NOTE: set the run-as password via 'nssm edit $name' before first start"
     }
     Write-Host "    OK $name installed (run-as: $RunAsUser)"

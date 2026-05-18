@@ -10,6 +10,7 @@ const {
   conversationMessageRepository,
   conversationWorkflowRepository,
   consentRecordRepository,
+  dncAuditRepository,
   leadCadenceRepository,
 } = require("../../shared-repositories/src");
 const { emitHourlyJobEvent } = require("./hourlyJobEventService");
@@ -23,6 +24,16 @@ const AUTO_REPLY_COOLDOWN_MS = 10 * 60 * 1000; // 10 min
 // Defensive cap. Matches the classifier's system-prompt constraint so
 // a misbehaving model can't send a novel.
 const MAX_SMS_BODY_CHARS = 320;
+
+function truthy(value) {
+  return ["true", "1", "yes", "on"].includes(
+    String(value || "").trim().toLowerCase(),
+  );
+}
+
+function shouldAutoRespondHotIntent() {
+  return truthy(process.env.SMS_AUTO_RESPOND_HOT_INTENT);
+}
 
 function normalizePhone(value) {
   return String(value || "").replace(/\D/g, "");
@@ -129,7 +140,7 @@ async function resolveSmsContactGuard({ domain, phone, workflow, logger }) {
 
 /**
  * Decide whether the classifier's output should actually trigger an
- * auto-send. Anything other than `hard_stop` / `dnc_confirm` /
+ * auto-send. Anything other than `dnc_confirm` / `soft_defer` /
  * `callback_prompt` routes to human review. Also enforces the
  * last-outbound cooldown and the no-two-in-a-row rule.
  *
@@ -151,14 +162,15 @@ async function evaluateAutoSendGates({
     return { shouldSend: false, reason: "hard_stop-no-reply", suppress: true };
   }
 
-  // Only two tiers trigger an outbound SMS.
-  if (tier !== "dnc_confirm" && tier !== "callback_prompt") {
+  // Only first-line-response tiers trigger an outbound SMS.
+  if (tier !== "dnc_confirm" && tier !== "soft_defer" && tier !== "callback_prompt") {
     return { shouldSend: false, reason: "tier-needs-human" };
   }
 
   // Classifier must have produced a non-empty reply.
-  if (!classification.suggestedReply) {
-    return { shouldSend: false, reason: "empty-suggested-reply" };
+  const replyCheck = validateReplyForAutoSend(classification.suggestedReply, domain);
+  if (!replyCheck.ok) {
+    return { shouldSend: false, reason: replyCheck.reason };
   }
 
   // Already opted out — never re-engage, even on a borderline dnc_confirm.
@@ -224,6 +236,20 @@ function enforceReplyConstraints(reply, domain = "WYNN") {
     body = body.slice(0, roomFor).trim() + suffix;
   }
   return body;
+}
+
+function validateReplyForAutoSend(reply, domain = "WYNN") {
+  const body = String(reply || "").trim();
+  if (!body) return { ok: false, reason: "empty-suggested-reply" };
+  if (body.length > MAX_SMS_BODY_CHARS) {
+    return { ok: false, reason: "suggested-reply-too-long" };
+  }
+  const suffix = replySuffixForDomain(domain);
+  const escapedSuffix = suffix.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  if (!new RegExp(`${escapedSuffix}\\s*$`, "i").test(body)) {
+    return { ok: false, reason: "suggested-reply-missing-required-suffix" };
+  }
+  return { ok: true, body };
 }
 
 /**
@@ -364,6 +390,30 @@ async function markLogicsDncForSms({
     return { ok: false, reason: "case-unresolved", source: resolvedCase.source };
   }
 
+  const existingProfile = await caseProfileRepository
+    .findCaseProfile(normalizedDomain, caseId)
+    .catch(() => null);
+  if (
+    String(existingProfile?.statusCategory || "").toLowerCase() === "dnc" ||
+    Number(existingProfile?.statusId) === statusId
+  ) {
+    logger?.info?.("sms.auto.logics_dnc_already_set", {
+      domain: normalizedDomain,
+      phone,
+      caseId,
+      statusId,
+      source: resolvedCase.source,
+    });
+    return {
+      ok: true,
+      skipped: true,
+      reason: "already-dnc",
+      caseId,
+      statusId,
+      source: resolvedCase.source,
+    };
+  }
+
   const note = [
     "SMS no-help DNC from inbound reply.",
     classification?.intent ? `Intent: ${classification.intent}.` : null,
@@ -436,8 +486,28 @@ async function applyDncConfirmSideEffects({
   workflow,
   classification,
   rawPayload,
+  threadHistory = [],
   logger,
 }) {
+  let audit = null;
+  try {
+    audit = await dncAuditRepository.createDncAudit({
+      domain,
+      phone,
+      caseId: workflow?.caseId != null ? Number(workflow.caseId) : null,
+      workflowId: workflow?._id || workflow?.id || null,
+      inboundText: rawPayload?.content || rawPayload?.message || workflow?.latestInboundText || null,
+      threadHistory: Array.isArray(threadHistory) ? threadHistory.slice(-10) : [],
+      classification,
+      rawPayload,
+    });
+  } catch (error) {
+    logger?.warn?.("sms.auto.dnc_audit_failed", {
+      domain,
+      phone,
+      error: error.message,
+    });
+  }
   const consent = await recordNegativeConsent({
     domain,
     phone,
@@ -459,9 +529,13 @@ async function applyDncConfirmSideEffects({
     rawPayload,
     logger,
   });
+  if (audit?._id) {
+    await dncAuditRepository.updateDncAudit(audit._id, { logicsResult: logics }).catch(() => null);
+  }
   return {
     ok: Boolean(logics?.ok),
     policy: "logics-dnc-from-no-help-reason",
+    dncAuditId: audit?._id ? String(audit._id) : null,
     logicsDncAttempted: true,
     cadenceChannels: ["sms", "email", "rvm", "call"],
     cadenceMatched: Boolean(cadence),
@@ -502,6 +576,7 @@ async function runAutoResponder({
   workflow,
   classification,
   rawPayload = null,
+  threadHistory = [],
   logger = null,
 }) {
   // hard_stop: carrier-level opt-out for SMS only. We do NOT reply
@@ -522,6 +597,14 @@ async function runAutoResponder({
       phone,
       cadenceMatched: Boolean(cadence),
     });
+    if (workflowId) {
+      await conversationWorkflowRepository.updateConversationWorkflowById(workflowId, {
+        aiRecommendedAction: "suppress_contact",
+        aiDraftReply: null,
+        aiConfidence: classification?.confidence != null ? String(classification.confidence) : null,
+        aiSummary: classification?.rationale || "Carrier STOP keyword.",
+      }).catch(() => null);
+    }
     return {
       action: "carrier_stop",
       tier: "hard_stop",
@@ -575,6 +658,7 @@ async function runAutoResponder({
           workflow,
           classification,
           rawPayload,
+          threadHistory,
           logger,
         })
       : null;
@@ -584,6 +668,20 @@ async function runAutoResponder({
       tier: classification.tier,
       reason: gate.reason,
     });
+    if (workflowId) {
+      await conversationWorkflowRepository.updateConversationWorkflowById(workflowId, {
+        status: workflow?.status || "observed",
+        aiRecommendedAction:
+          classification.tier === "dnc_confirm"
+            ? "auto_dnc_confirm"
+            : classification.tier === "soft_defer"
+              ? (classification.callbackWindow ? "soft_defer_callback" : "auto_soft_defer")
+              : classification.tier || "needs_human",
+        aiDraftReply: classification.suggestedReply || workflow?.aiDraftReply || null,
+        aiConfidence: classification?.confidence != null ? String(classification.confidence) : null,
+        aiSummary: classification?.rationale || workflow?.aiSummary || null,
+      }).catch(() => null);
+    }
     return {
       action: "skipped",
       tier: classification.tier,
@@ -598,7 +696,7 @@ async function runAutoResponder({
     };
   }
 
-  const replyBody = enforceReplyConstraints(classification.suggestedReply, domain);
+  const replyBody = String(classification.suggestedReply || "").trim();
 
   let sendResult;
   let sendError = null;
@@ -704,6 +802,7 @@ async function runAutoResponder({
       workflow,
       classification,
       rawPayload,
+      threadHistory,
       logger,
     });
   }
@@ -715,6 +814,33 @@ async function runAutoResponder({
     providerStatus: outbound.providerStatus,
   });
 
+  if (workflowId) {
+    await conversationWorkflowRepository.updateConversationWorkflowById(workflowId, {
+      status: sendError ? "manual-review" : "sent",
+      aiRecommendedAction:
+        classification.tier === "dnc_confirm"
+          ? "auto_dnc_confirm"
+          : classification.tier === "soft_defer"
+            ? (classification.callbackWindow ? "soft_defer_callback" : "auto_soft_defer")
+            : "auto_callback_prompt",
+      aiDraftReply: replyBody,
+      aiConfidence: classification?.confidence != null ? String(classification.confidence) : null,
+      aiSummary: classification?.rationale || null,
+      metadata: {
+        ...(workflow?.metadata || {}),
+        lastAutoResponderAction: sendError ? "send_failed" : "sent",
+        lastAutoResponderAt: new Date(),
+        lastAutoResponderTier: classification.tier || null,
+        lastAutoResponderProspectState: classification.prospectState || null,
+        callbackWindow: classification.callbackWindow || null,
+        provider: "callrail",
+        providerMessageId: outbound.providerMessageId || null,
+        outboundMessageId: outbound.id || null,
+        sendError: sendError?.message || null,
+      },
+    }).catch(() => null);
+  }
+
   return {
     action: sendError ? "send_failed" : "sent",
     tier: classification.tier,
@@ -722,8 +848,10 @@ async function runAutoResponder({
     policy:
       classification.tier === "dnc_confirm"
         ? "logics-dnc-from-no-help-reason"
+        : classification.tier === "soft_defer"
+          ? "soft-defer-first-line"
         : classification.tier === "callback_prompt"
-          ? "safe-callback-guidance"
+          ? "callback-first-line"
           : "no-side-effect",
     outboundMessageId: outbound.id,
     providerMessageId: outbound.providerMessageId,
@@ -737,5 +865,6 @@ module.exports = {
   runAutoResponder,
   evaluateAutoSendGates,
   enforceReplyConstraints,
+  shouldAutoRespondHotIntent,
   AUTO_REPLY_COOLDOWN_MS,
 };

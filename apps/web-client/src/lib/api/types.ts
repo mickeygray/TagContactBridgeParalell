@@ -909,6 +909,8 @@ export interface CxCallQueueItem {
   progressiveStageLabel?: string | null;
   placedCalls?: number | null;
   dailyPlacedCalls?: number | null;
+  hourlyPlacedHourKey?: string | null;
+  hourlyPlacedCalls?: number | null;
   lastPlacedAt?: string | null;
   payloadSnapshot?: Record<string, unknown> | null;
   leadBody?: Record<string, unknown> | null;
@@ -971,6 +973,61 @@ export interface CxSearchData {
   prospects: ClientSearchMatch[];
   caseProfiles: ClientSearchMatch[];
   merged: ClientSearchMatch[];
+}
+
+export type PostDateHoldStatus =
+  | "active"
+  | "released"
+  | "payment_verified"
+  | "review"
+  | "release_failed";
+
+export interface PostDateHold {
+  _id: string;
+  domain: string;
+  caseId: number;
+  status: PostDateHoldStatus;
+  postDatedAt?: string;
+  postDatedDateKey?: string;
+  postDatedByEmail?: string | null;
+  postDatedByName?: string | null;
+  caseName?: string | null;
+  phone?: string | null;
+  email?: string | null;
+  sourceName?: string | null;
+  intakeSource?: string | null;
+  intakeRoute?: string | null;
+  queueFamily?: string | null;
+  logicsStatusId?: number | null;
+  logicsStatusLabel?: string | null;
+  firstPaymentDate?: string | null;
+  firstPaymentDateKey?: string | null;
+  paymentScheduleStatus?: string | null;
+  paymentCheck?: Record<string, unknown> | null;
+  releasedAt?: string | null;
+  releasedByEmail?: string | null;
+  releaseReason?: string | null;
+  releaseStatusId?: number | null;
+  releaseStatusLabel?: string | null;
+  releaseQueueResult?: Record<string, unknown> | null;
+  metadata?: Record<string, unknown> | null;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface PostDateHoldsResult {
+  domain: string;
+  summary: {
+    total: number;
+    active: number;
+    released: number;
+    payment_verified: number;
+    review: number;
+    release_failed: number;
+    withFirstPaymentDate: number;
+    needsScheduleReview: number;
+  };
+  items: PostDateHold[];
 }
 
 /**
@@ -1161,8 +1218,24 @@ export type ConversationMessageProviderStatus =
 export type ConversationMessageTier =
   | "hard_stop"
   | "dnc_confirm"
+  | "soft_defer"
   | "callback_prompt"
   | "needs_human"
+  | null;
+
+export type ConversationMessageProspectState =
+  | "scared"
+  | "shopping"
+  | "skeptical"
+  | "resigned"
+  | "ready"
+  | "in_progress"
+  | "defer"
+  | "partial_clear"
+  | "investigating"
+  | "closing"
+  | "hostile"
+  | "unclear"
   | null;
 
 export type ConversationMessageDispositionLabel =
@@ -1180,10 +1253,13 @@ export type ConversationMessageDispositionLabel =
 export interface ConversationMessageClassification {
   intent?: string | null;
   tier?: ConversationMessageTier;
+  prospectState?: ConversationMessageProspectState;
   suggestedReply?: string | null;
+  callbackWindow?: string | null;
   confidence?: number | null;
   rationale?: string | null;
   model?: string | null;
+  validationError?: string | null;
 }
 
 export interface ConversationMessageDisposition {

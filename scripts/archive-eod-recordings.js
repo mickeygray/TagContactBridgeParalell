@@ -884,7 +884,7 @@ async function sendCompletionEmail({
   const fromEmail =
     company.fromEmail ||
     company.toEmail ||
-    "mgray@taxadvocategroup.com";
+    "team@taxadvocategroup.com";
 
   const subject = `[${String(companyKey).toUpperCase()}] EOD recordings dropped for ${summary.dateKey} (${uploadedRows.length} files)`;
   const body = [

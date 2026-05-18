@@ -93,6 +93,8 @@ const {
   extractAttributionCandidates,
   loadMailerConfigCache,
   processControlPlaneEventBatch,
+  getPacingConfig,
+  isOperatingNow,
   runHourlySweep,
   summarizeHourlySweepResult,
 } = require("../../../packages/shared-services/src");
@@ -124,6 +126,25 @@ function summarizeWorkerState(workerState) {
     lastResult: workerState.lastResult,
     lastError: workerState.lastError,
   };
+}
+
+function getMongoReadyState(runtime) {
+  try {
+    const state = runtime?.getMongoState?.();
+    return {
+      connected: Boolean(state?.connected),
+      readyState: state?.readyState ?? null,
+      host: state?.host || null,
+      name: state?.name || null,
+    };
+  } catch (_error) {
+    return {
+      connected: false,
+      readyState: null,
+      host: null,
+      name: null,
+    };
+  }
 }
 
 function summarizeHourlySweepConfig(config = {}) {
@@ -442,10 +463,56 @@ async function startHourlySweepWorker({ config, runtime, workerState, spendSyncR
     workerState.lastStartedAt = new Date();
 
     const currentHourKey = `${workerState.lastStartedAt.getUTCFullYear()}-${workerState.lastStartedAt.getUTCMonth()}-${workerState.lastStartedAt.getUTCDate()}-${workerState.lastStartedAt.getUTCHours()}`;
-    const runScheduledPhase =
+    let runScheduledPhase =
       workerState.lastScheduledHour !== currentHourKey;
+    const mongoState = getMongoReadyState(runtime);
+    if (!mongoState.connected) {
+      workerState.lastCompletedAt = new Date();
+      workerState.lastResult = {
+        skipped: true,
+        reason: "mongo-not-connected",
+        mongo: mongoState,
+      };
+      workerState.lastError = "mongo-not-connected";
+      workerState.running = false;
+      return;
+    }
+
+    let scheduledPhaseSkip = null;
+    if (runScheduledPhase) {
+      try {
+        const pacingConfig = await getPacingConfig();
+        if (!isOperatingNow(pacingConfig, workerState.lastStartedAt)) {
+          scheduledPhaseSkip = {
+            reason: "outside-business-hours",
+            timezone: pacingConfig.businessHoursTimezone || "America/Los_Angeles",
+            businessHoursStart: pacingConfig.businessHoursStart,
+            businessHoursEnd: pacingConfig.businessHoursEnd,
+            businessDays: pacingConfig.businessDays,
+          };
+          workerState.lastScheduledHour = currentHourKey;
+          runScheduledPhase = false;
+        }
+      } catch (error) {
+        scheduledPhaseSkip = {
+          reason: "business-hours-check-failed",
+          error: error.message,
+        };
+        workerState.lastScheduledHour = currentHourKey;
+        runScheduledPhase = false;
+      }
+    }
 
     try {
+      // Claim the hour before running Phase A. If a dependency fails
+      // mid-sweep, we still do not retry external hourly work every
+      // 60 seconds for the rest of the hour.
+      if (runScheduledPhase) {
+        workerState.lastScheduledHour = currentHourKey;
+      }
+      if (scheduledPhaseSkip) {
+        runtime.logger.info("control-plane.hourly.scheduled_phase_skipped", scheduledPhaseSkip);
+      }
       const result = await runHourlySweep({
         workerName: `${config.serviceName}-hourly-sweep`,
         lane: "hourly",
@@ -494,6 +561,9 @@ async function startHourlySweepWorker({ config, runtime, workerState, spendSyncR
           config.hourlySweep?.callLogHygieneArchiveRecordings !== false,
         logger: runtime.logger,
       });
+      if (scheduledPhaseSkip) {
+        result.scheduledPhaseSkip = scheduledPhaseSkip;
+      }
       if (
         runScheduledPhase &&
         config.hourlySweep?.spendSyncEnabled !== false &&
@@ -529,9 +599,6 @@ async function startHourlySweepWorker({ config, runtime, workerState, spendSyncR
             error: error.message,
           });
         }
-      }
-      if (runScheduledPhase) {
-        workerState.lastScheduledHour = currentHourKey;
       }
       workerState.lastCompletedAt = new Date();
       workerState.lastResult = result;
@@ -582,6 +649,18 @@ async function startControlPlaneWorker({ config, runtime, workerState }) {
     if (workerState.running) return;
     workerState.running = true;
     workerState.lastStartedAt = new Date();
+    const mongoState = getMongoReadyState(runtime);
+    if (!mongoState.connected) {
+      workerState.lastCompletedAt = new Date();
+      workerState.lastResult = {
+        skipped: true,
+        reason: "mongo-not-connected",
+        mongo: mongoState,
+      };
+      workerState.lastError = "mongo-not-connected";
+      workerState.running = false;
+      return;
+    }
 
     try {
       const result = await processControlPlaneEventBatch({

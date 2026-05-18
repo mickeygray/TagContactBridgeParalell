@@ -4,14 +4,16 @@ Parallel now expects per-process NSSM services instead of one `npm run dev` wrap
 
 Installed by:
 
-- [install-services.ps1](C:\Users\Admin\Code\TagContactBridgeParallel\ops\nssm\install-services.ps1)
+- [install-services.ps1](C:\code\TagContactBridgeParalell\ops\nssm\install-services.ps1)
 
 Services:
 
+- `ParallelNginx`
 - `ParallelControlPlane`
 - `ParallelInboundGateway`
 - `ParallelOutboundGateway`
 - `ParallelRingCentralCx`
+- `ParallelNgrok`
 - `ParallelRestartHelper`
 - `ParallelBlogger`
 
@@ -24,30 +26,54 @@ Why this shape:
 Typical install flow:
 
 ```powershell
-cd C:\Users\Admin\Code\TagContactBridgeParallel\ops\nssm
+cd C:\code\TagContactBridgeParalell\ops\nssm
 .\install-services.ps1
 ```
 
 Then set the run-as password for each service with `nssm edit <service>`.
 
 `ParallelRestartHelper` is a demand-start helper, not an always-on daemon.
-When started, it:
+When started, it runs [restart-parallel-all.ps1](C:\code\TagContactBridgeParalell\ops\nssm\restart-parallel-all.ps1), which restarts:
 
-- restarts `ParallelInboundGateway`
-- restarts `ParallelOutboundGateway`
-- restarts `ParallelRingCentralCx`
-- restarts `ParallelControlPlane`
-- reloads nginx
-- re-ensures the Parallel ngrok tunnel
+- `ParallelControlPlane`
+- `ParallelInboundGateway`
+- `ParallelOutboundGateway`
+- `ParallelRingCentralCx`
+- `ParallelBlogger` if installed
+- `ParallelNginx`
+- `ParallelNgrok` if installed
+
+The app is Atlas-backed. `ParallelMongo`, if present from older local testing, is not part of the normal production restart path. Use `-IncludeMongo` on `restart-parallel-all.ps1` only for an explicit local Mongo test.
 
 It does not touch:
 
 - the legacy TagContactBridge process
-- the old blogger daemon
-- `ParallelBlogger`
 
 Use it with:
 
 ```powershell
 Start-Service ParallelRestartHelper
 ```
+
+`Start-Service` itself does not stream output. To start the helper and watch
+the live restart log in the same terminal, use:
+
+```powershell
+cd C:\code\TagContactBridgeParalell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\ops\nssm\start-restart-helper-and-watch.ps1 -StopIfAlreadyRunning
+```
+
+Or run the script directly:
+
+```powershell
+cd C:\code\TagContactBridgeParalell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\ops\nssm\restart-parallel-all.ps1 -BuildWeb -Healthcheck
+```
+
+Useful switches:
+
+- `-SkipNgrok` keeps the tunnel untouched during migration tests.
+- `-SkipMongo` avoids restarting Mongo during live debugging.
+- `-BuildWeb` rebuilds the React client before restart.
+- `-Healthcheck` runs the local cutover healthcheck after services start.
+- `-EnsureAutomatic` sets included services to automatic startup.

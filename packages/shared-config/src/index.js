@@ -219,8 +219,7 @@ function getSharedConfig(overrides = {}) {
     rootDir: ROOT_DIR,
     mongoUri:
       overrides.mongoUri ||
-      process.env.MONGO_URI ||
-      "mongodb://127.0.0.1:27017/tagcontactbridge_parallel",
+      process.env.MONGO_URI,
     parallelDbName:
       overrides.parallelDbName ||
       process.env.PARALLEL_DB_NAME ||
@@ -1166,7 +1165,7 @@ function validateSharedConfig(config = {}) {
  * this helper.
  */
 function getInternalFromEmail() {
-  return env("INTERNAL_FROM_EMAIL", "mgray@taxadvocategroup.com");
+  return env("INTERNAL_FROM_EMAIL", env("TAG_FROM_EMAIL", "team@taxadvocategroup.com"));
 }
 
 module.exports = {

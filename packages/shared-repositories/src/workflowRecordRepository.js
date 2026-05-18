@@ -3,6 +3,22 @@
 const { WorkflowRecord } = require("../../shared-models/src");
 
 async function createWorkflowRecord(payload) {
+  const dedupeKey = payload?.dedupeKey ? String(payload.dedupeKey) : "";
+  if (dedupeKey) {
+    try {
+      return await WorkflowRecord.findOneAndUpdate(
+        { dedupeKey },
+        { $setOnInsert: { ...payload, dedupeKey } },
+        { upsert: true, new: true, setDefaultsOnInsert: true },
+      );
+    } catch (error) {
+      if (error?.code === 11000) {
+        const existing = await WorkflowRecord.findOne({ dedupeKey });
+        if (existing) return existing;
+      }
+      throw error;
+    }
+  }
   return WorkflowRecord.create(payload);
 }
 

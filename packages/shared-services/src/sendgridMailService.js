@@ -60,6 +60,13 @@ function fromHeader(payload) {
   return from.email || null;
 }
 
+function addressHeader(value) {
+  if (!value) return undefined;
+  if (typeof value === "string") return value;
+  if (value.name && value.email) return `${value.name} <${value.email}>`;
+  return value.email || undefined;
+}
+
 async function sendPlainEmail(companyKey, payload) {
   const recipients = flattenRecipients(payload.personalizations);
   if (recipients.length === 0) {
@@ -79,6 +86,7 @@ async function sendPlainEmail(companyKey, payload) {
     text: text || undefined,
     html: html || undefined,
     from: fromHeader(payload),
+    replyTo: addressHeader(payload.reply_to || payload.replyTo),
     attachments: adaptAttachments(payload.attachments),
   });
 
@@ -93,6 +101,7 @@ async function sendPlainEmail(companyKey, payload) {
 
 async function sendTestEmail(companyKey, options = {}) {
   const toEmail = options.toEmail || "mgray@taxadvocategroup.com";
+  const fromEmail = String(options.fromEmail || "").trim();
   const subject =
     options.subject ||
     `[${String(companyKey || "").toUpperCase() || "TAG"}] Parallel Mailer Test`;
@@ -101,6 +110,7 @@ async function sendTestEmail(companyKey, options = {}) {
     to: toEmail,
     subject,
     text,
+    from: fromEmail || undefined,
   });
 }
 

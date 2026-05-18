@@ -22,6 +22,7 @@ async function recordWorkflowStage(input = {}) {
     summary: input.summary || null,
     payload: input.payload || null,
     result: input.result || null,
+    dedupeKey: input.dedupeKey || null,
     happenedAt: input.happenedAt ? new Date(input.happenedAt) : new Date(),
   });
 }

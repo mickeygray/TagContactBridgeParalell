@@ -18,6 +18,7 @@ const hourlyJobEventRepository = require("./hourlyJobEventRepository");
 const caseProfileRepository = require("./caseProfileRepository");
 const deepCutRunRepository = require("./deepCutRunRepository");
 const dispatchListRepository = require("./dispatchListRepository");
+const dncAuditRepository = require("./dncAuditRepository");
 const leadCadenceRepository = require("./leadCadenceRepository");
 const mailerConfigRepository = require("./mailerConfigRepository");
 const masterProspectRepository = require("./masterProspectRepository");
@@ -26,6 +27,7 @@ const pacingConfigRepository = require("./pacingConfigRepository");
 const pacingReportRepository = require("./pacingReportRepository");
 const paymentAlertRepository = require("./paymentAlertRepository");
 const paymentLedgerRepository = require("./paymentLedgerRepository");
+const postDateHoldRepository = require("./postDateHoldRepository");
 const poolBudgetRepository = require("./poolBudgetRepository");
 const prePingRepository = require("./prePingRepository");
 const qualityReviewRepository = require("./qualityReviewRepository");
@@ -56,6 +58,7 @@ module.exports = {
   dailyCallStatRepository,
   deepCutRunRepository,
   dispatchListRepository,
+  dncAuditRepository,
   eventRepository,
   hourlyJobEventRepository,
   leadCadenceRepository,
@@ -66,6 +69,7 @@ module.exports = {
   pacingReportRepository,
   paymentAlertRepository,
   paymentLedgerRepository,
+  postDateHoldRepository,
   poolBudgetRepository,
   prePingRepository,
   qualityReviewRepository,

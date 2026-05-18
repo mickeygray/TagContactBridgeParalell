@@ -46,6 +46,7 @@ function buildFinancialCsv({
   spendByChannel = [],
   dealsByCase = [],
   failedPayments = [],
+  postDateHolds = [],
   mtdRoiBySource = [],
 }) {
   const rows = [];
@@ -67,6 +68,7 @@ function buildFinancialCsv({
   rows.push(csvRow(["payments_recurring_amount", moneyCell(daily.payments.recurringAmount), moneyCell(mtd.payments.recurringAmount)]));
   rows.push(csvRow(["payments_recurring_count", num(daily.payments.recurringCount), num(mtd.payments.recurringCount)]));
   rows.push(csvRow(["failed_payments_today", num(failedPayments.length), "—"]));
+  rows.push(csvRow(["postdate_holds_open_or_touched_today", num(postDateHolds.length), "—"]));
   rows.push("");
 
   // MTD ROI by source — same column shape as the metrics-page CSV
@@ -160,6 +162,28 @@ function buildFinancialCsv({
       num(a.attempts),
       a.lastTransactionStatus || a.status || "",
       a.lastTransactionComment || a.comment || "",
+    ]));
+  }
+  rows.push("");
+
+  rows.push(csvRow(["[POST DATE HOLDS]"]));
+  rows.push(csvRow([
+    "domain", "case_id", "name", "status", "row_type", "postdated_date",
+    "first_payment_date", "schedule_status", "source", "phone", "release_reason",
+  ]));
+  for (const h of postDateHolds) {
+    rows.push(csvRow([
+      h.domain || domain,
+      h.caseId || "",
+      h.caseName || "",
+      h.status || "",
+      h.rowType || "",
+      h.postDatedDateKey || "",
+      h.firstPaymentDateKey || "",
+      h.paymentScheduleStatus || "",
+      h.sourceName || "",
+      h.phone || "",
+      h.releaseReason || "",
     ]));
   }
   rows.push("");

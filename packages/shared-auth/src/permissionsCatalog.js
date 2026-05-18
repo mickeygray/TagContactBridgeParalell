@@ -116,6 +116,7 @@ const ROLE_DEFAULT_PERMISSIONS = Object.freeze({
     "cases.write",
     "metrics.read",
     "inbox.read",
+    "inbox.action",
   ]),
 
   // Widget user: external (e.g. partner portal). Minimal access.

@@ -19,6 +19,7 @@ const {
   requestCxDisposition,
   requestCxEmail,
   requestCxLeadStatusUpdate,
+  releaseCxPostDateHold,
   requestCxReminder,
   requestCxStatusChange,
   requestCxTask,
@@ -206,6 +207,20 @@ function createCommandsCxRouter(auth) {
       return res.status(error.status || 500).json(toErrorResponse(error));
     }
   });
+
+  router.post(
+    "/:domain/postdates/release",
+    auth.requireAuth,
+    auth.requireAdmin,
+    async (req, res) => {
+      try {
+        const result = await releaseCxPostDateHold(req.params.domain, req.user, req.body || {});
+        return res.json({ ok: true, result });
+      } catch (error) {
+        return res.status(error.status || 500).json(toErrorResponse(error));
+      }
+    },
+  );
 
   router.post("/:domain/logics/task", auth.requireAuth, auth.requireUser, async (req, res) => {
     try {

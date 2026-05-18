@@ -2,6 +2,7 @@
 
 const mongoose = require("mongoose");
 const { CallLog } = require("../../shared-models/src");
+const { legacyReadDb } = require("./legacyReadDb");
 
 // ── Legacy-collection fallback path ──────────────────────────────────
 //
@@ -20,10 +21,7 @@ const { CallLog } = require("../../shared-models/src");
 // queries (findLatestResolvedByPhone, listPendingRetries) keep reading
 // from parallel — they need fields legacy doesn't carry.
 function legacyContactActivitiesCollection() {
-  const dbName = process.env.LEGACY_APP_DB_NAME || "test";
-  return mongoose.connection
-    .useDb(dbName, { useCache: true })
-    .collection("rb_contactactivities");
+  return legacyReadDb(mongoose).collection("rb_contactactivities");
 }
 
 function boolFromEnv(value, fallback = false) {

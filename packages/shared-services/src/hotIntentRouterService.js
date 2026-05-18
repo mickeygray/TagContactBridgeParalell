@@ -24,10 +24,9 @@
  * doesn't bounce the assignment to a different rep mid-conversation.
  * Once that window passes, a new hot inbound rotates to the next rep.
  *
- * Universal-queue insertion: NOT done yet. The actual CX-queue boost
- * depends on phone→case lookup at SMS ingest, which is still pending.
- * Until that lands, the stamped routedToAgentId is the source of truth
- * for ownership and the rep's inbox UI is the only surface.
+ * CX-queue insertion: immediate hot SMS with a caseId gets a high-priority
+ * callback queue item. Future callback windows are captured for alerts and
+ * appointment handling only; they do not move or schedule the dialer queue.
  */
 
 const {
@@ -88,6 +87,151 @@ function pickNextRoundRobin(agents) {
   return sorted[0];
 }
 
+function callbackActionKey(workflowId) {
+  return `sms-callback:${String(workflowId || "").trim()}`;
+}
+
+function hasFutureCallbackDate(text) {
+  return /\b(tomorrow|next\s+(week|mon|monday|tue|tuesday|wed|wednesday|thu|thursday|fri|friday|sat|saturday|sun|sunday)|mon(day)?|tue(s|sday)?|wed(nesday)?|thu(r|rs|rsday)?|fri(day)?|sat(urday)?|sun(day)?|weekend|weekdays?)\b/.test(text);
+}
+
+function hasSpecificCallbackWindow(text) {
+  return /\b(morning|afternoon|evening|tonight|later|after\s+\d{1,2}|before\s+\d{1,2}|at\s+\d{1,2}|around\s+\d{1,2})\b/.test(text);
+}
+
+function resolveSmsCallbackQueueMode(callbackWindow) {
+  const raw = String(callbackWindow || "").trim();
+  if (!raw) {
+    return {
+      mode: "immediate",
+      shouldQueue: true,
+      reason: "no-callback-window",
+    };
+  }
+
+  const text = raw.toLowerCase();
+  if (hasFutureCallbackDate(text) || hasSpecificCallbackWindow(text)) {
+    return {
+      mode: "appointment",
+      shouldQueue: false,
+      reason: "future-callback-window-no-queue",
+    };
+  }
+
+  if (/\b(now|asap|right now|today|anytime|whenever)\b/.test(text)) {
+    return {
+      mode: "immediate",
+      shouldQueue: true,
+      reason: "window-says-now",
+    };
+  }
+
+  return {
+    mode: "appointment",
+    shouldQueue: false,
+    reason: "future-callback-window-no-queue",
+  };
+}
+
+async function queueSmsCallbackForWorkflow(workflow, options = {}) {
+  const workflowId = String(workflow?._id || workflow?.id || options.workflowId || "").trim();
+  if (!workflowId) {
+    return { queued: false, skipped: true, reason: "no-workflow-id" };
+  }
+
+  const domain = String(options.domain || workflow.domain || "WYNN").toUpperCase();
+  const actionKey = callbackActionKey(workflowId);
+  const callbackWindow = String(options.callbackWindow || "").trim();
+  const callbackQueueMode = resolveSmsCallbackQueueMode(callbackWindow);
+
+  if (!callbackQueueMode.shouldQueue) {
+    await conversationWorkflowRepository.updateConversationWorkflowById(workflowId, {
+      "metadata.callbackQueue": {
+        queued: false,
+        skipped: true,
+        actionKey,
+        callbackWindow,
+        mode: callbackQueueMode.mode,
+        reason: callbackQueueMode.reason,
+        observedAt: new Date(),
+      },
+    }).catch(() => null);
+
+    return {
+      queued: false,
+      skipped: true,
+      reason: callbackQueueMode.reason,
+      mode: callbackQueueMode.mode,
+      actionKey,
+      queueItemId: null,
+    };
+  }
+
+  const caseId = Number(workflow?.caseId);
+  if (!Number.isFinite(caseId) || caseId <= 0) {
+    return { queued: false, skipped: true, reason: "no-case-id" };
+  }
+
+  const { queueCxDialRequest } = require("./cxCadenceService");
+  const result = await queueCxDialRequest({
+    domain,
+    caseId,
+    phone: workflow.phone || null,
+    name: workflow.metadata?.name || workflow.metadata?.leadName || null,
+    intakeSource: "sms-hot-intent",
+    intakeRoute: "sms-hot-intent-now",
+    sourceName: "Wynn SMS callback",
+    queueFamily: "fresh-day1",
+    priorityLane: "sms-hot-intent",
+    priorityScore: 500,
+    requestedBy: "sms-opus-triage",
+    executionOwner: "ringcentral-cx",
+    workflowId,
+    actionKey,
+    metadata: {
+      actionKey,
+      source: "sms-opus-triage",
+      smsCallbackQueued: true,
+      workflowId,
+      callbackWindow: callbackWindow || null,
+      callbackQueueMode: callbackQueueMode.mode,
+      callbackQueueTimingReason: callbackQueueMode.reason,
+      smsCallbackUrgency: "immediate-hot",
+      reason: options.reason || null,
+      classificationTier: options.classification?.tier || null,
+      prospectState: options.classification?.prospectState || null,
+      hotIntentReason: options.classification?.hotIntent?.reason || null,
+    },
+  });
+
+  const queueItem = result?.queueItem || null;
+  if (queueItem?._id) {
+    await conversationWorkflowRepository.updateConversationWorkflowById(workflowId, {
+      routedQueueItemId: String(queueItem._id),
+      "metadata.callbackQueue": {
+        queued: true,
+        queueItemId: String(queueItem._id),
+        actionKey,
+        callbackWindow: callbackWindow || null,
+        mode: callbackQueueMode.mode,
+        queuedAt: new Date(),
+      },
+    }).catch(() => null);
+  }
+
+  return {
+    queued: Boolean(result?.queued),
+    deduped: Boolean(result?.deduped),
+    queueItemId: queueItem?._id ? String(queueItem._id) : null,
+    actionKey,
+    skipped: Boolean(result?.skipped),
+    reason: result?.reason || null,
+    detail: result?.detail || null,
+    mode: callbackQueueMode.mode,
+    timingReason: callbackQueueMode.reason,
+  };
+}
+
 /**
  * Route a hot-intent SMS workflow to the next available rep.
  *
@@ -114,6 +258,19 @@ async function autoRouteHotInboundWorkflow(input = {}) {
     return { routed: false, skipReason: "workflow-not-found" };
   }
 
+  let callbackQueue = null;
+  try {
+    callbackQueue = await queueSmsCallbackForWorkflow(workflow, {
+      workflowId,
+      domain,
+      reason: input.reason || null,
+      callbackWindow: input.callbackWindow || "",
+      classification: input.classification || null,
+    });
+  } catch (error) {
+    callbackQueue = { queued: false, error: error.message || "callback-queue-failed" };
+  }
+
   // Idempotency: already routed and still fresh → leave alone.
   const existingRoutedAt = workflow.routedAt
     ? new Date(workflow.routedAt).getTime()
@@ -130,6 +287,7 @@ async function autoRouteHotInboundWorkflow(input = {}) {
         extensionId: workflow.routedToAgentId,
         name: workflow.routedToAgentName || "",
       },
+      callbackQueue,
       workflow,
     };
   }
@@ -137,7 +295,7 @@ async function autoRouteHotInboundWorkflow(input = {}) {
   const available = await listAvailableHotIntentAgents(domain);
   const pick = pickNextRoundRobin(available);
   if (!pick) {
-    return { routed: false, skipReason: "no-available-agents", workflow };
+    return { routed: false, skipReason: "no-available-agents", callbackQueue, workflow };
   }
 
   const now = new Date();
@@ -147,8 +305,7 @@ async function autoRouteHotInboundWorkflow(input = {}) {
       routedToAgentId: String(pick.extensionId),
       routedToAgentName: String(pick.name || ""),
       routedAt: now,
-      // routedQueueItemId stays null until phone→case lookup lands and
-      // we can actually create/boost a universal-queue item.
+      routedQueueItemId: callbackQueue?.queueItemId || workflow.routedQueueItemId || null,
     },
   );
 
@@ -167,6 +324,7 @@ async function autoRouteHotInboundWorkflow(input = {}) {
       extensionId: pick.extensionId,
       name: pick.name,
     },
+    callbackQueue,
     workflow: updatedWorkflow,
   };
 }
@@ -176,6 +334,8 @@ module.exports = {
   isAvailableForHotIntent,
   listAvailableHotIntentAgents,
   pickNextRoundRobin,
+  queueSmsCallbackForWorkflow,
+  resolveSmsCallbackQueueMode,
   HEARTBEAT_FRESH_MS,
   ROUTING_FRESH_MS,
 };
