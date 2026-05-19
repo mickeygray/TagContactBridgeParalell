@@ -1,6 +1,7 @@
 "use strict";
 
 const fs = require("fs");
+const os = require("os");
 const path = require("path");
 const dotenv = require("dotenv");
 
@@ -19,7 +20,10 @@ function upsertEnvValue(contents, key, value) {
   if (pattern.test(contents)) {
     return contents.replace(pattern, line);
   }
-  return `${contents.replace(/\s*$/, "")}\r\n${line}\r\n`;
+  // Use platform line ending so .env stays consistent with however the
+  // file is currently written on the host (CRLF on Windows, LF on Linux).
+  const eol = os.EOL;
+  return `${contents.replace(/\s*$/, "")}${eol}${line}${eol}`;
 }
 
 async function mintPlatformToken() {

@@ -37,8 +37,20 @@ function parseCsvLine(line) {
   return values.map((value) => value.trim());
 }
 
+// CSV exports from Logics on Windows are typically UTF-16 LE with a BOM;
+// CSVs produced on Linux (or by curl/jq pipelines) are typically UTF-8.
+// Sniff the first two bytes for a UTF-16 LE BOM and read accordingly;
+// otherwise treat the file as UTF-8.
+function readCsvTextWithEncoding(filePath) {
+  const buffer = fs.readFileSync(filePath);
+  if (buffer.length >= 2 && buffer[0] === 0xff && buffer[1] === 0xfe) {
+    return buffer.toString("utf16le").replace(/^\uFEFF/, "");
+  }
+  return buffer.toString("utf8").replace(/^\uFEFF/, "");
+}
+
 function parseSimpleCsv(filePath) {
-  const raw = fs.readFileSync(filePath, "utf16le").replace(/^\uFEFF/, "");
+  const raw = readCsvTextWithEncoding(filePath);
   const lines = raw.split(/\r?\n/).filter((line) => line.trim());
   if (lines.length === 0) return [];
 

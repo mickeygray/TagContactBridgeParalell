@@ -288,6 +288,15 @@ function resolveWebhookSecret(rcConfig, config, logger) {
   return null;
 }
 
+function isRingCentralSuspended() {
+  const raw = String(process.env.PARALLEL_RC_SUSPENDED || "").trim().toLowerCase();
+  return ["1", "true", "yes", "on"].includes(raw);
+}
+
+function isStartupPresenceSeedEnabled() {
+  return String(process.env.RC_PRESENCE_STARTUP_SEED_ENABLED || "true").toLowerCase() !== "false";
+}
+
 async function startServer() {
   const config = {
     ...getSharedConfig(),
@@ -305,31 +314,47 @@ async function startServer() {
   const rc = createRingCentralClient();
   const rcConfig = getRingCentralConfig();
   const requiredWebhookSecret = resolveWebhookSecret(rcConfig, config, runtime.logger);
+  const seedPresenceSnapshot = async (logMessage, failureMessage) => {
+    if (isRingCentralSuspended()) {
+      runtime.logger.info(logMessage, {
+        skipped: true,
+        reason: "parallel-rc-suspended",
+      });
+      return;
+    }
+    if (!isStartupPresenceSeedEnabled()) {
+      runtime.logger.info(logMessage, {
+        skipped: true,
+        reason: "RC_PRESENCE_STARTUP_SEED_ENABLED=false",
+      });
+      return;
+    }
+    try {
+      const seeded = await seedPresenceForAgents(runtime.logger);
+      runtime.logger.info(logMessage, seeded);
+    } catch (error) {
+      runtime.logger.warn(failureMessage, {
+        error: error.message,
+      });
+    }
+  };
   rc.setRefreshCallback(async (context = {}) => {
     runtime.logger.info("ringcentral.platform.reinitialized", {
       reason: context.reason || "refresh",
       authenticatedAt: context.authenticatedAt || null,
     });
-    try {
-      const seeded = await seedPresenceForAgents(runtime.logger);
-      runtime.logger.info("ringcentral.presence.seeded_after_reinit", seeded);
-    } catch (error) {
-      runtime.logger.warn("ringcentral.presence.seed_after_reinit_failed", {
-        error: error.message,
-      });
-    }
+    await seedPresenceSnapshot(
+      "ringcentral.presence.seeded_after_reinit",
+      "ringcentral.presence.seed_after_reinit_failed",
+    );
   });
   try {
     await rc.warmupPlatform();
     runtime.logger.info("ringcentral.platform.ready", rc.getAuthStatus());
-    try {
-      const seeded = await seedPresenceForAgents(runtime.logger);
-      runtime.logger.info("ringcentral.presence.seeded_on_startup", seeded);
-    } catch (error) {
-      runtime.logger.warn("ringcentral.presence.seed_on_startup_failed", {
-        error: error.message,
-      });
-    }
+    await seedPresenceSnapshot(
+      "ringcentral.presence.seeded_on_startup",
+      "ringcentral.presence.seed_on_startup_failed",
+    );
   } catch (error) {
     runtime.logger.warn("ringcentral.platform.warmup_failed", {
       error: error.message,
@@ -446,6 +471,19 @@ async function startServer() {
   app.use(express.static(path.resolve(__dirname, "..", "public")));
 
   async function startCxCadenceWorker() {
+    const cadenceWorkerEnabledRaw =
+      process.env.RC_CX_CADENCE_WORKER_ENABLED
+      ?? config.ringCentralCxCadenceWorker?.enabled
+      ?? "true";
+    const cadenceWorkerEnabled = String(cadenceWorkerEnabledRaw).toLowerCase() !== "false";
+    cadenceWorkerState.enabled = cadenceWorkerEnabled;
+    if (!cadenceWorkerEnabled) {
+      runtime.logger.warn("ringcentral.cx_cadence.disabled", {
+        reason: "RC_CX_CADENCE_WORKER_ENABLED=false",
+      });
+      return;
+    }
+
     // Cadence is the queue-sweep + assignment + cadence-event drain. It
     // does NOT power live click-to-dial (that's webhook-driven via
     // /cx-serving/dispatch-intent). Five-minute cadence is the rule:
@@ -461,7 +499,6 @@ async function startServer() {
     const batchSize = Math.max(Number(config.ringCentralCxCadenceWorker?.batchSize) || 25, 1);
     const maxAttempts = Math.max(Number(config.ringCentralCxCadenceWorker?.maxAttempts) || 5, 1);
 
-    cadenceWorkerState.enabled = true;
     cadenceWorkerState.intervalMs = intervalMs;
 
     const tick = async () => {

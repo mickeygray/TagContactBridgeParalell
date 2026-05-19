@@ -49,8 +49,9 @@ const DEFAULT_TRAINING_FOLDER_ENV = "RECORDINGS_DRIVE_TRAINING_FOLDER_ID";
 function getDefaultRoot() {
   // Windows: %LOCALAPPDATA%\Parallel\recordings — survives reboots, not
   // wiped by temp cleaners, doesn't roam.
-  // Linux:   /var/lib/parallel/recordings — standard system data path,
-  //          systemd unit will own the directory.
+  // Linux:   $XDG_DATA_HOME/parallel/recordings (default ~/.local/share/...)
+  //          for user-mode installs. A systemd-managed prod deployment
+  //          should set PARALLEL_RECORDINGS_ROOT=/var/lib/parallel/recordings.
   // macOS:   ~/Library/Application Support/Parallel/recordings (dev only).
   if (process.platform === "win32") {
     const base = process.env.LOCALAPPDATA || path.join(os.homedir(), "AppData", "Local");
@@ -59,7 +60,13 @@ function getDefaultRoot() {
   if (process.platform === "darwin") {
     return path.join(os.homedir(), "Library", "Application Support", "Parallel", "recordings");
   }
-  return "/var/lib/parallel/recordings";
+  // Linux: XDG Base Directory spec. ~/.local/share is user-writable
+  // without sudo, which keeps `node` smoke runs friction-free. Prod
+  // deploys override via PARALLEL_RECORDINGS_ROOT (resolved by the
+  // caller in getRecordingsRoot below).
+  const xdgDataHome = String(process.env.XDG_DATA_HOME || "").trim();
+  const linuxBase = xdgDataHome || path.join(os.homedir(), ".local", "share");
+  return path.join(linuxBase, "parallel", "recordings");
 }
 
 function getRecordingsRoot() {

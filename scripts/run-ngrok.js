@@ -49,15 +49,23 @@ function resolveNgrokBinary() {
     }
   }
 
-  // Known install locations on this machine (legacy TagContactBridge
-  // dropped ngrok at the first one). Add more as new dev machines
-  // surface different setups.
-  const candidates = [
-    "C:\\users\\admin\\downloads\\ngrok-v3-stable-windows-amd64\\ngrok.exe",
-    "C:\\Users\\Admin\\Downloads\\ngrok-v3-stable-windows-amd64\\ngrok.exe",
-    "C:\\Program Files\\ngrok\\ngrok.exe",
-    "C:\\ProgramData\\chocolatey\\bin\\ngrok.exe",
-  ];
+  // Known install locations per platform. Add more as new dev machines
+  // surface different setups; NGROK_BIN env var always wins above.
+  const isWindows = process.platform === "win32";
+  const candidates = isWindows
+    ? [
+        "C:\\users\\admin\\downloads\\ngrok-v3-stable-windows-amd64\\ngrok.exe",
+        "C:\\Users\\Admin\\Downloads\\ngrok-v3-stable-windows-amd64\\ngrok.exe",
+        "C:\\Program Files\\ngrok\\ngrok.exe",
+        "C:\\ProgramData\\chocolatey\\bin\\ngrok.exe",
+      ]
+    : [
+        // Common Linux locations (apt + snap + manual install).
+        "/usr/local/bin/ngrok",
+        "/usr/bin/ngrok",
+        "/snap/bin/ngrok",
+        "/opt/ngrok/ngrok",
+      ];
   for (const candidate of candidates) {
     try {
       if (fs.existsSync(candidate)) return candidate;

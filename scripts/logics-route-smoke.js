@@ -80,7 +80,12 @@ function getFallbackSeed(domain) {
     return null;
   }
 
-  const raw = fs.readFileSync(filePath, "utf16le").replace(/^\uFEFF/, "");
+  // Logics CSV exports on Windows are UTF-16 LE with a BOM; on Linux
+  // they may arrive as UTF-8. Sniff the BOM, decode accordingly.
+  const buffer = fs.readFileSync(filePath);
+  const raw = buffer.length >= 2 && buffer[0] === 0xff && buffer[1] === 0xfe
+    ? buffer.toString("utf16le").replace(/^\uFEFF/, "")
+    : buffer.toString("utf8").replace(/^\uFEFF/, "");
   const lines = raw.split(/\r?\n/).filter((line) => line.trim());
   if (lines.length < 2) {
     return null;
