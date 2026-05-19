@@ -102,6 +102,31 @@ const agentStateSchema = new mongoose.Schema(
       lifetime: { type: mongoose.Schema.Types.Mixed, default: null },
       computedAt: { type: Date, default: null },
     },
+    cxQueuePolicy: {
+      tier: {
+        type: String,
+        enum: ["no_leads", "red_only", "old_balanced", "fresh_capped", "fresh_priority"],
+        default: null,
+        index: true,
+      },
+      enabled: { type: Boolean, default: true },
+      fresh: {
+        eligible: { type: Boolean, default: null },
+        firstTouchEligible: { type: Boolean, default: null },
+        targetOpen: { type: Number, default: null },
+        hourlyCap: { type: Number, default: null },
+        priorityWeight: { type: Number, default: null },
+      },
+      day2to15: {
+        targetOpen: { type: Number, default: null },
+      },
+      aged: {
+        targetOpen: { type: Number, default: null },
+      },
+      updatedAt: { type: Date, default: null },
+      updatedBy: { type: String, default: null },
+    },
+    cxQueuePolicyExplicit: { type: Boolean, default: false },
     cxRouting: {
       enabled: { type: Boolean, default: false },
       desiredAvailability: {

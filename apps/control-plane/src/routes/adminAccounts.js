@@ -13,6 +13,7 @@ const {
 const {
   syncUsersFromRcExtensions,
   getOrComputeAgentCallStats,
+  listCxPlacedCallsToday,
 } = require("../../../../packages/shared-services/src");
 const { touchCxWorkspacePresence } = require("../../../../packages/shared-services/src");
 const { releaseAssignedCxQueueForAgent } = require("../../../../packages/shared-services/src/cxCadenceService");
@@ -121,6 +122,8 @@ function summarizeAgentState(agentState) {
     activityState: agentState.activityState || null,
     exPresenceStatus: agentState.exPresenceStatus || null,
     exTelephonyStatus: agentState.exTelephonyStatus || null,
+    cxQueuePolicy: agentState.cxQueuePolicy || null,
+    cxQueuePolicyExplicit: Boolean(agentState.cxQueuePolicyExplicit),
     cxRouting: agentState.cxRouting || null,
     cxLive: deriveCxLiveState(agentState),
     freshLeadGate: deriveFreshLeadGate(agentState, agentState.cxRouting || null),
@@ -257,6 +260,59 @@ function summarizeRcExtension(extension = {}) {
     status: extension?.status || null,
     company: String(extension?.contact?.company || "").trim().toUpperCase() || deriveCompanyFromEmail(email),
   });
+}
+
+function summarizeUnassignedAgentExtension(agent = {}) {
+  return compactObject({
+    extensionId: agent?.extensionId != null ? String(agent.extensionId) : null,
+    extensionNumber: agent?.extensionNumber != null ? String(agent.extensionNumber) : null,
+    name: agent.name || null,
+    company: agent.company || null,
+    cxAgentId: agent.cxAgentId || null,
+    status: agent.status || null,
+    exPresenceStatus: agent.exPresenceStatus || null,
+    lastStatusChange: agent.lastStatusChange || null,
+    lastEventReceived: agent.lastEventReceived || null,
+    source: "agent-state-cache",
+  });
+}
+
+async function listLiveRcExtensionSummaries() {
+  const rc = createRingCentralClient();
+  await rc.reinitializePlatform({ force: false, reason: "admin-unassigned-extensions-live" });
+  const payload = await rc.listExtensions({ status: null });
+  return coerceList(payload)
+    .filter((extension) => extension?.type === "User")
+    .filter((extension) => String(extension?.status || "").toLowerCase() !== "disabled")
+    .map((extension) => ({
+      ...summarizeRcExtension(extension),
+      source: "ringcentral-ex-live",
+    }))
+    .filter((extension) => extension.extensionId);
+}
+
+function mergeExtensionSummaries(entries = []) {
+  const byExtensionId = new Map();
+  for (const entry of entries) {
+    const extensionId = String(entry?.extensionId || "").trim();
+    if (!extensionId) continue;
+    const previous = byExtensionId.get(extensionId) || {};
+    byExtensionId.set(extensionId, compactObject({
+      ...previous,
+      ...entry,
+      name: entry.name || previous.name || null,
+      company: entry.company || previous.company || null,
+      cxAgentId: entry.cxAgentId || previous.cxAgentId || null,
+      exPresenceStatus: previous.exPresenceStatus || entry.exPresenceStatus || null,
+      lastStatusChange: previous.lastStatusChange || entry.lastStatusChange || null,
+      lastEventReceived: previous.lastEventReceived || entry.lastEventReceived || null,
+      source: Array.from(new Set([
+        ...String(previous.source || "").split("+").filter(Boolean),
+        entry.source || null,
+      ].filter(Boolean))).join("+") || null,
+    }));
+  }
+  return Array.from(byExtensionId.values());
 }
 
 function summarizeLocalAgentState(agent = {}) {
@@ -484,8 +540,10 @@ async function resolveIdentityMatches(body = {}) {
   try {
     const rc = createRingCentralClient();
     await rc.reinitializePlatform({ force: false, reason: "admin-user-identity-lookup" });
-    const payload = await rc.listExtensions();
-    const liveMatch = coerceList(payload).find((extension) => matchRcExtension(extension, input));
+    const payload = await rc.listExtensions({ status: null });
+    const liveMatch = coerceList(payload)
+      .filter((extension) => String(extension?.status || "").toLowerCase() !== "disabled")
+      .find((extension) => matchRcExtension(extension, input));
     exLookup = {
       ok: true,
       source: liveMatch ? "ringcentral-ex-live" : "ringcentral-ex-live",
@@ -736,32 +794,58 @@ function createAdminAccountsRouter(auth) {
       try {
         const filters = {};
         if (req.query.company) filters.company = req.query.company;
+        const includeLive = String(req.query.live || "true").toLowerCase() !== "false";
 
-        const [agents, accounts] = await Promise.all([
+        const [agents, accounts, liveLookup] = await Promise.all([
           agentStateRepository.listAgentStates(filters),
           userAccountRepository.listUserAccounts({ limit: 1000 }),
+          includeLive
+            ? listLiveRcExtensionSummaries()
+              .then((extensions) => ({ ok: true, extensions, error: null }))
+              .catch((error) => ({ ok: false, extensions: [], error: error.message }))
+            : Promise.resolve({ ok: true, extensions: [], error: null }),
         ]);
 
-        const assigned = new Set(
-          accounts
-            .map((account) => account.extensionId)
-            .filter((value) => value != null && value !== ""),
-        );
+        const assignedExtensionIds = new Set();
+        const assignedExtensionNumbers = new Set();
+        for (const account of accounts) {
+          if (account.extensionId) assignedExtensionIds.add(String(account.extensionId));
+          if (account.extensionId && account.extensionNumber) {
+            assignedExtensionNumbers.add(String(account.extensionNumber));
+          }
+          const additionalIds = Array.isArray(account.metadata?.additionalExtensionIds)
+            ? account.metadata.additionalExtensionIds
+            : [];
+          for (const extensionId of additionalIds) {
+            if (extensionId) assignedExtensionIds.add(String(extensionId));
+          }
+        }
 
-        const unassigned = agents
-          .filter((agent) => !assigned.has(String(agent.extensionId)))
-          .map((agent) => ({
-            extensionId: String(agent.extensionId),
-            name: agent.name || null,
-            company: agent.company || null,
-            cxAgentId: agent.cxAgentId || null,
-            status: agent.status || null,
-            exPresenceStatus: agent.exPresenceStatus || null,
-            lastStatusChange: agent.lastStatusChange || null,
-            lastEventReceived: agent.lastEventReceived || null,
-          }));
+        const companyFilter = String(req.query.company || "").trim().toUpperCase();
+        const cachedExtensions = agents.map(summarizeUnassignedAgentExtension);
+        const mergedExtensions = mergeExtensionSummaries([
+          ...cachedExtensions,
+          ...liveLookup.extensions,
+        ]);
 
-        return res.json({ ok: true, extensions: unassigned });
+        const unassigned = mergedExtensions
+          .filter((extension) => !assignedExtensionIds.has(String(extension.extensionId)))
+          .filter((extension) =>
+            !extension.extensionNumber ||
+            !assignedExtensionNumbers.has(String(extension.extensionNumber)))
+          .filter((extension) =>
+            !companyFilter ||
+            !extension.company ||
+            String(extension.company).toUpperCase() === companyFilter)
+          .sort((left, right) =>
+            String(left.name || left.extensionNumber || left.extensionId)
+              .localeCompare(String(right.name || right.extensionNumber || right.extensionId)));
+
+        return res.json({
+          ok: true,
+          extensions: unassigned,
+          liveLookup,
+        });
       } catch (error) {
         return res.status(error.status || 500).json(toErrorResponse(error));
       }
@@ -775,6 +859,49 @@ function createAdminAccountsRouter(auth) {
     async (req, res) => {
       try {
         const result = await resolveIdentityMatches(req.body || {});
+        return res.json({ ok: true, ...result });
+      } catch (error) {
+        return res.status(error.status || 500).json(toErrorResponse(error));
+      }
+    },
+  );
+
+  /**
+   * GET /today-dials
+   *
+   * Always-fresh per-agent "today's CX activity" rollup. Reads
+   * CxDialQueue metadata directly (no CallLog aggregation, no
+   * AgentState snapshot cache) and groups by the extensionIds that
+   * touched each lead today. Intended for an admin dashboard that
+   * needs live numbers across all agents, where the per-agent
+   * call-stats endpoint's 5-min snapshot is too coarse.
+   *
+   * Optional `?domain=TAG|WYNN` to filter; omit to roll up both.
+   *
+   * Returns:
+   *   {
+   *     ok: true,
+   *     dateKey: "2026-05-18",
+   *     domain: "TAG" | null,
+   *     items: [
+   *       { extensionId, leadsTouchedToday, placedCallsToday,
+   *         lastPlacedAt, domains: ["TAG"] },
+   *       ...
+   *     ]
+   *   }
+   *
+   * MUST be defined BEFORE the `/:id` route — otherwise Express's
+   * parametric match will swallow "today-dials" as an id.
+   */
+  router.get(
+    "/today-dials",
+    auth.requireAuth,
+    auth.requireAdmin,
+    async (req, res) => {
+      try {
+        const result = await listCxPlacedCallsToday({
+          domain: req.query?.domain || null,
+        });
         return res.json({ ok: true, ...result });
       } catch (error) {
         return res.status(error.status || 500).json(toErrorResponse(error));

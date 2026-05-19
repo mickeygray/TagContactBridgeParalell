@@ -315,6 +315,7 @@ type QueueFamilyDisplay = {
 };
 
 const AUTO_SERVE_DELAY_SECONDS = 1;
+const AUTO_SERVE_HANDOFF_DELAY_SECONDS = 0;
 const AUTO_SERVE_STARTUP_DELAY_SECONDS = 8;
 const SHOW_POSTDATE_DISPOSITION = true;
 const SHOW_ADVANCED_CX_DISPOSITIONS = false;
@@ -3150,6 +3151,29 @@ export function CXWorkspace() {
     if (queueDomain && queueDomain !== domain) setDomain(queueDomain);
   }
 
+  function buildNextCallHandoffPayload(item: CxCallQueueItem | null | undefined) {
+    if (!item) return null;
+    const contact = contactFromQueue(item);
+    if (!contact.phone) return null;
+    const queueDomain = String(item.domain || domain || "TAG").trim().toUpperCase();
+    return {
+      domain: queueDomain,
+      ...buildQueueDialRequest(item, queueDomain, contact),
+      ...(cxDialExecutionModeOverride ? { executionMode: cxDialExecutionModeOverride } : {}),
+      assignedExtensionId: currentExtensionId || item.assignedExtensionId || undefined,
+      ringcxDialPriority: "IMMEDIATE",
+      requestedBySurface: "cx-next-call-handoff",
+    };
+  }
+
+  function stageNextCallHandoffLead(item: CxCallQueueItem) {
+    const contact = contactFromQueue(item);
+    const queueDomain = String(item.domain || domain || "TAG").trim().toUpperCase();
+    cancelAutoServe();
+    stageQueueLeadInWorkspace(item, contact, queueDomain);
+    setServingQueueKey(buildQueueItemKey(item));
+  }
+
   async function handleSelectFromQueue(
     item: CxCallQueueItem,
     options: { source?: "manual" | "auto" } = {},
@@ -3287,7 +3311,10 @@ export function CXWorkspace() {
     leadLookup.refetch();
   }
 
-  function releaseQueueAfterSuccess(result: unknown, options: { forceEject?: boolean } = {}) {
+  function releaseQueueAfterSuccess(
+    result: unknown,
+    options: { forceEject?: boolean; skipAutoServe?: boolean } = {},
+  ) {
     const forceEject = options.forceEject === true;
     if (!forceEject && !servedQueueActionKey && !servedQueueTicketId) return;
     const row = asRecord(result);
@@ -3325,7 +3352,9 @@ export function CXWorkspace() {
     for (const query of multiCallQueues) {
       query.refetch();
     }
-    scheduleAutoServe();
+    if (!options.skipAutoServe) {
+      scheduleAutoServe(AUTO_SERVE_HANDOFF_DELAY_SECONDS, "next");
+    }
   }
 
   function optimisticallyEjectCallbackLead() {
@@ -3349,7 +3378,7 @@ export function CXWorkspace() {
     for (const query of multiCallQueues) {
       query.refetch();
     }
-    scheduleAutoServe();
+    scheduleAutoServe(AUTO_SERVE_DELAY_SECONDS, "next");
   }
 
   function handleSaveCase() {
@@ -3559,7 +3588,7 @@ export function CXWorkspace() {
     });
     clearServedQueueSelection();
     clearCasePanelForNextQueueLead();
-    scheduleAutoServe(AUTO_SERVE_DELAY_SECONDS, "next");
+    scheduleAutoServe(AUTO_SERVE_HANDOFF_DELAY_SECONDS, "next");
   }, [
     data?.recentWorkflowStages,
     servedQueueTicketId,
@@ -4541,6 +4570,8 @@ export function CXWorkspace() {
                     variant="secondary"
                     isLoading={disposition.isPending}
                     onClick={() => {
+                      const nextQueueLead = queueItems[0] || null;
+                      const nextDial = buildNextCallHandoffPayload(nextQueueLead);
                       optimisticallyEjectCallbackLead();
                       void run("Call back", () =>
                         disposition.mutateAsync({
@@ -4552,9 +4583,32 @@ export function CXWorkspace() {
                           queueItemId: servedQueueTicketId || undefined,
                           queueTicketId: servedQueueTicketId || undefined,
                           assignedExtensionId: currentExtensionId || undefined,
+                          nextDial: nextDial || undefined,
                         }),
                       )
-                        .then((result) => releaseQueueAfterSuccess(result, { forceEject: true }))
+                        .then((result) => {
+                          const row = asRecord(result);
+                          const nextDialResult = asRecord(row.nextDial);
+                          const nextDialAccepted =
+                            nextDial != null &&
+                            nextQueueLead != null &&
+                            nextDialResult.accepted === true;
+                          releaseQueueAfterSuccess(result, {
+                            forceEject: true,
+                            skipAutoServe: nextDialAccepted,
+                          });
+                          if (nextDialAccepted && nextQueueLead) {
+                            stageNextCallHandoffLead(nextQueueLead);
+                            toast("Next call sent", {
+                              description: "RingCX has the next lead while the prior call finishes cleanup.",
+                            });
+                          } else if (nextDial != null && nextDialResult.accepted === false) {
+                            const reason = String(nextDialResult.reason || "").trim();
+                            toast.warning("Next call handoff fell back", {
+                              description: reason || "Auto serve will retry from the queue.",
+                            });
+                          }
+                        })
                         .catch(() => {
                           workspace.refetch();
                           callQueue.refetch();

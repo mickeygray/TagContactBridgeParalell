@@ -1,6 +1,6 @@
 "use strict";
 
-const { UserAccount } = require("../../shared-models/src");
+const { AgentState, UserAccount } = require("../../shared-models/src");
 const { normalizeCxQueuePolicyTier } = require("../../shared-normalizers/src");
 
 const CX_QUEUE_POLICY_TIERS = new Set([
@@ -45,6 +45,10 @@ function normalizeCxQueuePolicy(input) {
     enabled: input.enabled === undefined ? true : Boolean(input.enabled),
     fresh: {
       eligible: input.fresh?.eligible == null ? null : Boolean(input.fresh.eligible),
+      firstTouchEligible:
+        input.fresh?.firstTouchEligible == null
+          ? null
+          : Boolean(input.fresh.firstTouchEligible),
       targetOpen: toNullableNumber(input.fresh?.targetOpen),
       hourlyCap: toNullableNumber(input.fresh?.hourlyCap),
       priorityWeight: toNullableNumber(input.fresh?.priorityWeight),
@@ -60,6 +64,45 @@ function normalizeCxQueuePolicy(input) {
   };
 
   return out;
+}
+
+function hasPolicyValue(value) {
+  return value !== null && value !== undefined && value !== "";
+}
+
+function hasManualCxQueuePolicy(input = null) {
+  if (!input || typeof input !== "object") return false;
+  return (
+    input.enabled === false
+    || hasPolicyValue(input.fresh?.eligible)
+    || hasPolicyValue(input.fresh?.firstTouchEligible)
+    || hasPolicyValue(input.fresh?.targetOpen)
+    || hasPolicyValue(input.day2to15?.targetOpen)
+    || hasPolicyValue(input.aged?.targetOpen)
+  );
+}
+
+function buildAgentQueuePolicyMirror(account) {
+  if (!account || typeof account !== "object") return null;
+  const extensionId = normalizeExtension(account.extensionId);
+  if (!extensionId) return null;
+  const policy = normalizeCxQueuePolicy(account.cxQueuePolicy) || null;
+  return {
+    extensionId,
+    update: {
+      cxQueuePolicy: policy,
+      cxQueuePolicyExplicit: hasManualCxQueuePolicy(policy),
+    },
+  };
+}
+
+async function mirrorCxQueuePolicyToAgentState(account) {
+  const mirror = buildAgentQueuePolicyMirror(account);
+  if (!mirror) return null;
+  return AgentState.updateOne(
+    { extensionId: mirror.extensionId },
+    { $set: mirror.update },
+  );
 }
 
 function normalizeExShells(shells) {
@@ -233,6 +276,7 @@ async function createUserAccount(input = {}) {
 
   try {
     const doc = await UserAccount.create(payload);
+    await mirrorCxQueuePolicyToAgentState(doc).catch(() => null);
     return toAccountRecord(doc);
   } catch (error) {
     if (error && error.code === 11000) {
@@ -309,6 +353,7 @@ async function upsertUserAccount(input = {}) {
     upsert: true,
     setDefaultsOnInsert: true,
   });
+  await mirrorCxQueuePolicyToAgentState(doc).catch(() => null);
   return toAccountRecord(doc);
 }
 
@@ -399,6 +444,7 @@ async function updateUserAccount(id, patch = {}) {
     err.status = 404;
     throw err;
   }
+  await mirrorCxQueuePolicyToAgentState(doc).catch(() => null);
   return toAccountRecord(doc);
 }
 

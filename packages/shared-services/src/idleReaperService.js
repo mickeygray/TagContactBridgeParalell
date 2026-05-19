@@ -25,6 +25,7 @@ const {
 
 const ACTIVE_CX_QUEUE_STATES = ["queued", "ready", "claimed", "serving", "paused"];
 const ACTIVE_CALL_ACTIVITY_STATES = new Set(["dialing", "oncall", "dispositioning", "wrapup"]);
+const ORPHAN_DISPOSITION_STATES = new Set(["dispositioning", "wrapup"]);
 
 function normalizeToken(value) {
   return String(value || "").trim().toLowerCase();
@@ -104,6 +105,83 @@ async function reapStaleCxQueueAssignments({ asOf = new Date() } = {}) {
   };
 }
 
+function getOrphanDispositionClearMs() {
+  const parsed = Number(process.env.RC_CX_ORPHAN_DISPOSITION_CLEAR_MS);
+  if (Number.isFinite(parsed) && parsed >= 0) return parsed;
+  return 90_000;
+}
+
+function shouldClearOrphanCxDisposition(agent = null, asOf = new Date()) {
+  if (!agent) return false;
+  const activityState = normalizeToken(agent.activityState);
+  if (!ORPHAN_DISPOSITION_STATES.has(activityState)) return false;
+  const platform = String(agent.activePlatform || "").trim().toUpperCase();
+  if (platform && platform !== "CX") return false;
+  const currentCall = agent.currentCall && typeof agent.currentCall === "object"
+    ? agent.currentCall
+    : {};
+  const channel = normalizeToken(currentCall.channel);
+  if (channel && channel !== "cx") return false;
+  const lastCallEndedAt = agent.lastCallEndedAt ? new Date(agent.lastCallEndedAt) : null;
+  if (!lastCallEndedAt || Number.isNaN(lastCallEndedAt.getTime())) return false;
+  return asOf.getTime() - lastCallEndedAt.getTime() >= getOrphanDispositionClearMs();
+}
+
+async function clearOrphanCxDispositionStates({ asOf = new Date() } = {}) {
+  if (String(process.env.RC_CX_ORPHAN_DISPOSITION_REAPER_ENABLED || "true").toLowerCase() === "false") {
+    return { cleared: 0, reason: "disabled" };
+  }
+
+  const agents = await agentStateRepository.listAgentStates({ routingEnabled: true });
+  const results = [];
+
+  for (const agent of agents) {
+    if (!shouldClearOrphanCxDisposition(agent, asOf)) continue;
+    const extensionId = String(agent.extensionId || "").trim();
+    if (!extensionId) continue;
+    const assignedCount = await cxDialQueueRepository.countQueueItems({
+      assignedExtensionId: extensionId,
+      states: ACTIVE_CX_QUEUE_STATES,
+    });
+    if (assignedCount > 0) continue;
+
+    const updated = await agentStateRepository.updateAgentState(extensionId, {
+      status: "available",
+      activityState: "idle",
+      activePlatform: "none",
+      currentCall: {},
+      lastActivityAt: asOf,
+      lastStatusChange: asOf,
+      "cxRouting.assignmentStats.openAssignments": 0,
+      "cxRouting.reason": "orphan-disposition-cleared",
+      "cxRouting.syncedAt": asOf,
+      "cxRouting.lastSource": "idle-reaper",
+      "upstream.source": "idle-reaper-orphan-disposition",
+      "upstream.mirroredAt": asOf,
+    }).catch(() => null);
+
+    if (!updated) continue;
+    try {
+      // Lazy require avoids a module cycle; refill is best-effort.
+      // eslint-disable-next-line global-require
+      const { onAgentBecomesEligible } = require("./freshLeadAssignmentService");
+      await onAgentBecomesEligible(extensionId);
+    } catch {
+      // Do not fail the reaper if refill has a transient issue.
+    }
+    results.push({
+      extensionId,
+      name: agent.name || null,
+      lastCallEndedAt: agent.lastCallEndedAt || null,
+    });
+  }
+
+  return {
+    cleared: results.length,
+    results,
+  };
+}
+
 async function reapTick({ asOf = new Date() } = {}) {
   const config = await getConfig();
   if (config.enabled === false) return { reaped: 0, reason: "config-disabled" };
@@ -114,11 +192,13 @@ async function reapTick({ asOf = new Date() } = {}) {
 
   const activeSlices = await agentSliceRepository.listActiveSlices();
   const cxQueue = await reapStaleCxQueueAssignments({ asOf });
+  const orphanDisposition = await clearOrphanCxDispositionStates({ asOf });
   if (!activeSlices.length) {
     return {
       reaped: 0,
       reason: "no-active-slices",
       cxQueue,
+      orphanDisposition,
     };
   }
 
@@ -143,10 +223,11 @@ async function reapTick({ asOf = new Date() } = {}) {
     });
   }
 
-  return { reaped, reapedSlices, cxQueue };
+  return { reaped, reapedSlices, cxQueue, orphanDisposition };
 }
 
 module.exports = {
+  clearOrphanCxDispositionStates,
   reapTick,
   reapStaleCxQueueAssignments,
 };

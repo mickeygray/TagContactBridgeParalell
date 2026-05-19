@@ -10,6 +10,7 @@ import {
   PauseCircle,
   PhoneCall,
   PlayCircle,
+  RefreshCw,
   Search,
   ShieldCheck,
   UserPlus,
@@ -42,7 +43,6 @@ import type {
   AccountRecord,
   AccountStatus,
   AuthRole,
-  CxQueueTier,
   FreshLeadGate,
   UnassignedExtension,
 } from "@/lib/api/types";
@@ -63,22 +63,6 @@ const credentialTone = (status: string) => {
   return "neutral" as const;
 };
 
-const queueTierLabels: Record<string, string> = {
-  no_leads: "No leads",
-  red_only: "Red only",
-  old_balanced: "Old balanced",
-  fresh_capped: "Fresh capped",
-  fresh_priority: "Fresh priority",
-};
-
-const queueTierOptions: Array<{ value: CxQueueTier; label: string }> = [
-  { value: "no_leads", label: "No leads" },
-  { value: "red_only", label: "Red only" },
-  { value: "old_balanced", label: "Old balanced" },
-  { value: "fresh_capped", label: "Fresh capped" },
-  { value: "fresh_priority", label: "Fresh priority" },
-];
-
 function hasCurrentCall(call: unknown): boolean {
   if (!call || typeof call !== "object") return false;
   const currentCall = call as Record<string, unknown>;
@@ -95,6 +79,36 @@ function resolveFreshLeadGate(gate: FreshLeadGate | null | undefined) {
     blocked: Boolean(gate?.blocked),
     exCallActive: Boolean(gate?.exCallActive) || gate?.source === "ex-call",
     label: gate?.label || (gate?.blocked ? "Fresh paused" : "Fresh allowed"),
+  };
+}
+
+function readQueueCount(value: unknown, fallback: number) {
+  if (value === null || value === undefined || value === "") return fallback;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed >= 0 ? Math.trunc(parsed) : fallback;
+}
+
+function getLeadListSummary(row: AccountRecord) {
+  const policy =
+    row.agentState?.cxQueuePolicyExplicit && row.agentState?.cxQueuePolicy
+      ? row.agentState.cxQueuePolicy
+      : row.cxQueuePolicy;
+  const green = readQueueCount(policy?.fresh?.targetOpen, 0);
+  const blue = readQueueCount(policy?.day2to15?.targetOpen, 0);
+  const red = readQueueCount(policy?.aged?.targetOpen, 0);
+  const firstTouchEligible = Boolean(
+    policy?.fresh?.firstTouchEligible ??
+      policy?.fresh?.eligible ??
+      false,
+  );
+  const total = green + blue + red;
+  return {
+    enabled: policy?.enabled !== false && (total > 0 || firstTouchEligible),
+    firstTouchEligible,
+    green,
+    blue,
+    red,
+    total,
   };
 }
 
@@ -132,35 +146,6 @@ export function UsersWorkspace() {
   const selectedForDetail = rows.find((r) => r.id === detailId) ?? null;
   const selectedForEdit = rows.find((r) => r.id === editId) ?? null;
 
-  const updateQueueTier = React.useCallback(
-    async (row: AccountRecord, nextTier: CxQueueTier) => {
-      const currentTier =
-        (row.cxQueuePolicy?.tier as CxQueueTier | undefined) ||
-        (row.role === "admin" ? "no_leads" : "fresh_priority");
-      if (currentTier === nextTier) return;
-
-      try {
-        await update.mutateAsync({
-          id: row.id,
-          patch: {
-            cxQueuePolicy: {
-              tier: nextTier,
-              enabled: nextTier !== "no_leads",
-            },
-          },
-        });
-        toast.success("Queue tier updated", {
-          description: `${row.name} is now ${queueTierLabels[nextTier]}.`,
-        });
-      } catch (err) {
-        toast.error("Tier update failed", {
-          description: (err as Error).message,
-        });
-      }
-    },
-    [update],
-  );
-
   const columns = React.useMemo<ColumnDef<AccountRecord>[]>(
     () => [
       {
@@ -193,41 +178,24 @@ export function UsersWorkspace() {
         ),
       },
       {
-        id: "queueTier",
-        header: "Tier",
+        id: "leadList",
+        header: "Lead list",
         cell: (info) => {
           const row = info.row.original;
-          const tier =
-            (row.cxQueuePolicy?.tier as CxQueueTier | undefined) ||
-            (row.role === "admin" ? "no_leads" : "fresh_priority");
-          const savingTier =
-            update.isPending &&
-            update.variables?.id === row.id &&
-            Boolean(update.variables?.patch?.cxQueuePolicy);
+          const summary = getLeadListSummary(row);
           return (
-            <div
-              className="w-36"
-              onClick={(event) => event.stopPropagation()}
-              onPointerDown={(event) => event.stopPropagation()}
-            >
-              <Select
-                value={tier}
-                disabled={savingTier}
-                onValueChange={(value) => {
-                  void updateQueueTier(row, value as CxQueueTier);
-                }}
-              >
-                <SelectTrigger className="h-8 border-transparent bg-muted/35 px-2 text-xs shadow-none hover:border-border">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {queueTierOptions.map((option) => (
-                    <SelectItem key={option.value} value={option.value}>
-                      {option.label}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+            <div className="min-w-[180px] leading-tight">
+              <div className="flex flex-wrap items-center gap-1">
+                <StatusPill tone={summary.enabled ? "success" : "neutral"}>
+                  {summary.total}
+                </StatusPill>
+                <StatusPill tone={summary.firstTouchEligible ? "accent" : "neutral"}>
+                  0 contact {summary.firstTouchEligible ? "on" : "off"}
+                </StatusPill>
+              </div>
+              <div className="mt-1 font-mono text-[11px] text-muted-foreground">
+                G {summary.green} / B {summary.blue} / R {summary.red}
+              </div>
             </div>
           );
         },
@@ -482,14 +450,17 @@ export function UsersWorkspace() {
         },
       },
     ],
-    [deactivate, enable, update, updateQueueTier],
+    [deactivate, enable, update],
   );
 
-  async function pairExtension(userId: string, extensionId: string) {
+  async function pairExtension(userId: string, ext: UnassignedExtension) {
     try {
       await update.mutateAsync({
         id: userId,
-        patch: { extensionId },
+        patch: {
+          extensionId: ext.extensionId,
+          extensionNumber: ext.extensionNumber ?? null,
+        },
       });
       toast.success("Extension paired");
       setPairTargetId(null);
@@ -642,7 +613,18 @@ export function UsersWorkspace() {
 
       <Card>
         <CardHeader>
-          <CardTitle>Unpaired RingCentral extensions</CardTitle>
+          <CardTitle className="flex items-center justify-between gap-3">
+            <span>Unpaired RingCentral extensions</span>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => extensions.refetch()}
+              isLoading={extensions.isFetching}
+            >
+              <RefreshCw className="h-3.5 w-3.5" />
+              Refresh
+            </Button>
+          </CardTitle>
         </CardHeader>
         <CardContent className="pt-0">
           {extensions.isError ? (
@@ -666,7 +648,7 @@ export function UsersWorkspace() {
                   activePair={pairTargetId}
                   onBeginPair={() => setPairTargetId(ext.extensionId)}
                   onCancelPair={() => setPairTargetId(null)}
-                  onPair={(userId) => pairExtension(userId, ext.extensionId)}
+                  onPair={(userId) => pairExtension(userId, ext)}
                   isPairing={update.isPending}
                 />
               ))}

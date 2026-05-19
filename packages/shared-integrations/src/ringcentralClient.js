@@ -724,14 +724,38 @@ function createRingCentralClient() {
     doLogin,
     getAuthStatus,
     ensureAuthenticated,
-    listExtensions() {
-      return request("GET", "/restapi/v1.0/account/~/extension", {
-        query: {
-          type: "User",
-          status: "Enabled",
-          perPage: 100,
-        },
-      });
+    async listExtensions(options = {}) {
+      const perPage = Math.max(1, Math.min(Number(options.perPage || 100) || 100, 1000));
+      const status = options.status === undefined ? "Enabled" : options.status;
+      const type = options.type === undefined ? "User" : options.type;
+      const records = [];
+      let page = Math.max(Number(options.page || 1) || 1, 1);
+      let totalPages = page;
+      let lastPayload = null;
+
+      do {
+        const query = {
+          perPage,
+          page,
+        };
+        if (type !== null && type !== false && String(type || "").trim()) {
+          query.type = String(type).trim();
+        }
+        if (status !== null && status !== false && String(status || "").trim()) {
+          query.status = String(status).trim();
+        }
+
+        const payload = await request("GET", "/restapi/v1.0/account/~/extension", { query });
+        lastPayload = payload;
+        records.push(...(Array.isArray(payload?.records) ? payload.records : []));
+        totalPages = Number(payload?.paging?.totalPages || page) || page;
+        page += 1;
+      } while (options.allPages !== false && page <= totalPages);
+
+      return {
+        ...(lastPayload || {}),
+        records,
+      };
     },
     getPresence(extensionId) {
       return request(

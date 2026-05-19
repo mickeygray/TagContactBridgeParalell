@@ -184,6 +184,70 @@ function resolveActingAgentId(req, bodyField = "agentId") {
   return tokenAgentId;
 }
 
+function summarizeCxAssignedQueueItemForAgentView(item = {}) {
+  const queueTicketId = item._id ? String(item._id) : null;
+  const metadata = item.metadata && typeof item.metadata === "object" ? item.metadata : {};
+  const leadBody = metadata.leadBody && typeof metadata.leadBody === "object" ? metadata.leadBody : {};
+  const phoneNumber = String(item.phone || leadBody.phone || leadBody.phoneNumber || "").trim();
+  const progressiveStageKey = String(
+    item.progressiveStageKey || leadBody.progressiveStageKey || metadata.progressiveStageKey || "",
+  ).trim();
+  const ageBucket =
+    progressiveStageKey ||
+    item.progressiveStageLabel ||
+    item.queueFamily ||
+    item.queueTier ||
+    "assigned";
+
+  return {
+    _id: queueTicketId,
+    id: queueTicketId,
+    queueTicketId,
+    queueSource: "cx-dial-queue",
+    leadId: item.caseId != null ? String(item.caseId) : null,
+    sourceLogicsCaseId: item.caseId != null ? String(item.caseId) : null,
+    caseId: item.caseId != null ? String(item.caseId) : null,
+    domain: item.domain || null,
+    phoneNumber,
+    phone: phoneNumber,
+    name: item.name || leadBody.name || null,
+    sourceName: item.sourceName || leadBody.sourceName || null,
+    intakeSource: item.intakeSource || leadBody.intakeSource || null,
+    intakeRoute: item.intakeRoute || leadBody.intakeRoute || null,
+    partition: item.queueFamily === "fresh-day1" ? "fresh" : "non_fresh",
+    ageBucket,
+    state: item.state || null,
+    queueState: item.state || null,
+    queueFamily: item.queueFamily || null,
+    queueTier: item.queueTier || null,
+    progressiveStageKey: progressiveStageKey || null,
+    progressiveStageIndex: Number.isFinite(Number(item.progressiveStageIndex))
+      ? Number(item.progressiveStageIndex)
+      : null,
+    progressiveStageLabel: item.progressiveStageLabel || null,
+    assignedTo: item.assignment?.extensionId || null,
+    assignedExtensionId: item.assignment?.extensionId || null,
+    assignedAgentName: item.assignment?.agentName || null,
+    assignedAt: item.assignment?.assignedAt || null,
+    expiresAt: item.claimUntil || null,
+    releaseAt: item.releaseAt || null,
+    claimUntil: item.claimUntil || null,
+    placedCalls: Number(item.placedCalls || 0),
+    dailyPlacedCalls: Number(item.dailyPlacedCalls || 0),
+    hourlyPlacedCalls: Number(item.hourlyPlacedCalls || 0),
+    rcxAccountId: item.rcxAccountId || null,
+    rcxDialGroupId: item.rcxDialGroupId || null,
+    rcxCampaignId: item.rcxCampaignId || null,
+  };
+}
+
+function markLegacyAssignedQueueItemForAgentView(item = {}) {
+  return {
+    ...item,
+    queueSource: item.queueSource || "legacy-queue",
+  };
+}
+
 function createWorkerState() {
   return {
     running: false,
@@ -1774,13 +1838,19 @@ async function startServer() {
     buildSelfOrPermission("agents.read"),
     async (req, res) => {
     try {
-      const { agentSliceRepository, queueItemRepository, callSessionRepository, agentStateRepository }
+      const {
+        agentSliceRepository,
+        queueItemRepository,
+        callSessionRepository,
+        agentStateRepository,
+        cxDialQueueRepository,
+      }
         = require("../../../packages/shared-repositories/src");
       const agentId = String(req.params.extensionId);
       const agent = await agentStateRepository.findAgentStateByExtensionId(agentId);
       if (!agent) return res.status(404).json({ ok: false, error: "agent-not-found" });
 
-      const [slice, sliceItems, freshAssigned, activeCall] = await Promise.all([
+      const [slice, sliceItems, freshAssigned, activeCall, cxAssignedRaw] = await Promise.all([
         agentSliceRepository.findActiveByAgent(agentId),
         // Resolve slice items if there is a slice; otherwise empty
         (async () => {
@@ -1790,7 +1860,14 @@ async function startServer() {
         })(),
         queueItemRepository.listByAgent(agentId, { states: ["fresh_assigned"] }),
         callSessionRepository.findActiveByAgent(agentId),
+        cxDialQueueRepository.listQueueItems({
+          assignedExtensionId: agentId,
+          states: ["queued", "ready", "claimed", "serving", "paused"],
+          limitAll: true,
+        }),
       ]);
+      const cxAssigned = cxAssignedRaw.map(summarizeCxAssignedQueueItemForAgentView);
+      const legacyAssigned = freshAssigned.map(markLegacyAssignedQueueItemForAgentView);
 
       return res.json({
         ok: true,
@@ -1804,6 +1881,12 @@ async function startServer() {
         slice,
         sliceItems,
         freshAssigned,
+        cxAssigned,
+        cxQueueItems: cxAssigned,
+        assignedQueueItems: [
+          ...cxAssigned,
+          ...legacyAssigned,
+        ],
         activeCall,
       });
     } catch (error) {

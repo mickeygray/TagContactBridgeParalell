@@ -20,7 +20,6 @@ import type {
   AuthAudience,
   AuthRole,
   CreateAccountInput,
-  CxQueueTier,
 } from "@/lib/api/types";
 
 const ROLE_OPTIONS: Array<{
@@ -44,62 +43,19 @@ const ROLE_OPTIONS: Array<{
   },
 ];
 
-const CX_QUEUE_TIER_OPTIONS: Array<{
-  value: CxQueueTier;
-  label: string;
-  hint: string;
-}> = [
-  { value: "no_leads", label: "No leads", hint: "Login allowed; automatic lead serving is off." },
-  { value: "red_only", label: "Red only", hint: "Aged leads only." },
-  { value: "old_balanced", label: "Old balanced", hint: "Blue/red pack without day-0 hot lane." },
-  { value: "fresh_capped", label: "Fresh capped", hint: "Small green pack with larger blue fallback." },
-  { value: "fresh_priority", label: "Fresh priority", hint: "Larger green pack with blue fallback." },
-];
-
-const CX_QUEUE_TIER_DEFAULTS: Record<
-  CxQueueTier,
-  {
-    freshEligible: boolean;
-    freshTargetOpen: number;
-    day2to15TargetOpen: number;
-    agedTargetOpen: number;
-  }
-> = {
-  no_leads: {
-    freshEligible: false,
-    freshTargetOpen: 0,
-    day2to15TargetOpen: 0,
-    agedTargetOpen: 0,
-  },
-  red_only: {
-    freshEligible: false,
-    freshTargetOpen: 0,
-    day2to15TargetOpen: 0,
-    agedTargetOpen: 20,
-  },
-  old_balanced: {
-    freshEligible: false,
-    freshTargetOpen: 0,
-    day2to15TargetOpen: 25,
-    agedTargetOpen: 5,
-  },
-  fresh_capped: {
-    freshEligible: true,
-    freshTargetOpen: 5,
-    day2to15TargetOpen: 25,
-    agedTargetOpen: 5,
-  },
-  fresh_priority: {
-    freshEligible: true,
-    freshTargetOpen: 10,
-    day2to15TargetOpen: 25,
-    agedTargetOpen: 5,
-  },
+const MANUAL_QUEUE_DEFAULTS = {
+  firstTouchEligible: true,
+  freshTargetOpen: 15,
+  day2to15TargetOpen: 15,
+  agedTargetOpen: 5,
 };
 
-function getCxQueueTierDefaults(tier: CxQueueTier) {
-  return CX_QUEUE_TIER_DEFAULTS[tier] || CX_QUEUE_TIER_DEFAULTS.fresh_priority;
-}
+const NO_LEAD_QUEUE_DEFAULTS = {
+  firstTouchEligible: false,
+  freshTargetOpen: 0,
+  day2to15TargetOpen: 0,
+  agedTargetOpen: 0,
+};
 
 export const COMPANY_OPTIONS = ["TAG", "WYNN", "AMITY"] as const;
 
@@ -114,8 +70,7 @@ const baseSchema = z.object({
   ringcxUsername: z.string().optional(),
   stationLabel: z.string().optional(),
   phone: z.string().optional(),
-  cxQueueTier: z.enum(["no_leads", "red_only", "old_balanced", "fresh_capped", "fresh_priority"]),
-  cxFreshEligible: z.boolean().optional(),
+  cxFirstTouchEligible: z.boolean().optional(),
   cxFreshTargetOpen: z.string().optional(),
   cxDay2To15TargetOpen: z.string().optional(),
   cxAgedTargetOpen: z.string().optional(),
@@ -162,6 +117,7 @@ export interface UserFormProps {
    */
   includeCurrentExtension?: {
     extensionId: string;
+    extensionNumber?: string | null;
     name?: string | null;
   } | null;
   /** Defer `useUnassignedExtensions` call when the parent already has data. */
@@ -204,11 +160,10 @@ export function UserForm({
       initialMetadata.cxUsername ||
       "",
   );
-  const initialCxQueueTier = (
-    (initial?.cxQueuePolicy?.tier as UserFormValues["cxQueueTier"] | undefined) ??
-    (initial?.role === "admin" || initial?.audience === "admin" ? "no_leads" : "fresh_priority")
-  );
-  const initialCxQueueDefaults = getCxQueueTierDefaults(initialCxQueueTier);
+  const initialCxQueueDefaults =
+    initial?.role === "admin" || initial?.audience === "admin"
+      ? NO_LEAD_QUEUE_DEFAULTS
+      : MANUAL_QUEUE_DEFAULTS;
 
   const form = useForm<UserFormValues>({
     resolver: zodResolver(baseSchema),
@@ -228,8 +183,10 @@ export function UserForm({
       ringcxUsername: initialRingcxUsername,
       stationLabel: initial?.stationLabel ?? "",
       phone: initial?.phone ?? "",
-      cxQueueTier: initialCxQueueTier,
-      cxFreshEligible: initial?.cxQueuePolicy?.fresh?.eligible ?? initialCxQueueDefaults.freshEligible,
+      cxFirstTouchEligible:
+        initial?.cxQueuePolicy?.fresh?.firstTouchEligible ??
+        initial?.cxQueuePolicy?.fresh?.eligible ??
+        initialCxQueueDefaults.firstTouchEligible,
       cxFreshTargetOpen:
         initial?.cxQueuePolicy?.fresh?.targetOpen != null
           ? String(initial.cxQueuePolicy?.fresh?.targetOpen)
@@ -264,10 +221,15 @@ export function UserForm({
 
   const company = form.watch("company");
   const role = form.watch("role");
-  const cxQueueTier = form.watch("cxQueueTier");
+  const cxFreshTargetOpen = form.watch("cxFreshTargetOpen");
+  const cxDay2To15TargetOpen = form.watch("cxDay2To15TargetOpen");
+  const cxAgedTargetOpen = form.watch("cxAgedTargetOpen");
   const extensionId = form.watch("extensionId") || "";
   const roleDef = ROLE_OPTIONS.find((r) => r.value === role);
-  const cxQueueTierDef = CX_QUEUE_TIER_OPTIONS.find((tier) => tier.value === cxQueueTier);
+  const cxLeadListSize =
+    Number(parseNonNegativeNumber(cxFreshTargetOpen) || 0) +
+    Number(parseNonNegativeNumber(cxDay2To15TargetOpen) || 0) +
+    Number(parseNonNegativeNumber(cxAgedTargetOpen) || 0);
   const extensions = useUnassignedExtensions(company);
   const resolveIdentity = useResolveAccountIdentity();
   const [identityResult, setIdentityResult] =
@@ -282,6 +244,7 @@ export function UserForm({
     return [
       {
         extensionId: includeCurrentExtension.extensionId,
+        extensionNumber: includeCurrentExtension.extensionNumber ?? null,
         name: includeCurrentExtension.name ?? null,
         company: company,
         cxAgentId: null,
@@ -371,7 +334,15 @@ export function UserForm({
     setSubmitting(true);
     try {
       const audience = roleDef?.audience ?? "user";
-      const sameQueueTier = initial?.cxQueuePolicy?.tier === values.cxQueueTier;
+      const freshTargetOpen = parseNonNegativeNumber(values.cxFreshTargetOpen) ?? 0;
+      const day2to15TargetOpen = parseNonNegativeNumber(values.cxDay2To15TargetOpen) ?? 0;
+      const agedTargetOpen = parseNonNegativeNumber(values.cxAgedTargetOpen) ?? 0;
+      const firstTouchEligible = Boolean(values.cxFirstTouchEligible);
+      const queueEnabled =
+        firstTouchEligible
+        || freshTargetOpen > 0
+        || day2to15TargetOpen > 0
+        || agedTargetOpen > 0;
       const payload: CreateAccountInput = {
         email: values.email.trim().toLowerCase(),
         name: values.name.trim(),
@@ -384,21 +355,21 @@ export function UserForm({
         stationLabel: values.stationLabel?.trim() || undefined,
         phone: values.phone?.trim() || null,
         cxQueuePolicy: {
-          ...(sameQueueTier ? initial?.cxQueuePolicy || {} : {}),
-          tier: values.cxQueueTier,
-          enabled: values.cxQueueTier !== "no_leads",
+          ...(initial?.cxQueuePolicy || {}),
+          enabled: queueEnabled,
           fresh: {
-            ...(sameQueueTier ? initial?.cxQueuePolicy?.fresh || {} : {}),
-            eligible: Boolean(values.cxFreshEligible),
-            targetOpen: parseNonNegativeNumber(values.cxFreshTargetOpen),
+            ...(initial?.cxQueuePolicy?.fresh || {}),
+            eligible: firstTouchEligible || freshTargetOpen > 0,
+            firstTouchEligible,
+            targetOpen: freshTargetOpen,
           },
           day2to15: {
-            ...(sameQueueTier ? initial?.cxQueuePolicy?.day2to15 || {} : {}),
-            targetOpen: parseNonNegativeNumber(values.cxDay2To15TargetOpen),
+            ...(initial?.cxQueuePolicy?.day2to15 || {}),
+            targetOpen: day2to15TargetOpen,
           },
           aged: {
-            ...(sameQueueTier ? initial?.cxQueuePolicy?.aged || {} : {}),
-            targetOpen: parseNonNegativeNumber(values.cxAgedTargetOpen),
+            ...(initial?.cxQueuePolicy?.aged || {}),
+            targetOpen: agedTargetOpen,
           },
         },
         logicsUserId: parseNumber(values.logicsUserId),
@@ -571,9 +542,13 @@ export function UserForm({
       >
         <Select
           value={extensionId || "none"}
-          onValueChange={(v) =>
-            form.setValue("extensionId", v === "none" ? "" : v, { shouldDirty: true })
-          }
+          onValueChange={(v) => {
+            const selected = options.find((ext) => ext.extensionId === v);
+            form.setValue("extensionId", v === "none" ? "" : v, { shouldDirty: true });
+            form.setValue("extensionNumber", selected?.extensionNumber || "", {
+              shouldDirty: true,
+            });
+          }}
         >
           <SelectTrigger>
             <span className="flex items-center gap-2">
@@ -594,44 +569,26 @@ export function UserForm({
         </Select>
       </Field>
 
-      <Field label="CX queue tier" hint={cxQueueTierDef?.hint}>
-        <Select
-          value={cxQueueTier}
-          onValueChange={(v) => {
-            const nextTier = v as UserFormValues["cxQueueTier"];
-            const nextDefaults = getCxQueueTierDefaults(nextTier);
-            form.setValue("cxQueueTier", nextTier, { shouldDirty: true });
-            form.setValue("cxFreshEligible", nextDefaults.freshEligible, { shouldDirty: true });
-            form.setValue("cxFreshTargetOpen", String(nextDefaults.freshTargetOpen), { shouldDirty: true });
-            form.setValue("cxDay2To15TargetOpen", String(nextDefaults.day2to15TargetOpen), { shouldDirty: true });
-            form.setValue("cxAgedTargetOpen", String(nextDefaults.agedTargetOpen), { shouldDirty: true });
-          }}
-        >
-          <SelectTrigger>
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            {CX_QUEUE_TIER_OPTIONS.map((opt) => (
-              <SelectItem key={opt.value} value={opt.value}>
-                {opt.label}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-      </Field>
-
-      <div className="grid grid-cols-1 gap-4 rounded-md border border-border/60 bg-muted/20 p-3 md:grid-cols-4">
-        <Field label="Day-0">
+      <div className="grid grid-cols-1 gap-4 rounded-md border border-border/60 bg-muted/20 p-3 md:grid-cols-5">
+        <Field label="List size">
+          <div
+            className="flex h-10 items-center rounded-md border border-input bg-background px-3 text-sm font-semibold"
+            title="Green + blue + red"
+          >
+            {cxLeadListSize}
+          </div>
+        </Field>
+        <Field label="0 contact">
           <label className="flex h-10 items-center gap-2 rounded-md border border-input bg-background px-3 text-sm">
             <input
               type="checkbox"
               className="h-4 w-4"
-              {...form.register("cxFreshEligible")}
+              {...form.register("cxFirstTouchEligible")}
             />
-            Eligible
+            Enabled
           </label>
         </Field>
-        <Field label="Green pack">
+        <Field label="Green count">
           <Input
             type="number"
             min={0}
@@ -639,7 +596,7 @@ export function UserForm({
             {...form.register("cxFreshTargetOpen")}
           />
         </Field>
-        <Field label="Blue pack">
+        <Field label="Blue count">
           <Input
             type="number"
             min={0}
@@ -647,7 +604,7 @@ export function UserForm({
             {...form.register("cxDay2To15TargetOpen")}
           />
         </Field>
-        <Field label="Red pack">
+        <Field label="Red count">
           <Input
             type="number"
             min={0}

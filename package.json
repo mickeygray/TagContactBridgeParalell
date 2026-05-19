@@ -27,7 +27,8 @@
     "check:cutover": "node scripts/check-cutover-readiness.js",
     "preview:hourly-calls": "node scripts/preview-hourly-calls.js",
     "preview:hourly-finance": "node scripts/preview-hourly-finance.js",
-    "smoke": "node scripts/smoke-test.js"
+    "smoke": "node scripts/smoke-test.js",
+    "rc:live-monitor": "node scripts/rc-ex-live-trainer-oneoff.js"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.91.1",

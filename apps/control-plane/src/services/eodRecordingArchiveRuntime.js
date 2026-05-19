@@ -3,6 +3,9 @@
 const {
   runArchiveEodRecordings,
 } = require("../../../../scripts/archive-eod-recordings");
+const {
+  waitForRecordingPipelineIdle,
+} = require("../../../../packages/shared-services/src/recordingPipelineIdleService");
 
 const DEFAULT_WEEKDAYS = Object.freeze([1, 2, 3, 4, 5]);
 
@@ -79,6 +82,17 @@ function createState(config = {}) {
   };
 }
 
+function envBool(name, fallback = false) {
+  const value = process.env[name];
+  if (value === undefined || value === null || value === "") return fallback;
+  return ["1", "true", "yes", "on"].includes(String(value).trim().toLowerCase());
+}
+
+function envNumber(name, fallback) {
+  const parsed = Number(process.env[name]);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
 function summarizeState(state) {
   return {
     enabled: state.enabled,
@@ -118,6 +132,15 @@ function createEodRecordingArchiveRuntime({ config = {}, runtime }) {
     state.lastError = null;
 
     try {
+      if (envBool("RECORDING_PIPELINE_IDLE_WAIT_ENABLED", true)) {
+        await waitForRecordingPipelineIdle({
+          label: "eod-recording-archive",
+          pollMs: envNumber("RECORDING_PIPELINE_IDLE_POLL_MS", 60000),
+          maxWaitMs: envNumber("RECORDING_PIPELINE_IDLE_MAX_WAIT_MS", 12 * 60 * 60 * 1000),
+          logger: runtime.logger,
+        });
+      }
+
       const result = await runArchiveEodRecordings({
         date: options.date,
         minDurationSec:

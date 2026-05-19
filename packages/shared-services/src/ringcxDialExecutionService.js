@@ -1589,6 +1589,11 @@ async function executeCxDispatchIntent(options = {}) {
         force: true,
         allowedStates: ["claimed", "serving"],
         respectPresenceGate: options.respectPresenceGate !== false,
+        dialPriority:
+          dispatchIntent.ringcxDialPriority ||
+          dispatchIntent.leadLoaderDialPriority ||
+          dispatchIntent.dialPriority ||
+          null,
       });
       dialTraceLog(options.logger, "info", "ringcx.dialExecution.campaign.publishResult", {
         traceId,

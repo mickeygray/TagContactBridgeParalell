@@ -52,6 +52,16 @@ const DEFAULT_OUTPUT_ROOT = path.resolve(
   "end-of-day-recordings",
 );
 const DEFAULT_DELAY_MS = 400;
+const DEFAULT_EXCLUDED_AGENT_TOKENS = [
+  "Michael Gray",
+  "Mickey Gray",
+  "mgray",
+  "mgray@taxadvocategroup.com",
+  "Alex Banks",
+  "Alexander Banks",
+  "abanks",
+  "abanks@taxadvocategroup.com",
+];
 
 const CALLRAIL_FIELDS = [
   "id",
@@ -91,6 +101,18 @@ function boolArg(value, fallback = false) {
   return !["0", "false", "no", "off"].includes(normalized);
 }
 
+function parseList(value) {
+  if (Array.isArray(value)) {
+    return value
+      .map((entry) => String(entry || "").trim())
+      .filter(Boolean);
+  }
+  return String(value || "")
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+}
+
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, Math.max(Number(ms) || 0, 0)));
 }
@@ -108,6 +130,71 @@ function normalizeAgentDisplayName(value) {
   const withoutCompanySuffix = raw.replace(/\s*-\s*(tag|wynn|amity)\b.*$/i, "").trim();
   const firstSegment = withoutCompanySuffix.split(/\s*-\s*/)[0].trim();
   return firstSegment || withoutCompanySuffix || raw;
+}
+
+function normalizeArchiveExcludeText(value) {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/\s*-\s*(tag|wynn|amity)\b.*$/i, "")
+    .replace(/[^a-z0-9@.]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function collectRcIdentityTexts(record = null) {
+  if (!record) return [];
+  const values = [
+    record?.from?.name,
+    record?.from?.email,
+    record?.to?.name,
+    record?.to?.email,
+    record?.extension?.name,
+  ];
+  for (const leg of Array.isArray(record?.legs) ? record.legs : []) {
+    values.push(
+      leg?.from?.name,
+      leg?.from?.email,
+      leg?.to?.name,
+      leg?.to?.email,
+      leg?.extension?.name,
+      leg?.name,
+    );
+  }
+  return values;
+}
+
+function findExcludedAgentMatch(values = [], excludeTokens = []) {
+  const normalizedTokens = parseList(excludeTokens)
+    .map((token) => normalizeArchiveExcludeText(token))
+    .filter(Boolean);
+  if (normalizedTokens.length === 0) return null;
+
+  for (const value of values) {
+    const normalizedValue = normalizeArchiveExcludeText(value);
+    if (!normalizedValue) continue;
+    const token = normalizedTokens.find((entry) =>
+      normalizedValue === entry || normalizedValue.includes(entry),
+    );
+    if (token) {
+      return {
+        token,
+        value: String(value || ""),
+      };
+    }
+  }
+  return null;
+}
+
+function findExcludedTaskAgentMatch(task = {}, excludeTokens = []) {
+  return findExcludedAgentMatch(
+    [
+      task.seed?.agentName,
+      task.routing?.candidate?.agentName,
+      ...collectRcIdentityTexts(task.rcRecord),
+    ],
+    excludeTokens,
+  );
 }
 
 function sanitizeFileComponent(value, fallback = "unknown") {
@@ -960,6 +1047,11 @@ async function runArchiveEodRecordings(options = {}) {
   // historical sweep only touches AS without re-pulling OG/CS
   // artifacts. Accepts "OG", "AS", or "CS"; null = no filter.
   const bucketOnly = String(options.bucketOnly || "").trim().toUpperCase() || null;
+  const excludeAgentTokens = parseList(
+    options.excludeAgents !== undefined
+      ? options.excludeAgents
+      : process.env.RECORDING_ARCHIVE_EXCLUDED_AGENT_TOKENS || DEFAULT_EXCLUDED_AGENT_TOKENS,
+  );
   const notifyRecipients = parseRecipientList(
     options.notifyRecipients !== undefined
       ? options.notifyRecipients
@@ -1003,6 +1095,25 @@ async function runArchiveEodRecordings(options = {}) {
   });
 
   let tasks = [...legacyTasks, ...rcTasks, ...callrailTasks];
+  const skippedByAgent = [];
+  if (excludeAgentTokens.length > 0) {
+    tasks = tasks.filter((task) => {
+      const match = findExcludedTaskAgentMatch(task, excludeAgentTokens);
+      if (!match) return true;
+      skippedByAgent.push({
+        reason: "excluded-agent",
+        phase: "pre-fetch",
+        matchedToken: match.token,
+        matchedValue: match.value,
+        sourceKind: task.sourceKind,
+        telephonySessionId: task.telephonySessionId || null,
+        callrailCallId: task.callrailCallId || null,
+        phone: task.phone || null,
+        routeHint: task.routeHint,
+      });
+      return false;
+    });
+  }
   tasks.sort((left, right) =>
     new Date(left.startedAt || 0).getTime() - new Date(right.startedAt || 0).getTime(),
   );
@@ -1038,7 +1149,7 @@ async function runArchiveEodRecordings(options = {}) {
   }
 
   const results = [];
-  const skipped = [...skippedSeeds];
+  const skipped = [...skippedSeeds, ...skippedByAgent];
 
   for (const task of tasks) {
     try {
@@ -1089,6 +1200,21 @@ async function runArchiveEodRecordings(options = {}) {
       }
 
       task.routing = deriveRouting(artifact.provider, task.rcRecord, task.seed);
+      const excludedRouteAgent = findExcludedTaskAgentMatch(task, excludeAgentTokens);
+      if (excludedRouteAgent) {
+        skipped.push({
+          reason: "excluded-agent",
+          phase: "post-route",
+          matchedToken: excludedRouteAgent.token,
+          matchedValue: excludedRouteAgent.value,
+          sourceKind: task.sourceKind,
+          telephonySessionId: task.telephonySessionId || null,
+          callrailCallId: task.callrailCallId || null,
+          phone: task.phone || null,
+          routeHint: task.routeHint,
+        });
+        continue;
+      }
       const bucket = task.routing.bucket;
 
       // Interoffice calls (extension <-> extension, no external party)
@@ -1261,6 +1387,7 @@ async function runArchiveEodRecordings(options = {}) {
     minDurationSec,
     canUpload,
     configuredFolders: folderByBucket,
+    excludedAgentTokens: excludeAgentTokens,
     stats: {
       legacyRowsFetched: legacyDocs.length,
       rcRecordsFetched: rcRecords.length,
@@ -1317,6 +1444,7 @@ async function main() {
     notifyRecipients: args.recipients,
     emailCompanyKey: args.company,
     bucketOnly: args["bucket-only"],
+    excludeAgents: args["exclude-agents"],
   });
   console.log(JSON.stringify(result, null, 2));
 }

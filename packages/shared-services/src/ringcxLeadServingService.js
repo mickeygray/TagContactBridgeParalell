@@ -21,6 +21,9 @@ const {
 const {
   buildEligibility,
 } = require("./cxLoadBalancerService");
+const {
+  hasManualQueuePolicy,
+} = require("./cxQueuePolicyService");
 
 function normalizeDomain(value) {
   return String(value || "").trim().toUpperCase();
@@ -277,6 +280,12 @@ function parseBooleanFlag(value, fallback = false) {
   const normalized = String(value).trim().toLowerCase();
   if (["1", "true", "yes", "y", "on"].includes(normalized)) return true;
   if (["0", "false", "no", "n", "off"].includes(normalized)) return false;
+  return fallback;
+}
+
+function normalizeLeadLoaderDialPriority(value, fallback = "IMMEDIATE") {
+  const normalized = String(value || "").trim().toUpperCase();
+  if (normalized === "NORMAL" || normalized === "IMMEDIATE") return normalized;
   return fallback;
 }
 
@@ -591,7 +600,10 @@ function buildLeadLoaderPayload(queueItem = {}, externId, options = {}) {
 
   return {
     description: `Parallel ${queueItem.queueFamily || "fresh-day1"} / case ${queueItem.caseId}`,
-    dialPriority: "IMMEDIATE",
+    dialPriority: normalizeLeadLoaderDialPriority(
+      options.dialPriority,
+      normalizeLeadLoaderDialPriority(process.env.RINGCX_LEAD_LOADER_DIAL_PRIORITY, "IMMEDIATE"),
+    ),
     duplicateHandling: "REMOVE_FROM_LIST",
     listState: "ACTIVE",
     timeZoneOption: "NPA_NXX",
@@ -872,7 +884,11 @@ async function publishQueueItemToRingcx(options = {}) {
             }
             : null,
           cxQueuePolicy: agentState.cxQueuePolicy || userAccount?.cxQueuePolicy || null,
-          cxQueuePolicyExplicit: Boolean(agentState.cxQueuePolicy?.tier || userAccount?.cxQueuePolicy?.tier),
+          cxQueuePolicyExplicit: Boolean(
+            agentState.cxQueuePolicyExplicit
+            || hasManualQueuePolicy(agentState.cxQueuePolicy)
+            || hasManualQueuePolicy(userAccount?.cxQueuePolicy),
+          ),
         }
         : null;
       const eligibility = buildEligibility(enrichedAgentState, {
@@ -938,7 +954,11 @@ async function publishQueueItemToRingcx(options = {}) {
   const agentIdentity = await resolveAgentIdentity(queueItem, client);
   const agentUsername = agentIdentity?.username || null;
   const externId = buildExternId(queueItem);
-  const loadPayload = buildLeadLoaderPayload(queueItem, externId, { agentUsername, agentIdentity });
+  const loadPayload = buildLeadLoaderPayload(queueItem, externId, {
+    agentUsername,
+    agentIdentity,
+    dialPriority: options.dialPriority,
+  });
 
   try {
     const response = await client.loadLeads(campaignId, loadPayload);

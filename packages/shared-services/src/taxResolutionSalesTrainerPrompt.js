@@ -30,21 +30,25 @@ const TAX_RESOLUTION_SALES_TRAINER_PROMPT = fs
   .readFileSync(PROMPT_PATH, "utf8")
   .trim();
 
-// Slim live-turn prompt — used only during in-character chat turns.
-// The full prompt is loaded for profile generation, playbook generation,
-// coaching panel, and end-of-call scorecard, where the deeper reference
-// material is needed. For live turns, the locked profile + playbook
-// already encoded the per-caller specifics, so the model doesn't need
-// to re-attend over the full reference library every turn.
+// Slim live-turn prompt — used for EVERY live turn. The slim prompt
+// carries the load-bearing training-mode block, behavioral rules, and
+// phase pacing. The per-turn session header (built by buildSessionHeader)
+// injects personality, current state, recent-message awareness, and a
+// compact training-mode reminder. Together those give Sonnet enough
+// context to behave on-spec without the 27k master prompt loaded.
 //
-// Expected savings vs. full prompt at runtime:
-//   - Full: ~27,500 input tokens (cached) per turn
-//   - Slim: ~2,300 input tokens (cached) per turn
-//   - Difference: ~25k tokens of attention math eliminated per response
-//     ≈ 500-1500ms saved per turn even with cache hit
+// Why this works: the "what should I do this turn" decisions come from
+// the session header's situational context (personality + state +
+// recent messages + training directive), not from the 27k reference
+// library. The simulator doesn't need the full objection encyclopedia
+// every turn — it needs the right move to fire NEXT, which the
+// recent-message awareness handles directly.
 //
-// The slim prompt is still cached — it just has a different cache key
-// from the full prompt, so they're cached independently.
+// Token math at runtime:
+//   - Slim + session header (cached): ~3k tokens per turn
+//   - Full master prompt (~28k tokens): reserved for evals, "break
+//     character" recovery turns, coaching panel, and scorecard runs.
+//     NOT loaded on live turns.
 const LIVE_TURN_PROMPT_PATH = path.join(
   __dirname,
   "taxResolutionSalesTrainerPrompt.liveTurn.md",

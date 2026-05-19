@@ -69,18 +69,11 @@ export interface AccountLogicsAuth {
   externalSecretRef?: string | null;
 }
 
-export type CxQueueTier =
-  | "no_leads"
-  | "red_only"
-  | "old_balanced"
-  | "fresh_capped"
-  | "fresh_priority";
-
 export interface CxQueuePolicy {
-  tier?: CxQueueTier | null;
   enabled?: boolean;
   fresh?: {
     eligible?: boolean | null;
+    firstTouchEligible?: boolean | null;
     targetOpen?: number | null;
     hourlyCap?: number | null;
     priorityWeight?: number | null;
@@ -1539,6 +1532,8 @@ export interface AccountAgentState {
   activityState?: string | null;
   exPresenceStatus?: string | null;
   exTelephonyStatus?: string | null;
+  cxQueuePolicy?: CxQueuePolicy | null;
+  cxQueuePolicyExplicit?: boolean | null;
   cxRouting?: Record<string, unknown> | null;
   cxLive?: {
     workspaceActive?: boolean;
@@ -1611,13 +1606,16 @@ export interface AccountRecord {
 
 export interface UnassignedExtension {
   extensionId: string;
+  extensionNumber?: string | null;
   name?: string | null;
+  email?: string | null;
   company?: string | null;
   cxAgentId?: string | null;
   status?: string | null;
   exPresenceStatus?: string | null;
   lastStatusChange?: string | null;
   lastEventReceived?: string | null;
+  source?: string | null;
 }
 
 export interface CreateAccountInput {

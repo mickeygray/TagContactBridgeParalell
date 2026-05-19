@@ -46,6 +46,7 @@ const {
   normalizeDailyStats,
 } = require("./agentAvailabilityService");
 const { recordWorkflowStage } = require("./workflowStateService");
+const { invalidateAgentCallStatsSnapshot } = require("./agentCallStatsService");
 
 const CX_CADENCE_EVENT_TYPES = Object.freeze({
   DIAL_REQUESTED: "cx.dial.requested",
@@ -1735,6 +1736,21 @@ async function handleCxCallPlaced(payload = {}) {
     });
   }
 
+  // Invalidate the assigned agent's call-stats snapshot so the admin
+  // board reflects this call within the next read cycle (~5s) instead
+  // of waiting up to 5 min for the snapshot TTL to expire. Best-effort:
+  // never blocks the call-placement flow.
+  if (confirmedCall) {
+    const assignedExtensionId =
+      queueItem.assignment?.extensionId
+      || queueItem.metadata?.lastAssignedExtensionId
+      || payload.extensionId
+      || null;
+    if (assignedExtensionId) {
+      invalidateAgentCallStatsSnapshot(assignedExtensionId).catch(() => null);
+    }
+  }
+
   return {
     ok: true,
     queueItemId: String(queueItem._id),
@@ -2371,6 +2387,8 @@ async function claimNextCxQueueItem(options = {}) {
       openAssignmentFamilyMaps,
       maxOpenAssignments: options.maxOpenAssignments,
       scopedOpenAssignmentMap: true,
+      ignoreActivityState: options.ignoreActivityState === true,
+      ignoreDrainBeforeRefill: options.ignoreDrainBeforeRefill === true,
     });
     if (!ranking.selected) {
       await cxDialQueueRepository.transitionQueueItemState(item._id, ["claimed"], {
@@ -2399,6 +2417,15 @@ async function claimNextCxQueueItem(options = {}) {
       Number(options.claimMinutes || 0) || Number(getQueueFamilyPolicy(assignedQueueFamily).claimMinutes || 0) || 5,
       1,
     );
+    const assignmentPackMetadata = options.assignmentPackId
+      ? {
+        "metadata.assignmentPackId": String(options.assignmentPackId),
+        "metadata.assignmentPackFamily": options.assignmentPackFamily || assignedQueueFamily,
+        "metadata.assignmentPackTarget": Number(options.assignmentPackTarget || 0) || null,
+        "metadata.assignmentPackCreatedAt": options.assignmentPackCreatedAt || assignedAt,
+        "metadata.assignmentPackSource": options.assignmentPackSource || "cx-queue-assignment",
+      }
+      : {};
 
     const updatedQueueItem = await cxDialQueueRepository.transitionQueueItemState(item._id, ["claimed"], {
       assignment: {
@@ -2419,6 +2446,7 @@ async function claimNextCxQueueItem(options = {}) {
         now: assignedAt,
         reason: "new-assignment",
       }),
+      ...assignmentPackMetadata,
     }, {
       match: buildQueueItemMutationMatch(item),
       returnNew: true,
@@ -2520,6 +2548,13 @@ async function assignCxQueueBatch(options = {}) {
       maxOpenAssignmentsScope: options.maxOpenAssignmentsScope || null,
       createdAtGte: options.createdAtGte || options.windowStart || null,
       createdAtLte: options.createdAtLte || options.windowEnd || null,
+      ignoreActivityState: options.ignoreActivityState === true,
+      ignoreDrainBeforeRefill: options.ignoreDrainBeforeRefill === true,
+      assignmentPackId: options.assignmentPackId || null,
+      assignmentPackFamily: options.assignmentPackFamily || null,
+      assignmentPackTarget: options.assignmentPackTarget || null,
+      assignmentPackCreatedAt: options.assignmentPackCreatedAt || null,
+      assignmentPackSource: options.assignmentPackSource || null,
       requestKey: `${requestKeyPrefix}:${index + 1}`,
     });
     results.push(result);
@@ -2649,6 +2684,12 @@ function buildClearedDialRuntimeMetadata({ now = new Date(), reason = null } = {
     "metadata.wrapUpStartedWorkflowId": null,
     "metadata.wrapUpReason": null,
     "metadata.assignmentReleasedByHangup": null,
+    "metadata.assignmentPackId": null,
+    "metadata.assignmentPackFamily": null,
+    "metadata.assignmentPackTarget": null,
+    "metadata.assignmentPackCreatedAt": null,
+    "metadata.assignmentPackSealedAt": null,
+    "metadata.assignmentPackSource": null,
     "metadata.dealHandoffHold": null,
     "metadata.dialRuntimeClearedAt": now,
     "metadata.dialRuntimeClearedReason": reason || "queue-transition",

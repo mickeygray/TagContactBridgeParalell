@@ -138,6 +138,7 @@ const {
 const {
   buildAgentCallStats,
   getOrComputeAgentCallStats,
+  invalidateAgentCallStatsSnapshot,
 } = require("./agentCallStatsService");
 const {
   buildBlogBotStatus,
@@ -173,6 +174,7 @@ const {
 const {
   buildCxCallQueue,
   buildCxWorkspace,
+  listCxPlacedCallsToday,
   executeCxLogicsCreateCase,
   executeCxSaveCaseProfileFromLogics,
   executeCxLogicsFindMatch,
@@ -663,6 +665,7 @@ module.exports = {
   buildCxCadenceRuntimeSnapshot,
   buildCxCommLog,
   buildCxWorkspace,
+  listCxPlacedCallsToday,
   computeFreshHotLaneWindow,
   approveInboxWorkflow,
   cancelInboxWorkflow,
@@ -922,6 +925,7 @@ module.exports = {
   syncUsersFromRcExtensions,
   buildAgentCallStats,
   getOrComputeAgentCallStats,
+  invalidateAgentCallStatsSnapshot,
   buildBlogBotStatus,
   buildMetricsPulse,
   SHORT_CIRCUIT_INTAKE_SOURCES,

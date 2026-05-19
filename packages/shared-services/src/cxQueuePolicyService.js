@@ -1,7 +1,6 @@
 "use strict";
 
 const {
-  normalizeCxQueuePolicyTier,
   normalizeLeadQueueFamily,
 } = require("../../shared-normalizers/src");
 const {
@@ -51,47 +50,13 @@ const QUEUE_FAMILY_POLICIES = Object.freeze({
   },
 });
 
-const CX_QUEUE_TIER_POLICIES = Object.freeze({
-  no_leads: {
-    tier: "no_leads",
-    label: "No leads",
-    enabled: false,
-    fresh: { eligible: false, targetOpen: 0, priorityWeight: 0 },
-    day2to15: { targetOpen: 0 },
-    aged: { targetOpen: 0 },
-  },
-  red_only: {
-    tier: "red_only",
-    label: "Red only",
-    enabled: true,
-    fresh: { eligible: false, targetOpen: 0, priorityWeight: 0 },
-    day2to15: { targetOpen: 0 },
-    aged: { targetOpen: 20 },
-  },
-  old_balanced: {
-    tier: "old_balanced",
-    label: "Old balanced",
-    enabled: true,
-    fresh: { eligible: false, targetOpen: 0, priorityWeight: 0 },
-    day2to15: { targetOpen: 25 },
-    aged: { targetOpen: 5 },
-  },
-  fresh_capped: {
-    tier: "fresh_capped",
-    label: "Fresh capped",
-    enabled: true,
-    fresh: { eligible: true, targetOpen: 5, priorityWeight: 50 },
-    day2to15: { targetOpen: 25 },
-    aged: { targetOpen: 5 },
-  },
-  fresh_priority: {
-    tier: "fresh_priority",
-    label: "Fresh priority",
-    enabled: true,
-    fresh: { eligible: true, targetOpen: 10, priorityWeight: 100 },
-    day2to15: { targetOpen: 25 },
-    aged: { targetOpen: 5 },
-  },
+const MANUAL_NO_LEADS_POLICY = Object.freeze({
+  tier: null,
+  label: "Manual",
+  enabled: false,
+  fresh: { eligible: false, firstTouchEligible: false, targetOpen: 0, hourlyCap: null, priorityWeight: 0 },
+  day2to15: { targetOpen: 0 },
+  aged: { targetOpen: 0 },
 });
 
 function readPolicyNumber(value, fallback) {
@@ -122,6 +87,43 @@ function readEnvBoolean(names, fallback) {
   return fallback;
 }
 
+function hasPolicyValue(value) {
+  return value !== null && value !== undefined && value !== "";
+}
+
+function hasManualQueuePolicy(input = null) {
+  if (!input || typeof input !== "object") return false;
+  return (
+    input.enabled === false
+    || hasPolicyValue(input.fresh?.eligible)
+    || hasPolicyValue(input.fresh?.firstTouchEligible)
+    || hasPolicyValue(input.fresh?.targetOpen)
+    || hasPolicyValue(input.day2to15?.targetOpen)
+    || hasPolicyValue(input.aged?.targetOpen)
+  );
+}
+
+function cloneNoLeadsPolicy() {
+  return {
+    ...MANUAL_NO_LEADS_POLICY,
+    fresh: { ...MANUAL_NO_LEADS_POLICY.fresh },
+    day2to15: { ...MANUAL_NO_LEADS_POLICY.day2to15 },
+    aged: { ...MANUAL_NO_LEADS_POLICY.aged },
+  };
+}
+
+function isResolvedQueuePolicy(policy = null) {
+  return Boolean(
+    policy
+      && typeof policy === "object"
+      && Object.prototype.hasOwnProperty.call(policy, "label")
+      && Object.prototype.hasOwnProperty.call(policy, "enabled")
+      && policy.fresh
+      && policy.day2to15
+      && policy.aged,
+  );
+}
+
 function resolveQueueFamilyDailyMax(queueFamily, fallback) {
   const normalizedFamily = normalizeQueueFamily(queueFamily);
   if (normalizedFamily === "fresh-day1") {
@@ -141,45 +143,51 @@ function resolveAccountQueuePolicy(account = null) {
   const rawPolicy = hasAccount && account.cxQueuePolicy && typeof account.cxQueuePolicy === "object"
     ? account.cxQueuePolicy
     : {};
-  const explicitTier = normalizeCxQueuePolicyTier(rawPolicy.tier);
-  const defaultTier =
-    !hasAccount || account.status === "disabled"
-      ? "no_leads"
-      : account.role === "admin" || account.audience === "admin"
-        ? "no_leads"
-        : "fresh_priority";
-  const base = CX_QUEUE_TIER_POLICIES[explicitTier] || CX_QUEUE_TIER_POLICIES[defaultTier];
-  const enabled = rawPolicy.enabled === false ? false : Boolean(base.enabled);
-  if (!enabled) return CX_QUEUE_TIER_POLICIES.no_leads;
+  if (!hasAccount || account.status === "disabled") return cloneNoLeadsPolicy();
+  if (!hasManualQueuePolicy(rawPolicy)) return cloneNoLeadsPolicy();
 
+  const freshTargetOpen = readPolicyNumber(rawPolicy.fresh?.targetOpen, 0);
+  const day2to15TargetOpen = readPolicyNumber(rawPolicy.day2to15?.targetOpen, 0);
+  const agedTargetOpen = readPolicyNumber(rawPolicy.aged?.targetOpen, 0);
+
+  const firstTouchEligible =
+    rawPolicy.fresh?.firstTouchEligible == null
+      ? Boolean(rawPolicy.fresh?.eligible)
+      : Boolean(rawPolicy.fresh.firstTouchEligible);
   const freshEligible =
-    rawPolicy.fresh?.eligible == null
-      ? Boolean(base.fresh.eligible)
-      : Boolean(rawPolicy.fresh.eligible);
+    freshTargetOpen > 0
+    || firstTouchEligible
+    || Boolean(rawPolicy.fresh?.eligible);
+  const enabled =
+    rawPolicy.enabled !== false
+    && (freshTargetOpen > 0 || day2to15TargetOpen > 0 || agedTargetOpen > 0 || firstTouchEligible);
+  if (!enabled) return cloneNoLeadsPolicy();
 
   return {
-    tier: base.tier,
-    label: base.label,
+    tier: null,
+    label: "Manual",
     enabled: true,
     fresh: {
       eligible: freshEligible,
-      targetOpen: freshEligible
-        ? readPolicyNumber(rawPolicy.fresh?.targetOpen, base.fresh.targetOpen)
-        : 0,
-      hourlyCap: readPolicyNumber(rawPolicy.fresh?.hourlyCap, base.fresh.hourlyCap ?? null),
-      priorityWeight: readPolicyNumber(rawPolicy.fresh?.priorityWeight, base.fresh.priorityWeight),
+      firstTouchEligible: freshEligible && firstTouchEligible,
+      targetOpen: freshEligible ? freshTargetOpen : 0,
+      hourlyCap: readPolicyNumber(rawPolicy.fresh?.hourlyCap, null),
+      priorityWeight: readPolicyNumber(
+        rawPolicy.fresh?.priorityWeight,
+        freshEligible ? 100 : 0,
+      ),
     },
     day2to15: {
-      targetOpen: readPolicyNumber(rawPolicy.day2to15?.targetOpen, base.day2to15.targetOpen),
+      targetOpen: day2to15TargetOpen,
     },
     aged: {
-      targetOpen: readPolicyNumber(rawPolicy.aged?.targetOpen, base.aged.targetOpen),
+      targetOpen: agedTargetOpen,
     },
   };
 }
 
 function getPolicyBucketForQueueFamily(policy = null, queueFamily = null) {
-  const resolved = policy && typeof policy === "object" && policy.tier
+  const resolved = isResolvedQueuePolicy(policy)
     ? policy
     : resolveAccountQueuePolicy(policy);
   switch (normalizeQueueFamily(queueFamily)) {
@@ -195,7 +203,7 @@ function getPolicyBucketForQueueFamily(policy = null, queueFamily = null) {
 }
 
 function getQueueFamilyTargetOpen(policy = null, queueFamily = null) {
-  const resolved = policy && typeof policy === "object" && policy.tier
+  const resolved = isResolvedQueuePolicy(policy)
     ? policy
     : resolveAccountQueuePolicy(policy);
   if (!resolved.enabled) return 0;
@@ -206,7 +214,7 @@ function getQueueFamilyTargetOpen(policy = null, queueFamily = null) {
 }
 
 function isQueueFamilyAllowedForAccountPolicy(policy = null, queueFamily = null) {
-  const resolved = policy && typeof policy === "object" && policy.tier
+  const resolved = isResolvedQueuePolicy(policy)
     ? policy
     : resolveAccountQueuePolicy(policy);
   if (!resolved.enabled) return false;
@@ -526,7 +534,6 @@ function deriveQueueFamilyFromLeadCreatedAt(createdAt, asOf = new Date(), option
 
 module.exports = {
   buildCallAttemptPatch,
-  CX_QUEUE_TIER_POLICIES,
   deriveQueueFamilyFromAgeDays,
   deriveQueueFamilyFromLeadCreatedAt,
   deriveQueueFamilyFromLeadTouchState,
@@ -539,11 +546,11 @@ module.exports = {
   getQueueFamilyPolicy,
   getQueueFamilySortRank,
   getQueueFamilyTargetOpen,
+  hasManualQueuePolicy,
   getTouchAgeFreshMaxCalls,
   getTouchAgeFreshWindowDays,
   isQueueFamilyAllowedForAccountPolicy,
   isTouchAgeBucketingEnabled,
-  normalizeCxQueuePolicyTier,
   normalizeQueueFamily,
   normalizePlacedCallCount,
   resolveAccountQueuePolicy,

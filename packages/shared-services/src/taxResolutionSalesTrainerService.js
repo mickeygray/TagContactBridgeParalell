@@ -38,10 +38,13 @@ const DEFAULT_MODEL = "gpt-5-mini";
 //     calls (CALLER_PROFILE_TOOL uses SALES_TRAINER_PROFILE_MODEL,
 //     coaching panel can use SALES_TRAINER_COACH_MODEL).
 //
-// Override for high-fidelity drill sessions:
-//   SALES_TRAINER_ANTHROPIC_MODEL=claude-sonnet-4-6  (slower, richer)
-//   SALES_TRAINER_ANTHROPIC_MODEL=claude-opus-4-6    (slowest, eval)
-const DEFAULT_ANTHROPIC_MODEL = "claude-haiku-4-5";
+// Sonnet 4.6 is the default for live turns. The training-mode block in
+// the slim prompt + the per-turn session header give Sonnet enough
+// grounding to behave on-spec without the 27k master prompt.
+// Overrides:
+//   SALES_TRAINER_ANTHROPIC_MODEL=claude-haiku-4-5  (faster, cheaper, less reliable on nuance)
+//   SALES_TRAINER_ANTHROPIC_MODEL=claude-opus-4-6   (slowest, for eval)
+const DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-4-6";
 const DEFAULT_PROVIDER = "anthropic";
 const DEFAULT_TTS_MODEL = "gpt-4o-mini-tts";
 const DEFAULT_TTS_VOICE = "cedar";
@@ -117,21 +120,16 @@ function getSalesTrainerConfig() {
     // Anthropic (Messages API) — alternative provider, default.
     //
     // Three-tier model split for the trainer:
-    //   - anthropicModel (this one): live in-character turns. Haiku
-    //     default for speed — phone-call-pace replies are 1-3
-    //     sentences and Haiku does them in ~600-1200ms vs Sonnet's
-    //     ~2-3s.
+    //   - anthropicModel (this one): live in-character turns. Sonnet 4.6
+    //     by default — reliable on the training-mode principles
+    //     (progression-first, one-per-category, accept-reasonable-as-truth)
+    //     where Haiku was drifting. ~2-3s per reply with the slim prompt
+    //     + session header, which is acceptable on the voice path.
     //   - profileModel (SALES_TRAINER_PROFILE_MODEL, Sonnet default):
     //     generates the caller profile via tool-use at session start.
-    //     This is the "build a realistic person" step — Sonnet's
-    //     richer reasoning pays off here even though it costs ~2-3s.
     //   - coachModel (SALES_TRAINER_COACH_MODEL, Sonnet default):
     //     runs the coaching panel that scores rep behavior and renders
-    //     scorecard insights. Strict-schema tool-use, not user-facing
-    //     latency — Sonnet's better synthesis matters more than speed.
-    //
-    // Result: snappy live conversation (Haiku), thoughtful caller
-    // setup (Sonnet), accurate coaching feedback (Sonnet).
+    //     scorecard insights.
     anthropicApiKey: env("ANTHROPIC_API_KEY", ""),
     anthropicModel: env("SALES_TRAINER_ANTHROPIC_MODEL", DEFAULT_ANTHROPIC_MODEL),
     coachModel: env("SALES_TRAINER_COACH_MODEL", "claude-sonnet-4-6"),
@@ -713,6 +711,21 @@ function buildSessionHeader({ mode, scenario, user, profile, playbook = null } =
     "",
     `Locked mode: ${cleanText(normalizedMode, 80) || "auto"}`,
     `Scenario request: ${cleanText(scenario || "use the locked profile below", 600)}`,
+    "",
+    "═══════════════════════════════════════════════════════════════",
+    "TRAINING-MODE REMINDER — read before every turn, applies on top of <training_mode>:",
+    "═══════════════════════════════════════════════════════════════",
+    "",
+    "You are here for ONE purpose: give the trainee practice across the call arc. This is a SALES TRAINING TOOL, not a realistic prospect simulation. Specifically, this turn:",
+    "  - **Bias toward progression.** Competent or reasonable-but-imperfect agent moves ADVANCE the call. Don't hold the phase hostage for perfect phrasing.",
+    "  - **Accept reasonable claims as truth.** If the agent paraphrases imperfectly or asserts a minor detail you don't have pinned, take the spirit, not the letter. Locked profile facts are non-negotiable; secondary details are flexible.",
+    "  - **Engagement check, not perfection check.** When the agent responds to your last objection, ask: did they acknowledge it, touch the concern, and not talk right past it? If YES (even loosely) — objection is SATISFIED, retire it, fire a DIFFERENT category next. If NO — you may double down ONCE, then move on. Imperfect answers count as engagement. Listening is the bar, not nailing the answer.",
+    "  - **One objection per category, then retired forever.** Scan your own prior assistant turns in the message history — identify which categories you've already raised (money/price, trust, capability, decision, spouse, scope, timeline, etc.) and DO NOT repeat a category, even in different words. Hard mode means MORE different categories + more complicated material; it does NOT mean re-raising the same concern.",
+    "  - **Don't stonewall a competent agent.** If they've cleared the phase, advance. If they haven't, raise a NEW concern from a different category — not the same one in new words.",
+    "  - **Closeable by design.** Unless the playbook sets `uncloseableReason`, this call CAN close when the rep makes it through the phases with reasonable handling. Easy-mode WILL close on competent handling; hard-mode closes on listening + competent handling.",
+    "  - **Recent-message awareness.** Look at the last 2-3 messages in the history. If your last assistant turn already raised a price/affordability concern, your next concern is something else. If your last turn already raised a trust concern that the agent addressed, MOVE ON to discovery/scope/capability.",
+    "",
+    "Realism (voice, mood, vocabulary, emotional beats) stays anchored to the locked profile and playbook. Structure (advance vs. hold, accept vs. push back, which category to fire next) is governed by training-mode.",
   ];
   if (user?.email) {
     parts.push(`Trainee: ${cleanText(user.name || user.email, 120)}`);
@@ -1288,6 +1301,10 @@ async function transcribeSalesTrainerAudio({
   filename = "trainer-mic.webm",
   language = null,
   prompt = "",
+  includeDomainPrimer = true,
+  model = null,
+  responseFormat = null,
+  chunkingStrategy = null,
   timeoutMs = null,
 } = {}) {
   const config = getSalesTrainerConfig();
@@ -1311,8 +1328,15 @@ async function transcribeSalesTrainerAudio({
 
   const blob = new Blob([buffer], { type: mimeType });
   const form = new FormData();
+  const sttModel = String(model || config.sttModel || "gpt-4o-mini-transcribe").trim();
+  const modelName = sttModel.toLowerCase();
+  const isDiarizeModel = modelName.includes("diarize");
+  const supportsVerboseJson = modelName === "whisper-1";
+  const requestedResponseFormat = String(responseFormat || "").trim();
+  const effectiveResponseFormat = requestedResponseFormat
+    || (isDiarizeModel ? "diarized_json" : supportsVerboseJson ? "verbose_json" : "json");
   form.append("file", blob, filename);
-  form.append("model", config.sttModel);
+  form.append("model", sttModel);
   // Response format depends on model:
   //   - whisper-1 supports json | text | srt | verbose_json | vtt
   //   - gpt-4o-mini-transcribe / gpt-4o-transcribe support json | text
@@ -1320,27 +1344,31 @@ async function transcribeSalesTrainerAudio({
   // both families support. Using verbose_json on a gpt-4o-*-transcribe
   // model returns a 400 — so the format selection is required, not
   // cosmetic.
-  const modelName = String(config.sttModel || "").toLowerCase();
-  const supportsVerboseJson = modelName === "whisper-1";
-  form.append("response_format", supportsVerboseJson ? "verbose_json" : "json");
+  form.append("response_format", effectiveResponseFormat);
   const effectiveLanguage = language || config.sttLanguage || "";
   if (effectiveLanguage) form.append("language", effectiveLanguage);
+  if (isDiarizeModel && chunkingStrategy) {
+    form.append("chunking_strategy", String(chunkingStrategy));
+  }
 
   // Build the biasing prompt: domain primer first (always), then any
   // per-call context the caller supplied (e.g., the prior assistant
   // turn so the rep's "yeah okay so on that..." continues coherently).
   // OpenAI hard-caps the prompt at 224 tokens (~1000 chars). We give
   // the primer the lion's share since it's the highest-leverage signal.
-  const callerPrompt = String(prompt || "").trim();
-  const PRIMER_BUDGET = 800;
-  const CALLER_BUDGET = 200;
-  const promptParts = [STT_DOMAIN_PRIMER.slice(0, PRIMER_BUDGET)];
-  if (callerPrompt) promptParts.push(callerPrompt.slice(-CALLER_BUDGET));
-  form.append("prompt", promptParts.join(" "));
+  if (!isDiarizeModel) {
+    const callerPrompt = String(prompt || "").trim();
+    const PRIMER_BUDGET = 800;
+    const CALLER_BUDGET = 200;
+    const promptParts = includeDomainPrimer ? [STT_DOMAIN_PRIMER.slice(0, PRIMER_BUDGET)] : [];
+    if (callerPrompt) promptParts.push(callerPrompt.slice(-CALLER_BUDGET));
+    const effectivePrompt = promptParts.join(" ").trim();
+    if (effectivePrompt) form.append("prompt", effectivePrompt);
+  }
 
   // Temperature 0 = take the model's top hypothesis. Default is also 0
   // for Whisper but being explicit prevents future env-driven drift.
-  form.append("temperature", "0");
+  if (!isDiarizeModel) form.append("temperature", "0");
 
   const effectiveTimeoutMs = Math.max(Number(timeoutMs) || config.timeoutMs, 1000);
   const abortController = new AbortController();
@@ -1398,21 +1426,39 @@ async function transcribeSalesTrainerAudio({
     text = data.segments.map((s) => String(s.text || "").trim()).join(" ").trim();
   }
   if (!text) text = String(data.text || "").trim();
+  const segments = Array.isArray(data.segments)
+    ? data.segments.map((segment) => ({
+      id: segment.id || null,
+      type: segment.type || null,
+      text: String(segment.text || "").trim(),
+      speaker: segment.speaker == null ? null : String(segment.speaker),
+      start: typeof segment.start === "number" ? segment.start : null,
+      end: typeof segment.end === "number" ? segment.end : null,
+    })).filter((segment) => segment.text)
+    : [];
 
   return {
     text,
     language: data.language || effectiveLanguage || null,
     durationSec: typeof data.duration === "number" ? data.duration : null,
-    model: config.sttModel,
+    model: sttModel,
+    responseFormat: effectiveResponseFormat,
+    segments,
+    usage: data.usage || null,
     byteLength: buffer.length,
   };
 }
 
 function adaptInputForAnthropic(input, opts = {}) {
   // opts.promptVariant: "slim" (default for live turns) | "full"
-  //   - "slim" uses TAX_RESOLUTION_SALES_TRAINER_LIVE_TURN_PROMPT (~2.3k tokens)
-  //   - "full" uses TAX_RESOLUTION_SALES_TRAINER_PROMPT (~27.5k tokens) —
-  //     reserved for "break character" recovery turns or eval runs
+  //   - "slim" uses TAX_RESOLUTION_SALES_TRAINER_LIVE_TURN_PROMPT (~3k tokens)
+  //     including the <training_mode> block. The slim prompt + per-turn
+  //     session header (personality, current state, recent-message
+  //     awareness, training-mode reminder) is the steady-state anchor.
+  //   - "full" uses TAX_RESOLUTION_SALES_TRAINER_PROMPT (~28k tokens) —
+  //     reserved for "break character" recovery turns, evals, and the
+  //     coaching/scorecard runs. Live turns no longer use this — it was
+  //     too slow on the voice path and the slim prompt is sufficient.
   const promptVariant = opts.promptVariant === "full" ? "full" : "slim";
   const systemPromptText =
     promptVariant === "full"
@@ -1551,14 +1597,210 @@ async function callAnthropicMessages({ input, model, maxOutputTokens, timeoutMs,
 // concrete prospect (age/sex/state/employment/etc.) via Claude
 // tool-use, maps that to an OpenAI TTS voice slot + tone instructions
 // so the prospect sounds appropriate (older male → onyx + gravelly,
-// younger Hispanic woman from Texas → coral + soft Spanish-inflected,
-// etc.). Optionally pre-synthesizes the prospect's opening line so
-// the agent hears the prospect "answer the phone" the instant they
-// say "Tax Group."
+// retired widow from Iowa → soft Midwestern, gruff trucker from Texas
+// → drawled and tired, etc.). Optionally pre-synthesizes the
+// prospect's opening line so the agent hears the prospect "answer the
+// phone" the instant they say "Tax Group."
 //
 // The full profile is returned to the client and passed back on every
 // /respond turn — keeps the server stateless while ensuring Claude
 // stays in character throughout the call.
+
+// ── Demographic randomization ────────────────────────────────────────
+//
+// We roll demographics SERVER-SIDE rather than asking the model to
+// randomize, because models have stubborn latent priors. Asking Sonnet
+// to "vary the rolls" produced runs where every prospect was Hispanic,
+// or every prospect was a white male over 60 — the model collapses to
+// whatever it associates with the prompt. Rolling here from explicit
+// weighted pools and passing the values as LOCKED CONSTRAINTS guarantees
+// genuine variety.
+//
+// Weights are deliberately rough — US Census-ish for ethnicity, but
+// tilted toward middle-aged and working/lower-middle for affluency
+// because that's the realistic tax-debt caller pool, not the general
+// population. Adjust as the trainer's needs evolve.
+
+const ETHNICITY_POOL = [
+  { value: "White (non-Hispanic)", weight: 60 },
+  { value: "Hispanic/Latino", weight: 19 },
+  { value: "Black", weight: 14 },
+  { value: "Asian American", weight: 6 },
+  { value: "Mixed / Other", weight: 1 },
+];
+
+const AGE_BUCKET_POOL = [
+  { value: { min: 25, max: 34 }, weight: 8 },
+  { value: { min: 35, max: 44 }, weight: 20 },
+  { value: { min: 45, max: 54 }, weight: 25 },
+  { value: { min: 55, max: 64 }, weight: 25 },
+  { value: { min: 65, max: 74 }, weight: 17 },
+  { value: { min: 75, max: 85 }, weight: 5 },
+];
+
+const SEX_POOL = [
+  { value: "male", weight: 52 },
+  { value: "female", weight: 48 },
+];
+
+const EDUCATION_POOL = [
+  { value: "did not finish high school", weight: 10 },
+  { value: "high school", weight: 30 },
+  { value: "some college", weight: 22 },
+  { value: "trade school", weight: 12 },
+  { value: "associate's", weight: 8 },
+  { value: "bachelor's", weight: 13 },
+  { value: "graduate degree", weight: 5 },
+];
+
+const AFFLUENCY_POOL = [
+  { value: "working class", weight: 32 },
+  { value: "lower middle", weight: 30 },
+  { value: "middle class", weight: 22 },
+  { value: "upper middle", weight: 11 },
+  { value: "comfortable", weight: 5 },
+];
+
+const EMPLOYMENT_CATEGORY_POOL = [
+  { value: "sole proprietor / 1099 contractor", weight: 16 },
+  { value: "truck driver / owner-operator", weight: 8 },
+  { value: "small business owner (retail, restaurant, service)", weight: 12 },
+  { value: "skilled trade (plumber, electrician, mechanic, HVAC, etc.)", weight: 12 },
+  { value: "W-2 employee (clerical, retail, healthcare aide, factory)", weight: 16 },
+  { value: "retired (Social Security + pension and/or 401k)", weight: 16 },
+  { value: "rural professional (doctor, dentist, lawyer in a small town)", weight: 5 },
+  { value: "farmer / ranch operator", weight: 4 },
+  { value: "gig economy (Uber/DoorDash + side hustle)", weight: 5 },
+  { value: "between jobs / on disability", weight: 6 },
+];
+
+const SPOUSE_STATUS_POOL = [
+  { value: "married", weight: 45 },
+  { value: "divorced", weight: 22 },
+  { value: "single", weight: 18 },
+  { value: "widowed", weight: 8 },
+  { value: "separated", weight: 4 },
+  { value: "living with partner", weight: 3 },
+];
+
+function weightedPick(pool) {
+  const total = pool.reduce((sum, item) => sum + (item.weight || 0), 0);
+  if (total <= 0) return pool[0]?.value;
+  let roll = Math.random() * total;
+  for (const item of pool) {
+    roll -= item.weight || 0;
+    if (roll <= 0) return item.value;
+  }
+  return pool[pool.length - 1].value;
+}
+
+function rollAge(bucket) {
+  const min = bucket?.min ?? 35;
+  const max = bucket?.max ?? 70;
+  return min + Math.floor(Math.random() * (max - min + 1));
+}
+
+// Roll a full demographic stack. Accepts overrides for any field so
+// presets and operator selections can lock specific traits while the
+// rest are rolled. Returns plain values ready to pin in the prompt.
+function rollDemographics(overrides = {}) {
+  return {
+    ethnicity: overrides.ethnicity || weightedPick(ETHNICITY_POOL),
+    age: Number.isFinite(overrides.age)
+      ? overrides.age
+      : rollAge(overrides.ageBucket || weightedPick(AGE_BUCKET_POOL)),
+    sex: overrides.sex || weightedPick(SEX_POOL),
+    education: overrides.education || weightedPick(EDUCATION_POOL),
+    affluency: overrides.affluency || weightedPick(AFFLUENCY_POOL),
+    employmentCategory:
+      overrides.employmentCategory || weightedPick(EMPLOYMENT_CATEGORY_POOL),
+    spouseStatus: overrides.spouseStatus || weightedPick(SPOUSE_STATUS_POOL),
+  };
+}
+
+// ── Preset profile templates ─────────────────────────────────────────
+//
+// Operators can pick a preset for targeted practice on common call
+// types. Each preset locks the demographic fields most defining of the
+// scenario (age band, employment category, sometimes affluency) and
+// lets the rest roll. The `scenarioArchetype` field maps to the v2
+// master prompt's <scenario_archetypes> so the playbook + tax issue
+// generation lines up.
+
+const PRESET_PROFILES = {
+  newly_retired: {
+    label: "Newly Retired — surprise tax bill from retirement transition",
+    scenarioArchetype: "newly_retired",
+    constraints: {
+      ageBucket: { min: 62, max: 74 },
+      employmentCategory: "retired (Social Security + pension and/or 401k)",
+      affluency: "lower middle",
+      spouseStatus: "married",
+    },
+  },
+  emergency_withdrawal: {
+    label: "Emergency Retirement Withdrawal (pre-59½) — unexpected liability",
+    scenarioArchetype: "emergency_retirement_withdrawal",
+    constraints: {
+      ageBucket: { min: 45, max: 58 },
+      employmentCategory: "W-2 employee (clerical, retail, healthcare aide, factory)",
+      affluency: "working class",
+    },
+  },
+  business_open_941: {
+    label: "Business Open — payroll tax (941) trouble",
+    scenarioArchetype: "business_open_941",
+    constraints: {
+      ageBucket: { min: 38, max: 60 },
+      employmentCategory: "small business owner (retail, restaurant, service)",
+      affluency: "middle class",
+    },
+  },
+  business_closed_tfrp: {
+    label: "Business Closed — Trust Fund Recovery Penalty exposure",
+    scenarioArchetype: "business_closed_tfrp",
+    constraints: {
+      ageBucket: { min: 45, max: 68 },
+      employmentCategory: "between jobs / on disability",
+      affluency: "lower middle",
+    },
+  },
+  rural_professional: {
+    label: "Sole Proprietor — rural professional (doctor/dentist/lawyer)",
+    scenarioArchetype: "rural_professional",
+    constraints: {
+      ageBucket: { min: 42, max: 65 },
+      employmentCategory: "rural professional (doctor, dentist, lawyer in a small town)",
+      affluency: "upper middle",
+      education: "graduate degree",
+    },
+  },
+  trucker_unfiled: {
+    label: "Trucker / Owner-Operator — multiple unfiled years",
+    scenarioArchetype: "trucker",
+    constraints: {
+      ageBucket: { min: 32, max: 60 },
+      employmentCategory: "truck driver / owner-operator",
+      affluency: "working class",
+      education: "high school",
+    },
+  },
+};
+
+function listPresetProfiles() {
+  return Object.entries(PRESET_PROFILES).map(([key, def]) => ({
+    key,
+    label: def.label,
+    scenarioArchetype: def.scenarioArchetype,
+  }));
+}
+
+function resolvePresetProfile(presetKey) {
+  if (!presetKey) return null;
+  const def = PRESET_PROFILES[presetKey];
+  if (!def) return null;
+  return def;
+}
 
 const CALLER_PROFILE_TOOL = {
   name: "submit_caller_profile",
@@ -1708,7 +1950,7 @@ const CALLER_PROFILE_TOOL = {
           accent: {
             type: "string",
             description:
-              "Regional accent appropriate to state + demographics. e.g. 'flat Midwestern', 'Texas drawl', 'New York', 'Boston', 'Southern (Alabama)', 'Hispanic-inflected', 'generic American'.",
+              "Regional accent appropriate to the locked state + ethnicity. Examples: 'flat Midwestern', 'Texas drawl', 'New York', 'Boston', 'Southern (Alabama)', 'Appalachian', 'rural Pacific Northwest', 'African American Vernacular English (Atlanta)', 'generic American'. Pick what fits the LOCKED demographics — do not default to any single accent.",
           },
           speakingPace: {
             type: "string",
@@ -1726,7 +1968,14 @@ const CALLER_PROFILE_TOOL = {
   },
 };
 
-function buildProfilePrompt({ leadSource, difficulty, mode, scenarioArchetype }) {
+function buildProfilePrompt({
+  leadSource,
+  difficulty,
+  mode,
+  scenarioArchetype,
+  demographics,
+  presetLabel,
+}) {
   const constraints = [];
   if (leadSource) constraints.push(`Lead source MUST be: ${leadSource}.`);
   else
@@ -1748,20 +1997,50 @@ function buildProfilePrompt({ leadSource, difficulty, mode, scenarioArchetype })
   } else {
     constraints.push("Scenario archetype is operator-randomized across realistic tax-debt caller types.");
   }
+
+  // Demographics are pre-rolled SERVER-SIDE. Pin them verbatim — the
+  // model must use these exact values rather than re-rolling. Without
+  // this lock, Sonnet collapses to its priors (e.g. picks Hispanic
+  // every time, or white-male-over-60 every time) regardless of "be
+  // varied" guidance.
+  const demographicLock = demographics
+    ? [
+        "",
+        "LOCKED DEMOGRAPHICS — use these EXACT values in the tool call. Do NOT substitute, re-roll, or override:",
+        `- ethnicity: ${demographics.ethnicity}`,
+        `- age: ${demographics.age}`,
+        `- sex: ${demographics.sex}`,
+        `- education: ${demographics.education}`,
+        `- affluency: ${demographics.affluency}`,
+        `- employment CATEGORY: ${demographics.employmentCategory} (you may specify a concrete job title within this category — e.g. for 'small business owner', pick 'pizza shop owner, 12 years' or 'auto repair shop, 8 years')`,
+        `- spouseStatus: ${demographics.spouseStatus}`,
+        "",
+        "These demographics were rolled by the operator's randomization layer to guarantee genuine variety. They are NOT suggestions — copy them verbatim into the matching tool fields. Build the name, city, callbackNumber, mood, tax issues, opening line, and voice hints around these locked traits.",
+      ]
+    : [];
+
+  const presetLine = presetLabel
+    ? [
+        "",
+        `PRESET TEMPLATE: ${presetLabel}. The locked demographics above were chosen to fit this scenario. Tax issues, painPoints, openingLine, and tempermentRoll should match the preset's typical caller profile (see the scenario archetype name above for guidance).`,
+      ]
+    : [];
+
   return [
     "Generate a single realistic caller profile for tax-resolution sales practice. Output via the submit_caller_profile tool.",
     "",
     "Constraints for this roll:",
     ...constraints,
+    ...demographicLock,
+    ...presetLine,
     "",
-    "Realism rules:",
-    "- Demographics must be coherent (a 28-year-old retired person is wrong unless the spec explains it).",
-    "- Tax issues must overlap plausibly. Self-employed people get 941/sales-tax/unfiled-returns. Truckers get unpaid-1099-income/unfiled. Recent inheritances surface a one-time large tax bill.",
-    "- Geography matters: a farmer in Iowa vs. a doctor in rural Kentucky vs. a sole proprietor in NYC will sound completely different.",
+    "Realism rules (apply within the locked demographics above):",
+    "- Name and city must match the locked ethnicity + state plausibly. Don't pick a stereotypically Anglo name for a Hispanic-locked profile or vice versa.",
+    "- Tax issues must overlap plausibly with the locked employment. Self-employed people get 941/sales-tax/unfiled-returns. Truckers get unpaid-1099-income/unfiled. Retired people get retirement-distribution surprise bills or under-withholding on 1099-R.",
+    "- Geography: pick a real US state + a real city/town in that state. Region should fit the ethnicity distribution plausibly.",
     "- In inbound mode, the opening line is what the prospect says after the agent says 'Tax Group.' It should sound like a real human answering an unknown number, not a chatbot.",
-    "- In outbound mode, the opening line is the prospect's first pickup response after receiving the call. Make it terse, skeptical, distracted, or confused like a real cold/warm outbound answer.",
-    "- Voice hints must match the demographics (a 70-year-old retired farmer in Alabama should speak with a Southern drawl, slow pace, gruff/tired tone).",
-    "- Vary the rolls — don't always default to white-male-middle-aged. Pull from the full demographic spread.",
+    "- In outbound mode, the opening line is the prospect's first pickup response. Make it terse, skeptical, distracted, or confused like a real cold/warm outbound answer.",
+    "- Voice hints must match the locked demographics. Accent should reflect ethnicity + state (e.g. 'flat Midwestern', 'Texas drawl', 'New York', 'Boston', 'Southern (Alabama)', 'generic American') WITHOUT defaulting to any single accent — match the locked traits.",
   ].join("\n");
 }
 
@@ -1770,6 +2049,17 @@ async function generateCallerProfile({
   difficulty = null,
   mode = null,
   scenarioArchetype = null,
+  // Operator-selected preset (one of the keys in PRESET_PROFILES) — when
+  // set, the preset's locked demographic constraints (age band, employment,
+  // typical affluency/spouse) override the random roll for those fields.
+  // Unspecified fields still roll from the weighted pools.
+  presetKey = null,
+  // Optional per-field overrides that take precedence over both preset
+  // constraints and the random roll. Useful for "operator wants a
+  // specific ethnicity for this practice round" without committing to a
+  // full preset. Shape: { ethnicity, age, sex, education, affluency,
+  // employmentCategory, spouseStatus, ageBucket }.
+  demographicOverrides = null,
   model = null,
   timeoutMs = null,
 } = {}) {
@@ -1781,6 +2071,20 @@ async function generateCallerProfile({
     );
   }
 
+  // Resolve preset (if any) and merge with explicit overrides. Explicit
+  // overrides win; preset fills in the rest; remaining fields roll.
+  const preset = resolvePresetProfile(presetKey);
+  const mergedOverrides = {
+    ...(preset?.constraints || {}),
+    ...(demographicOverrides || {}),
+  };
+  const demographics = rollDemographics(mergedOverrides);
+
+  // If a preset specified a scenarioArchetype, it wins unless the caller
+  // explicitly passed a different one.
+  const effectiveScenarioArchetype =
+    scenarioArchetype || preset?.scenarioArchetype || null;
+
   const client = createAnthropicClient();
   const config = getSalesTrainerConfig();
   // Use a stronger model for profile generation than per-turn — happens
@@ -1790,15 +2094,22 @@ async function generateCallerProfile({
     env("SALES_TRAINER_PROFILE_MODEL", "claude-sonnet-4-5") ||
     config.anthropicModel;
 
-  const prompt = buildProfilePrompt({ leadSource, difficulty, mode, scenarioArchetype });
+  const prompt = buildProfilePrompt({
+    leadSource,
+    difficulty,
+    mode,
+    scenarioArchetype: effectiveScenarioArchetype,
+    demographics,
+    presetLabel: preset?.label || null,
+  });
 
   const raw = await client.createMessage({
     system:
-      "You generate realistic caller profiles for a tax-resolution sales-training simulation. Output strictly via the submit_caller_profile tool. Be concrete, be varied, be plausible.",
+      "You generate realistic caller profiles for a tax-resolution sales-training simulation. Output strictly via the submit_caller_profile tool. The demographics are pre-rolled and locked — your job is to build a coherent, concrete prospect AROUND those locked traits (name, city, mood, tax stack, opening line, voice). Be concrete, be plausible, never re-roll the locked fields.",
     messages: [{ role: "user", content: prompt }],
     model: profileModel,
     maxTokens: 2048,
-    temperature: 0.95, // high temp for persona variety
+    temperature: 0.95, // high temp for narrative variety within the locked demographics
     tools: [CALLER_PROFILE_TOOL],
     toolChoice: { type: "tool", name: "submit_caller_profile" },
     timeoutMs: timeoutMs || config.timeoutMs,
@@ -1821,12 +2132,28 @@ async function generateCallerProfile({
       },
     );
   }
+  // Force the server-rolled demographics back onto the profile, even if
+  // the model strayed. The randomization layer is the source of truth —
+  // the model's job is the connective narrative, not the dimensions we
+  // rolled. This belt-and-suspenders pin guarantees variety holds even
+  // when Sonnet decides to "correct" a demographic choice it didn't like.
+  const lockedProfile = {
+    ...toolUse.input,
+    ethnicity: demographics.ethnicity,
+    age: demographics.age,
+    sex: demographics.sex,
+    education: demographics.education,
+    affluency: demographics.affluency,
+    spouseStatus: demographics.spouseStatus,
+    practiceMode: mode || toolUse.input.practiceMode || "inbound",
+    scenarioArchetype:
+      effectiveScenarioArchetype || toolUse.input.scenarioArchetype || "random",
+    presetKey: presetKey || null,
+  };
   return {
-    profile: {
-      ...toolUse.input,
-      practiceMode: mode || toolUse.input.practiceMode || "inbound",
-      scenarioArchetype: scenarioArchetype || toolUse.input.scenarioArchetype || "random",
-    },
+    profile: lockedProfile,
+    rolledDemographics: demographics,
+    presetKey: presetKey || null,
     model: raw?.model || profileModel,
     usage: raw?.usage || null,
   };
@@ -2086,8 +2413,20 @@ function buildPlaybookPrompt({ profile }) {
     "- Objection count: 3-6 for easy, 8-14 for hard. Match the locked difficulty.",
     "- Hidden facts: 1 for easy, 2-3 for hard.",
     "- Trust arc realism: Skeptic archetypes start trust low (3-4), max ceiling 6-7. Trusting archetypes can start at 6, max 9. Easy mode favors recoverable trust (small deltas); hard mode rewards permanent cliffs (-3 from one wrong move).",
+    "",
+    "What 'hard' means in the objection queue (READ THIS — common failure mode):",
+    "- Hard = MORE DIFFERENT OBJECTIONS across CATEGORIES, plus MORE COMPLICATED MATERIAL. NOT more re-raising of the same concern. The live model is instructed to retire each objection after the agent engages with it, so DO NOT seed multiple variants of the same concern (e.g. two 'too expensive' + a 'why so much' + an 'I can't afford' would all be the same category — pick ONE entry that fires once).",
+    "- Hard difficulty's 8-14 objections must SPAN categories: trust/identity, capability, scope/timeline, decision-deferral, spouse-consult, edge concerns, ONE money objection, etc. Each category appears AT MOST once.",
+    "- For hard mode, lean into RICHER MATERIAL rather than more pushback: bigger debt amounts, multi-issue tax stacks (audit + lien + payroll), additional complicating parties (business partner, ex-spouse, estate), prior burned-by-a-tax-firm history, hidden issues that only surface with the right discovery question. That's what tests the agent's ear — not 'no actually I really can't afford it' four times.",
+    "- Hard easyAccept signal: the live model treats an objection as SATISFIED if the agent's response (a) acknowledges the concern, (b) is topically related, (c) doesn't talk right past it. Your `underlyingConcern` field should describe what 'touching' the objection looks like — even an imperfect answer — so the live model can recognize engagement vs. genuine deflection.",
     "- The earnedVulnerability sample should evoke the one true thing this caller would say if trust crossed 7 — read painPoints and voiceHints to pick what that is.",
     "- The closeAccept sample should match the caller's energy — not a generic 'sounds good.' Defeated callers might say 'Yeah... okay.' Bargainers might say 'Alright, fine. Send it over.'",
+    "",
+    "Objection-mix rules (IMPORTANT):",
+    "- Spread objections across phases — phase 1 trust/identity, phase 2 capability/diagnosis, phase 3 value/decision/close. Do NOT pile objections into phase 3.",
+    "- Phase 3 objections must be a MIX of categories (value/scope, guarantees, 'let me think,' timeline, capability, edge concerns, spouse/advisor consult). Money/affordability objections (the 'can't afford' / 'too expensive' / 'why so much' / 'can you do it cheaper' family) are valid but capped at ONE entry total in the entire objectionQueue. That single money objection fires once, the agent responds, and the caller moves on to a different concern — they do NOT cycle back to price. A simulator that keeps hammering cost reads as a caricature, not a real prospect; vary the pressure. The live-turn model is instructed to retire money objections after one firing, so do not stack multiple price variants for it to chain through.",
+    "- If you include a 'talk to my wife/husband/advisor first' objection, DEFAULT it to spouseAvailable: the trigger should describe the spouse as reachable now (or within a few minutes), and the underlyingConcern should make clear that a competent agent move (offer to loop the spouse in on a 3-way) unlocks the close path. Only mark the spouse as unreachable if the locked profile sets `+spouse` or the difficulty/uncloseableReason explicitly demands it.",
+    "- PRICE OBJECTION GATE (hard rule). The single money objection in the queue must be GATED on the agent having presented the entire package: trust established + work product clear (transcript pull, POA, compliance, resolution work) + services rendered explicit (who does what, timeline, payment terms, scope-change behavior). Encode this in the objection's `trigger` field — e.g. 'agent has quoted a specific dollar amount AND laid out scope (what's included, timeline, who does the work)' — NOT just 'agent mentions price' or 'phase 3 begins.' A taxpayer who hasn't been told what they're buying has nothing to anchor 'is this expensive' against; real prospects ask what they're getting first. The money objection should fire LATE in Phase 3, after scope/timeline/'what's included' questions have surfaced and been answered. If the agent skips the package and quotes a number first, the caller's reaction is confusion about scope (a separate objection in your queue), NOT a price objection.",
     "",
     "If difficulty is HARD and the caller archetype is naturally uncloseable on a first call (Skeptic who was burned, Defeated already-bankruptcy, fixed-income with no resources), set uncloseableReason. Leave empty for easy mode — easy mode is designed to be winnable.",
     "",
@@ -2271,13 +2610,31 @@ async function startSalesTrainerSession({
   difficulty = null,
   mode = null,
   scenarioArchetype = null,
+  // Optional preset profile key (one of PRESET_PROFILES) — picks a
+  // common-call template (newly retired, trucker, 941 trouble, etc.)
+  // and locks the matching demographics. Omit to roll fresh from the
+  // weighted demographic pools.
+  presetKey = null,
+  // Optional per-field demographic overrides that take precedence over
+  // both preset constraints and the random roll. Use this when the
+  // operator wants to lock just one or two traits (e.g. force a specific
+  // ethnicity for this practice round) without committing to a full
+  // preset.
+  demographicOverrides = null,
   includeAudio = true,
   audio = {},
   user = null,
 } = {}) {
   // 1. Generate profile
   const { profile, model: profileModel, usage: profileUsage } =
-    await generateCallerProfile({ leadSource, difficulty, mode, scenarioArchetype });
+    await generateCallerProfile({
+      leadSource,
+      difficulty,
+      mode,
+      scenarioArchetype,
+      presetKey,
+      demographicOverrides,
+    });
 
   // 2. Pick voice + generate playbook in parallel.
   //    - Voice picker is local/fast (no API call)
@@ -2917,16 +3274,19 @@ async function runTaxResolutionSalesTrainer({
   maxOutputTokens = null,
   timeoutMs = null,
   provider = null,
-  // "slim" (default) uses the live-turn-only prompt (~2.3k tokens).
-  // "full" loads the entire v2 reference prompt (~27.5k tokens) — used
-  // when the trainee or client invokes a "break character" recovery
-  // turn. The full prompt re-anchors the model against the complete
-  // simulator rule book in case it's drifted off-spec.
+  // Default to the slim prompt for live turns. The training-mode block
+  // + per-turn session header is the steady-state anchor; the 27k master
+  // prompt ("full") is reserved for evals, coaching, and the UI's "break
+  // character" recovery button — callers pass it explicitly when needed.
   promptVariant = "slim",
+  // Accepted for forward compatibility (the route plumbs it for
+  // recording), but not used for model/prompt selection — every live
+  // turn runs the same Sonnet + slim path.
+  // eslint-disable-next-line no-unused-vars
+  turnNumber = null,
 } = {}) {
   const input = buildInput({ messages, mode, scenario, user, profile, playbook });
-  const config = getSalesTrainerConfig();
-  const effectiveProvider = normalizeProvider(provider || config.provider);
+  const effectiveProvider = normalizeProvider(provider || getSalesTrainerConfig().provider);
 
   if (effectiveProvider === "anthropic") {
     if (!isAnthropicConfigured()) {
@@ -2945,7 +3305,13 @@ async function runTaxResolutionSalesTrainer({
         retryable: false,
       });
     }
-    return callAnthropicMessages({ input, model, maxOutputTokens, timeoutMs, promptVariant });
+    return callAnthropicMessages({
+      input,
+      model,
+      maxOutputTokens,
+      timeoutMs,
+      promptVariant,
+    });
   }
 
   // provider === "openai" (or anything that normalized to openai)
@@ -3000,11 +3366,10 @@ async function runSalesTrainerTurn({
   audio = {},
   sttPrompt = "",
   sttLanguage = null,
-  // "slim" (default) loads the ~2.3k-token live-turn prompt.
-  // "full" loads the ~27.5k-token v2 prompt — pass when the trainee
-  // hits the "break character" recovery button so the model gets the
-  // full simulator rulebook back for one turn.
-  promptVariant = "slim",
+  // Defaults to slim for live turns. Pass "full" explicitly when the
+  // UI's "break character" recovery button is hit — that's the only
+  // path that should load the 27k master prompt during a live call.
+  promptVariant = null,
   // Recording controls — default ON per policy decided 2026-05-13.
   // Caller must pass sessionId (matches startSalesTrainerSession's id)
   // and turnNumber (1-indexed) to enable persistence. If either is
@@ -3130,6 +3495,7 @@ async function runSalesTrainerTurn({
     model,
     maxOutputTokens,
     promptVariant,
+    turnNumber,
   });
 
   // --- 4. TTS (best-effort; UI can retry via /speech if it fails) ---
@@ -3374,6 +3740,7 @@ module.exports = {
   isTaxAdvocateGroupSalesTrainerAccount,
   issueSalesTrainerToken,
   listConfiguredProviders,
+  listPresetProfiles,
   normalizeTtsProfile,
   pickTtsVoiceForProfile,
   publishSalesTrainerUiState,

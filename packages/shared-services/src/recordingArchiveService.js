@@ -33,6 +33,14 @@ const RC_RECORDING_SEARCH_WINDOW_MS =
   Number(process.env.RECORDING_ARCHIVE_RC_SEARCH_WINDOW_MS) || 30 * 60 * 1000;
 const MIN_RECORDING_AGE_MS =
   Number(process.env.MIN_RECORDING_AGE_MS) || 90_000;
+const RINGCX_RECORDING_READY_DELAY_MS = Math.max(
+  Number(process.env.RINGCX_RECORDING_READY_DELAY_MS) || 15 * 60 * 1000,
+  15 * 60 * 1000,
+);
+const RINGCX_RECORDING_RETRY_DELAY_MS = Math.max(
+  Number(process.env.RINGCX_RECORDING_RETRY_DELAY_MS) || 3 * 60 * 1000,
+  60 * 1000,
+);
 const DOWNLOAD_TIMEOUT_MS =
   Number(process.env.RECORDING_ARCHIVE_DOWNLOAD_TIMEOUT_MS) || 60_000;
 const TERMINAL_ARCHIVE_STATUSES = new Set([
@@ -42,6 +50,16 @@ const TERMINAL_ARCHIVE_STATUSES = new Set([
   "abandoned",
 ]);
 const AMBIGUOUS_ADSERV_AGENTS = new Set(["bruce allen"]);
+const DEFAULT_EXCLUDED_AGENT_TOKENS = [
+  "Michael Gray",
+  "Mickey Gray",
+  "mgray",
+  "mgray@taxadvocategroup.com",
+  "Alex Banks",
+  "Alexander Banks",
+  "abanks",
+  "abanks@taxadvocategroup.com",
+];
 
 function getArchiveConfig() {
   return getSharedConfig().recordingArchive || {};
@@ -72,6 +90,63 @@ function sanitizeFileComponent(value, fallback = "unknown") {
 
 function normalizeName(value) {
   return String(value || "").trim().toLowerCase();
+}
+
+function parseTokenList(value) {
+  if (Array.isArray(value)) {
+    return value.map((entry) => String(entry || "").trim()).filter(Boolean);
+  }
+  return String(value || "")
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+}
+
+function getExcludedAgentTokens() {
+  return parseTokenList(
+    process.env.RECORDING_ARCHIVE_EXCLUDED_AGENT_TOKENS ||
+      DEFAULT_EXCLUDED_AGENT_TOKENS,
+  );
+}
+
+function normalizeArchiveExcludeText(value) {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/\s*-\s*(tag|wynn|amity)\b.*$/i, "")
+    .replace(/[^a-z0-9@.]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function findExcludedAgentMatch(values = [], excludeTokens = getExcludedAgentTokens()) {
+  const normalizedTokens = parseTokenList(excludeTokens)
+    .map((token) => normalizeArchiveExcludeText(token))
+    .filter(Boolean);
+  if (normalizedTokens.length === 0) return null;
+
+  for (const value of values) {
+    const normalizedValue = normalizeArchiveExcludeText(value);
+    if (!normalizedValue) continue;
+    const token = normalizedTokens.find((entry) =>
+      normalizedValue === entry || normalizedValue.includes(entry),
+    );
+    if (token) {
+      return {
+        token,
+        value: String(value || ""),
+      };
+    }
+  }
+  return null;
+}
+
+function findExcludedCallLogAgentMatch(callLog = {}, routing = null) {
+  return findExcludedAgentMatch([
+    callLog.agentName,
+    callLog.recordingArchive?.terminalAgentName,
+    routing?.candidate?.agentName,
+  ]);
 }
 
 function normalizeAgentDisplayName(value) {
@@ -179,9 +254,12 @@ function isTerminalArchiveStatus(status) {
   return TERMINAL_ARCHIVE_STATUSES.has(String(status || ""));
 }
 
-function buildRetryError(message) {
+function buildRetryError(message, options = {}) {
   const error = new Error(message);
   error.retryable = true;
+  if (options.nextAttemptAt) {
+    error.nextAttemptAt = new Date(options.nextAttemptAt);
+  }
   return error;
 }
 
@@ -190,9 +268,55 @@ function buildProviderOrder(callLog = {}) {
   // CX-platform calls (placed/answered through the RingCX dialer) have
   // their audio in the RingCX recordings store — neither CallRail nor
   // RingCentral EX will have it. Try ringcx first; fall through to the
-  // others as defensive backups in case the CX-vs-EX stamp was wrong.
-  if (platform === "cx") return ["ringcx", "ringcentral", "callrail"];
+  // others only when RECORDING_ARCHIVE_CX_FALLBACK_PROVIDERS_ENABLED is on.
+  if (platform === "cx") {
+    const allowFallback = String(process.env.RECORDING_ARCHIVE_CX_FALLBACK_PROVIDERS_ENABLED || "")
+      .trim()
+      .toLowerCase();
+    if (["1", "true", "yes", "on"].includes(allowFallback)) {
+      return ["ringcx", "ringcentral", "callrail"];
+    }
+    return ["ringcx"];
+  }
   return ["callrail", "ringcentral"];
+}
+
+function getCallEndReference(callLog = {}) {
+  if (callLog.callEndTime) return new Date(callLog.callEndTime);
+  if (callLog.callStartTime && callLog.durationSec) {
+    return new Date(
+      new Date(callLog.callStartTime).getTime() +
+        Number(callLog.durationSec || 0) * 1000,
+    );
+  }
+  return callLog.callStartTime ? new Date(callLog.callStartTime) : null;
+}
+
+function minRecordingAgeMsForCallLog(callLog = {}) {
+  return String(callLog.platform || "").trim().toLowerCase() === "cx"
+    ? Math.max(MIN_RECORDING_AGE_MS, RINGCX_RECORDING_READY_DELAY_MS)
+    : MIN_RECORDING_AGE_MS;
+}
+
+function retryDelayMsForCallLog(callLog = {}) {
+  return String(callLog.platform || "").trim().toLowerCase() === "cx"
+    ? RINGCX_RECORDING_RETRY_DELAY_MS
+    : 60 * 60 * 1000;
+}
+
+function computeArchiveNextAttemptAt(callLog = {}, config = getArchiveConfig(), now = new Date()) {
+  const normalizedNow = now instanceof Date ? now : new Date(now);
+  const platform = String(callLog.platform || "").trim().toLowerCase();
+  const callEnd = getCallEndReference(callLog);
+
+  if (platform === "cx" && callEnd && !Number.isNaN(callEnd.getTime())) {
+    const readyAt = new Date(callEnd.getTime() + RINGCX_RECORDING_READY_DELAY_MS);
+    return readyAt > normalizedNow ? readyAt : normalizedNow;
+  }
+
+  return new Date(
+    normalizedNow.getTime() + Math.max(Number(config.initialDelayMs) || 0, 0),
+  );
 }
 
 // Lazy singleton for the RingCX client. Reused across many calls
@@ -985,6 +1109,14 @@ async function queueCallRecordingArchiveJob(callLogDoc, {
   if (!callLogDoc?.telephonySessionId) {
     return { queued: false, reason: "missing-session" };
   }
+  const excludedAgent = findExcludedCallLogAgentMatch(callLogDoc);
+  if (excludedAgent) {
+    await writeArchiveState(callLogDoc._id, {
+      "recordingArchive.status": "skipped",
+      "recordingArchive.error": `Excluded internal/test agent: ${excludedAgent.value}`,
+    });
+    return { queued: false, reason: "excluded-agent" };
+  }
   if (!force && !qualifiesForArchive(callLogDoc, config)) {
     return { queued: false, reason: "below-threshold" };
   }
@@ -997,7 +1129,7 @@ async function queueCallRecordingArchiveJob(callLogDoc, {
     "recordingArchive.error": null,
   });
 
-  const nextAttemptAt = new Date(Date.now() + Math.max(Number(config.initialDelayMs) || 0, 0));
+  const nextAttemptAt = computeArchiveNextAttemptAt(callLogDoc, config);
   const result = await emitHourlyJobEvent({
     lane: String(lane || "hourly").toLowerCase() === "nightly" ? "nightly" : "hourly",
     domain: callLogDoc.domain,
@@ -1077,22 +1209,17 @@ async function processCallRecordingArchive({
     };
   }
 
-  const callEndReference =
-    callLog.callEndTime ||
-    (callLog.callStartTime && callLog.durationSec
-      ? new Date(
-          new Date(callLog.callStartTime).getTime() +
-            Number(callLog.durationSec || 0) * 1000,
-        )
-      : callLog.callStartTime);
+  const callEndReference = getCallEndReference(callLog);
   if (callEndReference) {
     const ageMs = Date.now() - new Date(callEndReference).getTime();
-    if (ageMs < MIN_RECORDING_AGE_MS) {
+    const minAgeMs = minRecordingAgeMsForCallLog(callLog);
+    if (ageMs < minAgeMs) {
+      const nextAttemptAt = new Date(new Date(callEndReference).getTime() + minAgeMs);
       await writeArchiveState(callLog._id, {
         "recordingArchive.status": "too_early",
         "recordingArchive.error": `Recording not ready yet (${ageMs}ms old)`,
       });
-      throw buildRetryError("Recording still settling");
+      throw buildRetryError("Recording still settling", { nextAttemptAt });
     }
   }
 
@@ -1147,6 +1274,18 @@ async function processCallRecordingArchive({
       "recordingArchive.agentGroupKey": destination?.key || null,
       "recordingArchive.agentGroupLabel": destination?.label || null,
     };
+    const excludedAgent = findExcludedCallLogAgentMatch(callLog, routing);
+    if (excludedAgent) {
+      await writeArchiveState(callLog._id, {
+        ...baseState,
+        "recordingArchive.status": "skipped",
+        "recordingArchive.error": `Excluded internal/test agent: ${excludedAgent.value}`,
+      });
+      return {
+        status: "skipped",
+        reason: "excluded-agent",
+      };
+    }
 
     if (!artifact) {
       const exhausted = attemptNumber >= Number(config.maxAttempts || 24);
@@ -1174,7 +1313,9 @@ async function processCallRecordingArchive({
         ).catch(() => null);
         return { status: "abandoned", attempts: attemptNumber };
       }
-      throw buildRetryError("Recording not available yet");
+      throw buildRetryError("Recording not available yet", {
+        nextAttemptAt: new Date(Date.now() + retryDelayMsForCallLog(callLog)),
+      });
     }
 
     if (!destination?.folderConfigured) {
@@ -1310,7 +1451,14 @@ async function processCallRecordingArchive({
       fileName,
     };
   } catch (error) {
-    if (error.deadLetter || error.retryable) {
+    if (error.retryable) {
+      await writeArchiveState(callLog._id, {
+        "recordingArchive.status": "retrying",
+        "recordingArchive.error": error.message,
+      }).catch(() => null);
+      throw error;
+    }
+    if (error.deadLetter) {
       throw error;
     }
 

@@ -324,6 +324,9 @@ async function drainHourlyJobQueue({
       // Timeouts get normal retry rules — a hung handler once can still
       // succeed on a later attempt when the downstream recovers.
       const failOptions = forceDeadLetter ? { maxAttempts: 0 } : {};
+      if (!forceDeadLetter && error?.nextAttemptAt) {
+        failOptions.nextAttemptAt = error.nextAttemptAt;
+      }
       await markHourlyJobFailed(job._id, workerName, error, failOptions);
       if (forceDeadLetter) {
         summary.deadLettered += 1;

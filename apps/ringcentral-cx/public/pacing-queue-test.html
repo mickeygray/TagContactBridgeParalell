@@ -91,7 +91,7 @@
     <h2>Slice (non-fresh, max 10)</h2>
     <div class="panel" id="slice-panel">(none)</div>
 
-    <h2>Fresh assignments (timer-bound)</h2>
+    <h2>Assigned queue items</h2>
     <div class="panel" id="fresh-panel">(none)</div>
   </div>
 </div>
@@ -179,7 +179,7 @@ async function refresh() {
   renderAgent(r.agent);
   renderActiveCall(r.activeCall);
   renderSlice(r.sliceItems || []);
-  renderFresh(r.freshAssigned || []);
+  renderFresh(r.assignedQueueItems || r.cxAssigned || r.freshAssigned || []);
 }
 
 function renderAgent(agent) {
@@ -232,16 +232,31 @@ function renderSlice(items) {
 function renderFresh(items) {
   if (!items.length) { $("fresh-panel").innerHTML = "<span class='small'>None</span>"; return; }
   $("fresh-panel").innerHTML = items.map((item) => {
+    const id = item._id || item.queueTicketId || item.id;
+    const queueSource = item.queueSource || "legacy-queue";
+    const phone = item.phoneNumber || item.phone || item.leadBody?.phone || "(no phone)";
+    const bucket = item.ageBucket || item.progressiveStageLabel || item.queueFamily || "assigned";
+    const state = item.state || item.queueState || "assigned";
+    const caseLabel = item.caseId || item.sourceLogicsCaseId || item.leadId || "";
     const expiresIn = item.expiresAt ? Math.max(0, Math.floor((new Date(item.expiresAt) - Date.now()) / 1000)) : "?";
+    const timing =
+      item.expiresAt ? `expires in ${expiresIn}s` :
+      item.releaseAt ? `release ${new Date(item.releaseAt).toLocaleTimeString()}` :
+      "assigned";
+    const canLegacyDial = queueSource === "legacy-queue" && id;
     return `
       <div class="item fresh">
         <div>
-          <span class="badge fresh">${item.ageBucket}</span>
-          <strong class="mono">${item.phoneNumber}</strong>
-          <span class="small">expires in ${expiresIn}s &middot; ${item.state}</span>
+          <span class="badge fresh">${bucket}</span>
+          <strong class="mono">${phone}</strong>
+          <span class="small">${timing} &middot; ${state}</span>
+          ${item.name ? `<div class="small">${item.name}${caseLabel ? ` &middot; case ${caseLabel}` : ""}</div>` : ""}
+          <div class="small">${queueSource}</div>
         </div>
         <div>
-          <button class="warn" onclick="dialItem('${item._id}')">Dial Now</button>
+          ${canLegacyDial
+            ? `<button class="warn" onclick="dialItem('${id}')">Dial Now</button>`
+            : `<span class="small">CX managed</span>`}
         </div>
       </div>
     `;

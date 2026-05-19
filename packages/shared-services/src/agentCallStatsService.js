@@ -278,6 +278,32 @@ async function getOrComputeAgentCallStats({
   return { snapshot, cached: false };
 }
 
+/**
+ * Mark an agent's call-stats snapshot stale without deleting it. Used
+ * by the call-placement path so the next admin board read recomputes
+ * fresh stats instead of serving the 5-min-old cached snapshot.
+ *
+ * Non-destructive on purpose: we only backdate `computedAt` to epoch 0
+ * so `snapshotIsFresh()` returns false. The cached numbers remain on
+ * AgentState as a fallback if the recompute fails for any reason.
+ *
+ * Safe to call with a missing/empty extensionId — it just no-ops.
+ * Errors are swallowed so this never blocks the call-placement flow.
+ */
+async function invalidateAgentCallStatsSnapshot(extensionId) {
+  const id = String(extensionId || "").trim();
+  if (!id) return { ok: true, skipped: "no-extension" };
+  try {
+    await AgentState.updateOne(
+      { extensionId: id },
+      { $set: { "callStatsSnapshot.computedAt": new Date(0) } },
+    );
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, error: error?.message || String(error) };
+  }
+}
+
 module.exports = {
   DEFAULT_TTL_MS,
   DEFAULT_TIMEZONE,
@@ -285,4 +311,5 @@ module.exports = {
   buildWindowCutoffs,
   emptyBucket,
   getOrComputeAgentCallStats,
+  invalidateAgentCallStatsSnapshot,
 };

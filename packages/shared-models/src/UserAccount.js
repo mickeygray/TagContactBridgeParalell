@@ -101,6 +101,7 @@ const userAccountSchema = new mongoose.Schema(
       enabled: { type: Boolean, default: true },
       fresh: {
         eligible: { type: Boolean, default: null },
+        firstTouchEligible: { type: Boolean, default: null },
         targetOpen: { type: Number, default: null },
         hourlyCap: { type: Number, default: null },
         priorityWeight: { type: Number, default: null },

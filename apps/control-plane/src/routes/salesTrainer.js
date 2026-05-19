@@ -23,6 +23,7 @@ const {
   isSalesTrainerAccountAllowed,
   issueSalesTrainerToken,
   listConfiguredProviders,
+  listPresetProfiles,
   getSalesTrainerUiState,
   publishSalesTrainerUiState,
   runSalesTrainerCoachingPanel,
@@ -370,6 +371,14 @@ function createSalesTrainerRouter(auth, config = {}) {
         difficulty: req.body?.difficulty,
         mode: req.body?.mode,
         scenarioArchetype: req.body?.scenarioArchetype,
+        // Optional preset key (e.g. "newly_retired", "trucker_unfiled") —
+        // picks a common-call template that locks the matching demographics.
+        // Omit for a fully randomized roll from the weighted pools.
+        presetKey: req.body?.presetKey,
+        // Optional per-field demographic overrides for fine-grained control.
+        // Shape: { ethnicity, age, sex, education, affluency,
+        // employmentCategory, spouseStatus, ageBucket }.
+        demographicOverrides: req.body?.demographicOverrides,
         includeAudio: req.body?.includeAudio,
         audio: req.body?.audio,
         user: req.salesTrainerUser || req.user,
@@ -378,6 +387,12 @@ function createSalesTrainerRouter(auth, config = {}) {
     } catch (error) {
       return res.status(error.status || 500).json(toErrorResponse(error));
     }
+  });
+
+  // List available preset profiles for the UI's "common calls" picker.
+  // Cheap, sync — no auth-sensitive data, just labels + keys.
+  router.get("/session/presets", requireSalesTrainerAccess, async (_req, res) => {
+    return res.json({ ok: true, presets: listPresetProfiles() });
   });
 
   router.post("/coach", coachLimit, requireSalesTrainerAccess, async (req, res) => {
@@ -538,10 +553,9 @@ function createSalesTrainerRouter(auth, config = {}) {
           messages: Array.isArray(messages) ? messages : [],
           profile,
           playbook,
-          // "slim" by default — uses the live-turn-only system prompt.
-          // UI passes "full" when the user hits a "break character" /
-          // re-anchor button so the model gets the full v2 simulator
-          // rulebook for one turn to re-ground against drift.
+          // Slim by default — every live turn runs Sonnet + slim prompt.
+          // UI may pass "full" explicitly (e.g. a "break character"
+          // recovery button) to force the 27k master prompt for one turn.
           promptVariant: payload.promptVariant === "full" ? "full" : "slim",
           mode: payload.mode || "auto",
           scenario: payload.scenario || "",

@@ -83,8 +83,15 @@ interface CallStatsResponse {
 /**
  * Per-agent call rollups (today / week / month / lifetime) split by
  * direction (inbound/outbound) and platform (cx/ex). Lazy-cached on
- * AgentState with a 5-min staleness window. Pass `{ refresh: true }`
- * via the returned `refetch` to force a re-aggregation.
+ * AgentState with a 5-min staleness window — but the server-side
+ * snapshot now gets invalidated immediately when the agent places a
+ * confirmed call (see invalidateAgentCallStatsSnapshot in the
+ * cxCadenceService call-placed flow). With that invalidation in
+ * place, the client can poll at ~5s without re-triggering 5-min-old
+ * snapshots: the server will recompute on the next read after a call.
+ *
+ * Pass `{ refresh: true }` via the returned `refetch` to force a
+ * recompute even when no call has fired (e.g. manual admin refresh).
  */
 export function useAccountCallStats(id: string | null) {
   return useQuery({
@@ -92,7 +99,13 @@ export function useAccountCallStats(id: string | null) {
     queryFn: () =>
       api.get<CallStatsResponse>(`/api/admin/accounts/${id}/call-stats`),
     enabled: Boolean(id),
-    staleTime: 60_000,
+    // Tightened from 60s → 5s. With the call-end snapshot invalidation
+    // landed, the server returns fresh numbers within a polling cycle
+    // of any actual dial. 5s matches the accounts-list cadence so the
+    // admin board's rows + stats refresh in step.
+    staleTime: 5_000,
+    refetchInterval: 5_000,
+    refetchIntervalInBackground: false,
   });
 }
 
@@ -115,7 +128,7 @@ export function useUnassignedExtensions(company?: string) {
     queryFn: () =>
       api
         .get<ExtensionsResponse>("/api/admin/accounts/unassigned-extensions", {
-          query: { company },
+          query: { company, live: "true" },
         })
         .then((r) => r.extensions),
     staleTime: 15_000,

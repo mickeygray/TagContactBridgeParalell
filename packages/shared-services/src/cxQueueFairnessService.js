@@ -134,19 +134,73 @@ function getGreenBlueParityAfterHourlyCalls() {
   return readNonNegativeIntegerEnv("RC_CX_GREEN_BLUE_PARITY_AFTER_HOURLY_CALLS", 2);
 }
 
+// Aging boost: a lead that has been queued for hours without a single
+// touch today gradually moves up the rank toward fresh-day1 territory.
+// Caps at 1.2 so an SMS hot intent (rank -0.5) still outranks even the
+// most-aged untouched lead, but a 10-hour-old aged lead with zero touches
+// lifts above an idle fresh-day2to10 (rank 1). Boost zeroes out the
+// moment the lead is dialed today — agents won't see a touched lead
+// keep climbing artificially.
+//
+// Knob: RC_CX_AGING_BOOST_PER_HOUR (default 0.15). RC_CX_AGING_BOOST_MAX
+// (default 1.2). Set RC_CX_AGING_BOOST_PER_HOUR=0 to disable.
+function getAgingBoostPerHour() {
+  const raw = process.env.RC_CX_AGING_BOOST_PER_HOUR;
+  if (raw === "" || raw === undefined || raw === null) return 0.15;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : 0.15;
+}
+
+function getAgingBoostMax() {
+  const raw = process.env.RC_CX_AGING_BOOST_MAX;
+  if (raw === "" || raw === undefined || raw === null) return 1.2;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : 1.2;
+}
+
+function computeAgingBoost(item, now) {
+  // Don't boost leads that have already received attention today —
+  // the boost is for COVERAGE, not for re-dial pacing (which the
+  // existing cooldown logic handles).
+  const dailyPlaced = Number(item?.dailyPlacedCalls || 0);
+  if (dailyPlaced > 0) return 0;
+
+  // Pick the most-recent "lead is waiting" timestamp we can find.
+  // Fall back to createdAt; if nothing is set, no boost.
+  const waitAnchor = item?.lastPlacedAt
+    || item?.releaseAt
+    || item?.queueEnteredAt
+    || item?.createdAt
+    || null;
+  if (!waitAnchor) return 0;
+  const anchorMs = new Date(waitAnchor).getTime();
+  if (!Number.isFinite(anchorMs)) return 0;
+
+  const hoursWaiting = Math.max(0, (now.getTime() - anchorMs) / 3_600_000);
+  const perHour = getAgingBoostPerHour();
+  if (perHour <= 0) return 0;
+  return Math.min(getAgingBoostMax(), hoursWaiting * perHour);
+}
+
 function getCxQueueServeRank(item = {}, options = {}) {
   const family = normalizeLeadQueueFamily(item.queueFamily || item.ageBucket || item.currentStage || "");
   const now = options.now || new Date();
 
+  let baseRank;
   if (family === "fresh-day1") {
     if (isImmediateSmsHotIntentQueueItem(item)) return -0.5;
     if (isFreshFirstContactQueueItem(item)) return 0;
     const hourlyCalls = getCxHourlyPlacedCalls(item, now);
-    return hourlyCalls >= getGreenBlueParityAfterHourlyCalls() ? 1 : 0.5;
+    baseRank = hourlyCalls >= getGreenBlueParityAfterHourlyCalls() ? 1 : 0.5;
+  } else if (family === "fresh-day2to10") {
+    baseRank = 1;
+  } else if (family === "aged") {
+    baseRank = 2;
+  } else {
+    baseRank = 99;
   }
-  if (family === "fresh-day2to10") return 1;
-  if (family === "aged") return 2;
-  return 99;
+
+  return baseRank - computeAgingBoost(item, now);
 }
 
 module.exports = {

@@ -6,6 +6,7 @@ const {
   getQueueFamilyPolicy,
   getQueueFamilySortRank,
   getQueueFamilyTargetOpen,
+  hasManualQueuePolicy,
   isQueueFamilyAllowedForAccountPolicy,
   normalizeQueueFamily,
   resolveAccountQueuePolicy,
@@ -268,7 +269,14 @@ function buildEligibility(agentState = null, options = {}) {
   const zeroContactFreshAllowed =
     options.zeroContactFresh === true
     && queueFamily === "fresh-day1"
-    && queuePolicy.fresh?.eligible === true;
+    && queuePolicy.fresh?.firstTouchEligible === true;
+  if (options.zeroContactFresh === true && queueFamily === "fresh-day1" && !zeroContactFreshAllowed) {
+    return {
+      eligible: false,
+      reason: "queue-policy-blocked-first-touch",
+      queuePolicy,
+    };
+  }
   if (
     queueFamily !== "unassigned"
     && !isQueueFamilyAllowedForAccountPolicy(queuePolicy, queueFamily)
@@ -324,7 +332,10 @@ function buildEligibility(agentState = null, options = {}) {
     };
   }
   const activityState = deriveEffectiveActivityState(agentState);
-  if (INELIGIBLE_ACTIVITY_STATES.has(String(activityState || "").trim().toLowerCase())) {
+  if (
+    options.ignoreActivityState !== true
+    && INELIGIBLE_ACTIVITY_STATES.has(String(activityState || "").trim().toLowerCase())
+  ) {
     return {
       eligible: false,
       reason: `activity-${activityState}`,
@@ -416,7 +427,8 @@ function rankAgentsForQueueItem(agentStates = [], item = {}, options = {}) {
   const zeroContactFresh = isZeroContactFreshQueueItem(item);
   const drainBeforeRefill =
     readBooleanEnv("RC_CX_DRAIN_BEFORE_REFILL_ENABLED", true)
-    && !zeroContactFresh;
+    && !zeroContactFresh
+    && options.ignoreDrainBeforeRefill !== true;
   const ignoreMaxOpenAssignments =
     zeroContactFresh
     && readBooleanEnv("RC_CX_ZERO_CONTACT_BYPASS_PACK_CAP_ENABLED", true);
@@ -450,6 +462,8 @@ function rankAgentsForQueueItem(agentStates = [], item = {}, options = {}) {
       maxOpenAssignments: options.maxOpenAssignments,
       queueFamily,
       drainBeforeRefill,
+      ignoreActivityState: options.ignoreActivityState === true,
+      ignoreDrainBeforeRefill: options.ignoreDrainBeforeRefill === true,
       ignoreMaxOpenAssignments,
       zeroContactFresh: zeroContactFresh,
     });
@@ -523,7 +537,16 @@ async function enrichAgentStatesWithQueuePolicies(agentStates = []) {
       const userAccount = extensionId
         ? await userAccountRepository.findUserAccountByExtensionId(extensionId).catch(() => null)
         : null;
-      const queuePolicy = resolveAccountQueuePolicy(userAccount);
+      const explicitAgentPolicy =
+        agentState?.cxQueuePolicy && typeof agentState.cxQueuePolicy === "object"
+          ? agentState.cxQueuePolicy
+          : null;
+      const queuePolicy = resolveAccountQueuePolicy({
+        role: userAccount?.role || agentState?.accountRole || null,
+        audience: userAccount?.audience || agentState?.accountAudience || null,
+        status: userAccount?.status || agentState?.accountStatus || "active",
+        cxQueuePolicy: explicitAgentPolicy || userAccount?.cxQueuePolicy || null,
+      });
       return {
         ...agentState,
         email: agentState.email || userAccount?.email || null,
@@ -540,7 +563,11 @@ async function enrichAgentStatesWithQueuePolicies(agentStates = []) {
           }
           : null,
         cxQueuePolicy: queuePolicy,
-        cxQueuePolicyExplicit: Boolean(userAccount?.cxQueuePolicy?.tier),
+        cxQueuePolicyExplicit: Boolean(
+          agentState?.cxQueuePolicyExplicit
+          || hasManualQueuePolicy(explicitAgentPolicy)
+          || hasManualQueuePolicy(userAccount?.cxQueuePolicy),
+        ),
       };
     }),
   );

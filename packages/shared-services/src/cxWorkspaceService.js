@@ -35,6 +35,9 @@ const {
   runWithImmediateRetries,
 } = require("./hourlyJobEventService");
 const {
+  queueCallRecordingArchiveJob,
+} = require("./recordingArchiveService");
+const {
   isKnownTemplateKey: isKnownEmailTemplateKey,
   renderEmailTemplate,
 } = require("./emailTemplateService");
@@ -91,6 +94,25 @@ function normalizeExternalId(value) {
 
 function plainObject(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : {};
+}
+
+function parseDateOrNull(value) {
+  if (!value) return null;
+  const date = value instanceof Date ? value : new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function resolveQueueItemCallStartTime(queueItem = null) {
+  for (const value of [
+    queueItem?.metadata?.lastDialExecutionAt,
+    queueItem?.metadata?.lastQueueAttemptAt,
+    queueItem?.lastPlacedAt,
+    queueItem?.updatedAt,
+  ]) {
+    const date = parseDateOrNull(value);
+    if (date) return date;
+  }
+  return null;
 }
 
 function resolveRingcxActiveCallRoute(queueItem = null, input = {}, workflowRoute = {}) {
@@ -1104,6 +1126,7 @@ function queueCxCallbackBackgroundCleanup({
         input: {
           ...input,
           callbackAt: input.callbackAt || input.scheduledFor || outcome?.rescheduledFor || null,
+          skipAgentStateClearAfterRelay: Boolean(input.nextDial),
         },
         queueItem,
         caseId,
@@ -1794,6 +1817,102 @@ function countVisibleQueueItemsByFamily(visibleQueueItems = [], queueFamilies = 
   return visibleQueueItems.filter((item) => familySet.has(getQueueItemFamily(item))).length;
 }
 
+function isQueueItemAssignedToAgent(queueItem = {}, agentExtensionId = null) {
+  const wanted = String(agentExtensionId || "").trim();
+  if (!wanted) return true;
+  return String(
+    queueItem?.assignment?.extensionId ||
+      queueItem?.assignedExtensionId ||
+      queueItem?.metadata?.assignedExtensionId ||
+      "",
+  ).trim() === wanted;
+}
+
+function listQueueItemsByFamily(visibleQueueItems = [], queueFamilies = [], agentExtensionId = null) {
+  const familySet = new Set(
+    queueFamilies.map((family) => normalizeCxQueueFamily(family)),
+  );
+  return visibleQueueItems.filter((item) =>
+    familySet.has(getQueueItemFamily(item)) &&
+    isQueueItemAssignedToAgent(item, agentExtensionId));
+}
+
+function getQueueItemAssignmentPackId(queueItem = {}) {
+  return String(
+    queueItem?.metadata?.assignmentPackId ||
+      queueItem?.assignmentPackId ||
+      "",
+  ).trim();
+}
+
+function getQueueItemAssignmentPackSealedAt(queueItem = {}) {
+  return queueItem?.metadata?.assignmentPackSealedAt || null;
+}
+
+function hasSealedAssignmentPackMarker(queueItems = []) {
+  return queueItems.some((item) =>
+    Boolean(getQueueItemAssignmentPackId(item)) &&
+    Boolean(getQueueItemAssignmentPackSealedAt(item)));
+}
+
+function buildAssignmentPack({
+  context = {},
+  agentExtensionId = null,
+  queueFamilies = [],
+  targetCount = 0,
+  source = "cx-workspace-refill",
+} = {}) {
+  const createdAt = new Date();
+  const normalizedFamilies = normalizeLeadQueueFamilyList(queueFamilies);
+  const family = normalizedFamilies.join("+") || "queue";
+  const safeFamily = family.replace(/[^a-z0-9+_-]/gi, "-");
+  return {
+    id: [
+      "cx-pack",
+      normalizeDomain(context.domain || context.account?.company || "NA"),
+      String(agentExtensionId || "agent").trim() || "agent",
+      safeFamily,
+      Math.max(Number(targetCount) || 0, 0),
+      createdAt.getTime(),
+      Math.random().toString(36).slice(2, 8),
+    ].join(":"),
+    family,
+    target: Math.max(Number(targetCount) || 0, 0),
+    createdAt,
+    sealedAt: null,
+    source,
+  };
+}
+
+function buildAssignmentPackUpdate(pack) {
+  if (!pack?.id) return {};
+  return {
+    "metadata.assignmentPackId": pack.id,
+    "metadata.assignmentPackFamily": pack.family || null,
+    "metadata.assignmentPackTarget": pack.target || null,
+    "metadata.assignmentPackCreatedAt": pack.createdAt || new Date(),
+    "metadata.assignmentPackSealedAt": pack.sealedAt || null,
+    "metadata.assignmentPackSource": pack.source || "cx-workspace-refill",
+  };
+}
+
+async function stampQueueItemsWithAssignmentPack(queueItems = [], pack = null) {
+  if (!pack?.id || !Array.isArray(queueItems) || queueItems.length === 0) return { stamped: 0 };
+  let stamped = 0;
+  await Promise.all(
+    queueItems
+      .filter((item) => item?._id)
+      .map(async (item) => {
+        const updated = await cxDialQueueRepository.updateQueueItem(
+          item._id,
+          buildAssignmentPackUpdate(pack),
+        ).catch(() => null);
+        if (updated) stamped += 1;
+      }),
+  );
+  return { stamped };
+}
+
 function getPositiveEnvNumber(name, fallback) {
   return Math.max(Number(process.env[name]) || fallback, 1);
 }
@@ -2150,6 +2269,7 @@ async function refillQueueFamilyForAgent({
   agentExtensionId,
   queueFamilies,
   currentCount,
+  currentItems = [],
   targetCount,
   countEnvName,
   claimMinutes,
@@ -2158,13 +2278,26 @@ async function refillQueueFamilyForAgent({
   requestKeyPrefix,
 }) {
   const deficit = Math.max(targetCount - currentCount, 0);
-  if (readBooleanEnv("RC_CX_DRAIN_BEFORE_REFILL_ENABLED", true) && currentCount > 0) {
+  const drainBeforeRefill = readBooleanEnv("RC_CX_DRAIN_BEFORE_REFILL_ENABLED", true);
+  const hasSealedPack = hasSealedAssignmentPackMarker(currentItems);
+  if (drainBeforeRefill && currentCount > 0 && (hasSealedPack || currentCount >= targetCount)) {
+    if (!hasSealedPack && currentCount >= targetCount) {
+      const pack = buildAssignmentPack({
+        context,
+        agentExtensionId,
+        queueFamilies,
+        targetCount,
+        source: "cx-workspace-existing-full-pack",
+      });
+      pack.sealedAt = new Date();
+      await stampQueueItemsWithAssignmentPack(currentItems, pack);
+    }
     return {
       ok: true,
       assigned: 0,
       materialized: 0,
       skipped: true,
-      reason: "drain-before-refill",
+      reason: hasSealedPack ? "drain-before-refill" : "target-met-pack-sealed",
       currentCount,
       targetCount,
       queueFamilies,
@@ -2183,6 +2316,13 @@ async function refillQueueFamilyForAgent({
     };
   }
 
+  const assignmentPack = buildAssignmentPack({
+    context,
+    agentExtensionId,
+    queueFamilies,
+    targetCount,
+    source: currentCount > 0 ? "cx-workspace-complete-partial-pack" : "cx-workspace-new-pack",
+  });
   const queueDomains = resolveCxQueueDomains(context);
   const materialized = await materializeQueueSupplyForAgent({
     domain: context.domain,
@@ -2209,6 +2349,13 @@ async function refillQueueFamilyForAgent({
       randomize,
       maxOpenAssignments: targetCount,
       maxOpenAssignmentsScope,
+      ignoreActivityState: true,
+      ignoreDrainBeforeRefill: true,
+      assignmentPackId: assignmentPack.id,
+      assignmentPackFamily: assignmentPack.family,
+      assignmentPackTarget: assignmentPack.target,
+      assignmentPackCreatedAt: assignmentPack.createdAt,
+      assignmentPackSource: assignmentPack.source,
       requestKeyPrefix: `${requestKeyPrefix}:${queueDomain}`,
     });
     assignmentResults.push({ domain: queueDomain, ...result });
@@ -2223,11 +2370,25 @@ async function refillQueueFamilyForAgent({
     results: assignmentResults.flatMap((result) => result.results || []),
     domainResults: assignmentResults,
   };
+  const assignedItems = assigned.results
+    .map((entry) => entry?.item)
+    .filter(Boolean);
+  let stampedExisting = 0;
+  if (currentCount + Number(assigned.assigned || 0) >= targetCount) {
+    assignmentPack.sealedAt = new Date();
+    const stamped = await stampQueueItemsWithAssignmentPack(
+      [...currentItems, ...assignedItems],
+      assignmentPack,
+    );
+    stampedExisting = stamped.stamped;
+  }
 
   return {
     ...assigned,
     materialized: Number(materialized?.created || 0),
     materialize: materialized,
+    assignmentPack,
+    stampedExisting,
     queueDomains,
   };
 }
@@ -2235,17 +2396,31 @@ async function refillQueueFamilyForAgent({
 async function refillFreshHotLaneForAgent({
   context,
   currentCount,
+  currentItems = [],
   targetCount,
   claimMinutes,
   requestKeyPrefix,
 }) {
   const deficit = Math.max(targetCount - currentCount, 0);
-  if (readBooleanEnv("RC_CX_DRAIN_BEFORE_REFILL_ENABLED", true) && currentCount > 0) {
+  const drainBeforeRefill = readBooleanEnv("RC_CX_DRAIN_BEFORE_REFILL_ENABLED", true);
+  const hasSealedPack = hasSealedAssignmentPackMarker(currentItems);
+  if (drainBeforeRefill && currentCount > 0 && (hasSealedPack || currentCount >= targetCount)) {
+    if (!hasSealedPack && currentCount >= targetCount) {
+      const pack = buildAssignmentPack({
+        context,
+        agentExtensionId: context?.account?.extensionId || null,
+        queueFamilies: ["fresh-day1"],
+        targetCount,
+        source: "cx-workspace-existing-full-pack",
+      });
+      pack.sealedAt = new Date();
+      await stampQueueItemsWithAssignmentPack(currentItems, pack);
+    }
     return {
       ok: true,
       assigned: 0,
       skipped: true,
-      reason: "drain-before-refill",
+      reason: hasSealedPack ? "drain-before-refill" : "target-met-pack-sealed",
       currentCount,
       targetCount,
       queueFamilies: ["fresh-day1"],
@@ -2264,10 +2439,14 @@ async function refillFreshHotLaneForAgent({
   }
 
   const queueDomains = resolveCxQueueDomains(context);
-  const batchSize = Math.max(
-    deficit,
-    getPositiveEnvNumber("RC_CX_FRESH_HOT_LANE_BATCH_SIZE", targetCount || 5),
-  );
+  const batchSize = deficit;
+  const assignmentPack = buildAssignmentPack({
+    context,
+    agentExtensionId: context?.account?.extensionId || null,
+    queueFamilies: ["fresh-day1"],
+    targetCount,
+    source: currentCount > 0 ? "cx-workspace-complete-partial-pack" : "cx-workspace-new-pack",
+  });
   // Lazy require keeps the hot-lane worker and workspace read path from
   // fighting module load order. Mongo still owns the actual claim state.
   // eslint-disable-next-line global-require
@@ -2279,17 +2458,40 @@ async function refillFreshHotLaneForAgent({
     claimMinutes,
     candidateExtensionIds: [String(context?.account?.extensionId || "").trim()].filter(Boolean),
     maxOpenAssignments: targetCount,
+    ignoreActivityState: true,
+    ignoreDrainBeforeRefill: true,
+    assignmentPackId: assignmentPack.id,
+    assignmentPackFamily: assignmentPack.family,
+    assignmentPackTarget: assignmentPack.target,
+    assignmentPackCreatedAt: assignmentPack.createdAt,
+    assignmentPackSource: assignmentPack.source,
     requestKeyPrefix,
   });
+  const assignedResults = Array.isArray(result?.assignments)
+    ? result.assignments.flatMap((entry) => entry.results || [])
+    : [];
+  const assignedItems = assignedResults
+    .map((entry) => entry?.item)
+    .filter(Boolean);
+  const assignedCount = Number(result?.assigned || 0);
+  let stampedExisting = 0;
+  if (currentCount + assignedCount >= targetCount) {
+    assignmentPack.sealedAt = new Date();
+    const stamped = await stampQueueItemsWithAssignmentPack(
+      [...currentItems, ...assignedItems],
+      assignmentPack,
+    );
+    stampedExisting = stamped.stamped;
+  }
 
   return {
     ok: true,
     requested: batchSize,
-    assigned: Number(result?.assigned || 0),
+    assigned: assignedCount,
     skipped: Number(result?.assignments?.reduce((total, entry) => total + Number(entry.skipped || 0), 0) || 0),
-    results: Array.isArray(result?.assignments)
-      ? result.assignments.flatMap((entry) => entry.results || [])
-      : [],
+    results: assignedResults,
+    assignmentPack,
+    stampedExisting,
     hotLane: result,
     queueDomains,
   };
@@ -2337,16 +2539,21 @@ async function maybeRefillCxQueueForAgent(context, agentExtensionId, visibleQueu
     ? resolveQueueFamilyTargetOpen(context, queuePolicy, "aged", "RC_CX_AGED_OPEN_ASSIGNMENTS")
     : 0;
   const nonFreshTarget = day2To15Target + agedTarget;
-  const freshCurrent = countVisibleQueueItemsByFamily(visibleQueueItems, freshFamilies);
-  const nonFreshCurrent = countVisibleQueueItemsByFamily(visibleQueueItems, nonFreshFamilies);
-  const day2To15Current = countVisibleQueueItemsByFamily(visibleQueueItems, day2To15Families);
-  const agedCurrent = countVisibleQueueItemsByFamily(visibleQueueItems, agedFamilies);
+  const freshCurrentItems = listQueueItemsByFamily(visibleQueueItems, freshFamilies, agentExtensionId);
+  const nonFreshCurrentItems = listQueueItemsByFamily(visibleQueueItems, nonFreshFamilies, agentExtensionId);
+  const day2To15CurrentItems = listQueueItemsByFamily(visibleQueueItems, day2To15Families, agentExtensionId);
+  const agedCurrentItems = listQueueItemsByFamily(visibleQueueItems, agedFamilies, agentExtensionId);
+  const freshCurrent = freshCurrentItems.length;
+  const nonFreshCurrent = nonFreshCurrentItems.length;
+  const day2To15Current = day2To15CurrentItems.length;
+  const agedCurrent = agedCurrentItems.length;
   const timestamp = Date.now();
   const batches = [];
 
   batches.push(await refillFreshHotLaneForAgent({
     context,
     currentCount: freshCurrent,
+    currentItems: freshCurrentItems,
     targetCount: freshTarget,
     claimMinutes: Number(process.env.RC_CX_FRESH_CLAIM_MINUTES) || 15,
     requestKeyPrefix: `cx-fresh-queue-refill:${context.domain}:${agentExtensionId}:${timestamp}`,
@@ -2357,6 +2564,7 @@ async function maybeRefillCxQueueForAgent(context, agentExtensionId, visibleQueu
     agentExtensionId,
     queueFamilies: day2To15Families,
     currentCount: day2To15Current,
+    currentItems: day2To15CurrentItems,
     targetCount: day2To15Target,
     countEnvName: "RC_CX_DAY2TO15_REFILL_COUNT",
     claimMinutes: Number(process.env.RC_CX_NONFRESH_CLAIM_MINUTES) || 30,
@@ -2370,6 +2578,7 @@ async function maybeRefillCxQueueForAgent(context, agentExtensionId, visibleQueu
     agentExtensionId,
     queueFamilies: agedFamilies,
     currentCount: agedCurrent,
+    currentItems: agedCurrentItems,
     targetCount: agedTarget,
     countEnvName: "RC_CX_AGED_REFILL_COUNT",
     claimMinutes: Number(process.env.RC_CX_AGED_CLAIM_MINUTES) || Number(process.env.RC_CX_NONFRESH_CLAIM_MINUTES) || 30,
@@ -2996,6 +3205,74 @@ async function buildCxCallQueue(domain, user) {
   };
 }
 
+/**
+ * Cheap, always-fresh per-agent "today's activity" rollup.
+ *
+ * Aggregates CxDialQueue items touched today (Pacific-time date key)
+ * and groups by the extensionIds in `metadata.dailyAgentTouchedExtensionIds`.
+ * Returns one row per agent with a count of distinct leads touched today
+ * and the last placement time. Domain filter is optional — pass nothing
+ * to roll up across both TAG and WYNN.
+ *
+ * Why this exists alongside getOrComputeAgentCallStats:
+ *   - getOrComputeAgentCallStats reads CallLog with a 5-min snapshot cache;
+ *     it's authoritative for the today/week/month/lifetime breakdown but
+ *     can lag behind real time (the call-placed flow now invalidates the
+ *     snapshot, but recompute still costs a CallLog aggregation).
+ *   - This rollup reads queue metadata directly with no cache — single
+ *     aggregation, intended for a "who's dialing right now" dashboard
+ *     that admins want fresh on every poll.
+ *
+ * Non-destructive: read-only aggregation. No writes.
+ */
+async function listCxPlacedCallsToday({ domain = null } = {}) {
+  const todayKey = getPacificDateKey(new Date());
+  const match = { "metadata.dailyAgentTouchDateKey": todayKey };
+  if (domain) {
+    const normalizedDomain = String(domain || "").trim().toUpperCase();
+    if (normalizedDomain) match.domain = normalizedDomain;
+  }
+  const rows = await CxDialQueue.aggregate([
+    { $match: match },
+    {
+      $project: {
+        domain: 1,
+        lastPlacedAt: 1,
+        dailyPlacedCalls: { $ifNull: ["$dailyPlacedCalls", 0] },
+        touchedExtensionIds: {
+          $ifNull: ["$metadata.dailyAgentTouchedExtensionIds", []],
+        },
+      },
+    },
+    { $unwind: "$touchedExtensionIds" },
+    {
+      $group: {
+        _id: "$touchedExtensionIds",
+        leadsTouchedToday: { $sum: 1 },
+        placedCallsToday: { $sum: "$dailyPlacedCalls" },
+        lastPlacedAt: { $max: "$lastPlacedAt" },
+        domains: { $addToSet: "$domain" },
+      },
+    },
+    {
+      $project: {
+        _id: 0,
+        extensionId: "$_id",
+        leadsTouchedToday: 1,
+        placedCallsToday: 1,
+        lastPlacedAt: 1,
+        domains: 1,
+      },
+    },
+    { $sort: { leadsTouchedToday: -1, extensionId: 1 } },
+  ]);
+  return {
+    dateKey: todayKey,
+    domain: match.domain || null,
+    items: rows,
+  };
+}
+
 async function listCxTasks(domain, user) {
   const context = await resolveCxUserContext(domain, user);
   const [tasks, reminders] = await Promise.all([
@@ -3611,6 +3888,39 @@ async function requestCxDisposition(domain, user, input = {}) {
       outcome,
       requested,
     });
+    const requestedNextDial = input.nextDial && typeof input.nextDial === "object"
+      ? input.nextDial
+      : null;
+    let nextDial = null;
+    if (requestedNextDial?.phone) {
+      const nextDialDomain = normalizeDomain(
+        requestedNextDial.domain ||
+          requestedNextDial.queueDomain ||
+          context.domain,
+      ) || context.domain;
+      const { domain: _ignoredDomain, queueDomain: _ignoredQueueDomain, ...nextDialInput } = requestedNextDial;
+      try {
+        nextDial = await requestCxDial(nextDialDomain, user, {
+          ...nextDialInput,
+          assignedExtensionId:
+            nextDialInput.assignedExtensionId ||
+            context.account?.extensionId ||
+            user?.extensionId ||
+            input.assignedExtensionId ||
+            null,
+          requestedBySurface: "cx-next-call-handoff",
+        });
+      } catch (error) {
+        nextDial = {
+          ok: false,
+          accepted: false,
+          domain: nextDialDomain,
+          status: error.status || 500,
+          reason: error.message || "Next CX dial handoff failed",
+          details: error.details || null,
+        };
+      }
+    }
     return {
       ...requested,
       completed: true,
@@ -3623,6 +3933,7 @@ async function requestCxDisposition(domain, user, input = {}) {
       queueTicketId: outcome?.queueTicketId || outcome?.queueItemId || input.queueItemId || input.queueTicketId || null,
       queueEjection: outcome?.queueEjection || null,
       response: outcome,
+      nextDial,
       hangup: {
         ok: true,
         acceptedLocally: true,
@@ -4293,6 +4604,12 @@ function buildCxDispatchIntent({
     intakeRoute,
     notes: String(input.notes || "").trim() || null,
     priority: input.priority || null,
+    ringcxDialPriority: String(
+      input.ringcxDialPriority ||
+        input.leadLoaderDialPriority ||
+        input.dialPriority ||
+        "",
+    ).trim().toUpperCase() || null,
     requestedBy: "cx-workspace",
     requestedBySurface: String(input.requestedBySurface || "cx-queue-card").trim(),
     requestedByUserEmail: actorEmail,
@@ -4790,7 +5107,7 @@ async function hangupCxCallAfterDisposition({
       "metadata.lastDispositionHangupIntentRelay": relay,
     }).catch(() => null);
   }
-  if (relayAccepted && assignedExtensionId) {
+  if (relayAccepted && assignedExtensionId && input.skipAgentStateClearAfterRelay !== true) {
     await clearAgentCxCallState(assignedExtensionId, "cx-disposition-complete", { uii });
   }
 
@@ -4825,14 +5142,23 @@ async function hangupCxCallAfterDisposition({
   // create a stub keyed by telephonySessionId; the next attribution
   // sweep / hygiene pass will enrich it.
   if (uii) {
-    await callLogRepository.upsertCallLog({
+    const endedAt = new Date();
+    const startedAt = resolveQueueItemCallStartTime(queueItem);
+    const durationSec = startedAt
+      ? Math.max(0, Math.round((endedAt.getTime() - startedAt.getTime()) / 1000))
+      : null;
+    const callLogDoc = await callLogRepository.upsertCallLog({
       domain: context.domain,
       telephonySessionId: uii,
       direction: "outbound",
       caseId: caseId != null ? Number(caseId) : null,
       phone: phone || null,
       extensionId: assignedExtensionId,
+      agentName: queueItem?.assignment?.agentName || context.account?.name || user?.name || null,
       executionOwner: "ringcentral-cx",
+      callEndTime: endedAt,
+      ...(startedAt ? { callStartTime: startedAt } : {}),
+      ...(durationSec != null ? { durationSec } : {}),
       // CX dispositions are the authoritative "this was a CX call" signal.
       // Use $set (the default in upsertCallLog) so this wins over any
       // earlier EX-stamp from the hourly RC native sweep.
@@ -4857,7 +5183,16 @@ async function hangupCxCallAfterDisposition({
         "[cx-call-defensive-write] upsertCallLog failed",
         { caseId, uii, error: error.message },
       );
+      return null;
     });
+    if (callLogDoc) {
+      await queueCallRecordingArchiveJob(callLogDoc, { lane: "hourly" }).catch((error) => {
+        console.warn(
+          "[cx-call-recording-archive] queue failed",
+          { caseId, uii, error: error.message },
+        );
+      });
+    }
   }
 
   return {
@@ -4964,6 +5299,11 @@ async function requestCxDial(domain, user, input = {}) {
       dialerExtensionId: contextExtensionId,
       dialerEmail: context.account?.email || user?.email || null,
       priority: input.priority || null,
+      ringcxDialPriority:
+        input.ringcxDialPriority ||
+        input.leadLoaderDialPriority ||
+        input.dialPriority ||
+        null,
       notes: input.notes || null,
       callerIdMode: "ex-number",
       executionOwner: "ringcentral-cx",
@@ -6898,6 +7238,7 @@ async function executeCxLogicsNotes(domain, user, input = {}) {
 module.exports = {
   buildCxCallQueue,
   buildCxWorkspace,
+  listCxPlacedCallsToday,
   executeCxLogicsCreateCase,
   executeCxSaveCaseProfileFromLogics,
   executeCxLogicsFindMatch,

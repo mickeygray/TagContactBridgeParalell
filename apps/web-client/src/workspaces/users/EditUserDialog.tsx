@@ -44,6 +44,7 @@ export function EditUserDialog({ account, open, onOpenChange }: EditUserDialogPr
             account.extensionId
               ? {
                   extensionId: account.extensionId,
+                  extensionNumber: account.extensionNumber ?? null,
                   name: account.name,
                 }
               : null
