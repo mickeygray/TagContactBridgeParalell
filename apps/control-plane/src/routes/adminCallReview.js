@@ -79,6 +79,8 @@ function pacificDateKey(date = new Date()) {
 function projectCallRow(callLog = {}) {
   const archive = callLog.recordingArchive || {};
   const driveFileId = String(archive.driveFileId || "").trim();
+  const score = callLog.callScore || {};
+  const transcription = callLog.transcription || {};
   return {
     id: String(callLog._id || callLog.id || callLog.telephonySessionId || ""),
     telephonySessionId: callLog.telephonySessionId || null,
@@ -98,6 +100,29 @@ function projectCallRow(callLog = {}) {
       : null,
     agentName: callLog.agentName || null,
     extensionId: callLog.extensionId ? String(callLog.extensionId) : null,
+    // Vendor / campaign attribution — drives the source chip in the
+    // CallRow and feeds the nightly vendor families rollup. Stamped
+    // by callLogSourceBackfillService or at call-placed time
+    // (cxCadenceService) for CX rows.
+    sourceName: callLog.sourceName || null,
+    sourceChannel: callLog.sourceChannel || null,
+    routeCampaignKey: callLog.routeCampaignKey || null,
+    routeCampaignName: callLog.routeCampaignName || null,
+    // Claude-scored lead quality. UI badges by verdict
+    // (hot / warm / cold / dead / fake). Null until transcription +
+    // scoring completes — see transcriptionScoringService.
+    score: {
+      overall: Number.isFinite(Number(score.overall))
+        ? Number(score.overall)
+        : null,
+      verdict: score.lead_verdict || null,
+      summary: score.summary || null,
+      scoredAt: score.scoredAt || null,
+    },
+    transcription: {
+      status: transcription.status || null,
+      hasText: Boolean(String(transcription.text || "").trim()),
+    },
     recording: {
       driveFileId: driveFileId || null,
       // Auth-protected playback — the existing /api/read/cx route reuses
@@ -135,6 +160,21 @@ function sortRows(rows, sort) {
     return [...rows].sort(
       (a, b) => (Number(b.durationSec) || 0) - (Number(a.durationSec) || 0),
     );
+  }
+  if (normalized === "score") {
+    // Highest-scored calls first. Unscored rows (overall === null)
+    // sink to the bottom; ties broken by duration desc so a 12-min
+    // unscored call still beats a 30-second unscored call.
+    return [...rows].sort((a, b) => {
+      const ascore = Number(a.score?.overall);
+      const bscore = Number(b.score?.overall);
+      const aHas = Number.isFinite(ascore);
+      const bHas = Number.isFinite(bscore);
+      if (aHas && bHas && ascore !== bscore) return bscore - ascore;
+      if (aHas && !bHas) return -1;
+      if (!aHas && bHas) return 1;
+      return (Number(b.durationSec) || 0) - (Number(a.durationSec) || 0);
+    });
   }
   // Default: most-recent first.
   return [...rows].sort((a, b) => {

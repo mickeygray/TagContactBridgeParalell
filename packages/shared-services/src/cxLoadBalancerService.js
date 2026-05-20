@@ -436,6 +436,8 @@ function deriveQueueFamily(item = {}) {
 function readLastTouchedExtensionId(item = {}) {
   return String(
     item?.metadata?.lastTouchedExtensionId ||
+      item?.metadata?.lastCxDialedByExtensionId ||
+      item?.payloadSnapshot?.lastCxDialedByExtensionId ||
       item?.metadata?.lastDialExecutionDialerExtensionId ||
       item?.metadata?.lastDialIntentAssignedExtensionId ||
       item?.metadata?.lastReleasedExtensionId ||

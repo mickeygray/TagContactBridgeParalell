@@ -12,36 +12,41 @@ const {
   getPacificFreshExpiry,
 } = require("../../packages/shared-services/src/cxQueuePolicyService");
 
-test("new green window starts at 4pm PT but expires at 6pm PT the next day", () => {
-  const createdAfterFour = new Date("2026-05-11T23:10:00.000Z"); // 4:10pm PDT
+test("new green window starts at 3:30pm PT and stays green through day two", () => {
+  const createdAfterRollover = new Date("2026-05-11T22:40:00.000Z"); // 3:40pm PDT
 
   assert.equal(
-    deriveQueueFamilyFromLeadCreatedAt(createdAfterFour, new Date("2026-05-12T22:59:00.000Z")),
+    deriveQueueFamilyFromLeadCreatedAt(createdAfterRollover, new Date("2026-05-12T22:29:00.000Z")),
     "fresh-day1",
   );
   assert.equal(
-    deriveQueueFamilyFromLeadCreatedAt(createdAfterFour, new Date("2026-05-12T23:01:00.000Z")),
+    deriveQueueFamilyFromLeadCreatedAt(createdAfterRollover, new Date("2026-05-12T22:31:00.000Z")),
     "fresh-day1",
   );
-  assert.equal(getPacificFreshExpiry(createdAfterFour).toISOString(), "2026-05-13T01:00:00.000Z");
+  assert.equal(getPacificFreshExpiry(createdAfterRollover).toISOString(), "2026-05-12T22:30:00.000Z");
   assert.equal(
-    deriveQueueFamilyFromLeadCreatedAt(createdAfterFour, new Date("2026-05-13T01:01:00.000Z")),
+    deriveQueueFamilyFromLeadCreatedAt(createdAfterRollover, new Date("2026-05-13T22:31:00.000Z")),
     "fresh-day2to10",
   );
 });
 
-test("old green does not age until 6pm PT", () => {
-  const createdBeforeFour = new Date("2026-05-11T22:30:00.000Z"); // 3:30pm PDT
-  const afterFourSameCalendarDay = new Date("2026-05-11T23:45:00.000Z"); // 4:45pm PDT
-  const afterGraceSameCalendarDay = new Date("2026-05-12T01:01:00.000Z"); // 6:01pm PDT
+test("pre-rollover green stays green through its second business day", () => {
+  const createdBeforeRollover = new Date("2026-05-11T22:20:00.000Z"); // 3:20pm PDT
+  const beforeRolloverSameCalendarDay = new Date("2026-05-11T22:29:00.000Z"); // 3:29pm PDT
+  const afterRolloverSameCalendarDay = new Date("2026-05-11T22:31:00.000Z"); // 3:31pm PDT
+  const afterSecondRollover = new Date("2026-05-12T22:31:00.000Z"); // 3:31pm PDT next day
 
-  assert.equal(getPacificBusinessDayAge(createdBeforeFour, afterFourSameCalendarDay), 0);
+  assert.equal(getPacificBusinessDayAge(createdBeforeRollover, beforeRolloverSameCalendarDay), 0);
   assert.equal(
-    deriveQueueFamilyFromLeadCreatedAt(createdBeforeFour, afterFourSameCalendarDay),
+    deriveQueueFamilyFromLeadCreatedAt(createdBeforeRollover, beforeRolloverSameCalendarDay),
     "fresh-day1",
   );
   assert.equal(
-    deriveQueueFamilyFromLeadCreatedAt(createdBeforeFour, afterGraceSameCalendarDay),
+    deriveQueueFamilyFromLeadCreatedAt(createdBeforeRollover, afterRolloverSameCalendarDay),
+    "fresh-day1",
+  );
+  assert.equal(
+    deriveQueueFamilyFromLeadCreatedAt(createdBeforeRollover, afterSecondRollover),
     "fresh-day2to10",
   );
 });

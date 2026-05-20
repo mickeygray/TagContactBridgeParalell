@@ -106,6 +106,12 @@ const masterProspectIndexSchema = new mongoose.Schema(
       lastDialAttempt: { type: Date, default: null },
       attemptCount: { type: Number, default: 0 },
       lastAttemptResult: { type: String, default: null },
+      lastDialedByExtensionId: { type: String, default: null },
+      lastDialedByAgentName: { type: String, default: null },
+      dailyDateKey: { type: String, default: null },
+      dailyAttempts: { type: Number, default: 0 },
+      monthlyMonthKey: { type: String, default: null },
+      monthlyAttempts: { type: Number, default: 0 },
     },
     // Cached DNC lookup result. Populated by the monthly filler build —
     // both clean and rejected rows persist this so we don't re-pay

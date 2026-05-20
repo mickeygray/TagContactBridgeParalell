@@ -42,7 +42,11 @@ const {
 } = require("./dncRecheckService");
 const {
   runFillerPoolRefresh,
+  runDailyAgedRefresh,
+  runMonthlyGraduationSweep,
   isAtMonthlyRefreshBoundary,
+  isAtDailyAgedRefreshBoundary,
+  isAgedRollingRefreshEnabled,
   hasFreshPoolForTag,
   defaultMonthTag,
 } = require("./fillerPoolRefreshService");
@@ -754,6 +758,100 @@ async function runMonthlyFillerPoolRefreshIfDue({ logger, now = new Date() } = {
   return result;
 }
 
+// ── Rolling aged-pool refresh (replaces monthly burst) ───────────────
+//
+// Daily 06:00 PT — runDailyAgedRefresh sweeps LeadCadence rows whose
+// dncCheckpoints.nextAt has passed and runs them through the 30/60/90
+// day re-scrub ladder. Day-1 of each month at 06:00 PT also fires the
+// graduation sweep (8+ qualifying CX connects in trailing 4 months →
+// drop from red). Both report by email via sendAgedRefreshReportEmail.
+//
+// Gated behind AGED_ROLLING_REFRESH_ENABLED so the legacy monthly burst
+// can keep running until cutover is verified.
+
+function isFirstOfMonthPT(now = new Date()) {
+  const fmt = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/Los_Angeles",
+    day: "2-digit",
+  });
+  const day = fmt.formatToParts(now).find((p) => p.type === "day")?.value;
+  return day === "01";
+}
+
+async function runAgedRollingRefreshIfDue({ logger, now = new Date() } = {}) {
+  if (!isAgedRollingRefreshEnabled()) {
+    return { skipped: true, reason: "disabled" };
+  }
+  if (!isAtDailyAgedRefreshBoundary(now)) {
+    return { skipped: true, reason: "not-at-daily-boundary" };
+  }
+
+  // Day-1 also fires graduation. Graduation runs FIRST so freed pool
+  // slots are available before promotions land.
+  let monthlySummary = null;
+  if (isFirstOfMonthPT(now)) {
+    try {
+      logger?.info?.("aged-rolling-refresh.graduation.starting");
+      monthlySummary = await runMonthlyGraduationSweep({ now, logger });
+      logger?.info?.("aged-rolling-refresh.graduation.completed", {
+        graduated: monthlySummary?.graduated,
+      });
+    } catch (error) {
+      logger?.warn?.("aged-rolling-refresh.graduation.failed", {
+        error: error.message,
+      });
+    }
+  }
+
+  let dailySummary = null;
+  try {
+    logger?.info?.("aged-rolling-refresh.daily.starting");
+    dailySummary = await runDailyAgedRefresh({ now, logger });
+    logger?.info?.("aged-rolling-refresh.daily.completed", {
+      checked: dailySummary?.checked,
+      promoted: dailySummary?.promoted,
+      evicted: (dailySummary?.evicted || 0) + (dailySummary?.droppedAtIntake || 0),
+    });
+  } catch (error) {
+    logger?.warn?.("aged-rolling-refresh.daily.failed", {
+      error: error.message,
+    });
+    return { ok: false, error: error.message };
+  }
+
+  // Email report. Skip if nothing was checked AND no graduation
+  // happened — keeps duplicate-tick noise out of inboxes.
+  const skipEmail =
+    (!dailySummary || dailySummary.checked === 0) &&
+    (!monthlySummary || monthlySummary.graduated === 0);
+  let emailResult = null;
+  if (!skipEmail) {
+    try {
+      // Lazy require to avoid the hourlySweeper ↔ nightlyClose require
+      // cycle (nightlyClose imports runHourlySweep from this module).
+      const { sendAgedRefreshReportEmail } = require("./nightlyCloseService");
+      emailResult = await sendAgedRefreshReportEmail({
+        dailySummary,
+        monthlySummary,
+      });
+    } catch (error) {
+      logger?.warn?.("aged-rolling-refresh.email.failed", {
+        error: error.message,
+      });
+      emailResult = { ok: false, error: error.message };
+    }
+  } else {
+    emailResult = { skipped: true, reason: "no-activity" };
+  }
+
+  return {
+    ok: true,
+    daily: dailySummary,
+    monthly: monthlySummary,
+    email: emailResult,
+  };
+}
+
 function isDncRecheckEnabled() {
   return String(process.env.DNC_RECHECK_SWEEP_ENABLED || "false").trim().toLowerCase() === "true";
 }
@@ -911,7 +1009,22 @@ async function runHourlySweep({
       // the prior month's pool tag, GCs MPI rows whose case is no
       // longer status=2. Idempotent across multiple ticks in the 5am
       // window via `hasFreshPoolForTag`.
+      //
+      // Will be retired after AGED_ROLLING_REFRESH_ENABLED is on for
+      // both tenants and we've verified the rolling sweep maintains the
+      // pool steady-state. Until then both run — the daily sweep adds
+      // 30-day-old leads incrementally while the monthly burst rebuilds
+      // from Logics.
       fillerPoolRefresh: await runMonthlyFillerPoolRefreshIfDue({ logger }).catch((error) => ({
+        error: error.message,
+      })),
+      // Rolling aged-pool refresh — fires daily at 06:00 PT (and the
+      // graduation sweep additionally on day-1). Gated behind the
+      // AGED_ROLLING_REFRESH_ENABLED env flag. Returns
+      // { skipped: true, reason: ... } outside the 06:00 window or when
+      // the flag is off. Emails the agedPool recipient list with the
+      // checked / promoted / retired summary + per-domain breakdown.
+      agedRollingRefresh: await runAgedRollingRefreshIfDue({ logger }).catch((error) => ({
         error: error.message,
       })),
       resolutionEmails: await sendResolutionEmails({ logger }),

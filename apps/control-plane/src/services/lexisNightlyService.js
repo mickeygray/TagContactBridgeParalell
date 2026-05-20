@@ -21,20 +21,95 @@ function normalizeActiveWeekdays(values = null) {
   return normalized.length > 0 ? normalized : [...DEFAULT_WEEKDAYS];
 }
 
+function getZonedDateParts(date, timezone) {
+  const formatter = new Intl.DateTimeFormat("en-US", {
+    timeZone: timezone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    weekday: "short",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hourCycle: "h23",
+  });
+  const parts = Object.fromEntries(
+    formatter.formatToParts(date).map((part) => [part.type, part.value]),
+  );
+  const weekdayMap = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
+  return {
+    year: Number(parts.year),
+    month: Number(parts.month),
+    day: Number(parts.day),
+    weekday: weekdayMap[parts.weekday] ?? date.getUTCDay(),
+    hour: Number(parts.hour),
+    minute: Number(parts.minute),
+    second: Number(parts.second),
+  };
+}
+
+function addDaysToLocalDate(parts, days) {
+  const date = new Date(Date.UTC(parts.year, parts.month - 1, parts.day + days));
+  return {
+    year: date.getUTCFullYear(),
+    month: date.getUTCMonth() + 1,
+    day: date.getUTCDate(),
+  };
+}
+
+function getTimeZoneOffsetMs(date, timezone) {
+  const parts = getZonedDateParts(date, timezone);
+  const asUtc = Date.UTC(
+    parts.year,
+    parts.month - 1,
+    parts.day,
+    parts.hour,
+    parts.minute,
+    parts.second,
+  );
+  return asUtc - date.getTime();
+}
+
+function zonedWallClockToUtc(parts, timezone) {
+  const utcGuess = new Date(Date.UTC(
+    parts.year,
+    parts.month - 1,
+    parts.day,
+    parts.hour,
+    parts.minute,
+    0,
+    0,
+  ));
+  const firstOffset = getTimeZoneOffsetMs(utcGuess, timezone);
+  let result = new Date(utcGuess.getTime() - firstOffset);
+  const secondOffset = getTimeZoneOffsetMs(result, timezone);
+  if (secondOffset !== firstOffset) {
+    result = new Date(utcGuess.getTime() - secondOffset);
+  }
+  return result;
+}
+
 function computeNextRunAt(hour, minute, now = new Date(), options = {}) {
+  const timezone = options.timezone || options.timeZone || "America/Los_Angeles";
   const activeWeekdays = new Set(normalizeActiveWeekdays(options.activeWeekdays));
-  const next = new Date(now);
-  next.setSeconds(0, 0);
-  next.setHours(hour, minute, 0, 0);
+  const nowParts = getZonedDateParts(now, timezone);
+  let dateParts = {
+    year: nowParts.year,
+    month: nowParts.month,
+    day: nowParts.day,
+  };
+  let next = zonedWallClockToUtc({ ...dateParts, hour, minute }, timezone);
   if (next.getTime() <= now.getTime()) {
-    next.setDate(next.getDate() + 1);
+    dateParts = addDaysToLocalDate(dateParts, 1);
+    next = zonedWallClockToUtc({ ...dateParts, hour, minute }, timezone);
   }
   for (let attempts = 0; attempts < 8; attempts += 1) {
-    if (activeWeekdays.has(next.getDay())) {
+    const nextParts = getZonedDateParts(next, timezone);
+    if (activeWeekdays.has(nextParts.weekday)) {
       return next;
     }
-    next.setDate(next.getDate() + 1);
-    next.setHours(hour, minute, 0, 0);
+    dateParts = addDaysToLocalDate(dateParts, 1);
+    next = zonedWallClockToUtc({ ...dateParts, hour, minute }, timezone);
   }
   return next;
 }

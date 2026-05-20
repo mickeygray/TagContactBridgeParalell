@@ -116,6 +116,7 @@ const userAccountSchema = new mongoose.Schema(
       },
       aged: {
         targetOpen: { type: Number, default: null },
+        fillRemainder: { type: Boolean, default: null },
       },
       updatedAt: { type: Date, default: null },
       updatedBy: { type: String, default: null },
@@ -146,6 +147,14 @@ const userAccountSchema = new mongoose.Schema(
       lastTokenIssuedAt: { type: Date, default: null },
       lastRefreshAt: { type: Date, default: null },
       lastRefreshError: { type: String, default: null },
+      // Anti-loop stamp for the off-hook scope auto-heal: set when an
+      // OAuth callback completes WITHOUT CXRouting in the granted
+      // scope set. While this stamp is recent (within
+      // OFFHOOK_SCOPE_REAUTH_BACKOFF_DAYS), deriveOAuthValidity stops
+      // gating the workspace on the missing scope — the agent's RC
+      // role doesn't allow CXRouting and re-prompting won't help.
+      // Cleared on any successful consent that DOES include CXRouting.
+      scopeReauthAttemptedAt: { type: Date, default: null },
     },
     cxSession: {
       // Encrypted current RingCX bearer (5-min lifetime)

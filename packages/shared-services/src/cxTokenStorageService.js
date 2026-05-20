@@ -133,7 +133,20 @@ async function storeRcRefreshToken(userId, refreshToken, {
   if (refreshTokenExpiresAt !== undefined) {
     update["cxAuth.refreshTokenExpiresAt"] = refreshTokenExpiresAt || null;
   }
-  if (Array.isArray(scopes)) update["cxAuth.scopes"] = scopes;
+  if (Array.isArray(scopes)) {
+    update["cxAuth.scopes"] = scopes;
+    // Off-hook scope auto-heal back-off: when this write is the result
+    // of a fresh consent (callback) or an explicit scope-returning
+    // refresh, mirror that evidence into scopeReauthAttemptedAt:
+    //   - CXRouting present → clear the stamp; the user has the scope
+    //     and any prior back-off no longer applies.
+    //   - CXRouting absent → set the stamp to now; deriveOAuthValidity
+    //     will stop nagging this user for the back-off window because
+    //     RC's response indicates their role doesn't permit it.
+    update["cxAuth.scopeReauthAttemptedAt"] = scopesIncludeOffHook(scopes)
+      ? null
+      : new Date();
+  }
   return userAccountRepository.updateUserAccount(userId, update);
 }
 
@@ -224,6 +237,27 @@ async function revoke(userId) {
 //
 // Note: bearer expiry is NOT part of this — bearers refresh silently
 // from the refresh token. Only refresh-token failure forces re-auth.
+// Required for RingCX off-hook capability. When this is missing from
+// cxAuth.scopes, the agent can authenticate but can't dial. The auto-
+// heal at deriveOAuthValidity flips them to "needs-reconnect" so the
+// SPA's existing reconnect banner picks them up — and the OAuth
+// authorize URL's default scope set re-requests it on the round trip.
+const OFFHOOK_SCOPE = "CXRouting";
+const OFFHOOK_SCOPE_REAUTH_BACKOFF_DAYS = 7;
+
+function isOffHookScopeAutoHealEnabled() {
+  const raw = String(process.env.CX_REQUIRE_OFFHOOK_SCOPE || "true")
+    .trim()
+    .toLowerCase();
+  return raw !== "false" && raw !== "0" && raw !== "off";
+}
+
+function scopesIncludeOffHook(scopes) {
+  if (!Array.isArray(scopes)) return false;
+  const target = OFFHOOK_SCOPE.toLowerCase();
+  return scopes.some((s) => String(s || "").toLowerCase() === target);
+}
+
 function deriveOAuthValidity(authSubdoc, sessionSubdoc, asOf = new Date()) {
   const auth = authSubdoc || {};
   const sess = sessionSubdoc || {};
@@ -240,6 +274,29 @@ function deriveOAuthValidity(authSubdoc, sessionSubdoc, asOf = new Date()) {
   // surface that as a reason to re-auth. Otherwise we're good.
   if (auth.lastRefreshError && !sess.bearerEnc) {
     return { isOAuthValidated: false, reason: "refresh-failed" };
+  }
+  // Off-hook scope auto-heal — if the granted scope set doesn't include
+  // CXRouting, the agent can't dial. The SPA's existing reconnect
+  // banner is the right surface for this: flip validity false, let the
+  // banner prompt them through OAuth, the new default authorize-URL
+  // scope set requests CXRouting on the round trip.
+  //
+  // Anti-loop: if we already tried and the most-recent consent came
+  // back without CXRouting, RC's response means the agent's role
+  // doesn't permit it. Don't nag — `scopeReauthAttemptedAt` is the
+  // back-off stamp set by the OAuth callback in that case. After the
+  // back-off window we try once more (in case the RC admin updates
+  // their role).
+  if (isOffHookScopeAutoHealEnabled() && !scopesIncludeOffHook(auth.scopes)) {
+    const stampedAt = auth.scopeReauthAttemptedAt
+      ? new Date(auth.scopeReauthAttemptedAt)
+      : null;
+    const backOffMs = OFFHOOK_SCOPE_REAUTH_BACKOFF_DAYS * 24 * 60 * 60 * 1000;
+    const recentlyTried =
+      stampedAt && asOf.getTime() - stampedAt.getTime() < backOffMs;
+    if (!recentlyTried) {
+      return { isOAuthValidated: false, reason: "missing-cx-routing-scope" };
+    }
   }
   return { isOAuthValidated: true, reason: null };
 }
@@ -259,6 +316,8 @@ async function describe(userId) {
     rcUserEmail: auth.rcUserEmail || null,
     rcUserId: auth.rcUserId || null,
     scopes: auth.scopes || [],
+    hasOffHookScope: scopesIncludeOffHook(auth.scopes),
+    scopeReauthAttemptedAt: auth.scopeReauthAttemptedAt || null,
     refreshTokenExpiresAt: auth.refreshTokenExpiresAt || null,
     consentGrantedAt: auth.consentGrantedAt || null,
     consentRevokedAt: auth.consentRevokedAt || null,

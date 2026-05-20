@@ -58,7 +58,29 @@ const DEFAULT_TOKEN_REFRESH_PATH = "/api/auth/token/refresh";
 // RingCX itself doesn't need ReadAccounts at runtime; the check was a sanity
 // guard. Reinstate ["ReadAccounts"] once the RC app permissions are fixed.
 const REQUIRED_RINGCX_SCOPES = Object.freeze([]);
-const DEFAULT_SCOPES = "";
+
+// Default `scope` param sent on the RC `/restapi/oauth/authorize` URL when
+// RC_OAUTH_SCOPES env is unset. RC silently drops any scope the agent's
+// role doesn't allow, so over-requesting is safe — but UNDER-requesting
+// (sending blank) lets RC return a narrower default that can omit
+// CXRouting, the scope that gates RingCX off-hook capability.
+//
+// Empirical: Sean's working account has cxAuth.scopes === ["CXRouting"].
+// Bruce's broken-yesterday account had cxAuth.scopes === [] after a
+// refresh — RC's response omitted scope, our code mirrored empty.
+//
+// Listed scopes, in order of importance:
+//   CXRouting          — REQUIRED for RingCX off-hook (the bug we're fixing)
+//   ReadAccounts       — listed in CX_OAUTH_SETUP.md as required for the SPA
+//   ReadCallLog        — call-history reads in the agent dashboard
+//   ReadCallRecording  — recording playback in the call review panel
+//   ReadPresence       — agent-presence reads for the routing layer
+//
+// Override per-deployment by setting RC_OAUTH_SCOPES — useful for
+// tenants whose RC app config blocks one of these (RC will reject the
+// authorize URL on disallowed scope rather than ignoring it).
+const DEFAULT_SCOPES =
+  "CXRouting ReadAccounts ReadCallLog ReadCallRecording ReadPresence";
 
 function readEnv(name, fallback = "") {
   const v = process.env[name];
@@ -335,17 +357,60 @@ async function refreshUserSession({ user, userId } = {}) {
     return { ok: false, error: `refresh-failed: ${error.message}` };
   }
 
-  let grantedScopes;
-  try {
-    grantedScopes = assertRequiredRingcxScopes(rcTokens.scope, cfg);
-  } catch (error) {
-    await cxTokenStorage.markRefreshError(targetId, error.message);
-    return {
-      ok: false,
-      error: error.message,
-      missingScopes: error.missingScopes || REQUIRED_RINGCX_SCOPES,
-      grantedScopes: error.grantedScopes || [],
-    };
+  // Per RFC 6749 §6: refresh-token responses MAY omit `scope` when the
+  // granted scope is unchanged from the original grant. RC's refresh
+  // endpoint frequently does this. If we treat an omitted/empty scope
+  // as "agent now has zero scopes," we silently strip CXRouting from
+  // every agent on the next refresh — they can still authenticate but
+  // can't go off-hook on RingCX.
+  //
+  // Discriminate the three response shapes:
+  //   - non-empty string  → grant changed; mirror what RC returned
+  //   - empty string      → ambiguous (some IdPs use this for
+  //                         "unchanged"); preserve existing scopes
+  //   - missing/undefined → unchanged per RFC; preserve existing scopes
+  const refreshReturnedScopes =
+    typeof rcTokens.scope === "string" && rcTokens.scope.trim().length > 0;
+  let grantedScopes = null;
+  if (refreshReturnedScopes) {
+    try {
+      grantedScopes = assertRequiredRingcxScopes(rcTokens.scope, cfg);
+    } catch (error) {
+      await cxTokenStorage.markRefreshError(targetId, error.message);
+      return {
+        ok: false,
+        error: error.message,
+        missingScopes: error.missingScopes || REQUIRED_RINGCX_SCOPES,
+        grantedScopes: error.grantedScopes || [],
+      };
+    }
+
+    // Surface scope narrowing — if the refresh dropped CXRouting (or
+    // any other previously-held scope) that's operationally significant.
+    // The agent's off-hook capability depends on this; without logging
+    // we have no way to notice mid-day silent revocations.
+    try {
+      const account = await userAccountRepository.findUserAccountById(targetId);
+      const priorScopes = Array.isArray(account?.cxAuth?.scopes)
+        ? account.cxAuth.scopes
+        : [];
+      const priorSet = new Set(priorScopes.map((s) => String(s).toLowerCase()));
+      const grantedSet = new Set(grantedScopes.map((s) => String(s).toLowerCase()));
+      const lost = priorScopes.filter((s) => !grantedSet.has(String(s).toLowerCase()));
+      const gained = grantedScopes.filter((s) => !priorSet.has(String(s).toLowerCase()));
+      if (lost.length > 0 || gained.length > 0) {
+        console.warn("cxOAuth.refresh.scopes-changed", {
+          userId: targetId,
+          email: account?.email || null,
+          priorScopes,
+          newScopes: grantedScopes,
+          lost,
+          gained,
+        });
+      }
+    } catch (_) {
+      // Diagnostic-only; never block refresh on logging failure.
+    }
   }
 
   // Update stored refresh token (RC may rotate it)
@@ -356,7 +421,10 @@ async function refreshUserSession({ user, userId } = {}) {
 
   await cxTokenStorage.storeRcRefreshToken(targetId, newRefreshToken, {
     refreshTokenExpiresAt,
-    scopes: grantedScopes,
+    // Only pass scopes when RC explicitly returned them. storeRcRefreshToken
+    // is a $set update with `if (Array.isArray(scopes))` — passing null
+    // here preserves whatever cxAuth.scopes was already on the row.
+    ...(grantedScopes !== null ? { scopes: grantedScopes } : {}),
   });
 
   // Exchange for RingCX bearer
@@ -492,12 +560,62 @@ async function refreshRingcxBearer({ rcxRefreshToken, cfg }) {
   };
 }
 
+// Revoke the user's RC OAuth grant on RingCentral's servers AND wipe
+// our local copy. After this call, RingCentral no longer recognizes
+// the prior refresh token, AND the user's next CX session attempt sees
+// `consent-revoked` and is routed through the OAuth consent flow,
+// where RC will show the consent screen with whatever scopes are
+// currently in RC_OAUTH_SCOPES.
+//
+// Use this when an agent's grant has drifted (e.g. CXRouting scope
+// missing on a stored token that should have it) and we need RC to
+// re-issue a fresh grant against the user's current RC role.
+//
+// Best-effort on the RC side — if RC's revoke endpoint 4xxs (e.g.
+// token already invalidated), we still wipe our local state and
+// return success. The next OAuth attempt will sort it.
+async function forceReauth(userId) {
+  if (!userId) throw new Error("userId required");
+  const cfg = getOAuthConfig();
+  let rcRevoke = { ok: true, skipped: true, reason: "no-token-on-file" };
+
+  // Try to revoke on the RC side first, while we still have a token.
+  const refreshToken = await cxTokenStorage.getRcRefreshToken(userId).catch(() => null);
+  if (refreshToken && cfg.tokenUrl) {
+    const revokeUrl = String(cfg.tokenUrl).replace(/\/token(\/?$|\?)/, "/revoke$1");
+    const basic = Buffer.from(`${cfg.clientId}:${cfg.clientSecret}`).toString("base64");
+    try {
+      const r = await rawFetch(revokeUrl, {
+        method: "POST",
+        headers: {
+          Authorization: `Basic ${basic}`,
+          "Content-Type": "application/x-www-form-urlencoded",
+          Accept: "application/json",
+        },
+        body: new URLSearchParams({
+          token: refreshToken,
+          token_type_hint: "refresh_token",
+        }).toString(),
+      });
+      rcRevoke = { ok: r.ok, status: r.status, body: r.json || null };
+    } catch (error) {
+      rcRevoke = { ok: false, error: error.message };
+    }
+  }
+
+  // Always wipe local copy, even if RC revoke failed — the user
+  // needs to be forced through the OAuth flow to get a fresh grant.
+  await cxTokenStorage.revoke(userId);
+  return { ok: true, userId, rcRevoke };
+}
+
 module.exports = {
   isConfigured,
   describeConfig,
   start,
   callback,
   refreshUserSession,
+  forceReauth,
   // pure helpers — exported for tests
   generateCodeVerifier,
   generateCodeChallenge,

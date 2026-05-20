@@ -28,7 +28,8 @@
     "preview:hourly-calls": "node scripts/preview-hourly-calls.js",
     "preview:hourly-finance": "node scripts/preview-hourly-finance.js",
     "smoke": "node scripts/smoke-test.js",
-    "rc:live-monitor": "node scripts/rc-ex-live-trainer-oneoff.js"
+    "rc:live-monitor": "node scripts/rc-ex-live-trainer-oneoff.js",
+    "rc:live-monitor:diarize-manual": "node scripts/run-ex-diarize-manual-test.js"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.91.1",

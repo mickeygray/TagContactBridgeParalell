@@ -54,6 +54,28 @@ function durationTone(
   return "warning";
 }
 
+function verdictTone(verdict: string | null): {
+  className: string;
+  label: string;
+} | null {
+  if (!verdict) return null;
+  const v = verdict.toLowerCase();
+  if (v === "hot") return { className: "bg-emerald-500/15 text-emerald-700 dark:text-emerald-300", label: "HOT" };
+  if (v === "warm") return { className: "bg-amber-500/15 text-amber-700 dark:text-amber-300", label: "WARM" };
+  if (v === "cold") return { className: "bg-sky-500/15 text-sky-700 dark:text-sky-300", label: "COLD" };
+  if (v === "dead") return { className: "bg-muted text-muted-foreground", label: "DEAD" };
+  if (v === "fake") return { className: "bg-rose-500/15 text-rose-700 dark:text-rose-300", label: "FAKE" };
+  return { className: "bg-muted text-muted-foreground", label: v.toUpperCase() };
+}
+
+function routeCampaignLabel(row: CallReviewRow): string | null {
+  if (row.routeCampaignName) return row.routeCampaignName;
+  if (row.routeCampaignKey === "ld-custom") return "LD Custom";
+  if (row.routeCampaignKey === "ld-general") return "LD General";
+  if (row.routeCampaignKey) return row.routeCampaignKey;
+  return row.sourceName || null;
+}
+
 export function CaseCallsDrawer({
   caseId,
   domain = "TAG",
@@ -215,7 +237,7 @@ function CaseCallRow({
                 : "—"}
             </span>
           </div>
-          <div className="mt-0.5 flex items-center gap-2 text-[10px] text-muted-foreground">
+          <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-[10px] text-muted-foreground">
             <Clock className="h-3 w-3" />
             <StatusPill tone={durationTone(call.durationSec)}>
               {formatDuration(call.durationSec)}
@@ -223,6 +245,39 @@ function CaseCallRow({
             {call.platform ? (
               <span className="uppercase">{call.platform}</span>
             ) : null}
+            {(() => {
+              const tone = verdictTone(call.score?.verdict ?? null);
+              if (!tone) return null;
+              return (
+                <span
+                  className={cn(
+                    "rounded px-1.5 py-0.5 font-semibold tracking-wide",
+                    tone.className,
+                  )}
+                  title={
+                    call.score?.summary ||
+                    (call.score?.overall != null
+                      ? `Score ${call.score.overall}/10`
+                      : undefined)
+                  }
+                >
+                  {tone.label}
+                  {call.score?.overall != null ? ` ${call.score.overall}` : ""}
+                </span>
+              );
+            })()}
+            {(() => {
+              const label = routeCampaignLabel(call);
+              if (!label) return null;
+              return (
+                <span
+                  className="rounded bg-muted/60 px-1.5 py-0.5 text-foreground/80"
+                  title={call.sourceName || label}
+                >
+                  {label}
+                </span>
+              );
+            })()}
             {call.statusShift ? (
               <span className="text-foreground/80">
                 → {call.statusShift.toStatusLabel || "status changed"}

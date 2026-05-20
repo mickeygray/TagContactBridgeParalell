@@ -49,8 +49,22 @@ const {
   createLogicsClient,
   createRealPhoneValidationClient,
 } = require("../../shared-integrations/src");
-const { MasterProspectIndex } = require("../../shared-models/src");
+const {
+  CallLog,
+  LeadCadence,
+  MasterProspectIndex,
+} = require("../../shared-models/src");
 const { recordWorkflowStage } = require("./workflowStateService");
+
+const MS_PER_DAY = 24 * 60 * 60 * 1000;
+
+// Aged-pool rolling-refresh tunables. Env knobs are read at call time so
+// tests / dry-runs can override without restart.
+const AGED_DAILY_CHECKPOINT_DAYS = [30, 60, 90];
+const AGED_DAILY_DEFAULT_LIMIT_PER_DOMAIN = 500;
+const AGED_GRADUATION_THRESHOLD_DEFAULT = 8;
+const AGED_GRADUATION_WINDOW_DAYS_DEFAULT = 120;
+const AGED_GRADUATION_DURATION_FLOOR_SEC_DEFAULT = 10;
 
 // Logics returns SourceCampaignID as a number, not a name string. We
 // pre-load the source-canonical mapping once and convert the regex to
@@ -869,13 +883,554 @@ async function hasFreshPoolForTag(tag) {
   return Boolean(existing);
 }
 
+// ─────────────────────────────────────────────────────────────────────
+// Rolling daily aged-pool refresh.
+//
+// Replaces the once-monthly burst with a per-lead checkpoint sweep:
+//   age 30d → first DNC scrub  → promote (clean) or drop (hit)
+//   age 60d → re-scrub          → stay in red (clean) or evict (hit)
+//   age 90d → final re-scrub    → mark cleared (clean) or evict (hit)
+//   age 90d+ → ignored          (graduation sweep + cadence rule handles)
+//
+// All state lives on LeadCadence.dncCheckpoints { count, lastAt, nextAt,
+// cleared, hit, ... }. MPI gets pool.tag stamped/cleared as a side
+// effect. CallLog is read-only here.
+//
+// Idempotent: query gates on `dncCheckpoints.nextAt <= now`, and every
+// touched row advances `nextAt` (forward or to null) so the same lead
+// can't be picked up twice on the same day. graduatedAt-set leads are
+// excluded.
+// ─────────────────────────────────────────────────────────────────────
+
+function isAtDailyAgedRefreshBoundary(now = new Date()) {
+  const fmt = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/Los_Angeles",
+    hour: "2-digit",
+    hour12: false,
+  });
+  const parts = fmt.formatToParts(now);
+  const hour = parts.find((p) => p.type === "hour")?.value;
+  return hour === "06";
+}
+
+function isAgedRollingRefreshEnabled() {
+  return String(process.env.AGED_ROLLING_REFRESH_ENABLED || "false")
+    .trim()
+    .toLowerCase() === "true";
+}
+
+function parseEnvDomains() {
+  const raw = String(process.env.AGED_ROLLING_REFRESH_DOMAINS || "").trim();
+  if (!raw) return null;
+  return raw
+    .split(",")
+    .map((s) => s.trim().toUpperCase())
+    .filter(Boolean);
+}
+
+function envNumber(name, fallback) {
+  const raw = Number(process.env[name]);
+  return Number.isFinite(raw) && raw > 0 ? raw : fallback;
+}
+
+function computeNextCheckpoint(intakeAt, currentCount) {
+  // Returns the milestone advance after this scrub completes.
+  // currentCount is BEFORE the scrub increments — after a clean scrub
+  // newCount = currentCount + 1.
+  const intakeMs = new Date(intakeAt).getTime();
+  if (!Number.isFinite(intakeMs)) {
+    return { newCount: currentCount + 1, nextAt: null, cleared: true };
+  }
+  const newCount = currentCount + 1;
+  const nextDayIdx = newCount; // 0→1: use index 1 (60d), 1→2: index 2 (90d), 2→3: done
+  if (nextDayIdx >= AGED_DAILY_CHECKPOINT_DAYS.length) {
+    return { newCount, nextAt: null, cleared: true };
+  }
+  const days = AGED_DAILY_CHECKPOINT_DAYS[nextDayIdx];
+  return {
+    newCount,
+    nextAt: new Date(intakeMs + days * MS_PER_DAY),
+    cleared: false,
+  };
+}
+
+function describeDncReason(lookup) {
+  if (!lookup) return null;
+  if (lookup.isLitigator) return "litigator";
+  if (lookup.onNationalDNC) return "national";
+  if (lookup.onStateDNC) return "state";
+  return null;
+}
+
+/**
+ * Daily aged-pool refresh tick. Walks LeadCadence rows whose
+ * dncCheckpoints.nextAt has passed, scrubs against RealValidation,
+ * promotes / re-scrubs / evicts per the 30/60/90 cadence.
+ *
+ * Returns the summary structure consumed by sendAgedRefreshReportEmail.
+ *
+ * @param {object} options
+ * @param {Date}    [options.now]              - current time (default new Date)
+ * @param {boolean} [options.dryRun]           - true = no writes (default reads env DRY_RUN)
+ * @param {number}  [options.limitPerDomain]   - cap per tenant (default env or 500)
+ * @param {string[]}[options.domains]          - tenants (default env or all)
+ * @param {number}  [options.concurrency]      - lookup concurrency
+ * @param {object}  [options.logger]           - { info, warn }
+ */
+async function runDailyAgedRefresh(options = {}) {
+  const startedAt = new Date();
+  const now = options.now || startedAt;
+  const dryRun = options.dryRun != null
+    ? Boolean(options.dryRun)
+    : String(process.env.AGED_ROLLING_REFRESH_DRY_RUN || "false").trim().toLowerCase() === "true";
+  const limitPerDomain = Number(options.limitPerDomain)
+    || envNumber("AGED_ROLLING_REFRESH_LIMIT_PER_DOMAIN", AGED_DAILY_DEFAULT_LIMIT_PER_DOMAIN);
+  const domainsFilter = options.domains && options.domains.length > 0
+    ? options.domains.map((d) => String(d).toUpperCase())
+    : parseEnvDomains();
+  const concurrency = Math.max(Number(options.concurrency) || DEFAULT_CONCURRENCY, 1);
+  const logger = options.logger || { info: () => {}, warn: () => {} };
+
+  const tag = defaultMonthTag(now);
+
+  // Pull all due rows. Even with limitPerDomain=500 across two tenants,
+  // we're talking ~1k docs — single query is fine. Apply per-domain
+  // truncation client-side after a stable sort.
+  const baseQuery = {
+    "dncCheckpoints.nextAt": { $lte: now },
+    graduatedAt: null,
+  };
+  if (domainsFilter) baseQuery.domain = { $in: domainsFilter };
+
+  const due = await LeadCadence.find(baseQuery)
+    .sort({ "dncCheckpoints.nextAt": 1 })
+    .limit(limitPerDomain * 4) // soft cap before per-domain trim
+    .lean();
+
+  const byDomain = new Map();
+  for (const lead of due) {
+    const dom = lead.domain;
+    if (!byDomain.has(dom)) byDomain.set(dom, []);
+    if (byDomain.get(dom).length < limitPerDomain) byDomain.get(dom).push(lead);
+  }
+
+  const summary = {
+    startedAt,
+    now,
+    dryRun,
+    tag,
+    domains: [...byDomain.keys()],
+    checked: 0,
+    promoted: 0,
+    stayed: 0,
+    cleared: 0,
+    evicted: 0,
+    droppedAtIntake: 0,
+    dncLookupFailures: 0,
+    noPhone: 0,
+    perDomain: {},
+    retiredToday: [], // for email body — capped list of DNC drops/evictions
+  };
+
+  if (due.length === 0) {
+    summary.finishedAt = new Date();
+    summary.durationMs = summary.finishedAt - startedAt;
+    return summary;
+  }
+
+  const rpv = createRealPhoneValidationClient();
+
+  for (const [domain, leads] of byDomain.entries()) {
+    const perDom = {
+      checked: 0,
+      promoted: 0,
+      stayed: 0,
+      cleared: 0,
+      evicted: 0,
+      droppedAtIntake: 0,
+      dncLookupFailures: 0,
+      noPhone: 0,
+    };
+
+    // Lookups concurrent within domain. Phones may dup across leads —
+    // dedupe to save RPV calls.
+    const phones = Array.from(
+      new Set(leads.map((l) => l.normalizedPhone).filter(Boolean)),
+    );
+    const lookups = new Map();
+    const lookupResults = await runConcurrent(
+      phones,
+      concurrency,
+      async (phone) => lookupDncWithRetry(rpv, phone, logger),
+    );
+    for (let i = 0; i < phones.length; i += 1) {
+      lookups.set(phones[i], lookupResults[i] || null);
+    }
+
+    for (const lead of leads) {
+      perDom.checked += 1;
+      summary.checked += 1;
+
+      const phone = lead.normalizedPhone;
+      const intakeAt = lead.createdAt;
+      const prevCount = Number(lead.dncCheckpoints?.count || 0);
+      const isInitial = prevCount === 0;
+
+      if (!phone) {
+        perDom.noPhone += 1;
+        summary.noPhone += 1;
+        // Advance nextAt anyway so we don't re-query the same empty row.
+        const adv = computeNextCheckpoint(intakeAt, prevCount);
+        if (!dryRun) {
+          await LeadCadence.updateOne(
+            { _id: lead._id },
+            {
+              $set: {
+                "dncCheckpoints.count": adv.newCount,
+                "dncCheckpoints.lastAt": now,
+                "dncCheckpoints.nextAt": adv.nextAt,
+                "dncCheckpoints.cleared": adv.cleared || lead.dncCheckpoints?.cleared || false,
+                "dncCheckpoints.source": "no-phone",
+              },
+            },
+          );
+        }
+        continue;
+      }
+
+      const lookup = lookups.get(phone);
+      if (!lookup) {
+        perDom.dncLookupFailures += 1;
+        summary.dncLookupFailures += 1;
+        // Leave nextAt where it is so tomorrow's tick retries — but
+        // bump lastAt so we don't hammer a chronically-failing phone
+        // more than once per day. Pushes nextAt forward by 24h.
+        if (!dryRun) {
+          await LeadCadence.updateOne(
+            { _id: lead._id },
+            {
+              $set: {
+                "dncCheckpoints.lastAt": now,
+                "dncCheckpoints.nextAt": new Date(now.getTime() + MS_PER_DAY),
+                "dncCheckpoints.source": "lookup-failed",
+              },
+            },
+          );
+        }
+        continue;
+      }
+
+      const dirty = Boolean(
+        lookup.onNationalDNC || lookup.onStateDNC || lookup.isLitigator,
+      );
+
+      if (dirty) {
+        const reason = describeDncReason(lookup);
+        if (isInitial) {
+          perDom.droppedAtIntake += 1;
+          summary.droppedAtIntake += 1;
+        } else {
+          perDom.evicted += 1;
+          summary.evicted += 1;
+        }
+        if (summary.retiredToday.length < 200) {
+          summary.retiredToday.push({
+            domain,
+            caseId: lead.caseId,
+            name: lead.name || [lead.firstName, lead.lastName].filter(Boolean).join(" ").trim() || null,
+            phone,
+            reason,
+            checkpoint: AGED_DAILY_CHECKPOINT_DAYS[prevCount] || null,
+          });
+        }
+        if (!dryRun) {
+          await LeadCadence.updateOne(
+            { _id: lead._id },
+            {
+              $set: {
+                "dncCheckpoints.count": prevCount + 1,
+                "dncCheckpoints.lastAt": now,
+                "dncCheckpoints.nextAt": null,
+                "dncCheckpoints.hit": true,
+                "dncCheckpoints.hitAt": now,
+                "dncCheckpoints.source": "realvalidation",
+                "dncCheckpoints.reason": reason,
+              },
+            },
+          );
+          // Clear pool.tag (and stamp dnc subdoc) on MPI so the dialer
+          // can't pick this lead up. Upsert because the row may not
+          // exist yet (the 30d initial check fires before any monthly
+          // build would have added them).
+          await MasterProspectIndex.updateOne(
+            { domain, caseId: lead.caseId },
+            {
+              $set: {
+                domain,
+                caseId: lead.caseId,
+                normalizedPhones: [phone],
+                lastSeenAt: now,
+                dnc: buildDncSubdoc(lookup, now),
+                pool: null,
+              },
+              $setOnInsert: { firstSeenAt: now },
+            },
+            { upsert: true },
+          );
+        }
+        continue;
+      }
+
+      // Clean. Advance checkpoint state. Either promote (first time)
+      // or just stay (subsequent re-scrubs).
+      const adv = computeNextCheckpoint(intakeAt, prevCount);
+      if (isInitial) {
+        perDom.promoted += 1;
+        summary.promoted += 1;
+      } else if (adv.cleared) {
+        perDom.cleared += 1;
+        summary.cleared += 1;
+      } else {
+        perDom.stayed += 1;
+        summary.stayed += 1;
+      }
+
+      if (!dryRun) {
+        await LeadCadence.updateOne(
+          { _id: lead._id },
+          {
+            $set: {
+              "dncCheckpoints.count": adv.newCount,
+              "dncCheckpoints.lastAt": now,
+              "dncCheckpoints.nextAt": adv.nextAt,
+              "dncCheckpoints.cleared": adv.cleared,
+              "dncCheckpoints.source": "realvalidation",
+              "dncCheckpoints.hit": false,
+              "dncCheckpoints.reason": null,
+            },
+          },
+        );
+        if (isInitial) {
+          // Promote: upsert MPI with current month's pool.tag.
+          //
+          // metadata.routeCampaignKey is stamped here so the CX queue
+          // materializer (cxWorkspaceService — materializes from MPI
+          // for the filler/aged path at line ~2637) can carry the LD
+          // route campaign through onto the resulting queueItem.metadata.
+          // Without this stamp, aged-tier queue items lose their
+          // ld-custom / ld-general bucketing and fall through to the
+          // legacy ld-posting family in the vendor rollup.
+          await MasterProspectIndex.updateOne(
+            { domain, caseId: lead.caseId },
+            {
+              $set: {
+                domain,
+                caseId: lead.caseId,
+                normalizedPhones: [phone],
+                lastSeenAt: now,
+                dnc: buildDncSubdoc(lookup, now),
+                pool: {
+                  tag,
+                  source: "aged-rolling-refresh",
+                  builtAt: now,
+                  dncScrubbedAt: now,
+                },
+                "metadata.routeCampaignKey": lead.routeCampaignKey || null,
+                "metadata.routeCampaignName": lead.routeCampaignName || null,
+              },
+              $setOnInsert: { firstSeenAt: now },
+            },
+            { upsert: true },
+          );
+        } else {
+          // 60d / 90d re-scrub: refresh dnc subdoc but leave pool.tag
+          // alone (still in red). Don't touch pool.builtAt either.
+          await MasterProspectIndex.updateOne(
+            { domain, caseId: lead.caseId },
+            {
+              $set: {
+                lastSeenAt: now,
+                dnc: buildDncSubdoc(lookup, now),
+                "pool.dncScrubbedAt": now,
+              },
+            },
+          );
+        }
+      }
+    }
+
+    summary.perDomain[domain] = perDom;
+  }
+
+  summary.finishedAt = new Date();
+  summary.durationMs = summary.finishedAt - startedAt;
+  logger.info?.("aged-rolling-refresh.daily.complete", {
+    checked: summary.checked,
+    promoted: summary.promoted,
+    evicted: summary.evicted + summary.droppedAtIntake,
+    dncLookupFailures: summary.dncLookupFailures,
+    durationMs: summary.durationMs,
+    dryRun,
+  });
+
+  return summary;
+}
+
+/**
+ * Monthly graduation sweep. Walks current red-pool leads and graduates
+ * (clears pool.tag, stamps graduatedAt) any with >= AGED_GRADUATION_THRESHOLD
+ * qualifying CX connects in the trailing AGED_GRADUATION_WINDOW_DAYS.
+ *
+ * "Qualifying" = outbound + platform:"cx" + durationSec >=
+ * AGED_GRADUATION_DURATION_FLOOR_SEC (default 10s). Voicemail counts
+ * because it produces wall-clock duration.
+ */
+async function runMonthlyGraduationSweep(options = {}) {
+  const startedAt = new Date();
+  const now = options.now || startedAt;
+  const dryRun = options.dryRun != null
+    ? Boolean(options.dryRun)
+    : String(process.env.AGED_ROLLING_REFRESH_DRY_RUN || "false").trim().toLowerCase() === "true";
+  const threshold = Number(options.threshold)
+    || envNumber("AGED_GRADUATION_THRESHOLD", AGED_GRADUATION_THRESHOLD_DEFAULT);
+  const windowDays = Number(options.windowDays)
+    || envNumber("AGED_GRADUATION_WINDOW_DAYS", AGED_GRADUATION_WINDOW_DAYS_DEFAULT);
+  const durationFloor = Number(options.durationFloorSec)
+    || envNumber("AGED_GRADUATION_DURATION_FLOOR_SEC", AGED_GRADUATION_DURATION_FLOOR_SEC_DEFAULT);
+  const domainsFilter = options.domains && options.domains.length > 0
+    ? options.domains.map((d) => String(d).toUpperCase())
+    : parseEnvDomains();
+  const logger = options.logger || { info: () => {}, warn: () => {} };
+
+  const windowStart = new Date(now.getTime() - windowDays * MS_PER_DAY);
+
+  // Source of truth for "currently in red" is MPI pool.tag matching
+  // filler-*. Pull (domain, caseId) only — heavy lifting happens
+  // per-lead.
+  const mpiQuery = { "pool.tag": { $regex: /^filler-/ } };
+  if (domainsFilter) mpiQuery.domain = { $in: domainsFilter };
+  const inRed = await MasterProspectIndex.find(mpiQuery, {
+    domain: 1,
+    caseId: 1,
+  }).lean();
+
+  const summary = {
+    startedAt,
+    now,
+    dryRun,
+    threshold,
+    windowDays,
+    durationFloor,
+    scanned: inRed.length,
+    graduated: 0,
+    skippedAlreadyGraduated: 0,
+    skippedNotEnoughTouches: 0,
+    perDomain: {},
+    graduatedToday: [],
+  };
+
+  if (inRed.length === 0) {
+    summary.finishedAt = new Date();
+    summary.durationMs = summary.finishedAt - startedAt;
+    return summary;
+  }
+
+  for (const row of inRed) {
+    const { domain, caseId } = row;
+    if (!summary.perDomain[domain]) {
+      summary.perDomain[domain] = {
+        scanned: 0,
+        graduated: 0,
+        skippedAlreadyGraduated: 0,
+        skippedNotEnoughTouches: 0,
+      };
+    }
+    summary.perDomain[domain].scanned += 1;
+
+    const lead = await LeadCadence.findOne(
+      { domain, caseId },
+      { _id: 1, name: 1, firstName: 1, lastName: 1, primaryPhone: 1, graduatedAt: 1, createdAt: 1 },
+    ).lean();
+
+    if (lead && lead.graduatedAt) {
+      summary.skippedAlreadyGraduated += 1;
+      summary.perDomain[domain].skippedAlreadyGraduated += 1;
+      continue;
+    }
+
+    const connects = await CallLog.countDocuments({
+      domain,
+      caseId,
+      direction: "outbound",
+      platform: "cx",
+      durationSec: { $gte: durationFloor },
+      callStartTime: { $gte: windowStart },
+    });
+
+    if (connects < threshold) {
+      summary.skippedNotEnoughTouches += 1;
+      summary.perDomain[domain].skippedNotEnoughTouches += 1;
+      continue;
+    }
+
+    summary.graduated += 1;
+    summary.perDomain[domain].graduated += 1;
+    if (summary.graduatedToday.length < 200) {
+      summary.graduatedToday.push({
+        domain,
+        caseId,
+        name: lead ? (lead.name || [lead.firstName, lead.lastName].filter(Boolean).join(" ").trim() || null) : null,
+        phone: lead?.primaryPhone || null,
+        connects,
+      });
+    }
+
+    if (!dryRun) {
+      if (lead) {
+        await LeadCadence.updateOne(
+          { _id: lead._id },
+          {
+            $set: {
+              graduatedAt: now,
+              graduatedConnects: connects,
+            },
+          },
+        );
+      }
+      await MasterProspectIndex.updateOne(
+        { domain, caseId },
+        {
+          $unset: { "pool.tag": "" },
+          $set: { lastSeenAt: now },
+        },
+      );
+    }
+  }
+
+  summary.finishedAt = new Date();
+  summary.durationMs = summary.finishedAt - startedAt;
+  logger.info?.("aged-rolling-refresh.graduation.complete", {
+    scanned: summary.scanned,
+    graduated: summary.graduated,
+    durationMs: summary.durationMs,
+    dryRun,
+  });
+  return summary;
+}
+
 module.exports = {
   runFillerPoolRefresh,
+  runDailyAgedRefresh,
+  runMonthlyGraduationSweep,
   isAtMonthlyRefreshBoundary,
+  isAtDailyAgedRefreshBoundary,
+  isAgedRollingRefreshEnabled,
   hasFreshPoolForTag,
   defaultMonthTag,
+  computeNextCheckpoint,
   // exported for tests / introspection
   WYNN_DIGITAL_FLOOR_DATE,
   TAG_CASE_ID_FLOOR,
   DNC_REUSE_WINDOW_MS,
+  AGED_DAILY_CHECKPOINT_DAYS,
 };

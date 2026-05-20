@@ -69,6 +69,8 @@ function buildCallLedgerEntryFromCallLog(callLog = {}, options = {}) {
     sourceName: callLog.sourceName || null,
     sourceChannel: callLog.sourceChannel || null,
     mailPieceKey: callLog.mailPieceKey || null,
+    routeCampaignKey: callLog.routeCampaignKey || null,
+    routeCampaignName: callLog.routeCampaignName || null,
     strategy: callLog.strategy || null,
     confidence: callLog.confidence || null,
     status: callLog.status || null,

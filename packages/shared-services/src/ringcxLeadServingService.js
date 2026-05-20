@@ -335,10 +335,30 @@ function summarizeRingcxAgent(agent = null) {
   };
 }
 
+let usernameResolutionCache = {
+  key: null,
+  expiresAt: 0,
+  agents: null,
+};
+
 async function listAgentsForUsernameResolution(client) {
   const defaultGroupId = String(
     client?.config?.defaultAgentGroupId || process.env.RINGCX_VOICE_DEFAULT_AGENT_GROUP_ID || "",
   ).trim();
+  const cacheMs = Math.max(Number(process.env.RINGCX_AGENT_RESOLUTION_CACHE_MS) || 300_000, 0);
+  const cacheKey = [
+    String(client?.config?.accountId || process.env.RINGCX_VOICE_ACCOUNT_ID || "").trim(),
+    defaultGroupId,
+  ].join(":");
+  if (
+    cacheMs > 0
+    && usernameResolutionCache.key === cacheKey
+    && usernameResolutionCache.expiresAt > Date.now()
+    && Array.isArray(usernameResolutionCache.agents)
+  ) {
+    return usernameResolutionCache.agents;
+  }
+
   const groupIds = [];
   if (defaultGroupId) groupIds.push(defaultGroupId);
 
@@ -368,6 +388,13 @@ async function listAgentsForUsernameResolution(client) {
       // Keep searching other groups; a missing/locked group should not block dialing.
     }
   }
+  if (cacheMs > 0) {
+    usernameResolutionCache = {
+      key: cacheKey,
+      expiresAt: Date.now() + cacheMs,
+      agents,
+    };
+  }
   return agents;
 }
 
@@ -394,10 +421,22 @@ async function resolveAgentIdentity(queueItem = {}, client) {
     queueItem?.metadata?.assignedAgentEmail,
     account?.email,
   ]);
+  const configuredAccountId = client?.config?.accountId || process.env.RINGCX_VOICE_ACCOUNT_ID || null;
+  const directUsername = preferredUsernames.find((username) => (
+    isUserManagedRingcxSeat({ username }, configuredAccountId)
+  ));
+  if (directUsername) {
+    return {
+      agentId: String(account?.metadata?.ringcxAgentId || account?.cxAgentId || "").trim() || null,
+      username: directUsername,
+      groupId: String(account?.metadata?.ringcxAgentGroupId || account?.metadata?.cxAgentGroupId || "").trim() || null,
+      rcUserId: extensionId,
+      userManagedByRC: true,
+    };
+  }
 
   try {
     const agents = await listAgentsForUsernameResolution(client);
-    const configuredAccountId = client?.config?.accountId || process.env.RINGCX_VOICE_ACCOUNT_ID || null;
     const sameRcUserAgents = agents.filter((agent) => (
       String(agent?.rcUserId || "").trim() === extensionId
     ));

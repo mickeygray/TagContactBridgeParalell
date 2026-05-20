@@ -133,6 +133,7 @@ function createLexisDailyDropRuntime({ config, runtime }) {
       state.lastError = null;
       state.nextRunAt = computeNextRunAt(state.hour, state.minute, state.lastCompletedAt, {
         activeWeekdays: state.activeWeekdays,
+        timezone: state.timezone,
       });
 
       await recordWorkflowStage({
@@ -157,6 +158,7 @@ function createLexisDailyDropRuntime({ config, runtime }) {
       state.lastResult = null;
       state.nextRunAt = computeNextRunAt(state.hour, state.minute, state.lastCompletedAt, {
         activeWeekdays: state.activeWeekdays,
+        timezone: state.timezone,
       });
 
       await recordWorkflowStage({
@@ -207,6 +209,7 @@ function createLexisDailyDropRuntime({ config, runtime }) {
     state.enabled = Boolean(config.enabled);
     state.nextRunAt = computeNextRunAt(state.hour, state.minute, new Date(), {
       activeWeekdays: state.activeWeekdays,
+      timezone: state.timezone,
     });
 
     if (!state.enabled) {

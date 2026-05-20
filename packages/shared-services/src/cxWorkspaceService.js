@@ -69,9 +69,11 @@ const {
   getPacificBusinessDayAge,
   getPacificBusinessDayStart,
   getPacificDateKey,
+  getPacificMonthKey,
   getQueueFamilySortRank,
   normalizeRouteCampaigns,
   resolveAccountQueuePolicy,
+  resolveQueueDialability,
 } = require("./cxQueuePolicyService");
 const {
   getCxQueueServeRank,
@@ -2204,6 +2206,7 @@ async function reconcileWorkspaceQueuePacksForAgent({
 
 const ACTIVE_QUEUE_STATES = ["queued", "ready", "claimed", "serving", "paused"];
 let lastQueueOrderingBackfillAt = 0;
+const cxWorkspaceRefillInFlight = new Map();
 const NON_DIALABLE_STAGE_PATTERN = /\b(dnc|do not call|post\s*date|post-date|sold|deal|bad inactive|inactive)\b/i;
 
 function getPacificMonthTag(now = new Date()) {
@@ -2244,6 +2247,127 @@ function isCxBlockedLeadCadence(doc = {}) {
   if (stage && NON_DIALABLE_STAGE_PATTERN.test(stage)) return true;
   const cxDnc = doc.cadenceState?.channelDnc?.cx;
   return Boolean(cxDnc?.blocked);
+}
+
+function readCadenceCxTouchState(cadence = {}) {
+  const counter = cadence?.counterCadence && typeof cadence.counterCadence === "object"
+    ? cadence.counterCadence
+    : {};
+  const payload = cadence?.payloadSnapshot && typeof cadence.payloadSnapshot === "object"
+    ? cadence.payloadSnapshot
+    : {};
+  return {
+    lastTouchedAt:
+      cadence?.lastTouched?.cx ||
+      counter.lastCxDialedAt ||
+      payload.lastCxDialedAt ||
+      null,
+    lastTouchedExtensionId: String(
+      counter.lastCxDialedByExtensionId ||
+        payload.lastCxDialedByExtensionId ||
+        "",
+    ).trim() || null,
+    lastTouchedAgentName:
+      counter.lastCxDialedByAgentName ||
+      payload.lastCxDialedByAgentName ||
+      null,
+    totalCalls: Math.max(Number(cadence?.cadenceCounters?.cx || 0) || 0, 0),
+    dailyDateKey: String(counter.cxDailyDateKey || "").trim() || null,
+    dailyCalls: Math.max(Number(counter.cxDailyCalls || 0) || 0, 0),
+    monthlyMonthKey: String(counter.cxMonthlyMonthKey || "").trim() || null,
+    monthlyCalls: Math.max(Number(counter.cxMonthlyCalls || 0) || 0, 0),
+  };
+}
+
+function readProspectCxTouchState(prospect = {}) {
+  const filler = prospect?.filler && typeof prospect.filler === "object"
+    ? prospect.filler
+    : {};
+  return {
+    lastTouchedAt: filler.lastDialAttempt || null,
+    lastTouchedExtensionId: String(filler.lastDialedByExtensionId || "").trim() || null,
+    lastTouchedAgentName: filler.lastDialedByAgentName || null,
+    totalCalls: Math.max(Number(filler.attemptCount || 0) || 0, 0),
+    dailyDateKey: String(filler.dailyDateKey || "").trim() || null,
+    dailyCalls: Math.max(Number(filler.dailyAttempts || 0) || 0, 0),
+    monthlyMonthKey: String(filler.monthlyMonthKey || "").trim() || null,
+    monthlyCalls: Math.max(Number(filler.monthlyAttempts || 0) || 0, 0),
+  };
+}
+
+function buildMaterializedTouchPatch(touchState = {}, now = new Date()) {
+  const dateKey = getPacificDateKey(now);
+  const monthKey = getPacificMonthKey(now);
+  return {
+    placedCalls: Number(touchState.totalCalls || 0) || 0,
+    lastPlacedAt: touchState.lastTouchedAt || null,
+    dailyPlacedDateKey: touchState.dailyDateKey || null,
+    dailyPlacedCalls: touchState.dailyDateKey === dateKey
+      ? Math.max(Number(touchState.dailyCalls || 0) || 0, 0)
+      : 0,
+    monthlyPlacedMonthKey: touchState.monthlyMonthKey || null,
+    monthlyPlacedCalls: touchState.monthlyMonthKey === monthKey
+      ? Math.max(Number(touchState.monthlyCalls || 0) || 0, 0)
+      : 0,
+    "metadata.lastQueueAttemptAt": touchState.lastTouchedAt || null,
+    "metadata.lastTouchedAt": touchState.lastTouchedAt || null,
+    "metadata.lastTouchedExtensionId": touchState.lastTouchedExtensionId || null,
+    "metadata.lastTouchedAgentName": touchState.lastTouchedAgentName || null,
+    "metadata.lastCxDialedByExtensionId": touchState.lastTouchedExtensionId || null,
+    "metadata.lastCxDialedByAgentName": touchState.lastTouchedAgentName || null,
+  };
+}
+
+function leadCxTouchViolatesAgentOrPolicy({
+  touchState = {},
+  queueFamily,
+  agentExtensionId = null,
+  now = new Date(),
+}) {
+  const normalizedAgentExtensionId = String(agentExtensionId || "").trim();
+  if (
+    normalizedAgentExtensionId &&
+    touchState.lastTouchedExtensionId &&
+    normalizedAgentExtensionId === String(touchState.lastTouchedExtensionId)
+  ) {
+    return {
+      blocked: true,
+      reason: "last-agent-called-lead",
+      nextEligibleAt: null,
+    };
+  }
+
+  const synthetic = {
+    queueFamily,
+    placedCalls: Number(touchState.totalCalls || 0) || 0,
+    lastPlacedAt: touchState.lastTouchedAt || null,
+    dailyPlacedDateKey: touchState.dailyDateKey || null,
+    dailyPlacedCalls: Number(touchState.dailyCalls || 0) || 0,
+    monthlyPlacedMonthKey: touchState.monthlyMonthKey || null,
+    monthlyPlacedCalls: Number(touchState.monthlyCalls || 0) || 0,
+    metadata: {
+      queueFamily,
+      lastQueueAttemptAt: touchState.lastTouchedAt || null,
+      dailyPlacedDateKey: touchState.dailyDateKey || null,
+      dailyPlacedCalls: Number(touchState.dailyCalls || 0) || 0,
+      monthlyPlacedMonthKey: touchState.monthlyMonthKey || null,
+      monthlyPlacedCalls: Number(touchState.monthlyCalls || 0) || 0,
+    },
+  };
+  const dialability = resolveQueueDialability(synthetic, now);
+  if (!dialability.ok) {
+    return {
+      blocked: true,
+      reason: dialability.reason,
+      nextEligibleAt: dialability.nextEligibleAt || null,
+      detail: dialability.detail || null,
+    };
+  }
+  return {
+    blocked: false,
+    reason: "eligible",
+    nextEligibleAt: null,
+  };
 }
 
 function buildQueueRoutingPatch(queueFamily) {
@@ -2330,6 +2454,14 @@ async function materializeDay2To15QueueItems(domain, neededCount, options = {}) 
 
     const businessAgeDays = getLeadAgeDays(cadence.createdAt, now);
     if (!Number.isFinite(businessAgeDays) || businessAgeDays < 2 || businessAgeDays > 14) continue;
+    const touchState = readCadenceCxTouchState(cadence);
+    const policyBlock = leadCxTouchViolatesAgentOrPolicy({
+      touchState,
+      queueFamily: "fresh-day2to10",
+      agentExtensionId: options.agentExtensionId,
+      now,
+    });
+    if (policyBlock.blocked) continue;
     const activeDay = businessAgeDays + 1;
     await cxDialQueueRepository.upsertQueueItem(
       normalizedDomain,
@@ -2367,6 +2499,7 @@ async function materializeDay2To15QueueItems(domain, neededCount, options = {}) 
         "metadata.materializedAt": now,
         "metadata.routeCampaignKey": cadence.routeCampaignKey || null,
         "metadata.routeCampaignName": cadence.routeCampaignName || null,
+        ...buildMaterializedTouchPatch(touchState, now),
       },
       { actionKey },
     );
@@ -2426,6 +2559,14 @@ async function materializeDay16To30QueueItems(domain, neededCount, options = {})
 
     const businessAgeDays = getLeadAgeDays(cadence.createdAt, now);
     if (!Number.isFinite(businessAgeDays) || businessAgeDays < 15 || businessAgeDays > 29) continue;
+    const touchState = readCadenceCxTouchState(cadence);
+    const policyBlock = leadCxTouchViolatesAgentOrPolicy({
+      touchState,
+      queueFamily: "fresh-day16to30",
+      agentExtensionId: options.agentExtensionId,
+      now,
+    });
+    if (policyBlock.blocked) continue;
     const activeDay = businessAgeDays + 1;
     await cxDialQueueRepository.upsertQueueItem(
       normalizedDomain,
@@ -2463,6 +2604,7 @@ async function materializeDay16To30QueueItems(domain, neededCount, options = {})
         "metadata.materializedAt": now,
         "metadata.routeCampaignKey": cadence.routeCampaignKey || null,
         "metadata.routeCampaignName": cadence.routeCampaignName || null,
+        ...buildMaterializedTouchPatch(touchState, now),
       },
       { actionKey },
     );
@@ -2527,6 +2669,14 @@ async function materializeAgedQueueItems(domain, neededCount, options = {}) {
     const actionKey = `cx-aged-${dateKey}-${caseId}`;
     if (await queueActionAlreadyExists(normalizedDomain, caseId, actionKey)) continue;
     if (await activeQueueCaseExists(normalizedDomain, caseId)) continue;
+    const touchState = readCadenceCxTouchState(cadence);
+    const policyBlock = leadCxTouchViolatesAgentOrPolicy({
+      touchState,
+      queueFamily: "aged",
+      agentExtensionId: options.agentExtensionId,
+      now,
+    });
+    if (policyBlock.blocked) continue;
 
     await cxDialQueueRepository.upsertQueueItem(
       normalizedDomain,
@@ -2564,6 +2714,7 @@ async function materializeAgedQueueItems(domain, neededCount, options = {}) {
         "metadata.materializedAt": now,
         "metadata.routeCampaignKey": cadence.routeCampaignKey || null,
         "metadata.routeCampaignName": cadence.routeCampaignName || null,
+        ...buildMaterializedTouchPatch(touchState, now),
       },
       { actionKey },
     );
@@ -2598,6 +2749,14 @@ async function materializeAgedQueueItems(domain, neededCount, options = {}) {
     const actionKey = `cx-aged-${dateKey}-${caseId}`;
     if (await queueActionAlreadyExists(normalizedDomain, caseId, actionKey)) continue;
     if (await activeQueueCaseExists(normalizedDomain, caseId)) continue;
+    const touchState = readProspectCxTouchState(prospect);
+    const policyBlock = leadCxTouchViolatesAgentOrPolicy({
+      touchState,
+      queueFamily: "aged",
+      agentExtensionId: options.agentExtensionId,
+      now,
+    });
+    if (policyBlock.blocked) continue;
 
     await cxDialQueueRepository.upsertQueueItem(
       normalizedDomain,
@@ -2635,6 +2794,7 @@ async function materializeAgedQueueItems(domain, neededCount, options = {}) {
         "metadata.materializedAt": now,
         "metadata.routeCampaignKey": prospect.metadata?.routeCampaignKey || null,
         "metadata.routeCampaignName": prospect.metadata?.routeCampaignName || null,
+        ...buildMaterializedTouchPatch(touchState, now),
       },
       { actionKey },
     );
@@ -2659,6 +2819,7 @@ async function materializeAgedQueueItems(domain, neededCount, options = {}) {
 async function materializeQueueSupplyForAgent({
   domain,
   domains = null,
+  agentExtensionId = null,
   queueFamilies = [],
   deficit = 0,
   routeCampaigns = null,
@@ -2687,6 +2848,7 @@ async function materializeQueueSupplyForAgent({
     if (wantsDay2To15 && remaining > 0) {
       const day2Result = await materializeDay2To15QueueItems(supplyDomain, remaining, {
         routeCampaigns: null,
+        agentExtensionId,
       });
       results.push({ domain: supplyDomain, ...day2Result });
       remaining -= Number(day2Result.created || 0);
@@ -2694,6 +2856,7 @@ async function materializeQueueSupplyForAgent({
     if (wantsDay16To30 && remaining > 0) {
       const day16Result = await materializeDay16To30QueueItems(supplyDomain, remaining, {
         routeCampaigns: null,
+        agentExtensionId,
       });
       results.push({ domain: supplyDomain, ...day16Result });
       remaining -= Number(day16Result.created || 0);
@@ -2701,6 +2864,7 @@ async function materializeQueueSupplyForAgent({
     if (wantsAged && remaining > 0) {
       const agedResult = await materializeAgedQueueItems(supplyDomain, remaining, {
         routeCampaigns: null,
+        agentExtensionId,
       });
       results.push({ domain: supplyDomain, ...agedResult });
       remaining -= Number(agedResult.created || 0);
@@ -2779,6 +2943,7 @@ async function refillQueueFamilyForAgent({
   const materialized = await materializeQueueSupplyForAgent({
     domain: context.domain,
     domains: queueDomains,
+    agentExtensionId,
     queueFamilies,
     deficit,
     routeCampaigns,
@@ -3002,11 +3167,14 @@ async function maybeRefillCxQueueForAgent(context, agentExtensionId, visibleQueu
     : 0;
   const familyTargetTotal = freshTarget + day2To15Target + day16To30Target + agedTarget;
   const totalOpen = familyTargetTotal > 0 ? familyTargetTotal : rawTotalOpen;
+  const agedReconciliationTarget = queuePolicy.aged?.fillRemainder === true
+    ? totalOpen
+    : agedTarget;
   const reconciliationTargets = [
     { queueFamilies: freshFamilies, targetCount: freshTarget },
     { queueFamilies: day2To15Families, targetCount: day2To15Target },
     { queueFamilies: day16To30Families, targetCount: day16To30Target },
-    { queueFamilies: agedFamilies, targetCount: agedTarget },
+    { queueFamilies: agedFamilies, targetCount: agedReconciliationTarget },
     {
       queueFamilies: Array.from(new Set([
         ...freshFamilies,
@@ -3109,15 +3277,16 @@ async function maybeRefillCxQueueForAgent(context, agentExtensionId, visibleQueu
     deficit -= Number(day16Batch?.assigned || 0);
   }
 
-  const agedDeficit = Math.min(Math.max(agedTarget - agedCurrent, 0), deficit);
+  let effectiveAgedCurrent = agedCurrent;
+  const agedDeficit = Math.min(Math.max(agedTarget - effectiveAgedCurrent, 0), deficit);
   if (agedDeficit > 0 && readBooleanEnv("RC_CX_AGED_OVERFLOW_ENABLED", true)) {
     const agedBatch = await refillQueueFamilyForAgent({
       context,
       agentExtensionId,
       queueFamilies: agedFamilies,
-      currentCount: agedCurrent,
+      currentCount: effectiveAgedCurrent,
       currentItems: agedCurrentItems,
-      targetCount: agedCurrent + agedDeficit,
+      targetCount: effectiveAgedCurrent + agedDeficit,
       claimMinutes: Number(process.env.RC_CX_AGED_CLAIM_MINUTES) || Number(process.env.RC_CX_NONFRESH_CLAIM_MINUTES) || 30,
       randomize: false,
       maxOpenAssignmentsScope: "queue-family",
@@ -3126,7 +3295,32 @@ async function maybeRefillCxQueueForAgent(context, agentExtensionId, visibleQueu
       ignoreDrainBeforeRefill: true,
     });
     batches.push(agedBatch);
-    deficit -= Number(agedBatch?.assigned || 0);
+    const agedAssigned = Number(agedBatch?.assigned || 0);
+    effectiveAgedCurrent += agedAssigned;
+    deficit -= agedAssigned;
+  }
+
+  if (
+    deficit > 0
+    && queuePolicy.aged?.fillRemainder === true
+    && readBooleanEnv("RC_CX_AGED_OVERFLOW_ENABLED", true)
+  ) {
+    const agedRemainderBatch = await refillQueueFamilyForAgent({
+      context,
+      agentExtensionId,
+      queueFamilies: agedFamilies,
+      currentCount: effectiveAgedCurrent,
+      currentItems: agedCurrentItems,
+      targetCount: effectiveAgedCurrent + deficit,
+      claimMinutes: Number(process.env.RC_CX_AGED_CLAIM_MINUTES) || Number(process.env.RC_CX_NONFRESH_CLAIM_MINUTES) || 30,
+      randomize: false,
+      maxOpenAssignmentsScope: "queue-family",
+      requestKeyPrefix: `cx-aged-remainder-refill:${context.domain}:${agentExtensionId}:${timestamp}`,
+      routeCampaigns: null,
+      ignoreDrainBeforeRefill: true,
+    });
+    batches.push(agedRemainderBatch);
+    deficit -= Number(agedRemainderBatch?.assigned || 0);
   }
 
   return {
@@ -3153,6 +3347,36 @@ async function maybeRefillCxQueueForAgent(context, agentExtensionId, visibleQueu
       routeCampaigns,
     },
   };
+}
+
+function queueCxWorkspaceRefill(context, agentExtensionId, visibleQueueItems = []) {
+  const normalizedExtensionId = String(agentExtensionId || "").trim();
+  if (!normalizedExtensionId) return { ok: true, queued: false, reason: "missing-extension-id" };
+  const key = `${normalizeDomain(context?.domain || context?.account?.company || "WYNN")}:${normalizedExtensionId}`;
+  const now = Date.now();
+  const staleMs = Math.max(Number(process.env.RC_CX_WORKSPACE_REFILL_IN_FLIGHT_STALE_MS) || 120_000, 10_000);
+  const existingStartedAt = Number(cxWorkspaceRefillInFlight.get(key) || 0);
+  if (existingStartedAt > 0 && now - existingStartedAt < staleMs) {
+    return { ok: true, queued: false, reason: "refill-already-running" };
+  }
+
+  cxWorkspaceRefillInFlight.set(key, now);
+  Promise.resolve()
+    .then(() => maybeRefillCxQueueForAgent(context, normalizedExtensionId, visibleQueueItems))
+    .catch((error) => {
+      console.warn("[cx-workspace-refill] failed", {
+        extensionId: normalizedExtensionId,
+        domain: context?.domain || null,
+        error: error.message,
+      });
+    })
+    .finally(() => {
+      if (Number(cxWorkspaceRefillInFlight.get(key) || 0) === now) {
+        cxWorkspaceRefillInFlight.delete(key);
+      }
+    });
+
+  return { ok: true, queued: true, reason: "background-refill" };
 }
 
 function buildLeadBodyFromQueueSources(queueItem = {}, cadenceDoc = null) {
@@ -3185,6 +3409,11 @@ function summarizeServedQueueItem(queueItem, cadenceDoc = null) {
     : null;
   const leadBody = buildLeadBodyFromQueueSources(queueItem, cadenceDoc);
   const effectiveQueueFamily = getQueueItemFamily(queueItem);
+  const effectiveRcxRouting = resolveRcxRoutingForQueueIntent({
+    queueFamily: effectiveQueueFamily,
+    assignedExtensionId: queueItem.assignment?.extensionId || null,
+    assignedAgentName: queueItem.assignment?.agentName || null,
+  }, queueItem);
   const nextPendingAction = Array.isArray(cadenceDoc?.schedule?.actions)
     ? cadenceDoc.schedule.actions
       .filter((entry) => entry.channel === "cx" && (entry.status === "pending" || entry.status === "requested"))
@@ -3249,11 +3478,11 @@ function summarizeServedQueueItem(queueItem, cadenceDoc = null) {
     queueState: queueItem.state || null,
     queueTicketId: queueItem._id ? String(queueItem._id) : null,
     rcxAccountId:
-      String(queueItem.rcxAccountId || payloadSnapshot?.rcxAccountId || "").trim() || null,
+      String(effectiveRcxRouting.accountId || queueItem.rcxAccountId || payloadSnapshot?.rcxAccountId || "").trim() || null,
     rcxDialGroupId:
-      String(queueItem.rcxDialGroupId || payloadSnapshot?.rcxDialGroupId || "").trim() || null,
+      String(effectiveRcxRouting.dialGroupId || queueItem.rcxDialGroupId || payloadSnapshot?.rcxDialGroupId || "").trim() || null,
     rcxCampaignId:
-      String(queueItem.rcxCampaignId || payloadSnapshot?.rcxCampaignId || "").trim() || null,
+      String(effectiveRcxRouting.campaignId || queueItem.rcxCampaignId || payloadSnapshot?.rcxCampaignId || "").trim() || null,
     assignedExtensionId: queueItem.assignment?.extensionId || null,
     assignedAgentName: queueItem.assignment?.agentName || null,
   };
@@ -3263,9 +3492,17 @@ async function buildCxQueueItems(context, limit = 50) {
   const agentExtensionId = String(context?.account?.extensionId || "").trim();
   if (!agentExtensionId) return [];
   await bumpLastActivityAt(agentExtensionId, { source: "cx-workspace" }).catch(() => null);
-  if (Date.now() - lastQueueOrderingBackfillAt > 60 * 1000) {
+  const backfillIntervalMs = Math.max(
+    Number(process.env.RC_CX_WORKSPACE_ORDERING_BACKFILL_INTERVAL_MS) || 60_000,
+    0,
+  );
+  if (backfillIntervalMs > 0 && Date.now() - lastQueueOrderingBackfillAt > backfillIntervalMs) {
     lastQueueOrderingBackfillAt = Date.now();
-    await backfillCxQueueOrdering(null, 1000).catch(() => null);
+    const backfillLimit = Math.min(
+      Math.max(Number(process.env.RC_CX_WORKSPACE_ORDERING_BACKFILL_LIMIT) || 250, 25),
+      5000,
+    );
+    backfillCxQueueOrdering(null, backfillLimit).catch(() => null);
   }
 
   let activeQueueItems = await listActiveCxQueueItemsForAgent(context, agentExtensionId);
@@ -3283,11 +3520,16 @@ async function buildCxQueueItems(context, limit = 50) {
   }
   let visibleQueueItems = activeQueueItems.filter((item) =>
     canViewQueueItemForAgent(item, context));
-  const refill = await maybeRefillCxQueueForAgent(context, agentExtensionId, visibleQueueItems).catch((error) => ({
-    ok: false,
-    error: error.message,
-  }));
-  if (refill?.assigned > 0 || refill?.released > 0) {
+  const asyncRefill =
+    readBooleanEnv("RC_CX_WORKSPACE_REFILL_ASYNC_ENABLED", true) &&
+    !(visibleQueueItems.length === 0 && readBooleanEnv("RC_CX_WORKSPACE_REFILL_SYNC_WHEN_EMPTY", false));
+  const refill = asyncRefill
+    ? queueCxWorkspaceRefill(context, agentExtensionId, visibleQueueItems)
+    : await maybeRefillCxQueueForAgent(context, agentExtensionId, visibleQueueItems).catch((error) => ({
+      ok: false,
+      error: error.message,
+    }));
+  if (!asyncRefill && (refill?.assigned > 0 || refill?.released > 0)) {
     activeQueueItems = await listActiveCxQueueItemsForAgent(context, agentExtensionId);
     visibleQueueItems = activeQueueItems.filter((item) =>
       canViewQueueItemForAgent(item, context));

@@ -2,7 +2,7 @@
 
 const { createEvent, processNextEvent } = require("../../event-core/src");
 const { env } = require("../../shared-config/src");
-const { CxDialQueue, LeadCadence } = require("../../shared-models/src");
+const { CxDialQueue, LeadCadence, MasterProspectIndex } = require("../../shared-models/src");
 const {
   agentStateRepository,
   callLogRepository,
@@ -30,6 +30,7 @@ const {
   deriveQueueFamilyFromLeadTouchState,
   getCooldownReleaseAt,
   getPacificDateKey,
+  getPacificMonthKey,
   getQueueFamilyPolicy,
   getTouchAgeFreshWindowDays,
   resolveQueueDialability,
@@ -53,6 +54,8 @@ const CX_CADENCE_EVENT_TYPES = Object.freeze({
   CALL_PLACED: "cx.call.placed",
   CALL_TERMINAL_OUTCOME: "cx.call.terminal-outcome",
 });
+
+const cxQueueOrderingBackfillMemo = new Map();
 
 function normalizeDomain(domain) {
   return String(domain || "").trim().toUpperCase();
@@ -710,6 +713,309 @@ function buildDailyAgentTouchMetadata(queueItem = {}, placedAt = new Date()) {
   };
 }
 
+function resolveCxTouchIdentity(queueItem = {}, payload = {}) {
+  const metadata = queueItem?.metadata && typeof queueItem.metadata === "object"
+    ? queueItem.metadata
+    : {};
+  const extensionId = String(
+    queueItem?.assignment?.extensionId ||
+      metadata.assignedExtensionId ||
+      metadata.lastDialIntentAssignedExtensionId ||
+      payload.assignedExtensionId ||
+      payload.extensionId ||
+      "",
+  ).trim();
+  const agentName = String(
+    queueItem?.assignment?.agentName ||
+      metadata.assignedAgentName ||
+      payload.agentName ||
+      "",
+  ).trim();
+  const agentEmail = String(
+    payload.agentEmail ||
+      metadata.rcxVisibilityAgentUsername ||
+      metadata.lastDialExecutionAgentEmail ||
+      "",
+  ).trim();
+
+  return {
+    extensionId: extensionId || null,
+    agentName: agentName || null,
+    agentEmail: agentEmail || null,
+  };
+}
+
+async function markLeadCxTouchState({
+  domain,
+  caseId,
+  queueItem = {},
+  payload = {},
+  placedAt = new Date(),
+  confirmedCall = false,
+} = {}) {
+  if (!confirmedCall) return { skipped: true, reason: "unconfirmed-call" };
+  const normalizedDomain = normalizeDomain(domain || queueItem?.domain);
+  const numericCaseId = Number(caseId ?? queueItem?.caseId);
+  if (!normalizedDomain || !Number.isFinite(numericCaseId)) {
+    return { skipped: true, reason: "missing-case" };
+  }
+
+  const safePlacedAt = placedAt instanceof Date && !Number.isNaN(placedAt.getTime())
+    ? placedAt
+    : new Date();
+  const identity = resolveCxTouchIdentity(queueItem, payload);
+  const dateKey = getPacificDateKey(safePlacedAt);
+  const monthKey = getPacificMonthKey(safePlacedAt);
+  const [existing, existingProspect] = await Promise.all([
+    LeadCadence.findOne(
+      { domain: normalizedDomain, caseId: numericCaseId },
+      {
+        "counterCadence.cxDailyDateKey": 1,
+        "counterCadence.cxDailyCalls": 1,
+        "counterCadence.cxMonthlyMonthKey": 1,
+        "counterCadence.cxMonthlyCalls": 1,
+      },
+    ).lean().catch(() => null),
+    MasterProspectIndex.findOne(
+      { domain: normalizedDomain, caseId: numericCaseId },
+      {
+        "filler.dailyDateKey": 1,
+        "filler.dailyAttempts": 1,
+        "filler.monthlyMonthKey": 1,
+        "filler.monthlyAttempts": 1,
+      },
+    ).lean().catch(() => null),
+  ]);
+
+  const priorDailyKey = String(existing?.counterCadence?.cxDailyDateKey || "").trim();
+  const priorMonthlyKey = String(existing?.counterCadence?.cxMonthlyMonthKey || "").trim();
+  const nextDailyCalls = priorDailyKey === dateKey
+    ? Math.max(Number(existing?.counterCadence?.cxDailyCalls || 0) || 0, 0) + 1
+    : 1;
+  const nextMonthlyCalls = priorMonthlyKey === monthKey
+    ? Math.max(Number(existing?.counterCadence?.cxMonthlyCalls || 0) || 0, 0) + 1
+    : 1;
+  const priorProspectDailyKey = String(existingProspect?.filler?.dailyDateKey || "").trim();
+  const priorProspectMonthlyKey = String(existingProspect?.filler?.monthlyMonthKey || "").trim();
+  const nextProspectDailyCalls = priorProspectDailyKey === dateKey
+    ? Math.max(Number(existingProspect?.filler?.dailyAttempts || 0) || 0, 0) + 1
+    : 1;
+  const nextProspectMonthlyCalls = priorProspectMonthlyKey === monthKey
+    ? Math.max(Number(existingProspect?.filler?.monthlyAttempts || 0) || 0, 0) + 1
+    : 1;
+  const queueFamily = normalizeQueueFamily(queueItem?.queueFamily || queueItem?.metadata?.queueFamily || "");
+  const queueItemId = queueItem?._id ? String(queueItem._id) : null;
+
+  const cadenceUpdate = await LeadCadence.findOneAndUpdate(
+    { domain: normalizedDomain, caseId: numericCaseId },
+    {
+      $set: {
+        "lastTouched.cx": safePlacedAt,
+        "counterCadence.lastCxDialedAt": safePlacedAt,
+        "counterCadence.lastCxDialedByExtensionId": identity.extensionId,
+        "counterCadence.lastCxDialedByAgentName": identity.agentName,
+        "counterCadence.lastCxDialedByAgentEmail": identity.agentEmail,
+        "counterCadence.lastCxQueueFamily": queueFamily,
+        "counterCadence.lastCxQueueItemId": queueItemId,
+        "counterCadence.cxDailyDateKey": dateKey,
+        "counterCadence.cxDailyCalls": nextDailyCalls,
+        "counterCadence.cxMonthlyMonthKey": monthKey,
+        "counterCadence.cxMonthlyCalls": nextMonthlyCalls,
+        "payloadSnapshot.lastCxDialedAt": safePlacedAt,
+        "payloadSnapshot.lastCxDialedByExtensionId": identity.extensionId,
+        "payloadSnapshot.lastCxDialedByAgentName": identity.agentName,
+        "payloadSnapshot.lastCxDialedByAgentEmail": identity.agentEmail,
+        "payloadSnapshot.lastCxQueueFamily": queueFamily,
+        "payloadSnapshot.lastCxQueueItemId": queueItemId,
+      },
+      $inc: {
+        "cadenceCounters.cx": 1,
+      },
+    },
+    { new: false },
+  ).catch(() => null);
+
+  const prospectUpdate = await MasterProspectIndex.findOneAndUpdate(
+    { domain: normalizedDomain, caseId: numericCaseId },
+    {
+      $set: {
+        "filler.lastDialAttempt": safePlacedAt,
+        "filler.lastAttemptResult": "cx-call-placed",
+        "filler.lastDialedByExtensionId": identity.extensionId,
+        "filler.lastDialedByAgentName": identity.agentName,
+        "filler.dailyDateKey": dateKey,
+        "filler.dailyAttempts": nextProspectDailyCalls,
+        "filler.monthlyMonthKey": monthKey,
+        "filler.monthlyAttempts": nextProspectMonthlyCalls,
+      },
+      $inc: {
+        "filler.attemptCount": 1,
+      },
+    },
+    { new: false },
+  ).catch(() => null);
+
+  return {
+    ok: true,
+    cadenceMatched: Boolean(cadenceUpdate),
+    prospectMatched: Boolean(prospectUpdate),
+    extensionId: identity.extensionId,
+    dailyCalls: nextDailyCalls,
+    monthlyCalls: nextMonthlyCalls,
+  };
+}
+
+function latestDateValue(...values) {
+  const dates = values
+    .map((value) => value ? new Date(value) : null)
+    .filter((date) => date && !Number.isNaN(date.getTime()));
+  if (dates.length === 0) return null;
+  return new Date(Math.max(...dates.map((date) => date.getTime())));
+}
+
+async function readPersistedCxTouchState(domain, caseId) {
+  const normalizedDomain = normalizeDomain(domain);
+  const numericCaseId = Number(caseId);
+  if (!normalizedDomain || !Number.isFinite(numericCaseId)) return null;
+
+  const [cadence, prospect] = await Promise.all([
+    LeadCadence.findOne(
+      { domain: normalizedDomain, caseId: numericCaseId },
+      {
+        "cadenceCounters.cx": 1,
+        "lastTouched.cx": 1,
+        "counterCadence.lastCxDialedAt": 1,
+        "counterCadence.lastCxDialedByExtensionId": 1,
+        "counterCadence.lastCxDialedByAgentName": 1,
+        "counterCadence.cxDailyDateKey": 1,
+        "counterCadence.cxDailyCalls": 1,
+        "counterCadence.cxMonthlyMonthKey": 1,
+        "counterCadence.cxMonthlyCalls": 1,
+        "payloadSnapshot.lastCxDialedAt": 1,
+        "payloadSnapshot.lastCxDialedByExtensionId": 1,
+        "payloadSnapshot.lastCxDialedByAgentName": 1,
+      },
+    ).lean().catch(() => null),
+    MasterProspectIndex.findOne(
+      { domain: normalizedDomain, caseId: numericCaseId },
+      {
+        "filler.lastDialAttempt": 1,
+        "filler.attemptCount": 1,
+        "filler.lastDialedByExtensionId": 1,
+        "filler.lastDialedByAgentName": 1,
+        "filler.dailyDateKey": 1,
+        "filler.dailyAttempts": 1,
+        "filler.monthlyMonthKey": 1,
+        "filler.monthlyAttempts": 1,
+      },
+    ).lean().catch(() => null),
+  ]);
+
+  const cadenceTouchAt = latestDateValue(
+    cadence?.lastTouched?.cx,
+    cadence?.counterCadence?.lastCxDialedAt,
+    cadence?.payloadSnapshot?.lastCxDialedAt,
+  );
+  const prospectTouchAt = latestDateValue(prospect?.filler?.lastDialAttempt);
+  const useProspect =
+    prospectTouchAt &&
+    (!cadenceTouchAt || prospectTouchAt.getTime() > cadenceTouchAt.getTime());
+  const source = useProspect ? prospect?.filler || {} : null;
+  const counter = !useProspect ? cadence?.counterCadence || {} : {};
+  const payload = !useProspect ? cadence?.payloadSnapshot || {} : {};
+  const touchedAt = useProspect ? prospectTouchAt : cadenceTouchAt;
+  if (!touchedAt) return null;
+
+  return {
+    touchedAt,
+    totalCalls: useProspect
+      ? Math.max(Number(source.attemptCount || 0) || 0, 0)
+      : Math.max(Number(cadence?.cadenceCounters?.cx || 0) || 0, 0),
+    extensionId: String(
+      useProspect
+        ? source.lastDialedByExtensionId || ""
+        : counter.lastCxDialedByExtensionId || payload.lastCxDialedByExtensionId || "",
+    ).trim() || null,
+    agentName: useProspect
+      ? source.lastDialedByAgentName || null
+      : counter.lastCxDialedByAgentName || payload.lastCxDialedByAgentName || null,
+    dailyDateKey: String(useProspect ? source.dailyDateKey || "" : counter.cxDailyDateKey || "").trim() || null,
+    dailyCalls: Math.max(Number(useProspect ? source.dailyAttempts || 0 : counter.cxDailyCalls || 0) || 0, 0),
+    monthlyMonthKey: String(useProspect ? source.monthlyMonthKey || "" : counter.cxMonthlyMonthKey || "").trim() || null,
+    monthlyCalls: Math.max(Number(useProspect ? source.monthlyAttempts || 0 : counter.cxMonthlyCalls || 0) || 0, 0),
+  };
+}
+
+function buildHydratedCxTouchPatch(item = {}, persisted = null, now = new Date()) {
+  if (!persisted?.touchedAt) return null;
+  const dateKey = getPacificDateKey(now);
+  const monthKey = getPacificMonthKey(now);
+  const itemLastPlacedAt = latestDateValue(item.lastPlacedAt, item.metadata?.lastQueueAttemptAt);
+  const nextLastPlacedAt =
+    !itemLastPlacedAt || persisted.touchedAt.getTime() > itemLastPlacedAt.getTime()
+      ? persisted.touchedAt
+      : itemLastPlacedAt;
+  const itemDailyCalls =
+    String(item.dailyPlacedDateKey || item.metadata?.dailyPlacedDateKey || "").trim() === dateKey
+      ? Math.max(Number(item.dailyPlacedCalls ?? item.metadata?.dailyPlacedCalls ?? 0) || 0, 0)
+      : 0;
+  const persistedDailyCalls = persisted.dailyDateKey === dateKey ? persisted.dailyCalls : 0;
+  const itemMonthlyCalls =
+    String(item.monthlyPlacedMonthKey || item.metadata?.monthlyPlacedMonthKey || "").trim() === monthKey
+      ? Math.max(Number(item.monthlyPlacedCalls ?? item.metadata?.monthlyPlacedCalls ?? 0) || 0, 0)
+      : 0;
+  const persistedMonthlyCalls = persisted.monthlyMonthKey === monthKey ? persisted.monthlyCalls : 0;
+
+  return {
+    placedCalls: Math.max(Number(item.placedCalls || 0) || 0, Number(persisted.totalCalls || 0) || 0),
+    lastPlacedAt: nextLastPlacedAt,
+    dailyPlacedDateKey: dateKey,
+    dailyPlacedCalls: Math.max(itemDailyCalls, persistedDailyCalls),
+    monthlyPlacedMonthKey: monthKey,
+    monthlyPlacedCalls: Math.max(itemMonthlyCalls, persistedMonthlyCalls),
+    "metadata.lastQueueAttemptAt": nextLastPlacedAt,
+    "metadata.lastTouchedAt": nextLastPlacedAt,
+    "metadata.lastTouchedExtensionId": persisted.extensionId || item.metadata?.lastTouchedExtensionId || null,
+    "metadata.lastTouchedAgentName": persisted.agentName || item.metadata?.lastTouchedAgentName || null,
+    "metadata.lastCxDialedByExtensionId": persisted.extensionId || item.metadata?.lastCxDialedByExtensionId || null,
+    "metadata.lastCxDialedByAgentName": persisted.agentName || item.metadata?.lastCxDialedByAgentName || null,
+    "metadata.dailyPlacedDateKey": dateKey,
+    "metadata.dailyPlacedCalls": Math.max(itemDailyCalls, persistedDailyCalls),
+    "metadata.monthlyPlacedMonthKey": monthKey,
+    "metadata.monthlyPlacedCalls": Math.max(itemMonthlyCalls, persistedMonthlyCalls),
+  };
+}
+
+async function hydrateClaimedQueueItemCxTouchState(item = {}) {
+  if (!item?._id) return item;
+  const persisted = await readPersistedCxTouchState(item.domain, item.caseId).catch(() => null);
+  const patch = buildHydratedCxTouchPatch(item, persisted);
+  if (!patch) return item;
+  await cxDialQueueRepository.updateQueueItem(item._id, patch).catch(() => null);
+  return {
+    ...item,
+    placedCalls: patch.placedCalls,
+    lastPlacedAt: patch.lastPlacedAt,
+    dailyPlacedDateKey: patch.dailyPlacedDateKey,
+    dailyPlacedCalls: patch.dailyPlacedCalls,
+    monthlyPlacedMonthKey: patch.monthlyPlacedMonthKey,
+    monthlyPlacedCalls: patch.monthlyPlacedCalls,
+    metadata: {
+      ...(item.metadata || {}),
+      lastQueueAttemptAt: patch["metadata.lastQueueAttemptAt"],
+      lastTouchedAt: patch["metadata.lastTouchedAt"],
+      lastTouchedExtensionId: patch["metadata.lastTouchedExtensionId"],
+      lastTouchedAgentName: patch["metadata.lastTouchedAgentName"],
+      lastCxDialedByExtensionId: patch["metadata.lastCxDialedByExtensionId"],
+      lastCxDialedByAgentName: patch["metadata.lastCxDialedByAgentName"],
+      dailyPlacedDateKey: patch["metadata.dailyPlacedDateKey"],
+      dailyPlacedCalls: patch["metadata.dailyPlacedCalls"],
+      monthlyPlacedMonthKey: patch["metadata.monthlyPlacedMonthKey"],
+      monthlyPlacedCalls: patch["metadata.monthlyPlacedCalls"],
+    },
+  };
+}
+
 async function markAgentCxCallState(queueItem = null, payload = {}, placedAt = new Date()) {
   const extensionId = String(queueItem?.assignment?.extensionId || "").trim();
   if (!extensionId) return null;
@@ -1269,6 +1575,39 @@ async function backfillCxQueueOrdering(domain = null, limit = 250) {
   }
 }
 
+async function maybeBackfillCxQueueOrdering(domain = null, limit = 250, options = {}) {
+  if (options.skipOrderingBackfill === true) return { ok: true, skipped: true, reason: "skip-requested" };
+
+  const normalizedLimit = Math.min(Math.max(Number(limit) || 250, 25), 5000);
+  const normalizedDomain = normalizeDomain(domain);
+  const cacheKey = `${normalizedDomain || "ALL"}:${normalizedLimit}`;
+  const intervalMs = Math.max(
+    Number(process.env.RC_CX_ORDERING_BACKFILL_MIN_INTERVAL_MS) || 60_000,
+    0,
+  );
+  const now = Date.now();
+  const previousAt = Number(cxQueueOrderingBackfillMemo.get(cacheKey) || 0);
+  if (
+    options.forceOrderingBackfill !== true
+    && intervalMs > 0
+    && previousAt > 0
+    && now - previousAt < intervalMs
+  ) {
+    return {
+      ok: true,
+      skipped: true,
+      reason: "recent-backfill",
+      nextEligibleAt: new Date(previousAt + intervalMs),
+    };
+  }
+
+  // Set before awaiting so simultaneous refill requests do not all start
+  // their own ordering scan against the same queue.
+  cxQueueOrderingBackfillMemo.set(cacheKey, now);
+  await backfillCxQueueOrdering(domain, normalizedLimit);
+  return { ok: true, skipped: false };
+}
+
 async function queueCxDialRequest(payload = {}) {
   const domain = normalizeDomain(payload.domain);
   const caseId = Number(payload.caseId);
@@ -1545,7 +1884,17 @@ async function handleCxCallPlaced(payload = {}) {
   );
   const nextPlacedCalls = Number(attemptPatch.placedCalls || 0);
   if (confirmedCall) {
-    await markAgentCxCallState(queueItem, payload, placedAt).catch(() => null);
+    await Promise.all([
+      markAgentCxCallState(queueItem, payload, placedAt).catch(() => null),
+      markLeadCxTouchState({
+        domain,
+        caseId,
+        queueItem,
+        payload,
+        placedAt,
+        confirmedCall,
+      }).catch(() => null),
+    ]);
   }
   if (confirmedCall && payload.uii) {
     // Read the RingCX-specific identifiers stamped on the queue item
@@ -1576,6 +1925,25 @@ async function handleCxCallPlaced(payload = {}) {
         : null,
       externId: queueMetadata.rcxVisibilityExternId || null,
     };
+    // Stamp routeCampaignKey at write time so the vendor families
+    // rollup can split LD into ld-custom / ld-general without waiting
+    // on the nightly source backfill. Backfill (callLogSourceBackfill
+    // Service) remains the safety net for stubs that race the queue
+    // metadata or older rows.
+    //
+    // TODO(ld-campaign-queue-feed): the producer side needs to
+    // guarantee `queueItem.metadata.routeCampaignKey` is set for every
+    // CX-publish path. Existing materializers in cxWorkspaceService
+    // (line ~2369 / 2465 / 2566 / 2637) already copy it from
+    // LeadCadence / MasterProspect.metadata — verify the live publish
+    // path (ringcxLeadServingService.publishQueueItemToRingcx) also
+    // propagates it onto the RingCX-side custom-fields if we want it
+    // visible in the agent dashboard. If the queue item lacks it, this
+    // code silently writes null and the nightly backfill fills it in
+    // from LeadCadence — correctness is preserved but real-time
+    // dashboards see the gap.
+    const routeCampaignKey = queueMetadata.routeCampaignKey || null;
+    const routeCampaignName = queueMetadata.routeCampaignName || null;
     await callLogRepository.upsertCallLog({
       domain,
       telephonySessionId: payload.uii,
@@ -1586,6 +1954,8 @@ async function handleCxCallPlaced(payload = {}) {
       executionOwner: "ringcentral-cx",
       platform: "cx",
       ringcx: ringcxStamp,
+      routeCampaignKey,
+      routeCampaignName,
       audit: {
         dispatchSource: "cx-call-placed",
         intent: "cx-call-defensive-write",
@@ -2313,7 +2683,11 @@ async function reconcileRequestedCxCadence(options = {}) {
 }
 
 async function claimNextCxQueueItem(options = {}) {
-  await backfillCxQueueOrdering(options.domain || null).catch(() => null);
+  if (options.skipOrderingBackfill !== true) {
+    await maybeBackfillCxQueueOrdering(options.domain || null, options.orderingBackfillLimit || 250, {
+      forceOrderingBackfill: options.forceOrderingBackfill === true,
+    }).catch(() => null);
+  }
   const requestKey = String(options.requestKey || "").trim();
   if (requestKey) {
     const existingClaim = await cxDialQueueRepository.findClaimedQueueItemByRequestKey(options.domain || null, requestKey);
@@ -2352,17 +2726,20 @@ async function claimNextCxQueueItem(options = {}) {
         preferQueueFamilyOrder: options.preferQueueFamilyOrder !== false,
         createdAtGte: options.createdAtGte || options.windowStart || null,
         createdAtLte: options.createdAtLte || options.windowEnd || null,
+        excludeLastTouchedExtensionId: options.extensionId || null,
       },
     );
     if (!claimed) break;
-    const claimedObject = claimed.toObject ? claimed.toObject() : claimed;
+    const claimedObject = await hydrateClaimedQueueItemCxTouchState(
+      claimed.toObject ? claimed.toObject() : claimed,
+    );
     const claimedFamily = deriveQueueFamily(claimedObject);
     const dialability = resolveQueueDialability({
       ...claimedObject,
       queueFamily: claimedFamily,
     }, new Date());
     if (dialability.ok) {
-      item = claimed;
+      item = claimedObject;
       break;
     }
 
@@ -2476,6 +2853,39 @@ async function claimNextCxQueueItem(options = {}) {
       ignoreDrainBeforeRefill: options.ignoreDrainBeforeRefill === true,
     });
     if (!ranking.selected) {
+      const rankedAgents = formatRankedAgents(ranking, openAssignmentMap);
+      const blockedOnlyByLastAgent =
+        rankedAgents.length > 0
+        && rankedAgents.every((entry) =>
+          String(entry.reasonCode || entry.reason || "").trim() === "last-agent-called-lead");
+
+      if (
+        blockedOnlyByLastAgent
+        && options.skipLastAgentBlockedItems !== false
+        && Number(options._lastAgentSkipDepth || 0) < maxClaimAttempts
+      ) {
+        const skipMinutes = Math.max(
+          Number(process.env.RC_CX_LAST_AGENT_SKIP_MINUTES) || 10,
+          1,
+        );
+        await cxDialQueueRepository.transitionQueueItemState(item._id, ["claimed"], {
+          state: "queued",
+          claimUntil: null,
+          releaseAt: new Date(Date.now() + skipMinutes * 60 * 1000),
+          "metadata.lastPolicyHoldAt": new Date(),
+          "metadata.lastPolicyHoldReason": "last-agent-called-lead",
+          "metadata.lastPolicyHoldDetail": "Skipped during assignment so the next eligible lead can be served.",
+          "metadata.lastPolicyHoldReleaseAt": new Date(Date.now() + skipMinutes * 60 * 1000),
+        }, {
+          match: buildQueueItemMutationMatch(item),
+        }).catch(() => null);
+
+        return claimNextCxQueueItem({
+          ...options,
+          _lastAgentSkipDepth: Number(options._lastAgentSkipDepth || 0) + 1,
+        });
+      }
+
       await cxDialQueueRepository.transitionQueueItemState(item._id, ["claimed"], {
         state: "ready",
         claimUntil: null,
@@ -2489,7 +2899,7 @@ async function claimNextCxQueueItem(options = {}) {
         reason: "no-eligible-agents",
         detail: "No eligible CX agents were available for this queue family.",
         queueFamily: ranking.queueFamily,
-        rankedAgents: formatRankedAgents(ranking, openAssignmentMap),
+        rankedAgents,
       };
     }
 
@@ -2618,6 +3028,10 @@ async function assignCxQueueBatch(options = {}) {
       .map((value) => String(value || "").trim())
       .filter(Boolean);
 
+  await maybeBackfillCxQueueOrdering(options.domain || null, options.orderingBackfillLimit || 250, {
+    forceOrderingBackfill: options.forceOrderingBackfill === true,
+  }).catch(() => null);
+
   for (let index = 0; index < maxCount; index += 1) {
     const result = await claimNextCxQueueItem({
       domain: options.domain || null,
@@ -2642,6 +3056,7 @@ async function assignCxQueueBatch(options = {}) {
       assignmentPackCreatedAt: options.assignmentPackCreatedAt || null,
       assignmentPackSource: options.assignmentPackSource || null,
       requestKey: `${requestKeyPrefix}:${index + 1}`,
+      skipOrderingBackfill: true,
     });
     results.push(result);
     if (!result.claimed && result.reason !== "queue-policy-hold") break;

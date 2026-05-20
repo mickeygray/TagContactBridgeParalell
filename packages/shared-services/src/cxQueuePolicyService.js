@@ -77,7 +77,7 @@ const MANUAL_NO_LEADS_POLICY = Object.freeze({
   fresh: { eligible: false, firstTouchEligible: false, targetOpen: 0, hourlyCap: null, priorityWeight: 0 },
   day2to15: { targetOpen: 0 },
   day16to30: { targetOpen: 0 },
-  aged: { targetOpen: 0 },
+  aged: { targetOpen: 0, fillRemainder: false },
 });
 
 function readPolicyNumber(value, fallback) {
@@ -108,6 +108,15 @@ function readEnvBoolean(names, fallback) {
   return fallback;
 }
 
+function readPolicyBoolean(value, fallback) {
+  if (value === null || value === undefined || value === "") return fallback;
+  if (typeof value === "boolean") return value;
+  const raw = String(value || "").trim().toLowerCase();
+  if (["1", "true", "yes", "on"].includes(raw)) return true;
+  if (["0", "false", "no", "off"].includes(raw)) return false;
+  return fallback;
+}
+
 function hasPolicyValue(value) {
   return value !== null && value !== undefined && value !== "";
 }
@@ -122,6 +131,7 @@ function hasManualQueuePolicy(input = null) {
     || hasPolicyValue(input.day2to15?.targetOpen)
     || hasPolicyValue(input.day16to30?.targetOpen)
     || hasPolicyValue(input.aged?.targetOpen)
+    || hasPolicyValue(input.aged?.fillRemainder)
     || hasPolicyValue(input.totalOpen)
     || hasPolicyValue(input.routeCampaigns)
   );
@@ -289,6 +299,10 @@ function resolveAccountQueuePolicy(account = null) {
     },
     aged: {
       targetOpen: resolvedAgedTarget,
+      fillRemainder: readPolicyBoolean(
+        rawPolicy.aged?.fillRemainder,
+        readEnvBoolean(["RC_CX_AGED_FILL_REMAINDER_ENABLED", "RC_CX_RED_FILL_REMAINDER_ENABLED"], false),
+      ),
     },
   };
 }
@@ -506,13 +520,17 @@ function getTouchAgeFreshWindowDays() {
 }
 
 function getTouchAgeFreshMaxCalls() {
-  return readEnvNumber(
+  const totalMax = readEnvNumber(
     [
-      "RC_CX_TOUCH_AGE_FRESH_MAX_CALLS",
-      "RC_CX_FIRST_TOUCH_GREEN_MAX_CALLS",
+      "RC_CX_GREEN_TOTAL_MAX_CALLS",
+      "RC_CX_FRESH_TOTAL_MAX_CALLS",
     ],
-    7,
+    8,
   );
+  // deriveQueueFamilyFromLeadTouchState receives the number of calls
+  // already placed. A ceiling of 7 lets the eighth green call go out,
+  // then promotes the lead to blue for the next attempt.
+  return Math.max(totalMax - 1, 0);
 }
 
 function isTouchAgeBucketingEnabled() {
@@ -665,7 +683,12 @@ function getCooldownReleaseAt(item = {}, now = new Date()) {
   const placedAt = item.lastPlacedAt || item.metadata?.lastQueueAttemptAt || null;
   const base = placedAt ? new Date(placedAt) : new Date(now);
   if (Number.isNaN(base.getTime())) return new Date(now);
-  return addWorkingMinutes(base, Math.max(Number(policy.cooldownMinutes) || 0, 0));
+  const cooldownMinutes = Math.max(Number(policy.cooldownMinutes) || 0, 0);
+  if (cooldownMinutes <= 0) return base;
+  if (policy.key === "fresh-day1" || policy.key === "fresh-day2to10") {
+    return addWorkingMinutes(base, cooldownMinutes);
+  }
+  return new Date(base.getTime() + cooldownMinutes * 60 * 1000);
 }
 
 function resolveQueueDialability(item = {}, now = new Date()) {
@@ -738,7 +761,8 @@ function resolveQueueDialability(item = {}, now = new Date()) {
     };
   }
 
-  if (item.lastPlacedAt && nextByCooldown.getTime() > new Date(now).getTime()) {
+  const lastPlacedAt = item.lastPlacedAt || item.metadata?.lastQueueAttemptAt || null;
+  if (lastPlacedAt && nextByCooldown.getTime() > new Date(now).getTime()) {
     return {
       ok: false,
       reason: "cooldown-active",
@@ -791,6 +815,7 @@ module.exports = {
   deriveQueueFamilyFromLeadTouchState,
   getCooldownReleaseAt,
   getDailyPlacedCalls,
+  getPacificMonthKey,
   getPacificBusinessDayAge,
   getPacificBusinessDayStart,
   getPacificDateKey,

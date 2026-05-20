@@ -978,6 +978,50 @@ function createAdminAccountsRouter(auth) {
     },
   );
 
+  /**
+   * POST /:id/cx-oauth/force-reauth
+   *
+   * Revokes the agent's RC OAuth grant on RingCentral's servers AND
+   * wipes the local refresh token / bearer. Next time the agent visits
+   * the CX workspace, the SPA sees `consent-revoked` and routes them
+   * through the OAuth flow — RC re-prompts with the current scope list
+   * (so e.g. CXRouting can be re-granted against the agent's current
+   * RC role).
+   *
+   * Use this when an agent's stored grant has drifted from what their
+   * RC role actually permits (most common symptom: cxAuth.scopes
+   * missing CXRouting despite being assigned an Agent role). Safer
+   * than asking the agent to "logout and back in" — that often
+   * silently reuses the old grant.
+   */
+  router.post(
+    "/:id/cx-oauth/force-reauth",
+    auth.requireAuth,
+    auth.requireAdmin,
+    async (req, res) => {
+      try {
+        const record = await userAccountRepository.findUserAccountById(req.params.id);
+        if (!record) {
+          return res.status(404).json({ ok: false, error: "Account not found" });
+        }
+        const result = await cxOAuthService.forceReauth(record.id);
+        const fresh = await cxTokenStorageService.describe(record.id).catch(() => null);
+        return res.json({
+          ok: true,
+          accountId: record.id,
+          email: record.email,
+          rcRevoke: result.rcRevoke,
+          oauthState: fresh,
+          note:
+            "Refresh token wiped. Next CX session attempt by this agent will be routed " +
+            "through the OAuth consent flow.",
+        });
+      } catch (error) {
+        return res.status(error.status || 500).json(toErrorResponse(error));
+      }
+    },
+  );
+
   router.post("/", auth.requireAuth, auth.requireAdmin, async (req, res) => {
     try {
       const body = req.body || {};

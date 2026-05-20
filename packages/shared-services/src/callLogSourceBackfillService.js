@@ -62,6 +62,29 @@ function buildEmptySourceMatcher() {
   };
 }
 
+function buildEmptyRouteCampaignMatcher() {
+  return {
+    $or: [
+      { routeCampaignKey: null },
+      { routeCampaignKey: { $exists: false } },
+      { routeCampaignKey: "" },
+    ],
+  };
+}
+
+function buildNeedsBackfillMatcher() {
+  // Row qualifies if EITHER sourceName OR routeCampaignKey is empty.
+  // Catches both the legacy "no source on CX stub" case and the newer
+  // "source set but campaign key never stamped" case (which lets us
+  // backfill ld-custom/ld-general onto existing rows).
+  return {
+    $or: [
+      ...buildEmptySourceMatcher().$or,
+      ...buildEmptyRouteCampaignMatcher().$or,
+    ],
+  };
+}
+
 function pickFromCadence(cadence) {
   const sourceName =
     cadence?.sourceName ||
@@ -73,7 +96,17 @@ function pickFromCadence(cadence) {
     cadence?.attributionContext?.sourceChannel ||
     cadence?.metadata?.sourceChannel ||
     null;
-  return { sourceName, sourceChannel };
+  const routeCampaignKey =
+    cadence?.routeCampaignKey ||
+    cadence?.attributionContext?.routeCampaignKey ||
+    cadence?.payloadSnapshot?.routeCampaignKey ||
+    null;
+  const routeCampaignName =
+    cadence?.routeCampaignName ||
+    cadence?.attributionContext?.routeCampaignName ||
+    cadence?.payloadSnapshot?.routeCampaignName ||
+    null;
+  return { sourceName, sourceChannel, routeCampaignKey, routeCampaignName };
 }
 
 function pickFromMasterProspect(prospect) {
@@ -142,17 +175,25 @@ async function backfillCallLogSourceFromLeadCadence({
     errors: [],
   };
 
-  // ── Pass 1: caseId-present, sourceName-missing ─────────────────────
-  // The common case for CX-cadence stubs. We know the case; just copy
-  // the case's intake-time sourceName onto the call.
+  // ── Pass 1: caseId-present, sourceName-or-routeCampaign-missing ────
+  // The common case for CX-cadence stubs. We know the case; copy the
+  // case's intake-time sourceName + routeCampaignKey onto the call so
+  // the vendor rollup can split LD into custom vs general.
   const candidateRows = await CallLog.find(
     {
       domain: normalizedDomain,
       callStartTime: { $gte: start, $lte: end },
       caseId: { $ne: null },
-      ...buildEmptySourceMatcher(),
+      ...buildNeedsBackfillMatcher(),
     },
-    { _id: 1, telephonySessionId: 1, caseId: 1, caseDomain: 1 },
+    {
+      _id: 1,
+      telephonySessionId: 1,
+      caseId: 1,
+      caseDomain: 1,
+      sourceName: 1,
+      routeCampaignKey: 1,
+    },
   )
     .limit(effectiveLimit)
     .lean();
@@ -197,26 +238,55 @@ async function backfillCallLogSourceFromLeadCadence({
       summary.rowsSkippedNoCadence += 1;
       continue;
     }
-    const { sourceName, sourceChannel } = pickFromCadence(cadence);
-    if (!sourceName && !sourceChannel) {
+    const {
+      sourceName,
+      sourceChannel,
+      routeCampaignKey,
+      routeCampaignName,
+    } = pickFromCadence(cadence);
+    if (!sourceName && !sourceChannel && !routeCampaignKey) {
       summary.rowsSkippedNoCadence += 1;
       continue;
     }
 
-    const update = {};
-    if (sourceName) update.sourceName = sourceName;
-    if (sourceChannel) update.sourceChannel = sourceChannel;
+    // Two writes per row so we can stamp routeCampaignKey onto rows
+    // that already had sourceName populated (where the source-name
+    // re-check guard would otherwise block the whole update).
+    const sourceUpdate = {};
+    if (sourceName) sourceUpdate.sourceName = sourceName;
+    if (sourceChannel) sourceUpdate.sourceChannel = sourceChannel;
+
+    let stampedAny = false;
 
     try {
-      // Re-check guard: we only stamp if the row STILL has no sourceName.
-      // Belt-and-suspenders against a concurrent resolver run that may
-      // have written a high-confidence sourceName between the scan and
-      // the update — its decision is canonical, ours is fallback.
-      const writeResult = await CallLog.updateOne(
-        { _id: row._id, ...buildEmptySourceMatcher() },
-        { $set: update },
-      );
-      if (writeResult.modifiedCount === 0) continue;
+      if (Object.keys(sourceUpdate).length > 0) {
+        // Re-check guard: only stamp source if the row STILL has no
+        // sourceName. Belt-and-suspenders against a concurrent resolver
+        // run that may have written a high-confidence sourceName
+        // between the scan and the update.
+        const writeResult = await CallLog.updateOne(
+          { _id: row._id, ...buildEmptySourceMatcher() },
+          { $set: sourceUpdate },
+        );
+        if (writeResult.modifiedCount > 0) stampedAny = true;
+      }
+
+      // Route-campaign stamp. No competing writer for this field, so
+      // we only need to guard against re-stamping rows that already
+      // have it. If the row had a stale (different) routeCampaignKey,
+      // we leave it alone — backfill is a fill-in operation, not a
+      // rewrite.
+      if (routeCampaignKey) {
+        const routeUpdate = { routeCampaignKey };
+        if (routeCampaignName) routeUpdate.routeCampaignName = routeCampaignName;
+        const routeWrite = await CallLog.updateOne(
+          { _id: row._id, ...buildEmptyRouteCampaignMatcher() },
+          { $set: routeUpdate },
+        );
+        if (routeWrite.modifiedCount > 0) stampedAny = true;
+      }
+
+      if (!stampedAny) continue;
       summary.rowsStamped += 1;
 
       if (syncLedger) {
@@ -284,6 +354,8 @@ async function backfillCallLogSourceFromLeadCadence({
     let cadenceCaseId = null;
     let resolvedSourceName = null;
     let resolvedSourceChannel = null;
+    let resolvedRouteCampaignKey = null;
+    let resolvedRouteCampaignName = null;
     let resolvedSource = null; // "leadCadence" | "masterProspect"
 
     try {
@@ -303,6 +375,8 @@ async function backfillCallLogSourceFromLeadCadence({
       cadenceCaseId = Number(cadence.caseId);
       resolvedSourceName = picked.sourceName;
       resolvedSourceChannel = picked.sourceChannel;
+      resolvedRouteCampaignKey = picked.routeCampaignKey;
+      resolvedRouteCampaignName = picked.routeCampaignName;
       resolvedSource = "leadCadence";
     } else {
       try {
@@ -333,6 +407,8 @@ async function backfillCallLogSourceFromLeadCadence({
     if (!row.caseDomain) update.caseDomain = normalizedDomain;
     if (resolvedSourceName) update.sourceName = resolvedSourceName;
     if (resolvedSourceChannel) update.sourceChannel = resolvedSourceChannel;
+    if (resolvedRouteCampaignKey) update.routeCampaignKey = resolvedRouteCampaignKey;
+    if (resolvedRouteCampaignName) update.routeCampaignName = resolvedRouteCampaignName;
 
     try {
       // Belt-and-suspenders: still null caseId on the write — guard

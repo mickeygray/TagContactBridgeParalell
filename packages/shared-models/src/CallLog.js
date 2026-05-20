@@ -89,6 +89,16 @@ const callLogSchema = new mongoose.Schema(
     // the "which specific mailer" granularity — not tenant-level "mail".
     mailPieceKey: { type: String, default: null, index: true },
 
+    // LD route-campaign split. Mirrors LeadCadence.routeCampaignKey so
+    // vendor rollups (specifically the "Vendor families — today" table)
+    // can split LD into ld-custom vs ld-general without joining to the
+    // case on the read side. Stamped by callLogSourceBackfillService
+    // from the lead's LeadCadence row right before the nightly vendor
+    // summary builds. Older rows are null and fall back to the legacy
+    // "ld-posting" family classification.
+    routeCampaignKey: { type: String, default: null, index: true },
+    routeCampaignName: { type: String, default: null },
+
     // Aged-data override flag. True when: direction=outbound AND the
     // case's createdDate is more than `AGED_DATA_THRESHOLD_DAYS` (default
     // 30) before this call's start. Set at resolver time as a signal

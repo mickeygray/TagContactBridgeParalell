@@ -70,6 +70,10 @@ async function summarizeCallLedgerBySource(domain, filters = {}) {
         _id: {
           source: { $ifNull: ["$sourceName", "Unknown"] },
           channel: "$sourceChannel",
+          // Third dimension so LD calls split into ld-custom vs
+          // ld-general in the vendor families rollup. Older rows are
+          // null and fall back to the legacy ld-posting family.
+          routeCampaignKey: { $ifNull: ["$routeCampaignKey", null] },
         },
         calls: { $sum: 1 },
         callsOver5: {

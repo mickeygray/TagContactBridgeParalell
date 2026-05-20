@@ -23,6 +23,26 @@ const VENDOR_FAMILY_DEFS = Object.freeze([
     matches: (source, channel) =>
       channel === "affiliate" || source.includes("affiliate"),
   },
+  // LD Custom — checked FIRST so it wins when routeCampaignKey is set.
+  // The ld-posting fallback below catches legacy rows with no route
+  // campaign key. ld-custom / ld-general distinction comes from the
+  // `routeCampaignKey` field on CallLog (mirrored from LeadCadence at
+  // intake — VFD/GS03RB7W → ld-custom, JM8K5B7Y → ld-general). The
+  // matcher only fires when routeCampaignKey is plumbed through; the
+  // classifier wrapper that calls into this list passes the campaign
+  // key as a third argument.
+  {
+    key: "ld-custom",
+    label: "LD Custom",
+    matches: (source, channel, routeCampaignKey) =>
+      routeCampaignKey === "ld-custom",
+  },
+  {
+    key: "ld-general",
+    label: "LD General",
+    matches: (source, channel, routeCampaignKey) =>
+      routeCampaignKey === "ld-general",
+  },
   {
     key: "ld-posting",
     label: "LD Posting",
@@ -83,7 +103,13 @@ const VENDOR_FAMILY_DEFS = Object.freeze([
   },
 ]);
 
-const TRACKED_VENDOR_FAMILIES = new Set(["ld-posting", "affiliate", "social"]);
+const TRACKED_VENDOR_FAMILIES = new Set([
+  "ld-custom",
+  "ld-general",
+  "ld-posting",
+  "affiliate",
+  "social",
+]);
 
 function normalizeDomain(domain) {
   return String(domain || "").trim().toUpperCase();
@@ -119,11 +145,14 @@ function formatDateKey(date = new Date(), timeZone = "America/Los_Angeles") {
   }).format(date);
 }
 
-function classifyVendorFamily(sourceName, fallbackChannel = null) {
+function classifyVendorFamily(sourceName, fallbackChannel = null, routeCampaignKey = null) {
   const normalizedSource = normalizeText(sourceName);
   const normalizedChannel = normalizeVendorChannel(fallbackChannel);
+  const normalizedRouteKey = routeCampaignKey
+    ? String(routeCampaignKey).trim().toLowerCase()
+    : null;
   for (const family of VENDOR_FAMILY_DEFS) {
-    if (family.matches(normalizedSource, normalizedChannel)) {
+    if (family.matches(normalizedSource, normalizedChannel, normalizedRouteKey)) {
       return {
         key: family.key,
         label: family.label,
@@ -138,8 +167,8 @@ function classifyVendorFamily(sourceName, fallbackChannel = null) {
   };
 }
 
-function isTrackedVendorCandidate(sourceName, fallbackChannel = null) {
-  return classifyVendorFamily(sourceName, fallbackChannel).tracked;
+function isTrackedVendorCandidate(sourceName, fallbackChannel = null, routeCampaignKey = null) {
+  return classifyVendorFamily(sourceName, fallbackChannel, routeCampaignKey).tracked;
 }
 
 function createMetricRow(source, channel, family) {
@@ -255,8 +284,8 @@ function finalizeRow(row) {
   };
 }
 
-function ensureSourceRow(bySource, sourceName, channel) {
-  const family = classifyVendorFamily(sourceName, channel);
+function ensureSourceRow(bySource, sourceName, channel, routeCampaignKey = null) {
+  const family = classifyVendorFamily(sourceName, channel, routeCampaignKey);
   const normalizedSource = String(sourceName || "Unknown").trim() || "Unknown";
   const normalizedChannel = normalizeVendorChannel(channel);
   const key = JSON.stringify({
@@ -273,8 +302,8 @@ function ensureSourceRow(bySource, sourceName, channel) {
   return bySource.get(key);
 }
 
-function ensureFamilyRow(byFamily, sourceName, channel) {
-  const family = classifyVendorFamily(sourceName, channel);
+function ensureFamilyRow(byFamily, sourceName, channel, routeCampaignKey = null) {
+  const family = classifyVendorFamily(sourceName, channel, routeCampaignKey);
   if (!byFamily.has(family.key)) {
     byFamily.set(family.key, createMetricRow(family.label, null, family));
   }
@@ -282,11 +311,18 @@ function ensureFamilyRow(byFamily, sourceName, channel) {
 }
 
 function createCandidate(kind, source, channel, metrics = {}, extra = {}) {
-  const family = classifyVendorFamily(source, channel);
+  // routeCampaignKey may be passed through `extra` so call sites can
+  // bucket LD calls into ld-custom / ld-general without a separate
+  // function-signature change. Stamped onto the candidate so the
+  // downstream attribution-review service and the byFamily/bySource
+  // bucketing both classify the same way.
+  const routeCampaignKey = extra.routeCampaignKey || null;
+  const family = classifyVendorFamily(source, channel, routeCampaignKey);
   return {
     kind,
     source,
     channel: normalizeVendorChannel(channel),
+    routeCampaignKey: routeCampaignKey || null,
     rawSource: source,
     rawChannel: channel,
     familyKey: family.key,
@@ -418,16 +454,19 @@ async function buildVendorDailySummary(domain, options = {}) {
       row.sourceChannel ||
       row.intakeRoute ||
       null;
-    if (!isTrackedVendorCandidate(source, channel)) continue;
+    const routeCampaignKey = row.routeCampaignKey || null;
+    if (!isTrackedVendorCandidate(source, channel, routeCampaignKey)) continue;
     candidates.push(createCandidate("lead", source, channel, {
       leads: 1,
     }, {
       dateKey,
+      routeCampaignKey,
       caseId: Number.isFinite(Number(row.caseId)) ? Number(row.caseId) : null,
       sample: {
         caseId: Number.isFinite(Number(row.caseId)) ? Number(row.caseId) : null,
         intakeSource: row.intakeSource || null,
         intakeRoute: row.intakeRoute || null,
+        routeCampaignKey,
       },
     }));
   }
@@ -435,7 +474,8 @@ async function buildVendorDailySummary(domain, options = {}) {
   for (const row of callRows) {
     const source = row._id?.source || "Unknown";
     const channel = row._id?.channel || null;
-    if (!isTrackedVendorCandidate(source, channel)) continue;
+    const routeCampaignKey = row._id?.routeCampaignKey || null;
+    if (!isTrackedVendorCandidate(source, channel, routeCampaignKey)) continue;
     const uniqueCallers = Array.isArray(row.uniqueCallersSet)
       ? row.uniqueCallersSet.filter(Boolean).length
       : 0;
@@ -455,9 +495,11 @@ async function buildVendorDailySummary(domain, options = {}) {
     };
     candidates.push(createCandidate("call", source, channel, patch, {
       dateKey,
+      routeCampaignKey,
       sample: {
         source,
         channel,
+        routeCampaignKey,
       },
     }));
   }
@@ -522,9 +564,10 @@ async function buildVendorDailySummary(domain, options = {}) {
   for (const candidate of attribution.accepted) {
     const source = candidate.source || "Unknown";
     const channel = candidate.channel || null;
+    const routeCampaignKey = candidate.routeCampaignKey || null;
     const patch = candidate.observed || {};
-    addMetrics(ensureSourceRow(bySource, source, channel), patch);
-    addMetrics(ensureFamilyRow(byFamily, source, channel), patch);
+    addMetrics(ensureSourceRow(bySource, source, channel, routeCampaignKey), patch);
+    addMetrics(ensureFamilyRow(byFamily, source, channel, routeCampaignKey), patch);
   }
 
   const sources = [...bySource.values()]

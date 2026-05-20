@@ -127,6 +127,7 @@ const agentStateSchema = new mongoose.Schema(
       },
       aged: {
         targetOpen: { type: Number, default: null },
+        fillRemainder: { type: Boolean, default: null },
       },
       updatedAt: { type: Date, default: null },
       updatedBy: { type: String, default: null },

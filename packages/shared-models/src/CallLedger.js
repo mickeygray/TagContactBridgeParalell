@@ -44,6 +44,11 @@ const callLedgerSchema = new mongoose.Schema(
     sourceChannel: { type: String, default: null, index: true },
     mailPieceKey: { type: String, default: null, index: true },
 
+    // LD route-campaign split — mirrors CallLog. Powers the
+    // ld-custom vs ld-general breakdown in the vendor families table.
+    routeCampaignKey: { type: String, default: null, index: true },
+    routeCampaignName: { type: String, default: null },
+
     strategy: { type: String, default: null },
     confidence: { type: String, default: null, index: true },
     status: { type: String, default: null, index: true },
@@ -70,6 +75,9 @@ callLedgerSchema.index({ domain: 1, telephonySessionId: 1 }, { unique: true });
 callLedgerSchema.index({ domain: 1, caseId: 1, callStartTime: -1 });
 callLedgerSchema.index({ domain: 1, date: 1, sourceName: 1, sourceChannel: 1 });
 callLedgerSchema.index({ date: 1, sourceChannel: 1, sourceName: 1 });
+// Per-route-campaign daily rollup — powers the LD custom/general split
+// in the vendor families table.
+callLedgerSchema.index({ domain: 1, date: 1, routeCampaignKey: 1 });
 
 module.exports =
   mongoose.models.ControlPlaneCallLedger ||

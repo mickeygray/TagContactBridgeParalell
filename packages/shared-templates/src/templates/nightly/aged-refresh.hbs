@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">{{> base-css}}</head>
+<body>
+  <div class="wrap">
+    <div class="hdr">
+      <h1>Aged pool refresh — {{date}}</h1>
+      <div class="sub">
+        Daily DNC re-scrub at the 30 / 60 / 90 day checkpoints.
+        {{#if dryRun}}<strong>DRY RUN — no writes made.</strong>{{/if}}
+      </div>
+    </div>
+
+    <div class="section">
+      <h2>Topline</h2>
+      <table class="kpi-row" cellpadding="0" cellspacing="0">
+        <tr>
+          <td class="kpi"><div class="v">{{counts.checked}}</div><div class="l">Checked</div></td>
+          <td class="kpi"><div class="v">{{counts.promoted}}</div><div class="l">Promoted to red</div></td>
+          <td class="kpi"><div class="v">{{counts.evicted}}</div><div class="l">Retired (DNC)</div></td>
+          <td class="kpi"><div class="v">{{counts.cleared}}</div><div class="l">90d cleared</div></td>
+          {{#if counts.currentlyInRed}}
+          <td class="kpi"><div class="v">{{counts.currentlyInRed}}</div><div class="l">In red pool</div></td>
+          {{/if}}
+        </tr>
+      </table>
+      {{#if counts.lookupFailures}}
+        <div class="muted">
+          {{counts.lookupFailures}} RealValidation lookup failure(s) — retried tomorrow.
+        </div>
+      {{/if}}
+      {{#if counts.noPhone}}
+        <div class="muted">{{counts.noPhone}} lead(s) due for check had no phone on file.</div>
+      {{/if}}
+    </div>
+
+    <div class="section">
+      <h2>Per domain</h2>
+      {{#if perDomain.length}}
+        <table class="data" cellpadding="0" cellspacing="0">
+          <tr>
+            <th>Domain</th>
+            <th class="center">Checked</th>
+            <th class="center">Promoted</th>
+            <th class="center">Stayed (60/90d)</th>
+            <th class="center">Cleared (90d)</th>
+            <th class="center">Retired</th>
+            <th class="center">Lookup fails</th>
+          </tr>
+          {{#each perDomain}}
+            <tr>
+              <td><strong>{{domain}}</strong></td>
+              <td class="center">{{checked}}</td>
+              <td class="center"><span class="score-green">{{promoted}}</span></td>
+              <td class="center">{{stayed}}</td>
+              <td class="center">{{cleared}}</td>
+              <td class="center"><span class="score-red">{{evicted}}</span></td>
+              <td class="center">{{dncLookupFailures}}</td>
+            </tr>
+          {{/each}}
+        </table>
+      {{else}}
+        <div class="muted">No leads were due for a checkpoint today.</div>
+      {{/if}}
+    </div>
+
+    {{#if retiredToday.length}}
+    <div class="section">
+      <h2>Retired today (DNC hit)</h2>
+      <table class="data" cellpadding="0" cellspacing="0">
+        <tr>
+          <th>Domain</th>
+          <th>Case</th>
+          <th>Name</th>
+          <th>Phone</th>
+          <th class="center">At checkpoint</th>
+          <th>Reason</th>
+        </tr>
+        {{#each retiredToday}}
+          <tr>
+            <td>{{domain}}</td>
+            <td><strong>#{{caseId}}</strong></td>
+            <td>{{default name "Unknown"}}</td>
+            <td>{{default phone "—"}}</td>
+            <td class="center">{{#if checkpoint}}{{checkpoint}}d{{else}}—{{/if}}</td>
+            <td><span class="score-red">{{default reason "dnc"}}</span></td>
+          </tr>
+        {{/each}}
+      </table>
+      {{#if retiredOverflow}}
+        <div class="muted">+ {{retiredOverflow}} more retired today (truncated).</div>
+      {{/if}}
+    </div>
+    {{/if}}
+
+    {{#if monthly}}
+    <div class="section">
+      <h2>Monthly graduation sweep</h2>
+      <div class="muted">
+        Day-1 sweep — drops leads with {{monthly.threshold}}+ qualifying CX
+        connects in the trailing {{monthly.windowDays}} days. Voicemail counts.
+      </div>
+      <table class="kpi-row" cellpadding="0" cellspacing="0">
+        <tr>
+          <td class="kpi"><div class="v">{{monthly.scanned}}</div><div class="l">Scanned (in red)</div></td>
+          <td class="kpi"><div class="v">{{monthly.graduated}}</div><div class="l">Graduated out</div></td>
+        </tr>
+      </table>
+
+      {{#if monthly.graduatedToday.length}}
+        <h2 style="margin-top:14px;">Graduated today</h2>
+        <table class="data" cellpadding="0" cellspacing="0">
+          <tr>
+            <th>Domain</th>
+            <th>Case</th>
+            <th>Name</th>
+            <th>Phone</th>
+            <th class="center">CX connects</th>
+          </tr>
+          {{#each monthly.graduatedToday}}
+            <tr>
+              <td>{{domain}}</td>
+              <td><strong>#{{caseId}}</strong></td>
+              <td>{{default name "Unknown"}}</td>
+              <td>{{default phone "—"}}</td>
+              <td class="center"><span class="score-green">{{connects}}</span></td>
+            </tr>
+          {{/each}}
+        </table>
+        {{#if monthly.graduatedOverflow}}
+          <div class="muted">+ {{monthly.graduatedOverflow}} more graduated today (truncated).</div>
+        {{/if}}
+      {{else}}
+        <div class="muted">No leads hit the graduation threshold today.</div>
+      {{/if}}
+    </div>
+    {{/if}}
+
+    {{> footer}}
+  </div>
+</body></html>

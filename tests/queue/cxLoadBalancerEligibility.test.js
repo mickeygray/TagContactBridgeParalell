@@ -13,6 +13,17 @@ const {
 } = require("../../packages/shared-services/src/cxLoadBalancerService");
 
 function agent(extensionId, overrides = {}) {
+  const baseQueuePolicy = {
+    fresh: {
+      eligible: true,
+      firstTouchEligible: true,
+      targetOpen: 15,
+      priorityWeight: 100,
+    },
+    day2to15: { targetOpen: 15 },
+    day16to30: { targetOpen: 5 },
+    aged: { targetOpen: 5 },
+  };
   return {
     extensionId,
     name: `Agent ${extensionId}`,
@@ -21,6 +32,7 @@ function agent(extensionId, overrides = {}) {
       role: "agent",
       audience: "agent",
       status: "active",
+      cxQueuePolicy: baseQueuePolicy,
     },
     status: "available",
     activityState: "idle",
@@ -193,7 +205,7 @@ test("rankAgentsForQueueItem treats unlimited low-priority green agents as overf
       aged: { targetOpen: 0 },
     },
   });
-  const queueItem = { queueFamily: "fresh-day1", caseId: 123 };
+  const queueItem = { queueFamily: "fresh-day1", caseId: 123, placedCalls: 1 };
 
   const normalPass = rankAgentsForQueueItem([regular, overflow], queueItem, {
     openAssignmentMap: new Map([

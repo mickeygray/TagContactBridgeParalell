@@ -244,6 +244,7 @@ const CHECKS = [
       lastName: `${SMOKE_CONTACT_LAST} (smoke ${SMOKE_RUN_ID})`,
       email: SMOKE_CONTACT_EMAIL,
       phone: SMOKE_CONTACT_PHONE,
+      state: "CA",
       caseId: SMOKE_CASE_ID_BASE + 1,
       company: "WYNN",
       domain: "WYNN",

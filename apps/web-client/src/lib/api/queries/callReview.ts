@@ -6,6 +6,14 @@ import { queryKeys } from "@/lib/api/queries/keys";
 // and /api/admin/call-review/case/:caseId/today. Mirrors the projectCallRow
 // helper in apps/control-plane/src/routes/adminCallReview.js — keep these
 // in sync (no schema generation; small surface).
+export type CallScoreVerdict =
+  | "hot"
+  | "warm"
+  | "cold"
+  | "dead"
+  | "fake"
+  | string;
+
 export interface CallReviewRow {
   id: string;
   telephonySessionId: string | null;
@@ -19,6 +27,26 @@ export interface CallReviewRow {
   caseProfileId: string | null;
   agentName: string | null;
   extensionId: string | null;
+  // Vendor / campaign attribution. sourceName is the canonical intake
+  // source ("LD Posting", "Affiliate X", etc.). routeCampaignKey is
+  // the LD subsplit ("ld-custom" | "ld-general") for vendor email
+  // rollups.
+  sourceName: string | null;
+  sourceChannel: string | null;
+  routeCampaignKey: string | null;
+  routeCampaignName: string | null;
+  // Claude-scored lead quality. Null until transcription + scoring
+  // completes (transcriptionScoringService).
+  score: {
+    overall: number | null;
+    verdict: CallScoreVerdict | null;
+    summary: string | null;
+    scoredAt: string | null;
+  };
+  transcription: {
+    status: string | null;
+    hasText: boolean;
+  };
   recording: {
     driveFileId: string | null;
     playbackUrl: string | null;
@@ -75,7 +103,7 @@ export interface CaseCallReviewResponse {
   calls: CallReviewRow[];
 }
 
-type CallSortKey = "time" | "duration";
+export type CallSortKey = "time" | "duration" | "score";
 
 /**
  * Today's calls for a specific agent extension. Server queries CallLog

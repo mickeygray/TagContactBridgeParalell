@@ -304,7 +304,86 @@ function stabilizeSpeakerSegments(segments, { recentSegments = [], metadata = {}
   });
 }
 
-function speakerSegmentsFromNativeDiarize(rawSegments = [], fallbackText = "", { recentSegments = [], metadata = {} } = {}) {
+function oppositeHumanSpeaker(speaker) {
+  return speaker === "agent" ? "prospect" : "agent";
+}
+
+function assignedNativeHumans(nativeSpeakerAssignments) {
+  return new Set(
+    [...(nativeSpeakerAssignments?.values?.() || [])]
+      .filter((speaker) => HUMAN_SPEAKER_KEYS.includes(speaker)),
+  );
+}
+
+function stabilizeNativeDiarizeSegments(segments, {
+  recentSegments = [],
+  metadata = {},
+  nativeSpeakerAssignments = null,
+} = {}) {
+  if (!nativeSpeakerAssignments) {
+    return stabilizeSpeakerSegments(segments, { recentSegments, metadata });
+  }
+
+  const callFlow = normalizeCallFlow(metadata.callFlow);
+  const initialHumanSpeaker = normalizeInitialHumanSpeaker(metadata.initialHumanSpeaker, callFlow);
+  let lastHumanSpeaker = getLastHumanSpeaker(recentSegments);
+
+  return (segments || []).map((segment) => {
+    if (!segment || !segment.text) return segment;
+    const next = { ...segment };
+    const nativeSpeaker = cleanText(next.nativeSpeaker || "", 40);
+    const cue = speakerCueForText(next.text, { callFlow, lastHumanSpeaker });
+
+    if (cue === "system") {
+      next.speaker = "system";
+      next.confidence = Math.max(Number(next.confidence || 0), 0.9);
+      next.reason = cleanText(`${next.reason || ""} text cue: system`, 180);
+      return next;
+    }
+
+    if (cue && HUMAN_SPEAKER_KEYS.includes(cue)) {
+      next.speaker = cue;
+      next.confidence = Math.max(Number(next.confidence || 0), 0.9);
+      next.reason = cleanText(`${next.reason || ""} text cue: ${cue}`, 180);
+      if (nativeSpeaker && !nativeSpeakerAssignments.has(nativeSpeaker)) {
+        nativeSpeakerAssignments.set(nativeSpeaker, cue);
+      }
+    } else if (nativeSpeaker && nativeSpeakerAssignments.has(nativeSpeaker)) {
+      next.speaker = nativeSpeakerAssignments.get(nativeSpeaker);
+      next.confidence = Math.max(Number(next.confidence || 0), 0.88);
+      next.reason = cleanText(`${next.reason || ""} mapped native speaker`, 180);
+    } else if (nativeSpeaker) {
+      const assignedHumans = assignedNativeHumans(nativeSpeakerAssignments);
+      let assigned = "";
+      if (assignedHumans.size === 0) {
+        assigned = initialHumanSpeaker;
+      } else if (assignedHumans.size === 1) {
+        assigned = oppositeHumanSpeaker([...assignedHumans][0]);
+      }
+      if (assigned) {
+        nativeSpeakerAssignments.set(nativeSpeaker, assigned);
+        next.speaker = assigned;
+        next.confidence = Math.max(Number(next.confidence || 0), 0.78);
+        next.reason = cleanText(`${next.reason || ""} native speaker assignment`, 180);
+      }
+    } else {
+      const stabilized = stabilizeSpeakerSegments([next], {
+        recentSegments,
+        metadata,
+      })[0] || next;
+      Object.assign(next, stabilized);
+    }
+
+    if (HUMAN_SPEAKER_KEYS.includes(next.speaker)) lastHumanSpeaker = next.speaker;
+    return next;
+  });
+}
+
+function speakerSegmentsFromNativeDiarize(rawSegments = [], fallbackText = "", {
+  recentSegments = [],
+  metadata = {},
+  nativeSpeakerAssignments = null,
+} = {}) {
   const nativeSegments = (Array.isArray(rawSegments) ? rawSegments : [])
     .map((segment) => {
       const text = cleanText(segment?.text || "", 1000);
@@ -312,6 +391,7 @@ function speakerSegmentsFromNativeDiarize(rawSegments = [], fallbackText = "", {
       const nativeSpeaker = cleanText(segment?.speaker || "", 20);
       return {
         speaker: "unknown",
+        nativeSpeaker,
         text,
         confidence: nativeSpeaker ? 0.82 : 0.7,
         reason: nativeSpeaker ? `native diarize speaker ${nativeSpeaker}` : "native diarize segment",
@@ -322,7 +402,13 @@ function speakerSegmentsFromNativeDiarize(rawSegments = [], fallbackText = "", {
   const segments = nativeSegments.length
     ? nativeSegments
     : normalizeSpeakerSegments({}, fallbackText);
-  return stabilizeSpeakerSegments(segments, { recentSegments, metadata });
+  return nativeSegments.length
+    ? stabilizeNativeDiarizeSegments(segments, {
+      recentSegments,
+      metadata,
+      nativeSpeakerAssignments,
+    })
+    : stabilizeSpeakerSegments(segments, { recentSegments, metadata });
 }
 
 function ulawByteToPcm16(byte) {
@@ -1263,9 +1349,9 @@ function createDashboardHtml() {
     transcriptsEl.innerHTML = transcripts.length
       ? transcripts.slice(-80).reverse().map((item) => \`
           <div class="row">
-            <div class="meta">\${esc(item.at)} | \${esc(item.durationSec)}s | active \${esc(item.activePctOver500)}%</div>
+            <div class="meta">\${esc(item.at)} | \${esc(item.durationSec)}s | active \${esc(item.activePctOver500)}% | \${esc(item.model || "")} \${esc(item.responseFormat || "")} \${esc(item.speakerStatus || "")}</div>
             <div class="text">\${(item.speakerSegments || []).length
-              ? item.speakerSegments.map((segment) => \`<span class="pill">\${esc(segment.speaker)} \${Math.round((segment.confidence || 0) * 100)}%</span>\${esc(segment.text)}\`).join("<br>")
+              ? item.speakerSegments.map((segment) => \`<span class="pill">\${esc([segment.speaker, segment.nativeSpeaker].filter(Boolean).join("/"))} \${Math.round((segment.confidence || 0) * 100)}%</span>\${esc(segment.text)}\`).join("<br>")
               : esc(item.text)}</div>
           </div>\`).join("")
       : '<div class="row"><div class="text">Waiting for usable audio...</div></div>';
@@ -1602,6 +1688,7 @@ async function main() {
   let pendingTranscript = null;
   let lastAdviceAt = 0;
   let adviceInFlight = false;
+  const nativeSpeakerAssignments = new Map();
   let monitorMetadata = {
     runId,
     supervisorExtNumber,
@@ -1836,6 +1923,7 @@ async function main() {
         ? speakerSegmentsFromNativeDiarize(transcript.segments, displayTranscript.text, {
           recentSegments,
           metadata: monitorMetadata,
+          nativeSpeakerAssignments,
         })
         : null;
       const entry = {
@@ -1892,6 +1980,7 @@ async function main() {
               .filter((item) => item.id !== previousEntry.id)
               .flatMap((item) => item.speakerSegments || []),
             metadata: monitorMetadata,
+            nativeSpeakerAssignments,
           })
           : normalizeSpeakerSegments({}, previousEntry.text);
         previousEntry.speakerModel = null;

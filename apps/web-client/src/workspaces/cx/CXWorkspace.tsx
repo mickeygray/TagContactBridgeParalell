@@ -382,6 +382,7 @@ type QueueFamilyDisplay = {
 const AUTO_SERVE_DELAY_SECONDS = 1;
 const AUTO_SERVE_HANDOFF_DELAY_SECONDS = 0;
 const AUTO_SERVE_STARTUP_DELAY_SECONDS = 8;
+const STALE_SERVED_QUEUE_RESET_MS = 20_000;
 const SHOW_POSTDATE_DISPOSITION = true;
 const SHOW_ADVANCED_CX_DISPOSITIONS = false;
 type AutoServeCountdownMode = "startup" | "next";
@@ -3758,6 +3759,36 @@ export function CXWorkspace() {
     isQueueItemLocallySuppressed,
     currentExtensionId,
   ]);
+
+  React.useEffect(() => {
+    if (!(servedQueueTicketId || servingQueueKey)) return;
+    if (servedQueueStartedAt == null) return;
+    if (dialAny.isPending || disposition.isPending) return;
+    if (Date.now() - servedQueueStartedAt < STALE_SERVED_QUEUE_RESET_MS) return;
+
+    const matchingItem = rawQueueItems.find((item) => {
+      const ticketId = String(item.queueTicketId || "").trim();
+      if (servedQueueTicketId && ticketId && ticketId === String(servedQueueTicketId)) return true;
+      return Boolean(servingQueueKey) && buildQueueItemKey(item) === servingQueueKey;
+    });
+    const matchingState = String(matchingItem?.queueState || "").trim().toLowerCase();
+    if (matchingItem && matchingState === "serving") return;
+
+    clearServedQueueSelection();
+    clearCasePanelForNextQueueLead();
+    scheduleAutoServe(AUTO_SERVE_HANDOFF_DELAY_SECONDS, "next");
+    toast.warning("Queue recovered", {
+      description: "The previous lead was no longer active, so the next lead can start.",
+    });
+  }, [
+    rawQueueItems,
+    servedQueueTicketId,
+    servingQueueKey,
+    servedQueueStartedAt,
+    dialAny.isPending,
+    disposition.isPending,
+  ]);
+
   const queueHasActiveLead = Boolean(
     servedQueueTicketId || servedQueueActionKey || servingQueueKey || servedQueueContact,
   );

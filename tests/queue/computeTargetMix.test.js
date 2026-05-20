@@ -14,7 +14,7 @@ test("empty pool → zero target", () => {
     poolByAgeBucket: { day2_10: 0, aged: 0 },
     sliceSize: 10,
   });
-  assert.deepEqual(target, { day2_10: 0, aged: 0 });
+  assert.deepEqual(target, { day2_10: 0, day16_30: 0, aged: 0 });
 });
 
 test("only day2_10 in pool → all 10 from day2_10", () => {

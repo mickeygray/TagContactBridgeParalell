@@ -69,6 +69,28 @@ function buildReadyClaimQuery(domain = null, options = {}) {
     query["metadata.routeCampaignKey"] = { $in: routeCampaigns };
   }
   applyCreatedAtRange(query, options);
+  const excludeLastTouchedExtensionId = String(options.excludeLastTouchedExtensionId || "").trim();
+  if (excludeLastTouchedExtensionId) {
+    query.$and = [
+      ...(Array.isArray(query.$and) ? query.$and : []),
+      {
+        $or: [
+          { "metadata.lastTouchedExtensionId": { $exists: false } },
+          { "metadata.lastTouchedExtensionId": null },
+          { "metadata.lastTouchedExtensionId": "" },
+          { "metadata.lastTouchedExtensionId": { $ne: excludeLastTouchedExtensionId } },
+        ],
+      },
+      {
+        $or: [
+          { "metadata.lastCxDialedByExtensionId": { $exists: false } },
+          { "metadata.lastCxDialedByExtensionId": null },
+          { "metadata.lastCxDialedByExtensionId": "" },
+          { "metadata.lastCxDialedByExtensionId": { $ne: excludeLastTouchedExtensionId } },
+        ],
+      },
+    ];
+  }
   return query;
 }
 

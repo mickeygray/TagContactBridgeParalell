@@ -184,8 +184,30 @@ test("summarizeOAuthValidityFromAccount — extracts known fields", () => {
   assert.deepEqual(s.refreshTokenExpiresAt, new Date("2030-01-01"));
 });
 
-test("summarizeOAuthValidityFromAccount — null account → not validated", () => {
-  const s = cx.summarizeOAuthValidityFromAccount(null);
-  assert.equal(s.isOAuthValidated, false);
-  assert.equal(s.invalidReason, "no-refresh-token");
+test("summarizeOAuthValidityFromAccount - user OAuth disabled keeps CX non-blocking", () => {
+  const saved = process.env.RC_CX_REQUIRE_USER_OAUTH;
+  delete process.env.RC_CX_REQUIRE_USER_OAUTH;
+  try {
+    const s = cx.summarizeOAuthValidityFromAccount(null);
+    assert.equal(s.oauthRequired, false);
+    assert.equal(s.isOAuthValidated, true);
+    assert.equal(s.invalidReason, null);
+  } finally {
+    if (saved === undefined) delete process.env.RC_CX_REQUIRE_USER_OAUTH;
+    else process.env.RC_CX_REQUIRE_USER_OAUTH = saved;
+  }
+});
+
+test("summarizeOAuthValidityFromAccount — required user OAuth null account → not validated", () => {
+  const saved = process.env.RC_CX_REQUIRE_USER_OAUTH;
+  process.env.RC_CX_REQUIRE_USER_OAUTH = "true";
+  try {
+    const s = cx.summarizeOAuthValidityFromAccount(null);
+    assert.equal(s.oauthRequired, true);
+    assert.equal(s.isOAuthValidated, false);
+    assert.equal(s.invalidReason, "no-refresh-token");
+  } finally {
+    if (saved === undefined) delete process.env.RC_CX_REQUIRE_USER_OAUTH;
+    else process.env.RC_CX_REQUIRE_USER_OAUTH = saved;
+  }
 });

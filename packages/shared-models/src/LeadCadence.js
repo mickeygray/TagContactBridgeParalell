@@ -100,6 +100,16 @@ const leadCadenceSchema = new mongoose.Schema(
       lastFailureAt: { type: Date, default: null },
       lastResult: { type: mongoose.Schema.Types.Mixed, default: {} },
       rvmDeliveries: { type: [mongoose.Schema.Types.Mixed], default: [] },
+      lastCxDialedAt: { type: Date, default: null },
+      lastCxDialedByExtensionId: { type: String, default: null },
+      lastCxDialedByAgentName: { type: String, default: null },
+      lastCxDialedByAgentEmail: { type: String, default: null },
+      lastCxQueueFamily: { type: String, default: null },
+      lastCxQueueItemId: { type: String, default: null },
+      cxDailyDateKey: { type: String, default: null },
+      cxDailyCalls: { type: Number, default: 0 },
+      cxMonthlyMonthKey: { type: String, default: null },
+      cxMonthlyCalls: { type: Number, default: 0 },
     },
     firstContactRequestedAt: { type: Date, default: null },
     firstContactEventId: { type: String, default: null },
@@ -159,6 +169,40 @@ const leadCadenceSchema = new mongoose.Schema(
     validationContext: { type: mongoose.Schema.Types.Mixed, default: {} },
     attributionContext: { type: mongoose.Schema.Types.Mixed, default: {} },
     payloadSnapshot: { type: mongoose.Schema.Types.Mixed, default: {} },
+
+    // Rolling aged-pool DNC checkpoints. Distinct from cadenceState.dncCheck
+    // (which marks cx/rvm channels DNC) — this governs membership in the
+    // red/aged dial pool. Daily 06:00 PT sweep finds leads where
+    // dncCheckpoints.nextAt <= now and walks them through the 30 / 60 / 90
+    // day checkpoints. After the 90-day pass they're left alone and either
+    // live in red until the monthly graduation sweep evicts them at 8+
+    // connects, or get hit by a DNC re-check and dropped.
+    //
+    //   nextAt is set at intake to createdAt + 30d.
+    //   After each clean scrub:
+    //     count 0→1: nextAt = createdAt + 60d
+    //     count 1→2: nextAt = createdAt + 90d
+    //     count 2→3: nextAt = null, cleared = true (done forever)
+    //   Any dirty scrub:
+    //     nextAt = null, hit = true, hitAt = now, reason = "national|state|litigator"
+    //
+    // Indexed below so the daily query is cheap.
+    dncCheckpoints: {
+      count: { type: Number, default: 0 },
+      lastAt: { type: Date, default: null },
+      nextAt: { type: Date, default: null },
+      cleared: { type: Boolean, default: false },
+      hit: { type: Boolean, default: false },
+      hitAt: { type: Date, default: null },
+      source: { type: String, default: null },
+      reason: { type: String, default: null },
+    },
+    // Set by runMonthlyGraduationSweep when this lead has had >= 8
+    // qualifying CX connects (duration >= 10s) in the trailing 4 months.
+    // Permanent stamp — the daily age-in sweep skips graduated leads so
+    // they never get re-promoted into red.
+    graduatedAt: { type: Date, default: null, index: true },
+    graduatedConnects: { type: Number, default: null },
   },
   { timestamps: true },
 );
@@ -166,6 +210,12 @@ const leadCadenceSchema = new mongoose.Schema(
 leadCadenceSchema.index({ domain: 1, caseId: 1 }, { unique: true });
 leadCadenceSchema.index({ domain: 1, active: 1, "schedule.nextActionAt": 1 });
 leadCadenceSchema.index({ domain: 1, active: 1, cadenceMode: 1, createdAt: 1 });
+// Daily aged-refresh sweep query. Sparse so the bulk of leads (with
+// nextAt === null) don't bloat the index.
+leadCadenceSchema.index(
+  { "dncCheckpoints.nextAt": 1, graduatedAt: 1 },
+  { sparse: true },
+);
 
 module.exports =
   mongoose.models.ControlPlaneLeadCadence ||

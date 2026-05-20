@@ -445,6 +445,19 @@ const NIGHTLY_RECIPIENT_POOLS = {
     development: ["mgray@taxadvocategroup.com"],
     production: ["mgray@taxadvocategroup.com"],
   },
+  // Pool E — Aged pool daily refresh report. Fires at 06:00 PT after
+  // the daily age-in / re-scrub job completes. Day-1 also includes the
+  // monthly graduation list. Recipients are the people who care about
+  // the dial-pool composition.
+  agedPool: {
+    env: "AGED_REFRESH_REPORT_RECIPIENTS",
+    development: ["mgray@taxadvocategroup.com"],
+    production: [
+      "mgray@taxadvocategroup.com",
+      "manderson@taxadvocategroup.com",
+      "abanks@taxadvocategroup.com",
+    ],
+  },
 };
 
 function parseRecipientList(value) {
@@ -3386,6 +3399,107 @@ async function startNightlyCloseRun(domain, options = {}) {
   };
 }
 
+/**
+ * Pool E — Aged pool daily refresh report. Fires at 06:00 PT after the
+ * daily age-in / re-scrub sweep completes. Day-1 also passes the monthly
+ * graduation summary so both lists land in one email.
+ *
+ * @param {object} options
+ * @param {object} options.dailySummary    - return of runDailyAgedRefresh
+ * @param {object} [options.monthlySummary]- return of runMonthlyGraduationSweep (day-1 only)
+ * @param {string[]} [options.recipients]  - override recipients
+ */
+async function sendAgedRefreshReportEmail(options = {}) {
+  const daily = options.dailySummary || {};
+  const monthly = options.monthlySummary || null;
+  const recipients = Array.isArray(options.recipients) && options.recipients.length > 0
+    ? options.recipients
+    : getRecipientPool("agedPool");
+
+  if (recipients.length === 0) {
+    return { sent: false, reason: "no-recipients", pool: "agedPool" };
+  }
+
+  const dateKey = formatDateKey(daily.now || new Date());
+  const totalRetired = toNumber(daily.evicted) + toNumber(daily.droppedAtIntake);
+
+  // MPI count for the "currently in red" headline tile.
+  const currentlyInRed = await mongoose.connection.db
+    .collection("controlplanemasterprospectindices")
+    .countDocuments({ "pool.tag": { $regex: /^filler-/ } })
+    .catch(() => null);
+
+  const perDomain = Object.entries(daily.perDomain || {}).map(([domain, stats]) => ({
+    domain,
+    checked: stats.checked || 0,
+    promoted: stats.promoted || 0,
+    stayed: stats.stayed || 0,
+    cleared: stats.cleared || 0,
+    evicted: (stats.evicted || 0) + (stats.droppedAtIntake || 0),
+    dncLookupFailures: stats.dncLookupFailures || 0,
+    noPhone: stats.noPhone || 0,
+  }));
+
+  const data = {
+    date: dateKey,
+    dryRun: Boolean(daily.dryRun),
+    tag: daily.tag || null,
+    counts: {
+      checked: toNumber(daily.checked),
+      promoted: toNumber(daily.promoted),
+      stayed: toNumber(daily.stayed),
+      cleared: toNumber(daily.cleared),
+      evicted: totalRetired,
+      lookupFailures: toNumber(daily.dncLookupFailures),
+      noPhone: toNumber(daily.noPhone),
+      currentlyInRed,
+    },
+    perDomain,
+    retiredToday: Array.isArray(daily.retiredToday) ? daily.retiredToday.slice(0, 50) : [],
+    retiredOverflow: Array.isArray(daily.retiredToday) && daily.retiredToday.length > 50
+      ? daily.retiredToday.length - 50
+      : 0,
+    monthly: monthly
+      ? {
+          scanned: toNumber(monthly.scanned),
+          graduated: toNumber(monthly.graduated),
+          threshold: monthly.threshold,
+          windowDays: monthly.windowDays,
+          graduatedToday: Array.isArray(monthly.graduatedToday)
+            ? monthly.graduatedToday.slice(0, 50)
+            : [],
+          graduatedOverflow: Array.isArray(monthly.graduatedToday) && monthly.graduatedToday.length > 50
+            ? monthly.graduatedToday.length - 50
+            : 0,
+        }
+      : null,
+    durationMs: toNumber(daily.durationMs),
+  };
+
+  const subject = monthly
+    ? `Aged pool refresh — ${dateKey} — ${data.counts.checked} checked, ${totalRetired} retired, ${monthly.graduated} graduated`
+    : `Aged pool refresh — ${dateKey} — ${data.counts.checked} checked, ${totalRetired} retired`;
+
+  // No domain-specific branding — this is a cross-tenant ops email.
+  const result = await sendMail(null, {
+    to: recipients,
+    subject,
+    template: "nightly/aged-refresh",
+    data,
+    text:
+      `Aged pool refresh ${dateKey}: ${data.counts.checked} checked, ` +
+      `${data.counts.promoted} promoted, ${totalRetired} retired` +
+      (monthly ? `, ${monthly.graduated} graduated.` : "."),
+  });
+
+  return {
+    sent: true,
+    recipients,
+    pool: "agedPool",
+    messageId: result.messageId,
+  };
+}
+
 module.exports = {
   buildManagementSnapshot,
   buildMonthToDateSnapshot,
@@ -3404,6 +3518,7 @@ module.exports = {
   sendLeadDataCloseEmail,
   sendRedlineAlertEmail,
   sendOpsStatusEmail,
+  sendAgedRefreshReportEmail,
   startNightlyCloseRun,
   wrapHourlyJobs,
 };

@@ -54,11 +54,24 @@ Log into <https://developers.ringcentral.com/my-account.html> as the app owner.
   - Add a **redirect URI**: `https://tagcontactbridge.ngrok.app/api/auth/cx/callback`
     (or whatever your prod domain is).
 - **Permissions / Scopes**: ensure the app requests at least:
+  - `CXRouting` — **REQUIRED** for RingCX off-hook capability (agents
+    can't dial out without this scope on the granted token). The most
+    common silent failure mode is an agent's `cxAuth.scopes` going
+    empty after a refresh — the code now preserves prior scopes when
+    RC's refresh response omits `scope` (per RFC 6749 §6), and the
+    authorize URL always requests CXRouting by default so consent
+    grants reliably include it.
   - `ReadAccounts`
   - `ReadCallLog`
   - `ReadCallRecording`
   - `ReadPresence`
   - (Add others as needed; the SPA does not currently use any others.)
+
+The agent's RingCentral role still needs to *allow* CXRouting — RC
+silently drops any scope the role doesn't permit, so requesting it for
+non-CX-eligible users does no harm but also doesn't grant them off-hook.
+Verify in **RC Admin → Users → \<agent\> → Permissions** that the agent
+has the **RingCX / CX Agent** application enabled.
 
 ### 2. Set env vars in `.env`
 
@@ -67,7 +80,9 @@ Log into <https://developers.ringcentral.com/my-account.html> as the app owner.
 RC_OAUTH_CLIENT_ID=               # optional override; falls back to RING_CENTRAL_CLIENT_ID
 RC_OAUTH_CLIENT_SECRET=           # optional override; falls back to RING_CENTRAL_CLIENT_SECRET
 RC_OAUTH_REDIRECT_URI=https://tagcontactbridge.ngrok.app/api/auth/cx/callback
-RC_OAUTH_SCOPES=   # optional; leave blank to use the app's configured RingCentral permissions
+RC_OAUTH_SCOPES=   # optional; leave blank to use the code default
+                   # ("CXRouting ReadAccounts ReadCallLog ReadCallRecording ReadPresence").
+                   # Only override if your RC app config blocks one of those.
 RC_OAUTH_AUTHORIZE_URL=https://platform.ringcentral.com/restapi/oauth/authorize
 RC_OAUTH_TOKEN_URL=https://platform.ringcentral.com/restapi/oauth/token
 

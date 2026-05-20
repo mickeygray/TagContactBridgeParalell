@@ -584,6 +584,56 @@ async function listFilesInFolder(config = {}, {
   };
 }
 
+/**
+ * Download a Drive file's binary content as a Buffer.
+ *
+ * Used by the transcription pipeline (transcriptionScoringService) to
+ * read recordings that the recordingArchive pipeline already pulled
+ * down + uploaded — sidesteps the RingCentral CDN entirely so a
+ * RingCentral rate-limit doesn't wedge transcription.
+ *
+ * Returns { buffer, mimeType, contentLength }. Throws ExternalServiceError
+ * on non-OK responses with `retryable` set on 5xx / 429.
+ */
+async function downloadFile(config = {}, { fileId, supportsAllDrives = true } = {}) {
+  if (!fileId) {
+    throw new Error("downloadFile: fileId is required");
+  }
+  const token = await getAccessToken(config);
+  const url = new URL(
+    `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}`,
+  );
+  url.searchParams.set("alt", "media");
+  if (supportsAllDrives) {
+    url.searchParams.set("supportsAllDrives", "true");
+  }
+
+  const response = await fetch(url.toString(), {
+    method: "GET",
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!response.ok) {
+    const text = await response.text().catch(() => "");
+    throw new ExternalServiceError(
+      "google-drive",
+      `Google Drive downloadFile failed: ${response.status}`,
+      {
+        status: 502,
+        retryable: response.status >= 500 || response.status === 429,
+        details: {
+          responseStatus: response.status,
+          responseBody: text.slice(0, 500),
+          fileId,
+        },
+      },
+    );
+  }
+  const mimeType = response.headers.get("content-type") || "application/octet-stream";
+  const contentLength = Number(response.headers.get("content-length") || 0) || null;
+  const buffer = Buffer.from(await response.arrayBuffer());
+  return { buffer, mimeType, contentLength };
+}
+
 function createGoogleDriveClient(config = {}) {
   return {
     config,
@@ -591,6 +641,7 @@ function createGoogleDriveClient(config = {}) {
     getAccessToken: () => getAccessToken(config),
     findFilesByAppProperties: (options) => findFilesByAppProperties(config, options),
     uploadFileResumable: (options) => uploadFileResumable(config, options),
+    downloadFile: (options) => downloadFile(config, options),
     findFolder: (options) => findFolder(config, options),
     createFolder: (options) => createFolder(config, options),
     ensureFolder: (options) => ensureFolder(config, options),

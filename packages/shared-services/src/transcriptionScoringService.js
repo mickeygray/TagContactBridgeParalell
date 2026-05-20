@@ -4,12 +4,31 @@ const fs = require("fs");
 const os = require("os");
 const path = require("path");
 
-const { createRingCentralClient } = require("../../shared-integrations/src");
+const {
+  createRingCentralClient,
+  createGoogleDriveClient,
+  isGoogleDriveConfigured,
+} = require("../../shared-integrations/src");
 const { callLogRepository } = require("../../shared-repositories/src");
 const { CallLog } = require("../../shared-models/src");
 const { emitHourlyJobEvent } = require("./hourlyJobEventService");
 const { syncCallLedgerBySession } = require("./callLedgerService");
 const { syncCaseCallRollup } = require("./caseCallRollupService");
+
+// Google Drive config — mirrors recordingStorageService.getDriveConfig so
+// transcription can pull from the already-archived file when the
+// recording-archive pipeline beat us to it. Avoids the RingCentral
+// rate-limit wedge: a single 429 from RC's call-log API otherwise
+// blocks every subsequent transcription for the duration of the
+// backoff window, even though we already have the file locally on Drive.
+function getDriveConfigFromEnv() {
+  return {
+    clientEmail: process.env.GOOGLE_DRIVE_CLIENT_EMAIL || "",
+    privateKey: String(process.env.GOOGLE_DRIVE_PRIVATE_KEY || "").replace(/\\n/g, "\n"),
+    tokenUri: process.env.GOOGLE_DRIVE_TOKEN_URI || "https://oauth2.googleapis.com/token",
+    scope: process.env.GOOGLE_DRIVE_SCOPE || "https://www.googleapis.com/auth/drive.file",
+  };
+}
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || "";
@@ -99,6 +118,34 @@ async function findRecordingForSession({ telephonySessionId, callStartTime, exte
       duration: rec.duration || 0,
     },
   };
+}
+
+/**
+ * Read a previously-archived recording from Google Drive and write it
+ * to a temp file. Used when `callLog.recordingArchive.driveFileId` is
+ * set — bypasses the RingCentral CDN entirely so a RC rate-limit
+ * cannot block transcription on files we already own.
+ *
+ * mimeType from Drive drives the file extension (Whisper accepts both
+ * mp3 and wav). Returns null when Drive isn't configured (caller
+ * should fall back to the RC path).
+ */
+async function downloadRecordingFromDrive(driveFileId, sessionIdSafe) {
+  const driveConfig = getDriveConfigFromEnv();
+  if (!isGoogleDriveConfigured(driveConfig)) return null;
+  const client = createGoogleDriveClient(driveConfig);
+  const { buffer, mimeType } = await client.downloadFile({ fileId: driveFileId });
+  if (!buffer || buffer.length === 0) {
+    throw new Error(`Drive file ${driveFileId} returned empty body`);
+  }
+  const ext =
+    mimeType?.includes("wav") ? ".wav" :
+    mimeType?.includes("mpeg") || mimeType?.includes("mp3") ? ".mp3" :
+    mimeType?.includes("ogg") ? ".ogg" :
+    ".mp3"; // safe default — Whisper sniffs the format anyway
+  const filePath = path.join(TEMP_DIR, `${sessionIdSafe}${ext}`);
+  fs.writeFileSync(filePath, buffer);
+  return filePath;
 }
 
 async function downloadRecording(contentUri, sessionIdSafe) {
@@ -413,12 +460,50 @@ async function processCallLogRecording({
   let audioPath = null;
 
   try {
-    const recInfo = await findRecordingForSession({
-      telephonySessionId,
-      callStartTime: callLog.callStartTime,
-      extensionId: callLog.extensionId,
-    });
-    if (!recInfo) {
+    // Drive-first: if the recordingArchive pipeline already pulled and
+    // uploaded the file, read it from Drive instead of going back to
+    // RingCentral. Two reasons:
+    //   1. RC rate-limits (a single 429 from RC's call-log API sets a
+    //      global backoff that wedges every subsequent transcription,
+    //      even ones whose recording we already own).
+    //   2. RingCX-platform calls — recordingArchive pulls those via
+    //      RingCX's interaction-metadata pipeline (entirely separate
+    //      from RC's EX call-log endpoint), so the Drive copy is the
+    //      ONLY working path for CX outbound.
+    let driveRecordingDuration = null;
+    let driveRecordingUri = null;
+    const archive = callLog.recordingArchive || {};
+    if (archive.status === "completed" && archive.driveFileId) {
+      try {
+        audioPath = await downloadRecordingFromDrive(
+          archive.driveFileId,
+          sessionIdSafe,
+        );
+      } catch (driveError) {
+        // Drive blip — log and fall through to the RC path below.
+        logger?.warn?.("transcription.drive_download_failed", {
+          telephonySessionId,
+          driveFileId: archive.driveFileId,
+          error: driveError.message,
+        });
+        audioPath = null;
+      }
+      if (audioPath) {
+        driveRecordingUri =
+          archive.driveWebViewLink || archive.driveWebContentLink || null;
+        driveRecordingDuration = Number(callLog.durationSec) || null;
+      }
+    }
+
+    let recInfo = null;
+    if (!audioPath) {
+      recInfo = await findRecordingForSession({
+        telephonySessionId,
+        callStartTime: callLog.callStartTime,
+        extensionId: callLog.extensionId,
+      });
+    }
+    if (!audioPath && !recInfo) {
       // `transcription.attempts` was just incremented above. Check if
       // we've burned through the retry budget — at that point the
       // recording is never coming and we should stop polling.
@@ -445,8 +530,21 @@ async function processCallLogRecording({
       };
     }
 
-    audioPath = await downloadRecording(recInfo.recording.contentUri, sessionIdSafe);
+    // Only pull from RC if we didn't already get the file from Drive.
+    if (!audioPath) {
+      audioPath = await downloadRecording(recInfo.recording.contentUri, sessionIdSafe);
+    }
     const transcript = await transcribeWithWhisper(audioPath);
+
+    // recordingUri + recordingDuration on the saved transcription
+    // depend on which source we used.
+    const finalRecordingUri = recInfo
+      ? recInfo.recording.contentUri
+      : driveRecordingUri;
+    const finalRecordingDuration = recInfo
+      ? recInfo.recording.duration
+      : driveRecordingDuration;
+    const transcriptionSource = recInfo ? "whisper" : "whisper-drive";
 
     if (!transcript) {
       await CallLog.updateOne(
@@ -455,8 +553,9 @@ async function processCallLogRecording({
           $set: {
             "transcription.status": "no_transcript",
             "transcription.error": "Whisper returned empty string",
-            "transcription.recordingUri": recInfo.recording.contentUri,
-            "transcription.recordingDuration": recInfo.recording.duration,
+            "transcription.recordingUri": finalRecordingUri,
+            "transcription.recordingDuration": finalRecordingDuration,
+            "transcription.source": transcriptionSource,
           },
         },
       );
@@ -478,11 +577,11 @@ async function processCallLogRecording({
     const update = {
       "transcription.status": "completed",
       "transcription.text": transcript,
-      "transcription.recordingUri": recInfo.recording.contentUri,
-      "transcription.recordingDuration": recInfo.recording.duration,
+      "transcription.recordingUri": finalRecordingUri,
+      "transcription.recordingDuration": finalRecordingDuration,
       "transcription.transcribedAt": new Date(),
       "transcription.error": null,
-      "transcription.source": "whisper",
+      "transcription.source": transcriptionSource,
     };
     if (scoring) {
       update.callScore = { ...scoring, scoredAt: new Date(), scoreError: null };

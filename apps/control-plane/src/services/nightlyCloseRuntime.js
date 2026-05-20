@@ -20,6 +20,74 @@ function normalizeActiveWeekdays(values = null) {
   return normalized.length > 0 ? normalized : [...DEFAULT_WEEKDAYS];
 }
 
+function getZonedDateParts(date, timezone) {
+  const formatter = new Intl.DateTimeFormat("en-US", {
+    timeZone: timezone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    weekday: "short",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hourCycle: "h23",
+  });
+  const parts = Object.fromEntries(
+    formatter.formatToParts(date).map((part) => [part.type, part.value]),
+  );
+  const weekdayMap = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
+  return {
+    year: Number(parts.year),
+    month: Number(parts.month),
+    day: Number(parts.day),
+    weekday: weekdayMap[parts.weekday] ?? date.getUTCDay(),
+    hour: Number(parts.hour),
+    minute: Number(parts.minute),
+    second: Number(parts.second),
+  };
+}
+
+function addDaysToLocalDate(parts, days) {
+  const date = new Date(Date.UTC(parts.year, parts.month - 1, parts.day + days));
+  return {
+    year: date.getUTCFullYear(),
+    month: date.getUTCMonth() + 1,
+    day: date.getUTCDate(),
+  };
+}
+
+function getTimeZoneOffsetMs(date, timezone) {
+  const parts = getZonedDateParts(date, timezone);
+  const asUtc = Date.UTC(
+    parts.year,
+    parts.month - 1,
+    parts.day,
+    parts.hour,
+    parts.minute,
+    parts.second,
+  );
+  return asUtc - date.getTime();
+}
+
+function zonedWallClockToUtc(parts, timezone) {
+  const utcGuess = new Date(Date.UTC(
+    parts.year,
+    parts.month - 1,
+    parts.day,
+    parts.hour,
+    parts.minute,
+    0,
+    0,
+  ));
+  const firstOffset = getTimeZoneOffsetMs(utcGuess, timezone);
+  let result = new Date(utcGuess.getTime() - firstOffset);
+  const secondOffset = getTimeZoneOffsetMs(result, timezone);
+  if (secondOffset !== firstOffset) {
+    result = new Date(utcGuess.getTime() - secondOffset);
+  }
+  return result;
+}
+
 function normalizeRecipients(values = []) {
   return (Array.isArray(values) ? values : [])
     .map((value) => String(value || "").trim().toLowerCase())
@@ -42,33 +110,24 @@ function computeNextRunAt(
   options = {},
 ) {
   const activeWeekdays = new Set(normalizeActiveWeekdays(options.activeWeekdays));
-  const formatter = new Intl.DateTimeFormat("en-CA", {
-    timeZone: timezone,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-    hour12: false,
-  });
-
-  const parts = Object.fromEntries(
-    formatter.formatToParts(now).map((part) => [part.type, part.value]),
-  );
-  const candidate = new Date(
-    `${parts.year}-${parts.month}-${parts.day}T${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}:00`,
-  );
+  const nowParts = getZonedDateParts(now, timezone);
+  let dateParts = {
+    year: nowParts.year,
+    month: nowParts.month,
+    day: nowParts.day,
+  };
+  let candidate = zonedWallClockToUtc({ ...dateParts, hour, minute }, timezone);
   if (candidate.getTime() <= now.getTime()) {
-    candidate.setDate(candidate.getDate() + 1);
-    candidate.setHours(hour, minute, 0, 0);
+    dateParts = addDaysToLocalDate(dateParts, 1);
+    candidate = zonedWallClockToUtc({ ...dateParts, hour, minute }, timezone);
   }
   for (let attempts = 0; attempts < 8; attempts += 1) {
-    if (activeWeekdays.has(candidate.getDay())) {
+    const candidateParts = getZonedDateParts(candidate, timezone);
+    if (activeWeekdays.has(candidateParts.weekday)) {
       return candidate;
     }
-    candidate.setDate(candidate.getDate() + 1);
-    candidate.setHours(hour, minute, 0, 0);
+    dateParts = addDaysToLocalDate(dateParts, 1);
+    candidate = zonedWallClockToUtc({ ...dateParts, hour, minute }, timezone);
   }
   return candidate;
 }
