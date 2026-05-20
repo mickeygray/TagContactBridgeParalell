@@ -1,6 +1,12 @@
 "use strict";
 
-const { createEvent, processNextEvent } = require("../../event-core/src");
+const {
+  EVENT_STATUS,
+  createEvent,
+  markCompleted,
+  markFailed,
+  processNextEvent,
+} = require("../../event-core/src");
 const { env } = require("../../shared-config/src");
 const { CxDialQueue, LeadCadence, MasterProspectIndex } = require("../../shared-models/src");
 const {
@@ -1845,6 +1851,14 @@ async function queueCxDialRequest(payload = {}) {
 }
 
 async function handleCxCallPlaced(payload = {}) {
+  if (payload.alreadyHandled === true) {
+    return {
+      ok: true,
+      skipped: true,
+      reason: "already-handled-inline",
+    };
+  }
+
   const queueItemId = String(payload.queueItemId || "").trim();
   const queueItem = queueItemId
     ? await cxDialQueueRepository.findQueueItemById(queueItemId)
@@ -1876,25 +1890,33 @@ async function handleCxCallPlaced(payload = {}) {
   const confirmedCall =
     payload.confirmedCall === true
     || Boolean(String(payload.uii || payload.callSessionId || "").trim());
-  const touchMetadata = confirmedCall
+  const countableAttempt =
+    confirmedCall
+    || payload.countAsAttempt === true
+    || payload.holdUntilDisposition === true
+    || payload.ringcxPublished === true;
+  const touchMetadata = countableAttempt
     ? buildDailyAgentTouchMetadata(queueItem, placedAt)
     : {};
   const attemptQueuePatch = Object.fromEntries(
     Object.entries(attemptPatch).filter(([key]) => !key.startsWith("metadata.")),
   );
   const nextPlacedCalls = Number(attemptPatch.placedCalls || 0);
-  if (confirmedCall) {
-    await Promise.all([
-      markAgentCxCallState(queueItem, payload, placedAt).catch(() => null),
+  if (countableAttempt) {
+    const touchWrites = [
       markLeadCxTouchState({
         domain,
         caseId,
         queueItem,
         payload,
         placedAt,
-        confirmedCall,
+        confirmedCall: true,
       }).catch(() => null),
-    ]);
+    ];
+    if (confirmedCall) {
+      touchWrites.push(markAgentCxCallState(queueItem, payload, placedAt).catch(() => null));
+    }
+    await Promise.all(touchWrites);
   }
   if (confirmedCall && payload.uii) {
     // Read the RingCX-specific identifiers stamped on the queue item
@@ -2488,6 +2510,47 @@ async function processCxCadenceEventBatch(options = {}) {
     handled: results.filter((entry) => entry.handled).length,
     results,
   };
+}
+
+async function processCreatedCxCadenceEventInline(event, options = {}) {
+  if (!event?._id) return { handled: false, reason: "missing-event" };
+
+  const workerName = options.workerName || "ringcentral-cx-cadence-inline";
+  const maxAttempts = options.maxAttempts || 5;
+  const handlers = buildCxCadenceHandlers();
+  const handler = handlers[event.eventType];
+  if (!handler) return { handled: false, reason: "no-handler" };
+
+  const startedAt = new Date();
+  event.status = EVENT_STATUS.PROCESSING;
+  event.lastWorker = workerName;
+  event.attemptCount = Math.max(Number(event.attemptCount || 0), 0) + 1;
+  event.attempts = [
+    ...(Array.isArray(event.attempts) ? event.attempts : []),
+    {
+      worker: workerName,
+      status: EVENT_STATUS.PROCESSING,
+      startedAt,
+    },
+  ];
+  await event.save();
+
+  try {
+    const handlerResult = await handler(event);
+    await markCompleted(event._id, workerName);
+    return {
+      handled: true,
+      eventId: String(event._id),
+      handlerResult,
+    };
+  } catch (error) {
+    await markFailed(event._id, workerName, error, maxAttempts);
+    return {
+      handled: false,
+      eventId: String(event._id),
+      error: error.message || "inline-cadence-handler-failed",
+    };
+  }
 }
 
 async function releaseCxQueueBatch(options = {}) {
@@ -4043,14 +4106,26 @@ async function previewCxAssignmentBuild(options = {}) {
 }
 
 async function createCxCallPlacedEvent(input = {}) {
-  return createEvent({
+  const payload = input.payload || {};
+  const result = await createEvent({
     eventType: CX_CADENCE_EVENT_TYPES.CALL_PLACED,
     sourceService: input.sourceService || "ringcentral-cx",
     aggregateType: "case",
-    aggregateId: String(input.caseId || input.queueItemId || "cx-call"),
+    aggregateId: String(input.caseId || input.queueItemId || payload.caseId || payload.queueItemId || "cx-call"),
     dedupeKey: input.dedupeKey || null,
-    payload: input.payload || {},
+    payload,
   });
+  if (input.processImmediately === true && !result.deduped && result.event) {
+    const inline = await processCreatedCxCadenceEventInline(result.event, {
+      workerName: input.workerName || `${input.sourceService || "ringcentral-cx"}-cx-cadence-inline`,
+      maxAttempts: input.maxAttempts || 5,
+    });
+    return {
+      ...result,
+      inline,
+    };
+  }
+  return result;
 }
 
 async function createCxCallTerminalOutcomeEvent(input = {}) {

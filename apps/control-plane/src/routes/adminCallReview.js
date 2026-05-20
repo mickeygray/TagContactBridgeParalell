@@ -22,6 +22,32 @@ const { toErrorResponse } = require("../../../../packages/shared-errors/src");
 
 const PACIFIC_TZ = "America/Los_Angeles";
 const DEFAULT_DOMAIN = "TAG";
+// Tenants we union across when the caller doesn't pin a domain. Agents
+// freely dial across both — Anthony today has 229 calls on WYNN + 6 on
+// TAG — so a single-domain filter would hide most of their activity.
+// Adjust here if a new tenant is introduced.
+const KNOWN_DOMAINS = Object.freeze(["TAG", "WYNN"]);
+
+// Resolve the ?domain= query param into an array of domains to query.
+// Accepts:
+//   - missing / "ALL" / "*"        → both tenants (default behavior)
+//   - "WYNN" / "TAG"               → single tenant (back-compat)
+//   - "WYNN,TAG" or "TAG,WYNN"     → CSV list, deduped
+function resolveDomainScope(rawDomain) {
+  const raw = String(rawDomain || "").trim().toUpperCase();
+  if (!raw || raw === "ALL" || raw === "*") {
+    return [...KNOWN_DOMAINS];
+  }
+  if (raw.includes(",")) {
+    const set = new Set();
+    for (const part of raw.split(",")) {
+      const cleaned = part.trim().toUpperCase();
+      if (cleaned && KNOWN_DOMAINS.includes(cleaned)) set.add(cleaned);
+    }
+    return set.size > 0 ? [...set] : [...KNOWN_DOMAINS];
+  }
+  return KNOWN_DOMAINS.includes(raw) ? [raw] : [...KNOWN_DOMAINS];
+}
 const MAX_ROWS = 200;
 
 // Compute the UTC instant for "today 00:00 in Pacific time." Used as
@@ -229,22 +255,33 @@ function createAdminCallReviewRouter(auth) {
             .status(400)
             .json({ ok: false, error: "extensionId is required" });
         }
-        const domain = String(
-          req.query?.domain || DEFAULT_DOMAIN,
-        ).toUpperCase();
+        const domains = resolveDomainScope(req.query?.domain);
         const dayStart = startOfPacificDay();
 
-        const callLogs = await callLogRepository.listCallLogs(domain, {
-          extensionId,
-          callStartFrom: dayStart,
-          limit: MAX_ROWS,
-        });
+        // Fan out per tenant — listCallLogs requires a single domain.
+        // Parallel + merge keeps the wall-clock equivalent to a single-
+        // tenant query. MAX_ROWS applies post-merge so a hot tenant
+        // can't crowd out a quiet one.
+        const perTenant = await Promise.all(
+          domains.map((d) =>
+            callLogRepository.listCallLogs(d, {
+              extensionId,
+              callStartFrom: dayStart,
+              limit: MAX_ROWS,
+            }),
+          ),
+        );
+        const callLogs = perTenant.flat();
 
-        const rows = sortRows(callLogs.map(projectCallRow), req.query?.sort);
+        const rows = sortRows(callLogs.map(projectCallRow), req.query?.sort)
+          .slice(0, MAX_ROWS);
         return res.json({
           ok: true,
           dateKey: pacificDateKey(),
-          domain,
+          // Echo what was queried so the SPA can show "across all
+          // tenants" vs "WYNN only" badges if it wants.
+          domains,
+          domain: domains.length === 1 ? domains[0] : "ALL",
           extensionId,
           summary: buildSummary(rows),
           calls: rows,
@@ -275,18 +312,22 @@ function createAdminCallReviewRouter(auth) {
             .status(400)
             .json({ ok: false, error: "caseId must be a positive number" });
         }
-        const domain = String(
-          req.query?.domain || DEFAULT_DOMAIN,
-        ).toUpperCase();
+        const domains = resolveDomainScope(req.query?.domain);
         const dayStart = startOfPacificDay();
 
-        const callLogs = await callLogRepository.listCallLogs(domain, {
-          caseId,
-          callStartFrom: dayStart,
-          limit: MAX_ROWS,
-        });
+        const perTenant = await Promise.all(
+          domains.map((d) =>
+            callLogRepository.listCallLogs(d, {
+              caseId,
+              callStartFrom: dayStart,
+              limit: MAX_ROWS,
+            }),
+          ),
+        );
+        const callLogs = perTenant.flat();
 
-        const rows = sortRows(callLogs.map(projectCallRow), req.query?.sort);
+        const rows = sortRows(callLogs.map(projectCallRow), req.query?.sort)
+          .slice(0, MAX_ROWS);
         // Build per-agent grouping so the UI can render "Sean dialed
         // 3 times, Maria once" without a second client query.
         const byAgent = new Map();
@@ -315,7 +356,8 @@ function createAdminCallReviewRouter(auth) {
         return res.json({
           ok: true,
           dateKey: pacificDateKey(),
-          domain,
+          domains,
+          domain: domains.length === 1 ? domains[0] : "ALL",
           caseId,
           summary: buildSummary(rows),
           agents: Array.from(byAgent.values()).sort(

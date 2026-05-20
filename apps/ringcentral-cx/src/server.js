@@ -1603,11 +1603,13 @@ async function startServer() {
         caseId: req.body?.caseId != null ? Number(req.body.caseId) : null,
         placedAt: req.body?.placedAt || new Date().toISOString(),
         confirmedCall: true,
+        countAsAttempt: true,
         sourceService: config.serviceName,
       };
       const result = await createCxCallPlacedEvent({
         sourceService: config.serviceName,
         dedupeKey: `cx-call-placed:${req.params.queueItemId}:${payload.placedAt}`,
+        processImmediately: true,
         payload,
       });
       return res.status(202).json({

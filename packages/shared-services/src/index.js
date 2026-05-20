@@ -70,6 +70,10 @@ const {
 const cxTokenStorageService = require("./cxTokenStorageService");
 const cxOAuthService = require("./cxOAuthService");
 const {
+  ensureRingcxAgentOffhookAllowed,
+  resolveRingcxAgentIdentity,
+} = require("./ringcxAgentSelfHealService");
+const {
   placeCall: dialPlaceCall,
   terminateAndDispose: dialTerminateAndDispose,
   reconcileCallEnded: dialReconcileCallEnded,
@@ -662,6 +666,8 @@ module.exports = {
   computeNextTouchAt,
   cxTokenStorageService,
   cxOAuthService,
+  ensureRingcxAgentOffhookAllowed,
+  resolveRingcxAgentIdentity,
   dialPlaceCall,
   dialTerminateAndDispose,
   dialReconcileCallEnded,

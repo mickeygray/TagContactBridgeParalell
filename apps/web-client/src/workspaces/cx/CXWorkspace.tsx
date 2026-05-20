@@ -3413,7 +3413,12 @@ export function CXWorkspace() {
 
   function releaseQueueAfterSuccess(
     result: unknown,
-    options: { forceEject?: boolean; skipAutoServe?: boolean } = {},
+    options: {
+      forceEject?: boolean;
+      skipAutoServe?: boolean;
+      preserveCurrentLead?: boolean;
+      skipCurrentLeadSuppression?: boolean;
+    } = {},
   ) {
     const forceEject = options.forceEject === true;
     if (!forceEject && !servedQueueActionKey && !servedQueueTicketId) return;
@@ -3441,23 +3446,27 @@ export function CXWorkspace() {
     const completed = row.completed === true || cleanupAccepted;
     if (!completed) return;
     if (!cleanupAccepted) return;
-    suppressCurrentQueueLead(row);
+    if (!options.skipCurrentLeadSuppression) {
+      suppressCurrentQueueLead(row);
+    }
     if (rawCurrentCallSessionId) {
       setSuppressedCallSessionId(rawCurrentCallSessionId);
     }
-    clearServedQueueSelection();
-    clearCasePanelForNextQueueLead();
+    if (!options.preserveCurrentLead) {
+      clearServedQueueSelection();
+      clearCasePanelForNextQueueLead();
+    }
     workspace.refetch();
     callQueue.refetch();
     for (const query of multiCallQueues) {
       query.refetch();
     }
-    if (!options.skipAutoServe) {
+    if (!options.skipAutoServe && !options.preserveCurrentLead) {
       scheduleAutoServe(AUTO_SERVE_HANDOFF_DELAY_SECONDS, "next");
     }
   }
 
-  function optimisticallyEjectCallbackLead() {
+  function optimisticallyEjectCallbackLead(options: { skipAutoServe?: boolean } = {}) {
     if (!servedQueueActionKey && !servedQueueTicketId && !servedQueueCaseId) return;
     suppressCurrentQueueLead({
       domain: servedQueueDomain || domain,
@@ -3478,7 +3487,9 @@ export function CXWorkspace() {
     for (const query of multiCallQueues) {
       query.refetch();
     }
-    scheduleAutoServe(AUTO_SERVE_DELAY_SECONDS, "next");
+    if (!options.skipAutoServe) {
+      scheduleAutoServe(AUTO_SERVE_DELAY_SECONDS, "next");
+    }
   }
 
   function handleSaveCase() {
@@ -4701,9 +4712,35 @@ export function CXWorkspace() {
                     variant="secondary"
                     isLoading={disposition.isPending}
                     onClick={() => {
-                      const nextQueueLead = queueItems[0] || null;
+                      const currentTicketId = String(servedQueueTicketId || "").trim();
+                      const nextQueueLead =
+                        queueItems.find((item) => {
+                          const ticketId = String(item.queueTicketId || "").trim();
+                          if (currentTicketId && ticketId && ticketId === currentTicketId) return false;
+                          if (servingQueueKey && buildQueueItemKey(item) === servingQueueKey) return false;
+                          return true;
+                        }) || null;
                       const nextDial = buildNextCallHandoffPayload(nextQueueLead);
-                      optimisticallyEjectCallbackLead();
+                      const hasImmediateNextHandoff = nextQueueLead != null && nextDial != null;
+                      const previousLeadSnapshot = hasImmediateNextHandoff
+                        ? {
+                            selected,
+                            form: { ...form },
+                            dirty: { ...dirty },
+                            pickedCandidateKey,
+                            servingQueueKey,
+                            servedQueueCaseId,
+                            servedQueueDomain,
+                            servedQueueActionKey,
+                            servedQueueTicketId,
+                            servedQueueContact,
+                            servedQueueStartedAt,
+                          }
+                        : null;
+                      optimisticallyEjectCallbackLead({ skipAutoServe: hasImmediateNextHandoff });
+                      if (hasImmediateNextHandoff) {
+                        stageNextCallHandoffLead(nextQueueLead);
+                      }
                       void run("Call back", () =>
                         disposition.mutateAsync({
                           caseId: String(callbackDispositionCaseId),
@@ -4727,9 +4764,10 @@ export function CXWorkspace() {
                           releaseQueueAfterSuccess(result, {
                             forceEject: true,
                             skipAutoServe: nextDialAccepted,
+                            preserveCurrentLead: nextDialAccepted,
+                            skipCurrentLeadSuppression: hasImmediateNextHandoff,
                           });
                           if (nextDialAccepted && nextQueueLead) {
-                            stageNextCallHandoffLead(nextQueueLead);
                             toast("Next call sent", {
                               description: "RingCX has the next lead while the prior call finishes cleanup.",
                             });
@@ -4738,9 +4776,26 @@ export function CXWorkspace() {
                             toast.warning("Next call handoff fell back", {
                               description: reason || "Auto serve will retry from the queue.",
                             });
+                            clearServedQueueSelection();
+                            clearCasePanelForNextQueueLead();
+                            scheduleAutoServe(AUTO_SERVE_HANDOFF_DELAY_SECONDS, "next");
                           }
                         })
                         .catch(() => {
+                          if (previousLeadSnapshot) {
+                            cancelAutoServe();
+                            setSelected(previousLeadSnapshot.selected);
+                            setForm(previousLeadSnapshot.form);
+                            setDirty(previousLeadSnapshot.dirty);
+                            setPickedCandidateKey(previousLeadSnapshot.pickedCandidateKey);
+                            setServingQueueKey(previousLeadSnapshot.servingQueueKey);
+                            setServedQueueCaseId(previousLeadSnapshot.servedQueueCaseId);
+                            setServedQueueDomain(previousLeadSnapshot.servedQueueDomain);
+                            setServedQueueActionKey(previousLeadSnapshot.servedQueueActionKey);
+                            setServedQueueTicketId(previousLeadSnapshot.servedQueueTicketId);
+                            setServedQueueContact(previousLeadSnapshot.servedQueueContact);
+                            setServedQueueStartedAt(previousLeadSnapshot.servedQueueStartedAt);
+                          }
                           workspace.refetch();
                           callQueue.refetch();
                         });

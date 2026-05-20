@@ -43,6 +43,9 @@ const {
   userAccountRepository,
 } = require("../../shared-repositories/src");
 const cxTokenStorage = require("./cxTokenStorageService");
+const {
+  ensureRingcxAgentOffhookAllowed,
+} = require("./ringcxAgentSelfHealService");
 
 const STATE_TTL_MS = 10 * 60 * 1000;        // 10 min
 const REFRESH_TOKEN_DEFAULT_TTL_MS = 60 * 24 * 60 * 60 * 1000;  // 60 days
@@ -123,6 +126,26 @@ function describeConfig() {
     tokenUrl: c.tokenUrl,
     encryptionKeySet: cxTokenStorage.isConfigured(),
   };
+}
+
+async function selfHealRingcxOffhookByAccount(account, source) {
+  if (!account) return { ok: true, skipped: true, reason: "missing-account", source };
+  return ensureRingcxAgentOffhookAllowed(account, {
+    source,
+    logger: console,
+  }).catch((error) => {
+    console.warn("ringcx.offhook.self_heal.failed", {
+      source,
+      email: account?.email || null,
+      error: error.message,
+    });
+    return { ok: false, error: error.message, source };
+  });
+}
+
+async function selfHealRingcxOffhookByUserId(userId, source) {
+  const account = await userAccountRepository.findUserAccountById(userId).catch(() => null);
+  return selfHealRingcxOffhookByAccount(account, source);
 }
 
 function normalizeScopes(value) {
@@ -301,6 +324,7 @@ async function callback({ code, state, errorParam = null } = {}) {
 
   // 5. Mark state consumed
   await rcOAuthStateRepository.consumeByState(state);
+  await selfHealRingcxOffhookByAccount(account, "cx-oauth-callback");
 
   return {
     ok: true,
@@ -343,6 +367,7 @@ async function refreshUserSession({ user, userId } = {}) {
         rcxMainAccountId: rcxSession.mainAccountId || existingRcxSession.rcxMainAccountId || null,
         rcxAgentEmail: rcxSession.rcUser?.email || existingRcxSession.rcxAgentEmail || null,
       });
+      await selfHealRingcxOffhookByUserId(targetId, "cx-oauth-refresh");
       return { ok: true, refreshedAt: new Date(), method: "rcx-refresh" };
     } catch (error) {
       await cxTokenStorage.markRefreshError(targetId, `rcx-refresh: ${error.message}`);
@@ -441,6 +466,7 @@ async function refreshUserSession({ user, userId } = {}) {
       rcxMainAccountId: rcxSession.mainAccountId,
       rcxAgentEmail: rcxSession.rcUser?.email || null,
     });
+    await selfHealRingcxOffhookByUserId(targetId, "cx-oauth-refresh");
     return { ok: true, refreshedAt: new Date() };
   } catch (error) {
     await cxTokenStorage.markRefreshError(targetId, `rcx-exchange: ${error.message}`);

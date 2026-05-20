@@ -106,7 +106,7 @@ async function markCompleted(eventId, workerName) {
         {
           "attempt.worker": workerName,
           "attempt.status": EVENT_STATUS.PROCESSING,
-          "attempt.finishedAt": { $exists: false },
+          "attempt.finishedAt": null,
         },
       ],
     },
@@ -145,7 +145,7 @@ async function markFailed(eventId, workerName, error, maxAttempts = 3) {
         {
           "attempt.worker": workerName,
           "attempt.status": EVENT_STATUS.PROCESSING,
-          "attempt.finishedAt": { $exists: false },
+          "attempt.finishedAt": null,
         },
       ],
     },

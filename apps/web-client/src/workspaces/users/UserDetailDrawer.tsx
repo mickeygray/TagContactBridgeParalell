@@ -206,7 +206,12 @@ export function UserDetailDrawer({
         <div className="rounded-lg border border-border p-3">
           <CallsTodayPanel
             extensionId={current.extensionId ?? null}
-            domain={current.company || "TAG"}
+            // Don't pin to current.company — agents dial across both
+            // tenants (most CX outbound lives on WYNN even for TAG-
+            // company agents). Pass "ALL" so the server fans out and
+            // we see every call. The drawer for case-specific views
+            // below also passes ALL.
+            domain="ALL"
             onCaseClick={(caseId) => setCaseDrawerId(caseId)}
           />
         </div>

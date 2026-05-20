@@ -51,6 +51,25 @@ function createAuthRouter(config, options = {}) {
     };
   }
 
+  async function ensureRingcxOffhookAllowed(account, source) {
+    try {
+      const {
+        ensureRingcxAgentOffhookAllowed,
+      } = require("../../../../packages/shared-services/src/ringcxAgentSelfHealService");
+      return await ensureRingcxAgentOffhookAllowed(account, {
+        source,
+        logger,
+      });
+    } catch (error) {
+      emitAuthLog("warn", "ringcx.offhook.self_heal.failed", {
+        source,
+        email: account?.email || null,
+        error: error.message,
+      });
+      return { ok: false, error: error.message };
+    }
+  }
+
   function attachSendCodeResponseLog(req, res, email) {
     const startedAt = Date.now();
     res.once("finish", () => {
@@ -260,6 +279,7 @@ function createAuthRouter(config, options = {}) {
       }
 
       const latest = (await findAccountByEmail(normalizedEmail)) || account;
+      await ensureRingcxOffhookAllowed(latest, "auth-verify-code");
 
       // Clamp JWT expiry to today's window-close for non-admins.
       // SPA's existing 401 handler will auto-logout when the token expires.

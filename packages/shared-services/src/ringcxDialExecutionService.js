@@ -1782,6 +1782,7 @@ async function executeCxDispatchIntent(options = {}) {
         callPlacedEvent = await createCxCallPlacedEvent({
           sourceService: "ringcentral-cx",
           dedupeKey: `cx-call-placed:${queueItemId}:${capturedUii || requestedAt.toISOString()}`,
+          processImmediately: true,
           payload: {
             queueItemId,
             domain,
@@ -1789,12 +1790,16 @@ async function executeCxDispatchIntent(options = {}) {
             actionKey: dispatchIntent.actionKey || queueItem?.metadata?.actionKey || null,
             placedAt: requestedAt.toISOString(),
             uii: capturedUii,
+            extensionId,
+            agentName: agentState?.name || queueItem?.assignment?.agentName || null,
             agentEmail,
             phone,
             campaignId: publish.campaignId || null,
             dialGroupId: publish.dialGroupId || null,
             externId: publish.externId || null,
             confirmedCall: Boolean(capturedUii),
+            countAsAttempt: true,
+            ringcxPublished: true,
             holdUntilDisposition: true,
           },
         }).catch((error) => ({
@@ -2051,6 +2056,7 @@ async function executeCxDispatchIntent(options = {}) {
       callPlacedEvent = await createCxCallPlacedEvent({
         sourceService: "ringcentral-cx",
         dedupeKey: `cx-call-placed:${queueItemId}:${uii || requestedAt.toISOString()}`,
+        processImmediately: true,
         payload: {
           queueItemId,
           domain,
@@ -2058,11 +2064,14 @@ async function executeCxDispatchIntent(options = {}) {
           actionKey: dispatchIntent.actionKey || queueItem?.metadata?.actionKey || null,
           placedAt: requestedAt.toISOString(),
           uii,
+          extensionId,
+          agentName: agentState?.name || queueItem?.assignment?.agentName || null,
           agentEmail,
           phone,
           ucqQueueItemId,
           callSessionId: response.callSessionId || null,
           confirmedCall: true,
+          countAsAttempt: true,
           holdUntilDisposition: true,
         },
       }).catch((error) => ({

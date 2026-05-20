@@ -29,7 +29,8 @@
     "preview:hourly-finance": "node scripts/preview-hourly-finance.js",
     "smoke": "node scripts/smoke-test.js",
     "rc:live-monitor": "node scripts/rc-ex-live-trainer-oneoff.js",
-    "rc:live-monitor:diarize-manual": "node scripts/run-ex-diarize-manual-test.js"
+    "rc:live-monitor:diarize-manual": "node scripts/run-ex-diarize-manual-test.js",
+    "eval:speaker-labels": "node scripts/eval-speaker-label-models.js"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.91.1",

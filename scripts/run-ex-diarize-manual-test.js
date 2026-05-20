@@ -67,8 +67,14 @@ Useful options:
   --no-dial                 Start only the EX monitor/dashboard
   --to PHONE                Destination/cell to dial
   --caller-id PHONE         RingCX outbound caller ID
-  --chunk-sec 5             Seconds per transcription chunk
-  --sentence-hold-ms 2000   Hold fragments briefly for sentence cleanup
+  --chunk-sec 4             Seconds per transcription chunk
+  --split-on-silence        Send chunks after a speech pause instead of fixed intervals
+  --silence-split-ms 3000   Silence duration for --split-on-silence
+  --stage-until-silence     Transcribe max chunks internally, publish merged turn after silence
+  --no-max-chunk            With --split-on-silence, publish only after silence
+  --sentence-hold-ms 3000   Hold fragments briefly for sentence cleanup
+  --stt-model gpt-4o-transcribe
+                            Use prompted 4o STT + semantic speaker labels
   --supervise-wait-sec 600  How long AI Monitor waits for the live CX call
   --timeout-sec 900         Max monitor runtime
 
@@ -114,14 +120,22 @@ async function main() {
     "--caller-id",
     process.env.EX_LIVE_MONITOR_TEST_CALLER_ID || "8182728593",
   ));
-  const chunkSec = readFlag(argv, "--chunk-sec", "5");
-  const sentenceHoldMs = readFlag(argv, "--sentence-hold-ms", "2000");
+  const chunkSec = readFlag(argv, "--chunk-sec", "4");
+  const splitOnSilence = hasFlag(argv, "--split-on-silence");
+  const stageUntilSilence = hasFlag(argv, "--stage-until-silence");
+  const noMaxChunk = hasFlag(argv, "--no-max-chunk");
+  const silenceSplitMs = readFlag(argv, "--silence-split-ms", "3000");
+  const speechPacketActivePct = readFlag(argv, "--speech-packet-active-pct", "1.0");
+  const speechPacketMaxAbs = readFlag(argv, "--speech-packet-max-abs", "1200");
+  const sentenceHoldMs = readFlag(argv, "--sentence-hold-ms", "3000");
   const coachEverySec = readFlag(argv, "--coach-every-sec", "15");
   const timeoutSec = readFlag(argv, "--timeout-sec", "900");
   const superviseWaitSec = readFlag(argv, "--supervise-wait-sec", "600");
   const ringDuration = readFlag(argv, "--ring-duration", "20");
   const dialDelaySec = Math.max(0, Number(readFlag(argv, "--dial-delay-sec", "2")) || 0);
   const sttModel = readFlag(argv, "--stt-model", "gpt-4o-transcribe-diarize");
+  const nativeDiarize = /diarize/i.test(sttModel);
+  const sttResponseFormat = readFlag(argv, "--stt-response-format", nativeDiarize ? "diarized_json" : "json");
   const noDial = hasFlag(argv, "--no-dial");
 
   if (!agentExt) throw new Error("--agent-ext is required");
@@ -135,8 +149,7 @@ async function main() {
     "--supervisor-ext", supervisorExt,
     "--dashboard-port", String(dashboardPort),
     "--stt-model", sttModel,
-    "--stt-response-format", "diarized_json",
-    "--no-speaker-labels",
+    "--stt-response-format", sttResponseFormat,
     "--call-flow", "outbound",
     "--initial-human-speaker", "prospect",
     "--chunk-sec", String(chunkSec),
@@ -145,10 +158,25 @@ async function main() {
     "--supervise-wait-sec", String(superviseWaitSec),
     "--timeout-sec", String(timeoutSec),
   ];
+  if (splitOnSilence) {
+    monitorArgs.push(
+      "--split-on-silence",
+      "--silence-split-ms", String(silenceSplitMs),
+      "--speech-packet-active-pct", String(speechPacketActivePct),
+      "--speech-packet-max-abs", String(speechPacketMaxAbs),
+    );
+    if (stageUntilSilence) monitorArgs.push("--stage-until-silence");
+    if (noMaxChunk) monitorArgs.push("--no-max-chunk");
+  }
+  if (nativeDiarize) {
+    monitorArgs.push("--chunking-strategy", "auto", "--no-speaker-labels");
+  } else {
+    monitorArgs.push("--speaker-labels");
+  }
 
   log(`dashboard: http://127.0.0.1:${dashboardPort}/`);
   log(`monitor: EX ${supervisorExt} listening to agent EX ${agentExt}`);
-  log(`stt: ${sttModel} / diarized_json`);
+  log(`stt: ${sttModel} / ${sttResponseFormat}${nativeDiarize ? " / native diarize" : " / semantic speaker labels"}`);
   if (!noDial) {
     log(`manual dial: ${username} -> ${maskPhone(destination)} callerId=${maskPhone(callerId)}`);
   }

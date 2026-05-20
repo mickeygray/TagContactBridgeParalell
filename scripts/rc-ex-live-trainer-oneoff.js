@@ -86,6 +86,53 @@ function cleanText(value, maxLength = 6000) {
     .slice(0, maxLength);
 }
 
+function inferAudioMimeType(filePath) {
+  const ext = path.extname(String(filePath || "")).toLowerCase();
+  if (ext === ".wav") return "audio/wav";
+  if (ext === ".mp3") return "audio/mpeg";
+  if (ext === ".m4a") return "audio/mp4";
+  if (ext === ".webm") return "audio/webm";
+  if (ext === ".ogg") return "audio/ogg";
+  return "audio/wav";
+}
+
+function audioFileDataUrl(filePath) {
+  const resolved = path.resolve(filePath);
+  const encoded = fs.readFileSync(resolved).toString("base64");
+  return `data:${inferAudioMimeType(resolved)};base64,${encoded}`;
+}
+
+function readRepeatedFlag(argv, name) {
+  const values = [];
+  for (let index = 0; index < argv.length; index += 1) {
+    const arg = argv[index];
+    if (arg.startsWith(`${name}=`)) {
+      values.push(arg.slice(name.length + 1));
+    } else if (arg === name && index < argv.length - 1) {
+      values.push(argv[index + 1]);
+      index += 1;
+    }
+  }
+  return values;
+}
+
+function parseKnownSpeakerReferences(argv) {
+  const specs = readRepeatedFlag(argv, "--known-speaker");
+  const names = [];
+  const references = [];
+  for (const spec of specs.slice(0, 4)) {
+    const raw = String(spec || "").trim();
+    const splitAt = raw.indexOf("=");
+    if (splitAt <= 0) continue;
+    const name = cleanText(raw.slice(0, splitAt), 40);
+    const filePath = raw.slice(splitAt + 1).trim();
+    if (!name || !filePath) continue;
+    names.push(name);
+    references.push(audioFileDataUrl(filePath));
+  }
+  return { names, references };
+}
+
 function normalizeCallFlow(value) {
   const normalized = String(value || "").trim().toLowerCase();
   return ["outbound", "inbound", "mixed"].includes(normalized) ? normalized : "outbound";
@@ -204,6 +251,7 @@ function speakerCueForText(text, { callFlow = "outbound", lastHumanSpeaker = "" 
     /\btax advocate\b/,
     /\btax group\b/,
     /\bwynn tax\b/,
+    /\bwintax\b/,
     /\bwe('re| are)\b/,
     /\bwe help\b/,
     /\bwhat we do\b/,
@@ -211,12 +259,18 @@ function speakerCueForText(text, { callFlow = "outbound", lastHumanSpeaker = "" 
     /\bwith (the )?(tax advocate group|tax group|group|wynn tax|wynn)\b/,
     /\bresponding to your (query|inquiry|request)\b/,
     /\bhow can i help\b/,
+    /\bhow can i assist\b/,
+    /\bhow are you doing\b/,
+    /\bhow are you today\b/,
     /\bhow much do you owe\b/,
     /\bdo you owe\b/,
     /\banything unfiled\b/,
     /\bcalling (from|about)\b/,
     /\bmy name is\b/,
     /\blet me\b/,
+    /\bconsultant can review\b/,
+    /\breview the basics\b/,
+    /\bbasics with you by phone\b/,
   ];
   if (agentPatterns.some((pattern) => pattern.test(clean))) return "agent";
 
@@ -227,10 +281,14 @@ function speakerCueForText(text, { callFlow = "outbound", lastHumanSpeaker = "" 
   const prospectPatterns = [
     /^(hello|hello there|hi|yeah hi|yes hello|speaking)\b/,
     /\bwho is this\b/,
+    /\bnot so bad\b/,
+    /\bi'?m (good|okay|ok|fine|alright)\b/,
     /\bi was wondering\b/,
     /\bwhat kind of\b/,
     /\bdo you guys\b/,
     /\bcan you help\b/,
+    /\b(kind of )?breaking up\b/,
+    /\bcan'?t hear\b/,
     /\bi need\b/,
     /\bi owe\b/,
     /\bi got\b/,
@@ -241,6 +299,19 @@ function speakerCueForText(text, { callFlow = "outbound", lastHumanSpeaker = "" 
   if (prospectPatterns.some((pattern) => pattern.test(clean))) return "prospect";
 
   return "";
+}
+
+function buildLiveSttPrompt({ baseContext = "", recentTranscripts = [] } = {}) {
+  const context = cleanText(baseContext, 700);
+  const recent = (Array.isArray(recentTranscripts) ? recentTranscripts : [])
+    .map((entry) => cleanText(entry?.text || "", 180))
+    .filter(Boolean)
+    .slice(-3)
+    .join(" ");
+  return [
+    context,
+    recent ? `Previous transcript: ${recent}` : "",
+  ].filter(Boolean).join(" ").trim();
 }
 
 function splitOutboundMixedSegment(segment) {
@@ -315,6 +386,24 @@ function assignedNativeHumans(nativeSpeakerAssignments) {
   );
 }
 
+function normalizeNativeDiarizeRawSegments(rawSegments = []) {
+  return (Array.isArray(rawSegments) ? rawSegments : [])
+    .map((segment) => {
+      const text = cleanText(segment?.text || "", 1000);
+      if (!text) return null;
+      return {
+        id: segment?.id ?? null,
+        type: segment?.type ?? null,
+        nativeSpeaker: cleanText(segment?.nativeSpeaker || segment?.speaker || "", 40),
+        text,
+        start: typeof segment?.start === "number" ? segment.start : null,
+        end: typeof segment?.end === "number" ? segment.end : null,
+      };
+    })
+    .filter(Boolean)
+    .slice(0, 32);
+}
+
 function stabilizeNativeDiarizeSegments(segments, {
   recentSegments = [],
   metadata = {},
@@ -384,15 +473,13 @@ function speakerSegmentsFromNativeDiarize(rawSegments = [], fallbackText = "", {
   metadata = {},
   nativeSpeakerAssignments = null,
 } = {}) {
-  const nativeSegments = (Array.isArray(rawSegments) ? rawSegments : [])
+  const nativeSegments = normalizeNativeDiarizeRawSegments(rawSegments)
     .map((segment) => {
-      const text = cleanText(segment?.text || "", 1000);
-      if (!text) return null;
-      const nativeSpeaker = cleanText(segment?.speaker || "", 20);
+      const nativeSpeaker = cleanText(segment?.nativeSpeaker || segment?.speaker || "", 20);
       return {
         speaker: "unknown",
         nativeSpeaker,
-        text,
+        text: segment.text,
         confidence: nativeSpeaker ? 0.82 : 0.7,
         reason: nativeSpeaker ? `native diarize speaker ${nativeSpeaker}` : "native diarize segment",
       };
@@ -515,6 +602,12 @@ function pickActiveCall(records, mode = "newest") {
     const at = Date.parse(a.startTime || a.creationTime || a.enqueueTime || "") || 0;
     return bt - at;
   })[0] || null;
+}
+
+function isRetryableSuperviseError(error) {
+  const message = String(error?.message || "");
+  return /No active agent telephonySessionId|MBW-005|Your call cannot be connected|TAS-102|WrongState|Incorrect State|CMN-10[12]|agentExtensionId/i
+    .test(message);
 }
 
 function pickParty(session, agentExtensionId, mode = "session") {
@@ -969,6 +1062,7 @@ function isLowSignalTranscript(text) {
   const clean = cleanText(text, 240).toLowerCase();
   if (!clean) return true;
   if (isPrimerHallucination(text)) return true;
+  if (isSystemOnlyTranscript(text)) return true;
   return [
     /^thank you[.!]?$/,
     /^thanks for watching[.!]?$/,
@@ -977,6 +1071,20 @@ function isLowSignalTranscript(text) {
     /^um+$/,
     /^music$/,
     /^silence$/,
+  ].some((pattern) => pattern.test(clean));
+}
+
+function isSystemOnlyTranscript(text) {
+  const clean = normalizeForDedupe(text);
+  if (!clean) return false;
+  return [
+    /^please continue( to)? hold$/,
+    /^please continue to hold$/,
+    /^please continue$/,
+    /^continue to hold$/,
+    /^your call is important to us$/,
+    /^please continue( to hold)? your call is important to us$/,
+    /^hold$/,
   ].some((pattern) => pattern.test(clean));
 }
 
@@ -1208,6 +1316,7 @@ function joinTranscriptContinuation(previousText, continuationText) {
 function shouldRepairIntoPrevious(displayTranscript, previousEntry, now = Date.now()) {
   if (!previousEntry || !displayTranscript?.text) return false;
   if (isPrimerHallucination(displayTranscript.text)) return false;
+  if (isSystemOnlyTranscript(displayTranscript.text)) return false;
   const previousEndedAt = Date.parse(previousEntry.endedAt || previousEntry.at || "") || 0;
   if (previousEndedAt && now - previousEndedAt > 15_000) return false;
   if (!looksLikeStrayTranscriptFragment(displayTranscript.text)) return false;
@@ -1277,6 +1386,115 @@ function removePriorTranscriptEcho(text, priorTexts) {
     cleaned = originalWords.slice(overlap).join(" ");
   }
   return cleanText(cleaned, 2000);
+}
+
+function findTokenSubsequence(haystackTokens, needleTokens) {
+  if (!haystackTokens.length || !needleTokens.length || needleTokens.length > haystackTokens.length) return -1;
+  for (let index = 0; index <= haystackTokens.length - needleTokens.length; index += 1) {
+    let matched = true;
+    for (let offset = 0; offset < needleTokens.length; offset += 1) {
+      if (haystackTokens[index + offset] !== needleTokens[offset]) {
+        matched = false;
+        break;
+      }
+    }
+    if (matched) return index;
+  }
+  return -1;
+}
+
+function splitTextByWordCount(text, wordCount) {
+  const words = String(text || "").trim().split(/\s+/).filter(Boolean);
+  const count = Math.max(0, Number(wordCount) || 0);
+  if (!words.length) return { head: "", tail: "" };
+  if (count <= 0) return { head: "", tail: cleanText(text, 1000) };
+  if (count >= words.length) return { head: cleanText(text, 1000), tail: "" };
+  return {
+    head: cleanText(words.slice(0, count).join(" "), 1000),
+    tail: cleanText(words.slice(count).join(" "), 1000),
+  };
+}
+
+function splitNativeSegmentByWordCount(segment, wordCount) {
+  const { head, tail } = splitTextByWordCount(segment?.text || "", wordCount);
+  return {
+    head: head ? { ...segment, text: head } : null,
+    tail: tail ? { ...segment, text: tail } : null,
+  };
+}
+
+function sliceNativeSegmentsByWords(nativeSegments, startWord, wordCount = Number.POSITIVE_INFINITY) {
+  const output = [];
+  let wordsToDrop = Math.max(0, Number(startWord) || 0);
+  let wordsToTake = Number.isFinite(Number(wordCount))
+    ? Math.max(0, Number(wordCount) || 0)
+    : Number.POSITIVE_INFINITY;
+
+  for (const rawSegment of normalizeNativeDiarizeRawSegments(nativeSegments)) {
+    if (wordsToTake <= 0) break;
+    const segmentWordCount = wordTokens(rawSegment.text).length;
+    if (!segmentWordCount) continue;
+
+    let segment = rawSegment;
+    let availableWords = segmentWordCount;
+    if (wordsToDrop >= availableWords) {
+      wordsToDrop -= availableWords;
+      continue;
+    }
+    if (wordsToDrop > 0) {
+      const split = splitNativeSegmentByWordCount(segment, wordsToDrop);
+      segment = split.tail;
+      wordsToDrop = 0;
+      if (!segment?.text) continue;
+      availableWords = wordTokens(segment.text).length;
+    }
+
+    if (Number.isFinite(wordsToTake) && availableWords > wordsToTake) {
+      const split = splitNativeSegmentByWordCount(segment, wordsToTake);
+      if (split.head?.text) output.push(split.head);
+      break;
+    }
+
+    output.push(segment);
+    wordsToTake -= availableWords;
+  }
+
+  return output;
+}
+
+function alignNativeSegmentsToTranscriptText(rawSegments, transcriptText) {
+  const segments = normalizeNativeDiarizeRawSegments(rawSegments);
+  const targetTokens = wordTokens(transcriptText);
+  if (!segments.length || !targetTokens.length) return [];
+
+  const combinedTokens = wordTokens(segments.map((segment) => segment.text).join(" "));
+  if (!combinedTokens.length) return [];
+  if (combinedTokens.length === targetTokens.length) return segments;
+
+  const exactStart = findTokenSubsequence(combinedTokens, targetTokens);
+  if (exactStart >= 0) {
+    return sliceNativeSegmentsByWords(segments, exactStart, targetTokens.length);
+  }
+
+  const targetNormalized = targetTokens.join(" ");
+  const combinedNormalized = combinedTokens.join(" ");
+  if (combinedNormalized.endsWith(targetNormalized)) {
+    return sliceNativeSegmentsByWords(segments, combinedTokens.length - targetTokens.length, targetTokens.length);
+  }
+
+  return sliceNativeSegmentsByWords(segments, 0, targetTokens.length);
+}
+
+function consumeNativeSegmentsForText(nativeSegments, targetText) {
+  const segments = normalizeNativeDiarizeRawSegments(nativeSegments);
+  const targetWordCount = wordTokens(targetText).length;
+  if (!segments.length || !targetWordCount) {
+    return { segments: [], remaining: segments };
+  }
+  return {
+    segments: sliceNativeSegmentsByWords(segments, 0, targetWordCount),
+    remaining: sliceNativeSegmentsByWords(segments, targetWordCount),
+  };
 }
 
 function escapeHtml(value) {
@@ -1496,12 +1714,22 @@ Core options:
 
 Audio/AI options:
   --chunk-sec 2              Seconds of PCMU per transcription chunk
+  --split-on-silence         Flush a transcription chunk after a speech pause
+  --silence-split-ms 3000    Silence duration used by --split-on-silence
+  --stage-until-silence      Transcribe max chunks internally, publish merged turn after silence
+  --no-max-chunk             With --split-on-silence, publish only after silence
+  --speech-packet-active-pct 1.0
+                             Packet activity threshold for speech detection
   --coach-every-sec 10       Minimum seconds between Claude advice calls
   --min-active-pct 0.35      Skip chunks quieter than this active-sample percent
   --sentence-hold-ms 4000    Hold fragments briefly for complete sentences
   --language en              STT language hint
   --stt-model MODEL          OpenAI STT model
   --stt-response-format FMT  json | diarized_json
+  --chunking-strategy auto   Diarize chunking strategy
+  --stt-context TEXT         Prompt/context for non-diarize STT
+  --no-stt-domain-primer     Disable tax vocabulary prompt for non-diarize STT
+  --known-speaker name=wav   Diarize-only speaker reference, repeat up to four
   --coach-model MODEL        Claude model for live advice
   --speaker-model MODEL      Claude model for speaker labels (default Haiku)
   --speaker-labels           Force Haiku labels even with native diarize
@@ -1537,6 +1765,15 @@ async function main() {
   const dashboardPort = Number(readFlag(argv, "--dashboard-port", env("EX_LIVE_MONITOR_DASHBOARD_PORT", "7331"))) || 7331;
   const timeoutSec = Math.max(10, Number(readFlag(argv, "--timeout-sec", env("EX_LIVE_MONITOR_TIMEOUT_SECONDS", "3600"))) || 3600);
   const chunkSec = Math.max(1, Math.min(20, Number(readFlag(argv, "--chunk-sec", env("EX_LIVE_MONITOR_CHUNK_SECONDS", "2"))) || 2));
+  const splitOnSilence = hasFlag(argv, "--split-on-silence")
+    || env("EX_LIVE_MONITOR_SPLIT_ON_SILENCE", "").toLowerCase() === "true";
+  const silenceSplitMs = Math.max(250, Number(readFlag(argv, "--silence-split-ms", env("EX_LIVE_MONITOR_SILENCE_SPLIT_MS", "3000"))) || 3000);
+  const stageUntilSilence = hasFlag(argv, "--stage-until-silence")
+    || env("EX_LIVE_MONITOR_STAGE_UNTIL_SILENCE", "").toLowerCase() === "true";
+  const noMaxChunk = hasFlag(argv, "--no-max-chunk")
+    || env("EX_LIVE_MONITOR_NO_MAX_CHUNK", "").toLowerCase() === "true";
+  const speechPacketActivePct = Math.max(0, Number(readFlag(argv, "--speech-packet-active-pct", env("EX_LIVE_MONITOR_SPEECH_PACKET_ACTIVE_PCT", "1.0"))) || 1.0);
+  const speechPacketMaxAbs = Math.max(0, Number(readFlag(argv, "--speech-packet-max-abs", env("EX_LIVE_MONITOR_SPEECH_PACKET_MAX_ABS", "1200"))) || 1200);
   const coachEverySec = Math.max(5, Number(readFlag(argv, "--coach-every-sec", env("EX_LIVE_MONITOR_COACH_EVERY_SECONDS", "10"))) || 10);
   const minActivePct = Math.max(0, Number(readFlag(argv, "--min-active-pct", env("EX_LIVE_MONITOR_MIN_ACTIVE_PCT", "0.35"))) || 0);
   const sentenceHoldMs = Math.max(0, Number(readFlag(argv, "--sentence-hold-ms", env("EX_LIVE_MONITOR_SENTENCE_HOLD_MS", "4000"))) || 0);
@@ -1553,6 +1790,21 @@ async function main() {
   );
   const nativeDiarizeEnabled = !hasFlag(argv, "--no-native-diarize")
     && (/diarize/i.test(sttModel) || String(sttResponseFormat).toLowerCase() === "diarized_json");
+  const sttChunkingStrategy = readFlag(
+    argv,
+    "--chunking-strategy",
+    env("EX_LIVE_MONITOR_CHUNKING_STRATEGY", nativeDiarizeEnabled ? "auto" : ""),
+  );
+  const sttContext = readFlag(
+    argv,
+    "--stt-context",
+    env(
+      "EX_LIVE_MONITOR_STT_CONTEXT",
+      "This is a live tax-relief sales call. Expect names and terms like Tax Advocate Group, Wynn Tax Solutions, WinTax Solutions, RingCentral CX, IRS, CP14, CP504, LT11, 1099, OIC, CNC, levy, lien, garnishment, unfiled returns, installment agreement, payment plan, revenue officer, and tax resolution.",
+    ),
+  );
+  const includeSttDomainPrimer = !hasFlag(argv, "--no-stt-domain-primer") && !nativeDiarizeEnabled;
+  const knownSpeakers = parseKnownSpeakerReferences(argv);
   const sessionId = readFlag(argv, "--session-id", env("EX_LIVE_MONITOR_SESSION_ID", ""));
   const controlPlaneUrl = readFlag(argv, "--control-plane-url", env("EX_LIVE_MONITOR_CONTROL_PLANE_URL", "http://127.0.0.1:5001"));
   const internalSecret = readFlag(
@@ -1598,6 +1850,10 @@ async function main() {
       packetCount: 0,
       byteCount: 0,
       chunkSec,
+      splitOnSilence,
+      silenceSplitMs,
+      stageUntilSilence,
+      noMaxChunk,
       coachEverySec,
       minActivePct,
       callFlow,
@@ -1683,9 +1939,13 @@ async function main() {
   let pendingChunks = [];
   let pendingBytes = 0;
   let pendingStartedAt = 0;
+  let pendingSpeechSeen = false;
+  let pendingLastSpeechAt = 0;
   let chunkSequence = 0;
   let transcriptionQueue = Promise.resolve();
   let pendingTranscript = null;
+  let stagedDisplayTranscripts = [];
+  let stagedTurnSequence = 0;
   let lastAdviceAt = 0;
   let adviceInFlight = false;
   const nativeSpeakerAssignments = new Map();
@@ -1752,12 +2012,13 @@ async function main() {
     }
   }
 
-  function takeDisplayTranscripts({ text, chunkId, startedAt, endedAt }) {
+  function takeDisplayTranscripts({ text, chunkId, startedAt, endedAt, nativeSegments = [] }) {
     const now = Date.now();
     if (!pendingTranscript) {
       pendingTranscript = {
         text: "",
         chunkIds: [],
+        nativeSegments: [],
         startedAt,
         startedMs: now,
       };
@@ -1765,24 +2026,35 @@ async function main() {
 
     pendingTranscript.text = mergeTranscriptFragments([pendingTranscript.text, text]);
     if (!pendingTranscript.chunkIds.includes(chunkId)) pendingTranscript.chunkIds.push(chunkId);
+    pendingTranscript.nativeSegments = [
+      ...(pendingTranscript.nativeSegments || []),
+      ...normalizeNativeDiarizeRawSegments(nativeSegments),
+    ];
     const combined = pendingTranscript.text;
     const holdMs = now - pendingTranscript.startedMs;
     const { sentences, tail } = splitCompleteTranscriptUnits(combined);
     const holdExpired = sentenceHoldMs > 0 && holdMs >= sentenceHoldMs;
-    const results = sentences.map((sentence) => ({
-      text: sentence,
-      startedAt: pendingTranscript.startedAt,
-      endedAt,
-      heldChunkIds: [...pendingTranscript.chunkIds],
-      holdMs,
-      complete: true,
-    }));
+    let remainingNativeSegments = pendingTranscript.nativeSegments || [];
+    const results = sentences.map((sentence) => {
+      const consumed = consumeNativeSegmentsForText(remainingNativeSegments, sentence);
+      remainingNativeSegments = consumed.remaining;
+      return {
+        text: sentence,
+        startedAt: pendingTranscript.startedAt,
+        endedAt,
+        heldChunkIds: [...pendingTranscript.chunkIds],
+        holdMs,
+        complete: true,
+        nativeSegments: consumed.segments,
+      };
+    });
 
     if (results.length) {
       pendingTranscript = tail
         ? {
           text: tail,
           chunkIds: [chunkId],
+          nativeSegments: remainingNativeSegments,
           startedAt,
           startedMs: now,
         }
@@ -1792,6 +2064,7 @@ async function main() {
 
     const tailText = tail || combined;
     if (shouldPublishIncompleteTranscript(tailText, holdExpired)) {
+      const consumed = consumeNativeSegmentsForText(pendingTranscript.nativeSegments, tailText);
       const result = {
         text: tailText,
         startedAt: pendingTranscript.startedAt,
@@ -1799,12 +2072,14 @@ async function main() {
         heldChunkIds: [...pendingTranscript.chunkIds],
         holdMs,
         complete: false,
+        nativeSegments: consumed.segments.length ? consumed.segments : pendingTranscript.nativeSegments,
       };
       pendingTranscript = null;
       return [result];
     }
 
     pendingTranscript.text = tailText;
+    pendingTranscript.nativeSegments = remainingNativeSegments;
     return [];
   }
 
@@ -1860,7 +2135,87 @@ async function main() {
     })();
   }
 
-  async function processAudioChunk({ pcmuBuffer, chunkId, startedAt, endedAt, stats }) {
+  function stageDisplayTranscript(displayTranscript, meta = {}) {
+    stagedDisplayTranscripts.push({
+      ...displayTranscript,
+      model: meta.model || null,
+      responseFormat: meta.responseFormat || null,
+      byteLength: Number(meta.byteLength || 0),
+      durationSec: Number(meta.durationSec || 0),
+      activePctOver500: Number(meta.activePctOver500 || 0),
+      elapsedMs: Number(meta.elapsedMs || 0),
+      sourceChunkId: meta.chunkId || "",
+    });
+    writeJsonLine(path.join(runDir, "transcript-stage.ndjson"), {
+      at: new Date().toISOString(),
+      sourceChunkId: meta.chunkId || "",
+      text: displayTranscript.text,
+      reason: meta.flushReason || "stage",
+    });
+  }
+
+  function publishStagedTurn(reason = "silence") {
+    if (!stagedDisplayTranscripts.length) return false;
+    const staged = stagedDisplayTranscripts;
+    stagedDisplayTranscripts = [];
+    const text = mergeTranscriptFragments(staged.map((item) => item.text));
+    if (!text || isLowSignalTranscript(text)) {
+      addEvent(state, eventLog, "stt.stage.skip", `staged turn skipped: ${text || "(empty)"}`, {
+        reason,
+        stagedParts: staged.length,
+      });
+      broadcast();
+      return false;
+    }
+    stagedTurnSequence += 1;
+    const entryId = `${runId}-turn-${String(stagedTurnSequence).padStart(4, "0")}`;
+    const nativeSegments = staged.flatMap((item) => item.nativeSegments || []);
+    const entry = {
+      id: entryId,
+      at: new Date(staged[staged.length - 1].endedAt).toISOString(),
+      startedAt: new Date(staged[0].startedAt).toISOString(),
+      endedAt: new Date(staged[staged.length - 1].endedAt).toISOString(),
+      text,
+      speakerSegments: nativeDiarizeEnabled
+        ? speakerSegmentsFromNativeDiarize(nativeSegments, text, {
+          recentSegments: state.transcripts.flatMap((item) => item.speakerSegments || []),
+          metadata: monitorMetadata,
+          nativeSpeakerAssignments,
+        })
+        : normalizeSpeakerSegments({}, text),
+      speakerModel: null,
+      speakerElapsedMs: null,
+      speakerStatus: nativeDiarizeEnabled ? "native-diarize-staged" : speakerLabelsEnabled ? "pending" : "off",
+      model: staged.find((item) => item.model)?.model || sttModel,
+      responseFormat: staged.find((item) => item.responseFormat)?.responseFormat || sttResponseFormat || null,
+      byteLength: staged.reduce((sum, item) => sum + Number(item.byteLength || 0), 0),
+      durationSec: Number(staged.reduce((sum, item) => sum + Number(item.durationSec || 0), 0).toFixed(2)),
+      activePctOver500: Math.max(...staged.map((item) => Number(item.activePctOver500 || 0))),
+      elapsedMs: staged.reduce((sum, item) => sum + Number(item.elapsedMs || 0), 0),
+      heldChunkIds: [...new Set(staged.flatMap((item) => item.heldChunkIds || []))],
+      stagedSourceChunkIds: [...new Set(staged.map((item) => item.sourceChunkId).filter(Boolean))],
+      sentenceHoldMs: Math.max(...staged.map((item) => Number(item.holdMs || 0))),
+      sentenceComplete: staged.every((item) => item.complete !== false),
+      nativeDiarizeSegments: nativeDiarizeEnabled ? nativeSegments : undefined,
+      stageReason: reason,
+      revision: 0,
+    };
+    state.transcripts.push(entry);
+    if (state.transcripts.length > 300) state.transcripts.splice(0, state.transcripts.length - 300);
+    writeJsonLine(path.join(runDir, "transcripts.ndjson"), entry);
+    addEvent(state, eventLog, "stt.stage.publish", text, {
+      chunkId: entryId,
+      reason,
+      stagedParts: staged.length,
+      sourceChunkIds: entry.stagedSourceChunkIds,
+    });
+    broadcast();
+    void maybeRefreshAdvice("transcript-stage");
+    enqueueSpeakerLabel(entry, text, entryId);
+    return true;
+  }
+
+  async function processAudioChunk({ pcmuBuffer, chunkId, startedAt, endedAt, stats, flushReason = "interval" }) {
     const activePct = Number(stats.activePctOver500 || 0);
     if (activePct < minActivePct) {
       addEvent(state, eventLog, "chunk.skip", `quiet chunk skipped (${activePct}% active)`, {
@@ -1881,6 +2236,13 @@ async function main() {
       activePctOver500: stats.activePctOver500,
     });
     const sttStarted = Date.now();
+    const liveSttPrompt = buildLiveSttPrompt({
+      baseContext: sttContext,
+      recentTranscripts: [
+        ...state.transcripts,
+        ...stagedDisplayTranscripts.map((item) => ({ text: item.text })),
+      ],
+    });
     const transcript = await transcribeSalesTrainerAudio({
       buffer: wav,
       mimeType: "audio/wav",
@@ -1888,12 +2250,21 @@ async function main() {
       language,
       model: sttModel,
       responseFormat: sttResponseFormat,
-      prompt: "",
-      includeDomainPrimer: false,
+      prompt: liveSttPrompt,
+      includeDomainPrimer: includeSttDomainPrimer,
+      chunkingStrategy: sttChunkingStrategy,
+      knownSpeakerNames: knownSpeakers.names,
+      knownSpeakerReferences: knownSpeakers.references,
       timeoutMs: 20_000,
     });
-    const priorTexts = state.transcripts.slice(-8).map((entry) => entry.text);
+    const priorTexts = [
+      ...state.transcripts.slice(-8).map((entry) => entry.text),
+      ...stagedDisplayTranscripts.slice(-4).map((entry) => entry.text),
+    ];
     const text = removePriorTranscriptEcho(transcript.text || "", priorTexts);
+    const alignedNativeSegments = nativeDiarizeEnabled
+      ? alignNativeSegmentsToTranscriptText(transcript.segments || [], text)
+      : [];
     if (isLowSignalTranscript(text)) {
       addEvent(state, eventLog, "stt.skip", `low-signal transcript skipped: ${text || "(empty)"}`, {
         chunkId,
@@ -1904,7 +2275,13 @@ async function main() {
       return;
     }
 
-    const displayTranscripts = takeDisplayTranscripts({ text, chunkId, startedAt, endedAt });
+    const displayTranscripts = takeDisplayTranscripts({
+      text,
+      chunkId,
+      startedAt,
+      endedAt,
+      nativeSegments: alignedNativeSegments,
+    });
     if (!displayTranscripts.length) {
       addEvent(state, eventLog, "stt.hold", `holding fragment for sentence completion: ${text}`, {
         chunkId,
@@ -1914,13 +2291,39 @@ async function main() {
       return;
     }
 
+    if (stageUntilSilence) {
+      displayTranscripts.forEach((displayTranscript) => {
+        stageDisplayTranscript(displayTranscript, {
+          chunkId,
+          flushReason,
+          model: transcript.model,
+          responseFormat: transcript.responseFormat || null,
+          byteLength: pcmuBuffer.length,
+          durationSec: Number(stats.durationSec.toFixed(2)),
+          activePctOver500: stats.activePctOver500,
+          elapsedMs: Date.now() - sttStarted,
+        });
+      });
+      addEvent(state, eventLog, "stt.stage", `staged ${displayTranscripts.length} transcript part(s) from ${chunkId}`, {
+        chunkId,
+        reason: flushReason,
+        stagedParts: stagedDisplayTranscripts.length,
+      });
+      if (["silence", "call-disposed", "shutdown"].includes(flushReason)) {
+        publishStagedTurn(flushReason);
+      } else {
+        broadcast();
+      }
+      return;
+    }
+
     displayTranscripts.forEach((displayTranscript, index) => {
       const entryId = displayTranscripts.length === 1 ? chunkId : `${chunkId}-s${index + 1}`;
       const recentSegments = state.transcripts
         .filter((item) => item.id !== entryId)
         .flatMap((item) => item.speakerSegments || []);
       const nativeSpeakerSegments = nativeDiarizeEnabled
-        ? speakerSegmentsFromNativeDiarize(transcript.segments, displayTranscript.text, {
+        ? speakerSegmentsFromNativeDiarize(displayTranscript.nativeSegments, displayTranscript.text, {
           recentSegments,
           metadata: monitorMetadata,
           nativeSpeakerAssignments,
@@ -1945,7 +2348,7 @@ async function main() {
         heldChunkIds: displayTranscript.heldChunkIds,
         sentenceHoldMs: displayTranscript.holdMs,
         sentenceComplete: displayTranscript.complete,
-        nativeDiarizeSegments: nativeDiarizeEnabled ? transcript.segments || [] : undefined,
+        nativeDiarizeSegments: nativeDiarizeEnabled ? displayTranscript.nativeSegments || [] : undefined,
         revision: 0,
       };
       const previousEntry = state.transcripts[state.transcripts.length - 1] || null;
@@ -2023,6 +2426,70 @@ async function main() {
     pendingChunks = [];
     pendingBytes = 0;
     pendingStartedAt = 0;
+    pendingSpeechSeen = false;
+    pendingLastSpeechAt = 0;
+  }
+
+  function dropPending(reason = "drop") {
+    if (!pendingBytes) return;
+    const stats = measurePcmuActivity(Buffer.concat(pendingChunks, pendingBytes));
+    writeJsonLine(eventLog, {
+      type: "chunk.drop",
+      at: new Date().toISOString(),
+      reason,
+      bytes: pendingBytes,
+      stats,
+    });
+    resetPending();
+    if (stageUntilSilence && reason === "silence-only") {
+      transcriptionQueue = transcriptionQueue
+        .then(() => {
+          publishStagedTurn(reason);
+        })
+        .catch((error) => {
+          addEvent(state, eventLog, "stt.stage.error", error.message);
+          broadcast();
+        });
+    }
+  }
+
+  function notePendingAudio(payload, now = Date.now()) {
+    if (!pendingStartedAt) pendingStartedAt = now;
+    pendingChunks.push(payload);
+    pendingBytes += payload.length;
+
+    if (!splitOnSilence) return;
+    const packetStats = measurePcmuActivity(payload);
+    const packetHasSpeech =
+      packetStats.activePctOver500 >= speechPacketActivePct ||
+      packetStats.maxAbs >= speechPacketMaxAbs;
+    if (packetHasSpeech) {
+      pendingSpeechSeen = true;
+      pendingLastSpeechAt = now;
+    }
+  }
+
+  function maybeFlushPendingByPolicy(reason = "timer") {
+    if (!pendingBytes || !pendingStartedAt) return;
+    const now = Date.now();
+    const ageMs = now - pendingStartedAt;
+    if (!splitOnSilence) {
+      if (ageMs >= chunkSec * 1000) flushPending(reason);
+      return;
+    }
+
+    if (!pendingSpeechSeen) {
+      if (ageMs >= silenceSplitMs) dropPending("silence-only");
+      return;
+    }
+    const silenceMs = now - pendingLastSpeechAt;
+    if (silenceMs >= silenceSplitMs) {
+      flushPending("silence");
+      return;
+    }
+    if (!noMaxChunk && ageMs >= chunkSec * 1000) {
+      flushPending("max-window");
+    }
   }
 
   function flushPending(reason = "interval") {
@@ -2046,7 +2513,7 @@ async function main() {
       stats,
     });
     transcriptionQueue = transcriptionQueue
-      .then(() => processAudioChunk({ pcmuBuffer, chunkId, startedAt, endedAt, stats }))
+      .then(() => processAudioChunk({ pcmuBuffer, chunkId, startedAt, endedAt, stats, flushReason: reason }))
       .catch((error) => {
         addEvent(state, eventLog, "stt.error", error.message, { chunkId });
         broadcast();
@@ -2087,12 +2554,8 @@ async function main() {
         state.public.packetCount = packetCount;
         state.public.byteCount = byteCount;
         if (fullAudioStream) fullAudioStream.write(payload);
-        if (!pendingStartedAt) pendingStartedAt = Date.now();
-        pendingChunks.push(payload);
-        pendingBytes += payload.length;
-        if (Date.now() - pendingStartedAt >= chunkSec * 1000) {
-          flushPending("interval");
-        }
+        notePendingAudio(payload);
+        maybeFlushPendingByPolicy("interval");
         if (packetCount % 250 === 0) {
           addEvent(state, eventLog, "audio", `packets=${packetCount} bytes=${byteCount}`);
           broadcast();
@@ -2119,10 +2582,13 @@ async function main() {
   if (agentExt) console.log(`  agent:      ${agentExt.name} ext=${agentExt.extensionNumber} id=${agentExt.id}`);
   console.log(`  device:     ${JSON.stringify(summarizeDevice(device))}`);
   console.log(`  sip proxy:  ${outboundProxy}`);
-  console.log(`  chunk:      ${chunkSec}s, active>=${minActivePct}%`);
+  console.log(`  chunk:      ${splitOnSilence ? `silence ${silenceSplitMs}ms, max ${noMaxChunk ? "off" : `${chunkSec}s`}` : `${chunkSec}s`}, active>=${minActivePct}%`);
+  if (stageUntilSilence) console.log("  publish:    stage STT chunks, send merged turn after silence");
   console.log(`  call flow:  ${callFlow}, initial human=${initialHumanSpeaker}`);
   console.log(`  sentences:  hold fragments up to ${sentenceHoldMs}ms`);
-  console.log(`  stt:        ${sttModel}, format=${sttResponseFormat}`);
+  console.log(`  stt:        ${sttModel}, format=${sttResponseFormat}${sttChunkingStrategy ? `, chunking=${sttChunkingStrategy}` : ""}`);
+  console.log(`  stt prompt: ${includeSttDomainPrimer ? "domain primer + live context" : nativeDiarizeEnabled ? "off (diarize does not support prompts)" : "live context only"}`);
+  if (knownSpeakers.names.length) console.log(`  speakers ref: ${knownSpeakers.names.join(", ")}`);
   console.log(`  coach:      every ${coachEverySec}s, model=${coachModel}`);
   console.log(`  speakers:   ${nativeDiarizeEnabled ? "native diarize" : speakerLabelsEnabled ? speakerModel : "off"}`);
   console.log(`  ui bridge:  ${sessionId ? `session=${sessionId}` : "off"}`);
@@ -2149,10 +2615,12 @@ async function main() {
         });
       } catch (error) {
         lastSuperviseError = error;
-        if (!/No active agent telephonySessionId|MBW-005|Your call cannot be connected/i.test(String(error?.message || ""))) {
+        if (!isRetryableSuperviseError(error)) {
           throw error;
         }
-        addEvent(state, eventLog, "supervise.wait", `waiting for active call on agent ext ${agentExtNumber}`);
+        addEvent(state, eventLog, "supervise.wait", `waiting for supervisable call on agent ext ${agentExtNumber}`, {
+          error: cleanText(error.message, 240),
+        });
         broadcast();
         await sleep(2000);
       }
@@ -2176,9 +2644,7 @@ async function main() {
   }
 
   const flushTimer = setInterval(() => {
-    if (pendingBytes && pendingStartedAt && Date.now() - pendingStartedAt >= chunkSec * 1000) {
-      flushPending("timer");
-    }
+    maybeFlushPendingByPolicy("timer");
   }, 500);
   const stopAt = Date.now() + timeoutSec * 1000;
 
@@ -2191,6 +2657,7 @@ async function main() {
     clearInterval(flushTimer);
     flushPending("shutdown");
     await transcriptionQueue.catch(() => {});
+    if (stageUntilSilence) publishStagedTurn("shutdown");
     if (state.transcripts.length) await maybeRefreshAdvice("forced");
     if (activeSession && !activeSession.disposed) {
       addEvent(state, eventLog, "timeout", "hanging up active monitor call");

@@ -1343,6 +1343,8 @@ async function transcribeSalesTrainerAudio({
   model = null,
   responseFormat = null,
   chunkingStrategy = null,
+  knownSpeakerNames = [],
+  knownSpeakerReferences = [],
   timeoutMs = null,
 } = {}) {
   const config = getSalesTrainerConfig();
@@ -1388,6 +1390,18 @@ async function transcribeSalesTrainerAudio({
   if (isDiarizeModel && chunkingStrategy) {
     form.append("chunking_strategy", String(chunkingStrategy));
   }
+  if (isDiarizeModel) {
+    const names = Array.isArray(knownSpeakerNames) ? knownSpeakerNames : [];
+    const references = Array.isArray(knownSpeakerReferences) ? knownSpeakerReferences : [];
+    const count = Math.min(names.length, references.length, 4);
+    for (let index = 0; index < count; index += 1) {
+      const speakerName = String(names[index] || "").trim();
+      const reference = String(references[index] || "").trim();
+      if (!speakerName || !reference) continue;
+      form.append("known_speaker_names[]", speakerName);
+      form.append("known_speaker_references[]", reference);
+    }
+  }
 
   // Build the biasing prompt: domain primer first (always), then any
   // per-call context the caller supplied (e.g., the prior assistant
@@ -1396,8 +1410,8 @@ async function transcribeSalesTrainerAudio({
   // the primer the lion's share since it's the highest-leverage signal.
   if (!isDiarizeModel) {
     const callerPrompt = String(prompt || "").trim();
-    const PRIMER_BUDGET = 800;
-    const CALLER_BUDGET = 200;
+    const PRIMER_BUDGET = includeDomainPrimer ? 700 : 0;
+    const CALLER_BUDGET = includeDomainPrimer ? 300 : 1000;
     const promptParts = includeDomainPrimer ? [STT_DOMAIN_PRIMER.slice(0, PRIMER_BUDGET)] : [];
     if (callerPrompt) promptParts.push(callerPrompt.slice(-CALLER_BUDGET));
     const effectivePrompt = promptParts.join(" ").trim();

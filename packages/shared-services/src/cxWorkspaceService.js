@@ -31,6 +31,9 @@ const {
   touchCxWorkspacePresence,
 } = require("./agentAvailabilityService");
 const {
+  ensureRingcxAgentOffhookAllowed,
+} = require("./ringcxAgentSelfHealService");
+const {
   emitHourlyJobEvent,
   runWithImmediateRetries,
 } = require("./hourlyJobEventService");
@@ -1547,6 +1550,15 @@ async function ensureCxAgentExtensionContext(context, user) {
 async function touchCxWorkspacePresenceForContext(context, user) {
   const extensionId = String(context?.account?.extensionId || user?.extensionId || "").trim();
   if (!extensionId) return context;
+  ensureRingcxAgentOffhookAllowed(context?.account || user, {
+    source: "cx-workspace-refresh",
+    logger: console,
+  }).catch((error) => {
+    console.warn("ringcx.offhook.self_heal.workspace_failed", {
+      email: context?.account?.email || user?.email || null,
+      error: error.message,
+    });
+  });
   const agentState = await touchCxWorkspacePresence(extensionId, {
     active: true,
     source: "cx-workspace",
