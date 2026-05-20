@@ -20,6 +20,8 @@ const {
 } = require("../../../packages/shared-observability/src");
 const { buildAuthMiddleware } = require("./middleware/auth");
 const { createAdminAccountsRouter } = require("./routes/adminAccounts");
+const { createAdminCallReviewRouter } = require("./routes/adminCallReview");
+const { createAdminCadenceToolsRouter } = require("./routes/adminCadenceTools");
 const { createAdminConsentRouter } = require("./routes/adminConsent");
 const { createAuthRouter } = require("./routes/auth");
 const { createCallrailRouter } = require("./routes/callrail");
@@ -976,6 +978,10 @@ async function startServer() {
   app.all("/webhook/ringcentral/session-events", ringcentralProxy);
 
   app.use("/api/admin/accounts", createAdminAccountsRouter(auth));
+  // Per-agent and per-lead call review (Calls Today, who-dialed-who).
+  app.use("/api/admin/call-review", createAdminCallReviewRouter(auth));
+  // Surgical lead-cadence adjustments (per-lead test bypass flags).
+  app.use("/api/admin/cadence", createAdminCadenceToolsRouter(auth));
   app.use("/api/admin", createAdminConsentRouter(auth));
   // Central runtime observability â€” single endpoint surfacing intake
   // health, recent failures, channel-DNC counts, last STOP, hourly

@@ -84,6 +84,7 @@ function createState(config = {}) {
     intervalMs: Number(config.intervalMs || 60000),
     activeWeekdays: normalizeActiveWeekdays(config.activeWeekdays),
     sendEmail: Boolean(config.sendEmail),
+    skipFinalClosePass: Boolean(config.skipFinalClosePass),
     recipients: normalizeRecipients(config.recipients),
     financialRecipients: normalizeRecipients(config.financialRecipients),
     leadDataRecipients: normalizeRecipients(config.leadDataRecipients),
@@ -115,6 +116,7 @@ function summarizeState(state) {
     intervalMs: state.intervalMs,
     activeWeekdays: state.activeWeekdays,
     sendEmail: state.sendEmail,
+    skipFinalClosePass: state.skipFinalClosePass,
     recipients: state.recipients,
     financialRecipients: state.financialRecipients,
     leadDataRecipients: state.leadDataRecipients,
@@ -197,6 +199,10 @@ function createNightlyCloseRuntime({ config = {}, runtime, spendSyncRuntime = nu
           options.sendEmail !== undefined
             ? Boolean(options.sendEmail)
             : state.sendEmail,
+        skipFinalClosePass:
+          options.skipFinalClosePass !== undefined
+            ? Boolean(options.skipFinalClosePass)
+            : state.skipFinalClosePass,
         email: {
           ...commonEmail,
           recipients:
@@ -316,6 +322,7 @@ function createNightlyCloseRuntime({ config = {}, runtime, spendSyncRuntime = nu
       timezone: state.timezone,
       activeWeekdays: state.activeWeekdays,
       sendEmail: state.sendEmail,
+      skipFinalClosePass: state.skipFinalClosePass,
       recipientCount: state.recipients.length,
       financialRecipientCount: state.financialRecipients.length,
       leadDataRecipientCount: state.leadDataRecipients.length,

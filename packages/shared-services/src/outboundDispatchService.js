@@ -969,7 +969,26 @@ async function dispatchForLead(lead, {
     }
   }
 
-  const timing = evaluateChannelContactTime(domain, channel, new Date());
+  // Per-lead opt-in bypass of the contact-timing gate. The smoke harness
+  // (and any future internal test) sets this flag on a marked
+  // LeadCadence row so a single SMS/email can fire outside the normal
+  // quiet-hours window. The global timing policy in
+  // contactTimingPolicyService is UNCHANGED — only leads with this
+  // explicit per-lead opt-in skip the gate.
+  const bypassMap = (lead && lead.cadenceState && lead.cadenceState.bypassChannelTiming) || {};
+  const bypassTiming = Boolean(bypassMap[channel] || bypassMap.all);
+
+  const timing = bypassTiming
+    ? {
+        allowed: true,
+        restricted: false,
+        timezone: null,
+        channel,
+        nextAllowedAt: new Date(),
+        reason: "bypass-test-lead",
+        policy: {},
+      }
+    : evaluateChannelContactTime(domain, channel, new Date());
   if (!timing.allowed) {
     if (action) {
       await leadCadenceRepository.rescheduleScheduledAction(

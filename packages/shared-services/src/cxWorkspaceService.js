@@ -69,6 +69,8 @@ const {
   getPacificBusinessDayAge,
   getPacificBusinessDayStart,
   getPacificDateKey,
+  getQueueFamilySortRank,
+  normalizeRouteCampaigns,
   resolveAccountQueuePolicy,
 } = require("./cxQueuePolicyService");
 const {
@@ -278,9 +280,14 @@ function resolveRcxRoutingForQueueIntent(input = {}, queueItem = null) {
       ? readEnvExternalId("RINGCX_VOICE_NEW_CAMPAIGN_ID")
       : family === "fresh-day2to10"
         ? readEnvExternalId("RINGCX_VOICE_OLD_CAMPAIGN_ID")
-        : family === "aged"
-          ? readEnvExternalId("RINGCX_VOICE_AGED_CAMPAIGN_ID")
-          : null;
+        : family === "fresh-day16to30"
+          ? (
+              readEnvExternalId("RINGCX_VOICE_YELLOW_CAMPAIGN_ID")
+              || readEnvExternalId("RINGCX_VOICE_OLD_CAMPAIGN_ID")
+            )
+          : family === "aged"
+            ? readEnvExternalId("RINGCX_VOICE_AGED_CAMPAIGN_ID")
+            : null;
 
   return {
     accountId:
@@ -1652,8 +1659,11 @@ function summarizeCallQueueItem(item) {
   );
   const derivedFamily = createdAtFamily
     || explicitFamily
-    || (activeDay === 0 ? "fresh-day1" : null)
-    || (activeDay != null && activeDay > 0 && activeDay <= 15 ? "fresh-day2to10" : null)
+    || (activeDay != null && activeDay <= 2 ? "fresh-day1" : null)
+    || (activeDay != null && activeDay > 2 && activeDay <= 15 ? "fresh-day2to10" : null)
+    || (activeDay != null && activeDay > 15 && activeDay <= 30 ? "fresh-day16to30" : null)
+    || (activeDay != null && activeDay > 120 ? "dead" : null)
+    || (activeDay != null && activeDay > 30 ? "aged" : null)
     || (String(item.currentStage || "").toLowerCase().includes("aged") ? "aged" : null);
   const progressiveStageKey =
     item.progressiveStageKey ||
@@ -1733,7 +1743,7 @@ function isPostFirstContactQueueItem(queueItem = {}) {
       || queueItem.metadata?.queueFamily
       || "",
   );
-  if (family === "fresh-day2to10" || family === "aged") return true;
+  if (family === "fresh-day2to10" || family === "fresh-day16to30" || family === "aged") return true;
 
   const stageIndex = Number(queueItem.progressiveStageIndex);
   if (Number.isFinite(stageIndex) && stageIndex > 0 && stageIndex < 99) return true;
@@ -1749,11 +1759,40 @@ function isPostFirstContactQueueItem(queueItem = {}) {
   return Number.isFinite(phaseIndex) && phaseIndex > 0;
 }
 
+function getQueueItemRouteCampaignKey(queueItem = {}) {
+  return String(
+    queueItem?.metadata?.routeCampaignKey ||
+      queueItem?.routeCampaignKey ||
+      "",
+  ).trim().toLowerCase();
+}
+
+function isQueueItemAllowedByAgentRouteCampaign(queueItem = {}, context = {}) {
+  const family = normalizeCxQueueFamily(
+    queueItem.queueFamily ||
+      queueItem.assignment?.queueFamilySnapshot ||
+      queueItem.metadata?.queueFamily ||
+      "",
+  );
+  if (family !== "fresh-day1") return true;
+
+  const policy = resolveAccountQueuePolicy(context.account || {});
+  const routeCampaigns = normalizeRouteCampaigns(policy.routeCampaigns);
+  if (!routeCampaigns || routeCampaigns.length === 0) return true;
+
+  const routeKey = getQueueItemRouteCampaignKey(queueItem);
+  return routeKey ? routeCampaigns.includes(routeKey) : false;
+}
+
 function canViewQueueItemForAgent(queueItem = {}, context = {}) {
   const agentExtensionId = String(context?.account?.extensionId || "").trim();
   if (!agentExtensionId) return false;
   const assignedExtensionId = String(queueItem?.assignment?.extensionId || "").trim();
-  if (assignedExtensionId) return assignedExtensionId === agentExtensionId;
+  if (assignedExtensionId) {
+    if (assignedExtensionId !== agentExtensionId) return false;
+    if (getQueueItemState(queueItem) === "serving") return true;
+    return isQueueItemAllowedByAgentRouteCampaign(queueItem, context);
+  }
   return Boolean(
     isFallbackAfterFirstContactViewer(context)
       && String(queueItem.state || "").trim().toLowerCase() === "ready"
@@ -1776,6 +1815,14 @@ function parseDomainList(value, fallback = []) {
     ),
   );
   return domains.length > 0 ? domains : fallback;
+}
+
+function applyRouteCampaignFilter(query = {}, routeCampaigns = null) {
+  const normalized = normalizeRouteCampaigns(routeCampaigns);
+  if (normalized && normalized.length > 0) {
+    query.routeCampaignKey = { $in: normalized };
+  }
+  return query;
 }
 
 function resolveCxQueueDomains(context = {}) {
@@ -1945,9 +1992,11 @@ function readExplicitAccountTargetOpen(account = null, family = null) {
       ? policy.fresh?.targetOpen
       : normalizedFamily === "fresh-day2to10"
         ? policy.day2to15?.targetOpen
-        : normalizedFamily === "aged"
-          ? policy.aged?.targetOpen
-          : null;
+        : normalizedFamily === "fresh-day16to30"
+          ? policy.day16to30?.targetOpen
+          : normalizedFamily === "aged"
+            ? policy.aged?.targetOpen
+            : null;
   const number = Number(raw);
   return Number.isFinite(number) && number >= 0 ? Math.trunc(number) : null;
 }
@@ -1960,10 +2009,197 @@ function resolveQueueFamilyTargetOpen(context = {}, queuePolicy = {}, family = n
       ? queuePolicy.fresh?.targetOpen
       : normalizeCxQueueFamily(family) === "fresh-day2to10"
         ? queuePolicy.day2to15?.targetOpen
-        : normalizeCxQueueFamily(family) === "aged"
-          ? queuePolicy.aged?.targetOpen
-          : 0;
+        : normalizeCxQueueFamily(family) === "fresh-day16to30"
+          ? queuePolicy.day16to30?.targetOpen
+          : normalizeCxQueueFamily(family) === "aged"
+            ? queuePolicy.aged?.targetOpen
+            : 0;
   return envName ? getNonNegativeEnvNumber(envName, fallback) : Math.max(Number(fallback) || 0, 0);
+}
+
+function getQueueItemState(queueItem = {}) {
+  return String(queueItem?.state || "").trim().toLowerCase();
+}
+
+function isQueueItemReleasableFromWorkspacePack(queueItem = {}) {
+  const state = getQueueItemState(queueItem);
+  return ["claimed", "queued", "ready", "paused"].includes(state);
+}
+
+function sortQueueItemsForWorkspacePack(left = {}, right = {}) {
+  const leftServing = getQueueItemState(left) === "serving";
+  const rightServing = getQueueItemState(right) === "serving";
+  if (leftServing !== rightServing) return leftServing ? -1 : 1;
+
+  const now = new Date();
+  const leftRank = getCxQueueServeRank(left, { now });
+  const rightRank = getCxQueueServeRank(right, { now });
+  if (leftRank !== rightRank) return leftRank - rightRank;
+
+  const leftStage = Number.isFinite(Number(left.progressiveStageIndex)) ? Number(left.progressiveStageIndex) : 99;
+  const rightStage = Number.isFinite(Number(right.progressiveStageIndex)) ? Number(right.progressiveStageIndex) : 99;
+  if (leftStage !== rightStage) return leftStage - rightStage;
+
+  const leftTime = left.releaseAt ? new Date(left.releaseAt).getTime() : Number.MAX_SAFE_INTEGER;
+  const rightTime = right.releaseAt ? new Date(right.releaseAt).getTime() : Number.MAX_SAFE_INTEGER;
+  if (leftTime !== rightTime) return leftTime - rightTime;
+
+  return String(left.caseId || "").localeCompare(String(right.caseId || ""));
+}
+
+function countOpenAssignedQueueItems(queueItems = [], agentExtensionId = null) {
+  return queueItems.filter((item) =>
+    isQueueItemAssignedToAgent(item, agentExtensionId) &&
+      ["claimed", "serving", "queued", "ready", "paused"].includes(getQueueItemState(item))).length;
+}
+
+async function reconcileAgentQueueAssignmentStats(agentExtensionId, visibleQueueItems = []) {
+  const normalizedExtensionId = String(agentExtensionId || "").trim();
+  if (!normalizedExtensionId) return { ok: true, skipped: true, reason: "missing-extension-id" };
+
+  const agentState = await agentStateRepository.findAgentStateByExtensionId(normalizedExtensionId)
+    .catch(() => null);
+  if (!agentState) return { ok: true, skipped: true, reason: "agent-not-found" };
+
+  const existingStats = agentState?.cxRouting?.assignmentStats && typeof agentState.cxRouting.assignmentStats === "object"
+    ? agentState.cxRouting.assignmentStats
+    : {};
+  const actualOpenAssignments = countOpenAssignedQueueItems(visibleQueueItems, normalizedExtensionId);
+  if (Number(existingStats.openAssignments || 0) === actualOpenAssignments) {
+    return { ok: true, updated: false, openAssignments: actualOpenAssignments };
+  }
+
+  const nextStats = {
+    ...existingStats,
+    date: existingStats.date || getPacificDateKey(new Date()),
+    openAssignments: actualOpenAssignments,
+  };
+  await agentStateRepository.updateAgentState(normalizedExtensionId, {
+    "cxRouting.assignmentStats": nextStats,
+    "cxRouting.syncedAt": new Date(),
+  }).catch(() => null);
+  return { ok: true, updated: true, openAssignments: actualOpenAssignments };
+}
+
+async function reconcileRouteCampaignAssignmentsForAgent({
+  context = {},
+  agentExtensionId,
+  activeQueueItems = [],
+} = {}) {
+  const normalizedExtensionId = String(agentExtensionId || "").trim();
+  if (!normalizedExtensionId) {
+    return { ok: true, released: 0, skipped: true, reason: "missing-extension-id" };
+  }
+
+  const policy = resolveAccountQueuePolicy(context.account || {});
+  const routeCampaigns = normalizeRouteCampaigns(policy.routeCampaigns);
+  if (!routeCampaigns || routeCampaigns.length === 0) {
+    return { ok: true, released: 0, skipped: true, reason: "all-green-routes-allowed" };
+  }
+
+  const releaseCandidates = activeQueueItems.filter((item) =>
+    isQueueItemAssignedToAgent(item, normalizedExtensionId) &&
+      !isQueueItemAllowedByAgentRouteCampaign(item, context) &&
+      isQueueItemReleasableFromWorkspacePack(item));
+  if (releaseCandidates.length === 0) {
+    return { ok: true, released: 0, skipped: true, reason: "no-route-mismatch" };
+  }
+
+  const releaseResults = [];
+  for (const item of releaseCandidates) {
+    const queueItemId = String(item?._id || "");
+    if (!queueItemId) continue;
+    const result = await releaseCxQueueItem({
+      queueItemId,
+      reason: "queue-route-campaign-mismatch",
+      actorEmail: context.account?.email || null,
+    }).catch((error) => ({
+      ok: false,
+      queueItemId,
+      error: error.message,
+    }));
+    releaseResults.push(result);
+  }
+
+  return {
+    ok: true,
+    released: releaseResults.filter((entry) => entry?.mutated).length,
+    attempted: releaseCandidates.length,
+    routeCampaigns,
+    results: releaseResults,
+  };
+}
+
+async function reconcileWorkspaceQueuePacksForAgent({
+  agentExtensionId,
+  visibleQueueItems = [],
+  familyTargets = [],
+  reason = "queue-over-target-trim",
+  actorEmail = null,
+} = {}) {
+  const normalizedExtensionId = String(agentExtensionId || "").trim();
+  if (!normalizedExtensionId) {
+    return { ok: true, released: 0, visibleQueueItems, skipped: true, reason: "missing-extension-id" };
+  }
+
+  const releaseIds = new Set();
+  const releaseResults = [];
+  for (const targetConfig of familyTargets) {
+    const queueFamilies = parseQueueFamilyList(targetConfig.queueFamilies || [], []);
+    const targetCount = Math.max(Number(targetConfig.targetCount || 0), 0);
+    if (queueFamilies.length === 0) continue;
+
+    const currentItems = listQueueItemsByFamily(visibleQueueItems, queueFamilies, normalizedExtensionId)
+      .slice()
+      .sort(sortQueueItemsForWorkspacePack);
+    if (currentItems.length <= targetCount) continue;
+
+    const keepIds = new Set(
+      currentItems
+        .slice(0, targetCount)
+        .map((item) => String(item?._id || ""))
+        .filter(Boolean),
+    );
+    for (const item of currentItems) {
+      const itemId = String(item?._id || "");
+      if (!itemId || keepIds.has(itemId)) continue;
+      if (!isQueueItemReleasableFromWorkspacePack(item)) continue;
+      releaseIds.add(itemId);
+    }
+  }
+
+  for (const queueItemId of releaseIds) {
+    const result = await releaseCxQueueItem({
+      queueItemId,
+      reason,
+      actorEmail,
+    }).catch((error) => ({
+      ok: false,
+      queueItemId,
+      error: error.message,
+    }));
+    releaseResults.push(result);
+  }
+
+  const releasedIds = new Set(
+    releaseResults
+      .filter((entry) => entry?.mutated)
+      .map((entry) => String(entry.queueItemId || ""))
+      .filter(Boolean),
+  );
+  const nextVisibleQueueItems = releasedIds.size > 0
+    ? visibleQueueItems.filter((item) => !releasedIds.has(String(item?._id || "")))
+    : visibleQueueItems;
+  const stats = await reconcileAgentQueueAssignmentStats(normalizedExtensionId, nextVisibleQueueItems);
+
+  return {
+    ok: true,
+    released: releasedIds.size,
+    attempted: releaseIds.size,
+    visibleQueueItems: nextVisibleQueueItems,
+    results: releaseResults,
+    stats,
+  };
 }
 
 const ACTIVE_QUEUE_STATES = ["queued", "ready", "claimed", "serving", "paused"];
@@ -2057,7 +2293,7 @@ async function materializeDay2To15QueueItems(domain, neededCount, options = {}) 
   const normalizedDomain = normalizeDomain(domain);
   const scanLimit = Math.min(Math.max(count * 8, 40), 300);
   const routingPatch = buildQueueRoutingPatch("fresh-day2to10");
-  const candidates = await LeadCadence.find({
+  const cadenceQuery = applyRouteCampaignFilter({
     domain: normalizedDomain,
     active: true,
     createdAt: { $gte: windowStart, $lt: windowEnd },
@@ -2065,7 +2301,8 @@ async function materializeDay2To15QueueItems(domain, neededCount, options = {}) 
       { normalizedPhone: { $nin: [null, ""] } },
       { primaryPhone: { $nin: [null, ""] } },
     ],
-  })
+  }, options.routeCampaigns);
+  const candidates = await LeadCadence.find(cadenceQuery)
     .sort({
       "lastTouched.cx": 1,
       createdAt: 1,
@@ -2092,7 +2329,7 @@ async function materializeDay2To15QueueItems(domain, neededCount, options = {}) 
     if (await activeQueueCaseExists(normalizedDomain, caseId)) continue;
 
     const businessAgeDays = getLeadAgeDays(cadence.createdAt, now);
-    if (!Number.isFinite(businessAgeDays) || businessAgeDays < 1 || businessAgeDays > 14) continue;
+    if (!Number.isFinite(businessAgeDays) || businessAgeDays < 2 || businessAgeDays > 14) continue;
     const activeDay = businessAgeDays + 1;
     await cxDialQueueRepository.upsertQueueItem(
       normalizedDomain,
@@ -2109,25 +2346,123 @@ async function materializeDay2To15QueueItems(domain, neededCount, options = {}) 
         ...routingPatch,
         state: "ready",
         queueFamily: "fresh-day2to10",
-        queueFamilyRank: 1,
+        queueFamilyRank: getQueueFamilySortRank("fresh-day2to10"),
         queueTier: "later",
         progressiveStageKey: "day2to15",
         progressiveStageIndex: Math.max(activeDay, 2),
-        progressiveStageLabel: "2-15",
+        progressiveStageLabel: "3-15",
         priorityScore: 100,
         releaseAt: now,
         claimUntil: null,
         callPlan: {
           phaseIndex: 0,
-          delaysMinutes: [25, 25, 25, 25],
+          delaysMinutes: [120, 120, 120],
           activeDay,
-          nextDelayMinutes: 25,
+          nextDelayMinutes: 120,
         },
         "metadata.actionKey": actionKey,
         "metadata.queueFamily": "fresh-day2to10",
         "metadata.materializedBy": "cx-workspace-refill",
         "metadata.materializedFrom": "lead-cadence",
         "metadata.materializedAt": now,
+        "metadata.routeCampaignKey": cadence.routeCampaignKey || null,
+        "metadata.routeCampaignName": cadence.routeCampaignName || null,
+      },
+      { actionKey },
+    );
+    created += 1;
+  }
+
+  return { ok: true, created, scanned, source: "lead-cadence" };
+}
+
+async function materializeDay16To30QueueItems(domain, neededCount, options = {}) {
+  const count = Math.max(Number(neededCount) || 0, 0);
+  if (count <= 0) return { ok: true, created: 0, scanned: 0, source: "lead-cadence" };
+
+  const now = options.now || new Date();
+  const dayMs = 24 * 60 * 60 * 1000;
+  const currentFreshWindowStart = getPacificBusinessDayStart(now);
+  const windowStart = new Date(currentFreshWindowStart.getTime() - 31 * dayMs);
+  const windowEnd = new Date(currentFreshWindowStart.getTime() - 14 * dayMs);
+  const dateKey = getPacificDateKey(now);
+  const normalizedDomain = normalizeDomain(domain);
+  const scanLimit = Math.min(Math.max(count * 8, 40), 300);
+  const routingPatch = buildQueueRoutingPatch("fresh-day16to30");
+  const cadenceQuery = applyRouteCampaignFilter({
+    domain: normalizedDomain,
+    active: true,
+    createdAt: { $gte: windowStart, $lt: windowEnd },
+    $or: [
+      { normalizedPhone: { $nin: [null, ""] } },
+      { primaryPhone: { $nin: [null, ""] } },
+    ],
+  }, options.routeCampaigns);
+  const candidates = await LeadCadence.find(cadenceQuery)
+    .sort({
+      "lastTouched.cx": 1,
+      createdAt: 1,
+      updatedAt: 1,
+    })
+    .limit(scanLimit)
+    .lean();
+
+  let created = 0;
+  let scanned = 0;
+  for (const cadence of candidates) {
+    if (created >= count) break;
+    scanned += 1;
+    if (isCxBlockedLeadCadence(cadence)) continue;
+
+    const phone = pickLeadCadencePhone(cadence);
+    if (!phone) continue;
+
+    const caseId = Number(cadence.caseId);
+    if (!Number.isFinite(caseId)) continue;
+
+    const actionKey = `cx-day16to30-${dateKey}-${caseId}`;
+    if (await queueActionAlreadyExists(normalizedDomain, caseId, actionKey)) continue;
+    if (await activeQueueCaseExists(normalizedDomain, caseId)) continue;
+
+    const businessAgeDays = getLeadAgeDays(cadence.createdAt, now);
+    if (!Number.isFinite(businessAgeDays) || businessAgeDays < 15 || businessAgeDays > 29) continue;
+    const activeDay = businessAgeDays + 1;
+    await cxDialQueueRepository.upsertQueueItem(
+      normalizedDomain,
+      caseId,
+      {
+        domain: normalizedDomain,
+        caseId,
+        leadCadenceId: String(cadence._id),
+        phone,
+        name: pickLeadName(cadence),
+        intakeSource: cadence.intakeSource || "lead-cadence",
+        intakeRoute: cadence.intakeRoute || "day16to30-cx-refill",
+        sourceName: cadence.sourceName || cadence.vendorSourceName || null,
+        ...routingPatch,
+        state: "ready",
+        queueFamily: "fresh-day16to30",
+        queueFamilyRank: getQueueFamilySortRank("fresh-day16to30"),
+        queueTier: "later",
+        progressiveStageKey: "day16to30",
+        progressiveStageIndex: activeDay,
+        progressiveStageLabel: "16-30",
+        priorityScore: 90,
+        releaseAt: now,
+        claimUntil: null,
+        callPlan: {
+          phaseIndex: 0,
+          delaysMinutes: [1440],
+          activeDay,
+          nextDelayMinutes: 1440,
+        },
+        "metadata.actionKey": actionKey,
+        "metadata.queueFamily": "fresh-day16to30",
+        "metadata.materializedBy": "cx-workspace-refill",
+        "metadata.materializedFrom": "lead-cadence",
+        "metadata.materializedAt": now,
+        "metadata.routeCampaignKey": cadence.routeCampaignKey || null,
+        "metadata.routeCampaignName": cadence.routeCampaignName || null,
       },
       { actionKey },
     );
@@ -2147,7 +2482,97 @@ async function materializeAgedQueueItems(domain, neededCount, options = {}) {
   const poolTag = String(process.env.RC_CX_FILLER_POOL_TAG || "").trim() || getPacificMonthTag(now);
   const scanLimit = Math.min(Math.max(count * 8, 40), 300);
   const routingPatch = buildQueueRoutingPatch("aged");
-  const candidates = await MasterProspectIndex.find({
+  const dayMs = 24 * 60 * 60 * 1000;
+  const currentFreshWindowStart = getPacificBusinessDayStart(now);
+  const agedWindowEnd = new Date(currentFreshWindowStart.getTime() - 29 * dayMs);
+
+  let created = 0;
+  let scanned = 0;
+  let cadenceCreated = 0;
+  let prospectCreated = 0;
+
+  const cadenceQuery = applyRouteCampaignFilter({
+    domain: normalizedDomain,
+    active: true,
+    createdAt: { $lt: agedWindowEnd },
+    $or: [
+      { normalizedPhone: { $nin: [null, ""] } },
+      { primaryPhone: { $nin: [null, ""] } },
+    ],
+  }, options.routeCampaigns);
+  const cadenceCandidates = await LeadCadence.find(cadenceQuery)
+    .sort({
+      "lastTouched.cx": 1,
+      createdAt: 1,
+      updatedAt: 1,
+    })
+    .limit(scanLimit)
+    .lean();
+
+  for (const cadence of cadenceCandidates) {
+    if (created >= count) break;
+    scanned += 1;
+    if (isCxBlockedLeadCadence(cadence)) continue;
+
+    const phone = pickLeadCadencePhone(cadence);
+    if (!phone) continue;
+
+    const caseId = Number(cadence.caseId);
+    if (!Number.isFinite(caseId)) continue;
+
+    const businessAgeDays = getLeadAgeDays(cadence.createdAt, now);
+    if (!Number.isFinite(businessAgeDays) || businessAgeDays <= 29 || businessAgeDays > 120) continue;
+    const activeDay = businessAgeDays + 1;
+
+    const actionKey = `cx-aged-${dateKey}-${caseId}`;
+    if (await queueActionAlreadyExists(normalizedDomain, caseId, actionKey)) continue;
+    if (await activeQueueCaseExists(normalizedDomain, caseId)) continue;
+
+    await cxDialQueueRepository.upsertQueueItem(
+      normalizedDomain,
+      caseId,
+      {
+        domain: normalizedDomain,
+        caseId,
+        leadCadenceId: String(cadence._id),
+        phone,
+        name: pickLeadName(cadence),
+        intakeSource: cadence.intakeSource || "lead-cadence",
+        intakeRoute: cadence.intakeRoute || "aged-cadence-cx-refill",
+        sourceName: cadence.sourceName || cadence.vendorSourceName || null,
+        ...routingPatch,
+        state: "ready",
+        queueFamily: "aged",
+        queueFamilyRank: getQueueFamilySortRank("aged"),
+        queueTier: "later",
+        progressiveStageKey: "aged-cadence",
+        progressiveStageIndex: 99,
+        progressiveStageLabel: "31-120",
+        priorityScore: 85,
+        releaseAt: now,
+        claimUntil: null,
+        callPlan: {
+          phaseIndex: 0,
+          delaysMinutes: [20160],
+          activeDay,
+          nextDelayMinutes: 20160,
+        },
+        "metadata.actionKey": actionKey,
+        "metadata.queueFamily": "aged",
+        "metadata.materializedBy": "cx-workspace-refill",
+        "metadata.materializedFrom": "aged-lead-cadence",
+        "metadata.materializedAt": now,
+        "metadata.routeCampaignKey": cadence.routeCampaignKey || null,
+        "metadata.routeCampaignName": cadence.routeCampaignName || null,
+      },
+      { actionKey },
+    );
+    created += 1;
+    cadenceCreated += 1;
+  }
+
+  const remaining = Math.max(count - created, 0);
+  const candidates = remaining > 0 ? await MasterProspectIndex.find({
     domain: normalizedDomain,
     "pool.tag": poolTag,
     normalizedPhones: { $exists: true, $ne: [] },
@@ -2157,11 +2582,9 @@ async function materializeAgedQueueItems(domain, neededCount, options = {}) {
       lastSeenAt: -1,
       updatedAt: 1,
     })
-    .limit(scanLimit)
-    .lean();
+    .limit(Math.min(Math.max(remaining * 8, 40), 300))
+    .lean() : [];
 
-  let created = 0;
-  let scanned = 0;
   for (const prospect of candidates) {
     if (created >= count) break;
     scanned += 1;
@@ -2190,19 +2613,19 @@ async function materializeAgedQueueItems(domain, neededCount, options = {}) {
         ...routingPatch,
         state: "ready",
         queueFamily: "aged",
-        queueFamilyRank: 2,
+        queueFamilyRank: getQueueFamilySortRank("aged"),
         queueTier: "later",
         progressiveStageKey: "aged-filler",
         progressiveStageIndex: 99,
-        progressiveStageLabel: "Aged",
+        progressiveStageLabel: "31-120",
         priorityScore: 80,
         releaseAt: now,
         claimUntil: null,
         callPlan: {
           phaseIndex: 0,
-          delaysMinutes: [60, 120, 240],
+          delaysMinutes: [20160],
           activeDay: 99,
-          nextDelayMinutes: 60,
+          nextDelayMinutes: 20160,
         },
         "metadata.actionKey": actionKey,
         "metadata.queueFamily": "aged",
@@ -2210,28 +2633,44 @@ async function materializeAgedQueueItems(domain, neededCount, options = {}) {
         "metadata.materializedFrom": "filler-pool",
         "metadata.materializedPoolTag": poolTag,
         "metadata.materializedAt": now,
+        "metadata.routeCampaignKey": prospect.metadata?.routeCampaignKey || null,
+        "metadata.routeCampaignName": prospect.metadata?.routeCampaignName || null,
       },
       { actionKey },
     );
     created += 1;
+    prospectCreated += 1;
   }
 
-  return { ok: true, created, scanned, source: "filler-pool", poolTag };
+  return {
+    ok: true,
+    created,
+    scanned,
+    source: "aged-overflow",
+    cadenceCreated,
+    prospectCreated,
+    poolTag,
+  };
 }
 
+// Non-green materialization is shared; blue/yellow/red do not split by LD bucket.
+// `routeCampaigns` is accepted for call-shape compatibility, but this
+// path always passes null to the post-first-contact materializers.
 async function materializeQueueSupplyForAgent({
   domain,
   domains = null,
   queueFamilies = [],
   deficit = 0,
+  routeCampaigns = null,
 }) {
   const enabled =
     String(process.env.RC_CX_AUTO_MATERIALIZE_NONFRESH_ENABLED || "true").toLowerCase() !== "false";
   const normalizedFamilies = queueFamilies.map((family) => normalizeCxQueueFamily(family));
   const wantsDay2To15 = normalizedFamilies.includes("fresh-day2to10");
+  const wantsDay16To30 = normalizedFamilies.includes("fresh-day16to30");
   const wantsAged = normalizedFamilies.includes("aged");
   const needed = Math.max(Number(deficit) || 0, 0);
-  if (!enabled || needed <= 0 || (!wantsDay2To15 && !wantsAged)) {
+  if (!enabled || needed <= 0 || (!wantsDay2To15 && !wantsDay16To30 && !wantsAged)) {
     return { ok: true, created: 0, skipped: true, reason: enabled ? "not-nonfresh" : "disabled" };
   }
 
@@ -2246,12 +2685,23 @@ async function materializeQueueSupplyForAgent({
   for (const supplyDomain of supplyDomains) {
     if (remaining <= 0) break;
     if (wantsDay2To15 && remaining > 0) {
-      const day2Result = await materializeDay2To15QueueItems(supplyDomain, remaining);
+      const day2Result = await materializeDay2To15QueueItems(supplyDomain, remaining, {
+        routeCampaigns: null,
+      });
       results.push({ domain: supplyDomain, ...day2Result });
       remaining -= Number(day2Result.created || 0);
     }
+    if (wantsDay16To30 && remaining > 0) {
+      const day16Result = await materializeDay16To30QueueItems(supplyDomain, remaining, {
+        routeCampaigns: null,
+      });
+      results.push({ domain: supplyDomain, ...day16Result });
+      remaining -= Number(day16Result.created || 0);
+    }
     if (wantsAged && remaining > 0) {
-      const agedResult = await materializeAgedQueueItems(supplyDomain, remaining);
+      const agedResult = await materializeAgedQueueItems(supplyDomain, remaining, {
+        routeCampaigns: null,
+      });
       results.push({ domain: supplyDomain, ...agedResult });
       remaining -= Number(agedResult.created || 0);
     }
@@ -2276,9 +2726,11 @@ async function refillQueueFamilyForAgent({
   randomize,
   maxOpenAssignmentsScope,
   requestKeyPrefix,
+  routeCampaigns = null,
+  ignoreDrainBeforeRefill = false,
 }) {
   const deficit = Math.max(targetCount - currentCount, 0);
-  const drainBeforeRefill = readBooleanEnv("RC_CX_DRAIN_BEFORE_REFILL_ENABLED", true);
+  const drainBeforeRefill = !ignoreDrainBeforeRefill && readBooleanEnv("RC_CX_DRAIN_BEFORE_REFILL_ENABLED", true);
   const hasSealedPack = hasSealedAssignmentPackMarker(currentItems);
   if (drainBeforeRefill && currentCount > 0 && (hasSealedPack || currentCount >= targetCount)) {
     if (!hasSealedPack && currentCount >= targetCount) {
@@ -2329,6 +2781,7 @@ async function refillQueueFamilyForAgent({
     domains: queueDomains,
     queueFamilies,
     deficit,
+    routeCampaigns,
   }).catch((error) => ({
     ok: false,
     error: error.message,
@@ -2346,6 +2799,7 @@ async function refillQueueFamilyForAgent({
       maxCount: remainingToAssign,
       claimMinutes,
       queueFamilies,
+      routeCampaigns: normalizeRouteCampaigns(routeCampaigns) || [],
       randomize,
       maxOpenAssignments: targetCount,
       maxOpenAssignmentsScope,
@@ -2400,9 +2854,11 @@ async function refillFreshHotLaneForAgent({
   targetCount,
   claimMinutes,
   requestKeyPrefix,
+  routeCampaigns = null,
+  ignoreDrainBeforeRefill = false,
 }) {
   const deficit = Math.max(targetCount - currentCount, 0);
-  const drainBeforeRefill = readBooleanEnv("RC_CX_DRAIN_BEFORE_REFILL_ENABLED", true);
+  const drainBeforeRefill = !ignoreDrainBeforeRefill && readBooleanEnv("RC_CX_DRAIN_BEFORE_REFILL_ENABLED", true);
   const hasSealedPack = hasSealedAssignmentPackMarker(currentItems);
   if (drainBeforeRefill && currentCount > 0 && (hasSealedPack || currentCount >= targetCount)) {
     if (!hasSealedPack && currentCount >= targetCount) {
@@ -2457,6 +2913,7 @@ async function refillFreshHotLaneForAgent({
     maxCount: batchSize,
     claimMinutes,
     candidateExtensionIds: [String(context?.account?.extensionId || "").trim()].filter(Boolean),
+    routeCampaigns: normalizeRouteCampaigns(routeCampaigns) || [],
     maxOpenAssignments: targetCount,
     ignoreActivityState: true,
     ignoreDrainBeforeRefill: true,
@@ -2497,110 +2954,203 @@ async function refillFreshHotLaneForAgent({
   };
 }
 
+// Priority-stack refill: route-filtered green, then shared blue/yellow/red.
+//
+// `routeCampaigns` is only applied to the fresh hot lane. Blue/yellow/red
+// explicitly pass null so aged and post-first-contact leads are shared.
 async function maybeRefillCxQueueForAgent(context, agentExtensionId, visibleQueueItems = []) {
   const enabled = String(process.env.RC_CX_EMPTY_QUEUE_REFILL_ENABLED || "true").toLowerCase() !== "false";
   if (!enabled) return { skipped: true, reason: "disabled" };
   if (!agentExtensionId) return { skipped: true, reason: "missing-extension-id" };
 
   const queuePolicy = resolveAccountQueuePolicy(context.account || {});
-  if (!queuePolicy.enabled) {
-    return {
-      ok: true,
-      assigned: 0,
-      skipped: true,
-      reason: "queue-policy-no-leads",
-      policy: queuePolicy,
-    };
-  }
-
+  const routeCampaigns = queuePolicy.routeCampaigns || null;
   const freshFamilies = parseQueueFamilyList(
     process.env.RC_CX_FRESH_REFILL_FAMILIES,
     ["fresh-day1"],
   );
   const nonFreshFamilies = parseQueueFamilyList(
     process.env.RC_CX_EMPTY_QUEUE_REFILL_FAMILIES,
-    ["fresh-day2to10", "aged"],
+    ["fresh-day2to10", "fresh-day16to30", "aged"],
   );
   const day2To15Families = parseQueueFamilyList(
     process.env.RC_CX_DAY2TO15_REFILL_FAMILIES,
     ["fresh-day2to10"],
   );
+  const day16To30Families = parseQueueFamilyList(
+    process.env.RC_CX_DAY16TO30_REFILL_FAMILIES || process.env.RC_CX_YELLOW_REFILL_FAMILIES,
+    ["fresh-day16to30"],
+  );
   const agedFamilies = parseQueueFamilyList(
     process.env.RC_CX_AGED_REFILL_FAMILIES,
     ["aged"],
   );
-  const freshTarget = queuePolicy.fresh.eligible
-    ? resolveQueueFamilyTargetOpen(context, queuePolicy, "fresh-day1", "RC_CX_FRESH_OPEN_ASSIGNMENTS")
+  const rawTotalOpen = queuePolicy.enabled
+    ? getNonNegativeEnvNumber("RC_CX_TOTAL_OPEN_ASSIGNMENTS", queuePolicy.totalOpen || 0)
     : 0;
-  const day2To15Target = Number(queuePolicy.day2to15.targetOpen || 0) > 0
-    ? resolveQueueFamilyTargetOpen(context, queuePolicy, "fresh-day2to10", "RC_CX_DAY2TO15_OPEN_ASSIGNMENTS")
+  const freshTarget = queuePolicy.enabled
+    ? resolveQueueFamilyTargetOpen(context, queuePolicy, "fresh-day1", "RC_CX_FRESH_TARGET_OPEN")
     : 0;
-  const agedTarget = Number(queuePolicy.aged.targetOpen || 0) > 0
-    ? resolveQueueFamilyTargetOpen(context, queuePolicy, "aged", "RC_CX_AGED_OPEN_ASSIGNMENTS")
+  const day2To15Target = queuePolicy.enabled
+    ? resolveQueueFamilyTargetOpen(context, queuePolicy, "fresh-day2to10", "RC_CX_DAY2TO15_TARGET_OPEN")
     : 0;
-  const nonFreshTarget = day2To15Target + agedTarget;
+  const day16To30Target = queuePolicy.enabled
+    ? resolveQueueFamilyTargetOpen(context, queuePolicy, "fresh-day16to30", "RC_CX_DAY16TO30_TARGET_OPEN")
+    : 0;
+  const agedTarget = queuePolicy.enabled
+    ? resolveQueueFamilyTargetOpen(context, queuePolicy, "aged", "RC_CX_AGED_TARGET_OPEN")
+    : 0;
+  const familyTargetTotal = freshTarget + day2To15Target + day16To30Target + agedTarget;
+  const totalOpen = familyTargetTotal > 0 ? familyTargetTotal : rawTotalOpen;
+  const reconciliationTargets = [
+    { queueFamilies: freshFamilies, targetCount: freshTarget },
+    { queueFamilies: day2To15Families, targetCount: day2To15Target },
+    { queueFamilies: day16To30Families, targetCount: day16To30Target },
+    { queueFamilies: agedFamilies, targetCount: agedTarget },
+    {
+      queueFamilies: Array.from(new Set([
+        ...freshFamilies,
+        ...day2To15Families,
+        ...day16To30Families,
+        ...agedFamilies,
+      ])),
+      targetCount: totalOpen,
+    },
+  ];
+  const reconciliation = await reconcileWorkspaceQueuePacksForAgent({
+    agentExtensionId,
+    visibleQueueItems,
+    familyTargets: reconciliationTargets,
+    reason: queuePolicy.enabled ? "queue-over-target-trim" : "queue-policy-disabled",
+    actorEmail: context.account?.email || null,
+  });
+  visibleQueueItems = reconciliation.visibleQueueItems || visibleQueueItems;
+
+  if (!queuePolicy.enabled) {
+    return {
+      ok: true,
+      assigned: 0,
+      released: reconciliation.released || 0,
+      skipped: true,
+      reason: "queue-policy-no-leads",
+      policy: queuePolicy,
+      reconciliation,
+    };
+  }
+
   const freshCurrentItems = listQueueItemsByFamily(visibleQueueItems, freshFamilies, agentExtensionId);
   const nonFreshCurrentItems = listQueueItemsByFamily(visibleQueueItems, nonFreshFamilies, agentExtensionId);
   const day2To15CurrentItems = listQueueItemsByFamily(visibleQueueItems, day2To15Families, agentExtensionId);
+  const day16To30CurrentItems = listQueueItemsByFamily(visibleQueueItems, day16To30Families, agentExtensionId);
   const agedCurrentItems = listQueueItemsByFamily(visibleQueueItems, agedFamilies, agentExtensionId);
   const freshCurrent = freshCurrentItems.length;
   const nonFreshCurrent = nonFreshCurrentItems.length;
   const day2To15Current = day2To15CurrentItems.length;
+  const day16To30Current = day16To30CurrentItems.length;
   const agedCurrent = agedCurrentItems.length;
+  const currentOpen = freshCurrent + day2To15Current + day16To30Current + agedCurrent;
+  let deficit = Math.max(totalOpen - currentOpen, 0);
   const timestamp = Date.now();
   const batches = [];
 
-  batches.push(await refillFreshHotLaneForAgent({
-    context,
-    currentCount: freshCurrent,
-    currentItems: freshCurrentItems,
-    targetCount: freshTarget,
-    claimMinutes: Number(process.env.RC_CX_FRESH_CLAIM_MINUTES) || 15,
-    requestKeyPrefix: `cx-fresh-queue-refill:${context.domain}:${agentExtensionId}:${timestamp}`,
-  }));
+  const freshDeficit = Math.min(Math.max(freshTarget - freshCurrent, 0), deficit);
+  if (freshDeficit > 0 && queuePolicy.fresh?.eligible !== false) {
+    const freshBatch = await refillFreshHotLaneForAgent({
+      context,
+      currentCount: freshCurrent,
+      currentItems: freshCurrentItems,
+      targetCount: freshCurrent + freshDeficit,
+      claimMinutes: Number(process.env.RC_CX_FRESH_CLAIM_MINUTES) || 15,
+      requestKeyPrefix: `cx-fresh-queue-refill:${context.domain}:${agentExtensionId}:${timestamp}`,
+      routeCampaigns,
+      ignoreDrainBeforeRefill: true,
+    });
+    batches.push(freshBatch);
+    deficit -= Number(freshBatch?.assigned || 0);
+  }
 
-  batches.push(await refillQueueFamilyForAgent({
-    context,
-    agentExtensionId,
-    queueFamilies: day2To15Families,
-    currentCount: day2To15Current,
-    currentItems: day2To15CurrentItems,
-    targetCount: day2To15Target,
-    countEnvName: "RC_CX_DAY2TO15_REFILL_COUNT",
-    claimMinutes: Number(process.env.RC_CX_NONFRESH_CLAIM_MINUTES) || 30,
-    randomize: false,
-    maxOpenAssignmentsScope: "queue-family",
-    requestKeyPrefix: `cx-day2to15-queue-refill:${context.domain}:${agentExtensionId}:${timestamp}`,
-  }));
+  const day2To15Deficit = Math.min(Math.max(day2To15Target - day2To15Current, 0), deficit);
+  if (day2To15Deficit > 0) {
+    const day2Batch = await refillQueueFamilyForAgent({
+      context,
+      agentExtensionId,
+      queueFamilies: day2To15Families,
+      currentCount: day2To15Current,
+      currentItems: day2To15CurrentItems,
+      targetCount: day2To15Current + day2To15Deficit,
+      claimMinutes: Number(process.env.RC_CX_NONFRESH_CLAIM_MINUTES) || 30,
+      randomize: false,
+      maxOpenAssignmentsScope: "queue-family",
+      requestKeyPrefix: `cx-day2to15-queue-refill:${context.domain}:${agentExtensionId}:${timestamp}`,
+      routeCampaigns: null,
+      ignoreDrainBeforeRefill: true,
+    });
+    batches.push(day2Batch);
+    deficit -= Number(day2Batch?.assigned || 0);
+  }
 
-  batches.push(await refillQueueFamilyForAgent({
-    context,
-    agentExtensionId,
-    queueFamilies: agedFamilies,
-    currentCount: agedCurrent,
-    currentItems: agedCurrentItems,
-    targetCount: agedTarget,
-    countEnvName: "RC_CX_AGED_REFILL_COUNT",
-    claimMinutes: Number(process.env.RC_CX_AGED_CLAIM_MINUTES) || Number(process.env.RC_CX_NONFRESH_CLAIM_MINUTES) || 30,
-    randomize: false,
-    maxOpenAssignmentsScope: "queue-family",
-    requestKeyPrefix: `cx-aged-queue-refill:${context.domain}:${agentExtensionId}:${timestamp}`,
-  }));
+  const day16To30Deficit = Math.min(Math.max(day16To30Target - day16To30Current, 0), deficit);
+  if (day16To30Deficit > 0) {
+    const day16Batch = await refillQueueFamilyForAgent({
+      context,
+      agentExtensionId,
+      queueFamilies: day16To30Families,
+      currentCount: day16To30Current,
+      currentItems: day16To30CurrentItems,
+      targetCount: day16To30Current + day16To30Deficit,
+      claimMinutes: Number(process.env.RC_CX_YELLOW_CLAIM_MINUTES) || Number(process.env.RC_CX_NONFRESH_CLAIM_MINUTES) || 30,
+      randomize: false,
+      maxOpenAssignmentsScope: "queue-family",
+      requestKeyPrefix: `cx-day16to30-queue-refill:${context.domain}:${agentExtensionId}:${timestamp}`,
+      routeCampaigns: null,
+      ignoreDrainBeforeRefill: true,
+    });
+    batches.push(day16Batch);
+    deficit -= Number(day16Batch?.assigned || 0);
+  }
+
+  const agedDeficit = Math.min(Math.max(agedTarget - agedCurrent, 0), deficit);
+  if (agedDeficit > 0 && readBooleanEnv("RC_CX_AGED_OVERFLOW_ENABLED", true)) {
+    const agedBatch = await refillQueueFamilyForAgent({
+      context,
+      agentExtensionId,
+      queueFamilies: agedFamilies,
+      currentCount: agedCurrent,
+      currentItems: agedCurrentItems,
+      targetCount: agedCurrent + agedDeficit,
+      claimMinutes: Number(process.env.RC_CX_AGED_CLAIM_MINUTES) || Number(process.env.RC_CX_NONFRESH_CLAIM_MINUTES) || 30,
+      randomize: false,
+      maxOpenAssignmentsScope: "queue-family",
+      requestKeyPrefix: `cx-aged-queue-refill:${context.domain}:${agentExtensionId}:${timestamp}`,
+      routeCampaigns: null,
+      ignoreDrainBeforeRefill: true,
+    });
+    batches.push(agedBatch);
+    deficit -= Number(agedBatch?.assigned || 0);
+  }
 
   return {
     ok: true,
     assigned: batches.reduce((total, batch) => total + (Number(batch?.assigned) || 0), 0),
+    released: reconciliation.released || 0,
     batches,
     policy: queuePolicy,
+    reconciliation,
     counts: {
       freshCurrent,
       freshTarget,
       nonFreshCurrent,
-      nonFreshTarget,
+      nonFreshTarget: day2To15Target + day16To30Target + agedTarget,
       day2To15Current,
       day2To15Target,
+      day16To30Current,
+      day16To30Target,
       agedCurrent,
       agedTarget,
+      currentOpen,
+      totalOpen,
+      remainingDeficit: Math.max(deficit, 0),
+      routeCampaigns,
     },
   };
 }
@@ -2719,13 +3269,25 @@ async function buildCxQueueItems(context, limit = 50) {
   }
 
   let activeQueueItems = await listActiveCxQueueItemsForAgent(context, agentExtensionId);
+  const routeReconciliation = await reconcileRouteCampaignAssignmentsForAgent({
+    context,
+    agentExtensionId,
+    activeQueueItems,
+  }).catch((error) => ({
+    ok: false,
+    released: 0,
+    error: error.message,
+  }));
+  if (routeReconciliation?.released > 0) {
+    activeQueueItems = await listActiveCxQueueItemsForAgent(context, agentExtensionId);
+  }
   let visibleQueueItems = activeQueueItems.filter((item) =>
     canViewQueueItemForAgent(item, context));
   const refill = await maybeRefillCxQueueForAgent(context, agentExtensionId, visibleQueueItems).catch((error) => ({
     ok: false,
     error: error.message,
   }));
-  if (refill?.assigned > 0) {
+  if (refill?.assigned > 0 || refill?.released > 0) {
     activeQueueItems = await listActiveCxQueueItemsForAgent(context, agentExtensionId);
     visibleQueueItems = activeQueueItems.filter((item) =>
       canViewQueueItemForAgent(item, context));
@@ -2789,17 +3351,33 @@ function getSmokeQueueFamilyConfig(queueFamily) {
       return {
         queueFamily: "fresh-day2to10",
         queueTier: "later",
-        activeDay: 2,
+        activeDay: 3,
         currentStage: "day2to15",
+        nextActionType: "cx:followup",
+      };
+    case "fresh-day16to30":
+      return {
+        queueFamily: "fresh-day16to30",
+        queueTier: "later",
+        activeDay: 16,
+        currentStage: "day16to30",
         nextActionType: "cx:followup",
       };
     case "aged":
       return {
         queueFamily: "aged",
         queueTier: "later",
-        activeDay: 30,
+        activeDay: 31,
         currentStage: "aged",
         nextActionType: "cx:aged",
+      };
+    case "dead":
+      return {
+        queueFamily: "dead",
+        queueTier: "dead",
+        activeDay: 121,
+        currentStage: "dead",
+        nextActionType: "cx:dead",
       };
     case "fresh-day1":
     default:
@@ -3202,6 +3780,189 @@ async function buildCxCallQueue(domain, user) {
   return {
     domain: context.domain,
     items: docs,
+  };
+}
+
+function summarizeCxQueueFamilyCounts(queueItems = []) {
+  const byFamily = {
+    "fresh-day1": 0,
+    "fresh-day2to10": 0,
+    "fresh-day16to30": 0,
+    aged: 0,
+    dead: 0,
+    unassigned: 0,
+  };
+  const byState = {};
+
+  for (const item of queueItems || []) {
+    const family = getQueueItemFamily(item);
+    byFamily[family] = (byFamily[family] || 0) + 1;
+    const state = getQueueItemState(item) || "unknown";
+    byState[state] = (byState[state] || 0) + 1;
+  }
+
+  return {
+    total: queueItems.length,
+    byFamily,
+    byState,
+  };
+}
+
+function queuePolicyTargetTotal(policy = {}) {
+  return (
+    Number(policy.fresh?.targetOpen || 0) +
+    Number(policy.day2to15?.targetOpen || 0) +
+    Number(policy.day16to30?.targetOpen || 0) +
+    Number(policy.aged?.targetOpen || 0)
+  ) || Number(policy.totalOpen || 0) || 0;
+}
+
+async function listCxQueueBuildAccounts(domain, extensionIds = []) {
+  const requestedExtensions = Array.from(
+    new Set(
+      (Array.isArray(extensionIds) ? extensionIds : String(extensionIds || "").split(","))
+        .map((value) => String(value || "").trim())
+        .filter(Boolean),
+    ),
+  );
+
+  if (requestedExtensions.length > 0) {
+    const accounts = [];
+    const missing = [];
+    for (const extensionId of requestedExtensions) {
+      const account = await userAccountRepository.findUserAccountByExtensionId(extensionId);
+      if (account?.email) {
+        accounts.push(account);
+      } else {
+        missing.push(extensionId);
+      }
+    }
+    return { accounts, missing };
+  }
+
+  const accounts = await userAccountRepository.listUserAccounts({ status: "active" });
+  return {
+    accounts: accounts.filter((account) => {
+      if (!account?.extensionId) return false;
+      const policy = resolveAccountQueuePolicy(account);
+      return policy.enabled && queuePolicyTargetTotal(policy) > 0;
+    }),
+    missing: [],
+  };
+}
+
+async function buildCxQueueForAgent(domain, extensionId, options = {}) {
+  const normalizedExtensionId = String(extensionId || "").trim();
+  if (!normalizedExtensionId) {
+    const err = new Error("extensionId is required");
+    err.status = 400;
+    throw err;
+  }
+
+  const account = await userAccountRepository.findUserAccountByExtensionId(normalizedExtensionId);
+  if (!account?.email) {
+    const err = new Error(`No user account is paired to extension ${normalizedExtensionId}`);
+    err.status = 404;
+    throw err;
+  }
+
+  const user = {
+    email: account.email,
+    name: account.name || account.email,
+    company: account.company || domain || "WYNN",
+    extensionId: account.extensionId || normalizedExtensionId,
+    cxAgentId: account.cxAgentId || null,
+    workspace: account.workspace || "cx",
+    stationLabel: account.stationLabel || null,
+    role: account.role,
+    audience: account.audience,
+  };
+  const context = await ensureCxAgentExtensionContext(
+    await resolveCxUserContext(domain || account.company || "WYNN", user),
+    user,
+  );
+  const agentExtensionId = String(context.account?.extensionId || normalizedExtensionId).trim();
+  const beforeActive = await listActiveCxQueueItemsForAgent(context, agentExtensionId);
+  const beforeVisible = beforeActive.filter((item) => canViewQueueItemForAgent(item, context));
+  const before = summarizeCxQueueFamilyCounts(beforeVisible);
+
+  const refill = await maybeRefillCxQueueForAgent(context, agentExtensionId, beforeVisible).catch((error) => ({
+    ok: false,
+    error: error.message,
+  }));
+  const afterActive = await listActiveCxQueueItemsForAgent(context, agentExtensionId);
+  const afterVisible = afterActive.filter((item) => canViewQueueItemForAgent(item, context));
+  const after = summarizeCxQueueFamilyCounts(afterVisible);
+  const policy = resolveAccountQueuePolicy(context.account || account);
+  const previewLimit = Math.min(Number(options.previewLimit) || 8, 25);
+
+  return {
+    ok: true,
+    domain: context.domain,
+    agent: {
+      email: context.account.email,
+      name: context.account.name || account.name || null,
+      extensionId: agentExtensionId,
+      cxAgentId: context.account.cxAgentId || null,
+    },
+    policy,
+    before,
+    after,
+    built: Math.max(after.total - before.total, 0),
+    refill,
+    targetOpen: queuePolicyTargetTotal(policy),
+    items: afterVisible
+      .slice()
+      .sort(sortQueueItemsForWorkspacePack)
+      .slice(0, previewLimit)
+      .map((item) => ({
+      queueTicketId: item._id ? String(item._id) : null,
+      caseId: item.caseId != null ? String(item.caseId) : null,
+      name: item.name || null,
+      phone: item.phone || null,
+      queueFamily: item.queueFamily || null,
+      ageBucket: deriveUcqAgeBucket(item),
+      assignedExtensionId: item.assignment?.extensionId || null,
+      assignedAgentName: item.assignment?.agentName || null,
+    })),
+  };
+}
+
+async function buildCxQueuesForAgents(input = {}) {
+  const domain = normalizeDomain(input.domain || "WYNN");
+  const { accounts, missing } = await listCxQueueBuildAccounts(domain, input.extensionIds || []);
+  const maxAgents = Math.min(Number(input.maxAgents) || accounts.length || 0, 100);
+  const selectedAccounts = accounts.slice(0, maxAgents);
+  const results = [];
+  const errors = [];
+
+  for (const account of selectedAccounts) {
+    try {
+      results.push(await buildCxQueueForAgent(domain, account.extensionId, input));
+    } catch (error) {
+      errors.push({
+        extensionId: account.extensionId || null,
+        email: account.email || null,
+        error: error.message,
+        status: error.status || 500,
+      });
+    }
+  }
+
+  return {
+    ok: errors.length === 0,
+    domain,
+    requested: Array.isArray(input.extensionIds) ? input.extensionIds.length : 0,
+    attempted: selectedAccounts.length,
+    missing,
+    errors,
+    results,
+    totals: {
+      before: results.reduce((sum, item) => sum + Number(item.before?.total || 0), 0),
+      after: results.reduce((sum, item) => sum + Number(item.after?.total || 0), 0),
+      built: results.reduce((sum, item) => sum + Number(item.built || 0), 0),
+      targetOpen: results.reduce((sum, item) => sum + Number(item.targetOpen || 0), 0),
+    },
   };
 }
 
@@ -7237,6 +7998,8 @@ async function executeCxLogicsNotes(domain, user, input = {}) {
 
 module.exports = {
   buildCxCallQueue,
+  buildCxQueueForAgent,
+  buildCxQueuesForAgents,
   buildCxWorkspace,
   listCxPlacedCallsToday,
   executeCxLogicsCreateCase,

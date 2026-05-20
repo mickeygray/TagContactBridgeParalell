@@ -198,8 +198,12 @@ function resolveRcxQueueRouting(queueFamily, payload = {}) {
       ? normalizeExternalId(env("RINGCX_VOICE_NEW_CAMPAIGN_ID", "")) || defaultCampaignId || "2306"
       : normalizedFamily === "fresh-day2to10"
         ? normalizeExternalId(env("RINGCX_VOICE_OLD_CAMPAIGN_ID", "")) || null
-        : normalizedFamily === "aged"
-          ? normalizeExternalId(env("RINGCX_VOICE_AGED_CAMPAIGN_ID", "")) || null
+        : normalizedFamily === "fresh-day16to30"
+          ? normalizeExternalId(env("RINGCX_VOICE_YELLOW_CAMPAIGN_ID", ""))
+            || normalizeExternalId(env("RINGCX_VOICE_OLD_CAMPAIGN_ID", ""))
+            || null
+          : normalizedFamily === "aged"
+            ? normalizeExternalId(env("RINGCX_VOICE_AGED_CAMPAIGN_ID", "")) || null
           : null;
 
   return {
@@ -223,7 +227,7 @@ function readStoredRcxQueueRouting(payload = {}) {
 function buildInitialCallPlan() {
   return {
     phaseIndex: 0,
-    delaysMinutes: [0, 15, 15, 15, 15, 15],
+    delaysMinutes: [0, 90, 90, 90, 90, 90, 90, 90],
     activeDay: 0,
     nextDelayMinutes: 0,
   };
@@ -245,7 +249,7 @@ function getFreshRetryDelayMinutes() {
       || process.env.RC_CX_FRESH_RETRY_DELAY_MINUTES,
   );
   if (Number.isFinite(configured) && configured >= 0) return Math.trunc(configured);
-  return 15;
+  return 90;
 }
 
 function normalizeCallPlanForQueueFamily(callPlan = null, queueFamily = null) {
@@ -376,6 +380,8 @@ function resolveQueueFamilyForPayload(payload = {}) {
 
   const queueTier = String(payload.queueTier || "").trim().toLowerCase();
   if (queueTier === "later") return "fresh-day2to10";
+  if (queueTier === "yellow" || queueTier === "day16to30") return "fresh-day16to30";
+  if (queueTier === "dead") return "dead";
   if (queueTier === "day1" || queueTier === "day0") return "fresh-day1";
 
   const activeDay = Number(
@@ -385,11 +391,16 @@ function resolveQueueFamilyForPayload(payload = {}) {
       ?? 0,
   );
   if (Number.isFinite(activeDay)) {
-    if (activeDay > 15) return "aged";
-    if (activeDay > 0) return "fresh-day2to10";
+    if (activeDay > 120) return "dead";
+    if (activeDay > 30) return "aged";
+    if (activeDay > 15) return "fresh-day16to30";
+    if (activeDay > 2) return "fresh-day2to10";
+    return "fresh-day1";
   }
 
   const source = String(payload.intakeSource || payload.sourceName || "").toLowerCase();
+  if (source.includes("dead")) return "dead";
+  if (source.includes("yellow") || source.includes("16to30") || source.includes("16-30")) return "fresh-day16to30";
   if (source.includes("aged")) return "aged";
   return "fresh-day1";
 }
@@ -531,18 +542,49 @@ function buildQueueProgressionState(payload = {}, queueFamily = null, callPlan =
     };
   }
 
+  const activeDay = Number((callPlan || payload.callPlan || {})?.activeDay);
+  const familyStage =
+    normalizedFamily === "fresh-day2to10"
+      ? {
+          progressiveStageKey: "day2to15",
+          progressiveStageIndex: Number.isFinite(activeDay) ? activeDay : 3,
+          progressiveStageLabel: "3-15",
+        }
+      : normalizedFamily === "fresh-day16to30"
+        ? {
+            progressiveStageKey: "day16to30",
+            progressiveStageIndex: Number.isFinite(activeDay) ? activeDay : 16,
+            progressiveStageLabel: "16-30",
+          }
+        : normalizedFamily === "aged"
+          ? {
+              progressiveStageKey: "aged-cadence",
+              progressiveStageIndex: 99,
+              progressiveStageLabel: "31-120",
+            }
+          : normalizedFamily === "dead"
+            ? {
+                progressiveStageKey: "dead",
+                progressiveStageIndex: 999,
+                progressiveStageLabel: "Dead",
+              }
+            : stage;
+  const progressiveStageKey = stage.progressiveStageKey || familyStage.progressiveStageKey;
+  const progressiveStageIndex = stage.progressiveStageKey ? stage.progressiveStageIndex : familyStage.progressiveStageIndex;
+  const progressiveStageLabel = stage.progressiveStageLabel || familyStage.progressiveStageLabel;
+
   return {
     queueFamily: normalizedFamily,
     queueFamilyRank: getQueueFamilySortRank(normalizedFamily),
-    progressiveStageKey: stage.progressiveStageKey,
-    progressiveStageIndex: stage.progressiveStageIndex,
-    progressiveStageLabel: stage.progressiveStageLabel,
+    progressiveStageKey,
+    progressiveStageIndex,
+    progressiveStageLabel,
     metadata: {
       queueFamily: normalizedFamily,
       queueFamilyRank: getQueueFamilySortRank(normalizedFamily),
-      progressiveStageKey: stage.progressiveStageKey,
-      progressiveStageIndex: stage.progressiveStageIndex,
-      progressiveStageLabel: stage.progressiveStageLabel,
+      progressiveStageKey,
+      progressiveStageIndex,
+      progressiveStageLabel,
     },
   };
 }
@@ -1167,7 +1209,7 @@ async function backfillCxQueueOrdering(domain = null, limit = 250) {
     Math.max(Number(process.env.RC_CX_TOUCH_AGE_BACKFILL_LIMIT) || 750, 50),
     5000,
   );
-  const touchAgeWindowDays = Math.max(Number(getTouchAgeFreshWindowDays()) || 5, 1);
+  const touchAgeWindowDays = Math.max(Number(getTouchAgeFreshWindowDays()) || 2, 1);
   const touchAgeCutoff = new Date(Date.now() - (touchAgeWindowDays + 2) * 24 * 60 * 60 * 1000);
   const [orderedItems, recentLowTouchItems] = await Promise.all([
     cxDialQueueRepository.listQueueItems({
@@ -1178,7 +1220,7 @@ async function backfillCxQueueOrdering(domain = null, limit = 250) {
     cxDialQueueRepository.listQueueItems({
       domain: domain || null,
       states: ["queued", "ready", "claimed", "serving", "paused"],
-      queueFamilies: ["fresh-day2to10"],
+      queueFamilies: ["fresh-day2to10", "fresh-day16to30"],
       createdAtGte: touchAgeCutoff,
       limit: recentTouchAgeLimit,
     }),
@@ -1506,6 +1548,34 @@ async function handleCxCallPlaced(payload = {}) {
     await markAgentCxCallState(queueItem, payload, placedAt).catch(() => null);
   }
   if (confirmedCall && payload.uii) {
+    // Read the RingCX-specific identifiers stamped on the queue item
+    // at publish time (ringcxLeadServingService sets metadata.rcxVisibility*
+    // when the lead is loaded into the campaign). These power the spot-
+    // download path in the call review dashboard — agentId is the
+    // narrow filter for the `interaction-metadata` POST that returns
+    // dialogId + segmentId for this specific call.
+    const queueMetadata = queueItem.metadata && typeof queueItem.metadata === "object"
+      ? queueItem.metadata
+      : {};
+    const ringcxStamp = {
+      agentId: queueMetadata.rcxVisibilityAgentId
+        ? String(queueMetadata.rcxVisibilityAgentId)
+        : null,
+      agentGroupId: queueMetadata.rcxVisibilityAgentGroupId
+        ? String(queueMetadata.rcxVisibilityAgentGroupId)
+        : null,
+      agentUsername: queueMetadata.rcxVisibilityAgentUsername || null,
+      campaignId: queueMetadata.rcxVisibilityCampaignId
+        ? String(queueMetadata.rcxVisibilityCampaignId)
+        : null,
+      dialGroupId: queueMetadata.rcxVisibilityDialGroupId
+        ? String(queueMetadata.rcxVisibilityDialGroupId)
+        : null,
+      accountId: queueMetadata.rcxVisibilityAccountId
+        ? String(queueMetadata.rcxVisibilityAccountId)
+        : null,
+      externId: queueMetadata.rcxVisibilityExternId || null,
+    };
     await callLogRepository.upsertCallLog({
       domain,
       telephonySessionId: payload.uii,
@@ -1515,6 +1585,7 @@ async function handleCxCallPlaced(payload = {}) {
       extensionId: queueItem.assignment?.extensionId || null,
       executionOwner: "ringcentral-cx",
       platform: "cx",
+      ringcx: ringcxStamp,
       audit: {
         dispatchSource: "cx-call-placed",
         intent: "cx-call-defensive-write",
@@ -1531,6 +1602,8 @@ async function handleCxCallPlaced(payload = {}) {
       metadata: {
         dailyPlacedDateKey: attemptPatch.dailyPlacedDateKey,
         dailyPlacedCalls: attemptPatch.dailyPlacedCalls,
+        monthlyPlacedMonthKey: attemptPatch.monthlyPlacedMonthKey,
+        monthlyPlacedCalls: attemptPatch.monthlyPlacedCalls,
         hourlyPlacedHourKey: attemptPatch.hourlyPlacedHourKey,
         hourlyPlacedCalls: attemptPatch.hourlyPlacedCalls,
         ...touchMetadata,
@@ -1555,6 +1628,8 @@ async function handleCxCallPlaced(payload = {}) {
       metadata: {
         dailyPlacedDateKey: attemptPatch.dailyPlacedDateKey,
         dailyPlacedCalls: attemptPatch.dailyPlacedCalls,
+        monthlyPlacedMonthKey: attemptPatch.monthlyPlacedMonthKey,
+        monthlyPlacedCalls: attemptPatch.monthlyPlacedCalls,
         hourlyPlacedHourKey: attemptPatch.hourlyPlacedHourKey,
         hourlyPlacedCalls: attemptPatch.hourlyPlacedCalls,
         ...touchMetadata,
@@ -1602,6 +1677,7 @@ async function handleCxCallPlaced(payload = {}) {
       claimUntil: null,
       ...attemptQueuePatch,
       callPlan: nextPlan,
+      queueFamily: progression.queueFamily,
       queueFamilyRank: progression.queueFamilyRank,
       progressiveStageKey: progression.progressiveStageKey,
       progressiveStageIndex: progression.progressiveStageIndex,
@@ -1610,6 +1686,8 @@ async function handleCxCallPlaced(payload = {}) {
         ...(progression.metadata || {}),
         dailyPlacedDateKey: attemptPatch.dailyPlacedDateKey,
         dailyPlacedCalls: attemptPatch.dailyPlacedCalls,
+        monthlyPlacedMonthKey: attemptPatch.monthlyPlacedMonthKey,
+        monthlyPlacedCalls: attemptPatch.monthlyPlacedCalls,
         hourlyPlacedHourKey: attemptPatch.hourlyPlacedHourKey,
         hourlyPlacedCalls: attemptPatch.hourlyPlacedCalls,
         ...touchMetadata,
@@ -1631,6 +1709,7 @@ async function handleCxCallPlaced(payload = {}) {
       disposition: "cx-call-placed",
       extraUpdate: {
         ...attemptQueuePatch,
+        queueFamily: progression.queueFamily,
         queueFamilyRank: progression.queueFamilyRank,
         progressiveStageKey: progression.progressiveStageKey,
         progressiveStageIndex: progression.progressiveStageIndex,
@@ -1639,6 +1718,8 @@ async function handleCxCallPlaced(payload = {}) {
           ...(progression.metadata || {}),
           dailyPlacedDateKey: attemptPatch.dailyPlacedDateKey,
           dailyPlacedCalls: attemptPatch.dailyPlacedCalls,
+          monthlyPlacedMonthKey: attemptPatch.monthlyPlacedMonthKey,
+          monthlyPlacedCalls: attemptPatch.monthlyPlacedCalls,
           hourlyPlacedHourKey: attemptPatch.hourlyPlacedHourKey,
           hourlyPlacedCalls: attemptPatch.hourlyPlacedCalls,
           ...touchMetadata,
@@ -1659,6 +1740,7 @@ async function handleCxCallPlaced(payload = {}) {
       extraUpdate: {
         ...attemptQueuePatch,
         callPlan: nextPlan,
+        queueFamily: progression.queueFamily,
         queueFamilyRank: progression.queueFamilyRank,
         progressiveStageKey: progression.progressiveStageKey,
         progressiveStageIndex: progression.progressiveStageIndex,
@@ -1667,6 +1749,8 @@ async function handleCxCallPlaced(payload = {}) {
           ...(progression.metadata || {}),
           dailyPlacedDateKey: attemptPatch.dailyPlacedDateKey,
           dailyPlacedCalls: attemptPatch.dailyPlacedCalls,
+          monthlyPlacedMonthKey: attemptPatch.monthlyPlacedMonthKey,
+          monthlyPlacedCalls: attemptPatch.monthlyPlacedCalls,
           hourlyPlacedHourKey: attemptPatch.hourlyPlacedHourKey,
           hourlyPlacedCalls: attemptPatch.hourlyPlacedCalls,
           ...touchMetadata,
@@ -2263,6 +2347,7 @@ async function claimNextCxQueueItem(options = {}) {
       {
         queueFamily: options.queueFamily || null,
         queueFamilies: Array.isArray(options.queueFamilies) ? options.queueFamilies : [],
+        routeCampaigns: Array.isArray(options.routeCampaigns) ? options.routeCampaigns : [],
         randomize: Boolean(options.randomize),
         preferQueueFamilyOrder: options.preferQueueFamilyOrder !== false,
         createdAtGte: options.createdAtGte || options.windowStart || null,
@@ -2377,7 +2462,7 @@ async function claimNextCxQueueItem(options = {}) {
       openAssignmentFamilyMaps.get(queueFamily)
       || await buildClaimedOpenAssignmentMap(item.domain, {
         queueFamily: assignmentScope === "queue-family" ? queueFamily : null,
-        queueFamilies: assignmentScope === "non-fresh" ? ["fresh-day2to10", "aged"] : [],
+        queueFamilies: assignmentScope === "non-fresh" ? ["fresh-day2to10", "fresh-day16to30", "aged"] : [],
       });
     const agents = extensionId
       ? await listEligibleAgentsForCx(item.domain, [extensionId])
@@ -2542,6 +2627,7 @@ async function assignCxQueueBatch(options = {}) {
         ? options.candidateExtensionIds
         : [],
       queueFamilies,
+      routeCampaigns: Array.isArray(options.routeCampaigns) ? options.routeCampaigns : [],
       randomize: Boolean(options.randomize),
       preferQueueFamilyOrder: options.preferQueueFamilyOrder !== false,
       maxOpenAssignments: options.maxOpenAssignments,
@@ -3589,7 +3675,9 @@ async function buildCxCadenceRuntimeSnapshot(domain = null) {
     byFamily: {
       "fresh-day1": { total: 0, queued: 0, ready: 0, claimed: 0, serving: 0, completed: 0, cancelled: 0, paused: 0 },
       "fresh-day2to10": { total: 0, queued: 0, ready: 0, claimed: 0, serving: 0, completed: 0, cancelled: 0, paused: 0 },
+      "fresh-day16to30": { total: 0, queued: 0, ready: 0, claimed: 0, serving: 0, completed: 0, cancelled: 0, paused: 0 },
       aged: { total: 0, queued: 0, ready: 0, claimed: 0, serving: 0, completed: 0, cancelled: 0, paused: 0 },
+      dead: { total: 0, queued: 0, ready: 0, claimed: 0, serving: 0, completed: 0, cancelled: 0, paused: 0 },
       unassigned: { total: 0, queued: 0, ready: 0, claimed: 0, serving: 0, completed: 0, cancelled: 0, paused: 0 },
     },
   };

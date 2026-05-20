@@ -22,7 +22,9 @@ const ageMixSubdoc = new mongoose.Schema(
     second_contact: { type: Number, default: 0 },
     third_contact: { type: Number, default: 0 },
     day2_10: { type: Number, default: 0 },
+    day16_30: { type: Number, default: 0 },
     aged: { type: Number, default: 0 },
+    dead: { type: Number, default: 0 },
   },
   { _id: false },
 );

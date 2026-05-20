@@ -273,6 +273,13 @@ If a vendor can only send query-string posts, configure a scoped query credentia
 
 If a matching pre-ping exists for the same email hash, the route becomes `ld-posting-lead` and the Logics source becomes `LD Posting Lead`. Otherwise the route is `ld-lead` and the Logics source is `LD Lead`.
 
+LD queue split:
+
+- `GS03RB7W`, `ldcustom`, `LD Custom`, or `Wynn Tax Custom` -> `routeCampaignKey: "ld-custom"`
+- `JM8K5B7Y`, `ldgeneral`, `LD General`, or `Wynn Tax General` -> `routeCampaignKey: "ld-general"`
+- The splitter scans top-level payload values, so the vendor can send the bucket in `vendor`, `sourceName`, `source ID`, `pubid`, or another flat field. The field name is not the contract; the value is.
+- If no split value is present, the fallback is plain `routeCampaignKey: "ld"`.
+
 LD payload:
 
 ```json
@@ -287,8 +294,8 @@ LD payload:
   "state": "CA",
   "trustedFormCertUrl": "https://cert.trustedform.com/abc123",
   "jornayaLeadId": "01234567-89ab-cdef-0123-456789abcdef",
-  "vendor": "Lead Distributor Name",
-  "sourceName": "Vendor Campaign 42",
+  "vendor": "ldcustom",
+  "sourceName": "GS03RB7W",
   "trackingNumber": "8005551212"
 }
 ```
@@ -309,8 +316,8 @@ curl -X POST "https://tagcontactbridge.ngrok.app/api/inbound/ld/lead" \
     "city": "Los Angeles",
     "state": "CA",
     "trustedFormCertUrl": "https://cert.trustedform.com/abc123",
-    "vendor": "Lead Distributor Name",
-    "sourceName": "Vendor Campaign 42"
+    "vendor": "ldcustom",
+    "sourceName": "GS03RB7W"
   }'
 ```
 
@@ -318,9 +325,10 @@ Route attribution:
 
 - `domain`: forced to `WYNN`
 - `intakeSource`: `ld` or `ld-posting`
+- `routeCampaignKey`: `ld-custom`, `ld-general`, or fallback `ld`
 - `sourceChannel`: `lead-distribution`
 - Logics `SourceName`: `LD Lead` or `LD Posting Lead`
-- Vendor-provided `sourceName`: preserved as `vendorSourceName`
+- `vendorSourceName`: split bucket label for LD Custom/General; raw vendor fields remain in `payloadSnapshot`
 
 ## Route 3: Affiliate Lead Post
 
@@ -532,4 +540,4 @@ Before sending production volume:
 - Send one real test lead per vendor route.
 - Confirm the response includes `accepted: true`, `domain: "WYNN"`, and a `caseId`.
 - Confirm the lead appears in Wynn Logics with the expected route source.
-- Confirm Parallel cadence row has `routeCampaignKey` of `ld` or `affiliate` where applicable.
+- Confirm Parallel cadence row has `routeCampaignKey` of `ld-custom` or `ld-general` for LD split posts, plain `ld` only for unsplit LD fallback, or `affiliate` where applicable.

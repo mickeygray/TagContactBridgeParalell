@@ -25,7 +25,7 @@ const ACTIVE_QUEUE_STATES = Object.freeze([
 // Partition vs ageBucket:
 //   partition  = fresh | non_fresh           (drives queue/UI behavior)
 //   ageBucket  = just_came_in | second_contact | third_contact   (within fresh)
-//              | day2_10 | aged              (within non_fresh)
+//              | day2_10 | day16_30 | aged | dead (within non_fresh)
 //
 // FIFO ordering:
 //   Within a partition, items sort by enteredQueueAt ASC (older first).
@@ -57,7 +57,9 @@ const queueItemSchema = new mongoose.Schema(
         "second_contact",
         "third_contact",
         "day2_10",
+        "day16_30",
         "aged",
+        "dead",
       ],
       required: true,
       index: true,

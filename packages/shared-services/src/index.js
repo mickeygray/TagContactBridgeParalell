@@ -173,6 +173,8 @@ const {
 } = require("./deployOrchestrationService");
 const {
   buildCxCallQueue,
+  buildCxQueueForAgent,
+  buildCxQueuesForAgents,
   buildCxWorkspace,
   listCxPlacedCallsToday,
   executeCxLogicsCreateCase,
@@ -662,6 +664,8 @@ module.exports = {
 
   getCxAgentStateByExtensionId,
   buildCxCallQueue,
+  buildCxQueueForAgent,
+  buildCxQueuesForAgents,
   buildCxCadenceRuntimeSnapshot,
   buildCxCommLog,
   buildCxWorkspace,

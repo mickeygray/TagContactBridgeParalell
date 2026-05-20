@@ -246,6 +246,35 @@ const callLogSchema = new mongoose.Schema(
       error: { type: String, default: null },
       attempts: { type: Number, default: 0 },
     },
+
+    // RingCX-specific identifiers captured at call-placed time for the
+    // CX platform. These power the spot-download path in the call
+    // review dashboard: agentId narrows the `interaction-metadata`
+    // POST so the response stays tiny (typically 1-2 rows for a 2-min
+    // window scoped by agent). agentGroupId is a backup filter.
+    // campaignId / dialGroupId are diagnostic. externId is the
+    // `parallel:DOMAIN:caseId:queueItemId` string we attach at publish
+    // time so RingCX active-calls carry our forensic id through.
+    //
+    // All optional — rows for non-CX platforms (`platform: "ex"`) leave
+    // these null. Stamped by `handleCxCallPlaced` in cxCadenceService
+    // from `queueItem.metadata.rcxVisibility*` (set at publish time by
+    // ringcxLeadServingService).
+    ringcx: {
+      agentId: { type: String, default: null, index: true },
+      agentGroupId: { type: String, default: null },
+      agentUsername: { type: String, default: null },
+      campaignId: { type: String, default: null, index: true },
+      dialGroupId: { type: String, default: null },
+      accountId: { type: String, default: null },
+      externId: { type: String, default: null, index: true },
+      // Populated by the bulk archive / spot-download path once the
+      // interaction-metadata POST returns. Allows direct GET of
+      // recordings/dialogs/{dialogId}/segments/{segmentId} without a
+      // second metadata round-trip.
+      dialogId: { type: String, default: null },
+      segmentIds: { type: [String], default: undefined },
+    },
   },
   { timestamps: true },
 );

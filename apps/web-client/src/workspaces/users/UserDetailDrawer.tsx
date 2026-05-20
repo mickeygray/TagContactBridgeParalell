@@ -24,6 +24,8 @@ import {
 } from "@/lib/api/queries/accounts";
 import type { AccountRecord } from "@/lib/api/types";
 import { formatDateTime, formatRelative, formatNumber } from "@/lib/utils/format";
+import { CallsTodayPanel } from "./CallsTodayPanel";
+import { CaseCallsDrawer } from "./CaseCallsDrawer";
 
 interface UserDetailDrawerProps {
   account: AccountRecord | null;
@@ -58,6 +60,9 @@ export function UserDetailDrawer({
   const callStats = useAccountCallStats(account?.id ?? null);
   const refreshStats = useRefreshAccountCallStats();
   const [window, setWindow] = React.useState<Window>("today");
+  // Per-lead drawer state — opens when an operator clicks a case id
+  // chip on a call row, showing every agent who dialed that lead today.
+  const [caseDrawerId, setCaseDrawerId] = React.useState<number | null>(null);
 
   if (!account) return null;
   const current = account;
@@ -192,6 +197,28 @@ export function UserDetailDrawer({
             </Tabs>
           )}
         </div>
+
+        {/* Per-call review — list of today's individual calls with
+            duration, recording playback, and a case chip that opens the
+            "who else dialed this lead today" drawer. Lives below the
+            rollup so the bucket totals stay the first thing the eye
+            lands on. */}
+        <div className="rounded-lg border border-border p-3">
+          <CallsTodayPanel
+            extensionId={current.extensionId ?? null}
+            domain={current.company || "TAG"}
+            onCaseClick={(caseId) => setCaseDrawerId(caseId)}
+          />
+        </div>
+
+        <CaseCallsDrawer
+          caseId={caseDrawerId}
+          domain={current.company || "TAG"}
+          open={caseDrawerId !== null}
+          onOpenChange={(open) => {
+            if (!open) setCaseDrawerId(null);
+          }}
+        />
 
         <DialogFooter className="flex-row flex-wrap items-center justify-between gap-2 sm:justify-between">
           <div className="flex items-center gap-2">

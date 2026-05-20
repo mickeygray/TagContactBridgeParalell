@@ -904,6 +904,9 @@ function createRingcxVoiceClient(options = {}) {
       query: { product, productId },
     });
   }
+  async function getCallHistory(uii) {
+    return request("GET", adminPath(`callHistory/${pathSegment(uii, "uii")}`));
+  }
   async function dispositionCall(uii, { disposition, callback, callBackDTS, notes, phone } = {}) {
     return request("POST", adminPath(`activeCalls/${uii}/dispositionCall`), {
       query: { disposition, callback, callBackDTS, notes },
@@ -1195,6 +1198,7 @@ function createRingcxVoiceClient(options = {}) {
 
     placeManualCall,
     listActiveCalls,
+    getCallHistory,
     dispositionCall,
     hangupCall,
     addSessionToCall,

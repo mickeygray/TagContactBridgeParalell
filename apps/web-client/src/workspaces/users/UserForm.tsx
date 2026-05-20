@@ -47,6 +47,7 @@ const MANUAL_QUEUE_DEFAULTS = {
   firstTouchEligible: true,
   freshTargetOpen: 15,
   day2to15TargetOpen: 15,
+  day16to30TargetOpen: 5,
   agedTargetOpen: 5,
 };
 
@@ -54,6 +55,7 @@ const NO_LEAD_QUEUE_DEFAULTS = {
   firstTouchEligible: false,
   freshTargetOpen: 0,
   day2to15TargetOpen: 0,
+  day16to30TargetOpen: 0,
   agedTargetOpen: 0,
 };
 
@@ -70,9 +72,12 @@ const baseSchema = z.object({
   ringcxUsername: z.string().optional(),
   stationLabel: z.string().optional(),
   phone: z.string().optional(),
+  cxTotalOpen: z.string().optional(),
+  cxRouteCampaigns: z.string().optional(),
   cxFirstTouchEligible: z.boolean().optional(),
   cxFreshTargetOpen: z.string().optional(),
   cxDay2To15TargetOpen: z.string().optional(),
+  cxDay16To30TargetOpen: z.string().optional(),
   cxAgedTargetOpen: z.string().optional(),
   logicsUserId: z.string().optional(),
   logicsDisplayName: z.string().optional(),
@@ -164,6 +169,20 @@ export function UserForm({
     initial?.role === "admin" || initial?.audience === "admin"
       ? NO_LEAD_QUEUE_DEFAULTS
       : MANUAL_QUEUE_DEFAULTS;
+  const initialLegacyQueueTotal =
+    Number(initial?.cxQueuePolicy?.fresh?.targetOpen || 0) +
+    Number(initial?.cxQueuePolicy?.day2to15?.targetOpen || 0) +
+    Number(initial?.cxQueuePolicy?.day16to30?.targetOpen || 0) +
+    Number(initial?.cxQueuePolicy?.aged?.targetOpen || 0);
+  const initialQueueTotal =
+    initial?.cxQueuePolicy?.totalOpen != null
+      ? Number(initial.cxQueuePolicy.totalOpen) || 0
+      : (initialLegacyQueueTotal > 0
+        ? initialLegacyQueueTotal
+        : initialCxQueueDefaults.freshTargetOpen +
+          initialCxQueueDefaults.day2to15TargetOpen +
+          initialCxQueueDefaults.day16to30TargetOpen +
+          initialCxQueueDefaults.agedTargetOpen);
 
   const form = useForm<UserFormValues>({
     resolver: zodResolver(baseSchema),
@@ -183,6 +202,10 @@ export function UserForm({
       ringcxUsername: initialRingcxUsername,
       stationLabel: initial?.stationLabel ?? "",
       phone: initial?.phone ?? "",
+      cxTotalOpen: String(initialQueueTotal),
+      cxRouteCampaigns: Array.isArray(initial?.cxQueuePolicy?.routeCampaigns)
+        ? initial.cxQueuePolicy.routeCampaigns.join(", ")
+        : "",
       cxFirstTouchEligible:
         initial?.cxQueuePolicy?.fresh?.firstTouchEligible ??
         initial?.cxQueuePolicy?.fresh?.eligible ??
@@ -195,6 +218,10 @@ export function UserForm({
         initial?.cxQueuePolicy?.day2to15?.targetOpen != null
           ? String(initial.cxQueuePolicy?.day2to15?.targetOpen)
           : String(initialCxQueueDefaults.day2to15TargetOpen),
+      cxDay16To30TargetOpen:
+        initial?.cxQueuePolicy?.day16to30?.targetOpen != null
+          ? String(initial.cxQueuePolicy?.day16to30?.targetOpen)
+          : String(initialCxQueueDefaults.day16to30TargetOpen),
       cxAgedTargetOpen:
         initial?.cxQueuePolicy?.aged?.targetOpen != null
           ? String(initial.cxQueuePolicy?.aged?.targetOpen)
@@ -223,12 +250,14 @@ export function UserForm({
   const role = form.watch("role");
   const cxFreshTargetOpen = form.watch("cxFreshTargetOpen");
   const cxDay2To15TargetOpen = form.watch("cxDay2To15TargetOpen");
+  const cxDay16To30TargetOpen = form.watch("cxDay16To30TargetOpen");
   const cxAgedTargetOpen = form.watch("cxAgedTargetOpen");
   const extensionId = form.watch("extensionId") || "";
   const roleDef = ROLE_OPTIONS.find((r) => r.value === role);
-  const cxLeadListSize =
+  const cxLegacyLeadListSize =
     Number(parseNonNegativeNumber(cxFreshTargetOpen) || 0) +
     Number(parseNonNegativeNumber(cxDay2To15TargetOpen) || 0) +
+    Number(parseNonNegativeNumber(cxDay16To30TargetOpen) || 0) +
     Number(parseNonNegativeNumber(cxAgedTargetOpen) || 0);
   const extensions = useUnassignedExtensions(company);
   const resolveIdentity = useResolveAccountIdentity();
@@ -336,12 +365,19 @@ export function UserForm({
       const audience = roleDef?.audience ?? "user";
       const freshTargetOpen = parseNonNegativeNumber(values.cxFreshTargetOpen) ?? 0;
       const day2to15TargetOpen = parseNonNegativeNumber(values.cxDay2To15TargetOpen) ?? 0;
+      const day16to30TargetOpen = parseNonNegativeNumber(values.cxDay16To30TargetOpen) ?? 0;
       const agedTargetOpen = parseNonNegativeNumber(values.cxAgedTargetOpen) ?? 0;
+      const totalOpen =
+        parseNonNegativeNumber(values.cxTotalOpen) ??
+        freshTargetOpen + day2to15TargetOpen + day16to30TargetOpen + agedTargetOpen;
+      const routeCampaigns = parseCsvArray(values.cxRouteCampaigns);
       const firstTouchEligible = Boolean(values.cxFirstTouchEligible);
       const queueEnabled =
         firstTouchEligible
+        || totalOpen > 0
         || freshTargetOpen > 0
         || day2to15TargetOpen > 0
+        || day16to30TargetOpen > 0
         || agedTargetOpen > 0;
       const payload: CreateAccountInput = {
         email: values.email.trim().toLowerCase(),
@@ -357,6 +393,8 @@ export function UserForm({
         cxQueuePolicy: {
           ...(initial?.cxQueuePolicy || {}),
           enabled: queueEnabled,
+          totalOpen,
+          routeCampaigns: routeCampaigns.length > 0 ? routeCampaigns : null,
           fresh: {
             ...(initial?.cxQueuePolicy?.fresh || {}),
             eligible: firstTouchEligible || freshTargetOpen > 0,
@@ -366,6 +404,10 @@ export function UserForm({
           day2to15: {
             ...(initial?.cxQueuePolicy?.day2to15 || {}),
             targetOpen: day2to15TargetOpen,
+          },
+          day16to30: {
+            ...(initial?.cxQueuePolicy?.day16to30 || {}),
+            targetOpen: day16to30TargetOpen,
           },
           aged: {
             ...(initial?.cxQueuePolicy?.aged || {}),
@@ -569,14 +611,15 @@ export function UserForm({
         </Select>
       </Field>
 
-      <div className="grid grid-cols-1 gap-4 rounded-md border border-border/60 bg-muted/20 p-3 md:grid-cols-5">
+      <div className="grid grid-cols-1 gap-4 rounded-md border border-border/60 bg-muted/20 p-3 md:grid-cols-6">
         <Field label="List size">
-          <div
-            className="flex h-10 items-center rounded-md border border-input bg-background px-3 text-sm font-semibold"
-            title="Green + blue + red"
-          >
-            {cxLeadListSize}
-          </div>
+          <Input
+            type="number"
+            min={0}
+            step={1}
+            title={`Priority-stack budget. Legacy mix total: ${cxLegacyLeadListSize}`}
+            {...form.register("cxTotalOpen")}
+          />
         </Field>
         <Field label="0 contact">
           <label className="flex h-10 items-center gap-2 rounded-md border border-input bg-background px-3 text-sm">
@@ -587,6 +630,12 @@ export function UserForm({
             />
             Enabled
           </label>
+        </Field>
+        <Field label="Green routes" hint="Comma-separated. Blue/yellow/red are shared.">
+          <Input
+            placeholder="ld-custom, ld-general"
+            {...form.register("cxRouteCampaigns")}
+          />
         </Field>
         <Field label="Green count">
           <Input
@@ -602,6 +651,14 @@ export function UserForm({
             min={0}
             step={1}
             {...form.register("cxDay2To15TargetOpen")}
+          />
+        </Field>
+        <Field label="Yellow count">
+          <Input
+            type="number"
+            min={0}
+            step={1}
+            {...form.register("cxDay16To30TargetOpen")}
           />
         </Field>
         <Field label="Red count">

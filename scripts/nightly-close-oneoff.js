@@ -11,6 +11,7 @@
 //   node scripts/nightly-close-oneoff.js --date 2026-04-30
 //   node scripts/nightly-close-oneoff.js --domains TAG,WYNN
 //   node scripts/nightly-close-oneoff.js --to mgray@taxadvocategroup.com
+//   node scripts/nightly-close-oneoff.js --date 2026-05-18 --to mgray@taxadvocategroup.com --skip-final-close
 //   node scripts/nightly-close-oneoff.js --domain TAG        # legacy single-domain mode (one set of emails)
 
 require("dotenv").config({
@@ -46,6 +47,10 @@ function readFlag(argv, name) {
   return null;
 }
 
+function hasFlag(argv, name) {
+  return argv.includes(name);
+}
+
 function yesterdayInTz(timeZone = "America/Los_Angeles") {
   const now = new Date(Date.now() - 24 * 60 * 60 * 1000);
   return new Intl.DateTimeFormat("en-CA", {
@@ -77,12 +82,13 @@ function logResult(label, result) {
   if (result.skipped) logKv(`${label}.skipped`, result.reason || "yes");
 }
 
-async function runGrouped({ domains, dateKey, to, vendorDomain }) {
+async function runGrouped({ domains, dateKey, to, vendorDomain, skipFinalClose }) {
   logHeader(`grouped close — ${domains.join(" + ")} ${dateKey}`);
   const opts = {
     date: dateKey,
     vendorDomain,
     sendDomain: domains.includes("TAG") ? "TAG" : domains[0],
+    skipFinalClosePass: Boolean(skipFinalClose),
   };
   if (to) {
     opts.financialEmail = { recipients: [to] };
@@ -100,6 +106,7 @@ async function runGrouped({ domains, dateKey, to, vendorDomain }) {
   logKv("payload.openServiceAlerts", out.payload.openServiceAlerts.length);
   logKv("payload.vendor.rows", (out.payload.vendorReport.rows || []).length);
   logKv("payload.dealsByCase", (out.payload.dealsByCase || []).length);
+  logKv("finalClose.skipped", Boolean(skipFinalClose));
   if (out.payload.attributionRefresh) {
     const ar = out.payload.attributionRefresh;
     logKv("attribution.casesWalked", ar.casesWalked || 0);
@@ -192,10 +199,12 @@ async function main() {
   const dateKey = readFlag(argv, "--date") || yesterdayInTz();
   const to = readFlag(argv, "--to");
   const vendorDomain = (readFlag(argv, "--vendor-domain") || "WYNN").toUpperCase();
+  const skipFinalClose = hasFlag(argv, "--skip-final-close");
 
   logHeader(`nightly-close-oneoff`);
   logKv("date", dateKey);
   logKv("recipient override", to || "(use development pool)");
+  logKv("skip final close", skipFinalClose ? "yes" : "no");
 
   await connectMongo(getSharedConfig());
 
@@ -203,7 +212,7 @@ async function main() {
     if (single) {
       await runSingleDomain({ domain: single.toUpperCase(), dateKey, to });
     } else {
-      await runGrouped({ domains, dateKey, to, vendorDomain });
+      await runGrouped({ domains, dateKey, to, vendorDomain, skipFinalClose });
     }
     logHeader("Done");
   } finally {

@@ -1287,6 +1287,44 @@ const STT_DOMAIN_PRIMER = [
   "FTB, NYS DTF, BOE, CDTFA.",
 ].join(" ");
 
+// Whisper's well-known failure mode: when the audio is low-signal
+// (silence, mic noise, a cough, a too-short clip), the model hallucinates
+// by echoing the `prompt` parameter back as the transcription. Our
+// primer is tax-jargon-heavy, so the echo manifests as "Tax Group, Tax
+// Advocate Group, ... CP14, CP501, ..." appearing as if the rep said it.
+//
+// Detection: normalize both strings (lowercase + alphanumerics + spaces),
+// slide a 20-char window across the transcript and count how many
+// windows appear inside the primer. If a large fraction match, treat
+// the transcript as an echo and discard it (returns empty `text`).
+//
+// We deliberately allow legitimate single primer phrases — a rep saying
+// "I'll file a 433-A" wouldn't trip a 40%+ window match because most of
+// the surrounding speech is non-primer English. The trigger requires
+// most of the utterance to be primer-shaped.
+function normalizeForPrimerCheck(value) {
+  return String(value || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9 ]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+const NORMALIZED_PRIMER = normalizeForPrimerCheck(STT_DOMAIN_PRIMER);
+
+function transcriptLooksLikePrimerEcho(transcriptText) {
+  const t = normalizeForPrimerCheck(transcriptText);
+  if (t.length < 30) return false;
+  const windowSize = 20;
+  const total = t.length - windowSize + 1;
+  if (total <= 0) return false;
+  let matched = 0;
+  for (let i = 0; i < total; i++) {
+    if (NORMALIZED_PRIMER.includes(t.slice(i, i + windowSize))) matched++;
+  }
+  return matched / total > 0.4;
+}
+
 // In-memory Whisper transcription for the trainer mic loop. The hourly
 // hygiene path (transcriptionScoringService) writes recordings to disk
 // first; here the audio comes straight from a browser MediaRecorder
@@ -1426,6 +1464,20 @@ async function transcribeSalesTrainerAudio({
     text = data.segments.map((s) => String(s.text || "").trim()).join(" ").trim();
   }
   if (!text) text = String(data.text || "").trim();
+
+  // Guard against Whisper echoing the domain primer back as if the rep
+  // said it. If the transcript is overwhelmingly primer-shaped, drop it
+  // — the caller treats empty text as "no speech detected" and prompts
+  // the rep to try again. Only runs when the primer was actually used
+  // for this request (skipped for diarize models which don't take a
+  // prompt parameter at all).
+  let primerEchoSuppressed = false;
+  if (text && includeDomainPrimer && !isDiarizeModel) {
+    if (transcriptLooksLikePrimerEcho(text)) {
+      primerEchoSuppressed = true;
+      text = "";
+    }
+  }
   const segments = Array.isArray(data.segments)
     ? data.segments.map((segment) => ({
       id: segment.id || null,
@@ -1443,9 +1495,10 @@ async function transcribeSalesTrainerAudio({
     durationSec: typeof data.duration === "number" ? data.duration : null,
     model: sttModel,
     responseFormat: effectiveResponseFormat,
-    segments,
+    segments: primerEchoSuppressed ? [] : segments,
     usage: data.usage || null,
     byteLength: buffer.length,
+    primerEchoSuppressed,
   };
 }
 

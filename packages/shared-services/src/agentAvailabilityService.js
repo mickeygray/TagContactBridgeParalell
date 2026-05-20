@@ -13,6 +13,7 @@ const DAILY_STAT_KEYS = Object.freeze([
   "hot",
   "day1",
   "day10",
+  "day16to30",
   "aged",
   "totalCalls",
   "cxCalls",
@@ -428,10 +429,43 @@ function isCxRoutingEnabled(snapshot = {}, existingRouting = null) {
   );
 }
 
+function normalizePhone(value) {
+  const digits = String(value || "").replace(/\D+/g, "");
+  if (digits.length === 11 && digits.startsWith("1")) return digits.slice(1);
+  if (digits.length > 10) return digits.slice(-10);
+  return digits;
+}
+
+function isLikelyCxBridgeExCall(currentCall = {}) {
+  const channel = String(currentCall.channel || "").trim().toLowerCase();
+  const direction = String(currentCall.direction || "").trim().toLowerCase();
+  if (channel !== "ex" || direction !== "inbound") return false;
+
+  const fromName = String(
+    currentCall.fromName ||
+      currentCall.callerName ||
+      currentCall.name ||
+      "",
+  ).trim().toLowerCase();
+  const fromPhone = normalizePhone(
+    currentCall.from ||
+      currentCall.ani ||
+      currentCall.sourcePhone ||
+      currentCall.callerId,
+  );
+  const namedLikeBridge =
+    fromName.includes("tax group") ||
+    fromName.includes("tax advocate") ||
+    fromName.includes("wynn tax");
+  const numberLooksLikeBridge = fromPhone.startsWith("877") || fromPhone.startsWith("888");
+  return namedLikeBridge && numberLooksLikeBridge;
+}
+
 function hasActiveExCall(snapshot = {}) {
   const currentCall = snapshot.currentCall && typeof snapshot.currentCall === "object"
     ? snapshot.currentCall
     : {};
+  if (isLikelyCxBridgeExCall(currentCall)) return false;
   const channel = String(currentCall.channel || "").trim().toLowerCase();
   if (channel !== "ex") return false;
   const exTelephonyStatus = String(snapshot.exTelephonyStatus || "").trim().toLowerCase();
@@ -448,6 +482,10 @@ function hasActiveExCall(snapshot = {}) {
 }
 
 function isExBusySnapshot(snapshot = {}) {
+  const currentCall = snapshot.currentCall && typeof snapshot.currentCall === "object"
+    ? snapshot.currentCall
+    : {};
+  if (isLikelyCxBridgeExCall(currentCall)) return false;
   const exTelephonyStatus = String(snapshot.exTelephonyStatus || "").trim().toLowerCase();
   return EX_BUSY_TELEPHONY_STATUSES.has(exTelephonyStatus)
     || hasActiveExCall(snapshot);
@@ -481,7 +519,8 @@ function resolveCurrentCallStartAt(snapshot = {}) {
 }
 
 function hasLongActiveCall(snapshot = {}, now = new Date()) {
-  if (!hasActiveExCall(snapshot) && !hasCxActiveCall(snapshot)) return false;
+  const exCallCountsForServing = isExLeadServingGateEnabled() && hasActiveExCall(snapshot);
+  if (!exCallCountsForServing && !hasCxActiveCall(snapshot)) return false;
   const startedAt = resolveCurrentCallStartAt(snapshot);
   if (!startedAt) return false;
   const nowDate = now instanceof Date ? now : new Date(now);
@@ -709,6 +748,20 @@ function deriveTelephonyActivityState(snapshot = {}) {
 }
 
 function normalizeSnapshot(snapshot = {}, existing = null) {
+  const rawCurrentCall = snapshot.currentCall && typeof snapshot.currentCall === "object"
+    ? snapshot.currentCall
+    : {};
+  const suppressBridgeCall = isLikelyCxBridgeExCall(rawCurrentCall);
+  const status = suppressBridgeCall ? "available" : snapshot.status || "offline";
+  const currentCall = suppressBridgeCall ? {} : rawCurrentCall;
+  const activePlatform = suppressBridgeCall ? "none" : snapshot.activePlatform || "none";
+  const activitySnapshot = {
+    ...snapshot,
+    status,
+    currentCall,
+    activePlatform,
+  };
+
   return {
     extensionId: snapshot.extensionId,
     cxAgentId: snapshot.cxAgentId || null,
@@ -716,13 +769,13 @@ function normalizeSnapshot(snapshot = {}, existing = null) {
     name: snapshot.name,
     company: snapshot.company || "TAG",
     pin: snapshot.pin || null,
-    status: snapshot.status || "offline",
+    status,
     exTelephonyStatus: snapshot.exTelephonyStatus || "NoCall",
     exPresenceStatus: snapshot.exPresenceStatus || "Offline",
-    currentCall: snapshot.currentCall || {},
-    activePlatform: snapshot.activePlatform || "none",
+    currentCall,
+    activePlatform,
     activityState: snapshot.activityState
-      || deriveActivityState(snapshot, existing?.activityState),
+      || deriveActivityState(activitySnapshot, existing?.activityState),
     lastActivityAt: snapshot.lastActivityAt || existing?.lastActivityAt || null,
     lastStatusChange: snapshot.lastStatusChange || new Date(),
     lastEventReceived: snapshot.lastEventReceived || null,
@@ -948,6 +1001,7 @@ module.exports = {
   getPauseReleaseDelayMs,
   hasActiveExCall,
   incrementDailyStats,
+  isLikelyCxBridgeExCall,
   isExLeadServingGateEnabled,
   isExBusySnapshot,
   isCxWorkspacePresenceActive,

@@ -2,19 +2,22 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
   ArrowLeft,
-  Award,
   CheckCircle2,
   Flame,
+  Heart,
+  Lightbulb,
   Loader2,
   LogOut,
   MessageSquare,
   Mic,
   Play,
+  Quote,
   RefreshCw,
   Send,
   ShieldCheck,
   Sparkles,
   Square,
+  Target,
   Trophy,
   Volume2,
 } from "lucide-react";
@@ -47,6 +50,7 @@ import {
   processTrainerTaggedResponse,
   type ParsedTrainerResponse,
   type UiHealthPayload,
+  normalizeScorecard,
   type UiPhasePayload,
   type UiScorecardPayload,
 } from "./uiPayloads";
@@ -604,49 +608,215 @@ function actionCommand(action: string) {
   }
 }
 
+function extractStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((entry) => (typeof entry === "string" ? entry.trim() : ""))
+    .filter((entry) => entry.length > 0);
+}
+
+function SectionHeading({
+  icon: Icon,
+  label,
+}: {
+  icon: typeof Trophy;
+  label: string;
+}) {
+  return (
+    <div className="mb-2 flex items-center gap-2 text-xs font-semibold uppercase text-muted-foreground">
+      <Icon className="h-3.5 w-3.5" />
+      {label}
+    </div>
+  );
+}
+
+function QuoteBlock({
+  tone,
+  words,
+  attribution,
+  detail,
+}: {
+  tone: "good" | "teach";
+  words?: string;
+  attribution?: string;
+  detail?: string;
+}) {
+  if (!words && !detail) return null;
+  return (
+    <div
+      className={cn(
+        "rounded-md border px-3 py-2 text-xs leading-relaxed",
+        tone === "good"
+          ? "border-success/30 bg-success/10"
+          : "border-amber-500/30 bg-amber-500/10",
+      )}
+    >
+      {attribution ? (
+        <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+          {attribution}
+        </div>
+      ) : null}
+      {words ? <div className="text-foreground">&ldquo;{words}&rdquo;</div> : null}
+      {detail ? <div className="mt-1 text-muted-foreground">{detail}</div> : null}
+    </div>
+  );
+}
+
 function ScorecardPanel({
   scorecard,
+  profile,
   onAction,
 }: {
   scorecard: UiScorecardPayload;
+  profile: Record<string, unknown> | null;
   onAction: (command: string) => void;
 }) {
-  const actions = scorecard.available_actions?.length
-    ? scorecard.available_actions
+  const flat = normalizeScorecard(scorecard);
+  const actions = flat.available_actions?.length
+    ? flat.available_actions
     : ["go_again", "switch", "reflect"];
-  const trustPhases = Object.entries(scorecard.trust_trajectory || {}).filter(
+  const trustPhases = Object.entries(flat.trust_trajectory || {}).filter(
     ([, value]) => value && typeof value === "object" && "start" in (value as Record<string, unknown>),
   );
+
+  // Pain points come from the caller profile, not the scorecard JSON —
+  // they're what the simulator's character is privately carrying. Showing
+  // them post-call lets the rep see what they could have surfaced.
+  const painPoints = extractStringArray(profile?.painPoints);
+  const taxIssues = extractStringArray(profile?.taxIssues);
+  const callerSummary = flat.caller_summary || null;
+  const summaryOneLine =
+    callerSummary?.one_line ||
+    callerSummary?.demographics_one_line ||
+    null;
+
+  const strongestOverall = flat.strongest_overall_moment || null;
+  const weakestOverall = flat.weakest_overall_moment || null;
+  const hasOverallQuotes = Boolean(
+    strongestOverall?.agent_words || weakestOverall?.agent_words,
+  );
+
+  const narrativeBits = [flat.mood_arc, flat.inflection_moment].filter(
+    (value): value is string => Boolean(value && value.trim()),
+  );
+
   return (
     <div className="space-y-4 p-4">
+      {/* === HEADER: score + outcome + caller one-liner === */}
       <div className="rounded-md border border-primary/30 bg-primary/5 p-4">
         <div className="flex items-start justify-between gap-3">
           <div>
-            <div className="flex items-center gap-2 text-xs font-semibold uppercase text-muted-foreground">
-              <Trophy className="h-3.5 w-3.5" />
-              Scorecard
+            <SectionHeading icon={Trophy} label="Scorecard" />
+            <div className="mt-2 text-4xl font-semibold">
+              {flat.overall_score ?? "-"}
             </div>
-            <div className="mt-2 text-4xl font-semibold">{scorecard.overall_score ?? "-"}</div>
           </div>
           <div className="space-y-2 text-right">
-            <StatusPill tone={scorecard.clean_call ? "warning" : "info"}>
-              {scorecard.clean_call ? "Clean Call" : formatOutcome(scorecard.outcome)}
+            <StatusPill tone={flat.clean_call ? "warning" : "info"}>
+              {flat.clean_call ? "Clean Call" : formatOutcome(flat.outcome)}
             </StatusPill>
             <div className="text-xs text-muted-foreground">
-              {scorecard.final_mistakes ?? 0} mistakes
+              {flat.final_mistakes ?? 0} mistakes
             </div>
           </div>
         </div>
-        {scorecard.caller_summary?.one_line ? (
-          <div className="mt-3 text-sm leading-relaxed">{scorecard.caller_summary.one_line}</div>
+        {summaryOneLine ? (
+          <div className="mt-3 text-sm leading-relaxed">{summaryOneLine}</div>
+        ) : null}
+        {flat.termination_reason ? (
+          <div className="mt-2 text-xs text-destructive">
+            Ended early: {flat.termination_reason}
+          </div>
         ) : null}
       </div>
 
+      {/* === COACHING SUMMARY: 1-3 sentence narrative review === */}
+      {flat.coaching_summary ? (
+        <div className="rounded-md border border-border bg-muted/30 p-3 text-sm leading-relaxed">
+          <SectionHeading icon={MessageSquare} label="How the call went" />
+          {flat.coaching_summary}
+        </div>
+      ) : null}
+
+      {/* === MOOD ARC + INFLECTION MOMENT === */}
+      {narrativeBits.length ? (
+        <div className="rounded-md border border-border p-3 text-xs leading-relaxed">
+          <SectionHeading icon={Sparkles} label="Mood + inflection" />
+          <div className="space-y-1">
+            {flat.mood_arc ? (
+              <div>
+                <span className="font-semibold">Mood arc: </span>
+                <span className="text-muted-foreground">{flat.mood_arc}</span>
+              </div>
+            ) : null}
+            {flat.inflection_moment ? (
+              <div>
+                <span className="font-semibold">Pivot: </span>
+                <span className="text-muted-foreground">{flat.inflection_moment}</span>
+              </div>
+            ) : null}
+          </div>
+        </div>
+      ) : null}
+
+      {/* === CALLER PAIN POINTS (from profile) === */}
+      {painPoints.length || taxIssues.length ? (
+        <div className="rounded-md border border-border p-3 text-xs leading-relaxed">
+          <SectionHeading icon={Heart} label="What the caller was carrying" />
+          {painPoints.length ? (
+            <div className="mb-2">
+              <div className="mb-1 font-semibold">Pain points</div>
+              <ul className="list-disc space-y-0.5 pl-4 text-muted-foreground">
+                {painPoints.map((point, index) => (
+                  <li key={`pain-${index}`}>{point}</li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
+          {taxIssues.length ? (
+            <div>
+              <div className="mb-1 font-semibold">Tax issues in play</div>
+              <ul className="list-disc space-y-0.5 pl-4 text-muted-foreground">
+                {taxIssues.map((issue, index) => (
+                  <li key={`issue-${index}`}>{issue}</li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+
+      {/* === OVERALL BEST + WHERE YOU DIVERGED === */}
+      {hasOverallQuotes ? (
+        <div className="space-y-2">
+          <SectionHeading icon={Quote} label="Key moments" />
+          <QuoteBlock
+            tone="good"
+            attribution={
+              strongestOverall?.principle_applied
+                ? `Strongest move · ${strongestOverall.principle_applied}`
+                : "Strongest move"
+            }
+            words={strongestOverall?.agent_words}
+            detail={strongestOverall?.why_it_landed}
+          />
+          <QuoteBlock
+            tone="teach"
+            attribution={
+              weakestOverall?.principle
+                ? `Could have been better · ${weakestOverall.principle}`
+                : "Could have been better"
+            }
+            words={weakestOverall?.agent_words}
+            detail={weakestOverall?.stronger_alternative}
+          />
+        </div>
+      ) : null}
+
+      {/* === TRUST TRAJECTORY === */}
       {trustPhases.length ? (
         <div className="rounded-md border border-border p-3">
-          <div className="mb-2 text-xs font-semibold uppercase text-muted-foreground">
-            Trust movement
-          </div>
+          <SectionHeading icon={ShieldCheck} label="Trust movement" />
           <div className="grid gap-2">
             {trustPhases.map(([key, value]) => {
               const point = value as { start?: number; end?: number };
@@ -663,7 +833,8 @@ function ScorecardPanel({
         </div>
       ) : null}
 
-      {scorecard.phase_breakdowns?.map((phase) => (
+      {/* === PHASE BREAKDOWNS === */}
+      {flat.phase_breakdowns?.map((phase) => (
         <div key={`phase-${phase.phase}`} className="space-y-2 rounded-md border border-border p-3">
           <div className="flex items-center justify-between">
             <div className="text-sm font-semibold">Phase {phase.phase}</div>
@@ -671,36 +842,124 @@ function ScorecardPanel({
               {phase.score ?? "-"}
             </StatusPill>
           </div>
-          <MomentBlock
-            label="Strongest"
+          {phase.objections ? (
+            <div className="grid grid-cols-3 gap-1 text-[10px] uppercase tracking-wide text-muted-foreground">
+              <div>
+                <span className="font-semibold text-foreground">
+                  {phase.objections.handled_well ?? 0}
+                </span>{" "}
+                well
+              </div>
+              <div>
+                <span className="font-semibold text-foreground">
+                  {phase.objections.partial ?? 0}
+                </span>{" "}
+                partial
+              </div>
+              <div>
+                <span className="font-semibold text-foreground">
+                  {phase.objections.poor ?? 0}
+                </span>{" "}
+                missed
+              </div>
+            </div>
+          ) : null}
+          <QuoteBlock
             tone="good"
+            attribution="Strongest"
             words={phase.strongest_moment?.agent_words}
             detail={phase.strongest_moment?.why_it_landed}
           />
-          <MomentBlock
-            label="Stronger"
+          <QuoteBlock
             tone="teach"
+            attribution={
+              phase.weakest_moment?.principle
+                ? `Stronger · ${phase.weakest_moment.principle}`
+                : "Stronger"
+            }
             words={phase.weakest_moment?.agent_words}
             detail={
               phase.weakest_moment?.stronger_alternative ||
               phase.weakest_moment?.principle
             }
           />
+          {phase.recovery_moment?.agent_words ? (
+            <QuoteBlock
+              tone="good"
+              attribution={
+                phase.recovery_moment.trust_dipped_to != null
+                  ? `Recovery · trust ${phase.recovery_moment.trust_dipped_to} → ${phase.recovery_moment.trust_recovered_to ?? "-"}`
+                  : "Recovery"
+              }
+              words={phase.recovery_moment.agent_words}
+              detail={phase.recovery_moment.why_it_worked}
+            />
+          ) : null}
+          {phase.vulnerability_handling ? (
+            <div className="rounded-md border border-border bg-muted/40 px-3 py-2 text-xs">
+              <span className="font-semibold">
+                Vulnerability handled {phase.vulnerability_handling.handled || "?"}
+              </span>
+              {phase.vulnerability_handling.what_it_taught ? (
+                <span className="ml-1 text-muted-foreground">
+                  — {phase.vulnerability_handling.what_it_taught}
+                </span>
+              ) : null}
+            </div>
+          ) : null}
         </div>
       ))}
 
-      {scorecard.ethical_flags?.length ? (
+      {/* === VULNERABILITY MOMENT (call-level) === */}
+      {flat.vulnerability_moment?.caller_words ? (
+        <div className="rounded-md border border-border bg-muted/30 p-3">
+          <SectionHeading icon={Heart} label="Vulnerability moment" />
+          <div className="text-xs leading-relaxed">
+            <div className="text-muted-foreground">Caller said:</div>
+            <div className="mt-0.5">
+              &ldquo;{flat.vulnerability_moment.caller_words}&rdquo;
+            </div>
+            {flat.vulnerability_moment.agent_response ? (
+              <>
+                <div className="mt-2 text-muted-foreground">You said:</div>
+                <div className="mt-0.5">
+                  &ldquo;{flat.vulnerability_moment.agent_response}&rdquo;
+                </div>
+              </>
+            ) : null}
+            {typeof flat.vulnerability_moment.trust_impact === "number" ? (
+              <div className="mt-2 text-muted-foreground">
+                Trust impact:{" "}
+                <span
+                  className={cn(
+                    "font-semibold",
+                    flat.vulnerability_moment.trust_impact >= 0
+                      ? "text-success"
+                      : "text-destructive",
+                  )}
+                >
+                  {flat.vulnerability_moment.trust_impact >= 0 ? "+" : ""}
+                  {flat.vulnerability_moment.trust_impact}
+                </span>
+              </div>
+            ) : null}
+          </div>
+        </div>
+      ) : null}
+
+      {/* === ETHICAL FLAGS === */}
+      {flat.ethical_flags?.length ? (
         <div className="rounded-md border border-destructive/40 bg-destructive/10 p-3">
           <div className="mb-2 flex items-center gap-2 text-sm font-semibold text-destructive">
             <AlertTriangle className="h-4 w-4" />
             Ethical flags
           </div>
           <div className="space-y-2 text-xs">
-            {scorecard.ethical_flags.map((flag, index) => (
+            {flat.ethical_flags.map((flag, index) => (
               <div key={`${flag.principle_crossed}-${index}`}>
                 <div className="font-medium">{flag.principle_crossed || "Flag"}</div>
                 {flag.agent_words ? (
-                  <div className="text-muted-foreground">"{flag.agent_words}"</div>
+                  <div className="text-muted-foreground">&ldquo;{flag.agent_words}&rdquo;</div>
                 ) : null}
               </div>
             ))}
@@ -708,28 +967,43 @@ function ScorecardPanel({
         </div>
       ) : null}
 
-      {scorecard.patterns?.length ? (
+      {/* === PATTERNS (repeated misses) === */}
+      {flat.patterns?.length ? (
         <div className="space-y-2">
-          <div className="text-xs font-semibold uppercase text-muted-foreground">Patterns</div>
-          {scorecard.patterns.map((pattern, index) => (
-            <div key={`${pattern.principle}-${index}`} className="rounded-md border border-border p-3 text-xs">
-              <div className="font-semibold">{pattern.principle || "Pattern"}</div>
-              {pattern.the_fix ? <div className="mt-1 text-muted-foreground">{pattern.the_fix}</div> : null}
+          <SectionHeading icon={Target} label="Patterns to watch" />
+          {flat.patterns.map((pattern, index) => (
+            <div
+              key={`${pattern.principle}-${index}`}
+              className="rounded-md border border-border p-3 text-xs"
+            >
+              <div className="font-semibold">
+                {pattern.principle || "Pattern"}
+                {typeof pattern.instances_count === "number" ? (
+                  <span className="ml-1 font-normal text-muted-foreground">
+                    ({pattern.instances_count}×)
+                  </span>
+                ) : null}
+              </div>
+              {pattern.the_fix ? (
+                <div className="mt-1 text-muted-foreground">{pattern.the_fix}</div>
+              ) : null}
             </div>
           ))}
         </div>
       ) : null}
 
-      {scorecard.drill_for_next_call ? (
+      {/* === NEXT DRILL === */}
+      {flat.drill_for_next_call ? (
         <div className="rounded-md border border-success/30 bg-success/10 p-3 text-sm">
           <div className="mb-1 flex items-center gap-2 text-xs font-semibold uppercase text-muted-foreground">
-            <Award className="h-3.5 w-3.5" />
+            <Lightbulb className="h-3.5 w-3.5" />
             Next drill
           </div>
-          {scorecard.drill_for_next_call}
+          {flat.drill_for_next_call}
         </div>
       ) : null}
 
+      {/* === ACTIONS === */}
       <div className="grid grid-cols-3 gap-2">
         {actions.map((action) => (
           <Button
@@ -762,6 +1036,7 @@ function SidePanel({
   health,
   phaseNotes,
   scorecard,
+  profile,
   countdown,
   coach,
   onCommand,
@@ -769,15 +1044,20 @@ function SidePanel({
   health: HealthState;
   phaseNotes: UiPhasePayload | null;
   scorecard: UiScorecardPayload | null;
+  profile: Record<string, unknown> | null;
   countdown: number | null;
   coach: TrainerCoachPanel | null;
   onCommand: (command: string) => void;
 }) {
   return (
-    <aside className="flex min-h-[640px] flex-col rounded-lg border border-border bg-card">
+    <aside className="flex min-h-[640px] flex-col overflow-y-auto rounded-lg border border-border bg-card">
       <HealthBar health={health} />
       {scorecard ? (
-        <ScorecardPanel scorecard={scorecard} onAction={onCommand} />
+        <ScorecardPanel
+          scorecard={scorecard}
+          profile={profile}
+          onAction={onCommand}
+        />
       ) : phaseNotes ? (
         <PhaseNotesCard notes={phaseNotes} countdown={countdown} onCommand={onCommand} />
       ) : (
@@ -2283,6 +2563,7 @@ export function SalesTrainerWorkspace() {
             health={health}
             phaseNotes={phaseNotes}
             scorecard={scorecard}
+            profile={profile}
             countdown={countdown}
             coach={coach}
             onCommand={(command) => void sendCommand(command)}

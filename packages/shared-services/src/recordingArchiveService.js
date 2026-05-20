@@ -367,6 +367,62 @@ function pickBestSegmentForCallLog(segments = [], callLog = {}) {
   return [...candidates].sort((a, b) => score(b) - score(a))[0];
 }
 
+function cloneRingcxSnapshot(value, depth = 0) {
+  if (value == null) return value;
+  if (depth > 6) return "[depth-limit]";
+  if (value instanceof Date) return value.toISOString();
+  if (Array.isArray(value)) {
+    return value.slice(0, 80).map((item) => cloneRingcxSnapshot(item, depth + 1));
+  }
+  if (typeof value === "object") {
+    const out = {};
+    for (const [key, child] of Object.entries(value).slice(0, 160)) {
+      out[key] = cloneRingcxSnapshot(child, depth + 1);
+    }
+    return out;
+  }
+  if (typeof value === "string") {
+    return value.length > 4000 ? `${value.slice(0, 4000)}...[truncated]` : value;
+  }
+  return value;
+}
+
+function extractSegmentsFromCallHistory(history = {}, uii = "") {
+  const dialogId = history?.dialogId || null;
+  const sessions = Array.isArray(history?.activeCallSessionHistories)
+    ? history.activeCallSessionHistories
+    : [];
+  return sessions
+    .map((session) => {
+      const segmentId = session?.segmentId || session?.segmentID || session?.segment_id || null;
+      if (!dialogId || !segmentId) return null;
+      return {
+        dialogId,
+        segmentId,
+        interactionId: history?.uii || uii || null,
+        segmentDuration: Number(session?.duration || session?.dialDuration || 0) || null,
+        segmentRecordingURL: session?.recordingUrl || null,
+        segmentAgentId:
+          session?.agentSession?.agentId
+          || session?.rcAgentAgentSession?.agentId
+          || history?.agentNameAndType?.agentId
+          || null,
+        segmentAgentName:
+          session?.agentLogin
+          || session?.agentSession?.agentName
+          || history?.agentNameAndType?.agentName
+          || null,
+        segmentAgentGroupId:
+          history?.historySource?.sourceGroupId
+          || null,
+        interactionDirection: history?.callType || history?.dialogContext?.dialogOrigination || null,
+        source: "callHistory",
+        rawSession: session,
+      };
+    })
+    .filter(Boolean);
+}
+
 async function resolveRingcxRecording(callLog, metadataCache = null) {
   if (!isRingcxRecordingEnabled()) {
     return { artifact: null, reason: "ringcx-recording-disabled" };
@@ -404,7 +460,29 @@ async function resolveRingcxRecording(callLog, metadataCache = null) {
       });
       segments = extractSegmentsForUii(metadata, uii);
     } catch (error) {
-      return { artifact: null, reason: "ringcx-metadata-failed", error: error.message };
+      segments = null;
+    }
+  }
+
+  if (!Array.isArray(segments) || segments.length === 0) {
+    if (typeof client.getCallHistory === "function") {
+      try {
+        const history = await client.getCallHistory(uii);
+        segments = extractSegmentsFromCallHistory(history, uii);
+        await CallLog.updateOne(
+          { _id: callLog._id },
+          {
+            $set: {
+              "recordingArchive.ringcxCallHistoryFetchedAt": new Date(),
+              "recordingArchive.ringcxCallHistorySnapshot": cloneRingcxSnapshot(history),
+              "recordingArchive.ringcxDialogId": history?.dialogId || null,
+              "recordingArchive.ringcxSegmentIds": segments.map((segment) => segment.segmentId),
+            },
+          },
+        ).catch(() => null);
+      } catch (error) {
+        return { artifact: null, reason: "ringcx-call-history-failed", error: error.message };
+      }
     }
   }
 

@@ -56,6 +56,18 @@ async function createTunnel() {
   return body;
 }
 
+async function deleteTunnel(name) {
+  const response = await fetch(`${AGENT_API_BASE}/api/tunnels/${encodeURIComponent(name)}`, {
+    method: "DELETE",
+  });
+  if (response.status === 404) return null;
+  const body = await safeJson(response);
+  if (!response.ok) {
+    throw new Error(`ngrok agent DELETE tunnel failed: ${response.status} ${JSON.stringify(body)}`);
+  }
+  return body;
+}
+
 function tunnelMatches(tunnel) {
   if (!tunnel || typeof tunnel !== "object") return false;
   const publicUrl = String(tunnel.public_url || "").trim().toLowerCase();
@@ -83,6 +95,10 @@ async function main() {
       ),
     );
     return;
+  }
+
+  if (existing) {
+    await deleteTunnel(TUNNEL_NAME);
   }
 
   const created = await createTunnel();

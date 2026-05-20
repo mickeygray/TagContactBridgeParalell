@@ -36,6 +36,18 @@ function normalizeQueueFamilies(value) {
   return normalizeLeadQueueFamilyList(value);
 }
 
+function normalizeRouteCampaigns(value) {
+  if (value === null || value === undefined || value === "") return [];
+  const raw = Array.isArray(value) ? value : String(value).split(",");
+  return Array.from(
+    new Set(
+      raw
+        .map((entry) => String(entry || "").trim().toLowerCase())
+        .filter(Boolean),
+    ),
+  );
+}
+
 function resolveQueueFamilies(options = {}) {
   return normalizeQueueFamilies([
     ...(Array.isArray(options.queueFamilies) ? options.queueFamilies : []),
@@ -51,6 +63,10 @@ function buildReadyClaimQuery(domain = null, options = {}) {
   const families = resolveQueueFamilies(options);
   if (families.length > 0) {
     query.queueFamily = { $in: families };
+  }
+  const routeCampaigns = normalizeRouteCampaigns(options.routeCampaigns);
+  if (routeCampaigns.length > 0) {
+    query["metadata.routeCampaignKey"] = { $in: routeCampaigns };
   }
   applyCreatedAtRange(query, options);
   return query;

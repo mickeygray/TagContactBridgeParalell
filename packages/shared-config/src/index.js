@@ -722,6 +722,13 @@ function getSharedConfig(overrides = {}) {
           : process.env.NIGHTLY_CLOSE_SEND_EMAIL,
         false,
       ),
+      skipFinalClosePass: boolFromEnv(
+        overrides.nightlyCloseSkipFinalClosePass !== undefined
+          ? overrides.nightlyCloseSkipFinalClosePass
+          : process.env.NIGHTLY_CLOSE_SKIP_FINAL_CLOSE_PASS ||
+            process.env.NIGHTLY_CLOSE_SKIP_FINAL_CLOSE,
+        false,
+      ),
       recipients: parseOriginList(
         overrides.nightlyCloseRecipients ||
           process.env.NIGHTLY_CLOSE_RECIPIENTS ||

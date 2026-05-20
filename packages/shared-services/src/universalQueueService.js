@@ -130,7 +130,9 @@ async function refreshPoolOccupancy() {
     second_contact: 0,
     third_contact: 0,
     day2_10: 0,
+    day16_30: 0,
     aged: 0,
+    dead: 0,
   };
   let inPoolCount = 0;
   for (const row of counts) {
@@ -144,7 +146,7 @@ async function refreshPoolOccupancy() {
       inPoolByAgeBucket.just_came_in
       + inPoolByAgeBucket.second_contact
       + inPoolByAgeBucket.third_contact,
-    non_fresh: inPoolByAgeBucket.day2_10 + inPoolByAgeBucket.aged,
+    non_fresh: inPoolByAgeBucket.day2_10 + inPoolByAgeBucket.day16_30 + inPoolByAgeBucket.aged,
   };
   await poolBudgetRepository.snapshotOccupancy({
     inPoolCount,

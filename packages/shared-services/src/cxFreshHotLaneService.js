@@ -79,9 +79,13 @@ function makeZonedDate(year, month, day, hour = 0, minute = 0, second = 0, timeZ
 
 function computeFreshHotLaneWindow(asOf = new Date(), options = {}) {
   const timeZone = options.timeZone || HOT_LANE_TIMEZONE;
-  const rolloverHour = Math.min(Math.max(Number(options.rolloverHour ?? process.env.RC_CX_FRESH_HOT_LANE_ROLLOVER_HOUR) || 16, 0), 23);
+  const rolloverHour = Math.min(Math.max(Number(options.rolloverHour ?? process.env.RC_CX_FRESH_HOT_LANE_ROLLOVER_HOUR) || 15, 0), 23);
+  const rolloverMinute = Math.min(Math.max(Number(options.rolloverMinute ?? process.env.RC_CX_FRESH_HOT_LANE_ROLLOVER_MINUTE) || 30, 0), 59);
   const parts = getZonedParts(asOf, timeZone);
-  const startDayOffset = parts.hour >= rolloverHour ? 0 : -1;
+  const afterRollover =
+    parts.hour > rolloverHour ||
+    (parts.hour === rolloverHour && parts.minute >= rolloverMinute);
+  const startDayOffset = afterRollover ? 0 : -1;
   const noonGuess = new Date(Date.UTC(parts.year, parts.month - 1, parts.day + startDayOffset, 12, 0, 0, 0));
   const startParts = getZonedParts(noonGuess, timeZone);
   const windowStart = makeZonedDate(
@@ -89,13 +93,14 @@ function computeFreshHotLaneWindow(asOf = new Date(), options = {}) {
     startParts.month,
     startParts.day,
     rolloverHour,
-    0,
+    rolloverMinute,
     0,
     timeZone,
   );
   return {
     timeZone,
     rolloverHour,
+    rolloverMinute,
     windowStart,
     windowEnd: new Date(asOf),
   };
@@ -125,7 +130,8 @@ async function rebuildFreshHotLane(options = {}) {
       windowStart: new Date(options.windowStart),
       windowEnd: new Date(options.windowEnd),
       timeZone: options.timeZone || HOT_LANE_TIMEZONE,
-      rolloverHour: Number(options.rolloverHour || 16),
+      rolloverHour: Number(options.rolloverHour || 15),
+      rolloverMinute: Number(options.rolloverMinute || 30),
     }
     : computeFreshHotLaneWindow(asOf, options);
   const domains = parseDomains(options.domains);
@@ -347,6 +353,7 @@ async function runFreshHotLaneAllocatorUnsafe(options = {}) {
       maxCount,
       claimMinutes,
       queueFamilies: ["fresh-day1"],
+      routeCampaigns: Array.isArray(options.routeCampaigns) ? options.routeCampaigns : [],
       candidateExtensionIds,
       maxOpenAssignments,
       maxOpenAssignmentsScope: "queue-family",

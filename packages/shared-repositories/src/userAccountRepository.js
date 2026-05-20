@@ -34,6 +34,19 @@ function toNullableNumber(value) {
   return Number.isFinite(number) ? number : null;
 }
 
+function normalizeRouteCampaigns(value) {
+  if (value === null || value === undefined || value === "") return null;
+  const raw = Array.isArray(value) ? value : String(value).split(",");
+  const normalized = Array.from(
+    new Set(
+      raw
+        .map((entry) => String(entry || "").trim().toLowerCase())
+        .filter(Boolean),
+    ),
+  );
+  return normalized.length > 0 ? normalized : null;
+}
+
 function normalizeCxQueuePolicy(input) {
   if (input === undefined) return undefined;
   if (input === null) return null;
@@ -43,6 +56,8 @@ function normalizeCxQueuePolicy(input) {
   const out = {
     tier: CX_QUEUE_POLICY_TIERS.has(tier) ? tier : null,
     enabled: input.enabled === undefined ? true : Boolean(input.enabled),
+    routeCampaigns: normalizeRouteCampaigns(input.routeCampaigns),
+    totalOpen: toNullableNumber(input.totalOpen),
     fresh: {
       eligible: input.fresh?.eligible == null ? null : Boolean(input.fresh.eligible),
       firstTouchEligible:
@@ -55,6 +70,9 @@ function normalizeCxQueuePolicy(input) {
     },
     day2to15: {
       targetOpen: toNullableNumber(input.day2to15?.targetOpen),
+    },
+    day16to30: {
+      targetOpen: toNullableNumber(input.day16to30?.targetOpen),
     },
     aged: {
       targetOpen: toNullableNumber(input.aged?.targetOpen),
@@ -78,7 +96,10 @@ function hasManualCxQueuePolicy(input = null) {
     || hasPolicyValue(input.fresh?.firstTouchEligible)
     || hasPolicyValue(input.fresh?.targetOpen)
     || hasPolicyValue(input.day2to15?.targetOpen)
+    || hasPolicyValue(input.day16to30?.targetOpen)
     || hasPolicyValue(input.aged?.targetOpen)
+    || hasPolicyValue(input.totalOpen)
+    || hasPolicyValue(input.routeCampaigns)
   );
 }
 

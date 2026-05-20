@@ -23,7 +23,7 @@ const cxDialQueueSchema = new mongoose.Schema(
     },
     queueFamily: {
       type: String,
-      enum: ["fresh-day1", "fresh-day2to10", "aged", "unassigned"],
+      enum: ["fresh-day1", "fresh-day2to10", "fresh-day16to30", "aged", "dead", "unassigned"],
       default: "fresh-day1",
       index: true,
     },
@@ -47,6 +47,8 @@ const cxDialQueueSchema = new mongoose.Schema(
     lastPlacedAt: { type: Date, default: null },
     dailyPlacedDateKey: { type: String, default: null, index: true },
     dailyPlacedCalls: { type: Number, default: 0, index: true },
+    monthlyPlacedMonthKey: { type: String, default: null, index: true },
+    monthlyPlacedCalls: { type: Number, default: 0, index: true },
     hourlyPlacedHourKey: { type: String, default: null, index: true },
     hourlyPlacedCalls: { type: Number, default: 0, index: true },
     callPlan: {
@@ -78,6 +80,7 @@ cxDialQueueSchema.index(
 );
 cxDialQueueSchema.index({ domain: 1, state: 1, releaseAt: 1, priorityScore: -1 });
 cxDialQueueSchema.index({ domain: 1, queueFamily: 1, dailyPlacedDateKey: 1, dailyPlacedCalls: 1 });
+cxDialQueueSchema.index({ domain: 1, queueFamily: 1, monthlyPlacedMonthKey: 1, monthlyPlacedCalls: 1 });
 cxDialQueueSchema.index({
   domain: 1,
   state: 1,
@@ -99,6 +102,14 @@ cxDialQueueSchema.index({
   priorityScore: -1,
   releaseAt: 1,
   createdAt: 1,
+});
+cxDialQueueSchema.index({
+  domain: 1,
+  state: 1,
+  queueFamily: 1,
+  "metadata.routeCampaignKey": 1,
+  releaseAt: 1,
+  priorityScore: -1,
 });
 
 module.exports =

@@ -110,6 +110,8 @@ const agentStateSchema = new mongoose.Schema(
         index: true,
       },
       enabled: { type: Boolean, default: true },
+      routeCampaigns: { type: [String], default: undefined },
+      totalOpen: { type: Number, default: null },
       fresh: {
         eligible: { type: Boolean, default: null },
         firstTouchEligible: { type: Boolean, default: null },
@@ -118,6 +120,9 @@ const agentStateSchema = new mongoose.Schema(
         priorityWeight: { type: Number, default: null },
       },
       day2to15: {
+        targetOpen: { type: Number, default: null },
+      },
+      day16to30: {
         targetOpen: { type: Number, default: null },
       },
       aged: {
@@ -160,6 +165,7 @@ const agentStateSchema = new mongoose.Schema(
         totalAssigned: { type: Number, default: 0 },
         freshDay1Assigned: { type: Number, default: 0 },
         freshDay2to10Assigned: { type: Number, default: 0 },
+        freshDay16to30Assigned: { type: Number, default: 0 },
         agedAssigned: { type: Number, default: 0 },
         openAssignments: { type: Number, default: 0 },
         lastAssignedAt: { type: Date, default: null },

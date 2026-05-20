@@ -14,6 +14,7 @@ const {
   applyCallStartedDailyStats,
   deriveActivityState,
   deriveCxRouting,
+  isLikelyCxBridgeExCall,
   normalizeDailyStats,
 } = require("./agentAvailabilityService");
 // Lazy-required at call-site to avoid a require cycle with
@@ -310,9 +311,25 @@ function buildChangePayload(agent, extra = {}) {
 }
 
 async function persistState(nextState, existingState = null) {
+  const currentCall = nextState?.currentCall && typeof nextState.currentCall === "object"
+    ? nextState.currentCall
+    : {};
+  const suppressBridgeCall = isLikelyCxBridgeExCall(currentCall);
+  const normalizedState = suppressBridgeCall
+    ? {
+      ...nextState,
+      status: "available",
+      exTelephonyStatus: "NoCall",
+      currentCall: {},
+      activePlatform: "none",
+    }
+    : nextState;
+  if (suppressBridgeCall) {
+    normalizedState.activityState = deriveActivityState(normalizedState, existingState?.activityState);
+  }
   const payload = {
-    ...nextState,
-    cxRouting: deriveCxRouting(nextState, existingState?.cxRouting || null),
+    ...normalizedState,
+    cxRouting: deriveCxRouting(normalizedState, existingState?.cxRouting || null),
     upstream: {
       source: "ringcentral-ex",
       mirroredAt: new Date(),
@@ -1201,6 +1218,13 @@ async function reconcilePolledPresence(agent, presence, logger, options = {}) {
     lastPresencePollAt: new Date(),
     lastPresencePollError: null,
   };
+  if (isLikelyCxBridgeExCall(next.currentCall)) {
+    next.status = "available";
+    next.exTelephonyStatus = "NoCall";
+    next.currentCall = {};
+    next.activePlatform = "none";
+    next.activityState = deriveActivityState(next, previous.activityState);
+  }
   next.cxRouting = deriveCxRouting(next, agent?.cxRouting || previous.cxRouting || null);
 
   if (next.status !== previous.status) {

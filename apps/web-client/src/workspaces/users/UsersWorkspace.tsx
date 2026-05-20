@@ -95,20 +95,27 @@ function getLeadListSummary(row: AccountRecord) {
       : row.cxQueuePolicy;
   const green = readQueueCount(policy?.fresh?.targetOpen, 0);
   const blue = readQueueCount(policy?.day2to15?.targetOpen, 0);
+  const yellow = readQueueCount(policy?.day16to30?.targetOpen, 0);
   const red = readQueueCount(policy?.aged?.targetOpen, 0);
+  const legacyTotal = green + blue + yellow + red;
+  const total = readQueueCount(policy?.totalOpen, legacyTotal);
+  const routeCampaigns = Array.isArray(policy?.routeCampaigns)
+    ? policy.routeCampaigns.filter(Boolean)
+    : [];
   const firstTouchEligible = Boolean(
     policy?.fresh?.firstTouchEligible ??
       policy?.fresh?.eligible ??
       false,
   );
-  const total = green + blue + red;
   return {
     enabled: policy?.enabled !== false && (total > 0 || firstTouchEligible),
     firstTouchEligible,
     green,
     blue,
+    yellow,
     red,
     total,
+    routeCampaigns,
   };
 }
 
@@ -194,7 +201,10 @@ export function UsersWorkspace() {
                 </StatusPill>
               </div>
               <div className="mt-1 font-mono text-[11px] text-muted-foreground">
-                G {summary.green} / B {summary.blue} / R {summary.red}
+                G {summary.green} / B {summary.blue} / Y {summary.yellow} / R {summary.red}
+              </div>
+              <div className="mt-0.5 max-w-[220px] truncate text-[11px] text-muted-foreground">
+                green: {summary.routeCampaigns.length > 0 ? summary.routeCampaigns.join(", ") : "all routes"}
               </div>
             </div>
           );

@@ -73,16 +73,16 @@ async function isAgentEligibleForSlice(agentId, config) {
 // in their own per-agent fresh queue, not in slices.
 //
 // Algorithm:
-//   1. Sum non-fresh pool counts (day2_10 + aged)
+//   1. Sum non-fresh pool counts (day2_10 + day16_30 + aged)
 //   2. For each bucket, target[b] = round(sliceSize * pool[b] / total)
 //   3. Drift correction: if sum(target) != sliceSize, adjust the
 //      largest bucket by ±1 until it matches
 //   4. Cap each bucket at the actual pool[b] (can't take more than exists)
 //
-// Returns { day2_10: n, aged: n } summing to <= sliceSize.
+// Returns { day2_10: n, day16_30: n, aged: n } summing to <= sliceSize.
 
 function computeTargetMix({ poolByAgeBucket, sliceSize }) {
-  const buckets = ["day2_10", "aged"];
+  const buckets = ["day2_10", "day16_30", "aged"];
   const counts = {};
   let total = 0;
   for (const b of buckets) {
@@ -90,7 +90,7 @@ function computeTargetMix({ poolByAgeBucket, sliceSize }) {
     total += counts[b];
   }
 
-  if (total === 0) return { day2_10: 0, aged: 0 };
+  if (total === 0) return { day2_10: 0, day16_30: 0, aged: 0 };
 
   const desiredSize = Math.min(sliceSize, total);
   const target = {};
@@ -99,7 +99,7 @@ function computeTargetMix({ poolByAgeBucket, sliceSize }) {
   }
 
   // Drift correction
-  let drift = desiredSize - (target.day2_10 + target.aged);
+  let drift = desiredSize - (target.day2_10 + target.day16_30 + target.aged);
   while (drift !== 0) {
     // Find bucket with most slack (largest pool minus current target)
     let bestBucket = null;
@@ -116,7 +116,7 @@ function computeTargetMix({ poolByAgeBucket, sliceSize }) {
     }
     if (!bestBucket) break;
     target[bestBucket] += drift > 0 ? 1 : -1;
-    drift = desiredSize - (target.day2_10 + target.aged);
+    drift = desiredSize - (target.day2_10 + target.day16_30 + target.aged);
     if (target[bestBucket] < 0) {
       target[bestBucket] = 0;
       break;
@@ -144,7 +144,7 @@ async function issueSlice(agentId, { hourBucket = null } = {}) {
   for (const row of counts) poolByAgeBucket[row._id] = row.count;
 
   const target = computeTargetMix({ poolByAgeBucket, sliceSize });
-  const targetTotal = target.day2_10 + target.aged;
+  const targetTotal = target.day2_10 + target.day16_30 + target.aged;
   if (targetTotal === 0) {
     return { issued: false, reason: "pool-empty" };
   }
@@ -153,9 +153,9 @@ async function issueSlice(agentId, { hourBucket = null } = {}) {
   // any concurrent claims losing the CAS.
   const sliceId = crypto.randomUUID();
   const claimed = [];
-  const ageMix = { just_came_in: 0, second_contact: 0, third_contact: 0, day2_10: 0, aged: 0 };
+  const ageMix = { just_came_in: 0, second_contact: 0, third_contact: 0, day2_10: 0, day16_30: 0, aged: 0 };
 
-  for (const bucket of ["day2_10", "aged"]) {
+  for (const bucket of ["day2_10", "day16_30", "aged"]) {
     if (target[bucket] === 0) continue;
     const overpull = Math.max(target[bucket] * 2, target[bucket] + 5);
     const candidates = await queueItemRepository.listInPool({

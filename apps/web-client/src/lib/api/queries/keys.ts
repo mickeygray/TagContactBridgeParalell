@@ -18,6 +18,13 @@ export const queryKeys = {
     unassignedExtensions: (company?: string) =>
       ["accounts", "unassigned-extensions", company ?? "all"] as const,
   },
+  callReview: {
+    all: () => ["call-review"] as const,
+    agentToday: (extensionId: string, domain?: string, sort?: string) =>
+      ["call-review", "agent-today", extensionId, domain ?? "TAG", sort ?? "time"] as const,
+    caseToday: (caseId: number | string, domain?: string, sort?: string) =>
+      ["call-review", "case-today", String(caseId), domain ?? "TAG", sort ?? "time"] as const,
+  },
   consent: {
     all: () => ["consent"] as const,
     records: (filters?: Record<string, unknown>) =>

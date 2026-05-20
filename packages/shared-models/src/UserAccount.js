@@ -99,6 +99,8 @@ const userAccountSchema = new mongoose.Schema(
         index: true,
       },
       enabled: { type: Boolean, default: true },
+      routeCampaigns: { type: [String], default: undefined },
+      totalOpen: { type: Number, default: null },
       fresh: {
         eligible: { type: Boolean, default: null },
         firstTouchEligible: { type: Boolean, default: null },
@@ -107,6 +109,9 @@ const userAccountSchema = new mongoose.Schema(
         priorityWeight: { type: Number, default: null },
       },
       day2to15: {
+        targetOpen: { type: Number, default: null },
+      },
+      day16to30: {
         targetOpen: { type: Number, default: null },
       },
       aged: {

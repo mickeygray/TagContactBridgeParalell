@@ -70,7 +70,10 @@ export interface AccountLogicsAuth {
 }
 
 export interface CxQueuePolicy {
+  tier?: string | null;
   enabled?: boolean;
+  routeCampaigns?: string[] | null;
+  totalOpen?: number | null;
   fresh?: {
     eligible?: boolean | null;
     firstTouchEligible?: boolean | null;
@@ -79,6 +82,9 @@ export interface CxQueuePolicy {
     priorityWeight?: number | null;
   };
   day2to15?: {
+    targetOpen?: number | null;
+  };
+  day16to30?: {
     targetOpen?: number | null;
   };
   aged?: {

@@ -95,6 +95,12 @@ function getCxHourlyCapForQueueFamily(queueFamily) {
       readNonNegativeIntegerEnv("RC_CX_DAY2TO15_HOURLY_CAP", 2),
     );
   }
+  if (family === "fresh-day16to30") {
+    return readNonNegativeIntegerEnv(
+      "RC_CX_YELLOW_HOURLY_CAP",
+      readNonNegativeIntegerEnv("RC_CX_DAY16TO30_HOURLY_CAP", 1),
+    );
+  }
   return null;
 }
 
@@ -194,8 +200,12 @@ function getCxQueueServeRank(item = {}, options = {}) {
     baseRank = hourlyCalls >= getGreenBlueParityAfterHourlyCalls() ? 1 : 0.5;
   } else if (family === "fresh-day2to10") {
     baseRank = 1;
-  } else if (family === "aged") {
+  } else if (family === "fresh-day16to30") {
     baseRank = 2;
+  } else if (family === "aged") {
+    baseRank = 3;
+  } else if (family === "dead") {
+    baseRank = 999;
   } else {
     baseRank = 99;
   }

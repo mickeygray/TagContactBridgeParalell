@@ -586,6 +586,63 @@ async function buildCallSummary(domain, dateKey, timeZone = "America/Los_Angeles
   };
 }
 
+// CX-only call rollup for the nightly close. Runs alongside the
+// existing channel/piece aggregations but reads CallLog directly so it
+// can filter by platform="cx" (the disposition path stamps this on every
+// CX-routed call). The numbers it produces are LD dial activity — CX is
+// the dial path for LD leads, so this is the throughput signal for the
+// LDCustom / LDGeneral pipelines we just split.
+//
+// Returns { total, uniqueCallers, callsOver5, longestSec } scoped to
+// the given domain + PT date. Wrapped in a try/catch by the caller so a
+// CallLog aggregation hiccup never derails the email composition.
+async function buildCxCallSummary(domain, dateKey, timeZone = "America/Los_Angeles") {
+  const { start, end } = buildTimezoneDateWindow(dateKey, timeZone);
+  const rows = await CallLog.aggregate([
+    {
+      $match: {
+        domain: normalizeDomain(domain),
+        callStartTime: { $gte: start, $lte: end },
+        platform: "cx",
+      },
+    },
+    {
+      $group: {
+        _id: null,
+        total: { $sum: 1 },
+        callsOver5: {
+          $sum: { $cond: [{ $gte: [{ $ifNull: ["$durationSec", 0] }, 300] }, 1, 0] },
+        },
+        longestSec: { $max: { $ifNull: ["$durationSec", 0] } },
+        uniqueCaseIds: { $addToSet: "$caseId" },
+        uniqueSessionIds: { $addToSet: "$telephonySessionId" },
+      },
+    },
+    {
+      $project: {
+        _id: 0,
+        total: 1,
+        callsOver5: 1,
+        longestSec: 1,
+        uniqueCallers: {
+          $size: { $filter: { input: "$uniqueCaseIds", as: "c", cond: { $ne: ["$$c", null] } } },
+        },
+        uniqueSessions: {
+          $size: { $filter: { input: "$uniqueSessionIds", as: "s", cond: { $ne: ["$$s", null] } } },
+        },
+      },
+    },
+  ]).catch(() => []);
+  const row = rows[0] || {};
+  return {
+    total: toNumber(row.total),
+    callsOver5: toNumber(row.callsOver5),
+    longestSec: toNumber(row.longestSec),
+    uniqueCallers: toNumber(row.uniqueCallers),
+    uniqueSessions: toNumber(row.uniqueSessions),
+  };
+}
+
 async function buildScoreSummary(domain, dateKey, timeZone = "America/Los_Angeles") {
   const { start, end } = buildTimezoneDateWindow(dateKey, timeZone);
   const rows = await CallLog.aggregate([
@@ -653,12 +710,17 @@ async function buildScoreSummary(domain, dateKey, timeZone = "America/Los_Angele
 }
 
 async function buildManagementSnapshot(domain, dateKey, timeZone = "America/Los_Angeles") {
-  const [spendTotals, leadSummary, paymentSummary, callSummary, scoreSummary, pendingRedlines, reviewRedlines, unresolvedHourly] =
+  const [spendTotals, leadSummary, paymentSummary, callSummary, cxCallSummary, scoreSummary, pendingRedlines, reviewRedlines, unresolvedHourly] =
     await Promise.all([
       spendEntryRepository.getSpendTotals(domain, { date: dateKey }),
       buildLeadSummary(domain, dateKey, timeZone),
       buildPaymentSummary(domain, dateKey),
       buildCallSummary(domain, dateKey, timeZone),
+      // CX-only rollup. Failure here is non-fatal — the rest of the
+      // email composes with the existing byChannel data.
+      buildCxCallSummary(domain, dateKey, timeZone).catch(() => ({
+        total: 0, callsOver5: 0, longestSec: 0, uniqueCallers: 0, uniqueSessions: 0,
+      })),
       buildScoreSummary(domain, dateKey, timeZone),
       paymentAlertRepository.countPaymentAlerts(domain, { status: "pending", paymentDate: dateKey }).catch(() => 0),
       reviewQueueRepository.countReviewQueueItems(domain, { category: "redline", status: "open" }).catch(() => 0),
@@ -687,6 +749,10 @@ async function buildManagementSnapshot(domain, dateKey, timeZone = "America/Los_
       total: totalCalls,
       callsOver5: totalCallsOver5,
       byChannel: callSummary.byChannel,
+      // CX-specific (LD dial activity). Added alongside the existing
+      // byChannel rollup so downstream consumers that already read
+      // .total / .byChannel keep working unchanged.
+      cx: cxCallSummary,
     },
     scores: {
       totalScoredCalls: scoreSummary.totalScoredCalls,
@@ -1621,7 +1687,15 @@ function mergeManagementSnapshots(snapshots) {
       initialAmount: 0, initialCount: 0,
       recurringAmount: 0, recurringCount: 0,
     },
-    calls: { total: 0, callsOver5: 0, byChannel: [] },
+    calls: {
+      total: 0,
+      callsOver5: 0,
+      byChannel: [],
+      // Cross-domain CX rollup. Sums across TAG + WYNN so the
+      // financial email can show one "LD dial activity" number
+      // alongside the existing total-calls figure.
+      cx: { total: 0, callsOver5: 0, longestSec: 0, uniqueCallers: 0, uniqueSessions: 0 },
+    },
     scores: { totalScoredCalls: 0, bySource: [] },
     alerts: { pendingRedlines: 0, reviewRedlines: 0, unresolvedHourlyJobs: 0 },
   };
@@ -1648,6 +1722,18 @@ function mergeManagementSnapshots(snapshots) {
     }
     merged.calls.total += toNumber(snap.calls?.total);
     merged.calls.callsOver5 += toNumber(snap.calls?.callsOver5);
+    // CX cross-domain sum (LD dial activity). Same shape as the
+    // per-domain snapshot's calls.cx block.
+    if (snap.calls?.cx) {
+      merged.calls.cx.total += toNumber(snap.calls.cx.total);
+      merged.calls.cx.callsOver5 += toNumber(snap.calls.cx.callsOver5);
+      merged.calls.cx.uniqueCallers += toNumber(snap.calls.cx.uniqueCallers);
+      merged.calls.cx.uniqueSessions += toNumber(snap.calls.cx.uniqueSessions);
+      merged.calls.cx.longestSec = Math.max(
+        merged.calls.cx.longestSec,
+        toNumber(snap.calls.cx.longestSec),
+      );
+    }
     for (const row of snap.calls?.byChannel || []) {
       const k = row.channel || "unknown";
       const target = channelByKey.get(k) || { channel: k, totalCalls: 0, callsOver5: 0, uniqueCallers: 0 };
@@ -2439,6 +2525,33 @@ async function sendLeadDataCloseEmail(domain, payload, options = {}) {
       ? [...daily.leads.entries].sort((a, b) => Number(b.count || 0) - Number(a.count || 0))
       : [];
 
+  // Lead intake split by routeCampaignKey — surfaces the LDCustom /
+  // LDGeneral split (and organic / affiliate / etc.) that the intake
+  // stamps at ingest time. Rows without a routeCampaignKey roll up
+  // under "(uncategorized)" rather than getting dropped. Sorted by
+  // volume desc.
+  const CAMPAIGN_LABELS = {
+    "ld-custom": "LDCustom",
+    "ld-general": "LDGeneral",
+    "ld": "LD (unsplit)",
+    "affiliate": "Affiliate",
+    "organic": "Organic",
+  };
+  const campaignBreakdown = leadRows.length > 0
+    ? [...leadRows.reduce((map, row) => {
+        const key = row.routeCampaignKey || "(uncategorized)";
+        const bucket = map.get(key) || {
+          key,
+          label: CAMPAIGN_LABELS[key] || row.routeCampaignName || key,
+          count: 0,
+        };
+        bucket.count += 1;
+        map.set(key, bucket);
+        return map;
+      }, new Map()).values()]
+        .sort((a, b) => Number(b.count || 0) - Number(a.count || 0))
+    : [];
+
   const totalContacted = transitions.reduce((sum, r) => sum + toNumber(r.contacted), 0);
   const totalDeal =
     toNumber(vendorReport.totals?.dealsToday) ||
@@ -2489,9 +2602,23 @@ async function sendLeadDataCloseEmail(domain, payload, options = {}) {
       )
     : null;
 
+  // Unique caller / unique session counts — distinct from raw call
+  // attempts. Lets readers see "we placed 547 calls but only reached
+  // 277 unique leads" at a glance, alongside the totals.
+  const uniqueCallerCount = new Set(
+    todaysCalls.map((c) => c?.caseId).filter(Boolean),
+  ).size;
+  const uniqueSessionCount = new Set(
+    todaysCalls
+      .map((c) => c?.telephonySessionId || c?.uii)
+      .filter(Boolean),
+  ).size;
+
   const topTiles = [
     { label: "Leads today", value: leadRows.length || toNumber(vendorReport.totals?.leads) || daily.leads.total, tone: "blue" },
     { label: "Calls", value: todaysCalls.length || toNumber(vendorReport.totals?.calls) || daily.calls.total, tone: "blue" },
+    { label: "Unique callers", value: uniqueCallerCount, tone: "blue" },
+    { label: "Unique sessions", value: uniqueSessionCount, tone: "blue" },
     { label: "5 min+", value: toNumber(vendorReport.totals?.callsOver5) || daily.calls.callsOver5, tone: "blue" },
     { label: "Scored", value: scoredCalls.length, tone: "blue" },
     { label: "Avg score", value: avgScore != null ? avgScore : "—", tone: "blue" },
@@ -2515,6 +2642,7 @@ async function sendLeadDataCloseEmail(domain, payload, options = {}) {
     leadReconciliationCsvFilename: leadReconciliationCsv.filename,
     topTiles,
     leadEntries,
+    campaignBreakdown,
     transitions,
     vendorFamilies,
     vendorRows,
@@ -2820,10 +2948,22 @@ async function runGroupedNightlyClose(domains, options = {}) {
           attributionsResolved: toNumber(payload.vendorReport?.attributionReview?.resolved),
         },
         groupLabel: "Parallel",
+        // Cross-domain CX rollup. LD is the only source that feeds the
+        // CX dial path today, so this number is effectively
+        // "LD outbound dial activity for the day."
+        cxToday: {
+          calls: toNumber(payload.managementSnapshot?.calls?.cx?.total),
+          callsOver5: toNumber(payload.managementSnapshot?.calls?.cx?.callsOver5),
+          uniqueCallers: toNumber(payload.managementSnapshot?.calls?.cx?.uniqueCallers),
+          uniqueSessions: toNumber(payload.managementSnapshot?.calls?.cx?.uniqueSessions),
+          longestSec: toNumber(payload.managementSnapshot?.calls?.cx?.longestSec),
+        },
         perDomain: payload.perDomain.map((p) => ({
           domain: p.domain,
           leads: p.managementSnapshot.leads.total,
           calls: p.managementSnapshot.calls.total,
+          cxCalls: toNumber(p.managementSnapshot.calls.cx?.total),
+          cxUniqueCallers: toNumber(p.managementSnapshot.calls.cx?.uniqueCallers),
           spend: p.managementSnapshot.spend.total,
           moneyIn: p.managementSnapshot.payments.totalAmount,
           deals: (p.dealsByCase || []).length,

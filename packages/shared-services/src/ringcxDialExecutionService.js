@@ -613,6 +613,26 @@ function activeCallContainsPhone(call, phone) {
     .some((candidate) => candidate === target);
 }
 
+function cloneActiveCallForAudit(value, depth = 0) {
+  if (value == null) return value;
+  if (depth > 5) return "[depth-limit]";
+  if (value instanceof Date) return value.toISOString();
+  if (Array.isArray(value)) {
+    return value.slice(0, 40).map((item) => cloneActiveCallForAudit(item, depth + 1));
+  }
+  if (typeof value === "object") {
+    const out = {};
+    for (const [key, child] of Object.entries(value).slice(0, 120)) {
+      out[key] = cloneActiveCallForAudit(child, depth + 1);
+    }
+    return out;
+  }
+  if (typeof value === "string") {
+    return value.length > 2000 ? `${value.slice(0, 2000)}...[truncated]` : value;
+  }
+  return value;
+}
+
 function summarizeActiveCall(call = null) {
   if (!call || typeof call !== "object") return null;
   const summary = {};
@@ -640,13 +660,20 @@ function summarizeActiveCall(call = null) {
     "username",
     "agentEmail",
     "externId",
+    "externalId",
+    "interactionId",
+    "dialogId",
+    "segmentId",
+    "sessionId",
+    "callSessionId",
   ];
   for (const key of keys) {
     const value = call[key];
     if (value !== undefined && value !== null && value !== "") summary[key] = value;
   }
   summary.uii = summary.uii || summary.UII || summary.callId || summary.callID || summary.activeCallId || summary.id || null;
-  summary.rawKeys = Object.keys(call).slice(0, 40);
+  summary.rawKeys = Object.keys(call).slice(0, 120);
+  summary.raw = cloneActiveCallForAudit(call);
   return summary;
 }
 
@@ -1329,7 +1356,17 @@ function normalizeQueueFamily(value) {
   ) {
     return "fresh-day2to10";
   }
+  if (
+    normalized === "fresh-day16to30"
+    || normalized === "day16to30"
+    || normalized === "day16-30"
+    || normalized === "day16_30"
+    || normalized === "yellow"
+  ) {
+    return "fresh-day16to30";
+  }
   if (normalized === "aged") return "aged";
+  if (normalized === "dead") return "dead";
   return "unassigned";
 }
 

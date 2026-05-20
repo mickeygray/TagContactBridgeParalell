@@ -5,7 +5,9 @@ const UCQ_AGE_BUCKETS = new Set([
   "second_contact",
   "third_contact",
   "day2_10",
+  "day16_30",
   "aged",
+  "dead",
 ]);
 
 const FRESH_AGE_BUCKETS = new Set([
@@ -89,6 +91,19 @@ function normalizeLeadQueueFamily(value) {
     return "fresh-day2to10";
   }
   if (
+    normalized === "fresh-day16to30"
+    || normalized === "day16to30"
+    || normalized === "day-16to30"
+    || normalized === "day16-30"
+    || normalized === "day-16-30"
+    || normalized === "day16_30"
+    || normalized === "yellow"
+    || normalized.includes("16-30")
+    || normalized.includes("day16")
+  ) {
+    return "fresh-day16to30";
+  }
+  if (
     normalized === "aged"
     || normalized === "red"
     || normalized === "red-only"
@@ -99,6 +114,14 @@ function normalizeLeadQueueFamily(value) {
     || normalized.includes("filler")
   ) {
     return "aged";
+  }
+  if (
+    normalized === "dead"
+    || normalized === "expired"
+    || normalized === "do-not-dial"
+    || normalized === "do-not-queue"
+  ) {
+    return "dead";
   }
   return "unassigned";
 }
@@ -116,7 +139,7 @@ function expandLeadQueueFamilyFilter(value) {
     || normalized === "non-fresh"
     || normalized === "fallback"
   ) {
-    return ["fresh-day2to10", "aged"];
+    return ["fresh-day2to10", "fresh-day16to30", "aged"];
   }
   const family = normalizeLeadQueueFamily(value);
   return family === "unassigned" ? [] : [family];
@@ -308,7 +331,9 @@ function deriveUcqAgeBucket(source = {}, cadence = {}) {
       || metadata.leadQueueFamily
       || metadata.queueTier,
   );
+  if (family === "dead") return "dead";
   if (family === "aged") return "aged";
+  if (family === "fresh-day16to30") return "day16_30";
   if (family === "fresh-day2to10") return "day2_10";
   if (family === "fresh-day1") return deriveDayOneAgeBucket(source, cadence);
 
@@ -337,8 +362,10 @@ function deriveUcqAgeBucket(source = {}, cadence = {}) {
     cadenceCallPlan.activeDay,
   );
   if (activeDay !== null) {
-    if (activeDay <= 0) return deriveDayOneAgeBucket(source, cadence);
+    if (activeDay <= 2) return deriveDayOneAgeBucket(source, cadence);
     if (activeDay <= 15) return "day2_10";
+    if (activeDay <= 30) return "day16_30";
+    if (activeDay > 120) return "dead";
     return "aged";
   }
 

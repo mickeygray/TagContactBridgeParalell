@@ -27,6 +27,7 @@ const { buildServiceHealth } = require("../../../packages/shared-observability/s
 const { toErrorResponse } = require("../../../packages/shared-errors/src");
 const {
   buildCxCadenceRuntimeSnapshot,
+  buildCxQueuesForAgents,
   clearScheduledTelephonySessions,
   claimNextCxQueueItem,
   createCxCallPlacedEvent,
@@ -523,6 +524,14 @@ async function startServer() {
           maxOpenAssignments: Math.max(Number(process.env.RC_CX_DAY2TO15_OPEN_ASSIGNMENTS) || 25, 1),
           maxOpenAssignmentsScope: "queue-family",
         });
+        const day16To30AssignmentBatch = await assignCxQueueBatch({
+          maxCount: Math.max(Number(process.env.RC_CX_DAY16TO30_BATCH_SIZE) || Number(process.env.RC_CX_NONFRESH_BATCH_SIZE) || 20, 1),
+          claimMinutes: Number(process.env.RC_CX_YELLOW_CLAIM_MINUTES) || Number(process.env.RC_CX_NONFRESH_CLAIM_MINUTES) || 30,
+          queueFamilies: ["fresh-day16to30"],
+          randomize: false,
+          maxOpenAssignments: Math.max(Number(process.env.RC_CX_DAY16TO30_OPEN_ASSIGNMENTS) || 10, 1),
+          maxOpenAssignmentsScope: "queue-family",
+        });
         const agedAssignmentBatch = await assignCxQueueBatch({
           maxCount: Math.max(Number(process.env.RC_CX_AGED_BATCH_SIZE) || Number(process.env.RC_CX_NONFRESH_BATCH_SIZE) || 20, 1),
           claimMinutes: Number(process.env.RC_CX_AGED_CLAIM_MINUTES) || Number(process.env.RC_CX_NONFRESH_CLAIM_MINUTES) || 30,
@@ -533,10 +542,11 @@ async function startServer() {
         });
         const nonFreshAssignmentBatch = {
           ok: true,
-          requested: Number(day2To15AssignmentBatch.requested || 0) + Number(agedAssignmentBatch.requested || 0),
-          assigned: Number(day2To15AssignmentBatch.assigned || 0) + Number(agedAssignmentBatch.assigned || 0),
-          skipped: Number(day2To15AssignmentBatch.skipped || 0) + Number(agedAssignmentBatch.skipped || 0),
+          requested: Number(day2To15AssignmentBatch.requested || 0) + Number(day16To30AssignmentBatch.requested || 0) + Number(agedAssignmentBatch.requested || 0),
+          assigned: Number(day2To15AssignmentBatch.assigned || 0) + Number(day16To30AssignmentBatch.assigned || 0) + Number(agedAssignmentBatch.assigned || 0),
+          skipped: Number(day2To15AssignmentBatch.skipped || 0) + Number(day16To30AssignmentBatch.skipped || 0) + Number(agedAssignmentBatch.skipped || 0),
           day2To15AssignmentBatch,
+          day16To30AssignmentBatch,
           agedAssignmentBatch,
         };
         const eventBatch = await processCxCadenceEventBatch({
@@ -553,6 +563,7 @@ async function startServer() {
           queueSweep,
           assignmentBatch,
           day2To15AssignmentBatch,
+          day16To30AssignmentBatch,
           agedAssignmentBatch,
           nonFreshAssignmentBatch,
           eventBatch,
@@ -590,6 +601,7 @@ async function startServer() {
             assigned: nonFreshAssignmentBatch.assigned,
             skipped: nonFreshAssignmentBatch.skipped,
             day2To15Assigned: day2To15AssignmentBatch.assigned,
+            day16To30Assigned: day16To30AssignmentBatch.assigned,
             agedAssigned: agedAssignmentBatch.assigned,
           });
         }
@@ -1540,6 +1552,28 @@ async function startServer() {
         eventBatch,
         snapshot,
       });
+    } catch (error) {
+      return res.status(error.status || 500).json({ ok: false, error: error.message });
+    }
+  });
+
+  app.post("/api/ringcentral/cx-queue/build-agents", requireInternalAccess, async (req, res) => {
+    try {
+      const body = req.body || {};
+      const extensionIds = Array.isArray(body.extensionIds)
+        ? body.extensionIds
+        : String(body.extensionIds || "")
+          .split(",")
+          .map((value) => value.trim())
+          .filter(Boolean);
+      const result = await buildCxQueuesForAgents({
+        domain: body.domain || null,
+        extensionIds,
+        limit: body.limit || 50,
+        previewLimit: body.previewLimit || 8,
+        maxAgents: body.maxAgents || null,
+      });
+      return res.status(result.ok ? 200 : 207).json(result);
     } catch (error) {
       return res.status(error.status || 500).json({ ok: false, error: error.message });
     }

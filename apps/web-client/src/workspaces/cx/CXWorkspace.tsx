@@ -277,6 +277,17 @@ function buildQueueDialRequest(item: CxCallQueueItem, domain: string, contact: C
   };
 }
 
+function phoneValuesCouldMatch(
+  left: string | null | undefined,
+  right: string | null | undefined,
+) {
+  const a = normalizeComparablePhone(left);
+  const b = normalizeComparablePhone(right);
+  if (!a || !b) return false;
+  if (a === b) return true;
+  return a.length >= 4 && b.length >= 4 && (a.endsWith(b) || b.endsWith(a));
+}
+
 function contactFromCurrentCall(raw: Record<string, unknown> | null | undefined): ContactContext | null {
   if (!raw) return null;
   // For inbound calls the lead's phone is `from` (caller); for outbound
@@ -285,11 +296,17 @@ function contactFromCurrentCall(raw: Record<string, unknown> | null | undefined)
   // agent's own DID.
   const direction = String(readString(raw, "direction") || "").toLowerCase();
   const isOutbound = direction === "outbound";
+  const explicitFrom = readString(raw, "from", "ani", "sourcePhone", "callerId");
+  const explicitTo = readString(raw, "to", "destination", "destinationPhone", "leadPhone", "dnis");
+  const genericPhone = readString(raw, "phone", "phoneNumber");
+  const genericMatchesFrom =
+    Boolean(genericPhone) &&
+    Boolean(explicitFrom) &&
+    phoneValuesCouldMatch(genericPhone, explicitFrom);
   const phone =
-    readString(raw, "phone") ||
     (isOutbound
-      ? readString(raw, "to", "from", "ani")
-      : readString(raw, "from", "ani", "to"));
+      ? explicitTo || (genericMatchesFrom ? "" : genericPhone) || explicitFrom
+      : explicitFrom || genericPhone || explicitTo);
   const rawChannel = String(readString(raw, "channel") || "").toLowerCase();
   const channel: "ex" | "cx" | null =
     rawChannel === "ex" ? "ex" : rawChannel === "cx" ? "cx" : null;
@@ -306,7 +323,55 @@ function contactFromCurrentCall(raw: Record<string, unknown> | null | undefined)
   };
 }
 
-type QueueFamilyKey = "fresh-day1" | "fresh-day2to10" | "aged" | "unassigned";
+const INTERNAL_EX_CALLER_NUMBERS = new Set(["8773622426"]);
+const INTERNAL_EX_CALLER_NAME_MARKERS = [
+  "tax group",
+  "tax advocate group",
+  "wynn tax",
+  "wynn tax solutions",
+];
+
+function collectAgentShellPhones(...shellGroups: unknown[]) {
+  const phones = new Set<string>();
+  for (const group of shellGroups) {
+    const shells = Array.isArray(group) ? group : group ? [group] : [];
+    for (const shell of shells) {
+      const record = asRecord(shell);
+      const primary = normalizeComparablePhone(readString(record, "primaryPhone", "phone", "phoneNumber"));
+      if (primary) phones.add(primary);
+      const loginPhones = Array.isArray(record.loginPhones) ? record.loginPhones : [];
+      for (const phone of loginPhones) {
+        const normalized = normalizeComparablePhone(String(phone || ""));
+        if (normalized) phones.add(normalized);
+      }
+    }
+  }
+  return Array.from(phones);
+}
+
+function isInternalExShellCurrentCall(
+  raw: Record<string, unknown> | null | undefined,
+  agentShellPhones: string[],
+) {
+  if (!raw) return false;
+  const channel = String(readString(raw, "channel") || "").trim().toLowerCase();
+  if (channel !== "ex") return false;
+
+  const toPhone = normalizeComparablePhone(readString(raw, "to", "dnis"));
+  const shellPhoneSet = new Set(agentShellPhones.map(normalizeComparablePhone).filter(Boolean));
+  const landsOnAgentShell = Boolean(toPhone && shellPhoneSet.has(toPhone));
+  if (!landsOnAgentShell) return false;
+
+  const fromPhone = normalizeComparablePhone(readString(raw, "from", "ani", "phone"));
+  const fromName = readString(raw, "fromName", "name", "contactName").toLowerCase();
+  const fromLooksInternal =
+    INTERNAL_EX_CALLER_NUMBERS.has(fromPhone) ||
+    INTERNAL_EX_CALLER_NAME_MARKERS.some((marker) => fromName.includes(marker));
+
+  return fromLooksInternal;
+}
+
+type QueueFamilyKey = "fresh-day1" | "fresh-day2to10" | "fresh-day16to30" | "aged" | "dead" | "unassigned";
 
 type QueueFamilyDisplay = {
   label: string;
@@ -337,23 +402,33 @@ const QUEUE_FAMILY_DISPLAY: Record<QueueFamilyKey, QueueFamilyDisplay> = {
     dotClassName: "bg-emerald-500",
   },
   "fresh-day2to10": {
-    label: "2-15",
+    label: "3-15",
     sortRank: 1,
     dotClassName: "bg-sky-500",
   },
-  aged: {
-    label: "Aged",
+  "fresh-day16to30": {
+    label: "16-30",
     sortRank: 2,
+    dotClassName: "bg-amber-500",
+  },
+  aged: {
+    label: "31-120",
+    sortRank: 3,
     dotClassName: "bg-red-500",
+  },
+  dead: {
+    label: "Dead",
+    sortRank: 4,
+    dotClassName: "bg-zinc-500",
   },
   unassigned: {
     label: "Other",
-    sortRank: 3,
+    sortRank: 5,
     dotClassName: "bg-muted-foreground",
   },
 };
 
-const QUEUE_LEGEND_FAMILIES: QueueFamilyKey[] = ["fresh-day1", "fresh-day2to10", "aged"];
+const QUEUE_LEGEND_FAMILIES: QueueFamilyKey[] = ["fresh-day1", "fresh-day2to10", "fresh-day16to30", "aged"];
 
 function normalizeQueueFamily(raw: string | null | undefined): QueueFamilyKey | null {
   const value = String(raw || "").trim().toLowerCase();
@@ -391,8 +466,21 @@ function normalizeQueueFamily(raw: string | null | undefined): QueueFamilyKey | 
   ) {
     return "fresh-day2to10";
   }
+  if (
+    value === "fresh-day16to30"
+    || value === "day16to30"
+    || value === "day16_30"
+    || value === "yellow"
+    || value.includes("16-30")
+    || value.includes("day16")
+  ) {
+    return "fresh-day16to30";
+  }
   if (value === "aged" || value === "red" || value.includes("aged") || value.includes("prospect")) {
     return "aged";
+  }
+  if (value === "dead" || value === "expired" || value.includes("do-not-dial")) {
+    return "dead";
   }
   return null;
 }
@@ -414,8 +502,11 @@ function inferQueueFamily(item: CxCallQueueItem): QueueFamilyKey {
     : item.queueDayIndex;
   const activeDay = Number(activeDayRaw);
   if (Number.isFinite(activeDay)) {
-    if (activeDay <= 0) return "fresh-day1";
+    if (activeDay <= 2) return "fresh-day1";
     if (activeDay <= 15) return "fresh-day2to10";
+    if (activeDay <= 30) return "fresh-day16to30";
+    if (activeDay > 120) return "dead";
+    return "aged";
   }
 
   const intakeSource = String(item.intakeSource || readString(merged, "intakeSource", "sourceName")).toLowerCase();
@@ -2551,8 +2642,17 @@ export function CXWorkspace() {
   const data = workspace.data;
   const currentExtensionId =
     String(data?.agent?.extensionId || user?.extensionId || "").trim() || null;
+  const currentCallAgentShellPhones = collectAgentShellPhones(
+    data?.agent?.exShells,
+    data?.agent?.activeExShell,
+    data?.agent?.requestedExShell,
+  );
+  const rawCurrentCallSnapshot =
+    (data?.ex.currentCall as Record<string, unknown> | null | undefined) ?? null;
+  const internalCurrentCallSuppressed =
+    isInternalExShellCurrentCall(rawCurrentCallSnapshot, currentCallAgentShellPhones);
   const rawCurrentCall = contactFromCurrentCall(
-    (data?.ex.currentCall as Record<string, unknown> | null | undefined) ?? null,
+    internalCurrentCallSuppressed ? null : rawCurrentCallSnapshot,
   );
   const rawCurrentCallSessionId = rawCurrentCall?.sessionId || "";
   const currentCallIsSuppressed =
@@ -2872,11 +2972,10 @@ export function CXWorkspace() {
     const params = new URLSearchParams(window.location.search);
     const fromQuery = normalize(params.get("cxDialExecutionMode") || params.get("cxDialMode"));
     if (fromQuery) return fromQuery;
-    try {
-      return normalize(localStorage.getItem("cxDialExecutionMode"));
-    } catch {
-      return null;
-    }
+    // Keep execution-mode overrides explicit. A stale localStorage flag from
+    // manual-dial testing should never turn normal queue serving into a manual
+    // outbound call for agents.
+    return null;
   }, []);
 
   // Repopulate the form when a new lookup resolves, preserving any fields
@@ -3674,7 +3773,7 @@ export function CXWorkspace() {
     .toLowerCase();
   const canAutoServeForAgentState =
     autoServeDesiredAvailability === "available"
-    && !AUTO_SERVE_BLOCKED_AGENT_STATES.has(autoServeAgentState);
+    && (internalCurrentCallSuppressed || !AUTO_SERVE_BLOCKED_AGENT_STATES.has(autoServeAgentState));
   const canAttemptStartQueueLead =
     queueItems.length > 0 &&
     canAutoServeForAgentState &&
@@ -3894,6 +3993,7 @@ export function CXWorkspace() {
   );
   const currentCallChannel = String(currentCallSnapshot.channel || "").trim().toLowerCase();
   const hasActiveExCall =
+    !internalCurrentCallSuppressed &&
     currentCallChannel === "ex" &&
     Boolean(
       currentCallSnapshot.sessionId ||

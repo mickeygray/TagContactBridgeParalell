@@ -55,6 +55,9 @@ async function main() {
   const dry = hasFlag(argv, "--dry");
   const manual = hasFlag(argv, "--manual");
   const keepLead = hasFlag(argv, "--keep-lead");
+  const firstName = readFlag(argv, "--first-name") || "Mickey";
+  const lastName = readFlag(argv, "--last-name") || "Gray";
+  const caseId = readFlag(argv, "--case-id") || "LINUX-SMOKE";
   const omitCallerId =
     hasFlag(argv, "--no-caller-id")
     || String(process.env.RINGCX_MANUAL_CALL_SEND_CALLER_ID || "").trim().toLowerCase() === "false";
@@ -88,6 +91,7 @@ async function main() {
   logKv("dial group id", dialGroupId || "(not set)");
   logKv("campaign id", campaignId || "(will be looked up)");
   logKv("caller id", callerId || "(none — campaign default)");
+  logKv("lead display", `${firstName} ${lastName} / ${caseId}`);
   logKv("dry-run", dry);
 
   if (!agentEmail) {
@@ -165,7 +169,7 @@ async function main() {
 
   // 1. Load the lead
   logHeader("Load lead into campaign");
-  const externId = `smoke-${Date.now()}`;
+  const externId = `smoke-${caseId.toLowerCase().replace(/[^a-z0-9]+/g, "-")}-${Date.now()}`.slice(0, 120);
   const loadPayload = {
     description: `progressive smoke ${externId}`,
     dialPriority: "IMMEDIATE",
@@ -177,8 +181,14 @@ async function main() {
     uploadLeads: [{
       externId,
       leadPhone: destination,
-      firstName: "Smoke",
-      lastName: "Test",
+      firstName,
+      lastName,
+      extendedLeadData: {
+        source: "parallel-progressive-smoke",
+        caseId,
+        expectedDisplayName: `${firstName} ${lastName}`.trim(),
+        expectedLeadPhoneLast4: destination.slice(-4),
+      },
     }],
   };
   if (dry) {

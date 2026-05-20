@@ -9,6 +9,7 @@
 //
 // Usage:
 //   node scripts/ringcx-audio-stream-probe-server.js --h2-port 3334 --http-port 3335
+//   node scripts/ringcx-audio-stream-probe-server.js --h2s-port 3337 --tls-cert cert.pem --tls-key key.pem
 //
 // Expose the h2c listener through ngrok for gRPC-style probes:
 //   ngrok http --upstream-protocol=http2 3334
@@ -122,8 +123,14 @@ function makeGrpcFrameParser({ requestId, eventLog, outDir, eventBase }) {
   };
 }
 
-function startHttp2Probe({ port, outDir, eventLog }) {
-  const server = http2.createServer();
+function startHttp2Probe({ port, outDir, eventLog, protocol = "h2c", tlsCert = "", tlsKey = "" }) {
+  const server = protocol === "h2s"
+    ? http2.createSecureServer({
+      allowHTTP1: true,
+      cert: fs.readFileSync(tlsCert),
+      key: fs.readFileSync(tlsKey),
+    })
+    : http2.createServer();
 
   server.on("stream", (stream, headers) => {
     const requestId = `${timestampForFile()}-${Math.random().toString(16).slice(2, 10)}`;
@@ -136,7 +143,7 @@ function startHttp2Probe({ port, outDir, eventLog }) {
 
     const eventBase = {
       requestId,
-      protocol: "h2c",
+      protocol,
       method: rawMethod,
       path: rawPath,
       contentType: rawContentType,
@@ -147,11 +154,39 @@ function startHttp2Probe({ port, outDir, eventLog }) {
     writeJsonLine(eventLog, { type: "h2.start", ...eventBase });
 
     if (!stream.headersSent) {
-      stream.respond({
-        ":status": 200,
-        "content-type": rawContentType.includes("grpc") ? rawContentType : "application/grpc",
-        "grpc-status": "0",
-      });
+      // gRPC over HTTP/2: response headers must NOT carry grpc-status.
+      // grpc-status belongs in HTTP/2 TRAILERS, sent via sendTrailers()
+      // from the wantTrailers handler below. waitForTrailers: true
+      // tells the framer to hold END_STREAM until trailers arrive.
+      stream.respond(
+        {
+          ":status": 200,
+          "content-type": rawContentType.includes("grpc")
+            ? rawContentType
+            : "application/grpc",
+        },
+        { waitForTrailers: true },
+      );
+
+      // Idempotency shim around sendTrailers. Node's http2/compat layer
+      // attaches its own onStreamTrailersReady listener that also calls
+      // sendTrailers on the same stream — when both fire (ours + theirs)
+      // the second call throws ERR_HTTP2_TRAILERS_ALREADY_SENT and
+      // crashes the process. Wrapping the bound method per-stream lets
+      // whichever listener wins the race actually send; the loser is a
+      // no-op. Only patched on the gRPC content-type path so non-gRPC
+      // streams keep the default behavior.
+      const realSendTrailers = stream.sendTrailers.bind(stream);
+      let trailersSent = false;
+      stream.sendTrailers = (headers) => {
+        if (trailersSent) return;
+        trailersSent = true;
+        try {
+          return realSendTrailers(headers);
+        } catch (err) {
+          console.error(`[h2] sendTrailers threw for ${requestId}: ${err.message}`);
+        }
+      };
     }
 
     const grpcParser = rawContentType.includes("grpc")
@@ -188,9 +223,21 @@ function startHttp2Probe({ port, outDir, eventLog }) {
       console.log(`[h2] end ${requestId} totalBytes=${totalBytes} sample=${bodyPath}`);
       writeJsonLine(eventLog, completed);
 
-      // gRPC expects a 200 with grpc-status trailers for success. This does
-      // not prove we handled the app-level proto, but it keeps probes tidy.
+      // Close the response stream. With waitForTrailers: true above,
+      // this defers END_STREAM until trailers are sent — the
+      // wantTrailers handler below fires before the framer closes.
       stream.end();
+    });
+
+    stream.on("wantTrailers", () => {
+      try {
+        stream.sendTrailers({
+          "grpc-status": "0",
+          "grpc-message": "ok",
+        });
+      } catch (err) {
+        console.error(`[h2] sendTrailers failed for ${requestId}: ${err.message}`);
+      }
     });
 
     stream.on("error", (error) => {
@@ -199,13 +246,53 @@ function startHttp2Probe({ port, outDir, eventLog }) {
     });
   });
 
+  server.on("request", (req, res) => {
+    if (req.httpVersionMajor >= 2) return;
+    const requestId = `${timestampForFile()}-${Math.random().toString(16).slice(2, 10)}`;
+    const chunks = [];
+    let totalBytes = 0;
+    const startedAt = Date.now();
+    const eventBase = {
+      requestId,
+      protocol: `${protocol}-http1-fallback`,
+      method: req.method,
+      path: req.url,
+      headers: sanitizeHeaders(req.headers),
+      startedAt: new Date().toISOString(),
+    };
+    console.log(`[${protocol}] http1 fallback ${requestId} ${req.method} ${req.url}`);
+    writeJsonLine(eventLog, { type: "h2.http1_fallback.start", ...eventBase });
+    req.on("data", (chunk) => {
+      totalBytes += chunk.length;
+      if (chunks.reduce((sum, item) => sum + item.length, 0) < 64 * 1024) {
+        chunks.push(Buffer.from(chunk));
+      }
+    });
+    req.on("end", () => {
+      const sample = Buffer.concat(chunks);
+      const bodyPath = path.join(outDir, `${requestId}.${protocol}.http1.body.sample.bin`);
+      fs.writeFileSync(bodyPath, sample);
+      writeJsonLine(eventLog, {
+        type: "h2.http1_fallback.end",
+        ...eventBase,
+        endedAt: new Date().toISOString(),
+        elapsedMs: Date.now() - startedAt,
+        totalBytes,
+        bodySamplePath: bodyPath,
+        bodySampleBase64: base64Sample(sample),
+      });
+      res.writeHead(426, { "content-type": "application/json" });
+      res.end(JSON.stringify({ ok: false, error: "expected-http2-grpc", requestId }));
+    });
+  });
+
   server.on("sessionError", (error) => {
-    console.error(`[h2] session error: ${error.message}`);
-    writeJsonLine(eventLog, { type: "h2.session_error", message: error.message, at: new Date().toISOString() });
+    console.error(`[${protocol}] session error: ${error.message}`);
+    writeJsonLine(eventLog, { type: "h2.session_error", protocol, message: error.message, at: new Date().toISOString() });
   });
 
   server.listen(port, "0.0.0.0", () => {
-    console.log(`[h2] listening on h2c://0.0.0.0:${port}`);
+    console.log(`[h2] listening on ${protocol}://0.0.0.0:${port}`);
   });
   return server;
 }
@@ -260,18 +347,28 @@ function startHttpProbe({ port, outDir, eventLog }) {
 function main() {
   const argv = process.argv.slice(2);
   const h2Port = Number(readFlag(argv, "--h2-port", "3334")) || 3334;
+  const h2sPort = Number(readFlag(argv, "--h2s-port", "0")) || 0;
   const httpPort = Number(readFlag(argv, "--http-port", "3335")) || 3335;
+  const tlsCert = readFlag(argv, "--tls-cert", "");
+  const tlsKey = readFlag(argv, "--tls-key", "");
   const outDir = path.resolve(readFlag(argv, "--out-dir", path.join("runtime", "ringcx-stream-probe")));
   ensureDir(outDir);
   const eventLog = path.join(outDir, "events.ndjson");
 
   console.log("RingCX audio stream probe server");
   console.log(`  h2 port:   ${h2Port}`);
+  console.log(`  h2s port:  ${h2sPort || "(off)"}`);
   console.log(`  http port: ${httpPort}`);
   console.log(`  out dir:   ${outDir}`);
   console.log(`  event log: ${eventLog}`);
 
   startHttp2Probe({ port: h2Port, outDir, eventLog });
+  if (h2sPort) {
+    if (!tlsCert || !tlsKey) {
+      throw new Error("--h2s-port requires --tls-cert and --tls-key");
+    }
+    startHttp2Probe({ port: h2sPort, outDir, eventLog, protocol: "h2s", tlsCert, tlsKey });
+  }
   startHttpProbe({ port: httpPort, outDir, eventLog });
 }
 

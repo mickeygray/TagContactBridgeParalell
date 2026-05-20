@@ -51,6 +51,14 @@ function normalizePhone(value) {
   return digits || null;
 }
 
+function phoneValuesCouldMatch(left, right) {
+  const a = normalizePhone(left);
+  const b = normalizePhone(right);
+  if (!a || !b) return false;
+  if (a === b) return true;
+  return a.length >= 4 && b.length >= 4 && (a.endsWith(b) || b.endsWith(a));
+}
+
 function collectScalarStrings(value, output = [], depth = 0) {
   if (output.length >= 160 || depth > 5 || value === null || value === undefined) return output;
   if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
@@ -87,6 +95,26 @@ function activeCallContainsPhone(call, phone) {
     .some((candidate) => candidate === target);
 }
 
+function cloneActiveCallForAudit(value, depth = 0) {
+  if (value == null) return value;
+  if (depth > 5) return "[depth-limit]";
+  if (value instanceof Date) return value.toISOString();
+  if (Array.isArray(value)) {
+    return value.slice(0, 40).map((item) => cloneActiveCallForAudit(item, depth + 1));
+  }
+  if (typeof value === "object") {
+    const out = {};
+    for (const [key, child] of Object.entries(value).slice(0, 120)) {
+      out[key] = cloneActiveCallForAudit(child, depth + 1);
+    }
+    return out;
+  }
+  if (typeof value === "string") {
+    return value.length > 2000 ? `${value.slice(0, 2000)}...[truncated]` : value;
+  }
+  return value;
+}
+
 function summarizeActiveCall(call = null) {
   if (!call || typeof call !== "object") return null;
   const summary = {};
@@ -114,13 +142,20 @@ function summarizeActiveCall(call = null) {
     "username",
     "agentEmail",
     "externId",
+    "externalId",
+    "interactionId",
+    "dialogId",
+    "segmentId",
+    "sessionId",
+    "callSessionId",
   ]) {
     if (call[key] !== undefined && call[key] !== null && call[key] !== "") {
       summary[key] = call[key];
     }
   }
   summary.uii = summary.uii || summary.UII || summary.callId || summary.callID || summary.activeCallId || summary.id || null;
-  summary.rawKeys = Object.keys(call).slice(0, 40);
+  summary.rawKeys = Object.keys(call).slice(0, 120);
+  summary.raw = cloneActiveCallForAudit(call);
   return summary;
 }
 
@@ -309,13 +344,24 @@ async function markAgentCxActive(queueItem = {}, call = {}, now = new Date()) {
   }
 
   const uii = extractActiveCallUii(call);
+  const fromPhone = call?.ani || call?.sourcePhone || call?.callerId || null;
+  const genericPhone = call?.phone || null;
+  const genericMatchesFrom = phoneValuesCouldMatch(genericPhone, fromPhone);
+  const toPhone =
+    queueItem.phone ||
+    call?.destination ||
+    call?.destinationPhone ||
+    call?.leadPhone ||
+    call?.dnis ||
+    (genericMatchesFrom ? null : genericPhone) ||
+    null;
   const currentCall = {
     sessionId: uii,
     telephonySessionId: uii,
     direction: "outbound",
-    from: call?.ani || call?.sourcePhone || call?.callerId || null,
+    from: fromPhone,
     fromName: queueItem.assignment?.agentName || null,
-    to: queueItem.phone || call?.destination || call?.destinationPhone || call?.leadPhone || call?.phone || null,
+    to: toPhone,
     channel: "cx",
     startTime: resolveCallStartTime(queueItem, now),
   };

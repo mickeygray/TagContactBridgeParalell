@@ -17,6 +17,8 @@
           <th>Company</th>
           <th class="center">Leads</th>
           <th class="center">Calls</th>
+          <th class="center">LD calls</th>
+          <th class="center">LD unique</th>
           <th class="center">Spend</th>
           <th class="center">Money in</th>
           <th class="center">Deals</th>
@@ -27,6 +29,8 @@
           <td><strong>{{domain}}</strong></td>
           <td class="center">{{leads}}</td>
           <td class="center">{{calls}}</td>
+          <td class="center">{{default cxCalls 0}}</td>
+          <td class="center">{{default cxUniqueCallers 0}}</td>
           <td class="center">{{money spend}}</td>
           <td class="center">{{money moneyIn}}</td>
           <td class="center">{{deals}}</td>
@@ -44,6 +48,14 @@
         <strong>{{daily.calls.total}}</strong> total calls ·
         <strong>{{daily.calls.callsOver5}}</strong> over 5 min
       </div>
+      {{#if cxToday.calls}}
+      <div class="summary-line" style="margin-top:4px;">
+        LD: <strong>{{cxToday.calls}}</strong> calls ·
+        <strong>{{cxToday.uniqueCallers}}</strong> unique callers ·
+        <strong>{{cxToday.uniqueSessions}}</strong> sessions ·
+        <strong>{{cxToday.callsOver5}}</strong> over 5 min
+      </div>
+      {{/if}}
       {{#if daily.calls.byChannel.length}}
         <table class="data" cellpadding="0" cellspacing="0" style="margin-top:8px;">
           <tr>

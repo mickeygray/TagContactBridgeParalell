@@ -2,12 +2,11 @@
 
 const { getCompanyConfig } = require("../../shared-config/src");
 
-// TCPA defaults: FCC rule limits marketing voice calls + SMS to 8am-9pm
-// recipient-local time. We go conservative (8pm end) to keep operators
-// well inside the safe window and leave buffer for clock skew across
-// zones. `contactEndHour` env overrides win if set, but we cap at 21
-// so an aggressive config can't wander past TCPA.
-const TCPA_START_HOUR = 8;
+// Contact-window defaults stay at 8am-8pm local. Some campaigns can
+// explicitly opt into a 7am start via company config; end-hour overrides
+// remain capped at 21 so an aggressive config can't wander past 9pm.
+const DEFAULT_CONTACT_START_HOUR = 8;
+const EARLIEST_CONFIGURED_START_HOUR = 7;
 const TCPA_END_HOUR = 20; // 8pm local — one hour shy of the 9pm cap
 const TCPA_HARD_CAP_HOUR = 21;
 
@@ -71,12 +70,17 @@ function formatDateInZone(date, timeZone) {
 function getTimezoneParts(date, timeZone) {
   const formatter = new Intl.DateTimeFormat("en-US", {
     timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
     weekday: "short",
+    second: "2-digit",
     hour: "numeric",
     minute: "numeric",
     hour12: false,
   });
   const parts = formatter.formatToParts(date);
+  const hour = Number(parts.find((part) => part.type === "hour")?.value || 0);
   const weekdayLabel = parts.find((part) => part.type === "weekday")?.value || "";
   const weekdayMap = {
     Sun: 0,
@@ -89,10 +93,36 @@ function getTimezoneParts(date, timeZone) {
   };
 
   return {
+    year: Number(parts.find((part) => part.type === "year")?.value || 0),
+    month: Number(parts.find((part) => part.type === "month")?.value || 0),
+    day: Number(parts.find((part) => part.type === "day")?.value || 0),
     weekday: weekdayMap[weekdayLabel] ?? -1,
-    hour: Number(parts.find((part) => part.type === "hour")?.value || 0),
+    hour: hour === 24 ? 0 : hour,
     minute: Number(parts.find((part) => part.type === "minute")?.value || 0),
+    second: Number(parts.find((part) => part.type === "second")?.value || 0),
   };
+}
+
+function getZonedOffsetMs(date, timeZone) {
+  const parts = getTimezoneParts(date, timeZone);
+  const asUtc = Date.UTC(
+    parts.year,
+    parts.month - 1,
+    parts.day,
+    parts.hour,
+    parts.minute,
+    parts.second || 0,
+  );
+  return asUtc - new Date(date).getTime();
+}
+
+function makeZonedDate(year, month, day, hour = 0, minute = 0, second = 0, timeZone) {
+  let utcMs = Date.UTC(year, month - 1, day, hour, minute, second, 0);
+  for (let index = 0; index < 3; index += 1) {
+    utcMs = Date.UTC(year, month - 1, day, hour, minute, second, 0)
+      - getZonedOffsetMs(new Date(utcMs), timeZone);
+  }
+  return new Date(utcMs);
 }
 
 function buildChannelPolicy(domain, channel) {
@@ -105,8 +135,8 @@ function buildChannelPolicy(domain, channel) {
   // email gets the full week by default.
   const activeWeekdays = cadence.activeWeekdays || "1,2,3,4,5";
   const startHour = Math.max(
-    TCPA_START_HOUR,
-    Math.min(23, Number(cadence.contactStartHour) || TCPA_START_HOUR),
+    EARLIEST_CONFIGURED_START_HOUR,
+    Math.min(23, Number(cadence.contactStartHour) || DEFAULT_CONTACT_START_HOUR),
   );
   const configuredEndHour = Math.max(
     startHour + 1,
@@ -148,18 +178,38 @@ function findNextAllowedTime(date, policy) {
   let cursor = new Date(date.getTime());
   cursor.setSeconds(0, 0);
 
-  for (let attempt = 0; attempt < 24 * 14 * 4; attempt += 1) {
+  for (let attempt = 0; attempt < 31; attempt += 1) {
     const parts = getTimezoneParts(cursor, policy.timezone);
-    const inWeekday = allowedWeekdays.includes(parts.weekday);
-    const inHourWindow = parts.hour >= policy.startHour && parts.hour < policy.endHour;
     const localDate = formatDateInZone(cursor, policy.timezone);
+    const inWeekday = allowedWeekdays.includes(parts.weekday);
     const isHoliday = policy.honorHolidays && US_CONTACT_HOLIDAYS.has(localDate);
 
-    if (inWeekday && inHourWindow && !isHoliday) {
-      return cursor;
+    if (inWeekday && !isHoliday) {
+      if (parts.hour < policy.startHour) {
+        return makeZonedDate(
+          parts.year,
+          parts.month,
+          parts.day,
+          policy.startHour,
+          0,
+          0,
+          policy.timezone,
+        );
+      }
+      if (parts.hour < policy.endHour) {
+        return cursor;
+      }
     }
 
-    cursor = new Date(cursor.getTime() + 15 * 60 * 1000);
+    cursor = makeZonedDate(
+      parts.year,
+      parts.month,
+      parts.day + 1,
+      policy.startHour,
+      0,
+      0,
+      policy.timezone,
+    );
   }
 
   return cursor;
@@ -250,7 +300,8 @@ function evaluateFrequencyCap(cadenceState, channel) {
 
 module.exports = {
   US_CONTACT_HOLIDAYS,
-  TCPA_START_HOUR,
+  DEFAULT_CONTACT_START_HOUR,
+  EARLIEST_CONFIGURED_START_HOUR,
   TCPA_END_HOUR,
   TCPA_HARD_CAP_HOUR,
   buildChannelPolicy,

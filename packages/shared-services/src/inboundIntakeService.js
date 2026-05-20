@@ -210,6 +210,22 @@ const ROUTE_CAMPAIGNS = Object.freeze({
     sourceChannel: "lead-distribution",
     logicsSourceName: "LD Posting",
   },
+  // LD queue split: vendor posts include either `ldcustom` or
+  // `ldgeneral` to indicate which sub-bucket the lead belongs to.
+  // We surface the split as a distinct routeCampaignKey so queue
+  // filtering can fan out without re-parsing the snapshot.
+  "ld-custom": {
+    key: "ld-custom",
+    name: "LD Custom Lead",
+    sourceChannel: "lead-distribution",
+    logicsSourceName: "LD Posting",
+  },
+  "ld-general": {
+    key: "ld-general",
+    name: "LD General Lead",
+    sourceChannel: "lead-distribution",
+    logicsSourceName: "LD Posting",
+  },
   affiliate: {
     key: "affiliate",
     name: "Affiliate Lead",
@@ -217,6 +233,121 @@ const ROUTE_CAMPAIGNS = Object.freeze({
     logicsSourceName: "Affiliate - OEV4LL6O",
   },
 });
+
+// NOTE(ld-queue-split): producer side of the LD queue split.
+// Consumer side is in cxWorkspaceService.js (materializeQueueSupplyForAgent
+// + maybeRefillCxQueueForAgent) and cxQueuePolicyService.js
+// (resolveAccountQueuePolicy). Grep `TODO(ld-queue-split)` for the
+// implementation breadcrumbs.
+//
+// LD queue-split detection by VALUE, not by field name.
+//
+// Each LD sub-bucket has a fixed opaque tracking code that the vendor
+// drops into the payload. The field name varies (we've seen `"source ID"`
+// with a space in production samples, but it could just as easily be
+// `pubid` / `subid` / `partnerId` depending on the partner's posting
+// template). The CODE is stable; the carrier field is not.
+//
+// Bucket mapping (vendor-supplied):
+//   GS03RB7W → LDCustom   queue
+//   JM8K5B7Y → LDGeneral  queue
+//
+// Both can be overridden via env (LD_CUSTOM_CODE / LD_GENERAL_CODE)
+// if the vendor ever rotates the codes — no code change needed.
+function canonicalLdBucketValue(value) {
+  return String(value || "").trim().toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+function addLdBucketMatchers(map, values, match) {
+  for (const value of values) {
+    const canonical = canonicalLdBucketValue(value);
+    if (canonical) map.set(canonical, match);
+  }
+}
+
+function parseLdBucketAliases(value) {
+  return String(value || "")
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+}
+
+function getLdBucketCodeMap() {
+  const customCode = String(process.env.LD_CUSTOM_CODE || "GS03RB7W").trim();
+  const generalCode = String(process.env.LD_GENERAL_CODE || "JM8K5B7Y").trim();
+  const map = new Map();
+  const customMatch = {
+    kind: "custom",
+    campaignKey: "ld-custom",
+    label: "LDCustom",
+    code: customCode || null,
+  };
+  const generalMatch = {
+    kind: "general",
+    campaignKey: "ld-general",
+    label: "LDGeneral",
+    code: generalCode || null,
+  };
+  if (customCode) {
+    addLdBucketMatchers(map, [customCode], customMatch);
+  }
+  if (generalCode) {
+    addLdBucketMatchers(map, [generalCode], generalMatch);
+  }
+  addLdBucketMatchers(
+    map,
+    [
+      "ldcustom",
+      "ld custom",
+      "LD Custom",
+      "Wynn Tax Custom",
+      "Wynn Custom",
+      ...parseLdBucketAliases(process.env.LD_CUSTOM_ALIASES),
+    ],
+    customMatch,
+  );
+  addLdBucketMatchers(
+    map,
+    [
+      "ldgeneral",
+      "ld general",
+      "LD General",
+      "Wynn Tax General",
+      "Wynn General",
+      ...parseLdBucketAliases(process.env.LD_GENERAL_ALIASES),
+    ],
+    generalMatch,
+  );
+  return map;
+}
+
+function extractLdSubsource(payload = {}) {
+  if (!payload || typeof payload !== "object") return null;
+  const bucketByCode = getLdBucketCodeMap();
+  if (bucketByCode.size === 0) return null;
+
+  // Scan top-level payload values for a bucket code match. We only
+  // walk one level deep — these codes always arrive at the top of the
+  // POST body / query string, never buried inside nested objects.
+  // Case-insensitive compare so a casing typo doesn't blackhole a lead.
+  for (const [fieldName, rawValue] of Object.entries(payload)) {
+    if (rawValue == null) continue;
+    if (typeof rawValue !== "string" && typeof rawValue !== "number") continue;
+    const value = String(rawValue).trim();
+    if (!value) continue;
+    const match = bucketByCode.get(canonicalLdBucketValue(value));
+    if (match) {
+      return {
+        kind: match.kind,
+        campaignKey: match.campaignKey,
+        label: match.label,
+        value,                              // "GS03RB7W"
+        sourceFieldName: fieldName,         // "source ID"
+      };
+    }
+  }
+  return null;
+}
 
 function extractVendorSourceName(payload = {}) {
   return extractFirstValue(
@@ -785,9 +916,27 @@ function normalizeLdLeadPayload(payload = {}, headers = {}, options = {}) {
   const normalized = normalizeWebsiteLeadPayload(payload, headers);
   const prePing = options.prePing || null;
   const intakeSource = prePing ? "ld-posting" : "ld";
-  const campaign = routeCampaignFor(intakeSource);
-  const partnerSource = extractPartnerSourceName(payload) || "ld";
-  const vendorSourceName = extractVendorSourceName(payload) || "ld";
+  const baseCampaign = routeCampaignFor(intakeSource);
+
+  // Detect the LD queue-split signal. When `ldcustom` or `ldgeneral`
+  // is present on the payload, route to the matching sub-campaign
+  // (`ld-custom` / `ld-general`) and stamp the human-readable bucket
+  // label (`LDCustom` / `LDGeneral`) onto partnerSource + vendorSourceName
+  // so the cadence row is self-describing. The raw vendor tracking
+  // code (e.g. GS03RB7W) is preserved in payloadSnapshot for audits.
+  // When absent we fall back to the plain `ld` campaign — existing
+  // intake behavior unchanged.
+  const ldSub = extractLdSubsource(payload);
+  const campaign = ldSub
+    ? routeCampaignFor(ldSub.campaignKey) || baseCampaign
+    : baseCampaign;
+
+  const partnerSource = ldSub?.label
+    || extractPartnerSourceName(payload)
+    || "ld";
+  const vendorSourceName = ldSub?.label
+    || extractVendorSourceName(payload)
+    || "ld";
 
   return applyLeadOverrides(normalized, {
     domain: "WYNN",
@@ -810,6 +959,13 @@ function normalizeLdLeadPayload(payload = {}, headers = {}, options = {}) {
       contactDomain: "WYNN",
       lockContactDomain: true,
       prePingCallbackUrl: prePing?.callbackUrl || null,
+      // Preserve the raw subsource value + the bucket label so future
+      // tooling can re-derive the split without having to re-parse
+      // the original webhook body.
+      ldSubsourceKind: ldSub?.kind || null,         // "custom" | "general" | null
+      ldSubsourceLabel: ldSub?.label || null,       // "LDCustom" | "LDGeneral"
+      ldSubsourceValue: ldSub?.value || null,       // "GS03RB7W"
+      ldSubsourceField: ldSub?.sourceFieldName || null,
     },
   });
 }

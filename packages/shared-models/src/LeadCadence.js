@@ -144,6 +144,17 @@ const leadCadenceSchema = new mongoose.Schema(
       //                                // and after each recheck (next boundary)
       //   }
       dncCheck: { type: mongoose.Schema.Types.Mixed, default: null },
+      // Per-lead opt-in to bypass the contact-timing gate
+      // (quiet hours / weekday / TCPA windows / holidays) on specific
+      // channels. Default empty — every existing lead behaves the way
+      // it always has. Smoke tests and ops dry-runs flip this to fire
+      // a single SMS/email outside business hours WITHOUT mutating the
+      // global timing policy. The dispatcher in outboundDispatchService
+      // checks this BEFORE evaluateChannelContactTime — if the channel
+      // (or "all") is truthy, the timing gate is skipped and the action
+      // dispatches immediately. Logs the bypass with reason="bypass-test-lead".
+      // Shape: { sms: true, email: true } or { all: true }.
+      bypassChannelTiming: { type: mongoose.Schema.Types.Mixed, default: {} },
     },
     validationContext: { type: mongoose.Schema.Types.Mixed, default: {} },
     attributionContext: { type: mongoose.Schema.Types.Mixed, default: {} },

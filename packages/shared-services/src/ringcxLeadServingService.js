@@ -100,9 +100,14 @@ function resolveQueueItemRcxRouting(queueItem = {}) {
       ? readEnvExternalId("RINGCX_VOICE_NEW_CAMPAIGN_ID")
       : family === "fresh-day2to10"
         ? readEnvExternalId("RINGCX_VOICE_OLD_CAMPAIGN_ID")
-        : family === "aged"
-          ? readEnvExternalId("RINGCX_VOICE_AGED_CAMPAIGN_ID")
-          : null;
+        : family === "fresh-day16to30"
+          ? (
+              readEnvExternalId("RINGCX_VOICE_YELLOW_CAMPAIGN_ID")
+              || readEnvExternalId("RINGCX_VOICE_OLD_CAMPAIGN_ID")
+            )
+          : family === "aged"
+            ? readEnvExternalId("RINGCX_VOICE_AGED_CAMPAIGN_ID")
+            : null;
   const explicitDialGroupId =
     normalizeExternalId(queueItem.rcxDialGroupId);
   const explicitCampaignId =
@@ -170,7 +175,7 @@ function splitName(value) {
 
 // Map the existing cxDialQueue `queueFamily` → new UCQ ageBucket.
 // queueFamily values are normalized by cxLoadBalancerService:
-//   fresh-day1 / fresh-day2to10 / aged
+//   fresh-day1 / fresh-day2to10 / fresh-day16to30 / aged
 // Default to day2_10 for unknown values.
 function mapQueueFamilyToAgeBucket(queueFamily) {
   return deriveUcqAgeBucket({ queueFamily });
@@ -196,7 +201,7 @@ function isPostFirstContactQueueItem(queueItem = {}) {
     ? queueItem.metadata
     : {};
   const family = String(queueItem.queueFamily || metadata.queueFamily || "").trim().toLowerCase();
-  if (family === "fresh-day2to10" || family === "aged") return true;
+  if (family === "fresh-day2to10" || family === "fresh-day16to30" || family === "aged") return true;
 
   const stageIndex = Number(queueItem.progressiveStageIndex ?? metadata.progressiveStageIndex);
   if (Number.isFinite(stageIndex) && stageIndex > 0 && stageIndex < 99) return true;

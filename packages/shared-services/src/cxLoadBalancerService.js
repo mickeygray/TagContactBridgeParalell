@@ -74,6 +74,7 @@ function emptyAssignmentStats(date = getTodayKey()) {
     totalAssigned: 0,
     freshDay1Assigned: 0,
     freshDay2to10Assigned: 0,
+    freshDay16to30Assigned: 0,
     agedAssigned: 0,
     openAssignments: 0,
     lastAssignedAt: null,
@@ -90,6 +91,7 @@ function normalizeAssignmentStats(raw = null, date = getTodayKey()) {
     totalAssigned: Number(raw.totalAssigned || 0),
     freshDay1Assigned: Number(raw.freshDay1Assigned || 0),
     freshDay2to10Assigned: Number(raw.freshDay2to10Assigned || 0),
+    freshDay16to30Assigned: Number(raw.freshDay16to30Assigned || 0),
     agedAssigned: Number(raw.agedAssigned || 0),
     openAssignments: Math.max(Number(raw.openAssignments || 0), 0),
     lastAssignedAt: raw.lastAssignedAt || null,
@@ -101,6 +103,7 @@ function familyCountForStats(stats, queueFamily) {
   const normalized = normalizeQueueFamily(queueFamily);
   if (normalized === "fresh-day1") return Number(stats.freshDay1Assigned || 0);
   if (normalized === "fresh-day2to10") return Number(stats.freshDay2to10Assigned || 0);
+  if (normalized === "fresh-day16to30") return Number(stats.freshDay16to30Assigned || 0);
   if (normalized === "aged") return Number(stats.agedAssigned || 0);
   return Number(stats.totalAssigned || 0);
 }
@@ -397,9 +400,15 @@ function deriveQueueFamily(item = {}) {
   );
   const fallbackFromPlan = normalizeQueueFamily(
     Number(item.callPlan?.activeDay) > 15
-      ? "aged"
+      ? Number(item.callPlan?.activeDay) <= 30
+        ? "fresh-day16to30"
+        : Number(item.callPlan?.activeDay) <= 120
+          ? "aged"
+          : "dead"
       : Number(item.callPlan?.activeDay) > 0
-        ? "fresh-day2to10"
+        ? Number(item.callPlan?.activeDay) <= 2
+          ? "fresh-day1"
+          : "fresh-day2to10"
         : "fresh-day1",
   );
   const explicit = explicitRaw !== "unassigned" ? explicitRaw : fallbackFromPlan;
@@ -418,8 +427,20 @@ function deriveQueueFamily(item = {}) {
     return "fresh-day1";
   }
   if (ageFamily && explicit === "fresh-day1" && ageFamily !== "fresh-day1") return ageFamily;
-  if (ageFamily === "aged" && explicit === "fresh-day2to10") return "aged";
+  if (ageFamily === "fresh-day16to30" && explicit === "fresh-day2to10") return "fresh-day16to30";
+  if (ageFamily === "aged" && (explicit === "fresh-day2to10" || explicit === "fresh-day16to30")) return "aged";
+  if (ageFamily === "dead" && explicit !== "dead") return "dead";
   return explicit;
+}
+
+function readLastTouchedExtensionId(item = {}) {
+  return String(
+    item?.metadata?.lastTouchedExtensionId ||
+      item?.metadata?.lastDialExecutionDialerExtensionId ||
+      item?.metadata?.lastDialIntentAssignedExtensionId ||
+      item?.metadata?.lastReleasedExtensionId ||
+      "",
+  ).trim();
 }
 
 function rankAgentsForQueueItem(agentStates = [], item = {}, options = {}) {
@@ -467,6 +488,16 @@ function rankAgentsForQueueItem(agentStates = [], item = {}, options = {}) {
       ignoreMaxOpenAssignments,
       zeroContactFresh: zeroContactFresh,
     });
+    const lastTouchedExtensionId = readLastTouchedExtensionId(item);
+    const rotationEligibility =
+      lastTouchedExtensionId && extensionId === lastTouchedExtensionId
+        ? {
+          ...eligibility,
+          eligible: false,
+          reason: "last-agent-called-lead",
+          reasonCode: "last-agent-called-lead",
+        }
+        : eligibility;
     const policyTargetOpen = getQueueFamilyTargetOpen(queuePolicy, queueFamily);
     const targetFillRatio = policyTargetOpen > 0
       ? openAssignments / policyTargetOpen
@@ -490,7 +521,7 @@ function rankAgentsForQueueItem(agentStates = [], item = {}, options = {}) {
       totalAssigned,
       openAssignments,
       lastAssignedAt,
-      eligibility,
+      eligibility: rotationEligibility,
     };
   });
 
@@ -600,6 +631,7 @@ function buildNextAssignmentStats(existingStats = null, queueFamily) {
   next.totalAssigned += 1;
   if (normalizedFamily === "fresh-day1") next.freshDay1Assigned += 1;
   if (normalizedFamily === "fresh-day2to10") next.freshDay2to10Assigned += 1;
+  if (normalizedFamily === "fresh-day16to30") next.freshDay16to30Assigned += 1;
   if (normalizedFamily === "aged") next.agedAssigned += 1;
   next.openAssignments = Math.max(Number(next.openAssignments || 0) + 1, 0);
   next.lastAssignedAt = new Date();

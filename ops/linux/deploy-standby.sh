@@ -54,7 +54,7 @@ step "Pull latest code"
 sudo -H -u "${APP_USER}" bash -lc "cd '${APP_DIR}' && git fetch --prune origin && git checkout '${BRANCH}' && git reset --hard 'origin/${BRANCH}'"
 
 step "Install dependencies and build"
-sudo -H -u "${APP_USER}" bash -lc "cd '${APP_DIR}' && npm ci && npm run build:web"
+sudo -H -u "${APP_USER}" bash -lc "cd '${APP_DIR}' && npm ci && { chmod +x node_modules/7zip-bin/linux/x64/7za 2>/dev/null || true; } && npm run build:web"
 
 step "Linux-safe env overrides"
 set_env "NODE_ENV" "production"
