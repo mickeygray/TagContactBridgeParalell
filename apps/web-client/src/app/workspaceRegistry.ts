@@ -3,6 +3,7 @@ import {
   BarChart3,
   CalendarClock,
   GraduationCap,
+  Headphones,
   Headset,
   Inbox,
   ListChecks,
@@ -23,6 +24,7 @@ export type WorkspaceKey =
   | "social"
   | "cleaning"
   | "users"
+  | "cx-call-tracker"
   | "deploy"
   | "trainer"
   | "cx";
@@ -110,6 +112,14 @@ export const adminWorkspaces: WorkspaceDef[] = [
     label: "Users & Agents",
     description: "Create users, pair to RingCentral, invite via OTP.",
     icon: UserCog,
+    audience: "admin",
+  },
+  {
+    key: "cx-call-tracker",
+    path: "/admin/cx-call-tracker",
+    label: "CX Call Tracker",
+    description: "Today's CX dial activity with playback + download.",
+    icon: Headphones,
     audience: "admin",
   },
   {

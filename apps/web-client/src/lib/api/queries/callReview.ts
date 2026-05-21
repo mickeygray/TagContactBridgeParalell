@@ -158,3 +158,147 @@ export function useCaseCallReviewToday(
     refetchIntervalInBackground: false,
   });
 }
+
+// ── CX Call Tracker (org-wide today list) ────────────────────────────
+
+export type CallPlatformFilter = "cx" | "ex" | "all";
+export type CallDirectionFilter = "outbound" | "inbound" | "all";
+
+export interface CallTrackerAgentBucket {
+  extensionId: string;
+  agentName: string | null;
+  callCount: number;
+  cxCount: number;
+  exCount: number;
+  totalDurationSec: number;
+  withRecording: number;
+  lastCallAt: string | null;
+}
+
+export interface CallTrackerResponse {
+  ok: true;
+  dateKey: string;
+  domains: string[];
+  domain: string;
+  filters: {
+    platform: string;
+    direction: string;
+    extensionId: string | null;
+    hasRecording: boolean | null;
+  };
+  summary: CallReviewSummary;
+  agents: CallTrackerAgentBucket[];
+  calls: CallReviewRow[];
+  truncated: boolean;
+}
+
+export interface CallTrackerFilters {
+  domain?: "ALL" | "TAG" | "WYNN" | string;
+  platform?: CallPlatformFilter;
+  direction?: CallDirectionFilter;
+  hasRecording?: boolean;
+  extensionId?: string | null;
+  sort?: CallSortKey;
+  limit?: number;
+}
+
+export interface CallsByPhoneResponse {
+  ok: true;
+  phone: string;
+  phoneDisplay: string;
+  domains: string[];
+  domain: string;
+  window: {
+    allTime: boolean;
+    days: number | null;
+  };
+  filters: {
+    hasRecording: boolean | null;
+  };
+  summary: CallReviewSummary & {
+    firstCallAt: string | null;
+    lastCallAt: string | null;
+    uniqueAgents: number;
+  };
+  agents: CallTrackerAgentBucket[];
+  calls: CallReviewRow[];
+  truncated: boolean;
+}
+
+export interface CallsByPhoneFilters {
+  domain?: "ALL" | "TAG" | "WYNN" | string;
+  days?: number | "all";
+  hasRecording?: boolean;
+  sort?: CallSortKey;
+  limit?: number;
+}
+
+/** Strip a phone string to its 10-digit US trunk, or return null. */
+export function normalizeUsPhone(input: string | null | undefined): string | null {
+  const digits = String(input || "").replace(/\D/g, "");
+  if (!digits) return null;
+  if (digits.length === 11 && digits.startsWith("1")) return digits.slice(1);
+  if (digits.length === 10) return digits;
+  if (digits.length > 10) return digits.slice(-10);
+  return null;
+}
+
+/**
+ * All historical calls to/from a phone number. 90-day default window;
+ * pass days="all" for the full history. Returns the same row shape as
+ * the other call-review endpoints plus phone-specific summary
+ * (first/last call, unique agents).
+ */
+export function useCallsByPhone(
+  phone: string | null,
+  filters: CallsByPhoneFilters = {},
+) {
+  const normalized = normalizeUsPhone(phone);
+  const query: Record<string, string | number> = {
+    domain: filters.domain ?? "ALL",
+    days: filters.days ?? 90,
+    sort: filters.sort ?? "time",
+  };
+  if (filters.hasRecording !== undefined) {
+    query.hasRecording = filters.hasRecording ? "true" : "false";
+  }
+  if (filters.limit) query.limit = filters.limit;
+  return useQuery({
+    queryKey: queryKeys.callReview.byPhone(normalized ?? "", query),
+    queryFn: () =>
+      api.get<CallsByPhoneResponse>(
+        `/api/admin/call-review/by-phone/${encodeURIComponent(normalized ?? "")}`,
+        { query },
+      ),
+    enabled: Boolean(normalized),
+    staleTime: 10_000,
+    refetchInterval: false,
+    refetchIntervalInBackground: false,
+  });
+}
+
+/**
+ * Org-wide today's-calls list — drives the CX Call Tracker workspace.
+ * Polls every 10s so the page stays live without spamming the server.
+ */
+export function useCallTrackerToday(filters: CallTrackerFilters = {}) {
+  const query: Record<string, string | number> = {
+    domain: filters.domain ?? "ALL",
+    platform: filters.platform ?? "cx",
+    direction: filters.direction ?? "all",
+    sort: filters.sort ?? "time",
+  };
+  if (filters.extensionId) query.extensionId = filters.extensionId;
+  if (filters.hasRecording !== undefined) {
+    query.hasRecording = filters.hasRecording ? "true" : "false";
+  }
+  if (filters.limit) query.limit = filters.limit;
+  return useQuery({
+    queryKey: queryKeys.callReview.tracker(query),
+    queryFn: () =>
+      api.get<CallTrackerResponse>("/api/admin/call-review/today", { query }),
+    staleTime: 5_000,
+    refetchInterval: 10_000,
+    refetchIntervalInBackground: false,
+  });
+}

@@ -1077,6 +1077,26 @@ function buildDestination(configured = {}, routeType, fallbackLabel) {
   };
 }
 
+function normalizeArchiveDirection(value, fallback = "outbound") {
+  const clean = String(value || "").trim().toLowerCase();
+  if (clean === "inbound" || clean === "outbound") return clean;
+  return fallback;
+}
+
+function buildRingcxDestination(destinations = {}, direction = "outbound") {
+  const normalizedDirection = normalizeArchiveDirection(direction);
+  const base = destinations.og || {};
+  const label = normalizedDirection === "inbound" ? "Inbound" : "Outbound";
+  return {
+    key: normalizedDirection,
+    label,
+    folderId: base.folderId || "",
+    folderConfigured: Boolean(String(base.folderId || "").trim()),
+    routeType: `ringcx-${normalizedDirection}`,
+    sourceGroupKey: base.key || "og",
+  };
+}
+
 async function resolveTerminalRouting(callLog, artifact = null, rcRecord = null) {
   const archiveConfig = getArchiveConfig();
   const destinations = archiveConfig.destinations || {};
@@ -1123,10 +1143,13 @@ async function resolveTerminalRouting(callLog, artifact = null, rcRecord = null)
   );
   const terminalCandidate = pickTerminalCandidate(candidates);
   const provider = String(artifact?.provider || "").toLowerCase();
+  const isRingcxRoute = provider === "ringcx";
   const isCustomerServiceRoute =
     provider === "ringcentral" && (cservTouches.length > 0 || hasCustomerServiceTouch);
   const destination =
-    provider === "callrail"
+    isRingcxRoute
+      ? buildRingcxDestination(destinations, callLog.direction)
+      : provider === "callrail"
       ? buildDestination(destinations.og, "origination", "OG")
       : isCustomerServiceRoute
         ? buildDestination(destinations.cs, "customer-service", "CS")
@@ -1134,6 +1157,8 @@ async function resolveTerminalRouting(callLog, artifact = null, rcRecord = null)
   const routeReason =
     provider === "callrail"
       ? "callrail-provider"
+      : isRingcxRoute
+        ? `ringcx-${normalizeArchiveDirection(callLog.direction)}-provider`
       : isCustomerServiceRoute
         ? hasCustomerServiceTouch
           ? "customer-service-text-touch"
@@ -1420,6 +1445,15 @@ async function processCallRecordingArchive({
     const driveClient = createGoogleDriveClient(config.drive);
     const fileName = buildRecordingFileName(callLog, routing, artifact);
     const dateKey = formatDateStamp(callLog.callStartTime);
+    const archiveFileProperties = {
+      telephonySessionId: String(callLog.telephonySessionId),
+      domain: normalizeDomain(callLog.domain),
+      provider: String(artifact.provider || ""),
+      platform: String(callLog.platform || ""),
+      direction: normalizeArchiveDirection(callLog.direction, "unknown"),
+      bucket: destination.key || "",
+      dateKey,
+    };
 
     // Drive-side idempotency: search globally by appProperties for a
     // file already tagged with the same telephonySessionId before
@@ -1493,13 +1527,8 @@ async function processCallRecordingArchive({
       name: fileName,
       mimeType: artifact.mimeType,
       buffer: artifact.buffer,
-      appProperties: {
-        telephonySessionId: String(callLog.telephonySessionId),
-        domain: normalizeDomain(callLog.domain),
-        provider: artifact.provider,
-        bucket: destination.key || "",
-        dateKey,
-      },
+      appProperties: archiveFileProperties,
+      properties: archiveFileProperties,
       description: `Archived call recording for ${normalizeDomain(callLog.domain)} ${callLog.caseId ? `case ${callLog.caseId}` : "unbound call"}`,
     }).catch((error) => {
       error.stage = "upload";

@@ -24,6 +24,10 @@ export const queryKeys = {
       ["call-review", "agent-today", extensionId, domain ?? "TAG", sort ?? "time"] as const,
     caseToday: (caseId: number | string, domain?: string, sort?: string) =>
       ["call-review", "case-today", String(caseId), domain ?? "TAG", sort ?? "time"] as const,
+    tracker: (filters?: Record<string, unknown>) =>
+      ["call-review", "tracker", filters ?? {}] as const,
+    byPhone: (phone: string, filters?: Record<string, unknown>) =>
+      ["call-review", "by-phone", phone, filters ?? {}] as const,
   },
   consent: {
     all: () => ["consent"] as const,

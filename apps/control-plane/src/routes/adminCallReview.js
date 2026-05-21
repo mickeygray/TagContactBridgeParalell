@@ -18,6 +18,7 @@ const express = require("express");
 const {
   callLogRepository,
 } = require("../../../../packages/shared-repositories/src");
+const { CallLog } = require("../../../../packages/shared-models/src");
 const { toErrorResponse } = require("../../../../packages/shared-errors/src");
 
 const PACIFIC_TZ = "America/Los_Angeles";
@@ -49,6 +50,9 @@ function resolveDomainScope(rawDomain) {
   return KNOWN_DOMAINS.includes(raw) ? [raw] : [...KNOWN_DOMAINS];
 }
 const MAX_ROWS = 200;
+// Higher cap for the org-wide /today endpoint — busiest day across both
+// tenants is in the low thousands of rows.
+const MAX_TRACKER_ROWS = 2000;
 
 // Compute the UTC instant for "today 00:00 in Pacific time." Used as
 // the lower bound on callStartTime so we only ever return rows whose
@@ -364,6 +368,309 @@ function createAdminCallReviewRouter(auth) {
             (a, b) => b.callCount - a.callCount,
           ),
           calls: rows,
+        });
+      } catch (error) {
+        return res.status(error.status || 500).json(toErrorResponse(error));
+      }
+    },
+  );
+
+  /**
+   * GET /today
+   *
+   * Org-wide today's calls. Powers the CX Call Tracker workspace —
+   * flat list of every CallLog row on the PT calendar day, across all
+   * tenants by default. Filters narrow the result; sort orders it.
+   *
+   * Query params (all optional):
+   *   domain          "ALL" (default) | "TAG" | "WYNN" | CSV
+   *   platform        "cx" (default) | "ex" | "all"
+   *   direction       "outbound" | "inbound" | "all" (default)
+   *   hasRecording    "true" | "false" (omit for both)
+   *   extensionId     filter to one agent's extension
+   *   sort            "time" (default) | "duration" | "score"
+   *   limit           default 500, cap MAX_TRACKER_ROWS
+   *
+   * Response shape mirrors /agent/:extensionId/today: summary block +
+   * calls[], plus per-agent rollup so the UI can show an at-a-glance
+   * "Anthony 219, Bruce 50, Sean 145" panel.
+   */
+  router.get(
+    "/today",
+    auth.requireAuth,
+    auth.requireAdmin,
+    async (req, res) => {
+      try {
+        const domains = resolveDomainScope(req.query?.domain);
+        const platformParam = String(req.query?.platform || "cx")
+          .trim()
+          .toLowerCase();
+        const directionParam = String(req.query?.direction || "all")
+          .trim()
+          .toLowerCase();
+        const hasRecordingParam = req.query?.hasRecording;
+        const extensionFilter = req.query?.extensionId
+          ? String(req.query.extensionId).trim()
+          : null;
+        const limit = Math.min(
+          Math.max(Number(req.query?.limit) || 500, 1),
+          MAX_TRACKER_ROWS,
+        );
+        const dayStart = startOfPacificDay();
+
+        const baseQuery = {
+          domain: { $in: domains },
+          callStartTime: { $gte: dayStart },
+        };
+        if (platformParam !== "all") {
+          // CallLog rows from before the platform stamp landed are null.
+          // For "cx" filter, "ex" matters too — null is "unattributed,"
+          // not "missing." Only include the requested value explicitly.
+          baseQuery.platform = platformParam;
+        }
+        if (directionParam !== "all") {
+          baseQuery.direction = directionParam;
+        }
+        if (extensionFilter) {
+          baseQuery.extensionId = extensionFilter;
+        }
+        if (hasRecordingParam !== undefined) {
+          const wantsRecording = String(hasRecordingParam) === "true";
+          if (wantsRecording) {
+            baseQuery["recordingArchive.driveFileId"] = {
+              $exists: true,
+              $ne: null,
+            };
+          } else {
+            baseQuery.$or = [
+              { "recordingArchive.driveFileId": null },
+              { "recordingArchive.driveFileId": { $exists: false } },
+            ];
+          }
+        }
+
+        const callLogs = await CallLog.find(baseQuery)
+          .sort({ callStartTime: -1, createdAt: -1 })
+          .limit(limit)
+          .lean();
+
+        const rows = sortRows(callLogs.map(projectCallRow), req.query?.sort);
+
+        // Per-agent rollup so the UI can show "today's leaderboard"
+        // above the row list. Skips unknown-agent rows so the panel
+        // doesn't get noisy with anonymous inbound legs.
+        const byAgent = new Map();
+        for (const row of rows) {
+          const key = row.extensionId || null;
+          if (!key) continue;
+          if (!byAgent.has(key)) {
+            byAgent.set(key, {
+              extensionId: key,
+              agentName: row.agentName || null,
+              callCount: 0,
+              cxCount: 0,
+              exCount: 0,
+              totalDurationSec: 0,
+              withRecording: 0,
+              lastCallAt: null,
+            });
+          }
+          const bucket = byAgent.get(key);
+          bucket.callCount += 1;
+          if (row.platform === "cx") bucket.cxCount += 1;
+          else if (row.platform === "ex") bucket.exCount += 1;
+          bucket.totalDurationSec += Number(row.durationSec) || 0;
+          if (row.recording?.available) bucket.withRecording += 1;
+          if (
+            row.callStartTime &&
+            (!bucket.lastCallAt ||
+              new Date(row.callStartTime) > new Date(bucket.lastCallAt))
+          ) {
+            bucket.lastCallAt = row.callStartTime;
+          }
+        }
+
+        return res.json({
+          ok: true,
+          dateKey: pacificDateKey(),
+          domains,
+          domain: domains.length === 1 ? domains[0] : "ALL",
+          filters: {
+            platform: platformParam,
+            direction: directionParam,
+            extensionId: extensionFilter,
+            hasRecording:
+              hasRecordingParam === undefined
+                ? null
+                : String(hasRecordingParam) === "true",
+          },
+          summary: buildSummary(rows),
+          agents: Array.from(byAgent.values()).sort(
+            (a, b) => b.callCount - a.callCount,
+          ),
+          calls: rows,
+          truncated: callLogs.length >= limit,
+        });
+      } catch (error) {
+        return res.status(error.status || 500).json(toErrorResponse(error));
+      }
+    },
+  );
+
+  /**
+   * GET /by-phone/:phone
+   *
+   * Phone-centric lookup — every CallLog row to/from a single phone
+   * number, across all agents, all tenants, over a configurable
+   * window. Powers the "how many times have we called X" workflow in
+   * the CX Call Tracker workspace.
+   *
+   * Path: `:phone` accepts any format; we normalize to a 10-digit US
+   * trunk before querying.
+   *
+   * Query params (all optional):
+   *   domain          "ALL" (default) | "TAG" | "WYNN" | CSV
+   *   days            integer days back (default 90) or "all"
+   *   hasRecording    "true" | "false"
+   *   sort            "time" (default) | "duration" | "score"
+   *   limit           default 500, cap MAX_TRACKER_ROWS
+   *
+   * Hits the (domain, normalizedPhone, status, callStartTime) compound
+   * index so it stays fast even for power-dialed numbers with hundreds
+   * of historical attempts.
+   */
+  router.get(
+    "/by-phone/:phone",
+    auth.requireAuth,
+    auth.requireAdmin,
+    async (req, res) => {
+      try {
+        const raw = String(req.params.phone || "").replace(/\D/g, "");
+        const tenDigit =
+          raw.length === 11 && raw.startsWith("1")
+            ? raw.slice(1)
+            : raw.length === 10
+              ? raw
+              : raw.length > 10
+                ? raw.slice(-10)
+                : null;
+        if (!tenDigit || tenDigit.length !== 10) {
+          return res.status(400).json({
+            ok: false,
+            error:
+              "phone must contain at least 10 digits (US format, optionally +1)",
+          });
+        }
+        const domains = resolveDomainScope(req.query?.domain);
+        const daysParam = String(req.query?.days || "90").toLowerCase();
+        const allTime = daysParam === "all" || daysParam === "*";
+        const days = allTime ? 0 : Math.max(Number(daysParam) || 90, 1);
+        const limit = Math.min(
+          Math.max(Number(req.query?.limit) || 500, 1),
+          MAX_TRACKER_ROWS,
+        );
+        const hasRecordingParam = req.query?.hasRecording;
+
+        const baseQuery = {
+          domain: { $in: domains },
+          normalizedPhone: tenDigit,
+        };
+        if (!allTime) {
+          const windowStart = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+          baseQuery.callStartTime = { $gte: windowStart };
+        }
+        if (hasRecordingParam !== undefined) {
+          const wantsRecording = String(hasRecordingParam) === "true";
+          if (wantsRecording) {
+            baseQuery["recordingArchive.driveFileId"] = {
+              $exists: true,
+              $ne: null,
+            };
+          } else {
+            baseQuery.$or = [
+              { "recordingArchive.driveFileId": null },
+              { "recordingArchive.driveFileId": { $exists: false } },
+            ];
+          }
+        }
+
+        const callLogs = await CallLog.find(baseQuery)
+          .sort({ callStartTime: -1, createdAt: -1 })
+          .limit(limit)
+          .lean();
+        const rows = sortRows(callLogs.map(projectCallRow), req.query?.sort);
+
+        // Per-agent rollup so the UI can show "you've called this
+        // person X times across N agents."
+        const byAgent = new Map();
+        let firstCallAt = null;
+        let lastCallAt = null;
+        for (const row of rows) {
+          const key = row.extensionId || "unknown";
+          if (!byAgent.has(key)) {
+            byAgent.set(key, {
+              extensionId: row.extensionId,
+              agentName: row.agentName || null,
+              callCount: 0,
+              cxCount: 0,
+              exCount: 0,
+              totalDurationSec: 0,
+              withRecording: 0,
+              lastCallAt: null,
+            });
+          }
+          const bucket = byAgent.get(key);
+          bucket.callCount += 1;
+          if (row.platform === "cx") bucket.cxCount += 1;
+          else if (row.platform === "ex") bucket.exCount += 1;
+          bucket.totalDurationSec += Number(row.durationSec) || 0;
+          if (row.recording?.available) bucket.withRecording += 1;
+          if (row.callStartTime) {
+            const t = new Date(row.callStartTime).getTime();
+            if (Number.isFinite(t)) {
+              if (!firstCallAt || t < new Date(firstCallAt).getTime()) {
+                firstCallAt = row.callStartTime;
+              }
+              if (!lastCallAt || t > new Date(lastCallAt).getTime()) {
+                lastCallAt = row.callStartTime;
+              }
+              if (
+                !bucket.lastCallAt ||
+                t > new Date(bucket.lastCallAt).getTime()
+              ) {
+                bucket.lastCallAt = row.callStartTime;
+              }
+            }
+          }
+        }
+
+        return res.json({
+          ok: true,
+          phone: tenDigit,
+          phoneDisplay: `(${tenDigit.slice(0, 3)}) ${tenDigit.slice(3, 6)}-${tenDigit.slice(6)}`,
+          domains,
+          domain: domains.length === 1 ? domains[0] : "ALL",
+          window: {
+            allTime,
+            days: allTime ? null : days,
+          },
+          filters: {
+            hasRecording:
+              hasRecordingParam === undefined
+                ? null
+                : String(hasRecordingParam) === "true",
+          },
+          summary: {
+            ...buildSummary(rows),
+            firstCallAt,
+            lastCallAt,
+            uniqueAgents: byAgent.size,
+          },
+          agents: Array.from(byAgent.values()).sort(
+            (a, b) => b.callCount - a.callCount,
+          ),
+          calls: rows,
+          truncated: callLogs.length >= limit,
         });
       } catch (error) {
         return res.status(error.status || 500).json(toErrorResponse(error));

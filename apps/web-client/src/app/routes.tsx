@@ -36,6 +36,11 @@ const CleaningWorkspace = React.lazy(() =>
 const UsersWorkspace = React.lazy(() =>
   import("@/workspaces/users/UsersWorkspace").then((m) => ({ default: m.UsersWorkspace })),
 );
+const CxCallTrackerWorkspace = React.lazy(() =>
+  import("@/workspaces/cx-call-tracker/CxCallTrackerWorkspace").then((m) => ({
+    default: m.CxCallTrackerWorkspace,
+  })),
+);
 const DeployWorkspace = React.lazy(() =>
   import("@/workspaces/deploy/DeployWorkspace").then((m) => ({ default: m.DeployWorkspace })),
 );
@@ -148,6 +153,14 @@ export function AppRoutes() {
             element={
               <Suspended>
                 <UsersWorkspace />
+              </Suspended>
+            }
+          />
+          <Route
+            path="cx-call-tracker"
+            element={
+              <Suspended>
+                <CxCallTrackerWorkspace />
               </Suspended>
             }
           />

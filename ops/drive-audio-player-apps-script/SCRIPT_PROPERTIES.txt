@@ -1,7 +1,7 @@
 OG_RECORDING_DUMP_FOLDER_ID=1Pkc3jpJ6MPHgDrWQR7WQachiX5LP7QuS
 AS_RECORDING_DUMP_FOLDER_ID=1YAIp7saPCsHEQhL9JhV41jufGaNyfKxq
 CS_RECORDING_DUMP_FOLDER_ID=1pfPH2QpxoqZBL7huit2r7Y_pD__ATKzP
-APPROVED_VIEWER_EMAILS=mgray@taxadvocategroup.com,manderson@taxadvocategroup.com,abanks@taxadvocategroup.com
+APPROVED_VIEWER_EMAILS=mgray@taxadvocategroup.com,manderson@taxadvocategroup.com,abanks@taxadvocategroup.com,jsharp@taxadvocategroup.com,bhansen@taxadvocategroup.com,cbolt@taxadvocategroup.com
 CALL_GRADER_OPTIONS=M Anderson,J Pineda,M Gray,B Allen,J Wallace,A Banks
 
 # ── Mobile playback proxy (Parallel control-plane streaming) ────────

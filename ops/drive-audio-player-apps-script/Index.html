@@ -643,11 +643,8 @@
         const fromUrl = String(params.get("mode") || "").toLowerCase();
         if (fromUrl === "audio" || fromUrl === "iframe") return fromUrl;
         const stored = String(localStorage.getItem("cx-player-mode") || "").toLowerCase();
-        if (stored === "audio" || stored === "iframe") return stored;
-        const isMobile =
-          /android|iphone|ipad|ipod|mobile/i.test(navigator.userAgent) ||
-          window.matchMedia("(max-width: 760px)").matches;
-        return isMobile ? "audio" : "iframe";
+        if (stored === "audio") return stored;
+        return "audio";
       }
       state.playerMode = detectInitialPlayerMode();
 

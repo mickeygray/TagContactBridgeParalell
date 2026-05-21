@@ -226,7 +226,20 @@ async function proxyDriveFile(req, res, fileId) {
       res.setHeader(name, value);
     }
   }
-  res.setHeader("content-disposition", "inline");
+  // Default to inline so the HTML5 <audio> element streams it for
+  // playback. When the client wants a Save As dialog (the "Download"
+  // button in the CX Call Tracker workspace), pass ?download=<name>
+  // and we flip to attachment with the requested filename.
+  const downloadName = String(req.query?.download || "").trim();
+  if (downloadName) {
+    const safeName = downloadName.replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 120);
+    res.setHeader(
+      "content-disposition",
+      `attachment; filename="${safeName || "recording.mp3"}"`,
+    );
+  } else {
+    res.setHeader("content-disposition", "inline");
+  }
 
   if (response.body && typeof Readable.fromWeb === "function") {
     return Readable.fromWeb(response.body).pipe(res);

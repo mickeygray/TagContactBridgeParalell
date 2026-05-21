@@ -218,7 +218,7 @@ export function UserDetailDrawer({
 
         <CaseCallsDrawer
           caseId={caseDrawerId}
-          domain={current.company || "TAG"}
+          domain="ALL"
           open={caseDrawerId !== null}
           onOpenChange={(open) => {
             if (!open) setCaseDrawerId(null);

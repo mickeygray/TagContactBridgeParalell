@@ -12,6 +12,21 @@ const PLAYER_FOLDER_CONFIG = {
     propertyKey: "CS_RECORDING_DUMP_FOLDER_ID",
   },
 };
+const PLAYER_VIEW_CONFIG = {
+  OUTBOUND: {
+    label: "Outbound",
+    sourceFolderKeys: ["OG", "AS"],
+    direction: "outbound",
+    provider: "ringcx",
+    archiveBucketMarkers: ["OUTBOUND"],
+  },
+  INBOUND: {
+    label: "Inbound",
+    sourceFolderKeys: ["OG"],
+    direction: "inbound",
+    archiveBucketMarkers: ["INBOUND", "OG"],
+  },
+};
 
 const PLAYABLE_MIME_TYPES = new Set([
   "audio/mpeg",
@@ -92,20 +107,26 @@ const DATE_SUBFOLDER_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 function listFolderDates(folderKey) {
   requireAuthorizedUser_();
   const folderMeta = resolveFolderMeta_(folderKey);
-  const folder = DriveApp.getFolderById(folderMeta.folderId);
 
-  const dates = [];
-  const subfolderIterator = folder.getFolders();
-  while (subfolderIterator.hasNext()) {
-    const sub = subfolderIterator.next();
-    const name = String(sub.getName() || "").trim();
-    if (!DATE_SUBFOLDER_PATTERN.test(name)) continue;
-    dates.push({
-      key: name,
-      label: name,
-      folderId: sub.getId(),
-    });
+  const dateMap = {};
+  for (var sourceIndex = 0; sourceIndex < folderMeta.sourceFolders.length; sourceIndex += 1) {
+    const source = folderMeta.sourceFolders[sourceIndex];
+    const folder = DriveApp.getFolderById(source.folderId);
+    const subfolderIterator = folder.getFolders();
+    while (subfolderIterator.hasNext()) {
+      const sub = subfolderIterator.next();
+      const name = String(sub.getName() || "").trim();
+      if (!DATE_SUBFOLDER_PATTERN.test(name)) continue;
+      if (!dateMap[name]) {
+        dateMap[name] = {
+          key: name,
+          label: name,
+          folderId: sub.getId(),
+        };
+      }
+    }
   }
+  const dates = Object.keys(dateMap).map(function (key) { return dateMap[key]; });
   // Newest first — date strings sort lexically, so reverse-asc gives
   // most-recent at the top of the dropdown.
   dates.sort((left, right) => (left.key < right.key ? 1 : left.key > right.key ? -1 : 0));
@@ -114,10 +135,8 @@ function listFolderDates(folderKey) {
   // — bail after the first match since we only need a boolean for the
   // UI hint. Avoids a full root-folder scan when migration is done.
   let hasFlatFiles = false;
-  const fileIterator = folder.getFiles();
-  while (fileIterator.hasNext()) {
-    const file = fileIterator.next();
-    if (isPlayableFile_(file)) {
+  for (var rootIndex = 0; rootIndex < folderMeta.sourceFolders.length; rootIndex += 1) {
+    if (folderHasPlayableFilesForView_(folderMeta.sourceFolders[rootIndex].folderId, folderMeta)) {
       hasFlatFiles = true;
       break;
     }
@@ -145,15 +164,20 @@ function listFolderAudio(folderKey, dateKey) {
   const folderMeta = resolveFolderMeta_(folderKey);
   const cleanDateKey = String(dateKey || "").trim();
 
-  let listFolder;
+  const listFolderIds = [];
   let appliedDate = null;
   if (cleanDateKey) {
     if (!DATE_SUBFOLDER_PATTERN.test(cleanDateKey)) {
       throw new Error("dateKey must be in YYYY-MM-DD format");
     }
-    const bucketFolder = DriveApp.getFolderById(folderMeta.folderId);
-    const matchIterator = bucketFolder.getFoldersByName(cleanDateKey);
-    if (!matchIterator.hasNext()) {
+    for (var sourceIndex = 0; sourceIndex < folderMeta.sourceFolders.length; sourceIndex += 1) {
+      const bucketFolder = DriveApp.getFolderById(folderMeta.sourceFolders[sourceIndex].folderId);
+      const matchIterator = bucketFolder.getFoldersByName(cleanDateKey);
+      if (matchIterator.hasNext()) {
+        listFolderIds.push(matchIterator.next().getId());
+      }
+    }
+    if (listFolderIds.length === 0) {
       return {
         folder: folderMeta,
         dateKey: cleanDateKey,
@@ -163,18 +187,19 @@ function listFolderAudio(folderKey, dateKey) {
         notFound: true,
       };
     }
-    listFolder = matchIterator.next();
     appliedDate = cleanDateKey;
   } else {
-    listFolder = DriveApp.getFolderById(folderMeta.folderId);
+    for (var rootIndex = 0; rootIndex < folderMeta.sourceFolders.length; rootIndex += 1) {
+      listFolderIds.push(folderMeta.sourceFolders[rootIndex].folderId);
+    }
   }
 
   const files = [];
-  const iterator = listFolder.getFiles();
-  while (iterator.hasNext()) {
-    const file = iterator.next();
-    if (!isPlayableFile_(file)) continue;
-    files.push(mapFile_(file, folderKey, folderMeta, viewerEmail, appliedDate));
+  for (var listIndex = 0; listIndex < listFolderIds.length; listIndex += 1) {
+    const folderFiles = listPlayableFilesInDriveFolder_(listFolderIds[listIndex], folderMeta);
+    for (var fileIndex = 0; fileIndex < folderFiles.length; fileIndex += 1) {
+      files.push(mapDriveApiFile_(folderFiles[fileIndex], folderKey, folderMeta, viewerEmail, appliedDate));
+    }
   }
 
   files.sort((left, right) => {
@@ -211,7 +236,6 @@ function listFolderAudio(folderKey, dateKey) {
 function listFolderAudioBulk(folderKey, dateKeys) {
   const viewerEmail = requireAuthorizedUser_();
   const folderMeta = resolveFolderMeta_(folderKey);
-  const bucketFolder = DriveApp.getFolderById(folderMeta.folderId);
 
   let targetDates = Array.isArray(dateKeys)
     ? dateKeys
@@ -220,12 +244,17 @@ function listFolderAudioBulk(folderKey, dateKeys) {
     : [];
 
   if (targetDates.length === 0) {
-    const subIter = bucketFolder.getFolders();
-    while (subIter.hasNext()) {
-      const sub = subIter.next();
-      const name = String(sub.getName() || "").trim();
-      if (DATE_SUBFOLDER_PATTERN.test(name)) targetDates.push(name);
+    const seenDates = {};
+    for (var sourceIndex = 0; sourceIndex < folderMeta.sourceFolders.length; sourceIndex += 1) {
+      const bucketFolder = DriveApp.getFolderById(folderMeta.sourceFolders[sourceIndex].folderId);
+      const subIter = bucketFolder.getFolders();
+      while (subIter.hasNext()) {
+        const sub = subIter.next();
+        const name = String(sub.getName() || "").trim();
+        if (DATE_SUBFOLDER_PATTERN.test(name)) seenDates[name] = true;
+      }
     }
+    targetDates = Object.keys(seenDates);
   }
   // Newest first — same convention as the date dropdown so order is
   // intuitive when the operator hits "Play all".
@@ -236,16 +265,18 @@ function listFolderAudioBulk(folderKey, dateKeys) {
   const datesSeen = [];
   for (let index = 0; index < targetDates.length; index += 1) {
     const dateKey = targetDates[index];
-    const matchIter = bucketFolder.getFoldersByName(dateKey);
-    if (!matchIter.hasNext()) continue;
-    const dateFolder = matchIter.next();
-    datesSeen.push(dateKey);
-    const fileIter = dateFolder.getFiles();
-    while (fileIter.hasNext()) {
-      const file = fileIter.next();
-      if (!isPlayableFile_(file)) continue;
-      files.push(mapFile_(file, folderKey, folderMeta, viewerEmail, dateKey));
+    let sawDate = false;
+    for (var sourceFolderIndex = 0; sourceFolderIndex < folderMeta.sourceFolders.length; sourceFolderIndex += 1) {
+      const bucketFolder = DriveApp.getFolderById(folderMeta.sourceFolders[sourceFolderIndex].folderId);
+      const matchIter = bucketFolder.getFoldersByName(dateKey);
+      if (!matchIter.hasNext()) continue;
+      sawDate = true;
+      const folderFiles = listPlayableFilesInDriveFolder_(matchIter.next().getId(), folderMeta);
+      for (var fileIndex = 0; fileIndex < folderFiles.length; fileIndex += 1) {
+        files.push(mapDriveApiFile_(folderFiles[fileIndex], folderKey, folderMeta, viewerEmail, dateKey));
+      }
     }
+    if (sawDate) datesSeen.push(dateKey);
   }
 
   // Sort by recency so the queue plays newest-first by default — the
@@ -346,16 +377,23 @@ function clearCallGrade(payload) {
 
 function getConfiguredFolders_() {
   const properties = PropertiesService.getScriptProperties();
-  return Object.keys(PLAYER_FOLDER_CONFIG).map((key) => {
-    const config = PLAYER_FOLDER_CONFIG[key];
-    const folderId = String(properties.getProperty(config.propertyKey) || "").trim();
-    return {
-      key,
-      label: config.label,
-      folderId,
-      configured: Boolean(folderId),
-    };
-  });
+  return Object.keys(PLAYER_VIEW_CONFIG)
+    .map((key) => {
+      const view = PLAYER_VIEW_CONFIG[key];
+      const sourceFolderKeys = Array.isArray(view.sourceFolderKeys) ? view.sourceFolderKeys : [];
+      const folderIds = sourceFolderKeys
+        .map(function (sourceKey) {
+          const source = PLAYER_FOLDER_CONFIG[sourceKey] || {};
+          return String(properties.getProperty(source.propertyKey) || "").trim();
+        })
+        .filter(Boolean);
+      return {
+        key,
+        label: view.label,
+        folderId: folderIds[0] || "",
+        configured: folderIds.length > 0,
+      };
+    });
 }
 
 function requireAuthorizedUser_() {
@@ -388,23 +426,42 @@ function requireAuthorizedUser_() {
 
 function resolveFolderMeta_(folderKey) {
   const key = String(folderKey || "").trim().toUpperCase();
-  const config = PLAYER_FOLDER_CONFIG[key];
-  if (!config) {
-    throw new Error(`Unknown folder key: ${folderKey}`);
+  const view = PLAYER_VIEW_CONFIG[key];
+  if (!view) {
+    throw new Error(`Unknown player view: ${folderKey}`);
   }
-
-  const folderId = String(
-    PropertiesService.getScriptProperties().getProperty(config.propertyKey) || "",
-  ).trim();
-  if (!folderId) {
-    throw new Error(`Missing Script Property ${config.propertyKey}`);
+  const properties = PropertiesService.getScriptProperties();
+  const sourceFolderKeys = Array.isArray(view.sourceFolderKeys) ? view.sourceFolderKeys : [];
+  const sourceFolders = sourceFolderKeys
+    .map(function (sourceKey) {
+      const source = PLAYER_FOLDER_CONFIG[sourceKey];
+      if (!source) return null;
+      const folderId = String(properties.getProperty(source.propertyKey) || "").trim();
+      if (!folderId) return null;
+      return {
+        key: sourceKey,
+        label: source.label,
+        folderId: folderId,
+        propertyKey: source.propertyKey,
+      };
+    })
+    .filter(Boolean);
+  if (sourceFolders.length === 0) {
+    throw new Error(`Missing source folder Script Properties for player view: ${folderKey}`);
   }
 
   return {
     key,
-    label: config.label,
-    folderId,
-    propertyKey: config.propertyKey,
+    label: view.label,
+    folderId: sourceFolders[0].folderId,
+    propertyKey: sourceFolders[0].propertyKey,
+    sourceFolderKey: sourceFolders[0].key,
+    sourceFolders,
+    direction: view.direction,
+    provider: view.provider || "",
+    archiveBucketMarkers: Array.isArray(view.archiveBucketMarkers)
+      ? view.archiveBucketMarkers
+      : [],
   };
 }
 
@@ -415,6 +472,122 @@ function isPlayableFile_(file) {
   return [".mp3", ".wav", ".ogg", ".opus", ".m4a", ".mp4"].some((suffix) =>
     name.endsWith(suffix),
   );
+}
+
+function isPlayableDriveApiFile_(file) {
+  const mimeType = String(file.mimeType || "").toLowerCase();
+  if (PLAYABLE_MIME_TYPES.has(mimeType)) return true;
+  const name = String(file.name || "").toLowerCase();
+  return [".mp3", ".wav", ".ogg", ".opus", ".m4a", ".mp4"].some(function (suffix) {
+    return name.endsWith(suffix);
+  });
+}
+
+function escapeDriveQueryValue_(value) {
+  return String(value || "").replace(/\\/g, "\\\\").replace(/'/g, "\\'");
+}
+
+function listDriveFilesInFolder_(folderId) {
+  const files = [];
+  let pageToken = "";
+  const q = [
+    "'" + escapeDriveQueryValue_(folderId) + "' in parents",
+    "trashed = false",
+    "mimeType != 'application/vnd.google-apps.folder'",
+  ].join(" and ");
+
+  do {
+    let url =
+      "https://www.googleapis.com/drive/v3/files" +
+      "?q=" + encodeURIComponent(q) +
+      "&fields=" + encodeURIComponent("nextPageToken,files(id,name,mimeType,size,modifiedTime,properties,webViewLink,webContentLink)") +
+      "&pageSize=1000" +
+      "&supportsAllDrives=true" +
+      "&includeItemsFromAllDrives=true";
+    if (pageToken) {
+      url += "&pageToken=" + encodeURIComponent(pageToken);
+    }
+    const response = UrlFetchApp.fetch(url, {
+      method: "get",
+      headers: {
+        Authorization: "Bearer " + ScriptApp.getOAuthToken(),
+      },
+      muteHttpExceptions: true,
+    });
+    const status = response.getResponseCode();
+    const body = String(response.getContentText() || "{}");
+    if (status < 200 || status >= 300) {
+      throw new Error("Drive files.list failed: " + status + " " + body.slice(0, 300));
+    }
+    const payload = JSON.parse(body);
+    const batch = Array.isArray(payload.files) ? payload.files : [];
+    for (var index = 0; index < batch.length; index += 1) {
+      files.push(batch[index]);
+    }
+    pageToken = String(payload.nextPageToken || "");
+  } while (pageToken);
+
+  return files;
+}
+
+function listPlayableFilesInDriveFolder_(folderId, folderMeta) {
+  const rawFiles = listDriveFilesInFolder_(folderId);
+  return rawFiles.filter(function (file) {
+    return isPlayableDriveApiFile_(file) && fileMatchesPlayerView_(file, folderMeta);
+  });
+}
+
+function folderHasPlayableFilesForView_(folderId, folderMeta) {
+  return listPlayableFilesInDriveFolder_(folderId, folderMeta).length > 0;
+}
+
+function getDriveFileName_(file) {
+  if (file && typeof file.getName === "function") return String(file.getName() || "");
+  return String((file && file.name) || "");
+}
+
+function fileMatchesPlayerView_(file, folderMeta) {
+  const markers = (Array.isArray(folderMeta.archiveBucketMarkers)
+    ? folderMeta.archiveBucketMarkers
+    : [])
+    .map(function (value) { return String(value || "").trim().toUpperCase(); })
+    .filter(Boolean);
+  const properties = (file && file.properties && typeof file.properties === "object")
+    ? file.properties
+    : {};
+  const provider = String(properties.provider || "").trim().toLowerCase();
+  const direction = String(properties.direction || "").trim().toLowerCase();
+  if (provider) {
+    const expectedProvider = String(folderMeta.provider || "").trim().toLowerCase();
+    if (expectedProvider && provider !== expectedProvider) return false;
+    if (folderMeta.direction && direction && direction !== String(folderMeta.direction).toLowerCase()) {
+      return false;
+    }
+    return true;
+  }
+
+  const segments = getDriveFileName_(file).split("__");
+  const bucketSegment = String(segments[1] || "").trim().toUpperCase();
+  if (markers.length === 0) return true;
+  return markers.indexOf(bucketSegment) !== -1;
+}
+
+function mapDriveApiFile_(file, folderKey, folderMeta, viewerEmail, dateKey) {
+  const id = String(file.id || "");
+  return {
+    id,
+    folderKey,
+    folderLabel: folderMeta.label,
+    dateKey: dateKey || null,
+    name: file.name || "",
+    mimeType: file.mimeType || "",
+    sizeBytes: Number(file.size || 0),
+    updatedAt: file.modifiedTime || new Date().toISOString(),
+    previewUrl: buildPreviewUrl_(id),
+    audioApiUrl: buildAudioApiUrl_(id),
+    streamUrl: buildSignedPlaybackUrl_(id, viewerEmail),
+    humanGrade: null,
+  };
 }
 
 function mapFile_(file, folderKey, folderMeta, viewerEmail, dateKey) {

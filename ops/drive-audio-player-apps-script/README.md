@@ -4,7 +4,8 @@ This is a tiny Google Apps Script web app that lists playable audio files from t
 
 ## What It Does
 
-- lets you switch between `OG`, `AS`, and `CS`
+- shows the `Outbound` and `Inbound` RingCX views
+- keeps the existing `OG`, `AS`, and `CS` Drive folders configured, but hides `AS` and `CS` as selectable folders in the app
 - loads every playable file in that folder
 - plays the file with a normal HTML audio player
 - gives next/previous controls
@@ -74,10 +75,10 @@ redirect chain Drive uses kills auth tokens mid-stream). The player
 also supports a native HTML5 `<audio>` mode that streams bytes
 through the Parallel control-plane's signed-URL proxy.
 
-Mode selection (last-write-wins):
+Mode selection:
 1. `?mode=audio` or `?mode=iframe` URL parameter
-2. `cx-player-mode` localStorage value (set by clicking the toggle button)
-3. Auto-detect: small viewport / mobile UA → `audio`, else `iframe`
+2. `cx-player-mode=audio` localStorage value
+3. Default: `audio`
 
 To enable the audio mode:
 1. Stand up the Parallel control-plane with `RECORDING_PLAYBACK_SIGNING_SECRET` set in `.env`
@@ -95,6 +96,7 @@ controls light up on iOS/Android.
 ## Notes
 
 - This player reads straight from Drive and does not duplicate the audio.
+- `AS` and `CS` are not deleted; they remain configured for archive/routing, but the Apps Script player only exposes the RingCX `Outbound` and `Inbound` views.
 - If Drive refuses to stream some files cleanly, the `Open In Drive` button still gives the native fallback.
 - The player currently sorts by most recently updated first.
 - Human grades are stored in shared Script Properties keyed by Drive file ID, which keeps this first pass fully inside Apps Script until the webhook stack takes it over later.
