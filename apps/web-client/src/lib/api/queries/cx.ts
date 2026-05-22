@@ -57,6 +57,7 @@ export function useCxCallQueue(domain: string) {
     // landing show up promptly while the operator is on a call.
     staleTime: 1_000,
     refetchInterval: 2_000,
+    refetchIntervalInBackground: false,
   });
 }
 
@@ -81,6 +82,7 @@ export function useCxCallQueueMulti(domains: string[]) {
       enabled: Boolean(domain),
       staleTime: 1_000,
       refetchInterval: 2_000,
+      refetchIntervalInBackground: false,
     })),
   });
 }
@@ -106,6 +108,7 @@ export function useCxPostDateHolds(
     enabled: Boolean(domain),
     staleTime: 10_000,
     refetchInterval: 30_000,
+    refetchIntervalInBackground: false,
   });
 }
 

@@ -81,6 +81,21 @@ hourlyJobEventSchema.index(
   { name: "hourly_job_event_claim" },
 );
 
+// Resolution-email sweep — runs every hourly tick scanning for newly-
+// completed jobs whose payload requested a resolution notification.
+// Partial filter is the key: we only ever index the rows that will
+// actually be queried, keeping the index tiny and writes cheap.
+hourlyJobEventSchema.index(
+  { status: 1, completedAt: -1 },
+  {
+    name: "hourly_job_event_resolution_email",
+    partialFilterExpression: { "payload.notifyOnResolution": true },
+  },
+);
+
+// Runtime snapshot "most recent hourly job" read.
+hourlyJobEventSchema.index({ createdAt: -1 }, { name: "hourly_job_event_created_at_desc" });
+
 module.exports =
   mongoose.models.HourlyJobEvent ||
   mongoose.model("HourlyJobEvent", hourlyJobEventSchema);

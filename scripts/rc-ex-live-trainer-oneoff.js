@@ -944,6 +944,24 @@ const LIVE_SPEAKER_LABEL_TOOL = {
   },
 };
 
+const LIVE_SEMANTIC_GLUE_TOOL = {
+  name: "submit_semantic_glue_decision",
+  description: "Decide whether a newly published transcript turn should be merged into the previous displayed turn.",
+  input_schema: {
+    type: "object",
+    required: ["action", "confidence", "reason", "revisedPreviousText"],
+    properties: {
+      action: { type: "string", enum: ["keep_separate", "append_previous"] },
+      confidence: { type: "number", minimum: 0, maximum: 1 },
+      reason: { type: "string" },
+      revisedPreviousText: {
+        type: "string",
+        description: "If action=append_previous, return the previous turn plus the new continuation as one cleaned thought. Otherwise return the original previous text.",
+      },
+    },
+  },
+};
+
 function buildSpeakerLabelPrompt({ chunkText, recentSegments, metadata }) {
   const prior = (recentSegments || [])
     .slice(-20)
@@ -997,6 +1015,81 @@ async function labelSpeakerSegments({ chunkText, recentSegments, metadata, model
   );
   return {
     segments,
+    model: raw?.model || model,
+    usage: raw?.usage || null,
+  };
+}
+
+function normalizeSemanticGlueDecision(input = {}, previousText = "") {
+  const action = input.action === "append_previous" ? "append_previous" : "keep_separate";
+  return {
+    action,
+    confidence: clampNumber(input.confidence, 0, 1, 0),
+    reason: cleanText(input.reason, 220),
+    revisedPreviousText: cleanText(input.revisedPreviousText || previousText, 3000),
+  };
+}
+
+function labeledEntryText(entry = {}) {
+  if (Array.isArray(entry.speakerSegments) && entry.speakerSegments.length) {
+    return entry.speakerSegments
+      .map((segment) => `${segment.speaker}: ${segment.text}`)
+      .join(" | ");
+  }
+  return cleanText(entry.text, 2000);
+}
+
+function buildSemanticGluePrompt({ previousEntry, currentEntry, recentEntries, metadata }) {
+  const recent = (recentEntries || [])
+    .slice(-6)
+    .map((entry) => `[${entry.at || ""}] ${labeledEntryText(entry)}`)
+    .join("\n");
+  return [
+    "You are cleaning a live transcript display for a tax-resolution sales call.",
+    "The UI publishes quickly after short pauses. Sometimes a speaker pauses to think, then continues the same thought, so the second row should be appended back into the prior row.",
+    "Your job is only to decide whether the newest row belongs appended to the immediately previous displayed row.",
+    "",
+    "Append only when the newest row is clearly the same speaker continuing the same idea after a pause.",
+    "Examples to append:",
+    "- previous: I owe a lot for 2026. / newest: I think my business was the problem.",
+    "- previous: I got behind after switching jobs. / newest: Then the IRS sent another notice.",
+    "- previous: We review the balance and filing status. / newest: Then we look at what options fit.",
+    "",
+    "Keep separate for normal back-and-forth, greetings, answers to questions, new questions, company intros, objections, yes/no replies, or likely speaker changes.",
+    "Do not rewrite meaning. Light punctuation cleanup is fine. Do not add words that were not said.",
+    "",
+    `Metadata: ${JSON.stringify(metadata || {})}`,
+    "",
+    "Recent context, oldest first:",
+    recent || "(none)",
+    "",
+    "Previous displayed row:",
+    previousEntry?.text || "",
+    "",
+    "Newest displayed row:",
+    currentEntry?.text || "",
+  ].join("\n");
+}
+
+async function runSemanticGlueDecision({ previousEntry, currentEntry, recentEntries, metadata, model, timeoutMs }) {
+  const client = createAnthropicClient();
+  const prompt = buildSemanticGluePrompt({ previousEntry, currentEntry, recentEntries, metadata });
+  const raw = await client.createMessage({
+    system: "Output strictly via submit_semantic_glue_decision. No free text.",
+    messages: [{ role: "user", content: prompt }],
+    model,
+    maxTokens: 500,
+    temperature: 0,
+    tools: [LIVE_SEMANTIC_GLUE_TOOL],
+    toolChoice: { type: "tool", name: "submit_semantic_glue_decision" },
+    timeoutMs,
+  });
+  const toolUse = client.extractToolUse(raw, "submit_semantic_glue_decision");
+  if (!toolUse?.input) {
+    throw new Error("Claude did not return submit_semantic_glue_decision");
+  }
+  return {
+    ...normalizeSemanticGlueDecision(toolUse.input, previousEntry?.text || ""),
     model: raw?.model || model,
     usage: raw?.usage || null,
   };
@@ -1567,7 +1660,7 @@ function createDashboardHtml() {
     transcriptsEl.innerHTML = transcripts.length
       ? transcripts.slice(-80).reverse().map((item) => \`
           <div class="row">
-            <div class="meta">\${esc(item.at)} | \${esc(item.durationSec)}s | active \${esc(item.activePctOver500)}% | \${esc(item.model || "")} \${esc(item.responseFormat || "")} \${esc(item.speakerStatus || "")}</div>
+            <div class="meta">\${esc(item.at)} | \${esc(item.durationSec)}s | active \${esc(item.activePctOver500)}% | \${esc(item.model || "")} \${esc(item.responseFormat || "")} \${esc(item.speakerStatus || "")}\${item.revision ? \` | rev \${esc(item.revision)}\` : ""}\${item.semanticGlueStatus ? \` | glue \${esc(item.semanticGlueStatus)}\` : ""}</div>
             <div class="text">\${(item.speakerSegments || []).length
               ? item.speakerSegments.map((segment) => \`<span class="pill">\${esc([segment.speaker, segment.nativeSpeaker].filter(Boolean).join("/"))} \${Math.round((segment.confidence || 0) * 100)}%</span>\${esc(segment.text)}\`).join("<br>")
               : esc(item.text)}</div>
@@ -1734,6 +1827,7 @@ Audio/AI options:
   --speaker-model MODEL      Claude model for speaker labels (default Haiku)
   --speaker-labels           Force Haiku labels even with native diarize
   --no-speaker-labels        Skip logical speaker separation
+  --semantic-glue            Let a fast model merge a new displayed row into the prior row when it is one continued thought
   --timeout-sec 3600         Max process runtime
 
 Notes:
@@ -1824,6 +1918,23 @@ async function main() {
   );
   const speakerLabelsEnabled = !hasFlag(argv, "--no-speaker-labels")
     && (!nativeDiarizeEnabled || hasFlag(argv, "--speaker-labels"));
+  const semanticGlueEnabled = hasFlag(argv, "--semantic-glue")
+    || env("EX_LIVE_MONITOR_SEMANTIC_GLUE", "").toLowerCase() === "true";
+  const semanticGlueModel = readFlag(
+    argv,
+    "--semantic-glue-model",
+    env("LIVE_CALL_MONITOR_SEMANTIC_GLUE_MODEL", speakerModel),
+  );
+  const semanticGlueWindowMs = Math.max(
+    0,
+    Number(readFlag(argv, "--semantic-glue-window-ms", env("EX_LIVE_MONITOR_SEMANTIC_GLUE_WINDOW_MS", "45000"))) || 0,
+  );
+  const semanticGlueMinConfidence = clampNumber(
+    readFlag(argv, "--semantic-glue-min-confidence", env("EX_LIVE_MONITOR_SEMANTIC_GLUE_MIN_CONFIDENCE", "0.72")),
+    0,
+    1,
+    0.72,
+  );
   const debug = hasFlag(argv, "--debug");
   const writeWavChunks = hasFlag(argv, "--write-wav-chunks");
   const outDir = path.resolve(readFlag(argv, "--out-dir", path.join("runtime", "ex-live-monitor-oneoff")));
@@ -1864,6 +1975,10 @@ async function main() {
       nativeDiarizeEnabled,
       speakerLabelsEnabled,
       speakerModel,
+      semanticGlueEnabled,
+      semanticGlueModel,
+      semanticGlueWindowMs,
+      semanticGlueMinConfidence,
     },
     transcripts: [],
     events: [],
@@ -2100,6 +2215,7 @@ async function main() {
           model: speakerModel,
           timeoutMs: 12_000,
         });
+        if (!state.transcripts.includes(entry)) return;
         if ((entry.revision || 0) !== expectedRevision) return;
         entry.speakerSegments = labeled.segments;
         entry.speakerModel = labeled.model;
@@ -2129,6 +2245,195 @@ async function main() {
           chunkId: entryId,
           revision: entry.revision || 0,
           elapsedMs: entry.speakerElapsedMs,
+        });
+        broadcast();
+      }
+    })();
+  }
+
+  function isSemanticGlueCandidate(previousEntry, currentEntry, now = Date.now()) {
+    if (!semanticGlueEnabled || !previousEntry || !currentEntry) return false;
+    if (!previousEntry.text || !currentEntry.text) return false;
+    if (previousEntry.mergedInto || currentEntry.mergedInto) return false;
+    if (isPrimerHallucination(previousEntry.text) || isPrimerHallucination(currentEntry.text)) return false;
+    if (isSystemOnlyTranscript(previousEntry.text) || isSystemOnlyTranscript(currentEntry.text)) return false;
+
+    const previousEndedAt = Date.parse(previousEntry.endedAt || previousEntry.at || "") || 0;
+    const currentStartedAt = Date.parse(currentEntry.startedAt || currentEntry.at || "") || 0;
+    if (semanticGlueWindowMs > 0 && previousEndedAt && currentStartedAt) {
+      const gapMs = currentStartedAt - previousEndedAt;
+      if (gapMs > semanticGlueWindowMs || gapMs < -1000) return false;
+    }
+
+    const currentClean = normalizeForDedupe(currentEntry.text);
+    if (!currentClean) return false;
+    if (/^(hello|hi|hey|yes|yeah|yep|no|nope|okay|ok|sorry|speaking|thank you|thanks)\b/.test(currentClean)) {
+      return false;
+    }
+    if (/^(what|why|how|when|where|who|can|could|do|does|did|is|are|will|would|should)\b/.test(currentClean)) {
+      return false;
+    }
+    if (/\?\s*$/.test(currentEntry.text)) return false;
+
+    const combinedTokens = wordTokens(`${previousEntry.text} ${currentEntry.text}`);
+    if (combinedTokens.length > 150) return false;
+    return wordTokens(currentEntry.text).length >= 3;
+  }
+
+  function applySemanticGlueDecision(previousEntry, currentEntry, decision) {
+    const currentIndex = state.transcripts.findIndex((item) => item.id === currentEntry.id);
+    if (currentIndex <= 0) return false;
+    const livePreviousEntry = state.transcripts[currentIndex - 1];
+    if (!livePreviousEntry || livePreviousEntry.id !== previousEntry.id) return false;
+
+    const revisedText = cleanText(decision.revisedPreviousText, 3000);
+    const mergedText = revisedText && normalizeForDedupe(revisedText).includes(normalizeForDedupe(currentEntry.text).slice(0, 20))
+      ? revisedText
+      : joinTranscriptContinuation(livePreviousEntry.text, currentEntry.text);
+
+    livePreviousEntry.revision = (livePreviousEntry.revision || 0) + 1;
+    livePreviousEntry.text = mergedText;
+    livePreviousEntry.endedAt = currentEntry.endedAt || livePreviousEntry.endedAt;
+    livePreviousEntry.at = currentEntry.at || livePreviousEntry.at;
+    livePreviousEntry.durationSec = Number((Number(livePreviousEntry.durationSec || 0) + Number(currentEntry.durationSec || 0)).toFixed(2));
+    livePreviousEntry.byteLength = Number(livePreviousEntry.byteLength || 0) + Number(currentEntry.byteLength || 0);
+    livePreviousEntry.activePctOver500 = Math.max(Number(livePreviousEntry.activePctOver500 || 0), Number(currentEntry.activePctOver500 || 0));
+    livePreviousEntry.elapsedMs = Number(livePreviousEntry.elapsedMs || 0) + Number(currentEntry.elapsedMs || 0);
+    livePreviousEntry.heldChunkIds = [...new Set([...(livePreviousEntry.heldChunkIds || []), ...(currentEntry.heldChunkIds || [])])];
+    livePreviousEntry.stagedSourceChunkIds = [...new Set([...(livePreviousEntry.stagedSourceChunkIds || []), ...(currentEntry.stagedSourceChunkIds || [])])];
+    livePreviousEntry.sentenceHoldMs = Math.max(Number(livePreviousEntry.sentenceHoldMs || 0), Number(currentEntry.sentenceHoldMs || 0));
+    livePreviousEntry.sentenceComplete = Boolean(livePreviousEntry.sentenceComplete && currentEntry.sentenceComplete);
+    livePreviousEntry.nativeDiarizeSegments = [
+      ...(livePreviousEntry.nativeDiarizeSegments || []),
+      ...(currentEntry.nativeDiarizeSegments || []),
+    ];
+    livePreviousEntry.semanticGluedFragments = [
+      ...(livePreviousEntry.semanticGluedFragments || []),
+      {
+        id: currentEntry.id,
+        text: currentEntry.text,
+        at: currentEntry.at,
+        confidence: decision.confidence,
+        reason: decision.reason,
+        model: decision.model,
+      },
+    ];
+    livePreviousEntry.semanticGlueStatus = "appended";
+    livePreviousEntry.semanticGlueModel = decision.model;
+    livePreviousEntry.semanticGlueReason = decision.reason;
+    livePreviousEntry.speakerSegments = nativeDiarizeEnabled
+      ? speakerSegmentsFromNativeDiarize(livePreviousEntry.nativeDiarizeSegments, livePreviousEntry.text, {
+        recentSegments: state.transcripts
+          .filter((item) => item.id !== livePreviousEntry.id && item.id !== currentEntry.id)
+          .flatMap((item) => item.speakerSegments || []),
+        metadata: monitorMetadata,
+        nativeSpeakerAssignments,
+      })
+      : normalizeSpeakerSegments({}, livePreviousEntry.text);
+    livePreviousEntry.speakerModel = null;
+    livePreviousEntry.speakerElapsedMs = null;
+    livePreviousEntry.speakerStatus = nativeDiarizeEnabled ? "native-diarize-glued" : speakerLabelsEnabled ? "pending" : "off";
+
+    currentEntry.mergedInto = livePreviousEntry.id;
+    currentEntry.semanticGlueStatus = "merged";
+    state.transcripts.splice(currentIndex, 1);
+
+    writeJsonLine(path.join(runDir, "transcript-revisions.ndjson"), {
+      id: livePreviousEntry.id,
+      at: new Date().toISOString(),
+      revision: livePreviousEntry.revision,
+      semanticGlue: true,
+      appendedFrom: currentEntry.id,
+      confidence: decision.confidence,
+      reason: decision.reason,
+      model: decision.model,
+      appendedText: currentEntry.text,
+      text: livePreviousEntry.text,
+    });
+    addEvent(state, eventLog, "semantic_glue.append", `merged newest row into prior thought: ${currentEntry.text}`, {
+      targetId: livePreviousEntry.id,
+      appendedFrom: currentEntry.id,
+      confidence: decision.confidence,
+      reason: decision.reason,
+      model: decision.model,
+    });
+    broadcast();
+    void maybeRefreshAdvice("semantic-glue");
+    enqueueSpeakerLabel(livePreviousEntry, livePreviousEntry.text, livePreviousEntry.id);
+    return true;
+  }
+
+  function enqueueSemanticGlue(entry, entryId) {
+    if (!semanticGlueEnabled) return;
+    const currentIndex = state.transcripts.findIndex((item) => item.id === entryId);
+    if (currentIndex <= 0) return;
+    const previousEntry = state.transcripts[currentIndex - 1];
+    if (!isSemanticGlueCandidate(previousEntry, entry)) return;
+    const expectedRevision = entry.revision || 0;
+    entry.semanticGlueStatus = "pending";
+    broadcast();
+
+    void (async () => {
+      const glueStarted = Date.now();
+      try {
+        const liveIndex = state.transcripts.findIndex((item) => item.id === entryId);
+        if (liveIndex <= 0) return;
+        const liveEntry = state.transcripts[liveIndex];
+        const livePrevious = state.transcripts[liveIndex - 1];
+        if (!liveEntry || !livePrevious || (liveEntry.revision || 0) !== expectedRevision) return;
+        if (!isSemanticGlueCandidate(livePrevious, liveEntry)) return;
+
+        const decision = await runSemanticGlueDecision({
+          previousEntry: livePrevious,
+          currentEntry: liveEntry,
+          recentEntries: state.transcripts.slice(Math.max(0, liveIndex - 5), liveIndex + 1),
+          metadata: monitorMetadata,
+          model: semanticGlueModel,
+          timeoutMs: 8_000,
+        });
+
+        const stillIndex = state.transcripts.findIndex((item) => item.id === entryId);
+        if (stillIndex <= 0) return;
+        const stillEntry = state.transcripts[stillIndex];
+        const stillPrevious = state.transcripts[stillIndex - 1];
+        if (!stillEntry || !stillPrevious || (stillEntry.revision || 0) !== expectedRevision) return;
+
+        stillEntry.semanticGlueStatus = decision.action === "append_previous" ? "append-candidate" : "separate";
+        stillEntry.semanticGlueDecision = {
+          action: decision.action,
+          confidence: decision.confidence,
+          reason: decision.reason,
+          model: decision.model,
+          elapsedMs: Date.now() - glueStarted,
+        };
+        writeJsonLine(path.join(runDir, "semantic-glue.ndjson"), {
+          id: entryId,
+          at: new Date().toISOString(),
+          previousId: stillPrevious.id,
+          decision: stillEntry.semanticGlueDecision,
+          previousText: stillPrevious.text,
+          currentText: stillEntry.text,
+          revisedPreviousText: decision.revisedPreviousText,
+        });
+
+        if (decision.action === "append_previous" && decision.confidence >= semanticGlueMinConfidence) {
+          applySemanticGlueDecision(stillPrevious, stillEntry, decision);
+          return;
+        }
+
+        addEvent(state, eventLog, "semantic_glue.keep", decision.reason || "kept newest row separate", {
+          chunkId: entryId,
+          confidence: decision.confidence,
+          model: decision.model,
+          elapsedMs: Date.now() - glueStarted,
+        });
+        broadcast();
+      } catch (error) {
+        if (!state.transcripts.includes(entry)) return;
+        entry.semanticGlueStatus = "error";
+        addEvent(state, eventLog, "semantic_glue.error", error.message, {
+          chunkId: entryId,
+          elapsedMs: Date.now() - glueStarted,
         });
         broadcast();
       }
@@ -2211,6 +2516,7 @@ async function main() {
     });
     broadcast();
     void maybeRefreshAdvice("transcript-stage");
+    enqueueSemanticGlue(entry, entryId);
     enqueueSpeakerLabel(entry, text, entryId);
     return true;
   }
@@ -2418,6 +2724,7 @@ async function main() {
       broadcast();
       void maybeRefreshAdvice("transcript");
 
+      enqueueSemanticGlue(entry, entryId);
       enqueueSpeakerLabel(entry, displayTranscript.text, entryId);
     });
   }

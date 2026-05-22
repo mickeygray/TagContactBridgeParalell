@@ -22,6 +22,7 @@ export function useDeployWorkspace(domain: string) {
     enabled: Boolean(domain),
     staleTime: 15_000,
     refetchInterval: 30_000,
+    refetchIntervalInBackground: false,
   });
 }
 
@@ -37,6 +38,7 @@ export function useDeployRuns(target?: string | null, limit = 20) {
         .then((env) => env.result),
     staleTime: 5_000,
     refetchInterval: 10_000,
+    refetchIntervalInBackground: false,
   });
 }
 

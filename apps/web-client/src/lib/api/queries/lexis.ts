@@ -143,6 +143,7 @@ export function useNcoaProgress(importBatch: string | null, enabled: boolean) {
     // is index-friendly (`{family, "payload.importBatch"}`) so cost
     // per poll stays small.
     refetchInterval: enabled ? 3000 : false,
+    refetchIntervalInBackground: false,
     refetchOnWindowFocus: false,
     staleTime: 0,
   });

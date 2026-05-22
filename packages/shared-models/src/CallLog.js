@@ -312,6 +312,19 @@ callLogSchema.index({ "transcription.status": 1, createdAt: 1 });
 // Recording archive retry queue lookup.
 callLogSchema.index({ "recordingArchive.status": 1, createdAt: 1 });
 
+// CX Call Tracker `/today` endpoint + per-tenant recent-calls reads.
+// Atlas was flagging "high docs-examined : docs-returned" without this —
+// Mongo was falling back to {domain,caseId,callStartTime} and scanning
+// the whole tenant. With this index, `{ domain: $in, platform: "cx",
+// callStartTime: $gte }` becomes a bounded range scan.
+callLogSchema.index({ domain: 1, platform: 1, callStartTime: -1 });
+
+// Hourly CX recording archive sweep — queries on callEndTime + platform
+// + non-terminal archive status. Same shape as the Tracker index above
+// but on callEndTime (which differs by call duration; Mongo can't share
+// the index across both fields).
+callLogSchema.index({ domain: 1, platform: 1, callEndTime: -1 });
+
 module.exports =
   mongoose.models.ControlPlaneCallLog ||
   mongoose.model("ControlPlaneCallLog", callLogSchema);

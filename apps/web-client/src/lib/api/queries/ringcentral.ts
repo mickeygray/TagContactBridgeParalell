@@ -23,6 +23,7 @@ export function useRingCentralPresence(domain: string, pollMs = 5_000) {
     enabled: Boolean(domain),
     staleTime: 2_000,
     refetchInterval: pollMs,
+    refetchIntervalInBackground: false,
   });
 }
 
@@ -38,6 +39,7 @@ export function useRingBridgeWorkspace(domain: string, pollMs = 10_000) {
     enabled: Boolean(domain),
     staleTime: 5_000,
     refetchInterval: pollMs,
+    refetchIntervalInBackground: false,
   });
 }
 
@@ -63,6 +65,7 @@ export function useRingCentralEvents(
     enabled: Boolean(domain),
     staleTime: 5_000,
     refetchInterval: 10_000,
+    refetchIntervalInBackground: false,
   });
 }
 
@@ -72,6 +75,7 @@ export function useRingCentralStatus() {
     queryFn: () => api.get<HealthStatus>("/api/ringcentral/status"),
     staleTime: 10_000,
     refetchInterval: 30_000,
+    refetchIntervalInBackground: false,
   });
 }
 
@@ -98,6 +102,7 @@ export function useRingCentralCallLog(
     enabled: Boolean(domain),
     staleTime: 5_000,
     refetchInterval: pollMs,
+    refetchIntervalInBackground: false,
   });
 }
 
@@ -113,5 +118,6 @@ export function useRingCentralRuntime(domain: string, pollMs = 15_000) {
     enabled: Boolean(domain),
     staleTime: 5_000,
     refetchInterval: pollMs,
+    refetchIntervalInBackground: false,
   });
 }

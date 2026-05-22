@@ -80,6 +80,7 @@ export function useBlogBotStatus() {
         .then((r) => r.result),
     staleTime: 10_000,
     refetchInterval: 30_000,
+    refetchIntervalInBackground: false,
   });
 }
 

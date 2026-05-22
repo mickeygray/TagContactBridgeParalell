@@ -830,6 +830,11 @@ function getSharedConfig(overrides = {}) {
           : process.env.RECORDING_ARCHIVE_ENABLED,
         false,
       ),
+      // Floor on duration before we bother archiving. Restored to
+      // 360s after the 60s default proved to overload the hourly
+      // archive sweep (6× the row volume → 6× Mongo + Drive load).
+      // To re-test a lower floor, set RECORDING_ARCHIVE_MIN_DURATION_SEC
+      // explicitly in env, not as a default change.
       minDurationSec: Math.max(
         60,
         envInt("RECORDING_ARCHIVE_MIN_DURATION_SEC", 360),
@@ -1044,6 +1049,9 @@ function getSharedConfig(overrides = {}) {
         )
           .map((value) => Number(value))
           .filter((value) => Number.isInteger(value) && value >= 0 && value <= 6),
+        // EOD (nightly catch-up) threshold — restored to 480s after
+        // the 60s default caused the hourly sweep to overload Mongo.
+        // Independent override via RECORDING_ARCHIVE_EOD_MIN_DURATION_SEC.
         minDurationSec: Math.max(
           60,
           envInt("RECORDING_ARCHIVE_EOD_MIN_DURATION_SEC", 480),

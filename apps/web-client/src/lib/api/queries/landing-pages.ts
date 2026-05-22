@@ -40,5 +40,6 @@ export function useLandingPagesPending() {
         .then((r) => r.result.rows),
     staleTime: 10_000,
     refetchInterval: 30_000,
+    refetchIntervalInBackground: false,
   });
 }

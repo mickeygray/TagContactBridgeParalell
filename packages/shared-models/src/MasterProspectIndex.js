@@ -218,6 +218,13 @@ masterProspectIndexSchema.index(
   { sparse: true },
 );
 
+// Phone-lookup compound — queries like findOne({ domain, normalizedPhones })
+// are common in the attribution + lead-source backfill paths. Without
+// this, Mongo uses the lone normalizedPhones[i] index then filters
+// domain in-memory across both tenants. Compound is much tighter for
+// our typical "is this phone known in WYNN" lookups.
+masterProspectIndexSchema.index({ domain: 1, normalizedPhones: 1 });
+
 module.exports =
   mongoose.models.ControlPlaneMasterProspectIndex ||
   mongoose.model("ControlPlaneMasterProspectIndex", masterProspectIndexSchema);

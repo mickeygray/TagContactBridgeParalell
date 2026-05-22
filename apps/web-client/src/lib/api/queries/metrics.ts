@@ -121,6 +121,7 @@ export function useMetricsPulse(domain: string, date?: string) {
     enabled: Boolean(domain),
     staleTime: 60_000,
     refetchInterval: 5 * 60 * 1000,
+    refetchIntervalInBackground: false,
   });
 }
 
@@ -153,6 +154,7 @@ export function useMetricsRedlines(domain: string) {
     enabled: Boolean(domain),
     staleTime: 30_000,
     refetchInterval: 60_000,
+    refetchIntervalInBackground: false,
   });
 }
 

@@ -50,6 +50,8 @@
     "ssh2-sftp-client": "^11.0.0"
   },
   "devDependencies": {
+    "@grpc/grpc-js": "^1.14.4",
+    "@grpc/proto-loader": "^0.8.1",
     "concurrently": "^9.2.1"
   }
 }

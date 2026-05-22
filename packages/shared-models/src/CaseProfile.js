@@ -313,6 +313,17 @@ caseProfileSchema.index({
   "attribution.lastRefineAttemptAt": 1,
 });
 
+// Payment-reconcile round-robin lookup ("oldest lastStatusCheckAt
+// per domain"). Without this index the reconcile sweep does a full
+// collection scan every hour to find the next batch of cases to
+// re-check. Sparse so cases that never had a status check don't
+// bloat the index — they fall through to the existing domain+caseId
+// lookup on demand.
+caseProfileSchema.index(
+  { domain: 1, lastStatusCheckAt: 1 },
+  { sparse: true, name: "case_profile_status_check_round_robin" },
+);
+
 module.exports =
   mongoose.models.ControlPlaneCaseProfile ||
   mongoose.model("ControlPlaneCaseProfile", caseProfileSchema);

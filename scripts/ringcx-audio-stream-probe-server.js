@@ -51,6 +51,47 @@ function sanitizeHeaders(headers = {}) {
   return output;
 }
 
+function parseBasicAuth(header) {
+  const value = String(header || "").trim();
+  const match = value.match(/^Basic\s+(.+)$/i);
+  if (!match) {
+    return {
+      present: Boolean(value),
+      scheme: value ? value.split(/\s+/, 1)[0] || "unknown" : null,
+      username: null,
+      passwordPresent: false,
+    };
+  }
+  try {
+    const decoded = Buffer.from(match[1], "base64").toString("utf8");
+    const idx = decoded.indexOf(":");
+    return {
+      present: true,
+      scheme: "Basic",
+      username: idx >= 0 ? decoded.slice(0, idx) : decoded,
+      passwordPresent: idx >= 0 && decoded.slice(idx + 1).length > 0,
+    };
+  } catch {
+    return {
+      present: true,
+      scheme: "Basic",
+      username: null,
+      passwordPresent: false,
+      malformed: true,
+    };
+  }
+}
+
+function summarizeApiKeyAuth(headers = {}) {
+  const authorization = String(headers.authorization || "").trim();
+  const apiKey = headers["x-api-key"] || headers["api-key"] || headers.apikey || "";
+  const bearer = authorization.match(/^Bearer\s+(.+)$/i);
+  return {
+    bearerPresent: Boolean(bearer && bearer[1]),
+    xApiKeyPresent: Boolean(apiKey),
+  };
+}
+
 function writeJsonLine(file, event) {
   fs.appendFileSync(file, `${JSON.stringify(event)}\n`);
 }
@@ -61,6 +102,22 @@ function ensureDir(dir) {
 
 function base64Sample(buffer) {
   return buffer.subarray(0, Math.min(buffer.length, 512)).toString("base64");
+}
+
+function isOAuthTokenPath(rawPath) {
+  return String(rawPath || "").split("?", 1)[0] === "/oauth/token";
+}
+
+function jsonResponseForPath(rawPath, requestId) {
+  if (isOAuthTokenPath(rawPath)) {
+    return {
+      access_token: process.env.RINGCX_STREAM_TEST_ACCESS_TOKEN || "ringcx-stream-test-token",
+      token_type: "Bearer",
+      expires_in: 3600,
+      scope: "ringcx.streaming",
+    };
+  }
+  return { ok: true, requestId };
 }
 
 function makeGrpcFrameParser({ requestId, eventLog, outDir, eventBase }) {
@@ -137,6 +194,7 @@ function startHttp2Probe({ port, outDir, eventLog, protocol = "h2c", tlsCert = "
     const rawPath = String(headers[":path"] || "/");
     const rawMethod = String(headers[":method"] || "");
     const rawContentType = String(headers["content-type"] || "");
+    const isGrpcRequest = rawContentType.includes("grpc");
     const chunks = [];
     let totalBytes = 0;
     const startedAt = Date.now();
@@ -148,6 +206,8 @@ function startHttp2Probe({ port, outDir, eventLog, protocol = "h2c", tlsCert = "
       path: rawPath,
       contentType: rawContentType,
       headers: sanitizeHeaders(headers),
+      auth: parseBasicAuth(headers.authorization),
+      apiKeyAuth: summarizeApiKeyAuth(headers),
       startedAt: new Date().toISOString(),
     };
     console.log(`[h2] start ${requestId} ${rawMethod} ${rawPath} content-type=${rawContentType || "(none)"}`);
@@ -158,15 +218,20 @@ function startHttp2Probe({ port, outDir, eventLog, protocol = "h2c", tlsCert = "
       // grpc-status belongs in HTTP/2 TRAILERS, sent via sendTrailers()
       // from the wantTrailers handler below. waitForTrailers: true
       // tells the framer to hold END_STREAM until trailers arrive.
-      stream.respond(
-        {
+      if (isGrpcRequest) {
+        stream.respond(
+          {
+            ":status": 200,
+            "content-type": rawContentType,
+          },
+          { waitForTrailers: true },
+        );
+      } else {
+        stream.respond({
           ":status": 200,
-          "content-type": rawContentType.includes("grpc")
-            ? rawContentType
-            : "application/grpc",
-        },
-        { waitForTrailers: true },
-      );
+          "content-type": "application/json",
+        });
+      }
 
       // Idempotency shim around sendTrailers. Node's http2/compat layer
       // attaches its own onStreamTrailersReady listener that also calls
@@ -189,7 +254,7 @@ function startHttp2Probe({ port, outDir, eventLog, protocol = "h2c", tlsCert = "
       };
     }
 
-    const grpcParser = rawContentType.includes("grpc")
+    const grpcParser = isGrpcRequest
       ? makeGrpcFrameParser({ requestId, eventLog, outDir, eventBase })
       : null;
 
@@ -226,7 +291,11 @@ function startHttp2Probe({ port, outDir, eventLog, protocol = "h2c", tlsCert = "
       // Close the response stream. With waitForTrailers: true above,
       // this defers END_STREAM until trailers are sent — the
       // wantTrailers handler below fires before the framer closes.
-      stream.end();
+      if (isGrpcRequest) {
+        stream.end();
+      } else {
+        stream.end(JSON.stringify(jsonResponseForPath(rawPath, requestId)));
+      }
     });
 
     stream.on("wantTrailers", () => {
@@ -258,6 +327,8 @@ function startHttp2Probe({ port, outDir, eventLog, protocol = "h2c", tlsCert = "
       method: req.method,
       path: req.url,
       headers: sanitizeHeaders(req.headers),
+      auth: parseBasicAuth(req.headers.authorization),
+      apiKeyAuth: summarizeApiKeyAuth(req.headers),
       startedAt: new Date().toISOString(),
     };
     console.log(`[${protocol}] http1 fallback ${requestId} ${req.method} ${req.url}`);
@@ -309,6 +380,8 @@ function startHttpProbe({ port, outDir, eventLog }) {
       method: req.method,
       path: req.url,
       headers: sanitizeHeaders(req.headers),
+      auth: parseBasicAuth(req.headers.authorization),
+      apiKeyAuth: summarizeApiKeyAuth(req.headers),
       startedAt: new Date().toISOString(),
     };
     console.log(`[http] start ${requestId} ${req.method} ${req.url}`);
@@ -334,7 +407,7 @@ function startHttpProbe({ port, outDir, eventLog }) {
         bodySampleBase64: base64Sample(sample),
       });
       res.writeHead(200, { "content-type": "application/json" });
-      res.end(JSON.stringify({ ok: true, requestId }));
+      res.end(JSON.stringify(jsonResponseForPath(req.url, requestId)));
     });
   });
 

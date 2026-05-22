@@ -217,6 +217,50 @@ leadCadenceSchema.index(
   { sparse: true },
 );
 
+// Audience-build queries — `find({ domain, intakeRoute, active })`
+// drives campaign dispatch + segmentation. Previously this hit the
+// (domain, active, schedule.nextActionAt) index and filtered on
+// intakeRoute in memory across the whole active set per tenant.
+leadCadenceSchema.index({ domain: 1, intakeRoute: 1, active: 1 });
+
+// Runtime/inbound snapshot reads. These are small dashboard probes, but
+// without indexes each poll scans the full cadence collection for DNC
+// counts and recent intake totals, which is enough to trigger Atlas
+// query-targeting alerts.
+leadCadenceSchema.index({ createdAt: -1 });
+leadCadenceSchema.index(
+  { "cadenceState.channelDnc.sms.blocked": 1, "cadenceState.channelDnc.sms.at": -1 },
+  {
+    name: "lead_cadence_channel_dnc_sms_at",
+    partialFilterExpression: { "cadenceState.channelDnc.sms.blocked": true },
+  },
+);
+leadCadenceSchema.index(
+  { "cadenceState.channelDnc.email.blocked": 1, "cadenceState.channelDnc.email.at": -1 },
+  {
+    name: "lead_cadence_channel_dnc_email_at",
+    partialFilterExpression: { "cadenceState.channelDnc.email.blocked": true },
+  },
+);
+leadCadenceSchema.index(
+  { "cadenceState.channelDnc.rvm.blocked": 1, "cadenceState.channelDnc.rvm.at": -1 },
+  {
+    name: "lead_cadence_channel_dnc_rvm_at",
+    partialFilterExpression: { "cadenceState.channelDnc.rvm.blocked": true },
+  },
+);
+leadCadenceSchema.index(
+  { "cadenceState.channelDnc.cx.blocked": 1, "cadenceState.channelDnc.cx.at": -1 },
+  {
+    name: "lead_cadence_channel_dnc_cx_at",
+    partialFilterExpression: { "cadenceState.channelDnc.cx.blocked": true },
+  },
+);
+leadCadenceSchema.index(
+  { "cadenceState.channelDnc.sms.reason": 1, "cadenceState.channelDnc.sms.at": -1 },
+  { name: "lead_cadence_sms_dnc_reason_at" },
+);
+
 module.exports =
   mongoose.models.ControlPlaneLeadCadence ||
   mongoose.model("ControlPlaneLeadCadence", leadCadenceSchema);

@@ -9,6 +9,7 @@ export function useControlPlaneHealth() {
     queryFn: () => api.get<HealthStatus>("/api/health/control-plane"),
     staleTime: 10_000,
     refetchInterval: 30_000,
+    refetchIntervalInBackground: false,
   });
 }
 
@@ -18,5 +19,6 @@ export function useServicesHealth() {
     queryFn: () => api.get<HealthStatus>("/api/health/services"),
     staleTime: 15_000,
     refetchInterval: 60_000,
+    refetchIntervalInBackground: false,
   });
 }

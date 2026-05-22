@@ -92,6 +92,7 @@ export function useDispatchLists(domain: string) {
     enabled: Boolean(domain),
     staleTime: 15_000,
     refetchInterval: 5_000,
+    refetchIntervalInBackground: false,
   });
 }
 
