@@ -472,8 +472,8 @@ async function buildVendorLeadRows(domain, dateKey, options = {}) {
         intakeSource: row.intakeSource || "",
         intakeRoute: row.intakeRoute || "",
         // Route campaign — surfaced for the nightly vendor email's
-        // "Lead intake by campaign" breakdown. Carries the LDCustom /
-        // LDGeneral / organic / affiliate split that the LD intake
+        // "Lead intake by campaign" breakdown. Carries the LD CUSTOM /
+        // LD GENERAL / organic / affiliate split that the LD intake
         // stamps at ingest time (see normalizeLdLeadPayload).
         routeCampaignKey: row.routeCampaignKey || null,
         routeCampaignName: row.routeCampaignName || null,

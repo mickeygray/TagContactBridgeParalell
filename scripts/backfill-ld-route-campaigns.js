@@ -53,6 +53,9 @@ function detectSplit(doc = {}) {
   return {
     routeCampaignKey: normalized.routeCampaignKey,
     routeCampaignName: normalized.routeCampaignName,
+    sourceName: normalized.sourceName || null,
+    logicsSourceName: normalized.logicsSourceName || null,
+    logicsCampaignName: normalized.logicsCampaignName || null,
     vendorSourceName: normalized.vendorSourceName || doc.vendorSourceName || null,
     partnerSource: normalized.partnerSource || doc.partnerSource || null,
     ldSubsourceKind: normalized.payloadSnapshot?.ldSubsourceKind || null,
@@ -66,14 +69,20 @@ function buildLeadCadencePatch(split) {
   const set = {
     routeCampaignKey: split.routeCampaignKey,
     routeCampaignName: split.routeCampaignName,
+    sourceName: split.sourceName,
     partnerSource: split.partnerSource,
     vendorSourceName: split.vendorSourceName,
     "attributionContext.routeCampaignKey": split.routeCampaignKey,
     "attributionContext.routeCampaignName": split.routeCampaignName,
+    "attributionContext.sourceName": split.sourceName,
     "attributionContext.vendorSourceName": split.vendorSourceName,
     "payloadSnapshot.routeCampaignKey": split.routeCampaignKey,
     "payloadSnapshot.routeCampaignName": split.routeCampaignName,
     "payloadSnapshot.vendorSourceName": split.vendorSourceName,
+    "payloadSnapshot.logicsSourceName": split.logicsSourceName,
+    "payloadSnapshot.logicsCampaignName": split.logicsCampaignName,
+    "payloadSnapshot.SourceName": split.logicsSourceName,
+    "payloadSnapshot.CampaignName": split.logicsCampaignName,
     "payloadSnapshot.ldSubsourceKind": split.ldSubsourceKind,
     "payloadSnapshot.ldSubsourceLabel": split.ldSubsourceLabel,
     "payloadSnapshot.ldSubsourceValue": split.ldSubsourceValue,
@@ -87,6 +96,9 @@ function buildMasterProspectPatch(split) {
     $set: {
       "metadata.routeCampaignKey": split.routeCampaignKey,
       "metadata.routeCampaignName": split.routeCampaignName,
+      "metadata.sourceName": split.sourceName,
+      "metadata.logicsSourceName": split.logicsSourceName,
+      "metadata.logicsCampaignName": split.logicsCampaignName,
       "metadata.vendorSourceName": split.vendorSourceName,
     },
   };
@@ -95,8 +107,12 @@ function buildMasterProspectPatch(split) {
 function buildQueuePatch(split) {
   return {
     $set: {
+      sourceName: split.sourceName,
       "metadata.routeCampaignKey": split.routeCampaignKey,
       "metadata.routeCampaignName": split.routeCampaignName,
+      "metadata.sourceName": split.sourceName,
+      "metadata.logicsSourceName": split.logicsSourceName,
+      "metadata.logicsCampaignName": split.logicsCampaignName,
     },
   };
 }
@@ -109,7 +125,6 @@ function buildQueuePatch(split) {
   const query = {
     domain: "WYNN",
     intakeSource: { $in: ["ld", "ld-posting"] },
-    routeCampaignKey: { $nin: ["ld-custom", "ld-general"] },
   };
   if (!args.all) {
     query.createdAt = {
@@ -136,6 +151,7 @@ function buildQueuePatch(split) {
     scanned: docs.length,
     detected: 0,
     byKey: {},
+    needsLeadCadenceUpdate: 0,
     masterProspectMatched: 0,
     queueMatched: 0,
     leadCadenceUpdated: 0,
@@ -149,6 +165,15 @@ function buildQueuePatch(split) {
     if (!split) continue;
     summary.detected += 1;
     summary.byKey[split.routeCampaignKey] = (summary.byKey[split.routeCampaignKey] || 0) + 1;
+    const cadenceNeedsUpdate =
+      doc.routeCampaignKey !== split.routeCampaignKey ||
+      doc.routeCampaignName !== split.routeCampaignName ||
+      doc.sourceName !== split.sourceName ||
+      doc.vendorSourceName !== split.vendorSourceName ||
+      doc.partnerSource !== split.partnerSource ||
+      doc.payloadSnapshot?.CampaignName !== split.logicsCampaignName ||
+      doc.payloadSnapshot?.SourceName !== split.logicsSourceName;
+    if (cadenceNeedsUpdate) summary.needsLeadCadenceUpdate += 1;
 
     const [masterMatchCount, queueMatchCount] = await Promise.all([
       MasterProspectIndex.countDocuments({
@@ -191,7 +216,7 @@ function buildQueuePatch(split) {
 
   console.log(JSON.stringify(summary, null, 2));
   if (!args.apply) {
-    console.log("Dry run only. Re-run with --apply to write routeCampaignKey/name to LeadCadence, MasterProspectIndex, and active CxDialQueue rows.");
+    console.log("Dry run only. Re-run with --apply to write internal LD split labels to LeadCadence, MasterProspectIndex, and active CxDialQueue rows. This script does not update Logics.");
   }
   await mongoose.disconnect();
 })().catch(async (error) => {

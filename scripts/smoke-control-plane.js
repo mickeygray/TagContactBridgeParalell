@@ -150,7 +150,7 @@ const LD_WEBHOOK_SECRET = String(process.env.SMOKE_LEAD_WEBHOOK_SECRET || "").tr
 // on the server side. Sent in the request body as `auth`.
 const LD_POSTING_AUTH = String(process.env.SMOKE_LD_POSTING_AUTH || "").trim();
 // LD subsource codes — the smoke pre-ping + lead body include "source ID"
-// set to the LDCustom code so the intake stamps routeCampaignKey=ld-custom
+// set to the LD CUSTOM code so the intake stamps routeCampaignKey=ld-custom
 // and we can verify the new LD split end-to-end.
 const LD_CUSTOM_CODE = String(process.env.SMOKE_LD_CUSTOM_CODE || "GS03RB7W").trim();
 
@@ -228,7 +228,7 @@ const CHECKS = [
   // ── Inbound LD endpoints — full JSON payloads, expect 200/202 ────
   // These hit the inbound-gateway (port 4001), not the control-plane.
   // The body shape mirrors `ops/tmp-inbound-smoke/tina-ld.json` plus the
-  // LDCustom tracking code so the intake stamps routeCampaignKey=ld-custom.
+  // LD CUSTOM tracking code so the intake stamps routeCampaignKey=ld-custom.
   // x-webhook-secret carries the LEAD_WEBHOOK_SECRET when configured;
   // `auth` in the body carries the LD posting auth when that route is
   // used instead. Both are optional — if neither is configured on the
@@ -257,7 +257,7 @@ const CHECKS = [
     skipIf: () => !WRITE_LD,
   },
   {
-    name: "POST /api/inbound/ld/lead (LDCustom → mgray contact)",
+    name: "POST /api/inbound/ld/lead (LD CUSTOM -> mgray contact)",
     method: "POST",
     host: INBOUND_BASE_URL,
     path: "/api/inbound/ld/lead",

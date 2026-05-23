@@ -10,10 +10,12 @@ require("dotenv").config({ path: path.resolve(__dirname, "..", ".env") });
 async function rcAuth() {
   const body = new URLSearchParams({
     grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer",
-    assertion: process.env.RING_CENTRAL_JWT_TOKEN,
+    assertion: process.env.RINGCX_PLATFORM_JWT_TOKEN || process.env.RING_CENTRAL_JWT_TOKEN2,
   });
   const basic = Buffer.from(
-    `${process.env.RING_CENTRAL_CLIENT_ID}:${process.env.RING_CENTRAL_CLIENT_SECRET}`,
+    `${process.env.RINGCX_PLATFORM_CLIENT_ID || process.env.RING_CENTRAL_CLIENT_ID2}:${
+      process.env.RINGCX_PLATFORM_CLIENT_SECRET || process.env.RING_CENTRAL_CLIENT_SECRET2
+    }`,
   ).toString("base64");
   const r = await fetch("https://platform.ringcentral.com/restapi/oauth/token", {
     method: "POST",

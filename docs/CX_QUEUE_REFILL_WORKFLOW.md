@@ -39,7 +39,7 @@ ceiling.
 ## The pool model
 
 ```
-Pool A (e.g. LDCustom agents):
+Pool A (e.g. LD CUSTOM agents):
   routeCampaigns = ["ld-custom"]
   totalOpen      = 25
 
@@ -50,7 +50,7 @@ Pool A (e.g. LDCustom agents):
        ↓ (same)
     3. aged — NO routeCampaignKey filter (shared red overflow)
 
-Pool B (e.g. LDGeneral agents):
+Pool B (e.g. LD GENERAL agents):
   routeCampaigns = ["ld-general"]
   totalOpen      = 25
   (same green filter; blue/red remain shared)
@@ -154,8 +154,8 @@ Land the `routeCampaigns` filter for green only. Don't touch cooldowns
 or daily caps. Don't change the per-family targetOpen budget.
 
 This is exactly the TODO(ld-queue-split) work we already breadcrumbed.
-Result: LDCustom agents get LDCustom greens, LDGeneral agents get
-LDGeneral greens, and everyone shares blue/red once those leads age.
+Result: LD CUSTOM agents get LD CUSTOM greens, LD GENERAL agents get
+LD GENERAL greens, and everyone shares blue/red once those leads age.
 Throughput math is the same as today — this is purely about first-touch
 ownership.
 
@@ -224,7 +224,7 @@ to use `totalOpen` as the sole budget. The legacy reads in
 
 After Phase 1:
 - Set one canary agent's `routeCampaigns = ["ld-custom"]`. Watch
-  their next green refill — should pull only LDCustom-stamped green
+  their next green refill — should pull only LD CUSTOM-stamped green
   items. Blue/red should still be shared. The today-dials rollup
   endpoint should reflect their activity normally.
 
@@ -278,7 +278,7 @@ env-override-or-default pattern — additions are tiny.
 - **278 unique leads dialed today across 5 agents**: with pool routing
   + cooldown bump + 10 agents fully ramped, this should rise to
   500-700 unique/day on the same call volume.
-- **The LDCustom / LDGeneral queue split**: ships in Phase 1.
+- **The LD CUSTOM / LD GENERAL queue split**: ships in Phase 1.
   Two agent groups, each focused on their own bucket, both able to
   reach into aged when their primary slows.
 

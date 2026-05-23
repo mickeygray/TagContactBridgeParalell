@@ -13,22 +13,22 @@
 //   3. Hit a few safe Voice GET endpoints with the new token
 //
 // Reads from .env:
-//   RING_CENTRAL_JWT_TOKEN
-//   RING_CENTRAL_CLIENT_ID
-//   RING_CENTRAL_CLIENT_SECRET
+//   RINGCX_PLATFORM_JWT_TOKEN
+//   RINGCX_PLATFORM_CLIENT_ID
+//   RINGCX_PLATFORM_CLIENT_SECRET
 //   RING_CENTRAL_SERVER_URL  (default https://platform.ringcentral.com)
 
 const path = require("path");
 require("dotenv").config({ path: path.resolve(__dirname, "..", ".env") });
 
 const RC_BASE = (process.env.RING_CENTRAL_SERVER_URL || "https://platform.ringcentral.com").replace(/\/$/, "");
-const RC_CLIENT_ID = process.env.RING_CENTRAL_CLIENT_ID || "";
-const RC_CLIENT_SECRET = process.env.RING_CENTRAL_CLIENT_SECRET || "";
-const RC_JWT = process.env.RING_CENTRAL_JWT_TOKEN || "";
+const RC_CLIENT_ID = process.env.RINGCX_PLATFORM_CLIENT_ID || process.env.RING_CENTRAL_CLIENT_ID2 || "";
+const RC_CLIENT_SECRET = process.env.RINGCX_PLATFORM_CLIENT_SECRET || process.env.RING_CENTRAL_CLIENT_SECRET2 || "";
+const RC_JWT = process.env.RINGCX_PLATFORM_JWT_TOKEN || process.env.RING_CENTRAL_JWT_TOKEN2 || "";
 const RCX_VOICE_BASE = "https://ringcx.ringcentral.com";
 
 if (!RC_JWT || !RC_CLIENT_ID || !RC_CLIENT_SECRET) {
-  console.error("Missing RC creds in .env (need RING_CENTRAL_JWT_TOKEN + CLIENT_ID + CLIENT_SECRET)");
+  console.error("Missing RingCX platform creds in .env (need RINGCX_PLATFORM_JWT_TOKEN + CLIENT_ID + CLIENT_SECRET)");
   process.exit(1);
 }
 

@@ -10,7 +10,7 @@
 //   node scripts/rcx-voice-discover.js --append     # also append to .env
 //
 // Reads:
-//   RING_CENTRAL_JWT_TOKEN, RING_CENTRAL_CLIENT_ID, RING_CENTRAL_CLIENT_SECRET
+//   RINGCX_PLATFORM_JWT_TOKEN, RINGCX_PLATFORM_CLIENT_ID, RINGCX_PLATFORM_CLIENT_SECRET
 //
 // Writes (when --append):
 //   RINGCX_VOICE_BASE_URL
@@ -40,10 +40,12 @@ const RCX_VOICE_BASE = "https://ringcx.ringcentral.com";
 async function rcAuth() {
   const body = new URLSearchParams({
     grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer",
-    assertion: process.env.RING_CENTRAL_JWT_TOKEN,
+    assertion: process.env.RINGCX_PLATFORM_JWT_TOKEN || process.env.RING_CENTRAL_JWT_TOKEN2,
   });
   const basic = Buffer.from(
-    `${process.env.RING_CENTRAL_CLIENT_ID}:${process.env.RING_CENTRAL_CLIENT_SECRET}`,
+    `${process.env.RINGCX_PLATFORM_CLIENT_ID || process.env.RING_CENTRAL_CLIENT_ID2}:${
+      process.env.RINGCX_PLATFORM_CLIENT_SECRET || process.env.RING_CENTRAL_CLIENT_SECRET2
+    }`,
   ).toString("base64");
   const r = await fetch(`${RC_BASE}/restapi/oauth/token`, {
     method: "POST",

@@ -27,16 +27,16 @@ function upsertEnvValue(contents, key, value) {
 }
 
 async function mintPlatformToken() {
-  const clientId = String(process.env.RING_CENTRAL_CLIENT_ID2 || "").trim();
-  const clientSecret = String(process.env.RING_CENTRAL_CLIENT_SECRET2 || "").trim();
-  const jwtToken = String(process.env.RING_CENTRAL_JWT_TOKEN2 || "").trim();
+  const clientId = String(process.env.RINGCX_PLATFORM_CLIENT_ID || process.env.RING_CENTRAL_CLIENT_ID2 || "").trim();
+  const clientSecret = String(process.env.RINGCX_PLATFORM_CLIENT_SECRET || process.env.RING_CENTRAL_CLIENT_SECRET2 || "").trim();
+  const jwtToken = String(process.env.RINGCX_PLATFORM_JWT_TOKEN || process.env.RING_CENTRAL_JWT_TOKEN2 || "").trim();
   const serverUrl = String(
     process.env.RING_CENTRAL_SERVER_URL || "https://platform.ringcentral.com",
   ).trim();
 
   if (!clientId || !clientSecret || !jwtToken) {
     throw new Error(
-      "RING_CENTRAL_CLIENT_ID2 / RING_CENTRAL_CLIENT_SECRET2 / RING_CENTRAL_JWT_TOKEN2 are required",
+      "RINGCX_PLATFORM_CLIENT_ID / RINGCX_PLATFORM_CLIENT_SECRET / RINGCX_PLATFORM_JWT_TOKEN are required",
     );
   }
 

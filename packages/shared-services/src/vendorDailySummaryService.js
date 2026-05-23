@@ -23,7 +23,7 @@ const VENDOR_FAMILY_DEFS = Object.freeze([
     matches: (source, channel) =>
       channel === "affiliate" || source.includes("affiliate"),
   },
-  // LD Custom — checked FIRST so it wins when routeCampaignKey is set.
+  // LD CUSTOM — checked FIRST so it wins when routeCampaignKey is set.
   // The ld-posting fallback below catches legacy rows with no route
   // campaign key. ld-custom / ld-general distinction comes from the
   // `routeCampaignKey` field on CallLog (mirrored from LeadCadence at
@@ -33,13 +33,13 @@ const VENDOR_FAMILY_DEFS = Object.freeze([
   // key as a third argument.
   {
     key: "ld-custom",
-    label: "LD Custom",
+    label: "LD CUSTOM",
     matches: (source, channel, routeCampaignKey) =>
       routeCampaignKey === "ld-custom",
   },
   {
     key: "ld-general",
-    label: "LD General",
+    label: "LD GENERAL",
     matches: (source, channel, routeCampaignKey) =>
       routeCampaignKey === "ld-general",
   },
@@ -164,6 +164,23 @@ function classifyVendorFamily(sourceName, fallbackChannel = null, routeCampaignK
     key: "other",
     label: "Other",
     tracked: false,
+  };
+}
+
+function vendorFamilyByKey(key) {
+  const normalized = String(key || "").trim().toLowerCase();
+  const family = VENDOR_FAMILY_DEFS.find((entry) => entry.key === normalized);
+  if (!family) {
+    return {
+      key: normalized || "other",
+      label: normalized || "Other",
+      tracked: TRACKED_VENDOR_FAMILIES.has(normalized),
+    };
+  }
+  return {
+    key: family.key,
+    label: family.label,
+    tracked: TRACKED_VENDOR_FAMILIES.has(family.key),
   };
 }
 
@@ -304,6 +321,14 @@ function ensureSourceRow(bySource, sourceName, channel, routeCampaignKey = null)
 
 function ensureFamilyRow(byFamily, sourceName, channel, routeCampaignKey = null) {
   const family = classifyVendorFamily(sourceName, channel, routeCampaignKey);
+  if (!byFamily.has(family.key)) {
+    byFamily.set(family.key, createMetricRow(family.label, null, family));
+  }
+  return byFamily.get(family.key);
+}
+
+function ensureFamilyRowByKey(byFamily, familyKey) {
+  const family = vendorFamilyByKey(familyKey);
   if (!byFamily.has(family.key)) {
     byFamily.set(family.key, createMetricRow(family.label, null, family));
   }
@@ -568,6 +593,10 @@ async function buildVendorDailySummary(domain, options = {}) {
     const patch = candidate.observed || {};
     addMetrics(ensureSourceRow(bySource, source, channel, routeCampaignKey), patch);
     addMetrics(ensureFamilyRow(byFamily, source, channel, routeCampaignKey), patch);
+  }
+
+  for (const familyKey of ["ld-custom", "ld-general", "ld-posting"]) {
+    ensureFamilyRowByKey(byFamily, familyKey);
   }
 
   const sources = [...bySource.values()]

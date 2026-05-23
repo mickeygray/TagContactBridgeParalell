@@ -1,6 +1,13 @@
 node_modules/
 .env
-.env.backup*
+.env.*
+.env-*
+*.env.local
+*.env.backup*
+*credentials*.json
+rc-credentials*.json
+!.env.example
+!apps/**/.env.example
 .ssh/
 *.pem
 .DS_Store

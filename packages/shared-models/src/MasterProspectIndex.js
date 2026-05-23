@@ -71,6 +71,8 @@ const masterProspectIndexSchema = new mongoose.Schema(
     metadata: {
       intakeSource: { type: String, default: null },
       sourceName: { type: String, default: null },
+      logicsSourceName: { type: String, default: null },
+      logicsCampaignName: { type: String, default: null },
       sourceChannel: { type: String, default: null },
       routeCampaignKey: { type: String, default: null },
       routeCampaignName: { type: String, default: null },
@@ -216,6 +218,13 @@ masterProspectIndexSchema.index({ domain: 1, state: 1, zip: 1 });
 masterProspectIndexSchema.index(
   { "pool.tag": 1, "filler.lastDialAttempt": 1 },
   { sparse: true },
+);
+masterProspectIndexSchema.index(
+  { domain: 1, "pool.tag": 1, "filler.lastDialAttempt": 1, lastSeenAt: -1, updatedAt: 1 },
+  {
+    name: "mpi_domain_pool_filler_round_robin",
+    sparse: true,
+  },
 );
 
 // Phone-lookup compound — queries like findOne({ domain, normalizedPhones })

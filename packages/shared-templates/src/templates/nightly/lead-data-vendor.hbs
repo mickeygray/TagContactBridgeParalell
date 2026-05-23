@@ -141,37 +141,12 @@
       {{/if}}
     </div>
 
-    <div class="section">
-      <h2>Top sources — today</h2>
-      {{#if vendorRows.length}}
-        <table class="data" cellpadding="0" cellspacing="0">
-          <tr>
-            <th>Source</th>
-            <th class="center">Spend</th>
-            <th class="center">Leads</th>
-            <th class="center">Calls</th>
-            <th class="center">Scored</th>
-            <th class="center">Avg score</th>
-            <th class="center">Deals</th>
-            <th class="center">Collected</th>
-          </tr>
-          {{#each vendorRows}}
-          <tr>
-            <td>{{source}}</td>
-            <td class="center">{{money spend}}</td>
-            <td class="center">{{leads}}</td>
-            <td class="center">{{calls}}</td>
-            <td class="center">{{scoredCalls}}</td>
-            <td class="center"><span class="{{scoreClass averageScore}}">{{default averageScore "—"}}</span></td>
-            <td class="center">{{dealsToday}}</td>
-            <td class="center">{{money totalCollected}}</td>
-          </tr>
-          {{/each}}
-        </table>
-      {{else}}
-        <div class="muted">No source activity today.</div>
-      {{/if}}
-    </div>
+    {{!-- "Top sources — today" was removed 2026-05-22. Source names
+          fragment across name variants ("LD Posting", "LD Posting Lead",
+          "ld-posting", etc.) so the per-source table showed five rows
+          for what was really one vendor. The Vendor families table
+          above already rolls these up under ld-custom / ld-general /
+          ld-posting, which is the right answer. --}}
 
     <!-- ─────────────────  TODAY'S CALLS — SCORED  ────────────────── -->
     <div class="section">

@@ -604,7 +604,7 @@ async function buildCallSummary(domain, dateKey, timeZone = "America/Los_Angeles
 // can filter by platform="cx" (the disposition path stamps this on every
 // CX-routed call). The numbers it produces are LD dial activity — CX is
 // the dial path for LD leads, so this is the throughput signal for the
-// LDCustom / LDGeneral pipelines we just split.
+// LD CUSTOM / LD GENERAL pipelines we just split.
 //
 // Returns { total, uniqueCallers, callsOver5, longestSec } scoped to
 // the given domain + PT date. Wrapped in a try/catch by the caller so a
@@ -2538,14 +2538,14 @@ async function sendLeadDataCloseEmail(domain, payload, options = {}) {
       ? [...daily.leads.entries].sort((a, b) => Number(b.count || 0) - Number(a.count || 0))
       : [];
 
-  // Lead intake split by routeCampaignKey — surfaces the LDCustom /
-  // LDGeneral split (and organic / affiliate / etc.) that the intake
+  // Lead intake split by routeCampaignKey — surfaces the LD CUSTOM /
+  // LD GENERAL split (and organic / affiliate / etc.) that the intake
   // stamps at ingest time. Rows without a routeCampaignKey roll up
   // under "(uncategorized)" rather than getting dropped. Sorted by
   // volume desc.
   const CAMPAIGN_LABELS = {
-    "ld-custom": "LDCustom",
-    "ld-general": "LDGeneral",
+    "ld-custom": "LD CUSTOM",
+    "ld-general": "LD GENERAL",
     "ld": "LD (unsplit)",
     "affiliate": "Affiliate",
     "organic": "Organic",

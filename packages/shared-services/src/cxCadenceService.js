@@ -44,6 +44,7 @@ const {
 const { evaluateChannelContactTime } = require("./contactTimingPolicyService");
 const { resolveCaseContactEligibility, stopCaseContact } = require("./contactEligibilityService");
 const { cancelPublishedQueueItemInRingcx } = require("./ringcxLeadServingService");
+const { syncCallLedgerFromCallLog } = require("./callLedgerService");
 const {
   applyCallEndedDailyStats,
   applyCallStartedDailyStats,
@@ -75,6 +76,46 @@ function normalizeActionKey(value) {
 function normalizeExternalId(value) {
   const normalized = String(value || "").trim();
   return normalized || null;
+}
+
+function buildSyntheticCxSessionId(queueItemId, placedAt = new Date()) {
+  const id = normalizeExternalId(queueItemId);
+  if (!id) return null;
+  const date = placedAt instanceof Date ? placedAt : new Date(placedAt);
+  const stamp = Number.isNaN(date.getTime()) ? Date.now() : date.getTime();
+  return `cx-synth:${id}:${stamp}`;
+}
+
+function ringcxSessionDateKey(value) {
+  const match = String(value || "").trim().match(/^(\d{4})(\d{2})(\d{2})/);
+  return match ? `${match[1]}-${match[2]}-${match[3]}` : null;
+}
+
+function isMetadataSessionIdCompatible(value, placedAt = new Date()) {
+  const sessionDateKey = ringcxSessionDateKey(value);
+  if (!sessionDateKey) return Boolean(normalizeExternalId(value));
+  const date = placedAt instanceof Date ? placedAt : new Date(placedAt);
+  if (Number.isNaN(date.getTime())) return false;
+  return sessionDateKey === getPacificDateKey(date);
+}
+
+function resolveCxPlacedSessionId(payload = {}, queueItem = {}, placedAt = new Date()) {
+  const explicit = normalizeExternalId(
+    payload.uii ||
+      payload.telephonySessionId ||
+      payload.callSessionId ||
+      payload.sessionId ||
+      payload.dialogId ||
+      payload.interactionId,
+  );
+  if (explicit) return explicit;
+
+  const metadataSessionId = normalizeExternalId(queueItem?.metadata?.lastDialExecutionUii);
+  if (metadataSessionId && isMetadataSessionIdCompatible(metadataSessionId, placedAt)) {
+    return metadataSessionId;
+  }
+
+  return buildSyntheticCxSessionId(queueItem?._id, placedAt);
 }
 
 function normalizeOutcomeToken(value) {
@@ -1890,6 +1931,16 @@ async function handleCxCallPlaced(payload = {}) {
   const confirmedCall =
     payload.confirmedCall === true
     || Boolean(String(payload.uii || payload.callSessionId || "").trim());
+  const callTelephonySessionId = confirmedCall
+    ? resolveCxPlacedSessionId(payload, queueItem, placedAt)
+    : null;
+  const callPayload = callTelephonySessionId
+    ? {
+      ...payload,
+      uii: payload.uii || callTelephonySessionId,
+      callSessionId: payload.callSessionId || callTelephonySessionId,
+    }
+    : payload;
   const countableAttempt =
     confirmedCall
     || payload.countAsAttempt === true
@@ -1908,17 +1959,17 @@ async function handleCxCallPlaced(payload = {}) {
         domain,
         caseId,
         queueItem,
-        payload,
+        payload: callPayload,
         placedAt,
         confirmedCall: true,
       }).catch(() => null),
     ];
     if (confirmedCall) {
-      touchWrites.push(markAgentCxCallState(queueItem, payload, placedAt).catch(() => null));
+      touchWrites.push(markAgentCxCallState(queueItem, callPayload, placedAt).catch(() => null));
     }
     await Promise.all(touchWrites);
   }
-  if (confirmedCall && payload.uii) {
+  if (confirmedCall && callTelephonySessionId) {
     // Read the RingCX-specific identifiers stamped on the queue item
     // at publish time (ringcxLeadServingService sets metadata.rcxVisibility*
     // when the lead is loaded into the campaign). These power the spot-
@@ -1966,16 +2017,51 @@ async function handleCxCallPlaced(payload = {}) {
     // dashboards see the gap.
     const routeCampaignKey = queueMetadata.routeCampaignKey || null;
     const routeCampaignName = queueMetadata.routeCampaignName || null;
-    await callLogRepository.upsertCallLog({
+    // Real-time source attribution. The nightly backfill
+    // (callLogSourceBackfillService) has been observed to leave a
+    // significant fraction of CX CallLog rows null-sourced, which
+    // causes the vendor email's "Vendor families" table to silently
+    // drop CX calls (the classifier treats null source as "other"
+    // family which isn't tracked). Stamping sourceName/sourceChannel
+    // at call-placed time eliminates the gap entirely — backfill
+    // becomes a safety net only.
+    //
+    // Order of preference: queueItem.metadata (no extra query) →
+    // LeadCadence lookup (one indexed query per call-placed). Cost
+    // of the lookup is small relative to the rest of the call-placed
+    // path (multiple queries already happen for case eligibility,
+    // queue update, etc.).
+    let sourceName = queueMetadata.sourceName || null;
+    let sourceChannel = queueMetadata.sourceChannel || null;
+    if (!sourceName) {
+      try {
+        const cadence = await leadCadenceRepository
+          .findLeadCadence(domain, caseId)
+          .catch(() => null);
+        if (cadence) {
+          sourceName = cadence.sourceName || null;
+          sourceChannel = cadence.sourceChannel || null;
+        }
+      } catch (_) {
+        // Best-effort — if LeadCadence lookup fails, the nightly
+        // backfill remains the fallback. Don't let it block the
+        // call-log write.
+      }
+    }
+    const callLog = await callLogRepository.upsertCallLog({
       domain,
-      telephonySessionId: payload.uii,
+      telephonySessionId: callTelephonySessionId,
+      callSessionId: payload.callSessionId || null,
       direction: "outbound",
+      callStartTime: placedAt,
       caseId,
       phone: payload.phone || queueItem.phone || null,
       extensionId: queueItem.assignment?.extensionId || null,
       executionOwner: "ringcentral-cx",
       platform: "cx",
       ringcx: ringcxStamp,
+      sourceName,
+      sourceChannel,
       routeCampaignKey,
       routeCampaignName,
       audit: {
@@ -1984,8 +2070,12 @@ async function handleCxCallPlaced(payload = {}) {
         queueItemId: String(queueItem._id),
         actionKey: payload.actionKey || queueItem.metadata?.actionKey || null,
         agentEmail: payload.agentEmail || null,
+        syntheticSessionId: callTelephonySessionId.startsWith("cx-synth:"),
       },
     }).catch(() => null);
+    if (callLog) {
+      await syncCallLedgerFromCallLog(callLog, { syncedAt: new Date() }).catch(() => null);
+    }
   }
   const queueState = String(queueItem.state || "").trim().toLowerCase();
   if (["completed", "cancelled"].includes(queueState)) {
@@ -2001,7 +2091,7 @@ async function handleCxCallPlaced(payload = {}) {
         ...touchMetadata,
         lastQueueAttemptAt: placedAt,
         lastQueueAttemptIgnoredState: queueState,
-        lastQueueAttemptUii: payload.uii || null,
+        lastQueueAttemptUii: callTelephonySessionId || null,
         lastQueueAttemptPhone: payload.phone || queueItem.phone || null,
       },
     })).catch(() => null);
@@ -2028,7 +2118,7 @@ async function handleCxCallPlaced(payload = {}) {
         lastQueueAttemptAt: placedAt,
         lastQueueAttemptIgnoredState: queueState,
         lastQueueAttemptIgnoredReason: "already-callback-rescheduled",
-        lastQueueAttemptUii: payload.uii || null,
+        lastQueueAttemptUii: callTelephonySessionId || null,
         lastQueueAttemptPhone: payload.phone || queueItem.phone || null,
       },
     })).catch(() => null);
@@ -2085,7 +2175,7 @@ async function handleCxCallPlaced(payload = {}) {
         ...touchMetadata,
         lastQueueAttemptAt: placedAt,
         lastQueueAttemptHeldForDisposition: true,
-        lastQueueAttemptUii: payload.uii || null,
+        lastQueueAttemptUii: callTelephonySessionId || null,
         lastQueueAttemptPhone: payload.phone || queueItem.phone || null,
       },
     }), {

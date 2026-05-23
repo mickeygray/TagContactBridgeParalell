@@ -216,15 +216,17 @@ const ROUTE_CAMPAIGNS = Object.freeze({
   // filtering can fan out without re-parsing the snapshot.
   "ld-custom": {
     key: "ld-custom",
-    name: "LD Custom Lead",
+    name: "LD CUSTOM",
     sourceChannel: "lead-distribution",
-    logicsSourceName: "LD Posting",
+    logicsSourceName: "LD CUSTOM",
+    logicsCampaignName: "LD CUSTOM",
   },
   "ld-general": {
     key: "ld-general",
-    name: "LD General Lead",
+    name: "LD GENERAL",
     sourceChannel: "lead-distribution",
-    logicsSourceName: "LD Posting",
+    logicsSourceName: "LD GENERAL",
+    logicsCampaignName: "LD GENERAL",
   },
   affiliate: {
     key: "affiliate",
@@ -249,8 +251,8 @@ const ROUTE_CAMPAIGNS = Object.freeze({
 // template). The CODE is stable; the carrier field is not.
 //
 // Bucket mapping (vendor-supplied):
-//   GS03RB7W → LDCustom   queue
-//   JM8K5B7Y → LDGeneral  queue
+//   GS03RB7W → LD CUSTOM   queue
+//   JM8K5B7Y → LD GENERAL  queue
 //
 // Both can be overridden via env (LD_CUSTOM_CODE / LD_GENERAL_CODE)
 // if the vendor ever rotates the codes — no code change needed.
@@ -279,13 +281,13 @@ function getLdBucketCodeMap() {
   const customMatch = {
     kind: "custom",
     campaignKey: "ld-custom",
-    label: "LDCustom",
+    label: "LD CUSTOM",
     code: customCode || null,
   };
   const generalMatch = {
     kind: "general",
     campaignKey: "ld-general",
-    label: "LDGeneral",
+    label: "LD GENERAL",
     code: generalCode || null,
   };
   if (customCode) {
@@ -404,6 +406,12 @@ function resolveLogicsSourceName(normalized = {}) {
   }
 
   return normalized.sourceName || normalized.intakeSource;
+}
+
+function resolveLogicsCampaignName(normalized = {}) {
+  const explicit = cleanString(normalized.logicsCampaignName);
+  if (explicit) return explicit;
+  return null;
 }
 
 function describeLeadSource(normalized = {}, companyConfig = null) {
@@ -823,6 +831,13 @@ function normalizeWebsiteLeadPayload(payload = {}, headers = {}) {
         "Website Lead",
     ),
     logicsSourceName: cleanString(payload.logicsSourceName || payload.SourceName),
+    logicsCampaignName: cleanString(
+      payload.logicsCampaignName ||
+      payload.CampaignName ||
+      payload.campaignName ||
+      payload.routeCampaignName ||
+      payload.campaign,
+    ),
     sourceId: Number.isFinite(Number(payload.sourceId)) ? Number(payload.sourceId) : null,
     routeCampaignKey: cleanString(payload.routeCampaignKey || payload.campaignKey),
     routeCampaignName: cleanString(
@@ -869,6 +884,7 @@ function applyLeadOverrides(normalized, overrides = {}) {
     sourceChannel: overrides.sourceChannel || normalized.sourceChannel,
     sourceName: overrides.sourceName || normalized.sourceName,
     logicsSourceName: overrides.logicsSourceName || normalized.logicsSourceName || null,
+    logicsCampaignName: overrides.logicsCampaignName || normalized.logicsCampaignName || null,
     routeCampaignKey: overrides.routeCampaignKey || normalized.routeCampaignKey || null,
     routeCampaignName: overrides.routeCampaignName || normalized.routeCampaignName || null,
     vendorSourceName: overrides.vendorSourceName || normalized.vendorSourceName || null,
@@ -921,7 +937,7 @@ function normalizeLdLeadPayload(payload = {}, headers = {}, options = {}) {
   // Detect the LD queue-split signal. When `ldcustom` or `ldgeneral`
   // is present on the payload, route to the matching sub-campaign
   // (`ld-custom` / `ld-general`) and stamp the human-readable bucket
-  // label (`LDCustom` / `LDGeneral`) onto partnerSource + vendorSourceName
+  // label (`LD CUSTOM` / `LD GENERAL`) onto partnerSource + vendorSourceName
   // so the cadence row is self-describing. The raw vendor tracking
   // code (e.g. GS03RB7W) is preserved in payloadSnapshot for audits.
   // When absent we fall back to the plain `ld` campaign — existing
@@ -937,6 +953,8 @@ function normalizeLdLeadPayload(payload = {}, headers = {}, options = {}) {
   const vendorSourceName = ldSub?.label
     || extractVendorSourceName(payload)
     || "ld";
+  const logicsSourceName = campaign.logicsSourceName || campaign.name;
+  const logicsCampaignName = campaign.logicsCampaignName || null;
 
   return applyLeadOverrides(normalized, {
     domain: "WYNN",
@@ -946,8 +964,9 @@ function normalizeLdLeadPayload(payload = {}, headers = {}, options = {}) {
     intakeSource,
     partnerSource,
     sourceChannel: campaign.sourceChannel,
-    sourceName: campaign.logicsSourceName || campaign.name,
-    logicsSourceName: campaign.logicsSourceName || campaign.name,
+    sourceName: logicsSourceName,
+    logicsSourceName,
+    logicsCampaignName,
     routeCampaignKey: campaign.key,
     routeCampaignName: campaign.name,
     vendorSourceName,
@@ -956,6 +975,10 @@ function normalizeLdLeadPayload(payload = {}, headers = {}, options = {}) {
       routeCampaignKey: campaign.key,
       routeCampaignName: campaign.name,
       vendorSourceName,
+      logicsSourceName,
+      logicsCampaignName,
+      SourceName: logicsSourceName,
+      CampaignName: logicsCampaignName,
       contactDomain: "WYNN",
       lockContactDomain: true,
       prePingCallbackUrl: prePing?.callbackUrl || null,
@@ -963,7 +986,7 @@ function normalizeLdLeadPayload(payload = {}, headers = {}, options = {}) {
       // tooling can re-derive the split without having to re-parse
       // the original webhook body.
       ldSubsourceKind: ldSub?.kind || null,         // "custom" | "general" | null
-      ldSubsourceLabel: ldSub?.label || null,       // "LDCustom" | "LDGeneral"
+      ldSubsourceLabel: ldSub?.label || null,       // "LD CUSTOM" | "LD GENERAL"
       ldSubsourceValue: ldSub?.value || null,       // "GS03RB7W"
       ldSubsourceField: ldSub?.sourceFieldName || null,
     },
@@ -1408,15 +1431,21 @@ function validateLeadWebhook(req) {
 }
 
 function buildLogicsCreatePayload(normalized) {
-  return {
+  const logicsSourceName = resolveLogicsSourceName(normalized);
+  const logicsCampaignName = resolveLogicsCampaignName(normalized);
+  const payload = {
     FirstName: normalized.firstName || "Prospect",
     LastName: normalized.lastName || "Prospect",
     Email: normalized.email || undefined,
     CellPhone: normalized.primaryPhone ? `(${normalized.primaryPhone.slice(0, 3)})${normalized.primaryPhone.slice(3, 6)}-${normalized.primaryPhone.slice(6, 10)}` : undefined,
     City: normalized.city || undefined,
     State: normalized.state || undefined,
-    SourceName: resolveLogicsSourceName(normalized),
+    SourceName: logicsSourceName,
   };
+  if (logicsCampaignName) {
+    payload.CampaignName = logicsCampaignName;
+  }
+  return payload;
 }
 
 async function ensureCaseId(normalized, options = {}) {
@@ -2325,5 +2354,6 @@ module.exports = {
   normalizeLdLeadPayload,
   normalizeTikTokLeadPayload,
   normalizeWebsiteLeadPayload,
+  buildLogicsCreatePayload,
   validateLeadWebhook,
 };

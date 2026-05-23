@@ -30,9 +30,9 @@
 //
 // Env contract (see scripts/rcx-voice-discover.js — that script
 // captures these into .env from a live API call):
-//   RING_CENTRAL_JWT_TOKEN
-//   RING_CENTRAL_CLIENT_ID
-//   RING_CENTRAL_CLIENT_SECRET
+//   RINGCX_PLATFORM_JWT_TOKEN
+//   RINGCX_PLATFORM_CLIENT_ID
+//   RINGCX_PLATFORM_CLIENT_SECRET
 //   RING_CENTRAL_SERVER_URL                          (default https://platform.ringcentral.com)
 //   RINGCX_VOICE_BASE_URL                            (default https://ringcx.ringcentral.com)
 //   RINGCX_VOICE_TOKEN_EXCHANGE_PATH                 (default /api/auth/login/rc/accesstoken)
@@ -111,7 +111,7 @@ function normalizeRingcxUsername(value) {
 
 // ── Token cache ──────────────────────────────────────────────────────
 //
-// Module-level cache keyed by RING_CENTRAL_CLIENT_ID so multiple
+// Module-level cache keyed by the RingCX platform credential so multiple
 // `createRingcxVoiceClient()` calls share the same bearer (no extra
 // token-exchange calls per invocation). Reset via `client.auth.revoke()`.
 const TOKEN_CACHE = new Map();
@@ -121,13 +121,19 @@ let AUTH_BACKOFF_LAST_ERROR = null;
 const API_BACKOFF_BY_SCOPE = new Map();
 const API_THROTTLE_BY_SCOPE = new Map();
 
-function getCacheKey() {
-  return readEnv("RING_CENTRAL_CLIENT_ID", "default");
+function getCacheKey(config = {}) {
+  return (
+    config.platformClientId
+    || readEnv("RINGCX_PLATFORM_CLIENT_ID")
+    || readEnv("RING_CENTRAL_CLIENT_ID2")
+    || "default"
+  );
 }
 
-function clearCache() {
-  TOKEN_CACHE.delete(getCacheKey());
-  TOKEN_RESOLVE_IN_FLIGHT.delete(getCacheKey());
+function clearCache(cacheKey) {
+  const key = cacheKey || getCacheKey();
+  TOKEN_CACHE.delete(key);
+  TOKEN_RESOLVE_IN_FLIGHT.delete(key);
 }
 
 function isRateLimitError(error) {
@@ -460,10 +466,19 @@ function asError(method, path, response) {
 // ── Auth ────────────────────────────────────────────────────────────
 //
 // Step 1: RC OAuth via JWT-bearer grant.
-async function fetchRcAccessToken(rcBase) {
-  const jwt = ensure(readEnv("RING_CENTRAL_JWT_TOKEN"), "RING_CENTRAL_JWT_TOKEN");
-  const clientId = ensure(readEnv("RING_CENTRAL_CLIENT_ID"), "RING_CENTRAL_CLIENT_ID");
-  const clientSecret = ensure(readEnv("RING_CENTRAL_CLIENT_SECRET"), "RING_CENTRAL_CLIENT_SECRET");
+async function fetchRcAccessToken(rcBase, credentials = {}) {
+  const jwt = ensure(
+    credentials.jwtToken,
+    "RINGCX_PLATFORM_JWT_TOKEN or RING_CENTRAL_JWT_TOKEN2",
+  );
+  const clientId = ensure(
+    credentials.clientId,
+    "RINGCX_PLATFORM_CLIENT_ID or RING_CENTRAL_CLIENT_ID2",
+  );
+  const clientSecret = ensure(
+    credentials.clientSecret,
+    "RINGCX_PLATFORM_CLIENT_SECRET or RING_CENTRAL_CLIENT_SECRET2",
+  );
 
   const body = new URLSearchParams({
     grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer",
@@ -561,7 +576,11 @@ async function resolveBearerUncached(config, cacheKey) {
   }
 
   assertNotInAuthBackoff();
-  const rc = await retryAuthOperation(() => fetchRcAccessToken(config.rcBase));
+  const rc = await retryAuthOperation(() => fetchRcAccessToken(config.rcBase, {
+    clientId: config.platformClientId,
+    clientSecret: config.platformClientSecret,
+    jwtToken: config.platformJwtToken,
+  }));
   const voice = await retryAuthOperation(
     () => exchangeForRingcxToken(
       config.rcxBase,
@@ -598,7 +617,7 @@ async function resolveBearer(config) {
     throw err;
   }
 
-  const key = getCacheKey();
+  const key = getCacheKey(config);
   const cached = TOKEN_CACHE.get(key);
   const now = Date.now();
 
@@ -636,6 +655,21 @@ function createRingcxVoiceClient(options = {}) {
     defaultAgentGroupId: options.defaultAgentGroupId || readEnv("RINGCX_VOICE_DEFAULT_AGENT_GROUP_ID"),
     availableStateId: options.availableStateId || readEnv("RINGCX_VOICE_AUX_AVAILABLE_STATE_ID"),
     rcUserEmail: options.rcUserEmail || readEnv("RINGCX_VOICE_RC_USER_EMAIL"),
+    // RingCX Voice can intentionally use a different RC JWT app than EX
+    // call-log/presence. Prefer the dedicated CX lane, with the historical
+    // secondary lane kept as a compatibility alias.
+    platformClientId:
+      options.platformClientId
+      || readEnv("RINGCX_PLATFORM_CLIENT_ID")
+      || readEnv("RING_CENTRAL_CLIENT_ID2"),
+    platformClientSecret:
+      options.platformClientSecret
+      || readEnv("RINGCX_PLATFORM_CLIENT_SECRET")
+      || readEnv("RING_CENTRAL_CLIENT_SECRET2"),
+    platformJwtToken:
+      options.platformJwtToken
+      || readEnv("RINGCX_PLATFORM_JWT_TOKEN")
+      || readEnv("RING_CENTRAL_JWT_TOKEN2"),
     // Default agent for placeManualCall — ballen (dedicated agent
     // license), with mgray (admin) as a fallback. The admin can dial
     // too if needed but the agent license is the supported path.
@@ -719,7 +753,7 @@ function createRingcxVoiceClient(options = {}) {
   // ── auth ──────────────────────────────────────────────────────────
   const auth = {
     async ensureToken() { return resolveBearer(config); },
-    revoke() { clearCache(); },
+    revoke() { clearCache(getCacheKey(config)); },
     async whoami() {
       const t = await resolveBearer(config);
       return {

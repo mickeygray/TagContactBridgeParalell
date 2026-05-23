@@ -61,12 +61,14 @@ workflowRecordSchema.index({ aggregateType: 1, aggregateId: 1, happenedAt: -1 })
 workflowRecordSchema.index({ family: 1, happenedAt: -1 }, { name: "workflow_family_happened_at" });
 workflowRecordSchema.index({ family: 1, stage: 1, happenedAt: -1 }, { name: "workflow_family_stage_happened_at" });
 // Hot path: buildCxWorkspace + buildRingBridgeWorkspace both fire
-// `{ domain, family, ... }` queries every render (CX workspace polls
-// every 3s, RingBridge every 5-10s). Without this compound, Mongo was
-// scanning the whole collection per render → Atlas "Query Targeting:
-// scanned/returned > 1000" alert. Sorts by happenedAt desc so
-// `.sort({ happenedAt: -1 }).limit(N)` is a clean index walk.
+// `{ domain, family, ... }` queries every render. Keep both the legacy
+// happenedAt-only index and the exact repository sort so a live index
+// sync only adds the tighter path instead of dropping the existing one.
 workflowRecordSchema.index({ domain: 1, family: 1, happenedAt: -1 });
+workflowRecordSchema.index(
+  { domain: 1, family: 1, happenedAt: -1, createdAt: -1 },
+  { name: "workflow_domain_family_happened_created" },
+);
 workflowRecordSchema.index(
   { dedupeKey: 1 },
   {

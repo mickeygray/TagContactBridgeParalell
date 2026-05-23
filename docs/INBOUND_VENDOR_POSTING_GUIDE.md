@@ -137,7 +137,7 @@ The app refuses a lead before Logics case creation when:
 
 The app does **not** let vendor `sourceName` override the route campaign for LD or affiliate:
 
-- LD posts become `SourceName: "LD Lead"` or `SourceName: "LD Posting Lead"`.
+- Split LD posts become `SourceName: "LD CUSTOM"` or `SourceName: "LD GENERAL"`; unsplit LD posts stay under `SourceName: "LD Posting"`.
 - Affiliate posts become `SourceName: "Affiliate Lead"`.
 - Vendor/source detail is preserved as `partnerSource` and `vendorSourceName`.
 
@@ -327,8 +327,8 @@ Route attribution:
 - `intakeSource`: `ld` or `ld-posting`
 - `routeCampaignKey`: `ld-custom`, `ld-general`, or fallback `ld`
 - `sourceChannel`: `lead-distribution`
-- Logics `SourceName`: `LD Lead` or `LD Posting Lead`
-- `vendorSourceName`: split bucket label for LD Custom/General; raw vendor fields remain in `payloadSnapshot`
+- Logics `SourceName`: `LD CUSTOM`, `LD GENERAL`, or fallback `LD Posting`
+- `vendorSourceName`: split bucket label for LD CUSTOM / LD GENERAL; raw vendor fields remain in `payloadSnapshot`
 
 ## Route 3: Affiliate Lead Post
 

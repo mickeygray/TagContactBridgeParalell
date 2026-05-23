@@ -157,9 +157,38 @@ function createSftpServer(options) {
 
     client
       .on("authentication", (ctx) => {
-        if (ctx.method !== "password") return ctx.reject();
-        if (!checkValue(ctx.username, allowedUser)) return ctx.reject();
-        if (!checkValue(ctx.password, allowedPassword)) return ctx.reject();
+        writeJsonLine(eventLog, {
+          type: "client.auth.attempt",
+          username: ctx.username,
+          method: ctx.method,
+        });
+        if (ctx.method !== "password") {
+          writeJsonLine(eventLog, {
+            type: "client.auth.rejected",
+            username: ctx.username,
+            method: ctx.method,
+            reason: "unsupported-method",
+          });
+          return ctx.reject();
+        }
+        if (!checkValue(ctx.username, allowedUser)) {
+          writeJsonLine(eventLog, {
+            type: "client.auth.rejected",
+            username: ctx.username,
+            method: ctx.method,
+            reason: "username-mismatch",
+          });
+          return ctx.reject();
+        }
+        if (!checkValue(ctx.password, allowedPassword)) {
+          writeJsonLine(eventLog, {
+            type: "client.auth.rejected",
+            username: ctx.username,
+            method: ctx.method,
+            reason: "password-mismatch",
+          });
+          return ctx.reject();
+        }
         writeJsonLine(eventLog, { type: "client.authenticated", username: ctx.username });
         ctx.accept();
       })
