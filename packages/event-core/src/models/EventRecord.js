@@ -46,6 +46,10 @@ EventRecordSchema.index(
     partialFilterExpression: { dedupeKey: { $type: "string" } },
   },
 );
+EventRecordSchema.index(
+  { eventType: 1, sourceService: 1, _id: -1 },
+  { name: "event_type_source_latest" },
+);
 
 module.exports =
   mongoose.models.EventRecord || mongoose.model("EventRecord", EventRecordSchema);

@@ -130,9 +130,13 @@ function queueRateLimitAlert(payload = {}) {
   Promise.resolve()
     .then(async () => {
       const { sendMail } = require("../../shared-services/src/mailerService");
+      const { getInternalFromEmail } = require("../../shared-config/src");
+      const from = `Parallel Alert <${getInternalFromEmail()}>`;
       await sendMail(company, {
         to: recipients,
         subject,
+        from,
+        replyTo: from,
         text,
       });
     })

@@ -234,6 +234,7 @@ function isRecordingArchiveConfigured() {
   const destinations = config.destinations || {};
   const hasFolder =
     String(destinations.og?.folderId || "").trim() ||
+    String(destinations.cx?.folderId || "").trim() ||
     String(destinations.as?.folderId || "").trim() ||
     String(destinations.cs?.folderId || "").trim();
   return Boolean(
@@ -1085,15 +1086,14 @@ function normalizeArchiveDirection(value, fallback = "outbound") {
 
 function buildRingcxDestination(destinations = {}, direction = "outbound") {
   const normalizedDirection = normalizeArchiveDirection(direction);
-  const base = destinations.og || {};
-  const label = normalizedDirection === "inbound" ? "Inbound" : "Outbound";
+  const base = destinations.cx || destinations.as || destinations.og || {};
   return {
-    key: normalizedDirection,
-    label,
+    key: base.key || "cx",
+    label: base.label || "CX",
     folderId: base.folderId || "",
     folderConfigured: Boolean(String(base.folderId || "").trim()),
     routeType: `ringcx-${normalizedDirection}`,
-    sourceGroupKey: base.key || "og",
+    sourceGroupKey: base.key || "cx",
   };
 }
 
@@ -1153,7 +1153,7 @@ async function resolveTerminalRouting(callLog, artifact = null, rcRecord = null)
       ? buildDestination(destinations.og, "origination", "OG")
       : isCustomerServiceRoute
         ? buildDestination(destinations.cs, "customer-service", "CS")
-        : buildDestination(destinations.as, "ad-serv", "AS");
+        : buildDestination(destinations.cx || destinations.as, "cx", "CX");
   const routeReason =
     provider === "callrail"
       ? "callrail-provider"
@@ -1163,7 +1163,7 @@ async function resolveTerminalRouting(callLog, artifact = null, rcRecord = null)
         ? hasCustomerServiceTouch
           ? "customer-service-text-touch"
           : "customer-service-queue-touch"
-        : "ringcentral-provider";
+        : "ringcentral-provider-cx-default";
   return {
     candidate: terminalCandidate,
     destination,

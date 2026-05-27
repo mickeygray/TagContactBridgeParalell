@@ -66,6 +66,8 @@ const DEFAULT_LEXIS_ALERT_RECIPIENTS =
 const DEFAULT_NIGHTLY_LEAD_DATA_RECIPIENTS =
   "mgray@taxadvocategroup.com,manderson@taxadvocategroup.com,liz@lizdev.com,beth@lizdev.com,james@beachmedia.io";
 const DEFAULT_NIGHTLY_OPS_RECIPIENTS = "mgray@taxadvocategroup.com";
+const INTERNAL_FROM_EMAIL = "mgray@taxadvocategroup.com";
+const MARKETING_FROM_EMAIL = "cameron@wynntaxsolutions.com";
 
 function boolFromEnv(value, fallback = false) {
   if (value === undefined || value === null || value === "") {
@@ -244,7 +246,7 @@ function getSharedConfig(overrides = {}) {
       false,
     ),
     authOtpDelivery: {
-      fromEmail: env("AUTH_OTP_FROM_EMAIL", env("SENDGRID_FROM_EMAIL", "")),
+      fromEmail: INTERNAL_FROM_EMAIL,
       fromName: env("AUTH_OTP_FROM_NAME", env("SENDGRID_FROM_NAME", "TagContactBridge")),
       subject: env("AUTH_OTP_SUBJECT", "Your sign-in code"),
       defaultCompany: env("AUTH_OTP_COMPANY", DEFAULT_COMPANY),
@@ -586,12 +588,22 @@ function getSharedConfig(overrides = {}) {
           : process.env.HOURLY_CALL_LOG_HYGIENE_ARCHIVE_RECORDINGS,
         true,
       ),
+      cxRecordingMinute: Math.max(
+        0,
+        Math.min(59, envInt("RINGCX_RECORDING_HOURLY_MINUTE", 30)),
+      ),
     },
     lexisNightly: {
       enabled: boolFromEnv(
         overrides.lexisNightlyEnabled !== undefined
           ? overrides.lexisNightlyEnabled
           : process.env.LEXIS_NIGHTLY_ENABLED,
+        false,
+      ),
+      ingestEnabled: boolFromEnv(
+        overrides.lexisNightlyIngestEnabled !== undefined
+          ? overrides.lexisNightlyIngestEnabled
+          : process.env.LEXIS_NIGHTLY_INGEST_ENABLED,
         false,
       ),
       domain: String(
@@ -830,14 +842,14 @@ function getSharedConfig(overrides = {}) {
           : process.env.RECORDING_ARCHIVE_ENABLED,
         false,
       ),
-      // Floor on duration before we bother archiving. Restored to
-      // 360s after the 60s default proved to overload the hourly
-      // archive sweep (6× the row volume → 6× Mongo + Drive load).
+      // Floor on duration before we bother archiving. Keep this at
+      // five minutes so the hourly archive sweep captures meaningful
+      // sales calls without pulling every short/no-answer attempt.
       // To re-test a lower floor, set RECORDING_ARCHIVE_MIN_DURATION_SEC
       // explicitly in env, not as a default change.
       minDurationSec: Math.max(
         60,
-        envInt("RECORDING_ARCHIVE_MIN_DURATION_SEC", 360),
+        envInt("RECORDING_ARCHIVE_MIN_DURATION_SEC", 300),
       ),
       initialDelayMs: Math.max(
         0,
@@ -904,6 +916,23 @@ function getSharedConfig(overrides = {}) {
             "AS",
           folderId:
             overrides.recordingArchiveAsFolderId ||
+            process.env.AS_RECORDING_DUMP_FOLDER_ID ||
+            process.env.RECORDING_ARCHIVE_GROUP_B_FOLDER_ID ||
+            "",
+        },
+        cx: {
+          key:
+            overrides.recordingArchiveCxKey ||
+            process.env.RECORDING_ARCHIVE_CX_KEY ||
+            "cx",
+          label:
+            overrides.recordingArchiveCxLabel ||
+            process.env.RECORDING_ARCHIVE_CX_LABEL ||
+            "CX",
+          folderId:
+            overrides.recordingArchiveCxFolderId ||
+            process.env.CX_RECORDING_DUMP_FOLDER_ID ||
+            process.env.RECORDING_ARCHIVE_CX_FOLDER_ID ||
             process.env.AS_RECORDING_DUMP_FOLDER_ID ||
             process.env.RECORDING_ARCHIVE_GROUP_B_FOLDER_ID ||
             "",
@@ -1153,7 +1182,7 @@ function validateSharedConfig(config = {}) {
     const fromEmail = String(config.authOtpDelivery?.fromEmail || "").trim();
     if (!fromEmail) {
       throw new Error(
-        "AUTH_OTP_FROM_EMAIL (or SENDGRID_FROM_EMAIL) must be configured when AUTH_OTP_PREVIEW is disabled — without it, users can't receive login codes.",
+        "authOtpDelivery.fromEmail must be configured when AUTH_OTP_PREVIEW is disabled - without it, users can't receive login codes.",
       );
     }
 
@@ -1171,19 +1200,22 @@ function validateSharedConfig(config = {}) {
 }
 
 /**
- * From-address for INTERNAL Parallel emails (SMS alerts to ogleads,
- * job-failure notifications, sweeper alerts, intake alerts, Lexis ops
- * mail). Single source of truth so flipping the sender later is one
- * env-var change. Per-domain branded senders (`company.fromEmail` /
- * `WYNN_FROM_EMAIL` / `TAG_FROM_EMAIL`) are still used for
- * prospect-facing cadence + outbound mail — DO NOT replace those with
- * this helper.
+ * From-address for internal Parallel emails: lead-add alerts, nightly
+ * rollups, vendor summaries, Lexis counts/drops, and system alerts.
+ * This is intentionally not env-backed so stale TAG/WYNN sender vars
+ * cannot quietly put operational mail back on a team mailbox.
  */
 function getInternalFromEmail() {
-  return env("INTERNAL_FROM_EMAIL", env("TAG_FROM_EMAIL", "team@taxadvocategroup.com"));
+  return INTERNAL_FROM_EMAIL;
+}
+
+function getMarketingFromEmail() {
+  return MARKETING_FROM_EMAIL;
 }
 
 module.exports = {
+  INTERNAL_FROM_EMAIL,
+  MARKETING_FROM_EMAIL,
   DEFAULT_COMPANY,
   PORTS,
   ROOT_DIR,
@@ -1195,6 +1227,7 @@ module.exports = {
   getGithubConfig,
   getIgPageToken,
   getInternalFromEmail,
+  getMarketingFromEmail,
   getRingCentralConfig,
   getSharedConfig,
   resolveCompanyFromFbPageId,

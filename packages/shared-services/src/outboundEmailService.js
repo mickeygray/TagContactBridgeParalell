@@ -1,7 +1,10 @@
 "use strict";
 
 const { sendMail } = require("./mailerService");
-const { getCompanyConfig } = require("../../shared-config/src");
+const {
+  getCompanyConfig,
+  getMarketingFromEmail,
+} = require("../../shared-config/src");
 
 function buildDefaultEmailContent({ name, domain }) {
   const company = getCompanyConfig(domain);
@@ -32,7 +35,7 @@ async function sendOutboundEmail({
     subject: subject || fallback.subject,
     text: text || fallback.text,
     html: html || undefined,
-    from: `${company.name} <${company.fromEmail}>`,
+    from: `${company.name} <${getMarketingFromEmail()}>`,
     attachments,
   });
 

@@ -28,11 +28,13 @@ const { buildTimezoneDateWindow } = require("./timezoneDateWindowService");
 const {
   backfillCallLogSourceFromLeadCadence,
 } = require("./callLogSourceBackfillService");
+const { getInternalFromEmail } = require("../../shared-config/src");
 
 const DEFAULT_TIMEZONE = "America/Los_Angeles";
 const DEFAULT_MAX_CALL_ROWS = 10000;
 const DEFAULT_MAX_LEAD_ROWS = 20000;
 const DEFAULT_MAX_PAYMENT_ROWS = 20000;
+const LD_VENDOR_FAMILY_KEYS = new Set(["ld-custom", "ld-general"]);
 
 function normalizeDomain(domain) {
   return String(domain || "").trim().toUpperCase();
@@ -41,6 +43,55 @@ function normalizeDomain(domain) {
 function toNumber(value) {
   const numeric = Number(value || 0);
   return Number.isFinite(numeric) ? numeric : 0;
+}
+
+function vendorFamilyKey(row = {}) {
+  return String(row.family || row.familyKey || row.sourceFamilyKey || "")
+    .trim()
+    .toLowerCase();
+}
+
+function isLdVendorFamily(row = {}) {
+  return LD_VENDOR_FAMILY_KEYS.has(vendorFamilyKey(row));
+}
+
+function ldFamilyEstimatedCost(row = {}) {
+  const leads = toNumber(row.leads);
+  const key = vendorFamilyKey(row);
+  if (key === "ld-custom") return leads * 3;
+  if (key === "ld-general") return leads * 2;
+  return 0;
+}
+
+function decorateLdVendorFamily(row = {}) {
+  return {
+    ...row,
+    estimatedCost: ldFamilyEstimatedCost(row),
+  };
+}
+
+function sumVendorRows(rows = [], field) {
+  return rows.reduce((sum, row) => sum + toNumber(row?.[field]), 0);
+}
+
+function buildLdCostSummary(rows = []) {
+  const custom = rows.find((row) => vendorFamilyKey(row) === "ld-custom") || {};
+  const general = rows.find((row) => vendorFamilyKey(row) === "ld-general") || {};
+  const customCount = toNumber(custom.leads);
+  const generalCount = toNumber(general.leads);
+  const customRate = 3;
+  const generalRate = 2;
+  const customCost = customCount * customRate;
+  const generalCost = generalCount * generalRate;
+  return {
+    customCount,
+    generalCount,
+    customRate,
+    generalRate,
+    customCost,
+    generalCost,
+    total: customCost + generalCost,
+  };
 }
 
 function toDate(value) {
@@ -128,6 +179,7 @@ function createAccumulator(seed = {}) {
 }
 
 function addScore(accumulator, score) {
+  if (score === "" || score == null) return;
   const numeric = Number(score);
   if (Number.isFinite(numeric)) {
     accumulator.scoredCalls += 1;
@@ -177,8 +229,8 @@ function finalizeAccumulator(accumulator) {
   };
 }
 
-function trackedVendorMeta(sourceName, sourceChannel = null) {
-  const family = classifyVendorFamily(sourceName, sourceChannel);
+function trackedVendorMeta(sourceName, sourceChannel = null, routeCampaignKey = null) {
+  const family = classifyVendorFamily(sourceName, sourceChannel, routeCampaignKey);
   return {
     source: String(sourceName || "Unknown").trim() || "Unknown",
     channel: sourceChannel || null,
@@ -188,8 +240,8 @@ function trackedVendorMeta(sourceName, sourceChannel = null) {
   };
 }
 
-function isTrackedVendorCandidate(sourceName, sourceChannel = null) {
-  return trackedVendorMeta(sourceName, sourceChannel).tracked;
+function isTrackedVendorCandidate(sourceName, sourceChannel = null, routeCampaignKey = null) {
+  return trackedVendorMeta(sourceName, sourceChannel, routeCampaignKey).tracked;
 }
 
 function uniqueStrings(values = []) {
@@ -325,6 +377,8 @@ async function buildVendorCallRows(domain, dateKey, options = {}) {
       caseId: 1,
       sourceName: 1,
       sourceChannel: 1,
+      routeCampaignKey: 1,
+      routeCampaignName: 1,
       recordingAvailable: 1,
       transcriptAvailable: 1,
       transcriptionStatus: 1,
@@ -363,6 +417,8 @@ async function buildVendorCallRows(domain, dateKey, options = {}) {
         caseId: 1,
         sourceName: 1,
         sourceChannel: 1,
+        routeCampaignKey: 1,
+        routeCampaignName: 1,
         caseMatch: 1,
         transcription: 1,
         callScore: 1,
@@ -380,9 +436,15 @@ async function buildVendorCallRows(domain, dateKey, options = {}) {
     .map((row) => {
       const sourceName = row.sourceName || row.caseMatch?.sourceName || "Unknown";
       const sourceChannel = row.sourceChannel || row.caseMatch?.sourceChannel || null;
-      const meta = trackedVendorMeta(sourceName, sourceChannel);
-      const scoreOverall = row.scoreOverall ?? row.callScore?.overall ?? "";
+      const routeCampaignKey = row.routeCampaignKey || null;
+      const meta = trackedVendorMeta(sourceName, sourceChannel, routeCampaignKey);
+      const rawScoreOverall = row.scoreOverall ?? row.callScore?.overall ?? "";
       const scoreVerdict = row.scoreVerdict || row.callScore?.lead_verdict || "";
+      const numericScore = Number(rawScoreOverall);
+      const scoreOverall =
+        Number.isFinite(numericScore) && (numericScore > 0 || scoreVerdict)
+          ? rawScoreOverall
+          : "";
       const scoreSummary = row.scoreSummary || row.callScore?.summary || "";
       const durationSec = toNumber(row.durationSec || row.durationSeconds);
       return {
@@ -397,6 +459,8 @@ async function buildVendorCallRows(domain, dateKey, options = {}) {
         sourceFamilyKey: meta.familyKey,
         sourceName: meta.source,
         sourceChannel: meta.channel || "",
+        routeCampaignKey,
+        routeCampaignName: row.routeCampaignName || "",
         direction: row.direction || "",
         durationSec,
         callsOver2: durationSec >= 120 ? 1 : 0,
@@ -453,7 +517,8 @@ async function buildVendorLeadRows(domain, dateKey, options = {}) {
         row.intakeRoute ||
         row.metadata?.sourceChannel ||
         null;
-      const meta = trackedVendorMeta(sourceName, sourceChannel);
+      const routeCampaignKey = row.routeCampaignKey || null;
+      const meta = trackedVendorMeta(sourceName, sourceChannel, routeCampaignKey);
       const name =
         row.name ||
         [row.firstName, row.lastName].filter(Boolean).join(" ").trim() ||
@@ -475,7 +540,7 @@ async function buildVendorLeadRows(domain, dateKey, options = {}) {
         // "Lead intake by campaign" breakdown. Carries the LD CUSTOM /
         // LD GENERAL / organic / affiliate split that the LD intake
         // stamps at ingest time (see normalizeLdLeadPayload).
-        routeCampaignKey: row.routeCampaignKey || null,
+        routeCampaignKey,
         routeCampaignName: row.routeCampaignName || null,
         currentStage: row.currentStage || "",
         active: row.active === false ? "no" : "yes",
@@ -782,31 +847,35 @@ function buildDetailBackedVendorSummary(baseSummary, callRows, leadRows, outcome
 }
 
 function buildVendorNightlyBody(domain, dateKey, summary, details, closePass) {
+  const trackedFamilies = (Array.isArray(summary.trackedFamilies)
+    ? summary.trackedFamilies
+    : [])
+      .filter(isLdVendorFamily)
+      .map(decorateLdVendorFamily);
+  const ldCost = buildLdCostSummary(trackedFamilies);
   const lines = [
     `[${domain}] Vendor nightly close for ${dateKey}`,
     "",
     "Top line",
-    `Vendor leads: ${toNumber(summary.totals?.leads)}`,
-    `Vendor calls: ${toNumber(summary.totals?.calls)} (${toNumber(summary.totals?.callsOver2)} over 2m, ${toNumber(summary.totals?.callsOver5)} over 5m)`,
-    `Scored calls: ${toNumber(summary.totals?.scoredCalls)}${summary.totals?.averageScore != null ? `, avg score ${summary.totals.averageScore}` : ""}`,
-    `DNC today: ${toNumber(summary.totals?.dncToday)}`,
-    `Postdate today: ${toNumber(summary.totals?.postdateToday)}`,
-    `Deals today: ${toNumber(summary.totals?.dealsToday)}`,
-    `Initials today: $${formatCurrency(summary.totals?.initialPayments)}`,
-    `Collected today: $${formatCurrency(summary.totals?.totalCollected)}`,
+    `LD leads: ${sumVendorRows(trackedFamilies, "leads")}`,
+    `LD cost: $${formatCurrency(ldCost.total)} (LD CUSTOM ${ldCost.customCount} x $${ldCost.customRate} + LD GENERAL ${ldCost.generalCount} x $${ldCost.generalRate})`,
+    `LD calls: ${sumVendorRows(trackedFamilies, "calls")} (${sumVendorRows(trackedFamilies, "callsOver2")} over 2m, ${sumVendorRows(trackedFamilies, "callsOver5")} over 5m)`,
+    `Scored LD calls: ${sumVendorRows(trackedFamilies, "scoredCalls")}`,
+    `DNC today: ${sumVendorRows(trackedFamilies, "dncToday")}`,
+    `Postdate today: ${sumVendorRows(trackedFamilies, "postdateToday")}`,
+    `Deals today: ${sumVendorRows(trackedFamilies, "dealsToday")}`,
+    `Initials today: $${formatCurrency(sumVendorRows(trackedFamilies, "initialPayments"))}`,
+    `Collected today: $${formatCurrency(sumVendorRows(trackedFamilies, "totalCollected"))}`,
     "",
-    "Vendor family summary",
+    "LD family summary",
   ];
 
-  const trackedFamilies = Array.isArray(summary.trackedFamilies)
-    ? summary.trackedFamilies
-    : [];
   if (trackedFamilies.length === 0) {
-    lines.push("No tracked vendor families were found for this date.");
+    lines.push("No LD families were found for this date.");
   } else {
     for (const row of trackedFamilies.slice(0, 12)) {
       lines.push(
-        `${row.familyLabel}: leads ${toNumber(row.leads)}, calls ${toNumber(row.calls)}, scored ${toNumber(row.scoredCalls)}, dnc ${toNumber(row.dncToday)}, postdate ${toNumber(row.postdateToday)}, deals ${toNumber(row.dealsToday)}, collected $${formatCurrency(row.totalCollected)}`,
+        `${row.familyLabel}: leads ${toNumber(row.leads)}, cost $${formatCurrency(row.estimatedCost)}, calls ${toNumber(row.calls)}, scored ${toNumber(row.scoredCalls)}, dnc ${toNumber(row.dncToday)}, postdate ${toNumber(row.postdateToday)}, deals ${toNumber(row.dealsToday)}, collected $${formatCurrency(row.totalCollected)}`,
       );
     }
   }
@@ -881,11 +950,11 @@ async function sendVendorNightlyEmail(domain, report, options = {}) {
       },
     ],
     from: {
-      email: company.fromEmail,
+      email: getInternalFromEmail(),
       name: company.emailName,
     },
     reply_to: {
-      email: company.alertEmail || company.fromEmail,
+      email: getInternalFromEmail(),
       name: company.contactName || company.emailName,
     },
     subject: `[${domain}] Vendor nightly ${report.date}`,
@@ -963,6 +1032,8 @@ async function runVendorNightlyEmail(domain, options = {}) {
     { header: "sourceFamilyKey", key: "sourceFamilyKey" },
     { header: "sourceName", key: "sourceName" },
     { header: "sourceChannel", key: "sourceChannel" },
+    { header: "routeCampaignKey", key: "routeCampaignKey" },
+    { header: "routeCampaignName", key: "routeCampaignName" },
     { header: "direction", key: "direction" },
     { header: "durationSec", key: "durationSec" },
     { header: "callsOver2", key: "callsOver2" },
@@ -989,6 +1060,8 @@ async function runVendorNightlyEmail(domain, options = {}) {
     { header: "sourceFamilyKey", key: "sourceFamilyKey" },
     { header: "sourceName", key: "sourceName" },
     { header: "sourceChannel", key: "sourceChannel" },
+    { header: "routeCampaignKey", key: "routeCampaignKey" },
+    { header: "routeCampaignName", key: "routeCampaignName" },
     { header: "intakeSource", key: "intakeSource" },
     { header: "intakeRoute", key: "intakeRoute" },
     { header: "currentStage", key: "currentStage" },
@@ -1072,6 +1145,7 @@ async function runVendorNightlyEmail(domain, options = {}) {
 }
 
 module.exports = {
+  buildDetailBackedVendorSummary,
   buildVendorCallRows,
   buildVendorLeadRows,
   buildVendorOutcomeRows,

@@ -40,3 +40,4 @@ runtime/recordings/
 # Sidecar JSON manifests live next to the recordings — also local-only.
 ops/end-of-day-recordings/**/*.json
 ops/manual-recording-dumps/**/*.json
+ops/scheduled-logs/*.log

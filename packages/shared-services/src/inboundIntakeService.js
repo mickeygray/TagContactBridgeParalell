@@ -236,6 +236,29 @@ const ROUTE_CAMPAIGNS = Object.freeze({
   },
 });
 
+const LD_ROUTE_SOURCE_ID_ENV = Object.freeze({
+  "ld-custom": ["LOGICS_LD_CUSTOM_SOURCE_ID", "LD_CUSTOM_SOURCE_ID"],
+  "ld-general": ["LOGICS_LD_GENERAL_SOURCE_ID", "LD_GENERAL_SOURCE_ID"],
+});
+
+const LD_ROUTE_SOURCE_ID_DEFAULTS = Object.freeze({
+  "ld-custom": 45,
+  "ld-general": 46,
+});
+
+function resolveLdRouteSourceId(routeCampaignKey) {
+  const key = String(routeCampaignKey || "").trim().toLowerCase();
+  if (!Object.prototype.hasOwnProperty.call(LD_ROUTE_SOURCE_ID_DEFAULTS, key)) {
+    return null;
+  }
+  const envNames = LD_ROUTE_SOURCE_ID_ENV[key] || [];
+  for (const envName of envNames) {
+    const value = Number(process.env[envName]);
+    if (Number.isFinite(value) && value > 0) return value;
+  }
+  return LD_ROUTE_SOURCE_ID_DEFAULTS[key];
+}
+
 // NOTE(ld-queue-split): producer side of the LD queue split.
 // Consumer side is in cxWorkspaceService.js (materializeQueueSupplyForAgent
 // + maybeRefillCxQueueForAgent) and cxQueuePolicyService.js
@@ -885,6 +908,10 @@ function applyLeadOverrides(normalized, overrides = {}) {
     sourceName: overrides.sourceName || normalized.sourceName,
     logicsSourceName: overrides.logicsSourceName || normalized.logicsSourceName || null,
     logicsCampaignName: overrides.logicsCampaignName || normalized.logicsCampaignName || null,
+    sourceId:
+      overrides.sourceId !== undefined
+        ? overrides.sourceId
+        : normalized.sourceId,
     routeCampaignKey: overrides.routeCampaignKey || normalized.routeCampaignKey || null,
     routeCampaignName: overrides.routeCampaignName || normalized.routeCampaignName || null,
     vendorSourceName: overrides.vendorSourceName || normalized.vendorSourceName || null,
@@ -955,6 +982,9 @@ function normalizeLdLeadPayload(payload = {}, headers = {}, options = {}) {
     || "ld";
   const logicsSourceName = campaign.logicsSourceName || campaign.name;
   const logicsCampaignName = campaign.logicsCampaignName || null;
+  const sourceId =
+    resolveLdRouteSourceId(campaign.key) ||
+    (Number.isFinite(Number(normalized.sourceId)) ? Number(normalized.sourceId) : null);
 
   return applyLeadOverrides(normalized, {
     domain: "WYNN",
@@ -967,6 +997,7 @@ function normalizeLdLeadPayload(payload = {}, headers = {}, options = {}) {
     sourceName: logicsSourceName,
     logicsSourceName,
     logicsCampaignName,
+    sourceId,
     routeCampaignKey: campaign.key,
     routeCampaignName: campaign.name,
     vendorSourceName,
@@ -977,6 +1008,7 @@ function normalizeLdLeadPayload(payload = {}, headers = {}, options = {}) {
       vendorSourceName,
       logicsSourceName,
       logicsCampaignName,
+      sourceId,
       SourceName: logicsSourceName,
       CampaignName: logicsCampaignName,
       contactDomain: "WYNN",
@@ -1536,6 +1568,56 @@ async function ensureCaseId(normalized, options = {}) {
   return caseId;
 }
 
+async function ensureLdLogicsSourceId(normalized, caseId, options = {}) {
+  const sourceId = resolveLdRouteSourceId(normalized.routeCampaignKey);
+  if (!sourceId || !caseId || String(normalized.domain || "").toUpperCase() !== "WYNN") {
+    return null;
+  }
+  const client = createLogicsClient(normalized.domain);
+  try {
+    const response = await client.updateCase({
+      CaseID: Number(caseId),
+      SourceID: Number(sourceId),
+    });
+    return {
+      ok: true,
+      sourceId,
+      response,
+    };
+  } catch (error) {
+    options.logger?.warn?.("ld.logics-source-id.update.failed", {
+      domain: normalized.domain,
+      caseId,
+      routeCampaignKey: normalized.routeCampaignKey,
+      sourceId,
+      message: error.message,
+    });
+    await recordWorkflowStage({
+      domain: normalized.domain,
+      family: "inbound",
+      subtype: "ld-logics-source-id-update-failed",
+      stage: "warning",
+      aggregateType: "case",
+      aggregateId: String(caseId),
+      sourceService: options.sourceService || "inbound-gateway",
+      title: "LD Logics SourceID update failed",
+      summary: `LD source split ${normalized.routeCampaignKey} could not set SourceID ${sourceId} on case ${caseId}`,
+      payload: {
+        caseId: Number(caseId),
+        routeCampaignKey: normalized.routeCampaignKey,
+        routeCampaignName: normalized.routeCampaignName,
+        sourceId,
+        error: error.message,
+      },
+    }).catch(() => null);
+    return {
+      ok: false,
+      sourceId,
+      error: error.message,
+    };
+  }
+}
+
 async function writeProspectAndCadence(normalized, options = {}) {
   const now = options.now || new Date();
   const companyConfig = options.companyConfig || getCompanyConfig(normalized.domain);
@@ -1641,6 +1723,15 @@ async function writeProspectAndCadence(normalized, options = {}) {
   }
 
   const caseId = await ensureCaseId(normalized, options);
+  const ldRouteSourceId = resolveLdRouteSourceId(normalized.routeCampaignKey);
+  if (ldRouteSourceId && !normalized.sourceId) {
+    normalized.sourceId = ldRouteSourceId;
+    normalized.payloadSnapshot = {
+      ...(normalized.payloadSnapshot || {}),
+      sourceId: ldRouteSourceId,
+    };
+  }
+  const ldLogicsSourceUpdate = await ensureLdLogicsSourceId(normalized, caseId, options);
   const schedule = createLegacyCadenceSchedule(now, companyConfig.cadence || {}, validation);
   const firstAction = schedule.actions[0] || null;
 
@@ -1664,6 +1755,8 @@ async function writeProspectAndCadence(normalized, options = {}) {
     metadata: {
       intakeSource: normalized.intakeSource,
       sourceName: normalized.sourceName,
+      logicsSourceName: normalized.logicsSourceName || null,
+      logicsCampaignName: normalized.logicsCampaignName || null,
       sourceChannel: normalized.sourceChannel,
       routeCampaignKey: normalized.routeCampaignKey || null,
       routeCampaignName: normalized.routeCampaignName || null,
@@ -1753,6 +1846,7 @@ async function writeProspectAndCadence(normalized, options = {}) {
     payloadSnapshot: {
       ...(normalized.payloadSnapshot || {}),
       trackingNumber,
+      ldLogicsSourceUpdate,
       routeCampaignKey: normalized.routeCampaignKey || null,
       routeCampaignName: normalized.routeCampaignName || null,
       vendorSourceName: normalized.vendorSourceName || null,

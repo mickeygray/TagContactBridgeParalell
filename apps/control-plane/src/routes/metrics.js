@@ -211,6 +211,7 @@ function createMetricsRouter(auth, spendSyncRuntime) {
       try {
         const result = await runCxRecordingHourly({
           fireTime: req.body?.fireTime ? new Date(req.body.fireTime) : new Date(),
+          scheduleMinute: req.body?.scheduleMinute ?? req.query.scheduleMinute,
           windowStart: req.body?.windowStart ? new Date(req.body.windowStart) : null,
           windowEnd: req.body?.windowEnd ? new Date(req.body.windowEnd) : null,
           domains: Array.isArray(req.body?.domains) ? req.body.domains : undefined,
@@ -234,7 +235,9 @@ function createMetricsRouter(auth, spendSyncRuntime) {
         const fireTime = req.query.fireTime
           ? new Date(req.query.fireTime)
           : new Date();
-        const window = computeCxRecordingHourlyWindow(fireTime);
+        const window = computeCxRecordingHourlyWindow(fireTime, {
+          scheduleMinute: req.query.scheduleMinute,
+        });
         return res.json({
           ok: true,
           result: {

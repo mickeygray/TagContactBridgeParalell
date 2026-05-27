@@ -10,6 +10,10 @@ const { normalizeLdLeadPayload } = require("../packages/shared-services/src/inbo
 
 const ACTIVE_QUEUE_STATES = ["queued", "ready", "claimed", "serving", "paused"];
 const SPLIT_KEYS = new Set(["ld-custom", "ld-general"]);
+const SOURCE_ID_BY_KEY = {
+  "ld-custom": Number(process.env.LOGICS_LD_CUSTOM_SOURCE_ID || process.env.LD_CUSTOM_SOURCE_ID || 45),
+  "ld-general": Number(process.env.LOGICS_LD_GENERAL_SOURCE_ID || process.env.LD_GENERAL_SOURCE_ID || 46),
+};
 
 function parseArgs(argv) {
   const args = {
@@ -62,6 +66,7 @@ function detectSplit(doc = {}) {
     ldSubsourceLabel: normalized.payloadSnapshot?.ldSubsourceLabel || null,
     ldSubsourceValue: normalized.payloadSnapshot?.ldSubsourceValue || null,
     ldSubsourceField: normalized.payloadSnapshot?.ldSubsourceField || null,
+    sourceId: SOURCE_ID_BY_KEY[normalized.routeCampaignKey] || null,
   };
 }
 
@@ -81,6 +86,7 @@ function buildLeadCadencePatch(split) {
     "payloadSnapshot.vendorSourceName": split.vendorSourceName,
     "payloadSnapshot.logicsSourceName": split.logicsSourceName,
     "payloadSnapshot.logicsCampaignName": split.logicsCampaignName,
+    "payloadSnapshot.sourceId": split.sourceId,
     "payloadSnapshot.SourceName": split.logicsSourceName,
     "payloadSnapshot.CampaignName": split.logicsCampaignName,
     "payloadSnapshot.ldSubsourceKind": split.ldSubsourceKind,
@@ -99,6 +105,8 @@ function buildMasterProspectPatch(split) {
       "metadata.sourceName": split.sourceName,
       "metadata.logicsSourceName": split.logicsSourceName,
       "metadata.logicsCampaignName": split.logicsCampaignName,
+      "metadata.sourceId": split.sourceId,
+      sourceId: split.sourceId,
       "metadata.vendorSourceName": split.vendorSourceName,
     },
   };
@@ -113,6 +121,7 @@ function buildQueuePatch(split) {
       "metadata.sourceName": split.sourceName,
       "metadata.logicsSourceName": split.logicsSourceName,
       "metadata.logicsCampaignName": split.logicsCampaignName,
+      "metadata.sourceId": split.sourceId,
     },
   };
 }

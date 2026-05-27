@@ -13,6 +13,7 @@
 // don't have to chase every caller through the codebase. New code
 // should import `sendMail` from `mailerService` directly.
 
+const { getInternalFromEmail } = require("../../shared-config/src");
 const { sendMail } = require("./mailerService");
 
 function flattenRecipients(personalizations) {
@@ -56,15 +57,13 @@ function adaptAttachments(list) {
 
 function fromHeader(payload) {
   const from = payload?.from || {};
-  if (from.name && from.email) return `${from.name} <${from.email}>`;
-  return from.email || null;
+  const name = from.name || "Parallel";
+  return `${name} <${getInternalFromEmail()}>`;
 }
 
 function addressHeader(value) {
-  if (!value) return undefined;
-  if (typeof value === "string") return value;
-  if (value.name && value.email) return `${value.name} <${value.email}>`;
-  return value.email || undefined;
+  const name = typeof value === "object" && value?.name ? value.name : "Parallel";
+  return `${name} <${getInternalFromEmail()}>`;
 }
 
 async function sendPlainEmail(companyKey, payload) {
@@ -110,7 +109,8 @@ async function sendTestEmail(companyKey, options = {}) {
     to: toEmail,
     subject,
     text,
-    from: fromEmail || undefined,
+    from: fromEmail || `Parallel Mailer Test <${getInternalFromEmail()}>`,
+    replyTo: fromEmail || `Parallel Mailer Test <${getInternalFromEmail()}>`,
   });
 }
 

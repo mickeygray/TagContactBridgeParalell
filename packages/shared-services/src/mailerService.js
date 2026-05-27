@@ -29,7 +29,10 @@ const {
   partialPath,
   assetPath,
 } = require("../../shared-templates/src");
-const { getCompanyConfig } = require("../../shared-config/src");
+const {
+  getCompanyConfig,
+  getMarketingFromEmail,
+} = require("../../shared-config/src");
 
 const TEMPLATE_CACHE = new Map(); // "<category>/<name>" → compiled fn
 const PARTIALS_REGISTERED = { done: false };
@@ -214,21 +217,13 @@ function getTransport(domainKey) {
 
 // ── From-line resolution ─────────────────────────────────────────────
 //
-// `from` resolution order:
-//   1. explicit `options.from` (callers who know what they want)
-//   2. company-config `fromEmail` + `name`
-//   3. process.env.<DOMAIN>_EMAIL_NAME / <DOMAIN>_EMAIL_ADDRESS (legacy)
-//   4. literal "Parallel <team@taxadvocategroup.com>" so dev sends still
-//      go through with whatever sender SendGrid has authorized
+// Default From-line for marketing/cadence/customer mail. Internal
+// jobs pass an explicit From header through getInternalFromEmail().
 function resolveFrom(domainKey, explicitFrom) {
   if (explicitFrom) return explicitFrom;
   const key = String(domainKey || "").toUpperCase();
   const company = getCompanyConfig(key);
-  const fromEmail =
-    company?.fromEmail ||
-    process.env[`${key}_EMAIL_ADDRESS`] ||
-    process.env[`${key}_FROM_EMAIL`] ||
-    "team@taxadvocategroup.com";
+  const fromEmail = getMarketingFromEmail();
   const fromName =
     process.env[`${key}_EMAIL_NAME`] ||
     company?.name ||

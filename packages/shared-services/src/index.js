@@ -444,6 +444,10 @@ const {
   syncCallLedgerFromCallLog,
 } = require("./callLedgerService");
 const {
+  recoverCxCallLogs,
+  recoverCxCallLogsForDate,
+} = require("./cxCallActivityBackfillService");
+const {
   reconcilePaymentsForCase,
   reconcilePaymentsForDomain,
 } = require("./paymentReconcileService");
@@ -766,6 +770,8 @@ module.exports = {
   buildCallLedgerEntryFromCallLog,
   syncCallLedgerBySession,
   syncCallLedgerFromCallLog,
+  recoverCxCallLogs,
+  recoverCxCallLogsForDate,
   previewHourlyFinancialSync,
   previewScheduledBlast,
   listMetricsAttributionReviewItems,

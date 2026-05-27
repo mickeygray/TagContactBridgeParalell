@@ -634,11 +634,54 @@ async function downloadFile(config = {}, { fileId, supportsAllDrives = true } = 
   return { buffer, mimeType, contentLength };
 }
 
+async function getFileMetadata(config = {}, {
+  fileId,
+  fields = "id,name,mimeType,parents,trashed,webViewLink,createdTime,modifiedTime",
+  supportsAllDrives = true,
+} = {}) {
+  ensureConfigured(config);
+  if (!fileId) {
+    throw new Error("getFileMetadata: fileId is required");
+  }
+  const token = await getAccessToken(config);
+  const url = new URL(
+    `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}`,
+  );
+  url.searchParams.set("fields", fields);
+  if (supportsAllDrives) {
+    url.searchParams.set("supportsAllDrives", "true");
+  }
+
+  const response = await fetch(url.toString(), {
+    method: "GET",
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  const text = await response.text();
+  const data = parseResponseBody(text);
+  if (!response.ok) {
+    throw new ExternalServiceError(
+      "google-drive",
+      `Google Drive getFileMetadata failed: ${response.status}`,
+      {
+        status: 502,
+        retryable: response.status >= 500 || response.status === 429,
+        details: {
+          responseStatus: response.status,
+          responseBody: data,
+          fileId,
+        },
+      },
+    );
+  }
+  return data;
+}
+
 function createGoogleDriveClient(config = {}) {
   return {
     config,
     isConfigured: () => isConfigured(config),
     getAccessToken: () => getAccessToken(config),
+    getFileMetadata: (options) => getFileMetadata(config, options),
     findFilesByAppProperties: (options) => findFilesByAppProperties(config, options),
     uploadFileResumable: (options) => uploadFileResumable(config, options),
     downloadFile: (options) => downloadFile(config, options),

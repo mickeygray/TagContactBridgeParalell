@@ -7,25 +7,11 @@
     <div class="section">
       <h2>Topline — {{date}}</h2>
       {{> kpi-tiles tiles=topTiles}}
-    </div>
-
-    <div class="section">
-      <h2>Lead intake by source</h2>
-      {{#if leadEntries.length}}
-        <table class="data" cellpadding="0" cellspacing="0">
-          <tr>
-            <th>Source</th>
-            <th class="center">Leads today</th>
-          </tr>
-          {{#each leadEntries}}
-            <tr>
-              <td>{{source}}</td>
-              <td class="center">{{count}}</td>
-            </tr>
-          {{/each}}
-        </table>
-      {{else}}
-        <div class="muted">No new leads today.</div>
+      {{#if ldCost}}
+        <div class="summary-line">
+          <strong>LD cost:</strong> {{money ldCost.total}}
+          <span class="muted">(LD CUSTOM {{ldCost.customCount}} x ${{ldCost.customRate}} + LD GENERAL {{ldCost.generalCount}} x ${{ldCost.generalRate}})</span>
+        </div>
       {{/if}}
     </div>
 
@@ -36,11 +22,13 @@
           <tr>
             <th>Campaign</th>
             <th class="center">Leads today</th>
+            <th class="center">Cost</th>
           </tr>
           {{#each campaignBreakdown}}
             <tr>
               <td>{{label}}</td>
               <td class="center">{{count}}</td>
+              <td class="center">{{money estimatedCost}}</td>
             </tr>
           {{/each}}
         </table>
@@ -104,12 +92,13 @@
     </div>
 
     <div class="section">
-      <h2>Vendor families — today</h2>
+      <h2>LD families - today</h2>
       {{#if vendorFamilies.length}}
         <table class="data" cellpadding="0" cellspacing="0">
           <tr>
             <th>Family</th>
             <th class="center">Leads</th>
+            <th class="center">Cost</th>
             <th class="center">Calls</th>
             <th class="center">5min+</th>
             <th class="center">Scored</th>
@@ -124,6 +113,7 @@
           <tr>
             <td>{{familyLabel}}</td>
             <td class="center">{{leads}}</td>
+            <td class="center">{{money estimatedCost}}</td>
             <td class="center">{{calls}}</td>
             <td class="center">{{callsOver5}}</td>
             <td class="center">{{scoredCalls}}</td>
@@ -137,16 +127,14 @@
           {{/each}}
         </table>
       {{else}}
-        <div class="muted">No vendor activity today.</div>
+        <div class="muted">No LD activity today.</div>
       {{/if}}
     </div>
 
     {{!-- "Top sources — today" was removed 2026-05-22. Source names
-          fragment across name variants ("LD Posting", "LD Posting Lead",
-          "ld-posting", etc.) so the per-source table showed five rows
-          for what was really one vendor. The Vendor families table
-          above already rolls these up under ld-custom / ld-general /
-          ld-posting, which is the right answer. --}}
+          fragment across source-name variants, so the per-source table showed multiple rows
+          for what was really one vendor. The LD families table
+          above stays limited to LD CUSTOM and LD GENERAL. --}}
 
     <!-- ─────────────────  TODAY'S CALLS — SCORED  ────────────────── -->
     <div class="section">

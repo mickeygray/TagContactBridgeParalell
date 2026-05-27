@@ -8,6 +8,7 @@ require("dotenv").config({ path: path.resolve(__dirname, "..", "..", "..", ".env
 const { env } = require("./env");
 
 const DEFAULT_COMPANY = "WYNN";
+const MARKETING_FROM_EMAIL = "cameron@wynntaxsolutions.com";
 
 const COMPANY_DEFINITIONS = Object.freeze({
   WYNN: {
@@ -24,8 +25,6 @@ const COMPANY_DEFINITIONS = Object.freeze({
     defaultScheduleUrl: "https://www.wynntaxsolutions.com/schedule",
     alertEmailEnv: "WYNN_ALERT_EMAIL",
     defaultAlertEmailEnv: "COMPANY_WYNN_DEFAULT_ALERT_EMAIL",
-    fromEmailEnv: "WYNN_FROM_EMAIL",
-    defaultFromEmailEnv: "COMPANY_WYNN_DEFAULT_FROM_EMAIL",
     toEmailEnv: "WYNN_TO_EMAIL",
     defaultToEmailEnv: "COMPANY_WYNN_DEFAULT_TO_EMAIL",
     sendgridApiKeyEnv: "WYNN_API_KEY",
@@ -60,8 +59,6 @@ const COMPANY_DEFINITIONS = Object.freeze({
     defaultScheduleUrl: "https://www.taxadvocategroup.com/schedule",
     alertEmailEnv: "TAG_ALERT_EMAIL",
     defaultAlertEmailEnv: "COMPANY_TAG_DEFAULT_ALERT_EMAIL",
-    fromEmailEnv: "TAG_FROM_EMAIL",
-    defaultFromEmailEnv: "COMPANY_TAG_DEFAULT_FROM_EMAIL",
     toEmailEnv: "TAG_TO_EMAIL",
     defaultToEmailEnv: "COMPANY_TAG_DEFAULT_TO_EMAIL",
     sendgridApiKeyEnv: "TAG_API_KEY",
@@ -132,7 +129,7 @@ function getCompanyConfig(companyKey = DEFAULT_COMPANY) {
       env(definition.calendarScheduleUrlEnv, definition.defaultScheduleUrl || ""),
     ),
     alertEmail: env(definition.alertEmailEnv, env(definition.defaultAlertEmailEnv, "")),
-    fromEmail: env(definition.fromEmailEnv, env(definition.defaultFromEmailEnv, "")),
+    fromEmail: MARKETING_FROM_EMAIL,
     toEmail: env(definition.toEmailEnv, env(definition.defaultToEmailEnv, "")),
     templateDir: env(definition.templateDirEnv, path.join(definition.key, "ProspectWelcome")),
     cadence: {

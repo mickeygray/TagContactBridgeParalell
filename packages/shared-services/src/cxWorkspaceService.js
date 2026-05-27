@@ -81,7 +81,12 @@ const {
 const {
   getCxQueueServeRank,
 } = require("./cxQueueFairnessService");
-const { getRingCentralConfig, getSharedConfig, PORTS } = require("../../shared-config/src");
+const {
+  getMarketingFromEmail,
+  getRingCentralConfig,
+  getSharedConfig,
+  PORTS,
+} = require("../../shared-config/src");
 const { getCompanyConfig } = require("../../shared-config/src/companyConfig");
 const { resolveExportStatus, resolveStatus } = require("../../shared-config/src/statusMap");
 const { findExShellsForEmail } = require("../../shared-data/src/exShellDirectory");
@@ -5349,13 +5354,13 @@ async function requestCxEmail(domain, user, input = {}) {
       body,
       html: htmlBody,
       templateKey: resolvedTemplateKey,
-      sendAs: input.sendAs || user.email || company.fromEmail,
+      sendAs: getMarketingFromEmail(),
     },
     reviewCategory: "cx-email",
   });
 
   const sendgrid = createSendgridClient(context.domain);
-  const fromEmail = String(input.sendAs || user.email || company.fromEmail || company.toEmail || "").trim();
+  const fromEmail = getMarketingFromEmail();
   const fromName = String(user?.name || company.name || context.domain).trim();
   const payload = {
     personalizations: [

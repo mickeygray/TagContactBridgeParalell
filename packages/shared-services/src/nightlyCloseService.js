@@ -38,6 +38,7 @@ const {
 } = require("./nightlyCsvBuilders");
 const { buildVendorDailySummary } = require("./vendorDailySummaryService");
 const {
+  buildDetailBackedVendorSummary,
   buildVendorCallRows,
   buildVendorLeadRows,
   buildVendorOutcomeRows,
@@ -60,13 +61,28 @@ const {
   rollupPaymentTotals: sharedRollupPaymentTotals,
 } = require("./metricsDedupService");
 const { runHourlySweep } = require("./hourlySweeperService");
+const {
+  recoverCxCallLogsForDate,
+} = require("./cxCallActivityBackfillService");
 const { refreshTouchedCase } = require("./hourlyCallLogHygieneService");
+const { getInternalFromEmail } = require("../../shared-config/src");
 
 const UNRESOLVED_HOURLY_STATUSES = ["pending", "processing", "failed", "dead-letter"];
 const REQUIRED_NIGHTLY_DOMAINS = ["WYNN", "TAG"];
+const LD_VENDOR_FAMILY_KEYS = new Set(["ld-custom", "ld-general"]);
+const LD_CAMPAIGN_LABELS = {
+  "ld-custom": "LD CUSTOM",
+  "ld-general": "LD GENERAL",
+  "ld-posting": "LD Posting",
+  "ld": "LD (unsplit)",
+};
 
 function normalizeDomain(domain) {
   return String(domain || "").trim().toUpperCase();
+}
+
+function internalFromHeader(name = "Parallel Nightly") {
+  return `${name} <${getInternalFromEmail()}>`;
 }
 
 function formatDateKey(date = new Date(), timeZone = "America/Los_Angeles") {
@@ -81,6 +97,74 @@ function formatDateKey(date = new Date(), timeZone = "America/Los_Angeles") {
 function toNumber(value) {
   const num = Number(value || 0);
   return Number.isFinite(num) ? num : 0;
+}
+
+function vendorFamilyKey(row = {}) {
+  return String(row.family || row.familyKey || row.sourceFamilyKey || "")
+    .trim()
+    .toLowerCase();
+}
+
+function isLdVendorFamily(row = {}) {
+  return LD_VENDOR_FAMILY_KEYS.has(vendorFamilyKey(row));
+}
+
+function isLdSourceLabel(value) {
+  const text = String(value || "").trim().toLowerCase();
+  return text === "ld" ||
+    text.includes("ld custom") ||
+    text.includes("ld general") ||
+    text.includes("lead data");
+}
+
+function isLdTransitionRow(row = {}) {
+  return isLdSourceLabel(row.source || row.sourceName || row.label);
+}
+
+function ldFamilyEstimatedCost(row = {}) {
+  const leads = toNumber(row.leads);
+  const key = vendorFamilyKey(row);
+  if (key === "ld-custom") return leads * 3;
+  if (key === "ld-general") return leads * 2;
+  return 0;
+}
+
+function decorateLdVendorFamily(row = {}) {
+  return {
+    ...row,
+    estimatedCost: ldFamilyEstimatedCost(row),
+  };
+}
+
+function sumVendorRows(rows = [], field) {
+  return rows.reduce((sum, row) => sum + toNumber(row?.[field]), 0);
+}
+
+function buildLdCostSummary(rows = []) {
+  const custom = rows.find((row) => vendorFamilyKey(row) === "ld-custom") || {};
+  const general = rows.find((row) => vendorFamilyKey(row) === "ld-general") || {};
+  const customCount = toNumber(custom.leads);
+  const generalCount = toNumber(general.leads);
+  const customRate = 3;
+  const generalRate = 2;
+  const customCost = customCount * customRate;
+  const generalCost = generalCount * generalRate;
+  return {
+    customCount,
+    generalCount,
+    customRate,
+    generalRate,
+    customCost,
+    generalCost,
+    total: customCost + generalCost,
+  };
+}
+
+function campaignEstimatedCost(row = {}) {
+  const count = toNumber(row.count);
+  if (row.key === "ld-custom") return count * 3;
+  if (row.key === "ld-general") return count * 2;
+  return 0;
 }
 
 function normalizeNightlyDomains(domains) {
@@ -320,6 +404,29 @@ async function runNightlyFinalClosePass(domains, options = {}) {
     logger: options.logger || null,
   });
 
+  let cxCallActivityBackfill = null;
+  try {
+    cxCallActivityBackfill = await recoverCxCallLogsForDate({
+      date: dateKey,
+      timezone: options.timezone || "America/Los_Angeles",
+      domains: selectedDomains,
+      limit: Math.min(Math.max(Number(options.cxCallActivityBackfillLimit) || 50000, 1), 100000),
+      dryRun: false,
+      logger: options.logger || null,
+    });
+  } catch (error) {
+    cxCallActivityBackfill = {
+      error: error.message,
+      date: dateKey,
+      domains: selectedDomains,
+    };
+    options.logger?.warn?.("nightly-close.cx_call_activity_backfill_failed", {
+      date: dateKey,
+      domains: selectedDomains,
+      error: error.message,
+    });
+  }
+
   const leadCadenceCaseRefresh = options.leadCadenceCaseRefreshEnabled === false
     ? { skipped: true, reason: "disabled" }
     : await runNightlyLeadCadenceCaseRefresh(
@@ -345,6 +452,7 @@ async function runNightlyFinalClosePass(domains, options = {}) {
     domains: selectedDomains,
     spendSync,
     hourlySweep,
+    cxCallActivityBackfill,
     leadCadenceCaseRefresh,
     postDateSweep,
     paymentSweep: summarizePaymentSweepForOps(
@@ -2205,6 +2313,12 @@ async function buildGroupedNightlyPayload(domains, dateKey, options = {}) {
         }).catch(() => []),
       ])
     : [[], [], []];
+  const detailBackedVendorReport = buildDetailBackedVendorSummary(
+    vendorReport,
+    vendorCallRows,
+    vendorLeadRows,
+    vendorOutcomeRows,
+  );
 
   // MTD ROI snapshot — cross-domain, per-source rows with derived
   // metrics. Drives the bottom of the financial email + the metrics-
@@ -2230,12 +2344,12 @@ async function buildGroupedNightlyPayload(domains, dateKey, options = {}) {
     todaysCalls: flattenAlerts(perDomain.map((p) => p.todaysCalls)),
     openServiceAlerts: flattenAlerts(perDomain.map((p) => p.openServiceAlerts)),
     bugWrap: mergeBugWraps(perDomain.map((p) => p.bugWrap)),
-    vendorReport,
+    vendorReport: detailBackedVendorReport,
     vendorLeadRows,
     vendorCallRows,
     vendorOutcomeRows,
     mtdRoiBySource,
-    attributionReview: mergeAttributionReviews([vendorReport.attributionReview]),
+    attributionReview: mergeAttributionReviews([detailBackedVendorReport.attributionReview]),
     attributionRefresh,
   };
 }
@@ -2280,33 +2394,27 @@ function buildLeadDataEmailBody(domain, dateKey, daily, vendorReport, bugWrap) {
     (vendorReport.trackedFamilies?.length > 0
       ? vendorReport.trackedFamilies
       : vendorReport.families || []
-    ).slice(0, 8);
-  const topVendorRows = (vendorReport.rows || []).slice(0, 8);
+    )
+      .filter(isLdVendorFamily)
+      .map(decorateLdVendorFamily)
+      .slice(0, 8);
+  const ldCost = buildLdCostSummary(topVendorFamilyRows);
   const attributionReview = vendorReport.attributionReview || {};
-  const leadEntries = Array.isArray(daily.leads?.entries)
-    ? [...daily.leads.entries].sort((a, b) => Number(b.count || 0) - Number(a.count || 0))
-    : [];
-  const leadSummaryLines = leadEntries.length > 0
-    ? leadEntries.map((row) => `  ${row.source}: ${row.count}`)
-    : ["  (no new leads today)"];
+  const ldLeadCount = sumVendorRows(topVendorFamilyRows, "leads");
+  const ldCallCount = sumVendorRows(topVendorFamilyRows, "calls");
+  const ldCallsOver5 = sumVendorRows(topVendorFamilyRows, "callsOver5");
 
   return [
     `[${domain}] Daily lead data + scoring — ${dateKey}`,
     "",
-    `Lead intake — ${daily.leads.total} new lead${daily.leads.total === 1 ? "" : "s"} today`,
-    ...leadSummaryLines,
+    `LD leads: ${ldLeadCount}`,
+    `LD calls: ${ldCallCount} (${ldCallsOver5} over 5 min)`,
+    `LD cost: ${formatMoney(ldCost.total)} (LD CUSTOM ${ldCost.customCount} x $${ldCost.customRate} + LD GENERAL ${ldCost.generalCount} x $${ldCost.generalRate})`,
     "",
-    `Calls: ${daily.calls.total} (${daily.calls.callsOver5} over 5 min)`,
-    `Scored calls: ${daily.scores.totalScoredCalls}`,
-    "",
-    "Vendor family summary",
+    "LD family summary",
     `Attribution held out: ${toNumber(attributionReview.skipped)} skipped, ${toNumber(attributionReview.queued)} newly queued, ${toNumber(attributionReview.resolved)} resolved by manual mapping, ${toNumber(attributionReview.ignored)} ignored`,
     ...topVendorFamilyRows.map((row) =>
-      `${row.familyLabel}: leads ${row.leads}, calls ${row.calls} (${row.callsOver5} over 5m), scored ${row.scoredCalls}, avg score ${row.averageScore ?? "n/a"}, deals ${row.dealsToday}, dnc ${row.dncToday}, postdate ${row.postdateToday}, initials ${formatMoney(row.initialPayments)}, collected ${formatMoney(row.totalCollected)}`),
-    "",
-    "Top source rows",
-    ...topVendorRows.map((row) =>
-      `${row.source}: spend ${formatMoney(row.spend)}, leads ${row.leads}, calls ${row.calls}, scored ${row.scoredCalls}, deals ${row.dealsToday}, collected ${formatMoney(row.totalCollected)}`),
+      `${row.familyLabel}: leads ${row.leads}, cost ${formatMoney(row.estimatedCost)}, calls ${row.calls} (${row.callsOver5} over 5m), scored ${row.scoredCalls}, avg score ${row.averageScore ?? "n/a"}, deals ${row.dealsToday}, dnc ${row.dncToday}, postdate ${row.postdateToday}, initials ${formatMoney(row.initialPayments)}, collected ${formatMoney(row.totalCollected)}`),
     "",
     "Hourly bug wrap",
     `Pruned resolved jobs: ${bugWrap.prunedResolved}`,
@@ -2321,43 +2429,30 @@ function buildNightlyEmailBody(domain, dateKey, managementSnapshot, vendorReport
     (vendorReport.trackedFamilies?.length > 0
       ? vendorReport.trackedFamilies
       : vendorReport.families || []
-    ).slice(0, 8);
-  const topVendorRows = (vendorReport.rows || []).slice(0, 8);
+    )
+      .filter(isLdVendorFamily)
+      .map(decorateLdVendorFamily)
+      .slice(0, 8);
+  const ldCost = buildLdCostSummary(topVendorFamilyRows);
   const attributionReview = vendorReport.attributionReview || {};
-
-  // Lead summary up top — the per-intake-source breakdown is already
-  // computed in `managementSnapshot.leads.entries`; surface it instead
-  // of just the total count. Sorted highest-volume first.
-  const leadEntries = Array.isArray(managementSnapshot.leads?.entries)
-    ? [...managementSnapshot.leads.entries].sort((a, b) => Number(b.count || 0) - Number(a.count || 0))
-    : [];
-  const leadSummaryLines = leadEntries.length > 0
-    ? leadEntries.map((row) => `  ${row.source}: ${row.count}`)
-    : ["  (no new leads today)"];
 
   return [
     `[${domain}] Nightly close for ${dateKey}`,
     "",
-    `Lead summary — ${managementSnapshot.leads.total} new lead${managementSnapshot.leads.total === 1 ? "" : "s"} today`,
-    ...leadSummaryLines,
-    "",
     "Management snapshot",
-    `Leads: ${managementSnapshot.leads.total}`,
+    `LD leads: ${sumVendorRows(topVendorFamilyRows, "leads")}`,
+    `LD cost: ${formatMoney(ldCost.total)} (LD CUSTOM ${ldCost.customCount} x $${ldCost.customRate} + LD GENERAL ${ldCost.generalCount} x $${ldCost.generalRate})`,
     `Spend: $${managementSnapshot.spend.total.toFixed(2)}`,
     `Payments: $${managementSnapshot.payments.totalAmount.toFixed(2)} (${managementSnapshot.payments.totalCount})`,
-    `Calls: ${managementSnapshot.calls.total} (${managementSnapshot.calls.callsOver5} over 5 min)`,
-    `Scored calls: ${managementSnapshot.scores.totalScoredCalls}`,
+    `LD calls: ${sumVendorRows(topVendorFamilyRows, "calls")} (${sumVendorRows(topVendorFamilyRows, "callsOver5")} over 5 min)`,
+    `Scored LD calls: ${sumVendorRows(topVendorFamilyRows, "scoredCalls")}`,
     `Pending redlines: ${managementSnapshot.alerts.pendingRedlines}`,
     `Unresolved hourly jobs: ${managementSnapshot.alerts.unresolvedHourlyJobs}`,
     "",
-    "Vendor family summary",
+    "LD family summary",
     `Attribution held out: ${toNumber(attributionReview.skipped)} skipped, ${toNumber(attributionReview.queued)} newly queued, ${toNumber(attributionReview.resolved)} resolved by manual mapping, ${toNumber(attributionReview.ignored)} ignored`,
     ...topVendorFamilyRows.map((row) =>
-      `${row.familyLabel}: leads ${row.leads}, calls ${row.calls} (${row.callsOver5} over 5m), scored ${row.scoredCalls}, avg score ${row.averageScore ?? "n/a"}, deals ${row.dealsToday}, dnc ${row.dncToday}, postdate ${row.postdateToday}, initials $${row.initialPayments.toFixed(2)}, collected $${row.totalCollected.toFixed(2)}`),
-    "",
-    "Top source rows",
-    ...topVendorRows.map((row) =>
-      `${row.source}: spend $${row.spend.toFixed(2)}, leads ${row.leads}, calls ${row.calls}, scored ${row.scoredCalls}, deals ${row.dealsToday}, collected $${row.totalCollected.toFixed(2)}`),
+      `${row.familyLabel}: leads ${row.leads}, cost ${formatMoney(row.estimatedCost)}, calls ${row.calls} (${row.callsOver5} over 5m), scored ${row.scoredCalls}, avg score ${row.averageScore ?? "n/a"}, deals ${row.dealsToday}, dnc ${row.dncToday}, postdate ${row.postdateToday}, initials ${formatMoney(row.initialPayments)}, collected ${formatMoney(row.totalCollected)}`),
     "",
     "Hourly bug wrap",
     `Pruned resolved jobs: ${bugWrap.prunedResolved}`,
@@ -2381,9 +2476,13 @@ function financialSubject(domain, dateKey, daily, label) {
 }
 
 function leadDataSubject(domain, dateKey, daily, vendorReport, label) {
-  const leads = toNumber(vendorReport?.totals?.leads) || toNumber(daily.leads?.total);
-  const calls = toNumber(vendorReport?.totals?.calls) || toNumber(daily.calls?.total);
-  const scored = toNumber(vendorReport?.totals?.scoredCalls) || toNumber(daily.scores?.totalScoredCalls);
+  const ldFamilies = (vendorReport?.trackedFamilies?.length > 0
+    ? vendorReport.trackedFamilies
+    : vendorReport?.families || []
+  ).filter(isLdVendorFamily);
+  const leads = sumVendorRows(ldFamilies, "leads") || toNumber(daily.leads?.total);
+  const calls = sumVendorRows(ldFamilies, "calls") || toNumber(daily.calls?.total);
+  const scored = sumVendorRows(ldFamilies, "scoredCalls") || toNumber(daily.scores?.totalScoredCalls);
   const heldOut = toNumber(vendorReport?.attributionReview?.skipped);
   const heldOutPart = heldOut > 0 ? ` | ${heldOut} held out` : "";
   const tag = label || domain;
@@ -2470,6 +2569,8 @@ async function sendFinancialCloseEmail(domain, payload, options = {}) {
   const result = await sendMail(domain, {
     to: recipients,
     subject: financialSubject(domain, payload.date, daily, payload.groupLabel),
+    from: internalFromHeader("Parallel Nightly"),
+    replyTo: internalFromHeader("Parallel Nightly"),
     template: "nightly/financial-close",
     data,
     text: buildFinancialEmailBody(domain, payload.date, daily, mtd, { postDateHolds, postDateSweep }),
@@ -2500,81 +2601,77 @@ async function sendLeadDataCloseEmail(domain, payload, options = {}) {
   const leadRows = Array.isArray(payload.leadRows) ? payload.leadRows : [];
   const todaysCalls = Array.isArray(payload.todaysCalls) ? payload.todaysCalls : [];
   const outcomeRows = Array.isArray(payload.outcomeRows) ? payload.outcomeRows : [];
+  const ldLeadRows = leadRows.filter(isLdVendorFamily);
+  const ldTodaysCalls = todaysCalls.filter(isLdVendorFamily);
+  const ldOutcomeRows = outcomeRows.filter(isLdVendorFamily);
   const transitions = outcomeRows.length > 0
-    ? rollupVendorOutcomeRows(outcomeRows)
-    : payload.transitions || [];
+    ? rollupVendorOutcomeRows(ldOutcomeRows)
+    : (payload.transitions || []).filter(isLdTransitionRow);
 
   const vendorFamilies = (vendorReport.trackedFamilies?.length > 0
     ? vendorReport.trackedFamilies
-    : vendorReport.families || []).slice(0, 12);
-  const vendorRows = (vendorReport.rows || []).slice(0, 20);
+    : vendorReport.families || [])
+      .filter(isLdVendorFamily)
+      .map(decorateLdVendorFamily)
+      .slice(0, 12);
+  const ldCost = buildLdCostSummary(vendorFamilies);
+  const vendorRows = (vendorReport.rows || [])
+    .filter(isLdVendorFamily)
+    .slice(0, 20);
 
   const vendorCsv = buildVendorCsv({
     domain,
     dateKey: payload.date,
-    vendorRows: vendorReport.rows || [],
-    vendorFamilies: vendorReport.families || [],
+    vendorRows,
+    vendorFamilies,
   });
   const callLogCsv = buildCallLogCsv({
     domain,
     dateKey: payload.date,
-    calls: todaysCalls,
+    calls: ldTodaysCalls,
   });
   const leadReconciliationCsv = buildLeadReconciliationCsv({
     domain,
     dateKey: payload.date,
-    leads: leadRows,
+    leads: ldLeadRows,
   });
 
-  const leadEntries = leadRows.length > 0
-    ? [...leadRows.reduce((map, row) => {
-        const source = row.sourceName || row.intakeSource || "Unknown";
-        map.set(source, toNumber(map.get(source)) + 1);
-        return map;
-      }, new Map()).entries()]
-        .map(([source, count]) => ({ source, count }))
-        .sort((a, b) => Number(b.count || 0) - Number(a.count || 0))
-    : Array.isArray(daily.leads?.entries)
-      ? [...daily.leads.entries].sort((a, b) => Number(b.count || 0) - Number(a.count || 0))
-      : [];
+  const leadEntries = [];
 
   // Lead intake split by routeCampaignKey — surfaces the LD CUSTOM /
-  // LD GENERAL split (and organic / affiliate / etc.) that the intake
+  // LD GENERAL split. Non-LD source detail stays in the attached CSVs.
   // stamps at ingest time. Rows without a routeCampaignKey roll up
   // under "(uncategorized)" rather than getting dropped. Sorted by
   // volume desc.
-  const CAMPAIGN_LABELS = {
-    "ld-custom": "LD CUSTOM",
-    "ld-general": "LD GENERAL",
-    "ld": "LD (unsplit)",
-    "affiliate": "Affiliate",
-    "organic": "Organic",
-  };
-  const campaignBreakdown = leadRows.length > 0
-    ? [...leadRows.reduce((map, row) => {
-        const key = row.routeCampaignKey || "(uncategorized)";
+  const campaignBreakdown = ldLeadRows.length > 0
+    ? [...ldLeadRows.reduce((map, row) => {
+        const key = row.routeCampaignKey || row.sourceFamilyKey || "(uncategorized)";
         const bucket = map.get(key) || {
           key,
-          label: CAMPAIGN_LABELS[key] || row.routeCampaignName || key,
+          label: LD_CAMPAIGN_LABELS[key] || row.routeCampaignName || key,
           count: 0,
         };
         bucket.count += 1;
         map.set(key, bucket);
         return map;
       }, new Map()).values()]
+        .filter((row) => LD_VENDOR_FAMILY_KEYS.has(row.key))
+        .map((row) => ({
+          ...row,
+          estimatedCost: campaignEstimatedCost(row),
+        }))
         .sort((a, b) => Number(b.count || 0) - Number(a.count || 0))
     : [];
 
-  const totalContacted = transitions.reduce((sum, r) => sum + toNumber(r.contacted), 0);
   const totalDeal =
-    toNumber(vendorReport.totals?.dealsToday) ||
-    toNumber(vendorReport.totals?.initialPaymentCount) ||
+    sumVendorRows(vendorFamilies, "dealsToday") ||
+    sumVendorRows(vendorFamilies, "initialPaymentCount") ||
     transitions.reduce((sum, r) => sum + toNumber(r.deal), 0);
   const totalDnc =
-    toNumber(vendorReport.totals?.dncToday) ||
+    sumVendorRows(vendorFamilies, "dncToday") ||
     transitions.reduce((sum, r) => sum + toNumber(r.dnc), 0);
   const totalPostdate =
-    toNumber(vendorReport.totals?.postdateToday) ||
+    sumVendorRows(vendorFamilies, "postdateToday") ||
     transitions.reduce((sum, r) => sum + toNumber(r.postdate), 0);
 
   // ── Build the call-scoring slice the email body shows inline ──────
@@ -2585,7 +2682,7 @@ async function sendLeadDataCloseEmail(domain, payload, options = {}) {
   //     dispositions) so the team can see what got dropped
   //   - allCallSummary: top-level rollup matching the metrics page
   //     "calls" tile (mirrors what we ship in the call-log CSV)
-  const scoredCalls = todaysCalls
+  const scoredCalls = ldTodaysCalls
     .filter((c) => (c?.callScore && c.callScore.overall != null) || c?.scoreOverall != null)
     .map((c) => ({
       time: c.callStartTime || c.createdAt || null,
@@ -2619,20 +2716,25 @@ async function sendLeadDataCloseEmail(domain, payload, options = {}) {
   // attempts. Lets readers see "we placed 547 calls but only reached
   // 277 unique leads" at a glance, alongside the totals.
   const uniqueCallerCount = new Set(
-    todaysCalls.map((c) => c?.caseId).filter(Boolean),
+    ldTodaysCalls.map((c) => c?.caseId).filter(Boolean),
   ).size;
   const uniqueSessionCount = new Set(
-    todaysCalls
+    ldTodaysCalls
       .map((c) => c?.telephonySessionId || c?.uii)
       .filter(Boolean),
   ).size;
 
+  const ldLeadCount = sumVendorRows(vendorFamilies, "leads");
+  const ldCallCount = sumVendorRows(vendorFamilies, "calls") || ldTodaysCalls.length;
+  const ldCallsOver5 = sumVendorRows(vendorFamilies, "callsOver5");
+
   const topTiles = [
-    { label: "Leads today", value: leadRows.length || toNumber(vendorReport.totals?.leads) || daily.leads.total, tone: "blue" },
-    { label: "Calls", value: todaysCalls.length || toNumber(vendorReport.totals?.calls) || daily.calls.total, tone: "blue" },
+    { label: "LD leads", value: ldLeadCount, tone: "blue" },
+    { label: "LD calls", value: ldCallCount, tone: "blue" },
+    { label: "LD cost", value: formatMoney(ldCost.total), tone: "amber" },
     { label: "Unique callers", value: uniqueCallerCount, tone: "blue" },
     { label: "Unique sessions", value: uniqueSessionCount, tone: "blue" },
-    { label: "5 min+", value: toNumber(vendorReport.totals?.callsOver5) || daily.calls.callsOver5, tone: "blue" },
+    { label: "5 min+", value: ldCallsOver5, tone: "blue" },
     { label: "Scored", value: scoredCalls.length, tone: "blue" },
     { label: "Avg score", value: avgScore != null ? avgScore : "—", tone: "blue" },
     { label: "Deal", value: totalDeal, tone: "green" },
@@ -2649,17 +2751,18 @@ async function sendLeadDataCloseEmail(domain, payload, options = {}) {
     headerTitle: "Vendor Lead Data + Scoring",
     headerSub: `${domain} vendors — ${payload.date}`,
     footerLine: `Parallel nightly close · ${payload.date}`,
-    footerSmall: `${vendorCsv.filename}${todaysCalls.length > 0 ? ` · ${callLogCsv.filename}` : ""}`,
+    footerSmall: `${vendorCsv.filename}${ldTodaysCalls.length > 0 ? ` · ${callLogCsv.filename}` : ""}`,
     csvFilename: vendorCsv.filename,
     callLogCsvFilename: callLogCsv.filename,
     leadReconciliationCsvFilename: leadReconciliationCsv.filename,
     topTiles,
+    ldCost,
     leadEntries,
     campaignBreakdown,
     transitions,
     vendorFamilies,
     vendorRows,
-    outcomeRows,
+    outcomeRows: ldOutcomeRows,
     scoredCalls,
     scoredCallsTop: scoredCalls.slice(0, 25),
     scoredCounts: {
@@ -2672,13 +2775,15 @@ async function sendLeadDataCloseEmail(domain, payload, options = {}) {
     hourlyBugs: (bugWrap.unresolved || []).slice(0, 10),
   };
 
-  const attachments = todaysCalls.length > 0
+  const attachments = ldTodaysCalls.length > 0
     ? [vendorCsv, leadReconciliationCsv, callLogCsv]
     : [vendorCsv, leadReconciliationCsv];
 
   const result = await sendMail(domain, {
     to: recipients,
     subject: leadDataSubject(domain, payload.date, daily, vendorReport),
+    from: internalFromHeader("Parallel Lead Data"),
+    replyTo: internalFromHeader("Parallel Lead Data"),
     template: "nightly/lead-data-vendor",
     data,
     text: buildLeadDataEmailBody(domain, payload.date, daily, vendorReport, bugWrap),
@@ -2731,6 +2836,8 @@ async function sendRedlineAlertEmail(domain, payload, options = {}) {
   const result = await sendMail(domain, {
     to: recipients,
     subject: redlineSubject(domain, payload.date, alerts, payload.groupLabel),
+    from: internalFromHeader("Parallel Payment Alert"),
+    replyTo: internalFromHeader("Parallel Payment Alert"),
     template: "nightly/redline-alert",
     data,
     text: `${alerts.length} failed payment(s) on ${payload.date}. Remove clients before 7 AM PT to suppress the reminder text.`,
@@ -2880,6 +2987,8 @@ async function sendOpsStatusEmail(domain, payload, options = {}) {
       attributionReview,
       openServiceAlerts,
     }, payload.groupLabel),
+    from: internalFromHeader("Parallel Ops"),
+    replyTo: internalFromHeader("Parallel Ops"),
     template: "nightly/ops-status",
     data,
     text,
@@ -3484,6 +3593,8 @@ async function sendAgedRefreshReportEmail(options = {}) {
   const result = await sendMail(null, {
     to: recipients,
     subject,
+    from: internalFromHeader("Parallel Aged Pool"),
+    replyTo: internalFromHeader("Parallel Aged Pool"),
     template: "nightly/aged-refresh",
     data,
     text:

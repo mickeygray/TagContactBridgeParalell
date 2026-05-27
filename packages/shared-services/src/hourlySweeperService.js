@@ -32,6 +32,9 @@ const {
   runCxRecordingHourly,
 } = require("./cxRecordingHourlyService");
 const {
+  recoverCxCallLogs,
+} = require("./cxCallActivityBackfillService");
+const {
   reconcileUnattributedSessions,
 } = require("./ringcentralReconcileService");
 const {
@@ -201,6 +204,25 @@ function summarizeHourlySweepResult(result = null) {
                   Number(result.phaseA?.callLogHygiene?.totals?.metricsErrors || 0) +
                   Number(result.phaseA?.callLogHygiene?.totals?.archiveFailed || 0),
               },
+          cxCallActivityBackfill: result.phaseA?.cxCallActivityBackfill
+            ? {
+                scannedCallPlacedEvents:
+                  Number(result.phaseA.cxCallActivityBackfill.scannedCallPlacedEvents || 0),
+                preparedRows:
+                  Number(result.phaseA.cxCallActivityBackfill.preparedRows || 0),
+                existingRows:
+                  Number(result.phaseA.cxCallActivityBackfill.existingRows || 0),
+                upsertedRows:
+                  Number(result.phaseA.cxCallActivityBackfill.upsertedRows || 0),
+                ledgerSynced:
+                  Number(result.phaseA.cxCallActivityBackfill.ledgerSynced || 0),
+                ledgerErrors:
+                  Number(result.phaseA.cxCallActivityBackfill.ledgerErrors || 0),
+                errors: Array.isArray(result.phaseA.cxCallActivityBackfill.errors)
+                  ? result.phaseA.cxCallActivityBackfill.errors.length
+                  : 0,
+              }
+            : null,
           metricsRefresh: result.phaseA?.metricsRefresh?.skipped
             ? { skipped: true, reason: result.phaseA.metricsRefresh.reason || null }
             : {
@@ -867,6 +889,36 @@ async function runDncRecheckSweepIfEnabled() {
   return runDncRecheckSweep({});
 }
 
+async function runCxCallActivityBackfill({
+  logger,
+  domains,
+  sinceMs,
+  now = new Date(),
+} = {}) {
+  const end = now instanceof Date ? now : new Date(now);
+  const windowMs = Math.max(Number(sinceMs) || 65 * 60 * 1000, 5 * 60 * 1000);
+  const start = new Date(end.getTime() - windowMs);
+  try {
+    return await recoverCxCallLogs({
+      start,
+      end,
+      domains,
+      limit: 25000,
+      dryRun: false,
+      logger,
+    });
+  } catch (error) {
+    logger?.warn?.("hourly.cx_call_activity_backfill_failed", {
+      error: error.message,
+    });
+    return {
+      error: error.message,
+      start: start.toISOString(),
+      end: end.toISOString(),
+    };
+  }
+}
+
 async function runHourlySweep({
   workerName = "hourly-sweeper",
   lane = "hourly",
@@ -951,16 +1003,26 @@ async function runHourlySweep({
               metricsRefreshPreferLegacyContactActivities,
           })
         : { skipped: true, reason: "disabled" },
+      // CX's campaign publish path emits `cx.call.placed` events before
+      // RingCX gives us a real UII. The vendor email reads CallLedger,
+      // so this backfills deterministic synthetic CallLog/CallLedger rows
+      // from those events during the day instead of waiting on a manual
+      // EOD script.
+      cxCallActivityBackfill: await runCxCallActivityBackfill({
+        logger,
+        domains,
+        sinceMs: callLogHygieneSinceMs,
+      }),
       metricsRefresh: metricsRefreshEnabled
         ? await runMetricsRefresh({
             logger,
             preferLegacyContactActivities: metricsRefreshPreferLegacyContactActivities,
           })
         : { skipped: true, reason: "disabled" },
-      // CX recording archive — pulls the previous :45-to-:45 hour of
+      // CX recording archive - pulls the previous :45-to-:45 hour of
       // CX-platform calls from RingCX's interaction-metadata, downloads
-      // the WAV per segment, and hands off to the existing archive →
-      // transcription → scoring pipeline. Gated by
+      // the WAV per segment, and hands off to the existing archive ->
+      // transcription -> scoring pipeline. Gated by
       // RINGCX_RECORDING_ENABLED (default false until RC activates
       // recording on the account). Bottom-of-window is exactly 15
       // minutes before this tick fires, which matches RingCX's stated

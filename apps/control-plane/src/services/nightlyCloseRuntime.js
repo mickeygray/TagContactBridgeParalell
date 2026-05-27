@@ -292,6 +292,21 @@ function createNightlyCloseRuntime({ config = {}, runtime, spendSyncRuntime = nu
                 durationMs: groupedResult.finalClose.hourlySweep.durationMs,
               }
             : null,
+          cxCallActivityBackfill: groupedResult.finalClose?.cxCallActivityBackfill
+            ? {
+                scannedCallPlacedEvents:
+                  Number(groupedResult.finalClose.cxCallActivityBackfill.scannedCallPlacedEvents || 0),
+                preparedRows:
+                  Number(groupedResult.finalClose.cxCallActivityBackfill.preparedRows || 0),
+                existingRows:
+                  Number(groupedResult.finalClose.cxCallActivityBackfill.existingRows || 0),
+                upsertedRows:
+                  Number(groupedResult.finalClose.cxCallActivityBackfill.upsertedRows || 0),
+                ledgerSynced:
+                  Number(groupedResult.finalClose.cxCallActivityBackfill.ledgerSynced || 0),
+                error: groupedResult.finalClose.cxCallActivityBackfill.error || null,
+              }
+            : null,
         },
       };
       state.lastError = null;

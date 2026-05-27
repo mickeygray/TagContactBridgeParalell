@@ -17,8 +17,8 @@ function generateCode() {
 
 /**
  * Deliver an OTP code to an account's email via SendGrid. Required when
- * `authOtpPreview` is off (production mode). Required `AUTH_OTP_FROM_EMAIL`
- * in the env (or `SENDGRID_FROM_EMAIL` as a fallback).
+ * `authOtpPreview` is off (production mode). Sender is supplied by
+ * shared-config's internal sender rule.
  *
  * Loaded lazily because shared-auth shouldn't depend on shared-services at
  * require time (would create a cycle if anything in shared-services ever
@@ -29,7 +29,7 @@ async function deliverOtpEmail(config, account, code) {
   const fromEmail = String(delivery.fromEmail || "").trim();
   if (!fromEmail) {
     throw new Error(
-      "AUTH_OTP_FROM_EMAIL must be configured when AUTH_OTP_PREVIEW is disabled",
+      "authOtpDelivery.fromEmail must be configured when AUTH_OTP_PREVIEW is disabled",
     );
   }
 

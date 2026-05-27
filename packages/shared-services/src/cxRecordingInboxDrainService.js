@@ -119,14 +119,14 @@ async function lookupCallLog(telephonySessionId) {
 function pickDestination(config, callLog) {
   // Reuse the existing recordingArchive destination buckets so all
   // archived recordings — EX-side AND CX-push — live alongside each
-  // other in Drive. Default to `as` (ad-serv) since that's where the
-  // 19 successfully-archived CX calls currently land.
-  const destKey = String(process.env.CX_RECORDING_INBOX_DRIVE_DEST_KEY || "as")
+  // other in Drive. Default to `cx`; shared-config falls back to the
+  // restored legacy AS folder id when a dedicated CX folder id is absent.
+  const destKey = String(process.env.CX_RECORDING_INBOX_DRIVE_DEST_KEY || "cx")
     .trim()
     .toLowerCase();
   const archiveCfg = config.recordingArchive || {};
   const destinations = archiveCfg.destinations || {};
-  return destinations[destKey] || destinations.as || destinations.og || null;
+  return destinations[destKey] || destinations.cx || destinations.as || destinations.og || null;
 }
 
 function sanitizeName(value, fallback = "unknown") {

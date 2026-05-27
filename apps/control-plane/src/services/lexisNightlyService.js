@@ -117,6 +117,7 @@ function computeNextRunAt(hour, minute, now = new Date(), options = {}) {
 function createLexisNightlyState(config = {}) {
   return {
     enabled: Boolean(config.enabled),
+    ingestEnabled: Boolean(config.ingestEnabled),
     running: false,
     domain: String(config.domain || "TAG").toUpperCase(),
     hour: Number(config.hour || 2),
@@ -139,6 +140,7 @@ function createLexisNightlyState(config = {}) {
 function summarizeState(state) {
   return {
     enabled: state.enabled,
+    ingestEnabled: state.ingestEnabled,
     running: state.running,
     domain: state.domain,
     hour: state.hour,
@@ -175,6 +177,9 @@ function createLexisNightlyRuntime({ config, runtime }) {
     const sendRegionalMail = options.sendRegionalMail !== undefined
       ? Boolean(options.sendRegionalMail)
       : state.sendRegionalMail;
+    const ingestEnabled = options.ingestEnabled !== undefined
+      ? Boolean(options.ingestEnabled)
+      : state.ingestEnabled;
     const runKey = `lexis-nightly-${domain}-${Date.now()}`;
 
     state.running = true;
@@ -195,15 +200,23 @@ function createLexisNightlyRuntime({ config, runtime }) {
         domain,
         scheduled: Boolean(options.scheduled),
         sendRegionalMail,
+        ingestEnabled,
       },
     });
 
     try {
-      const ingestResult = await ingestLatestLexisDrop({
-        domain,
-        sourceService: "control-plane",
-        importBatch: options.importBatch,
-      });
+      const ingestResult = ingestEnabled
+        ? await ingestLatestLexisDrop({
+            domain,
+            sourceService: "control-plane",
+            importBatch: options.importBatch,
+          })
+        : {
+            ok: true,
+            skipped: true,
+            reason: "lexis-nightly-ingest-disabled",
+            domain,
+          };
 
       const regionalMailResult = sendRegionalMail
         ? await sendLexisRegionalMail({
@@ -217,7 +230,7 @@ function createLexisNightlyRuntime({ config, runtime }) {
       const result = {
         ok: true,
         domain,
-        runId: ingestResult.runId,
+        runId: ingestResult.runId || runKey,
         ingest: ingestResult,
         regionalMail: regionalMailResult,
       };
@@ -238,7 +251,9 @@ function createLexisNightlyRuntime({ config, runtime }) {
         aggregateId: ingestResult.runId || runKey,
         sourceService: "control-plane",
         title: "Lexis nightly run completed",
-        summary: `Processed ${ingestResult.parsedRows} Lexis rows and ${regionalMailResult.skipped ? "skipped" : "sent"} regional mail`,
+        summary: ingestResult.skipped
+          ? `Skipped Logics ingest and ${regionalMailResult.skipped ? "skipped" : "sent"} regional mail`
+          : `Processed ${ingestResult.parsedRows} Lexis rows and ${regionalMailResult.skipped ? "skipped" : "sent"} regional mail`,
         payload: {
           domain,
           ingest: ingestResult,

@@ -32,16 +32,22 @@ const {
   createRingCentralClient,
 } = require("../packages/shared-integrations/src");
 const {
-  getCompanyConfig,
   getCompanyKeys,
+  getInternalFromEmail,
   getSharedConfig,
 } = require("../packages/shared-config/src");
 const {
   listLegacyContactActivityDocs,
 } = require("../packages/shared-services/src/legacyContactActivityService");
 const {
+  CallLog,
+} = require("../packages/shared-models/src");
+const {
   sendPlainEmail,
 } = require("../packages/shared-services/src/sendgridMailService");
+const {
+  syncCallLedgerFromCallLog,
+} = require("../packages/shared-services/src/callLedgerService");
 
 const TIME_ZONE = "America/Los_Angeles";
 const DEFAULT_MIN_DURATION_SEC = 480;
@@ -52,6 +58,9 @@ const DEFAULT_OUTPUT_ROOT = path.resolve(
   "end-of-day-recordings",
 );
 const DEFAULT_DELAY_MS = 400;
+const DEFAULT_DOWNLOAD_RETRIES = 4;
+const DEFAULT_RETRY_BASE_DELAY_MS = 3000;
+const MAX_RETRY_DELAY_MS = 90_000;
 const DEFAULT_EXCLUDED_AGENT_TOKENS = [
   "Michael Gray",
   "Mickey Gray",
@@ -115,6 +124,30 @@ function parseList(value) {
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, Math.max(Number(ms) || 0, 0)));
+}
+
+function parseRetryAfterMs(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return null;
+  const seconds = Number(raw);
+  if (Number.isFinite(seconds)) return Math.max(0, seconds * 1000);
+  const dateMs = Date.parse(raw);
+  return Number.isFinite(dateMs) ? Math.max(0, dateMs - Date.now()) : null;
+}
+
+function isRetryableHttpStatus(status) {
+  return status === 408 || status === 429 || status >= 500;
+}
+
+function createDownloadError(response, body = "", url = "") {
+  const error = new Error(
+    `Binary download failed (${response.status}): ${String(body).slice(0, 240)}`,
+  );
+  error.status = response.status;
+  error.retryable = isRetryableHttpStatus(response.status);
+  error.retryAfterMs = parseRetryAfterMs(response.headers.get("retry-after"));
+  error.url = url;
+  return error;
 }
 
 function normalizeDigits(value) {
@@ -195,6 +228,63 @@ function findExcludedTaskAgentMatch(task = {}, excludeTokens = []) {
     ],
     excludeTokens,
   );
+}
+
+function isCallrailArchiveTask(task = {}) {
+  return (
+    task.providerHint === "callrail" ||
+    task.sourceKind === "callrail-direct" ||
+    Boolean(task.callrailMatch) ||
+    Boolean(task.callrailCallId)
+  );
+}
+
+async function stampCallLogRecordingArchive({ task, artifact, upload, uploadFolderId, fileName }) {
+  const sessionId = String(task?.telephonySessionId || "").trim();
+  if (!sessionId || !upload?.id) {
+    return { matchedCount: 0, modifiedCount: 0, skipped: true };
+  }
+
+  const routing = task.routing || {};
+  const candidate = routing.candidate || null;
+  const bucket = routing.bucket || null;
+  const update = {
+    "recordingArchive.status": "completed",
+    "recordingArchive.provider": artifact.provider || null,
+    "recordingArchive.sourceUri": artifact.sourceUri || artifact.finalUrl || null,
+    "recordingArchive.mimeType": artifact.mimeType || null,
+    "recordingArchive.fileName": fileName || upload.name || null,
+    "recordingArchive.uploadedAt": new Date(),
+    "recordingArchive.driveFileId": upload.id || null,
+    "recordingArchive.driveFolderId": uploadFolderId || upload.parents?.[0] || null,
+    "recordingArchive.driveWebViewLink": upload.webViewLink || null,
+    "recordingArchive.driveWebContentLink": upload.webContentLink || null,
+    "recordingArchive.error": null,
+    "recordingArchive.terminalAgentName": normalizeAgentDisplayName(candidate?.agentName || "") || null,
+    "recordingArchive.terminalExtensionId": candidate?.extensionId || null,
+    "recordingArchive.terminalExtensionNumber": candidate?.extensionNumber || null,
+    "recordingArchive.terminalLegIndex": candidate?.legIndex ?? null,
+    "recordingArchive.agentGroupKey": String(bucket || "").toLowerCase() || null,
+    "recordingArchive.agentGroupLabel": bucket || null,
+  };
+
+  const result = await CallLog.updateMany(
+    { telephonySessionId: sessionId },
+    { $set: update },
+  );
+  let ledgerSynced = 0;
+  if (Number(result.matchedCount || 0) > 0) {
+    const callLogs = await CallLog.find({ telephonySessionId: sessionId }).lean();
+    for (const callLog of callLogs) {
+      const syncResult = await syncCallLedgerFromCallLog(callLog, { syncedAt: new Date() }).catch(() => null);
+      if (syncResult && !syncResult.skipped) ledgerSynced += 1;
+    }
+  }
+  return {
+    matchedCount: Number(result.matchedCount || 0),
+    modifiedCount: Number(result.modifiedCount || 0),
+    ledgerSynced,
+  };
 }
 
 function sanitizeFileComponent(value, fallback = "unknown") {
@@ -498,7 +588,7 @@ function deriveRouting(provider, rcRecord = null, seed = {}) {
     containsPhoneBurnerText(rcRecord?.to?.name) ||
     candidates.some((candidate) => containsPhoneBurnerText(candidate.agentName));
 
-  // Interoffice exclusion takes precedence over OG/CS/AS bucketing.
+  // Interoffice exclusion takes precedence over OG/CS/CX bucketing.
   // CallRail-provider calls bypass the check by construction (CallRail
   // sources only carry external prospects), but keep the guard tight
   // so a future leg shape couldn't sneak through.
@@ -510,7 +600,7 @@ function deriveRouting(provider, rcRecord = null, seed = {}) {
       ? "OG"
       : (queueTouches.length > 0 || hasCustomerServiceTouch)
           ? "CS"
-          : "AS";
+          : "CX";
 
   return {
     bucket,
@@ -542,16 +632,51 @@ function buildFileName(task) {
 }
 
 async function fetchBinary(url, options = {}) {
-  const response = await fetch(url, options);
-  if (!response.ok) {
+  const maxAttempts = Math.max(
+    1,
+    Number(
+      options.maxAttempts ||
+        process.env.RECORDING_ARCHIVE_DOWNLOAD_RETRIES ||
+        DEFAULT_DOWNLOAD_RETRIES,
+    ) || DEFAULT_DOWNLOAD_RETRIES,
+  );
+  const baseDelayMs = Math.max(
+    0,
+    Number(
+      options.retryBaseDelayMs ||
+        process.env.RECORDING_ARCHIVE_RETRY_BASE_DELAY_MS ||
+        DEFAULT_RETRY_BASE_DELAY_MS,
+    ) || DEFAULT_RETRY_BASE_DELAY_MS,
+  );
+  const fetchOptions = { ...options };
+  delete fetchOptions.maxAttempts;
+  delete fetchOptions.retryBaseDelayMs;
+
+  let lastError = null;
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    const response = await fetch(url, fetchOptions);
+    if (response.ok) {
+      return {
+        buffer: Buffer.from(await response.arrayBuffer()),
+        mimeType: response.headers.get("content-type") || "application/octet-stream",
+        finalUrl: response.url || url,
+      };
+    }
+
     const text = await response.text().catch(() => "");
-    throw new Error(`Binary download failed (${response.status}): ${String(text).slice(0, 240)}`);
+    lastError = createDownloadError(response, text, url);
+    if (!lastError.retryable || attempt >= maxAttempts) {
+      throw lastError;
+    }
+
+    const retryDelayMs = Math.min(
+      Math.max(lastError.retryAfterMs || 0, baseDelayMs * attempt),
+      MAX_RETRY_DELAY_MS,
+    );
+    await sleep(retryDelayMs);
   }
-  return {
-    buffer: Buffer.from(await response.arrayBuffer()),
-    mimeType: response.headers.get("content-type") || "application/octet-stream",
-    finalUrl: response.url || url,
-  };
+
+  throw lastError || new Error("Binary download failed");
 }
 
 async function fetchRcRecordsForDay(rcClient, dateKey) {
@@ -926,8 +1051,9 @@ function supplementCallrailTasks({
   return tasks;
 }
 
-function buildJsonSummaryPath(rootDir, dateKey, dryRun) {
-  const fileName = `archive-eod-recordings-${dateKey}${dryRun ? "-dry-run" : ""}.json`;
+function buildJsonSummaryPath(rootDir, dateKey, dryRun, providerOnly = null) {
+  const providerSuffix = providerOnly ? `-${sanitizeFileComponent(providerOnly, "provider").toLowerCase()}` : "";
+  const fileName = `archive-eod-recordings-${dateKey}${providerSuffix}${dryRun ? "-dry-run" : ""}.json`;
   return path.join(rootDir, fileName);
 }
 
@@ -967,11 +1093,7 @@ async function sendCompletionEmail({
     .sort((left, right) => String(left.fileName || "").localeCompare(String(right.fileName || "")))
     .map((row) => `- [${row.bucket}] ${row.fileName}`);
 
-  const company = getCompanyConfig(companyKey);
-  const fromEmail =
-    company.fromEmail ||
-    company.toEmail ||
-    "team@taxadvocategroup.com";
+  const fromEmail = getInternalFromEmail();
 
   const subject = `[${String(companyKey).toUpperCase()}] EOD recordings dropped for ${summary.dateKey} (${uploadedRows.length} files)`;
   const body = [
@@ -979,6 +1101,7 @@ async function sendCompletionEmail({
     "",
     `Uploaded files: ${uploadedRows.length}`,
     `OG: ${bucketCounts.OG || 0}`,
+    `CX: ${bucketCounts.CX || 0}`,
     `AS: ${bucketCounts.AS || 0}`,
     `CS: ${bucketCounts.CS || 0}`,
     "",
@@ -1042,11 +1165,17 @@ async function runArchiveEodRecordings(options = {}) {
   const limit = Math.max(Number(options.limit || 0) || 0, 0);
   const delayMs = Math.max(Number(options.delayMs || DEFAULT_DELAY_MS) || DEFAULT_DELAY_MS, 0);
   const outputRoot = path.resolve(String(options.outputRoot || DEFAULT_OUTPUT_ROOT));
+  const sessionFilter = new Set(
+    parseList(options.sessionIds)
+      .map((entry) => String(entry).trim())
+      .filter(Boolean),
+  );
   // Optional bucket filter — when set, only tasks whose derived bucket
-  // matches are uploaded. Used by `repopulate-as-bucket.js` so a
-  // historical sweep only touches AS without re-pulling OG/CS
-  // artifacts. Accepts "OG", "AS", or "CS"; null = no filter.
+  // matches are uploaded. Historical sweeps use this to touch one
+  // bucket without re-pulling unrelated artifacts. Accepts "OG",
+  // "CX", "AS", or "CS"; null = no filter.
   const bucketOnly = String(options.bucketOnly || "").trim().toUpperCase() || null;
+  const providerOnly = String(options.providerOnly || "").trim().toLowerCase() || null;
   const excludeAgentTokens = parseList(
     options.excludeAgents !== undefined
       ? options.excludeAgents
@@ -1061,7 +1190,7 @@ async function runArchiveEodRecordings(options = {}) {
   const emailCompanyKey = String(options.emailCompanyKey || eodConfig.emailCompanyKey || "TAG").toUpperCase();
   const { start, end } = buildDayWindow(dateKey, TIME_ZONE);
 
-  await mongoose.connect(process.env.MONGO_URI);
+  await mongoose.connect(sharedConfig.mongoUri, { dbName: sharedConfig.parallelDbName });
 
   const legacyDocs = await listLegacyContactActivityDocs({
     from: start,
@@ -1095,9 +1224,26 @@ async function runArchiveEodRecordings(options = {}) {
   });
 
   let tasks = [...legacyTasks, ...rcTasks, ...callrailTasks];
+  if (providerOnly) {
+    tasks = tasks.filter((task) =>
+      providerOnly === "callrail"
+        ? isCallrailArchiveTask(task)
+        : providerOnly === "ringcentral"
+          ? !isCallrailArchiveTask(task)
+          : true,
+    );
+  }
+  if (sessionFilter.size > 0) {
+    tasks = tasks.filter((task) => {
+      const sessionId = String(task.telephonySessionId || "").trim();
+      const callrailCallId = String(task.callrailCallId || "").trim();
+      return sessionFilter.has(sessionId) || sessionFilter.has(callrailCallId);
+    });
+  }
   const skippedByAgent = [];
   if (excludeAgentTokens.length > 0) {
     tasks = tasks.filter((task) => {
+      if (isCallrailArchiveTask(task)) return true;
       const match = findExcludedTaskAgentMatch(task, excludeAgentTokens);
       if (!match) return true;
       skippedByAgent.push({
@@ -1125,9 +1271,22 @@ async function runArchiveEodRecordings(options = {}) {
   const canUpload = !dryRun && driveClient.isConfigured();
   const folderByBucket = {
     OG: String(driveDestinations.og?.folderId || "").trim(),
+    CX: String(driveDestinations.cx?.folderId || "").trim(),
     AS: String(driveDestinations.as?.folderId || "").trim(),
     CS: String(driveDestinations.cs?.folderId || "").trim(),
   };
+
+  if (canUpload) {
+    for (const [bucket, folderId] of Object.entries(folderByBucket)) {
+      if (!folderId) continue;
+      const folder = await driveClient.getFileMetadata({ fileId: folderId });
+      if (folder?.trashed) {
+        throw new Error(
+          `Configured ${bucket} recording archive folder is in Google Drive trash: ${folder.name || folderId} (${folderId})`,
+        );
+      }
+    }
+  }
 
   // Per-run cache for date subfolders. Key = `${bucketFolderId}:${dateKey}`,
   // value = subfolder id. The archiver typically processes many files
@@ -1200,7 +1359,9 @@ async function runArchiveEodRecordings(options = {}) {
       }
 
       task.routing = deriveRouting(artifact.provider, task.rcRecord, task.seed);
-      const excludedRouteAgent = findExcludedTaskAgentMatch(task, excludeAgentTokens);
+      const excludedRouteAgent = isCallrailArchiveTask(task)
+        ? null
+        : findExcludedTaskAgentMatch(task, excludeAgentTokens);
       if (excludedRouteAgent) {
         skipped.push({
           reason: "excluded-agent",
@@ -1219,7 +1380,7 @@ async function runArchiveEodRecordings(options = {}) {
 
       // Interoffice calls (extension <-> extension, no external party)
       // never get archived — they're not prospect or client interactions
-      // and pre-reorg they were polluting the AS bucket. The router
+      // and pre-reorg they were polluting the catch-all bucket. The router
       // returns `bucket: null, interoffice: true` for these.
       if (task.routing.interoffice || !bucket) {
         skipped.push({
@@ -1233,8 +1394,8 @@ async function runArchiveEodRecordings(options = {}) {
         continue;
       }
 
-      // Optional bucket-only filter — used by the AS-repopulate
-      // worker so it skips OG/CS tasks instead of pulling artifacts
+      // Optional bucket-only filter. Repopulate workers use this so
+      // they skip other buckets instead of pulling artifacts
       // for every call on the day.
       if (bucketOnly && bucket !== bucketOnly) {
         skipped.push({
@@ -1334,6 +1495,20 @@ async function runArchiveEodRecordings(options = {}) {
         }
       }
 
+      const callLogStamp = canUpload && upload
+        ? await stampCallLogRecordingArchive({
+            task,
+            artifact,
+            upload,
+            uploadFolderId,
+            fileName,
+          }).catch((error) => ({
+            error: error.message,
+            matchedCount: 0,
+            modifiedCount: 0,
+          }))
+        : null;
+
       results.push({
         sourceKind: task.sourceKind,
         provider: artifact.provider,
@@ -1352,15 +1527,16 @@ async function runArchiveEodRecordings(options = {}) {
               ? "customer-service-text-touch"
               : task.routing?.queueTouches?.length
                 ? "customer-service-queue-touch"
-                : "ringcentral-provider",
+                : "ringcentral-provider-cx-default",
         fileName,
         localPath,
         uploaded: Boolean(upload),
         deduped,
         driveFileId: upload?.id || null,
-        driveFolderId: upload?.parents?.[0] || null,
+        driveFolderId: uploadFolderId || upload?.parents?.[0] || null,
         driveWebViewLink: upload?.webViewLink || null,
         sourceUri: artifact.sourceUri || null,
+        callLogStamp,
       });
 
       if (delayMs > 0) {
@@ -1385,6 +1561,8 @@ async function runArchiveEodRecordings(options = {}) {
     endedAt: toIsoDate(end),
     dryRun,
     minDurationSec,
+    providerOnly: providerOnly || null,
+    sessionFilterCount: sessionFilter.size,
     canUpload,
     configuredFolders: folderByBucket,
     excludedAgentTokens: excludeAgentTokens,
@@ -1420,7 +1598,7 @@ async function runArchiveEodRecordings(options = {}) {
   }
 
   fs.mkdirSync(outputRoot, { recursive: true });
-  const summaryPath = buildJsonSummaryPath(outputRoot, dateKey, dryRun);
+  const summaryPath = buildJsonSummaryPath(outputRoot, dateKey, dryRun, providerOnly);
   fs.writeFileSync(summaryPath, JSON.stringify(summary, null, 2));
 
   await mongoose.disconnect();
@@ -1444,6 +1622,8 @@ async function main() {
     notifyRecipients: args.recipients,
     emailCompanyKey: args.company,
     bucketOnly: args["bucket-only"],
+    providerOnly: args["provider-only"],
+    sessionIds: args["session-ids"],
     excludeAgents: args["exclude-agents"],
   });
   console.log(JSON.stringify(result, null, 2));

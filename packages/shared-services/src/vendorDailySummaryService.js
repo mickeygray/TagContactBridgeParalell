@@ -35,13 +35,17 @@ const VENDOR_FAMILY_DEFS = Object.freeze([
     key: "ld-custom",
     label: "LD CUSTOM",
     matches: (source, channel, routeCampaignKey) =>
-      routeCampaignKey === "ld-custom",
+      routeCampaignKey === "ld-custom" ||
+      source === "ld custom" ||
+      source.includes("ld custom"),
   },
   {
     key: "ld-general",
     label: "LD GENERAL",
     matches: (source, channel, routeCampaignKey) =>
-      routeCampaignKey === "ld-general",
+      routeCampaignKey === "ld-general" ||
+      source === "ld general" ||
+      source.includes("ld general"),
   },
   {
     key: "ld-posting",
@@ -49,6 +53,8 @@ const VENDOR_FAMILY_DEFS = Object.freeze([
     matches: (source, channel) =>
       channel === "ld" ||
       channel === "ld-posting" ||
+      source === "ld" ||
+      source.includes("ld-posting") ||
       source.includes("ld posting") ||
       source.includes("lead data") ||
       source.includes("lead post") ||

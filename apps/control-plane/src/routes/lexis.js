@@ -100,6 +100,7 @@ function createLexisRouter(auth, lexisNightlyRuntime, lexisDailyDropRuntime) {
       const result = await lexisNightlyRuntime.runNightlyLexisFlow({
         domain: req.params.domain,
         sendRegionalMail: req.body?.sendRegionalMail,
+        ingestEnabled: req.body?.ingestEnabled,
         recipients: req.body?.recipients,
         subject: req.body?.subject,
         text: req.body?.text,

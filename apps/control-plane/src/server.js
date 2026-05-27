@@ -98,6 +98,7 @@ const {
   getPacingConfig,
   isOperatingNow,
   runHourlySweep,
+  runCxRecordingHourly,
   summarizeHourlySweepResult,
 } = require("../../../packages/shared-services/src");
 const { bootstrapSeedAccounts } = require("../../../packages/shared-auth/src");
@@ -123,6 +124,8 @@ function summarizeWorkerState(workerState) {
     enabled: workerState.enabled,
     running: workerState.running,
     intervalMs: workerState.intervalMs,
+    scheduleMinute: workerState.scheduleMinute ?? null,
+    lastScheduledSlot: workerState.lastScheduledSlot || null,
     lastStartedAt: workerState.lastStartedAt,
     lastCompletedAt: workerState.lastCompletedAt,
     lastResult: workerState.lastResult,
@@ -639,6 +642,102 @@ async function startHourlySweepWorker({ config, runtime, workerState, spendSyncR
   });
 }
 
+/**
+ * RingCX/WEM recording downloader. Runs once per hour on a separate
+ * minute mark from the RingCentral call-log hygiene sweep so the two
+ * heavy RC surfaces do not stack on the same tick.
+ */
+async function startCxRecordingWorker({ config, runtime, workerState }) {
+  const intervalMs = 60_000;
+  const scheduleMinute = Math.max(
+    0,
+    Math.min(59, Number(config.hourlySweep?.cxRecordingMinute ?? 30) || 30),
+  );
+  workerState.enabled = true;
+  workerState.intervalMs = intervalMs;
+  workerState.scheduleMinute = scheduleMinute;
+  workerState.lastScheduledSlot = null;
+
+  const slotKeyFor = (date) => {
+    const slot = new Date(date);
+    slot.setUTCMinutes(scheduleMinute, 0, 0);
+    return `${slot.getUTCFullYear()}-${slot.getUTCMonth()}-${slot.getUTCDate()}-${slot.getUTCHours()}-${scheduleMinute}`;
+  };
+
+  const tick = async () => {
+    const now = new Date();
+    if (now.getUTCMinutes() < scheduleMinute) return;
+    const slotKey = slotKeyFor(now);
+    if (workerState.running || workerState.lastScheduledSlot === slotKey) return;
+
+    const mongoState = getMongoReadyState(runtime);
+    if (!mongoState.connected) {
+      workerState.lastCompletedAt = new Date();
+      workerState.lastResult = {
+        skipped: true,
+        reason: "mongo-not-connected",
+        mongo: mongoState,
+      };
+      workerState.lastError = "mongo-not-connected";
+      return;
+    }
+
+    workerState.running = true;
+    workerState.lastStartedAt = now;
+    workerState.lastScheduledSlot = slotKey;
+    try {
+      const result = await runCxRecordingHourly({
+        fireTime: now,
+        scheduleMinute,
+        logger: runtime.logger,
+      });
+      workerState.lastCompletedAt = new Date();
+      workerState.lastResult = result;
+      workerState.lastError = null;
+      runtime.logger.info("control-plane.cx_recording.tick", {
+        scheduleMinute,
+        windowStart: result.windowStart,
+        windowEnd: result.windowEnd,
+        minDurationSec: result.minDurationSec,
+        metadata: result.metadata,
+        domains: Object.fromEntries(
+          Object.entries(result.domains || {}).map(([domain, value]) => [
+            domain,
+            {
+              candidateRows: value.candidateRows,
+              processedCompleted: value.processedCompleted,
+              processedNoRecording: value.processedNoRecording,
+              processedErrors: value.processedErrors,
+            },
+          ]),
+        ),
+      });
+    } catch (error) {
+      workerState.lastCompletedAt = new Date();
+      workerState.lastError = error.message;
+      runtime.logger.error("control-plane.cx_recording.tick_failed", {
+        scheduleMinute,
+        error: error.message,
+      });
+    } finally {
+      workerState.running = false;
+    }
+  };
+
+  workerState.timer = setInterval(tick, intervalMs);
+  if (typeof workerState.timer.unref === "function") {
+    workerState.timer.unref();
+  }
+
+  setImmediate(() => {
+    tick().catch((error) => {
+      runtime.logger.error("control-plane.cx_recording.first_tick_failed", {
+        error: error.message,
+      });
+    });
+  });
+}
+
 async function startControlPlaneWorker({ config, runtime, workerState }) {
   const intervalMs = Math.max(Number(config.controlPlaneWorker?.intervalMs) || 5000, 1000);
   const batchSize = Math.max(Number(config.controlPlaneWorker?.batchSize) || 25, 1);
@@ -789,6 +888,7 @@ async function startServer() {
   const requireSmsWebhookSignature = buildCallrailWebhookVerifier(config, runtime);
   runtime.installSignalHandlers();
   const hourlySweepState = createWorkerState();
+  const cxRecordingState = createWorkerState();
   const inboundProxy = buildServiceProxy({
     port: PORTS.inboundGateway,
     runtime,
@@ -822,14 +922,15 @@ async function startServer() {
         hourlySweepState,
         config.hourlySweep || {},
       ),
+      cxRecording: summarizeWorkerState(cxRecordingState),
     },
-      runtimes: {
-        lexisNightly: lexisNightlyRuntime.getState(),
-        lexisDailyDrop: lexisDailyDropRuntime.getState(),
-        nightlyClose: nightlyCloseRuntime.getState(),
-        spendSync: spendSyncRuntime.getState(),
-        eodRecordingArchive: eodRecordingArchiveRuntime.getState(),
-        demoRingout: demoRingoutRuntime.getState(),
+    runtimes: {
+      lexisNightly: lexisNightlyRuntime.getState(),
+      lexisDailyDrop: lexisDailyDropRuntime.getState(),
+      nightlyClose: nightlyCloseRuntime.getState(),
+      spendSync: spendSyncRuntime.getState(),
+      eodRecordingArchive: eodRecordingArchiveRuntime.getState(),
+      demoRingout: demoRingoutRuntime.getState(),
     },
   });
 
@@ -1077,6 +1178,17 @@ async function startServer() {
     runtime.logger.warn("control-plane.hourly.disabled");
   }
 
+  if (config.controlPlaneWorker?.enabled !== false) {
+    await startCxRecordingWorker({
+      config,
+      runtime,
+      workerState: cxRecordingState,
+    });
+  } else {
+    cxRecordingState.enabled = false;
+    runtime.logger.warn("control-plane.cx_recording.disabled");
+  }
+
   await lexisNightlyRuntime.start();
   await lexisDailyDropRuntime.start();
   await nightlyCloseRuntime.start();
@@ -1097,6 +1209,10 @@ async function startServer() {
     if (hourlySweepState.timer) {
       clearInterval(hourlySweepState.timer);
       hourlySweepState.timer = null;
+    }
+    if (cxRecordingState.timer) {
+      clearInterval(cxRecordingState.timer);
+      cxRecordingState.timer = null;
     }
   });
 
@@ -1127,6 +1243,17 @@ async function startServer() {
       });
     }
   }
+  async function waitForCxRecordingIdle(maxWaitMs = 25_000) {
+    const deadline = Date.now() + maxWaitMs;
+    while (cxRecordingState.running && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+    if (cxRecordingState.running) {
+      runtime.logger.warn("control-plane.cx_recording.shutdown.tick_timeout", {
+        waitedMs: maxWaitMs,
+      });
+    }
+  }
 
   runtime.registerCleanup("control-plane-server", () => new Promise((resolve) => server.close(() => resolve())));
   runtime.registerCleanup("control-plane-worker", async () => {
@@ -1142,6 +1269,13 @@ async function startServer() {
       hourlySweepState.timer = null;
     }
     await waitForHourlySweepIdle();
+  });
+  runtime.registerCleanup("control-plane-cx-recording", async () => {
+    if (cxRecordingState.timer) {
+      clearInterval(cxRecordingState.timer);
+      cxRecordingState.timer = null;
+    }
+    await waitForCxRecordingIdle();
   });
   runtime.registerCleanup("control-plane-lexis-nightly", async () => {
     await lexisNightlyRuntime.stop();

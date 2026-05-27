@@ -12,7 +12,7 @@ function createSendgridRouter(auth) {
     try {
       const domain = String(req.params.domain || "TAG").toUpperCase();
       const payload = await sendTestEmail(domain, {
-        fromEmail: req.body?.fromEmail || getInternalFromEmail(),
+        fromEmail: getInternalFromEmail(),
         toEmail: req.body?.toEmail || "mgray@taxadvocategroup.com",
         subject: req.body?.subject,
         text: req.body?.text || "test",

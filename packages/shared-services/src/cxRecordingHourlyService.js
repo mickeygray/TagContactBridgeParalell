@@ -2,32 +2,32 @@
 
 // CX call-recording hourly poller.
 //
-// Fires at the top of every hour. The window pulled is the previous
-// :45-to-:45 span — at fire time HH:00 we pull calls that ended
-// between (HH-2):45 and (HH-1):45. That gives every call in the window
-// at least 15 minutes of post-call processing time on the RingCX side
-// (their stated media-readiness threshold), with the newest call right
-// at the 15-min boundary and the oldest at 1h15m.
+// Fires once per hour. The default top-of-hour window is the previous
+// :45-to-:45 span; when scheduled at :30 it pulls :15-to-:15 instead.
+// That gives every call in the window at least 15 minutes of post-call
+// processing time on the RingCX side (their stated media-readiness
+// threshold), while letting us offset this job from the call-log sweep.
 //
 // Flow:
 //   1. fetchInteractionMetadata for the window (one POST, well under
 //      the 2-rpm metadata limit)
-//   2. group segments by interactionId (UII) → cache
-//   3. find CallLog rows where platform="cx", callEndTime ∈ window,
+//   2. group segments by interactionId (UII) into a cache
+//   3. find CallLog rows where platform="cx", callEndTime is in window,
 //      recordingArchive.status NOT in terminal set
 //   4. for each row, run the existing processCallRecordingArchive
-//      with the metadata cache passed through — the new "ringcx"
+//      with the metadata cache passed through. The new "ringcx"
 //      provider in recordingArchiveService picks the right segment,
 //      downloads the WAV, and hands it off to the existing
-//      Drive-upload → transcription → scoring pipeline.
+//      Drive-upload -> transcription -> scoring pipeline.
 //
 // Gated by RINGCX_RECORDING_ENABLED (default false). Until RC
 // activates recording on the account, the metadata responses will be
-// empty and the rows stay at status="no_recording" — at which point
+// empty and the rows stay at status="no_recording", at which point
 // the existing retry/backoff in queueCallRecordingArchiveJob handles
 // the rest.
 
 const { CallLog } = require("../../shared-models/src");
+const { getSharedConfig } = require("../../shared-config/src");
 const { createRingcxVoiceClient } = require("../../shared-integrations/src");
 const {
   buildRingcxMetadataCache,
@@ -47,21 +47,34 @@ function normalizeDomain(domain) {
   return String(domain || "").trim().toUpperCase();
 }
 
-// Compute the :45-to-:45 window for a given fire time. fireTime
-// defaults to "now" rounded down to the hour boundary.
+function getMinDurationSec() {
+  const configured = Number(getSharedConfig().recordingArchive?.minDurationSec);
+  return Number.isFinite(configured) && configured > 0 ? configured : 300;
+}
+
+// Compute the one-hour recording window for a given fire time. The
+// schedule minute controls the slot boundary: 0 => :45-to-:45,
+// 30 => :15-to-:15.
 //
-// Example: fire at 14:00 → window [12:45, 13:45]. The bottom of the
+// Example: fire at 14:00 -> window [12:45, 13:45]. The bottom of the
 // window (newest call end-time included) is at 13:45, which is exactly
 // 15 minutes before the fire time, hitting the RingCX media-ready
 // threshold precisely.
-function computeWindow(fireTime = new Date()) {
+function computeWindow(fireTime = new Date(), { scheduleMinute = 0 } = {}) {
   const fire = new Date(fireTime);
+  const normalizedScheduleMinute = Math.max(
+    0,
+    Math.min(59, Number(scheduleMinute) || 0),
+  );
   const hourBoundary = new Date(fire);
-  hourBoundary.setMinutes(0, 0, 0);
+  if (hourBoundary.getUTCMinutes() < normalizedScheduleMinute) {
+    hourBoundary.setUTCHours(hourBoundary.getUTCHours() - 1);
+  }
+  hourBoundary.setUTCMinutes(normalizedScheduleMinute, 0, 0);
 
-  // windowEnd = hourBoundary - 15 minutes = (HH-1):45
+  // windowEnd = slotBoundary - 15 minutes.
   const windowEnd = new Date(hourBoundary.getTime() - 15 * 60 * 1000);
-  // windowStart = windowEnd - 1 hour = (HH-2):45
+  // windowStart = windowEnd - 1 hour.
   const windowStart = new Date(windowEnd.getTime() - 60 * 60 * 1000);
 
   return {
@@ -76,7 +89,8 @@ async function runCxRecordingHourly({
   fireTime = new Date(),
   domains = ["TAG", "WYNN"],
   logger = null,
-  // Override the computed window — used by the admin backfill route to
+  scheduleMinute = 0,
+  // Override the computed window; used by the admin backfill route to
   // process an arbitrary historical slot.
   windowStart: overrideStart = null,
   windowEnd: overrideEnd = null,
@@ -101,20 +115,93 @@ async function runCxRecordingHourly({
         windowStart: new Date(overrideStart),
         windowEnd: new Date(overrideEnd),
       }
-    : computeWindow(fireTime);
+    : computeWindow(fireTime, { scheduleMinute });
 
   const summary = {
     ok: true,
     fireTime: computed.fireTime.toISOString(),
     windowStart: computed.windowStart.toISOString(),
     windowEnd: computed.windowEnd.toISOString(),
+    scheduleMinute: Number(scheduleMinute) || 0,
+    minDurationSec: getMinDurationSec(),
     domains: {},
     metadata: null,
     errors: [],
   };
 
-  // Single bulk metadata POST for the window — one request feeds N
-  // CallLog rows across both domains.
+  // Check Mongo before touching RingCX/WEM; skip metadata unless a 5+ minute CX
+  // call is eligible for this slot.
+  const rowsByDomain = new Map();
+  let totalCandidateRows = 0;
+
+  for (const rawDomain of domains) {
+    const domain = normalizeDomain(rawDomain);
+    if (!domain) continue;
+    summary.domains[domain] = {
+      candidateRows: 0,
+      queued: 0,
+      processedInline: 0,
+      processedCompleted: 0,
+      processedNoRecording: 0,
+      processedErrors: 0,
+      skippedNoMetadata: 0,
+      errors: [],
+    };
+    const ds = summary.domains[domain];
+
+    let rows = [];
+    try {
+      rows = await CallLog.find(
+        {
+          domain,
+          platform: "cx",
+          callEndTime: {
+            $gte: computed.windowStart,
+            $lte: computed.windowEnd,
+          },
+          durationSec: { $gte: summary.minDurationSec },
+          $or: [
+            { "recordingArchive.status": { $exists: false } },
+            { "recordingArchive.status": null },
+            { "recordingArchive.status": { $nin: [...TERMINAL_STATUSES] } },
+          ],
+        },
+        {
+          _id: 1,
+          telephonySessionId: 1,
+          domain: 1,
+          caseId: 1,
+          callStartTime: 1,
+          callEndTime: 1,
+          extensionId: 1,
+          agentName: 1,
+          durationSec: 1,
+          recordingArchive: 1,
+        },
+      )
+        .sort({ callStartTime: 1 })
+        .limit(maxRowsPerDomain)
+        .lean();
+    } catch (error) {
+      ds.errors.push({ step: "calllog-find", error: error.message });
+      continue;
+    }
+
+    ds.candidateRows = rows.length;
+    rowsByDomain.set(domain, rows);
+    totalCandidateRows += rows.length;
+  }
+
+  if (totalCandidateRows === 0) {
+    summary.metadata = {
+      skipped: true,
+      reason: "no-eligible-calllog-rows",
+      totalSegments: 0,
+      uniqueInteractions: 0,
+    };
+    return summary;
+  }
+
   let client = null;
   try {
     client = createRingcxVoiceClient();
@@ -150,59 +237,9 @@ async function runCxRecordingHourly({
     uniqueInteractions: cache.byUii.size,
   };
 
-  for (const rawDomain of domains) {
-    const domain = normalizeDomain(rawDomain);
-    if (!domain) continue;
-    summary.domains[domain] = {
-      candidateRows: 0,
-      queued: 0,
-      processedInline: 0,
-      processedCompleted: 0,
-      processedNoRecording: 0,
-      processedErrors: 0,
-      skippedNoMetadata: 0,
-      errors: [],
-    };
+  for (const [domain, rows] of rowsByDomain.entries()) {
     const ds = summary.domains[domain];
-
-    let rows = [];
-    try {
-      rows = await CallLog.find(
-        {
-          domain,
-          platform: "cx",
-          callEndTime: {
-            $gte: computed.windowStart,
-            $lte: computed.windowEnd,
-          },
-          $or: [
-            { "recordingArchive.status": { $exists: false } },
-            { "recordingArchive.status": null },
-            { "recordingArchive.status": { $nin: [...TERMINAL_STATUSES] } },
-          ],
-        },
-        {
-          _id: 1,
-          telephonySessionId: 1,
-          domain: 1,
-          caseId: 1,
-          callStartTime: 1,
-          callEndTime: 1,
-          extensionId: 1,
-          agentName: 1,
-          durationSec: 1,
-          recordingArchive: 1,
-        },
-      )
-        .sort({ callStartTime: 1 })
-        .limit(maxRowsPerDomain)
-        .lean();
-    } catch (error) {
-      ds.errors.push({ step: "calllog-find", error: error.message });
-      continue;
-    }
-
-    ds.candidateRows = rows.length;
+    if (!ds) continue;
     if (rows.length === 0) continue;
 
     // Per row: enqueue an archive job (so the existing retry/backoff
@@ -228,7 +265,7 @@ async function runCxRecordingHourly({
 
       // Inline process with metadata cache. processCallRecordingArchive
       // re-fetches the CallLog row itself; we just pass the IDs +
-      // cache. Errors here don't kill the loop — the retry framework
+      // cache. Errors here don't kill the loop; the retry framework
       // owns recovery.
       try {
         const result = await processCallRecordingArchive({
