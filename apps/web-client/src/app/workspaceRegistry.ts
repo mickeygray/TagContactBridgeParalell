@@ -117,8 +117,8 @@ export const adminWorkspaces: WorkspaceDef[] = [
   {
     key: "cx-call-tracker",
     path: "/admin/cx-call-tracker",
-    label: "CX Call Tracker",
-    description: "Today's CX dial activity with playback + download.",
+    label: "Call Library",
+    description: "Playable Google Drive call recordings.",
     icon: Headphones,
     audience: "admin",
   },

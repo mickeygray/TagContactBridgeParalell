@@ -413,9 +413,13 @@ async function emailRecoverySummary({
   auditPath,
 }) {
   let sendPlainEmail;
+  let getInternalFromEmail;
   try {
     ({ sendPlainEmail } = require(
       path.resolve(PARALLEL_ROOT, "packages", "shared-services", "src", "sendgridMailService"),
+    ));
+    ({ getInternalFromEmail } = require(
+      path.resolve(PARALLEL_ROOT, "packages", "shared-config", "src"),
     ));
   } catch (err) {
     console.error("[recovery] sendgrid module load failed:", err.message);
@@ -459,15 +463,11 @@ async function emailRecoverySummary({
     `Audit log: ${auditPath}`,
   ];
   try {
-    const fromEmail = String(
-      process.env.AUTH_OTP_FROM_EMAIL ||
-        process.env.SENDGRID_FROM_EMAIL ||
-        "",
-    ).trim();
+    const fromEmail = getInternalFromEmail();
     const recoveryTo = String(
       process.env.BLOG_FAILURE_RECOVERY_TO ||
         process.env.BLOG_FAILURE_TO ||
-        process.env.SENDGRID_FROM_EMAIL ||
+        fromEmail ||
         "",
     ).trim();
     if (!fromEmail || !recoveryTo) {

@@ -62,6 +62,7 @@ const { createWorklistsRouter } = require("./routes/worklists");
 const { getControlPlaneConfig } = require("./services/appConfig");
 const { createLexisNightlyRuntime } = require("./services/lexisNightlyService");
 const { createLexisDailyDropRuntime } = require("./services/lexisDailyDropRuntime");
+const { createLogicsActivityReviewRuntime } = require("./services/logicsActivityReviewRuntime");
 const { createNightlyCloseRuntime } = require("./services/nightlyCloseRuntime");
 const { createEodRecordingArchiveRuntime } = require("./services/eodRecordingArchiveRuntime");
 const { createPhoneburnerRotationRuntime } = require("./services/phoneburnerRotationRuntime");
@@ -855,6 +856,10 @@ async function startServer() {
     config: config.lexisDailyDrop || {},
     runtime,
   });
+  const logicsActivityReviewRuntime = createLogicsActivityReviewRuntime({
+    config: config.logicsActivityReview || {},
+    runtime,
+  });
   const spendSyncRuntime = createSpendSyncRuntime({
     config: config.spendSync || {},
     runtime,
@@ -927,6 +932,7 @@ async function startServer() {
     runtimes: {
       lexisNightly: lexisNightlyRuntime.getState(),
       lexisDailyDrop: lexisDailyDropRuntime.getState(),
+      logicsActivityReview: logicsActivityReviewRuntime.getState(),
       nightlyClose: nightlyCloseRuntime.getState(),
       spendSync: spendSyncRuntime.getState(),
       eodRecordingArchive: eodRecordingArchiveRuntime.getState(),
@@ -1191,6 +1197,7 @@ async function startServer() {
 
   await lexisNightlyRuntime.start();
   await lexisDailyDropRuntime.start();
+  await logicsActivityReviewRuntime.start();
   await nightlyCloseRuntime.start();
   await spendSyncRuntime.start();
   await eodRecordingArchiveRuntime.start();
@@ -1282,6 +1289,9 @@ async function startServer() {
   });
   runtime.registerCleanup("control-plane-lexis-daily-drop", async () => {
     await lexisDailyDropRuntime.stop();
+  });
+  runtime.registerCleanup("control-plane-logics-activity-review", async () => {
+    await logicsActivityReviewRuntime.stop();
   });
   runtime.registerCleanup("control-plane-nightly-close", async () => {
     await nightlyCloseRuntime.stop();

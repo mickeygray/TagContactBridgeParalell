@@ -49,6 +49,12 @@ export interface CallReviewRow {
   };
   recording: {
     driveFileId: string | null;
+    provider?: string | null;
+    mimeType?: string | null;
+    fileName?: string | null;
+    groupKey?: string | null;
+    groupLabel?: string | null;
+    uploadedAt?: string | null;
     playbackUrl: string | null;
     sessionPlaybackUrl: string | null;
     available: boolean;
@@ -175,6 +181,54 @@ export interface CallTrackerAgentBucket {
   lastCallAt: string | null;
 }
 
+export interface RecordingGroupBucket {
+  key: string;
+  label: string;
+  callCount: number;
+  totalBytes?: number;
+  totalDurationSec?: number;
+}
+
+export interface DriveRecordingRow {
+  id: string;
+  driveFileId: string;
+  fileName: string | null;
+  mimeType: string | null;
+  sizeBytes: number | null;
+  createdTime: string | null;
+  modifiedTime: string | null;
+  webViewLink: string | null;
+  parentFolderId: string | null;
+  rootFolderId: string | null;
+  rootFolderKey: string | null;
+  rootFolderLabel: string | null;
+  folderPath: string | null;
+  telephonySessionId: string | null;
+  domain: string | null;
+  provider: string | null;
+  platform: "cx" | "ex" | string | null;
+  direction: "inbound" | "outbound" | "unknown" | string | null;
+  dateKey: string | null;
+  callStartTime: string | null;
+  phone: string | null;
+  agentName: string | null;
+  groupKey: string | null;
+  groupLabel: string | null;
+  playbackUrl: string | null;
+  recording: {
+    driveFileId: string | null;
+    playbackUrl: string | null;
+    available: boolean;
+    archiveStatus: string | null;
+    provider: string | null;
+    mimeType: string | null;
+    fileName: string | null;
+    groupKey: string | null;
+    groupLabel: string | null;
+    uploadedAt: string | null;
+  };
+}
+
 export interface CallTrackerResponse {
   ok: true;
   dateKey: string;
@@ -192,6 +246,38 @@ export interface CallTrackerResponse {
   truncated: boolean;
 }
 
+export interface CallLibraryResponse {
+  ok: true;
+  dateKey: string;
+  source: "google-drive" | string;
+  domain: string;
+  domains: string[];
+  window: {
+    allTime: boolean;
+    today: boolean;
+    days: number | null;
+    startAt: string | null;
+  };
+  filters: {
+    platform: string;
+    direction: string;
+    recordingGroup: string;
+    hasRecording: true;
+  };
+  folders: Array<{
+    folderId: string;
+    key: string;
+    label: string;
+  }>;
+  summary: CallReviewSummary & {
+    totalBytes?: number;
+  };
+  recordingGroups: RecordingGroupBucket[];
+  calls: DriveRecordingRow[];
+  recordings: DriveRecordingRow[];
+  truncated: boolean;
+}
+
 export interface CallTrackerFilters {
   domain?: "ALL" | "TAG" | "WYNN" | string;
   platform?: CallPlatformFilter;
@@ -201,6 +287,19 @@ export interface CallTrackerFilters {
   sort?: CallSortKey;
   limit?: number;
 }
+
+export type CallLibraryWindow = "today" | 7 | 30 | 90 | 365 | "all" | number;
+
+export interface CallLibraryFilters {
+  platform?: CallPlatformFilter;
+  direction?: CallDirectionFilter;
+  recordingGroup?: string | null;
+  days?: CallLibraryWindow;
+  sort?: CallSortKey;
+  limit?: number;
+}
+
+export type CallLibraryScope = "admin" | "user";
 
 export interface CallsByPhoneResponse {
   ok: true;
@@ -278,8 +377,41 @@ export function useCallsByPhone(
 }
 
 /**
- * Org-wide today's-calls list — drives the CX Call Tracker workspace.
- * Polls every 10s so the page stays live without spamming the server.
+ * Drive-backed recording library. Reads configured Google Drive archive
+ * folders directly and returns only files that can be played through the
+ * authenticated Drive proxy.
+ */
+export function useCallLibrary(
+  filters: CallLibraryFilters = {},
+  options: { scope?: CallLibraryScope } = {},
+) {
+  const scope = options.scope ?? "admin";
+  const query: Record<string, string | number> = {
+    platform: filters.platform ?? "all",
+    direction: filters.direction ?? "all",
+    recordingGroup: filters.recordingGroup || "all",
+    days: filters.days ?? 7,
+  };
+  if (filters.sort) query.sort = filters.sort;
+  if (filters.limit) query.limit = filters.limit;
+  return useQuery({
+    queryKey: queryKeys.callReview.library({ scope, ...query }),
+    queryFn: () =>
+      api.get<CallLibraryResponse>(
+        scope === "user"
+          ? "/api/read/cx/recordings/library"
+          : "/api/admin/call-review/library",
+        { query },
+      ),
+    staleTime: 30_000,
+    refetchInterval: 60_000,
+    refetchIntervalInBackground: false,
+  });
+}
+
+/**
+ * Org-wide today's-calls list — drives the legacy call tracker API.
+ * Polls every 10s so the endpoint stays live without spamming the server.
  */
 export function useCallTrackerToday(filters: CallTrackerFilters = {}) {
   const query: Record<string, string | number> = {

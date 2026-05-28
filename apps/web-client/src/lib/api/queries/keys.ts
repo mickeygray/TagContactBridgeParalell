@@ -26,6 +26,8 @@ export const queryKeys = {
       ["call-review", "case-today", String(caseId), domain ?? "TAG", sort ?? "time"] as const,
     tracker: (filters?: Record<string, unknown>) =>
       ["call-review", "tracker", filters ?? {}] as const,
+    library: (filters?: Record<string, unknown>) =>
+      ["call-review", "library", filters ?? {}] as const,
     byPhone: (phone: string, filters?: Record<string, unknown>) =>
       ["call-review", "by-phone", phone, filters ?? {}] as const,
   },

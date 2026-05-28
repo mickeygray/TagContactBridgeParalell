@@ -1,15 +1,12 @@
 import * as React from "react";
 import {
-  Clock,
   Download,
-  Flame,
+  Folder,
   Headphones,
-  PhoneIncoming,
-  PhoneOutgoing,
+  HardDrive,
   Play,
   RefreshCw,
   Search,
-  Users,
 } from "lucide-react";
 import { SectionHeader } from "@/components/ui/SectionHeader";
 import { Button } from "@/components/ui/Button";
@@ -19,199 +16,292 @@ import { ErrorState } from "@/components/ui/ErrorState";
 import { SkeletonRow } from "@/components/ui/Skeleton";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { Input } from "@/components/ui/Input";
+import { API_BASE_URL, TOKEN_STORAGE_KEY } from "@/lib/api/client";
 import {
-  normalizeUsPhone,
-  useCallsByPhone,
-  useCallTrackerToday,
-  type CallReviewRow,
-  type CallSortKey,
-  type CallPlatformFilter,
+  useCallLibrary,
   type CallDirectionFilter,
-  type CallsByPhoneFilters,
+  type CallLibraryScope,
+  type CallPlatformFilter,
+  type DriveRecordingRow,
 } from "@/lib/api/queries/callReview";
 import { formatDateTime, formatNumber, formatRelative } from "@/lib/utils/format";
 import { cn } from "@/lib/utils/cn";
 
-type PhoneLookupWindow = 30 | 90 | 365 | "all";
+type LibraryWindow = "today" | 7 | 30 | 90 | 365 | "all";
 
-const PHONE_WINDOW_OPTIONS: { label: string; value: PhoneLookupWindow }[] = [
+const WINDOW_OPTIONS: { label: string; value: LibraryWindow }[] = [
+  { label: "today", value: "today" },
+  { label: "7d", value: 7 },
   { label: "30d", value: 30 },
   { label: "90d", value: 90 },
   { label: "1y", value: 365 },
   { label: "all", value: "all" },
 ];
+const AGENT_LIBRARY_GROUP_KEYS = new Set(["cx", "og"]);
 
-type DomainFilter = "ALL" | "TAG" | "WYNN";
+function normalizeRecordingGroupKey(value: string | null | undefined): string {
+  return String(value || "").trim().toLowerCase();
+}
 
-function formatDuration(sec: number | null | undefined): string {
-  if (!sec || sec < 1) return "—";
-  const minutes = Math.floor(sec / 60);
-  const seconds = Math.floor(sec % 60);
-  if (minutes >= 60) {
-    const hours = Math.floor(minutes / 60);
-    const mins = minutes % 60;
-    return `${hours}h ${mins}m`;
+function isAgentVisibleRecording(row: DriveRecordingRow): boolean {
+  const groupKeys = [
+    row.groupKey,
+    row.recording?.groupKey,
+    row.rootFolderKey,
+  ].map(normalizeRecordingGroupKey);
+  if (groupKeys.some((key) => AGENT_LIBRARY_GROUP_KEYS.has(key))) return true;
+  if (normalizeRecordingGroupKey(row.provider) === "callrail") return true;
+  return normalizeRecordingGroupKey(row.platform) === "cx";
+}
+
+function formatBytes(value: number | null | undefined): string {
+  const bytes = Number(value) || 0;
+  if (!bytes) return "-";
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+  return `${(bytes / 1024 / 1024 / 1024).toFixed(2)} GB`;
+}
+
+function formatPhone(value: string | null | undefined): string {
+  const digits = String(value || "").replace(/\D/g, "");
+  if (digits.length === 10) {
+    return `(${digits.slice(0, 3)}) ${digits.slice(3, 6)}-${digits.slice(6)}`;
   }
-  return `${minutes}m ${seconds.toString().padStart(2, "0")}s`;
+  return value || "-";
 }
 
-function durationTone(
-  sec: number | null | undefined,
-): "info" | "warning" | "success" | "accent" {
-  if (!sec || sec < 30) return "info";
-  if (sec < 120) return "accent";
-  if (sec < 480) return "success";
-  return "warning";
+function buildDownloadFilename(row: DriveRecordingRow): string {
+  const base = row.fileName || row.driveFileId || "recording.mp3";
+  return base.replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 120);
 }
 
-function verdictTone(verdict: string | null): {
-  className: string;
-  label: string;
-} | null {
-  if (!verdict) return null;
-  const v = verdict.toLowerCase();
-  if (v === "hot") return { className: "bg-emerald-500/15 text-emerald-700 dark:text-emerald-300", label: "HOT" };
-  if (v === "warm") return { className: "bg-amber-500/15 text-amber-700 dark:text-amber-300", label: "WARM" };
-  if (v === "cold") return { className: "bg-sky-500/15 text-sky-700 dark:text-sky-300", label: "COLD" };
-  if (v === "dead") return { className: "bg-muted text-muted-foreground", label: "DEAD" };
-  if (v === "fake") return { className: "bg-rose-500/15 text-rose-700 dark:text-rose-300", label: "FAKE" };
-  return { className: "bg-muted text-muted-foreground", label: v.toUpperCase() };
+function protectedDrivePlaybackPath(row: DriveRecordingRow): string | null {
+  const existing = row.playbackUrl || row.recording?.playbackUrl || null;
+  if (existing) return existing;
+  return null;
 }
 
-function routeCampaignLabel(row: CallReviewRow): string | null {
-  if (row.routeCampaignName) return row.routeCampaignName;
-  if (row.routeCampaignKey === "ld-custom") return "LD Custom";
-  if (row.routeCampaignKey === "ld-general") return "LD General";
-  if (row.routeCampaignKey) return row.routeCampaignKey;
-  return row.sourceName || null;
+function playbackTicketPath(path: string): string {
+  const parsed = new URL(path, window.location.origin);
+  return `${parsed.pathname.replace("/recordings/play/", "/recordings/play-ticket/")}${parsed.search}`;
 }
 
-function buildDownloadFilename(call: CallReviewRow): string {
-  const date = call.callStartTime
-    ? new Date(call.callStartTime).toISOString().replace(/[:.]/g, "-").slice(0, 19)
-    : "unknown";
-  const agent = (call.agentName || call.extensionId || "agent")
-    .replace(/\s+/g, "_")
-    .replace(/[^a-zA-Z0-9_-]/g, "");
-  const phone = call.phone || "unknown";
-  return `${date}_${agent}_${phone}.mp3`;
+function isSignedStreamPath(path: string): boolean {
+  return (
+    path.includes("/recordings/stream/") ||
+    path.includes("/api/recordings/play/") ||
+    path.includes("/api/recordings/rc-play/")
+  );
 }
 
-export function CxCallTrackerWorkspace() {
-  const [domain, setDomain] = React.useState<DomainFilter>("ALL");
-  const [platform, setPlatform] = React.useState<CallPlatformFilter>("cx");
-  const [direction, setDirection] = React.useState<CallDirectionFilter>("outbound");
-  const [hasRecording, setHasRecording] = React.useState<boolean | undefined>(undefined);
-  const [sort, setSort] = React.useState<CallSortKey>("time");
-  const [agentFilter, setAgentFilter] = React.useState<string | null>(null);
+function withDownloadParam(url: string, filename: string): string {
+  const parsed = new URL(url, window.location.origin);
+  parsed.searchParams.set("download", filename);
+  return parsed.toString();
+}
+
+function absoluteApiUrl(path: string): string {
+  if (/^https?:\/\//i.test(path)) return path;
+  return `${API_BASE_URL}${path}`;
+}
+
+async function fetchTicketedRecordingStreamUrl(path: string): Promise<string | null> {
+  if (!path.includes("/recordings/play/")) return null;
+  const token = window.localStorage.getItem(TOKEN_STORAGE_KEY);
+  if (!token) {
+    throw new Error("Sign in again before opening a recording");
+  }
+  const response = await fetch(absoluteApiUrl(playbackTicketPath(path)), {
+    method: "POST",
+    headers: {
+      Accept: "application/json",
+      Authorization: `Bearer ${token}`,
+    },
+  });
+  if (response.status === 404) {
+    throw new Error("Playback ticket endpoint is not loaded yet. Restart the backend service.");
+  }
+  if (!response.ok) {
+    let message = `Playback failed (${response.status})`;
+    try {
+      const payload = await response.json();
+      message = String(payload.error || payload.message || message);
+    } catch {
+      // Keep the status-based message.
+    }
+    throw new Error(message);
+  }
+  const payload = (await response.json()) as { playbackUrl?: string };
+  if (!payload.playbackUrl) {
+    throw new Error("Playback URL was not returned");
+  }
+  return absoluteApiUrl(payload.playbackUrl);
+}
+
+async function fetchRecordingStreamUrl(path: string): Promise<string> {
+  if (isSignedStreamPath(path)) return absoluteApiUrl(path);
+  const ticketedUrl = await fetchTicketedRecordingStreamUrl(path);
+  if (ticketedUrl) return ticketedUrl;
+  throw new Error("Recording playback URL could not be signed");
+}
+
+async function fetchRecordingBlobUrl(
+  path: string,
+  _sizeBytes: number | null | undefined,
+): Promise<string> {
+  const directStreamUrl = isSignedStreamPath(path)
+    ? absoluteApiUrl(path)
+    : await fetchTicketedRecordingStreamUrl(path);
+  if (!directStreamUrl) {
+    throw new Error("Recording playback URL could not be signed");
+  }
+  const controller = new AbortController();
+  const timer = window.setTimeout(() => controller.abort(), 45_000);
+  let response: Response;
+  try {
+    response = await fetch(directStreamUrl, {
+      signal: controller.signal,
+    });
+    if (!response.ok && response.status !== 206) {
+      let message = `Playback failed (${response.status})`;
+      try {
+        const payload = await response.json();
+        message = String(payload.error || payload.message || message);
+      } catch {
+        // Keep the status-based message.
+      }
+      throw new Error(message);
+    }
+    return URL.createObjectURL(await response.blob());
+  } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") {
+      throw new Error("Playback request timed out after 45 seconds");
+    }
+    throw error;
+  } finally {
+    window.clearTimeout(timer);
+  }
+}
+
+export function CxCallTrackerWorkspace({
+  scope = "admin",
+}: {
+  scope?: CallLibraryScope;
+}) {
+  const [platform, setPlatform] = React.useState<CallPlatformFilter>("all");
+  const [direction, setDirection] = React.useState<CallDirectionFilter>("all");
+  const [recordingGroup, setRecordingGroup] = React.useState("all");
+  const [window, setWindow] = React.useState<LibraryWindow>(7);
   const [search, setSearch] = React.useState("");
   const [expandedId, setExpandedId] = React.useState<string | null>(null);
 
-  // Phone-lookup mode — when set, the workspace switches from "today's
-  // CX activity" to "all calls to this phone over the past N days."
-  const [phoneInput, setPhoneInput] = React.useState("");
-  const [phoneQuery, setPhoneQuery] = React.useState<string | null>(null);
-  const [phoneWindow, setPhoneWindow] = React.useState<PhoneLookupWindow>(90);
-  const phoneNormalized = normalizeUsPhone(phoneQuery);
-  const phoneMode = Boolean(phoneNormalized);
-
-  const query = useCallTrackerToday({
-    domain,
+  const query = useCallLibrary({
     platform,
     direction,
-    hasRecording,
-    extensionId: agentFilter || undefined,
-    sort,
-  });
-  const phoneResults = useCallsByPhone(phoneNormalized, {
-    domain,
-    days: phoneWindow,
-    sort,
-  } satisfies CallsByPhoneFilters);
+    recordingGroup,
+    days: window,
+    limit: 500,
+  }, { scope });
 
-  // When in phone mode, the visible data + summary come from the phone
-  // query; otherwise from the tracker today query. Branching here keeps
-  // the rest of the component shape simple.
-  const activeQuery = phoneMode ? phoneResults : query;
-  const activeData = phoneMode ? phoneResults.data : query.data;
-  const activeCalls = activeData?.calls ?? [];
+  const rawRecordings = query.data?.recordings ?? query.data?.calls ?? [];
+  const rawGroups = query.data?.recordingGroups ?? [];
+  const recordings = React.useMemo(
+    () => (scope === "user" ? rawRecordings.filter(isAgentVisibleRecording) : rawRecordings),
+    [rawRecordings, scope],
+  );
+  const groups = React.useMemo(
+    () =>
+      scope === "user"
+        ? rawGroups.filter((group) =>
+            AGENT_LIBRARY_GROUP_KEYS.has(normalizeRecordingGroupKey(group.key)),
+          )
+        : rawGroups,
+    [rawGroups, scope],
+  );
 
-  const visibleCalls = React.useMemo(() => {
-    if (!activeCalls.length) return [];
+  React.useEffect(() => {
+    if (scope !== "user" || recordingGroup === "all") return;
+    if (!AGENT_LIBRARY_GROUP_KEYS.has(normalizeRecordingGroupKey(recordingGroup))) {
+      setRecordingGroup("all");
+    }
+  }, [recordingGroup, scope]);
+
+  const visibleRecordings = React.useMemo(() => {
     const term = search.trim().toLowerCase();
-    if (!term) return activeCalls;
-    return activeCalls.filter((row) => {
+    if (!term) return recordings;
+    return recordings.filter((row) => {
       const haystack = [
+        row.fileName,
         row.agentName,
         row.phone,
-        row.sourceName,
-        row.routeCampaignName,
-        row.routeCampaignKey,
-        row.score?.summary,
-        row.caseId ? `#${row.caseId}` : null,
+        row.telephonySessionId,
+        row.groupLabel,
+        row.provider,
+        row.platform,
+        row.direction,
+        row.folderPath,
       ]
         .filter(Boolean)
         .join(" ")
         .toLowerCase();
       return haystack.includes(term);
     });
-  }, [activeCalls, search]);
+  }, [recordings, search]);
 
-  const totalDurationSec = activeData?.summary?.totalDurationSec ?? 0;
-  const avgDurationSec = activeCalls.length
-    ? Math.round(totalDurationSec / activeCalls.length)
-    : 0;
-  const cxCount = activeCalls.filter((c) => c.platform === "cx").length;
-  const scoredHot = activeCalls.filter(
-    (c) => c.score?.verdict?.toLowerCase() === "hot",
+  React.useEffect(() => {
+    if (!expandedId) return;
+    if (!visibleRecordings.some((row) => row.driveFileId === expandedId)) {
+      setExpandedId(null);
+    }
+  }, [expandedId, visibleRecordings]);
+
+  const playNextRecording = React.useCallback(
+    (driveFileId: string) => {
+      const currentIndex = visibleRecordings.findIndex(
+        (row) => row.driveFileId === driveFileId,
+      );
+      if (currentIndex < 0) {
+        setExpandedId(null);
+        return;
+      }
+      const nextRecording = visibleRecordings
+        .slice(currentIndex + 1)
+        .find((row) => protectedDrivePlaybackPath(row));
+      setExpandedId(nextRecording?.driveFileId ?? null);
+    },
+    [visibleRecordings],
+  );
+
+  const totalBytes = recordings.reduce(
+    (sum, row) => sum + (Number(row.sizeBytes) || 0),
+    0,
+  );
+  const cxCount = recordings.filter(
+    (row) => row.groupKey === "cx" || row.platform === "cx",
   ).length;
-
-  const phoneSummary =
-    phoneMode && phoneResults.data
-      ? {
-          firstCallAt: phoneResults.data.summary.firstCallAt,
-          lastCallAt: phoneResults.data.summary.lastCallAt,
-          uniqueAgents: phoneResults.data.summary.uniqueAgents,
-          phoneDisplay: phoneResults.data.phoneDisplay,
-          truncated: phoneResults.data.truncated,
-        }
-      : null;
-
-  const submitPhoneLookup = (raw: string) => {
-    const normalized = normalizeUsPhone(raw);
-    setPhoneQuery(normalized);
-    setAgentFilter(null);
-  };
-  const clearPhoneLookup = () => {
-    setPhoneInput("");
-    setPhoneQuery(null);
-  };
+  const ogCount = recordings.filter(
+    (row) => row.groupKey === "og" || row.provider === "callrail",
+  ).length;
 
   return (
     <div className="space-y-4">
       <SectionHeader
-        title="CX Call Tracker"
+        title="Call Library"
         description={
-          phoneMode && phoneSummary
-            ? `Phone history for ${phoneSummary.phoneDisplay} · ${activeCalls.length} call${
-                activeCalls.length === 1 ? "" : "s"
-              } across ${phoneSummary.uniqueAgents} agent${
-                phoneSummary.uniqueAgents === 1 ? "" : "s"
-              }${phoneSummary.truncated ? " (truncated)" : ""}`
-            : activeData
-              ? `${(activeData as any).dateKey ?? ""} · ${activeData.domain} · ${
-                  visibleCalls.length
-                } of ${activeCalls.length} call${
-                  activeCalls.length === 1 ? "" : "s"
-                } shown${activeData.truncated ? " (truncated)" : ""}`
-              : "Today's CX dial activity across all agents and tenants."
+          query.data
+            ? `${visibleRecordings.length} of ${recordings.length} playable recording${
+                recordings.length === 1 ? "" : "s"
+              } from Google Drive${scope === "user" ? " in your folders" : ""}${
+                query.data.truncated ? " (truncated)" : ""
+              }`
+            : "Playable recordings from the Google Drive archive."
         }
         actions={
           <Button
             variant="ghost"
             size="sm"
-            onClick={() => activeQuery.refetch()}
-            isLoading={activeQuery.isFetching && !activeQuery.isLoading}
+            onClick={() => query.refetch()}
+            isLoading={query.isFetching && !query.isLoading}
           >
             <RefreshCw className="h-3.5 w-3.5" />
             Refresh
@@ -219,118 +309,67 @@ export function CxCallTrackerWorkspace() {
         }
       />
 
-      {/* Phone lookup — paste a number to switch from "today's CX
-          activity" to "every call to/from this person." */}
-      <Card>
-        <CardContent className="p-3">
-          <form
-            onSubmit={(e) => {
-              e.preventDefault();
-              submitPhoneLookup(phoneInput);
-            }}
-            className="flex flex-wrap items-center gap-2"
-          >
-            <Search className="h-3.5 w-3.5 text-muted-foreground" />
-            <Input
-              value={phoneInput}
-              onChange={(e) => setPhoneInput(e.target.value)}
-              placeholder="Look up by phone — e.g. (310) 666-5997"
-              className="h-7 w-72 text-xs"
-            />
-            <Button
-              type="submit"
-              variant="primary"
-              size="sm"
-              className="h-7 px-3"
-              disabled={!normalizeUsPhone(phoneInput)}
-            >
-              Search
-            </Button>
-            {phoneMode ? (
-              <>
-                <span className="text-[10px] uppercase tracking-wider text-muted-foreground">
-                  Window
-                </span>
-                {PHONE_WINDOW_OPTIONS.map((opt) => (
-                  <FilterChip
-                    key={String(opt.value)}
-                    active={phoneWindow === opt.value}
-                    onClick={() => setPhoneWindow(opt.value)}
-                  >
-                    {opt.label}
-                  </FilterChip>
-                ))}
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  className="h-7 px-2 text-[11px]"
-                  onClick={clearPhoneLookup}
-                >
-                  Clear lookup
-                </Button>
-              </>
-            ) : null}
-            {phoneMode && phoneSummary ? (
-              <span className="ml-auto text-[11px] text-muted-foreground">
-                First: {phoneSummary.firstCallAt
-                  ? formatDateTime(phoneSummary.firstCallAt)
-                  : "—"}
-                {" · Last: "}
-                {phoneSummary.lastCallAt
-                  ? formatDateTime(phoneSummary.lastCallAt)
-                  : "—"}
-              </span>
-            ) : null}
-          </form>
-        </CardContent>
-      </Card>
-
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-5">
         <KpiCard
-          label={phoneMode ? "Total calls" : "Total today"}
-          value={formatNumber(activeCalls.length)}
+          label="Playable files"
+          value={formatNumber(recordings.length)}
           icon={<Headphones className="h-4 w-4" />}
         />
         <KpiCard
-          label="CX dials"
+          label="CX"
           value={formatNumber(cxCount)}
-          icon={<PhoneOutgoing className="h-4 w-4" />}
-        />
-        <KpiCard
-          label="Avg duration"
-          value={formatDuration(avgDurationSec)}
-          icon={<Clock className="h-4 w-4" />}
-        />
-        <KpiCard
-          label="With recording"
-          value={`${formatNumber(activeData?.summary?.withRecording ?? 0)} / ${formatNumber(activeCalls.length)}`}
           icon={<Play className="h-4 w-4" />}
         />
         <KpiCard
-          label={phoneMode ? "Unique agents" : "Hot leads"}
-          value={formatNumber(
-            phoneMode ? phoneSummary?.uniqueAgents ?? 0 : scoredHot,
-          )}
-          icon={phoneMode ? <Users className="h-4 w-4" /> : <Flame className="h-4 w-4" />}
+          label="OG"
+          value={formatNumber(ogCount)}
+          icon={<Folder className="h-4 w-4" />}
+        />
+        <KpiCard
+          label="Buckets"
+          value={formatNumber(groups.length)}
+          icon={<Folder className="h-4 w-4" />}
+        />
+        <KpiCard
+          label="Drive size"
+          value={formatBytes(totalBytes)}
+          icon={<HardDrive className="h-4 w-4" />}
         />
       </div>
 
       <Card>
         <CardContent className="p-3">
           <div className="flex flex-wrap items-center gap-2">
-            <FilterGroup label="Domain">
-              {(["ALL", "TAG", "WYNN"] as DomainFilter[]).map((opt) => (
+            <FilterGroup label="Window">
+              {WINDOW_OPTIONS.map((opt) => (
                 <FilterChip
-                  key={opt}
-                  active={domain === opt}
-                  onClick={() => setDomain(opt)}
+                  key={String(opt.value)}
+                  active={window === opt.value}
+                  onClick={() => setWindow(opt.value)}
                 >
-                  {opt}
+                  {opt.label}
+                </FilterChip>
+              ))}
+            </FilterGroup>
+            <FilterGroup label="Bucket">
+              <FilterChip
+                active={recordingGroup === "all"}
+                onClick={() => setRecordingGroup("all")}
+              >
+                all
+              </FilterChip>
+              {groups.map((group) => (
+                <FilterChip
+                  key={group.key}
+                  active={recordingGroup === group.key}
+                  onClick={() => setRecordingGroup(group.key)}
+                >
+                  {group.label} {group.callCount}
                 </FilterChip>
               ))}
             </FilterGroup>
             <FilterGroup label="Platform">
-              {(["cx", "ex", "all"] as CallPlatformFilter[]).map((opt) => (
+              {(["all", "cx", "ex"] as CallPlatformFilter[]).map((opt) => (
                 <FilterChip
                   key={opt}
                   active={platform === opt}
@@ -351,138 +390,53 @@ export function CxCallTrackerWorkspace() {
                 </FilterChip>
               ))}
             </FilterGroup>
-            <FilterGroup label="Recording">
-              <FilterChip
-                active={hasRecording === undefined}
-                onClick={() => setHasRecording(undefined)}
-              >
-                any
-              </FilterChip>
-              <FilterChip
-                active={hasRecording === true}
-                onClick={() => setHasRecording(true)}
-              >
-                has rec
-              </FilterChip>
-              <FilterChip
-                active={hasRecording === false}
-                onClick={() => setHasRecording(false)}
-              >
-                no rec
-              </FilterChip>
-            </FilterGroup>
-            <FilterGroup label="Sort">
-              {(["time", "duration", "score"] as CallSortKey[]).map((opt) => (
-                <FilterChip
-                  key={opt}
-                  active={sort === opt}
-                  onClick={() => setSort(opt)}
-                >
-                  {opt}
-                </FilterChip>
-              ))}
-            </FilterGroup>
             <div className="ml-auto flex items-center gap-2">
               <Search className="h-3.5 w-3.5 text-muted-foreground" />
               <Input
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
-                placeholder="agent, phone, case…"
-                className="h-7 w-44 text-xs"
+                placeholder="file, agent, phone..."
+                className="h-7 w-52 text-xs"
               />
             </div>
           </div>
         </CardContent>
       </Card>
 
-      {activeData?.agents && activeData.agents.length > 0 ? (
-        <Card>
-          <CardContent className="p-3">
-            <div className="mb-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-              {phoneMode ? "Agents who called this number" : "Today's leaderboard"}
-            </div>
-            <div className="flex flex-wrap gap-2">
-              {activeData.agents.slice(0, 12).map((agent) => (
-                <button
-                  key={agent.extensionId}
-                  type="button"
-                  onClick={() =>
-                    setAgentFilter(
-                      agentFilter === agent.extensionId
-                        ? null
-                        : agent.extensionId,
-                    )
-                  }
-                  className={cn(
-                    "rounded-md border px-2 py-1 text-left text-[11px] transition-colors",
-                    agentFilter === agent.extensionId
-                      ? "border-primary bg-primary/10"
-                      : "border-border hover:bg-muted/50",
-                  )}
-                >
-                  <div className="font-medium">
-                    {agent.agentName || `ext ${agent.extensionId}`}
-                  </div>
-                  <div className="text-muted-foreground">
-                    {agent.callCount} call{agent.callCount === 1 ? "" : "s"}
-                    {" · "}
-                    {formatDuration(agent.totalDurationSec)}
-                    {" · "}
-                    {agent.withRecording} rec
-                  </div>
-                </button>
-              ))}
-              {agentFilter ? (
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  className="h-7 px-2 text-[11px]"
-                  onClick={() => setAgentFilter(null)}
-                >
-                  Clear agent filter
-                </Button>
-              ) : null}
-            </div>
-          </CardContent>
-        </Card>
-      ) : null}
-
       <Card>
         <CardContent className="p-0">
-          {activeQuery.isError ? (
+          {query.isError ? (
             <div className="p-3">
-              <ErrorState
-                error={activeQuery.error}
-                onRetry={() => activeQuery.refetch()}
-              />
+              <ErrorState error={query.error} onRetry={() => query.refetch()} />
             </div>
-          ) : activeQuery.isLoading ? (
+          ) : query.isLoading ? (
             <div className="p-3">
               <SkeletonRow count={5} />
             </div>
-          ) : visibleCalls.length === 0 ? (
+          ) : visibleRecordings.length === 0 ? (
             <div className="p-3">
               <EmptyState
-                title="No calls match"
+                title="No playable recordings"
                 description={
-                  activeCalls.length
-                    ? "Your filters narrowed everything out — try widening platform or recording."
-                    : phoneMode
-                      ? "No calls to/from this number in the selected window."
-                      : "Nothing dialed yet on the current PT day with these filters."
+                  recordings.length
+                    ? "Your filters narrowed the Drive library out."
+                    : "No audio files were found in the configured Drive archive folders."
                 }
               />
             </div>
           ) : (
             <ul className="divide-y divide-border">
-              {visibleCalls.map((call) => (
-                <TrackerRow
-                  key={call.id}
-                  call={call}
-                  expanded={expandedId === call.id}
+              {visibleRecordings.map((recording) => (
+                <RecordingRow
+                  key={recording.driveFileId}
+                  recording={recording}
+                  expanded={expandedId === recording.driveFileId}
                   onToggle={() =>
-                    setExpandedId(expandedId === call.id ? null : call.id)
+                    setExpandedId(
+                      expandedId === recording.driveFileId ? null : recording.driveFileId,
+                    )
                   }
+                  onEnded={() => playNextRecording(recording.driveFileId)}
                 />
               ))}
             </ul>
@@ -535,126 +489,225 @@ function FilterChip({
   );
 }
 
-function TrackerRow({
-  call,
+function RecordingRow({
+  recording,
   expanded,
   onToggle,
+  onEnded,
 }: {
-  call: CallReviewRow;
+  recording: DriveRecordingRow;
   expanded: boolean;
   onToggle: () => void;
+  onEnded: () => void;
 }) {
-  const DirectionIcon =
-    call.direction === "outbound" ? PhoneOutgoing : PhoneIncoming;
-  const verdict = verdictTone(call.score?.verdict ?? null);
-  const route = routeCampaignLabel(call);
+  const playbackUrl = protectedDrivePlaybackPath(recording);
+  const displayTime =
+    recording.callStartTime || recording.createdTime || recording.modifiedTime;
+  const rowRef = React.useRef<HTMLLIElement | null>(null);
+  const audioRef = React.useRef<HTMLAudioElement | null>(null);
+  const [streamUrl, setStreamUrl] = React.useState<string | null>(null);
+  const [blobUrl, setBlobUrl] = React.useState<string | null>(null);
+  const [isLoadingAudio, setIsLoadingAudio] = React.useState(false);
+  const [audioError, setAudioError] = React.useState<string | null>(null);
+  const [audioStatus, setAudioStatus] = React.useState<string | null>(null);
+  const playableUrl = blobUrl || streamUrl;
+  const shouldUseBlobPlayback = false;
+
+  React.useEffect(() => {
+    return () => {
+      if (blobUrl) URL.revokeObjectURL(blobUrl);
+    };
+  }, [blobUrl]);
+
+  React.useEffect(() => {
+    if (!expanded) return;
+    rowRef.current?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  }, [expanded]);
+
+  React.useEffect(() => {
+    if (!expanded || !playbackUrl || playableUrl || isLoadingAudio) return;
+    let cancelled = false;
+    setAudioError(null);
+    setAudioStatus(
+      shouldUseBlobPlayback
+        ? `Loading ${formatBytes(recording.sizeBytes)} recording...`
+        : "Opening recording stream...",
+    );
+    setIsLoadingAudio(true);
+    const load = shouldUseBlobPlayback
+      ? fetchRecordingBlobUrl(playbackUrl, recording.sizeBytes)
+      : fetchRecordingStreamUrl(playbackUrl);
+    load
+      .then((url) => {
+        if (cancelled) {
+          if (url.startsWith("blob:")) URL.revokeObjectURL(url);
+          return;
+        }
+        if (url.startsWith("blob:")) {
+          setBlobUrl(url);
+        } else {
+          setStreamUrl(url);
+        }
+        setAudioStatus(url.startsWith("blob:") ? "Ready" : "Streaming");
+      })
+      .catch((error) => {
+        if (!cancelled) {
+          setAudioError(error.message || "Could not load recording");
+          setAudioStatus(null);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setIsLoadingAudio(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    expanded,
+    isLoadingAudio,
+    playbackUrl,
+    playableUrl,
+    recording.sizeBytes,
+    shouldUseBlobPlayback,
+  ]);
+
+  React.useEffect(() => {
+    if (!expanded || !playableUrl || !audioRef.current) return;
+    void audioRef.current.play().catch(() => {
+      setAudioStatus("Ready - press play to continue");
+    });
+  }, [expanded, playableUrl]);
+
+  const downloadRecording = async () => {
+    if (!playbackUrl) return;
+    setAudioError(null);
+    try {
+      const url = playableUrl || (await fetchRecordingBlobUrl(playbackUrl, recording.sizeBytes));
+      if (!playableUrl && url.startsWith("blob:")) setBlobUrl(url);
+      const link = document.createElement("a");
+      link.href = url.startsWith("blob:")
+        ? url
+        : withDownloadParam(url, buildDownloadFilename(recording));
+      link.download = buildDownloadFilename(recording);
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+    } catch (error) {
+      setAudioError(error instanceof Error ? error.message : "Could not download recording");
+      setAudioStatus(null);
+    }
+  };
+
+  const openRecording = async () => {
+    if (!playbackUrl) return;
+    setAudioError(null);
+    try {
+      const url = streamUrl || (await fetchRecordingStreamUrl(playbackUrl));
+      setStreamUrl(url);
+      window.open(url, "_blank", "noopener,noreferrer");
+    } catch (error) {
+      setAudioError(error instanceof Error ? error.message : "Could not open recording");
+      setAudioStatus(null);
+    }
+  };
+
   return (
-    <li className="px-3 py-2 text-xs">
+    <li ref={rowRef} className="px-3 py-2 text-xs">
       <div className="flex items-center gap-2">
-        <DirectionIcon
-          className={cn(
-            "h-4 w-4 shrink-0",
-            call.direction === "outbound" ? "text-blue-500" : "text-amber-500",
-          )}
-        />
+        <Headphones className="h-4 w-4 shrink-0 text-primary" />
         <span
-          className="font-mono text-[10px] text-muted-foreground"
-          title={
-            call.callStartTime ? formatDateTime(call.callStartTime) : undefined
-          }
+          className="w-20 font-mono text-[10px] text-muted-foreground"
+          title={displayTime ? formatDateTime(displayTime) : undefined}
         >
-          {call.callStartTime ? formatRelative(call.callStartTime) : "—"}
+          {displayTime ? formatRelative(displayTime) : "-"}
         </span>
         <span className="min-w-[8rem] truncate font-medium">
-          {call.agentName || (call.extensionId ? `ext ${call.extensionId}` : "—")}
+          {recording.agentName || "Unknown agent"}
         </span>
-        <span className="truncate text-foreground/80">{call.phone || "—"}</span>
-        {call.caseId ? (
-          <span className="rounded bg-muted px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground">
-            #{call.caseId}
+        <span className="w-28 truncate text-foreground/80">
+          {formatPhone(recording.phone)}
+        </span>
+        <StatusPill tone="info">{recording.groupLabel || "Drive"}</StatusPill>
+        {recording.platform ? (
+          <span className="uppercase text-muted-foreground">
+            {recording.platform}
           </span>
         ) : null}
-        <StatusPill tone={durationTone(call.durationSec)}>
-          {formatDuration(call.durationSec)}
-        </StatusPill>
-        {call.platform ? (
-          <span className="uppercase text-muted-foreground">{call.platform}</span>
+        {recording.direction ? (
+          <span className="text-muted-foreground">{recording.direction}</span>
         ) : null}
-        {verdict ? (
-          <span
-            className={cn(
-              "rounded px-1.5 py-0.5 text-[10px] font-semibold tracking-wide",
-              verdict.className,
-            )}
-            title={
-              call.score?.summary ||
-              (call.score?.overall != null
-                ? `Score ${call.score.overall}/10`
-                : undefined)
-            }
-          >
-            {verdict.label}
-            {call.score?.overall != null ? ` ${call.score.overall}` : ""}
-          </span>
-        ) : null}
-        {route ? (
-          <span
-            className="rounded bg-muted/60 px-1.5 py-0.5 text-[10px] text-foreground/80"
-            title={call.sourceName || route}
-          >
-            {route}
-          </span>
-        ) : null}
-        <div className="ml-auto flex items-center gap-1">
-          <Button
-            variant={call.recording.available ? "primary" : "ghost"}
-            size="sm"
-            className="h-7 px-2"
-            disabled={!call.recording.available}
-            onClick={onToggle}
-          >
-            <Play className="h-3 w-3" />
-            {call.recording.available
-              ? expanded
-                ? "Hide"
-                : "Play"
-              : "No rec"}
-          </Button>
-          {call.recording.available && call.recording.playbackUrl ? (
-            <a
-              href={`${call.recording.playbackUrl}?download=${encodeURIComponent(
-                buildDownloadFilename(call),
-              )}`}
-              download={buildDownloadFilename(call)}
+        <span className="truncate text-muted-foreground" title={recording.fileName || undefined}>
+          {recording.fileName || recording.driveFileId}
+        </span>
+        <span className="ml-auto text-[10px] text-muted-foreground">
+          {formatBytes(recording.sizeBytes)}
+        </span>
+        <Button
+          variant="primary"
+          size="sm"
+          className="h-7 px-2"
+          disabled={!playbackUrl}
+          onClick={onToggle}
+          isLoading={expanded && isLoadingAudio}
+        >
+          <Play className="h-3 w-3" />
+          {expanded ? "Hide" : "Play"}
+        </Button>
+        {playbackUrl ? (
+          <>
+            <button
+              type="button"
+              onClick={openRecording}
               className="inline-flex h-7 items-center gap-1 rounded-md border border-border bg-card px-2 text-[11px] text-foreground hover:bg-muted/50"
-              title="Download recording (mp3)"
+              title="Open recording stream"
+            >
+              Open
+            </button>
+            <button
+              type="button"
+              onClick={downloadRecording}
+              className="inline-flex h-7 items-center gap-1 rounded-md border border-border bg-card px-2 text-[11px] text-foreground hover:bg-muted/50"
+              title="Download recording"
             >
               <Download className="h-3 w-3" />
               Save
-            </a>
-          ) : null}
-        </div>
+            </button>
+          </>
+        ) : null}
       </div>
-      {expanded && call.recording.playbackUrl ? (
+      {expanded && playbackUrl ? (
         <div className="mt-2 rounded-md border border-border bg-muted/30 p-2">
-          {/* /api/read/cx/recordings/play/:fileId — Range-supported Drive
-              proxy, so scrubbing in the HTML5 audio element works. */}
-          <audio
-            controls
-            preload="none"
-            src={call.recording.playbackUrl}
-            className="w-full"
-          />
-          <div className="mt-1 flex items-center justify-between text-[10px] text-muted-foreground">
-            <span title={formatDateTime(call.callStartTime)}>
-              Started{" "}
-              {call.callStartTime ? formatDateTime(call.callStartTime) : "—"}
+          {audioError ? (
+            <div className="rounded border border-rose-200 bg-rose-50 px-3 py-2 text-[11px] text-rose-700">
+              {audioError}
+            </div>
+          ) : playableUrl ? (
+            <audio
+              ref={audioRef}
+              controls
+              preload="metadata"
+              src={playableUrl}
+              className="w-full"
+              onCanPlay={() => setAudioStatus("Ready")}
+              onEnded={onEnded}
+              onError={() => {
+                setAudioError("Audio player could not load this recording stream");
+                setAudioStatus(null);
+              }}
+            />
+          ) : (
+            <div className="rounded border border-border bg-card px-3 py-2 text-[11px] text-muted-foreground">
+              {audioStatus || "Loading recording..."}
+            </div>
+          )}
+          <div className="mt-1 flex items-center justify-between gap-3 text-[10px] text-muted-foreground">
+            <span className="truncate" title={recording.folderPath || undefined}>
+              {recording.folderPath || recording.rootFolderLabel || "Drive"}
             </span>
-            {call.recording.driveFileId ? (
-              <span className="font-mono">
-                {call.recording.driveFileId.slice(0, 8)}…
-              </span>
-            ) : null}
+            <span className="font-mono">
+              {audioStatus ? `${audioStatus} · ` : ""}
+              {recording.driveFileId.slice(0, 10)}
+            </span>
           </div>
         </div>
       ) : null}

@@ -30,6 +30,30 @@ const { toErrorResponse } = require("../../../../packages/shared-errors/src");
 function createCommandsCxRouter(auth) {
   const router = express.Router();
 
+  async function requireDialingWindow(req, res, next) {
+    try {
+      if (req.user?.role === "admin") return next();
+      const { getPacingConfig } = require("../../../../packages/shared-services/src");
+      const { isOperatingNow } =
+        require("../../../../packages/shared-services/src/businessHoursGuard");
+      const pacing = await getPacingConfig();
+      if (isOperatingNow(pacing)) return next();
+      return res.status(403).json({
+        ok: false,
+        error: "CX dialing is closed outside business hours",
+        code: "outside-business-hours",
+        businessHours: {
+          timezone: pacing.businessHoursTimezone || "America/Los_Angeles",
+          startHour: pacing.businessHoursStart,
+          endHour: pacing.businessHoursEnd,
+          days: pacing.businessDays || [],
+        },
+      });
+    } catch (error) {
+      return next(error);
+    }
+  }
+
   async function handleSmokeQueue(req, res) {
     try {
       const input = req.method === "GET" ? req.query || {} : req.body || {};
@@ -128,6 +152,7 @@ function createCommandsCxRouter(auth) {
     auth.requireAuth,
     auth.requireUser,
     auth.requirePermission("queue.dial"),
+    requireDialingWindow,
     auth.requireCxOAuth,
     async (req, res) => {
       try {
@@ -155,8 +180,8 @@ function createCommandsCxRouter(auth) {
     },
   );
 
-  router.get("/:domain/smoke-queue", auth.requireAuth, auth.requireUser, handleSmokeQueue);
-  router.post("/:domain/smoke-queue", auth.requireAuth, auth.requireUser, handleSmokeQueue);
+  router.get("/:domain/smoke-queue", auth.requireAuth, auth.requireUser, requireDialingWindow, handleSmokeQueue);
+  router.post("/:domain/smoke-queue", auth.requireAuth, auth.requireUser, requireDialingWindow, handleSmokeQueue);
 
   router.post("/:domain/logics/create-case", auth.requireAuth, auth.requireUser, async (req, res) => {
     try {

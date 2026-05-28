@@ -13,7 +13,7 @@
 //
 // Flags:
 //   --apply              actually move files (default: dry-run)
-//   --buckets OG,AS,CS   restrict to specific buckets (default: all)
+//   --buckets OG,CX,AS,CS   restrict to specific buckets (default: all)
 //   --max-per-bucket N   cap files moved per bucket (debug; 0 = no cap)
 //   --concurrency N      parallel moves per bucket (default: 4)
 //   --batch-delay-ms N   delay between batches (default: 250ms)
@@ -251,6 +251,7 @@ async function main() {
   const destinations = archiveConfig.destinations || {};
   const allBuckets = [
     ["OG", String(destinations.og?.folderId || "").trim()],
+    ["CX", String(destinations.cx?.folderId || "").trim()],
     ["AS", String(destinations.as?.folderId || "").trim()],
     ["CS", String(destinations.cs?.folderId || "").trim()],
   ];
@@ -263,7 +264,7 @@ async function main() {
   if (buckets.length === 0) {
     // eslint-disable-next-line no-console
     console.error(
-      "No bucket folders configured (or all filtered out). Check shared-config recordingArchive.destinations.{og,as,cs}.folderId.",
+      "No bucket folders configured (or all filtered out). Check shared-config recordingArchive.destinations.{og,cx,as,cs}.folderId.",
     );
     process.exit(1);
   }

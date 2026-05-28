@@ -131,6 +131,7 @@ async function main() {
   const coachEverySec = readFlag(argv, "--coach-every-sec", "15");
   const timeoutSec = readFlag(argv, "--timeout-sec", "900");
   const superviseWaitSec = readFlag(argv, "--supervise-wait-sec", "600");
+  const supervisePollMs = readFlag(argv, "--supervise-poll-ms", "6000");
   const ringDuration = readFlag(argv, "--ring-duration", "20");
   const dialDelaySec = Math.max(0, Number(readFlag(argv, "--dial-delay-sec", "2")) || 0);
   const sttModel = readFlag(argv, "--stt-model", "gpt-4o-transcribe-diarize");
@@ -140,6 +141,9 @@ async function main() {
 
   if (!agentExt) throw new Error("--agent-ext is required");
   if (!supervisorExt) throw new Error("--supervisor-ext is required");
+  if (String(agentExt).trim() === String(supervisorExt).trim()) {
+    throw new Error("--agent-ext and --supervisor-ext must be different; self-monitoring loops on the monitor leg");
+  }
   if (!noDial && !destination) throw new Error("--to is required unless --no-dial is set");
   if (!noDial && !callerId) throw new Error("--caller-id is required unless --no-dial is set");
 
@@ -156,6 +160,7 @@ async function main() {
     "--sentence-hold-ms", String(sentenceHoldMs),
     "--coach-every-sec", String(coachEverySec),
     "--supervise-wait-sec", String(superviseWaitSec),
+    "--supervise-poll-ms", String(supervisePollMs),
     "--timeout-sec", String(timeoutSec),
   ];
   if (splitOnSilence) {

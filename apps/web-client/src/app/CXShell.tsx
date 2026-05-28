@@ -1,9 +1,8 @@
 import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
-import { ArrowLeft, GraduationCap, Headset, Inbox, LogOut, Users } from "lucide-react";
+import { ArrowLeft, GraduationCap, Headphones, Headset, Inbox, LogOut, Users } from "lucide-react";
 import { Button } from "@/components/ui/Button";
 import { CaseInspector } from "@/components/ui/CaseInspector";
 import { ErrorBoundary } from "@/components/ui/ErrorBoundary";
-import { CxAuthGuard } from "@/app/CxAuthGuard";
 import { CxAvailabilityToggle } from "@/components/cx/CxAvailabilityToggle";
 import { CxConnectButton } from "@/components/cx/CxConnectButton";
 import { useSession } from "@/lib/auth/useSession";
@@ -21,6 +20,7 @@ const CX_NAV: CxNavItem[] = [
   // WYNN-only inbox for the agent shell. Reps cycle between dial queue
   // (My workspace), inbound prospecting SMS (Inbox), and existing
   // clients to keep prospecting and client work cleanly separated.
+  { to: "/cx/call-library", label: "Calls", icon: Headphones },
   { to: "/cx/inbox", label: "Inbox", icon: Inbox },
   { to: "/cx/clients", label: "Clients", icon: Users },
   { to: "/trainer", label: "Trainer", icon: GraduationCap },
@@ -30,6 +30,7 @@ export function CXShell() {
   const { user, logout } = useSession();
   const navigate = useNavigate();
   const location = useLocation();
+  const showCxControls = location.pathname === "/cx" || location.pathname === "/cx/";
 
   return (
     <div className="shell-gradient flex min-h-screen flex-col text-foreground">
@@ -70,8 +71,12 @@ export function CXShell() {
           </nav>
 
           <div className="flex items-center gap-2">
-            <CxConnectButton />
-            <CxAvailabilityToggle />
+            {showCxControls ? (
+              <>
+                <CxConnectButton />
+                <CxAvailabilityToggle />
+              </>
+            ) : null}
             {user?.role === "admin" ? (
               <Button
                 variant="ghost"
@@ -101,9 +106,7 @@ export function CXShell() {
       <main className="flex-1">
         <div className="mx-auto max-w-[1400px] px-6 py-8">
           <ErrorBoundary resetKeys={[location.pathname]}>
-            <CxAuthGuard>
-              <Outlet />
-            </CxAuthGuard>
+            <Outlet />
           </ErrorBoundary>
         </div>
       </main>

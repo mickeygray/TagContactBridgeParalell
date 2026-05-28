@@ -66,6 +66,8 @@ const DEFAULT_LEXIS_ALERT_RECIPIENTS =
 const DEFAULT_NIGHTLY_LEAD_DATA_RECIPIENTS =
   "mgray@taxadvocategroup.com,manderson@taxadvocategroup.com,liz@lizdev.com,beth@lizdev.com,james@beachmedia.io";
 const DEFAULT_NIGHTLY_OPS_RECIPIENTS = "mgray@taxadvocategroup.com";
+const DEFAULT_LOGICS_ACTIVITY_REVIEW_RECIPIENTS =
+  "mgray@taxadvocategroup.com,manderson@taxadvocategroup.com";
 const INTERNAL_FROM_EMAIL = "mgray@taxadvocategroup.com";
 const MARKETING_FROM_EMAIL = "cameron@wynntaxsolutions.com";
 
@@ -698,6 +700,59 @@ function getSharedConfig(overrides = {}) {
         overrides.lexisDailyDropAlertText ||
         process.env.LEXIS_DAILY_DROP_ALERT_TEXT ||
         "",
+    },
+    logicsActivityReview: {
+      enabled: boolFromEnv(
+        overrides.logicsActivityReviewEnabled !== undefined
+          ? overrides.logicsActivityReviewEnabled
+          : process.env.LOGICS_ACTIVITY_REVIEW_ENABLED,
+        true,
+      ),
+      domain: String(
+        overrides.logicsActivityReviewDomain ||
+          process.env.LOGICS_ACTIVITY_REVIEW_DOMAIN ||
+          DEFAULT_COMPANY,
+      ).toUpperCase(),
+      hour: Math.max(0, Math.min(23, envInt("LOGICS_ACTIVITY_REVIEW_HOUR", 6))),
+      minute: Math.max(0, Math.min(59, envInt("LOGICS_ACTIVITY_REVIEW_MINUTE", 0))),
+      intervalMs: Math.max(
+        10000,
+        envInt("LOGICS_ACTIVITY_REVIEW_INTERVAL_MS", 60000),
+      ),
+      activeWeekdays: parseOriginList(
+        overrides.logicsActivityReviewActiveWeekdays ||
+          process.env.LOGICS_ACTIVITY_REVIEW_ACTIVE_WEEKDAYS ||
+          "0,1,2,3,4,5,6",
+      )
+        .map((value) => Number(value))
+        .filter((value) => Number.isInteger(value) && value >= 0 && value <= 6),
+      timezone:
+        overrides.logicsActivityReviewTimezone ||
+        process.env.LOGICS_ACTIVITY_REVIEW_TIMEZONE ||
+        "America/Los_Angeles",
+      concurrency: Math.max(
+        1,
+        envInt("LOGICS_ACTIVITY_REVIEW_CONCURRENCY", 3),
+      ),
+      sendEmail: boolFromEnv(
+        overrides.logicsActivityReviewSendEmail !== undefined
+          ? overrides.logicsActivityReviewSendEmail
+          : process.env.LOGICS_ACTIVITY_REVIEW_SEND_EMAIL,
+        true,
+      ),
+      reportEmail:
+        overrides.logicsActivityReviewReportEmail ||
+        process.env.LOGICS_ACTIVITY_REVIEW_REPORT_EMAIL ||
+        "documents@taxadvocategroup.com",
+      recipients: parseOriginList(
+        overrides.logicsActivityReviewRecipients ||
+          process.env.LOGICS_ACTIVITY_REVIEW_RECIPIENTS ||
+          DEFAULT_LOGICS_ACTIVITY_REVIEW_RECIPIENTS,
+      ).map((value) => String(value || "").trim().toLowerCase()).filter(Boolean),
+      outDir:
+        overrides.logicsActivityReviewOutDir ||
+        process.env.LOGICS_ACTIVITY_REVIEW_OUTPUT_DIR ||
+        path.join(ROOT_DIR, "runtime", "logics-activity-review"),
     },
     nightlyClose: {
       enabled: boolFromEnv(

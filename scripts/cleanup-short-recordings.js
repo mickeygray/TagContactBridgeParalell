@@ -167,6 +167,7 @@ async function main() {
   const destinations = archiveConfig.destinations || {};
   const allBuckets = [
     ["OG", String(destinations.og?.folderId || "").trim()],
+    ["CX", String(destinations.cx?.folderId || "").trim()],
     ["AS", String(destinations.as?.folderId || "").trim()],
     ["CS", String(destinations.cs?.folderId || "").trim()],
   ];

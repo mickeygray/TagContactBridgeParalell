@@ -19,6 +19,11 @@ const {
   callLogRepository,
 } = require("../../../../packages/shared-repositories/src");
 const { CallLog } = require("../../../../packages/shared-models/src");
+const { getSharedConfig } = require("../../../../packages/shared-config/src");
+const { createGoogleDriveClient } = require("../../../../packages/shared-integrations/src");
+const {
+  mintDriveRecordingPlaybackUrl,
+} = require("../../../../packages/shared-services/src/recordingPlaybackUrlService");
 const { toErrorResponse } = require("../../../../packages/shared-errors/src");
 
 const PACIFIC_TZ = "America/Los_Angeles";
@@ -53,6 +58,8 @@ const MAX_ROWS = 200;
 // Higher cap for the org-wide /today endpoint — busiest day across both
 // tenants is in the low thousands of rows.
 const MAX_TRACKER_ROWS = 2000;
+const DRIVE_FOLDER_MIME = "application/vnd.google-apps.folder";
+const AUDIO_FILE_RE = /\.(mp3|wav|m4a|aac|ogg|oga|flac|webm)$/i;
 
 // Compute the UTC instant for "today 00:00 in Pacific time." Used as
 // the lower bound on callStartTime so we only ever return rows whose
@@ -98,6 +105,230 @@ function pacificDateKey(date = new Date()) {
   return new Intl.DateTimeFormat("en-CA", { timeZone: PACIFIC_TZ }).format(
     new Date(date),
   );
+}
+
+function parseLibraryWindow(rawDays) {
+  const value = String(rawDays || "7").trim().toLowerCase();
+  if (value === "today") {
+    return {
+      allTime: false,
+      today: true,
+      days: null,
+      startAt: startOfPacificDay(),
+    };
+  }
+  if (value === "all" || value === "*") {
+    return {
+      allTime: true,
+      today: false,
+      days: null,
+      startAt: null,
+    };
+  }
+  const days = Math.min(Math.max(Number(value) || 7, 1), 3650);
+  return {
+    allTime: false,
+    today: false,
+    days,
+    startAt: new Date(Date.now() - days * 24 * 60 * 60 * 1000),
+  };
+}
+
+function buildDrivePlaybackUrl(config, fileId, user = {}) {
+  const normalizedFileId = String(fileId || "").trim();
+  if (!normalizedFileId) return null;
+  return mintDriveRecordingPlaybackUrl(normalizedFileId, {
+    viewer: String(user?.email || "").trim().toLowerCase(),
+    ttlSeconds: config?.recordingArchive?.playback?.maxTtlSeconds || 600,
+  });
+}
+
+function attachDrivePlaybackUrl(config, row, user = {}) {
+  const playbackUrl = buildDrivePlaybackUrl(config, row.driveFileId, user) || row.playbackUrl;
+  return {
+    ...row,
+    playbackUrl,
+    recording: {
+      ...(row.recording || {}),
+      playbackUrl,
+    },
+  };
+}
+
+function configuredRecordingFolders(recordingArchive = {}) {
+  const destinations = recordingArchive.destinations || {};
+  const folderMap = new Map();
+  for (const key of ["og", "cx", "as", "cs"]) {
+    const destination = destinations[key] || {};
+    const folderId = String(destination.folderId || "").trim();
+    if (!folderId) continue;
+    if (!folderMap.has(folderId)) {
+      folderMap.set(folderId, {
+        folderId,
+        key: String(destination.key || key).trim().toLowerCase() || key,
+        label: String(destination.label || key.toUpperCase()).trim() || key.toUpperCase(),
+      });
+    }
+  }
+  return Array.from(folderMap.values());
+}
+
+function isDriveAudioFile(file = {}) {
+  const mime = String(file.mimeType || "").toLowerCase();
+  if (mime.startsWith("audio/")) return true;
+  return AUDIO_FILE_RE.test(String(file.name || ""));
+}
+
+function parseDriveRecordingName(name) {
+  const stem = String(name || "").replace(/\.[^.]+$/, "");
+  const parts = stem.split("__");
+  if (parts.length < 5) return {};
+  const [agentRaw, bucketRaw, dateRaw, phoneRaw, ...sessionParts] = parts;
+  const dateKey = /^\d{4}-\d{2}-\d{2}$/.test(dateRaw) ? dateRaw : null;
+  return {
+    agentName: String(agentRaw || "")
+      .replace(/-/g, " ")
+      .replace(/\b\w/g, (char) => char.toUpperCase())
+      .trim(),
+    bucketKey: String(bucketRaw || "").trim().toLowerCase(),
+    bucketLabel: String(bucketRaw || "").trim().toUpperCase(),
+    dateKey,
+    phone: String(phoneRaw || "").replace(/\D/g, "") || null,
+    telephonySessionId: sessionParts.join("__") || null,
+  };
+}
+
+function projectDriveRecordingFile(file = {}, folder = {}) {
+  const props = file.appProperties || {};
+  const parsed = parseDriveRecordingName(file.name);
+  const groupKey = String(props.bucket || parsed.bucketKey || folder.key || "unknown")
+    .trim()
+    .toLowerCase();
+  const groupLabel =
+    String(parsed.bucketLabel || folder.label || groupKey.toUpperCase()).trim() ||
+    "Unknown";
+  const dateKey = props.dateKey || parsed.dateKey || null;
+  const callStartTime = dateKey
+    ? `${dateKey}T12:00:00.000Z`
+    : file.createdTime || file.modifiedTime || null;
+  const driveFileId = String(file.id || "").trim();
+  return {
+    id: driveFileId,
+    driveFileId,
+    fileName: file.name || null,
+    mimeType: file.mimeType || null,
+    sizeBytes: Number.isFinite(Number(file.size)) ? Number(file.size) : null,
+    createdTime: file.createdTime || null,
+    modifiedTime: file.modifiedTime || null,
+    webViewLink: file.webViewLink || null,
+    parentFolderId: Array.isArray(file.parents) ? file.parents[0] || null : null,
+    rootFolderId: folder.folderId || null,
+    rootFolderKey: folder.key || null,
+    rootFolderLabel: folder.label || null,
+    folderPath: folder.path || folder.label || null,
+    telephonySessionId: props.telephonySessionId || parsed.telephonySessionId || null,
+    domain: props.domain || null,
+    provider: props.provider || null,
+    platform: props.platform || null,
+    direction: props.direction || null,
+    dateKey,
+    callStartTime,
+    phone: parsed.phone,
+    agentName: parsed.agentName || null,
+    groupKey,
+    groupLabel,
+    playbackUrl: driveFileId
+      ? `/api/read/cx/recordings/play/${encodeURIComponent(driveFileId)}`
+      : null,
+    recording: {
+      driveFileId: driveFileId || null,
+      playbackUrl: driveFileId
+        ? `/api/read/cx/recordings/play/${encodeURIComponent(driveFileId)}`
+        : null,
+      available: Boolean(driveFileId),
+      archiveStatus: "completed",
+      provider: props.provider || null,
+      mimeType: file.mimeType || null,
+      fileName: file.name || null,
+      groupKey,
+      groupLabel,
+      uploadedAt: file.createdTime || file.modifiedTime || null,
+    },
+  };
+}
+
+function shouldSkipDateFolder(folderName, startAt) {
+  if (!startAt) return false;
+  const name = String(folderName || "").trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(name)) return false;
+  return name < startAt.toISOString().slice(0, 10);
+}
+
+async function listDriveRecordingLibrary({
+  driveClient,
+  folders,
+  window,
+  limit,
+}) {
+  const fields =
+    "nextPageToken, files(id,name,mimeType,parents,appProperties,size,createdTime,modifiedTime,webViewLink)";
+  const queue = folders.map((folder) => ({
+    ...folder,
+    path: folder.label,
+    depth: 0,
+  }));
+  const seenFolders = new Set(queue.map((folder) => folder.folderId));
+  const seenFiles = new Set();
+  const recordings = [];
+  const maxDepth = 4;
+
+  while (queue.length > 0) {
+    const folder = queue.shift();
+    let pageToken = null;
+    do {
+      const page = await driveClient.listFilesInFolder({
+        parentId: folder.folderId,
+        pageSize: 1000,
+        pageToken,
+        fields,
+      });
+      for (const file of page.files || []) {
+        if (file.mimeType === DRIVE_FOLDER_MIME) {
+          if (folder.depth >= maxDepth) continue;
+          if (shouldSkipDateFolder(file.name, window.startAt)) continue;
+          const folderId = String(file.id || "").trim();
+          if (!folderId || seenFolders.has(folderId)) continue;
+          seenFolders.add(folderId);
+          queue.push({
+            ...folder,
+            folderId,
+            path: [folder.path, file.name].filter(Boolean).join("/"),
+            depth: folder.depth + 1,
+          });
+          continue;
+        }
+        if (!isDriveAudioFile(file)) continue;
+        const row = projectDriveRecordingFile(file, folder);
+        if (!row.driveFileId || seenFiles.has(row.driveFileId)) continue;
+        const eventTime = row.callStartTime || row.createdTime || row.modifiedTime;
+        if (window.startAt && eventTime) {
+          const t = new Date(eventTime).getTime();
+          if (Number.isFinite(t) && t < window.startAt.getTime()) continue;
+        }
+        seenFiles.add(row.driveFileId);
+        recordings.push(row);
+      }
+      pageToken = page.nextPageToken || null;
+    } while (pageToken);
+  }
+
+  return recordings
+    .sort((a, b) => {
+      const at = new Date(a.callStartTime || a.createdTime || a.modifiedTime || 0).getTime() || 0;
+      const bt = new Date(b.callStartTime || b.createdTime || b.modifiedTime || 0).getTime() || 0;
+      return bt - at;
+    })
+    .slice(0, limit);
 }
 
 // Shape one CallLog into a row the review UI can consume directly. The
@@ -237,6 +468,27 @@ function buildSummary(rows) {
   };
 }
 
+function buildRecordingGroupSummary(rows) {
+  const byGroup = new Map();
+  for (const row of rows) {
+    const key = String(row.groupKey || row.recording?.groupKey || "unknown")
+      .trim()
+      .toLowerCase();
+    if (!byGroup.has(key)) {
+      byGroup.set(key, {
+        key,
+        label: row.groupLabel || row.recording?.groupLabel || (key === "unknown" ? "Unknown" : key.toUpperCase()),
+        callCount: 0,
+        totalBytes: 0,
+      });
+    }
+    const bucket = byGroup.get(key);
+    bucket.callCount += 1;
+    bucket.totalBytes += Number(row.sizeBytes) || 0;
+  }
+  return Array.from(byGroup.values()).sort((a, b) => b.callCount - a.callCount);
+}
+
 function createAdminCallReviewRouter(auth) {
   const router = express.Router();
 
@@ -368,6 +620,110 @@ function createAdminCallReviewRouter(auth) {
             (a, b) => b.callCount - a.callCount,
           ),
           calls: rows,
+        });
+      } catch (error) {
+        return res.status(error.status || 500).json(toErrorResponse(error));
+      }
+    },
+  );
+
+  /**
+   * GET /library
+   *
+   * Drive-backed recording library for the admin playback screen. This
+   * intentionally reads Google Drive directly instead of treating CallLog as
+   * the listing source; CallLog can keep doing counting/backfill/scoring while
+   * this view only shows files that are actually listenable.
+   */
+  router.get(
+    "/library",
+    auth.requireAuth,
+    auth.requireAdmin,
+    async (req, res) => {
+      try {
+        const sharedConfig = getSharedConfig();
+        const archiveConfig = sharedConfig.recordingArchive || {};
+        const driveClient = createGoogleDriveClient(archiveConfig.drive || {});
+        if (!driveClient.isConfigured()) {
+          return res.status(503).json({
+            ok: false,
+            error: "recording-archive-drive-not-configured",
+          });
+        }
+
+        const folders = configuredRecordingFolders(archiveConfig);
+        if (folders.length === 0) {
+          return res.status(503).json({
+            ok: false,
+            error: "recording-archive-folders-not-configured",
+          });
+        }
+
+        const platformParam = String(req.query?.platform || "all")
+          .trim()
+          .toLowerCase();
+        const directionParam = String(req.query?.direction || "all")
+          .trim()
+          .toLowerCase();
+        const recordingGroupParam = String(req.query?.recordingGroup || "all")
+          .trim()
+          .toLowerCase();
+        const limit = Math.min(
+          Math.max(Number(req.query?.limit) || 500, 1),
+          MAX_TRACKER_ROWS,
+        );
+        const window = parseLibraryWindow(req.query?.days);
+
+        let recordings = await listDriveRecordingLibrary({
+          driveClient,
+          folders,
+          window,
+          limit: MAX_TRACKER_ROWS,
+        });
+        const availableRecordingGroups = buildRecordingGroupSummary(recordings);
+
+        if (platformParam !== "all") {
+          recordings = recordings.filter((row) => row.platform === platformParam);
+        }
+        if (directionParam !== "all") {
+          recordings = recordings.filter((row) => row.direction === directionParam);
+        }
+        if (recordingGroupParam !== "all") {
+          recordings = recordings.filter((row) => row.groupKey === recordingGroupParam);
+        }
+
+        const rows = recordings
+          .slice(0, limit)
+          .map((row) => attachDrivePlaybackUrl(sharedConfig, row, req.user));
+
+        return res.json({
+          ok: true,
+          dateKey: pacificDateKey(),
+          domain: "DRIVE",
+          domains: [],
+          source: "google-drive",
+          window: {
+            allTime: window.allTime,
+            today: window.today,
+            days: window.days,
+            startAt: window.startAt ? window.startAt.toISOString() : null,
+          },
+          filters: {
+            platform: platformParam,
+            direction: directionParam,
+            recordingGroup: recordingGroupParam,
+            hasRecording: true,
+          },
+          folders,
+          summary: {
+            ...buildSummary(rows),
+            totalBytes: rows.reduce((sum, row) => sum + (Number(row.sizeBytes) || 0), 0),
+          },
+          recordingGroups: availableRecordingGroups,
+          visibleRecordingGroups: buildRecordingGroupSummary(rows),
+          calls: rows,
+          recordings: rows,
+          truncated: recordings.length > rows.length,
         });
       } catch (error) {
         return res.status(error.status || 500).json(toErrorResponse(error));

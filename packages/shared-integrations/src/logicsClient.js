@@ -165,6 +165,12 @@ function createLogicsClient(companyKey, options = {}) {
     getActivities(caseId) {
       return request(`CaseActivity/Activity?CaseID=${encodeURIComponent(caseId)}`);
     },
+    requestActivityReport(payload) {
+      return request("Report/ActivityReport", {
+        method: "POST",
+        body: payload,
+      });
+    },
     createTask(payload) {
       return request("Task/Task", {
         method: "POST",

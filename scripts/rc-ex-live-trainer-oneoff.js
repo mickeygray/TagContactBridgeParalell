@@ -34,6 +34,16 @@ const {
 const {
   createAnthropicClient,
 } = require("../packages/shared-integrations/src/anthropicClient");
+const {
+  createRingcxVoiceClient,
+} = require("../packages/shared-integrations/src/ringcxVoiceClient");
+const { getSharedConfig } = require("../packages/shared-config/src");
+const {
+  connectMongo,
+  disconnectMongo,
+} = require("../packages/event-core/src");
+const EventRecord = require("../packages/event-core/src/models/EventRecord");
+const WorkflowRecord = require("../packages/shared-models/src/WorkflowRecord");
 
 const RC_BASE = (process.env.RING_CENTRAL_SERVER_URL || "https://platform.ringcentral.com").replace(/\/$/, "");
 const PHASE_KEYS = ["opening", "discovery", "pain", "qualification", "solution", "objection", "close", "wrap"];
@@ -57,6 +67,23 @@ function env(name, fallback = "") {
   return value === undefined || value === null || value === "" ? fallback : value;
 }
 
+function monitorCredentialPrefixForExt(extensionNumber) {
+  const byExtension = {
+    987: "PHIL",
+    1101: "SEAN",
+    1102: "BRUCE",
+    1103: "ANTHONY",
+    1104: "CHRIS",
+    1105: "JAMES",
+    1106: "BRAD",
+  };
+  return byExtension[String(extensionNumber || "").trim()] || "";
+}
+
+function namedMonitorCredential(prefix, suffix) {
+  return prefix ? env(`${prefix}_RING_CENTRAL_MONITOR_${suffix}`, "") : "";
+}
+
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -71,6 +98,147 @@ function ensureDir(dir) {
 
 function writeJsonLine(file, event) {
   fs.appendFileSync(file, `${JSON.stringify(event)}\n`);
+}
+
+const rcTokenMemoryCache = new Map();
+const RC_TOKEN_CACHE_SKEW_MS = Math.max(
+  30_000,
+  Number(process.env.EX_LIVE_MONITOR_TOKEN_CACHE_SKEW_MS || 120_000) || 120_000,
+);
+
+function isMonitorTokenCacheEnabled() {
+  return String(process.env.EX_LIVE_MONITOR_TOKEN_CACHE || "false").trim().toLowerCase() === "true";
+}
+
+function rcCredentialCacheKey({ jwtToken, clientId, clientSecret }) {
+  return crypto
+    .createHash("sha256")
+    .update([RC_BASE, clientId, clientSecret ? "secret-present" : "", jwtToken].join("\n"))
+    .digest("hex");
+}
+
+function rcTokenCacheDir() {
+  return path.resolve(process.env.EX_LIVE_MONITOR_TOKEN_CACHE_DIR || path.join(__dirname, "..", "runtime", "ex-live-monitor-token-cache"));
+}
+
+function rcTokenCachePaths(cacheKey) {
+  const dir = rcTokenCacheDir();
+  return {
+    dir,
+    tokenPath: path.join(dir, `${cacheKey}.json`),
+    lockPath: path.join(dir, `${cacheKey}.lock`),
+  };
+}
+
+function cachedTokenIsFresh(entry, skewMs = RC_TOKEN_CACHE_SKEW_MS) {
+  return Boolean(
+    entry?.accessToken &&
+    Number.isFinite(Number(entry.expiresAt)) &&
+    Number(entry.expiresAt) > Date.now() + skewMs
+  );
+}
+
+function cachedTokenIsUsable(entry) {
+  return Boolean(
+    entry?.accessToken &&
+    Number.isFinite(Number(entry.expiresAt)) &&
+    Number(entry.expiresAt) > Date.now()
+  );
+}
+
+function hasCachedRefreshToken(entry) {
+  return Boolean(entry?.refreshToken && typeof entry.refreshToken === "string");
+}
+
+function readCachedRcToken(cacheKey, { allowNearExpiry = false } = {}) {
+  if (!isMonitorTokenCacheEnabled()) return null;
+  const memory = rcTokenMemoryCache.get(cacheKey);
+  if ((allowNearExpiry ? cachedTokenIsUsable(memory) : cachedTokenIsFresh(memory))) return memory;
+
+  const { tokenPath } = rcTokenCachePaths(cacheKey);
+  try {
+    const entry = JSON.parse(fs.readFileSync(tokenPath, "utf8"));
+    if (allowNearExpiry ? cachedTokenIsUsable(entry) : cachedTokenIsFresh(entry)) {
+      rcTokenMemoryCache.set(cacheKey, entry);
+      return entry;
+    }
+    return entry;
+  } catch {
+    return null;
+  }
+}
+
+function writeCachedRcToken(cacheKey, entry) {
+  if (!isMonitorTokenCacheEnabled()) return;
+  const { dir, tokenPath } = rcTokenCachePaths(cacheKey);
+  ensureDir(dir);
+  const tempPath = `${tokenPath}.${process.pid}.${Date.now()}.tmp`;
+  fs.writeFileSync(tempPath, JSON.stringify(entry));
+  fs.renameSync(tempPath, tokenPath);
+  rcTokenMemoryCache.set(cacheKey, entry);
+}
+
+async function requestRcOauthToken({ basic, body }) {
+  const response = await fetch(`${RC_BASE}/restapi/oauth/token`, {
+    method: "POST",
+    headers: {
+      Authorization: `Basic ${basic}`,
+      "Content-Type": "application/x-www-form-urlencoded",
+    },
+    body: body.toString(),
+  });
+  const text = await response.text();
+  let json = null;
+  try { json = text ? JSON.parse(text) : null; } catch {}
+  return { response, text, json };
+}
+
+function tokenEntryFromOauthJson(json, previous = {}) {
+  const expiresInMs = Math.max(60_000, Number(json?.expires_in || 3600) * 1000);
+  const refreshExpiresInMs = Number(json?.refresh_token_expires_in || 0) > 0
+    ? Number(json.refresh_token_expires_in) * 1000
+    : 0;
+  const entry = {
+    accessToken: json?.access_token,
+    refreshToken: json?.refresh_token || previous.refreshToken || null,
+    tokenType: json?.token_type || previous.tokenType || "bearer",
+    scope: json?.scope || previous.scope || null,
+    ownerId: json?.owner_id || previous.ownerId || null,
+    expiresAt: Date.now() + expiresInMs,
+    refreshExpiresAt: refreshExpiresInMs ? Date.now() + refreshExpiresInMs : previous.refreshExpiresAt || null,
+    cachedAt: Date.now(),
+  };
+  if (!entry.accessToken) throw new Error("RC OAuth response did not include access_token");
+  return entry;
+}
+
+async function acquireRcTokenCacheLock(cacheKey) {
+  if (!isMonitorTokenCacheEnabled()) return null;
+  const { dir, lockPath } = rcTokenCachePaths(cacheKey);
+  ensureDir(dir);
+  const deadline = Date.now() + 30_000;
+  while (Date.now() < deadline) {
+    try {
+      const fd = fs.openSync(lockPath, "wx");
+      fs.writeFileSync(fd, JSON.stringify({ pid: process.pid, at: new Date().toISOString() }));
+      return {
+        release() {
+          try { fs.closeSync(fd); } catch {}
+          try { fs.unlinkSync(lockPath); } catch {}
+        },
+      };
+    } catch (error) {
+      if (error.code !== "EEXIST") return null;
+      try {
+        const stat = fs.statSync(lockPath);
+        if (Date.now() - stat.mtimeMs > 45_000) fs.unlinkSync(lockPath);
+      } catch {}
+      const cached = readCachedRcToken(cacheKey);
+      if (cached) return { cached, release() {} };
+      await sleep(500);
+    }
+  }
+  return null;
 }
 
 function maskPhone(value) {
@@ -552,6 +720,198 @@ function buildPcm16WavFromPcmu(pcmuBuffer, sampleRate = 8000) {
   return wav;
 }
 
+function buildPcm16_24kFromPcmu8k(pcmuBuffer) {
+  const out = Buffer.alloc(pcmuBuffer.length * 2 * 3);
+  for (let i = 0; i < pcmuBuffer.length; i += 1) {
+    const sample = ulawByteToPcm16(pcmuBuffer[i]);
+    const offset = i * 6;
+    out.writeInt16LE(sample, offset);
+    out.writeInt16LE(sample, offset + 2);
+    out.writeInt16LE(sample, offset + 4);
+  }
+  return out;
+}
+
+class OpenAiRealtimeTranscriber {
+  constructor({
+    apiKey,
+    model = "gpt-realtime-whisper",
+    language = "en",
+    delay = "xhigh",
+    safetyIdentifier = "tagcontactbridge-ex-live-monitor",
+  } = {}) {
+    if (!apiKey) throw new Error("OPENAI_API_KEY is missing");
+    this.apiKey = apiKey;
+    this.model = model || "gpt-realtime-whisper";
+    this.language = language || "en";
+    this.delay = delay || "";
+    this.safetyIdentifier = safetyIdentifier || "tagcontactbridge-ex-live-monitor";
+    this.ws = null;
+    this.readyPromise = null;
+    this.readyResolve = null;
+    this.readyReject = null;
+    this.pending = null;
+    this.sessionId = null;
+  }
+
+  connect() {
+    if (this.readyPromise) return this.readyPromise;
+    this.readyPromise = new Promise((resolve, reject) => {
+      this.readyResolve = resolve;
+      this.readyReject = reject;
+      const protocols = [
+        "realtime",
+        `openai-insecure-api-key.${this.apiKey}`,
+      ];
+      const project = process.env.OPENAI_PROJECT_ID || process.env.OPENAI_PROJECT || "";
+      const org = process.env.OPENAI_ORG_ID || process.env.OPENAI_ORGANIZATION || "";
+      if (project) protocols.push(`openai-project.${project}`);
+      if (org) protocols.push(`openai-organization.${org}`);
+      this.ws = new WebSocket("wss://api.openai.com/v1/realtime?intent=transcription", protocols);
+      this.ws.addEventListener("open", () => {
+        this.send({
+          type: "session.update",
+          session: {
+            type: "transcription",
+            audio: {
+              input: {
+                format: {
+                  type: "audio/pcm",
+                  rate: 24000,
+                },
+                transcription: {
+                  model: this.model,
+                  language: this.language,
+                  ...(this.delay ? { delay: this.delay } : {}),
+                },
+                turn_detection: null,
+              },
+            },
+          },
+        });
+      });
+      this.ws.addEventListener("message", (event) => this.handleMessage(event.data));
+      this.ws.addEventListener("error", () => {
+        const error = new Error("OpenAI realtime transcription websocket error");
+        if (this.pending) this.rejectPending(error);
+        if (this.readyReject) this.readyReject(error);
+      });
+      this.ws.addEventListener("close", (event) => {
+        const reason = event.reason ? `: ${event.reason}` : "";
+        const error = new Error(`OpenAI realtime transcription websocket closed ${event.code}${reason}`);
+        if (this.pending) this.rejectPending(error);
+        if (this.readyReject) this.readyReject(error);
+        this.readyPromise = null;
+        this.readyResolve = null;
+        this.readyReject = null;
+        this.ws = null;
+      });
+    });
+    return this.readyPromise;
+  }
+
+  send(payload) {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      throw new Error("OpenAI realtime transcription websocket is not open");
+    }
+    this.ws.send(JSON.stringify(payload));
+  }
+
+  handleMessage(raw) {
+    let event = null;
+    try {
+      event = typeof raw === "string" ? JSON.parse(raw) : JSON.parse(String(raw || ""));
+    } catch {
+      return;
+    }
+    if (event.type === "session.created" || event.type === "session.updated") {
+      this.sessionId = event.session?.id || this.sessionId;
+      if (event.type === "session.updated" && this.readyResolve) {
+        this.readyResolve(event.session || {});
+        this.readyResolve = null;
+        this.readyReject = null;
+      }
+      return;
+    }
+    if (event.type === "conversation.item.input_audio_transcription.delta") {
+      if (this.pending) {
+        this.pending.deltas.push(String(event.delta || ""));
+        this.pending.itemId = event.item_id || this.pending.itemId || null;
+      }
+      return;
+    }
+    if (event.type === "conversation.item.input_audio_transcription.completed") {
+      if (!this.pending) return;
+      const pending = this.pending;
+      this.pending = null;
+      clearTimeout(pending.timeoutHandle);
+      pending.resolve({
+        text: cleanText(event.transcript || pending.deltas.join(""), 4000),
+        model: this.model,
+        responseFormat: "realtime_json",
+        provider: "openai-realtime",
+        itemId: event.item_id || pending.itemId || null,
+        sessionId: this.sessionId,
+        delay: this.delay || null,
+      });
+      return;
+    }
+    if (event.type === "error") {
+      const message = event.error?.message || "OpenAI realtime transcription error";
+      const code = event.error?.code ? ` (${event.error.code})` : "";
+      const error = new Error(`${message}${code}`);
+      if (this.pending) this.rejectPending(error);
+      else if (this.readyReject) this.readyReject(error);
+    }
+  }
+
+  rejectPending(error) {
+    if (!this.pending) return;
+    const pending = this.pending;
+    this.pending = null;
+    clearTimeout(pending.timeoutHandle);
+    pending.reject(error);
+  }
+
+  async transcribePcmu({ pcmuBuffer, timeoutMs = 30000 } = {}) {
+    await this.connect();
+    if (this.pending) throw new Error("OpenAI realtime transcription already has a pending commit");
+    const pcm24 = buildPcm16_24kFromPcmu8k(pcmuBuffer);
+    return new Promise((resolve, reject) => {
+      const timeoutHandle = setTimeout(() => {
+        this.rejectPending(new Error(`OpenAI realtime transcription timed out after ${timeoutMs}ms`));
+      }, Math.max(Number(timeoutMs) || 30000, 1000));
+      this.pending = {
+        resolve,
+        reject,
+        timeoutHandle,
+        deltas: [],
+        itemId: null,
+      };
+      try {
+        this.send({
+          type: "input_audio_buffer.append",
+          audio: pcm24.toString("base64"),
+        });
+        this.send({ type: "input_audio_buffer.commit" });
+      } catch (error) {
+        this.rejectPending(error);
+      }
+    });
+  }
+
+  close() {
+    if (this.pending) this.rejectPending(new Error("OpenAI realtime transcription closed"));
+    if (this.ws) {
+      try {
+        this.ws.close(1000, "done");
+      } catch {
+        // no-op
+      }
+    }
+  }
+}
+
 function pickProxy(sipInfo, region = "NA") {
   const proxies = Array.isArray(sipInfo?.outboundProxies) ? sipInfo.outboundProxies : [];
   const desired = String(region || "NA").trim().toUpperCase();
@@ -604,9 +964,22 @@ function pickActiveCall(records, mode = "newest") {
   })[0] || null;
 }
 
+function orderActiveCallCandidates(records, mode = "newest") {
+  const candidates = records.filter((record) => record.telephonySessionId);
+  const source = candidates.length ? candidates : records;
+  const inProgress = source.filter((record) => String(record.result || "").toLowerCase() === "in progress");
+  const pool = inProgress.length ? inProgress : source;
+  if (mode === "first") return pool;
+  return [...pool].sort((a, b) => {
+    const bt = Date.parse(b.startTime || b.creationTime || b.enqueueTime || "") || 0;
+    const at = Date.parse(a.startTime || a.creationTime || a.enqueueTime || "") || 0;
+    return bt - at;
+  });
+}
+
 function isRetryableSuperviseError(error) {
   const message = String(error?.message || "");
-  return /No active agent telephonySessionId|MBW-005|Your call cannot be connected|TAS-102|WrongState|Incorrect State|CMN-10[12]|agentExtensionId/i
+  return /No (active|live) agent telephonySessionId|Request rate exceeded|CMN-301|HTTP 429|MBW-005|Your call cannot be connected|TAS-10[2]|TAS-120|WrongState|Incorrect State|CMN-10[12]|agentExtensionId/i
     .test(message);
 }
 
@@ -678,24 +1051,83 @@ async function rcAccessToken({
   if (!jwtToken || !clientId || !clientSecret) {
     throw new Error("Missing RingCentral JWT/client credentials");
   }
-  const body = new URLSearchParams({
-    grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer",
-    assertion: jwtToken,
-  });
-  const basic = Buffer.from(`${clientId}:${clientSecret}`).toString("base64");
-  const response = await fetch(`${RC_BASE}/restapi/oauth/token`, {
-    method: "POST",
-    headers: {
-      Authorization: `Basic ${basic}`,
-      "Content-Type": "application/x-www-form-urlencoded",
-    },
-    body: body.toString(),
-  });
-  const text = await response.text();
-  let json = null;
-  try { json = text ? JSON.parse(text) : null; } catch {}
-  if (!response.ok) throw new Error(`RC OAuth failed: ${response.status} ${text.slice(0, 300)}`);
-  return json.access_token;
+
+  const cacheKey = rcCredentialCacheKey({ jwtToken, clientId, clientSecret });
+  const cached = readCachedRcToken(cacheKey);
+  if (cached) return cached.accessToken;
+
+  const lock = await acquireRcTokenCacheLock(cacheKey);
+  if (lock?.cached) return lock.cached.accessToken;
+
+  try {
+    const refreshed = readCachedRcToken(cacheKey);
+    if (refreshed) return refreshed.accessToken;
+
+    const basic = Buffer.from(`${clientId}:${clientSecret}`).toString("base64");
+
+    const stale = readCachedRcToken(cacheKey, { allowNearExpiry: true });
+    const canTryRefresh =
+      String(process.env.EX_LIVE_MONITOR_REFRESH_TOKEN_CACHE || "true").trim().toLowerCase() !== "false" &&
+      hasCachedRefreshToken(stale);
+    if (canTryRefresh) {
+      const refreshBody = new URLSearchParams({
+        grant_type: "refresh_token",
+        refresh_token: stale.refreshToken,
+      });
+      let refreshLastText = "";
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        const { response, text, json } = await requestRcOauthToken({ basic, body: refreshBody });
+        refreshLastText = text;
+        if (response.ok) {
+          const entry = tokenEntryFromOauthJson(json, stale);
+          entry.refreshedWith = "refresh_token";
+          writeCachedRcToken(cacheKey, entry);
+          return entry.accessToken;
+        }
+        if (response.status !== 429) break;
+        const nearExpiry = readCachedRcToken(cacheKey, { allowNearExpiry: true });
+        if (nearExpiry) return nearExpiry.accessToken;
+        const retryAfter = Number(response.headers.get("retry-after"));
+        const delayMs = Number.isFinite(retryAfter) && retryAfter > 0
+          ? retryAfter * 1000
+          : 5000 + attempt * 5000;
+        await sleep(delayMs);
+      }
+      if (/invalid[_ -]?grant|refresh token/i.test(refreshLastText)) {
+        // Rotated/revoked refresh token. Fall back to the JWT assertion below
+        // while still keeping this path single-process via the cache lock.
+      }
+    }
+
+    const body = new URLSearchParams({
+      grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer",
+      assertion: jwtToken,
+    });
+    let lastText = "";
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      const { response, text, json } = await requestRcOauthToken({ basic, body });
+      lastText = text;
+      if (response.ok) {
+        const entry = tokenEntryFromOauthJson(json);
+        entry.refreshedWith = "jwt";
+        writeCachedRcToken(cacheKey, entry);
+        return entry.accessToken;
+      }
+      if (response.status !== 429 || attempt >= 3) {
+        throw new Error(`RC OAuth failed: ${response.status} ${text.slice(0, 300)}`);
+      }
+      const nearExpiry = readCachedRcToken(cacheKey, { allowNearExpiry: true });
+      if (nearExpiry) return nearExpiry.accessToken;
+      const retryAfter = Number(response.headers.get("retry-after"));
+      const delayMs = Number.isFinite(retryAfter) && retryAfter > 0
+        ? retryAfter * 1000
+        : 3000 + attempt * 3000;
+      await sleep(delayMs);
+    }
+    throw new Error(`RC OAuth failed after retry: ${lastText.slice(0, 300)}`);
+  } finally {
+    lock?.release?.();
+  }
 }
 
 async function rcRequest(token, method, endpoint, body) {
@@ -759,6 +1191,7 @@ async function superviseActiveCall({
   supervisorDeviceId,
   partyMode = "session",
   callPickMode = "newest",
+  callStartAfterMs = 0,
 }) {
   const active = await rcRequest(
     lookupToken,
@@ -766,21 +1199,51 @@ async function superviseActiveCall({
     `/restapi/v1.0/account/~/extension/${agentExtensionId}/active-calls?view=Detailed`,
   );
   const records = Array.isArray(active?.records) ? active.records : [];
-  const call = pickActiveCall(records, callPickMode);
+  const orderedCalls = orderActiveCallCandidates(records, callPickMode);
+  const skippedCalls = [];
+  let call = null;
+  let session = null;
+  for (const candidate of orderedCalls) {
+    if (!candidate?.telephonySessionId) continue;
+    const candidateTime = Date.parse(candidate.startTime || candidate.creationTime || candidate.enqueueTime || "") || 0;
+    if (callStartAfterMs && candidateTime && candidateTime < callStartAfterMs) {
+      skippedCalls.push({
+        telephonySessionId: candidate.telephonySessionId,
+        result: candidate.result || null,
+        startTime: candidate.startTime || candidate.creationTime || null,
+        reason: "started before this monitor attempt",
+      });
+      continue;
+    }
+    const candidateSession = await rcRequest(
+      lookupToken,
+      "GET",
+      `/restapi/v1.0/account/~/telephony/sessions/${encodeURIComponent(candidate.telephonySessionId)}`,
+    );
+    const liveParties = Array.isArray(candidateSession?.parties)
+      ? candidateSession.parties.filter(isLiveParty)
+      : [];
+    if (liveParties.length) {
+      call = candidate;
+      session = candidateSession;
+      break;
+    }
+    skippedCalls.push({
+      telephonySessionId: candidate.telephonySessionId,
+      result: candidate.result || null,
+      startTime: candidate.startTime || candidate.creationTime || null,
+      reason: "all parties disconnected",
+    });
+  }
   if (!call?.telephonySessionId) {
-    throw new Error("No active agent telephonySessionId found. Start a live call/hold session first.");
+    const skippedText = skippedCalls.length ? `; skipped stale sessions: ${JSON.stringify(skippedCalls).slice(0, 400)}` : "";
+    throw new Error(`No live agent telephonySessionId found. Start a live call/hold session first${skippedText}.`);
   }
 
   let endpoint = `/restapi/v1.0/account/~/telephony/sessions/${encodeURIComponent(call.telephonySessionId)}/supervise`;
   let pickedParty = null;
-  let session = null;
   let cleanedSupervisorParties = [];
   if (supervisorExtensionId) {
-    session = await rcRequest(
-      lookupToken,
-      "GET",
-      `/restapi/v1.0/account/~/telephony/sessions/${encodeURIComponent(call.telephonySessionId)}`,
-    );
     cleanedSupervisorParties = await cleanupSupervisorParties({
       token: superviseToken,
       telephonySessionId: call.telephonySessionId,
@@ -850,6 +1313,7 @@ async function superviseActiveCall({
       result: call.result || null,
       direction: call.direction || null,
     },
+    skippedCalls,
     partyMode,
     pickedParty: pickedParty ? summarizePartyForLog(pickedParty) : null,
     cleanedSupervisorParties,
@@ -958,6 +1422,49 @@ const LIVE_SEMANTIC_GLUE_TOOL = {
         type: "string",
         description: "If action=append_previous, return the previous turn plus the new continuation as one cleaned thought. Otherwise return the original previous text.",
       },
+    },
+  },
+};
+
+const LIVE_SEMANTIC_TURNS_TOOL = {
+  name: "submit_semantic_turns",
+  description: "Convert raw streaming STT fragments into complete display turns and compact call memory.",
+  input_schema: {
+    type: "object",
+    required: ["completeTurns", "remainingText", "callMemory", "reason"],
+    properties: {
+      completeTurns: {
+        type: "array",
+        maxItems: 4,
+        items: {
+          type: "object",
+          required: ["speaker", "text", "confidence", "reason"],
+          properties: {
+            speaker: { type: "string", enum: SPEAKER_KEYS },
+            text: { type: "string" },
+            confidence: { type: "number", minimum: 0, maximum: 1 },
+            reason: { type: "string" },
+          },
+        },
+      },
+      remainingText: {
+        type: "string",
+        description: "Unpublished tail that is not yet a complete thought. Keep only what is needed to finish the next turn.",
+      },
+      revisePrevious: {
+        type: "object",
+        properties: {
+          action: { type: "string", enum: ["none", "replace_previous", "append_previous"] },
+          text: { type: "string" },
+          confidence: { type: "number", minimum: 0, maximum: 1 },
+          reason: { type: "string" },
+        },
+      },
+      callMemory: {
+        type: "string",
+        description: "Compact rolling call memory for advice. Keep it factual and under the requested character budget.",
+      },
+      reason: { type: "string" },
     },
   },
 };
@@ -1095,8 +1602,279 @@ async function runSemanticGlueDecision({ previousEntry, currentEntry, recentEntr
   };
 }
 
+function normalizeSemanticTurnDecision(input = {}, fallbackMemory = "", maxMemoryChars = 2400) {
+  const completeTurns = (Array.isArray(input.completeTurns) ? input.completeTurns : [])
+    .map((turn) => {
+      const rawSpeaker = String(turn?.speaker || "").trim().toLowerCase();
+      const speaker = SPEAKER_KEYS.includes(rawSpeaker) ? rawSpeaker : "unknown";
+      const text = cleanText(turn?.text || "", 1400);
+      if (!text) return null;
+      return {
+        speaker,
+        text,
+        confidence: clampNumber(turn?.confidence, 0, 1, 0.45),
+        reason: cleanText(turn?.reason || "", 180),
+      };
+    })
+    .filter(Boolean)
+    .slice(0, 4);
+  const reviseRaw = input.revisePrevious && typeof input.revisePrevious === "object"
+    ? input.revisePrevious
+    : {};
+  const reviseAction = ["replace_previous", "append_previous"].includes(reviseRaw.action)
+    ? reviseRaw.action
+    : "none";
+  return {
+    completeTurns,
+    remainingText: cleanText(input.remainingText || "", 2200),
+    revisePrevious: {
+      action: reviseAction,
+      text: cleanText(reviseRaw.text || "", 2400),
+      confidence: clampNumber(reviseRaw.confidence, 0, 1, 0),
+      reason: cleanText(reviseRaw.reason || "", 220),
+    },
+    callMemory: cleanText(input.callMemory || fallbackMemory, maxMemoryChars),
+    reason: cleanText(input.reason || "", 220),
+  };
+}
+
+function parseJsonLoose(text) {
+  const raw = String(text || "").trim();
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    const start = raw.indexOf("{");
+    const end = raw.lastIndexOf("}");
+    if (start >= 0 && end > start) {
+      try {
+        return JSON.parse(raw.slice(start, end + 1));
+      } catch {
+        return null;
+      }
+    }
+  }
+  return null;
+}
+
+function extractOpenAiResponsesText(payload) {
+  if (typeof payload?.output_text === "string" && payload.output_text.trim()) {
+    return payload.output_text.trim();
+  }
+  const chunks = [];
+  const output = Array.isArray(payload?.output) ? payload.output : [];
+  for (const item of output) {
+    const content = Array.isArray(item?.content) ? item.content : [];
+    for (const block of content) {
+      if (typeof block?.text === "string") chunks.push(block.text);
+      if (typeof block?.output_text === "string") chunks.push(block.output_text);
+    }
+  }
+  return chunks.join("\n").trim();
+}
+
+function isLikelyDanglingSemanticTurn(text) {
+  const clean = cleanText(text, 500);
+  if (!clean) return true;
+  if (/[.?!]["')\]]*$/.test(clean)) {
+    if (/\.\.\.["')\]]*$/.test(clean)) return true;
+    return false;
+  }
+  if (/[,;:\-]$/.test(clean)) return true;
+  if (/\.\.\.["')\]]*$/.test(clean)) return true;
+  const lastWord = clean
+    .toLowerCase()
+    .replace(/[^a-z0-9']+$/g, "")
+    .split(/\s+/)
+    .filter(Boolean)
+    .pop();
+  return new Set([
+    "a",
+    "an",
+    "and",
+    "are",
+    "as",
+    "at",
+    "because",
+    "but",
+    "by",
+    "for",
+    "from",
+    "if",
+    "in",
+    "into",
+    "is",
+    "of",
+    "on",
+    "or",
+    "so",
+    "that",
+    "the",
+    "to",
+    "was",
+    "we",
+    "were",
+    "with",
+    "your",
+  ]).has(lastWord);
+}
+
+function trimFromLeft(text, maxChars) {
+  const clean = cleanText(text, Math.max(maxChars * 2, maxChars));
+  if (!clean || clean.length <= maxChars) return clean;
+  return clean.slice(clean.length - maxChars).replace(/^\S+\s+/, "").trim();
+}
+
+function buildSemanticTurnsPrompt({
+  bufferText,
+  newText,
+  recentEntries,
+  callMemory,
+  metadata,
+  flushReason,
+  maxBufferChars,
+  maxMemoryChars,
+}) {
+  const recent = (recentEntries || [])
+    .slice(-10)
+    .map((entry) => `[${entry.at || ""}] ${labeledEntryText(entry)}`)
+    .join("\n");
+  return [
+    "You are a live semantic transcript assembler for a tax-resolution sales call.",
+    "Raw STT arrives every couple seconds and is often partial, duplicated, or split in the middle of a thought.",
+    "Your job is to decide what should be shown to the agent UI now.",
+    "",
+    "Rules:",
+    "- Publish completeTurns only for complete thoughts, sentence-like units, or short standalone replies that are useful in a live call transcript.",
+    "- Keep incomplete fragments in remainingText. The next raw chunk will include that tail again.",
+    "- Do not publish hold prompts, voicemail boilerplate, music, silence, or RingCentral system audio as human call content. Keep brief system notes only when operationally useful.",
+    "- If the newest raw words obviously complete or correct the immediately previous displayed row, use revisePrevious instead of creating a separate row.",
+    "- Do not invent words. Light punctuation and duplicate cleanup are okay.",
+    "- Prefer snappy completion over perfect grammar, but do not emit dangling fragments.",
+    "- Prefer fewer, more coherent rows over many tiny rows. When multiple fragments belong to the same speaker and idea, combine them into one complete turn.",
+    "- Do not publish tiny backchannels like 'right', 'okay', 'yeah', or 'mm-hmm' as their own row unless they are the meaningful answer to a question or mark a clear speaker handoff.",
+    "- Never publish text ending with ellipses, a trailing article/preposition/conjunction, or an obviously unfinished phrase. Keep it in remainingText.",
+    "- Keep callMemory current and compact. It should summarize consumed useful call facts for coaching, not repeat the full transcript.",
+    `- Keep remainingText under ${maxBufferChars} characters and callMemory under ${maxMemoryChars} characters.`,
+    "",
+    `Metadata: ${JSON.stringify(metadata || {})}`,
+    `Flush reason: ${flushReason || "interval"}`,
+    "",
+    "Rolling call memory:",
+    callMemory || "(none yet)",
+    "",
+    "Recent displayed transcript:",
+    recent || "(none yet)",
+    "",
+    "Previously unpublished buffer:",
+    bufferText || "(empty)",
+    "",
+    "New raw STT chunk:",
+    newText,
+  ].join("\n");
+}
+
+async function runSemanticTurnDecision({
+  bufferText,
+  newText,
+  recentEntries,
+  callMemory,
+  metadata,
+  flushReason,
+  provider = "anthropic",
+  model,
+  serviceTier = "",
+  timeoutMs,
+  maxBufferChars,
+  maxMemoryChars,
+}) {
+  const prompt = buildSemanticTurnsPrompt({
+    bufferText,
+    newText,
+    recentEntries,
+    callMemory,
+    metadata,
+    flushReason,
+    maxBufferChars,
+    maxMemoryChars,
+  });
+  if (provider === "openai") {
+    const apiKey = process.env.OPENAI_API_KEY || "";
+    if (!apiKey) throw new Error("OPENAI_API_KEY is missing");
+    const abortController = new AbortController();
+    const timeoutHandle = setTimeout(() => abortController.abort(), Math.max(Number(timeoutMs) || 12000, 1000));
+    let response;
+    try {
+      const body = {
+        model,
+        instructions: [
+          "Return only valid JSON matching this schema:",
+          JSON.stringify(LIVE_SEMANTIC_TURNS_TOOL.input_schema),
+          "No markdown. No prose outside the JSON object.",
+        ].join("\n"),
+        input: [{ role: "user", content: prompt }],
+        max_output_tokens: 1000,
+        temperature: 0,
+      };
+      if (serviceTier) body.service_tier = serviceTier;
+      response = await fetch("https://api.openai.com/v1/responses", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify(body),
+        signal: abortController.signal,
+      });
+    } finally {
+      clearTimeout(timeoutHandle);
+    }
+    const rawText = await response.text();
+    const payload = parseJsonLoose(rawText) || { rawText };
+    if (!response.ok) {
+      throw new Error(`OpenAI semantic turn failed: ${response.status} ${rawText.slice(0, 500)}`);
+    }
+    const outputText = extractOpenAiResponsesText(payload);
+    const parsed = parseJsonLoose(outputText);
+    if (!parsed) {
+      throw new Error(`OpenAI semantic turn returned non-JSON: ${outputText.slice(0, 300)}`);
+    }
+    return {
+      ...normalizeSemanticTurnDecision(parsed, callMemory, maxMemoryChars),
+      provider: "openai",
+      model: payload?.model || model,
+      serviceTier: payload?.service_tier || serviceTier || null,
+      usage: payload?.usage || null,
+    };
+  }
+
+  const client = createAnthropicClient();
+  const raw = await client.createMessage({
+    system: "Output strictly via submit_semantic_turns. No free text.",
+    messages: [{ role: "user", content: prompt }],
+    model,
+    maxTokens: 1200,
+    temperature: 0,
+    tools: [LIVE_SEMANTIC_TURNS_TOOL],
+    toolChoice: { type: "tool", name: "submit_semantic_turns" },
+    timeoutMs,
+  });
+  const toolUse = client.extractToolUse(raw, "submit_semantic_turns");
+  if (!toolUse?.input) {
+    throw new Error("Claude did not return submit_semantic_turns");
+  }
+  return {
+    ...normalizeSemanticTurnDecision(toolUse.input, callMemory, maxMemoryChars),
+    provider: "anthropic",
+    model: raw?.model || model,
+    serviceTier: null,
+    usage: raw?.usage || null,
+  };
+}
+
 function buildAdvicePrompt({ transcripts, metadata }) {
   const recent = transcripts.slice(-16);
+  const memory = cleanText(metadata?.semanticCallMemory || "", 3000);
   const transcriptText = recent
     .map((entry) => {
       const labeled = Array.isArray(entry.speakerSegments) && entry.speakerSegments.length
@@ -1109,12 +1887,18 @@ function buildAdvicePrompt({ transcripts, metadata }) {
     "You are the live agent-advice brain for a tax-resolution sales call.",
     "The audio comes through a RingEX supervision leg. It may be mono/mixed and may contain the agent, the prospect, hold prompts, or both speakers in the same chunk.",
     "Infer cautiously. Do not pretend to know speaker labels when the transcript does not prove them.",
+    "Do the semantic check yourself: decide whether the newest useful content is from the prospect, the agent, system audio, or ambiguous mixed speech.",
+    "Only put words in suggestedDraft when the newest actionable content is a prospect/client concern, answer, objection, confusion, or buying signal.",
+    "If the newest content is the agent talking, a greeting/setup line, voicemail, hold audio, silence, or unclear mixed audio, leave suggestedDraft empty and give a compact listening/focus note instead.",
     "Your output goes to a tiny side panel beside the call. Keep it short, tactical, and useful while the agent is talking.",
     "Focus on discovery, pain, qualification, trust, next question, and objection handling.",
     "Do not give tax/legal advice, exact program recommendations, fees, timelines, guarantees, or anything the agent should not say.",
     "If the transcript is mostly hold music/system prompts/no real conversation, say to keep listening and leave suggestedDraft empty.",
     "",
     `Monitor metadata: ${JSON.stringify(metadata || {})}`,
+    "",
+    "Compact call memory:",
+    memory || "(none yet)",
     "",
     "Recent transcript, oldest first:",
     transcriptText || "(no usable transcript yet)",
@@ -1149,6 +1933,116 @@ async function runLiveAdvice({ transcripts, metadata, model, timeoutMs }) {
     usage: raw?.usage || null,
     model: raw?.model || model,
   };
+}
+
+function buildProspectOnlyCoachPrompt({ prospectText, recentTranscripts, memory, metadata }) {
+  const recent = (recentTranscripts || [])
+    .slice(-8)
+    .map((entry) => `Prospect: ${cleanText(entry.text, 360)}`)
+    .join("\n");
+  return [
+    "You are a real-time coach for a tax-resolution sales consultation.",
+    "The transcript below is assumed to be ONLY the prospect/client speaking. Do not spend tokens identifying the speaker.",
+    "Return only the exact short thing the agent should say next. No labels, no JSON, no markdown.",
+    "",
+    "Rules:",
+    "- Keep it to 1-2 agent-sayable sentences.",
+    "- Respond to the newest prospect turn, not a generic sales script.",
+    "- Be calm, practical, and specific.",
+    "- Ask one useful next question when discovery is needed.",
+    "- Never promise an outcome, program fit, deadline, fee, or tax/legal result.",
+    "- If the turn is too low-signal to coach, return exactly: WAIT",
+    "",
+    "Tax anchors:",
+    "- CP504, LT11/Letter 1058, levy, bank levy, wage garnishment, lien, and revenue officer contact are urgent collection signals.",
+    "- Unfiled returns mean compliance questions matter: which years, income type, IRS substitute returns, and available records.",
+    "- Balance due questions need tax type, years, notice/source, income, assets, and ability to pay before suggesting a path.",
+    "- Possible resolution paths include filing missing returns, installment agreement, penalty abatement, currently not collectible, offer in compromise, and lien/levy release work, but do not claim fit yet.",
+    "",
+    `Monitor metadata: ${JSON.stringify(metadata || {})}`,
+    "",
+    "Rolling memory:",
+    memory || "(none yet)",
+    "",
+    "Recent prospect-only turns:",
+    recent || "(none yet)",
+    "",
+    "Newest prospect turn:",
+    prospectText,
+  ].join("\n");
+}
+
+async function streamAnthropicText({ prompt, model, maxTokens = 180, temperature = 0.15, timeoutMs = 15000, onDelta }) {
+  const client = createAnthropicClient();
+  if (!client.config.apiKey) {
+    throw new Error("ANTHROPIC_API_KEY is missing");
+  }
+  const abortController = new AbortController();
+  const timeoutHandle = setTimeout(() => abortController.abort(), Math.max(timeoutMs, 1000));
+  let response;
+  try {
+    response = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": client.config.apiKey,
+        "anthropic-version": "2023-06-01",
+      },
+      body: JSON.stringify({
+        model,
+        max_tokens: maxTokens,
+        temperature,
+        stream: true,
+        system: "Return only the next agent line. No preamble.",
+        messages: [{ role: "user", content: prompt }],
+      }),
+      signal: abortController.signal,
+    });
+  } catch (error) {
+    clearTimeout(timeoutHandle);
+    if (error?.name === "AbortError") throw new Error(`streaming coach timed out after ${timeoutMs}ms`);
+    throw error;
+  }
+  clearTimeout(timeoutHandle);
+
+  if (!response.ok) {
+    const text = await response.text().catch(() => "");
+    throw new Error(`streaming coach failed: ${response.status} ${text.slice(0, 300)}`);
+  }
+  if (!response.body) throw new Error("streaming coach response had no body");
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let output = "";
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    let boundary = buffer.indexOf("\n\n");
+    while (boundary >= 0) {
+      const block = buffer.slice(0, boundary);
+      buffer = buffer.slice(boundary + 2);
+      const data = block
+        .split("\n")
+        .filter((line) => line.startsWith("data:"))
+        .map((line) => line.slice(5).trim())
+        .join("\n");
+      if (data && data !== "[DONE]") {
+        let event = null;
+        try { event = JSON.parse(data); } catch {}
+        const delta = event?.type === "content_block_delta" && event?.delta?.type === "text_delta"
+          ? String(event.delta.text || "")
+          : "";
+        if (delta) {
+          output += delta;
+          onDelta?.(delta, output);
+        }
+      }
+      boundary = buffer.indexOf("\n\n");
+    }
+  }
+  return cleanText(output, 1000);
 }
 
 function isLowSignalTranscript(text) {
@@ -1481,6 +2375,73 @@ function removePriorTranscriptEcho(text, priorTexts) {
   return cleanText(cleaned, 2000);
 }
 
+function longestCommonTokenRun(leftTokens, rightTokens) {
+  const left = Array.isArray(leftTokens) ? leftTokens : [];
+  const right = Array.isArray(rightTokens) ? rightTokens : [];
+  if (!left.length || !right.length) return 0;
+  let best = 0;
+  const previous = new Array(right.length + 1).fill(0);
+  for (let leftIndex = 1; leftIndex <= left.length; leftIndex += 1) {
+    let northWest = 0;
+    for (let rightIndex = 1; rightIndex <= right.length; rightIndex += 1) {
+      const savedNorth = previous[rightIndex];
+      previous[rightIndex] = left[leftIndex - 1] === right[rightIndex - 1]
+        ? northWest + 1
+        : 0;
+      if (previous[rightIndex] > best) best = previous[rightIndex];
+      northWest = savedNorth;
+    }
+  }
+  return best;
+}
+
+function tokenSetOverlapScore(leftTokens, rightTokens) {
+  const left = new Set(leftTokens || []);
+  const right = new Set(rightTokens || []);
+  if (!left.size || !right.size) return 0;
+  let intersection = 0;
+  for (const token of left) {
+    if (right.has(token)) intersection += 1;
+  }
+  return intersection / Math.max(left.size, right.size);
+}
+
+function semanticTurnTextRelationship(candidateText, existingText) {
+  const candidateTokens = wordTokens(candidateText);
+  const existingTokens = wordTokens(existingText);
+  if (!candidateTokens.length || !existingTokens.length) return null;
+
+  const candidateNorm = candidateTokens.join(" ");
+  const existingNorm = existingTokens.join(" ");
+  if (candidateNorm === existingNorm) {
+    return { action: "skip", confidence: 1, reason: "exact duplicate semantic turn" };
+  }
+
+  const candidateContainsExisting = findTokenSubsequence(candidateTokens, existingTokens) >= 0;
+  const existingContainsCandidate = findTokenSubsequence(existingTokens, candidateTokens) >= 0;
+  const candidateIsMeaningfullyLonger = candidateTokens.length >= existingTokens.length + 3;
+  const existingIsAtLeastAsLong = existingTokens.length >= candidateTokens.length;
+
+  if (candidateContainsExisting && candidateIsMeaningfullyLonger) {
+    return { action: "revise", confidence: 0.98, reason: "new semantic turn extends a recent row" };
+  }
+  if (existingContainsCandidate && existingIsAtLeastAsLong) {
+    return { action: "skip", confidence: 0.98, reason: "recent row already contains this semantic turn" };
+  }
+
+  const shortest = Math.min(candidateTokens.length, existingTokens.length);
+  const longestRun = longestCommonTokenRun(candidateTokens, existingTokens);
+  const runCoverage = shortest ? longestRun / shortest : 0;
+  const setOverlap = tokenSetOverlapScore(candidateTokens, existingTokens);
+  const highOverlap = shortest >= 5 && (runCoverage >= 0.86 || setOverlap >= 0.9);
+  if (!highOverlap) return null;
+
+  if (candidateIsMeaningfullyLonger) {
+    return { action: "revise", confidence: Math.max(runCoverage, setOverlap), reason: "near-duplicate semantic turn with more complete text" };
+  }
+  return { action: "skip", confidence: Math.max(runCoverage, setOverlap), reason: "near-duplicate semantic turn" };
+}
+
 function findTokenSubsequence(haystackTokens, needleTokens) {
   if (!haystackTokens.length || !needleTokens.length || needleTokens.length > haystackTokens.length) return -1;
   for (let index = 0; index <= haystackTokens.length - needleTokens.length; index += 1) {
@@ -1610,7 +2571,12 @@ function createDashboardHtml() {
     body { margin: 0; }
     header { position: sticky; top: 0; z-index: 2; background: #161b22; border-bottom: 1px solid #30363d; padding: 14px 18px; display: flex; justify-content: space-between; gap: 12px; align-items: center; }
     h1 { font-size: 16px; margin: 0; letter-spacing: 0; }
+    .title { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
     .status { font-size: 12px; color: #9da7b3; }
+    .toolbar { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; align-items: center; }
+    button { border: 1px solid #3b4754; border-radius: 7px; background: #1f6feb; color: #fff; font: inherit; font-size: 12px; font-weight: 600; padding: 8px 11px; cursor: pointer; }
+    button.secondary { background: #21262d; color: #e6edf3; }
+    button:disabled { opacity: 0.45; cursor: not-allowed; }
     main { display: grid; grid-template-columns: minmax(0, 1fr) 380px; gap: 14px; padding: 14px; }
     section { border: 1px solid #30363d; border-radius: 8px; background: #0f141b; min-height: 180px; }
     h2 { font-size: 13px; margin: 0; padding: 12px 12px 0; color: #9da7b3; font-weight: 600; }
@@ -1628,8 +2594,15 @@ function createDashboardHtml() {
 </head>
 <body>
   <header>
-    <h1>EX Live Monitor One-Off</h1>
-    <div class="status" id="status">connecting...</div>
+    <div class="title">
+      <h1>EX Live Monitor One-Off</h1>
+      <div class="status" id="gateStatus">coach gate unknown</div>
+    </div>
+    <div class="toolbar">
+      <button id="startCoach" type="button" disabled>Start coaching</button>
+      <button id="stopCoach" class="secondary" type="button" disabled>Stop coaching</button>
+      <div class="status" id="status">connecting...</div>
+    </div>
   </header>
   <main>
     <section>
@@ -1645,11 +2618,45 @@ function createDashboardHtml() {
   </main>
   <script>
     const statusEl = document.getElementById("status");
+    const gateStatusEl = document.getElementById("gateStatus");
+    const startCoachBtn = document.getElementById("startCoach");
+    const stopCoachBtn = document.getElementById("stopCoach");
     const transcriptsEl = document.getElementById("transcripts");
     const adviceEl = document.getElementById("advice");
     const eventsEl = document.getElementById("events");
     const esc = (v) => String(v ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+    async function coachGate(path) {
+      startCoachBtn.disabled = true;
+      stopCoachBtn.disabled = true;
+      try {
+        const response = await fetch(path, { method: "POST" });
+        const result = await response.json().catch(() => ({}));
+        if (!response.ok || result.ok === false) {
+          gateStatusEl.textContent = result.error || \`gate request failed (\${response.status})\`;
+          return;
+        }
+        const state = await fetch("/api/state").then((r) => r.json());
+        render(state);
+      } catch (error) {
+        gateStatusEl.textContent = error.message || "gate request failed";
+      }
+    }
+    startCoachBtn.addEventListener("click", () => coachGate("/api/coach/start?durationSec=2700"));
+    stopCoachBtn.addEventListener("click", () => coachGate("/api/coach/stop?reason=manual-coach-stop"));
     function render(state) {
+      const gate = state.cxGate || {};
+      const gateEnabled = Boolean(gate.enabled);
+      const gateParts = gateEnabled
+        ? [
+            \`coach \${gate.active ? "live" : "idle"}\`,
+            gate.mode || "",
+            gate.currentUii ? \`uii \${gate.currentUii}\` : "",
+            gate.lastReason || "",
+          ].filter(Boolean)
+        : ["coach gate off"];
+      gateStatusEl.textContent = gateParts.join(" | ");
+      startCoachBtn.disabled = !gateEnabled || gate.active;
+      stopCoachBtn.disabled = !gateEnabled || !gate.active;
       statusEl.textContent = [
         state.status || "unknown",
         state.packetCount ? \`\${state.packetCount} packets\` : "",
@@ -1666,8 +2673,15 @@ function createDashboardHtml() {
               : esc(item.text)}</div>
           </div>\`).join("")
       : '<div class="row"><div class="text">Waiting for usable audio...</div></div>';
+      const live = state.liveSuggestion || {};
+      const liveHtml = live.enabled ? \`
+        <div class="row">
+          <div class="meta"><span class="pill">next line</span><span class="pill">\${esc(live.status || "idle")}</span>\${live.elapsedMs ? \`<span class="pill">\${esc(live.elapsedMs)}ms</span>\` : ""}</div>
+          <div class="focus">\${esc(live.text || live.finalText || (live.status === "streaming" ? "Thinking..." : "Waiting for prospect speech..."))}</div>
+          \${live.prospectText ? \`<div class="meta">heard: \${esc(live.prospectText)}</div>\` : ""}
+        </div>\` : "";
       const coach = state.advice && state.advice.coach;
-      adviceEl.innerHTML = coach ? \`
+      const coachHtml = coach ? \`
         <div class="row">
           <div class="meta"><span class="pill">\${esc(coach.phase?.label || coach.phase?.key)}</span><span class="pill">\${Math.round((coach.confidence || 0) * 100)}%</span></div>
           <div class="focus">\${esc(coach.oneSentenceFocus)}</div>
@@ -1675,7 +2689,10 @@ function createDashboardHtml() {
           <strong>Moves</strong><ul>\${(coach.suggestedMoves || []).map((x) => \`<li>\${esc(x)}</li>\`).join("")}</ul>
           <strong>Listen for</strong><ul>\${(coach.listenFor || []).map((x) => \`<li>\${esc(x)}</li>\`).join("")}</ul>
           \${(coach.riskFlags || []).length ? \`<strong>Risk</strong><ul>\${coach.riskFlags.map((x) => \`<li>\${esc(x)}</li>\`).join("")}</ul>\` : ""}
-        </div>\` : '<div class="row"><div class="text">Advice will appear after the first usable transcript chunks.</div></div>';
+        </div>\` : "";
+      adviceEl.innerHTML = liveHtml || coachHtml
+        ? liveHtml + coachHtml
+        : '<div class="row"><div class="text">Advice will appear after the first usable transcript chunks.</div></div>';
       eventsEl.innerHTML = (state.events || []).slice(-18).reverse().map((item) => \`
         <div class="row"><div class="meta">\${esc(item.at || "")}</div><div class="text">\${esc(item.message || item.type || "")}</div></div>\`).join("");
     }
@@ -1707,7 +2724,8 @@ function createDashboardServer({ port, state, logger }) {
   }
 
   const server = http.createServer((req, res) => {
-    if (req.url === "/events") {
+    const requestUrl = new URL(req.url || "/", `http://${req.headers.host || "127.0.0.1"}`);
+    if (requestUrl.pathname === "/events") {
       res.writeHead(200, {
         "content-type": "text/event-stream",
         "cache-control": "no-cache",
@@ -1718,7 +2736,27 @@ function createDashboardServer({ port, state, logger }) {
       req.on("close", () => clients.delete(res));
       return;
     }
-    if (req.url === "/api/state" || req.url === "/health") {
+    if (requestUrl.pathname === "/api/fake-call/start" || requestUrl.pathname === "/api/coach/start") {
+      const result = state.actions?.fakeCallStart
+        ? state.actions.fakeCallStart({
+          durationSec: Number(requestUrl.searchParams.get("durationSec") || requestUrl.searchParams.get("seconds") || 0) || null,
+          caseId: requestUrl.searchParams.get("caseId") || null,
+          queueItemId: requestUrl.searchParams.get("queueItemId") || null,
+        })
+        : { ok: false, error: "fake call action is not available" };
+      res.writeHead(result.ok === false ? 409 : 200, { "content-type": "application/json" });
+      res.end(JSON.stringify(result));
+      return;
+    }
+    if (requestUrl.pathname === "/api/fake-call/stop" || requestUrl.pathname === "/api/coach/stop") {
+      const result = state.actions?.fakeCallStop
+        ? state.actions.fakeCallStop({ reason: requestUrl.searchParams.get("reason") || "manual-fake-stop" })
+        : { ok: false, error: "fake call action is not available" };
+      res.writeHead(result.ok === false ? 409 : 200, { "content-type": "application/json" });
+      res.end(JSON.stringify(result));
+      return;
+    }
+    if (requestUrl.pathname === "/api/state" || requestUrl.pathname === "/health") {
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify(snapshot()));
       return;
@@ -1788,6 +2826,146 @@ function addEvent(state, eventLog, type, message, extra = {}) {
   return event;
 }
 
+function coerceRingcxActiveCallList(payload) {
+  if (Array.isArray(payload)) return payload;
+  if (Array.isArray(payload?.data)) return payload.data;
+  if (Array.isArray(payload?.records)) return payload.records;
+  if (Array.isArray(payload?.content)) return payload.content;
+  if (Array.isArray(payload?.activeCalls)) return payload.activeCalls;
+  if (Array.isArray(payload?.items)) return payload.items;
+  return [];
+}
+
+function extractRingcxActiveCallUii(call = null) {
+  return cleanText(
+    call?.uii
+      || call?.UII
+      || call?.callId
+      || call?.callID
+      || call?.activeCallId
+      || call?.interactionId
+      || call?.id
+      || "",
+    120,
+  ) || null;
+}
+
+function collectScalarStrings(value, output = [], depth = 0) {
+  if (output.length >= 180 || depth > 5 || value === null || value === undefined) return output;
+  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+    output.push(String(value));
+    return output;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value.slice(0, 30)) collectScalarStrings(item, output, depth + 1);
+    return output;
+  }
+  if (typeof value === "object") {
+    for (const [key, child] of Object.entries(value).slice(0, 90)) {
+      output.push(String(key));
+      collectScalarStrings(child, output, depth + 1);
+      if (output.length >= 180) break;
+    }
+  }
+  return output;
+}
+
+function activeCallContainsText(call, value) {
+  const needle = String(value || "").trim().toLowerCase();
+  if (!needle) return false;
+  return collectScalarStrings(call)
+    .some((candidate) => String(candidate || "").toLowerCase().includes(needle));
+}
+
+function activeCallContainsAllWords(call, value) {
+  const words = String(value || "")
+    .trim()
+    .toLowerCase()
+    .split(/\s+/)
+    .filter((word) => word.length > 1);
+  if (!words.length) return false;
+  const haystack = collectScalarStrings(call).join(" ").toLowerCase();
+  return words.every((word) => haystack.includes(word));
+}
+
+function summarizeRingcxActiveCall(call = null) {
+  if (!call || typeof call !== "object") return null;
+  const summary = {};
+  for (const key of [
+    "uii",
+    "UII",
+    "callId",
+    "callID",
+    "activeCallId",
+    "id",
+    "state",
+    "status",
+    "callState",
+    "agentId",
+    "agentFirstName",
+    "agentLastName",
+    "username",
+    "agentEmail",
+    "campaignId",
+    "dialGroupId",
+    "externId",
+    "externalId",
+    "leadPhone",
+    "phone",
+    "destination",
+    "callerId",
+    "ani",
+    "dnis",
+    "dnisE164",
+    "destinationName",
+  ]) {
+    const value = call[key];
+    if (value !== undefined && value !== null && value !== "") summary[key] = value;
+  }
+  summary.uii = summary.uii || extractRingcxActiveCallUii(call);
+  summary.rawKeys = Object.keys(call).slice(0, 80);
+  return summary;
+}
+
+function isRingcxCallTerminal(call = null) {
+  const state = String(call?.state || call?.callState || call?.status || call?.dialState || "")
+    .trim()
+    .toLowerCase();
+  if (!state) return false;
+  return /(complete|completed|disconnected|disposed|hangup|hung|ended|terminated|abandoned|cancelled|canceled|failed|rejected|voicemail|no.answer|busy)/i
+    .test(state);
+}
+
+function scoreRingcxGateCall(call, criteria = {}) {
+  if (!call || typeof call !== "object" || !extractRingcxActiveCallUii(call) || isRingcxCallTerminal(call)) {
+    return { score: 0, reasons: [] };
+  }
+  const reasons = [];
+  let score = 1;
+  for (const [label, value, weight] of [
+    ["agentCxAgentId", criteria.agentCxAgentId, 10],
+    ["agentName", criteria.agentName, 9],
+    ["agentEmail", criteria.agentEmail, 8],
+    ["agentExtId", criteria.agentExtId, 6],
+    ["campaignId", criteria.campaignId, 4],
+    ["dialGroupId", criteria.dialGroupId, 3],
+  ]) {
+    const matched = label === "agentName"
+      ? activeCallContainsAllWords(call, value)
+      : activeCallContainsText(call, value);
+    if (value && matched) {
+      score += weight;
+      reasons.push(label);
+    }
+  }
+  const state = String(call.state || call.callState || call.status || call.dialState || "").toLowerCase();
+  if (state && /(outdial|dial|ring|connect|active|call|preview|talk|answered)/.test(state)) {
+    score += 2;
+    reasons.push("activeState");
+  }
+  return { score, reasons };
+}
+
 function printHelp() {
   console.log(`RingEX live trainer one-off
 
@@ -1801,6 +2979,12 @@ Core options:
   --supervise                Attach to the agent's active call automatically
   --party session            session | remote | agent | mixed | party id
   --call-flow outbound       outbound | inbound | mixed speaker bias
+  --event-gated              Keep monitor attached, but run STT only inside our app's cx.call.placed window
+  --event-gate-active-sec N  Safety close if no disposition-hangup arrives (default 2700)
+  --fake-event-gate          Test mode: open the same gate from an in-memory fake call event
+  --cx-gated                 Keep monitor attached, but run STT only while RingCX shows an active CX call
+  --cx-agent-id ID           RingCX agent id for activeCalls/list product=AGENT
+  --cx-campaign-id ID        Optional campaign id match for ACCOUNT-scope CX gate fallback
   --dashboard-port 7331      Local dashboard port
   --session-id ID            Optional trainer UI session id to publish advice into
   --supervise-wait-sec 120   When --supervise is set, wait for an active call
@@ -1822,11 +3006,23 @@ Audio/AI options:
   --chunking-strategy auto   Diarize chunking strategy
   --stt-context TEXT         Prompt/context for non-diarize STT
   --no-stt-domain-primer     Disable tax vocabulary prompt for non-diarize STT
+  --stt-realtime             Use OpenAI Realtime transcription instead of file STT
+  --realtime-stt-delay LEVEL minimal | low | medium | high | xhigh
   --known-speaker name=wav   Diarize-only speaker reference, repeat up to four
   --coach-model MODEL        Claude model for live advice
+  --no-coach                 Disable live advice calls for transcript-only model tests
+  --prospect-only-coach      Treat STT as prospect-only speech and stream next agent line
+  --prospect-coach-model MODEL
+                             Claude model for --prospect-only-coach
   --speaker-model MODEL      Claude model for speaker labels (default Haiku)
   --speaker-labels           Force Haiku labels even with native diarize
   --no-speaker-labels        Skip logical speaker separation
+  --semantic-turns           Let one Claude model assemble raw STT into complete UI turns
+  --semantic-turn-provider PROVIDER  anthropic | openai
+  --semantic-turn-model MODEL  Model for --semantic-turns, e.g. Sonnet vs Haiku
+  --semantic-turn-service-tier TIER
+                             OpenAI Responses service_tier, e.g. priority
+  --semantic-turn-batch-ms N Batch raw STT for N ms before semantic publish decisions
   --semantic-glue            Let a fast model merge a new displayed row into the prior row when it is one continued thought
   --timeout-sec 3600         Max process runtime
 
@@ -1845,6 +3041,9 @@ async function main() {
 
   const supervisorExtNumber = readFlag(argv, "--supervisor-ext", env("EX_LIVE_MONITOR_SUPERVISOR_EXT", "987"));
   const agentExtNumber = readFlag(argv, "--agent-ext", env("EX_LIVE_MONITOR_AGENT_EXT", ""));
+  if (String(supervisorExtNumber || "").trim() === String(agentExtNumber || "").trim()) {
+    throw new Error("--supervisor-ext must be different from --agent-ext; self-monitoring loops on the monitor leg");
+  }
   const requestedDeviceId = readFlag(argv, "--supervisor-device-id", env("EX_LIVE_MONITOR_SUPERVISOR_DEVICE_ID", ""));
   const proxyRegion = readFlag(argv, "--proxy-region", "NA");
   const doSupervise = hasFlag(argv, "--supervise");
@@ -1856,6 +3055,34 @@ async function main() {
     callFlow,
   );
   const superviseWaitSec = Math.max(0, Number(readFlag(argv, "--supervise-wait-sec", env("EX_LIVE_MONITOR_SUPERVISE_WAIT_SECONDS", "120"))) || 0);
+  const supervisePollMs = Math.max(2000, Number(readFlag(argv, "--supervise-poll-ms", env("EX_LIVE_MONITOR_SUPERVISE_POLL_MS", "6000"))) || 6000);
+  const onlyNewCalls = hasFlag(argv, "--only-new-calls")
+    || env("EX_LIVE_MONITOR_ONLY_NEW_CALLS", "").toLowerCase() === "true";
+  const fakeEventGate = hasFlag(argv, "--fake-event-gate")
+    || env("EX_LIVE_MONITOR_FAKE_EVENT_GATE", "").toLowerCase() === "true";
+  const fakeEventAfterSec = Math.max(0, Number(readFlag(argv, "--fake-event-after-sec", env("EX_LIVE_MONITOR_FAKE_EVENT_AFTER_SECONDS", "0"))) || 0);
+  const eventGated = fakeEventGate
+    || hasFlag(argv, "--event-gated")
+    || env("EX_LIVE_MONITOR_EVENT_GATED", "").toLowerCase() === "true"
+    || env("EX_LIVE_MONITOR_APP_EVENT_GATED", "").toLowerCase() === "true";
+  const eventGatePollMs = Math.max(1000, Number(readFlag(argv, "--event-gate-poll-ms", env("EX_LIVE_MONITOR_EVENT_GATE_POLL_MS", "2000"))) || 2000);
+  const eventGateLookbackSec = Math.max(0, Number(readFlag(argv, "--event-gate-lookback-sec", env("EX_LIVE_MONITOR_EVENT_GATE_LOOKBACK_SECONDS", "180"))) || 0);
+  const eventGateActiveSec = Math.max(30, Number(readFlag(argv, "--event-gate-active-sec", env("EX_LIVE_MONITOR_EVENT_GATE_ACTIVE_SECONDS", "2700"))) || 2700);
+  const eventGateAgentEmailFlag = readFlag(argv, "--event-gate-agent-email", env("EX_LIVE_MONITOR_EVENT_GATE_AGENT_EMAIL", ""));
+  const eventGateSourceService = readFlag(argv, "--event-gate-source-service", env("EX_LIVE_MONITOR_EVENT_GATE_SOURCE_SERVICE", "ringcentral-cx"));
+  const eventGateLookbackLimit = Math.max(10, Math.min(500, Number(readFlag(argv, "--event-gate-lookback-limit", env("EX_LIVE_MONITOR_EVENT_GATE_LOOKBACK_LIMIT", "160"))) || 160));
+  const cxGated = !eventGated && (
+    hasFlag(argv, "--cx-gated")
+    || env("EX_LIVE_MONITOR_CX_GATED", "").toLowerCase() === "true"
+  );
+  const cxGatePollMs = Math.max(1000, Number(readFlag(argv, "--cx-gate-poll-ms", env("EX_LIVE_MONITOR_CX_GATE_POLL_MS", "5000"))) || 5000);
+  const cxGateAgentIdFlag = readFlag(argv, "--cx-agent-id", env("EX_LIVE_MONITOR_CX_AGENT_ID", ""));
+  const cxGateAgentEmailFlag = readFlag(argv, "--cx-agent-email", env("EX_LIVE_MONITOR_CX_AGENT_EMAIL", env("RINGCX_VOICE_AGENT_EMAIL", "")));
+  const cxGateCampaignIdFlag = readFlag(argv, "--cx-campaign-id", env("EX_LIVE_MONITOR_CX_CAMPAIGN_ID", env("RINGCX_VOICE_DEFAULT_CAMPAIGN_ID", "")));
+  const cxGateDialGroupIdFlag = readFlag(argv, "--cx-dial-group-id", env("EX_LIVE_MONITOR_CX_DIAL_GROUP_ID", env("RINGCX_VOICE_DEFAULT_DIAL_GROUP_ID", "")));
+  const callGateEnabled = cxGated || eventGated;
+  const callGateMode = eventGated ? "app-event" : cxGated ? "ringcx-active-calls" : "off";
+  const callGatePollMs = eventGated ? eventGatePollMs : cxGatePollMs;
   const dashboardPort = Number(readFlag(argv, "--dashboard-port", env("EX_LIVE_MONITOR_DASHBOARD_PORT", "7331"))) || 7331;
   const timeoutSec = Math.max(10, Number(readFlag(argv, "--timeout-sec", env("EX_LIVE_MONITOR_TIMEOUT_SECONDS", "3600"))) || 3600);
   const chunkSec = Math.max(1, Math.min(20, Number(readFlag(argv, "--chunk-sec", env("EX_LIVE_MONITOR_CHUNK_SECONDS", "2"))) || 2));
@@ -1869,6 +3096,19 @@ async function main() {
   const speechPacketActivePct = Math.max(0, Number(readFlag(argv, "--speech-packet-active-pct", env("EX_LIVE_MONITOR_SPEECH_PACKET_ACTIVE_PCT", "1.0"))) || 1.0);
   const speechPacketMaxAbs = Math.max(0, Number(readFlag(argv, "--speech-packet-max-abs", env("EX_LIVE_MONITOR_SPEECH_PACKET_MAX_ABS", "1200"))) || 1200);
   const coachEverySec = Math.max(5, Number(readFlag(argv, "--coach-every-sec", env("EX_LIVE_MONITOR_COACH_EVERY_SECONDS", "10"))) || 10);
+  const coachEnabled = !hasFlag(argv, "--no-coach")
+    && env("EX_LIVE_MONITOR_NO_COACH", "").toLowerCase() !== "true";
+  const prospectOnlyCoachEnabled = hasFlag(argv, "--prospect-only-coach")
+    || env("EX_LIVE_MONITOR_PROSPECT_ONLY_COACH", "").toLowerCase() === "true";
+  const prospectCoachModel = readFlag(
+    argv,
+    "--prospect-coach-model",
+    env("LIVE_PROSPECT_COACH_MODEL", env("LIVE_CALL_MONITOR_COACH_MODEL", env("SALES_TRAINER_COACH_MODEL", "claude-sonnet-4-6"))),
+  );
+  const prospectCoachTimeoutMs = Math.max(
+    3000,
+    Number(readFlag(argv, "--prospect-coach-timeout-ms", env("LIVE_PROSPECT_COACH_TIMEOUT_MS", "15000"))) || 15000,
+  );
   const minActivePct = Math.max(0, Number(readFlag(argv, "--min-active-pct", env("EX_LIVE_MONITOR_MIN_ACTIVE_PCT", "0.35"))) || 0);
   const sentenceHoldMs = Math.max(0, Number(readFlag(argv, "--sentence-hold-ms", env("EX_LIVE_MONITOR_SENTENCE_HOLD_MS", "4000"))) || 0);
   const language = readFlag(argv, "--language", env("EX_LIVE_MONITOR_LANGUAGE", "en"));
@@ -1877,12 +3117,20 @@ async function main() {
     "--stt-model",
     env("EX_LIVE_MONITOR_STT_MODEL", env("SALES_TRAINER_STT_MODEL", "gpt-4o-mini-transcribe")),
   );
+  const sttRealtimeEnabled = hasFlag(argv, "--stt-realtime")
+    || env("EX_LIVE_MONITOR_STT_REALTIME", "").toLowerCase() === "true";
+  const realtimeSttDelay = readFlag(
+    argv,
+    "--realtime-stt-delay",
+    env("EX_LIVE_MONITOR_REALTIME_STT_DELAY", "xhigh"),
+  ).trim();
   const sttResponseFormat = readFlag(
     argv,
     "--stt-response-format",
     env("EX_LIVE_MONITOR_STT_RESPONSE_FORMAT", /diarize/i.test(sttModel) ? "diarized_json" : "json"),
   );
-  const nativeDiarizeEnabled = !hasFlag(argv, "--no-native-diarize")
+  const nativeDiarizeEnabled = !sttRealtimeEnabled
+    && !hasFlag(argv, "--no-native-diarize")
     && (/diarize/i.test(sttModel) || String(sttResponseFormat).toLowerCase() === "diarized_json");
   const sttChunkingStrategy = readFlag(
     argv,
@@ -1897,7 +3145,7 @@ async function main() {
       "This is a live tax-relief sales call. Expect names and terms like Tax Advocate Group, Wynn Tax Solutions, WinTax Solutions, RingCentral CX, IRS, CP14, CP504, LT11, 1099, OIC, CNC, levy, lien, garnishment, unfiled returns, installment agreement, payment plan, revenue officer, and tax resolution.",
     ),
   );
-  const includeSttDomainPrimer = !hasFlag(argv, "--no-stt-domain-primer") && !nativeDiarizeEnabled;
+  const includeSttDomainPrimer = !sttRealtimeEnabled && !hasFlag(argv, "--no-stt-domain-primer") && !nativeDiarizeEnabled;
   const knownSpeakers = parseKnownSpeakerReferences(argv);
   const sessionId = readFlag(argv, "--session-id", env("EX_LIVE_MONITOR_SESSION_ID", ""));
   const controlPlaneUrl = readFlag(argv, "--control-plane-url", env("EX_LIVE_MONITOR_CONTROL_PLANE_URL", "http://127.0.0.1:5001"));
@@ -1916,7 +3164,63 @@ async function main() {
     "--speaker-model",
     env("LIVE_CALL_MONITOR_SPEAKER_MODEL", "claude-haiku-4-5"),
   );
+  const semanticTurnsEnabled = hasFlag(argv, "--semantic-turns")
+    || env("EX_LIVE_MONITOR_SEMANTIC_TURNS", "").toLowerCase() === "true";
+  const semanticTurnModelRaw = readFlag(
+    argv,
+    "--semantic-turn-model",
+    env("LIVE_CALL_MONITOR_SEMANTIC_TURN_MODEL", env("LIVE_CALL_MONITOR_COACH_MODEL", "claude-sonnet-4-6")),
+  );
+  const semanticTurnProviderRaw = readFlag(
+    argv,
+    "--semantic-turn-provider",
+    env("LIVE_CALL_MONITOR_SEMANTIC_TURN_PROVIDER", ""),
+  );
+  const semanticTurnModelParts = String(semanticTurnModelRaw || "").split(":");
+  const semanticTurnProvider = (() => {
+    const explicit = String(semanticTurnProviderRaw || "").trim().toLowerCase();
+    if (["anthropic", "openai"].includes(explicit)) return explicit;
+    if (semanticTurnModelParts.length > 1 && ["anthropic", "openai"].includes(semanticTurnModelParts[0])) {
+      return semanticTurnModelParts[0];
+    }
+    return /^gpt-|^o[0-9]/i.test(String(semanticTurnModelRaw || "")) ? "openai" : "anthropic";
+  })();
+  const semanticTurnModel = semanticTurnModelParts.length > 1 && ["anthropic", "openai"].includes(semanticTurnModelParts[0])
+    ? semanticTurnModelParts.slice(1).join(":")
+    : semanticTurnModelRaw;
+  const semanticTurnServiceTier = readFlag(
+    argv,
+    "--semantic-turn-service-tier",
+    env("EX_LIVE_MONITOR_SEMANTIC_TURN_SERVICE_TIER", ""),
+  ).trim();
+  const semanticTurnTimeoutMs = Math.max(
+    3000,
+    Number(readFlag(argv, "--semantic-turn-timeout-ms", env("EX_LIVE_MONITOR_SEMANTIC_TURN_TIMEOUT_MS", "12000"))) || 12000,
+  );
+  const semanticTurnMaxBufferChars = Math.max(
+    300,
+    Number(readFlag(argv, "--semantic-turn-max-buffer-chars", env("EX_LIVE_MONITOR_SEMANTIC_TURN_MAX_BUFFER_CHARS", "1400"))) || 1400,
+  );
+  const semanticTurnMemoryChars = Math.max(
+    600,
+    Number(readFlag(argv, "--semantic-turn-memory-chars", env("EX_LIVE_MONITOR_SEMANTIC_TURN_MEMORY_CHARS", "2400"))) || 2400,
+  );
+  const semanticTurnBatchMs = Math.max(
+    0,
+    Number(readFlag(argv, "--semantic-turn-batch-ms", env("EX_LIVE_MONITOR_SEMANTIC_TURN_BATCH_MS", "0"))) || 0,
+  );
+  const semanticTurnBatchMaxChars = Math.max(
+    400,
+    Number(readFlag(argv, "--semantic-turn-batch-max-chars", env("EX_LIVE_MONITOR_SEMANTIC_TURN_BATCH_MAX_CHARS", "1200"))) || 1200,
+  );
+  const semanticTurnRevisionMinConfidence = clampNumber(
+    readFlag(argv, "--semantic-turn-revision-min-confidence", env("EX_LIVE_MONITOR_SEMANTIC_TURN_REVISION_MIN_CONFIDENCE", "0.72")),
+    0,
+    1,
+    0.72,
+  );
   const speakerLabelsEnabled = !hasFlag(argv, "--no-speaker-labels")
+    && !semanticTurnsEnabled
     && (!nativeDiarizeEnabled || hasFlag(argv, "--speaker-labels"));
   const semanticGlueEnabled = hasFlag(argv, "--semantic-glue")
     || env("EX_LIVE_MONITOR_SEMANTIC_GLUE", "").toLowerCase() === "true";
@@ -1966,6 +3270,9 @@ async function main() {
       stageUntilSilence,
       noMaxChunk,
       coachEverySec,
+      coachEnabled,
+      prospectOnlyCoachEnabled,
+      prospectCoachModel,
       minActivePct,
       callFlow,
       initialHumanSpeaker,
@@ -1973,12 +3280,43 @@ async function main() {
       sttModel,
       sttResponseFormat,
       nativeDiarizeEnabled,
+      semanticTurnsEnabled,
+      semanticTurnProvider,
+      semanticTurnModel,
+      semanticTurnServiceTier: semanticTurnServiceTier || null,
+      semanticTurnMaxBufferChars,
+      semanticTurnMemoryChars,
+      semanticTurnBatchMs,
+      semanticTurnBatchMaxChars,
+      semanticTurnBatchChars: 0,
+      semanticTurnBatchParts: 0,
+      semanticTurnBufferChars: 0,
+      semanticCallMemory: "",
       speakerLabelsEnabled,
       speakerModel,
       semanticGlueEnabled,
       semanticGlueModel,
       semanticGlueWindowMs,
       semanticGlueMinConfidence,
+      cxGate: {
+        enabled: callGateEnabled,
+        mode: callGateMode,
+        active: !callGateEnabled,
+        pollMs: callGatePollMs,
+        agentId: cleanText(cxGateAgentIdFlag, 80) || null,
+        agentEmail: cleanText(cxGateAgentEmailFlag, 160) || null,
+        campaignId: cleanText(cxGateCampaignIdFlag, 80) || null,
+        dialGroupId: cleanText(cxGateDialGroupIdFlag, 80) || null,
+        eventSourceService: eventGated ? eventGateSourceService : null,
+      },
+      liveSuggestion: {
+        enabled: prospectOnlyCoachEnabled,
+        status: prospectOnlyCoachEnabled ? "idle" : "off",
+        text: "",
+        finalText: "",
+        model: prospectCoachModel || null,
+        sequence: 0,
+      },
     },
     transcripts: [],
     events: [],
@@ -2002,16 +3340,43 @@ async function main() {
   });
 
   const lookupToken = await rcAccessToken();
+  const monitorCredentialPrefix = monitorCredentialPrefixForExt(supervisorExtNumber);
   const monitorToken = await rcAccessToken({
-    jwtToken: process.env.RING_CENTRAL_MONITOR_JWT_TOKEN || process.env.RING_CENTRAL_JWT_TOKEN,
-    clientId: process.env.RING_CENTRAL_MONITOR_CLIENT_ID || process.env.RING_CENTRAL_CLIENT_ID,
-    clientSecret: process.env.RING_CENTRAL_MONITOR_CLIENT_SECRET || process.env.RING_CENTRAL_CLIENT_SECRET,
+    jwtToken:
+      env("RING_CENTRAL_MONITOR_JWT_TOKEN", "")
+      || namedMonitorCredential(monitorCredentialPrefix, "JWT_TOKEN")
+      || process.env.RING_CENTRAL_JWT_TOKEN,
+    clientId:
+      env("RING_CENTRAL_MONITOR_CLIENT_ID", "")
+      || namedMonitorCredential(monitorCredentialPrefix, "CLIENT_ID")
+      || process.env.RING_CENTRAL_CLIENT_ID,
+    clientSecret:
+      env("RING_CENTRAL_MONITOR_CLIENT_SECRET", "")
+      || namedMonitorCredential(monitorCredentialPrefix, "CLIENT_SECRET")
+      || process.env.RING_CENTRAL_CLIENT_SECRET,
   });
 
   const supervisorExt = await resolveExtension(lookupToken, supervisorExtNumber);
   if (!supervisorExt) throw new Error(`Could not resolve supervisor extension ${supervisorExtNumber}`);
   const agentExt = agentExtNumber ? await resolveExtension(lookupToken, agentExtNumber) : null;
   if (agentExtNumber && !agentExt) throw new Error(`Could not resolve agent extension ${agentExtNumber}`);
+  const cxGateAgentId =
+    cleanText(cxGateAgentIdFlag, 80)
+    || (agentExt?.id ? cleanText(env(`EX_LIVE_MONITOR_CX_AGENT_ID_${agentExt.id}`, ""), 80) : "")
+    || (agentExt?.id ? cleanText(env(`RINGCX_AGENT_ROUTE_${agentExt.id}_AGENT_ID`, ""), 80) : "")
+    || "";
+  const cxGateAgentEmail = cleanText(cxGateAgentEmailFlag, 160);
+  const cxGateCampaignId =
+    cleanText(cxGateCampaignIdFlag, 80)
+    || (agentExt?.id ? cleanText(env(`RINGCX_AGENT_ROUTE_${agentExt.id}_CAMPAIGN_ID`, ""), 80) : "")
+    || "";
+  const cxGateDialGroupId =
+    cleanText(cxGateDialGroupIdFlag, 80)
+    || (agentExt?.id ? cleanText(env(`RINGCX_AGENT_ROUTE_${agentExt.id}_DIAL_GROUP_ID`, ""), 80) : "")
+    || "";
+  const eventGateAgentEmail = cleanText(eventGateAgentEmailFlag || cxGateAgentEmail, 160);
+  const eventGateAgentExtensionId = agentExt?.id ? String(agentExt.id) : "";
+  const cxGateClient = cxGated ? createRingcxVoiceClient() : null;
 
   const devices = await rcRequest(lookupToken, "GET", `/restapi/v1.0/account/~/extension/${supervisorExt.id}/device`);
   const deviceRows = Array.isArray(devices?.records) ? devices.records : [];
@@ -2043,6 +3408,19 @@ async function main() {
     }
     : null;
   state.public.device = summarizeDevice(device);
+  state.public.cxGate = {
+    ...(state.public.cxGate || {}),
+    enabled: callGateEnabled,
+    mode: callGateMode,
+    active: !callGateEnabled,
+    pollMs: callGatePollMs,
+    agentId: cxGateAgentId || null,
+    agentEmail: cxGateAgentEmail || cleanText(eventGateAgentEmailFlag, 160) || null,
+    campaignId: cxGateCampaignId || null,
+    dialGroupId: cxGateDialGroupId || null,
+    eventSourceService: eventGated ? eventGateSourceService : null,
+    fake: fakeEventGate,
+  };
   state.public.status = "registering";
   broadcast();
 
@@ -2061,8 +3439,24 @@ async function main() {
   let pendingTranscript = null;
   let stagedDisplayTranscripts = [];
   let stagedTurnSequence = 0;
+  let semanticTurnBuffer = "";
+  let semanticCallMemory = "";
+  let semanticTurnSequence = 0;
+  let semanticTurnBatchItems = [];
+  let semanticTurnBatchStartedAt = 0;
+  let semanticTurnBatchSequence = 0;
+  let semanticTurnBatchFlushQueued = false;
   let lastAdviceAt = 0;
   let adviceInFlight = false;
+  const realtimeTranscriber = sttRealtimeEnabled
+    ? new OpenAiRealtimeTranscriber({
+      apiKey: process.env.OPENAI_API_KEY || "",
+      model: sttModel || "gpt-realtime-whisper",
+      language,
+      delay: realtimeSttDelay,
+      safetyIdentifier: `tagcontactbridge-ex-live-monitor-${agentExtNumber || "unknown"}`,
+    })
+    : null;
   const nativeSpeakerAssignments = new Map();
   let monitorMetadata = {
     runId,
@@ -2072,9 +3466,127 @@ async function main() {
     callFlow,
     initialHumanSpeaker,
     sessionId: sessionId || null,
+    semanticCallMemory: "",
   };
+  let prospectCoachInFlight = false;
+  let prospectCoachPendingEntry = null;
+  let prospectCoachSequence = 0;
+  let prospectCoachMemory = "";
+
+  function setLiveSuggestion(patch = {}) {
+    state.public.liveSuggestion = {
+      ...(state.public.liveSuggestion || {}),
+      enabled: prospectOnlyCoachEnabled,
+      ...patch,
+      updatedAt: new Date().toISOString(),
+    };
+    broadcast();
+  }
+
+  async function runProspectOnlyCoach(entry) {
+    if (!prospectOnlyCoachEnabled || !entry?.text) return;
+    if (prospectCoachInFlight) {
+      prospectCoachPendingEntry = entry;
+      return;
+    }
+    prospectCoachInFlight = true;
+    prospectCoachSequence += 1;
+    const sequence = prospectCoachSequence;
+    const started = Date.now();
+    const prospectText = cleanText(entry.text, 900);
+    setLiveSuggestion({
+      status: "streaming",
+      sequence,
+      text: "",
+      finalText: "",
+      prospectText,
+      startedAt: new Date(started).toISOString(),
+      elapsedMs: null,
+      model: prospectCoachModel,
+      error: null,
+    });
+    addEvent(state, eventLog, "prospect_coach.start", prospectText, {
+      entryId: entry.id,
+      sequence,
+      model: prospectCoachModel,
+    });
+    try {
+      const prompt = buildProspectOnlyCoachPrompt({
+        prospectText,
+        recentTranscripts: state.transcripts,
+        memory: prospectCoachMemory,
+        metadata: monitorMetadata,
+      });
+      let lastBroadcastAt = 0;
+      const finalText = await streamAnthropicText({
+        prompt,
+        model: prospectCoachModel,
+        timeoutMs: prospectCoachTimeoutMs,
+        onDelta(_delta, output) {
+          const now = Date.now();
+          if (now - lastBroadcastAt < 80 && output.length < 16) return;
+          lastBroadcastAt = now;
+          if ((state.public.liveSuggestion || {}).sequence !== sequence) return;
+          setLiveSuggestion({
+            status: "streaming",
+            text: output,
+            elapsedMs: now - started,
+          });
+        },
+      });
+      const cleaned = /^wait\.?$/i.test(finalText) ? "" : finalText;
+      prospectCoachMemory = cleanText([
+        prospectCoachMemory,
+        `Prospect: ${prospectText}`,
+        cleaned ? `Coach: ${cleaned}` : "Coach: WAIT",
+      ].filter(Boolean).join("\n"), 2000);
+      setLiveSuggestion({
+        status: cleaned ? "done" : "wait",
+        text: cleaned,
+        finalText: cleaned,
+        elapsedMs: Date.now() - started,
+      });
+      writeJsonLine(path.join(runDir, "prospect-coach.ndjson"), {
+        at: new Date().toISOString(),
+        sequence,
+        entryId: entry.id,
+        prospectText,
+        suggestion: cleaned,
+        rawSuggestion: finalText,
+        elapsedMs: Date.now() - started,
+        model: prospectCoachModel,
+      });
+      addEvent(state, eventLog, cleaned ? "prospect_coach.done" : "prospect_coach.wait", cleaned || "WAIT", {
+        entryId: entry.id,
+        sequence,
+        elapsedMs: Date.now() - started,
+        model: prospectCoachModel,
+      });
+    } catch (error) {
+      setLiveSuggestion({
+        status: "error",
+        error: error.message,
+        text: "",
+        finalText: "",
+        elapsedMs: Date.now() - started,
+      });
+      addEvent(state, eventLog, "prospect_coach.error", error.message, {
+        entryId: entry.id,
+        sequence,
+      });
+    } finally {
+      prospectCoachInFlight = false;
+      const pending = prospectCoachPendingEntry;
+      prospectCoachPendingEntry = null;
+      if (pending && pending !== entry) {
+        void runProspectOnlyCoach(pending);
+      }
+    }
+  }
 
   async function maybeRefreshAdvice(reason = "transcript") {
+    if (prospectOnlyCoachEnabled) return;
+    if (!coachEnabled) return;
     const now = Date.now();
     if (adviceInFlight) return;
     if (state.transcripts.length === 0) return;
@@ -2515,13 +4027,935 @@ async function main() {
       sourceChunkIds: entry.stagedSourceChunkIds,
     });
     broadcast();
+    void runProspectOnlyCoach(entry);
     void maybeRefreshAdvice("transcript-stage");
     enqueueSemanticGlue(entry, entryId);
     enqueueSpeakerLabel(entry, text, entryId);
     return true;
   }
 
+  function transcriptEntrySpeaker(entry = {}) {
+    const raw = String(entry.speakerSegments?.[0]?.speaker || "").trim().toLowerCase();
+    return SPEAKER_KEYS.includes(raw) ? raw : "unknown";
+  }
+
+  function findRecentSemanticTurnDuplicate(turn, meta = {}) {
+    const speaker = String(turn?.speaker || "unknown").trim().toLowerCase();
+    const candidateAt = Date.parse(meta.endedAt || meta.startedAt || "") || Date.now();
+    const recent = state.transcripts
+      .slice(-18)
+      .map((entry, index) => ({ entry, index }))
+      .reverse();
+
+    for (const { entry } of recent) {
+      if (!entry || entry.stageReason !== "semantic-turn") continue;
+      if (speaker !== transcriptEntrySpeaker(entry)) continue;
+      const entryAt = Date.parse(entry.endedAt || entry.at || "") || 0;
+      if (entryAt && Math.abs(candidateAt - entryAt) > 75_000) continue;
+      const relationship = semanticTurnTextRelationship(turn.text, entry.text);
+      if (relationship) return { entry, relationship };
+    }
+    return null;
+  }
+
+  function reviseSemanticDuplicateEntry(entry, turn, meta = {}, relationship = {}) {
+    const originalText = entry.text || "";
+    const revisedText = cleanText(turn.text, 3000);
+    if (!revisedText || normalizeForDedupe(revisedText) === normalizeForDedupe(originalText)) return entry;
+
+    entry.revision = (entry.revision || 0) + 1;
+    entry.text = revisedText;
+    entry.endedAt = new Date(meta.endedAt || Date.now()).toISOString();
+    entry.at = entry.endedAt;
+    entry.durationSec = Math.max(Number(entry.durationSec || 0), Number(meta.durationSec || 0));
+    entry.byteLength = Math.max(Number(entry.byteLength || 0), Number(meta.byteLength || 0));
+    entry.activePctOver500 = Math.max(Number(entry.activePctOver500 || 0), Number(meta.activePctOver500 || 0));
+    entry.elapsedMs = Math.max(Number(entry.elapsedMs || 0), Number(meta.elapsedMs || 0));
+    entry.heldChunkIds = [...new Set([
+      ...(entry.heldChunkIds || []),
+      ...(Array.isArray(meta.chunkIds) && meta.chunkIds.length ? meta.chunkIds : meta.chunkId ? [meta.chunkId] : []),
+    ])];
+    entry.speakerSegments = [{
+      speaker: turn.speaker || "unknown",
+      text: revisedText,
+      confidence: turn.confidence,
+      reason: turn.reason || relationship.reason || "semantic duplicate revision",
+    }];
+    entry.semanticTurnRevision = {
+      ...(entry.semanticTurnRevision || {}),
+      dedupe: true,
+      confidence: relationship.confidence || null,
+      reason: relationship.reason || "",
+      model: meta.semanticModel || null,
+      serviceTier: meta.semanticServiceTier || null,
+      previousText: originalText,
+      at: new Date().toISOString(),
+    };
+    writeJsonLine(path.join(runDir, "transcript-revisions.ndjson"), {
+      id: entry.id,
+      at: new Date().toISOString(),
+      revision: entry.revision,
+      semanticTurnDedupe: true,
+      action: "revise",
+      confidence: relationship.confidence || null,
+      reason: relationship.reason || "",
+      model: meta.semanticModel || null,
+      serviceTier: meta.semanticServiceTier || null,
+      previousText: originalText,
+      text: entry.text,
+    });
+    addEvent(state, eventLog, "semantic_turn.dedupe_revise", `revised duplicate semantic row: ${entry.text}`, {
+      targetId: entry.id,
+      revision: entry.revision,
+      confidence: relationship.confidence || null,
+      reason: relationship.reason || "",
+      serviceTier: meta.semanticServiceTier || null,
+    });
+    return entry;
+  }
+
+  function publishSemanticTurn(turn, meta = {}) {
+    if (!turn?.text || (turn.speaker === "system" && isSystemOnlyTranscript(turn.text))) {
+      addEvent(state, eventLog, "semantic_turn.skip", `semantic turn skipped: ${turn?.text || "(empty)"}`, {
+        reason: turn?.reason || "",
+      });
+      return null;
+    }
+    if (isLikelyDanglingSemanticTurn(turn.text)) {
+      addEvent(state, eventLog, "semantic_turn.dangling_skip", `semantic turn held as dangling: ${turn.text}`, {
+        reason: turn.reason || "",
+      });
+      return null;
+    }
+    const duplicate = findRecentSemanticTurnDuplicate(turn, meta);
+    if (duplicate?.relationship?.action === "skip") {
+      writeJsonLine(path.join(runDir, "semantic-turn-skips.ndjson"), {
+        at: new Date().toISOString(),
+        action: "skip",
+        reason: duplicate.relationship.reason || "",
+        confidence: duplicate.relationship.confidence || null,
+        existingId: duplicate.entry.id,
+        existingText: duplicate.entry.text,
+        text: turn.text,
+        chunkId: meta.chunkId || null,
+      });
+      addEvent(state, eventLog, "semantic_turn.dedupe_skip", `duplicate semantic turn skipped: ${turn.text}`, {
+        chunkId: meta.chunkId || null,
+        existingId: duplicate.entry.id,
+        confidence: duplicate.relationship.confidence || null,
+        reason: duplicate.relationship.reason || "",
+      });
+      return null;
+    }
+    if (duplicate?.relationship?.action === "revise") {
+      return reviseSemanticDuplicateEntry(duplicate.entry, turn, meta, duplicate.relationship);
+    }
+    semanticTurnSequence += 1;
+    const entryId = `${runId}-semantic-${String(semanticTurnSequence).padStart(4, "0")}`;
+    const entry = {
+      id: entryId,
+      at: new Date(meta.endedAt || Date.now()).toISOString(),
+      startedAt: new Date(meta.startedAt || Date.now()).toISOString(),
+      endedAt: new Date(meta.endedAt || Date.now()).toISOString(),
+      text: turn.text,
+      speakerSegments: [{
+        speaker: turn.speaker || "unknown",
+        text: turn.text,
+        confidence: turn.confidence,
+        reason: turn.reason || "semantic turn assembler",
+      }],
+      speakerModel: meta.semanticModel || null,
+      speakerElapsedMs: meta.elapsedMs || null,
+      speakerStatus: "semantic-turn",
+      model: meta.sttModel || sttModel,
+      responseFormat: meta.responseFormat || null,
+      semanticProvider: meta.semanticProvider || null,
+      semanticModel: meta.semanticModel || null,
+      semanticServiceTier: meta.semanticServiceTier || null,
+      semanticReason: turn.reason || "",
+      byteLength: Number(meta.byteLength || 0),
+      durationSec: Number(meta.durationSec || 0),
+      activePctOver500: Number(meta.activePctOver500 || 0),
+      elapsedMs: Number(meta.elapsedMs || 0),
+      heldChunkIds: Array.isArray(meta.chunkIds) && meta.chunkIds.length
+        ? meta.chunkIds
+        : meta.chunkId ? [meta.chunkId] : [],
+      sentenceHoldMs: 0,
+      sentenceComplete: true,
+      stageReason: "semantic-turn",
+      revision: 0,
+    };
+    state.transcripts.push(entry);
+    if (state.transcripts.length > 300) state.transcripts.splice(0, state.transcripts.length - 300);
+    writeJsonLine(path.join(runDir, "transcripts.ndjson"), entry);
+    addEvent(state, eventLog, "semantic_turn.publish", turn.text, {
+      chunkId: meta.chunkId || null,
+      entryId,
+      speaker: turn.speaker,
+      confidence: turn.confidence,
+      provider: meta.semanticProvider || null,
+      model: meta.semanticModel || null,
+      serviceTier: meta.semanticServiceTier || null,
+      elapsedMs: meta.elapsedMs || null,
+    });
+    return entry;
+  }
+
+  function applySemanticPreviousRevision(revisePrevious, meta = {}) {
+    if (!revisePrevious || revisePrevious.action === "none") return false;
+    if (revisePrevious.confidence < semanticTurnRevisionMinConfidence) return false;
+    const previousEntry = state.transcripts[state.transcripts.length - 1] || null;
+    if (!previousEntry || !revisePrevious.text) return false;
+    const originalText = previousEntry.text || "";
+    previousEntry.revision = (previousEntry.revision || 0) + 1;
+    previousEntry.text = revisePrevious.text;
+    previousEntry.endedAt = new Date(meta.endedAt || Date.now()).toISOString();
+    previousEntry.at = previousEntry.endedAt;
+    previousEntry.semanticTurnRevision = {
+      action: revisePrevious.action,
+      confidence: revisePrevious.confidence,
+      reason: revisePrevious.reason,
+      model: meta.semanticModel || null,
+      serviceTier: meta.semanticServiceTier || null,
+      at: new Date().toISOString(),
+      previousText: originalText,
+    };
+    previousEntry.speakerSegments = normalizeSpeakerSegments({
+      segments: (previousEntry.speakerSegments || []).map((segment, index) => ({
+        ...segment,
+        text: index === 0 ? revisePrevious.text : segment.text,
+      })),
+    }, revisePrevious.text);
+    writeJsonLine(path.join(runDir, "transcript-revisions.ndjson"), {
+      id: previousEntry.id,
+      at: new Date().toISOString(),
+      revision: previousEntry.revision,
+      semanticTurnRevision: true,
+      action: revisePrevious.action,
+      confidence: revisePrevious.confidence,
+      reason: revisePrevious.reason,
+      model: meta.semanticModel || null,
+      serviceTier: meta.semanticServiceTier || null,
+      previousText: originalText,
+      text: previousEntry.text,
+    });
+    addEvent(state, eventLog, "semantic_turn.revise", `revised previous row: ${previousEntry.text}`, {
+      targetId: previousEntry.id,
+      revision: previousEntry.revision,
+      action: revisePrevious.action,
+      confidence: revisePrevious.confidence,
+      serviceTier: meta.semanticServiceTier || null,
+    });
+    return true;
+  }
+
+  async function processSemanticTurnText({
+    text,
+    chunkId,
+    chunkIds,
+    startedAt,
+    endedAt,
+    transcript,
+    stats,
+    sttStarted,
+    pcmuBuffer,
+    flushReason,
+  }) {
+    const previousBuffer = semanticTurnBuffer;
+    const semanticStarted = Date.now();
+    let decision;
+    try {
+      decision = await runSemanticTurnDecision({
+        bufferText: previousBuffer,
+        newText: text,
+        recentEntries: state.transcripts,
+        callMemory: semanticCallMemory,
+        metadata: monitorMetadata,
+        flushReason,
+        provider: semanticTurnProvider,
+        model: semanticTurnModel,
+        serviceTier: semanticTurnProvider === "openai" ? semanticTurnServiceTier : "",
+        timeoutMs: semanticTurnTimeoutMs,
+        maxBufferChars: semanticTurnMaxBufferChars,
+        maxMemoryChars: semanticTurnMemoryChars,
+      });
+    } catch (error) {
+      semanticTurnBuffer = trimFromLeft(mergeTranscriptFragments([previousBuffer, text]), semanticTurnMaxBufferChars);
+      state.public.semanticTurnBufferChars = semanticTurnBuffer.length;
+      addEvent(state, eventLog, "semantic_turn.error", error.message, {
+        chunkId,
+        bufferChars: semanticTurnBuffer.length,
+      });
+      broadcast();
+      return;
+    }
+
+    semanticTurnBuffer = trimFromLeft(decision.remainingText, semanticTurnMaxBufferChars);
+    semanticCallMemory = cleanText(decision.callMemory, semanticTurnMemoryChars);
+    monitorMetadata = {
+      ...monitorMetadata,
+      semanticCallMemory,
+    };
+    state.public.semanticTurnBufferChars = semanticTurnBuffer.length;
+    state.public.semanticCallMemory = semanticCallMemory;
+    writeJsonLine(path.join(runDir, "semantic-turns.ndjson"), {
+      at: new Date().toISOString(),
+      chunkId,
+      provider: decision.provider,
+      model: decision.model,
+      serviceTier: decision.serviceTier || null,
+      rawText: text,
+      previousBuffer,
+      remainingText: semanticTurnBuffer,
+      completeTurns: decision.completeTurns,
+      revisePrevious: decision.revisePrevious,
+      callMemory: semanticCallMemory,
+      reason: decision.reason,
+      elapsedMs: Date.now() - semanticStarted,
+      usage: decision.usage || null,
+    });
+    writeJsonLine(path.join(runDir, "semantic-memory.ndjson"), {
+      at: new Date().toISOString(),
+      chunkId,
+      callMemory: semanticCallMemory,
+    });
+
+    const danglingTurns = decision.completeTurns.filter((turn) => isLikelyDanglingSemanticTurn(turn.text));
+    const publishableTurns = decision.completeTurns.filter((turn) => !isLikelyDanglingSemanticTurn(turn.text));
+    if (danglingTurns.length) {
+      semanticTurnBuffer = trimFromLeft(
+        mergeTranscriptFragments([
+          ...danglingTurns.map((turn) => turn.text),
+          semanticTurnBuffer,
+        ]),
+        semanticTurnMaxBufferChars,
+      );
+      state.public.semanticTurnBufferChars = semanticTurnBuffer.length;
+      addEvent(state, eventLog, "semantic_turn.rehold", `held dangling turn(s): ${danglingTurns.map((turn) => turn.text).join(" | ")}`, {
+        chunkId,
+        provider: decision.provider,
+        model: decision.model,
+        serviceTier: decision.serviceTier || null,
+        bufferChars: semanticTurnBuffer.length,
+      });
+    }
+
+    const revised = applySemanticPreviousRevision(decision.revisePrevious, {
+      endedAt,
+      semanticModel: decision.model,
+      semanticServiceTier: decision.serviceTier || null,
+    });
+    const published = publishableTurns
+      .map((turn) => publishSemanticTurn(turn, {
+        chunkId,
+        chunkIds,
+        startedAt,
+        endedAt,
+        sttModel: transcript.model,
+        responseFormat: transcript.responseFormat || null,
+        semanticProvider: decision.provider,
+        semanticModel: decision.model,
+        semanticServiceTier: decision.serviceTier || null,
+        byteLength: pcmuBuffer.length,
+        durationSec: Number(stats.durationSec.toFixed(2)),
+        activePctOver500: stats.activePctOver500,
+        elapsedMs: Date.now() - sttStarted,
+      }))
+      .filter(Boolean);
+
+    if (!published.length && !revised) {
+      addEvent(state, eventLog, "semantic_turn.hold", `semantic buffer held: ${semanticTurnBuffer || text}`, {
+        chunkId,
+        provider: decision.provider,
+        model: decision.model,
+        serviceTier: decision.serviceTier || null,
+        bufferChars: semanticTurnBuffer.length,
+        reason: decision.reason,
+        elapsedMs: Date.now() - semanticStarted,
+      });
+    }
+
+    if (published.length || revised) {
+      broadcast();
+      void maybeRefreshAdvice("semantic-turn");
+    } else {
+      broadcast();
+    }
+  }
+
+  function updateSemanticTurnBatchPublic() {
+    const text = mergeTranscriptFragments(semanticTurnBatchItems.map((item) => item.text));
+    state.public.semanticTurnBatchChars = text.length;
+    state.public.semanticTurnBatchParts = semanticTurnBatchItems.length;
+    return text;
+  }
+
+  async function flushSemanticTurnBatch(reason = "timer") {
+    if (!semanticTurnBatchItems.length) return false;
+    const items = semanticTurnBatchItems;
+    semanticTurnBatchItems = [];
+    semanticTurnBatchStartedAt = 0;
+    updateSemanticTurnBatchPublic();
+
+    const text = mergeTranscriptFragments(items.map((item) => item.text));
+    semanticTurnBatchSequence += 1;
+    const batchId = `${runId}-semantic-batch-${String(semanticTurnBatchSequence).padStart(4, "0")}`;
+    const first = items[0];
+    const last = items[items.length - 1];
+    const chunkIds = [...new Set(items.map((item) => item.chunkId).filter(Boolean))];
+    const pcmuBuffer = Buffer.concat(items.map((item) => item.pcmuBuffer).filter(Boolean));
+    const durationSec = items.reduce((sum, item) => sum + Number(item.stats?.durationSec || 0), 0);
+    const activePctOver500 = Math.max(...items.map((item) => Number(item.stats?.activePctOver500 || 0)));
+    writeJsonLine(path.join(runDir, "semantic-turn-batches.ndjson"), {
+      at: new Date().toISOString(),
+      batchId,
+      reason,
+      sourceChunkIds: chunkIds,
+      text,
+      parts: items.length,
+      durationSec: Number(durationSec.toFixed(2)),
+      activePctOver500,
+    });
+    addEvent(state, eventLog, "semantic_turn.batch_flush", `semantic batch ${batchId} (${items.length} chunks)`, {
+      batchId,
+      reason,
+      sourceChunkIds: chunkIds,
+      chars: text.length,
+    });
+    if (!text || isLowSignalTranscript(text)) {
+      addEvent(state, eventLog, "semantic_turn.batch_skip", `semantic batch skipped: ${text || "(empty)"}`, {
+        batchId,
+        reason,
+      });
+      broadcast();
+      return false;
+    }
+    await processSemanticTurnText({
+      text,
+      chunkId: batchId,
+      chunkIds,
+      startedAt: first.startedAt,
+      endedAt: last.endedAt,
+      transcript: {
+        model: last.transcript?.model || sttModel,
+        responseFormat: last.transcript?.responseFormat || sttResponseFormat || null,
+      },
+      stats: {
+        durationSec,
+        activePctOver500,
+      },
+      sttStarted: Math.min(...items.map((item) => Number(item.sttStarted || Date.now()))),
+      pcmuBuffer,
+      flushReason: `semantic-batch:${reason}`,
+    });
+    return true;
+  }
+
+  function enqueueSemanticTurnBatchFlush(reason = "timer") {
+    if (!semanticTurnsEnabled || semanticTurnBatchMs <= 0 || !semanticTurnBatchItems.length || semanticTurnBatchFlushQueued) return;
+    semanticTurnBatchFlushQueued = true;
+    transcriptionQueue = transcriptionQueue
+      .then(async () => {
+        semanticTurnBatchFlushQueued = false;
+        await flushSemanticTurnBatch(reason);
+      })
+      .catch((error) => {
+        semanticTurnBatchFlushQueued = false;
+        addEvent(state, eventLog, "semantic_turn.batch_error", error.message);
+        broadcast();
+      });
+  }
+
+  async function stageSemanticTurnText(args) {
+    if (semanticTurnBatchMs <= 0) {
+      await processSemanticTurnText(args);
+      return;
+    }
+    if (!semanticTurnBatchStartedAt) semanticTurnBatchStartedAt = Date.now();
+    semanticTurnBatchItems.push(args);
+    const text = updateSemanticTurnBatchPublic();
+    writeJsonLine(path.join(runDir, "semantic-turn-batch-stage.ndjson"), {
+      at: new Date().toISOString(),
+      chunkId: args.chunkId,
+      flushReason: args.flushReason,
+      text: args.text,
+      batchChars: text.length,
+      batchParts: semanticTurnBatchItems.length,
+    });
+    const ageMs = Date.now() - semanticTurnBatchStartedAt;
+    const forceFlush = ["silence", "call-disposed", "shutdown"].includes(args.flushReason);
+    if (forceFlush || ageMs >= semanticTurnBatchMs || text.length >= semanticTurnBatchMaxChars) {
+      await flushSemanticTurnBatch(forceFlush ? args.flushReason : text.length >= semanticTurnBatchMaxChars ? "max-chars" : "timer");
+      return;
+    }
+    addEvent(state, eventLog, "semantic_turn.batch_hold", `semantic batch holding ${semanticTurnBatchItems.length} chunk(s)`, {
+      chunkId: args.chunkId,
+      chars: text.length,
+      ageMs,
+      targetMs: semanticTurnBatchMs,
+    });
+    broadcast();
+  }
+
+  let cxGateLastPollAt = 0;
+  let cxGateLastPollPromise = null;
+  let appEventGateLastPollAt = 0;
+  let appEventGateLastPollPromise = null;
+  let appEventMongoReady = false;
+  let fakeGateEvent = null;
+  const cxGateState = {
+    enabled: callGateEnabled,
+    mode: callGateMode,
+    active: !callGateEnabled,
+    currentUii: null,
+    sessionSequence: 0,
+    lastReason: callGateEnabled ? "not-polled" : "disabled",
+    lastError: null,
+    lastPollAt: null,
+    lastMatch: null,
+  };
+
+  function publishCxGateState() {
+    state.public.cxGate = {
+      enabled: cxGateState.enabled,
+      mode: cxGateState.mode,
+      active: cxGateState.active,
+      currentUii: cxGateState.currentUii,
+      sessionSequence: cxGateState.sessionSequence,
+      lastReason: cxGateState.lastReason,
+      lastError: cxGateState.lastError,
+      lastPollAt: cxGateState.lastPollAt,
+      lastMatch: cxGateState.lastMatch,
+      pollMs: callGatePollMs,
+      agentId: cxGateAgentId || null,
+      agentEmail: eventGateAgentEmail || cxGateAgentEmail || null,
+      campaignId: cxGateCampaignId || null,
+      dialGroupId: cxGateDialGroupId || null,
+      eventSourceService: eventGated ? eventGateSourceService : null,
+      eventAgentExtensionId: eventGated ? eventGateAgentExtensionId || null : null,
+      fake: fakeEventGate,
+    };
+  }
+
+  function resetLogicalTranscriptState() {
+    state.transcripts = [];
+    state.advice = null;
+    pendingTranscript = null;
+    stagedDisplayTranscripts = [];
+    semanticTurnBuffer = "";
+    semanticCallMemory = "";
+    prospectCoachMemory = "";
+    prospectCoachPendingEntry = null;
+    nativeSpeakerAssignments.clear();
+    lastAdviceAt = 0;
+    monitorMetadata = {
+      ...monitorMetadata,
+      semanticCallMemory: "",
+    };
+    state.public.semanticTurnBufferChars = 0;
+    state.public.semanticCallMemory = "";
+    setLiveSuggestion({
+      status: prospectOnlyCoachEnabled ? "idle" : "off",
+      text: "",
+      finalText: "",
+      prospectText: "",
+      elapsedMs: null,
+      error: null,
+    });
+  }
+
+  function summarizeGateEvent(event = null) {
+    if (!event) return null;
+    return {
+      id: event.id || null,
+      createdAt: event.createdAt || null,
+      source: event.source || null,
+      eventType: event.eventType || null,
+      queueItemId: event.queueItemId || null,
+      caseId: event.caseId || null,
+      extensionId: event.extensionId || null,
+      agentName: event.agentName || null,
+      agentEmail: event.agentEmail || null,
+      uii: event.uii || null,
+      callSessionId: event.callSessionId || null,
+      confirmedCall: event.confirmedCall,
+      fake: Boolean(event.fake),
+    };
+  }
+
+  function gateMatchId(match) {
+    return cleanText(
+      match?.event?.uii
+        || match?.event?.callSessionId
+        || match?.event?.id
+        || extractRingcxActiveCallUii(match?.call)
+        || "",
+      160,
+    ) || `gate-${Date.now()}`;
+  }
+
+  function activateCxGate(match) {
+    const uii = gateMatchId(match);
+    if (cxGateState.active && cxGateState.currentUii === uii) return;
+    if (cxGateState.currentUii !== uii) {
+      cxGateState.sessionSequence += 1;
+      resetPending();
+      resetLogicalTranscriptState();
+      monitorMetadata = {
+        ...monitorMetadata,
+        cxUii: uii,
+        cxGateSession: cxGateState.sessionSequence,
+        cxGateMatchReasons: match?.reasons || [],
+        cxGateQueryScope: match?.queryScope || null,
+        appEventId: match?.event?.id || null,
+        queueItemId: match?.event?.queueItemId || null,
+        caseId: match?.event?.caseId || null,
+        agentEmail: match?.event?.agentEmail || eventGateAgentEmail || null,
+      };
+    }
+    cxGateState.active = true;
+    cxGateState.currentUii = uii;
+    cxGateState.lastReason = `${callGateMode}-active`;
+    cxGateState.lastError = null;
+    cxGateState.lastMatch = {
+      uii,
+      reasons: match?.reasons || [],
+      queryScope: match?.queryScope || null,
+      summary: match?.event ? summarizeGateEvent(match.event) : summarizeRingcxActiveCall(match?.call),
+    };
+    publishCxGateState();
+    addEvent(state, eventLog, "cx_gate.active", `call gate active: ${uii}`, {
+      uii,
+      sessionSequence: cxGateState.sessionSequence,
+      reasons: match?.reasons || [],
+      queryScope: match?.queryScope || null,
+      mode: callGateMode,
+      summary: match?.event ? summarizeGateEvent(match.event) : summarizeRingcxActiveCall(match?.call),
+    });
+    broadcast();
+  }
+
+  function deactivateCxGate(reason = "no-active-call") {
+    if (cxGateState.active && cxGateState.currentUii && stagedDisplayTranscripts.length) {
+      publishStagedTurn("cx-ended");
+    }
+    if (cxGateState.active || cxGateState.currentUii) {
+      addEvent(state, eventLog, "cx_gate.idle", `CX gate idle: ${reason}`, {
+        previousUii: cxGateState.currentUii,
+      });
+    }
+    cxGateState.active = false;
+    cxGateState.currentUii = null;
+    cxGateState.lastReason = reason;
+    cxGateState.lastMatch = null;
+    monitorMetadata = {
+      ...monitorMetadata,
+      cxUii: null,
+      cxGateMatchReasons: [],
+      cxGateQueryScope: null,
+      appEventId: null,
+      queueItemId: null,
+      caseId: null,
+    };
+    resetPending();
+    publishCxGateState();
+    broadcast();
+  }
+
+  function normalizeAppGateEvent(record, source = "mongo") {
+    const payload = record?.payload || record || {};
+    const createdAt = record?.createdAt || payload.createdAt || payload.placedAt || new Date();
+    const id = record?._id ? String(record._id) : payload.id || `fake-${Date.now()}`;
+    return {
+      id,
+      source,
+      eventType: record?.eventType || payload.eventType || "cx.call.placed",
+      createdAt: new Date(createdAt).toISOString(),
+      createdAtMs: Date.parse(createdAt) || Date.now(),
+      expiresAtMs: Number(payload.expiresAtMs || 0) || null,
+      queueItemId: cleanText(payload.queueItemId || record?.aggregateId || "", 120),
+      caseId: payload.caseId || record?.aggregateId || null,
+      extensionId: cleanText(payload.extensionId || "", 80),
+      agentName: cleanText(payload.agentName || "", 120),
+      agentEmail: cleanText(payload.agentEmail || "", 180),
+      uii: cleanText(payload.uii || "", 120),
+      callSessionId: cleanText(payload.callSessionId || "", 160),
+      confirmedCall: payload.confirmedCall,
+      fake: source === "fake",
+    };
+  }
+
+  function appGateEventMatchesAgent(event) {
+    if (!event) return false;
+    const eventExtId = String(event.extensionId || "").trim();
+    const eventEmail = String(event.agentEmail || "").trim().toLowerCase();
+    if (eventGateAgentExtensionId && eventExtId === String(eventGateAgentExtensionId)) return true;
+    if (eventGateAgentEmail && eventEmail === String(eventGateAgentEmail).toLowerCase()) return true;
+    return !eventGateAgentExtensionId && !eventGateAgentEmail;
+  }
+
+  function createFakeGateEvent({ durationSec = null, caseId = null, queueItemId = null } = {}) {
+    const now = Date.now();
+    const seconds = Math.max(5, Number(durationSec || eventGateActiveSec) || eventGateActiveSec);
+    const fakeId = `fake-${timestampForFile()}-${crypto.randomBytes(3).toString("hex")}`;
+    return normalizeAppGateEvent({
+      payload: {
+        id: fakeId,
+        eventType: "cx.call.placed",
+        placedAt: new Date(now).toISOString(),
+        expiresAtMs: now + seconds * 1000,
+        queueItemId: queueItemId || `fake-queue-${fakeId}`,
+        caseId: caseId || "fake-case",
+        extensionId: eventGateAgentExtensionId,
+        agentName: agentExt?.name || null,
+        agentEmail: eventGateAgentEmail || null,
+        callSessionId: `fake-call-${fakeId}`,
+        confirmedCall: true,
+      },
+    }, "fake");
+  }
+
+  state.actions = {
+    fakeCallStart({ durationSec = null, caseId = null, queueItemId = null } = {}) {
+      if (!eventGated) return { ok: false, error: "start this monitor with --event-gated or --fake-event-gate" };
+      fakeGateEvent = createFakeGateEvent({ durationSec, caseId, queueItemId });
+      activateCxGate({
+        event: fakeGateEvent,
+        reasons: ["fake-event"],
+        queryScope: "memory",
+      });
+      return { ok: true, gate: state.public.cxGate, event: summarizeGateEvent(fakeGateEvent) };
+    },
+    fakeCallStop({ reason = "manual-fake-stop" } = {}) {
+      fakeGateEvent = null;
+      deactivateCxGate(reason);
+      return { ok: true, gate: state.public.cxGate };
+    },
+  };
+
+  async function ensureAppEventMongo() {
+    if (appEventMongoReady) return;
+    await connectMongo(getSharedConfig());
+    appEventMongoReady = true;
+  }
+
+  async function latestMatchingAppGateEvent() {
+    await ensureAppEventMongo();
+    const cutoffMs = eventGateLookbackSec > 0 ? Date.now() - eventGateLookbackSec * 1000 : 0;
+    const rows = await EventRecord.find({
+      eventType: "cx.call.placed",
+      sourceService: eventGateSourceService,
+    })
+      .sort({ _id: -1 })
+      .limit(eventGateLookbackLimit)
+      .lean();
+    return rows
+      .map((record) => normalizeAppGateEvent(record, "mongo"))
+      .find((event) => event.createdAtMs >= cutoffMs && appGateEventMatchesAgent(event)) || null;
+  }
+
+  async function isAppGateClosed(event) {
+    if (!event?.queueItemId || event.fake) return false;
+    await ensureAppEventMongo();
+    const close = await WorkflowRecord.findOne({
+      family: "cx",
+      subtype: "disposition-hangup",
+      stage: "completed",
+      aggregateType: "dial-request",
+      aggregateId: String(event.queueItemId),
+    })
+      .sort({ _id: -1 })
+      .lean();
+    if (!close) return false;
+    const closeMs = Date.parse(close.happenedAt || close.createdAt || "") || 0;
+    return closeMs >= event.createdAtMs - 2000;
+  }
+
+  async function refreshAppEventGate(force = false) {
+    if (!eventGated) return cxGateState;
+    const now = Date.now();
+    if (!force && now - appEventGateLastPollAt < eventGatePollMs) return cxGateState;
+    if (appEventGateLastPollPromise) return appEventGateLastPollPromise;
+    appEventGateLastPollAt = now;
+    appEventGateLastPollPromise = (async () => {
+      cxGateState.lastPollAt = new Date().toISOString();
+      try {
+        if (fakeGateEvent) {
+          if (fakeGateEvent.expiresAtMs && fakeGateEvent.expiresAtMs <= Date.now()) {
+            fakeGateEvent = null;
+            deactivateCxGate("fake-event-expired");
+            return cxGateState;
+          }
+          activateCxGate({ event: fakeGateEvent, reasons: ["fake-event"], queryScope: "memory" });
+          return cxGateState;
+        }
+
+        if (fakeEventGate) {
+          deactivateCxGate("waiting-for-fake-event");
+          return cxGateState;
+        }
+
+        const event = await latestMatchingAppGateEvent();
+        if (!event) {
+          deactivateCxGate("no-app-call-event");
+          return cxGateState;
+        }
+        const ageMs = Date.now() - event.createdAtMs;
+        if (ageMs > eventGateActiveSec * 1000) {
+          deactivateCxGate("app-call-event-expired");
+          return cxGateState;
+        }
+        if (await isAppGateClosed(event)) {
+          deactivateCxGate("app-disposition-hangup");
+          return cxGateState;
+        }
+        activateCxGate({
+          event,
+          reasons: ["app-cx-call-placed"],
+          queryScope: "event-core",
+        });
+        return cxGateState;
+      } catch (error) {
+        cxGateState.lastError = error.message;
+        cxGateState.lastReason = "event-poll-error";
+        publishCxGateState();
+        addEvent(state, eventLog, "cx_gate.error", error.message);
+        broadcast();
+        return cxGateState;
+      } finally {
+        appEventGateLastPollPromise = null;
+      }
+    })();
+    return appEventGateLastPollPromise;
+  }
+
+  function findCxGateMatch(activePayload, { queryScope = "ACCOUNT", scopedToAgent = false } = {}) {
+    const calls = coerceRingcxActiveCallList(activePayload);
+    const scored = calls
+      .map((call) => ({
+        call,
+        queryScope,
+        ...scoreRingcxGateCall(call, {
+          agentCxAgentId: cxGateAgentId,
+          agentEmail: cxGateAgentEmail,
+          agentExtId: agentExt?.id,
+          campaignId: cxGateCampaignId,
+          dialGroupId: cxGateDialGroupId,
+        }),
+      }))
+      .filter((item) => item.score > 0)
+      .sort((left, right) => right.score - left.score);
+    if (scopedToAgent && scored.length === 1 && extractRingcxActiveCallUii(scored[0].call)) {
+      scored[0].reasons = [...new Set([...(scored[0].reasons || []), "single-agent-active-call"])];
+      return scored[0];
+    }
+    const top = scored[0];
+    if (!top) return null;
+    const hasSpecificMatch = (top.reasons || []).some((reason) =>
+      ["agentCxAgentId", "agentEmail", "agentExtId", "campaignId", "dialGroupId"].includes(reason),
+    );
+    if (!scopedToAgent && !hasSpecificMatch) return null;
+    return top;
+  }
+
+  async function refreshCxGate(force = false) {
+    if (!cxGated) return cxGateState;
+    const now = Date.now();
+    if (!force && now - cxGateLastPollAt < cxGatePollMs) return cxGateState;
+    if (cxGateLastPollPromise) return cxGateLastPollPromise;
+    cxGateLastPollAt = now;
+    cxGateLastPollPromise = (async () => {
+      cxGateState.lastPollAt = new Date().toISOString();
+      try {
+        const querySpecs = [];
+        if (cxGateAgentId) {
+          querySpecs.push({ product: "AGENT", productId: cxGateAgentId, scopedToAgent: true });
+        }
+        if (
+          !cxGateAgentId
+          || hasFlag(argv, "--cx-gate-account-fallback")
+          || cxGateCampaignId
+          || cxGateDialGroupId
+        ) {
+          querySpecs.push({ product: "ACCOUNT", productId: cxGateClient.config?.accountId, scopedToAgent: false });
+        }
+
+        let sawUnavailableScope = false;
+        let sawSuccessfulScope = false;
+        for (const spec of querySpecs) {
+          let payload = null;
+          try {
+            payload = await cxGateClient.listActiveCalls({
+              product: spec.product,
+              productId: spec.productId,
+            });
+            sawSuccessfulScope = true;
+          } catch (error) {
+            if (/activeCalls\/list failed: 500/i.test(String(error?.message || ""))) {
+              sawUnavailableScope = true;
+              continue;
+            }
+            throw error;
+          }
+          const calls = coerceRingcxActiveCallList(payload);
+          if (calls.length) {
+            addEvent(state, eventLog, "cx_gate.seen", `${spec.product} activeCalls=${calls.length}`, {
+              product: spec.product,
+              calls: calls.slice(0, 5).map(summarizeRingcxActiveCall),
+            });
+          }
+          const match = findCxGateMatch(payload, {
+            queryScope: spec.product,
+            scopedToAgent: spec.scopedToAgent,
+          });
+          if (match) {
+            activateCxGate(match);
+            return cxGateState;
+          }
+        }
+        deactivateCxGate(
+          sawSuccessfulScope
+            ? "no-active-cx-call"
+            : sawUnavailableScope
+              ? "active-call-list-empty-or-unavailable"
+              : "no-active-cx-call",
+        );
+        return cxGateState;
+      } catch (error) {
+        if (/activeCalls\/list failed: 500/i.test(String(error?.message || ""))) {
+          deactivateCxGate("active-call-list-empty-or-unavailable");
+          return cxGateState;
+        }
+        cxGateState.lastError = error.message;
+        cxGateState.lastReason = "poll-error";
+        publishCxGateState();
+        addEvent(state, eventLog, "cx_gate.error", error.message);
+        broadcast();
+        return cxGateState;
+      } finally {
+        cxGateLastPollPromise = null;
+      }
+    })();
+    return cxGateLastPollPromise;
+  }
+
+  async function refreshCallGate(force = false) {
+    if (eventGated) return refreshAppEventGate(force);
+    if (cxGated) return refreshCxGate(force);
+    return cxGateState;
+  }
+
   async function processAudioChunk({ pcmuBuffer, chunkId, startedAt, endedAt, stats, flushReason = "interval" }) {
+    const gate = await refreshCallGate(false);
+    if (callGateEnabled && !gate.active) {
+      addEvent(state, eventLog, "cx_gate.drop", `chunk dropped while CX gate idle (${gate.lastReason})`, {
+        chunkId,
+        stats,
+      });
+      broadcast();
+      return;
+    }
+
     const activePct = Number(stats.activePctOver500 || 0);
     if (activePct < minActivePct) {
       addEvent(state, eventLog, "chunk.skip", `quiet chunk skipped (${activePct}% active)`, {
@@ -2532,14 +4966,16 @@ async function main() {
       return;
     }
 
-    const wav = buildPcm16WavFromPcmu(pcmuBuffer);
+    const wav = sttRealtimeEnabled ? null : buildPcm16WavFromPcmu(pcmuBuffer);
     const wavPath = path.join(runDir, `${chunkId}.wav`);
-    if (writeWavChunks) fs.writeFileSync(wavPath, wav);
+    if (writeWavChunks && wav) fs.writeFileSync(wavPath, wav);
 
     addEvent(state, eventLog, "stt.start", `transcribing ${chunkId}`, {
       chunkId,
       durationSec: stats.durationSec,
       activePctOver500: stats.activePctOver500,
+      realtime: sttRealtimeEnabled,
+      realtimeDelay: sttRealtimeEnabled ? realtimeSttDelay : null,
     });
     const sttStarted = Date.now();
     const liveSttPrompt = buildLiveSttPrompt({
@@ -2549,20 +4985,25 @@ async function main() {
         ...stagedDisplayTranscripts.map((item) => ({ text: item.text })),
       ],
     });
-    const transcript = await transcribeSalesTrainerAudio({
-      buffer: wav,
-      mimeType: "audio/wav",
-      filename: `${chunkId}.wav`,
-      language,
-      model: sttModel,
-      responseFormat: sttResponseFormat,
-      prompt: liveSttPrompt,
-      includeDomainPrimer: includeSttDomainPrimer,
-      chunkingStrategy: sttChunkingStrategy,
-      knownSpeakerNames: knownSpeakers.names,
-      knownSpeakerReferences: knownSpeakers.references,
-      timeoutMs: 20_000,
-    });
+    const transcript = sttRealtimeEnabled
+      ? await realtimeTranscriber.transcribePcmu({
+        pcmuBuffer,
+        timeoutMs: 45_000,
+      })
+      : await transcribeSalesTrainerAudio({
+        buffer: wav,
+        mimeType: "audio/wav",
+        filename: `${chunkId}.wav`,
+        language,
+        model: sttModel,
+        responseFormat: sttResponseFormat,
+        prompt: liveSttPrompt,
+        includeDomainPrimer: includeSttDomainPrimer,
+        chunkingStrategy: sttChunkingStrategy,
+        knownSpeakerNames: knownSpeakers.names,
+        knownSpeakerReferences: knownSpeakers.references,
+        timeoutMs: 20_000,
+      });
     const priorTexts = [
       ...state.transcripts.slice(-8).map((entry) => entry.text),
       ...stagedDisplayTranscripts.slice(-4).map((entry) => entry.text),
@@ -2578,6 +5019,21 @@ async function main() {
         rawText: cleanText(transcript.text || "", 500),
       });
       broadcast();
+      return;
+    }
+
+    if (semanticTurnsEnabled) {
+      await stageSemanticTurnText({
+        text,
+        chunkId,
+        startedAt,
+        endedAt,
+        transcript,
+        stats,
+        sttStarted,
+        pcmuBuffer,
+        flushReason,
+      });
       return;
     }
 
@@ -2709,6 +5165,7 @@ async function main() {
           revision: previousEntry.revision,
         });
         broadcast();
+        void runProspectOnlyCoach(previousEntry);
         void maybeRefreshAdvice("transcript-repair");
         enqueueSpeakerLabel(previousEntry, previousEntry.text, previousEntry.id);
         return;
@@ -2722,6 +5179,7 @@ async function main() {
         model: entry.model,
       });
       broadcast();
+      void runProspectOnlyCoach(entry);
       void maybeRefreshAdvice("transcript");
 
       enqueueSemanticGlue(entry, entryId);
@@ -2758,6 +5216,9 @@ async function main() {
           broadcast();
         });
     }
+    if (semanticTurnsEnabled && semanticTurnBatchMs > 0 && reason === "silence-only") {
+      enqueueSemanticTurnBatchFlush(reason);
+    }
   }
 
   function notePendingAudio(payload, now = Date.now()) {
@@ -2780,6 +5241,11 @@ async function main() {
     if (!pendingBytes || !pendingStartedAt) return;
     const now = Date.now();
     const ageMs = now - pendingStartedAt;
+    if (callGateEnabled && !cxGateState.active) {
+      const inactiveDropMs = splitOnSilence ? silenceSplitMs : chunkSec * 1000;
+      if (ageMs >= inactiveDropMs) dropPending("cx-gate-inactive");
+      return;
+    }
     if (!splitOnSilence) {
       if (ageMs >= chunkSec * 1000) flushPending(reason);
       return;
@@ -2801,6 +5267,10 @@ async function main() {
 
   function flushPending(reason = "interval") {
     if (!pendingBytes) return;
+    if (callGateEnabled && !cxGateState.active) {
+      dropPending("cx-gate-inactive");
+      return;
+    }
     const pcmuBuffer = Buffer.concat(pendingChunks, pendingBytes);
     const startedAt = pendingStartedAt || Date.now();
     const endedAt = Date.now();
@@ -2861,8 +5331,11 @@ async function main() {
         state.public.packetCount = packetCount;
         state.public.byteCount = byteCount;
         if (fullAudioStream) fullAudioStream.write(payload);
-        notePendingAudio(payload);
-        maybeFlushPendingByPolicy("interval");
+        const aiProcessingAllowed = !callGateEnabled || cxGateState.active;
+        if (aiProcessingAllowed) {
+          notePendingAudio(payload);
+          maybeFlushPendingByPolicy("interval");
+        }
         if (packetCount % 250 === 0) {
           addEvent(state, eventLog, "audio", `packets=${packetCount} bytes=${byteCount}`);
           broadcast();
@@ -2893,11 +5366,14 @@ async function main() {
   if (stageUntilSilence) console.log("  publish:    stage STT chunks, send merged turn after silence");
   console.log(`  call flow:  ${callFlow}, initial human=${initialHumanSpeaker}`);
   console.log(`  sentences:  hold fragments up to ${sentenceHoldMs}ms`);
-  console.log(`  stt:        ${sttModel}, format=${sttResponseFormat}${sttChunkingStrategy ? `, chunking=${sttChunkingStrategy}` : ""}`);
+  console.log(`  stt:        ${sttRealtimeEnabled ? `realtime:${sttModel}, delay=${realtimeSttDelay || "default"}` : `${sttModel}, format=${sttResponseFormat}${sttChunkingStrategy ? `, chunking=${sttChunkingStrategy}` : ""}`}`);
   console.log(`  stt prompt: ${includeSttDomainPrimer ? "domain primer + live context" : nativeDiarizeEnabled ? "off (diarize does not support prompts)" : "live context only"}`);
   if (knownSpeakers.names.length) console.log(`  speakers ref: ${knownSpeakers.names.join(", ")}`);
-  console.log(`  coach:      every ${coachEverySec}s, model=${coachModel}`);
+  console.log(`  semantic:   ${semanticTurnsEnabled ? `${semanticTurnProvider}:${semanticTurnModel}${semanticTurnServiceTier ? ` tier=${semanticTurnServiceTier}` : ""}, batch=${semanticTurnBatchMs ? `${semanticTurnBatchMs}ms` : "off"}, buffer<=${semanticTurnMaxBufferChars}, memory<=${semanticTurnMemoryChars}` : "off"}`);
+  console.log(`  coach:      ${coachEnabled ? `every ${coachEverySec}s, model=${coachModel}` : "off"}`);
+  if (prospectOnlyCoachEnabled) console.log(`  next-line:  streaming prospect-only coach, model=${prospectCoachModel}`);
   console.log(`  speakers:   ${nativeDiarizeEnabled ? "native diarize" : speakerLabelsEnabled ? speakerModel : "off"}`);
+  console.log(`  call gate:  ${callGateEnabled ? `${callGateMode}, poll=${callGatePollMs}ms, agentExtId=${eventGateAgentExtensionId || "none"}, agentEmail=${eventGateAgentEmail || cxGateAgentEmail || "none"}` : "off"}`);
   console.log(`  ui bridge:  ${sessionId ? `session=${sessionId}` : "off"}`);
 
   await softphone.register();
@@ -2905,8 +5381,25 @@ async function main() {
   addEvent(state, eventLog, "register", "headless AI Monitor phone registered");
   broadcast();
 
+  let cxGateTimer = null;
+  if (callGateEnabled) {
+    publishCxGateState();
+    void refreshCallGate(true);
+    cxGateTimer = setInterval(() => {
+      void refreshCallGate(false);
+    }, callGatePollMs);
+    if (fakeEventGate) {
+      setTimeout(() => {
+        if (!fakeGateEvent && !cxGateState.active) {
+          state.actions.fakeCallStart({ durationSec: eventGateActiveSec });
+        }
+      }, fakeEventAfterSec * 1000);
+    }
+  }
+
   if (doSupervise) {
     const startedWaiting = Date.now();
+    const callStartAfterMs = onlyNewCalls ? startedWaiting - 1000 : 0;
     let result = null;
     let lastSuperviseError = null;
     while (!result && Date.now() - startedWaiting <= superviseWaitSec * 1000) {
@@ -2919,6 +5412,7 @@ async function main() {
           supervisorDeviceId: device.id,
           partyMode,
           callPickMode,
+          callStartAfterMs,
         });
       } catch (error) {
         lastSuperviseError = error;
@@ -2929,7 +5423,7 @@ async function main() {
           error: cleanText(error.message, 240),
         });
         broadcast();
-        await sleep(2000);
+        await sleep(supervisePollMs);
       }
     }
     if (!result) {
@@ -2952,6 +5446,15 @@ async function main() {
 
   const flushTimer = setInterval(() => {
     maybeFlushPendingByPolicy("timer");
+    if (
+      semanticTurnsEnabled &&
+      semanticTurnBatchMs > 0 &&
+      semanticTurnBatchItems.length &&
+      semanticTurnBatchStartedAt &&
+      Date.now() - semanticTurnBatchStartedAt >= semanticTurnBatchMs
+    ) {
+      enqueueSemanticTurnBatchFlush("timer");
+    }
   }, 500);
   const stopAt = Date.now() + timeoutSec * 1000;
 
@@ -2962,16 +5465,22 @@ async function main() {
     }
   } finally {
     clearInterval(flushTimer);
+    if (cxGateTimer) clearInterval(cxGateTimer);
     flushPending("shutdown");
     await transcriptionQueue.catch(() => {});
+    await flushSemanticTurnBatch("shutdown").catch((error) => addEvent(state, eventLog, "semantic_turn.batch_error", error.message));
     if (stageUntilSilence) publishStagedTurn("shutdown");
     if (state.transcripts.length) await maybeRefreshAdvice("forced");
     if (activeSession && !activeSession.disposed) {
       addEvent(state, eventLog, "timeout", "hanging up active monitor call");
       await activeSession.hangup().catch((error) => addEvent(state, eventLog, "hangup.error", error.message));
     }
+    if (realtimeTranscriber) realtimeTranscriber.close();
     closeOutput();
     softphone.revoke();
+    if (appEventMongoReady) {
+      await disconnectMongo().catch((error) => addEvent(state, eventLog, "mongo.disconnect.error", error.message));
+    }
     state.public.status = "stopped";
     addEvent(state, eventLog, "stop", "monitor stopped", {
       outputPath: outputPath || null,

@@ -2,7 +2,9 @@
 
 const express = require("express");
 const crypto = require("crypto");
+const { spawn } = require("node:child_process");
 const { Readable } = require("stream");
+const ffmpegPath = require("ffmpeg-static");
 
 const {
   createGoogleDriveClient,
@@ -34,6 +36,7 @@ const RESPONSE_HEADERS_TO_FORWARD = [
   "last-modified",
   "cache-control",
 ];
+const WAV_FORMAT_GSM610 = 0x31;
 
 function timingSafeStringEqual(a, b) {
   const ba = Buffer.from(String(a || ""), "utf8");
@@ -91,6 +94,134 @@ function isViewerAllowed(viewer, allowedSet) {
   if (!allowedSet || allowedSet.size === 0) return true;
   const normalized = String(viewer || "").trim().toLowerCase();
   return allowedSet.has(normalized);
+}
+
+function isWavRecording(file = {}) {
+  const name = String(file.name || "").toLowerCase();
+  const mime = String(file.mimeType || "").toLowerCase();
+  return name.endsWith(".wav") || mime.includes("wav") || mime.includes("wave");
+}
+
+function parseWavFormat(buffer) {
+  if (!Buffer.isBuffer(buffer) || buffer.length < 32) return null;
+  if (buffer.toString("ascii", 0, 4) !== "RIFF") return null;
+  if (buffer.toString("ascii", 8, 12) !== "WAVE") return null;
+  let offset = 12;
+  while (offset + 24 <= buffer.length) {
+    const chunkId = buffer.toString("ascii", offset, offset + 4);
+    const chunkSize = buffer.readUInt32LE(offset + 4);
+    if (chunkId === "fmt ") {
+      return {
+        audioFormat: buffer.readUInt16LE(offset + 8),
+        channels: buffer.readUInt16LE(offset + 10),
+        sampleRate: buffer.readUInt32LE(offset + 12),
+        bitsPerSample: buffer.readUInt16LE(offset + 22),
+      };
+    }
+    offset += 8 + chunkSize + (chunkSize % 2);
+  }
+  return null;
+}
+
+function transcodeWavToMp3(buffer) {
+  return new Promise((resolve, reject) => {
+    if (!ffmpegPath) {
+      reject(new Error("ffmpeg-static is not available for WAV playback conversion"));
+      return;
+    }
+    const child = spawn(ffmpegPath, [
+      "-hide_banner",
+      "-loglevel",
+      "error",
+      "-f",
+      "wav",
+      "-i",
+      "pipe:0",
+      "-codec:a",
+      "libmp3lame",
+      "-b:a",
+      "64k",
+      "-f",
+      "mp3",
+      "pipe:1",
+    ]);
+    const stdout = [];
+    const stderr = [];
+    child.stdout.on("data", (chunk) => stdout.push(Buffer.from(chunk)));
+    child.stderr.on("data", (chunk) => stderr.push(Buffer.from(chunk)));
+    child.on("error", reject);
+    child.on("close", (code) => {
+      if (code !== 0) {
+        reject(
+          new Error(
+            `WAV playback conversion failed: ${Buffer.concat(stderr)
+              .toString("utf8")
+              .slice(0, 300)}`,
+          ),
+        );
+        return;
+      }
+      resolve(Buffer.concat(stdout));
+    });
+    child.stdin.end(buffer);
+  });
+}
+
+function parseByteRange(rangeHeader, size) {
+  const match = /^bytes=(\d*)-(\d*)$/i.exec(String(rangeHeader || "").trim());
+  if (!match || !Number.isFinite(size) || size <= 0) return null;
+  let start = match[1] ? Number(match[1]) : 0;
+  let end = match[2] ? Number(match[2]) : size - 1;
+  if (!match[1] && match[2]) {
+    const suffix = Math.max(Number(match[2]) || 0, 0);
+    start = Math.max(size - suffix, 0);
+    end = size - 1;
+  }
+  if (!Number.isFinite(start) || !Number.isFinite(end) || start > end || start >= size) {
+    return { invalid: true };
+  }
+  return {
+    start,
+    end: Math.min(end, size - 1),
+  };
+}
+
+function sendBufferedAudio(req, res, buffer, {
+  contentType = "audio/mpeg",
+  downloadName = "",
+  inlineName = "recording.mp3",
+} = {}) {
+  const size = buffer.length;
+  const range = parseByteRange(req.headers.range, size);
+  if (range?.invalid) {
+    res.status(416);
+    res.setHeader("content-range", `bytes */${size}`);
+    return res.end();
+  }
+  const safeDownloadName = String(downloadName || inlineName || "recording.mp3")
+    .replace(/[^a-zA-Z0-9._-]/g, "_")
+    .slice(0, 120);
+  res.setHeader("content-type", contentType);
+  res.setHeader("accept-ranges", "bytes");
+  res.setHeader("cache-control", "private, max-age=0, must-revalidate");
+  res.setHeader(
+    "content-disposition",
+    downloadName
+      ? `attachment; filename="${safeDownloadName || "recording.mp3"}"`
+      : "inline",
+  );
+  if (range) {
+    const chunk = buffer.subarray(range.start, range.end + 1);
+    res.status(206);
+    res.setHeader("content-range", `bytes ${range.start}-${range.end}/${size}`);
+    res.setHeader("content-length", String(chunk.length));
+    if (req.method === "HEAD") return res.end();
+    return res.end(chunk);
+  }
+  res.status(200);
+  res.setHeader("content-length", String(size));
+  if (req.method === "HEAD") return res.end();
+  return res.end(buffer);
 }
 
 function createRecordingPlaybackRouter() {
@@ -204,6 +335,79 @@ function createRecordingPlaybackRouter() {
     const driveUrl = `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(
       fileId,
     )}?alt=media&supportsAllDrives=${driveConfig.supportsAllDrives === false ? "false" : "true"}`;
+
+    let driveFile = null;
+    try {
+      const metadataUrl = `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(
+        fileId,
+      )}?fields=id%2Cname%2CmimeType%2Csize&supportsAllDrives=${
+        driveConfig.supportsAllDrives === false ? "false" : "true"
+      }`;
+      const metadataResponse = await fetch(metadataUrl, {
+        method: "GET",
+        headers: { Authorization: `Bearer ${accessToken}` },
+      });
+      if (metadataResponse.ok) {
+        driveFile = await metadataResponse.json();
+      }
+    } catch {
+      // Metadata only helps us identify WAV variants. Fall back to
+      // normal Drive streaming if that small lookup has a bad day.
+    }
+
+    if (isWavRecording(driveFile)) {
+      let wavResponse;
+      try {
+        wavResponse = await fetch(driveUrl, {
+          method: "GET",
+          headers: { Authorization: `Bearer ${accessToken}` },
+          redirect: "follow",
+        });
+      } catch (error) {
+        return res.status(502).json({
+          ok: false,
+          error: "drive-fetch-failed",
+          message: error.message,
+        });
+      }
+      if (!wavResponse.ok) {
+        const bodySnippet = await wavResponse.text().catch(() => "");
+        return res.status(wavResponse.status === 404 ? 404 : 502).json({
+          ok: false,
+          error: "drive-upstream-error",
+          status: wavResponse.status,
+          body: bodySnippet.slice(0, 200),
+        });
+      }
+      const wavBuffer = Buffer.from(await wavResponse.arrayBuffer());
+      const wavFormat = parseWavFormat(wavBuffer);
+      const downloadName = req.query.download
+        ? String(req.query.download || "")
+        : "";
+      if (wavFormat?.audioFormat === WAV_FORMAT_GSM610) {
+        let mp3Buffer;
+        try {
+          mp3Buffer = await transcodeWavToMp3(wavBuffer);
+        } catch (error) {
+          return res.status(502).json({
+            ok: false,
+            error: "wav-transcode-failed",
+            message: error.message,
+          });
+        }
+        const baseName = String(driveFile?.name || "recording.wav").replace(/\.[^.]+$/, "");
+        return sendBufferedAudio(req, res, mp3Buffer, {
+          contentType: "audio/mpeg",
+          downloadName,
+          inlineName: `${baseName}.mp3`,
+        });
+      }
+      return sendBufferedAudio(req, res, wavBuffer, {
+        contentType: driveFile?.mimeType || "audio/wav",
+        downloadName,
+        inlineName: driveFile?.name || "recording.wav",
+      });
+    }
 
     let upstream;
     try {

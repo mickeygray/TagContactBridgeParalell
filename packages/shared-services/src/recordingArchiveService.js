@@ -60,6 +60,24 @@ const DEFAULT_EXCLUDED_AGENT_TOKENS = [
   "abanks",
   "abanks@taxadvocategroup.com",
 ];
+const DEFAULT_ASCS_AGENT_NAMES = [
+  "Neyla Ramirez",
+  "Neyla",
+  "Jonathan Haro",
+  "Leo Collins",
+  "Leo",
+  "Matthew Anderson",
+  "Matt Anderson",
+  "Andrew Wells",
+  "Andrew",
+  "Monica Cazares",
+  "Monica",
+];
+const DEFAULT_ALWAYS_CX_AGENT_NAMES = [
+  "Chris Bolt",
+  "Brad Hansen",
+  "James Sharp",
+];
 
 function getArchiveConfig() {
   return getSharedConfig().recordingArchive || {};
@@ -100,6 +118,30 @@ function parseTokenList(value) {
     .split(",")
     .map((entry) => entry.trim())
     .filter(Boolean);
+}
+
+function normalizeAgentBucketName(value) {
+  return normalizeAgentDisplayName(value)
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function getAscsAgentNameSet() {
+  return new Set(
+    parseTokenList(process.env.RECORDING_ARCHIVE_ASCS_AGENT_NAMES || DEFAULT_ASCS_AGENT_NAMES)
+      .map((name) => normalizeAgentBucketName(name))
+      .filter(Boolean),
+  );
+}
+
+function getAlwaysCxAgentNameSet() {
+  return new Set(
+    parseTokenList(process.env.RECORDING_ARCHIVE_ALWAYS_CX_AGENT_NAMES || DEFAULT_ALWAYS_CX_AGENT_NAMES)
+      .map((name) => normalizeAgentBucketName(name))
+      .filter(Boolean),
+  );
 }
 
 function getExcludedAgentTokens() {
@@ -1078,6 +1120,16 @@ function buildDestination(configured = {}, routeType, fallbackLabel) {
   };
 }
 
+function candidateIsAscsAgent(candidate = {}, ascsAgentNames = getAscsAgentNameSet()) {
+  const candidateName = normalizeAgentBucketName(candidate.agentName);
+  return Boolean(candidateName && ascsAgentNames.has(candidateName));
+}
+
+function candidateIsAlwaysCxAgent(candidate = {}, alwaysCxAgentNames = getAlwaysCxAgentNameSet()) {
+  const candidateName = normalizeAgentBucketName(candidate.agentName);
+  return Boolean(candidateName && alwaysCxAgentNames.has(candidateName));
+}
+
 function normalizeArchiveDirection(value, fallback = "outbound") {
   const clean = String(value || "").trim().toLowerCase();
   if (clean === "inbound" || clean === "outbound") return clean;
@@ -1142,21 +1194,37 @@ async function resolveTerminalRouting(callLog, artifact = null, rcRecord = null)
     candidate.extensionNumber && csQueueNumbers.has(String(candidate.extensionNumber).trim()),
   );
   const terminalCandidate = pickTerminalCandidate(candidates);
+  const ascsAgentNames = getAscsAgentNameSet();
+  const ascsAgentTouches = candidates.filter((candidate) =>
+    candidateIsAscsAgent(candidate, ascsAgentNames),
+  );
+  const alwaysCxAgentNames = getAlwaysCxAgentNameSet();
+  const alwaysCxAgentTouches = candidates.filter((candidate) =>
+    candidateIsAlwaysCxAgent(candidate, alwaysCxAgentNames),
+  );
   const provider = String(artifact?.provider || "").toLowerCase();
   const isRingcxRoute = provider === "ringcx";
+  const isAscsAgentRoute = provider !== "callrail" && ascsAgentTouches.length > 0;
+  const isAlwaysCxAgentRoute = provider !== "callrail" && alwaysCxAgentTouches.length > 0;
   const isCustomerServiceRoute =
     provider === "ringcentral" && (cservTouches.length > 0 || hasCustomerServiceTouch);
   const destination =
-    isRingcxRoute
-      ? buildRingcxDestination(destinations, callLog.direction)
-      : provider === "callrail"
+    provider === "callrail"
       ? buildDestination(destinations.og, "origination", "OG")
-      : isCustomerServiceRoute
+      : isAlwaysCxAgentRoute
+        ? buildDestination(destinations.cx || destinations.as, "cx", "CX")
+      : isAscsAgentRoute || isCustomerServiceRoute
         ? buildDestination(destinations.cs, "customer-service", "CS")
+        : isRingcxRoute
+        ? buildRingcxDestination(destinations, callLog.direction)
         : buildDestination(destinations.cx || destinations.as, "cx", "CX");
   const routeReason =
     provider === "callrail"
       ? "callrail-provider"
+      : isAlwaysCxAgentRoute
+        ? "always-cx-agent-name"
+      : isAscsAgentRoute
+        ? "as-cs-agent-name"
       : isRingcxRoute
         ? `ringcx-${normalizeArchiveDirection(callLog.direction)}-provider`
       : isCustomerServiceRoute
@@ -1170,6 +1238,8 @@ async function resolveTerminalRouting(callLog, artifact = null, rcRecord = null)
     candidates,
     routeReason,
     queueTouches: cservTouches,
+    alwaysCxAgentTouches,
+    ascsAgentTouches,
   };
 }
 

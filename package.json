@@ -24,6 +24,7 @@
     "clone:legacy-data": "node scripts/clone-legacy-data.js",
     "backfill:legacy-metrics": "node scripts/backfill-legacy-metrics.js",
     "archive:eod-recordings": "node scripts/archive-eod-recordings.js",
+    "logics:activity-review": "node scripts/run-logics-activity-review.js",
     "backfill:today-calls": "node scripts/backfill-today-call-activity.js",
     "cx-recordings:sftp:check": "powershell -ExecutionPolicy Bypass -File scripts/check-cx-recording-sftp-test.ps1",
     "cx-recordings:sftp:start": "powershell -ExecutionPolicy Bypass -File scripts/start-cx-recording-sftp-test.ps1",
@@ -34,6 +35,7 @@
     "preview:hourly-finance": "node scripts/preview-hourly-finance.js",
     "smoke": "node scripts/smoke-test.js",
     "rc:live-monitor": "node scripts/rc-ex-live-trainer-oneoff.js",
+    "rc:live-monitor:manager": "node scripts/run-ex-live-monitor-manager.js",
     "rc:live-monitor:diarize-manual": "node scripts/run-ex-diarize-manual-test.js",
     "eval:speaker-labels": "node scripts/eval-speaker-label-models.js"
   },
@@ -43,6 +45,7 @@
     "cors": "^2.8.5",
     "dotenv": "^16.4.7",
     "express": "^4.21.2",
+    "ffmpeg-static": "^5.3.0",
     "handlebars": "^4.7.9",
     "mongoose": "^8.13.0",
     "multer": "^2.1.1",

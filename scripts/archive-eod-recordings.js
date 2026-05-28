@@ -71,6 +71,24 @@ const DEFAULT_EXCLUDED_AGENT_TOKENS = [
   "abanks",
   "abanks@taxadvocategroup.com",
 ];
+const DEFAULT_ASCS_AGENT_NAMES = [
+  "Neyla Ramirez",
+  "Neyla",
+  "Jonathan Haro",
+  "Leo Collins",
+  "Leo",
+  "Matthew Anderson",
+  "Matt Anderson",
+  "Andrew Wells",
+  "Andrew",
+  "Monica Cazares",
+  "Monica",
+];
+const DEFAULT_ALWAYS_CX_AGENT_NAMES = [
+  "Chris Bolt",
+  "Brad Hansen",
+  "James Sharp",
+];
 
 const CALLRAIL_FIELDS = [
   "id",
@@ -163,6 +181,40 @@ function normalizeAgentDisplayName(value) {
   const withoutCompanySuffix = raw.replace(/\s*-\s*(tag|wynn|amity)\b.*$/i, "").trim();
   const firstSegment = withoutCompanySuffix.split(/\s*-\s*/)[0].trim();
   return firstSegment || withoutCompanySuffix || raw;
+}
+
+function normalizeAgentBucketName(value) {
+  return normalizeAgentDisplayName(value)
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function getAscsAgentNameSet() {
+  return new Set(
+    parseList(process.env.RECORDING_ARCHIVE_ASCS_AGENT_NAMES || DEFAULT_ASCS_AGENT_NAMES)
+      .map((name) => normalizeAgentBucketName(name))
+      .filter(Boolean),
+  );
+}
+
+function getAlwaysCxAgentNameSet() {
+  return new Set(
+    parseList(process.env.RECORDING_ARCHIVE_ALWAYS_CX_AGENT_NAMES || DEFAULT_ALWAYS_CX_AGENT_NAMES)
+      .map((name) => normalizeAgentBucketName(name))
+      .filter(Boolean),
+  );
+}
+
+function candidateIsAscsAgent(candidate = {}, ascsAgentNames = getAscsAgentNameSet()) {
+  const candidateName = normalizeAgentBucketName(candidate.agentName);
+  return Boolean(candidateName && ascsAgentNames.has(candidateName));
+}
+
+function candidateIsAlwaysCxAgent(candidate = {}, alwaysCxAgentNames = getAlwaysCxAgentNameSet()) {
+  const candidateName = normalizeAgentBucketName(candidate.agentName);
+  return Boolean(candidateName && alwaysCxAgentNames.has(candidateName));
 }
 
 function normalizeArchiveExcludeText(value) {
@@ -576,6 +628,14 @@ function deriveRouting(provider, rcRecord = null, seed = {}) {
   }
 
   const terminalCandidate = pickTerminalCandidate(candidates);
+  const ascsAgentNames = getAscsAgentNameSet();
+  const hasAscsAgentTouch = candidates.some((candidate) =>
+    candidateIsAscsAgent(candidate, ascsAgentNames),
+  );
+  const alwaysCxAgentNames = getAlwaysCxAgentNameSet();
+  const hasAlwaysCxAgentTouch = candidates.some((candidate) =>
+    candidateIsAlwaysCxAgent(candidate, alwaysCxAgentNames),
+  );
   const queueTouches = candidates.filter((candidate) =>
     ["505", "5051", "5052"].includes(String(candidate.extensionNumber || "").trim()),
   );
@@ -598,7 +658,9 @@ function deriveRouting(provider, rcRecord = null, seed = {}) {
     ? null
     : provider === "callrail" || phoneBurnerTouch
       ? "OG"
-      : (queueTouches.length > 0 || hasCustomerServiceTouch)
+      : hasAlwaysCxAgentTouch
+        ? "CX"
+        : (hasAscsAgentTouch || queueTouches.length > 0 || hasCustomerServiceTouch)
           ? "CS"
           : "CX";
 
@@ -607,6 +669,8 @@ function deriveRouting(provider, rcRecord = null, seed = {}) {
     interoffice,
     candidate: terminalCandidate,
     queueTouches,
+    hasAlwaysCxAgentTouch,
+    hasAscsAgentTouch,
     hasCustomerServiceTouch,
   };
 }
@@ -1523,11 +1587,15 @@ async function runArchiveEodRecordings(options = {}) {
         routeReason:
           artifact.provider === "callrail"
             ? "callrail-provider"
-            : task.routing?.hasCustomerServiceTouch
-              ? "customer-service-text-touch"
-              : task.routing?.queueTouches?.length
-                ? "customer-service-queue-touch"
-                : "ringcentral-provider-cx-default",
+            : task.routing?.hasAlwaysCxAgentTouch
+              ? "always-cx-agent-name"
+              : task.routing?.hasAscsAgentTouch
+                ? "as-cs-agent-name"
+                : task.routing?.hasCustomerServiceTouch
+                  ? "customer-service-text-touch"
+                  : task.routing?.queueTouches?.length
+                    ? "customer-service-queue-touch"
+                    : "ringcentral-provider-cx-default",
         fileName,
         localPath,
         uploaded: Boolean(upload),

@@ -501,6 +501,9 @@ const {
   buildRecommendedWorkflow,
 } = require("./logicsCapabilityService");
 const {
+  runLogicsActivityReview,
+} = require("./logicsActivityReviewService");
+const {
   getActiveMailers,
   getMailerConfigState,
   getMailerHistory,
@@ -1029,6 +1032,7 @@ module.exports = {
   EMAIL_TEMPLATE_CATALOG,
   listEmailTemplates,
   renderEmailTemplate,
+  runLogicsActivityReview,
   lookupCxLead,
   findCxLeadCandidates,
   hourlyJobHandlerRegistry,

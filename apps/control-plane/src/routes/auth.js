@@ -238,28 +238,6 @@ function createAuthRouter(config, options = {}) {
         return res.status(400).json({ ok: false, error: "Unknown account" });
       }
 
-      // ── Agent login window check (non-admins only) ───────────────
-      // Agents can only obtain a session inside the configured window.
-      // Admins are exempt — they need access for off-hours admin work.
-      if (isAgentLoginWindowLimited(account)) {
-        try {
-          const { getPacingConfig } = require("../../../../packages/shared-services/src");
-          const { isAgentLoginWindowOpen } = require("../../../../packages/shared-services/src/businessHoursGuard");
-          const pacing = await getPacingConfig();
-          if (!isAgentLoginWindowOpen(pacing)) {
-            return res.status(403).json({
-              ok: false,
-              error: "outside-login-window",
-              hint: `Agent logins allowed ${pacing.agentLoginStartHour}:00–${pacing.agentLoginEndHour}:00 ${pacing.agentLoginTimezone || pacing.businessHoursTimezone}`,
-            });
-          }
-        } catch (_) {
-          // If pacing config is unavailable for any reason, fall through
-          // (don't block login on a config-load failure). The strict-mode
-          // startup validator catches misconfigurations.
-        }
-      }
-
       try {
         await verifyOtpChallenge(config, account, String(req.body?.code || ""));
       } catch (verifyError) {
@@ -281,24 +259,15 @@ function createAuthRouter(config, options = {}) {
       const latest = (await findAccountByEmail(normalizedEmail)) || account;
       await ensureRingcxOffhookAllowed(latest, "auth-verify-code");
 
-      // Clamp JWT expiry to today's window-close for non-admins.
-      // SPA's existing 401 handler will auto-logout when the token expires.
-      let clampExpiresAt = null;
-      if (isAgentLoginWindowLimited(latest)) {
-        try {
-          const { getPacingConfig } = require("../../../../packages/shared-services/src");
-          const { todaysAgentLoginWindowClose } = require("../../../../packages/shared-services/src/businessHoursGuard");
-          const pacing = await getPacingConfig();
-          clampExpiresAt = todaysAgentLoginWindowClose(pacing);
-        } catch (_) { /* fall through, no clamp */ }
-      }
-
-      const token = issueLoginToken(config, latest, { clampExpiresAt });
+      // Login is intentionally allowed outside the dialing window so agents
+      // can review recordings after hours. Dialer/workspace access is gated
+      // separately by business-hours checks.
+      const token = issueLoginToken(config, latest);
       return res.json({
         ok: true,
         token,
         user: buildPublicAuthUser(latest),
-        expiresAt: clampExpiresAt || null,
+        expiresAt: null,
       });
     } catch (error) {
       return res.status(error.status || 500).json({ ok: false, error: error.message });
@@ -324,6 +293,45 @@ function createAuthRouter(config, options = {}) {
     const account = req.liveAccount || req.user;
     const user = (await findAccountByEmail(account.email)) || account;
     return res.json(buildPublicAuthUser(user));
+  });
+
+  router.get("/work-hours", requireAuth(config), requireActiveAccount, async (req, res) => {
+    const account = req.liveAccount || req.user || {};
+    const limited = isAgentLoginWindowLimited(account);
+    try {
+      const { getPacingConfig } = require("../../../../packages/shared-services/src");
+      const { isAgentLoginWindowOpen, isOperatingNow } =
+        require("../../../../packages/shared-services/src/businessHoursGuard");
+      const pacing = await getPacingConfig();
+      const cxWorkspaceOpen = isOperatingNow(pacing);
+      const loginWindowOpen = isAgentLoginWindowOpen(pacing);
+      return res.json({
+        ok: true,
+        limited,
+        cxWorkspace: {
+          allowed: !limited || cxWorkspaceOpen,
+          open: cxWorkspaceOpen,
+          timezone: pacing.businessHoursTimezone || "America/Los_Angeles",
+          startHour: pacing.businessHoursStart,
+          endHour: pacing.businessHoursEnd,
+          days: pacing.businessDays || [],
+        },
+        login: {
+          allowed: true,
+          open: loginWindowOpen,
+          timezone: pacing.agentLoginTimezone || pacing.businessHoursTimezone || "America/Los_Angeles",
+          startHour: pacing.agentLoginStartHour,
+          endHour: pacing.agentLoginEndHour,
+          days: pacing.agentLoginDays || pacing.businessDays || [],
+        },
+      });
+    } catch (error) {
+      return res.status(503).json({
+        ok: false,
+        error: "Could not load work-hours configuration",
+        detail: error.message,
+      });
+    }
   });
 
   router.get("/accounts", requireAuth(config), async (req, res) => {

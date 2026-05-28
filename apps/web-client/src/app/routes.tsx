@@ -4,6 +4,8 @@ import { Navigate, Route, Routes } from "react-router-dom";
 import { AdminShell } from "@/app/AdminShell";
 import { CXShell } from "@/app/CXShell";
 import { AuthGate, RoleSplash } from "@/app/AuthGate";
+import { CxAuthGuard } from "@/app/CxAuthGuard";
+import { CxWorkHoursGuard } from "@/app/CxWorkHoursGuard";
 import { LoginPage } from "@/workspaces/auth/LoginPage";
 
 // Route-level code splitting — each workspace ships its own chunk and is
@@ -181,7 +183,11 @@ export function AppRoutes() {
             index
             element={
               <Suspended>
-                <CXWorkspace />
+                <CxWorkHoursGuard>
+                  <CxAuthGuard>
+                    <CXWorkspace />
+                  </CxAuthGuard>
+                </CxWorkHoursGuard>
               </Suspended>
             }
           />
@@ -198,6 +204,14 @@ export function AppRoutes() {
             element={
               <Suspended>
                 <WynnInboxWorkspace />
+              </Suspended>
+            }
+          />
+          <Route
+            path="call-library"
+            element={
+              <Suspended>
+                <CxCallTrackerWorkspace scope="user" />
               </Suspended>
             }
           />
