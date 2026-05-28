@@ -4,17 +4,29 @@ const {
   recordServiceAlert,
   recordWorkflowStage,
   runLogicsActivityReview,
+  runLogicsActivityReviewBatch,
 } = require("../../../../packages/shared-services/src");
 const {
   computeNextRunAt,
   normalizeActiveWeekdays,
 } = require("./lexisNightlyService");
 
+function normalizeDomains(value, fallback = ["TAG"]) {
+  const raw = Array.isArray(value) ? value : String(value || "").split(",");
+  const domains = raw
+    .map((item) => String(item || "").trim().toUpperCase())
+    .filter(Boolean);
+  const unique = [...new Set(domains)];
+  return unique.length ? unique : fallback;
+}
+
 function createState(config = {}) {
+  const domains = normalizeDomains(config.domains || config.domain || "TAG,WYNN,AMITY", ["TAG"]);
   return {
     enabled: Boolean(config.enabled),
     running: false,
-    domain: String(config.domain || "TAG").toUpperCase(),
+    domain: String(config.domain || domains[0] || "TAG").toUpperCase(),
+    domains,
     hour: Number(config.hour || 6),
     minute: Number(config.minute || 0),
     timezone: config.timezone || "America/Los_Angeles",
@@ -25,6 +37,10 @@ function createState(config = {}) {
     recipients: Array.isArray(config.recipients) ? config.recipients : [],
     reportEmail: config.reportEmail || "documents@taxadvocategroup.com",
     outDir: config.outDir || "",
+    includeAiReview: config.includeAiReview !== false,
+    aiReviewMaxCases: Math.max(0, Number(config.aiReviewMaxCases || 75) || 75),
+    aiReviewConcurrency: Math.max(1, Number(config.aiReviewConcurrency || 1) || 1),
+    aiReviewModel: config.aiReviewModel || "",
     timer: null,
     nextRunAt: null,
     lastStartedAt: null,
@@ -39,6 +55,7 @@ function summarizeState(state) {
     enabled: state.enabled,
     running: state.running,
     domain: state.domain,
+    domains: state.domains,
     hour: state.hour,
     minute: state.minute,
     timezone: state.timezone,
@@ -49,6 +66,10 @@ function summarizeState(state) {
     recipients: state.recipients,
     reportEmail: state.reportEmail,
     outDir: state.outDir,
+    includeAiReview: state.includeAiReview,
+    aiReviewMaxCases: state.aiReviewMaxCases,
+    aiReviewConcurrency: state.aiReviewConcurrency,
+    aiReviewModel: state.aiReviewModel,
     nextRunAt: state.nextRunAt,
     lastStartedAt: state.lastStartedAt,
     lastCompletedAt: state.lastCompletedAt,
@@ -70,8 +91,10 @@ function createLogicsActivityReviewRuntime({ config = {}, runtime }) {
       };
     }
 
-    const domain = String(options.domain || state.domain || "TAG").toUpperCase();
-    const runKey = `logics-activity-review-${domain}-${Date.now()}`;
+    const domains = normalizeDomains(options.domains || options.domain || state.domains, state.domains);
+    const domain = domains.length === 1 ? domains[0] : "TAG";
+    const domainLabel = domains.join(",");
+    const runKey = `logics-activity-review-${domains.join("-")}-${Date.now()}`;
 
     state.running = true;
     state.lastStartedAt = new Date();
@@ -86,16 +109,19 @@ function createLogicsActivityReviewRuntime({ config = {}, runtime }) {
       aggregateId: runKey,
       sourceService: "control-plane",
       title: "Logics activity review started",
-      summary: `Beginning Logics activity review for ${domain}`,
+      summary: `Beginning Logics activity review for ${domainLabel}`,
       payload: {
         domain,
+        domains,
         scheduled: Boolean(options.scheduled),
       },
     });
 
     try {
-      const result = await runLogicsActivityReview({
-        domain,
+      const runner = domains.length > 1 ? runLogicsActivityReviewBatch : runLogicsActivityReview;
+      const result = await runner({
+        domains,
+        domain: domains[0],
         dateKey: options.date || options.dateKey,
         startDateKey: options.startDate || options.startDateKey,
         endDateKey: options.endDate || options.endDateKey,
@@ -120,16 +146,35 @@ function createLogicsActivityReviewRuntime({ config = {}, runtime }) {
           options.sendEmail !== undefined
             ? Boolean(options.sendEmail)
             : state.sendEmail,
+        includeAiReview:
+          options.includeAiReview !== undefined
+            ? Boolean(options.includeAiReview)
+            : state.includeAiReview,
+        aiReviewMaxCases:
+          options.aiReviewMaxCases !== undefined
+            ? options.aiReviewMaxCases
+            : state.aiReviewMaxCases,
+        aiReviewConcurrency:
+          options.aiReviewConcurrency !== undefined
+            ? options.aiReviewConcurrency
+            : state.aiReviewConcurrency,
+        aiReviewModel:
+          options.aiReviewModel !== undefined
+            ? options.aiReviewModel
+            : state.aiReviewModel,
       });
 
       state.lastCompletedAt = new Date();
       state.lastResult = {
+        domains: result.domains || [result.domain],
         date: result.date,
         startDate: result.startDate,
         endDate: result.endDate,
         activityRows: result.processed?.parsedRows || 0,
         noticeCases: result.processed?.outputRows || 0,
         suspendedCases: result.processed?.suspendedOutputRows || 0,
+        aiReviewedNoticeCases: result.processed?.aiReview?.reviewedCases || 0,
+        aiReviewedSuspendedCases: result.processed?.suspendedAiReview?.reviewedCases || 0,
         csvOut: result.processed?.csvOut || null,
         suspendedCsvOut: result.processed?.suspendedCsvOut || null,
         email: result.email || null,
@@ -149,7 +194,7 @@ function createLogicsActivityReviewRuntime({ config = {}, runtime }) {
         aggregateId: runKey,
         sourceService: "control-plane",
         title: "Logics activity review completed",
-        summary: `Logics activity review completed for ${domain}`,
+        summary: `Logics activity review completed for ${domainLabel}`,
         result: state.lastResult,
       });
 
@@ -177,6 +222,7 @@ function createLogicsActivityReviewRuntime({ config = {}, runtime }) {
         summary: error.message,
         payload: {
           domain,
+          domains,
           scheduled: Boolean(options.scheduled),
         },
         result: {
@@ -193,6 +239,7 @@ function createLogicsActivityReviewRuntime({ config = {}, runtime }) {
         summary: error.message,
         payload: {
           domain,
+          domains,
           scheduled: Boolean(options.scheduled),
         },
         tags: ["logics", "activity-report", "notice-review"],
@@ -200,6 +247,7 @@ function createLogicsActivityReviewRuntime({ config = {}, runtime }) {
 
       runtime.logger.error("logics.activity_review.failed", {
         domain,
+        domains,
         error: error.message,
       });
       throw error;
@@ -218,6 +266,7 @@ function createLogicsActivityReviewRuntime({ config = {}, runtime }) {
     if (!state.enabled) {
       runtime.logger.warn("logics.activity_review.disabled", {
         domain: state.domain,
+        domains: state.domains,
       });
       return;
     }
@@ -226,7 +275,7 @@ function createLogicsActivityReviewRuntime({ config = {}, runtime }) {
       if (state.running || !state.nextRunAt) return;
       if (Date.now() < state.nextRunAt.getTime()) return;
       try {
-        await runActivityReview({ scheduled: true, domain: state.domain });
+        await runActivityReview({ scheduled: true, domains: state.domains });
       } catch {
         // Failure is recorded in runActivityReview.
       }
@@ -242,12 +291,14 @@ function createLogicsActivityReviewRuntime({ config = {}, runtime }) {
 
     runtime.logger.info("logics.activity_review.armed", {
       domain: state.domain,
+      domains: state.domains,
       hour: state.hour,
       minute: state.minute,
       nextRunAt: state.nextRunAt,
       timezone: state.timezone,
       activeWeekdays: state.activeWeekdays,
       recipients: state.recipients,
+      includeAiReview: state.includeAiReview,
     });
   }
 

@@ -502,6 +502,7 @@ const {
 } = require("./logicsCapabilityService");
 const {
   runLogicsActivityReview,
+  runLogicsActivityReviewBatch,
 } = require("./logicsActivityReviewService");
 const {
   getActiveMailers,
@@ -1033,6 +1034,7 @@ module.exports = {
   listEmailTemplates,
   renderEmailTemplate,
   runLogicsActivityReview,
+  runLogicsActivityReviewBatch,
   lookupCxLead,
   findCxLeadCandidates,
   hourlyJobHandlerRegistry,

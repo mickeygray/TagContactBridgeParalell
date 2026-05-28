@@ -23,6 +23,9 @@ const DEFAULT_REVIEW_RECIPIENTS = [
   "mgray@taxadvocategroup.com",
   "manderson@taxadvocategroup.com",
 ];
+const DEFAULT_DOMAINS = Object.freeze(["TAG", "WYNN", "AMITY"]);
+const DEFAULT_AI_REVIEW_MAX_CASES = 75;
+const DEFAULT_AI_REVIEW_CONCURRENCY = 1;
 
 const DEFAULT_NOTICE_RULES = Object.freeze([
   { name: "LT11", pattern: /\bLT[-\s]?11\b/i },
@@ -136,6 +139,20 @@ function parseList(value) {
     .split(",")
     .map((item) => item.trim())
     .filter(Boolean);
+}
+
+function parseDomains(value, fallback = DEFAULT_DOMAINS) {
+  const raw = value === undefined || value === null || value === "" ? fallback : value;
+  const domains = parseList(raw)
+    .map((item) => String(item || "").trim().toUpperCase())
+    .filter(Boolean);
+  return [...new Set(domains)].length ? [...new Set(domains)] : [...fallback];
+}
+
+function parseBoolean(value, fallback = false) {
+  if (value === undefined || value === null || value === "") return fallback;
+  if (typeof value === "boolean") return value;
+  return ["1", "true", "yes", "on"].includes(String(value).trim().toLowerCase());
 }
 
 function normalizeDateKey(value, timeZone = DEFAULT_TIMEZONE) {
@@ -571,6 +588,112 @@ async function mapLimit(items, limit, fn) {
   return output;
 }
 
+function isAiReviewEnabled(options = {}) {
+  if (options.includeAiReview !== undefined) {
+    return parseBoolean(options.includeAiReview, false);
+  }
+  return parseBoolean(process.env.LOGICS_ACTIVITY_REVIEW_AI_ENABLED, false);
+}
+
+function emptyAiReviewFields(error = "") {
+  return {
+    contactReviewStatus: "",
+    contactReviewConfidence: "",
+    contactRecommendedAction: "",
+    contactRiskFlags: "",
+    contactEvidence: "",
+    contactReviewError: clean(error, 300),
+  };
+}
+
+function summarizeAiReviewResult(result) {
+  if (!result?.ok) {
+    return emptyAiReviewFields(result?.reason || "ai-review-unavailable");
+  }
+  const review = result.review || {};
+  return {
+    contactReviewStatus: clean(review.status || "", 80),
+    contactReviewConfidence: clean(review.confidence || "", 40),
+    contactRecommendedAction: clean(review.recommendedAction || "", 220),
+    contactRiskFlags: uniqueJoined(review.riskFlags || []),
+    contactEvidence: uniqueJoined([
+      ...(Array.isArray(review.evidence) ? review.evidence : []),
+      ...(Array.isArray(review.concerns) ? review.concerns : []),
+    ]),
+    contactReviewError: "",
+  };
+}
+
+async function attachAiActivityReviews(domain, rows, options = {}) {
+  if (!isAiReviewEnabled(options) || rows.length === 0) {
+    return rows.map((row) => ({ ...row, ...emptyAiReviewFields() }));
+  }
+
+  const uniqueCaseIds = [...new Set(rows.map((row) => Number(row.caseId)).filter(Boolean))];
+  const maxCases = Math.max(
+    0,
+    Number(options.aiReviewMaxCases || process.env.LOGICS_ACTIVITY_REVIEW_AI_MAX_CASES || DEFAULT_AI_REVIEW_MAX_CASES) ||
+      DEFAULT_AI_REVIEW_MAX_CASES,
+  );
+  const concurrency = Math.max(
+    1,
+    Number(options.aiReviewConcurrency || process.env.LOGICS_ACTIVITY_REVIEW_AI_CONCURRENCY || DEFAULT_AI_REVIEW_CONCURRENCY) ||
+      DEFAULT_AI_REVIEW_CONCURRENCY,
+  );
+  const caseIdsToReview = maxCases > 0 ? uniqueCaseIds.slice(0, maxCases) : [];
+  const skippedCaseIds = new Set(maxCases > 0 ? uniqueCaseIds.slice(maxCases) : uniqueCaseIds);
+  const reviewByCaseId = new Map();
+
+  if (caseIdsToReview.length) {
+    const { reviewCaseActivities } = require("./activityAiReviewService");
+    await mapLimit(caseIdsToReview, concurrency, async (caseId) => {
+      try {
+        const result = await reviewCaseActivities(domain, caseId, {
+          model: options.aiReviewModel || process.env.LOGICS_ACTIVITY_REVIEW_AI_MODEL || undefined,
+          maxTokens: Number(options.aiReviewMaxTokens || process.env.LOGICS_ACTIVITY_REVIEW_AI_MAX_TOKENS || 0) || undefined,
+          temperature:
+            options.aiReviewTemperature !== undefined
+              ? Number(options.aiReviewTemperature)
+              : process.env.LOGICS_ACTIVITY_REVIEW_AI_TEMPERATURE !== undefined
+                ? Number(process.env.LOGICS_ACTIVITY_REVIEW_AI_TEMPERATURE)
+                : undefined,
+        });
+        reviewByCaseId.set(caseId, summarizeAiReviewResult(result));
+      } catch (error) {
+        reviewByCaseId.set(caseId, emptyAiReviewFields(error.message));
+      }
+    });
+  }
+
+  return rows.map((row) => {
+    const numericCaseId = Number(row.caseId);
+    const review = reviewByCaseId.get(numericCaseId) ||
+      (skippedCaseIds.has(numericCaseId)
+        ? emptyAiReviewFields("ai-review-skipped:max-cases")
+        : emptyAiReviewFields());
+    return {
+      ...row,
+      ...review,
+    };
+  });
+}
+
+function summarizeAiReviewRows(rows = []) {
+  const byCase = new Map();
+  for (const row of rows) {
+    const caseId = String(row.caseId || "");
+    if (!caseId || byCase.has(caseId)) continue;
+    byCase.set(caseId, row);
+  }
+  const values = [...byCase.values()];
+  return {
+    enabled: values.some((row) => row.contactReviewStatus || row.contactReviewError),
+    reviewedCases: values.filter((row) => row.contactReviewStatus).length,
+    errorCases: values.filter((row) => row.contactReviewError && !/skipped:max-cases/i.test(row.contactReviewError)).length,
+    skippedCases: values.filter((row) => /skipped:max-cases/i.test(String(row.contactReviewError || ""))).length,
+  };
+}
+
 function findMatchingCaseActivity(activities, candidate) {
   const normalizedDoc = clean(candidate.documentName).toLowerCase();
   const activityId = String(candidate.activityId || "").trim();
@@ -714,6 +837,12 @@ function outputColumns() {
     "latestInvoiceDate",
     "temperature",
     "tier",
+    "contactReviewStatus",
+    "contactReviewConfidence",
+    "contactRecommendedAction",
+    "contactRiskFlags",
+    "contactEvidence",
+    "contactReviewError",
   ];
 }
 
@@ -734,6 +863,12 @@ function finalCsvRow(row) {
     latestInvoiceDate: row.latestInvoiceDate,
     temperature: row.activityTemperature || row.statusName,
     tier: row.clientTemperature || parseStatusTier(row.fromStatus) || parseStatusTier(row.toStatus),
+    contactReviewStatus: row.contactReviewStatus || "",
+    contactReviewConfidence: row.contactReviewConfidence || "",
+    contactRecommendedAction: row.contactRecommendedAction || "",
+    contactRiskFlags: row.contactRiskFlags || "",
+    contactEvidence: row.contactEvidence || "",
+    contactReviewError: row.contactReviewError || "",
   };
 }
 
@@ -774,6 +909,12 @@ function collapseRowsByCase(rows) {
         latestInvoiceDate: base.latestInvoiceDate,
         temperature: base.temperature,
         tier: base.tier,
+        contactReviewStatus: base.contactReviewStatus,
+        contactReviewConfidence: base.contactReviewConfidence,
+        contactRecommendedAction: base.contactRecommendedAction,
+        contactRiskFlags: base.contactRiskFlags,
+        contactEvidence: base.contactEvidence,
+        contactReviewError: base.contactReviewError,
       };
     })
     .sort((a, b) => parseDateMs(a.firstUploadAt) - parseDateMs(b.firstUploadAt));
@@ -799,6 +940,12 @@ function suspendedOutputColumns() {
     "latestInvoiceDate",
     "temperature",
     "tier",
+    "contactReviewStatus",
+    "contactReviewConfidence",
+    "contactRecommendedAction",
+    "contactRiskFlags",
+    "contactEvidence",
+    "contactReviewError",
   ];
 }
 
@@ -842,6 +989,12 @@ function collapseSuspendedRowsByCase(rows) {
         latestInvoiceDate: base.latestInvoiceDate,
         temperature: base.temperature,
         tier: base.tier,
+        contactReviewStatus: base.contactReviewStatus,
+        contactReviewConfidence: base.contactReviewConfidence,
+        contactRecommendedAction: base.contactRecommendedAction,
+        contactRiskFlags: base.contactRiskFlags,
+        contactEvidence: base.contactEvidence,
+        contactReviewError: base.contactReviewError,
       };
     })
     .sort((a, b) => parseDateMs(a.firstChangedAt) - parseDateMs(b.firstChangedAt));
@@ -857,8 +1010,10 @@ async function processSuspendedStatusRows({ domain, rows, outDir, concurrency, r
   const candidates = classifySuspendedStatusRows(rows);
   const enriched = await enrichCandidates(domain, candidates, { ...options, concurrency });
   const currentSuspended = enriched.filter((row) => isSuspendedStatusName(row.statusName));
-  const sorted = currentSuspended.sort((a, b) => parseDateMs(a.uploadedAt) - parseDateMs(b.uploadedAt));
+  const reviewed = await attachAiActivityReviews(domain, currentSuspended, options);
+  const sorted = reviewed.sort((a, b) => parseDateMs(a.uploadedAt) - parseDateMs(b.uploadedAt));
   const collapsedRows = collapseSuspendedRowsByCase(sorted);
+  const aiReview = summarizeAiReviewRows(sorted);
   const outputDir = path.resolve(outDir || DEFAULT_OUT_DIR);
   ensureDir(outputDir);
   const csvOut = path.join(outputDir, `logics-suspended-status-${domain}-${rangeKey}.csv`);
@@ -869,6 +1024,7 @@ async function processSuspendedStatusRows({ domain, rows, outDir, concurrency, r
     currentSuspendedRows: currentSuspended.length,
     outputRows: collapsedRows.length,
     uniqueCases: collapsedRows.length,
+    aiReview,
     csvOut,
     rows: sorted,
     staleRows: enriched.filter((row) => !isSuspendedStatusName(row.statusName)),
@@ -911,7 +1067,8 @@ async function processActivityRows({
       ...entry.row,
       noticeMatches: entry.row.noticeMatches || entry.includeMatches.join(" | "),
     }));
-  const sorted = filtered.sort((a, b) => parseDateMs(a.uploadedAt) - parseDateMs(b.uploadedAt));
+  const reviewed = await attachAiActivityReviews(domain, filtered, options);
+  const sorted = reviewed.sort((a, b) => parseDateMs(a.uploadedAt) - parseDateMs(b.uploadedAt));
   const outputDir = path.resolve(outDir || DEFAULT_OUT_DIR);
   ensureDir(outputDir);
   const rangeKey = buildRangeKey(dateKey, startDateKey, endDateKey);
@@ -928,6 +1085,7 @@ async function processActivityRows({
   });
   const collapsedRows = collapseRowsByCase(sorted);
   const uniqueCases = collapsedRows.length;
+  const aiReview = summarizeAiReviewRows(sorted);
   writeCsv(csvOut, collapsedRows, outputColumns());
   writeJson(jsonOut, {
     ok: true,
@@ -944,6 +1102,7 @@ async function processActivityRows({
     outputRows: collapsedRows.length,
     rowLevelOutputRows: sorted.length,
     uniqueCases,
+    aiReview,
     csvOut,
     jsonOut,
     suspendedCsvOut: suspended.csvOut,
@@ -960,6 +1119,7 @@ async function processActivityRows({
     outputRows: collapsedRows.length,
     rowLevelOutputRows: sorted.length,
     uniqueCases,
+    aiReview,
     csvOut,
     jsonOut,
     suspendedStatusChanges: suspended.statusChangeRows,
@@ -967,7 +1127,10 @@ async function processActivityRows({
     suspendedCurrentStatusChanges: suspended.currentSuspendedRows,
     suspendedOutputRows: suspended.outputRows,
     suspendedUniqueCases: suspended.uniqueCases,
+    suspendedAiReview: suspended.aiReview,
     suspendedCsvOut: suspended.csvOut,
+    collapsedRows,
+    suspendedCollapsedRows: suspended.collapsedRows,
   };
 }
 
@@ -1004,16 +1167,20 @@ function buildEmailText({ domain, dateKey, startDateKey, endDateKey, processed }
     "Logics activity review complete.",
     "",
     `Domain: ${domain}`,
+    processed.domains ? `Databases: ${processed.domains.join(", ")}` : "",
     `Range: ${range}`,
     `Activity rows scanned: ${processed.parsedRows || 0}`,
     `Raw document uploads: ${processed.documentUploadActivities || 0}`,
     `Excluded uploads: ${processed.excludedActivities || 0}`,
     `Notice upload rows after filters: ${processed.rowLevelOutputRows || 0}`,
     `Notice upload cases: ${processed.outputRows || 0}`,
+    `AI-reviewed notice cases: ${processed.aiReview?.reviewedCases || 0}`,
+    `AI review skips/errors: ${(processed.aiReview?.skippedCases || 0) + (processed.aiReview?.errorCases || 0)}`,
     `Suspended status changes: ${processed.suspendedStatusChanges || 0}`,
     `Suspended changes still current: ${processed.suspendedCurrentStatusChanges || 0}`,
     `Suspended changes no longer current: ${processed.suspendedStaleStatusChanges || 0}`,
     `Suspended status cases: ${processed.suspendedOutputRows || 0}`,
+    `AI-reviewed suspended cases: ${processed.suspendedAiReview?.reviewedCases || 0}`,
     "",
     `Notice CSV: ${processed.csvOut || ""}`,
     `Suspended CSV: ${processed.suspendedCsvOut || ""}`,
@@ -1034,7 +1201,8 @@ async function emailActivityReview(result, options = {}) {
   const range = startDateKey && endDateKey && startDateKey !== endDateKey
     ? `${startDateKey} to ${endDateKey}`
     : dateKey;
-  const subject = `Logics activity review ${range}: ${processed.outputRows || 0} notices, ${processed.suspendedOutputRows || 0} suspended`;
+  const subjectPrefix = domain === "ALL" ? "Logics activity review ALL" : "Logics activity review";
+  const subject = `${subjectPrefix} ${range}: ${processed.outputRows || 0} notices, ${processed.suspendedOutputRows || 0} suspended`;
   const text = buildEmailText({ domain, dateKey, startDateKey, endDateKey, processed });
   const attachments = [];
   if (processed.csvOut && fs.existsSync(processed.csvOut)) {
@@ -1052,6 +1220,130 @@ async function emailActivityReview(result, options = {}) {
     text,
     attachments,
   });
+}
+
+function sumProcessed(results, key) {
+  return results.reduce((sum, result) => {
+    const value = String(key)
+      .split(".")
+      .reduce((cursor, part) => (cursor ? cursor[part] : undefined), result.processed);
+    return sum + (Number(value) || 0);
+  }, 0);
+}
+
+async function runLogicsActivityReviewBatch(options = {}) {
+  const timezone = options.timezone || DEFAULT_TIMEZONE;
+  const dateKey = normalizeDateKey(
+    options.dateKey || options.date || yesterdayInTz(timezone),
+    timezone,
+  );
+  const startDateKey = normalizeDateKey(options.startDateKey || options.startDate || dateKey, timezone);
+  const endDateKey = normalizeDateKey(options.endDateKey || options.endDate || dateKey, timezone);
+  const domains = parseDomains(
+    options.domains ||
+      process.env.LOGICS_ACTIVITY_REVIEW_DOMAINS ||
+      options.domain ||
+      DEFAULT_DOMAINS,
+  );
+  const outDir = path.resolve(options.outDir || DEFAULT_OUT_DIR);
+  const rangeKey = buildRangeKey(dateKey, startDateKey, endDateKey);
+  const recipients = parseList(
+    options.recipients ||
+      process.env.LOGICS_ACTIVITY_REVIEW_RECIPIENTS ||
+      DEFAULT_REVIEW_RECIPIENTS,
+  );
+  const results = [];
+
+  for (const domain of domains) {
+    results.push(await runLogicsActivityReview({
+      ...options,
+      domain,
+      dateKey,
+      startDateKey,
+      endDateKey,
+      outDir,
+      sendEmail: false,
+    }));
+  }
+
+  ensureDir(outDir);
+  const combinedRows = results.flatMap((result) => result.processed?.collapsedRows || []);
+  const combinedSuspendedRows = results.flatMap((result) => result.processed?.suspendedCollapsedRows || []);
+  const csvOut = path.join(outDir, `logics-document-uploads-ALL-${rangeKey}.csv`);
+  const suspendedCsvOut = path.join(outDir, `logics-suspended-status-ALL-${rangeKey}.csv`);
+  const jsonOut = path.join(outDir, `logics-activity-review-ALL-${rangeKey}.json`);
+
+  writeCsv(csvOut, combinedRows, outputColumns());
+  writeCsv(suspendedCsvOut, combinedSuspendedRows, suspendedOutputColumns());
+
+  const processed = {
+    domains,
+    parsedRows: sumProcessed(results, "parsedRows"),
+    documentUploadActivities: sumProcessed(results, "documentUploadActivities"),
+    excludedActivities: sumProcessed(results, "excludedActivities"),
+    matchedActivities: sumProcessed(results, "matchedActivities"),
+    rowLevelOutputRows: sumProcessed(results, "rowLevelOutputRows"),
+    outputRows: combinedRows.length,
+    uniqueCases: combinedRows.length,
+    suspendedStatusChanges: sumProcessed(results, "suspendedStatusChanges"),
+    suspendedStaleStatusChanges: sumProcessed(results, "suspendedStaleStatusChanges"),
+    suspendedCurrentStatusChanges: sumProcessed(results, "suspendedCurrentStatusChanges"),
+    suspendedOutputRows: combinedSuspendedRows.length,
+    suspendedUniqueCases: combinedSuspendedRows.length,
+    aiReview: {
+      enabled: results.some((result) => result.processed?.aiReview?.enabled),
+      reviewedCases: sumProcessed(results, "aiReview.reviewedCases"),
+      errorCases: sumProcessed(results, "aiReview.errorCases"),
+      skippedCases: sumProcessed(results, "aiReview.skippedCases"),
+    },
+    suspendedAiReview: {
+      enabled: results.some((result) => result.processed?.suspendedAiReview?.enabled),
+      reviewedCases: sumProcessed(results, "suspendedAiReview.reviewedCases"),
+      errorCases: sumProcessed(results, "suspendedAiReview.errorCases"),
+      skippedCases: sumProcessed(results, "suspendedAiReview.skippedCases"),
+    },
+    csvOut,
+    suspendedCsvOut,
+    jsonOut,
+    perDomain: results.map((result) => ({
+      domain: result.domain,
+      activityRows: result.processed?.parsedRows || 0,
+      noticeCases: result.processed?.outputRows || 0,
+      suspendedCases: result.processed?.suspendedOutputRows || 0,
+      csvOut: result.processed?.csvOut || "",
+      suspendedCsvOut: result.processed?.suspendedCsvOut || "",
+    })),
+  };
+
+  writeJson(jsonOut, {
+    ok: true,
+    domains,
+    date: dateKey,
+    startDate: startDateKey,
+    endDate: endDateKey,
+    generatedAt: new Date().toISOString(),
+    processed,
+    results,
+  });
+
+  const email = options.sendEmail !== false
+    ? await emailActivityReview(
+        { processed },
+        { domain: "ALL", dateKey, startDateKey, endDateKey, recipients },
+      )
+    : null;
+
+  return {
+    ok: true,
+    domains,
+    date: dateKey,
+    startDate: startDateKey,
+    endDate: endDateKey,
+    results,
+    processed,
+    email,
+    generatedAt: new Date().toISOString(),
+  };
 }
 
 async function runLogicsActivityReview(options = {}) {
@@ -1116,6 +1408,7 @@ async function runLogicsActivityReview(options = {}) {
 }
 
 module.exports = {
+  DEFAULT_DOMAINS,
   DEFAULT_REVIEW_RECIPIENTS,
   buildEmailText,
   classifyActivityRows,
@@ -1125,5 +1418,6 @@ module.exports = {
   processActivityRows,
   requestActivityReport,
   runLogicsActivityReview,
+  runLogicsActivityReviewBatch,
   yesterdayInTz,
 };

@@ -713,6 +713,11 @@ function getSharedConfig(overrides = {}) {
           process.env.LOGICS_ACTIVITY_REVIEW_DOMAIN ||
           DEFAULT_COMPANY,
       ).toUpperCase(),
+      domains: parseOriginList(
+        overrides.logicsActivityReviewDomains ||
+          process.env.LOGICS_ACTIVITY_REVIEW_DOMAINS ||
+          "TAG,WYNN,AMITY",
+      ).map((value) => String(value || "").trim().toUpperCase()).filter(Boolean),
       hour: Math.max(0, Math.min(23, envInt("LOGICS_ACTIVITY_REVIEW_HOUR", 6))),
       minute: Math.max(0, Math.min(59, envInt("LOGICS_ACTIVITY_REVIEW_MINUTE", 0))),
       intervalMs: Math.max(
@@ -753,6 +758,30 @@ function getSharedConfig(overrides = {}) {
         overrides.logicsActivityReviewOutDir ||
         process.env.LOGICS_ACTIVITY_REVIEW_OUTPUT_DIR ||
         path.join(ROOT_DIR, "runtime", "logics-activity-review"),
+      includeAiReview: boolFromEnv(
+        overrides.logicsActivityReviewAiEnabled !== undefined
+          ? overrides.logicsActivityReviewAiEnabled
+          : process.env.LOGICS_ACTIVITY_REVIEW_AI_ENABLED,
+        true,
+      ),
+      aiReviewMaxCases: Math.max(
+        0,
+        Number(
+          overrides.logicsActivityReviewAiMaxCases ||
+            envInt("LOGICS_ACTIVITY_REVIEW_AI_MAX_CASES", 75),
+        ) || 75,
+      ),
+      aiReviewConcurrency: Math.max(
+        1,
+        Number(
+          overrides.logicsActivityReviewAiConcurrency ||
+            envInt("LOGICS_ACTIVITY_REVIEW_AI_CONCURRENCY", 1),
+        ) || 1,
+      ),
+      aiReviewModel:
+        overrides.logicsActivityReviewAiModel ||
+        process.env.LOGICS_ACTIVITY_REVIEW_AI_MODEL ||
+        "",
     },
     nightlyClose: {
       enabled: boolFromEnv(
