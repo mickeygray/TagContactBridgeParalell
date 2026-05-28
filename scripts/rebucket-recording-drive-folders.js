@@ -34,6 +34,8 @@ const ASCS_AGENT_NAMES = [
   "Matthew Anderson",
   "Matthew",
   "Matt Anderson",
+  "Dani Pearson",
+  "Dani",
   "Andrew Wells",
   "Andrew",
   "Monica Cazares",
@@ -72,6 +74,13 @@ function boolArg(value, fallback = false) {
 function intArg(value, fallback) {
   const parsed = Number.parseInt(value, 10);
   return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function csvArg(value) {
+  return String(value || "")
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter(Boolean);
 }
 
 function sleep(ms) {
@@ -115,6 +124,11 @@ function agentNameHit(file, names) {
   return names.find((name) => nameMatchesHaystack(haystack, name)) || null;
 }
 
+function fileMatchesAgentFilter(file, agentFilters) {
+  if (!agentFilters.length) return true;
+  return Boolean(agentNameHit(file, agentFilters));
+}
+
 function isCallRail(file) {
   const provider = normalizeText(file?.appProperties?.provider);
   if (provider === "callrail") return true;
@@ -135,9 +149,6 @@ function inferBucketFromFile(file, currentBucket) {
 }
 
 function targetBucketForFile(file, currentBucket) {
-  if (isCallRail(file)) {
-    return { bucket: "OG", reason: "callrail-provider", agent: null };
-  }
   const alwaysCxAgent = agentNameHit(file, ALWAYS_CX_AGENT_NAMES);
   if (alwaysCxAgent) {
     return { bucket: "CX", reason: "always-cx-agent", agent: alwaysCxAgent };
@@ -145,6 +156,9 @@ function targetBucketForFile(file, currentBucket) {
   const ascsAgent = agentNameHit(file, ASCS_AGENT_NAMES);
   if (ascsAgent) {
     return { bucket: "ASCS", reason: "named-as-cs-agent", agent: ascsAgent };
+  }
+  if (isCallRail(file)) {
+    return { bucket: "OG", reason: "callrail-provider", agent: null };
   }
   return {
     bucket: "CX",
@@ -254,6 +268,7 @@ async function main() {
   const rename = boolArg(args.rename, true);
   const maxMoves = Math.max(intArg(args["max-moves"], 0), 0);
   const delayMs = Math.max(intArg(args["delay-ms"], 150), 0);
+  const agentFilters = csvArg(args.agent || args["agent-filter"] || args["only-agent"]);
   const outDir = path.resolve(String(args["out-dir"] || path.join("runtime", "drive-rebucket")));
   fs.mkdirSync(outDir, { recursive: true });
   const runId = new Date().toISOString().replace(/[:.]/g, "-");
@@ -283,6 +298,7 @@ async function main() {
 
   const planned = [];
   for (const row of rows) {
+    if (!fileMatchesAgentFilter(row.file, agentFilters)) continue;
     const target = targetBucketForFile(row.file, row.bucket);
     const targetFolderId = buckets[target.bucket]?.folderId;
     if (!targetFolderId) continue;
@@ -342,6 +358,7 @@ async function main() {
   const summary = {
     apply,
     rename,
+    agentFilters,
     runId,
     eventsPath,
     scanned: rows.length,

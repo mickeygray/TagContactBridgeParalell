@@ -68,6 +68,8 @@ const DEFAULT_ASCS_AGENT_NAMES = [
   "Leo",
   "Matthew Anderson",
   "Matt Anderson",
+  "Dani Pearson",
+  "Dani",
   "Andrew Wells",
   "Andrew",
   "Monica Cazares",
@@ -1204,27 +1206,27 @@ async function resolveTerminalRouting(callLog, artifact = null, rcRecord = null)
   );
   const provider = String(artifact?.provider || "").toLowerCase();
   const isRingcxRoute = provider === "ringcx";
-  const isAscsAgentRoute = provider !== "callrail" && ascsAgentTouches.length > 0;
-  const isAlwaysCxAgentRoute = provider !== "callrail" && alwaysCxAgentTouches.length > 0;
+  const isAscsAgentRoute = ascsAgentTouches.length > 0;
+  const isAlwaysCxAgentRoute = alwaysCxAgentTouches.length > 0;
   const isCustomerServiceRoute =
     provider === "ringcentral" && (cservTouches.length > 0 || hasCustomerServiceTouch);
   const destination =
-    provider === "callrail"
-      ? buildDestination(destinations.og, "origination", "OG")
-      : isAlwaysCxAgentRoute
+    isAlwaysCxAgentRoute
         ? buildDestination(destinations.cx || destinations.as, "cx", "CX")
       : isAscsAgentRoute || isCustomerServiceRoute
         ? buildDestination(destinations.cs, "customer-service", "CS")
+      : provider === "callrail"
+        ? buildDestination(destinations.og, "origination", "OG")
         : isRingcxRoute
         ? buildRingcxDestination(destinations, callLog.direction)
         : buildDestination(destinations.cx || destinations.as, "cx", "CX");
   const routeReason =
-    provider === "callrail"
-      ? "callrail-provider"
-      : isAlwaysCxAgentRoute
+    isAlwaysCxAgentRoute
         ? "always-cx-agent-name"
       : isAscsAgentRoute
         ? "as-cs-agent-name"
+      : provider === "callrail"
+        ? "callrail-provider"
       : isRingcxRoute
         ? `ringcx-${normalizeArchiveDirection(callLog.direction)}-provider`
       : isCustomerServiceRoute
