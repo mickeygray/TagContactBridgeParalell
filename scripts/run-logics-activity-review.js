@@ -68,6 +68,8 @@ async function main() {
     noticeRows: result.processed?.rowLevelOutputRows || 0,
     noticeCases: result.processed?.outputRows || 0,
     suspendedStatusChanges: result.processed?.suspendedStatusChanges || 0,
+    suspendedCurrentStatusChanges: result.processed?.suspendedCurrentStatusChanges || 0,
+    suspendedStaleStatusChanges: result.processed?.suspendedStaleStatusChanges || 0,
     suspendedCases: result.processed?.suspendedOutputRows || 0,
     csvOut: result.processed?.csvOut || null,
     suspendedCsvOut: result.processed?.suspendedCsvOut || null,

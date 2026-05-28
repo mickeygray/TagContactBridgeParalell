@@ -59,6 +59,60 @@ const DEFAULT_DOCUMENT_INCLUDE_RULES = Object.freeze([
   { name: "CP", pattern: /(?:^|[^a-z0-9])CP[\s_-]*[A-Z0-9]*/i },
   { name: "668", pattern: /(?:^|[^0-9])668(?:[^0-9]|$)/ },
 ]);
+const ACTIVITY_TEMPERATURE_RULES = Object.freeze([
+  {
+    severity: "stop_contact",
+    name: "do-not-contact",
+    pattern: /\b(do not call|do not contact|don't call|dont call|stop calling|stop texting|stop text|unsubscribe|opt out|remove me|take me off|never contact)\b/i,
+  },
+  {
+    severity: "stop_contact",
+    name: "legal-risk",
+    pattern: /\b(cease and desist|attorney general|complaint|lawsuit|sue you|harassment|harassing|fraud|scam)\b/i,
+  },
+  {
+    severity: "stop_contact",
+    name: "wrong-person",
+    pattern: /\b(wrong number|wrong person|not me|this is not me|this isn't me|never applied|did not apply|didn't apply|did not sign up|didn't sign up)\b/i,
+  },
+  {
+    severity: "stop_contact",
+    name: "deceased",
+    pattern: /\b(deceased|passed away|died|dead)\b/i,
+  },
+  {
+    severity: "manual_review",
+    name: "represented",
+    pattern: /\b(attorney|lawyer|cpa|ea|tax pro|tax professional|represented|representation|already hired|already signed|working with another|working with a firm)\b/i,
+  },
+  {
+    severity: "manual_review",
+    name: "not-interested",
+    pattern: /\b(not interested|no longer interested|no thanks|changed mind|doesn't want|does not want|declined|refused)\b/i,
+  },
+  {
+    severity: "manual_review",
+    name: "contact-friction",
+    pattern: /\b(no answer|left voicemail|voicemail|vm\b|bad number|disconnected|busy|hang ?up|hung up|call failed|unable to reach)\b/i,
+  },
+  {
+    severity: "pause_contact",
+    name: "call-later",
+    pattern: /\b(call back|callback|call later|bad time|busy right now|follow up|try again|not available)\b/i,
+  },
+  {
+    severity: "allow_contact",
+    name: "engaged",
+    pattern: /\b(sent docs|uploaded|asked|requested|wants help|needs help|interested|appointment|scheduled|spoke with|called back)\b/i,
+  },
+]);
+const ACTIVITY_TEMPERATURE_RANK = {
+  clear: 0,
+  allow_contact: 1,
+  pause_contact: 2,
+  manual_review: 3,
+  stop_contact: 4,
+};
 
 function ensureDir(dir) {
   fs.mkdirSync(dir, { recursive: true });
@@ -123,6 +177,69 @@ function parseDateMs(value) {
   if (!value) return 0;
   const ms = Date.parse(value);
   return Number.isFinite(ms) ? ms : 0;
+}
+
+function sortActivitiesNewestFirst(activities = []) {
+  return [...(Array.isArray(activities) ? activities : [])].sort(
+    (a, b) =>
+      parseDateMs(b.CreatedDate || b.ModifiedDate || b.Date) -
+      parseDateMs(a.CreatedDate || a.ModifiedDate || a.Date),
+  );
+}
+
+function summarizeActivityTemperature(activities = []) {
+  const hits = [];
+  const rows = sortActivitiesNewestFirst(activities).slice(0, 40);
+  for (const row of rows) {
+    const text = clean([
+      row.Subject,
+      row.ActivityType,
+      row.Comment,
+      row.Notes,
+      row.Description,
+    ].filter(Boolean).join(" "), 2000);
+    if (!text) continue;
+    for (const rule of ACTIVITY_TEMPERATURE_RULES) {
+      if (!rule.pattern.test(text)) continue;
+      hits.push({
+        severity: rule.severity,
+        name: rule.name,
+        at: clean(row.CreatedDate || row.ModifiedDate || row.Date || "", 80),
+        evidence: clean(text, 160),
+      });
+    }
+  }
+
+  if (hits.length === 0) {
+    return {
+      status: "clear",
+      label: "clear",
+      flags: "",
+      evidence: "",
+    };
+  }
+
+  const status = hits.reduce((best, hit) =>
+    ACTIVITY_TEMPERATURE_RANK[hit.severity] > ACTIVITY_TEMPERATURE_RANK[best]
+      ? hit.severity
+      : best,
+  "clear");
+  const names = [...new Set(hits
+    .filter((hit) => hit.severity === status || status === "clear")
+    .map((hit) => hit.name))]
+    .slice(0, 4);
+  const evidence = hits
+    .filter((hit) => hit.severity === status)
+    .slice(0, 2)
+    .map((hit) => hit.at ? `${hit.at}: ${hit.evidence}` : hit.evidence)
+    .join(" | ");
+
+  return {
+    status,
+    label: names.length ? `${status}: ${names.join(", ")}` : status,
+    flags: names.join(" | "),
+    evidence,
+  };
 }
 
 function formatCsvValue(value) {
@@ -381,6 +498,10 @@ function parseStatusTier(statusName) {
   return match ? `T${match[1]}` : "";
 }
 
+function isSuspendedStatusName(statusName) {
+  return /\bsuspend(ed|)\b/i.test(String(statusName || ""));
+}
+
 function summarizeInvoices(invoices = []) {
   const rows = Array.isArray(invoices) ? invoices : [];
   const total = rows.reduce(
@@ -514,6 +635,7 @@ async function enrichCandidates(domain, candidates, options = {}) {
     const caseInfo = summarizeCaseInfo(entry.caseInfo || {});
     const billing = summarizeBilling(entry.billing || {});
     const invoices = summarizeInvoices(entry.invoices || []);
+    const activityTemperature = summarizeActivityTemperature(entry.activities || []);
     const exactActivity = findMatchingCaseActivity(entry.activities || [], candidate);
     const documentName = candidate.documentName || exactActivity.documentName || "";
     const noticeMatches = [...new Set([
@@ -538,6 +660,13 @@ async function enrichCandidates(domain, candidates, options = {}) {
       statusName: caseInfo.statusName,
       clientTemperature: caseInfo.statusTier,
       statusIsT1T4: caseInfo.statusIsT1T4 ? "yes" : "no",
+      currentStatusName: caseInfo.statusName,
+      currentStatusTier: caseInfo.statusTier,
+      currentlySuspended: isSuspendedStatusName(caseInfo.statusName) ? "yes" : "no",
+      activityTemperature: activityTemperature.label,
+      activityTemperatureStatus: activityTemperature.status,
+      activityTemperatureFlags: activityTemperature.flags,
+      activityTemperatureEvidence: activityTemperature.evidence,
       taxLiability: caseInfo.taxLiability,
       saleDate: caseInfo.saleDate,
       documentName,
@@ -601,8 +730,8 @@ function finalCsvRow(row) {
     pastDue: formatMoney(row.pastDue),
     invoiceTotal: formatMoney(row.invoiceTotal),
     latestInvoiceDate: row.latestInvoiceDate,
-    temperature: row.statusName,
-    tier: row.clientTemperature,
+    temperature: row.activityTemperature || row.statusName,
+    tier: row.clientTemperature || parseStatusTier(row.fromStatus) || parseStatusTier(row.toStatus),
   };
 }
 
@@ -722,7 +851,8 @@ function buildRangeKey(dateKey, startDateKey, endDateKey) {
 async function processSuspendedStatusRows({ domain, rows, outDir, concurrency, rangeKey, options }) {
   const candidates = classifySuspendedStatusRows(rows);
   const enriched = await enrichCandidates(domain, candidates, { ...options, concurrency });
-  const sorted = enriched.sort((a, b) => parseDateMs(a.uploadedAt) - parseDateMs(b.uploadedAt));
+  const currentSuspended = enriched.filter((row) => isSuspendedStatusName(row.statusName));
+  const sorted = currentSuspended.sort((a, b) => parseDateMs(a.uploadedAt) - parseDateMs(b.uploadedAt));
   const collapsedRows = collapseSuspendedRowsByCase(sorted);
   const outputDir = path.resolve(outDir || DEFAULT_OUT_DIR);
   ensureDir(outputDir);
@@ -730,10 +860,13 @@ async function processSuspendedStatusRows({ domain, rows, outDir, concurrency, r
   writeCsv(csvOut, collapsedRows, suspendedOutputColumns());
   return {
     statusChangeRows: candidates.length,
+    staleStatusRows: enriched.length - currentSuspended.length,
+    currentSuspendedRows: currentSuspended.length,
     outputRows: collapsedRows.length,
     uniqueCases: collapsedRows.length,
     csvOut,
     rows: sorted,
+    staleRows: enriched.filter((row) => !isSuspendedStatusName(row.statusName)),
     collapsedRows,
   };
 }
@@ -825,6 +958,8 @@ async function processActivityRows({
     csvOut,
     jsonOut,
     suspendedStatusChanges: suspended.statusChangeRows,
+    suspendedStaleStatusChanges: suspended.staleStatusRows,
+    suspendedCurrentStatusChanges: suspended.currentSuspendedRows,
     suspendedOutputRows: suspended.outputRows,
     suspendedUniqueCases: suspended.uniqueCases,
     suspendedCsvOut: suspended.csvOut,
@@ -871,6 +1006,8 @@ function buildEmailText({ domain, dateKey, startDateKey, endDateKey, processed }
     `Notice upload rows after filters: ${processed.rowLevelOutputRows || 0}`,
     `Notice upload cases: ${processed.outputRows || 0}`,
     `Suspended status changes: ${processed.suspendedStatusChanges || 0}`,
+    `Suspended changes still current: ${processed.suspendedCurrentStatusChanges || 0}`,
+    `Suspended changes no longer current: ${processed.suspendedStaleStatusChanges || 0}`,
     `Suspended status cases: ${processed.suspendedOutputRows || 0}`,
     "",
     `Notice CSV: ${processed.csvOut || ""}`,
