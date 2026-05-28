@@ -31,6 +31,7 @@ const {
 } = require("../../shared-templates/src");
 const {
   getCompanyConfig,
+  getInternalFromEmail,
   getMarketingFromEmail,
 } = require("../../shared-config/src");
 
@@ -231,6 +232,18 @@ function resolveFrom(domainKey, explicitFrom) {
   return `${fromName} <${fromEmail}>`;
 }
 
+function resolveTransportDomain(domainKey, explicitFrom, explicitTransportDomain) {
+  if (explicitTransportDomain) {
+    return String(explicitTransportDomain || "").toUpperCase();
+  }
+  const internalEmail = String(getInternalFromEmail() || "").trim().toLowerCase();
+  const from = String(explicitFrom || "").toLowerCase();
+  if (internalEmail && from.includes(internalEmail)) {
+    return "TAG";
+  }
+  return String(domainKey || "").toUpperCase();
+}
+
 // ── Attachment resolution ────────────────────────────────────────────
 //
 // Attachments accept legacy nodemailer shape, plus a sugar form for the
@@ -279,6 +292,7 @@ function resolveAttachments(domainKey, attachments = []) {
 //   from          string                explicit From header (optional)
 //   replyTo       string | object       optional
 //   attachments   array                 see resolveAttachments
+//   transportDomain string               optional SendGrid key domain override
 //   bcc, cc       string | string[]     optional
 async function sendMail(domain, options = {}) {
   const key = String(domain || "").toUpperCase();
@@ -294,7 +308,8 @@ async function sendMail(domain, options = {}) {
     html = renderTemplate(options.template, options.data || {});
   }
 
-  const transport = getTransport(key);
+  const transportKey = resolveTransportDomain(key, options.from, options.transportDomain);
+  const transport = getTransport(transportKey);
   const mail = {
     from: resolveFrom(key, options.from),
     to: Array.isArray(options.to) ? options.to.join(", ") : options.to,
@@ -312,6 +327,7 @@ async function sendMail(domain, options = {}) {
     ok: true,
     messageId: info?.messageId || null,
     domain: key,
+    transportDomain: transportKey,
     to: mail.to,
     subject: mail.subject,
   };
@@ -338,6 +354,7 @@ module.exports = {
   renderTemplate,
   compileTemplate,
   getTransport,
+  resolveTransportDomain,
   resolveFrom,
   resolveAttachments,
   clearCaches,
