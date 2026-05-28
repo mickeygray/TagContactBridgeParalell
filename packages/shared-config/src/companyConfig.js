@@ -79,6 +79,40 @@ const COMPANY_DEFINITIONS = Object.freeze({
     dropTransferNumberEnv: "TAG_DROP_TRANSFER_NUMBER",
     templateDirEnv: "COMPANY_TAG_TEMPLATE_DIR",
   },
+  AMITY: {
+    key: "AMITY",
+    nameEnv: "COMPANY_AMITY_NAME",
+    defaultName: "Amity Tax Group",
+    workspaceEnv: "COMPANY_AMITY_WORKSPACE",
+    logicsDomainEnv: "COMPANY_AMITY_LOGICS_DOMAIN",
+    companySlugEnv: "COMPANY_AMITY_SLUG",
+    clientContactPhoneEnv: "AMITY_CLIENT_CONTACT_PHONE",
+    fallbackPhoneEnv: "AMITY_PHONE",
+    scheduleUrlEnv: "AMITY_SCHEDULE_URL",
+    calendarScheduleUrlEnv: "AMITY_CALENDAR_SCHEDULE_URL",
+    defaultScheduleUrl: "https://www.amitytaxgroup.com",
+    alertEmailEnv: "AMITY_ALERT_EMAIL",
+    defaultAlertEmailEnv: "COMPANY_AMITY_DEFAULT_ALERT_EMAIL",
+    toEmailEnv: "AMITY_TO_EMAIL",
+    defaultToEmailEnv: "COMPANY_AMITY_DEFAULT_TO_EMAIL",
+    sendgridApiKeyEnv: "AMITY_API_KEY",
+    logicsApiUrlEnv: "AMITY_LOGICS_API_URL",
+    logicsApiKeyEnv: "AMITY_LOGICS_API_KEY",
+    logicsSecretEnv: "AMITY_LOGICS_SECRET",
+    fbPageIdEnv: "AMITY_FB_PAGE_ID",
+    fbPageTokenEnv: "AMITY_FB_PAGE_TOKEN",
+    igPageIdEnv: "AMITY_IG_PAGE_ID",
+    igPageTokenEnv: "AMITY_IG_PAGE_TOKEN",
+    ttAdvertiserIdEnv: "AMITY_TT_ADVERTISER_ID",
+    callrailAccountIdEnv: "AMITY_CALL_RAIL_ACCOUNT_ID",
+    callrailCompanyIdEnv: "AMITY_CALLRAIL_COMPANY_ID",
+    callrailKeyEnv: "AMITY_CALL_RAIL_KEY",
+    callrailTrackingNumberEnv: "AMITY_CALL_RAIL_TRACKING_NUMBER",
+    dropApiKeyEnv: "DROP_API_KEY",
+    dropCampaignTokenEnv: "AMITY_DROP_CAMPAIGN_TOKEN",
+    dropTransferNumberEnv: "AMITY_DROP_TRANSFER_NUMBER",
+    templateDirEnv: "COMPANY_AMITY_TEMPLATE_DIR",
+  },
 });
 
 function normalizeLogicsApiUrl(value) {
@@ -89,6 +123,9 @@ function normalizeLogicsApiUrl(value) {
   }
   if (/\/publicapi\/v3\/?$/i.test(raw)) {
     return raw.replace(/\/publicapi\/v3\/?$/i, "/publicapi/V4/");
+  }
+  if (/\/publicapi\/[^/]+\/?$/i.test(raw)) {
+    return raw.replace(/\/publicapi\/[^/]+\/?$/i, "/publicapi/V4/");
   }
   return raw.endsWith("/") ? raw : `${raw}/`;
 }
@@ -193,10 +230,12 @@ function resolveCompanyFromPayload(body = {}, headers = {}) {
   const referer = String(headers.referer || headers.origin || "").toLowerCase();
   if (referer.includes("wynntaxsolutions")) return "WYNN";
   if (referer.includes("taxadvocategroup")) return "TAG";
+  if (referer.includes("amitytaxgroup")) return "AMITY";
 
   const source = String(body.source || body.Source || "").toLowerCase();
   if (source.includes("wynn")) return "WYNN";
   if (source.includes("tag")) return "TAG";
+  if (source.includes("amity")) return "AMITY";
 
   return DEFAULT_COMPANY;
 }

@@ -697,6 +697,7 @@ async function enrichCandidates(domain, candidates, options = {}) {
 function outputColumns() {
   return [
     "caseId",
+    "database",
     "name",
     "cell",
     "documentsUploaded",
@@ -719,6 +720,7 @@ function outputColumns() {
 function finalCsvRow(row) {
   const documentUploaded = row.documentName || row.activitySubject || row.activityType;
   return {
+    database: row.domain,
     name: row.name,
     cell: row.cell,
     documentUploaded,
@@ -755,6 +757,7 @@ function collapseRowsByCase(rows) {
       const base = finalCsvRow(latest);
       return {
         caseId: latest.caseId,
+        database: base.database,
         name: latest.name,
         cell: latest.cell,
         documentsUploaded: uniqueJoined(sortedRows.map((row) => row.documentName || row.activitySubject || row.activityType)),
@@ -779,6 +782,7 @@ function collapseRowsByCase(rows) {
 function suspendedOutputColumns() {
   return [
     "caseId",
+    "database",
     "name",
     "cell",
     "statusChanges",
@@ -821,6 +825,7 @@ function collapseSuspendedRowsByCase(rows) {
       const base = finalCsvRow(latest);
       return {
         caseId: latest.caseId,
+        database: base.database,
         name: latest.name,
         cell: latest.cell,
         statusChanges: uniqueJoined(sortedRows.map(statusChangeLabel)),
