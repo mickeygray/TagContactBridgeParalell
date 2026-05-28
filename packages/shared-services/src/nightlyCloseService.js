@@ -541,7 +541,6 @@ const NIGHTLY_RECIPIENT_POOLS = {
       "manderson@taxadvocategroup.com",
       "liz@lizdev.com",
       "beth@lizdev.com",
-      "james@beachmedia.io",
     ],
     //   // LizDev partner — fill in once Liz confirms the recipient
   },
