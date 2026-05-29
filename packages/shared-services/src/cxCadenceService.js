@@ -35,13 +35,14 @@ const {
   deriveQueueFamilyFromLeadCreatedAt,
   deriveQueueFamilyFromLeadTouchState,
   getCooldownReleaseAt,
+  getQueueDailyDateKey,
   getPacificDateKey,
   getPacificMonthKey,
   getQueueFamilyPolicy,
   getTouchAgeFreshWindowDays,
   resolveQueueDialability,
+  resolveQueueDialTimeWindow,
 } = require("./cxQueuePolicyService");
-const { evaluateChannelContactTime } = require("./contactTimingPolicyService");
 const { resolveCaseContactEligibility, stopCaseContact } = require("./contactEligibilityService");
 const { cancelPublishedQueueItemInRingcx } = require("./ringcxLeadServingService");
 const { syncCallLedgerFromCallLog } = require("./callLedgerService");
@@ -645,10 +646,55 @@ function parseRequestedReleaseAt(value) {
   return Number.isNaN(date.getTime()) ? null : date;
 }
 
-function resolveRequestedReleaseTiming(domain, requestedReleaseAt = null) {
+function readLeadStateForQueue(payload = {}) {
+  return (
+    payload.leadState ||
+    payload.state ||
+    payload.contactState ||
+    payload.metadata?.leadState ||
+    payload.metadata?.contactState ||
+    payload.metadata?.state ||
+    payload.payloadSnapshot?.state ||
+    payload.attributionContext?.state ||
+    null
+  );
+}
+
+function readLeadTimeZoneForQueue(payload = {}) {
+  return (
+    payload.leadTimeZone ||
+    payload.leadTimezone ||
+    payload.timeZone ||
+    payload.timezone ||
+    payload.metadata?.leadTimeZone ||
+    payload.metadata?.leadTimezone ||
+    payload.metadata?.timeZone ||
+    payload.metadata?.timezone ||
+    payload.cadenceState?.timezone ||
+    payload.payloadSnapshot?.timeZone ||
+    payload.payloadSnapshot?.timezone ||
+    null
+  );
+}
+
+function buildQueueTimingPayload(domain, payload = {}) {
+  const leadState = readLeadStateForQueue(payload);
+  const leadTimeZone = readLeadTimeZoneForQueue(payload);
+  return {
+    ...payload,
+    domain,
+    metadata: {
+      ...(payload.metadata || {}),
+      ...(leadState ? { leadState } : {}),
+      ...(leadTimeZone ? { leadTimeZone } : {}),
+    },
+  };
+}
+
+function resolveRequestedReleaseTiming(domain, requestedReleaseAt = null, payload = {}) {
   const now = new Date();
   const target = requestedReleaseAt || now;
-  const timing = evaluateChannelContactTime(domain, "cx", target);
+  const timing = resolveQueueDialTimeWindow(buildQueueTimingPayload(domain, payload), target);
   const releaseAt = timing.nextAllowedAt || target;
   return {
     timing,
@@ -934,13 +980,22 @@ async function readPersistedCxTouchState(domain, caseId) {
         "counterCadence.lastCxDialedAt": 1,
         "counterCadence.lastCxDialedByExtensionId": 1,
         "counterCadence.lastCxDialedByAgentName": 1,
+        "counterCadence.cxAnsweredContacts": 1,
+        "counterCadence.cxNoAnswerCalls": 1,
         "counterCadence.cxDailyDateKey": 1,
         "counterCadence.cxDailyCalls": 1,
         "counterCadence.cxMonthlyMonthKey": 1,
         "counterCadence.cxMonthlyCalls": 1,
+        "cadenceState.timezone": 1,
+        "cadenceState.timeZone": 1,
         "payloadSnapshot.lastCxDialedAt": 1,
         "payloadSnapshot.lastCxDialedByExtensionId": 1,
         "payloadSnapshot.lastCxDialedByAgentName": 1,
+        "payloadSnapshot.cxAnsweredContacts": 1,
+        "payloadSnapshot.cxNoAnswerCalls": 1,
+        "payloadSnapshot.state": 1,
+        "payloadSnapshot.timezone": 1,
+        "payloadSnapshot.timeZone": 1,
       },
     ).lean().catch(() => null),
     MasterProspectIndex.findOne(
@@ -950,10 +1005,18 @@ async function readPersistedCxTouchState(domain, caseId) {
         "filler.attemptCount": 1,
         "filler.lastDialedByExtensionId": 1,
         "filler.lastDialedByAgentName": 1,
+        "filler.answeredContacts": 1,
+        "filler.noAnswerCalls": 1,
         "filler.dailyDateKey": 1,
         "filler.dailyAttempts": 1,
         "filler.monthlyMonthKey": 1,
         "filler.monthlyAttempts": 1,
+        state: 1,
+        timeZone: 1,
+        timezone: 1,
+        "payloadSnapshot.state": 1,
+        "payloadSnapshot.timezone": 1,
+        "payloadSnapshot.timeZone": 1,
       },
     ).lean().catch(() => null),
   ]);
@@ -978,6 +1041,12 @@ async function readPersistedCxTouchState(domain, caseId) {
     totalCalls: useProspect
       ? Math.max(Number(source.attemptCount || 0) || 0, 0)
       : Math.max(Number(cadence?.cadenceCounters?.cx || 0) || 0, 0),
+    answeredContacts: useProspect
+      ? Math.max(Number(source.answeredContacts || 0) || 0, 0)
+      : Math.max(Number(counter.cxAnsweredContacts || payload.cxAnsweredContacts || 0) || 0, 0),
+    noAnswerCalls: useProspect
+      ? Math.max(Number(source.noAnswerCalls || 0) || 0, 0)
+      : Math.max(Number(counter.cxNoAnswerCalls || payload.cxNoAnswerCalls || 0) || 0, 0),
     extensionId: String(
       useProspect
         ? source.lastDialedByExtensionId || ""
@@ -990,12 +1059,40 @@ async function readPersistedCxTouchState(domain, caseId) {
     dailyCalls: Math.max(Number(useProspect ? source.dailyAttempts || 0 : counter.cxDailyCalls || 0) || 0, 0),
     monthlyMonthKey: String(useProspect ? source.monthlyMonthKey || "" : counter.cxMonthlyMonthKey || "").trim() || null,
     monthlyCalls: Math.max(Number(useProspect ? source.monthlyAttempts || 0 : counter.cxMonthlyCalls || 0) || 0, 0),
+    leadState: (
+      cadence?.payloadSnapshot?.state ||
+      prospect?.state ||
+      prospect?.payloadSnapshot?.state ||
+      null
+    ),
+    leadTimeZone: (
+      cadence?.cadenceState?.timezone ||
+      cadence?.cadenceState?.timeZone ||
+      cadence?.payloadSnapshot?.timezone ||
+      cadence?.payloadSnapshot?.timeZone ||
+      prospect?.timeZone ||
+      prospect?.timezone ||
+      prospect?.payloadSnapshot?.timezone ||
+      prospect?.payloadSnapshot?.timeZone ||
+      null
+    ),
   };
 }
 
 function buildHydratedCxTouchPatch(item = {}, persisted = null, now = new Date()) {
   if (!persisted?.touchedAt) return null;
-  const dateKey = getPacificDateKey(now);
+  const leadState = persisted.leadState || item.metadata?.leadState || null;
+  const leadTimeZone = persisted.leadTimeZone || item.metadata?.leadTimeZone || null;
+  const timingItem = {
+    ...item,
+    metadata: {
+      ...(item.metadata || {}),
+      ...(leadState ? { leadState } : {}),
+      ...(leadTimeZone ? { leadTimeZone } : {}),
+    },
+  };
+  const dateKey = getQueueDailyDateKey(timingItem, now);
+  const pacificDateKey = getPacificDateKey(now);
   const monthKey = getPacificMonthKey(now);
   const itemLastPlacedAt = latestDateValue(item.lastPlacedAt, item.metadata?.lastQueueAttemptAt);
   const nextLastPlacedAt =
@@ -1003,10 +1100,10 @@ function buildHydratedCxTouchPatch(item = {}, persisted = null, now = new Date()
       ? persisted.touchedAt
       : itemLastPlacedAt;
   const itemDailyCalls =
-    String(item.dailyPlacedDateKey || item.metadata?.dailyPlacedDateKey || "").trim() === dateKey
+    [dateKey, pacificDateKey].includes(String(item.dailyPlacedDateKey || item.metadata?.dailyPlacedDateKey || "").trim())
       ? Math.max(Number(item.dailyPlacedCalls ?? item.metadata?.dailyPlacedCalls ?? 0) || 0, 0)
       : 0;
-  const persistedDailyCalls = persisted.dailyDateKey === dateKey ? persisted.dailyCalls : 0;
+  const persistedDailyCalls = [dateKey, pacificDateKey].includes(persisted.dailyDateKey) ? persisted.dailyCalls : 0;
   const itemMonthlyCalls =
     String(item.monthlyPlacedMonthKey || item.metadata?.monthlyPlacedMonthKey || "").trim() === monthKey
       ? Math.max(Number(item.monthlyPlacedCalls ?? item.metadata?.monthlyPlacedCalls ?? 0) || 0, 0)
@@ -1026,10 +1123,33 @@ function buildHydratedCxTouchPatch(item = {}, persisted = null, now = new Date()
     "metadata.lastTouchedAgentName": persisted.agentName || item.metadata?.lastTouchedAgentName || null,
     "metadata.lastCxDialedByExtensionId": persisted.extensionId || item.metadata?.lastCxDialedByExtensionId || null,
     "metadata.lastCxDialedByAgentName": persisted.agentName || item.metadata?.lastCxDialedByAgentName || null,
+    "metadata.answeredContacts": Math.max(
+      Number(item.metadata?.answeredContacts || item.metadata?.cxAnsweredContacts || 0) || 0,
+      Number(persisted.answeredContacts || 0) || 0,
+    ),
+    "metadata.cxAnsweredContacts": Math.max(
+      Number(item.metadata?.answeredContacts || item.metadata?.cxAnsweredContacts || 0) || 0,
+      Number(persisted.answeredContacts || 0) || 0,
+    ),
+    "metadata.unansweredCalls": Math.max(
+      Number(item.metadata?.unansweredCalls || item.metadata?.noAnswerCalls || item.metadata?.cxNoAnswerCalls || 0) || 0,
+      Number(persisted.noAnswerCalls || 0) || 0,
+    ),
+    "metadata.noAnswerCalls": Math.max(
+      Number(item.metadata?.unansweredCalls || item.metadata?.noAnswerCalls || item.metadata?.cxNoAnswerCalls || 0) || 0,
+      Number(persisted.noAnswerCalls || 0) || 0,
+    ),
+    "metadata.cxNoAnswerCalls": Math.max(
+      Number(item.metadata?.unansweredCalls || item.metadata?.noAnswerCalls || item.metadata?.cxNoAnswerCalls || 0) || 0,
+      Number(persisted.noAnswerCalls || 0) || 0,
+    ),
     "metadata.dailyPlacedDateKey": dateKey,
     "metadata.dailyPlacedCalls": Math.max(itemDailyCalls, persistedDailyCalls),
+    "metadata.dailyPlacedTimezone": leadTimeZone || item.metadata?.dailyPlacedTimezone || null,
     "metadata.monthlyPlacedMonthKey": monthKey,
     "metadata.monthlyPlacedCalls": Math.max(itemMonthlyCalls, persistedMonthlyCalls),
+    "metadata.leadState": leadState,
+    "metadata.leadTimeZone": leadTimeZone,
   };
 }
 
@@ -1057,8 +1177,11 @@ async function hydrateClaimedQueueItemCxTouchState(item = {}) {
       lastCxDialedByAgentName: patch["metadata.lastCxDialedByAgentName"],
       dailyPlacedDateKey: patch["metadata.dailyPlacedDateKey"],
       dailyPlacedCalls: patch["metadata.dailyPlacedCalls"],
+      dailyPlacedTimezone: patch["metadata.dailyPlacedTimezone"],
       monthlyPlacedMonthKey: patch["metadata.monthlyPlacedMonthKey"],
       monthlyPlacedCalls: patch["metadata.monthlyPlacedCalls"],
+      leadState: patch["metadata.leadState"],
+      leadTimeZone: patch["metadata.leadTimeZone"],
     },
   };
 }
@@ -1661,6 +1784,8 @@ async function queueCxDialRequest(payload = {}) {
   const actionKey = normalizeActionKey(
     payload.actionKey || payload.queueKey || payload.metadata?.actionKey,
   );
+  const leadState = readLeadStateForQueue(payload);
+  const leadTimeZone = readLeadTimeZoneForQueue(payload);
   if (!domain || !Number.isFinite(caseId)) {
     throw new Error("domain and caseId are required for cx dial queueing");
   }
@@ -1700,7 +1825,7 @@ async function queueCxDialRequest(payload = {}) {
     const existingRouting = readStoredRcxQueueRouting(existingObject);
     const requestedReleaseAt = parseRequestedReleaseAt(payload.releaseAt);
     const requestedReleaseTiming = requestedReleaseAt
-      ? resolveRequestedReleaseTiming(domain, requestedReleaseAt)
+      ? resolveRequestedReleaseTiming(domain, requestedReleaseAt, { ...existingObject, ...payload })
       : null;
     const requestedRouting = resolveRcxQueueRouting(existingObject.queueFamily, {
       ...existingObject,
@@ -1778,6 +1903,8 @@ async function queueCxDialRequest(payload = {}) {
           ...(payload.metadata || {}),
           ...(progression.metadata || {}),
           actionKey: actionKey || existingActionKey || null,
+          ...(leadState ? { leadState } : {}),
+          ...(leadTimeZone ? { leadTimeZone } : {}),
           rcxAccountId: requestedRouting.rcxAccountId,
           rcxDialGroupId: requestedRouting.rcxDialGroupId,
           rcxCampaignId: requestedRouting.rcxCampaignId,
@@ -1819,6 +1946,7 @@ async function queueCxDialRequest(payload = {}) {
   const releaseTiming = resolveRequestedReleaseTiming(
     domain,
     requestedReleaseAt || new Date(now.getTime() + callPlan.nextDelayMinutes * 60 * 1000),
+    payload,
   );
   const timing = releaseTiming.timing;
   const queueItem = await cxDialQueueRepository.upsertQueueItem(domain, caseId, {
@@ -1849,6 +1977,8 @@ async function queueCxDialRequest(payload = {}) {
       requestedWorkflowId: payload.workflowId || null,
       requestedByUserEmail: payload.requestedByUserEmail || null,
       leadCreatedAt: payload.leadCreatedAt || payload.createdAt || payload.payloadSnapshot?.createdAt || null,
+      ...(leadState ? { leadState } : {}),
+      ...(leadTimeZone ? { leadTimeZone } : {}),
       requestedReleaseAt: requestedReleaseAt || null,
       ...(payload.metadata || {}),
       ...(progression.metadata || {}),
@@ -2210,9 +2340,8 @@ async function handleCxCallPlaced(payload = {}) {
       },
     });
   } else {
-    const timing = evaluateChannelContactTime(
-      domain,
-      "cx",
+    const timing = resolveQueueDialTimeWindow(
+      queueItem,
       new Date(placedAt.getTime() + nextDelayMinutes * 60 * 1000),
     );
     await rescheduleCxQueueItem({
@@ -2426,6 +2555,21 @@ async function handleCxTerminalCallOutcome(payload = {}) {
 
   const preferredActionKey = normalizeActionKey(payload.actionKey || queueItem?.metadata?.actionKey);
   const lead = await LeadCadence.findOne({ domain, caseId }).lean();
+  const priorCxAnsweredContacts = Math.max(Number(
+    lead?.counterCadence?.cxAnsweredContacts ||
+      lead?.payloadSnapshot?.cxAnsweredContacts ||
+      queueItem?.metadata?.answeredContacts ||
+      queueItem?.metadata?.cxAnsweredContacts ||
+      0,
+  ) || 0, 0);
+  const nextCxNoAnswerCalls = Math.max(Number(
+    lead?.counterCadence?.cxNoAnswerCalls ||
+      lead?.payloadSnapshot?.cxNoAnswerCalls ||
+      queueItem?.metadata?.unansweredCalls ||
+      queueItem?.metadata?.noAnswerCalls ||
+      queueItem?.metadata?.cxNoAnswerCalls ||
+      0,
+  ) || 0, 0) + 1;
   const pendingCxActions = (lead?.schedule?.actions || []).filter(
     (entry) => entry.channel === "cx" && (entry.status === "pending" || entry.status === "requested"),
   );
@@ -2445,6 +2589,18 @@ async function handleCxTerminalCallOutcome(payload = {}) {
     });
     await leadCadenceRepository.syncLeadCadenceState(domain, caseId).catch(() => null);
   }
+  await LeadCadence.updateOne(
+    { domain, caseId },
+    {
+      $set: {
+        "counterCadence.cxNoAnswerCalls": nextCxNoAnswerCalls,
+        "counterCadence.lastCxNoAnswerAt": safeOutcomeAt,
+        "payloadSnapshot.cxNoAnswerCalls": nextCxNoAnswerCalls,
+        "payloadSnapshot.lastCxNoAnswerAt": safeOutcomeAt,
+        "payloadSnapshot.cxAnsweredContacts": priorCxAnsweredContacts,
+      },
+    },
+  ).catch(() => null);
 
   const currentPlan = normalizeCallPlanForQueueFamily(
     queueItem.callPlan || null,
@@ -2455,24 +2611,43 @@ async function handleCxTerminalCallOutcome(payload = {}) {
     : null;
   const baseMetadata = {
     ...terminalMetadata,
+    answeredContacts: priorCxAnsweredContacts,
+    cxAnsweredContacts: priorCxAnsweredContacts,
+    unansweredCalls: nextCxNoAnswerCalls,
+    noAnswerCalls: nextCxNoAnswerCalls,
+    cxNoAnswerCalls: nextCxNoAnswerCalls,
     lastQueueAttemptHeldForDisposition: false,
     wrapUpRequired: false,
     wrapUpReason: null,
   };
+  const projectedQueueItem = {
+    ...queueItem,
+    metadata: {
+      ...(queueItem.metadata || {}),
+      ...baseMetadata,
+    },
+  };
+  const postOutcomeDialability = resolveQueueDialability(projectedQueueItem, safeOutcomeAt);
+  const terminalPolicyHold = Boolean(
+    postOutcomeDialability?.ok === false && postOutcomeDialability.lifecycleHold?.terminal,
+  );
   let queueMutation = null;
-  if (nextDelayMinutes == null) {
+  if (nextDelayMinutes == null || terminalPolicyHold) {
     queueMutation = await completeCxQueueItem({
       queueItemId: String(queueItem._id),
       queueOutcome: "cadence-finished",
       disposition: classification.normalizedOutcome,
       extraUpdate: {
-        metadata: baseMetadata,
+        metadata: {
+          ...baseMetadata,
+          lastPolicyHoldReason: terminalPolicyHold ? postOutcomeDialability.reason : null,
+          lastPolicyHoldReleaseAt: terminalPolicyHold ? postOutcomeDialability.nextEligibleAt || null : null,
+        },
       },
     });
   } else {
-    const timing = evaluateChannelContactTime(
-      domain,
-      "cx",
+    const timing = resolveQueueDialTimeWindow(
+      queueItem,
       new Date(safeOutcomeAt.getTime() + Math.max(nextDelayMinutes, 0) * 60 * 1000),
     );
     queueMutation = await rescheduleCxQueueItem({
@@ -2896,27 +3071,50 @@ async function claimNextCxQueueItem(options = {}) {
       break;
     }
 
-    await cxDialQueueRepository.transitionQueueItemState(claimedObject._id, ["claimed"], {
-      state: "queued",
-      claimUntil: null,
-      releaseAt: dialability.nextEligibleAt || new Date(Date.now() + 30 * 60 * 1000),
-      "metadata.lastPolicyHoldAt": new Date(),
-      "metadata.lastPolicyHoldReason": dialability.reason,
-      "metadata.lastPolicyHoldDetail": dialability.detail || null,
-      "metadata.queueFamily": claimedFamily,
-      "metadata.lastPolicyHoldDailyCount": dialability.dailyCount,
-      "metadata.lastPolicyHoldDailyMax": dialability.dailyMax,
-      "metadata.lastPolicyHoldHourlyCount": dialability.hourlyCount,
-      "metadata.lastPolicyHoldHourlyMax": dialability.hourlyMax,
-      "metadata.lastPolicyHoldReleaseAt": dialability.nextEligibleAt || null,
-    }, {
-      match: buildQueueItemMutationMatch(claimedObject),
-    }).catch(() => null);
+    const terminalPolicyHold = Boolean(dialability.lifecycleHold?.terminal);
+    if (terminalPolicyHold) {
+      await completeCxQueueItem({
+        queueItemId: String(claimedObject._id),
+        queueOutcome: "cadence-finished",
+        disposition: dialability.reason,
+        extraUpdate: {
+          metadata: {
+            lastPolicyHoldAt: new Date(),
+            lastPolicyHoldReason: dialability.reason,
+            lastPolicyHoldDetail: dialability.detail || null,
+            queueFamily: claimedFamily,
+            lastPolicyHoldDailyCount: dialability.dailyCount,
+            lastPolicyHoldDailyMax: dialability.dailyMax,
+            lastPolicyHoldHourlyCount: dialability.hourlyCount,
+            lastPolicyHoldHourlyMax: dialability.hourlyMax,
+            lastPolicyHoldReleaseAt: null,
+          },
+        },
+      }).catch(() => null);
+    } else {
+      await cxDialQueueRepository.transitionQueueItemState(claimedObject._id, ["claimed"], {
+        state: "queued",
+        claimUntil: null,
+        releaseAt: dialability.nextEligibleAt || new Date(Date.now() + 30 * 60 * 1000),
+        "metadata.lastPolicyHoldAt": new Date(),
+        "metadata.lastPolicyHoldReason": dialability.reason,
+        "metadata.lastPolicyHoldDetail": dialability.detail || null,
+        "metadata.queueFamily": claimedFamily,
+        "metadata.lastPolicyHoldDailyCount": dialability.dailyCount,
+        "metadata.lastPolicyHoldDailyMax": dialability.dailyMax,
+        "metadata.lastPolicyHoldHourlyCount": dialability.hourlyCount,
+        "metadata.lastPolicyHoldHourlyMax": dialability.hourlyMax,
+        "metadata.lastPolicyHoldReleaseAt": dialability.nextEligibleAt || null,
+      }, {
+        match: buildQueueItemMutationMatch(claimedObject),
+      }).catch(() => null);
+    }
     policySkipped.push({
       queueItemId: claimedObject?._id ? String(claimedObject._id) : null,
       caseId: Number(claimedObject?.caseId || 0) || null,
       queueFamily: deriveQueueFamily(claimedObject),
       reason: dialability.reason,
+      terminal: terminalPolicyHold,
       releaseAt: dialability.nextEligibleAt || null,
       dailyCount: dialability.dailyCount,
       dailyMax: dialability.dailyMax,
@@ -2958,7 +3156,7 @@ async function claimNextCxQueueItem(options = {}) {
     };
   }
 
-  const timing = evaluateChannelContactTime(item.domain, "cx", new Date());
+  const timing = resolveQueueDialTimeWindow(item, new Date());
   if (!timing.allowed) {
     await cxDialQueueRepository.transitionQueueItemState(item._id, ["claimed"], {
       state: "queued",

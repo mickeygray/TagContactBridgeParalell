@@ -51,6 +51,27 @@ test("pre-rollover green stays green through its second business day", () => {
   );
 });
 
+test("friday afternoon and weekend leads stay green on monday morning", () => {
+  const fridayAfterRollover = new Date("2026-05-15T22:40:00.000Z"); // Friday 3:40pm PDT
+  const mondayMorning = new Date("2026-05-18T14:00:00.000Z"); // Monday 7:00am PDT
+  const mondayAfternoon = new Date("2026-05-18T22:31:00.000Z"); // Monday 3:31pm PDT
+  const tuesdayAfternoon = new Date("2026-05-19T22:31:00.000Z"); // Tuesday 3:31pm PDT
+
+  assert.equal(getPacificBusinessDayAge(fridayAfterRollover, mondayMorning), 1);
+  assert.equal(
+    deriveQueueFamilyFromLeadCreatedAt(fridayAfterRollover, mondayMorning),
+    "fresh-day1",
+  );
+  assert.equal(
+    deriveQueueFamilyFromLeadCreatedAt(fridayAfterRollover, mondayAfternoon),
+    "fresh-day1",
+  );
+  assert.equal(
+    deriveQueueFamilyFromLeadCreatedAt(fridayAfterRollover, tuesdayAfternoon),
+    "fresh-day2to10",
+  );
+});
+
 test("trusted lead-created timestamp overrides stale stored queue family", () => {
   const item = {
     queueFamily: "fresh-day2to10",

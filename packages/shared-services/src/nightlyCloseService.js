@@ -3529,7 +3529,9 @@ async function sendAgedRefreshReportEmail(options = {}) {
   }
 
   const dateKey = formatDateKey(daily.now || new Date());
-  const totalRetired = toNumber(daily.evicted) + toNumber(daily.droppedAtIntake);
+  const dncRetired = toNumber(daily.evicted) + toNumber(daily.droppedAtIntake);
+  const expiredRetired = toNumber(daily.expiredRetirement?.retired);
+  const totalRetired = dncRetired + expiredRetired;
 
   // MPI count for the "currently in red" headline tile.
   const currentlyInRed = await mongoose.connection.db
@@ -3557,7 +3559,9 @@ async function sendAgedRefreshReportEmail(options = {}) {
       promoted: toNumber(daily.promoted),
       stayed: toNumber(daily.stayed),
       cleared: toNumber(daily.cleared),
-      evicted: totalRetired,
+      evicted: dncRetired,
+      expiredRetired,
+      totalRetired,
       lookupFailures: toNumber(daily.dncLookupFailures),
       noPhone: toNumber(daily.noPhone),
       currentlyInRed,
@@ -3598,7 +3602,7 @@ async function sendAgedRefreshReportEmail(options = {}) {
     data,
     text:
       `Aged pool refresh ${dateKey}: ${data.counts.checked} checked, ` +
-      `${data.counts.promoted} promoted, ${totalRetired} retired` +
+      `${data.counts.promoted} promoted, ${dncRetired} DNC retired, ${expiredRetired} expired retired` +
       (monthly ? `, ${monthly.graduated} graduated.` : "."),
   });
 

@@ -17,6 +17,9 @@
           <td class="kpi"><div class="v">{{counts.checked}}</div><div class="l">Checked</div></td>
           <td class="kpi"><div class="v">{{counts.promoted}}</div><div class="l">Promoted to red</div></td>
           <td class="kpi"><div class="v">{{counts.evicted}}</div><div class="l">Retired (DNC)</div></td>
+          {{#if counts.expiredRetired}}
+          <td class="kpi"><div class="v">{{counts.expiredRetired}}</div><div class="l">Retired (120d)</div></td>
+          {{/if}}
           <td class="kpi"><div class="v">{{counts.cleared}}</div><div class="l">90d cleared</div></td>
           {{#if counts.currentlyInRed}}
           <td class="kpi"><div class="v">{{counts.currentlyInRed}}</div><div class="l">In red pool</div></td>

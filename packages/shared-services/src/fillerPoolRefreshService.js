@@ -51,6 +51,7 @@ const {
 } = require("../../shared-integrations/src");
 const {
   CallLog,
+  CxDialQueue,
   LeadCadence,
   MasterProspectIndex,
 } = require("../../shared-models/src");
@@ -61,10 +62,12 @@ const MS_PER_DAY = 24 * 60 * 60 * 1000;
 // Aged-pool rolling-refresh tunables. Env knobs are read at call time so
 // tests / dry-runs can override without restart.
 const AGED_DAILY_CHECKPOINT_DAYS = [30, 60, 90];
+const AGED_CADENCE_RETIRE_DAYS = 120;
 const AGED_DAILY_DEFAULT_LIMIT_PER_DOMAIN = 500;
 const AGED_GRADUATION_THRESHOLD_DEFAULT = 8;
 const AGED_GRADUATION_WINDOW_DAYS_DEFAULT = 120;
 const AGED_GRADUATION_DURATION_FLOOR_SEC_DEFAULT = 10;
+const ACTIVE_CX_QUEUE_STATES = ["queued", "ready", "claimed", "serving", "paused"];
 
 // Logics returns SourceCampaignID as a number, not a name string. We
 // pre-load the source-canonical mapping once and convert the regex to
@@ -962,6 +965,101 @@ function describeDncReason(lookup) {
   return null;
 }
 
+async function retireExpiredAgedCadence({
+  now = new Date(),
+  dryRun = false,
+  domains = null,
+  limitPerDomain = AGED_DAILY_DEFAULT_LIMIT_PER_DOMAIN,
+  logger = null,
+} = {}) {
+  const cutoff = new Date(now.getTime() - AGED_CADENCE_RETIRE_DAYS * MS_PER_DAY);
+  const baseQuery = {
+    active: true,
+    createdAt: { $lte: cutoff },
+    graduatedAt: null,
+  };
+  if (Array.isArray(domains) && domains.length > 0) {
+    baseQuery.domain = { $in: domains.map((domain) => String(domain).toUpperCase()) };
+  }
+
+  const rows = await LeadCadence.find(baseQuery, {
+    _id: 1,
+    domain: 1,
+    caseId: 1,
+    createdAt: 1,
+    normalizedPhone: 1,
+  })
+    .sort({ createdAt: 1 })
+    .limit(Math.max(Number(limitPerDomain) || AGED_DAILY_DEFAULT_LIMIT_PER_DOMAIN, 1) * 4)
+    .lean();
+
+  const byDomain = new Map();
+  for (const row of rows) {
+    const domain = String(row.domain || "").toUpperCase();
+    if (!domain) continue;
+    if (!byDomain.has(domain)) byDomain.set(domain, []);
+    if (byDomain.get(domain).length < limitPerDomain) byDomain.get(domain).push(row);
+  }
+
+  const summary = {
+    cutoff,
+    retireDays: AGED_CADENCE_RETIRE_DAYS,
+    scanned: rows.length,
+    retired: 0,
+    queueDeleted: 0,
+    mpiCleared: 0,
+    perDomain: {},
+  };
+
+  for (const [domain, leads] of byDomain.entries()) {
+    summary.perDomain[domain] = { retired: 0, queueDeleted: 0, mpiCleared: 0 };
+    for (const lead of leads) {
+      const caseId = Number(lead.caseId);
+      if (!Number.isFinite(caseId)) continue;
+      if (dryRun) {
+        summary.retired += 1;
+        summary.perDomain[domain].retired += 1;
+        continue;
+      }
+      const [cadenceResult, queueResult, mpiResult] = await Promise.all([
+        LeadCadence.deleteOne({ _id: lead._id }),
+        CxDialQueue.deleteMany({
+          domain,
+          caseId,
+          state: { $in: ACTIVE_CX_QUEUE_STATES },
+        }),
+        MasterProspectIndex.updateOne(
+          { domain, caseId },
+          {
+            $set: {
+              pool: null,
+              "metadata.agedCadenceRetiredAt": now,
+              "metadata.agedCadenceRetiredReason": "day-120",
+            },
+          },
+        ),
+      ]);
+      const cadenceDeleted = Number(cadenceResult.deletedCount || 0);
+      const queueDeleted = Number(queueResult.deletedCount || 0);
+      const mpiCleared = Number(mpiResult.modifiedCount || 0);
+      summary.retired += cadenceDeleted;
+      summary.queueDeleted += queueDeleted;
+      summary.mpiCleared += mpiCleared;
+      summary.perDomain[domain].retired += cadenceDeleted;
+      summary.perDomain[domain].queueDeleted += queueDeleted;
+      summary.perDomain[domain].mpiCleared += mpiCleared;
+    }
+  }
+
+  logger?.info?.("aged-rolling-refresh.retire-expired.completed", {
+    retired: summary.retired,
+    queueDeleted: summary.queueDeleted,
+    mpiCleared: summary.mpiCleared,
+  });
+
+  return summary;
+}
+
 /**
  * Daily aged-pool refresh tick. Walks LeadCadence rows whose
  * dncCheckpoints.nextAt has passed, scrubs against RealValidation,
@@ -1032,7 +1130,23 @@ async function runDailyAgedRefresh(options = {}) {
     retiredToday: [], // for email body — capped list of DNC drops/evictions
   };
 
+  const runExpiredRetirement = async () => {
+    summary.expiredRetirement = await retireExpiredAgedCadence({
+      now,
+      dryRun,
+      domains: domainsFilter,
+      limitPerDomain,
+      logger,
+    }).catch((error) => ({
+      error: error.message,
+      retired: 0,
+      queueDeleted: 0,
+      mpiCleared: 0,
+    }));
+  };
+
   if (due.length === 0) {
+    await runExpiredRetirement();
     summary.finishedAt = new Date();
     summary.durationMs = summary.finishedAt - startedAt;
     return summary;
@@ -1144,20 +1258,14 @@ async function runDailyAgedRefresh(options = {}) {
           });
         }
         if (!dryRun) {
-          await LeadCadence.updateOne(
-            { _id: lead._id },
-            {
-              $set: {
-                "dncCheckpoints.count": prevCount + 1,
-                "dncCheckpoints.lastAt": now,
-                "dncCheckpoints.nextAt": null,
-                "dncCheckpoints.hit": true,
-                "dncCheckpoints.hitAt": now,
-                "dncCheckpoints.source": "realvalidation",
-                "dncCheckpoints.reason": reason,
-              },
-            },
-          );
+          await Promise.all([
+            LeadCadence.deleteOne({ _id: lead._id }),
+            CxDialQueue.deleteMany({
+              domain,
+              caseId: lead.caseId,
+              state: { $in: ACTIVE_CX_QUEUE_STATES },
+            }),
+          ]);
           // Clear pool.tag (and stamp dnc subdoc) on MPI so the dialer
           // can't pick this lead up. Upsert because the row may not
           // exist yet (the 30d initial check fires before any monthly
@@ -1262,12 +1370,15 @@ async function runDailyAgedRefresh(options = {}) {
     summary.perDomain[domain] = perDom;
   }
 
+  await runExpiredRetirement();
+
   summary.finishedAt = new Date();
   summary.durationMs = summary.finishedAt - startedAt;
   logger.info?.("aged-rolling-refresh.daily.complete", {
     checked: summary.checked,
     promoted: summary.promoted,
     evicted: summary.evicted + summary.droppedAtIntake,
+    expiredRetired: summary.expiredRetirement?.retired || 0,
     dncLookupFailures: summary.dncLookupFailures,
     durationMs: summary.durationMs,
     dryRun,
@@ -1421,6 +1532,7 @@ async function runMonthlyGraduationSweep(options = {}) {
 module.exports = {
   runFillerPoolRefresh,
   runDailyAgedRefresh,
+  retireExpiredAgedCadence,
   runMonthlyGraduationSweep,
   isAtMonthlyRefreshBoundary,
   isAtDailyAgedRefreshBoundary,
@@ -1433,4 +1545,5 @@ module.exports = {
   TAG_CASE_ID_FLOOR,
   DNC_REUSE_WINDOW_MS,
   AGED_DAILY_CHECKPOINT_DAYS,
+  AGED_CADENCE_RETIRE_DAYS,
 };

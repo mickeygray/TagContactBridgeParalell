@@ -128,6 +128,15 @@ function buildMonitorArgs(agent, options) {
   }
   if (options.stageUntilSilence) args.push("--stage-until-silence");
   if (options.noMaxChunk) args.push("--no-max-chunk");
+  if (options.prospectOnlyCoach) {
+    args.push("--prospect-only-coach");
+    if (options.prospectCoachProvider) args.push("--prospect-coach-provider", options.prospectCoachProvider);
+    if (options.prospectCoachModel) args.push("--prospect-coach-model", options.prospectCoachModel);
+    if (options.prospectCoachServiceTier) args.push("--prospect-coach-service-tier", options.prospectCoachServiceTier);
+    if (options.prospectCoachPlaybookFile) args.push("--prospect-coach-playbook-file", options.prospectCoachPlaybookFile);
+    if (options.prospectCoachPlaybookMaxChars) args.push("--prospect-coach-playbook-max-chars", String(options.prospectCoachPlaybookMaxChars));
+    if (options.prospectCoachTimeoutMs) args.push("--prospect-coach-timeout-ms", String(options.prospectCoachTimeoutMs));
+  }
   if (/diarize/i.test(options.sttModel)) {
     args.push("--chunking-strategy", "auto", "--no-speaker-labels");
   } else {
@@ -317,6 +326,28 @@ async function main() {
     speechPacketActivePct: Math.max(0, Number(readFlag(argv, "--speech-packet-active-pct", "1.0")) || 1.0),
     speechPacketMaxAbs: Math.max(0, Number(readFlag(argv, "--speech-packet-max-abs", "1200")) || 1200),
     coachEverySec: Math.max(5, Number(readFlag(argv, "--coach-every-sec", "15")) || 15),
+    prospectOnlyCoach: hasFlag(argv, "--prospect-only-coach")
+      || String(process.env.EX_LIVE_MONITOR_PROSPECT_ONLY_COACH || "").toLowerCase() === "true",
+    prospectCoachProvider: cleanString(readFlag(argv, "--prospect-coach-provider", process.env.LIVE_PROSPECT_COACH_PROVIDER || "")),
+    prospectCoachModel: cleanString(readFlag(argv, "--prospect-coach-model", process.env.LIVE_PROSPECT_COACH_MODEL || "")),
+    prospectCoachServiceTier: cleanString(readFlag(
+      argv,
+      "--prospect-coach-service-tier",
+      process.env.LIVE_PROSPECT_COACH_SERVICE_TIER || process.env.LIVE_PROSPECT_COACH_OPENAI_SERVICE_TIER || "",
+    )),
+    prospectCoachPlaybookFile: cleanString(readFlag(
+      argv,
+      "--prospect-coach-playbook-file",
+      process.env.LIVE_PROSPECT_COACH_PLAYBOOK_FILE || path.join("docs", "LIVE_PROSPECT_COACH_PLAYBOOK.md"),
+    )),
+    prospectCoachPlaybookMaxChars: Math.max(
+      2000,
+      Number(readFlag(argv, "--prospect-coach-playbook-max-chars", process.env.LIVE_PROSPECT_COACH_PLAYBOOK_MAX_CHARS || "7000")) || 7000,
+    ),
+    prospectCoachTimeoutMs: Math.max(
+      3000,
+      Number(readFlag(argv, "--prospect-coach-timeout-ms", process.env.LIVE_PROSPECT_COACH_TIMEOUT_MS || "15000")) || 15000,
+    ),
     superviseWaitSec: Math.max(30, Number(readFlag(argv, "--supervise-wait-sec", "7200")) || 7200),
     supervisePollMs: Math.max(15000, Number(readFlag(argv, "--supervise-poll-ms", "60000")) || 60000),
     timeoutSec: Math.max(60, Number(readFlag(argv, "--timeout-sec", "7200")) || 7200),

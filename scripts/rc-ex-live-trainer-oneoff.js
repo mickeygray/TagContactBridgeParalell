@@ -49,6 +49,85 @@ const RC_BASE = (process.env.RING_CENTRAL_SERVER_URL || "https://platform.ringce
 const PHASE_KEYS = ["opening", "discovery", "pain", "qualification", "solution", "objection", "close", "wrap"];
 const SPEAKER_KEYS = ["agent", "prospect", "system", "unknown"];
 const HUMAN_SPEAKER_KEYS = ["agent", "prospect"];
+const PROSPECT_COACH_BASE_SECTIONS = [
+  "Output Contract",
+  "Call Philosophy",
+  "Universal Coaching Formula",
+  "Human Tone and Emotional Listening",
+  "Hard Guardrails",
+];
+const PROSPECT_COACH_SALES_SECTION_KEYWORDS = [
+  {
+    title: "Opening and Legitimacy",
+    keywords: ["who are you", "why are you calling", "scam", "irs", "sales call", "not interested", "busy", "public records", "company", "legit", "legitimate"],
+  },
+  {
+    title: "Discovery and Pain",
+    keywords: ["owe", "owed", "balance", "federal", "state", "filed", "unfiled", "years", "letter", "notice", "payment plan", "accountant", "tax firm", "stress", "affecting"],
+  },
+  {
+    title: "Notice and Enforcement Framing",
+    keywords: ["cp501", "cp503", "cp504", "lt11", "1058", "levy", "bank levy", "garnish", "garnishment", "lien", "revenue officer", "final notice", "take money", "freeze", "paycheck", "collections"],
+  },
+  {
+    title: "Expert Guidance",
+    keywords: ["what does", "what means", "options", "program", "qualify", "settlement", "compromise", "hardship", "penalty", "help me understand", "can you tell me"],
+  },
+  {
+    title: "Representation Pitch",
+    keywords: ["represent", "representation", "attorney", "poa", "power of attorney", "transcript", "authorization", "form 2848", "8821", "start", "next step", "protect"],
+  },
+  {
+    title: "Financial Snapshot and Qualification",
+    keywords: ["income", "job", "work", "self-employed", "expense", "rent", "mortgage", "car", "childcare", "asset", "bank account", "retirement", "home", "property", "afford"],
+  },
+  {
+    title: "Closing and Payment Terms",
+    keywords: ["cost", "fee", "price", "pay", "payment", "card", "credit card", "debit", "expensive", "high", "spouse", "think about", "monthly", "today"],
+  },
+  {
+    title: "Information Collection",
+    keywords: ["ssn", "social security", "date of birth", "dob", "address", "email", "phone", "docusign", "documents", "sign"],
+  },
+  {
+    title: "Objection Patterns",
+    keywords: ["not interested", "busy", "scam", "already", "fixed", "taken care", "spouse", "think", "card", "expensive", "how did you get", "bad experience"],
+  },
+];
+const PROSPECT_COACH_TAX_KNOWLEDGE_KEYWORDS = [
+  {
+    title: "Tax Knowledge: 1099 and Self-Employment",
+    keywords: ["1099", "1099-nec", "contractor", "independent contractor", "self-employed", "self employment", "gig", "uber", "doordash", "schedule c", "schedule se", "estimated tax", "quarterly", "no withholding"],
+  },
+  {
+    title: "Tax Knowledge: Payroll and Business Taxes",
+    keywords: ["payroll", "941", "940", "employment tax", "trust fund", "tfrp", "responsible person", "employee withholding", "withholding", "fica", "medicare", "business tax", "employees"],
+  },
+  {
+    title: "Tax Knowledge: State, Local, and Mixed Balances",
+    keywords: ["state tax", "state", "ftb", "edd", "sales tax", "franchise tax", "unemployment tax", "state garnishment", "state lien", "both federal and state", "california"],
+  },
+  {
+    title: "Tax Knowledge: Audits, Exams, and Adjustments",
+    keywords: ["audit", "audited", "exam", "examination", "cp2000", "underreporter", "missing income", "adjustment", "proposed assessment", "receipts", "documentation"],
+  },
+  {
+    title: "Tax Knowledge: Penalties, Interest, and Amendments",
+    keywords: ["penalty", "penalties", "interest", "abatement", "first time abatement", "reasonable cause", "amended", "amend", "amendment", "wrong return", "mistake"],
+  },
+  {
+    title: "Tax Knowledge: Joint, Spouse, and Identity Issues",
+    keywords: ["spouse", "ex spouse", "ex-spouse", "divorce", "joint", "jointly", "innocent spouse", "injured spouse", "identity theft", "stolen identity", "ssn", "social security"],
+  },
+  {
+    title: "Tax Knowledge: Unfiled Returns and Substitute Returns",
+    keywords: ["unfiled", "haven't filed", "hasn't filed", "didn't file", "missing return", "sfr", "substitute for return", "w-2", "w2", "old returns", "wage and income"],
+  },
+  {
+    title: "Tax Knowledge: Collection and Resolution Paths",
+    keywords: ["payment plan", "installment", "installment agreement", "offer in compromise", "oic", "settle", "settlement", "currently not collectible", "cnc", "hardship", "levy release", "lien release", "garnishment", "bank levy"],
+  },
+];
 
 function readFlag(argv, name, fallback = "") {
   const inline = argv.find((arg) => arg.startsWith(`${name}=`));
@@ -65,6 +144,17 @@ function hasFlag(argv, name) {
 function env(name, fallback = "") {
   const value = process.env[name];
   return value === undefined || value === null || value === "" ? fallback : value;
+}
+
+function readOptionalTextFile(filePath, maxChars = 12000) {
+  const raw = String(filePath || "").trim();
+  if (!raw) return "";
+  const absolute = path.resolve(raw);
+  if (!fs.existsSync(absolute)) return "";
+  return fs.readFileSync(absolute, "utf8")
+    .replace(/\r\n/g, "\n")
+    .trim()
+    .slice(0, maxChars);
 }
 
 function monitorCredentialPrefixForExt(extensionNumber) {
@@ -252,6 +342,206 @@ function cleanText(value, maxLength = 6000) {
     .replace(/\s+/g, " ")
     .trim()
     .slice(0, maxLength);
+}
+
+function normalizePlaybookHeading(value) {
+  return cleanText(String(value || "").replace(/^#+\s*/, ""), 120);
+}
+
+function parseProspectCoachPlaybook(playbookText) {
+  const text = String(playbookText || "").replace(/\r\n/g, "\n");
+  const sections = [];
+  let current = null;
+  for (const line of text.split("\n")) {
+    const match = line.match(/^#{2,3}\s+(.+?)\s*$/);
+    if (match) {
+      if (current && current.body.join("\n").trim()) {
+        sections.push({
+          title: current.title,
+          body: current.body.join("\n").trim(),
+        });
+      }
+      current = { title: normalizePlaybookHeading(match[1]), body: [] };
+    } else if (current) {
+      current.body.push(line);
+    }
+  }
+  if (current && current.body.join("\n").trim()) {
+    sections.push({
+      title: current.title,
+      body: current.body.join("\n").trim(),
+    });
+  }
+  return sections;
+}
+
+function countKeywordHits(text, keywords = []) {
+  const haystack = String(text || "").toLowerCase();
+  let score = 0;
+  for (const keyword of keywords) {
+    const needle = String(keyword || "").trim().toLowerCase();
+    if (!needle) continue;
+    let index = haystack.indexOf(needle);
+    while (index >= 0) {
+      score += needle.includes(" ") ? 3 : 1;
+      index = haystack.indexOf(needle, index + needle.length);
+    }
+  }
+  return score;
+}
+
+function scoreProspectCoachRoutes(routes, routeText, byTitle) {
+  return routes
+    .map((route) => ({
+      title: route.title,
+      score: countKeywordHits(routeText, route.keywords),
+    }))
+    .filter((row) => row.score > 0 && byTitle.has(row.title))
+    .sort((a, b) => b.score - a.score || a.title.localeCompare(b.title));
+}
+
+function classifyTaxJurisdiction({ prospectText, memory = "" } = {}) {
+  const prospectMemory = String(memory || "")
+    .split("\n")
+    .filter((line) => /^Prospect:/i.test(line.trim()))
+    .join("\n");
+  const text = `${prospectText || ""}\n${prospectMemory}`.toLowerCase();
+  const hasState = [
+    /\bstate\s+(tax|balance|notice|debt|agency|levy|lien|garnish|garnishment|collections?)\b/,
+    /\bstate\b.{0,30}\b(tax|balance|notice|debt|agency|levy|lien|garnish|garnishing|garnishment|collect|collection|owe|owed)\b/,
+    /\b(ftb|edd|cdtfa)\b/,
+    /franchise tax board/,
+    /employment development department/,
+    /\bsales tax\b/,
+    /\bstate payroll\b/,
+    /\bunemployment tax\b/,
+    /\bcalifornia\b/,
+  ].some((pattern) => pattern.test(text));
+  const hasExplicitIrs = [
+    /\birs\b/,
+    /\bfederal\b/,
+    /\bcp\s*(?:50\d|2000)\b/,
+    /\blt\s*11\b/,
+    /\bletter\s*1058\b/,
+    /\bform\s*(?:1040|941|940|2848|8821)\b/,
+    /\b1099\b/,
+    /\bw-?2\b/,
+    /\bsfr\b/,
+    /substitute for return/,
+    /trust fund/,
+    /revenue officer/,
+  ].some((pattern) => pattern.test(text));
+  const hasTaxishDefault = [
+    /\btax(?:es)?\b/,
+    /\bbalance\b/,
+    /\bowe\b/,
+    /\bhaven'?t\s+filed\b/,
+    /\bhasn'?t\s+filed\b/,
+    /\bdidn'?t\s+file\b/,
+    /\bnot\s+filed\b/,
+    /\bmissing\s+(?:returns?|years?)\b/,
+    /\bfiled?\s+(?:late|missing)\b/,
+    /\bunfiled\b/,
+    /\blevy\b/,
+    /\blien\b/,
+    /\bgarnish(?:ing|ment)?\b/,
+    /\bwage\b/,
+    /\bpaycheck\b/,
+    /\bmoney\s+(?:is\s+)?(?:being\s+)?taken\b/,
+    /\bcollections?\b/,
+    /\bpayroll\b/,
+    /\bpenalt(?:y|ies)\b/,
+    /\binterest\b/,
+  ].some((pattern) => pattern.test(text));
+  const hasOnlyVagueAgencySignal = !hasExplicitIrs && !hasState && [
+    /\bnotice\b/,
+    /\bletter\b/,
+    /\bthey\b/,
+    /\bgovernment\b/,
+    /\bcollections?\b/,
+  ].some((pattern) => pattern.test(text));
+
+  if (hasState && hasExplicitIrs) {
+    return { value: "mixed", confidence: "high", reason: "clear IRS/federal and state signals" };
+  }
+  if (hasState) {
+    return { value: "state", confidence: "high", reason: "clear state agency or state tax signal" };
+  }
+  if (hasExplicitIrs) {
+    return { value: "irs", confidence: "high", reason: "clear IRS/federal notice or form signal" };
+  }
+  if (hasOnlyVagueAgencySignal) {
+    return { value: "ambiguous", confidence: "vague", reason: "agency language is vague" };
+  }
+  if (hasTaxishDefault) {
+    return { value: "irs", confidence: "default", reason: "tax issue with no clear state signal" };
+  }
+  return { value: "ambiguous", confidence: "low", reason: "no clear agency or tax signal" };
+}
+
+function selectProspectCoachPlaybookContext({
+  playbookText,
+  prospectText,
+  memory = "",
+  maxChars = 7000,
+} = {}) {
+  const text = String(playbookText || "").trim();
+  const limit = Math.max(1000, Number(maxChars) || 7000);
+  const sections = parseProspectCoachPlaybook(text);
+  if (!sections.length) {
+    return {
+      context: text.slice(0, limit),
+      sections: text ? ["full-playbook"] : [],
+    };
+  }
+
+  const byTitle = new Map(sections.map((section) => [section.title, section]));
+  const selected = [];
+  const selectedTitles = new Set();
+  const pushTitle = (title) => {
+    const section = byTitle.get(title);
+    if (!section || selectedTitles.has(title)) return;
+    selected.push(section);
+    selectedTitles.add(title);
+  };
+
+  for (const title of PROSPECT_COACH_BASE_SECTIONS) pushTitle(title);
+
+  const prospectMemory = String(memory || "")
+    .split("\n")
+    .filter((line) => /^Prospect:/i.test(line.trim()))
+    .join("\n");
+  const salesRouteText = `${prospectText || ""}\n${memory || ""}`;
+  const taxRouteText = `${prospectText || ""}\n${prospectMemory}`;
+  const salesScored = scoreProspectCoachRoutes(PROSPECT_COACH_SALES_SECTION_KEYWORDS, salesRouteText, byTitle);
+  const taxScored = scoreProspectCoachRoutes(PROSPECT_COACH_TAX_KNOWLEDGE_KEYWORDS, taxRouteText, byTitle);
+
+  if (!salesScored.length) {
+    pushTitle("Discovery and Pain");
+    pushTitle("Expert Guidance");
+  } else {
+    for (const row of salesScored.slice(0, 4)) pushTitle(row.title);
+    if (
+      !selectedTitles.has("Objection Patterns")
+      && /think|spouse|scam|busy|not interested|already|card|fee|cost|expensive/i.test(salesRouteText)
+    ) {
+      pushTitle("Objection Patterns");
+    }
+  }
+  for (const row of taxScored.slice(0, 4)) pushTitle(row.title);
+
+  const parts = [];
+  for (const section of selected) {
+    const block = `## ${section.title}\n${section.body}`.trim();
+    if (parts.join("\n\n").length + block.length > limit && parts.length > 0) break;
+    parts.push(block);
+  }
+  return {
+    context: parts.join("\n\n"),
+    sections: selected.map((section) => section.title),
+    salesSections: salesScored.slice(0, 4).map((row) => row.title),
+    taxSections: taxScored.slice(0, 4).map((row) => row.title),
+  };
 }
 
 function inferAudioMimeType(filePath) {
@@ -1935,11 +2225,12 @@ async function runLiveAdvice({ transcripts, metadata, model, timeoutMs }) {
   };
 }
 
-function buildProspectOnlyCoachPrompt({ prospectText, recentTranscripts, memory, metadata }) {
+function buildProspectOnlyCoachPrompt({ prospectText, recentTranscripts, memory, metadata, playbook, taxJurisdiction }) {
   const recent = (recentTranscripts || [])
     .slice(-8)
     .map((entry) => `Prospect: ${cleanText(entry.text, 360)}`)
     .join("\n");
+  const jurisdiction = taxJurisdiction || { value: "ambiguous", confidence: "low", reason: "" };
   return [
     "You are a real-time coach for a tax-resolution sales consultation.",
     "The transcript below is assumed to be ONLY the prospect/client speaking. Do not spend tokens identifying the speaker.",
@@ -1948,16 +2239,25 @@ function buildProspectOnlyCoachPrompt({ prospectText, recentTranscripts, memory,
     "Rules:",
     "- Keep it to 1-2 agent-sayable sentences.",
     "- Respond to the newest prospect turn, not a generic sales script.",
-    "- Be calm, practical, and specific.",
+    "- Be calm, practical, and specific, but sound human.",
+    "- If the prospect mentions fear, family, paycheck, business pressure, shame, confusion, or a bad prior experience, briefly acknowledge the human impact before the tactical question.",
+    "- Vary acknowledgements; do not mechanically start every answer with 'I understand' or 'That makes sense'.",
     "- Ask one useful next question when discovery is needed.",
     "- Never promise an outcome, program fit, deadline, fee, or tax/legal result.",
-    "- If the turn is too low-signal to coach, return exactly: WAIT",
+    "- Do not wait solely because the transcript is grammatically incomplete. If it contains a tax issue, fear, objection, or useful fact, give a short bridge response or question.",
+    "- Return exactly WAIT only for true filler, silence, system noise, or a fragment with no usable intent.",
+    "- Follow the local tax jurisdiction exactly. If jurisdiction=irs, do not ask whether it is IRS/state/both unless the prospect's agency language is genuinely vague; ask the next IRS-specific fact. If jurisdiction=state, briefly acknowledge state, then screen for broader IRS/federal symptoms such as IRS balance, federal notices, unfiled years, 1099/self-employment, payroll/941, or missing returns. If jurisdiction=mixed, split IRS and state facts. If jurisdiction=ambiguous or agency language is only 'they/the government/collections/a letter', ask: 'Is this coming from the IRS or the state?'",
     "",
     "Tax anchors:",
     "- CP504, LT11/Letter 1058, levy, bank levy, wage garnishment, lien, and revenue officer contact are urgent collection signals.",
     "- Unfiled returns mean compliance questions matter: which years, income type, IRS substitute returns, and available records.",
     "- Balance due questions need tax type, years, notice/source, income, assets, and ability to pay before suggesting a path.",
     "- Possible resolution paths include filing missing returns, installment agreement, penalty abatement, currently not collectible, offer in compromise, and lien/levy release work, but do not claim fit yet.",
+    "",
+    "Focused sales and tax reference context:",
+    playbook || "(none)",
+    "",
+    `Local tax jurisdiction: ${jurisdiction.value} (${jurisdiction.confidence}${jurisdiction.reason ? `; ${jurisdiction.reason}` : ""})`,
     "",
     `Monitor metadata: ${JSON.stringify(metadata || {})}`,
     "",
@@ -2043,6 +2343,90 @@ async function streamAnthropicText({ prompt, model, maxTokens = 180, temperature
     }
   }
   return cleanText(output, 1000);
+}
+
+async function streamOpenAiText({ prompt, model, serviceTier = "", maxTokens = 180, timeoutMs = 15000, onDelta }) {
+  const apiKey = process.env.OPENAI_API_KEY || "";
+  if (!apiKey) throw new Error("OPENAI_API_KEY is missing");
+
+  const abortController = new AbortController();
+  const timeoutHandle = setTimeout(() => abortController.abort(), Math.max(timeoutMs, 1000));
+  let response;
+  try {
+    const body = {
+      model,
+      instructions: "Return only the next agent line. No preamble.",
+      input: [{ role: "user", content: prompt }],
+      max_output_tokens: maxTokens,
+      stream: true,
+    };
+    if (serviceTier) body.service_tier = serviceTier;
+    response = await fetch("https://api.openai.com/v1/responses", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify(body),
+      signal: abortController.signal,
+    });
+
+    if (!response.ok) {
+      const text = await response.text().catch(() => "");
+      throw new Error(`OpenAI streaming coach failed: ${response.status} ${text.slice(0, 300)}`);
+    }
+    if (!response.body) throw new Error("OpenAI streaming coach response had no body");
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let output = "";
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let boundary = buffer.indexOf("\n\n");
+      while (boundary >= 0) {
+        const block = buffer.slice(0, boundary);
+        buffer = buffer.slice(boundary + 2);
+        const eventName = block
+          .split("\n")
+          .find((line) => line.startsWith("event:"))
+          ?.slice(6)
+          .trim();
+        const data = block
+          .split("\n")
+          .filter((line) => line.startsWith("data:"))
+          .map((line) => line.slice(5).trim())
+          .join("\n");
+        if (data && data !== "[DONE]") {
+          let event = null;
+          try { event = JSON.parse(data); } catch {}
+          if (event?.error) {
+            throw new Error(`OpenAI streaming coach error: ${event.error.message || JSON.stringify(event.error).slice(0, 240)}`);
+          }
+          if (event?.type === "response.failed") {
+            throw new Error(`OpenAI streaming coach failed: ${event.response?.error?.message || "response.failed"}`);
+          }
+          const type = event?.type || eventName || "";
+          const delta = type === "response.output_text.delta" || eventName === "response.output_text.delta"
+            ? String(event?.delta || "")
+            : "";
+          if (delta) {
+            output += delta;
+            onDelta?.(delta, output);
+          }
+        }
+        boundary = buffer.indexOf("\n\n");
+      }
+    }
+    return cleanText(output, 1000);
+  } catch (error) {
+    if (error?.name === "AbortError") throw new Error(`OpenAI streaming coach timed out after ${timeoutMs}ms`);
+    throw error;
+  } finally {
+    clearTimeout(timeoutHandle);
+  }
 }
 
 function isLowSignalTranscript(text) {
@@ -3012,8 +3396,16 @@ Audio/AI options:
   --coach-model MODEL        Claude model for live advice
   --no-coach                 Disable live advice calls for transcript-only model tests
   --prospect-only-coach      Treat STT as prospect-only speech and stream next agent line
+  --prospect-coach-provider PROVIDER
+                             anthropic | openai
   --prospect-coach-model MODEL
-                             Claude model for --prospect-only-coach
+                             Model for --prospect-only-coach
+  --prospect-coach-service-tier TIER
+                             OpenAI Responses service_tier, e.g. priority
+  --prospect-coach-playbook-file PATH
+                             Static prompt block for next-line coach
+  --prospect-coach-playbook-max-chars N
+                             Max focused playbook context per coach call
   --speaker-model MODEL      Claude model for speaker labels (default Haiku)
   --speaker-labels           Force Haiku labels even with native diarize
   --no-speaker-labels        Skip logical speaker separation
@@ -3100,10 +3492,46 @@ async function main() {
     && env("EX_LIVE_MONITOR_NO_COACH", "").toLowerCase() !== "true";
   const prospectOnlyCoachEnabled = hasFlag(argv, "--prospect-only-coach")
     || env("EX_LIVE_MONITOR_PROSPECT_ONLY_COACH", "").toLowerCase() === "true";
-  const prospectCoachModel = readFlag(
+  const prospectCoachModelRaw = readFlag(
     argv,
     "--prospect-coach-model",
     env("LIVE_PROSPECT_COACH_MODEL", env("LIVE_CALL_MONITOR_COACH_MODEL", env("SALES_TRAINER_COACH_MODEL", "claude-sonnet-4-6"))),
+  );
+  const prospectCoachProviderRaw = readFlag(
+    argv,
+    "--prospect-coach-provider",
+    env("LIVE_PROSPECT_COACH_PROVIDER", ""),
+  );
+  const prospectCoachModelParts = String(prospectCoachModelRaw || "").split(":");
+  const prospectCoachProvider = (() => {
+    const explicit = String(prospectCoachProviderRaw || "").trim().toLowerCase();
+    if (["anthropic", "openai"].includes(explicit)) return explicit;
+    if (prospectCoachModelParts.length > 1 && ["anthropic", "openai"].includes(prospectCoachModelParts[0])) {
+      return prospectCoachModelParts[0];
+    }
+    return /^gpt-|^o[0-9]/i.test(String(prospectCoachModelRaw || "")) ? "openai" : "anthropic";
+  })();
+  const prospectCoachModel = prospectCoachModelParts.length > 1 && ["anthropic", "openai"].includes(prospectCoachModelParts[0])
+    ? prospectCoachModelParts.slice(1).join(":")
+    : prospectCoachModelRaw;
+  const prospectCoachServiceTier = readFlag(
+    argv,
+    "--prospect-coach-service-tier",
+    env("LIVE_PROSPECT_COACH_SERVICE_TIER", env("LIVE_PROSPECT_COACH_OPENAI_SERVICE_TIER", "")),
+  ).trim();
+  const prospectCoachPlaybookFile = readFlag(
+    argv,
+    "--prospect-coach-playbook-file",
+    env("LIVE_PROSPECT_COACH_PLAYBOOK_FILE", path.join("docs", "LIVE_PROSPECT_COACH_PLAYBOOK.md")),
+  );
+  const prospectCoachPlaybook = readOptionalTextFile(prospectCoachPlaybookFile, 32000);
+  const prospectCoachPlaybookMaxChars = Math.max(
+    2000,
+    Number(readFlag(
+      argv,
+      "--prospect-coach-playbook-max-chars",
+      env("LIVE_PROSPECT_COACH_PLAYBOOK_MAX_CHARS", "7000"),
+    )) || 7000,
   );
   const prospectCoachTimeoutMs = Math.max(
     3000,
@@ -3272,7 +3700,12 @@ async function main() {
       coachEverySec,
       coachEnabled,
       prospectOnlyCoachEnabled,
+      prospectCoachProvider,
       prospectCoachModel,
+      prospectCoachServiceTier: prospectCoachServiceTier || null,
+      prospectCoachPlaybookFile: prospectCoachPlaybook ? path.resolve(prospectCoachPlaybookFile) : null,
+      prospectCoachPlaybookChars: prospectCoachPlaybook.length,
+      prospectCoachPlaybookMaxChars,
       minActivePct,
       callFlow,
       initialHumanSpeaker,
@@ -3314,7 +3747,16 @@ async function main() {
         status: prospectOnlyCoachEnabled ? "idle" : "off",
         text: "",
         finalText: "",
+        provider: prospectCoachProvider,
         model: prospectCoachModel || null,
+        serviceTier: prospectCoachServiceTier || null,
+        playbookChars: prospectCoachPlaybook.length,
+        playbookMaxChars: prospectCoachPlaybookMaxChars,
+        playbookSections: [],
+        taxKnowledgeSections: [],
+        taxJurisdiction: null,
+        taxJurisdictionConfidence: null,
+        taxJurisdictionReason: null,
         sequence: 0,
       },
     },
@@ -3494,6 +3936,16 @@ async function main() {
     const sequence = prospectCoachSequence;
     const started = Date.now();
     const prospectText = cleanText(entry.text, 900);
+    const playbookSelection = selectProspectCoachPlaybookContext({
+      playbookText: prospectCoachPlaybook,
+      prospectText,
+      memory: prospectCoachMemory,
+      maxChars: prospectCoachPlaybookMaxChars,
+    });
+    const taxJurisdiction = classifyTaxJurisdiction({
+      prospectText,
+      memory: prospectCoachMemory,
+    });
     setLiveSuggestion({
       status: "streaming",
       sequence,
@@ -3502,13 +3954,32 @@ async function main() {
       prospectText,
       startedAt: new Date(started).toISOString(),
       elapsedMs: null,
+      provider: prospectCoachProvider,
       model: prospectCoachModel,
+      serviceTier: prospectCoachServiceTier || null,
+      playbookSections: playbookSelection.sections,
+      salesSections: playbookSelection.salesSections,
+      taxKnowledgeSections: playbookSelection.taxSections,
+      taxJurisdiction: taxJurisdiction.value,
+      taxJurisdictionConfidence: taxJurisdiction.confidence,
+      taxJurisdictionReason: taxJurisdiction.reason,
+      playbookChars: playbookSelection.context.length,
+      playbookMaxChars: prospectCoachPlaybookMaxChars,
       error: null,
     });
     addEvent(state, eventLog, "prospect_coach.start", prospectText, {
       entryId: entry.id,
       sequence,
+      provider: prospectCoachProvider,
       model: prospectCoachModel,
+      serviceTier: prospectCoachServiceTier || null,
+      playbookSections: playbookSelection.sections,
+      salesSections: playbookSelection.salesSections,
+      taxKnowledgeSections: playbookSelection.taxSections,
+      taxJurisdiction: taxJurisdiction.value,
+      taxJurisdictionConfidence: taxJurisdiction.confidence,
+      taxJurisdictionReason: taxJurisdiction.reason,
+      playbookChars: playbookSelection.context.length,
     });
     try {
       const prompt = buildProspectOnlyCoachPrompt({
@@ -3516,24 +3987,35 @@ async function main() {
         recentTranscripts: state.transcripts,
         memory: prospectCoachMemory,
         metadata: monitorMetadata,
+        playbook: playbookSelection.context,
+        taxJurisdiction,
       });
       let lastBroadcastAt = 0;
-      const finalText = await streamAnthropicText({
-        prompt,
-        model: prospectCoachModel,
-        timeoutMs: prospectCoachTimeoutMs,
-        onDelta(_delta, output) {
-          const now = Date.now();
-          if (now - lastBroadcastAt < 80 && output.length < 16) return;
-          lastBroadcastAt = now;
-          if ((state.public.liveSuggestion || {}).sequence !== sequence) return;
-          setLiveSuggestion({
-            status: "streaming",
-            text: output,
-            elapsedMs: now - started,
-          });
-        },
-      });
+      const onDelta = (_delta, output) => {
+        const now = Date.now();
+        if (now - lastBroadcastAt < 80 && output.length < 16) return;
+        lastBroadcastAt = now;
+        if ((state.public.liveSuggestion || {}).sequence !== sequence) return;
+        setLiveSuggestion({
+          status: "streaming",
+          text: output,
+          elapsedMs: now - started,
+        });
+      };
+      const finalText = prospectCoachProvider === "openai"
+        ? await streamOpenAiText({
+          prompt,
+          model: prospectCoachModel,
+          serviceTier: prospectCoachServiceTier,
+          timeoutMs: prospectCoachTimeoutMs,
+          onDelta,
+        })
+        : await streamAnthropicText({
+          prompt,
+          model: prospectCoachModel,
+          timeoutMs: prospectCoachTimeoutMs,
+          onDelta,
+        });
       const cleaned = /^wait\.?$/i.test(finalText) ? "" : finalText;
       prospectCoachMemory = cleanText([
         prospectCoachMemory,
@@ -3554,13 +4036,31 @@ async function main() {
         suggestion: cleaned,
         rawSuggestion: finalText,
         elapsedMs: Date.now() - started,
+        provider: prospectCoachProvider,
         model: prospectCoachModel,
+        serviceTier: prospectCoachServiceTier || null,
+        playbookSections: playbookSelection.sections,
+        salesSections: playbookSelection.salesSections,
+        taxKnowledgeSections: playbookSelection.taxSections,
+        taxJurisdiction: taxJurisdiction.value,
+        taxJurisdictionConfidence: taxJurisdiction.confidence,
+        taxJurisdictionReason: taxJurisdiction.reason,
+        playbookChars: playbookSelection.context.length,
       });
       addEvent(state, eventLog, cleaned ? "prospect_coach.done" : "prospect_coach.wait", cleaned || "WAIT", {
         entryId: entry.id,
         sequence,
         elapsedMs: Date.now() - started,
+        provider: prospectCoachProvider,
         model: prospectCoachModel,
+        serviceTier: prospectCoachServiceTier || null,
+        playbookSections: playbookSelection.sections,
+        salesSections: playbookSelection.salesSections,
+        taxKnowledgeSections: playbookSelection.taxSections,
+        taxJurisdiction: taxJurisdiction.value,
+        taxJurisdictionConfidence: taxJurisdiction.confidence,
+        taxJurisdictionReason: taxJurisdiction.reason,
+        playbookChars: playbookSelection.context.length,
       });
     } catch (error) {
       setLiveSuggestion({
@@ -5371,7 +5871,9 @@ async function main() {
   if (knownSpeakers.names.length) console.log(`  speakers ref: ${knownSpeakers.names.join(", ")}`);
   console.log(`  semantic:   ${semanticTurnsEnabled ? `${semanticTurnProvider}:${semanticTurnModel}${semanticTurnServiceTier ? ` tier=${semanticTurnServiceTier}` : ""}, batch=${semanticTurnBatchMs ? `${semanticTurnBatchMs}ms` : "off"}, buffer<=${semanticTurnMaxBufferChars}, memory<=${semanticTurnMemoryChars}` : "off"}`);
   console.log(`  coach:      ${coachEnabled ? `every ${coachEverySec}s, model=${coachModel}` : "off"}`);
-  if (prospectOnlyCoachEnabled) console.log(`  next-line:  streaming prospect-only coach, model=${prospectCoachModel}`);
+  if (prospectOnlyCoachEnabled) {
+    console.log(`  next-line:  streaming prospect-only coach, ${prospectCoachProvider}:${prospectCoachModel}${prospectCoachServiceTier ? ` tier=${prospectCoachServiceTier}` : ""}, playbook=${prospectCoachPlaybook.length ? `${prospectCoachPlaybook.length} chars, focused<=${prospectCoachPlaybookMaxChars}` : "off"}`);
+  }
   console.log(`  speakers:   ${nativeDiarizeEnabled ? "native diarize" : speakerLabelsEnabled ? speakerModel : "off"}`);
   console.log(`  call gate:  ${callGateEnabled ? `${callGateMode}, poll=${callGatePollMs}ms, agentExtId=${eventGateAgentExtensionId || "none"}, agentEmail=${eventGateAgentEmail || cxGateAgentEmail || "none"}` : "off"}`);
   console.log(`  ui bridge:  ${sessionId ? `session=${sessionId}` : "off"}`);

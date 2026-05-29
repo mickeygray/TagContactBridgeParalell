@@ -1208,6 +1208,13 @@ async function dispatchForLead(lead, {
           intakeSource: lead.intakeSource || null,
           intakeRoute: lead.intakeRoute || null,
           sourceName: lead.sourceName || null,
+          state: lead.state || lead.payloadSnapshot?.state || null,
+          timezone:
+            lead.cadenceState?.timezone ||
+            lead.cadenceState?.timeZone ||
+            lead.payloadSnapshot?.timezone ||
+            lead.payloadSnapshot?.timeZone ||
+            null,
           requestedBy: "cadence-engine",
           executionOwner: "ringcentral-cx",
           futureAdapterPort: 6101,

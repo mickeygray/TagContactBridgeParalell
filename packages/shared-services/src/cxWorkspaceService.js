@@ -77,6 +77,7 @@ const {
   normalizeRouteCampaigns,
   resolveAccountQueuePolicy,
   resolveQueueDialability,
+  resolveQueueDialTimeWindow,
 } = require("./cxQueuePolicyService");
 const {
   getCxQueueServeRank,
@@ -946,14 +947,25 @@ function normalizeCxDisposition(value) {
   if (
     normalized === "callback" ||
     normalized === "call back" ||
-    normalized === "call-back" ||
-    normalized === "no answer" ||
-    normalized === "no-answer" ||
-    normalized === "no connect" ||
-    normalized === "no-connect"
+    normalized === "call-back"
   ) {
     return "call-back";
   }
+  if (
+    normalized === "no answer" ||
+    normalized === "no-answer" ||
+    normalized === "did not answer" ||
+    normalized === "did-not-answer" ||
+    normalized === "did_not_answer" ||
+    normalized === "did not connect" ||
+    normalized === "did-not-connect" ||
+    normalized === "did_not_connect" ||
+    normalized === "no connect" ||
+    normalized === "no-connect"
+  ) {
+    return "did-not-answer";
+  }
+  if (normalized === "answered" || normalized === "answer" || normalized === "connected") return "answered";
   if (normalized === "dnc" || normalized.includes("do not call")) return "dnc";
   if (normalized === "postdate" || normalized === "post-date" || normalized === "post date") {
     return "postdate";
@@ -1124,6 +1136,242 @@ async function finalizeCxDispositionCallback(domain, input = {}) {
   };
 }
 
+function latestNonNullDate(...values) {
+  const dates = values
+    .map((value) => value ? new Date(value) : null)
+    .filter((date) => date && !Number.isNaN(date.getTime()));
+  if (dates.length === 0) return null;
+  return new Date(Math.max(...dates.map((date) => date.getTime())));
+}
+
+function resolveNoAnswerReleaseAt(queueItem = {}, now = new Date()) {
+  const cooldownAt = getCooldownReleaseAt(queueItem, now);
+  const timing = resolveQueueDialTimeWindow(queueItem, cooldownAt || now);
+  return latestNonNullDate(cooldownAt, timing.nextAllowedAt) || now;
+}
+
+function readQueueDispositionCounters(queueItem = {}) {
+  const metadata = queueItem?.metadata && typeof queueItem.metadata === "object" ? queueItem.metadata : {};
+  return {
+    answeredContacts: Math.max(Number(
+      queueItem?.answeredContacts
+        ?? metadata.answeredContacts
+        ?? metadata.cxAnsweredContacts
+        ?? metadata.answeredCalls
+        ?? metadata.contactCount
+        ?? 0,
+    ) || 0, 0),
+    noAnswerCalls: Math.max(Number(
+      queueItem?.unansweredCalls
+        ?? metadata.unansweredCalls
+        ?? metadata.noAnswerCalls
+        ?? metadata.didNotAnswerCalls
+        ?? metadata.cxNoAnswerCalls
+        ?? 0,
+    ) || 0, 0),
+  };
+}
+
+async function readLeadCxDispositionCounters(domain, caseId, queueItem = null) {
+  const queueCounters = readQueueDispositionCounters(queueItem || {});
+  const cadence = await LeadCadence.findOne(
+    { domain: normalizeDomain(domain), caseId: Number(caseId) },
+    {
+      "counterCadence.cxAnsweredContacts": 1,
+      "counterCadence.cxNoAnswerCalls": 1,
+      "payloadSnapshot.cxAnsweredContacts": 1,
+      "payloadSnapshot.cxNoAnswerCalls": 1,
+    },
+  ).lean().catch(() => null);
+  return {
+    answeredContacts: Math.max(
+      queueCounters.answeredContacts,
+      Number(cadence?.counterCadence?.cxAnsweredContacts || 0) || 0,
+      Number(cadence?.payloadSnapshot?.cxAnsweredContacts || 0) || 0,
+    ),
+    noAnswerCalls: Math.max(
+      queueCounters.noAnswerCalls,
+      Number(cadence?.counterCadence?.cxNoAnswerCalls || 0) || 0,
+      Number(cadence?.payloadSnapshot?.cxNoAnswerCalls || 0) || 0,
+    ),
+  };
+}
+
+async function stampLeadCxDispositionCounters(domain, caseId, patch = {}) {
+  const normalizedDomain = normalizeDomain(domain);
+  const numericCaseId = Number(caseId);
+  if (!normalizedDomain || !Number.isFinite(numericCaseId)) return null;
+  return LeadCadence.updateOne(
+    { domain: normalizedDomain, caseId: numericCaseId },
+    { $set: patch },
+  ).catch(() => null);
+}
+
+async function finalizeCxDispositionDidNotAnswer(domain, input = {}) {
+  const caseId = Number(input.caseId);
+  if (!Number.isFinite(caseId)) return null;
+  const now = new Date();
+  const actionKey = extractQueueActionKey(input);
+  const queueAction = await resolveActiveCxQueueAction(domain, caseId, actionKey);
+  const queueItem = await resolveCxDialQueueItem(domain, caseId, input).catch(() => null);
+  const counters = await readLeadCxDispositionCounters(domain, caseId, queueItem || {});
+  const nextNoAnswerCount = counters.noAnswerCalls + 1;
+  const projectedQueueItem = queueItem
+    ? {
+      ...queueItem,
+      metadata: {
+        ...(queueItem.metadata || {}),
+        unansweredCalls: nextNoAnswerCount,
+        noAnswerCalls: nextNoAnswerCount,
+        cxNoAnswerCalls: nextNoAnswerCount,
+        answeredContacts: counters.answeredContacts,
+        cxAnsweredContacts: counters.answeredContacts,
+      },
+    }
+    : null;
+  const dialability = projectedQueueItem
+    ? resolveQueueDialability(projectedQueueItem, now)
+    : null;
+  const terminalPolicyHold = Boolean(dialability?.ok === false && dialability.lifecycleHold?.terminal);
+  const releaseAt =
+    terminalPolicyHold
+      ? null
+      : dialability?.ok === false
+      ? dialability.nextEligibleAt || resolveNoAnswerReleaseAt(projectedQueueItem || queueItem || {}, now)
+      : resolveNoAnswerReleaseAt(projectedQueueItem || queueItem || {}, now);
+
+  if (queueAction?.actionKey) {
+    await leadCadenceRepository.markScheduledActionStatus(domain, caseId, queueAction.actionKey, "completed", {
+      active: true,
+      currentStage: "cx-did-not-answer",
+    }).catch(() => null);
+    await leadCadenceRepository.syncLeadCadenceState(domain, caseId).catch(() => null);
+  }
+
+  await stampLeadCxDispositionCounters(domain, caseId, {
+    "counterCadence.cxNoAnswerCalls": nextNoAnswerCount,
+    "counterCadence.lastCxNoAnswerAt": now,
+    "payloadSnapshot.cxNoAnswerCalls": nextNoAnswerCount,
+    "payloadSnapshot.lastCxNoAnswerAt": now,
+    "payloadSnapshot.cxAnsweredContacts": counters.answeredContacts,
+  });
+
+  const queueMetadata = {
+    lastDidNotAnswerAt: now,
+    lastDidNotAnswerBy: input.actorEmail || null,
+    unansweredCalls: nextNoAnswerCount,
+    noAnswerCalls: nextNoAnswerCount,
+    cxNoAnswerCalls: nextNoAnswerCount,
+    answeredContacts: counters.answeredContacts,
+    cxAnsweredContacts: counters.answeredContacts,
+    lastPolicyHoldReason: dialability?.ok === false ? dialability.reason : null,
+    lastPolicyHoldReleaseAt: dialability?.ok === false ? dialability.nextEligibleAt || null : null,
+    lastQueueAttemptHeldForDisposition: false,
+    wrapUpRequired: false,
+  };
+  const queueMutation = terminalPolicyHold
+    ? await completeCxQueueItem({
+      domain,
+      caseId,
+      queueItemId: queueItem?._id ? String(queueItem._id) : input.queueItemId || input.queueTicketId || null,
+      queueActionKey: actionKey,
+      queueOutcome: "cadence-finished",
+      disposition: "did-not-answer",
+      actorEmail: input.actorEmail || null,
+      extraUpdate: {
+        metadata: queueMetadata,
+      },
+    }).catch(() => null)
+    : await rescheduleCxQueueItem({
+      domain,
+      caseId,
+      queueItemId: queueItem?._id ? String(queueItem._id) : input.queueItemId || input.queueTicketId || null,
+      queueActionKey: actionKey,
+      releaseAt,
+      reason: "did-not-answer",
+      actorEmail: input.actorEmail || null,
+      cancelRingcxInBackground: true,
+      extraUpdate: {
+        metadata: queueMetadata,
+      },
+    }).catch(() => null);
+
+  return {
+    caseId,
+    domain,
+    disposition: "Did not answer",
+    queueOutcome: terminalPolicyHold
+      ? "cadence-finished"
+      : queueMutation?.mutated ? "rescheduled" : queueAction?.actionKey ? "rescheduled" : "noop",
+    queueItemId: queueMutation?.queueItemId || input.queueItemId || input.queueTicketId || null,
+    queueTicketId: queueMutation?.queueItemId || input.queueItemId || input.queueTicketId || null,
+    actionKey: queueAction?.actionKey || actionKey || null,
+    rescheduledFor: releaseAt ? new Date(releaseAt).toISOString() : null,
+    unansweredCalls: nextNoAnswerCount,
+    policyReason: dialability?.ok === false ? dialability.reason : null,
+    queueEjection: queueMutation || null,
+  };
+}
+
+async function finalizeCxDispositionAnswered(domain, input = {}) {
+  const caseId = Number(input.caseId);
+  if (!Number.isFinite(caseId)) return null;
+  const now = new Date();
+  const actionKey = extractQueueActionKey(input);
+  const queueAction = await resolveActiveCxQueueAction(domain, caseId, actionKey);
+  const queueItem = await resolveCxDialQueueItem(domain, caseId, input).catch(() => null);
+  const counters = await readLeadCxDispositionCounters(domain, caseId, queueItem || {});
+  const nextAnsweredContacts = counters.answeredContacts + 1;
+  if (queueAction?.actionKey) {
+    await leadCadenceRepository.markScheduledActionStatus(domain, caseId, queueAction.actionKey, "completed", {
+      active: true,
+      currentStage: "cx-answered",
+    }).catch(() => null);
+    await leadCadenceRepository.syncLeadCadenceState(domain, caseId).catch(() => null);
+  }
+  await stampLeadCxDispositionCounters(domain, caseId, {
+    "counterCadence.cxAnsweredContacts": nextAnsweredContacts,
+    "counterCadence.cxNoAnswerCalls": 0,
+    "counterCadence.lastCxAnsweredAt": now,
+    "payloadSnapshot.cxAnsweredContacts": nextAnsweredContacts,
+    "payloadSnapshot.cxNoAnswerCalls": 0,
+    "payloadSnapshot.lastCxAnsweredAt": now,
+  });
+  const queueMutation = await completeCxQueueItem({
+    domain,
+    caseId,
+    queueItemId: input.queueItemId || input.queueTicketId || null,
+    queueActionKey: actionKey,
+    queueOutcome: "answered",
+    disposition: "answered",
+    actorEmail: input.actorEmail || null,
+    extraUpdate: {
+      metadata: {
+        lastAnsweredAt: now,
+        lastAnsweredBy: input.actorEmail || null,
+        answeredContacts: nextAnsweredContacts,
+        cxAnsweredContacts: nextAnsweredContacts,
+        unansweredCalls: 0,
+        noAnswerCalls: 0,
+        didNotAnswerCalls: 0,
+        lastQueueAttemptHeldForDisposition: false,
+        wrapUpRequired: false,
+      },
+    },
+  }).catch(() => null);
+  return {
+    caseId,
+    domain,
+    disposition: "Answered",
+    queueOutcome: queueMutation?.mutated ? "completed" : queueAction?.actionKey ? "completed" : "noop",
+    queueItemId: queueMutation?.queueItemId || input.queueItemId || input.queueTicketId || null,
+    queueTicketId: queueMutation?.queueItemId || input.queueItemId || input.queueTicketId || null,
+    actionKey: queueAction?.actionKey || actionKey || null,
+    rescheduledFor: null,
+    queueEjection: queueMutation || null,
+  };
+}
+
 function queueCxCallbackBackgroundCleanup({
   context,
   user,
@@ -1187,6 +1435,99 @@ function queueCxCallbackBackgroundCleanup({
       console.warn("[cx-callback-background-cleanup] failed", {
         caseId,
         queueItemId: outcome?.queueItemId || input.queueItemId || input.queueTicketId || null,
+        error: error.message || String(error),
+      });
+    });
+}
+
+async function requestCxNextDialHandoff({ context, user, input = {} }) {
+  const requestedNextDial = input.nextDial && typeof input.nextDial === "object"
+    ? input.nextDial
+    : null;
+  if (!requestedNextDial?.phone) return null;
+
+  const nextDialDomain = normalizeDomain(
+    requestedNextDial.domain ||
+      requestedNextDial.queueDomain ||
+      context.domain,
+  ) || context.domain;
+  const {
+    domain: _ignoredDomain,
+    queueDomain: _ignoredQueueDomain,
+    ...nextDialInput
+  } = requestedNextDial;
+
+  try {
+    return await requestCxDial(nextDialDomain, user, {
+      ...nextDialInput,
+      assignedExtensionId:
+        nextDialInput.assignedExtensionId ||
+        context.account?.extensionId ||
+        user?.extensionId ||
+        input.assignedExtensionId ||
+        null,
+      requestedBySurface: "cx-next-call-handoff",
+    });
+  } catch (error) {
+    return {
+      ok: false,
+      accepted: false,
+      domain: nextDialDomain,
+      status: error.status || 500,
+      reason: error.message || "Next CX dial handoff failed",
+      details: error.details || null,
+    };
+  }
+}
+
+function queueCxTerminalDispositionBackgroundCleanup({
+  context,
+  user,
+  input = {},
+  queueItem = null,
+  caseId = null,
+  outcome = null,
+  requested = null,
+  title = "Disposition requested",
+  summary = "Apply disposition",
+  disposition = null,
+} = {}) {
+  Promise.resolve()
+    .then(async () => {
+      const hangup = await hangupCxCallAfterDisposition({
+        context,
+        user,
+        input: {
+          ...input,
+          skipAgentStateClearAfterRelay: Boolean(input.nextDial),
+        },
+        queueItem,
+        caseId,
+        disposition,
+      });
+      await recordWorkflowStage({
+        domain: context.domain,
+        family: "cx",
+        subtype: "disposition",
+        stage: "completed",
+        aggregateType: "case-profile",
+        aggregateId: input.caseId,
+        caseId: input.caseId,
+        sourceService: "control-plane",
+        title,
+        summary: `${summary} completed`,
+        result: {
+          requested,
+          response: outcome,
+          hangup,
+        },
+      });
+    })
+    .catch((error) => {
+      console.warn("[cx-terminal-disposition-background-cleanup] failed", {
+        caseId,
+        queueItemId: outcome?.queueItemId || input.queueItemId || input.queueTicketId || null,
+        disposition,
         error: error.message || String(error),
       });
     });
@@ -2263,7 +2604,7 @@ function isCxBlockedLeadCadence(doc = {}) {
   const stage = String(doc.currentStage || "").trim();
   if (stage && NON_DIALABLE_STAGE_PATTERN.test(stage)) return true;
   const cxDnc = doc.cadenceState?.channelDnc?.cx;
-  return Boolean(cxDnc?.blocked);
+  return Boolean(cxDnc?.blocked || doc.dncCheckpoints?.hit);
 }
 
 function readCadenceCxTouchState(cadence = {}) {
@@ -2289,6 +2630,16 @@ function readCadenceCxTouchState(cadence = {}) {
       payload.lastCxDialedByAgentName ||
       null,
     totalCalls: Math.max(Number(cadence?.cadenceCounters?.cx || 0) || 0, 0),
+    answeredContacts: Math.max(Number(
+      counter.cxAnsweredContacts ||
+        payload.cxAnsweredContacts ||
+        0,
+    ) || 0, 0),
+    noAnswerCalls: Math.max(Number(
+      counter.cxNoAnswerCalls ||
+        payload.cxNoAnswerCalls ||
+        0,
+    ) || 0, 0),
     dailyDateKey: String(counter.cxDailyDateKey || "").trim() || null,
     dailyCalls: Math.max(Number(counter.cxDailyCalls || 0) || 0, 0),
     monthlyMonthKey: String(counter.cxMonthlyMonthKey || "").trim() || null,
@@ -2305,6 +2656,8 @@ function readProspectCxTouchState(prospect = {}) {
     lastTouchedExtensionId: String(filler.lastDialedByExtensionId || "").trim() || null,
     lastTouchedAgentName: filler.lastDialedByAgentName || null,
     totalCalls: Math.max(Number(filler.attemptCount || 0) || 0, 0),
+    answeredContacts: Math.max(Number(filler.answeredContacts || 0) || 0, 0),
+    noAnswerCalls: Math.max(Number(filler.noAnswerCalls || 0) || 0, 0),
     dailyDateKey: String(filler.dailyDateKey || "").trim() || null,
     dailyCalls: Math.max(Number(filler.dailyAttempts || 0) || 0, 0),
     monthlyMonthKey: String(filler.monthlyMonthKey || "").trim() || null,
@@ -2326,6 +2679,11 @@ function buildMaterializedTouchPatch(touchState = {}, now = new Date()) {
     monthlyPlacedCalls: touchState.monthlyMonthKey === monthKey
       ? Math.max(Number(touchState.monthlyCalls || 0) || 0, 0)
       : 0,
+    "metadata.answeredContacts": Math.max(Number(touchState.answeredContacts || 0) || 0, 0),
+    "metadata.cxAnsweredContacts": Math.max(Number(touchState.answeredContacts || 0) || 0, 0),
+    "metadata.unansweredCalls": Math.max(Number(touchState.noAnswerCalls || 0) || 0, 0),
+    "metadata.noAnswerCalls": Math.max(Number(touchState.noAnswerCalls || 0) || 0, 0),
+    "metadata.cxNoAnswerCalls": Math.max(Number(touchState.noAnswerCalls || 0) || 0, 0),
     "metadata.lastQueueAttemptAt": touchState.lastTouchedAt || null,
     "metadata.lastTouchedAt": touchState.lastTouchedAt || null,
     "metadata.lastTouchedExtensionId": touchState.lastTouchedExtensionId || null,
@@ -2369,6 +2727,11 @@ function leadCxTouchViolatesAgentOrPolicy({
       dailyPlacedCalls: Number(touchState.dailyCalls || 0) || 0,
       monthlyPlacedMonthKey: touchState.monthlyMonthKey || null,
       monthlyPlacedCalls: Number(touchState.monthlyCalls || 0) || 0,
+      answeredContacts: Number(touchState.answeredContacts || 0) || 0,
+      cxAnsweredContacts: Number(touchState.answeredContacts || 0) || 0,
+      unansweredCalls: Number(touchState.noAnswerCalls || 0) || 0,
+      noAnswerCalls: Number(touchState.noAnswerCalls || 0) || 0,
+      cxNoAnswerCalls: Number(touchState.noAnswerCalls || 0) || 0,
     },
   };
   const dialability = resolveQueueDialability(synthetic, now);
@@ -4866,6 +5229,77 @@ async function requestCxDisposition(domain, user, input = {}) {
     };
   }
 
+  if (normalizedDisposition === "did-not-answer" || normalizedDisposition === "answered") {
+    const title = "Disposition requested";
+    const friendlyDisposition = normalizedDisposition === "answered" ? "answered" : "did not answer";
+    const summary = `Apply disposition ${friendlyDisposition} to case ${input.caseId}`;
+    const requested = await recordCxCommand({
+      domain: context.domain,
+      user,
+      subtype: "disposition",
+      aggregateType: "case-profile",
+      aggregateId: input.caseId,
+      caseId: input.caseId,
+      title,
+      summary,
+      payload: {
+        disposition: normalizedDisposition,
+        notes: input.notes || null,
+        queueActionKey: extractQueueActionKey(input),
+        queueItemId: input.queueItemId || input.queueTicketId || null,
+        phone: input.phone || null,
+      },
+    });
+    const outcome = normalizedDisposition === "answered"
+      ? await finalizeCxDispositionAnswered(context.domain, {
+        ...input,
+        actorEmail: context.account?.email || user?.email || null,
+      })
+      : await finalizeCxDispositionDidNotAnswer(context.domain, {
+        ...input,
+        actorEmail: context.account?.email || user?.email || null,
+      });
+    await clearAgentCxCallState(
+      context.account?.extensionId || user?.extensionId || input.assignedExtensionId || null,
+      `cx-${normalizedDisposition}`,
+      {
+        uii: input.uii || input.rcxUii || queueItem?.metadata?.lastDialExecutionUii || null,
+      },
+    );
+    queueCxTerminalDispositionBackgroundCleanup({
+      context,
+      user,
+      input,
+      queueItem,
+      caseId: normalizedCaseId,
+      title,
+      summary,
+      disposition: normalizedDisposition,
+      outcome,
+      requested,
+    });
+    const nextDial = await requestCxNextDialHandoff({ context, user, input });
+    return {
+      ...requested,
+      completed: true,
+      completionWorkflowId: null,
+      disposition: outcome?.disposition || friendlyDisposition,
+      queueOutcome: outcome?.queueOutcome || null,
+      rescheduledFor: outcome?.rescheduledFor || null,
+      unansweredCalls: outcome?.unansweredCalls || null,
+      queueItemId: outcome?.queueItemId || input.queueItemId || input.queueTicketId || null,
+      queueTicketId: outcome?.queueTicketId || outcome?.queueItemId || input.queueItemId || input.queueTicketId || null,
+      response: outcome,
+      nextDial,
+      hangup: {
+        ok: true,
+        acceptedLocally: true,
+        backgroundPending: true,
+        reason: "disposition-hangup-backgrounded",
+      },
+    };
+  }
+
   if (normalizedDisposition === "call-back") {
     const title = "Disposition requested";
     const summary = `Apply disposition call back to case ${input.caseId}`;
@@ -4908,39 +5342,7 @@ async function requestCxDisposition(domain, user, input = {}) {
       outcome,
       requested,
     });
-    const requestedNextDial = input.nextDial && typeof input.nextDial === "object"
-      ? input.nextDial
-      : null;
-    let nextDial = null;
-    if (requestedNextDial?.phone) {
-      const nextDialDomain = normalizeDomain(
-        requestedNextDial.domain ||
-          requestedNextDial.queueDomain ||
-          context.domain,
-      ) || context.domain;
-      const { domain: _ignoredDomain, queueDomain: _ignoredQueueDomain, ...nextDialInput } = requestedNextDial;
-      try {
-        nextDial = await requestCxDial(nextDialDomain, user, {
-          ...nextDialInput,
-          assignedExtensionId:
-            nextDialInput.assignedExtensionId ||
-            context.account?.extensionId ||
-            user?.extensionId ||
-            input.assignedExtensionId ||
-            null,
-          requestedBySurface: "cx-next-call-handoff",
-        });
-      } catch (error) {
-        nextDial = {
-          ok: false,
-          accepted: false,
-          domain: nextDialDomain,
-          status: error.status || 500,
-          reason: error.message || "Next CX dial handoff failed",
-          details: error.details || null,
-        };
-      }
-    }
+    const nextDial = await requestCxNextDialHandoff({ context, user, input });
     return {
       ...requested,
       completed: true,

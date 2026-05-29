@@ -9,6 +9,85 @@ const {
 } = require("./cxQueueFairnessService");
 
 const QUEUE_TIMEZONE = "America/Los_Angeles";
+const OPERATIONAL_TIMEZONE = "America/Los_Angeles";
+const DEFAULT_LEAD_TIMEZONE = "America/Los_Angeles";
+const DEFAULT_DIAL_START_HOUR = 8;
+const DEFAULT_DIAL_END_HOUR = 20;
+const DEFAULT_DIAL_DAILY_MAX = 3;
+const DEFAULT_INITIAL_ACTIVE_BUSINESS_DAYS = 5;
+const DEFAULT_INITIAL_UNANSWERED_ATTEMPT_MAX = 15;
+const DEFAULT_CONTACT_EXTENSION_BUSINESS_DAY = 15;
+const DEFAULT_SECOND_HALF_BUSINESS_DAY_MAX = 30;
+const DEFAULT_SECOND_HALF_REQUIRED_CONTACTS = 2;
+const DEFAULT_ENGAGEMENT_POLICY_EFFECTIVE_AT = "2026-05-28T00:00:00-07:00";
+const GRANDFATHER_CONTACT_REQUIRED_BUSINESS_DAY = 10;
+const MS_PER_DAY = 24 * 60 * 60 * 1000;
+
+const STATE_TIMEZONES = Object.freeze({
+  AL: "America/Chicago",
+  AK: "America/Anchorage",
+  AZ: "America/Phoenix",
+  AR: "America/Chicago",
+  CA: "America/Los_Angeles",
+  CO: "America/Denver",
+  CT: "America/New_York",
+  DC: "America/New_York",
+  DE: "America/New_York",
+  FL: "America/New_York",
+  GA: "America/New_York",
+  HI: "Pacific/Honolulu",
+  IA: "America/Chicago",
+  ID: "America/Denver",
+  IL: "America/Chicago",
+  IN: "America/Indiana/Indianapolis",
+  KS: "America/Chicago",
+  KY: "America/New_York",
+  LA: "America/Chicago",
+  MA: "America/New_York",
+  MD: "America/New_York",
+  ME: "America/New_York",
+  MI: "America/Detroit",
+  MN: "America/Chicago",
+  MO: "America/Chicago",
+  MS: "America/Chicago",
+  MT: "America/Denver",
+  NC: "America/New_York",
+  ND: "America/Chicago",
+  NE: "America/Chicago",
+  NH: "America/New_York",
+  NJ: "America/New_York",
+  NM: "America/Denver",
+  NV: "America/Los_Angeles",
+  NY: "America/New_York",
+  OH: "America/New_York",
+  OK: "America/Chicago",
+  OR: "America/Los_Angeles",
+  PA: "America/New_York",
+  RI: "America/New_York",
+  SC: "America/New_York",
+  SD: "America/Chicago",
+  TN: "America/Chicago",
+  TX: "America/Chicago",
+  UT: "America/Denver",
+  VA: "America/New_York",
+  VT: "America/New_York",
+  WA: "America/Los_Angeles",
+  WI: "America/Chicago",
+  WV: "America/New_York",
+  WY: "America/Denver",
+});
+
+const STATE_DIAL_RULES = Object.freeze({
+  FL: { endHour: 20, sundayAllowed: false },
+  OK: { endHour: 20 },
+  WA: { endHour: 20 },
+  TX: { startHour: 9, endHour: 21, sundayStartHour: 12 },
+  LA: { endHour: 21, sundayAllowed: false, holidayBlackout: true },
+  MD: { endHour: 20 },
+  MS: { endHour: 20, holidayBlackout: true },
+  AL: { endHour: 20, holidayBlackout: true },
+  IN: { endHour: 21, sundayAllowed: false },
+});
 
 // Keep the stored queue-family key stable for existing data. The
 // business meaning is now day 2 through day 15.
@@ -27,14 +106,14 @@ const QUEUE_FAMILY_POLICIES = Object.freeze({
     label: "New",
     claimMinutes: 15,
     cooldownMinutes: 90,
-    dailyMax: 5,
+    dailyMax: DEFAULT_DIAL_DAILY_MAX,
   },
   "fresh-day2to10": {
     key: "fresh-day2to10",
     label: "3-15",
     claimMinutes: 30,
     cooldownMinutes: 120,
-    dailyMax: 3,
+    dailyMax: DEFAULT_DIAL_DAILY_MAX,
   },
   "fresh-day16to30": {
     key: "fresh-day16to30",
@@ -49,7 +128,7 @@ const QUEUE_FAMILY_POLICIES = Object.freeze({
     claimMinutes: 60,
     cooldownMinutes: 14 * 24 * 60,
     dailyMax: 1,
-    monthlyMax: 2,
+    monthlyMax: null,
   },
   dead: {
     key: "dead",
@@ -161,6 +240,10 @@ function isResolvedQueuePolicy(policy = null) {
 }
 
 function resolveQueueFamilyDailyMax(queueFamily, fallback) {
+  const globalMax = readEnvNumber("RC_CX_DAILY_MAX", null);
+  if (globalMax != null) return globalMax;
+  const familyOverridesEnabled = readEnvBoolean("RC_CX_ALLOW_FAMILY_DAILY_MAX_OVERRIDES", false);
+  if (!familyOverridesEnabled) return fallback;
   const normalizedFamily = normalizeQueueFamily(queueFamily);
   if (normalizedFamily === "fresh-day1") {
     return readEnvNumber(["RC_CX_GREEN_DAILY_MAX", "RC_CX_FRESH_DAILY_MAX"], fallback);
@@ -366,6 +449,294 @@ function getQueueFamilyPolicy(value) {
   };
 }
 
+function isValidTimeZone(value) {
+  const candidate = String(value || "").trim();
+  if (!candidate) return false;
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: candidate }).format(new Date());
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function normalizeUsState(value) {
+  const raw = String(value || "").trim().toUpperCase();
+  if (/^[A-Z]{2}$/.test(raw)) return raw;
+  const compact = raw.replace(/[^A-Z]/g, "");
+  const names = {
+    ALABAMA: "AL",
+    ALASKA: "AK",
+    ARIZONA: "AZ",
+    ARKANSAS: "AR",
+    CALIFORNIA: "CA",
+    COLORADO: "CO",
+    CONNECTICUT: "CT",
+    DELAWARE: "DE",
+    FLORIDA: "FL",
+    GEORGIA: "GA",
+    HAWAII: "HI",
+    IDAHO: "ID",
+    ILLINOIS: "IL",
+    INDIANA: "IN",
+    IOWA: "IA",
+    KANSAS: "KS",
+    KENTUCKY: "KY",
+    LOUISIANA: "LA",
+    MAINE: "ME",
+    MARYLAND: "MD",
+    MASSACHUSETTS: "MA",
+    MICHIGAN: "MI",
+    MINNESOTA: "MN",
+    MISSISSIPPI: "MS",
+    MISSOURI: "MO",
+    MONTANA: "MT",
+    NEBRASKA: "NE",
+    NEVADA: "NV",
+    NEWHAMPSHIRE: "NH",
+    NEWJERSEY: "NJ",
+    NEWMEXICO: "NM",
+    NEWYORK: "NY",
+    NORTHCAROLINA: "NC",
+    NORTHDAKOTA: "ND",
+    OHIO: "OH",
+    OKLAHOMA: "OK",
+    OREGON: "OR",
+    PENNSYLVANIA: "PA",
+    RHODEISLAND: "RI",
+    SOUTHCAROLINA: "SC",
+    SOUTHDAKOTA: "SD",
+    TENNESSEE: "TN",
+    TEXAS: "TX",
+    UTAH: "UT",
+    VERMONT: "VT",
+    VIRGINIA: "VA",
+    WASHINGTON: "WA",
+    WESTVIRGINIA: "WV",
+    WISCONSIN: "WI",
+    WYOMING: "WY",
+    DISTRICTOFCOLUMBIA: "DC",
+  };
+  return names[compact] || null;
+}
+
+function resolveLeadState(item = {}) {
+  const metadata = item.metadata && typeof item.metadata === "object" ? item.metadata : {};
+  const payload = item.payloadSnapshot && typeof item.payloadSnapshot === "object" ? item.payloadSnapshot : {};
+  const attribution = item.attributionContext && typeof item.attributionContext === "object" ? item.attributionContext : {};
+  return normalizeUsState(
+    metadata.leadState ||
+      metadata.contactState ||
+      metadata.state ||
+      payload.state ||
+      attribution.state ||
+      item.leadState ||
+      item.contactState,
+  );
+}
+
+function resolveLeadTimeZone(item = {}) {
+  const metadata = item.metadata && typeof item.metadata === "object" ? item.metadata : {};
+  const payload = item.payloadSnapshot && typeof item.payloadSnapshot === "object" ? item.payloadSnapshot : {};
+  const explicit =
+    metadata.leadTimeZone ||
+    metadata.leadTimezone ||
+    metadata.timeZone ||
+    metadata.timezone ||
+    payload.timeZone ||
+    payload.timezone ||
+    item.leadTimeZone ||
+    item.timeZone ||
+    item.timezone;
+  if (isValidTimeZone(explicit)) return String(explicit).trim();
+  return STATE_TIMEZONES[resolveLeadState(item)] || DEFAULT_LEAD_TIMEZONE;
+}
+
+function getZonedParts(date = new Date(), timeZone = DEFAULT_LEAD_TIMEZONE) {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    weekday: "short",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  }).formatToParts(new Date(date));
+  const lookup = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+  const weekdayMap = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
+  const hour = Number(lookup.hour);
+  return {
+    year: Number(lookup.year),
+    month: Number(lookup.month),
+    day: Number(lookup.day),
+    weekday: weekdayMap[lookup.weekday] ?? -1,
+    hour: hour === 24 ? 0 : hour,
+    minute: Number(lookup.minute),
+    second: Number(lookup.second),
+  };
+}
+
+function getZonedOffsetMs(date = new Date(), timeZone = DEFAULT_LEAD_TIMEZONE) {
+  const parts = getZonedParts(date, timeZone);
+  const asUtc = Date.UTC(
+    parts.year,
+    parts.month - 1,
+    parts.day,
+    parts.hour,
+    parts.minute,
+    parts.second,
+  );
+  return asUtc - new Date(date).getTime();
+}
+
+function makeZonedDate(year, month, day, hour = 0, minute = 0, second = 0, timeZone = DEFAULT_LEAD_TIMEZONE) {
+  let utcMs = Date.UTC(year, month - 1, day, hour, minute, second, 0);
+  for (let index = 0; index < 3; index += 1) {
+    utcMs = Date.UTC(year, month - 1, day, hour, minute, second, 0)
+      - getZonedOffsetMs(new Date(utcMs), timeZone);
+  }
+  return new Date(utcMs);
+}
+
+function formatDateKeyInZone(date = new Date(), timeZone = DEFAULT_LEAD_TIMEZONE) {
+  return new Intl.DateTimeFormat("en-CA", { timeZone }).format(new Date(date));
+}
+
+function readOperationalStartHour() {
+  return readEnvNumber(["RC_CX_OPERATIONAL_START_HOUR", "RC_CX_WORKING_START_HOUR"], 7);
+}
+
+function readOperationalEndHour() {
+  return readEnvNumber(["RC_CX_OPERATIONAL_END_HOUR", "RC_CX_WORKING_END_HOUR"], 17);
+}
+
+function nextWindowStart(date, timeZone, startHour) {
+  const parts = getZonedParts(date, timeZone);
+  return makeZonedDate(parts.year, parts.month, parts.day + 1, startHour, 0, 0, timeZone);
+}
+
+function evaluateDailyWindow(date, {
+  timeZone,
+  startHour,
+  endHour,
+  activeWeekdays = [1, 2, 3, 4, 5],
+} = {}) {
+  const target = new Date(date);
+  const parts = getZonedParts(target, timeZone);
+  const allowedWeekday = activeWeekdays.includes(parts.weekday);
+  if (!allowedWeekday) {
+    let cursor = target;
+    for (let guard = 0; guard < 10; guard += 1) {
+      const cursorParts = getZonedParts(cursor, timeZone);
+      const next = makeZonedDate(cursorParts.year, cursorParts.month, cursorParts.day + 1, startHour, 0, 0, timeZone);
+      const nextParts = getZonedParts(next, timeZone);
+      if (activeWeekdays.includes(nextParts.weekday)) {
+        return { allowed: false, reason: "off-weekday", nextAllowedAt: next };
+      }
+      cursor = next;
+    }
+  }
+  if (parts.hour < startHour) {
+    return {
+      allowed: false,
+      reason: "before-window",
+      nextAllowedAt: makeZonedDate(parts.year, parts.month, parts.day, startHour, 0, 0, timeZone),
+    };
+  }
+  if (parts.hour >= endHour) {
+    return {
+      allowed: false,
+      reason: "after-window",
+      nextAllowedAt: nextWindowStart(target, timeZone, startHour),
+    };
+  }
+  return { allowed: true, reason: null, nextAllowedAt: target };
+}
+
+function resolveLeadDialRules(state, parts = null) {
+  const base = {
+    startHour: DEFAULT_DIAL_START_HOUR,
+    endHour: DEFAULT_DIAL_END_HOUR,
+    activeWeekdays: [1, 2, 3, 4, 5],
+  };
+  const overlay = STATE_DIAL_RULES[state] || {};
+  const weekday = parts?.weekday;
+  const isSunday = weekday === 0;
+  const activeWeekdays = overlay.sundayAllowed === false
+    ? [1, 2, 3, 4, 5, 6]
+    : base.activeWeekdays;
+  return {
+    ...base,
+    ...overlay,
+    activeWeekdays,
+    startHour: isSunday && overlay.sundayStartHour ? overlay.sundayStartHour : (overlay.startHour || base.startHour),
+    endHour: overlay.endHour || base.endHour,
+  };
+}
+
+function resolveQueueDialTimeWindow(item = {}, now = new Date()) {
+  const state = resolveLeadState(item);
+  const timeZone = resolveLeadTimeZone(item);
+  let cursor = new Date(now);
+
+  for (let guard = 0; guard < 20; guard += 1) {
+    const operational = evaluateDailyWindow(cursor, {
+      timeZone: OPERATIONAL_TIMEZONE,
+      startHour: readOperationalStartHour(),
+      endHour: Math.max(readOperationalEndHour(), readOperationalStartHour() + 1),
+      activeWeekdays: [1, 2, 3, 4, 5],
+    });
+    const leadParts = getZonedParts(cursor, timeZone);
+    const leadRules = resolveLeadDialRules(state, leadParts);
+    const lead = evaluateDailyWindow(cursor, {
+      timeZone,
+      startHour: leadRules.startHour,
+      endHour: leadRules.endHour,
+      activeWeekdays: leadRules.activeWeekdays,
+    });
+    if (operational.allowed && lead.allowed) {
+      const target = new Date(now);
+      const allowedNow = cursor.getTime() <= target.getTime() + 1000;
+      return {
+        allowed: allowedNow,
+        reason: allowedNow ? null : (cursor.policyReason || "future-window"),
+        nextAllowedAt: cursor,
+        state,
+        timeZone,
+        localDateKey: formatDateKeyInZone(cursor, timeZone),
+        operationalTimeZone: OPERATIONAL_TIMEZONE,
+        policy: {
+          operationalStartHour: readOperationalStartHour(),
+          operationalEndHour: readOperationalEndHour(),
+          leadStartHour: leadRules.startHour,
+          leadEndHour: leadRules.endHour,
+          leadActiveWeekdays: leadRules.activeWeekdays,
+        },
+      };
+    }
+    const nextAllowedAt = maxDate(operational.nextAllowedAt, lead.nextAllowedAt) || cursor;
+    cursor = new Date(nextAllowedAt.getTime() + 1000);
+    if (!operational.allowed) {
+      cursor.policyReason = operational.reason;
+    } else if (!lead.allowed) {
+      cursor.policyReason = lead.reason;
+    }
+  }
+
+  return {
+    allowed: false,
+    reason: "queue-window-unresolved",
+    nextAllowedAt: cursor,
+    state,
+    timeZone,
+    localDateKey: formatDateKeyInZone(cursor, timeZone),
+    operationalTimeZone: OPERATIONAL_TIMEZONE,
+    policy: {},
+  };
+}
+
 function getPacificDateKey(date = new Date()) {
   return new Intl.DateTimeFormat("en-CA", {
     timeZone: QUEUE_TIMEZONE,
@@ -478,7 +849,41 @@ function getPacificBusinessDaySerial(
   rolloverMinute = getGreenRolloverMinute(),
 ) {
   const parts = getPacificBusinessDayParts(date, rolloverHour, rolloverMinute);
-  return Math.floor(Date.UTC(parts.year, parts.month - 1, parts.day) / (24 * 60 * 60 * 1000));
+  return getWeekdayOrdinalFromParts(parts);
+}
+
+function getUtcDayOfWeek(serialDay) {
+  return new Date(serialDay * MS_PER_DAY).getUTCDay();
+}
+
+function normalizeWeekendSerialDay(serialDay) {
+  let cursor = serialDay;
+  for (let guard = 0; guard < 3; guard += 1) {
+    const day = getUtcDayOfWeek(cursor);
+    if (day === 6) {
+      cursor -= 1;
+      continue;
+    }
+    if (day === 0) {
+      cursor -= 2;
+      continue;
+    }
+    return cursor;
+  }
+  return cursor;
+}
+
+function getWeekdayOrdinalFromParts(parts = {}) {
+  const rawSerial = Math.floor(Date.UTC(parts.year, parts.month - 1, parts.day) / MS_PER_DAY);
+  const serial = normalizeWeekendSerialDay(rawSerial);
+  const fullWeeks = Math.floor(serial / 7);
+  let weekdays = fullWeeks * 5;
+  const remainder = ((serial % 7) + 7) % 7;
+  for (let i = 0; i < remainder; i += 1) {
+    const day = (4 + i) % 7; // 1970-01-01 was a Thursday.
+    if (day !== 0 && day !== 6) weekdays += 1;
+  }
+  return weekdays;
 }
 
 function getPacificBusinessDayAge(
@@ -533,6 +938,35 @@ function getTouchAgeFreshMaxCalls() {
   return Math.max(totalMax - 1, 0);
 }
 
+function getInitialActiveBusinessDays() {
+  return readEnvNumber("RC_CX_INITIAL_ACTIVE_BUSINESS_DAYS", DEFAULT_INITIAL_ACTIVE_BUSINESS_DAYS);
+}
+
+function getInitialUnansweredAttemptMax() {
+  return readEnvNumber(
+    ["RC_CX_INITIAL_UNANSWERED_MAX", "RC_CX_INITIAL_ATTEMPT_MAX", "RC_CX_LIFETIME_ATTEMPT_MAX"],
+    DEFAULT_INITIAL_UNANSWERED_ATTEMPT_MAX,
+  );
+}
+
+function getContactExtensionBusinessDay() {
+  return readEnvNumber("RC_CX_CONTACT_EXTENSION_BUSINESS_DAY", DEFAULT_CONTACT_EXTENSION_BUSINESS_DAY);
+}
+
+function getSecondHalfBusinessDayMax() {
+  return readEnvNumber("RC_CX_SECOND_HALF_BUSINESS_DAY_MAX", DEFAULT_SECOND_HALF_BUSINESS_DAY_MAX);
+}
+
+function getSecondHalfRequiredContacts() {
+  return readEnvNumber("RC_CX_SECOND_HALF_REQUIRED_CONTACTS", DEFAULT_SECOND_HALF_REQUIRED_CONTACTS);
+}
+
+function getEngagementPolicyEffectiveAt() {
+  const raw = String(process.env.RC_CX_ENGAGEMENT_POLICY_EFFECTIVE_AT || DEFAULT_ENGAGEMENT_POLICY_EFFECTIVE_AT).trim();
+  const date = raw ? new Date(raw) : null;
+  return date && !Number.isNaN(date.getTime()) ? date : new Date(DEFAULT_ENGAGEMENT_POLICY_EFFECTIVE_AT);
+}
+
 function isTouchAgeBucketingEnabled() {
   return readEnvBoolean(
     [
@@ -560,21 +994,9 @@ function deriveQueueFamilyFromLeadTouchState(input = {}) {
   const ageFamily = deriveQueueFamilyFromAgeDays(businessAge);
   if (!isTouchAgeBucketingEnabled() || ageFamily === "aged" || ageFamily === "dead") return ageFamily;
 
-  const placedCalls = normalizePlacedCallCount(
-    input.placedCalls,
-    input.totalPlacedCalls,
-    input.totalCalls,
-    input.callCount,
-  );
-  if (placedCalls == null) return ageFamily;
-
   const freshWindowDays = Math.max(getTouchAgeFreshWindowDays(), 0);
-  const freshMaxCalls = Math.max(getTouchAgeFreshMaxCalls(), 0);
-  if (businessAge <= freshWindowDays && placedCalls <= freshMaxCalls) {
+  if (businessAge <= freshWindowDays) {
     return "fresh-day1";
-  }
-  if (ageFamily === "fresh-day1" && placedCalls > freshMaxCalls) {
-    return "fresh-day2to10";
   }
 
   return ageFamily;
@@ -592,19 +1014,293 @@ function getPacificMonthKey(date = new Date()) {
   return `${parts.year}-${String(parts.month).padStart(2, "0")}`;
 }
 
+function getQueueDailyDateKey(item = {}, asOf = new Date()) {
+  return formatDateKeyInZone(asOf, resolveLeadTimeZone(item));
+}
+
+function getNextQueueDialDayStart(item = {}, asOf = new Date()) {
+  const timeZone = resolveLeadTimeZone(item);
+  const state = resolveLeadState(item);
+  const parts = getZonedParts(asOf, timeZone);
+  const nextNoon = makeZonedDate(parts.year, parts.month, parts.day + 1, 12, 0, 0, timeZone);
+  const nextParts = getZonedParts(nextNoon, timeZone);
+  const rules = resolveLeadDialRules(state, nextParts);
+  const nextLocalStart = makeZonedDate(
+    nextParts.year,
+    nextParts.month,
+    nextParts.day,
+    rules.startHour,
+    0,
+    0,
+    timeZone,
+  );
+  return resolveQueueDialTimeWindow(item, nextLocalStart).nextAllowedAt || nextLocalStart;
+}
+
+function pickQueueLeadCreatedAt(item = {}) {
+  return (
+    item.metadata?.leadCreatedAt ||
+    item.payloadSnapshot?.createdAt ||
+    item.leadCreatedAt ||
+    item.createdAt ||
+    null
+  );
+}
+
+function isGrandfatheredEngagementPolicyLead(item = {}) {
+  const createdAt = pickQueueLeadCreatedAt(item);
+  if (!createdAt) return false;
+  const created = new Date(createdAt);
+  const effectiveAt = getEngagementPolicyEffectiveAt();
+  if (Number.isNaN(created.getTime()) || Number.isNaN(effectiveAt.getTime())) return false;
+  return created.getTime() < effectiveAt.getTime();
+}
+
+function getQueueLeadBusinessAge(item = {}, asOf = new Date()) {
+  const createdAt = pickQueueLeadCreatedAt(item);
+  if (!createdAt) return null;
+  const age = getPacificBusinessDayAge(
+    createdAt,
+    asOf,
+    item.rolloverHour,
+    item.graceEndHour,
+    item.rolloverMinute,
+  );
+  return Number.isFinite(age) ? age : null;
+}
+
+function getQueueUnansweredAttempts(item = {}) {
+  return Math.max(Number(
+    item.unansweredCalls
+      ?? item.metadata?.unansweredCalls
+      ?? item.metadata?.noAnswerCalls
+      ?? item.metadata?.didNotAnswerCalls
+      ?? item.metadata?.cxNoAnswerCalls
+      ?? 0,
+  ) || 0, 0);
+}
+
+function getQueueAnsweredContacts(item = {}) {
+  return Math.max(Number(
+    item.answeredContacts
+      ?? item.metadata?.answeredContacts
+      ?? item.metadata?.cxAnsweredContacts
+      ?? item.metadata?.answeredCalls
+      ?? item.metadata?.contactCount
+      ?? 0,
+  ) || 0, 0);
+}
+
+function getQueueBusinessAgeStart(item = {}, targetAge = 0, asOf = new Date()) {
+  const createdAt = pickQueueLeadCreatedAt(item);
+  if (!createdAt) return null;
+  let cursor = new Date(createdAt);
+  const now = new Date(asOf);
+  if (Number.isNaN(cursor.getTime()) || Number.isNaN(now.getTime())) return null;
+  if (cursor.getTime() > now.getTime()) cursor = now;
+  for (let guard = 0; guard < 90; guard += 1) {
+    const age = getQueueLeadBusinessAge(item, cursor);
+    if (Number.isFinite(age) && age >= targetAge) {
+      return resolveQueueDialTimeWindow(item, getPacificBusinessDayStart(cursor)).nextAllowedAt;
+    }
+    cursor = new Date(cursor.getTime() + 24 * 60 * 60 * 1000);
+  }
+  return null;
+}
+
+function resolveQueueLifecycleHold(item = {}, now = new Date()) {
+  const businessAge = getQueueLeadBusinessAge(item, now);
+  const queueFamily = normalizeQueueFamily(item.queueFamily || item.metadata?.queueFamily);
+  if (!Number.isFinite(businessAge)) {
+    return {
+      held: false,
+      businessAge: null,
+      unansweredAttempts: getQueueUnansweredAttempts(item),
+      answeredContacts: getQueueAnsweredContacts(item),
+    };
+  }
+  const initialActiveDays = Math.max(getInitialActiveBusinessDays(), 0);
+  const unansweredMax = Math.max(getInitialUnansweredAttemptMax(), 0);
+  const contactExtensionDay = Math.max(getContactExtensionBusinessDay(), initialActiveDays + 1);
+  const secondHalfDayMax = Math.max(getSecondHalfBusinessDayMax(), contactExtensionDay + 1);
+  const secondHalfRequiredContacts = Math.max(getSecondHalfRequiredContacts(), 0);
+  const unansweredAttempts = getQueueUnansweredAttempts(item);
+  const answeredContacts = getQueueAnsweredContacts(item);
+  const hasFirstContact = answeredContacts >= 1;
+  const hasSecondHalfContactUnlock = answeredContacts >= secondHalfRequiredContacts;
+  const grandfathered = isGrandfatheredEngagementPolicyLead(item);
+
+  if (queueFamily === "aged") {
+    return {
+      held: false,
+      businessAge,
+      unansweredAttempts,
+      answeredContacts,
+      unansweredMax,
+      initialActiveDays,
+      contactExtensionDay,
+      secondHalfDayMax,
+      secondHalfRequiredContacts,
+      grandfathered,
+    };
+  }
+
+  if (grandfathered) {
+    if (
+      businessAge >= GRANDFATHER_CONTACT_REQUIRED_BUSINESS_DAY &&
+      businessAge < contactExtensionDay &&
+      !hasFirstContact
+    ) {
+      return {
+        held: true,
+        reason: "grandfather-contact-required",
+        detail: `Grandfathered ${GRANDFATHER_CONTACT_REQUIRED_BUSINESS_DAY}-${contactExtensionDay} day lead needs at least one contact`,
+        nextEligibleAt: null,
+        businessAge,
+        unansweredAttempts,
+        answeredContacts,
+        unansweredMax,
+        initialActiveDays,
+        contactExtensionDay,
+        secondHalfDayMax,
+        secondHalfRequiredContacts,
+        grandfathered,
+        terminal: true,
+      };
+    }
+    if (businessAge >= contactExtensionDay) {
+      return {
+        held: false,
+        businessAge,
+        unansweredAttempts,
+        answeredContacts,
+        unansweredMax,
+        initialActiveDays,
+        contactExtensionDay,
+        secondHalfDayMax,
+        secondHalfRequiredContacts,
+        grandfathered,
+      };
+    }
+    return {
+      held: false,
+      businessAge,
+      unansweredAttempts,
+      answeredContacts,
+      unansweredMax,
+      initialActiveDays,
+      contactExtensionDay,
+      secondHalfDayMax,
+      secondHalfRequiredContacts,
+      grandfathered,
+    };
+  }
+
+  if (!hasFirstContact && unansweredMax > 0 && unansweredAttempts >= unansweredMax) {
+    return {
+      held: true,
+      reason: "no-answer-budget-exhausted",
+      detail: `No-answer attempt budget reached (${unansweredAttempts}/${unansweredMax})`,
+      nextEligibleAt: null,
+      businessAge,
+      unansweredAttempts,
+      answeredContacts,
+      unansweredMax,
+      initialActiveDays,
+      contactExtensionDay,
+      secondHalfDayMax,
+      secondHalfRequiredContacts,
+      grandfathered,
+      terminal: true,
+    };
+  }
+
+  if (!hasFirstContact && businessAge >= initialActiveDays) {
+    return {
+      held: true,
+      reason: "initial-window-complete",
+      detail: `Initial ${initialActiveDays}-business-day no-answer dial window is complete`,
+      nextEligibleAt: null,
+      businessAge,
+      unansweredAttempts,
+      answeredContacts,
+      unansweredMax,
+      initialActiveDays,
+      contactExtensionDay,
+      secondHalfDayMax,
+      secondHalfRequiredContacts,
+      grandfathered,
+      terminal: true,
+    };
+  }
+
+  if (hasFirstContact && !hasSecondHalfContactUnlock && businessAge >= contactExtensionDay) {
+    return {
+      held: true,
+      reason: "single-contact-window-complete",
+      detail: `Lead had one contact but did not reach ${secondHalfRequiredContacts} contacts before day ${contactExtensionDay}`,
+      nextEligibleAt: null,
+      businessAge,
+      unansweredAttempts,
+      answeredContacts,
+      unansweredMax,
+      initialActiveDays,
+      contactExtensionDay,
+      secondHalfDayMax,
+      secondHalfRequiredContacts,
+      grandfathered,
+      terminal: true,
+    };
+  }
+
+  if (hasSecondHalfContactUnlock && businessAge >= secondHalfDayMax) {
+    return {
+      held: true,
+      reason: "second-half-window-complete",
+      detail: `Second-half contact window is complete at day ${secondHalfDayMax}`,
+      nextEligibleAt: null,
+      businessAge,
+      unansweredAttempts,
+      answeredContacts,
+      unansweredMax,
+      initialActiveDays,
+      contactExtensionDay,
+      secondHalfDayMax,
+      secondHalfRequiredContacts,
+      grandfathered,
+      terminal: true,
+    };
+  }
+
+  return {
+    held: false,
+    businessAge,
+    unansweredAttempts,
+    answeredContacts,
+    unansweredMax,
+    initialActiveDays,
+    contactExtensionDay,
+    secondHalfDayMax,
+    secondHalfRequiredContacts,
+    grandfathered,
+  };
+}
+
 function getDailyPlacedCalls(item = {}, asOf = new Date()) {
-  const dateKey = getPacificDateKey(asOf);
+  const dateKey = getQueueDailyDateKey(item, asOf);
+  const pacificDateKey = getPacificDateKey(asOf);
   const itemDateKey = String(item.dailyPlacedDateKey || item.metadata?.dailyPlacedDateKey || "").trim();
-  if (itemDateKey !== dateKey) return 0;
+  if (itemDateKey !== dateKey && itemDateKey !== pacificDateKey) return 0;
   return Math.max(Number(item.dailyPlacedCalls ?? item.metadata?.dailyPlacedCalls ?? 0) || 0, 0);
 }
 
 function buildCallAttemptPatch(item = {}, placedAt = new Date()) {
-  const dateKey = getPacificDateKey(placedAt);
+  const leadTimeZone = resolveLeadTimeZone(item);
+  const dateKey = formatDateKeyInZone(placedAt, leadTimeZone);
   const monthKey = getPacificMonthKey(placedAt);
   const priorDateKey = String(item.dailyPlacedDateKey || item.metadata?.dailyPlacedDateKey || "").trim();
   const priorMonthKey = String(item.monthlyPlacedMonthKey || item.metadata?.monthlyPlacedMonthKey || "").trim();
-  const priorDailyCount = priorDateKey === dateKey
+  const priorDailyCount = (priorDateKey === dateKey || priorDateKey === getPacificDateKey(placedAt))
     ? Math.max(Number(item.dailyPlacedCalls ?? item.metadata?.dailyPlacedCalls ?? 0) || 0, 0)
     : 0;
   const priorMonthlyCount = priorMonthKey === monthKey
@@ -622,6 +1318,7 @@ function buildCallAttemptPatch(item = {}, placedAt = new Date()) {
     monthlyPlacedCalls: nextMonthlyCount,
     "metadata.dailyPlacedDateKey": dateKey,
     "metadata.dailyPlacedCalls": nextDailyCount,
+    "metadata.dailyPlacedTimezone": leadTimeZone,
     "metadata.monthlyPlacedMonthKey": monthKey,
     "metadata.monthlyPlacedCalls": nextMonthlyCount,
     "metadata.lastQueueAttemptAt": placedAt,
@@ -694,6 +1391,8 @@ function getCooldownReleaseAt(item = {}, now = new Date()) {
 function resolveQueueDialability(item = {}, now = new Date()) {
   const policy = getQueueFamilyPolicy(item.queueFamily || item.metadata?.queueFamily);
   const dailyCount = getDailyPlacedCalls(item, now);
+  const timeWindow = resolveQueueDialTimeWindow(item, now);
+  const lifecycleHold = resolveQueueLifecycleHold(item, now);
   const monthKey = getPacificMonthKey(now);
   const itemMonthKey = String(item.monthlyPlacedMonthKey || item.metadata?.monthlyPlacedMonthKey || "").trim();
   const monthlyCount = itemMonthKey === monthKey
@@ -713,12 +1412,28 @@ function resolveQueueDialability(item = {}, now = new Date()) {
       policy,
     };
   }
+
+  if (lifecycleHold.held) {
+    return {
+      ok: false,
+      reason: lifecycleHold.reason,
+      detail: lifecycleHold.detail,
+      nextEligibleAt: lifecycleHold.nextEligibleAt,
+      dailyCount,
+      dailyMax: policy.dailyMax,
+      monthlyCount,
+      monthlyMax: policy.monthlyMax,
+      lifecycleHold,
+      policy,
+    };
+  }
+
   if (policy.dailyMax != null && dailyCount >= Number(policy.dailyMax)) {
     return {
       ok: false,
       reason: "daily-cap-reached",
       detail: `${policy.label} daily contact cap reached`,
-      nextEligibleAt: getNextPacificDayStart(now),
+      nextEligibleAt: getNextQueueDialDayStart(item, now),
       dailyCount,
       dailyMax: Number(policy.dailyMax),
       monthlyCount,
@@ -767,11 +1482,30 @@ function resolveQueueDialability(item = {}, now = new Date()) {
       ok: false,
       reason: "cooldown-active",
       detail: `${policy.label} cooldown is still active`,
-      nextEligibleAt: nextByCooldown,
+      nextEligibleAt: maxDate(nextByCooldown, timeWindow.nextAllowedAt),
       dailyCount,
       dailyMax: policy.dailyMax,
       monthlyCount,
       monthlyMax: policy.monthlyMax,
+      policy,
+    };
+  }
+
+  if (!timeWindow.allowed) {
+    return {
+      ok: false,
+      reason: "queue-contact-window",
+      detail: `Lead-local or operational contact window is closed (${timeWindow.timeZone})`,
+      nextEligibleAt: timeWindow.nextAllowedAt,
+      dailyCount,
+      dailyMax: policy.dailyMax,
+      hourlyCount: hourlyPacing.count,
+      hourlyMax: hourlyPacing.cap,
+      monthlyCount,
+      monthlyMax: policy.monthlyMax,
+      leadState: timeWindow.state,
+      leadTimeZone: timeWindow.timeZone,
+      timeWindow,
       policy,
     };
   }
@@ -815,6 +1549,7 @@ module.exports = {
   deriveQueueFamilyFromLeadTouchState,
   getCooldownReleaseAt,
   getDailyPlacedCalls,
+  getNextQueueDialDayStart,
   getPacificMonthKey,
   getPacificBusinessDayAge,
   getPacificBusinessDayStart,
@@ -823,9 +1558,19 @@ module.exports = {
   getQueueFamilyPolicy,
   getQueueFamilySortRank,
   getQueueFamilyTargetOpen,
+  getQueueDailyDateKey,
   hasManualQueuePolicy,
   getTouchAgeFreshMaxCalls,
   getTouchAgeFreshWindowDays,
+  getInitialActiveBusinessDays,
+  getInitialUnansweredAttemptMax,
+  getQueueAnsweredContacts,
+  getQueueLeadBusinessAge,
+  getQueueUnansweredAttempts,
+  getContactExtensionBusinessDay,
+  getEngagementPolicyEffectiveAt,
+  getSecondHalfBusinessDayMax,
+  getSecondHalfRequiredContacts,
   isQueueFamilyAllowedForAccountPolicy,
   isTouchAgeBucketingEnabled,
   normalizeRouteCampaigns,
@@ -833,6 +1578,10 @@ module.exports = {
   normalizePlacedCallCount,
   resolveAccountQueuePolicy,
   resolveQueueDialability,
+  resolveQueueDialTimeWindow,
+  resolveQueueLifecycleHold,
+  resolveLeadState,
+  resolveLeadTimeZone,
   QUEUE_FAMILY_POLICIES,
   QUEUE_TIMEZONE,
 };

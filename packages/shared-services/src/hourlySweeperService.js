@@ -833,6 +833,7 @@ async function runAgedRollingRefreshIfDue({ logger, now = new Date() } = {}) {
       checked: dailySummary?.checked,
       promoted: dailySummary?.promoted,
       evicted: (dailySummary?.evicted || 0) + (dailySummary?.droppedAtIntake || 0),
+      expiredRetired: dailySummary?.expiredRetirement?.retired || 0,
     });
   } catch (error) {
     logger?.warn?.("aged-rolling-refresh.daily.failed", {
@@ -843,8 +844,9 @@ async function runAgedRollingRefreshIfDue({ logger, now = new Date() } = {}) {
 
   // Email report. Skip if nothing was checked AND no graduation
   // happened — keeps duplicate-tick noise out of inboxes.
+  const expiredRetired = Number(dailySummary?.expiredRetirement?.retired || 0) || 0;
   const skipEmail =
-    (!dailySummary || dailySummary.checked === 0) &&
+    (!dailySummary || (dailySummary.checked === 0 && expiredRetired === 0)) &&
     (!monthlySummary || monthlySummary.graduated === 0);
   let emailResult = null;
   if (!skipEmail) {
