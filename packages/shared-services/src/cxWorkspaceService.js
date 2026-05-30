@@ -2615,6 +2615,11 @@ function readCadenceCxTouchState(cadence = {}) {
     ? cadence.payloadSnapshot
     : {};
   return {
+    leadState: cadence.state || payload.state || null,
+    leadTimeZone:
+      payload.timezone ||
+      payload.timeZone ||
+      null,
     lastTouchedAt:
       cadence?.lastTouched?.cx ||
       counter.lastCxDialedAt ||
@@ -2651,7 +2656,17 @@ function readProspectCxTouchState(prospect = {}) {
   const filler = prospect?.filler && typeof prospect.filler === "object"
     ? prospect.filler
     : {};
+  const payload = prospect?.payloadSnapshot && typeof prospect.payloadSnapshot === "object"
+    ? prospect.payloadSnapshot
+    : {};
   return {
+    leadState: prospect.state || payload.state || null,
+    leadTimeZone:
+      prospect.timeZone ||
+      prospect.timezone ||
+      payload.timeZone ||
+      payload.timezone ||
+      null,
     lastTouchedAt: filler.lastDialAttempt || null,
     lastTouchedExtensionId: String(filler.lastDialedByExtensionId || "").trim() || null,
     lastTouchedAgentName: filler.lastDialedByAgentName || null,
@@ -2690,6 +2705,8 @@ function buildMaterializedTouchPatch(touchState = {}, now = new Date()) {
     "metadata.lastTouchedAgentName": touchState.lastTouchedAgentName || null,
     "metadata.lastCxDialedByExtensionId": touchState.lastTouchedExtensionId || null,
     "metadata.lastCxDialedByAgentName": touchState.lastTouchedAgentName || null,
+    "metadata.leadState": touchState.leadState || null,
+    "metadata.leadTimeZone": touchState.leadTimeZone || null,
   };
 }
 
@@ -2722,6 +2739,8 @@ function leadCxTouchViolatesAgentOrPolicy({
     monthlyPlacedCalls: Number(touchState.monthlyCalls || 0) || 0,
     metadata: {
       queueFamily,
+      leadState: touchState.leadState || null,
+      leadTimeZone: touchState.leadTimeZone || null,
       lastQueueAttemptAt: touchState.lastTouchedAt || null,
       dailyPlacedDateKey: touchState.dailyDateKey || null,
       dailyPlacedCalls: Number(touchState.dailyCalls || 0) || 0,

@@ -42,8 +42,50 @@ export interface BlogBotPublishedCommit {
   committedAt: string;
 }
 
+export interface BlogBotRuntimeState {
+  enabled: boolean;
+  running: boolean;
+  hour: number;
+  minute: number;
+  timezone: string;
+  nextRunAt: string | null;
+  activeRunId: string | null;
+  lastRunId: string | null;
+  lastStartedAt: string | null;
+  lastCompletedAt: string | null;
+  lastError: string | null;
+  routing: {
+    parallelRoot: string;
+    runnerPath: string;
+    wynnRepo: string;
+    tagRepo: string;
+    tcbDeployDir: string;
+    deploy: {
+      wynn: {
+        repo: string;
+        host: string;
+        user: string;
+        pem: string;
+        remotePath: string;
+        pm2: string;
+        branch: string;
+      };
+      tag: {
+        repo: string;
+        host: string;
+        user: string;
+        pem: string;
+        remotePath: string;
+        pm2: string;
+        branch: string;
+      };
+    };
+  };
+}
+
 export interface BlogBotStatus {
   capturedAt: string;
+  runtime: BlogBotRuntimeState | null;
   state: BlogBotState | null;
   lastRunOutcome: BlogBotRunLogEntry["outcome"];
   recentRuns: BlogBotRunLogEntry[];

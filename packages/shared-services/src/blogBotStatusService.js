@@ -219,6 +219,7 @@ function computeSlugSync() {
 async function buildBlogBotStatus({
   runLogLimit = 8,
   recoveryAuditLimit = 6,
+  runtimeState = null,
 } = {}) {
   const [state, recentRuns, recentRecoveries, slugSync, wynnLast, tagLast] =
     [
@@ -270,6 +271,7 @@ async function buildBlogBotStatus({
 
   return {
     capturedAt: new Date().toISOString(),
+    runtime: runtimeState,
     state,
     lastRunOutcome,
     recentRuns,

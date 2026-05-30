@@ -18,7 +18,7 @@ const DEFAULT_DOMAIN = "TAG";
 const DEFAULT_TIMEZONE = "America/Los_Angeles";
 const DEFAULT_REPORT_NAME = "ActivityReport";
 const DEFAULT_OUT_DIR = path.join(ROOT_DIR, "runtime", "logics-activity-review");
-const DEFAULT_REPORT_EMAIL = "documents@taxadvocategroup.com";
+const DEFAULT_REPORT_EMAIL = getInternalFromEmail();
 const DEFAULT_REVIEW_RECIPIENTS = [
   "mgray@taxadvocategroup.com",
   "manderson@taxadvocategroup.com",
@@ -1205,10 +1205,11 @@ async function emailActivityReview(result, options = {}) {
   const subject = `${subjectPrefix} ${range}: ${processed.outputRows || 0} notices, ${processed.suspendedOutputRows || 0} suspended`;
   const text = buildEmailText({ domain, dateKey, startDateKey, endDateKey, processed });
   const attachments = [];
-  if (processed.csvOut && fs.existsSync(processed.csvOut)) {
+  const attachCsv = options.attachCsv === true;
+  if (attachCsv && processed.csvOut && fs.existsSync(processed.csvOut)) {
     attachments.push({ filename: path.basename(processed.csvOut), path: processed.csvOut });
   }
-  if (processed.suspendedCsvOut && fs.existsSync(processed.suspendedCsvOut)) {
+  if (attachCsv && processed.suspendedCsvOut && fs.existsSync(processed.suspendedCsvOut)) {
     attachments.push({ filename: path.basename(processed.suspendedCsvOut), path: processed.suspendedCsvOut });
   }
 
@@ -1329,7 +1330,14 @@ async function runLogicsActivityReviewBatch(options = {}) {
   const email = options.sendEmail !== false
     ? await emailActivityReview(
         { processed },
-        { domain: "ALL", dateKey, startDateKey, endDateKey, recipients },
+        {
+          domain: "ALL",
+          dateKey,
+          startDateKey,
+          endDateKey,
+          recipients,
+          attachCsv: options.attachCsv === true,
+        },
       )
     : null;
 
@@ -1389,7 +1397,14 @@ async function runLogicsActivityReview(options = {}) {
   const email = sendEmail
     ? await emailActivityReview(
         { request, processed },
-        { domain, dateKey, startDateKey, endDateKey, recipients },
+        {
+          domain,
+          dateKey,
+          startDateKey,
+          endDateKey,
+          recipients,
+          attachCsv: options.attachCsv === true,
+        },
       )
     : null;
 

@@ -41,6 +41,9 @@ const {
   sweepStaleNcoaBatches,
 } = require("./ncoaUploadService");
 const {
+  runNcoaMailboxIngestIfDue,
+} = require("./ncoaMailboxIngestService");
+const {
   runDncRecheckSweep,
 } = require("./dncRecheckService");
 const {
@@ -252,6 +255,19 @@ function summarizeHourlySweepResult(result = null) {
             modified: Number(result.phaseA?.staleCadenceSweep?.modified || 0),
             error: result.phaseA?.staleCadenceSweep?.error || null,
           },
+          ncoaMailbox: result.phaseA?.ncoaMailbox
+            ? {
+                skipped: Boolean(result.phaseA.ncoaMailbox.skipped),
+                reason: result.phaseA.ncoaMailbox.reason || null,
+                messagesScanned: Number(result.phaseA.ncoaMailbox.messagesScanned || 0),
+                attachments: Array.isArray(result.phaseA.ncoaMailbox.attachments)
+                  ? result.phaseA.ncoaMailbox.attachments.length
+                  : 0,
+                errors: Array.isArray(result.phaseA.ncoaMailbox.attachments)
+                  ? result.phaseA.ncoaMailbox.attachments.filter((item) => item?.error).length
+                  : 0,
+              }
+            : null,
           resolutionEmails: {
             candidates: Number(result.phaseA?.resolutionEmails?.candidates || 0),
             sent: Number(result.phaseA?.resolutionEmails?.sent || 0),
@@ -1051,6 +1067,14 @@ async function runHourlySweep({
       // Idempotent — only closes batches that have a `requested`
       // stage, no `completed`/`failed`, and no row activity in 30m+.
       staleNcoaSweep: await sweepStaleNcoaBatches({}).catch((error) => ({
+        error: error.message,
+      })),
+      // NCOA mailbox ingest â€” checks documents@ for unread CSV/TXT
+      // attachments on weekdays until one file is processed for the
+      // Pacific business day, then self-skips until tomorrow.
+      // If NCOA_MAILBOX_COMPLETE_ON_NO_UNREAD is enabled, an empty
+      // unread mailbox also writes a same-day skip marker.
+      ncoaMailbox: await runNcoaMailboxIngestIfDue({}).catch((error) => ({
         error: error.message,
       })),
       // Disabled by default: RealValidation spending is limited to

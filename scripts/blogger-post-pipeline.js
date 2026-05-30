@@ -30,6 +30,47 @@ const {
 
 const sharp = loadSharp();
 
+function childProcessEnv(extra = {}) {
+  const keepExact = [
+    "APPDATA",
+    "ComSpec",
+    "COMSPEC",
+    "HOME",
+    "LOCALAPPDATA",
+    "NODE_ENV",
+    "NUMBER_OF_PROCESSORS",
+    "OS",
+    "Path",
+    "PATH",
+    "PATHEXT",
+    "PROCESSOR_ARCHITECTURE",
+    "SystemDrive",
+    "SystemRoot",
+    "TEMP",
+    "TMP",
+    "USERDOMAIN",
+    "USERNAME",
+    "USERPROFILE",
+    "windir",
+  ];
+  const env = {};
+  for (const key of keepExact) {
+    if (process.env[key]) env[key] = process.env[key];
+  }
+  for (const [key, value] of Object.entries(process.env)) {
+    if (
+      key.startsWith("DEPLOY_") ||
+      key.startsWith("GIT_") ||
+      key.startsWith("NPM_CONFIG_") ||
+      key.startsWith("npm_config_") ||
+      key.startsWith("REACT_APP_")
+    ) {
+      env[key] = value;
+    }
+  }
+  return { ...env, ...extra };
+}
+
 // ── Brand interpolation ──────────────────────────────────────────
 
 function interpolateBrand(text, brandName) {
@@ -307,8 +348,19 @@ async function renderHeaderImage(draft) {
 // ── Build + deploy ───────────────────────────────────────────────
 
 function buildClient(repoDir) {
+  const cwd = path.join(repoDir, "client");
+  if (process.platform === "win32") {
+    return execFileSync(process.env.ComSpec || "cmd.exe", ["/d", "/s", "/c", "npm run build"], {
+      cwd,
+      env: childProcessEnv(),
+      stdio: "pipe",
+      encoding: "utf8",
+      maxBuffer: 500 * 1024 * 1024,
+    });
+  }
   return execFileSync(npmCommand(), ["run", "build"], {
-    cwd: path.join(repoDir, "client"),
+    cwd,
+    env: childProcessEnv(),
     stdio: "pipe",
     encoding: "utf8",
     maxBuffer: 500 * 1024 * 1024,
@@ -321,6 +373,7 @@ function deployBrand(brandKey, commitMsg) {
     ["scripts/deploy.js", "deploy", brandKey, commitMsg, "--pull"],
     {
       cwd: TCB_DEPLOY_DIR,
+      env: childProcessEnv(),
       stdio: "pipe",
       encoding: "utf8",
       maxBuffer: 200 * 1024 * 1024,

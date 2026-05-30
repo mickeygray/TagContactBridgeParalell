@@ -27,8 +27,9 @@ const deployLimit = createRateLimiter({
   message: "Too many deploy requests. Try again shortly.",
 });
 
-function createCommandsDeployRouter(auth) {
+function createCommandsDeployRouter(auth, options = {}) {
   const router = express.Router();
+  const bloggerRuntime = options.bloggerRuntime || null;
 
   function trigger(action) {
     return async (req, res) => {
@@ -125,6 +126,27 @@ function createCommandsDeployRouter(auth) {
     deployLimit,
     async (req, res) => {
       try {
+        if (bloggerRuntime) {
+          const result = bloggerRuntime.startBloggerRun({
+            force: req.body?.force !== undefined ? Boolean(req.body.force) : true,
+            preflight: Boolean(req.body?.preflight),
+            dryRun: Boolean(req.body?.dryRun),
+            override: req.body?.override,
+            scheduled: false,
+            actor: req.user?.email || null,
+          });
+          const status = result.accepted ? 202 : 409;
+          return res.status(status).json({
+            ok: Boolean(result.ok),
+            message: result.accepted
+              ? "Blogger run accepted by control-plane runtime. Watch the Blog Bot card for logs, state, and alerts."
+              : result.reason || "Blogger run was not accepted.",
+            spawnedAt: result.startedAt || new Date().toISOString(),
+            actor: req.user?.email || null,
+            result,
+          });
+        }
+
         const child = spawn(
           process.execPath,
           [BLOG_BOT_RUNNER, "--force"],

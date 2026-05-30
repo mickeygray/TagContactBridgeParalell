@@ -67,6 +67,7 @@ const { createNightlyCloseRuntime } = require("./services/nightlyCloseRuntime");
 const { createEodRecordingArchiveRuntime } = require("./services/eodRecordingArchiveRuntime");
 const { createPhoneburnerRotationRuntime } = require("./services/phoneburnerRotationRuntime");
 const { createDemoRingoutRuntime } = require("./services/demoRingoutRuntime");
+const { createBloggerRuntime } = require("./services/bloggerRuntime");
 const { initializeServiceRuntime } = require("../../../packages/shared-runtime/src");
 const { createEvent } = require("../../../packages/event-core/src");
 const { toErrorResponse } = require("../../../packages/shared-errors/src");
@@ -888,6 +889,10 @@ async function startServer() {
     config: config.demoRingout || {},
     runtime,
   });
+  const bloggerRuntime = createBloggerRuntime({
+    config: config.blogger || {},
+    runtime,
+  });
   const requireHealthAccess = buildHealthAccessMiddleware(config);
   const requireWebhookSecret = buildWebhookVerifier(config, runtime);
   const requireSmsWebhookSignature = buildCallrailWebhookVerifier(config, runtime);
@@ -937,6 +942,7 @@ async function startServer() {
       spendSync: spendSyncRuntime.getState(),
       eodRecordingArchive: eodRecordingArchiveRuntime.getState(),
       demoRingout: demoRingoutRuntime.getState(),
+      blogger: bloggerRuntime.getState(),
     },
   });
 
@@ -1098,7 +1104,7 @@ async function startServer() {
   app.use("/api/callrail", createCallrailRouter(auth));
   app.use("/api/commands/clients", createCommandsClientsRouter(auth));
   app.use("/api/commands/cx", createCommandsCxRouter(auth));
-  app.use("/api/commands/deploy", createCommandsDeployRouter(auth));
+  app.use("/api/commands/deploy", createCommandsDeployRouter(auth, { bloggerRuntime }));
   app.use("/api/commands/inbox", createCommandsInboxRouter(auth));
   app.use("/api/commands/social", createCommandsSocialRouter(auth));
   app.use("/api/control-plane", createDomainsRouter(auth));
@@ -1119,7 +1125,7 @@ async function startServer() {
   app.use("/api/metrics", createMetricsRouter(auth, spendSyncRuntime));
   app.use("/api/read/clients", createReadClientsRouter(auth));
   app.use("/api/read/cx", createReadCxRouter(auth));
-  app.use("/api/read/deploy", createReadDeployRouter(auth));
+  app.use("/api/read/deploy", createReadDeployRouter(auth, { bloggerRuntime }));
   app.use("/api/read/inbox", createReadInboxRouter(auth));
   app.use("/api/read/library", createReadLibraryRouter(auth));
   app.use("/api/read/metrics", createReadMetricsRouter(auth));
@@ -1203,6 +1209,7 @@ async function startServer() {
   await eodRecordingArchiveRuntime.start();
   await phoneburnerRotationRuntime.start();
   await demoRingoutRuntime.start();
+  await bloggerRuntime.start();
 
   const server = app.listen(config.port, config.bindHost, () => {
     runtime.logger.info("listening", { host: config.bindHost, port: config.port });
@@ -1307,6 +1314,9 @@ async function startServer() {
   });
   runtime.registerCleanup("control-plane-demo-ringout", async () => {
     await demoRingoutRuntime.stop();
+  });
+  runtime.registerCleanup("control-plane-blogger", async () => {
+    await bloggerRuntime.stop();
   });
 
   return server;

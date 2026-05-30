@@ -1202,6 +1202,426 @@ class OpenAiRealtimeTranscriber {
   }
 }
 
+function parseRealtimeDirectCoachOutput(text) {
+  const clean = cleanText(text, 1200);
+  if (!clean) return { acceptInput: null, mode: "", heard: "", say: "", signal: "", topic: "", direction: "", raw: "" };
+  const normalizeCoachOutputMode = (value) => {
+    const mode = cleanText(value || "", 40).toLowerCase();
+    if (["agent", "agent_feedback", "feedback", "adjust", "adjust_current_talk"].includes(mode)) return "agent_feedback";
+    if (["prospect", "client", "customer", "coach", "response", "prospect_response", "proposed_response"].includes(mode)) return "prospect_response";
+    if (["hold", "system", "hold_system"].includes(mode)) return "hold";
+    if (["wait", "none", "no_action"].includes(mode)) return "wait";
+    return mode;
+  };
+  const parseAcceptInput = (value) => {
+    if (value === true || value === false) return value;
+    const cleanValue = cleanText(value, 24).toLowerCase();
+    if (["false", "no", "0", "off", "stop", "hold", "pause"].includes(cleanValue)) return false;
+    if (["true", "yes", "1", "on", "continue", "accept"].includes(cleanValue)) return true;
+    return null;
+  };
+  try {
+    const json = JSON.parse(clean);
+    const mode = normalizeCoachOutputMode(json.mode || json.status || "");
+    let say = cleanText(json.say || json.response || json.coach || "", 600);
+    if (/^wait\.?$/i.test(say)) say = "";
+    return {
+      acceptInput: parseAcceptInput(
+        json.acceptInput ?? json.accept_input ?? json.accept ?? json.continueInput ?? json.continue_input,
+      ),
+      mode,
+      heard: cleanText(json.heard || "", 600),
+      say,
+      signal: cleanText(json.signal || json.basedOn || json.evidence || "", 220),
+      topic: cleanText(json.topic || "", 80),
+      direction: cleanText(json.direction || json.note || json.why || "", 220),
+      raw: clean,
+    };
+  } catch {
+    // fall through to compact label parsing
+  }
+  const readField = (label) => {
+    const pattern = new RegExp(`(?:^|\\n|\\s)\\s*${label}\\s*[:=]\\s*([\\s\\S]*?)(?=(?:\\n|\\s)\\s*(?:MODE|HEARD|SAY|SIGNAL|TOPIC|DIRECTION)\\s*[:=]|$)`, "i");
+    return cleanText(clean.match(pattern)?.[1] || "", label === "SAY" ? 600 : 220);
+  };
+  const mode = normalizeCoachOutputMode(readField("MODE"));
+  const acceptInput = parseAcceptInput(
+    readField("ACCEPT_INPUT") || readField("ACCEPTINPUT") || readField("ACCEPT") || readField("INPUT"),
+  );
+  const heard = cleanText(readField("HEARD"), 600);
+  let say = cleanText(readField("SAY") || clean, 600);
+  const signal = cleanText(readField("SIGNAL"), 220);
+  const topic = cleanText(readField("TOPIC"), 80);
+  const direction = cleanText(readField("DIRECTION"), 220);
+  if (mode) {
+    say = cleanText(say.replace(/MODE\s*[:=]\s*[a-z_ -]+/i, ""), 600);
+  }
+  if (/^wait\.?$/i.test(say)) say = "";
+  return { acceptInput, mode, heard, say, signal, topic, direction, raw: clean };
+}
+
+function extractRealtimeResponseText(response = {}) {
+  const output = Array.isArray(response.output) ? response.output : [];
+  const parts = [];
+  for (const item of output) {
+    const content = Array.isArray(item?.content) ? item.content : [];
+    for (const part of content) {
+      const text = part?.text || part?.transcript || part?.audio?.transcript || "";
+      if (text) parts.push(text);
+    }
+  }
+  return cleanText(parts.join(" "), 1600);
+}
+
+function buildRealtimeDirectCoachInstructions({ metadata, playbook, summary, coachOnly = false }) {
+  const shared = [
+    "You are a real-time tax-resolution sales call coach.",
+    "You receive mixed mono monitor audio from a live RingEX supervision leg. It may contain the agent, prospect/client, system prompts, hold audio, voicemail, or overlapping speech.",
+    "Your job is to discern what is probably party A (the sales agent), party B (the prospect/client), and system/noise, then provide tax-resolution-grounded feedback as a dialogue option for the sales agent.",
+    coachOnly
+      ? "If the newest useful content is party B/prospect, provide a line the sales agent can say. If it is party A/agent, provide private coaching feedback for the agent. Only if you hear the exact words 'please continue to hold', return acceptInput=false, mode=HOLD, say=WAIT, and signal='please continue to hold'."
+      : "If the newest useful content is mostly party A talking, system audio, filler, silence, voicemail, hold music, or unclear mixed speech, return SAY: WAIT.",
+    "Before answering, apply this gate in order:",
+    "1. If you hear the exact words 'please continue to hold', return acceptInput=false, mode=HOLD, say=WAIT, and signal='please continue to hold'. For any other hold/system/noise/voicemail/silence, keep acceptInput=true and return mode=WAIT, say=WAIT. Never coach the agent about how to manage hold music or hold prompts.",
+    "2. If the newest useful speech is probably the agent, return AGENT_FEEDBACK only when the agent needs course correction, empathy, pacing, compliance/safety correction, or a sharper next move. This means: guidance for how to adjust what the agent is currently saying. If the agent is already following a good suggestion, return WAIT.",
+    "3. If the newest useful speech is probably the prospect/client, return PROSPECT_RESPONSE only after a complete sentence or clear question that raises pain, urgency, objection, confusion, willingness, resistance, next-step friction, money pressure, trust concern, buying signal, or a tax issue. This means: proposed response based on what the prospect just said.",
+    "4. If the prospect is rambling without a complete, response-worthy thought, return WAIT.",
+    "Start streaming the SAY line as soon as those gates pass. Do not wait for a full paragraph or long silence once the actionable thought is clear.",
+    "You do not need to transcribe. You should explain the cue behind your advice in SIGNAL: either a very short phrase you heard, such as based on words like 'I have a problem', or a call dynamic, such as 'agent is explaining while prospect is unresponsive'. For the exact hold phrase, signal must be exactly 'please continue to hold'.",
+    "DIRECTION should explain the move, such as 'shift from explaining to a short question' or 'acknowledge stress, then ask for the notice date'.",
+    "Keep context of the whole conversation using the session history and the background summary. Prefer the newest prospect/client issue, but do not forget already-learned facts.",
+    "Be warm, human, concise, and sales-useful. Acknowledge real stress briefly when present, then ask one useful next question or give a safe bridge.",
+    "This is a service-sales coach, not a self-help tax advisor. The best response usually sells the value of professional review, representation, organization, communication, and taking the next step with the firm.",
+    "Sound like a skilled human on a call: calm, conversational, empathetic, direct, and not scripted. Avoid robotic tax labels when a human phrase would work.",
+    "Focus on what the firm can help them do next: understand the notice, get the facts organized, review transcripts/documents, communicate with the agency, and choose the right path after review.",
+    "Do not give DIY instructions as the main answer. Do not make 'the thing to do is...' recommendations. Frame as 'let's look at this correctly so we know what option fits.'",
+    "When there is emotion, briefly meet the emotion first, then move to a practical next fact. One human sentence is enough.",
+    "This is usually an outbound sales call. Do not say generic inbound greetings like 'thanks for calling', 'how can I help you today', or 'this is the sales team' unless the prospect literally just initiated a fresh inbound greeting.",
+    "If the newest useful audio is only greeting/setup, the best SAY line should introduce the firm and ask one opening discovery question, not pretend the prospect called in.",
+    "If the prospect mentions a tax problem, notice, balance, levy, lien, unfiled returns, garnishment, payroll, 1099, state issue, or fear, respond to that specific problem immediately.",
+    "Do not promise outcomes, exact programs, timelines, fees, tax/legal results, or guaranteed savings.",
+    "Do not prescribe a payment plan, installment agreement, partial payment, hold request, levy release, settlement, OIC, CNC, penalty relief, or any specific resolution path until the agent has basic qualification facts.",
+    "For CP504/LT11/levy-style urgency, triage first: notice date/deadline, tax years, balance, whether later notices arrived, whether levy/garnishment/bank freeze is active, and whether all required returns are filed.",
+    "Never say 'pay what you can' as live advice. Partial payment may not stop enforcement and can be strategically wrong before review.",
+    "When the prospect asks 'what should I do' early, answer with a safe process bridge: review the notice, confirm compliance, identify urgency, then decide which option fits. Ask one next question.",
+    "For AGENT_FEEDBACK, be private, direct, and brief: tell the agent how to adjust what they are currently saying, not what the prospect said. Examples: 'Slow down, acknowledge the fear first, then ask for the notice date.' or 'Do not promise a plan yet; qualify filing compliance first.'",
+    "For AGENT_FEEDBACK, SAY should be an instruction to the agent, not words to say verbatim. For PROSPECT_RESPONSE, SAY should be a line the agent can say verbatim or very close to verbatim.",
+    "Prefer one question over a multi-step checklist. Keep SAY under 30 words unless the prospect directly asks for an explanation.",
+    "Do not identify speaker labels in the SAY line. Do not use markdown.",
+    coachOnly
+      ? "Do not output a transcript, paraphrase, heard text, analysis, explanation, or speaker labels. You may internally understand the audio, but only output the compact JSON control result."
+      : "Return exactly this format:",
+    coachOnly ? "Return exactly one JSON object with these keys and no markdown:" : "HEARD: <brief cleaned version of the newest useful prospect/client content, or blank>",
+    coachOnly ? '{"acceptInput":true|false,"mode":"PROSPECT_RESPONSE|AGENT_FEEDBACK|WAIT|HOLD","say":"... or WAIT","signal":"...","topic":"...","direction":"..."}' : "SAY: <agent-sayable response, or WAIT>",
+    coachOnly ? "acceptInput=false is a hard stop signal for the script. Use it only when you hear the exact words 'please continue to hold'. Do not use acceptInput=false for generic hold music, queue prompts, voicemail prompts, system prompts, silence, or any other wait loop." : "",
+    coachOnly ? "If acceptInput=false, mode must be HOLD, say must be WAIT, and signal must be exactly 'please continue to hold'. Do not give hold-management advice." : "",
+    coachOnly ? "If acceptInput=true, mode must be exactly one of PROSPECT_RESPONSE, AGENT_FEEDBACK, or WAIT." : "",
+    coachOnly ? "Keep say under 28 words and direction under 16 words. Do not include transcript, alternatives, or speaker labels." : "",
+    "",
+    "Helpful tax anchors:",
+    "- CP504, LT11/Letter 1058, levy, bank levy, wage garnishment, lien, and revenue officer contact are urgent collection signals.",
+    "- Unfiled returns require compliance discovery: years, income type, IRS substitute returns, and available records.",
+    "- Balance due questions need tax type, years, notice/source, income, assets, and ability to pay before suggesting a path.",
+    "- State problems should be acknowledged, then screen for broader IRS/federal symptoms.",
+    "",
+    "Focused reference context:",
+    playbook || "(none)",
+    "",
+    "Background summary:",
+    summary || "(none yet)",
+    "",
+    `Monitor metadata: ${JSON.stringify(metadata || {})}`,
+  ];
+  return shared.filter((line) => line !== "").join("\n");
+}
+
+function buildRealtimeDirectCoachTextContext({
+  chunkId,
+  stats,
+  flushReason,
+} = {}) {
+  return [
+    "Latest audio chunk context. Use cached session instructions and prior call memory already in this realtime conversation.",
+    "The latest committed audio is the source of truth. Classify it as prospect response, agent feedback, wait, or hold. Do not output a transcript.",
+    `Chunk: ${chunkId || "unknown"}`,
+    `Flush reason: ${flushReason || "unknown"}`,
+    `Audio stats: ${JSON.stringify(stats || {})}`,
+  ].join("\n");
+}
+
+function buildRealtimeDirectCoachMemoryContext({
+  summary,
+  metadata,
+} = {}) {
+  const compactSummary = cleanText(summary, 1800);
+  if (!compactSummary) return "";
+  return [
+    "Background call memory update. Use this memory for future audio chunks, but do not answer this update by itself.",
+    "",
+    "Compact call summary:",
+    compactSummary,
+    "",
+    `Stable monitor metadata: ${JSON.stringify(metadata || {})}`,
+  ].join("\n");
+}
+
+class OpenAiRealtimeDirectCoach {
+  constructor({
+    apiKey,
+    model = "gpt-realtime-2",
+    instructions = "",
+    safetyIdentifier = "tagcontactbridge-ex-live-direct-coach",
+    timeoutMs = 20000,
+    reasoningEffort = "",
+  } = {}) {
+    if (!apiKey) throw new Error("OPENAI_API_KEY is missing");
+    this.apiKey = apiKey;
+    this.model = model || "gpt-realtime-2";
+    this.instructions = instructions || "";
+    this.safetyIdentifier = safetyIdentifier || "tagcontactbridge-ex-live-direct-coach";
+    this.timeoutMs = Math.max(Number(timeoutMs) || 20000, 1000);
+    this.reasoningEffort = reasoningEffort || "";
+    this.ws = null;
+    this.readyPromise = null;
+    this.readyResolve = null;
+    this.readyReject = null;
+    this.pending = null;
+    this.sessionId = null;
+  }
+
+  connect() {
+    if (this.readyPromise) return this.readyPromise;
+    this.readyPromise = new Promise((resolve, reject) => {
+      this.readyResolve = resolve;
+      this.readyReject = reject;
+      const protocols = [
+        "realtime",
+        `openai-insecure-api-key.${this.apiKey}`,
+      ];
+      const project = process.env.OPENAI_PROJECT_ID || process.env.OPENAI_PROJECT || "";
+      const org = process.env.OPENAI_ORG_ID || process.env.OPENAI_ORGANIZATION || "";
+      if (project) protocols.push(`openai-project.${project}`);
+      if (org) protocols.push(`openai-organization.${org}`);
+      this.ws = new WebSocket(`wss://api.openai.com/v1/realtime?model=${encodeURIComponent(this.model)}`, protocols);
+      this.ws.addEventListener("open", () => {
+        this.send({
+          type: "session.update",
+          session: {
+            type: "realtime",
+            instructions: this.instructions,
+            audio: {
+              input: {
+                format: {
+                  type: "audio/pcm",
+                  rate: 24000,
+                },
+                turn_detection: null,
+              },
+            },
+            ...(this.reasoningEffort ? { reasoning: { effort: this.reasoningEffort } } : {}),
+          },
+        });
+      });
+      this.ws.addEventListener("message", (event) => this.handleMessage(event.data));
+      this.ws.addEventListener("error", () => {
+        const error = new Error("OpenAI realtime direct coach websocket error");
+        if (this.pending) this.rejectPending(error);
+        if (this.readyReject) this.readyReject(error);
+      });
+      this.ws.addEventListener("close", (event) => {
+        const reason = event.reason ? `: ${event.reason}` : "";
+        const error = new Error(`OpenAI realtime direct coach websocket closed ${event.code}${reason}`);
+        if (this.pending) this.rejectPending(error);
+        if (this.readyReject) this.readyReject(error);
+        this.readyPromise = null;
+        this.readyResolve = null;
+        this.readyReject = null;
+        this.ws = null;
+      });
+    });
+    return this.readyPromise;
+  }
+
+  send(payload) {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      throw new Error("OpenAI realtime direct coach websocket is not open");
+    }
+    this.ws.send(JSON.stringify(payload));
+  }
+
+  handleMessage(raw) {
+    let event = null;
+    try {
+      event = typeof raw === "string" ? JSON.parse(raw) : JSON.parse(String(raw || ""));
+    } catch {
+      return;
+    }
+    if (event.type === "session.created" || event.type === "session.updated") {
+      this.sessionId = event.session?.id || this.sessionId;
+      if (event.type === "session.updated" && this.readyResolve) {
+        this.readyResolve(event.session || {});
+        this.readyResolve = null;
+        this.readyReject = null;
+      }
+      return;
+    }
+    if (event.type === "response.text.delta" || event.type === "response.output_text.delta") {
+      if (this.pending) {
+        const delta = String(event.delta || "");
+        this.pending.output += delta;
+        this.pending.onDelta?.(delta, this.pending.output);
+      }
+      return;
+    }
+    if (event.type === "response.audio_transcript.delta" || event.type === "response.output_audio_transcript.delta") {
+      if (this.pending) {
+        const delta = String(event.delta || "");
+        this.pending.output += delta;
+        this.pending.onDelta?.(delta, this.pending.output);
+      }
+      return;
+    }
+    if (event.type === "response.text.done" || event.type === "response.output_text.done") {
+      if (!this.pending) return;
+      const pending = this.pending;
+      pending.finalText = cleanText(event.text || event.transcript || pending.output, 1600);
+      pending.onDelta?.("", pending.finalText || pending.output);
+      if (!pending.doneGraceHandle) {
+        pending.doneGraceHandle = setTimeout(() => {
+          if (this.pending !== pending) return;
+          this.pending = null;
+          clearTimeout(pending.timeoutHandle);
+          pending.resolve({
+            ...parseRealtimeDirectCoachOutput(pending.finalText || pending.output),
+            model: this.model,
+            provider: "openai-realtime",
+            sessionId: this.sessionId,
+            usage: null,
+          });
+        }, 2000);
+      }
+      return;
+    }
+    if (event.type === "response.done") {
+      if (!this.pending) return;
+      const pending = this.pending;
+      this.pending = null;
+      clearTimeout(pending.timeoutHandle);
+      if (pending.doneGraceHandle) clearTimeout(pending.doneGraceHandle);
+      const finalText = cleanText(
+        event.text || event.transcript || extractRealtimeResponseText(event.response) || pending.finalText || pending.output,
+        1600,
+      );
+      pending.resolve({
+        ...parseRealtimeDirectCoachOutput(finalText || pending.output),
+        model: this.model,
+        provider: "openai-realtime",
+        sessionId: this.sessionId,
+        usage: event.response?.usage || null,
+      });
+      return;
+    }
+    if (event.type === "error") {
+      const message = event.error?.message || "OpenAI realtime direct coach error";
+      const code = event.error?.code ? ` (${event.error.code})` : "";
+      const error = new Error(`${message}${code}`);
+      if (this.pending) this.rejectPending(error);
+      else if (this.readyReject) this.readyReject(error);
+    }
+  }
+
+  rejectPending(error) {
+    if (!this.pending) return;
+    const pending = this.pending;
+    this.pending = null;
+    clearTimeout(pending.timeoutHandle);
+    if (pending.doneGraceHandle) clearTimeout(pending.doneGraceHandle);
+    pending.reject(error);
+  }
+
+  async coachPcmu({ pcmuBuffer, timeoutMs, onDelta, instructions, textContext } = {}) {
+    await this.connect();
+    if (this.pending) throw new Error("OpenAI realtime direct coach already has a pending response");
+    const pcm24 = buildPcm16_24kFromPcmu8k(pcmuBuffer);
+    return new Promise((resolve, reject) => {
+      const timeoutHandle = setTimeout(() => {
+        this.rejectPending(new Error(`OpenAI realtime direct coach timed out after ${timeoutMs || this.timeoutMs}ms`));
+      }, Math.max(Number(timeoutMs) || this.timeoutMs, 1000));
+      this.pending = {
+        resolve,
+        reject,
+        timeoutHandle,
+        doneGraceHandle: null,
+        output: "",
+        finalText: "",
+        onDelta,
+      };
+      try {
+        this.send({
+          type: "input_audio_buffer.append",
+          audio: pcm24.toString("base64"),
+        });
+        this.send({ type: "input_audio_buffer.commit" });
+        if (textContext) {
+          this.send({
+            type: "conversation.item.create",
+            item: {
+              type: "message",
+              role: "user",
+              content: [
+                {
+                  type: "input_text",
+                  text: cleanText(textContext, 12000),
+                },
+              ],
+            },
+          });
+        }
+        this.send({
+          type: "response.create",
+          response: {
+            output_modalities: ["text"],
+            instructions: instructions || "Use the latest committed audio item and latest text context item together. Return only HEARD/SAY in the required format.",
+          },
+        });
+      } catch (error) {
+        this.rejectPending(error);
+      }
+    });
+  }
+
+  async addTextContext(text) {
+    await this.connect();
+    const clean = cleanText(text, 12000);
+    if (!clean) return false;
+    this.send({
+      type: "conversation.item.create",
+      item: {
+        type: "message",
+        role: "user",
+        content: [
+          {
+            type: "input_text",
+            text: clean,
+          },
+        ],
+      },
+    });
+    return true;
+  }
+
+  close() {
+    if (this.pending) this.rejectPending(new Error("OpenAI realtime direct coach closed"));
+    if (this.ws) {
+      try {
+        this.ws.close(1000, "done");
+      } catch {
+        // no-op
+      }
+    }
+  }
+}
+
 function pickProxy(sipInfo, region = "NA") {
   const proxies = Array.isArray(sipInfo?.outboundProxies) ? sipInfo.outboundProxies : [];
   const desired = String(region || "NA").trim().toUpperCase();
@@ -2164,7 +2584,7 @@ async function runSemanticTurnDecision({
 
 function buildAdvicePrompt({ transcripts, metadata }) {
   const recent = transcripts.slice(-16);
-  const memory = cleanText(metadata?.semanticCallMemory || "", 3000);
+  const memory = cleanText(metadata?.conversationSummary || metadata?.semanticCallMemory || "", 3000);
   const transcriptText = recent
     .map((entry) => {
       const labeled = Array.isArray(entry.speakerSegments) && entry.speakerSegments.length
@@ -2193,6 +2613,115 @@ function buildAdvicePrompt({ transcripts, metadata }) {
     "Recent transcript, oldest first:",
     transcriptText || "(no usable transcript yet)",
   ].join("\n");
+}
+
+function formatTranscriptForCoachMemory(transcripts = [], maxChars = 12000) {
+  const rows = (Array.isArray(transcripts) ? transcripts : [])
+    .map((entry) => {
+      const label = Array.isArray(entry?.speakerSegments) && entry.speakerSegments.length
+        ? entry.speakerSegments
+          .map((segment) => `${segment.speaker || "unknown"}: ${cleanText(segment.text || "", 900)}`)
+          .join(" | ")
+        : `unknown: ${cleanText(entry?.text || "", 900)}`;
+      return `[${entry?.at || entry?.endedAt || ""}] ${label}`;
+    })
+    .filter((line) => cleanText(line, 1200));
+  return trimFromLeft(rows.join("\n"), maxChars);
+}
+
+function buildConversationSummaryPrompt({ transcripts, previousSummary, metadata, maxTranscriptChars }) {
+  const transcriptText = formatTranscriptForCoachMemory(transcripts, maxTranscriptChars);
+  return [
+    "Summarize the live tax-resolution sales call for a real-time coach.",
+    "This is background memory only. Be compact, factual, and useful for the next response.",
+    "Track the client's IRS/state issue, notices, tax years, balances, unfiled returns, business/payroll/1099 clues, emotional tone, objections, buying signals, and unanswered next questions.",
+    "Do not invent facts. Preserve uncertainty when speaker labels or details are unclear.",
+    "Keep it under 12 short bullets or 900 words, whichever is shorter.",
+    "",
+    `Monitor metadata: ${JSON.stringify(metadata || {})}`,
+    "",
+    "Previous summary:",
+    cleanText(previousSummary || "", 2500) || "(none yet)",
+    "",
+    "Transcript so far, oldest first:",
+    transcriptText || "(no usable transcript yet)",
+  ].join("\n");
+}
+
+async function runConversationSummary({
+  transcripts,
+  previousSummary,
+  metadata,
+  provider = "anthropic",
+  model,
+  serviceTier = "",
+  timeoutMs,
+  maxTranscriptChars,
+  maxSummaryChars,
+}) {
+  const prompt = buildConversationSummaryPrompt({
+    transcripts,
+    previousSummary,
+    metadata,
+    maxTranscriptChars,
+  });
+  if (provider === "openai") {
+    const apiKey = process.env.OPENAI_API_KEY || "";
+    if (!apiKey) throw new Error("OPENAI_API_KEY is missing");
+    const abortController = new AbortController();
+    const timeoutHandle = setTimeout(() => abortController.abort(), Math.max(Number(timeoutMs) || 25000, 1000));
+    let response;
+    try {
+      const body = {
+        model,
+        instructions: "Return only a compact call-memory summary. No preamble.",
+        input: [{ role: "user", content: prompt }],
+        max_output_tokens: 1200,
+        temperature: 0.1,
+      };
+      if (serviceTier) body.service_tier = serviceTier;
+      response = await fetch("https://api.openai.com/v1/responses", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify(body),
+        signal: abortController.signal,
+      });
+    } finally {
+      clearTimeout(timeoutHandle);
+    }
+    const rawText = await response.text();
+    const payload = parseJsonLoose(rawText) || { rawText };
+    if (!response.ok) {
+      throw new Error(`OpenAI summary failed: ${response.status} ${rawText.slice(0, 500)}`);
+    }
+    return {
+      summary: cleanText(extractOpenAiResponsesText(payload), maxSummaryChars),
+      provider: "openai",
+      model: payload?.model || model,
+      serviceTier: payload?.service_tier || serviceTier || null,
+      usage: payload?.usage || null,
+    };
+  }
+
+  const client = createAnthropicClient();
+  const raw = await client.createMessage({
+    system: "Return only a compact call-memory summary. No preamble.",
+    messages: [{ role: "user", content: prompt }],
+    model,
+    maxTokens: 1200,
+    temperature: 0.1,
+    timeoutMs,
+  });
+  return {
+    summary: cleanText(client.extractTextBlocks(raw), maxSummaryChars),
+    provider: "anthropic",
+    model: raw?.model || model,
+    serviceTier: null,
+    usage: raw?.usage || null,
+  };
 }
 
 async function runLiveAdvice({ transcripts, metadata, model, timeoutMs }) {
@@ -2225,7 +2754,15 @@ async function runLiveAdvice({ transcripts, metadata, model, timeoutMs }) {
   };
 }
 
-function buildProspectOnlyCoachPrompt({ prospectText, recentTranscripts, memory, metadata, playbook, taxJurisdiction }) {
+function buildProspectOnlyCoachPrompt({
+  prospectText,
+  recentTranscripts,
+  memory,
+  conversationSummary,
+  metadata,
+  playbook,
+  taxJurisdiction,
+}) {
   const recent = (recentTranscripts || [])
     .slice(-8)
     .map((entry) => `Prospect: ${cleanText(entry.text, 360)}`)
@@ -2263,6 +2800,9 @@ function buildProspectOnlyCoachPrompt({ prospectText, recentTranscripts, memory,
     "",
     "Rolling memory:",
     memory || "(none yet)",
+    "",
+    "Background call summary:",
+    conversationSummary || "(none yet)",
     "",
     "Recent prospect-only turns:",
     recent || "(none yet)",
@@ -2448,6 +2988,7 @@ function isLowSignalTranscript(text) {
 function isSystemOnlyTranscript(text) {
   const clean = normalizeForDedupe(text);
   if (!clean) return false;
+  if (isHoldPromptTranscript(clean)) return true;
   return [
     /^please continue( to)? hold$/,
     /^please continue to hold$/,
@@ -2457,6 +2998,37 @@ function isSystemOnlyTranscript(text) {
     /^please continue( to hold)? your call is important to us$/,
     /^hold$/,
   ].some((pattern) => pattern.test(clean));
+}
+
+function isHoldPromptTranscript(text) {
+  const clean = normalizeForDedupe(text);
+  if (!clean) return false;
+  return [
+    /\bplease continue( to)? hold\b/,
+    /\bcontinue to hold\b/,
+    /\byour call is important( to us)?\b/,
+    /\bthank you for holding\b/,
+    /\bwe appreciate your patience\b/,
+  ].some((pattern) => pattern.test(clean));
+}
+
+function hasExactContinueHoldPhrase(text) {
+  const clean = normalizeForDedupe(text);
+  if (!clean) return false;
+  return /\bplease continue to hold\b/.test(clean);
+}
+
+function looksLikeIncompleteRealtimeHeard(text) {
+  const cleaned = cleanText(text, 1000);
+  if (!cleaned) return false;
+  if (isHoldPromptTranscript(cleaned)) return false;
+  if (/[.!?]\s*$/.test(cleaned)) return false;
+  if (/\.\.\.\s*$/.test(cleaned)) return true;
+  if (endsWithDanglingWord(cleaned)) return true;
+  const tokens = wordTokens(cleaned);
+  if (tokens.length <= 5) return true;
+  if (tokens.length <= 10 && startsLikeContinuation(cleaned)) return true;
+  return false;
 }
 
 function isPrimerHallucination(text) {
@@ -2961,7 +3533,7 @@ function createDashboardHtml() {
     button { border: 1px solid #3b4754; border-radius: 7px; background: #1f6feb; color: #fff; font: inherit; font-size: 12px; font-weight: 600; padding: 8px 11px; cursor: pointer; }
     button.secondary { background: #21262d; color: #e6edf3; }
     button:disabled { opacity: 0.45; cursor: not-allowed; }
-    main { display: grid; grid-template-columns: minmax(0, 1fr) 380px; gap: 14px; padding: 14px; }
+    main { display: grid; grid-template-columns: minmax(0, 1fr) 320px; gap: 14px; padding: 14px; }
     section { border: 1px solid #30363d; border-radius: 8px; background: #0f141b; min-height: 180px; }
     h2 { font-size: 13px; margin: 0; padding: 12px 12px 0; color: #9da7b3; font-weight: 600; }
     .list { padding: 10px 12px 14px; display: flex; flex-direction: column; gap: 10px; }
@@ -2970,6 +3542,37 @@ function createDashboardHtml() {
     .text { white-space: pre-wrap; line-height: 1.42; font-size: 14px; }
     .focus { font-size: 16px; line-height: 1.35; }
     .pill { display: inline-block; border: 1px solid #3b4754; border-radius: 999px; padding: 2px 8px; color: #9da7b3; font-size: 11px; margin-right: 6px; }
+    .chat-pair { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; align-items: start; }
+    .bubble { border: 1px solid #303b46; border-radius: 8px; padding: 10px 12px; min-height: 70px; background: #111923; }
+    .bubble .label { color: #9da7b3; font-size: 11px; font-weight: 700; letter-spacing: 0; margin-bottom: 6px; text-transform: uppercase; }
+    .bubble .body { white-space: pre-wrap; line-height: 1.42; font-size: 15px; }
+    .bubble.heard, .bubble.prospect { background: #111d26; border-color: #27445a; }
+    .bubble.say, .bubble.agent { background: #182111; border-color: #3b5324; }
+    .bubble.feedback { background: #211b12; border-color: #5a4724; }
+    .bubble.system, .bubble.unknown, .bubble.empty { background: #151922; border-color: #30363d; color: #9da7b3; }
+    .live-card { border-width: 1px 1px 1px 7px; padding: 0; overflow: hidden; background: #101820; }
+    .live-card.mode-prospect_response, .history-card.mode-prospect_response { border-left-color: #2f8f4e; }
+    .live-card.mode-agent_feedback, .history-card.mode-agent_feedback { border-left-color: #d29922; }
+    .live-card.mode-hold, .history-card.mode-hold { border-left-color: #8957e5; }
+    .live-card.mode-wait, .live-card.waiting, .history-card.mode-wait { border-left-color: #57606a; }
+    .guidance-head { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; padding: 12px 14px 10px; border-bottom: 1px solid #27313c; background: #151c25; }
+    .guidance-title { font-size: 12px; font-weight: 800; letter-spacing: 0; text-transform: uppercase; color: #e6edf3; }
+    .guidance-help { color: #9da7b3; font-size: 13px; line-height: 1.35; margin-top: 3px; max-width: 720px; }
+    .guidance-meta { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; min-width: 140px; }
+    .guidance-body { font-size: 26px; line-height: 1.3; padding: 22px 22px 24px; color: #f0f6fc; max-width: 980px; }
+    .side-panel { min-height: 120px; }
+    .guidance-details { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 8px; padding: 10px 14px 12px; border-top: 1px solid #27313c; background: #0f141b; }
+    .guidance-detail { border: 1px solid #27313c; border-radius: 7px; padding: 9px 10px; background: #111923; min-height: 54px; }
+    .guidance-detail-label { color: #7d8590; font-size: 10px; font-weight: 800; letter-spacing: 0; text-transform: uppercase; margin-bottom: 5px; }
+    .guidance-detail-body { color: #c9d1d9; font-size: 13px; line-height: 1.35; }
+    .live-card.mode-prospect_response .guidance-body { background: #101c12; }
+    .live-card.mode-agent_feedback .guidance-body { background: #211a10; }
+    .live-card.mode-hold .guidance-body { background: #191526; color: #c9d1d9; }
+    .live-card.mode-wait .guidance-body, .live-card.waiting .guidance-body { background: #111923; color: #9da7b3; }
+    .detail-line { color: #9da7b3; font-size: 12px; line-height: 1.4; padding: 9px 14px 11px; border-top: 1px solid #27313c; background: #0f141b; }
+    .history-card { border-left-width: 5px; }
+    .turn-meta { color: #7d8590; font-size: 11px; display: flex; flex-wrap: wrap; gap: 7px; margin-bottom: 8px; }
+    .coach-feed { gap: 12px; }
     ul { margin: 8px 0 0 18px; padding: 0; }
     li { margin: 5px 0; }
     code { color: #a5d6ff; }
@@ -2983,6 +3586,7 @@ function createDashboardHtml() {
       <div class="status" id="gateStatus">coach gate unknown</div>
     </div>
     <div class="toolbar">
+      <button id="attachMonitor" class="secondary" type="button">Attach monitor</button>
       <button id="startCoach" type="button" disabled>Start coaching</button>
       <button id="stopCoach" class="secondary" type="button" disabled>Stop coaching</button>
       <div class="status" id="status">connecting...</div>
@@ -2990,12 +3594,10 @@ function createDashboardHtml() {
   </header>
   <main>
     <section>
-      <h2>Transcript</h2>
+      <h2>Live Guidance</h2>
       <div class="list" id="transcripts"></div>
     </section>
-    <section>
-      <h2>Advice</h2>
-      <div class="list" id="advice"></div>
+    <section class="side-panel">
       <h2>Events</h2>
       <div class="list" id="events"></div>
     </section>
@@ -3003,12 +3605,148 @@ function createDashboardHtml() {
   <script>
     const statusEl = document.getElementById("status");
     const gateStatusEl = document.getElementById("gateStatus");
+    const attachMonitorBtn = document.getElementById("attachMonitor");
     const startCoachBtn = document.getElementById("startCoach");
     const stopCoachBtn = document.getElementById("stopCoach");
     const transcriptsEl = document.getElementById("transcripts");
-    const adviceEl = document.getElementById("advice");
     const eventsEl = document.getElementById("events");
     const esc = (v) => String(v ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+    function bubble(kind, label, body) {
+      const cleanBody = String(body || "").trim();
+      return \`<div class="bubble \${esc(kind || "unknown")}">
+        <div class="label">\${esc(label)}</div>
+        <div class="body">\${cleanBody ? esc(cleanBody) : '<span class="meta">No usable speech</span>'}</div>
+      </div>\`;
+    }
+    function turnMeta(parts) {
+      return \`<div class="turn-meta">\${parts.filter(Boolean).map((part) => \`<span>\${esc(part)}</span>\`).join("")}</div>\`;
+    }
+    function modeLabel(mode) {
+      const clean = String(mode || "").toLowerCase();
+      if (clean === "agent_feedback") return "Adjust Current Talk";
+      if (clean === "prospect_response" || clean === "coach") return "Proposed Response";
+      if (clean === "hold") return "Hold/System";
+      return "Waiting";
+    }
+    function modeHelp(mode) {
+      const clean = String(mode || "").toLowerCase();
+      if (clean === "agent_feedback") return "Guidance for how to adjust what you are currently saying.";
+      if (clean === "prospect_response" || clean === "coach") return "Proposed response based on what the prospect just said to you.";
+      if (clean === "hold") return "System or hold audio detected.";
+      return "Waiting for a complete, useful thought.";
+    }
+    function modeBubbleKind(mode, hasText) {
+      const clean = String(mode || "").toLowerCase();
+      if (!hasText) return "empty";
+      if (clean === "agent_feedback") return "feedback";
+      if (clean === "hold") return "system";
+      return "say";
+    }
+    function modeClass(mode) {
+      const clean = String(mode || "").toLowerCase();
+      if (clean === "agent_feedback") return "agent_feedback";
+      if (clean === "prospect_response" || clean === "coach") return "prospect_response";
+      if (clean === "hold") return "hold";
+      return "wait";
+    }
+    function pill(text) {
+      return text ? \`<span class="pill">\${esc(text)}</span>\` : "";
+    }
+    function guidanceDetails(items) {
+      const rows = items
+        .filter((item) => item && item.body)
+        .map((item) => \`<div class="guidance-detail">
+          <div class="guidance-detail-label">\${esc(item.label)}</div>
+          <div class="guidance-detail-body">\${esc(item.body)}</div>
+        </div>\`);
+      return rows.length ? \`<div class="guidance-details">\${rows.join("")}</div>\` : "";
+    }
+    function renderCoachTurn(turn) {
+      const coachOnly = turn.outputMode === "coach-only";
+      const label = modeLabel(turn.mode);
+      const details = guidanceDetails([
+        { label: "Signal", body: turn.signal },
+        { label: "Direction", body: turn.direction || modeHelp(turn.mode) },
+        { label: "Topic", body: turn.topic },
+      ]);
+      return \`<div class="row history-card mode-\${modeClass(turn.mode)}">
+        \${turnMeta([
+          turn.at || "",
+          turn.elapsedMs ? \`\${turn.elapsedMs}ms\` : "",
+          turn.durationSec ? \`\${turn.durationSec}s\` : "",
+          turn.activePctOver500 !== undefined ? \`active \${turn.activePctOver500}%\` : "",
+          turn.model || "",
+          turn.mode ? \`mode \${turn.mode}\` : "",
+          turn.usage?.total_tokens ? \`\${turn.usage.total_tokens} tokens\` : "",
+        ])}
+        \${coachOnly
+          ? \`\${bubble(modeBubbleKind(turn.mode, turn.say), label, turn.say || "WAIT")}\${details}\`
+          : \`<div class="chat-pair">
+              \${bubble("heard", "Heard", turn.heard)}
+              \${bubble(turn.say ? "say" : "empty", "Say Next", turn.say || "WAIT")}
+            </div>\`}
+      </div>\`;
+    }
+    function renderLiveSuggestion(live) {
+      if (!live?.enabled) return "";
+      const sleeping = live.status === "sleeping";
+      const hold = live.status === "hold";
+      const inputPaused = live.acceptInput === false || hold || sleeping;
+      const text = live.text
+        || live.finalText
+        || (sleeping
+          ? "Input paused until the scheduled check."
+          : hold
+            ? "Exact hold phrase heard. Pausing before the next check."
+            : inputPaused
+              ? "Input paused."
+              : live.status === "streaming"
+                ? "Thinking..."
+                : "Waiting for useful speech...");
+      const mode = hold ? "hold" : live.mode || (text && !/^wait$/i.test(text) ? "prospect_response" : "wait");
+      const details = guidanceDetails([
+        { label: "Signal", body: live.signal },
+        { label: "Direction", body: live.direction || modeHelp(mode) },
+        { label: "Topic", body: live.topic },
+      ]);
+      const status = [
+        live.status || "idle",
+        live.elapsedMs ? \`\${live.elapsedMs}ms\` : "",
+        live.usage?.total_tokens ? \`\${live.usage.total_tokens} tokens\` : "",
+      ].filter(Boolean);
+      const waiting = !live.text && !live.finalText;
+      return \`<div class="row live-card mode-\${modeClass(mode)} \${waiting ? "waiting" : ""}">
+        <div class="guidance-head">
+          <div>
+            <div class="guidance-title">\${esc(modeLabel(mode))}</div>
+            <div class="guidance-help">\${esc(modeHelp(mode))}</div>
+          </div>
+          <div class="guidance-meta">\${status.map(pill).join("")}</div>
+        </div>
+        <div class="guidance-body">\${esc(text)}</div>
+        \${details}
+      </div>\`;
+    }
+    function renderTranscriptEntry(item) {
+      const segments = (item.speakerSegments || []).length
+        ? item.speakerSegments
+        : [{ speaker: "unknown", text: item.text, confidence: 0 }];
+      return \`<div class="row">
+        \${turnMeta([
+          item.at || "",
+          item.durationSec ? \`\${item.durationSec}s\` : "",
+          item.activePctOver500 !== undefined ? \`active \${item.activePctOver500}%\` : "",
+          item.model || "",
+          item.responseFormat || "",
+          item.speakerStatus || "",
+        ])}
+        <div class="list coach-feed">\${segments.map((segment) => {
+          const speaker = String(segment.speaker || "unknown").toLowerCase();
+          const label = [segment.speaker || "unknown", segment.nativeSpeaker].filter(Boolean).join("/") + (segment.confidence ? \` \${Math.round((segment.confidence || 0) * 100)}%\` : "");
+          return bubble(speaker, label, segment.text);
+        }).join("")}</div>
+      </div>\`;
+    }
     async function coachGate(path) {
       startCoachBtn.disabled = true;
       stopCoachBtn.disabled = true;
@@ -3025,8 +3763,9 @@ function createDashboardHtml() {
         gateStatusEl.textContent = error.message || "gate request failed";
       }
     }
-    startCoachBtn.addEventListener("click", () => coachGate("/api/coach/start?durationSec=2700"));
+    startCoachBtn.addEventListener("click", () => coachGate("/api/coach/start?durationSec=2700&manual=1"));
     stopCoachBtn.addEventListener("click", () => coachGate("/api/coach/stop?reason=manual-coach-stop"));
+    attachMonitorBtn.addEventListener("click", () => coachGate("/api/supervise/attach"));
     function render(state) {
       const gate = state.cxGate || {};
       const gateEnabled = Boolean(gate.enabled);
@@ -3038,8 +3777,12 @@ function createDashboardHtml() {
             gate.lastReason || "",
           ].filter(Boolean)
         : ["coach gate off"];
+      if (state.realtimeDirectSleepUntil) {
+        gateParts.push(\`sleeping until \${new Date(state.realtimeDirectSleepUntil).toLocaleTimeString()}\`);
+        if (state.realtimeDirectSleepReason) gateParts.push(state.realtimeDirectSleepReason);
+      }
       gateStatusEl.textContent = gateParts.join(" | ");
-      startCoachBtn.disabled = !gateEnabled || gate.active;
+      startCoachBtn.disabled = !gateEnabled;
       stopCoachBtn.disabled = !gateEnabled || !gate.active;
       statusEl.textContent = [
         state.status || "unknown",
@@ -3047,36 +3790,16 @@ function createDashboardHtml() {
         state.byteCount ? \`\${state.byteCount} bytes\` : "",
         state.outputPath ? \`writing \${state.outputPath.split(/[\\\\/]/).pop()}\` : "",
       ].filter(Boolean).join(" | ");
-    const transcripts = state.transcripts || [];
-    transcriptsEl.innerHTML = transcripts.length
-      ? transcripts.slice(-80).reverse().map((item) => \`
-          <div class="row">
-            <div class="meta">\${esc(item.at)} | \${esc(item.durationSec)}s | active \${esc(item.activePctOver500)}% | \${esc(item.model || "")} \${esc(item.responseFormat || "")} \${esc(item.speakerStatus || "")}\${item.revision ? \` | rev \${esc(item.revision)}\` : ""}\${item.semanticGlueStatus ? \` | glue \${esc(item.semanticGlueStatus)}\` : ""}</div>
-            <div class="text">\${(item.speakerSegments || []).length
-              ? item.speakerSegments.map((segment) => \`<span class="pill">\${esc([segment.speaker, segment.nativeSpeaker].filter(Boolean).join("/"))} \${Math.round((segment.confidence || 0) * 100)}%</span>\${esc(segment.text)}\`).join("<br>")
-              : esc(item.text)}</div>
-          </div>\`).join("")
-      : '<div class="row"><div class="text">Waiting for usable audio...</div></div>';
       const live = state.liveSuggestion || {};
-      const liveHtml = live.enabled ? \`
-        <div class="row">
-          <div class="meta"><span class="pill">next line</span><span class="pill">\${esc(live.status || "idle")}</span>\${live.elapsedMs ? \`<span class="pill">\${esc(live.elapsedMs)}ms</span>\` : ""}</div>
-          <div class="focus">\${esc(live.text || live.finalText || (live.status === "streaming" ? "Thinking..." : "Waiting for prospect speech..."))}</div>
-          \${live.prospectText ? \`<div class="meta">heard: \${esc(live.prospectText)}</div>\` : ""}
-        </div>\` : "";
-      const coach = state.advice && state.advice.coach;
-      const coachHtml = coach ? \`
-        <div class="row">
-          <div class="meta"><span class="pill">\${esc(coach.phase?.label || coach.phase?.key)}</span><span class="pill">\${Math.round((coach.confidence || 0) * 100)}%</span></div>
-          <div class="focus">\${esc(coach.oneSentenceFocus)}</div>
-          \${state.advice.suggestedDraft ? \`<p><strong>Say:</strong> \${esc(state.advice.suggestedDraft)}</p>\` : ""}
-          <strong>Moves</strong><ul>\${(coach.suggestedMoves || []).map((x) => \`<li>\${esc(x)}</li>\`).join("")}</ul>
-          <strong>Listen for</strong><ul>\${(coach.listenFor || []).map((x) => \`<li>\${esc(x)}</li>\`).join("")}</ul>
-          \${(coach.riskFlags || []).length ? \`<strong>Risk</strong><ul>\${coach.riskFlags.map((x) => \`<li>\${esc(x)}</li>\`).join("")}</ul>\` : ""}
-        </div>\` : "";
-      adviceEl.innerHTML = liveHtml || coachHtml
-        ? liveHtml + coachHtml
-        : '<div class="row"><div class="text">Advice will appear after the first usable transcript chunks.</div></div>';
+      const transcripts = state.transcripts || [];
+      const coachTurns = state.realtimeDirectTurns || [];
+      const liveHtml = renderLiveSuggestion(live);
+      const historyHtml = coachTurns.length
+        ? coachTurns.slice(-80).reverse().map(renderCoachTurn).join("")
+        : transcripts.length
+          ? transcripts.slice(-80).reverse().map(renderTranscriptEntry).join("")
+          : '<div class="row"><div class="text">Waiting for usable audio...</div></div>';
+      transcriptsEl.innerHTML = liveHtml + historyHtml;
       eventsEl.innerHTML = (state.events || []).slice(-18).reverse().map((item) => \`
         <div class="row"><div class="meta">\${esc(item.at || "")}</div><div class="text">\${esc(item.message || item.type || "")}</div></div>\`).join("");
     }
@@ -3097,6 +3820,7 @@ function createDashboardServer({ port, state, logger }) {
     return {
       ...state.public,
       transcripts: state.transcripts.slice(-100),
+      realtimeDirectTurns: state.realtimeDirectTurns.slice(-100),
       events: state.events.slice(-50),
       advice: state.advice,
     };
@@ -3121,15 +3845,22 @@ function createDashboardServer({ port, state, logger }) {
       return;
     }
     if (requestUrl.pathname === "/api/fake-call/start" || requestUrl.pathname === "/api/coach/start") {
-      const result = state.actions?.fakeCallStart
-        ? state.actions.fakeCallStart({
+      Promise.resolve(state.actions?.coachStart
+        ? state.actions.coachStart({
           durationSec: Number(requestUrl.searchParams.get("durationSec") || requestUrl.searchParams.get("seconds") || 0) || null,
           caseId: requestUrl.searchParams.get("caseId") || null,
           queueItemId: requestUrl.searchParams.get("queueItemId") || null,
+          manual: requestUrl.searchParams.get("manual") === "1" || requestUrl.searchParams.get("manual") === "true",
         })
-        : { ok: false, error: "fake call action is not available" };
-      res.writeHead(result.ok === false ? 409 : 200, { "content-type": "application/json" });
-      res.end(JSON.stringify(result));
+        : { ok: false, error: "coach start action is not available" })
+        .then((result) => {
+          res.writeHead(result.ok === false ? 409 : 200, { "content-type": "application/json" });
+          res.end(JSON.stringify(result));
+        })
+        .catch((error) => {
+          res.writeHead(500, { "content-type": "application/json" });
+          res.end(JSON.stringify({ ok: false, error: error.message }));
+        });
       return;
     }
     if (requestUrl.pathname === "/api/fake-call/stop" || requestUrl.pathname === "/api/coach/stop") {
@@ -3138,6 +3869,18 @@ function createDashboardServer({ port, state, logger }) {
         : { ok: false, error: "fake call action is not available" };
       res.writeHead(result.ok === false ? 409 : 200, { "content-type": "application/json" });
       res.end(JSON.stringify(result));
+      return;
+    }
+    if (requestUrl.pathname === "/api/supervise/attach") {
+      Promise.resolve(state.actions?.superviseAttachOnce ? state.actions.superviseAttachOnce() : { ok: false, error: "supervise attach action is not available" })
+        .then((result) => {
+          res.writeHead(result.ok === false ? 409 : 200, { "content-type": "application/json" });
+          res.end(JSON.stringify(result));
+        })
+        .catch((error) => {
+          res.writeHead(500, { "content-type": "application/json" });
+          res.end(JSON.stringify({ ok: false, error: error.message }));
+        });
       return;
     }
     if (requestUrl.pathname === "/api/state" || requestUrl.pathname === "/health") {
@@ -3392,6 +4135,19 @@ Audio/AI options:
   --no-stt-domain-primer     Disable tax vocabulary prompt for non-diarize STT
   --stt-realtime             Use OpenAI Realtime transcription instead of file STT
   --realtime-stt-delay LEVEL minimal | low | medium | high | xhigh
+  --realtime-direct-coach    Science lane: send monitor audio straight to gpt-realtime-2 for HEARD/SAY
+  --realtime-direct-coach-only
+                             Realtime direct returns MODE/SAY only, no transcript text
+  --realtime-direct-model M  Model for --realtime-direct-coach (default gpt-realtime-2)
+  --realtime-direct-start-delay-sec N
+                             Sleep before first realtime coach probe after a call gate opens
+  --realtime-direct-hold-recheck-sec N
+                             After exact "please continue to hold", sleep before the next probe (default 120)
+  --realtime-direct-min-chunk-sec N
+                             Minimum audio seconds before realtime-direct sends a coach request (default 6)
+  --realtime-direct-incomplete-hold-ms N
+                             Hold incomplete realtime HEARD fragments briefly before showing them
+  Exact "please continue to hold" pauses input and checks again after the hold recheck delay
   --known-speaker name=wav   Diarize-only speaker reference, repeat up to four
   --coach-model MODEL        Claude model for live advice
   --no-coach                 Disable live advice calls for transcript-only model tests
@@ -3406,6 +4162,13 @@ Audio/AI options:
                              Static prompt block for next-line coach
   --prospect-coach-playbook-max-chars N
                              Max focused playbook context per coach call
+  --prospect-coach-min-speaker-confidence N
+                             With speaker labels/semantic turns, only coach prospect turns above this confidence
+  --summary-every-sec N      Refresh compact call memory for the streaming coach
+  --summary-provider PROVIDER anthropic | openai
+  --summary-model MODEL      Model for compact call memory, prefix provider:model allowed
+  --summary-service-tier TIER OpenAI Responses service_tier, e.g. priority
+  --no-summary               Disable background compact call memory
   --speaker-model MODEL      Claude model for speaker labels (default Haiku)
   --speaker-labels           Force Haiku labels even with native diarize
   --no-speaker-labels        Skip logical speaker separation
@@ -3537,6 +4300,12 @@ async function main() {
     3000,
     Number(readFlag(argv, "--prospect-coach-timeout-ms", env("LIVE_PROSPECT_COACH_TIMEOUT_MS", "15000"))) || 15000,
   );
+  const prospectCoachMinSpeakerConfidence = clampNumber(
+    readFlag(argv, "--prospect-coach-min-speaker-confidence", env("LIVE_PROSPECT_COACH_MIN_SPEAKER_CONFIDENCE", "0.65")),
+    0,
+    1,
+    0.65,
+  );
   const minActivePct = Math.max(0, Number(readFlag(argv, "--min-active-pct", env("EX_LIVE_MONITOR_MIN_ACTIVE_PCT", "0.35"))) || 0);
   const sentenceHoldMs = Math.max(0, Number(readFlag(argv, "--sentence-hold-ms", env("EX_LIVE_MONITOR_SENTENCE_HOLD_MS", "4000"))) || 0);
   const language = readFlag(argv, "--language", env("EX_LIVE_MONITOR_LANGUAGE", "en"));
@@ -3552,6 +4321,41 @@ async function main() {
     "--realtime-stt-delay",
     env("EX_LIVE_MONITOR_REALTIME_STT_DELAY", "xhigh"),
   ).trim();
+  const realtimeDirectCoachEnabled = hasFlag(argv, "--realtime-direct-coach")
+    || env("EX_LIVE_MONITOR_REALTIME_DIRECT_COACH", "").toLowerCase() === "true";
+  const realtimeDirectModel = readFlag(
+    argv,
+    "--realtime-direct-model",
+    env("EX_LIVE_MONITOR_REALTIME_DIRECT_MODEL", "gpt-realtime-2"),
+  ).trim() || "gpt-realtime-2";
+  const realtimeDirectTimeoutMs = Math.max(
+    3000,
+    Number(readFlag(argv, "--realtime-direct-timeout-ms", env("EX_LIVE_MONITOR_REALTIME_DIRECT_TIMEOUT_MS", "20000"))) || 20000,
+  );
+  const realtimeDirectReasoningEffort = readFlag(
+    argv,
+    "--realtime-direct-reasoning-effort",
+    env("EX_LIVE_MONITOR_REALTIME_DIRECT_REASONING_EFFORT", ""),
+  ).trim();
+  const realtimeDirectStartDelaySec = Math.max(
+    0,
+    Number(readFlag(argv, "--realtime-direct-start-delay-sec", env("EX_LIVE_MONITOR_REALTIME_DIRECT_START_DELAY_SECONDS", "0"))) || 0,
+  );
+  const realtimeDirectHoldRecheckSec = Math.max(
+    0,
+    Number(readFlag(argv, "--realtime-direct-hold-recheck-sec", env("EX_LIVE_MONITOR_REALTIME_DIRECT_HOLD_RECHECK_SECONDS", "120"))) || 120,
+  );
+  const realtimeDirectMinChunkSec = Math.max(
+    0,
+    Number(readFlag(argv, "--realtime-direct-min-chunk-sec", env("EX_LIVE_MONITOR_REALTIME_DIRECT_MIN_CHUNK_SECONDS", "3"))) || 0,
+  );
+  const realtimeDirectIncompleteHoldMs = Math.max(
+    0,
+    Number(readFlag(argv, "--realtime-direct-incomplete-hold-ms", env("EX_LIVE_MONITOR_REALTIME_DIRECT_INCOMPLETE_HOLD_MS", "6000"))) || 0,
+  );
+  const realtimeDirectCoachOnly = hasFlag(argv, "--realtime-direct-coach-only")
+    || env("EX_LIVE_MONITOR_REALTIME_DIRECT_COACH_ONLY", "").toLowerCase() === "true";
+  const nextLineCoachUiEnabled = prospectOnlyCoachEnabled || realtimeDirectCoachEnabled;
   const sttResponseFormat = readFlag(
     argv,
     "--stt-response-format",
@@ -3586,6 +4390,51 @@ async function main() {
     argv,
     "--coach-model",
     env("LIVE_CALL_MONITOR_COACH_MODEL", env("SALES_TRAINER_COACH_MODEL", "claude-sonnet-4-6")),
+  );
+  const conversationSummaryEnabled = !hasFlag(argv, "--no-summary")
+    && env("EX_LIVE_MONITOR_NO_SUMMARY", "").toLowerCase() !== "true";
+  const conversationSummaryEverySec = Math.max(
+    30,
+    Number(readFlag(argv, "--summary-every-sec", env("EX_LIVE_MONITOR_SUMMARY_EVERY_SECONDS", "120"))) || 120,
+  );
+  const conversationSummaryModelRaw = readFlag(
+    argv,
+    "--summary-model",
+    env("LIVE_CALL_MONITOR_SUMMARY_MODEL", env("LIVE_CALL_MONITOR_SPEAKER_MODEL", "claude-haiku-4-5")),
+  );
+  const conversationSummaryProviderRaw = readFlag(
+    argv,
+    "--summary-provider",
+    env("LIVE_CALL_MONITOR_SUMMARY_PROVIDER", ""),
+  );
+  const conversationSummaryModelParts = String(conversationSummaryModelRaw || "").split(":");
+  const conversationSummaryProvider = (() => {
+    const explicit = String(conversationSummaryProviderRaw || "").trim().toLowerCase();
+    if (["anthropic", "openai"].includes(explicit)) return explicit;
+    if (conversationSummaryModelParts.length > 1 && ["anthropic", "openai"].includes(conversationSummaryModelParts[0])) {
+      return conversationSummaryModelParts[0];
+    }
+    return /^gpt-|^o[0-9]/i.test(String(conversationSummaryModelRaw || "")) ? "openai" : "anthropic";
+  })();
+  const conversationSummaryModel = conversationSummaryModelParts.length > 1 && ["anthropic", "openai"].includes(conversationSummaryModelParts[0])
+    ? conversationSummaryModelParts.slice(1).join(":")
+    : conversationSummaryModelRaw;
+  const conversationSummaryServiceTier = readFlag(
+    argv,
+    "--summary-service-tier",
+    env("LIVE_CALL_MONITOR_SUMMARY_SERVICE_TIER", ""),
+  ).trim();
+  const conversationSummaryTimeoutMs = Math.max(
+    5000,
+    Number(readFlag(argv, "--summary-timeout-ms", env("EX_LIVE_MONITOR_SUMMARY_TIMEOUT_MS", "25000"))) || 25000,
+  );
+  const conversationSummaryMaxTranscriptChars = Math.max(
+    3000,
+    Number(readFlag(argv, "--summary-max-transcript-chars", env("EX_LIVE_MONITOR_SUMMARY_MAX_TRANSCRIPT_CHARS", "14000"))) || 14000,
+  );
+  const conversationSummaryMaxChars = Math.max(
+    800,
+    Number(readFlag(argv, "--summary-max-chars", env("EX_LIVE_MONITOR_SUMMARY_MAX_CHARS", "3200"))) || 3200,
   );
   const speakerModel = readFlag(
     argv,
@@ -3699,10 +4548,35 @@ async function main() {
       noMaxChunk,
       coachEverySec,
       coachEnabled,
+      conversationSummaryEnabled,
+      conversationSummaryEverySec,
+      conversationSummaryProvider,
+      conversationSummaryModel,
+      conversationSummaryServiceTier: conversationSummaryServiceTier || null,
+      conversationSummaryChars: 0,
+      conversationSummaryUpdatedAt: null,
+      conversationSummaryStatus: conversationSummaryEnabled ? "idle" : "off",
       prospectOnlyCoachEnabled,
+      realtimeDirectCoachEnabled,
+      realtimeDirectModel,
+      realtimeDirectTimeoutMs,
+      realtimeDirectReasoningEffort: realtimeDirectReasoningEffort || null,
+      realtimeDirectStartDelaySec,
+      realtimeDirectHoldRecheckSec,
+      realtimeDirectMinChunkSec,
+      realtimeDirectIncompleteHoldMs,
+      realtimeDirectHoldDormantUntilNextEvent: false,
+      realtimeDirectSleepUntil: null,
+      realtimeDirectSleepReason: null,
+      realtimeDirectSleepLastHeard: null,
+      realtimeDirectDormantUntilNextEvent: false,
+      realtimeDirectDormantGateId: null,
+      realtimeDirectDormantReason: null,
+      realtimeDirectCoachOnly,
       prospectCoachProvider,
       prospectCoachModel,
       prospectCoachServiceTier: prospectCoachServiceTier || null,
+      prospectCoachMinSpeakerConfidence,
       prospectCoachPlaybookFile: prospectCoachPlaybook ? path.resolve(prospectCoachPlaybookFile) : null,
       prospectCoachPlaybookChars: prospectCoachPlaybook.length,
       prospectCoachPlaybookMaxChars,
@@ -3743,12 +4617,13 @@ async function main() {
         eventSourceService: eventGated ? eventGateSourceService : null,
       },
       liveSuggestion: {
-        enabled: prospectOnlyCoachEnabled,
-        status: prospectOnlyCoachEnabled ? "idle" : "off",
+        enabled: nextLineCoachUiEnabled,
+        status: nextLineCoachUiEnabled ? "idle" : "off",
         text: "",
         finalText: "",
-        provider: prospectCoachProvider,
-        model: prospectCoachModel || null,
+        provider: realtimeDirectCoachEnabled ? "openai-realtime" : prospectCoachProvider,
+        model: realtimeDirectCoachEnabled ? realtimeDirectModel : prospectCoachModel || null,
+        outputMode: realtimeDirectCoachOnly ? "coach-only" : "heard-say",
         serviceTier: prospectCoachServiceTier || null,
         playbookChars: prospectCoachPlaybook.length,
         playbookMaxChars: prospectCoachPlaybookMaxChars,
@@ -3758,9 +4633,16 @@ async function main() {
         taxJurisdictionConfidence: null,
         taxJurisdictionReason: null,
         sequence: 0,
+        prospectText: "",
+        acceptInput: null,
+        mode: "wait",
+        signal: "",
+        topic: "",
+        direction: "",
       },
     },
     transcripts: [],
+    realtimeDirectTurns: [],
     events: [],
     advice: null,
   };
@@ -3910,19 +4792,247 @@ async function main() {
     sessionId: sessionId || null,
     semanticCallMemory: "",
   };
+  const realtimeDirectCoach = realtimeDirectCoachEnabled
+    ? new OpenAiRealtimeDirectCoach({
+      apiKey: process.env.OPENAI_API_KEY || "",
+      model: realtimeDirectModel,
+      instructions: buildRealtimeDirectCoachInstructions({
+        metadata: monitorMetadata,
+        playbook: cleanText(prospectCoachPlaybook, prospectCoachPlaybookMaxChars),
+        summary: "",
+        coachOnly: realtimeDirectCoachOnly,
+      }),
+      timeoutMs: realtimeDirectTimeoutMs,
+      reasoningEffort: realtimeDirectReasoningEffort,
+      safetyIdentifier: `tagcontactbridge-ex-live-realtime-direct-${agentExtNumber || "unknown"}`,
+    })
+    : null;
   let prospectCoachInFlight = false;
   let prospectCoachPendingEntry = null;
   let prospectCoachSequence = 0;
   let prospectCoachMemory = "";
+  let conversationSummary = "";
+  let conversationSummaryInFlight = false;
+  let conversationSummaryLastAt = 0;
+  let conversationSummaryTranscriptCount = 0;
+  let realtimeDirectLastMemoryContext = "";
+  let realtimeDirectSleepUntilMs = 0;
+  let realtimeDirectSleepReason = "";
+  let realtimeDirectSleepLastHeard = "";
+  let realtimeDirectLastSleepDropLogAt = 0;
+  let realtimeDirectDormantGateId = "";
+  let realtimeDirectDormantReason = "";
+  let realtimeDirectDormantLastHeard = "";
+  let realtimeDirectHeldFragment = null;
+
+  function publishRealtimeDirectSleepState() {
+    state.public.realtimeDirectSleepUntil = realtimeDirectSleepUntilMs
+      ? new Date(realtimeDirectSleepUntilMs).toISOString()
+      : null;
+    state.public.realtimeDirectSleepReason = realtimeDirectSleepReason || null;
+    state.public.realtimeDirectSleepLastHeard = realtimeDirectSleepLastHeard || null;
+  }
+
+  function publishRealtimeDirectDormantState() {
+    state.public.realtimeDirectDormantUntilNextEvent = Boolean(realtimeDirectDormantGateId);
+    state.public.realtimeDirectDormantGateId = realtimeDirectDormantGateId || null;
+    state.public.realtimeDirectDormantReason = realtimeDirectDormantReason || null;
+    state.public.realtimeDirectSleepLastHeard = realtimeDirectDormantLastHeard || realtimeDirectSleepLastHeard || null;
+  }
+
+  function setRealtimeDirectSleep(seconds, reason, heard = "") {
+    const sec = Math.max(0, Number(seconds) || 0);
+    if (!realtimeDirectCoachEnabled || !sec) return false;
+    const until = Date.now() + sec * 1000;
+    if (until <= realtimeDirectSleepUntilMs) return false;
+    realtimeDirectSleepUntilMs = until;
+    realtimeDirectSleepReason = cleanText(reason, 120);
+    realtimeDirectSleepLastHeard = cleanText(heard, 240);
+    publishRealtimeDirectSleepState();
+    addEvent(state, eventLog, "realtime_direct.sleep", `sleeping realtime coach for ${sec}s (${realtimeDirectSleepReason})`, {
+      until: state.public.realtimeDirectSleepUntil,
+      reason: realtimeDirectSleepReason,
+      heard: realtimeDirectSleepLastHeard || null,
+    });
+    setLiveSuggestion({
+      status: "sleeping",
+      text: "",
+      finalText: "",
+      prospectText: "",
+      mode: "wait",
+      acceptInput: false,
+      signal: realtimeDirectSleepLastHeard || "",
+      topic: realtimeDirectSleepReason === "hold-prompt-recheck" ? "hold prompt" : "call delay",
+      direction: realtimeDirectSleepReason === "hold-prompt-recheck"
+        ? `Exact hold phrase heard. Rechecking in ${sec}s.`
+        : `Waiting ${sec}s after the call event before checking audio.`,
+      error: null,
+    });
+    broadcast();
+    return true;
+  }
+
+  function clearRealtimeDirectSleep(reason = "clear") {
+    if (!realtimeDirectSleepUntilMs) return;
+    realtimeDirectSleepUntilMs = 0;
+    realtimeDirectSleepReason = "";
+    realtimeDirectSleepLastHeard = "";
+    publishRealtimeDirectSleepState();
+    addEvent(state, eventLog, "realtime_direct.wake", `realtime coach awake (${reason})`);
+    if (cxGateState.active && reason !== "call-gate-idle") {
+      setLiveSuggestion({
+        status: "listening",
+        text: "",
+        finalText: "",
+        prospectText: "",
+        mode: "wait",
+        acceptInput: true,
+        signal: "",
+        topic: "",
+        direction: "Listening for a complete, response-worthy sentence.",
+        error: null,
+      });
+    }
+    broadcast();
+  }
+
+  function clearRealtimeDirectDormant(reason = "new-event") {
+    if (!realtimeDirectDormantGateId) return;
+    realtimeDirectDormantGateId = "";
+    realtimeDirectDormantReason = "";
+    realtimeDirectDormantLastHeard = "";
+    publishRealtimeDirectDormantState();
+    addEvent(state, eventLog, "realtime_direct.dormant_clear", `realtime coach dormant cleared (${reason})`);
+    broadcast();
+  }
+
+  function isRealtimeDirectDormantMatch(match) {
+    return Boolean(realtimeDirectDormantGateId && gateMatchId(match) === realtimeDirectDormantGateId);
+  }
+
+  function setRealtimeDirectDormantUntilNextEvent(reason, heard = "") {
+    if (!realtimeDirectCoachEnabled) return false;
+    const gateId = cxGateState.currentUii || `dormant-${Date.now()}`;
+    realtimeDirectDormantGateId = gateId;
+    realtimeDirectDormantReason = cleanText(reason, 120);
+    realtimeDirectDormantLastHeard = cleanText(heard, 240);
+    publishRealtimeDirectDormantState();
+    addEvent(state, eventLog, "realtime_direct.dormant", `realtime coach dormant until next event (${realtimeDirectDormantReason})`, {
+      gateId,
+      heard: realtimeDirectDormantLastHeard || null,
+    });
+    deactivateCxGate(realtimeDirectDormantReason || "realtime-direct-dormant");
+    return true;
+  }
+
+  function getRealtimeDirectSleepRemainingMs() {
+    if (!realtimeDirectSleepUntilMs) return 0;
+    const remaining = realtimeDirectSleepUntilMs - Date.now();
+    if (remaining <= 0) {
+      clearRealtimeDirectSleep("cooldown-expired");
+      return 0;
+    }
+    return remaining;
+  }
 
   function setLiveSuggestion(patch = {}) {
     state.public.liveSuggestion = {
       ...(state.public.liveSuggestion || {}),
-      enabled: prospectOnlyCoachEnabled,
+      enabled: nextLineCoachUiEnabled,
       ...patch,
       updatedAt: new Date().toISOString(),
     };
     broadcast();
+  }
+
+  async function maybeRefreshConversationSummary(reason = "transcript", { force = false } = {}) {
+    if (!conversationSummaryEnabled) return;
+    if (!state.transcripts.length) return;
+    const now = Date.now();
+    if (conversationSummaryInFlight) return;
+    if (!force) {
+      if (state.transcripts.length === conversationSummaryTranscriptCount) return;
+      if (now - conversationSummaryLastAt < conversationSummaryEverySec * 1000) return;
+    }
+    conversationSummaryInFlight = true;
+    conversationSummaryLastAt = now;
+    state.public.conversationSummaryStatus = "refreshing";
+    broadcast();
+    try {
+      addEvent(state, eventLog, "summary.start", "refreshing compact call memory", {
+        reason,
+        transcripts: state.transcripts.length,
+      });
+      const started = Date.now();
+      const result = await runConversationSummary({
+        transcripts: state.transcripts,
+        previousSummary: conversationSummary,
+        metadata: monitorMetadata,
+        provider: conversationSummaryProvider,
+        model: conversationSummaryModel,
+        serviceTier: conversationSummaryProvider === "openai" ? conversationSummaryServiceTier : "",
+        timeoutMs: conversationSummaryTimeoutMs,
+        maxTranscriptChars: conversationSummaryMaxTranscriptChars,
+        maxSummaryChars: conversationSummaryMaxChars,
+      });
+      if (result.summary) {
+        conversationSummary = result.summary;
+        conversationSummaryTranscriptCount = state.transcripts.length;
+        monitorMetadata = {
+          ...monitorMetadata,
+          conversationSummary,
+        };
+        state.public.conversationSummary = conversationSummary;
+        state.public.conversationSummaryChars = conversationSummary.length;
+        state.public.conversationSummaryUpdatedAt = new Date().toISOString();
+        state.public.conversationSummaryStatus = "ready";
+        writeJsonLine(path.join(runDir, "conversation-summary.ndjson"), {
+          at: state.public.conversationSummaryUpdatedAt,
+          reason,
+          summary: conversationSummary,
+          transcripts: state.transcripts.length,
+          elapsedMs: Date.now() - started,
+          provider: result.provider,
+          model: result.model,
+          serviceTier: result.serviceTier || null,
+          usage: result.usage || null,
+        });
+        addEvent(state, eventLog, "summary.done", `compact memory updated (${conversationSummary.length} chars)`, {
+          reason,
+          elapsedMs: Date.now() - started,
+          provider: result.provider,
+          model: result.model,
+          serviceTier: result.serviceTier || null,
+        });
+      } else {
+        state.public.conversationSummaryStatus = "empty";
+        addEvent(state, eventLog, "summary.empty", "compact memory returned empty", { reason });
+      }
+    } catch (error) {
+      state.public.conversationSummaryStatus = "error";
+      state.public.conversationSummaryError = error.message;
+      addEvent(state, eventLog, "summary.error", error.message, { reason });
+    } finally {
+      conversationSummaryInFlight = false;
+      broadcast();
+    }
+  }
+
+  async function maybeSendRealtimeDirectMemoryUpdate(reason = "chunk") {
+    if (!realtimeDirectCoach || !conversationSummary) return 0;
+    const context = buildRealtimeDirectCoachMemoryContext({
+      summary: conversationSummary,
+      metadata: monitorMetadata,
+    });
+    if (!context || context === realtimeDirectLastMemoryContext) return 0;
+    await realtimeDirectCoach.addTextContext(context);
+    realtimeDirectLastMemoryContext = context;
+    addEvent(state, eventLog, "realtime_direct.memory", `sent compact memory update (${context.length} chars)`, {
+      reason,
+      summaryChars: conversationSummary.length,
+      memoryContextChars: context.length,
+    });
+    return context.length;
   }
 
   async function runProspectOnlyCoach(entry) {
@@ -3936,15 +5046,19 @@ async function main() {
     const sequence = prospectCoachSequence;
     const started = Date.now();
     const prospectText = cleanText(entry.text, 900);
+    const coachMemoryForContext = cleanText([
+      conversationSummary ? `Summary: ${conversationSummary}` : "",
+      prospectCoachMemory,
+    ].filter(Boolean).join("\n"), 4200);
     const playbookSelection = selectProspectCoachPlaybookContext({
       playbookText: prospectCoachPlaybook,
       prospectText,
-      memory: prospectCoachMemory,
+      memory: coachMemoryForContext,
       maxChars: prospectCoachPlaybookMaxChars,
     });
     const taxJurisdiction = classifyTaxJurisdiction({
       prospectText,
-      memory: prospectCoachMemory,
+      memory: coachMemoryForContext,
     });
     setLiveSuggestion({
       status: "streaming",
@@ -3986,6 +5100,7 @@ async function main() {
         prospectText,
         recentTranscripts: state.transcripts,
         memory: prospectCoachMemory,
+        conversationSummary,
         metadata: monitorMetadata,
         playbook: playbookSelection.context,
         taxJurisdiction,
@@ -4370,6 +5485,7 @@ async function main() {
       model: decision.model,
     });
     broadcast();
+    void maybeRefreshConversationSummary("semantic-glue");
     void maybeRefreshAdvice("semantic-glue");
     enqueueSpeakerLabel(livePreviousEntry, livePreviousEntry.text, livePreviousEntry.id);
     return true;
@@ -4527,7 +5643,8 @@ async function main() {
       sourceChunkIds: entry.stagedSourceChunkIds,
     });
     broadcast();
-    void runProspectOnlyCoach(entry);
+    void maybeRefreshConversationSummary("transcript-stage");
+    enqueueProspectCoach(entry, "transcript-stage");
     void maybeRefreshAdvice("transcript-stage");
     enqueueSemanticGlue(entry, entryId);
     enqueueSpeakerLabel(entry, text, entryId);
@@ -4537,6 +5654,38 @@ async function main() {
   function transcriptEntrySpeaker(entry = {}) {
     const raw = String(entry.speakerSegments?.[0]?.speaker || "").trim().toLowerCase();
     return SPEAKER_KEYS.includes(raw) ? raw : "unknown";
+  }
+
+  function transcriptEntrySpeakerConfidence(entry = {}) {
+    return clampNumber(entry.speakerSegments?.[0]?.confidence, 0, 1, 0);
+  }
+
+  function shouldRunProspectCoachForEntry(entry = {}) {
+    if (!prospectOnlyCoachEnabled || !entry?.text) return false;
+    const speaker = transcriptEntrySpeaker(entry);
+    if (speaker === "prospect") {
+      return transcriptEntrySpeakerConfidence(entry) >= prospectCoachMinSpeakerConfidence;
+    }
+    if (!semanticTurnsEnabled && !nativeDiarizeEnabled && !speakerLabelsEnabled) {
+      return speaker === "unknown";
+    }
+    return false;
+  }
+
+  function enqueueProspectCoach(entry, reason = "transcript") {
+    if (shouldRunProspectCoachForEntry(entry)) {
+      void runProspectOnlyCoach(entry);
+      return true;
+    }
+    if (prospectOnlyCoachEnabled && entry?.text) {
+      addEvent(state, eventLog, "prospect_coach.skip", `not prospect turn (${transcriptEntrySpeaker(entry)})`, {
+        entryId: entry.id || null,
+        reason,
+        speaker: transcriptEntrySpeaker(entry),
+        confidence: transcriptEntrySpeakerConfidence(entry),
+      });
+    }
+    return false;
   }
 
   function findRecentSemanticTurnDuplicate(turn, meta = {}) {
@@ -4877,6 +6026,8 @@ async function main() {
 
     if (published.length || revised) {
       broadcast();
+      void maybeRefreshConversationSummary("semantic-turn");
+      published.forEach((entry) => enqueueProspectCoach(entry, "semantic-turn"));
       void maybeRefreshAdvice("semantic-turn");
     } else {
       broadcast();
@@ -5046,6 +6197,7 @@ async function main() {
     semanticCallMemory = "";
     prospectCoachMemory = "";
     prospectCoachPendingEntry = null;
+    realtimeDirectHeldFragment = null;
     nativeSpeakerAssignments.clear();
     lastAdviceAt = 0;
     monitorMetadata = {
@@ -5059,6 +6211,11 @@ async function main() {
       text: "",
       finalText: "",
       prospectText: "",
+      acceptInput: null,
+      mode: "wait",
+      signal: "",
+      topic: "",
+      direction: "",
       elapsedMs: null,
       error: null,
     });
@@ -5096,11 +6253,20 @@ async function main() {
 
   function activateCxGate(match) {
     const uii = gateMatchId(match);
+    if (realtimeDirectDormantGateId && realtimeDirectDormantGateId !== uii) {
+      clearRealtimeDirectDormant("next-call-event");
+    }
+    if (realtimeDirectDormantGateId && realtimeDirectDormantGateId === uii) {
+      deactivateCxGate("dormant-until-next-call-event");
+      return;
+    }
     if (cxGateState.active && cxGateState.currentUii === uii) return;
     if (cxGateState.currentUii !== uii) {
       cxGateState.sessionSequence += 1;
       resetPending();
       resetLogicalTranscriptState();
+      clearRealtimeDirectSleep("new-call");
+      setRealtimeDirectSleep(realtimeDirectStartDelaySec, "call-start-delay");
       monitorMetadata = {
         ...monitorMetadata,
         cxUii: uii,
@@ -5148,6 +6314,7 @@ async function main() {
     cxGateState.currentUii = null;
     cxGateState.lastReason = reason;
     cxGateState.lastMatch = null;
+    clearRealtimeDirectSleep("call-gate-idle");
     monitorMetadata = {
       ...monitorMetadata,
       cxUii: null,
@@ -5216,8 +6383,64 @@ async function main() {
   }
 
   state.actions = {
-    fakeCallStart({ durationSec = null, caseId = null, queueItemId = null } = {}) {
+    async superviseAttachOnce() {
+      if (!agentExt?.id) return { ok: false, error: "agent extension is not resolved" };
+      if (!device?.id) return { ok: false, error: "supervisor device is not resolved" };
+      try {
+        const result = await superviseActiveCall({
+          lookupToken,
+          superviseToken: monitorToken,
+          agentExtensionId: agentExt.id,
+          supervisorExtensionId: supervisorExt.id,
+          supervisorDeviceId: device.id,
+          partyMode,
+          callPickMode,
+          callStartAfterMs: 0,
+        });
+        monitorMetadata = {
+          ...monitorMetadata,
+          telephonySessionId: result.telephonySessionId,
+          pickedCall: result.pickedCall,
+          pickedParty: result.pickedParty,
+        };
+        addEvent(state, eventLog, "supervise", `manual attach requested on telephonySessionId=${result.telephonySessionId}`, {
+          result,
+        });
+        broadcast();
+        return { ok: true, result };
+      } catch (error) {
+        addEvent(state, eventLog, "supervise.attach_error", error.message);
+        broadcast();
+        return { ok: false, error: error.message };
+      }
+    },
+    async coachStart({ durationSec = null, caseId = null, queueItemId = null, manual = false } = {}) {
       if (!eventGated) return { ok: false, error: "start this monitor with --event-gated or --fake-event-gate" };
+      if (cxGateState.active) {
+        if (realtimeDirectDormantGateId && realtimeDirectDormantGateId === cxGateState.currentUii) {
+          return { ok: false, error: "coach is dormant for this call after hold prompt; waiting for the next call event" };
+        }
+        addEvent(state, eventLog, "cx_gate.manual_start", "manual coaching start requested", {
+          currentUii: cxGateState.currentUii,
+          delayActive: Boolean(realtimeDirectSleepUntilMs),
+        });
+        broadcast();
+        return { ok: true, gate: state.public.cxGate };
+      }
+
+      if (!fakeEventGate) {
+        const gate = await refreshAppEventGate(true);
+        if (gate.active) {
+          addEvent(state, eventLog, "cx_gate.manual_start", "manual coaching start requested after event refresh", {
+            currentUii: gate.currentUii,
+            delayActive: Boolean(realtimeDirectSleepUntilMs),
+          });
+          broadcast();
+          return { ok: true, gate: state.public.cxGate };
+        }
+        return { ok: false, error: `no active call event found (${gate.lastReason || "idle"})` };
+      }
+
       fakeGateEvent = createFakeGateEvent({ durationSec, caseId, queueItemId });
       activateCxGate({
         event: fakeGateEvent,
@@ -5445,6 +6668,269 @@ async function main() {
     return cxGateState;
   }
 
+  async function runRealtimeDirectCoachChunk({ pcmuBuffer, chunkId, startedAt, endedAt, stats, flushReason = "interval" }) {
+    if (!realtimeDirectCoach) return false;
+    if (Number(stats.durationSec || 0) < realtimeDirectMinChunkSec && flushReason !== "shutdown" && flushReason !== "call-disposed") {
+      addEvent(state, eventLog, "realtime_direct.hold_chunk", `holding short realtime chunk (${Number(stats.durationSec || 0).toFixed(2)}s < ${realtimeDirectMinChunkSec}s)`, {
+        chunkId,
+        durationSec: stats.durationSec,
+        flushReason,
+      });
+      return false;
+    }
+    const started = Date.now();
+    const sequence = prospectCoachSequence + 1;
+    prospectCoachSequence = sequence;
+    const playbookContext = cleanText(prospectCoachPlaybook, prospectCoachPlaybookMaxChars);
+    let memoryUpdateChars = 0;
+    try {
+      memoryUpdateChars = await maybeSendRealtimeDirectMemoryUpdate("realtime-direct");
+    } catch (error) {
+      addEvent(state, eventLog, "realtime_direct.memory_error", error.message, { sequence });
+    }
+    const textContext = buildRealtimeDirectCoachTextContext({
+      chunkId,
+      stats,
+      flushReason,
+    });
+    setLiveSuggestion({
+      status: "streaming",
+      sequence,
+      text: "",
+      finalText: "",
+      prospectText: "",
+      startedAt: new Date(started).toISOString(),
+      elapsedMs: null,
+      provider: "openai-realtime",
+      model: realtimeDirectModel,
+      serviceTier: null,
+      playbookSections: prospectCoachPlaybook ? ["direct-realtime-playbook"] : [],
+      taxKnowledgeSections: prospectCoachPlaybook ? ["direct-realtime-tax-context"] : [],
+      taxJurisdiction: "mixed-audio",
+      taxJurisdictionConfidence: "model-inferred",
+      taxJurisdictionReason: "gpt-realtime-2 hears mixed party audio directly",
+      playbookChars: playbookContext.length,
+      playbookMaxChars: prospectCoachPlaybookMaxChars,
+      outputMode: realtimeDirectCoachOnly ? "coach-only" : "heard-say",
+      mode: "wait",
+      acceptInput: null,
+      signal: "",
+      topic: "",
+      direction: "",
+      error: null,
+    });
+    addEvent(state, eventLog, "realtime_direct.start", `coaching ${chunkId} with ${realtimeDirectModel}`, {
+      chunkId,
+      sequence,
+      durationSec: stats.durationSec,
+      activePctOver500: stats.activePctOver500,
+      flushReason,
+      playbookChars: playbookContext.length,
+      summaryChars: conversationSummary.length,
+      memoryUpdateChars,
+      textContextChars: textContext.length,
+    });
+
+    let lastBroadcastAt = 0;
+    const result = await realtimeDirectCoach.coachPcmu({
+      pcmuBuffer,
+      timeoutMs: realtimeDirectTimeoutMs,
+      instructions: realtimeDirectCoachOnly
+        ? "Use the latest committed audio item and latest text context item together. Do not output a transcript. Stream only one compact JSON object with acceptInput/mode/say/signal/topic/direction. Only if you hear the exact words 'please continue to hold', set acceptInput=false, mode=HOLD, say=WAIT, signal='please continue to hold'. For all other hold/system/silence/noise, set acceptInput=true, mode=WAIT, say=WAIT. If the newest useful content is party B/prospect, make say the exact next line the sales agent should say. If it is party A/agent, make say private coaching feedback."
+        : "Use the latest committed audio item and latest text context item together. Stream only HEARD/SAY in the required format. If the newest useful content is party B/prospect, make SAY the exact next line the sales agent should say.",
+      textContext,
+      onDelta: (_delta, output) => {
+        const now = Date.now();
+        if (now - lastBroadcastAt < 80 && output.length < 16) return;
+        lastBroadcastAt = now;
+        if ((state.public.liveSuggestion || {}).sequence !== sequence) return;
+        const parsed = parseRealtimeDirectCoachOutput(output);
+        const partialExactHold = hasExactContinueHoldPhrase([
+          output,
+          parsed.signal,
+          parsed.topic,
+          parsed.direction,
+          parsed.say,
+        ].filter(Boolean).join(" "));
+        setLiveSuggestion({
+          status: parsed.acceptInput === false && partialExactHold ? "hold" : "streaming",
+          text: parsed.acceptInput === false && partialExactHold ? "" : parsed.say || parsed.raw || output,
+          prospectText: realtimeDirectCoachOnly ? "" : parsed.heard || "",
+          mode: parsed.acceptInput === false && partialExactHold ? "hold" : parsed.mode || "wait",
+          acceptInput: parsed.acceptInput,
+          signal: parsed.signal || "",
+          topic: parsed.topic || "",
+          direction: parsed.direction || "",
+          outputMode: realtimeDirectCoachOnly ? "coach-only" : "heard-say",
+          elapsedMs: now - started,
+        });
+      },
+    });
+    const heard = cleanText(result.heard || "", 1200);
+    const rawResultMode = cleanText(result.mode || "", 40).toLowerCase();
+    const resultMode = rawResultMode === "coach" ? "prospect_response" : rawResultMode;
+    const acceptInput = result.acceptInput;
+    const resultSignal = cleanText(result.signal || "", 220);
+    const resultTopic = cleanText(result.topic || "", 80);
+    const resultDirection = cleanText(result.direction || "", 220);
+    const resultSay = cleanText(result.say || "", 900);
+    const rawText = cleanText(result.raw || "", 1200);
+    const rawHoldModeDetected = /\bMODE\s*[:=]\s*HOLD\b/i.test(rawText);
+    const exactHoldPhraseHeard = hasExactContinueHoldPhrase([
+      heard,
+      rawText,
+      resultSignal,
+      resultTopic,
+      resultDirection,
+      resultSay,
+    ].filter(Boolean).join(" "));
+    const holdControlRequested = resultMode === "hold" || acceptInput === false || rawHoldModeDetected;
+    const heardIsHoldPrompt = exactHoldPhraseHeard;
+    if (holdControlRequested && !exactHoldPhraseHeard) {
+      addEvent(state, eventLog, "realtime_direct.strict_hold_ignored", "hold control ignored because exact phrase was not returned", {
+        chunkId,
+        sequence,
+        mode: resultMode || null,
+        acceptInput,
+        signal: resultSignal || null,
+        topic: resultTopic || null,
+      });
+    }
+    const heardLooksIncomplete = !heardIsHoldPrompt && looksLikeIncompleteRealtimeHeard(heard);
+    if (heardLooksIncomplete && realtimeDirectIncompleteHoldMs > 0) {
+      realtimeDirectHeldFragment = {
+        chunkId,
+        heard,
+        raw: result.raw || "",
+        at: Date.now(),
+      };
+      setLiveSuggestion({
+        status: "holding",
+        text: "",
+        finalText: "",
+        prospectText: heard,
+        elapsedMs: Date.now() - started,
+        usage: result.usage || null,
+        mode: resultMode || "wait",
+        acceptInput,
+        signal: resultSignal,
+        topic: resultTopic,
+        direction: resultDirection,
+      });
+      addEvent(state, eventLog, "realtime_direct.fragment_hold", `holding incomplete realtime fragment: ${heard}`, {
+        chunkId,
+        sequence,
+        holdMs: realtimeDirectIncompleteHoldMs,
+        usage: result.usage || null,
+      });
+      broadcast();
+      return true;
+    }
+    const priorHeld = realtimeDirectHeldFragment;
+    realtimeDirectHeldFragment = null;
+    const combinedHeard = cleanText([
+      priorHeld?.heard && heard ? joinTranscriptContinuation(priorHeld.heard, heard) : priorHeld?.heard || "",
+      priorHeld?.heard && heard ? "" : heard,
+    ].filter(Boolean).join(" "), 1200);
+    const effectiveHeard = realtimeDirectCoachOnly ? "" : combinedHeard || heard;
+    const say = heardIsHoldPrompt || resultMode === "wait" ? "" : resultSay;
+    const finishedAt = Date.now();
+    const outputModeValue = heardIsHoldPrompt ? "hold" : (resultMode || (say ? "prospect_response" : "wait"));
+    if (effectiveHeard && !heardIsHoldPrompt) {
+      const entry = {
+        id: `${chunkId}-realtime2`,
+        at: new Date(endedAt).toISOString(),
+        startedAt: new Date(startedAt).toISOString(),
+        endedAt: new Date(endedAt).toISOString(),
+        text: effectiveHeard,
+        speakerSegments: [{
+          speaker: "prospect",
+          text: effectiveHeard,
+          confidence: say ? 0.78 : 0.55,
+          reason: "gpt-realtime-2 direct mixed-audio interpretation",
+        }],
+        speakerModel: realtimeDirectModel,
+        speakerElapsedMs: finishedAt - started,
+        speakerStatus: "openai-realtime-direct",
+        model: realtimeDirectModel,
+        responseFormat: "realtime-direct-heard-say",
+        byteLength: pcmuBuffer.length,
+        durationSec: Number(stats.durationSec.toFixed(2)),
+        activePctOver500: stats.activePctOver500,
+        elapsedMs: finishedAt - started,
+        stageReason: "realtime-direct",
+        revision: 0,
+      };
+      state.transcripts.push(entry);
+      if (state.transcripts.length > 300) state.transcripts.splice(0, state.transcripts.length - 300);
+      writeJsonLine(path.join(runDir, "transcripts.ndjson"), entry);
+      void maybeRefreshConversationSummary("realtime-direct");
+    }
+    prospectCoachMemory = cleanText([
+      prospectCoachMemory,
+      effectiveHeard && !heardIsHoldPrompt ? `Prospect: ${effectiveHeard}` : "",
+      heardIsHoldPrompt ? `System: ${effectiveHeard || "hold prompt"}` : "",
+      resultMode ? `Coach mode: ${resultMode}` : "",
+      resultSignal ? `Signal: ${resultSignal}` : "",
+      resultTopic ? `Topic: ${resultTopic}` : "",
+      resultDirection ? `Direction: ${resultDirection}` : "",
+      say ? `Coach: ${say}` : "Coach: WAIT",
+    ].filter(Boolean).join("\n"), 2000);
+    setLiveSuggestion({
+      status: heardIsHoldPrompt ? "hold" : say ? "done" : "wait",
+      text: say,
+      finalText: say,
+      prospectText: effectiveHeard,
+      elapsedMs: finishedAt - started,
+      usage: result.usage || null,
+      mode: outputModeValue,
+      acceptInput,
+      signal: resultSignal,
+      topic: resultTopic,
+      direction: resultDirection,
+      outputMode: realtimeDirectCoachOnly ? "coach-only" : "heard-say",
+    });
+    const realtimeTurn = {
+      at: new Date().toISOString(),
+      sequence,
+      chunkId,
+      heard: effectiveHeard,
+      say,
+      mode: outputModeValue,
+      acceptInput,
+      signal: resultSignal,
+      topic: resultTopic,
+      direction: resultDirection,
+      outputMode: realtimeDirectCoachOnly ? "coach-only" : "heard-say",
+      raw: result.raw || "",
+      elapsedMs: finishedAt - started,
+      model: result.model,
+      provider: result.provider,
+      sessionId: result.sessionId || null,
+      usage: result.usage || null,
+      stats,
+      durationSec: Number(stats.durationSec?.toFixed ? stats.durationSec.toFixed(2) : stats.durationSec || 0),
+      activePctOver500: stats.activePctOver500,
+    };
+    state.realtimeDirectTurns.push(realtimeTurn);
+    if (state.realtimeDirectTurns.length > 200) {
+      state.realtimeDirectTurns.splice(0, state.realtimeDirectTurns.length - 200);
+    }
+    writeJsonLine(path.join(runDir, "realtime-direct-coach.ndjson"), realtimeTurn);
+    addEvent(state, eventLog, heardIsHoldPrompt ? "realtime_direct.hold" : say ? "realtime_direct.done" : "realtime_direct.wait", say || (heardIsHoldPrompt ? "HOLD" : "WAIT"), {
+      chunkId,
+      sequence,
+      heard: effectiveHeard,
+      elapsedMs: finishedAt - started,
+      usage: result.usage || null,
+    });
+    if (heardIsHoldPrompt) {
+      setRealtimeDirectSleep(realtimeDirectHoldRecheckSec, "hold-prompt-recheck", "please continue to hold");
+    }
+    broadcast();
+    return true;
+  }
+
   async function processAudioChunk({ pcmuBuffer, chunkId, startedAt, endedAt, stats, flushReason = "interval" }) {
     const gate = await refreshCallGate(false);
     if (callGateEnabled && !gate.active) {
@@ -5456,6 +6942,24 @@ async function main() {
       return;
     }
 
+    if (realtimeDirectCoachEnabled) {
+      const sleepRemainingMs = getRealtimeDirectSleepRemainingMs();
+      if (sleepRemainingMs > 0) {
+        const now = Date.now();
+        if (now - realtimeDirectLastSleepDropLogAt > 15_000) {
+          realtimeDirectLastSleepDropLogAt = now;
+          addEvent(state, eventLog, "realtime_direct.sleep_drop", `chunk dropped while realtime coach sleeps (${Math.ceil(sleepRemainingMs / 1000)}s left)`, {
+            chunkId,
+            reason: realtimeDirectSleepReason || null,
+            until: state.public.realtimeDirectSleepUntil,
+            stats,
+          });
+          broadcast();
+        }
+        return;
+      }
+    }
+
     const activePct = Number(stats.activePctOver500 || 0);
     if (activePct < minActivePct) {
       addEvent(state, eventLog, "chunk.skip", `quiet chunk skipped (${activePct}% active)`, {
@@ -5463,6 +6967,21 @@ async function main() {
         stats,
       });
       broadcast();
+      return;
+    }
+
+    if (realtimeDirectCoachEnabled) {
+      try {
+        await runRealtimeDirectCoachChunk({ pcmuBuffer, chunkId, startedAt, endedAt, stats, flushReason });
+      } catch (error) {
+        setLiveSuggestion({
+          status: "error",
+          error: error.message,
+          elapsedMs: null,
+        });
+        addEvent(state, eventLog, "realtime_direct.error", error.message, { chunkId });
+        broadcast();
+      }
       return;
     }
 
@@ -5665,7 +7184,8 @@ async function main() {
           revision: previousEntry.revision,
         });
         broadcast();
-        void runProspectOnlyCoach(previousEntry);
+        void maybeRefreshConversationSummary("transcript-repair");
+        enqueueProspectCoach(previousEntry, "transcript-repair");
         void maybeRefreshAdvice("transcript-repair");
         enqueueSpeakerLabel(previousEntry, previousEntry.text, previousEntry.id);
         return;
@@ -5679,7 +7199,8 @@ async function main() {
         model: entry.model,
       });
       broadcast();
-      void runProspectOnlyCoach(entry);
+      void maybeRefreshConversationSummary("transcript");
+      enqueueProspectCoach(entry, "transcript");
       void maybeRefreshAdvice("transcript");
 
       enqueueSemanticGlue(entry, entryId);
@@ -5760,7 +7281,10 @@ async function main() {
       flushPending("silence");
       return;
     }
-    if (!noMaxChunk && ageMs >= chunkSec * 1000) {
+    const maxChunkMs = realtimeDirectCoachEnabled
+      ? Math.max(chunkSec * 1000, realtimeDirectMinChunkSec * 1000)
+      : chunkSec * 1000;
+    if (!noMaxChunk && ageMs >= maxChunkMs) {
       flushPending("max-window");
     }
   }
@@ -5868,9 +7392,11 @@ async function main() {
   console.log(`  sentences:  hold fragments up to ${sentenceHoldMs}ms`);
   console.log(`  stt:        ${sttRealtimeEnabled ? `realtime:${sttModel}, delay=${realtimeSttDelay || "default"}` : `${sttModel}, format=${sttResponseFormat}${sttChunkingStrategy ? `, chunking=${sttChunkingStrategy}` : ""}`}`);
   console.log(`  stt prompt: ${includeSttDomainPrimer ? "domain primer + live context" : nativeDiarizeEnabled ? "off (diarize does not support prompts)" : "live context only"}`);
+  if (realtimeDirectCoachEnabled) console.log(`  realtime2:  direct mixed-audio coach, model=${realtimeDirectModel}, timeout=${realtimeDirectTimeoutMs}ms`);
   if (knownSpeakers.names.length) console.log(`  speakers ref: ${knownSpeakers.names.join(", ")}`);
   console.log(`  semantic:   ${semanticTurnsEnabled ? `${semanticTurnProvider}:${semanticTurnModel}${semanticTurnServiceTier ? ` tier=${semanticTurnServiceTier}` : ""}, batch=${semanticTurnBatchMs ? `${semanticTurnBatchMs}ms` : "off"}, buffer<=${semanticTurnMaxBufferChars}, memory<=${semanticTurnMemoryChars}` : "off"}`);
   console.log(`  coach:      ${coachEnabled ? `every ${coachEverySec}s, model=${coachModel}` : "off"}`);
+  console.log(`  summary:    ${conversationSummaryEnabled ? `every ${conversationSummaryEverySec}s, ${conversationSummaryProvider}:${conversationSummaryModel}${conversationSummaryServiceTier ? ` tier=${conversationSummaryServiceTier}` : ""}` : "off"}`);
   if (prospectOnlyCoachEnabled) {
     console.log(`  next-line:  streaming prospect-only coach, ${prospectCoachProvider}:${prospectCoachModel}${prospectCoachServiceTier ? ` tier=${prospectCoachServiceTier}` : ""}, playbook=${prospectCoachPlaybook.length ? `${prospectCoachPlaybook.length} chars, focused<=${prospectCoachPlaybookMaxChars}` : "off"}`);
   }
@@ -5883,6 +7409,13 @@ async function main() {
   addEvent(state, eventLog, "register", "headless AI Monitor phone registered");
   broadcast();
 
+  let conversationSummaryTimer = null;
+  if (conversationSummaryEnabled) {
+    conversationSummaryTimer = setInterval(() => {
+      void maybeRefreshConversationSummary("timer");
+    }, conversationSummaryEverySec * 1000);
+  }
+
   let cxGateTimer = null;
   if (callGateEnabled) {
     publishCxGateState();
@@ -5893,7 +7426,7 @@ async function main() {
     if (fakeEventGate) {
       setTimeout(() => {
         if (!fakeGateEvent && !cxGateState.active) {
-          state.actions.fakeCallStart({ durationSec: eventGateActiveSec });
+          state.actions.coachStart({ durationSec: eventGateActiveSec });
         }
       }, fakeEventAfterSec * 1000);
     }
@@ -5967,17 +7500,20 @@ async function main() {
     }
   } finally {
     clearInterval(flushTimer);
+    if (conversationSummaryTimer) clearInterval(conversationSummaryTimer);
     if (cxGateTimer) clearInterval(cxGateTimer);
     flushPending("shutdown");
     await transcriptionQueue.catch(() => {});
     await flushSemanticTurnBatch("shutdown").catch((error) => addEvent(state, eventLog, "semantic_turn.batch_error", error.message));
     if (stageUntilSilence) publishStagedTurn("shutdown");
+    if (state.transcripts.length) await maybeRefreshConversationSummary("shutdown", { force: true });
     if (state.transcripts.length) await maybeRefreshAdvice("forced");
     if (activeSession && !activeSession.disposed) {
       addEvent(state, eventLog, "timeout", "hanging up active monitor call");
       await activeSession.hangup().catch((error) => addEvent(state, eventLog, "hangup.error", error.message));
     }
     if (realtimeTranscriber) realtimeTranscriber.close();
+    if (realtimeDirectCoach) realtimeDirectCoach.close();
     closeOutput();
     softphone.revoke();
     if (appEventMongoReady) {

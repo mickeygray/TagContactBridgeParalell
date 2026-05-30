@@ -570,6 +570,10 @@ const {
   uploadNcoaRows,
 } = require("./ncoaUploadService");
 const {
+  runNcoaMailboxIngest,
+  runNcoaMailboxIngestIfDue,
+} = require("./ncoaMailboxIngestService");
+const {
   getLegacyMetricsMirrorStatus,
   syncLegacyMetricsMirror,
 } = require("./legacyMetricsMirrorService");
@@ -886,6 +890,8 @@ module.exports = {
   parseLogicsData,
   parseSuccessfulPayments,
   processMailHouseCsv,
+  runNcoaMailboxIngest,
+  runNcoaMailboxIngestIfDue,
   processCxCadenceEventBatch,
   processNextCxCadenceEvent,
   processNextControlPlaneEvent,
@@ -1066,6 +1072,8 @@ module.exports = {
   syncLegacyMetricsMirror,
   unzipLexisArchive,
   uploadNcoaRows,
+  runNcoaMailboxIngest,
+  runNcoaMailboxIngestIfDue,
   getNcoaUploadProgress,
   sweepStaleNcoaBatches,
   intakeLdPrePing,

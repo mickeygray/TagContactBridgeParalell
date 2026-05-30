@@ -9,9 +9,10 @@ const { CxDialQueue, LeadCadence, MasterProspectIndex } = require("../packages/s
 const { normalizeLdLeadPayload } = require("../packages/shared-services/src/inboundIntakeService");
 
 const ACTIVE_QUEUE_STATES = ["queued", "ready", "claimed", "serving", "paused"];
-const SPLIT_KEYS = new Set(["ld-custom", "ld-general"]);
+const SPLIT_KEYS = new Set(["ld-custom", "ld-custom-2", "ld-general"]);
 const SOURCE_ID_BY_KEY = {
   "ld-custom": Number(process.env.LOGICS_LD_CUSTOM_SOURCE_ID || process.env.LD_CUSTOM_SOURCE_ID || 45),
+  "ld-custom-2": Number(process.env.LOGICS_LD_CUSTOM_2_SOURCE_ID || process.env.LD_CUSTOM_2_SOURCE_ID || 47),
   "ld-general": Number(process.env.LOGICS_LD_GENERAL_SOURCE_ID || process.env.LD_GENERAL_SOURCE_ID || 46),
 };
 

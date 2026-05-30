@@ -17,6 +17,46 @@ function shellEscape(val) {
 
 const DEPLOY_SECRET = process.env.DEPLOY_SECRET || "";
 
+function childProcessEnv(extra = {}) {
+  const keepExact = [
+    "APPDATA",
+    "ComSpec",
+    "COMSPEC",
+    "HOME",
+    "LOCALAPPDATA",
+    "NODE_ENV",
+    "NUMBER_OF_PROCESSORS",
+    "OS",
+    "Path",
+    "PATH",
+    "PATHEXT",
+    "PROCESSOR_ARCHITECTURE",
+    "SystemDrive",
+    "SystemRoot",
+    "TEMP",
+    "TMP",
+    "USERDOMAIN",
+    "USERNAME",
+    "USERPROFILE",
+    "windir",
+  ];
+  const env = {};
+  for (const key of keepExact) {
+    if (process.env[key]) env[key] = process.env[key];
+  }
+  for (const [key, value] of Object.entries(process.env)) {
+    if (
+      key.startsWith("DEPLOY_") ||
+      key.startsWith("GIT_") ||
+      key.startsWith("NPM_CONFIG_") ||
+      key.startsWith("npm_config_")
+    ) {
+      env[key] = value;
+    }
+  }
+  return { ...env, ...extra };
+}
+
 const SITES = {
   wynn: {
     label: "Wynn Tax Solutions",
@@ -49,6 +89,7 @@ const deployHistory = {};
 function runGit(repoDir, args, options = {}) {
   return execFileSync("git", args, {
     cwd: repoDir,
+    env: childProcessEnv(),
     stdio: "pipe",
     encoding: "utf8",
     ...options,
@@ -127,6 +168,7 @@ async function deployBuild(brand, opts = {}, onLog = console.log) {
             onLog(`[DEPLOY:${brand}]   Staged: ${fileCount} file(s)`);
             execFileSync("git", ["commit", "-m", commitMsg], {
               cwd: repoDir,
+              env: childProcessEnv(),
               stdio: "pipe",
             });
             onLog(`[DEPLOY:${brand}]   ✓ Committed`);

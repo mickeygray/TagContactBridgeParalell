@@ -54,8 +54,9 @@ function listGeneratedLandingPages() {
   return rows;
 }
 
-function createReadDeployRouter(auth) {
+function createReadDeployRouter(auth, options = {}) {
   const router = express.Router();
+  const bloggerRuntime = options.bloggerRuntime || null;
 
   router.get("/runs", auth.requireAuth, auth.requireAdmin, async (req, res) => {
     try {
@@ -87,7 +88,9 @@ function createReadDeployRouter(auth) {
     auth.requireAdmin,
     async (_req, res) => {
       try {
-        const result = await buildBlogBotStatus();
+        const result = await buildBlogBotStatus({
+          runtimeState: bloggerRuntime ? bloggerRuntime.getState() : null,
+        });
         return res.json({ ok: true, result });
       } catch (error) {
         return res.status(error.status || 500).json(toErrorResponse(error));

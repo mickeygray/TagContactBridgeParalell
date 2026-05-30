@@ -210,7 +210,7 @@ const ROUTE_CAMPAIGNS = Object.freeze({
     sourceChannel: "lead-distribution",
     logicsSourceName: "LD Posting",
   },
-  // LD queue split: vendor posts include either `ldcustom` or
+  // LD queue split: vendor posts include `ldcustom`, `ldcustom2`, or
   // `ldgeneral` to indicate which sub-bucket the lead belongs to.
   // We surface the split as a distinct routeCampaignKey so queue
   // filtering can fan out without re-parsing the snapshot.
@@ -220,6 +220,13 @@ const ROUTE_CAMPAIGNS = Object.freeze({
     sourceChannel: "lead-distribution",
     logicsSourceName: "LD CUSTOM",
     logicsCampaignName: "LD CUSTOM",
+  },
+  "ld-custom-2": {
+    key: "ld-custom-2",
+    name: "LD CUSTOM 2",
+    sourceChannel: "lead-distribution",
+    logicsSourceName: "LD CUSTOM 2",
+    logicsCampaignName: "LD CUSTOM 2",
   },
   "ld-general": {
     key: "ld-general",
@@ -238,11 +245,13 @@ const ROUTE_CAMPAIGNS = Object.freeze({
 
 const LD_ROUTE_SOURCE_ID_ENV = Object.freeze({
   "ld-custom": ["LOGICS_LD_CUSTOM_SOURCE_ID", "LD_CUSTOM_SOURCE_ID"],
+  "ld-custom-2": ["LOGICS_LD_CUSTOM_2_SOURCE_ID", "LD_CUSTOM_2_SOURCE_ID"],
   "ld-general": ["LOGICS_LD_GENERAL_SOURCE_ID", "LD_GENERAL_SOURCE_ID"],
 });
 
 const LD_ROUTE_SOURCE_ID_DEFAULTS = Object.freeze({
   "ld-custom": 45,
+  "ld-custom-2": 47,
   "ld-general": 46,
 });
 
@@ -299,6 +308,7 @@ function parseLdBucketAliases(value) {
 
 function getLdBucketCodeMap() {
   const customCode = String(process.env.LD_CUSTOM_CODE || "GS03RB7W").trim();
+  const custom2Code = String(process.env.LD_CUSTOM_2_CODE || "").trim();
   const generalCode = String(process.env.LD_GENERAL_CODE || "JM8K5B7Y").trim();
   const map = new Map();
   const customMatch = {
@@ -306,6 +316,12 @@ function getLdBucketCodeMap() {
     campaignKey: "ld-custom",
     label: "LD CUSTOM",
     code: customCode || null,
+  };
+  const custom2Match = {
+    kind: "custom-2",
+    campaignKey: "ld-custom-2",
+    label: "LD CUSTOM 2",
+    code: custom2Code || null,
   };
   const generalMatch = {
     kind: "general",
@@ -315,6 +331,9 @@ function getLdBucketCodeMap() {
   };
   if (customCode) {
     addLdBucketMatchers(map, [customCode], customMatch);
+  }
+  if (custom2Code) {
+    addLdBucketMatchers(map, [custom2Code], custom2Match);
   }
   if (generalCode) {
     addLdBucketMatchers(map, [generalCode], generalMatch);
@@ -330,6 +349,20 @@ function getLdBucketCodeMap() {
       ...parseLdBucketAliases(process.env.LD_CUSTOM_ALIASES),
     ],
     customMatch,
+  );
+  addLdBucketMatchers(
+    map,
+    [
+      "ldcustom2",
+      "ld custom 2",
+      "LD Custom 2",
+      "Wynn Tax Custom2",
+      "Wynn Tax Custom 2",
+      "Wynn Custom2",
+      "Wynn Custom 2",
+      ...parseLdBucketAliases(process.env.LD_CUSTOM_2_ALIASES),
+    ],
+    custom2Match,
   );
   addLdBucketMatchers(
     map,
@@ -350,6 +383,22 @@ function extractLdSubsource(payload = {}) {
   if (!payload || typeof payload !== "object") return null;
   const bucketByCode = getLdBucketCodeMap();
   if (bucketByCode.size === 0) return null;
+
+  // Prefer LD's semantic vendor field. This makes vendor=ldcustom2 win
+  // even if sourceName still carries an old opaque tracking value.
+  const vendor = extractFirstValue(payload.vendor, payload.Vendor);
+  if (vendor) {
+    const match = bucketByCode.get(canonicalLdBucketValue(vendor));
+    if (match) {
+      return {
+        kind: match.kind,
+        campaignKey: match.campaignKey,
+        label: match.label,
+        value: vendor,
+        sourceFieldName: "vendor",
+      };
+    }
+  }
 
   // Scan top-level payload values for a bucket code match. We only
   // walk one level deep — these codes always arrive at the top of the
@@ -963,8 +1012,8 @@ function normalizeLdLeadPayload(payload = {}, headers = {}, options = {}) {
 
   // Detect the LD queue-split signal. When `ldcustom` or `ldgeneral`
   // is present on the payload, route to the matching sub-campaign
-  // (`ld-custom` / `ld-general`) and stamp the human-readable bucket
-  // label (`LD CUSTOM` / `LD GENERAL`) onto partnerSource + vendorSourceName
+  // (`ld-custom` / `ld-custom-2` / `ld-general`) and stamp the
+  // human-readable bucket label onto partnerSource + vendorSourceName
   // so the cadence row is self-describing. The raw vendor tracking
   // code (e.g. GS03RB7W) is preserved in payloadSnapshot for audits.
   // When absent we fall back to the plain `ld` campaign — existing
@@ -1017,8 +1066,8 @@ function normalizeLdLeadPayload(payload = {}, headers = {}, options = {}) {
       // Preserve the raw subsource value + the bucket label so future
       // tooling can re-derive the split without having to re-parse
       // the original webhook body.
-      ldSubsourceKind: ldSub?.kind || null,         // "custom" | "general" | null
-      ldSubsourceLabel: ldSub?.label || null,       // "LD CUSTOM" | "LD GENERAL"
+      ldSubsourceKind: ldSub?.kind || null,         // "custom" | "custom-2" | "general" | null
+      ldSubsourceLabel: ldSub?.label || null,       // "LD CUSTOM" | "LD CUSTOM 2" | "LD GENERAL"
       ldSubsourceValue: ldSub?.value || null,       // "GS03RB7W"
       ldSubsourceField: ldSub?.sourceFieldName || null,
     },

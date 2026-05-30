@@ -35,7 +35,8 @@ function createState(config = {}) {
     concurrency: Math.max(1, Number(config.concurrency || 3) || 3),
     sendEmail: config.sendEmail !== false,
     recipients: Array.isArray(config.recipients) ? config.recipients : [],
-    reportEmail: config.reportEmail || "documents@taxadvocategroup.com",
+    reportEmail: config.reportEmail || "mgray@taxadvocategroup.com",
+    attachCsv: Boolean(config.attachCsv),
     outDir: config.outDir || "",
     includeAiReview: config.includeAiReview !== false,
     aiReviewMaxCases: Math.max(0, Number(config.aiReviewMaxCases || 75) || 75),
@@ -65,6 +66,7 @@ function summarizeState(state) {
     sendEmail: state.sendEmail,
     recipients: state.recipients,
     reportEmail: state.reportEmail,
+    attachCsv: state.attachCsv,
     outDir: state.outDir,
     includeAiReview: state.includeAiReview,
     aiReviewMaxCases: state.aiReviewMaxCases,
@@ -138,6 +140,10 @@ function createLogicsActivityReviewRuntime({ config = {}, runtime }) {
           options.reportEmail !== undefined
             ? options.reportEmail
             : state.reportEmail,
+        attachCsv:
+          options.attachCsv !== undefined
+            ? Boolean(options.attachCsv)
+            : state.attachCsv,
         outDir:
           options.outDir !== undefined
             ? options.outDir

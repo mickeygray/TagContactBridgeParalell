@@ -187,7 +187,7 @@ test("cx lifecycle requires contact unlocks for day 6-30 eligibility", () => {
   }, dayFortyFive).ok, true);
 });
 
-test("pacific-state leads wait until 8am local while mountain-plus can start at 7am PT", () => {
+test("western leads wait until 8am local while mountain-plus can start at 7am PT", () => {
   const previousOperationalStart = process.env.RC_CX_OPERATIONAL_START_HOUR;
   const previousOperationalEnd = process.env.RC_CX_OPERATIONAL_END_HOUR;
   process.env.RC_CX_OPERATIONAL_START_HOUR = "7";
@@ -202,6 +202,22 @@ test("pacific-state leads wait until 8am local while mountain-plus can start at 
     }, now);
     assert.equal(california.reason, "queue-contact-window");
     assert.equal(california.nextEligibleAt.toISOString(), "2026-06-01T15:00:01.000Z");
+
+    const alaska = resolveQueueDialability({
+      queueFamily: "fresh-day1",
+      createdAt: now,
+      metadata: { leadState: "AK" },
+    }, now);
+    assert.equal(alaska.reason, "queue-contact-window");
+    assert.equal(alaska.nextEligibleAt.toISOString(), "2026-06-01T16:00:01.000Z");
+
+    const hawaii = resolveQueueDialability({
+      queueFamily: "fresh-day1",
+      createdAt: now,
+      metadata: { leadState: "HI" },
+    }, now);
+    assert.equal(hawaii.reason, "queue-contact-window");
+    assert.equal(hawaii.nextEligibleAt.toISOString(), "2026-06-01T18:00:01.000Z");
 
     assert.equal(resolveQueueDialability({
       queueFamily: "fresh-day1",
@@ -219,6 +235,35 @@ test("pacific-state leads wait until 8am local while mountain-plus can start at 
     else process.env.RC_CX_OPERATIONAL_START_HOUR = previousOperationalStart;
     if (previousOperationalEnd == null) delete process.env.RC_CX_OPERATIONAL_END_HOUR;
     else process.env.RC_CX_OPERATIONAL_END_HOUR = previousOperationalEnd;
+  }
+});
+
+test("legacy working-start env does not override the 7am operational queue window", () => {
+  const previousOperationalStart = process.env.RC_CX_OPERATIONAL_START_HOUR;
+  const previousOperationalEnd = process.env.RC_CX_OPERATIONAL_END_HOUR;
+  const previousWorkingStart = process.env.RC_CX_WORKING_START_HOUR;
+  const previousWorkingEnd = process.env.RC_CX_WORKING_END_HOUR;
+  delete process.env.RC_CX_OPERATIONAL_START_HOUR;
+  delete process.env.RC_CX_OPERATIONAL_END_HOUR;
+  process.env.RC_CX_WORKING_START_HOUR = "8";
+  process.env.RC_CX_WORKING_END_HOUR = "17";
+  try {
+    const now = new Date("2026-06-01T14:15:00.000Z"); // 7:15am PT, 8:15am MT
+    const colorado = resolveQueueDialability({
+      queueFamily: "fresh-day1",
+      createdAt: now,
+      metadata: { leadState: "CO" },
+    }, now);
+    assert.equal(colorado.ok, true);
+  } finally {
+    if (previousOperationalStart == null) delete process.env.RC_CX_OPERATIONAL_START_HOUR;
+    else process.env.RC_CX_OPERATIONAL_START_HOUR = previousOperationalStart;
+    if (previousOperationalEnd == null) delete process.env.RC_CX_OPERATIONAL_END_HOUR;
+    else process.env.RC_CX_OPERATIONAL_END_HOUR = previousOperationalEnd;
+    if (previousWorkingStart == null) delete process.env.RC_CX_WORKING_START_HOUR;
+    else process.env.RC_CX_WORKING_START_HOUR = previousWorkingStart;
+    if (previousWorkingEnd == null) delete process.env.RC_CX_WORKING_END_HOUR;
+    else process.env.RC_CX_WORKING_END_HOUR = previousWorkingEnd;
   }
 });
 

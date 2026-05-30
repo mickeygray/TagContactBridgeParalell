@@ -6,6 +6,7 @@ import {
   PenSquare,
   PlayCircle,
   RotateCcw,
+  Server,
   ShieldAlert,
   ShieldCheck,
 } from "lucide-react";
@@ -193,6 +194,57 @@ export function BlogBotCard() {
                 }
               />
             </div>
+
+            {data.runtime ? (
+              <div className="rounded-md border border-border p-3">
+                <div className="mb-2 flex items-center justify-between gap-2 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+                  <span className="inline-flex items-center gap-1.5">
+                    <Server className="h-3 w-3" />
+                    Control-plane runtime
+                  </span>
+                  <StatusPill
+                    dotted
+                    tone={data.runtime.running ? "info" : data.runtime.enabled ? "success" : "neutral"}
+                  >
+                    {data.runtime.running ? "running" : data.runtime.enabled ? "armed" : "disabled"}
+                  </StatusPill>
+                </div>
+                <div className="grid grid-cols-1 gap-2 text-xs md:grid-cols-2">
+                  <Field
+                    label="Next run"
+                    value={
+                      data.runtime.nextRunAt ? (
+                        <span title={formatDateTime(data.runtime.nextRunAt)}>
+                          {formatRelative(data.runtime.nextRunAt)}
+                        </span>
+                      ) : (
+                        "manual only"
+                      )
+                    }
+                  />
+                  <Field
+                    label="Schedule"
+                    value={`${String(data.runtime.hour).padStart(2, "0")}:${String(data.runtime.minute).padStart(2, "0")} ${data.runtime.timezone}`}
+                  />
+                  <Field
+                    label="Wynn route"
+                    value={
+                      <span className="font-mono text-[10px]">
+                        {asText(data.runtime.routing?.wynnRepo)}
+                      </span>
+                    }
+                  />
+                  <Field
+                    label="TAG route"
+                    value={
+                      <span className="font-mono text-[10px]">
+                        {asText(data.runtime.routing?.tagRepo)}
+                      </span>
+                    }
+                  />
+                </div>
+              </div>
+            ) : null}
 
             {/* Last published per repo */}
             <div className="rounded-md border border-border p-3">

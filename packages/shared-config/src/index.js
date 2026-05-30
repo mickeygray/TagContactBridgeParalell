@@ -23,6 +23,8 @@ const DEFAULT_PHONEBURNER_LEGACY_SCRIPT_PATH = path.resolve(
   "scripts",
   "run-pb-morning-rotation.js",
 );
+const DEFAULT_BLOGGER_WYNN_REPO = path.resolve(ROOT_DIR, "..", "WynnTax");
+const DEFAULT_BLOGGER_TAG_REPO = path.resolve(ROOT_DIR, "..", "taxadvocategroup");
 const {
   DEFAULT_COMPANY,
   getCompanyConfig,
@@ -164,12 +166,23 @@ function parseGoogleServiceAccountJson(raw, fallbackName = "GOOGLE_SERVICE_ACCOU
   const directText = String(raw || "").trim();
   const text = directText || readLooseJsonEnvValue(fallbackName);
   if (!text) return null;
-  try {
-    const parsed = JSON.parse(text);
-    return parsed && typeof parsed === "object" ? parsed : null;
-  } catch {
-    return null;
+  const candidates = [text];
+  if (/^\s*\{[\s\S]*\\\"/.test(text)) {
+    candidates.push(text.replace(/\\"/g, '"'));
   }
+  if (/^\s*"\{/.test(text)) {
+    candidates.push(text.replace(/^"|"$/g, ""));
+  }
+  for (const candidate of candidates) {
+    try {
+      const first = JSON.parse(candidate);
+      const parsed = typeof first === "string" ? JSON.parse(first) : first;
+      if (parsed && typeof parsed === "object") return parsed;
+    } catch {
+      // try the next env encoding shape
+    }
+  }
+  return null;
 }
 
 /**
@@ -748,7 +761,13 @@ function getSharedConfig(overrides = {}) {
       reportEmail:
         overrides.logicsActivityReviewReportEmail ||
         process.env.LOGICS_ACTIVITY_REVIEW_REPORT_EMAIL ||
-        "documents@taxadvocategroup.com",
+        getInternalFromEmail(),
+      attachCsv: boolFromEnv(
+        overrides.logicsActivityReviewAttachCsv !== undefined
+          ? overrides.logicsActivityReviewAttachCsv
+          : process.env.LOGICS_ACTIVITY_REVIEW_ATTACH_CSV,
+        false,
+      ),
       recipients: parseOriginList(
         overrides.logicsActivityReviewRecipients ||
           process.env.LOGICS_ACTIVITY_REVIEW_RECIPIENTS ||
@@ -782,6 +801,125 @@ function getSharedConfig(overrides = {}) {
         overrides.logicsActivityReviewAiModel ||
         process.env.LOGICS_ACTIVITY_REVIEW_AI_MODEL ||
         "",
+    },
+    ncoaMailbox: {
+      enabled: boolFromEnv(
+        overrides.ncoaMailboxEnabled !== undefined
+          ? overrides.ncoaMailboxEnabled
+          : process.env.NCOA_MAILBOX_ENABLED,
+        false,
+      ),
+      domain:
+        String(
+          overrides.ncoaMailboxDomain ||
+            process.env.NCOA_MAILBOX_DOMAIN ||
+            "TAG",
+        ).trim().toUpperCase() || "TAG",
+      user:
+        overrides.ncoaMailboxUser ||
+        process.env.NCOA_MAILBOX_USER ||
+        "documents@taxadvocategroup.com",
+      gmailQuery:
+        overrides.ncoaMailboxGmailQuery ||
+        process.env.NCOA_MAILBOX_GMAIL_QUERY ||
+        "is:unread has:attachment newer_than:14d",
+      maxMessages: Math.max(
+        1,
+        envInt("NCOA_MAILBOX_MAX_MESSAGES", Number(overrides.ncoaMailboxMaxMessages) || 10),
+      ),
+      activeWeekdays: parseOriginList(
+        overrides.ncoaMailboxActiveWeekdays ||
+          process.env.NCOA_MAILBOX_ACTIVE_WEEKDAYS ||
+          "1,2,3,4,5",
+      )
+        .map((value) => Number(value))
+        .filter((value) => Number.isInteger(value) && value >= 0 && value <= 6),
+      timezone:
+        overrides.ncoaMailboxTimezone ||
+        process.env.NCOA_MAILBOX_TIMEZONE ||
+        "America/Los_Angeles",
+      acceptedExtensions: parseOriginList(
+        overrides.ncoaMailboxAcceptedExtensions ||
+          process.env.NCOA_MAILBOX_ACCEPTED_EXTENSIONS ||
+          ".csv,.txt",
+      ).map((value) => String(value || "").trim().toLowerCase()).filter(Boolean),
+      outDir:
+        overrides.ncoaMailboxOutDir ||
+        process.env.NCOA_MAILBOX_OUTPUT_DIR ||
+        path.join(ROOT_DIR, "runtime", "ncoa-mailbox"),
+      markRead: boolFromEnv(
+        overrides.ncoaMailboxMarkRead !== undefined
+          ? overrides.ncoaMailboxMarkRead
+          : process.env.NCOA_MAILBOX_MARK_READ,
+        true,
+      ),
+      archiveProcessed: boolFromEnv(
+        overrides.ncoaMailboxArchiveProcessed !== undefined
+          ? overrides.ncoaMailboxArchiveProcessed
+          : process.env.NCOA_MAILBOX_ARCHIVE_PROCESSED,
+        true,
+      ),
+      completeOnNoUnread: boolFromEnv(
+        overrides.ncoaMailboxCompleteOnNoUnread !== undefined
+          ? overrides.ncoaMailboxCompleteOnNoUnread
+          : process.env.NCOA_MAILBOX_COMPLETE_ON_NO_UNREAD,
+        false,
+      ),
+      notifyRecipients: parseOriginList(
+        overrides.ncoaMailboxNotifyRecipients ||
+          process.env.NCOA_MAILBOX_NOTIFY_RECIPIENTS ||
+          "mgray@taxadvocategroup.com",
+      ).map((value) => String(value || "").trim().toLowerCase()).filter(Boolean),
+      gmail: {
+        authMode:
+          overrides.ncoaMailboxGoogleAuthMode ||
+          process.env.NCOA_MAILBOX_GOOGLE_AUTH_MODE ||
+          "service_account",
+        user:
+          overrides.ncoaMailboxUser ||
+          process.env.NCOA_MAILBOX_USER ||
+          "documents@taxadvocategroup.com",
+        subject:
+          overrides.ncoaMailboxGoogleSubject ||
+          process.env.NCOA_MAILBOX_GOOGLE_SUBJECT ||
+          overrides.ncoaMailboxUser ||
+          process.env.NCOA_MAILBOX_USER ||
+          "documents@taxadvocategroup.com",
+        clientEmail:
+          overrides.ncoaMailboxGoogleClientEmail ||
+          process.env.NCOA_MAILBOX_GOOGLE_CLIENT_EMAIL ||
+          googleServiceAccount.client_email ||
+          process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL ||
+          "",
+        privateKey: (
+          overrides.ncoaMailboxGooglePrivateKey ||
+          process.env.NCOA_MAILBOX_GOOGLE_PRIVATE_KEY ||
+          googleServiceAccount.private_key ||
+          process.env.GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY ||
+          ""
+        ).replace(/\\n/g, "\n"),
+        clientId:
+          overrides.ncoaMailboxGoogleClientId ||
+          process.env.NCOA_MAILBOX_GOOGLE_CLIENT_ID ||
+          "",
+        clientSecret:
+          overrides.ncoaMailboxGoogleClientSecret ||
+          process.env.NCOA_MAILBOX_GOOGLE_CLIENT_SECRET ||
+          "",
+        refreshToken:
+          overrides.ncoaMailboxGoogleRefreshToken ||
+          process.env.NCOA_MAILBOX_GOOGLE_REFRESH_TOKEN ||
+          "",
+        tokenUri:
+          overrides.ncoaMailboxGoogleTokenUri ||
+          process.env.NCOA_MAILBOX_GOOGLE_TOKEN_URI ||
+          googleServiceAccount.token_uri ||
+          "https://oauth2.googleapis.com/token",
+        scope:
+          overrides.ncoaMailboxGoogleScope ||
+          process.env.NCOA_MAILBOX_GOOGLE_SCOPE ||
+          "https://www.googleapis.com/auth/gmail.modify",
+      },
     },
     nightlyClose: {
       enabled: boolFromEnv(
@@ -879,6 +1017,99 @@ function getSharedConfig(overrides = {}) {
         overrides.phoneburnerRotationLegacyScriptPath ||
         process.env.PHONEBURNER_ROTATION_LEGACY_SCRIPT_PATH ||
         DEFAULT_PHONEBURNER_LEGACY_SCRIPT_PATH,
+    },
+    blogger: {
+      // Control-plane managed blog runtime. It runs the existing
+      // scripts/blogger-daily-runner.js, but injects Linux-friendly
+      // repo/deploy paths so production can commit/build from the
+      // TagContactBridge box instead of a Windows workstation.
+      enabled: boolFromEnv(
+        overrides.bloggerEnabled !== undefined
+          ? overrides.bloggerEnabled
+          : process.env.BLOGGER_ENABLED,
+        false,
+      ),
+      hour: Math.max(0, Math.min(23, envInt("BLOGGER_HOUR", 8))),
+      minute: Math.max(0, Math.min(59, envInt("BLOGGER_MINUTE", 0))),
+      intervalMs: Math.max(10000, envInt("BLOGGER_INTERVAL_MS", 60000)),
+      timeoutMs: Math.max(
+        60000,
+        envInt("BLOGGER_RUN_TIMEOUT_MS", 45 * 60 * 1000),
+      ),
+      activeWeekdays: parseOriginList(
+        overrides.bloggerActiveWeekdays ||
+          process.env.BLOGGER_ACTIVE_WEEKDAYS ||
+          "1,2,3,4,5",
+      )
+        .map((value) => Number(value))
+        .filter((value) => Number.isInteger(value) && value >= 0 && value <= 6),
+      timezone:
+        overrides.bloggerTimezone ||
+        process.env.BLOGGER_TIMEZONE ||
+        "America/Los_Angeles",
+      parallelRoot:
+        overrides.bloggerParallelRoot ||
+        process.env.BLOGGER_PARALLEL_ROOT ||
+        ROOT_DIR,
+      runnerPath:
+        overrides.bloggerRunnerPath ||
+        process.env.BLOGGER_RUNNER_PATH ||
+        path.join(ROOT_DIR, "scripts", "blogger-daily-runner.js"),
+      wynnRepo:
+        overrides.bloggerWynnRepo ||
+        process.env.BLOGGER_WYNN_REPO ||
+        process.env.DEPLOY_WYNN_REPO ||
+        DEFAULT_BLOGGER_WYNN_REPO,
+      tagRepo:
+        overrides.bloggerTagRepo ||
+        process.env.BLOGGER_TAG_REPO ||
+        process.env.DEPLOY_TAG_REPO ||
+        DEFAULT_BLOGGER_TAG_REPO,
+      tcbDeployDir:
+        overrides.bloggerTcbDeployDir ||
+        process.env.BLOGGER_TCB_DEPLOY_DIR ||
+        process.env.TCB_DEPLOY_DIR ||
+        ROOT_DIR,
+      deploy: {
+        wynn: {
+          repo:
+            overrides.bloggerDeployWynnRepo ||
+            process.env.DEPLOY_WYNN_REPO ||
+            process.env.BLOGGER_WYNN_REPO ||
+            DEFAULT_BLOGGER_WYNN_REPO,
+          host: overrides.bloggerDeployWynnHost || process.env.DEPLOY_WYNN_HOST || "",
+          user: overrides.bloggerDeployWynnUser || process.env.DEPLOY_WYNN_USER || "ubuntu",
+          pem: overrides.bloggerDeployWynnPem || process.env.DEPLOY_WYNN_PEM || "",
+          remotePath:
+            overrides.bloggerDeployWynnPath ||
+            process.env.DEPLOY_WYNN_PATH ||
+            "/var/www/WynnTax",
+          pm2: overrides.bloggerDeployWynnPm2 || process.env.DEPLOY_WYNN_PM2 || "backend",
+          branch:
+            overrides.bloggerDeployWynnBranch ||
+            process.env.DEPLOY_WYNN_BRANCH ||
+            "master",
+        },
+        tag: {
+          repo:
+            overrides.bloggerDeployTagRepo ||
+            process.env.DEPLOY_TAG_REPO ||
+            process.env.BLOGGER_TAG_REPO ||
+            DEFAULT_BLOGGER_TAG_REPO,
+          host: overrides.bloggerDeployTagHost || process.env.DEPLOY_TAG_HOST || "",
+          user: overrides.bloggerDeployTagUser || process.env.DEPLOY_TAG_USER || "ubuntu",
+          pem: overrides.bloggerDeployTagPem || process.env.DEPLOY_TAG_PEM || "",
+          remotePath:
+            overrides.bloggerDeployTagPath ||
+            process.env.DEPLOY_TAG_PATH ||
+            "/var/www/taxadvocategroup",
+          pm2: overrides.bloggerDeployTagPm2 || process.env.DEPLOY_TAG_PM2 || "backend",
+          branch:
+            overrides.bloggerDeployTagBranch ||
+            process.env.DEPLOY_TAG_BRANCH ||
+            "master",
+        },
+      },
     },
     spendSync: {
       enabled: boolFromEnv(

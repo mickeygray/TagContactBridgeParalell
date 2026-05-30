@@ -37,7 +37,15 @@ const VENDOR_FAMILY_DEFS = Object.freeze([
     matches: (source, channel, routeCampaignKey) =>
       routeCampaignKey === "ld-custom" ||
       source === "ld custom" ||
-      source.includes("ld custom"),
+      (source.includes("ld custom") && !source.includes("ld custom 2")),
+  },
+  {
+    key: "ld-custom-2",
+    label: "LD CUSTOM 2",
+    matches: (source, channel, routeCampaignKey) =>
+      routeCampaignKey === "ld-custom-2" ||
+      source === "ld custom 2" ||
+      source.includes("ld custom 2"),
   },
   {
     key: "ld-general",
@@ -111,6 +119,7 @@ const VENDOR_FAMILY_DEFS = Object.freeze([
 
 const TRACKED_VENDOR_FAMILIES = new Set([
   "ld-custom",
+  "ld-custom-2",
   "ld-general",
   "ld-posting",
   "affiliate",
@@ -601,7 +610,7 @@ async function buildVendorDailySummary(domain, options = {}) {
     addMetrics(ensureFamilyRow(byFamily, source, channel, routeCampaignKey), patch);
   }
 
-  for (const familyKey of ["ld-custom", "ld-general", "ld-posting"]) {
+  for (const familyKey of ["ld-custom", "ld-custom-2", "ld-general", "ld-posting"]) {
     ensureFamilyRowByKey(byFamily, familyKey);
   }
 

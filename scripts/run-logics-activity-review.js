@@ -72,8 +72,9 @@ function parseOptions(argv) {
     reportEmail: readFlag(
       argv,
       "--report-email",
-      process.env.LOGICS_ACTIVITY_REVIEW_REPORT_EMAIL || "documents@taxadvocategroup.com",
+      process.env.LOGICS_ACTIVITY_REVIEW_REPORT_EMAIL || "mgray@taxadvocategroup.com",
     ),
+    attachCsv: parseBoolean(process.env.LOGICS_ACTIVITY_REVIEW_ATTACH_CSV, false) || hasFlag(argv, "--attach-csv"),
     outDir: readFlag(argv, "--out-dir", process.env.LOGICS_ACTIVITY_REVIEW_OUTPUT_DIR || ""),
     sendEmail: !hasFlag(argv, "--no-email"),
     includeAiReview,

@@ -12,6 +12,7 @@ const {
   validateCompanyTrackingNumbers,
 } = require("./callrailClient");
 const { createDropClient } = require("./dropClient");
+const { createGoogleGmailClient } = require("./googleGmailClient");
 const { createGoogleDriveClient, isGoogleDriveConfigured } = require("./googleDriveClient");
 const { requestJson } = require("./httpClient");
 const { createLogicsClient } = require("./logicsClient");
@@ -35,6 +36,7 @@ module.exports = {
   createCallrailClient,
   createCompanyRuntime,
   createDropClient,
+  createGoogleGmailClient,
   createGoogleDriveClient,
   createLogicsClient,
   createNeverBounceClient,

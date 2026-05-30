@@ -10,7 +10,7 @@
       {{#if ldCost}}
         <div class="summary-line">
           <strong>LD cost:</strong> {{money ldCost.total}}
-          <span class="muted">(LD CUSTOM {{ldCost.customCount}} x ${{ldCost.customRate}} + LD GENERAL {{ldCost.generalCount}} x ${{ldCost.generalRate}})</span>
+          <span class="muted">(LD CUSTOM {{ldCost.customCount}} x ${{ldCost.customRate}} + LD CUSTOM 2 {{ldCost.custom2Count}} x ${{ldCost.custom2Rate}} + LD GENERAL {{ldCost.generalCount}} x ${{ldCost.generalRate}})</span>
         </div>
       {{/if}}
     </div>
@@ -134,7 +134,7 @@
     {{!-- "Top sources — today" was removed 2026-05-22. Source names
           fragment across source-name variants, so the per-source table showed multiple rows
           for what was really one vendor. The LD families table
-          above stays limited to LD CUSTOM and LD GENERAL. --}}
+          above stays limited to LD CUSTOM, LD CUSTOM 2, and LD GENERAL. --}}
 
     <!-- ─────────────────  TODAY'S CALLS — SCORED  ────────────────── -->
     <div class="section">

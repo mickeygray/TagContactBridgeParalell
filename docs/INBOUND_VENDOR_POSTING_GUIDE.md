@@ -137,7 +137,7 @@ The app refuses a lead before Logics case creation when:
 
 The app does **not** let vendor `sourceName` override the route campaign for LD or affiliate:
 
-- Split LD posts become `SourceName: "LD CUSTOM"` or `SourceName: "LD GENERAL"`; unsplit LD posts stay under `SourceName: "LD Posting"`.
+- Split LD posts become `SourceName: "LD CUSTOM"`, `SourceName: "LD CUSTOM 2"`, or `SourceName: "LD GENERAL"`; unsplit LD posts stay under `SourceName: "LD Posting"`.
 - Affiliate posts become `SourceName: "Affiliate Lead"`.
 - Vendor/source detail is preserved as `partnerSource` and `vendorSourceName`.
 
@@ -275,9 +275,10 @@ If a matching pre-ping exists for the same email hash, the route becomes `ld-pos
 
 LD queue split:
 
-- `GS03RB7W`, `ldcustom`, `LD Custom`, or `Wynn Tax Custom` -> `routeCampaignKey: "ld-custom"`
+- `vendor=ldcustom`, `GS03RB7W`, `LD Custom`, or `Wynn Tax Custom` -> `routeCampaignKey: "ld-custom"`
+- `vendor=ldcustom2`, `LD Custom 2`, or `Wynn Tax Custom 2` -> `routeCampaignKey: "ld-custom-2"`
 - `JM8K5B7Y`, `ldgeneral`, `LD General`, or `Wynn Tax General` -> `routeCampaignKey: "ld-general"`
-- The splitter scans top-level payload values, so the vendor can send the bucket in `vendor`, `sourceName`, `source ID`, `pubid`, or another flat field. The field name is not the contract; the value is.
+- The splitter prefers `vendor` when present, then scans top-level payload values as a fallback, so old `sourceName`, `source ID`, `pubid`, and other flat fields still work. The value is still normalized for casing, spaces, and punctuation.
 - If no split value is present, the fallback is plain `routeCampaignKey: "ld"`.
 
 LD payload:
@@ -325,10 +326,10 @@ Route attribution:
 
 - `domain`: forced to `WYNN`
 - `intakeSource`: `ld` or `ld-posting`
-- `routeCampaignKey`: `ld-custom`, `ld-general`, or fallback `ld`
+- `routeCampaignKey`: `ld-custom`, `ld-custom-2`, `ld-general`, or fallback `ld`
 - `sourceChannel`: `lead-distribution`
-- Logics `SourceName`: `LD CUSTOM`, `LD GENERAL`, or fallback `LD Posting`
-- `vendorSourceName`: split bucket label for LD CUSTOM / LD GENERAL; raw vendor fields remain in `payloadSnapshot`
+- Logics `SourceName`: `LD CUSTOM`, `LD CUSTOM 2`, `LD GENERAL`, or fallback `LD Posting`
+- `vendorSourceName`: split bucket label for LD CUSTOM / LD CUSTOM 2 / LD GENERAL; raw vendor fields remain in `payloadSnapshot`
 
 ## Route 3: Affiliate Lead Post
 
@@ -540,4 +541,4 @@ Before sending production volume:
 - Send one real test lead per vendor route.
 - Confirm the response includes `accepted: true`, `domain: "WYNN"`, and a `caseId`.
 - Confirm the lead appears in Wynn Logics with the expected route source.
-- Confirm Parallel cadence row has `routeCampaignKey` of `ld-custom` or `ld-general` for LD split posts, plain `ld` only for unsplit LD fallback, or `affiliate` where applicable.
+- Confirm Parallel cadence row has `routeCampaignKey` of `ld-custom`, `ld-custom-2`, or `ld-general` for LD split posts, plain `ld` only for unsplit LD fallback, or `affiliate` where applicable.

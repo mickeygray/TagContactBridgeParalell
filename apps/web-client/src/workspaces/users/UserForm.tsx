@@ -633,7 +633,7 @@ export function UserForm({
         </Field>
         <Field label="Green routes" hint="Comma-separated. Blue/yellow/red are shared.">
           <Input
-            placeholder="ld-custom, ld-general"
+            placeholder="ld-custom, ld-custom-2, ld-general"
             {...form.register("cxRouteCampaigns")}
           />
         </Field>

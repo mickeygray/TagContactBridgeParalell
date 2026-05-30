@@ -69,9 +69,10 @@ const { getInternalFromEmail } = require("../../shared-config/src");
 
 const UNRESOLVED_HOURLY_STATUSES = ["pending", "processing", "failed", "dead-letter"];
 const REQUIRED_NIGHTLY_DOMAINS = ["WYNN", "TAG"];
-const LD_VENDOR_FAMILY_KEYS = new Set(["ld-custom", "ld-general"]);
+const LD_VENDOR_FAMILY_KEYS = new Set(["ld-custom", "ld-custom-2", "ld-general"]);
 const LD_CAMPAIGN_LABELS = {
   "ld-custom": "LD CUSTOM",
+  "ld-custom-2": "LD CUSTOM 2",
   "ld-general": "LD GENERAL",
   "ld-posting": "LD Posting",
   "ld": "LD (unsplit)",
@@ -125,6 +126,7 @@ function ldFamilyEstimatedCost(row = {}) {
   const leads = toNumber(row.leads);
   const key = vendorFamilyKey(row);
   if (key === "ld-custom") return leads * 3;
+  if (key === "ld-custom-2") return leads * 3;
   if (key === "ld-general") return leads * 2;
   return 0;
 }
@@ -142,27 +144,35 @@ function sumVendorRows(rows = [], field) {
 
 function buildLdCostSummary(rows = []) {
   const custom = rows.find((row) => vendorFamilyKey(row) === "ld-custom") || {};
+  const custom2 = rows.find((row) => vendorFamilyKey(row) === "ld-custom-2") || {};
   const general = rows.find((row) => vendorFamilyKey(row) === "ld-general") || {};
   const customCount = toNumber(custom.leads);
+  const custom2Count = toNumber(custom2.leads);
   const generalCount = toNumber(general.leads);
   const customRate = 3;
+  const custom2Rate = 3;
   const generalRate = 2;
   const customCost = customCount * customRate;
+  const custom2Cost = custom2Count * custom2Rate;
   const generalCost = generalCount * generalRate;
   return {
     customCount,
+    custom2Count,
     generalCount,
     customRate,
+    custom2Rate,
     generalRate,
     customCost,
+    custom2Cost,
     generalCost,
-    total: customCost + generalCost,
+    total: customCost + custom2Cost + generalCost,
   };
 }
 
 function campaignEstimatedCost(row = {}) {
   const count = toNumber(row.count);
   if (row.key === "ld-custom") return count * 3;
+  if (row.key === "ld-custom-2") return count * 3;
   if (row.key === "ld-general") return count * 2;
   return 0;
 }
@@ -2408,7 +2418,7 @@ function buildLeadDataEmailBody(domain, dateKey, daily, vendorReport, bugWrap) {
     "",
     `LD leads: ${ldLeadCount}`,
     `LD calls: ${ldCallCount} (${ldCallsOver5} over 5 min)`,
-    `LD cost: ${formatMoney(ldCost.total)} (LD CUSTOM ${ldCost.customCount} x $${ldCost.customRate} + LD GENERAL ${ldCost.generalCount} x $${ldCost.generalRate})`,
+    `LD cost: ${formatMoney(ldCost.total)} (LD CUSTOM ${ldCost.customCount} x $${ldCost.customRate} + LD CUSTOM 2 ${ldCost.custom2Count} x $${ldCost.custom2Rate} + LD GENERAL ${ldCost.generalCount} x $${ldCost.generalRate})`,
     "",
     "LD family summary",
     `Attribution held out: ${toNumber(attributionReview.skipped)} skipped, ${toNumber(attributionReview.queued)} newly queued, ${toNumber(attributionReview.resolved)} resolved by manual mapping, ${toNumber(attributionReview.ignored)} ignored`,
@@ -2440,7 +2450,7 @@ function buildNightlyEmailBody(domain, dateKey, managementSnapshot, vendorReport
     "",
     "Management snapshot",
     `LD leads: ${sumVendorRows(topVendorFamilyRows, "leads")}`,
-    `LD cost: ${formatMoney(ldCost.total)} (LD CUSTOM ${ldCost.customCount} x $${ldCost.customRate} + LD GENERAL ${ldCost.generalCount} x $${ldCost.generalRate})`,
+    `LD cost: ${formatMoney(ldCost.total)} (LD CUSTOM ${ldCost.customCount} x $${ldCost.customRate} + LD CUSTOM 2 ${ldCost.custom2Count} x $${ldCost.custom2Rate} + LD GENERAL ${ldCost.generalCount} x $${ldCost.generalRate})`,
     `Spend: $${managementSnapshot.spend.total.toFixed(2)}`,
     `Payments: $${managementSnapshot.payments.totalAmount.toFixed(2)} (${managementSnapshot.payments.totalCount})`,
     `LD calls: ${sumVendorRows(topVendorFamilyRows, "calls")} (${sumVendorRows(topVendorFamilyRows, "callsOver5")} over 5 min)`,

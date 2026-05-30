@@ -975,6 +975,7 @@ async function readPersistedCxTouchState(domain, caseId) {
     LeadCadence.findOne(
       { domain: normalizedDomain, caseId: numericCaseId },
       {
+        state: 1,
         "cadenceCounters.cx": 1,
         "lastTouched.cx": 1,
         "counterCadence.lastCxDialedAt": 1,
@@ -986,8 +987,6 @@ async function readPersistedCxTouchState(domain, caseId) {
         "counterCadence.cxDailyCalls": 1,
         "counterCadence.cxMonthlyMonthKey": 1,
         "counterCadence.cxMonthlyCalls": 1,
-        "cadenceState.timezone": 1,
-        "cadenceState.timeZone": 1,
         "payloadSnapshot.lastCxDialedAt": 1,
         "payloadSnapshot.lastCxDialedByExtensionId": 1,
         "payloadSnapshot.lastCxDialedByAgentName": 1,
@@ -1060,14 +1059,13 @@ async function readPersistedCxTouchState(domain, caseId) {
     monthlyMonthKey: String(useProspect ? source.monthlyMonthKey || "" : counter.cxMonthlyMonthKey || "").trim() || null,
     monthlyCalls: Math.max(Number(useProspect ? source.monthlyAttempts || 0 : counter.cxMonthlyCalls || 0) || 0, 0),
     leadState: (
+      cadence?.state ||
       cadence?.payloadSnapshot?.state ||
       prospect?.state ||
       prospect?.payloadSnapshot?.state ||
       null
     ),
     leadTimeZone: (
-      cadence?.cadenceState?.timezone ||
-      cadence?.cadenceState?.timeZone ||
       cadence?.payloadSnapshot?.timezone ||
       cadence?.payloadSnapshot?.timeZone ||
       prospect?.timeZone ||

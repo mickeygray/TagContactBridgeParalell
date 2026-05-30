@@ -288,6 +288,9 @@ function normalizeRouteCampaigns(value) {
         .filter(Boolean),
     ),
   );
+  if (normalized.includes("ld-custom") && !normalized.includes("ld-custom-2")) {
+    normalized.push("ld-custom-2");
+  }
   return normalized.length > 0 ? normalized : null;
 }
 
@@ -605,11 +608,11 @@ function formatDateKeyInZone(date = new Date(), timeZone = DEFAULT_LEAD_TIMEZONE
 }
 
 function readOperationalStartHour() {
-  return readEnvNumber(["RC_CX_OPERATIONAL_START_HOUR", "RC_CX_WORKING_START_HOUR"], 7);
+  return readEnvNumber("RC_CX_OPERATIONAL_START_HOUR", 7);
 }
 
 function readOperationalEndHour() {
-  return readEnvNumber(["RC_CX_OPERATIONAL_END_HOUR", "RC_CX_WORKING_END_HOUR"], 17);
+  return readEnvNumber("RC_CX_OPERATIONAL_END_HOUR", 17);
 }
 
 function nextWindowStart(date, timeZone, startHour) {
