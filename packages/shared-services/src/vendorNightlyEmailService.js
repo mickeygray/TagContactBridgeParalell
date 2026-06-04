@@ -622,6 +622,9 @@ async function buildVendorOutcomeRows(domain, dateKey, options = {}) {
     {
       caseId: 1,
       name: 1,
+      primaryPhone: 1,
+      homePhone: 1,
+      normalizedPhones: 1,
       sourceName: 1,
       sourceChannel: 1,
       sourceCanonicalId: 1,
@@ -632,6 +635,7 @@ async function buildVendorOutcomeRows(domain, dateKey, options = {}) {
       firstPaymentDate: 1,
       totalPaid: 1,
       initialPayment: 1,
+      "paymentHandoff.phone": 1,
     },
   ).lean();
 
@@ -667,6 +671,12 @@ async function buildVendorOutcomeRows(domain, dateKey, options = {}) {
         date: dateKey,
         caseId: profile.caseId ?? "",
         name: profile.name || "",
+        phone:
+          profile.primaryPhone ||
+          profile.paymentHandoff?.phone ||
+          profile.homePhone ||
+          (Array.isArray(profile.normalizedPhones) ? profile.normalizedPhones[0] : "") ||
+          "",
         sourceFamily: meta.familyLabel,
         sourceFamilyKey: meta.familyKey,
         sourceName: meta.source,
@@ -1080,6 +1090,7 @@ async function runVendorNightlyEmail(domain, options = {}) {
     { header: "date", key: "date" },
     { header: "caseId", key: "caseId" },
     { header: "name", key: "name" },
+    { header: "phone", key: "phone" },
     { header: "sourceFamily", key: "sourceFamily" },
     { header: "sourceFamilyKey", key: "sourceFamilyKey" },
     { header: "sourceName", key: "sourceName" },
