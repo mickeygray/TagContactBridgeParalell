@@ -11,7 +11,7 @@
 //   node scripts/test-blog-openai-images.js
 //
 // Env overrides (same as the main pipeline):
-//   OPENAI_IMAGE_MODEL=gpt-image-2    (default)
+//   OPENAI_IMAGE_MODEL=gpt-image-1    (default)
 //   OPENAI_IMAGE_QUALITY=low | medium | high
 //   OPENAI_IMAGE_SIZE=1024x1024       (default)
 
@@ -80,7 +80,7 @@ async function generateOne(draft, outDir) {
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) throw new Error("OPENAI_API_KEY not set");
 
-  const model = process.env.OPENAI_IMAGE_MODEL || "gpt-image-2";
+  const model = process.env.OPENAI_IMAGE_MODEL || "gpt-image-1";
   const quality = process.env.OPENAI_IMAGE_QUALITY || "low";
   const size = process.env.OPENAI_IMAGE_SIZE || "1024x1024";
   const prompt = buildPrompt(draft);

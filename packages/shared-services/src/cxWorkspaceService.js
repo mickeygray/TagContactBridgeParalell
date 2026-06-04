@@ -64,6 +64,10 @@ const {
   queueCxDialRequest,
   stageCxDispatchIntent,
 } = require("./cxCadenceService");
+const {
+  cancelCxAppointmentsForCase,
+  resolveCxAppointmentAfterDisposition,
+} = require("./cxAppointmentService");
 const { extractPaymentRows } = require("./paymentReconcileService");
 const { deriveQueueFamily } = require("./cxLoadBalancerService");
 const {
@@ -107,6 +111,29 @@ function normalizeExternalId(value) {
 
 function plainObject(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : {};
+}
+
+function sanitizeInterviewSnapshotValue(value, depth = 0) {
+  if (value == null) return value;
+  if (typeof value === "string") return value.trim().slice(0, 2000);
+  if (typeof value === "boolean") return value;
+  if (typeof value === "number") return Number.isFinite(value) ? value : null;
+  if (depth >= 4) return null;
+  if (Array.isArray(value)) {
+    return value
+      .slice(0, 50)
+      .map((item) => sanitizeInterviewSnapshotValue(item, depth + 1));
+  }
+  if (typeof value === "object") {
+    const out = {};
+    for (const [key, item] of Object.entries(value).slice(0, 100)) {
+      const normalizedKey = String(key || "").trim().slice(0, 80);
+      if (!normalizedKey) continue;
+      out[normalizedKey] = sanitizeInterviewSnapshotValue(item, depth + 1);
+    }
+    return out;
+  }
+  return null;
 }
 
 function parseDateOrNull(value) {
@@ -1295,6 +1322,14 @@ async function finalizeCxDispositionDidNotAnswer(domain, input = {}) {
         metadata: queueMetadata,
       },
     }).catch(() => null);
+  const appointmentResolution = await resolveCxAppointmentAfterDisposition({
+    domain,
+    caseId,
+    queueItem,
+    queueItemId: queueMutation?.queueItemId || input.queueItemId || input.queueTicketId || null,
+    disposition: "did-not-answer",
+    actorEmail: input.actorEmail || null,
+  }).catch((error) => ({ ok: false, error: error.message }));
 
   return {
     caseId,
@@ -1310,6 +1345,7 @@ async function finalizeCxDispositionDidNotAnswer(domain, input = {}) {
     unansweredCalls: nextNoAnswerCount,
     policyReason: dialability?.ok === false ? dialability.reason : null,
     queueEjection: queueMutation || null,
+    appointmentResolution,
   };
 }
 
@@ -1359,6 +1395,14 @@ async function finalizeCxDispositionAnswered(domain, input = {}) {
       },
     },
   }).catch(() => null);
+  const appointmentResolution = await resolveCxAppointmentAfterDisposition({
+    domain,
+    caseId,
+    queueItem,
+    queueItemId: queueMutation?.queueItemId || input.queueItemId || input.queueTicketId || null,
+    disposition: "answered",
+    actorEmail: input.actorEmail || null,
+  }).catch((error) => ({ ok: false, error: error.message }));
   return {
     caseId,
     domain,
@@ -1369,6 +1413,7 @@ async function finalizeCxDispositionAnswered(domain, input = {}) {
     actionKey: queueAction?.actionKey || actionKey || null,
     rescheduledFor: null,
     queueEjection: queueMutation || null,
+    appointmentResolution,
   };
 }
 
@@ -1745,6 +1790,10 @@ async function finalizeCxQueueFromLogicsState(domain, caseId, input = {}, logics
       statusLabel: disposition,
       actorEmail: input.actorEmail || null,
     }).catch(() => null);
+    const appointmentResolution = await cancelCxAppointmentsForCase(domain, normalizedCaseId, {
+      reason: statusCategory || "terminal-status",
+      actorEmail: input.actorEmail || null,
+    }).catch((error) => ({ ok: false, error: error.message }));
     return {
       caseId: normalizedCaseId,
       disposition,
@@ -1753,6 +1802,7 @@ async function finalizeCxQueueFromLogicsState(domain, caseId, input = {}, logics
       queueOutcome: queueMutation?.mutated ? "cancelled" : queueAction?.actionKey ? "cancelled" : "noop",
       actionKey: queueAction?.actionKey || null,
       rescheduledFor: null,
+      appointmentResolution,
     };
   }
 
@@ -2144,6 +2194,18 @@ function isQueueItemAllowedByAgentRouteCampaign(queueItem = {}, context = {}) {
   return routeKey ? routeCampaigns.includes(routeKey) : false;
 }
 
+function isQueueItemHeldForFutureAppointment(queueItem = {}) {
+  const metadata = queueItem?.metadata || {};
+  const holdReason = String(metadata.dialabilityHoldReason || "").trim().toLowerCase();
+  const appointmentStatus = String(metadata.appointmentStatus || "").trim().toLowerCase();
+  if (holdReason !== "appointment" || !["scheduled", "blocked"].includes(appointmentStatus)) {
+    return false;
+  }
+  const holdUntil = metadata.dialabilityHoldUntil || queueItem.releaseAt || metadata.appointmentLegalDialAt;
+  const holdUntilMs = holdUntil ? new Date(holdUntil).getTime() : null;
+  return !Number.isFinite(holdUntilMs) || holdUntilMs > Date.now();
+}
+
 function canViewQueueItemForAgent(queueItem = {}, context = {}) {
   const agentExtensionId = String(context?.account?.extensionId || "").trim();
   if (!agentExtensionId) return false;
@@ -2151,6 +2213,7 @@ function canViewQueueItemForAgent(queueItem = {}, context = {}) {
   if (assignedExtensionId) {
     if (assignedExtensionId !== agentExtensionId) return false;
     if (getQueueItemState(queueItem) === "serving") return true;
+    if (isQueueItemHeldForFutureAppointment(queueItem)) return false;
     return isQueueItemAllowedByAgentRouteCampaign(queueItem, context);
   }
   return Boolean(
@@ -4349,6 +4412,11 @@ async function buildCxWorkspace(domain, user) {
     agentStateSnapshot.cxRouting || null,
   );
   const queuePolicy = resolveAccountQueuePolicy(context.account || null);
+  const appointments = Array.isArray(agentStateSnapshot.appointments)
+    ? [...agentStateSnapshot.appointments]
+      .sort((left, right) => new Date(left.legalDialAt || left.appointmentAt || 0) - new Date(right.legalDialAt || right.appointmentAt || 0))
+      .slice(0, 25)
+    : [];
 
   return {
     domain: context.domain,
@@ -4364,6 +4432,7 @@ async function buildCxWorkspace(domain, user) {
       exShells: normalizeExShells(context.account.exShells || []).map(summarizeExShell),
       requestedExShell: summarizeExShell(requestedExShell),
       activeExShell: summarizeExShell(activeExShell),
+      appointments,
     },
     ex: {
       status: context.agentState?.status || "offline",
@@ -4379,6 +4448,7 @@ async function buildCxWorkspace(domain, user) {
     },
     counts: {
       callQueue: callQueue.length,
+      appointments: appointments.length,
       tasks: openTasks.length,
       reminders: openReminders.length,
       workflowStages: assignedWorkflowStages.length,
@@ -7945,6 +8015,67 @@ async function executeCxLogicsActivity(domain, user, input = {}) {
 // appended to the case as a structured "Spouse intake" activity-note
 // elsewhere (see appendSpouseIntakeNote). They're omitted from this
 // map so we don't accidentally send them as fields Logics will drop.
+// Persist a structured interview snapshot to LeadCadence and Logics.
+async function executeCxInterviewSnapshot(domain, user, input = {}) {
+  const normalizedDomain = normalizeDomain(domain);
+  const caseId = Number(input.caseId);
+  if (!Number.isFinite(caseId) || caseId <= 0) {
+    const err = new Error("caseId is required");
+    err.status = 400;
+    throw err;
+  }
+
+  const activityNote = String(input.activityNote || input.note || input.comment || "").trim();
+  if (!activityNote) {
+    const err = new Error("activityNote is required");
+    err.status = 400;
+    throw err;
+  }
+
+  const now = new Date();
+  const actor = normalizeActor(user);
+  const snapshotPayload = {
+    source: "cx-workspace-interview-snapshot",
+    caseId,
+    domain: normalizedDomain,
+    prospectName: String(input.prospectName || "").trim().slice(0, 160) || null,
+    phone: String(input.phone || "").trim().slice(0, 80) || null,
+    queue: {
+      actionKey: String(input.queueActionKey || "").trim().slice(0, 120) || null,
+      itemId: String(input.queueItemId || "").trim().slice(0, 120) || null,
+      ticketId: String(input.queueTicketId || "").trim().slice(0, 120) || null,
+    },
+    updatedAt: now,
+    updatedBy: actor,
+    snapshot: sanitizeInterviewSnapshotValue(plainObject(input.snapshot)),
+    activityNote,
+  };
+
+  const cadenceResult = await leadCadenceRepository.saveLeadCadenceInterviewSnapshot(
+    normalizedDomain,
+    caseId,
+    snapshotPayload,
+  );
+
+  const logicsResult = await executeCxLogicsActivity(normalizedDomain, user, {
+    caseId,
+    subject: "CX interview snapshot",
+    activityType: "General",
+    note: activityNote,
+    snapshot: snapshotPayload.snapshot,
+    source: snapshotPayload.source,
+  });
+
+  return {
+    completed: logicsResult?.completed === true,
+    response: {
+      cadence: cadenceResult,
+      cadenceMatched: Number(cadenceResult?.matchedCount || 0) > 0,
+      logics: logicsResult,
+    },
+  };
+}
+
 const LOGICS_UPDATE_FIELD_MAP = {
   firstName: "FirstName",
   lastName: "LastName",
@@ -8686,6 +8817,7 @@ module.exports = {
   executeCxSaveCaseProfileFromLogics,
   executeCxLogicsFindMatch,
   executeCxLogicsActivity,
+  executeCxInterviewSnapshot,
   executeCxLogicsAmortization,
   executeCxLogicsInvoice,
   executeCxLogicsNotes,

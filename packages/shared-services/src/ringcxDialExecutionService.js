@@ -134,6 +134,10 @@ function isDialTraceEnabled() {
   return parseBooleanFlag(process.env.RINGCX_DIAL_EXECUTION_VERBOSE_LOGS, true);
 }
 
+function allowWeakRingcxActiveCallCapture() {
+  return parseBooleanFlag(process.env.RINGCX_ACTIVE_CALL_ALLOW_WEAK_MATCH, false);
+}
+
 function dialTraceLog(logger, level, event, payload = {}) {
   if (!logger || typeof logger[level] !== "function") return;
   if (level === "info" && !isDialTraceEnabled()) return;
@@ -694,7 +698,7 @@ function scoreActiveCallMatch(call, {
     reasons.push("phone");
   }
   if (externId && activeCallContainsText(call, externId)) {
-    score += 7;
+    score += 100;
     reasons.push("externId");
   }
   if (campaignId && activeCallContainsText(call, campaignId)) {
@@ -727,10 +731,15 @@ function findMatchingActiveCall(activeCallsPayload, criteria = {}) {
   const top = scored[0];
   if (!top) return null;
   const next = scored[1];
-  const hasStrongIdentifier =
-    top.reasons.includes("phone") || top.reasons.includes("externId");
-  if (!hasStrongIdentifier && top.score < 8) return null;
-  if (next && next.score === top.score && !hasStrongIdentifier) return null;
+  const hasExactQueueIdentity = top.reasons.includes("externId");
+  if (hasExactQueueIdentity) return top;
+
+  const hasWeakFallbackIdentity =
+    allowWeakRingcxActiveCallCapture()
+    && top.reasons.includes("phone")
+    && (top.reasons.includes("agentEmail") || top.reasons.includes("campaignId"));
+  if (!hasWeakFallbackIdentity) return null;
+  if (next && next.score === top.score) return null;
   return top;
 }
 
@@ -770,16 +779,27 @@ async function waitForRingcxCampaignCall(client, {
   }
 
   const querySpecs = [];
-  if (agentCxAgentId) {
+  if (externId) {
+    querySpecs.push({
+      product: null,
+      productId: null,
+      externalId: externId,
+      queryScope: "EXTERNAL_ID",
+      scopedToAgent: false,
+    });
+  } else if (agentCxAgentId) {
     querySpecs.push({
       product: "AGENT",
       productId: agentCxAgentId,
+      externalId: null,
       scopedToAgent: true,
     });
   }
   querySpecs.push({
     product: "ACCOUNT",
     productId: client.config?.accountId,
+    externalId: externId || null,
+    queryScope: "ACCOUNT",
     scopedToAgent: false,
   });
 
@@ -793,6 +813,7 @@ async function waitForRingcxCampaignCall(client, {
         const activeCalls = await client.listActiveCalls({
           product: spec.product,
           productId: spec.productId,
+          externalId: spec.externalId,
         });
         const calls = coerceActiveCallList(activeCalls);
         lastCallCount = calls.length;
@@ -810,28 +831,23 @@ async function waitForRingcxCampaignCall(client, {
             uii: extractActiveCallUii(match.call),
             activeCallSummary: summarizeActiveCall(match.call),
             matchReasons: match.reasons,
-            queryScope: spec.product,
+            queryScope: spec.queryScope || spec.product,
           };
         }
 
         if (spec.scopedToAgent && calls.length === 1) {
-          const onlyCall = calls[0];
-          const uii = extractActiveCallUii(onlyCall);
-          if (uii) {
-            return {
-              ok: true,
-              uii,
-              activeCallSummary: summarizeActiveCall(onlyCall),
-              matchReasons: ["single-agent-active-call"],
-              queryScope: spec.product,
-            };
-          }
+          logger?.warn?.("ringcx.campaignCallCapture.singleAgentCall.unconfirmed", {
+            product: spec.product,
+            productId: spec.productId,
+            reason: "missing-queue-identity",
+            sample: summarizeActiveCall(calls[0]),
+          });
         }
       } catch (error) {
         lastError = error;
         logger?.warn?.("ringcx.campaignCallCapture.listActiveCalls.failed", {
-          product: spec.product,
-          productId: spec.productId,
+          product: spec.queryScope || spec.product,
+          productId: spec.externalId ? "externalId" : spec.productId,
           error: error.message,
         });
       }

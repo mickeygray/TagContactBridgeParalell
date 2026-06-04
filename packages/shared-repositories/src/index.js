@@ -11,6 +11,7 @@ const conversationWorkflowRepository = require("./conversationWorkflowRepository
 const callSessionRepository = require("./callSessionRepository");
 const leadActivityRepository = require("./leadActivityRepository");
 const rcOAuthStateRepository = require("./rcOAuthStateRepository");
+const cxAppointmentRepository = require("./cxAppointmentRepository");
 const cxDialQueueRepository = require("./cxDialQueueRepository");
 const dailyCallStatRepository = require("./dailyCallStatRepository");
 const eventRepository = require("./eventRepository");
@@ -54,6 +55,7 @@ module.exports = {
   callSessionRepository,
   leadActivityRepository,
   rcOAuthStateRepository,
+  cxAppointmentRepository,
   cxDialQueueRepository,
   dailyCallStatRepository,
   deepCutRunRepository,

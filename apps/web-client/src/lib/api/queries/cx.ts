@@ -2,6 +2,7 @@ import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/rea
 import { api } from "@/lib/api/client";
 import type {
   ClientSearchMatch,
+  CxAppointmentsResult,
   CxCommandResult,
   CxLeadCandidatesResult,
   CxLeadLookupResult,
@@ -19,6 +20,7 @@ function invalidateCxScope(qc: ReturnType<typeof useQueryClient>, domain: string
   qc.invalidateQueries({ queryKey: queryKeys.ringcentral.all() });
   qc.invalidateQueries({ queryKey: queryKeys.cx.workspace(domain) });
   qc.invalidateQueries({ queryKey: queryKeys.cx.callQueue(domain) });
+  qc.invalidateQueries({ queryKey: queryKeys.cx.appointments(domain) });
   qc.invalidateQueries({ queryKey: queryKeys.cx.tasks(domain) });
 }
 
@@ -122,6 +124,82 @@ export function useCxReleasePostDateHold(domain: string) {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: queryKeys.cx.all() });
       qc.invalidateQueries({ queryKey: queryKeys.cx.postdates(domain) });
+    },
+  });
+}
+
+export function useCxAppointments(
+  domain: string,
+  filters: { status?: string; from?: string; to?: string; caseId?: string; agentExtensionId?: string } = {},
+) {
+  return useQuery({
+    queryKey: queryKeys.cx.appointments(domain, filters),
+    queryFn: () =>
+      api
+        .get<{ ok: true; result: CxAppointmentsResult }>(`/api/read/cx/appointments/${domain}`, {
+          query: {
+            status: filters.status || "active",
+            from: filters.from || undefined,
+            to: filters.to || undefined,
+            caseId: filters.caseId || undefined,
+            agentExtensionId: filters.agentExtensionId || undefined,
+          },
+        })
+        .then((r) => r.result),
+    enabled: Boolean(domain),
+    staleTime: 10_000,
+    refetchInterval: 30_000,
+    refetchIntervalInBackground: false,
+  });
+}
+
+export function useCxCreateAppointment(domain: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: Record<string, unknown>) =>
+      api
+        .post<{ ok: true; result: CxCommandResult | Record<string, unknown> }>(
+          `/api/commands/cx/${domain}/appointments`,
+          body,
+        )
+        .then((r) => r.result),
+    onSuccess: () => invalidateCxScope(qc, domain),
+  });
+}
+
+export function useCxReleaseAppointment(domain: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: { appointmentId: string; reason?: string }) =>
+      api
+        .post<{ ok: true; result: CxCommandResult | Record<string, unknown> }>(
+          `/api/commands/cx/${domain}/appointments/release`,
+          body,
+        )
+        .then((r) => r.result),
+    onSuccess: () => invalidateCxScope(qc, domain),
+  });
+}
+
+export function useCxReleaseAppointmentAny() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: { domain: string; appointmentId: string; reason?: string }) => {
+      const domain = String(body.domain || "").toUpperCase();
+      return api
+        .post<{ ok: true; result: CxCommandResult | Record<string, unknown> }>(
+          `/api/commands/cx/${domain}/appointments/release`,
+          {
+            appointmentId: body.appointmentId,
+            reason: body.reason,
+          },
+        )
+        .then((r) => r.result);
+    },
+    onSuccess: (_result, vars) => {
+      qc.invalidateQueries({ queryKey: queryKeys.cx.all() });
+      qc.invalidateQueries({ queryKey: queryKeys.cx.appointments("ALL") });
+      if (vars?.domain) invalidateCxScope(qc, String(vars.domain).toUpperCase());
     },
   });
 }
@@ -558,6 +636,7 @@ export const useCxLogicsFindMatch = buildCxCommandHook((domain) => `/api/command
 export const useCxLogicsUpdateStatus = buildCxCommandHook((domain) => `/api/commands/cx/${domain}/logics/update-status`);
 export const useCxLogicsTask = buildCxCommandHook((domain) => `/api/commands/cx/${domain}/logics/task`);
 export const useCxLogicsActivity = buildCxCommandHook((domain) => `/api/commands/cx/${domain}/logics/activity`);
+export const useCxInterviewSnapshot = buildCxCommandHook((domain) => `/api/commands/cx/${domain}/interview-snapshot`);
 export const useCxLogicsUpdateCase = buildCxCommandHook((domain) => `/api/commands/cx/${domain}/logics/update-case`);
 export const useCxLogicsNotes = buildCxCommandHook((domain) => `/api/commands/cx/${domain}/logics/notes`);
 export const useCxLogicsInvoice = buildCxCommandHook((domain) => `/api/commands/cx/${domain}/logics/invoice`);

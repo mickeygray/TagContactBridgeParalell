@@ -2,6 +2,29 @@
 
 const mongoose = require("mongoose");
 
+const agentAppointmentSchema = new mongoose.Schema(
+  {
+    appointmentId: { type: String, required: true },
+    domain: { type: String, default: null },
+    caseId: { type: Number, default: null },
+    leadCadenceId: { type: String, default: null },
+    cxQueueRecordId: { type: String, default: null },
+    queueActionKey: { type: String, default: null },
+    prospectName: { type: String, default: null },
+    phone: { type: String, default: null },
+    sourceName: { type: String, default: null },
+    appointmentAt: { type: Date, default: null },
+    appointmentTimezone: { type: String, default: "America/Los_Angeles" },
+    legalDialAt: { type: Date, default: null },
+    legalDialTimezone: { type: String, default: "America/Los_Angeles" },
+    status: { type: String, default: "scheduled" },
+    note: { type: String, default: null },
+    createdAt: { type: Date, default: Date.now },
+    updatedAt: { type: Date, default: Date.now },
+  },
+  { _id: false },
+);
+
 // IDENTIFIER SCOPE: `extensionId` is globally unique because every company
 // (TAG / WYNN / AMITY) shares a single RingCentral account configured via one
 // set of credentials (`RING_CENTRAL_CLIENT_ID`, `RING_CENTRAL_JWT_TOKEN`).
@@ -181,6 +204,7 @@ const agentStateSchema = new mongoose.Schema(
       sessionId: { type: String, default: null },
       updatedAt: { type: Date, default: null },
     },
+    appointments: { type: [agentAppointmentSchema], default: [] },
     upstream: {
       source: { type: String, default: "ringbridge" },
       mirroredAt: { type: Date, default: Date.now },

@@ -33,6 +33,22 @@ function legacyLeadCadenceReadsEnabled() {
   return boolFromEnv(process.env.LEAD_CADENCE_LEGACY_READS_ENABLED, false);
 }
 
+const AGED_DNC_FIRST_CHECK_MS = 30 * 24 * 60 * 60 * 1000;
+
+function buildAgedDncCheckpointOnInsert(update = {}) {
+  const hasExplicitDncCheckpoint = Object.keys(update).some((key) => (
+    key === "dncCheckpoints" || key.startsWith("dncCheckpoints.")
+  ));
+  if (hasExplicitDncCheckpoint || update.active !== true) return {};
+  return {
+    "dncCheckpoints.count": 0,
+    "dncCheckpoints.nextAt": new Date(Date.now() + AGED_DNC_FIRST_CHECK_MS),
+    "dncCheckpoints.cleared": false,
+    "dncCheckpoints.hit": false,
+    "dncCheckpoints.source": "intake",
+  };
+}
+
 function normalizeLegacyLeadCadence(doc) {
   if (!doc) return null;
   const company = doc.company || doc.domain || null;
@@ -77,14 +93,41 @@ async function findLeadCadence(domain, caseId) {
 }
 
 async function upsertLeadCadence(domain, caseId, update = {}) {
+  const setOnInsert = buildAgedDncCheckpointOnInsert(update);
+  const updateDoc = Object.keys(setOnInsert).length
+    ? { $set: update, $setOnInsert: setOnInsert }
+    : { $set: update };
   return LeadCadence.findOneAndUpdate(
     {
       domain: String(domain || "").toUpperCase(),
       caseId: Number(caseId),
     },
-    { $set: update },
+    updateDoc,
     { new: true, upsert: true, setDefaultsOnInsert: true },
   );
+}
+
+async function saveLeadCadenceInterviewSnapshot(domain, caseId, interviewSnapshot = {}) {
+  const normalizedDomain = String(domain || "").toUpperCase();
+  const numericCaseId = Number(caseId);
+  if (!normalizedDomain || !Number.isFinite(numericCaseId)) {
+    return { matchedCount: 0, modifiedCount: 0 };
+  }
+  const result = await LeadCadence.updateOne(
+    {
+      domain: normalizedDomain,
+      caseId: numericCaseId,
+    },
+    {
+      $set: {
+        interviewSnapshot,
+      },
+    },
+  );
+  return {
+    matchedCount: result.matchedCount ?? result.n ?? 0,
+    modifiedCount: result.modifiedCount ?? result.nModified ?? 0,
+  };
 }
 
 // Best-effort date-range coercion. Accepts:
@@ -1418,6 +1461,7 @@ module.exports = {
   recordInitialDncCheck,
   recordRvmDispositionPoll,
   rescheduleScheduledAction,
+  saveLeadCadenceInterviewSnapshot,
   syncLeadCadenceState,
   upsertLeadCadence,
 };

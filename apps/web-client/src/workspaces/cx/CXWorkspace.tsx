@@ -1,18 +1,16 @@
 import * as React from "react";
 import { useNavigate } from "react-router-dom";
 import {
+  CalendarClock,
+  CalendarPlus,
   ChevronDown,
   ChevronUp,
   CheckCircle2,
   Clock3,
-  ExternalLink,
   Mail,
   MessageCircleMore,
   Phone,
   PhoneOff,
-  RefreshCw,
-  Save,
-  UserCheck,
 } from "lucide-react";
 import { Button } from "@/components/ui/Button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/Card";
@@ -47,17 +45,19 @@ import {
   useCxCasePayments,
   useCxCaseTasks,
   useCxCommLog,
+  useCxCreateAppointment,
   useCxDialAny,
   useCxDisposition,
   useCxEmail,
+  useCxInterviewSnapshot,
   useCxLeadCandidates,
   useCxLeadLookup,
   useCxLogicsActivity,
   useCxLogicsAmortization,
-  useCxLogicsCreateCase,
   useCxLogicsInvoice,
   useCxLogicsTask,
   useCxLogicsUpdateCase,
+  useCxReleaseAppointment,
   useCxSetStatus,
   useCxSimulateCallAny,
   useCxText,
@@ -65,9 +65,8 @@ import {
 } from "@/lib/api/queries/cx";
 import { useClientDetail } from "@/lib/api/queries/clients";
 import type {
-  ClientCaseCall,
-  ClientCaseMessage,
   CxCallQueueItem,
+  CxAppointment,
   CxLeadCandidate,
   CxLeadLookupMatch,
   CxLeadLookupSource,
@@ -77,7 +76,6 @@ import type {
 import type { CommLogEntry } from "@/lib/api/queries/cx";
 import { KNOWN_DOMAINS, useDomainStore } from "@/lib/domain/domainStore";
 import { useSession } from "@/lib/auth/useSession";
-import { formatRelative } from "@/lib/utils/format";
 import { cn } from "@/lib/utils/cn";
 
 type ContactContext = {
@@ -150,10 +148,29 @@ function isCxNextDialAccepted(result: unknown) {
   const row = asRecord(result);
   const nextDial = asRecord(row.nextDial);
   if (Object.keys(nextDial).length === 0) return false;
-  if (nextDial.accepted === true || nextDial.pending === true || nextDial.queued === true) return true;
-  if (nextDial.ok === true && nextDial.accepted !== false) return true;
+  const activeCallCapture = asRecord(nextDial.activeCallCapture);
+  const hasConfirmedCall =
+    Boolean(readString(nextDial, "uii", "callSessionId", "rcxUii")) ||
+    Boolean(readString(activeCallCapture, "uii", "callSessionId", "rcxUii")) ||
+    nextDial.confirmedCall === true;
+  if (nextDial.accepted === true && hasConfirmedCall) return true;
+  if (nextDial.ok === true && hasConfirmedCall) return true;
   const status = String(nextDial.status || "").trim().toLowerCase();
-  return ["accepted", "queued", "pending", "dialing"].includes(status);
+  return ["accepted", "dialing"].includes(status) && hasConfirmedCall;
+}
+
+function isCxNextDialQueuedButUnconfirmed(result: unknown) {
+  if (isCxNextDialAccepted(result)) return false;
+  const row = asRecord(result);
+  const nextDial = asRecord(row.nextDial);
+  if (Object.keys(nextDial).length === 0) return false;
+  if (nextDial.accepted === false || nextDial.ok === false) return false;
+  const status = String(nextDial.status || "").trim().toLowerCase();
+  return (
+    nextDial.queued === true ||
+    nextDial.pending === true ||
+    ["queued", "pending"].includes(status)
+  );
 }
 
 function normalizeComparablePhone(value: string | null | undefined) {
@@ -397,7 +414,6 @@ const AUTO_SERVE_STARTUP_DELAY_SECONDS = 8;
 const BACKEND_NEXT_DIAL_HANDOFF_HOLD_MS = 10_000;
 const STALE_SERVED_QUEUE_RESET_MS = 20_000;
 const SHOW_POSTDATE_DISPOSITION = true;
-const SHOW_ADVANCED_CX_DISPOSITIONS = false;
 type AutoServeCountdownMode = "startup" | "next";
 type ResumePromptBreakType = "short-break" | "meal-break" | string;
 const AUTO_SERVE_BLOCKED_AGENT_STATES = new Set([
@@ -953,14 +969,39 @@ function sourceBadgeFor(source: CxLeadLookupSource | null):
   return null;
 }
 
-function formatDuration(sec?: number | null) {
-  if (!sec || sec < 0) return "—";
-  const mins = Math.floor(sec / 60);
-  const rem = Math.floor(sec % 60);
-  return `${mins}:${String(rem).padStart(2, "0")}`;
+// ─── Collapsible section shell ──────────────────────────────────────────────
+
+function formatAppointmentDateTime(value?: string | null) {
+  if (!value) return "Not set";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value);
+  return date.toLocaleString([], {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
 }
 
-// ─── Collapsible section shell ──────────────────────────────────────────────
+function toDateInputValue(date = new Date(Date.now() + 60 * 60 * 1000)) {
+  const rounded = roundToNextQuarterHour(date);
+  const year = rounded.getFullYear();
+  const month = String(rounded.getMonth() + 1).padStart(2, "0");
+  const day = String(rounded.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function roundToNextQuarterHour(date = new Date()) {
+  const rounded = new Date(date);
+  const minutes = Math.ceil(rounded.getMinutes() / 15) * 15;
+  rounded.setMinutes(minutes, 0, 0);
+  return rounded;
+}
+
+function toTimeInputValue(date = new Date(Date.now() + 60 * 60 * 1000)) {
+  const rounded = roundToNextQuarterHour(date);
+  return `${String(rounded.getHours()).padStart(2, "0")}:${String(rounded.getMinutes()).padStart(2, "0")}`;
+}
 
 type CollapsibleProps = {
   title: string;
@@ -1055,76 +1096,231 @@ function TemplatePreviewModal({ open, onClose, entry, context, onInsert }: Templ
 
 // ─── Contact history rendering ──────────────────────────────────────────────
 
-function CallRow({ call }: { call: ClientCaseCall }) {
-  const tone =
-    call.direction === "inbound" ? "info" : call.direction === "outbound" ? "accent" : "neutral";
-  const when = call.callStartTime || call.callEndTime;
+type AppointmentModalProps = {
+  open: boolean;
+  onClose: () => void;
+  caseId: string | null;
+  prospectName: string;
+  phone: string;
+  sourceName: string;
+  isLoading: boolean;
+  canPostdate: boolean;
+  canAssign: boolean;
+  onSubmit: (payload: {
+    appointmentDate?: string;
+    appointmentTime?: string;
+    appointmentTimezone?: string;
+    assignToMe?: boolean;
+    postdate?: boolean;
+    note?: string;
+  }) => void;
+};
+
+function AppointmentModal({
+  open,
+  onClose,
+  caseId,
+  prospectName,
+  phone,
+  sourceName,
+  isLoading,
+  canPostdate,
+  canAssign,
+  onSubmit,
+}: AppointmentModalProps) {
+  const [date, setDate] = React.useState(toDateInputValue());
+  const [time, setTime] = React.useState(toTimeInputValue());
+  const [timezone, setTimezone] = React.useState("America/Los_Angeles");
+  const [assignToMe, setAssignToMe] = React.useState(false);
+  const [postdate, setPostdate] = React.useState(false);
+  const [note, setNote] = React.useState("");
+
+  React.useEffect(() => {
+    if (!open) return;
+    const next = new Date(Date.now() + 60 * 60 * 1000);
+    setDate(toDateInputValue(next));
+    setTime(toTimeInputValue(next));
+    setTimezone("America/Los_Angeles");
+    setAssignToMe(false);
+    setPostdate(false);
+    setNote("");
+  }, [open]);
+
   return (
-    <div className="space-y-2 rounded-lg border border-border bg-card/50 p-3">
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <div className="flex items-center gap-2">
-          <StatusPill tone={tone}>{call.direction || "call"}</StatusPill>
-          <span className="text-sm text-foreground">
-            {call.direction === "inbound"
-              ? call.fromNumber || call.toNumber || "Unknown caller"
-              : call.toNumber || call.fromNumber || "Unknown callee"}
-          </span>
+    <Dialog open={open} onOpenChange={(next) => (!next ? onClose() : null)}>
+      <DialogContent className="max-w-lg">
+        <DialogHeader>
+          <DialogTitle>Set appointment</DialogTitle>
+          <DialogDescription>
+            Reserve this lead for your queue, pause normal dialing until the appointment time, then move to the next lead.
+          </DialogDescription>
+        </DialogHeader>
+        <div className="space-y-4">
+          <div className="rounded-md border border-border bg-muted/20 px-3 py-2">
+            <div className="text-sm font-medium text-foreground">
+              {prospectName || "Current lead"}
+            </div>
+            <div className="mt-0.5 flex flex-wrap gap-x-3 gap-y-1 text-xs text-muted-foreground">
+              <span>{caseId ? `Case ${caseId}` : "No case loaded"}</span>
+              {phone ? <span>{phone}</span> : null}
+              {sourceName ? <span>{sourceName}</span> : null}
+            </div>
+          </div>
+
+          <div className="grid gap-3 sm:grid-cols-3">
+            <div className="space-y-1.5">
+              <Label>Date</Label>
+              <Input type="date" value={date} onChange={(event) => setDate(event.target.value)} />
+            </div>
+            <div className="space-y-1.5">
+              <Label>Time</Label>
+              <Input type="time" value={time} onChange={(event) => setTime(event.target.value)} />
+            </div>
+            <div className="space-y-1.5">
+              <Label>Timezone</Label>
+              <Select value={timezone} onValueChange={setTimezone}>
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="America/Los_Angeles">Pacific</SelectItem>
+                  <SelectItem value="America/Denver">Mountain</SelectItem>
+                  <SelectItem value="America/Chicago">Central</SelectItem>
+                  <SelectItem value="America/New_York">Eastern</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+          </div>
+
+          {(canAssign || canPostdate) ? (
+            <div className="grid gap-2 sm:grid-cols-2">
+              {canAssign ? (
+                <label className="flex items-center gap-2 rounded-md border border-border px-3 py-2 text-sm">
+                  <input
+                    type="checkbox"
+                    checked={assignToMe}
+                    onChange={(event) => setAssignToMe(event.target.checked)}
+                    className="h-4 w-4 accent-primary"
+                  />
+                  <span>Assign to me</span>
+                </label>
+              ) : null}
+              {canPostdate ? (
+                <label className="flex items-center gap-2 rounded-md border border-border px-3 py-2 text-sm">
+                  <input
+                    type="checkbox"
+                    checked={postdate}
+                    onChange={(event) => setPostdate(event.target.checked)}
+                    className="h-4 w-4 accent-primary"
+                  />
+                  <span>Postdate</span>
+                </label>
+              ) : null}
+            </div>
+          ) : null}
+
+          <div className="space-y-1.5">
+            <Label>Note</Label>
+            <textarea
+              value={note}
+              onChange={(event) => setNote(event.target.value)}
+              rows={3}
+              className="min-h-20 w-full rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground outline-none transition focus-visible:ring-2 focus-visible:ring-ring"
+              placeholder="Optional appointment context"
+            />
+          </div>
         </div>
-        <div className="flex items-center gap-2 text-xs text-muted-foreground">
-          <span>{formatDuration(call.durationSec)}</span>
-          <span>{when ? formatRelative(when) : "—"}</span>
-        </div>
-      </div>
-      {call.agentName ? (
-        <div className="text-[11px] text-muted-foreground">Agent: {call.agentName}</div>
-      ) : null}
-      {call.transcription?.recordingUri ? (
-        <audio
-          controls
-          preload="none"
-          src={call.transcription.recordingUri}
-          className="w-full"
-        />
-      ) : null}
-      {call.transcription?.text ? (
-        <div className="max-h-24 overflow-auto whitespace-pre-wrap rounded-md border border-border bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
-          {call.transcription.text}
-        </div>
-      ) : null}
-    </div>
+        <DialogFooter>
+          <Button variant="secondary" onClick={onClose} disabled={isLoading}>
+            Cancel
+          </Button>
+          <Button
+            isLoading={isLoading}
+            disabled={!caseId || !date || !time}
+            onClick={() =>
+              onSubmit({
+                appointmentDate: date,
+                appointmentTime: time,
+                appointmentTimezone: timezone,
+                assignToMe,
+                postdate,
+                note: note.trim() || undefined,
+              })
+            }
+          >
+            Set appointment and next lead
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 
-function TextBubble({ message }: { message: ClientCaseMessage }) {
-  const isInbound = message.direction === "inbound";
+function AppointmentList({
+  appointments,
+  onRelease,
+  isReleasing,
+}: {
+  appointments: CxAppointment[];
+  onRelease: (appointment: CxAppointment) => void;
+  isReleasing: boolean;
+}) {
+  const visible = (appointments || []).filter((appointment) =>
+    ["scheduled", "due", "fired", "blocked"].includes(String(appointment.status || "")),
+  );
   return (
-    <div className={cn("flex", isInbound ? "justify-start" : "justify-end")}>
-      <div
-        className={cn(
-          "max-w-[82%] whitespace-pre-wrap rounded-2xl px-3 py-2 text-sm shadow-sm",
-          isInbound
-            ? "rounded-tl-sm border border-border bg-card text-foreground"
-            : "rounded-tr-sm bg-primary/10 text-foreground",
+    <Card>
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2 text-sm">
+          <CalendarClock className="h-4 w-4" />
+          Appointments
+        </CardTitle>
+      </CardHeader>
+      <CardContent>
+        {visible.length === 0 ? (
+          <div className="rounded-md border border-dashed border-border p-3 text-xs text-muted-foreground">
+            No scheduled callbacks.
+          </div>
+        ) : (
+          <div className="space-y-2">
+            {visible.map((appointment) => (
+              <div
+                key={appointment.appointmentId}
+                className="rounded-md border border-border bg-card/50 p-2"
+              >
+                <div className="flex items-start justify-between gap-2">
+                  <div className="min-w-0">
+                    <div className="truncate text-xs font-semibold text-foreground">
+                      {appointment.prospectName || `Case ${appointment.caseId}`}
+                    </div>
+                    <div className="mt-0.5 text-[11px] text-muted-foreground">
+                      {formatAppointmentDateTime(appointment.legalDialAt || appointment.appointmentAt)}
+                    </div>
+                  </div>
+                  <StatusPill tone={appointment.status === "blocked" ? "warning" : "info"}>
+                    {appointment.status}
+                  </StatusPill>
+                </div>
+                <div className="mt-1 truncate text-[11px] text-muted-foreground">
+                  Case {appointment.caseId}
+                  {appointment.phone ? ` | ${appointment.phone}` : ""}
+                </div>
+                <div className="mt-2 flex justify-end">
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    disabled={isReleasing}
+                    onClick={() => onRelease(appointment)}
+                  >
+                    Release
+                  </Button>
+                </div>
+              </div>
+            ))}
+          </div>
         )}
-      >
-        <div>{message.body}</div>
-        <div className="mt-1 flex flex-wrap items-center gap-2 text-[10px] text-muted-foreground">
-          {message.createdAt ? (
-            <span>{new Date(message.createdAt).toLocaleString()}</span>
-          ) : null}
-          {message.providerStatus ? (
-            <span className="rounded bg-muted px-1 py-0.5 font-medium uppercase tracking-wide">
-              {message.providerStatus}
-            </span>
-          ) : null}
-          {message.autoResponded ? (
-            <span className="rounded bg-muted px-1 py-0.5 font-medium uppercase tracking-wide">
-              auto
-            </span>
-          ) : null}
-        </div>
-      </div>
-    </div>
+      </CardContent>
+    </Card>
   );
 }
 
@@ -1282,42 +1478,6 @@ function CxDomainSwitcher({
 }
 
 // ─── Logics workspace helpers ───────────────────────────────────────────────
-
-// Per-company Logics web UI subdomain. Logics (IRS Logics, not the
-// generic Logiqs SaaS) is a WebForms SPA — the URL is always
-// `Default.aspx#` regardless of which case you're on, so there's no
-// deep link. Best we can do is open the tenant's home page and drop
-// the case id on the clipboard for the operator to paste into the
-// in-app search. Different tenants have different subdomains:
-//   - TAG  → taxag.irslogics.com
-//   - WYNN → (TBD — confirm with ops when flipping on)
-const LOGICS_WEB_SUBDOMAIN: Record<string, string> = {
-  TAG: "taxag",
-  WYNN: "wynn", // placeholder — may need tweak
-};
-
-function buildLogicsUrl(domain: string): string {
-  const key = String(domain || "TAG").toUpperCase();
-  const subdomain = LOGICS_WEB_SUBDOMAIN[key] || "taxag";
-  return `https://${subdomain}.irslogics.com/Default.aspx`;
-}
-
-async function openCaseInLogics(domain: string, caseId: number | string): Promise<boolean> {
-  // Copy the case id first so the operator can paste it into the
-  // Logics home page's search. Best-effort — clipboard may fail on
-  // insecure contexts; we still open the tab either way.
-  let copied = false;
-  try {
-    if (navigator.clipboard?.writeText) {
-      await navigator.clipboard.writeText(String(caseId));
-      copied = true;
-    }
-  } catch {
-    copied = false;
-  }
-  window.open(buildLogicsUrl(domain), "_blank", "noopener,noreferrer");
-  return copied;
-}
 
 function formatMaybeDate(value: unknown): string {
   if (!value) return "—";
@@ -2163,9 +2323,7 @@ function PaymentsSubsection({
 
 // ─── Logics workspace card (composes the four subsections) ──────────────────
 
-// Two-tab section header — used inside merged panels (Activities/Tasks
-// and Financials) to switch between subsections without spawning more
-// collapsible cards.
+// Tab header for compact merged panels.
 function PanelTabs({
   tabs,
   active,
@@ -2176,7 +2334,7 @@ function PanelTabs({
   onChange: (key: string) => void;
 }) {
   return (
-    <div className="flex gap-1 px-3 pt-2">
+    <div className="flex flex-wrap gap-1 px-3 pt-2">
       {tabs.map((tab) => (
         <button
           key={tab.key}
@@ -2215,7 +2373,7 @@ function CommLogSubsection({
   const entries = log.data?.entries || [];
 
   if (log.isLoading && entries.length === 0) {
-    return <div className="p-3 text-[11px] text-muted-foreground">Loading communications…</div>;
+    return <div className="p-3 text-[11px] text-muted-foreground">Loading communications...</div>;
   }
   if (entries.length === 0) {
     return (
@@ -2232,9 +2390,9 @@ function CommLogSubsection({
       <div className="flex items-center justify-between text-[11px] text-muted-foreground">
         <div>
           <span className="font-medium text-foreground">{log.data?.counts.total ?? 0}</span> entries
-          {log.data?.counts.callLogs ? <> · {log.data.counts.callLogs} calls</> : null}
-          {log.data?.counts.conversationMessages ? <> · {log.data.counts.conversationMessages} messages</> : null}
-          {log.data?.counts.leadCadence ? <> · cadence active</> : null}
+          {log.data?.counts.callLogs ? <> | {log.data.counts.callLogs} calls</> : null}
+          {log.data?.counts.conversationMessages ? <> | {log.data.counts.conversationMessages} messages</> : null}
+          {log.data?.counts.leadCadence ? <> | cadence active</> : null}
         </div>
         <button
           type="button"
@@ -2242,7 +2400,7 @@ function CommLogSubsection({
           disabled={log.isFetching}
           className="text-primary hover:underline disabled:opacity-50"
         >
-          {log.isFetching ? "Refreshing…" : "Refresh"}
+          {log.isFetching ? "Refreshing..." : "Refresh"}
         </button>
       </div>
       <ExpandableList
@@ -2260,11 +2418,12 @@ function CommLogSubsection({
 function CommLogRow({ entry }: { entry: CommLogEntry }) {
   const [expanded, setExpanded] = React.useState(false);
   const channelLabel = entry.channel.toUpperCase();
-  const dirLabel = entry.direction === "inbound"
-    ? "← in"
-    : entry.direction === "scheduled"
-      ? "▷ scheduled"
-      : "→ out";
+  const dirLabel =
+    entry.direction === "inbound"
+      ? "in"
+      : entry.direction === "scheduled"
+        ? "scheduled"
+        : "out";
   const tone =
     entry.status === "failed" || entry.status === "no-answer"
       ? "text-destructive"
@@ -2289,14 +2448,14 @@ function CommLogRow({ entry }: { entry: CommLogEntry }) {
             </span>
             <span className={cn("font-medium", tone)}>{dirLabel}</span>
             <span className="text-muted-foreground">{formatMaybeDate(entry.ts)}</span>
-            <span className="text-[10px] text-muted-foreground">· {entry.status}</span>
+            <span className="text-[10px] text-muted-foreground">| {entry.status}</span>
           </div>
           {bodyPreview ? (
             <div className="mt-0.5 truncate text-foreground">{bodyPreview}</div>
           ) : entry.channel === "call" && entry.metadata?.durationSeconds ? (
             <div className="mt-0.5 text-muted-foreground">
               {Math.round(Number(entry.metadata.durationSeconds))}s call
-              {entry.actor?.name ? ` · ${entry.actor.name}` : ""}
+              {entry.actor?.name ? ` | ${entry.actor.name}` : ""}
             </div>
           ) : entry.actor?.name ? (
             <div className="mt-0.5 text-muted-foreground">{entry.actor.name}</div>
@@ -2324,21 +2483,13 @@ function LogicsWorkspaceCard({
   resolvedPhone: string | null;
 }) {
   const [commLogOpen, setCommLogOpen] = React.useState(true);
-
-  const [historyOpen, setHistoryOpen] = React.useState(true);
-  const [historyTab, setHistoryTab] = React.useState<"activities" | "tasks">("activities");
-
-  const [financialsOpen, setFinancialsOpen] = React.useState(true);
-  const [financialsTab, setFinancialsTab] = React.useState<
-    "invoices" | "payments" | "amortization"
-  >("payments");
+  const [logicsInfoOpen, setLogicsInfoOpen] = React.useState(true);
+  const [logicsInfoTab, setLogicsInfoTab] = React.useState<
+    "activities" | "tasks" | "payments" | "invoices" | "amortization"
+  >("activities");
 
   return (
     <div className="space-y-2">
-      {/* Communications log — unified read across SMS (case-profile +
-         conversation-messages), calls (call-log), and cadence attempts
-         (lead-cadence). Newest-first. Source-agnostic so it works
-         pre-conversion via phone-only too. */}
       <Collapsible
         title="Communications"
         open={commLogOpen}
@@ -2351,45 +2502,29 @@ function LogicsWorkspaceCard({
         />
       </Collapsible>
 
-      {/* History — Activities + Tasks share one card, switched by tabs */}
       <Collapsible
-        title="History"
-        open={historyOpen}
-        onToggle={() => setHistoryOpen((v) => !v)}
+        title="Logics info"
+        open={logicsInfoOpen}
+        onToggle={() => setLogicsInfoOpen((v) => !v)}
       >
         <PanelTabs
           tabs={[
             { key: "activities", label: "Activities" },
             { key: "tasks", label: "Tasks" },
-          ]}
-          active={historyTab}
-          onChange={(k) => setHistoryTab(k as typeof historyTab)}
-        />
-        {historyTab === "activities" ? (
-          <ActivitiesSubsection domain={domain} resolvedCaseId={resolvedCaseId} />
-        ) : (
-          <TasksSubsection domain={domain} resolvedCaseId={resolvedCaseId} />
-        )}
-      </Collapsible>
-
-      {/* Financials — Invoices + Payments + Amortization share one card */}
-      <Collapsible
-        title="Financials"
-        open={financialsOpen}
-        onToggle={() => setFinancialsOpen((v) => !v)}
-      >
-        <PanelTabs
-          tabs={[
             { key: "payments", label: "Payments" },
             { key: "invoices", label: "Invoices" },
             { key: "amortization", label: "Amortization" },
           ]}
-          active={financialsTab}
-          onChange={(k) => setFinancialsTab(k as typeof financialsTab)}
+          active={logicsInfoTab}
+          onChange={(k) => setLogicsInfoTab(k as typeof logicsInfoTab)}
         />
-        {financialsTab === "payments" ? (
+        {logicsInfoTab === "activities" ? (
+          <ActivitiesSubsection domain={domain} resolvedCaseId={resolvedCaseId} />
+        ) : logicsInfoTab === "tasks" ? (
+          <TasksSubsection domain={domain} resolvedCaseId={resolvedCaseId} />
+        ) : logicsInfoTab === "payments" ? (
           <PaymentsSubsection domain={domain} resolvedCaseId={resolvedCaseId} />
-        ) : financialsTab === "invoices" ? (
+        ) : logicsInfoTab === "invoices" ? (
           <InvoicesSubsection domain={domain} resolvedCaseId={resolvedCaseId} />
         ) : (
           <AmortizationSubsection domain={domain} resolvedCaseId={resolvedCaseId} />
@@ -2400,6 +2535,606 @@ function LogicsWorkspaceCard({
 }
 
 // ─── Main workspace ─────────────────────────────────────────────────────────
+
+type InterviewSnapshotState = {
+  debtAmount: string;
+  irsDebt: boolean;
+  stateDebt: boolean;
+  taxProblems: Record<string, boolean>;
+  receivedNotices: string;
+  temperature: string;
+  employment: string;
+  filingStatus: string;
+  unfiledYears: string;
+  income: string;
+  expenses: string;
+  selectedFinancials: Record<string, boolean>;
+  financials: Record<string, string>;
+  flags: Record<string, boolean>;
+  personalNotes: string;
+};
+
+const INTERVIEW_SNAPSHOT_DEFAULT: InterviewSnapshotState = {
+  debtAmount: "",
+  irsDebt: false,
+  stateDebt: false,
+  taxProblems: {},
+  receivedNotices: "",
+  temperature: "",
+  employment: "",
+  filingStatus: "",
+  unfiledYears: "",
+  income: "",
+  expenses: "",
+  selectedFinancials: {},
+  financials: {},
+  flags: {},
+  personalNotes: "",
+};
+
+const INTERVIEW_TAX_PROBLEM_OPTIONS = [
+  { key: "balanceDue", label: "Balance due" },
+  { key: "unfiledReturns", label: "Unfiled returns" },
+  { key: "payroll941", label: "Payroll / 941" },
+  { key: "auditExam", label: "Audit / exam" },
+  { key: "taxLien", label: "Tax lien" },
+  { key: "bankLevy", label: "Bank levy" },
+  { key: "wageGarnishment", label: "Wage garnishment" },
+  { key: "penaltiesInterest", label: "Penalties / interest" },
+  { key: "stateTax", label: "State tax issue" },
+  { key: "1099SelfEmployed", label: "1099 / self-employed" },
+];
+
+const INTERVIEW_FINANCIAL_INFLOW_OPTIONS = [
+  { key: "savings", label: "Savings", placeholder: "Savings amount" },
+  { key: "checking", label: "Checking", placeholder: "Checking balance" },
+  { key: "availableToday", label: "Available today", placeholder: "Available today" },
+  { key: "homeValue", label: "Home value", placeholder: "Home value" },
+  { key: "homeEquity", label: "Home equity", placeholder: "Home equity" },
+  { key: "vehicleValue", label: "Vehicle value", placeholder: "Vehicle value" },
+  { key: "familySupportAmount", label: "Family support", placeholder: "Family support amount" },
+  { key: "businessRevenue", label: "Business revenue", placeholder: "Monthly business revenue" },
+];
+
+const INTERVIEW_FINANCIAL_OUTFLOW_OPTIONS = [
+  { key: "paymentCapacity", label: "Payment capacity", placeholder: "Monthly payment capacity" },
+  { key: "rentMortgagePayment", label: "Rent / mortgage payment", placeholder: "Monthly rent or mortgage" },
+  { key: "mortgageBalance", label: "Mortgage balance", placeholder: "Mortgage balance" },
+  { key: "vehiclePayment", label: "Vehicle payment", placeholder: "Vehicle payment" },
+  { key: "medicalExpenses", label: "Medical expenses", placeholder: "Medical expenses" },
+  { key: "payrollLiability", label: "Payroll liability", placeholder: "Payroll liability" },
+];
+
+const INTERVIEW_FINANCIAL_FIELD_OPTIONS = [
+  ...INTERVIEW_FINANCIAL_INFLOW_OPTIONS,
+  ...INTERVIEW_FINANCIAL_OUTFLOW_OPTIONS,
+];
+
+const INTERVIEW_FLAG_OPTIONS = [
+  { key: "retiredFixedIncome", label: "Retired / fixed income" },
+  { key: "dependents", label: "Has kids / dependents" },
+  { key: "spouseInvolved", label: "Spouse involved" },
+  { key: "singleParent", label: "Single parent / head of household" },
+  { key: "recentJobLoss", label: "Recent job loss / hours cut" },
+  { key: "medicalIssue", label: "Medical issue / disability" },
+  { key: "caregiver", label: "Caregiver responsibilities" },
+  { key: "transportation", label: "Vehicle / transportation need" },
+  { key: "familySupport", label: "Family helping financially" },
+];
+
+function checkedLabels(
+  options: Array<{ key: string; label: string }>,
+  selected: Record<string, boolean> | undefined,
+) {
+  return options
+    .filter((option) => selected?.[option.key])
+    .map((option) => option.label);
+}
+
+function pushInterviewLine(lines: string[], key: string, value: string | null | undefined) {
+  const clean = String(value || "").trim();
+  if (!clean) return;
+  lines.push(`${key}: ${clean}`);
+}
+
+function pushInterviewLines(lines: string[], key: string, values: Array<string | null | undefined>) {
+  for (const value of values) pushInterviewLine(lines, key, value);
+}
+
+function loadInterviewSnapshot(storageKey: string): InterviewSnapshotState {
+  try {
+    const raw = window.localStorage.getItem(storageKey);
+    if (!raw) return INTERVIEW_SNAPSHOT_DEFAULT;
+    const parsed = JSON.parse(raw) as Partial<InterviewSnapshotState>;
+    const legacyTaxProblem = String((parsed as { debtType?: unknown }).debtType || "").trim();
+    const legacyIncomeSignal = String((parsed as { incomeSignal?: unknown }).incomeSignal || "").trim();
+    const migratedTaxProblems = { ...(parsed.taxProblems || {}) };
+    if (legacyTaxProblem) {
+      const legacyMatch = INTERVIEW_TAX_PROBLEM_OPTIONS.find(
+        (option) => option.label.toLowerCase() === legacyTaxProblem.toLowerCase(),
+      );
+      if (legacyMatch) migratedTaxProblems[legacyMatch.key] = true;
+    }
+    const migratedSelectedFinancials =
+      parsed.selectedFinancials && typeof parsed.selectedFinancials === "object"
+        ? { ...parsed.selectedFinancials }
+        : {};
+    const migratedFinancials =
+      parsed.financials && typeof parsed.financials === "object" ? { ...parsed.financials } : {};
+    if (migratedSelectedFinancials.rentMortgage && !migratedSelectedFinancials.rentMortgagePayment) {
+      migratedSelectedFinancials.rentMortgagePayment = true;
+    }
+    if (migratedFinancials.rentMortgage && !migratedFinancials.rentMortgagePayment) {
+      migratedFinancials.rentMortgagePayment = migratedFinancials.rentMortgage;
+    }
+    return {
+      ...INTERVIEW_SNAPSHOT_DEFAULT,
+      ...parsed,
+      income: parsed.income || legacyIncomeSignal,
+      expenses: parsed.expenses || "",
+      taxProblems: migratedTaxProblems,
+      selectedFinancials: migratedSelectedFinancials,
+      financials: migratedFinancials,
+      flags: parsed.flags && typeof parsed.flags === "object" ? parsed.flags : {},
+    };
+  } catch {
+    return INTERVIEW_SNAPSHOT_DEFAULT;
+  }
+}
+
+function buildInterviewActivityNote(
+  snapshot: InterviewSnapshotState,
+  prospectName: string,
+  caseId: string,
+) {
+  const selectedFlags = checkedLabels(INTERVIEW_FLAG_OPTIONS, snapshot.flags);
+  const selectedTaxProblems = checkedLabels(INTERVIEW_TAX_PROBLEM_OPTIONS, snapshot.taxProblems);
+  const financialLines = INTERVIEW_FINANCIAL_FIELD_OPTIONS
+    .filter((option) => snapshot.selectedFinancials[option.key])
+    .map((option) => {
+      const value = String(snapshot.financials[option.key] || "").trim();
+      return value ? `${option.label} - ${value}` : option.label;
+    });
+  const lines: string[] = [];
+  pushInterviewLine(lines, "Note Type", "AI-assisted interview snapshot");
+  pushInterviewLine(lines, "Prospect", prospectName);
+  pushInterviewLine(lines, "Case ID", caseId);
+  pushInterviewLine(lines, "Client Temperature", snapshot.temperature || "unknown");
+  pushInterviewLines(lines, "Debt Jurisdiction", [
+    snapshot.irsDebt ? "IRS debt" : "",
+    snapshot.stateDebt ? "State debt" : "",
+  ]);
+  pushInterviewLines(lines, "Tax Problem", selectedTaxProblems);
+  pushInterviewLine(lines, "Debt Amount", snapshot.debtAmount);
+  pushInterviewLine(lines, "Received Notices", snapshot.receivedNotices);
+  pushInterviewLine(lines, "Unfiled Years", snapshot.unfiledYears);
+  pushInterviewLine(lines, "Employment", snapshot.employment);
+  pushInterviewLine(lines, "Filing Status", snapshot.filingStatus);
+  pushInterviewLine(lines, "Income", snapshot.income);
+  pushInterviewLine(lines, "Expenses", snapshot.expenses);
+  pushInterviewLines(lines, "Financial", financialLines);
+  pushInterviewLines(lines, "Client Context", selectedFlags);
+  pushInterviewLine(lines, "Personal / Pitch Notes", snapshot.personalNotes);
+  pushInterviewLine(lines, "Source", "CX workspace interview panel");
+  return lines.join("\n");
+}
+
+function CompactNativeSelect({
+  value,
+  onChange,
+  children,
+}: {
+  value: string;
+  onChange: (value: string) => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <select
+      value={value}
+      onChange={(event) => onChange(event.target.value)}
+      className="h-8 rounded-md border border-input bg-background px-2 text-xs text-foreground outline-none ring-offset-background focus:border-primary focus:ring-2 focus:ring-primary/20"
+    >
+      {children}
+    </select>
+  );
+}
+
+function CompactMultiSelect({
+  options,
+  selected,
+  placeholder,
+  onChange,
+}: {
+  options: Array<{ key: string; label: string }>;
+  selected: Record<string, boolean>;
+  placeholder: string;
+  onChange: (key: string, checked: boolean) => void;
+}) {
+  const selectedOptions = options.filter((option) => selected[option.key]);
+  const availableOptions = options.filter((option) => !selected[option.key]);
+  return (
+    <div className="space-y-1">
+      <select
+        value=""
+        onChange={(event) => {
+          const key = event.target.value;
+          if (key) onChange(key, true);
+        }}
+        className="h-8 w-full rounded-md border border-input bg-background px-2 text-xs text-foreground outline-none ring-offset-background focus:border-primary focus:ring-2 focus:ring-primary/20"
+      >
+        <option value="">{placeholder}</option>
+        {availableOptions.map((option) => (
+          <option key={option.key} value={option.key}>
+            {option.label}
+          </option>
+        ))}
+      </select>
+      {selectedOptions.length ? (
+        <div className="flex flex-wrap gap-1.5">
+          {selectedOptions.map((option) => (
+            <span
+              key={option.key}
+              className="inline-flex h-7 items-center gap-1 rounded-md border border-border bg-muted px-2 text-[11px] text-foreground"
+            >
+              {option.label}
+              <button
+                type="button"
+                onClick={() => onChange(option.key, false)}
+                className="rounded px-1 text-muted-foreground hover:bg-background hover:text-foreground"
+                aria-label={`Remove ${option.label}`}
+              >
+                x
+              </button>
+            </span>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function FinancialMultiSelect({
+  options,
+  selected,
+  values,
+  placeholder,
+  onSelect,
+  onValue,
+}: {
+  options: Array<{ key: string; label: string; placeholder: string }>;
+  selected: Record<string, boolean>;
+  values: Record<string, string>;
+  placeholder: string;
+  onSelect: (key: string, checked: boolean) => void;
+  onValue: (key: string, value: string) => void;
+}) {
+  const selectedOptions = options.filter((option) => selected[option.key]);
+  const availableOptions = options.filter((option) => !selected[option.key]);
+  return (
+    <div className="space-y-1">
+      <select
+        value=""
+        onChange={(event) => {
+          const key = event.target.value;
+          if (key) onSelect(key, true);
+        }}
+        className="h-8 w-full rounded-md border border-input bg-background px-2 text-xs text-foreground outline-none ring-offset-background focus:border-primary focus:ring-2 focus:ring-primary/20"
+      >
+        <option value="">{placeholder}</option>
+        {availableOptions.map((option) => (
+          <option key={option.key} value={option.key}>
+            {option.label}
+          </option>
+        ))}
+      </select>
+      {selectedOptions.length ? (
+        <div className="grid gap-1.5 md:grid-cols-2">
+          {selectedOptions.map((option) => (
+            <div
+              key={option.key}
+              className="flex min-h-8 items-center gap-1 rounded-md border border-border bg-muted px-2 py-1"
+            >
+              <span className="min-w-0 flex-1 truncate text-[11px] text-foreground">
+                {option.label}
+              </span>
+              <input
+                value={values[option.key] || ""}
+                onChange={(event) => onValue(option.key, event.target.value)}
+                placeholder={option.placeholder}
+                className="h-6 w-28 rounded border border-input bg-background px-1.5 text-[11px] text-foreground outline-none focus:border-primary focus:ring-1 focus:ring-primary/20"
+              />
+              <button
+                type="button"
+                onClick={() => onSelect(option.key, false)}
+                className="rounded px-1 text-[11px] text-muted-foreground hover:bg-background hover:text-foreground"
+                aria-label={`Remove ${option.label}`}
+              >
+                x
+              </button>
+            </div>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+type InterviewSnapshotTextField = {
+  [K in keyof InterviewSnapshotState]: InterviewSnapshotState[K] extends string ? K : never;
+}[keyof InterviewSnapshotState];
+
+function InterviewSnapshotCard({
+  domain,
+  caseId,
+  prospectName,
+  phone,
+  queueActionKey,
+  queueItemId,
+  queueTicketId,
+}: {
+  domain: string;
+  caseId: string;
+  prospectName: string;
+  phone?: string | null;
+  queueActionKey?: string | null;
+  queueItemId?: string | null;
+  queueTicketId?: string | null;
+}) {
+  const storageKey = React.useMemo(
+    () => `cx-interview-snapshot:${caseId || prospectName || "current"}`,
+    [caseId, prospectName],
+  );
+  const [snapshot, setSnapshot] = React.useState<InterviewSnapshotState>(() =>
+    loadInterviewSnapshot(storageKey),
+  );
+  const [preview, setPreview] = React.useState("");
+  const saveSnapshot = useCxInterviewSnapshot(domain);
+
+  React.useEffect(() => {
+    setSnapshot(loadInterviewSnapshot(storageKey));
+    setPreview("");
+  }, [storageKey]);
+
+  React.useEffect(() => {
+    try {
+      window.localStorage.setItem(storageKey, JSON.stringify(snapshot));
+    } catch {
+      // local snapshot persistence is best-effort only
+    }
+  }, [snapshot, storageKey]);
+
+  const setField = (field: InterviewSnapshotTextField, value: string) => {
+    setSnapshot((current) => ({ ...current, [field]: value }));
+  };
+  const setDebtFlag = (field: "irsDebt" | "stateDebt", checked: boolean) => {
+    setSnapshot((current) => ({ ...current, [field]: checked }));
+  };
+  const setTaxProblem = (key: string, checked: boolean) => {
+    setSnapshot((current) => ({
+      ...current,
+      taxProblems: { ...current.taxProblems, [key]: checked },
+    }));
+  };
+  const setFinancialSelected = (key: string, checked: boolean) => {
+    setSnapshot((current) => ({
+      ...current,
+      selectedFinancials: { ...current.selectedFinancials, [key]: checked },
+    }));
+  };
+  const setFinancialValue = (key: string, value: string) => {
+    setSnapshot((current) => ({
+      ...current,
+      financials: { ...current.financials, [key]: value },
+    }));
+  };
+  const setFlag = (key: string, checked: boolean) => {
+    setSnapshot((current) => ({
+      ...current,
+      flags: { ...current.flags, [key]: checked },
+    }));
+  };
+  const buildPreview = () => {
+    setPreview(buildInterviewActivityNote(snapshot, prospectName, caseId));
+  };
+  const saveToSystems = async () => {
+    const normalizedCaseId = String(caseId || "").trim();
+    if (!normalizedCaseId) {
+      toast.error("Interview snapshot needs a case", {
+        description: "Load or enter a Logics case before saving this snapshot.",
+      });
+      return;
+    }
+    const activityNote = buildInterviewActivityNote(snapshot, prospectName, normalizedCaseId);
+    setPreview(activityNote);
+    try {
+      const result = await saveSnapshot.mutateAsync({
+        caseId: normalizedCaseId,
+        prospectName,
+        phone: phone || undefined,
+        queueActionKey: queueActionKey || undefined,
+        queueItemId: queueItemId || undefined,
+        queueTicketId: queueTicketId || undefined,
+        snapshot,
+        activityNote,
+      });
+      const response = asRecord((result as { response?: unknown } | undefined)?.response);
+      const cadenceMatched = response.cadenceMatched === true;
+      toast("Interview snapshot saved", {
+        description: cadenceMatched
+          ? "Posted to Logics and stored on the matching LeadCadence row."
+          : "Posted to Logics. No matching LeadCadence row was found for this case.",
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Something went wrong.";
+      toast.error("Interview snapshot failed", { description: message });
+    }
+  };
+  const clearSnapshot = () => {
+    setSnapshot(INTERVIEW_SNAPSHOT_DEFAULT);
+    setPreview("");
+    try {
+      window.localStorage.removeItem(storageKey);
+    } catch {
+      // no-op
+    }
+  };
+
+  return (
+    <div className="space-y-2 p-4">
+      <div className="text-[11px] text-muted-foreground">
+        Structured call facts for future Logics activity notes. Do not enter full SSNs, card numbers, or bank account numbers.
+      </div>
+      <div className="space-y-2">
+        <div className="grid gap-2 md:grid-cols-5">
+          <Input
+            value={snapshot.debtAmount}
+            onChange={(event) => setField("debtAmount", event.target.value)}
+            placeholder="Debt amount"
+            className="h-8 text-xs"
+          />
+          <CompactNativeSelect
+            value={snapshot.receivedNotices}
+            onChange={(value) => setField("receivedNotices", value)}
+          >
+            <option value="">Received notices?</option>
+            <option>Yes</option>
+            <option>No</option>
+            <option>Unknown</option>
+          </CompactNativeSelect>
+          <CompactNativeSelect
+            value={snapshot.filingStatus}
+            onChange={(value) => setField("filingStatus", value)}
+          >
+            <option value="">Filing status</option>
+            <option>Single</option>
+            <option>Married filing jointly</option>
+            <option>Married filing separately</option>
+            <option>Head of household</option>
+            <option>Widowed</option>
+            <option>Unknown</option>
+          </CompactNativeSelect>
+          <CompactNativeSelect
+            value={snapshot.employment}
+            onChange={(value) => setField("employment", value)}
+          >
+            <option value="">Employment</option>
+            <option>W-2 employee</option>
+            <option>1099 / contractor</option>
+            <option>Business owner</option>
+            <option>Unemployed</option>
+            <option>Retired / fixed income</option>
+          </CompactNativeSelect>
+          <Input
+            value={snapshot.unfiledYears}
+            onChange={(event) => setField("unfiledYears", event.target.value)}
+            placeholder="Unfiled years"
+            className="h-8 text-xs"
+          />
+        </div>
+        <div className="grid gap-2 md:grid-cols-2">
+          <CompactMultiSelect
+            options={[
+              { key: "irsDebt", label: "IRS debt" },
+              { key: "stateDebt", label: "State debt" },
+            ]}
+            selected={{ irsDebt: snapshot.irsDebt, stateDebt: snapshot.stateDebt }}
+            placeholder="Add debt jurisdiction"
+            onChange={(key, checked) => setDebtFlag(key as "irsDebt" | "stateDebt", checked)}
+          />
+          <CompactMultiSelect
+            options={INTERVIEW_TAX_PROBLEM_OPTIONS}
+            selected={snapshot.taxProblems}
+            placeholder="Add tax problem"
+            onChange={setTaxProblem}
+          />
+        </div>
+        <div className="grid gap-2 md:grid-cols-2">
+          <CompactNativeSelect
+            value={snapshot.temperature}
+            onChange={(value) => setField("temperature", value)}
+          >
+            <option value="">Temperature</option>
+            <option>Cold</option>
+            <option>Cautious</option>
+            <option>Warm</option>
+            <option>Hot / urgent</option>
+            <option>Hostile / do not push</option>
+          </CompactNativeSelect>
+          <CompactMultiSelect
+            options={INTERVIEW_FLAG_OPTIONS}
+            selected={snapshot.flags}
+            placeholder="Add client context"
+            onChange={setFlag}
+          />
+        </div>
+        <div className="grid gap-2 md:grid-cols-2">
+          <Input
+            value={snapshot.income}
+            onChange={(event) => setField("income", event.target.value)}
+            placeholder="Income"
+            className="h-8 text-xs"
+          />
+          <Input
+            value={snapshot.expenses}
+            onChange={(event) => setField("expenses", event.target.value)}
+            placeholder="Expenses"
+            className="h-8 text-xs"
+          />
+        </div>
+        <div className="grid gap-2 md:grid-cols-2">
+          <FinancialMultiSelect
+            options={INTERVIEW_FINANCIAL_INFLOW_OPTIONS}
+            selected={snapshot.selectedFinancials}
+            values={snapshot.financials}
+            placeholder="Add money/value field"
+            onSelect={setFinancialSelected}
+            onValue={setFinancialValue}
+          />
+          <FinancialMultiSelect
+            options={INTERVIEW_FINANCIAL_OUTFLOW_OPTIONS}
+            selected={snapshot.selectedFinancials}
+            values={snapshot.financials}
+            placeholder="Add payment/outflow field"
+            onSelect={setFinancialSelected}
+            onValue={setFinancialValue}
+          />
+        </div>
+        <div className="grid gap-2">
+          <textarea
+            value={snapshot.personalNotes}
+            onChange={(event) => setField("personalNotes", event.target.value)}
+            placeholder="Personal / pitch notes: spouse name, kids, job details, pressure, why now, financial services angle"
+            className="min-h-[70px] rounded-md border border-input bg-background px-2 py-1.5 text-xs text-foreground outline-none focus:border-primary focus:ring-2 focus:ring-primary/20"
+          />
+        </div>
+        <div className="flex flex-wrap items-center gap-1.5">
+          <Button
+            size="sm"
+            onClick={() => void saveToSystems()}
+            isLoading={saveSnapshot.isPending}
+            disabled={!caseId || saveSnapshot.isPending}
+          >
+            Save snapshot
+          </Button>
+          <Button size="sm" variant="secondary" onClick={buildPreview}>
+            Build note
+          </Button>
+          <Button size="sm" variant="ghost" onClick={clearSnapshot}>
+            Clear
+          </Button>
+          <span className="text-[11px] text-muted-foreground">
+            Saves to Logics and the matching LeadCadence row.
+          </span>
+        </div>
+        {preview ? (
+          <pre className="max-h-40 overflow-auto whitespace-pre-wrap rounded-md border border-border bg-muted/20 p-2 text-[11px] text-foreground">
+            {preview}
+          </pre>
+        ) : null}
+      </div>
+    </div>
+  );
+}
 
 export function CXWorkspace() {
   const domain = useDomainStore((s) => s.domain || "TAG");
@@ -2431,15 +3166,10 @@ export function CXWorkspace() {
     zip: "",
   });
   const [nameSearchOpen, setNameSearchOpen] = React.useState(false);
-  // Sensitivity toggle for "create from scratch" path — when there's
-  // no match ANYWHERE and the operator clicks Save, the first click
-  // flips this to true and toasts "no matches, click again to confirm".
-  // The second click actually POSTs the new case.
-  const [confirmCreateNew, setConfirmCreateNew] = React.useState(false);
-
   // Compose panel state (collapsible — default expanded)
   const [textOpen, setTextOpen] = React.useState(true);
   const [emailOpen, setEmailOpen] = React.useState(true);
+  const [interviewSnapshotOpen, setInterviewSnapshotOpen] = React.useState(false);
 
   // Text compose
   const [textPhone, setTextPhone] = React.useState("");
@@ -2457,6 +3187,7 @@ export function CXWorkspace() {
   // Preview modals
   const [textPreview, setTextPreview] = React.useState<LibraryEntry | null>(null);
   const [emailPreview, setEmailPreview] = React.useState<LibraryEntry | null>(null);
+  const [appointmentModalOpen, setAppointmentModalOpen] = React.useState(false);
 
   // ─── Center-column case form ────────────────────────────────────────────
   // Per-field dirty flags keep operator edits from being clobbered when a
@@ -2544,7 +3275,6 @@ export function CXWorkspace() {
       zip: "",
     });
     setNameSearchOpen(false);
-    setConfirmCreateNew(false);
     setTextBody("");
     setTextTemplateId(null);
     setEmailSubject("");
@@ -2753,7 +3483,6 @@ export function CXWorkspace() {
       zip: "",
     });
     setNameSearchOpen(false);
-    setConfirmCreateNew(false);
     // Wipe outbound message drafts — a draft text/email composed for
     // the previous caller shouldn't sit there when a new call lands.
     setTextBody("");
@@ -2909,12 +3638,15 @@ export function CXWorkspace() {
   // ── Case-scoped mutations (bound to the case's resolved domain) ──
   const assignCaseToMe = useCxAssignCaseToMe(caseDomain);
   const disposition = useCxDisposition(caseDomain);
+  const createAppointment = useCxCreateAppointment(caseDomain);
+  const releaseAppointment = useCxReleaseAppointment(caseDomain);
   const updateCase = useCxLogicsUpdateCase(caseDomain);
   // Case detail (calls + texts) — also case-scoped.
   const clientDetail = useClientDetail(caseDomain, resolvedCaseId);
   const detail = clientDetail.data;
   const selectedPhone = detail?.phone || selected?.phone || "";
   const selectedEmail = detail?.email || selected?.email || "";
+  const appointmentItems = data?.agent.appointments || [];
 
   const templateContext = React.useMemo(
     () =>
@@ -2961,7 +3693,6 @@ export function CXWorkspace() {
   // routes to the correct /api/commands/cx/:domain/dial without waiting for
   // setDomain() to land. (See handleSelectFromQueue.)
   const dialAny = useCxDialAny();
-  const createCase = useCxLogicsCreateCase(domain);
 
   // Dev escape hatch — `?cxDialMode=simulate` keeps the simulator path
   // available for QA / smoke tests. Default behavior on the queue
@@ -3412,19 +4143,6 @@ export function CXWorkspace() {
     setDirty((prev) => (prev[field] ? prev : { ...prev, [field]: true }));
   }
 
-  function handleResetToLookup() {
-    if (!lookupMatch) return;
-    // Clear dirty flags first so applyLookupToForm repopulates every
-    // field the match supplies.
-    setDirty(BLANK_DIRTY);
-    setForm((prev) => applyLookupToForm(prev, BLANK_DIRTY, lookupMatch));
-  }
-
-  function handleSyncFromLogics() {
-    setDirty(BLANK_DIRTY);
-    leadLookup.refetch();
-  }
-
   function releaseQueueAfterSuccess(
     result: unknown,
     options: {
@@ -3441,7 +4159,8 @@ export function CXWorkspace() {
     const response = asRecord(row.response);
     const hangup = asRecord(row.hangup);
     const backendNextDialAccepted = isCxNextDialAccepted(row);
-    if (backendNextDialAccepted) {
+    const backendNextDialQueuedButUnconfirmed = isCxNextDialQueuedButUnconfirmed(row);
+    if (backendNextDialAccepted || backendNextDialQueuedButUnconfirmed) {
       holdAutoServeForBackendNextDial();
     }
     const queueOutcome = String(row.queueOutcome || "").trim().toLowerCase();
@@ -3479,12 +4198,19 @@ export function CXWorkspace() {
     for (const query of multiCallQueues) {
       query.refetch();
     }
-    if (!options.skipAutoServe && !options.preserveCurrentLead && !backendNextDialAccepted) {
+    if (
+      !options.skipAutoServe &&
+      !options.preserveCurrentLead &&
+      !backendNextDialAccepted &&
+      !backendNextDialQueuedButUnconfirmed
+    ) {
       scheduleAutoServe(AUTO_SERVE_HANDOFF_DELAY_SECONDS, "next");
     }
   }
 
-  function optimisticallyEjectDispositionLead(options: { skipAutoServe?: boolean } = {}) {
+  function optimisticallyEjectDispositionLead(
+    options: { skipAutoServe?: boolean; queueOutcome?: string } = {},
+  ) {
     if (!servedQueueActionKey && !servedQueueTicketId && !servedQueueCaseId) return;
     suppressCurrentQueueLead({
       domain: servedQueueDomain || domain,
@@ -3492,7 +4218,7 @@ export function CXWorkspace() {
       actionKey: servedQueueActionKey,
       queueItemId: servedQueueTicketId,
       queueTicketId: servedQueueTicketId,
-      queueOutcome: "completed",
+      queueOutcome: options.queueOutcome || "completed",
     });
     if (rawCurrentCallSessionId) {
       setSuppressedCallSessionId(rawCurrentCallSessionId);
@@ -3507,99 +4233,6 @@ export function CXWorkspace() {
     if (!options.skipAutoServe) {
       scheduleAutoServe(AUTO_SERVE_HANDOFF_DELAY_SECONDS, "next");
     }
-  }
-
-  function handleSaveCase() {
-    const caseIdPayload = formCaseIdValid ? parsedFormCaseId : undefined;
-    // Non-destructive: only send fields the operator actually has data
-    // in. Empty strings turn into `undefined` so they get stripped from
-    // the JSON request body — Logics' updateCase preserves whatever
-    // value is already there for any field we omit, instead of nuking
-    // it with "". The same payload feeds both create and update paths.
-    const trim = (v: string) => (v || "").trim() || undefined;
-    const basePayload: Record<string, unknown> = {
-      firstName: trim(form.firstName),
-      lastName: trim(form.lastName),
-      ssn: trim(form.ssn),
-      cellPhone: trim(form.cellPhone),
-      homePhone: trim(form.homePhone),
-      email: trim(form.email),
-      spouseFirstName: trim(form.spouseFirstName),
-      spouseLastName: trim(form.spouseLastName),
-      spouseSsn: trim(form.spouseSsn),
-      spouseEmail: trim(form.spouseEmail),
-      spouseCellPhone: trim(form.spouseCellPhone),
-      spouseHomePhone: trim(form.spouseHomePhone),
-      sourceName: trim(form.sourceName),
-    };
-    // Strip explicit undefineds so the JSON serializer doesn't include
-    // them — keeps the payload minimal + makes the intent crystal-clear
-    // when staring at network logs.
-    for (const k of Object.keys(basePayload)) {
-      if (basePayload[k] === undefined) delete basePayload[k];
-    }
-
-    // Two unified modes — Save always writes BOTH Logics + CaseProfile:
-    //   • UPDATE: caseId is known (from lookup or operator paste). PUT
-    //     Logics with non-empty fields only (preserves existing data),
-    //     then the post-success chain re-syncs CaseProfile from Logics.
-    //   • CREATE: no caseId anywhere. POST Logics → assigned CaseID
-    //     comes back → CaseProfile gets upserted via the same sync.
-    // The CaseProfile upsert is automatic on the backend (executeCxLogicsAction
-    // calls syncCaseProfileFromLogics after a successful Logics write),
-    // so no separate Mongo-only path is needed.
-    if (authoritativeLogicsCaseIdNumber != null) {
-      void run(
-        "Update case",
-        () =>
-          updateCase.mutateAsync({
-            ...basePayload,
-            caseId: authoritativeLogicsCaseIdNumber,
-            queueActionKey: servedQueueActionKey || undefined,
-            queueItemId: servedQueueTicketId || undefined,
-            queueTicketId: servedQueueTicketId || undefined,
-            skipQueueFinalize: true,
-            searchPhone: currentCallPhone || selectedPhone || undefined,
-          }),
-        {
-          retry: () => {
-            handleSaveCase();
-          },
-        },
-      ).catch(() => undefined);
-      return;
-    }
-    // Create-from-scratch sensitivity toggle: when there are no
-    // candidates anywhere AND the operator hasn't explicitly confirmed,
-    // pop a confirm. This prevents accidental "create new case" clicks
-    // when really we should be searching harder in MasterProspectIndex.
-    // Once they confirm, the form's existing data drives a POST to
-    // Logics in the active CX-switcher domain.
-    if (leadCandidates.length === 0 && !confirmCreateNew) {
-      setConfirmCreateNew(true);
-      toast("No matches found anywhere", {
-        description: "Click Create case again to confirm a brand-new Logics case in " + domain + ".",
-      });
-      return;
-    }
-    void run(
-      "Create case",
-      () =>
-        createCase.mutateAsync({
-          ...basePayload,
-          caseId: caseIdPayload,
-          queueActionKey: servedQueueActionKey || undefined,
-          queueItemId: servedQueueTicketId || undefined,
-          queueTicketId: servedQueueTicketId || undefined,
-          skipQueueFinalize: true,
-        }),
-      {
-        retry: () => {
-          handleSaveCase();
-        },
-      },
-    ).catch(() => undefined);
-    setConfirmCreateNew(false);
   }
 
   function handleTextLibraryChange(id: string) {
@@ -3997,7 +4630,6 @@ export function CXWorkspace() {
     const state = callQueue.isLoading ? "loading" : callQueue.error ? "err" : count;
     return `active ${domain} • ${domain}:${state}`;
   }, [isAdminUser, availableDomains, multiCallQueues, domain, callQueue.data, callQueue.isLoading, callQueue.error, data?.callQueue]);
-  const hasAnyDirty = Object.values(dirty).some(Boolean);
   const sourceBadge = sourceBadgeFor(lookupSource);
   const authoritativeLogicsCaseIdNumber: number | null =
     lookupSource === "logics" && lookupMatch?.caseId
@@ -4039,7 +4671,6 @@ export function CXWorkspace() {
 
     if (hasImmediateNextHandoff && nextQueueLead) {
       optimisticallyEjectDispositionLead({ skipAutoServe: true });
-      stageNextCallHandoffLead(nextQueueLead);
     }
 
     void run(label, () =>
@@ -4057,15 +4688,24 @@ export function CXWorkspace() {
     )
       .then((result) => {
         const nextDialAccepted = isCxNextDialAccepted(result);
+        const nextDialQueuedButUnconfirmed = isCxNextDialQueuedButUnconfirmed(result);
         releaseQueueAfterSuccess(result, {
           forceEject: true,
-          skipAutoServe: nextDialAccepted,
+          skipAutoServe: nextDialAccepted || nextDialQueuedButUnconfirmed,
           preserveCurrentLead: nextDialAccepted,
           skipCurrentLeadSuppression: hasImmediateNextHandoff,
         });
         if (nextDialAccepted) {
+          if (nextQueueLead) {
+            stageNextCallHandoffLead(nextQueueLead);
+          }
           toast("Next call sent", {
-            description: "RingCX accepted the next queue lead.",
+            description: "RingCX confirmed the next queue lead.",
+          });
+        } else if (nextDialQueuedButUnconfirmed) {
+          holdAutoServeForBackendNextDial();
+          toast("Next call queued", {
+            description: "Waiting for RingCX to confirm the active call before showing the next lead.",
           });
         } else if (nextDial != null) {
           const reason = String(asRecord(asRecord(result).nextDial).reason || "").trim();
@@ -4097,20 +4737,187 @@ export function CXWorkspace() {
       });
   }
 
-  // Two unified modes:
-  //   • "update" → a Logics lookup definitively matched an existing case.
-  //   • "create" → no Logics match. Use whatever Mongo/source data we
-  //     have in the form to create/persist into Logics.
-  // Both paths write to BOTH places — Save is the single button for
-  // every save scenario (no separate "promote to CaseProfile" branch).
-  const saveMode: "create" | "update" =
-    authoritativeLogicsCaseIdNumber != null ? "update" : "create";
-  const saveLabel =
-    saveMode === "update"
-      ? "Save"
-      : confirmCreateNew
-        ? "Confirm — Create new"
-        : "Create case";
+  function handleAppointmentSubmit(payload: {
+    appointmentDate?: string;
+    appointmentTime?: string;
+    appointmentTimezone?: string;
+    assignToMe?: boolean;
+    postdate?: boolean;
+    note?: string;
+  }) {
+    if (assignCaseId == null) return;
+    const nextQueueLead = pickNextCallHandoffLead();
+    const nextDial = buildNextCallHandoffPayload(nextQueueLead);
+    const hasImmediateNextHandoff = nextQueueLead != null && nextDial != null;
+    const previousLeadSnapshot = hasImmediateNextHandoff
+      ? {
+          selected,
+          form: { ...form },
+          dirty: { ...dirty },
+          pickedCandidateKey,
+          servingQueueKey,
+          servedQueueCaseId,
+          servedQueueDomain,
+          servedQueueActionKey,
+          servedQueueTicketId,
+          servedQueueContact,
+          servedQueueStartedAt,
+        }
+      : null;
+
+    if (hasImmediateNextHandoff && nextQueueLead) {
+      setAppointmentModalOpen(false);
+      optimisticallyEjectDispositionLead({ skipAutoServe: true, queueOutcome: "rescheduled" });
+    }
+
+    void run("Appointment", async () => {
+      const appointmentResult = await createAppointment.mutateAsync({
+        caseId: String(assignCaseId),
+        appointmentDate: payload.appointmentDate,
+        appointmentTime: payload.appointmentTime,
+        appointmentTimezone: payload.appointmentTimezone,
+        note: payload.note,
+        phone: form.cellPhone || selectedPhone || currentCallPhone,
+        searchPhone: currentCallPhone || selectedPhone || undefined,
+        prospectName:
+          `${form.firstName} ${form.lastName}`.trim() ||
+          selected?.name ||
+          servedQueueContact?.name ||
+          undefined,
+        sourceName: form.sourceName || selected?.source || servedQueueContact?.source || undefined,
+        queueActionKey: servedQueueActionKey || undefined,
+        queueItemId: servedQueueTicketId || undefined,
+        queueTicketId: servedQueueTicketId || undefined,
+        assignedExtensionId: currentExtensionId || undefined,
+      });
+      const assignResult = payload.assignToMe
+        ? await assignCaseToMe.mutateAsync({
+            caseId: String(assignCaseId),
+            note: payload.note,
+          }).catch((error) => ({
+            ok: false,
+            status: error?.status || null,
+            reason: error instanceof Error ? error.message : "Assign-to-me failed.",
+          }))
+        : null;
+      const postdateResult = payload.postdate
+        ? await updateCase.mutateAsync({
+            caseId: String(assignCaseId),
+            CaseID: String(assignCaseId),
+            status: "post-date",
+            skipQueueFinalize: true,
+            notes: payload.note,
+          }).catch((error) => ({
+            ok: false,
+            status: error?.status || null,
+            reason: error instanceof Error ? error.message : "Postdate update failed.",
+          }))
+        : null;
+      const nextDialResult = nextDial
+        ? await dialAny.mutateAsync(nextDial).catch((error) => ({
+            ok: false,
+            accepted: false,
+            status: error?.status || null,
+            reason: error instanceof Error ? error.message : "Next CX dial handoff failed.",
+          }))
+        : null;
+      return {
+        appointmentResult,
+        assignResult,
+        postdateResult,
+        nextDial: nextDialResult,
+      };
+    })
+      .then((result) => {
+        const appointmentFlowResult = asRecord(result);
+        const assignResult = asRecord(appointmentFlowResult.assignResult);
+        const postdateResult = asRecord(appointmentFlowResult.postdateResult);
+        const nextDialResult = appointmentFlowResult.nextDial;
+        setAppointmentModalOpen(false);
+        if (assignResult.ok === false) {
+          toast.warning("Appointment saved, assign failed", {
+            description: String(assignResult.reason || "Assign-to-me did not complete."),
+          });
+        }
+        if (postdateResult.ok === false) {
+          toast.warning("Appointment saved, postdate failed", {
+            description: String(postdateResult.reason || "Logics postdate did not complete."),
+          });
+        }
+        const nextDialAccepted = isCxNextDialAccepted({ nextDial: nextDialResult });
+        const nextDialQueuedButUnconfirmed = isCxNextDialQueuedButUnconfirmed({ nextDial: nextDialResult });
+        if (nextDialAccepted) {
+          holdAutoServeForBackendNextDial();
+          if (nextQueueLead) {
+            stageNextCallHandoffLead(nextQueueLead);
+          }
+          toast("Next call sent", {
+            description: "RingCX confirmed the next queue lead.",
+          });
+        } else if (nextDialQueuedButUnconfirmed) {
+          holdAutoServeForBackendNextDial();
+          toast("Next call queued", {
+            description: "Waiting for RingCX to confirm the active call before showing the next lead.",
+          });
+        } else if (nextDial != null) {
+          const reason = String(asRecord(nextDialResult).reason || "").trim();
+          toast.warning("Next call handoff fell back", {
+            description: reason || "Auto serve will retry from the queue.",
+          });
+          clearServedQueueSelection();
+          clearCasePanelForNextQueueLead();
+          scheduleAutoServe(AUTO_SERVE_HANDOFF_DELAY_SECONDS, "next");
+        } else if (servedQueueActionKey || servedQueueTicketId || servedQueueCaseId) {
+          suppressCurrentQueueLead({
+            domain: servedQueueDomain || caseDomain,
+            caseId: servedQueueCaseId || assignCaseId,
+            actionKey: servedQueueActionKey,
+            queueItemId: servedQueueTicketId,
+            queueTicketId: servedQueueTicketId,
+            queueOutcome: "rescheduled",
+          });
+          clearServedQueueSelection();
+          clearCasePanelForNextQueueLead();
+          scheduleAutoServe(AUTO_SERVE_HANDOFF_DELAY_SECONDS, "next");
+        }
+        workspace.refetch();
+        callQueue.refetch();
+      })
+      .catch(() => {
+        if (previousLeadSnapshot) {
+          cancelAutoServe();
+          setSelected(previousLeadSnapshot.selected);
+          setForm(previousLeadSnapshot.form);
+          setDirty(previousLeadSnapshot.dirty);
+          setPickedCandidateKey(previousLeadSnapshot.pickedCandidateKey);
+          setServingQueueKey(previousLeadSnapshot.servingQueueKey);
+          setServedQueueCaseId(previousLeadSnapshot.servedQueueCaseId);
+          setServedQueueDomain(previousLeadSnapshot.servedQueueDomain);
+          setServedQueueActionKey(previousLeadSnapshot.servedQueueActionKey);
+          setServedQueueTicketId(previousLeadSnapshot.servedQueueTicketId);
+          setServedQueueContact(previousLeadSnapshot.servedQueueContact);
+          setServedQueueStartedAt(previousLeadSnapshot.servedQueueStartedAt);
+          setAppointmentModalOpen(true);
+        }
+        workspace.refetch();
+        callQueue.refetch();
+      });
+  }
+
+  function handleReleaseAppointment(appointment: CxAppointment) {
+    void run("Release appointment", () =>
+      releaseAppointment.mutateAsync({
+        appointmentId: appointment.appointmentId,
+        reason: "released-from-cx-workspace",
+      }),
+    )
+      .then(() => {
+        workspace.refetch();
+        callQueue.refetch();
+      })
+      .catch(() => undefined);
+  }
+
   const isExistingCase = Boolean(resolvedCaseId);
   const hasLookupHit = Boolean(lookupMatch);
   const formHeading = isExistingCase
@@ -4121,11 +4928,11 @@ export function CXWorkspace() {
       ? "Match found"
       : "Start a new case";
   const formSubtitle =
-    saveMode === "update"
-      ? "Save updates Logics with whatever fields have data — empty fields are preserved, never blanked."
+    authoritativeLogicsCaseIdNumber != null
+      ? "Matched case loaded from Logics. Use the call-cycle buttons above to finish the attempt."
       : hasLookupHit
-        ? "Auto-populated from the best source we found. Save will persist that data into Logics and then sync CaseProfile."
-        : "Populate fields to create a new case in Logics, or wait for an inbound call to auto-fill.";
+        ? "Auto-populated from the best source we found. Review the lead, then finish the attempt from the buttons above."
+        : "No matched case yet. Ask for enough information to identify the caller before finishing the attempt.";
 
   if (workspace.isLoading) {
     return <SkeletonRow count={8} />;
@@ -4198,14 +5005,6 @@ export function CXWorkspace() {
   const cxRoutingReasonLabel = humanizeCxRoutingReason(cxRoutingReason);
 
   // ─── Contact history lists ────────────────────────────────────────────────
-  const caseCalls: ClientCaseCall[] = detail?.calls ?? [];
-  const caseTexts: ClientCaseMessage[] = [...(detail?.textChain ?? [])].reverse();
-
-  // Agent-scope activity stays in the compact right-column panel only.
-  const agentRecentActivityCompact = (data.recentWorkflowStages || [])
-    .filter((row) => row.family === "cx")
-    .slice(0, 6);
-
   return (
     <>
       <BreakResumePrompt
@@ -4403,8 +5202,8 @@ export function CXWorkspace() {
               {/* Top row: domain badge + case id are the FIRST things the
                   operator sees on a connect — "WYNN · 123456" is the
                   unique routing key for any inbound call. */}
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <div className="flex flex-wrap items-center gap-2">
+              <div className="flex flex-wrap items-center gap-2">
+                <div className="flex min-w-0 flex-wrap items-center gap-2">
                   {(() => {
                     // Show the RESOLVED domain (where the lookup actually
                     // landed), not just the active CX switcher. With the
@@ -4460,10 +5259,70 @@ export function CXWorkspace() {
                     <StatusPill tone={sourceBadge.tone}>{sourceBadge.label}</StatusPill>
                   ) : null}
                 </div>
-                <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
-                  {leadLookup.isFetching && resolvedCaseId ? <span>refreshing…</span> : null}
-                  {leadLookupPhone ? (
-                    <span className="font-mono">{leadLookupPhone}</span>
+                <div className="flex flex-wrap items-center gap-1.5">
+                  {assignCaseId != null ? (
+                    <Button
+                      size="sm"
+                      variant="secondary"
+                      className="border-sky-500/40 bg-sky-600 text-white hover:bg-sky-700"
+                      isLoading={createAppointment.isPending || assignCaseToMe.isPending || disposition.isPending}
+                      onClick={() => setAppointmentModalOpen(true)}
+                      title="Schedule a callback, or use the same modal for assign-to-me and postdate."
+                    >
+                      <CalendarPlus className="h-3.5 w-3.5" />
+                      Set appointment
+                    </Button>
+                  ) : null}
+                  {dispositionCaseId != null ? (
+                    <Button
+                      size="sm"
+                      variant="destructive"
+                      className="bg-red-600 text-white hover:bg-red-700"
+                      isLoading={disposition.isPending}
+                      onClick={() =>
+                        void run("DNC", () =>
+                          disposition.mutateAsync({
+                            caseId: String(dispositionCaseId),
+                            disposition: "dnc",
+                            phone: form.cellPhone || selectedPhone,
+                            searchPhone: currentCallPhone || selectedPhone || undefined,
+                            queueActionKey: servedQueueActionKey || undefined,
+                            queueItemId: servedQueueTicketId || undefined,
+                            queueTicketId: servedQueueTicketId || undefined,
+                            assignedExtensionId: currentExtensionId || undefined,
+                          }),
+                        ).then(releaseQueueAfterSuccess).catch(() => undefined)
+                      }
+                      title="Mark this contact as Do-Not-Call (stops cadence on every channel)"
+                    >
+                      DNC
+                    </Button>
+                  ) : null}
+                  {hasServedQueueTarget && dispositionCaseId != null ? (
+                    <Button
+                      size="sm"
+                      variant="secondary"
+                      className="border-emerald-500/40 bg-emerald-600 text-white hover:bg-emerald-700"
+                      isLoading={disposition.isPending}
+                      onClick={() => submitQueueDisposition("answered", "Answered")}
+                      title="Mark the queue attempt as answered without DNC or Logics status changes."
+                    >
+                      <CheckCircle2 className="h-3.5 w-3.5" />
+                      Answer
+                    </Button>
+                  ) : null}
+                  {hasServedQueueTarget && dispositionCaseId != null ? (
+                    <Button
+                      size="sm"
+                      variant="secondary"
+                      className="border-amber-500/50 bg-amber-500 text-amber-950 hover:bg-amber-400"
+                      isLoading={disposition.isPending}
+                      onClick={() => submitQueueDisposition("did-not-answer", "Did not answer")}
+                      title="No answer: count the attempt and reschedule the queue item by cadence rules."
+                    >
+                      <PhoneOff className="h-3.5 w-3.5" />
+                      No answer
+                    </Button>
                   ) : null}
                 </div>
               </div>
@@ -4727,238 +5586,57 @@ export function CXWorkspace() {
                   leadingIcon={<Phone />}
                 />
               </div>
-              {/* Action row */}
-              <div className="flex flex-wrap items-center gap-1.5 pt-1">
-                <Button
-                  size="sm"
-                  isLoading={createCase.isPending || updateCase.isPending}
-                  disabled={!form.lastName.trim() && !form.firstName.trim() && !form.cellPhone.trim()}
-                  onClick={handleSaveCase}
-                  title={
-                    saveMode === "update"
-                      ? "PUT identity edits to Logics — only fields with data are sent (existing values preserved). CaseProfile is auto-synced from Logics on success."
-                      : "POST a new case to Logics. CaseProfile is auto-created from the assigned CaseID."
-                  }
-                >
-                  <Save className="h-3.5 w-3.5" />
-                  {saveLabel}
-                </Button>
-                {assignCaseId != null ? (
-                  <Button
-                    size="sm"
-                    variant="secondary"
-                    isLoading={assignCaseToMe.isPending}
-                    onClick={() =>
-                      void run("Assign case", () =>
-                        assignCaseToMe.mutateAsync({
-                          caseId: String(assignCaseId),
-                        }),
-                      ).catch(() => undefined)
-                    }
-                    title="Assign this Logics case to you as settlement officer."
-                  >
-                    <UserCheck className="h-3.5 w-3.5" />
-                    Assign to me
-                  </Button>
-                ) : null}
-                {dispositionCaseId != null ? (
-                  <Button
-                    size="sm"
-                    variant="destructive"
-                    isLoading={disposition.isPending}
-                    onClick={() =>
-                      void run("DNC", () =>
-                        disposition.mutateAsync({
-                          caseId: String(dispositionCaseId),
-                          disposition: "dnc",
-                          phone: form.cellPhone || selectedPhone,
-                          searchPhone: currentCallPhone || selectedPhone || undefined,
-                          queueActionKey: servedQueueActionKey || undefined,
-                          queueItemId: servedQueueTicketId || undefined,
-                          queueTicketId: servedQueueTicketId || undefined,
-                          assignedExtensionId: currentExtensionId || undefined,
-                        }),
-                      ).then(releaseQueueAfterSuccess).catch(() => undefined)
-                    }
-                    title="Mark this contact as Do-Not-Call (stops cadence on every channel)"
-                  >
-                    DNC
-                  </Button>
-                ) : null}
-                {SHOW_POSTDATE_DISPOSITION && dispositionCaseId != null ? (
-                  <Button
-                    size="sm"
-                    variant="secondary"
-                    isLoading={disposition.isPending}
-                    onClick={() =>
-                      void run("Postdate", () =>
-                        disposition.mutateAsync({
-                          caseId: String(dispositionCaseId),
-                          disposition: "postdate",
-                          phone: form.cellPhone || selectedPhone || currentCallPhone,
-                          searchPhone: currentCallPhone || selectedPhone || undefined,
-                          queueActionKey: servedQueueActionKey || undefined,
-                          queueItemId: servedQueueTicketId || undefined,
-                          queueTicketId: servedQueueTicketId || undefined,
-                          assignedExtensionId: currentExtensionId || undefined,
-                        }),
-                      ).then(releaseQueueAfterSuccess).catch(() => undefined)
-                    }
-                    title="Set Logics status to post-date (snooze cadence; finance handles the actual schedule)"
-                  >
-                    Postdate
-                  </Button>
-                ) : null}
-                {SHOW_ADVANCED_CX_DISPOSITIONS && dispositionCaseId != null ? (
-                  <Button
-                    size="sm"
-                    variant="secondary"
-                    isLoading={disposition.isPending}
-                    onClick={() =>
-                      void run("Deal handoff", () =>
-                        disposition.mutateAsync({
-                          caseId: String(dispositionCaseId),
-                          disposition: "deal",
-                          phone: form.cellPhone || selectedPhone || currentCallPhone,
-                          searchPhone: currentCallPhone || selectedPhone || undefined,
-                          queueActionKey: servedQueueActionKey || undefined,
-                          queueItemId: servedQueueTicketId || undefined,
-                          queueTicketId: servedQueueTicketId || undefined,
-                          assignedExtensionId: currentExtensionId || undefined,
-                          leadName:
-                            `${form.firstName} ${form.lastName}`.trim() ||
-                            selected?.name ||
-                            undefined,
-                        }),
-                      ).catch(() => undefined)
-                    }
-                    title="Create a payment handoff without changing Logics status or ending the CX call."
-                  >
-                    Deal
-                  </Button>
-                ) : null}
-                {hasServedQueueTarget && dispositionCaseId != null ? (
-                  <Button
-                    size="sm"
-                    variant="secondary"
-                    isLoading={disposition.isPending}
-                    onClick={() => submitQueueDisposition("answered", "Answered")}
-                    title="Mark the queue attempt as answered without DNC or Logics status changes."
-                  >
-                    <CheckCircle2 className="h-3.5 w-3.5" />
-                    Answered
-                  </Button>
-                ) : null}
-                {hasServedQueueTarget && dispositionCaseId != null ? (
-                  <Button
-                    size="sm"
-                    variant="secondary"
-                    isLoading={disposition.isPending}
-                    onClick={() => submitQueueDisposition("did-not-answer", "Did not answer")}
-                    title="No answer: count the attempt and reschedule the queue item by cadence rules."
-                  >
-                    <PhoneOff className="h-3.5 w-3.5" />
-                    No answer
-                  </Button>
-                ) : null}
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  onClick={handleSyncFromLogics}
-                  disabled={!leadLookupPhone && !leadLookupCaseId}
-                  title="Re-pull from Logics"
-                >
-                  <RefreshCw className="h-3.5 w-3.5" />
-                  Sync
-                </Button>
-                {authoritativeLogicsCaseIdNumber != null ? (
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    title="Opens Logics home + copies case ID to clipboard (Logics has no deep links)"
-                    onClick={async () => {
-                      const copied = await openCaseInLogics(
-                        caseDomain,
-                        String(authoritativeLogicsCaseIdNumber),
-                      );
-                      toast.success(
-                        copied
-                          ? `Opened Logics — ${authoritativeLogicsCaseIdNumber} on clipboard, paste into search`
-                          : `Opened Logics — paste ${authoritativeLogicsCaseIdNumber} into search`,
-                      );
-                    }}
-                  >
-                    <ExternalLink className="h-3.5 w-3.5" />
-                    Logics
-                  </Button>
-                ) : null}
-                {hasAnyDirty && lookupMatch ? (
-                  <Button size="sm" variant="ghost" onClick={handleResetToLookup}>
-                    Reset
-                  </Button>
-                ) : null}
-              </div>
             </CardContent>
           </Card>
 
+          <Collapsible
+            title="Interview snapshot"
+            open={interviewSnapshotOpen}
+            onToggle={() => setInterviewSnapshotOpen((value) => !value)}
+            right={
+              <span className="text-[10px] font-semibold uppercase tracking-[0.14em] text-muted-foreground">
+                Logics + cadence
+              </span>
+            }
+          >
+            <InterviewSnapshotCard
+              domain={caseDomain}
+              caseId={resolvedCaseId || form.caseId || selected?.caseId || ""}
+              prospectName={
+                `${form.firstName} ${form.lastName}`.trim()
+                || selected?.name
+                || [lookupMatch?.firstName, lookupMatch?.lastName].filter(Boolean).join(" ")
+                || servedQueueContact?.name
+                || ""
+              }
+              phone={form.cellPhone || selectedPhone || currentCallPhone || ""}
+              queueActionKey={servedQueueActionKey}
+              queueItemId={servedQueueTicketId}
+              queueTicketId={servedQueueTicketId}
+            />
+          </Collapsible>
+
           {/* Logics workspace — list-first panels (Activities / Tasks / Invoices / Payments / Amortization) */}
           {resolvedCaseId ? (
-            <>
-              <LogicsWorkspaceCard
-                domain={caseDomain}
-                resolvedCaseId={resolvedCaseId}
-                resolvedPhone={
-                  selected?.phone || lookupResult?.match?.phone || currentCallPhone || null
-                }
-              />
-
-              {/* Communication threads — calls + text chain */}
-              <Card>
-                <CardHeader>
-                  <CardTitle className="text-sm">Communication</CardTitle>
-                </CardHeader>
-                <CardContent className="space-y-6">
-                  <div className="space-y-2">
-                    <div className="flex items-center justify-between">
-                      <div className="text-xs font-semibold uppercase tracking-[0.12em] text-muted-foreground">
-                        Calls
-                      </div>
-                      {clientDetail.isFetching ? (
-                        <span className="text-[11px] text-muted-foreground">loading…</span>
-                      ) : null}
-                    </div>
-                    <ExpandableList
-                      items={caseCalls}
-                      initial={8}
-                      emptyLabel="No calls on this case yet."
-                      render={(call) => (
-                        <CallRow
-                          key={call._id || call.telephonySessionId || Math.random()}
-                          call={call}
-                        />
-                      )}
-                    />
-                  </div>
-                  <div className="space-y-2">
-                    <div className="text-xs font-semibold uppercase tracking-[0.12em] text-muted-foreground">
-                      Text chain
-                    </div>
-                    <ExpandableList
-                      items={caseTexts}
-                      initial={8}
-                      emptyLabel="No text messages on this case yet."
-                      render={(msg) => <TextBubble key={msg.id} message={msg} />}
-                    />
-                  </div>
-                </CardContent>
-              </Card>
-            </>
+            <LogicsWorkspaceCard
+              domain={caseDomain}
+              resolvedCaseId={resolvedCaseId}
+              resolvedPhone={
+                selected?.phone || lookupResult?.match?.phone || currentCallPhone || null
+              }
+            />
           ) : null}
         </section>
 
         {/* ── RIGHT: compose + compact agent history ───────────────────── */}
         <aside className="flex-shrink-0 lg:w-[340px]">
           <div className="lg:sticky lg:top-20 space-y-4">
+            <AppointmentList
+              appointments={appointmentItems}
+              onRelease={handleReleaseAppointment}
+              isReleasing={releaseAppointment.isPending}
+            />
+
             {/* Send text */}
             <Collapsible
               title="Send text"
@@ -5136,46 +5814,23 @@ export function CXWorkspace() {
               </div>
             </Collapsible>
 
-            {/* Compact agent-scope history */}
-            <Card>
-              <CardHeader>
-                <CardTitle className="text-sm">Your recent activity</CardTitle>
-              </CardHeader>
-              <CardContent>
-                {agentRecentActivityCompact.length === 0 ? (
-                  <div className="rounded-md border border-dashed border-border p-3 text-xs text-muted-foreground">
-                    No recent CX touches.
-                  </div>
-                ) : (
-                  <div className="space-y-2">
-                    {agentRecentActivityCompact.map((row) => (
-                      <div
-                        key={row._id || `${row.caseId}-${row.createdAt}`}
-                        className="rounded-md border border-border bg-card/50 p-2"
-                      >
-                        <div className="flex items-center justify-between gap-2">
-                          <div className="truncate text-xs font-medium text-foreground">
-                            {row.title || row.summary || row.stage || row.family || "Activity"}
-                          </div>
-                          <div className="text-[10px] text-muted-foreground">
-                            {formatRelative(row.createdAt || row.happenedAt)}
-                          </div>
-                        </div>
-                        <div className="mt-0.5 truncate text-[11px] text-muted-foreground">
-                          {row.caseId ? `Case ${row.caseId}` : null}
-                          {row.subtype ? ` · ${row.subtype}` : ""}
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </CardContent>
-            </Card>
           </div>
         </aside>
       </div>
 
       {/* ─── Modals ───────────────────────────────────────────────────── */}
+      <AppointmentModal
+        open={appointmentModalOpen}
+        onClose={() => setAppointmentModalOpen(false)}
+        caseId={assignCaseId != null ? String(assignCaseId) : null}
+        prospectName={`${form.firstName} ${form.lastName}`.trim() || selected?.name || ""}
+        phone={form.cellPhone || selectedPhone || currentCallPhone || ""}
+        sourceName={form.sourceName || selected?.source || ""}
+        isLoading={createAppointment.isPending || assignCaseToMe.isPending || disposition.isPending}
+        canAssign={assignCaseId != null}
+        canPostdate={SHOW_POSTDATE_DISPOSITION && dispositionCaseId != null}
+        onSubmit={handleAppointmentSubmit}
+      />
       <TemplatePreviewModal
         open={Boolean(textPreview)}
         onClose={() => {

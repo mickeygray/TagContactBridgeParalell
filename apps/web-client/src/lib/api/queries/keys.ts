@@ -81,6 +81,8 @@ export const queryKeys = {
     logicsMatch: (domain: string, needle: string) => ["cx", "logics-match", domain, needle] as const,
     logicsTasks: (domain: string, startDate: string, endDate: string) =>
       ["cx", "logics-tasks", domain, startDate, endDate] as const,
+    appointments: (domain: string, filters?: Record<string, unknown>) =>
+      ["cx", "appointments", domain, filters ?? {}] as const,
     postdates: (domain: string, filters?: Record<string, unknown>) =>
       ["cx", "postdates", domain, filters ?? {}] as const,
   },

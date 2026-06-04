@@ -367,7 +367,7 @@ Return JSON matching the LandingPageDraft schema:
   • bullets (string[], 3-5 items, <= 90 chars each)
   • sections (array of { title, body[] }) — 3-5 supporting blocks below the form
   • faq (array of { q, a }) — 3-5 items, plain conversational answers
-  • imagePrompt (string) — a topic-specific concept for gpt-image-2 (NO text, NO faces, photographic editorial)
+  • imagePrompt (string) — a topic-specific concept for the image model (NO text, NO faces, photographic editorial)
   • seoTitle (string, <= 60 chars)
   • seoDescription (string, <= 155 chars)
   • jsonLd (object) — a JSON-LD WebPage + LocalBusiness or Service schema graph

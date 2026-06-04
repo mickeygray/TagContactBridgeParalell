@@ -100,6 +100,7 @@ const {
   getPacingConfig,
   isOperatingNow,
   runHourlySweep,
+  runDueCxAppointments,
   runCxRecordingHourly,
   summarizeHourlySweepResult,
 } = require("../../../packages/shared-services/src");
@@ -740,6 +741,79 @@ async function startCxRecordingWorker({ config, runtime, workerState }) {
   });
 }
 
+async function startCxAppointmentWorker({ config, runtime, workerState }) {
+  const intervalMs = Math.max(
+    Number(config.cxAppointmentWorker?.intervalMs || process.env.CX_APPOINTMENT_WORKER_INTERVAL_MS) || 60_000,
+    15_000,
+  );
+  const limit = Math.max(
+    1,
+    Math.min(
+      200,
+      Number(config.cxAppointmentWorker?.limit || process.env.CX_APPOINTMENT_WORKER_LIMIT) || 50,
+    ),
+  );
+  workerState.enabled = String(process.env.CX_APPOINTMENT_WORKER_ENABLED || "true").toLowerCase() !== "false";
+  workerState.intervalMs = intervalMs;
+  if (!workerState.enabled) {
+    runtime.logger.warn("control-plane.cx_appointments.disabled");
+    return;
+  }
+
+  const tick = async () => {
+    if (workerState.running) return;
+    const mongoState = getMongoReadyState(runtime);
+    if (!mongoState.connected) {
+      workerState.lastCompletedAt = new Date();
+      workerState.lastResult = {
+        skipped: true,
+        reason: "mongo-not-connected",
+        mongo: mongoState,
+      };
+      workerState.lastError = "mongo-not-connected";
+      return;
+    }
+
+    workerState.running = true;
+    workerState.lastStartedAt = new Date();
+    try {
+      const result = await runDueCxAppointments({ limit });
+      workerState.lastCompletedAt = new Date();
+      workerState.lastResult = result;
+      workerState.lastError = null;
+      if (result.checked > 0 || result.fired > 0 || result.blocked > 0) {
+        runtime.logger.info("control-plane.cx_appointments.tick", {
+          checked: result.checked,
+          fired: result.fired,
+          deferred: result.deferred,
+          blocked: result.blocked,
+        });
+      }
+    } catch (error) {
+      workerState.lastCompletedAt = new Date();
+      workerState.lastError = error.message;
+      runtime.logger.error("control-plane.cx_appointments.tick_failed", {
+        error: error.message,
+      });
+    } finally {
+      workerState.running = false;
+    }
+  };
+
+  workerState.timer = setInterval(tick, intervalMs);
+  if (typeof workerState.timer.unref === "function") {
+    workerState.timer.unref();
+  }
+
+  setImmediate(() => {
+    tick().catch((error) => {
+      runtime.logger.error("control-plane.cx_appointments.first_tick_failed", {
+        error: error.message,
+      });
+    });
+  });
+}
+
 async function startControlPlaneWorker({ config, runtime, workerState }) {
   const intervalMs = Math.max(Number(config.controlPlaneWorker?.intervalMs) || 5000, 1000);
   const batchSize = Math.max(Number(config.controlPlaneWorker?.batchSize) || 25, 1);
@@ -899,6 +973,7 @@ async function startServer() {
   runtime.installSignalHandlers();
   const hourlySweepState = createWorkerState();
   const cxRecordingState = createWorkerState();
+  const cxAppointmentState = createWorkerState();
   const inboundProxy = buildServiceProxy({
     port: PORTS.inboundGateway,
     runtime,
@@ -933,6 +1008,7 @@ async function startServer() {
         config.hourlySweep || {},
       ),
       cxRecording: summarizeWorkerState(cxRecordingState),
+      cxAppointments: summarizeWorkerState(cxAppointmentState),
     },
     runtimes: {
       lexisNightly: lexisNightlyRuntime.getState(),
@@ -1201,6 +1277,17 @@ async function startServer() {
     runtime.logger.warn("control-plane.cx_recording.disabled");
   }
 
+  if (config.controlPlaneWorker?.enabled !== false) {
+    await startCxAppointmentWorker({
+      config,
+      runtime,
+      workerState: cxAppointmentState,
+    });
+  } else {
+    cxAppointmentState.enabled = false;
+    runtime.logger.warn("control-plane.cx_appointments.disabled");
+  }
+
   await lexisNightlyRuntime.start();
   await lexisDailyDropRuntime.start();
   await logicsActivityReviewRuntime.start();
@@ -1227,6 +1314,10 @@ async function startServer() {
     if (cxRecordingState.timer) {
       clearInterval(cxRecordingState.timer);
       cxRecordingState.timer = null;
+    }
+    if (cxAppointmentState.timer) {
+      clearInterval(cxAppointmentState.timer);
+      cxAppointmentState.timer = null;
     }
   });
 
@@ -1268,6 +1359,17 @@ async function startServer() {
       });
     }
   }
+  async function waitForCxAppointmentsIdle(maxWaitMs = 25_000) {
+    const deadline = Date.now() + maxWaitMs;
+    while (cxAppointmentState.running && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+    if (cxAppointmentState.running) {
+      runtime.logger.warn("control-plane.cx_appointments.shutdown.tick_timeout", {
+        waitedMs: maxWaitMs,
+      });
+    }
+  }
 
   runtime.registerCleanup("control-plane-server", () => new Promise((resolve) => server.close(() => resolve())));
   runtime.registerCleanup("control-plane-worker", async () => {
@@ -1290,6 +1392,13 @@ async function startServer() {
       cxRecordingState.timer = null;
     }
     await waitForCxRecordingIdle();
+  });
+  runtime.registerCleanup("control-plane-cx-appointments", async () => {
+    if (cxAppointmentState.timer) {
+      clearInterval(cxAppointmentState.timer);
+      cxAppointmentState.timer = null;
+    }
+    await waitForCxAppointmentsIdle();
   });
   runtime.registerCleanup("control-plane-lexis-nightly", async () => {
     await lexisNightlyRuntime.stop();

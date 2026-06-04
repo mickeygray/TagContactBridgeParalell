@@ -185,6 +185,7 @@ const {
   executeCxSaveCaseProfileFromLogics,
   executeCxLogicsFindMatch,
   executeCxLogicsActivity,
+  executeCxInterviewSnapshot,
   executeCxLogicsAmortization,
   executeCxLogicsInvoice,
   executeCxLogicsNotes,
@@ -235,6 +236,14 @@ const {
 const {
   buildCxCommLog,
 } = require("./cxCommLogService");
+const {
+  cancelCxAppointmentsForCase,
+  createCxAppointment,
+  listCxAppointments,
+  releaseCxAppointment,
+  resolveCxAppointmentAfterDisposition,
+  runDueCxAppointments,
+} = require("./cxAppointmentService");
 const {
   publishQueueItemToRingcx,
 } = require("./ringcxLeadServingService");
@@ -696,6 +705,10 @@ module.exports = {
   buildCxCadenceRuntimeSnapshot,
   buildCxCommLog,
   buildCxWorkspace,
+  createCxAppointment,
+  listCxAppointments,
+  releaseCxAppointment,
+  runDueCxAppointments,
   listCxPlacedCallsToday,
   computeFreshHotLaneWindow,
   approveInboxWorkflow,
@@ -709,6 +722,7 @@ module.exports = {
   executeCxSaveCaseProfileFromLogics,
   executeCxLogicsFindMatch,
   executeCxLogicsActivity,
+  executeCxInterviewSnapshot,
   executeCxLogicsAmortization,
   executeCxLogicsInvoice,
   executeCxLogicsNotes,
@@ -1043,6 +1057,8 @@ module.exports = {
   runLogicsActivityReviewBatch,
   lookupCxLead,
   findCxLeadCandidates,
+  cancelCxAppointmentsForCase,
+  resolveCxAppointmentAfterDisposition,
   hourlyJobHandlerRegistry,
   hourlyJobResolutionCheckRegistry,
   drainHourlyJobQueue,

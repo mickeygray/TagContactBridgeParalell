@@ -18,6 +18,19 @@ function isRingcxAgentMonitorEnabled() {
   return String(process.env.RINGCX_AGENT_MONITOR_ENABLED || "true").toLowerCase() !== "false";
 }
 
+function readBooleanEnv(name, fallback = false) {
+  const value = process.env[name];
+  if (value === undefined || value === null || value === "") return fallback;
+  const normalized = String(value).trim().toLowerCase();
+  if (["1", "true", "yes", "y", "on"].includes(normalized)) return true;
+  if (["0", "false", "no", "n", "off"].includes(normalized)) return false;
+  return fallback;
+}
+
+function allowWeakRingcxActiveCallMatch() {
+  return readBooleanEnv("RINGCX_ACTIVE_CALL_ALLOW_WEAK_MATCH", false);
+}
+
 function coerceActiveCallList(payload) {
   if (Array.isArray(payload)) return payload;
   if (Array.isArray(payload?.data)) return payload.data;
@@ -252,7 +265,7 @@ function scoreQueueItemForActiveCall(queueItem = {}, call = {}) {
     metadata.rcxVisibilityExternId,
   ]) {
     if (value && activeCallContainsText(call, value)) {
-      score += 20;
+      score += 100;
       reasons.push("externId");
       break;
     }
@@ -304,12 +317,26 @@ function findQueueItemForActiveCall(queueItems = [], call = {}) {
       queueItem,
       ...scoreQueueItemForActiveCall(queueItem, call),
     }))
-    .filter((entry) => entry.score >= 10)
+    .filter((entry) => entry.score > 0)
     .sort((left, right) => right.score - left.score);
   const top = scored[0];
   if (!top) return null;
   const next = scored[1];
-  if (next && next.score === top.score && !top.reasons.includes("uii")) return null;
+  const hasExactQueueIdentity = top.reasons.includes("uii") || top.reasons.includes("externId");
+  if (hasExactQueueIdentity) {
+    if (next && next.score === top.score && !next.reasons.some((reason) => reason === "uii" || reason === "externId")) {
+      return top;
+    }
+    if (next && next.score === top.score && !top.reasons.includes("uii")) return null;
+    return top;
+  }
+
+  const hasWeakFallbackIdentity =
+    allowWeakRingcxActiveCallMatch()
+    && top.reasons.includes("phone")
+    && (top.reasons.includes("agentEmail") || top.reasons.includes("agentId"));
+  if (!hasWeakFallbackIdentity) return null;
+  if (next && next.score === top.score) return null;
   return top;
 }
 

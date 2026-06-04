@@ -9,6 +9,7 @@ const AuthOtpChallenge = require("./AuthOtpChallenge");
 const CaseProfile = require("./CaseProfile");
 const ConversationMessage = require("./ConversationMessage");
 const ConversationWorkflow = require("./ConversationWorkflow");
+const CxAppointment = require("./CxAppointment");
 const CxDialQueue = require("./CxDialQueue");
 const DailyCallStat = require("./DailyCallStat");
 const DeepCutRun = require("./DeepCutRun");
@@ -52,6 +53,7 @@ const MODEL_REGISTRY = Object.freeze({
   CaseProfile,
   ConversationMessage,
   ConversationWorkflow,
+  CxAppointment,
   CxDialQueue,
   DailyCallStat,
   DeepCutRun,
@@ -100,6 +102,7 @@ module.exports = {
   CaseProfile,
   ConversationMessage,
   ConversationWorkflow,
+  CxAppointment,
   CxDialQueue,
   DailyCallStat,
   DeepCutRun,

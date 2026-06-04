@@ -766,7 +766,7 @@ function getSharedConfig(overrides = {}) {
         overrides.logicsActivityReviewAttachCsv !== undefined
           ? overrides.logicsActivityReviewAttachCsv
           : process.env.LOGICS_ACTIVITY_REVIEW_ATTACH_CSV,
-        false,
+        true,
       ),
       recipients: parseOriginList(
         overrides.logicsActivityReviewRecipients ||

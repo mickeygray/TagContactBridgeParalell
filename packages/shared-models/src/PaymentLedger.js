@@ -50,6 +50,14 @@ const paymentLedgerSchema = new mongoose.Schema(
 paymentLedgerSchema.index({ domain: 1, caseId: 1, paymentDate: -1 });
 paymentLedgerSchema.index({ domain: 1, sourceCanonicalId: 1, paymentDate: -1 });
 paymentLedgerSchema.index({ paymentDateKey: 1, domain: 1 });
+paymentLedgerSchema.index(
+  { domain: 1, paymentDate: 1, caseId: 1 },
+  { name: "payment_ledger_domain_payment_date_case" },
+);
+paymentLedgerSchema.index(
+  { domain: 1, updatedAt: 1, caseId: 1 },
+  { name: "payment_ledger_domain_updated_case" },
+);
 
 module.exports =
   mongoose.models.ControlPlanePaymentLedger ||

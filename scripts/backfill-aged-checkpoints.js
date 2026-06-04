@@ -116,6 +116,7 @@ function classifyLead(intakeAt, now) {
   await mongoose.connect(config.mongoUri, { dbName: config.parallelDbName });
 
   const query = {
+    active: true,
     graduatedAt: null,
     $or: [
       { "dncCheckpoints.nextAt": null },

@@ -37,13 +37,13 @@ test("sanitizeUsPhone — empty/null returns null", () => {
 
 test("buildLogicsCaseUrl — TAG", () => {
   const url = buildLogicsCaseUrl("TAG", "12345");
-  assert.match(url, /taxag\.irslogics\.com/);
+  assert.match(url, /taxag\.logiqsapi\.com/);
   assert.match(url, /caseid=12345/);
 });
 
 test("buildLogicsCaseUrl — WYNN", () => {
   const url = buildLogicsCaseUrl("WYNN", "67890");
-  assert.match(url, /wynntax\.irslogics\.com/);
+  assert.match(url, /wynntax\.logiqsapi\.com/);
   assert.match(url, /caseid=67890/);
 });
 

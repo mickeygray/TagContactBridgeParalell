@@ -26,6 +26,7 @@
     "archive:eod-recordings": "node scripts/archive-eod-recordings.js",
     "logics:activity-review": "node scripts/run-logics-activity-review.js",
     "ncoa:mailbox": "node scripts/run-ncoa-mailbox-ingest.js --once",
+    "ncoa:mailbox:check": "node scripts/run-ncoa-mailbox-ingest.js --once --dry-run --skip-email --max-messages 1",
     "ncoa:mailbox:loop": "node scripts/run-ncoa-mailbox-ingest.js --loop",
     "backfill:today-calls": "node scripts/backfill-today-call-activity.js",
     "cx-recordings:sftp:check": "powershell -ExecutionPolicy Bypass -File scripts/check-cx-recording-sftp-test.ps1",

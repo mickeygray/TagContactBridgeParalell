@@ -922,6 +922,51 @@ export interface CxCallQueueItem {
   assignedAgentName?: string | null;
 }
 
+export type CxAppointmentStatus =
+  | "scheduled"
+  | "due"
+  | "fired"
+  | "completed"
+  | "cancelled"
+  | "released"
+  | "blocked";
+
+export interface CxAppointment {
+  appointmentId: string;
+  domain: string;
+  caseId: number;
+  leadCadenceId?: string | null;
+  cxQueueRecordId?: string | null;
+  queueActionKey?: string | null;
+  status: CxAppointmentStatus;
+  agentExtensionId?: string | null;
+  agentName?: string | null;
+  agentEmail?: string | null;
+  prospectName?: string | null;
+  phone?: string | null;
+  sourceName?: string | null;
+  intakeSource?: string | null;
+  intakeRoute?: string | null;
+  requestedAtLocal?: string | null;
+  requestedTimezone?: string | null;
+  appointmentAt?: string | null;
+  appointmentTimezone?: string | null;
+  legalDialAt?: string | null;
+  legalDialTimezone?: string | null;
+  legalDialReason?: string | null;
+  note?: string | null;
+  metadata?: Record<string, unknown> | null;
+  createdAt?: string | null;
+  updatedAt?: string | null;
+}
+
+export interface CxAppointmentsResult {
+  domain: string;
+  filters?: Record<string, unknown>;
+  summary?: Record<string, number>;
+  items: CxAppointment[];
+}
+
 export interface CxWorkspaceData {
   domain: string;
     agent: {
@@ -935,6 +980,7 @@ export interface CxWorkspaceData {
       exShells?: ExShellRecord[];
       requestedExShell?: ExShellRecord | null;
       activeExShell?: ExShellRecord | null;
+      appointments?: CxAppointment[];
     };
   ex: {
     status?: string;
@@ -948,6 +994,7 @@ export interface CxWorkspaceData {
   };
   counts: {
     callQueue?: number;
+    appointments?: number;
     tasks?: number;
     reminders?: number;
     workflowStages?: number;

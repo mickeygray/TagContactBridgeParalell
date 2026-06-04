@@ -977,8 +977,8 @@ function sanitizeUsPhone(value) {
 function buildLogicsCaseUrl(domain, logicsCaseId) {
   if (!logicsCaseId) return null;
   const upper = String(domain || "TAG").toUpperCase();
-  if (upper === "TAG") return `https://taxag.irslogics.com/Default.aspx?caseid=${logicsCaseId}`;
-  if (upper === "WYNN") return `https://wynntax.irslogics.com/Default.aspx?caseid=${logicsCaseId}`;
+  if (upper === "TAG") return `https://taxag.logiqsapi.com/Default.aspx?caseid=${logicsCaseId}`;
+  if (upper === "WYNN") return `https://wynntax.logiqsapi.com/Default.aspx?caseid=${logicsCaseId}`;
   return null;
 }
 

@@ -226,7 +226,7 @@ function escapeXml(text) {
 //     Free, deterministic, includes legible text.
 //
 //   BLOG_IMAGE_PROVIDER=openai
-//     gpt-image-2 (or whatever OPENAI_IMAGE_MODEL is) generates a
+//     gpt-image-1 (or whatever OPENAI_IMAGE_MODEL is) generates a
 //     photographic editorial-style hero. No text on the image —
 //     subject suggests the topic. ~$0.01–0.04/image depending on
 //     quality. Slower (~10–25s per image).
@@ -247,7 +247,7 @@ function buildOpenAiImagePrompt(draft) {
 
   // Editorial / magazine-cover style works well for tax/finance topics:
   // suggests authority without crossing into the "stock image" trap.
-  // No text on the image (gpt-image-2 can render text but blog cards
+  // No text on the image (image models can render text but blog cards
   // already overlay the title, and AI-rendered numbers/letters are
   // still occasionally wrong).
   return [
@@ -267,7 +267,7 @@ async function renderOpenAiHeaderBuffer(draft) {
   if (!apiKey) {
     throw new Error("BLOG_IMAGE_PROVIDER=openai but OPENAI_API_KEY is not set");
   }
-  const model = process.env.OPENAI_IMAGE_MODEL || "gpt-image-2";
+  const model = process.env.OPENAI_IMAGE_MODEL || "gpt-image-1";
   const quality = process.env.OPENAI_IMAGE_QUALITY || "low";
   const size = process.env.OPENAI_IMAGE_SIZE || "1024x1024";
   const prompt = buildOpenAiImagePrompt(draft);

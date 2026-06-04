@@ -8,11 +8,14 @@ const {
   executeCxLogicsFindMatch,
   simulateCxIncomingCall,
   executeCxLogicsActivity,
+  executeCxInterviewSnapshot,
   executeCxLogicsAmortization,
   executeCxLogicsInvoice,
   executeCxLogicsNotes,
   executeCxLogicsTask,
   executeCxLogicsUpdateCase,
+  createCxAppointment,
+  releaseCxAppointment,
   requestCxAssignCaseToMe,
   requestCxDial,
   requestCxEndCall,
@@ -247,6 +250,36 @@ function createCommandsCxRouter(auth) {
     },
   );
 
+  router.post(
+    "/:domain/appointments",
+    auth.requireAuth,
+    auth.requireUser,
+    auth.requirePermission("queue.dispose"),
+    async (req, res) => {
+      try {
+        const result = await createCxAppointment(req.params.domain, req.user, req.body || {});
+        return res.json({ ok: true, result });
+      } catch (error) {
+        return res.status(error.status || 500).json(toErrorResponse(error));
+      }
+    },
+  );
+
+  router.post(
+    "/:domain/appointments/release",
+    auth.requireAuth,
+    auth.requireUser,
+    auth.requirePermission("queue.dispose"),
+    async (req, res) => {
+      try {
+        const result = await releaseCxAppointment(req.params.domain, req.user, req.body || {});
+        return res.json({ ok: true, result });
+      } catch (error) {
+        return res.status(error.status || 500).json(toErrorResponse(error));
+      }
+    },
+  );
+
   router.post("/:domain/logics/task", auth.requireAuth, auth.requireUser, async (req, res) => {
     try {
       const result = await executeCxLogicsTask(req.params.domain, req.user, req.body || {});
@@ -259,6 +292,15 @@ function createCommandsCxRouter(auth) {
   router.post("/:domain/logics/activity", auth.requireAuth, auth.requireUser, async (req, res) => {
     try {
       const result = await executeCxLogicsActivity(req.params.domain, req.user, req.body || {});
+      return res.json({ ok: true, result });
+    } catch (error) {
+      return res.status(error.status || 500).json(toErrorResponse(error));
+    }
+  });
+
+  router.post("/:domain/interview-snapshot", auth.requireAuth, auth.requireUser, async (req, res) => {
+    try {
+      const result = await executeCxInterviewSnapshot(req.params.domain, req.user, req.body || {});
       return res.json({ ok: true, result });
     } catch (error) {
       return res.status(error.status || 500).json(toErrorResponse(error));

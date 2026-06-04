@@ -9,6 +9,7 @@ const {
   buildCxCallQueue,
   buildCxCommLog,
   buildCxWorkspace,
+  listCxAppointments,
   listCxLogicsTasks,
   listCxPostDateHolds,
   listCxTasks,
@@ -893,6 +894,22 @@ function createReadCxRouter(auth) {
   router.get("/call-queue/:domain", auth.requireAuth, auth.requireUser, requireCxDomainAccess, async (req, res) => {
     try {
       const result = await buildCxCallQueue(req.params.domain, req.user);
+      return res.json({ ok: true, result });
+    } catch (error) {
+      return res.status(error.status || 500).json(toErrorResponse(error));
+    }
+  });
+
+  router.get("/appointments/:domain", auth.requireAuth, auth.requireUser, requireCxDomainAccess, async (req, res) => {
+    try {
+      const result = await listCxAppointments(req.params.domain, req.user, {
+        status: req.query.status || "active",
+        from: req.query.from || null,
+        to: req.query.to || null,
+        caseId: req.query.caseId || null,
+        agentExtensionId: req.query.agentExtensionId || null,
+        limit: req.query.limit || null,
+      });
       return res.json({ ok: true, result });
     } catch (error) {
       return res.status(error.status || 500).json(toErrorResponse(error));

@@ -1095,6 +1095,7 @@ async function runDailyAgedRefresh(options = {}) {
   // we're talking ~1k docs — single query is fine. Apply per-domain
   // truncation client-side after a stable sort.
   const baseQuery = {
+    active: true,
     "dncCheckpoints.nextAt": { $lte: now },
     graduatedAt: null,
   };

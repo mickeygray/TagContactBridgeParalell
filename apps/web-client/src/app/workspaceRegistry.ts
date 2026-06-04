@@ -85,8 +85,8 @@ export const adminWorkspaces: WorkspaceDef[] = [
   {
     key: "postdates",
     path: "/admin/postdates",
-    label: "Post Dates",
-    description: "Post-date holds, releases, and payment checks.",
+    label: "Appointments",
+    description: "Agent appointment queues, releases, and scheduled callback holds.",
     icon: CalendarClock,
     audience: "admin",
   },

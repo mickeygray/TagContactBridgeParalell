@@ -1820,6 +1820,31 @@ async function queueCxDialRequest(payload = {}) {
   if (existing) {
     const existingObject = existing.toObject ? existing.toObject() : existing;
     const existingActionKey = normalizeActionKey(existingObject?.metadata?.actionKey);
+    const existingAppointmentId = String(existingObject?.metadata?.appointmentId || "").trim();
+    const requestedAppointmentId = String(payload.appointmentId || payload.metadata?.appointmentId || "").trim();
+    const appointmentHoldStatus = String(existingObject?.metadata?.appointmentStatus || "").trim().toLowerCase();
+    const appointmentHoldReason = String(existingObject?.metadata?.dialabilityHoldReason || "").trim().toLowerCase();
+    const isDifferentAppointmentRequest =
+      existingAppointmentId &&
+      requestedAppointmentId &&
+      existingAppointmentId !== requestedAppointmentId;
+    const isOrdinaryRequestAgainstAppointment =
+      existingAppointmentId &&
+      !requestedAppointmentId;
+    if (
+      appointmentHoldReason === "appointment" &&
+      ["scheduled", "blocked"].includes(appointmentHoldStatus) &&
+      (isDifferentAppointmentRequest || isOrdinaryRequestAgainstAppointment)
+    ) {
+      return {
+        queued: false,
+        skipped: true,
+        reason: "appointment-hold",
+        appointmentId: existingAppointmentId,
+        releaseAt: existingObject.releaseAt || existingObject.metadata?.dialabilityHoldUntil || null,
+        queueItem: existingObject,
+      };
+    }
     const existingRouting = readStoredRcxQueueRouting(existingObject);
     const requestedReleaseAt = parseRequestedReleaseAt(payload.releaseAt);
     const requestedReleaseTiming = requestedReleaseAt

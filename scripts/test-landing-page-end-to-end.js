@@ -2,7 +2,7 @@
 
 // End-to-end smoke test of the landing-page creator pipeline. Fills
 // the structured composer with my-choice values, composes the prompt,
-// calls Claude tool-use, calls gpt-image-2 for the hero, and writes
+// calls Claude tool-use, calls gpt-image-1 for the hero, and writes
 // the result to runtime/landing-pages/<slug>.{json,png}.
 //
 // Surfaces the generated content so the operator can see what comes
@@ -250,7 +250,7 @@ const TOOL_SCHEMA = {
       imagePrompt: {
         type: "string",
         description:
-          "Concept prompt for gpt-image-2. NO text, NO faces, photographic editorial style. Should suggest the subject matter without showing literal IRS letters that would render as gibberish text.",
+          "Concept prompt for gpt-image-1. NO text, NO faces, photographic editorial style. Should suggest the subject matter without showing literal IRS letters that would render as gibberish text.",
       },
       seoTitle: { type: "string", description: "<= 60 chars" },
       seoDescription: { type: "string", description: "<= 155 chars" },
@@ -292,7 +292,7 @@ async function callOpenAiImage(prompt) {
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
-      model: process.env.OPENAI_IMAGE_MODEL || "gpt-image-2",
+      model: process.env.OPENAI_IMAGE_MODEL || "gpt-image-1",
       prompt,
       n: 1,
       size: "1024x1024",
@@ -345,7 +345,7 @@ async function main() {
   );
   console.log(`  → ${jsonPath}`);
 
-  console.log("\n[2/2] calling OpenAI gpt-image-2…");
+  console.log("\n[2/2] calling OpenAI gpt-image-1…");
   console.log(`  prompt: ${pageDraft.imagePrompt}`);
   const imgStart = Date.now();
   const imgBuffer = await callOpenAiImage(pageDraft.imagePrompt);

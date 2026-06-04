@@ -55,6 +55,22 @@ const ROLE_VIEWS = Object.freeze({
   [ROLES.SERVICE]: ["service"],
 });
 
+function buildFreshPriorityCxQueuePolicy() {
+  return {
+    tier: "fresh_priority",
+    enabled: true,
+    fresh: {
+      eligible: true,
+      firstTouchEligible: true,
+      targetOpen: 15,
+      priorityWeight: 100,
+    },
+    day2to15: { targetOpen: 15 },
+    day16to30: { targetOpen: 5 },
+    aged: { targetOpen: 5 },
+  };
+}
+
 /**
  * Seed admins are bootstrapped on startup and cannot be deleted through the
  * normal admin UI. They can still be edited (name, extensionId) via the
@@ -126,6 +142,30 @@ const HARDENED_USERS = Object.freeze([
     audience: AUDIENCES.USER,
     company: "TAG",
     workspace: "general",
+  },
+  {
+    email: "cbolt@taxadvocategroup.com",
+    name: "Chris Bolt",
+    role: ROLES.INTERNAL_AGENT,
+    audience: AUDIENCES.USER,
+    company: "TAG",
+    workspace: "general",
+    extensionId: "63914586004",
+    extensionNumber: "741",
+    cxAgentId: "21810",
+    cxQueuePolicy: buildFreshPriorityCxQueuePolicy(),
+  },
+  {
+    email: "bhansen@taxadvocategroup.com",
+    name: "Brad Hansen",
+    role: ROLES.INTERNAL_AGENT,
+    audience: AUDIENCES.USER,
+    company: "TAG",
+    workspace: "general",
+    extensionId: "63914587004",
+    extensionNumber: "742",
+    cxAgentId: "21812",
+    cxQueuePolicy: buildFreshPriorityCxQueuePolicy(),
   },
 ]);
 

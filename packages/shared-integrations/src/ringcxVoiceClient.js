@@ -933,9 +933,17 @@ function createRingcxVoiceClient(options = {}) {
       },
     });
   }
-  async function listActiveCalls({ product = "ACCOUNT", productId = config.accountId } = {}) {
+  async function listActiveCalls(options = {}) {
+    const hasProduct = Object.prototype.hasOwnProperty.call(options, "product");
+    const hasProductId = Object.prototype.hasOwnProperty.call(options, "productId");
+    const product = hasProduct ? options.product : "ACCOUNT";
+    const productId = hasProductId ? options.productId : config.accountId;
     return request("GET", adminPath("activeCalls/list"), {
-      query: { product, productId },
+      query: {
+        product,
+        productId,
+        externalId: options.externalId,
+      },
     });
   }
   async function getCallHistory(uii) {

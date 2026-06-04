@@ -14,7 +14,8 @@ Hashing a mailbox password in `.env` is not meaningful protection for unattended
 ## Env
 
 ```env
-NCOA_MAILBOX_ENABLED=false
+# Live/control-plane must be true. Keep false only for dev machines that should never poll Gmail.
+NCOA_MAILBOX_ENABLED=true
 NCOA_MAILBOX_DOMAIN=TAG
 NCOA_MAILBOX_USER=documents@taxadvocategroup.com
 NCOA_MAILBOX_NOTIFY_RECIPIENTS=mgray@taxadvocategroup.com
@@ -44,9 +45,31 @@ NCOA_MAILBOX_GOOGLE_TOKEN_URI=https://oauth2.googleapis.com/token
 NCOA_MAILBOX_GOOGLE_SCOPE=https://www.googleapis.com/auth/gmail.modify
 ```
 
+## Live Patch Checklist
+
+For the live control-plane, this is not automatic unless the running process sees `NCOA_MAILBOX_ENABLED=true`.
+
+1. Set `NCOA_MAILBOX_ENABLED=true` in the live `.env`.
+2. Confirm the Gmail auth values are present for `documents@taxadvocategroup.com`.
+3. Restart the control-plane/hourly service so it reloads `.env`.
+4. Verify the live process can see the setting:
+
+```bash
+npm run ncoa:mailbox:check
+```
+
+Expected healthy results:
+
+- `already-completed-today` if today's NCOA file already ran.
+- `no-attachments` if the mailbox has no matching unread attachment yet.
+- one attachment summary if a new unread NCOA file is waiting.
+
+If the result is `disabled`, the hourly worker will skip tomorrow too. Fix the live env and restart again before leaving the patch.
+
 ## Run
 
 ```powershell
+npm run ncoa:mailbox:check
 npm run ncoa:mailbox -- --dry-run --skip-email --max-messages 1
 npm run ncoa:mailbox
 npm run ncoa:mailbox:loop

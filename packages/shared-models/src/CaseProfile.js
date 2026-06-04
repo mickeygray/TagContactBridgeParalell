@@ -324,6 +324,23 @@ caseProfileSchema.index(
   { sparse: true, name: "case_profile_status_check_round_robin" },
 );
 
+// Current payment-reconcile round-robin lookup. The older
+// `lastStatusCheckAt` index above is still useful for status sweeps, but
+// payment reconciliation now uses `paymentReconcile.lastCheckedAt` plus a
+// stable tie-break sort. Keep this index aligned with
+// caseProfileRepository.findCaseProfilesDueForPaymentReconcile().
+caseProfileSchema.index(
+  {
+    domain: 1,
+    "paymentReconcile.lastCheckedAt": 1,
+    lastPaymentDate: -1,
+    updatedAt: -1,
+    createdAt: -1,
+    caseId: 1,
+  },
+  { name: "case_profile_payment_reconcile_due" },
+);
+
 module.exports =
   mongoose.models.ControlPlaneCaseProfile ||
   mongoose.model("ControlPlaneCaseProfile", caseProfileSchema);

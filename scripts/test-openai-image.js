@@ -20,7 +20,7 @@ async function main() {
     process.argv[2] ||
     "A clean, professional hero image for a tax-relief landing page: a desk with an open IRS letter, a calculator, and a steaming coffee mug, soft natural light, blurred bookshelf background, photographic, no text overlay.";
 
-  const model = process.env.OPENAI_IMAGE_MODEL || "gpt-image-2";
+  const model = process.env.OPENAI_IMAGE_MODEL || "gpt-image-1";
   const quality = process.env.OPENAI_IMAGE_QUALITY || "low";
   const body = {
     model,

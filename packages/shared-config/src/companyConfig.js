@@ -116,7 +116,9 @@ const COMPANY_DEFINITIONS = Object.freeze({
 });
 
 function normalizeLogicsApiUrl(value) {
-  const raw = String(value || "").trim();
+  const raw = String(value || "")
+    .trim()
+    .replace(/\.irslogics\.com(?=[:/]|$)/i, ".logiqsapi.com");
   if (!raw) return "";
   if (/\/publicapi\/v4\/?$/i.test(raw)) {
     return raw.endsWith("/") ? raw : `${raw}/`;
