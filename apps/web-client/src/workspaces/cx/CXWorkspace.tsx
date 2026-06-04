@@ -98,6 +98,7 @@ type ContactContext = {
   // (e.g. CX→EX re-scramble of the same number) bumps this and forces
   // a clean reset of the form/selection state.
   sessionId?: string | null;
+  interviewSnapshot?: Record<string, unknown> | null;
 };
 
 type CaseForm = {
@@ -265,6 +266,7 @@ function contactFromQueue(item: CxCallQueueItem): ContactContext {
     source: item.intakeSource || readString(merged, "source", "intakeSource", "sourceName"),
     note: item.nextActionType || undefined,
     channel: "cx",
+    interviewSnapshot: item.interviewSnapshot || null,
   };
 }
 
@@ -2641,42 +2643,56 @@ function pushInterviewLines(lines: string[], key: string, values: Array<string |
   for (const value of values) pushInterviewLine(lines, key, value);
 }
 
+function normalizeInterviewSnapshotState(
+  parsed: Partial<InterviewSnapshotState> & { debtType?: unknown; incomeSignal?: unknown },
+): InterviewSnapshotState {
+  const legacyTaxProblem = String((parsed as { debtType?: unknown }).debtType || "").trim();
+  const legacyIncomeSignal = String((parsed as { incomeSignal?: unknown }).incomeSignal || "").trim();
+  const migratedTaxProblems = { ...(parsed.taxProblems || {}) };
+  if (legacyTaxProblem) {
+    const legacyMatch = INTERVIEW_TAX_PROBLEM_OPTIONS.find(
+      (option) => option.label.toLowerCase() === legacyTaxProblem.toLowerCase(),
+    );
+    if (legacyMatch) migratedTaxProblems[legacyMatch.key] = true;
+  }
+  const migratedSelectedFinancials =
+    parsed.selectedFinancials && typeof parsed.selectedFinancials === "object"
+      ? { ...parsed.selectedFinancials }
+      : {};
+  const migratedFinancials =
+    parsed.financials && typeof parsed.financials === "object" ? { ...parsed.financials } : {};
+  if (migratedSelectedFinancials.rentMortgage && !migratedSelectedFinancials.rentMortgagePayment) {
+    migratedSelectedFinancials.rentMortgagePayment = true;
+  }
+  if (migratedFinancials.rentMortgage && !migratedFinancials.rentMortgagePayment) {
+    migratedFinancials.rentMortgagePayment = migratedFinancials.rentMortgage;
+  }
+  return {
+    ...INTERVIEW_SNAPSHOT_DEFAULT,
+    ...parsed,
+    income: parsed.income || legacyIncomeSignal,
+    expenses: parsed.expenses || "",
+    taxProblems: migratedTaxProblems,
+    selectedFinancials: migratedSelectedFinancials,
+    financials: migratedFinancials,
+    flags: parsed.flags && typeof parsed.flags === "object" ? parsed.flags : {},
+  };
+}
+
+function coerceStoredInterviewSnapshot(value: unknown): InterviewSnapshotState | null {
+  const wrapper = asRecord(value);
+  const nestedSnapshot = asRecord(wrapper.snapshot);
+  const source = Object.keys(nestedSnapshot).length ? nestedSnapshot : wrapper;
+  if (!Object.keys(source).length) return null;
+  return normalizeInterviewSnapshotState(source as Partial<InterviewSnapshotState>);
+}
+
 function loadInterviewSnapshot(storageKey: string): InterviewSnapshotState {
   try {
     const raw = window.localStorage.getItem(storageKey);
     if (!raw) return INTERVIEW_SNAPSHOT_DEFAULT;
     const parsed = JSON.parse(raw) as Partial<InterviewSnapshotState>;
-    const legacyTaxProblem = String((parsed as { debtType?: unknown }).debtType || "").trim();
-    const legacyIncomeSignal = String((parsed as { incomeSignal?: unknown }).incomeSignal || "").trim();
-    const migratedTaxProblems = { ...(parsed.taxProblems || {}) };
-    if (legacyTaxProblem) {
-      const legacyMatch = INTERVIEW_TAX_PROBLEM_OPTIONS.find(
-        (option) => option.label.toLowerCase() === legacyTaxProblem.toLowerCase(),
-      );
-      if (legacyMatch) migratedTaxProblems[legacyMatch.key] = true;
-    }
-    const migratedSelectedFinancials =
-      parsed.selectedFinancials && typeof parsed.selectedFinancials === "object"
-        ? { ...parsed.selectedFinancials }
-        : {};
-    const migratedFinancials =
-      parsed.financials && typeof parsed.financials === "object" ? { ...parsed.financials } : {};
-    if (migratedSelectedFinancials.rentMortgage && !migratedSelectedFinancials.rentMortgagePayment) {
-      migratedSelectedFinancials.rentMortgagePayment = true;
-    }
-    if (migratedFinancials.rentMortgage && !migratedFinancials.rentMortgagePayment) {
-      migratedFinancials.rentMortgagePayment = migratedFinancials.rentMortgage;
-    }
-    return {
-      ...INTERVIEW_SNAPSHOT_DEFAULT,
-      ...parsed,
-      income: parsed.income || legacyIncomeSignal,
-      expenses: parsed.expenses || "",
-      taxProblems: migratedTaxProblems,
-      selectedFinancials: migratedSelectedFinancials,
-      financials: migratedFinancials,
-      flags: parsed.flags && typeof parsed.flags === "object" ? parsed.flags : {},
-    };
+    return normalizeInterviewSnapshotState(parsed);
   } catch {
     return INTERVIEW_SNAPSHOT_DEFAULT;
   }
@@ -2871,6 +2887,7 @@ function InterviewSnapshotCard({
   queueActionKey,
   queueItemId,
   queueTicketId,
+  initialSnapshot,
 }: {
   domain: string;
   caseId: string;
@@ -2879,21 +2896,30 @@ function InterviewSnapshotCard({
   queueActionKey?: string | null;
   queueItemId?: string | null;
   queueTicketId?: string | null;
+  initialSnapshot?: Record<string, unknown> | null;
 }) {
   const storageKey = React.useMemo(
     () => `cx-interview-snapshot:${caseId || prospectName || "current"}`,
     [caseId, prospectName],
   );
-  const [snapshot, setSnapshot] = React.useState<InterviewSnapshotState>(() =>
-    loadInterviewSnapshot(storageKey),
+  const initialSnapshotKey = React.useMemo(
+    () => JSON.stringify(initialSnapshot || null),
+    [initialSnapshot],
   );
+  const storedSnapshot = React.useMemo(
+    () => coerceStoredInterviewSnapshot(initialSnapshot),
+    [initialSnapshotKey],
+  );
+  const [snapshot, setSnapshot] = React.useState<InterviewSnapshotState>(() => (
+    storedSnapshot || loadInterviewSnapshot(storageKey)
+  ));
   const [preview, setPreview] = React.useState("");
   const saveSnapshot = useCxInterviewSnapshot(domain);
 
   React.useEffect(() => {
-    setSnapshot(loadInterviewSnapshot(storageKey));
+    setSnapshot(storedSnapshot || loadInterviewSnapshot(storageKey));
     setPreview("");
-  }, [storageKey]);
+  }, [storageKey, storedSnapshot]);
 
   React.useEffect(() => {
     try {
@@ -5613,6 +5639,7 @@ export function CXWorkspace() {
               queueActionKey={servedQueueActionKey}
               queueItemId={servedQueueTicketId}
               queueTicketId={servedQueueTicketId}
+              initialSnapshot={selected?.interviewSnapshot || servedQueueContact?.interviewSnapshot || null}
             />
           </Collapsible>
 

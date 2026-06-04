@@ -2115,6 +2115,7 @@ function summarizeCallQueueItem(item) {
     queueDayIndex: activeDay,
     payloadSnapshot,
     leadBody: payloadSnapshot?.leadBody || payloadSnapshot,
+    interviewSnapshot: item.interviewSnapshot || null,
   };
 }
 

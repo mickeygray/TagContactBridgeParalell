@@ -913,6 +913,7 @@ export interface CxCallQueueItem {
   lastPlacedAt?: string | null;
   payloadSnapshot?: Record<string, unknown> | null;
   leadBody?: Record<string, unknown> | null;
+  interviewSnapshot?: Record<string, unknown> | null;
   queueState?: string | null;
   queueTicketId?: string | null;
   rcxAccountId?: string | null;
