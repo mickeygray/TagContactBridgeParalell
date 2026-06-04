@@ -15,6 +15,7 @@ const {
   executeCxLogicsTask,
   executeCxLogicsUpdateCase,
   createCxAppointment,
+  fireCxAppointmentNow,
   releaseCxAppointment,
   requestCxAssignCaseToMe,
   requestCxDial,
@@ -274,6 +275,71 @@ function createCommandsCxRouter(auth) {
       try {
         const result = await releaseCxAppointment(req.params.domain, req.user, req.body || {});
         return res.json({ ok: true, result });
+      } catch (error) {
+        return res.status(error.status || 500).json(toErrorResponse(error));
+      }
+    },
+  );
+
+  router.post(
+    "/:domain/appointments/call-now",
+    auth.requireAuth,
+    auth.requireUser,
+    auth.requirePermission("queue.dial"),
+    requireDialingWindow,
+    auth.requireCxOAuth,
+    async (req, res) => {
+      try {
+        const fireResult = await fireCxAppointmentNow(req.params.domain, req.user, {
+          ...(req.body || {}),
+          requirePhone: true,
+        });
+        const appointment = fireResult?.result?.appointment || null;
+        const queueItem = fireResult?.result?.queueItem || null;
+
+        if (fireResult?.result?.deferred) {
+          return res.json({
+            ok: true,
+            result: {
+              ok: true,
+              deferred: true,
+              fireResult,
+              dialResult: null,
+            },
+          });
+        }
+
+        if (!fireResult?.result?.ok) {
+          return res.status(409).json({
+            ok: false,
+            error: fireResult?.result?.reason || fireResult?.result?.error || "Appointment could not be queued",
+            code: "appointment-call-now-blocked",
+            fireResult,
+          });
+        }
+
+        const queueItemId = String(queueItem?._id || appointment.cxQueueRecordId || "").trim();
+        const dialResult = await requestCxDial(req.params.domain, req.user, {
+          phone: appointment.phone,
+          caseId: appointment.caseId,
+          queueItemId,
+          queueTicketId: queueItemId,
+          queueActionKey: appointment.queueActionKey || queueItem?.metadata?.actionKey || undefined,
+          assignedExtensionId: appointment.agentExtensionId || undefined,
+          priority: "appointment-now",
+          ringcxDialPriority: "IMMEDIATE",
+          notes: "appointment-call-now",
+        });
+
+        return res.json({
+          ok: true,
+          result: {
+            ok: true,
+            deferred: false,
+            fireResult,
+            dialResult,
+          },
+        });
       } catch (error) {
         return res.status(error.status || 500).json(toErrorResponse(error));
       }

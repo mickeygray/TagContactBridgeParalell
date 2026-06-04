@@ -181,6 +181,40 @@ export function useCxReleaseAppointment(domain: string) {
   });
 }
 
+export function useCxCallAppointmentNow(domain: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: { appointmentId: string }) =>
+      api
+        .post<{ ok: true; result: CxCommandResult | Record<string, unknown> }>(
+          `/api/commands/cx/${domain}/appointments/call-now`,
+          body,
+        )
+        .then((r) => r.result),
+    onSuccess: () => invalidateCxScope(qc, domain),
+  });
+}
+
+export function useCxCallAppointmentNowAny() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: { domain: string; appointmentId: string }) => {
+      const domain = String(body.domain || "").toUpperCase();
+      return api
+        .post<{ ok: true; result: CxCommandResult | Record<string, unknown> }>(
+          `/api/commands/cx/${domain}/appointments/call-now`,
+          { appointmentId: body.appointmentId },
+        )
+        .then((r) => r.result);
+    },
+    onSuccess: (_result, vars) => {
+      qc.invalidateQueries({ queryKey: queryKeys.cx.all() });
+      qc.invalidateQueries({ queryKey: queryKeys.cx.appointments("ALL") });
+      if (vars?.domain) invalidateCxScope(qc, String(vars.domain).toUpperCase());
+    },
+  });
+}
+
 export function useCxReleaseAppointmentAny() {
   const qc = useQueryClient();
   return useMutation({

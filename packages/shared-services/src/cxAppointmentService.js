@@ -868,6 +868,54 @@ async function runDueCxAppointments(options = {}) {
   };
 }
 
+async function fireCxAppointmentNow(domain, user, input = {}) {
+  const context = await resolveCxAppointmentContext(domain, user);
+  const appointmentId = String(input.appointmentId || input.id || "").trim();
+  if (!appointmentId) {
+    const error = new Error("appointmentId is required");
+    error.status = 400;
+    throw error;
+  }
+
+  const appointment = await cxAppointmentRepository.findAppointmentById(appointmentId);
+  if (!appointment || normalizeDomain(appointment.domain) !== context.domain) {
+    const error = new Error("Appointment not found");
+    error.status = 404;
+    throw error;
+  }
+
+  const appointmentAgentExtensionId = String(appointment.agentExtensionId || "").trim();
+  if (
+    appointmentAgentExtensionId &&
+    appointmentAgentExtensionId !== context.account.extensionId &&
+    !isAdminUser(context.account)
+  ) {
+    const error = new Error(`This appointment belongs to ${appointment.agentName || appointmentAgentExtensionId}`);
+    error.status = 409;
+    throw error;
+  }
+
+  if (!ACTIVE_STATUSES.has(String(appointment.status || ""))) {
+    const error = new Error(`Appointment is not active: ${appointment.status || "unknown"}`);
+    error.status = 409;
+    throw error;
+  }
+  if (input.requirePhone && !normalizePhone(appointment.phone || "")) {
+    const error = new Error("Appointment has no phone number to dial");
+    error.status = 409;
+    throw error;
+  }
+
+  const result = await fireOneDueAppointment(appointment, { now: input.now || new Date() });
+  return {
+    ok: Boolean(result?.ok),
+    manual: true,
+    domain: context.domain,
+    appointmentId,
+    result,
+  };
+}
+
 async function resolveCxAppointmentAfterDisposition({
   domain,
   caseId,
@@ -949,6 +997,7 @@ async function cancelCxAppointmentsForCase(domain, caseId, options = {}) {
 module.exports = {
   cancelCxAppointmentsForCase,
   createCxAppointment,
+  fireCxAppointmentNow,
   listCxAppointments,
   releaseCxAppointment,
   resolveCxAppointmentAfterDisposition,

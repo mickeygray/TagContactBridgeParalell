@@ -44,6 +44,7 @@ import {
   useCxCaseInvoices,
   useCxCasePayments,
   useCxCaseTasks,
+  useCxCallAppointmentNowAny,
   useCxCommLog,
   useCxCreateAppointment,
   useCxDialAny,
@@ -1260,12 +1261,18 @@ function AppointmentModal({
 
 function AppointmentList({
   appointments,
+  onCallNow,
   onRelease,
+  callingAppointmentId,
   isReleasing,
+  isCallingNow,
 }: {
   appointments: CxAppointment[];
+  onCallNow: (appointment: CxAppointment) => void;
   onRelease: (appointment: CxAppointment) => void;
+  callingAppointmentId?: string | null;
   isReleasing: boolean;
+  isCallingNow: boolean;
 }) {
   const visible = (appointments || []).filter((appointment) =>
     ["scheduled", "due", "fired", "blocked"].includes(String(appointment.status || "")),
@@ -1307,7 +1314,17 @@ function AppointmentList({
                   Case {appointment.caseId}
                   {appointment.phone ? ` | ${appointment.phone}` : ""}
                 </div>
-                <div className="mt-2 flex justify-end">
+                <div className="mt-2 flex justify-end gap-2">
+                  <Button
+                    size="sm"
+                    variant="primary"
+                    disabled={!appointment.phone || isCallingNow}
+                    isLoading={isCallingNow && callingAppointmentId === appointment.appointmentId}
+                    onClick={() => onCallNow(appointment)}
+                  >
+                    <Phone className="h-3.5 w-3.5" />
+                    Call now
+                  </Button>
                   <Button
                     size="sm"
                     variant="ghost"
@@ -3666,6 +3683,7 @@ export function CXWorkspace() {
   const disposition = useCxDisposition(caseDomain);
   const createAppointment = useCxCreateAppointment(caseDomain);
   const releaseAppointment = useCxReleaseAppointment(caseDomain);
+  const callAppointmentNow = useCxCallAppointmentNowAny();
   const updateCase = useCxLogicsUpdateCase(caseDomain);
   // Case detail (calls + texts) — also case-scoped.
   const clientDetail = useClientDetail(caseDomain, resolvedCaseId);
@@ -4944,6 +4962,42 @@ export function CXWorkspace() {
       .catch(() => undefined);
   }
 
+  function handleCallAppointmentNow(appointment: CxAppointment) {
+    callAppointmentNow
+      .mutateAsync({
+        domain: appointment.domain,
+        appointmentId: appointment.appointmentId,
+      })
+      .then((result) => {
+        const row = asRecord(result);
+        const deferred = row.deferred === true;
+        if (deferred) {
+          const fireResult = asRecord(row.fireResult);
+          const inner = asRecord(fireResult.result);
+          const nextAllowedAt = readString(inner, "nextAllowedAt");
+          toast("Appointment held for legal dial window", {
+            description: nextAllowedAt
+              ? `Next legal time: ${formatAppointmentDateTime(nextAllowedAt)}`
+              : "The appointment is still outside the allowed dialing window.",
+          });
+        } else {
+          toast.success("Appointment call queued", {
+            description: "CX is dialing this appointment through your agent queue.",
+          });
+        }
+        workspace.refetch();
+        callQueue.refetch();
+      })
+      .catch((error) => {
+        const classified = classifyCommandError(error);
+        toast.error(`Call now - ${classified.title}`, {
+          description: classified.description,
+        });
+        workspace.refetch();
+        callQueue.refetch();
+      });
+  }
+
   const isExistingCase = Boolean(resolvedCaseId);
   const hasLookupHit = Boolean(lookupMatch);
   const formHeading = isExistingCase
@@ -5660,8 +5714,11 @@ export function CXWorkspace() {
           <div className="lg:sticky lg:top-20 space-y-4">
             <AppointmentList
               appointments={appointmentItems}
+              onCallNow={handleCallAppointmentNow}
               onRelease={handleReleaseAppointment}
+              callingAppointmentId={String(callAppointmentNow.variables?.appointmentId || "") || null}
               isReleasing={releaseAppointment.isPending}
+              isCallingNow={callAppointmentNow.isPending}
             />
 
             {/* Send text */}

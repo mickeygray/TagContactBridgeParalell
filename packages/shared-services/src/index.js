@@ -239,6 +239,7 @@ const {
 const {
   cancelCxAppointmentsForCase,
   createCxAppointment,
+  fireCxAppointmentNow,
   listCxAppointments,
   releaseCxAppointment,
   resolveCxAppointmentAfterDisposition,
@@ -706,6 +707,7 @@ module.exports = {
   buildCxCommLog,
   buildCxWorkspace,
   createCxAppointment,
+  fireCxAppointmentNow,
   listCxAppointments,
   releaseCxAppointment,
   runDueCxAppointments,
