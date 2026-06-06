@@ -113,18 +113,20 @@ chmod 600 "${APP_DIR}/.env"
 ok "PARALLEL_RC_SUSPENDED=false"
 
 step "Restart RC-touching services"
-systemctl restart parallel-control-plane parallel-ringcentral-cx parallel-outbound-gateway parallel-inbound-gateway
+systemctl restart parallel-control-plane parallel-ringcentral-cx parallel-outbound-gateway parallel-inbound-gateway parallel-ai-bus parallel-barge
 sleep 5
 systemctl is-active --quiet parallel-control-plane
 systemctl is-active --quiet parallel-ringcentral-cx
 systemctl is-active --quiet parallel-outbound-gateway
 systemctl is-active --quiet parallel-inbound-gateway
+systemctl is-active --quiet parallel-ai-bus
 ok "app services restarted"
 
 step "Post-cutover checks"
 curl -fsS "https://${DOMAIN}/api/client/runtime" >/dev/null
 curl -fsS http://127.0.0.1:5001/health >/dev/null
 curl -fsS http://127.0.0.1:6101/health >/dev/null
+curl -fsS http://127.0.0.1:7000/health >/dev/null
 ok "cutover checks passed"
 
 echo

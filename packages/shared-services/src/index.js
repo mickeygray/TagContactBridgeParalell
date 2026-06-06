@@ -213,6 +213,7 @@ const {
   enqueueCxSmokeLead,
   simulateCxIncomingCall,
 } = require("./cxWorkspaceService");
+const { requestCxVoicemailDrop } = require("./cxVoicemailDropService");
 const {
   CX_CADENCE_EVENT_TYPES,
   buildCxCadenceRuntimeSnapshot,
@@ -932,6 +933,7 @@ module.exports = {
   requestCxDial,
   requestCxEndCall,
   requestCxDisposition,
+  requestCxVoicemailDrop,
   requestCxEmail,
   requestCxLogicsCreateCase,
   requestCxLogicsFindMatch,

@@ -2,7 +2,7 @@
 
 const { execFileSync } = require("child_process");
 
-const TARGET_PORTS = [3001, 4001, 4002, 5001, 6101];
+const TARGET_PORTS = [3001, 4001, 4002, 5001, 6101, 7000];
 
 function run(command, args = []) {
   return execFileSync(command, args, {

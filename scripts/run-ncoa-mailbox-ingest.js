@@ -64,6 +64,8 @@ async function runOnce(argv) {
     skipped: summary.skipped,
     reason: summary.reason,
     messagesScanned: summary.messagesScanned,
+    messagePagesScanned: summary.messagePagesScanned,
+    messageScanTruncated: summary.messageScanTruncated,
     attachments: (summary.attachments || []).map((item) => ({
       filename: item.filename,
       total: item.total,

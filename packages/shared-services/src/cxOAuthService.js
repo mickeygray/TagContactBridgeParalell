@@ -326,6 +326,25 @@ async function callback({ code, state, errorParam = null } = {}) {
   await rcOAuthStateRepository.consumeByState(state);
   await selfHealRingcxOffhookByAccount(account, "cx-oauth-callback");
 
+  // 6. Warm this agent's barge monitor softphone for the day, if one is configured
+  // (metadata.barge.monitorExtension). Fire-and-forget: this must never block or
+  // fail the OAuth handshake. First barge press still self-registers as a fallback.
+  if (account?.metadata?.barge?.monitorExtension) {
+    Promise.resolve()
+      .then(() => require("./cxVoicemailDropService").warmMonitorForAccount(account))
+      .then((result) => {
+        if (result && result.ok === false && !result.skipped) {
+          console.warn("cxOAuth.barge-monitor-warm.failed", {
+            monitorExtension: result.monitorExt || account?.metadata?.barge?.monitorExtension || null,
+            error: result.error || result.reason || "unknown",
+          });
+        }
+      })
+      .catch((error) => {
+        console.warn("cxOAuth.barge-monitor-warm.error", { error: error.message });
+      });
+  }
+
   return {
     ok: true,
     userId: String(account._id || account.id),

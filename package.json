@@ -11,6 +11,8 @@
     "dev": "npm run dev:preflight && concurrently -k --handle-input -n cp,in,out,rc,web,ngrok -c blue,cyan,magenta,green,yellow,white \"npm:dev:control-plane\" \"npm:dev:inbound\" \"npm:dev:outbound\" \"npm:dev:ring\" \"npm:dev:web\" \"npm:dev:ngrok\"",
     "dev:no-ngrok": "npm run dev:preflight && concurrently -k --handle-input -n cp,in,out,rc,web -c blue,cyan,magenta,green,yellow \"npm:dev:control-plane\" \"npm:dev:inbound\" \"npm:dev:outbound\" \"npm:dev:ring\" \"npm:dev:web\"",
     "dev:backend": "npm run dev:preflight && concurrently -k --handle-input -n cp,in,out,rc -c blue,cyan,magenta,green \"npm:dev:control-plane\" \"npm:dev:inbound\" \"npm:dev:outbound\" \"npm:dev:ring\"",
+    "dev:ai-bus": "node apps/ai-bus/src/server.js",
+    "dev:backend:ai": "node scripts/check-dev-ports.js --ai-bus && concurrently -k --handle-input -n cp,in,out,rc,ai -c blue,cyan,magenta,green,white \"npm:dev:control-plane\" \"npm:dev:inbound\" \"npm:dev:outbound\" \"npm:dev:ring\" \"npm:dev:ai-bus\"",
     "dev:preflight": "node scripts/check-dev-ports.js",
     "dev:stop": "node scripts/stop-dev-ports.js",
     "dev:control-plane": "node apps/control-plane/src/server.js",
@@ -46,7 +48,8 @@
     "rc:live-monitor:test-call": "node scripts/send-live-coach-campaign-call.js",
     "rc:live-monitor:manager": "node scripts/run-ex-live-monitor-manager.js",
     "rc:live-monitor:diarize-manual": "node scripts/run-ex-diarize-manual-test.js",
-    "eval:speaker-labels": "node scripts/eval-speaker-label-models.js"
+    "eval:speaker-labels": "node scripts/eval-speaker-label-models.js",
+    "ai:bus": "node apps/ai-bus/src/server.js"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.91.1",

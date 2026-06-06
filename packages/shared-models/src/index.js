@@ -24,6 +24,7 @@ const MasterProspectIndex = require("./MasterProspectIndex");
 const MetricsSnapshot = require("./MetricsSnapshot");
 const CallSession = require("./CallSession");
 const LeadActivity = require("./LeadActivity");
+const LiveCoachSession = require("./LiveCoachSession");
 const RcOAuthState = require("./RcOAuthState");
 const PacingConfig = require("./PacingConfig");
 const PacingReport = require("./PacingReport");
@@ -68,6 +69,7 @@ const MODEL_REGISTRY = Object.freeze({
   MetricsSnapshot,
   CallSession,
   LeadActivity,
+  LiveCoachSession,
   PacingConfig,
   PacingReport,
   PaymentAlert,
@@ -117,6 +119,7 @@ module.exports = {
   MetricsSnapshot,
   CallSession,
   LeadActivity,
+  LiveCoachSession,
   PacingConfig,
   PacingReport,
   PaymentAlert,

@@ -36,6 +36,7 @@ const { createDropRouter } = require("./routes/drop");
 const { createEventsRouter } = require("./routes/events");
 const { createHealthRouter } = require("./routes/health");
 const { createHygieneRouter } = require("./routes/hygiene");
+const { createLiveCoachProxyRouter } = require("./routes/liveCoachProxy");
 const { createLogicsRouter } = require("./routes/logics");
 const { createLexisRouter } = require("./routes/lexis");
 const { createMetricsRouter } = require("./routes/metrics");
@@ -1141,6 +1142,27 @@ async function startServer() {
     }
   });
 
+  // Internal token broker: lets the barge/voicemail service borrow THIS app's RC
+  // platform token instead of authenticating itself. The control-plane already
+  // maintains the token on a cached, backoff-aware refresh loop; serving it here
+  // keeps the barge entirely off RingCentral's per-app Auth rate-limit group (so a
+  // barge boot can never contribute to locking the floor out), and the barge's
+  // token refreshes in lockstep with ours. Secret-gated, internal-only.
+  app.get("/api/internal/rc/access-token", async (req, res) => {
+    const secret = String(process.env.INTERNAL_SERVICE_SECRET || "").trim();
+    const provided = String(req.headers["x-internal-secret"] || "").trim();
+    if (!secret || provided !== secret) return res.status(403).json({ ok: false, error: "forbidden" });
+    try {
+      const { createRingCentralClient } = require("../../../packages/shared-integrations/src");
+      const rc = createRingCentralClient();
+      const accessToken = await rc.authenticate(); // cached / refreshed-if-due / backoff-aware
+      const status = rc.getAuthStatus();
+      return res.json({ ok: true, accessToken, expiresAt: status.expiresAt || null });
+    } catch (error) {
+      return res.status(error.status === 429 ? 429 : 502).json({ ok: false, error: error.message });
+    }
+  });
+
   // Edge passthroughs so a single 5001/ngrok origin can accept public
   // traffic while the specialized workers keep running on their internal
   // ports.
@@ -1196,6 +1218,7 @@ async function startServer() {
       logger: runtime.logger,
     }),
   );
+  app.use("/api/ai/live-coach", createLiveCoachProxyRouter(auth, { config, logger: runtime.logger }));
   app.use("/api/logics", createLogicsRouter(auth));
   app.use("/api/lexis", createLexisRouter(auth, lexisNightlyRuntime, lexisDailyDropRuntime));
   app.use("/api/metrics", createMetricsRouter(auth, spendSyncRuntime));

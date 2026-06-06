@@ -78,9 +78,9 @@ nginx -t
 systemctl reload nginx
 
 step "Restart app services"
-systemctl restart parallel-control-plane parallel-inbound-gateway parallel-outbound-gateway parallel-ringcentral-cx
+systemctl restart parallel-control-plane parallel-inbound-gateway parallel-outbound-gateway parallel-ringcentral-cx parallel-ai-bus parallel-barge
 sleep 4
-systemctl --no-pager --full status parallel-control-plane parallel-inbound-gateway parallel-outbound-gateway parallel-ringcentral-cx >/dev/null
+systemctl --no-pager --full status parallel-control-plane parallel-inbound-gateway parallel-outbound-gateway parallel-ringcentral-cx parallel-ai-bus parallel-barge >/dev/null
 ok "systemd services are running"
 
 step "Health checks"
@@ -88,6 +88,7 @@ curl -fsS http://127.0.0.1:5001/health >/dev/null
 curl -fsS http://127.0.0.1:4001/health >/dev/null
 curl -fsS http://127.0.0.1:4002/health >/dev/null
 curl -fsS http://127.0.0.1:6101/health >/dev/null
+curl -fsS http://127.0.0.1:7000/health >/dev/null
 curl -fsS http://127.0.0.1:81/ >/dev/null
 ok "local health checks passed"
 

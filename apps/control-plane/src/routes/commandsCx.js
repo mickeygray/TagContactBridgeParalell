@@ -21,6 +21,7 @@ const {
   requestCxDial,
   requestCxEndCall,
   requestCxDisposition,
+  requestCxVoicemailDrop,
   requestCxEmail,
   requestCxLeadStatusUpdate,
   releaseCxPostDateHold,
@@ -93,6 +94,22 @@ function createCommandsCxRouter(auth) {
     async (req, res) => {
       try {
         const result = await requestCxDisposition(req.params.domain, req.user, req.body || {});
+        return res.json({ ok: true, result });
+      } catch (error) {
+        return res.status(error.status || 500).json(toErrorResponse(error));
+      }
+    },
+  );
+
+  router.post(
+    "/:domain/voicemail-drop",
+    auth.requireAuth,
+    auth.requireUser,
+    auth.requirePermission("queue.dispose"),
+    auth.requireCxOAuth,
+    async (req, res) => {
+      try {
+        const result = await requestCxVoicemailDrop(req.params.domain, req.user, req.body || {});
         return res.json({ ok: true, result });
       } catch (error) {
         return res.status(error.status || 500).json(toErrorResponse(error));

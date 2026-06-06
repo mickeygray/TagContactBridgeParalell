@@ -87,6 +87,40 @@ async function readAttachmentBuffer(gmail, messageId, part) {
   return gmail.decodeData(attachment.data);
 }
 
+async function listMailboxMessageRefs(gmail, config = {}) {
+  const pageSize = Math.max(1, Math.min(500, Number(config.maxMessages || 10) || 10));
+  const maxPages = Math.max(1, Math.min(50, Number(config.maxMessagePages || config.maxPages || 10) || 10));
+  const messages = [];
+  const seen = new Set();
+  let pageToken = "";
+  let pagesScanned = 0;
+
+  for (;;) {
+    const listed = await gmail.listMessages({
+      query: config.gmailQuery,
+      maxResults: pageSize,
+      pageToken,
+    });
+    pagesScanned += 1;
+    for (const message of Array.isArray(listed?.messages) ? listed.messages : []) {
+      const id = cleanText(message?.id || "", 200);
+      if (!id || seen.has(id)) continue;
+      seen.add(id);
+      messages.push({ ...message, id });
+    }
+    pageToken = cleanText(listed?.nextPageToken || "", 500);
+    if (!pageToken || pagesScanned >= maxPages) break;
+  }
+
+  return {
+    messages,
+    pagesScanned,
+    truncated: Boolean(pageToken),
+    pageSize,
+    maxPages,
+  };
+}
+
 async function alreadyProcessed(dedupeKey) {
   if (!dedupeKey) return false;
   const existing = await WorkflowRecord.findOne({
@@ -353,7 +387,7 @@ async function runNcoaMailboxIngest(options = {}) {
   const dryRun = Boolean(options.dryRun || config.dryRun);
   const dateKey = options.dateKey || formatDateKey(new Date(), config.timezone || DEFAULT_TIMEZONE);
   const runDir = path.join(config.outDir, `run-${timestampForFile()}`);
-  const gmail = createGoogleGmailClient({
+  const gmail = options.gmailClient || createGoogleGmailClient({
     ...(config.gmail || {}),
     user: config.user,
   });
@@ -362,17 +396,18 @@ async function runNcoaMailboxIngest(options = {}) {
     dryRun,
     query: config.gmailQuery,
     messagesScanned: 0,
+    messagePagesScanned: 0,
+    messageScanTruncated: false,
     attachments: [],
     runDir,
     dateKey,
   };
 
-  const listed = await gmail.listMessages({
-    query: config.gmailQuery,
-    maxResults: config.maxMessages || 10,
-  });
-  const messages = Array.isArray(listed?.messages) ? listed.messages : [];
+  const listed = await listMailboxMessageRefs(gmail, config);
+  const messages = listed.messages;
   summary.messagesScanned = messages.length;
+  summary.messagePagesScanned = listed.pagesScanned;
+  summary.messageScanTruncated = listed.truncated;
 
   for (const row of messages) {
     const message = await gmail.getMessage(row.id, { format: "full" });
@@ -471,7 +506,24 @@ async function runNcoaMailboxIngestIfDue(options = {}) {
   const domain = normalizeDomain(config.domain);
   const dateKey = options.dateKey || formatDateKey(now, timeZone);
   if (await hasCompletedMailboxRun({ domain, dateKey })) {
-    return { skipped: true, reason: "already-completed-today", dateKey };
+    const gmail = options.gmailClient || createGoogleGmailClient({
+      ...(config.gmail || {}),
+      user: config.user,
+    });
+    const unreadCheck = await listMailboxMessageRefs(gmail, {
+      ...config,
+      maxMessages: 1,
+      maxMessagePages: 1,
+    });
+    if (!unreadCheck.messages.length) {
+      return {
+        skipped: true,
+        reason: "already-completed-today",
+        dateKey,
+        messagesScanned: 0,
+        messagePagesScanned: unreadCheck.pagesScanned,
+      };
+    }
   }
   const result = await runNcoaMailboxIngest({
     ...options,
@@ -513,6 +565,7 @@ async function runNcoaMailboxIngestIfDue(options = {}) {
 
 module.exports = {
   hasCompletedMailboxRun,
+  listMailboxMessageRefs,
   runNcoaMailboxIngest,
   runNcoaMailboxIngestIfDue,
 };

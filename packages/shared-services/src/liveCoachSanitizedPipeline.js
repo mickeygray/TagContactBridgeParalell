@@ -1,0 +1,1662 @@
+"use strict";
+
+const VOICEMAIL_MATCHES = [
+  "name and number",
+  "can't take your call now",
+  "cant take your call now",
+  "at the tone",
+  "after the tone",
+  "forwarded to voicemail",
+  "forwarded to an automated voice messaging system",
+  "leave a message",
+  "leave your message",
+  "leave me a message",
+  "record a message",
+  "please record your message",
+  "record your message",
+  "voice mailbox",
+  "voicemail box",
+  "mailbox is full",
+  "automated voice messaging system",
+];
+
+const VOICEMAIL_PATTERNS = [
+  {
+    label: "leave a message",
+    pattern: /\bleave\s+(?:(?:me|us|a|your)\s+){0,2}(?:(?:quick|brief|short|detailed|voice)\s+)?message\b/i,
+  },
+  {
+    label: "leave your name and number",
+    pattern: /\bleave\s+(?:your\s+)?name\s+(?:and|&)\s+(?:phone\s+)?number\b/i,
+  },
+  {
+    label: "record your message",
+    pattern: /\b(?:record|leave)\s+(?:your\s+)?message\s+(?:after|at)\s+the\s+tone\b/i,
+  },
+  {
+    label: "not available leave a message",
+    pattern: /\b(?:not|un)available\b.{0,120}\b(?:leave|record)\b.{0,80}\bmessage\b/i,
+  },
+  {
+    label: "forwarded to voicemail",
+    pattern: /\b(?:call|your call)\b.{0,80}\bforwarded\b.{0,80}\b(?:voicemail|voice\s+mail|voice\s+messaging)\b/i,
+  },
+  {
+    label: "voicemail greeting",
+    pattern: /\b(?:voicemail|voice\s+mail|mailbox)\b.{0,120}\b(?:message|tone|full|unavailable)\b/i,
+  },
+];
+
+const CALL_SCREENER_MATCHES = [
+  "ai assistant",
+  "call assistant",
+  "virtual assistant",
+  "automated assistant",
+  "recording this call",
+  "record your name",
+  "name and reason for calling",
+  "reason for calling",
+  "what is this regarding",
+  "who may i say is calling",
+  "can i tell them who's calling",
+  "can i tell them whos calling",
+  "i'll see if this person is available",
+  "ill see if this person is available",
+  "let me see if",
+  "one moment",
+  "hold please",
+  "may i ask who's calling",
+  "may i ask whos calling",
+  "who is calling",
+  "who's calling",
+];
+
+const FILLER_PATTERNS = [
+  /^(yeah|yes|no|okay|ok|right|sure|uh|um|hello|hi|thanks|thank you)[.!?]?$/i,
+  /^(mm+h?m*|mhm|hmm)[.!?]?$/i,
+];
+
+const CONTEXT_RULES = [
+  {
+    key: "legitimacy",
+    label: "Opening legitimacy",
+    family: "sales",
+    priority: 70,
+    keywords: [
+      "who are you",
+      "why are you calling",
+      "how did you get",
+      "scam",
+      "legit",
+      "legitimate",
+      "company",
+      "public records",
+      "is this real",
+      "are you real",
+      "is this spam",
+      "spam call",
+      "robo call",
+      "where did you get my number",
+      "how did you get my number",
+      "why did i get this call",
+      "do i know you",
+      "who is this",
+      "what company",
+      "tax advocate",
+      "tax group",
+      "public record",
+      "tax lien record",
+    ],
+    guidance:
+      "Self-identify clearly, tie the call to their tax inquiry/public tax signal, and ask permission to verify the issue.",
+  },
+  {
+    key: "irs_notice",
+    label: "IRS notice",
+    family: "tax_comprehension",
+    priority: 100,
+    keywords: [
+      "IRS",
+      "CP501",
+      "CP503",
+      "CP504",
+      "CP2000",
+      "CP50",
+      "LT11",
+      "Letter 1058",
+      "notice",
+      "letter",
+      "federal",
+      "transcript",
+      "internal revenue",
+      "department of treasury",
+      "irs letter",
+      "federal tax",
+      "tax bill",
+      "balance due",
+      "amount due",
+      "certified mail",
+      "certified letter",
+      "notice of intent",
+      "intent to levy",
+      "cp notice",
+      "letter 11",
+      "letter eleven",
+      "notice 1058",
+      "final letter",
+      "tax year",
+      "tax years",
+    ],
+    guidance:
+      "Treat this as likely IRS/federal unless a clear state agency is named; ask notice type, year, amount, and deadline before naming options.",
+  },
+  {
+    key: "state_tax",
+    label: "State tax",
+    family: "tax_comprehension",
+    priority: 95,
+    keywords: [
+      "state",
+      "FTB",
+      "EDD",
+      "franchise tax",
+      "sales tax",
+      "state lien",
+      "state levy",
+      "state garnishment",
+      "franchise tax board",
+      "department of revenue",
+      "department of taxation",
+      "state tax board",
+      "state notice",
+      "state letter",
+      "state balance",
+      "california tax",
+      "california state",
+      "state agency",
+      "state income tax",
+      "state collections",
+    ],
+    guidance:
+      "Separate state symptoms from federal symptoms and screen for whether there is also an IRS/federal balance or unfiled return issue.",
+  },
+  {
+    key: "collection_pressure",
+    label: "Collection pressure",
+    family: "tax_comprehension",
+    priority: 95,
+    keywords: [
+      "levy",
+      "lien",
+      "garnish",
+      "garnishment",
+      "bank account",
+      "freeze",
+      "frozen",
+      "paycheck",
+      "revenue officer",
+      "collections",
+      "final notice",
+      "take my wages",
+      "take my paycheck",
+      "take my check",
+      "take money",
+      "took money",
+      "bank levy",
+      "wage levy",
+      "wage garnishment",
+      "levied",
+      "garnished",
+      "seize",
+      "seizure",
+      "freeze my account",
+      "locked my account",
+      "empty my account",
+      "property lien",
+      "tax lien",
+      "filed a lien",
+      "filed lien",
+      "threaten",
+      "threatening",
+      "collection notice",
+      "levy notice",
+    ],
+    guidance:
+      "Acknowledge urgency, confirm whether money is being taken now, then move toward representation and fact gathering without promising a stop.",
+  },
+  {
+    key: "unfiled_returns",
+    label: "Unfiled returns",
+    family: "tax_comprehension",
+    priority: 90,
+    keywords: [
+      "unfiled",
+      "haven't filed",
+      "havent filed",
+      "hasn't filed",
+      "didn't file",
+      "missing return",
+      "years behind",
+      "substitute for return",
+      "SFR",
+      "back taxes",
+      "tax returns",
+      "late return",
+      "late returns",
+      "not file",
+      "did not file",
+      "didn't do my taxes",
+      "didnt do my taxes",
+      "haven't done taxes",
+      "havent done taxes",
+      "haven't done my taxes",
+      "havent done my taxes",
+      "years missing",
+      "returns missing",
+      "filing behind",
+      "behind on filing",
+    ],
+    guidance:
+      "Find the missing years and income type; frame cleanup as a first step before anyone guesses at resolution.",
+  },
+  {
+    key: "payroll_tax",
+    label: "Payroll tax",
+    family: "tax_comprehension",
+    priority: 90,
+    keywords: [
+      "payroll",
+      "941",
+      "940",
+      "trust fund",
+      "TFRP",
+      "employee withholding",
+      "withholding",
+      "business tax",
+      "employees",
+      "employment tax",
+      "941s",
+      "quarterlies",
+      "quarterly payroll",
+      "payroll returns",
+      "pay employees",
+      "withheld from employees",
+      "responsible person",
+      "responsible-person",
+      "business owes",
+      "business taxes",
+      "business balance",
+      "trust fund recovery",
+      "employee taxes",
+    ],
+    guidance:
+      "Separate business and personal exposure; ask quarters/years, whether the business is operating, and whether trust fund/responsible-person language appeared.",
+  },
+  {
+    key: "self_employment",
+    label: "1099 / self-employment",
+    family: "tax_comprehension",
+    priority: 85,
+    keywords: [
+      "1099",
+      "1099-NEC",
+      "contractor",
+      "independent contractor",
+      "self-employed",
+      "self employed",
+      "Schedule C",
+      "gig",
+      "quarterly",
+      "estimated tax",
+      "1099K",
+      "1099-K",
+      "venmo",
+      "paypal",
+      "etsy",
+      "cash app",
+      "cashapp",
+      "doordash",
+      "uber",
+      "lyft",
+      "side hustle",
+      "gig work",
+      "freelance",
+      "freelancer",
+      "no withholding",
+      "did not withhold",
+      "didn't withhold",
+      "write off",
+      "write-off",
+      "business expenses",
+      "mileage",
+    ],
+    guidance:
+      "Explain that withholding may not have happened; ask years, income records, and whether expenses were ever counted.",
+  },
+  {
+    key: "audit_adjustment",
+    label: "Audit or adjustment",
+    family: "tax_comprehension",
+    priority: 80,
+    keywords: [
+      "audit",
+      "exam",
+      "examination",
+      "underreporter",
+      "missing income",
+      "adjustment",
+      "proposed assessment",
+      "receipts",
+      "audited",
+      "being audited",
+      "tax court",
+      "irs changed",
+      "they changed my return",
+      "changed my return",
+      "disallowed",
+      "deductions",
+      "proof",
+      "prove",
+      "1099 mismatch",
+      "w2 mismatch",
+      "income mismatch",
+      "computer matching",
+      "notice of deficiency",
+      "90 day letter",
+      "ninety day letter",
+    ],
+    guidance:
+      "Identify whether this is an exam, underreporter, or balance after assessment; ask what document or deadline they received.",
+  },
+  {
+    key: "spouse_identity",
+    label: "Spouse or identity issue",
+    family: "tax_comprehension",
+    priority: 75,
+    keywords: [
+      "spouse",
+      "ex spouse",
+      "ex-spouse",
+      "divorce",
+      "joint",
+      "innocent spouse",
+      "injured spouse",
+      "identity theft",
+      "stolen identity",
+      "wife",
+      "husband",
+      "ex wife",
+      "ex-wife",
+      "ex husband",
+      "ex-husband",
+      "married filing joint",
+      "filed jointly",
+      "separated",
+      "separation",
+      "my ex",
+      "not my income",
+      "not my debt",
+      "refund taken",
+      "offset",
+    ],
+    guidance:
+      "Do not decide liability on the call; ask filing status, years, and whether the notice names both spouses.",
+  },
+  {
+    key: "money_pressure",
+    label: "Money pressure",
+    family: "human_context",
+    priority: 70,
+    keywords: [
+      "can't afford",
+      "cant afford",
+      "paycheck",
+      "my check",
+      "rent",
+      "mortgage",
+      "car payment",
+      "bills",
+      "kids",
+      "food",
+      "bank account",
+      "business cash flow",
+      "lost my job",
+      "laid off",
+      "fixed income",
+      "social security",
+      "retired",
+      "medical bills",
+      "hospital",
+      "child support",
+      "single parent",
+      "utilities",
+      "groceries",
+      "food bill",
+      "can't pay",
+      "cant pay",
+      "take money out",
+      "money out of my check",
+      "out of my check",
+      "no money",
+      "broke",
+      "pay rent",
+      "make rent",
+    ],
+    guidance:
+      "Give one human acknowledgment, then ask a concrete financial or enforcement fact that moves the call forward.",
+  },
+  {
+    key: "emotional_pressure",
+    label: "Emotional pressure",
+    family: "human_context",
+    priority: 70,
+    keywords: [
+      "scared",
+      "scary",
+      "afraid",
+      "nervous",
+      "stress",
+      "stressed",
+      "worried",
+      "confused",
+      "embarrassed",
+      "can't sleep",
+      "cant sleep",
+      "overwhelmed",
+      "frustrated",
+      "panic",
+      "panicking",
+      "freaking out",
+      "anxious",
+      "anxiety",
+      "upset",
+      "mad",
+      "angry",
+      "lost",
+      "don't understand",
+      "dont understand",
+      "no idea",
+      "terrified",
+      "humiliated",
+      "ashamed",
+    ],
+    guidance:
+      "Sound human first, avoid therapy language, and ask the next fact needed to regain control.",
+  },
+  {
+    key: "objection",
+    label: "Objection or resistance",
+    family: "sales",
+    priority: 75,
+    keywords: [
+      "not interested",
+      "busy",
+      "call me back",
+      "already handled",
+      "taken care of",
+      "accountant",
+      "expensive",
+      "think about it",
+      "spouse",
+      "send me",
+      "email me",
+      "mail me",
+      "just send",
+      "already have someone",
+      "have a lawyer",
+      "have an attorney",
+      "have a CPA",
+      "my CPA",
+      "tax person",
+      "accountant handles",
+      "not right now",
+      "bad time",
+      "later",
+      "take me off",
+      "stop calling",
+      "do not call",
+      "don't call",
+      "dont call",
+      "remove me",
+      "not my problem",
+    ],
+    guidance:
+      "Lower pressure, clarify the objection, and return to why reviewing the facts matters before guessing.",
+  },
+  {
+    key: "representation",
+    label: "Representation / POA",
+    family: "sales",
+    priority: 75,
+    keywords: [
+      "represent",
+      "representation",
+      "power of attorney",
+      "POA",
+      "2848",
+      "8821",
+      "authorization",
+      "talk to the IRS",
+      "handle this",
+      "speak for me",
+      "speak to the IRS",
+      "call the IRS",
+      "deal with the IRS",
+      "deal with them",
+      "take over",
+      "authorized",
+      "authorization form",
+      "transcript pull",
+      "pull transcripts",
+      "talk to them",
+      "contact them",
+      "on my behalf",
+      "representative",
+    ],
+    guidance:
+      "Frame representation as the foundation for fact gathering and agency communication, not as a magic resolution.",
+  },
+  {
+    key: "fees_close",
+    label: "Fees / close",
+    family: "sales",
+    priority: 65,
+    keywords: [
+      "cost",
+      "costs",
+      "fee",
+      "fees",
+      "price",
+      "pricing",
+      "how much",
+      "what this costs",
+      "what it costs",
+      "what does it cost",
+      "what do you charge",
+      "charge",
+      "payment",
+      "card",
+      "monthly",
+      "today",
+      "sign",
+      "retainer",
+      "down payment",
+      "deposit",
+      "credit card",
+      "debit card",
+      "bank draft",
+      "ACH",
+      "pay today",
+      "start today",
+      "enroll",
+      "enrollment",
+      "agreement",
+      "paperwork",
+      "contract",
+      "afford",
+      "expensive",
+      "cheap",
+      "too much",
+      "worth it",
+    ],
+    guidance:
+      "State value and scope confidently only after enough facts; do not apologize for price or over-explain.",
+  },
+];
+
+const COMPLETE_THOUGHT_TRIGGERS = [
+  "IRS",
+  "CP",
+  "LT11",
+  "Letter 1058",
+  "notice",
+  "letter",
+  "levy",
+  "lien",
+  "garnish",
+  "payroll",
+  "1099",
+  "unfiled",
+  "state",
+  "FTB",
+  "EDD",
+  "owe",
+  "balance",
+  "scared",
+  "worried",
+  "stressed",
+  "can't afford",
+  "cant afford",
+  "not interested",
+  "who are you",
+  "why are you calling",
+  "cost",
+  "fee",
+];
+
+const WEAK_CONTEXT_HITS = new Set([
+  "notice",
+  "letter",
+  "state",
+  "company",
+  "paycheck",
+  "my check",
+  "spouse",
+  "payment",
+  "card",
+  "today",
+  "sign",
+  "paperwork",
+  "talk to them",
+  "handle this",
+  "contact them",
+]);
+
+const TACTIC_RULES = [
+  {
+    key: "calm_urgency",
+    label: "Calm urgency",
+    family: "psychology",
+    priority: 100,
+    applies: ({ keys }) => keys.has("collection_pressure"),
+    guidance:
+      "Lead with calm urgency, not alarm. Acknowledge the risk, confirm whether enforcement is active, then move into fact-gathering and representation without promising a stop.",
+    humor:
+      "No humor when levy, garnishment, liens, frozen accounts, or wage pressure are in play.",
+  },
+  {
+    key: "human_reassurance",
+    label: "Human reassurance",
+    family: "psychology",
+    priority: 95,
+    applies: ({ keys, text }) =>
+      keys.has("emotional_pressure") ||
+      keys.has("money_pressure") ||
+      /\b(scared|worried|stressed|panic|overwhelmed|can't sleep|cant sleep|rent|kids|medical|lost my job|laid off)\b/i.test(text),
+    guidance:
+      "Mirror the life pressure in plain language first, then ask one concrete control question. Avoid therapy language, lectures, or rushing straight to price.",
+    humor:
+      "Use warmth, not jokes. If they are scared or broke, cleverness will sound dismissive.",
+  },
+  {
+    key: "permission_legitimacy",
+    label: "Permission and legitimacy",
+    family: "sales_psychology",
+    priority: 90,
+    applies: ({ keys }) => keys.has("legitimacy"),
+    guidance:
+      "Slow the call down, identify the agent and firm, connect the call to the tax signal, and ask permission to verify the issue before pitching.",
+    humor:
+      "No jokes until legitimacy is restored; clarity beats charm here.",
+  },
+  {
+    key: "lower_pressure_objection",
+    label: "Lower pressure objection handling",
+    family: "sales_psychology",
+    priority: 88,
+    applies: ({ keys }) => keys.has("objection"),
+    guidance:
+      "Respect the resistance, lower pressure, and ask for one useful fact or permission to explain why the review matters before ending the call.",
+    humor:
+      "A tiny softener is acceptable only if the objection is mild; never joke around DNC, anger, or distrust.",
+  },
+  {
+    key: "confident_value_frame",
+    label: "Confident value frame",
+    family: "sales_psychology",
+    priority: 82,
+    applies: ({ keys }) => keys.has("fees_close"),
+    guidance:
+      "Answer price pressure with confidence and scope. Tie cost to investigation, representation, and cleanup; do not apologize, discount, or over-explain.",
+    humor:
+      "Keep humor out of fee pressure unless rapport is already obvious.",
+  },
+  {
+    key: "expert_specificity",
+    label: "Expert specificity",
+    family: "sales_psychology",
+    priority: 78,
+    applies: ({ keys }) =>
+      keys.has("payroll_tax") ||
+      keys.has("self_employment") ||
+      keys.has("audit_adjustment") ||
+      keys.has("spouse_identity"),
+    guidance:
+      "Sound specialized by naming the next fact that matters. Use tax comprehension to prove expertise, then pivot to why the team needs documents/authorization.",
+    humor:
+      "Avoid jokes about complex or embarrassing facts; confidence should carry the warmth.",
+  },
+  {
+    key: "shame_reduction",
+    label: "Shame reduction",
+    family: "psychology",
+    priority: 76,
+    applies: ({ keys, text }) =>
+      keys.has("unfiled_returns") ||
+      keys.has("spouse_identity") ||
+      /\b(embarrassed|ashamed|humiliated|my fault|i messed up|years behind|haven't filed|havent filed)\b/i.test(text),
+    guidance:
+      "Normalize without excusing. Make it feel sortable: years, income type, notices, then representation/fact review.",
+    humor:
+      "Gentle warmth is okay; do not make the person feel like the joke is about them.",
+  },
+  {
+    key: "state_to_irs_screen",
+    label: "State-to-IRS screen",
+    family: "sales_psychology",
+    priority: 74,
+    applies: ({ keys, jurisdiction }) => keys.has("state_tax") || jurisdiction === "state" || jurisdiction === "mixed",
+    guidance:
+      "Do not over-anchor on state-only help. Separate state symptoms from IRS symptoms and screen for federal balances or unfiled years where the larger resolution value usually lives.",
+    humor:
+      "Keep it practical; state/federal confusion needs clarity more than personality.",
+  },
+  {
+    key: "next_phase_control",
+    label: "Next phase control",
+    family: "sales_psychology",
+    priority: 65,
+    applies: ({ keys }) => keys.size > 0,
+    guidance:
+      "Move the call one phase forward: identify issue, discover pain, prove expertise, then gather facts. Do not solve the case inside the one-liner.",
+    humor:
+      "Only use light conversational warmth when the prospect is calm and there is no enforcement, shame, fee, or legitimacy pressure.",
+  },
+  {
+    key: "light_warmth_allowed",
+    label: "Light warmth allowed",
+    family: "humor",
+    priority: 35,
+    applies: ({ keys, text }) =>
+      !keys.has("collection_pressure") &&
+      !keys.has("emotional_pressure") &&
+      !keys.has("money_pressure") &&
+      !keys.has("fees_close") &&
+      !keys.has("legitimacy") &&
+      !keys.has("objection") &&
+      /\b(taxes are|taxes is|this is a mess|what a mess|confusing|ridiculous|crazy|i hate taxes)\b/i.test(text),
+    guidance:
+      "A brief human softener can make the agent sound alive, but it must immediately pivot to the next useful fact.",
+    humor:
+      "Dry, low-stakes warmth only. Never make tax enforcement, debt, fear, or the prospect themselves the joke.",
+  },
+  {
+    key: "anchor_to_inquiry",
+    label: "Re-anchor to the inquiry",
+    family: "sales_psychology",
+    priority: 99,
+    applies: ({ text }) =>
+      /\b(didn'?t ask|never asked|don'?t know what (you'?re|your|you are) talking|what (is )?this (is )?about|didn'?t (request|sign up)|why would i|never (filled|signed)|no idea what|i didn'?t do anything)\b/i.test(text),
+    guidance:
+      "They forgot the inquiry or are testing you. Do not get apologetic or over-explain the lead source. Re-anchor with quiet authority to the one thing that matters and pivot straight to the diagnostic: 'You submitted an inquiry about a tax issue, and I can actually help with that — do you owe the IRS, or not?' Certainty disarms; pleading does not.",
+    humor:
+      "No humor — they are skeptical. Calm certainty is the disarmer, not cleverness.",
+  },
+  {
+    key: "hostility_resilience",
+    label: "Hostility resilience",
+    family: "psychology",
+    priority: 98,
+    applies: ({ text }) =>
+      /\b(f[\W_]*you|f off|leave me alone|stop calling|go away|piss off|screw you|how dare|harass|quit calling|don'?t call|get a life|loser)\b/i.test(text),
+    guidance:
+      "A hostile tone is a defense, not a final answer — people answering an unknown tax call are often scared or embarrassed. Do not apologize repeatedly, do not flinch, do not match their heat. Stay flat and steady, acknowledge once, and make ONE clean attempt to land the value: 'Understood, not trying to bother you. You did reach out about a tax issue, and that part is fixable — do you owe the IRS, or not?' If they give a genuine, unambiguous stop/do-not-call, honor it and disengage.",
+    humor:
+      "Absolutely none — humor here reads as mockery and confirms their worst assumption.",
+  },
+  {
+    key: "loop_in_decision_maker",
+    label: "Loop in the decision maker",
+    family: "sales_psychology",
+    priority: 70,
+    applies: ({ text }) =>
+      /\b(my (husband|wife|spouse|partner|accountant)|talk to my|ask my|both of us|joint (return|filing|taxes)|we file (jointly|together)|have to (ask|check with)|run it by)\b/i.test(text),
+    guidance:
+      "Do not lose the call to 'I have to ask someone.' Affirm that involving the spouse/partner is smart, then keep momentum by gathering facts now so that conversation is informed: 'Smart to keep them in the loop — so when you two talk you have the real picture, what notice and year are we looking at?' Never imply they can't decide alone.",
+    humor:
+      "Light warmth fine if calm; never joke about the relationship or their authority to decide.",
+  },
+  {
+    key: "dissolve_stall",
+    label: "Dissolve the stall",
+    family: "sales_psychology",
+    priority: 68,
+    applies: ({ text }) =>
+      /\b(think about it|call me back|call back later|send me (something|info|details|an email)|email me|not a good time|busy right now|let me think|maybe later|in writing|some other time)\b/i.test(text),
+    guidance:
+      "A stall usually hides a real concern — cost, trust, or 'is this even worth it.' Use LAER: acknowledge, then explore the real hesitation: 'Happy to follow up — so I send the right thing, is the hesitation the cost, or whether this is legit?' Tax balances compound, so tie waiting to growing penalties gently, without pressure.",
+    humor:
+      "A very dry softener is okay on a mild stall; never on a hard no or when money pressure is present.",
+  },
+  {
+    key: "already_represented",
+    label: "Already has help",
+    family: "sales_psychology",
+    priority: 66,
+    applies: ({ text }) =>
+      /\b(already have (a|an|someone)|i have a (cpa|accountant|attorney|lawyer|tax (guy|person|preparer))|working with (someone|a (firm|company))|someone is handling|another company|my guy|my accountant)\b/i.test(text),
+    guidance:
+      "Never disparage the other party. Separate filing from resolution: a CPA who prepares returns is not the same as active IRS representation negotiating collections. Screen whether it's actually resolved: 'Good that you have someone — are they actively representing you on the collection side, or just preparing returns? Those are different jobs.'",
+    humor:
+      "Keep it professional; no jokes at the other provider's expense.",
+  },
+  {
+    key: "earn_trust_with_proof",
+    label: "Earn trust with proof",
+    family: "psychology",
+    priority: 64,
+    applies: ({ keys, text }) =>
+      !keys.has("legitimacy") &&
+      /\b(scam|you people|all the same|how do i (know|trust)|trust you|rip ?off|prove it|skeptical|don'?t trust|too good to be true|sounds like a scam)\b/i.test(text),
+    guidance:
+      "Distrust beyond a simple 'who are you' needs proof, not persuasion. Be specific and verifiable — name the firm, the concrete process (investigation, authorization via 2848, representation), and invite them to verify it independently. Drop all pressure; specifics and calm beat reassurance.",
+    humor:
+      "No humor; a skeptical person reads jokes as deflection.",
+  },
+  {
+    key: "channel_relief",
+    label: "Channel relief into action",
+    family: "psychology",
+    priority: 60,
+    applies: ({ text }) =>
+      /\b(thank god|finally|so glad|relieved|can you (really|actually) help|you can help|that would be (great|amazing)|i need help|please help|don'?t know what to do)\b/i.test(text),
+    guidance:
+      "Hope is fragile — do not over-promise and break it. Channel relief into the immediate next concrete step without guaranteeing outcomes: 'We help people through exactly this every day. To get you the real answer instead of a guess, let's start with the notice and the year you're looking at.'",
+    humor:
+      "Warmth yes, jokes no — they're being vulnerable; meet it sincerely.",
+  },
+];
+
+function cleanText(value, maxLength = 6000) {
+  return String(value || "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, maxLength);
+}
+
+function normalizeRole(value) {
+  const role = String(value || "").trim().toLowerCase();
+  if (["agent", "prospect", "system", "unknown"].includes(role)) return role;
+  if (["client", "customer", "callee", "remote"].includes(role)) return "prospect";
+  return "prospect";
+}
+
+function normalizeTaxTerms(text) {
+  let output = cleanText(text, 6000);
+  output = output.replace(/\bc\s*p\s*[- ]?\s*(\d{3,4})\b/gi, (_m, number) => `CP${number}`);
+  output = output.replace(/\bcp\s*[- ]?\s*(\d{3,4})\b/gi, (_m, number) => `CP${number}`);
+  output = output.replace(/\bl\s*t\s*[- ]?\s*(\d{2})\b/gi, (_m, number) => `LT${number}`);
+  output = output.replace(/\bletter\s+ten\s+fifty\s+eight\b/gi, "Letter 1058");
+  output = output.replace(/\bi\s*r\s*s\b/gi, "IRS");
+  output = output.replace(/\bf\s*t\s*b\b/gi, "FTB");
+  output = output.replace(/\be\s*d\s*d\b/gi, "EDD");
+  output = output.replace(/\bten\s+ninety\s+nine\b/gi, "1099");
+  output = output.replace(/\bw\s*[- ]?\s*2\b/gi, "W-2");
+  output = output.replace(/\bform\s+nine\s+forty\s+one\b/gi, "Form 941");
+  output = output.replace(/\bform\s+nine\s+forty\b/gi, "Form 940");
+  return output;
+}
+
+function normalizeSttTranscript(input = {}) {
+  const text = normalizeTaxTerms(input.text || input.transcript || input.finalText || "");
+  const words = text ? text.split(/\s+/).filter(Boolean) : [];
+  return {
+    id: cleanText(input.id || "", 120) || null,
+    at: cleanText(input.at || "", 80) || new Date().toISOString(),
+    role: normalizeRole(input.role || input.speaker),
+    text,
+    source: cleanText(input.source || "stt", 80),
+    provider: cleanText(input.provider || input.sttProvider || "", 80) || null,
+    model: cleanText(input.model || input.sttModel || "", 120) || null,
+    confidence: Number.isFinite(Number(input.confidence)) ? Number(input.confidence) : null,
+    isFinal: input.isFinal === undefined ? true : Boolean(input.isFinal),
+    durationSec: Number.isFinite(Number(input.durationSec)) ? Number(input.durationSec) : null,
+    wordCount: words.length,
+  };
+}
+
+function includesPhrase(text, phrases) {
+  const lower = cleanText(text, 6000).toLowerCase();
+  return phrases.find((phrase) => lower.includes(String(phrase).toLowerCase())) || null;
+}
+
+function includesPattern(text, patterns) {
+  const clean = cleanText(text, 6000);
+  for (const row of patterns) {
+    if (row.pattern.test(clean)) return row.label;
+  }
+  return null;
+}
+
+function analyzeVoicemail(text) {
+  const match = includesPhrase(text, VOICEMAIL_MATCHES) || includesPattern(text, VOICEMAIL_PATTERNS);
+  return {
+    isVoicemail: Boolean(match),
+    match,
+    action: match ? "reject_call" : "continue",
+  };
+}
+
+function analyzeCallScreener(text) {
+  const match = includesPhrase(text, CALL_SCREENER_MATCHES);
+  return {
+    isScreener: Boolean(match),
+    match,
+    action: match ? "hold_context" : "continue",
+  };
+}
+
+function keywordHit(lowerText, keyword) {
+  const needle = String(keyword || "").trim().toLowerCase();
+  if (!needle) return false;
+  if (/^[a-z0-9-]+$/i.test(needle)) {
+    return new RegExp(`\\b${needle.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i").test(lowerText);
+  }
+  return lowerText.includes(needle);
+}
+
+function isWeakContextHit(keyword) {
+  return WEAK_CONTEXT_HITS.has(String(keyword || "").trim().toLowerCase());
+}
+
+function filterContextHits(rule, hits = []) {
+  const cleanHits = [...new Set(hits.map((hit) => cleanText(hit, 120)).filter(Boolean))];
+  if (!cleanHits.length) return [];
+  return cleanHits;
+}
+
+function findContextMatches(text, options = {}) {
+  const lower = cleanText(text, 6000).toLowerCase();
+  const limit = Math.max(1, Number(options.limit || 6));
+  return CONTEXT_RULES
+    .map((rule) => {
+      const hits = filterContextHits(rule, rule.keywords.filter((keyword) => keywordHit(lower, keyword)));
+      if (!hits.length) return null;
+      return {
+        key: rule.key,
+        label: rule.label,
+        family: rule.family,
+        priority: rule.priority,
+        hits,
+        guidance: rule.guidance,
+      };
+    })
+    .filter(Boolean)
+    .sort((a, b) => b.priority - a.priority || b.hits.length - a.hits.length)
+    .slice(0, limit);
+}
+
+function normalizeContextCandidate(candidate = {}) {
+  const key = cleanText(candidate.key || "", 80);
+  if (!key) return null;
+  return {
+    key,
+    label: cleanText(candidate.label || key, 120),
+    family: cleanText(candidate.family || "sales", 80),
+    priority: Number(candidate.priority || candidate.score || 0) || 0,
+    score: Number(candidate.score || candidate.priority || 0) || 0,
+    hits: Array.isArray(candidate.hits)
+      ? candidate.hits.map((hit) => cleanText(hit, 120)).filter(Boolean)
+      : [],
+    guidance: cleanText(candidate.guidance || candidate.summary || "", 300),
+  };
+}
+
+function normalizeContextCandidates(candidates = [], options = {}) {
+  const limit = Math.max(1, Number(options.limit || 6));
+  const byKey = new Map();
+  for (const candidate of Array.isArray(candidates) ? candidates : []) {
+    const normalized = normalizeContextCandidate(candidate);
+    if (!normalized) continue;
+    const current = byKey.get(normalized.key);
+    if (!current) {
+      byKey.set(normalized.key, normalized);
+      continue;
+    }
+    current.priority = Math.max(current.priority, normalized.priority);
+    current.score = Math.max(current.score, normalized.score);
+    current.hits = [...new Set([...current.hits, ...normalized.hits])];
+    if (!current.guidance && normalized.guidance) current.guidance = normalized.guidance;
+    if (!current.label && normalized.label) current.label = normalized.label;
+    if (!current.family && normalized.family) current.family = normalized.family;
+  }
+  return [...byKey.values()]
+    .sort((a, b) => b.score - a.score || b.priority - a.priority || b.hits.length - a.hits.length || a.key.localeCompare(b.key))
+    .slice(0, limit);
+}
+
+function candidateToContextMatch(candidate = {}) {
+  return {
+    key: candidate.key,
+    label: candidate.label,
+    family: candidate.family,
+    priority: Number(candidate.priority || 0),
+    hits: Array.isArray(candidate.hits) ? candidate.hits : [],
+    guidance: cleanText(candidate.guidance || candidate.summary || "", 300),
+    miniConfidence: Number.isFinite(Number(candidate.miniConfidence)) ? Number(candidate.miniConfidence) : undefined,
+    miniReason: cleanText(candidate.miniReason || "", 240) || undefined,
+  };
+}
+
+function phraseHas(text, pattern) {
+  return pattern.test(cleanText(text, 2400));
+}
+
+function hasAnyStrongHit(candidate = {}) {
+  return (candidate.hits || []).some((hit) => !isWeakContextHit(hit));
+}
+
+function judgeContextCandidate(candidate = {}, phraseText = "", allCandidates = []) {
+  const text = cleanText(phraseText, 2400);
+  const lower = text.toLowerCase();
+  const key = candidate.key;
+  const hits = Array.isArray(candidate.hits) ? candidate.hits : [];
+  const hasStrongHit = hasAnyStrongHit(candidate);
+  let applies = hasStrongHit;
+  let confidence = hasStrongHit ? 0.72 : 0.32;
+  let reason = hasStrongHit ? "literal strong keyword evidence" : "weak keyword evidence only";
+
+  if (key === "irs_notice") {
+    applies = phraseHas(text, /\b(IRS|CP\d{3,4}|LT11|Letter 1058|internal revenue|department of treasury|federal tax|tax bill|balance due|amount due|certified mail|notice of intent|tax year)\b/i);
+    confidence = applies ? 0.9 : 0.2;
+    reason = applies ? "specific federal/IRS notice signal" : "generic notice or letter without federal context";
+  } else if (key === "state_tax") {
+    applies = phraseHas(text, /\b(FTB|EDD|franchise tax|department of revenue|department of taxation|state tax|state lien|state levy|state garnishment|state notice|state balance|california tax|california state)\b/i);
+    confidence = applies ? 0.88 : 0.2;
+    reason = applies ? "specific state tax signal" : "generic state word without tax-agency context";
+  } else if (key === "collection_pressure") {
+    applies = phraseHas(text, /\b(levy|lien|garnish|garnishment|freeze|frozen|revenue officer|collections|take (my )?(wages|paycheck|check|money)|took money|bank levy|wage levy|seize|seizure|filed (a )?lien|collection notice|levy notice|threaten|threatening)\b/i);
+    confidence = applies ? 0.9 : 0.18;
+    reason = applies ? "actual enforcement/collection language" : "money word without enforcement pressure";
+  } else if (key === "spouse_identity") {
+    applies = phraseHas(text, /\b(ex[- ]?(spouse|wife|husband)|divorce|joint|innocent spouse|injured spouse|identity theft|filed jointly|married filing joint|refund taken|offset|not my income|not my debt)\b/i);
+    confidence = applies ? 0.82 : 0.22;
+    reason = applies ? "spouse/identity affects tax liability or filing status" : "spouse mentioned without tax-liability context";
+  } else if (key === "objection") {
+    applies = phraseHas(text, /\b(not interested|busy|call me back|already handled|taken care of|accountant|CPA|lawyer|attorney|think about it|ask (my )?(wife|husband|spouse)|talk (to|with) (my )?(wife|husband|spouse)|check (with )?(my )?(wife|husband|spouse)|send me|email me|mail me|not right now|bad time|later|take me off|stop calling|do not call|don't call|remove me)\b/i);
+    confidence = applies ? 0.84 : 0.22;
+    reason = applies ? "real resistance, callback, third-party, or DNC signal" : "weak sales word without objection context";
+  } else if (key === "fees_close") {
+    applies = phraseHas(text, /\b(cost|costs|fee|fees|price|pricing|how much|what (this|it) costs|what do you charge|charge|pay today|start today|enroll|retainer|down payment|deposit|afford|expensive|too much)\b/i);
+    confidence = applies ? 0.78 : 0.2;
+    reason = applies ? "pricing, affordability, or enrollment language" : "generic payment/card/today word without fees context";
+  } else if (key === "legitimacy") {
+    applies = phraseHas(text, /\b(who are you|who is this|why are you calling|how did you get|where did you get|scam|legit|legitimate|is this real|are you real|spam call|what company|tax advocate|tax group|public record|tax lien record)\b/i);
+    confidence = applies ? 0.82 : 0.18;
+    reason = applies ? "caller is questioning identity or legitimacy" : "generic company word without legitimacy challenge";
+  } else if (key === "representation") {
+    applies = phraseHas(text, /\b(represent|representation|power of attorney|POA|2848|8821|authorization|speak (to|for)|call the IRS|deal with (the IRS|them)|take over|on my behalf|representative|pull transcripts|transcript pull)\b/i);
+    confidence = applies ? 0.8 : 0.2;
+    reason = applies ? "representation or authorization language" : "generic handle/talk/contact word without representation context";
+  }
+
+  if (!applies && hasStrongHit && candidate.family === "tax_comprehension") {
+    applies = true;
+    confidence = Math.max(confidence, 0.68);
+    reason = "literal tax-comprehension keyword remains relevant";
+  }
+  if (!applies && hasStrongHit && candidate.family === "human_context") {
+    applies = true;
+    confidence = Math.max(confidence, 0.66);
+    reason = "literal human-context keyword remains relevant";
+  }
+
+  const competingTaxKeys = allCandidates
+    .filter((row) => row.key !== key && row.family === "tax_comprehension")
+    .map((row) => row.key);
+  return {
+    ...candidate,
+    applies,
+    miniConfidence: Number(confidence.toFixed(2)),
+    miniReason: reason,
+    hitStrength: hasStrongHit ? "strong" : "weak",
+    competingTaxKeys,
+    hits,
+    transcriptFragment: text,
+  };
+}
+
+function judgeContextCandidates({ phraseText, candidates = [], maxMatches = 6 } = {}) {
+  const normalized = normalizeContextCandidates(candidates, { limit: Math.max(maxMatches * 3, 18) });
+  const judged = normalized
+    .map((candidate) => judgeContextCandidate(candidate, phraseText, normalized))
+    .sort((a, b) => {
+      const appliesDelta = Number(b.applies) - Number(a.applies);
+      if (appliesDelta) return appliesDelta;
+      return b.miniConfidence - a.miniConfidence ||
+        b.score - a.score ||
+        b.priority - a.priority ||
+        b.hits.length - a.hits.length ||
+        a.key.localeCompare(b.key);
+    });
+  const selected = judged
+    .filter((candidate) => candidate.applies)
+    .slice(0, maxMatches)
+    .map(candidateToContextMatch);
+  const rejected = judged
+    .filter((candidate) => !candidate.applies)
+    .map((candidate) => ({
+      key: candidate.key,
+      label: candidate.label,
+      hits: candidate.hits,
+      reason: candidate.miniReason,
+      confidence: candidate.miniConfidence,
+    }));
+  return {
+    selected,
+    rejected,
+    judged,
+    rawCandidateCount: normalized.length,
+  };
+}
+
+function buildMiniMeaningSummary({ phraseText, matches = [] } = {}) {
+  const labels = matches.slice(0, 4).map((match) => match.label).filter(Boolean);
+  const clean = cleanText(phraseText, 240);
+  if (!labels.length) {
+    return `Prospect said: ${clean}. No candidate clearly applies; hold unless this is a direct question.`;
+  }
+  return `Prospect said: ${clean}. Applicable context: ${labels.join(", ")}.`;
+}
+
+function isFiller(text) {
+  const clean = cleanText(text, 400);
+  if (!clean) return true;
+  return FILLER_PATTERNS.some((pattern) => pattern.test(clean));
+}
+
+function hasQuestionShape(text) {
+  const clean = cleanText(text, 800);
+  if (/[?]$/.test(clean)) return true;
+  return /^(who|what|why|when|where|how|can|could|should|do|does|did|is|are|am|will|would)\b/i.test(clean);
+}
+
+function hasCompleteThoughtTrigger(text) {
+  const lower = cleanText(text, 2000).toLowerCase();
+  return COMPLETE_THOUGHT_TRIGGERS.some((trigger) => lower.includes(trigger.toLowerCase()));
+}
+
+function classifyThoughtCompleteness(text) {
+  const clean = cleanText(text, 2000);
+  const words = clean ? clean.split(/\s+/).filter(Boolean) : [];
+  if (!clean || isFiller(clean)) {
+    return { complete: false, reason: "filler_or_empty", wordCount: words.length };
+  }
+  if (/\.\.\.$/.test(clean) || /\b(and|or|but|because|from|with|about|for|to)$/i.test(clean)) {
+    return { complete: false, reason: "trailing_fragment", wordCount: words.length };
+  }
+  if (/[.!?]$/.test(clean)) {
+    return { complete: true, reason: "terminal_punctuation", wordCount: words.length };
+  }
+  if (hasQuestionShape(clean) && words.length >= 4) {
+    return { complete: true, reason: "question_shape", wordCount: words.length };
+  }
+  if (words.length >= 7 && hasCompleteThoughtTrigger(clean)) {
+    return { complete: true, reason: "semantic_trigger", wordCount: words.length };
+  }
+  return { complete: false, reason: "needs_more_context", wordCount: words.length };
+}
+
+function shouldComposeFromContext({ text, contextMatches, completeness }) {
+  if (!completeness.complete) {
+    return { shouldCompose: false, reason: completeness.reason };
+  }
+  if (contextMatches.length) {
+    return { shouldCompose: true, reason: "matched_context" };
+  }
+  if (hasQuestionShape(text) && completeness.wordCount >= 5) {
+    return { shouldCompose: true, reason: "question_without_keyword_match" };
+  }
+  return { shouldCompose: false, reason: "complete_but_not_actionable" };
+}
+
+function buildMiniContextFrame({ phraseText, transcript, metadata = {}, pendingCount = 0, candidateMatches = [] }) {
+  const text = normalizeTaxTerms(phraseText);
+  const completeness = classifyThoughtCompleteness(text);
+  const deterministicMatches = normalizeContextCandidates(candidateMatches, { limit: 18 });
+  const rawCandidates = deterministicMatches.length
+    ? deterministicMatches
+    : normalizeContextCandidates(findContextMatches(text, { limit: 18 }), { limit: 18 });
+  const miniJudgement = judgeContextCandidates({
+    phraseText: text,
+    candidates: rawCandidates,
+    maxMatches: 6,
+  });
+  const contextMatches = miniJudgement.selected;
+  const compose = shouldComposeFromContext({ text, contextMatches, completeness });
+  const primary = contextMatches[0] || null;
+  const jurisdiction = classifyJurisdiction(text, contextMatches);
+  const tactics = deriveConversationTactics({
+    phraseText: text,
+    matches: contextMatches,
+    jurisdiction,
+    maxTactics: 4,
+  });
+  return {
+    id: null,
+    at: new Date().toISOString(),
+    type: "mini_context_frame",
+    role: transcript.role,
+    sourceTranscriptId: transcript.id || null,
+    phraseText: text,
+    pendingCount,
+    completeThought: completeness.complete,
+    completenessReason: completeness.reason,
+    actionable: compose.shouldCompose,
+    actionReason: compose.reason,
+    shouldCompose: compose.shouldCompose,
+    jurisdiction,
+    primaryContextKey: primary?.key || null,
+    matches: contextMatches,
+    tactics,
+    deterministicCandidates: rawCandidates,
+    deterministicCandidateCount: rawCandidates.length,
+    miniJudgement: {
+      modelRole: "local_context_heuristic",
+      selectedKeys: contextMatches.map((match) => match.key),
+      selectedTactics: tactics.map((tactic) => tactic.key),
+      rejected: miniJudgement.rejected,
+      candidateCount: miniJudgement.rawCandidateCount,
+      transcriptMeaning: buildMiniMeaningSummary({ phraseText: text, matches: contextMatches }),
+    },
+    metadata: {
+      agentName: cleanText(metadata.agentName || "", 120),
+      firmName: cleanText(metadata.firmName || "Tax Advocate Group", 120),
+      uii: cleanText(metadata.uii || "", 120),
+      agentEmail: cleanText(metadata.agentEmail || "", 160),
+    },
+    instructionsForPrompt: buildFixedComposerInstructions({ role: transcript.role }),
+  };
+}
+
+function classifyJurisdiction(text, matches = findContextMatches(text)) {
+  const keys = new Set(matches.map((match) => match.key));
+  const clean = cleanText(text, 2000);
+  const hasState = keys.has("state_tax");
+  const hasFederal =
+    keys.has("irs_notice") ||
+    keys.has("payroll_tax") ||
+    keys.has("self_employment") ||
+    keys.has("unfiled_returns") ||
+    /\b(IRS|CP\d{3,4}|LT11|Letter 1058|1040|941|940|W-2|1099)\b/i.test(clean);
+  if (hasState && hasFederal) return "mixed";
+  if (hasState) return "state";
+  if (hasFederal || hasCompleteThoughtTrigger(clean)) return "irs";
+  return "ambiguous";
+}
+
+function deriveConversationTactics({ phraseText = "", matches = [], jurisdiction = "ambiguous", maxTactics = 4 } = {}) {
+  const text = cleanText(phraseText, 2400);
+  const keys = new Set((Array.isArray(matches) ? matches : []).map((match) => cleanText(match.key, 120)).filter(Boolean));
+  const matched = TACTIC_RULES
+    .map((rule) => {
+      // Fail-soft: a bad applies() in one tactic must never take down the whole frame.
+      let applies = false;
+      try {
+        applies = Boolean(rule.applies({ text, keys, matches, jurisdiction }));
+      } catch {
+        applies = false;
+      }
+      if (!applies) return null;
+      const contributingKeys = [...keys].filter((key) => {
+        if (rule.key === "calm_urgency") return key === "collection_pressure";
+        if (rule.key === "human_reassurance") return ["emotional_pressure", "money_pressure"].includes(key);
+        if (rule.key === "permission_legitimacy") return key === "legitimacy";
+        if (rule.key === "lower_pressure_objection") return key === "objection";
+        if (rule.key === "confident_value_frame") return key === "fees_close";
+        if (rule.key === "expert_specificity") return ["payroll_tax", "self_employment", "audit_adjustment", "spouse_identity"].includes(key);
+        if (rule.key === "shame_reduction") return ["unfiled_returns", "spouse_identity"].includes(key);
+        if (rule.key === "state_to_irs_screen") return key === "state_tax";
+        // Text-triggered tactics fire on the raw phrasing, not on a detected context
+        // key — so they have no contributing context keys (keeps derivedFrom honest and
+        // confidence from being inflated by unrelated tax keys that happen to co-occur).
+        if ([
+          "anchor_to_inquiry",
+          "hostility_resilience",
+          "loop_in_decision_maker",
+          "dissolve_stall",
+          "already_represented",
+          "earn_trust_with_proof",
+          "channel_relief",
+        ].includes(rule.key)) return false;
+        return true;
+      });
+      return {
+        key: rule.key,
+        label: rule.label,
+        family: rule.family,
+        priority: rule.priority,
+        confidence: Number(Math.min(0.95, 0.6 + (contributingKeys.length * 0.08)).toFixed(2)),
+        derivedFrom: contributingKeys.slice(0, 6),
+        guidance: rule.guidance,
+        humor: rule.humor,
+      };
+    })
+    .filter(Boolean)
+    .sort((a, b) => b.priority - a.priority || b.confidence - a.confidence || a.key.localeCompare(b.key))
+    .slice(0, Math.max(1, Number(maxTactics) || 4));
+
+  if (matched.length) return matched;
+  return [{
+    key: "clarify_without_overfitting",
+    label: "Clarify without overfitting",
+    family: "sales_psychology",
+    priority: 20,
+    confidence: 0.55,
+    derivedFrom: [],
+    guidance:
+      "When the meaning is not clear, ask one plain clarifying question. Do not force a tax program, joke, or pitch angle that the prospect has not earned yet.",
+    humor:
+      "No humor until the prospect's issue and emotional state are clear.",
+  }];
+}
+
+function buildFixedComposerInstructions({ role = "prospect" } = {}) {
+  if (role !== "prospect") {
+    return [
+      "This is agent-side feedback. Do not write a prospect-facing answer unless the agent has asked for wording.",
+      "Give one concise adjustment that keeps the agent human, calm, and moving toward the next phase.",
+    ];
+  }
+  return [
+    // Output shape
+    "Output only the exact words the agent should say next — spoken, not written; no labels or meta. Or WAIT if told not to compose.",
+    "One or two short sentences, usually under 35 words. Anchor on what the prospect just said, then do ONE thing: ask a concrete discovery question, or move toward fact review / representation.",
+    // Persona & status
+    "You are an expert tax-resolution consultant meeting the prospect at their level. Carry quiet authority — they reached out because they don't know the way out and you do.",
+    "No sycophancy or flattery ('great question', 'you're so right'). No asking permission to help ('would it be okay if'). You're already engaged because they submitted the inquiry — proceed with calm assumption.",
+    "Do not apologize for calling and do not flinch at a hostile tone; a sharp tone is usually fear or embarrassment, not a verdict. Make one clear attempt to deliver value, then honor a genuine opt-out.",
+    // Psychology
+    "Diagnose before prescribing: never name a program before you know notice type, year, balance, income type, and ability to pay. One question at a time.",
+    "Reflect their situation back precisely (not parroting) so they feel understood, then advance. Let real stakes (levy, lien, penalties) speak without manufacturing fear or pressure.",
+    "Sound human before salesy whenever there's stress, money, family pressure, shame, fear, or confusion. Use tax comprehension to sound credible, then translate the term into plain consequence.",
+    // Humor
+    "Humor: light, dry, self-aware, and rare — only to disarm tension, never sarcasm, never at the prospect's expense or about their debt/fear. Drop it entirely if they're distressed or angry.",
+    // Defer to situational tactics
+    "Apply the conversation-tactic guidance below for the specific psychology, warmth, and humor boundary that fits this exact moment.",
+    // Compliance guardrails
+    "No DIY tax advice, no program promises before qualification (OIC/CNC/IA/abatement), no guarantees, no savings claims, no timelines, no holds, no legal conclusions.",
+    "Default tax-ish issues to IRS unless a clear state agency is named; if state appears, also screen for an IRS/federal issue.",
+    "Use only the supplied firm and agent names. Do not invent people, firms, facts, balances, or deadlines — when unsure, ask.",
+  ];
+}
+
+function buildSonnetPromptPayload({ contextFrame, metadata = {} }) {
+  const agentName = cleanText(metadata.agentName || contextFrame?.metadata?.agentName || "the agent", 120);
+  const firmName = cleanText(metadata.firmName || contextFrame?.metadata?.firmName || "Tax Advocate Group", 120);
+  const matches = Array.isArray(contextFrame?.matches) ? contextFrame.matches : [];
+  const tactics = Array.isArray(contextFrame?.tactics) ? contextFrame.tactics : [];
+  // SYSTEM = the STABLE prefix: role + standing directives. Identical on every call,
+  // so the composer marks it cache_control:ephemeral (Anthropic prompt caching). The
+  // big instruction block lives here ONCE instead of bleeding through every user turn.
+  // Keep zero per-call data in here or the cache prefix won't match.
+  const system = [
+    "You are a live tax-resolution sales dialog composer for phone calls.",
+    "You receive normalized prospect text plus the tax/sales context and conversation tactics selected for THIS moment.",
+    "Your job is not transcription and not legal advice — produce one line the agent can say right now, or WAIT if told not to compose.",
+    "Ground every line in the RAW prospect text in the user message. Apply only the tactics listed for this turn; ignore any standing directive that doesn't fit what was actually said. Never restate instructions back.",
+    "",
+    "Standing directives:",
+    // The frame precomputes instructionsForPrompt (the same static set); use it so
+    // there's one source of truth, and keep it in this cached prefix only.
+    ...((Array.isArray(contextFrame?.instructionsForPrompt) && contextFrame.instructionsForPrompt.length
+      ? contextFrame.instructionsForPrompt
+      : buildFixedComposerInstructions()).map((line) => `- ${line}`)),
+  ].join("\n");
+
+  // USER = the DYNAMIC per-turn delta only: names, jurisdiction, raw transcript, the
+  // context + tactics chosen for this moment. No standing instructions here.
+  const user = [
+    `Agent name: ${agentName}`,
+    `Firm name: ${firmName}`,
+    `Jurisdiction bucket: ${contextFrame?.jurisdiction || "ambiguous"}`,
+    "",
+    "Prospect text:",
+    contextFrame?.phraseText || "",
+    "",
+    "Matched context:",
+    matches.length
+      ? matches.map((match) => `- ${match.label}: ${match.guidance} (hits: ${match.hits.join(", ")})`).join("\n")
+      : "- No strong keyword match. Keep it to one clarifying discovery question.",
+    "",
+    "Conversation tactic:",
+    tactics.length
+      ? tactics.map((tactic) => [
+        `- ${tactic.label}: ${tactic.guidance}`,
+        tactic.humor ? `  Humor boundary: ${tactic.humor}` : "",
+        tactic.derivedFrom?.length ? `  Derived from: ${tactic.derivedFrom.join(", ")}` : "",
+      ].filter(Boolean).join("\n")).join("\n")
+      : "- Use direct discovery. No humor unless the prospect is calm and the issue is clear.",
+  ];
+  return {
+    provider: "anthropic",
+    modelRole: "sonnet_dialog_composer",
+    system,
+    systemCacheable: true,
+    user: user.join("\n"),
+    maxOutputWords: 35,
+    shouldCompose: Boolean(contextFrame?.shouldCompose),
+  };
+}
+
+function createSonnetDialogDraft({ contextFrame, metadata = {} }) {
+  const promptPayload = buildSonnetPromptPayload({ contextFrame, metadata });
+  if (!contextFrame?.shouldCompose) {
+    return {
+      status: "wait",
+      label: "Waiting for a coach-worthy thought",
+      say: "",
+      guidance: contextFrame?.actionReason || "No complete/actionable prospect thought yet.",
+      promptPayload,
+    };
+  }
+
+  const matchByKey = (key) => contextFrame.matches.find((match) => match.key === key) || null;
+  const primary =
+    matchByKey("collection_pressure") ||
+    matchByKey("emotional_pressure") ||
+    matchByKey("money_pressure") ||
+    contextFrame.matches[0] ||
+    null;
+  const label = primary?.label || "Discovery";
+  const phrase = contextFrame.phraseText;
+  const jurisdiction = contextFrame.jurisdiction;
+  const primaryTactic = Array.isArray(contextFrame.tactics) ? contextFrame.tactics[0] : null;
+  let say;
+
+  if (primary?.key === "collection_pressure") {
+    say = "That sounds urgent, especially if it may affect your money directly. Is anything being levied or garnished right now, or is this still at the warning stage?";
+  } else if (primary?.key === "state_tax" && jurisdiction === "state") {
+    say = "State issues can move differently than IRS cases, so I want to separate the two. Is this only with the state, or do you also have any IRS balance or unfiled years?";
+  } else if (primary?.key === "unfiled_returns") {
+    say = "That can make the balance look worse than it really is. What is the last year you remember filing, and was the income W-2, 1099, or business income?";
+  } else if (primary?.key === "payroll_tax") {
+    say = "Payroll cases have to be handled carefully because business and personal exposure can split. Are these unpaid 941 quarters, and is the business still operating?";
+  } else if (primary?.key === "self_employment") {
+    say = "With 1099 income, the key is figuring out the years, income, and whether expenses were counted. What year is this from?";
+  } else if (primary?.key === "emotional_pressure" || primary?.key === "money_pressure") {
+    say = "I can hear why that feels heavy. Before we guess at a solution, what notice, year, and amount are they showing you?";
+  } else if (primary?.key === "legitimacy") {
+    say = `This is ${metadata.agentName || "your representative"} with ${metadata.firmName || "Tax Advocate Group"}, and I want to make sure I am looking at the right tax issue. Did you recently get a notice or request help online?`;
+  } else if (primary?.key === "fees_close") {
+    say = "The fee depends on the scope, so I do not want to guess before we know the facts. What years, notices, and balances are we actually dealing with?";
+  } else if (primary?.key === "representation") {
+    say = "Representation is how we get the facts and communicate properly; it is not a guess at the final answer. What notice or balance are we starting from?";
+  } else {
+    say = jurisdiction === "ambiguous"
+      ? "Good question. Is this coming from the IRS or the state, and what year or notice are you looking at?"
+      : "Before we talk solutions, let's get the facts straight. What year, balance, and notice are you looking at?";
+  }
+
+  return {
+    status: "ready",
+    label,
+    say,
+    guidance: [
+      primary?.guidance || "Ask one clarifying discovery question.",
+      primaryTactic?.guidance || "",
+    ].filter(Boolean).join(" "),
+    tactic: primaryTactic || null,
+    promptPayload,
+    sourceText: phrase,
+  };
+}
+
+function createSanitizedLiveCoachPipeline({ metadata = {} } = {}) {
+  const state = {
+    rejected: false,
+    transcriptCount: 0,
+    pendingByRole: {
+      prospect: [],
+      agent: [],
+      system: [],
+      unknown: [],
+    },
+    sentenceBankByRole: {
+      prospect: [],
+      agent: [],
+      system: [],
+      unknown: [],
+    },
+  };
+
+  function handleTranscript(input = {}) {
+    if (state.rejected) {
+      return {
+        action: "ignore_rejected_session",
+        transcript: null,
+        context: null,
+        dialog: null,
+        state: snapshot(),
+      };
+    }
+
+    const transcript = normalizeSttTranscript(input);
+    if (!transcript.text) {
+      return { action: "ignore_empty", transcript: null, context: null, dialog: null, state: snapshot() };
+    }
+
+    state.transcriptCount += 1;
+    const screener = analyzeCallScreener(transcript.text);
+    const voicemail = analyzeVoicemail(transcript.text);
+    if (state.transcriptCount === 1 && voicemail.isVoicemail && !screener.isScreener) {
+      state.rejected = true;
+      const dialog = {
+        status: "rejected",
+        label: "Call rejected for voicemail match",
+        say: "",
+        guidance: `Deterministic voicemail phrase matched: ${voicemail.match}`,
+      };
+      return {
+        action: "reject_voicemail",
+        transcript,
+        context: null,
+        dialog,
+        state: snapshot(),
+      };
+    }
+
+    if (screener.isScreener) {
+      state.sentenceBankByRole.system.push(transcript.text);
+      return {
+        action: "hold_call_screener",
+        transcript: { ...transcript, nonProspectReason: `call_screener:${screener.match}` },
+        context: null,
+        dialog: null,
+        state: snapshot(),
+      };
+    }
+
+    if (transcript.role !== "prospect") {
+      state.sentenceBankByRole[transcript.role] = state.sentenceBankByRole[transcript.role] || [];
+      state.sentenceBankByRole[transcript.role].push(transcript.text);
+      return {
+        action: "store_non_prospect",
+        transcript,
+        context: null,
+        dialog: null,
+        state: snapshot(),
+      };
+    }
+
+    const pending = state.pendingByRole.prospect;
+    const phraseText = normalizeTaxTerms([...pending, transcript.text].join(" "));
+    const context = buildMiniContextFrame({
+      phraseText,
+      transcript,
+      metadata,
+      pendingCount: pending.length,
+      candidateMatches: input.candidateMatches || input.contextCandidates || [],
+    });
+
+    if (!context.shouldCompose) {
+      pending.push(transcript.text);
+      return {
+        action: "hold_for_more_context",
+        transcript,
+        context: null,
+        dialog: null,
+        hold: {
+          reason: context.actionReason,
+          completeThought: context.completeThought,
+          pendingText: phraseText,
+        },
+        state: snapshot(),
+      };
+    }
+
+    state.pendingByRole.prospect = [];
+    state.sentenceBankByRole.prospect.push(phraseText);
+    const dialog = createSonnetDialogDraft({ contextFrame: context, metadata });
+    return {
+      action: "compose_dialog",
+      transcript,
+      context,
+      dialog,
+      state: snapshot(),
+    };
+  }
+
+  function snapshot() {
+    return {
+      rejected: state.rejected,
+      transcriptCount: state.transcriptCount,
+      pendingByRole: {
+        prospect: state.pendingByRole.prospect.slice(),
+        agent: state.pendingByRole.agent.slice(),
+        system: state.pendingByRole.system.slice(),
+        unknown: state.pendingByRole.unknown.slice(),
+      },
+      sentenceCounts: Object.fromEntries(
+        Object.entries(state.sentenceBankByRole).map(([role, rows]) => [role, rows.length]),
+      ),
+    };
+  }
+
+  return {
+    handleTranscript,
+    snapshot,
+  };
+}
+
+module.exports = {
+  CALL_SCREENER_MATCHES,
+  CONTEXT_RULES,
+  VOICEMAIL_MATCHES,
+  analyzeCallScreener,
+  analyzeVoicemail,
+  buildFixedComposerInstructions,
+  buildMiniContextFrame,
+  buildSonnetPromptPayload,
+  classifyJurisdiction,
+  classifyThoughtCompleteness,
+  cleanText,
+  createSanitizedLiveCoachPipeline,
+  createSonnetDialogDraft,
+  deriveConversationTactics,
+  findContextMatches,
+  normalizeContextCandidates,
+  normalizeSttTranscript,
+  normalizeTaxTerms,
+  shouldComposeFromContext,
+};

@@ -10,6 +10,13 @@ const REQUIRED_PORTS = [
   { port: 6101, name: "ringcentral-cx" },
 ];
 
+if (
+  process.argv.includes("--ai-bus") ||
+  ["1", "true", "yes", "on"].includes(String(process.env.CHECK_AI_BUS_PORT || "").toLowerCase())
+) {
+  REQUIRED_PORTS.push({ port: 7000, name: "ai-bus" });
+}
+
 function run(command, args = []) {
   return execFileSync(command, args, {
     encoding: "utf8",

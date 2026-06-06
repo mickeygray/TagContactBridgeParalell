@@ -475,7 +475,23 @@ async function main() {
   process.on("SIGTERM", shutdown);
 }
 
-main().catch((error) => {
-  console.error(error.stack || error.message);
-  process.exit(1);
-});
+if (require.main === module) {
+  main().catch((error) => {
+    console.error(error.stack || error.message);
+    process.exit(1);
+  });
+}
+
+module.exports = {
+  decodeEvent,
+  ensureDir,
+  loadProto,
+  pcm16FromPayload,
+  requireBasicAuth,
+  safeString,
+  sanitizeMetadata,
+  stamp,
+  wavHeader,
+  writeJsonLine,
+  writeWav,
+};

@@ -53,6 +53,9 @@ const PERMISSIONS_CATALOG = Object.freeze({
   "cases.write": "Edit Logics case profiles, create activities",
   "cases.dnc": "Mark cases DNC / suspend cadence",
 
+  // Live coach
+  "coach.view": "View live AI coach transcript and dialog for own calls",
+
   // ── Metrics + reporting ──────────────────────────────────────
   "metrics.read": "View dashboards + reports",
   "metrics.export": "Export reports as CSV / email",
@@ -95,6 +98,7 @@ const ROLE_DEFAULT_PERMISSIONS = Object.freeze({
     "cases.read",
     "cases.write",
     "cases.dnc",
+    "coach.view",
     "metrics.read",
     "metrics.export",
     "recordings.archive",
@@ -114,6 +118,7 @@ const ROLE_DEFAULT_PERMISSIONS = Object.freeze({
     "calls.read-self",
     "cases.read",
     "cases.write",
+    "coach.view",
     "metrics.read",
     "inbox.read",
     "inbox.action",

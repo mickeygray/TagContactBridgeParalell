@@ -49,6 +49,7 @@ const PORTS = Object.freeze({
   inboundGateway: envInt("INBOUND_GATEWAY_PORT", 4001),
   outboundGateway: envInt("OUTBOUND_GATEWAY_PORT", 4002),
   ringcentralCx: envInt("RINGCENTRAL_CX_PORT", 6101),
+  aiBus: envInt("AI_BUS_PORT", 7000),
   brandSshGateway: envInt("BRAND_SSH_PORT", 3333),
 });
 
@@ -58,6 +59,7 @@ const SERVICE_NAMES = Object.freeze({
   inboundGateway: "inbound-gateway",
   outboundGateway: "outbound-gateway",
   ringcentralCx: "ringcentral-cx",
+  aiBus: "ai-bus",
   brandSshGateway: "brand-ssh-gateway",
 });
 
@@ -826,6 +828,10 @@ function getSharedConfig(overrides = {}) {
       maxMessages: Math.max(
         1,
         envInt("NCOA_MAILBOX_MAX_MESSAGES", Number(overrides.ncoaMailboxMaxMessages) || 10),
+      ),
+      maxMessagePages: Math.max(
+        1,
+        envInt("NCOA_MAILBOX_MAX_MESSAGE_PAGES", Number(overrides.ncoaMailboxMaxMessagePages) || 10),
       ),
       activeWeekdays: parseOriginList(
         overrides.ncoaMailboxActiveWeekdays ||

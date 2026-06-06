@@ -196,6 +196,50 @@ RestartSec=5
 WantedBy=multi-user.target
 EOF
 
+cat >/etc/systemd/system/parallel-ai-bus.service <<EOF
+[Unit]
+Description=Parallel AI bus (7000)
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=${APP_USER}
+Group=${APP_USER}
+WorkingDirectory=${APP_DIR}
+Environment=NODE_ENV=production
+ExecStart=/usr/bin/node apps/ai-bus/src/server.js
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+cat >/etc/systemd/system/parallel-barge.service <<EOF
+[Unit]
+Description=Parallel barge / voicemail-drop service (7335)
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=${APP_USER}
+Group=${APP_USER}
+WorkingDirectory=${APP_DIR}
+Environment=NODE_ENV=production
+# Barger monitors + fallback wav are data-driven via .env:
+#   EX_BARGE_MONITORS=987,1101,1102,1103,1104,1105,1106   (pre-warm all monitors at boot)
+#   EX_BARGE_WAV=runtime/audio/drop-message.raw           (fallback voicemail)
+# The registration health loop self-heals any monitor whose SIP socket drops.
+ExecStart=/usr/bin/node scripts/ex-barge-button.js
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
 cat >/etc/systemd/system/parallel-ngrok.service <<EOF
 [Unit]
 Description=Parallel ngrok tunnel
@@ -217,7 +261,7 @@ WantedBy=multi-user.target
 EOF
 
 systemctl daemon-reload
-systemctl enable parallel-control-plane parallel-inbound-gateway parallel-outbound-gateway parallel-ringcentral-cx
+systemctl enable parallel-control-plane parallel-inbound-gateway parallel-outbound-gateway parallel-ringcentral-cx parallel-ai-bus parallel-barge
 systemctl disable parallel-ngrok >/dev/null 2>&1 || true
 ok "App services enabled; ngrok service is installed but disabled/manual"
 

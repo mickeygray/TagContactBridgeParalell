@@ -49,6 +49,7 @@ import {
   useCxCreateAppointment,
   useCxDialAny,
   useCxDisposition,
+  useCxVoicemailDrop,
   useCxEmail,
   useCxInterviewSnapshot,
   useCxLeadCandidates,
@@ -78,6 +79,14 @@ import type { CommLogEntry } from "@/lib/api/queries/cx";
 import { KNOWN_DOMAINS, useDomainStore } from "@/lib/domain/domainStore";
 import { useSession } from "@/lib/auth/useSession";
 import { cn } from "@/lib/utils/cn";
+import { LiveCoachPanel } from "./LiveCoachPanel";
+
+const LIVE_COACH_PANEL_ENABLED = ["1", "true", "yes", "on"].includes(
+  String(import.meta.env.VITE_LIVE_COACH_PANEL_ENABLED || "").trim().toLowerCase(),
+);
+const CX_VOICEMAIL_BUTTON_ENABLED = !["0", "false", "no", "off", "disabled"].includes(
+  String(import.meta.env.VITE_CX_VOICEMAIL_BUTTON_ENABLED || "true").trim().toLowerCase(),
+);
 
 type ContactContext = {
   caseId?: string | null;
@@ -3290,9 +3299,14 @@ export function CXWorkspace() {
   const [breakResumeRemaining, setBreakResumeRemaining] = React.useState<number | null>(null);
   const [breakAutoLogoutRunning, setBreakAutoLogoutRunning] = React.useState(false);
   const [suppressedQueueItems, setSuppressedQueueItems] = React.useState<Record<string, number>>({});
+  const [coachReleaseSignal, setCoachReleaseSignal] =
+    React.useState<{ key: string; reason: string } | null>(null);
+  const [voicemailDropPending, setVoicemailDropPending] = React.useState(false);
   const autoServeInFlightRef = React.useRef(false);
   const breakAutoLogoutFiredRef = React.useRef(false);
   const lastTerminalOutcomeWorkflowRef = React.useRef<string | null>(null);
+  const voicemailArmKeyRef = React.useRef<string | null>(null);
+  const voicemailArmInFlightRef = React.useRef<string | null>(null);
 
   function clearServedQueueSelection() {
     setServingQueueKey(null);
@@ -3302,6 +3316,53 @@ export function CXWorkspace() {
     setServedQueueTicketId(null);
     setServedQueueContact(null);
     setServedQueueStartedAt(null);
+  }
+
+  function releaseLiveCoachForCurrentCall(reason: string) {
+    setCoachReleaseSignal({
+      key: `${Date.now()}-${reason}`,
+      reason,
+    });
+  }
+
+  async function runHeadlessVoicemailDrop() {
+    // Server-side serving: the control-plane resolves THIS agent's barge monitor,
+    // dialable target extension, and recorded voicemail from their profile, then
+    // drives the headless barge. We just confirm playback + release here.
+    const response = (await voicemailDrop.mutateAsync({ action: "play" })) as
+      | { result?: Record<string, unknown> }
+      | undefined;
+    const result = (response?.result ?? response) as Record<string, unknown> | undefined;
+    if (!result?.played || !result?.released) {
+      throw new Error("Headless monitor did not confirm voicemail playback and release");
+    }
+    voicemailArmKeyRef.current = null;
+    return result;
+  }
+
+  function releaseArmedVoicemailDrop(reason: string) {
+    if (!voicemailArmKeyRef.current && !voicemailArmInFlightRef.current) return;
+    voicemailArmKeyRef.current = null;
+    voicemailArmInFlightRef.current = null;
+    void voicemailDrop.mutateAsync({ action: "release", reason }).catch(() => undefined);
+  }
+
+  function beginVoicemailDrop() {
+    setVoicemailDropPending(true);
+    releaseLiveCoachForCurrentCall("voicemail-drop-started");
+    toast("Voicemail drop started", {
+      description: "Keeping this call open until the headless monitor finishes the recording.",
+    });
+    void runHeadlessVoicemailDrop()
+      .then(() => {
+        submitQueueDisposition("did-not-answer", "Voicemail", { releaseVoicemailArm: false });
+      })
+      .catch((error) => {
+        setVoicemailDropPending(false);
+        toast.error("Voicemail drop failed", {
+          description: error instanceof Error ? error.message : "Headless monitor did not finish the recording.",
+        });
+      });
   }
 
   function clearCasePanelForNextQueueLead() {
@@ -3462,6 +3523,9 @@ export function CXWorkspace() {
     Boolean(rawCurrentCallSessionId) && rawCurrentCallSessionId === suppressedCallSessionId;
   const currentCall = currentCallIsSuppressed ? null : rawCurrentCall;
   const currentCallPhone = currentCall?.phone || "";
+  const currentCallUii = currentCallIsSuppressed
+    ? ""
+    : readString(asRecord(rawCurrentCallSnapshot), "uii", "rcxUii", "callUii");
 
   // detail/selectedPhone/selectedEmail/templateContext + the auto-
   // hydrate effects all need clientDetail.data, which comes from a
@@ -3681,9 +3745,49 @@ export function CXWorkspace() {
   // ── Case-scoped mutations (bound to the case's resolved domain) ──
   const assignCaseToMe = useCxAssignCaseToMe(caseDomain);
   const disposition = useCxDisposition(caseDomain);
+  const voicemailDrop = useCxVoicemailDrop(caseDomain);
   const createAppointment = useCxCreateAppointment(caseDomain);
   const releaseAppointment = useCxReleaseAppointment(caseDomain);
   const callAppointmentNow = useCxCallAppointmentNowAny();
+
+  React.useEffect(() => {
+    if (!CX_VOICEMAIL_BUTTON_ENABLED) return;
+    const activeQueueKey = String(servedQueueTicketId || servedQueueActionKey || "").trim();
+    if (!currentCallSessionId || !activeQueueKey || !currentExtensionId) return;
+    const armKey = `${caseDomain}:${currentCallSessionId}:${activeQueueKey}`;
+    if (voicemailArmKeyRef.current === armKey || voicemailArmInFlightRef.current === armKey) return;
+    voicemailArmInFlightRef.current = armKey;
+    void voicemailDrop
+      .mutateAsync({ action: "arm" })
+      .then(() => {
+        if (voicemailArmInFlightRef.current === armKey) {
+          voicemailArmKeyRef.current = armKey;
+        }
+      })
+      .catch(() => {
+        if (voicemailArmInFlightRef.current === armKey) {
+          voicemailArmKeyRef.current = null;
+        }
+      })
+      .finally(() => {
+        if (voicemailArmInFlightRef.current === armKey) {
+          voicemailArmInFlightRef.current = null;
+        }
+      });
+  }, [
+    caseDomain,
+    currentCallSessionId,
+    currentExtensionId,
+    servedQueueActionKey,
+    servedQueueTicketId,
+    voicemailDrop,
+  ]);
+
+  React.useEffect(() => {
+    if (currentCallSessionId) return;
+    releaseArmedVoicemailDrop("call-session-ended");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentCallSessionId]);
   const updateCase = useCxLogicsUpdateCase(caseDomain);
   // Case detail (calls + texts) — also case-scoped.
   const clientDetail = useClientDetail(caseDomain, resolvedCaseId);
@@ -3782,7 +3886,6 @@ export function CXWorkspace() {
     // outbound call for agents.
     return null;
   }, []);
-
   // Repopulate the form when a new lookup resolves, preserving any fields
   // the operator has already touched since the last populate. We key the
   // effect on a stable signature of the match so typing into a non-dirty
@@ -4692,8 +4795,18 @@ export function CXWorkspace() {
     (resolvedCaseId && Number.isFinite(Number(resolvedCaseId)) ? Number(resolvedCaseId) : null);
   const textCaseId = resolvedCaseId || selected?.caseId || null;
 
-  function submitQueueDisposition(dispositionKey: "answered" | "did-not-answer", label: string) {
+  function submitQueueDisposition(
+    dispositionKey: "answered" | "did-not-answer",
+    label: string,
+    options: { coachReleaseReason?: string; releaseVoicemailArm?: boolean } = {},
+  ) {
     if (dispositionCaseId == null) return;
+    if (options.coachReleaseReason) {
+      releaseLiveCoachForCurrentCall(options.coachReleaseReason);
+    }
+    if (options.releaseVoicemailArm !== false) {
+      releaseArmedVoicemailDrop(`queue-disposition-${dispositionKey}`);
+    }
     const nextQueueLead = pickNextCallHandoffLead();
     const nextDial = buildNextCallHandoffPayload(nextQueueLead);
     const hasImmediateNextHandoff = nextQueueLead != null && nextDial != null;
@@ -4731,6 +4844,7 @@ export function CXWorkspace() {
       }),
     )
       .then((result) => {
+        setVoicemailDropPending(false);
         const nextDialAccepted = isCxNextDialAccepted(result);
         const nextDialQueuedButUnconfirmed = isCxNextDialQueuedButUnconfirmed(result);
         releaseQueueAfterSuccess(result, {
@@ -4762,6 +4876,7 @@ export function CXWorkspace() {
         }
       })
       .catch(() => {
+        setVoicemailDropPending(false);
         if (previousLeadSnapshot) {
           cancelAutoServe();
           setSelected(previousLeadSnapshot.selected);
@@ -5404,6 +5519,19 @@ export function CXWorkspace() {
                       No answer
                     </Button>
                   ) : null}
+                  {CX_VOICEMAIL_BUTTON_ENABLED && hasServedQueueTarget && dispositionCaseId != null ? (
+                    <Button
+                      size="sm"
+                      variant="secondary"
+                      className="border-violet-500/40 bg-violet-600 text-white hover:bg-violet-700"
+                      disabled={voicemailDropPending || disposition.isPending}
+                      onClick={beginVoicemailDrop}
+                      title="Stop live coach input and keep this call open while the headless monitor drops the voicemail. The queue advances after the headless monitor releases."
+                    >
+                      <MessageCircleMore className="h-3.5 w-3.5" />
+                      {voicemailDropPending ? "Dropping VM" : "Voicemail"}
+                    </Button>
+                  ) : null}
                 </div>
               </div>
               <div className="text-[11px] text-muted-foreground">{formSubtitle}</div>
@@ -5712,6 +5840,27 @@ export function CXWorkspace() {
         {/* ── RIGHT: compose + compact agent history ───────────────────── */}
         <aside className="flex-shrink-0 lg:w-[340px]">
           <div className="lg:sticky lg:top-20 space-y-4">
+            {LIVE_COACH_PANEL_ENABLED ? (
+              <LiveCoachPanel
+                agentEmail={data?.agent?.email || user?.email || null}
+                agentExtension={currentExtensionId}
+                agentName={data?.agent?.name || user?.name || null}
+                currentUii={currentCallUii}
+                currentCallSessionId={currentCallSessionId}
+                queueItemId={servedQueueTicketId}
+                caseId={resolvedCaseId || servedQueueCaseId || null}
+                contactName={
+                  `${form.firstName} ${form.lastName}`.trim()
+                  || selected?.name
+                  || servedQueueContact?.name
+                  || currentCall?.name
+                  || null
+                }
+                releaseKey={coachReleaseSignal?.key || null}
+                releaseReason={coachReleaseSignal?.reason || null}
+              />
+            ) : null}
+
             <AppointmentList
               appointments={appointmentItems}
               onCallNow={handleCallAppointmentNow}

@@ -615,6 +615,7 @@ function buildCxCommandHook(pathBuilder: (domain: string) => string) {
 
 export const useCxSetStatus = buildCxCommandHook((domain) => `/api/commands/cx/${domain}/set-status`);
 export const useCxDisposition = buildCxCommandHook((domain) => `/api/commands/cx/${domain}/disposition`);
+export const useCxVoicemailDrop = buildCxCommandHook((domain) => `/api/commands/cx/${domain}/voicemail-drop`);
 export const useCxCreateTask = buildCxCommandHook((domain) => `/api/commands/cx/${domain}/create-task`);
 export const useCxCreateReminder = buildCxCommandHook((domain) => `/api/commands/cx/${domain}/create-reminder`);
 export const useCxText = buildCxCommandHook((domain) => `/api/commands/cx/${domain}/text`);
