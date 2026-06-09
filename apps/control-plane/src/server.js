@@ -98,8 +98,6 @@ const {
   extractAttributionCandidates,
   loadMailerConfigCache,
   processControlPlaneEventBatch,
-  getPacingConfig,
-  isOperatingNow,
   runHourlySweep,
   runDueCxAppointments,
   runCxRecordingHourly,
@@ -487,31 +485,6 @@ async function startHourlySweepWorker({ config, runtime, workerState, spendSyncR
       return;
     }
 
-    let scheduledPhaseSkip = null;
-    if (runScheduledPhase) {
-      try {
-        const pacingConfig = await getPacingConfig();
-        if (!isOperatingNow(pacingConfig, workerState.lastStartedAt)) {
-          scheduledPhaseSkip = {
-            reason: "outside-business-hours",
-            timezone: pacingConfig.businessHoursTimezone || "America/Los_Angeles",
-            businessHoursStart: pacingConfig.businessHoursStart,
-            businessHoursEnd: pacingConfig.businessHoursEnd,
-            businessDays: pacingConfig.businessDays,
-          };
-          workerState.lastScheduledHour = currentHourKey;
-          runScheduledPhase = false;
-        }
-      } catch (error) {
-        scheduledPhaseSkip = {
-          reason: "business-hours-check-failed",
-          error: error.message,
-        };
-        workerState.lastScheduledHour = currentHourKey;
-        runScheduledPhase = false;
-      }
-    }
-
     try {
       // Claim the hour before running Phase A. If a dependency fails
       // mid-sweep, we still do not retry external hourly work every
@@ -519,9 +492,11 @@ async function startHourlySweepWorker({ config, runtime, workerState, spendSyncR
       if (runScheduledPhase) {
         workerState.lastScheduledHour = currentHourKey;
       }
-      if (scheduledPhaseSkip) {
-        runtime.logger.info("control-plane.hourly.scheduled_phase_skipped", scheduledPhaseSkip);
-      }
+      // Backend hygiene is allowed to run outside CX/SMS operating
+      // hours. Phone and text actions are gated at their own command
+      // boundaries; applying that gate here prevents non-contact work
+      // like DNC checkpoints, NCOA ingest, recording/archive hygiene,
+      // and activity review from firing in their intended windows.
       const result = await runHourlySweep({
         workerName: `${config.serviceName}-hourly-sweep`,
         lane: "hourly",
@@ -570,9 +545,6 @@ async function startHourlySweepWorker({ config, runtime, workerState, spendSyncR
           config.hourlySweep?.callLogHygieneArchiveRecordings !== false,
         logger: runtime.logger,
       });
-      if (scheduledPhaseSkip) {
-        result.scheduledPhaseSkip = scheduledPhaseSkip;
-      }
       if (
         runScheduledPhase &&
         config.hourlySweep?.spendSyncEnabled !== false &&
