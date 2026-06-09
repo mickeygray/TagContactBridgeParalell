@@ -98,6 +98,16 @@ if (( SECONDS >= deadline )); then
   exit 1
 fi
 
+if systemctl list-unit-files --type=service | grep -q '^parallel-tag-webhook-ngrok.service'; then
+  step "Start tag-webhook ngrok"
+  systemctl restart parallel-live-coach-grpc parallel-tag-webhook-front parallel-tag-webhook-ngrok
+  sleep 3
+  systemctl is-active --quiet parallel-live-coach-grpc
+  systemctl is-active --quiet parallel-tag-webhook-front
+  systemctl is-active --quiet parallel-tag-webhook-ngrok
+  ok "live coach gRPC/front/tag-webhook ngrok services are active"
+fi
+
 step "Confirm public domain reaches this box"
 public_id="$(node_json_field "https://${DOMAIN}/api/client/runtime" "runtime.runtimeId")"
 if [[ "${public_id}" != "${local_id}" ]]; then
@@ -114,6 +124,9 @@ ok "PARALLEL_RC_SUSPENDED=false"
 
 step "Restart RC-touching services"
 systemctl restart parallel-control-plane parallel-ringcentral-cx parallel-outbound-gateway parallel-inbound-gateway parallel-ai-bus parallel-barge
+if systemctl is-active --quiet parallel-live-coach-grpc; then systemctl restart parallel-live-coach-grpc; fi
+if systemctl is-active --quiet parallel-tag-webhook-front; then systemctl restart parallel-tag-webhook-front; fi
+if systemctl is-active --quiet parallel-tag-webhook-ngrok; then systemctl restart parallel-tag-webhook-ngrok; fi
 sleep 5
 systemctl is-active --quiet parallel-control-plane
 systemctl is-active --quiet parallel-ringcentral-cx

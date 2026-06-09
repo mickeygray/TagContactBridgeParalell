@@ -1902,6 +1902,9 @@ async function superviseActiveCall({
   partyMode = "session",
   callPickMode = "newest",
   callStartAfterMs = 0,
+  // Supervise audio mode: Listen (silent monitor) | Whisper (agent only) | Barge (heard by all).
+  // Defaults from env so main()'s --mode flag flows here without rewiring the call sites.
+  mode = process.env.EX_LIVE_MONITOR_SUPERVISE_MODE || "Listen",
 }) {
   const active = await rcRequest(
     lookupToken,
@@ -1983,7 +1986,7 @@ async function superviseActiveCall({
   }
 
   const body = {
-    mode: "Listen",
+    mode,
     supervisorDeviceId: String(supervisorDeviceId),
     agentExtensionId: String(agentExtensionId),
   };
@@ -1995,7 +1998,7 @@ async function superviseActiveCall({
     const agentExtensionRejected = /agentExtensionId|CMN-10[12]/i.test(String(error?.message || ""));
     if (!agentExtensionRejected) throw error;
     usedBody = {
-      mode: "Listen",
+      mode,
       supervisorDeviceId: String(supervisorDeviceId),
     };
     try {
@@ -4132,7 +4135,8 @@ Audio/AI options:
   --stt-response-format FMT  json | diarized_json
   --chunking-strategy auto   Diarize chunking strategy
   --stt-context TEXT         Prompt/context for non-diarize STT
-  --no-stt-domain-primer     Disable tax vocabulary prompt for non-diarize STT
+  --stt-domain-primer        Opt IN to the tax vocabulary STT prompt (OFF by default; it
+                             hallucinates/echoes the jargon back on low-signal audio)
   --stt-realtime             Use OpenAI Realtime transcription instead of file STT
   --realtime-stt-delay LEVEL minimal | low | medium | high | xhigh
   --realtime-direct-coach    Science lane: send monitor audio straight to gpt-realtime-2 for HEARD/SAY
@@ -4202,6 +4206,15 @@ async function main() {
   const requestedDeviceId = readFlag(argv, "--supervisor-device-id", env("EX_LIVE_MONITOR_SUPERVISOR_DEVICE_ID", ""));
   const proxyRegion = readFlag(argv, "--proxy-region", "NA");
   const doSupervise = hasFlag(argv, "--supervise");
+  // Supervise audio mode. Listen (default, silent monitor) | Whisper (agent only) | Barge (all).
+  // Set into env so superviseActiveCall's default param picks it up without touching call sites.
+  const superviseMode = (() => {
+    const m = String(readFlag(argv, "--mode", env("EX_LIVE_MONITOR_SUPERVISE_MODE", "Listen")) || "").trim().toLowerCase();
+    if (m === "barge" || m === "bargein") return "Barge";
+    if (m === "whisper") return "Whisper";
+    return "Listen";
+  })();
+  process.env.EX_LIVE_MONITOR_SUPERVISE_MODE = superviseMode;
   const partyMode = readFlag(argv, "--party", env("EX_LIVE_MONITOR_PARTY", "session"));
   const callPickMode = readFlag(argv, "--call", "newest");
   const callFlow = normalizeCallFlow(readFlag(argv, "--call-flow", env("EX_LIVE_MONITOR_CALL_FLOW", "outbound")));
@@ -4377,7 +4390,15 @@ async function main() {
       "This is a live tax-relief sales call. Expect names and terms like Tax Advocate Group, Wynn Tax Solutions, WinTax Solutions, RingCentral CX, IRS, CP14, CP504, LT11, 1099, OIC, CNC, levy, lien, garnishment, unfiled returns, installment agreement, payment plan, revenue officer, and tax resolution.",
     ),
   );
-  const includeSttDomainPrimer = !sttRealtimeEnabled && !hasFlag(argv, "--no-stt-domain-primer") && !nativeDiarizeEnabled;
+  // Domain primer is OFF by default: feeding a tax-jargon prompt makes gpt-4o-transcribe
+  // hallucinate it back ("FTB, NYS DTF, BOE, CDTFA", "CP504...") on low-signal audio.
+  // Opt in explicitly with --stt-domain-primer if you ever want the vocab biasing back.
+  const includeSttDomainPrimer = !sttRealtimeEnabled && hasFlag(argv, "--stt-domain-primer") && !nativeDiarizeEnabled;
+  // The real fix for hallucinated transcripts: never send non-speech audio to STT.
+  // If a chunk has almost no samples above the activity floor, it's silence/noise/hold
+  // and the model would hallucinate (echo a prompt, or emit "thank you"). Skip it.
+  // Content-agnostic -- no word lists. Set to 0 to disable the gate.
+  const minSttActivePct = Number(readFlag(argv, "--min-stt-active-pct", env("EX_LIVE_MONITOR_MIN_STT_ACTIVE_PCT", "1"))) || 0;
   const knownSpeakers = parseKnownSpeakerReferences(argv);
   const sessionId = readFlag(argv, "--session-id", env("EX_LIVE_MONITOR_SESSION_ID", ""));
   const controlPlaneUrl = readFlag(argv, "--control-plane-url", env("EX_LIVE_MONITOR_CONTROL_PLANE_URL", "http://127.0.0.1:5001"));
@@ -7004,25 +7025,38 @@ async function main() {
         ...stagedDisplayTranscripts.map((item) => ({ text: item.text })),
       ],
     });
-    const transcript = sttRealtimeEnabled
-      ? await realtimeTranscriber.transcribePcmu({
-        pcmuBuffer,
-        timeoutMs: 45_000,
-      })
-      : await transcribeSalesTrainerAudio({
-        buffer: wav,
-        mimeType: "audio/wav",
-        filename: `${chunkId}.wav`,
-        language,
-        model: sttModel,
-        responseFormat: sttResponseFormat,
-        prompt: liveSttPrompt,
-        includeDomainPrimer: includeSttDomainPrimer,
-        chunkingStrategy: sttChunkingStrategy,
-        knownSpeakerNames: knownSpeakers.names,
-        knownSpeakerReferences: knownSpeakers.references,
-        timeoutMs: 20_000,
+    let transcript;
+    if (minSttActivePct > 0 && stats.activePctOver500 < minSttActivePct) {
+      // Non-speech chunk -> don't transcribe (kills hallucinated/echoed output at the source).
+      addEvent(state, eventLog, "stt.skip", `skipped low-signal ${chunkId}`, {
+        chunkId,
+        activePctOver500: stats.activePctOver500,
+        maxAbs: stats.maxAbs,
+        durationSec: stats.durationSec,
+        minSttActivePct,
       });
+      transcript = { text: "" };
+    } else {
+      transcript = sttRealtimeEnabled
+        ? await realtimeTranscriber.transcribePcmu({
+          pcmuBuffer,
+          timeoutMs: 45_000,
+        })
+        : await transcribeSalesTrainerAudio({
+          buffer: wav,
+          mimeType: "audio/wav",
+          filename: `${chunkId}.wav`,
+          language,
+          model: sttModel,
+          responseFormat: sttResponseFormat,
+          prompt: liveSttPrompt,
+          includeDomainPrimer: includeSttDomainPrimer,
+          chunkingStrategy: sttChunkingStrategy,
+          knownSpeakerNames: knownSpeakers.names,
+          knownSpeakerReferences: knownSpeakers.references,
+          timeoutMs: 20_000,
+        });
+    }
     const priorTexts = [
       ...state.transcripts.slice(-8).map((entry) => entry.text),
       ...stagedDisplayTranscripts.slice(-4).map((entry) => entry.text),

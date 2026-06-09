@@ -86,7 +86,7 @@ function normalizeMetadata(input = {}) {
     agentEmail: cleanText(input.agentEmail || input.agent || "", 160).toLowerCase(),
     agentExtension: cleanText(input.agentExtension || input.agentExt || input.extensionId || "", 80),
     agentName: cleanText(input.agentName || "", 120),
-    firmName: cleanText(input.firmName || "Tax Advocate Group", 120),
+    firmName: cleanText(input.firmName || "Wynn Tax Solutions", 120),
     uii: cleanText(input.uii || input.UII || input.callUii || "", 120),
     queueItemId: cleanText(input.queueItemId || input.queueTicketId || "", 120),
     caseId: cleanText(input.caseId || input.sourceLogicsCaseId || "", 120),
@@ -132,6 +132,54 @@ function callIdentityFromBinding(binding = {}) {
     binding.event?.id,
     binding.metadata?.eventId,
   ], 180);
+}
+
+function uniqueCleanIdentityKeys(values = []) {
+  const seen = new Set();
+  const keys = [];
+  for (const value of values) {
+    const key = cleanText(value, 180);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    keys.push(key);
+  }
+  return keys;
+}
+
+function callIdentityKeysFromMetadata(metadata = {}) {
+  return uniqueCleanIdentityKeys([
+    metadata.uii,
+    metadata.queueItemId,
+    metadata.eventId,
+    metadata.callSessionId,
+  ]);
+}
+
+function callIdentityKeysFromBinding(binding = {}) {
+  return uniqueCleanIdentityKeys([
+    binding.event?.uii,
+    binding.metadata?.uii,
+    binding.event?.queueItemId,
+    binding.metadata?.queueItemId,
+    binding.event?.id,
+    binding.metadata?.eventId,
+    binding.event?.callSessionId,
+    binding.metadata?.callSessionId,
+  ]);
+}
+
+function mergeIdentityKeys(...keyGroups) {
+  return uniqueCleanIdentityKeys(keyGroups.flatMap((keys) => Array.isArray(keys) ? keys : [keys]));
+}
+
+function identityKeysOverlap(left = [], right = []) {
+  if (!left.length || !right.length) return false;
+  const rightSet = new Set(right);
+  return left.some((key) => rightSet.has(key));
+}
+
+function hasUiiIdentityKey(keys = []) {
+  return (Array.isArray(keys) ? keys : []).some((key) => /^\d{18,}$/.test(String(key || "")));
 }
 
 function agentMatchesSession(session = {}, identity = {}) {
@@ -241,9 +289,25 @@ function candidateToSemanticMatch(candidate = {}, selectedRow = {}) {
   };
 }
 
+function ruleToSemanticCandidate(rule = {}) {
+  return {
+    key: cleanText(rule.key, 120),
+    label: cleanText(rule.label, 120),
+    family: cleanText(rule.family, 80),
+    priority: Number(rule.priority || 0),
+    hits: [],
+    guidance: cleanText(rule.guidance || "", 300),
+    summary: cleanText(rule.guidance || "", 300),
+  };
+}
+
 function refineContextWithSemanticJudgement(context = {}, judgement = {}, input = {}) {
   const candidates = normalizeContextCandidates(context.deterministicCandidates || [], { limit: 24 });
   const byKey = new Map(candidates.map((candidate) => [candidate.key, candidate]));
+  for (const rule of CONTEXT_RULES) {
+    const candidate = ruleToSemanticCandidate(rule);
+    if (candidate.key && !byKey.has(candidate.key)) byKey.set(candidate.key, candidate);
+  }
   const selectedRows = normalizeJudgeKeyRows(judgement.selectedKeys || judgement.matches || []);
   const selectedMatches = selectedRows
     .map((row) => {
@@ -420,7 +484,11 @@ function createLiveCoachBus({
           ["session.stop", "session.stale", "voicemail.reject"].includes(type),
       });
     }
-    for (const listener of subscribers.get(sessionId) || []) {
+    const sessionSubscribers = subscribers.get(sessionId);
+    if (session && sessionSubscribers && sessionSubscribers.size > 0) {
+      session.lastSubscriberEventAt = event.at;
+    }
+    for (const listener of sessionSubscribers || []) {
       try {
         listener(event);
       } catch (error) {
@@ -513,6 +581,7 @@ function createLiveCoachBus({
         transcript: null,
         context: null,
         dialog: null,
+        streamStatus: null,
       },
       memory: createMemoryState(),
       events: [],
@@ -631,13 +700,15 @@ function createLiveCoachBus({
 
   function retireReplacedSessions(binding = {}, input = {}) {
     const apply = input.apply !== false;
-    const currentIdentity = callIdentityFromBinding(binding);
+    const currentIdentityKeys = callIdentityKeysFromBinding(binding);
+    const currentIdentity = currentIdentityKeys[0] || "";
+    const currentHasUii = hasUiiIdentityKey(currentIdentityKeys);
     const currentAgentExtension = cleanText(binding.metadata?.agentExtension || binding.event?.extensionId || "", 80);
     const currentAgentEmail = cleanLower(binding.metadata?.agentEmail || binding.event?.agentEmail || "", 180);
     const sourceFilter = input.sourceFilter === undefined ? GRPC_SESSION_SOURCES : input.sourceFilter;
     const retired = [];
 
-    if (!currentIdentity || (!currentAgentExtension && !currentAgentEmail)) {
+    if (!currentIdentityKeys.length || (!currentAgentExtension && !currentAgentEmail)) {
       return { ok: true, apply, retiredCount: 0, retired };
     }
 
@@ -649,8 +720,13 @@ function createLiveCoachBus({
         (currentAgentExtension && metadata.agentExtension === currentAgentExtension) ||
         (currentAgentEmail && cleanLower(metadata.agentEmail, 180) === currentAgentEmail);
       if (!sameAgent) continue;
-      const sessionIdentity = callIdentityFromMetadata(metadata) || callIdentityFromBinding(session.binding || {});
-      if (!sessionIdentity || sessionIdentity === currentIdentity) continue;
+      const sessionIdentityKeys = mergeIdentityKeys(
+        callIdentityKeysFromMetadata(metadata),
+        callIdentityKeysFromBinding(session.binding || {}),
+      );
+      const sessionIdentity = sessionIdentityKeys[0] || "";
+      if (!sessionIdentity || identityKeysOverlap(sessionIdentityKeys, currentIdentityKeys)) continue;
+      if (hasUiiIdentityKey(sessionIdentityKeys) && !currentHasUii) continue;
 
       const summary = serializeSession(session);
       retired.push({
@@ -746,6 +822,30 @@ function createLiveCoachBus({
           error: error.message,
           elapsedMs: contextFrame.miniJudgement.elapsedMs,
         });
+        if (!contextFrame.shouldCompose) {
+          const hold = {
+            reason: contextFrame.actionReason || "semantic_context_judge_error_hold",
+            context: contextFrame,
+          };
+          pushMemory(session, "holds", {
+            at: new Date().toISOString(),
+            action: "hold_semantic_context_error",
+            transcript,
+            hold,
+          });
+          emit(session.id, "pipeline.hold", {
+            action: "hold_semantic_context_error",
+            hold,
+          });
+          return {
+            ...pipelineResult,
+            action: "hold_semantic_context_error",
+            hold,
+            transcript,
+            context: contextFrame,
+            dialog: null,
+          };
+        }
       }
     }
 
@@ -758,6 +858,13 @@ function createLiveCoachBus({
       id: `ctx-${String(session.counters.context + 1).padStart(4, "0")}`,
       text: contextFrame.phraseText,
     };
+    if (
+      pipelineResult.action === "hold_for_more_context" &&
+      context.shouldCompose &&
+      typeof session.pipeline?.commitPending === "function"
+    ) {
+      session.pipeline.commitPending("prospect", context.phraseText || transcript?.text || "");
+    }
     session.counters.context += 1;
     session.latest.context = context;
     pushMemory(session, "contexts", context);
@@ -776,7 +883,13 @@ function createLiveCoachBus({
     emit(session.id, "dialog", { dialog });
     requestDialogComposition(session, context, dialog);
 
-    return { ...pipelineResult, transcript, context, dialog };
+    return {
+      ...pipelineResult,
+      action: context.shouldCompose ? "compose_dialog" : pipelineResult.action,
+      transcript,
+      context,
+      dialog,
+    };
   }
 
   function startContextAndDialogPipeline(session, pipelineResult, transcript, input = {}) {
@@ -820,8 +933,58 @@ function createLiveCoachBus({
       const dialog = pipelineResult.dialog;
       session.latest.dialog = dialog;
       if (dialog?.say) pushMemory(session, "coachingSuggestions", dialog);
-      emit(session.id, "voicemail.reject", { transcript, dialog });
+      // Additive observability: surface any confidence/reason/decision the pipeline
+      // exposes on the dialog or result. All optional — never required.
+      const voicemailObservability = {};
+      const vmConfidence = dialog?.confidence ?? pipelineResult.confidence;
+      const vmReason = dialog?.reason ?? pipelineResult.reason ?? dialog?.guidance;
+      const vmDecision = dialog?.decision ?? pipelineResult.decision ?? pipelineResult.action;
+      const vmMatch = dialog?.match ?? pipelineResult.match ?? pipelineResult.voicemail?.match;
+      if (vmConfidence !== undefined && vmConfidence !== null) voicemailObservability.confidence = vmConfidence;
+      if (vmReason !== undefined && vmReason !== null) voicemailObservability.reason = vmReason;
+      if (vmDecision !== undefined && vmDecision !== null) voicemailObservability.decision = vmDecision;
+      if (vmMatch !== undefined && vmMatch !== null) voicemailObservability.match = vmMatch;
+      emit(session.id, "voicemail.reject", { transcript, dialog, ...voicemailObservability });
       return { ...pipelineResult, transcript, context: null, dialog };
+    }
+
+    if (pipelineResult.action === "clear_context_system_prompt" || pipelineResult.action === "hold_call_screener") {
+      abortActiveDialogComposer(session.id, pipelineResult.action === "hold_call_screener" ? "call-screener" : "system-context-clear");
+      session.latest.provisionalTranscript = null;
+      session.latest.context = null;
+      session.latest.dialog = null;
+      session.updatedAt = new Date().toISOString();
+      pushMemory(session, "holds", {
+        at: new Date().toISOString(),
+        action: pipelineResult.action,
+        transcript,
+        hold: pipelineResult.hold || null,
+      });
+      emit(session.id, "context.clear", {
+        action: pipelineResult.action,
+        transcript,
+        hold: pipelineResult.hold || null,
+      });
+      return { ...pipelineResult, transcript, context: null, dialog: null };
+    }
+
+    if (
+      pipelineResult.action === "hold_for_more_context" &&
+      pipelineResult.context &&
+      typeof semanticContextJudge === "function"
+    ) {
+      if (asyncContextPipeline || input.asyncContextPipeline === true) {
+        startContextAndDialogPipeline(session, pipelineResult, transcript, input);
+        return {
+          ...pipelineResult,
+          action: "semantic_judge_pending",
+          transcript,
+          context: null,
+          dialog: null,
+          pendingPipeline: true,
+        };
+      }
+      return processContextAndDialog(session, pipelineResult, transcript, input);
     }
 
     if (pipelineResult.action !== "compose_dialog") {
@@ -1041,6 +1204,23 @@ function createLiveCoachBus({
 
   function appendProvisionalText(session, input = {}) {
     const text = cleanText(input.text || input.transcript || input.delta || "", 4000);
+    const itemId = cleanText(input.itemId || input.item_id || "", 120) || null;
+    const latestFinal = session.latest?.transcript || null;
+    if (
+      itemId &&
+      latestFinal?.itemId &&
+      latestFinal.itemId === itemId &&
+      latestFinal.provisional !== true
+    ) {
+      emit(session.id, "transcript.provisional_ignored", {
+        itemId,
+        reason: "final-transcript-already-committed",
+      });
+      return {
+        action: "provisional_ignored_after_final",
+        provisionalTranscript: session.latest.provisionalTranscript,
+      };
+    }
     if (!text) {
       return {
         action: "provisional",
@@ -1051,7 +1231,7 @@ function createLiveCoachBus({
     const provisionalTranscript = {
       id: cleanText(input.id || input.itemId || input.item_id || "", 120) ||
         `pv-${String(session.counters.provisional).padStart(4, "0")}`,
-      itemId: cleanText(input.itemId || input.item_id || "", 120) || null,
+      itemId,
       at: new Date().toISOString(),
       role: cleanText(input.role || "prospect", 40),
       text,
@@ -1068,6 +1248,56 @@ function createLiveCoachBus({
     return {
       action: "provisional",
       provisionalTranscript,
+    };
+  }
+
+  function rejectSessionFromStreamingVoicemail(session, provisionalTranscript = null, watcherResult = {}) {
+    abortActiveDialogComposer(session.id, "streaming-voicemail-rejected");
+    session.status = "voicemail_rejected";
+    session.counters.voicemailRejected += 1;
+    session.updatedAt = new Date().toISOString();
+    const systemMatch = watcherResult.systemMatch ||
+      (Array.isArray(watcherResult.systemMatches)
+        ? watcherResult.systemMatches.find((match) => match.type === "voicemail")
+        : null) ||
+      {};
+    const transcript = provisionalTranscript?.text
+      ? {
+        ...provisionalTranscript,
+        id: `tr-${String(session.counters.transcript + 1).padStart(4, "0")}`,
+        provisional: false,
+        source: cleanText(provisionalTranscript.source || "streaming-voicemail-gate", 80),
+      }
+      : null;
+    if (transcript) {
+      session.counters.transcript += 1;
+      session.latest.transcript = transcript;
+      pushMemory(session, "transcripts", transcript);
+      writeJsonLine(path.join(session.dir, "ai", "transcript.ndjson"), transcript);
+      emit(session.id, "transcript", { transcript });
+    }
+    session.latest.provisionalTranscript = null;
+    const dialog = {
+      status: "rejected",
+      label: "Call rejected for voicemail match",
+      say: "",
+      guidance: systemMatch.match
+        ? `Streaming deterministic voicemail phrase matched: ${systemMatch.match}`
+        : "Streaming deterministic voicemail phrase matched.",
+    };
+    session.latest.dialog = dialog;
+    emit(session.id, "voicemail.reject", {
+      transcript,
+      dialog,
+      match: systemMatch.match || null,
+      decision: "streaming_delta_voicemail_reject",
+    });
+    return {
+      action: "reject_voicemail",
+      transcript,
+      context: null,
+      dialog,
+      watcher: watcherResult,
     };
   }
 
@@ -1102,7 +1332,10 @@ function createLiveCoachBus({
     if (base64) {
       try {
         const rawName = `raw-${String(session.counters.input).padStart(4, "0")}.bin`;
-        fs.writeFileSync(path.join(session.dir, "raw", rawName), Buffer.from(base64, "base64"));
+        // Fire-and-forget so the hot emit/subscriber path is never blocked by disk IO.
+        fs.promises
+          .writeFile(path.join(session.dir, "raw", rawName), Buffer.from(base64, "base64"))
+          .catch(() => {});
         emit(session.id, "raw.write", { filename: rawName });
       } catch (error) {
         emit(session.id, "raw.error", { error: error.message });
@@ -1129,6 +1362,44 @@ function createLiveCoachBus({
         candidates: watcherResult.candidates || [],
         systemMatches: watcherResult.systemMatches || [],
       });
+      if (watcherResult.action === "reject_voicemail") {
+        const rejected = rejectSessionFromStreamingVoicemail(
+          session,
+          result.provisionalTranscript,
+          watcherResult,
+        );
+        return {
+          ok: true,
+          session: serializeSession(session),
+          result: rejected,
+        };
+      }
+      if (
+        watcherResult.action === "clear_context_system_prompt" ||
+        watcherResult.action === "hold_call_screener"
+      ) {
+        // Symmetric with the streaming voicemail hang-up: a hold/screener prompt detected in
+        // the deltas erases coach context NOW (don't wait for VAD) and holds. The watcher has
+        // already suppressed candidate matching for this turn, so nothing screener-side leaks.
+        abortActiveDialogComposer(
+          session.id,
+          watcherResult.action === "hold_call_screener" ? "call-screener" : "system-context-clear",
+        );
+        session.latest.provisionalTranscript = null;
+        session.latest.context = null;
+        session.latest.dialog = null;
+        session.updatedAt = new Date().toISOString();
+        emit(session.id, "context.clear", {
+          action: watcherResult.action,
+          transcript: result.provisionalTranscript || null,
+          systemMatches: watcherResult.systemMatches || [],
+        });
+        return {
+          ok: true,
+          session: serializeSession(session),
+          result: { ...result, watcher: watcherResult, action: watcherResult.action },
+        };
+      }
       return {
         ok: true,
         session: serializeSession(session),
@@ -1173,6 +1444,47 @@ function createLiveCoachBus({
     };
   }
 
+  function appendStreamStatus(sessionId, input = {}) {
+    const session = sessions.get(String(sessionId || ""));
+    if (!session) return { ok: false, error: "Session not found" };
+    if (TERMINAL_SESSION_STATUSES.includes(session.status)) {
+      return { ok: false, error: `Session is ${session.status}`, session: serializeSession(session) };
+    }
+
+    const identityCheck = validateInputForSession(session, input);
+    if (!identityCheck.ok) {
+      emit(session.id, "stream.status_rejected", identityCheck);
+      return {
+        ok: false,
+        error: identityCheck.reason,
+        statusCode: identityCheck.statusCode,
+        session: serializeSession(session),
+        details: identityCheck,
+      };
+    }
+
+    const at = new Date().toISOString();
+    const streamStatus = {
+      at,
+      role: cleanText(input.role || "prospect", 40),
+      source: cleanText(input.source || "grpc-audio", 80),
+      streamId: cleanText(input.streamId || "", 160),
+      segmentId: cleanText(input.segmentId || "", 180),
+      mediaCount: Math.max(0, Number(input.mediaCount || 0) || 0),
+      rawBytes: Math.max(0, Number(input.rawBytes || 0) || 0),
+      durationSec: Math.max(0, Number(input.durationSec || 0) || 0),
+      activePct: Math.max(0, Math.min(100, Number(input.activePct || 0) || 0)),
+      rms: Math.max(0, Number(input.rms || 0) || 0),
+      maxAbs: Math.max(0, Number(input.maxAbs || 0) || 0),
+      state: cleanText(input.state || "audio-receiving", 80),
+    };
+    session.latest.streamStatus = streamStatus;
+    session.updatedAt = at;
+    session.lastEventAt = at;
+    emit(session.id, "stream.status", { streamStatus });
+    return { ok: true, session: serializeSession(session), streamStatus };
+  }
+
   function stopSession(sessionId, input = {}) {
     const session = sessions.get(String(sessionId || ""));
     if (!session) return { ok: false, error: "Session not found" };
@@ -1188,7 +1500,7 @@ function createLiveCoachBus({
       source: "fixture",
       agentEmail: input.agentEmail || "fixture@local",
       agentName: input.agentName || "Agent",
-      firmName: input.firmName || "Tax Advocate Group",
+      firmName: input.firmName || "Wynn Tax Solutions",
       uii: input.uii || `fixture-${timestampForFile()}`,
     });
     const text = cleanText(input.text || input.transcript || input.prospect || "", 4000);
@@ -1207,7 +1519,7 @@ function createLiveCoachBus({
         source: "fixture-provisional",
         agentEmail: input.agentEmail || "fixture@local",
         agentName: input.agentName || "Agent",
-        firmName: input.firmName || "Tax Advocate Group",
+        firmName: input.firmName || "Wynn Tax Solutions",
         uii: input.uii || `fixture-provisional-${timestampForFile()}`,
       });
       session = sessions.get(started.id);
@@ -1297,6 +1609,10 @@ function createLiveCoachBus({
     const apply = Boolean(input.apply);
     const maxIdleMs = Math.max(1000, Number(input.maxIdleMs || 5 * 60 * 1000));
     const sourceFilter = input.sourceFilter === undefined ? GRPC_SESSION_SOURCES : input.sourceFilter;
+    // Default TRUE: a session with live SSE subscribers (an admin watching the dashboard)
+    // should not be swept out from under them.
+    const preserveSubscribers =
+      String(process.env.LIVE_COACH_STALE_SWEEP_PRESERVE_SUBSCRIBERS || "true").toLowerCase() !== "false";
     const now = Date.now();
     const checked = [];
     const stale = [];
@@ -1309,7 +1625,11 @@ function createLiveCoachBus({
       const last = Date.parse(session.lastEventAt || session.updatedAt || session.createdAt) || 0;
       const idleMs = now - last;
       const metadata = session.metadata || {};
-      const sessionIdentity = callIdentityFromMetadata(metadata) || callIdentityFromBinding(session.binding || {});
+      const sessionIdentityKeys = mergeIdentityKeys(
+        callIdentityKeysFromMetadata(metadata),
+        callIdentityKeysFromBinding(session.binding || {}),
+      );
+      const sessionIdentity = sessionIdentityKeys[0] || "";
       const hasAgent = Boolean(metadata.agentExtension || metadata.agentEmail);
       const query = hasAgent
         ? {
@@ -1340,7 +1660,8 @@ function createLiveCoachBus({
         const current = await resolveBinding(query);
         row.bindingStatus = current?.status || null;
         row.bindingReason = current?.binding?.reason || current?.reason || null;
-        const currentIdentity = callIdentityFromBinding(current?.binding || {});
+        const currentIdentityKeys = callIdentityKeysFromBinding(current?.binding || {});
+        const currentIdentity = currentIdentityKeys[0] || "";
         row.currentIdentity = currentIdentity || null;
         if (!current?.binding) {
           row.decision = "stale";
@@ -1348,21 +1669,40 @@ function createLiveCoachBus({
         } else if (!current.binding.active) {
           row.decision = "stale";
           row.reason = current.binding.reason || current.status || "binding-inactive";
-        } else if (sessionIdentity && currentIdentity && sessionIdentity !== currentIdentity) {
+        } else if (
+          sessionIdentityKeys.length &&
+          currentIdentityKeys.length &&
+          !(hasUiiIdentityKey(sessionIdentityKeys) && !hasUiiIdentityKey(currentIdentityKeys)) &&
+          !identityKeysOverlap(sessionIdentityKeys, currentIdentityKeys)
+        ) {
           row.decision = "stale";
           row.reason = "agent-current-call-changed";
         }
       }
 
       if (row.decision === "stale") {
-        stale.push(row);
-        if (apply) {
-          markSessionStale(session, row.reason, {
+        const activeSubscribers = subscribers.get(session.id);
+        if (preserveSubscribers && activeSubscribers && activeSubscribers.size > 0) {
+          logger?.info?.("live_coach.stale_sweep.preserved_for_subscribers", {
+            sessionId: session.id,
+            staleReason: row.reason,
+            subscriberCount: activeSubscribers.size,
             idleMs,
-            sessionIdentity,
-            currentIdentity: row.currentIdentity || null,
-            bindingStatus: row.bindingStatus || null,
           });
+          row.staleReasonOverridden = row.reason;
+          row.decision = "keep";
+          row.reason = "active-subscribers";
+          kept.push(row);
+        } else {
+          stale.push(row);
+          if (apply) {
+            markSessionStale(session, row.reason, {
+              idleMs,
+              sessionIdentity,
+              currentIdentity: row.currentIdentity || null,
+              bindingStatus: row.bindingStatus || null,
+            });
+          }
         }
       } else {
         kept.push(row);
@@ -1408,6 +1748,7 @@ function createLiveCoachBus({
     ensureSession,
     retireReplacedSessions,
     appendInput,
+    appendStreamStatus,
     stopSession,
     getSession,
     listSessions,

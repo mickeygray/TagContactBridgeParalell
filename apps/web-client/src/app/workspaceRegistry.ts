@@ -8,6 +8,7 @@ import {
   Inbox,
   ListChecks,
   Megaphone,
+  Radio,
   Rocket,
   Users,
   UserCog,
@@ -17,6 +18,7 @@ import {
 export type WorkspaceKey =
   | "metrics"
   | "ringbridge"
+  | "live-coach"
   | "inbox"
   | "clients"
   | "dispatch"
@@ -56,6 +58,14 @@ export const adminWorkspaces: WorkspaceDef[] = [
     label: "RingBridge",
     description: "Agent presence, telephony state, RC runtime.",
     icon: Headset,
+    audience: "admin",
+  },
+  {
+    key: "live-coach",
+    path: "/admin/live-coach",
+    label: "Live Coach",
+    description: "Agent coach streams, transcript, context, and dialog.",
+    icon: Radio,
     audience: "admin",
   },
   {

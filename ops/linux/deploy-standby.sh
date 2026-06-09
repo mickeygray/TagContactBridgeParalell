@@ -20,6 +20,13 @@ flock -n 9 || {
 step() { echo; echo "=== $* ==="; }
 ok() { echo "  [ok] $*"; }
 
+restart_if_active() {
+  local svc="$1"
+  if systemctl is-active --quiet "${svc}"; then
+    systemctl restart "${svc}"
+  fi
+}
+
 set_env() {
   local key="$1"
   local value="$2"
@@ -79,6 +86,9 @@ systemctl reload nginx
 
 step "Restart app services"
 systemctl restart parallel-control-plane parallel-inbound-gateway parallel-outbound-gateway parallel-ringcentral-cx parallel-ai-bus parallel-barge
+restart_if_active parallel-live-coach-grpc
+restart_if_active parallel-tag-webhook-front
+restart_if_active parallel-tag-webhook-ngrok
 sleep 4
 systemctl --no-pager --full status parallel-control-plane parallel-inbound-gateway parallel-outbound-gateway parallel-ringcentral-cx parallel-ai-bus parallel-barge >/dev/null
 ok "systemd services are running"
@@ -93,5 +103,5 @@ curl -fsS http://127.0.0.1:81/ >/dev/null
 ok "local health checks passed"
 
 echo
-echo "Deploy complete. This box is warm. parallel-ngrok remains manual/off unless you start it."
+echo "Deploy complete. This box is warm. ngrok services remain manual/off unless you start them."
 

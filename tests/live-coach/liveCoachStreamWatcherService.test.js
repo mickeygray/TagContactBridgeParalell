@@ -37,6 +37,29 @@ test("stream watcher rejects natural voicemail greeting variants", () => {
   assert.equal(first.snapshot.status, "voicemail_rejected");
 });
 
+test("stream watcher rejects OpenAI automatic voice message wording", () => {
+  const watcher = createLiveCoachStreamWatcher();
+  const first = watcher.appendText({
+    text: "Has been forwarded to an automatic voice message system.",
+  });
+  assert.equal(first.action, "reject_voicemail");
+  assert.equal(first.systemMatch.type, "voicemail");
+  assert.equal(first.systemMatch.match, "forwarded to an automatic voice message system");
+  assert.equal(first.snapshot.status, "voicemail_rejected");
+});
+
+test("stream watcher clears context for hold prompts without rejecting the call", () => {
+  const watcher = createLiveCoachStreamWatcher();
+  const result = watcher.appendText({ text: "Please stay on the line while I see if they are available." });
+  assert.equal(result.action, "clear_context_system_prompt");
+  assert.equal(result.snapshot.rejected, false);
+  assert.equal(result.systemMatches[0].type, "system_context_clear");
+
+  const release = watcher.releaseForVad();
+  assert.equal(release.action, "clear_context_system_prompt");
+  assert.equal(release.candidates.length, 0);
+});
+
 test("stream watcher holds call screeners but keeps the session alive", () => {
   const watcher = createLiveCoachStreamWatcher();
   const result = watcher.appendText({ text: "I'll see if this person is available one moment" });
@@ -141,6 +164,18 @@ test("broad deterministic keys catch human tax-language without exact form names
   assert.ok(keys.includes("money_pressure"));
 });
 
+test("in-memory fuzzy bank catches adjacent language before mini filtering", () => {
+  const candidates = rankContextCandidates(
+    "I thought this was a fake call, and the government letter says they put a hold on my wages.",
+  );
+  const keys = candidates.map((candidate) => candidate.key);
+  assert.ok(keys.includes("legitimacy"));
+  assert.ok(keys.includes("irs_notice"));
+  assert.ok(keys.includes("collection_pressure"));
+  assert.ok(candidates.find((candidate) => candidate.key === "legitimacy").hits.includes("fake call"));
+  assert.ok(candidates.find((candidate) => candidate.key === "collection_pressure").hits.includes("hold on my wages"));
+});
+
 test("deterministic keys can over-return while mini rejects unsupported candidates", () => {
   const candidates = rankContextCandidates("I got a letter.");
   assert.ok(candidates.some((candidate) => candidate.key === "irs_notice"));
@@ -152,7 +187,10 @@ test("deterministic keys can over-return while mini rejects unsupported candidat
     candidateMatches: candidates,
   });
 
-  assert.equal(frame.shouldCompose, false);
+  // Fail-open: a complete-but-contextless line composes (let Sonnet decide) WHILE the
+  // mini judge still rejects the unsupported irs_notice candidate -- determinism narrows
+  // (no fabricated IRS context) without hard-blocking the turn.
+  assert.equal(frame.shouldCompose, true);
   assert.equal(frame.matches.some((match) => match.key === "irs_notice"), false);
   assert.ok(frame.miniJudgement.rejected.some((candidate) => candidate.key === "irs_notice"));
 });
@@ -174,4 +212,6 @@ test("rule summaries expose the small card catalog for mini judgement", () => {
   assert.ok(summaries.every((summary) => summary.key && summary.summary));
   assert.ok(summaries.some((summary) => summary.key === "irs_notice"));
   assert.ok(summaries.some((summary) => summary.key === "fees_close"));
+  assert.ok(summaries.find((summary) => summary.key === "legitimacy").keywords.includes("fake call"));
+  assert.ok(summaries.find((summary) => summary.key === "representation").keywords.includes("you talk to them for me"));
 });

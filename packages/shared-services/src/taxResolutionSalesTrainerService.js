@@ -1283,8 +1283,10 @@ const STT_DOMAIN_PRIMER = [
   "Notice of Federal Tax Lien, NFTL, levy, garnishment, Substitute for Return, SFR, Trust Fund Recovery Penalty, TFRP, Revenue Officer, RO.",
   // Forms and references
   "Form 433-A, Form 433-F, Form 2848, Form 8821, Form 8857 Innocent Spouse, IRC 6672, IRC 7122, IRC 6159.",
-  // State authorities
-  "FTB, NYS DTF, BOE, CDTFA.",
+  // NOTE: the bare state-authority acronym line ("FTB, NYS DTF, BOE, CDTFA") was
+  // removed -- with no surrounding English it was the most echo-prone fragment and
+  // slipped under the echo-guard's length floor, so it showed up as if reps said it.
+  // State terms are recovered post-STT by liveCoachSanitizedPipeline's normalizer.
 ].join(" ");
 
 // Whisper's well-known failure mode: when the audio is low-signal

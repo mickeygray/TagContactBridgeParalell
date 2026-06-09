@@ -85,9 +85,12 @@ const INTERNAL_SECRET = String(process.env.INTERNAL_SERVICE_SECRET || process.en
 
 async function borrowTokenFromApp() {
   if (!INTERNAL_SECRET) return null;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 8000);
   try {
     const r = await fetch(`${CONTROL_PLANE_URL}/api/internal/rc/access-token`, {
       headers: { "x-internal-secret": INTERNAL_SECRET, Accept: "application/json" },
+      signal: controller.signal,
     });
     if (!r.ok) return null;
     const j = await r.json().catch(() => null);
@@ -97,6 +100,8 @@ async function borrowTokenFromApp() {
     return { value: j.accessToken, exp };
   } catch {
     return null;
+  } finally {
+    clearTimeout(timer);
   }
 }
 
@@ -106,15 +111,22 @@ async function directToken() {
   const secret = process.env.RING_CENTRAL_CLIENT_SECRET;
   const basic = Buffer.from(`${id}:${secret}`).toString("base64");
   const body = new URLSearchParams({ grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer", assertion: jwt });
-  const r = await fetch(`${RC_BASE}/restapi/oauth/token`, {
-    method: "POST",
-    headers: { Authorization: `Basic ${basic}`, "Content-Type": "application/x-www-form-urlencoded", Accept: "application/json" },
-    body: body.toString(),
-  });
-  const t = await r.text();
-  if (!r.ok) throw new Error(`OAuth ${r.status}: ${t.slice(0, 200)}`);
-  const j = JSON.parse(t);
-  return { value: j.access_token, exp: Date.now() + Math.max(60_000, ((Number(j.expires_in) || 3600) - 120) * 1000) };
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 8000);
+  try {
+    const r = await fetch(`${RC_BASE}/restapi/oauth/token`, {
+      method: "POST",
+      headers: { Authorization: `Basic ${basic}`, "Content-Type": "application/x-www-form-urlencoded", Accept: "application/json" },
+      body: body.toString(),
+      signal: controller.signal,
+    });
+    const t = await r.text();
+    if (!r.ok) throw new Error(`OAuth ${r.status}: ${t.slice(0, 200)}`);
+    const j = JSON.parse(t);
+    return { value: j.access_token, exp: Date.now() + Math.max(60_000, ((Number(j.expires_in) || 3600) - 120) * 1000) };
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 let _tok = { value: null, exp: 0, inflight: null, source: null };
@@ -133,6 +145,69 @@ async function token() {
   })();
   try { return await _tok.inflight; } finally { _tok.inflight = null; }
 }
+// ---- per-extension JWTs (preferred) ----------------------------------------
+// Each monitor authenticates AS ITSELF with its own JWT, so we never lean on one
+// account-admin token and every registration/leg is scoped to its own extension.
+// Supply either EX_BARGE_JWT_MAP (path to JSON {"987":"<jwt>", ...}) or per-ext env
+// vars EX_BARGE_JWT_987=<jwt>. If no JWT is configured for an extension, we fall
+// back to the shared app-broker/direct token + account-scoped lookup (legacy path).
+let _jwtMap = null;
+function loadJwtMap() {
+  if (_jwtMap) return _jwtMap;
+  _jwtMap = new Map();
+  const file = process.env.EX_BARGE_JWT_MAP;
+  if (file) {
+    try {
+      const j = JSON.parse(fs.readFileSync(file, "utf8"));
+      for (const [k, v] of Object.entries(j)) if (v) _jwtMap.set(String(k).trim(), String(v).trim());
+    } catch (e) { console.error(`[auth] EX_BARGE_JWT_MAP read failed: ${e.message}`); }
+  }
+  for (const [k, v] of Object.entries(process.env)) {
+    const m = /^EX_BARGE_JWT_(\d+)$/.exec(k);
+    if (m && v) _jwtMap.set(m[1], String(v).trim());
+  }
+  if (_jwtMap.size) console.log(`[auth] per-extension JWTs loaded for: ${[..._jwtMap.keys()].join(", ")}`);
+  return _jwtMap;
+}
+function jwtForExt(ext) { return loadJwtMap().get(String(ext).trim()) || null; }
+
+async function jwtGrant(jwt) {
+  const id = process.env.RING_CENTRAL_CLIENT_ID;
+  const secret = process.env.RING_CENTRAL_CLIENT_SECRET;
+  const basic = Buffer.from(`${id}:${secret}`).toString("base64");
+  const body = new URLSearchParams({ grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer", assertion: jwt });
+  const r = await fetch(`${RC_BASE}/restapi/oauth/token`, {
+    method: "POST",
+    headers: { Authorization: `Basic ${basic}`, "Content-Type": "application/x-www-form-urlencoded", Accept: "application/json" },
+    body: body.toString(),
+  });
+  const t = await r.text();
+  if (!r.ok) throw new Error(`OAuth(ext-jwt) ${r.status}: ${t.slice(0, 200)}`);
+  const j = JSON.parse(t);
+  return { value: j.access_token, exp: Date.now() + Math.max(60_000, ((Number(j.expires_in) || 3600) - 120) * 1000) };
+}
+
+// Per-extension token cache (single-flight per ext). Returns null when no JWT is set
+// for the extension, so callers can fall back to the shared token.
+const _extTok = new Map(); // ext -> { value, exp, inflight }
+async function tokenForExt(ext) {
+  const jwt = jwtForExt(ext);
+  if (!jwt) return null;
+  const key = String(ext).trim();
+  const now = Date.now();
+  let c = _extTok.get(key) || { value: null, exp: 0, inflight: null };
+  if (c.value && now < c.exp) return c.value;
+  if (c.inflight) return c.inflight;
+  _extTok.set(key, c);
+  c.inflight = (async () => {
+    const t = await jwtGrant(jwt);
+    c.value = t.value; c.exp = t.exp;
+    console.log(`[auth] monitor ${key} token via own-jwt`);
+    return c.value;
+  })();
+  try { return await c.inflight; } finally { c.inflight = null; }
+}
+
 async function get(tok, endpoint) {
   const r = await fetch(`${RC_BASE}${endpoint}`, { headers: { Authorization: `Bearer ${tok}`, Accept: "application/json" } });
   const t = await r.text();
@@ -191,10 +266,34 @@ async function registerMonitor(monitorExt, { deviceId = "", region = "NA" } = {}
   entry = entry || { softphone: null, registered: false, regError: null, meta: {}, registering: null, regErrorSinceWarm: false, lastWarmAt: null, lastBargeAt: 0 };
   monitors.set(key, entry);
   entry.registering = (async () => {
-    const tok = await token();
-    const ext = await resolveExt(tok, key);
-    if (!ext) throw new Error(`monitor ext ${key} not found`);
-    const devResp = await get(tok, `/restapi/v1.0/account/~/extension/${ext.id}/device`);
+    // Prefer the extension's OWN jwt (self-scoped). Fall back to the shared token +
+    // account-scoped lookup by ext.id when no per-ext jwt is configured.
+    // A bad/expired per-ext JWT must NOT break registration -- fall back to the shared token.
+    let ownTok = null;
+    try {
+      ownTok = await tokenForExt(key);
+    } catch (e) {
+      console.warn(`[auth] monitor ${key} own-jwt failed (${e.message}); falling back to shared token`);
+      ownTok = null;
+    }
+    let tok; let extId = null; let devResp; let authSrc;
+    if (ownTok) {
+      tok = ownTok;
+      authSrc = "own-jwt";
+      const me = await get(tok, `/restapi/v1.0/account/~/extension/~`);
+      extId = me?.id || null;
+      if (me?.extensionNumber && String(me.extensionNumber) !== key) {
+        throw new Error(`jwt for ext ${key} authenticated as ext ${me.extensionNumber} -- wrong jwt`);
+      }
+      devResp = await get(tok, `/restapi/v1.0/account/~/extension/~/device`);
+    } else {
+      tok = await token();
+      authSrc = "shared-token";
+      const ext = await resolveExt(tok, key);
+      if (!ext) throw new Error(`monitor ext ${key} not found`);
+      extId = ext.id;
+      devResp = await get(tok, `/restapi/v1.0/account/~/extension/${ext.id}/device`);
+    }
     const device = pickOtherPhone(Array.isArray(devResp?.records) ? devResp.records : [], deviceId);
     if (!device?.id) throw new Error(`no OtherPhone device on ext ${key}`);
     const sipInfo = await get(tok, `/restapi/v1.0/account/~/device/${device.id}/sip-info`);
@@ -221,8 +320,8 @@ async function registerMonitor(monitorExt, { deviceId = "", region = "NA" } = {}
     entry.regError = null;
     entry.regErrorSinceWarm = false;
     entry.lastWarmAt = Date.now();
-    entry.meta = { ext: key, extId: ext.id, deviceId: device.id, outboundProxy, domain: sipInfo.domain };
-    console.log(`  monitor ${key} REGISTERED (device ${device.id}, proxy ${outboundProxy})`);
+    entry.meta = { ext: key, extId, deviceId: device.id, outboundProxy, domain: sipInfo.domain, authSrc };
+    console.log(`  monitor ${key} REGISTERED via ${authSrc} (device ${device.id}, proxy ${outboundProxy})`);
   })();
   try {
     await entry.registering;
@@ -299,6 +398,7 @@ function monitorsStatus() {
     regErrorSinceWarm: Boolean(e.regErrorSinceWarm),
     lastWarmAt: e.lastWarmAt ? new Date(e.lastWarmAt).toISOString() : null,
     deviceId: e.meta?.deviceId || null,
+    authSrc: e.meta?.authSrc || null,
   }));
   const armed = Array.from(armedBarges.values()).map(summarizeArmedBarge);
   const def = defaultMonitorExt ? monitors.get(defaultMonitorExt) : null;
@@ -364,7 +464,7 @@ function sendAudioPaced(callSession, buffer, { log, onFinished, leadFrames = 3 }
     const target = Math.min(totalFrames, Math.floor(elapsed / frameMs) + leadFrames);
     let guard = 0;
     while (sent < target && sent < totalFrames) {
-      try { sendOne(); } catch (e) { if (log) log(`send error @frame ${sent}: ${e && e.message}`); stopped = true; return; }
+      try { sendOne(); } catch (e) { if (log) log(`send error @frame ${sent}: ${e && e.message}`); stopped = true; finish(); return; }
       if (++guard > 200) break; // never block the loop
     }
     if (sent >= totalFrames) { finish(); return; }
@@ -431,6 +531,25 @@ function buildRecorder(prefix, steps, events) {
   return { log, recordEvent };
 }
 
+// Dialing must never hang the HTTP handler (and leave a half-open leg) if RC stalls.
+// Race the softphone.call against a hard timeout so a stuck dial fails fast.
+async function dialWithTimeout(softphone, dial) {
+  const ms = Number(env("EX_BARGE_DIAL_TIMEOUT_MS", "20000")) || 20000;
+  let timer = null;
+  try {
+    return await Promise.race([
+      softphone.call(dial),
+      new Promise((_, rej) => { timer = setTimeout(() => rej(new Error(`dial ${dial} timed out after ${ms}ms`)), ms); }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+// Safety cap: a play must never block the handler forever if the leg never disposes
+// or sendAudioPaced never reports finished. Force a hangup + release at the cap.
+const PLAY_HARD_CAP_MS = Number(env("EX_BARGE_PLAY_HARD_CAP_MS", "120000")) || 120000;
+
 async function armBarge(softphone, { monitorExt, agentExtNumber, code }) {
   if (!softphone) throw new Error("no registered monitor softphone for this barge");
   const key = bargeArmKey(monitorExt, code, agentExtNumber);
@@ -439,6 +558,8 @@ async function armBarge(softphone, { monitorExt, agentExtNumber, code }) {
     existing.reused = true;
     return existing;
   }
+  // Drop any stale/disposed entry so it can't be reused or block the health loop.
+  if (existing) armedBarges.delete(key);
 
   const dial = `${code}${agentExtNumber}`;
   const steps = [];
@@ -447,7 +568,7 @@ async function armBarge(softphone, { monitorExt, agentExtNumber, code }) {
 
   log(`dialing ${dial}`);
   recordEvent("dial.start", { dial, monitorExt, agentExtNumber, code });
-  const callSession = await softphone.call(dial);
+  const callSession = await dialWithTimeout(softphone, dial);
   const arm = {
     key,
     monitorExt,
@@ -490,6 +611,11 @@ async function armBarge(softphone, { monitorExt, agentExtNumber, code }) {
   callSession.once("busy", (...args) => {
     log("event: busy (486) -- target unreachable/invalid");
     recordEvent("call.busy", { args: summarizeEventArgs(args) });
+    // Unanswered/invalid target: tear the leg down and drop the arm so it can't leak.
+    arm.released = true;
+    arm.releasedAt = new Date().toISOString();
+    try { callSession.hangup?.(); } catch {}
+    armedBarges.delete(key);
   });
   callSession.once("disposed", (...args) => {
     arm.released = true;
@@ -522,7 +648,17 @@ async function playArmedBarge(arm, { wavPath, delayMs, trigger = "silence", sile
   if (!wavPath) throw new Error("wavPath required");
   arm.playing = true;
 
-  const buf = fs.readFileSync(wavPath);
+  let buf;
+  try {
+    buf = fs.readFileSync(wavPath);
+  } catch (e) {
+    // Missing/unreadable WAV: never leave the leg armed-but-silent. Tear down + drop.
+    arm.playing = false;
+    try { await arm.callSession.hangup(); } catch {}
+    arm.released = true;
+    armedBarges.delete(arm.key);
+    throw new Error(`voicemail file unreadable (${wavPath}): ${e.message}`);
+  }
   arm.recordEvent("playback.loaded", { wavPath, bytes: buf.length });
   await waitForArmedMedia(arm);
 
@@ -530,6 +666,25 @@ async function playArmedBarge(arm, { wavPath, delayMs, trigger = "silence", sile
     arm.log(`waiting for play cue: silence>=${silenceHoldMs}ms after activity (rms<${silenceRms}, min ${minWaitMs}ms, max ${cueMaxWaitMs}ms)`);
     const cue = await waitForPlayCue(arm.callSession, { log: arm.log, silenceRms, silenceHoldMs, minWaitMs, maxWaitMs: cueMaxWaitMs });
     arm.recordEvent("playback.cue", { trigger, cue });
+    if (cue === "disposed" || arm.callSession?.disposed || arm.released) {
+      arm.playing = false;
+      arm.released = true;
+      arm.releasedAt = arm.releasedAt || new Date().toISOString();
+      armedBarges.delete(arm.key);
+      return {
+        ok: true,
+        armed: true,
+        played: false,
+        released: true,
+        reason: "disposed-before-playback",
+        inboundRtpSeen: arm.inbound,
+        dial: arm.dial,
+        sessionId: arm.sessionId,
+        partyId: arm.partyId,
+        steps: arm.steps,
+        events: arm.events,
+      };
+    }
   } else {
     const settle = Number.isFinite(delayMs) ? delayMs : 700;
     arm.log(`fixed trigger: settling ${settle}ms before play`);
@@ -565,8 +720,28 @@ async function playArmedBarge(arm, { wavPath, delayMs, trigger = "silence", sile
     },
   });
 
-  if (waitForRelease) await releasePromise;
-  else await sleep(1500);
+  if (waitForRelease) {
+    // Never await the release forever: if sendAudioPaced never reports finished or the
+    // leg never disposes, force a hangup + release at the hard cap so the handler returns.
+    let capTimer = null;
+    const cap = new Promise((resolve) => {
+      capTimer = setTimeout(async () => {
+        if (!arm.released) {
+          arm.log(`play hard-cap ${PLAY_HARD_CAP_MS}ms hit -> forcing hangup`);
+          try { await arm.callSession.hangup(); } catch {}
+          arm.released = true;
+          arm.releasedAt = new Date().toISOString();
+          armedBarges.delete(arm.key);
+          if (releaseDone) releaseDone();
+        }
+        resolve();
+      }, PLAY_HARD_CAP_MS);
+    });
+    await Promise.race([releasePromise, cap]);
+    if (capTimer) clearTimeout(capTimer);
+  } else {
+    await sleep(1500);
+  }
 
   return {
     ok: true,
@@ -594,10 +769,12 @@ async function releaseArmedBarge(arm, reason = "release-request") {
     await arm.callSession.hangup();
     arm.released = true;
     arm.releasedAt = new Date().toISOString();
-    armedBarges.delete(arm.key);
     return { ok: true, released: true, reason, arm: summarizeArmedBarge(arm) };
   } catch (e) {
     return { ok: false, released: false, reason, error: e && e.message, arm: summarizeArmedBarge(arm) };
+  } finally {
+    // Always drop the entry -- even if hangup threw -- so a failed release can't leak/stale-reuse.
+    armedBarges.delete(arm.key);
   }
 }
 
@@ -650,7 +827,7 @@ async function barge(softphone, { agentExtNumber, code, wavPath, delayMs, trigge
 
   log(`dialing ${dial}`);
   recordEvent("dial.start", { dial });
-  const callSession = await softphone.call(dial);
+  const callSession = await dialWithTimeout(softphone, dial);
   log(`call set up sessionId=${callSession.sessionId || "?"} partyId=${callSession.partyId || "?"}`);
   recordEvent("call.setup", {
     sessionId: callSession.sessionId || null,
@@ -678,6 +855,7 @@ async function barge(softphone, { agentExtNumber, code, wavPath, delayMs, trigge
   callSession.once("busy", (...args) => {
     log("event: busy (486) -- target unreachable/invalid");
     recordEvent("call.busy", { args: summarizeEventArgs(args) });
+    try { callSession.hangup?.(); } catch {}
   });
   callSession.once("disposed", (...args) => {
     log(`event: disposed (inbound rtp seen=${inbound})`);
@@ -690,7 +868,14 @@ async function barge(softphone, { agentExtNumber, code, wavPath, delayMs, trigge
   const result = { ok: true, dial, sessionId: callSession.sessionId || null, partyId: callSession.partyId || null, played: false, steps, events };
 
   if (wavPath) {
-    const buf = fs.readFileSync(wavPath);
+    let buf;
+    try {
+      buf = fs.readFileSync(wavPath);
+    } catch (e) {
+      // Missing/unreadable WAV: tear down the leg instead of leaving it open on the agent.
+      try { await callSession.hangup(); } catch {}
+      throw new Error(`voicemail file unreadable (${wavPath}): ${e.message}`);
+    }
     recordEvent("playback.loaded", { wavPath, bytes: buf.length });
     // 1) Wait for the media path to actually come up (first inbound RTP).
     const mediaCapMs = 5000;
@@ -704,6 +889,12 @@ async function barge(softphone, { agentExtNumber, code, wavPath, delayMs, trigge
       log(`waiting for play cue: silence>=${silenceHoldMs}ms after activity (rms<${silenceRms}, min ${minWaitMs}ms, max ${cueMaxWaitMs}ms)`);
       const cue = await waitForPlayCue(callSession, { log, silenceRms, silenceHoldMs, minWaitMs, maxWaitMs: cueMaxWaitMs });
       recordEvent("playback.cue", { trigger, cue });
+      if (cue === "disposed" || callSession.disposed) {
+        result.released = true;
+        result.releasedAt = result.releasedAt || new Date().toISOString();
+        result.reason = "disposed-before-playback";
+        return result;
+      }
     } else {
       const settle = Number.isFinite(delayMs) ? delayMs : 700;
       log(`fixed trigger: settling ${settle}ms before play`);
@@ -742,7 +933,22 @@ async function barge(softphone, { agentExtNumber, code, wavPath, delayMs, trigge
     void streamHandle; // (could .stop() on demand; left running to completion here)
     result.played = true;
     if (waitForRelease) {
-      await releasePromise;
+      // Hard cap so a never-finishing send / non-disposing leg can't hang the handler.
+      let capTimer = null;
+      const cap = new Promise((resolve) => {
+        capTimer = setTimeout(async () => {
+          if (!result.released) {
+            log(`play hard-cap ${PLAY_HARD_CAP_MS}ms hit -> forcing hangup`);
+            try { await callSession.hangup(); } catch {}
+            result.released = true;
+            result.releasedAt = new Date().toISOString();
+          }
+          if (releaseDone) releaseDone();
+          resolve();
+        }, PLAY_HARD_CAP_MS);
+      });
+      await Promise.race([releasePromise, cap]);
+      if (capTimer) clearTimeout(capTimer);
     } else {
       // Let it run briefly; don't block the response. Capture media evidence for the report.
       await sleep(1500);
@@ -918,6 +1124,21 @@ function main() {
     startMonitorHealthLoop({ region }); // self-heal dropped registrations while idle
     console.log(`  health loop: re-warm downed monitors every ${env("EX_BARGE_HEALTH_MS", "30000")}ms`);
   });
+
+  // Graceful shutdown: hang up any in-flight barge legs and revoke softphone
+  // registrations so a restart never orphans a *82 leg on an agent's live call.
+  let shuttingDown = false;
+  const shutdown = (sig) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    console.log(`[shutdown] ${sig}: hanging up ${armedBarges.size} armed leg(s), revoking ${monitors.size} monitor(s)`);
+    for (const arm of armedBarges.values()) { try { arm.callSession?.hangup?.(); } catch {} }
+    for (const e of monitors.values()) { try { e.softphone?.revoke?.(); } catch {} }
+    try { server.close(); } catch {}
+    setTimeout(() => process.exit(0), 600);
+  };
+  process.on("SIGTERM", () => shutdown("SIGTERM"));
+  process.on("SIGINT", () => shutdown("SIGINT"));
 }
 
 function html({ supervisorExtNumber, agentExtDefault, wavDefault }) {

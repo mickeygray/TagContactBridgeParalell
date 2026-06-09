@@ -10,6 +10,9 @@ fi
 
 cd "${APP_DIR}"
 
+mkdir -p runtime/audio runtime/ai-bus/live-coach runtime/live-coach-grpc-bridge runtime/audio/voicemails
+chmod -R u+rwX runtime 2>/dev/null || true
+
 # Some patch paths extract npm-owned files from Windows-created archives, which
 # can flatten executable bits. Keep the known runtime binaries executable.
 chmod +x node_modules/.bin/* 2>/dev/null || true

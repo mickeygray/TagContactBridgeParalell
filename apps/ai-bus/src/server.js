@@ -37,6 +37,12 @@ const {
 const {
   createLiveCoachMongoPersistence,
 } = require("../../../packages/shared-services/src/liveCoachPersistenceService");
+const {
+  CONTEXT_RULES,
+} = require("../../../packages/shared-services/src/liveCoachSanitizedPipeline");
+const {
+  buildContextRuleCatalog,
+} = require("../../../packages/shared-services/src/liveCoachContextMatchBank");
 
 let processCrashLogger = null;
 
@@ -66,8 +72,32 @@ function boolFromEnv(value, fallback = false) {
   return ["1", "true", "yes", "on"].includes(String(value).trim().toLowerCase());
 }
 
+function textValue(value, depth = 0) {
+  if (value === undefined || value === null) return "";
+  if (typeof value === "string") return value;
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  if (depth > 3) return "";
+  if (Array.isArray(value)) {
+    return value.map((item) => textValue(item, depth + 1)).filter(Boolean).join("");
+  }
+  if (typeof value === "object") {
+    return textValue(
+      value.text ??
+        value.value ??
+        value.output_text ??
+        value.outputText ??
+        value.content ??
+        value.message ??
+        value.say ??
+        "",
+      depth + 1,
+    );
+  }
+  return String(value || "");
+}
+
 function cleanText(value, maxLength = 4000) {
-  return String(value || "")
+  return textValue(value)
     .replace(/\s+/g, " ")
     .trim()
     .slice(0, maxLength);
@@ -123,6 +153,7 @@ function createOpenAiSemanticContextJudge({ logger } = {}) {
     120,
     Math.min(1200, Number(process.env.LIVE_COACH_CONTEXT_JUDGE_MAX_OUTPUT_TOKENS || 450) || 450),
   );
+  const catalog = buildContextRuleCatalog(CONTEXT_RULES);
 
   return async function judgeWithOpenAi({
     session,
@@ -154,8 +185,10 @@ function createOpenAiSemanticContextJudge({ logger } = {}) {
       ...(serviceTier ? { service_tier: serviceTier } : {}),
       instructions: [
         "You are the semantic context judge between STT and a live tax-resolution sales coach.",
-        "The candidate list is deterministic and intentionally over-inclusive. Pick every candidate key that genuinely helps answer or guide the specific prospect statement.",
-        "Use only exact keys from candidates. Do not invent keys.",
+        "Your job is one mini/API pass: understand the VAD-released sentence, use the compact tool catalog, rank/filter fuzzy matches, and decide whether the coach should respond.",
+        "candidateHints are deterministic word/phrase hits and are intentionally over-inclusive. They are useful hints, not the ceiling.",
+        "candidateCatalog is the full compact lookup tool. Recover relevant fuzzy matches from it when the sentence clearly points to a catalog key even if candidateHints missed it.",
+        "Use only exact keys from candidateCatalog. Do not invent keys.",
         "Reject voicemail, automated prompts, call screeners, filler, greetings, and fragments with no useful sales/tax/human context.",
         "Return JSON only with this shape:",
         '{"shouldCompose":boolean,"completeThought":boolean,"selectedKeys":[{"key":"exact_key","confidence":0.0,"reason":"short reason"}],"rejected":[{"key":"exact_key","reason":"short reason"}],"transcriptMeaning":"one sentence meaning","actionReason":"short machine reason","confidence":0.0}',
@@ -167,7 +200,7 @@ function createOpenAiSemanticContextJudge({ logger } = {}) {
           role: "user",
           content: JSON.stringify({
             agentName: metadata.agentName || context?.metadata?.agentName || "",
-            firmName: metadata.firmName || context?.metadata?.firmName || "Tax Advocate Group",
+            firmName: metadata.firmName || context?.metadata?.firmName || "Wynn Tax Solutions",
             phraseText: transcript?.text || context?.phraseText || "",
             localCompleteness: {
               completeThought: Boolean(context?.completeThought),
@@ -176,7 +209,8 @@ function createOpenAiSemanticContextJudge({ logger } = {}) {
               localActionReason: context?.actionReason || "",
             },
             recentProspect,
-            candidates,
+            candidateHints: candidates,
+            candidateCatalog: catalog,
           }),
         },
       ],
@@ -381,8 +415,10 @@ function createAnthropicDialogComposer({ logger } = {}) {
             let event = null;
             try { event = JSON.parse(data); } catch {}
             const delta = event?.type === "content_block_delta" && event?.delta?.type === "text_delta"
-              ? String(event.delta.text || "")
-              : "";
+              ? textValue(event.delta.text)
+              : event?.type === "content_block_start"
+                ? textValue(event.content_block?.text)
+                : "";
             if (delta) {
               output += delta;
               onDelta?.(delta, cleanText(output, 1000));
@@ -420,6 +456,10 @@ function buildConfig() {
     60_000,
     Number(process.env.LIVE_COACH_STALE_MAX_IDLE_MS || 5 * 60_000) || 5 * 60_000,
   );
+  const liveCoachHeartbeatIntervalMs = Math.max(
+    1000,
+    Number(process.env.LIVE_COACH_HEARTBEAT_INTERVAL_MS || 5000) || 5000,
+  );
   return {
     ...getSharedConfig({
       // The AI playground can still boot without Mongo, but when a Mongo URI
@@ -431,6 +471,7 @@ function buildConfig() {
     liveCoachStaleSweepEnabled: boolFromEnv(process.env.LIVE_COACH_STALE_SWEEP_ENABLED, true),
     liveCoachStaleSweepIntervalMs: staleSweepIntervalMs,
     liveCoachStaleMaxIdleMs: staleSweepMaxIdleMs,
+    liveCoachHeartbeatIntervalMs,
   };
 }
 
@@ -783,6 +824,14 @@ function createLiveCoachDashboardHtml() {
       return ["stopped", "stale", "voicemail_rejected"].includes(String(session?.status || ""));
     }
 
+    function isRejectedSession(session) {
+      const status = String(session?.status || "");
+      const dialogStatus = String(session?.latest?.dialog?.status || "");
+      return status === "voicemail_rejected" ||
+        dialogStatus === "rejected" ||
+        Number(session?.counters?.voicemailRejected || 0) > 0;
+    }
+
     function isLiveSession(session) {
       const source = String(session?.metadata?.source || "").toLowerCase();
       if (source.includes("fixture")) return false;
@@ -996,6 +1045,7 @@ function createLiveCoachDashboardHtml() {
         eventSource.addEventListener("snapshot", (event) => handleEvent(JSON.parse(event.data)));
         eventSource.addEventListener("transcript.provisional", (event) => handleEvent(JSON.parse(event.data)));
         eventSource.addEventListener("transcript", (event) => handleEvent(JSON.parse(event.data)));
+        eventSource.addEventListener("context.clear", (event) => handleEvent(JSON.parse(event.data)));
         eventSource.addEventListener("dialog", (event) => handleEvent(JSON.parse(event.data)));
         eventSource.addEventListener("voicemail.reject", (event) => handleEvent(JSON.parse(event.data)));
         eventSource.addEventListener("session.stop", (event) => handleEvent(JSON.parse(event.data)));
@@ -1034,7 +1084,7 @@ function createLiveCoachDashboardHtml() {
 
     refreshSessions();
     renderContext();
-    setInterval(refreshSessions, 2500);
+    setInterval(refreshSessions, 1500);
   </script>
 </body>
 </html>`;
@@ -1090,9 +1140,25 @@ function createLiveCoachWallboardHtml() {
       display: flex;
       flex-wrap: wrap;
       justify-content: flex-end;
+      align-items: center;
       gap: 7px;
       color: var(--muted);
       font-size: 12px;
+    }
+    button.action {
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: #fff;
+      color: var(--text);
+      cursor: pointer;
+      font: inherit;
+      font-weight: 750;
+      padding: 3px 9px;
+      white-space: nowrap;
+    }
+    button.action:disabled {
+      cursor: wait;
+      opacity: 0.6;
     }
     .pill {
       border: 1px solid var(--line);
@@ -1104,6 +1170,13 @@ function createLiveCoachWallboardHtml() {
     .pill.live { border-color: #bfdbfe; color: var(--blue); font-weight: 800; }
     .pill.waiting { color: var(--amber); }
     .pill.rejected { border-color: #fecaca; color: var(--red); font-weight: 800; }
+    .phase-text.flash {
+      border-left: 4px solid #ef4444;
+      background: #fff7f7;
+      color: #991b1b;
+      padding: 8px 10px;
+      font-weight: 760;
+    }
     main {
       display: grid;
       grid-template-columns: repeat(var(--lane-count, 3), minmax(0, 1fr));
@@ -1203,6 +1276,8 @@ function createLiveCoachWallboardHtml() {
     <h1>RingCX Live Coach</h1>
     <div class="status">
       <span class="pill live" id="live-count">0 live</span>
+      <span class="pill" id="sync-summary">sync waiting</span>
+      <button class="action" id="sync-current" type="button">Sync current calls</button>
       <span class="pill" id="updated">waiting</span>
     </div>
   </header>
@@ -1219,10 +1294,13 @@ function createLiveCoachWallboardHtml() {
     const els = {
       lanes: document.getElementById("lanes"),
       liveCount: document.getElementById("live-count"),
+      syncSummary: document.getElementById("sync-summary"),
+      syncCurrent: document.getElementById("sync-current"),
       updated: document.getElementById("updated"),
     };
     const laneState = new Map();
     const eventSources = new Map();
+    const VOICEMAIL_FLASH_MS = 5000;
     const dashboardToken = new URLSearchParams(window.location.search).get("accessToken") || "";
 
     function dashboardUrl(path) {
@@ -1258,8 +1336,24 @@ function createLiveCoachWallboardHtml() {
       ].join(" ").toLowerCase().replace(/[^a-z0-9@+._ -]+/g, "");
     }
 
+    function compactCallEventText(event) {
+      return [
+        event?.agentEmail || "",
+        event?.agentEmail ? String(event.agentEmail).split("@")[0] : "",
+        event?.agentName || "",
+        event?.extensionId || "",
+        event?.agentExtension || "",
+        event?.agentExtensionId || "",
+      ].join(" ").toLowerCase().replace(/[^a-z0-9@+._ -]+/g, "");
+    }
+
     function agentMatches(agent, session) {
       const haystack = compactAgentText(session);
+      return agent.aliases.some((alias) => haystack.includes(alias.toLowerCase()));
+    }
+
+    function callEventMatches(agent, event) {
+      const haystack = compactCallEventText(event);
       return agent.aliases.some((alias) => haystack.includes(alias.toLowerCase()));
     }
 
@@ -1283,9 +1377,48 @@ function createLiveCoachWallboardHtml() {
       return Date.parse(session?.lastEventAt || session?.updatedAt || session?.createdAt || "") || 0;
     }
 
+    function callEventSortMs(event) {
+      return Date.parse(event?.createdAt || "") || 0;
+    }
+
+    function isRecentlyUpdated(session, windowMs = 180000) {
+      const updatedMs = sessionSortMs(session);
+      return updatedMs && Date.now() - updatedMs <= windowMs;
+    }
+
+    function isActiveFlash(flash) {
+      return Boolean(flash?.expiresAt && Date.now() < flash.expiresAt);
+    }
+
     function isDisplayable(session) {
       if (!isLiveSession(session)) return false;
+      if (isRejectedSession(session)) return false;
       return !isTerminalSession(session);
+    }
+
+    function sessionWaitingForRingCxStream(session) {
+      if (!session || isTerminalSession(session)) return false;
+      const metadata = session?.metadata || {};
+      const source = String(metadata.source || "").toLowerCase();
+      const inputCount = Number(session?.counters?.input || 0);
+      const hasTranscript = Boolean(session?.latest?.provisionalTranscript?.text || session?.latest?.transcript?.text);
+      return source === "mongo-cx" && !metadata.streamId && inputCount <= 0 && !hasTranscript;
+    }
+
+    function eventMatchesFinishedSession(agent, event, sessions) {
+      return (sessions || []).some((session) => {
+        if (!isTerminalSession(session) || !agentMatches(agent, session)) return false;
+        const metadata = session?.metadata || {};
+        const eventUii = String(event?.uii || "");
+        const sessionUii = String(metadata.uii || "");
+        if (eventUii && sessionUii && eventUii === sessionUii) return true;
+        const eventQueue = String(event?.queueItemId || "");
+        const sessionQueue = String(metadata.queueItemId || "");
+        if (eventQueue && sessionQueue && eventQueue === sessionQueue) return true;
+        const eventPhone = String(event?.phone || "").replace(/\\D/g, "");
+        const sessionPhone = String(metadata.phone || "").replace(/\\D/g, "");
+        return Boolean(eventPhone && sessionPhone && eventPhone === sessionPhone);
+      });
     }
 
     function pickSessionForAgent(agent, sessions) {
@@ -1307,6 +1440,45 @@ function createLiveCoachWallboardHtml() {
         })[0] || null;
     }
 
+    function buildVoicemailFlash(source) {
+      const session = source?.session || source;
+      const transcript = source?.transcript || session?.latest?.transcript || null;
+      const dialog = source?.dialog || session?.latest?.dialog || null;
+      const text = transcript?.text
+        ? "Voicemail detected. " + transcript.text
+        : "Voicemail detected. Coach cleared this call.";
+      return {
+        text,
+        at: source?.at || dialog?.at || transcript?.at || session?.lastEventAt || new Date().toISOString(),
+        source: "voicemail gate",
+        wordCount: transcript?.wordCount || 0,
+        guidance: dialog?.guidance || "",
+        phone: session?.metadata?.phone || "",
+        uii: session?.metadata?.uii || "",
+        expiresAt: Date.now() + VOICEMAIL_FLASH_MS,
+      };
+    }
+
+    function pickRecentRejectedForAgent(agent, sessions) {
+      return (sessions || [])
+        .filter((session) => isRejectedSession(session) && agentMatches(agent, session))
+        .filter((session) => isRecentlyUpdated(session, VOICEMAIL_FLASH_MS))
+        .sort((a, b) => sessionSortMs(b) - sessionSortMs(a))[0] || null;
+    }
+
+    function pickCallEventForAgent(agent, callEvents, sessions = []) {
+      if (agent.fallback) return null;
+      const maxAgeMs = 3 * 60 * 1000;
+      return (callEvents || [])
+        .filter((event) => callEventMatches(agent, event))
+        .filter((event) => !eventMatchesFinishedSession(agent, event, sessions))
+        .filter((event) => {
+          const ms = callEventSortMs(event);
+          return ms && Date.now() - ms <= maxAgeMs;
+        })
+        .sort((a, b) => callEventSortMs(b) - callEventSortMs(a))[0] || null;
+    }
+
     function metadataPills(session) {
       const metadata = session?.metadata || {};
       return [
@@ -1317,6 +1489,17 @@ function createLiveCoachWallboardHtml() {
         metadata.streamId ? "stream " + shortId(metadata.streamId, 8) : "",
         session?.status || "",
       ].filter(Boolean).map((x) => "<span class=\\"pill\\">" + escapeHtml(x) + "</span>").join("");
+    }
+
+    function callEventPills(event) {
+      return [
+        event?.phone ? "phone " + event.phone : "",
+        event?.domain || "",
+        event?.caseId ? "case " + event.caseId : "",
+        event?.uii ? "UII " + shortId(event.uii, 12) : "no UII yet",
+        event?.queueItemId ? "q " + shortId(event.queueItemId, 8) : "",
+        event?.createdAt ? "placed " + fmtTime(event.createdAt) : "",
+      ].filter(Boolean).map((x) => "<span class=\\"pill waiting\\">" + escapeHtml(x) + "</span>").join("");
     }
 
     function phaseMeta(items) {
@@ -1347,9 +1530,29 @@ function createLiveCoachWallboardHtml() {
     }
 
     function setLane(agent, patch = {}) {
-      const current = laneState.get(agent.key) || { agent, session: null, transcript: null, context: null, dialog: null };
+      const current = laneState.get(agent.key) || { agent, session: null, waitingCall: null, transcript: null, coachTranscript: null, context: null, dialog: null, transcriptFlash: null };
       laneState.set(agent.key, { ...current, ...patch });
       renderLane(agent);
+    }
+
+    const pendingLanePatches = new Map();
+    let laneFlushScheduled = false;
+
+    function queueLanePatch(agent, patch = {}) {
+      if (!agent) return;
+      const current = pendingLanePatches.get(agent.key) || {};
+      pendingLanePatches.set(agent.key, { ...current, ...patch });
+      if (laneFlushScheduled) return;
+      laneFlushScheduled = true;
+      requestAnimationFrame(() => {
+        laneFlushScheduled = false;
+        const rows = Array.from(pendingLanePatches.entries());
+        pendingLanePatches.clear();
+        for (const [agentKey, queuedPatch] of rows) {
+          const rowAgent = AGENTS.find((candidate) => candidate.key === agentKey);
+          if (rowAgent) setLane(rowAgent, queuedPatch);
+        }
+      });
     }
 
     function renderShell() {
@@ -1406,56 +1609,229 @@ function createLiveCoachWallboardHtml() {
       el.className = "pill " + (status || "");
     }
 
+    function appendTranscriptText(existing, incoming) {
+      const left = String(existing || "").trim();
+      const right = String(incoming || "").trim();
+      if (!left) return right;
+      if (!right) return left;
+      const normalizedLeft = left.toLowerCase();
+      const normalizedRight = right.toLowerCase();
+      if (normalizedLeft.endsWith(normalizedRight)) return left;
+      if (normalizedRight.startsWith(normalizedLeft)) return right;
+      if (/^[.,!?;:%)\]}]/.test(right)) return left + right;
+      return left + " " + right;
+    }
+
+    function appendCoachTranscript(current, transcript) {
+      const existing = current?.coachTranscript;
+      const text = existing?.awaitingCoach
+        ? appendTranscriptText(existing.text, transcript?.text)
+        : String(transcript?.text || "").trim();
+      return {
+        ...(existing?.awaitingCoach ? existing : transcript),
+        ...transcript,
+        text,
+        wordCount: text ? text.split(/\\s+/).filter(Boolean).length : 0,
+        coachHeld: true,
+        awaitingCoach: true,
+      };
+    }
+
     function renderLane(agent) {
       const state = laneState.get(agent.key) || {};
       const session = state.session;
+      const waitingCall = state.waitingCall;
+      const waitingForStream = sessionWaitingForRingCxStream(session);
+      const streamStatus = state.streamStatus || session?.latest?.streamStatus || null;
+      const transcriptFlash = isActiveFlash(state.transcriptFlash) ? state.transcriptFlash : null;
       const metadata = session?.metadata || {};
-      setHtml(agent.key + "-agent-meta", session ? metadataPills(session) : "<span class=\\"pill waiting\\">waiting for stream</span>");
+      setHtml(agent.key + "-agent-meta", session
+        ? metadataPills(session)
+        : waitingCall
+          ? callEventPills(waitingCall)
+          : "<span class=\\"pill waiting\\">waiting for stream</span>");
 
-      const transcript = state.transcript || session?.latest?.provisionalTranscript || session?.latest?.transcript;
-      setText(agent.key + "-transcript", transcript?.text || "", "Waiting for prospect speech...");
-      setStatePill(agent.key + "-transcript-state", transcript?.text ? (transcript.provisional ? "live" : "heard") : "waiting", transcript?.text ? "live" : "waiting");
+      const transcript = transcriptFlash || state.coachTranscript || state.transcript || session?.latest?.provisionalTranscript || session?.latest?.transcript;
+      const waitingStreamText = waitingCall
+        ? "Call event received. Waiting for RingCX stream..."
+        : waitingForStream
+          ? "Current CX call joined. Waiting for RingCX audio stream..."
+          : streamStatus
+            ? "Prospect audio frames are arriving. Waiting for STT to release speech..."
+          : "Waiting for prospect speech...";
+      setText(agent.key + "-transcript", transcript?.text || "", waitingStreamText);
+      const transcriptEl = document.getElementById(agent.key + "-transcript");
+      transcriptEl?.classList.toggle("flash", Boolean(transcriptFlash));
+      setStatePill(agent.key + "-transcript-state", transcript?.text ? (transcriptFlash ? "voicemail" : transcript.coachHeld ? "coaching this" : transcript.provisional ? "streaming" : "VAD final") : waitingForStream ? "stream missing" : streamStatus ? "audio" : waitingCall ? "waiting stream" : "waiting", transcriptFlash ? "rejected" : transcript?.text || streamStatus ? "live" : waitingForStream ? "rejected" : "waiting");
       setHtml(agent.key + "-transcript-meta", phaseMeta([
         transcript?.model || transcript?.source || "",
         transcript?.at ? fmtTime(transcript.at) : "",
         transcript?.wordCount ? transcript.wordCount + " words" : "",
+        streamStatus && !transcript?.text ? Math.round(Number(streamStatus.durationSec || 0)) + "s audio" : "",
+        streamStatus && !transcript?.text ? "active " + Number(streamStatus.activePct || 0).toFixed(1) + "%" : "",
+        streamStatus && !transcript?.text ? "waiting on STT" : "",
+        transcriptFlash?.guidance || "",
+        transcriptFlash?.phone ? "phone " + transcriptFlash.phone : "",
+        transcriptFlash?.uii ? "UII " + shortId(transcriptFlash.uii, 12) : "",
+        transcript?.coachHeld ? "held until coach advances" : "",
+        waitingForStream ? "joined current call; no streamId/input" : "",
+        waitingCall && !transcript?.text ? "app fired cx.call.placed" : "",
       ]));
 
       const context = state.context || session?.latest?.context;
+      const contextStatus = state.contextStatus || null;
       setText(agent.key + "-context", formatContext(context), "Waiting for mini context...");
-      setStatePill(agent.key + "-context-state", context ? (context.shouldCompose ? "compose" : "hold") : "waiting", context?.shouldCompose ? "live" : "waiting");
+      setStatePill(agent.key + "-context-state", context ? (context.shouldCompose ? "mini kept" : "mini hold") : contextStatus?.label || "waiting", context?.shouldCompose || contextStatus?.live ? "live" : "waiting");
       setHtml(agent.key + "-context-meta", phaseMeta([
         context?.jurisdiction || "",
         context?.completeThought ? "complete" : context ? "collecting" : "",
         context?.primaryContextKey || "",
         context?.miniJudgement?.candidateCount ? context.miniJudgement.candidateCount + " candidates" : "",
+        ...(contextStatus?.meta || []),
       ]));
 
       const dialog = state.dialog || session?.latest?.dialog;
+      const dialogStatus = state.dialogStatus || null;
       const rejected = dialog?.status === "rejected";
       setText(agent.key + "-dialog", dialog?.say || "", rejected ? "Call rejected for voicemail match." : "Coach line will appear here.");
-      setStatePill(agent.key + "-dialog-state", dialog?.label || dialog?.status || "waiting", rejected ? "rejected" : dialog?.status === "ready" ? "live" : "waiting");
+      setStatePill(agent.key + "-dialog-state", dialog?.label || dialog?.status || dialogStatus?.label || "waiting", rejected ? "rejected" : dialog?.status === "ready" || dialog?.status === "streaming" || dialogStatus?.live ? "live" : "waiting");
       setHtml(agent.key + "-dialog-meta", phaseMeta([
         dialog?.composer || dialog?.model || "",
         dialog?.at ? fmtTime(dialog.at) : "",
         dialog?.guidance || "",
+        ...(dialogStatus?.meta || []),
       ]));
     }
 
     function handleEvent(agent, payload) {
+      const state = laneState.get(agent.key) || {};
       if (["session.stop", "session.stale", "voicemail.reject"].includes(String(payload?.type || ""))) {
+        const flash = payload?.type === "voicemail.reject" || payload?.dialog?.status === "rejected" || isRejectedSession(payload?.session)
+          ? buildVoicemailFlash(payload)
+          : (isActiveFlash(state.transcriptFlash) ? state.transcriptFlash : null);
         closeLaneSource(agent);
-        setLane(agent, { session: null, transcript: null, context: null, dialog: null });
+        queueLanePatch(agent, {
+          session: null,
+          waitingCall: null,
+          transcript: null,
+          coachTranscript: null,
+          context: null,
+          dialog: null,
+          contextStatus: null,
+          dialogStatus: null,
+          transcriptFlash: flash,
+        });
+        els.updated.textContent = payload.at ? fmtTime(payload.at) : fmtTime(new Date().toISOString());
+        return;
+      }
+      if (payload.type === "context.clear") {
+        queueLanePatch(agent, {
+          transcript: {
+            at: payload.at || payload.transcript?.at || new Date().toISOString(),
+            role: "system",
+            text: payload.transcript?.text
+              ? "Hold prompt detected. Context cleared. " + payload.transcript.text
+              : "Hold prompt detected. Context cleared.",
+            source: "system context gate",
+            wordCount: 0,
+          },
+          coachTranscript: null,
+          context: null,
+          dialog: null,
+          contextStatus: { label: "context cleared", live: false, meta: [payload.hold?.match || payload.hold?.reason || ""].filter(Boolean) },
+          dialogStatus: { label: "waiting", live: false, meta: ["Listening for the next prospect phrase"] },
+        });
         els.updated.textContent = payload.at ? fmtTime(payload.at) : fmtTime(new Date().toISOString());
         return;
       }
       const patch = {};
-      if (payload.session) patch.session = payload.session;
-      if (payload.provisionalTranscript?.role === "prospect") patch.transcript = payload.provisionalTranscript;
-      if (payload.transcript?.role === "prospect") patch.transcript = payload.transcript;
-      if (payload.context) patch.context = payload.context;
-      if (payload.dialog) patch.dialog = payload.dialog;
-      if (Object.keys(patch).length) setLane(agent, patch);
+      if (payload.session) {
+        patch.session = payload.session;
+        patch.streamStatus = payload.session.latest?.streamStatus || null;
+      }
+      if (payload.type === "stream.status" && payload.streamStatus) {
+        patch.streamStatus = payload.streamStatus;
+      }
+      if (payload.provisionalTranscript?.role === "prospect" && !state.coachTranscript?.awaitingCoach) {
+        patch.transcript = payload.provisionalTranscript;
+      }
+      if (payload.transcript?.role === "prospect") {
+        patch.transcript = payload.transcript;
+        patch.coachTranscript = appendCoachTranscript(state, payload.transcript);
+        patch.contextStatus = { label: "mini queued", live: true, meta: ["VAD released"] };
+        patch.dialogStatus = { label: "waiting on coach", live: true, meta: [] };
+      }
+      if (payload.type === "context.judge.start") {
+        if (state.coachTranscript?.text) {
+          patch.coachTranscript = { ...state.coachTranscript, coachHeld: true, awaitingCoach: true };
+        }
+        patch.contextStatus = {
+          label: "mini checking",
+          live: true,
+          meta: [payload.candidateCount ? payload.candidateCount + " candidates" : ""].filter(Boolean),
+        };
+      }
+      if (payload.type === "context.judge.done") {
+        patch.contextStatus = {
+          label: payload.shouldCompose ? "mini kept" : "mini hold",
+          live: Boolean(payload.shouldCompose),
+          meta: [
+            payload.elapsedMs ? payload.elapsedMs + "ms" : "",
+            Array.isArray(payload.selectedKeys) && payload.selectedKeys.length ? payload.selectedKeys.slice(0, 3).join(", ") : "",
+          ].filter(Boolean),
+        };
+        if (!payload.shouldCompose && state.coachTranscript?.awaitingCoach) patch.coachTranscript = null;
+      }
+      if (payload.type === "pipeline.hold") {
+        patch.contextStatus = {
+          label: "hold",
+          live: false,
+          meta: [payload.action || payload.hold?.reason || ""].filter(Boolean),
+        };
+        if (state.coachTranscript?.awaitingCoach) patch.coachTranscript = null;
+      }
+      if (payload.context) {
+        patch.context = payload.context;
+        if (payload.context.shouldCompose && (payload.context.phraseText || payload.context.text)) {
+          patch.coachTranscript = {
+            ...(state.transcript || {}),
+            id: payload.context.sourceTranscriptId || state.transcript?.id || null,
+            at: payload.context.at || state.transcript?.at || new Date().toISOString(),
+            role: "prospect",
+            text: payload.context.phraseText || payload.context.text,
+            source: "mini-context",
+            model: payload.context.miniJudgement?.model || state.transcript?.model || null,
+            wordCount: String(payload.context.phraseText || payload.context.text || "").trim().split(/\\s+/).filter(Boolean).length,
+            coachHeld: true,
+            awaitingCoach: false,
+          };
+        }
+      }
+      if (payload.type === "compose.start") {
+        patch.dialogStatus = {
+          label: "coach writing",
+          live: true,
+          meta: [payload.dialogId ? "dialog " + shortId(payload.dialogId, 8) : ""].filter(Boolean),
+        };
+      }
+      if (payload.type === "compose.deduped" || payload.type === "compose.rate_limited") {
+        patch.dialogStatus = {
+          label: payload.type === "compose.deduped" ? "deduped" : "rate limited",
+          live: false,
+          meta: [payload.windowMs ? payload.windowMs + "ms window" : "", payload.rateLimitPerMinute ? payload.rateLimitPerMinute + "/min" : ""].filter(Boolean),
+        };
+      }
+      if (payload.type === "compose.supersede") {
+        patch.dialogStatus = { label: "coach updating", live: true, meta: [] };
+      }
+      if (payload.dialog) {
+        patch.dialog = payload.dialog;
+        const held = patch.coachTranscript || state.coachTranscript;
+        if (held?.text && (payload.dialog.status === "streaming" || payload.dialog.status === "ready")) {
+          patch.coachTranscript = { ...held, coachHeld: true, awaitingCoach: false };
+        }
+      }
+      if (Object.keys(patch).length) queueLanePatch(agent, patch);
       els.updated.textContent = payload.at ? fmtTime(payload.at) : fmtTime(new Date().toISOString());
     }
 
@@ -1467,35 +1843,74 @@ function createLiveCoachWallboardHtml() {
 
     function subscribeLane(agent, session) {
       const current = laneState.get(agent.key);
-      if (current?.session?.id === session?.id && eventSources.has(agent.key)) return;
-      closeLaneSource(agent);
-      setLane(agent, {
+      const latestSnapshot = {
         session,
         transcript: session?.latest?.provisionalTranscript || session?.latest?.transcript || null,
+        coachTranscript: session?.latest?.context?.phraseText ? {
+          ...(session?.latest?.transcript || {}),
+          role: "prospect",
+          text: session.latest.context.phraseText,
+          source: "mini-context",
+          model: session.latest.context.miniJudgement?.model || session?.latest?.transcript?.model || null,
+          coachHeld: true,
+        } : null,
         context: session?.latest?.context || null,
         dialog: session?.latest?.dialog || null,
-      });
+        streamStatus: session?.latest?.streamStatus || null,
+      };
+      setLane(agent, latestSnapshot);
+      if (current?.session?.id === session?.id && eventSources.has(agent.key)) return;
+      closeLaneSource(agent);
       if (!session?.id || isTerminalSession(session)) return;
       const source = new EventSource(dashboardUrl("/api/ai/live-coach/dashboard/sessions/" + encodeURIComponent(session.id) + "/events"));
-      ["snapshot", "transcript.provisional", "transcript", "context", "dialog", "voicemail.reject", "session.stop", "session.stale"].forEach((eventName) => {
+      [
+        "snapshot",
+        "stream.status",
+        "transcript.provisional",
+        "transcript",
+        "context.clear",
+        "context.judge.start",
+        "context.judge.done",
+        "pipeline.hold",
+        "context",
+        "compose.start",
+        "compose.supersede",
+        "compose.deduped",
+        "compose.rate_limited",
+        "dialog",
+        "dialog.error",
+        "voicemail.reject",
+        "session.stop",
+        "session.stale",
+      ].forEach((eventName) => {
         source.addEventListener(eventName, (event) => handleEvent(agent, JSON.parse(event.data)));
       });
       eventSources.set(agent.key, source);
     }
 
     async function loadSessions() {
-      const response = await fetch(dashboardUrl("/api/ai/live-coach/dashboard/sessions"));
+      const response = await fetch(dashboardUrl("/api/ai/live-coach/dashboard/sessions?summary=1"));
       const data = await response.json();
       const sessions = (Array.isArray(data.sessions) ? data.sessions : []).filter(isLiveSession);
+      const callEvents = Array.isArray(data.callEvents) ? data.callEvents : [];
       const active = sessions.filter((session) => !isTerminalSession(session));
       els.liveCount.textContent = active.length + " live";
       els.updated.textContent = fmtTime(new Date().toISOString());
       for (const agent of AGENTS) {
         const session = pickSessionForAgent(agent, sessions);
+        const waitingCall = pickCallEventForAgent(agent, callEvents, sessions);
+        const rejectedSession = pickRecentRejectedForAgent(agent, sessions);
+        const current = laneState.get(agent.key) || {};
+        const transcriptFlash = rejectedSession
+          ? buildVoicemailFlash(rejectedSession)
+          : isActiveFlash(current.transcriptFlash)
+            ? current.transcriptFlash
+            : null;
         if (!session) {
           closeLaneSource(agent);
-          setLane(agent, { session: null, transcript: null, context: null, dialog: null });
+          setLane(agent, { session: null, waitingCall, transcript: null, coachTranscript: null, context: null, dialog: null, transcriptFlash });
         } else {
+          setLane(agent, { waitingCall: null, transcriptFlash: null });
           subscribeLane(agent, session);
         }
       }
@@ -1514,9 +1929,44 @@ function createLiveCoachWallboardHtml() {
       }
     }
 
+    let syncCurrentInFlight = false;
+    async function syncCurrentCalls(options = {}) {
+      if (syncCurrentInFlight) return;
+      syncCurrentInFlight = true;
+      if (!options.quiet && els.syncCurrent) els.syncCurrent.disabled = true;
+      try {
+        const response = await fetch(dashboardUrl("/api/ai/live-coach/dashboard/sync-current"), {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ lookbackMs: 5 * 60 * 1000, limit: 120 }),
+        });
+        const data = await response.json();
+        if (!response.ok || data?.ok === false) {
+          throw new Error(data?.error || "sync failed");
+        }
+        const summary = [
+          (data.activeCount || 0) + " active",
+          (data.ensuredCount || 0) + " joined",
+          data.retiredCount ? data.retiredCount + " retired" : "",
+          data.checkedAgents ? data.checkedAgents + " agents checked" : "",
+        ].filter(Boolean).join(" | ");
+        if (els.syncSummary) els.syncSummary.textContent = summary || "no active calls";
+        if (!options.quiet) await refreshSessions();
+      } catch (error) {
+        if (els.syncSummary) els.syncSummary.textContent = "sync error";
+        console.warn("live coach current-call sync failed", error);
+      } finally {
+        syncCurrentInFlight = false;
+        if (els.syncCurrent) els.syncCurrent.disabled = false;
+      }
+    }
+
+    els.syncCurrent?.addEventListener("click", () => syncCurrentCalls());
     renderShell();
+    syncCurrentCalls({ quiet: true });
     refreshSessions();
-    setInterval(refreshSessions, 2500);
+    setInterval(refreshSessions, 1500);
+    setInterval(() => syncCurrentCalls({ quiet: true }), 10000);
   </script>
 </body>
 </html>`;
@@ -1550,12 +2000,15 @@ async function main() {
       logger,
     })
     : null;
+  const semanticContextJudge = createOpenAiSemanticContextJudge({ logger });
   const coachBus = createLiveCoachBus({
     rootDir: config.rootDir,
     logger,
     persistence: coachPersistence,
     dialogComposer: createAnthropicDialogComposer({ logger }),
-    semanticContextJudge: createOpenAiSemanticContextJudge({ logger }),
+    // semantic_vad only decides when STT should release text. This optional API judge is the
+    // fuzzy filter that ranks deterministic candidates before Sonnet composes a line.
+    semanticContextJudge,
     composeDedupWindowMs: Number(process.env.LIVE_COACH_COMPOSE_DEDUP_WINDOW_MS || 4000) || 4000,
     composeRateLimitPerMinute: Number(process.env.LIVE_COACH_COMPOSE_RATE_LIMIT_PER_MINUTE || 3) || 3,
     composeDeltaThrottleMs: Number(process.env.LIVE_COACH_COMPOSE_DELTA_THROTTLE_MS || 100) || 100,
@@ -1580,6 +2033,15 @@ async function main() {
     const extra = {
       port: config.port,
       sessions: coachBus.getSummary(),
+      liveCoach: {
+        contextJudgeEnabled: Boolean(semanticContextJudge),
+        contextJudgeModel: semanticContextJudge
+          ? cleanText(process.env.LIVE_COACH_CONTEXT_JUDGE_MODEL || process.env.LIVE_COACH_MINI_MODEL || "gpt-5.4-mini", 120)
+          : null,
+        anthropicComposerEnabled: boolFromEnv(process.env.LIVE_COACH_ANTHROPIC_COMPOSER_ENABLED, false),
+        composeDedupWindowMs: Number(process.env.LIVE_COACH_COMPOSE_DEDUP_WINDOW_MS || 4000) || 4000,
+        composeRateLimitPerMinute: Number(process.env.LIVE_COACH_COMPOSE_RATE_LIMIT_PER_MINUTE || 3) || 3,
+      },
     };
     if (!isDetailedHealthRequest(req)) {
       return res.json(buildPublicHealthPayload(config, mongo));
@@ -1599,12 +2061,154 @@ async function main() {
     res.end(createLiveCoachWallboardHtml());
   });
 
-  app.get("/api/ai/live-coach/dashboard/sessions", requireDashboardAccess, (req, res) => {
+  function buildBindingFromCallEvent(event = {}) {
+    return {
+      status: event.expired ? "expired" : "active",
+      active: !event.expired,
+      reason: event.expired ? "event-expired" : "matched-cx-call-placed",
+      event,
+      metadata: {
+        source: "mongo-cx",
+        agentEmail: event.agentEmail || "",
+        agentExtension: event.extensionId || "",
+        agentName: event.agentName || "",
+        firmName: "Wynn Tax Solutions",
+        uii: event.uii || "",
+        queueItemId: event.queueItemId || "",
+        caseId: event.caseId || "",
+        phone: event.phone || "",
+        domain: event.domain || "",
+        eventId: event.id || "",
+        callSessionId: event.callSessionId || "",
+      },
+    };
+  }
+
+  function latestCallEventByAgent(callEvents = []) {
+    const latestByAgent = new Map();
+    for (const event of Array.isArray(callEvents) ? callEvents : []) {
+      if (!event || event.expired) continue;
+      const agentKey = cleanText(event.extensionId || event.agentEmail || "", 180).toLowerCase();
+      const identity = cleanText(event.uii || event.queueItemId || event.id || "", 180);
+      if (!agentKey || !identity) continue;
+      const atMs = Number(event.createdAtMs || Date.parse(event.createdAt || "")) || 0;
+      const current = latestByAgent.get(agentKey);
+      if (!current || atMs > current.atMs) latestByAgent.set(agentKey, { event, atMs });
+    }
+    return latestByAgent;
+  }
+
+  function retireReplacedSessionsFromCallEvents(callEvents = []) {
+    const latestByAgent = latestCallEventByAgent(callEvents);
+
+    const retired = [];
+    for (const { event } of latestByAgent.values()) {
+      const result = coachBus.retireReplacedSessions(buildBindingFromCallEvent(event), { apply: true });
+      if (result.retiredCount) retired.push(...result.retired);
+    }
+    return { checkedAgents: latestByAgent.size, retiredCount: retired.length, retired };
+  }
+
+  async function syncCurrentCoachCalls(input = {}) {
+    if (!mongoBridge) {
+      return { ok: false, error: "Mongo bridge is not available" };
+    }
+    const lookbackMs = Math.max(15_000, Number(input.lookbackMs || 5 * 60 * 1000) || 5 * 60 * 1000);
+    const limit = Math.max(1, Math.min(500, Number(input.limit || 120) || 120));
+    const callEventResult = await mongoBridge.listRecentCoachCallEvents({ lookbackMs, limit });
+    const callEvents = callEventResult.events || [];
+    const latestByAgent = latestCallEventByAgent(callEvents);
+    const results = [];
+    let ensuredCount = 0;
+    let activeCount = 0;
+    let retiredCount = 0;
+
+    for (const { event } of latestByAgent.values()) {
+      const query = {
+        agentExtensionId: event.extensionId || undefined,
+        agentEmail: event.agentEmail || undefined,
+        uii: event.uii || undefined,
+        queueItemId: event.queueItemId || undefined,
+        callSessionId: event.callSessionId || undefined,
+        requireCurrentForAgent: true,
+      };
+      const bindingResult = await mongoBridge.resolveCoachBinding(query);
+      const row = {
+        event,
+        status: bindingResult.status || null,
+        reason: bindingResult.binding?.reason || bindingResult.reason || null,
+        active: Boolean(bindingResult.binding?.active),
+        sessionId: bindingResult.binding?.sessionId || null,
+        ensured: false,
+        retired: null,
+      };
+      if (bindingResult.binding?.active) {
+        activeCount += 1;
+        const retired = coachBus.retireReplacedSessions(bindingResult.binding, { apply: true });
+        retiredCount += retired.retiredCount || 0;
+        const session = coachBus.ensureSession({
+          ...bindingResult.binding.metadata,
+          source: "mongo-cx",
+          sessionId: bindingResult.binding.sessionId,
+          binding: bindingResult.binding,
+        });
+        ensuredCount += 1;
+        row.ensured = true;
+        row.sessionId = session.id;
+        row.sessionStatus = session.status;
+        row.retired = {
+          retiredCount: retired.retiredCount || 0,
+        };
+      }
+      results.push(row);
+    }
+
+    return {
+      ok: true,
+      lookbackMs,
+      callEventCount: callEvents.length,
+      checkedAgents: latestByAgent.size,
+      activeCount,
+      ensuredCount,
+      retiredCount,
+      results,
+    };
+  }
+
+  async function buildLiveCoachDashboardPayload(req) {
     const summaryOnly = ["1", "true", "yes"].includes(String(req.query.summary || "").trim().toLowerCase());
-    res.json({
+    const callEvents = mongoBridge
+      ? (await mongoBridge.listRecentCoachCallEvents({
+        lookbackMs: 5 * 60 * 1000,
+        limit: 120,
+      })).events
+      : [];
+    const retiredFromCallEvents = retireReplacedSessionsFromCallEvents(callEvents);
+    return {
       ok: true,
       sessions: summaryOnly ? coachBus.listSessionSummaries() : coachBus.listSessions(),
-    });
+      callEvents,
+      retiredFromCallEvents: {
+        checkedAgents: retiredFromCallEvents.checkedAgents,
+        retiredCount: retiredFromCallEvents.retiredCount,
+      },
+    };
+  }
+
+  app.get("/api/ai/live-coach/dashboard/sessions", requireDashboardAccess, async (req, res, next) => {
+    try {
+      res.json(await buildLiveCoachDashboardPayload(req));
+    } catch (error) {
+      return next(error);
+    }
+  });
+
+  app.post("/api/ai/live-coach/dashboard/sync-current", requireDashboardAccess, requireMongoBridge, async (req, res, next) => {
+    try {
+      res.json(await syncCurrentCoachCalls(req.body || {}));
+    } catch (error) {
+      return next(error);
+    }
   });
 
   app.get("/api/ai/live-coach/dashboard/session-for-call", requireDashboardAccess, requireMongoBridge, async (req, res, next) => {
@@ -1659,16 +2263,20 @@ async function main() {
       connection: "keep-alive",
       "x-accel-buffering": "no",
     });
+    res.flushHeaders();
     res.write(`event: snapshot\n`);
     res.write(`data: ${JSON.stringify({ type: "snapshot", session })}\n\n`);
+    res.flush?.();
     const heartbeat = setInterval(() => {
       res.write(`event: heartbeat\n`);
       res.write(`data: ${JSON.stringify({ type: "heartbeat", at: new Date().toISOString(), sessionId: req.params.sessionId })}\n\n`);
-    }, 15_000);
+      res.flush?.();
+    }, config.liveCoachHeartbeatIntervalMs);
     if (typeof heartbeat.unref === "function") heartbeat.unref();
     const unsubscribe = coachBus.subscribe(req.params.sessionId, (event) => {
       res.write(`event: ${event.type || "event"}\n`);
       res.write(`data: ${JSON.stringify(event)}\n\n`);
+      res.flush?.();
     });
     req.on("close", () => {
       clearInterval(heartbeat);
@@ -1691,7 +2299,7 @@ async function main() {
       source: "fixture-provisional",
       agentEmail: input.agentEmail || "fixture@local",
       agentName: input.agentName || "Agent",
-      firmName: input.firmName || "Tax Advocate Group",
+      firmName: input.firmName || "Wynn Tax Solutions",
       uii: input.uii || undefined,
     });
     const startDelayMs = Math.max(0, Math.min(2000, Number(input.startDelayMs ?? 350) || 0));
@@ -1718,16 +2326,20 @@ async function main() {
       connection: "keep-alive",
       "x-accel-buffering": "no",
     });
+    res.flushHeaders();
     res.write(`event: snapshot\n`);
     res.write(`data: ${JSON.stringify({ type: "snapshot", session })}\n\n`);
+    res.flush?.();
     const heartbeat = setInterval(() => {
       res.write(`event: heartbeat\n`);
       res.write(`data: ${JSON.stringify({ type: "heartbeat", at: new Date().toISOString(), sessionId })}\n\n`);
-    }, 15_000);
+      res.flush?.();
+    }, config.liveCoachHeartbeatIntervalMs);
     if (typeof heartbeat.unref === "function") heartbeat.unref();
     const unsubscribe = coachBus.subscribe(sessionId, (event) => {
       res.write(`event: ${event.type || "event"}\n`);
       res.write(`data: ${JSON.stringify(event)}\n\n`);
+      res.flush?.();
     });
     req.on("close", () => {
       clearInterval(heartbeat);
@@ -1762,6 +2374,7 @@ async function main() {
             "GET /api/ai/live-coach/grpc/mongo/bind/latest",
             "POST /api/ai/live-coach/grpc/mongo/bind/latest",
             "POST /api/ai/live-coach/grpc/mongo/cleanup-dead-streams",
+            "GET /api/ai/live-coach/grpc/dashboard/sessions",
             "GET /api/ai/live-coach/dashboard/session-for-call",
             "POST /api/ai/live-coach/dashboard/sessions/:sessionId/stop",
             "POST /api/ai/live-coach/fixture",
@@ -1807,6 +2420,14 @@ async function main() {
     res.json({ ok: true, sessions: coachBus.listSessions() });
   });
 
+  app.get("/api/ai/live-coach/grpc/dashboard/sessions", requireInternalAccess, async (req, res, next) => {
+    try {
+      res.json(await buildLiveCoachDashboardPayload(req));
+    } catch (error) {
+      next(error);
+    }
+  });
+
   app.get("/api/ai/live-coach/monitor/sessions/:sessionId", requireInternalAccess, (req, res) => {
     const session = coachBus.getSession(req.params.sessionId);
     if (!session) return res.status(404).json({ ok: false, error: "Session not found" });
@@ -1840,6 +2461,14 @@ async function main() {
     try {
       const result = await mongoBridge.resolveCoachBinding(req.query || {});
       res.json(result);
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.post("/api/ai/live-coach/grpc/mongo/sync-current", requireInternalAccess, requireMongoBridge, async (req, res, next) => {
+    try {
+      res.json(await syncCurrentCoachCalls(req.body || {}));
     } catch (error) {
       next(error);
     }
@@ -1914,6 +2543,12 @@ async function main() {
     } catch (error) {
       next(error);
     }
+  });
+
+  app.post("/api/ai/live-coach/grpc/:sessionId/stream-status", requireInternalAccess, (req, res) => {
+    const body = typeof req.body === "string" ? {} : req.body || {};
+    const result = coachBus.appendStreamStatus(req.params.sessionId, body);
+    res.status(result.ok ? 200 : result.statusCode || 404).json(result);
   });
 
   app.post("/api/ai/live-coach/monitor/:sessionId/stop", requireInternalAccess, (req, res) => {

@@ -38,6 +38,8 @@ require("dotenv").config({
 const DEFAULT_PORT = String(process.env.NODE_ENV || "").toLowerCase() === "production" ? "81" : "5001";
 const PORT = String(process.env.NGROK_FORWARD_PORT || DEFAULT_PORT);
 const DOMAIN = process.env.NGROK_DOMAIN || "tagcontactbridge.ngrok.app";
+const WEB_ADDR = String(process.env.NGROK_WEB_ADDR || "").trim();
+const UPSTREAM_PROTOCOL = String(process.env.NGROK_UPSTREAM_PROTOCOL || "").trim().toLowerCase();
 
 function resolveNgrokBinary() {
   const overridePath = String(process.env.NGROK_BIN || "").trim();
@@ -87,6 +89,8 @@ console.log(
 );
 
 const args = ["http", "--domain=" + DOMAIN, PORT];
+if (WEB_ADDR) args.splice(1, 0, "--web-addr=" + WEB_ADDR);
+if (UPSTREAM_PROTOCOL) args.splice(1, 0, "--upstream-protocol=" + UPSTREAM_PROTOCOL);
 
 // Pass --authtoken inline if NGROK_AUTHTOKEN is set in .env. ngrok also
 // caches the token in ~/.ngrok2/ngrok.yml after first use, so if it's

@@ -94,6 +94,44 @@ test("live coach bus lets semantic judge hold before dialog composition", async 
   assert.equal(result.result.context.miniJudgement.modelRole, "semantic_context_judge");
 });
 
+test("live coach bus lets semantic judge recover catalog keys beyond deterministic hints", async () => {
+  const rootDir = makeTempRoot();
+  const bus = createLiveCoachBus({
+    rootDir,
+    semanticContextJudge: async ({ deterministicCandidates }) => ({
+      shouldCompose: true,
+      completeThought: true,
+      selectedKeys: [{ key: "self_employment", confidence: 0.91, reason: "platform income maps to 1099/self-employment" }],
+      rejected: deterministicCandidates.map((candidate) => ({ key: candidate.key, reason: "not the best fit" })),
+      transcriptMeaning: "The prospect has platform income that likely created a self-employment tax issue.",
+      actionReason: "semantic_context_judge_selected",
+      confidence: 0.91,
+      provider: "test",
+      model: "fake-mini",
+    }),
+  });
+  const started = bus.startSession({
+    source: "test",
+    agentName: "Chris",
+    firmName: "Wynn Tax Solutions",
+    uii: "uii-judge-fuzzy-recovery",
+  });
+
+  const result = await bus.appendInput(started.id, {
+    text: "I got paid through a platform and now I owe taxes.",
+    role: "prospect",
+    source: "unit-test",
+    contextCandidates: [],
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.result.action, "compose_dialog");
+  assert.equal(result.result.context.miniJudgement.modelRole, "semantic_context_judge");
+  assert.ok(result.result.context.matches.some((match) => match.key === "self_employment"));
+  assert.equal(result.result.context.primaryContextKey, "self_employment");
+  assert.match(result.result.dialog.promptPayload.user, /1099 \/ self-employment/);
+});
+
 test("live coach bus can emit transcript before async context judge finishes", async () => {
   const rootDir = makeTempRoot();
   let judgeStarted = false;
@@ -296,6 +334,44 @@ test("live coach bus marks voicemail sessions rejected without writing context",
   assert.equal(fs.existsSync(contextFile), false);
 });
 
+test("live coach bus rejects voicemail from streaming deltas before mini or Sonnet", async () => {
+  const rootDir = makeTempRoot();
+  const bus = createLiveCoachBus({
+    rootDir,
+    semanticContextJudge: async () => {
+      throw new Error("semantic judge should not run for streaming voicemail");
+    },
+    dialogComposer: async () => {
+      throw new Error("dialog composer should not run for streaming voicemail");
+    },
+  });
+  const started = bus.startSession({
+    source: "test",
+    agentName: "Chris",
+    firmName: "Wynn Tax Solutions",
+    uii: "uii-stream-vm",
+  });
+
+  const result = await bus.appendInput(started.id, {
+    text: "At the tone please record your",
+    role: "prospect",
+    source: "unit-test-delta",
+    type: "conversation.item.input_audio_transcription.delta",
+    provisional: true,
+    final: false,
+    itemId: "vm-item-1",
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.result.action, "reject_voicemail");
+  assert.equal(result.session.status, "voicemail_rejected");
+  assert.equal(result.session.counters.voicemailRejected, 1);
+  assert.equal(result.session.counters.context, 0);
+  assert.equal(result.session.counters.dialog, 0);
+  assert.equal(result.result.dialog.status, "rejected");
+  assert.match(result.result.dialog.guidance, /at the tone/i);
+});
+
 test("live coach bus accepts provisional transcript without invoking context or dialog", async () => {
   const rootDir = makeTempRoot();
   const bus = createLiveCoachBus({ rootDir });
@@ -321,6 +397,9 @@ test("live coach bus accepts provisional transcript without invoking context or 
   assert.equal(provisional.session.latest.provisionalTranscript.text, "I got a letter from the IRS and");
   assert.equal(provisional.session.latest.transcript, null);
   assert.equal(provisional.session.latest.dialog, null);
+  assert.ok(provisional.result.watcher.candidates.some((candidate) => candidate.key === "irs_notice"));
+  assert.equal(provisional.session.counters.context, 0);
+  assert.equal(provisional.session.counters.dialog, 0);
   assert.equal(provisional.session.memory.provisionalTranscripts.length, 1);
   assert.equal(provisional.session.memory.transcripts.length, 0);
   assert.equal(provisional.session.memory.contexts.length, 0);

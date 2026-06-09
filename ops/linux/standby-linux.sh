@@ -29,7 +29,8 @@ set_env "PARALLEL_RC_SUSPENDED" "true"
 chown "${APP_USER}:${APP_USER}" "${APP_DIR}/.env"
 chmod 600 "${APP_DIR}/.env"
 
-systemctl stop parallel-ngrok || true
+systemctl stop parallel-ngrok parallel-tag-webhook-ngrok || true
+systemctl stop parallel-live-coach-grpc parallel-tag-webhook-front || true
 systemctl restart parallel-control-plane parallel-ringcentral-cx parallel-outbound-gateway parallel-inbound-gateway parallel-ai-bus parallel-barge
 
 echo "This host is back in standby mode: ngrok stopped, RingCentral suspended."

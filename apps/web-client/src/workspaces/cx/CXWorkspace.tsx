@@ -3307,6 +3307,7 @@ export function CXWorkspace() {
   const lastTerminalOutcomeWorkflowRef = React.useRef<string | null>(null);
   const voicemailArmKeyRef = React.useRef<string | null>(null);
   const voicemailArmInFlightRef = React.useRef<string | null>(null);
+  const voicemailArmReleaseAfterInflightRef = React.useRef<string | null>(null);
 
   function clearServedQueueSelection() {
     setServingQueueKey(null);
@@ -3341,13 +3342,19 @@ export function CXWorkspace() {
   }
 
   function releaseArmedVoicemailDrop(reason: string) {
+    if (!voicemailArmKeyRef.current && voicemailArmInFlightRef.current) {
+      voicemailArmReleaseAfterInflightRef.current = reason;
+      return;
+    }
     if (!voicemailArmKeyRef.current && !voicemailArmInFlightRef.current) return;
     voicemailArmKeyRef.current = null;
     voicemailArmInFlightRef.current = null;
+    voicemailArmReleaseAfterInflightRef.current = null;
     void voicemailDrop.mutateAsync({ action: "release", reason }).catch(() => undefined);
   }
 
   function beginVoicemailDrop() {
+    if (voicemailDropPending) return; // re-entrancy guard: never fire two drops at once
     setVoicemailDropPending(true);
     releaseLiveCoachForCurrentCall("voicemail-drop-started");
     toast("Voicemail drop started", {
@@ -3761,12 +3768,21 @@ export function CXWorkspace() {
       .mutateAsync({ action: "arm" })
       .then(() => {
         if (voicemailArmInFlightRef.current === armKey) {
+          const releaseReason = voicemailArmReleaseAfterInflightRef.current;
           voicemailArmKeyRef.current = armKey;
+          if (releaseReason) {
+            voicemailArmInFlightRef.current = null;
+            voicemailArmReleaseAfterInflightRef.current = null;
+            releaseArmedVoicemailDrop(releaseReason);
+          }
+        } else {
+          void voicemailDrop.mutateAsync({ action: "release", reason: "stale-arm-completed" }).catch(() => undefined);
         }
       })
       .catch(() => {
         if (voicemailArmInFlightRef.current === armKey) {
           voicemailArmKeyRef.current = null;
+          voicemailArmReleaseAfterInflightRef.current = null;
         }
       })
       .finally(() => {

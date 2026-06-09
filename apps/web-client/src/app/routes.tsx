@@ -17,6 +17,11 @@ const MetricsWorkspace = React.lazy(() =>
 const RingBridgeWorkspace = React.lazy(() =>
   import("@/workspaces/ringbridge/RingBridgeWorkspace").then((m) => ({ default: m.RingBridgeWorkspace })),
 );
+const LiveCoachWallboardWorkspace = React.lazy(() =>
+  import("@/workspaces/live-coach/LiveCoachWallboardWorkspace").then((m) => ({
+    default: m.LiveCoachWallboardWorkspace,
+  })),
+);
 const InboxWorkspace = React.lazy(() =>
   import("@/workspaces/inbox/InboxWorkspace").then((m) => ({ default: m.InboxWorkspace })),
 );
@@ -99,6 +104,14 @@ export function AppRoutes() {
             element={
               <Suspended>
                 <RingBridgeWorkspace />
+              </Suspended>
+            }
+          />
+          <Route
+            path="live-coach"
+            element={
+              <Suspended>
+                <LiveCoachWallboardWorkspace />
               </Suspended>
             }
           />

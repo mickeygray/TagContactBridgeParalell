@@ -89,7 +89,10 @@ test("mini router holds fragments until the phrase has enough semantic context",
     role: "prospect",
   });
   assert.equal(first.action, "hold_for_more_context");
-  assert.equal(first.context, null);
+  // The trailing-preposition fragment is still HELD (not coached); the in-progress
+  // frame is now returned for observability, so the gate is shouldCompose=false
+  // rather than a null context.
+  assert.equal(first.context.shouldCompose, false);
   assert.equal(first.dialog, null);
   assert.match(first.hold.pendingText, /letter from$/);
 

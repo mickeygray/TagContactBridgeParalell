@@ -2,6 +2,15 @@ import * as React from "react";
 import { MessageSquareQuote, MessagesSquare, Sparkles } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
+import { api } from "@/lib/api/client";
+import {
+  streamLiveCoachEventsWithRetry,
+  type LiveCoachContext,
+  type LiveCoachDialog,
+  type LiveCoachEvent,
+  type LiveCoachSession,
+  type LiveCoachTranscript,
+} from "@/lib/liveCoach/stream";
 import {
   Dialog,
   DialogContent,
@@ -10,54 +19,6 @@ import {
   DialogTitle,
 } from "@/components/ui/Dialog";
 import { cn } from "@/lib/utils/cn";
-
-type LiveCoachTranscript = {
-  id?: string | null;
-  itemId?: string | null;
-  at?: string | null;
-  role?: string | null;
-  text?: string | null;
-  source?: string | null;
-  model?: string | null;
-  wordCount?: number | null;
-  provisional?: boolean | null;
-};
-
-type LiveCoachDialog = {
-  id?: string | null;
-  at?: string | null;
-  status?: string | null;
-  label?: string | null;
-  say?: string | null;
-  guidance?: string | null;
-};
-
-type LiveCoachSession = {
-  id: string;
-  status?: string | null;
-  createdAt?: string | null;
-  updatedAt?: string | null;
-  lastEventAt?: string | null;
-  metadata?: {
-    agentName?: string | null;
-    agentEmail?: string | null;
-    uii?: string | null;
-  } | null;
-  latest?: {
-    provisionalTranscript?: LiveCoachTranscript | null;
-    transcript?: LiveCoachTranscript | null;
-    dialog?: LiveCoachDialog | null;
-  } | null;
-};
-
-type LiveCoachEvent = {
-  type?: string;
-  at?: string;
-  session?: LiveCoachSession;
-  transcript?: LiveCoachTranscript;
-  provisionalTranscript?: LiveCoachTranscript;
-  dialog?: LiveCoachDialog;
-};
 
 type LiveCoachPanelProps = {
   agentEmail?: string | null;
@@ -80,6 +41,349 @@ type ConversationItem = {
   text: string;
   provisional?: boolean;
 };
+
+type CoachStageTone = "idle" | "active" | "good" | "warn" | "danger";
+
+type CoachStage = {
+  label: string;
+  detail?: string;
+  at?: string;
+  tone: CoachStageTone;
+};
+
+type BridgeStatus = "disabled" | "connecting" | "connected" | "error";
+
+type CoachState = {
+  session: LiveCoachSession | null;
+  provisionalTranscript: LiveCoachTranscript | null;
+  prospectTranscript: LiveCoachTranscript | null;
+  context: LiveCoachContext | null;
+  dialog: LiveCoachDialog | null;
+  stage: CoachStage;
+  conversationItems: ConversationItem[];
+  bridgeStatus: BridgeStatus;
+  error: string;
+};
+
+const INITIAL_STAGE: CoachStage = {
+  label: "waiting",
+  detail: "Waiting for active call",
+  tone: "idle",
+};
+
+const INITIAL_COACH_STATE: CoachState = {
+  session: null,
+  provisionalTranscript: null,
+  prospectTranscript: null,
+  context: null,
+  dialog: null,
+  stage: INITIAL_STAGE,
+  conversationItems: [],
+  bridgeStatus: "connecting",
+  error: "",
+};
+
+type CoachAction =
+  | { type: "reset"; status: BridgeStatus; message?: string }
+  | { type: "stage"; stage: CoachStage }
+  | { type: "bridge"; status: BridgeStatus; error?: string; stage?: CoachStage }
+  | { type: "session"; session: LiveCoachSession }
+  | { type: "clearItems"; stage?: CoachStage }
+  | { type: "event"; payload: LiveCoachEvent };
+
+// Pure transform: fold a fetched/streamed session snapshot into coach state.
+// Mirrors the former multi-setState applySession exactly, but as one update.
+function reduceSession(state: CoachState, next: LiveCoachSession): CoachState {
+  let items = state.conversationItems;
+  let provisionalTranscript = state.provisionalTranscript;
+  let prospectTranscript = state.prospectTranscript;
+  let context = state.context;
+  let dialog = state.dialog;
+
+  const latestProvisional = next.latest?.provisionalTranscript || null;
+  if (latestProvisional) {
+    items = mergeConversationItem(items, transcriptToConversationItem({ ...latestProvisional, provisional: true }));
+  }
+  provisionalTranscript = latestProvisional?.role === "prospect" ? latestProvisional : null;
+  const latestTranscript = next.latest?.transcript || null;
+  if (latestTranscript) {
+    items = mergeConversationItem(items, transcriptToConversationItem(latestTranscript));
+  }
+  if (latestTranscript?.role === "prospect") {
+    prospectTranscript = latestTranscript;
+    provisionalTranscript = null;
+  }
+  if (next.latest?.context) context = next.latest.context;
+  if (next.latest?.dialog) dialog = next.latest.dialog;
+
+  return {
+    ...state,
+    session: next,
+    stage: {
+      label: next.status === "listening" ? "stream attached" : next.status || "session",
+      detail: next.metadata?.streamId ? `stream ${next.metadata.streamId.slice(-8)}` : "Coach session bound",
+      tone: next.status === "listening" ? "active" : "idle",
+      at: next.lastEventAt || next.updatedAt || new Date().toISOString(),
+    },
+    conversationItems: items,
+    provisionalTranscript,
+    prospectTranscript,
+    context,
+    dialog,
+  };
+}
+
+// Pure transform: fold one SSE event into coach state in a SINGLE pass.
+// Consolidates the former ~7 setState calls per event into one update.
+function reduceEvent(state: CoachState, payload: LiveCoachEvent): CoachState {
+  let next = state;
+  const patch = (changes: Partial<CoachState>) => {
+    next = { ...next, ...changes };
+  };
+  const addItem = (transcript: LiveCoachTranscript) => {
+    patch({ conversationItems: mergeConversationItem(next.conversationItems, transcriptToConversationItem(transcript)) });
+  };
+
+  const transcript = payload.transcript;
+  if (payload.session) next = reduceSession(next, payload.session);
+
+  if (payload.provisionalTranscript) {
+    addItem({ ...payload.provisionalTranscript, provisional: true });
+  }
+  if (payload.provisionalTranscript?.role === "prospect") {
+    patch({
+      provisionalTranscript: payload.provisionalTranscript,
+      stage: {
+        label: "STT live",
+        detail: "Words are arriving",
+        tone: "active",
+        at: payload.provisionalTranscript.at || payload.at || new Date().toISOString(),
+      },
+    });
+  }
+  if (transcript?.role === "prospect") {
+    addItem(transcript);
+    patch({
+      prospectTranscript: transcript,
+      provisionalTranscript: null,
+      stage: {
+        label: "VAD final",
+        detail: "Mini queued",
+        tone: "active",
+        at: transcript.at || payload.at || new Date().toISOString(),
+      },
+    });
+  } else if (transcript) {
+    addItem(transcript);
+  }
+  if (payload.type === "context.judge.start") {
+    patch({
+      stage: {
+        label: "mini checking",
+        detail: payload.candidateCount ? `${payload.candidateCount} candidates` : "Reading released phrase",
+        tone: "active",
+        at: payload.at || new Date().toISOString(),
+      },
+    });
+  }
+  if (payload.type === "context.judge.done") {
+    patch({
+      stage: {
+        label: payload.shouldCompose ? "mini kept" : "mini held",
+        detail: [
+          payload.elapsedMs ? `${payload.elapsedMs}ms` : "",
+          Array.isArray(payload.selectedKeys) && payload.selectedKeys.length
+            ? payload.selectedKeys.slice(0, 3).join(", ")
+            : payload.actionReason || "",
+        ].filter(Boolean).join(" | "),
+        tone: payload.shouldCompose ? "good" : "idle",
+        at: payload.at || new Date().toISOString(),
+      },
+    });
+  }
+  if (payload.type === "pipeline.hold") {
+    patch({
+      stage: {
+        label: "held",
+        detail: payload.action || payload.hold?.reason || "No coachable phrase yet",
+        tone: "idle",
+        at: payload.at || new Date().toISOString(),
+      },
+    });
+  }
+  if (payload.type === "context.clear") {
+    patch({
+      prospectTranscript: {
+        at: payload.at || payload.transcript?.at || new Date().toISOString(),
+        role: "system",
+        text: payload.transcript?.text
+          ? `Screener/hold prompt detected. Context cleared. ${payload.transcript.text}`
+          : "Screener/hold prompt detected. Context cleared.",
+        source: "system context gate",
+        wordCount: 0,
+      },
+      provisionalTranscript: null,
+      context: null,
+      dialog: null,
+      stage: {
+        label: "screener hold",
+        detail: payload.hold?.match || payload.hold?.reason || "Listening for next prospect phrase",
+        tone: "idle",
+        at: payload.at || new Date().toISOString(),
+      },
+    });
+  }
+  if (payload.context) {
+    patch({ context: payload.context });
+  }
+  if (payload.type === "compose.start") {
+    patch({
+      stage: {
+        label: "coach writing",
+        detail: payload.dialogId ? `dialog ${payload.dialogId.slice(-8)}` : "Streaming response",
+        tone: "active",
+        at: payload.at || new Date().toISOString(),
+      },
+    });
+  }
+  if (payload.type === "compose.deduped" || payload.type === "compose.rate_limited") {
+    patch({
+      stage: {
+        label: payload.type === "compose.deduped" ? "deduped" : "rate limited",
+        detail: payload.type === "compose.deduped"
+          ? "Similar phrase already coached"
+          : `${payload.rateLimitPerMinute || 0}/min cap`,
+        tone: "warn",
+        at: payload.at || new Date().toISOString(),
+      },
+    });
+  }
+  if (payload.dialog) {
+    patch({ dialog: payload.dialog });
+    if (payload.dialog.status === "rejected") {
+      const voicemailTranscript = payload.transcript || null;
+      patch({
+        prospectTranscript: {
+          ...(voicemailTranscript || {}),
+          at: payload.at || voicemailTranscript?.at || new Date().toISOString(),
+          role: "prospect",
+          text: voicemailTranscript?.text
+            ? `Voicemail detected. ${voicemailTranscript.text}`
+            : "Voicemail detected. Coach cleared this call.",
+          source: "voicemail gate",
+        },
+        dialog: null,
+        stage: {
+          label: "voicemail",
+          detail: payload.dialog.guidance || "Call cleared",
+          tone: "danger",
+          at: payload.at || new Date().toISOString(),
+        },
+      });
+    } else {
+      patch({
+        stage: {
+          label: payload.dialog.status === "streaming" ? "coach streaming" : "line ready",
+          detail: payload.dialog.composer || payload.dialog.model || payload.dialog.label || "",
+          tone: payload.dialog.status === "ready" ? "good" : "active",
+          at: payload.dialog.at || payload.at || new Date().toISOString(),
+        },
+      });
+    }
+  }
+  if (payload.type === "dialog.error") {
+    patch({
+      stage: {
+        label: "coach error",
+        detail: payload.error || payload.dialog?.composerError || "Composer failed",
+        tone: "danger",
+        at: payload.at || new Date().toISOString(),
+      },
+    });
+  }
+  if (payload.type === "voicemail.reject") {
+    const voicemailTranscript = payload.transcript;
+    patch({
+      prospectTranscript: {
+        ...(voicemailTranscript || {}),
+        at: payload.at || voicemailTranscript?.at || new Date().toISOString(),
+        role: "prospect",
+        text: voicemailTranscript?.text
+          ? `Voicemail detected. ${voicemailTranscript.text}`
+          : "Voicemail detected. Coach cleared this call.",
+        source: "voicemail gate",
+      },
+      provisionalTranscript: null,
+      dialog: null,
+      stage: {
+        label: "voicemail",
+        detail: payload.dialog?.guidance || "Call cleared",
+        tone: "danger",
+        at: payload.at || new Date().toISOString(),
+      },
+    });
+  }
+  if (payload.type === "session.stop" || payload.type === "session.stale") {
+    // Clear conversation items when the session ends so a stale board
+    // doesn't carry the prior call's transcript into the next one.
+    patch({
+      conversationItems: [],
+      stage: {
+        label: payload.type === "session.stale" ? "stale" : "released",
+        detail: payload.actionReason || "Session ended",
+        tone: payload.type === "session.stale" ? "warn" : "idle",
+        at: payload.at || new Date().toISOString(),
+      },
+    });
+  }
+  return next;
+}
+
+function coachReducer(state: CoachState, action: CoachAction): CoachState {
+  switch (action.type) {
+    case "reset":
+      return {
+        ...INITIAL_COACH_STATE,
+        bridgeStatus: action.status,
+        error: action.message || "",
+        stage: {
+          label: action.status === "disabled" ? "off" : action.status === "connecting" ? "binding" : "waiting",
+          detail:
+            action.message
+            || (action.status === "connecting" ? "Binding coach to current call" : "Waiting for active call"),
+          tone: action.status === "error" ? "danger" : action.status === "connecting" ? "active" : "idle",
+          at: new Date().toISOString(),
+        },
+      };
+    case "stage":
+      return { ...state, stage: action.stage };
+    case "bridge":
+      return {
+        ...state,
+        bridgeStatus: action.status,
+        ...(action.error !== undefined ? { error: action.error } : {}),
+        ...(action.stage ? { stage: action.stage } : {}),
+      };
+    case "session":
+      return reduceSession(state, action.session);
+    case "clearItems":
+      // Mirrors the former connectEvents reset: clears transcripts/context/
+      // dialog/items but preserves the session set by applySession.
+      return {
+        ...state,
+        provisionalTranscript: null,
+        prospectTranscript: null,
+        context: null,
+        dialog: null,
+        conversationItems: [],
+        ...(action.stage ? { stage: action.stage } : {}),
+      };
+    case "event":
+      return reduceEvent(state, action.payload);
+    default:
+      return state;
+  }
+}
 
 const LIVE_COACH_API_BASE = "/api/ai/live-coach";
 
@@ -154,12 +458,7 @@ function cleanParam(value: string | null | undefined) {
 
 function stopDashboardSession(sessionId: string, reason: string) {
   if (!sessionId) return;
-  fetch(`${LIVE_COACH_API_BASE}/sessions/${encodeURIComponent(sessionId)}/stop`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ reason }),
-    keepalive: true,
-  }).catch(() => {
+  api.post(`${LIVE_COACH_API_BASE}/sessions/${encodeURIComponent(sessionId)}/stop`, { reason }).catch(() => {
     // Best-effort release; stale sweep is the backstop.
   });
 }
@@ -176,16 +475,15 @@ export function LiveCoachPanel({
   releaseKey,
   releaseReason,
 }: LiveCoachPanelProps) {
-  const [session, setSession] = React.useState<LiveCoachSession | null>(null);
-  const [provisionalTranscript, setProvisionalTranscript] = React.useState<LiveCoachTranscript | null>(null);
-  const [prospectTranscript, setProspectTranscript] = React.useState<LiveCoachTranscript | null>(null);
-  const [dialog, setDialog] = React.useState<LiveCoachDialog | null>(null);
+  // Single reducer so each SSE event triggers exactly one render instead of
+  // the former ~7 setState calls. All coach-domain state lives here; only the
+  // UI-local dialog-open toggle stays a plain useState.
+  const [coach, dispatch] = React.useReducer(coachReducer, INITIAL_COACH_STATE);
+  const { session, provisionalTranscript, prospectTranscript, context, dialog, stage, conversationItems, bridgeStatus, error } = coach;
   const [contextOpen, setContextOpen] = React.useState(false);
-  const [conversationItems, setConversationItems] = React.useState<ConversationItem[]>([]);
-  const [bridgeStatus, setBridgeStatus] = React.useState<"disabled" | "connecting" | "connected" | "error">("connecting");
-  const [error, setError] = React.useState("");
   const previousBoundRef = React.useRef<{ scopeKey: string; sessionId: string } | null>(null);
   const releasedScopeRef = React.useRef<{ scopeKey: string; releaseKey: string } | null>(null);
+  const cancelledRef = React.useRef(false);
 
   const scopedAgentEmail = cleanParam(agentEmail).toLowerCase();
   const scopedAgentExtension = cleanParam(agentExtension);
@@ -200,14 +498,18 @@ export function LiveCoachPanel({
   const scopedReleaseKey = cleanParam(releaseKey);
   const scopedReleaseReason = cleanParam(releaseReason) || "cx-workspace-release";
 
-  const resetCoach = React.useCallback((nextStatus: "disabled" | "connecting" | "connected" | "error", message = "") => {
-    setSession(null);
-    setProvisionalTranscript(null);
-    setProspectTranscript(null);
-    setDialog(null);
-    setConversationItems([]);
-    setBridgeStatus(nextStatus);
-    setError(message);
+  const resetCoach = React.useCallback((nextStatus: BridgeStatus, message = "") => {
+    dispatch({ type: "reset", status: nextStatus, message });
+  }, []);
+
+  // Memoized: one reducer dispatch per SSE event => exactly one render.
+  const handleEvent = React.useCallback((_eventName: string, payload: LiveCoachEvent) => {
+    if (cancelledRef.current) return;
+    try {
+      dispatch({ type: "event", payload });
+    } catch {
+      // Ignore malformed local playground events.
+    }
   }, []);
 
   React.useEffect(() => {
@@ -247,88 +549,60 @@ export function LiveCoachPanel({
     }
 
     let cancelled = false;
-    let events: EventSource | null = null;
+    cancelledRef.current = false;
+    let events: AbortController | null = null;
     let activeSessionId = "";
     let retryTimer: number | null = null;
     let attempts = 0;
 
     const applySession = (next: LiveCoachSession) => {
-      setSession(next);
-      const latestProvisional = next.latest?.provisionalTranscript || null;
-      if (latestProvisional) {
-        setConversationItems((items) => mergeConversationItem(items, transcriptToConversationItem({
-          ...latestProvisional,
-          provisional: true,
-        })));
-      }
-      setProvisionalTranscript(latestProvisional?.role === "prospect" ? latestProvisional : null);
-      const latestTranscript = next.latest?.transcript || null;
-      if (latestTranscript) {
-        setConversationItems((items) => mergeConversationItem(items, transcriptToConversationItem(latestTranscript)));
-      }
-      if (latestTranscript?.role === "prospect") {
-        setProspectTranscript(latestTranscript);
-        setProvisionalTranscript(null);
-      }
-      if (next.latest?.dialog) {
-        setDialog(next.latest.dialog);
-      }
+      dispatch({ type: "session", session: next });
     };
 
     const connectEvents = (sessionId: string) => {
       if (activeSessionId === sessionId) return;
-      if (events) events.close();
+      if (events) events.abort();
       activeSessionId = sessionId;
       previousBoundRef.current = { scopeKey, sessionId };
-      setConversationItems([]);
-      setProvisionalTranscript(null);
-      setProspectTranscript(null);
-      setDialog(null);
-      events = new EventSource(`${LIVE_COACH_API_BASE}/sessions/${encodeURIComponent(sessionId)}/events`);
-      events.onopen = () => {
-        if (!cancelled) {
-          setBridgeStatus("connected");
-          setError("");
-        }
-      };
-      events.onerror = () => {
-        if (!cancelled) {
-          setBridgeStatus("error");
-          setError("Waiting for coach stream");
-        }
-      };
-      const handleEvent = (event: MessageEvent<string>) => {
-        if (cancelled) return;
-        try {
-          const payload = JSON.parse(event.data) as LiveCoachEvent;
-          if (payload.session) applySession(payload.session);
-          if (payload.provisionalTranscript) {
-            setConversationItems((items) => mergeConversationItem(items, transcriptToConversationItem({
-              ...payload.provisionalTranscript,
-              provisional: true,
-            })));
+      dispatch({
+        type: "clearItems",
+        stage: {
+          label: "streaming",
+          detail: "Connected to coach event stream",
+          tone: "active",
+          at: new Date().toISOString(),
+        },
+      });
+      events = new AbortController();
+      const eventController = events;
+      // One render per SSE event: a single reducer dispatch folds the whole
+      // payload into state (handleEvent is memoized at component scope).
+      // streamLiveCoachEventsWithRetry surfaces a transient "Reconnecting..."
+      // via onError during backoff and only a fatal error once retries run out.
+      void streamLiveCoachEventsWithRetry(`${LIVE_COACH_API_BASE}/sessions/${encodeURIComponent(sessionId)}/events`, {
+        signal: eventController.signal,
+        onOpen: () => {
+          if (!cancelledRef.current) {
+            dispatch({ type: "bridge", status: "connected", error: "" });
           }
-          if (payload.provisionalTranscript?.role === "prospect") setProvisionalTranscript(payload.provisionalTranscript);
-          if (payload.transcript?.role === "prospect") {
-            setConversationItems((items) => mergeConversationItem(items, transcriptToConversationItem(payload.transcript || {})));
-            setProspectTranscript(payload.transcript);
-            setProvisionalTranscript(null);
-          } else if (payload.transcript) {
-            setConversationItems((items) => mergeConversationItem(items, transcriptToConversationItem(payload.transcript || {})));
-          }
-          if (payload.dialog) {
-            setDialog(payload.dialog);
-          }
-        } catch {
-          // Ignore malformed local playground events.
-        }
-      };
-      events.addEventListener("snapshot", handleEvent);
-      events.addEventListener("transcript.provisional", handleEvent);
-      events.addEventListener("transcript", handleEvent);
-      events.addEventListener("dialog", handleEvent);
-      events.addEventListener("voicemail.reject", handleEvent);
-      events.addEventListener("session.stop", handleEvent);
+        },
+        onEvent: handleEvent,
+        onError: (streamError) => {
+          if (cancelledRef.current) return;
+          const reconnecting = streamError.message === "Reconnecting...";
+          dispatch({
+            type: "bridge",
+            status: reconnecting ? "connecting" : "error",
+            error: streamError.message || "Waiting for coach stream",
+            stage: {
+              label: reconnecting ? "reconnecting" : "stream error",
+              detail: streamError.message || "Waiting for coach stream",
+              tone: reconnecting ? "active" : "danger",
+              at: new Date().toISOString(),
+            },
+          });
+        },
+      }).catch(() => undefined);
     };
 
     const bindSession = async () => {
@@ -343,40 +617,71 @@ export function LiveCoachPanel({
         if (scopedCaseId) params.set("caseId", scopedCaseId);
         if (scopedContactName) params.set("contactName", scopedContactName);
         if (agentName) params.set("agentName", agentName);
-        const response = await fetch(`${LIVE_COACH_API_BASE}/session-for-call?${params.toString()}`);
-        if (!response.ok) throw new Error(`Coach bridge returned ${response.status}`);
-        const data = await response.json() as { session?: LiveCoachSession | null; reason?: string; status?: string };
+        const query = Object.fromEntries(params.entries());
+        const data = await api.get<{ session?: LiveCoachSession | null; reason?: string; status?: string }>(
+          `${LIVE_COACH_API_BASE}/session-for-call`,
+          { query },
+        );
         if (cancelled) return;
         if (data.session) {
           applySession(data.session);
           connectEvents(data.session.id);
         } else {
-          setBridgeStatus("connected");
-          setError(data.reason || data.status || "Waiting for matching stream");
+          dispatch({
+            type: "bridge",
+            status: "connected",
+            error: data.reason || data.status || "Waiting for matching stream",
+            stage: {
+              label: "waiting stream",
+              detail: data.reason || data.status || "Waiting for matching stream",
+              tone: "idle",
+              at: new Date().toISOString(),
+            },
+          });
           retryTimer = window.setTimeout(() => void bindSession(), attempts < 8 ? 1250 : 5000);
         }
       } catch (loadError) {
         if (!cancelled) {
-          setBridgeStatus("error");
-          setError(readErrorMessage(loadError));
+          dispatch({
+            type: "bridge",
+            status: "error",
+            error: readErrorMessage(loadError),
+            stage: {
+              label: "binding error",
+              detail: readErrorMessage(loadError),
+              tone: "danger",
+              at: new Date().toISOString(),
+            },
+          });
           retryTimer = window.setTimeout(() => void bindSession(), attempts < 5 ? 1500 : 5000);
         }
       }
     };
 
-    setBridgeStatus("connecting");
-    setError("Binding coach to current call");
+    dispatch({
+      type: "bridge",
+      status: "connecting",
+      error: "Binding coach to current call",
+      stage: {
+        label: "binding",
+        detail: "Looking for current RingCX stream",
+        tone: "active",
+        at: new Date().toISOString(),
+      },
+    });
     void bindSession();
 
     return () => {
       cancelled = true;
+      cancelledRef.current = true;
       if (retryTimer) window.clearTimeout(retryTimer);
-      if (events) events.close();
+      if (events) events.abort();
     };
   }, [
     agentName,
     agentScopeKey,
     callScopeKey,
+    handleEvent,
     resetCoach,
     scopedAgentEmail,
     scopedAgentExtension,
@@ -396,6 +701,20 @@ export function LiveCoachPanel({
   const heardIsLive = Boolean(provisionalTranscript?.text?.trim());
   const line = dialog?.say?.trim() || "";
   const rejected = dialog?.status === "rejected";
+  const contextKeys = [
+    ...(context?.miniJudgement?.selectedKeys || []),
+    ...(context?.matches || []).map((match) => match.key || match.label || ""),
+  ].filter(Boolean);
+  const stageToneClass =
+    stage.tone === "good"
+      ? "border-emerald-200 bg-emerald-50 text-emerald-700"
+      : stage.tone === "danger"
+        ? "border-red-200 bg-red-50 text-red-700"
+        : stage.tone === "warn"
+          ? "border-amber-200 bg-amber-50 text-amber-700"
+          : stage.tone === "active"
+            ? "border-sky-200 bg-sky-50 text-sky-700"
+            : "border-border bg-muted text-muted-foreground";
   const statusLabel =
     bridgeStatus === "disabled"
       ? "off"
@@ -436,6 +755,24 @@ export function LiveCoachPanel({
         </div>
       </CardHeader>
       <CardContent className="space-y-2 px-3 py-3">
+        <div className="flex flex-wrap items-center gap-1.5">
+          <span
+            className={cn(
+              "rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.12em]",
+              stageToneClass,
+            )}
+          >
+            {stage.label}
+          </span>
+          {stage.detail ? (
+            <span className="min-w-0 flex-1 truncate text-[10px] text-muted-foreground">
+              {stage.detail}
+            </span>
+          ) : null}
+          {stage.at ? (
+            <span className="text-[10px] text-muted-foreground">{formatCoachTime(stage.at)}</span>
+          ) : null}
+        </div>
         <div className="rounded-md border border-sky-100 bg-white p-2">
           <div className="mb-1 flex items-center justify-between gap-2">
             <div className="text-[10px] font-semibold uppercase tracking-[0.14em] text-muted-foreground">
@@ -479,6 +816,21 @@ export function LiveCoachPanel({
             )}
           >
             {heardSentence || "Waiting for prospect speech..."}
+          </div>
+        </div>
+        <div className="rounded-md border border-slate-100 bg-white p-2">
+          <div className="mb-1 flex items-center justify-between gap-2">
+            <div className="text-[10px] font-semibold uppercase tracking-[0.14em] text-muted-foreground">
+              Context
+            </div>
+            {context?.miniJudgement?.elapsedMs ? (
+              <div className="text-[10px] text-muted-foreground">{context.miniJudgement.elapsedMs}ms</div>
+            ) : null}
+          </div>
+          <div className="text-xs leading-snug text-muted-foreground">
+            {context?.miniJudgement?.transcriptMeaning
+              || context?.actionReason
+              || (contextKeys.length ? `Keys: ${Array.from(new Set(contextKeys)).slice(0, 4).join(", ")}` : "Waiting for mini context...")}
           </div>
         </div>
         <div className="rounded-md border border-sky-200 bg-white p-2">

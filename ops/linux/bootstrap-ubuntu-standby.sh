@@ -216,6 +216,46 @@ RestartSec=5
 WantedBy=multi-user.target
 EOF
 
+cat >/etc/systemd/system/parallel-live-coach-grpc.service <<EOF
+[Unit]
+Description=Parallel live coach RingCX gRPC bridge (3344)
+After=network-online.target parallel-ai-bus.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=${APP_USER}
+Group=${APP_USER}
+WorkingDirectory=${APP_DIR}
+Environment=NODE_ENV=production
+ExecStart=/usr/bin/node scripts/ringcx-grpc-live-coach-bridge.js
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+cat >/etc/systemd/system/parallel-tag-webhook-front.service <<EOF
+[Unit]
+Description=Parallel tag-webhook h2/gRPC front door (3345)
+After=network-online.target parallel-control-plane.service parallel-live-coach-grpc.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=${APP_USER}
+Group=${APP_USER}
+WorkingDirectory=${APP_DIR}
+Environment=NODE_ENV=production
+ExecStart=/usr/bin/node scripts/tag-webhook-front-proxy.js
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
 cat >/etc/systemd/system/parallel-barge.service <<EOF
 [Unit]
 Description=Parallel barge / voicemail-drop service (7335)
@@ -230,7 +270,7 @@ WorkingDirectory=${APP_DIR}
 Environment=NODE_ENV=production
 # Barger monitors + fallback wav are data-driven via .env:
 #   EX_BARGE_MONITORS=987,1101,1102,1103,1104,1105,1106   (pre-warm all monitors at boot)
-#   EX_BARGE_WAV=runtime/audio/drop-message.raw           (fallback voicemail)
+#   EX_BARGE_WAV=runtime/audio/voicemail-shared.raw       (shared voicemail)
 # The registration health loop self-heals any monitor whose SIP socket drops.
 ExecStart=/usr/bin/node scripts/ex-barge-button.js
 Restart=always
@@ -260,10 +300,34 @@ RestartSec=5
 WantedBy=multi-user.target
 EOF
 
+cat >/etc/systemd/system/parallel-tag-webhook-ngrok.service <<EOF
+[Unit]
+Description=Parallel tag-webhook ngrok tunnel
+After=network-online.target parallel-live-coach-grpc.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=${APP_USER}
+Group=${APP_USER}
+WorkingDirectory=${APP_DIR}
+Environment=NODE_ENV=production
+Environment=NGROK_DOMAIN=tag-webhook.ngrok.app
+Environment=NGROK_FORWARD_PORT=3344
+Environment=NGROK_UPSTREAM_PROTOCOL=http2
+ExecStart=/usr/bin/node scripts/run-ngrok.js
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
 systemctl daemon-reload
 systemctl enable parallel-control-plane parallel-inbound-gateway parallel-outbound-gateway parallel-ringcentral-cx parallel-ai-bus parallel-barge
-systemctl disable parallel-ngrok >/dev/null 2>&1 || true
-ok "App services enabled; ngrok service is installed but disabled/manual"
+systemctl disable parallel-live-coach-grpc parallel-tag-webhook-front >/dev/null 2>&1 || true
+systemctl disable parallel-ngrok parallel-tag-webhook-ngrok >/dev/null 2>&1 || true
+ok "App services enabled; live-coach gRPC/front and ngrok tunnels are installed but disabled/manual"
 
 step "Nginx"
 cp "${APP_DIR}/ops/nginx/parallel.conf" /etc/nginx/conf.d/parallel.conf

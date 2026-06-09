@@ -1,10 +1,40 @@
 "use strict";
 
+const http = require("http");
+const https = require("https");
 const express = require("express");
 const { PORTS } = require("../../../../packages/shared-config/src");
 const { toErrorResponse } = require("../../../../packages/shared-errors/src");
 
 const MANAGER_ROLES = new Set(["admin", "manager"]);
+
+// Reusable keep-alive agents so proxied requests to ai-bus (:7000) pool their
+// sockets instead of opening a fresh TCP+HTTP connection per request. ai-bus is
+// reached over plain HTTP today; the https agent is kept for symmetry in case
+// the upstream scheme ever changes.
+// NOTE: Node's global fetch() is undici-based and IGNORES the `agent` option
+// (undici pools via a `dispatcher` instead), so on the global fetch path these
+// agents are currently a no-op. They are harmless and become active if/when the
+// upstream calls move to http.request or an `undici.Agent` dispatcher. In prod,
+// connection reuse to ai-bus is already handled by nginx (upstream `keepalive`
+// + `Connection ""`), so this is an efficiency nicety, not a correctness gap.
+const aiBusHttpAgent = new http.Agent({
+  keepAlive: true,
+  keepAliveMsecs: 30000,
+  maxSockets: 128,
+  maxFreeSockets: 10,
+});
+const aiBusHttpsAgent = new https.Agent({
+  keepAlive: true,
+  keepAliveMsecs: 30000,
+  maxSockets: 128,
+  maxFreeSockets: 10,
+});
+
+function agentForUrl(url) {
+  const protocol = typeof url === "string" ? new URL(url).protocol : url.protocol;
+  return protocol === "https:" ? aiBusHttpsAgent : aiBusHttpAgent;
+}
 
 function clean(value, maxLength = 240) {
   return String(value || "").trim().slice(0, maxLength);
@@ -68,6 +98,7 @@ async function fetchWithTimeout(url, init = {}, timeoutMs = 8000) {
   try {
     return await fetch(url, {
       ...init,
+      agent: init.agent || agentForUrl(url),
       signal: controller.signal,
     });
   } catch (error) {
@@ -201,6 +232,44 @@ function createLiveCoachProxyRouter(auth, { config, logger } = {}) {
 
   router.use(auth.requireAuth, auth.requireUser, auth.requirePermission("coach.view"));
 
+  router.get("/dashboard/sessions", async (req, res) => {
+    try {
+      if (!isManager(req.user || {})) {
+        return res.status(403).json({ ok: false, error: "Manager access required" });
+      }
+      return proxyJson(
+        res,
+        fetchAiBusJson(config, "/api/ai/live-coach/grpc/dashboard/sessions", {
+          query: {
+            summary: firstClean(req.query?.summary, "1") || "1",
+          },
+        }),
+      );
+    } catch (error) {
+      return res.status(error.status || 500).json(toErrorResponse(error));
+    }
+  });
+
+  router.post("/sync-current", async (req, res) => {
+    try {
+      if (!isManager(req.user || {})) {
+        return res.status(403).json({ ok: false, error: "Manager access required" });
+      }
+      return proxyJson(
+        res,
+        fetchAiBusJson(config, "/api/ai/live-coach/grpc/mongo/sync-current", {
+          method: "POST",
+          body: {
+            lookbackMs: Number(req.body?.lookbackMs || req.query?.lookbackMs || 5 * 60 * 1000) || 5 * 60 * 1000,
+            limit: Number(req.body?.limit || req.query?.limit || 120) || 120,
+          },
+        }),
+      );
+    } catch (error) {
+      return res.status(error.status || 500).json(toErrorResponse(error));
+    }
+  });
+
   router.get("/session-for-call", async (req, res) => {
     try {
       const agentScope = resolveAgentScope(req);
@@ -286,13 +355,14 @@ function createLiveCoachProxyRouter(auth, { config, logger } = {}) {
       const session = await getInternalSession(config, req.params.sessionId);
       assertSessionScope(req, session);
 
-      const upstream = await fetch(
-        buildAiBusUrl(`/api/ai/live-coach/grpc/sessions/${encodeURIComponent(req.params.sessionId)}/events`),
-        {
-          headers: buildInternalHeaders(config),
-          signal: controller.signal,
-        },
+      const upstreamUrl = buildAiBusUrl(
+        `/api/ai/live-coach/grpc/sessions/${encodeURIComponent(req.params.sessionId)}/events`,
       );
+      const upstream = await fetch(upstreamUrl, {
+        headers: buildInternalHeaders(config),
+        agent: agentForUrl(upstreamUrl),
+        signal: controller.signal,
+      });
       clearTimeout(connectTimeout);
 
       if (!upstream.ok || !upstream.body) {

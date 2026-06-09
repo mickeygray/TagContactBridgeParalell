@@ -106,7 +106,7 @@ function main() {
 
   const metadata = {
     agentName: readFlag(argv, "--agent-name", "Chris"),
-    firmName: readFlag(argv, "--firm-name", "Tax Advocate Group"),
+    firmName: readFlag(argv, "--firm-name", "Wynn Tax Solutions"),
     uii: `fixture-${scenario}`,
     agentEmail: "local.fixture@taxadvocategroup.com",
   };

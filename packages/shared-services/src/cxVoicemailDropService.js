@@ -22,7 +22,7 @@ function timeoutMsForAction(action) {
   const envName = action === "play"
     ? "CX_VOICEMAIL_DROP_PLAY_TIMEOUT_MS"
     : "CX_VOICEMAIL_DROP_CONTROL_TIMEOUT_MS";
-  const fallback = action === "play" ? 45_000 : 12_000;
+  const fallback = action === "play" ? 135_000 : 12_000;
   return Math.max(3000, Number(process.env[envName] || fallback) || fallback);
 }
 
@@ -52,7 +52,10 @@ async function postBargeJson(url, payload, timeoutMs) {
 // for admin/testing (e.g. dropping on a specific agent extension).
 function pickIdentifier(user, body) {
   const override = body && (body.agentIdentifier || body.agentExtensionId || body.agentExt);
-  if (override) return String(override).trim();
+  // SECURITY: only an admin may target a DIFFERENT agent's extension (supervisor/testing).
+  // Regular agents always resolve to their own authed identity -- a client-supplied target is
+  // ignored -- so an agent can never trigger a barge/drop onto another agent's live call.
+  if (override && user?.role === "admin") return String(override).trim();
   return String(
     user?.extensionId || user?.extensionNumber || user?.cxAgentId || user?.email || "",
   ).trim();

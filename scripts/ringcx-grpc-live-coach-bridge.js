@@ -31,7 +31,28 @@ const {
 } = require("../packages/shared-services/src/taxResolutionSalesTrainerService");
 
 const TERMINAL_COACH_STATUSES = new Set(["stopped", "stale", "voicemail_rejected"]);
+const TERMINAL_COACH_POST_ERROR_PATTERN =
+  /Session is (?:stale|stopped|voicemail_rejected)|uii-mismatch|queue-item-mismatch|agent-mismatch|agent-current-(?:uii|queue|call-session)-mismatch|not_current|binding-inactive|disposition-hangup|event-expired/i;
 const OPENAI_REALTIME_TRANSCRIPTION_URL = "wss://api.openai.com/v1/realtime?intent=transcription";
+const STT_MODEL_ALIASES = new Map([
+  ["4o", "gpt-4o-transcribe"],
+  ["4otranscribe", "gpt-4o-transcribe"],
+  ["gpt4o", "gpt-4o-transcribe"],
+  ["gpt4otranscribe", "gpt-4o-transcribe"],
+  ["gpt-4o", "gpt-4o-transcribe"],
+  ["gpt-4o-transcribe", "gpt-4o-transcribe"],
+  ["mini", "gpt-4o-mini-transcribe"],
+  ["4omini", "gpt-4o-mini-transcribe"],
+  ["gpt4omini", "gpt-4o-mini-transcribe"],
+  ["gpt-4o-mini-transcribe", "gpt-4o-mini-transcribe"],
+  ["realtimewhisper", "gpt-realtime-whisper"],
+  ["rtwhisper", "gpt-realtime-whisper"],
+  ["gptrealtimewhisper", "gpt-realtime-whisper"],
+  ["gpt-realtime-whisper", "gpt-realtime-whisper"],
+  ["whisper", "gpt-realtime-whisper"],
+  ["whisper1", "whisper-1"],
+  ["whisper-1", "whisper-1"],
+]);
 
 function readFlag(argv, name, fallback = "") {
   const inline = argv.find((arg) => arg.startsWith(`${name}=`));
@@ -48,6 +69,14 @@ function readBoolFlag(argv, name, fallback = true) {
   return Boolean(fallback);
 }
 
+function readEnvBool(value, fallback = false) {
+  if (value === undefined || value === null || value === "") return Boolean(fallback);
+  const raw = String(value).trim().toLowerCase();
+  if (["0", "false", "no", "off", "disabled"].includes(raw)) return false;
+  if (["1", "true", "yes", "on", "enabled"].includes(raw)) return true;
+  return Boolean(fallback);
+}
+
 function cleanText(value, maxLength = 4000) {
   return String(value || "")
     .replace(/\s+/g, " ")
@@ -55,8 +84,47 @@ function cleanText(value, maxLength = 4000) {
     .slice(0, maxLength);
 }
 
+function normalizeLookupKey(value) {
+  return String(value || "").toLowerCase().replace(/[^a-z0-9]+/g, "");
+}
+
+function resolveSttModelAlias(value, fallback = "") {
+  const raw = cleanText(value, 120);
+  if (!raw) return fallback;
+  return STT_MODEL_ALIASES.get(normalizeLookupKey(raw)) || STT_MODEL_ALIASES.get(raw.toLowerCase()) || raw;
+}
+
+function parseSttModelMap(raw = "") {
+  const map = new Map();
+  String(raw || "")
+    .split(/[;,]/)
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .forEach((part) => {
+      const splitAt = part.includes("=") ? part.indexOf("=") : part.indexOf(":");
+      if (splitAt <= 0) return;
+      const key = normalizeLookupKey(part.slice(0, splitAt));
+      const model = resolveSttModelAlias(part.slice(splitAt + 1));
+      if (key && model) map.set(key, model);
+    });
+  return map;
+}
+
+function openAiRealtimeTranscriptionSupportsTurnDetection(model) {
+  const normalized = normalizeLookupKey(resolveSttModelAlias(model));
+  return !["gptrealtimewhisper", "whisper1"].includes(normalized);
+}
+
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isTerminalCoachPostError(error) {
+  return TERMINAL_COACH_POST_ERROR_PATTERN.test(String(error?.message || error || ""));
+}
+
+function isMissingCoachSessionPostError(error) {
+  return /Session not found/i.test(String(error?.message || error || ""));
 }
 
 function normalizePhone(value) {
@@ -128,15 +196,22 @@ function measurePcm16Activity(pcmBuffers) {
   let active = 0;
   let total = 0;
   let maxAbs = 0;
+  let sumSquares = 0;
   for (const buf of pcmBuffers || []) {
     for (let i = 0; i + 1 < buf.length; i += 2) {
       const a = Math.abs(buf.readInt16LE(i));
       total += 1;
+      sumSquares += a * a;
       if (a > maxAbs) maxAbs = a;
       if (a > 500) active += 1;
     }
   }
-  return { samples: total, maxAbs, activePctOver500: total ? Number(((active / total) * 100).toFixed(3)) : 0 };
+  return {
+    samples: total,
+    maxAbs,
+    rms: total ? Number(Math.sqrt(sumSquares / total).toFixed(3)) : 0,
+    activePctOver500: total ? Number(((active / total) * 100).toFixed(3)) : 0,
+  };
 }
 
 function isLowSignalTranscript(text) {
@@ -206,6 +281,102 @@ async function postJson(url, body, timeoutMs = 15_000) {
   return json;
 }
 
+function coachPostIdentity(segment) {
+  const boundUii = cleanText(
+    segment.coachBinding?.metadata?.uii ||
+      segment.coachBinding?.event?.uii ||
+      segment.dialogIdentity?.uii ||
+      "",
+    160,
+  );
+  return {
+    streamId: segment.streamId,
+    workflowInstanceId: segment.sessionId,
+    uii: boundUii,
+    callSessionId: segment.dialogIdentity?.callSessionId || segment.sessionId || "",
+    queueItemId: segment.dialogIdentity?.queueItemId || "",
+    agentExtensionId: segment.dialogIdentity?.agentExtensionId || "",
+    agentEmail: segment.dialogIdentity?.agentEmail || "",
+  };
+}
+
+function resetCoachSessionAfterMissing(segment, reason = "session-not-found") {
+  if (!segment) return;
+  segment.coachSessionStarted = false;
+  segment.coachBinding = null;
+  segment.coachSessionMetadata = null;
+  writeJsonLine(segment.eventLog, {
+    type: "coach.session.rebind_after_missing",
+    at: new Date().toISOString(),
+    streamId: segment.streamId,
+    segmentId: segment.segmentId,
+    coachSessionId: segment.coachSessionId,
+    reason,
+  });
+}
+
+async function postCoachInput(segment, buildBody, timeoutMs = 15_000, options = {}) {
+  if (segment.role !== "prospect") return null;
+  if (segment.coachTerminal) return null;
+  // STREAM 4 self-healing: piggyback the agent-uii drift check on the transcript
+  // cadence (throttled internally, fire-and-forget). No new always-on timer; the
+  // check is a no-op unless LIVE_COACH_UII_RECONCILE_ENABLED is set and bound.
+  if (segment.uiiReconcileEnabled && segment.coachSessionStarted) {
+    reconcileCoachUii(segment).catch(() => {});
+  }
+  const forceBind = Boolean(options.forceBind);
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
+    await ensureCoachSession(segment, { forceBind: forceBind || attempt > 1 });
+    if (!segment.coachSessionStarted || !segment.coachSessionId) return null;
+    const body = typeof buildBody === "function" ? buildBody() : buildBody;
+    if (!body) return null;
+    try {
+      const result = await postJson(
+        `${segment.aiBusUrl}/api/ai/live-coach/grpc/${encodeURIComponent(segment.coachSessionId)}/input`,
+        body,
+        timeoutMs,
+      );
+      if (TERMINAL_COACH_STATUSES.has(String(result?.session?.status || ""))) {
+        segment.coachTerminal = true;
+      }
+      return result;
+    } catch (error) {
+      if (attempt === 1 && isMissingCoachSessionPostError(error)) {
+        resetCoachSessionAfterMissing(segment, error.message);
+        continue;
+      }
+      throw error;
+    }
+  }
+  return null;
+}
+
+async function postCoachStreamStatus(segment, buildBody, timeoutMs = 5000, options = {}) {
+  if (segment.role !== "prospect") return null;
+  if (segment.coachTerminal) return null;
+  const forceBind = Boolean(options.forceBind);
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
+    await ensureCoachSession(segment, { forceBind: forceBind || attempt > 1 });
+    if (!segment.coachSessionStarted || !segment.coachSessionId) return null;
+    const body = typeof buildBody === "function" ? buildBody() : buildBody;
+    if (!body) return null;
+    try {
+      return await postJson(
+        `${segment.aiBusUrl}/api/ai/live-coach/grpc/${encodeURIComponent(segment.coachSessionId)}/stream-status`,
+        body,
+        timeoutMs,
+      );
+    } catch (error) {
+      if (attempt === 1 && isMissingCoachSessionPostError(error)) {
+        resetCoachSessionAfterMissing(segment, error.message);
+        continue;
+      }
+      throw error;
+    }
+  }
+  return null;
+}
+
 function participantRole(participant = {}) {
   const type = String(participant.type || "").toUpperCase();
   if (type.includes("CONTACT")) return "prospect";
@@ -269,6 +440,7 @@ function createSegmentState({
   provisionalPreviewChunks,
   sttProvider,
   sttModel,
+  sttModelMap,
   openAiApiKey,
   turnDetection,
   semanticEagerness,
@@ -289,6 +461,14 @@ function createSegmentState({
   const coachSessionId = `coach-grpc-${streamId}-${String(segmentId || "").slice(-12) || crypto.randomBytes(3).toString("hex")}`
     .replace(/[^a-z0-9_.@-]+/gi, "-")
     .slice(0, 120);
+  // STREAM 4 self-healing: agent UII drift reconcile (default OFF). Read env at
+  // segment construction so behavior is gated per-segment and stays inert unless
+  // LIVE_COACH_UII_RECONCILE_ENABLED is explicitly truthy.
+  const uiiReconcileEnabled = readEnvBool(process.env.LIVE_COACH_UII_RECONCILE_ENABLED, false);
+  const uiiReconcileIntervalMs = Math.max(
+    5000,
+    Number(process.env.LIVE_COACH_UII_RECONCILE_MS || "15000") || 15000,
+  );
   const state = {
     streamId,
     sessionId,
@@ -308,6 +488,7 @@ function createSegmentState({
     provisionalPreviewChunks,
     sttProvider,
     sttModel,
+    sttModelMap: sttModelMap instanceof Map ? sttModelMap : new Map(),
     openAiApiKey,
     turnDetection,
     semanticEagerness,
@@ -332,36 +513,255 @@ function createSegmentState({
     coachBindAttempts: 0,
     nextCoachBindAt: 0,
     coachBinding: null,
+    coachSessionMetadata: null,
     coachTerminal: false,
+    uiiReconcileEnabled,
+    uiiReconcileIntervalMs,
+    nextUiiReconcileAt: 0,
+    uiiDriftCandidate: null,
+    uiiDriftConfirmCount: 0,
     realtimeStt: null,
+    realtimeSttStarting: false,
+    realtimeSttStartPromise: null,
+    realtimeSttStartAttempts: 0,
+    nextRealtimeSttStartAt: 0,
+    lastStreamStatusAtMs: 0,
+    streamStatusIntervalMs: Math.max(
+      1000,
+      Number(process.env.LIVE_COACH_STREAM_STATUS_INTERVAL_MS || "2500") || 2500,
+    ),
+    pendingRealtimePayloads: [],
+    pendingRealtimePayloadBytes: 0,
+    pendingRealtimePayloadMaxBytes: Math.max(
+      8000,
+      Number(process.env.LIVE_COACH_REALTIME_PENDING_BIND_MAX_BYTES || "320000") || 320000,
+    ),
     transcribeQueue: Promise.resolve(),
   };
-  if (state.role === "prospect" && state.sttProvider === "openai-realtime") {
-    state.realtimeStt = new OpenAiRealtimeSttChannel({
-      segment: state,
-      apiKey: state.openAiApiKey,
-      model: state.sttModel,
-      language: state.language,
-      turnDetection: state.turnDetection,
-      semanticEagerness: state.semanticEagerness,
-      noiseReduction: state.noiseReduction,
-      provisionalEnabled: state.realtimeProvisionalEnabled,
-    });
-    state.realtimeStt.connect().catch((error) => {
-      writeJsonLine(state.eventLog, {
-        type: "stt.realtime.connect_error",
-        at: new Date().toISOString(),
-        streamId: state.streamId,
-        segmentId: state.segmentId,
-        error: error.message,
-      });
-    });
-  }
+  scheduleRealtimeSttStart(state, "segment-start");
   return state;
 }
 
-async function ensureCoachSession(segment) {
-  if (segment.coachSessionStarted || segment.role !== "prospect") return null;
+function collectAgentLookupKeys(segment, bound = null) {
+  const metadata = bound?.session?.metadata || segment?.coachSessionMetadata || {};
+  const binding = bound?.binding || segment?.coachBinding || {};
+  const values = [
+    segment?.dialogIdentity?.agentExtensionId,
+    segment?.dialogIdentity?.agentEmail,
+    metadata.agentExtension,
+    metadata.agentExtensionId,
+    metadata.agentEmail,
+    metadata.email,
+    metadata.agentName,
+    binding.metadata?.agentExtension,
+    binding.metadata?.agentExtensionId,
+    binding.metadata?.agentEmail,
+    binding.metadata?.agentName,
+    binding.event?.agentExtension,
+    binding.event?.agentExtensionId,
+    binding.event?.agentEmail,
+    binding.event?.agentName,
+  ].filter(Boolean);
+  const keys = new Set();
+  for (const value of values) {
+    const raw = cleanText(value, 240);
+    const normalized = normalizeLookupKey(raw);
+    if (!normalized) continue;
+    keys.add(normalized);
+    if (raw.includes("@")) {
+      const local = raw.split("@")[0];
+      keys.add(normalizeLookupKey(local));
+      const parts = local.split(/[._-]+/).filter(Boolean);
+      if (parts.length >= 2) {
+        keys.add(normalizeLookupKey(`${parts[0]}${parts[parts.length - 1]}`));
+        keys.add(normalizeLookupKey(`${parts[0][0] || ""}${parts[parts.length - 1]}`));
+      }
+    } else {
+      const parts = raw.split(/\s+/).filter(Boolean);
+      if (parts.length >= 2) {
+        keys.add(normalizeLookupKey(`${parts[0]}${parts[parts.length - 1]}`));
+        keys.add(normalizeLookupKey(`${parts[0][0] || ""}${parts[parts.length - 1]}`));
+      }
+    }
+  }
+  return [...keys].filter(Boolean);
+}
+
+function selectRealtimeSttModel(segment, bound = null) {
+  const map = segment?.sttModelMap instanceof Map ? segment.sttModelMap : new Map();
+  const keys = collectAgentLookupKeys(segment, bound);
+  for (const key of keys) {
+    if (map.has(key)) {
+      return {
+        model: map.get(key),
+        matchedKey: key,
+        lookupKeys: keys,
+      };
+    }
+  }
+  return {
+    model: resolveSttModelAlias(segment?.sttModel || "gpt-4o-transcribe", "gpt-4o-transcribe"),
+    matchedKey: "",
+    lookupKeys: keys,
+  };
+}
+
+function queueRealtimePayload(segment, payload) {
+  if (!segment || !payload?.length) return;
+  segment.pendingRealtimePayloads.push(Buffer.from(payload));
+  segment.pendingRealtimePayloadBytes += payload.length;
+  while (
+    segment.pendingRealtimePayloadBytes > segment.pendingRealtimePayloadMaxBytes &&
+    segment.pendingRealtimePayloads.length
+  ) {
+    const removed = segment.pendingRealtimePayloads.shift();
+    segment.pendingRealtimePayloadBytes -= removed.length;
+  }
+}
+
+function flushPendingRealtimePayloads(segment, reason = "stt-start") {
+  if (!segment?.realtimeStt || !segment.pendingRealtimePayloads?.length) return 0;
+  const pending = segment.pendingRealtimePayloads;
+  const bytes = segment.pendingRealtimePayloadBytes;
+  segment.pendingRealtimePayloads = [];
+  segment.pendingRealtimePayloadBytes = 0;
+  for (const payload of pending) segment.realtimeStt.appendPcmu(payload);
+  writeJsonLine(segment.eventLog, {
+    type: "stt.realtime.pending_flush",
+    at: new Date().toISOString(),
+    streamId: segment.streamId,
+    segmentId: segment.segmentId,
+    reason,
+    chunks: pending.length,
+    bytes,
+    model: segment.sttModel,
+  });
+  return pending.length;
+}
+
+// ---- live-coach kill switch -------------------------------------------------
+// Short-circuit coaching on the live box WITHOUT dropping the gRPC stream: the bridge
+// keeps accepting RingCX media (no floor-side connection error) but stops STT + coaching.
+// Toggle with NO restart by creating/removing the kill file (scripts/live-coach-kill.js
+// on|off|status), or set LIVE_COACH_BRIDGE_DISABLED=1 to start disabled. Re-checked per
+// stream so a flip takes effect on the next call immediately.
+const LIVE_COACH_KILL_FILE = process.env.LIVE_COACH_KILL_FILE
+  || path.resolve(__dirname, "..", "runtime", "live-coach.killed");
+function liveCoachKilledVia() {
+  if (/^(1|true|yes|on)$/i.test(String(process.env.LIVE_COACH_BRIDGE_DISABLED || "").trim())) return "env";
+  try { if (fs.existsSync(LIVE_COACH_KILL_FILE)) return "kill-file"; } catch {}
+  return null;
+}
+function isLiveCoachKilled() { return liveCoachKilledVia() !== null; }
+
+function scheduleRealtimeSttStart(segment, reason = "media") {
+  if (!segment || segment.role !== "prospect" || segment.sttProvider !== "openai-realtime") return null;
+  if (isLiveCoachKilled()) {
+    if (!segment._coachKilledLogged) {
+      segment._coachKilledLogged = true;
+      try {
+        writeJsonLine(segment.eventLog, {
+          type: "coach.kill_switch.active",
+          at: new Date().toISOString(),
+          streamId: segment.streamId,
+          segmentId: segment.segmentId,
+          via: liveCoachKilledVia(),
+          reason,
+        });
+      } catch {}
+      console.log(`[coach] KILL SWITCH active (${liveCoachKilledVia()}) -> STT/coaching off, gRPC stream still accepted (reason=${reason})`);
+    }
+    return null;
+  }
+  if (segment.realtimeStt || segment.realtimeSttStarting || segment.coachTerminal) return segment.realtimeStt || null;
+  const now = Date.now();
+  if (segment.nextRealtimeSttStartAt && now < segment.nextRealtimeSttStartAt) return null;
+  segment.nextRealtimeSttStartAt = now + 250;
+  segment.realtimeSttStartPromise = ensureRealtimeStt(segment, reason).catch((error) => {
+    writeJsonLine(segment.eventLog, {
+      type: "stt.realtime.start_error",
+      at: new Date().toISOString(),
+      streamId: segment.streamId,
+      segmentId: segment.segmentId,
+      reason,
+      error: error.message,
+    });
+    return null;
+  });
+  return segment.realtimeSttStartPromise;
+}
+
+async function ensureRealtimeStt(segment, reason = "media") {
+  if (!segment || segment.role !== "prospect" || segment.sttProvider !== "openai-realtime") return null;
+  if (segment.realtimeStt || segment.coachTerminal) return segment.realtimeStt || null;
+  if (segment.realtimeSttStarting) return segment.realtimeSttStartPromise || null;
+  segment.realtimeSttStarting = true;
+  segment.realtimeSttStartAttempts += 1;
+  try {
+    const bound = await ensureCoachSession(segment, { forceBind: true });
+    if (!segment.coachSessionStarted || !segment.coachSessionId) return null;
+    const selected = selectRealtimeSttModel(segment, bound);
+    segment.sttModel = selected.model;
+    segment.realtimeStt = new OpenAiRealtimeSttChannel({
+      segment,
+      apiKey: segment.openAiApiKey,
+      model: segment.sttModel,
+      language: segment.language,
+      turnDetection: segment.turnDetection,
+      semanticEagerness: segment.semanticEagerness,
+      noiseReduction: segment.noiseReduction,
+      provisionalEnabled: segment.realtimeProvisionalEnabled,
+    });
+    writeJsonLine(segment.eventLog, {
+      type: "stt.realtime.model_select",
+      at: new Date().toISOString(),
+      streamId: segment.streamId,
+      segmentId: segment.segmentId,
+      coachSessionId: segment.coachSessionId,
+      reason,
+      model: segment.sttModel,
+      matchedKey: selected.matchedKey,
+      lookupKeys: selected.lookupKeys,
+      agentName: bound?.session?.metadata?.agentName || segment.coachBinding?.metadata?.agentName || "",
+      agentEmail: bound?.session?.metadata?.agentEmail || segment.coachBinding?.metadata?.agentEmail || "",
+      agentExtension: bound?.session?.metadata?.agentExtension || segment.coachBinding?.metadata?.agentExtension || "",
+      pendingBytes: segment.pendingRealtimePayloadBytes,
+    });
+    segment.realtimeStt.connect().catch((error) => {
+      writeJsonLine(segment.eventLog, {
+        type: "stt.realtime.connect_error",
+        at: new Date().toISOString(),
+        streamId: segment.streamId,
+        segmentId: segment.segmentId,
+        model: segment.sttModel,
+        error: error.message,
+      });
+    });
+    flushPendingRealtimePayloads(segment, reason);
+    return segment.realtimeStt;
+  } finally {
+    segment.realtimeSttStarting = false;
+  }
+}
+
+function isRealtimeItemCompleted(segment, itemId) {
+  return Boolean(itemId && segment?.realtimeStt?.completedItemIds?.has?.(itemId));
+}
+
+async function ensureCoachSession(segment, options = {}) {
+  if (segment.role !== "prospect") return null;
+  if (isLiveCoachKilled()) return null; // kill switch: never start a coach session / LLM call
+  if (segment.coachSessionStarted) {
+    return {
+      status: "existing",
+      binding: segment.coachBinding,
+      session: {
+        id: segment.coachSessionId,
+        metadata: segment.coachSessionMetadata || segment.coachBinding?.metadata || {},
+      },
+    };
+  }
+  const forceBind = Boolean(options.forceBind);
   const hasBindIdentity = Boolean(
     segment.contactPhone ||
       segment.dialogIdentity?.uii ||
@@ -385,7 +785,7 @@ async function ensureCoachSession(segment) {
     return null;
   }
   if (hasBindIdentity) {
-    if (now < segment.nextCoachBindAt) return null;
+    if (!forceBind && now < segment.nextCoachBindAt) return null;
     segment.coachBindAttempts += 1;
     segment.nextCoachBindAt = now + Math.min(5000, 1000 + segment.coachBindAttempts * 500);
     try {
@@ -423,6 +823,7 @@ async function ensureCoachSession(segment) {
         segment.coachSessionId = bound.session.id;
         segment.coachSessionStarted = true;
         segment.coachBinding = bound.binding || null;
+        segment.coachSessionMetadata = bound.session.metadata || null;
         writeJsonLine(segment.eventLog, {
           type: "coach.session.bind",
           at: new Date().toISOString(),
@@ -441,6 +842,43 @@ async function ensureCoachSession(segment) {
           uii: bound.session.metadata?.uii || "",
         });
         return bound;
+      }
+      // STREAM 4 self-healing MISS->ADOPT: the bridge requested a uii that the
+      // mongo bridge says is stale ('not_current'), but the response carries the
+      // agent's actual current call. Adopt that current identity and let the next
+      // attempt bind to the right call instead of getting stuck on a dead uii.
+      const currentEvent = bound?.binding?.event || null;
+      const adoptUii = cleanText(currentEvent?.uii || "", 160);
+      const requestedUii = cleanText(segment.dialogIdentity?.uii || "", 160);
+      if (
+        String(bound?.status || "") === "not_current" &&
+        adoptUii &&
+        adoptUii !== requestedUii
+      ) {
+        segment.dialogIdentity = {
+          ...(segment.dialogIdentity || {}),
+          uii: adoptUii,
+        };
+        const adoptQueueItemId = cleanText(currentEvent?.queueItemId || "", 160);
+        const adoptCallSessionId = cleanText(currentEvent?.callSessionId || "", 160);
+        if (adoptQueueItemId) segment.dialogIdentity.queueItemId = adoptQueueItemId;
+        if (adoptCallSessionId) segment.dialogIdentity.callSessionId = adoptCallSessionId;
+        writeJsonLine(segment.eventLog, {
+          type: "coach.session.uii_adopted",
+          at: new Date().toISOString(),
+          streamId: segment.streamId,
+          segmentId: segment.segmentId,
+          coachSessionId: segment.coachSessionId,
+          fromUii: requestedUii || null,
+          toUii: adoptUii,
+          queueItemId: adoptQueueItemId || null,
+          callSessionId: adoptCallSessionId || null,
+        });
+        // Advance the existing backoff so the next attempt rebinds promptly with
+        // the adopted identity rather than spinning. Return non-terminal (null).
+        segment.coachBindAttempts += 1;
+        segment.nextCoachBindAt = now + Math.min(5000, 1000 + segment.coachBindAttempts * 500);
+        return null;
       }
       writeJsonLine(segment.eventLog, {
         type: "coach.session.bind_miss",
@@ -486,9 +924,10 @@ async function ensureCoachSession(segment) {
     agentEmail: segment.dialogIdentity?.agentEmail || "",
     phone: segment.contactPhone,
     contactName: segment.participant?.name || "",
-    firmName: "Tax Advocate Group",
+    firmName: "Wynn Tax Solutions",
   });
   segment.coachSessionStarted = true;
+  segment.coachSessionMetadata = result.session?.metadata || null;
   writeJsonLine(segment.eventLog, {
     type: "coach.session.start",
     at: new Date().toISOString(),
@@ -502,17 +941,8 @@ async function ensureCoachSession(segment) {
 
 async function postTranscript(segment, transcript, input = {}) {
   if (segment.role !== "prospect") return null;
-  await ensureCoachSession(segment);
-  if (!segment.coachSessionStarted || !segment.coachSessionId) return null;
-  const boundUii = cleanText(
-    segment.coachBinding?.metadata?.uii ||
-      segment.coachBinding?.event?.uii ||
-      segment.dialogIdentity?.uii ||
-      "",
-    160,
-  );
   const itemId = cleanText(input.itemId || input.chunkId || "", 160) || null;
-  return postJson(`${segment.aiBusUrl}/api/ai/live-coach/grpc/${encodeURIComponent(segment.coachSessionId)}/input`, {
+  return postCoachInput(segment, () => ({
     text: transcript.text,
     role: "prospect",
     source: input.source || "grpc-stt-chunk",
@@ -522,29 +952,16 @@ async function postTranscript(segment, transcript, input = {}) {
     final: true,
     durationSec: input.durationSec || null,
     confidence: transcript.confidence || null,
-    streamId: segment.streamId,
-    workflowInstanceId: segment.sessionId,
-    uii: boundUii,
-    callSessionId: segment.dialogIdentity?.callSessionId || segment.sessionId || "",
-    queueItemId: segment.dialogIdentity?.queueItemId || "",
-    agentExtensionId: segment.dialogIdentity?.agentExtensionId || "",
-    agentEmail: segment.dialogIdentity?.agentEmail || "",
-  }, 20_000);
+    ...coachPostIdentity(segment),
+    asyncContextPipeline: true,
+  }), 20_000, { forceBind: input.forceBind === true });
 }
 
 async function postProvisionalTranscript(segment, transcript, input = {}) {
   if (segment.role !== "prospect") return null;
-  await ensureCoachSession(segment);
-  if (!segment.coachSessionStarted || !segment.coachSessionId) return null;
-  const boundUii = cleanText(
-    segment.coachBinding?.metadata?.uii ||
-      segment.coachBinding?.event?.uii ||
-      segment.dialogIdentity?.uii ||
-      "",
-    160,
-  );
   const itemId = cleanText(input.itemId || transcript.itemId || transcript.item_id || input.chunkId || "", 160) || null;
-  return postJson(`${segment.aiBusUrl}/api/ai/live-coach/grpc/${encodeURIComponent(segment.coachSessionId)}/input`, {
+  if (isRealtimeItemCompleted(segment, itemId)) return null;
+  return postCoachInput(segment, () => isRealtimeItemCompleted(segment, itemId) ? null : ({
     text: transcript.text,
     role: "prospect",
     source: input.source || "grpc-openai-realtime-delta",
@@ -556,14 +973,8 @@ async function postProvisionalTranscript(segment, transcript, input = {}) {
     final: false,
     durationSec: input.durationSec || null,
     confidence: transcript.confidence || null,
-    streamId: segment.streamId,
-    workflowInstanceId: segment.sessionId,
-    uii: boundUii,
-    callSessionId: segment.dialogIdentity?.callSessionId || segment.sessionId || "",
-    queueItemId: segment.dialogIdentity?.queueItemId || "",
-    agentExtensionId: segment.dialogIdentity?.agentExtensionId || "",
-    agentEmail: segment.dialogIdentity?.agentEmail || "",
-  }, 8000);
+    ...coachPostIdentity(segment),
+  }), 8000);
 }
 
 async function postProvisionalTranscriptPreview(segment, transcript, input = {}) {
@@ -579,17 +990,10 @@ async function postProvisionalTranscriptPreview(segment, transcript, input = {})
   const delayMs = chunks.length > 1
     ? Math.max(0, Math.floor(segment.provisionalPreviewMs / chunks.length))
     : Math.max(0, segment.provisionalPreviewMs);
-  const boundUii = cleanText(
-    segment.coachBinding?.metadata?.uii ||
-      segment.coachBinding?.event?.uii ||
-      segment.dialogIdentity?.uii ||
-      "",
-    160,
-  );
   let posted = 0;
   for (const chunk of chunks) {
     if (segment.coachTerminal) break;
-    await postJson(`${segment.aiBusUrl}/api/ai/live-coach/grpc/${encodeURIComponent(segment.coachSessionId)}/input`, {
+    await postCoachInput(segment, () => ({
       text: chunk,
       role: "prospect",
       source: "grpc-stt-preview",
@@ -601,18 +1005,29 @@ async function postProvisionalTranscriptPreview(segment, transcript, input = {})
       final: false,
       durationSec: input.durationSec || null,
       confidence: transcript.confidence || null,
-      streamId: segment.streamId,
-      workflowInstanceId: segment.sessionId,
-      uii: boundUii,
-      callSessionId: segment.dialogIdentity?.callSessionId || segment.sessionId || "",
-      queueItemId: segment.dialogIdentity?.queueItemId || "",
-      agentExtensionId: segment.dialogIdentity?.agentExtensionId || "",
-      agentEmail: segment.dialogIdentity?.agentEmail || "",
-    }, 8000);
+      ...coachPostIdentity(segment),
+    }), 8000);
     posted += 1;
     if (delayMs) await sleep(delayMs);
   }
   return posted;
+}
+
+async function postStreamStatus(segment, input = {}) {
+  if (segment.role !== "prospect") return null;
+  return postCoachStreamStatus(segment, () => ({
+    role: "prospect",
+    source: "grpc-audio-status",
+    segmentId: segment.segmentId,
+    mediaCount: segment.mediaCount,
+    rawBytes: segment.rawBytes,
+    durationSec: segment.rate ? Number((segment.rawBytes / segment.rate).toFixed(2)) : null,
+    activePct: input.activePct || 0,
+    rms: input.rms || 0,
+    maxAbs: input.maxAbs || 0,
+    state: input.state || "audio-receiving",
+    ...coachPostIdentity(segment),
+  }), 5000, { forceBind: input.forceBind === true });
 }
 
 class OpenAiRealtimeSttChannel {
@@ -633,6 +1048,7 @@ class OpenAiRealtimeSttChannel {
     this.model = model || "gpt-4o-transcribe";
     this.language = language || "en";
     this.turnDetection = turnDetection || "semantic_vad";
+    this.turnDetectionSupported = openAiRealtimeTranscriptionSupportsTurnDetection(this.model);
     this.semanticEagerness = semanticEagerness || "high";
     this.noiseReduction = noiseReduction || "near_field";
     this.provisionalEnabled = provisionalEnabled !== false;
@@ -643,8 +1059,31 @@ class OpenAiRealtimeSttChannel {
     this.sessionId = "";
     this.disabled = false;
     this.itemTextById = new Map();
+    this.completedItemIds = new Set();
+    this.completionGeneration = 0;
+    this.completionWaiters = [];
+    this.pendingProvisionalByItemId = new Map();
+    this.provisionalFlushTimer = null;
+    this.provisionalPostInFlight = false;
+    this.lastProvisionalPostAtMs = 0;
+    this.provisionalPostIntervalMs = Math.max(
+      0,
+      Math.min(1000, Number(process.env.LIVE_COACH_REALTIME_PROVISIONAL_MIN_MS || "50") || 0),
+    );
+    this.completionWaitMs = Math.max(
+      500,
+      Math.min(8000, Number(process.env.LIVE_COACH_REALTIME_COMPLETION_WAIT_MS || "3000") || 3000),
+    );
     this.pendingPayloads = [];
     this.pendingPayloadBytes = 0;
+    this.bytesSinceCommit = 0;
+    this.manualCommitMs = this.turnDetectionSupported
+      ? 0
+      : Math.max(
+        500,
+        Math.min(5000, Number(process.env.LIVE_COACH_REALTIME_MANUAL_COMMIT_MS || "1200") || 1200),
+      );
+    this.manualCommitTimer = null;
     this.connectPromise = null;
     this.eventQueue = Promise.resolve();
   }
@@ -706,6 +1145,7 @@ class OpenAiRealtimeSttChannel {
   }
 
   buildTurnDetection() {
+    if (!this.turnDetectionSupported) return null;
     if (this.turnDetection === "off" || this.turnDetection === "none" || this.turnDetection === "manual") return null;
     if (this.turnDetection === "server_vad") {
       return {
@@ -754,6 +1194,7 @@ class OpenAiRealtimeSttChannel {
         type: "input_audio_buffer.append",
         audio: Buffer.from(payload).toString("base64"),
       });
+      this.bytesSinceCommit += payload.length;
     } catch (error) {
       writeJsonLine(this.segment.eventLog, {
         type: "stt.realtime.append_error",
@@ -770,6 +1211,16 @@ class OpenAiRealtimeSttChannel {
     this.pendingPayloads = [];
     this.pendingPayloadBytes = 0;
     for (const payload of pending) this.sendAudio(payload);
+  }
+
+  startManualCommitLoop() {
+    if (!this.manualCommitMs || this.manualCommitTimer) return;
+    this.manualCommitTimer = setInterval(() => {
+      if (this.disabled || this.closed || !this.ready) return;
+      if (this.bytesSinceCommit <= 0) return;
+      this.commitInputBuffer("manual-commit");
+    }, this.manualCommitMs);
+    if (typeof this.manualCommitTimer.unref === "function") this.manualCommitTimer.unref();
   }
 
   handleMessage(raw) {
@@ -792,8 +1243,12 @@ class OpenAiRealtimeSttChannel {
           turnDetection: this.turnDetection,
           semanticEagerness: this.semanticEagerness,
           bufferedBytes: this.pendingPayloadBytes,
+          model: this.model,
+          turnDetectionSupported: this.turnDetectionSupported,
+          manualCommitMs: this.manualCommitMs,
         });
         this.flushBufferedAudio();
+        this.startManualCommitLoop();
         if (this.resolveReady) {
           this.resolveReady(event.session || {});
           this.resolveReady = null;
@@ -817,7 +1272,9 @@ class OpenAiRealtimeSttChannel {
     if (event.type === "conversation.item.input_audio_transcription.delta") {
       const delta = cleanText(event.delta || "", 2000);
       if (!delta) return;
-      this.eventQueue = this.eventQueue.then(() => this.handleDelta(event, delta)).catch((error) => {
+      try {
+        this.handleDelta(event, delta);
+      } catch (error) {
         writeJsonLine(this.segment.eventLog, {
           type: "stt.realtime.delta_error",
           at: new Date().toISOString(),
@@ -825,11 +1282,12 @@ class OpenAiRealtimeSttChannel {
           segmentId: this.segment.segmentId,
           error: error.message,
         });
-      });
+      }
       return;
     }
     if (event.type === "conversation.item.input_audio_transcription.completed") {
       const text = cleanText(event.transcript || "", 4000);
+      this.markCompletionReceived(event.item_id || "");
       this.eventQueue = this.eventQueue.then(() => this.handleCompleted(event, text)).catch((error) => {
         writeJsonLine(this.segment.eventLog, {
           type: "stt.realtime.completed_error",
@@ -856,9 +1314,148 @@ class OpenAiRealtimeSttChannel {
     }
   }
 
-  async handleDelta(event, delta) {
+  markCompletionReceived(itemId = "") {
+    this.completionGeneration += 1;
+    const waiters = this.completionWaiters.splice(0);
+    for (const waiter of waiters) {
+      try {
+        waiter.resolve({
+          itemId,
+          generation: this.completionGeneration,
+        });
+      } catch {
+        // no-op
+      }
+    }
+  }
+
+  waitForCompletionAfter(generation, timeoutMs) {
+    if (this.completionGeneration > generation) {
+      return Promise.resolve({ generation: this.completionGeneration, immediate: true });
+    }
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        const index = this.completionWaiters.indexOf(waiter);
+        if (index >= 0) this.completionWaiters.splice(index, 1);
+        resolve({ generation: this.completionGeneration, timedOut: true });
+      }, Math.max(0, Number(timeoutMs) || 0));
+      if (typeof timer.unref === "function") timer.unref();
+      const waiter = {
+        resolve: (value) => {
+          clearTimeout(timer);
+          resolve(value);
+        },
+      };
+      this.completionWaiters.push(waiter);
+    });
+  }
+
+  handleTerminalPostError(error) {
+    if (!isTerminalCoachPostError(error)) {
+      return false;
+    }
+    this.segment.coachTerminal = true;
+    this.disabled = true;
+    writeJsonLine(this.segment.eventLog, {
+      type: "stt.realtime.disabled",
+      at: new Date().toISOString(),
+      streamId: this.segment.streamId,
+      segmentId: this.segment.segmentId,
+      reason: error.message.slice(0, 240),
+    });
+    return true;
+  }
+
+  scheduleProvisionalFlush(delayMs = this.provisionalPostIntervalMs) {
+    if (this.provisionalFlushTimer || this.disabled || this.segment.coachTerminal) return;
+    this.provisionalFlushTimer = setTimeout(() => {
+      this.provisionalFlushTimer = null;
+      this.flushProvisionalPosts().catch((error) => {
+        writeJsonLine(this.segment.eventLog, {
+          type: "stt.realtime.delta_error",
+          at: new Date().toISOString(),
+          streamId: this.segment.streamId,
+          segmentId: this.segment.segmentId,
+          error: error.message,
+        });
+      });
+    }, Math.max(0, Number(delayMs) || 0));
+    if (typeof this.provisionalFlushTimer.unref === "function") this.provisionalFlushTimer.unref();
+  }
+
+  queueProvisionalPost(event, itemId, text) {
+    if (this.completedItemIds.has(itemId)) return;
+    this.pendingProvisionalByItemId.set(itemId, {
+      eventId: event.event_id || "",
+      itemId,
+      text,
+      queuedAt: new Date().toISOString(),
+    });
+    if (this.provisionalPostInFlight) return;
+    const elapsed = Date.now() - this.lastProvisionalPostAtMs;
+    const delayMs = this.lastProvisionalPostAtMs
+      ? Math.max(0, this.provisionalPostIntervalMs - elapsed)
+      : 0;
+    this.scheduleProvisionalFlush(delayMs);
+  }
+
+  async flushProvisionalPosts() {
+    if (this.provisionalPostInFlight || this.disabled || this.segment.coachTerminal) return;
+    const entries = Array.from(this.pendingProvisionalByItemId.values())
+      .filter((entry) => !this.completedItemIds.has(entry.itemId));
+    this.pendingProvisionalByItemId.clear();
+    if (!entries.length) return;
+
+    this.provisionalPostInFlight = true;
+    try {
+      for (const entry of entries) {
+        if (this.disabled || this.segment.coachTerminal || this.completedItemIds.has(entry.itemId)) continue;
+        let posted = null;
+        try {
+          posted = await postProvisionalTranscript(this.segment, {
+            text: entry.text,
+            provider: "openai-realtime",
+            model: this.model,
+            itemId: entry.itemId,
+            eventId: entry.eventId,
+          });
+        } catch (error) {
+          if (this.handleTerminalPostError(error)) return;
+          throw error;
+        }
+        if (!posted) {
+          writeJsonLine(this.segment.eventLog, {
+            type: "stt.realtime.delta_drop",
+            at: new Date().toISOString(),
+            streamId: this.segment.streamId,
+            segmentId: this.segment.segmentId,
+            itemId: entry.itemId,
+            textLength: entry.text.length,
+            reason: this.completedItemIds.has(entry.itemId) ? "final-already-committed" : "coach-session-not-bound",
+          });
+          continue;
+        }
+        this.lastProvisionalPostAtMs = Date.now();
+        writeJsonLine(this.segment.eventLog, {
+          type: "stt.realtime.delta",
+          at: new Date().toISOString(),
+          streamId: this.segment.streamId,
+          segmentId: this.segment.segmentId,
+          itemId: entry.itemId,
+          text: entry.text,
+          coachStatus: posted?.session?.status || null,
+        });
+      }
+    } finally {
+      this.provisionalPostInFlight = false;
+      if (this.pendingProvisionalByItemId.size) this.scheduleProvisionalFlush();
+    }
+  }
+
+  handleDelta(event, delta) {
     if (this.disabled || this.segment.coachTerminal) return;
     const itemId = cleanText(event.item_id || "unknown-item", 160);
+    if (this.completedItemIds.has(itemId)) return;
     const text = cleanText(appendRealtimeTranscriptDelta(this.itemTextById.get(itemId) || "", delta), 4000);
     this.itemTextById.set(itemId, text);
     if (!this.provisionalEnabled) {
@@ -885,45 +1482,77 @@ class OpenAiRealtimeSttChannel {
       });
       return;
     }
-    let posted = null;
-    try {
-      posted = await postProvisionalTranscript(this.segment, {
-        text,
-        provider: "openai-realtime",
-        model: this.model,
-        itemId,
-        eventId: event.event_id || "",
-      });
-    } catch (error) {
-      if (/Session is stale|Session is stopped|Session is voicemail_rejected/i.test(error.message)) {
-        this.segment.coachTerminal = true;
-        this.disabled = true;
-        writeJsonLine(this.segment.eventLog, {
-          type: "stt.realtime.disabled",
-          at: new Date().toISOString(),
-          streamId: this.segment.streamId,
-          segmentId: this.segment.segmentId,
-          reason: error.message.slice(0, 240),
-        });
-        return;
-      }
-      throw error;
-    }
     writeJsonLine(this.segment.eventLog, {
-      type: "stt.realtime.delta",
+      type: "stt.realtime.delta_queued",
       at: new Date().toISOString(),
       streamId: this.segment.streamId,
       segmentId: this.segment.segmentId,
       itemId,
       text,
-      coachStatus: posted?.session?.status || null,
+      textLength: text.length,
     });
+    this.queueProvisionalPost(event, itemId, text);
+  }
+
+  async postCompletedWithBindRetry(event, itemId, text) {
+    const maxWaitMs = Math.max(
+      0,
+      Math.min(5000, Number(process.env.LIVE_COACH_REALTIME_FINAL_BIND_WAIT_MS || "2500") || 2500),
+    );
+    const startedAt = Date.now();
+    let attempts = 0;
+    for (;;) {
+      attempts += 1;
+      const posted = await postTranscript(this.segment, {
+        text,
+        provider: "openai-realtime",
+        model: this.model,
+        itemId,
+      }, {
+        source: "grpc-openai-realtime-semantic-vad",
+        itemId,
+        durationSec: null,
+        forceBind: true,
+      });
+      if (posted || this.disabled || this.segment.coachTerminal) {
+        if (posted && attempts > 1) {
+          writeJsonLine(this.segment.eventLog, {
+            type: "stt.realtime.completed_bind_retry_success",
+            at: new Date().toISOString(),
+            streamId: this.segment.streamId,
+            segmentId: this.segment.segmentId,
+            itemId,
+            attempts,
+            elapsedMs: Date.now() - startedAt,
+          });
+        }
+        return posted;
+      }
+      const elapsedMs = Date.now() - startedAt;
+      if (elapsedMs >= maxWaitMs) {
+        writeJsonLine(this.segment.eventLog, {
+          type: "stt.realtime.completed_bind_miss",
+          at: new Date().toISOString(),
+          streamId: this.segment.streamId,
+          segmentId: this.segment.segmentId,
+          itemId,
+          attempts,
+          elapsedMs,
+          maxWaitMs,
+        });
+        return null;
+      }
+      await sleep(Math.min(350, 100 + attempts * 75));
+    }
   }
 
   async handleCompleted(event, text) {
     if (this.disabled || this.segment.coachTerminal) return;
     const itemId = cleanText(event.item_id || "unknown-item", 160);
     if (!text) text = cleanText(this.itemTextById.get(itemId) || "", 4000);
+    this.bytesSinceCommit = 0;
+    this.completedItemIds.add(itemId);
+    this.pendingProvisionalByItemId.delete(itemId);
     this.itemTextById.delete(itemId);
     if (isLowSignalTranscript(text)) {
       writeJsonLine(this.segment.eventLog, {
@@ -939,33 +1568,14 @@ class OpenAiRealtimeSttChannel {
     }
     let posted = null;
     try {
-      posted = await postTranscript(this.segment, {
-        text,
-        provider: "openai-realtime",
-        model: this.model,
-        itemId,
-      }, {
-        source: "grpc-openai-realtime-semantic-vad",
-        itemId,
-        durationSec: null,
-      });
+      posted = await this.postCompletedWithBindRetry(event, itemId, text);
     } catch (error) {
-      if (/Session is stale|Session is stopped|Session is voicemail_rejected/i.test(error.message)) {
-        this.segment.coachTerminal = true;
-        this.disabled = true;
-        writeJsonLine(this.segment.eventLog, {
-          type: "stt.realtime.disabled",
-          at: new Date().toISOString(),
-          streamId: this.segment.streamId,
-          segmentId: this.segment.segmentId,
-          reason: error.message.slice(0, 240),
-        });
-        return;
-      }
+      if (this.handleTerminalPostError(error)) return;
       throw error;
     }
     if (TERMINAL_COACH_STATUSES.has(String(posted?.session?.status || ""))) {
       this.segment.coachTerminal = true;
+      this.disabled = true;
     }
     writeJsonLine(this.segment.eventLog, {
       type: "stt.realtime.completed",
@@ -978,10 +1588,45 @@ class OpenAiRealtimeSttChannel {
       coachAction: posted?.result?.action || null,
       usage: event.usage || null,
     });
+    if (this.disabled) this.close();
+  }
+
+  commitInputBuffer(reason = "segment-ended") {
+    if (this.disabled || this.closed || !this.ready || this.ws?.readyState !== WebSocket.OPEN) return 0;
+    if (this.bytesSinceCommit <= 0) return 0;
+    const committedBytes = this.bytesSinceCommit;
+    this.bytesSinceCommit = 0;
+    try {
+      this.send({ type: "input_audio_buffer.commit" });
+      writeJsonLine(this.segment.eventLog, {
+        type: "stt.realtime.commit",
+        at: new Date().toISOString(),
+        streamId: this.segment.streamId,
+        segmentId: this.segment.segmentId,
+        reason,
+        committedBytes,
+      });
+      return committedBytes;
+    } catch (error) {
+      this.bytesSinceCommit += committedBytes;
+      writeJsonLine(this.segment.eventLog, {
+        type: "stt.realtime.commit_error",
+        at: new Date().toISOString(),
+        streamId: this.segment.streamId,
+        segmentId: this.segment.segmentId,
+        reason,
+        error: error.message,
+      });
+      return 0;
+    }
   }
 
   close() {
     this.closed = true;
+    if (this.manualCommitTimer) {
+      clearInterval(this.manualCommitTimer);
+      this.manualCommitTimer = null;
+    }
     if (this.ws) {
       try {
         this.ws.close(1000, "segment ended");
@@ -994,16 +1639,33 @@ class OpenAiRealtimeSttChannel {
   async finish(reason = "segment-ended") {
     if (this.closed) return;
     if (this.ready && this.ws?.readyState === WebSocket.OPEN) {
+      const completionGeneration = this.completionGeneration;
+      const committedBytes = this.commitInputBuffer(reason);
       writeJsonLine(this.segment.eventLog, {
         type: "stt.realtime.finish",
         at: new Date().toISOString(),
         streamId: this.segment.streamId,
         segmentId: this.segment.segmentId,
         reason,
+        committedBytes,
       });
+      if (committedBytes > 0) {
+        const waitResult = await this.waitForCompletionAfter(completionGeneration, this.completionWaitMs);
+        writeJsonLine(this.segment.eventLog, {
+          type: "stt.realtime.finish_wait",
+          at: new Date().toISOString(),
+          streamId: this.segment.streamId,
+          segmentId: this.segment.segmentId,
+          reason,
+          committedBytes,
+          completionGenerationBefore: completionGeneration,
+          completionGenerationAfter: this.completionGeneration,
+          timedOut: !!waitResult?.timedOut,
+        });
+      }
       await Promise.race([
         this.eventQueue.catch(() => null),
-        sleep(1200),
+        sleep(this.completionWaitMs),
       ]);
     }
     this.close();
@@ -1120,8 +1782,11 @@ function queueFlush(segment, reason = "interval") {
       return posted;
     })
     .catch((error) => {
+      if (isTerminalCoachPostError(error)) {
+        segment.coachTerminal = true;
+      }
       writeJsonLine(segment.eventLog, {
-        type: "stt.error",
+        type: segment.coachTerminal ? "stt.terminal" : "stt.error",
         at: new Date().toISOString(),
         streamId: segment.streamId,
         segmentId: segment.segmentId,
@@ -1164,6 +1829,109 @@ async function stopCoachSession(segment, reason = "stream-end") {
   }
 }
 
+// STREAM 4 self-healing DRIFT->REBIND: while a coach session is bound, the agent
+// may roll to a new call (new uii) without the bridge tearing down the segment.
+// Periodically (throttled, piggybacked on transcript cadence) ask the mongo
+// bridge for the agent's CURRENT uii using agent-only filters. If it changed,
+// require the SAME new uii on 2 consecutive ticks (debounce) before tearing down
+// the stale session and rebinding to the current call. Default OFF; inert unless
+// LIVE_COACH_UII_RECONCILE_ENABLED is set.
+async function reconcileCoachUii(segment) {
+  if (!segment || !segment.uiiReconcileEnabled) return null;
+  if (segment.role !== "prospect") return null;
+  if (!segment.coachSessionStarted || segment.coachTerminal) return null;
+  const agentExtensionId = cleanText(segment.dialogIdentity?.agentExtensionId || "", 80);
+  const agentEmail = cleanText(segment.dialogIdentity?.agentEmail || "", 180);
+  if (!agentExtensionId && !agentEmail) return null;
+  const now = Date.now();
+  if (segment.nextUiiReconcileAt && now < segment.nextUiiReconcileAt) return null;
+  segment.nextUiiReconcileAt = now + segment.uiiReconcileIntervalMs;
+  const boundUii = cleanText(
+    segment.coachBinding?.metadata?.uii ||
+      segment.coachBinding?.event?.uii ||
+      segment.dialogIdentity?.uii ||
+      "",
+    160,
+  );
+  try {
+    // AGENT-ONLY filters: no uii/callSessionId/queueItemId so we get whatever
+    // call the agent is on right now, regardless of what we are bound to.
+    const latest = await postJson(`${segment.aiBusUrl}/api/ai/live-coach/grpc/mongo/bind/latest`, compactObject({
+      agentExtensionId,
+      agentEmail,
+      source: "grpc-live-bridge-reconcile",
+      streamId: segment.streamId,
+      // bind/latest would otherwise ensure/replace a coach session; this is a
+      // read-only probe, so do not retire other sessions on our behalf.
+      retireReplaced: false,
+    }), 8000);
+    const currentEvent = latest?.binding?.event || latest?.session?.metadata || null;
+    const currentUii = cleanText(currentEvent?.uii || "", 160);
+    if (!currentUii || currentUii === boundUii) {
+      // No drift: clear any half-formed candidate.
+      segment.uiiDriftCandidate = null;
+      segment.uiiDriftConfirmCount = 0;
+      return null;
+    }
+    // Drift detected. Debounce: require the SAME new uii on 2 consecutive ticks.
+    if (segment.uiiDriftCandidate === currentUii) {
+      segment.uiiDriftConfirmCount += 1;
+    } else {
+      segment.uiiDriftCandidate = currentUii;
+      segment.uiiDriftConfirmCount = 1;
+    }
+    if (segment.uiiDriftConfirmCount < 2) {
+      writeJsonLine(segment.eventLog, {
+        type: "coach.uii.reconcile_candidate",
+        at: new Date().toISOString(),
+        streamId: segment.streamId,
+        segmentId: segment.segmentId,
+        coachSessionId: segment.coachSessionId,
+        fromUii: boundUii || null,
+        toUii: currentUii,
+        confirmCount: segment.uiiDriftConfirmCount,
+      });
+      return null;
+    }
+    // Confirmed drift: tear down the stale session and rebind to current call.
+    const currentQueueItemId = cleanText(currentEvent?.queueItemId || "", 160);
+    const currentCallSessionId = cleanText(currentEvent?.callSessionId || "", 160);
+    await stopCoachSession(segment, "uii-reconcile");
+    resetCoachSessionAfterMissing(segment, "uii-reconcile");
+    segment.dialogIdentity = {
+      ...(segment.dialogIdentity || {}),
+      uii: currentUii,
+    };
+    if (currentQueueItemId) segment.dialogIdentity.queueItemId = currentQueueItemId;
+    if (currentCallSessionId) segment.dialogIdentity.callSessionId = currentCallSessionId;
+    segment.uiiDriftCandidate = null;
+    segment.uiiDriftConfirmCount = 0;
+    await ensureCoachSession(segment, { forceBind: true });
+    writeJsonLine(segment.eventLog, {
+      type: "coach.uii.reconciled",
+      at: new Date().toISOString(),
+      streamId: segment.streamId,
+      segmentId: segment.segmentId,
+      coachSessionId: segment.coachSessionId,
+      fromUii: boundUii || null,
+      toUii: currentUii,
+      queueItemId: currentQueueItemId || null,
+      callSessionId: currentCallSessionId || null,
+    });
+    return { fromUii: boundUii || null, toUii: currentUii };
+  } catch (error) {
+    writeJsonLine(segment.eventLog, {
+      type: "coach.uii.reconcile_error",
+      at: new Date().toISOString(),
+      streamId: segment.streamId,
+      segmentId: segment.segmentId,
+      coachSessionId: segment.coachSessionId,
+      error: error.message,
+    });
+    return null;
+  }
+}
+
 function createLiveCoachStreamingService({
   outDir,
   eventLog,
@@ -1173,6 +1941,7 @@ function createLiveCoachStreamingService({
   provisionalPreviewChunks,
   sttProvider,
   sttModel,
+  sttModelMap,
   openAiApiKey,
   turnDetection,
   semanticEagerness,
@@ -1213,9 +1982,10 @@ function createLiveCoachStreamingService({
         finalized = true;
         for (const segment of segments.values()) {
           queueFlush(segment, reason);
-          if (segment.realtimeStt) {
+          if (segment.sttProvider === "openai-realtime") {
             segment.transcribeQueue = segment.transcribeQueue
-              .then(() => segment.realtimeStt.finish(reason))
+              .then(() => segment.realtimeStt ? segment.realtimeStt : ensureRealtimeStt(segment, reason))
+              .then(() => segment.realtimeStt ? segment.realtimeStt.finish(reason) : null)
               .catch(() => null);
           }
           if (segment.pcmBuffers.length && !fs.existsSync(segment.wavPath)) {
@@ -1304,6 +2074,7 @@ function createLiveCoachStreamingService({
             provisionalPreviewChunks,
             sttProvider,
             sttModel,
+            sttModelMap,
             openAiApiKey,
             turnDetection,
             semanticEagerness,
@@ -1333,20 +2104,48 @@ function createLiveCoachStreamingService({
           const payload = audio.payload ? Buffer.from(audio.payload) : Buffer.alloc(0);
           const segment = segments.get(media.segmentId);
           if (segment && payload.length) {
+            segment.mediaCount += 1;
             fs.appendFileSync(segment.rawPath, payload);
             segment.rawBytes += payload.length;
             if (segment.sttProvider !== "openai-realtime") {
               segment.pendingRawBytes += payload.length;
             }
             const pcm = pcm16FromPayload(payload, segment.codec);
+            const packetActivity = pcm ? measurePcm16Activity([pcm]) : null;
             if (pcm) {
               segment.pcmBuffers.push(pcm);
               if (segment.sttProvider !== "openai-realtime") {
                 segment.pendingPcmBuffers.push(pcm);
               }
             }
+            if (
+              segment.role === "prospect" &&
+              Date.now() - segment.lastStreamStatusAtMs >= segment.streamStatusIntervalMs
+            ) {
+              segment.lastStreamStatusAtMs = Date.now();
+              postStreamStatus(segment, {
+                activePct: packetActivity?.activePctOver500 || 0,
+                rms: packetActivity?.rms || 0,
+                maxAbs: packetActivity?.maxAbs || 0,
+                state: segment.realtimeStt ? "stt-ready-audio" : "audio-buffering",
+              }).catch((error) => {
+                writeJsonLine(segment.eventLog, {
+                  type: "stream.status_error",
+                  at: new Date().toISOString(),
+                  streamId: segment.streamId,
+                  segmentId: segment.segmentId,
+                  error: error.message,
+                });
+              });
+            }
             if (segment.sttProvider === "openai-realtime") {
-              segment.realtimeStt?.appendPcmu(payload);
+              if (!segment.realtimeStt) {
+                queueRealtimePayload(segment, payload);
+                scheduleRealtimeSttStart(segment, "media");
+              } else {
+                flushPendingRealtimePayloads(segment, "media");
+                segment.realtimeStt.appendPcmu(payload);
+              }
             } else if (segment.pendingRawBytes >= Math.max(1, segment.rate) * segment.chunkSec) {
               queueFlush(segment, "bytes");
             }
@@ -1373,6 +2172,7 @@ function createLiveCoachStreamingService({
             }
             writeJsonLine(segment.jsonPath, base);
             segment.transcribeQueue = segment.transcribeQueue
+              .then(() => segment.realtimeStt ? segment.realtimeStt : ensureRealtimeStt(segment, "segment-stop"))
               .then(() => segment.realtimeStt ? segment.realtimeStt.finish("segment-stop") : null)
               .then(() => stopCoachSession(segment, "segment-stop"))
               .catch(() => null);
@@ -1429,7 +2229,8 @@ async function main() {
     Math.min(8, Number(readFlag(argv, "--provisional-preview-chunks", process.env.LIVE_COACH_GRPC_PROVISIONAL_PREVIEW_CHUNKS || "4")) || 4),
   );
   const sttProvider = String(readFlag(argv, "--stt-provider", process.env.LIVE_COACH_STT_PROVIDER || "openai-realtime")).trim().toLowerCase();
-  const sttModel = readFlag(argv, "--stt-model", process.env.LIVE_COACH_STT_MODEL || process.env.SALES_TRAINER_STT_MODEL || "gpt-4o-transcribe");
+  const sttModel = resolveSttModelAlias(readFlag(argv, "--stt-model", process.env.LIVE_COACH_STT_MODEL || process.env.SALES_TRAINER_STT_MODEL || "gpt-4o-transcribe"));
+  const sttModelMap = parseSttModelMap(readFlag(argv, "--stt-model-map", process.env.LIVE_COACH_STT_MODEL_MAP || ""));
   const openAiApiKey = process.env.OPENAI_API_KEY || "";
   const turnDetection = String(readFlag(argv, "--turn-detection", process.env.LIVE_COACH_OPENAI_TURN_DETECTION || "semantic_vad")).trim().toLowerCase();
   const semanticEagerness = String(readFlag(argv, "--semantic-vad-eagerness", process.env.LIVE_COACH_OPENAI_SEMANTIC_EAGERNESS || "high")).trim().toLowerCase();
@@ -1463,6 +2264,7 @@ async function main() {
     provisionalPreviewChunks,
     sttProvider,
     sttModel,
+    sttModelMap,
     openAiApiKey,
     turnDetection,
     semanticEagerness,
@@ -1485,6 +2287,9 @@ async function main() {
     console.log(`  chunk:      ${sttProvider === "openai-realtime" ? "semantic_vad realtime" : `${chunkSec}s`}`);
     console.log(`  preview:    ${sttProvider === "openai-realtime" ? (realtimeProvisionalEnabled ? "realtime deltas" : "semantic vad finals only") : provisionalPreviewMs ? `${provisionalPreviewChunks} chunks / ${provisionalPreviewMs}ms` : "off"}`);
     console.log(`  stt:        ${sttProvider}:${sttModel}`);
+    if (sttModelMap.size) {
+      console.log(`  stt map:    ${[...sttModelMap.entries()].map(([key, model]) => `${key}=${model}`).join(",")}`);
+    }
     console.log(`  bind:       ${allowUnboundCoachSessions ? "allow-unbound-test" : "require-current-cx-call"}`);
     if (sttProvider === "openai-realtime") {
       console.log(`  vad:        ${turnDetection}${turnDetection === "semantic_vad" ? `/${semanticEagerness}` : ""}`);
@@ -1501,7 +2306,21 @@ async function main() {
   process.on("SIGTERM", shutdown);
 }
 
-main().catch((error) => {
-  console.error(error.stack || error.message);
-  process.exit(1);
-});
+// Only auto-start the gRPC server when run directly. When required as a module
+// (tests), export the self-healing helpers without booting anything.
+if (require.main === module) {
+  main().catch((error) => {
+    console.error(error.stack || error.message);
+    process.exit(1);
+  });
+}
+
+module.exports = {
+  createSegmentState,
+  ensureCoachSession,
+  postCoachInput,
+  reconcileCoachUii,
+  stopCoachSession,
+  resetCoachSessionAfterMissing,
+  readEnvBool,
+};

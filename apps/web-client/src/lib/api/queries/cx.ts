@@ -13,15 +13,14 @@ import type {
 } from "@/lib/api/types";
 import { queryKeys } from "@/lib/api/queries/keys";
 
-function invalidateCxScope(qc: ReturnType<typeof useQueryClient>, domain: string) {
+function invalidateCxScope(qc: ReturnType<typeof useQueryClient>, _domain: string) {
+  // Narrowed to cx-scoped keys only. The review/workflows/ringcentral
+  // families were carpet-bombing every CX mutation, forcing unrelated
+  // panels to refetch on each dial/disposition/text. cx.all() already
+  // covers the domain-specific workspace/callQueue/appointments/tasks
+  // (and every other cx.* query), so a single family invalidation is
+  // sufficient and far cheaper than the per-key fan-out.
   qc.invalidateQueries({ queryKey: queryKeys.cx.all() });
-  qc.invalidateQueries({ queryKey: queryKeys.review.all() });
-  qc.invalidateQueries({ queryKey: queryKeys.workflows.all() });
-  qc.invalidateQueries({ queryKey: queryKeys.ringcentral.all() });
-  qc.invalidateQueries({ queryKey: queryKeys.cx.workspace(domain) });
-  qc.invalidateQueries({ queryKey: queryKeys.cx.callQueue(domain) });
-  qc.invalidateQueries({ queryKey: queryKeys.cx.appointments(domain) });
-  qc.invalidateQueries({ queryKey: queryKeys.cx.tasks(domain) });
 }
 
 export function useCxWorkspace(domain: string) {
@@ -39,9 +38,12 @@ export function useCxWorkspace(domain: string) {
     //
     // This drives live call/scramble state in the CX workspace. Keep it
     // tight while the tab is active so progressive dialing feels snappy.
-    staleTime: 1_500,
+    // staleTime aligned to refetchInterval so window-focus/remount don't
+    // fire an extra fetch on top of the steady 3s poll (no double-poll).
+    staleTime: 3_000,
     refetchInterval: 3_000,
     refetchIntervalInBackground: false,
+    refetchOnWindowFocus: false,
   });
 }
 
@@ -57,9 +59,12 @@ export function useCxCallQueue(domain: string) {
     enabled: Boolean(domain),
     // Tight polling so queue items popping off / new dial requests
     // landing show up promptly while the operator is on a call.
-    staleTime: 1_000,
+    // staleTime aligned to refetchInterval so window-focus/remount don't
+    // double-poll on top of the steady 2s cadence.
+    staleTime: 2_000,
     refetchInterval: 2_000,
     refetchIntervalInBackground: false,
+    refetchOnWindowFocus: false,
   });
 }
 

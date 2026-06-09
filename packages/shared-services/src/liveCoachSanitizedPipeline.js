@@ -1,13 +1,35 @@
 "use strict";
 
+const contextMatchBank = require("./liveCoachContextMatchBank");
+
 const VOICEMAIL_MATCHES = [
   "name and number",
   "can't take your call now",
   "cant take your call now",
+  "not able to get with you right now",
+  "not able to get to you right now",
+  "not able to take your call",
+  "we are not available now",
+  "we're not available now",
+  "not available now",
+  "this person is not available",
+  "person is not available",
+  "person you're trying to reach is not available",
+  "person you are trying to reach is not available",
+  "didn't get your message",
+  "did not get your message",
+  "not speaking or because of a bad connection",
+  "if you're satisfied with the message",
+  "if you are satisfied with the message",
+  "to erase and re-record",
+  "to erase and rerecord",
   "at the tone",
   "after the tone",
   "forwarded to voicemail",
   "forwarded to an automated voice messaging system",
+  "forwarded to an automatic voice message system",
+  "automatic voice message system",
+  "automatic voice messaging system",
   "leave a message",
   "leave your message",
   "leave me a message",
@@ -27,7 +49,23 @@ const VOICEMAIL_PATTERNS = [
   },
   {
     label: "leave your name and number",
-    pattern: /\bleave\s+(?:your\s+)?name\s+(?:and|&)\s+(?:phone\s+)?number\b/i,
+    pattern: /\b(?:please\s+)?leave\s+(?:your\s+)?name\s+(?:and|&)\s+(?:phone\s+)?number\b/i,
+  },
+  {
+    label: "unavailable leave name and number",
+    pattern: /\b(?:not\s+able|unable|unavailable|not\s+available)\b.{0,140}\b(?:leave|record)\b.{0,80}\b(?:name|number|message)\b/i,
+  },
+  {
+    label: "not available now",
+    pattern: /\b(?:(?:we|i|this\s+person|the\s+person)\s+(?:are|am|is)|person\s+(?:you're|you\s+are)\s+trying\s+to\s+reach\s+is)\b.{0,80}\b(?:not\s+available|unavailable)(?:\s+now)?\b/i,
+  },
+  {
+    label: "post-message voicemail menu",
+    pattern: /\b(?:satisfied\s+with\s+the\s+message|listen\s+to\s+your\s+message|erase\s+and\s+re-?record|continue\s+recording|press\s+(?:one|1|two|2|three|3|pound))\b.{0,160}\b(?:message|recording|options?)\b/i,
+  },
+  {
+    label: "no voicemail audio captured",
+    pattern: /\b(?:didn['’]?t|did\s+not)\s+get\s+your\s+message\b.{0,140}\b(?:not\s+speaking|bad\s+connection|record\s+your\s+message|press\s+2)\b/i,
   },
   {
     label: "record your message",
@@ -69,6 +107,13 @@ const CALL_SCREENER_MATCHES = [
   "may i ask whos calling",
   "who is calling",
   "who's calling",
+];
+
+const SYSTEM_CONTEXT_CLEAR_MATCHES = [
+  "please stay on the line",
+  "stay on the line",
+  "please continue to hold",
+  "continue to hold",
 ];
 
 const FILLER_PATTERNS = [
@@ -905,6 +950,7 @@ function normalizeSttTranscript(input = {}) {
     at: cleanText(input.at || "", 80) || new Date().toISOString(),
     role: normalizeRole(input.role || input.speaker),
     text,
+    itemId: cleanText(input.itemId || input.item_id || "", 120) || null,
     source: cleanText(input.source || "stt", 80),
     provider: cleanText(input.provider || input.sttProvider || "", 80) || null,
     model: cleanText(input.model || input.sttModel || "", 120) || null,
@@ -946,6 +992,15 @@ function analyzeCallScreener(text) {
   };
 }
 
+function analyzeSystemContextClear(text) {
+  const match = includesPhrase(text, SYSTEM_CONTEXT_CLEAR_MATCHES);
+  return {
+    shouldClear: Boolean(match),
+    match,
+    action: match ? "clear_context" : "continue",
+  };
+}
+
 function keywordHit(lowerText, keyword) {
   const needle = String(keyword || "").trim().toLowerCase();
   if (!needle) return false;
@@ -956,7 +1011,8 @@ function keywordHit(lowerText, keyword) {
 }
 
 function isWeakContextHit(keyword) {
-  return WEAK_CONTEXT_HITS.has(String(keyword || "").trim().toLowerCase());
+  return contextMatchBank.isWeakContextHit(keyword) ||
+    WEAK_CONTEXT_HITS.has(String(keyword || "").trim().toLowerCase());
 }
 
 function filterContextHits(rule, hits = []) {
@@ -966,24 +1022,7 @@ function filterContextHits(rule, hits = []) {
 }
 
 function findContextMatches(text, options = {}) {
-  const lower = cleanText(text, 6000).toLowerCase();
-  const limit = Math.max(1, Number(options.limit || 6));
-  return CONTEXT_RULES
-    .map((rule) => {
-      const hits = filterContextHits(rule, rule.keywords.filter((keyword) => keywordHit(lower, keyword)));
-      if (!hits.length) return null;
-      return {
-        key: rule.key,
-        label: rule.label,
-        family: rule.family,
-        priority: rule.priority,
-        hits,
-        guidance: rule.guidance,
-      };
-    })
-    .filter(Boolean)
-    .sort((a, b) => b.priority - a.priority || b.hits.length - a.hits.length)
-    .slice(0, limit);
+  return contextMatchBank.findContextCandidateMatches(text, CONTEXT_RULES, options);
 }
 
 function normalizeContextCandidate(candidate = {}) {
@@ -1003,26 +1042,7 @@ function normalizeContextCandidate(candidate = {}) {
 }
 
 function normalizeContextCandidates(candidates = [], options = {}) {
-  const limit = Math.max(1, Number(options.limit || 6));
-  const byKey = new Map();
-  for (const candidate of Array.isArray(candidates) ? candidates : []) {
-    const normalized = normalizeContextCandidate(candidate);
-    if (!normalized) continue;
-    const current = byKey.get(normalized.key);
-    if (!current) {
-      byKey.set(normalized.key, normalized);
-      continue;
-    }
-    current.priority = Math.max(current.priority, normalized.priority);
-    current.score = Math.max(current.score, normalized.score);
-    current.hits = [...new Set([...current.hits, ...normalized.hits])];
-    if (!current.guidance && normalized.guidance) current.guidance = normalized.guidance;
-    if (!current.label && normalized.label) current.label = normalized.label;
-    if (!current.family && normalized.family) current.family = normalized.family;
-  }
-  return [...byKey.values()]
-    .sort((a, b) => b.score - a.score || b.priority - a.priority || b.hits.length - a.hits.length || a.key.localeCompare(b.key))
-    .slice(0, limit);
+  return contextMatchBank.normalizeContextCandidates(candidates, options);
 }
 
 function candidateToContextMatch(candidate = {}) {
@@ -1198,16 +1218,21 @@ function classifyThoughtCompleteness(text) {
 }
 
 function shouldComposeFromContext({ text, contextMatches, completeness }) {
-  if (!completeness.complete) {
+  const clean = cleanText(text, 1200);
+  const wordCount = Number(completeness?.wordCount || 0);
+  if (!clean || isFiller(clean)) {
+    return { shouldCompose: false, reason: "filler_or_empty" };
+  }
+  if (completeness?.reason === "trailing_fragment") {
     return { shouldCompose: false, reason: completeness.reason };
   }
   if (contextMatches.length) {
     return { shouldCompose: true, reason: "matched_context" };
   }
-  if (hasQuestionShape(text) && completeness.wordCount >= 5) {
+  if (hasQuestionShape(text) && wordCount >= 3) {
     return { shouldCompose: true, reason: "question_without_keyword_match" };
   }
-  return { shouldCompose: false, reason: "complete_but_not_actionable" };
+  return { shouldCompose: true, reason: "vad_release_default_compose" };
 }
 
 function buildMiniContextFrame({ phraseText, transcript, metadata = {}, pendingCount = 0, candidateMatches = [] }) {
@@ -1261,7 +1286,7 @@ function buildMiniContextFrame({ phraseText, transcript, metadata = {}, pendingC
     },
     metadata: {
       agentName: cleanText(metadata.agentName || "", 120),
-      firmName: cleanText(metadata.firmName || "Tax Advocate Group", 120),
+      firmName: cleanText(metadata.firmName || "Wynn Tax Solutions", 120),
       uii: cleanText(metadata.uii || "", 120),
       agentEmail: cleanText(metadata.agentEmail || "", 160),
     },
@@ -1383,7 +1408,7 @@ function buildFixedComposerInstructions({ role = "prospect" } = {}) {
 
 function buildSonnetPromptPayload({ contextFrame, metadata = {} }) {
   const agentName = cleanText(metadata.agentName || contextFrame?.metadata?.agentName || "the agent", 120);
-  const firmName = cleanText(metadata.firmName || contextFrame?.metadata?.firmName || "Tax Advocate Group", 120);
+  const firmName = cleanText(metadata.firmName || contextFrame?.metadata?.firmName || "Wynn Tax Solutions", 120);
   const matches = Array.isArray(contextFrame?.matches) ? contextFrame.matches : [];
   const tactics = Array.isArray(contextFrame?.tactics) ? contextFrame.tactics : [];
   // SYSTEM = the STABLE prefix: role + standing directives. Identical on every call,
@@ -1477,7 +1502,7 @@ function createSonnetDialogDraft({ contextFrame, metadata = {} }) {
   } else if (primary?.key === "emotional_pressure" || primary?.key === "money_pressure") {
     say = "I can hear why that feels heavy. Before we guess at a solution, what notice, year, and amount are they showing you?";
   } else if (primary?.key === "legitimacy") {
-    say = `This is ${metadata.agentName || "your representative"} with ${metadata.firmName || "Tax Advocate Group"}, and I want to make sure I am looking at the right tax issue. Did you recently get a notice or request help online?`;
+    say = `This is ${metadata.agentName || "your representative"} with ${metadata.firmName || "Wynn Tax Solutions"}, and I want to make sure I am looking at the right tax issue. Did you recently get a notice or request help online?`;
   } else if (primary?.key === "fees_close") {
     say = "The fee depends on the scope, so I do not want to guess before we know the facts. What years, notices, and balances are we actually dealing with?";
   } else if (primary?.key === "representation") {
@@ -1506,6 +1531,7 @@ function createSanitizedLiveCoachPipeline({ metadata = {} } = {}) {
   const state = {
     rejected: false,
     transcriptCount: 0,
+    coachableCount: 0,
     pendingByRole: {
       prospect: [],
       agent: [],
@@ -1537,9 +1563,10 @@ function createSanitizedLiveCoachPipeline({ metadata = {} } = {}) {
     }
 
     state.transcriptCount += 1;
+    const contextClear = analyzeSystemContextClear(transcript.text);
     const screener = analyzeCallScreener(transcript.text);
     const voicemail = analyzeVoicemail(transcript.text);
-    if (state.transcriptCount === 1 && voicemail.isVoicemail && !screener.isScreener) {
+    if (state.coachableCount === 0 && voicemail.isVoicemail && !screener.isScreener) {
       state.rejected = true;
       const dialog = {
         status: "rejected",
@@ -1556,13 +1583,40 @@ function createSanitizedLiveCoachPipeline({ metadata = {} } = {}) {
       };
     }
 
+    if (contextClear.shouldClear) {
+      state.pendingByRole.prospect = [];
+      state.pendingByRole.agent = [];
+      state.pendingByRole.unknown = [];
+      state.sentenceBankByRole.system.push(transcript.text);
+      return {
+        action: "clear_context_system_prompt",
+        transcript: { ...transcript, role: "system", nonProspectReason: `system_context_clear:${contextClear.match}` },
+        context: null,
+        dialog: null,
+        hold: {
+          reason: "system_context_clear",
+          match: contextClear.match,
+          pendingText: "",
+        },
+        state: snapshot(),
+      };
+    }
+
     if (screener.isScreener) {
+      state.pendingByRole.prospect = [];
+      state.pendingByRole.agent = [];
+      state.pendingByRole.unknown = [];
       state.sentenceBankByRole.system.push(transcript.text);
       return {
         action: "hold_call_screener",
-        transcript: { ...transcript, nonProspectReason: `call_screener:${screener.match}` },
+        transcript: { ...transcript, role: "system", nonProspectReason: `call_screener:${screener.match}` },
         context: null,
         dialog: null,
+        hold: {
+          reason: "call_screener",
+          match: screener.match,
+          pendingText: "",
+        },
         state: snapshot(),
       };
     }
@@ -1594,7 +1648,7 @@ function createSanitizedLiveCoachPipeline({ metadata = {} } = {}) {
       return {
         action: "hold_for_more_context",
         transcript,
-        context: null,
+        context,
         dialog: null,
         hold: {
           reason: context.actionReason,
@@ -1607,6 +1661,7 @@ function createSanitizedLiveCoachPipeline({ metadata = {} } = {}) {
 
     state.pendingByRole.prospect = [];
     state.sentenceBankByRole.prospect.push(phraseText);
+    state.coachableCount += 1;
     const dialog = createSonnetDialogDraft({ contextFrame: context, metadata });
     return {
       action: "compose_dialog",
@@ -1621,6 +1676,7 @@ function createSanitizedLiveCoachPipeline({ metadata = {} } = {}) {
     return {
       rejected: state.rejected,
       transcriptCount: state.transcriptCount,
+      coachableCount: state.coachableCount,
       pendingByRole: {
         prospect: state.pendingByRole.prospect.slice(),
         agent: state.pendingByRole.agent.slice(),
@@ -1633,17 +1689,31 @@ function createSanitizedLiveCoachPipeline({ metadata = {} } = {}) {
     };
   }
 
+  function commitPending(role = "prospect", phraseText = "") {
+    const normalizedRole = normalizeRole(role);
+    state.pendingByRole[normalizedRole] = [];
+    const clean = normalizeTaxTerms(phraseText);
+    if (clean) {
+      state.sentenceBankByRole[normalizedRole] = state.sentenceBankByRole[normalizedRole] || [];
+      state.sentenceBankByRole[normalizedRole].push(clean);
+    }
+    return snapshot();
+  }
+
   return {
     handleTranscript,
+    commitPending,
     snapshot,
   };
 }
 
 module.exports = {
   CALL_SCREENER_MATCHES,
+  SYSTEM_CONTEXT_CLEAR_MATCHES,
   CONTEXT_RULES,
   VOICEMAIL_MATCHES,
   analyzeCallScreener,
+  analyzeSystemContextClear,
   analyzeVoicemail,
   buildFixedComposerInstructions,
   buildMiniContextFrame,

@@ -168,8 +168,12 @@ function eventMatchesFilters(event, filters = {}) {
   const queueItemId = firstClean([filters.queueItemId, filters.queueTicketId], 160);
   const phone = normalizePhone(firstClean([filters.phone, filters.phoneNumber, filters.leadPhone, filters.contactPhone], 80));
 
-  if (uii && event.uii !== uii) return false;
-  if (callSessionId && event.callSessionId !== callSessionId) return false;
+  // RingCX streams often know the UII before our cx.call.placed event has
+  // been updated with it. Treat present-but-different IDs as authoritative
+  // mismatches, but let a blank event ID fall through to phone/agent/queue
+  // matching so the live coach can bind during that capture gap.
+  if (uii && event.uii && event.uii !== uii) return false;
+  if (callSessionId && event.callSessionId && event.callSessionId !== callSessionId) return false;
   if (queueItemId && event.queueItemId !== queueItemId) return false;
   if (phone && normalizePhone(event.phone || "") !== phone) return false;
   if (extensionId && String(event.extensionId || "") !== String(extensionId)) return false;
@@ -256,7 +260,7 @@ function buildSessionMetadataFromBinding({ event = null, callSession = null } = 
     agentEmail: event?.agentEmail || session.agentEmail || "",
     agentExtension: event?.extensionId || session.agentId || "",
     agentName: event?.agentName || session.agentName || "",
-    firmName: "Tax Advocate Group",
+    firmName: "Wynn Tax Solutions",
     uii: event?.uii || session.rcxUii || "",
     queueItemId: event?.queueItemId || session.queueItemId || "",
     caseId: event?.caseId || session.logicsCaseId || "",
