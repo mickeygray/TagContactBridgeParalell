@@ -39,6 +39,9 @@ test("live coach bus writes sanitized transcript, mini context, and dialog artif
   assert.equal(result.result.context.jurisdiction, "irs");
   assert.equal(result.result.dialog.status, "ready");
   assert.match(result.result.dialog.promptPayload.user, /Agent name: Chris/);
+  assert.match(result.result.dialog.promptPayload.user, /Mini compact memory for this turn/);
+  assert.match(result.result.dialog.promptPayload.user, /Transcript snippet/);
+  assert.equal(result.result.context.memoryBrief.activeIssues[0].status, "new");
   assert.equal(result.session.memory.transcripts.length, 1);
   assert.equal(result.session.memory.contexts.length, 1);
   assert.equal(result.session.memory.coachingSuggestions.length, 1);
@@ -88,8 +91,10 @@ test("live coach bus lets semantic judge hold before dialog composition", async 
   assert.equal(result.ok, true);
   assert.equal(result.result.action, "hold_semantic_context");
   assert.equal(result.result.dialog, null);
-  assert.equal(result.session.counters.context, 0);
+  assert.equal(result.session.counters.context, 1);
   assert.equal(result.session.counters.dialog, 0);
+  assert.equal(result.session.memory.contexts.length, 1);
+  assert.equal(result.session.memory.contexts[0].held, true);
   assert.equal(result.session.memory.holds.length, 1);
   assert.equal(result.result.context.miniJudgement.modelRole, "semantic_context_judge");
 });
@@ -104,6 +109,11 @@ test("live coach bus lets semantic judge recover catalog keys beyond determinist
       selectedKeys: [{ key: "self_employment", confidence: 0.91, reason: "platform income maps to 1099/self-employment" }],
       rejected: deterministicCandidates.map((candidate) => ({ key: candidate.key, reason: "not the best fit" })),
       transcriptMeaning: "The prospect has platform income that likely created a self-employment tax issue.",
+      memoryBrief: {
+        whatHappened: "The prospect has platform income and owes taxes.",
+        activeIssues: [{ key: "self_employment", snippet: "paid through a platform", status: "new" }],
+        continueFrom: "Ask what kind of income forms they received and move into discovery.",
+      },
       actionReason: "semantic_context_judge_selected",
       confidence: 0.91,
       provider: "test",
@@ -130,6 +140,7 @@ test("live coach bus lets semantic judge recover catalog keys beyond determinist
   assert.ok(result.result.context.matches.some((match) => match.key === "self_employment"));
   assert.equal(result.result.context.primaryContextKey, "self_employment");
   assert.match(result.result.dialog.promptPayload.user, /1099 \/ self-employment/);
+  assert.match(result.result.dialog.promptPayload.user, /paid through a platform/);
 });
 
 test("live coach bus can emit transcript before async context judge finishes", async () => {

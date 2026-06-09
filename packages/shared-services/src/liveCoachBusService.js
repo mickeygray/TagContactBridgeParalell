@@ -221,6 +221,124 @@ function pushMemory(session, key, value) {
   return value;
 }
 
+function buildRecentCallMemory(session = {}, context = {}, {
+  maxTranscriptRows = 10,
+  maxContextRows = 8,
+  maxCoachRows = 2,
+  maxChars = 900,
+} = {}) {
+  const memory = session.memory || {};
+  const currentTranscriptId = cleanText(context.sourceTranscriptId || "", 120);
+  const currentPhrase = normalizeSignatureText(context.phraseText || context.text || "");
+  const currentMemoryBrief = normalizeMemoryBrief(context.memoryBrief || context.miniJudgement?.memoryBrief || {});
+  const filteredRows = (Array.isArray(memory.contexts) ? memory.contexts : [])
+    .filter((row) => row?.phraseText || row?.text || row?.memoryBrief || row?.miniJudgement?.memoryBrief)
+    .slice(-Math.max(1, Number(maxContextRows) || 8))
+    .flatMap((row) => {
+      const phrase = cleanText(row.phraseText || row.text || "", 180);
+      const brief = normalizeMemoryBrief(row.memoryBrief || row.miniJudgement?.memoryBrief || {});
+      const issues = brief?.activeIssues?.length
+        ? brief.activeIssues.map((issue) => ({
+          key: issue.key,
+          snippet: issue.snippet || phrase,
+          status: issue.status,
+          meaning: brief.whatHappened,
+        }))
+        : [];
+      const matchIssues = (Array.isArray(row.matches) ? row.matches : [])
+        .slice(0, 4)
+        .map((match) => ({
+          key: cleanText(match.key, 120),
+          snippet: cleanText(match.miniSnippet || match.hits?.[0] || phrase, 180),
+          status: "prior_match",
+          meaning: cleanText(row.miniJudgement?.transcriptMeaning || row.actionReason || "", 180),
+        }))
+        .filter((issue) => issue.key || issue.snippet);
+      return issues.length ? issues : matchIssues;
+    })
+    .filter((issue) => issue.key || issue.snippet)
+    .slice(-8)
+    .map((issue) => [
+      `- ${issue.key || "general"}: ${issue.snippet}`,
+      issue.status ? `(${issue.status})` : "",
+      issue.meaning ? `=> ${issue.meaning}` : "",
+    ].filter(Boolean).join(" "));
+
+  const currentBriefRows = currentMemoryBrief ? [
+    currentMemoryBrief.whatHappened ? `- Current compact read: ${currentMemoryBrief.whatHappened}` : "",
+    currentMemoryBrief.activeIssues?.length
+      ? `- Current filtered matches: ${currentMemoryBrief.activeIssues.map((issue) => `${issue.key}: ${issue.snippet}`).join("; ")}`
+      : "",
+    currentMemoryBrief.continueFrom ? `- Continue from: ${currentMemoryBrief.continueFrom}` : "",
+  ].filter(Boolean) : [];
+
+  const transcriptRows = (Array.isArray(memory.transcripts) ? memory.transcripts : [])
+    .filter((row) => row?.text)
+    .filter((row) => cleanText(row.role || "prospect", 40) === "prospect")
+    .slice(-Math.max(1, Number(maxTranscriptRows) || 6))
+    .map((row) => {
+      const text = cleanText(row.text, 220);
+      const sameId = currentTranscriptId && cleanText(row.id || "", 120) === currentTranscriptId;
+      const sameText = currentPhrase && normalizeSignatureText(text) === currentPhrase;
+      return sameId || sameText ? null : `- Prospect: ${text}`;
+    })
+    .filter(Boolean);
+
+  const coachRows = (Array.isArray(memory.coachingSuggestions) ? memory.coachingSuggestions : [])
+    .filter((row) => row?.say)
+    .slice(-Math.max(0, Number(maxCoachRows) || 2))
+    .map((row) => `- Prior coach line: ${cleanText(row.say, 180)}`);
+
+  const priorCallRows = (Array.isArray(session.priorCallMemory) ? session.priorCallMemory : [])
+    .slice(0, 2)
+    .map((p) => {
+      const parts = [
+        Array.isArray(p.issues) && p.issues.length ? `raised ${p.issues.slice(0, 5).join(", ")}` : "",
+        p.lastCoachLine ? `last coached: "${cleanText(p.lastCoachLine, 160)}"` : "",
+        p.status ? `[${cleanText(p.status, 40)}]` : "",
+      ].filter(Boolean).join(" | ");
+      return parts ? `- ${parts}` : "";
+    })
+    .filter(Boolean);
+
+  const sections = [
+    priorCallRows.length ? ["Prior calls with this prospect (continuity only; the current call always outranks this):", ...priorCallRows].join("\n") : "",
+    currentBriefRows.length ? ["Mini compact memory for this turn:", ...currentBriefRows].join("\n") : "",
+    filteredRows.length ? ["Recent filtered matches with snippets:", ...filteredRows].join("\n") : "",
+    transcriptRows.length ? ["Recent raw prospect lines, fallback only:", ...transcriptRows].join("\n") : "",
+    coachRows.length ? ["Avoid repeating these recent coach lines:", ...coachRows].join("\n") : "",
+  ].filter(Boolean);
+
+  const text = cleanText(sections.join("\n"), Math.max(240, Number(maxChars) || 900));
+  if (!text) return null;
+  return {
+    at: new Date().toISOString(),
+    transcriptRows: transcriptRows.length,
+    contextRows: filteredRows.length,
+    coachRows: coachRows.length,
+    currentBriefRows: currentBriefRows.length,
+    text,
+  };
+}
+
+function attachRecentMemoryToDialog(dialog = {}, recentMemory = null) {
+  if (!dialog || !recentMemory?.text) return dialog;
+  const promptPayload = dialog.promptPayload || {};
+  return {
+    ...dialog,
+    promptPayload: {
+      ...promptPayload,
+      user: [
+        promptPayload.user || "",
+        "",
+        "Recent call memory for continuity only. Do not answer old lines; use this to avoid repetition and keep the next line grounded in the current prospect text above:",
+        recentMemory.text,
+      ].filter(Boolean).join("\n"),
+    },
+    recentMemory,
+  };
+}
+
 function normalizeJudgeKeyRows(input = []) {
   const rows = Array.isArray(input) ? input : [];
   const seen = new Set();
@@ -233,9 +351,29 @@ function normalizeJudgeKeyRows(input = []) {
       key,
       confidence: Number.isFinite(Number(row?.confidence)) ? Number(row.confidence) : undefined,
       reason: cleanText(row?.reason || row?.why || "", 240) || undefined,
+      snippet: cleanText(row?.snippet || row?.phrase || row?.quote || "", 180) || undefined,
     });
   }
   return normalized;
+}
+
+function normalizeMemoryBrief(input = {}) {
+  if (!input || typeof input !== "object") return null;
+  const activeIssues = (Array.isArray(input.activeIssues) ? input.activeIssues : [])
+    .slice(0, 8)
+    .map((issue) => ({
+      key: cleanText(issue?.key || "general", 120),
+      snippet: cleanText(issue?.snippet || issue?.phrase || issue?.quote || "", 180),
+      status: cleanText(issue?.status || "", 80),
+    }))
+    .filter((issue) => issue.key || issue.snippet);
+  const brief = {
+    whatHappened: cleanText(input.whatHappened || input.summary || "", 300),
+    activeIssues,
+    continueFrom: cleanText(input.continueFrom || input.nextStep || input.instruction || "", 280),
+  };
+  if (!brief.whatHappened && !brief.continueFrom && !brief.activeIssues.length) return null;
+  return brief;
 }
 
 function normalizeSignatureText(value = "") {
@@ -286,6 +424,7 @@ function candidateToSemanticMatch(candidate = {}, selectedRow = {}) {
     guidance: cleanText(candidate.guidance || candidate.summary || "", 300),
     miniConfidence: Number.isFinite(Number(selectedRow.confidence)) ? Number(selectedRow.confidence) : undefined,
     miniReason: cleanText(selectedRow.reason || "semantic judge selected this context", 240),
+    miniSnippet: cleanText(selectedRow.snippet || "", 180),
   };
 }
 
@@ -309,6 +448,7 @@ function refineContextWithSemanticJudgement(context = {}, judgement = {}, input 
     if (candidate.key && !byKey.has(candidate.key)) byKey.set(candidate.key, candidate);
   }
   const selectedRows = normalizeJudgeKeyRows(judgement.selectedKeys || judgement.matches || []);
+  const memoryBrief = normalizeMemoryBrief(judgement.memoryBrief || judgement.callMemory || {});
   const selectedMatches = selectedRows
     .map((row) => {
       const candidate = byKey.get(row.key);
@@ -363,11 +503,13 @@ function refineContextWithSemanticJudgement(context = {}, judgement = {}, input 
           "",
         500,
       ),
+      memoryBrief,
       confidence: Number.isFinite(Number(judgement.confidence)) ? Number(judgement.confidence) : undefined,
       completeThought: judgement.completeThought === undefined ? context.completeThought : Boolean(judgement.completeThought),
       elapsedMs: Number.isFinite(Number(input.elapsedMs)) ? Number(input.elapsedMs) : undefined,
       usage: judgement.usage || null,
     },
+    memoryBrief,
   };
 }
 
@@ -385,6 +527,9 @@ function createLiveCoachBus({
 } = {}) {
   const runtimeRoot = path.join(rootDir || process.cwd(), "runtime", "ai-bus", "live-coach");
   ensureDir(runtimeRoot);
+  // Cross-call (between-calls) coach memory: load the prospect's prior call summary at
+  // session start and surface it in the digest for continuity. Default OFF -- flip when ready.
+  const crossCallMemoryEnabled = /^(1|true|yes|on)$/i.test(String(process.env.LIVE_COACH_CROSS_CALL_MEMORY_ENABLED || "").trim());
 
   const sessions = new Map();
   const subscribers = new Map();
@@ -589,6 +734,23 @@ function createLiveCoachBus({
     session.pipeline = createSanitizedLiveCoachPipeline({ metadata: session.metadata });
     session.streamWatcher = createLiveCoachStreamWatcher();
     sessions.set(id, session);
+    if (crossCallMemoryEnabled && persistence && typeof persistence.loadPriorCallSummaries === "function") {
+      const md = session.metadata || {};
+      Promise.resolve(persistence.loadPriorCallSummaries({
+        caseId: md.caseId,
+        phone: md.phone || md.contactPhone,
+        excludeSessionId: id,
+        limit: 2,
+      }))
+        .then((priors) => {
+          // Only attach if this session is still the live one (not stale/replaced).
+          if (Array.isArray(priors) && priors.length && sessions.get(id) === session) {
+            session.priorCallMemory = priors;
+            emit(id, "memory.prior_calls", { count: priors.length });
+          }
+        })
+        .catch(() => {});
+    }
     fs.writeFileSync(path.join(dir, "metadata.json"), JSON.stringify(session.metadata, null, 2));
     session.status = "listening";
     emit(id, "session.start", { metadata: session.metadata });
@@ -784,9 +946,20 @@ function createLiveCoachBus({
           model: contextFrame.miniJudgement?.model || null,
         });
         if (!contextFrame.shouldCompose) {
+          const heldContext = {
+            ...contextFrame,
+            id: `ctx-${String(session.counters.context + 1).padStart(4, "0")}`,
+            text: contextFrame.phraseText,
+            held: true,
+          };
+          session.counters.context += 1;
+          session.latest.context = heldContext;
+          pushMemory(session, "contexts", heldContext);
+          writeJsonLine(path.join(session.dir, "ai", "context.ndjson"), heldContext);
+          emit(session.id, "context", { context: heldContext });
           const hold = {
-            reason: contextFrame.actionReason,
-            context: contextFrame,
+            reason: heldContext.actionReason,
+            context: heldContext,
           };
           pushMemory(session, "holds", {
             at: new Date().toISOString(),
@@ -803,7 +976,7 @@ function createLiveCoachBus({
             action: "hold_semantic_context",
             hold,
             transcript,
-            context: contextFrame,
+            context: heldContext,
             dialog: null,
           };
         }
@@ -823,9 +996,20 @@ function createLiveCoachBus({
           elapsedMs: contextFrame.miniJudgement.elapsedMs,
         });
         if (!contextFrame.shouldCompose) {
+          const heldContext = {
+            ...contextFrame,
+            id: `ctx-${String(session.counters.context + 1).padStart(4, "0")}`,
+            text: contextFrame.phraseText,
+            held: true,
+          };
+          session.counters.context += 1;
+          session.latest.context = heldContext;
+          pushMemory(session, "contexts", heldContext);
+          writeJsonLine(path.join(session.dir, "ai", "context.ndjson"), heldContext);
+          emit(session.id, "context", { context: heldContext });
           const hold = {
-            reason: contextFrame.actionReason || "semantic_context_judge_error_hold",
-            context: contextFrame,
+            reason: heldContext.actionReason || "semantic_context_judge_error_hold",
+            context: heldContext,
           };
           pushMemory(session, "holds", {
             at: new Date().toISOString(),
@@ -842,7 +1026,7 @@ function createLiveCoachBus({
             action: "hold_semantic_context_error",
             hold,
             transcript,
-            context: contextFrame,
+            context: heldContext,
             dialog: null,
           };
         }
@@ -1019,7 +1203,8 @@ function createLiveCoachBus({
   function requestDialogComposition(session, context, dialog) {
     if (!session || !context || !dialog || typeof dialogComposer !== "function") return;
     if (TERMINAL_SESSION_STATUSES.includes(session.status)) return;
-    const baseDialog = { ...dialog };
+    const recentMemory = buildRecentCallMemory(session, context);
+    const baseDialog = { ...attachRecentMemoryToDialog(dialog, recentMemory) };
     const signature = buildComposeSignature(context);
     const now = Date.now();
     const guard = session.composeGuard || {
@@ -1112,6 +1297,11 @@ function createLiveCoachBus({
     emit(session.id, "compose.start", {
       dialogId: baseDialog.id,
       selectedKeys: signature.keys ? signature.keys.split("|") : [],
+      recentMemory: recentMemory ? {
+        transcriptRows: recentMemory.transcriptRows,
+        contextRows: recentMemory.contextRows,
+        coachRows: recentMemory.coachRows,
+      } : null,
     });
     const isCurrent = () => {
       const latest = sessions.get(session.id);

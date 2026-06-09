@@ -1055,6 +1055,7 @@ function candidateToContextMatch(candidate = {}) {
     guidance: cleanText(candidate.guidance || candidate.summary || "", 300),
     miniConfidence: Number.isFinite(Number(candidate.miniConfidence)) ? Number(candidate.miniConfidence) : undefined,
     miniReason: cleanText(candidate.miniReason || "", 240) || undefined,
+    miniSnippet: cleanText(candidate.transcriptFragment || candidate.fragment || "", 180) || undefined,
   };
 }
 
@@ -1179,6 +1180,56 @@ function buildMiniMeaningSummary({ phraseText, matches = [] } = {}) {
   return `Prospect said: ${clean}. Applicable context: ${labels.join(", ")}.`;
 }
 
+function buildLocalMemoryBrief({ phraseText, matches = [], tactics = [], actionReason = "" } = {}) {
+  const clean = cleanText(phraseText, 260);
+  if (!clean) return null;
+  const activeIssues = (Array.isArray(matches) ? matches : [])
+    .slice(0, 5)
+    .map((match) => ({
+      key: cleanText(match.key || "general", 120),
+      snippet: cleanText(match.miniSnippet || match.fragment || clean, 180),
+      status: "new",
+    }))
+    .filter((issue) => issue.key || issue.snippet);
+  const tacticLabels = (Array.isArray(tactics) ? tactics : [])
+    .slice(0, 3)
+    .map((tactic) => cleanText(tactic.label || tactic.key || "", 80))
+    .filter(Boolean);
+  const topKeys = activeIssues.map((issue) => issue.key).filter(Boolean).slice(0, 4);
+  return {
+    whatHappened: topKeys.length
+      ? `Prospect raised ${topKeys.join(", ")}: ${clean}`
+      : `Prospect said: ${clean}`,
+    activeIssues: activeIssues.length
+      ? activeIssues
+      : [{ key: "general", snippet: clean, status: "new" }],
+    continueFrom: [
+      "Respond to the current prospect sentence, not an older line.",
+      tacticLabels.length ? `Use this posture: ${tacticLabels.join(", ")}.` : "",
+      cleanText(actionReason, 80) ? `Local trigger: ${cleanText(actionReason, 80)}.` : "",
+    ].filter(Boolean).join(" "),
+  };
+}
+
+function formatMemoryBriefForPrompt(memoryBrief = null) {
+  if (!memoryBrief || typeof memoryBrief !== "object") return "";
+  const rows = [];
+  const whatHappened = cleanText(memoryBrief.whatHappened || "", 300);
+  if (whatHappened) rows.push(`- Compact read: ${whatHappened}`);
+  const activeIssues = Array.isArray(memoryBrief.activeIssues) ? memoryBrief.activeIssues : [];
+  if (activeIssues.length) {
+    rows.push(`- Active issues: ${activeIssues.slice(0, 6).map((issue) => {
+      const key = cleanText(issue?.key || "general", 120);
+      const snippet = cleanText(issue?.snippet || "", 180);
+      const status = cleanText(issue?.status || "", 60);
+      return [key, snippet ? `(${snippet})` : "", status ? `[${status}]` : ""].filter(Boolean).join(" ");
+    }).join("; ")}`);
+  }
+  const continueFrom = cleanText(memoryBrief.continueFrom || "", 280);
+  if (continueFrom) rows.push(`- Continue from: ${continueFrom}`);
+  return rows.join("\n");
+}
+
 function isFiller(text) {
   const clean = cleanText(text, 400);
   if (!clean) return true;
@@ -1257,6 +1308,12 @@ function buildMiniContextFrame({ phraseText, transcript, metadata = {}, pendingC
     jurisdiction,
     maxTactics: 4,
   });
+  const memoryBrief = buildLocalMemoryBrief({
+    phraseText: text,
+    matches: contextMatches,
+    tactics,
+    actionReason: compose.reason,
+  });
   return {
     id: null,
     at: new Date().toISOString(),
@@ -1283,7 +1340,9 @@ function buildMiniContextFrame({ phraseText, transcript, metadata = {}, pendingC
       rejected: miniJudgement.rejected,
       candidateCount: miniJudgement.rawCandidateCount,
       transcriptMeaning: buildMiniMeaningSummary({ phraseText: text, matches: contextMatches }),
+      memoryBrief,
     },
+    memoryBrief,
     metadata: {
       agentName: cleanText(metadata.agentName || "", 120),
       firmName: cleanText(metadata.firmName || "Wynn Tax Solutions", 120),
@@ -1399,6 +1458,8 @@ function buildFixedComposerInstructions({ role = "prospect" } = {}) {
     "Humor: light, dry, self-aware, and rare — only to disarm tension, never sarcasm, never at the prospect's expense or about their debt/fear. Drop it entirely if they're distressed or angry.",
     // Defer to situational tactics
     "Apply the conversation-tactic guidance below for the specific psychology, warmth, and humor boundary that fits this exact moment.",
+    "If recent call memory is supplied, use it only for continuity, avoiding repeated questions, and knowing what has already been covered. The current prospect text always outranks memory.",
+    "Use transcript snippets attached to selected context. Do not write from key labels alone, and do not invent facts that are not in the current text or memory snippets.",
     // Compliance guardrails
     "No DIY tax advice, no program promises before qualification (OIC/CNC/IA/abatement), no guarantees, no savings claims, no timelines, no holds, no legal conclusions.",
     "Default tax-ish issues to IRS unless a clear state agency is named; if state appears, also screen for an IRS/federal issue.",
@@ -1411,6 +1472,7 @@ function buildSonnetPromptPayload({ contextFrame, metadata = {} }) {
   const firmName = cleanText(metadata.firmName || contextFrame?.metadata?.firmName || "Wynn Tax Solutions", 120);
   const matches = Array.isArray(contextFrame?.matches) ? contextFrame.matches : [];
   const tactics = Array.isArray(contextFrame?.tactics) ? contextFrame.tactics : [];
+  const memoryBriefText = formatMemoryBriefForPrompt(contextFrame?.memoryBrief || contextFrame?.miniJudgement?.memoryBrief || null);
   // SYSTEM = the STABLE prefix: role + standing directives. Identical on every call,
   // so the composer marks it cache_control:ephemeral (Anthropic prompt caching). The
   // big instruction block lives here ONCE instead of bleeding through every user turn.
@@ -1439,9 +1501,17 @@ function buildSonnetPromptPayload({ contextFrame, metadata = {} }) {
     "Prospect text:",
     contextFrame?.phraseText || "",
     "",
+    memoryBriefText ? "Mini compact memory for this turn:" : "",
+    memoryBriefText,
+    memoryBriefText ? "" : "",
     "Matched context:",
     matches.length
-      ? matches.map((match) => `- ${match.label}: ${match.guidance} (hits: ${match.hits.join(", ")})`).join("\n")
+      ? matches.map((match) => [
+        `- ${match.label}: ${match.guidance}`,
+        match.miniSnippet ? `  Transcript snippet: ${match.miniSnippet}` : "",
+        Array.isArray(match.hits) && match.hits.length ? `  Deterministic hits: ${match.hits.join(", ")}` : "",
+        match.miniReason ? `  Mini reason: ${match.miniReason}` : "",
+      ].filter(Boolean).join("\n")).join("\n")
       : "- No strong keyword match. Keep it to one clarifying discovery question.",
     "",
     "Conversation tactic:",

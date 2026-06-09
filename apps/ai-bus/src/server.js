@@ -151,7 +151,7 @@ function createOpenAiSemanticContextJudge({ logger } = {}) {
   const timeoutMs = Math.max(2500, Number(process.env.LIVE_COACH_CONTEXT_JUDGE_TIMEOUT_MS || 6000) || 6000);
   const maxOutputTokens = Math.max(
     120,
-    Math.min(1200, Number(process.env.LIVE_COACH_CONTEXT_JUDGE_MAX_OUTPUT_TOKENS || 450) || 450),
+    Math.min(1200, Number(process.env.LIVE_COACH_CONTEXT_JUDGE_MAX_OUTPUT_TOKENS || 550) || 550),
   );
   const catalog = buildContextRuleCatalog(CONTEXT_RULES);
 
@@ -177,21 +177,42 @@ function createOpenAiSemanticContextJudge({ logger } = {}) {
       .filter((candidate) => candidate.key);
     const recentProspect = (session?.memory?.transcripts || [])
       .filter((row) => row.role === "prospect")
-      .slice(-4)
+      .slice(-10)
       .map((row) => cleanText(row.text, 320))
       .filter(Boolean);
+    const recentFiltered = (session?.memory?.contexts || [])
+      .slice(-8)
+      .map((row) => ({
+        phrase: cleanText(row.phraseText || row.text || "", 220),
+        selectedKeys: Array.isArray(row.miniJudgement?.selectedKeys)
+          ? row.miniJudgement.selectedKeys.slice(0, 6).map((key) => cleanText(key, 120)).filter(Boolean)
+          : (Array.isArray(row.matches) ? row.matches.slice(0, 6).map((match) => cleanText(match.key, 120)).filter(Boolean) : []),
+        snippets: [
+          ...(Array.isArray(row.memoryBrief?.activeIssues) ? row.memoryBrief.activeIssues : []),
+          ...(Array.isArray(row.miniJudgement?.memoryBrief?.activeIssues) ? row.miniJudgement.memoryBrief.activeIssues : []),
+        ]
+          .map((issue) => cleanText(issue?.snippet || "", 160))
+          .filter(Boolean)
+          .slice(0, 5),
+        meaning: cleanText(row.miniJudgement?.transcriptMeaning || row.actionReason || "", 180),
+      }))
+      .filter((row) => row.phrase || row.selectedKeys.length || row.snippets.length || row.meaning);
     const requestBody = {
       model,
       ...(serviceTier ? { service_tier: serviceTier } : {}),
       instructions: [
         "You are the semantic context judge between STT and a live tax-resolution sales coach.",
         "Your job is one mini/API pass: understand the VAD-released sentence, use the compact tool catalog, rank/filter fuzzy matches, and decide whether the coach should respond.",
+        "Also compact recent call memory into useful continuity for the coach: not a transcript, just what has already happened, which filtered keys mattered, and where the agent should logically continue.",
         "candidateHints are deterministic word/phrase hits and are intentionally over-inclusive. They are useful hints, not the ceiling.",
         "candidateCatalog is the full compact lookup tool. Recover relevant fuzzy matches from it when the sentence clearly points to a catalog key even if candidateHints missed it.",
         "Use only exact keys from candidateCatalog. Do not invent keys.",
         "Reject voicemail, automated prompts, call screeners, filler, greetings, and fragments with no useful sales/tax/human context.",
+        "selectedKeys must be objects, not strings. For each selectedKey, include a short snippet copied/paraphrased from the CURRENT phrase that proves why the key applies.",
+        "For memoryBrief, use recentProspect plus recentFiltered. Keep it compact, actionable, and tied to selected keys with transcript snippets. If a prior issue was already asked, mark it already_asked or needs_followup instead of repeating it.",
+        "memoryBrief should give Sonnet continuity: what just happened, what issues remain active, and the next logical direction. Never tell the coach to answer old lines; tell it how to continue logically from them.",
         "Return JSON only with this shape:",
-        '{"shouldCompose":boolean,"completeThought":boolean,"selectedKeys":[{"key":"exact_key","confidence":0.0,"reason":"short reason"}],"rejected":[{"key":"exact_key","reason":"short reason"}],"transcriptMeaning":"one sentence meaning","actionReason":"short machine reason","confidence":0.0}',
+        '{"shouldCompose":boolean,"completeThought":boolean,"selectedKeys":[{"key":"exact_key","confidence":0.0,"reason":"short reason","snippet":"short associated phrase from current transcript"}],"rejected":[{"key":"exact_key","reason":"short reason"}],"transcriptMeaning":"one sentence meaning","memoryBrief":{"whatHappened":"one compact sentence","activeIssues":[{"key":"exact_key_or_general","snippet":"short associated transcript phrase","status":"new|already_asked|needs_followup"}],"continueFrom":"one sentence coaching continuity instruction"},"actionReason":"short machine reason","confidence":0.0}',
         "If no key matches but the prospect asked a meaningful direct question, set shouldCompose true and selectedKeys empty.",
         "If the prospect is still mid-thought or nothing useful should be said yet, set shouldCompose false.",
       ].join("\n"),
@@ -209,6 +230,7 @@ function createOpenAiSemanticContextJudge({ logger } = {}) {
               localActionReason: context?.actionReason || "",
             },
             recentProspect,
+            recentFiltered,
             candidateHints: candidates,
             candidateCatalog: catalog,
           }),
