@@ -22,6 +22,8 @@ type AgentLane = {
   key: string;
   label: string;
   aliases: string[];
+  fallback?: boolean;
+  dynamic?: boolean;
 };
 
 type LaneFlash = {
@@ -65,11 +67,59 @@ type SyncCurrentPayload = {
   retiredCount?: number | null;
 };
 
-const AGENTS: AgentLane[] = [
+// Pinned lanes always render. Any OTHER agent with a live session or fresh
+// call event gets a dynamic lane derived from their identity — the coach works
+// for everyone with a stream attached, not just the names pinned here.
+// Identity-less streams share the Unbound lane (shown only when one exists).
+const PINNED_AGENTS: AgentLane[] = [
   { key: "cbolt", label: "Chris Bolt", aliases: ["cbolt", "cbolt@", "chris bolt", "chrisbolt", "63914586004"] },
   { key: "bhansen", label: "Brad Hansen", aliases: ["bhansen", "bhansen@", "brad hansen", "bradhansen", "63914587004"] },
   { key: "jsharp", label: "J. Sharp", aliases: ["jsharp", "jsharp@", "james sharp", "jay sharp", "63914621004"] },
 ];
+const UNBOUND_LANE: AgentLane = { key: "unbound", label: "Unbound Stream", aliases: [], fallback: true };
+
+function dynamicLaneFromIdentity(ext?: string | null, email?: string | null, name?: string | null): AgentLane | null {
+  const cleanExt = String(ext || "").trim();
+  const cleanEmail = String(email || "").trim().toLowerCase();
+  const cleanName = String(name || "").trim();
+  if (!cleanExt && !cleanEmail && !cleanName) return null;
+  const key = `dyn-${(cleanExt || cleanEmail || cleanName).toLowerCase().replace(/[^a-z0-9@._-]+/g, "-").slice(0, 60)}`;
+  const aliases = [
+    cleanExt,
+    cleanEmail,
+    cleanEmail ? cleanEmail.split("@")[0] : "",
+    cleanName.toLowerCase(),
+  ].filter(Boolean);
+  const label = cleanName || (cleanEmail ? cleanEmail.split("@")[0] : `Ext ${cleanExt}`);
+  return { key, label, aliases, dynamic: true };
+}
+
+function deriveDynamicLanes(sessions: LiveCoachSession[], callEvents: LiveCoachCallEvent[]): AgentLane[] {
+  const dynamic = new Map<string, AgentLane>();
+  let sawIdentitylessSession = false;
+  for (const session of sessions) {
+    if (isLiveCoachTerminal(session.status) || isLiveCoachRejected(session)) continue;
+    if (PINNED_AGENTS.some((agent) => agentMatches(agent, session))) continue;
+    const metadata = session.metadata || {};
+    const lane = dynamicLaneFromIdentity(metadata.agentExtension, metadata.agentEmail, metadata.agentName);
+    if (!lane) {
+      sawIdentitylessSession = true;
+      continue;
+    }
+    if (!dynamic.has(lane.key)) dynamic.set(lane.key, lane);
+  }
+  const maxEventAgeMs = 3 * 60 * 1000;
+  for (const event of callEvents) {
+    const ms = callEventSortMs(event);
+    if (!ms || Date.now() - ms > maxEventAgeMs) continue;
+    if (PINNED_AGENTS.some((agent) => callMatches(agent, event))) continue;
+    const lane = dynamicLaneFromIdentity(event.extensionId, event.agentEmail, event.agentName);
+    if (lane && !dynamic.has(lane.key)) dynamic.set(lane.key, lane);
+  }
+  const rows = [...dynamic.values()].sort((a, b) => a.label.localeCompare(b.label));
+  if (sawIdentitylessSession) rows.push(UNBOUND_LANE);
+  return rows;
+}
 
 const VOICEMAIL_FLASH_MS = 5000;
 
@@ -133,11 +183,39 @@ function eventMatchesFinishedSession(agent: AgentLane, event: LiveCoachCallEvent
   });
 }
 
-function pickSession(agent: AgentLane, sessions: LiveCoachSession[]) {
-  return sessions
+// Prefer sessions with real signal over empty control-plane shells (sync-current
+// re-ensures coach-cx shells every 10s, keeping their recency fresh). Signal
+// counts only while fresh (30s): flowing audio refreshes lastEventAt every ~2.5s.
+function sessionSignalScore(session: LiveCoachSession) {
+  const latest = session.latest || {};
+  let score = 0;
+  if (latest.dialog) score += 4;
+  if (latest.transcript?.text || latest.provisionalTranscript?.text) score += 4;
+  if (latest.context) score += 2;
+  if (Number(session.counters?.input || 0) > 0) score += 2;
+  if (latest.streamStatus) score += 1;
+  if (session.metadata?.streamId) score += 1;
+  return score;
+}
+
+function sessionPickRank(session: LiveCoachSession) {
+  const updatedMs = sessionSortMs(session);
+  if (!updatedMs || Date.now() - updatedMs > 30_000) return 0;
+  return sessionSignalScore(session);
+}
+
+function pickSession(agent: AgentLane, sessions: LiveCoachSession[], allLanes: AgentLane[]) {
+  const candidates = agent.fallback
+    ? sessions.filter((session) =>
+      !allLanes.some((lane) => !lane.fallback && agentMatches(lane, session)))
+    : sessions.filter((session) => agentMatches(agent, session));
+  return candidates
     .filter((session) => !isLiveCoachTerminal(session.status))
-    .filter((session) => agentMatches(agent, session))
-    .sort((a, b) => sessionSortMs(b) - sessionSortMs(a))[0] || null;
+    .sort((a, b) => {
+      const rankDelta = sessionPickRank(b) - sessionPickRank(a);
+      if (rankDelta) return rankDelta;
+      return sessionSortMs(b) - sessionSortMs(a);
+    })[0] || null;
 }
 
 function pickRecentRejected(agent: AgentLane, sessions: LiveCoachSession[]) {
@@ -261,8 +339,10 @@ function newBlankLane(): LaneState {
 }
 
 export function LiveCoachWallboardWorkspace() {
+  const [agentLanes, setAgentLanes] = React.useState<AgentLane[]>(PINNED_AGENTS);
+  const agentLanesRef = React.useRef<AgentLane[]>(PINNED_AGENTS);
   const [lanes, setLanes] = React.useState<Record<string, LaneState>>(() =>
-    Object.fromEntries(AGENTS.map((agent) => [agent.key, newBlankLane()])),
+    Object.fromEntries(PINNED_AGENTS.map((agent) => [agent.key, newBlankLane()])),
   );
   const [liveCount, setLiveCount] = React.useState(0);
   const [updatedAt, setUpdatedAt] = React.useState("");
@@ -540,8 +620,26 @@ export function LiveCoachWallboardWorkspace() {
     setUpdatedAt(new Date().toISOString());
     setError("");
 
-    for (const agent of AGENTS) {
-      const session = pickSession(agent, sessions);
+    // Lanes follow the floor: pinned agents plus a dynamic lane for any other
+    // agent that has a live session or fresh call event.
+    const desiredLanes = PINNED_AGENTS.concat(deriveDynamicLanes(sessions, callEvents));
+    const desiredKeys = new Set(desiredLanes.map((lane) => lane.key));
+    if (desiredLanes.map((lane) => lane.key).join("|") !== agentLanesRef.current.map((lane) => lane.key).join("|")) {
+      for (const key of [...streamControllersRef.current.keys()]) {
+        if (!desiredKeys.has(key)) closeLaneStream(key);
+      }
+      setLanes((current) => {
+        const next: Record<string, LaneState> = {};
+        for (const lane of desiredLanes) next[lane.key] = current[lane.key] || newBlankLane();
+        lanesRef.current = next;
+        return next;
+      });
+      agentLanesRef.current = desiredLanes;
+      setAgentLanes(desiredLanes);
+    }
+
+    for (const agent of desiredLanes) {
+      const session = pickSession(agent, sessions, desiredLanes);
       const waitingCall = pickWaitingCall(agent, callEvents, sessions);
       const recentRejected = pickRecentRejected(agent, sessions);
       if (session) {
@@ -647,7 +745,7 @@ export function LiveCoachWallboardWorkspace() {
           </div>
           <h1 className="mt-1 text-2xl font-semibold tracking-tight">Live Coach Wallboard</h1>
           <p className="mt-1 text-sm text-muted-foreground">
-            Same three-lane test rig, routed through the authenticated control plane.
+            Pinned floor lanes plus a dynamic lane for any other agent with a live stream.
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -670,8 +768,11 @@ export function LiveCoachWallboardWorkspace() {
         </div>
       </div>
 
-      <div className="grid gap-3 xl:grid-cols-3">
-        {AGENTS.map((agent) => {
+      <div
+        className="grid gap-3"
+        style={{ gridTemplateColumns: "repeat(auto-fit, minmax(340px, 1fr))" }}
+      >
+        {agentLanes.map((agent) => {
           const lane = lanes[agent.key] || newBlankLane();
           const visibleTranscript = lane.flash
             ? {

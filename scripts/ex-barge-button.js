@@ -36,6 +36,11 @@ process.on("uncaughtException", (e) => console.error(`[uncaught] ${(e && e.code)
 process.on("unhandledRejection", (e) => console.error(`[unhandledRejection] ${(e && e.message) || e}`));
 
 function env(n, f = "") { const v = process.env[n]; return v == null || v === "" ? f : String(v); }
+function boolEnv(n, fb = false) {
+  const v = process.env[n];
+  if (v == null || v === "") return fb;
+  return /^(1|true|yes|on)$/i.test(String(v).trim());
+}
 function readFlag(argv, name, fb = "") {
   const inline = argv.find((a) => a.startsWith(`${name}=`));
   if (inline) return inline.slice(name.length + 1);
@@ -151,6 +156,19 @@ async function token() {
 // Supply either EX_BARGE_JWT_MAP (path to JSON {"987":"<jwt>", ...}) or per-ext env
 // vars EX_BARGE_JWT_987=<jwt>. If no JWT is configured for an extension, we fall
 // back to the shared app-broker/direct token + account-scoped lookup (legacy path).
+// Set EX_BARGE_REQUIRE_OWN_JWT=true to fail closed instead of using that legacy
+// fallback; production voicemail drop should run in that mode once monitor JWTs
+// are configured.
+const requireOwnMonitorJwt = boolEnv("EX_BARGE_REQUIRE_OWN_JWT") || boolEnv("EX_BARGE_REQUIRE_MONITOR_JWT");
+const monitorJwtEnvAliases = new Map([
+  ["987", "PHIL_RING_CENTRAL_MONITOR_JWT_TOKEN"],
+  ["1101", "SEAN_RING_CENTRAL_MONITOR_JWT_TOKEN"],
+  ["1102", "BRUCE_RING_CENTRAL_MONITOR_JWT_TOKEN"],
+  ["1103", "ANTHONY_RING_CENTRAL_MONITOR_JWT_TOKEN"],
+  ["1104", "CHRIS_RING_CENTRAL_MONITOR_JWT_TOKEN"],
+  ["1105", "JAMES_RING_CENTRAL_MONITOR_JWT_TOKEN"],
+  ["1106", "BRAD_RING_CENTRAL_MONITOR_JWT_TOKEN"],
+]);
 let _jwtMap = null;
 function loadJwtMap() {
   if (_jwtMap) return _jwtMap;
@@ -169,7 +187,13 @@ function loadJwtMap() {
   if (_jwtMap.size) console.log(`[auth] per-extension JWTs loaded for: ${[..._jwtMap.keys()].join(", ")}`);
   return _jwtMap;
 }
-function jwtForExt(ext) { return loadJwtMap().get(String(ext).trim()) || null; }
+function jwtForExt(ext) {
+  const key = String(ext).trim();
+  const direct = loadJwtMap().get(key);
+  if (direct) return direct;
+  const alias = monitorJwtEnvAliases.get(key);
+  return alias && process.env[alias] ? String(process.env[alias]).trim() : null;
+}
 
 async function jwtGrant(jwt) {
   const id = process.env.RING_CENTRAL_CLIENT_ID;
@@ -273,30 +297,50 @@ async function registerMonitor(monitorExt, { deviceId = "", region = "NA" } = {}
     try {
       ownTok = await tokenForExt(key);
     } catch (e) {
+      if (requireOwnMonitorJwt) throw e;
       console.warn(`[auth] monitor ${key} own-jwt failed (${e.message}); falling back to shared token`);
       ownTok = null;
     }
-    let tok; let extId = null; let devResp; let authSrc;
+    let tok; let extId = null; let devResp; let authSrc; let sipInfo; let device;
     if (ownTok) {
-      tok = ownTok;
-      authSrc = "own-jwt";
-      const me = await get(tok, `/restapi/v1.0/account/~/extension/~`);
-      extId = me?.id || null;
-      if (me?.extensionNumber && String(me.extensionNumber) !== key) {
-        throw new Error(`jwt for ext ${key} authenticated as ext ${me.extensionNumber} -- wrong jwt`);
+      try {
+        tok = ownTok;
+        authSrc = "own-jwt";
+        const me = await get(tok, `/restapi/v1.0/account/~/extension/~`);
+        extId = me?.id || null;
+        if (me?.extensionNumber && String(me.extensionNumber) !== key) {
+          throw new Error(`jwt for ext ${key} authenticated as ext ${me.extensionNumber} -- wrong jwt`);
+        }
+        devResp = await get(tok, `/restapi/v1.0/account/~/extension/~/device`);
+        device = pickOtherPhone(Array.isArray(devResp?.records) ? devResp.records : [], deviceId);
+        if (!device?.id) throw new Error(`no OtherPhone device on ext ${key}`);
+        sipInfo = await get(tok, `/restapi/v1.0/account/~/device/${device.id}/sip-info`);
+      } catch (e) {
+        if (requireOwnMonitorJwt) throw e;
+        console.warn(`[auth] monitor ${key} own-jwt registration failed (${e.message}); falling back to shared token`);
+        ownTok = null;
+        tok = null;
+        extId = null;
+        devResp = null;
+        authSrc = null;
+        sipInfo = null;
+        device = null;
       }
-      devResp = await get(tok, `/restapi/v1.0/account/~/extension/~/device`);
-    } else {
+    }
+    if (!ownTok) {
+      if (requireOwnMonitorJwt) {
+        throw new Error(`own JWT required for monitor ext ${key}; set EX_BARGE_JWT_${key} or EX_BARGE_JWT_MAP`);
+      }
       tok = await token();
       authSrc = "shared-token";
       const ext = await resolveExt(tok, key);
       if (!ext) throw new Error(`monitor ext ${key} not found`);
       extId = ext.id;
       devResp = await get(tok, `/restapi/v1.0/account/~/extension/${ext.id}/device`);
+      device = pickOtherPhone(Array.isArray(devResp?.records) ? devResp.records : [], deviceId);
+      if (!device?.id) throw new Error(`no OtherPhone device on ext ${key}`);
+      sipInfo = await get(tok, `/restapi/v1.0/account/~/device/${device.id}/sip-info`);
     }
-    const device = pickOtherPhone(Array.isArray(devResp?.records) ? devResp.records : [], deviceId);
-    if (!device?.id) throw new Error(`no OtherPhone device on ext ${key}`);
-    const sipInfo = await get(tok, `/restapi/v1.0/account/~/device/${device.id}/sip-info`);
     const outboundProxy = pickProxyTLS(sipInfo, region);
     const sp = new Softphone({
       domain: sipInfo.domain,
@@ -405,6 +449,7 @@ function monitorsStatus() {
   return {
     registered: list.some((m) => m.registered),
     defaultMonitorExt,
+    requireOwnMonitorJwt,
     monitorMeta: def?.meta || {},
     regError: def?.regError || null,
     monitors: list,
@@ -573,15 +618,28 @@ const PLAY_HARD_CAP_MS = Number(env("EX_BARGE_PLAY_HARD_CAP_MS", "120000")) || 1
 // actually connected to voicemail. Wait this long for first inbound RTP.
 const ARM_MEDIA_CONFIRM_MS = Number(env("EX_BARGE_ARM_MEDIA_CONFIRM_MS", "3500")) || 3500;
 
+// An armed leg is only trustworthy for the call it joined. The arm key has NO
+// session scope (monitorExt:code:agentExt), so the same agent's NEXT call maps
+// to the same key — an old-but-alive leg could be reused and a voicemail
+// streamed into the wrong call. Treat anything released, disposed, or older
+// than this as stale: purge, never reuse.
+const ARM_MAX_AGE_MS = Number(env("EX_BARGE_ARM_MAX_AGE_MS", "180000")) || 180000;
+function armIsStale(arm) {
+  if (!arm) return true;
+  if (arm.released || arm.callSession?.disposed) return true;
+  const createdMs = Date.parse(arm.createdAt || "") || 0;
+  return Boolean(createdMs && Date.now() - createdMs > ARM_MAX_AGE_MS);
+}
+
 async function armBarge(softphone, { monitorExt, agentExtNumber, code }) {
   if (!softphone) throw new Error("no registered monitor softphone for this barge");
   const key = bargeArmKey(monitorExt, code, agentExtNumber);
   const existing = armedBarges.get(key);
-  if (existing && !existing.released && !existing.callSession?.disposed) {
+  if (existing && !armIsStale(existing)) {
     existing.reused = true;
     return existing;
   }
-  // Drop any stale/disposed entry so it can't be reused or block the health loop.
+  // Drop any stale/disposed/aged entry so it can't be reused or block the health loop.
   if (existing) armedBarges.delete(key);
 
   const dial = `${code}${agentExtNumber}`;
@@ -1110,7 +1168,14 @@ function main() {
           };
           const requireArmed = o.requireArmed === true || String(o.requireArmed || "").toLowerCase() === "true";
           const armWaitMs = boundedMs(o.armWaitMs, requireArmed ? 2000 : 0, { min: 0, max: 15000 });
-          const arm = armedBarges.get(key) || (requireArmed ? await waitForArmedBarge(key, armWaitMs) : null);
+          let arm = armedBarges.get(key) || (requireArmed ? await waitForArmedBarge(key, armWaitMs) : null);
+          // Never play through a stale leg: released, disposed, or older than
+          // ARM_MAX_AGE_MS means it joined a PREVIOUS call — purge and fall to
+          // the one-shot barge (or arm-not-ready when requireArmed).
+          if (arm && armIsStale(arm)) {
+            armedBarges.delete(key);
+            arm = null;
+          }
           if (!arm) {
             if (requireArmed) {
               res.writeHead(200, { "content-type": "application/json" });

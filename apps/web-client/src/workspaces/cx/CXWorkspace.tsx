@@ -444,6 +444,12 @@ const VOICEMAIL_ARM_RETRY_DELAY_MS = 3_000;
 // the call ends (armKey changes). It MUST be large enough never to expire mid-call: a
 // cell-forward can ring 30-45s before voicemail. ~30 x (3.5s server + 3s delay) ~= 3 min.
 const VOICEMAIL_ARM_MAX_RETRIES = 30;
+// Last-resort watchdog for the drop flow: the play request has NO client-side
+// timeout (the api fetch has no deadline) and the server path is bounded
+// (~135s service timeout, 120s play hard cap). If nothing settled by here,
+// force-clear the pending flag so the Voicemail button can never be stuck
+// "Dropping VM" until a page reload.
+const VOICEMAIL_DROP_WATCHDOG_MS = 180_000;
 const STALE_SERVED_QUEUE_RESET_MS = 20_000;
 const SHOW_POSTDATE_DISPOSITION = true;
 type AutoServeCountdownMode = "startup" | "next";
@@ -3333,6 +3339,22 @@ export function CXWorkspace() {
   const voicemailArmRetryCountRef = React.useRef(0);
   const voicemailWarmKeyRef = React.useRef<string | null>(null);
   const voicemailWarmInFlightRef = React.useRef<string | null>(null);
+  const voicemailDropWatchdogRef = React.useRef<number | null>(null);
+
+  function clearVoicemailDropWatchdog() {
+    if (voicemailDropWatchdogRef.current != null) {
+      window.clearTimeout(voicemailDropWatchdogRef.current);
+      voicemailDropWatchdogRef.current = null;
+    }
+  }
+
+  // Single settle point for the drop's pending flag: every exit path (play
+  // success -> disposition, play failure, disposition failure, watchdog) goes
+  // through here so the flag and its watchdog can never diverge.
+  function settleVoicemailDropPending() {
+    clearVoicemailDropWatchdog();
+    setVoicemailDropPending(false);
+  }
 
   function clearServedQueueSelection() {
     setServingQueueKey(null);
@@ -3548,17 +3570,36 @@ export function CXWorkspace() {
   function beginVoicemailDrop() {
     if (voicemailDropPending) return; // re-entrancy guard: never fire two drops at once
     setVoicemailDropPending(true);
+    clearVoicemailDropWatchdog();
+    voicemailDropWatchdogRef.current = window.setTimeout(() => {
+      voicemailDropWatchdogRef.current = null;
+      releaseArmedVoicemailDrop("voicemail-drop-watchdog");
+      setVoicemailDropPending(false);
+      toast.error("Voicemail drop timed out", {
+        description: "The headless monitor never reported back. This call may still need a manual disposition.",
+      });
+    }, VOICEMAIL_DROP_WATCHDOG_MS);
     releaseLiveCoachForCurrentCall("voicemail-drop-started");
     toast("Voicemail drop started", {
       description: "Keeping this call open until the headless monitor finishes the recording.",
     });
     void runHeadlessVoicemailDrop()
       .then(() => {
-        submitQueueDisposition("did-not-answer", "Voicemail", { releaseVoicemailArm: false });
+        try {
+          submitQueueDisposition("did-not-answer", "Voicemail", { releaseVoicemailArm: false });
+        } catch (error) {
+          // Drop succeeded but the disposition path threw synchronously: settle
+          // the flag so the button can't stick, and tell the agent the queue
+          // still needs a manual advance.
+          settleVoicemailDropPending();
+          toast.error("Voicemail dropped, but the disposition failed", {
+            description: error instanceof Error ? error.message : "Advance the queue manually.",
+          });
+        }
       })
       .catch((error) => {
         releaseArmedVoicemailDrop("voicemail-drop-failed");
-        setVoicemailDropPending(false);
+        settleVoicemailDropPending();
         toast.error("Voicemail drop failed", {
           description: error instanceof Error ? error.message : "Headless monitor did not finish the recording.",
         });
@@ -3970,9 +4011,13 @@ export function CXWorkspace() {
     releaseArmedVoicemailDrop("call-session-ended");
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentCallSessionId]);
-  // Leak guard: cancel any pending re-arm timer if the workspace unmounts mid-call.
+  // Leak guard: cancel any pending re-arm timer + drop watchdog if the
+  // workspace unmounts mid-call.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  React.useEffect(() => () => clearVoicemailArmRetry(), []);
+  React.useEffect(() => () => {
+    clearVoicemailArmRetry();
+    clearVoicemailDropWatchdog();
+  }, []);
   const updateCase = useCxLogicsUpdateCase(caseDomain);
   // Case detail (calls + texts) — also case-scoped.
   const clientDetail = useClientDetail(caseDomain, resolvedCaseId);
@@ -5029,7 +5074,7 @@ export function CXWorkspace() {
       }),
     )
       .then((result) => {
-        setVoicemailDropPending(false);
+        settleVoicemailDropPending();
         const nextDialAccepted = isCxNextDialAccepted(result);
         const nextDialQueuedButUnconfirmed = isCxNextDialQueuedButUnconfirmed(result);
         releaseQueueAfterSuccess(result, {
@@ -5061,7 +5106,7 @@ export function CXWorkspace() {
         }
       })
       .catch(() => {
-        setVoicemailDropPending(false);
+        settleVoicemailDropPending();
         if (previousLeadSnapshot) {
           cancelAutoServe();
           setSelected(previousLeadSnapshot.selected);

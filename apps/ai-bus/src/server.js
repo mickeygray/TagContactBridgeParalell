@@ -531,8 +531,10 @@ function buildDashboardAccessMiddleware() {
 // Runtime-toggleable composer contemplativeness ("tier" = effort + thinking), flippable
 // mid-day at the ai-bus (port 7000) via the dashboard endpoint with NO restart. The dialog
 // composer reads getComposerTier() per request, so a toggle takes effect on the next turn.
-// Default stays the most contemplative (high effort + adaptive thinking); dial down live if
-// latency bites. Override the boot default with LIVE_COACH_COMPOSER_TIER.
+// Default is medium effort with thinking OFF: adaptive thinking added 1-4s before the
+// first visible token, which dominated coach-line latency on a live call. Dial UP to a
+// thinking tier via the dashboard when contemplation matters more than speed. Override
+// the boot default with LIVE_COACH_COMPOSER_TIER.
 const COMPOSER_TIERS = Object.freeze({
   "high-thinking": { effort: "high", thinking: true },
   "medium-thinking": { effort: "medium", thinking: true },
@@ -541,7 +543,7 @@ const COMPOSER_TIERS = Object.freeze({
 });
 const DEFAULT_COMPOSER_TIER = (() => {
   const fromEnv = String(process.env.LIVE_COACH_COMPOSER_TIER || "").trim().toLowerCase();
-  return COMPOSER_TIERS[fromEnv] ? fromEnv : "high-thinking";
+  return COMPOSER_TIERS[fromEnv] ? fromEnv : "medium-no-thinking";
 })();
 let liveComposerTier = DEFAULT_COMPOSER_TIER;
 function getComposerTier() {
@@ -1171,6 +1173,27 @@ function createLiveCoachDashboardHtml() {
       return Date.parse(session?.lastEventAt || session?.updatedAt || session?.createdAt || "") || 0;
     }
 
+    // Prefer sessions with real signal over empty control-plane shells (see the
+    // wallboard's sessionSignalScore for rationale). Signal counts only while
+    // fresh (30s): live audio refreshes lastEventAt every ~2.5s.
+    function sessionSignalScore(session) {
+      const latest = session?.latest || {};
+      let score = 0;
+      if (latest.dialog) score += 4;
+      if (latest.transcript?.text || latest.provisionalTranscript?.text) score += 4;
+      if (latest.context) score += 2;
+      if (Number(session?.counters?.input || 0) > 0) score += 2;
+      if (latest.streamStatus) score += 1;
+      if (session?.metadata?.streamId) score += 1;
+      return score;
+    }
+
+    function sessionPickRank(session) {
+      const updatedMs = sessionSortMs(session);
+      if (!updatedMs || Date.now() - updatedMs > 30000) return 0;
+      return sessionSignalScore(session);
+    }
+
     function sessionLabel(session) {
       const metadata = session?.metadata || {};
       return metadata.agentName ||
@@ -1338,7 +1361,11 @@ function createLiveCoachDashboardHtml() {
       const data = await response.json();
       const sessions = (Array.isArray(data.sessions) ? data.sessions : [])
         .filter(isLiveSession)
-        .sort((a, b) => sessionSortMs(b) - sessionSortMs(a));
+        .sort((a, b) => {
+          const rankDelta = sessionPickRank(b) - sessionPickRank(a);
+          if (rankDelta) return rankDelta;
+          return sessionSortMs(b) - sessionSortMs(a);
+        });
       const active = sessions.filter((session) => !isTerminalSession(session));
       const selectedStillExists = selectedSessionId && active.some((session) => session.id === selectedSessionId);
       const latest = selectedStillExists
@@ -1511,7 +1538,9 @@ function createLiveCoachWallboardHtml() {
       grid-template-columns: repeat(var(--lane-count, 3), minmax(0, 1fr));
       gap: 12px;
       padding: 12px;
-      min-width: 1180px;
+      /* Scales with dynamic lane count: extra agents scroll horizontally
+         instead of crushing every lane. */
+      min-width: calc(var(--lane-count, 3) * 393px);
     }
     .lane {
       display: grid;
@@ -1613,12 +1642,19 @@ function createLiveCoachWallboardHtml() {
   <main id="lanes"></main>
   <script>
     const SHOW_UNBOUND = new URLSearchParams(window.location.search).get("debug") === "unbound";
-    const AGENTS = [
+    // Pinned lanes always render (known floor). Any OTHER agent with a live
+    // session or a fresh call event gets a dynamic lane derived from their
+    // identity — the coach works for everyone with a stream attached, not just
+    // the names hardcoded here. Identity-less streams share the Unbound lane
+    // (auto-shown when one exists; always shown with ?debug=unbound).
+    const PINNED_AGENTS = [
       { key: "cbolt", label: "Chris Bolt", aliases: ["cbolt", "cbolt@", "chrisbolt", "chris bolt", "63914586004"] },
       { key: "bhansen", label: "Brad Hansen", aliases: ["bhansen", "bhansen@", "bradhansen", "brad hansen", "63914587004"] },
       { key: "jsharp", label: "J. Sharp", aliases: ["jsharp", "jsharp@", "james sharp", "jay sharp", "63914621004"] },
-      ...(SHOW_UNBOUND ? [{ key: "unbound", label: "Unbound Stream", aliases: [], fallback: true }] : []),
     ];
+    const UNBOUND_LANE = { key: "unbound", label: "Unbound Stream", aliases: [], fallback: true };
+    let lanes = PINNED_AGENTS.concat(SHOW_UNBOUND ? [UNBOUND_LANE] : []);
+    let laneSignature = "";
 
     const els = {
       lanes: document.getElementById("lanes"),
@@ -1687,9 +1723,77 @@ function createLiveCoachWallboardHtml() {
     }
 
     function matchesKnownAgent(session) {
-      return AGENTS
+      return lanes
         .filter((agent) => !agent.fallback)
         .some((agent) => agentMatches(agent, session));
+    }
+
+    function dynamicLaneFromIdentity(ext, email, name) {
+      const cleanExt = String(ext || "").trim();
+      const cleanEmail = String(email || "").trim().toLowerCase();
+      const cleanName = String(name || "").trim();
+      if (!cleanExt && !cleanEmail && !cleanName) return null;
+      const key = "dyn-" + (cleanExt || cleanEmail || cleanName).toLowerCase().replace(/[^a-z0-9@._-]+/g, "-").slice(0, 60);
+      const aliases = [
+        cleanExt,
+        cleanEmail,
+        cleanEmail ? cleanEmail.split("@")[0] : "",
+        cleanName.toLowerCase(),
+      ].filter(Boolean);
+      const label = cleanName || (cleanEmail ? cleanEmail.split("@")[0] : "Ext " + cleanExt);
+      return { key, label, aliases, dynamic: true };
+    }
+
+    function deriveDynamicLanes(sessions, callEvents) {
+      const dynamic = new Map();
+      let sawIdentitylessSession = false;
+      for (const session of sessions || []) {
+        if (!isDisplayable(session)) continue;
+        if (PINNED_AGENTS.some((agent) => agentMatches(agent, session))) continue;
+        const metadata = session.metadata || {};
+        const lane = dynamicLaneFromIdentity(
+          metadata.agentExtension || metadata.agentExtensionId,
+          metadata.agentEmail,
+          metadata.agentName,
+        );
+        if (!lane) {
+          sawIdentitylessSession = true;
+          continue;
+        }
+        if (!dynamic.has(lane.key)) dynamic.set(lane.key, lane);
+      }
+      const maxEventAgeMs = 3 * 60 * 1000;
+      for (const event of callEvents || []) {
+        if (!event || event.expired) continue;
+        const ms = callEventSortMs(event);
+        if (!ms || Date.now() - ms > maxEventAgeMs) continue;
+        if (PINNED_AGENTS.some((agent) => callEventMatches(agent, event))) continue;
+        const lane = dynamicLaneFromIdentity(
+          event.extensionId || event.agentExtension || event.agentExtensionId,
+          event.agentEmail,
+          event.agentName,
+        );
+        if (lane && !dynamic.has(lane.key)) dynamic.set(lane.key, lane);
+      }
+      const rows = [...dynamic.values()].sort((a, b) => a.label.localeCompare(b.label));
+      if (sawIdentitylessSession || SHOW_UNBOUND) rows.push(UNBOUND_LANE);
+      return rows;
+    }
+
+    function syncLanes(sessions, callEvents) {
+      const desired = PINNED_AGENTS.concat(deriveDynamicLanes(sessions, callEvents));
+      const signature = desired.map((lane) => lane.key).join("|");
+      if (signature === laneSignature) return;
+      laneSignature = signature;
+      const desiredKeys = new Set(desired.map((lane) => lane.key));
+      for (const key of [...eventSources.keys()]) {
+        if (!desiredKeys.has(key)) closeLaneSource({ key });
+      }
+      for (const key of [...laneState.keys()]) {
+        if (!desiredKeys.has(key)) laneState.delete(key);
+      }
+      lanes = desired;
+      renderShell();
     }
 
     function isTerminalSession(session) {
@@ -1713,6 +1817,31 @@ function createLiveCoachWallboardHtml() {
     function isRecentlyUpdated(session, windowMs = 180000) {
       const updatedMs = sessionSortMs(session);
       return updatedMs && Date.now() - updatedMs <= windowMs;
+    }
+
+    // Prefer sessions with real signal (audio/transcript/context/dialog) over
+    // empty control-plane shells: sync-current re-ensures coach-cx shells every
+    // 10s, which keeps bumping their recency, so "newest active" can stare at a
+    // ghost while the session that actually has the stream sits underneath.
+    function sessionSignalScore(session) {
+      const latest = session?.latest || {};
+      let score = 0;
+      if (latest.dialog) score += 4;
+      if (latest.transcript?.text || latest.provisionalTranscript?.text) score += 4;
+      if (latest.context) score += 2;
+      if (Number(session?.counters?.input || 0) > 0) score += 2;
+      if (latest.streamStatus) score += 1;
+      if (session?.metadata?.streamId) score += 1;
+      return score;
+    }
+
+    // Signal only counts while FRESH: flowing audio refreshes lastEventAt every
+    // ~2.5s (stream-status), so a live session always qualifies, while a dead
+    // unstopped session from the previous call ages out of preference in 30s
+    // instead of masking the new call until the 5-minute stale sweep.
+    function sessionPickRank(session) {
+      if (!isRecentlyUpdated(session, 30000)) return 0;
+      return sessionSignalScore(session);
     }
 
     function isActiveFlash(flash) {
@@ -1751,22 +1880,21 @@ function createLiveCoachWallboardHtml() {
     }
 
     function pickSessionForAgent(agent, sessions) {
+      const bySignalThenRecency = (a, b) => {
+        const activeDelta = Number(isTerminalSession(a)) - Number(isTerminalSession(b));
+        if (activeDelta) return activeDelta;
+        const rankDelta = sessionPickRank(b) - sessionPickRank(a);
+        if (rankDelta) return rankDelta;
+        return sessionSortMs(b) - sessionSortMs(a);
+      };
       if (agent.fallback) {
         return sessions
           .filter((session) => isDisplayable(session) && !matchesKnownAgent(session))
-          .sort((a, b) => {
-            const activeDelta = Number(isTerminalSession(a)) - Number(isTerminalSession(b));
-            if (activeDelta) return activeDelta;
-            return sessionSortMs(b) - sessionSortMs(a);
-          })[0] || null;
+          .sort(bySignalThenRecency)[0] || null;
       }
       return sessions
         .filter((session) => isDisplayable(session) && agentMatches(agent, session))
-        .sort((a, b) => {
-          const activeDelta = Number(isTerminalSession(a)) - Number(isTerminalSession(b));
-          if (activeDelta) return activeDelta;
-          return sessionSortMs(b) - sessionSortMs(a);
-        })[0] || null;
+        .sort(bySignalThenRecency)[0] || null;
     }
 
     function buildVoicemailFlash(source) {
@@ -1878,15 +2006,15 @@ function createLiveCoachWallboardHtml() {
         const rows = Array.from(pendingLanePatches.entries());
         pendingLanePatches.clear();
         for (const [agentKey, queuedPatch] of rows) {
-          const rowAgent = AGENTS.find((candidate) => candidate.key === agentKey);
+          const rowAgent = lanes.find((candidate) => candidate.key === agentKey);
           if (rowAgent) setLane(rowAgent, queuedPatch);
         }
       });
     }
 
     function renderShell() {
-      document.documentElement.style.setProperty("--lane-count", String(AGENTS.length));
-      els.lanes.innerHTML = AGENTS.map((agent) =>
+      document.documentElement.style.setProperty("--lane-count", String(lanes.length));
+      els.lanes.innerHTML = lanes.map((agent) =>
         "<div class=\\"lane\\" data-agent=\\"" + escapeHtml(agent.key) + "\\">" +
           "<div class=\\"lane-head\\">" +
             "<div class=\\"agent-name\\">" + escapeHtml(agent.label) + "</div>" +
@@ -1915,7 +2043,7 @@ function createLiveCoachWallboardHtml() {
           "</section>" +
         "</div>"
       ).join("");
-      for (const agent of AGENTS) setLane(agent);
+      for (const agent of lanes) setLane(agent);
     }
 
     function setText(id, text, emptyText) {
@@ -1996,6 +2124,8 @@ function createLiveCoachWallboardHtml() {
         transcript?.model || transcript?.source || "",
         transcript?.at ? fmtTime(transcript.at) : "",
         transcript?.wordCount ? transcript.wordCount + " words" : "",
+        streamStatus && streamStatus.bindState && streamStatus.bindState !== "bound" ? "bind: " + streamStatus.bindState : "",
+        streamStatus && Number(streamStatus.pendingDroppedBytes || 0) > 0 ? "audio dropped " + Math.round(Number(streamStatus.pendingDroppedBytes) / 1024) + "KB" : "",
         streamStatus && !transcript?.text ? Math.round(Number(streamStatus.durationSec || 0)) + "s audio" : "",
         streamStatus && !transcript?.text ? "active " + Number(streamStatus.activePct || 0).toFixed(1) + "%" : "",
         streamStatus && !transcript?.text ? "waiting on STT" : "",
@@ -2225,7 +2355,9 @@ function createLiveCoachWallboardHtml() {
       const active = sessions.filter((session) => !isTerminalSession(session));
       els.liveCount.textContent = active.length + " live";
       els.updated.textContent = fmtTime(new Date().toISOString());
-      for (const agent of AGENTS) {
+      // Lanes follow the floor: add/remove dynamic lanes before painting.
+      syncLanes(sessions, callEvents);
+      for (const agent of lanes) {
         const session = pickSessionForAgent(agent, sessions);
         const waitingCall = pickCallEventForAgent(agent, callEvents, sessions);
         const rejectedSession = pickRecentRejectedForAgent(agent, sessions);
@@ -2339,11 +2471,21 @@ async function main() {
     // fuzzy filter that ranks deterministic candidates before Sonnet composes a line.
     semanticContextJudge,
     composeDedupWindowMs: Number(process.env.LIVE_COACH_COMPOSE_DEDUP_WINDOW_MS || 4000) || 4000,
-    composeRateLimitPerMinute: Number(process.env.LIVE_COACH_COMPOSE_RATE_LIMIT_PER_MINUTE || 3) || 3,
+    // 3/min silently starved fast objection sequences (3+ coachable turns inside
+    // a minute is normal in live sales); the 4s dedupe window is the real
+    // runaway-compose guard, so the per-minute cap can breathe.
+    composeRateLimitPerMinute: Number(process.env.LIVE_COACH_COMPOSE_RATE_LIMIT_PER_MINUTE || 6) || 6,
     composeDeltaThrottleMs: Number(process.env.LIVE_COACH_COMPOSE_DELTA_THROTTLE_MS || 60) || 60,
     asyncContextPipeline: boolFromEnv(process.env.LIVE_COACH_ASYNC_CONTEXT_PIPELINE, true),
     thoughtBufferMaxChars: Number(process.env.LIVE_COACH_THOUGHT_BUFFER_MAX_CHARS || 900) || 900,
     thoughtBufferMaxChunks: Number(process.env.LIVE_COACH_THOUGHT_BUFFER_MAX_CHUNKS || 5) || 5,
+    // Mini veto scope: "junk-only" (default) lets the mini hold composition only
+    // for junk reasons (voicemail/screener/filler...); any other refusal composes
+    // anyway and Claude's WAIT judges completeness. "all" restores the full veto.
+    miniVetoScope: cleanText(process.env.LIVE_COACH_MINI_VETO_SCOPE || "junk-only", 20).toLowerCase(),
+    // Non-strong-junk holds expire after this silence window and force-compose
+    // the buffered thought (trailing-off prospects still get coached). 0 = off.
+    holdExpiryMs: Math.max(0, Number(process.env.LIVE_COACH_HOLD_EXPIRY_MS ?? 2500) || 0),
   });
   logger.info("live_coach.runtime_config", {
     mongoConnected: Boolean(mongoRuntime.connected),
@@ -2364,7 +2506,7 @@ async function main() {
       : null,
     composerTier: getComposerTier(),
     composeDedupWindowMs: Number(process.env.LIVE_COACH_COMPOSE_DEDUP_WINDOW_MS || 4000) || 4000,
-    composeRateLimitPerMinute: Number(process.env.LIVE_COACH_COMPOSE_RATE_LIMIT_PER_MINUTE || 3) || 3,
+    composeRateLimitPerMinute: Number(process.env.LIVE_COACH_COMPOSE_RATE_LIMIT_PER_MINUTE || 6) || 6,
     composeDeltaThrottleMs: Number(process.env.LIVE_COACH_COMPOSE_DELTA_THROTTLE_MS || 60) || 60,
     asyncContextPipeline: boolFromEnv(process.env.LIVE_COACH_ASYNC_CONTEXT_PIPELINE, true),
     thoughtBufferMaxChars: Number(process.env.LIVE_COACH_THOUGHT_BUFFER_MAX_CHARS || 900) || 900,
@@ -2399,7 +2541,7 @@ async function main() {
           : null,
         anthropicComposerEnabled: boolFromEnv(process.env.LIVE_COACH_ANTHROPIC_COMPOSER_ENABLED, false),
         composeDedupWindowMs: Number(process.env.LIVE_COACH_COMPOSE_DEDUP_WINDOW_MS || 4000) || 4000,
-        composeRateLimitPerMinute: Number(process.env.LIVE_COACH_COMPOSE_RATE_LIMIT_PER_MINUTE || 3) || 3,
+        composeRateLimitPerMinute: Number(process.env.LIVE_COACH_COMPOSE_RATE_LIMIT_PER_MINUTE || 6) || 6,
       },
     };
     if (!isDetailedHealthRequest(req)) {

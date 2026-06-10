@@ -95,13 +95,16 @@ test("live coach bus lets semantic judge hold before dialog composition", async 
   const rootDir = makeTempRoot();
   const bus = createLiveCoachBus({
     rootDir,
+    holdExpiryMs: 0,
     semanticContextJudge: async () => ({
       shouldCompose: false,
       completeThought: true,
       selectedKeys: [],
       rejected: [{ key: "irs_notice", reason: "not actually about an IRS notice" }],
       transcriptMeaning: "The statement is not actionable enough for live coaching.",
-      actionReason: "semantic_context_not_actionable",
+      // Under the reason-scoped veto the mini may only hold for JUNK reasons;
+      // this stub holds as filler/test chatter (weak junk).
+      actionReason: "filler test chatter, no useful sales context",
       confidence: 0.86,
       provider: "test",
       model: "fake-mini",
@@ -178,12 +181,65 @@ test("live coach bus lets semantic judge recover catalog keys beyond determinist
   assert.match(result.result.dialog.promptPayload.user, /paid through a platform/);
 });
 
+test("agent semantic VAD is optional context and never required to release coaching", async () => {
+  const rootDir = makeTempRoot();
+  const composerPayloads = [];
+  const bus = createLiveCoachBus({
+    rootDir,
+    dialogComposer: async ({ dialog }) => {
+      composerPayloads.push(dialog.promptPayload || {});
+      return { say: "Let's slow that down and look at the notice first.", composer: "test" };
+    },
+  });
+  const started = bus.startSession({
+    source: "test",
+    agentName: "Chris",
+    firmName: "Wynn Tax Solutions",
+    uii: "uii-agent-vad-optional",
+  });
+
+  const first = await bus.appendInput(started.id, {
+    text: "I have a CP504 from the IRS and I am worried about a levy.",
+    role: "prospect",
+    source: "unit-test",
+  });
+  await wait(20);
+
+  assert.equal(first.ok, true);
+  assert.equal(first.result.action, "compose_dialog");
+  assert.equal(composerPayloads.length, 1);
+  assert.doesNotMatch(composerPayloads[0].user, /Agent's most recent line/);
+
+  const agentOnly = await bus.appendInput(started.id, {
+    text: "I can help you figure out what this notice actually means.",
+    role: "agent",
+    source: "unit-test-agent-stt",
+  });
+  assert.equal(agentOnly.ok, true);
+  assert.equal(agentOnly.result.action, "store_non_prospect");
+  assert.equal(agentOnly.result.dialog, null);
+
+  const second = await bus.appendInput(started.id, {
+    text: "I also have not filed my last two tax returns.",
+    role: "prospect",
+    source: "unit-test",
+  });
+  await wait(20);
+
+  assert.equal(second.ok, true);
+  assert.equal(second.result.action, "compose_dialog");
+  assert.equal(composerPayloads.length, 2);
+  assert.match(composerPayloads[1].user, /Agent's most recent line/);
+  assert.match(composerPayloads[1].user, /optional context only/);
+});
+
 test("live coach bus can emit transcript before async context judge finishes", async () => {
   const rootDir = makeTempRoot();
   let judgeStarted = false;
   const bus = createLiveCoachBus({
     rootDir,
     asyncContextPipeline: true,
+    holdExpiryMs: 0,
     semanticContextJudge: async () => {
       judgeStarted = true;
       await wait(25);
@@ -193,7 +249,7 @@ test("live coach bus can emit transcript before async context judge finishes", a
         selectedKeys: [],
         rejected: [{ key: "irs_notice", reason: "test hold" }],
         transcriptMeaning: "The transcript was accepted before context judgement finished.",
-        actionReason: "semantic_context_not_actionable",
+        actionReason: "junk filler, non-coachable test input",
         confidence: 0.8,
         provider: "test",
         model: "fake-mini",
@@ -734,4 +790,129 @@ test("live coach bus exposes summaries and flushes terminal persistence asynchro
   assert.equal(saves[0].input.reason, "session.stop");
   assert.equal(saves[0].snapshot.status, "stopped");
   assert.equal(saves[0].snapshot.memory.transcripts.length, 1);
+});
+
+test("mini hold with a non-junk reason is overridden and composes (Claude owns completeness)", async () => {
+  const rootDir = makeTempRoot();
+  let composeCalls = 0;
+  const bus = createLiveCoachBus({
+    rootDir,
+    composeDedupWindowMs: 0,
+    composeRateLimitPerMinute: 10,
+    holdExpiryMs: 0,
+    semanticContextJudge: async () => ({
+      shouldCompose: false,
+      actionReason: "thought seems incomplete mid sentence",
+      approvedKeys: [],
+      contextBrief: "prospect appears to be mid-sentence",
+    }),
+    dialogComposer: async () => {
+      composeCalls += 1;
+      return { say: "What year is that CP504 for?", composer: "test" };
+    },
+  });
+  const started = bus.startSession({
+    source: "test",
+    agentName: "Chris",
+    firmName: "Tax Advocate Group",
+    uii: "uii-veto-override",
+  });
+
+  await bus.appendInput(started.id, {
+    text: "I got a CP504 from the IRS and I'm worried about a levy.",
+    role: "prospect",
+    source: "unit-test",
+  });
+  await wait(60);
+
+  const session = bus.getSession(started.id);
+  assert.equal(composeCalls, 1, "non-junk mini hold must be overridden into a compose");
+  assert.equal(session.latest.context.actionReason, "mini_hold_overridden_non_junk");
+  assert.equal(session.latest.context.miniJudgement.holdOverridden, true);
+  assert.equal(session.events.some((event) => event.type === "pipeline.hold"), false);
+});
+
+test("mini hold with a strong-junk reason stands and never expires", async () => {
+  const rootDir = makeTempRoot();
+  let composeCalls = 0;
+  const bus = createLiveCoachBus({
+    rootDir,
+    composeDedupWindowMs: 0,
+    composeRateLimitPerMinute: 10,
+    holdExpiryMs: 40,
+    semanticContextJudge: async () => ({
+      shouldCompose: false,
+      actionReason: "sounds like a voicemail greeting recording",
+      approvedKeys: [],
+      contextBrief: "voicemail",
+    }),
+    dialogComposer: async () => {
+      composeCalls += 1;
+      return { say: "should never compose", composer: "test" };
+    },
+  });
+  const started = bus.startSession({
+    source: "test",
+    agentName: "Chris",
+    firmName: "Tax Advocate Group",
+    uii: "uii-strong-junk",
+  });
+
+  await bus.appendInput(started.id, {
+    text: "I got a CP504 from the IRS and I'm worried about a levy.",
+    role: "prospect",
+    source: "unit-test",
+  });
+  await wait(200);
+
+  const session = bus.getSession(started.id);
+  assert.equal(composeCalls, 0, "strong-junk veto must hold with no silence expiry");
+  assert.equal(session.events.some((event) => event.type === "pipeline.hold"), true);
+  assert.equal(session.events.some((event) => event.type === "pipeline.hold_released"), false);
+});
+
+test("weak-junk mini hold expires on silence and force-composes the buffered thought", async () => {
+  const rootDir = makeTempRoot();
+  let composeCalls = 0;
+  const bus = createLiveCoachBus({
+    rootDir,
+    composeDedupWindowMs: 0,
+    composeRateLimitPerMinute: 10,
+    holdExpiryMs: 40,
+    semanticContextJudge: async () => ({
+      shouldCompose: false,
+      actionReason: "pure filler with no useful sales context",
+      approvedKeys: [],
+      contextBrief: "filler",
+    }),
+    dialogComposer: async () => {
+      composeCalls += 1;
+      return { say: "Take your time -- what's the notice say?", composer: "test" };
+    },
+  });
+  const started = bus.startSession({
+    source: "test",
+    agentName: "Chris",
+    firmName: "Tax Advocate Group",
+    uii: "uii-weak-junk-expiry",
+  });
+
+  await bus.appendInput(started.id, {
+    text: "I just... I don't know what to do about this levy thing.",
+    role: "prospect",
+    source: "unit-test",
+  });
+  await wait(250);
+
+  const session = bus.getSession(started.id);
+  assert.equal(session.events.some((event) => event.type === "pipeline.hold"), true);
+  assert.equal(session.events.some((event) => event.type === "pipeline.hold_released"), true);
+  assert.equal(composeCalls, 1, "silence expiry must force-compose the held thought");
+  assert.equal(session.latest.context.actionReason, "hold_expired_silence");
+  assert.equal(session.latest.context.forcedBySilence, true);
+  // The held chunk merged exactly once -- no doubled text from the buffer.
+  const phrase = String(session.latest.context.phraseText || "");
+  const firstIndex = phrase.indexOf("levy thing");
+  assert.notEqual(firstIndex, -1);
+  assert.equal(phrase.indexOf("levy thing", firstIndex + 1), -1, "held text must not be duplicated by the merge");
 });

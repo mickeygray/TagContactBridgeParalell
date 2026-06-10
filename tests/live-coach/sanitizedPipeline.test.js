@@ -50,6 +50,28 @@ test("deterministic voicemail phrases reject the first transcript item", () => {
   assert.match(result.dialog.label, /voicemail/i);
 });
 
+test("agent-channel rows bypass the voicemail/screener gates and store as context", () => {
+  const pipeline = createSanitizedLiveCoachPipeline({
+    metadata: { agentName: "Chris", firmName: "Tax Advocate Group", uii: "u-agent" },
+  });
+  // Voicemail-shaped phrase spoken by the AGENT (their own mic) must never
+  // reject the session — agent rows are composer context, not call-state evidence.
+  const agentResult = pipeline.handleTranscript({
+    text: "If we get disconnected, just leave me a quick message and I'll call right back.",
+    role: "agent",
+  });
+  assert.equal(agentResult.action, "store_non_prospect");
+  assert.equal(agentResult.context, null);
+  assert.equal(agentResult.dialog, null);
+  // Session still alive: a real prospect line afterwards is processed normally.
+  const prospectResult = pipeline.handleTranscript({
+    text: "I got a CP504 notice from the IRS about a levy.",
+    role: "prospect",
+  });
+  assert.notEqual(prospectResult.action, "ignore_rejected_session");
+  assert.notEqual(prospectResult.action, "reject_voicemail");
+});
+
 test("natural voicemail greetings with inserted words are rejected", () => {
   const pipeline = createSanitizedLiveCoachPipeline({
     metadata: { agentName: "Chris", firmName: "Tax Advocate Group", uii: "u1b" },
@@ -155,6 +177,7 @@ test("Sonnet prompt payload uses fixed instructions and does not invent names or
   assert.equal(payload.systemCacheable, true);
   assert.match(payload.system, /Use tax comprehension/);
   assert.match(payload.system, /Do not invent people/);
+  assert.match(payload.system, /Never wait for an agent final/);
   const otherPayload = buildSonnetPromptPayload({
     contextFrame,
     metadata: {

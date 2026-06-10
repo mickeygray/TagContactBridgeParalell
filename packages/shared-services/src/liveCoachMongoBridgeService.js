@@ -304,15 +304,41 @@ function createLiveCoachMongoBridge({
     const query = { eventType: DEFAULT_EVENT_TYPE };
     if (sourceService && sourceService !== "*") query.sourceService = sourceService;
 
-    const rows = await EventRecord.find(query)
-      .sort({ _id: -1 })
-      .limit(limit)
-      .lean();
+    // Scan newest-first in pages until we have `limit` MATCHED events or the
+    // page falls entirely outside the lookback window. The old shape applied
+    // `limit` to the raw scan BEFORE the agent/uii filters ran, so on a busy
+    // floor one agent's event could be pushed past the global limit by other
+    // agents' events and binding would report not_found even though the event
+    // existed. `limit` now caps matched results; the raw scan is bounded by
+    // maxScan (LIVE_COACH_CALL_EVENT_MAX_SCAN, default 1000).
     const cutoffMs = lookbackMs ? now() - lookbackMs : 0;
-    const events = rows
-      .map((row) => normalizeCoachCallEvent(row, { source: "mongo" }))
-      .filter((event) => event.createdAtMs >= cutoffMs)
-      .filter((event) => eventMatchesFilters(event, input));
+    const scanPageSize = Math.max(limit, 200);
+    const maxScan = Math.max(scanPageSize, Number(
+      input.maxScan || process.env.LIVE_COACH_CALL_EVENT_MAX_SCAN || 1000,
+    ) || 1000);
+    const events = [];
+    let scanned = 0;
+    let lastId = null;
+    while (scanned < maxScan && events.length < limit) {
+      const pageQuery = lastId ? { ...query, _id: { $lt: lastId } } : query;
+      const rows = await EventRecord.find(pageQuery)
+        .sort({ _id: -1 })
+        .limit(scanPageSize)
+        .lean();
+      if (!rows.length) break;
+      scanned += rows.length;
+      let pageEntirelyOlderThanCutoff = true;
+      for (const row of rows) {
+        const event = normalizeCoachCallEvent(row, { source: "mongo" });
+        if (event.createdAtMs < cutoffMs) continue;
+        pageEntirelyOlderThanCutoff = false;
+        if (events.length < limit && eventMatchesFilters(event, input)) events.push(event);
+      }
+      if (rows.length < scanPageSize) break;
+      if (pageEntirelyOlderThanCutoff) break;
+      lastId = rows[rows.length - 1]?._id;
+      if (!lastId) break;
+    }
     return {
       ok: true,
       query: {

@@ -26,6 +26,10 @@ const MONITOR_ASSIGNMENTS = [
   { monitorExt: "1105", monitorName: "JAMES", email: "jsharp@taxadvocategroup.com" },
   { monitorExt: "1106", monitorName: "BRAD", email: "bhansen@taxadvocategroup.com" },
 ];
+const MONITOR_JWT_ENV_ALIASES = new Map(MONITOR_ASSIGNMENTS.map((a) => [
+  a.monitorExt,
+  `${a.monitorName}_RING_CENTRAL_MONITOR_JWT_TOKEN`,
+]));
 
 async function token() {
   const id = process.env.RING_CENTRAL_CLIENT_ID, secret = process.env.RING_CENTRAL_CLIENT_SECRET, jwt = process.env.RING_CENTRAL_JWT_TOKEN;
@@ -37,6 +41,8 @@ async function get(tok, ep) { const r = await fetch(`${RC_BASE}${ep}`, { headers
 
 function jwtConfigured(ext) {
   if (process.env[`EX_BARGE_JWT_${ext}`]) return true;
+  const alias = MONITOR_JWT_ENV_ALIASES.get(String(ext));
+  if (alias && process.env[alias]) return true;
   const file = process.env.EX_BARGE_JWT_MAP;
   if (file) { try { const j = JSON.parse(require("fs").readFileSync(file, "utf8")); return Boolean(j[ext]); } catch {} }
   return false;

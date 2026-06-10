@@ -96,11 +96,66 @@ function withFetch(routes, fn) {
   });
 }
 
-test("MISS->ADOPT: not_current bind adopts the agent's current uii and stays non-terminal", async () => {
+test("MISS->ADOPT (opt-in): not_current bind adopts the agent's current uii and stays non-terminal", async () => {
   delete process.env.LIVE_COACH_UII_RECONCILE_ENABLED;
+  process.env.LIVE_COACH_UII_ADOPT_ENABLED = "true";
+  try {
+    const segment = makeProspectSegment({
+      dialogIdentity: { uii: "OLD-UII", queueItemId: "q-old", callSessionId: "cs-old" },
+    });
+
+    await withFetch(
+      [
+        {
+          match: "/mongo/bind/latest",
+          respond: () => ({
+            ok: true,
+            status: "not_current",
+            session: null,
+            binding: {
+              status: "not_current",
+              active: false,
+              reason: "agent-current-uii-mismatch",
+              event: {
+                uii: "NEW-UII",
+                queueItemId: "q-new",
+                callSessionId: "cs-new",
+              },
+            },
+          }),
+        },
+      ],
+      async () => {
+        const result = await ensureCoachSession(segment, { forceBind: true });
+        // Adopt returns non-terminal (null) so the next attempt can rebind.
+        assert.equal(result, null);
+        // Identity advanced to the agent's real current call.
+        assert.equal(segment.dialogIdentity.uii, "NEW-UII");
+        assert.equal(segment.dialogIdentity.queueItemId, "q-new");
+        assert.equal(segment.dialogIdentity.callSessionId, "cs-new");
+        // Still unbound (not terminal) -- ready to rebind.
+        assert.equal(segment.coachSessionStarted, false);
+        assert.equal(segment.coachTerminal, false);
+        const adopted = eventsOfType(segment.__eventLog, "coach.session.uii_adopted");
+        assert.equal(adopted.length, 1);
+        assert.equal(adopted[0].fromUii, "OLD-UII");
+        assert.equal(adopted[0].toUii, "NEW-UII");
+        // No misleading bind_miss line when we adopt.
+        assert.equal(eventsOfType(segment.__eventLog, "coach.session.bind_miss").length, 0);
+      },
+    );
+  } finally {
+    delete process.env.LIVE_COACH_UII_ADOPT_ENABLED;
+  }
+});
+
+test("MISS->ADOPT default OFF: drift is logged, stream identity preserved, falls through to bind_miss", async () => {
+  delete process.env.LIVE_COACH_UII_RECONCILE_ENABLED;
+  delete process.env.LIVE_COACH_UII_ADOPT_ENABLED;
   const segment = makeProspectSegment({
-    dialogIdentity: { uii: "OLD-UII", queueItemId: "q-old", callSessionId: "cs-old" },
+    dialogIdentity: { uii: "STREAM-UII", queueItemId: "q-stream", callSessionId: "cs-stream" },
   });
+  assert.equal(segment.uiiAdoptEnabled, false);
 
   await withFetch(
     [
@@ -115,9 +170,9 @@ test("MISS->ADOPT: not_current bind adopts the agent's current uii and stays non
             active: false,
             reason: "agent-current-uii-mismatch",
             event: {
-              uii: "NEW-UII",
-              queueItemId: "q-new",
-              callSessionId: "cs-new",
+              uii: "STALE-EVENT-UII",
+              queueItemId: "q-stale",
+              callSessionId: "cs-stale",
             },
           },
         }),
@@ -125,21 +180,23 @@ test("MISS->ADOPT: not_current bind adopts the agent's current uii and stays non
     ],
     async () => {
       const result = await ensureCoachSession(segment, { forceBind: true });
-      // Adopt returns non-terminal (null) so the next attempt can rebind.
+      // allowUnboundCoachSessions=false in this harness -> bind_miss is terminal null.
       assert.equal(result, null);
-      // Identity advanced to the agent's real current call.
-      assert.equal(segment.dialogIdentity.uii, "NEW-UII");
-      assert.equal(segment.dialogIdentity.queueItemId, "q-new");
-      assert.equal(segment.dialogIdentity.callSessionId, "cs-new");
-      // Still unbound (not terminal) -- ready to rebind.
+      // The stream's RingCX ground-truth identity is NOT overwritten by the
+      // (possibly stale) latest event for the agent.
+      assert.equal(segment.dialogIdentity.uii, "STREAM-UII");
+      assert.equal(segment.dialogIdentity.queueItemId, "q-stream");
+      assert.equal(segment.dialogIdentity.callSessionId, "cs-stream");
       assert.equal(segment.coachSessionStarted, false);
-      assert.equal(segment.coachTerminal, false);
-      const adopted = eventsOfType(segment.__eventLog, "coach.session.uii_adopted");
-      assert.equal(adopted.length, 1);
-      assert.equal(adopted[0].fromUii, "OLD-UII");
-      assert.equal(adopted[0].toUii, "NEW-UII");
-      // No misleading bind_miss line when we adopt.
-      assert.equal(eventsOfType(segment.__eventLog, "coach.session.bind_miss").length, 0);
+      assert.equal(eventsOfType(segment.__eventLog, "coach.session.uii_adopted").length, 0);
+      const drift = eventsOfType(segment.__eventLog, "coach.session.uii_drift");
+      assert.equal(drift.length, 1);
+      assert.equal(drift[0].streamUii, "STREAM-UII");
+      assert.equal(drift[0].latestEventUii, "STALE-EVENT-UII");
+      assert.equal(drift[0].adoption, "disabled");
+      // Falls through to the normal miss path (which, with unbound sessions
+      // allowed in production, degrades to a thin session instead of silence).
+      assert.equal(eventsOfType(segment.__eventLog, "coach.session.bind_miss").length, 1);
     },
   );
 });

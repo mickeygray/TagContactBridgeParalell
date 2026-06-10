@@ -306,6 +306,16 @@ function buildRecentCallMemory(session = {}, context = {}, {
     })
     .filter(Boolean);
 
+  // Agent-channel rows (role:"agent" from the bridge's context-only agent STT)
+  // surface ONLY here — composer context. The mini judge and the deterministic
+  // pipeline never see them; they exist so Claude doesn't suggest what the
+  // agent just said and can build on the agent's actual last move.
+  const agentRows = (Array.isArray(memory.transcripts) ? memory.transcripts : [])
+    .filter((row) => row?.text)
+    .filter((row) => cleanText(row.role || "", 40) === "agent")
+    .slice(-2)
+    .map((row) => `- Agent: ${cleanText(row.text, 220)}`);
+
   const coachRows = (Array.isArray(memory.coachingSuggestions) ? memory.coachingSuggestions : [])
     .filter((row) => row?.say)
     .slice(-Math.max(0, Number(maxCoachRows) || 2))
@@ -326,6 +336,7 @@ function buildRecentCallMemory(session = {}, context = {}, {
   const sections = [
     priorCallRows.length ? ["Prior calls with this prospect (continuity only; the current call always outranks this):", ...priorCallRows].join("\n") : "",
     currentBriefRows.length ? ["Mini compact memory for this turn:", ...currentBriefRows].join("\n") : "",
+    agentRows.length ? ["Agent's most recent line(s) - optional context only; do not wait for agent VAD, repeat it, or rephrase it:", ...agentRows].join("\n") : "",
     filteredRows.length ? ["Recent filtered matches with snippets:", ...filteredRows].join("\n") : "",
     transcriptRows.length ? ["Recent raw prospect lines, fallback only:", ...transcriptRows].join("\n") : "",
     coachRows.length ? ["Avoid repeating these recent coach lines:", ...coachRows].join("\n") : "",
@@ -338,6 +349,7 @@ function buildRecentCallMemory(session = {}, context = {}, {
     transcriptRows: transcriptRows.length,
     contextRows: filteredRows.length,
     coachRows: coachRows.length,
+    agentRows: agentRows.length,
     currentBriefRows: currentBriefRows.length,
     text,
   };
@@ -688,6 +700,14 @@ function refineContextWithSemanticJudgement(context = {}, judgement = {}, input 
   };
 }
 
+// The mini's veto is scoped to JUNK only. Completeness is Claude's call (the WAIT
+// sentinel) — a small model gating composition on "incomplete thought" is the
+// exact failure mode that was already moved out of the mini once. Strong junk
+// (clearly non-conversation) holds with no expiry; weak junk (filler/greeting —
+// which can also be a trailing-off human moment) holds but expires on silence.
+const MINI_STRONG_JUNK_PATTERN = /(voicemail|voice\s*mail|screener|screening|ivr|automated|recording|robocall|music|beep|dial\s*tone|answering\s*(machine|service))/i;
+const MINI_WEAK_JUNK_PATTERN = /(filler|greeting|noise|silence|junk|non.?coachable|no\s+(useful|sales|tax|human)\s+(context|content)|empty)/i;
+
 function createLiveCoachBus({
   rootDir,
   logger,
@@ -701,6 +721,14 @@ function createLiveCoachBus({
   asyncContextPipeline = false,
   thoughtBufferMaxChars = DEFAULT_THOUGHT_BUFFER_MAX_CHARS,
   thoughtBufferMaxChunks = DEFAULT_THOUGHT_BUFFER_MAX_CHUNKS,
+  // "junk-only" (default): the mini may hold composition only for junk reasons;
+  // any other refusal composes anyway and Claude's WAIT judges completeness.
+  // "all": restore the mini's full veto (pre-override behavior).
+  miniVetoScope = "junk-only",
+  // A hold is "wait for more audio" — but more audio is not guaranteed. Expire
+  // non-strong-junk holds after this silence window and force-compose the
+  // buffered thought (flagged forcedBySilence). 0 disables.
+  holdExpiryMs = 2500,
 } = {}) {
   const runtimeRoot = path.join(rootDir || process.cwd(), "runtime", "ai-bus", "live-coach");
   ensureDir(runtimeRoot);
@@ -713,6 +741,103 @@ function createLiveCoachBus({
   const pendingPersistence = new Map();
   const activeDialogComposers = new Map();
   const pendingDialogCompositions = new Map();
+  // Timers live OUTSIDE session objects (serialization/persistence must never
+  // see a Timeout handle).
+  const holdExpiryBySession = new Map();
+
+  function clearHoldExpiry(sessionId) {
+    const key = String(sessionId || "");
+    const timer = holdExpiryBySession.get(key);
+    if (timer) clearTimeout(timer);
+    holdExpiryBySession.delete(key);
+  }
+
+  function armHoldExpiry(session, heldContext, transcript, thoughtOptions, meta = {}) {
+    if (!session || !(Number(holdExpiryMs) > 0)) return;
+    clearHoldExpiry(session.id);
+    const armedAtTranscript = session.counters.transcript;
+    const timer = setTimeout(() => {
+      holdExpiryBySession.delete(String(session.id));
+      try {
+        releaseExpiredHold(session, heldContext, transcript, thoughtOptions, { ...meta, armedAtTranscript });
+      } catch (error) {
+        emit(session.id, "pipeline.error", { error: error.message, stage: "hold_expiry" });
+      }
+    }, Number(holdExpiryMs));
+    if (typeof timer.unref === "function") timer.unref();
+    holdExpiryBySession.set(String(session.id), timer);
+  }
+
+  function releaseExpiredHold(session, heldContext, transcript, thoughtOptions, meta = {}) {
+    if (!session || TERMINAL_SESSION_STATUSES.includes(session.status)) return null;
+    // Superseded: newer audio arrived after the hold; the live turn owns the
+    // buffer now and the held chunk merges through the normal path.
+    if (session.counters.transcript !== meta.armedAtTranscript) return null;
+    // The held chunk was already appended to the unresolved buffer; remove it so
+    // the merge below (which re-adds the current context) doesn't double it.
+    const heldVadId = cleanText(meta.heldVadId || "", 120);
+    if (heldVadId && Array.isArray(session.thoughtBuffer?.unresolved)) {
+      session.thoughtBuffer.unresolved = session.thoughtBuffer.unresolved.filter((item) => item.vadId !== heldVadId);
+    }
+    let contextFrame = {
+      ...heldContext,
+      held: false,
+      actionable: true,
+      shouldCompose: true,
+      actionReason: "hold_expired_silence",
+      forcedBySilence: true,
+      miniJudgement: {
+        ...(heldContext.miniJudgement || {}),
+        forcedBySilence: true,
+        holdReason: cleanText(meta.holdReason || heldContext.actionReason || "", 200),
+      },
+    };
+    contextFrame = mergeThoughtBufferIntoContext(session, contextFrame, transcript, {
+      ...thoughtOptions,
+      reason: "hold_expired_silence",
+    });
+    const context = {
+      ...contextFrame,
+      id: `ctx-${String(session.counters.context + 1).padStart(4, "0")}`,
+      text: contextFrame.phraseText,
+    };
+    if (meta.commitPendingOnRelease && typeof session.pipeline?.commitPending === "function") {
+      session.pipeline.commitPending("prospect", context.phraseText || transcript?.text || "");
+    }
+    session.counters.context += 1;
+    session.latest.context = context;
+    pushMemory(session, "contexts", context);
+    writeJsonLine(path.join(session.dir, "ai", "context.ndjson"), context);
+    emit(session.id, "pipeline.hold_released", {
+      reason: "silence_expiry",
+      holdReason: cleanText(meta.holdReason || "", 200) || null,
+      expiredAfterMs: Number(holdExpiryMs),
+    });
+    emit(session.id, "context", { context });
+    const dialogFrame = createSonnetDialogDraft({ contextFrame, metadata: session.metadata });
+    const composerActive = typeof dialogComposer === "function";
+    const dialog = composerActive && dialogFrame?.status === "ready"
+      ? {
+        ...dialogFrame,
+        id: `dlg-${String(session.counters.dialog + 1).padStart(4, "0")}`,
+        at: new Date().toISOString(),
+        status: "composing",
+        say: "",
+        fallbackSay: cleanText(dialogFrame?.say || "", 1000),
+      }
+      : {
+        ...dialogFrame,
+        id: `dlg-${String(session.counters.dialog + 1).padStart(4, "0")}`,
+        at: new Date().toISOString(),
+      };
+    session.counters.dialog += 1;
+    session.latest.dialog = dialog;
+    if (dialog?.say) pushMemory(session, "coachingSuggestions", dialog);
+    writeJsonLine(path.join(session.dir, "ai", "dialog.ndjson"), dialog);
+    emit(session.id, "dialog", { dialog });
+    requestDialogComposition(session, context, dialog);
+    return context;
+  }
 
   function abortActiveDialogComposer(sessionId, reason = "session-ended") {
     const key = String(sessionId || "");
@@ -1173,6 +1298,31 @@ function createLiveCoachBus({
             },
           };
         }
+        // Reason-scoped veto: the mini may hold ONLY for junk. Any other refusal
+        // is a completeness opinion, and completeness is Claude's call (WAIT).
+        // holdClass drives the expiry policy below: strong junk never expires,
+        // weak junk (filler/greeting — could be a trailing-off human) expires.
+        let holdClass = null;
+        if (!contextFrame.shouldCompose) {
+          const vetoReason = cleanText(contextFrame.actionReason || "", 200);
+          if (MINI_STRONG_JUNK_PATTERN.test(vetoReason)) {
+            holdClass = "strong-junk";
+          } else if (MINI_WEAK_JUNK_PATTERN.test(vetoReason)) {
+            holdClass = "weak-junk";
+          } else if (miniVetoScope !== "all") {
+            contextFrame = {
+              ...contextFrame,
+              actionable: true,
+              shouldCompose: true,
+              actionReason: "mini_hold_overridden_non_junk",
+              miniJudgement: {
+                ...(contextFrame.miniJudgement || {}),
+                holdOverridden: true,
+                holdReason: vetoReason,
+              },
+            };
+          }
+        }
         emit(session.id, "context.judge.done", {
           selectedKeys: contextFrame.miniJudgement?.selectedKeys || [],
           shouldCompose: contextFrame.shouldCompose,
@@ -1203,6 +1353,7 @@ function createLiveCoachBus({
           });
           const hold = {
             reason: heldContext.actionReason,
+            holdClass: holdClass || null,
             context: heldContext,
           };
           pushMemory(session, "holds", {
@@ -1215,6 +1366,17 @@ function createLiveCoachBus({
             action: "hold_semantic_context",
             hold,
           });
+          // A hold means "wait for more audio" — which is not guaranteed to come.
+          // Everything except strong junk gets a silence expiry so a trailing-off
+          // prospect ("I just... I don't know") still gets coached.
+          if (holdClass !== "strong-junk") {
+            armHoldExpiry(session, heldContext, transcript, thoughtOptions, {
+              heldVadId: buffered?.vadId || "",
+              holdReason: heldContext.actionReason,
+              holdClass,
+              commitPendingOnRelease: pipelineResult.action === "hold_for_more_context",
+            });
+          }
           return {
             ...pipelineResult,
             action: "hold_semantic_context",
@@ -1283,6 +1445,11 @@ function createLiveCoachBus({
           emit(session.id, "pipeline.hold", {
             action: "hold_semantic_context_error",
             hold,
+          });
+          armHoldExpiry(session, heldContext, transcript, thoughtOptions, {
+            heldVadId: buffered?.vadId || "",
+            holdReason: hold.reason,
+            commitPendingOnRelease: pipelineResult.action === "hold_for_more_context",
           });
           return {
             ...pipelineResult,
@@ -1394,8 +1561,13 @@ function createLiveCoachBus({
     if (!transcript?.text) return { ...pipelineResult, transcript: null, context: null, dialog: null };
 
     session.counters.transcript += 1;
-    session.latest.transcript = transcript;
-    session.latest.provisionalTranscript = null;
+    // Agent-channel rows are composer context only: store + emit them, but never
+    // let them clobber the prospect's latest transcript or kill a live prospect
+    // provisional mid-stream (the agent talks constantly).
+    if (cleanText(transcript.role || "prospect", 40) !== "agent") {
+      session.latest.transcript = transcript;
+      session.latest.provisionalTranscript = null;
+    }
     pushMemory(session, "transcripts", transcript);
     writeJsonLine(path.join(session.dir, "ai", "transcript.ndjson"), transcript);
     emit(session.id, "transcript", { transcript });
@@ -1999,6 +2171,11 @@ function createLiveCoachBus({
       rms: Math.max(0, Number(input.rms || 0) || 0),
       maxAbs: Math.max(0, Number(input.maxAbs || 0) || 0),
       state: cleanText(input.state || "audio-receiving", 80),
+      // Bridge binding visibility (bound / unbound / binding) so the dashboard
+      // can show when a live stream is coaching without a matched CX call.
+      bindState: cleanText(input.bindState || "", 40),
+      bindReason: cleanText(input.bindReason || "", 120),
+      pendingDroppedBytes: Math.max(0, Number(input.pendingDroppedBytes || 0) || 0),
     };
     session.latest.streamStatus = streamStatus;
     session.updatedAt = at;
@@ -2010,6 +2187,7 @@ function createLiveCoachBus({
   function stopSession(sessionId, input = {}) {
     const session = sessions.get(String(sessionId || ""));
     if (!session) return { ok: false, error: "Session not found" };
+    clearHoldExpiry(session.id);
     abortActiveDialogComposer(session.id, cleanText(input.reason || "manual", 120));
     session.status = cleanText(input.status || "stopped", 40);
     session.updatedAt = new Date().toISOString();

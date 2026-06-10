@@ -450,6 +450,11 @@ function createSegmentState({
   language,
   eventLog,
   dialogIdentity = {},
+  agentSttEnabled = false,
+  agentSttModel = "",
+  agentSemanticEagerness = "medium",
+  sttDomainPrimer = "",
+  getCoachSegment = null,
 }) {
   const role = participantRole(decoded.participant || {});
   const safeSegment = safeString(`${sessionId || "no-session"}-${segmentId || crypto.randomBytes(3).toString("hex")}`, 140)
@@ -469,6 +474,13 @@ function createSegmentState({
     5000,
     Number(process.env.LIVE_COACH_UII_RECONCILE_MS || "15000") || 15000,
   );
+  // MISS->ADOPT is now opt-in (default OFF). The gRPC dialogInit UII comes from
+  // RingCX itself — ground truth for THIS stream. Overwriting it with the latest
+  // cx.call.placed event's UII inverted that authority: when the event table was
+  // stale (hook missed, inbound call, page reload) adoption rebound the live
+  // stream to a dead/closed call and locked binding out for the whole call.
+  // Default path now logs the drift and falls through to the unbound fallback.
+  const uiiAdoptEnabled = readEnvBool(process.env.LIVE_COACH_UII_ADOPT_ENABLED, false);
   const state = {
     streamId,
     sessionId,
@@ -487,7 +499,15 @@ function createSegmentState({
     provisionalPreviewMs,
     provisionalPreviewChunks,
     sttProvider,
-    sttModel,
+    // Agent segments run the cheap context-only model; prospect keeps the full
+    // model (it's the system's ears — per-agent overrides via sttModelMap).
+    sttModel: role === "agent"
+      ? resolveSttModelAlias(agentSttModel || "gpt-4o-mini-transcribe", "gpt-4o-mini-transcribe")
+      : sttModel,
+    agentSttEnabled: role === "agent" ? Boolean(agentSttEnabled) : false,
+    agentSemanticEagerness,
+    sttDomainPrimer,
+    getCoachSegment: typeof getCoachSegment === "function" ? getCoachSegment : null,
     sttModelMap: sttModelMap instanceof Map ? sttModelMap : new Map(),
     openAiApiKey,
     turnDetection,
@@ -517,9 +537,13 @@ function createSegmentState({
     coachTerminal: false,
     uiiReconcileEnabled,
     uiiReconcileIntervalMs,
+    uiiAdoptEnabled,
     nextUiiReconcileAt: 0,
     uiiDriftCandidate: null,
     uiiDriftConfirmCount: 0,
+    coachEnrichAttempts: 0,
+    nextCoachEnrichAt: 0,
+    coachEnriching: false,
     realtimeStt: null,
     realtimeSttStarting: false,
     realtimeSttStartPromise: null,
@@ -532,9 +556,15 @@ function createSegmentState({
     ),
     pendingRealtimePayloads: [],
     pendingRealtimePayloadBytes: 0,
+    pendingRealtimeDroppedChunks: 0,
+    pendingRealtimeDroppedBytes: 0,
+    // 320KB (~40s of PCMU) proved too small when binding was slow: a 5-minute
+    // unbound call silently shed almost all of its audio. 2.56MB rides out a
+    // multi-minute bind/enrich delay; flushed audio is still released to STT
+    // in order once the session starts.
     pendingRealtimePayloadMaxBytes: Math.max(
       8000,
-      Number(process.env.LIVE_COACH_REALTIME_PENDING_BIND_MAX_BYTES || "320000") || 320000,
+      Number(process.env.LIVE_COACH_REALTIME_PENDING_BIND_MAX_BYTES || "2560000") || 2560000,
     ),
     transcribeQueue: Promise.resolve(),
   };
@@ -610,12 +640,38 @@ function queueRealtimePayload(segment, payload) {
   if (!segment || !payload?.length) return;
   segment.pendingRealtimePayloads.push(Buffer.from(payload));
   segment.pendingRealtimePayloadBytes += payload.length;
+  let droppedChunks = 0;
+  let droppedBytes = 0;
   while (
     segment.pendingRealtimePayloadBytes > segment.pendingRealtimePayloadMaxBytes &&
     segment.pendingRealtimePayloads.length
   ) {
     const removed = segment.pendingRealtimePayloads.shift();
     segment.pendingRealtimePayloadBytes -= removed.length;
+    droppedChunks += 1;
+    droppedBytes += removed.length;
+  }
+  if (droppedChunks) {
+    // This used to be a fully silent drop — a stuck bind shed audio with zero
+    // evidence. Keep counters on the segment (surfaced via stream-status) and
+    // log at most every 5s so a sustained overflow is visible without spam.
+    segment.pendingRealtimeDroppedChunks = (segment.pendingRealtimeDroppedChunks || 0) + droppedChunks;
+    segment.pendingRealtimeDroppedBytes = (segment.pendingRealtimeDroppedBytes || 0) + droppedBytes;
+    const now = Date.now();
+    if (!segment.nextPendingDropLogAt || now >= segment.nextPendingDropLogAt) {
+      segment.nextPendingDropLogAt = now + 5000;
+      writeJsonLine(segment.eventLog, {
+        type: "stt.realtime.pending_drop",
+        at: new Date().toISOString(),
+        streamId: segment.streamId,
+        segmentId: segment.segmentId,
+        droppedChunks: segment.pendingRealtimeDroppedChunks,
+        droppedBytes: segment.pendingRealtimeDroppedBytes,
+        pendingBytes: segment.pendingRealtimePayloadBytes,
+        maxBytes: segment.pendingRealtimePayloadMaxBytes,
+        coachSessionStarted: Boolean(segment.coachSessionStarted),
+      });
+    }
   }
 }
 
@@ -654,8 +710,17 @@ function liveCoachKilledVia() {
 }
 function isLiveCoachKilled() { return liveCoachKilledVia() !== null; }
 
+// Prospect always transcribes; agent transcribes only when the agent channel is
+// enabled (LIVE_COACH_AGENT_STT_ENABLED) — context-only, cheap model, no coach
+// session of its own.
+function realtimeSttRoleEnabled(segment) {
+  if (!segment) return false;
+  if (segment.role === "prospect") return true;
+  return segment.role === "agent" && Boolean(segment.agentSttEnabled);
+}
+
 function scheduleRealtimeSttStart(segment, reason = "media") {
-  if (!segment || segment.role !== "prospect" || segment.sttProvider !== "openai-realtime") return null;
+  if (!segment || !realtimeSttRoleEnabled(segment) || segment.sttProvider !== "openai-realtime") return null;
   if (isLiveCoachKilled()) {
     if (!segment._coachKilledLogged) {
       segment._coachKilledLogged = true;
@@ -692,12 +757,53 @@ function scheduleRealtimeSttStart(segment, reason = "media") {
 }
 
 async function ensureRealtimeStt(segment, reason = "media") {
-  if (!segment || segment.role !== "prospect" || segment.sttProvider !== "openai-realtime") return null;
+  if (!segment || !realtimeSttRoleEnabled(segment) || segment.sttProvider !== "openai-realtime") return null;
   if (segment.realtimeStt || segment.coachTerminal) return segment.realtimeStt || null;
   if (segment.realtimeSttStarting) return segment.realtimeSttStartPromise || null;
   segment.realtimeSttStarting = true;
   segment.realtimeSttStartAttempts += 1;
   try {
+    if (segment.role === "agent") {
+      // Agent channel: no coach session, no binding, no provisionals. Connects
+      // immediately at first media; finals route into the prospect segment's
+      // session via postAgentCompleted. Semantic VAD so agent sentences arrive
+      // as complete thoughts for the composer's context.
+      segment.realtimeStt = new OpenAiRealtimeSttChannel({
+        segment,
+        apiKey: segment.openAiApiKey,
+        model: segment.sttModel,
+        language: segment.language,
+        turnDetection: "semantic_vad",
+        semanticEagerness: segment.agentSemanticEagerness || "medium",
+        noiseReduction: segment.noiseReduction,
+        provisionalEnabled: false,
+        transcriptionPrompt: segment.sttDomainPrimer || "",
+      });
+      writeJsonLine(segment.eventLog, {
+        type: "stt.realtime.model_select",
+        at: new Date().toISOString(),
+        streamId: segment.streamId,
+        segmentId: segment.segmentId,
+        role: "agent",
+        reason,
+        model: segment.sttModel,
+        turnDetection: "semantic_vad",
+        semanticEagerness: segment.agentSemanticEagerness || "medium",
+        pendingBytes: segment.pendingRealtimePayloadBytes,
+      });
+      segment.realtimeStt.connect().catch((error) => {
+        writeJsonLine(segment.eventLog, {
+          type: "stt.realtime.connect_error",
+          at: new Date().toISOString(),
+          streamId: segment.streamId,
+          segmentId: segment.segmentId,
+          model: segment.sttModel,
+          error: error.message,
+        });
+      });
+      flushPendingRealtimePayloads(segment, reason);
+      return segment.realtimeStt;
+    }
     const bound = await ensureCoachSession(segment, { forceBind: true });
     if (!segment.coachSessionStarted || !segment.coachSessionId) return null;
     const selected = selectRealtimeSttModel(segment, bound);
@@ -711,6 +817,7 @@ async function ensureRealtimeStt(segment, reason = "media") {
       semanticEagerness: segment.semanticEagerness,
       noiseReduction: segment.noiseReduction,
       provisionalEnabled: segment.realtimeProvisionalEnabled,
+      transcriptionPrompt: segment.sttDomainPrimer || "",
     });
     writeJsonLine(segment.eventLog, {
       type: "stt.realtime.model_select",
@@ -748,10 +855,103 @@ function isRealtimeItemCompleted(segment, itemId) {
   return Boolean(itemId && segment?.realtimeStt?.completedItemIds?.has?.(itemId));
 }
 
+// Late enrichment: a session started unbound (fallback /grpc/start) keeps
+// transcribing and coaching, but its metadata is thin (no case/queue/contact).
+// Retry bind/latest in the background at a slow cadence, passing OUR sessionId
+// so ai-bus enriches the existing session in place (ensureSession merges
+// metadata) instead of spawning a second session. Never tears anything down,
+// never retires other sessions, and gives up after ~5 minutes.
+const COACH_ENRICH_INTERVAL_MS = 10_000;
+const COACH_ENRICH_MAX_ATTEMPTS = 30;
+
+function scheduleCoachBindingEnrichment(segment) {
+  if (!segment || segment.role !== "prospect") return;
+  if (!segment.coachSessionStarted || segment.coachBinding || segment.coachTerminal) return;
+  if ((segment.coachEnrichAttempts || 0) >= COACH_ENRICH_MAX_ATTEMPTS) return;
+  const identity = segment.dialogIdentity || {};
+  // Agent identity is required: it keeps the mongo bridge's requireCurrentForAgent
+  // protection active so we can never enrich from another agent's (or a stale)
+  // call event matched on phone alone.
+  if (!identity.agentExtensionId && !identity.agentEmail) return;
+  const now = Date.now();
+  if (segment.coachEnriching || now < (segment.nextCoachEnrichAt || 0)) return;
+  segment.coachEnriching = true;
+  segment.coachEnrichAttempts = (segment.coachEnrichAttempts || 0) + 1;
+  segment.nextCoachEnrichAt = now + COACH_ENRICH_INTERVAL_MS;
+  enrichCoachBinding(segment)
+    .catch((error) => {
+      writeJsonLine(segment.eventLog, {
+        type: "coach.session.enrich_error",
+        at: new Date().toISOString(),
+        streamId: segment.streamId,
+        segmentId: segment.segmentId,
+        coachSessionId: segment.coachSessionId,
+        attempt: segment.coachEnrichAttempts,
+        error: error.message,
+      });
+    })
+    .finally(() => {
+      segment.coachEnriching = false;
+    });
+}
+
+async function enrichCoachBinding(segment) {
+  const identity = segment.dialogIdentity || {};
+  const bindCallSessionId = identity.callSessionId && !isWorkflowStreamSessionId(identity.callSessionId)
+    ? identity.callSessionId
+    : "";
+  const bound = await postJson(`${segment.aiBusUrl}/api/ai/live-coach/grpc/mongo/bind/latest`, compactObject({
+    sessionId: segment.coachSessionId,
+    retireReplaced: false,
+    phone: segment.contactPhone,
+    uii: identity.uii,
+    callSessionId: bindCallSessionId,
+    queueItemId: identity.queueItemId,
+    agentExtensionId: identity.agentExtensionId,
+    agentEmail: identity.agentEmail,
+    caseId: identity.caseId,
+    source: "grpc-live-bridge-enrich",
+    streamId: segment.streamId,
+  }), 8000);
+  if (!bound?.session?.id || !bound?.binding?.active) return null;
+  if (bound.session.id !== segment.coachSessionId) {
+    // ai-bus honored a different session id; keep coaching where we already are
+    // and just record the divergence — switching sessions mid-call is worse
+    // than thin metadata.
+    writeJsonLine(segment.eventLog, {
+      type: "coach.session.enrich_session_mismatch",
+      at: new Date().toISOString(),
+      streamId: segment.streamId,
+      segmentId: segment.segmentId,
+      coachSessionId: segment.coachSessionId,
+      boundSessionId: bound.session.id,
+    });
+    return null;
+  }
+  segment.coachBinding = bound.binding || null;
+  segment.coachSessionMetadata = bound.session.metadata || segment.coachSessionMetadata;
+  writeJsonLine(segment.eventLog, {
+    type: "coach.session.enriched",
+    at: new Date().toISOString(),
+    streamId: segment.streamId,
+    segmentId: segment.segmentId,
+    coachSessionId: segment.coachSessionId,
+    attempt: segment.coachEnrichAttempts,
+    bindingStatus: bound.status || null,
+    bindingReason: bound.binding?.reason || null,
+    uii: bound.session.metadata?.uii || "",
+    caseId: bound.session.metadata?.caseId || "",
+    queueItemId: bound.session.metadata?.queueItemId || "",
+  });
+  return bound;
+}
+
 async function ensureCoachSession(segment, options = {}) {
   if (segment.role !== "prospect") return null;
   if (isLiveCoachKilled()) return null; // kill switch: never start a coach session / LLM call
   if (segment.coachSessionStarted) {
+    // Unbound sessions keep trying to pick up CX metadata in the background.
+    scheduleCoachBindingEnrichment(segment);
     return {
       status: "existing",
       binding: segment.coachBinding,
@@ -843,18 +1043,35 @@ async function ensureCoachSession(segment, options = {}) {
         });
         return bound;
       }
-      // STREAM 4 self-healing MISS->ADOPT: the bridge requested a uii that the
-      // mongo bridge says is stale ('not_current'), but the response carries the
-      // agent's actual current call. Adopt that current identity and let the next
-      // attempt bind to the right call instead of getting stuck on a dead uii.
+      // STREAM 4 self-healing MISS->ADOPT (opt-in via LIVE_COACH_UII_ADOPT_ENABLED):
+      // the bridge requested a uii that the mongo bridge says is stale
+      // ('not_current'), and the response carries the agent's latest event uii.
+      // Adoption overwrites the stream's identity with the event's — which is
+      // backwards when the EVENT table is the stale side (missed workspace hook,
+      // inbound call): it rebinds the live stream to a dead/closed call and locks
+      // binding out for the whole call. Default OFF: log the drift instead and
+      // fall through to bind_miss -> unbound fallback so coaching continues under
+      // the stream's own (RingCX ground-truth) identity.
       const currentEvent = bound?.binding?.event || null;
       const adoptUii = cleanText(currentEvent?.uii || "", 160);
       const requestedUii = cleanText(segment.dialogIdentity?.uii || "", 160);
-      if (
+      const uiiDrifted =
         String(bound?.status || "") === "not_current" &&
         adoptUii &&
-        adoptUii !== requestedUii
-      ) {
+        adoptUii !== requestedUii;
+      if (uiiDrifted && !segment.uiiAdoptEnabled) {
+        writeJsonLine(segment.eventLog, {
+          type: "coach.session.uii_drift",
+          at: new Date().toISOString(),
+          streamId: segment.streamId,
+          segmentId: segment.segmentId,
+          streamUii: requestedUii || null,
+          latestEventUii: adoptUii,
+          queueItemId: cleanText(currentEvent?.queueItemId || "", 160) || null,
+          adoption: "disabled",
+        });
+      }
+      if (uiiDrifted && segment.uiiAdoptEnabled) {
         segment.dialogIdentity = {
           ...(segment.dialogIdentity || {}),
           uii: adoptUii,
@@ -1026,8 +1243,39 @@ async function postStreamStatus(segment, input = {}) {
     rms: input.rms || 0,
     maxAbs: input.maxAbs || 0,
     state: input.state || "audio-receiving",
+    // Binding visibility: "bound" (CX event matched), "unbound" (coaching on
+    // stream identity only, enrichment retrying), or "binding" (not started).
+    bindState: segment.coachBinding ? "bound" : segment.coachSessionStarted ? "unbound" : "binding",
+    bindReason: segment.coachBinding?.reason || "",
+    pendingDroppedBytes: segment.pendingRealtimeDroppedBytes || 0,
     ...coachPostIdentity(segment),
   }), 5000, { forceBind: input.forceBind === true });
+}
+
+// Domain primer for the realtime transcription prompt. A previous primer was
+// disabled because Whisper-family models echoed it over silence/noise; that
+// echo vector is now blocked upstream by the energy gate (MIN_STT_ACTIVE_PCT)
+// and the low-signal filters, so the primer is back on by default for tax-term
+// accuracy (CP504 vs "CP five oh four" at the source instead of regex repair).
+// Keep it SHORT (vocabulary list, not instructions). Disable with
+// LIVE_COACH_STT_DOMAIN_PRIMER_ENABLED=false or override via LIVE_COACH_STT_PROMPT.
+const DEFAULT_STT_DOMAIN_PRIMER = [
+  "CP504", "CP503", "CP501", "LT11", "Letter 1058",
+  "levy", "lien", "wage garnishment", "offer in compromise",
+  "installment agreement", "currently not collectible", "penalty abatement",
+  "unfiled returns", "941", "1099", "W-2", "revenue officer",
+  "Wynn Tax Solutions",
+].join(", ");
+
+// Average token logprob -> a 0..1 confidence. null when logprobs are absent.
+function realtimeTranscriptConfidence(event) {
+  const rows = Array.isArray(event?.logprobs) ? event.logprobs : [];
+  const values = rows
+    .map((row) => Number(row?.logprob))
+    .filter((value) => Number.isFinite(value));
+  if (!values.length) return null;
+  const avg = values.reduce((sum, value) => sum + value, 0) / values.length;
+  return Number(Math.min(1, Math.max(0, Math.exp(avg))).toFixed(4));
 }
 
 class OpenAiRealtimeSttChannel {
@@ -1041,16 +1289,28 @@ class OpenAiRealtimeSttChannel {
     noiseReduction,
     provisionalEnabled = true,
     maxBufferedBytes = 240_000,
+    transcriptionPrompt = "",
+    includeLogprobs = true,
   } = {}) {
     if (!apiKey) throw new Error("OPENAI_API_KEY is missing for realtime transcription");
     this.segment = segment;
     this.apiKey = apiKey;
+    this.role = segment?.role || "prospect";
     this.model = model || "gpt-4o-transcribe";
     this.language = language || "en";
     this.turnDetection = turnDetection || "semantic_vad";
     this.turnDetectionSupported = openAiRealtimeTranscriptionSupportsTurnDetection(this.model);
     this.semanticEagerness = semanticEagerness || "high";
     this.noiseReduction = noiseReduction || "near_field";
+    this.transcriptionPrompt = cleanText(transcriptionPrompt || "", 800);
+    this.includeLogprobs = includeLogprobs !== false;
+    // Finals whose average token confidence falls below this are dropped (with a
+    // log). exp(avg logprob) ~= 0.25 corresponds to clearly degraded audio; real
+    // telephone speech sits well above it. 0 disables the gate.
+    this.minConfidence = Math.min(
+      0.95,
+      Math.max(0, Number(process.env.LIVE_COACH_STT_MIN_CONFIDENCE ?? "0.25") || 0),
+    );
     this.serverVadSilenceMs = Math.max(
       200,
       Math.min(3000, Number(process.env.LIVE_COACH_OPENAI_SERVER_VAD_SILENCE_MS || "1000") || 1000),
@@ -1102,6 +1362,9 @@ class OpenAiRealtimeSttChannel {
           type: "session.update",
           session: {
             type: "transcription",
+            // Per-token logprobs ride along on completed transcripts so finals
+            // can be confidence-gated instead of word-blacklisted.
+            ...(this.includeLogprobs ? { include: ["item.input_audio_transcription.logprobs"] } : {}),
             audio: {
               input: {
                 format: { type: "audio/pcmu" },
@@ -1111,6 +1374,8 @@ class OpenAiRealtimeSttChannel {
                 transcription: {
                   model: this.model,
                   language: this.language,
+                  // Short domain vocabulary primer (see DEFAULT_STT_DOMAIN_PRIMER).
+                  ...(this.transcriptionPrompt ? { prompt: this.transcriptionPrompt } : {}),
                 },
                 turn_detection: this.buildTurnDetection(),
               },
@@ -1462,6 +1727,9 @@ class OpenAiRealtimeSttChannel {
     if (this.completedItemIds.has(itemId)) return;
     const text = cleanText(appendRealtimeTranscriptDelta(this.itemTextById.get(itemId) || "", delta), 4000);
     this.itemTextById.set(itemId, text);
+    // Agent channel is context-only: accumulate silently (finals are what feed
+    // the composer); no provisional machinery, no per-delta log spam.
+    if (this.role === "agent") return;
     if (!this.provisionalEnabled) {
       writeJsonLine(this.segment.eventLog, {
         type: "stt.realtime.delta_buffered",
@@ -1498,7 +1766,7 @@ class OpenAiRealtimeSttChannel {
     this.queueProvisionalPost(event, itemId, text);
   }
 
-  async postCompletedWithBindRetry(event, itemId, text) {
+  async postCompletedWithBindRetry(event, itemId, text, confidence = null) {
     const maxWaitMs = Math.max(
       0,
       Math.min(5000, Number(process.env.LIVE_COACH_REALTIME_FINAL_BIND_WAIT_MS || "2500") || 2500),
@@ -1512,6 +1780,7 @@ class OpenAiRealtimeSttChannel {
         provider: "openai-realtime",
         model: this.model,
         itemId,
+        confidence,
       }, {
         source: "grpc-openai-realtime-semantic-vad",
         itemId,
@@ -1570,9 +1839,31 @@ class OpenAiRealtimeSttChannel {
       });
       return;
     }
+    // Confidence gate: drop finals whose average token logprob marks them as
+    // probable hallucination/garble. Principled replacement for word blacklists
+    // (which still run above as a second layer for known ghosts).
+    const confidence = realtimeTranscriptConfidence(event);
+    if (confidence !== null && this.minConfidence > 0 && confidence < this.minConfidence) {
+      writeJsonLine(this.segment.eventLog, {
+        type: "stt.realtime.low_confidence_skip",
+        at: new Date().toISOString(),
+        streamId: this.segment.streamId,
+        segmentId: this.segment.segmentId,
+        itemId,
+        text,
+        confidence,
+        minConfidence: this.minConfidence,
+        role: this.role,
+      });
+      return;
+    }
+    if (this.role === "agent") {
+      await this.postAgentCompleted(event, itemId, text, confidence);
+      return;
+    }
     let posted = null;
     try {
-      posted = await this.postCompletedWithBindRetry(event, itemId, text);
+      posted = await this.postCompletedWithBindRetry(event, itemId, text, confidence);
     } catch (error) {
       if (this.handleTerminalPostError(error)) return;
       throw error;
@@ -1593,6 +1884,61 @@ class OpenAiRealtimeSttChannel {
       usage: event.usage || null,
     });
     if (this.disabled) this.close();
+  }
+
+  // Agent-channel finals route into the PROSPECT segment's coach session as
+  // role:"agent" rows — context for the Claude composer only (the pipeline
+  // stores agent rows without triggering compose; the mini never sees them).
+  async postAgentCompleted(event, itemId, text, confidence = null) {
+    const coachSegment = this.segment.getCoachSegment?.();
+    if (!coachSegment || !coachSegment.coachSessionStarted || !coachSegment.coachSessionId) {
+      writeJsonLine(this.segment.eventLog, {
+        type: "stt.realtime.agent_skip",
+        at: new Date().toISOString(),
+        streamId: this.segment.streamId,
+        segmentId: this.segment.segmentId,
+        itemId,
+        textLength: text.length,
+        reason: coachSegment ? "prospect-session-not-started" : "no-prospect-segment",
+      });
+      return null;
+    }
+    let posted = null;
+    try {
+      posted = await postCoachInput(coachSegment, () => ({
+        text,
+        role: "agent",
+        source: "grpc-agent-stt",
+        provider: "openai-realtime",
+        model: this.model,
+        itemId: `agent-${itemId}`,
+        final: true,
+        confidence,
+        ...coachPostIdentity(coachSegment),
+      }), 8000);
+    } catch (error) {
+      writeJsonLine(this.segment.eventLog, {
+        type: "stt.realtime.agent_post_error",
+        at: new Date().toISOString(),
+        streamId: this.segment.streamId,
+        segmentId: this.segment.segmentId,
+        itemId,
+        error: error.message,
+      });
+      return null;
+    }
+    writeJsonLine(this.segment.eventLog, {
+      type: "stt.realtime.agent_completed",
+      at: new Date().toISOString(),
+      streamId: this.segment.streamId,
+      segmentId: this.segment.segmentId,
+      itemId,
+      text,
+      confidence,
+      coachSessionId: coachSegment.coachSessionId,
+      coachStatus: posted?.session?.status || null,
+    });
+    return posted;
   }
 
   commitInputBuffer(reason = "segment-ended") {
@@ -1953,6 +2299,10 @@ function createLiveCoachStreamingService({
   realtimeProvisionalEnabled,
   allowUnboundCoachSessions,
   language,
+  agentSttEnabled = false,
+  agentSttModel = "",
+  agentSemanticEagerness = "medium",
+  sttDomainPrimer = "",
 }) {
   return {
     Stream(call, callback) {
@@ -2088,6 +2438,14 @@ function createLiveCoachStreamingService({
             language,
             eventLog,
             dialogIdentity,
+            agentSttEnabled,
+            agentSttModel,
+            agentSemanticEagerness,
+            sttDomainPrimer,
+            // Agent-channel finals route into this stream's prospect session.
+            getCoachSegment: () => [...segments.values()].find(
+              (candidate) => candidate.role === "prospect" && !candidate.coachTerminal,
+            ) || null,
           });
           segments.set(decoded.segmentId, segment);
           writeJsonLine(segment.jsonPath, base);
@@ -2247,8 +2605,29 @@ async function main() {
   const allowUnboundCoachSessions = readBoolFlag(
     argv,
     "--allow-unbound-coach-session",
-    ["1", "true", "yes", "on", "enabled"].includes(String(process.env.LIVE_COACH_ALLOW_UNBOUND_SESSIONS || "").trim().toLowerCase()),
+    // Default ON: a binding miss (no/stale cx.call.placed event, inbound call,
+    // manual dial) must degrade to a thin-metadata session that still
+    // transcribes and coaches — never to five minutes of silence. Set
+    // LIVE_COACH_ALLOW_UNBOUND_SESSIONS=false to restore the strict gate.
+    readEnvBool(process.env.LIVE_COACH_ALLOW_UNBOUND_SESSIONS, true),
   );
+  // Agent channel: context-only transcription (cheap model, semantic VAD) whose
+  // finals land in the prospect session as role:"agent" for the Claude composer.
+  const agentSttEnabled = readBoolFlag(
+    argv,
+    "--agent-stt",
+    readEnvBool(process.env.LIVE_COACH_AGENT_STT_ENABLED, true),
+  );
+  const agentSttModel = resolveSttModelAlias(
+    readFlag(argv, "--agent-stt-model", process.env.LIVE_COACH_AGENT_STT_MODEL || "gpt-4o-mini-transcribe"),
+    "gpt-4o-mini-transcribe",
+  );
+  const agentSemanticEagerness = String(
+    readFlag(argv, "--agent-semantic-vad-eagerness", process.env.LIVE_COACH_AGENT_SEMANTIC_EAGERNESS || "medium"),
+  ).trim().toLowerCase();
+  const sttDomainPrimer = readEnvBool(process.env.LIVE_COACH_STT_DOMAIN_PRIMER_ENABLED, true)
+    ? cleanText(process.env.LIVE_COACH_STT_PROMPT || DEFAULT_STT_DOMAIN_PRIMER, 800)
+    : "";
   const language = readFlag(argv, "--language", process.env.LIVE_COACH_STT_LANGUAGE || process.env.SALES_TRAINER_STT_LANGUAGE || "en");
   MIN_STT_ACTIVE_PCT = Number(readFlag(argv, "--min-stt-active-pct", process.env.LIVE_COACH_MIN_STT_ACTIVE_PCT || "1")) || 0;
   const outDir = path.resolve(readFlag(argv, "--out-dir", path.join("runtime", "live-coach-grpc-bridge")));
@@ -2276,6 +2655,10 @@ async function main() {
     realtimeProvisionalEnabled,
     allowUnboundCoachSessions,
     language,
+    agentSttEnabled,
+    agentSttModel,
+    agentSemanticEagerness,
+    sttDomainPrimer,
   }));
   const bindAddress = `0.0.0.0:${port}`;
   server.bindAsync(bindAddress, grpc.ServerCredentials.createInsecure(), (error, boundPort) => {
@@ -2291,6 +2674,8 @@ async function main() {
     console.log(`  chunk:      ${sttProvider === "openai-realtime" ? "semantic_vad realtime" : `${chunkSec}s`}`);
     console.log(`  preview:    ${sttProvider === "openai-realtime" ? (realtimeProvisionalEnabled ? "realtime deltas" : "semantic vad finals only") : provisionalPreviewMs ? `${provisionalPreviewChunks} chunks / ${provisionalPreviewMs}ms` : "off"}`);
     console.log(`  stt:        ${sttProvider}:${sttModel}`);
+    console.log(`  agent stt:  ${agentSttEnabled ? `${agentSttModel} (semantic_vad ${agentSemanticEagerness}, context-only)` : "off"}`);
+    console.log(`  stt primer: ${sttDomainPrimer ? `${sttDomainPrimer.split(",").length} terms` : "off"}`);
     if (sttModelMap.size) {
       console.log(`  stt map:    ${[...sttModelMap.entries()].map(([key, model]) => `${key}=${model}`).join(",")}`);
     }

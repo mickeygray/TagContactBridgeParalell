@@ -1455,6 +1455,7 @@ const FIXED_PROSPECT_COMPOSER_INSTRUCTIONS = Object.freeze([
   "Humor: light, dry, self-aware, and rare - only to disarm tension, never sarcasm, never at the prospect's expense or about their debt/fear. Drop it entirely if they're distressed or angry.",
   "Apply the conversation-tactic guidance below for the specific psychology, warmth, and humor boundary that fits this exact moment.",
   "If recent call memory is supplied, use it only for continuity, avoiding repeated questions, and knowing what has already been covered. The current prospect text always outranks memory.",
+  "Agent-side VAD, when present in recent memory, is optional context only. Never wait for an agent final to decide whether to coach; the current prospect text can release a line by itself.",
   "Use transcript snippets attached to selected context. Do not write from key labels alone, and do not invent facts that are not in the current text or memory snippets.",
   "No DIY tax advice, no program promises before qualification (OIC/CNC/IA/abatement), no guarantees, no savings claims, no timelines, no holds, no legal conclusions.",
   "Default tax-ish issues to IRS unless a clear state agency is named; if state appears, also screen for an IRS/federal issue.",
@@ -1692,6 +1693,21 @@ function createSanitizedLiveCoachPipeline({ metadata = {} } = {}) {
     }
 
     state.transcriptCount += 1;
+    // Agent-channel rows are the agent's own mic: never run them through the
+    // voicemail/screener/system gates (an agent saying "just leave me a message
+    // if we get cut off" must not voicemail-reject the session). Store as
+    // composer context and exit before any gate.
+    if (transcript.role === "agent") {
+      state.sentenceBankByRole.agent = state.sentenceBankByRole.agent || [];
+      state.sentenceBankByRole.agent.push(transcript.text);
+      return {
+        action: "store_non_prospect",
+        transcript,
+        context: null,
+        dialog: null,
+        state: snapshot(),
+      };
+    }
     const contextClear = analyzeSystemContextClear(transcript.text);
     const screener = analyzeCallScreener(transcript.text);
     const voicemail = analyzeVoicemail(transcript.text);

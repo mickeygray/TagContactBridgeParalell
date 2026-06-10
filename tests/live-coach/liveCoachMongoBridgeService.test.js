@@ -42,6 +42,9 @@ function matchesQuery(row, query) {
     if (expected && typeof expected === "object" && Array.isArray(expected.$in)) {
       return expected.$in.includes(actual);
     }
+    if (expected && typeof expected === "object" && expected.$lt !== undefined) {
+      return String(actual ?? "") < String(expected.$lt);
+    }
     return String(actual ?? "") === String(expected ?? "");
   });
 }
@@ -109,6 +112,40 @@ test("matches events by exact UII and agent identity", () => {
   assert.equal(eventMatchesFilters(event, { callSessionId: "session-2" }), false);
   assert.equal(eventMatchesFilters(event, { agentExtensionId: "3344" }), false);
   assert.equal(eventMatchesFilters(event, { agentEmail: "bhansen@taxadvocategroup.com" }), false);
+});
+
+test("agent event beyond the first raw scan page is still found (limit caps matches, not the scan)", async () => {
+  // Regression: the old shape applied `limit` to the raw scan BEFORE the agent
+  // filter, so a busy floor pushed an agent's event past the global limit and
+  // binding reported not_found even though the event existed.
+  const nowMs = Date.parse("2026-06-10T17:00:00.000Z");
+  const rows = [];
+  for (let i = 0; i < 240; i += 1) {
+    rows.push({
+      _id: `evt-${String(9999 - i).padStart(4, "0")}`,
+      eventType: "cx.call.placed",
+      sourceService: "ringcentral-cx",
+      createdAt: new Date(nowMs - i * 1000).toISOString(),
+      payload: {
+        extensionId: i === 230 ? "63914586004" : "1111",
+        uii: `uii-${i}`,
+        phone: "3105551000",
+      },
+    });
+  }
+  const bridge = createLiveCoachMongoBridge({
+    EventRecord: makeModel(rows),
+    CallSession: makeModel([]),
+    WorkflowRecord: makeModel([]),
+    now: () => nowMs,
+  });
+  const result = await bridge.listRecentCoachCallEvents({
+    agentExtensionId: "63914586004",
+    limit: 10,
+  });
+  assert.equal(result.events.length, 1);
+  assert.equal(result.events[0].extensionId, "63914586004");
+  assert.equal(result.events[0].uii, "uii-230");
 });
 
 test("resolves active binding and enriches from CallSession", async () => {
