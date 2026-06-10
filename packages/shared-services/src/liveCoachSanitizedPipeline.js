@@ -1274,16 +1274,17 @@ function shouldComposeFromContext({ text, contextMatches, completeness }) {
   if (!clean || isFiller(clean)) {
     return { shouldCompose: false, reason: "filler_or_empty" };
   }
-  if (completeness?.reason === "trailing_fragment") {
-    return { shouldCompose: false, reason: completeness.reason };
-  }
+  // Completeness is no longer a local/mini gate. server_vad cuts on ~1s of silence, so a
+  // released segment can be mid-thought. Forward any real (non-filler) prospect utterance
+  // and let the coach (Claude) decide thought-completeness and whether to speak or WAIT.
+  // completeness stays on the frame as a non-binding hint only.
   if (contextMatches.length) {
     return { shouldCompose: true, reason: "matched_context" };
   }
   if (hasQuestionShape(text) && wordCount >= 3) {
     return { shouldCompose: true, reason: "question_without_keyword_match" };
   }
-  return { shouldCompose: true, reason: "vad_release_default_compose" };
+  return { shouldCompose: true, reason: "vad_release_forward_to_coach" };
 }
 
 function buildMiniContextFrame({ phraseText, transcript, metadata = {}, pendingCount = 0, candidateMatches = [] }) {
@@ -1435,7 +1436,60 @@ function deriveConversationTactics({ phraseText = "", matches = [], jurisdiction
   }];
 }
 
+const FIXED_AGENT_COMPOSER_INSTRUCTIONS = Object.freeze([
+  "This is agent-side feedback. Do not write a prospect-facing answer unless the agent has asked for wording.",
+  "Give one concise adjustment that keeps the agent human, calm, and moving toward the next phase.",
+]);
+
+const FIXED_PROSPECT_COMPOSER_INSTRUCTIONS = Object.freeze([
+  "FIRST, judge turn-completeness. Read the prospect's CURRENT text together with the recent call memory below. If the prospect is still mid-thought, trailing off mid-sentence, or this is a fragment, backchannel ('uh huh', 'okay', 'right'), or filler, reply with EXACTLY: WAIT - one word, nothing else.",
+  "Only when the prospect has finished a thought worth answering do you compose a line. When you do:",
+  "Output only the exact words the agent should say next - spoken, not written; no labels or meta.",
+  "One or two short sentences, usually under 35 words. Anchor on what the prospect just said, then do ONE thing: ask a concrete discovery question, or move toward fact review / representation.",
+  "You are an expert tax-resolution consultant meeting the prospect at their level. Carry quiet authority because they reached out without knowing the way out and you do.",
+  "No sycophancy or flattery ('great question', 'you're so right'). No asking permission to help ('would it be okay if'). You're already engaged because they submitted the inquiry; proceed with calm assumption.",
+  "Do not apologize for calling and do not flinch at a hostile tone; a sharp tone is usually fear or embarrassment, not a verdict. Make one clear attempt to deliver value, then honor a genuine opt-out.",
+  "Diagnose before prescribing: never name a program before you know notice type, year, balance, income type, and ability to pay. One question at a time.",
+  "Reflect their situation back precisely (not parroting) so they feel understood, then advance. Let real stakes (levy, lien, penalties) speak without manufacturing fear or pressure.",
+  "Sound human before salesy whenever there's stress, money, family pressure, shame, fear, or confusion. Use tax comprehension to sound credible, then translate the term into plain consequence.",
+  "Humor: light, dry, self-aware, and rare - only to disarm tension, never sarcasm, never at the prospect's expense or about their debt/fear. Drop it entirely if they're distressed or angry.",
+  "Apply the conversation-tactic guidance below for the specific psychology, warmth, and humor boundary that fits this exact moment.",
+  "If recent call memory is supplied, use it only for continuity, avoiding repeated questions, and knowing what has already been covered. The current prospect text always outranks memory.",
+  "Use transcript snippets attached to selected context. Do not write from key labels alone, and do not invent facts that are not in the current text or memory snippets.",
+  "No DIY tax advice, no program promises before qualification (OIC/CNC/IA/abatement), no guarantees, no savings claims, no timelines, no holds, no legal conclusions.",
+  "Default tax-ish issues to IRS unless a clear state agency is named; if state appears, also screen for an IRS/federal issue.",
+  "Use only the supplied firm and agent names. Do not invent people, firms, facts, balances, or deadlines - when unsure, ask.",
+]);
+
+const SONNET_PROSPECT_SYSTEM_PROMPT = [
+  "You are a live tax-resolution sales dialog composer for phone calls.",
+  "You receive normalized prospect text plus the tax/sales context and conversation tactics selected for THIS moment.",
+  "Your job is not transcription and not legal advice - first decide whether the prospect completed a coachable thought (reply WAIT if not), otherwise produce one line the agent can say right now.",
+  "Ground every line in the RAW prospect text in the user message. Apply only the tactics listed for this turn; ignore any standing directive that doesn't fit what was actually said. Never restate instructions back.",
+  "",
+  "Standing directives:",
+  ...FIXED_PROSPECT_COMPOSER_INSTRUCTIONS.map((line) => `- ${line}`),
+].join("\n");
+
+const SONNET_AGENT_SYSTEM_PROMPT = [
+  "You are a live tax-resolution sales dialog composer for phone calls.",
+  "This turn is agent-side feedback, not a prospect response.",
+  "",
+  "Standing directives:",
+  ...FIXED_AGENT_COMPOSER_INSTRUCTIONS.map((line) => `- ${line}`),
+].join("\n");
+
 function buildFixedComposerInstructions({ role = "prospect" } = {}) {
+  return role === "prospect"
+    ? [...FIXED_PROSPECT_COMPOSER_INSTRUCTIONS]
+    : [...FIXED_AGENT_COMPOSER_INSTRUCTIONS];
+}
+
+function buildCacheableComposerSystem({ role = "prospect" } = {}) {
+  return role === "prospect" ? SONNET_PROSPECT_SYSTEM_PROMPT : SONNET_AGENT_SYSTEM_PROMPT;
+}
+
+function buildLegacyFixedComposerInstructions({ role = "prospect" } = {}) {
   if (role !== "prospect") {
     return [
       "This is agent-side feedback. Do not write a prospect-facing answer unless the agent has asked for wording.",
@@ -1443,8 +1497,12 @@ function buildFixedComposerInstructions({ role = "prospect" } = {}) {
     ];
   }
   return [
+    // Completeness gate: the coach is now the turn decider. VAD only cuts on silence, so
+    // the prospect text may be a partial thought.
+    "FIRST, judge turn-completeness. Read the prospect's CURRENT text together with the recent call memory below. If the prospect is still mid-thought, trailing off mid-sentence, or this is a fragment, backchannel ('uh huh', 'okay', 'right'), or filler, reply with EXACTLY: WAIT — one word, nothing else.",
+    "Only when the prospect has finished a thought worth answering do you compose a line. When you do:",
     // Output shape
-    "Output only the exact words the agent should say next — spoken, not written; no labels or meta. Or WAIT if told not to compose.",
+    "Output only the exact words the agent should say next — spoken, not written; no labels or meta.",
     "One or two short sentences, usually under 35 words. Anchor on what the prospect just said, then do ONE thing: ask a concrete discovery question, or move toward fact review / representation.",
     // Persona & status
     "You are an expert tax-resolution consultant meeting the prospect at their level. Carry quiet authority — they reached out because they don't know the way out and you do.",
@@ -1477,10 +1535,10 @@ function buildSonnetPromptPayload({ contextFrame, metadata = {} }) {
   // so the composer marks it cache_control:ephemeral (Anthropic prompt caching). The
   // big instruction block lives here ONCE instead of bleeding through every user turn.
   // Keep zero per-call data in here or the cache prefix won't match.
-  const system = [
+  let system = [
     "You are a live tax-resolution sales dialog composer for phone calls.",
     "You receive normalized prospect text plus the tax/sales context and conversation tactics selected for THIS moment.",
-    "Your job is not transcription and not legal advice — produce one line the agent can say right now, or WAIT if told not to compose.",
+    "Your job is not transcription and not legal advice — first decide whether the prospect completed a coachable thought (reply WAIT if not), otherwise produce one line the agent can say right now.",
     "Ground every line in the RAW prospect text in the user message. Apply only the tactics listed for this turn; ignore any standing directive that doesn't fit what was actually said. Never restate instructions back.",
     "",
     "Standing directives:",
@@ -1490,6 +1548,7 @@ function buildSonnetPromptPayload({ contextFrame, metadata = {} }) {
       ? contextFrame.instructionsForPrompt
       : buildFixedComposerInstructions()).map((line) => `- ${line}`)),
   ].join("\n");
+  system = buildCacheableComposerSystem({ role: contextFrame?.role || "prospect" });
 
   // USER = the DYNAMIC per-turn delta only: names, jurisdiction, raw transcript, the
   // context + tactics chosen for this moment. No standing instructions here.

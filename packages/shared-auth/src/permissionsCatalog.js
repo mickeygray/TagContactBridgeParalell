@@ -116,6 +116,7 @@ const ROLE_DEFAULT_PERMISSIONS = Object.freeze({
     "agents.read-self",
     "agents.toggle-availability",
     "calls.read-self",
+    "calls.recordings",
     "cases.read",
     "cases.write",
     "coach.view",

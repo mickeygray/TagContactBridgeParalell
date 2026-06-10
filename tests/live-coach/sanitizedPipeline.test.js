@@ -80,21 +80,22 @@ test("call screeners are held and never sent to the mini context or Sonnet dialo
   assert.match(result.transcript.nonProspectReason, /call_screener/);
 });
 
-test("mini router holds fragments until the phrase has enough semantic context", () => {
+test("router forwards fragments and defers thought-completeness to the composer", () => {
   const pipeline = createSanitizedLiveCoachPipeline({
     metadata: { agentName: "Sean", firmName: "Tax Advocate Group", uii: "u3" },
   });
+  // server_vad cuts on ~1s of silence, so a released segment can be mid-thought. The
+  // router no longer holds/aggregates trailing fragments locally: it forwards any
+  // non-filler prospect utterance and the composer (Claude) is the turn decider -- it
+  // replies WAIT on a partial. completeThought is still computed, carried as a
+  // NON-BINDING hint, not a gate.
   const first = pipeline.handleTranscript({
     text: "I got a letter from",
     role: "prospect",
   });
-  assert.equal(first.action, "hold_for_more_context");
-  // The trailing-preposition fragment is still HELD (not coached); the in-progress
-  // frame is now returned for observability, so the gate is shouldCompose=false
-  // rather than a null context.
-  assert.equal(first.context.shouldCompose, false);
-  assert.equal(first.dialog, null);
-  assert.match(first.hold.pendingText, /letter from$/);
+  assert.equal(first.action, "compose_dialog");
+  assert.equal(first.context.shouldCompose, true);
+  assert.equal(first.context.completeThought, false);
 
   const second = pipeline.handleTranscript({
     text: "the IRS and I'm scared they can garnish my paycheck",
@@ -102,8 +103,6 @@ test("mini router holds fragments until the phrase has enough semantic context",
   });
   assert.equal(second.action, "compose_dialog");
   assert.equal(second.context.shouldCompose, true);
-  assert.match(second.context.phraseText, /letter from the IRS/i);
-  assert.ok(second.context.matches.some((match) => match.key === "irs_notice"));
   assert.ok(second.context.matches.some((match) => match.key === "emotional_pressure"));
   assert.ok(second.context.matches.some((match) => match.key === "collection_pressure"));
   assert.equal(second.dialog.status, "ready");
@@ -120,6 +119,12 @@ test("context matcher separates IRS, state, and mixed tax signals", () => {
 
   const mixed = findContextMatches("I owe the IRS and California FTB.");
   assert.equal(classifyJurisdiction("I owe the IRS and California FTB.", mixed), "mixed");
+});
+
+test("context matcher keeps phrase aliases on word boundaries", () => {
+  const matches = findContextMatches("I am being audited and they disallowed my expenses.");
+  assert.ok(matches.some((match) => match.key === "audit_adjustment"));
+  assert.ok(!matches.some((match) => match.key === "spouse_identity"));
 });
 
 test("Sonnet prompt payload uses fixed instructions and does not invent names or firms", () => {
@@ -150,6 +155,15 @@ test("Sonnet prompt payload uses fixed instructions and does not invent names or
   assert.equal(payload.systemCacheable, true);
   assert.match(payload.system, /Use tax comprehension/);
   assert.match(payload.system, /Do not invent people/);
+  const otherPayload = buildSonnetPromptPayload({
+    contextFrame,
+    metadata: {
+      agentName: "Brad",
+      firmName: "Wynn Tax Solutions",
+    },
+  });
+  assert.equal(payload.system, otherPayload.system);
+  assert.doesNotMatch(payload.system, /Anthony|Brad|Tax Advocate Group|Wynn Tax Solutions/);
   assert.match(payload.user, /Agent name: Anthony/);
   assert.match(payload.user, /Firm name: Tax Advocate Group/);
   assert.match(payload.user, /Conversation tactic:/);

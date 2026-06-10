@@ -71,7 +71,8 @@ function httpError(message, status, code, details) {
 
 function pickDropAction(body = {}) {
   const raw = String(body.action || body.mode || "").trim().toLowerCase();
-  if (raw === "arm" || raw === "prearm" || raw === "pre-arm") return "arm";
+  if (raw === "warm" || raw === "prewarm" || raw === "pre-warm" || raw === "prearm" || raw === "pre-arm") return "warm";
+  if (raw === "arm") return "arm";
   if (raw === "release" || raw === "stop" || raw === "cleanup") return "release";
   return "play";
 }
@@ -104,7 +105,7 @@ async function requestCxVoicemailDrop(domain, user, body = {}) {
   }
 
   const action = pickDropAction(body);
-  const endpoint = action === "arm" ? "arm" : action === "release" ? "release" : "play";
+  const endpoint = action === "warm" ? "warm" : action === "arm" ? "arm" : action === "release" ? "release" : "play";
   const url = `${bargeServiceUrl()}/${endpoint}`;
   const timeoutMs = timeoutMsForAction(action);
   const payload = {
@@ -114,8 +115,43 @@ async function requestCxVoicemailDrop(domain, user, body = {}) {
     wav: plan.voicemailPath,
     trigger: "silence",
     waitForRelease: true,
+    requireArmed: action === "play" ? body.requireArmed !== false : undefined,
+    armWaitMs: action === "play" ? body.armWaitMs || undefined : undefined,
+    cueMaxWaitMs: action === "play" ? body.cueMaxWaitMs || undefined : undefined,
     reason: body.reason || undefined,
   };
+
+  if (action === "warm") {
+    let res;
+    let json;
+    try {
+      ({ res, json } = await postBargeJson(url, { monitorExt: plan.monitorExtension }, timeoutMs));
+    } catch (err) {
+      throw httpError(`Barge service unreachable at ${url}: ${err.message}`, 502, "barge-service-unreachable");
+    }
+
+    if (!res.ok || !json || json.ok === false) {
+      throw httpError(String(json?.error || `Barge service warm failed (${res.status})`), 502, "barge-warm-failed", json);
+    }
+
+    return {
+      ok: true,
+      warmed: true,
+      registered: Boolean(json.registered),
+      usingFallbackVoicemail: Boolean(plan.usingFallbackVoicemail),
+      plan: {
+        agentName: plan.agentName,
+        targetExtensionNumber: plan.targetExtensionNumber,
+        monitorExtension: plan.monitorExtension,
+        voicemailPath: plan.voicemailPath,
+        problems: plan.problems,
+      },
+      barge: {
+        monitorExt: json.monitorExt || plan.monitorExtension,
+        deviceId: json.deviceId || null,
+      },
+    };
+  }
 
   let res;
   let json;
@@ -165,7 +201,14 @@ async function requestCxVoicemailDrop(domain, user, body = {}) {
     };
   }
   if (!json.played || !json.released) {
-    throw httpError("Barge service did not confirm playback + release", 502, "barge-not-confirmed", json);
+    const reason = String(json.reason || json.error || "").trim();
+    const message =
+      reason === "disposed-before-playback"
+        ? "Call ended before voicemail playback could start"
+        : json.fallbackOneShot && Number(json.inboundRtpSeen || 0) === 0
+          ? "Voicemail monitor was not armed before playback; call may have ended"
+          : "Barge service did not confirm playback + release";
+    throw httpError(message, 502, "barge-not-confirmed", json);
   }
 
   return {

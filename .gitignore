@@ -41,3 +41,7 @@ runtime/recordings/
 ops/end-of-day-recordings/**/*.json
 ops/manual-recording-dumps/**/*.json
 ops/scheduled-logs/*.log
+
+# Local Drop.co fire-test harnesses. Production voicemail drop uses the RingCX
+# barge path; keep campaign one-offs out of patches and GitHub.
+scripts/drop-phonefrom-local-server.js

@@ -40,9 +40,6 @@ const {
 const {
   CONTEXT_RULES,
 } = require("../../../packages/shared-services/src/liveCoachSanitizedPipeline");
-const {
-  buildContextRuleCatalog,
-} = require("../../../packages/shared-services/src/liveCoachContextMatchBank");
 
 let processCrashLogger = null;
 
@@ -70,6 +67,37 @@ process.on("unhandledRejection", (reason) => {
 function boolFromEnv(value, fallback = false) {
   if (value === undefined || value === null || value === "") return fallback;
   return ["1", "true", "yes", "on"].includes(String(value).trim().toLowerCase());
+}
+
+const LIVE_COACH_DIAGNOSTIC_LOGGING = boolFromEnv(process.env.LIVE_COACH_DIAGNOSTIC_LOGGING, true);
+const LIVE_COACH_DIAGNOSTIC_SAMPLE_EVERY = Math.max(
+  0,
+  Number(process.env.LIVE_COACH_DIAGNOSTIC_SAMPLE_EVERY || 20) || 20,
+);
+const LIVE_COACH_DIAGNOSTIC_SLOW_MS = Math.max(
+  0,
+  Number(process.env.LIVE_COACH_DIAGNOSTIC_SLOW_MS || 1500) || 1500,
+);
+const liveCoachDiagnosticCounters = new Map();
+
+function shouldLogLiveCoachDiagnostic(name, elapsedMs = 0) {
+  if (!LIVE_COACH_DIAGNOSTIC_LOGGING) return false;
+  if (LIVE_COACH_DIAGNOSTIC_SLOW_MS > 0 && Number(elapsedMs || 0) >= LIVE_COACH_DIAGNOSTIC_SLOW_MS) return true;
+  if (LIVE_COACH_DIAGNOSTIC_SAMPLE_EVERY <= 0) return false;
+  const key = cleanText(name, 120) || "default";
+  const next = (liveCoachDiagnosticCounters.get(key) || 0) + 1;
+  liveCoachDiagnosticCounters.set(key, next);
+  return next === 1 || next % LIVE_COACH_DIAGNOSTIC_SAMPLE_EVERY === 0;
+}
+
+function logLiveCoachDiagnostic(logger, name, fields = {}, { level = "info", elapsedMs = 0, force = false } = {}) {
+  if (!force && !shouldLogLiveCoachDiagnostic(name, elapsedMs)) return;
+  const log = logger?.[level] || logger?.info;
+  log?.call(logger, name, {
+    ...fields,
+    diagnosticSampleEvery: LIVE_COACH_DIAGNOSTIC_SAMPLE_EVERY,
+    diagnosticSlowMs: LIVE_COACH_DIAGNOSTIC_SLOW_MS,
+  });
 }
 
 function textValue(value, depth = 0) {
@@ -132,6 +160,128 @@ function parseJsonObject(text) {
   throw new Error("OpenAI context judge did not return JSON");
 }
 
+const MINI_CONTEXT_JUDGE_PROMPT_VERSION = "live-coach-mini-context-v4";
+const MATCHABLE_STOPWORDS = new Set([
+  "a",
+  "an",
+  "and",
+  "are",
+  "but",
+  "for",
+  "i",
+  "im",
+  "i'm",
+  "is",
+  "it",
+  "me",
+  "my",
+  "of",
+  "or",
+  "so",
+  "that",
+  "the",
+  "this",
+  "to",
+  "uh",
+  "um",
+  "you",
+]);
+
+function normalizeMatchableTerm(value = "") {
+  return cleanText(value, 120)
+    .toLowerCase()
+    .replace(/[^a-z0-9\s-]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function expandMatchableTerms(hit = "") {
+  const normalized = normalizeMatchableTerm(hit);
+  if (!normalized) return [];
+  const terms = [normalized];
+  const words = normalized
+    .split(/\s+/)
+    .map((word) => word.trim())
+    .filter((word) => word.length > 1 && !MATCHABLE_STOPWORDS.has(word));
+  terms.push(...words);
+  return [...new Set(terms)].slice(0, 8);
+}
+
+function buildGroupedMatchables(candidates = [], {
+  maxTerms = 18,
+  maxCandidatesPerTerm = 6,
+} = {}) {
+  const groups = new Map();
+  for (const candidate of Array.isArray(candidates) ? candidates : []) {
+    const key = cleanText(candidate.key, 120);
+    if (!key) continue;
+    const candidateRow = {
+      key,
+      label: cleanText(candidate.label, 120),
+      family: cleanText(candidate.family, 80),
+      priority: Number(candidate.priority || 0),
+      score: Number(candidate.score || 0),
+      summary: cleanText(candidate.summary || candidate.guidance || "", 240),
+      fragment: cleanText(candidate.fragment || candidate.transcriptFragment || "", 220),
+    };
+    const hits = Array.isArray(candidate.hits) && candidate.hits.length
+      ? candidate.hits
+      : [candidate.key, candidate.label].filter(Boolean);
+    for (const term of hits.flatMap((hit) => expandMatchableTerms(hit))) {
+      if (!term || MATCHABLE_STOPWORDS.has(term)) continue;
+      if (!groups.has(term)) groups.set(term, []);
+      const rows = groups.get(term);
+      if (!rows.some((row) => row.key === candidateRow.key)) rows.push(candidateRow);
+    }
+  }
+  return [...groups.entries()]
+    .map(([matchable, rows]) => ({
+      matchable,
+      candidates: rows
+        .sort((a, b) => b.score - a.score || b.priority - a.priority || a.key.localeCompare(b.key))
+        .slice(0, maxCandidatesPerTerm),
+    }))
+    .sort((a, b) => {
+      const aScore = a.candidates[0]?.score || 0;
+      const bScore = b.candidates[0]?.score || 0;
+      return bScore - aScore || b.candidates.length - a.candidates.length || a.matchable.localeCompare(b.matchable);
+    })
+    .slice(0, maxTerms);
+}
+
+const MINI_CONTEXT_JUDGE_STATIC_PROMPT = [
+  `Prompt version: ${MINI_CONTEXT_JUDGE_PROMPT_VERSION}`,
+  "You are the semantic context judge between STT and a live tax-resolution sales coach.",
+  "Your job is one mini/API pass: understand the server-VAD transcript, filter/rank the local lookup matchables, and decide whether the capped unresolved VAD buffer is ready for the writer.",
+  "The dynamic user message contains vad, currentVad, matched, unresolvedVadBuffer, bufferPolicy, recentProspect, and recentFiltered.",
+  "matched is the output of the local JS lookup tool. It is deterministic word/phrase evidence grouped as matchable -> possible candidate keys/summaries. It is intentionally over-inclusive.",
+  "Use only exact keys present inside matched[].candidates. Do not invent keys and do not assume access to a hidden catalog.",
+  "Reject voicemail, automated prompts, call screeners, filler, greetings, and fragments with no useful sales/tax/human context.",
+  "Read vad together with unresolvedVadBuffer. If the thought is clearly coachable now, set shouldCompose true. If bufferPolicy.forceReleaseByCap is true, set shouldCompose true even if the thought is imperfect so the writer can work it out.",
+  "If not ready and not forced by cap, set shouldCompose false and preserve useful activeIssues in contextBrief.",
+  "approvedKeys must be objects, not strings. For each approved key, include a short snippet copied/paraphrased from the CURRENT grouped thought that proves why the key applies.",
+  "contextBrief is the single compact meaning+memory sentence for the writer: current meaning, relevant prior unresolved VADs, and the next logical direction. Do not duplicate it into a second meaning field.",
+  "Return JSON only with this shape:",
+  '{"shouldCompose":boolean,"completeThought":boolean,"approvedKeys":[{"key":"exact_key","confidence":0.0,"reason":"short reason","snippet":"short associated phrase from current grouped thought"}],"rejected":[{"key":"exact_key","reason":"short reason"}],"contextBrief":"one compact meaning+memory+next-direction sentence","thoughtVadIds":["vad-id"],"actionReason":"short machine reason","confidence":0.0}',
+  "If no key matches but the prospect asked a meaningful direct question, set shouldCompose true and approvedKeys empty.",
+  "shouldCompose is a JUNK FILTER, not a completeness gate: set it false ONLY for non-coachable input -- voicemail, automated prompts, call screeners, pure filler or greetings.",
+  "Do NOT set shouldCompose false solely because the sentence is slightly imperfect; the writer is allowed to make sense of grouped VAD chunks.",
+].join("\n");
+
+function buildMiniContextJudgeCacheKey({ model, metadata = {}, scope = "agent" } = {}) {
+  const parts = ["live-coach-mini", MINI_CONTEXT_JUDGE_PROMPT_VERSION, cleanText(model, 80) || "model"];
+  const normalizedScope = cleanText(scope || "agent", 40).toLowerCase();
+  if (normalizedScope === "agent") {
+    const agent = cleanText(metadata.agentExtension || metadata.agentExtensionId || metadata.agentEmail || metadata.agentName || "floor", 80)
+      .toLowerCase()
+      .replace(/[^a-z0-9@._-]+/g, "-");
+    parts.push(agent || "floor");
+  } else if (normalizedScope && normalizedScope !== "global") {
+    parts.push(normalizedScope.replace(/[^a-z0-9@._-]+/g, "-"));
+  }
+  return cleanText(parts.filter(Boolean).join(":"), 180);
+}
+
 function createOpenAiSemanticContextJudge({ logger } = {}) {
   const enabled = boolFromEnv(process.env.LIVE_COACH_CONTEXT_JUDGE_ENABLED, false);
   const apiKey = String(process.env.OPENAI_API_KEY || "").trim();
@@ -145,15 +295,36 @@ function createOpenAiSemanticContextJudge({ logger } = {}) {
   const serviceTier = cleanText(
     process.env.LIVE_COACH_CONTEXT_JUDGE_SERVICE_TIER ||
       process.env.LIVE_COACH_OPENAI_SERVICE_TIER ||
-      "",
+      "priority",
     80,
+  );
+  const promptCacheRetention = cleanText(
+    process.env.LIVE_COACH_CONTEXT_JUDGE_PROMPT_CACHE_RETENTION ||
+      process.env.LIVE_COACH_OPENAI_PROMPT_CACHE_RETENTION ||
+      "in_memory",
+    40,
+  );
+  const promptCacheScope = cleanText(
+    process.env.LIVE_COACH_CONTEXT_JUDGE_PROMPT_CACHE_SCOPE || "global",
+    40,
   );
   const timeoutMs = Math.max(2500, Number(process.env.LIVE_COACH_CONTEXT_JUDGE_TIMEOUT_MS || 6000) || 6000);
   const maxOutputTokens = Math.max(
     120,
     Math.min(1200, Number(process.env.LIVE_COACH_CONTEXT_JUDGE_MAX_OUTPUT_TOKENS || 550) || 550),
   );
-  const catalog = buildContextRuleCatalog(CONTEXT_RULES);
+  const staticPrompt = MINI_CONTEXT_JUDGE_STATIC_PROMPT;
+  logLiveCoachDiagnostic(logger, "live_coach.context_judge.config", {
+    enabled: true,
+    model,
+    serviceTier: serviceTier || null,
+    promptCacheScope,
+    promptCacheRetention: promptCacheRetention || null,
+    promptVersion: MINI_CONTEXT_JUDGE_PROMPT_VERSION,
+    maxOutputTokens,
+    timeoutMs,
+    staticPromptChars: staticPrompt.length,
+  }, { force: true });
 
   return async function judgeWithOpenAi({
     session,
@@ -172,6 +343,7 @@ function createOpenAiSemanticContextJudge({ logger } = {}) {
         priority: Number(candidate.priority || 0),
         score: Number(candidate.score || 0),
         hits: Array.isArray(candidate.hits) ? candidate.hits.slice(0, 8).map((hit) => cleanText(hit, 80)) : [],
+        fragment: cleanText(candidate.fragment || candidate.transcriptFragment || "", 220),
         summary: cleanText(candidate.guidance || candidate.summary || "", 240),
       }))
       .filter((candidate) => candidate.key);
@@ -197,48 +369,56 @@ function createOpenAiSemanticContextJudge({ logger } = {}) {
         meaning: cleanText(row.miniJudgement?.transcriptMeaning || row.actionReason || "", 180),
       }))
       .filter((row) => row.phrase || row.selectedKeys.length || row.snippets.length || row.meaning);
+    const thoughtBuffer = context?.thoughtBuffer || {};
+    const dynamicPayload = {
+      vad: transcript?.text || context?.phraseText || "",
+      currentVad: thoughtBuffer.currentVad || {
+        vadId: transcript?.id || context?.sourceTranscriptId || "",
+        text: transcript?.text || context?.phraseText || "",
+      },
+      matched: buildGroupedMatchables(candidates),
+      unresolvedVadBuffer: Array.isArray(thoughtBuffer.unresolved) ? thoughtBuffer.unresolved : [],
+      bufferPolicy: {
+        maxChars: Number(thoughtBuffer.maxChars || 0) || null,
+        maxChunks: Number(thoughtBuffer.maxChunks || 0) || null,
+        totalChars: Number(thoughtBuffer.totalChars || 0) || null,
+        forceReleaseByCap: Boolean(thoughtBuffer.forceReleaseByCap),
+      },
+      localCompleteness: {
+        completeThought: Boolean(context?.completeThought),
+        reason: context?.completenessReason || "",
+        localShouldCompose: Boolean(context?.shouldCompose),
+        localActionReason: context?.actionReason || "",
+      },
+      recentProspect,
+      recentFiltered,
+    };
     const requestBody = {
       model,
       ...(serviceTier ? { service_tier: serviceTier } : {}),
-      instructions: [
-        "You are the semantic context judge between STT and a live tax-resolution sales coach.",
-        "Your job is one mini/API pass: understand the VAD-released sentence, use the compact tool catalog, rank/filter fuzzy matches, and decide whether the coach should respond.",
-        "Also compact recent call memory into useful continuity for the coach: not a transcript, just what has already happened, which filtered keys mattered, and where the agent should logically continue.",
-        "candidateHints are deterministic word/phrase hits and are intentionally over-inclusive. They are useful hints, not the ceiling.",
-        "candidateCatalog is the full compact lookup tool. Recover relevant fuzzy matches from it when the sentence clearly points to a catalog key even if candidateHints missed it.",
-        "Use only exact keys from candidateCatalog. Do not invent keys.",
-        "Reject voicemail, automated prompts, call screeners, filler, greetings, and fragments with no useful sales/tax/human context.",
-        "selectedKeys must be objects, not strings. For each selectedKey, include a short snippet copied/paraphrased from the CURRENT phrase that proves why the key applies.",
-        "For memoryBrief, use recentProspect plus recentFiltered. Keep it compact, actionable, and tied to selected keys with transcript snippets. If a prior issue was already asked, mark it already_asked or needs_followup instead of repeating it.",
-        "memoryBrief should give Sonnet continuity: what just happened, what issues remain active, and the next logical direction. Never tell the coach to answer old lines; tell it how to continue logically from them.",
-        "Return JSON only with this shape:",
-        '{"shouldCompose":boolean,"completeThought":boolean,"selectedKeys":[{"key":"exact_key","confidence":0.0,"reason":"short reason","snippet":"short associated phrase from current transcript"}],"rejected":[{"key":"exact_key","reason":"short reason"}],"transcriptMeaning":"one sentence meaning","memoryBrief":{"whatHappened":"one compact sentence","activeIssues":[{"key":"exact_key_or_general","snippet":"short associated transcript phrase","status":"new|already_asked|needs_followup"}],"continueFrom":"one sentence coaching continuity instruction"},"actionReason":"short machine reason","confidence":0.0}',
-        "If no key matches but the prospect asked a meaningful direct question, set shouldCompose true and selectedKeys empty.",
-        "If the prospect is still mid-thought or nothing useful should be said yet, set shouldCompose false.",
-      ].join("\n"),
+      prompt_cache_key: buildMiniContextJudgeCacheKey({
+        model,
+        metadata: {
+          ...metadata,
+          ...(context?.metadata || {}),
+        },
+        scope: promptCacheScope,
+      }),
+      ...(promptCacheRetention ? { prompt_cache_retention: promptCacheRetention } : {}),
       input: [
         {
+          role: "developer",
+          content: staticPrompt,
+        },
+        {
           role: "user",
-          content: JSON.stringify({
-            agentName: metadata.agentName || context?.metadata?.agentName || "",
-            firmName: metadata.firmName || context?.metadata?.firmName || "Wynn Tax Solutions",
-            phraseText: transcript?.text || context?.phraseText || "",
-            localCompleteness: {
-              completeThought: Boolean(context?.completeThought),
-              reason: context?.completenessReason || "",
-              localShouldCompose: Boolean(context?.shouldCompose),
-              localActionReason: context?.actionReason || "",
-            },
-            recentProspect,
-            recentFiltered,
-            candidateHints: candidates,
-            candidateCatalog: catalog,
-          }),
+          content: JSON.stringify(dynamicPayload),
         },
       ],
       max_output_tokens: maxOutputTokens,
     };
 
+    const startedAtMs = Date.now();
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), timeoutMs);
     const abortFromCaller = () => controller.abort();
@@ -264,6 +444,23 @@ function createOpenAiSemanticContextJudge({ logger } = {}) {
       }
       const payload = await response.json();
       const parsed = parseJsonObject(extractOpenAiResponseText(payload));
+      const elapsedMs = Date.now() - startedAtMs;
+      logLiveCoachDiagnostic(logger, "live_coach.context_judge.result", {
+        elapsedMs,
+        model: payload.model || model,
+        serviceTier: serviceTier || null,
+        promptCacheScope,
+        promptCacheRetention: promptCacheRetention || null,
+        candidateCount: candidates.length,
+        matchGroupCount: Array.isArray(dynamicPayload.matched) ? dynamicPayload.matched.length : 0,
+        unresolvedVadCount: Array.isArray(dynamicPayload.unresolvedVadBuffer) ? dynamicPayload.unresolvedVadBuffer.length : 0,
+        forceReleaseByCap: Boolean(dynamicPayload.bufferPolicy?.forceReleaseByCap),
+        shouldCompose: Boolean(parsed.shouldCompose),
+        completeThought: Boolean(parsed.completeThought),
+        approvedKeyCount: Array.isArray(parsed.approvedKeys) ? parsed.approvedKeys.length : 0,
+        rejectedKeyCount: Array.isArray(parsed.rejected) ? parsed.rejected.length : 0,
+        usage: payload.usage || null,
+      }, { elapsedMs });
       return {
         ...parsed,
         provider: "openai",
@@ -271,6 +468,14 @@ function createOpenAiSemanticContextJudge({ logger } = {}) {
         usage: payload.usage || null,
       };
     } catch (error) {
+      const elapsedMs = Date.now() - startedAtMs;
+      logger?.warn?.("live_coach.context_judge.error", {
+        elapsedMs,
+        model,
+        serviceTier: serviceTier || null,
+        candidateCount: candidates.length,
+        error: error.message,
+      });
       if (error?.name === "AbortError" || controller.signal.aborted || abortSignal?.aborted) {
         throw new Error(`OpenAI context judge timed out after ${timeoutMs}ms`);
       }
@@ -323,6 +528,34 @@ function buildDashboardAccessMiddleware() {
   };
 }
 
+// Runtime-toggleable composer contemplativeness ("tier" = effort + thinking), flippable
+// mid-day at the ai-bus (port 7000) via the dashboard endpoint with NO restart. The dialog
+// composer reads getComposerTier() per request, so a toggle takes effect on the next turn.
+// Default stays the most contemplative (high effort + adaptive thinking); dial down live if
+// latency bites. Override the boot default with LIVE_COACH_COMPOSER_TIER.
+const COMPOSER_TIERS = Object.freeze({
+  "high-thinking": { effort: "high", thinking: true },
+  "medium-thinking": { effort: "medium", thinking: true },
+  "medium-no-thinking": { effort: "medium", thinking: false },
+  "low-no-thinking": { effort: "low", thinking: false },
+});
+const DEFAULT_COMPOSER_TIER = (() => {
+  const fromEnv = String(process.env.LIVE_COACH_COMPOSER_TIER || "").trim().toLowerCase();
+  return COMPOSER_TIERS[fromEnv] ? fromEnv : "high-thinking";
+})();
+let liveComposerTier = DEFAULT_COMPOSER_TIER;
+function getComposerTier() {
+  return COMPOSER_TIERS[liveComposerTier] ? liveComposerTier : "high-thinking";
+}
+function setComposerTier(tier) {
+  const normalized = String(tier || "").trim().toLowerCase();
+  if (!COMPOSER_TIERS[normalized]) {
+    return { ok: false, error: `unknown composer tier: ${tier}`, tier: getComposerTier(), tiers: Object.keys(COMPOSER_TIERS) };
+  }
+  liveComposerTier = normalized;
+  return { ok: true, tier: liveComposerTier, config: COMPOSER_TIERS[liveComposerTier] };
+}
+
 function createAnthropicDialogComposer({ logger } = {}) {
   const enabled = boolFromEnv(process.env.LIVE_COACH_ANTHROPIC_COMPOSER_ENABLED, false);
   const apiKey = String(process.env.ANTHROPIC_API_KEY || "").trim();
@@ -340,6 +573,23 @@ function createAnthropicDialogComposer({ logger } = {}) {
     Number(process.env.LIVE_COACH_ANTHROPIC_READ_TIMEOUT_MS || timeoutMs) || timeoutMs,
   );
   const maxTokens = Math.max(32, Math.min(500, Number(process.env.LIVE_COACH_ANTHROPIC_MAX_TOKENS || 160) || 160));
+  // Thinking tiers need a larger output budget so adaptive thinking tokens (which count
+  // toward max_tokens) don't crowd out the actual coach line.
+  const thinkingMaxTokens = Math.max(
+    maxTokens,
+    Math.min(4000, Number(process.env.LIVE_COACH_ANTHROPIC_THINKING_MAX_TOKENS || 2000) || 2000),
+  );
+  logLiveCoachDiagnostic(logger, "live_coach.anthropic_composer.config", {
+    enabled: true,
+    model,
+    defaultTier: getComposerTier(),
+    defaultTierConfig: COMPOSER_TIERS[getComposerTier()],
+    timeoutMs,
+    readTimeoutMs,
+    maxTokens,
+    thinkingMaxTokens,
+    deltaThrottleDefaultMs: Number(process.env.LIVE_COACH_COMPOSE_DELTA_THROTTLE_MS || 60) || 60,
+  }, { force: true });
 
   return async function composeWithAnthropic({ dialog, onDelta, abortSignal } = {}) {
     const promptPayload = dialog?.promptPayload || {};
@@ -347,6 +597,11 @@ function createAnthropicDialogComposer({ logger } = {}) {
       return { say: "", composer: "anthropic", model };
     }
 
+    // Read the LIVE tier per request so a mid-day dashboard toggle takes effect next turn.
+    const tier = COMPOSER_TIERS[getComposerTier()] || COMPOSER_TIERS["high-thinking"];
+    const requestMaxTokens = tier.thinking ? thinkingMaxTokens : maxTokens;
+
+    const startedAtMs = Date.now();
     const abortController = new AbortController();
     const timeout = setTimeout(() => abortController.abort(), timeoutMs);
     const abortFromCaller = () => abortController.abort();
@@ -364,9 +619,15 @@ function createAnthropicDialogComposer({ logger } = {}) {
         },
         body: JSON.stringify({
           model,
-          max_tokens: maxTokens,
-          temperature: 0.25,
+          max_tokens: requestMaxTokens,
           stream: true,
+          // Effort + thinking come from the live, mid-day-toggleable tier. When thinking is
+          // on we omit temperature (sampling can conflict with thinking); when off we keep a
+          // low temperature for fast, terse phrasing -- the prior behavior.
+          output_config: { effort: tier.effort },
+          ...(tier.thinking
+            ? { thinking: { type: "adaptive" } }
+            : { thinking: { type: "disabled" }, temperature: 0.25 }),
           // Stable standing directives ride a cache_control:ephemeral system prefix
           // (Anthropic prompt caching). Sent once, reused across turns; the per-turn
           // delta is the lean user message. If the prefix is under the cache minimum,
@@ -407,6 +668,8 @@ function createAnthropicDialogComposer({ logger } = {}) {
     const decoder = new TextDecoder();
     let buffer = "";
     let output = "";
+    let deltaCount = 0;
+    let firstDeltaAtMs = 0;
     try {
       for (;;) {
         let readTimeout = null;
@@ -443,7 +706,19 @@ function createAnthropicDialogComposer({ logger } = {}) {
                 : "";
             if (delta) {
               output += delta;
-              onDelta?.(delta, cleanText(output, 1000));
+              deltaCount += 1;
+              if (!firstDeltaAtMs) firstDeltaAtMs = Date.now();
+              // Completeness gate: a bare "WAIT" is the coach's "not a complete thought"
+              // hold sentinel, not a coach line. Suppress streaming ONLY while the output so
+              // far IS the bare sentinel ("wait", or "wait" + trailing punctuation) -- the
+              // same shape the final detection below uses. The instant a non-sentinel char
+              // appears we stream, so legitimate lines (including ones opening "Wait, ..."
+              // or "Was ...") never lose their first characters to the panel.
+              const headTrim = output.trim();
+              const stillMaybeWait = /^wait$/i.test(headTrim) || /^wait[\s.!,:;-]+$/i.test(headTrim);
+              if (!stillMaybeWait) {
+                onDelta?.(delta, cleanText(output, 1000));
+              }
             }
           }
           boundary = buffer.indexOf("\n\n");
@@ -460,10 +735,32 @@ function createAnthropicDialogComposer({ logger } = {}) {
       await reader.cancel().catch(() => undefined);
     }
 
+    // A leading "WAIT" means the coach judged the prospect had not completed a coachable
+    // thought -> emit nothing as a coach line (the bus settles the dialog to a hold).
+    const finalText = cleanText(output, 1000);
+    const heldForIncompleteThought =
+      /^\s*wait\b[\s.!,:;-]*$/i.test(output) ||
+      finalText.replace(/[^a-z]/gi, "").toLowerCase() === "wait";
+    const elapsedMs = Date.now() - startedAtMs;
+    logLiveCoachDiagnostic(logger, "live_coach.anthropic_composer.result", {
+      elapsedMs,
+      firstDeltaMs: firstDeltaAtMs ? firstDeltaAtMs - startedAtMs : null,
+      model,
+      tier: getComposerTier(),
+      tierConfig: tier,
+      deltaCount,
+      outputChars: finalText.length,
+      heldForIncompleteThought,
+      requestMaxTokens,
+      systemCacheable: Boolean(promptPayload.systemCacheable),
+      systemChars: cleanText(promptPayload.system || "", 20_000).length,
+      userChars: cleanText(promptPayload.user || "", 20_000).length,
+    }, { elapsedMs });
     return {
-      say: cleanText(output, 1000),
+      say: heldForIncompleteThought ? "" : finalText,
       composer: "anthropic",
       model,
+      heldForIncompleteThought,
     };
   };
 }
@@ -482,6 +779,14 @@ function buildConfig() {
     1000,
     Number(process.env.LIVE_COACH_HEARTBEAT_INTERVAL_MS || 5000) || 5000,
   );
+  const terminalPruneMaxAgeMs = Math.max(
+    15_000,
+    Number(process.env.LIVE_COACH_TERMINAL_PRUNE_MAX_AGE_MS || 2 * 60_000) || 2 * 60_000,
+  );
+  const terminalPruneMaxSessions = Math.max(
+    0,
+    Number(process.env.LIVE_COACH_TERMINAL_PRUNE_MAX_SESSIONS || 21) || 21,
+  );
   return {
     ...getSharedConfig({
       // The AI playground can still boot without Mongo, but when a Mongo URI
@@ -494,6 +799,8 @@ function buildConfig() {
     liveCoachStaleSweepIntervalMs: staleSweepIntervalMs,
     liveCoachStaleMaxIdleMs: staleSweepMaxIdleMs,
     liveCoachHeartbeatIntervalMs,
+    liveCoachTerminalPruneMaxAgeMs: terminalPruneMaxAgeMs,
+    liveCoachTerminalPruneMaxSessions: terminalPruneMaxSessions,
   };
 }
 
@@ -843,7 +1150,7 @@ function createLiveCoachDashboardHtml() {
     }
 
     function isTerminalSession(session) {
-      return ["stopped", "stale", "voicemail_rejected"].includes(String(session?.status || ""));
+      return ["stopped", "stale", "voicemail_rejected", "released"].includes(String(session?.status || ""));
     }
 
     function isRejectedSession(session) {
@@ -1386,7 +1693,7 @@ function createLiveCoachWallboardHtml() {
     }
 
     function isTerminalSession(session) {
-      return ["stopped", "stale", "voicemail_rejected"].includes(String(session?.status || ""));
+      return ["stopped", "stale", "voicemail_rejected", "released"].includes(String(session?.status || ""));
     }
 
     function isLiveSession(session) {
@@ -2033,8 +2340,38 @@ async function main() {
     semanticContextJudge,
     composeDedupWindowMs: Number(process.env.LIVE_COACH_COMPOSE_DEDUP_WINDOW_MS || 4000) || 4000,
     composeRateLimitPerMinute: Number(process.env.LIVE_COACH_COMPOSE_RATE_LIMIT_PER_MINUTE || 3) || 3,
-    composeDeltaThrottleMs: Number(process.env.LIVE_COACH_COMPOSE_DELTA_THROTTLE_MS || 100) || 100,
+    composeDeltaThrottleMs: Number(process.env.LIVE_COACH_COMPOSE_DELTA_THROTTLE_MS || 60) || 60,
     asyncContextPipeline: boolFromEnv(process.env.LIVE_COACH_ASYNC_CONTEXT_PIPELINE, true),
+    thoughtBufferMaxChars: Number(process.env.LIVE_COACH_THOUGHT_BUFFER_MAX_CHARS || 900) || 900,
+    thoughtBufferMaxChunks: Number(process.env.LIVE_COACH_THOUGHT_BUFFER_MAX_CHUNKS || 5) || 5,
+  });
+  logger.info("live_coach.runtime_config", {
+    mongoConnected: Boolean(mongoRuntime.connected),
+    contextJudgeEnabled: Boolean(semanticContextJudge),
+    contextJudgeModel: semanticContextJudge
+      ? cleanText(process.env.LIVE_COACH_CONTEXT_JUDGE_MODEL || process.env.LIVE_COACH_MINI_MODEL || "gpt-5.4-mini", 120)
+      : null,
+    contextJudgeServiceTier: cleanText(
+      process.env.LIVE_COACH_CONTEXT_JUDGE_SERVICE_TIER ||
+        process.env.LIVE_COACH_OPENAI_SERVICE_TIER ||
+        "priority",
+      80,
+    ),
+    contextJudgePromptCacheScope: cleanText(process.env.LIVE_COACH_CONTEXT_JUDGE_PROMPT_CACHE_SCOPE || "global", 40),
+    anthropicComposerEnabled: boolFromEnv(process.env.LIVE_COACH_ANTHROPIC_COMPOSER_ENABLED, false),
+    anthropicModel: boolFromEnv(process.env.LIVE_COACH_ANTHROPIC_COMPOSER_ENABLED, false)
+      ? cleanText(process.env.LIVE_COACH_ANTHROPIC_MODEL || process.env.LIVE_COACH_SONNET_MODEL || "claude-sonnet-4-6", 120)
+      : null,
+    composerTier: getComposerTier(),
+    composeDedupWindowMs: Number(process.env.LIVE_COACH_COMPOSE_DEDUP_WINDOW_MS || 4000) || 4000,
+    composeRateLimitPerMinute: Number(process.env.LIVE_COACH_COMPOSE_RATE_LIMIT_PER_MINUTE || 3) || 3,
+    composeDeltaThrottleMs: Number(process.env.LIVE_COACH_COMPOSE_DELTA_THROTTLE_MS || 60) || 60,
+    asyncContextPipeline: boolFromEnv(process.env.LIVE_COACH_ASYNC_CONTEXT_PIPELINE, true),
+    thoughtBufferMaxChars: Number(process.env.LIVE_COACH_THOUGHT_BUFFER_MAX_CHARS || 900) || 900,
+    thoughtBufferMaxChunks: Number(process.env.LIVE_COACH_THOUGHT_BUFFER_MAX_CHUNKS || 5) || 5,
+    diagnosticLogging: LIVE_COACH_DIAGNOSTIC_LOGGING,
+    diagnosticSampleEvery: LIVE_COACH_DIAGNOSTIC_SAMPLE_EVERY,
+    diagnosticSlowMs: LIVE_COACH_DIAGNOSTIC_SLOW_MS,
   });
 
   const app = express();
@@ -2276,6 +2613,27 @@ async function main() {
     res.status(result.ok ? 200 : 404).json(result);
   });
 
+  // Mid-day, no-restart toggle of Sonnet's contemplativeness (effort + thinking).
+  // GET to read; POST { tier } to flip. Takes effect on the next coaching turn.
+  app.get("/api/ai/live-coach/dashboard/composer-tier", requireDashboardAccess, (req, res) => {
+    const tier = getComposerTier();
+    res.json({ ok: true, tier, config: COMPOSER_TIERS[tier], tiers: Object.keys(COMPOSER_TIERS) });
+  });
+
+  app.post("/api/ai/live-coach/dashboard/composer-tier", requireDashboardAccess, (req, res) => {
+    const priorTier = getComposerTier();
+    const result = setComposerTier(req.body?.tier);
+    logger.info("live_coach.composer_tier.update", {
+      ok: Boolean(result.ok),
+      from: priorTier,
+      to: result.tier || priorTier,
+      requested: cleanText(req.body?.tier || "", 80),
+      config: result.config || COMPOSER_TIERS[priorTier] || null,
+      error: result.error || null,
+    });
+    res.status(result.ok ? 200 : 400).json(result);
+  });
+
   app.get("/api/ai/live-coach/dashboard/sessions/:sessionId/events", requireDashboardAccess, (req, res) => {
     const session = coachBus.getSession(req.params.sessionId);
     if (!session) return res.status(404).json({ ok: false, error: "Session not found" });
@@ -2403,6 +2761,7 @@ async function main() {
             "POST /api/ai/live-coach/provisional-fixture",
             "POST /api/ai/live-coach/replay",
             "POST /api/ai/live-coach/cleanup-stale",
+            "POST /api/ai/live-coach/prune-terminal",
           ],
         },
       ],
@@ -2615,6 +2974,15 @@ async function main() {
     res.json(result);
   });
 
+  app.post("/api/ai/live-coach/prune-terminal", requireInternalAccess, (req, res) => {
+    const result = coachBus.pruneTerminalSessions({
+      ...(req.body || {}),
+      maxAgeMs: req.body?.maxAgeMs || config.liveCoachTerminalPruneMaxAgeMs,
+      maxTerminalSessions: req.body?.maxTerminalSessions || config.liveCoachTerminalPruneMaxSessions,
+    });
+    res.json(result);
+  });
+
   let staleSweepInFlight = false;
   const staleSweepTimer = mongoBridge && config.liveCoachStaleSweepEnabled
     ? setInterval(() => {
@@ -2630,6 +2998,20 @@ async function main() {
           ...query,
           requireCurrentForAgent: true,
         }),
+      }).then((cleanupResult) => {
+        const pruneResult = coachBus.pruneTerminalSessions({
+          apply: true,
+          maxAgeMs: config.liveCoachTerminalPruneMaxAgeMs,
+          maxTerminalSessions: config.liveCoachTerminalPruneMaxSessions,
+        });
+        if (cleanupResult.staleCount > 0 || pruneResult.prunedCount > 0) {
+          logger.info("live_coach.stale_sweep.result", {
+            checkedCount: cleanupResult.checkedCount,
+            staleCount: cleanupResult.staleCount,
+            prunedCount: pruneResult.prunedCount,
+            terminalCount: pruneResult.terminalCount,
+          });
+        }
       }).catch((error) => {
         logger.warn("live_coach.stale_sweep.error", { error: error.message });
       }).finally(() => {

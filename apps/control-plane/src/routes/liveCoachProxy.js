@@ -52,9 +52,24 @@ function normalizeEmail(value) {
   return clean(value, 320).toLowerCase();
 }
 
+function canonicalAgentEmail(value) {
+  const email = normalizeEmail(value);
+  const at = email.indexOf("@");
+  if (at <= 0) return email;
+  const local = email.slice(0, at).replace(/\+.*/, "");
+  const domain = email.slice(at + 1);
+  return local && domain ? `${local}@${domain}` : email;
+}
+
 function idsMatch(left, right) {
   const a = clean(left).toLowerCase();
   const b = clean(right).toLowerCase();
+  return Boolean(a && b && a === b);
+}
+
+function emailsMatch(left, right) {
+  const a = canonicalAgentEmail(left);
+  const b = canonicalAgentEmail(right);
   return Boolean(a && b && a === b);
 }
 
@@ -129,7 +144,7 @@ function resolveAgentScope(req) {
   ].map((value) => clean(value)).filter(Boolean);
 
   if (!manager) {
-    if (requestedEmail && userEmail && requestedEmail !== userEmail) {
+    if (requestedEmail && userEmail && !emailsMatch(requestedEmail, userEmail)) {
       const error = new Error("Coach session is outside this agent scope");
       error.status = 403;
       throw error;
@@ -167,17 +182,17 @@ function assertSessionScope(req, session) {
     user.stationLabel,
   ].map((value) => clean(value)).filter(Boolean);
   const sessionExtension = firstClean(metadata.agentExtensionId, metadata.agentExtension, metadata.extensionId);
+  const comparableExtension = Boolean(sessionExtension && userExtensions.length > 0);
+  const extensionMatches = comparableExtension
+    ? userExtensions.some((extension) => idsMatch(extension, sessionExtension))
+    : false;
 
-  if (sessionEmail && userEmail && sessionEmail !== userEmail) {
+  if (comparableExtension && !extensionMatches) {
     const error = new Error("Coach session is outside this agent scope");
     error.status = 403;
     throw error;
   }
-  if (
-    sessionExtension &&
-    userExtensions.length > 0 &&
-    !userExtensions.some((extension) => idsMatch(extension, sessionExtension))
-  ) {
+  if (!comparableExtension && sessionEmail && userEmail && !emailsMatch(sessionEmail, userEmail)) {
     const error = new Error("Coach session is outside this agent scope");
     error.status = 403;
     throw error;
@@ -237,7 +252,7 @@ function createLiveCoachProxyRouter(auth, { config, logger } = {}) {
       if (!isManager(req.user || {})) {
         return res.status(403).json({ ok: false, error: "Manager access required" });
       }
-      return proxyJson(
+      return await proxyJson(
         res,
         fetchAiBusJson(config, "/api/ai/live-coach/grpc/dashboard/sessions", {
           query: {
@@ -255,13 +270,34 @@ function createLiveCoachProxyRouter(auth, { config, logger } = {}) {
       if (!isManager(req.user || {})) {
         return res.status(403).json({ ok: false, error: "Manager access required" });
       }
-      return proxyJson(
+      return await proxyJson(
         res,
         fetchAiBusJson(config, "/api/ai/live-coach/grpc/mongo/sync-current", {
           method: "POST",
           body: {
             lookbackMs: Number(req.body?.lookbackMs || req.query?.lookbackMs || 5 * 60 * 1000) || 5 * 60 * 1000,
             limit: Number(req.body?.limit || req.query?.limit || 120) || 120,
+          },
+        }),
+      );
+    } catch (error) {
+      return res.status(error.status || 500).json(toErrorResponse(error));
+    }
+  });
+
+  router.post("/prune-terminal", async (req, res) => {
+    try {
+      if (!isManager(req.user || {})) {
+        return res.status(403).json({ ok: false, error: "Manager access required" });
+      }
+      return await proxyJson(
+        res,
+        fetchAiBusJson(config, "/api/ai/live-coach/prune-terminal", {
+          method: "POST",
+          body: {
+            apply: req.body?.apply === true || req.query?.apply === "true",
+            maxAgeMs: Number(req.body?.maxAgeMs || req.query?.maxAgeMs || 0) || undefined,
+            maxTerminalSessions: Number(req.body?.maxTerminalSessions || req.query?.maxTerminalSessions || 0) || undefined,
           },
         }),
       );
@@ -285,7 +321,7 @@ function createLiveCoachProxyRouter(auth, { config, logger } = {}) {
         source: "control-plane-cx",
         retireReplaced: true,
       };
-      return proxyJson(
+      return await proxyJson(
         res,
         fetchAiBusJson(config, "/api/ai/live-coach/grpc/mongo/bind/latest", {
           method: "POST",
@@ -311,7 +347,7 @@ function createLiveCoachProxyRouter(auth, { config, logger } = {}) {
     try {
       const session = await getInternalSession(config, req.params.sessionId);
       assertSessionScope(req, session);
-      return proxyJson(
+      return await proxyJson(
         res,
         fetchAiBusJson(config, `/api/ai/live-coach/grpc/${encodeURIComponent(req.params.sessionId)}/stop`, {
           method: "POST",
@@ -330,7 +366,7 @@ function createLiveCoachProxyRouter(auth, { config, logger } = {}) {
     try {
       const session = await getInternalSession(config, req.params.sessionId);
       assertSessionScope(req, session);
-      return proxyJson(
+      return await proxyJson(
         res,
         fetchAiBusJson(config, `/api/ai/live-coach/grpc/${encodeURIComponent(req.params.sessionId)}/stop`, {
           method: "POST",

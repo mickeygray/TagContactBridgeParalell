@@ -56,6 +56,41 @@ test("live coach bus writes sanitized transcript, mini context, and dialog artif
   assert.match(fs.readFileSync(contextFile, "utf8"), /irs_notice/);
 });
 
+test("live coach bus accepts RingCX plus aliases for the same agent email", async () => {
+  const rootDir = makeTempRoot();
+  const bus = createLiveCoachBus({ rootDir });
+  const started = bus.startSession({
+    source: "test",
+    agentName: "Chris",
+    agentEmail: "cbolt+50810001_8283@taxadvocategroup.com",
+    agentExtension: "4545",
+    firmName: "Wynn Tax Solutions",
+    uii: "uii-plus-alias",
+  });
+
+  const result = await bus.appendInput(started.id, {
+    text: "I got a CP504 from the IRS and I am worried about a levy.",
+    role: "prospect",
+    agentEmail: "cbolt@taxadvocategroup.com",
+    agentExtensionId: "4545",
+    source: "unit-test",
+  });
+
+  assert.equal(result.ok, true);
+  assert.notEqual(result.statusCode, 409);
+
+  const mismatch = await bus.appendInput(started.id, {
+    text: "This should not attach to another agent.",
+    role: "prospect",
+    agentEmail: "cbolt@taxadvocategroup.com",
+    agentExtensionId: "3344",
+    source: "unit-test",
+  });
+
+  assert.equal(mismatch.ok, false);
+  assert.equal(mismatch.error, "agent-mismatch");
+});
+
 test("live coach bus lets semantic judge hold before dialog composition", async () => {
   const rootDir = makeTempRoot();
   const bus = createLiveCoachBus({
@@ -600,6 +635,64 @@ test("live coach bus cleanupDeadStreams compares sessions to latest agent bindin
   assert.equal(result.staleCount, 1);
   assert.equal(result.stale[0].reason, "agent-current-call-changed");
   assert.equal(bus.getSession(oldSession.id).status, "stale");
+});
+
+test("live coach bus prunes terminal sessions from hot memory", () => {
+  const rootDir = makeTempRoot();
+  const bus = createLiveCoachBus({ rootDir });
+  const sessions = ["a", "b", "c"].map((suffix) => bus.startSession({
+    sessionId: `coach-cx-4545-uii-prune-${suffix}`,
+    source: "grpc-mongo",
+    agentExtension: "4545",
+    uii: `uii-prune-${suffix}`,
+  }));
+
+  for (const session of sessions) {
+    const stopped = bus.stopSession(session.id, { reason: "unit-test-stop" });
+    assert.equal(stopped.ok, true);
+  }
+
+  const dryRun = bus.pruneTerminalSessions({
+    apply: false,
+    maxTerminalSessions: 1,
+  });
+  assert.equal(dryRun.terminalCount, 3);
+  assert.equal(dryRun.prunedCount, 2);
+  assert.equal(bus.listSessionSummaries().length, 3);
+
+  const applied = bus.pruneTerminalSessions({
+    apply: true,
+    maxTerminalSessions: 1,
+  });
+  assert.equal(applied.prunedCount, 2);
+  assert.equal(bus.listSessionSummaries().length, 1);
+  assert.equal(bus.getSummary().total, 1);
+});
+
+test("live coach bus treats released sessions as terminal", async () => {
+  const rootDir = makeTempRoot();
+  const bus = createLiveCoachBus({ rootDir });
+  const started = bus.startSession({
+    sessionId: "coach-cx-4545-uii-released",
+    source: "grpc-mongo",
+    agentExtension: "4545",
+    uii: "uii-released",
+  });
+
+  const stopped = bus.stopSession(started.id, {
+    status: "released",
+    reason: "client-release",
+  });
+  assert.equal(stopped.ok, true);
+  assert.equal(stopped.session.status, "released");
+
+  const input = await bus.appendInput(started.id, {
+    text: "I have an IRS notice.",
+    role: "prospect",
+    source: "unit-test",
+  });
+  assert.equal(input.ok, false);
+  assert.match(input.error, /released/);
 });
 
 test("live coach bus exposes summaries and flushes terminal persistence asynchronously", async () => {

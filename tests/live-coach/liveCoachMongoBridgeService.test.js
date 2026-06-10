@@ -4,6 +4,7 @@ const { test } = require("node:test");
 const assert = require("node:assert/strict");
 
 const {
+  canonicalAgentEmail,
   createLiveCoachMongoBridge,
   eventMatchesFilters,
   normalizeCoachCallEvent,
@@ -95,16 +96,19 @@ test("matches events by exact UII and agent identity", () => {
     uii: "uii-1",
     callSessionId: "session-1",
     extensionId: "4545",
-    agentEmail: "cbolt@taxadvocategroup.com",
+    agentEmail: "cbolt+50810001_8283@taxadvocategroup.com",
   };
 
+  assert.equal(canonicalAgentEmail("cbolt+50810001_8283@taxadvocategroup.com"), "cbolt@taxadvocategroup.com");
   assert.equal(eventMatchesFilters(event, { uii: "uii-1" }), true);
   assert.equal(eventMatchesFilters(event, { callSessionId: "session-1" }), true);
   assert.equal(eventMatchesFilters(event, { agentExtensionId: "4545" }), true);
   assert.equal(eventMatchesFilters(event, { agentEmail: "CBOLT@taxadvocategroup.com" }), true);
+  assert.equal(eventMatchesFilters(event, { agentExtensionId: "4545", agentEmail: "cbolt@taxadvocategroup.com" }), true);
   assert.equal(eventMatchesFilters(event, { uii: "uii-2" }), false);
   assert.equal(eventMatchesFilters(event, { callSessionId: "session-2" }), false);
   assert.equal(eventMatchesFilters(event, { agentExtensionId: "3344" }), false);
+  assert.equal(eventMatchesFilters(event, { agentEmail: "bhansen@taxadvocategroup.com" }), false);
 });
 
 test("resolves active binding and enriches from CallSession", async () => {

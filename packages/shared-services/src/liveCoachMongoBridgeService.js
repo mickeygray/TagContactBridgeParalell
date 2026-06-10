@@ -17,6 +17,15 @@ function cleanLower(value, maxLength = 240) {
   return cleanText(value, maxLength).toLowerCase();
 }
 
+function canonicalAgentEmail(value) {
+  const email = cleanLower(value, 180);
+  const at = email.indexOf("@");
+  if (at <= 0) return email;
+  const local = email.slice(0, at).replace(/\+.*/, "");
+  const domain = email.slice(at + 1);
+  return local && domain ? `${local}@${domain}` : email;
+}
+
 function normalizePhone(value) {
   const digits = String(value || "").replace(/\D/g, "");
   if (digits.length === 11 && digits.startsWith("1")) return digits.slice(1);
@@ -96,7 +105,7 @@ function normalizeCoachCallEvent(record = {}, options = {}) {
     ],
     80,
   );
-  const agentEmail = cleanLower(extractFirstPath(
+  const agentEmail = canonicalAgentEmail(extractFirstPath(
     payload,
     ["agentEmail", "dialerEmail", "requestedByUserEmail", "agent.email", "user.email", "account.email"],
     180,
@@ -162,11 +171,13 @@ function normalizeCoachCallEvent(record = {}, options = {}) {
 function eventMatchesFilters(event, filters = {}) {
   if (!event) return false;
   const extensionId = firstClean([filters.agentExtensionId, filters.extensionId, filters.agentExt], 80);
-  const agentEmail = cleanLower(firstClean([filters.agentEmail, filters.email], 180));
+  const agentEmail = canonicalAgentEmail(firstClean([filters.agentEmail, filters.email], 180));
   const uii = firstClean([filters.uii, filters.rcxUii, filters.callUii], 160);
   const callSessionId = firstClean([filters.callSessionId, filters.sessionId, filters.workflowInstanceId], 160);
   const queueItemId = firstClean([filters.queueItemId, filters.queueTicketId], 160);
   const phone = normalizePhone(firstClean([filters.phone, filters.phoneNumber, filters.leadPhone, filters.contactPhone], 80));
+  const eventExtensionId = String(event.extensionId || "");
+  const extensionMatched = Boolean(extensionId && eventExtensionId === String(extensionId));
 
   // RingCX streams often know the UII before our cx.call.placed event has
   // been updated with it. Treat present-but-different IDs as authoritative
@@ -176,8 +187,8 @@ function eventMatchesFilters(event, filters = {}) {
   if (callSessionId && event.callSessionId && event.callSessionId !== callSessionId) return false;
   if (queueItemId && event.queueItemId !== queueItemId) return false;
   if (phone && normalizePhone(event.phone || "") !== phone) return false;
-  if (extensionId && String(event.extensionId || "") !== String(extensionId)) return false;
-  if (agentEmail && cleanLower(event.agentEmail, 180) !== agentEmail) return false;
+  if (extensionId && !extensionMatched) return false;
+  if (agentEmail && !extensionMatched && canonicalAgentEmail(event.agentEmail) !== agentEmail) return false;
   return true;
 }
 
@@ -509,6 +520,7 @@ module.exports = {
   DEFAULT_SOURCE_SERVICE,
   buildCoachSessionId,
   buildSessionMetadataFromBinding,
+  canonicalAgentEmail,
   createLiveCoachMongoBridge,
   eventMatchesFilters,
   normalizeCoachCallEvent,

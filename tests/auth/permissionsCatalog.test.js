@@ -54,11 +54,13 @@ test("ROLE_DEFAULT_PERMISSIONS — internal-agent has queue.dial + queue.dispose
   const perms = ROLE_DEFAULT_PERMISSIONS["internal-agent"];
   assert.ok(perms.includes("queue.dial"));
   assert.ok(perms.includes("queue.dispose"));
+  assert.ok(perms.includes("calls.recordings"));
 });
 
 test("ROLE_DEFAULT_PERMISSIONS — internal-agent does NOT have agents.manage", () => {
   const perms = ROLE_DEFAULT_PERMISSIONS["internal-agent"];
   assert.equal(perms.includes("agents.manage"), false);
+  assert.equal(perms.includes("calls.read"), false);
 });
 
 test("ROLE_DEFAULT_PERMISSIONS — manager has agents.manage + pacing.write", () => {
@@ -100,6 +102,7 @@ test("hasPermission — internal-agent has role defaults", () => {
   const agent = { role: "internal-agent", permissions: [] };
   assert.equal(hasPermission(agent, "queue.dial"), true);
   assert.equal(hasPermission(agent, "queue.dispose"), true);
+  assert.equal(hasPermission(agent, "calls.recordings"), true);
   assert.equal(hasPermission(agent, "agents.manage"), false);
 });
 
@@ -143,6 +146,7 @@ test("effectivePermissionsFor — agent role + extra grants merges", () => {
   });
   assert.ok(result.includes("queue.dial"));      // role default
   assert.ok(result.includes("queue.dispose"));    // role default
+  assert.ok(result.includes("calls.recordings")); // role default
   assert.ok(result.includes("agents.manage"));    // extra grant
   assert.equal(result.includes("system.deploy"), false);
 });

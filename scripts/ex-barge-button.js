@@ -520,6 +520,22 @@ function summarizeArmedBarge(arm) {
   };
 }
 
+function boundedMs(value, fallback, { min = 0, max = 30000 } = {}) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.max(min, Math.min(max, parsed));
+}
+
+async function waitForArmedBarge(key, waitMs = 0) {
+  const started = Date.now();
+  for (;;) {
+    const arm = armedBarges.get(key);
+    if (arm && !arm.released && !arm.callSession?.disposed) return arm;
+    if (Date.now() - started >= waitMs) return null;
+    await sleep(25);
+  }
+}
+
 function buildRecorder(prefix, steps, events) {
   const log = (m) => { steps.push(m); console.log(`[${prefix}] ${m}`); };
   const recordEvent = (type, extra = {}) => {
@@ -549,6 +565,13 @@ async function dialWithTimeout(softphone, dial) {
 // Safety cap: a play must never block the handler forever if the leg never disposes
 // or sendAudioPaced never reports finished. Force a hangup + release at the cap.
 const PLAY_HARD_CAP_MS = Number(env("EX_BARGE_PLAY_HARD_CAP_MS", "120000")) || 120000;
+
+// /arm must confirm the *82 leg actually JOINED a connected call (inbound media)
+// before it reports armed:true. A *82 dial to an extension whose call is still
+// RINGING the far end (no media yet) gets 486/no-media -- reporting armed:true
+// there made the client believe it was ready and never re-arm once the call
+// actually connected to voicemail. Wait this long for first inbound RTP.
+const ARM_MEDIA_CONFIRM_MS = Number(env("EX_BARGE_ARM_MEDIA_CONFIRM_MS", "3500")) || 3500;
 
 async function armBarge(softphone, { monitorExt, agentExtNumber, code }) {
   if (!softphone) throw new Error("no registered monitor softphone for this barge");
@@ -1047,10 +1070,21 @@ function main() {
           if (req.url === "/arm") {
             const sp = await getMonitorSoftphone(monitorExt, { region });
             const arm = await armBarge(sp, { monitorExt, agentExtNumber, code });
+            // Only report armed:true once the *82 leg has joined a CONNECTED call
+            // (first inbound RTP). A reused live arm already has media; a fresh dial
+            // into a still-ringing target gets 486/no-media -- tear that dead leg
+            // down so it can't be falsely reused, and tell the caller to retry.
+            await waitForArmedMedia(arm, ARM_MEDIA_CONFIRM_MS);
+            const mediaUp = arm.firstPt !== null && !arm.released && !arm.callSession?.disposed;
+            if (!mediaUp && !arm.reused) {
+              try { arm.callSession?.hangup?.(); } catch {}
+              if (!arm.released) { arm.released = true; arm.releasedAt = new Date().toISOString(); }
+              armedBarges.delete(arm.key);
+            }
             res.writeHead(200, { "content-type": "application/json" });
             res.end(JSON.stringify({
               ok: true,
-              armed: true,
+              armed: mediaUp,
               reused: Boolean(arm.reused),
               arm: summarizeArmedBarge(arm),
             }, null, 2));
@@ -1074,8 +1108,26 @@ function main() {
             cueMaxWaitMs: Number.isFinite(Number(o.cueMaxWaitMs)) && o.cueMaxWaitMs !== "" ? Number(o.cueMaxWaitMs) : cueMaxWaitDefault,
             waitForRelease: o.waitForRelease !== false,
           };
-          const arm = armedBarges.get(key);
+          const requireArmed = o.requireArmed === true || String(o.requireArmed || "").toLowerCase() === "true";
+          const armWaitMs = boundedMs(o.armWaitMs, requireArmed ? 2000 : 0, { min: 0, max: 15000 });
+          const arm = armedBarges.get(key) || (requireArmed ? await waitForArmedBarge(key, armWaitMs) : null);
           if (!arm) {
+            if (requireArmed) {
+              res.writeHead(200, { "content-type": "application/json" });
+              res.end(JSON.stringify({
+                ok: false,
+                error: `armed barge leg not ready after ${armWaitMs}ms`,
+                reason: "arm-not-ready",
+                monitorExt,
+                key,
+                agentExtNumber,
+                code,
+                requireArmed: true,
+                armWaitMs,
+                armed: monitorsStatus().armed,
+              }, null, 2));
+              return;
+            }
             const sp = await getMonitorSoftphone(monitorExt, { region });
             const r = await barge(sp, { agentExtNumber, code, ...params });
             res.writeHead(200, { "content-type": "application/json" });

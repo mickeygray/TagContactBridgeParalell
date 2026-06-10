@@ -1051,6 +1051,10 @@ class OpenAiRealtimeSttChannel {
     this.turnDetectionSupported = openAiRealtimeTranscriptionSupportsTurnDetection(this.model);
     this.semanticEagerness = semanticEagerness || "high";
     this.noiseReduction = noiseReduction || "near_field";
+    this.serverVadSilenceMs = Math.max(
+      200,
+      Math.min(3000, Number(process.env.LIVE_COACH_OPENAI_SERVER_VAD_SILENCE_MS || "1000") || 1000),
+    );
     this.provisionalEnabled = provisionalEnabled !== false;
     this.maxBufferedBytes = Math.max(8000, Number(maxBufferedBytes) || 240_000);
     this.ws = null;
@@ -1152,7 +1156,7 @@ class OpenAiRealtimeSttChannel {
         type: "server_vad",
         threshold: 0.5,
         prefix_padding_ms: 300,
-        silence_duration_ms: 500,
+        silence_duration_ms: this.serverVadSilenceMs,
         create_response: false,
         interrupt_response: false,
       };

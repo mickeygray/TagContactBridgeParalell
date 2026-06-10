@@ -12,6 +12,7 @@ const http = require("http");
 const http2 = require("http2");
 const net = require("net");
 const path = require("path");
+const fs = require("fs");
 
 require("dotenv").config({
   path: path.resolve(__dirname, "..", ".env"),
@@ -40,7 +41,12 @@ const WEB_TARGET_PORT = cleanInt(
   readFlag(argv, "--web-port", process.env.TAG_WEBHOOK_WEB_TARGET_PORT || "5001"),
   5001,
 );
+const AUDIO_TARGET_PORT = cleanInt(
+  readFlag(argv, "--audio-port", process.env.TAG_WEBHOOK_AUDIO_TARGET_PORT || process.env.INBOUND_GATEWAY_PORT || "4001"),
+  4001,
+);
 const GRPC_TARGET = `http://127.0.0.1:${GRPC_TARGET_PORT}`;
+const AUDIO_DIR = path.resolve(__dirname, "..", "runtime", "audio");
 
 function headerValue(headers, name) {
   const value = headers[name] || headers[String(name).toLowerCase()];
@@ -68,6 +74,69 @@ function filterResponseHeaders(headers = {}) {
     out[lower] = value;
   }
   return out;
+}
+
+function targetPortForPath(pathName) {
+  return String(pathName || "").startsWith("/audio/") ? AUDIO_TARGET_PORT : WEB_TARGET_PORT;
+}
+
+function resolveAudioPath(pathName) {
+  const stripped = decodeURIComponent(String(pathName || "").split("?")[0] || "")
+    .replace(/^\/audio\/?/, "")
+    .replace(/^\/+/, "");
+  const resolved = path.resolve(AUDIO_DIR, stripped);
+  if (!resolved.startsWith(AUDIO_DIR + path.sep) && resolved !== AUDIO_DIR) return null;
+  return resolved;
+}
+
+function audioContentType(filePath) {
+  const ext = path.extname(filePath).toLowerCase();
+  if (ext === ".wav") return "audio/wav";
+  if (ext === ".mp3") return "audio/mpeg";
+  if (ext === ".raw") return "application/octet-stream";
+  return "application/octet-stream";
+}
+
+function serveAudioH2(stream, headers) {
+  const filePath = resolveAudioPath(headers[":path"]);
+  if (!filePath || !fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) {
+    respondJson(stream, 404, { ok: false, error: "audio-not-found" });
+    return true;
+  }
+  const stat = fs.statSync(filePath);
+  stream.respond({
+    ":status": 200,
+    "content-type": audioContentType(filePath),
+    "content-length": String(stat.size),
+    "cache-control": "public, max-age=3600",
+  });
+  if (String(headers[":method"] || "GET").toUpperCase() === "HEAD") {
+    stream.end();
+    return true;
+  }
+  fs.createReadStream(filePath).pipe(stream);
+  return true;
+}
+
+function serveAudioHttp1(req, res) {
+  const filePath = resolveAudioPath(req.url);
+  if (!filePath || !fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) {
+    res.writeHead(404, { "content-type": "application/json; charset=utf-8" });
+    res.end(JSON.stringify({ ok: false, error: "audio-not-found" }));
+    return true;
+  }
+  const stat = fs.statSync(filePath);
+  res.writeHead(200, {
+    "content-type": audioContentType(filePath),
+    "content-length": String(stat.size),
+    "cache-control": "public, max-age=3600",
+  });
+  if (String(req.method || "GET").toUpperCase() === "HEAD") {
+    res.end();
+    return true;
+  }
+  fs.createReadStream(filePath).pipe(res);
+  return true;
 }
 
 function respondJson(stream, status, body) {
@@ -135,6 +204,11 @@ function proxyGrpc(stream, headers) {
 function proxyWeb(stream, headers) {
   const method = String(headers[":method"] || "GET").toUpperCase();
   const targetPath = String(headers[":path"] || "/");
+  if (targetPath.startsWith("/audio/")) {
+    serveAudioH2(stream, headers);
+    return;
+  }
+  const targetPort = targetPortForPath(targetPath);
   const requestHeaders = {};
 
   for (const [key, value] of Object.entries(headers || {})) {
@@ -144,11 +218,11 @@ function proxyWeb(stream, headers) {
     if (lower === "te") continue;
     requestHeaders[lower] = value;
   }
-  requestHeaders.host = `127.0.0.1:${WEB_TARGET_PORT}`;
+  requestHeaders.host = `127.0.0.1:${targetPort}`;
 
   const request = http.request({
     hostname: "127.0.0.1",
-    port: WEB_TARGET_PORT,
+    port: targetPort,
     method,
     path: targetPath,
     headers: requestHeaders,
@@ -164,7 +238,7 @@ function proxyWeb(stream, headers) {
     if (!stream.destroyed) {
       respondJson(stream, 502, {
         ok: false,
-        error: `Web app unavailable on ${WEB_TARGET_PORT}: ${error.message}`,
+        error: `Web app unavailable on ${targetPort}: ${error.message}`,
       });
     }
   });
@@ -174,15 +248,20 @@ function proxyWeb(stream, headers) {
 }
 
 function proxyWebHttp1(req, res) {
+  if (String(req.url || "").startsWith("/audio/")) {
+    serveAudioHttp1(req, res);
+    return;
+  }
+  const targetPort = targetPortForPath(req.url || "/");
   const requestHeaders = { ...(req.headers || {}) };
   delete requestHeaders.connection;
   delete requestHeaders.upgrade;
   delete requestHeaders["keep-alive"];
-  requestHeaders.host = `127.0.0.1:${WEB_TARGET_PORT}`;
+  requestHeaders.host = `127.0.0.1:${targetPort}`;
 
   const request = http.request({
     hostname: "127.0.0.1",
-    port: WEB_TARGET_PORT,
+    port: targetPort,
     method: req.method || "GET",
     path: req.url || "/",
     headers: requestHeaders,
@@ -197,7 +276,7 @@ function proxyWebHttp1(req, res) {
     }
     res.end(JSON.stringify({
       ok: false,
-      error: `Web app unavailable on ${WEB_TARGET_PORT}: ${error.message}`,
+      error: `Web app unavailable on ${targetPort}: ${error.message}`,
     }));
   });
 
@@ -248,5 +327,7 @@ server.on("error", (error) => {
 
 server.listen(PORT, "127.0.0.1", () => {
   // eslint-disable-next-line no-console
-  console.log(`[tag-webhook-front] h1+h2c :${PORT} | grpc -> :${GRPC_TARGET_PORT} | web -> :${WEB_TARGET_PORT}`);
+  console.log(
+    `[tag-webhook-front] h1+h2c :${PORT} | grpc -> :${GRPC_TARGET_PORT} | web -> :${WEB_TARGET_PORT} | audio -> :${AUDIO_TARGET_PORT}`,
+  );
 });

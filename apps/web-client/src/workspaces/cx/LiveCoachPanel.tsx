@@ -323,7 +323,7 @@ function reduceEvent(state: CoachState, payload: LiveCoachEvent): CoachState {
       },
     });
   }
-  if (payload.type === "session.stop" || payload.type === "session.stale") {
+  if (payload.type === "session.stop" || payload.type === "session.stale" || payload.type === "session.pruned") {
     // Clear conversation items when the session ends so a stale board
     // doesn't carry the prior call's transcript into the next one.
     patch({

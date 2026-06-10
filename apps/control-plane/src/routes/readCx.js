@@ -937,7 +937,7 @@ function createReadCxRouter(auth) {
   // → Logics. Used by the CX workspace center panel when a call
   // connects or an operator types a phone, so the case form can
   // auto-populate from whichever tier has the best record.
-  router.get("/recordings/library", auth.requireAuth, auth.requireUser, async (req, res) => {
+  router.get("/recordings/library", auth.requireAuth, auth.requireUser, auth.requirePermission("calls.recordings"), async (req, res) => {
     try {
       const config = getSharedConfig();
       const archiveConfig = config.recordingArchive || {};
@@ -1013,7 +1013,7 @@ function createReadCxRouter(auth) {
     }
   });
 
-  router.get("/recordings/play/:fileId", auth.requireAuth, auth.requireUser, async (req, res) => {
+  router.get("/recordings/play/:fileId", auth.requireAuth, auth.requireUser, auth.requirePermission("calls.recordings"), async (req, res) => {
     try {
       return await proxyDriveFile(req, res, req.params.fileId);
     } catch (error) {
@@ -1021,7 +1021,7 @@ function createReadCxRouter(auth) {
     }
   });
 
-  router.post("/recordings/play-ticket/:fileId", auth.requireAuth, auth.requireUser, async (req, res) => {
+  router.post("/recordings/play-ticket/:fileId", auth.requireAuth, auth.requireUser, auth.requirePermission("calls.recordings"), async (req, res) => {
     try {
       const config = getSharedConfig();
       const archiveConfig = config.recordingArchive || {};
@@ -1075,6 +1075,7 @@ function createReadCxRouter(auth) {
     "/recordings/call/:domain/:telephonySessionId",
     auth.requireAuth,
     auth.requireUser,
+    auth.requirePermission("calls.recordings"),
     requireCxDomainAccess,
     async (req, res) => {
       try {

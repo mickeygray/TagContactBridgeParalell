@@ -282,7 +282,7 @@ export async function streamLiveCoachEventsWithRetry(
 }
 
 export function isLiveCoachTerminal(status: string | null | undefined) {
-  return ["stopped", "stale", "voicemail_rejected"].includes(String(status || ""));
+  return ["stopped", "stale", "voicemail_rejected", "released"].includes(String(status || ""));
 }
 
 export function isLiveCoachRejected(session: LiveCoachSession | null | undefined) {

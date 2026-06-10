@@ -424,6 +424,26 @@ const AUTO_SERVE_DELAY_SECONDS = 1;
 const AUTO_SERVE_HANDOFF_DELAY_SECONDS = 0;
 const AUTO_SERVE_STARTUP_DELAY_SECONDS = 8;
 const BACKEND_NEXT_DIAL_HANDOFF_HOLD_MS = 10_000;
+// Must outlast the headless /arm media-confirm window (EX_BARGE_ARM_MEDIA_CONFIRM_MS,
+// 3500ms) plus round-trip so a cold arm at button-press has time to confirm a live
+// join before we give up. Background lifecycle may only warm/register the monitor;
+// the explicit voicemail button is the only path that may arm/barge.
+const VOICEMAIL_ARM_READY_WAIT_MS = 4_500;
+// One bounded window from button click: keep trying to join only while the
+// voicemail cue is still plausible, then let the barge service spend the
+// remaining time listening for silence/beep. Do not stack arm-wait + cue-wait.
+const VOICEMAIL_DROP_CUE_WINDOW_MS = 15_000;
+// The *82 monitor can only JOIN a connected call. The outbound call is marked
+// onCall the instant it is dialed (still ringing the prospect), so the first arm
+// almost always lands before the call connects to voicemail and reports armed:false.
+// Re-arm on a cadence until the server confirms a live (media-up) join or the call
+// ends -- this is what makes the drop reliable instead of racing the connect. Delay is
+// strictly > the server media cap so a re-arm never races an in-flight confirm.
+const VOICEMAIL_ARM_RETRY_DELAY_MS = 3_000;
+// Ceiling is a runaway guard ONLY -- the loop already terminates deterministically when
+// the call ends (armKey changes). It MUST be large enough never to expire mid-call: a
+// cell-forward can ring 30-45s before voicemail. ~30 x (3.5s server + 3s delay) ~= 3 min.
+const VOICEMAIL_ARM_MAX_RETRIES = 30;
 const STALE_SERVED_QUEUE_RESET_MS = 20_000;
 const SHOW_POSTDATE_DISPOSITION = true;
 type AutoServeCountdownMode = "startup" | "next";
@@ -3307,7 +3327,12 @@ export function CXWorkspace() {
   const lastTerminalOutcomeWorkflowRef = React.useRef<string | null>(null);
   const voicemailArmKeyRef = React.useRef<string | null>(null);
   const voicemailArmInFlightRef = React.useRef<string | null>(null);
+  const voicemailArmPromiseRef = React.useRef<{ key: string; promise: Promise<unknown> } | null>(null);
   const voicemailArmReleaseAfterInflightRef = React.useRef<string | null>(null);
+  const voicemailArmRetryTimerRef = React.useRef<number | null>(null);
+  const voicemailArmRetryCountRef = React.useRef(0);
+  const voicemailWarmKeyRef = React.useRef<string | null>(null);
+  const voicemailWarmInFlightRef = React.useRef<string | null>(null);
 
   function clearServedQueueSelection() {
     setServingQueueKey(null);
@@ -3326,22 +3351,188 @@ export function CXWorkspace() {
     });
   }
 
+  function currentVoicemailArmKey() {
+    const activeQueueKey = String(servedQueueTicketId || servedQueueActionKey || "").trim();
+    if (!currentCallSessionId || !activeQueueKey) return null;
+    return `${caseDomain}:${currentCallSessionId}:${activeQueueKey}`;
+  }
+
+  function startVoicemailWarm(warmKey: string) {
+    if (!warmKey) return;
+    if (voicemailWarmKeyRef.current === warmKey || voicemailWarmInFlightRef.current === warmKey) return;
+    voicemailWarmInFlightRef.current = warmKey;
+    void voicemailDrop
+      .mutateAsync({ action: "warm" })
+      .then(() => {
+        if (voicemailWarmInFlightRef.current === warmKey) {
+          voicemailWarmKeyRef.current = warmKey;
+        }
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        if (voicemailWarmInFlightRef.current === warmKey) {
+          voicemailWarmInFlightRef.current = null;
+        }
+      });
+  }
+
+  function waitForVoicemailArm(key: string, timeoutMs = VOICEMAIL_ARM_READY_WAIT_MS) {
+    const tracked = voicemailArmPromiseRef.current;
+    if (!tracked || tracked.key !== key) return Promise.resolve();
+    return Promise.race([
+      tracked.promise.catch(() => undefined),
+      new Promise((resolve) => window.setTimeout(resolve, timeoutMs)),
+    ]);
+  }
+
+  function clearVoicemailArmRetry() {
+    if (voicemailArmRetryTimerRef.current != null) {
+      window.clearTimeout(voicemailArmRetryTimerRef.current);
+      voicemailArmRetryTimerRef.current = null;
+    }
+    voicemailArmRetryCountRef.current = 0;
+  }
+
+  // The first arm almost always fires while the call is still ringing the prospect
+  // (the *82 leg has nothing connected to join yet -> armed:false). Keep re-arming on
+  // a cadence until the server confirms a live join or the call ends, so the drop is
+  // ready the moment the call connects to voicemail -- mirrors barging by hand once
+  // you hear the mailbox. Bounded by VOICEMAIL_ARM_MAX_RETRIES; stops on call change.
+  function scheduleVoicemailArmRetry(armKey: string) {
+    if (voicemailArmRetryTimerRef.current != null) return; // a retry is already pending
+    if (currentVoicemailArmKey() !== armKey) return; // call changed/ended -> stop
+    if (voicemailArmRetryCountRef.current >= VOICEMAIL_ARM_MAX_RETRIES) return;
+    voicemailArmRetryCountRef.current += 1;
+    voicemailArmRetryTimerRef.current = window.setTimeout(() => {
+      voicemailArmRetryTimerRef.current = null;
+      if (currentVoicemailArmKey() !== armKey) return; // verify it is still this live call
+      startVoicemailArm(armKey);
+    }, VOICEMAIL_ARM_RETRY_DELAY_MS);
+  }
+
+  function startVoicemailArm(armKey: string) {
+    if (!armKey) return;
+    if (voicemailArmKeyRef.current === armKey || voicemailArmInFlightRef.current === armKey) return;
+    // We are attempting now; cancel any pending retry timer so we never double-fire.
+    if (voicemailArmRetryTimerRef.current != null) {
+      window.clearTimeout(voicemailArmRetryTimerRef.current);
+      voicemailArmRetryTimerRef.current = null;
+    }
+    voicemailArmInFlightRef.current = armKey;
+    const armPromise = voicemailDrop.mutateAsync({ action: "arm" });
+    voicemailArmPromiseRef.current = { key: armKey, promise: armPromise };
+    void armPromise
+      .then((result) => {
+        // The monitor is only truly armed once the *82 leg JOINED a connected call.
+        // Trust the server's armed flag -- a dialed-but-not-joined leg reports false.
+        const armed = Boolean((result as { armed?: boolean } | undefined)?.armed);
+        if (voicemailArmInFlightRef.current === armKey) {
+          const releaseReason = voicemailArmReleaseAfterInflightRef.current;
+          if (armed) {
+            clearVoicemailArmRetry();
+            voicemailArmKeyRef.current = armKey;
+            if (releaseReason) {
+              voicemailArmInFlightRef.current = null;
+              voicemailArmReleaseAfterInflightRef.current = null;
+              releaseArmedVoicemailDrop(releaseReason);
+            }
+          } else {
+            // Dialed but the call had not connected yet -- not armed. Retry until it does.
+            voicemailArmKeyRef.current = null;
+            if (releaseReason) {
+              voicemailArmReleaseAfterInflightRef.current = null;
+            } else {
+              scheduleVoicemailArmRetry(armKey);
+            }
+          }
+        } else if (armed) {
+          void voicemailDrop.mutateAsync({ action: "release", reason: "stale-arm-completed" }).catch(() => undefined);
+        }
+      })
+      .catch(() => {
+        if (voicemailArmInFlightRef.current === armKey) {
+          voicemailArmKeyRef.current = null;
+          voicemailArmPromiseRef.current = null;
+          if (voicemailArmReleaseAfterInflightRef.current) {
+            voicemailArmReleaseAfterInflightRef.current = null;
+          } else {
+            scheduleVoicemailArmRetry(armKey);
+          }
+        }
+      })
+      .finally(() => {
+        if (voicemailArmPromiseRef.current?.key === armKey) {
+          voicemailArmPromiseRef.current = null;
+        }
+        if (voicemailArmInFlightRef.current === armKey) {
+          voicemailArmInFlightRef.current = null;
+        }
+      });
+  }
+
+  function remainingVoicemailDropCueMs(deadlineAt: number) {
+    return Math.max(0, deadlineAt - Date.now());
+  }
+
+  async function ensureVoicemailArmReady(deadlineAt: number) {
+    const armKey = currentVoicemailArmKey();
+    if (!armKey) return;
+    while (currentVoicemailArmKey() === armKey && remainingVoicemailDropCueMs(deadlineAt) > 0) {
+      if (voicemailArmKeyRef.current === armKey) return;
+      if (voicemailArmInFlightRef.current !== armKey) {
+        startVoicemailArm(armKey);
+      }
+      await waitForVoicemailArm(
+        armKey,
+        Math.min(VOICEMAIL_ARM_READY_WAIT_MS, remainingVoicemailDropCueMs(deadlineAt)),
+      );
+      if (voicemailArmKeyRef.current === armKey) return;
+      await new Promise((resolve) => window.setTimeout(resolve, Math.min(150, remainingVoicemailDropCueMs(deadlineAt))));
+    }
+    clearVoicemailArmRetry();
+    if (currentVoicemailArmKey() !== armKey) {
+      throw new Error("Call ended before the voicemail monitor could join.");
+    }
+    if (voicemailArmKeyRef.current !== armKey) {
+      throw new Error("Voicemail monitor could not join before the voicemail cue window closed.");
+    }
+  }
+
   async function runHeadlessVoicemailDrop() {
-    // Server-side serving: the control-plane resolves THIS agent's barge monitor,
-    // dialable target extension, and recorded voicemail from their profile, then
-    // drives the headless barge. We just confirm playback + release here.
-    const response = (await voicemailDrop.mutateAsync({ action: "play" })) as
+    // The drop joins the (now voicemail-connected) call and plays the agent's recording.
+    // Fast path: a SHORT best-effort pre-arm so the play can reuse an already-joined leg.
+    // But the drop does NOT depend on the pre-arm -- requireArmed:false lets the headless
+    // fall back to the self-contained one-shot barge (dial *82 -> wait for the media/silence
+    // cue -> play), which is the logic that reliably worked mid-call (the same thing a
+    // human does barging a playing mailbox by hand). We never arm on CONNECT -- that silent
+    // join into live conversations was the poison; warm-on-connect keeps the monitor
+    // registered so either path dials fast at button time.
+    const armDeadlineAt = Date.now() + VOICEMAIL_ARM_READY_WAIT_MS;
+    try {
+      await ensureVoicemailArmReady(armDeadlineAt);
+    } catch {
+      // Pre-arm did not join in the fast-path budget -- fall through to the one-shot barge.
+    }
+    const response = (await voicemailDrop.mutateAsync({
+      action: "play",
+      requireArmed: false,
+      armWaitMs: VOICEMAIL_ARM_READY_WAIT_MS,
+      cueMaxWaitMs: VOICEMAIL_DROP_CUE_WINDOW_MS,
+    })) as
       | { result?: Record<string, unknown> }
       | undefined;
     const result = (response?.result ?? response) as Record<string, unknown> | undefined;
     if (!result?.played || !result?.released) {
       throw new Error("Headless monitor did not confirm voicemail playback and release");
     }
+    clearVoicemailArmRetry();
     voicemailArmKeyRef.current = null;
+    voicemailArmPromiseRef.current = null;
     return result;
   }
 
   function releaseArmedVoicemailDrop(reason: string) {
+    clearVoicemailArmRetry();
     if (!voicemailArmKeyRef.current && voicemailArmInFlightRef.current) {
       voicemailArmReleaseAfterInflightRef.current = reason;
       return;
@@ -3349,6 +3540,7 @@ export function CXWorkspace() {
     if (!voicemailArmKeyRef.current && !voicemailArmInFlightRef.current) return;
     voicemailArmKeyRef.current = null;
     voicemailArmInFlightRef.current = null;
+    voicemailArmPromiseRef.current = null;
     voicemailArmReleaseAfterInflightRef.current = null;
     void voicemailDrop.mutateAsync({ action: "release", reason }).catch(() => undefined);
   }
@@ -3365,6 +3557,7 @@ export function CXWorkspace() {
         submitQueueDisposition("did-not-answer", "Voicemail", { releaseVoicemailArm: false });
       })
       .catch((error) => {
+        releaseArmedVoicemailDrop("voicemail-drop-failed");
         setVoicemailDropPending(false);
         toast.error("Voicemail drop failed", {
           description: error instanceof Error ? error.message : "Headless monitor did not finish the recording.",
@@ -3761,35 +3954,8 @@ export function CXWorkspace() {
     if (!CX_VOICEMAIL_BUTTON_ENABLED) return;
     const activeQueueKey = String(servedQueueTicketId || servedQueueActionKey || "").trim();
     if (!currentCallSessionId || !activeQueueKey || !currentExtensionId) return;
-    const armKey = `${caseDomain}:${currentCallSessionId}:${activeQueueKey}`;
-    if (voicemailArmKeyRef.current === armKey || voicemailArmInFlightRef.current === armKey) return;
-    voicemailArmInFlightRef.current = armKey;
-    void voicemailDrop
-      .mutateAsync({ action: "arm" })
-      .then(() => {
-        if (voicemailArmInFlightRef.current === armKey) {
-          const releaseReason = voicemailArmReleaseAfterInflightRef.current;
-          voicemailArmKeyRef.current = armKey;
-          if (releaseReason) {
-            voicemailArmInFlightRef.current = null;
-            voicemailArmReleaseAfterInflightRef.current = null;
-            releaseArmedVoicemailDrop(releaseReason);
-          }
-        } else {
-          void voicemailDrop.mutateAsync({ action: "release", reason: "stale-arm-completed" }).catch(() => undefined);
-        }
-      })
-      .catch(() => {
-        if (voicemailArmInFlightRef.current === armKey) {
-          voicemailArmKeyRef.current = null;
-          voicemailArmReleaseAfterInflightRef.current = null;
-        }
-      })
-      .finally(() => {
-        if (voicemailArmInFlightRef.current === armKey) {
-          voicemailArmInFlightRef.current = null;
-        }
-      });
+    const warmKey = `${caseDomain}:${currentCallSessionId}:${activeQueueKey}`;
+    startVoicemailWarm(warmKey);
   }, [
     caseDomain,
     currentCallSessionId,
@@ -3804,6 +3970,9 @@ export function CXWorkspace() {
     releaseArmedVoicemailDrop("call-session-ended");
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentCallSessionId]);
+  // Leak guard: cancel any pending re-arm timer if the workspace unmounts mid-call.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  React.useEffect(() => () => clearVoicemailArmRetry(), []);
   const updateCase = useCxLogicsUpdateCase(caseDomain);
   // Case detail (calls + texts) — also case-scoped.
   const clientDetail = useClientDetail(caseDomain, resolvedCaseId);

@@ -15,7 +15,7 @@ const {
   createLiveCoachStreamWatcher,
 } = require("./liveCoachStreamWatcherService");
 
-const TERMINAL_SESSION_STATUSES = Object.freeze(["stopped", "stale", "voicemail_rejected"]);
+const TERMINAL_SESSION_STATUSES = Object.freeze(["stopped", "stale", "voicemail_rejected", "released"]);
 const GRPC_SESSION_SOURCES = Object.freeze(["grpc", "grpc-mongo", "grpc-live-bridge", "mongo-cx"]);
 const MEMORY_LIMITS = Object.freeze({
   provisionalTranscripts: 40,
@@ -24,6 +24,8 @@ const MEMORY_LIMITS = Object.freeze({
   coachingSuggestions: 140,
   holds: 120,
 });
+const DEFAULT_THOUGHT_BUFFER_MAX_CHARS = 900;
+const DEFAULT_THOUGHT_BUFFER_MAX_CHUNKS = 5;
 
 function timestampForFile(date = new Date()) {
   return date.toISOString().replace(/[:.]/g, "-");
@@ -38,6 +40,15 @@ function cleanText(value, maxLength = 4000) {
 
 function cleanLower(value, maxLength = 4000) {
   return cleanText(value, maxLength).toLowerCase();
+}
+
+function canonicalAgentEmail(value) {
+  const email = cleanLower(value, 180);
+  const at = email.indexOf("@");
+  if (at <= 0) return email;
+  const local = email.slice(0, at).replace(/\+.*/, "");
+  const domain = email.slice(at + 1);
+  return local && domain ? `${local}@${domain}` : email;
 }
 
 function ensureDir(dir) {
@@ -187,7 +198,11 @@ function agentMatchesSession(session = {}, identity = {}) {
   if (identity.agentExtension && metadata.agentExtension && identity.agentExtension !== metadata.agentExtension) {
     return false;
   }
-  if (identity.agentEmail && metadata.agentEmail && identity.agentEmail !== cleanLower(metadata.agentEmail, 180)) {
+  if (
+    identity.agentEmail &&
+    metadata.agentEmail &&
+    canonicalAgentEmail(identity.agentEmail) !== canonicalAgentEmail(metadata.agentEmail)
+  ) {
     return false;
   }
   return true;
@@ -207,6 +222,13 @@ function createMemoryState() {
     contexts: [],
     coachingSuggestions: [],
     holds: [],
+  };
+}
+
+function createThoughtBufferState() {
+  return {
+    unresolved: [],
+    nextId: 1,
   };
 }
 
@@ -357,6 +379,163 @@ function normalizeJudgeKeyRows(input = []) {
   return normalized;
 }
 
+function normalizeThoughtBufferItem(item = {}) {
+  const text = cleanText(item.text || item.phraseText || "", 420);
+  if (!text) return null;
+  const matches = normalizeContextCandidates(item.matches || item.contextMatches || [], { limit: 8 });
+  return {
+    vadId: cleanText(item.vadId || item.id || "", 120),
+    at: cleanText(item.at || "", 80),
+    text,
+    charCount: text.length,
+    approvedKeys: Array.isArray(item.approvedKeys)
+      ? item.approvedKeys.map((key) => cleanText(key, 120)).filter(Boolean).slice(0, 8)
+      : matches.map((match) => match.key).filter(Boolean).slice(0, 8),
+    matches,
+    contextBrief: cleanText(item.contextBrief || item.memoryBrief?.whatHappened || "", 280),
+  };
+}
+
+function getThoughtBufferItems(session = {}, {
+  maxChars = DEFAULT_THOUGHT_BUFFER_MAX_CHARS,
+  maxChunks = DEFAULT_THOUGHT_BUFFER_MAX_CHUNKS,
+} = {}) {
+  const items = Array.isArray(session.thoughtBuffer?.unresolved) ? session.thoughtBuffer.unresolved : [];
+  const selected = [];
+  let chars = 0;
+  for (let index = items.length - 1; index >= 0 && selected.length < maxChunks; index -= 1) {
+    const normalized = normalizeThoughtBufferItem(items[index]);
+    if (!normalized) continue;
+    if (selected.length && chars + normalized.charCount > maxChars) break;
+    chars += normalized.charCount;
+    selected.unshift(normalized);
+  }
+  return selected;
+}
+
+function contextToThoughtBufferItem(session = {}, context = {}, transcript = {}) {
+  if (!session.thoughtBuffer) session.thoughtBuffer = createThoughtBufferState();
+  const vadId = cleanText(
+    context.thoughtVadId ||
+      context.sourceTranscriptId ||
+      transcript.id ||
+      `vad-${String(session.thoughtBuffer.nextId || 1).padStart(4, "0")}`,
+    120,
+  );
+  session.thoughtBuffer.nextId = Math.max(1, Number(session.thoughtBuffer.nextId || 1) + 1);
+  const text = cleanText(context.phraseText || context.text || transcript.text || "", 900);
+  const memoryBrief = normalizeMemoryBrief(context.memoryBrief || context.miniJudgement?.memoryBrief || {});
+  const matches = normalizeContextCandidates(context.matches || [], { limit: 8 });
+  return normalizeThoughtBufferItem({
+    vadId,
+    at: context.at || transcript.at || new Date().toISOString(),
+    text,
+    approvedKeys: context.miniJudgement?.selectedKeys || matches.map((match) => match.key),
+    matches,
+    contextBrief: memoryBrief?.whatHappened || context.miniJudgement?.transcriptMeaning || context.actionReason || "",
+  });
+}
+
+function appendThoughtBufferItem(session, context = {}, transcript = {}, options = {}) {
+  if (!session) return null;
+  if (!session.thoughtBuffer) session.thoughtBuffer = createThoughtBufferState();
+  const item = contextToThoughtBufferItem(session, context, transcript);
+  if (!item) return null;
+  session.thoughtBuffer.unresolved.push(item);
+  const maxChars = Math.max(120, Number(options.maxChars || DEFAULT_THOUGHT_BUFFER_MAX_CHARS));
+  const maxChunks = Math.max(1, Number(options.maxChunks || DEFAULT_THOUGHT_BUFFER_MAX_CHUNKS));
+  session.thoughtBuffer.unresolved = getThoughtBufferItems(session, { maxChars, maxChunks });
+  return item;
+}
+
+function clearThoughtBuffer(session, reason = "released") {
+  if (!session) return [];
+  if (!session.thoughtBuffer) session.thoughtBuffer = createThoughtBufferState();
+  const cleared = session.thoughtBuffer.unresolved || [];
+  session.thoughtBuffer.unresolved = [];
+  session.thoughtBuffer.lastClearedAt = new Date().toISOString();
+  session.thoughtBuffer.lastClearReason = cleanText(reason, 120);
+  return cleared;
+}
+
+function buildThoughtBufferSnapshot(session = {}, context = {}, transcript = {}, options = {}) {
+  const maxChars = Math.max(120, Number(options.maxChars || DEFAULT_THOUGHT_BUFFER_MAX_CHARS));
+  const maxChunks = Math.max(1, Number(options.maxChunks || DEFAULT_THOUGHT_BUFFER_MAX_CHUNKS));
+  const unresolved = getThoughtBufferItems(session, { maxChars, maxChunks });
+  const current = contextToThoughtBufferItem(
+    { ...session, thoughtBuffer: { ...(session.thoughtBuffer || {}), nextId: session.thoughtBuffer?.nextId || 1 } },
+    context,
+    transcript,
+  );
+  const totalChars = unresolved.reduce((sum, item) => sum + item.charCount, 0) + (current?.charCount || 0);
+  return {
+    unresolved,
+    currentVad: current ? {
+      vadId: current.vadId,
+      text: current.text,
+      charCount: current.charCount,
+      approvedKeys: current.approvedKeys,
+    } : null,
+    maxChars,
+    maxChunks,
+    totalChars,
+    forceReleaseByCap: totalChars >= maxChars,
+  };
+}
+
+function mergeThoughtBufferIntoContext(session = {}, context = {}, transcript = {}, options = {}) {
+  const maxChars = Math.max(120, Number(options.maxChars || DEFAULT_THOUGHT_BUFFER_MAX_CHARS));
+  const maxChunks = Math.max(1, Number(options.maxChunks || DEFAULT_THOUGHT_BUFFER_MAX_CHUNKS));
+  const prior = getThoughtBufferItems(session, { maxChars, maxChunks });
+  const current = contextToThoughtBufferItem(session, context, transcript);
+  const chunks = [...prior, current].filter(Boolean);
+  if (chunks.length <= 1) {
+    clearThoughtBuffer(session, options.reason || context.actionReason || "single_vad_release");
+    return context;
+  }
+  const phraseText = cleanText(chunks.map((chunk) => chunk.text).join(" "), maxChars + 220);
+  const matches = normalizeContextCandidates(chunks.flatMap((chunk) => chunk.matches || []), { limit: 10 });
+  const thoughtVadIds = chunks.map((chunk) => chunk.vadId).filter(Boolean);
+  const thoughtCharCount = chunks.reduce((sum, chunk) => sum + chunk.charCount, 0);
+  const activeIssues = matches.slice(0, 8).map((match) => ({
+    key: match.key,
+    snippet: cleanText(match.miniSnippet || match.fragment || phraseText, 180),
+    status: "new",
+  }));
+  const contextBrief = cleanText(
+    context.memoryBrief?.whatHappened ||
+      context.miniJudgement?.transcriptMeaning ||
+      `Current read: ${phraseText}`,
+    300,
+  );
+  clearThoughtBuffer(session, options.reason || context.actionReason || "released_for_coach");
+  return {
+    ...context,
+    phraseText,
+    text: phraseText,
+    matches,
+    primaryContextKey: matches[0]?.key || context.primaryContextKey || null,
+    memoryBrief: {
+      whatHappened: contextBrief,
+      activeIssues,
+      continueFrom: cleanText(
+        context.memoryBrief?.continueFrom ||
+          `Respond to these grouped VAD chunks as one thought, grounded in the current prospect text.`,
+        280,
+      ),
+    },
+    miniJudgement: {
+      ...(context.miniJudgement || {}),
+      selectedKeys: matches.map((match) => match.key),
+      thoughtVadIds,
+      thoughtCharCount,
+      releaseReason: cleanText(options.reason || context.actionReason || "released_for_coach", 160),
+    },
+    thoughtVadIds,
+    thoughtCharCount,
+  };
+}
+
 function normalizeMemoryBrief(input = {}) {
   if (!input || typeof input !== "object") return null;
   const activeIssues = (Array.isArray(input.activeIssues) ? input.activeIssues : [])
@@ -428,27 +607,22 @@ function candidateToSemanticMatch(candidate = {}, selectedRow = {}) {
   };
 }
 
-function ruleToSemanticCandidate(rule = {}) {
-  return {
-    key: cleanText(rule.key, 120),
-    label: cleanText(rule.label, 120),
-    family: cleanText(rule.family, 80),
-    priority: Number(rule.priority || 0),
-    hits: [],
-    guidance: cleanText(rule.guidance || "", 300),
-    summary: cleanText(rule.guidance || "", 300),
-  };
-}
-
 function refineContextWithSemanticJudgement(context = {}, judgement = {}, input = {}) {
   const candidates = normalizeContextCandidates(context.deterministicCandidates || [], { limit: 24 });
   const byKey = new Map(candidates.map((candidate) => [candidate.key, candidate]));
-  for (const rule of CONTEXT_RULES) {
-    const candidate = ruleToSemanticCandidate(rule);
-    if (candidate.key && !byKey.has(candidate.key)) byKey.set(candidate.key, candidate);
-  }
-  const selectedRows = normalizeJudgeKeyRows(judgement.selectedKeys || judgement.matches || []);
-  const memoryBrief = normalizeMemoryBrief(judgement.memoryBrief || judgement.callMemory || {});
+  const selectedRows = normalizeJudgeKeyRows(judgement.selectedKeys || judgement.approvedKeys || judgement.matches || []);
+  const fallbackMemoryBrief = judgement.contextBrief
+    ? {
+      whatHappened: judgement.contextBrief,
+      activeIssues: selectedRows.map((row) => ({
+        key: row.key,
+        snippet: row.snippet || judgement.contextBrief,
+        status: "new",
+      })),
+      continueFrom: judgement.contextBrief,
+    }
+    : {};
+  const memoryBrief = normalizeMemoryBrief(judgement.memoryBrief || judgement.callMemory || fallbackMemoryBrief);
   const selectedMatches = selectedRows
     .map((row) => {
       const candidate = byKey.get(row.key);
@@ -497,6 +671,7 @@ function refineContextWithSemanticJudgement(context = {}, judgement = {}, input 
       rejected,
       candidateCount: candidates.length,
       transcriptMeaning: cleanText(
+        judgement.contextBrief ||
         judgement.transcriptMeaning ||
           judgement.baseUnderstanding ||
           context.miniJudgement?.transcriptMeaning ||
@@ -524,6 +699,8 @@ function createLiveCoachBus({
   composeRateLimitPerMinute = 3,
   composeDeltaThrottleMs = 100,
   asyncContextPipeline = false,
+  thoughtBufferMaxChars = DEFAULT_THOUGHT_BUFFER_MAX_CHARS,
+  thoughtBufferMaxChunks = DEFAULT_THOUGHT_BUFFER_MAX_CHUNKS,
 } = {}) {
   const runtimeRoot = path.join(rootDir || process.cwd(), "runtime", "ai-bus", "live-coach");
   ensureDir(runtimeRoot);
@@ -662,6 +839,7 @@ function createLiveCoachBus({
       counters: session.counters,
       latest: session.latest,
       memory: session.memory,
+      thoughtBuffer: session.thoughtBuffer || createThoughtBufferState(),
       events: session.events.slice(-50),
     };
   }
@@ -684,6 +862,7 @@ function createLiveCoachBus({
         : null,
       counters: session.counters,
       latest: session.latest,
+      thoughtBuffer: session.thoughtBuffer || createThoughtBufferState(),
     };
   }
 
@@ -729,6 +908,7 @@ function createLiveCoachBus({
         streamStatus: null,
       },
       memory: createMemoryState(),
+      thoughtBuffer: createThoughtBufferState(),
       events: [],
     };
     session.pipeline = createSanitizedLiveCoachPipeline({ metadata: session.metadata });
@@ -767,6 +947,38 @@ function createLiveCoachBus({
       ...extra,
     });
     return serializeSession(session);
+  }
+
+  function terminalAgeMs(session, now = Date.now()) {
+    const terminalAt = Date.parse(session?.updatedAt || session?.lastEventAt || session?.createdAt) || 0;
+    return terminalAt ? Math.max(0, now - terminalAt) : Number.POSITIVE_INFINITY;
+  }
+
+  function pruneSession(session, reason = "terminal-prune") {
+    if (!session) return null;
+    const sessionId = session.id;
+    const subscriberCount = subscribers.get(sessionId)?.size || 0;
+    emit(sessionId, "session.pruned", {
+      reason: cleanText(reason, 120),
+      status: session.status,
+      subscriberCount,
+    });
+    abortActiveDialogComposer(sessionId, reason);
+    pendingDialogCompositions.delete(sessionId);
+    const pending = pendingPersistence.get(sessionId);
+    if (pending) {
+      clearTimeout(pending);
+      pendingPersistence.delete(sessionId);
+    }
+    subscribers.delete(sessionId);
+    sessions.delete(sessionId);
+    return {
+      id: sessionId,
+      status: session.status,
+      reason,
+      subscriberCount,
+      metadata: session.metadata,
+    };
   }
 
   function ensureSession(input = {}) {
@@ -920,11 +1132,22 @@ function createLiveCoachBus({
 
     let contextFrame = pipelineResult.context;
     let dialogFrame = pipelineResult.dialog;
+    const thoughtOptions = {
+      maxChars: Math.max(120, Number(thoughtBufferMaxChars || DEFAULT_THOUGHT_BUFFER_MAX_CHARS)),
+      maxChunks: Math.max(1, Number(thoughtBufferMaxChunks || DEFAULT_THOUGHT_BUFFER_MAX_CHUNKS)),
+    };
+    contextFrame = {
+      ...contextFrame,
+      thoughtBuffer: buildThoughtBufferSnapshot(session, contextFrame, transcript, thoughtOptions),
+    };
     if (typeof semanticContextJudge === "function") {
       const started = Date.now();
       emit(session.id, "context.judge.start", {
         transcript,
         candidateCount: contextFrame.deterministicCandidateCount || contextFrame.deterministicCandidates?.length || 0,
+        unresolvedCount: contextFrame.thoughtBuffer?.unresolved?.length || 0,
+        thoughtChars: contextFrame.thoughtBuffer?.totalChars || 0,
+        forceReleaseByCap: Boolean(contextFrame.thoughtBuffer?.forceReleaseByCap),
       });
       try {
         const judgement = await semanticContextJudge({
@@ -938,12 +1161,26 @@ function createLiveCoachBus({
         contextFrame = refineContextWithSemanticJudgement(contextFrame, judgement, {
           elapsedMs: Date.now() - started,
         });
+        if (contextFrame.thoughtBuffer?.forceReleaseByCap && !contextFrame.shouldCompose) {
+          contextFrame = {
+            ...contextFrame,
+            actionable: true,
+            shouldCompose: true,
+            actionReason: "thought_buffer_char_cap",
+            miniJudgement: {
+              ...(contextFrame.miniJudgement || {}),
+              forcedByThoughtBufferCap: true,
+            },
+          };
+        }
         emit(session.id, "context.judge.done", {
           selectedKeys: contextFrame.miniJudgement?.selectedKeys || [],
           shouldCompose: contextFrame.shouldCompose,
           actionReason: contextFrame.actionReason,
           elapsedMs: contextFrame.miniJudgement?.elapsedMs || null,
           model: contextFrame.miniJudgement?.model || null,
+          unresolvedCount: contextFrame.thoughtBuffer?.unresolved?.length || 0,
+          thoughtChars: contextFrame.thoughtBuffer?.totalChars || 0,
         });
         if (!contextFrame.shouldCompose) {
           const heldContext = {
@@ -955,8 +1192,15 @@ function createLiveCoachBus({
           session.counters.context += 1;
           session.latest.context = heldContext;
           pushMemory(session, "contexts", heldContext);
+          const buffered = appendThoughtBufferItem(session, heldContext, transcript, thoughtOptions);
           writeJsonLine(path.join(session.dir, "ai", "context.ndjson"), heldContext);
           emit(session.id, "context", { context: heldContext });
+          emit(session.id, "thought.buffer", {
+            action: "append",
+            item: buffered,
+            unresolvedCount: session.thoughtBuffer?.unresolved?.length || 0,
+            maxChars: thoughtOptions.maxChars,
+          });
           const hold = {
             reason: heldContext.actionReason,
             context: heldContext,
@@ -995,6 +1239,18 @@ function createLiveCoachBus({
           error: error.message,
           elapsedMs: contextFrame.miniJudgement.elapsedMs,
         });
+        if (contextFrame.thoughtBuffer?.forceReleaseByCap && !contextFrame.shouldCompose) {
+          contextFrame = {
+            ...contextFrame,
+            actionable: true,
+            shouldCompose: true,
+            actionReason: "thought_buffer_char_cap_after_judge_error",
+            miniJudgement: {
+              ...(contextFrame.miniJudgement || {}),
+              forcedByThoughtBufferCap: true,
+            },
+          };
+        }
         if (!contextFrame.shouldCompose) {
           const heldContext = {
             ...contextFrame,
@@ -1005,8 +1261,15 @@ function createLiveCoachBus({
           session.counters.context += 1;
           session.latest.context = heldContext;
           pushMemory(session, "contexts", heldContext);
+          const buffered = appendThoughtBufferItem(session, heldContext, transcript, thoughtOptions);
           writeJsonLine(path.join(session.dir, "ai", "context.ndjson"), heldContext);
           emit(session.id, "context", { context: heldContext });
+          emit(session.id, "thought.buffer", {
+            action: "append",
+            item: buffered,
+            unresolvedCount: session.thoughtBuffer?.unresolved?.length || 0,
+            maxChars: thoughtOptions.maxChars,
+          });
           const hold = {
             reason: heldContext.actionReason || "semantic_context_judge_error_hold",
             context: heldContext,
@@ -1037,6 +1300,19 @@ function createLiveCoachBus({
       return { ...pipelineResult, transcript, context: null, dialog: null };
     }
 
+    contextFrame = mergeThoughtBufferIntoContext(session, contextFrame, transcript, {
+      ...thoughtOptions,
+      reason: contextFrame.actionReason || "ready_to_coach",
+    });
+    dialogFrame = createSonnetDialogDraft({ contextFrame, metadata: session.metadata });
+    emit(session.id, "thought.buffer", {
+      action: "release",
+      thoughtVadIds: contextFrame.thoughtVadIds || [],
+      thoughtCharCount: contextFrame.thoughtCharCount || cleanText(contextFrame.phraseText || "", 2000).length,
+      reason: contextFrame.miniJudgement?.releaseReason || contextFrame.actionReason || "ready_to_coach",
+      unresolvedCount: session.thoughtBuffer?.unresolved?.length || 0,
+    });
+
     const context = {
       ...contextFrame,
       id: `ctx-${String(session.counters.context + 1).padStart(4, "0")}`,
@@ -1055,11 +1331,26 @@ function createLiveCoachBus({
     writeJsonLine(path.join(session.dir, "ai", "context.ndjson"), context);
     emit(session.id, "context", { context });
 
-    const dialog = {
-      ...dialogFrame,
-      id: `dlg-${String(session.counters.dialog + 1).padStart(4, "0")}`,
-      at: new Date().toISOString(),
-    };
+    // When Claude (the dialog composer) is active it is the turn decider: it reads the
+    // text + memory, judges completeness, and either streams the line or holds (WAIT).
+    // For a composable turn, DON'T pre-render the deterministic draft line -- it would
+    // flicker on partial thoughts that Claude will WAIT on. Keep it as fallbackSay for
+    // the composer-error/disabled paths only.
+    const composerActive = typeof dialogComposer === "function";
+    const dialog = composerActive && dialogFrame?.status === "ready"
+      ? {
+        ...dialogFrame,
+        id: `dlg-${String(session.counters.dialog + 1).padStart(4, "0")}`,
+        at: new Date().toISOString(),
+        status: "composing",
+        say: "",
+        fallbackSay: cleanText(dialogFrame?.say || "", 1000),
+      }
+      : {
+        ...dialogFrame,
+        id: `dlg-${String(session.counters.dialog + 1).padStart(4, "0")}`,
+        at: new Date().toISOString(),
+      };
     session.counters.dialog += 1;
     session.latest.dialog = dialog;
     if (dialog?.say) pushMemory(session, "coachingSuggestions", dialog);
@@ -1231,6 +1522,12 @@ function createLiveCoachBus({
         selectedKeys: signature.keys ? signature.keys.split("|") : [],
         windowMs: dedupWindowMs,
       });
+      logger?.info?.("live_coach.compose_guard.deduped", {
+        sessionId: session.id,
+        dialogId: baseDialog.id,
+        selectedKeyCount: signature.keys ? signature.keys.split("|").filter(Boolean).length : 0,
+        windowMs: dedupWindowMs,
+      });
       const latest = sessions.get(session.id);
       if (latest?.latest?.dialog?.id === baseDialog.id) {
         latest.latest.dialog = {
@@ -1257,6 +1554,12 @@ function createLiveCoachBus({
         activeDialogId: active.dialogId || null,
         queuedDialogId: baseDialog.id,
       });
+      logger?.info?.("live_coach.compose_guard.supersede", {
+        sessionId: session.id,
+        activeDialogId: active.dialogId || null,
+        queuedDialogId: baseDialog.id,
+        selectedKeyCount: signature.keys ? signature.keys.split("|").filter(Boolean).length : 0,
+      });
       return;
     }
 
@@ -1266,6 +1569,13 @@ function createLiveCoachBus({
         dialogId: baseDialog.id,
         rateLimitPerMinute: rateLimit,
         recentStarts: guard.startedAtMs.length,
+      });
+      logger?.warn?.("live_coach.compose_guard.rate_limited", {
+        sessionId: session.id,
+        dialogId: baseDialog.id,
+        rateLimitPerMinute: rateLimit,
+        recentStarts: guard.startedAtMs.length,
+        selectedKeyCount: signature.keys ? signature.keys.split("|").filter(Boolean).length : 0,
       });
       const latest = sessions.get(session.id);
       if (latest?.latest?.dialog?.id === baseDialog.id) {
@@ -1344,7 +1654,22 @@ function createLiveCoachBus({
         if (!isCurrent()) return;
         const latest = sessions.get(session.id);
         const say = cleanText(composed?.say || composed || "", 1000);
-        if (!say) return;
+        if (!say) {
+          // Claude held (WAIT) or returned nothing. isCurrent() above already filtered
+          // aborts/supersedes, so an empty final here is a genuine hold: always settle the
+          // line to a terminal "wait" so the panel clears the composing/streaming state
+          // (never strands) and surfaces no coach line.
+          latest.latest.dialog = {
+            ...latest.latest.dialog,
+            status: "wait",
+            say: "",
+            label: "Waiting for a complete thought",
+            at: new Date().toISOString(),
+            composer: cleanText(composed?.composer || "anthropic", 80),
+          };
+          emit(latest.id, "dialog", { dialog: latest.latest.dialog });
+          return;
+        }
         latest.latest.dialog = {
           ...latest.latest.dialog,
           status: "ready",
@@ -1361,12 +1686,19 @@ function createLiveCoachBus({
         if (controller.signal.aborted) return;
         if (!isCurrent()) return;
         const latest = sessions.get(session.id);
+        // Self-heal: if we suppressed the deterministic draft to let Claude compose and
+        // Claude then failed, fall back to that draft line so the agent still gets help.
+        const fallbackSay = cleanText(latest.latest.dialog?.fallbackSay || "", 1000);
         latest.latest.dialog = {
           ...latest.latest.dialog,
           status: "ready",
+          ...(fallbackSay && !cleanText(latest.latest.dialog?.say || "", 1000)
+            ? { say: fallbackSay, composerFallback: true }
+            : {}),
           composerError: error.message,
           at: new Date().toISOString(),
         };
+        if (fallbackSay) pushMemory(latest, "coachingSuggestions", latest.latest.dialog);
         emit(latest.id, "dialog.error", {
           dialog: latest.latest.dialog,
           error: error.message,
@@ -1790,6 +2122,69 @@ function createLiveCoachBus({
     return { ok: true, apply, maxIdleMs, staleCount: stale.length, stale };
   }
 
+  function pruneTerminalSessions(input = {}) {
+    const apply = Boolean(input.apply);
+    const maxAgeMs = Math.max(15_000, Number(input.maxAgeMs || input.terminalMaxAgeMs || 2 * 60 * 1000) || 2 * 60 * 1000);
+    const maxTerminalSessions = Math.max(0, Number(input.maxTerminalSessions || 21) || 21);
+    const sourceFilter = input.sourceFilter === undefined ? GRPC_SESSION_SOURCES : input.sourceFilter;
+    const now = Date.now();
+    const terminalRows = Array.from(sessions.values())
+      .filter((session) => TERMINAL_SESSION_STATUSES.includes(session.status))
+      .filter((session) => shouldCleanupSession(session, sourceFilter))
+      .map((session) => ({
+        session,
+        ageMs: terminalAgeMs(session, now),
+        terminalAtMs: Date.parse(session.updatedAt || session.lastEventAt || session.createdAt) || 0,
+      }))
+      .sort((left, right) => right.terminalAtMs - left.terminalAtMs);
+
+    const keepIds = new Set();
+    if (maxTerminalSessions > 0) {
+      for (const row of terminalRows.slice(0, maxTerminalSessions)) {
+        keepIds.add(row.session.id);
+      }
+    }
+
+    const pruned = [];
+    const kept = [];
+    for (const row of terminalRows) {
+      const overAge = row.ageMs >= maxAgeMs;
+      const overCap = maxTerminalSessions > 0 && !keepIds.has(row.session.id);
+      if (overAge || overCap) {
+        const reason = overAge ? "terminal-age" : "terminal-cap";
+        const summary = {
+          id: row.session.id,
+          status: row.session.status,
+          ageMs: row.ageMs,
+          reason,
+          subscriberCount: subscribers.get(row.session.id)?.size || 0,
+          metadata: row.session.metadata,
+        };
+        pruned.push(summary);
+        if (apply) pruneSession(row.session, reason);
+      } else {
+        kept.push({
+          id: row.session.id,
+          status: row.session.status,
+          ageMs: row.ageMs,
+          subscriberCount: subscribers.get(row.session.id)?.size || 0,
+        });
+      }
+    }
+
+    return {
+      ok: true,
+      apply,
+      maxAgeMs,
+      maxTerminalSessions,
+      terminalCount: terminalRows.length,
+      prunedCount: pruned.length,
+      keptCount: kept.length,
+      pruned,
+      kept,
+    };
+  }
+
   async function cleanupDeadStreams(input = {}) {
     const resolveBinding = input.resolveBinding;
     if (typeof resolveBinding !== "function") {
@@ -1949,6 +2344,7 @@ function createLiveCoachBus({
     replaySession,
     cleanupStale,
     cleanupDeadStreams,
+    pruneTerminalSessions,
     subscribe,
   };
 }

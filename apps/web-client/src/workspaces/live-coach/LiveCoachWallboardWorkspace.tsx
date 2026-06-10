@@ -501,7 +501,7 @@ export function LiveCoachWallboardWorkspace() {
             stageDetail: payload.dialog?.guidance || "Call cleared",
           });
         }
-        if (payload.type === "session.stop" || payload.type === "session.stale") {
+        if (payload.type === "session.stop" || payload.type === "session.stale" || payload.type === "session.pruned") {
           closeLaneStream(agent.key);
           patchLane(agent.key, {
             session: null,
