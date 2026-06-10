@@ -62,6 +62,24 @@ function normalizePhone(value) {
   return digits.slice(-10);
 }
 
+function trimTrailingSlash(value) {
+  return String(value || "").trim().replace(/\/+$/, "");
+}
+
+function resolveRvmAudioUrl(domain, templateKey, explicitUrl = null) {
+  const provided = String(explicitUrl || "").trim();
+  if (provided) return provided;
+
+  const key = String(templateKey || "").trim();
+  if (!key || !/^prospect-rvm-\d+$/i.test(key)) return "";
+
+  const base = trimTrailingSlash(process.env.RVM_AUDIO_BASE_URL || process.env.DROP_RVM_AUDIO_URL || "");
+  if (!base) return "";
+
+  const company = normalizeDomain(domain);
+  return `${base}/${encodeURIComponent(company)}/${encodeURIComponent(key)}.wav`;
+}
+
 function isProspectCadenceTemplate(templateKey) {
   const value = String(templateKey || "").trim().toLowerCase();
   if (!value) return false;
@@ -1167,13 +1185,14 @@ async function dispatchForLead(lead, {
         attachments: cadenceEmail?.attachments || [],
       });
     } else if (channel === "rvm") {
+      const resolvedAudioUrl = resolveRvmAudioUrl(domain, effectiveTemplateKey, audioUrl);
       result = await sendOutboundRvm({
         domain,
         toPhone: lead.primaryPhone || lead.normalizedPhone,
         caseId,
         name: lead.name,
         source: effectiveTemplateKey || "cadence",
-        audioUrl,
+        audioUrl: resolvedAudioUrl,
         actionKey,
       });
     } else if (channel === "phoneburner") {
