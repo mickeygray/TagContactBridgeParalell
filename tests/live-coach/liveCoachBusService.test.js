@@ -693,6 +693,44 @@ test("live coach bus cleanupDeadStreams compares sessions to latest agent bindin
   assert.equal(bus.getSession(oldSession.id).status, "stale");
 });
 
+test("live coach bus does not preserve call-ended stale sessions just because dashboard is subscribed", async () => {
+  const rootDir = makeTempRoot();
+  const bus = createLiveCoachBus({ rootDir });
+  const oldSession = bus.ensureSession({
+    sessionId: "coach-cx-4545-uii-old-subscribed",
+    source: "grpc-mongo",
+    agentExtension: "4545",
+    uii: "uii-old-subscribed",
+  });
+  const unsubscribe = bus.subscribe(oldSession.id, () => {});
+
+  const result = await bus.cleanupDeadStreams({
+    apply: true,
+    maxIdleMs: 60_000,
+    resolveBinding: async () => ({
+      status: "active",
+      binding: {
+        active: true,
+        reason: "matched-cx-call-placed",
+        metadata: {
+          agentExtension: "4545",
+          uii: "uii-new-subscribed",
+        },
+        event: {
+          extensionId: "4545",
+          uii: "uii-new-subscribed",
+        },
+      },
+    }),
+  });
+
+  unsubscribe();
+  assert.equal(result.ok, true);
+  assert.equal(result.staleCount, 1);
+  assert.equal(result.stale[0].reason, "agent-current-call-changed");
+  assert.equal(bus.getSession(oldSession.id).status, "stale");
+});
+
 test("live coach bus prunes terminal sessions from hot memory", () => {
   const rootDir = makeTempRoot();
   const bus = createLiveCoachBus({ rootDir });

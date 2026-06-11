@@ -40,6 +40,7 @@ type ConversationItem = {
   label: string;
   text: string;
   provisional?: boolean;
+  lowConfidence?: boolean;
 };
 
 type CoachStageTone = "idle" | "active" | "good" | "warn" | "danger";
@@ -99,6 +100,15 @@ function reduceSession(state: CoachState, next: LiveCoachSession): CoachState {
   let prospectTranscript = state.prospectTranscript;
   let context = state.context;
   let dialog = state.dialog;
+
+  // Snapshot seeding: an empty thread + a session carrying call memory means
+  // we just (re)connected mid-call — paint the WHOLE conversation, not just
+  // the latest line. Live events keep appending on top.
+  if (!items.length && Array.isArray(next.memory?.transcripts) && next.memory.transcripts.length) {
+    for (const row of next.memory.transcripts) {
+      items = mergeConversationItem(items, transcriptToConversationItem(row));
+    }
+  }
 
   const latestProvisional = next.latest?.provisionalTranscript || null;
   if (latestProvisional) {
@@ -402,13 +412,6 @@ function readErrorMessage(error: unknown) {
   return error instanceof Error ? error.message : "Coach bridge unavailable";
 }
 
-function lastSentence(value: string) {
-  const clean = value.replace(/\s+/g, " ").trim();
-  if (!clean) return "";
-  const matches = clean.match(/[^.!?]+[.!?]*/g)?.map((part) => part.trim()).filter(Boolean) || [];
-  return matches[matches.length - 1] || clean;
-}
-
 function transcriptLabel(role: string | null | undefined) {
   if (role === "agent") return "Agent";
   if (role === "system") return "System";
@@ -435,6 +438,7 @@ function transcriptToConversationItem(transcript: LiveCoachTranscript): Conversa
     label: transcriptLabel(role),
     text,
     provisional: Boolean(transcript.provisional),
+    lowConfidence: Boolean(transcript.lowConfidence),
   };
 }
 
@@ -479,9 +483,29 @@ export function LiveCoachPanel({
   // the former ~7 setState calls. All coach-domain state lives here; only the
   // UI-local dialog-open toggle stays a plain useState.
   const [coach, dispatch] = React.useReducer(coachReducer, INITIAL_COACH_STATE);
-  const { session, provisionalTranscript, prospectTranscript, context, dialog, stage, conversationItems, bridgeStatus, error } = coach;
+  const { session, context, dialog, stage, conversationItems, bridgeStatus, error } = coach;
   const [contextOpen, setContextOpen] = React.useState(false);
-  const previousBoundRef = React.useRef<{ scopeKey: string; sessionId: string } | null>(null);
+  // Bind LOCK: once a session is bound for this call it stays bound. Identity
+  // drift (uii arriving late, caseId loading, contactName landing) must NOT
+  // re-run the bind effect — every re-run aborts the SSE and kills the session
+  // server-side, which is the mid-call flicker. The lock only breaks on a
+  // genuine call CONFLICT, a terminal session event, a release, or call end.
+  const lockRef = React.useRef<{
+    sessionId: string;
+    uii: string;
+    queueItemId: string;
+    callSessionId: string;
+  } | null>(null);
+  const [rebindNonce, setRebindNonce] = React.useState(0);
+  const bumpRebind = React.useCallback(() => setRebindNonce((n) => n + 1), []);
+  const transcriptScrollRef = React.useRef<HTMLDivElement | null>(null);
+  // Mid-call the interesting end of the transcript is the bottom: anchor there
+  // when the modal opens and keep following as new lines arrive while open.
+  React.useEffect(() => {
+    if (!contextOpen) return;
+    const el = transcriptScrollRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [contextOpen, conversationItems.length]);
   const releasedScopeRef = React.useRef<{ scopeKey: string; releaseKey: string } | null>(null);
   const cancelledRef = React.useRef(false);
 
@@ -497,12 +521,38 @@ export function LiveCoachPanel({
   const scopeKey = [agentScopeKey, callScopeKey].filter(Boolean).join(":");
   const scopedReleaseKey = cleanParam(releaseKey);
   const scopedReleaseReason = cleanParam(releaseReason) || "cx-workspace-release";
+  // The bind effect keys on PRESENCE of a call, never its drifting identity —
+  // bindSession reads the freshest params from this ref at request time.
+  const hasCall = Boolean(callScopeKey);
+  const paramsRef = React.useRef({
+    scopedAgentEmail,
+    scopedAgentExtension,
+    scopedUii,
+    scopedQueueItemId,
+    scopedCallSessionId,
+    scopedCaseId,
+    scopedContactName,
+    agentName: cleanParam(agentName),
+  });
+  paramsRef.current = {
+    scopedAgentEmail,
+    scopedAgentExtension,
+    scopedUii,
+    scopedQueueItemId,
+    scopedCallSessionId,
+    scopedCaseId,
+    scopedContactName,
+    agentName: cleanParam(agentName),
+  };
 
   const resetCoach = React.useCallback((nextStatus: BridgeStatus, message = "") => {
     dispatch({ type: "reset", status: nextStatus, message });
   }, []);
 
   // Memoized: one reducer dispatch per SSE event => exactly one render.
+  // Terminal session events double as the lock's CLEANOUT: a stopped/stale/
+  // pruned session drops the lock and schedules a rebind so a dead session is
+  // never held open while a replacement is already streaming on the bus.
   const handleEvent = React.useCallback((_eventName: string, payload: LiveCoachEvent) => {
     if (cancelledRef.current) return;
     try {
@@ -510,23 +560,45 @@ export function LiveCoachPanel({
     } catch {
       // Ignore malformed local playground events.
     }
-  }, []);
+    const type = String(payload?.type || "");
+    if ((type === "session.stop" || type === "session.stale" || type === "session.pruned") && lockRef.current) {
+      lockRef.current = null;
+      window.setTimeout(() => {
+        if (!cancelledRef.current) bumpRebind();
+      }, 800);
+    }
+  }, [bumpRebind]);
 
+  // Call-conflict detector: the ONLY identity change that breaks the lock is a
+  // direct conflict (locked uii/queueItem/callSession differs from a non-empty
+  // scoped value) — that means a genuinely different call. Everything else is
+  // the same call learning more about itself; absorb it into the lock.
   React.useEffect(() => {
-    const previous = previousBoundRef.current;
-    if (!previous || previous.scopeKey === scopeKey) return;
-    previousBoundRef.current = null;
-    stopDashboardSession(previous.sessionId, callScopeKey ? "cx-workspace-current-call-changed" : "cx-workspace-current-call-cleared");
-  }, [callScopeKey, scopeKey]);
+    const lock = lockRef.current;
+    if (!lock) return;
+    const conflict =
+      (lock.uii && scopedUii && lock.uii !== scopedUii) ||
+      (lock.queueItemId && scopedQueueItemId && lock.queueItemId !== scopedQueueItemId) ||
+      (lock.callSessionId && scopedCallSessionId && lock.callSessionId !== scopedCallSessionId);
+    if (!conflict) {
+      if (scopedUii && !lock.uii) lock.uii = scopedUii;
+      if (scopedQueueItemId && !lock.queueItemId) lock.queueItemId = scopedQueueItemId;
+      if (scopedCallSessionId && !lock.callSessionId) lock.callSessionId = scopedCallSessionId;
+      return;
+    }
+    stopDashboardSession(lock.sessionId, "cx-workspace-call-changed");
+    lockRef.current = null;
+    bumpRebind();
+  }, [bumpRebind, scopedCallSessionId, scopedQueueItemId, scopedUii]);
 
   React.useEffect(() => {
     if (!scopedReleaseKey || !scopeKey) return;
     releasedScopeRef.current = { scopeKey, releaseKey: scopedReleaseKey };
-    const previous = previousBoundRef.current;
-    if (previous?.sessionId) {
-      stopDashboardSession(previous.sessionId, scopedReleaseReason);
+    const lock = lockRef.current;
+    if (lock?.sessionId) {
+      stopDashboardSession(lock.sessionId, scopedReleaseReason);
     }
-    previousBoundRef.current = null;
+    lockRef.current = null;
     resetCoach("connected", scopedReleaseReason);
   }, [resetCoach, scopeKey, scopedReleaseKey, scopedReleaseReason]);
 
@@ -535,14 +607,22 @@ export function LiveCoachPanel({
       resetCoach("disabled", "No agent scope");
       return undefined;
     }
-    if (!callScopeKey) {
+    if (!hasCall) {
+      // Call ended (or none yet): clean out a held session, then keep an
+      // OPTIMISTIC slow poll running — the bus often has the agent's stream
+      // before the workspace registers the call, and the server's bus-fallback
+      // can hand it to us early.
+      const lock = lockRef.current;
+      if (lock?.sessionId) {
+        stopDashboardSession(lock.sessionId, "cx-workspace-current-call-cleared");
+        lockRef.current = null;
+      }
+      releasedScopeRef.current = null;
       resetCoach("connected", "Waiting for active call");
-      return undefined;
     }
     if (
       scopedReleaseKey &&
-      releasedScopeRef.current?.scopeKey === scopeKey &&
-      releasedScopeRef.current.releaseKey === scopedReleaseKey
+      releasedScopeRef.current?.releaseKey === scopedReleaseKey
     ) {
       resetCoach("connected", scopedReleaseReason);
       return undefined;
@@ -563,7 +643,6 @@ export function LiveCoachPanel({
       if (activeSessionId === sessionId) return;
       if (events) events.abort();
       activeSessionId = sessionId;
-      previousBoundRef.current = { scopeKey, sessionId };
       dispatch({
         type: "clearItems",
         stage: {
@@ -601,6 +680,15 @@ export function LiveCoachPanel({
               at: new Date().toISOString(),
             },
           });
+          if (!reconnecting) {
+            // Retries are exhausted — this stream is dead. Drop the lock and
+            // re-resolve instead of dead-ending in an error state: the bus
+            // may already be serving a replacement session.
+            lockRef.current = null;
+            window.setTimeout(() => {
+              if (!cancelledRef.current) bumpRebind();
+            }, 4000);
+          }
         },
       }).catch(() => undefined);
     };
@@ -608,15 +696,18 @@ export function LiveCoachPanel({
     const bindSession = async () => {
       try {
         attempts += 1;
+        // Freshest identity at REQUEST time — the effect itself never re-runs
+        // on identity drift (that re-run was the mid-call flicker).
+        const p = paramsRef.current;
         const params = new URLSearchParams();
-        if (scopedAgentExtension) params.set("agentExtensionId", scopedAgentExtension);
-        if (scopedAgentEmail) params.set("agentEmail", scopedAgentEmail);
-        if (scopedUii) params.set("uii", scopedUii);
-        if (scopedQueueItemId) params.set("queueItemId", scopedQueueItemId);
-        if (scopedCallSessionId) params.set("callSessionId", scopedCallSessionId);
-        if (scopedCaseId) params.set("caseId", scopedCaseId);
-        if (scopedContactName) params.set("contactName", scopedContactName);
-        if (agentName) params.set("agentName", agentName);
+        if (p.scopedAgentExtension) params.set("agentExtensionId", p.scopedAgentExtension);
+        if (p.scopedAgentEmail) params.set("agentEmail", p.scopedAgentEmail);
+        if (p.scopedUii) params.set("uii", p.scopedUii);
+        if (p.scopedQueueItemId) params.set("queueItemId", p.scopedQueueItemId);
+        if (p.scopedCallSessionId) params.set("callSessionId", p.scopedCallSessionId);
+        if (p.scopedCaseId) params.set("caseId", p.scopedCaseId);
+        if (p.scopedContactName) params.set("contactName", p.scopedContactName);
+        if (p.agentName) params.set("agentName", p.agentName);
         const query = Object.fromEntries(params.entries());
         const data = await api.get<{ session?: LiveCoachSession | null; reason?: string; status?: string }>(
           `${LIVE_COACH_API_BASE}/session-for-call`,
@@ -624,6 +715,15 @@ export function LiveCoachPanel({
         );
         if (cancelled) return;
         if (data.session) {
+          // LOCK: remember which call this session belongs to. From here on
+          // only a genuine call conflict, a terminal session event, a release,
+          // or call end breaks the bind.
+          lockRef.current = {
+            sessionId: data.session.id,
+            uii: cleanParam(data.session.metadata?.uii) || p.scopedUii,
+            queueItemId: cleanParam(data.session.metadata?.queueItemId) || p.scopedQueueItemId,
+            callSessionId: p.scopedCallSessionId,
+          };
           applySession(data.session);
           connectEvents(data.session.id);
         } else {
@@ -638,7 +738,10 @@ export function LiveCoachPanel({
               at: new Date().toISOString(),
             },
           });
-          retryTimer = window.setTimeout(() => void bindSession(), attempts < 8 ? 1250 : 5000);
+          retryTimer = window.setTimeout(
+            () => void bindSession(),
+            !hasCall ? 5000 : attempts < 8 ? 1250 : 5000,
+          );
         }
       } catch (loadError) {
         if (!cancelled) {
@@ -658,17 +761,33 @@ export function LiveCoachPanel({
       }
     };
 
-    dispatch({
-      type: "bridge",
-      status: "connecting",
-      error: "Binding coach to current call",
-      stage: {
-        label: "binding",
-        detail: "Looking for current RingCX stream",
-        tone: "active",
-        at: new Date().toISOString(),
-      },
-    });
+    // Locked already (e.g. the effect re-ran for a non-identity reason):
+    // reconnect the SAME session's stream instead of re-resolving — the lock
+    // is the contract.
+    const lock = lockRef.current;
+    if (lock?.sessionId && hasCall) {
+      connectEvents(lock.sessionId);
+      return () => {
+        cancelled = true;
+        cancelledRef.current = true;
+        if (retryTimer) window.clearTimeout(retryTimer);
+        if (events) events.abort();
+      };
+    }
+
+    if (hasCall) {
+      dispatch({
+        type: "bridge",
+        status: "connecting",
+        error: "Binding coach to current call",
+        stage: {
+          label: "binding",
+          detail: "Looking for current RingCX stream",
+          tone: "active",
+          at: new Date().toISOString(),
+        },
+      });
+    }
     void bindSession();
 
     return () => {
@@ -677,28 +796,22 @@ export function LiveCoachPanel({
       if (retryTimer) window.clearTimeout(retryTimer);
       if (events) events.abort();
     };
-  }, [
-    agentName,
-    agentScopeKey,
-    callScopeKey,
-    handleEvent,
-    resetCoach,
-    scopedAgentEmail,
-    scopedAgentExtension,
-    scopedCallSessionId,
-    scopedCaseId,
-    scopedContactName,
-    scopedQueueItemId,
-    scopedReleaseKey,
-    scopedReleaseReason,
-    scopedUii,
-    scopeKey,
-  ]);
+    // Deps are deliberately MINIMAL: agent identity, call PRESENCE (not its
+    // drifting identity), release, and the explicit rebind nonce. Everything
+    // else flows through paramsRef so identity drift can't flicker the stream.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [agentScopeKey, hasCall, scopedReleaseKey, scopedReleaseReason, rebindNonce, handleEvent, resetCoach]);
 
-  const heardText = provisionalTranscript?.text?.trim() || prospectTranscript?.text?.trim() || "";
-  const heardSentence = lastSentence(heardText);
-  const heardAt = provisionalTranscript?.at || prospectTranscript?.at || "";
-  const heardIsLive = Boolean(provisionalTranscript?.text?.trim());
+  // Rolling ribbon: the WHOLE prospect stream concatenated (memory), only the
+  // tail shown. Finals replace their provisional segment in place inside
+  // conversationItems, so the ribbon never blinks empty between a final
+  // landing and the next provisional starting — there is no "drop" state.
+  const prospectItems = conversationItems.filter((item) => item.side === "prospect");
+  const lastProspectItem = prospectItems.length ? prospectItems[prospectItems.length - 1] : null;
+  const streamText = prospectItems.map((item) => item.text).join(" ").replace(/\s+/g, " ").trim();
+  const streamTail = streamText.length > 260 ? `…${streamText.slice(-260).trimStart()}` : streamText;
+  const heardAt = lastProspectItem?.at || "";
+  const heardIsLive = Boolean(lastProspectItem?.provisional);
   const line = dialog?.say?.trim() || "";
   const rejected = dialog?.status === "rejected";
   const contextKeys = [
@@ -798,7 +911,7 @@ export function LiveCoachPanel({
                 <span className="rounded-full border border-amber-200 bg-amber-50 px-1.5 py-0.5 text-[10px] font-semibold text-amber-700">
                   live
                 </span>
-              ) : prospectTranscript?.text ? (
+              ) : lastProspectItem ? (
                 <span className="rounded-full border border-emerald-200 bg-emerald-50 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-700">
                   final
                 </span>
@@ -812,10 +925,10 @@ export function LiveCoachPanel({
             className={cn(
               "min-h-[58px] whitespace-pre-wrap text-sm font-medium leading-snug text-foreground",
               heardIsLive && "text-muted-foreground",
-              !heardText && "flex items-center text-muted-foreground",
+              !streamText && "flex items-center text-muted-foreground",
             )}
           >
-            {heardSentence || "Waiting for prospect speech..."}
+            {streamTail || "Waiting for prospect speech..."}
           </div>
         </div>
         <div className="rounded-md border border-slate-100 bg-white p-2">
@@ -867,7 +980,7 @@ export function LiveCoachPanel({
             Actual call transcript collected for the current coach session.
           </DialogDescription>
         </DialogHeader>
-        <div className="max-h-[62vh] space-y-3 overflow-y-auto bg-slate-50 px-4 py-4">
+        <div ref={transcriptScrollRef} className="max-h-[62vh] space-y-3 overflow-y-auto bg-slate-50 px-4 py-4">
           {conversationItems.length ? (
             conversationItems.map((item) => {
               const rightSide = item.side === "agent";
@@ -886,10 +999,14 @@ export function LiveCoachPanel({
                       item.side === "agent" && "border-slate-200 bg-slate-900 text-white",
                       item.side === "system" && "border-amber-200 bg-amber-50 text-amber-950",
                       item.provisional && "border-dashed opacity-75",
+                      item.lowConfidence && "opacity-60",
                     )}
                   >
                     <div className="mb-1 flex items-center justify-between gap-3 text-[10px] font-semibold uppercase tracking-[0.12em] opacity-70">
-                      <span>{item.provisional ? `${item.label} live` : item.label}</span>
+                      <span>
+                        {item.provisional ? `${item.label} live` : item.label}
+                        {item.lowConfidence ? " · low confidence" : ""}
+                      </span>
                       <span>{formatCoachTime(item.at)}</span>
                     </div>
                     <div className="whitespace-pre-wrap text-sm leading-snug">{item.text}</div>

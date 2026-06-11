@@ -50,6 +50,90 @@ test("deterministic voicemail phrases reject the first transcript item", () => {
   assert.match(result.dialog.label, /voicemail/i);
 });
 
+test("opening phase runs the scripted opening prompt; established runs the full coach", () => {
+  const opening = buildSonnetPromptPayload({
+    contextFrame: { role: "prospect", callPhase: "opening", prospectTurnCount: 1, shouldCompose: true, phraseText: "Hello?" },
+    metadata: { agentName: "Chris", firmName: "Tax Advocate Group", contactName: "Maria Lopez" },
+  });
+  assert.match(opening.system, /OPENING moments/);
+  assert.match(opening.user, /Prospect name: Maria Lopez/);
+  assert.match(opening.user, /Call phase: OPENING \(prospect turn 1\)/);
+
+  const established = buildSonnetPromptPayload({
+    contextFrame: { role: "prospect", callPhase: "established", shouldCompose: true, phraseText: "I owe about forty grand from 2021." },
+    metadata: { agentName: "Chris", firmName: "Tax Advocate Group" },
+  });
+  assert.doesNotMatch(established.system, /OPENING moments/);
+  assert.match(established.system, /Standing directives/);
+});
+
+test("dual-VAD: fast channel is additive, turn channel composes, no phrase duplication", () => {
+  const pipeline = createSanitizedLiveCoachPipeline({
+    metadata: { agentName: "Chris", firmName: "Tax Advocate Group", uii: "u-dual" },
+  });
+  // Fast quick-final: terms get caught (context built, matches recorded) but
+  // it must never trigger compose and must never enter pending.
+  const fast = pipeline.handleTranscript({
+    text: "I got a CP504 about a wage garnishment and honestly I'm scared",
+    role: "prospect",
+    channel: "fast",
+  });
+  assert.equal(fast.action, "hold_for_more_context");
+  assert.equal(fast.context.shouldCompose, false);
+  assert.equal(fast.context.actionReason, "fast_channel_additive");
+  assert.ok((fast.context.matches || []).length > 0, "term catching still runs on the fast channel");
+
+  // The turn channel then delivers the SAME speech as a completed thought:
+  // it composes, and the phrase contains the speech once (no pending merge).
+  const turn = pipeline.handleTranscript({
+    text: "I got a CP504 about a wage garnishment and honestly I'm scared.",
+    role: "prospect",
+    channel: "turn",
+  });
+  assert.equal(turn.action, "compose_dialog");
+  assert.equal(turn.context.shouldCompose, true);
+  const occurrences = (turn.context.phraseText.match(/wage garnishment/gi) || []).length;
+  assert.equal(occurrences, 1, "fast decode must not duplicate into the turn phrase");
+});
+
+test("marked finals (low confidence / primer echo) inform but never coach", () => {
+  const pipeline = createSanitizedLiveCoachPipeline({
+    metadata: { agentName: "Chris", firmName: "Tax Advocate Group", uii: "u-lowconf" },
+  });
+  // A garbled-but-delivered final full of MATCHING words (primer-echo shape)
+  // must not run the match bank — echoed banks self-match and ship junk lines.
+  const echo = pipeline.handleTranscript({
+    text: "levy lien wage garnishment offer in compromise penalty abatement",
+    role: "prospect",
+    lowConfidence: true,
+  });
+  assert.equal(echo.action, "store_low_confidence");
+  assert.equal(echo.context, null);
+  assert.equal(echo.dialog, null);
+  assert.equal(echo.transcript.lowConfidence, true);
+
+  // But the voicemail gates run FIRST: a garbled machine greeting still
+  // rejects (delivering low-confidence finals to the VM gate was the point).
+  const vm = pipeline.handleTranscript({
+    text: "At the tone, please record your message.",
+    role: "prospect",
+    lowConfidence: true,
+  });
+  assert.equal(vm.action, "reject_voicemail");
+
+  // primerEcho alone (normal confidence band) is also held out of coaching.
+  const fresh = createSanitizedLiveCoachPipeline({
+    metadata: { agentName: "Chris", firmName: "Tax Advocate Group", uii: "u-echo" },
+  });
+  const echoOnly = fresh.handleTranscript({
+    text: "installment agreement currently not collectible revenue officer",
+    role: "prospect",
+    primerEcho: true,
+  });
+  assert.equal(echoOnly.action, "store_low_confidence");
+  assert.equal(echoOnly.transcript.primerEcho, true);
+});
+
 test("agent-channel rows bypass the voicemail/screener gates and store as context", () => {
   const pipeline = createSanitizedLiveCoachPipeline({
     metadata: { agentName: "Chris", firmName: "Tax Advocate Group", uii: "u-agent" },
@@ -86,6 +170,64 @@ test("natural voicemail greetings with inserted words are rejected", () => {
   assert.equal(result.context, null);
   assert.equal(result.dialog.status, "rejected");
   assert.match(result.dialog.guidance, /leave a message/i);
+});
+
+test("machine-only voicemail phrases reject mid-call after coachable turns (anytime gate)", () => {
+  const pipeline = createSanitizedLiveCoachPipeline({
+    metadata: { agentName: "Chris", firmName: "Tax Advocate Group", uii: "u-anytime" },
+  });
+  // A coachable prospect turn first — the start-only voicemail gate is now off.
+  const first = pipeline.handleTranscript({
+    text: "I got a CP504 notice from the IRS about a levy.",
+    role: "prospect",
+  });
+  assert.equal(first.action, "compose_dialog");
+  // Broad-set phrase mid-call must NOT reject (a live human can say this).
+  const humanish = pipeline.handleTranscript({
+    text: "Just leave me a message later if I drop off.",
+    role: "prospect",
+  });
+  assert.notEqual(humanish.action, "reject_voicemail");
+  // Deposit-menu audio is machine-only: reject even after coachable turns.
+  const menu = pipeline.handleTranscript({
+    text: "To erase and re-record, press three. To continue recording where you left off, press four.",
+    role: "prospect",
+  });
+  assert.equal(menu.action, "reject_voicemail");
+  assert.match(menu.dialog.guidance, /mid-call/i);
+});
+
+test("contraction greeting forms reject at call start (live miss 2026-06-10)", () => {
+  const samples = [
+    "This is Nicki, I'm not available, bye.",
+    "This is Nikki. Not available. Bye.",
+    "Hey, it's Tom — I'm not available, leave it after the beep.",
+  ];
+  for (const text of samples) {
+    const pipeline = createSanitizedLiveCoachPipeline({
+      metadata: { agentName: "Chris", firmName: "Tax Advocate Group", uii: `u-vm-${text.length}` },
+    });
+    const result = pipeline.handleTranscript({ text, role: "prospect" });
+    assert.equal(result.action, "reject_voicemail", `expected reject for: ${text}`);
+  }
+});
+
+test("mined greeting variants reject at call start (Spanish + you've-reached + phone-greeting)", () => {
+  const samples = [
+    "Se envió al buzón de voz. La persona con la que intentas comunicarte no está disponible. Graba tu mensaje después del tono.",
+    "Hi, you've reached Angie. I'm sorry I'm unable to come to the phone right now. Go ahead and leave your name, number, and a message.",
+    "This is John Blessing. I can't get to the phone right now. If you leave your name and your number, I'll get back to you.",
+    "The person at extension 702-329-5690 is unavailable. Please leave your message after the tone. When done, hang up or press the pound key.",
+    "The number you have reached is not in service. Please check the number and dial again.",
+    "The person you are trying to reach has a voicemail box that has not been set up yet. Please try your call again later.",
+  ];
+  for (const text of samples) {
+    const pipeline = createSanitizedLiveCoachPipeline({
+      metadata: { agentName: "Chris", firmName: "Tax Advocate Group", uii: `u-${text.length}` },
+    });
+    const result = pipeline.handleTranscript({ text, role: "prospect" });
+    assert.equal(result.action, "reject_voicemail", `expected reject for: ${text.slice(0, 60)}`);
+  }
 });
 
 test("call screeners are held and never sent to the mini context or Sonnet dialog stages", () => {

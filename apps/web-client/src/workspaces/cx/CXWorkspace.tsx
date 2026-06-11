@@ -88,6 +88,18 @@ const CX_VOICEMAIL_BUTTON_ENABLED = !["0", "false", "no", "off", "disabled"].inc
   String(import.meta.env.VITE_CX_VOICEMAIL_BUTTON_ENABLED || "true").trim().toLowerCase(),
 );
 
+// Themed voicemail-drop menu. Keys are stable identifiers the server maps to
+// campaign dispositions (cxVoicemailDropService.listVmDropThemes) — labels
+// here only feed the select. Renaming a disposition is a server-side change.
+const VM_DROP_THEMES: Array<{ key: string; label: string }> = [
+  { key: "online-inquiry", label: "Online Inquiry" },
+  { key: "free-consultation", label: "Free Consultation" },
+  { key: "notices", label: "Notices" },
+  { key: "balance-due", label: "Balance Due" },
+  { key: "tailor-made", label: "Tailor Made" },
+];
+const VM_DROP_THEME_STORAGE_KEY = "cxVmDropTheme";
+
 type ContactContext = {
   caseId?: string | null;
   name?: string | null;
@@ -3328,6 +3340,19 @@ export function CXWorkspace() {
   const [coachReleaseSignal, setCoachReleaseSignal] =
     React.useState<{ key: string; reason: string } | null>(null);
   const [voicemailDropPending, setVoicemailDropPending] = React.useState(false);
+  const [vmDropTheme, setVmDropTheme] = React.useState<string>(() => {
+    try {
+      const saved = localStorage.getItem(VM_DROP_THEME_STORAGE_KEY) || "";
+      if (VM_DROP_THEMES.some((t) => t.key === saved)) return saved;
+    } catch {}
+    return VM_DROP_THEMES[0].key;
+  });
+  function pickVmDropTheme(key: string) {
+    setVmDropTheme(key);
+    try {
+      localStorage.setItem(VM_DROP_THEME_STORAGE_KEY, key);
+    } catch {}
+  }
   const autoServeInFlightRef = React.useRef(false);
   const breakAutoLogoutFiredRef = React.useRef(false);
   const lastTerminalOutcomeWorkflowRef = React.useRef<string | null>(null);
@@ -3521,22 +3546,27 @@ export function CXWorkspace() {
   }
 
   async function runHeadlessVoicemailDrop() {
-    // The drop joins the (now voicemail-connected) call and plays the agent's recording.
-    // Fast path: a SHORT best-effort pre-arm so the play can reuse an already-joined leg.
-    // But the drop does NOT depend on the pre-arm -- requireArmed:false lets the headless
-    // fall back to the self-contained one-shot barge (dial *82 -> wait for the media/silence
-    // cue -> play), which is the logic that reliably worked mid-call (the same thing a
-    // human does barging a playing mailbox by hand). We never arm on CONNECT -- that silent
-    // join into live conversations was the poison; warm-on-connect keeps the monitor
-    // registered so either path dials fast at button time.
+    // v3 (server default): themed DISPOSITION drop. The server resolves this
+    // agent's live RingCX UII and sets the selected theme's disposition —
+    // the dialer completes the call for the agent and cold-transfers the
+    // VM leg to the themed answerer. Returns in ~2s; no barge, no arming.
+    //
+    // Legacy fallback: when the server runs CX_VOICEMAIL_DROP_MODE=barge the
+    // same request degrades to the headless one-shot *82 play (action falls
+    // back to "play"; requireArmed:false keeps the self-contained barge).
+    // The short best-effort pre-arm only matters on that path — in
+    // disposition mode the server answers arm requests with a no-op.
     const armDeadlineAt = Date.now() + VOICEMAIL_ARM_READY_WAIT_MS;
     try {
       await ensureVoicemailArmReady(armDeadlineAt);
     } catch {
-      // Pre-arm did not join in the fast-path budget -- fall through to the one-shot barge.
+      // Pre-arm did not join in the fast-path budget — the one-shot barge
+      // (or the disposition path) does not depend on it.
     }
     const response = (await voicemailDrop.mutateAsync({
-      action: "play",
+      action: "drop",
+      theme: vmDropTheme,
+      phone: selectedPhone || undefined,
       requireArmed: false,
       armWaitMs: VOICEMAIL_ARM_READY_WAIT_MS,
       cueMaxWaitMs: VOICEMAIL_DROP_CUE_WINDOW_MS,
@@ -3544,6 +3574,12 @@ export function CXWorkspace() {
       | { result?: Record<string, unknown> }
       | undefined;
     const result = (response?.result ?? response) as Record<string, unknown> | undefined;
+    if (result?.mode === "disposition") {
+      if (!result?.dropped) {
+        throw new Error("Voicemail disposition was not confirmed");
+      }
+      return result;
+    }
     if (!result?.played || !result?.released) {
       throw new Error("Headless monitor did not confirm voicemail playback and release");
     }
@@ -3580,8 +3616,9 @@ export function CXWorkspace() {
       });
     }, VOICEMAIL_DROP_WATCHDOG_MS);
     releaseLiveCoachForCurrentCall("voicemail-drop-started");
+    const themeLabel = VM_DROP_THEMES.find((t) => t.key === vmDropTheme)?.label || "Voicemail";
     toast("Voicemail drop started", {
-      description: "Keeping this call open until the headless monitor finishes the recording.",
+      description: `Dropping "${themeLabel}" — the dialer delivers the message while you move on.`,
     });
     void runHeadlessVoicemailDrop()
       .then(() => {
@@ -5750,17 +5787,32 @@ export function CXWorkspace() {
                     </Button>
                   ) : null}
                   {CX_VOICEMAIL_BUTTON_ENABLED && hasServedQueueTarget && dispositionCaseId != null ? (
-                    <Button
-                      size="sm"
-                      variant="secondary"
-                      className="border-violet-500/40 bg-violet-600 text-white hover:bg-violet-700"
-                      disabled={voicemailDropPending || disposition.isPending}
-                      onClick={beginVoicemailDrop}
-                      title="Stop live coach input and keep this call open while the headless monitor drops the voicemail. The queue advances after the headless monitor releases."
-                    >
-                      <MessageCircleMore className="h-3.5 w-3.5" />
-                      {voicemailDropPending ? "Dropping VM" : "Voicemail"}
-                    </Button>
+                    <div className="flex items-center gap-1">
+                      <select
+                        value={vmDropTheme}
+                        onChange={(e) => pickVmDropTheme(e.target.value)}
+                        disabled={voicemailDropPending || disposition.isPending}
+                        className="h-8 rounded-md border border-violet-500/40 bg-card px-1.5 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-violet-500 disabled:opacity-50"
+                        title="Which voicemail message to drop"
+                      >
+                        {VM_DROP_THEMES.map((t) => (
+                          <option key={t.key} value={t.key}>
+                            {t.label}
+                          </option>
+                        ))}
+                      </select>
+                      <Button
+                        size="sm"
+                        variant="secondary"
+                        className="border-violet-500/40 bg-violet-600 text-white hover:bg-violet-700"
+                        disabled={voicemailDropPending || disposition.isPending}
+                        onClick={beginVoicemailDrop}
+                        title="Drop the selected voicemail message: you're released to the next call instantly while the dialer delivers the recording into the prospect's mailbox."
+                      >
+                        <MessageCircleMore className="h-3.5 w-3.5" />
+                        {voicemailDropPending ? "Dropping VM" : "Voicemail"}
+                      </Button>
+                    </div>
                   ) : null}
                 </div>
               </div>

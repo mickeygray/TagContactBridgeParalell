@@ -40,6 +40,9 @@ const {
 const {
   CONTEXT_RULES,
 } = require("../../../packages/shared-services/src/liveCoachSanitizedPipeline");
+const {
+  createLiveCoachVmTransferTrigger,
+} = require("../../../packages/shared-services/src/liveCoachVmTransferService");
 
 let processCrashLogger = null;
 
@@ -280,6 +283,100 @@ function buildMiniContextJudgeCacheKey({ model, metadata = {}, scope = "agent" }
     parts.push(normalizedScope.replace(/[^a-z0-9@._-]+/g, "-"));
   }
   return cleanText(parts.filter(Boolean).join(":"), 180);
+}
+
+// ── Rolling relevance digest (mini's dual-VAD role) ─────────────────────────
+// Mini continuously reads the fast channel's caught packets against the last
+// completed turns + recent coach lines. It is explicitly NOT judging the
+// present (Sonnet reads the present at turn time) — its one question is: in
+// the broad context of what's already been said, is this caught info relevant?
+const MINI_ROLLING_DIGEST_PROMPT_VERSION = "digest-v1";
+const MINI_ROLLING_DIGEST_STATIC_PROMPT = [
+  "You are the rolling relevance reader for a live tax-resolution sales call.",
+  "You are NOT trying to understand what is being said right now - the coach reads the present at turn time. Your only question: in the broad context of what has ALREADY been said (the last completed turns and recent coach lines), is the newly caught tax/sales info RELEVANT to the live thread of this conversation?",
+  "Input JSON: lastTurns (last completed thoughts, both speakers), coachLines (recent coach suggestions), packets (newest fast speech fragments, each with deterministically caught keys and snippets).",
+  "Drop catches that are echoes, already-resolved topics, side noise, or keyword misfires. Keep catches that extend, answer, or complicate the live thread.",
+  'Reply ONLY with JSON: {"relevantKeys":[{"key":"...","snippet":"...","why":"<=15 words"}] (max 5), "droppedKeys":["..."], "brief":{"whatHappened":"<=140 chars - the immediate past in one beat","continueFrom":"<=100 chars - where the thread is heading"}, "read":"<=120 chars - what the prospect feels and wants right now"}',
+].join("\n");
+
+function createOpenAiRollingDigest({ logger } = {}) {
+  const enabled = boolFromEnv(process.env.LIVE_COACH_MINI_DIGEST_ENABLED, true);
+  const apiKey = String(process.env.OPENAI_API_KEY || "").trim();
+  if (!enabled || !apiKey) return null;
+  const model = String(
+    process.env.LIVE_COACH_MINI_DIGEST_MODEL ||
+      process.env.LIVE_COACH_CONTEXT_JUDGE_MODEL ||
+      process.env.LIVE_COACH_MINI_MODEL ||
+      "gpt-5.4-mini",
+  ).trim();
+  const serviceTier = cleanText(process.env.LIVE_COACH_OPENAI_SERVICE_TIER || "priority", 80);
+  const timeoutMs = Math.max(2000, Number(process.env.LIVE_COACH_MINI_DIGEST_TIMEOUT_MS || 5000) || 5000);
+  const maxOutputTokens = Math.max(
+    150,
+    Math.min(600, Number(process.env.LIVE_COACH_MINI_DIGEST_MAX_OUTPUT_TOKENS || 300) || 300),
+  );
+  logLiveCoachDiagnostic(logger, "live_coach.rolling_digest.config", {
+    enabled: true,
+    model,
+    serviceTier: serviceTier || null,
+    promptVersion: MINI_ROLLING_DIGEST_PROMPT_VERSION,
+    maxOutputTokens,
+    timeoutMs,
+  }, { force: true });
+
+  return async function rollingDigestWithOpenAi({ lastTurns = [], coachLines = [], packets = [] } = {}) {
+    const requestBody = {
+      model,
+      ...(serviceTier ? { service_tier: serviceTier } : {}),
+      prompt_cache_key: `live-coach-rolling-digest:${MINI_ROLLING_DIGEST_PROMPT_VERSION}`,
+      prompt_cache_retention: "in_memory",
+      input: [
+        { role: "developer", content: MINI_ROLLING_DIGEST_STATIC_PROMPT },
+        { role: "user", content: JSON.stringify({ lastTurns, coachLines, packets }) },
+      ],
+      max_output_tokens: maxOutputTokens,
+    };
+    const startedAtMs = Date.now();
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const response = await fetch("https://api.openai.com/v1/responses", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify(requestBody),
+        signal: controller.signal,
+      });
+      if (!response.ok) {
+        const body = await response.text().catch(() => "");
+        throw new Error(`rolling digest failed: ${response.status} ${body.slice(0, 160)}`);
+      }
+      const payload = await response.json();
+      const parsed = parseJsonObject(extractOpenAiResponseText(payload));
+      const elapsedMs = Date.now() - startedAtMs;
+      logLiveCoachDiagnostic(logger, "live_coach.rolling_digest.result", {
+        elapsedMs,
+        model: payload.model || model,
+        packetCount: packets.length,
+        relevantCount: Array.isArray(parsed.relevantKeys) ? parsed.relevantKeys.length : 0,
+        droppedCount: Array.isArray(parsed.droppedKeys) ? parsed.droppedKeys.length : 0,
+        usage: payload.usage || null,
+      }, { elapsedMs });
+      return parsed;
+    } catch (error) {
+      logger?.warn?.("live_coach.rolling_digest.error", {
+        elapsedMs: Date.now() - startedAtMs,
+        model,
+        packetCount: packets.length,
+        error: error.message,
+      });
+      return null;
+    } finally {
+      clearTimeout(timeout);
+    }
+  };
 }
 
 function createOpenAiSemanticContextJudge({ logger } = {}) {
@@ -1644,9 +1741,12 @@ function createLiveCoachWallboardHtml() {
     const SHOW_UNBOUND = new URLSearchParams(window.location.search).get("debug") === "unbound";
     // Pinned lanes always render (known floor). Any OTHER agent with a live
     // session or a fresh call event gets a dynamic lane derived from their
-    // identity — the coach works for everyone with a stream attached, not just
-    // the names hardcoded here. Identity-less streams share the Unbound lane
-    // (auto-shown when one exists; always shown with ?debug=unbound).
+    // identity. Identity-less sessions are OPTIMISTICALLY placed into the agent
+    // lane whose fresh cx.call.placed event matches their phone (the event
+    // knows agent+phone, the stream knows phone+uii) and the bridge's
+    // enrichment heals the metadata in the background — the floor never sees
+    // an "unbound" lane. Phone-labeled lanes appear only for sessions that
+    // stay orphaned >60s; the debug Unbound lane only with ?debug=unbound.
     const PINNED_AGENTS = [
       { key: "cbolt", label: "Chris Bolt", aliases: ["cbolt", "cbolt@", "chrisbolt", "chris bolt", "63914586004"] },
       { key: "bhansen", label: "Brad Hansen", aliases: ["bhansen", "bhansen@", "bradhansen", "brad hansen", "63914587004"] },
@@ -1698,6 +1798,9 @@ function createLiveCoachWallboardHtml() {
         metadata.agentName || "",
         metadata.agentExtension || "",
         metadata.agentExtensionId || "",
+        // Phone digits so identity-less sessions can match their per-phone lane
+        // (live dialogInits carry no agent identity — phone is often all we have).
+        String(metadata.phone || "").replace(/\D/g, ""),
       ].join(" ").toLowerCase().replace(/[^a-z0-9@+._ -]+/g, "");
     }
 
@@ -1728,11 +1831,61 @@ function createLiveCoachWallboardHtml() {
         .some((agent) => agentMatches(agent, session));
     }
 
-    function dynamicLaneFromIdentity(ext, email, name) {
+    function sessionHasAgentIdentity(session) {
+      const metadata = session?.metadata || {};
+      return Boolean(String(
+        metadata.agentExtension || metadata.agentExtensionId || metadata.agentEmail || metadata.agentName || "",
+      ).trim());
+    }
+
+    function sessionAgeMs(session) {
+      const createdMs = Date.parse(session?.createdAt || "") || 0;
+      return createdMs ? Date.now() - createdMs : 0;
+    }
+
+    function agentRecentEventPhones(agent, callEvents) {
+      const phones = new Set();
+      const maxAgeMs = 3 * 60 * 1000;
+      for (const event of callEvents || []) {
+        if (!event || event.expired) continue;
+        const ms = callEventSortMs(event);
+        if (!ms || Date.now() - ms > maxAgeMs) continue;
+        if (!callEventMatches(agent, event)) continue;
+        const digits = String(event.phone || "").replace(/\D/g, "");
+        if (digits) phones.add(digits);
+      }
+      return phones;
+    }
+
+    // Optimistic attribution: an identity-less session whose phone matches one
+    // of this agent's fresh call events belongs in this agent's lane NOW;
+    // bridge enrichment makes it authoritative moments later (healing).
+    function sessionMatchesAgentOptimistically(agent, session, callEvents) {
+      if (agentMatches(agent, session)) return true;
+      if (sessionHasAgentIdentity(session)) return false;
+      const digits = String(session?.metadata?.phone || "").replace(/\D/g, "");
+      if (!digits) return false;
+      return agentRecentEventPhones(agent, callEvents).has(digits);
+    }
+
+    function dynamicLaneFromIdentity(ext, email, name, phone, session) {
       const cleanExt = String(ext || "").trim();
       const cleanEmail = String(email || "").trim().toLowerCase();
       const cleanName = String(name || "").trim();
-      if (!cleanExt && !cleanEmail && !cleanName) return null;
+      const cleanPhone = String(phone || "").replace(/\D/g, "");
+      if (!cleanExt && !cleanEmail && !cleanName) {
+        // Last-resort visibility: only a PERSISTENT orphan (alive >60s with no
+        // attribution) earns a phone lane — transient pre-event gaps stay
+        // invisible because optimistic attribution or enrichment claims them.
+        if (!cleanPhone || cleanPhone.length < 7) return null;
+        if (!session || sessionAgeMs(session) < 60_000) return null;
+        return {
+          key: "dyn-ph-" + cleanPhone,
+          label: "Phone " + cleanPhone.replace(/^(\d{3})(\d{3})(\d{4})$/, "($1) $2-$3"),
+          aliases: [cleanPhone],
+          dynamic: true,
+        };
+      }
       const key = "dyn-" + (cleanExt || cleanEmail || cleanName).toLowerCase().replace(/[^a-z0-9@._-]+/g, "-").slice(0, 60);
       const aliases = [
         cleanExt,
@@ -1746,22 +1899,8 @@ function createLiveCoachWallboardHtml() {
 
     function deriveDynamicLanes(sessions, callEvents) {
       const dynamic = new Map();
-      let sawIdentitylessSession = false;
-      for (const session of sessions || []) {
-        if (!isDisplayable(session)) continue;
-        if (PINNED_AGENTS.some((agent) => agentMatches(agent, session))) continue;
-        const metadata = session.metadata || {};
-        const lane = dynamicLaneFromIdentity(
-          metadata.agentExtension || metadata.agentExtensionId,
-          metadata.agentEmail,
-          metadata.agentName,
-        );
-        if (!lane) {
-          sawIdentitylessSession = true;
-          continue;
-        }
-        if (!dynamic.has(lane.key)) dynamic.set(lane.key, lane);
-      }
+      // 1. Event-derived agent lanes first (events always carry agent identity)
+      //    so identity-less sessions can be optimistically claimed by them.
       const maxEventAgeMs = 3 * 60 * 1000;
       for (const event of callEvents || []) {
         if (!event || event.expired) continue;
@@ -1775,8 +1914,26 @@ function createLiveCoachWallboardHtml() {
         );
         if (lane && !dynamic.has(lane.key)) dynamic.set(lane.key, lane);
       }
+      // 2. Session-derived lanes: identified sessions get their agent lane;
+      //    identity-less sessions claimed by ANY lane's fresh event-phone stay
+      //    laneless (they render inside that agent's lane); persistent orphans
+      //    (>60s, unclaimed) earn a last-resort phone lane.
+      const claimLanes = PINNED_AGENTS.concat([...dynamic.values()]);
+      for (const session of sessions || []) {
+        if (!isDisplayable(session)) continue;
+        if (claimLanes.some((agent) => sessionMatchesAgentOptimistically(agent, session, callEvents))) continue;
+        const metadata = session.metadata || {};
+        const lane = dynamicLaneFromIdentity(
+          metadata.agentExtension || metadata.agentExtensionId,
+          metadata.agentEmail,
+          metadata.agentName,
+          metadata.phone,
+          session,
+        );
+        if (lane && !dynamic.has(lane.key)) dynamic.set(lane.key, lane);
+      }
       const rows = [...dynamic.values()].sort((a, b) => a.label.localeCompare(b.label));
-      if (sawIdentitylessSession || SHOW_UNBOUND) rows.push(UNBOUND_LANE);
+      if (SHOW_UNBOUND) rows.push(UNBOUND_LANE);
       return rows;
     }
 
@@ -1879,7 +2036,7 @@ function createLiveCoachWallboardHtml() {
       });
     }
 
-    function pickSessionForAgent(agent, sessions) {
+    function pickSessionForAgent(agent, sessions, callEvents) {
       const bySignalThenRecency = (a, b) => {
         const activeDelta = Number(isTerminalSession(a)) - Number(isTerminalSession(b));
         if (activeDelta) return activeDelta;
@@ -1893,7 +2050,7 @@ function createLiveCoachWallboardHtml() {
           .sort(bySignalThenRecency)[0] || null;
       }
       return sessions
-        .filter((session) => isDisplayable(session) && agentMatches(agent, session))
+        .filter((session) => isDisplayable(session) && sessionMatchesAgentOptimistically(agent, session, callEvents))
         .sort(bySignalThenRecency)[0] || null;
     }
 
@@ -2124,7 +2281,7 @@ function createLiveCoachWallboardHtml() {
         transcript?.model || transcript?.source || "",
         transcript?.at ? fmtTime(transcript.at) : "",
         transcript?.wordCount ? transcript.wordCount + " words" : "",
-        streamStatus && streamStatus.bindState && streamStatus.bindState !== "bound" ? "bind: " + streamStatus.bindState : "",
+        streamStatus && streamStatus.bindState && streamStatus.bindState !== "bound" ? "linking call..." : "",
         streamStatus && Number(streamStatus.pendingDroppedBytes || 0) > 0 ? "audio dropped " + Math.round(Number(streamStatus.pendingDroppedBytes) / 1024) + "KB" : "",
         streamStatus && !transcript?.text ? Math.round(Number(streamStatus.durationSec || 0)) + "s audio" : "",
         streamStatus && !transcript?.text ? "active " + Number(streamStatus.activePct || 0).toFixed(1) + "%" : "",
@@ -2358,7 +2515,7 @@ function createLiveCoachWallboardHtml() {
       // Lanes follow the floor: add/remove dynamic lanes before painting.
       syncLanes(sessions, callEvents);
       for (const agent of lanes) {
-        const session = pickSessionForAgent(agent, sessions);
+        const session = pickSessionForAgent(agent, sessions, callEvents);
         const waitingCall = pickCallEventForAgent(agent, callEvents, sessions);
         const rejectedSession = pickRecentRejectedForAgent(agent, sessions);
         const current = laneState.get(agent.key) || {};
@@ -2461,7 +2618,16 @@ async function main() {
       logger,
     })
     : null;
-  const semanticContextJudge = createOpenAiSemanticContextJudge({ logger });
+  // SIMPLIFIED FLOW (default): the mini context judge is OFF — the
+  // deterministic gates (voicemail/screener/filler/echo) protect the pipe,
+  // every real utterance forwards with its ranked candidate keys, and Claude
+  // decides (WAIT) and writes in one call. Live data drove this: the judge
+  // held 61% of contexts and every layer of arbitration around it existed
+  // because we didn't trust those holds. Re-enable the cost-gate era with
+  // LIVE_COACH_CONTEXT_JUDGE_ENABLED=true.
+  const semanticContextJudge = boolFromEnv(process.env.LIVE_COACH_CONTEXT_JUDGE_ENABLED, false)
+    ? createOpenAiSemanticContextJudge({ logger })
+    : null;
   const coachBus = createLiveCoachBus({
     rootDir: config.rootDir,
     logger,
@@ -2486,6 +2652,15 @@ async function main() {
     // Non-strong-junk holds expire after this silence window and force-compose
     // the buffered thought (trailing-off prospects still get coached). 0 = off.
     holdExpiryMs: Math.max(0, Number(process.env.LIVE_COACH_HOLD_EXPIRY_MS ?? 2500) || 0),
+    // Coach-triggered voicemail drop: default OFF; hard phone allowlist inside
+    // the trigger (LIVE_COACH_VM_TRANSFER_* envs).
+    vmTransferTrigger: createLiveCoachVmTransferTrigger({ logger }),
+    // Mini's dual-VAD role: rolling relevance digest over the fast channel's
+    // packets (default ON; LIVE_COACH_MINI_DIGEST_ENABLED=false disables).
+    rollingDigest: createOpenAiRollingDigest({ logger }),
+    // Mini wakes after the prospect's first N semantic turns; before that
+    // Sonnet runs the scripted OPENING prompt with no memory.
+    digestWarmupTurns: Math.max(0, Number(process.env.LIVE_COACH_DIGEST_WARMUP_TURNS || 3) || 3),
   });
   logger.info("live_coach.runtime_config", {
     mongoConnected: Boolean(mongoRuntime.connected),
@@ -2712,6 +2887,64 @@ async function main() {
     }
   });
 
+  // Bus fallback for session-for-call: when the Mongo cx.call.placed lookup
+  // misses (558/688 binding misses in one live window were "no matching
+  // event"), the LIVE session store is the truth — the gRPC stream creates
+  // sessions regardless of whether the workspace hook emitted an event. Match
+  // by call identity first, then agent fields; rank by signal so a flowing
+  // stream beats a control-plane shell; only FRESH sessions qualify so a dead
+  // unstopped session can't be handed to the panel.
+  function pickLiveSessionFallback(input = {}) {
+    const ext = cleanText(input.agentExtensionId || input.agentExtension || "", 80).toLowerCase();
+    const email = cleanText(input.agentEmail || "", 180).toLowerCase();
+    const name = cleanText(input.agentName || "", 120).toLowerCase();
+    const uii = cleanText(input.uii || "", 160);
+    const queueItemId = cleanText(input.queueItemId || "", 160);
+    const callSessionId = cleanText(input.callSessionId || "", 160);
+    const TERMINAL = new Set(["stopped", "stale", "released", "voicemail_rejected", "pruned"]);
+    const now = Date.now();
+    const fresh = (s) => {
+      const ms = Date.parse(s?.lastEventAt || s?.updatedAt || "") || 0;
+      return ms && now - ms <= 45_000;
+    };
+    const signal = (s) => {
+      const latest = s?.latest || {};
+      let score = 0;
+      if (latest.dialog) score += 4;
+      if (latest.transcript?.text || latest.provisionalTranscript?.text) score += 4;
+      if (latest.context) score += 2;
+      if (Number(s?.counters?.input || 0) > 0) score += 2;
+      if (latest.streamStatus) score += 1;
+      return score;
+    };
+    const idScore = (s) => {
+      const m = s?.metadata || {};
+      const b = s?.binding?.metadata || {};
+      if (uii && (String(m.uii || "") === uii || String(b.uii || "") === uii)) return 3;
+      if (queueItemId && (String(m.queueItemId || "") === queueItemId || String(b.queueItemId || "") === queueItemId)) return 2;
+      if (callSessionId && (String(m.callSessionId || "") === callSessionId || String(b.callSessionId || "") === callSessionId)) return 2;
+      return 0;
+    };
+    const agentMatch = (s) => {
+      const m = s?.metadata || {};
+      const fields = [m.agentExtension, m.agentExtensionId, m.agentEmail, m.agentName]
+        .map((v) => String(v || "").trim().toLowerCase())
+        .filter(Boolean);
+      if (ext && fields.includes(ext)) return true;
+      if (email && fields.includes(email)) return true;
+      return Boolean(name && String(m.agentName || "").trim().toLowerCase() === name);
+    };
+    const rows = (coachBus.listSessions() || [])
+      .filter((s) => s && !TERMINAL.has(String(s.status || "")) && fresh(s))
+      .map((s) => ({ s, id: idScore(s), agent: agentMatch(s) }))
+      .filter((row) => row.id > 0 || row.agent);
+    rows.sort((a, b) =>
+      (b.id - a.id)
+      || (signal(b.s) - signal(a.s))
+      || ((Date.parse(b.s.lastEventAt || "") || 0) - (Date.parse(a.s.lastEventAt || "") || 0)));
+    return rows[0]?.s || null;
+  }
+
   app.get("/api/ai/live-coach/dashboard/session-for-call", requireDashboardAccess, requireMongoBridge, async (req, res, next) => {
     try {
       const input = req.query || {};
@@ -2720,6 +2953,22 @@ async function main() {
         requireCurrentForAgent: true,
       });
       if (!result.binding?.active) {
+        const fallback = pickLiveSessionFallback(input);
+        if (fallback) {
+          logger.info("live_coach.session_for_call.bus_fallback", {
+            sessionId: fallback.id,
+            mongoStatus: result.status || null,
+            agentExtensionId: cleanText(input.agentExtensionId || "", 80) || null,
+            uii: cleanText(input.uii || "", 160) || null,
+          });
+          return res.json({
+            ...result,
+            status: "bus_fallback",
+            fallback: true,
+            retired: null,
+            session: fallback,
+          });
+        }
         return res.json({
           ...result,
           retired: null,

@@ -22,6 +22,8 @@ const {
   requestCxEndCall,
   requestCxDisposition,
   requestCxVoicemailDrop,
+  listVmDropThemes,
+  vmDropMode,
   requestCxEmail,
   requestCxLeadStatusUpdate,
   releaseCxPostDateHold,
@@ -111,6 +113,25 @@ function createCommandsCxRouter(auth) {
       try {
         const result = await requestCxVoicemailDrop(req.params.domain, req.user, req.body || {});
         return res.json({ ok: true, result });
+      } catch (error) {
+        return res.status(error.status || 500).json(toErrorResponse(error));
+      }
+    },
+  );
+
+  // Themed VM-drop menu for the client select (disposition mode). Static
+  // config read — no CX OAuth needed, any authed agent may read it.
+  router.get(
+    "/:domain/voicemail-drop/themes",
+    auth.requireAuth,
+    auth.requireUser,
+    async (req, res) => {
+      try {
+        return res.json({
+          ok: true,
+          mode: vmDropMode(),
+          themes: listVmDropThemes().map(({ key, label, urgency }) => ({ key, label, urgency: urgency || null })),
+        });
       } catch (error) {
         return res.status(error.status || 500).json(toErrorResponse(error));
       }

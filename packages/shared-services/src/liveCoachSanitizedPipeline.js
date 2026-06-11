@@ -40,6 +40,61 @@ const VOICEMAIL_MATCHES = [
   "voicemail box",
   "mailbox is full",
   "automated voice messaging system",
+  // Mined from real floor transcripts (2026-06-10): greeting/system phrasings
+  // the gate was missing while the call kept transcribing to the bitter end.
+  "unable to come to the phone",
+  "can't come to the phone",
+  "cannot come to the phone",
+  "can't get to the phone",
+  "cannot get to the phone",
+  "press the pound key",
+  "hang up or press",
+  "is not in service",
+  "check the number and dial again",
+  "has not been set up yet",
+  "try your call again later",
+  // Contraction greeting forms (live miss 2026-06-10: real carrier greeting
+  // "This is Nicki, I'm not available, bye." — the patterns only knew
+  // "i am" / "this person is"). Start-only gate, so a live human's first
+  // utterance is "Hello?", not these.
+  "i'm not available",
+  "i am not available",
+  "we're not available",
+  // Spanish voicemail prompts (STT transcribes them faithfully; the gate
+  // never spoke Spanish). Include unaccented variants for STT drift.
+  "buzón de voz",
+  "buzon de voz",
+  "graba tu mensaje",
+  "grabe su mensaje",
+  "después del tono",
+  "despues del tono",
+  "deja tu mensaje",
+  "deje su mensaje",
+];
+
+// Unambiguous MACHINE audio that can never be a live prospect speaking —
+// voicemail deposit menus, carrier intercepts, forward announcements. Unlike
+// VOICEMAIL_MATCHES (checked only before the first coachable turn), these
+// reject the session at ANY point: a missed greeting or a stray early fragment
+// used to disable the gate and the bridge then transcribed the entire
+// voicemail deposit (menus included) for nothing.
+const VOICEMAIL_ANYTIME_MATCHES = [
+  "satisfied with the message, press",
+  "if you're satisfied with the message",
+  "if you are satisfied with the message",
+  "to erase and re-record",
+  "to erase and rerecord",
+  "to listen to your message, press",
+  "continue recording where you left off",
+  "has been forwarded to voicemail",
+  "forwarded to an automated voice messaging system",
+  "forwarded to an automatic voice message system",
+  "automatic voice message system",
+  "at the tone, please record your message",
+  "when you have finished recording",
+  "is not in service",
+  "buzón de voz",
+  "buzon de voz",
 ];
 
 const VOICEMAIL_PATTERNS = [
@@ -82,6 +137,20 @@ const VOICEMAIL_PATTERNS = [
   {
     label: "voicemail greeting",
     pattern: /\b(?:voicemail|voice\s+mail|mailbox)\b.{0,120}\b(?:message|tone|full|unavailable)\b/i,
+  },
+  {
+    // "Not available. Bye." / "not available right now, thanks, bye" — terse
+    // carrier/personal greetings that end in a goodbye instead of instructions.
+    label: "not available goodbye",
+    pattern: /\bnot\s+available\b[\s.,!]*(?:right\s+now\b[\s.,!]*)?(?:bye|goodbye|thanks)\b/i,
+  },
+  {
+    // Garbled-greeting fragment: custom greetings transcribe patchily and the
+    // surviving final can be as thin as "available by(e)". Start-only gate, and
+    // a live human's first utterance never ENDS in "available bye" — anchored
+    // to the end of the fragment to keep it tight.
+    label: "available goodbye fragment",
+    pattern: /\bavailable\b[\s.,!]*(?:bye|by)\b[\s.,!]*$/i,
   },
 ];
 
@@ -955,6 +1024,16 @@ function normalizeSttTranscript(input = {}) {
     provider: cleanText(input.provider || input.sttProvider || "", 80) || null,
     model: cleanText(input.model || input.sttModel || "", 120) || null,
     confidence: Number.isFinite(Number(input.confidence)) ? Number(input.confidence) : null,
+    // Marked-not-dropped: the bridge delivers low-logprob finals with this
+    // flag instead of discarding them. UI grays the row; models see the flag.
+    lowConfidence: Boolean(input.lowConfidence),
+    // Primer echo: the bridge flagged this final as mostly primer vocabulary
+    // (the STT prompt hallucinated over noise/silence). Never coachable.
+    primerEcho: Boolean(input.primerEcho),
+    // Dual-VAD channel: "fast" = server_vad quick finals (additive context,
+    // never composes), "turn" = semantic_vad completed thoughts (Claude's
+    // trigger). Empty = single-channel legacy.
+    channel: cleanText(input.channel || "", 20) || null,
     isFinal: input.isFinal === undefined ? true : Boolean(input.isFinal),
     durationSec: Number.isFinite(Number(input.durationSec)) ? Number(input.durationSec) : null,
     wordCount: words.length,
@@ -976,6 +1055,17 @@ function includesPattern(text, patterns) {
 
 function analyzeVoicemail(text) {
   const match = includesPhrase(text, VOICEMAIL_MATCHES) || includesPattern(text, VOICEMAIL_PATTERNS);
+  return {
+    isVoicemail: Boolean(match),
+    match,
+    action: match ? "reject_call" : "continue",
+  };
+}
+
+// Machine-only phrases that reject at ANY point in the call (the broad gate
+// above only runs before the first coachable turn). See VOICEMAIL_ANYTIME_MATCHES.
+function analyzeVoicemailAnytime(text) {
+  const match = includesPhrase(text, VOICEMAIL_ANYTIME_MATCHES);
   return {
     isVoicemail: Boolean(match),
     match,
@@ -1268,15 +1358,21 @@ function classifyThoughtCompleteness(text) {
   return { complete: false, reason: "needs_more_context", wordCount: words.length };
 }
 
-function shouldComposeFromContext({ text, contextMatches, completeness }) {
+function shouldComposeFromContext({ text, contextMatches, completeness, channel }) {
   const clean = cleanText(text, 1200);
   const wordCount = Number(completeness?.wordCount || 0);
   if (!clean || isFiller(clean)) {
     return { shouldCompose: false, reason: "filler_or_empty" };
   }
-  // Completeness is no longer a local/mini gate. server_vad cuts on ~1s of silence, so a
-  // released segment can be mid-thought. Forward any real (non-filler) prospect utterance
-  // and let the coach (Claude) decide thought-completeness and whether to speak or WAIT.
+  // Dual-VAD: the fast channel is ADDITIVE ONLY — its quick finals run the
+  // gates and the term bank and accumulate context/memory, but the compose
+  // trigger belongs to the semantic turn channel (a completed thought).
+  if (channel === "fast") {
+    return { shouldCompose: false, reason: "fast_channel_additive" };
+  }
+  // Completeness is no longer a local/mini gate. A released segment can still be
+  // mid-thought. Forward any real (non-filler) prospect utterance and let the
+  // coach (Claude) decide thought-completeness and whether to speak or WAIT.
   // completeness stays on the frame as a non-binding hint only.
   if (contextMatches.length) {
     return { shouldCompose: true, reason: "matched_context" };
@@ -1300,7 +1396,7 @@ function buildMiniContextFrame({ phraseText, transcript, metadata = {}, pendingC
     maxMatches: 6,
   });
   const contextMatches = miniJudgement.selected;
-  const compose = shouldComposeFromContext({ text, contextMatches, completeness });
+  const compose = shouldComposeFromContext({ text, contextMatches, completeness, channel: transcript?.channel || null });
   const primary = contextMatches[0] || null;
   const jurisdiction = classifyJurisdiction(text, contextMatches);
   const tactics = deriveConversationTactics({
@@ -1443,6 +1539,7 @@ const FIXED_AGENT_COMPOSER_INSTRUCTIONS = Object.freeze([
 
 const FIXED_PROSPECT_COMPOSER_INSTRUCTIONS = Object.freeze([
   "FIRST, judge turn-completeness. Read the prospect's CURRENT text together with the recent call memory below. If the prospect is still mid-thought, trailing off mid-sentence, or this is a fragment, backchannel ('uh huh', 'okay', 'right'), or filler, reply with EXACTLY: WAIT - one word, nothing else.",
+  "Before writing, glance at the last agent and prospect turns in the memory: note silently what the prospect feels and wants right now (fear, skepticism, relief-seeking, pride) and let that read shape the line. Never output the analysis.",
   "Only when the prospect has finished a thought worth answering do you compose a line. When you do:",
   "Output only the exact words the agent should say next - spoken, not written; no labels or meta.",
   "One or two short sentences, usually under 35 words. Anchor on what the prospect just said, then do ONE thing: ask a concrete discovery question, or move toward fact review / representation.",
@@ -1472,6 +1569,23 @@ const SONNET_PROSPECT_SYSTEM_PROMPT = [
   ...FIXED_PROSPECT_COMPOSER_INSTRUCTIONS.map((line) => `- ${line}`),
 ].join("\n");
 
+// OPENING-PHASE system prompt (the prospect's first few turns): there is no
+// accumulated context yet and none is needed — the job is the call opening,
+// run close to verbatim. Separate STABLE prompt so it gets its own Anthropic
+// cache prefix (never mix per-call data in here).
+const SONNET_OPENING_SYSTEM_PROMPT = [
+  "You are a live tax-resolution sales dialog composer for the OPENING moments of an outbound phone call.",
+  "The prospect submitted a tax-debt inquiry; the agent is calling them back. These are the first exchanges — there is no call memory yet and you do not need any.",
+  "Reply WAIT only for pure noise (a cough, a half-ring, dead air). Otherwise ALWAYS give the agent their next opening line, fast.",
+  "",
+  "Standing directives:",
+  "- Output only the exact words the agent should say next - spoken, not written; no labels or meta. One short sentence or two, under 25 words.",
+  "- Run the opening sequence in order, advancing one step per turn: (1) confirm you're speaking with the prospect by first name; (2) self-identify - agent first name + firm name - and anchor to THEIR inquiry about their tax situation; (3) first discovery question: what notice or letter did they get, or what's going on with the IRS or state.",
+  "- Stay close to these shapes, personalized with the supplied names: 'Hi, is this {prospect}?' -> '{Prospect}, it's {agent} with {firm} - you reached out about your tax situation, so I'm following up on that.' -> 'So I can point you the right way: did you get a notice or letter recently, or is this about back balances or unfiled years?'",
+  "- If they answer a step, take the next one. If they object early ('who is this', 'not interested', 'busy'), answer it in one calm sentence anchored to their inquiry, then return to the sequence. Never apologize for calling.",
+  "- Use only the supplied agent, firm, and prospect names. No program talk, no promises, no DIY advice this early - the opening earns the conversation, nothing more.",
+].join("\n");
+
 const SONNET_AGENT_SYSTEM_PROMPT = [
   "You are a live tax-resolution sales dialog composer for phone calls.",
   "This turn is agent-side feedback, not a prospect response.",
@@ -1486,8 +1600,10 @@ function buildFixedComposerInstructions({ role = "prospect" } = {}) {
     : [...FIXED_AGENT_COMPOSER_INSTRUCTIONS];
 }
 
-function buildCacheableComposerSystem({ role = "prospect" } = {}) {
-  return role === "prospect" ? SONNET_PROSPECT_SYSTEM_PROMPT : SONNET_AGENT_SYSTEM_PROMPT;
+function buildCacheableComposerSystem({ role = "prospect", callPhase = "" } = {}) {
+  if (role !== "prospect") return SONNET_AGENT_SYSTEM_PROMPT;
+  // Both prompts are STABLE constants — each gets its own cache prefix.
+  return callPhase === "opening" ? SONNET_OPENING_SYSTEM_PROMPT : SONNET_PROSPECT_SYSTEM_PROMPT;
 }
 
 function buildLegacyFixedComposerInstructions({ role = "prospect" } = {}) {
@@ -1501,6 +1617,7 @@ function buildLegacyFixedComposerInstructions({ role = "prospect" } = {}) {
     // Completeness gate: the coach is now the turn decider. VAD only cuts on silence, so
     // the prospect text may be a partial thought.
     "FIRST, judge turn-completeness. Read the prospect's CURRENT text together with the recent call memory below. If the prospect is still mid-thought, trailing off mid-sentence, or this is a fragment, backchannel ('uh huh', 'okay', 'right'), or filler, reply with EXACTLY: WAIT — one word, nothing else.",
+    "Before writing, glance at the last agent and prospect turns in the memory: note silently what the prospect feels and wants right now (fear, skepticism, relief-seeking, pride) and let that read shape the line. Never output the analysis.",
     "Only when the prospect has finished a thought worth answering do you compose a line. When you do:",
     // Output shape
     "Output only the exact words the agent should say next — spoken, not written; no labels or meta.",
@@ -1549,13 +1666,19 @@ function buildSonnetPromptPayload({ contextFrame, metadata = {} }) {
       ? contextFrame.instructionsForPrompt
       : buildFixedComposerInstructions()).map((line) => `- ${line}`)),
   ].join("\n");
-  system = buildCacheableComposerSystem({ role: contextFrame?.role || "prospect" });
+  system = buildCacheableComposerSystem({
+    role: contextFrame?.role || "prospect",
+    callPhase: contextFrame?.callPhase || "",
+  });
 
   // USER = the DYNAMIC per-turn delta only: names, jurisdiction, raw transcript, the
   // context + tactics chosen for this moment. No standing instructions here.
+  const contactName = cleanText(metadata.contactName || contextFrame?.metadata?.contactName || "", 120);
   const user = [
     `Agent name: ${agentName}`,
     `Firm name: ${firmName}`,
+    contactName ? `Prospect name: ${contactName}` : "",
+    contextFrame?.callPhase === "opening" ? `Call phase: OPENING (prospect turn ${Number(contextFrame?.prospectTurnCount || 0) || 1})` : "",
     `Jurisdiction bucket: ${contextFrame?.jurisdiction || "ambiguous"}`,
     "",
     "Prospect text:",
@@ -1711,6 +1834,27 @@ function createSanitizedLiveCoachPipeline({ metadata = {} } = {}) {
     const contextClear = analyzeSystemContextClear(transcript.text);
     const screener = analyzeCallScreener(transcript.text);
     const voicemail = analyzeVoicemail(transcript.text);
+    // Unambiguous machine audio (deposit menus, forward announcements, carrier
+    // intercepts) rejects at ANY point — a missed greeting or stray early
+    // fragment must not disable the gate and let the bridge transcribe the
+    // entire voicemail deposit.
+    const anytimeVoicemail = analyzeVoicemailAnytime(transcript.text);
+    if (anytimeVoicemail.isVoicemail) {
+      state.rejected = true;
+      const dialog = {
+        status: "rejected",
+        label: "Call rejected for voicemail match",
+        say: "",
+        guidance: `Deterministic machine-audio phrase matched mid-call: ${anytimeVoicemail.match}`,
+      };
+      return {
+        action: "reject_voicemail",
+        transcript,
+        context: null,
+        dialog,
+        state: snapshot(),
+      };
+    }
     if (state.coachableCount === 0 && voicemail.isVoicemail && !screener.isScreener) {
       state.rejected = true;
       const dialog = {
@@ -1724,6 +1868,21 @@ function createSanitizedLiveCoachPipeline({ metadata = {} } = {}) {
         transcript,
         context: null,
         dialog,
+        state: snapshot(),
+      };
+    }
+
+    // Marked finals (low logprob / primer echo) inform but never coach: they
+    // reach the client grayed and the voicemail gates ABOVE still see them
+    // (garbled machine greetings were the whole point of delivering them),
+    // but they must not run the match bank. The primer vocabulary IS the
+    // match vocabulary — an echoed bank self-matches and ships junk lines.
+    if (transcript.lowConfidence || transcript.primerEcho) {
+      return {
+        action: "store_low_confidence",
+        transcript,
+        context: null,
+        dialog: null,
         state: snapshot(),
       };
     }
@@ -1789,7 +1948,10 @@ function createSanitizedLiveCoachPipeline({ metadata = {} } = {}) {
     });
 
     if (!context.shouldCompose) {
-      pending.push(transcript.text);
+      // Fast-channel rows are a PARALLEL decode of the same audio the turn
+      // channel will deliver as a completed thought — pushing them into
+      // pending would make the turn phrase contain the speech twice.
+      if (transcript.channel !== "fast") pending.push(transcript.text);
       return {
         action: "hold_for_more_context",
         transcript,
@@ -1859,7 +2021,9 @@ module.exports = {
   VOICEMAIL_MATCHES,
   analyzeCallScreener,
   analyzeSystemContextClear,
+  VOICEMAIL_ANYTIME_MATCHES,
   analyzeVoicemail,
+  analyzeVoicemailAnytime,
   buildFixedComposerInstructions,
   buildMiniContextFrame,
   buildSonnetPromptPayload,

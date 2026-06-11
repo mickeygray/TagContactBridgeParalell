@@ -71,6 +71,7 @@ function makeMongoAgentFinder(UserAccount) {
 async function resolveAgentVoicemailPlan(identifier, options = {}) {
   const {
     findAgent,
+    domain = "",
     audioDir = DEFAULT_AUDIO_DIR,
     sharedPath = DEFAULT_SHARED,
     fallbackPath = DEFAULT_FALLBACK,
@@ -87,15 +88,32 @@ async function resolveAgentVoicemailPlan(identifier, options = {}) {
   const agent = await findAgent(id);
   if (!agent) return { ok: false, reason: "agent-not-found", identifier: id, problems: ["agent-not-found"] };
 
-  const targetExtensionNumber = norm(agent.extensionNumber) || null;
+  // The *82 barge can only join the extension the call actually lives on.
+  // Multi-domain agents have a SHELL extension per company (exShells[].company
+  // TAG/WYNN/AMITY) and the base extensionNumber is TAG-centric — dialing it
+  // for a WYNN/AMITY call joins a dead extension and 486s every time (observed
+  // live: Bruce 0-for-104 on *82966 while his Wynn calls ride 9661). The route
+  // is domain-scoped, so prefer the shell extension for THAT domain.
+  const domainKey = norm(domain).toUpperCase();
+  const shells = Array.isArray(agent.exShells) ? agent.exShells : [];
+  const domainShell = domainKey
+    ? shells.find((shell) => norm(shell?.company).toUpperCase() === domainKey)
+    : null;
+  const domainExtensionNumber = norm(domainShell?.extensionNumber) || null;
+  const baseExtensionNumber = norm(agent.extensionNumber) || null;
+  const targetExtensionNumber = domainExtensionNumber || baseExtensionNumber;
   const monitorExtension = norm(agent.metadata?.barge?.monitorExtension) || null;
 
-  // Resolution order: optional per-agent override -> per-agent <ext>.raw ->
-  // SHARED (the one-for-everyone) -> drop-message.raw (legacy test clip).
+  // Resolution order: optional per-agent override -> per-agent <ext>.raw (domain
+  // shell ext first, then base ext) -> SHARED (the one-for-everyone) ->
+  // drop-message.raw (legacy test clip).
   const perAgent = [];
   const explicit = norm(agent.metadata?.barge?.voicemail);
   if (explicit) perAgent.push(path.isAbsolute(explicit) ? explicit : path.join(audioDir, explicit));
-  if (targetExtensionNumber) perAgent.push(path.join(audioDir, `${targetExtensionNumber}.raw`));
+  if (domainExtensionNumber) perAgent.push(path.join(audioDir, `${domainExtensionNumber}.raw`));
+  if (baseExtensionNumber && baseExtensionNumber !== domainExtensionNumber) {
+    perAgent.push(path.join(audioDir, `${baseExtensionNumber}.raw`));
+  }
   const emailLocal = norm(agent.email).split("@")[0];
   if (emailLocal) perAgent.push(path.join(audioDir, `${emailLocal}.raw`));
 
@@ -131,6 +149,11 @@ async function resolveAgentVoicemailPlan(identifier, options = {}) {
     agentEmail: agent.email || null,
     agentExtensionId: norm(agent.extensionId) || null,
     targetExtensionNumber,
+    // Observability: which domain resolved the target and whether a shell
+    // extension overrode the base extensionNumber.
+    requestedDomain: domainKey || null,
+    domainExtensionUsed: Boolean(domainExtensionNumber && domainExtensionNumber !== baseExtensionNumber),
+    baseExtensionNumber,
     monitorExtension,
     voicemailPath,
     usingSharedVoicemail,

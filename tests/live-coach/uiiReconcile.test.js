@@ -201,6 +201,43 @@ test("MISS->ADOPT default OFF: drift is logged, stream identity preserved, falls
   );
 });
 
+test("closed bind miss does not fall through to unbound fallback", async () => {
+  delete process.env.LIVE_COACH_UII_RECONCILE_ENABLED;
+  delete process.env.LIVE_COACH_UII_ADOPT_ENABLED;
+  const segment = makeProspectSegment({
+    dialogIdentity: { uii: "CLOSED-UII", queueItemId: "q-closed", callSessionId: "cs-closed" },
+  });
+  segment.allowUnboundCoachSessions = true;
+
+  await withFetch(
+    [
+      {
+        match: "/mongo/bind/latest",
+        respond: () => ({
+          ok: true,
+          status: "closed",
+          session: null,
+          binding: null,
+        }),
+      },
+      {
+        match: "/grpc/start",
+        respond: () => {
+          throw new Error("closed calls must not start unbound sessions");
+        },
+      },
+    ],
+    async () => {
+      const result = await ensureCoachSession(segment, { forceBind: true });
+      assert.equal(result, null);
+      assert.equal(segment.coachSessionStarted, false);
+      assert.equal(segment.coachTerminal, true);
+      assert.equal(eventsOfType(segment.__eventLog, "coach.session.bind_miss").length, 1);
+      assert.equal(eventsOfType(segment.__eventLog, "coach.session.bind_miss_terminal").length, 1);
+    },
+  );
+});
+
 test("DRIFT->REBIND: requires the same new uii on 2 consecutive ticks before rebinding", async () => {
   process.env.LIVE_COACH_UII_RECONCILE_ENABLED = "true";
   process.env.LIVE_COACH_UII_RECONCILE_MS = "5000";

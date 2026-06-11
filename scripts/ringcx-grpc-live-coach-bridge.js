@@ -31,6 +31,7 @@ const {
 } = require("../packages/shared-services/src/taxResolutionSalesTrainerService");
 
 const TERMINAL_COACH_STATUSES = new Set(["stopped", "stale", "voicemail_rejected"]);
+const TERMINAL_COACH_BIND_MISS_STATUSES = new Set(["closed", "event-expired", "binding-inactive", "disposition-hangup"]);
 const TERMINAL_COACH_POST_ERROR_PATTERN =
   /Session is (?:stale|stopped|voicemail_rejected)|uii-mismatch|queue-item-mismatch|agent-mismatch|agent-current-(?:uii|queue|call-session)-mismatch|not_current|binding-inactive|disposition-hangup|event-expired/i;
 const OPENAI_REALTIME_TRANSCRIPTION_URL = "wss://api.openai.com/v1/realtime?intent=transcription";
@@ -341,6 +342,18 @@ async function postCoachInput(segment, buildBody, timeoutMs = 15_000, options = 
       }
       return result;
     } catch (error) {
+      if (isTerminalCoachPostError(error)) {
+        segment.coachTerminal = true;
+        writeJsonLine(segment.eventLog, {
+          type: "coach.post.terminal",
+          at: new Date().toISOString(),
+          streamId: segment.streamId,
+          segmentId: segment.segmentId,
+          coachSessionId: segment.coachSessionId,
+          error: error.message,
+        });
+        return null;
+      }
       if (attempt === 1 && isMissingCoachSessionPostError(error)) {
         resetCoachSessionAfterMissing(segment, error.message);
         continue;
@@ -367,6 +380,18 @@ async function postCoachStreamStatus(segment, buildBody, timeoutMs = 5000, optio
         timeoutMs,
       );
     } catch (error) {
+      if (isTerminalCoachPostError(error)) {
+        segment.coachTerminal = true;
+        writeJsonLine(segment.eventLog, {
+          type: "stream.status_terminal",
+          at: new Date().toISOString(),
+          streamId: segment.streamId,
+          segmentId: segment.segmentId,
+          coachSessionId: segment.coachSessionId,
+          error: error.message,
+        });
+        return null;
+      }
       if (attempt === 1 && isMissingCoachSessionPostError(error)) {
         resetCoachSessionAfterMissing(segment, error.message);
         continue;
@@ -452,9 +477,13 @@ function createSegmentState({
   dialogIdentity = {},
   agentSttEnabled = false,
   agentSttModel = "",
-  agentSemanticEagerness = "medium",
+  agentSemanticEagerness = "low",
   sttDomainPrimer = "",
   getCoachSegment = null,
+  dualVadEnabled = false,
+  fastSttModel = "",
+  fastVadSilenceMs = 500,
+  turnEagerness = "low",
 }) {
   const role = participantRole(decoded.participant || {});
   const safeSegment = safeString(`${sessionId || "no-session"}-${segmentId || crypto.randomBytes(3).toString("hex")}`, 140)
@@ -506,6 +535,12 @@ function createSegmentState({
       : sttModel,
     agentSttEnabled: role === "agent" ? Boolean(agentSttEnabled) : false,
     agentSemanticEagerness,
+    // Dual-VAD (prospect only): fast additive channel + semantic turn channel.
+    dualVadEnabled: role === "prospect" ? Boolean(dualVadEnabled) : false,
+    fastSttModel: resolveSttModelAlias(fastSttModel || "gpt-4o-mini-transcribe", "gpt-4o-mini-transcribe"),
+    fastVadSilenceMs,
+    turnEagerness,
+    turnStt: null,
     sttDomainPrimer,
     getCoachSegment: typeof getCoachSegment === "function" ? getCoachSegment : null,
     sttModelMap: sttModelMap instanceof Map ? sttModelMap : new Map(),
@@ -681,7 +716,10 @@ function flushPendingRealtimePayloads(segment, reason = "stt-start") {
   const bytes = segment.pendingRealtimePayloadBytes;
   segment.pendingRealtimePayloads = [];
   segment.pendingRealtimePayloadBytes = 0;
-  for (const payload of pending) segment.realtimeStt.appendPcmu(payload);
+  for (const payload of pending) {
+    segment.realtimeStt.appendPcmu(payload);
+    segment.turnStt?.appendPcmu(payload);
+  }
   writeJsonLine(segment.eventLog, {
     type: "stt.realtime.pending_flush",
     at: new Date().toISOString(),
@@ -756,6 +794,152 @@ function scheduleRealtimeSttStart(segment, reason = "media") {
   return segment.realtimeSttStartPromise;
 }
 
+// ── STT channel factories (creation + mid-call healing share these) ─────────
+function createProspectFastChannel(segment) {
+  return new OpenAiRealtimeSttChannel({
+    segment,
+    apiKey: segment.openAiApiKey,
+    model: segment.fastSttModel || "gpt-4o-mini-transcribe",
+    language: segment.language,
+    turnDetection: "server_vad",
+    semanticEagerness: segment.semanticEagerness,
+    noiseReduction: segment.noiseReduction,
+    provisionalEnabled: segment.realtimeProvisionalEnabled,
+    transcriptionPrompt: buildCallSttPrimer(segment) || segment.sttDomainPrimer || "",
+    channelTag: segment.fastChannelComposeFallback ? "" : "fast",
+    serverVadSilenceMsOverride: segment.fastVadSilenceMs || 500,
+  });
+}
+
+function createProspectTurnChannel(segment) {
+  return new OpenAiRealtimeSttChannel({
+    segment,
+    apiKey: segment.openAiApiKey,
+    model: segment.sttModel,
+    language: segment.language,
+    turnDetection: "semantic_vad",
+    semanticEagerness: segment.turnEagerness || "low",
+    noiseReduction: segment.noiseReduction,
+    provisionalEnabled: false,
+    transcriptionPrompt: buildCallSttPrimer(segment) || segment.sttDomainPrimer || "",
+    channelTag: "turn",
+  });
+}
+
+function createProspectSingleChannel(segment) {
+  return new OpenAiRealtimeSttChannel({
+    segment,
+    apiKey: segment.openAiApiKey,
+    model: segment.sttModel,
+    language: segment.language,
+    turnDetection: segment.turnDetection,
+    semanticEagerness: segment.semanticEagerness,
+    noiseReduction: segment.noiseReduction,
+    provisionalEnabled: segment.realtimeProvisionalEnabled,
+    transcriptionPrompt: buildCallSttPrimer(segment) || segment.sttDomainPrimer || "",
+  });
+}
+
+// ── Mid-call STT healing ─────────────────────────────────────────────────────
+// An OpenAI websocket that dies mid-call used to just log and stay dead —
+// silent coach for the rest of the call. The watchdog recreates dead channels
+// (capped attempts, audio resumes on the new socket). If the TURN channel
+// exhausts its attempts the fast channel DEGRADES to compose-eligible
+// (channelTag "") so coaching continues single-channel rather than never.
+const STT_HEAL_INTERVAL_MS = 4000;
+const STT_HEAL_MAX_ATTEMPTS = 5;
+
+function healChannel(segment, slot, factory) {
+  const attemptsKey = `${slot}HealAttempts`;
+  segment[attemptsKey] = (segment[attemptsKey] || 0) + 1;
+  const attempt = segment[attemptsKey];
+  if (attempt > STT_HEAL_MAX_ATTEMPTS) return false;
+  const channel = factory(segment);
+  segment[slot] = channel;
+  writeJsonLine(segment.eventLog, {
+    type: "stt.realtime.heal",
+    at: new Date().toISOString(),
+    streamId: segment.streamId,
+    segmentId: segment.segmentId,
+    slot,
+    attempt,
+    model: channel.model,
+    channel: channel.channelTag || "single",
+  });
+  channel.connect().catch((error) => {
+    writeJsonLine(segment.eventLog, {
+      type: "stt.realtime.heal_connect_error",
+      at: new Date().toISOString(),
+      streamId: segment.streamId,
+      segmentId: segment.segmentId,
+      slot,
+      attempt,
+      error: error.message,
+    });
+  });
+  return true;
+}
+
+function channelNeedsHeal(channel) {
+  return Boolean(channel && channel.closed && !channel.disabled);
+}
+
+function armSttHealing(segment) {
+  if (segment.sttHealTimer) return;
+  segment.sttHealTimer = setInterval(() => {
+    if (segment.stopped || segment.coachTerminal) {
+      clearInterval(segment.sttHealTimer);
+      segment.sttHealTimer = null;
+      return;
+    }
+    if (channelNeedsHeal(segment.realtimeStt)) {
+      healChannel(
+        segment,
+        "realtimeStt",
+        segment.role === "agent"
+          ? createAgentChannel
+          : segment.dualVadEnabled
+            ? createProspectFastChannel
+            : createProspectSingleChannel,
+      );
+    }
+    if (segment.dualVadEnabled && channelNeedsHeal(segment.turnStt)) {
+      const healed = healChannel(segment, "turnStt", createProspectTurnChannel);
+      if (!healed && !segment.fastChannelComposeFallback) {
+        // Turn channel is gone for good: composes would never fire again.
+        // Degrade: the fast channel drops its "fast" tag so its finals become
+        // compose-eligible (single-channel behavior) for the rest of the call.
+        segment.fastChannelComposeFallback = true;
+        if (segment.realtimeStt) segment.realtimeStt.channelTag = "";
+        writeJsonLine(segment.eventLog, {
+          type: "stt.realtime.turn_channel_degraded",
+          at: new Date().toISOString(),
+          streamId: segment.streamId,
+          segmentId: segment.segmentId,
+          attempts: segment.turnSttHealAttempts || 0,
+          action: "fast-channel-now-composes",
+        });
+      }
+    }
+  }, STT_HEAL_INTERVAL_MS);
+  if (typeof segment.sttHealTimer.unref === "function") segment.sttHealTimer.unref();
+}
+
+function createAgentChannel(segment) {
+  return new OpenAiRealtimeSttChannel({
+    segment,
+    apiKey: segment.openAiApiKey,
+    model: segment.sttModel,
+    language: segment.language,
+    turnDetection: "semantic_vad",
+    semanticEagerness: segment.agentSemanticEagerness || "low",
+    noiseReduction: segment.noiseReduction,
+    provisionalEnabled: false,
+    transcriptionPrompt: segment.sttDomainPrimer || "",
+    channelTag: "turn",
+  });
+}
+
 async function ensureRealtimeStt(segment, reason = "media") {
   if (!segment || !realtimeSttRoleEnabled(segment) || segment.sttProvider !== "openai-realtime") return null;
   if (segment.realtimeStt || segment.coachTerminal) return segment.realtimeStt || null;
@@ -768,17 +952,9 @@ async function ensureRealtimeStt(segment, reason = "media") {
       // immediately at first media; finals route into the prospect segment's
       // session via postAgentCompleted. Semantic VAD so agent sentences arrive
       // as complete thoughts for the composer's context.
-      segment.realtimeStt = new OpenAiRealtimeSttChannel({
-        segment,
-        apiKey: segment.openAiApiKey,
-        model: segment.sttModel,
-        language: segment.language,
-        turnDetection: "semantic_vad",
-        semanticEagerness: segment.agentSemanticEagerness || "medium",
-        noiseReduction: segment.noiseReduction,
-        provisionalEnabled: false,
-        transcriptionPrompt: segment.sttDomainPrimer || "",
-      });
+      // Low eagerness: agent rows are completed-thought turns for the
+      // composer's both-parties read, same cadence as the prospect turn channel.
+      segment.realtimeStt = createAgentChannel(segment);
       writeJsonLine(segment.eventLog, {
         type: "stt.realtime.model_select",
         at: new Date().toISOString(),
@@ -788,7 +964,7 @@ async function ensureRealtimeStt(segment, reason = "media") {
         reason,
         model: segment.sttModel,
         turnDetection: "semantic_vad",
-        semanticEagerness: segment.agentSemanticEagerness || "medium",
+        semanticEagerness: segment.agentSemanticEagerness || "low",
         pendingBytes: segment.pendingRealtimePayloadBytes,
       });
       segment.realtimeStt.connect().catch((error) => {
@@ -801,6 +977,7 @@ async function ensureRealtimeStt(segment, reason = "media") {
           error: error.message,
         });
       });
+      armSttHealing(segment);
       flushPendingRealtimePayloads(segment, reason);
       return segment.realtimeStt;
     }
@@ -808,17 +985,31 @@ async function ensureRealtimeStt(segment, reason = "media") {
     if (!segment.coachSessionStarted || !segment.coachSessionId) return null;
     const selected = selectRealtimeSttModel(segment, bound);
     segment.sttModel = selected.model;
-    segment.realtimeStt = new OpenAiRealtimeSttChannel({
-      segment,
-      apiKey: segment.openAiApiKey,
-      model: segment.sttModel,
-      language: segment.language,
-      turnDetection: segment.turnDetection,
-      semanticEagerness: segment.semanticEagerness,
-      noiseReduction: segment.noiseReduction,
-      provisionalEnabled: segment.realtimeProvisionalEnabled,
-      transcriptionPrompt: segment.sttDomainPrimer || "",
-    });
+    if (segment.dualVadEnabled) {
+      // DUAL-VAD: two decodes of the same prospect audio.
+      //  - FAST channel (segment.realtimeStt): server_vad ~500ms, cheap model,
+      //    provisionals ON. Everything additive rides here — ribbon, gates,
+      //    term catching, memory. It never composes.
+      //  - TURN channel (segment.turnStt): semantic_vad on LOW eagerness, full
+      //    model, no provisionals. Fires only on completed thoughts — Claude's
+      //    trigger.
+      segment.realtimeStt = createProspectFastChannel(segment);
+      segment.turnStt = createProspectTurnChannel(segment);
+      segment.turnStt.connect().catch((error) => {
+        writeJsonLine(segment.eventLog, {
+          type: "stt.realtime.connect_error",
+          at: new Date().toISOString(),
+          streamId: segment.streamId,
+          segmentId: segment.segmentId,
+          model: segment.sttModel,
+          channel: "turn",
+          error: error.message,
+        });
+      });
+    } else {
+      segment.realtimeStt = createProspectSingleChannel(segment);
+    }
+    armSttHealing(segment);
     writeJsonLine(segment.eventLog, {
       type: "stt.realtime.model_select",
       at: new Date().toISOString(),
@@ -857,27 +1048,39 @@ function isRealtimeItemCompleted(segment, itemId) {
 
 // Late enrichment: a session started unbound (fallback /grpc/start) keeps
 // transcribing and coaching, but its metadata is thin (no case/queue/contact).
-// Retry bind/latest in the background at a slow cadence, passing OUR sessionId
-// so ai-bus enriches the existing session in place (ensureSession merges
-// metadata) instead of spawning a second session. Never tears anything down,
-// never retires other sessions, and gives up after ~5 minutes.
+// Retry bind/latest in the background, passing OUR sessionId so ai-bus enriches
+// the existing session in place (ensureSession merges metadata) instead of
+// spawning a second session. Never tears anything down, never retires other
+// sessions, and gives up after ~5 minutes.
+//
+// Cadence is front-loaded: the cx.call.placed event usually lags the stream by
+// a few SECONDS (fire-and-forget hook), so the first retries come fast — the
+// wallboard heals the lane almost immediately — then back off to 10s.
+const COACH_ENRICH_FAST_INTERVAL_MS = 2_000;
+const COACH_ENRICH_FAST_ATTEMPTS = 5;
 const COACH_ENRICH_INTERVAL_MS = 10_000;
-const COACH_ENRICH_MAX_ATTEMPTS = 30;
+const COACH_ENRICH_MAX_ATTEMPTS = 34;
 
 function scheduleCoachBindingEnrichment(segment) {
   if (!segment || segment.role !== "prospect") return;
   if (!segment.coachSessionStarted || segment.coachBinding || segment.coachTerminal) return;
   if ((segment.coachEnrichAttempts || 0) >= COACH_ENRICH_MAX_ATTEMPTS) return;
   const identity = segment.dialogIdentity || {};
-  // Agent identity is required: it keeps the mongo bridge's requireCurrentForAgent
-  // protection active so we can never enrich from another agent's (or a stale)
-  // call event matched on phone alone.
-  if (!identity.agentExtensionId && !identity.agentEmail) return;
+  // Live RingCX dialogInits carry NO agent identity (observed 541/541 with
+  // empty ext/email), so requiring it meant enrichment never fired in prod.
+  // UII is an exact-match key — a mismatched event uii can never bind — so
+  // uii-keyed enrichment is safe without the agent filter. Phone-only stays
+  // excluded: phone alone could match another concurrent call's event.
+  if (!identity.uii && !identity.agentExtensionId && !identity.agentEmail) return;
   const now = Date.now();
   if (segment.coachEnriching || now < (segment.nextCoachEnrichAt || 0)) return;
   segment.coachEnriching = true;
   segment.coachEnrichAttempts = (segment.coachEnrichAttempts || 0) + 1;
-  segment.nextCoachEnrichAt = now + COACH_ENRICH_INTERVAL_MS;
+  segment.nextCoachEnrichAt = now + (
+    segment.coachEnrichAttempts <= COACH_ENRICH_FAST_ATTEMPTS
+      ? COACH_ENRICH_FAST_INTERVAL_MS
+      : COACH_ENRICH_INTERVAL_MS
+  );
   enrichCoachBinding(segment)
     .catch((error) => {
       writeJsonLine(segment.eventLog, {
@@ -930,6 +1133,10 @@ async function enrichCoachBinding(segment) {
   }
   segment.coachBinding = bound.binding || null;
   segment.coachSessionMetadata = bound.session.metadata || segment.coachSessionMetadata;
+  // Names just arrived (or improved) — refresh the STT primer mid-call so the
+  // engine hears the prospect/agent names spelled right from here on.
+  segment.realtimeStt?.updateTranscriptionPrompt?.(buildCallSttPrimer(segment));
+  segment.turnStt?.updateTranscriptionPrompt?.(buildCallSttPrimer(segment));
   writeJsonLine(segment.eventLog, {
     type: "coach.session.enriched",
     at: new Date().toISOString(),
@@ -1024,6 +1231,10 @@ async function ensureCoachSession(segment, options = {}) {
         segment.coachSessionStarted = true;
         segment.coachBinding = bound.binding || null;
         segment.coachSessionMetadata = bound.session.metadata || null;
+        // If the STT channels already connected (unbound start), give them the
+        // per-call primer now that names are known.
+        segment.realtimeStt?.updateTranscriptionPrompt?.(buildCallSttPrimer(segment));
+        segment.turnStt?.updateTranscriptionPrompt?.(buildCallSttPrimer(segment));
         writeJsonLine(segment.eventLog, {
           type: "coach.session.bind",
           at: new Date().toISOString(),
@@ -1110,6 +1321,23 @@ async function ensureCoachSession(segment, options = {}) {
         reason: bound?.reason || null,
         allowUnboundCoachSessions: Boolean(segment.allowUnboundCoachSessions),
       });
+      const bindMissStatus = String(bound?.status || "").trim().toLowerCase();
+      const bindMissReason = String(bound?.reason || bound?.binding?.reason || "").trim().toLowerCase();
+      if (
+        TERMINAL_COACH_BIND_MISS_STATUSES.has(bindMissStatus) ||
+        TERMINAL_COACH_BIND_MISS_STATUSES.has(bindMissReason)
+      ) {
+        segment.coachTerminal = true;
+        writeJsonLine(segment.eventLog, {
+          type: "coach.session.bind_miss_terminal",
+          at: new Date().toISOString(),
+          streamId: segment.streamId,
+          segmentId: segment.segmentId,
+          status: bound?.status || null,
+          reason: bound?.reason || bound?.binding?.reason || null,
+        });
+        return null;
+      }
       if (!segment.allowUnboundCoachSessions) return null;
     } catch (error) {
       writeJsonLine(segment.eventLog, {
@@ -1267,6 +1495,38 @@ const DEFAULT_STT_DOMAIN_PRIMER = [
   "Wynn Tax Solutions",
 ].join(", ");
 
+// Per-call primer: prospect + agent names prepended to the domain vocabulary.
+// Names are the most-misheard class on 8kHz carrier audio and we KNOW them at
+// bind time — tell the engine who is on the phone. Vocabulary-list style only
+// (instructions get echoed; see the primer note above).
+function buildCallSttPrimer(segment) {
+  const base = cleanText(segment?.sttDomainPrimer || "", 700);
+  const names = [
+    cleanText(segment?.coachSessionMetadata?.contactName || segment?.participant?.name || "", 80),
+    cleanText(segment?.coachSessionMetadata?.agentName || segment?.coachBinding?.metadata?.agentName || "", 80),
+  ].filter(Boolean);
+  if (!names.length) return base;
+  return [...new Set(names), base].filter(Boolean).join(", ");
+}
+
+// Primer-echo detector: the known failure mode of transcription prompts is the
+// model "reading the bank back" over noise/silence — and since the primer
+// vocabulary IS the deterministic match vocabulary, an echoed bank self-matches
+// downstream and ships junk coach lines. Flag finals whose content words are
+// mostly primer vocabulary when the engine itself wasn't confident.
+function detectPrimerEcho(text, primer, confidence) {
+  if (!text || !primer) return false;
+  if (confidence !== null && confidence >= 0.6) return false; // confident speech is speech
+  const primerWords = new Set(
+    String(primer).toLowerCase().split(/[^a-z0-9]+/).filter((w) => w.length >= 3),
+  );
+  if (!primerWords.size) return false;
+  const contentWords = String(text).toLowerCase().split(/[^a-z0-9]+/).filter((w) => w.length >= 4);
+  if (contentWords.length < 3) return false;
+  const hits = contentWords.filter((w) => primerWords.has(w)).length;
+  return hits / contentWords.length >= 0.75;
+}
+
 // Average token logprob -> a 0..1 confidence. null when logprobs are absent.
 function realtimeTranscriptConfidence(event) {
   const rows = Array.isArray(event?.logprobs) ? event.logprobs : [];
@@ -1291,11 +1551,16 @@ class OpenAiRealtimeSttChannel {
     maxBufferedBytes = 240_000,
     transcriptionPrompt = "",
     includeLogprobs = true,
+    channelTag = "",
+    serverVadSilenceMsOverride = 0,
   } = {}) {
     if (!apiKey) throw new Error("OPENAI_API_KEY is missing for realtime transcription");
     this.segment = segment;
     this.apiKey = apiKey;
     this.role = segment?.role || "prospect";
+    // Dual-VAD channel identity: "fast" (server_vad additive) | "turn"
+    // (semantic completed thoughts — the compose trigger). Rides every post.
+    this.channelTag = cleanText(channelTag || "", 20);
     this.model = model || "gpt-4o-transcribe";
     this.language = language || "en";
     this.turnDetection = turnDetection || "semantic_vad";
@@ -1311,10 +1576,16 @@ class OpenAiRealtimeSttChannel {
       0.95,
       Math.max(0, Number(process.env.LIVE_COACH_STT_MIN_CONFIDENCE ?? "0.25") || 0),
     );
-    this.serverVadSilenceMs = Math.max(
-      200,
-      Math.min(3000, Number(process.env.LIVE_COACH_OPENAI_SERVER_VAD_SILENCE_MS || "1000") || 1000),
-    );
+    // 600ms default (was 1000): every prospect final lands ~0.4s sooner, which
+    // every downstream stage inherits. The cost is more mid-thought splits —
+    // completeness is the composer's WAIT call, so splits hold less risk than
+    // they used to. Tune live via LIVE_COACH_OPENAI_SERVER_VAD_SILENCE_MS.
+    this.serverVadSilenceMs = serverVadSilenceMsOverride > 0
+      ? Math.max(200, Math.min(3000, serverVadSilenceMsOverride))
+      : Math.max(
+        200,
+        Math.min(3000, Number(process.env.LIVE_COACH_OPENAI_SERVER_VAD_SILENCE_MS || "600") || 600),
+      );
     this.provisionalEnabled = provisionalEnabled !== false;
     this.maxBufferedBytes = Math.max(8000, Number(maxBufferedBytes) || 240_000);
     this.ws = null;
@@ -1411,6 +1682,44 @@ class OpenAiRealtimeSttChannel {
       this.rejectReady = reject;
     });
     return this.connectPromise;
+  }
+
+  // Per-call primer refresh: when the binding (and with it the prospect/agent
+  // names) arrives after the channel connected, re-send the transcription
+  // prompt so the engine knows who is on the phone. Vocabulary-list style
+  // only — same echo-safety rules as DEFAULT_STT_DOMAIN_PRIMER.
+  updateTranscriptionPrompt(prompt) {
+    const next = cleanText(prompt || "", 800);
+    if (!next || next === this.transcriptionPrompt) return false;
+    this.transcriptionPrompt = next;
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return false;
+    try {
+      this.send({
+        type: "session.update",
+        session: {
+          type: "transcription",
+          audio: {
+            input: {
+              transcription: {
+                model: this.model,
+                language: this.language,
+                prompt: next,
+              },
+            },
+          },
+        },
+      });
+      writeJsonLine(this.segment.eventLog, {
+        type: "stt.realtime.prompt_update",
+        at: new Date().toISOString(),
+        streamId: this.segment.streamId,
+        segmentId: this.segment.segmentId,
+        promptLength: next.length,
+      });
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   buildTurnDetection() {
@@ -1766,7 +2075,7 @@ class OpenAiRealtimeSttChannel {
     this.queueProvisionalPost(event, itemId, text);
   }
 
-  async postCompletedWithBindRetry(event, itemId, text, confidence = null) {
+  async postCompletedWithBindRetry(event, itemId, text, confidence = null, lowConfidence = false, primerEcho = false) {
     const maxWaitMs = Math.max(
       0,
       Math.min(5000, Number(process.env.LIVE_COACH_REALTIME_FINAL_BIND_WAIT_MS || "2500") || 2500),
@@ -1781,6 +2090,9 @@ class OpenAiRealtimeSttChannel {
         model: this.model,
         itemId,
         confidence,
+        lowConfidence: lowConfidence || undefined,
+        primerEcho: primerEcho || undefined,
+        channel: this.channelTag || undefined,
       }, {
         source: "grpc-openai-realtime-semantic-vad",
         itemId,
@@ -1839,13 +2151,17 @@ class OpenAiRealtimeSttChannel {
       });
       return;
     }
-    // Confidence gate: drop finals whose average token logprob marks them as
-    // probable hallucination/garble. Principled replacement for word blacklists
-    // (which still run above as a second layer for known ghosts).
+    // Confidence MARK (was a gate): finals whose average token logprob marks
+    // them as probable garble are DELIVERED with lowConfidence:true instead of
+    // dropped — silent discards ate real speech on noisy carrier audio (a VM
+    // greeting survived only as fragments at 0.10-0.24 and vanished entirely).
+    // The UI grays marked rows; the models see the flag and weigh accordingly.
     const confidence = realtimeTranscriptConfidence(event);
-    if (confidence !== null && this.minConfidence > 0 && confidence < this.minConfidence) {
+    const lowConfidence = confidence !== null && this.minConfidence > 0 && confidence < this.minConfidence;
+    const primerEcho = detectPrimerEcho(text, this.transcriptionPrompt, confidence);
+    if (lowConfidence || primerEcho) {
       writeJsonLine(this.segment.eventLog, {
-        type: "stt.realtime.low_confidence_skip",
+        type: primerEcho ? "stt.realtime.primer_echo" : "stt.realtime.low_confidence",
         at: new Date().toISOString(),
         streamId: this.segment.streamId,
         segmentId: this.segment.segmentId,
@@ -1854,16 +2170,16 @@ class OpenAiRealtimeSttChannel {
         confidence,
         minConfidence: this.minConfidence,
         role: this.role,
+        delivered: true,
       });
-      return;
     }
     if (this.role === "agent") {
-      await this.postAgentCompleted(event, itemId, text, confidence);
+      await this.postAgentCompleted(event, itemId, text, confidence, lowConfidence || primerEcho);
       return;
     }
     let posted = null;
     try {
-      posted = await this.postCompletedWithBindRetry(event, itemId, text, confidence);
+      posted = await this.postCompletedWithBindRetry(event, itemId, text, confidence, lowConfidence || primerEcho, primerEcho);
     } catch (error) {
       if (this.handleTerminalPostError(error)) return;
       throw error;
@@ -1879,6 +2195,8 @@ class OpenAiRealtimeSttChannel {
       segmentId: this.segment.segmentId,
       itemId,
       text,
+      channel: this.channelTag || "single",
+      confidence,
       coachStatus: posted?.session?.status || null,
       coachAction: posted?.result?.action || null,
       usage: event.usage || null,
@@ -1889,7 +2207,7 @@ class OpenAiRealtimeSttChannel {
   // Agent-channel finals route into the PROSPECT segment's coach session as
   // role:"agent" rows — context for the Claude composer only (the pipeline
   // stores agent rows without triggering compose; the mini never sees them).
-  async postAgentCompleted(event, itemId, text, confidence = null) {
+  async postAgentCompleted(event, itemId, text, confidence = null, lowConfidence = false) {
     const coachSegment = this.segment.getCoachSegment?.();
     if (!coachSegment || !coachSegment.coachSessionStarted || !coachSegment.coachSessionId) {
       writeJsonLine(this.segment.eventLog, {
@@ -1914,6 +2232,8 @@ class OpenAiRealtimeSttChannel {
         itemId: `agent-${itemId}`,
         final: true,
         confidence,
+        lowConfidence: lowConfidence || undefined,
+        channel: this.channelTag || undefined,
         ...coachPostIdentity(coachSegment),
       }), 8000);
     } catch (error) {
@@ -1944,6 +2264,13 @@ class OpenAiRealtimeSttChannel {
   commitInputBuffer(reason = "segment-ended") {
     if (this.disabled || this.closed || !this.ready || this.ws?.readyState !== WebSocket.OPEN) return 0;
     if (this.bytesSinceCommit <= 0) return 0;
+    // OpenAI rejects commits under 100ms of audio ("buffer too small" — 137
+    // hits in one live log window). A sub-100ms tail is unusable anyway: drop
+    // it instead of erroring. PCMU @8kHz = 8000 bytes/s, so 960B ≈ 120ms.
+    if (this.bytesSinceCommit < 960) {
+      this.bytesSinceCommit = 0;
+      return 0;
+    }
     const committedBytes = this.bytesSinceCommit;
     this.bytesSinceCommit = 0;
     try {
@@ -2301,8 +2628,12 @@ function createLiveCoachStreamingService({
   language,
   agentSttEnabled = false,
   agentSttModel = "",
-  agentSemanticEagerness = "medium",
+  agentSemanticEagerness = "low",
   sttDomainPrimer = "",
+  dualVadEnabled = false,
+  fastSttModel = "",
+  fastVadSilenceMs = 500,
+  turnEagerness = "low",
 }) {
   return {
     Stream(call, callback) {
@@ -2335,11 +2666,19 @@ function createLiveCoachStreamingService({
         if (finalized) return;
         finalized = true;
         for (const segment of segments.values()) {
+          // Mark stopped FIRST so the STT heal watchdog stands down — a
+          // finalizing stream must never have its channels resurrected.
+          segment.stopped = true;
+          if (segment.sttHealTimer) {
+            clearInterval(segment.sttHealTimer);
+            segment.sttHealTimer = null;
+          }
           queueFlush(segment, reason);
           if (segment.sttProvider === "openai-realtime") {
             segment.transcribeQueue = segment.transcribeQueue
               .then(() => segment.realtimeStt ? segment.realtimeStt : ensureRealtimeStt(segment, reason))
               .then(() => segment.realtimeStt ? segment.realtimeStt.finish(reason) : null)
+              .then(() => segment.turnStt ? segment.turnStt.finish(reason) : null)
               .catch(() => null);
           }
           if (segment.pcmBuffers.length && !fs.existsSync(segment.wavPath)) {
@@ -2442,6 +2781,10 @@ function createLiveCoachStreamingService({
             agentSttModel,
             agentSemanticEagerness,
             sttDomainPrimer,
+            dualVadEnabled,
+            fastSttModel,
+            fastVadSilenceMs,
+            turnEagerness,
             // Agent-channel finals route into this stream's prospect session.
             getCoachSegment: () => [...segments.values()].find(
               (candidate) => candidate.role === "prospect" && !candidate.coachTerminal,
@@ -2507,6 +2850,7 @@ function createLiveCoachStreamingService({
               } else {
                 flushPendingRealtimePayloads(segment, "media");
                 segment.realtimeStt.appendPcmu(payload);
+                segment.turnStt?.appendPcmu(payload);
               }
             } else if (segment.pendingRawBytes >= Math.max(1, segment.rate) * segment.chunkSec) {
               queueFlush(segment, "bytes");
@@ -2536,6 +2880,7 @@ function createLiveCoachStreamingService({
             segment.transcribeQueue = segment.transcribeQueue
               .then(() => segment.realtimeStt ? segment.realtimeStt : ensureRealtimeStt(segment, "segment-stop"))
               .then(() => segment.realtimeStt ? segment.realtimeStt.finish("segment-stop") : null)
+              .then(() => segment.turnStt ? segment.turnStt.finish("segment-stop") : null)
               .then(() => stopCoachSession(segment, "segment-stop"))
               .catch(() => null);
           }
@@ -2623,7 +2968,27 @@ async function main() {
     "gpt-4o-mini-transcribe",
   );
   const agentSemanticEagerness = String(
-    readFlag(argv, "--agent-semantic-vad-eagerness", process.env.LIVE_COACH_AGENT_SEMANTIC_EAGERNESS || "medium"),
+    readFlag(argv, "--agent-semantic-vad-eagerness", process.env.LIVE_COACH_AGENT_SEMANTIC_EAGERNESS || "low"),
+  ).trim().toLowerCase();
+  // DUAL-VAD (default ON): the prospect decodes twice — a fast server_vad
+  // channel (cheap model, ~500ms finals: gates, term catching, ribbon, memory;
+  // ADDITIVE, never composes) and a semantic_vad LOW-eagerness turn channel
+  // (full model: completed thoughts — Claude's compose trigger).
+  const dualVadEnabled = readBoolFlag(
+    argv,
+    "--dual-vad",
+    readEnvBool(process.env.LIVE_COACH_DUAL_VAD_ENABLED, true),
+  );
+  const fastSttModel = resolveSttModelAlias(
+    readFlag(argv, "--fast-stt-model", process.env.LIVE_COACH_FAST_STT_MODEL || "gpt-4o-mini-transcribe"),
+    "gpt-4o-mini-transcribe",
+  );
+  const fastVadSilenceMs = Math.max(
+    200,
+    Math.min(2000, Number(readFlag(argv, "--fast-vad-silence-ms", process.env.LIVE_COACH_FAST_VAD_SILENCE_MS || "500")) || 500),
+  );
+  const turnEagerness = String(
+    readFlag(argv, "--turn-eagerness", process.env.LIVE_COACH_TURN_EAGERNESS || "low"),
   ).trim().toLowerCase();
   const sttDomainPrimer = readEnvBool(process.env.LIVE_COACH_STT_DOMAIN_PRIMER_ENABLED, true)
     ? cleanText(process.env.LIVE_COACH_STT_PROMPT || DEFAULT_STT_DOMAIN_PRIMER, 800)
@@ -2659,6 +3024,10 @@ async function main() {
     agentSttModel,
     agentSemanticEagerness,
     sttDomainPrimer,
+    dualVadEnabled,
+    fastSttModel,
+    fastVadSilenceMs,
+    turnEagerness,
   }));
   const bindAddress = `0.0.0.0:${port}`;
   server.bindAsync(bindAddress, grpc.ServerCredentials.createInsecure(), (error, boundPort) => {

@@ -17,6 +17,14 @@ const {
 
 const TERMINAL_SESSION_STATUSES = Object.freeze(["stopped", "stale", "voicemail_rejected", "released"]);
 const GRPC_SESSION_SOURCES = Object.freeze(["grpc", "grpc-mongo", "grpc-live-bridge", "mongo-cx"]);
+const CALL_ENDING_STALE_REASONS = Object.freeze(new Set([
+  "agent-current-call-changed",
+  "binding-inactive",
+  "disposition-hangup",
+  "event-expired",
+  "no-current-binding",
+  "not_current",
+]));
 const MEMORY_LIMITS = Object.freeze({
   provisionalTranscripts: 40,
   transcripts: 240,
@@ -302,7 +310,10 @@ function buildRecentCallMemory(session = {}, context = {}, {
       const text = cleanText(row.text, 220);
       const sameId = currentTranscriptId && cleanText(row.id || "", 120) === currentTranscriptId;
       const sameText = currentPhrase && normalizeSignatureText(text) === currentPhrase;
-      return sameId || sameText ? null : `- Prospect: ${text}`;
+      if (sameId || sameText) return null;
+      // Marked-not-dropped STT: tell the model when a line was low confidence
+      // so it weighs (not trusts) garbled carrier audio.
+      return row.lowConfidence ? `- Prospect (low-confidence transcription): ${text}` : `- Prospect: ${text}`;
     })
     .filter(Boolean);
 
@@ -729,6 +740,20 @@ function createLiveCoachBus({
   // non-strong-junk holds after this silence window and force-compose the
   // buffered thought (flagged forcedBySilence). 0 disables.
   holdExpiryMs = 2500,
+  // Coach-triggered voicemail drop (liveCoachVmTransferService): fire-and-forget
+  // hook invoked on voicemail rejection. null disables (default); the trigger
+  // itself enforces enable-flag + hard phone allowlist.
+  vmTransferTrigger = null,
+  // Rolling relevance digest (mini's dual-VAD role): continuously reads the
+  // fast channel's caught packets against the last few completed turns and
+  // recent coach lines — NOT to understand the present (Sonnet's job at turn
+  // time) but to answer "is this relevant to what came before?". Maintains
+  // session.rollingDigest; never gates anything. null disables.
+  rollingDigest = null,
+  // Mini wakes only after the prospect's first N semantic turns — before that
+  // there's nothing to read and Sonnet runs the scripted OPENING prompt
+  // (release → fire → stream, no memory needed).
+  digestWarmupTurns = 3,
 } = {}) {
   const runtimeRoot = path.join(rootDir || process.cwd(), "runtime", "ai-bus", "live-coach");
   ensureDir(runtimeRoot);
@@ -1471,6 +1496,25 @@ function createLiveCoachBus({
       ...thoughtOptions,
       reason: contextFrame.actionReason || "ready_to_coach",
     });
+    // Call-phase: the prospect's first few turns are the OPENING — Sonnet runs
+    // the scripted opening prompt with no memory (release → fire → stream).
+    // After the warmup, the established prompt takes over and mini's digest
+    // becomes the coach's memory.
+    if (contextFrame.shouldCompose && cleanText(transcript?.role || "prospect", 40) === "prospect") {
+      session.prospectTurnCount = (session.prospectTurnCount || 0) + 1;
+      contextFrame = {
+        ...contextFrame,
+        prospectTurnCount: session.prospectTurnCount,
+        callPhase: session.prospectTurnCount <= Math.max(0, Number(digestWarmupTurns) || 0)
+          ? "opening"
+          : "established",
+      };
+    }
+    // A turn is composing: attach mini's immediate-past digest (Sonnet is the
+    // present, the digest is everything between turns) and start a fresh
+    // window — these packets are now part of a completed thought.
+    contextFrame = attachRollingDigest(session, contextFrame);
+    if (contextFrame.shouldCompose) session.digestWindow = [];
     dialogFrame = createSonnetDialogDraft({ contextFrame, metadata: session.metadata });
     emit(session.id, "thought.buffer", {
       action: "release",
@@ -1561,16 +1605,24 @@ function createLiveCoachBus({
     if (!transcript?.text) return { ...pipelineResult, transcript: null, context: null, dialog: null };
 
     session.counters.transcript += 1;
-    // Agent-channel rows are composer context only: store + emit them, but never
-    // let them clobber the prospect's latest transcript or kill a live prospect
-    // provisional mid-stream (the agent talks constantly).
-    if (cleanText(transcript.role || "prospect", 40) !== "agent") {
+    // Channel merge policy (dual-VAD):
+    //   FAST prospect rows own the UI (ribbon/thread/latest) but stay OUT of
+    //   call memory — the turn channel re-transcribes the same audio and its
+    //   completed thoughts are the canonical record the composer reads.
+    //   TURN prospect rows own memory but don't emit as transcript events —
+    //   the thread already painted this speech from the fast channel.
+    //   Agent rows and legacy single-channel rows behave as before.
+    const transcriptChannel = cleanText(transcript.channel || "", 20);
+    const isAgentRow = cleanText(transcript.role || "prospect", 40) === "agent";
+    const isProspectFastRow = !isAgentRow && transcriptChannel === "fast";
+    const isProspectTurnRow = !isAgentRow && transcriptChannel === "turn";
+    if (!isAgentRow && !isProspectTurnRow) {
       session.latest.transcript = transcript;
       session.latest.provisionalTranscript = null;
     }
-    pushMemory(session, "transcripts", transcript);
+    if (!isProspectFastRow) pushMemory(session, "transcripts", transcript);
     writeJsonLine(path.join(session.dir, "ai", "transcript.ndjson"), transcript);
-    emit(session.id, "transcript", { transcript });
+    if (!isProspectTurnRow) emit(session.id, "transcript", { transcript });
 
     if (pipelineResult.action === "reject_voicemail") {
       abortActiveDialogComposer(session.id, "voicemail-rejected");
@@ -1592,6 +1644,14 @@ function createLiveCoachBus({
       if (vmDecision !== undefined && vmDecision !== null) voicemailObservability.decision = vmDecision;
       if (vmMatch !== undefined && vmMatch !== null) voicemailObservability.match = vmMatch;
       emit(session.id, "voicemail.reject", { transcript, dialog, ...voicemailObservability });
+      // Coach-triggered voicemail drop: the gate verdict is the trigger. The
+      // trigger self-gates (enable flag + hard phone allowlist) and never throws.
+      try {
+        vmTransferTrigger?.maybeFire?.(serializeSession(session), {
+          match: voicemailObservability.match || null,
+          source: "pipeline-voicemail-gate",
+        });
+      } catch {}
       return { ...pipelineResult, transcript, context: null, dialog };
     }
 
@@ -1635,6 +1695,18 @@ function createLiveCoachBus({
     }
 
     if (pipelineResult.action !== "compose_dialog") {
+      // Fast-channel packets (and any other non-composing prospect context)
+      // feed the rolling digest — mini reads them against the last turns and
+      // keeps the immediate-past brief warm for the next turn compose.
+      if (pipelineResult.context && cleanText(transcript?.role || "prospect", 40) === "prospect") {
+        pushDigestPacket(session, pipelineResult.context, transcript);
+      }
+      // Fast-channel additive packets are EXPECTED several times per utterance:
+      // recording each as a hold would flap the panel's stage chip and bury
+      // real holds in memory. The digest packet above is their record.
+      if (pipelineResult.context?.actionReason === "fast_channel_additive") {
+        return pipelineResult;
+      }
       pushMemory(session, "holds", {
         at: new Date().toISOString(),
         action: pipelineResult.action,
@@ -1661,6 +1733,113 @@ function createLiveCoachBus({
     }
 
     return processContextAndDialog(session, pipelineResult, transcript, input);
+  }
+
+  // ── Rolling relevance digest (mini, dual-VAD role) ────────────────────────
+  // Fast-channel packets accumulate in session.digestWindow; one digest runs at
+  // a time, re-running while dirty so the brief always reflects the newest
+  // packets. The result is attached to the NEXT turn compose as the
+  // "immediate past" — Sonnet reads the present, this is everything between.
+  function pushDigestPacket(session, context, transcript) {
+    if (typeof rollingDigest !== "function" || !session) return;
+    // Warmup: mini stays off until the prospect has completed a few turns —
+    // it needs something to read before relevance is a meaningful question.
+    if ((session.prospectTurnCount || 0) < Math.max(0, Number(digestWarmupTurns) || 0)) return;
+    const phrase = cleanText(context?.phraseText || transcript?.text || "", 240);
+    if (!phrase) return;
+    const keys = (Array.isArray(context?.matches) ? context.matches : [])
+      .slice(0, 6)
+      .map((match) => ({
+        key: cleanText(match.key, 120),
+        snippet: cleanText(match.miniSnippet || match.hits?.[0] || phrase, 160),
+      }))
+      .filter((row) => row.key);
+    if (!Array.isArray(session.digestWindow)) session.digestWindow = [];
+    session.digestWindow.push({ at: new Date().toISOString(), phrase, keys });
+    if (session.digestWindow.length > 8) session.digestWindow.splice(0, session.digestWindow.length - 8);
+    scheduleRollingDigest(session);
+  }
+
+  function scheduleRollingDigest(session) {
+    if (typeof rollingDigest !== "function" || !session) return;
+    const state = session.digestState || (session.digestState = { running: false, dirty: false });
+    state.dirty = true;
+    if (state.running) return;
+    state.running = true;
+    const run = async () => {
+      state.dirty = false;
+      try {
+        const memory = session.memory || {};
+        const lastTurns = (Array.isArray(memory.transcripts) ? memory.transcripts : [])
+          .slice(-3)
+          .map((row) => ({ role: cleanText(row.role || "prospect", 20), text: cleanText(row.text, 280) }))
+          .filter((row) => row.text);
+        const coachLines = (Array.isArray(memory.coachingSuggestions) ? memory.coachingSuggestions : [])
+          .slice(-2)
+          .map((row) => cleanText(row.say, 200))
+          .filter(Boolean);
+        const result = await rollingDigest({
+          session: serializeSession(session),
+          lastTurns,
+          coachLines,
+          packets: (session.digestWindow || []).slice(-6),
+          metadata: session.metadata,
+        });
+        if (result && !TERMINAL_SESSION_STATUSES.includes(session.status)) {
+          const relevantKeys = (Array.isArray(result.relevantKeys) ? result.relevantKeys : [])
+            .slice(0, 5)
+            .map((row) => ({
+              key: cleanText(row.key, 120),
+              snippet: cleanText(row.snippet, 160),
+              why: cleanText(row.why || row.reason || "", 140),
+            }))
+            .filter((row) => row.key);
+          session.rollingDigest = {
+            at: new Date().toISOString(),
+            relevantKeys,
+            droppedKeys: (Array.isArray(result.droppedKeys) ? result.droppedKeys : []).slice(0, 8).map((key) => cleanText(key, 120)).filter(Boolean),
+            brief: {
+              whatHappened: cleanText(result.brief?.whatHappened || "", 160),
+              continueFrom: cleanText(result.brief?.continueFrom || "", 120),
+              activeIssues: relevantKeys.map((row) => ({ key: row.key, snippet: row.snippet, status: "relevant" })),
+            },
+            read: cleanText(result.read || "", 140),
+          };
+          emit(session.id, "context.digest", { digest: session.rollingDigest });
+        }
+      } catch (error) {
+        logger?.warn?.("live_coach.rolling_digest.error", {
+          sessionId: session.id,
+          error: error.message,
+        });
+      }
+      if (state.dirty && !TERMINAL_SESSION_STATUSES.includes(session.status)) return run();
+      state.running = false;
+      return null;
+    };
+    run().catch(() => {
+      state.running = false;
+    });
+  }
+
+  // Attach the digest's immediate-past brief to a composing turn context.
+  // Additive only: the turn's own deterministic matches stay the approved
+  // keys; the digest rides as memory (whatHappened/relevant snippets/read).
+  function attachRollingDigest(session, contextFrame) {
+    const digest = session?.rollingDigest;
+    if (!digest || !contextFrame?.shouldCompose) return contextFrame;
+    return {
+      ...contextFrame,
+      memoryBrief: contextFrame.memoryBrief && contextFrame.memoryBrief.whatHappened
+        ? contextFrame.memoryBrief
+        : digest.brief,
+      miniJudgement: {
+        ...(contextFrame.miniJudgement || {}),
+        transcriptMeaning: contextFrame.miniJudgement?.transcriptMeaning || digest.read || digest.brief?.whatHappened || "",
+        digestRelevantKeys: digest.relevantKeys.map((row) => row.key),
+        digestAt: digest.at,
+      },
+    };
   }
 
   function requestDialogComposition(session, context, dialog) {
@@ -1778,6 +1957,8 @@ function createLiveCoachBus({
     });
     emit(session.id, "compose.start", {
       dialogId: baseDialog.id,
+      callPhase: context.callPhase || null,
+      prospectTurnCount: context.prospectTurnCount || null,
       selectedKeys: signature.keys ? signature.keys.split("|") : [],
       recentMemory: recentMemory ? {
         transcriptRows: recentMemory.transcriptRows,
@@ -1831,6 +2012,16 @@ function createLiveCoachBus({
           // aborts/supersedes, so an empty final here is a genuine hold: always settle the
           // line to a terminal "wait" so the panel clears the composing/streaming state
           // (never strands) and surfaces no coach line.
+          //
+          // RATE-LIMIT REFUND: a WAIT is a decision, not a coach line — with
+          // Claude as the decider (judge off, everything forwards) WAITs must
+          // not consume the per-minute compose budget or fragments would
+          // starve the real lines that follow them.
+          if (Array.isArray(guard.startedAtMs) && guard.startedAtMs.length) {
+            const idx = guard.startedAtMs.lastIndexOf(guard.lastStartedAtMs);
+            if (idx >= 0) guard.startedAtMs.splice(idx, 1);
+            else guard.startedAtMs.pop();
+          }
           latest.latest.dialog = {
             ...latest.latest.dialog,
             status: "wait",
@@ -1986,6 +2177,13 @@ function createLiveCoachBus({
       match: systemMatch.match || null,
       decision: "streaming_delta_voicemail_reject",
     });
+    // Coach-triggered voicemail drop (streaming-delta path). Self-gated.
+    try {
+      vmTransferTrigger?.maybeFire?.(serializeSession(session), {
+        match: systemMatch.match || null,
+        source: "streaming-voicemail-gate",
+      });
+    } catch {}
     return {
       action: "reject_voicemail",
       transcript,
@@ -2445,7 +2643,12 @@ function createLiveCoachBus({
 
       if (row.decision === "stale") {
         const activeSubscribers = subscribers.get(session.id);
-        if (preserveSubscribers && activeSubscribers && activeSubscribers.size > 0) {
+        const shouldPreserveForSubscribers =
+          preserveSubscribers &&
+          activeSubscribers &&
+          activeSubscribers.size > 0 &&
+          !CALL_ENDING_STALE_REASONS.has(String(row.reason || ""));
+        if (shouldPreserveForSubscribers) {
           logger?.info?.("live_coach.stale_sweep.preserved_for_subscribers", {
             sessionId: session.id,
             staleReason: row.reason,

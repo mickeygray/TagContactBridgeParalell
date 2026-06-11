@@ -76,13 +76,70 @@ const PINNED_AGENTS: AgentLane[] = [
   { key: "bhansen", label: "Brad Hansen", aliases: ["bhansen", "bhansen@", "brad hansen", "bradhansen", "63914587004"] },
   { key: "jsharp", label: "J. Sharp", aliases: ["jsharp", "jsharp@", "james sharp", "jay sharp", "63914621004"] },
 ];
-const UNBOUND_LANE: AgentLane = { key: "unbound", label: "Unbound Stream", aliases: [], fallback: true };
+// (No "Unbound Stream" lane: identity-less sessions are optimistically claimed
+// into agent lanes by event-phone match and healed by bridge enrichment;
+// persistent orphans get a per-phone lane via dynamicLaneFromIdentity.)
 
-function dynamicLaneFromIdentity(ext?: string | null, email?: string | null, name?: string | null): AgentLane | null {
+function sessionHasAgentIdentity(session: LiveCoachSession) {
+  const metadata = session.metadata || {};
+  return Boolean(String(
+    metadata.agentExtension || metadata.agentEmail || metadata.agentName || "",
+  ).trim());
+}
+
+function sessionAgeMs(session: LiveCoachSession) {
+  const createdMs = Date.parse(session.createdAt || "") || 0;
+  return createdMs ? Date.now() - createdMs : 0;
+}
+
+function agentRecentEventPhones(agent: AgentLane, callEvents: LiveCoachCallEvent[]) {
+  const phones = new Set<string>();
+  const maxAgeMs = 3 * 60 * 1000;
+  for (const event of callEvents) {
+    const ms = callEventSortMs(event);
+    if (!ms || Date.now() - ms > maxAgeMs) continue;
+    if (!callMatches(agent, event)) continue;
+    const digits = phoneDigits(event.phone);
+    if (digits) phones.add(digits);
+  }
+  return phones;
+}
+
+// Optimistic attribution: an identity-less session whose phone matches one of
+// this agent's fresh call events belongs in this agent's lane NOW; bridge
+// enrichment makes it authoritative moments later (healing).
+function sessionMatchesAgentOptimistically(agent: AgentLane, session: LiveCoachSession, callEvents: LiveCoachCallEvent[]) {
+  if (agentMatches(agent, session)) return true;
+  if (sessionHasAgentIdentity(session)) return false;
+  const digits = phoneDigits(session.metadata?.phone);
+  if (!digits) return false;
+  return agentRecentEventPhones(agent, callEvents).has(digits);
+}
+
+function dynamicLaneFromIdentity(
+  ext?: string | null,
+  email?: string | null,
+  name?: string | null,
+  phone?: string | null,
+  session?: LiveCoachSession | null,
+): AgentLane | null {
   const cleanExt = String(ext || "").trim();
   const cleanEmail = String(email || "").trim().toLowerCase();
   const cleanName = String(name || "").trim();
-  if (!cleanExt && !cleanEmail && !cleanName) return null;
+  const cleanPhone = String(phone || "").replace(/\D/g, "");
+  if (!cleanExt && !cleanEmail && !cleanName) {
+    // Last-resort visibility: only a PERSISTENT orphan (alive >60s with no
+    // attribution) earns a phone lane — transient pre-event gaps stay
+    // invisible because optimistic attribution or enrichment claims them.
+    if (!cleanPhone || cleanPhone.length < 7) return null;
+    if (!session || sessionAgeMs(session) < 60_000) return null;
+    return {
+      key: `dyn-ph-${cleanPhone}`,
+      label: `Phone ${cleanPhone.replace(/^(\d{3})(\d{3})(\d{4})$/, "($1) $2-$3")}`,
+      aliases: [cleanPhone],
+      dynamic: true,
+    };
+  }
   const key = `dyn-${(cleanExt || cleanEmail || cleanName).toLowerCase().replace(/[^a-z0-9@._-]+/g, "-").slice(0, 60)}`;
   const aliases = [
     cleanExt,
@@ -96,18 +153,8 @@ function dynamicLaneFromIdentity(ext?: string | null, email?: string | null, nam
 
 function deriveDynamicLanes(sessions: LiveCoachSession[], callEvents: LiveCoachCallEvent[]): AgentLane[] {
   const dynamic = new Map<string, AgentLane>();
-  let sawIdentitylessSession = false;
-  for (const session of sessions) {
-    if (isLiveCoachTerminal(session.status) || isLiveCoachRejected(session)) continue;
-    if (PINNED_AGENTS.some((agent) => agentMatches(agent, session))) continue;
-    const metadata = session.metadata || {};
-    const lane = dynamicLaneFromIdentity(metadata.agentExtension, metadata.agentEmail, metadata.agentName);
-    if (!lane) {
-      sawIdentitylessSession = true;
-      continue;
-    }
-    if (!dynamic.has(lane.key)) dynamic.set(lane.key, lane);
-  }
+  // 1. Event-derived agent lanes first (events always carry agent identity)
+  //    so identity-less sessions can be optimistically claimed by them.
   const maxEventAgeMs = 3 * 60 * 1000;
   for (const event of callEvents) {
     const ms = callEventSortMs(event);
@@ -116,9 +163,18 @@ function deriveDynamicLanes(sessions: LiveCoachSession[], callEvents: LiveCoachC
     const lane = dynamicLaneFromIdentity(event.extensionId, event.agentEmail, event.agentName);
     if (lane && !dynamic.has(lane.key)) dynamic.set(lane.key, lane);
   }
-  const rows = [...dynamic.values()].sort((a, b) => a.label.localeCompare(b.label));
-  if (sawIdentitylessSession) rows.push(UNBOUND_LANE);
-  return rows;
+  // 2. Session-derived lanes: identity-less sessions claimed by ANY lane's
+  //    fresh event-phone stay laneless (they render inside that agent's lane);
+  //    persistent orphans (>60s, unclaimed) earn a last-resort phone lane.
+  const claimLanes = PINNED_AGENTS.concat([...dynamic.values()]);
+  for (const session of sessions) {
+    if (isLiveCoachTerminal(session.status) || isLiveCoachRejected(session)) continue;
+    if (claimLanes.some((agent) => sessionMatchesAgentOptimistically(agent, session, callEvents))) continue;
+    const metadata = session.metadata || {};
+    const lane = dynamicLaneFromIdentity(metadata.agentExtension, metadata.agentEmail, metadata.agentName, metadata.phone, session);
+    if (lane && !dynamic.has(lane.key)) dynamic.set(lane.key, lane);
+  }
+  return [...dynamic.values()].sort((a, b) => a.label.localeCompare(b.label));
 }
 
 const VOICEMAIL_FLASH_MS = 5000;
@@ -145,6 +201,9 @@ function compactSessionAgent(session: LiveCoachSession) {
     metadata.agentEmail ? String(metadata.agentEmail).split("@")[0] : "",
     metadata.agentName || "",
     metadata.agentExtension || "",
+    // Phone digits so identity-less sessions can match their per-phone lane
+    // (live dialogInits carry no agent identity — phone is often all we have).
+    String(metadata.phone || "").replace(/\D/g, ""),
   ].join(" ").toLowerCase().replace(/[^a-z0-9@+._ -]+/g, "");
 }
 
@@ -204,11 +263,11 @@ function sessionPickRank(session: LiveCoachSession) {
   return sessionSignalScore(session);
 }
 
-function pickSession(agent: AgentLane, sessions: LiveCoachSession[], allLanes: AgentLane[]) {
+function pickSession(agent: AgentLane, sessions: LiveCoachSession[], allLanes: AgentLane[], callEvents: LiveCoachCallEvent[]) {
   const candidates = agent.fallback
     ? sessions.filter((session) =>
       !allLanes.some((lane) => !lane.fallback && agentMatches(lane, session)))
-    : sessions.filter((session) => agentMatches(agent, session));
+    : sessions.filter((session) => sessionMatchesAgentOptimistically(agent, session, callEvents));
   return candidates
     .filter((session) => !isLiveCoachTerminal(session.status))
     .sort((a, b) => {
@@ -639,7 +698,7 @@ export function LiveCoachWallboardWorkspace() {
     }
 
     for (const agent of desiredLanes) {
-      const session = pickSession(agent, sessions, desiredLanes);
+      const session = pickSession(agent, sessions, desiredLanes, callEvents);
       const waitingCall = pickWaitingCall(agent, callEvents, sessions);
       const recentRejected = pickRecentRejected(agent, sessions);
       if (session) {

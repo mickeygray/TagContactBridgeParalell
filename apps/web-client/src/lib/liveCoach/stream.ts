@@ -11,6 +11,7 @@ export type LiveCoachTranscript = {
   model?: string | null;
   wordCount?: number | null;
   provisional?: boolean | null;
+  lowConfidence?: boolean | null;
   coachHeld?: boolean | null;
   awaitingCoach?: boolean | null;
 };
@@ -100,6 +101,12 @@ export type LiveCoachSession = {
     context?: LiveCoachContext | null;
     dialog?: LiveCoachDialog | null;
     streamStatus?: LiveCoachStreamStatus | null;
+  } | null;
+  // Rolling call memory from the bus (serializeSession ships it whole).
+  // transcripts carries the full thread (240-row cap) — snapshot seeding uses
+  // it so reconnects/late joins paint the entire conversation.
+  memory?: {
+    transcripts?: LiveCoachTranscript[] | null;
   } | null;
 };
 
