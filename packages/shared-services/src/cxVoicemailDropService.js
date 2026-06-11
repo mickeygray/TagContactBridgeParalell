@@ -2,14 +2,13 @@
 
 // CX voicemail-drop serving (the "actual app" path).
 //
-// v3 (default): THEMED DISPOSITION DROP. The agent picks a themed message and
-// clicks Voicemail; we resolve their live RingCX UII server-side and set that
-// theme's disposition with callback=false. The dialer then (a) completes the
-// call for the agent — nailed station leg untouched, straight to the next
-// call — and (b) cold-transfers the prospect/VM leg to the theme's DID, where
-// the vm-theme-answerer plays the message and hangs up. One API call; the
-// telephony does the rest. (`callback` is REQUIRED on dispositionCall —
-// omitting it is a bare 400 invalid.data.)
+// v3 (default): AGENT DISPOSITION DROP. The agent clicks Voicemail; we
+// resolve their live RingCX UII server-side and set that agent's fixed VM
+// disposition with callback=false. The dialer completes the call for the agent
+// and cold-transfers the prospect/VM leg to that agent's monitor extension,
+// where the answerer plays their recording and hangs up. One API call; the
+// telephony does the rest. callback is REQUIRED on dispositionCall; omitting it
+// is a bare 400 invalid.data.
 //
 // Legacy (CX_VOICEMAIL_DROP_MODE=barge): resolve which monitor barges which
 // agent extension and call the headless *82 barge service. Kept as fallback.
@@ -21,26 +20,37 @@ const {
 } = require("./voicemailServingService");
 const { createRingcxVoiceClient } = require("../../shared-integrations/src/ringcxVoiceClient");
 
-// theme key -> campaign disposition name (stamped on every active campaign by
-// scripts/rcx-stamp-vm-dispositions.js) + answerer ext/DID for reference.
-// Override with VM_DROP_THEMES_JSON (same shape) when dispositions get renamed.
-const DEFAULT_VM_DROP_THEMES = [
-  { key: "online-inquiry", label: "Online Inquiry", urgency: "medium", disposition: "VM DROP", ext: "987" },
-  { key: "free-consultation", label: "Free Consultation", urgency: "low", disposition: "VM DROP SEAN", ext: "1101" },
-  { key: "notices", label: "Notices", urgency: "medium", disposition: "VM DROP JAMES", ext: "1105" },
-  { key: "balance-due", label: "Balance Due", urgency: "high", disposition: "VM DROP CHRIS", ext: "1104" },
-  { key: "tailor-made", label: "Tailor Made", urgency: "medium", disposition: "VM DROP BRUCE", ext: "1102" },
+// Agent key -> campaign disposition name. Override with
+// VM_DROP_AGENT_DISPOSITIONS_JSON when RingCX disposition names change.
+// VM_DROP_THEMES_JSON is still read as a legacy fallback for old envs.
+const DEFAULT_VM_DROP_AGENT_DISPOSITIONS = [
+  { key: "phil", label: "Phil Olson", disposition: "VM DROP", ext: "987", extensionNumbers: ["319"], emails: ["polson@taxadvocategroup.com"] },
+  { key: "sean", label: "Sean Lucas", disposition: "VM DROP SEAN", ext: "1101", extensionNumbers: ["445"], emails: ["slucas@taxadvocategroup.com"] },
+  { key: "bruce", label: "Bruce Allen", disposition: "VM DROP BRUCE", ext: "1102", extensionNumbers: ["966", "9661", "9662"], emails: ["ballen@taxadvocategroup.com"] },
+  { key: "chris", label: "Chris Bolt", disposition: "VM DROP CHRIS", ext: "1104", extensionNumbers: ["741"], emails: ["cbolt@taxadvocategroup.com"] },
+  { key: "james", label: "James Sharp", disposition: "VM DROP JAMES", ext: "1105", extensionNumbers: ["743"], emails: ["jsharp@taxadvocategroup.com"] },
+  { key: "brad", label: "Brad Hansen", disposition: "VM DROP BRAD", ext: "1106", extensionNumbers: ["742"], emails: ["bhansen@taxadvocategroup.com"] },
 ];
 
-function listVmDropThemes() {
-  const raw = String(process.env.VM_DROP_THEMES_JSON || "").trim();
+function listVmDropAgentDispositions() {
+  const raw = String(process.env.VM_DROP_AGENT_DISPOSITIONS_JSON || process.env.VM_DROP_THEMES_JSON || "").trim();
   if (raw) {
     try {
       const parsed = JSON.parse(raw);
       if (Array.isArray(parsed) && parsed.length) return parsed;
     } catch {}
   }
-  return DEFAULT_VM_DROP_THEMES;
+  return DEFAULT_VM_DROP_AGENT_DISPOSITIONS;
+}
+
+function listVmDropThemes() {
+  return listVmDropAgentDispositions().map(({ key, label, disposition, ext }) => ({
+    key,
+    label,
+    urgency: null,
+    disposition,
+    ext,
+  }));
 }
 
 function vmDropMode() {
@@ -122,6 +132,46 @@ function digitsLast10(value) {
   return String(value || "").replace(/\D/g, "").slice(-10);
 }
 
+function normalizedSet(values) {
+  return new Set(
+    (Array.isArray(values) ? values : [values])
+      .map((value) => String(value || "").trim().toLowerCase())
+      .filter(Boolean),
+  );
+}
+
+function resolveAgentDispositionDrop(plan = {}, user = {}) {
+  const candidates = new Set(
+    [
+      plan.agentEmail,
+      user.email,
+      user.accountEmail,
+      plan.targetExtensionNumber,
+      plan.baseExtensionNumber,
+      plan.monitorExtension,
+      user.extensionNumber,
+      user.extensionId,
+      user.cxAgentId,
+    ]
+      .map((value) => String(value || "").trim().toLowerCase())
+      .filter(Boolean),
+  );
+  const drops = listVmDropAgentDispositions();
+  return drops.find((drop) => {
+    if (candidates.has(String(drop.key || "").trim().toLowerCase())) return true;
+    if (candidates.has(String(drop.ext || "").trim().toLowerCase())) return true;
+    const emails = normalizedSet(drop.emails);
+    for (const candidate of candidates) {
+      if (emails.has(candidate)) return true;
+    }
+    const extensionNumbers = normalizedSet(drop.extensionNumbers);
+    for (const candidate of candidates) {
+      if (extensionNumbers.has(candidate)) return true;
+    }
+    return false;
+  }) || null;
+}
+
 // Resolve the authed agent's live UII from RingCX activeCalls. Phone match
 // (the queue item the client is serving) is primary; agent-name match is the
 // fallback. Server-side resolution — the client never supplies a UII.
@@ -143,14 +193,44 @@ async function resolveLiveUii(client, { phone, agentName }) {
   return { uii: "", matchedBy: null, row: null };
 }
 
-// v3: themed disposition drop — one dispositionCall does everything.
-async function requestThemedDispositionDrop(domain, user, body = {}) {
-  const themes = listVmDropThemes();
-  const requestedKey = String(body.theme || body.themeKey || "").trim().toLowerCase();
-  const theme = themes.find((t) => t.key === requestedKey) || themes[0];
+// v3: agent-owned disposition drop -- one dispositionCall does everything.
+async function requestAgentDispositionDrop(domain, user, body = {}) {
+  const identifier = pickIdentifier(user, body);
+  if (!identifier) {
+    throw httpError("No agent identifier to resolve voicemail drop", 400, "no-agent-identifier");
+  }
+
+  const plan = await resolveAgentVoicemailPlan(identifier, {
+    findAgent: makeMongoAgentFinder(UserAccount),
+    domain,
+  });
+
+  if (!plan.agentName && !plan.agentEmail && !plan.targetExtensionNumber) {
+    throw httpError(
+      `Cannot resolve voicemail agent (${(plan.problems || [plan.reason]).join(", ")})`,
+      400,
+      "voicemail-agent-unresolved",
+      plan,
+    );
+  }
+
+  const drop = resolveAgentDispositionDrop(plan, user);
+  if (!drop) {
+    throw httpError(
+      "No agent voicemail disposition is configured for this user",
+      409,
+      "no-agent-voicemail-disposition",
+      {
+        agentName: plan.agentName || user?.name || null,
+        agentEmail: plan.agentEmail || user?.email || null,
+        targetExtensionNumber: plan.targetExtensionNumber || null,
+        monitorExtension: plan.monitorExtension || null,
+      },
+    );
+  }
 
   const agentName = String(
-    body.agentName || user?.name || user?.displayName || `${user?.firstName || ""} ${user?.lastName || ""}`,
+    plan.agentName || body.agentName || user?.name || user?.displayName || `${user?.firstName || ""} ${user?.lastName || ""}`,
   ).trim();
   const phone = body.phone || body.prospectPhone || body.leadPhone || "";
 
@@ -158,27 +238,40 @@ async function requestThemedDispositionDrop(domain, user, body = {}) {
   const { uii, matchedBy, row } = await resolveLiveUii(client, { phone, agentName });
   if (!uii) {
     throw httpError(
-      "No live RingCX call found for this agent — is the call still up?",
+      "No live RingCX call found for this agent -- is the call still up?",
       409,
       "no-live-call",
       { phone: digitsLast10(phone) || null, agentName: agentName || null },
     );
   }
 
-  // `callback` is REQUIRED — omitting it 400s with invalid.data.
-  await client.dispositionCall(uii, { disposition: theme.disposition, callback: false });
+  // callback is REQUIRED; omitting it 400s with invalid.data.
+  await client.dispositionCall(uii, { disposition: drop.disposition, callback: false });
 
   return {
     ok: true,
     dropped: true,
     mode: "disposition",
-    theme: { key: theme.key, label: theme.label, urgency: theme.urgency || null, disposition: theme.disposition },
+    drop: {
+      key: drop.key,
+      label: drop.label,
+      disposition: drop.disposition,
+      monitorExtension: drop.ext || plan.monitorExtension || null,
+    },
+    // Back-compat for older log readers that still display result.theme.
+    theme: { key: drop.key, label: drop.label, urgency: null, disposition: drop.disposition },
+    plan: {
+      agentName: plan.agentName,
+      targetExtensionNumber: plan.targetExtensionNumber,
+      monitorExtension: plan.monitorExtension,
+      voicemailPath: plan.voicemailPath,
+      problems: plan.problems,
+    },
     uii,
     matchedBy,
     agent: `${row?.agentFirstName || ""} ${row?.agentLastName || ""}`.trim() || null,
   };
 }
-
 async function requestCxVoicemailDrop(domain, user, body = {}) {
   const action = pickDropAction(body);
 
@@ -188,7 +281,7 @@ async function requestCxVoicemailDrop(domain, user, body = {}) {
     if (action === "warm") return { ok: true, warmed: true, skipped: true, mode: "disposition" };
     if (action === "arm") return { ok: true, armed: true, skipped: true, mode: "disposition" };
     if (action === "release") return { ok: true, released: true, skipped: true, mode: "disposition" };
-    return requestThemedDispositionDrop(domain, user, body);
+    return requestAgentDispositionDrop(domain, user, body);
   }
 
   const identifier = pickIdentifier(user, body);

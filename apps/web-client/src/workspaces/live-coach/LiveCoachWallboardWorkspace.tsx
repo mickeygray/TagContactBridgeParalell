@@ -34,6 +34,17 @@ type LaneFlash = {
   expiresAt: number;
 };
 
+type LaneTone = "idle" | "live" | "good" | "warn" | "danger";
+
+type LaneDiagnosticEvent = {
+  id: string;
+  at: string;
+  label: string;
+  detail?: string;
+  tone: LaneTone;
+  deltaMs?: number | null;
+};
+
 type LaneState = {
   session: LiveCoachSession | null;
   waitingCall: LiveCoachCallEvent | null;
@@ -44,8 +55,9 @@ type LaneState = {
   streamStatus: LiveCoachStreamStatus | null;
   flash: LaneFlash | null;
   stage: string;
-  stageTone: "idle" | "live" | "good" | "warn" | "danger";
+  stageTone: LaneTone;
   stageDetail?: string;
+  diagnostics: LaneDiagnosticEvent[];
 };
 
 type DashboardPayload = {
@@ -303,7 +315,7 @@ function sessionWaitingForRingCxStream(session: LiveCoachSession | null | undefi
   const source = String(metadata.source || "").toLowerCase();
   const inputCount = Number(session.counters?.input || 0);
   const hasTranscript = Boolean(session.latest?.provisionalTranscript?.text || session.latest?.transcript?.text);
-  return source === "mongo-cx" && !metadata.streamId && inputCount <= 0 && !hasTranscript;
+  return (source === "mongo-cx" || source === "control-plane-cx") && !metadata.streamId && inputCount <= 0 && !hasTranscript;
 }
 
 function voicemailFlashFromSession(session: LiveCoachSession): LaneFlash {
@@ -353,6 +365,203 @@ function metaPills(items: Array<string | null | undefined>) {
   return items.filter(Boolean);
 }
 
+const DIAGNOSTIC_LIMIT = 9;
+
+function shortId(value?: string | null, length = 10) {
+  const clean = String(value || "").trim();
+  if (!clean) return "";
+  return clean.length <= length ? clean : clean.slice(-length);
+}
+
+function formatBytes(value?: number | null) {
+  const bytes = Number(value || 0);
+  if (!bytes) return "";
+  if (bytes < 1024) return `${bytes}B`;
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)}KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)}MB`;
+}
+
+function formatDeltaMs(value?: number | null) {
+  const ms = Number(value || 0);
+  if (!Number.isFinite(ms) || ms <= 0) return "";
+  if (ms < 1000) return `+${Math.round(ms)}ms`;
+  return `+${(ms / 1000).toFixed(1)}s`;
+}
+
+function toneClasses(tone: LaneTone) {
+  return cn(
+    tone === "good" && "border-emerald-200 bg-emerald-50 text-emerald-700",
+    tone === "live" && "border-sky-200 bg-sky-50 text-sky-700",
+    tone === "warn" && "border-amber-200 bg-amber-50 text-amber-700",
+    tone === "danger" && "border-red-200 bg-red-50 text-red-700",
+    tone === "idle" && "border-border bg-muted text-muted-foreground",
+  );
+}
+
+function diagnosticId(type: string, at: string, payload: LiveCoachEvent) {
+  return [
+    at,
+    type,
+    payload.dialogId || payload.dialog?.id || payload.transcript?.id || payload.provisionalTranscript?.id || payload.sessionId || "",
+  ].join(":");
+}
+
+function countRows(value: unknown) {
+  return Array.isArray(value) ? value.length : 0;
+}
+
+function selectedKeysFromPayload(payload: LiveCoachEvent) {
+  if (Array.isArray(payload.selectedKeys)) return payload.selectedKeys.filter(Boolean);
+  if (Array.isArray(payload.context?.miniJudgement?.selectedKeys)) {
+    return payload.context.miniJudgement.selectedKeys.filter(Boolean);
+  }
+  if (Array.isArray(payload.context?.matches)) {
+    return payload.context.matches.map((row) => row.key || row.label || "").filter(Boolean);
+  }
+  return [];
+}
+
+function diagnosticFromPayload(eventName: string, payload: LiveCoachEvent): LaneDiagnosticEvent | null {
+  const type = String(payload.type || eventName || "");
+  const at = payload.at || payload.streamStatus?.at || payload.transcript?.at || payload.dialog?.at || new Date().toISOString();
+  let label = "";
+  let detail = "";
+  let tone: LaneTone = "idle";
+
+  if (type === "snapshot") {
+    label = "snapshot";
+    detail = payload.session?.status || payload.session?.metadata?.source || "";
+    tone = "idle";
+  } else if (type === "stream.status" && payload.streamStatus) {
+    const status = payload.streamStatus;
+    label = "audio";
+    detail = [
+      `${Math.round(Number(status.durationSec || 0))}s`,
+      `active ${Number(status.activePct || 0).toFixed(1)}%`,
+      status.bindState ? `bind ${status.bindState}` : "",
+      status.bindReason && status.bindState !== "bound" ? status.bindReason : "",
+      Number(status.pendingDroppedBytes || 0) > 0 ? `drop ${formatBytes(status.pendingDroppedBytes)}` : "",
+    ].filter(Boolean).join(" | ");
+    tone = status.bindState && status.bindState !== "bound" ? "warn" : "live";
+  } else if (type === "transcript.provisional" || payload.provisionalTranscript) {
+    const transcript = payload.provisionalTranscript;
+    label = "STT live";
+    detail = [
+      transcript?.wordCount ? `${transcript.wordCount} words` : "",
+      transcript?.model || transcript?.source || "",
+    ].filter(Boolean).join(" | ");
+    tone = "live";
+  } else if (type === "transcript" || payload.transcript) {
+    const transcript = payload.transcript;
+    label = "VAD final";
+    detail = [
+      transcript?.wordCount ? `${transcript.wordCount} words` : "",
+      transcript?.model || transcript?.source || "",
+    ].filter(Boolean).join(" | ");
+    tone = "live";
+  } else if (type === "watcher.collect" || type === "watcher.vad_release") {
+    label = type === "watcher.vad_release" ? "VAD release" : "determinism";
+    const candidateCount = countRows(payload.candidates);
+    const systemCount = countRows(payload.systemMatches);
+    detail = [
+      payload.action || "",
+      candidateCount ? `${candidateCount} candidates` : "",
+      systemCount ? `${systemCount} system` : "",
+    ].filter(Boolean).join(" | ");
+    tone = payload.action === "reject_voicemail" ? "danger" : systemCount ? "warn" : "live";
+  } else if (type === "context.judge.start") {
+    label = "mini start";
+    detail = payload.candidateCount ? `${payload.candidateCount} candidates` : "reading phrase";
+    tone = "live";
+  } else if (type === "context.judge.done") {
+    const selected = selectedKeysFromPayload(payload);
+    label = payload.shouldCompose ? "mini kept" : "mini held";
+    detail = [
+      payload.elapsedMs ? `${payload.elapsedMs}ms` : "",
+      selected.length ? selected.slice(0, 4).join(", ") : payload.actionReason || "",
+    ].filter(Boolean).join(" | ");
+    tone = payload.shouldCompose ? "good" : "idle";
+  } else if (type === "context.judge.error" || type === "dialog.error") {
+    label = type === "dialog.error" ? "coach error" : "mini error";
+    detail = payload.error || "error";
+    tone = "danger";
+  } else if (type === "pipeline.hold") {
+    label = "hold";
+    detail = payload.action || payload.hold?.reason || "not coachable yet";
+    tone = "idle";
+  } else if (type === "context.clear") {
+    label = "context clear";
+    detail = payload.hold?.match || payload.hold?.reason || payload.action || "screener/hold";
+    tone = "warn";
+  } else if (type === "context" || payload.context) {
+    const context = payload.context;
+    const selected = selectedKeysFromPayload(payload);
+    label = context?.shouldCompose ? "context ready" : "context held";
+    detail = [
+      context?.actionReason || "",
+      selected.length ? selected.slice(0, 4).join(", ") : "",
+    ].filter(Boolean).join(" | ");
+    tone = context?.shouldCompose ? "good" : "idle";
+  } else if (type === "compose.start") {
+    label = "coach start";
+    detail = payload.dialogId ? `dialog ${shortId(payload.dialogId, 8)}` : "streaming response";
+    tone = "live";
+  } else if (type === "compose.supersede") {
+    label = "supersede";
+    detail = payload.activeDialogId ? `active ${shortId(payload.activeDialogId, 8)}` : "newer phrase won";
+    tone = "warn";
+  } else if (type === "compose.deduped") {
+    label = "deduped";
+    detail = payload.windowMs ? `${payload.windowMs}ms window` : "similar phrase";
+    tone = "warn";
+  } else if (type === "compose.rate_limited") {
+    label = "rate limited";
+    detail = payload.rateLimitPerMinute ? `${payload.rateLimitPerMinute}/min cap` : "compose cap";
+    tone = "warn";
+  } else if (type === "dialog") {
+    const dialog = payload.dialog;
+    label = dialog?.status === "ready" ? "coach ready" : dialog?.status === "streaming" ? "coach streaming" : "dialog";
+    detail = [dialog?.composer || dialog?.model || "", dialog?.label || ""].filter(Boolean).join(" | ");
+    tone = dialog?.status === "rejected" ? "danger" : dialog?.status === "ready" ? "good" : "live";
+  } else if (type === "voicemail.reject") {
+    label = "voicemail";
+    detail = payload.dialog?.guidance || "call cleared";
+    tone = "danger";
+  } else if (type === "session.stop" || type === "session.stale" || type === "session.pruned") {
+    label = type === "session.stale" ? "stale" : type === "session.pruned" ? "pruned" : "released";
+    detail = "session closed";
+    tone = type === "session.stale" ? "warn" : "idle";
+  }
+
+  if (!label) return null;
+  return { id: diagnosticId(type, at, payload), at, label, detail, tone };
+}
+
+function appendDiagnostic(existing: LaneState | undefined, next: LaneDiagnosticEvent | null) {
+  const rows = existing?.diagnostics || [];
+  if (!next) return rows;
+  const previous = rows[rows.length - 1];
+  const previousMs = Date.parse(previous?.at || "");
+  const nextMs = Date.parse(next.at || "");
+  const withDelta = {
+    ...next,
+    deltaMs: previousMs && nextMs ? Math.max(0, nextMs - previousMs) : null,
+  };
+  if (previous?.id === withDelta.id) {
+    return rows.slice(0, -1).concat(withDelta);
+  }
+  return rows.concat(withDelta).slice(-DIAGNOSTIC_LIMIT);
+}
+
+function diagnosticsFromSession(session: LiveCoachSession | null | undefined) {
+  let rows: LaneDiagnosticEvent[] = [];
+  for (const event of (session?.events || []).slice(-DIAGNOSTIC_LIMIT)) {
+    const diagnostic = diagnosticFromPayload(event.type || "message", event);
+    rows = appendDiagnostic({ ...newBlankLane(), diagnostics: rows }, diagnostic);
+  }
+  return rows;
+}
+
 function appendTranscriptText(existing?: string | null, incoming?: string | null) {
   const left = String(existing || "").trim();
   const right = String(incoming || "").trim();
@@ -394,6 +603,7 @@ function newBlankLane(): LaneState {
     stage: "waiting",
     stageTone: "idle",
     stageDetail: "Waiting for stream",
+    diagnostics: [],
   };
 }
 
@@ -440,6 +650,12 @@ export function LiveCoachWallboardWorkspace() {
   const subscribeLane = React.useCallback((agent: AgentLane, session: LiveCoachSession) => {
     const waitingForStream = sessionWaitingForRingCxStream(session);
     const streamStatus = session.latest?.streamStatus || null;
+    const existingLane = lanesRef.current?.[agent.key];
+    const diagnostics = session.events?.length
+      ? diagnosticsFromSession(session)
+      : existingLane?.session?.id === session.id
+        ? existingLane.diagnostics
+        : [];
     patchLane(agent.key, {
       session,
       waitingCall: null,
@@ -467,6 +683,7 @@ export function LiveCoachWallboardWorkspace() {
         : streamStatus
           ? `${Math.round(Number(streamStatus.durationSec || 0))}s audio | active ${Number(streamStatus.activePct || 0).toFixed(1)}% | waiting on STT`
         : session.metadata?.streamId ? `stream ${session.metadata.streamId.slice(-8)}` : "SSE connecting",
+      diagnostics,
     });
     if (laneSessionIdsRef.current.get(agent.key) === session.id && streamControllersRef.current.has(agent.key)) return;
     closeLaneStream(agent.key);
@@ -477,6 +694,12 @@ export function LiveCoachWallboardWorkspace() {
     void streamLiveCoachEventsWithRetry(`/api/ai/live-coach/sessions/${encodeURIComponent(session.id)}/events`, {
       signal: controller.signal,
       onEvent: (_eventName, payload) => {
+        const diagnostic = diagnosticFromPayload(_eventName, payload);
+        if (diagnostic) {
+          patchLane(agent.key, {
+            diagnostics: appendDiagnostic(lanesRef.current?.[agent.key], diagnostic),
+          });
+        }
         if (payload.session) {
           patchLane(agent.key, { session: payload.session, streamStatus: payload.session.latest?.streamStatus || null });
         }
@@ -672,7 +895,7 @@ export function LiveCoachWallboardWorkspace() {
     });
     const sessions = (data.sessions || []).filter((session) => {
       const source = String(session.metadata?.source || "").toLowerCase();
-      return source.includes("grpc") || source === "mongo-cx";
+      return source.includes("grpc") || source === "mongo-cx" || source === "control-plane-cx";
     });
     const callEvents = data.callEvents || [];
     setLiveCount(sessions.filter((session) => !isLiveCoachTerminal(session.status)).length);
@@ -853,6 +1076,29 @@ export function LiveCoachWallboardWorkspace() {
           const contextBody = contextText(lane.context);
           const rejected = lane.dialog?.status === "rejected";
           const waitingForStream = sessionWaitingForRingCxStream(lane.session);
+          const streamStatus = lane.streamStatus || lane.session?.latest?.streamStatus || null;
+          const metadata = lane.session?.metadata || {};
+          const counters = lane.session?.counters || {};
+          const diagnosticPills = metaPills([
+            lane.session?.id ? `session ${shortId(lane.session.id, 10)}` : "",
+            metadata.source ? `src ${metadata.source}` : "",
+            metadata.uii ? `uii ${shortId(metadata.uii, 12)}` : "",
+            metadata.queueItemId ? `q ${shortId(metadata.queueItemId, 8)}` : "",
+            metadata.streamId ? `stream ${shortId(metadata.streamId, 8)}` : "",
+            lane.session?.binding?.status ? `binding ${lane.session.binding.status}` : "",
+            streamStatus?.bindState ? `bind ${streamStatus.bindState}` : "",
+            streamStatus?.bindReason && streamStatus.bindState !== "bound" ? streamStatus.bindReason : "",
+            streamStatus ? `${Math.round(Number(streamStatus.durationSec || 0))}s audio` : "",
+            streamStatus ? `active ${Number(streamStatus.activePct || 0).toFixed(1)}%` : "",
+            Number(streamStatus?.pendingDroppedBytes || 0) > 0 ? `drop ${formatBytes(streamStatus?.pendingDroppedBytes)}` : "",
+            [
+              Number(counters.input || 0) ? `in ${counters.input}` : "",
+              Number(counters.provisional || 0) ? `live ${counters.provisional}` : "",
+              Number(counters.transcript || 0) ? `vad ${counters.transcript}` : "",
+              Number(counters.context || 0) ? `ctx ${counters.context}` : "",
+              Number(counters.dialog || 0) ? `dlg ${counters.dialog}` : "",
+            ].filter(Boolean).join(" / "),
+          ]);
           return (
             <Card key={agent.key} className="overflow-hidden shadow-none">
               <CardHeader className="border-b border-border px-4 py-3">
@@ -886,7 +1132,45 @@ export function LiveCoachWallboardWorkspace() {
                   <div className="mt-2 truncate text-xs text-muted-foreground">{lane.stageDetail}</div>
                 ) : null}
               </CardHeader>
-              <CardContent className="grid min-h-[560px] grid-rows-[1fr_1fr_1.12fr] gap-3 bg-slate-50/70 p-3">
+              <CardContent className="grid min-h-[680px] grid-rows-[auto_1fr_1fr_1.12fr] gap-3 bg-slate-50/70 p-3">
+                <section className="rounded-md border border-border bg-white p-3">
+                  <div className="mb-2 flex items-center justify-between gap-2">
+                    <h2 className="text-[10px] font-semibold uppercase tracking-[0.14em] text-muted-foreground">
+                      Pipeline
+                    </h2>
+                    <StatusPill tone={lane.diagnostics.length ? "info" : "neutral"}>
+                      {lane.diagnostics.length ? `${lane.diagnostics.length} events` : "quiet"}
+                    </StatusPill>
+                  </div>
+                  <div className="flex flex-wrap gap-1">
+                    {diagnosticPills.length ? diagnosticPills.map((pill) => (
+                      <span key={pill} className="rounded-full border border-border px-1.5 py-0.5 text-[10px] text-muted-foreground">
+                        {pill}
+                      </span>
+                    )) : (
+                      <span className="rounded-full border border-border px-1.5 py-0.5 text-[10px] text-muted-foreground">
+                        no session metadata
+                      </span>
+                    )}
+                  </div>
+                  <div className="mt-2 space-y-1">
+                    {lane.diagnostics.length ? lane.diagnostics.slice(-5).reverse().map((event) => (
+                      <div key={event.id} className="flex items-center gap-2 rounded-md border border-border bg-slate-50 px-2 py-1 text-[11px]">
+                        <span className={cn("rounded-full border px-1.5 py-0.5 font-semibold uppercase tracking-[0.08em]", toneClasses(event.tone))}>
+                          {event.label}
+                        </span>
+                        <span className="shrink-0 text-muted-foreground">{formatTime(event.at)}</span>
+                        {event.deltaMs ? <span className="shrink-0 text-muted-foreground">{formatDeltaMs(event.deltaMs)}</span> : null}
+                        <span className="min-w-0 truncate text-slate-700">{event.detail || "event received"}</span>
+                      </div>
+                    )) : (
+                      <div className="rounded-md border border-dashed border-border px-2 py-2 text-[11px] text-muted-foreground">
+                        Waiting for stream diagnostics.
+                      </div>
+                    )}
+                  </div>
+                </section>
+
                 <section className="rounded-md border border-border bg-white p-3">
                   <div className="mb-2 flex items-center justify-between gap-2">
                     <h2 className="text-[10px] font-semibold uppercase tracking-[0.14em] text-muted-foreground">

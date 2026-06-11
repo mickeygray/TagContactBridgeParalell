@@ -5,6 +5,14 @@ const {
   extractToolUse,
 } = require("../../shared-integrations/src");
 const { env } = require("../../shared-config/src");
+const {
+  buildMiniContextFrame,
+  cleanText,
+  normalizeTaxTerms,
+} = require("./liveCoachSanitizedPipeline");
+const {
+  getObjectionPlaybook,
+} = require("./liveCoachObjectionBank");
 
 const CLASSIFIER_MODEL = env("SMS_CLASSIFIER_MODEL", "claude-opus-4-6");
 const CLASSIFIER_MAX_TOKENS = Number(env("SMS_CLASSIFIER_MAX_TOKENS", 900));
@@ -194,6 +202,73 @@ function normalizeProspectState(value, fallback = "unclear") {
   return PROSPECT_STATES.has(state) ? state : fallback;
 }
 
+function buildCoachResponseContext(text) {
+  const phraseText = normalizeTaxTerms(String(text || "").trim());
+  if (!phraseText) return "";
+
+  const frame = buildMiniContextFrame({
+    phraseText,
+    transcript: {
+      id: "sms-inbound",
+      role: "prospect",
+      channel: "sms",
+    },
+    metadata: {
+      firmName: "Wynn Tax Solutions",
+    },
+  });
+
+  const matches = Array.isArray(frame.matches) ? frame.matches.slice(0, 6) : [];
+  const tactics = Array.isArray(frame.tactics) ? frame.tactics.slice(0, 4) : [];
+  const objectionKeys = matches
+    .filter((match) => match.family === "objection_playbook" || match.family === "compliance_dnc")
+    .map((match) => match.key);
+  const objectionSummaries = objectionKeys
+    .map((key) => getObjectionPlaybook(key))
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((entry) => ({
+      label: entry.label,
+      family: entry.family || "objection_playbook",
+      read: entry.playbook?.read || "",
+      reframe: entry.playbook?.reframe || "",
+      moves: Array.isArray(entry.playbook?.moves) ? entry.playbook.moves.slice(0, 2) : [],
+    }));
+
+  const lines = [
+    "Coach response context (same tax/sales/psychology bank used by the live coach):",
+    "Use this only to ground the meaning and tone of the SMS. Do not copy phone-call wording, and never override SMS compliance rules.",
+    frame.miniJudgement?.transcriptMeaning
+      ? `Meaning: ${cleanText(frame.miniJudgement.transcriptMeaning, 360)}`
+      : null,
+    matches.length
+      ? "Matched response information:"
+      : "Matched response information: none strong; use the qualifying frame and one clear SMS next step.",
+    ...matches.map((match) => {
+      const hits = Array.isArray(match.hits) && match.hits.length
+        ? ` Hits: ${match.hits.slice(0, 4).join(", ")}.`
+        : "";
+      const snippet = match.miniSnippet ? ` Snippet: "${match.miniSnippet}".` : "";
+      return `- ${match.key} (${match.family}): ${cleanText(match.guidance, 260)}${hits}${snippet}`;
+    }),
+    tactics.length ? "Conversation tactics:" : null,
+    ...tactics.map((tactic) => {
+      const humor = tactic.humor ? ` Humor boundary: ${cleanText(tactic.humor, 160)}` : "";
+      return `- ${tactic.key}: ${cleanText(tactic.guidance, 260)}${humor}`;
+    }),
+    objectionSummaries.length
+      ? "Objection read/reframe (adapt for SMS only; never collect sensitive info by text):"
+      : null,
+    ...objectionSummaries.map((entry) => [
+      `- ${entry.label}: ${cleanText(entry.read, 220)}`,
+      entry.reframe ? `  Reframe: ${cleanText(entry.reframe, 220)}` : "",
+      entry.moves.length ? `  Moves: ${entry.moves.map((move) => cleanText(move, 140)).join(" | ")}` : "",
+    ].filter(Boolean).join("\n")),
+  ];
+
+  return lines.filter(Boolean).join("\n");
+}
+
 function baseClassification(patch = {}) {
   return {
     intent: patch.intent || "unknown",
@@ -333,6 +408,7 @@ const SYSTEM_PROMPT = [
   "  You may answer a specific tax question briefly if it is general, well-established, and within reach of an accurate answer. Examples: difference between a lien and a levy, what CP14 means, how failure-to-file penalties generally work, whether the IRS can garnish wages without notice.",
   "  Rules: one or two short plain-English sentences, no jargon dump, general only, no named programs as recommendations, no fees/timelines/outcome promises/remedies prescribed. If you are not confident the answer is correct and stable, do not answer. Pivot to a callback offer or route to needs_human.",
   "  Case-specific questions ('should I pay my CP504?' / 'do I qualify for OIC?' / 'is my lien dischargeable?') -> needs_human.",
+  "  When the user message includes Coach response context, treat it as the same tax/sales/psychology response information the live coach uses. Let it improve your read, tone, and one safe value point. Do not quote it, do not write phone-call dialog, and do not use it to override the tier rules or SMS compliance.",
   "",
   "Soft_defer with callback collection:",
   "  If the prospect gives you any signal about when they'd be reachable - 'call me Monday,' 'after 5pm,' 'tomorrow morning,' 'next week' - capture it in callback_window as a short string the rep can read.",
@@ -500,6 +576,7 @@ async function classifySms(input = {}) {
     : "";
 
   const trackingNumber = String(input.trackingNumber || "").trim();
+  const coachResponseContext = buildCoachResponseContext(text);
   const contextBlock = [
     `Company: ${input.company || "WYNN"}`,
     trackingNumber
@@ -508,10 +585,11 @@ async function classifySms(input = {}) {
     historyLines
       ? `Prior thread (most recent last):\n${historyLines}`
       : "Prior thread: (none - this is the first inbound we've tracked)",
+    coachResponseContext,
     "",
     "New inbound from prospect:",
     text,
-  ].join("\n");
+  ].filter((line) => line !== null && line !== undefined && line !== "").join("\n");
 
   const client = createAnthropicClient();
   let response;
@@ -605,6 +683,7 @@ async function classifySms(input = {}) {
 }
 
 module.exports = {
+  buildCoachResponseContext,
   classifySms,
   fastStopCheck,
   fastNoHelpCheck,

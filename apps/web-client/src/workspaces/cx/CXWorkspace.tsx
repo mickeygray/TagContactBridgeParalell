@@ -13,6 +13,8 @@ import {
   PhoneOff,
 } from "lucide-react";
 import { Button } from "@/components/ui/Button";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/Tabs";
+import { api } from "@/lib/api/client";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/Card";
 import { CaseLink } from "@/components/ui/CaseLink";
 import {
@@ -50,7 +52,6 @@ import {
   useCxDialAny,
   useCxDisposition,
   useCxVoicemailDrop,
-  useCxEmail,
   useCxInterviewSnapshot,
   useCxLeadCandidates,
   useCxLeadLookup,
@@ -62,7 +63,6 @@ import {
   useCxReleaseAppointment,
   useCxSetStatus,
   useCxSimulateCallAny,
-  useCxText,
   useCxWorkspace,
 } from "@/lib/api/queries/cx";
 import { useClientDetail } from "@/lib/api/queries/clients";
@@ -79,7 +79,7 @@ import type { CommLogEntry } from "@/lib/api/queries/cx";
 import { KNOWN_DOMAINS, useDomainStore } from "@/lib/domain/domainStore";
 import { useSession } from "@/lib/auth/useSession";
 import { cn } from "@/lib/utils/cn";
-import { LiveCoachPanel } from "./LiveCoachPanel";
+import { COACH_CHAT_SLOT_ID, LiveCoachPanel } from "./LiveCoachPanel";
 
 const LIVE_COACH_PANEL_ENABLED = ["1", "true", "yes", "on"].includes(
   String(import.meta.env.VITE_LIVE_COACH_PANEL_ENABLED || "").trim().toLowerCase(),
@@ -87,18 +87,6 @@ const LIVE_COACH_PANEL_ENABLED = ["1", "true", "yes", "on"].includes(
 const CX_VOICEMAIL_BUTTON_ENABLED = !["0", "false", "no", "off", "disabled"].includes(
   String(import.meta.env.VITE_CX_VOICEMAIL_BUTTON_ENABLED || "true").trim().toLowerCase(),
 );
-
-// Themed voicemail-drop menu. Keys are stable identifiers the server maps to
-// campaign dispositions (cxVoicemailDropService.listVmDropThemes) — labels
-// here only feed the select. Renaming a disposition is a server-side change.
-const VM_DROP_THEMES: Array<{ key: string; label: string }> = [
-  { key: "online-inquiry", label: "Online Inquiry" },
-  { key: "free-consultation", label: "Free Consultation" },
-  { key: "notices", label: "Notices" },
-  { key: "balance-due", label: "Balance Due" },
-  { key: "tailor-made", label: "Tailor Made" },
-];
-const VM_DROP_THEME_STORAGE_KEY = "cxVmDropTheme";
 
 type ContactContext = {
   caseId?: string | null;
@@ -148,13 +136,6 @@ type CaseForm = {
 type CaseFormField = keyof CaseForm;
 type CaseFormDirty = Record<CaseFormField, boolean>;
 
-type LibraryEntry = {
-  id: string;
-  label: string;
-  body: string;
-  subject?: string;
-};
-
 function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" ? (value as Record<string, unknown>) : {};
 }
@@ -201,79 +182,6 @@ function normalizeComparablePhone(value: string | null | undefined) {
   if (!digits) return "";
   if (digits.length === 11 && digits.startsWith("1")) return digits.slice(1);
   return digits.length > 10 ? digits.slice(-10) : digits;
-}
-
-function buildTextLibrary(domain: string): LibraryEntry[] {
-  return [
-    {
-      id: "intro",
-      label: "Fresh reachout",
-      body: "Hi {{firstName}}, this is {{agentName}} with {{domainLabel}}. I'm following up on your inquiry and can help today.",
-    },
-    {
-      id: "callback",
-      label: "Callback nudge",
-      body: "Hi {{firstName}}, I missed you earlier. Text me here if you want me to call back at a better time.",
-    },
-    {
-      id: "status",
-      label: `${domain} status touch`,
-      body: "Hi {{firstName}}, quick status check from {{domainLabel}}. I'm here if you want to review your next step.",
-    },
-  ];
-}
-
-// Entries here mirror the server's template catalog in
-// `packages/shared-services/src/emailTemplateService.js`. The `id`
-// matches a real `templateKey` so the send path renders server-side
-// with full brand-aware header / signature / footer.
-function buildEmailLibrary(_domain: string): LibraryEntry[] {
-  return [
-    {
-      id: "direct-intro",
-      label: "Direct intro",
-      subject: "Introduction — {{domainLabel}}",
-      body: "Hi {{firstName}},\n\nThis is {{agentName}} with {{domainLabel}}. I wanted to reach out directly so you have a clear point of contact going forward.\n\nIf any questions come up, reply here or call me at {{phone}}.\n\nTalk soon,\n{{agentName}}",
-    },
-    {
-      id: "call-scheduled",
-      label: "Call scheduled",
-      subject: "Confirming our call",
-      body: "Hi {{firstName}},\n\nConfirming our call on [time]. I'll reach out to [phone] at that time.\n\nIf you need to reschedule, reply here or text me at {{phone}}.\n\n{{agentName}}",
-    },
-    {
-      id: "documents-requested",
-      label: "Documents requested",
-      subject: "Documents we'll need — next step",
-      body: "Hi {{firstName}},\n\nTo keep things moving on your case, could you send over the items below? Any legible photo or scan works.\n\n[list]\n\nIf anything doesn't apply, just let me know. {{agentName}}",
-    },
-    {
-      id: "status-update",
-      label: "Status update",
-      subject: "Quick update on your case",
-      body: "Hi {{firstName}},\n\nQuick update — [summary]\n\nI'll keep you posted. Anything on your end, reply here or call {{phone}}.\n\n{{agentName}}",
-    },
-  ];
-}
-
-function buildTemplateContext(
-  domain: string,
-  agentName: string,
-  selected: ContactContext | null,
-  fallbackPhone: string,
-) {
-  const fullName = selected?.name || "there";
-  const firstName = fullName.split(" ")[0] || fullName;
-  return {
-    domainLabel: domain,
-    agentName: agentName || "your agent",
-    firstName,
-    phone: selected?.phone || fallbackPhone || "",
-  };
-}
-
-function renderTemplate(template: string, context: Record<string, string>) {
-  return template.replace(/\{\{\s*(\w+)\s*\}\}/g, (_, key) => context[key] ?? "");
 }
 
 function contactFromQueue(item: CxCallQueueItem): ContactContext {
@@ -436,32 +344,13 @@ const AUTO_SERVE_DELAY_SECONDS = 1;
 const AUTO_SERVE_HANDOFF_DELAY_SECONDS = 0;
 const AUTO_SERVE_STARTUP_DELAY_SECONDS = 8;
 const BACKEND_NEXT_DIAL_HANDOFF_HOLD_MS = 10_000;
-// Must outlast the headless /arm media-confirm window (EX_BARGE_ARM_MEDIA_CONFIRM_MS,
-// 3500ms) plus round-trip so a cold arm at button-press has time to confirm a live
-// join before we give up. Background lifecycle may only warm/register the monitor;
-// the explicit voicemail button is the only path that may arm/barge.
-const VOICEMAIL_ARM_READY_WAIT_MS = 4_500;
-// One bounded window from button click: keep trying to join only while the
-// voicemail cue is still plausible, then let the barge service spend the
-// remaining time listening for silence/beep. Do not stack arm-wait + cue-wait.
-const VOICEMAIL_DROP_CUE_WINDOW_MS = 15_000;
-// The *82 monitor can only JOIN a connected call. The outbound call is marked
-// onCall the instant it is dialed (still ringing the prospect), so the first arm
-// almost always lands before the call connects to voicemail and reports armed:false.
-// Re-arm on a cadence until the server confirms a live (media-up) join or the call
-// ends -- this is what makes the drop reliable instead of racing the connect. Delay is
-// strictly > the server media cap so a re-arm never races an in-flight confirm.
-const VOICEMAIL_ARM_RETRY_DELAY_MS = 3_000;
-// Ceiling is a runaway guard ONLY -- the loop already terminates deterministically when
-// the call ends (armKey changes). It MUST be large enough never to expire mid-call: a
-// cell-forward can ring 30-45s before voicemail. ~30 x (3.5s server + 3s delay) ~= 3 min.
-const VOICEMAIL_ARM_MAX_RETRIES = 30;
-// Last-resort watchdog for the drop flow: the play request has NO client-side
+// Last-resort watchdog for the drop flow: the drop request has NO client-side
 // timeout (the api fetch has no deadline) and the server path is bounded
 // (~135s service timeout, 120s play hard cap). If nothing settled by here,
 // force-clear the pending flag so the Voicemail button can never be stuck
 // "Dropping VM" until a page reload.
 const VOICEMAIL_DROP_WATCHDOG_MS = 180_000;
+const DISPOSITION_NEXT_LEAD_DELAY_SECONDS = 2;
 const STALE_SERVED_QUEUE_RESET_MS = 20_000;
 const SHOW_POSTDATE_DISPOSITION = true;
 type AutoServeCountdownMode = "startup" | "next";
@@ -1083,68 +972,6 @@ function Collapsible({ title, open, onToggle, right, children }: CollapsibleProp
     </Card>
   );
 }
-
-// ─── Template preview modal ─────────────────────────────────────────────────
-
-type TemplatePreviewModalProps = {
-  open: boolean;
-  onClose: () => void;
-  entry: LibraryEntry | null;
-  context: Record<string, string>;
-  onInsert: (entry: LibraryEntry) => void;
-};
-
-function TemplatePreviewModal({ open, onClose, entry, context, onInsert }: TemplatePreviewModalProps) {
-  if (!entry) {
-    return (
-      <Dialog open={open} onOpenChange={(next) => (!next ? onClose() : null)}>
-        <DialogContent />
-      </Dialog>
-    );
-  }
-  const renderedSubject = entry.subject ? renderTemplate(entry.subject, context) : "";
-  const renderedBody = renderTemplate(entry.body, context);
-  return (
-    <Dialog open={open} onOpenChange={(next) => (!next ? onClose() : null)}>
-      <DialogContent className="max-w-xl">
-        <DialogHeader>
-          <DialogTitle>{entry.label}</DialogTitle>
-          <DialogDescription>
-            Preview below uses the current case context. Insert replaces the compose fields.
-          </DialogDescription>
-        </DialogHeader>
-        <div className="space-y-3">
-          {renderedSubject ? (
-            <div className="space-y-1">
-              <div className="text-[11px] font-semibold uppercase tracking-[0.12em] text-muted-foreground">
-                Subject
-              </div>
-              <div className="rounded-md border border-border bg-muted/30 px-3 py-2 text-sm text-foreground">
-                {renderedSubject}
-              </div>
-            </div>
-          ) : null}
-          <div className="space-y-1">
-            <div className="text-[11px] font-semibold uppercase tracking-[0.12em] text-muted-foreground">
-              Body
-            </div>
-            <div className="max-h-72 overflow-auto whitespace-pre-wrap rounded-md border border-border bg-muted/30 px-3 py-2 text-sm text-foreground">
-              {renderedBody}
-            </div>
-          </div>
-        </div>
-        <DialogFooter>
-          <Button variant="secondary" onClick={onClose}>
-            Cancel
-          </Button>
-          <Button onClick={() => onInsert(entry)}>Insert</Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
-  );
-}
-
-// ─── Contact history rendering ──────────────────────────────────────────────
 
 type AppointmentModalProps = {
   open: boolean;
@@ -2819,129 +2646,48 @@ function CompactNativeSelect({
   );
 }
 
-function CompactMultiSelect({
-  options,
-  selected,
-  placeholder,
-  onChange,
-}: {
-  options: Array<{ key: string; label: string }>;
-  selected: Record<string, boolean>;
-  placeholder: string;
-  onChange: (key: string, checked: boolean) => void;
-}) {
-  const selectedOptions = options.filter((option) => selected[option.key]);
-  const availableOptions = options.filter((option) => !selected[option.key]);
-  return (
-    <div className="space-y-1">
-      <select
-        value=""
-        onChange={(event) => {
-          const key = event.target.value;
-          if (key) onChange(key, true);
-        }}
-        className="h-8 w-full rounded-md border border-input bg-background px-2 text-xs text-foreground outline-none ring-offset-background focus:border-primary focus:ring-2 focus:ring-primary/20"
-      >
-        <option value="">{placeholder}</option>
-        {availableOptions.map((option) => (
-          <option key={option.key} value={option.key}>
-            {option.label}
-          </option>
-        ))}
-      </select>
-      {selectedOptions.length ? (
-        <div className="flex flex-wrap gap-1.5">
-          {selectedOptions.map((option) => (
-            <span
-              key={option.key}
-              className="inline-flex h-7 items-center gap-1 rounded-md border border-border bg-muted px-2 text-[11px] text-foreground"
-            >
-              {option.label}
-              <button
-                type="button"
-                onClick={() => onChange(option.key, false)}
-                className="rounded px-1 text-muted-foreground hover:bg-background hover:text-foreground"
-                aria-label={`Remove ${option.label}`}
-              >
-                x
-              </button>
-            </span>
-          ))}
-        </div>
-      ) : null}
-    </div>
-  );
-}
-
-function FinancialMultiSelect({
-  options,
-  selected,
-  values,
-  placeholder,
-  onSelect,
-  onValue,
-}: {
-  options: Array<{ key: string; label: string; placeholder: string }>;
-  selected: Record<string, boolean>;
-  values: Record<string, string>;
-  placeholder: string;
-  onSelect: (key: string, checked: boolean) => void;
-  onValue: (key: string, value: string) => void;
-}) {
-  const selectedOptions = options.filter((option) => selected[option.key]);
-  const availableOptions = options.filter((option) => !selected[option.key]);
-  return (
-    <div className="space-y-1">
-      <select
-        value=""
-        onChange={(event) => {
-          const key = event.target.value;
-          if (key) onSelect(key, true);
-        }}
-        className="h-8 w-full rounded-md border border-input bg-background px-2 text-xs text-foreground outline-none ring-offset-background focus:border-primary focus:ring-2 focus:ring-primary/20"
-      >
-        <option value="">{placeholder}</option>
-        {availableOptions.map((option) => (
-          <option key={option.key} value={option.key}>
-            {option.label}
-          </option>
-        ))}
-      </select>
-      {selectedOptions.length ? (
-        <div className="grid gap-1.5 md:grid-cols-2">
-          {selectedOptions.map((option) => (
-            <div
-              key={option.key}
-              className="flex min-h-8 items-center gap-1 rounded-md border border-border bg-muted px-2 py-1"
-            >
-              <span className="min-w-0 flex-1 truncate text-[11px] text-foreground">
-                {option.label}
-              </span>
-              <input
-                value={values[option.key] || ""}
-                onChange={(event) => onValue(option.key, event.target.value)}
-                placeholder={option.placeholder}
-                className="h-6 w-28 rounded border border-input bg-background px-1.5 text-[11px] text-foreground outline-none focus:border-primary focus:ring-1 focus:ring-primary/20"
-              />
-              <button
-                type="button"
-                onClick={() => onSelect(option.key, false)}
-                className="rounded px-1 text-[11px] text-muted-foreground hover:bg-background hover:text-foreground"
-                aria-label={`Remove ${option.label}`}
-              >
-                x
-              </button>
-            </div>
-          ))}
-        </div>
-      ) : null}
-    </div>
-  );
-}
-
 type InterviewSnapshotTextField = {
   [K in keyof InterviewSnapshotState]: InterviewSnapshotState[K] extends string ? K : never;
 }[keyof InterviewSnapshotState];
+
+// Verbose labeled field: a clear question + its own entry. The tabbed layout
+// trades the old dense grids for one-question-per-row clarity while the tabs
+// keep the card compact on screen.
+function InterviewField({ label, hint, children }: { label: string; hint?: string; children: React.ReactNode }) {
+  return (
+    <div className="space-y-1">
+      <div className="text-[11px] font-medium text-foreground">{label}</div>
+      {hint ? <div className="text-[10px] text-muted-foreground">{hint}</div> : null}
+      {children}
+    </div>
+  );
+}
+
+function InterviewCheckGrid({
+  options,
+  selected,
+  onChange,
+}: {
+  options: Array<{ key: string; label: string }>;
+  selected: Record<string, boolean> | undefined;
+  onChange: (key: string, checked: boolean) => void;
+}) {
+  return (
+    <div className="grid grid-cols-2 gap-x-3 gap-y-1.5">
+      {options.map((option) => (
+        <label key={option.key} className="flex cursor-pointer items-center gap-1.5 text-xs text-foreground">
+          <input
+            type="checkbox"
+            checked={Boolean(selected?.[option.key])}
+            onChange={(event) => onChange(option.key, event.target.checked)}
+            className="h-3.5 w-3.5 rounded border-input"
+          />
+          {option.label}
+        </label>
+      ))}
+    </div>
+  );
+}
 
 function InterviewSnapshotCard({
   domain,
@@ -3045,6 +2791,9 @@ function InterviewSnapshotCard({
         queueItemId: queueItemId || undefined,
         queueTicketId: queueTicketId || undefined,
         snapshot,
+        // Server-side strategy persistence (cadence row + Logics) — the
+        // browser copy (sessionStorage) is just a working cache.
+        callStrategy: strategy || undefined,
         activityNote,
       });
       const response = asRecord((result as { response?: unknown } | undefined)?.response);
@@ -3062,10 +2811,96 @@ function InterviewSnapshotCard({
   const clearSnapshot = () => {
     setSnapshot(INTERVIEW_SNAPSHOT_DEFAULT);
     setPreview("");
+    setStrategy("");
     try {
       window.localStorage.removeItem(storageKey);
+      window.sessionStorage.removeItem(`${storageKey}:strategy`);
+      window.sessionStorage.removeItem(`${storageKey}:strategyHash`);
     } catch {
       // no-op
+    }
+  };
+
+  // ── Call strategy (Opus + cached Universal Sales Script) ──
+  const [strategy, setStrategy] = React.useState<string>(() => {
+    try {
+      return window.sessionStorage.getItem(`${storageKey}:strategy`) || "";
+    } catch {
+      return "";
+    }
+  });
+  const [strategyPending, setStrategyPending] = React.useState(false);
+  // Hash of the interview at last generation — when the form grows past it,
+  // the Strategy tab nudges a rewrite (which REVISES, not restarts: the prior
+  // strategy rides the request so Opus develops what it already produced).
+  const [strategySnapshotHash, setStrategySnapshotHash] = React.useState<string>(() => {
+    try {
+      return window.sessionStorage.getItem(`${storageKey}:strategyHash`) || "";
+    } catch {
+      return "";
+    }
+  });
+  React.useEffect(() => {
+    try {
+      setStrategy(window.sessionStorage.getItem(`${storageKey}:strategy`) || "");
+      setStrategySnapshotHash(window.sessionStorage.getItem(`${storageKey}:strategyHash`) || "");
+    } catch {
+      setStrategy("");
+      setStrategySnapshotHash("");
+    }
+  }, [storageKey]);
+  const interviewHash = React.useMemo(() => JSON.stringify(snapshot), [snapshot]);
+  const interviewChangedSinceStrategy = Boolean(strategy) && strategySnapshotHash !== "" && interviewHash !== strategySnapshotHash;
+  // Two modes, one card: the FORM (tabbed interview) and the STRATEGY screen.
+  // Strategy is a primary executable (lives in the action row on every tab),
+  // and its output takes over the card — toggle back and forth at will.
+  const [view, setView] = React.useState<"form" | "strategy">("form");
+  const generateStrategy = async () => {
+    setView("strategy");
+    setStrategyPending(true);
+    const body = {
+      caseId: caseId || undefined,
+      contactName: prospectName || undefined,
+      queueItemId: queueItemId || undefined,
+      interview: snapshot,
+      // Rewrite-not-restart: prior strategy is the base for the revision.
+      priorStrategy: strategy || undefined,
+    };
+    try {
+      // Control-plane (5001) is the ONLY path — auth + agent scoping apply
+      // there. The temporary nginx day-bridge to ai-bus (7000) was removed;
+      // 7000 is never the browser's security boundary.
+      const data = await api.post<{ ok?: boolean; strategy?: string; attachedSessionId?: string | null; error?: string }>(
+        "/api/ai/live-coach/call-strategy",
+        body,
+      );
+      const text = String(data?.strategy || "").trim();
+      if (!text) throw new Error(data?.error || "No strategy returned");
+      setStrategy(text);
+      setStrategySnapshotHash(interviewHash);
+      try {
+        window.sessionStorage.setItem(`${storageKey}:strategy`, text);
+        window.sessionStorage.setItem(`${storageKey}:strategyHash`, interviewHash);
+      } catch {
+        // best-effort persistence
+      }
+      toast("Call strategy ready", {
+        description: data?.attachedSessionId
+          ? "Also feeding the live coach on the current call."
+          : "The coach picks it up when the call binds.",
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Something went wrong.";
+      const routeMissing = /\b404\b|not found/i.test(message);
+      if (routeMissing) {
+        toast("Strategy service not reachable", {
+          description: "Neither strategy route answered — it lands with the next server deploy.",
+        });
+      } else {
+        toast.error("Strategy generation failed", { description: message });
+      }
+    } finally {
+      setStrategyPending(false);
     }
   };
 
@@ -3074,154 +2909,266 @@ function InterviewSnapshotCard({
       <div className="text-[11px] text-muted-foreground">
         Structured call facts for future Logics activity notes. Do not enter full SSNs, card numbers, or bank account numbers.
       </div>
-      <div className="space-y-2">
-        <div className="grid gap-2 md:grid-cols-5">
-          <Input
-            value={snapshot.debtAmount}
-            onChange={(event) => setField("debtAmount", event.target.value)}
-            placeholder="Debt amount"
-            className="h-8 text-xs"
-          />
-          <CompactNativeSelect
-            value={snapshot.receivedNotices}
-            onChange={(value) => setField("receivedNotices", value)}
+      {view === "strategy" ? (
+        <div className="space-y-2">
+          <div className="flex items-center justify-between gap-2">
+            <div className="text-xs font-semibold uppercase tracking-[0.12em] text-sky-700">
+              Call strategy
+            </div>
+            <Button size="sm" variant="secondary" onClick={() => setView("form")}>
+              Back to interview
+            </Button>
+          </div>
+          {interviewChangedSinceStrategy ? (
+            <div className="rounded-md border border-amber-200 bg-amber-50 px-2 py-1.5 text-[11px] text-amber-800">
+              The interview has new info since this strategy was written — rewrite to fold it in (the prior plan is revised, not restarted).
+            </div>
+          ) : null}
+          {strategyPending ? (
+            <div className="flex min-h-[180px] items-center justify-center rounded-md border border-dashed border-sky-200 bg-sky-50/40 text-xs text-muted-foreground">
+              Opus is reading the sales guide and this interview…
+            </div>
+          ) : strategy ? (
+            <pre className="max-h-[420px] overflow-auto whitespace-pre-wrap rounded-md border border-sky-200 bg-sky-50/40 p-3 text-[12px] leading-relaxed text-foreground">
+              {strategy}
+            </pre>
+          ) : (
+            <div className="rounded-md border border-dashed border-border p-4 text-center text-xs text-muted-foreground">
+              No strategy yet — generate one from the interview.
+            </div>
+          )}
+          <div className="flex flex-wrap items-center gap-1.5">
+            <Button
+              size="sm"
+              onClick={() => void generateStrategy()}
+              isLoading={strategyPending}
+              disabled={strategyPending}
+            >
+              {strategy ? "Rewrite with new info" : "Generate call strategy"}
+            </Button>
+            <span className="text-[11px] text-muted-foreground">
+              Consumes the whole interview; the live coach carries the result in real time.
+            </span>
+          </div>
+        </div>
+      ) : (
+      <Tabs defaultValue="problem">
+        <TabsList className="h-auto flex-wrap">
+          <TabsTrigger value="problem">Tax problem</TabsTrigger>
+          <TabsTrigger value="client">Client temp</TabsTrigger>
+          <TabsTrigger value="compliance">Compliance</TabsTrigger>
+          <TabsTrigger value="financials">Financials</TabsTrigger>
+        </TabsList>
+
+        <TabsContent value="problem" className="mt-2 space-y-2.5">
+          <InterviewField label="How much do they owe (their best guess)?">
+            <Input
+              value={snapshot.debtAmount}
+              onChange={(event) => setField("debtAmount", event.target.value)}
+              placeholder="e.g. $42,000"
+              className="h-8 text-xs"
+            />
+          </InterviewField>
+          <InterviewField label="Who do they owe?">
+            <InterviewCheckGrid
+              options={[
+                { key: "irsDebt", label: "IRS / federal" },
+                { key: "stateDebt", label: "State" },
+              ]}
+              selected={{ irsDebt: snapshot.irsDebt, stateDebt: snapshot.stateDebt }}
+              onChange={(key, checked) => setDebtFlag(key as "irsDebt" | "stateDebt", checked)}
+            />
+          </InterviewField>
+          <InterviewField label="Have they received notices or letters?">
+            <CompactNativeSelect
+              value={snapshot.receivedNotices}
+              onChange={(value) => setField("receivedNotices", value)}
+            >
+              <option value="">Select…</option>
+              <option>Yes</option>
+              <option>No</option>
+              <option>Unknown</option>
+            </CompactNativeSelect>
+          </InterviewField>
+          <InterviewField label="What's going on with their taxes?" hint="Check everything that applies.">
+            <InterviewCheckGrid
+              options={INTERVIEW_TAX_PROBLEM_OPTIONS}
+              selected={snapshot.taxProblems}
+              onChange={setTaxProblem}
+            />
+          </InterviewField>
+        </TabsContent>
+
+        <TabsContent value="client" className="mt-2 space-y-2.5">
+          <InterviewField label="How warm is this prospect right now?">
+            <CompactNativeSelect
+              value={snapshot.temperature}
+              onChange={(value) => setField("temperature", value)}
+            >
+              <option value="">Select…</option>
+              <option>Cold</option>
+              <option>Cautious</option>
+              <option>Warm</option>
+              <option>Hot / urgent</option>
+              <option>Hostile / do not push</option>
+            </CompactNativeSelect>
+          </InterviewField>
+          <InterviewField label="Life context you heard on the call" hint="Check what applies — this shapes the pitch angle.">
+            <InterviewCheckGrid
+              options={INTERVIEW_FLAG_OPTIONS}
+              selected={snapshot.flags}
+              onChange={setFlag}
+            />
+          </InterviewField>
+          <InterviewField
+            label="Personal / pitch notes"
+            hint="Spouse name, kids, job details, pressure, why now, financial-services angle."
           >
-            <option value="">Received notices?</option>
-            <option>Yes</option>
-            <option>No</option>
-            <option>Unknown</option>
-          </CompactNativeSelect>
-          <CompactNativeSelect
-            value={snapshot.filingStatus}
-            onChange={(value) => setField("filingStatus", value)}
-          >
-            <option value="">Filing status</option>
-            <option>Single</option>
-            <option>Married filing jointly</option>
-            <option>Married filing separately</option>
-            <option>Head of household</option>
-            <option>Widowed</option>
-            <option>Unknown</option>
-          </CompactNativeSelect>
-          <CompactNativeSelect
-            value={snapshot.employment}
-            onChange={(value) => setField("employment", value)}
-          >
-            <option value="">Employment</option>
-            <option>W-2 employee</option>
-            <option>1099 / contractor</option>
-            <option>Business owner</option>
-            <option>Unemployed</option>
-            <option>Retired / fixed income</option>
-          </CompactNativeSelect>
-          <Input
-            value={snapshot.unfiledYears}
-            onChange={(event) => setField("unfiledYears", event.target.value)}
-            placeholder="Unfiled years"
-            className="h-8 text-xs"
-          />
-        </div>
-        <div className="grid gap-2 md:grid-cols-2">
-          <CompactMultiSelect
-            options={[
-              { key: "irsDebt", label: "IRS debt" },
-              { key: "stateDebt", label: "State debt" },
-            ]}
-            selected={{ irsDebt: snapshot.irsDebt, stateDebt: snapshot.stateDebt }}
-            placeholder="Add debt jurisdiction"
-            onChange={(key, checked) => setDebtFlag(key as "irsDebt" | "stateDebt", checked)}
-          />
-          <CompactMultiSelect
-            options={INTERVIEW_TAX_PROBLEM_OPTIONS}
-            selected={snapshot.taxProblems}
-            placeholder="Add tax problem"
-            onChange={setTaxProblem}
-          />
-        </div>
-        <div className="grid gap-2 md:grid-cols-2">
-          <CompactNativeSelect
-            value={snapshot.temperature}
-            onChange={(value) => setField("temperature", value)}
-          >
-            <option value="">Temperature</option>
-            <option>Cold</option>
-            <option>Cautious</option>
-            <option>Warm</option>
-            <option>Hot / urgent</option>
-            <option>Hostile / do not push</option>
-          </CompactNativeSelect>
-          <CompactMultiSelect
-            options={INTERVIEW_FLAG_OPTIONS}
-            selected={snapshot.flags}
-            placeholder="Add client context"
-            onChange={setFlag}
-          />
-        </div>
-        <div className="grid gap-2 md:grid-cols-2">
-          <Input
-            value={snapshot.income}
-            onChange={(event) => setField("income", event.target.value)}
-            placeholder="Income"
-            className="h-8 text-xs"
-          />
-          <Input
-            value={snapshot.expenses}
-            onChange={(event) => setField("expenses", event.target.value)}
-            placeholder="Expenses"
-            className="h-8 text-xs"
-          />
-        </div>
-        <div className="grid gap-2 md:grid-cols-2">
-          <FinancialMultiSelect
-            options={INTERVIEW_FINANCIAL_INFLOW_OPTIONS}
-            selected={snapshot.selectedFinancials}
-            values={snapshot.financials}
-            placeholder="Add money/value field"
-            onSelect={setFinancialSelected}
-            onValue={setFinancialValue}
-          />
-          <FinancialMultiSelect
-            options={INTERVIEW_FINANCIAL_OUTFLOW_OPTIONS}
-            selected={snapshot.selectedFinancials}
-            values={snapshot.financials}
-            placeholder="Add payment/outflow field"
-            onSelect={setFinancialSelected}
-            onValue={setFinancialValue}
-          />
-        </div>
-        <div className="grid gap-2">
-          <textarea
-            value={snapshot.personalNotes}
-            onChange={(event) => setField("personalNotes", event.target.value)}
-            placeholder="Personal / pitch notes: spouse name, kids, job details, pressure, why now, financial services angle"
-            className="min-h-[70px] rounded-md border border-input bg-background px-2 py-1.5 text-xs text-foreground outline-none focus:border-primary focus:ring-2 focus:ring-primary/20"
-          />
-        </div>
-        <div className="flex flex-wrap items-center gap-1.5">
-          <Button
-            size="sm"
-            onClick={() => void saveToSystems()}
-            isLoading={saveSnapshot.isPending}
-            disabled={!caseId || saveSnapshot.isPending}
-          >
-            Save snapshot
-          </Button>
-          <Button size="sm" variant="secondary" onClick={buildPreview}>
-            Build note
-          </Button>
-          <Button size="sm" variant="ghost" onClick={clearSnapshot}>
-            Clear
-          </Button>
-          <span className="text-[11px] text-muted-foreground">
-            Saves to Logics and the matching LeadCadence row.
-          </span>
-        </div>
-        {preview ? (
-          <pre className="max-h-40 overflow-auto whitespace-pre-wrap rounded-md border border-border bg-muted/20 p-2 text-[11px] text-foreground">
-            {preview}
-          </pre>
+            <textarea
+              value={snapshot.personalNotes}
+              onChange={(event) => setField("personalNotes", event.target.value)}
+              placeholder="Free notes…"
+              className="min-h-[80px] w-full rounded-md border border-input bg-background px-2 py-1.5 text-xs text-foreground outline-none focus:border-primary focus:ring-2 focus:ring-primary/20"
+            />
+          </InterviewField>
+        </TabsContent>
+
+        <TabsContent value="compliance" className="mt-2 space-y-2.5">
+          <InterviewField label="How do they earn — employment type?">
+            <CompactNativeSelect
+              value={snapshot.employment}
+              onChange={(value) => setField("employment", value)}
+            >
+              <option value="">Select…</option>
+              <option>W-2 employee</option>
+              <option>1099 / contractor</option>
+              <option>Business owner</option>
+              <option>Unemployed</option>
+              <option>Retired / fixed income</option>
+            </CompactNativeSelect>
+          </InterviewField>
+          <InterviewField label="Filing status?">
+            <CompactNativeSelect
+              value={snapshot.filingStatus}
+              onChange={(value) => setField("filingStatus", value)}
+            >
+              <option value="">Select…</option>
+              <option>Single</option>
+              <option>Married filing jointly</option>
+              <option>Married filing separately</option>
+              <option>Head of household</option>
+              <option>Widowed</option>
+              <option>Unknown</option>
+            </CompactNativeSelect>
+          </InterviewField>
+          <InterviewField label="Which years are unfiled?" hint="Best guess is fine — e.g. 2019-2022, or 'maybe 5 years'.">
+            <Input
+              value={snapshot.unfiledYears}
+              onChange={(event) => setField("unfiledYears", event.target.value)}
+              placeholder="e.g. 2019-2022"
+              className="h-8 text-xs"
+            />
+          </InterviewField>
+        </TabsContent>
+
+        <TabsContent value="financials" className="mt-2 space-y-2.5">
+          <div className="grid gap-2 md:grid-cols-2">
+            <InterviewField label="Monthly income?">
+              <Input
+                value={snapshot.income}
+                onChange={(event) => setField("income", event.target.value)}
+                placeholder="e.g. $4,800/mo"
+                className="h-8 text-xs"
+              />
+            </InterviewField>
+            <InterviewField label="Monthly expenses?">
+              <Input
+                value={snapshot.expenses}
+                onChange={(event) => setField("expenses", event.target.value)}
+                placeholder="e.g. $4,200/mo"
+                className="h-8 text-xs"
+              />
+            </InterviewField>
+          </div>
+          <InterviewField label="Money coming in / assets" hint="Fill what you learned — blank fields stay out of the note.">
+            <div className="grid gap-1.5 md:grid-cols-2">
+              {INTERVIEW_FINANCIAL_INFLOW_OPTIONS.map((option) => (
+                <Input
+                  key={option.key}
+                  value={snapshot.financials[option.key] || ""}
+                  onChange={(event) => {
+                    setFinancialValue(option.key, event.target.value);
+                    setFinancialSelected(option.key, event.target.value.trim() !== "");
+                  }}
+                  placeholder={option.label}
+                  className="h-8 text-xs"
+                />
+              ))}
+            </div>
+          </InterviewField>
+          <InterviewField label="Money going out / liabilities">
+            <div className="grid gap-1.5 md:grid-cols-2">
+              {INTERVIEW_FINANCIAL_OUTFLOW_OPTIONS.map((option) => (
+                <Input
+                  key={option.key}
+                  value={snapshot.financials[option.key] || ""}
+                  onChange={(event) => {
+                    setFinancialValue(option.key, event.target.value);
+                    setFinancialSelected(option.key, event.target.value.trim() !== "");
+                  }}
+                  placeholder={option.label}
+                  className="h-8 text-xs"
+                />
+              ))}
+            </div>
+          </InterviewField>
+        </TabsContent>
+
+      </Tabs>
+      )}
+
+      <div className="flex flex-wrap items-center gap-1.5">
+        {view === "form" ? (
+          <>
+            <Button
+              size="sm"
+              onClick={() => void generateStrategy()}
+              isLoading={strategyPending}
+              disabled={strategyPending}
+              className="border-sky-500/40 bg-sky-600 text-white hover:bg-sky-700"
+            >
+              {strategy ? "Rewrite strategy" : "Generate strategy"}
+            </Button>
+            {strategy ? (
+              <Button size="sm" variant="secondary" onClick={() => setView("strategy")}>
+                View strategy{interviewChangedSinceStrategy ? " •" : ""}
+              </Button>
+            ) : null}
+          </>
         ) : null}
+        <Button
+          size="sm"
+          onClick={() => void saveToSystems()}
+          isLoading={saveSnapshot.isPending}
+          disabled={!caseId || saveSnapshot.isPending}
+        >
+          Save snapshot
+        </Button>
+        <Button size="sm" variant="secondary" onClick={buildPreview}>
+          Build note
+        </Button>
+        <Button size="sm" variant="ghost" onClick={clearSnapshot}>
+          Clear
+        </Button>
+        <span className="text-[11px] text-muted-foreground">
+          Saves to Logics and the matching LeadCadence row.
+        </span>
       </div>
+      {preview ? (
+        <pre className="max-h-40 overflow-auto whitespace-pre-wrap rounded-md border border-border bg-muted/20 p-2 text-[11px] text-foreground">
+          {preview}
+        </pre>
+      ) : null}
     </div>
   );
 }
@@ -3256,27 +3203,8 @@ export function CXWorkspace() {
     zip: "",
   });
   const [nameSearchOpen, setNameSearchOpen] = React.useState(false);
-  // Compose panel state (collapsible — default expanded)
-  const [textOpen, setTextOpen] = React.useState(true);
-  const [emailOpen, setEmailOpen] = React.useState(true);
   const [interviewSnapshotOpen, setInterviewSnapshotOpen] = React.useState(false);
 
-  // Text compose
-  const [textPhone, setTextPhone] = React.useState("");
-  const [textBody, setTextBody] = React.useState("");
-  const [textTemplateId, setTextTemplateId] = React.useState<string | null>(null);
-
-  // Email compose
-  const [emailTo, setEmailTo] = React.useState("");
-  const [emailSubject, setEmailSubject] = React.useState("");
-  const [emailBody, setEmailBody] = React.useState("");
-  // Server-side HBS template armed for send. Cleared when either field is edited.
-  const [emailTemplateKey, setEmailTemplateKey] = React.useState<string | null>(null);
-  const [emailTemplateId, setEmailTemplateId] = React.useState<string | null>(null);
-
-  // Preview modals
-  const [textPreview, setTextPreview] = React.useState<LibraryEntry | null>(null);
-  const [emailPreview, setEmailPreview] = React.useState<LibraryEntry | null>(null);
   const [appointmentModalOpen, setAppointmentModalOpen] = React.useState(false);
 
   // ─── Center-column case form ────────────────────────────────────────────
@@ -3323,6 +3251,9 @@ export function CXWorkspace() {
   const [servedQueueDomain, setServedQueueDomain] = React.useState<string | null>(null);
   const [servedQueueActionKey, setServedQueueActionKey] = React.useState<string | null>(null);
   const [servedQueueTicketId, setServedQueueTicketId] = React.useState<string | null>(null);
+  // Anti-jitter guards for the restore effect (see clearServedQueueSelection).
+  const lastServedClearAtRef = React.useRef(0);
+  const lastClearedLeadKeysRef = React.useRef<Set<string>>(new Set());
   const [servedQueueContact, setServedQueueContact] = React.useState<ContactContext | null>(null);
   const [servedQueueStartedAt, setServedQueueStartedAt] = React.useState<number | null>(null);
   const [suppressedCallSessionId, setSuppressedCallSessionId] = React.useState<string | null>(null);
@@ -3340,31 +3271,23 @@ export function CXWorkspace() {
   const [coachReleaseSignal, setCoachReleaseSignal] =
     React.useState<{ key: string; reason: string } | null>(null);
   const [voicemailDropPending, setVoicemailDropPending] = React.useState(false);
-  const [vmDropTheme, setVmDropTheme] = React.useState<string>(() => {
-    try {
-      const saved = localStorage.getItem(VM_DROP_THEME_STORAGE_KEY) || "";
-      if (VM_DROP_THEMES.some((t) => t.key === saved)) return saved;
-    } catch {}
-    return VM_DROP_THEMES[0].key;
-  });
-  function pickVmDropTheme(key: string) {
-    setVmDropTheme(key);
-    try {
-      localStorage.setItem(VM_DROP_THEME_STORAGE_KEY, key);
-    } catch {}
-  }
   const autoServeInFlightRef = React.useRef(false);
   const breakAutoLogoutFiredRef = React.useRef(false);
   const lastTerminalOutcomeWorkflowRef = React.useRef<string | null>(null);
-  const voicemailArmKeyRef = React.useRef<string | null>(null);
-  const voicemailArmInFlightRef = React.useRef<string | null>(null);
-  const voicemailArmPromiseRef = React.useRef<{ key: string; promise: Promise<unknown> } | null>(null);
-  const voicemailArmReleaseAfterInflightRef = React.useRef<string | null>(null);
-  const voicemailArmRetryTimerRef = React.useRef<number | null>(null);
-  const voicemailArmRetryCountRef = React.useRef(0);
-  const voicemailWarmKeyRef = React.useRef<string | null>(null);
-  const voicemailWarmInFlightRef = React.useRef<string | null>(null);
   const voicemailDropWatchdogRef = React.useRef<number | null>(null);
+  const lastCoachCallIdentityRef = React.useRef<{
+    uii: string;
+    callSessionId: string;
+    queueItemId: string;
+    agentExtensionId: string;
+    agentEmail: string;
+  }>({
+    uii: "",
+    callSessionId: "",
+    queueItemId: "",
+    agentExtensionId: "",
+    agentEmail: "",
+  });
 
   function clearVoicemailDropWatchdog() {
     if (voicemailDropWatchdogRef.current != null) {
@@ -3382,6 +3305,22 @@ export function CXWorkspace() {
   }
 
   function clearServedQueueSelection() {
+    // Anti-jitter: remember when we cleared and WHICH lead we were holding.
+    // For 1-2 poll cycles after an advance, the server can still report the
+    // old item as queueState:"serving" — the restore effect must not re-stage
+    // it (the A→B→A lead flap). See the debounce + ejected-keys guards there.
+    lastServedClearAtRef.current = Date.now();
+    const clearedKeys = new Set<string>();
+    if (servingQueueKey) clearedKeys.add(servingQueueKey);
+    if (servedQueueTicketId) {
+      const itemDomain = String(servedQueueDomain || domain || "domain").trim().toUpperCase();
+      clearedKeys.add(`${itemDomain}:queue:${servedQueueTicketId}`);
+    }
+    if (servedQueueCaseId && servedQueueActionKey) {
+      const itemDomain = String(servedQueueDomain || domain || "domain").trim().toUpperCase();
+      clearedKeys.add(`${itemDomain}:case:${servedQueueCaseId}:action:${servedQueueActionKey}`);
+    }
+    if (clearedKeys.size) lastClearedLeadKeysRef.current = clearedKeys;
     setServingQueueKey(null);
     setServedQueueCaseId(null);
     setServedQueueDomain(null);
@@ -3396,180 +3335,51 @@ export function CXWorkspace() {
       key: `${Date.now()}-${reason}`,
       reason,
     });
+    hardPruneLiveCoachForCurrentCall(reason);
   }
 
-  function currentVoicemailArmKey() {
-    const activeQueueKey = String(servedQueueTicketId || servedQueueActionKey || "").trim();
-    if (!currentCallSessionId || !activeQueueKey) return null;
-    return `${caseDomain}:${currentCallSessionId}:${activeQueueKey}`;
-  }
-
-  function startVoicemailWarm(warmKey: string) {
-    if (!warmKey) return;
-    if (voicemailWarmKeyRef.current === warmKey || voicemailWarmInFlightRef.current === warmKey) return;
-    voicemailWarmInFlightRef.current = warmKey;
-    void voicemailDrop
-      .mutateAsync({ action: "warm" })
-      .then(() => {
-        if (voicemailWarmInFlightRef.current === warmKey) {
-          voicemailWarmKeyRef.current = warmKey;
-        }
-      })
-      .catch(() => undefined)
-      .finally(() => {
-        if (voicemailWarmInFlightRef.current === warmKey) {
-          voicemailWarmInFlightRef.current = null;
-        }
-      });
-  }
-
-  function waitForVoicemailArm(key: string, timeoutMs = VOICEMAIL_ARM_READY_WAIT_MS) {
-    const tracked = voicemailArmPromiseRef.current;
-    if (!tracked || tracked.key !== key) return Promise.resolve();
-    return Promise.race([
-      tracked.promise.catch(() => undefined),
-      new Promise((resolve) => window.setTimeout(resolve, timeoutMs)),
-    ]);
-  }
-
-  function clearVoicemailArmRetry() {
-    if (voicemailArmRetryTimerRef.current != null) {
-      window.clearTimeout(voicemailArmRetryTimerRef.current);
-      voicemailArmRetryTimerRef.current = null;
-    }
-    voicemailArmRetryCountRef.current = 0;
-  }
-
-  // The first arm almost always fires while the call is still ringing the prospect
-  // (the *82 leg has nothing connected to join yet -> armed:false). Keep re-arming on
-  // a cadence until the server confirms a live join or the call ends, so the drop is
-  // ready the moment the call connects to voicemail -- mirrors barging by hand once
-  // you hear the mailbox. Bounded by VOICEMAIL_ARM_MAX_RETRIES; stops on call change.
-  function scheduleVoicemailArmRetry(armKey: string) {
-    if (voicemailArmRetryTimerRef.current != null) return; // a retry is already pending
-    if (currentVoicemailArmKey() !== armKey) return; // call changed/ended -> stop
-    if (voicemailArmRetryCountRef.current >= VOICEMAIL_ARM_MAX_RETRIES) return;
-    voicemailArmRetryCountRef.current += 1;
-    voicemailArmRetryTimerRef.current = window.setTimeout(() => {
-      voicemailArmRetryTimerRef.current = null;
-      if (currentVoicemailArmKey() !== armKey) return; // verify it is still this live call
-      startVoicemailArm(armKey);
-    }, VOICEMAIL_ARM_RETRY_DELAY_MS);
-  }
-
-  function startVoicemailArm(armKey: string) {
-    if (!armKey) return;
-    if (voicemailArmKeyRef.current === armKey || voicemailArmInFlightRef.current === armKey) return;
-    // We are attempting now; cancel any pending retry timer so we never double-fire.
-    if (voicemailArmRetryTimerRef.current != null) {
-      window.clearTimeout(voicemailArmRetryTimerRef.current);
-      voicemailArmRetryTimerRef.current = null;
-    }
-    voicemailArmInFlightRef.current = armKey;
-    const armPromise = voicemailDrop.mutateAsync({ action: "arm" });
-    voicemailArmPromiseRef.current = { key: armKey, promise: armPromise };
-    void armPromise
-      .then((result) => {
-        // The monitor is only truly armed once the *82 leg JOINED a connected call.
-        // Trust the server's armed flag -- a dialed-but-not-joined leg reports false.
-        const armed = Boolean((result as { armed?: boolean } | undefined)?.armed);
-        if (voicemailArmInFlightRef.current === armKey) {
-          const releaseReason = voicemailArmReleaseAfterInflightRef.current;
-          if (armed) {
-            clearVoicemailArmRetry();
-            voicemailArmKeyRef.current = armKey;
-            if (releaseReason) {
-              voicemailArmInFlightRef.current = null;
-              voicemailArmReleaseAfterInflightRef.current = null;
-              releaseArmedVoicemailDrop(releaseReason);
-            }
-          } else {
-            // Dialed but the call had not connected yet -- not armed. Retry until it does.
-            voicemailArmKeyRef.current = null;
-            if (releaseReason) {
-              voicemailArmReleaseAfterInflightRef.current = null;
-            } else {
-              scheduleVoicemailArmRetry(armKey);
-            }
-          }
-        } else if (armed) {
-          void voicemailDrop.mutateAsync({ action: "release", reason: "stale-arm-completed" }).catch(() => undefined);
-        }
-      })
-      .catch(() => {
-        if (voicemailArmInFlightRef.current === armKey) {
-          voicemailArmKeyRef.current = null;
-          voicemailArmPromiseRef.current = null;
-          if (voicemailArmReleaseAfterInflightRef.current) {
-            voicemailArmReleaseAfterInflightRef.current = null;
-          } else {
-            scheduleVoicemailArmRetry(armKey);
-          }
-        }
-      })
-      .finally(() => {
-        if (voicemailArmPromiseRef.current?.key === armKey) {
-          voicemailArmPromiseRef.current = null;
-        }
-        if (voicemailArmInFlightRef.current === armKey) {
-          voicemailArmInFlightRef.current = null;
-        }
-      });
-  }
-
-  function remainingVoicemailDropCueMs(deadlineAt: number) {
-    return Math.max(0, deadlineAt - Date.now());
-  }
-
-  async function ensureVoicemailArmReady(deadlineAt: number) {
-    const armKey = currentVoicemailArmKey();
-    if (!armKey) return;
-    while (currentVoicemailArmKey() === armKey && remainingVoicemailDropCueMs(deadlineAt) > 0) {
-      if (voicemailArmKeyRef.current === armKey) return;
-      if (voicemailArmInFlightRef.current !== armKey) {
-        startVoicemailArm(armKey);
-      }
-      await waitForVoicemailArm(
-        armKey,
-        Math.min(VOICEMAIL_ARM_READY_WAIT_MS, remainingVoicemailDropCueMs(deadlineAt)),
-      );
-      if (voicemailArmKeyRef.current === armKey) return;
-      await new Promise((resolve) => window.setTimeout(resolve, Math.min(150, remainingVoicemailDropCueMs(deadlineAt))));
-    }
-    clearVoicemailArmRetry();
-    if (currentVoicemailArmKey() !== armKey) {
-      throw new Error("Call ended before the voicemail monitor could join.");
-    }
-    if (voicemailArmKeyRef.current !== armKey) {
-      throw new Error("Voicemail monitor could not join before the voicemail cue window closed.");
-    }
+  function hardPruneLiveCoachForCurrentCall(
+    reason: string,
+    override: Partial<{
+      uii: string;
+      callSessionId: string;
+      queueItemId: string;
+      agentExtensionId: string;
+      agentEmail: string;
+    }> = {},
+  ) {
+    const snapshot = {
+      ...lastCoachCallIdentityRef.current,
+      ...override,
+    };
+    const uii = String(snapshot.uii || "").trim();
+    if (!uii) return;
+    void api.post("/api/ai/live-coach/call-release", {
+      uii,
+      callSessionId: snapshot.callSessionId || undefined,
+      queueItemId: snapshot.queueItemId || undefined,
+      agentExtensionId: snapshot.agentExtensionId || undefined,
+      agentEmail: snapshot.agentEmail || undefined,
+      reason,
+      apply: true,
+    }).catch(() => {
+      // Best-effort cleanup; ai-bus stale sweep is the backstop.
+    });
   }
 
   async function runHeadlessVoicemailDrop() {
-    // v3 (server default): themed DISPOSITION drop. The server resolves this
-    // agent's live RingCX UII and sets the selected theme's disposition —
+    // v3 (server default): agent-owned DISPOSITION drop. The server resolves
+    // this agent's live RingCX UII and sets that agent's fixed VM disposition —
     // the dialer completes the call for the agent and cold-transfers the
-    // VM leg to the themed answerer. Returns in ~2s; no barge, no arming.
+    // VM leg to their answerer. Returns in ~2s; no barge, no arming.
     //
     // Legacy fallback: when the server runs CX_VOICEMAIL_DROP_MODE=barge the
     // same request degrades to the headless one-shot *82 play (action falls
     // back to "play"; requireArmed:false keeps the self-contained barge).
-    // The short best-effort pre-arm only matters on that path — in
-    // disposition mode the server answers arm requests with a no-op.
-    const armDeadlineAt = Date.now() + VOICEMAIL_ARM_READY_WAIT_MS;
-    try {
-      await ensureVoicemailArmReady(armDeadlineAt);
-    } catch {
-      // Pre-arm did not join in the fast-path budget — the one-shot barge
-      // (or the disposition path) does not depend on it.
-    }
     const response = (await voicemailDrop.mutateAsync({
       action: "drop",
-      theme: vmDropTheme,
       phone: selectedPhone || undefined,
       requireArmed: false,
-      armWaitMs: VOICEMAIL_ARM_READY_WAIT_MS,
-      cueMaxWaitMs: VOICEMAIL_DROP_CUE_WINDOW_MS,
     })) as
       | { result?: Record<string, unknown> }
       | undefined;
@@ -3583,24 +3393,7 @@ export function CXWorkspace() {
     if (!result?.played || !result?.released) {
       throw new Error("Headless monitor did not confirm voicemail playback and release");
     }
-    clearVoicemailArmRetry();
-    voicemailArmKeyRef.current = null;
-    voicemailArmPromiseRef.current = null;
     return result;
-  }
-
-  function releaseArmedVoicemailDrop(reason: string) {
-    clearVoicemailArmRetry();
-    if (!voicemailArmKeyRef.current && voicemailArmInFlightRef.current) {
-      voicemailArmReleaseAfterInflightRef.current = reason;
-      return;
-    }
-    if (!voicemailArmKeyRef.current && !voicemailArmInFlightRef.current) return;
-    voicemailArmKeyRef.current = null;
-    voicemailArmInFlightRef.current = null;
-    voicemailArmPromiseRef.current = null;
-    voicemailArmReleaseAfterInflightRef.current = null;
-    void voicemailDrop.mutateAsync({ action: "release", reason }).catch(() => undefined);
   }
 
   function beginVoicemailDrop() {
@@ -3609,21 +3402,22 @@ export function CXWorkspace() {
     clearVoicemailDropWatchdog();
     voicemailDropWatchdogRef.current = window.setTimeout(() => {
       voicemailDropWatchdogRef.current = null;
-      releaseArmedVoicemailDrop("voicemail-drop-watchdog");
       setVoicemailDropPending(false);
       toast.error("Voicemail drop timed out", {
-        description: "The headless monitor never reported back. This call may still need a manual disposition.",
+        description: "The voicemail service never reported back. This call may still need a manual disposition.",
       });
     }, VOICEMAIL_DROP_WATCHDOG_MS);
     releaseLiveCoachForCurrentCall("voicemail-drop-started");
-    const themeLabel = VM_DROP_THEMES.find((t) => t.key === vmDropTheme)?.label || "Voicemail";
     toast("Voicemail drop started", {
-      description: `Dropping "${themeLabel}" — the dialer delivers the message while you move on.`,
+      description: "Dropping this agent's assigned voicemail while the queue advances.",
     });
     void runHeadlessVoicemailDrop()
       .then(() => {
         try {
-          submitQueueDisposition("did-not-answer", "Voicemail", { releaseVoicemailArm: false });
+          submitQueueDisposition("did-not-answer", "Voicemail", {
+            deferNextDial: true,
+            autoServeDelaySeconds: DISPOSITION_NEXT_LEAD_DELAY_SECONDS,
+          });
         } catch (error) {
           // Drop succeeded but the disposition path threw synchronously: settle
           // the flag so the button can't stick, and tell the agent the queue
@@ -3635,10 +3429,9 @@ export function CXWorkspace() {
         }
       })
       .catch((error) => {
-        releaseArmedVoicemailDrop("voicemail-drop-failed");
         settleVoicemailDropPending();
         toast.error("Voicemail drop failed", {
-          description: error instanceof Error ? error.message : "Headless monitor did not finish the recording.",
+          description: error instanceof Error ? error.message : "The voicemail service did not finish the recording.",
         });
       });
   }
@@ -3657,12 +3450,6 @@ export function CXWorkspace() {
       zip: "",
     });
     setNameSearchOpen(false);
-    setTextBody("");
-    setTextTemplateId(null);
-    setEmailSubject("");
-    setEmailBody("");
-    setEmailTemplateKey(null);
-    setEmailTemplateId(null);
   }
 
   function cancelAutoServe() {
@@ -3805,8 +3592,7 @@ export function CXWorkspace() {
     ? ""
     : readString(asRecord(rawCurrentCallSnapshot), "uii", "rcxUii", "callUii");
 
-  // detail/selectedPhone/selectedEmail/templateContext + the auto-
-  // hydrate effects all need clientDetail.data, which comes from a
+  // detail/selectedPhone need clientDetail.data, which comes from a
   // hook declared further down (after lookup resolves caseDomain).
   // They live below the clientDetail block.
 
@@ -3822,6 +3608,26 @@ export function CXWorkspace() {
   // lookup's auto-populated caseId would pin the form to the wrong case.
   const lastScrambledSessionRef = React.useRef<string | null>(null);
   const currentCallSessionId = currentCall?.sessionId || "";
+  React.useEffect(() => {
+    const identity = {
+      uii: String(currentCallUii || "").trim(),
+      callSessionId: String(currentCallSessionId || "").trim(),
+      queueItemId: String(servedQueueTicketId || servedQueueActionKey || "").trim(),
+      agentExtensionId: String(currentExtensionId || "").trim(),
+      agentEmail: String(data?.agent?.email || user?.email || "").trim(),
+    };
+    if (identity.uii || identity.callSessionId || identity.queueItemId) {
+      lastCoachCallIdentityRef.current = identity;
+    }
+  }, [
+    currentCallUii,
+    currentCallSessionId,
+    servedQueueTicketId,
+    servedQueueActionKey,
+    currentExtensionId,
+    data?.agent?.email,
+    user?.email,
+  ]);
   React.useEffect(() => {
     if (!suppressedCallSessionId) return;
     if (!rawCurrentCallSessionId || rawCurrentCallSessionId !== suppressedCallSessionId) {
@@ -3868,14 +3674,6 @@ export function CXWorkspace() {
       zip: "",
     });
     setNameSearchOpen(false);
-    // Wipe outbound message drafts — a draft text/email composed for
-    // the previous caller shouldn't sit there when a new call lands.
-    setTextBody("");
-    setTextTemplateId(null);
-    setEmailSubject("");
-    setEmailBody("");
-    setEmailTemplateKey(null);
-    setEmailTemplateId(null);
     if (!keepQueueSelection) clearServedQueueSelection();
   }, [
     currentCallSessionId,
@@ -4012,13 +3810,6 @@ export function CXWorkspace() {
   // the operator happens to be filtering search by.
   const caseDomain =
     (lookupResult as { domain?: string } | undefined)?.domain || domain;
-  const agentContactShell =
-    data?.agent.exShells?.find((shell) => String(shell.company || "").toUpperCase() === caseDomain) ||
-    data?.agent.activeExShell ||
-    data?.agent.requestedExShell ||
-    null;
-  const textLibrary = React.useMemo(() => buildTextLibrary(caseDomain), [caseDomain]);
-  const emailLibrary = React.useMemo(() => buildEmailLibrary(caseDomain), [caseDomain]);
 
   // ── Case-scoped mutations (bound to the case's resolved domain) ──
   const assignCaseToMe = useCxAssignCaseToMe(caseDomain);
@@ -4029,30 +3820,13 @@ export function CXWorkspace() {
   const callAppointmentNow = useCxCallAppointmentNowAny();
 
   React.useEffect(() => {
-    if (!CX_VOICEMAIL_BUTTON_ENABLED) return;
-    const activeQueueKey = String(servedQueueTicketId || servedQueueActionKey || "").trim();
-    if (!currentCallSessionId || !activeQueueKey || !currentExtensionId) return;
-    const warmKey = `${caseDomain}:${currentCallSessionId}:${activeQueueKey}`;
-    startVoicemailWarm(warmKey);
-  }, [
-    caseDomain,
-    currentCallSessionId,
-    currentExtensionId,
-    servedQueueActionKey,
-    servedQueueTicketId,
-    voicemailDrop,
-  ]);
-
-  React.useEffect(() => {
     if (currentCallSessionId) return;
-    releaseArmedVoicemailDrop("call-session-ended");
+    hardPruneLiveCoachForCurrentCall("call-session-ended");
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentCallSessionId]);
-  // Leak guard: cancel any pending re-arm timer + drop watchdog if the
-  // workspace unmounts mid-call.
+  // Leak guard: cancel the drop watchdog if the workspace unmounts mid-call.
   // eslint-disable-next-line react-hooks/exhaustive-deps
   React.useEffect(() => () => {
-    clearVoicemailArmRetry();
     clearVoicemailDropWatchdog();
   }, []);
   const updateCase = useCxLogicsUpdateCase(caseDomain);
@@ -4060,49 +3834,11 @@ export function CXWorkspace() {
   const clientDetail = useClientDetail(caseDomain, resolvedCaseId);
   const detail = clientDetail.data;
   const selectedPhone = detail?.phone || selected?.phone || "";
-  const selectedEmail = detail?.email || selected?.email || "";
   const appointmentItems = data?.agent.appointments || [];
 
-  const templateContext = React.useMemo(
-    () =>
-      buildTemplateContext(
-        caseDomain,
-        data?.agent.name || data?.agent.email || "Agent",
-        selected
-          ? {
-              ...selected,
-              name: detail?.name || selected.name,
-              phone: selectedPhone || selected.phone,
-            }
-          : null,
-        agentContactShell?.primaryPhone || "",
-      ),
-    [
-      agentContactShell?.primaryPhone,
-      data?.agent.email,
-      data?.agent.name,
-      detail?.name,
-      caseDomain,
-      selected,
-      selectedPhone,
-    ],
-  );
-
-  // Auto-hydrate text/email recipient from selected case (editable)
-  React.useEffect(() => {
-    setTextPhone(selectedPhone || "");
-  }, [selectedPhone]);
-  React.useEffect(() => {
-    setEmailTo(selectedEmail || "");
-  }, [selectedEmail]);
-
   // ── Operator/case-scoped mutations ──
-  // Text/email route through the resolved case tenant so comms are recorded
-  // and branded against the loaded case, independent of the active switcher.
   // New-case create stays on the active tenant.
   const setCxStatus = useCxSetStatus(domain);
-  const text = useCxText(caseDomain);
-  const email = useCxEmail(caseDomain);
   const simulateCxCallAny = useCxSimulateCallAny();
   // dialAny accepts { domain, ...body } so a queue pick on a different tenant
   // routes to the correct /api/commands/cx/:domain/dial without waiting for
@@ -4564,6 +4300,7 @@ export function CXWorkspace() {
       skipAutoServe?: boolean;
       preserveCurrentLead?: boolean;
       skipCurrentLeadSuppression?: boolean;
+      autoServeDelaySeconds?: number;
     } = {},
   ) {
     const forceEject = options.forceEject === true;
@@ -4618,7 +4355,7 @@ export function CXWorkspace() {
       !backendNextDialAccepted &&
       !backendNextDialQueuedButUnconfirmed
     ) {
-      scheduleAutoServe(AUTO_SERVE_HANDOFF_DELAY_SECONDS, "next");
+      scheduleAutoServe(options.autoServeDelaySeconds ?? AUTO_SERVE_HANDOFF_DELAY_SECONDS, "next");
     }
   }
 
@@ -4649,30 +4386,6 @@ export function CXWorkspace() {
     }
   }
 
-  function handleTextLibraryChange(id: string) {
-    const entry = textLibrary.find((l) => l.id === id);
-    if (entry) setTextPreview(entry);
-  }
-
-  function handleTextInsert(entry: LibraryEntry) {
-    setTextBody(renderTemplate(entry.body, templateContext));
-    setTextTemplateId(entry.id);
-    setTextPreview(null);
-  }
-
-  function handleEmailLibraryChange(id: string) {
-    const entry = emailLibrary.find((l) => l.id === id);
-    if (entry) setEmailPreview(entry);
-  }
-
-  function handleEmailInsert(entry: LibraryEntry) {
-    setEmailSubject(renderTemplate(entry.subject || "", templateContext));
-    setEmailBody(renderTemplate(entry.body, templateContext));
-    setEmailTemplateKey(entry.id);
-    setEmailTemplateId(entry.id);
-    setEmailPreview(null);
-  }
-
   const rawQueueItems = React.useMemo(() => {
     return isAdminUser
       ? multiCallQueues.flatMap((query) => {
@@ -4685,6 +4398,10 @@ export function CXWorkspace() {
   const isQueueItemLocallySuppressed = React.useCallback(
     (item: CxCallQueueItem) => {
       const now = Date.now();
+      if (now - lastServedClearAtRef.current < 60_000) {
+        const candidateKeys = getQueueItemSuppressionKeys(item);
+        if (candidateKeys.some((key) => lastClearedLeadKeysRef.current.has(key))) return true;
+      }
       return getQueueItemSuppressionKeys(item).some((key) => Number(suppressedQueueItems[key] || 0) > now);
     },
     [suppressedQueueItems],
@@ -4709,6 +4426,38 @@ export function CXWorkspace() {
     const queueDomain = String(activeServingQueueItem.domain || domain || "TAG").trim().toUpperCase();
     const isBackendNextDialRestore =
       backendNextDialHandoffUntil != null && backendNextDialHandoffUntil > Date.now();
+    // ── Anti-jitter guards ────────────────────────────────────────────────
+    // ONLY for the wrap-up-restore path. During a BACKEND NEXT-DIAL HANDOFF
+    // the dialer is actively serving the next lead (sometimes the SAME lead,
+    // requeued) within seconds — guarding there made the workspace refuse to
+    // stage the call that was already ringing the agent's phone (Sean's
+    // "badly desynced" queue). The handoff window IS the signal that a new
+    // serving row is expected: stage it immediately, old behavior.
+    if (!isBackendNextDialRestore) {
+      // 1. Debounce after an advance: for a few seconds after we cleared the
+      //    served lead, the polled queue can still carry the OLD item as
+      //    "serving" (server release lag / stale poll). Restoring it produced
+      //    the brief A→B lead flap. Wrap-up recovery (reload/crash) doesn't
+      //    feel a 4s delay — the next poll re-runs this effect.
+      if (Date.now() - lastServedClearAtRef.current < 4_000) return;
+      // 2. Never restore the lead we JUST advanced past — match on every
+      //    identity the row can carry (key shape can differ between polls
+      //    when ticket ids land late). Time-bounded to 60s so genuinely
+      //    requeued callbacks stay restorable.
+      const candidateKeys = new Set<string>([buildQueueItemKey(activeServingQueueItem)]);
+      const candidateTicketId = String(activeServingQueueItem.queueTicketId || "").trim();
+      if (candidateTicketId) candidateKeys.add(`${queueDomain}:queue:${candidateTicketId}`);
+      const candidateActionKey = extractQueueActionKey(activeServingQueueItem);
+      const candidateCaseId = String(activeServingQueueItem.caseId || "").trim();
+      if (candidateCaseId && candidateActionKey) {
+        candidateKeys.add(`${queueDomain}:case:${candidateCaseId}:action:${candidateActionKey}`);
+      }
+      if (Date.now() - lastServedClearAtRef.current < 60_000) {
+        for (const key of candidateKeys) {
+          if (lastClearedLeadKeysRef.current.has(key)) return;
+        }
+      }
+    }
     cancelAutoServe();
     if (isBackendNextDialRestore) setBackendNextDialHandoffUntil(null);
     setServingQueueKey(buildQueueItemKey(activeServingQueueItem));
@@ -5060,24 +4809,27 @@ export function CXWorkspace() {
   const assignCaseId =
     dispositionCaseId ??
     (resolvedCaseId && Number.isFinite(Number(resolvedCaseId)) ? Number(resolvedCaseId) : null);
-  const textCaseId = resolvedCaseId || selected?.caseId || null;
 
   function submitQueueDisposition(
     dispositionKey: "answered" | "did-not-answer",
     label: string,
-    options: { coachReleaseReason?: string; releaseVoicemailArm?: boolean } = {},
+    options: {
+      coachReleaseReason?: string;
+      deferNextDial?: boolean;
+      autoServeDelaySeconds?: number;
+    } = {},
   ) {
     if (dispositionCaseId == null) return;
-    if (options.coachReleaseReason) {
-      releaseLiveCoachForCurrentCall(options.coachReleaseReason);
-    }
-    if (options.releaseVoicemailArm !== false) {
-      releaseArmedVoicemailDrop(`queue-disposition-${dispositionKey}`);
-    }
-    const nextQueueLead = pickNextCallHandoffLead();
+    const shouldDeferNextDial = options.deferNextDial ?? true;
+    const autoServeDelaySeconds =
+      options.autoServeDelaySeconds ??
+      (shouldDeferNextDial ? DISPOSITION_NEXT_LEAD_DELAY_SECONDS : undefined);
+    releaseLiveCoachForCurrentCall(options.coachReleaseReason || `queue-disposition-${dispositionKey}`);
+    const nextQueueLead = shouldDeferNextDial ? null : pickNextCallHandoffLead();
     const nextDial = buildNextCallHandoffPayload(nextQueueLead);
     const hasImmediateNextHandoff = nextQueueLead != null && nextDial != null;
-    const previousLeadSnapshot = hasImmediateNextHandoff
+    const shouldOptimisticallyEject = hasImmediateNextHandoff || shouldDeferNextDial;
+    const previousLeadSnapshot = shouldOptimisticallyEject
       ? {
           selected,
           form: { ...form },
@@ -5090,10 +4842,10 @@ export function CXWorkspace() {
           servedQueueTicketId,
           servedQueueContact,
           servedQueueStartedAt,
-        }
+      }
       : null;
 
-    if (hasImmediateNextHandoff && nextQueueLead) {
+    if (shouldOptimisticallyEject) {
       optimisticallyEjectDispositionLead({ skipAutoServe: true });
     }
 
@@ -5118,7 +4870,8 @@ export function CXWorkspace() {
           forceEject: true,
           skipAutoServe: nextDialAccepted || nextDialQueuedButUnconfirmed,
           preserveCurrentLead: nextDialAccepted,
-          skipCurrentLeadSuppression: hasImmediateNextHandoff,
+          skipCurrentLeadSuppression: false,
+          autoServeDelaySeconds,
         });
         if (nextDialAccepted) {
           if (nextQueueLead) {
@@ -5139,7 +4892,7 @@ export function CXWorkspace() {
           });
           clearServedQueueSelection();
           clearCasePanelForNextQueueLead();
-          scheduleAutoServe(AUTO_SERVE_HANDOFF_DELAY_SECONDS, "next");
+          scheduleAutoServe(autoServeDelaySeconds ?? AUTO_SERVE_HANDOFF_DELAY_SECONDS, "next");
         }
       })
       .catch(() => {
@@ -5408,10 +5161,6 @@ export function CXWorkspace() {
     );
   }
 
-  const agentTextShell =
-    agentContactShell ||
-    null;
-  const agentShellPhone = agentTextShell?.primaryPhone || "";
   const cxRouting = asRecord(data.ex?.cxRouting);
   const freshLeadGate = asRecord(data.ex?.freshLeadGate);
   const currentCallSnapshot = asRecord(data.ex?.currentCall);
@@ -5645,6 +5394,30 @@ export function CXWorkspace() {
 
         {/* ── CENTER: client management ─────────────────────────────────── */}
         <section className="flex min-w-0 flex-1 flex-col gap-3">
+          {/* Live coach — its own ALWAYS-ON floating dock (fixed, bottom-right),
+              visible regardless of scroll or which section the agent is in,
+              and minimizable to a pill. Rendered here unconditionally; the
+              fixed positioning lifts it out of flow. */}
+          {LIVE_COACH_PANEL_ENABLED ? (
+            <LiveCoachPanel
+              agentEmail={data?.agent?.email || user?.email || null}
+              agentExtension={currentExtensionId}
+              agentName={data?.agent?.name || user?.name || null}
+              currentUii={currentCallUii}
+              currentCallSessionId={currentCallSessionId}
+              queueItemId={servedQueueTicketId}
+              caseId={resolvedCaseId || servedQueueCaseId || null}
+              contactName={
+                `${form.firstName} ${form.lastName}`.trim()
+                || selected?.name
+                || servedQueueContact?.name
+                || currentCall?.name
+                || null
+              }
+              releaseKey={coachReleaseSignal?.key || null}
+              releaseReason={coachReleaseSignal?.reason || null}
+            />
+          ) : null}
           {/* Identity strip — quick-glance + inline edits + call outcome */}
           <Card className="relative overflow-hidden">
             {/* Scramble progress bar — a thin animated stripe across the
@@ -5741,7 +5514,8 @@ export function CXWorkspace() {
                       variant="destructive"
                       className="bg-red-600 text-white hover:bg-red-700"
                       isLoading={disposition.isPending}
-                      onClick={() =>
+                      onClick={() => {
+                        releaseLiveCoachForCurrentCall("queue-disposition-dnc");
                         void run("DNC", () =>
                           disposition.mutateAsync({
                             caseId: String(dispositionCaseId),
@@ -5754,7 +5528,7 @@ export function CXWorkspace() {
                             assignedExtensionId: currentExtensionId || undefined,
                           }),
                         ).then(releaseQueueAfterSuccess).catch(() => undefined)
-                      }
+                      }}
                       title="Mark this contact as Do-Not-Call (stops cadence on every channel)"
                     >
                       DNC
@@ -5787,32 +5561,17 @@ export function CXWorkspace() {
                     </Button>
                   ) : null}
                   {CX_VOICEMAIL_BUTTON_ENABLED && hasServedQueueTarget && dispositionCaseId != null ? (
-                    <div className="flex items-center gap-1">
-                      <select
-                        value={vmDropTheme}
-                        onChange={(e) => pickVmDropTheme(e.target.value)}
-                        disabled={voicemailDropPending || disposition.isPending}
-                        className="h-8 rounded-md border border-violet-500/40 bg-card px-1.5 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-violet-500 disabled:opacity-50"
-                        title="Which voicemail message to drop"
-                      >
-                        {VM_DROP_THEMES.map((t) => (
-                          <option key={t.key} value={t.key}>
-                            {t.label}
-                          </option>
-                        ))}
-                      </select>
-                      <Button
-                        size="sm"
-                        variant="secondary"
-                        className="border-violet-500/40 bg-violet-600 text-white hover:bg-violet-700"
-                        disabled={voicemailDropPending || disposition.isPending}
-                        onClick={beginVoicemailDrop}
-                        title="Drop the selected voicemail message: you're released to the next call instantly while the dialer delivers the recording into the prospect's mailbox."
-                      >
-                        <MessageCircleMore className="h-3.5 w-3.5" />
-                        {voicemailDropPending ? "Dropping VM" : "Voicemail"}
-                      </Button>
-                    </div>
+                    <Button
+                      size="sm"
+                      variant="secondary"
+                      className="border-violet-500/40 bg-violet-600 text-white hover:bg-violet-700"
+                      disabled={voicemailDropPending || disposition.isPending}
+                      onClick={beginVoicemailDrop}
+                      title="Drop your assigned voicemail: the dialer sends this call to your monitor recording and advances your queue."
+                    >
+                      <MessageCircleMore className="h-3.5 w-3.5" />
+                      {voicemailDropPending ? "Dropping VM" : "Voicemail"}
+                    </Button>
                   ) : null}
                 </div>
               </div>
@@ -6119,30 +5878,9 @@ export function CXWorkspace() {
           ) : null}
         </section>
 
-        {/* ── RIGHT: compose + compact agent history ───────────────────── */}
+        {/* ── RIGHT: appointments now; reserved for sales coach/chat next ── */}
         <aside className="flex-shrink-0 lg:w-[340px]">
           <div className="lg:sticky lg:top-20 space-y-4">
-            {LIVE_COACH_PANEL_ENABLED ? (
-              <LiveCoachPanel
-                agentEmail={data?.agent?.email || user?.email || null}
-                agentExtension={currentExtensionId}
-                agentName={data?.agent?.name || user?.name || null}
-                currentUii={currentCallUii}
-                currentCallSessionId={currentCallSessionId}
-                queueItemId={servedQueueTicketId}
-                caseId={resolvedCaseId || servedQueueCaseId || null}
-                contactName={
-                  `${form.firstName} ${form.lastName}`.trim()
-                  || selected?.name
-                  || servedQueueContact?.name
-                  || currentCall?.name
-                  || null
-                }
-                releaseKey={coachReleaseSignal?.key || null}
-                releaseReason={coachReleaseSignal?.reason || null}
-              />
-            ) : null}
-
             <AppointmentList
               appointments={appointmentItems}
               onCallNow={handleCallAppointmentNow}
@@ -6151,183 +5889,7 @@ export function CXWorkspace() {
               isReleasing={releaseAppointment.isPending}
               isCallingNow={callAppointmentNow.isPending}
             />
-
-            {/* Send text */}
-            <Collapsible
-              title="Send text"
-              open={textOpen}
-              onToggle={() => setTextOpen((v) => !v)}
-              right={
-                agentShellPhone ? (
-                  <span className="text-[11px] text-muted-foreground">from {agentShellPhone}</span>
-                ) : null
-              }
-            >
-              <div className="space-y-3 p-4">
-                <div className="space-y-2">
-                  <Label>To (phone)</Label>
-                  <Input
-                    value={textPhone}
-                    onChange={(e) => setTextPhone(e.target.value)}
-                    placeholder="+1310..."
-                    leadingIcon={<Phone />}
-                  />
-                </div>
-                <div className="space-y-2">
-                  <Label>Template</Label>
-                  <Select
-                    value={textTemplateId ?? undefined}
-                    onValueChange={handleTextLibraryChange}
-                  >
-                    <SelectTrigger>
-                      <SelectValue placeholder="Pick a template" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {textLibrary.map((entry) => (
-                        <SelectItem key={entry.id} value={entry.id}>
-                          {entry.label}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </div>
-                <div className="space-y-2">
-                  <Label>Message</Label>
-                  <textarea
-                    className="min-h-[120px] w-full rounded-md border border-input bg-card px-3 py-2 text-sm"
-                    value={textBody}
-                    onChange={(e) => {
-                      setTextBody(e.target.value);
-                      setTextTemplateId(null);
-                    }}
-                    placeholder="Compose or pick a template..."
-                  />
-                </div>
-                <div className="flex justify-end">
-                  <Button
-                    isLoading={text.isPending}
-                    disabled={!textPhone.trim() || !textBody.trim()}
-                    onClick={() =>
-                      run("Text", () =>
-                        text.mutateAsync({
-                          caseId: textCaseId || undefined,
-                          phone: textPhone,
-                          body: textBody,
-                        }),
-                      )
-                    }
-                  >
-                    <MessageCircleMore className="h-4 w-4" />
-                    Send SMS
-                  </Button>
-                </div>
-              </div>
-            </Collapsible>
-
-            {/* Send email */}
-            <Collapsible
-              title="Send email"
-              open={emailOpen}
-              onToggle={() => setEmailOpen((v) => !v)}
-              right={
-                emailTemplateKey ? (
-                  <span className="text-[11px] text-muted-foreground">armed: {emailTemplateKey}</span>
-                ) : null
-              }
-            >
-              <div className="space-y-3 p-4">
-                <div className="space-y-2">
-                  <Label>To (email)</Label>
-                  <Input
-                    value={emailTo}
-                    onChange={(e) => setEmailTo(e.target.value)}
-                    placeholder="name@example.com"
-                    leadingIcon={<Mail />}
-                  />
-                </div>
-                <div className="space-y-2">
-                  <Label>Template</Label>
-                  <Select
-                    value={emailTemplateId ?? undefined}
-                    onValueChange={handleEmailLibraryChange}
-                  >
-                    <SelectTrigger>
-                      <SelectValue placeholder="Pick a template" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {emailLibrary.map((entry) => (
-                        <SelectItem key={entry.id} value={entry.id}>
-                          {entry.label}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </div>
-                <div className="space-y-2">
-                  <Label>Subject</Label>
-                  <Input
-                    value={emailSubject}
-                    onChange={(e) => {
-                      setEmailSubject(e.target.value);
-                      // Manual edits drop back to free-form so the send
-                      // doesn't clobber the edit with the server template.
-                      setEmailTemplateKey(null);
-                      setEmailTemplateId(null);
-                    }}
-                    placeholder="Subject line"
-                  />
-                </div>
-                <div className="space-y-2">
-                  <Label>Body</Label>
-                  <textarea
-                    className="min-h-[140px] w-full rounded-md border border-input bg-card px-3 py-2 text-sm"
-                    value={emailBody}
-                    onChange={(e) => {
-                      setEmailBody(e.target.value);
-                      setEmailTemplateKey(null);
-                      setEmailTemplateId(null);
-                    }}
-                    placeholder="Compose or pick a template..."
-                  />
-                  {emailTemplateKey ? (
-                    <div className="text-[11px] text-muted-foreground">
-                      Branded template{" "}
-                      <code className="rounded bg-muted px-1 py-0.5">{emailTemplateKey}</code>{" "}
-                      renders server-side on send. Editing subject or body drops to free-form.
-                    </div>
-                  ) : null}
-                </div>
-                <div className="flex justify-end">
-                  <Button
-                    isLoading={email.isPending}
-                    disabled={
-                      !emailTo.trim() ||
-                      (!emailTemplateKey && (!emailSubject.trim() || !emailBody.trim()))
-                    }
-                    onClick={() =>
-                      run("Email", () =>
-                        email.mutateAsync({
-                          caseId: textCaseId || undefined,
-                          email: emailTo,
-                          subject: emailTemplateKey ? "" : emailSubject,
-                          body: emailTemplateKey ? "" : emailBody,
-                          templateKey: emailTemplateKey || undefined,
-                          variables: emailTemplateKey
-                            ? {
-                                firstName: selected?.name?.split(" ")[0] || undefined,
-                                name: selected?.name || undefined,
-                              }
-                            : undefined,
-                        }),
-                      )
-                    }
-                  >
-                    <Mail className="h-4 w-4" />
-                    Send email
-                  </Button>
-                </div>
-              </div>
-            </Collapsible>
+            <div id={COACH_CHAT_SLOT_ID} />
 
           </div>
         </aside>
@@ -6345,27 +5907,6 @@ export function CXWorkspace() {
         canAssign={assignCaseId != null}
         canPostdate={SHOW_POSTDATE_DISPOSITION && dispositionCaseId != null}
         onSubmit={handleAppointmentSubmit}
-      />
-      <TemplatePreviewModal
-        open={Boolean(textPreview)}
-        onClose={() => {
-          setTextPreview(null);
-          // If the user cancelled without inserting, drop the select value.
-          if (!textBody) setTextTemplateId(null);
-        }}
-        entry={textPreview}
-        context={templateContext}
-        onInsert={handleTextInsert}
-      />
-      <TemplatePreviewModal
-        open={Boolean(emailPreview)}
-        onClose={() => {
-          setEmailPreview(null);
-          if (!emailBody) setEmailTemplateId(null);
-        }}
-        entry={emailPreview}
-        context={templateContext}
-        onInsert={handleEmailInsert}
       />
       </div>
     </>

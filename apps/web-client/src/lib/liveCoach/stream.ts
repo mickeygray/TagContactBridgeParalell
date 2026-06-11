@@ -67,6 +67,9 @@ export type LiveCoachStreamStatus = {
   rms?: number | null;
   maxAbs?: number | null;
   state?: string | null;
+  bindState?: string | null;
+  bindReason?: string | null;
+  pendingDroppedBytes?: number | null;
 };
 
 export type LiveCoachSession = {
@@ -86,6 +89,12 @@ export type LiveCoachSession = {
     phone?: string | null;
     domain?: string | null;
     streamId?: string | null;
+    callStrategy?: string | null;
+  } | null;
+  binding?: {
+    status?: string | null;
+    active?: boolean | null;
+    reason?: string | null;
   } | null;
   counters?: {
     input?: number | null;
@@ -107,8 +116,18 @@ export type LiveCoachSession = {
   // it so reconnects/late joins paint the entire conversation.
   memory?: {
     transcripts?: LiveCoachTranscript[] | null;
+    // Finished agent-initiated asks (the coach chat thread, cap 30) — snapshot
+    // seeding repaints the chat on reconnect/late join.
+    asks?: LiveCoachAsk[] | null;
   } | null;
+  // Durable whole-call memory from the mini scribe: the facts ledger never
+  // rolls off and the summary is the cumulative story so far.
+  factLedger?: LiveCoachFactLedger | null;
+  callSummary?: string | null;
+  events?: LiveCoachEvent[] | null;
 };
+
+export type LiveCoachFactLedger = Record<string, { value?: string | null; at?: string | null }>;
 
 export type LiveCoachEvent = {
   type?: string;
@@ -122,6 +141,8 @@ export type LiveCoachEvent = {
   dialog?: LiveCoachDialog;
   action?: string;
   hold?: { reason?: string | null; match?: string | null } | null;
+  candidates?: Array<{ key?: string | null; label?: string | null; family?: string | null }> | null;
+  systemMatches?: Array<{ key?: string | null; label?: string | null; match?: string | null }> | null;
   candidateCount?: number | null;
   selectedKeys?: string[] | null;
   shouldCompose?: boolean | null;
@@ -134,6 +155,25 @@ export type LiveCoachEvent = {
   windowMs?: number | null;
   rateLimitPerMinute?: number | null;
   error?: string | null;
+  // context.digest events carry the scribe's durable memory updates.
+  factLedger?: LiveCoachFactLedger | null;
+  callSummary?: string | null;
+  // coach.answer events: an agent-initiated ask streaming back.
+  ask?: LiveCoachAsk | null;
+};
+
+// Agent-initiated ask (the "send an AI call" path): pin a line / direct
+// question / expand a topic / objection examples.
+export type LiveCoachAsk = {
+  id: string;
+  kind?: string | null;
+  question?: string | null;
+  lineText?: string | null;
+  status?: string | null; // thinking | streaming | ready | empty | error
+  answer?: string | null;
+  error?: string | null;
+  at?: string | null;
+  elapsedMs?: number | null;
 };
 
 export type LiveCoachCallEvent = {

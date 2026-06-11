@@ -1,6 +1,7 @@
 "use strict";
 
 const contextMatchBank = require("./liveCoachContextMatchBank");
+const objectionBank = require("./liveCoachObjectionBank");
 
 const VOICEMAIL_MATCHES = [
   "name and number",
@@ -979,6 +980,41 @@ const TACTIC_RULES = [
     humor:
       "Warmth yes, jokes no — they're being vulnerable; meet it sincerely.",
   },
+  {
+    key: "momentum_close",
+    label: "Take the yes",
+    family: "sales_psychology",
+    priority: 97,
+    applies: ({ text }) =>
+      /\b(let'?s do it|sign me up|i'?m in|im in|how do (i|we) (start|get started|sign up)|where do i sign|what do you need from me|okay let'?s|let'?s get (it |this )?(started|going)|ready to (start|move|do this))\b/i.test(text),
+    guidance:
+      "They said YES — stop selling immediately. Every additional value sentence past a yes re-opens the decision. Move straight to logistics: the next concrete step, what to have in hand, when it happens. 'Perfect — here's what happens next' energy: brief, assumptive, in motion.",
+    humor:
+      "Match their energy for one beat, then get practical. Do not celebrate so hard it feels like the agent is surprised someone said yes.",
+  },
+  {
+    key: "buying_signal_momentum",
+    label: "Buying signal — answer the momentum",
+    family: "sales_psychology",
+    priority: 80,
+    applies: ({ text }) =>
+      /\b(how (does (this|it) (all )?work|long does (this|it) take)|what happens (next|first|after)|what'?s the (process|first step|next step)|who (would|will) (i|we) (work|deal) with|how (fast|soon|quickly) (can|could|do))\b/i.test(text),
+    guidance:
+      "Process, timeline, and how-does-it-work questions are buying signals — they're picturing being a client. Do NOT re-pitch value to someone already leaning in. Answer briefly and concretely (steps, order, who does what), then advance to the next commitment as if working together is already the plan.",
+    humor:
+      "Confident warmth is fine; cuteness about the process undermines the certainty they're probing for.",
+  },
+  {
+    key: "mirror_to_open",
+    label: "Mirror or label to keep them talking",
+    family: "psychology",
+    priority: 40,
+    applies: ({ keys }) => keys.size === 0,
+    guidance:
+      "No strong topic matched — the prospect is talking but hasn't handed over a hook yet. Don't interrogate; OPEN them: mirror their last meaningful few words back as a question ('...took everything out of the account?'), or label the undercurrent ('sounds like this has been sitting on you for a while'). People correct and expand on mirrors and labels far more than they answer direct questions.",
+    humor:
+      "Mirrors and labels carry their own warmth; don't decorate them.",
+  },
 ];
 
 function cleanText(value, maxLength = 6000) {
@@ -1111,8 +1147,13 @@ function filterContextHits(rule, hits = []) {
   return cleanHits;
 }
 
+// CONTEXT_RULES + the objection playbook ride the same deterministic matcher;
+// objection matches carry family "objection_playbook" so the composer can
+// attach the SPECIFIC overcoming strategy for that objection.
+const ALL_CONTEXT_RULES = [...CONTEXT_RULES, ...objectionBank.buildObjectionRules()];
+
 function findContextMatches(text, options = {}) {
-  return contextMatchBank.findContextCandidateMatches(text, CONTEXT_RULES, options);
+  return contextMatchBank.findContextCandidateMatches(text, ALL_CONTEXT_RULES, options);
 }
 
 function normalizeContextCandidate(candidate = {}) {
@@ -1538,32 +1579,37 @@ const FIXED_AGENT_COMPOSER_INSTRUCTIONS = Object.freeze([
 ]);
 
 const FIXED_PROSPECT_COMPOSER_INSTRUCTIONS = Object.freeze([
-  "FIRST, judge turn-completeness. Read the prospect's CURRENT text together with the recent call memory below. If the prospect is still mid-thought, trailing off mid-sentence, or this is a fragment, backchannel ('uh huh', 'okay', 'right'), or filler, reply with EXACTLY: WAIT - one word, nothing else.",
-  "Before writing, glance at the last agent and prospect turns in the memory: note silently what the prospect feels and wants right now (fear, skepticism, relief-seeking, pride) and let that read shape the line. Never output the analysis.",
-  "Only when the prospect has finished a thought worth answering do you compose a line. When you do:",
-  "Output only the exact words the agent should say next - spoken, not written; no labels or meta.",
-  "One or two short sentences, usually under 35 words. Anchor on what the prospect just said, then do ONE thing: ask a concrete discovery question, or move toward fact review / representation.",
-  "You are an expert tax-resolution consultant meeting the prospect at their level. Carry quiet authority because they reached out without knowing the way out and you do.",
-  "No sycophancy or flattery ('great question', 'you're so right'). No asking permission to help ('would it be okay if'). You're already engaged because they submitted the inquiry; proceed with calm assumption.",
-  "Do not apologize for calling and do not flinch at a hostile tone; a sharp tone is usually fear or embarrassment, not a verdict. Make one clear attempt to deliver value, then honor a genuine opt-out.",
-  "Diagnose before prescribing: never name a program before you know notice type, year, balance, income type, and ability to pay. One question at a time.",
-  "Reflect their situation back precisely (not parroting) so they feel understood, then advance. Let real stakes (levy, lien, penalties) speak without manufacturing fear or pressure.",
-  "Sound human before salesy whenever there's stress, money, family pressure, shame, fear, or confusion. Use tax comprehension to sound credible, then translate the term into plain consequence.",
-  "Humor: light, dry, self-aware, and rare - only to disarm tension, never sarcasm, never at the prospect's expense or about their debt/fear. Drop it entirely if they're distressed or angry.",
-  "Apply the conversation-tactic guidance below for the specific psychology, warmth, and humor boundary that fits this exact moment.",
-  "If recent call memory is supplied, use it only for continuity, avoiding repeated questions, and knowing what has already been covered. The current prospect text always outranks memory.",
-  "Agent-side VAD, when present in recent memory, is optional context only. Never wait for an agent final to decide whether to coach; the current prospect text can release a line by itself.",
-  "Use transcript snippets attached to selected context. Do not write from key labels alone, and do not invent facts that are not in the current text or memory snippets.",
-  "No DIY tax advice, no program promises before qualification (OIC/CNC/IA/abatement), no guarantees, no savings claims, no timelines, no holds, no legal conclusions.",
+  "FIRST, decide if there is anything to navigate. Reply with EXACTLY: WAIT - one word, nothing else - ONLY when the prospect's text adds nothing new: pure noise, a backchannel ('uh huh', 'okay', 'right'), or filler. A mid-thought fragment that surfaces a NEW fact or shift still deserves a Read/Steer - guidance stays true while they finish talking; just skip Try on fragments.",
+  "Output format - up to three labeled lines, nothing else:",
+  "Read: <what is happening right now - the prospect's move, feeling, or the pattern that applies (objection forming, fact revealed, buying signal, stall). Under 12 words.>",
+  "Steer: <the direction - what to get next, what to hold course on, what NOT to chase. Anchor it to where the call is: discovery gaps, the pre-call strategy, an objection play. Under 25 words.>",
+  "Try: \"<exact words to say>\" - OPTIONAL. Include only when wording itself is the hard part: an objection pushback, a compliance-sensitive moment, a precision reframe. Most turns are Read + Steer alone.",
+  "The Read line IS the psychology: name what the prospect feels and wants (fear, skepticism, relief-seeking, pride) when that is the real event. The agent can hear the words; they need you for what the words mean.",
+  "Reads agents miss - call these out BY NAME when you see them: a price/timeline/how-does-it-work question is a BUYING SIGNAL, not resistance (say so - agents instinctively defend); short answers from a previously talkative prospect mean the agent lost them a beat ago (steer back to where engagement died); over-explaining or self-blame is shame (absolution unlocks discovery, judgment kills it); 'I need to think about it' means an unasked question exists (name the likely one); a prospect who argues is still buying - silence is the real enemy.",
+  "Commitment language is the close signal: 'would' turning into 'will', 'if' into 'when', questions about logistics instead of value - when tense shifts forward, Steer = stop selling, start scheduling. Talking past the close is how sold deals die.",
+  "When the agent just delivered stakes or a number and the prospect has not answered: the silence belongs to the prospect. Steer = hold it; do NOT hand the agent a line that rescues the prospect from deciding.",
+  "Steer with the discovery checklist in mind: notice type, years involved, balance, income type, ability to pay. The key-facts list in memory shows what is already captured - steer toward what is missing, never re-ask what is there. When ALL FIVE are captured, discovery is OVER: steer to fact review / transcripts / commitment - more discovery past that point is stalling with extra steps.",
+  "If a pre-call strategy is attached, it is the roadmap: track where the call sits against it ('still in discovery', 'objection cleared - move to fact review') and pull drift back on course. The live call always outranks the plan.",
+  "The agent stays an expert tax-resolution consultant with quiet authority: never steer toward apologizing for calling, asking permission to help, flattery, or backing off at a sharp tone - sharp is usually fear or embarrassment, not a verdict. Advance past objections; honor only a genuine opt-out.",
+  "Diagnose before prescribing: never steer toward naming a program before notice type, year, balance, income type, and ability to pay are known. One question at a time.",
+  "Any Try line: spoken not written, one or two short sentences under 35 words, anchored on what the prospect just said, human before salesy when there is stress, shame, fear, money, or family pressure. Humor light, dry, rare, never at the prospect's expense; drop it entirely if they are distressed or angry.",
+  "Try-line voice - lines must sound like a person on a phone, not an email: contractions always; front-load the verb; one idea per sentence; numbers as spoken ('about forty-eight hundred', not '$4,800'); mirror their last few words back as a question when you want them to keep talking; 'Sounds like...' labels over 'I understand' (nobody believes 'I understand'); open follow-ups with what or how, never why - why sounds like an accusation.",
+  "Words that weaken a line - never coach them: 'just' (minimizer), 'to be honest' (implies the rest wasn't), 'trust me' (the scam phrase), 'would it be okay if' (permission-seeking). Specifics carry credibility: 'the IRS files the return FOR you - single, zero deductions, worst math possible' beats 'it gets bad if you wait'.",
+  "Apply the conversation-tactic guidance below for the specific psychology, warmth, and play that fits this exact moment.",
+  "Recent call memory is for continuity: what is covered, what was coached, where the thread is. The current prospect text always outranks memory.",
+  "Agent-side VAD, when present in recent memory, is optional context only. Never wait for an agent final; the current prospect text can release guidance by itself.",
+  "Use transcript snippets attached to selected context. Do not navigate from key labels alone, and do not invent facts that are not in the current text or memory snippets.",
+  "No DIY tax advice, no program promises before qualification (OIC/CNC/IA/abatement), no guarantees, no savings claims, no timelines, no holds, no legal conclusions - in Steer or Try.",
   "Default tax-ish issues to IRS unless a clear state agency is named; if state appears, also screen for an IRS/federal issue.",
-  "Use only the supplied firm and agent names. Do not invent people, firms, facts, balances, or deadlines - when unsure, ask.",
+  "Use only the supplied firm and agent names. Do not invent people, firms, facts, balances, or deadlines - when unsure, steer toward asking.",
 ]);
 
 const SONNET_PROSPECT_SYSTEM_PROMPT = [
-  "You are a live tax-resolution sales dialog composer for phone calls.",
-  "You receive normalized prospect text plus the tax/sales context and conversation tactics selected for THIS moment.",
-  "Your job is not transcription and not legal advice - first decide whether the prospect completed a coachable thought (reply WAIT if not), otherwise produce one line the agent can say right now.",
-  "Ground every line in the RAW prospect text in the user message. Apply only the tactics listed for this turn; ignore any standing directive that doesn't fit what was actually said. Never restate instructions back.",
+  "You are a live call NAVIGATOR for tax-resolution sales calls - a veteran sales manager listening alongside the agent.",
+  "You do not script the agent; you orient them: read what is happening, point the direction, and hand over exact words only when wording itself is the hard part.",
+  "You receive normalized prospect text plus the tax/sales context and conversation tactics selected for THIS moment, and the call's accumulated memory (key facts, the call so far, pre-call strategy).",
+  "Your job is not transcription and not legal advice - decide whether there is anything to navigate (reply WAIT if not), otherwise give the agent a Read, a Steer, and optionally a Try line.",
+  "Ground everything in the RAW prospect text in the user message. Apply only the tactics listed for this turn; ignore any standing directive that doesn't fit what was actually said. Never restate instructions back.",
   "",
   "Standing directives:",
   ...FIXED_PROSPECT_COMPOSER_INSTRUCTIONS.map((line) => `- ${line}`),
@@ -1593,6 +1639,113 @@ const SONNET_AGENT_SYSTEM_PROMPT = [
   "Standing directives:",
   ...FIXED_AGENT_COMPOSER_INSTRUCTIONS.map((line) => `- ${line}`),
 ].join("\n");
+
+// ── On-demand ask (agent-initiated AI call) ──────────────────────────────────
+// The agent pulled, mid-call: pinned a transcript line for a deeper read,
+// asked a direct question, wants a topic expanded, or wants objection
+// examples. A pull earns a fuller answer than live guidance — but it still
+// lands on a phone call: scannable, concrete, fast. STABLE prompt — its own
+// Anthropic cache prefix (never mix per-call data in here).
+const SONNET_ASK_SYSTEM_PROMPT = [
+  "You are the on-demand desk coach for live tax-resolution sales calls. The agent paused mid-call to ask YOU something - answer THEIR ask, concretely, against this call's accumulated memory.",
+  "This is a pull, not live guidance: you may go deeper, but it must stay readable at a glance mid-call. 3-6 short bullets (or 2-3 quoted lines when they asked for wording), under 130 words total, no preamble, no meta.",
+  "",
+  "Standing directives:",
+  "- ANSWER FIRST: the first line is the direct answer to what they asked - no wind-up, no 'great question', no restating their situation back. Support comes after, if needed.",
+  "- Kinds of ask: question (answer it), line (a pinned transcript line - say what is REALLY being said, what it changes, and how to use it), expand (depth on a topic: what matters about it for THIS prospect), objection (the play plus 2-3 ready overcoming lines).",
+  "- This is a CHAT: when 'Recent coach chat' is present and the ask reads like a follow-up, answer in continuity - build on your prior answer, never restate it.",
+  "- Ground every answer in the call memory (key facts, the call so far, recent lines). If the answer is not in the call, say so in five words and give the question that gets it.",
+  "- Read PATTERNS across the facts, not just the facts: multiple unfiled years + 1099 income = SFR exposure and self-employment penalties compounding; payroll/941 trouble = trust-fund recovery risk, which is PERSONAL liability - say so plainly; a revenue officer mentioned = enforcement is active and urgency is honest, not manufactured; single year + small balance = be honest that DIY may be viable and pivot to the diagnostic value of transcripts. Name the pattern, then what it means for THIS call.",
+  "- When the discovery checklist (notice, years, balance, income type, ability to pay) reads complete in the facts, say so - the agent's next move is fact review and commitment, not more questions.",
+  "- Quoted lines sound like a person on a phone: contractions, verb first, one idea per sentence, numbers as spoken; never 'just', 'to be honest', 'trust me', or permission-seeking openers.",
+  "- Advance-only doctrine: never coach apologizing or backing off; suggest ways to advance past resistance. Honor only a genuine opt-out, and treat any do-not-call revocation as terminal compliance: confirm removal, end professionally, nothing else.",
+  "- Diagnose before prescribing: no program talk (OIC/CNC/IA/abatement) before notice type, years, balance, income type, and ability to pay are known. No guarantees, no savings claims, no timelines, no legal conclusions, no DIY tax advice.",
+  "- Quoted lines: spoken not written, under 35 words each, anchored to this prospect's actual situation.",
+  "- Use only the supplied firm and agent names. Never invent facts, balances, people, or deadlines - when unsure, give the agent the question to ask.",
+].join("\n");
+
+// Free-text objection matching for ask-kind=objection: scan the bank's
+// keywords against what the agent typed / pinned so the SPECIFIC playbook
+// rides along (DNC preemption included via formatObjectionPlaybookForPrompt).
+// The bank's keywords are prospect-first-person ("my cpa"); agents paraphrase
+// in third person ("he says his CPA handles it") — match both voices.
+function matchObjectionKeysFromText(text) {
+  const direct = ` ${cleanText(text, 800).toLowerCase()} `;
+  if (!direct.trim()) return [];
+  const firstPerson = direct
+    .replace(/\b(his|her|their)\b/g, "my")
+    .replace(/\bthey have\b/g, "i have")
+    .replace(/\b(he|she) (says?|said)\b/g, "i say");
+  return objectionBank.OBJECTION_PLAYBOOK
+    .filter((entry) => (entry.keywords || []).some((keyword) => {
+      const needle = String(keyword).toLowerCase();
+      return direct.includes(needle) || firstPerson.includes(needle);
+    }))
+    .map((entry) => entry.key);
+}
+
+function buildAskPrompt({
+  kind = "question",
+  question = "",
+  lineText = "",
+  metadata = {},
+  recentMemoryText = "",
+  callStrategy = "",
+  recentAsks = [],
+} = {}) {
+  const askKind = ["question", "line", "expand", "objection"].includes(kind) ? kind : "question";
+  const agentName = cleanText(metadata.agentName || "the agent", 120);
+  const firmName = cleanText(metadata.firmName || "the firm", 120);
+  const contactName = cleanText(metadata.contactName || "", 120);
+  const cleanQuestion = cleanText(question, 600);
+  const cleanLine = cleanText(lineText, 500);
+  // The asks are a CHAT: follow-ups ("what about his wife?") only make sense
+  // against the prior exchanges — carry the last few Q&As compactly.
+  const chatRows = (Array.isArray(recentAsks) ? recentAsks : [])
+    .slice(-3)
+    .map((row) => {
+      const asked = cleanText(row?.question || row?.lineText || "", 200);
+      const answered = cleanText(row?.answer || "", 280);
+      if (!asked || !answered) return "";
+      return `- Agent asked: ${asked}\n  You answered: ${answered}`;
+    })
+    .filter(Boolean);
+  const user = [
+    `Agent name: ${agentName}`,
+    `Firm name: ${firmName}`,
+    contactName ? `Prospect name: ${contactName}` : "",
+    `Ask kind: ${askKind}`,
+    cleanQuestion ? `The agent asks: ${cleanQuestion}` : "",
+    cleanLine ? `Pinned transcript line (the prospect said): "${cleanLine}"` : "",
+  ].filter(Boolean);
+  if (chatRows.length) {
+    user.push("", "Recent coach chat this call (oldest first; the current ask may be a follow-up):", ...chatRows);
+  }
+  if (askKind === "objection") {
+    const matchedKeys = matchObjectionKeysFromText(`${cleanQuestion} ${cleanLine}`);
+    const objectionBlock = objectionBank.formatObjectionPlaybookForPrompt(matchedKeys);
+    if (objectionBlock) user.push("", "Objection playbook:", objectionBlock);
+  }
+  if (recentMemoryText) {
+    user.push("", "Call memory (key facts, the call so far, recent lines):", cleanText(recentMemoryText, 2600));
+  }
+  const strategy = cleanText(callStrategy || metadata.callStrategy || "", 1600);
+  if (strategy) {
+    user.push("", "Pre-call strategy for this prospect:", strategy);
+  }
+  return {
+    provider: "anthropic",
+    // Asks are pulls — the composer routes them to the ASK model (Opus) while
+    // live turn ticks stay on Sonnet. Same data pool, separate cache prefixes.
+    modelRole: "ask_coach",
+    system: SONNET_ASK_SYSTEM_PROMPT,
+    systemCacheable: true,
+    user: user.join("\n"),
+    maxOutputWords: 130,
+    maxTokensHint: 400,
+    shouldCompose: true,
+  };
+}
 
 function buildFixedComposerInstructions({ role = "prospect" } = {}) {
   return role === "prospect"
@@ -1695,7 +1848,7 @@ function buildSonnetPromptPayload({ contextFrame, metadata = {} }) {
         Array.isArray(match.hits) && match.hits.length ? `  Deterministic hits: ${match.hits.join(", ")}` : "",
         match.miniReason ? `  Mini reason: ${match.miniReason}` : "",
       ].filter(Boolean).join("\n")).join("\n")
-      : "- No strong keyword match. Keep it to one clarifying discovery question.",
+      : "- No strong keyword match. Read the moment and steer toward the biggest discovery gap; suggest a line only if wording is the hard part.",
     "",
     "Conversation tactic:",
     tactics.length
@@ -1706,13 +1859,30 @@ function buildSonnetPromptPayload({ contextFrame, metadata = {} }) {
       ].filter(Boolean).join("\n")).join("\n")
       : "- Use direct discovery. No humor unless the prospect is calm and the issue is clear.",
   ];
+  // Objection playbook: when this turn matched a known objection, hand the
+  // composer the SPECIFIC overcoming strategy (read/reframe/plays/lines) —
+  // broader than a one-line response, never read verbatim.
+  const objectionBlock = objectionBank.formatObjectionPlaybookForPrompt(
+    matches
+      .filter((match) => match.family === "objection_playbook" || match.family === "compliance_dnc")
+      .map((match) => match.key),
+  );
+  if (objectionBlock) {
+    user.push("", "Objection playbook for this turn:", objectionBlock);
+  }
+  // Call strategy from the interview (when one was generated pre-call/early-call):
+  // standing guidance for the whole call — current prospect text still outranks it.
+  const callStrategy = cleanText(contextFrame?.callStrategy || metadata.callStrategy || "", 2400);
+  if (callStrategy) {
+    user.push("", "Pre-call strategy for this prospect (from the agent's interview; current text outranks it):", callStrategy);
+  }
   return {
     provider: "anthropic",
     modelRole: "sonnet_dialog_composer",
     system,
     systemCacheable: true,
     user: user.join("\n"),
-    maxOutputWords: 35,
+    maxOutputWords: 80,
     shouldCompose: Boolean(contextFrame?.shouldCompose),
   };
 }
@@ -2024,6 +2194,7 @@ module.exports = {
   VOICEMAIL_ANYTIME_MATCHES,
   analyzeVoicemail,
   analyzeVoicemailAnytime,
+  buildAskPrompt,
   buildFixedComposerInstructions,
   buildMiniContextFrame,
   buildSonnetPromptPayload,

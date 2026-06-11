@@ -133,6 +133,13 @@ function smsAlertSubject({ domain, phone, classification = {} }) {
   }
 }
 
+function resolveSmsAlertRecipients() {
+  // Inbound SMS reply alerts are ops-sensitive and should not follow
+  // stale per-domain, assigned-rep, or client-team recipient env. Route
+  // every text response to the internal Mickey inbox for now.
+  return parseEmailList(getInternalFromEmail());
+}
+
 async function sendClientSmsAlert({ domain, phone, body, payload, workflowId, inboundMessageId, classification, hotRoutingResult, autoResult }) {
   const normalizedDomain = normalizeDomain(domain);
   const company = getCompanyConfig(normalizedDomain);
@@ -147,14 +154,7 @@ async function sendClientSmsAlert({ domain, phone, body, payload, workflowId, in
   // rep can claim the conversation and reply manually before the AI
   // auto-fallback runs. TAG is client traffic — alerts go to the
   // designated client-team escalation list.
-  const domainSpecificEnv = `${normalizedDomain}_SMS_ALERT_EMAIL`;
-  const recipients = parseEmailList(
-    env(domainSpecificEnv, "")
-      || env("CLIENT_SMS_ALERT_EMAIL", "")
-      || company.alertEmail
-      || company.toEmail
-      || "",
-  );
+  const recipients = resolveSmsAlertRecipients();
   if (recipients.length === 0) {
     return { ok: false, skipped: true, reason: "no-client-sms-alert-recipients" };
   }

@@ -941,6 +941,9 @@ async function runHourlySweep({
   workerName = "hourly-sweeper",
   lane = "hourly",
   scheduledPhase = true,
+  sessionReconcileEnabled = true,
+  paymentReconcileEnabled = true,
+  paymentFieldsSyncEnabled = true,
   batchCap = DEFAULT_BATCH_CAP,
   maxCasesPerDomain,
   leadCadenceEnforcementEnabled = false,
@@ -961,6 +964,15 @@ async function runHourlySweep({
   callLogHygieneMaxArchivePerDomain,
   callLogHygieneScorePendingCalls = true,
   callLogHygieneArchiveRecordings = true,
+  cxCallActivityBackfillEnabled = true,
+  cxRecordingHourlyEnabled = true,
+  calllogBridgeEnabled = true,
+  staleCadenceSweepEnabled = true,
+  staleNcoaSweepEnabled = true,
+  dncRecheckEnabled = true,
+  fillerPoolRefreshEnabled = true,
+  agedRollingRefreshEnabled = true,
+  resolutionEmailsEnabled = true,
   metricsRefreshEnabled = true,
   metricsRefreshPreferLegacyContactActivities = false,
   domains = null,
@@ -979,21 +991,27 @@ async function runHourlySweep({
 
   if (scheduledPhase) {
     summary.phaseA = {
-      sessionReconcile: await runSessionReconcile({ logger }),
-      paymentReconcile: await runPaymentReconcileForAllDomains({
-        logger,
-        lane,
-        maxCasesPerDomain,
-      }),
+      sessionReconcile: sessionReconcileEnabled
+        ? await runSessionReconcile({ logger })
+        : { skipped: true, reason: "business-hours-lite" },
+      paymentReconcile: paymentReconcileEnabled
+        ? await runPaymentReconcileForAllDomains({
+            logger,
+            lane,
+            maxCasesPerDomain,
+          })
+        : { skipped: true, reason: "business-hours-lite" },
       // Reconcile CaseProfile payment-derived fields against the
       // PaymentLedger truth set BEFORE metricsRefresh reads them.
       // Gated by PAYMENT_FIELD_SYNC_ENABLED — when off, this is a
       // cheap skip so the order stays correct for the day we flip it
       // on. See caseProfilePaymentSyncService for the design notes.
-      paymentFieldsSync: await runPaymentFieldsSyncForAllDomains({
-        logger,
-        maxCasesPerDomain,
-      }),
+      paymentFieldsSync: paymentFieldsSyncEnabled
+        ? await runPaymentFieldsSyncForAllDomains({
+            logger,
+            maxCasesPerDomain,
+          })
+        : { skipped: true, reason: "business-hours-lite" },
       callLogHygiene: callLogHygieneEnabled
         ? await runCallLogHygiene({
             logger,
@@ -1026,11 +1044,13 @@ async function runHourlySweep({
       // so this backfills deterministic synthetic CallLog/CallLedger rows
       // from those events during the day instead of waiting on a manual
       // EOD script.
-      cxCallActivityBackfill: await runCxCallActivityBackfill({
-        logger,
-        domains,
-        sinceMs: callLogHygieneSinceMs,
-      }),
+      cxCallActivityBackfill: cxCallActivityBackfillEnabled
+        ? await runCxCallActivityBackfill({
+            logger,
+            domains,
+            sinceMs: callLogHygieneSinceMs,
+          })
+        : { skipped: true, reason: "business-hours-lite" },
       metricsRefresh: metricsRefreshEnabled
         ? await runMetricsRefresh({
             logger,
@@ -1046,13 +1066,15 @@ async function runHourlySweep({
       // minutes before this tick fires, which matches RingCX's stated
       // post-call media-readiness threshold. Idempotent: rows already
       // at terminal recordingArchive.status are skipped.
-      cxRecordingHourly: await runCxRecordingHourly({
-        fireTime: new Date(),
-        logger,
-      }).catch((error) => ({
-        ok: false,
-        error: error.message,
-      })),
+      cxRecordingHourly: cxRecordingHourlyEnabled
+        ? await runCxRecordingHourly({
+            fireTime: new Date(),
+            logger,
+          }).catch((error) => ({
+            ok: false,
+            error: error.message,
+          }))
+        : { skipped: true, reason: "business-hours-lite" },
       leadCadenceEnforcement: leadCadenceEnforcementEnabled
         ? await runLeadCadenceEnforcement({
             logger,
@@ -1061,14 +1083,18 @@ async function runHourlySweep({
             dryRun: leadCadenceEnforcementDryRun,
           })
         : { skipped: true, reason: "disabled" },
-      staleCadenceSweep: await runStaleCadenceSweep({ logger }),
+      staleCadenceSweep: staleCadenceSweepEnabled
+        ? await runStaleCadenceSweep({ logger })
+        : { skipped: true, reason: "business-hours-lite" },
       // Catch NCOA upload batches whose process died mid-flight before
       // the in-process try/finally could write a terminal envelope.
       // Idempotent — only closes batches that have a `requested`
       // stage, no `completed`/`failed`, and no row activity in 30m+.
-      staleNcoaSweep: await sweepStaleNcoaBatches({}).catch((error) => ({
-        error: error.message,
-      })),
+      staleNcoaSweep: staleNcoaSweepEnabled
+        ? await sweepStaleNcoaBatches({}).catch((error) => ({
+            error: error.message,
+          }))
+        : { skipped: true, reason: "business-hours-lite" },
       // NCOA mailbox ingest â€” checks documents@ for unread CSV/TXT
       // attachments on weekdays until one file is processed for the
       // Pacific business day, then self-skips until tomorrow.
@@ -1079,18 +1105,22 @@ async function runHourlySweep({
       })),
       // Disabled by default: RealValidation spending is limited to
       // intake-time validation plus the once-monthly filler rebuild.
-      dncRecheck: await runDncRecheckSweepIfEnabled().catch((error) => ({
-        error: error.message,
-      })),
+      dncRecheck: dncRecheckEnabled
+        ? await runDncRecheckSweepIfEnabled().catch((error) => ({
+            error: error.message,
+          }))
+        : { skipped: true, reason: "business-hours-lite" },
       // CallLog → CaseProfile bridge — self-healing sweep for cases
       // where a call landed (CallLog row written, caseId resolved)
       // but the CaseProfile promotion never produced a row. Without
       // this, payment reconcile / metrics rollups / CX queue render
       // can't see the case. Idempotent: existing-profile rows just
       // get back-linked and skipped on the next pass.
-      calllogBridge: await runCallLogToCaseProfileBridge({ logger }).catch((error) => ({
-        error: error.message,
-      })),
+      calllogBridge: calllogBridgeEnabled
+        ? await runCallLogToCaseProfileBridge({ logger }).catch((error) => ({
+            error: error.message,
+          }))
+        : { skipped: true, reason: "business-hours-lite" },
       // Monthly filler-pool refresh — fires once a month on the
       // 1st-of-month at 5am PT. Pulls fresh status=2 candidates from
       // Logics for both tenants, DNC-scrubs them, atomic-ish swaps
@@ -1103,19 +1133,25 @@ async function runHourlySweep({
       // pool steady-state. Until then both run — the daily sweep adds
       // 30-day-old leads incrementally while the monthly burst rebuilds
       // from Logics.
-      fillerPoolRefresh: await runMonthlyFillerPoolRefreshIfDue({ logger }).catch((error) => ({
-        error: error.message,
-      })),
+      fillerPoolRefresh: fillerPoolRefreshEnabled
+        ? await runMonthlyFillerPoolRefreshIfDue({ logger }).catch((error) => ({
+            error: error.message,
+          }))
+        : { skipped: true, reason: "business-hours-lite" },
       // Rolling aged-pool refresh — fires daily at 06:00 PT (and the
       // graduation sweep additionally on day-1). Gated behind the
       // AGED_ROLLING_REFRESH_ENABLED env flag. Returns
       // { skipped: true, reason: ... } outside the 06:00 window or when
       // the flag is off. Emails the agedPool recipient list with the
       // checked / promoted / retired summary + per-domain breakdown.
-      agedRollingRefresh: await runAgedRollingRefreshIfDue({ logger }).catch((error) => ({
-        error: error.message,
-      })),
-      resolutionEmails: await sendResolutionEmails({ logger }),
+      agedRollingRefresh: agedRollingRefreshEnabled
+        ? await runAgedRollingRefreshIfDue({ logger }).catch((error) => ({
+            error: error.message,
+          }))
+        : { skipped: true, reason: "business-hours-lite" },
+      resolutionEmails: resolutionEmailsEnabled
+        ? await sendResolutionEmails({ logger })
+        : { skipped: true, reason: "business-hours-lite" },
     };
   }
 

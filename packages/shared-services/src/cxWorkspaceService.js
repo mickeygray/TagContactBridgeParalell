@@ -5806,6 +5806,7 @@ async function requestCxEmail(domain, user, input = {}) {
   let body;
   let htmlBody = null;
   let resolvedTemplateKey = input.templateKey || null;
+  const clientTemplateId = input.templateId || input.clientTemplateId || null;
 
   if (resolvedTemplateKey && isKnownEmailTemplateKey(resolvedTemplateKey)) {
     const rendered = renderEmailTemplate({
@@ -5817,6 +5818,10 @@ async function requestCxEmail(domain, user, input = {}) {
     subject = String(input.subject || rendered.subject).trim();
     body = String(input.body || rendered.text).trim();
     htmlBody = input.html || rendered.html || null;
+  } else if (input.subject || input.body) {
+    subject = String(input.subject || "").trim();
+    body = String(input.body || "").trim();
+    resolvedTemplateKey = null;
   } else {
     const template = buildWelcomeEmailTemplate();
     const templateContext = buildTemplateContext(context.domain, user, input);
@@ -5845,7 +5850,9 @@ async function requestCxEmail(domain, user, input = {}) {
       subject,
       body,
       html: htmlBody,
-      templateKey: resolvedTemplateKey,
+      templateKey: resolvedTemplateKey || clientTemplateId || null,
+      serverTemplateKey: resolvedTemplateKey,
+      clientTemplateId,
       sendAs: getMarketingFromEmail(),
     },
     reviewCategory: "cx-email",
@@ -5896,12 +5903,14 @@ async function requestCxEmail(domain, user, input = {}) {
       email: to,
       subject,
       body,
-      templateKey: resolvedTemplateKey,
+      templateKey: resolvedTemplateKey || clientTemplateId || null,
       status: "sent",
       workflowId: result.workflowId || null,
       actorEmail: actor.actorEmail,
       actorName: actor.actorName,
       metadata: {
+        serverTemplateKey: resolvedTemplateKey,
+        clientTemplateId,
         sendgridStatus: response.status,
       },
     }),
@@ -8049,6 +8058,11 @@ async function executeCxInterviewSnapshot(domain, user, input = {}) {
     updatedAt: now,
     updatedBy: actor,
     snapshot: sanitizeInterviewSnapshotValue(plainObject(input.snapshot)),
+    // Opus call strategy, persisted SERVER-SIDE with the snapshot (cadence row
+    // + Logics activity) so rich form-derived data doesn't have to live in
+    // browser storage. Kept separate from `snapshot` so it never round-trips
+    // into the form state. Capped to the compact-strategy budget.
+    callStrategy: String(input.callStrategy || "").trim().slice(0, 2000) || null,
     activityNote,
   };
 

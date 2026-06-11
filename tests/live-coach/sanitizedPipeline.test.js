@@ -5,6 +5,7 @@ const assert = require("node:assert/strict");
 
 const {
   analyzeVoicemail,
+  buildAskPrompt,
   buildMiniContextFrame,
   buildSonnetPromptPayload,
   classifyJurisdiction,
@@ -48,6 +49,72 @@ test("deterministic voicemail phrases reject the first transcript item", () => {
   assert.equal(result.context, null);
   assert.equal(result.dialog.status, "rejected");
   assert.match(result.dialog.label, /voicemail/i);
+});
+
+test("DNC revocation is terminal compliance, never an overcome input", () => {
+  // "Stop calling" routes to the compliance directive — alone, no doctrine,
+  // no advance plays, and it preempts any other matched objection.
+  const matches = findContextMatches("stop calling me, I'm not interested");
+  const dnc = matches.find((m) => m.key === "dnc_revocation");
+  assert.ok(dnc, "stop calling must match the DNC rule");
+  assert.equal(dnc.family, "compliance_dnc");
+
+  const payload = buildSonnetPromptPayload({
+    contextFrame: {
+      role: "prospect",
+      shouldCompose: true,
+      phraseText: "stop calling me, I'm not interested",
+      matches,
+    },
+    metadata: { agentName: "Chris", firmName: "Tax Advocate Group" },
+  });
+  assert.match(payload.user, /DO-NOT-CALL REVOCATION DETECTED/);
+  assert.match(payload.user, /confirm removal immediately/i);
+  assert.doesNotMatch(payload.user, /Objection doctrine/);
+  assert.doesNotMatch(payload.user, /keeps the conversation alive/);
+
+  // Plain "not interested" (no removal demand) stays coachable.
+  const coachable = findContextMatches("yeah I'm really not interested honestly");
+  assert.ok(coachable.some((m) => m.key === "obj_not_interested"));
+  assert.ok(!coachable.some((m) => m.key === "dnc_revocation"));
+});
+
+test("objection playbook: phrase match rides the catalog and attaches strategy to the prompt", () => {
+  const matches = findContextMatches("I need to talk to my wife before I spend that kind of money");
+  const spouse = matches.find((m) => m.key === "obj_spouse_consult");
+  assert.ok(spouse, "spouse-consult objection must match");
+  assert.equal(spouse.family, "objection_playbook");
+
+  const payload = buildSonnetPromptPayload({
+    contextFrame: {
+      role: "prospect",
+      shouldCompose: true,
+      phraseText: "I need to talk to my wife before I spend that kind of money",
+      matches,
+    },
+    metadata: { agentName: "Chris", firmName: "Tax Advocate Group" },
+  });
+  assert.match(payload.user, /Objection playbook for this turn:/);
+  assert.match(payload.user, /joint return/i);
+  assert.match(payload.user, /adapt, never read verbatim/);
+
+  // Classic distrust objection also matches.
+  const distrust = findContextMatches("honestly this sounds like a scam, I don't trust tax relief companies");
+  assert.ok(distrust.some((m) => m.key === "obj_dont_trust_tax_companies"));
+});
+
+test("call strategy from interview rides the composer prompt when present", () => {
+  const payload = buildSonnetPromptPayload({
+    contextFrame: {
+      role: "prospect",
+      shouldCompose: true,
+      phraseText: "I owe about forty grand.",
+      callStrategy: "Lead with the levy deadline; prospect is retired on fixed income — frame fees against garnishment exposure.",
+    },
+    metadata: { agentName: "Chris", firmName: "Tax Advocate Group" },
+  });
+  assert.match(payload.user, /Pre-call strategy for this prospect/);
+  assert.match(payload.user, /levy deadline/);
 });
 
 test("opening phase runs the scripted opening prompt; established runs the full coach", () => {
@@ -314,10 +381,12 @@ test("Sonnet prompt payload uses fixed instructions and does not invent names or
     },
   });
   assert.equal(payload.shouldCompose, true);
-  assert.match(payload.system, /live tax-resolution sales dialog composer/);
+  // Navigator contract: orient (Read/Steer), hand exact words only when needed (Try).
+  assert.match(payload.system, /live call NAVIGATOR for tax-resolution sales calls/);
+  assert.match(payload.system, /Read:.*\n.*Steer:.*\n.*Try:/);
+  assert.match(payload.system, /The Read line IS the psychology/);
   // Standing directives now live in the cacheable system prefix, not the per-turn user message.
   assert.equal(payload.systemCacheable, true);
-  assert.match(payload.system, /Use tax comprehension/);
   assert.match(payload.system, /Do not invent people/);
   assert.match(payload.system, /Never wait for an agent final/);
   const otherPayload = buildSonnetPromptPayload({
@@ -394,4 +463,101 @@ test("Sonnet draft stays service-selling and avoids DIY resolution advice", () =
   assert.doesNotMatch(draft.say, /pay what you can/i);
   assert.doesNotMatch(draft.say, /installment agreement/i);
   assert.doesNotMatch(draft.say, /request a hold/i);
+});
+
+test("new objection entries fire on their phrases and DNC still preempts everything", () => {
+  // Sleeping giant: quiet IRS reads as no-urgency.
+  const giant = findContextMatches("they haven't bothered me in years, it can wait");
+  assert.ok(giant.some((match) => match.key === "obj_no_urgency_sleeping_giant"));
+  // Payment-plan treadmill.
+  const plan = findContextMatches("I'm already on a payment plan with the IRS, making payments every month");
+  assert.ok(plan.some((match) => match.key === "obj_already_on_payment_plan"));
+  // Early price probe — a buying signal, matched as its own entry.
+  const price = findContextMatches("before anything else, how much does it cost?");
+  assert.ok(price.some((match) => match.key === "obj_early_price_probe"));
+  // DNC preemption is untouched by the new entries.
+  const dnc = findContextMatches("stop calling me, take me off your list");
+  assert.ok(dnc.some((match) => match.key === "dnc_revocation"));
+});
+
+test("new tactics: take-the-yes, buying-signal momentum, mirror fallback", () => {
+  const yes = deriveConversationTactics({ phraseText: "okay let's do it, what do you need from me?" });
+  assert.ok(yes.some((tactic) => tactic.key === "momentum_close"));
+
+  const process = deriveConversationTactics({ phraseText: "so how does this all work, what happens first?" });
+  assert.ok(process.some((tactic) => tactic.key === "buying_signal_momentum"));
+
+  // Mirror/label fallback only when NO key matched...
+  const noKeys = deriveConversationTactics({ phraseText: "yeah it's been a weird couple of months honestly", matches: [] });
+  assert.ok(noKeys.some((tactic) => tactic.key === "mirror_to_open"));
+  // ...and stays out when real keys are present.
+  const keyed = deriveConversationTactics({
+    phraseText: "I got a CP504 about a levy",
+    matches: [{ key: "collection_pressure" }],
+  });
+  assert.ok(!keyed.some((tactic) => tactic.key === "mirror_to_open"));
+});
+
+test("ask prompt: objection kind matches third-person paraphrase and rides the playbook", () => {
+  const ask = buildAskPrompt({
+    kind: "objection",
+    question: "he says his CPA already handles this, give me lines",
+    metadata: { agentName: "Sean", firmName: "Wynn Tax Solutions", contactName: "Robert" },
+  });
+  assert.equal(ask.shouldCompose, true);
+  assert.equal(ask.systemCacheable, true);
+  assert.match(ask.system, /on-demand desk coach/);
+  assert.match(ask.user, /Ask kind: objection/);
+  // "his CPA" (agent paraphrase) must match the bank's first-person "my cpa".
+  assert.match(ask.user, /Objection playbook:/);
+  assert.match(ask.user, /Objection doctrine/);
+  // System prompt stays name-free (stable cache prefix); names ride the user message.
+  assert.doesNotMatch(ask.system, /Sean|Wynn|Robert/);
+  assert.match(ask.user, /Agent name: Sean/);
+});
+
+test("ask prompt: DNC revocation preempts even in an agent ask", () => {
+  const ask = buildAskPrompt({
+    kind: "objection",
+    question: "she said stop calling me, what do I do",
+    metadata: {},
+  });
+  assert.match(ask.user, /DO-NOT-CALL REVOCATION DETECTED/);
+  assert.doesNotMatch(ask.user, /Objection doctrine/);
+});
+
+test("ask prompt: chat continuity carries recent Q&A for follow-ups", () => {
+  const ask = buildAskPrompt({
+    kind: "question",
+    question: "what about his wife?",
+    metadata: { agentName: "Sean", firmName: "Wynn" },
+    recentAsks: [
+      { question: "How do I respond to the CPA thing?", answer: "Split preparation from representation." },
+      { question: "incomplete row, no answer" },
+    ],
+  });
+  assert.match(ask.user, /Recent coach chat this call/);
+  assert.match(ask.user, /Agent asked: How do I respond to the CPA thing\?/);
+  assert.match(ask.user, /You answered: Split preparation from representation\./);
+  // Unanswered rows never render (a half exchange reads as an instruction).
+  assert.doesNotMatch(ask.user, /incomplete row, no answer/);
+  assert.match(ask.system, /This is a CHAT/);
+});
+
+test("ask prompt: line kind carries the pinned transcript and call memory", () => {
+  const ask = buildAskPrompt({
+    kind: "line",
+    lineText: "my payroll guy said he would take care of the 941s",
+    metadata: { agentName: "Sean", firmName: "Wynn" },
+    recentMemoryText: "Key facts discovered this call:\n- balance: ~48k",
+    callStrategy: "Lead with levy urgency.",
+  });
+  assert.match(ask.user, /Ask kind: line/);
+  assert.match(ask.user, /Pinned transcript line \(the prospect said\): "my payroll guy/);
+  assert.match(ask.user, /Call memory \(key facts, the call so far, recent lines\):/);
+  assert.match(ask.user, /Pre-call strategy for this prospect:/);
+  // Objection playbook only rides objection asks.
+  assert.doesNotMatch(ask.user, /Objection playbook:/);
+  // Pull answers get the larger output hint (live lines stay clamped).
+  assert.equal(ask.maxTokensHint, 400);
 });

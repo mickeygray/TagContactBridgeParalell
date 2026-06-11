@@ -98,6 +98,8 @@ const {
   extractAttributionCandidates,
   loadMailerConfigCache,
   processControlPlaneEventBatch,
+  getPacingConfig,
+  isOperatingNow,
   runHourlySweep,
   runDueCxAppointments,
   runCxRecordingHourly,
@@ -153,6 +155,23 @@ function getMongoReadyState(runtime) {
     };
   }
 }
+
+const BUSINESS_HOURS_LITE_HOURLY_HANDLER_KEYS = Object.freeze([
+  "retryCxLogicsAction",
+  "cancelFailedOutboundText",
+  "scheduleRecontactAttempt",
+  "recontactAttempt",
+  "refireContactAttempt",
+  "cancelFailedOutboundRvm",
+  "cancelFailedOutboundCallfireDial",
+  "cancelFailedAutoResponderText",
+  "retrySocialReply",
+  "retryNcoaCreateCase",
+  "retryInboundLogicsCreate",
+  "renewRingcentralSubscription",
+  "investigateRingcentralSilence",
+  "retryLexisDailyDrop",
+]);
 
 function summarizeHourlySweepConfig(config = {}) {
   return {
@@ -485,6 +504,27 @@ async function startHourlySweepWorker({ config, runtime, workerState, spendSyncR
       return;
     }
 
+    let businessHoursLiteMode = null;
+    try {
+      const pacingConfig = await getPacingConfig();
+      if (isOperatingNow(pacingConfig, workerState.lastStartedAt)) {
+        businessHoursLiteMode = {
+          mode: "business-hours-lite",
+          timezone: pacingConfig.businessHoursTimezone || "America/Los_Angeles",
+          businessHoursStart: pacingConfig.businessHoursStart,
+          businessHoursEnd: pacingConfig.businessHoursEnd,
+          businessDays: pacingConfig.businessDays,
+        };
+      }
+    } catch (error) {
+      businessHoursLiteMode = {
+        mode: "business-hours-lite",
+        reason: "business-hours-check-failed",
+        error: error.message,
+      };
+    }
+    const scheduledPhaseMode = runScheduledPhase ? businessHoursLiteMode : null;
+
     try {
       // Claim the hour before running Phase A. If a dependency fails
       // mid-sweep, we still do not retry external hourly work every
@@ -492,17 +532,24 @@ async function startHourlySweepWorker({ config, runtime, workerState, spendSyncR
       if (runScheduledPhase) {
         workerState.lastScheduledHour = currentHourKey;
       }
-      // Backend hygiene is allowed to run outside CX/SMS operating
-      // hours. Phone and text actions are gated at their own command
-      // boundaries; applying that gate here prevents non-contact work
-      // like DNC checkpoints, NCOA ingest, recording/archive hygiene,
-      // and activity review from firing in their intended windows.
+      const scheduledPhaseLite = businessHoursLiteMode?.mode === "business-hours-lite";
+      if (scheduledPhaseMode) {
+        runtime.logger.info("control-plane.hourly.scheduled_phase_mode", scheduledPhaseMode);
+      }
+      // Keep the hourly worker alive during floor hours, but run a
+      // lighter Phase A so long Logics/payment/media jobs do not compete
+      // with queue serving. Phase B still drains the hourly job queue.
       const result = await runHourlySweep({
         workerName: `${config.serviceName}-hourly-sweep`,
         lane: "hourly",
         scheduledPhase: runScheduledPhase,
+        batchCap: scheduledPhaseLite ? 10 : undefined,
+        handlerKeys: scheduledPhaseLite ? BUSINESS_HOURS_LITE_HOURLY_HANDLER_KEYS : null,
+        sessionReconcileEnabled: !scheduledPhaseLite,
+        paymentReconcileEnabled: !scheduledPhaseLite,
+        paymentFieldsSyncEnabled: !scheduledPhaseLite,
         metricsRefreshEnabled:
-          config.hourlySweep?.metricsRefreshEnabled !== false,
+          !scheduledPhaseLite && config.hourlySweep?.metricsRefreshEnabled !== false,
         metricsRefreshPreferLegacyContactActivities:
           config.hourlySweep?.metricsRefreshPreferLegacyContactActivities !== false,
         maxCasesPerDomain:
@@ -516,7 +563,7 @@ async function startHourlySweepWorker({ config, runtime, workerState, spendSyncR
         leadCadenceEnforcementDryRun:
           Boolean(config.hourlySweep?.leadCadenceEnforcementDryRun),
         callLogHygieneEnabled:
-          Boolean(config.hourlySweep?.callLogHygieneEnabled),
+          !scheduledPhaseLite && Boolean(config.hourlySweep?.callLogHygieneEnabled),
         callLogHygieneSinceMs:
           config.hourlySweep?.callLogHygieneSinceMs,
         callLogHygieneLimitPerDomain:
@@ -543,10 +590,23 @@ async function startHourlySweepWorker({ config, runtime, workerState, spendSyncR
           config.hourlySweep?.callLogHygieneScorePendingCalls !== false,
         callLogHygieneArchiveRecordings:
           config.hourlySweep?.callLogHygieneArchiveRecordings !== false,
+        cxCallActivityBackfillEnabled: !scheduledPhaseLite,
+        cxRecordingHourlyEnabled: !scheduledPhaseLite,
+        calllogBridgeEnabled: !scheduledPhaseLite,
+        staleCadenceSweepEnabled: !scheduledPhaseLite,
+        staleNcoaSweepEnabled: !scheduledPhaseLite,
+        dncRecheckEnabled: !scheduledPhaseLite,
+        fillerPoolRefreshEnabled: !scheduledPhaseLite,
+        agedRollingRefreshEnabled: !scheduledPhaseLite,
+        resolutionEmailsEnabled: !scheduledPhaseLite,
         logger: runtime.logger,
       });
+      if (scheduledPhaseMode) {
+        result.scheduledPhaseMode = scheduledPhaseMode;
+      }
       if (
         runScheduledPhase &&
+        !scheduledPhaseLite &&
         config.hourlySweep?.spendSyncEnabled !== false &&
         spendSyncRuntime?.syncAll
       ) {

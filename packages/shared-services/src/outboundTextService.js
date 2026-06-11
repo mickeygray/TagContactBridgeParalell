@@ -1,6 +1,7 @@
 "use strict";
 
 const { requestJson } = require("../../shared-integrations/src/httpClient");
+const { resolveCompanyByTrackingNumber } = require("../../shared-integrations/src/callrailClient");
 const { getCompanyConfig } = require("../../shared-config/src");
 const { leadCadenceRepository } = require("../../shared-repositories/src");
 const { emitHourlyJobEvent } = require("./hourlyJobEventService");
@@ -18,12 +19,42 @@ function stripLeadingBrandPrefix(content) {
     .trimStart();
 }
 
+function resolveTrackingForDomain(domain, requestedTrackingNumber, defaultTrackingNumber) {
+  const normalizedDomain = String(domain || "").trim().toUpperCase();
+  const requested = normalizePhone(requestedTrackingNumber);
+  if (requested && requested.length === 10) {
+    const owner = resolveCompanyByTrackingNumber(requested);
+    if (owner && String(owner).toUpperCase() === normalizedDomain) {
+      return { tracking: requested, source: "requested" };
+    }
+  }
+
+  const fallback = normalizePhone(defaultTrackingNumber);
+  if (fallback && fallback.length === 10) {
+    const owner = resolveCompanyByTrackingNumber(fallback);
+    if (owner && String(owner).toUpperCase() === normalizedDomain) {
+      return { tracking: fallback, source: "company-default" };
+    }
+  }
+
+  return {
+    tracking: "",
+    source: null,
+    reason: requested
+      ? "tracking-number-domain-mismatch"
+      : "missing-tracking-number",
+  };
+}
+
 async function sendOutboundText({ domain, toPhone, trackingNumber, content, actionKey = null, caseId = null }) {
   const company = getCompanyConfig(domain);
   const digits = normalizePhone(toPhone);
-  const tracking = normalizePhone(
-    trackingNumber || company.integrations?.callrail?.trackingNumber,
+  const trackingResolution = resolveTrackingForDomain(
+    domain,
+    trackingNumber,
+    company.integrations?.callrail?.trackingNumber,
   );
+  const tracking = trackingResolution.tracking;
   const cleanedContent = stripLeadingBrandPrefix(content);
 
   if (!company.integrations.callrail.accountId || !company.integrations.callrail.apiKey || !company.integrations.callrail.companyId) {
@@ -35,7 +66,11 @@ async function sendOutboundText({ domain, toPhone, trackingNumber, content, acti
   }
 
   if (!tracking || tracking.length !== 10) {
-    return { ok: false, skipped: true, reason: "missing-tracking-number" };
+    return {
+      ok: false,
+      skipped: true,
+      reason: trackingResolution.reason || "missing-tracking-number",
+    };
   }
 
   const url = `https://api.callrail.com/v3/a/${company.integrations.callrail.accountId}/text-messages.json`;
@@ -127,12 +162,14 @@ async function sendOutboundText({ domain, toPhone, trackingNumber, content, acti
     ok: true,
     provider: "callrail",
     trackingNumber: tracking,
+    trackingSource: trackingResolution.source,
     response: response.data,
   };
 }
 
 module.exports = {
   normalizePhone,
+  resolveTrackingForDomain,
   stripLeadingBrandPrefix,
   sendOutboundText,
 };

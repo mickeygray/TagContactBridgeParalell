@@ -763,6 +763,56 @@ test("live coach bus prunes terminal sessions from hot memory", () => {
   assert.equal(bus.getSummary().total, 1);
 });
 
+test("live coach bus hard-prunes sessions by call uii within agent scope", () => {
+  const rootDir = makeTempRoot();
+  const bus = createLiveCoachBus({ rootDir });
+  const target = bus.startSession({
+    sessionId: "coach-cx-4545-uii-release-target",
+    source: "control-plane-cx",
+    agentEmail: "cbolt@taxadvocategroup.com",
+    agentExtension: "4545",
+    uii: "uii-release-target",
+  });
+  const otherAgent = bus.startSession({
+    sessionId: "coach-cx-3344-uii-release-target",
+    source: "grpc-mongo",
+    agentEmail: "bhansen@taxadvocategroup.com",
+    agentExtension: "3344",
+    uii: "uii-release-target",
+  });
+  const otherCall = bus.startSession({
+    sessionId: "coach-cx-4545-uii-release-other",
+    source: "grpc-mongo",
+    agentEmail: "cbolt@taxadvocategroup.com",
+    agentExtension: "4545",
+    uii: "uii-release-other",
+  });
+
+  const dryRun = bus.pruneSessionsForCall({
+    uii: "uii-release-target",
+    agentEmail: "cbolt@taxadvocategroup.com",
+    agentExtensionId: "4545",
+    apply: false,
+  });
+  assert.equal(dryRun.ok, true);
+  assert.equal(dryRun.matchedCount, 1);
+  assert.equal(dryRun.prunedCount, 0);
+  assert.equal(bus.getSession(target.id).id, target.id);
+
+  const applied = bus.pruneSessionsForCall({
+    uii: "uii-release-target",
+    agentEmail: "cbolt@taxadvocategroup.com",
+    agentExtensionId: "4545",
+    reason: "unit-test-call-ended",
+  });
+  assert.equal(applied.ok, true);
+  assert.equal(applied.matchedCount, 1);
+  assert.equal(applied.prunedCount, 1);
+  assert.equal(bus.getSession(target.id), null);
+  assert.equal(bus.getSession(otherAgent.id).id, otherAgent.id);
+  assert.equal(bus.getSession(otherCall.id).id, otherCall.id);
+});
+
 test("live coach bus treats released sessions as terminal", async () => {
   const rootDir = makeTempRoot();
   const bus = createLiveCoachBus({ rootDir });
@@ -953,4 +1003,73 @@ test("weak-junk mini hold expires on silence and force-composes the buffered tho
   const firstIndex = phrase.indexOf("levy thing");
   assert.notEqual(firstIndex, -1);
   assert.equal(phrase.indexOf("levy thing", firstIndex + 1), -1, "held text must not be duplicated by the merge");
+});
+
+test("askCoach runs the full ask cycle: events stream, memory.asks lands, in-flight guard holds", async () => {
+  const rootDir = makeTempRoot();
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const bus = createLiveCoachBus({
+    rootDir,
+    dialogComposer: async ({ dialog, onDelta }) => {
+      assert.match(String(dialog?.promptPayload?.system || ""), /on-demand desk coach/);
+      assert.match(String(dialog?.promptPayload?.user || ""), /How do I respond/);
+      onDelta?.("partial", "Mirror the fear, then");
+      await gate; // hold the ask in flight so the guard is observable
+      return { say: "Mirror the fear, then ask which years are unfiled.", composer: "anthropic" };
+    },
+  });
+  const started = bus.startSession({ source: "test", agentName: "Sean", firmName: "Wynn", uii: "uii-ask-1" });
+  const events = [];
+  bus.subscribe(started.id, (event) => events.push(event));
+
+  const result = bus.askCoach(started.id, { kind: "question", question: "How do I respond to the levy fear?" });
+  assert.equal(result.ok, true);
+  assert.match(result.askId, /^ask-/);
+
+  // One in flight per session: a second ask is rejected while the first runs.
+  const second = bus.askCoach(started.id, { kind: "question", question: "another" });
+  assert.equal(second.ok, false);
+  assert.match(second.error, /in flight/i);
+
+  release();
+  await wait(25);
+
+  const answerEvents = events.filter((event) => event.type === "coach.answer");
+  assert.ok(answerEvents.length >= 2, "thinking + ready events expected");
+  assert.equal(answerEvents[0].ask.status, "thinking");
+  const final = answerEvents[answerEvents.length - 1].ask;
+  assert.equal(final.status, "ready");
+  assert.match(final.answer, /which years are unfiled/);
+
+  // Finished ask lands in memory.asks (chat thread reseeding) and the guard clears.
+  const session = bus.getSession(started.id);
+  assert.equal(session.memory.asks.length, 1);
+  assert.equal(session.memory.asks[0].id, result.askId);
+  const third = bus.askCoach(started.id, { kind: "question", question: "follow up" });
+  assert.equal(third.ok, true);
+  await wait(25);
+
+  // Empty asks and unknown sessions are rejected cleanly.
+  assert.equal(bus.askCoach(started.id, { kind: "question" }).ok, false);
+  assert.equal(bus.askCoach("nope", { question: "x" }).ok, false);
+});
+
+test("prune-terminal: force clears terminal sessions the gentle path skips (age floor + source filter)", () => {
+  const rootDir = makeTempRoot();
+  const bus = createLiveCoachBus({ rootDir });
+  // Source OUTSIDE GRPC_SESSION_SOURCES — the exact class that lingers.
+  const started = bus.startSession({ source: "manual-test", uii: "uii-prune-force" });
+  bus.stopSession(started.id, { reason: "test" });
+
+  // Gentle prune skips it: fresh (under the 15s age floor) AND filtered source.
+  const gentle = bus.pruneTerminalSessions({ apply: true });
+  assert.equal(gentle.prunedCount, 0);
+  assert.ok(bus.getSession(started.id), "gentle prune must keep the fresh odd-source session");
+
+  // Force clears it regardless of age, cap, and source.
+  const forced = bus.pruneTerminalSessions({ apply: true, force: true });
+  assert.equal(forced.force, true);
+  assert.ok(forced.prunedCount >= 1);
+  assert.ok(!bus.getSession(started.id), "force prune must remove it");
 });

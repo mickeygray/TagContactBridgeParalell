@@ -1665,55 +1665,6 @@ async function executeCxDispatchIntent(options = {}) {
         throw error;
       }
 
-      let activeCallCapture = {
-        ok: false,
-        skipped: true,
-        reason: "capture-disabled",
-      };
-      const captureTimeoutMs = Number(process.env.RINGCX_CAMPAIGN_CALL_CAPTURE_MS);
-      if (captureTimeoutMs !== 0) {
-        try {
-          const captureClient = createRingcxVoiceClient();
-          dialTraceLog(options.logger, "info", "ringcx.dialExecution.campaign.capture.start", {
-            traceId,
-            queueItemId,
-            phone: maskPhoneForLog(phone),
-            campaignId: publish.campaignId || null,
-            externId: publish.externId || null,
-            agentEmail: maskEmailForLog(agentEmail || publish.agentUsername),
-            agentCxAgentId,
-            timeoutMs: Number.isFinite(captureTimeoutMs) && captureTimeoutMs > 0
-              ? captureTimeoutMs
-              : null,
-          });
-          activeCallCapture = await waitForRingcxCampaignCall(captureClient, {
-            phone,
-            campaignId: publish.campaignId || null,
-            externId: publish.externId || null,
-            agentEmail: agentEmail || publish.agentUsername || null,
-            agentCxAgentId,
-            timeoutMs: Number.isFinite(captureTimeoutMs) && captureTimeoutMs > 0
-              ? captureTimeoutMs
-              : undefined,
-            logger: options.logger || null,
-          });
-        } catch (error) {
-          activeCallCapture = {
-            ok: false,
-            reason: "active-call-capture-error",
-            error: error.message,
-          };
-        }
-      }
-      dialTraceLog(options.logger, activeCallCapture?.ok ? "info" : "warn", "ringcx.dialExecution.campaign.capture.result", {
-        traceId,
-        queueItemId,
-        activeCallCapture: {
-          ...activeCallCapture,
-          activeCall: activeCallCapture?.activeCallSummary || null,
-        },
-      });
-      const capturedUii = normalizeExternalId(activeCallCapture?.uii);
       const publishedDialGroupId =
         publish.dialGroupId
         || dispatchIntent.rcxDialGroupId
@@ -1734,6 +1685,116 @@ async function executeCxDispatchIntent(options = {}) {
         agentUsername: publish.agentUsername || agentEmail || null,
         agentCxAgentId: agentCxAgentId || null,
       };
+
+      let activeCallCapture = {
+        ok: false,
+        skipped: true,
+        reason: "capture-disabled",
+      };
+      const captureTimeoutMs = Number(process.env.RINGCX_CAMPAIGN_CALL_CAPTURE_MS);
+      const resolvedCaptureTimeoutMs = Number.isFinite(captureTimeoutMs) && captureTimeoutMs > 0
+        ? captureTimeoutMs
+        : undefined;
+      const captureAsync = parseBooleanFlag(
+        process.env.RINGCX_CAMPAIGN_CALL_CAPTURE_ASYNC,
+        true,
+      );
+      if (captureTimeoutMs !== 0) {
+        const captureContext = {
+          traceId,
+          queueItemId,
+          phone: maskPhoneForLog(phone),
+          campaignId: publish.campaignId || null,
+          externId: publish.externId || null,
+          agentEmail: maskEmailForLog(agentEmail || publish.agentUsername),
+          agentCxAgentId,
+          timeoutMs: resolvedCaptureTimeoutMs || null,
+        };
+        const runCapture = async () => {
+          const captureClient = createRingcxVoiceClient();
+          dialTraceLog(options.logger, "info", "ringcx.dialExecution.campaign.capture.start", {
+            ...captureContext,
+            async: captureAsync,
+          });
+          return waitForRingcxCampaignCall(captureClient, {
+            phone,
+            campaignId: publish.campaignId || null,
+            externId: publish.externId || null,
+            agentEmail: agentEmail || publish.agentUsername || null,
+            agentCxAgentId,
+            timeoutMs: resolvedCaptureTimeoutMs,
+            logger: options.logger || null,
+          });
+        };
+        if (captureAsync) {
+          activeCallCapture = {
+            ok: false,
+            skipped: true,
+            reason: "capture-deferred",
+            timeoutMs: resolvedCaptureTimeoutMs || null,
+          };
+          dialTraceLog(options.logger, "info", "ringcx.dialExecution.campaign.capture.deferred", captureContext);
+          runCapture()
+            .then(async (captureResult) => {
+              const backgroundCapturedUii = normalizeExternalId(captureResult?.uii);
+              dialTraceLog(options.logger, backgroundCapturedUii ? "info" : "warn", "ringcx.dialExecution.campaign.capture.result", {
+                traceId,
+                queueItemId,
+                async: true,
+                activeCallCapture: {
+                  ...captureResult,
+                  activeCall: captureResult?.activeCallSummary || null,
+                },
+              });
+              if (!queueItemId) return;
+              const patch = {
+                "metadata.lastDialExecutionActiveCall": captureResult?.activeCallSummary || null,
+                "metadata.lastDialExecutionActiveCallCapture": captureResult || null,
+                "metadata.lastDialExecutionUii": backgroundCapturedUii || null,
+              };
+              if (backgroundCapturedUii) {
+                patch["metadata.lastDialExecutionStatus"] = "accepted";
+                patch["metadata.lastDialIntentStatus"] = "accepted";
+              }
+              await cxDialQueueRepository.updateQueueItem(queueItemId, patch).catch(() => null);
+            })
+            .catch((error) => {
+              dialTraceLog(options.logger, "warn", "ringcx.dialExecution.campaign.capture.result", {
+                traceId,
+                queueItemId,
+                async: true,
+                activeCallCapture: {
+                  ok: false,
+                  reason: "active-call-capture-error",
+                  error: error.message,
+                },
+              });
+            });
+        } else {
+          try {
+            activeCallCapture = await runCapture();
+          } catch (error) {
+            activeCallCapture = {
+              ok: false,
+              reason: "active-call-capture-error",
+              error: error.message,
+            };
+          }
+        }
+      }
+      const captureLogLevel =
+        activeCallCapture?.ok || activeCallCapture?.reason === "capture-deferred"
+          ? "info"
+          : "warn";
+      dialTraceLog(options.logger, captureLogLevel, "ringcx.dialExecution.campaign.capture.result", {
+        traceId,
+        queueItemId,
+        activeCallCapture: {
+          ...activeCallCapture,
+          activeCall: activeCallCapture?.activeCallSummary || null,
+        },
+      });
+      const capturedUii = normalizeExternalId(activeCallCapture?.uii);
 
       if (queueItemId) {
         await cxDialQueueRepository.updateQueueItem(queueItemId, {

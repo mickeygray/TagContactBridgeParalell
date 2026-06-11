@@ -92,6 +92,7 @@ function isProspectCadenceTemplate(templateKey) {
 }
 
 function resolveLeadCompanyByTrackingNumber(lead = {}) {
+  const leadDomain = normalizeDomain(lead.domain);
   const lockedContactDomain = normalizeDomain(
     lead.attributionContext?.contactDomain ||
       lead.payloadSnapshot?.contactDomain ||
@@ -115,10 +116,12 @@ function resolveLeadCompanyByTrackingNumber(lead = {}) {
     const normalized = normalizePhone(candidate);
     if (!normalized || normalized.length !== 10) continue;
     const resolved = resolveCompanyByTrackingNumber(normalized);
-    if (resolved) return normalizeDomain(resolved);
+    if (resolved && (!leadDomain || normalizeDomain(resolved) === leadDomain)) {
+      return normalizeDomain(resolved);
+    }
   }
 
-  return normalizeDomain(lead.domain);
+  return leadDomain;
 }
 
 function findLeadActionByKey(lead = {}, actionKey) {

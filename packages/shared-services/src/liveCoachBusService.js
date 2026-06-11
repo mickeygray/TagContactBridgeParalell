@@ -6,6 +6,7 @@ const path = require("path");
 const {
   CONTEXT_RULES,
   VOICEMAIL_MATCHES,
+  buildAskPrompt,
   createSonnetDialogDraft,
   createSanitizedLiveCoachPipeline,
   deriveConversationTactics,
@@ -16,7 +17,7 @@ const {
 } = require("./liveCoachStreamWatcherService");
 
 const TERMINAL_SESSION_STATUSES = Object.freeze(["stopped", "stale", "voicemail_rejected", "released"]);
-const GRPC_SESSION_SOURCES = Object.freeze(["grpc", "grpc-mongo", "grpc-live-bridge", "mongo-cx"]);
+const GRPC_SESSION_SOURCES = Object.freeze(["grpc", "grpc-mongo", "grpc-live-bridge", "mongo-cx", "control-plane-cx"]);
 const CALL_ENDING_STALE_REASONS = Object.freeze(new Set([
   "agent-current-call-changed",
   "binding-inactive",
@@ -31,6 +32,7 @@ const MEMORY_LIMITS = Object.freeze({
   contexts: 140,
   coachingSuggestions: 140,
   holds: 120,
+  asks: 30,
 });
 const DEFAULT_THOUGHT_BUFFER_MAX_CHARS = 900;
 const DEFAULT_THOUGHT_BUFFER_MAX_CHUNKS = 5;
@@ -230,6 +232,7 @@ function createMemoryState() {
     contexts: [],
     coachingSuggestions: [],
     holds: [],
+    asks: [],
   };
 }
 
@@ -238,6 +241,28 @@ function createThoughtBufferState() {
     unresolved: [],
     nextId: 1,
   };
+}
+
+// ── Per-turn timing rollup ───────────────────────────────────────────────────
+// One glanceable object on session.latest.turnTimings: when the turn's STT
+// finalized, how long the mini took, when Sonnet started / first streamed /
+// settled, and the outcome (ready | wait | suppressed | error). latest ships
+// whole in serializeSession, so admin UIs read timing truth directly instead
+// of re-deriving it from the event log. Diagnostics only — never gates.
+function startTurnTimings(session, transcript) {
+  if (!session?.latest) return;
+  session.latest.turnTimings = {
+    vadFinalAt: new Date().toISOString(),
+    transcriptId: cleanText(transcript?.id || "", 120) || null,
+    channel: cleanText(transcript?.channel || "", 20) || null,
+  };
+}
+
+function stampTurnTiming(session, key, extra) {
+  if (!session?.latest) return;
+  const timings = session.latest.turnTimings || (session.latest.turnTimings = {});
+  timings[key] = new Date().toISOString();
+  if (extra) Object.assign(timings, extra);
 }
 
 function pushMemory(session, key, value) {
@@ -255,7 +280,7 @@ function buildRecentCallMemory(session = {}, context = {}, {
   maxTranscriptRows = 10,
   maxContextRows = 8,
   maxCoachRows = 2,
-  maxChars = 900,
+  maxChars = 1600,
 } = {}) {
   const memory = session.memory || {};
   const currentTranscriptId = cleanText(context.sourceTranscriptId || "", 120);
@@ -330,7 +355,14 @@ function buildRecentCallMemory(session = {}, context = {}, {
   const coachRows = (Array.isArray(memory.coachingSuggestions) ? memory.coachingSuggestions : [])
     .filter((row) => row?.say)
     .slice(-Math.max(0, Number(maxCoachRows) || 2))
-    .map((row) => `- Prior coach line: ${cleanText(row.say, 180)}`);
+    .map((row) => {
+      // Navigator-shaped output: the repetition risk is the Try line (spoken
+      // words) or the Steer (the direction) — not the Read label preamble.
+      const full = cleanText(row.say, 600);
+      const tryLine = full.match(/(?:^|\n)\s*Try:\s*"?([^"\n]+)"?/i)?.[1];
+      const steer = full.match(/(?:^|\n)\s*Steer:\s*([^\n]+)/i)?.[1];
+      return `- Prior coaching (avoid repeating): ${cleanText(tryLine || steer || full, 180)}`;
+    });
 
   const priorCallRows = (Array.isArray(session.priorCallMemory) ? session.priorCallMemory : [])
     .slice(0, 2)
@@ -344,13 +376,27 @@ function buildRecentCallMemory(session = {}, context = {}, {
     })
     .filter(Boolean);
 
+  // ── Whole-call durable memory: the facts ledger never rolls off and the
+  // cumulative summary is revised every digest cycle — on a long call these
+  // are how the composer "finds things" that left the transcript window.
+  const factRows = Object.entries(session.factLedger || {})
+    .slice(-24)
+    .map(([key, row]) => `- ${key}: ${cleanText(row?.value || "", 120)}`)
+    .filter((row) => !row.endsWith(": "));
+  const summaryRow = cleanText(session.callSummary || "", 480);
+
   const sections = [
     priorCallRows.length ? ["Prior calls with this prospect (continuity only; the current call always outranks this):", ...priorCallRows].join("\n") : "",
+    summaryRow ? ["The call so far (cumulative, oldest first):", `- ${summaryRow}`].join("\n") : "",
+    factRows.length ? ["Key facts discovered this call (steer toward gaps; never re-ask these):", ...factRows].join("\n") : "",
     currentBriefRows.length ? ["Mini compact memory for this turn:", ...currentBriefRows].join("\n") : "",
     agentRows.length ? ["Agent's most recent line(s) - optional context only; do not wait for agent VAD, repeat it, or rephrase it:", ...agentRows].join("\n") : "",
     filteredRows.length ? ["Recent filtered matches with snippets:", ...filteredRows].join("\n") : "",
-    transcriptRows.length ? ["Recent raw prospect lines, fallback only:", ...transcriptRows].join("\n") : "",
+    // Avoid-repeat BEFORE the raw transcript fallback: the char cap truncates
+    // from the END, and losing avoid-repeat invites repeated coaching while
+    // losing raw lines only loses redundancy (facts/summary carry the call).
     coachRows.length ? ["Avoid repeating these recent coach lines:", ...coachRows].join("\n") : "",
+    transcriptRows.length ? ["Recent raw prospect lines, fallback only:", ...transcriptRows].join("\n") : "",
   ].filter(Boolean);
 
   const text = cleanText(sections.join("\n"), Math.max(240, Number(maxChars) || 900));
@@ -754,6 +800,12 @@ function createLiveCoachBus({
   // there's nothing to read and Sonnet runs the scripted OPENING prompt
   // (release → fire → stream, no memory needed).
   digestWarmupTurns = 3,
+  // Quiet start: coach LINES stay invisible until the prospect's Nth turn —
+  // the composer still RUNS from turn 1 (prompt caches warm, the first
+  // comment builds) but its output settles silently. Lets the agent get into
+  // the call before coaching appears. 0 (default) = show from the first
+  // turn; production sets 3 via LIVE_COACH_VISIBLE_AFTER_TURNS in server.js.
+  visibleAfterTurns = 0,
 } = {}) {
   const runtimeRoot = path.join(rootDir || process.cwd(), "runtime", "ai-bus", "live-coach");
   ensureDir(runtimeRoot);
@@ -839,6 +891,12 @@ function createLiveCoachBus({
       expiredAfterMs: Number(holdExpiryMs),
     });
     emit(session.id, "context", { context });
+    // Scribe pass: this force-composed thought is a completed turn too — keep
+    // the facts ledger + cumulative summary current (same gate as the main
+    // compose path).
+    if ((session.prospectTurnCount || 0) >= Math.max(0, Number(digestWarmupTurns) || 0)) {
+      scheduleRollingDigest(session);
+    }
     const dialogFrame = createSonnetDialogDraft({ contextFrame, metadata: session.metadata });
     const composerActive = typeof dialogComposer === "function";
     const dialog = composerActive && dialogFrame?.status === "ready"
@@ -895,6 +953,8 @@ function createLiveCoachBus({
       counters: row.counters,
       latest: row.latest,
       memory: row.memory,
+      factLedger: row.factLedger,
+      callSummary: row.callSummary,
     };
   }
 
@@ -989,6 +1049,8 @@ function createLiveCoachBus({
       counters: session.counters,
       latest: session.latest,
       memory: session.memory,
+      factLedger: session.factLedger || {},
+      callSummary: session.callSummary || "",
       thoughtBuffer: session.thoughtBuffer || createThoughtBufferState(),
       events: session.events.slice(-50),
     };
@@ -1508,13 +1570,26 @@ function createLiveCoachBus({
         callPhase: session.prospectTurnCount <= Math.max(0, Number(digestWarmupTurns) || 0)
           ? "opening"
           : "established",
+        // Quiet start: compose runs (warms caches, builds the first comment)
+        // but the line settles silently until the visibility turn.
+        warmupSuppressed: session.prospectTurnCount < Math.max(0, Number(visibleAfterTurns) || 0),
       };
     }
     // A turn is composing: attach mini's immediate-past digest (Sonnet is the
     // present, the digest is everything between turns) and start a fresh
     // window — these packets are now part of a completed thought.
     contextFrame = attachRollingDigest(session, contextFrame);
-    if (contextFrame.shouldCompose) session.digestWindow = [];
+    if (contextFrame.shouldCompose) {
+      session.digestWindow = [];
+      // Scribe pass on every completed turn: completed thoughts are the most
+      // fact-dense rows, and fast packets alone can't be relied on to trigger
+      // the cycle (the fast channel degrades to silent on STT heal). The mini
+      // reads the fresh turn from memory.transcripts and updates the facts
+      // ledger + cumulative summary. Same warmup gate as packet-driven runs.
+      if ((session.prospectTurnCount || 0) >= Math.max(0, Number(digestWarmupTurns) || 0)) {
+        scheduleRollingDigest(session);
+      }
+    }
     dialogFrame = createSonnetDialogDraft({ contextFrame, metadata: session.metadata });
     emit(session.id, "thought.buffer", {
       action: "release",
@@ -1621,6 +1696,9 @@ function createLiveCoachBus({
       session.latest.provisionalTranscript = null;
     }
     if (!isProspectFastRow) pushMemory(session, "transcripts", transcript);
+    // New compose-relevant prospect turn → fresh timing frame (fast packets
+    // and agent rows never compose, so they never reset the clock).
+    if (!isAgentRow && !isProspectFastRow) startTurnTimings(session, transcript);
     writeJsonLine(path.join(session.dir, "ai", "transcript.ndjson"), transcript);
     if (!isProspectTurnRow) emit(session.id, "transcript", { transcript });
 
@@ -1783,6 +1861,10 @@ function createLiveCoachBus({
           lastTurns,
           coachLines,
           packets: (session.digestWindow || []).slice(-6),
+          // Scribe inputs: the ledger so far (so the mini emits only NEW/CHANGED
+          // facts) and the prior cumulative summary (so it revises, never restarts).
+          knownFacts: Object.entries(session.factLedger || {}).map(([key, row]) => ({ key, value: row?.value || "" })),
+          priorSummary: cleanText(session.callSummary || "", 480),
           metadata: session.metadata,
         });
         if (result && !TERMINAL_SESSION_STATUSES.includes(session.status)) {
@@ -1805,7 +1887,33 @@ function createLiveCoachBus({
             },
             read: cleanText(result.read || "", 140),
           };
-          emit(session.id, "context.digest", { digest: session.rollingDigest });
+          // ── Facts ledger + cumulative summary (the call's durable memory) ──
+          // Merge NEW/CHANGED facts by key (newest value wins); the ledger never
+          // rolls off, so the whole conversation stays findable on long calls.
+          const newFacts = (Array.isArray(result.facts) ? result.facts : [])
+            .map((row) => ({ key: cleanText(row?.key, 60).toLowerCase().replace(/[^a-z0-9_]+/g, "_").replace(/^_+|_+$/g, ""), value: cleanText(row?.value, 120) }))
+            .filter((row) => row.key && row.value);
+          if (newFacts.length) {
+            if (!session.factLedger || typeof session.factLedger !== "object") session.factLedger = {};
+            for (const fact of newFacts) {
+              session.factLedger[fact.key] = { value: fact.value, at: new Date().toISOString() };
+            }
+            // Hard cap: oldest entries fall off only past 24 distinct keys.
+            const keys = Object.keys(session.factLedger);
+            if (keys.length > 24) {
+              keys
+                .sort((a, b) => String(session.factLedger[a].at).localeCompare(String(session.factLedger[b].at)))
+                .slice(0, keys.length - 24)
+                .forEach((key) => delete session.factLedger[key]);
+            }
+          }
+          const summary = cleanText(result.callSummary || "", 480);
+          if (summary) session.callSummary = summary;
+          emit(session.id, "context.digest", {
+            digest: session.rollingDigest,
+            factLedger: session.factLedger || {},
+            callSummary: session.callSummary || "",
+          });
         }
       } catch (error) {
         logger?.warn?.("live_coach.rolling_digest.error", {
@@ -1975,6 +2083,10 @@ function createLiveCoachBus({
         !controller.signal.aborted,
       );
     };
+    stampTurnTiming(session, "composeStartAt", {
+      miniMs: context.miniJudgement?.elapsedMs ?? null,
+      suppressed: Boolean(context.warmupSuppressed),
+    });
     Promise.resolve()
       .then(() => dialogComposer({
         session: serializeSession(session),
@@ -1987,6 +2099,12 @@ function createLiveCoachBus({
             controller.abort();
             return;
           }
+          {
+            const timed = sessions.get(session.id);
+            if (timed && !timed.latest?.turnTimings?.firstDeltaAt) stampTurnTiming(timed, "firstDeltaAt");
+          }
+          // Quiet start: no streaming text to the panel while suppressed.
+          if (context.warmupSuppressed) return;
           const latest = sessions.get(session.id);
           const now = Date.now();
           latest.latest.dialog = {
@@ -2006,7 +2124,14 @@ function createLiveCoachBus({
       .then((composed) => {
         if (!isCurrent()) return;
         const latest = sessions.get(session.id);
-        const say = cleanText(composed?.say || composed || "", 1000);
+        // Only ever accept STRINGS here: composed is normally {say, ...} and a
+        // WAIT carries say:"" — the old `composed?.say || composed` fell
+        // through to the OBJECT on empty say, String()-ing it into a literal
+        // "[object Object]" coach line on the agent's screen.
+        const say = cleanText(
+          typeof composed === "string" ? composed : composed?.say || "",
+          1000,
+        );
         if (!say) {
           // Claude held (WAIT) or returned nothing. isCurrent() above already filtered
           // aborts/supersedes, so an empty final here is a genuine hold: always settle the
@@ -2030,6 +2155,34 @@ function createLiveCoachBus({
             at: new Date().toISOString(),
             composer: cleanText(composed?.composer || "anthropic", 80),
           };
+          stampTurnTiming(latest, "settledAt", { outcome: "wait" });
+          emit(latest.id, "dialog", { dialog: latest.latest.dialog });
+          return;
+        }
+        // Quiet start: the line composed (caches warm, latency real) but the
+        // agent doesn't see coach lines until the visibility turn. Settle
+        // silently, refund the rate budget, and DON'T put it in the
+        // avoid-repeating memory — a line nobody saw is fair to say later.
+        if (context.warmupSuppressed) {
+          if (Array.isArray(guard.startedAtMs) && guard.startedAtMs.length) {
+            const idx = guard.startedAtMs.lastIndexOf(guard.lastStartedAtMs);
+            if (idx >= 0) guard.startedAtMs.splice(idx, 1);
+            else guard.startedAtMs.pop();
+          }
+          latest.latest.dialog = {
+            ...latest.latest.dialog,
+            status: "wait",
+            say: "",
+            label: "Coach warming up",
+            warmup: true,
+            at: new Date().toISOString(),
+            composer: cleanText(composed?.composer || "anthropic", 80),
+          };
+          writeJsonLine(path.join(latest.dir, "ai", "dialog.ndjson"), {
+            ...latest.latest.dialog,
+            suppressedSay: say,
+          });
+          stampTurnTiming(latest, "settledAt", { outcome: "suppressed" });
           emit(latest.id, "dialog", { dialog: latest.latest.dialog });
           return;
         }
@@ -2041,6 +2194,7 @@ function createLiveCoachBus({
           composer: cleanText(composed?.composer || "anthropic", 80),
           model: cleanText(composed?.model || "", 120) || latest.latest.dialog.model || null,
         };
+        stampTurnTiming(latest, "settledAt", { outcome: "ready" });
         pushMemory(latest, "coachingSuggestions", latest.latest.dialog);
         writeJsonLine(path.join(latest.dir, "ai", "dialog.ndjson"), latest.latest.dialog);
         emit(latest.id, "dialog", { dialog: latest.latest.dialog });
@@ -2062,6 +2216,7 @@ function createLiveCoachBus({
           at: new Date().toISOString(),
         };
         if (fallbackSay) pushMemory(latest, "coachingSuggestions", latest.latest.dialog);
+        stampTurnTiming(latest, "settledAt", { outcome: "error" });
         emit(latest.id, "dialog.error", {
           dialog: latest.latest.dialog,
           error: error.message,
@@ -2382,6 +2537,107 @@ function createLiveCoachBus({
     return { ok: true, session: serializeSession(session), streamStatus };
   }
 
+  // Pre-call strategy (Opus, from the agent's interview): rides session
+  // metadata so the composer's prompt includes it on every turn. The panel
+  // also receives it via the session.strategy event.
+  function attachCallStrategy(sessionId, strategy) {
+    const session = sessions.get(String(sessionId || ""));
+    if (!session) return { ok: false, error: "Session not found" };
+    const clean = cleanText(strategy, 2000);
+    if (!clean) return { ok: false, error: "Empty strategy" };
+    session.metadata = { ...session.metadata, callStrategy: clean };
+    session.updatedAt = new Date().toISOString();
+    emit(session.id, "session.strategy", { callStrategy: clean, session: serializeSession(session) });
+    logger?.info?.("live_coach.session.strategy_attached", {
+      sessionId: session.id,
+      strategyChars: clean.length,
+    });
+    return { ok: true, session: serializeSession(session) };
+  }
+
+  // ── Agent-initiated ask (the "send an AI call" path) ───────────────────────
+  // The agent pulls mid-call: pin a transcript line for a deeper read, ask a
+  // direct question, expand a topic, or get objection examples. One in flight
+  // per session; the answer streams to the panel as coach.answer events and
+  // the finished ask lands in memory.asks (snapshot-rehydratable). Separate
+  // budget from live composes on purpose — a pull never costs a push.
+  function askCoach(sessionId, input = {}) {
+    const session = sessions.get(String(sessionId || ""));
+    if (!session) return { ok: false, error: "Session not found" };
+    if (TERMINAL_SESSION_STATUSES.includes(session.status)) return { ok: false, error: "Session has ended" };
+    if (typeof dialogComposer !== "function") return { ok: false, error: "Composer unavailable" };
+    if (session.askInFlight) return { ok: false, error: "Ask already in flight", askId: session.askInFlight };
+    const kind = cleanText(input.kind || "question", 20).toLowerCase();
+    const question = cleanText(input.question || input.text || "", 600);
+    const lineText = cleanText(input.lineText || input.transcriptText || "", 500);
+    if (!question && !lineText) return { ok: false, error: "Empty ask" };
+    session.counters.ask = (Number(session.counters.ask) || 0) + 1;
+    const id = `ask-${String(session.counters.ask).padStart(4, "0")}`;
+    const ask = { id, kind, question, lineText, status: "thinking", answer: "", at: new Date().toISOString() };
+    session.askInFlight = id;
+    emit(session.id, "coach.answer", { ask: { ...ask } });
+    const recentMemory = buildRecentCallMemory(session, {}, { maxTranscriptRows: 16, maxChars: 2600 });
+    const promptPayload = buildAskPrompt({
+      kind,
+      question,
+      lineText,
+      metadata: session.metadata,
+      recentMemoryText: recentMemory?.text || "",
+      callStrategy: session.metadata?.callStrategy || "",
+      // Chat continuity: follow-ups read against the prior exchanges.
+      recentAsks: (session.memory?.asks || []).slice(-3),
+    });
+    const startedAtMs = Date.now();
+    let lastDeltaEmitMs = 0;
+    Promise.resolve()
+      .then(() => dialogComposer({
+        session: serializeSession(session),
+        dialog: { id, promptPayload },
+        metadata: session.metadata,
+        onDelta(delta, output) {
+          const latest = sessions.get(session.id);
+          if (!latest || TERMINAL_SESSION_STATUSES.includes(latest.status)) return;
+          // Throttle SSE chatter; the final emit below always lands whole.
+          const now = Date.now();
+          if (now - lastDeltaEmitMs < 150) return;
+          lastDeltaEmitMs = now;
+          emit(latest.id, "coach.answer", { ask: { ...ask, status: "streaming", answer: cleanText(output, 1600) } });
+        },
+      }))
+      .then((composed) => {
+        const answer = cleanText(typeof composed === "string" ? composed : composed?.say || "", 1600);
+        const finished = {
+          ...ask,
+          status: answer ? "ready" : "empty",
+          answer,
+          model: cleanText(composed?.model || "", 120) || undefined,
+          elapsedMs: Date.now() - startedAtMs,
+        };
+        const latest = sessions.get(session.id);
+        if (latest) {
+          latest.askInFlight = null;
+          pushMemory(latest, "asks", finished);
+          writeJsonLine(path.join(latest.dir, "ai", "asks.ndjson"), finished);
+          emit(latest.id, "coach.answer", { ask: finished });
+        }
+        return null;
+      })
+      .catch((error) => {
+        const latest = sessions.get(session.id);
+        if (latest) {
+          latest.askInFlight = null;
+          emit(latest.id, "coach.answer", { ask: { ...ask, status: "error", error: cleanText(error.message, 200) } });
+        }
+        logger?.warn?.("live_coach.ask.error", {
+          sessionId: session.id,
+          askId: id,
+          error: error.message,
+        });
+      });
+    logger?.info?.("live_coach.ask.start", { sessionId: session.id, askId: id, kind });
+    return { ok: true, askId: id };
+  }
+
   function stopSession(sessionId, input = {}) {
     const session = sessions.get(String(sessionId || ""));
     if (!session) return { ok: false, error: "Session not found" };
@@ -2500,9 +2756,16 @@ function createLiveCoachBus({
 
   function pruneTerminalSessions(input = {}) {
     const apply = Boolean(input.apply);
-    const maxAgeMs = Math.max(15_000, Number(input.maxAgeMs || input.terminalMaxAgeMs || 2 * 60 * 1000) || 2 * 60 * 1000);
-    const maxTerminalSessions = Math.max(0, Number(input.maxTerminalSessions || 21) || 21);
-    const sourceFilter = input.sourceFilter === undefined ? GRPC_SESSION_SOURCES : input.sourceFilter;
+    // FORCE: the admin "clear all terminal NOW" path. Ignores the age floor,
+    // the keep-cap, and the source filter — identity-less/odd-source stopped
+    // sessions go too. Without force, explicit 0s fall back to defaults (the
+    // 15s age floor guards against pruning a terminal row mid-handoff).
+    const force = Boolean(input.force);
+    const maxAgeMs = force
+      ? 0
+      : Math.max(15_000, Number(input.maxAgeMs || input.terminalMaxAgeMs || 2 * 60 * 1000) || 2 * 60 * 1000);
+    const maxTerminalSessions = force ? 0 : Math.max(0, Number(input.maxTerminalSessions || 21) || 21);
+    const sourceFilter = force ? null : (input.sourceFilter === undefined ? GRPC_SESSION_SOURCES : input.sourceFilter);
     const now = Date.now();
     const terminalRows = Array.from(sessions.values())
       .filter((session) => TERMINAL_SESSION_STATUSES.includes(session.status))
@@ -2551,6 +2814,7 @@ function createLiveCoachBus({
     return {
       ok: true,
       apply,
+      force,
       maxAgeMs,
       maxTerminalSessions,
       terminalCount: terminalRows.length,
@@ -2558,6 +2822,57 @@ function createLiveCoachBus({
       keptCount: kept.length,
       pruned,
       kept,
+    };
+  }
+
+  function pruneSessionsForCall(input = {}) {
+    const apply = input.apply !== false;
+    const uii = firstClean([input.uii, input.UII, input.rcxUii, input.callUii], 160);
+    if (!uii) {
+      return {
+        ok: false,
+        statusCode: 400,
+        error: "uii is required",
+      };
+    }
+
+    const identity = extractInputIdentity(input);
+    const sourceFilter = input.sourceFilter === undefined ? GRPC_SESSION_SOURCES : input.sourceFilter;
+    const reason = cleanText(input.reason || "call-ended", 120);
+    const matched = [];
+    const pruned = [];
+
+    for (const session of sessions.values()) {
+      if (!shouldCleanupSession(session, sourceFilter)) continue;
+      const sessionUiiKeys = uniqueCleanIdentityKeys([
+        session.metadata?.uii,
+        session.binding?.event?.uii,
+        session.binding?.metadata?.uii,
+      ]);
+      if (!sessionUiiKeys.includes(uii)) continue;
+      if (!agentMatchesSession(session, identity)) continue;
+
+      const summary = {
+        id: session.id,
+        status: session.status,
+        subscriberCount: subscribers.get(session.id)?.size || 0,
+        metadata: session.metadata,
+      };
+      matched.push(summary);
+      if (apply) {
+        pruned.push(pruneSession(session, reason));
+      }
+    }
+
+    return {
+      ok: true,
+      apply,
+      uii,
+      reason,
+      matchedCount: matched.length,
+      prunedCount: pruned.length,
+      matched,
+      pruned,
     };
   }
 
@@ -2715,6 +3030,8 @@ function createLiveCoachBus({
     retireReplacedSessions,
     appendInput,
     appendStreamStatus,
+    attachCallStrategy,
+    askCoach,
     stopSession,
     getSession,
     listSessions,
@@ -2726,6 +3043,7 @@ function createLiveCoachBus({
     cleanupStale,
     cleanupDeadStreams,
     pruneTerminalSessions,
+    pruneSessionsForCall,
     subscribe,
   };
 }

@@ -70,6 +70,7 @@ function summarizeCaseContext(source, match = {}, domain) {
 async function resolveSmsContactGuard({ domain, phone, workflow, logger }) {
   const normalizedDomain = normalizeDomain(domain);
   const workflowCaseId = Number(workflow?.caseId);
+  let nonClientCaseContext = null;
 
   try {
     if (Number.isFinite(workflowCaseId) && workflowCaseId > 0) {
@@ -79,6 +80,7 @@ async function resolveSmsContactGuard({ domain, phone, workflow, logger }) {
         if (isClientLikeStatusCategory(context.statusCategory)) {
           return { shouldBlockAutoResponse: true, reason: "existing-client-case", context };
         }
+        nonClientCaseContext = context;
       }
     }
   } catch (error) {
@@ -96,6 +98,7 @@ async function resolveSmsContactGuard({ domain, phone, workflow, logger }) {
       if (isClientLikeStatusCategory(context.statusCategory)) {
         return { shouldBlockAutoResponse: true, reason: "existing-client-phone", context };
       }
+      nonClientCaseContext = nonClientCaseContext || context;
     }
   } catch (error) {
     logger?.warn?.("sms.auto.case_guard.case_profile_lookup_failed", {
@@ -128,10 +131,26 @@ async function resolveSmsContactGuard({ domain, phone, workflow, logger }) {
       phone,
       error: error.message,
     });
+    if (nonClientCaseContext) {
+      return {
+        shouldBlockAutoResponse: false,
+        reason: "case-found-not-client-logics-error",
+        context: nonClientCaseContext,
+        lookupWarning: error.message,
+      };
+    }
     return {
       shouldBlockAutoResponse: true,
       reason: "case-lookup-error",
       error: error.message,
+    };
+  }
+
+  if (nonClientCaseContext) {
+    return {
+      shouldBlockAutoResponse: false,
+      reason: "case-found-not-client",
+      context: nonClientCaseContext,
     };
   }
 

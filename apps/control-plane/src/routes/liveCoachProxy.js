@@ -306,6 +306,34 @@ function createLiveCoachProxyRouter(auth, { config, logger } = {}) {
     }
   });
 
+  router.post("/call-release", async (req, res) => {
+    try {
+      const agentScope = resolveAgentScope(req);
+      const input = req.body || {};
+      const uii = firstClean(input.uii, input.rcxUii, input.callUii);
+      if (!uii) {
+        return res.status(400).json({ ok: false, error: "uii is required" });
+      }
+      return await proxyJson(
+        res,
+        fetchAiBusJson(config, "/api/ai/live-coach/prune-call", {
+          method: "POST",
+          body: {
+            ...agentScope,
+            agentExtension: agentScope.agentExtensionId,
+            uii,
+            queueItemId: firstClean(input.queueItemId, input.queueTicketId),
+            callSessionId: firstClean(input.callSessionId, input.sessionId),
+            reason: firstClean(input.reason, "cx-workspace-call-release"),
+            apply: input.apply !== false,
+          },
+        }),
+      );
+    } catch (error) {
+      return res.status(error.status || 500).json(toErrorResponse(error));
+    }
+  });
+
   router.get("/session-for-call", async (req, res) => {
     try {
       const agentScope = resolveAgentScope(req);
@@ -326,6 +354,35 @@ function createLiveCoachProxyRouter(auth, { config, logger } = {}) {
         fetchAiBusJson(config, "/api/ai/live-coach/grpc/mongo/bind/latest", {
           method: "POST",
           body,
+        }),
+      );
+    } catch (error) {
+      return res.status(error.status || 500).json(toErrorResponse(error));
+    }
+  });
+
+  // Pre-call strategy: forwards the interview snapshot to the ai-bus Opus
+  // strategist (Universal Sales Script as cached prefix). The bus best-effort
+  // attaches the result to the agent's live coach session.
+  router.post("/call-strategy", async (req, res) => {
+    try {
+      const agentScope = resolveAgentScope(req);
+      const input = req.body || {};
+      return await proxyJson(
+        res,
+        fetchAiBusJson(config, "/api/ai/live-coach/dashboard/call-strategy", {
+          method: "POST",
+          body: {
+            ...agentScope,
+            agentExtension: agentScope.agentExtensionId,
+            agentName: firstClean(input.agentName),
+            interview: input.interview || input.snapshot || {},
+            contactName: firstClean(input.contactName),
+            caseId: firstClean(input.caseId),
+            uii: firstClean(input.uii),
+            queueItemId: firstClean(input.queueItemId),
+            callSessionId: firstClean(input.callSessionId),
+          },
         }),
       );
     } catch (error) {
@@ -355,6 +412,25 @@ function createLiveCoachProxyRouter(auth, { config, logger } = {}) {
             ...(req.body || {}),
             reason: firstClean(req.body?.reason, "control-plane-client-release"),
           },
+        }),
+      );
+    } catch (error) {
+      return res.status(error.status || 500).json(toErrorResponse(error));
+    }
+  });
+
+  // Agent-initiated ask: pin a transcript line / direct question / expand a
+  // topic / objection examples. Starts the ask on the bus; the answer streams
+  // back on the session's event stream as coach.answer events.
+  router.post("/sessions/:sessionId/ask", async (req, res) => {
+    try {
+      const session = await getInternalSession(config, req.params.sessionId);
+      assertSessionScope(req, session);
+      return await proxyJson(
+        res,
+        fetchAiBusJson(config, `/api/ai/live-coach/grpc/${encodeURIComponent(req.params.sessionId)}/ask`, {
+          method: "POST",
+          body: req.body || {},
         }),
       );
     } catch (error) {
