@@ -285,6 +285,7 @@ function createNightlyCloseRuntime({ config = {}, runtime, spendSyncRuntime = nu
           paymentSweep: groupedResult.finalClose?.paymentSweep || null,
           postDateSweep: groupedResult.finalClose?.postDateSweep || null,
           leadCadenceCaseRefresh: groupedResult.finalClose?.leadCadenceCaseRefresh || null,
+          resolutionBankClose: groupedResult.finalClose?.resolutionBankClose || null,
           hourlySweep: groupedResult.finalClose?.hourlySweep
             ? {
                 startedAt: groupedResult.finalClose.hourlySweep.startedAt,

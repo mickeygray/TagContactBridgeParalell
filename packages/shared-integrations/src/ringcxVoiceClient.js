@@ -312,7 +312,7 @@ function setApiBackoff(error, scope = "api") {
 
 function assertNotInAuthBackoff() {
   if (!AUTH_BACKOFF_UNTIL_MS || AUTH_BACKOFF_UNTIL_MS <= Date.now()) return;
-  throw new ExternalServiceError(
+  const error = new ExternalServiceError(
     "ringcx-voice",
     `RingCX auth in rate-limit backoff until ${new Date(AUTH_BACKOFF_UNTIL_MS).toISOString()}`,
     {
@@ -326,6 +326,10 @@ function assertNotInAuthBackoff() {
       },
     },
   );
+  // Hourly job queue honors top-level nextAttemptAt — jobs that hit an open
+  // circuit reschedule for exactly when it reopens.
+  error.nextAttemptAt = new Date(AUTH_BACKOFF_UNTIL_MS).toISOString();
+  throw error;
 }
 
 function assertNotInApiBackoff(method, path, scope = "api") {
@@ -336,7 +340,7 @@ function assertNotInApiBackoff(method, path, scope = "api") {
       API_BACKOFF_BY_SCOPE.delete(key);
       continue;
     }
-    throw new ExternalServiceError(
+    const error = new ExternalServiceError(
       "ringcx-voice",
       `RingCX ${record.scope || scope} in rate-limit backoff until ${new Date(record.untilMs).toISOString()}`,
       {
@@ -353,6 +357,8 @@ function assertNotInApiBackoff(method, path, scope = "api") {
         },
       },
     );
+    error.nextAttemptAt = new Date(record.untilMs).toISOString();
+    throw error;
   }
 }
 
@@ -409,11 +415,23 @@ function getRateLimitState() {
   };
 }
 
+// Generic auth-failure cooldown: ANY failed RingCX auth (not just 429) opens
+// the circuit — "not dialed into the platform: back off, try again in 3
+// minutes." Without this, every caller re-attempts the full token exchange
+// immediately during an outage, which is how auth-endpoint 429 cascades start.
+const DEFAULT_AUTH_FAILURE_BACKOFF_MS = 3 * 60 * 1000;
+function setAuthFailureBackoff(error) {
+  const delayMs = envDurationMs("RINGCX_AUTH_FAILURE_BACKOFF_MS", DEFAULT_AUTH_FAILURE_BACKOFF_MS);
+  AUTH_BACKOFF_UNTIL_MS = Date.now() + delayMs;
+  AUTH_BACKOFF_LAST_ERROR = error?.message || "RingCX auth failed";
+}
+
 async function retryAuthOperation(operation) {
   try {
     return await operation();
   } catch (error) {
     if (isRateLimitError(error)) setAuthBackoff(error);
+    else setAuthFailureBackoff(error);
     throw error;
   }
 }

@@ -770,6 +770,7 @@ function createLiveCoachBus({
   logger,
   persistence = null,
   persistenceIntervalMs = 120_000,
+  closeoutWorker = null,
   dialogComposer = null,
   semanticContextJudge = null,
   composeDedupWindowMs = 4000,
@@ -996,6 +997,37 @@ function createLiveCoachBus({
     pendingPersistence.set(session.id, timer);
   }
 
+  function enqueueCloseout(session, reason = "session-ended", extra = {}) {
+    if (!session || !closeoutWorker || typeof closeoutWorker.enqueue !== "function") return null;
+    if (session.closeout?.queuedAt) return session.closeout;
+    const queuedAt = new Date().toISOString();
+    session.closeout = {
+      queuedAt,
+      reason: cleanText(reason, 160),
+    };
+    try {
+      const result = closeoutWorker.enqueue(serializeSession(session), {
+        reason,
+        ...extra,
+      });
+      session.closeout.result = result || null;
+      logger?.info?.("live_coach.closeout.queued", {
+        sessionId: session.id,
+        reason,
+        queued: Boolean(result?.queued),
+        skipped: Boolean(result?.skipped),
+      });
+    } catch (error) {
+      session.closeout.error = error.message;
+      logger?.warn?.("live_coach.closeout.enqueue_error", {
+        sessionId: session.id,
+        reason,
+        error: error.message,
+      });
+    }
+    return session.closeout;
+  }
+
   function emit(sessionId, type, payload = {}) {
     const session = sessions.get(sessionId);
     const event = {
@@ -1052,6 +1084,7 @@ function createLiveCoachBus({
       factLedger: session.factLedger || {},
       callSummary: session.callSummary || "",
       thoughtBuffer: session.thoughtBuffer || createThoughtBufferState(),
+      closeout: session.closeout || null,
       events: session.events.slice(-50),
     };
   }
@@ -1158,6 +1191,7 @@ function createLiveCoachBus({
       reason: cleanText(reason, 160),
       ...extra,
     });
+    enqueueCloseout(session, reason, { terminalType: "stale" });
     return serializeSession(session);
   }
 
@@ -1175,6 +1209,7 @@ function createLiveCoachBus({
       status: session.status,
       subscriberCount,
     });
+    enqueueCloseout(session, reason, { terminalType: "pruned", subscriberCount });
     abortActiveDialogComposer(sessionId, reason);
     pendingDialogCompositions.delete(sessionId);
     const pending = pendingPersistence.get(sessionId);
@@ -1722,6 +1757,7 @@ function createLiveCoachBus({
       if (vmDecision !== undefined && vmDecision !== null) voicemailObservability.decision = vmDecision;
       if (vmMatch !== undefined && vmMatch !== null) voicemailObservability.match = vmMatch;
       emit(session.id, "voicemail.reject", { transcript, dialog, ...voicemailObservability });
+      enqueueCloseout(session, "voicemail-rejected", { terminalType: "voicemail" });
       // Coach-triggered voicemail drop: the gate verdict is the trigger. The
       // trigger self-gates (enable flag + hard phone allowlist) and never throws.
       try {
@@ -2332,6 +2368,7 @@ function createLiveCoachBus({
       match: systemMatch.match || null,
       decision: "streaming_delta_voicemail_reject",
     });
+    enqueueCloseout(session, "streaming-voicemail-rejected", { terminalType: "voicemail" });
     // Coach-triggered voicemail drop (streaming-delta path). Self-gated.
     try {
       vmTransferTrigger?.maybeFire?.(serializeSession(session), {
@@ -2569,11 +2606,24 @@ function createLiveCoachBus({
     if (session.askInFlight) return { ok: false, error: "Ask already in flight", askId: session.askInFlight };
     const kind = cleanText(input.kind || "question", 20).toLowerCase();
     const question = cleanText(input.question || input.text || "", 600);
-    const lineText = cleanText(input.lineText || input.transcriptText || "", 500);
-    if (!question && !lineText) return { ok: false, error: "Empty ask" };
+    const contextItems = (Array.isArray(input.contextItems) ? input.contextItems : [])
+      .slice(0, 6)
+      .map((item) => ({
+        kind: cleanText(item?.kind || "context", 40),
+        label: cleanText(item?.label || "", 140),
+        lineText: cleanText(item?.lineText || item?.text || item?.value || "", 500),
+      }))
+      .filter((item) => item.label || item.lineText);
+    const lineText = cleanText(
+      input.lineText ||
+      input.transcriptText ||
+      contextItems.map((item, index) => `Context ${index + 1} (${item.kind}): ${item.lineText || item.label}`).join("\n"),
+      1800,
+    );
+    if (!question && !lineText && !contextItems.length) return { ok: false, error: "Empty ask" };
     session.counters.ask = (Number(session.counters.ask) || 0) + 1;
     const id = `ask-${String(session.counters.ask).padStart(4, "0")}`;
-    const ask = { id, kind, question, lineText, status: "thinking", answer: "", at: new Date().toISOString() };
+    const ask = { id, kind, question, lineText, contextItems, status: "thinking", answer: "", at: new Date().toISOString() };
     session.askInFlight = id;
     emit(session.id, "coach.answer", { ask: { ...ask } });
     const recentMemory = buildRecentCallMemory(session, {}, { maxTranscriptRows: 16, maxChars: 2600 });
@@ -2581,6 +2631,7 @@ function createLiveCoachBus({
       kind,
       question,
       lineText,
+      contextItems,
       metadata: session.metadata,
       recentMemoryText: recentMemory?.text || "",
       callStrategy: session.metadata?.callStrategy || "",
@@ -2646,6 +2697,7 @@ function createLiveCoachBus({
     session.status = cleanText(input.status || "stopped", 40);
     session.updatedAt = new Date().toISOString();
     emit(session.id, "session.stop", { reason: cleanText(input.reason || "manual", 120) });
+    enqueueCloseout(session, cleanText(input.reason || "manual", 120), { terminalType: "stopped" });
     return { ok: true, session: serializeSession(session) };
   }
 
@@ -3037,6 +3089,7 @@ function createLiveCoachBus({
     listSessions,
     listSessionSummaries,
     getSummary,
+    getCloseoutStats: () => closeoutWorker?.getStats?.() || null,
     runFixture,
     runProvisionalFixture,
     replaySession,

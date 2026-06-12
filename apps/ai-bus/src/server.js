@@ -45,6 +45,19 @@ const {
 const {
   createLiveCoachVmTransferTrigger,
 } = require("../../../packages/shared-services/src/liveCoachVmTransferService");
+const {
+  createLiveCoachCloseoutWorker,
+} = require("../../../packages/shared-services/src/liveCoachCloseoutService");
+const {
+  caseProfileRepository,
+  leadCadenceRepository,
+} = require("../../../packages/shared-repositories/src");
+const {
+  createLogicsClient,
+} = require("../../../packages/shared-integrations/src");
+const {
+  sendPlainEmail,
+} = require("../../../packages/shared-services/src/sendgridMailService");
 
 let processCrashLogger = null;
 
@@ -149,7 +162,7 @@ function extractOpenAiResponseText(payload = {}) {
   return parts.join("\n");
 }
 
-function parseJsonObject(text) {
+function parseJsonObject(text, label = "OpenAI context judge") {
   const raw = cleanText(text, 20_000)
     .replace(/^```(?:json)?/i, "")
     .replace(/```$/i, "")
@@ -162,7 +175,7 @@ function parseJsonObject(text) {
   if (start >= 0 && end > start) {
     return JSON.parse(raw.slice(start, end + 1));
   }
-  throw new Error("OpenAI context judge did not return JSON");
+  throw new Error(`${label} did not return JSON`);
 }
 
 const MINI_CONTEXT_JUDGE_PROMPT_VERSION = "live-coach-mini-context-v4";
@@ -394,6 +407,106 @@ function createOpusCallStrategist({ logger } = {}) {
   };
 }
 
+// ── Opus resolution pitch designer ───────────────────────────────────────────
+// The agent edge of the resolution double-edged sword: the Pitch Doctrine
+// (pitchability gates + fee doctrine) rides as the CACHED system prefix; the
+// per-call user delta is the client dossier + the EA's conversation thread.
+// Every reply ends in a ```verdict fence the caller parses (shared module).
+const RESOLUTION_PITCH_DOCTRINE = (() => {
+  try {
+    return fs.readFileSync(
+      path.join(__dirname, "../../../packages/shared-services/src/resolutionPitchDoctrine.md"),
+      "utf8",
+    );
+  } catch {
+    return "";
+  }
+})();
+
+function createOpusResolutionPitchAgent({ logger } = {}) {
+  const apiKey = String(process.env.ANTHROPIC_API_KEY || "").trim();
+  if (!apiKey || !RESOLUTION_PITCH_DOCTRINE) return null;
+  const model = String(process.env.RESOLUTION_AGENT_MODEL || "claude-opus-4-8").trim();
+  // 75s here vs the control-plane proxy's 90s: the upstream must time out
+  // FIRST so the EA sees the real Anthropic error, not a proxy abort.
+  const timeoutMs = Math.max(10_000, Number(process.env.RESOLUTION_AGENT_TIMEOUT_MS || 75_000) || 75_000);
+  // Adaptive thinking and the reply SHARE max_tokens — a rich dossier can
+  // draw several thousand thinking tokens before a word of text, so this
+  // must be generous or the reply gets starved entirely.
+  const maxTokens = Math.max(2000, Math.min(16_000, Number(process.env.RESOLUTION_AGENT_MAX_TOKENS || 8000) || 8000));
+
+  return async function designPitch({ dossier = {}, thread = [], ask = "" } = {}) {
+    const startedAtMs = Date.now();
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      // First contact (empty thread, no ask) = full assessment; otherwise the
+      // thread rides as real conversation turns and the ask is the newest one.
+      const priorTurns = (Array.isArray(thread) ? thread : [])
+        .filter((m) => m && (m.role === "user" || m.role === "assistant") && m.content)
+        .slice(-12)
+        .map((m) => ({ role: m.role, content: String(m.content).slice(0, 6000) }));
+      const askText = cleanText(ask, 4000);
+      const messages = [
+        {
+          role: "user",
+          content: `CLIENT DOSSIER (shorthand values carry provenance + as-of dates):\n${JSON.stringify(dossier)}`,
+        },
+        ...(priorTurns.length || askText
+          ? priorTurns
+          : [{ role: "user", content: "First read on this client. Produce the full pitchability assessment." }]),
+        ...(askText ? [{ role: "user", content: askText }] : []),
+      ];
+      const response = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-api-key": apiKey,
+          "anthropic-version": "2023-06-01",
+        },
+        body: JSON.stringify({
+          model,
+          max_tokens: maxTokens,
+          thinking: { type: "adaptive" },
+          system: [
+            {
+              type: "text",
+              // STABLE prefix: doctrine only -> one cache write, then reads.
+              text: RESOLUTION_PITCH_DOCTRINE,
+              cache_control: { type: "ephemeral" },
+            },
+          ],
+          messages,
+        }),
+        signal: controller.signal,
+      });
+      if (!response.ok) {
+        const body = await response.text().catch(() => "");
+        throw new Error(`resolution pitch agent failed: ${response.status} ${body.slice(0, 200)}`);
+      }
+      const payload = await response.json();
+      const text = (Array.isArray(payload.content) ? payload.content : [])
+        .filter((block) => block.type === "text")
+        .map((block) => block.text)
+        .join("\n")
+        .trim();
+      const elapsedMs = Date.now() - startedAtMs;
+      logger?.info?.("resolution.pitch_agent.result", {
+        elapsedMs,
+        model: payload.model || model,
+        replyChars: text.length,
+        threadTurns: priorTurns.length,
+        usage: payload.usage || null,
+        caseNumber: cleanText(String(dossier?.caseNumber || ""), 60) || null,
+      });
+      if (!text) throw new Error("resolution pitch agent returned empty output");
+      return { text, model: payload.model || model, elapsedMs, usage: payload.usage || null };
+    } finally {
+      clearTimeout(timeout);
+    }
+  };
+}
+
 // ── Rolling relevance digest (mini's dual-VAD role) ─────────────────────────
 // Mini continuously reads the fast channel's caught packets against the last
 // completed turns + recent coach lines. It is explicitly NOT judging the
@@ -483,6 +596,137 @@ function createOpenAiRollingDigest({ logger } = {}) {
         error: error.message,
       });
       return null;
+    } finally {
+      clearTimeout(timeout);
+    }
+  };
+}
+
+const CALL_GRADER_PROMPT_VERSION = "live-coach-call-grader-v1";
+const CALL_GRADER_STATIC_PROMPT = [
+  `Prompt version: ${CALL_GRADER_PROMPT_VERSION}`,
+  "You are a call grader for a tax-resolution sales floor.",
+  "Your job is analysis, not prose. Grade the agent's call from the transcript, selected coach context, facts, and coach suggestions.",
+  "Primary sales phases: intro/identify, problem and pain discovery, expert opinion and offer building, pitch and fees, closing/onboarding.",
+  "Tax posture: reward tax comprehension and confident issue recognition; penalize giving overly specific tax/legal advice, guarantees, or solving the case instead of selling representation.",
+  "Sales posture: reward empathy, control, next-step movement, objection handling, financial qualification, and keeping the prospect engaged.",
+  "If the transcript lacks enough agent speech, grade what is observable and mention that limitation.",
+  "Do not invent facts. Do not quote long transcript chunks. Keep lists concrete and short.",
+  "Return JSON only with this exact shape:",
+  '{"overallScore":0,"verdict":"<=260 chars","callPhaseReached":"intro|discovery|expert_opinion|pitch_fees|closing|unknown","outcome":"<=80 chars","scores":{"rapport":0,"discovery":0,"control":0,"taxComprehension":0,"salesPivot":0,"compliance":0,"close":0},"whatWorked":["..."],"missedOpportunities":["..."],"coachingNotes":["..."],"nextCallFocus":["..."],"riskFlags":["..."],"factsCaptured":["..."],"summaryForAgent":"<=600 chars"}',
+].join("\n");
+
+function createOpenAiCallGrader({ logger } = {}) {
+  const enabled = boolFromEnv(process.env.LIVE_COACH_CALL_GRADER_ENABLED, true);
+  const apiKey = String(process.env.OPENAI_API_KEY || "").trim();
+  if (!enabled || !apiKey) return null;
+  const model = String(
+    process.env.LIVE_COACH_CALL_GRADER_MODEL ||
+      "gpt-5.4",
+  ).trim();
+  const serviceTier = cleanText(process.env.LIVE_COACH_CALL_GRADER_SERVICE_TIER || "", 80);
+  const promptCacheRetention = cleanText(
+    process.env.LIVE_COACH_CALL_GRADER_PROMPT_CACHE_RETENTION ||
+      process.env.LIVE_COACH_OPENAI_PROMPT_CACHE_RETENTION ||
+      "in_memory",
+    40,
+  );
+  const timeoutMs = Math.max(5000, Number(process.env.LIVE_COACH_CALL_GRADER_TIMEOUT_MS || 45_000) || 45_000);
+  const maxOutputTokens = Math.max(
+    300,
+    Math.min(2000, Number(process.env.LIVE_COACH_CALL_GRADER_MAX_OUTPUT_TOKENS || 950) || 950),
+  );
+  logLiveCoachDiagnostic(logger, "live_coach.call_grader.config", {
+    enabled: true,
+    model,
+    serviceTier: serviceTier || null,
+    promptVersion: CALL_GRADER_PROMPT_VERSION,
+    maxOutputTokens,
+    timeoutMs,
+  }, { force: true });
+
+  return async function gradeCallWithOpenAi(payload = {}) {
+    const inputPayload = {
+      metadata: payload.metadata || {},
+      outcome: payload.outcome || "",
+      durationSec: payload.durationSec || 0,
+      sparseSummary: cleanText(payload.sparseSummary || "", 1600),
+      transcriptRows: (Array.isArray(payload.transcriptRows) ? payload.transcriptRows : [])
+        .slice(-120)
+        .map((row) => ({
+          role: cleanText(row?.role || "", 40),
+          text: cleanText(row?.text || "", 700),
+          at: row?.at || null,
+        }))
+        .filter((row) => row.text),
+      selectedContexts: (Array.isArray(payload.selectedContexts) ? payload.selectedContexts : [])
+        .slice(-24)
+        .map((row) => ({
+          phrase: cleanText(row?.phrase || "", 500),
+          selectedKeys: Array.isArray(row?.selectedKeys) ? row.selectedKeys.slice(0, 8).map((key) => cleanText(key, 80)).filter(Boolean) : [],
+          meaning: cleanText(row?.meaning || "", 260),
+        })),
+      contextKeys: Array.isArray(payload.contextKeys) ? payload.contextKeys.slice(0, 20).map((key) => cleanText(key, 80)).filter(Boolean) : [],
+      facts: Array.isArray(payload.facts) ? payload.facts.slice(0, 16).map((fact) => cleanText(fact, 180)).filter(Boolean) : [],
+      coachSuggestions: Array.isArray(payload.coachSuggestions) ? payload.coachSuggestions.slice(-20).map((line) => cleanText(line, 400)).filter(Boolean) : [],
+      priorCallSummary: cleanText(payload.priorCallSummary || "", 1200),
+      counters: payload.counters || {},
+    };
+    const requestBody = {
+      model,
+      ...(serviceTier ? { service_tier: serviceTier } : {}),
+      prompt_cache_key: `live-coach-call-grader:${CALL_GRADER_PROMPT_VERSION}:${model}`,
+      ...(promptCacheRetention ? { prompt_cache_retention: promptCacheRetention } : {}),
+      input: [
+        { role: "developer", content: CALL_GRADER_STATIC_PROMPT },
+        { role: "user", content: JSON.stringify(inputPayload) },
+      ],
+      max_output_tokens: maxOutputTokens,
+    };
+    const startedAtMs = Date.now();
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const response = await fetch("https://api.openai.com/v1/responses", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify(requestBody),
+        signal: controller.signal,
+      });
+      if (!response.ok) {
+        const body = await response.text().catch(() => "");
+        throw new Error(`OpenAI call grader failed: ${response.status} ${body.slice(0, 220)}`);
+      }
+      const responsePayload = await response.json();
+      const parsed = parseJsonObject(extractOpenAiResponseText(responsePayload), "OpenAI call grader");
+      const elapsedMs = Date.now() - startedAtMs;
+      logLiveCoachDiagnostic(logger, "live_coach.call_grader.result", {
+        elapsedMs,
+        model: responsePayload.model || model,
+        transcriptRows: inputPayload.transcriptRows.length,
+        contextKeys: inputPayload.contextKeys.length,
+        score: parsed.overallScore ?? parsed.score ?? null,
+        usage: responsePayload.usage || null,
+      }, { elapsedMs });
+      return {
+        provider: "openai",
+        model: responsePayload.model || model,
+        elapsedMs,
+        usage: responsePayload.usage || null,
+        grade: parsed,
+      };
+    } catch (error) {
+      const elapsedMs = Date.now() - startedAtMs;
+      logger?.warn?.("live_coach.call_grader.error", {
+        elapsedMs,
+        model,
+        error: error?.name === "AbortError" ? `timed out after ${timeoutMs}ms` : error.message,
+      });
+      if (error?.name === "AbortError") throw new Error(`OpenAI call grader timed out after ${timeoutMs}ms`);
+      throw error;
     } finally {
       clearTimeout(timeout);
     }
@@ -732,6 +976,28 @@ function buildDashboardAccessMiddleware() {
     ).trim();
     if (provided && safeSecretEquals(provided, configuredToken)) return next();
     return res.status(401).json({ ok: false, error: "Live coach dashboard token required" });
+  };
+}
+
+// Routes reached BOTH by the admin dashboard (token) and by the control-plane
+// proxy (x-service-secret) accept either credential. The nginx day-bridge used
+// to inject the dashboard token for the proxy path; with the bridge gone the
+// proxy stands on its own internal secret — without this, agents hitting
+// /call-strategy through 5001 got "Live coach dashboard token required".
+function buildDashboardOrInternalAccessMiddleware(config) {
+  const dashboard = buildDashboardAccessMiddleware();
+  const internalSecret = String(config.internalServiceSecret || "").trim();
+  return (req, res, next) => {
+    const providedSecret = String(
+      req.headers["x-service-secret"] ||
+        req.headers["x-internal-secret"] ||
+        "",
+    ).trim();
+    if (internalSecret && safeSecretEquals(providedSecret, internalSecret)) {
+      req.user = { id: "internal-service", role: "service", email: "internal@local" };
+      return next();
+    }
+    return dashboard(req, res, next);
   };
 }
 
@@ -1049,6 +1315,67 @@ function buildConfig() {
     liveCoachTerminalPruneMaxAgeMs: terminalPruneMaxAgeMs,
     liveCoachTerminalPruneMaxSessions: terminalPruneMaxSessions,
   };
+}
+
+function numberFromEnv(name, fallback) {
+  const value = Number(process.env[name]);
+  return Number.isFinite(value) ? value : fallback;
+}
+
+function emailListFromValue(value) {
+  const raw = Array.isArray(value) ? value : String(value || "").split(/[,\s;]+/);
+  const out = [];
+  const seen = new Set();
+  for (const item of raw) {
+    const email = cleanText(item, 180).toLowerCase();
+    if (!email || !email.includes("@") || seen.has(email)) continue;
+    seen.add(email);
+    out.push(email);
+  }
+  return out;
+}
+
+function buildLiveCoachCloseoutConfig() {
+  return {
+    enabled: boolFromEnv(process.env.LIVE_COACH_CLOSEOUT_ENABLED, true),
+    caseProfileCommunicationEnabled: boolFromEnv(process.env.LIVE_COACH_CLOSEOUT_CASE_PROFILE_ENABLED, true),
+    leadCadenceSummaryEnabled: boolFromEnv(process.env.LIVE_COACH_CLOSEOUT_LEAD_CADENCE_ENABLED, true),
+    // Logics is deliberately opt-in. Agent email is on by default but
+    // thresholded; disable with LIVE_COACH_CLOSEOUT_AGENT_EMAIL_ENABLED=false.
+    // closeout should never make a live call transition wait on external APIs.
+    logicsActivityEnabled: boolFromEnv(process.env.LIVE_COACH_CLOSEOUT_LOGICS_ENABLED, false),
+    agentEmailEnabled: boolFromEnv(process.env.LIVE_COACH_CLOSEOUT_AGENT_EMAIL_ENABLED, true),
+    callGraderEnabled: boolFromEnv(process.env.LIVE_COACH_CALL_GRADER_ENABLED, true),
+    callGraderMinDurationSec: Math.max(0, numberFromEnv("LIVE_COACH_CALL_GRADER_MIN_SECONDS", 90)),
+    callGraderMinTranscriptChars: Math.max(0, numberFromEnv("LIVE_COACH_CALL_GRADER_MIN_CHARS", 350)),
+    agentEmailOverride: cleanText(process.env.LIVE_COACH_CLOSEOUT_AGENT_EMAIL_TO || "", 180),
+    agentEmailMinDurationSec: Math.max(0, numberFromEnv("LIVE_COACH_CLOSEOUT_AGENT_EMAIL_MIN_SECONDS", 180)),
+    agentEmailMinTranscriptChars: Math.max(0, numberFromEnv("LIVE_COACH_CLOSEOUT_AGENT_EMAIL_MIN_CHARS", 400)),
+    agentEmailManagersEnabled: boolFromEnv(process.env.LIVE_COACH_CLOSEOUT_MANAGER_EMAIL_ENABLED, true),
+    agentEmailManagerRecipients: emailListFromValue(
+      process.env.LIVE_COACH_CLOSEOUT_MANAGER_EMAIL_TO ||
+        "manderson@taxadvocategroup.com,mgray@taxadvocategroup.com",
+    ),
+    agentEmailManagerMinDurationSec: Math.max(0, numberFromEnv("LIVE_COACH_CLOSEOUT_MANAGER_EMAIL_MIN_SECONDS", 300)),
+    agentEmailManagerMinTranscriptChars: Math.max(0, numberFromEnv("LIVE_COACH_CLOSEOUT_MANAGER_EMAIL_MIN_CHARS", 800)),
+    agentEmailManagerHighScore: Math.max(0, Math.min(100, numberFromEnv("LIVE_COACH_CLOSEOUT_MANAGER_HIGH_SCORE", 90))),
+    agentEmailManagerLowScore: Math.max(0, Math.min(100, numberFromEnv("LIVE_COACH_CLOSEOUT_MANAGER_LOW_SCORE", 55))),
+    minDurationSec: Math.max(0, numberFromEnv("LIVE_COACH_CLOSEOUT_MIN_SECONDS", 20)),
+    minTranscriptChars: Math.max(0, numberFromEnv("LIVE_COACH_CLOSEOUT_MIN_CHARS", 80)),
+    logicsActivityType: cleanText(process.env.LIVE_COACH_CLOSEOUT_LOGICS_ACTIVITY_TYPE || "General", 80),
+    logicsSubject: cleanText(process.env.LIVE_COACH_CLOSEOUT_LOGICS_SUBJECT || "CX call summary", 120),
+  };
+}
+
+async function sendLiveCoachCloseoutEmail(domain, message = {}) {
+  const to = emailListFromValue(message.to);
+  if (!to.length) throw new Error("live coach closeout email missing recipient");
+  return sendPlainEmail(domain || "TAG", {
+    personalizations: [{ to: to.map((email) => ({ email })) }],
+    from: { name: "Live Coach" },
+    subject: cleanText(message.subject || "Live coach call summary", 180),
+    content: [{ type: "text/plain", value: String(message.text || "") }],
+  });
 }
 
 function createLiveCoachDashboardHtml() {
@@ -3075,6 +3402,23 @@ async function main() {
   // held 61% of contexts and every layer of arbitration around it existed
   // because we didn't trust those holds. Re-enable the cost-gate era with
   // LIVE_COACH_CONTEXT_JUDGE_ENABLED=true.
+  const baseCloseoutConfig = buildLiveCoachCloseoutConfig();
+  const closeoutConfig = {
+    ...baseCloseoutConfig,
+    caseProfileCommunicationEnabled: baseCloseoutConfig.caseProfileCommunicationEnabled && Boolean(mongoRuntime.connected),
+    leadCadenceSummaryEnabled: baseCloseoutConfig.leadCadenceSummaryEnabled && Boolean(mongoRuntime.connected),
+  };
+  const callGrader = createOpenAiCallGrader({ logger });
+  const closeoutWorker = createLiveCoachCloseoutWorker({
+    rootDir: config.rootDir,
+    logger,
+    caseProfileRepository,
+    leadCadenceRepository,
+    logicsClientFactory: createLogicsClient,
+    sendAgentEmail: sendLiveCoachCloseoutEmail,
+    callGrader,
+    config: closeoutConfig,
+  });
   const semanticContextJudge = boolFromEnv(process.env.LIVE_COACH_CONTEXT_JUDGE_ENABLED, false)
     ? createOpenAiSemanticContextJudge({ logger })
     : null;
@@ -3082,6 +3426,7 @@ async function main() {
     rootDir: config.rootDir,
     logger,
     persistence: coachPersistence,
+    closeoutWorker,
     dialogComposer: createAnthropicDialogComposer({ logger }),
     // semantic_vad only decides when STT should release text. This optional API judge is the
     // fuzzy filter that ranks deterministic candidates before Sonnet composes a line.
@@ -3114,11 +3459,15 @@ async function main() {
     // Quiet start: coach lines invisible until the prospect's Nth turn — the
     // composer still runs from turn 1 (cache warm, first comment builds).
     // Default 0 (visible immediately): floor testing showed a working coach
-    // that LOOKS dead for two turns reads as broken; the scripted opening
-    // prompt makes turn-1 lines safe to show. Re-quiet with the env if needed.
+    // that LOOKS dead for two turns reads as broken. Since 2026-06-12 turn-1
+    // lines come from the unified NAVIGATOR prompt (the scripted opening
+    // prompt is unrouted — see liveCoachSanitizedPipeline) with the phase
+    // stamped in the user payload. If unified turn-1 lines prove wonky,
+    // re-quiet with this env OR restore the opening-prompt routing.
     visibleAfterTurns: Math.max(0, Number(process.env.LIVE_COACH_VISIBLE_AFTER_TURNS ?? 0) || 0),
   });
   const callStrategist = createOpusCallStrategist({ logger });
+  const resolutionPitchAgent = createOpusResolutionPitchAgent({ logger });
   logger.info("live_coach.runtime_config", {
     mongoConnected: Boolean(mongoRuntime.connected),
     contextJudgeEnabled: Boolean(semanticContextJudge),
@@ -3143,6 +3492,28 @@ async function main() {
     asyncContextPipeline: boolFromEnv(process.env.LIVE_COACH_ASYNC_CONTEXT_PIPELINE, true),
     thoughtBufferMaxChars: Number(process.env.LIVE_COACH_THOUGHT_BUFFER_MAX_CHARS || 900) || 900,
     thoughtBufferMaxChunks: Number(process.env.LIVE_COACH_THOUGHT_BUFFER_MAX_CHUNKS || 5) || 5,
+    closeoutEnabled: Boolean(closeoutConfig.enabled),
+    closeoutCaseProfileEnabled: Boolean(closeoutConfig.caseProfileCommunicationEnabled),
+    closeoutLeadCadenceEnabled: Boolean(closeoutConfig.leadCadenceSummaryEnabled),
+    closeoutLogicsEnabled: Boolean(closeoutConfig.logicsActivityEnabled),
+    closeoutAgentEmailEnabled: Boolean(closeoutConfig.agentEmailEnabled),
+    closeoutManagerEmailEnabled: Boolean(closeoutConfig.agentEmailManagersEnabled),
+    closeoutManagerEmailThresholds: {
+      high: closeoutConfig.agentEmailManagerHighScore,
+      low: closeoutConfig.agentEmailManagerLowScore,
+      minDurationSec: closeoutConfig.agentEmailManagerMinDurationSec,
+      minTranscriptChars: closeoutConfig.agentEmailManagerMinTranscriptChars,
+      recipientCount: Array.isArray(closeoutConfig.agentEmailManagerRecipients)
+        ? closeoutConfig.agentEmailManagerRecipients.length
+        : 0,
+    },
+    callGraderEnabled: Boolean(closeoutConfig.callGraderEnabled && callGrader),
+    callGraderModel: callGrader
+      ? cleanText(process.env.LIVE_COACH_CALL_GRADER_MODEL || "gpt-5.4", 120)
+      : null,
+    callGraderServiceTier: callGrader
+      ? cleanText(process.env.LIVE_COACH_CALL_GRADER_SERVICE_TIER || "", 80) || null
+      : null,
     diagnosticLogging: LIVE_COACH_DIAGNOSTIC_LOGGING,
     diagnosticSampleEvery: LIVE_COACH_DIAGNOSTIC_SAMPLE_EVERY,
     diagnosticSlowMs: LIVE_COACH_DIAGNOSTIC_SLOW_MS,
@@ -3157,6 +3528,7 @@ async function main() {
   const requireHealthAccess = buildHealthAccessMiddleware(config);
   const requireInternalAccess = buildInternalAccessMiddleware(config);
   const requireDashboardAccess = buildDashboardAccessMiddleware();
+  const requireDashboardOrInternalAccess = buildDashboardOrInternalAccessMiddleware(config);
 
   app.get("/health", requireHealthAccess, (req, res) => {
     const mongo = {
@@ -3457,7 +3829,7 @@ async function main() {
   // prefix + interview JSON as the delta). Best-effort attaches the strategy
   // to the agent's LIVE session so the composer reads the same plan in
   // real time; also returns it for the workspace UI.
-  app.post("/api/ai/live-coach/dashboard/call-strategy", requireDashboardAccess, async (req, res, next) => {
+  app.post("/api/ai/live-coach/dashboard/call-strategy", requireDashboardOrInternalAccess, async (req, res, next) => {
     try {
       if (typeof callStrategist !== "function") {
         return res.status(503).json({ ok: false, error: "Call strategist unavailable (no ANTHROPIC_API_KEY)" });
@@ -3486,6 +3858,32 @@ async function main() {
         elapsedMs: result.elapsedMs,
         usage: result.usage,
         attachedSessionId: attached,
+      });
+    } catch (error) {
+      return next(error);
+    }
+  });
+
+  // Resolution pitch designer: control-plane proxies here with the client
+  // dossier + the EA's conversation thread (internal secret path; resolution
+  // permission enforcement lives on the control-plane side).
+  app.post("/api/ai/resolution/pitch", requireDashboardOrInternalAccess, async (req, res, next) => {
+    try {
+      if (typeof resolutionPitchAgent !== "function") {
+        return res.status(503).json({ ok: false, error: "Resolution pitch agent unavailable (no ANTHROPIC_API_KEY or doctrine)" });
+      }
+      const input = req.body || {};
+      const result = await resolutionPitchAgent({
+        dossier: input.dossier || {},
+        thread: Array.isArray(input.thread) ? input.thread : [],
+        ask: input.ask || "",
+      });
+      return res.json({
+        ok: true,
+        text: result.text,
+        model: result.model,
+        elapsedMs: result.elapsedMs,
+        usage: result.usage,
       });
     } catch (error) {
       return next(error);
@@ -3527,6 +3925,14 @@ async function main() {
       error: result.error || null,
     });
     res.status(result.ok ? 200 : 400).json(result);
+  });
+
+  app.get("/api/ai/live-coach/dashboard/closeout/stats", requireDashboardAccess, (req, res) => {
+    res.json({
+      ok: true,
+      config: closeoutConfig,
+      stats: closeoutWorker.getStats(),
+    });
   });
 
   app.get("/api/ai/live-coach/dashboard/sessions/:sessionId/events", requireDashboardAccess, (req, res) => {

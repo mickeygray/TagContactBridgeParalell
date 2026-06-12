@@ -39,6 +39,7 @@ const { createHygieneRouter } = require("./routes/hygiene");
 const { createLiveCoachProxyRouter } = require("./routes/liveCoachProxy");
 const { createLogicsRouter } = require("./routes/logics");
 const { createLexisRouter } = require("./routes/lexis");
+const { createResolutionIntelligenceRouter } = require("./routes/resolutionIntelligence");
 const { createMetricsRouter } = require("./routes/metrics");
 const { createReadClientsRouter } = require("./routes/readClients");
 const { createReadCxRouter } = require("./routes/readCx");
@@ -1253,6 +1254,9 @@ async function startServer() {
   app.use("/api/ai/live-coach", createLiveCoachProxyRouter(auth, { config, logger: runtime.logger }));
   app.use("/api/logics", createLogicsRouter(auth));
   app.use("/api/lexis", createLexisRouter(auth, lexisNightlyRuntime, lexisDailyDropRuntime));
+  // Resolution intelligence (secondary-sales panel) — per-user permission
+  // grants (resolution.read/write/agent), no role defaults.
+  app.use("/api/resolution", createResolutionIntelligenceRouter(auth, config));
   app.use("/api/metrics", createMetricsRouter(auth, spendSyncRuntime));
   app.use("/api/read/clients", createReadClientsRouter(auth));
   app.use("/api/read/cx", createReadCxRouter(auth));

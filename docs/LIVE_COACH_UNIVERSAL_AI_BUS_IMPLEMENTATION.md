@@ -483,6 +483,89 @@ State reset triggers:
 - explicit session stop,
 - stale timeout.
 
+## End-Of-Call Closeout Worker
+
+The live coach should not make the disposition path wait for summaries, emails,
+Logics writes, or grading. On call release/hangup/disposition, the app should
+enqueue a closeout job with the session id, UII, agent, case/contact ids,
+transcript memory, selected context keys, reactions, guideposts, asks, facts,
+and timing. The UI and queue move on immediately; the worker finishes the
+recordkeeping in the background and then fully prunes live coach context for
+that call.
+
+Outputs should be intentionally different by destination:
+
+- Logics activity: sparse operational note only. Use a short human-readable
+  list: call outcome, major issue discussed, next step, and any promised
+  follow-up. Do not include agent critique, strategy notes, or long transcript.
+- Contact / communications panel: sparse call context, similar to Logics but
+  local and searchable. It should answer "what happened on the call?" without
+  turning the communications tab into a coach transcript.
+- LeadCadence / case profile memory: compact continuity summary for future
+  coach sessions. Include facts learned, unresolved questions, objections,
+  promised next step, and selected context keys.
+- Agent email: richer coaching artifact. This can include a call summary,
+  useful moments, missed opportunities, objection handling notes, phase
+  movement, and a light scorecard.
+- Manager/admin view: optional deeper grade/debug record with timings, model
+  usage, selected keys, and transcript references.
+- Call grader: optional OpenAI analysis pass at closeout. It uses a stable
+  cached grading rubric and a compact per-call payload to score phase movement,
+  discovery, control, tax comprehension, sales pivot, compliance, and close.
+  Default model: `LIVE_COACH_CALL_GRADER_MODEL=gpt-5.4`.
+
+Controls:
+
+- Agent summary emails must be toggleable by env/admin setting.
+- Agent summary emails should probably only fire for longer or meaningful
+  calls, for example after a minimum duration, minimum transcript character
+  count, or at least one real coach turn.
+- Voicemail/no-answer/short junk calls should prune context and skip summary
+  writes unless a compliance event needs a sparse note.
+- Summary failures must not reopen or block the agent queue; log and retry
+  worker-side.
+
+Proposed worker stages:
+
+1. Snapshot session memory and mark the session `closing`.
+2. Generate a compact operational summary.
+3. Write sparse Logics activity when case/domain credentials are available.
+4. Upsert local communications/case context.
+5. Optionally generate and send the agent coaching email.
+6. Persist closeout status and model usage.
+7. Prune live coach session state and runtime buffers.
+
+First pass status:
+
+- `packages/shared-services/src/liveCoachCloseoutService.js` builds deterministic closeouts without an extra model call.
+- Terminal bus paths enqueue closeout on stop, stale, prune, and voicemail reject. The queue is best-effort and never blocks the caller.
+- Runtime artifacts always write to `runtime/ai-bus/live-coach/closeout`.
+- CaseProfile communication and LeadCadence continuity summary are enabled only when Mongo is connected.
+- Logics activity is opt-in; agent email is enabled by default for meaningful
+  calls and can be disabled:
+  - `LIVE_COACH_CLOSEOUT_LOGICS_ENABLED=true`
+  - `LIVE_COACH_CLOSEOUT_AGENT_EMAIL_ENABLED=false`
+  - `LIVE_COACH_CLOSEOUT_AGENT_EMAIL_MIN_SECONDS`
+  - `LIVE_COACH_CLOSEOUT_AGENT_EMAIL_MIN_CHARS`
+- Agent email can also alert managers on outlier graded calls. Defaults:
+  high score `>=90`, low score `<=55`, longer call threshold `>=300s` or
+  `>=800` prospect transcript chars, recipients Matt Anderson and Mickey Gray.
+  Tune with:
+  - `LIVE_COACH_CLOSEOUT_MANAGER_EMAIL_ENABLED`
+  - `LIVE_COACH_CLOSEOUT_MANAGER_EMAIL_TO`
+  - `LIVE_COACH_CLOSEOUT_MANAGER_EMAIL_MIN_SECONDS`
+  - `LIVE_COACH_CLOSEOUT_MANAGER_EMAIL_MIN_CHARS`
+  - `LIVE_COACH_CLOSEOUT_MANAGER_HIGH_SCORE`
+  - `LIVE_COACH_CLOSEOUT_MANAGER_LOW_SCORE`
+- Call grading is enabled by default when `OPENAI_API_KEY` is present and can
+  be tuned with:
+  - `LIVE_COACH_CALL_GRADER_ENABLED=false`
+  - `LIVE_COACH_CALL_GRADER_MODEL`
+  - `LIVE_COACH_CALL_GRADER_MIN_SECONDS`
+  - `LIVE_COACH_CALL_GRADER_MIN_CHARS`
+  - `LIVE_COACH_CALL_GRADER_TIMEOUT_MS`
+- Dashboard stats are available at `/api/ai/live-coach/dashboard/closeout/stats`.
+
 ## First Implementation Checklist
 
 - [ ] Create bus route skeleton on `7000`.

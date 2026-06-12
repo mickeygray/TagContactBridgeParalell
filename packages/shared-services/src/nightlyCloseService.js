@@ -122,13 +122,14 @@ function isLdTransitionRow(row = {}) {
   return isLdSourceLabel(row.source || row.sourceName || row.label);
 }
 
+// Rates come from ldSpendService (env-overridable) so the email's estimate
+// and the spend LEDGER price identically — the hardcoded $2 general rate
+// here overstated the email's LD cost for months (real rate: $1.50).
 function ldFamilyEstimatedCost(row = {}) {
   const leads = toNumber(row.leads);
   const key = vendorFamilyKey(row);
-  if (key === "ld-custom") return leads * 3;
-  if (key === "ld-custom-2") return leads * 3;
-  if (key === "ld-general") return leads * 2;
-  return 0;
+  const rates = require("./ldSpendService").getLdRates();
+  return leads * toNumber(rates[key]);
 }
 
 function decorateLdVendorFamily(row = {}) {
@@ -149,9 +150,10 @@ function buildLdCostSummary(rows = []) {
   const customCount = toNumber(custom.leads);
   const custom2Count = toNumber(custom2.leads);
   const generalCount = toNumber(general.leads);
-  const customRate = 3;
-  const custom2Rate = 3;
-  const generalRate = 2;
+  const rates = require("./ldSpendService").getLdRates();
+  const customRate = toNumber(rates["ld-custom"]);
+  const custom2Rate = toNumber(rates["ld-custom-2"]);
+  const generalRate = toNumber(rates["ld-general"]);
   const customCost = customCount * customRate;
   const custom2Cost = custom2Count * custom2Rate;
   const generalCost = generalCount * generalRate;
@@ -171,10 +173,8 @@ function buildLdCostSummary(rows = []) {
 
 function campaignEstimatedCost(row = {}) {
   const count = toNumber(row.count);
-  if (row.key === "ld-custom") return count * 3;
-  if (row.key === "ld-custom-2") return count * 3;
-  if (row.key === "ld-general") return count * 2;
-  return 0;
+  const rates = require("./ldSpendService").getLdRates();
+  return count * toNumber(rates[String(row.key || "").toLowerCase()]);
 }
 
 function normalizeNightlyDomains(domains) {
@@ -364,6 +364,35 @@ async function runNightlyFinalClosePass(domains, options = {}) {
     spendSync = { ok: false, skipped: true, reason: "no-spend-sync-runtime-passed" };
   }
 
+  // LD spend materializer: lead-cadence counts × per-family rates become
+  // REAL spend entries (idempotent per date+family; manual nudges win via
+  // collision-skip). Runs right after spend sync so the vendor report and
+  // snapshots built later in this close read true LD cost, not zero.
+  let ldSpendMaterializer = { skipped: true, reason: "disabled" };
+  const ldSpendEnabled =
+    options.ldSpendMaterializerEnabled !== undefined
+      ? Boolean(options.ldSpendMaterializerEnabled)
+      : String(process.env.LD_SPEND_MATERIALIZER_ENABLED ?? "true") !== "false";
+  if (ldSpendEnabled) {
+    try {
+      const { materializeLdSpendForDate } = require("./ldSpendService");
+      const ldDomains = String(process.env.LD_SPEND_DOMAINS || "WYNN")
+        .split(",").map((s) => s.trim().toUpperCase()).filter(Boolean)
+        .filter((d) => selectedDomains.includes(d));
+      ldSpendMaterializer = { domains: {} };
+      for (const ldDomain of ldDomains) {
+        ldSpendMaterializer.domains[ldDomain] = await materializeLdSpendForDate({
+          domain: ldDomain,
+          dateKey,
+          logger: options.logger || null,
+        });
+      }
+    } catch (error) {
+      ldSpendMaterializer = { ok: false, error: error.message };
+      options.logger?.warn?.("nightly-close.ld_spend_materializer_failed", { error: error.message });
+    }
+  }
+
   const hourlySweep = await runHourlySweep({
     workerName: "nightly-close-final",
     lane: "nightly",
@@ -458,13 +487,35 @@ async function runNightlyFinalClosePass(domains, options = {}) {
     }
   }
 
+  // Client-case discovery: ensure every Logics client-status case has a
+  // caseProfile, independent of call logs and intake (the auth-spam window
+  // proved profiles born only from engagement go missing — and the payment
+  // reconcile can't see a case without a profile). Skips itself politely
+  // until CLIENT_CASE_DISCOVERY_STATUS_IDS is configured.
+  let clientCaseDiscovery = { skipped: true, reason: "disabled" };
+  const discoveryEnabled =
+    options.clientCaseDiscoveryEnabled !== undefined
+      ? Boolean(options.clientCaseDiscoveryEnabled)
+      : String(process.env.CLIENT_CASE_DISCOVERY_ENABLED ?? "true") !== "false";
+  if (discoveryEnabled) {
+    try {
+      const { ensureClientCaseProfiles } = require("./clientCaseDiscoveryService");
+      clientCaseDiscovery = await ensureClientCaseProfiles({ logger: options.logger || null });
+    } catch (error) {
+      clientCaseDiscovery = { ok: false, error: error.message };
+      options.logger?.warn?.("nightly-close.client_case_discovery_failed", { error: error.message });
+    }
+  }
+
   return {
     domains: selectedDomains,
     spendSync,
+    ldSpendMaterializer,
     hourlySweep,
     cxCallActivityBackfill,
     leadCadenceCaseRefresh,
     postDateSweep,
+    clientCaseDiscovery,
     paymentSweep: summarizePaymentSweepForOps(
       hourlySweep?.phaseA?.paymentReconcile || [],
       selectedDomains,
@@ -3182,6 +3233,30 @@ async function runGroupedNightlyClose(domains, options = {}) {
       reason: "email-disabled",
       pool: "ops",
     };
+  }
+
+  // Resolution bank close — LAST, deliberately after every email is out.
+  // The tier-weighted Logics sweep is paced per-case GETs and can run
+  // ~25 minutes at full cap; the close reports must never wait on it.
+  // Isolated like every other step: a Logics outage costs one night of
+  // bank freshness, nothing else.
+  const resolutionEnabled =
+    options.resolutionBankCloseEnabled !== undefined
+      ? Boolean(options.resolutionBankCloseEnabled)
+      : String(process.env.RESOLUTION_NIGHTLY_CLOSE_ENABLED ?? "true") !== "false";
+  if (resolutionEnabled && !options.skipFinalClosePass) {
+    try {
+      const { runResolutionBankClose } = require("./resolutionBankService");
+      finalClose.resolutionBankClose = await runResolutionBankClose({
+        logger: options.logger || null,
+        ...(options.resolutionCloseMaxCases ? { maxCases: Number(options.resolutionCloseMaxCases) } : {}),
+      });
+    } catch (error) {
+      finalClose.resolutionBankClose = { ok: false, error: error.message };
+      options.logger?.warn?.("nightly-close.resolution_bank_close_failed", { error: error.message });
+    }
+  } else {
+    finalClose.resolutionBankClose = { skipped: true, reason: resolutionEnabled ? "final-close-pass-skipped" : "disabled" };
   }
 
   return { date: dateKey, domains: payload.domains, finalClose, payload, results };

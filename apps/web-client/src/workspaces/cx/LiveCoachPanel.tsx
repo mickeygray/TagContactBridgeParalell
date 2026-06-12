@@ -1,6 +1,6 @@
 import * as React from "react";
 import { createPortal } from "react-dom";
-import { AlertTriangle, ClipboardList, MessageSquareQuote, MessagesSquare, Send, Sparkles, Target, Wand2, X } from "lucide-react";
+import { AlertTriangle, ClipboardList, MessageSquareQuote, MessagesSquare, Plus, Send, Sparkles, Target, Wand2, X } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { api } from "@/lib/api/client";
@@ -14,13 +14,6 @@ import {
   type LiveCoachSession,
   type LiveCoachTranscript,
 } from "@/lib/liveCoach/stream";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/Dialog";
 import { cn } from "@/lib/utils/cn";
 
 type LiveCoachPanelProps = {
@@ -34,6 +27,36 @@ type LiveCoachPanelProps = {
   contactName?: string | null;
   releaseKey?: string | null;
   releaseReason?: string | null;
+  layout?: "floating" | "embedded";
+  chatPlacement?: "portal" | "inline";
+  panelView?: "coach" | "interview" | "guidance";
+  headerControls?: React.ReactNode;
+  contentOverride?: React.ReactNode | ((helpers: LiveCoachChildHelpers) => React.ReactNode);
+};
+
+type LiveCoachAskSeed = {
+  kind: string;
+  label: string;
+  lineText?: string;
+};
+
+type LiveCoachAskDraft = {
+  id: string;
+  text: string;
+  kind: string;
+  seeds: LiveCoachAskSeed[];
+};
+
+type LiveCoachAskDragProps = {
+  draggable: true;
+  onDragStart: (event: React.DragEvent<HTMLElement>) => void;
+};
+
+type LiveCoachChildHelpers = {
+  seedAsk: (seed: LiveCoachAskSeed, mode?: "replace" | "append") => void;
+  getDragProps: (seed: LiveCoachAskSeed, mode?: "replace" | "append") => LiveCoachAskDragProps;
+  askPending: boolean;
+  sessionReady: boolean;
 };
 
 type ConversationItem = {
@@ -44,6 +67,26 @@ type ConversationItem = {
   text: string;
   provisional?: boolean;
   lowConfidence?: boolean;
+};
+
+type GuidepostHistoryItem = {
+  id: string;
+  at: string;
+  signature: string;
+  stageLabel: string;
+  primary: string;
+  stay: string;
+  next: string;
+};
+
+type ReactionHistoryItem = {
+  id: string;
+  at: string;
+  signature: string;
+  label: string;
+  sayable: string;
+  watchPoints: string;
+  transcript: string;
 };
 
 type CoachStageTone = "idle" | "active" | "good" | "warn" | "danger";
@@ -382,10 +425,17 @@ function reduceEvent(state: CoachState, payload: LiveCoachEvent): CoachState {
     });
   }
   if (payload.type === "session.stop" || payload.type === "session.stale" || payload.type === "session.pruned") {
-    // Clear conversation items when the session ends so a stale board
-    // doesn't carry the prior call's transcript into the next one.
+    // Clear all call-derived coach state when the session ends so a stale
+    // board doesn't carry the prior call's transcript or guidance forward.
     patch({
+      provisionalTranscript: null,
+      prospectTranscript: null,
+      context: null,
+      dialog: null,
       conversationItems: [],
+      asks: [],
+      factLedger: {},
+      callSummary: "",
       stage: {
         label: payload.type === "session.stale" ? "stale" : "released",
         detail: payload.actionReason || "Session ended",
@@ -545,6 +595,18 @@ function firstStrategyBlock(value: string | null | undefined) {
   return compactCoachText(withoutHeaders || clean, 360);
 }
 
+function humanizeCoachKey(value: string | null | undefined) {
+  return String(value || "")
+    .replace(/[_-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function sentenceCase(value: string | null | undefined) {
+  const clean = humanizeCoachKey(value);
+  return clean ? `${clean.charAt(0).toUpperCase()}${clean.slice(1)}` : "";
+}
+
 function stopDashboardSession(sessionId: string, reason: string) {
   if (!sessionId) return;
   api.post(`${LIVE_COACH_API_BASE}/sessions/${encodeURIComponent(sessionId)}/stop`, { reason }).catch(() => {
@@ -563,30 +625,44 @@ export function LiveCoachPanel({
   contactName,
   releaseKey,
   releaseReason,
+  layout = "floating",
+  chatPlacement = "portal",
+  panelView = "coach",
+  headerControls,
+  contentOverride,
 }: LiveCoachPanelProps) {
   // Single reducer so each SSE event triggers exactly one render instead of
   // the former ~7 setState calls. All coach-domain state lives here; only the
   // UI-local dialog-open toggle stays a plain useState.
   const [coach, dispatch] = React.useReducer(coachReducer, INITIAL_COACH_STATE);
   const { session, context, dialog, stage, conversationItems, asks, bridgeStatus, error } = coach;
-  const [contextOpen, setContextOpen] = React.useState(false);
   const [focusedTranscriptId, setFocusedTranscriptId] = React.useState("");
+  const [guidepostHistory, setGuidepostHistory] = React.useState<GuidepostHistoryItem[]>([]);
+  const [reactionHistory, setReactionHistory] = React.useState<ReactionHistoryItem[]>([]);
   // ── Coach chat ("scramble the AI"): every zone can seed the chat input — a
   // transcript line ("they said this, how do I respond"), a guidepost ("I'm
   // stuck on this objective"), an objection ("more help with this"), a
   // pretyped quick question, or free text. The seed carries kind + context;
   // the agent can add custom words. Answers thread into a chat the agent can
   // follow up on — the bus carries the recent Q&A as context.
-  const [askText, setAskText] = React.useState("");
-  const [askSeed, setAskSeed] = React.useState<{ kind: string; label: string; lineText?: string } | null>(null);
+  const [askDrafts, setAskDrafts] = React.useState<LiveCoachAskDraft[]>([
+    { id: "ask-1", text: "", kind: "", seeds: [] },
+  ]);
+  const [activeAskDraftId, setActiveAskDraftId] = React.useState("ask-1");
   const [askError, setAskError] = React.useState("");
   const askInputRef = React.useRef<HTMLInputElement | null>(null);
   const chatScrollRef = React.useRef<HTMLDivElement | null>(null);
+  const embedded = layout === "embedded";
+  const shouldUseChatPortal = chatPlacement === "portal";
   // Workspace chat slot (under Appointments). Looked up after mount because
   // the slot and this panel can render a beat apart while the workspace
   // settles.
   const [chatSlot, setChatSlot] = React.useState<HTMLElement | null>(null);
   React.useEffect(() => {
+    if (!shouldUseChatPortal) {
+      setChatSlot(null);
+      return undefined;
+    }
     const find = () => document.getElementById(COACH_CHAT_SLOT_ID);
     const found = find();
     if (found) {
@@ -595,49 +671,178 @@ export function LiveCoachPanel({
     }
     const retry = window.setTimeout(() => setChatSlot(find()), 600);
     return () => window.clearTimeout(retry);
-  }, []);
+  }, [shouldUseChatPortal]);
   const latestAsk = asks.length ? asks[asks.length - 1] : null;
   const askPending = Boolean(latestAsk && (latestAsk.status === "thinking" || latestAsk.status === "streaming"));
-  const seedAsk = React.useCallback((seed: { kind: string; label: string; lineText?: string }) => {
-    setAskSeed(seed);
+  const responseAsks = asks;
+  const [activeAskResponseId, setActiveAskResponseId] = React.useState("");
+  React.useEffect(() => {
+    if (!responseAsks.length) {
+      setActiveAskResponseId("");
+      return;
+    }
+    setActiveAskResponseId((current) => (
+      current && responseAsks.some((ask) => ask.id === current)
+        ? current
+        : responseAsks[responseAsks.length - 1]?.id || ""
+    ));
+  }, [responseAsks]);
+  const activeAskResponse = responseAsks.find((ask) => ask.id === activeAskResponseId) || responseAsks[responseAsks.length - 1] || latestAsk;
+  const activeAskDraft = askDrafts.find((draft) => draft.id === activeAskDraftId) || askDrafts[0] || { id: "ask-1", text: "", kind: "", seeds: [] };
+  const askText = activeAskDraft.text;
+  const askKind = activeAskDraft.kind;
+  const askSeeds = activeAskDraft.seeds;
+  const updateActiveAskDraft = React.useCallback((updater: (draft: LiveCoachAskDraft) => LiveCoachAskDraft) => {
+    setAskDrafts((current) => {
+      if (!current.length) return [updater({ id: activeAskDraftId || "ask-1", text: "", kind: "", seeds: [] })];
+      return current.map((draft) => (draft.id === activeAskDraftId ? updater(draft) : draft));
+    });
+  }, [activeAskDraftId]);
+  const setAskText = React.useCallback((value: string) => {
+    updateActiveAskDraft((draft) => ({ ...draft, text: value }));
+  }, [updateActiveAskDraft]);
+  const setAskKind = React.useCallback((value: string | ((current: string) => string)) => {
+    updateActiveAskDraft((draft) => ({
+      ...draft,
+      kind: typeof value === "function" ? value(draft.kind) : value,
+    }));
+  }, [updateActiveAskDraft]);
+  const setAskSeeds = React.useCallback((value: LiveCoachAskSeed[] | ((current: LiveCoachAskSeed[]) => LiveCoachAskSeed[])) => {
+    updateActiveAskDraft((draft) => ({
+      ...draft,
+      seeds: typeof value === "function" ? value(draft.seeds) : value,
+    }));
+  }, [updateActiveAskDraft]);
+  const addAskDraft = React.useCallback(() => {
+    const id = `ask-${Date.now().toString(36)}`;
+    setAskDrafts((current) => [...current, { id, text: "", kind: "", seeds: [] }].slice(-4));
+    setActiveAskDraftId(id);
     setAskError("");
     window.setTimeout(() => askInputRef.current?.focus(), 0);
   }, []);
+  const removeAskDraft = React.useCallback((id: string) => {
+    setAskDrafts((current) => {
+      const next = current.filter((draft) => draft.id !== id);
+      const safeNext = next.length ? next : [{ id: "ask-1", text: "", kind: "", seeds: [] }];
+      if (id === activeAskDraftId) setActiveAskDraftId(safeNext[safeNext.length - 1]?.id || "ask-1");
+      return safeNext;
+    });
+  }, [activeAskDraftId]);
+  const askSeed = askSeeds[0] || null;
+  const askContextText = React.useMemo(
+    () => askSeeds
+      .map((seed, index) => {
+        const text = String(seed.lineText || seed.label || "").trim();
+        return text ? `Context ${index + 1} (${seed.kind}): ${text}` : "";
+      })
+      .filter(Boolean)
+      .join("\n")
+      .slice(0, 1800),
+    [askSeeds],
+  );
+  const seedAsk = React.useCallback((seed: LiveCoachAskSeed, mode: "replace" | "append" = "replace") => {
+    setAskKind((current) => current || seed.kind);
+    setAskSeeds((current) => {
+      if (mode !== "append") return [seed];
+      const seedKey = `${seed.kind}:${seed.label}:${seed.lineText || ""}`;
+      const next = current.filter((item) => `${item.kind}:${item.label}:${item.lineText || ""}` !== seedKey);
+      return [...next, seed].slice(-6);
+    });
+    setAskError("");
+    window.setTimeout(() => askInputRef.current?.focus(), 0);
+  }, []);
+  const clearAskSeed = React.useCallback((seed: LiveCoachAskSeed) => {
+    setAskSeeds((current) => current.filter((item) => item !== seed));
+  }, []);
+  const getAskDragProps = React.useCallback((
+    seed: LiveCoachAskSeed,
+    mode: "replace" | "append" = "append",
+  ): LiveCoachAskDragProps => ({
+    draggable: true,
+    onDragStart: (event) => {
+      event.dataTransfer.effectAllowed = "copy";
+      event.dataTransfer.setData("application/x-live-coach-ask-seed", JSON.stringify({ seed, mode }));
+      event.dataTransfer.setData("text/plain", seed.lineText || seed.label);
+    },
+  }), []);
   // Shared POST core: the chat input and the one-tap quick questions both land
   // here. The answer streams back over SSE (coach.answer) into the thread.
-  const postAsk = React.useCallback(async (kind: string, question: string, lineText: string) => {
+  const postAsk = React.useCallback(async (
+    kind: string,
+    question: string,
+    lineText: string,
+    contextItems: LiveCoachAskSeed[],
+  ) => {
     const sessionId = String(session?.id || "");
-    if (!sessionId || askPending || (!question && !lineText)) return;
+    if (!sessionId || askPending || (!question && !lineText && !contextItems.length)) return;
     setAskError("");
     try {
       const result = await api.post<{ ok?: boolean; error?: string }>(
         `${LIVE_COACH_API_BASE}/sessions/${encodeURIComponent(sessionId)}/ask`,
-        { kind, question, lineText },
+        { kind, question, lineText, contextItems },
       );
       if (result && result.ok === false) {
         setAskError(result.error || "Ask failed");
         return;
       }
       setAskText("");
-      setAskSeed(null);
+      setAskKind("");
+      setAskSeeds([]);
     } catch (err) {
       setAskError(err instanceof Error ? err.message : "Ask failed");
     }
   }, [session?.id, askPending]);
   const submitAsk = React.useCallback(
-    () => postAsk(askSeed?.kind || "question", askText.trim(), askSeed?.lineText || ""),
-    [postAsk, askSeed, askText],
+    () => postAsk(askKind || askSeed?.kind || "question", askText.trim(), askContextText, askSeeds),
+    [postAsk, askKind, askSeed, askText, askContextText, askSeeds],
   );
+  const selectedAskGuidance = askText.trim()
+    || ({
+      line: "How do I respond to this specific line?",
+      objection: "How do I deal with this specific objection?",
+      expand: "Give me more context on this guidance.",
+      next_move: "Explain what to keep in mind.",
+      watch_points: "Explain these watch points.",
+      fact: "Explain this call fact.",
+      tax_problem: "Explain this tax problem.",
+      client_context: "Explain this client context.",
+      financial_context: "Explain this financial fact.",
+      interview_snapshot: "Explain this interview snapshot.",
+      strategy: "Clarify this call strategy.",
+      discovery: "Show me what discovery is still missing.",
+      close: "Help me close around this moment.",
+      context: "Explain this selected context.",
+    } as Record<string, string>)[askKind || askSeed?.kind || ""]
+    || "";
+  const contentOverrideNode =
+    typeof contentOverride === "function"
+      ? contentOverride({
+        seedAsk,
+        getDragProps: getAskDragProps,
+        askPending,
+        sessionReady: Boolean(session?.id),
+      })
+      : contentOverride;
   // Pretyped quick questions — one tap sends. Line-anchored ones ride the
   // pinned/latest prospect line so "that" means what was just said.
-  const quickAsk = React.useCallback((kind: string, question: string, useLine: boolean) => {
+  const selectQuickAsk = React.useCallback((kind: string, label: string, question: string, useLine: boolean) => {
     const anchor = useLine
       ? (conversationItems.find((item) => item.id === focusedTranscriptId)?.text
         || [...conversationItems].reverse().find((item) => item.side === "prospect")?.text
         || "")
       : "";
-    void postAsk(kind, question, anchor);
-  }, [postAsk, conversationItems, focusedTranscriptId]);
+    setAskText(question);
+    setAskKind(kind);
+    setAskError("");
+    if (anchor && !askSeeds.some((seed) => seed.lineText)) {
+      seedAsk({
+        kind,
+        label: `${label}: "${compactCoachText(anchor, 64)}"`,
+        lineText: anchor,
+      }, "replace");
+    }
+    window.setTimeout(() => askInputRef.current?.focus(), 0);
+  }, [askSeeds, conversationItems, focusedTranscriptId, seedAsk]);
   // Chat follows its tail while answers stream in.
   React.useEffect(() => {
     const el = chatScrollRef.current;
@@ -665,15 +870,7 @@ export function LiveCoachPanel({
   } | null>(null);
   const [rebindNonce, setRebindNonce] = React.useState(0);
   const bumpRebind = React.useCallback(() => setRebindNonce((n) => n + 1), []);
-  const transcriptScrollRef = React.useRef<HTMLDivElement | null>(null);
   const inlineTranscriptScrollRef = React.useRef<HTMLDivElement | null>(null);
-  // Mid-call the interesting end of the transcript is the bottom: anchor there
-  // when the modal opens and keep following as new lines arrive while open.
-  React.useEffect(() => {
-    if (!contextOpen) return;
-    const el = transcriptScrollRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
-  }, [contextOpen, conversationItems.length]);
   React.useEffect(() => {
     if (focusedTranscriptId) return;
     const el = inlineTranscriptScrollRef.current;
@@ -909,7 +1106,7 @@ export function LiveCoachPanel({
             status: "connected",
             error: data.reason || data.status || "Waiting for matching stream",
             stage: {
-              label: "waiting stream",
+              label: "ready",
               detail: data.reason || data.status || "Waiting for matching stream",
               tone: "idle",
               at: new Date().toISOString(),
@@ -996,8 +1193,10 @@ export function LiveCoachPanel({
   React.useEffect(() => {
     autoRestoredRef.current = false;
     setFocusedTranscriptId("");
-    setAskText("");
-    setAskSeed(null);
+    setGuidepostHistory([]);
+    setReactionHistory([]);
+    setAskDrafts([{ id: "ask-1", text: "", kind: "", seeds: [] }]);
+    setActiveAskDraftId("ask-1");
     setAskError("");
   }, [rebindNonce, scopedReleaseKey, callScopeKey]);
 
@@ -1011,15 +1210,15 @@ export function LiveCoachPanel({
     conversationItems.find((item) => item.id === focusedTranscriptId) ||
     lastProspectItem ||
     null;
-  const visibleConversationItems = conversationItems.slice(-16);
+  const visibleConversationItems = conversationItems;
   const streamText = prospectItems.map((item) => item.text).join(" ").replace(/\s+/g, " ").trim();
   const streamTail = streamText.length > 260 ? `…${streamText.slice(-260).trimStart()}` : streamText;
   const heardAt = lastProspectItem?.at || "";
   const heardIsLive = Boolean(lastProspectItem?.provisional);
   const line = dialog?.say?.trim() || "";
   const rejected = dialog?.status === "rejected";
-  // Navigator contract: Read → "What changed", Steer → "Stay on track",
-  // Try → the sayable line. Unlabeled output (opening phase) stays a line.
+  // Navigator contract: Read -> reaction trigger, Steer -> guidepost,
+  // Try -> optional sayable line. Unlabeled output (opening phase) stays a line.
   const nav = parseNavigatorSay(line);
   const contextKeys = [
     ...(context?.miniJudgement?.selectedKeys || []),
@@ -1032,37 +1231,112 @@ export function LiveCoachPanel({
     .map(([key, row]) => ({ key, value: String(row?.value || "").trim() }))
     .filter((row) => row.value)
     .slice(-10);
+  const contextMatches = Array.isArray(context?.matches) ? context.matches : [];
+  const tacticRows = Array.isArray(context?.tactics) ? context.tactics : [];
+  const memoryBrief = context?.memoryBrief || context?.miniJudgement?.memoryBrief || null;
+  const activeIssues = Array.isArray(memoryBrief?.activeIssues) ? memoryBrief.activeIssues : [];
+  const normalizedCallText = [
+    streamText,
+    coach.callSummary,
+    memoryBrief?.whatHappened,
+    memoryBrief?.continueFrom,
+    factEntries.map((fact) => `${fact.key} ${fact.value}`).join(" "),
+    uniqueContextKeys.join(" "),
+    tacticRows.map((tactic) => `${tactic.key || ""} ${tactic.label || ""}`).join(" "),
+  ].join(" ").toLowerCase();
+  const contextKeySet = new Set(uniqueContextKeys);
+  const hasContextKey = (...keys: string[]) => keys.some((key) => contextKeySet.has(key));
+  const discoveryChecks = [
+    {
+      label: "notice type",
+      found: hasContextKey("irs_notice", "state_tax", "collection_pressure") ||
+        /\b(cp\d{2,4}|lt11|1058|notice|letter|irs|state|ftb|franchise tax|levy|lien|garnish)\b/i.test(normalizedCallText),
+    },
+    {
+      label: "years involved",
+      found: /\b(20\d{2}|tax year|years?|returns?|filed|unfiled|behind)\b/i.test(normalizedCallText),
+    },
+    {
+      label: "balance",
+      found: /\b(balance|owe|owed|amount|debt|\$\d|\d+\s?(k|thousand)|hundred)\b/i.test(normalizedCallText),
+    },
+    {
+      label: "income type",
+      found: hasContextKey("payroll_tax", "self_employment") ||
+        /\b(w-?2|1099|payroll|941|business|self employed|contractor|employee|income)\b/i.test(normalizedCallText),
+    },
+    {
+      label: "ability to pay",
+      found: hasContextKey("money_pressure", "fees_close") ||
+        /\b(pay|afford|income|savings|monthly|rent|mortgage|fixed income|cash|broke|expensive)\b/i.test(normalizedCallText),
+    },
+  ];
+  const missingDiscovery = discoveryChecks.filter((item) => !item.found).map((item) => item.label);
+  const knownDiscovery = discoveryChecks.filter((item) => item.found).map((item) => item.label);
+  const tacticLabels = tacticRows
+    .map((tactic) => sentenceCase(tactic.label || tactic.key))
+    .filter(Boolean)
+    .slice(0, 4);
+  const sensitivityKeys = [
+    hasContextKey("emotional_pressure") ? "emotional pressure" : "",
+    hasContextKey("money_pressure", "fees_close") ? "money sensitivity" : "",
+    hasContextKey("legitimacy") ? "legitimacy/trust" : "",
+    hasContextKey("objection") ? "resistance/stall" : "",
+    tacticLabels.includes("Shame reduction") || /shame|embarrass|ashamed|my fault|messed up/i.test(normalizedCallText) ? "shame reduction" : "",
+  ].filter(Boolean);
+  const phase =
+    /closing|commitment|sign|paperwork|payment|onboarding|ready to start|where do i sign|let'?s do/i.test(normalizedCallText) ||
+      tacticRows.some((tactic) => tactic.key === "momentum_close")
+      ? "Closing"
+      : hasContextKey("fees_close") || /\b(cost|fee|price|retainer|down payment|expensive)\b/i.test(normalizedCallText)
+        ? "Pitch / fees"
+        : knownDiscovery.length >= 4 || hasContextKey("representation") || /\b(represent|poa|power of attorney|2848|transcript)\b/i.test(normalizedCallText)
+          ? "Expert opinion / offer"
+          : prospectItems.length <= 2 && !knownDiscovery.length
+            ? "Intro / identify"
+            : "Discovery";
+  const caseRead = compactCoachText(
+    coach.callSummary ||
+      memoryBrief?.whatHappened ||
+      context?.miniJudgement?.transcriptMeaning ||
+      (contextMatches.length ? `This is shaping into ${contextMatches.slice(0, 4).map((match) => match.label || humanizeCoachKey(match.key)).filter(Boolean).join(", ")}.` : "") ||
+      strategyPreview ||
+      "No durable case read yet. Let transcript and the interview form establish the case shape.",
+    520,
+  );
+  const advanceDirection = compactCoachText(
+    memoryBrief?.continueFrom ||
+      tacticRows[0]?.guidance ||
+      (missingDiscovery.length
+        ? `You are in ${phase}. Get ${missingDiscovery.slice(0, 3).join(", ")} before advancing.`
+        : `You are in ${phase}. Discovery is mostly covered; move toward fact review, representation, and commitment.`) ||
+      "Keep the call moving through discovery, consequence, offer, price, and close.",
+    520,
+  );
+  const keepInMind = compactCoachText(
+    [
+      knownDiscovery.length ? `Known: ${knownDiscovery.join(", ")}.` : "",
+      sensitivityKeys.length ? `Sensitivity: ${sensitivityKeys.join(", ")}.` : "",
+      tacticLabels.length ? `Posture: ${tacticLabels.join(", ")}.` : "",
+      activeIssues.length
+        ? `Recent thread: ${activeIssues.slice(0, 3).map((issue) => `${humanizeCoachKey(issue.key)}${issue.snippet ? ` (${issue.snippet})` : ""}`).join("; ")}.`
+        : "",
+    ].filter(Boolean).join(" ") ||
+      "Keep listening for notice type, years, balance, income type, ability to pay, and emotional pressure.",
+    520,
+  );
   const guidepostPrimary =
     focusedTranscriptId && focusedTranscriptItem
       ? `Focused line: ${focusedTranscriptItem.text}`
-      : nav.read
-        || context?.miniJudgement?.transcriptMeaning
-        || context?.actionReason
-        || strategyPreview
-        || "Use the interview form to sharpen the coach. Live guidance will update as transcript and context arrive.";
+      : `${phase}: ${caseRead}`;
   const guidepostStayOnTrack =
     nav.steer
-    || dialog?.guidance
-    || context?.actionReason
-    || (strategyPreview ? "Follow the form-based strategy and use new transcript lines to adjust the next move." : "")
-    || "Keep the call moving through discovery, consequence, offer, price, and close.";
-  const guidepostNextMove =
-    nav.tryLine
-      ? compactCoachText(nav.tryLine, 360)
-      : nav.labeled && nav.steer
-        ? compactCoachText(nav.steer, 360)
-        : line
-          ? compactCoachText(line, 360)
-          : rejected
-            ? "Call rejected for voicemail match."
-            : "Waiting for the next coachable moment.";
+      ? nav.steer
+      : advanceDirection;
+  const guidepostNextMove = keepInMind;
   // The Reactions card shows ONLY sayable words: the Try line, or the whole
   // output when it's an unlabeled opening-phase line.
   const sayableLine = nav.tryLine || (nav.labeled ? "" : line);
-  const focusedLineHelp =
-    focusedTranscriptId && focusedTranscriptItem
-      ? "This transcript line is pinned for extra consideration."
-      : "Click a transcript line to pin it here for more specific feedback.";
   const stageToneClass =
     stage.tone === "good"
       ? "border-emerald-200 bg-emerald-50 text-emerald-700"
@@ -1077,10 +1351,131 @@ export function LiveCoachPanel({
     bridgeStatus === "disabled"
       ? "off"
       : bridgeStatus === "connected"
-        ? session?.status || "ready"
+        ? session?.status || (!session?.id && /stream/i.test(`${error} ${stage.detail || ""}`) ? "waiting stream" : "ready")
         : bridgeStatus === "connecting"
           ? "connecting"
           : "waiting";
+  const watchPointsText = uniqueContextKeys.length
+    ? uniqueContextKeys.join(", ")
+    : "Price pressure, authority, urgency, confusion, spouse approval, and attempts to drift away from discovery.";
+  const reactionTrigger = nav.read
+    || dialog?.label
+    || context?.miniJudgement?.transcriptMeaning
+    || context?.actionReason
+    || (rejected ? "Voicemail or machine audio detected" : "");
+  const reactionDisplay = sayableLine
+    || (nav.labeled
+      ? "No script needed - follow the guideposts."
+      : rejected
+        ? "Call rejected for voicemail match."
+        : "Waiting for a useful reaction.");
+  const guidepostSignature = [
+    guidepostPrimary,
+    guidepostStayOnTrack,
+    guidepostNextMove,
+    stage.label,
+  ].join("\n").trim();
+  const reactionSignature = [
+    reactionTrigger,
+    reactionDisplay,
+    watchPointsText,
+    dialog?.label || "",
+    focusedTranscriptItem?.id || "",
+  ].join("\n").trim();
+
+  React.useEffect(() => {
+    const hasRealGuidepost = Boolean(
+      dialog?.id ||
+      context?.id ||
+      focusedTranscriptId ||
+      factEntries.length ||
+      formStrategy,
+    );
+    if (!hasRealGuidepost || !guidepostSignature) return;
+    setGuidepostHistory((current) => {
+      if (current[0]?.signature === guidepostSignature) return current;
+      return [
+        {
+          id: `guide-${Date.now().toString(36)}`,
+          at: new Date().toISOString(),
+          signature: guidepostSignature,
+          stageLabel: stage.label,
+          primary: guidepostPrimary,
+          stay: guidepostStayOnTrack,
+          next: guidepostNextMove,
+        },
+        ...current.filter((item) => item.signature !== guidepostSignature),
+      ].slice(0, 24);
+    });
+  }, [
+    context?.id,
+    dialog?.id,
+    factEntries.length,
+    focusedTranscriptId,
+    formStrategy,
+    guidepostNextMove,
+    guidepostPrimary,
+    guidepostSignature,
+    guidepostStayOnTrack,
+    stage.label,
+  ]);
+
+  React.useEffect(() => {
+    const hasRealReaction = Boolean(dialog?.id || rejected || sayableLine || uniqueContextKeys.length);
+    if (!hasRealReaction || !reactionSignature || reactionDisplay === "Waiting for a useful reaction.") return;
+    setReactionHistory((current) => {
+      if (current[0]?.signature === reactionSignature) return current;
+      return [
+        {
+          id: `reaction-${Date.now().toString(36)}`,
+          at: new Date().toISOString(),
+          signature: reactionSignature,
+          label: reactionTrigger || dialog?.label || (rejected ? "voicemail" : "reaction"),
+          sayable: reactionDisplay,
+          watchPoints: watchPointsText,
+          transcript: focusedTranscriptItem?.text || lastProspectItem?.text || "",
+        },
+        ...current.filter((item) => item.signature !== reactionSignature),
+      ].slice(0, 24);
+    });
+  }, [
+    dialog?.id,
+    dialog?.label,
+    focusedTranscriptItem?.id,
+    focusedTranscriptItem?.text,
+    lastProspectItem?.text,
+    reactionDisplay,
+    reactionSignature,
+    reactionTrigger,
+    rejected,
+    sayableLine,
+    uniqueContextKeys.length,
+    watchPointsText,
+  ]);
+
+  const earlierGuideposts = guidepostHistory.filter((item) => item.signature !== guidepostSignature);
+  const earlierReactions = reactionHistory.filter((item) => item.signature !== reactionSignature);
+  const renderAskActions = (seed: LiveCoachAskSeed, label = "ask") => (
+    <span className="inline-flex overflow-hidden rounded border border-sky-200 bg-white text-[10px] font-medium text-sky-700">
+      <button
+        type="button"
+        className="px-1.5 py-0.5 hover:bg-sky-50"
+        onClick={() => seedAsk(seed, "replace")}
+        {...getAskDragProps(seed, "replace")}
+      >
+        {label}
+      </button>
+      <button
+        type="button"
+        className="flex items-center border-l border-sky-200 px-1 hover:bg-sky-50"
+        onClick={() => seedAsk(seed, "append")}
+        title="Add this as another Ask context"
+        aria-label="Add Ask context"
+      >
+        <Plus className="h-3 w-3" />
+      </button>
+    </span>
+  );
 
   // ── Ask-the-coach chat panel ──────────────────────────────────────────────
   // ONE self-contained block: thread + quick questions + seeded input. Portals
@@ -1088,67 +1483,163 @@ export function LiveCoachPanel({
   // available there even while the dock is minimized); otherwise renders as
   // the dock's bottom row.
   const coachChatPanel = (
-    <div className="rounded-md border border-violet-200 bg-white p-2 shadow-sm">
-      <div className="mb-1.5 flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-violet-700">
-        <Wand2 className="h-3 w-3" />
-        Ask the coach
-        {askPending ? (
-          <span className="ml-1 inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-violet-500" />
-        ) : null}
+    <div
+      className="rounded-md border border-violet-200 bg-white p-2 shadow-sm"
+      onDragOver={(event) => event.preventDefault()}
+      onDrop={(event) => {
+        event.preventDefault();
+        const rawSeed = event.dataTransfer.getData("application/x-live-coach-ask-seed");
+        if (rawSeed) {
+          try {
+            const parsed = JSON.parse(rawSeed) as LiveCoachAskSeed | { seed?: LiveCoachAskSeed; mode?: "replace" | "append" };
+            if ("seed" in parsed && parsed.seed) seedAsk(parsed.seed, parsed.mode || "append");
+            else seedAsk(parsed as LiveCoachAskSeed, "append");
+            return;
+          } catch {
+            // Fall through to plain text below.
+          }
+        }
+        const droppedText = event.dataTransfer.getData("text/plain").trim();
+        if (droppedText) {
+          seedAsk({
+            kind: "context",
+            label: `Dropped context: "${compactCoachText(droppedText, 64)}"`,
+            lineText: droppedText,
+          }, "append");
+        }
+      }}
+    >
+      <div className="mb-1.5 flex flex-wrap items-center justify-between gap-2">
+        <div className="flex items-center gap-1.5">
+          <button
+            type="button"
+            onClick={addAskDraft}
+            disabled={askPending}
+            className="inline-flex items-center gap-1 rounded-full border border-violet-200 bg-violet-50 px-2 py-0.5 text-[10px] font-semibold text-violet-800 hover:bg-violet-100 disabled:opacity-40"
+            title="Open another Ask guidance card"
+          >
+            <Plus className="h-3 w-3" />
+            Ask
+          </button>
+          <span className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-violet-700">
+          <Wand2 className="h-3 w-3" />
+          Ask the coach
+          {askPending ? (
+            <span className="ml-1 inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-violet-500" />
+          ) : null}
+          </span>
+        </div>
       </div>
-      {asks.length ? (
-        <div ref={chatScrollRef} className="mb-2 max-h-[300px] space-y-1.5 overflow-y-auto pr-1">
-          {asks.map((ask) => (
-            <div key={ask.id}>
-              <div className="ml-6 rounded-md rounded-br-sm border border-violet-200 bg-violet-50/60 px-2 py-1 text-[11px] leading-snug text-violet-900">
-                {compactCoachText(
-                  ask.question || (ask.lineText ? `Re: "${ask.lineText}"` : ask.kind || "ask"),
-                  160,
+      {askDrafts.length > 1 ? (
+        <div className="mb-1.5 flex flex-wrap gap-1.5">
+          {askDrafts.map((draft, index) => {
+            const selected = draft.id === activeAskDraftId;
+            const label = draft.text || draft.kind || draft.seeds[0]?.label || `Ask ${index + 1}`;
+            return (
+              <span
+                key={draft.id}
+                className={cn(
+                  "inline-flex overflow-hidden rounded-full border text-[10px] font-medium",
+                  selected
+                    ? "border-violet-500 bg-violet-600 text-white"
+                    : "border-violet-200 bg-violet-50 text-violet-800",
                 )}
-              </div>
-              <div className="mr-6 mt-1 whitespace-pre-wrap rounded-md rounded-tl-sm bg-violet-100/70 px-2 py-1 text-sm leading-snug text-slate-950">
-                {ask.status === "error"
-                  ? `Ask failed: ${ask.error || "coach unavailable"}`
-                  : ask.answer
-                    || (ask.status === "thinking" || ask.status === "streaming" ? "Thinking..." : "No answer.")}
-              </div>
-            </div>
-          ))}
+              >
+                <button
+                  type="button"
+                  className="max-w-[180px] truncate px-2 py-0.5"
+                  onClick={() => setActiveAskDraftId(draft.id)}
+                  title={label}
+                >
+                  Ask {index + 1}: {compactCoachText(label, 42)}
+                </button>
+                {askDrafts.length > 1 ? (
+                  <button
+                    type="button"
+                    className={cn(
+                      "border-l px-1",
+                      selected ? "border-violet-400 hover:bg-violet-700" : "border-violet-200 hover:bg-violet-100",
+                    )}
+                    onClick={() => removeAskDraft(draft.id)}
+                    aria-label={`Close Ask ${index + 1}`}
+                  >
+                    <X className="h-3 w-3" />
+                  </button>
+                ) : null}
+              </span>
+            );
+          })}
         </div>
       ) : null}
       <div className="mb-1.5 flex flex-wrap gap-1.5">
         {[
           { label: "How do I respond?", kind: "line", question: "How do I respond to that?", useLine: true },
           { label: "Objection lines", kind: "objection", question: "Give me lines to get past this.", useLine: true },
-          { label: "What am I missing?", kind: "question", question: "What discovery am I still missing on this call?", useLine: false },
-          { label: "Move it forward", kind: "question", question: "How do I move this call to the next step right now?", useLine: false },
-          { label: "Close it", kind: "question", question: "Give me the close for this call right now - the ask, and the exact words.", useLine: false },
-          { label: "Where are we?", kind: "question", question: "Summarize where we are on this call and against the strategy.", useLine: false },
-        ].map((quick) => (
+          { label: "What am I missing?", kind: "discovery", question: "What discovery am I still missing on this call?", useLine: false },
+          { label: "Move it forward", kind: "next_move", question: "How do I move this call to the next step right now?", useLine: false },
+          { label: "Close it", kind: "close", question: "Give me the close for this call right now - the ask, and the exact words.", useLine: false },
+          { label: "Where are we?", kind: "strategy", question: "Summarize where we are on this call and against the strategy.", useLine: false },
+        ].map((quick) => {
+          const selectedQuick = askText.trim() === quick.question;
+          return (
           <button
             key={quick.label}
             type="button"
-            disabled={!session?.id || askPending}
-            onClick={() => quickAsk(quick.kind, quick.question, quick.useLine)}
-            className="rounded-full border border-violet-200 bg-violet-50 px-2 py-0.5 text-[10px] font-medium text-violet-800 transition-colors hover:bg-violet-100 disabled:opacity-40"
+            disabled={askPending}
+            onClick={() => selectQuickAsk(quick.kind, quick.label, quick.question, quick.useLine)}
+            className={cn(
+              "rounded-full border px-2 py-0.5 text-[10px] font-medium transition-colors disabled:opacity-40",
+              selectedQuick
+                ? "border-violet-500 bg-violet-600 text-white"
+                : "border-violet-200 bg-violet-50 text-violet-800 hover:bg-violet-100",
+            )}
           >
             {quick.label}
           </button>
-        ))}
+          );
+        })}
       </div>
-      {askSeed ? (
-        <div className="mb-1.5 flex items-center gap-1.5">
-          <span className="flex min-w-0 items-center gap-1 rounded-full border border-violet-200 bg-violet-50 px-2 py-0.5 text-[10px] font-medium text-violet-800">
-            <span className="truncate">{askSeed.label}</span>
-            <button
-              type="button"
-              onClick={() => setAskSeed(null)}
-              className="shrink-0 text-violet-400 hover:text-violet-700"
-              aria-label="Clear ask context"
-            >
-              <X className="h-3 w-3" />
-            </button>
-          </span>
+      {selectedAskGuidance || askSeeds.length ? (
+        <div className="mb-1.5 rounded-md border border-violet-200 bg-violet-50/70 p-2 text-[11px] text-violet-950">
+          {selectedAskGuidance ? (
+            <div className="flex gap-1.5">
+              <span className="shrink-0 font-semibold uppercase tracking-[0.08em] text-violet-700">Guidance</span>
+              <span className="min-w-0">{compactCoachText(selectedAskGuidance, 180)}</span>
+            </div>
+          ) : null}
+          {askSeeds.length ? (
+            <div className="mt-1.5 space-y-1">
+              <div className="font-semibold uppercase tracking-[0.08em] text-violet-700">
+                Context ({askSeeds.length})
+              </div>
+              {askSeeds.map((seed, index) => (
+                <div
+                  key={`${seed.kind}:${seed.label}:${seed.lineText || ""}:${index}`}
+                  className="flex items-start gap-1.5 rounded border border-violet-100 bg-white/70 px-1.5 py-1"
+                >
+                  <span className="mt-0.5 rounded bg-violet-100 px-1 text-[9px] font-semibold uppercase text-violet-700">
+                    {seed.kind.replace(/_/g, " ")}
+                  </span>
+                  <span className="min-w-0 flex-1">
+                    <span className="font-medium">{seed.label}</span>
+                    {seed.lineText ? (
+                      <span className="block text-violet-900/80">
+                        {compactCoachText(seed.lineText, 220)}
+                      </span>
+                    ) : null}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => clearAskSeed(seed)}
+                    className="shrink-0 text-violet-400 hover:text-violet-700"
+                    aria-label="Remove ask context"
+                  >
+                    <X className="h-3 w-3" />
+                  </button>
+                </div>
+              ))}
+            </div>
+          ) : null}
         </div>
       ) : null}
       <div className="flex items-center gap-2">
@@ -1168,14 +1659,14 @@ export function LiveCoachPanel({
               ? "Add your own words (optional), then send..."
               : "Ask the coach anything mid-call..."
           }
-          disabled={!session?.id}
+          disabled={askPending}
           className="h-8 min-w-0 flex-1 rounded-md border border-input bg-background px-2.5 text-sm outline-none placeholder:text-muted-foreground focus:border-violet-400 disabled:opacity-50"
         />
         <Button
           type="button"
           size="sm"
           className="h-8 gap-1.5 bg-violet-600 px-3 text-white hover:bg-violet-700"
-          disabled={!session?.id || askPending || (!askText.trim() && !askSeed?.lineText)}
+          disabled={!session?.id || askPending || (!askText.trim() && !askSeeds.length)}
           onClick={() => void submitAsk()}
         >
           <Send className="h-3.5 w-3.5" />
@@ -1187,7 +1678,111 @@ export function LiveCoachPanel({
       ) : null}
     </div>
   );
-  const chatPortal = chatSlot ? createPortal(coachChatPanel, chatSlot) : null;
+  const guidancePanel = (
+    <section className="rounded-md border border-violet-200 bg-white p-3">
+      <div className="mb-2 flex items-center justify-between gap-2">
+        <div>
+          <div className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-violet-700">
+            <Wand2 className="h-3 w-3" />
+            Guidance
+          </div>
+          <div className="text-[11px] text-muted-foreground">
+            Ask-the-coach responses returned for this call.
+          </div>
+        </div>
+        <span className="rounded-full border border-violet-200 bg-violet-50 px-2 py-0.5 text-[10px] font-semibold text-violet-800">
+          {responseAsks.length} response{responseAsks.length === 1 ? "" : "s"}
+        </span>
+      </div>
+      {responseAsks.length && activeAskResponse ? (
+        <div className="space-y-2">
+          <div className="flex flex-wrap gap-1 border-b border-violet-100 pb-2">
+            {responseAsks.map((ask, index) => {
+              const selected = ask.id === activeAskResponse.id;
+              const tabLabel = ask.question || ask.kind || `Response ${index + 1}`;
+              return (
+                <button
+                  key={ask.id}
+                  type="button"
+                  onClick={() => setActiveAskResponseId(ask.id)}
+                  className={cn(
+                    "max-w-[220px] truncate rounded px-2 py-1 text-[11px] font-semibold transition-colors",
+                    selected
+                      ? "bg-violet-600 text-white"
+                      : "bg-violet-50 text-violet-800 hover:bg-violet-100",
+                  )}
+                  title={tabLabel}
+                >
+                  {index + 1}. {compactCoachText(tabLabel, 54)}
+                </button>
+              );
+            })}
+          </div>
+          <div className="rounded-md border border-violet-200 bg-violet-50/50 p-2">
+            <div className="mb-2 flex items-center justify-between gap-2">
+              <div className="min-w-0 text-sm font-semibold text-violet-950">
+                {compactCoachText(activeAskResponse.question || activeAskResponse.kind || "Coach response", 220)}
+              </div>
+              <span
+                className={cn(
+                  "shrink-0 rounded-full border px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-[0.1em]",
+                  activeAskResponse.status === "ready"
+                    ? "border-emerald-200 bg-emerald-50 text-emerald-700"
+                    : activeAskResponse.status === "error"
+                      ? "border-red-200 bg-red-50 text-red-700"
+                      : "border-violet-200 bg-white text-violet-700",
+                )}
+              >
+                {activeAskResponse.status || "response"}
+              </span>
+            </div>
+            {(activeAskResponse.contextItems?.length || activeAskResponse.lineText) ? (
+              <div className="mb-2 space-y-1 rounded-md border border-violet-100 bg-white px-2 py-1.5 text-[11px] leading-snug text-violet-900">
+                {activeAskResponse.contextItems?.length
+                  ? activeAskResponse.contextItems.slice(0, 6).map((item, index) => (
+                    <div key={`${item.kind || ""}:${item.label || ""}:${index}`}>
+                      <span className="font-semibold">Context {index + 1}</span>
+                      {item.kind ? ` / ${item.kind.replace(/_/g, " ")}` : ""}:{" "}
+                      {compactCoachText(item.lineText || item.label || "", 220)}
+                    </div>
+                  ))
+                  : <div><span className="font-semibold">Context:</span> {compactCoachText(activeAskResponse.lineText || "", 260)}</div>}
+              </div>
+            ) : null}
+            <div className="whitespace-pre-wrap rounded-md border border-violet-100 bg-white px-3 py-2 text-sm font-medium leading-snug text-slate-950">
+              {activeAskResponse.status === "error"
+                ? `Ask failed: ${activeAskResponse.error || "coach unavailable"}`
+                : activeAskResponse.answer
+                  || (activeAskResponse.status === "thinking" || activeAskResponse.status === "streaming" ? "Thinking..." : "No answer.")}
+            </div>
+          </div>
+          {responseAsks.length > 1 ? (
+            <div className="space-y-1">
+              <div className="text-[10px] font-semibold uppercase tracking-[0.12em] text-muted-foreground">
+                Returned guidance history
+              </div>
+              {responseAsks.map((ask, index) => (
+                <button
+                  key={`history-${ask.id}`}
+                  type="button"
+                  onClick={() => setActiveAskResponseId(ask.id)}
+                  className="w-full rounded-md border border-violet-100 bg-white px-2 py-1.5 text-left text-[11px] text-slate-700 hover:bg-violet-50"
+                >
+                  <span className="font-semibold text-violet-800">{index + 1}. {ask.kind || "guidance"}:</span>{" "}
+                  {compactCoachText(ask.answer || ask.question || ask.lineText || "", 170)}
+                </button>
+              ))}
+            </div>
+          ) : null}
+        </div>
+      ) : (
+        <div className="rounded-md border border-dashed border-violet-200 bg-violet-50/50 p-5 text-center text-sm text-muted-foreground">
+          No Ask-the-coach responses yet. Use + Ask in the coach footer to create one.
+        </div>
+      )}
+    </section>
+  );
+  const chatPortal = shouldUseChatPortal && chatSlot ? createPortal(coachChatPanel, chatSlot) : null;
 
   // ── Minimized pill ────────────────────────────────────────────────────────
   // Always-on dock, tucked away: a small fixed pill in the corner showing the
@@ -1199,7 +1794,12 @@ export function LiveCoachPanel({
       <button
         type="button"
         onClick={() => setMinimized(false)}
-        className="fixed bottom-4 left-1/2 z-50 flex -translate-x-1/2 items-center gap-2 rounded-full border border-sky-300 bg-white px-3 py-2 shadow-lg transition-colors hover:bg-sky-50"
+        className={cn(
+          "flex items-center gap-2 border border-sky-300 bg-white px-3 py-2 transition-colors hover:bg-sky-50",
+          embedded
+            ? "w-full justify-between rounded-md shadow-sm"
+            : "fixed bottom-4 left-1/2 z-50 -translate-x-1/2 rounded-full shadow-lg",
+        )}
         title="Live coach — click to open"
       >
         <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-sky-600 text-white">
@@ -1225,8 +1825,17 @@ export function LiveCoachPanel({
     <>
     {/* Always-on floating dock — bottom-CENTER, visible regardless of scroll
         or page section. z-50 keeps it above sticky headers/cards. */}
-    <div className="fixed bottom-4 left-1/2 z-50 max-h-[86vh] w-[min(1180px,calc(100vw-2rem))] -translate-x-1/2 overflow-y-auto">
-    <Card className="overflow-hidden border-sky-200/80 bg-sky-50/95 shadow-xl backdrop-blur">
+    <div
+      className={cn(
+        embedded
+          ? "w-full"
+          : "fixed bottom-4 left-1/2 z-50 max-h-[86vh] w-[min(1180px,calc(100vw-2rem))] -translate-x-1/2 overflow-y-auto",
+      )}
+    >
+    <Card className={cn(
+      "overflow-hidden border-sky-200/80 bg-sky-50/95 backdrop-blur",
+      embedded ? "shadow-none" : "shadow-xl",
+    )}>
       <CardHeader className="border-b border-sky-100 bg-white/70 px-3 py-2">
         <div className="flex items-center justify-between gap-2">
           <div className="flex min-w-0 items-center gap-2">
@@ -1240,7 +1849,8 @@ export function LiveCoachPanel({
               </div>
             </div>
           </div>
-          <div className="flex shrink-0 items-center gap-1.5">
+          <div className="flex shrink-0 flex-wrap items-center justify-end gap-1.5">
+            {headerControls ? <div className="mr-1">{headerControls}</div> : null}
             <span
               className={cn(
                 "rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.12em]",
@@ -1254,18 +1864,24 @@ export function LiveCoachPanel({
               {statusLabel}
             </span>
             <button
-              type="button"
-              onClick={() => setMinimized(true)}
-              className="flex h-6 w-6 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground"
-              title="Minimize coach"
-              aria-label="Minimize coach"
-            >
+                type="button"
+                onClick={() => setMinimized(true)}
+                className="flex h-6 w-6 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground"
+                title="Minimize coach"
+                aria-label="Minimize coach"
+              >
               <span className="text-sm leading-none">—</span>
             </button>
           </div>
         </div>
       </CardHeader>
       <CardContent className="grid gap-3 px-3 py-3 lg:grid-cols-[1.05fr_1.15fr_0.95fr]">
+        {panelView === "guidance" ? (
+          <div className="lg:col-span-3">{guidancePanel}</div>
+        ) : panelView === "interview" && contentOverrideNode ? (
+          <div className="lg:col-span-3">{contentOverrideNode}</div>
+        ) : (
+        <>
         <section className="rounded-md border border-sky-100 bg-white p-3">
           <div className="mb-2 flex items-center justify-between gap-2">
             <div className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-muted-foreground">
@@ -1285,15 +1901,11 @@ export function LiveCoachPanel({
               {heardAt ? (
                 <span className="text-[10px] text-muted-foreground">{formatCoachTime(heardAt)}</span>
               ) : null}
-              <Button
-                type="button"
-                variant="ghost"
-                size="sm"
-                className="h-6 px-2 text-[10px] text-sky-700"
-                onClick={() => setContextOpen(true)}
-              >
-                Full
-              </Button>
+              {visibleConversationItems.length ? (
+                <span className="rounded-full border border-slate-200 bg-slate-50 px-1.5 py-0.5 text-[10px] text-muted-foreground">
+                  {visibleConversationItems.length} lines
+                </span>
+              ) : null}
             </div>
           </div>
           {streamTail ? (
@@ -1301,17 +1913,27 @@ export function LiveCoachPanel({
               Latest: {streamTail}
             </div>
           ) : null}
-          <div ref={inlineTranscriptScrollRef} className="max-h-[360px] space-y-2 overflow-y-auto pr-1">
+          <div ref={inlineTranscriptScrollRef} className="max-h-[420px] space-y-2 overflow-y-auto pr-1">
             {visibleConversationItems.length ? (
               visibleConversationItems.map((item) => {
                 const selected = focusedTranscriptId === item.id;
+                const transcriptSeed: LiveCoachAskSeed = {
+                  kind: item.side === "prospect" ? "line" : "context",
+                  label: `${item.label}: "${compactCoachText(item.text, 70)}"`,
+                  lineText: item.text,
+                };
                 return (
                   <div key={item.id}>
+                    <div className="flex items-stretch gap-1.5">
                     <button
                       type="button"
-                      onClick={() => setFocusedTranscriptId((current) => (current === item.id ? "" : item.id))}
+                      onClick={() => {
+                        setFocusedTranscriptId((current) => (current === item.id ? "" : item.id));
+                        seedAsk(transcriptSeed, "replace");
+                      }}
+                      {...getAskDragProps(transcriptSeed, "replace")}
                       className={cn(
-                        "w-full rounded-md border px-2.5 py-2 text-left text-sm shadow-sm transition",
+                        "min-w-0 flex-1 rounded-md border px-2.5 py-2 text-left text-sm shadow-sm transition",
                         item.side === "prospect" && "border-sky-100 bg-white text-slate-950 hover:border-sky-300",
                         item.side === "agent" && "border-slate-200 bg-slate-900 text-white hover:border-slate-500",
                         item.side === "system" && "border-amber-200 bg-amber-50 text-amber-950 hover:border-amber-300",
@@ -1328,6 +1950,16 @@ export function LiveCoachPanel({
                       </span>
                       <span className="block whitespace-pre-wrap leading-snug">{item.text}</span>
                     </button>
+                    <button
+                      type="button"
+                      onClick={() => seedAsk(transcriptSeed, "append")}
+                      className="flex w-7 shrink-0 items-center justify-center rounded-md border border-violet-200 bg-violet-50 text-violet-700 shadow-sm hover:bg-violet-100"
+                      title="Add this transcript line to Ask context"
+                      aria-label="Add transcript line to Ask context"
+                    >
+                      <Plus className="h-3.5 w-3.5" />
+                    </button>
+                    </div>
                     {selected ? (
                       <div className="mt-1 flex flex-wrap gap-1.5">
                         <Button
@@ -1339,10 +1971,24 @@ export function LiveCoachPanel({
                             kind: "line",
                             label: `They said: "${compactCoachText(item.text, 70)}"`,
                             lineText: item.text,
-                          })}
+                          }, "replace")}
                         >
                           <Wand2 className="h-3 w-3" />
                           How do I respond?
+                        </Button>
+                        <Button
+                          type="button"
+                          variant="subtle"
+                          size="sm"
+                          className="h-6 px-1.5 text-[10px] text-violet-700"
+                          onClick={() => seedAsk({
+                            kind: "line",
+                            label: `They said: "${compactCoachText(item.text, 70)}"`,
+                            lineText: item.text,
+                          }, "append")}
+                          title="Add response context"
+                        >
+                          <Plus className="h-3 w-3" />
                         </Button>
                         <Button
                           type="button"
@@ -1353,9 +1999,23 @@ export function LiveCoachPanel({
                             kind: "objection",
                             label: `Objection help: "${compactCoachText(item.text, 60)}"`,
                             lineText: item.text,
-                          })}
+                          }, "replace")}
                         >
                           Objection help
+                        </Button>
+                        <Button
+                          type="button"
+                          variant="subtle"
+                          size="sm"
+                          className="h-6 px-1.5 text-[10px] text-violet-700"
+                          onClick={() => seedAsk({
+                            kind: "objection",
+                            label: `Objection help: "${compactCoachText(item.text, 60)}"`,
+                            lineText: item.text,
+                          }, "append")}
+                          title="Add objection context"
+                        >
+                          <Plus className="h-3 w-3" />
                         </Button>
                       </div>
                     ) : null}
@@ -1364,7 +2024,7 @@ export function LiveCoachPanel({
               })
             ) : (
               <div className="flex min-h-[180px] items-center justify-center rounded-md border border-dashed border-slate-200 bg-slate-50 px-4 text-center text-sm text-muted-foreground">
-                Waiting for transcript. Click any line later to pin it for extra guidance.
+                Waiting for transcript. When lines appear, click or drag one into Ask the coach.
               </div>
             )}
           </div>
@@ -1376,29 +2036,24 @@ export function LiveCoachPanel({
               <Target className="h-3 w-3" />
               Guideposts
             </div>
-            <span
-              className={cn(
-                "rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.12em]",
-                stageToneClass,
-              )}
-            >
-              {stage.label}
-            </span>
+            {stage.label !== "ready" ? (
+              <span
+                className={cn(
+                  "rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.12em]",
+                  stageToneClass,
+                )}
+              >
+                {stage.label}
+              </span>
+            ) : null}
           </div>
-          <div className="space-y-2">
+          <div className="max-h-[420px] space-y-2 overflow-y-auto pr-1">
             <div className="rounded-md border border-slate-100 bg-slate-50 p-2">
               <div className="mb-1 flex items-center justify-between gap-2">
                 <span className="text-[10px] font-semibold uppercase tracking-[0.12em] text-muted-foreground">
-                  What changed
+                  Call map
                 </span>
-                <button
-                  type="button"
-                  className="text-[10px] font-medium text-sky-700 hover:underline"
-                  onClick={() => seedAsk({ kind: "expand", label: "Tell me more about what's happening", lineText: guidepostPrimary })}
-                  title="Ask the coach to expand on this"
-                >
-                  tell me more
-                </button>
+                {renderAskActions({ kind: "expand", label: "Explain this call map", lineText: guidepostPrimary }, "more")}
               </div>
               <div className="whitespace-pre-wrap text-sm font-medium leading-snug text-slate-950">
                 {compactCoachText(guidepostPrimary, 520)}
@@ -1407,24 +2062,20 @@ export function LiveCoachPanel({
             <div className="rounded-md border border-slate-100 bg-white p-2">
               <div className="mb-1 flex items-center justify-between gap-2">
                 <span className="text-[10px] font-semibold uppercase tracking-[0.12em] text-muted-foreground">
-                  Stay on track
+                  Advance
                 </span>
-                <button
-                  type="button"
-                  className="text-[10px] font-medium text-sky-700 hover:underline"
-                  onClick={() => seedAsk({ kind: "expand", label: "I'm stuck on this objective", lineText: guidepostStayOnTrack })}
-                  title="Stuck here? Ask the coach for a way through"
-                >
-                  I'm stuck here
-                </button>
+                {renderAskActions({ kind: "expand", label: "Help me advance this phase", lineText: guidepostStayOnTrack }, "advance")}
               </div>
               <div className="text-sm leading-snug text-slate-700">
                 {compactCoachText(guidepostStayOnTrack, 420)}
               </div>
             </div>
             <div className="rounded-md border border-sky-100 bg-sky-50 p-2">
-              <div className="mb-1 text-[10px] font-semibold uppercase tracking-[0.12em] text-sky-700">
-                Next move
+              <div className="mb-1 flex items-center justify-between gap-2">
+                <span className="text-[10px] font-semibold uppercase tracking-[0.12em] text-sky-700">
+                  Keep in mind
+                </span>
+                {renderAskActions({ kind: "next_move", label: "Explain what to keep in mind", lineText: guidepostNextMove })}
               </div>
               <div className="whitespace-pre-wrap text-base font-semibold leading-snug text-slate-950">
                 {guidepostNextMove}
@@ -1436,15 +2087,35 @@ export function LiveCoachPanel({
                   Key facts so far
                 </div>
                 <div className="flex flex-wrap gap-1">
-                  {factEntries.map((fact) => (
-                    <span
-                      key={fact.key}
-                      className="rounded-full border border-emerald-200 bg-white px-2 py-0.5 text-[10px] text-emerald-900"
-                      title={`${fact.key}: ${fact.value}`}
-                    >
-                      <span className="font-semibold">{fact.key.replace(/_/g, " ")}:</span> {compactCoachText(fact.value, 48)}
+                  {factEntries.map((fact) => {
+                    const factSeed: LiveCoachAskSeed = {
+                      kind: "fact",
+                      label: `Fact: ${fact.key.replace(/_/g, " ")}`,
+                      lineText: `${fact.key.replace(/_/g, " ")}: ${fact.value}`,
+                    };
+                    return (
+                    <span key={fact.key} className="inline-flex overflow-hidden rounded-full border border-emerald-200 bg-white text-[10px] text-emerald-900">
+                      <button
+                        type="button"
+                        className="px-2 py-0.5 text-left hover:bg-emerald-50"
+                        title={`${fact.key}: ${fact.value}`}
+                        onClick={() => seedAsk(factSeed, "replace")}
+                        {...getAskDragProps(factSeed, "replace")}
+                      >
+                        <span className="font-semibold">{fact.key.replace(/_/g, " ")}:</span> {compactCoachText(fact.value, 48)}
+                      </button>
+                      <button
+                        type="button"
+                        className="flex items-center border-l border-emerald-200 px-1 text-violet-700 hover:bg-violet-50"
+                        onClick={() => seedAsk(factSeed, "append")}
+                        title="Add this fact to Ask context"
+                        aria-label="Add fact to Ask context"
+                      >
+                        <Plus className="h-3 w-3" />
+                      </button>
                     </span>
-                  ))}
+                    );
+                  })}
                 </div>
                 {coach.callSummary ? (
                   <div className="mt-1.5 text-[11px] leading-snug text-emerald-900/80">
@@ -1453,26 +2124,58 @@ export function LiveCoachPanel({
                 ) : null}
               </div>
             ) : null}
+            {earlierGuideposts.length ? (
+              <div className="space-y-1.5 border-t border-slate-100 pt-2">
+                <div className="text-[10px] font-semibold uppercase tracking-[0.12em] text-muted-foreground">
+                  Earlier guideposts
+                </div>
+                {earlierGuideposts.map((item) => (
+                  <div key={item.id} className="rounded-md border border-slate-100 bg-white px-2 py-1.5 text-[11px] text-slate-700">
+                    <div className="mb-1 flex items-center justify-between gap-2">
+                      <span className="rounded-full border border-slate-200 bg-slate-50 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-[0.1em] text-muted-foreground">
+                        {item.stageLabel}
+                      </span>
+                      <span className="text-[10px] text-muted-foreground">{formatCoachTime(item.at)}</span>
+                    </div>
+                    <button
+                      type="button"
+                      className="block w-full text-left font-medium text-slate-950 hover:text-sky-700"
+                      onClick={() => seedAsk({
+                        kind: "expand",
+                        label: `Earlier guidepost: ${compactCoachText(item.primary, 54)}`,
+                        lineText: [
+                          `Call map: ${item.primary}`,
+                          `Advance: ${item.stay}`,
+                          `Keep in mind: ${item.next}`,
+                        ].join("\n"),
+                      }, "replace")}
+                      {...getAskDragProps({
+                        kind: "expand",
+                        label: `Earlier guidepost: ${compactCoachText(item.primary, 54)}`,
+                        lineText: [
+                          `Call map: ${item.primary}`,
+                          `Advance: ${item.stay}`,
+                          `Keep in mind: ${item.next}`,
+                        ].join("\n"),
+                      }, "replace")}
+                    >
+                      {compactCoachText(item.primary, 130)}
+                    </button>
+                    <div className="mt-0.5 text-slate-500">
+                      Keep in mind: {compactCoachText(item.next, 120)}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : null}
           </div>
+          {context?.miniJudgement?.elapsedMs ? (
           <div className="mt-2 flex flex-wrap gap-1.5">
-            <span className="rounded-full border border-border bg-muted px-2 py-0.5 text-[10px] text-muted-foreground">
-              {focusedLineHelp}
-            </span>
-            {formStrategy ? (
-              <span className="rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[10px] font-semibold text-emerald-700">
-                form strategy attached
-              </span>
-            ) : (
-              <span className="rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 text-[10px] font-semibold text-amber-700">
-                form improves guidance
-              </span>
-            )}
-            {context?.miniJudgement?.elapsedMs ? (
               <span className="rounded-full border border-border px-2 py-0.5 text-[10px] text-muted-foreground">
                 mini {context.miniJudgement.elapsedMs}ms
               </span>
-            ) : null}
           </div>
+          ) : null}
         </section>
 
         <section className="rounded-md border border-slate-200 bg-white p-3">
@@ -1487,25 +2190,39 @@ export function LiveCoachPanel({
               </div>
             ) : null}
           </div>
-          <div className="space-y-2">
+          <div className="max-h-[420px] space-y-2 overflow-y-auto pr-1">
+            <div className="rounded-md border border-amber-100 bg-amber-50/70 p-2">
+              <div className="mb-1 flex items-center justify-between gap-2">
+                <span className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-[0.12em] text-amber-800">
+                  <AlertTriangle className="h-3 w-3" />
+                  Heard just now
+                </span>
+                {renderAskActions({
+                  kind: "context",
+                  label: "Explain this reaction",
+                  lineText: reactionTrigger || focusedTranscriptItem?.text || lastProspectItem?.text || "",
+                }, "why")}
+              </div>
+              <div
+                className={cn(
+                  "min-h-[44px] whitespace-pre-wrap text-sm font-medium leading-snug text-slate-950",
+                  !reactionTrigger && "flex items-center text-muted-foreground",
+                )}
+              >
+                {reactionTrigger || "Waiting for an objection, fact, pain point, buying signal, or other coachable moment."}
+              </div>
+            </div>
             <div className="rounded-md border border-slate-100 bg-slate-50 p-2">
               <div className="mb-1 flex items-center justify-between gap-2">
                 <span className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-[0.12em] text-muted-foreground">
                   <MessageSquareQuote className="h-3 w-3" />
-                  Try saying
+                  Consider responding
                 </span>
-                <button
-                  type="button"
-                  className="text-[10px] font-medium text-sky-700 hover:underline"
-                  onClick={() => seedAsk({
+                {renderAskActions({
                     kind: "objection",
-                    label: "More help with this objection",
+                    label: "More help with this moment",
                     lineText: focusedTranscriptItem?.text || lastProspectItem?.text || "",
-                  })}
-                  title="Get the play plus ready lines for the current objection"
-                >
-                  more help
-                </button>
+                  }, "help")}
               </div>
               <div
                 className={cn(
@@ -1522,86 +2239,77 @@ export function LiveCoachPanel({
               </div>
             </div>
             <div className="rounded-md border border-slate-100 bg-white p-2">
-              <div className="mb-1 flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-[0.12em] text-muted-foreground">
-                <ClipboardList className="h-3 w-3" />
-                Watch points
+              <div className="mb-1 flex items-center justify-between gap-2">
+                <span className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-[0.12em] text-muted-foreground">
+                  <ClipboardList className="h-3 w-3" />
+                  Watch points
+                </span>
+                {renderAskActions({
+                    kind: "watch_points",
+                    label: "Explain these watch points",
+                    lineText: watchPointsText,
+                  })}
               </div>
               <div className="text-xs leading-snug text-slate-700">
-                {uniqueContextKeys.length
-                  ? uniqueContextKeys.join(", ")
-                  : "Price pressure, authority, urgency, confusion, spouse approval, and attempts to drift away from discovery."}
+                {watchPointsText}
               </div>
             </div>
-            {focusedTranscriptItem ? (
-              <div className="rounded-md border border-sky-100 bg-sky-50 p-2">
-                <div className="mb-1 flex items-center justify-between gap-2">
-                  <span className="text-[10px] font-semibold uppercase tracking-[0.12em] text-sky-700">
-                    Pinned moment
-                  </span>
-                  <button
-                    type="button"
-                    className="text-[10px] font-medium text-sky-700 hover:underline"
-                    onClick={() => seedAsk({
-                      kind: "line",
-                      label: `They said: "${compactCoachText(focusedTranscriptItem.text, 70)}"`,
-                      lineText: focusedTranscriptItem.text,
-                    })}
-                  >
-                    how do I respond?
-                  </button>
+            {earlierReactions.length ? (
+              <div className="space-y-1.5 border-t border-slate-100 pt-2">
+                <div className="text-[10px] font-semibold uppercase tracking-[0.12em] text-muted-foreground">
+                  Earlier reactions
                 </div>
-                <div className="text-xs leading-snug text-slate-700">
-                  {compactCoachText(focusedTranscriptItem.text, 260)}
-                </div>
+                {earlierReactions.map((item) => {
+                  const reactionSeed: LiveCoachAskSeed = {
+                    kind: "objection",
+                    label: `Earlier reaction: ${compactCoachText(item.sayable, 54)}`,
+                    lineText: [
+                      item.transcript ? `Transcript: ${item.transcript}` : "",
+                      `Reaction: ${item.sayable}`,
+                      `Watch points: ${item.watchPoints}`,
+                    ].filter(Boolean).join("\n"),
+                  };
+                  return (
+                    <div key={item.id} className="rounded-md border border-slate-100 bg-white px-2 py-1.5 text-[11px] text-slate-700">
+                      <div className="mb-1 flex items-center justify-between gap-2">
+                        <span className="max-w-[160px] truncate rounded-full border border-slate-200 bg-slate-50 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-[0.1em] text-muted-foreground">
+                          {item.label}
+                        </span>
+                        <span className="text-[10px] text-muted-foreground">{formatCoachTime(item.at)}</span>
+                      </div>
+                      <button
+                        type="button"
+                        className="block w-full text-left font-semibold text-slate-950 hover:text-sky-700"
+                        onClick={() => seedAsk(reactionSeed, "replace")}
+                        {...getAskDragProps(reactionSeed, "replace")}
+                      >
+                        {compactCoachText(item.sayable, 150)}
+                      </button>
+                      {item.watchPoints ? (
+                        <div className="mt-0.5 text-slate-500">
+                          Watch: {compactCoachText(item.watchPoints, 120)}
+                        </div>
+                      ) : null}
+                    </div>
+                  );
+                })}
               </div>
             ) : null}
           </div>
         </section>
 
+        </>
+        )}
+
         {/* Chat fallback: no workspace slot (other hosts) → the full chat
             panel renders as the dock's bottom row. With a slot, the chat
             lives under Appointments via the portal instead. */}
-        {chatSlot ? null : <div className="lg:col-span-3">{coachChatPanel}</div>}
+        {shouldUseChatPortal && chatSlot ? null : <div className="lg:col-span-3">{coachChatPanel}</div>}
       </CardContent>
     </Card>
     </div>
     {chatPortal}
-    <Dialog open={contextOpen} onOpenChange={setContextOpen}>
-      <DialogContent className="max-h-[82vh] max-w-2xl overflow-hidden p-0">
-        <DialogHeader className="border-b border-border px-5 pb-3 pt-5">
-          <DialogTitle className="flex items-center gap-2">
-            <MessagesSquare className="h-4 w-4 text-sky-700" />
-            Transcript context
-          </DialogTitle>
-          <DialogDescription>
-            Actual call transcript collected for the current coach session.
-          </DialogDescription>
-        </DialogHeader>
-        <div ref={transcriptScrollRef} className="max-h-[62vh] space-y-3 overflow-y-auto bg-slate-50 px-4 py-4">
-          {conversationItems.length ? (
-            conversationItems.map((item) => {
-              const rightSide = item.side === "agent";
-              return (
-                <div
-                  key={item.id}
-                  className={cn(
-                    "flex w-full",
-                    rightSide ? "justify-end" : "justify-start",
-                  )}
-                >
-                  <div
-                    className={cn(
-                      "max-w-[82%] rounded-lg border px-3 py-2 shadow-sm",
-                      item.side === "prospect" && "border-sky-100 bg-white text-slate-950",
-                      item.side === "agent" && "border-slate-200 bg-slate-900 text-white",
-                      item.side === "system" && "border-amber-200 bg-amber-50 text-amber-950",
-                      item.provisional && "border-dashed opacity-75",
-                      item.lowConfidence && "opacity-60",
-                    )}
-                  >
-                    <div className="mb-1 flex items-center justify-between gap-3 text-[10px] font-semibold uppercase tracking-[0.12em] opacity-70">
-                      <span>
-                        {item.provisional ? `${item.label} live` : item.label}
+    {/*
                         {item.lowConfidence ? " · low confidence" : ""}
                       </span>
                       <span>{formatCoachTime(item.at)}</span>
@@ -1619,6 +2327,7 @@ export function LiveCoachPanel({
         </div>
       </DialogContent>
     </Dialog>
+    */}
     </>
   );
 }

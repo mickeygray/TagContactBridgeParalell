@@ -780,6 +780,39 @@ async function appendCommunicationThread(domain, caseId, channel, entry = {}) {
   );
 }
 
+async function appendCommunicationEntry(domain, caseId, channel, entry = {}) {
+  const normalizedChannel = String(channel || "").toLowerCase();
+  if (!["sms", "email", "call", "rvm"].includes(normalizedChannel)) {
+    const error = new Error("channel must be sms, email, call, or rvm");
+    error.status = 400;
+    throw error;
+  }
+
+  const normalizedDomain = String(domain || "").toUpperCase();
+  const normalizedCaseId = Number(caseId);
+  const communicationEntry = buildCommunicationEntry(normalizedChannel, entry);
+
+  return CaseProfile.findOneAndUpdate(
+    {
+      domain: normalizedDomain,
+      caseId: normalizedCaseId,
+    },
+    {
+      $setOnInsert: {
+        domain: normalizedDomain,
+        caseId: normalizedCaseId,
+      },
+      $push: {
+        communications: communicationEntry,
+      },
+      $set: {
+        "communicationThreads.lastTouchedAt": communicationEntry.happenedAt,
+      },
+    },
+    { new: true, upsert: true, setDefaultsOnInsert: true },
+  );
+}
+
 async function findCaseProfilesDueForAiCaseReview(domain, olderThanDays = 7, limit = 100) {
   const normalizedDomain = String(domain || "").toUpperCase();
   const cutoff = new Date(Date.now() - Number(olderThanDays || 7) * 86400000);
@@ -1283,6 +1316,7 @@ async function summarizeInitialPaymentsBySource(domain, filters = {}) {
 
 module.exports = {
   appendContactActivity,
+  appendCommunicationEntry,
   applyPaymentToCaseProfile,
   reversePaymentOnCaseProfile,
   countCaseProfilesByDomain,

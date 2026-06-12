@@ -26,7 +26,13 @@ export type LiveCoachContext = {
   primaryContextKey?: string | null;
   jurisdiction?: string | null;
   completeThought?: boolean | null;
-  matches?: Array<{ key?: string | null; label?: string | null; family?: string | null }>;
+  matches?: Array<{ key?: string | null; label?: string | null; family?: string | null; guidance?: string | null; miniSnippet?: string | null }>;
+  tactics?: Array<{ key?: string | null; label?: string | null; family?: string | null; guidance?: string | null; humor?: string | null }>;
+  memoryBrief?: {
+    whatHappened?: string | null;
+    continueFrom?: string | null;
+    activeIssues?: Array<{ key?: string | null; snippet?: string | null; status?: string | null }> | null;
+  } | null;
   deterministicCandidates?: Array<{ key?: string | null; label?: string | null; family?: string | null }>;
   miniJudgement?: {
     model?: string | null;
@@ -37,6 +43,11 @@ export type LiveCoachContext = {
     candidateCount?: number | null;
     elapsedMs?: number | null;
     transcriptMeaning?: string | null;
+    memoryBrief?: {
+      whatHappened?: string | null;
+      continueFrom?: string | null;
+      activeIssues?: Array<{ key?: string | null; snippet?: string | null; status?: string | null }> | null;
+    } | null;
     confidence?: number | null;
   } | null;
 };
@@ -169,6 +180,11 @@ export type LiveCoachAsk = {
   kind?: string | null;
   question?: string | null;
   lineText?: string | null;
+  contextItems?: Array<{
+    kind?: string | null;
+    label?: string | null;
+    lineText?: string | null;
+  }> | null;
   status?: string | null; // thinking | streaming | ready | empty | error
   answer?: string | null;
   error?: string | null;

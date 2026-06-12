@@ -43,10 +43,12 @@ const SourceCanonical = require("./SourceCanonical");
 const SpendEntry = require("./SpendEntry");
 const UserAccount = require("./UserAccount");
 const WorkflowRecord = require("./WorkflowRecord");
+const ClientProfile = require("./ClientProfile");
 
 const MODEL_REGISTRY = Object.freeze({
   AgentState,
   ActivityAiReview,
+  ClientProfile,
   CallLedger,
   CallLog,
   ConsentRecord,
@@ -97,6 +99,7 @@ function listModels() {
 module.exports = {
   AgentState,
   ActivityAiReview,
+  ClientProfile,
   CallLedger,
   CallLog,
   ConsentRecord,

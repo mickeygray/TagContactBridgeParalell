@@ -41,6 +41,11 @@ let refreshCallback = null;
 
 const DEFAULT_RATE_LIMIT_BACKOFF_MS = 60 * 1000;
 const DEFAULT_MAX_RATE_LIMIT_BACKOFF_MS = 15 * 60 * 1000;
+// AUTH failures (any kind — 429, 5xx, network, bad grant) open a 3-minute
+// circuit: "if we aren't dialed into the platform, back off and try again
+// after 3 minutes." Hot re-auth loops during an RC outage are how auth-endpoint
+// 429 cascades start; hourly jobs fail fast during the window and reschedule.
+const DEFAULT_AUTH_FAILURE_BACKOFF_MS = 3 * 60 * 1000;
 
 function hasCredentials(config) {
   return Boolean(config.clientId && config.clientSecret && config.jwtToken);
@@ -209,6 +214,25 @@ function getAuthBackoffMs(error) {
   return getRateLimitBackoffMs(error, "RC_AUTH_RATE_LIMIT_BACKOFF_MS");
 }
 
+// Generic auth-failure cooldown (non-429: network, 5xx, invalid grant). The
+// 429 path keeps its Retry-After-aware backoff; everything else gets a flat
+// window so a dead/unreachable platform is probed once per window instead of
+// once per caller.
+function getAuthFailureBackoffMs() {
+  return envDurationMs("RC_AUTH_FAILURE_BACKOFF_MS", DEFAULT_AUTH_FAILURE_BACKOFF_MS);
+}
+
+function recordAuthFailure(error) {
+  const nextAttemptAt = new Date(Date.now() + getAuthFailureBackoffMs()).toISOString();
+  authState = {
+    ...authState,
+    lastAuthFailureAt: new Date().toISOString(),
+    nextAuthAttemptAt: nextAttemptAt,
+    lastError: error.message,
+  };
+  return nextAttemptAt;
+}
+
 function getApiBackoffMs(error) {
   return getRateLimitBackoffMs(error, "RC_API_RATE_LIMIT_BACKOFF_MS");
 }
@@ -258,12 +282,18 @@ function recordApiRateLimit(error) {
   return nextAttemptAt;
 }
 
-function buildBackoffError(message, details) {
-  return new ExternalServiceError("ringcentral", message, {
+function buildBackoffError(message, details, nextAttemptAt) {
+  const error = new ExternalServiceError("ringcentral", message, {
     status: 429,
     retryable: true,
     details,
   });
+  // Top-level nextAttemptAt: the hourly job queue honors this field
+  // (markHourlyJobFailed → failOptions.nextAttemptAt), so a job that hits an
+  // open circuit reschedules itself for exactly when the circuit reopens
+  // instead of burning a generic retry.
+  if (nextAttemptAt) error.nextAttemptAt = nextAttemptAt;
+  return error;
 }
 
 function assertNotInAuthBackoff() {
@@ -280,6 +310,7 @@ function assertNotInAuthBackoff() {
         lastRateLimitedAt: authState.lastRateLimitedAt,
         lastError: authState.lastError,
       },
+      authState.nextAuthAttemptAt,
     );
   }
 }
@@ -300,6 +331,7 @@ function assertNotInApiBackoff(method, path) {
         lastApiRateLimitedAt: authState.lastApiRateLimitedAt,
         lastApiRateLimitError: authState.lastApiRateLimitError,
       },
+      authState.nextApiAttemptAt,
     );
   }
 }
@@ -438,6 +470,10 @@ async function ensureAuthenticated(options = {}) {
       if (!Number.isFinite(nextAuthAttemptMs) || nextAuthAttemptMs <= Date.now()) {
         recordAuthRateLimit(error);
       }
+    } else {
+      // ANY failed auth opens the circuit — not just rate limits. "We aren't
+      // dialed into the platform: back off and try again after 3 minutes."
+      recordAuthFailure(error);
     }
     authState = {
       ...authState,
@@ -616,20 +652,48 @@ async function warmupPlatform(options = {}) {
   }
 
   if (refreshIntervalMs > 0) {
-    refreshTimer = setInterval(async () => {
-      try {
-        await runScheduledReinitialize("scheduled-refresh");
-      } catch (error) {
-        authState = {
-          ...authState,
-          isAuthenticated: false,
-          lastError: error.message,
-        };
+    // HOUR-DESYNCED token refresh. The hour mark belongs to the heavy work —
+    // call-log pulls and recording downloads — so scheduled auth is ANCHORED
+    // to minute :45 (RC_TOKEN_REFRESH_MINUTE) instead of drifting on a
+    // process-start interval that can land on :00. A token minted at :45
+    // lives through the entire :00 burst with ~45 minutes of headroom, and
+    // the burst itself never has to compete with an auth round-trip.
+    const anchorMinute = Math.min(59, Math.max(0, Number(process.env.RC_TOKEN_REFRESH_MINUTE ?? 45) || 45));
+    const msToNextAnchor = () => {
+      const now = new Date();
+      const next = new Date(now);
+      next.setMinutes(anchorMinute, 0, 0);
+      if (next.getTime() <= now.getTime()) next.setHours(next.getHours() + 1);
+      return next.getTime() - now.getTime();
+    };
+    const scheduleAnchoredRefresh = () => {
+      refreshTimer = setTimeout(async () => {
+        try {
+          // Freshness guard: only mint when the current token would NOT
+          // survive the next hour-mark burst (needs ~35 min: to :00 plus
+          // the burst itself). Skipping a healthy token = zero API spend.
+          if (!hasFreshToken(35 * 60 * 1000)) {
+            await runScheduledReinitialize("scheduled-refresh");
+          } else {
+            authState = {
+              ...authState,
+              lastScheduledSkipAt: new Date().toISOString(),
+            };
+          }
+        } catch (error) {
+          authState = {
+            ...authState,
+            isAuthenticated: false,
+            lastError: error.message,
+          };
+        }
+        scheduleAnchoredRefresh();
+      }, msToNextAnchor());
+      if (typeof refreshTimer.unref === "function") {
+        refreshTimer.unref();
       }
-    }, refreshIntervalMs);
-    if (typeof refreshTimer.unref === "function") {
-      refreshTimer.unref();
-    }
+    };
+    scheduleAnchoredRefresh();
   }
 
   await doLogin(Boolean(options.force));

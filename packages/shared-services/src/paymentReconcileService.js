@@ -467,10 +467,54 @@ async function reconcilePaymentsForCase({
 }
 
 /**
+ * Unknown-type healer: ledger rows can arrive through the event-driven
+ * writer with `paymentType: "unknown"` and — if their case's round-robin
+ * slot never comes up soon — sit unclassified forever, counted in "paid"
+ * but never in initials (found live: a $3,200 June initial). The heal is
+ * exactly one production reconcile for that case: getCasePayments re-runs
+ * the classifier and the upsert $set rewrites the row's type.
+ *
+ * Returns the caseIds to PREPEND to the round-robin batch. Throttled two
+ * ways: capped per run, and only cases whose reconcile checkpoint is >6h
+ * old (so a case whose payments are all PENDING — legitimately unknown —
+ * doesn't burn a Logics call every hour).
+ */
+async function findUnknownTypeCaseIds(domain, { limit = 15 } = {}) {
+  const { PaymentLedger } = require("../../shared-models/src");
+  const normalizedDomain = normalizeDomain(domain);
+  const caseIds = await PaymentLedger.distinct("caseId", {
+    domain: normalizedDomain,
+    $and: [
+      { $or: [{ paymentType: "unknown" }, { paymentType: null }] },
+      // Only unknowns that LOOK consequential: a success-ish status (any
+      // casing — the event writer doesn't normalize) or no status at all.
+      // Non-SUCCESS rows (pending/failed/post-dates) are CORRECTLY
+      // unclassified — ~1,900 of them live in the ledger and chasing them
+      // would burn ~360 Logics calls/day reclassifying nothing.
+      { $or: [{ transactionStatus: /^success$/i }, { transactionStatus: null }] },
+    ],
+  });
+  if (!caseIds.length) return [];
+  const staleBefore = new Date(Date.now() - 6 * 60 * 60 * 1000);
+  const profiles = await caseProfileRepository.listCaseProfilesByCaseIds(
+    normalizedDomain,
+    caseIds.map(Number).filter(Number.isFinite),
+  );
+  return profiles
+    .filter((p) => {
+      const checked = p?.paymentReconcile?.lastCheckedAt;
+      return !checked || new Date(checked) < staleBefore;
+    })
+    .map((p) => Number(p.caseId))
+    .slice(0, Math.max(1, limit));
+}
+
+/**
  * Round-robin reconcile across one domain. Caller controls cap via
  * `maxCases`; `staleAfterMs` defines how long since last check to
  * consider a case due. Catches per-case errors and continues with the
- * rest of the batch.
+ * rest of the batch. Unknown-type ledger rows jump the queue (see
+ * findUnknownTypeCaseIds above).
  */
 async function reconcilePaymentsForDomain({
   domain,
@@ -486,9 +530,16 @@ async function reconcilePaymentsForDomain({
     maxCases,
   );
 
+  // Unknown-type rows first — dedup against the round-robin batch.
+  const unknownCaseIds = await findUnknownTypeCaseIds(normalizedDomain)
+    .catch(() => []);
+  const dueCaseIds = new Set(due.map((p) => Number(p.caseId)));
+  const healCaseIds = unknownCaseIds.filter((id) => !dueCaseIds.has(id));
+
   const summary = {
     domain: normalizedDomain,
-    casesScanned: due.length,
+    casesScanned: due.length + healCaseIds.length,
+    unknownTypeHeals: healCaseIds.length,
     casesWithPayments: 0,
     newLedgerRows: 0,
     flaggedFailures: 0,
@@ -496,8 +547,14 @@ async function reconcilePaymentsForDomain({
     errors: 0,
     errorDetails: [],
   };
+  if (healCaseIds.length) {
+    logger?.info?.("payment.reconcile.unknown_type_heal", {
+      domain: normalizedDomain,
+      caseIds: healCaseIds,
+    });
+  }
 
-  for (const profile of due) {
+  for (const profile of [...healCaseIds.map((caseId) => ({ caseId })), ...due]) {
     const caseId = Number(profile.caseId);
     if (!Number.isFinite(caseId)) continue;
     const result = await reconcilePaymentsForCase({
@@ -524,6 +581,7 @@ module.exports = {
   DEFAULT_MAX_CASES_PER_RUN,
   DEFAULT_STALE_AFTER_MS,
   extractPaymentRows,
+  findUnknownTypeCaseIds,
   normalizePaymentRow,
   normalizePaymentRows,
   reconcilePaymentsForCase,

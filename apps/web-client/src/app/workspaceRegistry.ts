@@ -2,6 +2,7 @@ import type { ComponentType } from "react";
 import {
   BarChart3,
   CalendarClock,
+  Gem,
   GraduationCap,
   Headphones,
   Headset,
@@ -29,6 +30,7 @@ export type WorkspaceKey =
   | "cx-call-tracker"
   | "deploy"
   | "trainer"
+  | "resolution"
   | "cx";
 
 export interface WorkspaceDef {
@@ -138,6 +140,16 @@ export const adminWorkspaces: WorkspaceDef[] = [
     label: "Sales Trainer",
     description: "Roleplay calls, voice persona, live coaching.",
     icon: GraduationCap,
+    audience: "admin",
+  },
+  {
+    // Lives OUTSIDE the /admin shell (like the trainer) — the resolution
+    // crew logs straight into it; admins reach it from this sidebar.
+    key: "resolution",
+    path: "/resolution",
+    label: "Upsellerator",
+    description: "Resolution case bank, dossiers, and the Opus pitch designer.",
+    icon: Gem,
     audience: "admin",
   },
   {

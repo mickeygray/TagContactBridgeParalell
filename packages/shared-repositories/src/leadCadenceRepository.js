@@ -1138,6 +1138,28 @@ async function cancelPendingActions(domain, caseId, extra = {}) {
   return syncLeadCadenceState(normalizedDomain, normalizedCaseId);
 }
 
+async function saveLiveCoachCloseoutSummary(domain, caseId, summary = {}) {
+  const normalizedDomain = String(domain || "").toUpperCase();
+  const normalizedCaseId = Number(caseId);
+  if (!normalizedDomain || !Number.isFinite(normalizedCaseId)) return null;
+  const payload = {
+    ...(summary && typeof summary === "object" ? summary : {}),
+    updatedAt: new Date(),
+    source: "live-coach-closeout",
+  };
+  return LeadCadence.updateOne(
+    {
+      domain: normalizedDomain,
+      caseId: normalizedCaseId,
+    },
+    {
+      $set: {
+        liveCoachCloseout: payload,
+      },
+    },
+  );
+}
+
 async function deleteLeadCadence(domain, caseId) {
   return LeadCadence.deleteOne({
     domain: String(domain || "").toUpperCase(),
@@ -1461,6 +1483,7 @@ module.exports = {
   recordInitialDncCheck,
   recordRvmDispositionPoll,
   rescheduleScheduledAction,
+  saveLiveCoachCloseoutSummary,
   saveLeadCadenceInterviewSnapshot,
   syncLeadCadenceState,
   upsertLeadCadence,

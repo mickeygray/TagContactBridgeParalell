@@ -1227,17 +1227,30 @@ function main() {
   server.listen(port, "127.0.0.1", async () => {
     console.log(`EX barge button: http://127.0.0.1:${port}/`);
     defaultMonitorExt = String(supervisorExtNumber).trim();
-    const toRegister = Array.from(new Set([defaultMonitorExt, ...warmList]));
-    console.log(`  registering monitor softphone(s): ${toRegister.join(", ")} ...`);
-    for (const m of toRegister) {
-      try {
-        await registerMonitor(m, { deviceId: m === defaultMonitorExt ? deviceId : "", region });
-      } catch (e) {
-        console.error(`  monitor ${m} registration error: ${e.message}`);
+    // WARM-AT-BOOT GATE: the monitor extensions' SIP registrations are owned
+    // by the VM ANSWERER fleet in disposition mode — a barge warm pool that
+    // registers the SAME OtherPhone devices steals the contact binding from
+    // the answerer (most recent REGISTER wins) and inbound drops ring a
+    // service that cannot answer them. Barge is the legacy fallback: with
+    // warm-at-boot off, monitors register ON DEMAND at first barge use
+    // (getMonitorSoftphone → registerMonitor) and the health loop maintains
+    // only what's actually in use.
+    const warmAtBoot = !["0", "false", "no", "off"].includes(String(env("EX_BARGE_WARM_AT_BOOT", "true")).trim().toLowerCase());
+    if (warmAtBoot) {
+      const toRegister = Array.from(new Set([defaultMonitorExt, ...warmList]));
+      console.log(`  registering monitor softphone(s): ${toRegister.join(", ")} ...`);
+      for (const m of toRegister) {
+        try {
+          await registerMonitor(m, { deviceId: m === defaultMonitorExt ? deviceId : "", region });
+        } catch (e) {
+          console.error(`  monitor ${m} registration error: ${e.message}`);
+        }
       }
+      const ok = monitorsStatus().monitors.filter((x) => x.registered).map((x) => x.ext);
+      console.log(`  ready: monitors registered=[${ok.join(",")}]  default=${defaultMonitorExt}`);
+    } else {
+      console.log(`  warm-at-boot OFF (EX_BARGE_WARM_AT_BOOT=false): monitors register on demand; answerer fleet owns the registrations`);
     }
-    const ok = monitorsStatus().monitors.filter((x) => x.registered).map((x) => x.ext);
-    console.log(`  ready: monitors registered=[${ok.join(",")}]  default=${defaultMonitorExt}`);
     startMonitorHealthLoop({ region }); // self-heal dropped registrations while idle
     console.log(`  health loop: re-warm downed monitors every ${env("EX_BARGE_HEALTH_MS", "30000")}ms`);
   });

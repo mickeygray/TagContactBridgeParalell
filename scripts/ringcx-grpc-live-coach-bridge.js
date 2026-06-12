@@ -120,6 +120,135 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function readNonNegativeMs(value, fallback) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < 0) return fallback;
+  return parsed;
+}
+
+function isDirectChildPath(parentDir, candidatePath) {
+  const parent = path.resolve(parentDir);
+  const candidate = path.resolve(candidatePath);
+  const relative = path.relative(parent, candidate);
+  return Boolean(relative) && !relative.startsWith("..") && !path.isAbsolute(relative);
+}
+
+function removeGrpcSegmentDir(segmentDir, { segmentsRoot }) {
+  const root = path.resolve(segmentsRoot);
+  const target = path.resolve(segmentDir || "");
+  if (!isDirectChildPath(root, target)) {
+    return {
+      ok: false,
+      dir: target,
+      error: "segment-dir-outside-root",
+    };
+  }
+  try {
+    fs.rmSync(target, { recursive: true, force: true });
+    return {
+      ok: true,
+      dir: target,
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      dir: target,
+      error: error.message,
+    };
+  }
+}
+
+function pruneGrpcSegmentDirs({
+  segmentsRoot,
+  maxAgeMs,
+  activeSegmentDirs = null,
+  apply = true,
+  limit = 1000,
+} = {}) {
+  const root = path.resolve(segmentsRoot || "");
+  const safeMaxAgeMs = readNonNegativeMs(maxAgeMs, 0);
+  if (!root || safeMaxAgeMs <= 0) {
+    return { ok: true, skipped: true, reason: "disabled", prunedCount: 0, errorCount: 0 };
+  }
+  if (!fs.existsSync(root)) {
+    return { ok: true, skipped: true, reason: "missing-root", root, prunedCount: 0, errorCount: 0 };
+  }
+
+  const now = Date.now();
+  const activeSet = activeSegmentDirs instanceof Set ? activeSegmentDirs : new Set();
+  const pruned = [];
+  const errors = [];
+  let scannedCount = 0;
+  let staleCount = 0;
+  let activeCount = 0;
+
+  for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    const dir = path.resolve(root, entry.name);
+    if (!isDirectChildPath(root, dir)) continue;
+    scannedCount += 1;
+    if (activeSet.has(dir)) {
+      activeCount += 1;
+      continue;
+    }
+    try {
+      const stat = fs.statSync(dir);
+      const ageMs = now - (stat.mtimeMs || stat.ctimeMs || 0);
+      if (ageMs < safeMaxAgeMs) continue;
+      staleCount += 1;
+      if (apply && pruned.length < limit) {
+        fs.rmSync(dir, { recursive: true, force: true });
+        pruned.push({ dir, ageMs });
+      }
+    } catch (error) {
+      errors.push({ dir, error: error.message });
+    }
+  }
+
+  return {
+    ok: errors.length === 0,
+    apply,
+    root,
+    maxAgeMs: safeMaxAgeMs,
+    scannedCount,
+    activeCount,
+    staleCount,
+    prunedCount: pruned.length,
+    errorCount: errors.length,
+    pruned: pruned.slice(0, 20),
+    errors: errors.slice(0, 20),
+  };
+}
+
+// Boot-time event-log rotation: rename an oversized events.ndjson to a
+// timestamped sibling and prune old rotations. Boot-only on purpose — no
+// mid-flight handle juggling; the bridge restarts often enough.
+function rotateEventLogAtBoot(eventLogPath, { maxBytes, keepRotated = 2 } = {}) {
+  try {
+    if (!maxBytes || maxBytes <= 0) return { skipped: true, reason: "disabled" };
+    if (!fs.existsSync(eventLogPath)) return { skipped: true, reason: "missing" };
+    const size = fs.statSync(eventLogPath).size;
+    if (size < maxBytes) return { skipped: true, reason: "under-limit", size };
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const rotatedPath = eventLogPath.replace(/\.ndjson$/, `-${stamp}.ndjson`);
+    fs.renameSync(eventLogPath, rotatedPath);
+    const dir = path.dirname(eventLogPath);
+    const base = path.basename(eventLogPath, ".ndjson");
+    const rotated = fs.readdirSync(dir)
+      .filter((name) => name.startsWith(`${base}-`) && name.endsWith(".ndjson"))
+      .sort()
+      .reverse();
+    for (const name of rotated.slice(Math.max(0, keepRotated))) {
+      fs.rmSync(path.join(dir, name), { force: true });
+    }
+    console.log(`[coach-grpc] rotated event log (${Math.round(size / 1024 / 1024)}MB) -> ${path.basename(rotatedPath)}`);
+    return { rotated: rotatedPath, size };
+  } catch (error) {
+    console.warn(`[coach-grpc] event log rotation failed: ${error.message}`);
+    return { error: error.message };
+  }
+}
+
 function isTerminalCoachPostError(error) {
   return TERMINAL_COACH_POST_ERROR_PATTERN.test(String(error?.message || error || ""));
 }
@@ -2611,6 +2740,7 @@ async function reconcileCoachUii(segment) {
 
 function createLiveCoachStreamingService({
   outDir,
+  segmentsRoot,
   eventLog,
   aiBusUrl,
   chunkSec,
@@ -2634,6 +2764,8 @@ function createLiveCoachStreamingService({
   fastSttModel = "",
   fastVadSilenceMs = 500,
   turnEagerness = "low",
+  cleanupSegmentsOnFinalize = true,
+  activeSegmentDirs = null,
 }) {
   return {
     Stream(call, callback) {
@@ -2689,6 +2821,39 @@ function createLiveCoachStreamingService({
         for (const segment of segments.values()) {
           await stopCoachSession(segment, reason);
         }
+        const segmentSummaries = [...segments.values()].map((segment) => ({
+          sessionId: segment.sessionId,
+          segmentId: segment.segmentId,
+          role: segment.role,
+          coachSessionId: segment.coachSessionId,
+          rawBytes: segment.rawBytes,
+          rawPath: segment.rawPath,
+          wavPath: fs.existsSync(segment.wavPath) ? segment.wavPath : "",
+        }));
+        const segmentCleanup = {
+          enabled: Boolean(cleanupSegmentsOnFinalize),
+          deletedCount: 0,
+          keptCount: 0,
+          errorCount: 0,
+          errors: [],
+        };
+        for (const segment of segments.values()) {
+          const segmentDir = path.resolve(segment.dir);
+          if (activeSegmentDirs instanceof Set) {
+            activeSegmentDirs.delete(segmentDir);
+          }
+          if (!cleanupSegmentsOnFinalize) {
+            segmentCleanup.keptCount += 1;
+            continue;
+          }
+          const removed = removeGrpcSegmentDir(segmentDir, { segmentsRoot });
+          if (removed.ok) {
+            segmentCleanup.deletedCount += 1;
+          } else {
+            segmentCleanup.errorCount += 1;
+            segmentCleanup.errors.push(removed);
+          }
+        }
         const endedAt = new Date();
         writeJsonLine(eventLog, {
           type: "stream.end",
@@ -2700,15 +2865,8 @@ function createLiveCoachStreamingService({
           eventCount,
           mediaCount,
           mediaBytes,
-          segments: [...segments.values()].map((segment) => ({
-            sessionId: segment.sessionId,
-            segmentId: segment.segmentId,
-            role: segment.role,
-            coachSessionId: segment.coachSessionId,
-            rawBytes: segment.rawBytes,
-            rawPath: segment.rawPath,
-            wavPath: fs.existsSync(segment.wavPath) ? segment.wavPath : "",
-          })),
+          segmentCleanup,
+          segments: segmentSummaries,
         });
         console.log(`[coach-grpc] stream end ${streamId} reason=${reason} events=${eventCount} media=${mediaCount} bytes=${mediaBytes}`);
         if (typeof done === "function") done(callbackError || null, callbackError ? undefined : {});
@@ -2791,6 +2949,9 @@ function createLiveCoachStreamingService({
             ) || null,
           });
           segments.set(decoded.segmentId, segment);
+          if (activeSegmentDirs instanceof Set) {
+            activeSegmentDirs.add(path.resolve(segment.dir));
+          }
           writeJsonLine(segment.jsonPath, base);
           writeJsonLine(eventLog, {
             ...base,
@@ -2998,13 +3159,67 @@ async function main() {
   const outDir = path.resolve(readFlag(argv, "--out-dir", path.join("runtime", "live-coach-grpc-bridge")));
   const protoPath = path.resolve(readFlag(argv, "--proto", path.join("scripts", "proto", "ringcx_streaming.proto")));
   ensureDir(outDir);
-  ensureDir(path.join(outDir, "segments"));
+  const segmentsRoot = path.join(outDir, "segments");
+  ensureDir(segmentsRoot);
   const eventLog = path.join(outDir, "events.ndjson");
+  // Same leak family as the segment WAVs: events.ndjson grows unbounded
+  // (215MB found alongside the 75GB). Rotate at boot, keep a short tail.
+  rotateEventLogAtBoot(eventLog, {
+    maxBytes: readNonNegativeMs(
+      readFlag(argv, "--event-log-max-mb", process.env.LIVE_COACH_GRPC_EVENT_LOG_MAX_MB || "128"),
+      128,
+    ) * 1024 * 1024,
+    keepRotated: 2,
+  });
+  const keepAudioOnDisk = readBoolFlag(
+    argv,
+    "--keep-audio-on-disk",
+    readEnvBool(process.env.LIVE_COACH_GRPC_KEEP_AUDIO_ON_DISK, false),
+  );
+  const cleanupSegmentsOnFinalize = readBoolFlag(
+    argv,
+    "--cleanup-segments-on-finalize",
+    readEnvBool(process.env.LIVE_COACH_GRPC_CLEANUP_SEGMENTS_ON_FINALIZE, !keepAudioOnDisk),
+  ) && !keepAudioOnDisk;
+  const segmentRetentionMs = readNonNegativeMs(
+    readFlag(argv, "--segment-retention-ms", process.env.LIVE_COACH_GRPC_SEGMENT_RETENTION_MS || String(4 * 60 * 60 * 1000)),
+    4 * 60 * 60 * 1000,
+  );
+  const segmentSweepIntervalMs = readNonNegativeMs(
+    readFlag(argv, "--segment-sweep-interval-ms", process.env.LIVE_COACH_GRPC_SEGMENT_SWEEP_INTERVAL_MS || String(5 * 60 * 1000)),
+    5 * 60 * 1000,
+  );
+  const activeSegmentDirs = new Set();
+  const runSegmentSweep = (reason) => {
+    const result = pruneGrpcSegmentDirs({
+      segmentsRoot,
+      maxAgeMs: segmentRetentionMs,
+      activeSegmentDirs,
+      apply: true,
+    });
+    if (result.prunedCount || result.errorCount || reason === "startup") {
+      writeJsonLine(eventLog, {
+        type: "segments.sweep",
+        at: new Date().toISOString(),
+        reason,
+        ...result,
+      });
+    }
+    return result;
+  };
+  runSegmentSweep("startup");
+  if (segmentSweepIntervalMs > 0) {
+    const sweepTimer = setInterval(() => {
+      runSegmentSweep("interval");
+    }, segmentSweepIntervalMs);
+    if (typeof sweepTimer.unref === "function") sweepTimer.unref();
+  }
 
   const ringcx = loadProto(protoPath);
   const server = new grpc.Server();
   server.addService(ringcx.Streaming.service, createLiveCoachStreamingService({
     outDir,
+    segmentsRoot,
     eventLog,
     aiBusUrl,
     chunkSec,
@@ -3028,6 +3243,8 @@ async function main() {
     fastSttModel,
     fastVadSilenceMs,
     turnEagerness,
+    cleanupSegmentsOnFinalize,
+    activeSegmentDirs,
   }));
   const bindAddress = `0.0.0.0:${port}`;
   server.bindAsync(bindAddress, grpc.ServerCredentials.createInsecure(), (error, boundPort) => {
@@ -3052,6 +3269,7 @@ async function main() {
     if (sttProvider === "openai-realtime") {
       console.log(`  vad:        ${turnDetection}${turnDetection === "semantic_vad" ? `/${semanticEagerness}` : ""}`);
     }
+    console.log(`  cleanup:    finalize=${cleanupSegmentsOnFinalize ? "on" : "off"} sweep=${segmentSweepIntervalMs}ms retention=${segmentRetentionMs}ms`);
     console.log(`  eventLog:   ${eventLog}`);
   });
 
@@ -3080,5 +3298,7 @@ module.exports = {
   reconcileCoachUii,
   stopCoachSession,
   resetCoachSessionAfterMissing,
+  pruneGrpcSegmentDirs,
+  removeGrpcSegmentDir,
   readEnvBool,
 };

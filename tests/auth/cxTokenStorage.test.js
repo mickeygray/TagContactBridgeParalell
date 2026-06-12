@@ -115,11 +115,34 @@ test("deriveOAuthValidity — false when no refresh token", () => {
 
 test("deriveOAuthValidity — true with refresh token, no expiry", () => {
   const r = cx.deriveOAuthValidity(
-    { refreshTokenEnc: "anything" },
+    // scopes must include CXRouting since the off-hook scope auto-heal
+    // landed — a scopes-less fixture now (correctly) reads as missing it.
+    { refreshTokenEnc: "anything", scopes: ["CXRouting"] },
     { bearerEnc: "anything" },
   );
   assert.equal(r.isOAuthValidated, true);
   assert.equal(r.reason, null);
+});
+
+test("deriveOAuthValidity — missing CXRouting scope flips invalid (auto-heal)", () => {
+  const r = cx.deriveOAuthValidity(
+    { refreshTokenEnc: "x", scopes: ["ReadAccounts"] },
+    { bearerEnc: "y" },
+  );
+  assert.equal(r.isOAuthValidated, false);
+  assert.equal(r.reason, "missing-cx-routing-scope");
+});
+
+test("deriveOAuthValidity — scope re-auth back-off: recently tried stays valid", () => {
+  const r = cx.deriveOAuthValidity(
+    {
+      refreshTokenEnc: "x",
+      scopes: ["ReadAccounts"],
+      scopeReauthAttemptedAt: new Date(Date.now() - 60 * 60 * 1000), // 1h ago, inside 7d back-off
+    },
+    { bearerEnc: "y" },
+  );
+  assert.equal(r.isOAuthValidated, true);
 });
 
 test("deriveOAuthValidity — false when consent revoked", () => {
@@ -144,7 +167,7 @@ test("deriveOAuthValidity — false when refresh token expired", () => {
 test("deriveOAuthValidity — true with future expiry", () => {
   const future = new Date(Date.now() + 60 * 24 * 60 * 60 * 1000);
   const r = cx.deriveOAuthValidity(
-    { refreshTokenEnc: "x", refreshTokenExpiresAt: future },
+    { refreshTokenEnc: "x", refreshTokenExpiresAt: future, scopes: ["CXRouting"] },
     { bearerEnc: "y" },
   );
   assert.equal(r.isOAuthValidated, true);
@@ -162,7 +185,7 @@ test("deriveOAuthValidity — false when last refresh failed AND no bearer", () 
 test("deriveOAuthValidity — true if old error but bearer present", () => {
   // Successful refresh after a transient error → bearer was minted
   const r = cx.deriveOAuthValidity(
-    { refreshTokenEnc: "x", lastRefreshError: "old-error" },
+    { refreshTokenEnc: "x", lastRefreshError: "old-error", scopes: ["CXRouting"] },
     { bearerEnc: "current" },
   );
   assert.equal(r.isOAuthValidated, true);

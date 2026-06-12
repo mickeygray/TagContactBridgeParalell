@@ -11,6 +11,7 @@ import {
   MessageCircleMore,
   Phone,
   PhoneOff,
+  Plus,
 } from "lucide-react";
 import { Button } from "@/components/ui/Button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/Tabs";
@@ -79,7 +80,7 @@ import type { CommLogEntry } from "@/lib/api/queries/cx";
 import { KNOWN_DOMAINS, useDomainStore } from "@/lib/domain/domainStore";
 import { useSession } from "@/lib/auth/useSession";
 import { cn } from "@/lib/utils/cn";
-import { COACH_CHAT_SLOT_ID, LiveCoachPanel } from "./LiveCoachPanel";
+import { LiveCoachPanel } from "./LiveCoachPanel";
 
 const LIVE_COACH_PANEL_ENABLED = ["1", "true", "yes", "on"].includes(
   String(import.meta.env.VITE_LIVE_COACH_PANEL_ENABLED || "").trim().toLowerCase(),
@@ -344,13 +345,13 @@ const AUTO_SERVE_DELAY_SECONDS = 1;
 const AUTO_SERVE_HANDOFF_DELAY_SECONDS = 0;
 const AUTO_SERVE_STARTUP_DELAY_SECONDS = 8;
 const BACKEND_NEXT_DIAL_HANDOFF_HOLD_MS = 10_000;
-// Last-resort watchdog for the drop flow: the drop request has NO client-side
-// timeout (the api fetch has no deadline) and the server path is bounded
-// (~135s service timeout, 120s play hard cap). If nothing settled by here,
-// force-clear the pending flag so the Voicemail button can never be stuck
-// "Dropping VM" until a page reload.
+// Last-resort watchdog for the app disposition side of the VM flow. The
+// RingCX voicemail request is fired in the background; the queue disposition
+// owns the button lifecycle so agents are not held on playback/release.
 const VOICEMAIL_DROP_WATCHDOG_MS = 180_000;
 const DISPOSITION_NEXT_LEAD_DELAY_SECONDS = 2;
+const NO_ANSWER_NEXT_LEAD_DELAY_SECONDS = 8;
+const QUEUE_RESTORE_DEBOUNCE_MS = 8_000;
 const STALE_SERVED_QUEUE_RESET_MS = 20_000;
 const SHOW_POSTDATE_DISPOSITION = true;
 type AutoServeCountdownMode = "startup" | "next";
@@ -2028,7 +2029,7 @@ function InvoicesSubsection({
 // have no GET endpoint we use here, so the list shows whatever Logics
 // returns when we POST/refresh — for now this is post-only with no
 // historical reader (open question whether Logics exposes a read).
-function AmortizationSubsection({
+export function AmortizationSubsection({
   domain,
   resolvedCaseId,
 }: {
@@ -2378,7 +2379,7 @@ function LogicsWorkspaceCard({
   const [commLogOpen, setCommLogOpen] = React.useState(true);
   const [logicsInfoOpen, setLogicsInfoOpen] = React.useState(true);
   const [logicsInfoTab, setLogicsInfoTab] = React.useState<
-    "activities" | "tasks" | "payments" | "invoices" | "amortization"
+    "activities" | "tasks" | "payments" | "invoices"
   >("activities");
 
   return (
@@ -2406,7 +2407,6 @@ function LogicsWorkspaceCard({
             { key: "tasks", label: "Tasks" },
             { key: "payments", label: "Payments" },
             { key: "invoices", label: "Invoices" },
-            { key: "amortization", label: "Amortization" },
           ]}
           active={logicsInfoTab}
           onChange={(k) => setLogicsInfoTab(k as typeof logicsInfoTab)}
@@ -2417,10 +2417,8 @@ function LogicsWorkspaceCard({
           <TasksSubsection domain={domain} resolvedCaseId={resolvedCaseId} />
         ) : logicsInfoTab === "payments" ? (
           <PaymentsSubsection domain={domain} resolvedCaseId={resolvedCaseId} />
-        ) : logicsInfoTab === "invoices" ? (
-          <InvoicesSubsection domain={domain} resolvedCaseId={resolvedCaseId} />
         ) : (
-          <AmortizationSubsection domain={domain} resolvedCaseId={resolvedCaseId} />
+          <InvoicesSubsection domain={domain} resolvedCaseId={resolvedCaseId} />
         )}
       </Collapsible>
     </div>
@@ -2445,6 +2443,22 @@ type InterviewSnapshotState = {
   financials: Record<string, string>;
   flags: Record<string, boolean>;
   personalNotes: string;
+};
+
+type CoachAskSeed = {
+  kind: string;
+  label: string;
+  lineText?: string;
+};
+
+type CoachAskContextBridge = {
+  seedAsk: (seed: CoachAskSeed, mode?: "replace" | "append") => void;
+  getDragProps: (seed: CoachAskSeed, mode?: "replace" | "append") => {
+    draggable: true;
+    onDragStart: (event: React.DragEvent<HTMLElement>) => void;
+  };
+  askPending: boolean;
+  sessionReady: boolean;
 };
 
 const INTERVIEW_SNAPSHOT_DEFAULT: InterviewSnapshotState = {
@@ -2689,6 +2703,45 @@ function InterviewCheckGrid({
   );
 }
 
+function InterviewAskPills({
+  askCoach,
+  seeds,
+}: {
+  askCoach?: CoachAskContextBridge | null;
+  seeds: CoachAskSeed[];
+}) {
+  if (!askCoach || !seeds.length) return null;
+  return (
+    <div className="flex flex-wrap gap-1.5">
+      {seeds.map((seed) => (
+        <span
+          key={`${seed.kind}:${seed.label}:${seed.lineText || ""}`}
+          className="inline-flex overflow-hidden rounded-full border border-violet-200 bg-violet-50 text-[10px] font-medium text-violet-800"
+        >
+          <button
+            type="button"
+            className="px-2 py-0.5 transition-colors hover:bg-violet-100"
+            title="Click to replace Ask context with this interview item, or drag it onto the Ask box."
+            onClick={() => askCoach.seedAsk(seed, "replace")}
+            {...askCoach.getDragProps(seed, "replace")}
+          >
+            Ask: {seed.label}
+          </button>
+          <button
+            type="button"
+            className="flex items-center border-l border-violet-200 px-1 transition-colors hover:bg-violet-100"
+            title="Add this interview item as another Ask context."
+            aria-label={`Add ${seed.label} to Ask context`}
+            onClick={() => askCoach.seedAsk(seed, "append")}
+          >
+            <Plus className="h-3 w-3" />
+          </button>
+        </span>
+      ))}
+    </div>
+  );
+}
+
 function InterviewSnapshotCard({
   domain,
   caseId,
@@ -2698,6 +2751,7 @@ function InterviewSnapshotCard({
   queueItemId,
   queueTicketId,
   initialSnapshot,
+  askCoach,
 }: {
   domain: string;
   caseId: string;
@@ -2707,6 +2761,7 @@ function InterviewSnapshotCard({
   queueItemId?: string | null;
   queueTicketId?: string | null;
   initialSnapshot?: Record<string, unknown> | null;
+  askCoach?: CoachAskContextBridge | null;
 }) {
   const storageKey = React.useMemo(
     () => `cx-interview-snapshot:${caseId || prospectName || "current"}`,
@@ -2904,11 +2959,78 @@ function InterviewSnapshotCard({
     }
   };
 
+  const interviewAskText = React.useMemo(
+    () => buildInterviewActivityNote(snapshot, prospectName, caseId),
+    [snapshot, prospectName, caseId],
+  );
+  const jurisdictionAskSeeds = React.useMemo(() => {
+    const seeds: CoachAskSeed[] = [];
+    if (snapshot.irsDebt) {
+      seeds.push({
+        kind: "tax_problem",
+        label: "IRS / federal",
+        lineText: "Interview fact: prospect has IRS / federal tax debt.",
+      });
+    }
+    if (snapshot.stateDebt) {
+      seeds.push({
+        kind: "tax_problem",
+        label: "State debt",
+        lineText: "Interview fact: prospect has state tax debt.",
+      });
+    }
+    return seeds;
+  }, [snapshot.irsDebt, snapshot.stateDebt]);
+  const taxProblemAskSeeds = React.useMemo(
+    () => INTERVIEW_TAX_PROBLEM_OPTIONS
+      .filter((option) => snapshot.taxProblems[option.key])
+      .map((option) => ({
+        kind: "tax_problem",
+        label: option.label,
+        lineText: `Interview tax problem: ${option.label}. Give context, discovery questions, and the right sales framing.`,
+      })),
+    [snapshot.taxProblems],
+  );
+  const clientContextAskSeeds = React.useMemo(
+    () => INTERVIEW_FLAG_OPTIONS
+      .filter((option) => snapshot.flags[option.key])
+      .map((option) => ({
+        kind: "client_context",
+        label: option.label,
+        lineText: `Interview client context: ${option.label}. Explain how this should shape tone, empathy, and next questions.`,
+      })),
+    [snapshot.flags],
+  );
+  const financialAskSeeds = React.useMemo<CoachAskSeed[]>(
+    () => INTERVIEW_FINANCIAL_FIELD_OPTIONS
+      .flatMap((option) => {
+        const value = String(snapshot.financials[option.key] || "").trim();
+        return value
+          ? [{
+            kind: "financial_context",
+            label: option.label,
+            lineText: `Interview financial fact: ${option.label}: ${value}. Explain how to use this in discovery and offer framing.`,
+          }]
+          : [];
+      }),
+    [snapshot.financials],
+  );
+
   return (
     <div className="space-y-2 p-4">
       <div className="text-[11px] text-muted-foreground">
         Structured call facts for future Logics activity notes. Do not enter full SSNs, card numbers, or bank account numbers.
       </div>
+      <InterviewAskPills
+        askCoach={askCoach}
+        seeds={[
+          {
+            kind: "interview_snapshot",
+            label: "full interview",
+            lineText: `${interviewAskText}\n\nExplain what matters most here and what I should ask next.`,
+          },
+        ]}
+      />
       {view === "strategy" ? (
         <div className="space-y-2">
           <div className="flex items-center justify-between gap-2">
@@ -2929,9 +3051,19 @@ function InterviewSnapshotCard({
               Opus is reading the sales guide and this interview…
             </div>
           ) : strategy ? (
-            <pre className="max-h-[420px] overflow-auto whitespace-pre-wrap rounded-md border border-sky-200 bg-sky-50/40 p-3 text-[12px] leading-relaxed text-foreground">
-              {strategy}
-            </pre>
+            <>
+              <InterviewAskPills
+                askCoach={askCoach}
+                seeds={[{
+                  kind: "strategy",
+                  label: "call strategy",
+                  lineText: `${strategy}\n\nClarify the best next move from this strategy.`,
+                }]}
+              />
+              <pre className="max-h-[420px] overflow-auto whitespace-pre-wrap rounded-md border border-sky-200 bg-sky-50/40 p-3 text-[12px] leading-relaxed text-foreground">
+                {strategy}
+              </pre>
+            </>
           ) : (
             <div className="rounded-md border border-dashed border-border p-4 text-center text-xs text-muted-foreground">
               No strategy yet — generate one from the interview.
@@ -2978,6 +3110,7 @@ function InterviewSnapshotCard({
               selected={{ irsDebt: snapshot.irsDebt, stateDebt: snapshot.stateDebt }}
               onChange={(key, checked) => setDebtFlag(key as "irsDebt" | "stateDebt", checked)}
             />
+            <InterviewAskPills askCoach={askCoach} seeds={jurisdictionAskSeeds} />
           </InterviewField>
           <InterviewField label="Have they received notices or letters?">
             <CompactNativeSelect
@@ -2996,6 +3129,7 @@ function InterviewSnapshotCard({
               selected={snapshot.taxProblems}
               onChange={setTaxProblem}
             />
+            <InterviewAskPills askCoach={askCoach} seeds={taxProblemAskSeeds} />
           </InterviewField>
         </TabsContent>
 
@@ -3019,6 +3153,7 @@ function InterviewSnapshotCard({
               selected={snapshot.flags}
               onChange={setFlag}
             />
+            <InterviewAskPills askCoach={askCoach} seeds={clientContextAskSeeds} />
           </InterviewField>
           <InterviewField
             label="Personal / pitch notes"
@@ -3122,6 +3257,7 @@ function InterviewSnapshotCard({
               ))}
             </div>
           </InterviewField>
+          <InterviewAskPills askCoach={askCoach} seeds={financialAskSeeds} />
         </TabsContent>
 
       </Tabs>
@@ -3203,7 +3339,7 @@ export function CXWorkspace() {
     zip: "",
   });
   const [nameSearchOpen, setNameSearchOpen] = React.useState(false);
-  const [interviewSnapshotOpen, setInterviewSnapshotOpen] = React.useState(false);
+  const [coachWindowTab, setCoachWindowTab] = React.useState<"coach" | "interview" | "guidance">("coach");
 
   const [appointmentModalOpen, setAppointmentModalOpen] = React.useState(false);
 
@@ -3296,9 +3432,8 @@ export function CXWorkspace() {
     }
   }
 
-  // Single settle point for the drop's pending flag: every exit path (play
-  // success -> disposition, play failure, disposition failure, watchdog) goes
-  // through here so the flag and its watchdog can never diverge.
+  // Single settle point for the VM button pending flag: successful queue
+  // disposition, disposition failure, and the watchdog all pass through here.
   function settleVoicemailDropPending() {
     clearVoicemailDropWatchdog();
     setVoicemailDropPending(false);
@@ -3367,33 +3502,31 @@ export function CXWorkspace() {
     });
   }
 
-  async function runHeadlessVoicemailDrop() {
-    // v3 (server default): agent-owned DISPOSITION drop. The server resolves
-    // this agent's live RingCX UII and sets that agent's fixed VM disposition —
-    // the dialer completes the call for the agent and cold-transfers the
-    // VM leg to their answerer. Returns in ~2s; no barge, no arming.
-    //
-    // Legacy fallback: when the server runs CX_VOICEMAIL_DROP_MODE=barge the
-    // same request degrades to the headless one-shot *82 play (action falls
-    // back to "play"; requireArmed:false keeps the self-contained barge).
-    const response = (await voicemailDrop.mutateAsync({
+  function fireVoicemailDropRequest() {
+    void voicemailDrop.mutateAsync({
       action: "drop",
       phone: selectedPhone || undefined,
       requireArmed: false,
-    })) as
-      | { result?: Record<string, unknown> }
-      | undefined;
-    const result = (response?.result ?? response) as Record<string, unknown> | undefined;
-    if (result?.mode === "disposition") {
-      if (!result?.dropped) {
-        throw new Error("Voicemail disposition was not confirmed");
-      }
-      return result;
-    }
-    if (!result?.played || !result?.released) {
-      throw new Error("Headless monitor did not confirm voicemail playback and release");
-    }
-    return result;
+    })
+      .then((response) => {
+        const result = ((response as { result?: Record<string, unknown> } | undefined)?.result ?? response) as
+          | Record<string, unknown>
+          | undefined;
+        if (result?.mode === "disposition" && !result?.dropped) {
+          toast.warning("Voicemail request not confirmed", {
+            description: "The queue advanced, but RingCX did not confirm the VM disposition.",
+          });
+        } else if (result?.mode && result.mode !== "disposition" && !result?.played) {
+          toast.warning("Voicemail request not confirmed", {
+            description: "The queue advanced, but the legacy VM fallback did not confirm playback.",
+          });
+        }
+      })
+      .catch((error) => {
+        toast.error("Voicemail request failed", {
+          description: error instanceof Error ? error.message : "The queue advanced, but RingCX did not accept the VM request.",
+        });
+      });
   }
 
   function beginVoicemailDrop() {
@@ -3403,37 +3536,27 @@ export function CXWorkspace() {
     voicemailDropWatchdogRef.current = window.setTimeout(() => {
       voicemailDropWatchdogRef.current = null;
       setVoicemailDropPending(false);
-      toast.error("Voicemail drop timed out", {
-        description: "The voicemail service never reported back. This call may still need a manual disposition.",
+      toast.error("Voicemail disposition timed out", {
+        description: "The app did not finish recording the queue disposition. This call may still need a manual disposition.",
       });
     }, VOICEMAIL_DROP_WATCHDOG_MS);
     releaseLiveCoachForCurrentCall("voicemail-drop-started");
-    toast("Voicemail drop started", {
-      description: "Dropping this agent's assigned voicemail while the queue advances.",
-    });
-    void runHeadlessVoicemailDrop()
-      .then(() => {
-        try {
-          submitQueueDisposition("did-not-answer", "Voicemail", {
-            deferNextDial: true,
-            autoServeDelaySeconds: DISPOSITION_NEXT_LEAD_DELAY_SECONDS,
-          });
-        } catch (error) {
-          // Drop succeeded but the disposition path threw synchronously: settle
-          // the flag so the button can't stick, and tell the agent the queue
-          // still needs a manual advance.
-          settleVoicemailDropPending();
-          toast.error("Voicemail dropped, but the disposition failed", {
-            description: error instanceof Error ? error.message : "Advance the queue manually.",
-          });
-        }
-      })
-      .catch((error) => {
-        settleVoicemailDropPending();
-        toast.error("Voicemail drop failed", {
-          description: error instanceof Error ? error.message : "The voicemail service did not finish the recording.",
-        });
+    fireVoicemailDropRequest();
+    try {
+      submitQueueDisposition("did-not-answer", "Voicemail", {
+        deferNextDial: true,
+        autoServeDelaySeconds: NO_ANSWER_NEXT_LEAD_DELAY_SECONDS,
       });
+    } catch (error) {
+      settleVoicemailDropPending();
+      toast.error("Voicemail disposition failed", {
+        description: error instanceof Error ? error.message : "Advance the queue manually.",
+      });
+      return;
+    }
+    toast("Voicemail sent", {
+      description: "The queue is advancing while RingCX handles the voicemail transfer.",
+    });
   }
 
   function clearCasePanelForNextQueueLead() {
@@ -4439,7 +4562,7 @@ export function CXWorkspace() {
       //    "serving" (server release lag / stale poll). Restoring it produced
       //    the brief A→B lead flap. Wrap-up recovery (reload/crash) doesn't
       //    feel a 4s delay — the next poll re-runs this effect.
-      if (Date.now() - lastServedClearAtRef.current < 4_000) return;
+      if (Date.now() - lastServedClearAtRef.current < QUEUE_RESTORE_DEBOUNCE_MS) return;
       // 2. Never restore the lead we JUST advanced past — match on every
       //    identity the row can carry (key shape can differ between polls
       //    when ticket ids land late). Time-bounded to 60s so genuinely
@@ -4821,9 +4944,13 @@ export function CXWorkspace() {
   ) {
     if (dispositionCaseId == null) return;
     const shouldDeferNextDial = options.deferNextDial ?? true;
+    const defaultAutoServeDelaySeconds =
+      dispositionKey === "did-not-answer"
+        ? NO_ANSWER_NEXT_LEAD_DELAY_SECONDS
+        : DISPOSITION_NEXT_LEAD_DELAY_SECONDS;
     const autoServeDelaySeconds =
       options.autoServeDelaySeconds ??
-      (shouldDeferNextDial ? DISPOSITION_NEXT_LEAD_DELAY_SECONDS : undefined);
+      (shouldDeferNextDial ? defaultAutoServeDelaySeconds : undefined);
     releaseLiveCoachForCurrentCall(options.coachReleaseReason || `queue-disposition-${dispositionKey}`);
     const nextQueueLead = shouldDeferNextDial ? null : pickNextCallHandoffLead();
     const nextDial = buildNextCallHandoffPayload(nextQueueLead);
@@ -5394,30 +5521,6 @@ export function CXWorkspace() {
 
         {/* ── CENTER: client management ─────────────────────────────────── */}
         <section className="flex min-w-0 flex-1 flex-col gap-3">
-          {/* Live coach — its own ALWAYS-ON floating dock (fixed, bottom-right),
-              visible regardless of scroll or which section the agent is in,
-              and minimizable to a pill. Rendered here unconditionally; the
-              fixed positioning lifts it out of flow. */}
-          {LIVE_COACH_PANEL_ENABLED ? (
-            <LiveCoachPanel
-              agentEmail={data?.agent?.email || user?.email || null}
-              agentExtension={currentExtensionId}
-              agentName={data?.agent?.name || user?.name || null}
-              currentUii={currentCallUii}
-              currentCallSessionId={currentCallSessionId}
-              queueItemId={servedQueueTicketId}
-              caseId={resolvedCaseId || servedQueueCaseId || null}
-              contactName={
-                `${form.firstName} ${form.lastName}`.trim()
-                || selected?.name
-                || servedQueueContact?.name
-                || currentCall?.name
-                || null
-              }
-              releaseKey={coachReleaseSignal?.key || null}
-              releaseReason={coachReleaseSignal?.reason || null}
-            />
-          ) : null}
           {/* Identity strip — quick-glance + inline edits + call outcome */}
           <Card className="relative overflow-hidden">
             {/* Scramble progress bar — a thin animated stripe across the
@@ -5838,48 +5941,99 @@ export function CXWorkspace() {
             </CardContent>
           </Card>
 
-          <Collapsible
-            title="Interview snapshot"
-            open={interviewSnapshotOpen}
-            onToggle={() => setInterviewSnapshotOpen((value) => !value)}
-            right={
-              <span className="text-[10px] font-semibold uppercase tracking-[0.14em] text-muted-foreground">
-                Logics + cadence
-              </span>
-            }
-          >
-            <InterviewSnapshotCard
-              domain={caseDomain}
-              caseId={resolvedCaseId || form.caseId || selected?.caseId || ""}
-              prospectName={
+          {LIVE_COACH_PANEL_ENABLED ? (
+            <LiveCoachPanel
+              agentEmail={data?.agent?.email || user?.email || null}
+              agentExtension={currentExtensionId}
+              agentName={data?.agent?.name || user?.name || null}
+              currentUii={currentCallUii || null}
+              currentCallSessionId={currentCallSessionId || null}
+              queueItemId={servedQueueTicketId || null}
+              caseId={resolvedCaseId || servedQueueCaseId || null}
+              contactName={
                 `${form.firstName} ${form.lastName}`.trim()
                 || selected?.name
-                || [lookupMatch?.firstName, lookupMatch?.lastName].filter(Boolean).join(" ")
                 || servedQueueContact?.name
-                || ""
+                || currentCall?.name
+                || null
               }
-              phone={form.cellPhone || selectedPhone || currentCallPhone || ""}
-              queueActionKey={servedQueueActionKey}
-              queueItemId={servedQueueTicketId}
-              queueTicketId={servedQueueTicketId}
-              initialSnapshot={selected?.interviewSnapshot || servedQueueContact?.interviewSnapshot || null}
+              releaseKey={coachReleaseSignal?.key || null}
+              releaseReason={coachReleaseSignal?.reason || null}
+              layout="embedded"
+              chatPlacement="inline"
+              panelView={coachWindowTab}
+              headerControls={
+                <div className="flex rounded-md border border-sky-200 bg-white p-0.5 shadow-sm">
+                  <button
+                    type="button"
+                    onClick={() => setCoachWindowTab("coach")}
+                    className={cn(
+                      "rounded px-2 py-1 text-[11px] font-semibold transition-colors",
+                      coachWindowTab === "coach"
+                        ? "bg-sky-600 text-white"
+                        : "text-sky-700 hover:bg-sky-50",
+                    )}
+                  >
+                    Coach
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setCoachWindowTab("guidance")}
+                    className={cn(
+                      "rounded px-2 py-1 text-[11px] font-semibold transition-colors",
+                      coachWindowTab === "guidance"
+                        ? "bg-sky-600 text-white"
+                        : "text-sky-700 hover:bg-sky-50",
+                    )}
+                  >
+                    Guidance
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setCoachWindowTab("interview")}
+                    className={cn(
+                      "rounded px-2 py-1 text-[11px] font-semibold transition-colors",
+                      coachWindowTab === "interview"
+                        ? "bg-sky-600 text-white"
+                        : "text-sky-700 hover:bg-sky-50",
+                    )}
+                  >
+                    Interview
+                  </button>
+                </div>
+              }
+              contentOverride={(askCoach) => (
+                coachWindowTab === "interview" ? (
+                  <InterviewSnapshotCard
+                    domain={caseDomain}
+                    caseId={resolvedCaseId || form.caseId || selected?.caseId || ""}
+                    prospectName={
+                      `${form.firstName} ${form.lastName}`.trim()
+                      || selected?.name
+                      || [lookupMatch?.firstName, lookupMatch?.lastName].filter(Boolean).join(" ")
+                      || servedQueueContact?.name
+                      || ""
+                    }
+                    phone={form.cellPhone || selectedPhone || currentCallPhone || ""}
+                    queueActionKey={servedQueueActionKey}
+                    queueItemId={servedQueueTicketId}
+                    queueTicketId={servedQueueTicketId}
+                    initialSnapshot={selected?.interviewSnapshot || servedQueueContact?.interviewSnapshot || null}
+                    askCoach={askCoach}
+                  />
+                ) : null
+              )}
             />
-          </Collapsible>
+          ) : (
+            <div className="rounded-md border border-dashed border-sky-200 bg-white p-4 text-sm text-muted-foreground">
+              Coach is hidden by feature flag.
+            </div>
+          )}
 
-          {/* Logics workspace — list-first panels (Activities / Tasks / Invoices / Payments / Amortization) */}
-          {resolvedCaseId ? (
-            <LogicsWorkspaceCard
-              domain={caseDomain}
-              resolvedCaseId={resolvedCaseId}
-              resolvedPhone={
-                selected?.phone || lookupResult?.match?.phone || currentCallPhone || null
-              }
-            />
-          ) : null}
         </section>
 
-        {/* ── RIGHT: appointments now; reserved for sales coach/chat next ── */}
-        <aside className="flex-shrink-0 lg:w-[340px]">
+        {/* ── RIGHT: appointments + Logics context ──────────────────────── */}
+        <aside className="flex-shrink-0 lg:w-[370px]">
           <div className="lg:sticky lg:top-20 space-y-4">
             <AppointmentList
               appointments={appointmentItems}
@@ -5889,8 +6043,15 @@ export function CXWorkspace() {
               isReleasing={releaseAppointment.isPending}
               isCallingNow={callAppointmentNow.isPending}
             />
-            <div id={COACH_CHAT_SLOT_ID} />
-
+            {resolvedCaseId ? (
+              <LogicsWorkspaceCard
+                domain={caseDomain}
+                resolvedCaseId={resolvedCaseId}
+                resolvedPhone={
+                  selected?.phone || lookupResult?.match?.phone || currentCallPhone || null
+                }
+              />
+            ) : null}
           </div>
         </aside>
       </div>

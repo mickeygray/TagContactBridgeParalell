@@ -188,3 +188,38 @@ test("normalizePermissionList — non-array returns empty", () => {
   assert.deepEqual(normalizePermissionList(null), []);
   assert.deepEqual(normalizePermissionList("queue.dial"), []);
 });
+
+test("resolution.* permissions exist and are PER-USER GRANTS — in no role's defaults except admin", () => {
+  for (const key of ["resolution.read", "resolution.write", "resolution.agent"]) {
+    assert.ok(isKnownPermission(key), `unknown: ${key}`);
+    // Admin inherits implicitly (and via the audit list).
+    assert.ok(ROLE_DEFAULT_PERMISSIONS.admin.includes(key));
+    // Deliberately NOT a default for any other role — a handful of people
+    // get these via permissions[] grants.
+    for (const role of Object.keys(ROLE_DEFAULT_PERMISSIONS)) {
+      if (role === "admin") continue;
+      assert.ok(
+        !ROLE_DEFAULT_PERMISSIONS[role].includes(key),
+        `${role} must not default-carry ${key}`,
+      );
+    }
+  }
+});
+
+test("resolution access: per-user grant works on top of any role; ungranted users are denied", () => {
+  const granted = { role: "internal-agent", permissions: ["resolution.read", "resolution.agent"] };
+  assert.ok(hasPermission(granted, "resolution.read"));
+  assert.ok(hasPermission(granted, "resolution.agent"));
+  assert.ok(!hasPermission(granted, "resolution.write"));
+
+  const ungranted = { role: "manager", permissions: [] };
+  assert.ok(!hasPermission(ungranted, "resolution.read"));
+
+  const admin = { role: "admin" };
+  assert.ok(hasPermission(admin, "resolution.read"));
+  assert.ok(hasPermission(admin, "resolution.write"));
+  assert.ok(hasPermission(admin, "resolution.agent"));
+
+  // Effective set surfaces the grants for the users-admin UI.
+  assert.ok(effectivePermissionsFor(granted).includes("resolution.read"));
+});

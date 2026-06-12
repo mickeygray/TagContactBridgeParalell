@@ -62,6 +62,9 @@ const WynnInboxWorkspace = React.lazy(() =>
 const SalesTrainerWorkspace = React.lazy(() =>
   import("@/workspaces/trainer/SalesTrainerWorkspace").then((m) => ({ default: m.SalesTrainerWorkspace })),
 );
+const ResolutionWorkspace = React.lazy(() =>
+  import("@/workspaces/resolution/ResolutionWorkspace").then((m) => ({ default: m.ResolutionWorkspace })),
+);
 
 function WorkspaceFallback() {
   return (
@@ -229,6 +232,20 @@ export function AppRoutes() {
             }
           />
         </Route>
+      </Route>
+
+      {/* Resolution intelligence — permission-gated (resolution.read per-user
+          grant; admins implicit). The workspace double-checks server-side via
+          /api/resolution/access, so this route only needs authentication. */}
+      <Route element={<AuthGate />}>
+        <Route
+          path="/resolution"
+          element={
+            <Suspended>
+              <ResolutionWorkspace />
+            </Suspended>
+          }
+        />
       </Route>
 
       <Route element={<AuthGate />}>

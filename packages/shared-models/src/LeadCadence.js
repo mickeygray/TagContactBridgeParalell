@@ -174,6 +174,7 @@ const leadCadenceSchema = new mongoose.Schema(
     attributionContext: { type: mongoose.Schema.Types.Mixed, default: {} },
     payloadSnapshot: { type: mongoose.Schema.Types.Mixed, default: {} },
     interviewSnapshot: { type: mongoose.Schema.Types.Mixed, default: null },
+    liveCoachCloseout: { type: mongoose.Schema.Types.Mixed, default: null },
 
     // Rolling aged-pool DNC checkpoints. Distinct from cadenceState.dncCheck
     // (which marks cx/rvm channels DNC) — this governs membership in the

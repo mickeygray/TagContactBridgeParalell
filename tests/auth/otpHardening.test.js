@@ -66,7 +66,9 @@ test("validateSharedConfig — strict mode requires authOtpDelivery.fromEmail wh
   });
   assert.throws(
     () => validateSharedConfig(config),
-    /AUTH_OTP_FROM_EMAIL/,
+    // Message was reworded to name the config path + the env flag that
+    // gates it; anchor on the stable parts.
+    /authOtpDelivery\.fromEmail.*AUTH_OTP_PREVIEW/,
   );
 });
 

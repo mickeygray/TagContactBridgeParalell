@@ -67,6 +67,13 @@ const PERMISSIONS_CATALOG = Object.freeze({
   "inbox.read": "View inbox items",
   "inbox.action": "Approve / cancel / DNC inbox workflows",
 
+  // ── Resolution intelligence (secondary-sales panel) ──────────
+  // Deliberately in NO role's defaults: a handful of people get these as
+  // per-user grants (permissions[]). Admins inherit implicitly.
+  "resolution.read": "View the resolution panel: case bank, dossiers, opportunities",
+  "resolution.write": "Upload documents (parse-and-delete), amend dossier facts, manage opportunities",
+  "resolution.agent": "Run the resolution agent: deep reads, strategies, chat",
+
   // ── Admin / system ───────────────────────────────────────────
   "system.admin": "Full admin access (everything)",
   "system.deploy": "Trigger deploys",

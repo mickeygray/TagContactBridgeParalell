@@ -7,7 +7,7 @@
     "packages/*"
   ],
   "scripts": {
-    "build:web": "npm run build --workspace=web-client",
+    "build:web": "node scripts/check-build-safety.js && npm run build --workspace=web-client",
     "dev": "npm run dev:preflight && concurrently -k --handle-input -n cp,in,out,rc,web,ngrok -c blue,cyan,magenta,green,yellow,white \"npm:dev:control-plane\" \"npm:dev:inbound\" \"npm:dev:outbound\" \"npm:dev:ring\" \"npm:dev:web\" \"npm:dev:ngrok\"",
     "dev:no-ngrok": "npm run dev:preflight && concurrently -k --handle-input -n cp,in,out,rc,web -c blue,cyan,magenta,green,yellow \"npm:dev:control-plane\" \"npm:dev:inbound\" \"npm:dev:outbound\" \"npm:dev:ring\" \"npm:dev:web\"",
     "dev:backend": "npm run dev:preflight && concurrently -k --handle-input -n cp,in,out,rc -c blue,cyan,magenta,green \"npm:dev:control-plane\" \"npm:dev:inbound\" \"npm:dev:outbound\" \"npm:dev:ring\"",
@@ -27,6 +27,10 @@
     "backfill:legacy-metrics": "node scripts/backfill-legacy-metrics.js",
     "archive:eod-recordings": "node scripts/archive-eod-recordings.js",
     "logics:activity-review": "node scripts/run-logics-activity-review.js",
+    "resolution:close": "node scripts/run-resolution-bank-close.js",
+    "resolution:pitch-probe": "node scripts/resolution-pitch-probe.js",
+    "resolution:dossier": "node scripts/resolution-show-dossier.js",
+    "resolution:ingest": "node scripts/resolution-ingest-local.js",
     "ncoa:mailbox": "node scripts/run-ncoa-mailbox-ingest.js --once",
     "ncoa:mailbox:check": "node scripts/run-ncoa-mailbox-ingest.js --once --dry-run --skip-email --max-messages 1",
     "ncoa:mailbox:loop": "node scripts/run-ncoa-mailbox-ingest.js --loop",
@@ -66,6 +70,7 @@
     "node-ssh": "^13.2.1",
     "nodemailer": "^8.0.7",
     "papaparse": "^5.5.3",
+    "pdf-parse": "^2.4.5",
     "ringcentral-softphone": "^1.3.8",
     "ssh2-sftp-client": "^11.0.0"
   },

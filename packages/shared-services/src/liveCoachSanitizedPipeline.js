@@ -1581,10 +1581,12 @@ const FIXED_AGENT_COMPOSER_INSTRUCTIONS = Object.freeze([
 const FIXED_PROSPECT_COMPOSER_INSTRUCTIONS = Object.freeze([
   "FIRST, decide if there is anything to navigate. Reply with EXACTLY: WAIT - one word, nothing else - ONLY when the prospect's text adds nothing new: pure noise, a backchannel ('uh huh', 'okay', 'right'), or filler. A mid-thought fragment that surfaces a NEW fact or shift still deserves a Read/Steer - guidance stays true while they finish talking; just skip Try on fragments.",
   "Output format - up to three labeled lines, nothing else:",
-  "Read: <what is happening right now - the prospect's move, feeling, or the pattern that applies (objection forming, fact revealed, buying signal, stall). Under 12 words.>",
-  "Steer: <the direction - what to get next, what to hold course on, what NOT to chase. Anchor it to where the call is: discovery gaps, the pre-call strategy, an objection play. Under 25 words.>",
+  "Read: <the immediate REACTION trigger you heard: objection, tax fact, financial fact, pain point, buying signal, stall, compliance risk, or emotional shift. Under 12 words.>",
+  "Steer: <the GUIDEPOST update: where the call is now, which phase to advance, what fact is missing, or what not to chase. Anchor it to long-tail memory, discovery gaps, the pre-call strategy, or an objection play. Under 25 words.>",
   "Try: \"<exact words to say>\" - OPTIONAL. Include only when wording itself is the hard part: an objection pushback, a compliance-sensitive moment, a precision reframe. Most turns are Read + Steer alone.",
-  "The Read line IS the psychology: name what the prospect feels and wants (fear, skepticism, relief-seeking, pride) when that is the real event. The agent can hear the words; they need you for what the words mean.",
+  "Read is a reaction card, not a transcript: name what mattered in the last prospect turn and why the agent should care. It may be a fact ('IRS notice'), a feeling ('shame spike'), or a sales event ('buying signal').",
+  "Steer is a guidepost, not a script: look back at what has already been said, infer the case shape, and tell the agent how to advance between call phases.",
+  "The Read line IS the psychology when psychology is the event: name what the prospect feels and wants (fear, skepticism, relief-seeking, pride) when that is the real event. The agent can hear the words; they need you for what the words mean.",
   "Reads agents miss - call these out BY NAME when you see them: a price/timeline/how-does-it-work question is a BUYING SIGNAL, not resistance (say so - agents instinctively defend); short answers from a previously talkative prospect mean the agent lost them a beat ago (steer back to where engagement died); over-explaining or self-blame is shame (absolution unlocks discovery, judgment kills it); 'I need to think about it' means an unasked question exists (name the likely one); a prospect who argues is still buying - silence is the real enemy.",
   "Commitment language is the close signal: 'would' turning into 'will', 'if' into 'when', questions about logistics instead of value - when tense shifts forward, Steer = stop selling, start scheduling. Talking past the close is how sold deals die.",
   "When the agent just delivered stakes or a number and the prospect has not answered: the silence belongs to the prospect. Steer = hold it; do NOT hand the agent a line that rescues the prospect from deciding.",
@@ -1606,7 +1608,8 @@ const FIXED_PROSPECT_COMPOSER_INSTRUCTIONS = Object.freeze([
 
 const SONNET_PROSPECT_SYSTEM_PROMPT = [
   "You are a live call NAVIGATOR for tax-resolution sales calls - a veteran sales manager listening alongside the agent.",
-  "You do not script the agent; you orient them: read what is happening, point the direction, and hand over exact words only when wording itself is the hard part.",
+  "You do two different jobs at once: create a moment-level reaction to what was just heard, and update the long-tail guidepost for where the call should go next.",
+  "You do not merely script the agent; you orient them: read the event, point the direction, and hand over exact words only when wording itself is the hard part.",
   "You receive normalized prospect text plus the tax/sales context and conversation tactics selected for THIS moment, and the call's accumulated memory (key facts, the call so far, pre-call strategy).",
   "Your job is not transcription and not legal advice - decide whether there is anything to navigate (reply WAIT if not), otherwise give the agent a Read, a Steer, and optionally a Try line.",
   "Ground everything in the RAW prospect text in the user message. Apply only the tactics listed for this turn; ignore any standing directive that doesn't fit what was actually said. Never restate instructions back.",
@@ -1615,10 +1618,19 @@ const SONNET_PROSPECT_SYSTEM_PROMPT = [
   ...FIXED_PROSPECT_COMPOSER_INSTRUCTIONS.map((line) => `- ${line}`),
 ].join("\n");
 
-// OPENING-PHASE system prompt (the prospect's first few turns): there is no
+// OPENING-PHASE system prompt — CURRENTLY UNROUTED (2026-06-12, deliberate:
+// unified navigator handles every phase; "do everything, back off later").
+// The opening phase now rides as a user-payload stamp ("Call phase: OPENING")
+// instead of swapping the system prompt. KEPT as the back-off lever: if
+// turn-1 lines get wonky, restore the phase check in getSonnetSystemPrompt
+// (`callPhase === "opening" ? SONNET_OPENING_SYSTEM_PROMPT : ...`) and revert
+// the unified-navigator test in tests/live-coach/sanitizedPipeline.test.js.
+//
+// Original rationale (the prospect's first few turns): there is no
 // accumulated context yet and none is needed — the job is the call opening,
 // run close to verbatim. Separate STABLE prompt so it gets its own Anthropic
 // cache prefix (never mix per-call data in here).
+// eslint-disable-next-line no-unused-vars
 const SONNET_OPENING_SYSTEM_PROMPT = [
   "You are a live tax-resolution sales dialog composer for the OPENING moments of an outbound phone call.",
   "The prospect submitted a tax-debt inquiry; the agent is calling them back. These are the first exchanges — there is no call memory yet and you do not need any.",
@@ -1688,17 +1700,48 @@ function buildAskPrompt({
   kind = "question",
   question = "",
   lineText = "",
+  contextItems = [],
   metadata = {},
   recentMemoryText = "",
   callStrategy = "",
   recentAsks = [],
 } = {}) {
-  const askKind = ["question", "line", "expand", "objection"].includes(kind) ? kind : "question";
+  const askKind = [
+    "question",
+    "line",
+    "expand",
+    "objection",
+    "next_move",
+    "watch_points",
+    "fact",
+    "tax_problem",
+    "client_context",
+    "financial_context",
+    "interview_snapshot",
+    "strategy",
+    "discovery",
+    "close",
+    "context",
+  ].includes(kind) ? kind : "question";
   const agentName = cleanText(metadata.agentName || "the agent", 120);
   const firmName = cleanText(metadata.firmName || "the firm", 120);
   const contactName = cleanText(metadata.contactName || "", 120);
   const cleanQuestion = cleanText(question, 600);
   const cleanLine = cleanText(lineText, 500);
+  const cleanContextItems = (Array.isArray(contextItems) ? contextItems : [])
+    .slice(0, 6)
+    .map((item, index) => {
+      const itemKind = cleanText(item?.kind || "context", 40);
+      const label = cleanText(item?.label || `Context ${index + 1}`, 140);
+      const text = cleanText(item?.lineText || item?.text || item?.value || "", 500);
+      if (!label && !text) return null;
+      return {
+        kind: itemKind,
+        label,
+        text,
+      };
+    })
+    .filter(Boolean);
   // The asks are a CHAT: follow-ups ("what about his wife?") only make sense
   // against the prior exchanges — carry the last few Q&As compactly.
   const chatRows = (Array.isArray(recentAsks) ? recentAsks : [])
@@ -1716,13 +1759,20 @@ function buildAskPrompt({
     contactName ? `Prospect name: ${contactName}` : "",
     `Ask kind: ${askKind}`,
     cleanQuestion ? `The agent asks: ${cleanQuestion}` : "",
-    cleanLine ? `Pinned transcript line (the prospect said): "${cleanLine}"` : "",
+    cleanLine && !cleanContextItems.length ? `Pinned context: "${cleanLine}"` : "",
   ].filter(Boolean);
+  if (cleanContextItems.length) {
+    user.push("", "Selected Ask context (the agent intentionally attached these items):");
+    cleanContextItems.forEach((item, index) => {
+      user.push(`- Context ${index + 1} [${item.kind}] ${item.label}: ${item.text || item.label}`);
+    });
+  }
   if (chatRows.length) {
     user.push("", "Recent coach chat this call (oldest first; the current ask may be a follow-up):", ...chatRows);
   }
   if (askKind === "objection") {
-    const matchedKeys = matchObjectionKeysFromText(`${cleanQuestion} ${cleanLine}`);
+    const contextText = cleanContextItems.map((item) => `${item.label} ${item.text}`).join(" ");
+    const matchedKeys = matchObjectionKeysFromText(`${cleanQuestion} ${cleanLine} ${contextText}`);
     const objectionBlock = objectionBank.formatObjectionPlaybookForPrompt(matchedKeys);
     if (objectionBlock) user.push("", "Objection playbook:", objectionBlock);
   }
@@ -1755,8 +1805,9 @@ function buildFixedComposerInstructions({ role = "prospect" } = {}) {
 
 function buildCacheableComposerSystem({ role = "prospect", callPhase = "" } = {}) {
   if (role !== "prospect") return SONNET_AGENT_SYSTEM_PROMPT;
-  // Both prompts are STABLE constants — each gets its own cache prefix.
-  return callPhase === "opening" ? SONNET_OPENING_SYSTEM_PROMPT : SONNET_PROSPECT_SYSTEM_PROMPT;
+  // Keep the same Read/Steer/Try navigator contract from the first prospect
+  // turn onward so the UI does not switch mental models mid-call.
+  return SONNET_PROSPECT_SYSTEM_PROMPT;
 }
 
 function buildLegacyFixedComposerInstructions({ role = "prospect" } = {}) {

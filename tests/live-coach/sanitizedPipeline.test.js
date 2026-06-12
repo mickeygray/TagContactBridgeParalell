@@ -117,12 +117,19 @@ test("call strategy from interview rides the composer prompt when present", () =
   assert.match(payload.user, /levy deadline/);
 });
 
-test("opening phase runs the scripted opening prompt; established runs the full coach", () => {
+// UNIFIED-ON-PURPOSE (2026-06-12, user call: "do everything, we can back off
+// later"): every phase — including the prospect's first turn — runs the full
+// navigator prompt. The opening phase is still STAMPED in the user payload so
+// the navigator knows where it is. To back off, restore the phase check in
+// getSonnetSystemPrompt (SONNET_OPENING_SYSTEM_PROMPT is kept for exactly
+// that) and revert this test to the scripted-opening assertions.
+test("unified navigator: opening turns get the full coach with the phase stamped", () => {
   const opening = buildSonnetPromptPayload({
     contextFrame: { role: "prospect", callPhase: "opening", prospectTurnCount: 1, shouldCompose: true, phraseText: "Hello?" },
     metadata: { agentName: "Chris", firmName: "Tax Advocate Group", contactName: "Maria Lopez" },
   });
-  assert.match(opening.system, /OPENING moments/);
+  assert.match(opening.system, /live call NAVIGATOR/);
+  assert.doesNotMatch(opening.system, /OPENING moments/); // scripted opening is unrouted by design
   assert.match(opening.user, /Prospect name: Maria Lopez/);
   assert.match(opening.user, /Call phase: OPENING \(prospect turn 1\)/);
 
@@ -130,8 +137,10 @@ test("opening phase runs the scripted opening prompt; established runs the full 
     contextFrame: { role: "prospect", callPhase: "established", shouldCompose: true, phraseText: "I owe about forty grand from 2021." },
     metadata: { agentName: "Chris", firmName: "Tax Advocate Group" },
   });
-  assert.doesNotMatch(established.system, /OPENING moments/);
-  assert.match(established.system, /Standing directives/);
+  // Same system prompt for both phases — the phase difference rides the
+  // user payload, not the system prompt.
+  assert.equal(opening.system, established.system);
+  assert.doesNotMatch(established.user, /Call phase: OPENING/);
 });
 
 test("dual-VAD: fast channel is additive, turn channel composes, no phrase duplication", () => {
@@ -553,7 +562,9 @@ test("ask prompt: line kind carries the pinned transcript and call memory", () =
     callStrategy: "Lead with levy urgency.",
   });
   assert.match(ask.user, /Ask kind: line/);
-  assert.match(ask.user, /Pinned transcript line \(the prospect said\): "my payroll guy/);
+  // Wording changed with the Ask-pills work: a bare pinned line (no attached
+  // context items) now rides as "Pinned context".
+  assert.match(ask.user, /Pinned context: "my payroll guy/);
   assert.match(ask.user, /Call memory \(key facts, the call so far, recent lines\):/);
   assert.match(ask.user, /Pre-call strategy for this prospect:/);
   // Objection playbook only rides objection asks.
