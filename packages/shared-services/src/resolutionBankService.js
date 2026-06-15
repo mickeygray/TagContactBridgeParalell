@@ -78,6 +78,51 @@ function asRows(value) {
   return [];
 }
 
+// ── Activity NOTE-TEXT extraction (nightly per-profile refresh) ──────────────
+// Logics returns the full recent activity list each refresh, so the notes field is a
+// whole-field REPLACE (Logics is the authority) — newest-first, capped; no append/dedup needed.
+const ACTIVITY_NOTE_ID_KEYS = ["ActivityID", "ActivityId", "ID"];
+const ACTIVITY_NOTE_DATE_KEYS = ["CreatedDate", "ActivityDate", "ModifiedDate", "Date"];
+const ACTIVITY_NOTE_BY_KEYS = ["CreatedByName", "CreatedBy", "EnteredBy", "User", "Author"];
+const ACTIVITY_NOTE_TEXT_KEYS = ["Subject", "ActivityType", "Comment", "Notes", "Description"];
+
+function cleanActivityNoteText(value, max = 280) {
+  return String(value == null ? "" : value)
+    .replace(/[\x00-\x1F\x7F]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, max);
+}
+
+// Pure: raw Logics activity rows -> compact newest-first note objects { activityId, at, by, text }.
+function extractActivityNotes(activities = [], { limit = 25, maxTextLen = 280 } = {}) {
+  const cap = Math.max(1, Number(limit) || 1);
+  const notes = asRows(activities)
+    .map((a) => {
+      const text = cleanActivityNoteText(
+        ACTIVITY_NOTE_TEXT_KEYS.map((k) => a?.[k]).filter(Boolean).join(" — "),
+        maxTextLen,
+      );
+      if (!text) return null;
+      const date = toDate(pickFirst(a, ACTIVITY_NOTE_DATE_KEYS));
+      const id = num(pickFirst(a, ACTIVITY_NOTE_ID_KEYS));
+      const by = cleanActivityNoteText(pickFirst(a, ACTIVITY_NOTE_BY_KEYS) || "", 60);
+      return { activityId: id || null, at: date ? date.toISOString() : null, by: by || null, text };
+    })
+    .filter(Boolean);
+  notes.sort((x, y) => {
+    const dx = x.at ? Date.parse(x.at) : 0;
+    const dy = y.at ? Date.parse(y.at) : 0;
+    if (dy !== dx) return dy - dx;
+    return (y.activityId || 0) - (x.activityId || 0);
+  });
+  return notes.slice(0, cap);
+}
+
+function activityNotesLimit() {
+  return Math.max(1, Number(process.env.RESOLUTION_ACTIVITY_NOTES_LIMIT || 25) || 25);
+}
+
 // Refunds/voids/declines never count toward "money in".
 const BAD_PAYMENT_STATUS = /refund|void|charge.?back|declin|nsf|return|reject|cancel/i;
 
@@ -232,6 +277,22 @@ async function refreshClientProfileFromLogics({ caseNumber, domain = "TAG", clie
         asOf: now,
         source: sourceTag,
       };
+      // Activity NOTE TEXT (newest-first, capped) — silently capture WHAT each recent activity
+      // says, alongside the cursor. Reuses `acts` (no extra Logics GET). Whole-field replace:
+      // Logics returns the full recent activity list, so the latest N are the current truth.
+      const activityNotes = extractActivityNotes(acts, { limit: activityNotesLimit() });
+      if (activityNotes.length) {
+        shorthand.logics_activity_notes = {
+          value: activityNotes,
+          snippet: activityNotes
+            .slice(0, 3)
+            .map((n) => `${n.at ? n.at.slice(0, 10) : "?"}: ${n.text}`)
+            .join(" | ")
+            .slice(0, 240),
+          asOf: now,
+          source: sourceTag,
+        };
+      }
     }
   } catch (error) {
     errors.push(`Activities: ${error.message}`);
@@ -478,4 +539,5 @@ module.exports = {
   runResolutionBankClose,
   addCaseToBank,
   REFRESH_DUE_HOURS,
+  extractActivityNotes, // exported for unit tests (nightly activity-note capture)
 };
