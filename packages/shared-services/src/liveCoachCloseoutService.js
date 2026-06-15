@@ -401,6 +401,36 @@ function normalizeCallGrade(raw = {}) {
   };
 }
 
+function hasSubstantiveCloseoutEvidence(closeout = {}, options = {}) {
+  const transcriptChars = Number(closeout.metrics?.prospectCharCount || 0);
+  const transcriptCount = Number(closeout.metrics?.transcriptCount || 0);
+  const coachTurnCount = Number(closeout.metrics?.coachTurnCount || 0);
+  const contextCount = Number(closeout.metrics?.contextCount || 0);
+  const factCount = Array.isArray(closeout.facts) ? closeout.facts.length : 0;
+  const minTranscriptChars = Math.max(1, Number(options.minTranscriptChars || 120));
+  const artifactMinChars = Math.min(minTranscriptChars, 80);
+
+  return (
+    transcriptChars >= minTranscriptChars ||
+    (transcriptCount >= 2 && transcriptChars >= Math.min(minTranscriptChars, 120)) ||
+    ((coachTurnCount > 0 || contextCount > 0) && transcriptChars >= artifactMinChars) ||
+    factCount > 0
+  );
+}
+
+function gradeIndicatesInsufficientEvidence(grade = {}) {
+  const text = [
+    grade.verdict,
+    grade.outcome,
+    grade.callPhaseReached,
+    grade.summaryForAgent,
+    ...(Array.isArray(grade.riskFlags) ? grade.riskFlags : []),
+    ...(Array.isArray(grade.coachingNotes) ? grade.coachingNotes : []),
+  ].map((value) => cleanText(value, 500)).join(" ").toLowerCase();
+
+  return /insufficient evidence|no transcript|no usable call content|no observable|low confidence|transcript lacks/.test(text);
+}
+
 function formatLogicsActivityComment(closeout = {}) {
   return cleanMultilineText(closeout.sparse?.text || "", 1800);
 }
@@ -476,6 +506,13 @@ function shouldSendManagerOutlierEmail(closeout = {}, config = {}) {
   const transcriptChars = Number(closeout.metrics?.prospectCharCount || 0);
   const minDurationSec = Number(config.agentEmailManagerMinDurationSec || 300);
   const minChars = Number(config.agentEmailManagerMinTranscriptChars || 800);
+  const evidenceEnough = hasSubstantiveCloseoutEvidence(closeout, {
+    minTranscriptChars: Math.min(minChars, 250),
+  });
+  if (!evidenceEnough) return { ok: false, reason: "below-manager-email-evidence-threshold", score };
+  if (gradeIndicatesInsufficientEvidence(closeout.callGrade?.grade || {})) {
+    return { ok: false, reason: "insufficient-evidence-grade", score };
+  }
   const longEnough = durationSec >= minDurationSec || transcriptChars >= minChars;
   if (!longEnough) return { ok: false, reason: "below-manager-email-length-threshold" };
   const high = Number(config.agentEmailManagerHighScore || 90);
@@ -609,10 +646,18 @@ function createLiveCoachCloseoutWorker({
     if (!to) return { skipped: true, reason: "missing-agent-email" };
     const minDurationSec = Number(config.agentEmailMinDurationSec || 180);
     const minChars = Number(config.agentEmailMinTranscriptChars || 400);
+    const evidenceEnough = hasSubstantiveCloseoutEvidence(closeout, {
+      minTranscriptChars: Math.min(minChars, 250),
+    });
     const meaningful =
-      Number(closeout.metrics?.durationSec || 0) >= minDurationSec ||
-      Number(closeout.metrics?.prospectCharCount || 0) >= minChars ||
-      Number(closeout.metrics?.coachTurnCount || 0) > 0;
+      evidenceEnough &&
+      (
+        Number(closeout.metrics?.durationSec || 0) >= minDurationSec ||
+        Number(closeout.metrics?.prospectCharCount || 0) >= minChars ||
+        Number(closeout.metrics?.coachTurnCount || 0) > 0 ||
+        Number(closeout.metrics?.contextCount || 0) > 0 ||
+        (Array.isArray(closeout.facts) && closeout.facts.length > 0)
+      );
     if (!meaningful) return { skipped: true, reason: "below-agent-email-threshold" };
     const response = {
       skipped: false,
@@ -653,10 +698,18 @@ function createLiveCoachCloseoutWorker({
     }
     const minDurationSec = Number(config.callGraderMinDurationSec || 90);
     const minChars = Number(config.callGraderMinTranscriptChars || 350);
+    const evidenceEnough = hasSubstantiveCloseoutEvidence(closeout, {
+      minTranscriptChars: Math.min(minChars, 200),
+    });
     const meaningful =
-      Number(closeout.metrics?.durationSec || 0) >= minDurationSec ||
-      Number(closeout.metrics?.prospectCharCount || 0) >= minChars ||
-      Number(closeout.metrics?.coachTurnCount || 0) > 0;
+      evidenceEnough &&
+      (
+        Number(closeout.metrics?.durationSec || 0) >= minDurationSec ||
+        Number(closeout.metrics?.prospectCharCount || 0) >= minChars ||
+        Number(closeout.metrics?.coachTurnCount || 0) > 0 ||
+        Number(closeout.metrics?.contextCount || 0) > 0 ||
+        (Array.isArray(closeout.facts) && closeout.facts.length > 0)
+      );
     if (!meaningful) {
       stats.gradeSkipped += 1;
       return { skipped: true, reason: "below-grader-threshold" };
@@ -772,6 +825,8 @@ module.exports = {
   formatAgentEmailText,
   formatLogicsActivityComment,
   formatManagerOutlierEmailText,
+  gradeIndicatesInsufficientEvidence,
+  hasSubstantiveCloseoutEvidence,
   normalizeCallGrade,
   shouldSendManagerOutlierEmail,
 };

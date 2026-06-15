@@ -17,6 +17,7 @@ const {
 } = require("../../shared-repositories/src");
 const { CxDialQueue, LeadCadence, MasterProspectIndex } = require("../../shared-models/src");
 const { recordWorkflowStage } = require("./workflowStateService");
+const { evaluateCxClear } = require("./cxCallStateGuard");
 const { searchClientWorkspace } = require("./frontendReadService");
 const {
   applyCallEndedDailyStats,
@@ -1588,17 +1589,14 @@ async function clearAgentCxCallState(extensionId, source = "cx-call-state-clear"
   const existingCall = existing?.currentCall && typeof existing.currentCall === "object"
     ? existing.currentCall
     : {};
-  const requestedIdentity = normalizeExternalId(options.uii || options.rcxUii || null);
-  const existingIdentity = callIdentity(existingCall);
-  if (
-    requestedIdentity
-    && existingIdentity
-    && existingIdentity !== requestedIdentity
-    && String(existing?.activePlatform || "").trim().toUpperCase() === "CX"
-  ) {
+  const { skip: cxClearSkip, existingIdentity, requestedIdentity } = evaluateCxClear(
+    existing,
+    options.uii || options.rcxUii || null,
+  );
+  if (cxClearSkip) {
     return {
       skipped: true,
-      reason: "different-active-cx-call",
+      reason: cxClearSkip,
       extensionId: normalizedExtensionId,
       existingIdentity,
       requestedIdentity,
@@ -5349,7 +5347,7 @@ async function requestCxDisposition(domain, user, input = {}) {
         ...input,
         actorEmail: context.account?.email || user?.email || null,
       });
-    await clearAgentCxCallState(
+    const clearResult = await clearAgentCxCallState(
       context.account?.extensionId || user?.extensionId || input.assignedExtensionId || null,
       `cx-${normalizedDisposition}`,
       {
@@ -5368,10 +5366,15 @@ async function requestCxDisposition(domain, user, input = {}) {
       outcome,
       requested,
     });
-    const nextDial = await requestCxNextDialHandoff({ context, user, input });
+    // Do NOT serve the next lead if the CX clear was SKIPPED because the agent is still on a live
+    // CX call (missing-uii / different-active-cx-call) — advancing then is the Tracey->Veronica leak.
+    const clearSkipped = Boolean(clearResult?.skipped);
+    const nextDial = clearSkipped
+      ? { ok: false, skipped: true, reason: clearResult.reason || "cx-clear-skipped" }
+      : await requestCxNextDialHandoff({ context, user, input });
     return {
       ...requested,
-      completed: true,
+      completed: !clearSkipped,
       completionWorkflowId: null,
       disposition: outcome?.disposition || friendlyDisposition,
       queueOutcome: outcome?.queueOutcome || null,
@@ -5380,12 +5383,17 @@ async function requestCxDisposition(domain, user, input = {}) {
       queueItemId: outcome?.queueItemId || input.queueItemId || input.queueTicketId || null,
       queueTicketId: outcome?.queueTicketId || outcome?.queueItemId || input.queueItemId || input.queueTicketId || null,
       response: outcome,
+      clearResult,
       nextDial,
+      callHeldOpen: clearSkipped,
+      wrapUpRequired: false,
       hangup: {
-        ok: true,
-        acceptedLocally: true,
-        backgroundPending: true,
-        reason: "disposition-hangup-backgrounded",
+        ok: !clearSkipped,
+        acceptedLocally: !clearSkipped,
+        backgroundPending: !clearSkipped,
+        reason: clearSkipped
+          ? clearResult.reason || "cx-clear-skipped"
+          : "disposition-hangup-backgrounded",
       },
     };
   }
@@ -5414,7 +5422,7 @@ async function requestCxDisposition(domain, user, input = {}) {
       ...input,
       actorEmail: context.account?.email || user?.email || null,
     });
-    await clearAgentCxCallState(
+    const clearResult = await clearAgentCxCallState(
       context.account?.extensionId || user?.extensionId || input.assignedExtensionId || null,
       "cx-callback-eject",
       {
@@ -5432,10 +5440,15 @@ async function requestCxDisposition(domain, user, input = {}) {
       outcome,
       requested,
     });
-    const nextDial = await requestCxNextDialHandoff({ context, user, input });
+    // Do NOT serve the next lead if the CX clear was SKIPPED because the agent is still on a live
+    // CX call (missing-uii / different-active-cx-call) — advancing then is the Tracey->Veronica leak.
+    const clearSkipped = Boolean(clearResult?.skipped);
+    const nextDial = clearSkipped
+      ? { ok: false, skipped: true, reason: clearResult.reason || "cx-clear-skipped" }
+      : await requestCxNextDialHandoff({ context, user, input });
     return {
       ...requested,
-      completed: true,
+      completed: !clearSkipped,
       completionWorkflowId: null,
       disposition: outcome?.disposition || "Call Back",
       queueOutcome: outcome?.queueOutcome || null,
@@ -5445,12 +5458,17 @@ async function requestCxDisposition(domain, user, input = {}) {
       queueTicketId: outcome?.queueTicketId || outcome?.queueItemId || input.queueItemId || input.queueTicketId || null,
       queueEjection: outcome?.queueEjection || null,
       response: outcome,
+      clearResult,
       nextDial,
+      callHeldOpen: clearSkipped,
+      wrapUpRequired: false,
       hangup: {
-        ok: true,
-        acceptedLocally: true,
-        backgroundPending: true,
-        reason: "callback-hangup-backgrounded",
+        ok: !clearSkipped,
+        acceptedLocally: !clearSkipped,
+        backgroundPending: !clearSkipped,
+        reason: clearSkipped
+          ? clearResult.reason || "cx-clear-skipped"
+          : "callback-hangup-backgrounded",
       },
     };
   }

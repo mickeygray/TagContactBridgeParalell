@@ -1234,7 +1234,7 @@ async function startServer() {
   app.use("/api/auth", createAuthRouter(config, { logger: runtime.logger }));
   app.use("/api/callrail", createCallrailRouter(auth));
   app.use("/api/commands/clients", createCommandsClientsRouter(auth));
-  app.use("/api/commands/cx", createCommandsCxRouter(auth));
+  app.use("/api/commands/cx", createCommandsCxRouter(auth, { logger: runtime.logger }));
   app.use("/api/commands/deploy", createCommandsDeployRouter(auth, { bloggerRuntime }));
   app.use("/api/commands/inbox", createCommandsInboxRouter(auth));
   app.use("/api/commands/social", createCommandsSocialRouter(auth));

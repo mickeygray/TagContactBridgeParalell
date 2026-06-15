@@ -12,6 +12,7 @@ const {
   isCxWorkspacePresenceActive,
   isCxWorkspacePresenceRequired,
 } = require("./agentAvailabilityService");
+const { callIdentity } = require("./cxCallStateGuard");
 
 // idleReaperService — releases active slices for agents who've been
 // idle (no activity) for longer than `unavailReaperMinutes`.
@@ -111,6 +112,15 @@ function getOrphanDispositionClearMs() {
   return 90_000;
 }
 
+// Optional NON-EX absolute backstop. A CX disposition that still carries a UII identity is
+// held (not reaped) until its UII-matched terminal/disposition releases it; only past this many
+// ms is it reaped anyway, so a genuinely lost terminal event can't strand an agent forever.
+// Default: disabled (held indefinitely on UII). RingCentral EX presence is never consulted.
+function getCxOrphanDispositionUiiMaxHoldMs() {
+  const parsed = Number(process.env.RC_CX_ORPHAN_DISPOSITION_UII_MAX_HOLD_MS);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+}
+
 function shouldClearOrphanCxDisposition(agent = null, asOf = new Date()) {
   if (!agent) return false;
   const activityState = normalizeToken(agent.activityState);
@@ -124,7 +134,23 @@ function shouldClearOrphanCxDisposition(agent = null, asOf = new Date()) {
   if (channel && channel !== "cx") return false;
   const lastCallEndedAt = agent.lastCallEndedAt ? new Date(agent.lastCallEndedAt) : null;
   if (!lastCallEndedAt || Number.isNaN(lastCallEndedAt.getTime())) return false;
-  return asOf.getTime() - lastCallEndedAt.getTime() >= getOrphanDispositionClearMs();
+  const orphanAgeMs = asOf.getTime() - lastCallEndedAt.getTime();
+  if (orphanAgeMs < getOrphanDispositionClearMs()) return false;
+
+  // UII-EVENT HOLD: CX call state is owned by UII-keyed CX events, NOT by the EX dial-in
+  // presence log (which is stale — the Tracey->Veronica incident, 2026-06-15). While the call
+  // still carries a UII identity, release must come from a UII-matched terminal/disposition
+  // (the guarded clear functions in cxWorkspace/ringcxDialExecution/dial/cxCadence services),
+  // never from age or EX presence. So we HOLD a UII-bearing orphan, except past an optional
+  // generous non-EX absolute cap. Identity-less orphans (no UII to wait on) are reaped as before.
+  const identity = callIdentity(currentCall);
+  if (identity) {
+    const maxHoldMs = getCxOrphanDispositionUiiMaxHoldMs();
+    if (!(Number.isFinite(maxHoldMs) && maxHoldMs > 0 && orphanAgeMs > maxHoldMs)) {
+      return false;
+    }
+  }
+  return true;
 }
 
 async function clearOrphanCxDispositionStates({ asOf = new Date() } = {}) {
@@ -228,6 +254,7 @@ async function reapTick({ asOf = new Date() } = {}) {
 
 module.exports = {
   clearOrphanCxDispositionStates,
+  shouldClearOrphanCxDisposition,
   reapTick,
   reapStaleCxQueueAssignments,
 };

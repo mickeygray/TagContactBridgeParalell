@@ -1,5 +1,6 @@
 "use strict";
 
+const crypto = require("crypto");
 const express = require("express");
 const {
   executeCxLogicsCreateCase,
@@ -34,8 +35,71 @@ const {
 } = require("../../../../packages/shared-services/src");
 const { toErrorResponse } = require("../../../../packages/shared-errors/src");
 
-function createCommandsCxRouter(auth) {
+function createCommandsCxRouter(auth, options = {}) {
   const router = express.Router();
+  const logger = options.logger || console;
+
+  function maskEmail(value) {
+    const raw = String(value || "").trim();
+    if (!raw) return null;
+    const [name, domain] = raw.split("@");
+    if (!domain) return raw.length <= 3 ? "***" : `${raw.slice(0, 3)}***`;
+    return `${name.slice(0, 3)}***@${domain}`;
+  }
+
+  function phoneLast4(value) {
+    const digits = String(value || "").replace(/\D/g, "");
+    return digits ? digits.slice(-4) : null;
+  }
+
+  function summarizeProviderBody(body) {
+    if (!body || typeof body !== "object") return body ? String(body).slice(0, 300) : null;
+    const errors = Array.isArray(body.errors)
+      ? body.errors.slice(0, 3).map((entry) => ({
+          errorCode: entry?.errorCode || null,
+          message: entry?.message || entry?.generalMessage || null,
+        }))
+      : undefined;
+    return {
+      errorCode: body.errorCode || null,
+      generalMessage: body.generalMessage || null,
+      message: body.message || null,
+      requestUri: body.requestUri || null,
+      timestamp: body.timestamp || null,
+      errors,
+    };
+  }
+
+  function summarizeError(error) {
+    const details = error?.details || {};
+    return {
+      name: error?.name || null,
+      message: error?.message || "Unknown error",
+      code: error?.code || null,
+      status: error?.status || details.responseStatus || 500,
+      retryable: Boolean(error?.retryable),
+      service: error?.service || details.service || null,
+      method: details.method || null,
+      path: details.path || null,
+      responseStatus: details.responseStatus || null,
+      retryAfter: details.retryAfter || details.retryAfterSeconds || null,
+      rateLimitedCircuitOpen: Boolean(details.rateLimitedCircuitOpen),
+      rateLimitedCircuitOpened: Boolean(details.rateLimitedCircuitOpened),
+      scope: details.scope || null,
+      usageGroup: details.usageGroup || details.rateLimitHeaders?.group || null,
+      nextApiAttemptAt: details.nextApiAttemptAt || null,
+      rateLimitHeaders: details.rateLimitHeaders
+        ? {
+            group: details.rateLimitHeaders.group || null,
+            limit: details.rateLimitHeaders.limit || null,
+            remaining: details.rateLimitHeaders.remaining || null,
+            window: details.rateLimitHeaders.window || null,
+            retryAfter: details.rateLimitHeaders.retryAfter || null,
+          }
+        : null,
+      responseBody: summarizeProviderBody(details.responseBody),
+    };
+  }
 
   async function requireDialingWindow(req, res, next) {
     try {
@@ -110,10 +174,44 @@ function createCommandsCxRouter(auth) {
     auth.requirePermission("queue.dispose"),
     auth.requireCxOAuth,
     async (req, res) => {
+      const requestId = crypto.randomUUID();
+      const startedAt = Date.now();
+      const body = req.body || {};
+      logger.info?.("cx.voicemail_drop.request", {
+        requestId,
+        domain: req.params.domain,
+        userEmail: maskEmail(req.user?.email),
+        userRole: req.user?.role || null,
+        action: body.action || body.mode || "play",
+        caseId: body.caseId || null,
+        queueItemId: body.queueItemId || null,
+        phoneLast4: phoneLast4(body.phone || body.prospectPhone || body.leadPhone),
+      });
       try {
-        const result = await requestCxVoicemailDrop(req.params.domain, req.user, req.body || {});
+        const result = await requestCxVoicemailDrop(req.params.domain, req.user, body, {
+          logger,
+          requestId,
+        });
+        logger.info?.("cx.voicemail_drop.completed", {
+          requestId,
+          domain: req.params.domain,
+          userEmail: maskEmail(req.user?.email),
+          elapsedMs: Date.now() - startedAt,
+          mode: result?.mode || null,
+          disposition: result?.drop?.disposition || result?.theme?.disposition || null,
+          uii: result?.uii || null,
+          matchedBy: result?.matchedBy || null,
+          skipped: Boolean(result?.skipped),
+        });
         return res.json({ ok: true, result });
       } catch (error) {
+        logger.warn?.("cx.voicemail_drop.failed", {
+          requestId,
+          domain: req.params.domain,
+          userEmail: maskEmail(req.user?.email),
+          elapsedMs: Date.now() - startedAt,
+          error: summarizeError(error),
+        });
         return res.status(error.status || 500).json(toErrorResponse(error));
       }
     },

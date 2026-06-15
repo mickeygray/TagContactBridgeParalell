@@ -50,6 +50,15 @@ const {
   relayReviewItemObserved,
 } = require("./controlPlaneRelayService");
 const { recordWorkflowStage } = require("./workflowStateService");
+const { decideExPollCxOwnership, callIdentity } = require("./cxCallStateGuard");
+
+// EX->CX decoupling rollout flag (phase-out). DEFAULT OFF: when unset/not "true", the EX presence
+// poll behaves exactly as before. When "true", the poll stops overwriting an agent's held CX
+// call-state from the EX dial-in log (CX state is owned by the RingCX/UII path). Enable in a
+// controlled test window, not blanket. See docs/cx-handoff-tracey-veronica.PLAN.md.
+function exCxDecoupleEnabled() {
+  return String(process.env.RC_CX_EX_DECOUPLE_ENABLED || "").trim().toLowerCase() === "true";
+}
 
 const EX_EVENT_TYPES = Object.freeze({
   PRESENCE_OBSERVED: "ringcentral.ex.presence.observed",
@@ -144,6 +153,8 @@ function callSignature(call = {}) {
   return [
     call.sessionId || "",
     call.telephonySessionId || "",
+    call.callSessionId || "",
+    call.uii || "",
     call.direction || "",
     call.from || "",
     call.to || "",
@@ -184,6 +195,8 @@ function snapshotCurrentCall(activeCall = null) {
   return {
     sessionId: activeCall.sessionId || null,
     telephonySessionId: activeCall.telephonySessionId || null,
+    callSessionId: activeCall.callSessionId || null,
+    uii: activeCall.uii || null,
     direction: activeCall.direction || null,
     from: activeCall.from || null,
     fromName: activeCall.fromName || null,
@@ -202,6 +215,8 @@ function cloneCall(call = {}) {
   return {
     sessionId: call.sessionId || null,
     telephonySessionId: call.telephonySessionId || null,
+    callSessionId: call.callSessionId || null,
+    uii: call.uii || null,
     direction: call.direction || null,
     from: call.from || null,
     fromName: call.fromName || null,
@@ -1182,34 +1197,58 @@ async function reconcilePolledPresence(agent, presence, logger, options = {}) {
   const holdCxDisposition =
     nextStatus === "disposition" && shouldHoldCxDisposition(previous, telephonyStatus);
 
-  const nextCurrentCall = activeCall
-    ? snapshotCurrentCall(activeCall)
-    : holdCxDisposition
-      ? cloneCall(previous.currentCall)
-      : {};
-  const nextActivePlatform =
-    telephonyStatus === "CallConnected" || telephonyStatus === "OnHold"
+  // EX->CX decoupling (flag-gated, default off): when the agent holds a CX call, the EX presence
+  // poll must NOT overwrite/clear that CX call-state from its (stale) dial-in view — CX state is
+  // owned by the RingCX/UII path. When disabled, cxOwn.cxOwnsCallState is always false and every
+  // branch below is identical to the prior behavior.
+  // Stats ownership (review #3): under preserve, effectiveStatus=previous.status, so the call
+  // start/end dailyStats transitions further below are intentionally NOT fired by the EX poll.
+  // CX call-lifecycle stats are owned by the CX/UII path — markAgentCxActive counts the start and
+  // the CX clear paths (markAgentAvailableAfterAutoDisposition / clearAgentCxCallState /
+  // clearAgentCxCallStateForTerminalOutcome / markMissingCxCallsEnded) count the end. The EX poll
+  // counting them would double-count and mis-attribute CX calls as "ex".
+  const cxOwn = decideExPollCxOwnership({
+    enabled: exCxDecoupleEnabled(),
+    previousHasCxCall: hasCxCallSnapshot(previous),
+    previousCxIdentity: callIdentity(previous.currentCall),
+    exActiveIdentity: activeCall ? callIdentity(snapshotCurrentCall(activeCall)) : null,
+    exActiveIsBridge: activeCall ? isLikelyCxBridgeExCall(snapshotCurrentCall(activeCall)) : false,
+  });
+  const effectiveStatus = cxOwn.cxOwnsCallState ? (previous.status || nextStatus) : nextStatus;
+
+  const nextCurrentCall = cxOwn.cxOwnsCallState
+    ? cloneCall(previous.currentCall)
+    : activeCall
+      ? snapshotCurrentCall(activeCall)
+      : holdCxDisposition
+        ? cloneCall(previous.currentCall)
+        : {};
+  const nextActivePlatform = cxOwn.cxOwnsCallState
+    ? "CX"
+    : telephonyStatus === "CallConnected" || telephonyStatus === "OnHold"
       ? "EX"
       : holdCxDisposition
         ? "CX"
         : "none";
-  const nextActivityState = holdCxDisposition
-    ? "dispositioning"
-    : deriveActivityState(
-        {
-          ...previous,
-          status: nextStatus,
-          exTelephonyStatus: telephonyStatus,
-          exPresenceStatus: presenceStatus,
-          currentCall: nextCurrentCall,
-          activePlatform: nextActivePlatform,
-        },
-        previous.activityState,
-      );
+  const nextActivityState = cxOwn.cxOwnsCallState
+    ? (previous.activityState || "onCall")
+    : holdCxDisposition
+      ? "dispositioning"
+      : deriveActivityState(
+          {
+            ...previous,
+            status: effectiveStatus,
+            exTelephonyStatus: telephonyStatus,
+            exPresenceStatus: presenceStatus,
+            currentCall: nextCurrentCall,
+            activePlatform: nextActivePlatform,
+          },
+          previous.activityState,
+        );
 
   const next = {
     ...previous,
-    status: nextStatus,
+    status: effectiveStatus,
     exTelephonyStatus: telephonyStatus,
     exPresenceStatus: presenceStatus,
     currentCall: nextCurrentCall,
@@ -1218,7 +1257,12 @@ async function reconcilePolledPresence(agent, presence, logger, options = {}) {
     lastPresencePollAt: new Date(),
     lastPresencePollError: null,
   };
-  if (isLikelyCxBridgeExCall(next.currentCall)) {
+  if (cxOwn.cxOwnsCallState) {
+    // Phase-out: EX presence does not determine CX call-state. The CX-owned fields above are
+    // preserved; only EX presence is recorded. If the EX leg is the bridge dial-in, keep it
+    // NOT-ex-busy so the EX-busy lead gate behaves exactly as before bridge suppression.
+    if (cxOwn.forceExNoCall) next.exTelephonyStatus = "NoCall";
+  } else if (isLikelyCxBridgeExCall(next.currentCall)) {
     next.status = "available";
     next.exTelephonyStatus = "NoCall";
     next.currentCall = {};
@@ -1585,4 +1629,8 @@ module.exports = {
   reconcilePresenceMismatch,
   seedPresenceForAgents,
   startPresencePoller,
+  // exported for regression tests (review #2: identity fields must survive snapshot/clone)
+  snapshotCurrentCall,
+  cloneCall,
+  callSignature,
 };

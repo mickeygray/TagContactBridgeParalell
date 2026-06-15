@@ -219,6 +219,13 @@ const SCORING_SYSTEM_PROMPT = `You are a call quality analyst for a tax resoluti
 
 Your job is to assess the LEAD QUALITY (not the agent's performance) for vendor reporting purposes. The firm wants to know if the lead vendor is sending real, qualified prospects or garbage.
 
+GROUNDING RULES — read first, apply to EVERY field:
+- The TRANSCRIPT below is your ONLY source of truth. Score and describe ONLY what is explicitly present in it. This system prompt is instructions, not call content — nothing in it describes what was said on this call.
+- Do NOT invent, infer, or add tax specifics that were not literally spoken. In particular, NEVER name an IRS notice or letter code (e.g. CP14, CP501, CP503, CP504, LT11, Letter 1058, CP2000), a form number, or a dollar amount unless that exact value appears verbatim in the transcript.
+- If a detail is not in the transcript, use null, "not mentioned", or "unclear" — never guess. tax_amount_mentioned MUST be null unless a specific amount was actually said.
+- If the transcript is empty, garbled, voicemail-only, or has no real two-way conversation, return low scores and say so in the summary. Do not describe a call that did not happen.
+- Every red_flag, note, key_detail, and summary statement must be supported by words actually in the transcript.
+
 Score each dimension 1-10 and provide a brief justification. Return ONLY valid JSON, no markdown.
 
 JSON schema:
@@ -262,7 +269,7 @@ Duration: ${callLogDoc.durationSec || 0} seconds
 ${callLogDoc.caseId ? `Logics Case: ${callLogDoc.caseDomain} #${callLogDoc.caseId}` : "No existing case"}
 ${callLogDoc.sourceName ? `Marketing source: ${callLogDoc.sourceName}` : ""}
 
-TRANSCRIPT:
+TRANSCRIPT (verbatim — the ONLY source of truth; everything you report must come from these exact words. Do NOT add IRS notice codes, form numbers, or dollar amounts that are not present below):
 ${String(transcript).slice(0, 12000)}`;
 
   const controller = new AbortController();
@@ -660,4 +667,5 @@ module.exports = {
   isScoringConfigured,
   processCallLogRecording,
   scoreCallLogTranscript,
+  scoreWithClaude, // exported for grounding smoke (prompt-bleed regression)
 };

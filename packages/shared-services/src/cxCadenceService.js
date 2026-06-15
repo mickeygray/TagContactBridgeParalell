@@ -44,6 +44,7 @@ const {
   resolveQueueDialTimeWindow,
 } = require("./cxQueuePolicyService");
 const { resolveCaseContactEligibility, stopCaseContact } = require("./contactEligibilityService");
+const { evaluateCxClear } = require("./cxCallStateGuard");
 const { cancelPublishedQueueItemInRingcx } = require("./ringcxLeadServingService");
 const { syncCallLedgerFromCallLog } = require("./callLedgerService");
 const {
@@ -1414,23 +1415,18 @@ async function clearAgentCxCallStateForTerminalOutcome(queueItem = null, payload
   const existingCall = existing?.currentCall && typeof existing.currentCall === "object"
     ? existing.currentCall
     : {};
-  const requestedIdentity = normalizeExternalId(
+  const { skip: cxClearSkip, existingIdentity, requestedIdentity } = evaluateCxClear(
+    existing,
     payload.uii ||
       payload.callSessionId ||
       queueItem?.metadata?.lastDialExecutionUii ||
       queueItem?.metadata?.lastQueueAttemptUii ||
       null,
   );
-  const existingIdentity = callIdentity(existingCall);
-  if (
-    requestedIdentity
-    && existingIdentity
-    && existingIdentity !== requestedIdentity
-    && String(existing?.activePlatform || "").trim().toUpperCase() === "CX"
-  ) {
+  if (cxClearSkip) {
     return {
       skipped: true,
-      reason: "different-active-cx-call",
+      reason: cxClearSkip,
       extensionId,
       existingIdentity,
       requestedIdentity,
@@ -2724,7 +2720,12 @@ async function handleCxTerminalCallOutcome(payload = {}) {
       payload.assignedExtensionId ||
       "",
   ).trim();
-  if (extensionId) {
+  // Do NOT advance the agent if the CX clear was SKIPPED because they are still on a live CX call
+  // (missing-uii-active-cx-call / different-active-cx-call). Kicking eligibility here would serve a
+  // fresh lead off a still-active call — the Tracey->Veronica class of bug.
+  if (extensionId && agentClear?.skipped) {
+    eligibilityKick = { ok: false, skipped: true, reason: agentClear.reason || "cx-clear-skipped" };
+  } else if (extensionId) {
     try {
       const { onAgentBecomesEligible } = require("./freshLeadAssignmentService");
       eligibilityKick = await onAgentBecomesEligible(extensionId);

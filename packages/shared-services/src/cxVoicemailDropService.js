@@ -58,6 +58,76 @@ function vmDropMode() {
   return raw === "barge" ? "barge" : "disposition";
 }
 
+function maskEmail(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return null;
+  const [name, domain] = raw.split("@");
+  if (!domain) return raw.length <= 3 ? "***" : `${raw.slice(0, 3)}***`;
+  return `${name.slice(0, 3)}***@${domain}`;
+}
+
+function phoneLast4(value) {
+  const digits = String(value || "").replace(/\D/g, "");
+  return digits ? digits.slice(-4) : null;
+}
+
+function summarizeProviderBody(body) {
+  if (!body || typeof body !== "object") return body ? String(body).slice(0, 300) : null;
+  const errors = Array.isArray(body.errors)
+    ? body.errors.slice(0, 3).map((entry) => ({
+        errorCode: entry?.errorCode || null,
+        message: entry?.message || entry?.generalMessage || null,
+      }))
+    : undefined;
+  return {
+    errorCode: body.errorCode || null,
+    generalMessage: body.generalMessage || null,
+    message: body.message || null,
+    requestUri: body.requestUri || null,
+    timestamp: body.timestamp || null,
+    errors,
+  };
+}
+
+function summarizeError(error) {
+  const details = error?.details || {};
+  return {
+    name: error?.name || null,
+    message: error?.message || "Unknown error",
+    code: error?.code || null,
+    status: error?.status || details.responseStatus || 500,
+    retryable: Boolean(error?.retryable),
+    service: error?.service || details.service || null,
+    method: details.method || null,
+    path: details.path || null,
+    responseStatus: details.responseStatus || null,
+    retryAfter: details.retryAfter || details.retryAfterSeconds || null,
+    rateLimitedCircuitOpen: Boolean(details.rateLimitedCircuitOpen),
+    rateLimitedCircuitOpened: Boolean(details.rateLimitedCircuitOpened),
+    scope: details.scope || null,
+    usageGroup: details.usageGroup || details.rateLimitHeaders?.group || null,
+    nextApiAttemptAt: details.nextApiAttemptAt || null,
+    rateLimitHeaders: details.rateLimitHeaders
+      ? {
+          group: details.rateLimitHeaders.group || null,
+          limit: details.rateLimitHeaders.limit || null,
+          remaining: details.rateLimitHeaders.remaining || null,
+          window: details.rateLimitHeaders.window || null,
+          retryAfter: details.rateLimitHeaders.retryAfter || null,
+        }
+      : null,
+    responseBody: summarizeProviderBody(details.responseBody),
+  };
+}
+
+function logInfo(logger, message, meta) {
+  logger?.info?.(message, meta);
+}
+
+function logWarn(logger, message, meta) {
+  logger?.warn?.(message, meta);
+}
+
 function bargeServiceUrl() {
   return String(process.env.EX_BARGE_SERVICE_URL || "http://127.0.0.1:7335").replace(/\/$/, "");
 }
@@ -175,12 +245,33 @@ function resolveAgentDispositionDrop(plan = {}, user = {}) {
 // Resolve the authed agent's live UII from RingCX activeCalls. Phone match
 // (the queue item the client is serving) is primary; agent-name match is the
 // fallback. Server-side resolution — the client never supplies a UII.
-async function resolveLiveUii(client, { phone, agentName }) {
-  const rows = coerceActiveCallRows(await client.listActiveCalls());
+async function resolveLiveUii(client, { phone, agentName, logger = null, requestId = null }) {
+  let rows;
+  try {
+    rows = coerceActiveCallRows(await client.listActiveCalls());
+  } catch (error) {
+    logWarn(logger, "cx.voicemail_drop.active_calls.failed", {
+      requestId,
+      phoneLast4: phoneLast4(phone),
+      agentName: agentName || null,
+      error: summarizeError(error),
+    });
+    throw error;
+  }
   const last10 = digitsLast10(phone);
   if (last10) {
     const byPhone = rows.find((row) => JSON.stringify(row).includes(last10));
-    if (byPhone) return { uii: String(byPhone.uii || ""), matchedBy: "phone", row: byPhone };
+    if (byPhone) {
+      logInfo(logger, "cx.voicemail_drop.active_calls.matched", {
+        requestId,
+        matchedBy: "phone",
+        callCount: rows.length,
+        uii: byPhone.uii || null,
+        callState: byPhone.callState || null,
+        agent: `${byPhone.agentFirstName || ""} ${byPhone.agentLastName || ""}`.trim() || null,
+      });
+      return { uii: String(byPhone.uii || ""), matchedBy: "phone", row: byPhone };
+    }
   }
   const name = String(agentName || "").trim().toLowerCase();
   if (name) {
@@ -188,21 +279,64 @@ async function resolveLiveUii(client, { phone, agentName }) {
       const rowName = `${row.agentFirstName || ""} ${row.agentLastName || ""}`.trim().toLowerCase();
       return rowName && (name.includes(rowName) || rowName.includes(name));
     });
-    if (byAgent) return { uii: String(byAgent.uii || ""), matchedBy: "agent-name", row: byAgent };
+    if (byAgent) {
+      logInfo(logger, "cx.voicemail_drop.active_calls.matched", {
+        requestId,
+        matchedBy: "agent-name",
+        callCount: rows.length,
+        uii: byAgent.uii || null,
+        callState: byAgent.callState || null,
+        agent: `${byAgent.agentFirstName || ""} ${byAgent.agentLastName || ""}`.trim() || null,
+      });
+      return { uii: String(byAgent.uii || ""), matchedBy: "agent-name", row: byAgent };
+    }
   }
+  logWarn(logger, "cx.voicemail_drop.active_calls.no_match", {
+    requestId,
+    callCount: rows.length,
+    phoneLast4: phoneLast4(phone),
+    agentName: agentName || null,
+    sample: rows.slice(0, 5).map((row) => ({
+      uii: row.uii || null,
+      callState: row.callState || null,
+      aniLast4: phoneLast4(row.ani),
+      dnisLast4: phoneLast4(row.dnis || row.dnisE164),
+      agent: `${row.agentFirstName || ""} ${row.agentLastName || ""}`.trim() || null,
+    })),
+  });
   return { uii: "", matchedBy: null, row: null };
 }
 
 // v3: agent-owned disposition drop -- one dispositionCall does everything.
-async function requestAgentDispositionDrop(domain, user, body = {}) {
+async function requestAgentDispositionDrop(domain, user, body = {}, options = {}) {
+  const logger = options.logger || null;
+  const requestId = options.requestId || null;
   const identifier = pickIdentifier(user, body);
   if (!identifier) {
     throw httpError("No agent identifier to resolve voicemail drop", 400, "no-agent-identifier");
   }
 
+  logInfo(logger, "cx.voicemail_drop.resolve_agent.start", {
+    requestId,
+    domain,
+    userEmail: maskEmail(user?.email),
+    identifierType: identifier.includes("@") ? "email" : "extension-or-id",
+  });
+
   const plan = await resolveAgentVoicemailPlan(identifier, {
     findAgent: makeMongoAgentFinder(UserAccount),
     domain,
+  });
+
+  logInfo(logger, "cx.voicemail_drop.resolve_agent.result", {
+    requestId,
+    domain,
+    agentName: plan.agentName || user?.name || null,
+    agentEmail: maskEmail(plan.agentEmail || user?.email),
+    targetExtensionNumber: plan.targetExtensionNumber || null,
+    monitorExtension: plan.monitorExtension || null,
+    problems: plan.problems || null,
+    reason: plan.reason || null,
   });
 
   if (!plan.agentName && !plan.agentEmail && !plan.targetExtensionNumber) {
@@ -235,7 +369,12 @@ async function requestAgentDispositionDrop(domain, user, body = {}) {
   const phone = body.phone || body.prospectPhone || body.leadPhone || "";
 
   const client = createRingcxVoiceClient();
-  const { uii, matchedBy, row } = await resolveLiveUii(client, { phone, agentName });
+  const { uii, matchedBy, row } = await resolveLiveUii(client, {
+    phone,
+    agentName,
+    logger,
+    requestId,
+  });
   if (!uii) {
     throw httpError(
       "No live RingCX call found for this agent -- is the call still up?",
@@ -246,7 +385,36 @@ async function requestAgentDispositionDrop(domain, user, body = {}) {
   }
 
   // callback is REQUIRED; omitting it 400s with invalid.data.
-  await client.dispositionCall(uii, { disposition: drop.disposition, callback: false });
+  logInfo(logger, "cx.voicemail_drop.disposition.start", {
+    requestId,
+    domain,
+    uii,
+    matchedBy,
+    disposition: drop.disposition,
+    dropKey: drop.key || null,
+    dropLabel: drop.label || null,
+    agent: `${row?.agentFirstName || ""} ${row?.agentLastName || ""}`.trim() || agentName || null,
+  });
+  try {
+    await client.dispositionCall(uii, { disposition: drop.disposition, callback: false });
+  } catch (error) {
+    logWarn(logger, "cx.voicemail_drop.disposition.failed", {
+      requestId,
+      domain,
+      uii,
+      disposition: drop.disposition,
+      dropKey: drop.key || null,
+      error: summarizeError(error),
+    });
+    throw error;
+  }
+  logInfo(logger, "cx.voicemail_drop.disposition.succeeded", {
+    requestId,
+    domain,
+    uii,
+    disposition: drop.disposition,
+    dropKey: drop.key || null,
+  });
 
   return {
     ok: true,
@@ -272,16 +440,27 @@ async function requestAgentDispositionDrop(domain, user, body = {}) {
     agent: `${row?.agentFirstName || ""} ${row?.agentLastName || ""}`.trim() || null,
   };
 }
-async function requestCxVoicemailDrop(domain, user, body = {}) {
+async function requestCxVoicemailDrop(domain, user, body = {}, options = {}) {
   const action = pickDropAction(body);
+  const logger = options.logger || null;
+  const requestId = options.requestId || null;
 
   if (vmDropMode() === "disposition") {
     // warm/arm are barge-era concepts — report success without doing anything
     // so existing clients' pre-arm flows degrade gracefully.
-    if (action === "warm") return { ok: true, warmed: true, skipped: true, mode: "disposition" };
-    if (action === "arm") return { ok: true, armed: true, skipped: true, mode: "disposition" };
-    if (action === "release") return { ok: true, released: true, skipped: true, mode: "disposition" };
-    return requestAgentDispositionDrop(domain, user, body);
+    if (action === "warm") {
+      logInfo(logger, "cx.voicemail_drop.control.skipped", { requestId, domain, action, mode: "disposition" });
+      return { ok: true, warmed: true, skipped: true, mode: "disposition" };
+    }
+    if (action === "arm") {
+      logInfo(logger, "cx.voicemail_drop.control.skipped", { requestId, domain, action, mode: "disposition" });
+      return { ok: true, armed: true, skipped: true, mode: "disposition" };
+    }
+    if (action === "release") {
+      logInfo(logger, "cx.voicemail_drop.control.skipped", { requestId, domain, action, mode: "disposition" });
+      return { ok: true, released: true, skipped: true, mode: "disposition" };
+    }
+    return requestAgentDispositionDrop(domain, user, body, options);
   }
 
   const identifier = pickIdentifier(user, body);

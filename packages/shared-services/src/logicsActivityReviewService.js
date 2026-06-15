@@ -13,6 +13,10 @@ const {
   parseLogicsData,
 } = require("./logicsFacadeService");
 const { sendMail } = require("./mailerService");
+const {
+  getClientProfileByCaseNumber,
+  mergeShorthandFields,
+} = require("../../shared-repositories/src/clientProfileRepository");
 
 const DEFAULT_DOMAIN = "TAG";
 const DEFAULT_TIMEZONE = "America/Los_Angeles";
@@ -308,6 +312,125 @@ function parseMoney(value) {
 function formatMoney(value) {
   const number = Number(value);
   return Number.isFinite(number) ? number.toFixed(2) : "";
+}
+
+function formatWholeMoney(value) {
+  if (value === null || value === undefined || value === "") return "";
+  const number = Number(value);
+  if (!Number.isFinite(number)) return "";
+  return `$${Math.round(number).toLocaleString()}`;
+}
+
+function formatShortDate(value) {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return clean(value, 40);
+  return date.toISOString().slice(0, 10);
+}
+
+function compactParts(parts, max = 500) {
+  return clean((parts || []).filter(Boolean).join(" | "), max);
+}
+
+function summarizeProfileEntry(entry, max = 160) {
+  if (!entry) return "";
+  if (typeof entry === "string") return clean(entry, max);
+  if (entry.snippet) return clean(entry.snippet, max);
+  if (entry.value !== undefined) {
+    if (typeof entry.value === "string") return clean(entry.value, max);
+    try {
+      return clean(JSON.stringify(entry.value), max);
+    } catch {
+      return "";
+    }
+  }
+  return "";
+}
+
+function summarizeProfileOpportunities(profile, maxItems = 3) {
+  const opportunities = Array.isArray(profile?.opportunities) ? profile.opportunities : [];
+  return opportunities
+    .slice(0, maxItems)
+    .map((opp) => compactParts([
+      opp.play || opp.name || opp.type || "opportunity",
+      opp.status,
+      opp.basis || opp.clock || opp.strategy,
+    ], 220))
+    .filter(Boolean)
+    .join(" || ");
+}
+
+function summarizeProfileSalesContext(profile) {
+  if (!profile) return emptyClientProfileFields();
+  const shorthand = profile.shorthand || {};
+  const pursuitTier = clean(profile.pursuit?.tier || "", 30);
+  const pursuitScore = Number.isFinite(Number(profile.pursuit?.score))
+    ? String(Number(profile.pursuit.score))
+    : "";
+  const profileTemperature = compactParts([
+    profile.temperature?.label,
+    profile.temperature?.signals,
+  ], 220);
+  const payments = compactParts([
+    profile.payments?.totalPaid ? `paid ${formatWholeMoney(profile.payments.totalPaid)}` : "",
+    profile.payments?.lastAmount ? `last ${formatWholeMoney(profile.payments.lastAmount)}` : "",
+    profile.payments?.lastDate ? `on ${formatShortDate(profile.payments.lastDate)}` : "",
+    profile.payments?.count ? `${profile.payments.count} payments` : "",
+  ], 180);
+  const funding = compactParts([
+    profile.funding?.funded ? `funded ${formatWholeMoney(profile.funding.lastLoanTotal)}` : "",
+    profile.funding?.lastLoanDate ? `loan ${formatShortDate(profile.funding.lastLoanDate)}` : "",
+    profile.funding?.rejected ? "funding rejected" : "",
+    Array.isArray(profile.funding?.denialLenders) && profile.funding.denialLenders.length
+      ? `denied by ${profile.funding.denialLenders.slice(-3).join(", ")}`
+      : "",
+  ], 220);
+  const salesTouch = compactParts([
+    profile.touches?.sales?.lastDate ? `sales ${formatShortDate(profile.touches.sales.lastDate)}` : "",
+    profile.touches?.sales?.lastBy,
+    profile.touches?.sales?.lastPitched || profile.touches?.sales?.servicesPitched,
+  ], 220);
+  const workTouch = compactParts([
+    profile.touches?.work?.lastDate ? `work ${formatShortDate(profile.touches.work.lastDate)}` : "",
+    profile.touches?.work?.lastBy,
+    profile.touches?.work?.product,
+  ], 180);
+  const shorthandSnapshot = compactParts([
+    summarizeProfileEntry(shorthand.logics_status),
+    summarizeProfileEntry(shorthand.logics_billing),
+    summarizeProfileEntry(shorthand.logics_invoices),
+    summarizeProfileEntry(shorthand.lexis_tax_liens),
+    summarizeProfileEntry(shorthand.lexis_notice_of_default),
+    summarizeProfileEntry(shorthand.logics_notice_alerts),
+  ], 520);
+
+  return {
+    profileTier: pursuitTier,
+    profileScore: pursuitScore,
+    profileTemperature,
+    profileReasons: clean(profile.pursuit?.reasons || "", 300),
+    profilePayments: payments,
+    profileFunding: funding,
+    profileSalesTouch: salesTouch,
+    profileWorkTouch: workTouch,
+    profileOpportunities: summarizeProfileOpportunities(profile),
+    profileSnapshot: shorthandSnapshot,
+  };
+}
+
+function emptyClientProfileFields() {
+  return {
+    profileTier: "",
+    profileScore: "",
+    profileTemperature: "",
+    profileReasons: "",
+    profilePayments: "",
+    profileFunding: "",
+    profileSalesTouch: "",
+    profileWorkTouch: "",
+    profileOpportunities: "",
+    profileSnapshot: "",
+  };
 }
 
 function extractDocumentNameFromText(value) {
@@ -733,11 +856,12 @@ async function enrichCandidates(domain, candidates, options = {}) {
   await mapLimit(uniqueCaseIds, concurrency, async (caseId) => {
     const entry = { caseId, ok: true, error: "" };
     try {
-      const [info, billing, invoices, activities] = await Promise.all([
+      const [info, billing, invoices, activities, profile] = await Promise.all([
         facade.fetchCaseInfo(caseId),
         facade.fetchBillingSummary(caseId).catch((error) => ({ error: error.message })),
         facade.fetchInvoices(caseId).catch((error) => ({ error: error.message })),
         facade.fetchActivities(caseId).catch(() => []),
+        getClientProfileByCaseNumber(String(caseId), domain).catch((error) => ({ error: error.message })),
       ]);
       entry.caseInfo = info?.data || {};
       entry.caseInfoError = info?.ok === false ? info.error : "";
@@ -746,6 +870,8 @@ async function enrichCandidates(domain, candidates, options = {}) {
       entry.invoices = Array.isArray(invoices) ? invoices : [];
       entry.invoiceError = invoices?.error || "";
       entry.activities = Array.isArray(activities) ? activities : [];
+      entry.clientProfile = profile && !profile.error ? profile : null;
+      entry.clientProfileError = profile?.error || "";
     } catch (error) {
       entry.ok = false;
       entry.error = error.message;
@@ -761,6 +887,7 @@ async function enrichCandidates(domain, candidates, options = {}) {
     const activityTemperature = summarizeActivityTemperature(entry.activities || []);
     const exactActivity = findMatchingCaseActivity(entry.activities || [], candidate);
     const documentName = candidate.documentName || exactActivity.documentName || "";
+    const profileContext = summarizeProfileSalesContext(entry.clientProfile);
     const noticeMatches = [...new Set([
       ...candidate.noticeMatches,
       ...matchNotices(`${documentName} ${exactActivity.comment || ""}`, options),
@@ -810,6 +937,9 @@ async function enrichCandidates(domain, candidates, options = {}) {
       invoiceTotal: invoices.invoiceTotal,
       latestInvoiceDate: invoices.latestInvoiceDate,
       latestInvoiceDescription: invoices.latestInvoiceDescription,
+      ...profileContext,
+      clientProfileFound: entry.clientProfile ? "yes" : "no",
+      clientProfileError: entry.clientProfileError || "",
       caseInfoError: entry.caseInfoError || entry.error || "",
       billingError: entry.billingError || "",
       invoiceError: entry.invoiceError || "",
@@ -837,6 +967,16 @@ function outputColumns() {
     "latestInvoiceDate",
     "temperature",
     "tier",
+    "profileTier",
+    "profileScore",
+    "profileTemperature",
+    "profileReasons",
+    "profilePayments",
+    "profileFunding",
+    "profileSalesTouch",
+    "profileWorkTouch",
+    "profileOpportunities",
+    "profileSnapshot",
     "contactReviewStatus",
     "contactReviewConfidence",
     "contactRecommendedAction",
@@ -863,6 +1003,16 @@ function finalCsvRow(row) {
     latestInvoiceDate: row.latestInvoiceDate,
     temperature: row.activityTemperature || row.statusName,
     tier: row.clientTemperature || parseStatusTier(row.fromStatus) || parseStatusTier(row.toStatus),
+    profileTier: row.profileTier || "",
+    profileScore: row.profileScore || "",
+    profileTemperature: row.profileTemperature || "",
+    profileReasons: row.profileReasons || "",
+    profilePayments: row.profilePayments || "",
+    profileFunding: row.profileFunding || "",
+    profileSalesTouch: row.profileSalesTouch || "",
+    profileWorkTouch: row.profileWorkTouch || "",
+    profileOpportunities: row.profileOpportunities || "",
+    profileSnapshot: row.profileSnapshot || "",
     contactReviewStatus: row.contactReviewStatus || "",
     contactReviewConfidence: row.contactReviewConfidence || "",
     contactRecommendedAction: row.contactRecommendedAction || "",
@@ -909,6 +1059,16 @@ function collapseRowsByCase(rows) {
         latestInvoiceDate: base.latestInvoiceDate,
         temperature: base.temperature,
         tier: base.tier,
+        profileTier: base.profileTier,
+        profileScore: base.profileScore,
+        profileTemperature: base.profileTemperature,
+        profileReasons: base.profileReasons,
+        profilePayments: base.profilePayments,
+        profileFunding: base.profileFunding,
+        profileSalesTouch: base.profileSalesTouch,
+        profileWorkTouch: base.profileWorkTouch,
+        profileOpportunities: base.profileOpportunities,
+        profileSnapshot: base.profileSnapshot,
         contactReviewStatus: base.contactReviewStatus,
         contactReviewConfidence: base.contactReviewConfidence,
         contactRecommendedAction: base.contactRecommendedAction,
@@ -918,6 +1078,97 @@ function collapseRowsByCase(rows) {
       };
     })
     .sort((a, b) => parseDateMs(a.firstUploadAt) - parseDateMs(b.firstUploadAt));
+}
+
+function noticeAlertFromRow(row) {
+  return {
+    activityId: clean(row.activityId || "", 80),
+    uploadedAt: clean(row.uploadedAt || "", 80),
+    documentName: clean(row.documentName || row.activitySubject || row.activityType || "", 220),
+    noticeMatches: clean(row.noticeMatches || "", 220),
+    createdBy: clean(row.createdBy || "", 120),
+    contactReviewStatus: clean(row.contactReviewStatus || "", 80),
+    recommendedAction: clean(row.contactRecommendedAction || row.recommendedAction || "", 240),
+  };
+}
+
+function noticeAlertKey(alert) {
+  return [
+    alert.activityId,
+    alert.uploadedAt,
+    alert.documentName,
+    alert.noticeMatches,
+  ].map((part) => String(part || "").toLowerCase()).join("|");
+}
+
+function compactNoticeAlertSnippet(alerts = []) {
+  return alerts
+    .slice(-3)
+    .map((alert) => compactParts([
+      alert.noticeMatches || "notice",
+      alert.documentName,
+      alert.uploadedAt,
+      alert.recommendedAction,
+    ], 260))
+    .filter(Boolean)
+    .join(" || ");
+}
+
+async function recordNoticeAlertsOnClientProfiles(domain, rows = [], options = {}) {
+  if (options.recordClientProfileNoticeAlerts === false) {
+    return { enabled: false, updated: 0, skipped: 0, failed: 0 };
+  }
+  const byCase = new Map();
+  for (const row of rows) {
+    const caseId = String(row.caseId || "").trim();
+    if (!caseId) continue;
+    if (!byCase.has(caseId)) byCase.set(caseId, []);
+    byCase.get(caseId).push(row);
+  }
+
+  let updated = 0;
+  let skipped = 0;
+  let failed = 0;
+  const asOf = new Date();
+
+  for (const [caseId, caseRows] of byCase.entries()) {
+    try {
+      const existing = await getClientProfileByCaseNumber(caseId, domain);
+      if (!existing) {
+        skipped += 1;
+        continue;
+      }
+      const prior = Array.isArray(existing.shorthand?.logics_notice_alerts?.value)
+        ? existing.shorthand.logics_notice_alerts.value
+        : [];
+      const alerts = [
+        ...prior.map((alert) => noticeAlertFromRow(alert)),
+        ...caseRows.map(noticeAlertFromRow),
+      ];
+      const deduped = [];
+      const seen = new Set();
+      for (const alert of alerts) {
+        const key = noticeAlertKey(alert);
+        if (!key || seen.has(key)) continue;
+        seen.add(key);
+        deduped.push(alert);
+      }
+      const value = deduped.slice(-25);
+      await mergeShorthandFields(caseId, {
+        logics_notice_alerts: {
+          value,
+          snippet: compactNoticeAlertSnippet(value),
+          asOf,
+          source: `logics-activity-review:${domain}`,
+        },
+      }, { domain, upsert: false });
+      updated += 1;
+    } catch {
+      failed += 1;
+    }
+  }
+
+  return { enabled: true, updated, skipped, failed };
 }
 
 function suspendedOutputColumns() {
@@ -940,6 +1191,16 @@ function suspendedOutputColumns() {
     "latestInvoiceDate",
     "temperature",
     "tier",
+    "profileTier",
+    "profileScore",
+    "profileTemperature",
+    "profileReasons",
+    "profilePayments",
+    "profileFunding",
+    "profileSalesTouch",
+    "profileWorkTouch",
+    "profileOpportunities",
+    "profileSnapshot",
     "contactReviewStatus",
     "contactReviewConfidence",
     "contactRecommendedAction",
@@ -989,6 +1250,16 @@ function collapseSuspendedRowsByCase(rows) {
         latestInvoiceDate: base.latestInvoiceDate,
         temperature: base.temperature,
         tier: base.tier,
+        profileTier: base.profileTier,
+        profileScore: base.profileScore,
+        profileTemperature: base.profileTemperature,
+        profileReasons: base.profileReasons,
+        profilePayments: base.profilePayments,
+        profileFunding: base.profileFunding,
+        profileSalesTouch: base.profileSalesTouch,
+        profileWorkTouch: base.profileWorkTouch,
+        profileOpportunities: base.profileOpportunities,
+        profileSnapshot: base.profileSnapshot,
         contactReviewStatus: base.contactReviewStatus,
         contactReviewConfidence: base.contactReviewConfidence,
         contactRecommendedAction: base.contactRecommendedAction,
@@ -1004,6 +1275,41 @@ function buildRangeKey(dateKey, startDateKey, endDateKey) {
   return startDateKey && endDateKey && startDateKey !== endDateKey
     ? `${startDateKey}_to_${endDateKey}`
     : dateKey;
+}
+
+function formatEmailCaseRows(rows = [], { limit = 15, label = "Notice cases" } = {}) {
+  const visible = (Array.isArray(rows) ? rows : []).slice(0, limit);
+  if (!visible.length) return "";
+  const lines = [
+    "",
+    `${label}:`,
+  ];
+  for (const row of visible) {
+    const sales = compactParts([
+      row.profileTier || row.tier ? `tier ${row.profileTier || row.tier}` : "",
+      row.profileScore ? `score ${row.profileScore}` : "",
+      row.profileTemperature,
+      row.profileReasons,
+      row.profilePayments,
+      row.profileFunding,
+      row.profileSalesTouch,
+      row.profileOpportunities,
+      row.profileSnapshot,
+    ], 700);
+    const ai = compactParts([
+      row.contactReviewStatus,
+      row.contactRecommendedAction,
+      row.contactRiskFlags,
+    ], 420);
+    lines.push(
+      `- ${row.database || ""} ${row.caseId || ""} ${row.name || ""}: ${row.matchedTerms || row.documentsUploaded || "matched notice"}`,
+    );
+    if (sales) lines.push(`  Sales/profile: ${sales}`);
+    if (ai) lines.push(`  Review: ${ai}`);
+  }
+  const remaining = (Array.isArray(rows) ? rows.length : 0) - visible.length;
+  if (remaining > 0) lines.push(`  ...and ${remaining} more in the CSV.`);
+  return lines.join("\n");
 }
 
 async function processSuspendedStatusRows({ domain, rows, outDir, concurrency, rangeKey, options }) {
@@ -1069,6 +1375,7 @@ async function processActivityRows({
     }));
   const reviewed = await attachAiActivityReviews(domain, filtered, options);
   const sorted = reviewed.sort((a, b) => parseDateMs(a.uploadedAt) - parseDateMs(b.uploadedAt));
+  const clientProfileNoticeAlerts = await recordNoticeAlertsOnClientProfiles(domain, sorted, options);
   const outputDir = path.resolve(outDir || DEFAULT_OUT_DIR);
   ensureDir(outputDir);
   const rangeKey = buildRangeKey(dateKey, startDateKey, endDateKey);
@@ -1103,6 +1410,7 @@ async function processActivityRows({
     rowLevelOutputRows: sorted.length,
     uniqueCases,
     aiReview,
+    clientProfileNoticeAlerts,
     csvOut,
     jsonOut,
     suspendedCsvOut: suspended.csvOut,
@@ -1120,6 +1428,7 @@ async function processActivityRows({
     rowLevelOutputRows: sorted.length,
     uniqueCases,
     aiReview,
+    clientProfileNoticeAlerts,
     csvOut,
     jsonOut,
     suspendedStatusChanges: suspended.statusChangeRows,
@@ -1176,11 +1485,18 @@ function buildEmailText({ domain, dateKey, startDateKey, endDateKey, processed }
     `Notice upload cases: ${processed.outputRows || 0}`,
     `AI-reviewed notice cases: ${processed.aiReview?.reviewedCases || 0}`,
     `AI review skips/errors: ${(processed.aiReview?.skippedCases || 0) + (processed.aiReview?.errorCases || 0)}`,
+    `Client profiles stamped with notice memory: ${processed.clientProfileNoticeAlerts?.updated || 0}`,
+    processed.clientProfileNoticeAlerts
+      ? `Client profile stamp skips/errors: ${(processed.clientProfileNoticeAlerts.skipped || 0) + (processed.clientProfileNoticeAlerts.failed || 0)}`
+      : "",
     `Suspended status changes: ${processed.suspendedStatusChanges || 0}`,
     `Suspended changes still current: ${processed.suspendedCurrentStatusChanges || 0}`,
     `Suspended changes no longer current: ${processed.suspendedStaleStatusChanges || 0}`,
     `Suspended status cases: ${processed.suspendedOutputRows || 0}`,
     `AI-reviewed suspended cases: ${processed.suspendedAiReview?.reviewedCases || 0}`,
+    "",
+    formatEmailCaseRows(processed.collapsedRows, { label: "Notice cases with sales/profile context" }),
+    formatEmailCaseRows(processed.suspendedCollapsedRows, { label: "Suspended cases with sales/profile context", limit: 8 }),
     "",
     `Notice CSV: ${processed.csvOut || ""}`,
     `Suspended CSV: ${processed.suspendedCsvOut || ""}`,
@@ -1296,6 +1612,12 @@ async function runLogicsActivityReviewBatch(options = {}) {
       reviewedCases: sumProcessed(results, "aiReview.reviewedCases"),
       errorCases: sumProcessed(results, "aiReview.errorCases"),
       skippedCases: sumProcessed(results, "aiReview.skippedCases"),
+    },
+    clientProfileNoticeAlerts: {
+      enabled: results.some((result) => result.processed?.clientProfileNoticeAlerts?.enabled),
+      updated: sumProcessed(results, "clientProfileNoticeAlerts.updated"),
+      skipped: sumProcessed(results, "clientProfileNoticeAlerts.skipped"),
+      failed: sumProcessed(results, "clientProfileNoticeAlerts.failed"),
     },
     suspendedAiReview: {
       enabled: results.some((result) => result.processed?.suspendedAiReview?.enabled),

@@ -25,6 +25,7 @@ const {
 const {
   buildQueueLeadId,
 } = require("./universalQueueService");
+const { evaluateCxClear } = require("./cxCallStateGuard");
 const {
   publishQueueItemToRingcx,
 } = require("./ringcxLeadServingService");
@@ -494,17 +495,16 @@ async function markAgentAvailableAfterAutoDisposition(extensionId, { logger = nu
       ? existing.currentCall
       : {};
     const existingCallChannel = String(existingCall.channel || "").trim().toLowerCase();
-    const existingIdentity = callIdentity(existingCall);
-    const requestedIdentity = normalizeExternalId(uii);
-    if (
-      requestedIdentity
-      && existingIdentity
-      && existingIdentity !== requestedIdentity
-      && String(existing?.activePlatform || "").trim().toUpperCase() === "CX"
-    ) {
+    const { skip: cxClearSkip, existingIdentity, requestedIdentity } = evaluateCxClear(existing, uii);
+    if (cxClearSkip) {
+      logger?.warn?.("ringcx.autoDisposition.agentAvailable.skipped", {
+        extensionId: normalizedExtensionId,
+        reason: cxClearSkip,
+        existingIdentity,
+      });
       return {
         skipped: true,
-        reason: "different-active-cx-call",
+        reason: cxClearSkip,
         extensionId: normalizedExtensionId,
         existingIdentity,
         requestedIdentity,

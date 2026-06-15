@@ -220,7 +220,21 @@ async function listClientProfiles({
     .sort({ "pursuit.score": -1, updatedAt: -1 })
     .skip(Math.max(0, Number(skip) || 0))
     .limit(capped)
-    .select("-shorthand -opportunities -documentHashes -pitch")
+    .select([
+      "profileKey",
+      "caseNumber",
+      "domain",
+      "credit",
+      "funding",
+      "payments",
+      "touches",
+      "temperature",
+      "pursuit",
+      "lifecycle",
+      "shorthand.logics_billing",
+      "shorthand.logics_notice_alerts",
+      "shorthand.logics_status",
+    ].join(" "))
     .lean();
   const total = await ClientProfile.countDocuments(query);
   return { rows, total };

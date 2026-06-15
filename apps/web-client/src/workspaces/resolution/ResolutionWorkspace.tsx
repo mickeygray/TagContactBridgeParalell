@@ -35,6 +35,7 @@ type BankRow = {
   };
   temperature?: { label?: string; signals?: string | null };
   pursuit?: { score?: number; tier?: string; reasons?: string | null };
+  shorthand?: Record<string, ShorthandEntry> | null;
 };
 
 type BankSummary = {
@@ -46,6 +47,12 @@ type BankSummary = {
 };
 
 type ShorthandEntry = { value: unknown; snippet?: string; asOf?: string; source?: string };
+type NoticeAlert = {
+  uploadedAt?: string;
+  documentName?: string;
+  noticeMatches?: string;
+  recommendedAction?: string;
+};
 
 type PitchVerdict = {
   class: "PITCH_NOW" | "DEVELOP" | "NURTURE" | "PASS";
@@ -126,6 +133,46 @@ function daysAgo(value?: string | null) {
   const ms = Date.now() - new Date(value).getTime();
   if (!Number.isFinite(ms) || ms < 0) return null;
   return Math.floor(ms / 86_400_000);
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function getLogicsBilling(profile?: Pick<BankRow, "shorthand"> | null) {
+  const value = asRecord(profile?.shorthand?.logics_billing?.value);
+  return value as { pastDue?: number; amountDue?: number; dueDate?: string } | null;
+}
+
+function isPaymentDelinquent(profile?: Pick<BankRow, "shorthand"> | null) {
+  const billing = getLogicsBilling(profile);
+  const pastDue = Number(billing?.pastDue || 0);
+  return Number.isFinite(pastDue) && pastDue > 0;
+}
+
+function getNoticeAlerts(profile?: Pick<BankRow, "shorthand"> | null): NoticeAlert[] {
+  const value = profile?.shorthand?.logics_notice_alerts?.value;
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((row) => asRecord(row))
+    .filter(Boolean)
+    .map((row) => ({
+      uploadedAt: String(row?.uploadedAt || ""),
+      documentName: String(row?.documentName || ""),
+      noticeMatches: String(row?.noticeMatches || ""),
+      recommendedAction: String(row?.recommendedAction || ""),
+    }))
+    .filter((row) => row.noticeMatches || row.documentName);
+}
+
+function summarizeNoticeAlerts(alerts: NoticeAlert[]) {
+  const labels = alerts
+    .flatMap((alert) => String(alert.noticeMatches || alert.documentName || "").split("|"))
+    .map((item) => item.trim())
+    .filter(Boolean);
+  return [...new Set(labels)].slice(0, 4).join(" / ");
 }
 
 function UploadSlot({ caseNumber, domain, canWrite, onUploaded, compact = true }: {
@@ -555,8 +602,10 @@ function ProfilePage({ identity, access, onBack }: {
   // Live Logics posture chips from the appendage refresh (when polled).
   const logicsStatus = (shorthand.logics_status?.value || null) as
     { statusName?: string; taxLiability?: number } | null;
-  const logicsBilling = (shorthand.logics_billing?.value || null) as
-    { pastDue?: number } | null;
+  const logicsBilling = getLogicsBilling(profile);
+  const paymentDelinquent = isPaymentDelinquent(profile);
+  const noticeAlerts = getNoticeAlerts(profile);
+  const noticeSummary = summarizeNoticeAlerts(noticeAlerts);
 
   return (
     <div className="space-y-3">
@@ -584,9 +633,14 @@ function ProfilePage({ identity, access, onBack }: {
             liability {fmtMoney(logicsStatus.taxLiability)}
           </span>
         ) : null}
-        {logicsBilling?.pastDue ? (
+        {noticeAlerts.length ? (
+          <span className="rounded-full border border-red-300 bg-red-50 px-1.5 py-0.5 text-[10px] font-bold text-red-700">
+            notices received: {noticeSummary || noticeAlerts.length}
+          </span>
+        ) : null}
+        {paymentDelinquent ? (
           <span className="rounded-full border border-red-400 bg-red-50 px-1.5 py-0.5 text-[10px] font-bold text-red-700">
-            PAST DUE {fmtMoney(logicsBilling.pastDue)}
+            PAST DUE {fmtMoney(logicsBilling?.pastDue)}
           </span>
         ) : null}
         <span className="text-[11px] text-muted-foreground">
@@ -596,6 +650,19 @@ function ProfilePage({ identity, access, onBack }: {
       </div>
       {profile.pursuit?.reasons ? (
         <div className="text-[11px] text-violet-800/80">{profile.pursuit.reasons}</div>
+      ) : null}
+      {noticeAlerts.length ? (
+        <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-900">
+          <div className="mb-1 font-semibold">Notices received</div>
+          <div className="flex flex-wrap gap-1.5">
+            {noticeAlerts.slice(-5).map((notice, index) => (
+              <span key={`${notice.uploadedAt || index}-${notice.noticeMatches || notice.documentName}`} className="rounded-full border border-red-200 bg-white px-2 py-0.5">
+                {notice.noticeMatches || notice.documentName}
+                {notice.uploadedAt ? ` · ${new Date(notice.uploadedAt).toLocaleDateString()}` : ""}
+              </span>
+            ))}
+          </div>
+        </div>
       ) : null}
 
       <div className="grid gap-3 lg:grid-cols-[minmax(0,5fr)_minmax(0,4fr)]">
@@ -684,11 +751,21 @@ function ClientCard({ row, canWrite, onOpen }: { row: BankRow; canWrite: boolean
 
   const workDays = daysAgo(row.touches?.work?.lastDate);
   const salesDays = daysAgo(row.touches?.sales?.lastDate);
-  const shorthand = full?.shorthand || null;
+  const effectiveProfile = full || row;
+  const shorthand = effectiveProfile.shorthand || null;
   const pitchClass = full?.pitch?.verdict?.class;
+  const paymentDelinquent = isPaymentDelinquent(effectiveProfile);
+  const logicsBilling = getLogicsBilling(effectiveProfile);
+  const noticeAlerts = getNoticeAlerts(effectiveProfile);
+  const noticeSummary = summarizeNoticeAlerts(noticeAlerts);
 
   return (
-    <Card className="overflow-hidden">
+    <Card
+      className={cn(
+        "overflow-hidden",
+        paymentDelinquent && "border-red-300 bg-red-50/60 ring-1 ring-red-200",
+      )}
+    >
       <CardContent className="space-y-1.5 p-3">
         <div className="flex items-start justify-between gap-2">
           <button type="button" className="min-w-0 text-left hover:underline" onClick={onOpen} title="Open profile">
@@ -702,6 +779,11 @@ function ClientCard({ row, canWrite, onOpen }: { row: BankRow; canWrite: boolean
             <span className={cn("rounded-full border px-1.5 py-0.5 text-[10px] font-semibold", tempTone(row.temperature?.label))}>
               {row.temperature?.label || "unknown"}
             </span>
+            {paymentDelinquent ? (
+              <span className="rounded-full border border-red-400 bg-red-100 px-1.5 py-0.5 text-[10px] font-bold text-red-800">
+                past due {fmtMoney(logicsBilling?.pastDue)}
+              </span>
+            ) : null}
           </div>
         </div>
 
@@ -722,6 +804,11 @@ function ClientCard({ row, canWrite, onOpen }: { row: BankRow; canWrite: boolean
         {row.pursuit?.reasons ? (
           <div className="line-clamp-2 text-[11px] text-violet-800/80" title={row.pursuit.reasons}>
             {row.pursuit.reasons}
+          </div>
+        ) : null}
+        {noticeAlerts.length ? (
+          <div className="rounded-md border border-red-200 bg-white/70 px-2 py-1 text-[11px] font-medium text-red-800">
+            Notices received: {noticeSummary || `${noticeAlerts.length} notice${noticeAlerts.length === 1 ? "" : "s"}`}
           </div>
         ) : null}
 

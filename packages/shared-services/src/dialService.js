@@ -23,6 +23,7 @@ const {
   normalizeDailyStats,
 } = require("./agentAvailabilityService");
 const { maybeCompleteSlice } = require("./agentSliceService");
+const { evaluateCxClear } = require("./cxCallStateGuard");
 const {
   resolveCaseContactEligibility,
 } = require("./contactEligibilityService");
@@ -339,17 +340,16 @@ async function markAgentAvailableAfterAutoDisposition(extensionId, { logger = nu
       ? existing.currentCall
       : {};
     const existingCallChannel = String(existingCall.channel || "").trim().toLowerCase();
-    const existingIdentity = callIdentity(existingCall);
-    const requestedIdentity = normalizeExternalId(uii);
-    if (
-      requestedIdentity
-      && existingIdentity
-      && existingIdentity !== requestedIdentity
-      && String(existing?.activePlatform || "").trim().toUpperCase() === "CX"
-    ) {
+    const { skip: cxClearSkip, existingIdentity, requestedIdentity } = evaluateCxClear(existing, uii);
+    if (cxClearSkip) {
+      logger?.warn?.("dial.dispose.autoDisposition.agentAvailable.skipped", {
+        extensionId: normalizedExtensionId,
+        reason: cxClearSkip,
+        existingIdentity,
+      });
       return {
         skipped: true,
-        reason: "different-active-cx-call",
+        reason: cxClearSkip,
         extensionId: normalizedExtensionId,
         existingIdentity,
         requestedIdentity,
@@ -2063,13 +2063,22 @@ async function terminateAndDispose(callSessionId, dispositionKey, {
   }
 
   // ── 7. Trigger fresh-lead drain on agent-becomes-eligible. ─────
-  // Lazy-required to avoid load-time circular deps.
-  try {
-    // eslint-disable-next-line global-require
-    const { onAgentBecomesEligible } = require("./freshLeadAssignmentService");
-    await onAgentBecomesEligible(effectiveAgentId);
-  } catch (e) {
-    logger?.warn?.("dial.dispose.eligibilityHook.failed", { error: e.message });
+  // Lazy-required to avoid load-time circular deps. Skip the advance if the RingCX auto-disposition
+  // release was BLOCKED because the agent is still on a live CX call (missing-uii / different-active
+  // -cx-call) — advancing then serves a fresh lead off a still-active call (Tracey->Veronica class).
+  if (rcxAutoDispositionRelease?.skipped) {
+    logger?.warn?.("dial.dispose.eligibilityHook.skipped", {
+      callSessionId,
+      reason: rcxAutoDispositionRelease.reason,
+    });
+  } else {
+    try {
+      // eslint-disable-next-line global-require
+      const { onAgentBecomesEligible } = require("./freshLeadAssignmentService");
+      await onAgentBecomesEligible(effectiveAgentId);
+    } catch (e) {
+      logger?.warn?.("dial.dispose.eligibilityHook.failed", { error: e.message });
+    }
   }
 
   // ── 8. Cadence reschedule (stub: cadence engine consumes nextTouchAt
