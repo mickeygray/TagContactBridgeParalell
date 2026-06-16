@@ -1406,7 +1406,6 @@ async function checkEmailHashExists(domain, emailHash, options = {}) {
 async function intakeLdPrePing(payload = {}, options = {}) {
   const domain = "WYNN";
   const companyConfig = options.companyConfig || getCompanyConfig(domain);
-  const state = normalizeState(extractLeadState(payload));
   const dob = cleanString(
     payload["Date Of Birth"] ||
       payload["Date  Of  Birth"] ||
@@ -1425,16 +1424,6 @@ async function intakeLdPrePing(payload = {}, options = {}) {
   const callbackUrl = cleanString(
     payload.callback_url || payload.callbackUrl || payload.ping_url,
   );
-
-  if (!state) {
-    return {
-      ok: false,
-      accepted: false,
-      error: "Missing state",
-      code: "MISSING_STATE",
-      statusCode: 400,
-    };
-  }
 
   const age = calculateAge(dob);
   if (age === null) {
@@ -1910,6 +1899,27 @@ async function writeProspectAndCadence(normalized, options = {}) {
       consentTier,
     },
   });
+
+  // Real-time LD-spend tick (best-effort): when an LD-family lead lands, increment the day's LD
+  // SpendEntry by $rate exactly once per lead (CAS-guarded on the cadence). The nightly materializer
+  // remains the reconcile backstop. A metrics write must never break lead intake.
+  try {
+    // eslint-disable-next-line global-require
+    const { recordRealtimeLdLeadSpend } = require("./ldSpendService");
+    await recordRealtimeLdLeadSpend({
+      domain: normalized.domain,
+      caseId,
+      routeCampaignKey: normalized.routeCampaignKey,
+      now,
+      logger: options.logger,
+    });
+  } catch (error) {
+    options.logger?.warn?.("ld_spend.realtime_tick.failed", {
+      domain: normalized.domain,
+      caseId,
+      error: error.message,
+    });
+  }
 
   // Capture initial federal-DNC status from the validation we just
   // ran. The validation called RealValidation's full DNCPlus.php

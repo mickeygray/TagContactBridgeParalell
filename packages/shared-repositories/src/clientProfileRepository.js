@@ -180,6 +180,17 @@ async function getClientProfileByCaseNumber(caseNumber, domain = DEFAULT_DOMAIN)
 // Bank listing: best-prospect-first by default; filterable by tier,
 // temperature, and lifecycle status. Projection trims the heavy fields
 // (shorthand/opportunities ride the dossier view, not the table).
+// Card projection — the trimmed fields the bank grid + suggestion cards need.
+// The full dossier (pitch thread, document hashes, whole shorthand ledger) loads
+// only when a card is opened.
+const CARD_PROJECTION = [
+  "profileKey", "caseNumber", "domain", "credit", "funding", "payments",
+  "touches", "temperature", "pursuit", "lifecycle",
+  "shorthand.logics_billing", "shorthand.logics_notice_alerts", "shorthand.logics_status",
+].join(" ");
+// Suggestions additionally need the fields the candidate predicate reads.
+const SUGGESTION_PROJECTION = `${CARD_PROJECTION} opportunities upsell`;
+
 async function listClientProfiles({
   domain = null,
   tier = null,
@@ -220,21 +231,7 @@ async function listClientProfiles({
     .sort({ "pursuit.score": -1, updatedAt: -1 })
     .skip(Math.max(0, Number(skip) || 0))
     .limit(capped)
-    .select([
-      "profileKey",
-      "caseNumber",
-      "domain",
-      "credit",
-      "funding",
-      "payments",
-      "touches",
-      "temperature",
-      "pursuit",
-      "lifecycle",
-      "shorthand.logics_billing",
-      "shorthand.logics_notice_alerts",
-      "shorthand.logics_status",
-    ].join(" "))
+    .select(CARD_PROJECTION)
     .lean();
   const total = await ClientProfile.countDocuments(query);
   return { rows, total };
@@ -300,9 +297,120 @@ async function retireClientProfile(caseNumber, reason = "retired", { domain = DE
   ).lean();
 }
 
+// ── Upsell-suggestion suppression ("not now" / "check again on") ──────────────
+const DEFAULT_UPSELL_SNOOZE_DAYS = 30;
+
+// "not now" pushes the next eligible suggestion out by N days (config
+// RESOLUTION_UPSELL_SNOOZE_DAYS, default 30). An explicit checkAgainOn date wins.
+// Returns a future Date, or null ONLY if an explicit checkAgainOn is unparseable.
+function resolveUpsellCheckAgainOn({ now = new Date(), checkAgainOn = null, days = null } = {}) {
+  if (checkAgainOn) {
+    const explicit = new Date(checkAgainOn);
+    return Number.isNaN(explicit.getTime()) ? null : explicit;
+  }
+  const envDays = Number(process.env.RESOLUTION_UPSELL_SNOOZE_DAYS);
+  const span = Number.isFinite(Number(days)) && Number(days) > 0
+    ? Number(days)
+    : (Number.isFinite(envDays) && envDays > 0 ? envDays : DEFAULT_UPSELL_SNOOZE_DAYS);
+  return new Date(new Date(now).getTime() + span * 86_400_000);
+}
+
+// A client is suppressed from upsell suggestions while checkAgainOn is in the future.
+function isUpsellSuppressed(profile, now = new Date()) {
+  const when = profile && profile.upsell ? profile.upsell.checkAgainOn : null;
+  if (!when) return false;
+  const date = new Date(when);
+  return !Number.isNaN(date.getTime()) && date.getTime() > new Date(now).getTime();
+}
+
+// An opportunity counts as "open" unless explicitly closed out. The gem-scan
+// status vocabulary isn't fixed, so treat anything NOT in the closed set as
+// open (tighten the closed set as the vocabulary settles).
+const CLOSED_OPPORTUNITY_STATUSES = new Set([
+  "dismissed", "rejected", "complete", "completed", "done", "closed", "won", "lost",
+]);
+
+function hasOpenUpsellOpportunity(profile) {
+  const opps = profile && Array.isArray(profile.opportunities) ? profile.opportunities : [];
+  return opps.some(
+    (o) => o && !CLOSED_OPPORTUNITY_STATUSES.has(String(o.status || "").trim().toLowerCase()),
+  );
+}
+
+// A client is a "look into this" upsell suggestion when it's active, not snoozed
+// ("not now" / check-again-on in the future), and has at least one open
+// UPSELLERATOR opportunity. Pure — the list query filters on this predicate.
+function isUpsellSuggestionCandidate(profile, now = new Date()) {
+  if (!profile) return false;
+  if (profile.lifecycle && profile.lifecycle.status === "retired") return false;
+  if (isUpsellSuppressed(profile, now)) return false;
+  return hasOpenUpsellOpportunity(profile);
+}
+
+// upsell may be null on legacy/seeded rows; Mongo can't create a dot-path inside an
+// explicit null ("Cannot create field ... in element {upsell: null}"). Normalize
+// null/missing → {} first — mirrors the shorthand guard above. Idempotent, and it
+// never touches a row whose upsell is already an object.
+async function ensureUpsellSubdoc(identity) {
+  await ClientProfile.updateOne(
+    { ...profileIdentityFilter(identity), upsell: null },
+    { $set: { upsell: {} } },
+  );
+}
+
+// "not now": dismiss a surfaced upsell suggestion and snooze re-suggestion.
+async function snoozeUpsell(caseNumber, { domain = DEFAULT_DOMAIN, days = null, checkAgainOn = null, by = null, reason = null, now = new Date() } = {}) {
+  const identity = normalizeClientProfileIdentity(caseNumber, domain);
+  if (!identity.caseNumber) return null;
+  await claimLegacyProfileKey(identity);
+  await ensureUpsellSubdoc(identity);
+  const checkAgain = resolveUpsellCheckAgainOn({ now, checkAgainOn, days });
+  return ClientProfile.findOneAndUpdate(
+    profileIdentityFilter(identity),
+    {
+      $set: {
+        "upsell.checkAgainOn": checkAgain,
+        "upsell.dismissedAt": new Date(now),
+        "upsell.dismissedBy": by ? String(by).slice(0, 120) : null,
+        "upsell.dismissReason": reason ? String(reason).slice(0, 200) : null,
+      },
+    },
+    { new: true },
+  ).lean();
+}
+
+// Clear a snooze so the client can be suggested again immediately.
+async function clearUpsellSnooze(caseNumber, { domain = DEFAULT_DOMAIN } = {}) {
+  const identity = normalizeClientProfileIdentity(caseNumber, domain);
+  if (!identity.caseNumber) return null;
+  await claimLegacyProfileKey(identity);
+  await ensureUpsellSubdoc(identity);
+  return ClientProfile.findOneAndUpdate(
+    profileIdentityFilter(identity),
+    { $set: { "upsell.checkAgainOn": null, "upsell.dismissedAt": null, "upsell.dismissReason": null } },
+    { new: true },
+  ).lean();
+}
+
+// Today's "look into these" upsell list: active clients with at least one open
+// opportunity, minus anyone snoozed via "not now". The query narrows to
+// active + has-opportunity; isUpsellSuggestionCandidate (snooze + open-opp) is
+// the source of truth applied in-memory. Best-prospect-first by pursuit score.
+async function listUpsellSuggestions({ domain = null, limit = 100, now = new Date() } = {}) {
+  const query = { "lifecycle.status": "active", "opportunities.0": { $exists: true } };
+  if (domain) query.domain = normalizeDomain(domain);
+  const rows = await ClientProfile.find(query)
+    .sort({ "pursuit.score": -1 })
+    .limit(Math.min(Number(limit) || 100, 500))
+    .select(SUGGESTION_PROJECTION)
+    .lean();
+  return rows.filter((profile) => isUpsellSuggestionCandidate(profile, now));
+}
+
 module.exports = {
   DEFAULT_DOMAIN,
   normalizeDomain,
+  listUpsellSuggestions,
   buildClientProfileKey,
   normalizeClientProfileIdentity,
   upsertClientProfile,
@@ -313,4 +421,10 @@ module.exports = {
   summarizeBank,
   retireClientProfile,
   setPitchState,
+  resolveUpsellCheckAgainOn, // exported for unit tests (upsell snooze)
+  isUpsellSuppressed, // exported for unit tests (upsell snooze)
+  hasOpenUpsellOpportunity, // exported for unit tests (upsell suggestions)
+  isUpsellSuggestionCandidate, // exported for unit tests (upsell suggestions)
+  snoozeUpsell,
+  clearUpsellSnooze,
 };

@@ -11,7 +11,6 @@ import {
   Megaphone,
   Radio,
   Rocket,
-  Users,
   UserCog,
   Wrench,
 } from "lucide-react";
@@ -79,14 +78,6 @@ export const adminWorkspaces: WorkspaceDef[] = [
     audience: "admin",
   },
   {
-    key: "clients",
-    path: "/admin/clients",
-    label: "Clients",
-    description: "Search and open any prospect or case profile.",
-    icon: Users,
-    audience: "admin",
-  },
-  {
     key: "dispatch",
     path: "/admin/dispatch",
     label: "Dispatch",
@@ -108,14 +99,6 @@ export const adminWorkspaces: WorkspaceDef[] = [
     label: "Lead Intake",
     description: "NCOA CSV uploads and the TCPA consent vault.",
     icon: ListChecks,
-    audience: "admin",
-  },
-  {
-    key: "social",
-    path: "/admin/social",
-    label: "Meta Responder",
-    description: "Facebook and Instagram auto-reply keywords and webhook status.",
-    icon: Wrench,
     audience: "admin",
   },
   {

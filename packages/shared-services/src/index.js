@@ -382,7 +382,19 @@ const {
 const {
   resolveCaseContactEligibility,
   stopCaseContact,
+  resolveUpsellContactEligibility,
+  getUpsellContactAllowList,
 } = require("./contactEligibilityService");
+const {
+  sendUpsellContact,
+  sendBulkUpsellContact,
+} = require("./resolutionContactService");
+const {
+  buildProspectBlast,
+  planProspectBlast,
+  loadProspectBlast,
+} = require("./predictiveCampaignService");
+const blastJobStore = require("./blastJobStore");
 const {
   buildHourlyHygienePlan,
   listHourlyReviewFeed,
@@ -954,6 +966,14 @@ module.exports = {
   resolveMailerByRcExtension,
   resolveMailerByTrackingNumber,
   buildCampaignAudience,
+  resolveUpsellContactEligibility,
+  getUpsellContactAllowList,
+  sendUpsellContact,
+  sendBulkUpsellContact,
+  buildProspectBlast,
+  planProspectBlast,
+  loadProspectBlast,
+  blastJobStore,
   extractCadenceEmailIndex,
   extractCadenceSmsIndex,
   resolveCadenceEmailContent,

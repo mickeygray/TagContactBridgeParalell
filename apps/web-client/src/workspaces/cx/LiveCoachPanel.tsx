@@ -1667,7 +1667,11 @@ export function LiveCoachPanel({
           size="sm"
           className="h-8 gap-1.5 bg-violet-600 px-3 text-white hover:bg-violet-700"
           disabled={!session?.id || askPending || (!askText.trim() && !askSeeds.length)}
-          onClick={() => void submitAsk()}
+          onClick={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            void submitAsk();
+          }}
         >
           <Send className="h-3.5 w-3.5" />
           {askPending ? "Coaching..." : "Ask"}

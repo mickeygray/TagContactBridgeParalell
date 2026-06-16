@@ -92,6 +92,7 @@ const WYNN_STATUSES = {
   221: { label: "POST DATE", category: "postdate", color: "amber" },
   222: { label: "CHANGE BACK TO OPENED", category: "prospect", color: "blue" },
   223: { label: "AUTO CONTACT COMPLETE", category: "exhausted", color: "gray" },
+  224: { label: "Resolution Only", category: "reso", color: "violet", resoOnly: true },
 };
 
 const TAG_STATUSES = {
@@ -110,11 +111,24 @@ const TAG_STATUSES = {
   210: { label: "New Client", category: "client", color: "green" },
   211: { label: "New Client", category: "client", color: "green" },
   212: { label: "Tier 5", category: "tier5", color: "teal" },
+  // Resolution-only statuses (secondary-sale bank): gated behind the upsell
+  // contact allow-list. Labels are placeholders — rename to the real Logics
+  // status names when confirmed.
+  218: { label: "Resolution Only", category: "reso", color: "violet", resoOnly: true },
+  220: { label: "Resolution Only", category: "reso", color: "violet", resoOnly: true },
+};
+
+// AMITY status table — only the reso-only entry is known today; every other
+// AMITY statusId falls through to the safe "Status N" label until the full
+// map is supplied, so registering this table changes behavior ONLY for 240.
+const AMITY_STATUSES = {
+  240: { label: "Resolution Only", category: "reso", color: "violet", resoOnly: true },
 };
 
 const STATUS_TABLES = {
   TAG: TAG_STATUSES,
   WYNN: WYNN_STATUSES,
+  AMITY: AMITY_STATUSES,
 };
 
 const EXPORT_STATUS_OVERRIDES = {
@@ -322,11 +336,42 @@ function resolveExportStatus(domain, rawStatus) {
   return null;
 }
 
+// Status → tier view for the resolution cards. tier is 1-5 (parsed from the
+// "tierN" category), null otherwise; resoOnly marks the secondary-sale statuses.
+function resolveStatusTier(domain, statusId) {
+  const entry = resolveStatus(domain, statusId);
+  const tierMatch = String(entry.category || "").match(/^tier([1-5])$/);
+  return {
+    statusId: statusId == null ? null : Number(statusId),
+    label: entry.label,
+    category: entry.category,
+    color: entry.color,
+    tier: tierMatch ? Number(tierMatch[1]) : null,
+    resoOnly: Boolean(entry.resoOnly),
+  };
+}
+
+function isResoOnlyStatus(domain, statusId) {
+  return Boolean(resolveStatus(domain, statusId).resoOnly);
+}
+
+// The set of statuses the upsell-contact allow-list gates: tier-5 clients and
+// every reso-only status. Used ONLY by the /resolution send path (never by the
+// global cadence eligibility), so a misconfigured allow-list can't block dialing.
+function isAllowListGatedStatus(domain, statusId) {
+  const t = resolveStatusTier(domain, statusId);
+  return t.tier === 5 || t.resoOnly;
+}
+
 module.exports = {
   resolveExportStatus,
   resolveStatus,
+  resolveStatusTier,
+  isResoOnlyStatus,
+  isAllowListGatedStatus,
   STATUS_TABLES,
   TAG_STATUSES,
   WYNN_STATUSES,
+  AMITY_STATUSES,
   normalizeStatusText,
 };

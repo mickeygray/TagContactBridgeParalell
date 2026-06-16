@@ -12,6 +12,7 @@ import { useDispatchLists, useWorklists } from "@/lib/api/queries/dispatch";
 import { formatDateTime, formatNumber } from "@/lib/utils/format";
 import type { DispatchList } from "@/lib/api/types";
 import { CampaignBuilder } from "./CampaignBuilder";
+import { ProspectBlastBuilder } from "./ProspectBlastBuilder";
 import { TemplateLookup } from "./TemplateLookup";
 
 export function DispatchWorkspace() {
@@ -86,6 +87,8 @@ export function DispatchWorkspace() {
       />
 
       <CampaignBuilder />
+
+      <ProspectBlastBuilder />
 
       <Card>
         <CardHeader>

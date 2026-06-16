@@ -22,6 +22,7 @@ const MailImport = require("./MailImport");
 const MailerConfig = require("./MailerConfig");
 const MasterProspectIndex = require("./MasterProspectIndex");
 const MetricsSnapshot = require("./MetricsSnapshot");
+const MetricClose = require("./MetricClose");
 const CallSession = require("./CallSession");
 const LeadActivity = require("./LeadActivity");
 const LiveCoachSession = require("./LiveCoachSession");
@@ -69,6 +70,7 @@ const MODEL_REGISTRY = Object.freeze({
   MailerConfig,
   MasterProspectIndex,
   MetricsSnapshot,
+  MetricClose,
   CallSession,
   LeadActivity,
   LiveCoachSession,
@@ -120,6 +122,7 @@ module.exports = {
   MailerConfig,
   MasterProspectIndex,
   MetricsSnapshot,
+  MetricClose,
   CallSession,
   LeadActivity,
   LiveCoachSession,

@@ -729,7 +729,158 @@ function ProfilePage({ identity, access, onBack }: {
   );
 }
 
-function ClientCard({ row, canWrite, onOpen }: { row: BankRow; canWrite: boolean; onOpen: () => void }) {
+type LogicsStatusValue = { statusName?: string | null; statusId?: number | null; statusTier?: number | null };
+
+// The Logics status the nightly refresh stamped into shorthand — the "clear
+// letters" status we print on the card (and the launch).
+function getLogicsStatus(profile: BankRow | FullProfile): LogicsStatusValue | null {
+  const entry = profile.shorthand?.logics_status;
+  if (!entry || typeof entry.value !== "object" || entry.value === null) return null;
+  return entry.value as LogicsStatusValue;
+}
+
+// On-card UPSELLERATOR contact: send one text/email, or "not now" to snooze the
+// client out of the suggestions list. Tier-5/reso-only gating is enforced server-side.
+function UpsellContactActions({
+  caseNumber,
+  domain,
+  onSnoozed,
+}: {
+  caseNumber: string;
+  domain: string;
+  onSnoozed?: () => void;
+}) {
+  const [open, setOpen] = React.useState(false);
+  const [channel, setChannel] = React.useState<"sms" | "email">("sms");
+  const [subject, setSubject] = React.useState("");
+  const [body, setBody] = React.useState("");
+  const [busy, setBusy] = React.useState(false);
+
+  async function send() {
+    if (!body.trim()) return;
+    setBusy(true);
+    try {
+      const res = await api.post<{ ok: boolean; result: { ok: boolean; skipped?: boolean; reason?: string } }>(
+        `/api/resolution/cases/${encodeURIComponent(caseNumber)}/upsell/send`,
+        {
+          domain: normalizeDomain(domain),
+          channel,
+          content: body,
+          subject: channel === "email" ? subject : undefined,
+        },
+      );
+      if (res.result?.ok) {
+        toast.success(`${channel === "email" ? "Email" : "Text"} sent`);
+        setOpen(false);
+        setBody("");
+        setSubject("");
+      } else {
+        toast.error("Not sent", { description: res.result?.reason || "blocked by contact policy" });
+      }
+    } catch (err) {
+      toast.error("Send failed", { description: (err as Error).message });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function snooze() {
+    setBusy(true);
+    try {
+      await api.post(`/api/resolution/cases/${encodeURIComponent(caseNumber)}/upsell/snooze`, {
+        domain: normalizeDomain(domain),
+      });
+      toast.success("Snoozed — won't re-suggest for a while");
+      onSnoozed?.();
+    } catch (err) {
+      toast.error("Snooze failed", { description: (err as Error).message });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="space-y-1.5 border-t border-violet-100 pt-1.5">
+      <div className="flex items-center gap-3">
+        <button
+          type="button"
+          className="flex items-center gap-1 text-[11px] font-medium text-violet-700 hover:underline"
+          onClick={() => setOpen((v) => !v)}
+        >
+          <Send className="h-3 w-3" /> {open ? "Cancel" : "Contact"}
+        </button>
+        <button
+          type="button"
+          className="text-[11px] font-medium text-muted-foreground hover:underline disabled:opacity-50"
+          onClick={() => void snooze()}
+          disabled={busy}
+        >
+          Not now
+        </button>
+      </div>
+      {open ? (
+        <div className="space-y-1.5">
+          <div className="flex gap-1">
+            {(["sms", "email"] as const).map((c) => (
+              <button
+                key={c}
+                type="button"
+                onClick={() => setChannel(c)}
+                className={cn(
+                  "rounded-md border px-2 py-0.5 text-[10px] font-medium",
+                  channel === c
+                    ? "border-violet-400 bg-violet-100 text-violet-900"
+                    : "border-border text-muted-foreground",
+                )}
+              >
+                {c === "sms" ? "Text" : "Email"}
+              </button>
+            ))}
+          </div>
+          {channel === "email" ? (
+            <Input
+              value={subject}
+              onChange={(e) => setSubject(e.target.value)}
+              placeholder="Subject"
+              className="h-7 text-xs"
+            />
+          ) : null}
+          <textarea
+            value={body}
+            onChange={(e) => setBody(e.target.value)}
+            placeholder={channel === "email" ? "Hi {firstName}, ..." : "Hi, reaching out about your case..."}
+            className="min-h-[60px] w-full rounded-md border border-input bg-card px-2 py-1 text-xs"
+          />
+          <Button
+            size="sm"
+            className="h-7 w-full text-xs"
+            isLoading={busy}
+            disabled={!body.trim()}
+            onClick={() => void send()}
+          >
+            Send {channel === "email" ? "email" : "text"}
+          </Button>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function ClientCard({
+  row,
+  canWrite,
+  onOpen,
+  onSnoozed,
+  selected,
+  onToggleSelect,
+}: {
+  row: BankRow;
+  canWrite: boolean;
+  onOpen: () => void;
+  onSnoozed?: () => void;
+  selected?: boolean;
+  onToggleSelect?: () => void;
+}) {
   const [open, setOpen] = React.useState(false);
   const [full, setFull] = React.useState<FullProfile | null>(null);
   const [loading, setLoading] = React.useState(false);
@@ -758,6 +909,7 @@ function ClientCard({ row, canWrite, onOpen }: { row: BankRow; canWrite: boolean
   const logicsBilling = getLogicsBilling(effectiveProfile);
   const noticeAlerts = getNoticeAlerts(effectiveProfile);
   const noticeSummary = summarizeNoticeAlerts(noticeAlerts);
+  const status = getLogicsStatus(effectiveProfile);
 
   return (
     <Card
@@ -768,11 +920,31 @@ function ClientCard({ row, canWrite, onOpen }: { row: BankRow; canWrite: boolean
     >
       <CardContent className="space-y-1.5 p-3">
         <div className="flex items-start justify-between gap-2">
-          <button type="button" className="min-w-0 text-left hover:underline" onClick={onOpen} title="Open profile">
-            <div className="truncate text-sm font-semibold">{normalizeDomain(row.domain)} case {row.caseNumber}</div>
-            <div className="text-[11px] text-muted-foreground">Resolution dossier</div>
-          </button>
-          <div className="flex shrink-0 items-center gap-1">
+          <div className="flex min-w-0 items-start gap-2">
+            {onToggleSelect ? (
+              <input
+                type="checkbox"
+                checked={Boolean(selected)}
+                onChange={onToggleSelect}
+                className="mt-1 h-3.5 w-3.5 shrink-0"
+                title="Select for bulk send"
+              />
+            ) : null}
+            <button type="button" className="min-w-0 text-left hover:underline" onClick={onOpen} title="Open profile">
+              <div className="truncate text-sm font-semibold">{normalizeDomain(row.domain)} case {row.caseNumber}</div>
+              <div className="text-[11px] text-muted-foreground">Resolution dossier</div>
+            </button>
+          </div>
+          <div className="flex shrink-0 flex-wrap items-center justify-end gap-1">
+            {status?.statusName ? (
+              <span
+                className="rounded-full border border-violet-300 bg-violet-50 px-1.5 py-0.5 text-[10px] font-semibold text-violet-800"
+                title={`Logics status ${status.statusId ?? "?"}`}
+              >
+                {status.statusName}
+                {status.statusTier ? ` · T${status.statusTier}` : ""}
+              </span>
+            ) : null}
             <span className={cn("rounded-full border px-2 py-0.5 text-[10px] font-bold", tierTone(row.pursuit?.tier))}>
               {row.pursuit?.tier || "?"} · {row.pursuit?.score ?? "—"}
             </span>
@@ -858,6 +1030,10 @@ function ClientCard({ row, canWrite, onOpen }: { row: BankRow; canWrite: boolean
         ) : null}
 
         <UploadSlot caseNumber={row.caseNumber} domain={row.domain} canWrite={canWrite} onUploaded={() => void loadFull()} />
+
+        {canWrite ? (
+          <UpsellContactActions caseNumber={row.caseNumber} domain={normalizeDomain(row.domain)} onSnoozed={onSnoozed} />
+        ) : null}
       </CardContent>
     </Card>
   );
@@ -876,6 +1052,12 @@ export function ResolutionWorkspace() {
   const [temp, setTemp] = React.useState("");
   const [search, setSearch] = React.useState("");
   const [selectedCase, setSelectedCase] = React.useState<ProfileIdentity | null>(null);
+  const [view, setView] = React.useState<"bank" | "suggestions">("bank");
+  const [selected, setSelected] = React.useState<Set<string>>(() => new Set());
+  const [bulkChannel, setBulkChannel] = React.useState<"sms" | "email">("sms");
+  const [bulkSubject, setBulkSubject] = React.useState("");
+  const [bulkBody, setBulkBody] = React.useState("");
+  const [bulkBusy, setBulkBusy] = React.useState(false);
 
   React.useEffect(() => {
     // Don't latch "denied" before the session hydrates — a fresh login (or
@@ -911,15 +1093,24 @@ export function ResolutionWorkspace() {
   const loadBank = React.useCallback(async () => {
     setLoading(true);
     try {
+      const rowsReq =
+        view === "suggestions"
+          ? api
+              .get<{ ok: boolean; suggestions: BankRow[]; count: number }>(
+                "/api/resolution/upsell/suggestions",
+                { query: { limit: 150 } },
+              )
+              .then((res) => ({ ok: res?.ok, rows: res?.suggestions || [], total: res?.count || 0 }))
+          : api.get<{ ok: boolean; rows: BankRow[]; total: number }>("/api/resolution/bank", {
+              query: {
+                limit: 150,
+                ...(tier !== "ALL" ? { tier } : {}),
+                ...(temp ? { temperature: temp } : {}),
+                ...(debouncedSearch ? { q: debouncedSearch } : {}),
+              },
+            });
       const [bank, sum] = await Promise.all([
-        api.get<{ ok: boolean; rows: BankRow[]; total: number }>("/api/resolution/bank", {
-          query: {
-            limit: 150,
-            ...(tier !== "ALL" ? { tier } : {}),
-            ...(temp ? { temperature: temp } : {}),
-            ...(debouncedSearch ? { q: debouncedSearch } : {}),
-          },
-        }),
+        rowsReq,
         summary ? Promise.resolve(null) : api.get<{ ok: boolean; summary: BankSummary }>("/api/resolution/bank/summary"),
       ]);
       if (bank?.ok) {
@@ -933,7 +1124,66 @@ export function ResolutionWorkspace() {
       setLoading(false);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tier, temp, debouncedSearch]);
+  }, [tier, temp, debouncedSearch, view]);
+
+  function rowKey(row: BankRow) {
+    return row.profileKey || `${normalizeDomain(row.domain)}:${row.caseNumber}`;
+  }
+  function toggleSelect(row: BankRow) {
+    const key = rowKey(row);
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  }
+  async function sendBulk() {
+    if (!selected.size || !bulkBody.trim()) return;
+    const ok = window.confirm(
+      `Send a ${bulkChannel === "email" ? "email" : "text"} to ${selected.size} client${selected.size === 1 ? "" : "s"}? This contacts real paid clients.`,
+    );
+    if (!ok) return;
+    setBulkBusy(true);
+    try {
+      const byDomain = new Map<string, number[]>();
+      for (const row of rows) {
+        if (!selected.has(rowKey(row))) continue;
+        const d = normalizeDomain(row.domain);
+        const arr = byDomain.get(d) || [];
+        arr.push(Number(row.caseNumber));
+        byDomain.set(d, arr);
+      }
+      let sent = 0;
+      let blocked = 0;
+      let failed = 0;
+      for (const [d, caseIds] of byDomain) {
+        const res = await api.post<{ ok: boolean; result: { sent?: number; blocked?: number; failed?: number } }>(
+          "/api/resolution/upsell/send-bulk",
+          {
+            domain: d,
+            caseIds,
+            channel: bulkChannel,
+            content: bulkBody,
+            subject: bulkChannel === "email" ? bulkSubject : undefined,
+          },
+        );
+        sent += res.result?.sent || 0;
+        blocked += res.result?.blocked || 0;
+        failed += res.result?.failed || 0;
+      }
+      toast.success(`Bulk ${bulkChannel === "email" ? "email" : "text"} sent`, {
+        description: `${sent} sent · ${blocked} blocked · ${failed} failed`,
+      });
+      setSelected(new Set());
+      setBulkBody("");
+      setBulkSubject("");
+    } catch (err) {
+      toast.error("Bulk send failed", { description: (err as Error).message });
+    } finally {
+      setBulkBusy(false);
+    }
+  }
 
   React.useEffect(() => {
     if (access) void loadBank();
@@ -1049,6 +1299,19 @@ export function ResolutionWorkspace() {
             </Button>
           ))}
         </div>
+        <Button
+          type="button"
+          size="sm"
+          variant={view === "suggestions" ? "primary" : "ghost"}
+          className="h-7 gap-1 px-2.5 text-xs"
+          onClick={() => {
+            setView((v) => (v === "suggestions" ? "bank" : "suggestions"));
+            setSelected(new Set());
+          }}
+        >
+          <Sparkles className="h-3 w-3" />
+          {view === "suggestions" ? "Today's suggestions" : "Full bank"}
+        </Button>
         <select
           value={temp}
           onChange={(e) => setTemp(e.target.value)}
@@ -1076,6 +1339,65 @@ export function ResolutionWorkspace() {
         </span>
       </div>
 
+      {access.write && selected.size > 0 ? (
+        <Card className="border-violet-200 bg-violet-50/60">
+          <CardContent className="space-y-2 p-3">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-sm font-semibold text-violet-900">{selected.size} selected</span>
+              <div className="flex gap-1">
+                {(["sms", "email"] as const).map((c) => (
+                  <button
+                    key={c}
+                    type="button"
+                    onClick={() => setBulkChannel(c)}
+                    className={cn(
+                      "rounded-md border px-2 py-0.5 text-[11px] font-medium",
+                      bulkChannel === c
+                        ? "border-violet-400 bg-violet-100 text-violet-900"
+                        : "border-border text-muted-foreground",
+                    )}
+                  >
+                    {c === "sms" ? "Text" : "Email"}
+                  </button>
+                ))}
+              </div>
+              <button
+                type="button"
+                className="text-[11px] text-muted-foreground hover:underline"
+                onClick={() => setSelected(new Set())}
+              >
+                Clear
+              </button>
+            </div>
+            {bulkChannel === "email" ? (
+              <Input
+                value={bulkSubject}
+                onChange={(e) => setBulkSubject(e.target.value)}
+                placeholder="Subject"
+                className="h-7 text-xs"
+              />
+            ) : null}
+            <textarea
+              value={bulkBody}
+              onChange={(e) => setBulkBody(e.target.value)}
+              placeholder={bulkChannel === "email" ? "Hi {firstName}, ..." : "Hi, reaching out about your case..."}
+              className="min-h-[56px] w-full rounded-md border border-input bg-card px-2 py-1 text-xs"
+            />
+            <div className="flex justify-end">
+              <Button
+                size="sm"
+                className="h-7 text-xs"
+                isLoading={bulkBusy}
+                disabled={!bulkBody.trim()}
+                onClick={() => void sendBulk()}
+              >
+                <Send className="h-3.5 w-3.5" /> Send to {selected.size}
+              </Button>
+            </div>
+          </CardContent>
+        </Card>
+      ) : null}
+
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
         {rows.map((row) => (
           <ClientCard
@@ -1083,6 +1405,9 @@ export function ResolutionWorkspace() {
             row={row}
             canWrite={access.write}
             onOpen={() => setSelectedCase(profileIdentity(row))}
+            onSnoozed={() => void loadBank()}
+            selected={selected.has(rowKey(row))}
+            onToggleSelect={access.write ? () => toggleSelect(row) : undefined}
           />
         ))}
       </div>

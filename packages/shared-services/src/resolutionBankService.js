@@ -335,19 +335,43 @@ async function refreshClientProfileFromLogics({ caseNumber, domain = "TAG", clie
   return { profile, fields: Object.keys(shorthand), errors };
 }
 
+// Promotion ($5k) gate for elevation. Default 0 = no gate (the pre-gate behavior). An explicit
+// override wins; otherwise we read RESOLUTION_ELEVATION_MIN_PAID. Negative/NaN/zero all mean
+// "ungated", so a misconfigured env can only ever fail OPEN to the old behavior, never block the bank.
+function resolveElevationMinPaid(override = null) {
+  const raw = override !== null && override !== undefined
+    ? override
+    : process.env.RESOLUTION_ELEVATION_MIN_PAID;
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : 0;
+}
+
+// The CaseProfile query for elevation candidates. When minPaid > 0 only cases that have paid in at
+// least that much are eligible (the "$5000 → promoted" gate); when 0 the query is byte-identical to
+// the original ungated one, so flipping the knob off is a true no-op.
+function buildElevationCandidateQuery({ domains = BANK_DOMAINS, minPaid = 0 } = {}) {
+  const query = { statusCategory: "client", domain: { $in: domains } };
+  if (Number.isFinite(Number(minPaid)) && Number(minPaid) > 0) {
+    query.totalPaid = { $gte: Number(minPaid) };
+  }
+  return query;
+}
+
 // ── Elevation: caseProfiles → clientProfiles ─────────────────────────────────
-async function elevateCaseProfiles({ domains = BANK_DOMAINS, logger = null } = {}) {
+async function elevateCaseProfiles({ domains = BANK_DOMAINS, minPaid = null, logger = null } = {}) {
   const mongoose = require("mongoose");
   require("../../shared-models/src");
   const CaseProfile = mongoose.model("ControlPlaneCaseProfile");
   const ClientProfile = mongoose.model("ClientProfile");
+
+  const elevationMinPaid = resolveElevationMinPaid(minPaid);
 
   const existing = new Set(
     (await ClientProfile.find({}, { profileKey: 1, caseNumber: 1, domain: 1 }).lean())
       .map((p) => p.profileKey || buildClientProfileKey(p.domain || "TAG", p.caseNumber)),
   );
   const candidates = await CaseProfile.find(
-    { statusCategory: "client", domain: { $in: domains } },
+    buildElevationCandidateQuery({ domains, minPaid: elevationMinPaid }),
     {
       caseId: 1, domain: 1,
       totalPaid: 1, paymentsCount: 1, lastPaymentDate: 1, lastPaymentAmount: 1,
@@ -381,8 +405,8 @@ async function elevateCaseProfiles({ domains = BANK_DOMAINS, logger = null } = {
     existing.add(profileKey);
     created += 1;
   }
-  logger?.info?.("resolution.bank.elevation", { candidates: candidates.length, created });
-  return { candidates: candidates.length, created };
+  logger?.info?.("resolution.bank.elevation", { minPaid: elevationMinPaid, candidates: candidates.length, created });
+  return { minPaid: elevationMinPaid, candidates: candidates.length, created };
 }
 
 // ── The PM-close sweep: elevation + tier-weighted due refresh ────────────────
@@ -536,6 +560,8 @@ async function addCaseToBank({ caseNumber, domain = "TAG", addedBy = null, logge
 module.exports = {
   refreshClientProfileFromLogics,
   elevateCaseProfiles,
+  resolveElevationMinPaid, // exported for unit tests ($5k promotion gate)
+  buildElevationCandidateQuery, // exported for unit tests ($5k promotion gate)
   runResolutionBankClose,
   addCaseToBank,
   REFRESH_DUE_HOURS,

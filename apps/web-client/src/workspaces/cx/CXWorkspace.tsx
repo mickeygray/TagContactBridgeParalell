@@ -599,6 +599,8 @@ function extractTerminalOutcomeWorkflow(record: WorkflowRecord | null | undefine
     caseId: record.caseId != null ? String(record.caseId) : "",
     normalizedOutcome,
     label: normalizedOutcome === "voicemail" ? "Voicemail" : "No answer",
+    uii: String(result.uii || "").trim() || null,
+    callSessionId: String(result.callSessionId || "").trim() || null,
   };
 }
 
@@ -2958,6 +2960,36 @@ function InterviewSnapshotCard({
       setStrategyPending(false);
     }
   };
+  const handleGenerateStrategyClick = (event: React.MouseEvent<HTMLButtonElement>) => {
+    event.preventDefault();
+    event.stopPropagation();
+    void generateStrategy();
+  };
+  const handleSetFormViewClick = (event: React.MouseEvent<HTMLButtonElement>) => {
+    event.preventDefault();
+    event.stopPropagation();
+    setView("form");
+  };
+  const handleSetStrategyViewClick = (event: React.MouseEvent<HTMLButtonElement>) => {
+    event.preventDefault();
+    event.stopPropagation();
+    setView("strategy");
+  };
+  const handleSaveSnapshotClick = (event: React.MouseEvent<HTMLButtonElement>) => {
+    event.preventDefault();
+    event.stopPropagation();
+    void saveToSystems();
+  };
+  const handleBuildPreviewClick = (event: React.MouseEvent<HTMLButtonElement>) => {
+    event.preventDefault();
+    event.stopPropagation();
+    buildPreview();
+  };
+  const handleClearSnapshotClick = (event: React.MouseEvent<HTMLButtonElement>) => {
+    event.preventDefault();
+    event.stopPropagation();
+    clearSnapshot();
+  };
 
   const interviewAskText = React.useMemo(
     () => buildInterviewActivityNote(snapshot, prospectName, caseId),
@@ -3037,7 +3069,7 @@ function InterviewSnapshotCard({
             <div className="text-xs font-semibold uppercase tracking-[0.12em] text-sky-700">
               Call strategy
             </div>
-            <Button size="sm" variant="secondary" onClick={() => setView("form")}>
+            <Button size="sm" variant="secondary" onClick={handleSetFormViewClick}>
               Back to interview
             </Button>
           </div>
@@ -3072,7 +3104,7 @@ function InterviewSnapshotCard({
           <div className="flex flex-wrap items-center gap-1.5">
             <Button
               size="sm"
-              onClick={() => void generateStrategy()}
+              onClick={handleGenerateStrategyClick}
               isLoading={strategyPending}
               disabled={strategyPending}
             >
@@ -3268,7 +3300,7 @@ function InterviewSnapshotCard({
           <>
             <Button
               size="sm"
-              onClick={() => void generateStrategy()}
+              onClick={handleGenerateStrategyClick}
               isLoading={strategyPending}
               disabled={strategyPending}
               className="border-sky-500/40 bg-sky-600 text-white hover:bg-sky-700"
@@ -3276,7 +3308,7 @@ function InterviewSnapshotCard({
               {strategy ? "Rewrite strategy" : "Generate strategy"}
             </Button>
             {strategy ? (
-              <Button size="sm" variant="secondary" onClick={() => setView("strategy")}>
+              <Button size="sm" variant="secondary" onClick={handleSetStrategyViewClick}>
                 View strategy{interviewChangedSinceStrategy ? " •" : ""}
               </Button>
             ) : null}
@@ -3284,16 +3316,16 @@ function InterviewSnapshotCard({
         ) : null}
         <Button
           size="sm"
-          onClick={() => void saveToSystems()}
+          onClick={handleSaveSnapshotClick}
           isLoading={saveSnapshot.isPending}
           disabled={!caseId || saveSnapshot.isPending}
         >
           Save snapshot
         </Button>
-        <Button size="sm" variant="secondary" onClick={buildPreview}>
+        <Button size="sm" variant="secondary" onClick={handleBuildPreviewClick}>
           Build note
         </Button>
-        <Button size="sm" variant="ghost" onClick={clearSnapshot}>
+        <Button size="sm" variant="ghost" onClick={handleClearSnapshotClick}>
           Clear
         </Button>
         <span className="text-[11px] text-muted-foreground">
@@ -4614,17 +4646,47 @@ export function CXWorkspace() {
       .find((entry) => {
         if (!entry) return false;
         if (lastTerminalOutcomeWorkflowRef.current === entry.workflowId) return false;
+        const hasServedQueueIdentity = Boolean(servedQueueTicketId || servedQueueActionKey || servingQueueKey);
         if (servedQueueStartedAt != null) {
           const record = recent.find((row) => String(row._id || "") === entry.workflowId);
           const recordAt = record?.createdAt || record?.happenedAt || "";
           const recordTime = recordAt ? new Date(recordAt).getTime() : NaN;
           if (Number.isFinite(recordTime) && recordTime + 2_000 < servedQueueStartedAt) return false;
         }
+        // Strongest match: the terminal row carries the LIVE call's identity (UII).
+        // Exact identity beats the queueItemId/case heuristics — only the current
+        // call's own outcome advances the workspace (the clean anti-flicker signal).
+        if (entry.uii && currentCallUii && entry.uii === String(currentCallUii).trim()) {
+          return true;
+        }
         if (servedQueueTicketId && entry.queueItemId && entry.queueItemId === String(servedQueueTicketId)) {
           return true;
         }
         if (servingQueueKey && entry.queueItemId && servingQueueKey.includes(entry.queueItemId)) {
           return true;
+        }
+        // A terminal CX workflow is written with aggregateId = queue item id.
+        // While a concrete served queue item is known, do not fall back to
+        // case-only matching: coach/interview submits can refresh recent
+        // workflow data and a stale terminal row for the same case would
+        // otherwise advance the workspace to the next lead mid-call.
+        if (hasServedQueueIdentity) {
+          // Observability: a terminal row matched by CASE, but a concrete served
+          // queue item is known, so we ignore it (anti-flicker — a stale case-level
+          // workflow must not advance a live call). Log only the meaningful case.
+          if (servedQueueCaseId && entry.caseId && String(entry.caseId) === String(servedQueueCaseId)) {
+            console.info("[cx] terminal workflow ignored — queue identity present", {
+              workflowId: entry.workflowId,
+              caseId: String(entry.caseId),
+              servedQueueTicketId: servedQueueTicketId || null,
+              servedQueueActionKey: servedQueueActionKey || null,
+              servingQueueKey: servingQueueKey || null,
+              entryQueueItemId: entry.queueItemId || null,
+              entryUii: entry.uii || null,
+              currentCallUii: currentCallUii || null,
+            });
+          }
+          return false;
         }
         if (servedQueueCaseId && entry.caseId && String(entry.caseId) === String(servedQueueCaseId)) {
           return true;
@@ -4656,6 +4718,7 @@ export function CXWorkspace() {
     servedQueueContact,
     servedQueueDomain,
     servedQueueStartedAt,
+    currentCallUii,
     domain,
   ]);
 

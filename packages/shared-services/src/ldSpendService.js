@@ -23,7 +23,9 @@
 const {
   upsertSpendEntry,
   listSpendEntries,
+  incrementSpendEntry,
 } = require("../../shared-repositories/src/spendEntryRepository");
+const leadCadenceRepository = require("../../shared-repositories/src/leadCadenceRepository");
 const {
   buildVendorDailySummary,
   classifyVendorFamily,
@@ -157,10 +159,100 @@ async function materializeLdSpendForDate({ domain, dateKey, dryRun = false, logg
   return summary;
 }
 
+// PT calendar date (YYYY-MM-DD) — the same basis the nightly materializer attributes a lead's
+// spend to, so the real-time tick and the nightly reconcile land on the same SpendEntry row.
+function ldSpendDateKey(now = new Date()) {
+  const when = now instanceof Date ? now : new Date(now);
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/Los_Angeles",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(when);
+}
+
+// Pure: a lead's routeCampaignKey -> { family, label, rate } if it is an LD family, else null.
+// custom / custom-2 = $3, general = $1.50 (env-overridable via getLdRates). Exported for tests.
+function resolveLdLeadSpend(routeCampaignKey, rates = getLdRates()) {
+  const key = String(routeCampaignKey || "").trim().toLowerCase();
+  if (!key) return null;
+  const family = LD_FAMILIES.find((f) => f.key === key);
+  if (!family) return null;
+  const rate = Number(rates?.[family.key]);
+  if (!Number.isFinite(rate) || rate < 0) return null;
+  return { family: family.key, label: family.label, rate };
+}
+
+// Real-time LD-spend tick: when an LD-family lead comes in, increment the day's LD SpendEntry by
+// the lead's rate EXACTLY ONCE (CAS-guarded on the lead cadence via claimLdSpendTick). The nightly
+// materializer stays the reconcile backstop (recompute leads x rate and SET). Best-effort — the
+// caller must wrap this so it can never break lead intake. deps are injectable for unit tests.
+async function recordRealtimeLdLeadSpend({
+  domain,
+  caseId,
+  routeCampaignKey,
+  now = new Date(),
+  rates = getLdRates(),
+  logger = null,
+  deps = {},
+} = {}) {
+  const spend = resolveLdLeadSpend(routeCampaignKey, rates);
+  if (!spend) return { skipped: true, reason: "not-ld-family" };
+  const normalizedDomain = String(domain || "").trim().toUpperCase();
+  const numericCaseId = Number(caseId);
+  if (!normalizedDomain || !Number.isFinite(numericCaseId) || numericCaseId <= 0) {
+    return { skipped: true, reason: "missing-identity" };
+  }
+  const dateKey = ldSpendDateKey(now);
+  const claim = deps.claimLdSpendTick || leadCadenceRepository.claimLdSpendTick;
+  const increment = deps.incrementSpendEntry || incrementSpendEntry;
+  const release = deps.releaseLdSpendTick || leadCadenceRepository.releaseLdSpendTick;
+
+  const won = await claim(normalizedDomain, numericCaseId, { family: spend.family, rate: spend.rate, dateKey, now });
+  if (!won) return { skipped: true, reason: "already-counted", family: spend.family };
+
+  try {
+    await increment(
+      { date: dateKey, domain: normalizedDomain, channel: LD_SPEND_CHANNEL, campaign: spend.family },
+      { spend: spend.rate, leadsReported: 1 },
+      {
+        source: spend.label,
+        costPerLead: spend.rate,
+        raw: { computedBy: "ld-spend-materializer", familyKey: spend.family, realtime: true },
+      },
+    );
+  } catch (error) {
+    // The claim is stamped but the increment never landed. Release the claim so a re-ingest can
+    // re-tick this lead intraday (the nightly materializer is still the final backstop), then
+    // re-throw so the caller's best-effort guard logs the failure.
+    try {
+      await release(normalizedDomain, numericCaseId);
+    } catch (releaseError) {
+      logger?.warn?.("ld_spend.realtime_tick.release_failed", {
+        domain: normalizedDomain,
+        caseId: numericCaseId,
+        error: releaseError?.message,
+      });
+    }
+    throw error;
+  }
+  logger?.info?.("ld_spend.realtime_tick", {
+    domain: normalizedDomain,
+    caseId: numericCaseId,
+    family: spend.family,
+    rate: spend.rate,
+    date: dateKey,
+  });
+  return { ticked: true, family: spend.family, rate: spend.rate, date: dateKey };
+}
+
 module.exports = {
   LD_SPEND_CHANNEL,
   getLdRates,
   computeLdSpendEntries,
   findLdCollisions,
   materializeLdSpendForDate,
+  ldSpendDateKey,
+  resolveLdLeadSpend,
+  recordRealtimeLdLeadSpend,
 };

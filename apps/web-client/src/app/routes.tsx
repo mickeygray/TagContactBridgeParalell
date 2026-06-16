@@ -34,9 +34,6 @@ const DispatchWorkspace = React.lazy(() =>
 const PostDatesWorkspace = React.lazy(() =>
   import("@/workspaces/postdates/PostDatesWorkspace").then((m) => ({ default: m.PostDatesWorkspace })),
 );
-const SocialWorkspace = React.lazy(() =>
-  import("@/workspaces/social/SocialWorkspace").then((m) => ({ default: m.SocialWorkspace })),
-);
 const CleaningWorkspace = React.lazy(() =>
   import("@/workspaces/cleaning/CleaningWorkspace").then((m) => ({ default: m.CleaningWorkspace })),
 );
@@ -127,14 +124,6 @@ export function AppRoutes() {
             }
           />
           <Route
-            path="clients"
-            element={
-              <Suspended>
-                <ClientsWorkspace />
-              </Suspended>
-            }
-          />
-          <Route
             path="dispatch"
             element={
               <Suspended>
@@ -147,14 +136,6 @@ export function AppRoutes() {
             element={
               <Suspended>
                 <PostDatesWorkspace />
-              </Suspended>
-            }
-          />
-          <Route
-            path="social"
-            element={
-              <Suspended>
-                <SocialWorkspace />
               </Suspended>
             }
           />

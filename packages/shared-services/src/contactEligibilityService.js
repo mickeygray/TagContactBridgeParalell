@@ -1,6 +1,7 @@
 "use strict";
 
 const { getSharedConfig } = require("../../shared-config/src");
+const { isAllowListGatedStatus } = require("../../shared-config/src/statusMap");
 const {
   caseProfileRepository,
   cxDialQueueRepository,
@@ -238,7 +239,72 @@ async function resolveCaseContactEligibility(domain, caseId, options = {}) {
   };
 }
 
+// ── Upsell-contact gate (the /resolution send path ONLY) ─────────────────────
+//
+// Deliberately SEPARATE from buildBlockedReason: that gate blocks every paid
+// client (payment-or-converted), but upsell INTENTIONALLY targets paid clients.
+// This gate only ever runs on the /resolution send path, so a misconfigured
+// allow-list can never block CX cadence/dialing. Fail-closed: tier-5 + reso-only
+// statuses are blocked unless the case is explicitly allow-listed.
+
+// Allow-list of caseIds permitted to receive upsell contact despite a gated
+// (tier-5 / reso-only) status. Pending the operator's list — default EMPTY, so
+// every gated status is blocked until explicitly allow-listed.
+// Config: UPSELL_CONTACT_ALLOWLIST = JSON e.g. {"TAG":[12345,...],"WYNN":[...]}
+function getUpsellContactAllowList(domain) {
+  const raw = process.env.UPSELL_CONTACT_ALLOWLIST;
+  if (!raw) return [];
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (error) {
+    // Malformed config is a DEPLOY error, not "no allow-list" — make it loud so the
+    // operator doesn't chase phantom missing case-IDs. Still fail-closed (empty list).
+    console.warn(JSON.stringify({
+      timestamp: new Date().toISOString(),
+      level: "warn",
+      scope: "contact-eligibility",
+      message: "upsell_allowlist.malformed_json",
+      error: error.message,
+    }));
+    return [];
+  }
+  const list = parsed && parsed[normalizeDomain(domain)];
+  return Array.isArray(list) ? list.map(Number).filter(Number.isFinite) : [];
+}
+
+// Eligibility for an upsell text/email/call from /resolution. dnc/optOut always
+// block; tier-5 + reso-only statuses require the caseId to be allow-listed.
+// allowList is injectable for tests; otherwise read from config (fail-closed).
+function resolveUpsellContactEligibility({
+  domain,
+  statusId,
+  caseId,
+  optOut = false,
+  dnc = false,
+  allowList = null,
+} = {}) {
+  const normalizedDomain = normalizeDomain(domain);
+  if (dnc) return { ok: false, reason: "dnc", detail: "Case is DNC" };
+  if (optOut) return { ok: false, reason: "opt-out", detail: "Case opted out of contact" };
+
+  if (isAllowListGatedStatus(normalizedDomain, statusId)) {
+    const list = Array.isArray(allowList) ? allowList : getUpsellContactAllowList(normalizedDomain);
+    const allowed = new Set(list.map(Number).filter(Number.isFinite));
+    if (!allowed.has(Number(caseId))) {
+      return {
+        ok: false,
+        reason: "allowlist-required",
+        detail: `Status ${statusId} (tier-5/reso-only) requires allow-listing before upsell contact`,
+      };
+    }
+  }
+  return { ok: true };
+}
+
 module.exports = {
   resolveCaseContactEligibility,
   stopCaseContact,
+  getUpsellContactAllowList,
+  resolveUpsellContactEligibility,
 };

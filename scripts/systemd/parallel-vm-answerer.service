@@ -1,0 +1,46 @@
+# Parallel VM theme answerer — owns the monitor extensions' SIP registrations.
+#
+# Answers inbound cold-transfer legs (VM DROP dispositions) on the monitor
+# extensions and plays each agent's recorded message. Replaces the laptop
+# console process as the registration owner.
+#
+# Design (2026-06-12, per the API-budget principle):
+#   - REST at bootstrap only (token + device + sip-info, cached per extension).
+#     Steady state is the SDK's 30s SIP-layer REGISTER refresh — zero RC API.
+#   - Event-driven recovery: registrationError → rebuild from cached creds.
+#   - Proof-of-life: any 95s of SIP silence = dead socket → rebuild (catches
+#     half-open TCP that never errors).
+#   - Platform-auth failures back off 3 minutes (VM_ANSWERER_AUTH_BACKOFF_MS).
+#
+# IMPORTANT: parallel-barge must run with EX_BARGE_WARM_AT_BOOT=false — a
+# barge warm pool registering the same OtherPhone devices steals the contact
+# binding from this service (most recent REGISTER wins).
+#
+# Install:
+#   sudo cp scripts/systemd/parallel-vm-answerer.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now parallel-vm-answerer
+#
+# Audio: expects runtime/audio/voicemails/<ext-raws> (319/445/966/741/742/743).
+
+[Unit]
+Description=Parallel VM theme answerer (monitor extension fleet)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/tagcontactbridge-parallel
+ExecStart=/usr/bin/node scripts/vm-theme-answerer.js
+Environment=NODE_ENV=production
+Restart=always
+RestartSec=5
+# The answerer is quiet by design (one line per register/invite); journal is
+# the source of truth for INVITE/ANSWERED/rebuild events.
+StandardOutput=journal
+StandardError=journal
+User=parallel
+Group=parallel
+
+[Install]
+WantedBy=multi-user.target

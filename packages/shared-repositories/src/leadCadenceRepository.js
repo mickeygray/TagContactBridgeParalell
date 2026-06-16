@@ -107,6 +107,39 @@ async function upsertLeadCadence(domain, caseId, update = {}) {
   );
 }
 
+// Compare-and-set idempotency claim for the real-time LD-spend tick. Atomically stamps
+// metricsLdSpend.countedAt only if it is not already set, returning true ONLY for the caller
+// that won the claim. A re-ingest (or concurrent retry) of the same lead returns false, so the
+// per-lead $rate is ticked into the day's SpendEntry exactly once. The nightly materializer
+// stays the reconcile backstop (it recomputes leads x rate and SETs the row).
+async function claimLdSpendTick(domain, caseId, { family = null, rate = null, dateKey = null, now = new Date() } = {}) {
+  const normalizedDomain = String(domain || "").toUpperCase();
+  const numericCaseId = Number(caseId);
+  if (!normalizedDomain || !Number.isFinite(numericCaseId) || numericCaseId <= 0) return false;
+  const updated = await LeadCadence.findOneAndUpdate(
+    { domain: normalizedDomain, caseId: numericCaseId, "metricsLdSpend.countedAt": { $in: [null, undefined] } },
+    { $set: { metricsLdSpend: { countedAt: now, family, rate, dateKey } } },
+    { new: true },
+  ).lean();
+  return Boolean(updated);
+}
+
+// Release a won-but-unfulfilled LD-spend claim. If claimLdSpendTick stamped the marker but the
+// SpendEntry increment then failed, the lead would be stuck "already counted" and the intraday
+// number would under-count until the nightly reconcile. Resetting the marker lets a re-ingest
+// re-tick the same day. Best-effort; the nightly materializer is still the final backstop.
+async function releaseLdSpendTick(domain, caseId) {
+  const normalizedDomain = String(domain || "").toUpperCase();
+  const numericCaseId = Number(caseId);
+  if (!normalizedDomain || !Number.isFinite(numericCaseId) || numericCaseId <= 0) return false;
+  const updated = await LeadCadence.findOneAndUpdate(
+    { domain: normalizedDomain, caseId: numericCaseId },
+    { $set: { metricsLdSpend: { countedAt: null, family: null, rate: null, dateKey: null } } },
+    { new: true },
+  ).lean();
+  return Boolean(updated);
+}
+
 async function saveLeadCadenceInterviewSnapshot(domain, caseId, interviewSnapshot = {}) {
   const normalizedDomain = String(domain || "").toUpperCase();
   const numericCaseId = Number(caseId);
@@ -1457,6 +1490,8 @@ module.exports = {
   buildCadenceStateFromActions,
   cancelPendingActions,
   cancelStaleScheduledActions,
+  claimLdSpendTick,
+  releaseLdSpendTick,
   claimScheduledAction,
   countDueLeadCadenceByChannel,
   countLeadCadence,

@@ -507,6 +507,34 @@ async function runNightlyFinalClosePass(domains, options = {}) {
     }
   }
 
+  // Accurate-nightly metrics (docs/CALL_TOTALS_RECONCILIATION_PLAN.md): (1) recompute
+  // the HONEST call-totals reconciliation for month-to-date against live data, then
+  // (2) FREEZE it into an immutable MetricClose so closed periods stop drifting.
+  // Best-effort, env-gated, DEFAULT OFF — writes only the reconciliation + close
+  // collections and can never break the close.
+  let callReconciliation = { skipped: true, reason: "disabled" };
+  let metricClose = { skipped: true, reason: "disabled" };
+  const accurateNightlyEnabled =
+    options.metricCloseFreezeEnabled !== undefined
+      ? Boolean(options.metricCloseFreezeEnabled)
+      : String(process.env.METRIC_CLOSE_FREEZE_ENABLED ?? "false") === "true";
+  if (accurateNightlyEnabled) {
+    try {
+      const { runNightlyCallReconciliation } = require("./callMetricsReconciliationService");
+      callReconciliation = await runNightlyCallReconciliation({ logger: options.logger || null });
+    } catch (error) {
+      callReconciliation = { ok: false, error: error.message };
+      options.logger?.warn?.("nightly-close.call_reconciliation_failed", { error: error.message });
+    }
+    try {
+      const { runMetricCloseFreeze } = require("./metricCloseService");
+      metricClose = await runMetricCloseFreeze({ logger: options.logger || null });
+    } catch (error) {
+      metricClose = { ok: false, error: error.message };
+      options.logger?.warn?.("nightly-close.metric_close_freeze_failed", { error: error.message });
+    }
+  }
+
   return {
     domains: selectedDomains,
     spendSync,
@@ -516,6 +544,8 @@ async function runNightlyFinalClosePass(domains, options = {}) {
     leadCadenceCaseRefresh,
     postDateSweep,
     clientCaseDiscovery,
+    callReconciliation,
+    metricClose,
     paymentSweep: summarizePaymentSweepForOps(
       hourlySweep?.phaseA?.paymentReconcile || [],
       selectedDomains,

@@ -139,6 +139,23 @@ const clientProfileSchema = new mongoose.Schema(
       // five of them trip the circuit breaker before any real work happens.
       lastLogicsAttemptAt: { type: Date, default: null },
     },
+
+    // Upsell-suggestion curation. When the bank surfaces a client as a
+    // "look into this" upsell candidate, an operator can dismiss it ("not now"),
+    // which snoozes re-suggestion until checkAgainOn (default +30d, config
+    // RESOLUTION_UPSELL_SNOOZE_DAYS). suggestedAt/lastBatchKey let "today's
+    // suggestions" dedupe; signalLabel records why it surfaced. Deliberately
+    // UNINDEXED — additive on a large live collection, so a deploy triggers no
+    // background index build.
+    upsell: {
+      suggestedAt: { type: Date, default: null },
+      lastBatchKey: { type: String, default: null },
+      signalLabel: { type: String, default: null },
+      checkAgainOn: { type: Date, default: null },
+      dismissedAt: { type: Date, default: null },
+      dismissedBy: { type: String, default: null },
+      dismissReason: { type: String, default: null },
+    },
   },
   { timestamps: true },
 );

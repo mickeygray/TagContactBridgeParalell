@@ -1,6 +1,5 @@
 import * as React from "react";
-import { ExternalLink, RefreshCw } from "lucide-react";
-import { useNavigate } from "react-router-dom";
+import { RefreshCw } from "lucide-react";
 import {
   Dialog,
   DialogContent,
@@ -14,7 +13,6 @@ import { SkeletonRow } from "@/components/ui/Skeleton";
 import { ErrorState } from "@/components/ui/ErrorState";
 import { useClientDetail } from "@/lib/api/queries/clients";
 import { useCaseInspectorStore } from "@/lib/caseInspector/caseInspectorStore";
-import { useSession } from "@/lib/auth/useSession";
 import {
   formatDate,
   formatDateTime,
@@ -26,11 +24,7 @@ import {
  */
 export function CaseInspector() {
   const { domain, caseId, open, close, reset } = useCaseInspectorStore();
-  const navigate = useNavigate();
-  const { user } = useSession();
   const query = useClientDetail(domain ?? "", caseId);
-
-  const isAdmin = user?.audience === "admin";
 
   // Once the user closes the drawer, wait a tick before clearing state so the
   // exit animation finishes cleanly.
@@ -171,19 +165,6 @@ export function CaseInspector() {
             Refresh
           </Button>
           <div className="flex gap-2">
-            {isAdmin ? (
-              <Button
-                variant="secondary"
-                size="sm"
-                onClick={() => {
-                  close();
-                  navigate("/admin/clients");
-                }}
-              >
-                <ExternalLink className="h-3.5 w-3.5" />
-                Open in Clients
-              </Button>
-            ) : null}
             <Button size="sm" onClick={close}>
               Close
             </Button>

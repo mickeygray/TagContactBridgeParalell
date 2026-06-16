@@ -2754,6 +2754,16 @@ async function handleCxTerminalCallOutcome(payload = {}) {
       queueMutation,
       agentClear,
       eligibilityKick,
+      // Call identity so the wallboard can match a terminal row to the LIVE call
+      // (stronger than queueItemId/caseId — the Tracey->Veronica anti-flicker class).
+      uii: String(
+        payload.uii || payload.telephonySessionId || payload.callSessionId
+        || queueItem?.metadata?.lastTerminalOutcomeUii || queueItem?.metadata?.lastDialExecutionUii || "",
+      ).trim() || null,
+      callSessionId: String(
+        payload.callSessionId || payload.telephonySessionId
+        || queueItem?.metadata?.lastDialExecutionCallSessionId || "",
+      ).trim() || null,
     },
   }).catch(() => null);
 

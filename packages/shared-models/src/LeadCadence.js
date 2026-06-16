@@ -53,6 +53,16 @@ const leadCadenceSchema = new mongoose.Schema(
   {
     domain: { type: String, required: true, index: true },
     caseId: { type: Number, required: true },
+    // Real-time LD-spend idempotency marker: stamped the first time this lead's
+    // per-lead $rate is ticked into the day's LD SpendEntry, so a re-ingest of the
+    // same lead can't double-count. The nightly materializer remains the reconcile
+    // backstop (recomputes leads x rate and SETs the row).
+    metricsLdSpend: {
+      countedAt: { type: Date, default: null },
+      family: { type: String, default: null },
+      rate: { type: Number, default: null },
+      dateKey: { type: String, default: null },
+    },
     externalLeadId: { type: String, default: null, index: true },
     intakeRoute: { type: String, default: null, index: true },
     intakeSource: { type: String, default: null, index: true },

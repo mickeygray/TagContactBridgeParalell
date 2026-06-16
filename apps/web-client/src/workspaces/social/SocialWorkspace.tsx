@@ -1,3 +1,8 @@
+// ⚠️ PARKED — intentionally NOT routed and NOT in the nav (phase-out 2026-06-16).
+// The Meta/social responder webhooks (/fb, /tt) and socialResponderService still
+// run on stored config; only this admin management UI is unserved. To restore:
+// re-add the lazy import + <Route path="social"> in app/routes.tsx and the
+// `social` entry in app/workspaceRegistry.ts. Do NOT delete this file.
 import * as React from "react";
 import {
   CheckCircle2,

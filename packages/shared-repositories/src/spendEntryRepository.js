@@ -172,9 +172,28 @@ async function upsertSpendEntries(entries = []) {
   return SpendEntry.bulkWrite(operations, { ordered: false });
 }
 
+// Atomic per-event INCREMENT of a spend row (real-time LD-lead tick). Adds spend / leadsReported
+// to the (date, domain, channel, campaign) identity, creating the row on first hit. The `onInsert`
+// fields (source, costPerLead, raw) stamp the row's metadata on creation only. Tag the row with
+// raw.computedBy = "ld-spend-materializer" so the nightly materializer RECONCILES it
+// (recompute-and-SET) rather than treating it as an operator manual nudge.
+async function incrementSpendEntry(identity = {}, deltas = {}, onInsert = {}) {
+  const filter = buildSpendEntryIdentity(identity);
+  const inc = {};
+  if (Number.isFinite(Number(deltas.spend))) inc.spend = Number(deltas.spend);
+  if (Number.isFinite(Number(deltas.leadsReported))) inc.leadsReported = Number(deltas.leadsReported);
+  const update = {
+    $setOnInsert: { ...filter, ...onInsert },
+    $set: { syncedAt: new Date() },
+  };
+  if (Object.keys(inc).length) update.$inc = inc;
+  return SpendEntry.findOneAndUpdate(filter, update, { new: true, upsert: true, setDefaultsOnInsert: true });
+}
+
 module.exports = {
   buildSpendEntryIdentity,
   getSpendTotals,
+  incrementSpendEntry,
   listSpendEntries,
   summarizeMailCosts,
   summarizeSpendBySource,

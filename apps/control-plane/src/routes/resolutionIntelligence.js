@@ -135,6 +135,102 @@ function createResolutionIntelligenceRouter(auth, config = {}) {
     }
   });
 
+  // ── Upsell suggestions + contact (UPSELLERATOR client tools) ───────────────
+  // "Look into these": active clients with an open opportunity, minus anyone
+  // snoozed via "not now". Best-prospect-first.
+  router.get("/upsell/suggestions", async (req, res) => {
+    try {
+      const {
+        listUpsellSuggestions,
+      } = require("../../../../packages/shared-repositories/src/clientProfileRepository");
+      const suggestions = await listUpsellSuggestions({
+        domain: req.query.domain || null,
+        limit: req.query.limit != null ? Number(req.query.limit) : 100,
+      });
+      return res.json({ ok: true, count: suggestions.length, suggestions });
+    } catch (error) {
+      return res.status(error.status || 500).json(toErrorResponse(error));
+    }
+  });
+
+  // "Not now": snooze a client out of the suggestions list until checkAgainOn.
+  router.post(
+    "/cases/:caseNumber/upsell/snooze",
+    auth.requirePermission("resolution.write"),
+    async (req, res) => {
+      try {
+        const {
+          snoozeUpsell,
+        } = require("../../../../packages/shared-repositories/src/clientProfileRepository");
+        const profile = await snoozeUpsell(req.params.caseNumber, {
+          domain: requestDomain(req),
+          days: req.body?.days != null ? Number(req.body.days) : null,
+          checkAgainOn: req.body?.checkAgainOn || null,
+          by: req.user?.email || null,
+          reason: req.body?.reason || null,
+        });
+        if (!profile) return res.status(404).json({ ok: false, error: "Client profile not found" });
+        return res.json({ ok: true, profile });
+      } catch (error) {
+        return res.status(error.status || 500).json(toErrorResponse(error));
+      }
+    },
+  );
+
+  // Send ONE upsell text/email. Fail-closed allow-list for tier-5/reso-only.
+  // The HTTP call succeeds even when the send is blocked/skipped — the per-case
+  // outcome (ok / skipped / reason) is in `result` for the card to render.
+  router.post(
+    "/cases/:caseNumber/upsell/send",
+    auth.requirePermission("resolution.write"),
+    async (req, res) => {
+      try {
+        const {
+          sendUpsellContact,
+        } = require("../../../../packages/shared-services/src/resolutionContactService");
+        const result = await sendUpsellContact({
+          domain: requestDomain(req),
+          caseId: Number(req.params.caseNumber),
+          channel: req.body?.channel,
+          templateKey: req.body?.templateKey || null,
+          content: req.body?.content || null,
+          subject: req.body?.subject || null,
+          actor: req.user?.email || null,
+          dryRun: Boolean(req.body?.dryRun),
+        });
+        return res.json({ ok: true, result });
+      } catch (error) {
+        return res.status(error.status || 500).json(toErrorResponse(error));
+      }
+    },
+  );
+
+  // Bulk send to a filtered selection. Per-case isolation + tallies.
+  router.post(
+    "/upsell/send-bulk",
+    auth.requirePermission("resolution.write"),
+    async (req, res) => {
+      try {
+        const {
+          sendBulkUpsellContact,
+        } = require("../../../../packages/shared-services/src/resolutionContactService");
+        const result = await sendBulkUpsellContact({
+          domain: requestDomain(req),
+          caseIds: Array.isArray(req.body?.caseIds) ? req.body.caseIds.map(Number) : [],
+          channel: req.body?.channel,
+          templateKey: req.body?.templateKey || null,
+          content: req.body?.content || null,
+          subject: req.body?.subject || null,
+          actor: req.user?.email || null,
+          dryRun: Boolean(req.body?.dryRun),
+        });
+        return res.json({ ok: true, result });
+      } catch (error) {
+        return res.status(error.status || 500).json(toErrorResponse(error));
+      }
+    },
+  );
+
   // ── P1: documents (parse-and-delete) ──────────────────────────────────────
   // Multipart upload held in MEMORY ONLY (multer memoryStorage — never disk),
   // parsed into shorthand, recorded as a content hash, then released. Main
