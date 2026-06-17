@@ -6,6 +6,7 @@ const assert = require("node:assert/strict");
 const {
   callIdentity,
   cxClearSkipReason,
+  decideCxCurrentCallDialBlock,
   evaluateCxClear,
   getCxMissingUiiMaxHoldMs,
 } = require("../../packages/shared-services/src/cxCallStateGuard");
@@ -154,4 +155,59 @@ test("evaluateCxClear: empty/idle agent state clears (no protection)", () => {
 test("evaluateCxClear: a different active CX call is still blocked", () => {
   const existing = { activePlatform: "CX", currentCall: { channel: "cx", telephonySessionId: "OTHER" } };
   assert.equal(evaluateCxClear(existing, UII).skip, "different-active-cx-call");
+});
+
+test("next dial guard blocks a different lead while a CX currentCall is active", () => {
+  const result = decideCxCurrentCallDialBlock({
+    agentState: {
+      activePlatform: "CX",
+      currentCall: {
+        channel: "cx",
+        queueItemId: "queue-a",
+        telephonySessionId: UII,
+        phone: "310-555-0101",
+      },
+    },
+    requestedQueueItemId: "queue-b",
+    requestedIdentities: ["OTHER-UII"],
+    requestedPhone: "310-555-0199",
+  });
+  assert.equal(result.block, true);
+  assert.equal(result.reason, "different-active-cx-current-call");
+  assert.equal(result.details.currentQueueItemId, "queue-a");
+});
+
+test("next dial guard allows the same queue item or same UII", () => {
+  const sameQueue = decideCxCurrentCallDialBlock({
+    agentState: {
+      activePlatform: "CX",
+      currentCall: { channel: "cx", queueItemId: "queue-a", telephonySessionId: UII },
+    },
+    requestedQueueItemId: "queue-a",
+    requestedIdentities: [],
+  });
+  assert.equal(sameQueue.block, false);
+
+  const sameUii = decideCxCurrentCallDialBlock({
+    agentState: {
+      activePlatform: "CX",
+      currentCall: { channel: "cx", telephonySessionId: UII },
+    },
+    requestedQueueItemId: "queue-b",
+    requestedIdentities: [UII],
+  });
+  assert.equal(sameUii.block, false);
+});
+
+test("next dial guard allows same phone for old CX snapshots without queue id or UII", () => {
+  const result = decideCxCurrentCallDialBlock({
+    agentState: {
+      activePlatform: "CX",
+      currentCall: { channel: "cx", to: "(310) 555-0101" },
+    },
+    requestedQueueItemId: "queue-b",
+    requestedIdentities: [],
+    requestedPhone: "1-310-555-0101",
+  });
+  assert.equal(result.block, false);
 });

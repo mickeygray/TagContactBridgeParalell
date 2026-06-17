@@ -28,6 +28,27 @@ function callIdentity(call = {}) {
   return String(value || "").trim() || null;
 }
 
+function normalizeId(value) {
+  const normalized = String(value || "").trim();
+  return normalized || null;
+}
+
+function normalizePhone(value) {
+  const digits = String(value || "").replace(/\D+/g, "");
+  if (digits.length === 11 && digits.startsWith("1")) return digits.slice(1);
+  if (digits.length >= 10) return digits.slice(-10);
+  return digits || null;
+}
+
+function collectRequestedIdentities(values = []) {
+  const out = new Set();
+  for (const value of values) {
+    const normalized = normalizeId(value);
+    if (normalized) out.add(normalized);
+  }
+  return out;
+}
+
 // Anti-stranding safety valve. If a CX call with NO matching identity has been active longer
 // than this, allow the clear (it has almost certainly ended and no UII-tagged release arrived).
 // Default: disabled (null) — a missing-UII clear is always skipped, and the call is released by
@@ -109,6 +130,72 @@ function evaluateCxClear(existing, requestedIdentityRaw, options = {}) {
   return { skip, existingIdentity, requestedIdentity };
 }
 
+// Independent next-dial guard. Queue rows can drift or disappear during RingCX timing edges,
+// so a live CX currentCall must also block a request to dial a different lead. This is the
+// "same person stays on screen" seatbelt: allow the same queue item, same UII/session, or
+// same phone when older snapshots do not yet carry a queue id.
+function decideCxCurrentCallDialBlock({
+  agentState = null,
+  requestedQueueItemId = null,
+  requestedIdentities = [],
+  requestedPhone = null,
+} = {}) {
+  const currentCall =
+    agentState?.currentCall && typeof agentState.currentCall === "object"
+      ? agentState.currentCall
+      : {};
+  const activePlatformIsCx = String(agentState?.activePlatform || "").trim().toUpperCase() === "CX";
+  const channelIsCx = String(currentCall.channel || "").trim().toLowerCase() === "cx";
+  if (!activePlatformIsCx && !channelIsCx) {
+    return { block: false, reason: null, details: null };
+  }
+
+  const currentQueueItemId =
+    normalizeId(currentCall.queueItemId)
+    || normalizeId(currentCall.queueTicketId)
+    || normalizeId(currentCall.cxQueueRecordId)
+    || normalizeId(currentCall.cxQueueItemId);
+  const targetQueueItemId = normalizeId(requestedQueueItemId);
+  if (currentQueueItemId && targetQueueItemId && currentQueueItemId === targetQueueItemId) {
+    return { block: false, reason: null, details: null };
+  }
+
+  const currentIdentity = callIdentity(currentCall);
+  const requestedIdentitySet = collectRequestedIdentities(requestedIdentities);
+  if (currentIdentity && requestedIdentitySet.has(currentIdentity)) {
+    return { block: false, reason: null, details: null };
+  }
+
+  const currentPhone = normalizePhone(
+    currentCall.phone || currentCall.phoneNumber || currentCall.to || currentCall.dnis,
+  );
+  const targetPhone = normalizePhone(requestedPhone);
+  if (!currentQueueItemId && !currentIdentity && currentPhone && targetPhone && currentPhone === targetPhone) {
+    return { block: false, reason: null, details: null };
+  }
+
+  const hasProtectableCurrentCall =
+    Boolean(currentQueueItemId || currentIdentity || currentPhone || channelIsCx || activePlatformIsCx);
+  if (!hasProtectableCurrentCall) {
+    return { block: false, reason: null, details: null };
+  }
+
+  return {
+    block: true,
+    reason: "different-active-cx-current-call",
+    details: {
+      currentQueueItemId,
+      requestedQueueItemId: targetQueueItemId,
+      currentIdentity,
+      requestedIdentities: Array.from(requestedIdentitySet),
+      currentPhone,
+      requestedPhone: targetPhone,
+      activePlatform: agentState?.activePlatform || null,
+      currentCallChannel: currentCall.channel || null,
+    },
+  };
+}
+
 // EX->CX decoupling (phase-out, 2026-06-15). Decide whether the EX presence poll must PRESERVE
 // the agent's CX call-state instead of overwriting it from the EX dial-in log. CX call-state is
 // owned by the RingCX/UII path; EX presence is stale and must not determine it. Pure + env-free
@@ -146,6 +233,7 @@ function decideExPollCxOwnership({
 module.exports = {
   callIdentity,
   cxClearSkipReason,
+  decideCxCurrentCallDialBlock,
   evaluateCxClear,
   getCxMissingUiiMaxHoldMs,
   decideExPollCxOwnership,

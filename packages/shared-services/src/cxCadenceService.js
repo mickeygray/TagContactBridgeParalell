@@ -1207,16 +1207,29 @@ async function markAgentCxCallState(queueItem = null, payload = {}, placedAt = n
   const startedAt = placedAt instanceof Date ? placedAt : new Date(placedAt);
   const phone = String(payload.phone || queueItem?.phone || "").trim() || null;
   const uii = String(payload.uii || "").trim() || null;
+  const queueItemId = queueItem?._id ? String(queueItem._id) : null;
   const existing = await agentStateRepository.findAgentStateByExtensionId(extensionId);
   const currentCall = {
     sessionId: uii,
     telephonySessionId: uii,
+    uii,
     direction: "outbound",
     from: null,
     fromName: queueItem?.assignment?.agentName || null,
     to: phone,
+    phone,
     channel: "cx",
     startTime: Number.isNaN(startedAt.getTime()) ? new Date() : startedAt,
+    queueItemId,
+    queueTicketId: queueItemId,
+    caseId:
+      queueItem?.caseId != null && Number.isFinite(Number(queueItem.caseId))
+        ? Number(queueItem.caseId)
+        : payload.caseId != null && Number.isFinite(Number(payload.caseId))
+          ? Number(payload.caseId)
+          : null,
+    domain: normalizeDomain(queueItem?.domain || payload.domain || null) || null,
+    actionKey: String(payload.actionKey || queueItem?.metadata?.actionKey || "").trim() || null,
   };
   const dailyStats = applyCallStartedDailyStats(existing || {}, normalizeDailyStats(existing?.dailyStats, startedAt), {
     call: currentCall,

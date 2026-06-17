@@ -55,6 +55,16 @@ const agentStateSchema = new mongoose.Schema(
       from: String,
       fromName: String,
       to: String,
+      phone: String,
+      phoneNumber: String,
+      uii: String,
+      rcxUii: String,
+      queueItemId: String,
+      queueTicketId: String,
+      cxQueueRecordId: String,
+      caseId: Number,
+      domain: String,
+      actionKey: String,
       // "ex" = call landed on the agent's RC desk app (TAG-first
       // lookup ladder fallback). "cx" = call routed via the CX queue
       // / cadence dialer (WYNN-first). Drives the lookup ladder's

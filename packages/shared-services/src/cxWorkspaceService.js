@@ -17,7 +17,10 @@ const {
 } = require("../../shared-repositories/src");
 const { CxDialQueue, LeadCadence, MasterProspectIndex } = require("../../shared-models/src");
 const { recordWorkflowStage } = require("./workflowStateService");
-const { evaluateCxClear } = require("./cxCallStateGuard");
+const {
+  decideCxCurrentCallDialBlock,
+  evaluateCxClear,
+} = require("./cxCallStateGuard");
 const { searchClientWorkspace } = require("./frontendReadService");
 const {
   applyCallEndedDailyStats,
@@ -6595,6 +6598,30 @@ async function assertNoUnresolvedCxDispositionBeforeDial(context = {}, user = {}
   ).trim();
   if (!actorExtensionId) return;
   const requestedQueueItemId = String(queueItem?._id || "").trim();
+  const currentCallBlock = decideCxCurrentCallDialBlock({
+    agentState: context.agentState || null,
+    requestedQueueItemId,
+    requestedIdentities: [
+      queueItem?.metadata?.lastDialExecutionUii,
+      queueItem?.metadata?.lastDialExecutionCallSessionId,
+      queueItem?.metadata?.lastQueueAttemptUii,
+      queueItem?.metadata?.lastHangupRequestUii,
+      queueItem?.metadata?.lastTerminalOutcomeUii,
+    ],
+    requestedPhone: queueItem?.phone || queueItem?.metadata?.lastDialExecutionPhone || null,
+  });
+  if (currentCallBlock.block) {
+    const err = new Error(
+      "Finish the current lead before starting another call.",
+    );
+    err.status = 409;
+    err.details = {
+      reason: currentCallBlock.reason,
+      ...(currentCallBlock.details || {}),
+    };
+    throw err;
+  }
+
   const servingItems = await cxDialQueueRepository.listQueueItems({
     assignedExtensionId: actorExtensionId,
     states: ["serving"],
