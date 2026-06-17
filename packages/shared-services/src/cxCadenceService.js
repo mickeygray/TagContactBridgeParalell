@@ -2327,9 +2327,16 @@ async function handleCxCallPlaced(payload = {}) {
     nextPlan,
     nextPlacedCalls,
   );
+  const confirmedClaimedCxCall = confirmedCall && queueState === "claimed";
   const holdUntilDisposition =
     queueState === "serving"
-    || queueItem.metadata?.dealHandoffHold === true;
+    || queueItem.metadata?.dealHandoffHold === true
+    || confirmedClaimedCxCall;
+  const holdReason = confirmedClaimedCxCall
+    ? "confirmed-claimed-call"
+    : queueItem.metadata?.dealHandoffHold === true
+      ? "deal-handoff-hold"
+      : "serving-call";
 
   if (holdUntilDisposition) {
     await cxDialQueueRepository.updateQueueItem(queueItem._id, normalizeExtraQueueUpdate({
@@ -2353,6 +2360,7 @@ async function handleCxCallPlaced(payload = {}) {
         ...touchMetadata,
         lastQueueAttemptAt: placedAt,
         lastQueueAttemptHeldForDisposition: true,
+        lastQueueAttemptHoldReason: holdReason,
         lastQueueAttemptUii: callTelephonySessionId || null,
         lastQueueAttemptPhone: payload.phone || queueItem.phone || null,
       },

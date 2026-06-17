@@ -581,6 +581,113 @@ async function markMissingCxCallsEnded(activeIdentities = new Set(), now = new D
   return ended;
 }
 
+function isOrphanDispositionClearEnabled() {
+  return String(process.env.RINGCX_AGENT_MONITOR_ORPHAN_DISPOSITION_CLEAR_ENABLED || "true").toLowerCase() !== "false";
+}
+
+async function hasHeldServingQueueForAgent(extensionId, identity = null) {
+  const normalizedExtensionId = String(extensionId || "").trim();
+  if (!normalizedExtensionId) return false;
+
+  const orConditions = [{ "metadata.lastQueueAttemptHeldForDisposition": true }];
+  if (identity) {
+    orConditions.push(
+      { "metadata.lastQueueAttemptUii": identity },
+      { "metadata.lastDialExecutionUii": identity },
+      { "metadata.lastRingcxMonitorUii": identity },
+    );
+  }
+
+  const held = await CxDialQueue.exists({
+    state: "serving",
+    "assignment.extensionId": normalizedExtensionId,
+    $or: orConditions,
+  }).catch(() => null);
+
+  return Boolean(held);
+}
+
+async function clearOrphanDispositioningAgents(activeIdentities = new Set(), now = new Date(), logger = null) {
+  if (!isOrphanDispositionClearEnabled()) return [];
+
+  const graceMs = Math.max(
+    Number(process.env.RINGCX_AGENT_MONITOR_ORPHAN_DISPOSITION_CLEAR_MS) || 90_000,
+    30_000,
+  );
+  const agents = await agentStateRepository.listAgentStates();
+  const cleared = [];
+
+  for (const agent of agents) {
+    const call = agent.currentCall && typeof agent.currentCall === "object" ? agent.currentCall : {};
+    if (String(call.channel || "").toLowerCase() !== "cx") continue;
+    if (String(agent.activePlatform || "").toUpperCase() !== "CX") continue;
+
+    const status = String(agent.status || "");
+    const activityState = String(agent.activityState || "");
+    if (status !== "disposition" && activityState !== "dispositioning" && activityState !== "wrapup") continue;
+
+    const identity = callIdentity(call);
+    if (identity && activeIdentities.has(identity)) continue;
+
+    const lastChangedAt = agent.lastStatusChange ? new Date(agent.lastStatusChange).getTime() : 0;
+    const callStartedAt = call.startTime ? new Date(call.startTime).getTime() : 0;
+    const referenceTime = lastChangedAt || callStartedAt || 0;
+    const ageMs = now.getTime() - (referenceTime > 0 ? referenceTime : 0);
+    if (ageMs < graceMs) continue;
+
+    const extensionId = String(agent.extensionId || "").trim();
+    const hasHeldQueue = await hasHeldServingQueueForAgent(extensionId, identity);
+    if (hasHeldQueue) continue;
+
+    traceCxCallIdentity(logger, "ringcx-monitor.orphan-disposition-clear.before", {
+      extensionId,
+      reason: "no-active-identity-or-held-serving-queue",
+      ageMs,
+      graceMs,
+      observedUii: identity,
+      agentState: agent,
+      currentCall: call,
+    });
+
+    const updated = await agentStateRepository.updateAgentState(extensionId, {
+      status: "available",
+      activityState: "idle",
+      activePlatform: "none",
+      currentCall: {},
+      lastCallEndedAt: now,
+      lastCallOutcome: "orphan-disposition-cleared",
+      lastActivityAt: now,
+      lastStatusChange: now,
+      "upstream.source": "ringcx-agent-monitor-orphan-clear",
+      "upstream.mirroredAt": now,
+    }).catch((error) => {
+      logger?.warn?.("ringcx.agentMonitor.orphanDispositionClear.failed", {
+        extensionId,
+        error: error.message,
+      });
+      return null;
+    });
+
+    if (updated) {
+      traceCxCallIdentity(logger, "ringcx-monitor.orphan-disposition-clear.after", {
+        extensionId,
+        reason: "no-active-identity-or-held-serving-queue",
+        previousAgentState: agent,
+        nextAgentState: updated,
+        currentCall: call,
+        observedUii: identity,
+      });
+      cleared.push({
+        extensionId,
+        identity,
+        ageMs,
+      });
+    }
+  }
+
+  return cleared;
+}
+
 async function runRingcxAgentMonitor(options = {}) {
   const logger = options.logger || null;
   if (!isRingcxAgentMonitorEnabled()) {
@@ -636,14 +743,17 @@ async function runRingcxAgentMonitor(options = {}) {
   }
 
   const ended = await markMissingCxCallsEnded(activeIdentities, now, logger);
+  const orphanCleared = await clearOrphanDispositioningAgents(activeIdentities, now, logger);
   return {
     enabled: true,
     activeCalls: activeCalls.length,
     servingQueueItems: queueItems.length,
     matched: matched.length,
     ended: ended.length,
+    orphanCleared: orphanCleared.length,
     matches: matched.slice(0, 20),
     endedAgents: ended.slice(0, 20),
+    orphanClearedAgents: orphanCleared.slice(0, 20),
   };
 }
 
