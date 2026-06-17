@@ -15,6 +15,10 @@ const {
   isLeadServingExcludedAgent,
 } = require("./cxLeadServingEligibilityService");
 const {
+  suppressExArtifactsForCx,
+  suppressExBusyRoutingReason,
+} = require("./cxRuntimeModeService");
+const {
   isCxWorkspacePresenceActive,
   isCxWorkspacePresenceRequired,
   isExLeadServingGateEnabled,
@@ -305,14 +309,21 @@ function buildEligibility(agentState = null, options = {}) {
       queuePolicy,
     };
   }
-  if (isExLeadServingGateEnabled() && hasActiveExCall(agentState)) {
+  const activeExCall = hasActiveExCall(agentState);
+  const activeExSuppressed = suppressExArtifactsForCx() && activeExCall;
+  if (isExLeadServingGateEnabled() && activeExCall) {
     return {
       eligible: false,
       reason: "ex-busy",
       queuePolicy,
     };
   }
-  if (String(routing.desiredAvailability || "").trim().toLowerCase() !== "available") {
+  const routingDesiredAvailability = String(routing.desiredAvailability || "").trim().toLowerCase();
+  const routingReason = String(routing.reason || "").trim().toLowerCase();
+  if (
+    routingDesiredAvailability !== "available"
+    && !suppressExBusyRoutingReason(routingReason)
+  ) {
     return {
       eligible: false,
       reason: String(routing.reason || "cx-unavailable"),
@@ -358,6 +369,7 @@ function buildEligibility(agentState = null, options = {}) {
     reason: "available",
     queuePolicy,
     maxOpenAssignments,
+    exArtifactsSuppressed: Boolean(activeExSuppressed || suppressExBusyRoutingReason(routingReason)),
   };
 }
 

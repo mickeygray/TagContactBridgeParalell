@@ -10,6 +10,32 @@ import { queryKeys } from "@/lib/api/queries/keys";
 import type { AuthUser } from "@/lib/api/types";
 import { Button } from "@/components/ui/Button";
 
+function cxTimingEnabled(): boolean {
+  try {
+    if (window.location.search.includes("cxdebug=1")) return true;
+    return window.localStorage.getItem("tcbCxTiming") === "1";
+  } catch {
+    return false;
+  }
+}
+
+function emitCxTiming(event: string, meta: Record<string, unknown> = {}): void {
+  if (!cxTimingEnabled()) return;
+  const payload = {
+    event,
+    at: new Date().toISOString(),
+    ...meta,
+  };
+  try {
+    const timeline = ((window as unknown as { __tcbCxTimeline?: unknown[] }).__tcbCxTimeline ?? []) as unknown[];
+    timeline.push(payload);
+    (window as unknown as { __tcbCxTimeline?: unknown[] }).__tcbCxTimeline = timeline.slice(-250);
+  } catch {
+    /* best-effort local debugging only */
+  }
+  console.info("tcb.cx.timing", payload);
+}
+
 /**
  * CxAuthGuard — gates the /cx surface on the agent having valid RingCX
  * OAuth credentials. Behavior:
@@ -34,7 +60,17 @@ import { Button } from "@/components/ui/Button";
  * doesn't lock them out).
  */
 
-export function CxAuthGuard({ children }: { children: React.ReactNode }) {
+type CxAuthGuardProps = {
+  children: React.ReactNode;
+  startPath?: string;
+  defaultFinalRedirectTo?: string;
+};
+
+export function CxAuthGuard({
+  children,
+  startPath = "/api/auth/cx/start",
+  defaultFinalRedirectTo = "/cx",
+}: CxAuthGuardProps) {
   const { user } = useSession();
   const qc = useQueryClient();
   const [searchParams, setSearchParams] = useSearchParams();
@@ -60,9 +96,21 @@ export function CxAuthGuard({ children }: { children: React.ReactNode }) {
   const cxauthParam = searchParams.get("cxauth");
   const cxauthReason = searchParams.get("reason");
 
+  useEffect(() => {
+    emitCxTiming("oauth_guard.mount", {
+      email: user?.email || null,
+      oauthRequired: user?.cxAuth?.oauthRequired ?? null,
+      isOAuthValidated: user?.cxAuth?.isOAuthValidated ?? null,
+      invalidReason: user?.cxAuth?.invalidReason || null,
+      cxauthParam,
+      startPath,
+    });
+  }, []);
+
   // Surface success / error toasts when RC redirects back with a result
   useEffect(() => {
     if (cxauthParam === "ok") {
+      emitCxTiming("oauth_callback.ok", { email: user?.email || null });
       // Latch the "we just succeeded" signal BEFORE the param gets
       // stripped — this ref is what `skip` reads on subsequent renders
       // when cxauthParam is gone but the /me cache hasn't yet flushed.
@@ -97,6 +145,7 @@ export function CxAuthGuard({ children }: { children: React.ReactNode }) {
           if (cancelled) return;
           useAuthStore.getState().setUser(freshUser);
           if (freshUser.cxAuth?.isOAuthValidated === true) {
+            emitCxTiming("oauth_callback.refreshed_ready", { email: freshUser.email || null });
             try {
               window.sessionStorage.removeItem("cx-oauth-success-suppress-until");
             } catch {
@@ -104,11 +153,16 @@ export function CxAuthGuard({ children }: { children: React.ReactNode }) {
             }
           } else {
             const reason = freshUser.cxAuth?.invalidReason || "cx-session-not-ready";
+            emitCxTiming("oauth_callback.refreshed_not_ready", {
+              email: freshUser.email || null,
+              reason,
+            });
             setStartError(`RingCentral connected, but CX session is not ready yet (${reason}).`);
           }
         } catch (err) {
           if (cancelled) return;
           const message = err instanceof Error ? err.message : "unknown";
+          emitCxTiming("oauth_callback.refresh_failed", { message });
           setStartError(`Could not refresh RingCentral status: ${message}`);
         } finally {
           if (cancelled) return;
@@ -124,6 +178,7 @@ export function CxAuthGuard({ children }: { children: React.ReactNode }) {
         cancelled = true;
       };
     } else if (cxauthParam === "err") {
+      emitCxTiming("oauth_callback.err", { reason: cxauthReason || null });
       toast.error("RingCentral connection failed", {
         description: cxauthReason ? decodeURIComponent(cxauthReason) : "Try again.",
       });
@@ -166,6 +221,31 @@ export function CxAuthGuard({ children }: { children: React.ReactNode }) {
     || successSuppressActive;
 
   useEffect(() => {
+    emitCxTiming("oauth_guard.state", {
+      email: user?.email || null,
+      skip,
+      startError,
+      starting,
+      oauthRequired: user?.cxAuth?.oauthRequired ?? null,
+      isOAuthValidated: user?.cxAuth?.isOAuthValidated ?? null,
+      invalidReason: user?.cxAuth?.invalidReason || null,
+      cxauthParam,
+      successSuppressActive,
+      justSucceeded: justSucceededRef.current,
+    });
+  }, [
+    user?.email,
+    user?.cxAuth?.oauthRequired,
+    user?.cxAuth?.isOAuthValidated,
+    user?.cxAuth?.invalidReason,
+    skip,
+    startError,
+    starting,
+    cxauthParam,
+    successSuppressActive,
+  ]);
+
+  useEffect(() => {
     if (skip) return;
     if (startError) return;
     if (attemptedRef.current) return;  // StrictMode double-mount guard
@@ -174,16 +254,19 @@ export function CxAuthGuard({ children }: { children: React.ReactNode }) {
     attemptedRef.current = true;
     setStarting(true);
     setStartError(null);
+    emitCxTiming("oauth_start.request", { email: user?.email || null });
     (async () => {
       try {
         const res = await api.post<{ ok: boolean; authorizeUrl?: string; error?: string }>(
-          "/api/auth/cx/start",
-          { finalRedirectTo: location.pathname || "/cx" },
+          startPath,
+          { finalRedirectTo: location.pathname || defaultFinalRedirectTo },
         );
         if (res.ok && res.authorizeUrl) {
+          emitCxTiming("oauth_start.redirect", { email: user?.email || null });
           window.location.href = res.authorizeUrl;
           return;
         }
+        emitCxTiming("oauth_start.no_authorize_url", { error: res.error || null });
         setStartError(res.error || "no-authorize-url");
         setStarting(false);
       } catch (err) {
@@ -194,10 +277,14 @@ export function CxAuthGuard({ children }: { children: React.ReactNode }) {
         } else {
           setStartError((err as Error).message);
         }
+        emitCxTiming("oauth_start.failed", {
+          email: user?.email || null,
+          error: err instanceof Error ? err.message : "unknown",
+        });
         setStarting(false);
       }
     })();
-  }, [skip, startError, starting, location.pathname]);
+  }, [skip, startError, starting, location.pathname, startPath, defaultFinalRedirectTo]);
 
   // ── Render states ────────────────────────────────────────────
 

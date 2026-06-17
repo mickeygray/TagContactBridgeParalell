@@ -46,6 +46,9 @@ const cxTokenStorage = require("./cxTokenStorageService");
 const {
   ensureRingcxAgentOffhookAllowed,
 } = require("./ringcxAgentSelfHealService");
+const {
+  createCxLoginTrace,
+} = require("./cxLoginTraceService");
 
 const STATE_TTL_MS = 10 * 60 * 1000;        // 10 min
 const REFRESH_TOKEN_DEFAULT_TTL_MS = 60 * 24 * 60 * 60 * 1000;  // 60 days
@@ -88,6 +91,30 @@ const DEFAULT_SCOPES =
 function readEnv(name, fallback = "") {
   const v = process.env[name];
   return v != null && v !== "" ? String(v) : fallback;
+}
+
+function readBooleanEnv(name, fallback = false) {
+  const raw = process.env[name];
+  if (raw == null || raw === "") return fallback;
+  const normalized = String(raw).trim().toLowerCase();
+  if (["1", "true", "yes", "on"].includes(normalized)) return true;
+  if (["0", "false", "no", "off"].includes(normalized)) return false;
+  return fallback;
+}
+
+function isPrepFinalRedirect(finalRedirectTo) {
+  const value = String(finalRedirectTo || "").trim();
+  return value === "/cx/prep" || value.startsWith("/cx/prep?");
+}
+
+function loginThinEnabled() {
+  return readBooleanEnv("CX_LOGIN_THIN_ENABLED", false);
+}
+
+function shouldAsyncOffhookSelfHealForState(stateRow) {
+  return loginThinEnabled()
+    || readBooleanEnv("CX_LOGIN_ASYNC_OFFHOOK_SELF_HEAL", false)
+    || isPrepFinalRedirect(stateRow?.finalRedirectTo);
 }
 
 // ── Configuration check ─────────────────────────────────────────
@@ -148,6 +175,31 @@ async function selfHealRingcxOffhookByUserId(userId, source) {
   return selfHealRingcxOffhookByAccount(account, source);
 }
 
+function scheduleSelfHealRingcxOffhookByAccount(account, source) {
+  const startedAt = Date.now();
+  Promise.resolve()
+    .then(() => selfHealRingcxOffhookByAccount(account, source))
+    .then((result) => {
+      console.info("cxOAuth.offhook.self_heal.async.done", {
+        source,
+        email: account?.email || null,
+        durationMs: Date.now() - startedAt,
+        ok: result?.ok ?? null,
+        skipped: Boolean(result?.skipped),
+        reason: result?.reason || null,
+        patched: Boolean(result?.patched),
+      });
+    })
+    .catch((error) => {
+      console.warn("cxOAuth.offhook.self_heal.async.failed", {
+        source,
+        email: account?.email || null,
+        durationMs: Date.now() - startedAt,
+        error: error.message,
+      });
+    });
+}
+
 function normalizeScopes(value) {
   if (Array.isArray(value)) {
     return value.map((scope) => String(scope || "").trim()).filter(Boolean);
@@ -189,17 +241,29 @@ function generateState() {
 // ── start: build authorize URL + persist state ─────────────────
 
 async function start({ user, finalRedirectTo = null } = {}) {
+  const traceLogin = createCxLoginTrace(console, "cx-oauth-start", {
+    email: user?.email || null,
+    account: user,
+    prepRedirect: isPrepFinalRedirect(finalRedirectTo),
+  });
+  traceLogin("start", {
+    configured: isConfigured(),
+  });
   if (!isConfigured()) {
+    traceLogin("not-configured", { configured: false });
     return { ok: false, error: "cx-oauth-not-configured", details: describeConfig() };
   }
   if (!user || !user.id || !user.email) {
+    traceLogin("missing-user-context", { reason: "user-context-required" });
     return { ok: false, error: "user-context-required" };
   }
+  const startedAt = Date.now();
   const cfg = getOAuthConfig();
   const codeVerifier = generateCodeVerifier();
   const codeChallenge = generateCodeChallenge(codeVerifier);
   const state = generateState();
 
+  const stateStartedAt = Date.now();
   await rcOAuthStateRepository.createState({
     state,
     codeVerifier,
@@ -210,6 +274,10 @@ async function start({ user, finalRedirectTo = null } = {}) {
     redirectUri: cfg.redirectUri,
     finalRedirectTo,
     expiresAt: new Date(Date.now() + STATE_TTL_MS),
+  });
+  traceLogin("state.create.done", {
+    account: user,
+    stepMs: Date.now() - stateStartedAt,
   });
 
   const params = new URLSearchParams({
@@ -226,25 +294,58 @@ async function start({ user, finalRedirectTo = null } = {}) {
     params.set("scope", cfg.scopes);
   }
   const authorizeUrl = `${cfg.authorizeUrl}?${params.toString()}`;
+  traceLogin("authorize-url.ready", {
+    account: user,
+    stepMs: Date.now() - startedAt,
+  });
   return { ok: true, authorizeUrl, state, expiresAt: new Date(Date.now() + STATE_TTL_MS) };
 }
 
 // ── callback: exchange code for tokens, store on user ──────────
 
 async function callback({ code, state, errorParam = null } = {}) {
+  const traceLogin = createCxLoginTrace(console, "cx-oauth-callback", {
+    prepRedirect: false,
+  });
+  traceLogin("start", {
+    reason: errorParam ? "rc-error-param" : null,
+  });
   if (errorParam) {
     // RC returned ?error=... — user denied or something failed
     if (state) await rcOAuthStateRepository.consumeByState(state, { error: errorParam });
+    traceLogin("rc-error-param", { error: errorParam });
     return { ok: false, error: `rc-oauth-error:${errorParam}` };
   }
   if (!code || !state) {
+    traceLogin("missing-code-or-state", {
+      reason: !code && !state ? "missing-code-and-state" : (!code ? "missing-code" : "missing-state"),
+    });
     return { ok: false, error: "missing-code-or-state" };
   }
 
+  let stepStartedAt = Date.now();
   const stateRow = await rcOAuthStateRepository.findByState(state);
+  traceLogin("state.lookup.done", {
+    email: stateRow?.initiatingUserEmail || null,
+    stepMs: Date.now() - stepStartedAt,
+    prepRedirect: isPrepFinalRedirect(stateRow?.finalRedirectTo),
+    reason: stateRow ? "found" : "missing",
+  });
   if (!stateRow) return { ok: false, error: "unknown-state" };
-  if (stateRow.consumed) return { ok: false, error: "state-already-consumed" };
+  if (stateRow.consumed) {
+    traceLogin("state.rejected", {
+      email: stateRow.initiatingUserEmail || null,
+      prepRedirect: isPrepFinalRedirect(stateRow.finalRedirectTo),
+      reason: "state-already-consumed",
+    });
+    return { ok: false, error: "state-already-consumed" };
+  }
   if (new Date(stateRow.expiresAt) < new Date()) {
+    traceLogin("state.rejected", {
+      email: stateRow.initiatingUserEmail || null,
+      prepRedirect: isPrepFinalRedirect(stateRow.finalRedirectTo),
+      reason: "state-expired",
+    });
     return { ok: false, error: "state-expired" };
   }
 
@@ -253,22 +354,46 @@ async function callback({ code, state, errorParam = null } = {}) {
   // 1. Exchange auth code for RC tokens
   let rcTokens;
   try {
+    stepStartedAt = Date.now();
     rcTokens = await exchangeAuthCode({
       code,
       codeVerifier: stateRow.codeVerifier,
       redirectUri: stateRow.redirectUri,
       cfg,
     });
+    traceLogin("rc.token-exchange.done", {
+      email: stateRow.initiatingUserEmail || null,
+      prepRedirect: isPrepFinalRedirect(stateRow.finalRedirectTo),
+      stepMs: Date.now() - stepStartedAt,
+    });
   } catch (error) {
     await rcOAuthStateRepository.consumeByState(state, { error: error.message });
+    traceLogin("rc.token-exchange.failed", {
+      email: stateRow.initiatingUserEmail || null,
+      prepRedirect: isPrepFinalRedirect(stateRow.finalRedirectTo),
+      stepMs: Date.now() - stepStartedAt,
+      error: error.message,
+    });
     return { ok: false, error: `code-exchange-failed: ${error.message}` };
   }
 
   let grantedScopes;
   try {
+    stepStartedAt = Date.now();
     grantedScopes = assertRequiredRingcxScopes(rcTokens.scope, cfg);
+    traceLogin("scope.check.done", {
+      email: stateRow.initiatingUserEmail || null,
+      prepRedirect: isPrepFinalRedirect(stateRow.finalRedirectTo),
+      stepMs: Date.now() - stepStartedAt,
+    });
   } catch (error) {
     await rcOAuthStateRepository.consumeByState(state, { error: error.message });
+    traceLogin("scope.check.failed", {
+      email: stateRow.initiatingUserEmail || null,
+      prepRedirect: isPrepFinalRedirect(stateRow.finalRedirectTo),
+      stepMs: Date.now() - stepStartedAt,
+      error: error.message,
+    });
     return {
       ok: false,
       error: error.message,
@@ -278,7 +403,15 @@ async function callback({ code, state, errorParam = null } = {}) {
   }
 
   // 2. Look up Parallel user by initiating session
+  stepStartedAt = Date.now();
   const account = await userAccountRepository.findUserAccountById(stateRow.initiatingUserId);
+  traceLogin("account.lookup.done", {
+    email: stateRow.initiatingUserEmail || null,
+    account,
+    prepRedirect: isPrepFinalRedirect(stateRow.finalRedirectTo),
+    stepMs: Date.now() - stepStartedAt,
+    reason: account ? "found" : "missing",
+  });
   if (!account) {
     await rcOAuthStateRepository.consumeByState(state, { error: "user-not-found" });
     return { ok: false, error: "initiating-user-not-found" };
@@ -288,6 +421,7 @@ async function callback({ code, state, errorParam = null } = {}) {
   const refreshTokenExpiresAt = rcTokens.refresh_token_expires_in
     ? new Date(Date.now() + Number(rcTokens.refresh_token_expires_in) * 1000)
     : new Date(Date.now() + REFRESH_TOKEN_DEFAULT_TTL_MS);
+  stepStartedAt = Date.now();
   await cxTokenStorage.storeRcRefreshToken(
     String(account._id || account.id),
     rcTokens.refresh_token,
@@ -298,15 +432,23 @@ async function callback({ code, state, errorParam = null } = {}) {
       refreshTokenExpiresAt,
     },
   );
+  traceLogin("rc.token-store.done", {
+    account,
+    prepRedirect: isPrepFinalRedirect(stateRow.finalRedirectTo),
+    stepMs: Date.now() - stepStartedAt,
+  });
 
   // 4. Exchange RC token for RingCX bearer
   let rcxSession = null;
   try {
+    stepStartedAt = Date.now();
     rcxSession = await exchangeForRingcxBearer({
       rcAccessToken: rcTokens.access_token,
       rcTokenType: rcTokens.token_type || "Bearer",
       cfg,
     });
+    const rcxExchangeMs = Date.now() - stepStartedAt;
+    stepStartedAt = Date.now();
     await cxTokenStorage.storeRcxSession(String(account._id || account.id), {
       bearer: rcxSession.accessToken,
       rcxRefresh: rcxSession.refreshToken,
@@ -314,17 +456,55 @@ async function callback({ code, state, errorParam = null } = {}) {
       rcxMainAccountId: rcxSession.mainAccountId,
       rcxAgentEmail: rcxSession.rcUser?.email || null,
     });
+    traceLogin("rcx.exchange-and-store.done", {
+      account,
+      prepRedirect: isPrepFinalRedirect(stateRow.finalRedirectTo),
+      stepMs: rcxExchangeMs + (Date.now() - stepStartedAt),
+      rcxBearerActive: true,
+    });
   } catch (error) {
     // Non-fatal: RC OAuth succeeded; RingCX exchange can be retried later
     await cxTokenStorage.markRefreshError(
       String(account._id || account.id),
       `initial-rcx-exchange: ${error.message}`,
     );
+    traceLogin("rcx.exchange.failed", {
+      account,
+      prepRedirect: isPrepFinalRedirect(stateRow.finalRedirectTo),
+      stepMs: Date.now() - stepStartedAt,
+      error: error.message,
+      rcxBearerActive: false,
+    });
   }
 
   // 5. Mark state consumed
+  stepStartedAt = Date.now();
   await rcOAuthStateRepository.consumeByState(state);
-  await selfHealRingcxOffhookByAccount(account, "cx-oauth-callback");
+  traceLogin("state.consume.done", {
+    account,
+    prepRedirect: isPrepFinalRedirect(stateRow.finalRedirectTo),
+    stepMs: Date.now() - stepStartedAt,
+  });
+  if (shouldAsyncOffhookSelfHealForState(stateRow)) {
+    scheduleSelfHealRingcxOffhookByAccount(account, "cx-oauth-callback-async");
+    traceLogin("offhook.self-heal.scheduled", {
+      account,
+      prepRedirect: isPrepFinalRedirect(stateRow.finalRedirectTo),
+      asyncOffhookSelfHeal: true,
+      loginThinEnabled: loginThinEnabled(),
+      offhookScheduled: true,
+    });
+  } else {
+    stepStartedAt = Date.now();
+    await selfHealRingcxOffhookByAccount(account, "cx-oauth-callback");
+    traceLogin("offhook.self-heal.done", {
+      account,
+      prepRedirect: isPrepFinalRedirect(stateRow.finalRedirectTo),
+      asyncOffhookSelfHeal: false,
+      loginThinEnabled: loginThinEnabled(),
+      stepMs: Date.now() - stepStartedAt,
+    });
+  }
 
   // 6. Warm this agent's barge monitor softphone for the day, if one is configured
   // (metadata.barge.monitorExtension). Fire-and-forget: this must never block or
@@ -344,6 +524,11 @@ async function callback({ code, state, errorParam = null } = {}) {
         console.warn("cxOAuth.barge-monitor-warm.error", { error: error.message });
       });
   }
+  traceLogin("done", {
+    account,
+    prepRedirect: isPrepFinalRedirect(stateRow.finalRedirectTo),
+    rcxBearerActive: Boolean(rcxSession),
+  });
 
   return {
     ok: true,
@@ -358,13 +543,29 @@ async function callback({ code, state, errorParam = null } = {}) {
 // ── refreshUserSession: refresh tokens for an existing agent ────
 
 async function refreshUserSession({ user, userId } = {}) {
+  const traceLogin = createCxLoginTrace(console, "cx-oauth-refresh", {
+    email: user?.email || null,
+    account: user,
+  });
+  traceLogin("start", {
+    configured: isConfigured(),
+  });
   if (!isConfigured()) {
+    traceLogin("not-configured", { configured: false });
     return { ok: false, error: "cx-oauth-not-configured" };
   }
   const targetId = String(userId || user?.id || "");
-  if (!targetId) return { ok: false, error: "user-id-required" };
+  if (!targetId) {
+    traceLogin("missing-user-id", { reason: "user-id-required" });
+    return { ok: false, error: "user-id-required" };
+  }
 
+  let stepStartedAt = Date.now();
   const refreshToken = await cxTokenStorage.getRcRefreshToken(targetId);
+  traceLogin("rc.refresh-token.lookup.done", {
+    stepMs: Date.now() - stepStartedAt,
+    reason: refreshToken ? "found" : "missing",
+  });
   if (!refreshToken) return { ok: false, error: "no-stored-refresh-token" };
 
   const cfg = getOAuthConfig();
@@ -372,13 +573,21 @@ async function refreshUserSession({ user, userId } = {}) {
   // Prefer RingCX's own refresh token when we have one. Re-exchanging a
   // freshly refreshed RingCentral token can 403 even though the existing
   // RingCX session is refreshable.
+  stepStartedAt = Date.now();
   const existingRcxSession = await cxTokenStorage.getRcxSession(targetId).catch(() => null);
+  traceLogin("rcx.session.lookup.done", {
+    stepMs: Date.now() - stepStartedAt,
+    reason: existingRcxSession?.rcxRefresh ? "rcx-refresh-available" : "rcx-refresh-missing",
+  });
   if (existingRcxSession?.rcxRefresh) {
     try {
+      stepStartedAt = Date.now();
       const rcxSession = await refreshRingcxBearer({
         rcxRefreshToken: existingRcxSession.rcxRefresh,
         cfg,
       });
+      const rcxRefreshMs = Date.now() - stepStartedAt;
+      stepStartedAt = Date.now();
       await cxTokenStorage.storeRcxSession(targetId, {
         bearer: rcxSession.accessToken,
         rcxRefresh: rcxSession.refreshToken || existingRcxSession.rcxRefresh,
@@ -386,18 +595,43 @@ async function refreshUserSession({ user, userId } = {}) {
         rcxMainAccountId: rcxSession.mainAccountId || existingRcxSession.rcxMainAccountId || null,
         rcxAgentEmail: rcxSession.rcUser?.email || existingRcxSession.rcxAgentEmail || null,
       });
+      traceLogin("rcx.refresh-and-store.done", {
+        stepMs: rcxRefreshMs + (Date.now() - stepStartedAt),
+        rcxBearerActive: true,
+      });
+      stepStartedAt = Date.now();
       await selfHealRingcxOffhookByUserId(targetId, "cx-oauth-refresh");
+      traceLogin("offhook.self-heal.done", {
+        stepMs: Date.now() - stepStartedAt,
+        asyncOffhookSelfHeal: false,
+      });
+      traceLogin("done", {
+        result: { ok: true, method: "rcx-refresh" },
+        rcxBearerActive: true,
+      });
       return { ok: true, refreshedAt: new Date(), method: "rcx-refresh" };
     } catch (error) {
       await cxTokenStorage.markRefreshError(targetId, `rcx-refresh: ${error.message}`);
+      traceLogin("rcx.refresh.failed", {
+        stepMs: Date.now() - stepStartedAt,
+        error: error.message,
+      });
     }
   }
 
   let rcTokens;
   try {
+    stepStartedAt = Date.now();
     rcTokens = await refreshAccessToken({ refreshToken, cfg });
+    traceLogin("rc.token-refresh.done", {
+      stepMs: Date.now() - stepStartedAt,
+    });
   } catch (error) {
     await cxTokenStorage.markRefreshError(targetId, `refresh-rc-token: ${error.message}`);
+    traceLogin("rc.token-refresh.failed", {
+      stepMs: Date.now() - stepStartedAt,
+      error: error.message,
+    });
     return { ok: false, error: `refresh-failed: ${error.message}` };
   }
 
@@ -418,9 +652,17 @@ async function refreshUserSession({ user, userId } = {}) {
   let grantedScopes = null;
   if (refreshReturnedScopes) {
     try {
+      stepStartedAt = Date.now();
       grantedScopes = assertRequiredRingcxScopes(rcTokens.scope, cfg);
+      traceLogin("scope.check.done", {
+        stepMs: Date.now() - stepStartedAt,
+      });
     } catch (error) {
       await cxTokenStorage.markRefreshError(targetId, error.message);
+      traceLogin("scope.check.failed", {
+        stepMs: Date.now() - stepStartedAt,
+        error: error.message,
+      });
       return {
         ok: false,
         error: error.message,
@@ -463,6 +705,7 @@ async function refreshUserSession({ user, userId } = {}) {
     ? new Date(Date.now() + Number(rcTokens.refresh_token_expires_in) * 1000)
     : null;
 
+  stepStartedAt = Date.now();
   await cxTokenStorage.storeRcRefreshToken(targetId, newRefreshToken, {
     refreshTokenExpiresAt,
     // Only pass scopes when RC explicitly returned them. storeRcRefreshToken
@@ -470,14 +713,20 @@ async function refreshUserSession({ user, userId } = {}) {
     // here preserves whatever cxAuth.scopes was already on the row.
     ...(grantedScopes !== null ? { scopes: grantedScopes } : {}),
   });
+  traceLogin("rc.token-store.done", {
+    stepMs: Date.now() - stepStartedAt,
+  });
 
   // Exchange for RingCX bearer
   try {
+    stepStartedAt = Date.now();
     const rcxSession = await exchangeForRingcxBearer({
       rcAccessToken: rcTokens.access_token,
       rcTokenType: rcTokens.token_type || "Bearer",
       cfg,
     });
+    const rcxExchangeMs = Date.now() - stepStartedAt;
+    stepStartedAt = Date.now();
     await cxTokenStorage.storeRcxSession(targetId, {
       bearer: rcxSession.accessToken,
       rcxRefresh: rcxSession.refreshToken,
@@ -485,10 +734,28 @@ async function refreshUserSession({ user, userId } = {}) {
       rcxMainAccountId: rcxSession.mainAccountId,
       rcxAgentEmail: rcxSession.rcUser?.email || null,
     });
+    traceLogin("rcx.exchange-and-store.done", {
+      stepMs: rcxExchangeMs + (Date.now() - stepStartedAt),
+      rcxBearerActive: true,
+    });
+    stepStartedAt = Date.now();
     await selfHealRingcxOffhookByUserId(targetId, "cx-oauth-refresh");
+    traceLogin("offhook.self-heal.done", {
+      stepMs: Date.now() - stepStartedAt,
+      asyncOffhookSelfHeal: false,
+    });
+    traceLogin("done", {
+      result: { ok: true, method: "rc-refresh" },
+      rcxBearerActive: true,
+    });
     return { ok: true, refreshedAt: new Date() };
   } catch (error) {
     await cxTokenStorage.markRefreshError(targetId, `rcx-exchange: ${error.message}`);
+    traceLogin("rcx.exchange.failed", {
+      stepMs: Date.now() - stepStartedAt,
+      error: error.message,
+      rcxBearerActive: false,
+    });
     return { ok: false, error: `rcx-exchange-failed: ${error.message}` };
   }
 }

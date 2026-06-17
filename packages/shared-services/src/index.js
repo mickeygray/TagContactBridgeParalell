@@ -621,10 +621,16 @@ const {
 } = require("./ringcentralAttributionService");
 const {
   EX_EVENT_TYPES,
+  exPresencePollMode,
   processPresenceEnvelope,
   seedPresenceForAgents,
   startPresencePoller,
 } = require("./ringcentralExService");
+const {
+  createCxLoginTrace,
+  isCxLoginTraceEnabled,
+  traceCxLoginTiming,
+} = require("./cxLoginTraceService");
 const { listServiceTopology } = require("./serviceCatalog");
 const { sendPlainEmail, sendTestEmail } = require("./sendgridMailService");
 const {
@@ -1032,6 +1038,10 @@ module.exports = {
   scheduleTelephonySessionEnvelope,
   sleepInboxWorkflow,
   seedPresenceForAgents,
+  exPresencePollMode,
+  createCxLoginTrace,
+  isCxLoginTraceEnabled,
+  traceCxLoginTiming,
   sendMail,
   sendPlainEmail,
   sendFinancialCloseEmail,

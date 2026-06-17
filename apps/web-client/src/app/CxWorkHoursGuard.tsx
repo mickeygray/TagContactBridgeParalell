@@ -19,6 +19,32 @@ type WorkHoursResponse = {
   error?: string;
 };
 
+function cxTimingEnabled(): boolean {
+  try {
+    if (window.location.search.includes("cxdebug=1")) return true;
+    return window.localStorage.getItem("tcbCxTiming") === "1";
+  } catch {
+    return false;
+  }
+}
+
+function emitCxTiming(event: string, meta: Record<string, unknown> = {}): void {
+  if (!cxTimingEnabled()) return;
+  const payload = {
+    event,
+    at: new Date().toISOString(),
+    ...meta,
+  };
+  try {
+    const timeline = ((window as unknown as { __tcbCxTimeline?: unknown[] }).__tcbCxTimeline ?? []) as unknown[];
+    timeline.push(payload);
+    (window as unknown as { __tcbCxTimeline?: unknown[] }).__tcbCxTimeline = timeline.slice(-250);
+  } catch {
+    /* best-effort local debugging only */
+  }
+  console.info("tcb.cx.timing", payload);
+}
+
 function formatHour(hour: number | null | undefined): string {
   if (!Number.isFinite(hour)) return "";
   const value = Number(hour);
@@ -38,19 +64,33 @@ export function CxWorkHoursGuard({ children }: { children: React.ReactNode }) {
 
   React.useEffect(() => {
     if (user?.role === "admin") {
+      emitCxTiming("work_hours.skip_admin", { email: user?.email || null });
       setState({ loading: false, data: { ok: true, cxWorkspace: { allowed: true } }, error: null });
       return;
     }
 
     let cancelled = false;
+    const startedAt = Date.now();
+    emitCxTiming("work_hours.request", { email: user?.email || null, role: user?.role || null });
     setState((current) => ({ ...current, loading: true, error: null }));
     api
       .get<WorkHoursResponse>("/api/auth/work-hours")
       .then((data) => {
-        if (!cancelled) setState({ loading: false, data, error: null });
+        if (!cancelled) {
+          emitCxTiming("work_hours.ready", {
+            durationMs: Date.now() - startedAt,
+            allowed: data.cxWorkspace?.allowed ?? null,
+            open: data.cxWorkspace?.open ?? null,
+          });
+          setState({ loading: false, data, error: null });
+        }
       })
       .catch((error) => {
         if (!cancelled) {
+          emitCxTiming("work_hours.failed", {
+            durationMs: Date.now() - startedAt,
+            error: error instanceof Error ? error.message : "unknown",
+          });
           setState({
             loading: false,
             data: null,

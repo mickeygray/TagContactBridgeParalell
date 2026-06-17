@@ -125,13 +125,17 @@ function evaluateCxClear(existing, requestedIdentityRaw, options = {}) {
 // When `enabled` is false this ALWAYS returns the no-op result, so the poll behaves exactly as today.
 function decideExPollCxOwnership({
   enabled = false,
+  mode = null,
   previousHasCxCall = false,
   previousCxIdentity = null,
   exActiveIdentity = null,
   exActiveIsBridge = false,
 } = {}) {
+  const normalizedMode = String(mode || "").trim().toLowerCase();
+  const cxOwnedMode = normalizedMode === "cx-owned";
   if (!enabled) return { cxOwnsCallState: false, forceExNoCall: false };
   if (!previousHasCxCall || !previousCxIdentity) return { cxOwnsCallState: false, forceExNoCall: false };
+  if (cxOwnedMode) return { cxOwnsCallState: true, forceExNoCall: true };
   // A genuine, DIFFERENT, non-bridge EX call means the agent really IS on an EX call -> defer to EX.
   if (exActiveIdentity && exActiveIdentity !== previousCxIdentity && !exActiveIsBridge) {
     return { cxOwnsCallState: false, forceExNoCall: false };

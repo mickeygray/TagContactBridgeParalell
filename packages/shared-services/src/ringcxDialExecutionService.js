@@ -26,7 +26,9 @@ const {
   buildQueueLeadId,
 } = require("./universalQueueService");
 const { evaluateCxClear } = require("./cxCallStateGuard");
+const { traceCxCallIdentity } = require("./cxCallTraceService");
 const {
+  cancelPublishedQueueItemInRingcx,
   publishQueueItemToRingcx,
 } = require("./ringcxLeadServingService");
 const {
@@ -137,6 +139,10 @@ function isDialTraceEnabled() {
 
 function allowWeakRingcxActiveCallCapture() {
   return parseBooleanFlag(process.env.RINGCX_ACTIVE_CALL_ALLOW_WEAK_MATCH, false);
+}
+
+function requireRingcxCampaignActiveCallConfirmation() {
+  return parseBooleanFlag(process.env.RINGCX_CAMPAIGN_REQUIRE_ACTIVE_CALL_CONFIRMATION, false);
 }
 
 function dialTraceLog(logger, level, event, payload = {}) {
@@ -496,11 +502,27 @@ async function markAgentAvailableAfterAutoDisposition(extensionId, { logger = nu
       : {};
     const existingCallChannel = String(existingCall.channel || "").trim().toLowerCase();
     const { skip: cxClearSkip, existingIdentity, requestedIdentity } = evaluateCxClear(existing, uii);
+    traceCxCallIdentity(logger, "ringcx-auto-disposition.clear.before", {
+      extensionId: normalizedExtensionId,
+      reason: "auto-disposition-release",
+      requestedUii: requestedIdentity,
+      observedUii: existingIdentity,
+      agentState: existing,
+      currentCall: existingCall,
+    });
     if (cxClearSkip) {
       logger?.warn?.("ringcx.autoDisposition.agentAvailable.skipped", {
         extensionId: normalizedExtensionId,
         reason: cxClearSkip,
         existingIdentity,
+      });
+      traceCxCallIdentity(logger, "ringcx-auto-disposition.clear.skipped", {
+        extensionId: normalizedExtensionId,
+        reason: cxClearSkip,
+        requestedUii: requestedIdentity,
+        observedUii: existingIdentity,
+        agentState: existing,
+        currentCall: existingCall,
       });
       return {
         skipped: true,
@@ -511,6 +533,14 @@ async function markAgentAvailableAfterAutoDisposition(extensionId, { logger = nu
       };
     }
     if (existingCallChannel && existingCallChannel !== "cx" && String(existing?.activePlatform || "").trim().toUpperCase() !== "CX") {
+      traceCxCallIdentity(logger, "ringcx-auto-disposition.clear.skipped", {
+        extensionId: normalizedExtensionId,
+        reason: "active-non-cx-call",
+        requestedUii: requestedIdentity,
+        observedUii: existingIdentity,
+        agentState: existing,
+        currentCall: existingCall,
+      });
       return {
         skipped: true,
         reason: "active-non-cx-call",
@@ -539,6 +569,15 @@ async function markAgentAvailableAfterAutoDisposition(extensionId, { logger = nu
       "cxRouting.lastSource": "ringcx-auto-disposition",
       "upstream.source": "ringcx-auto-disposition",
       "upstream.mirroredAt": now,
+    });
+    traceCxCallIdentity(logger, "ringcx-auto-disposition.clear.after", {
+      extensionId: normalizedExtensionId,
+      reason: "auto-disposition-release",
+      requestedUii: requestedIdentity,
+      observedUii: existingIdentity,
+      previousAgentState: existing,
+      nextAgentState: updated,
+      previousCall: existingCall,
     });
     return {
       ok: Boolean(updated),
@@ -1579,6 +1618,15 @@ async function executeCxDispatchIntent(options = {}) {
     ? await agentStateRepository.findAgentStateByExtensionId(extensionId).catch(() => null)
     : null;
   const executionMode = resolveDialExecutionMode(options, dispatchIntent);
+  traceCxCallIdentity(options.logger, "ringcx-dial.execution.start", {
+    extensionId,
+    queueItemId,
+    caseId: Number.isFinite(caseId) ? caseId : null,
+    domain,
+    actionKey: dispatchIntent.actionKey || null,
+    agentState,
+    reason: executionMode,
+  });
   dialTraceLog(options.logger, "info", "ringcx.dialExecution.start", {
     traceId,
     executionMode,
@@ -1795,6 +1843,117 @@ async function executeCxDispatchIntent(options = {}) {
         },
       });
       const capturedUii = normalizeExternalId(activeCallCapture?.uii);
+      const confirmationRequired = requireRingcxCampaignActiveCallConfirmation();
+
+      if (confirmationRequired && !capturedUii) {
+        const cancelResult = await cancelPublishedQueueItemInRingcx(queueItem, {
+          campaignId: publish.campaignId || null,
+          externId: publish.externId || null,
+          reason: "unconfirmed-active-call",
+        }).catch((error) => ({
+          ok: false,
+          cancelled: false,
+          error: error.message || "ringcx-cancel-unconfirmed-lead-failed",
+        }));
+        const claimUntil = new Date(requestedAt.getTime() + 2 * 60 * 1000);
+        if (queueItemId) {
+          await cxDialQueueRepository.updateQueueItem(queueItemId, {
+            state: "claimed",
+            claimUntil,
+            "metadata.servingAt": null,
+            "metadata.lastDialExecutionStatus": "unconfirmed",
+            "metadata.lastDialExecutionTraceId": traceId,
+            "metadata.lastDialExecutionMode": executionMode,
+            "metadata.lastDialExecutionAt": requestedAt,
+            "metadata.lastDialExecutionAgentEmail": agentEmail,
+            "metadata.lastDialExecutionDialerExtensionId": extensionId,
+            "metadata.lastDialExecutionDialerCxAgentId": agentCxAgentId,
+            "metadata.lastDialExecutionDialerEmail":
+              dispatchIntent.dialerEmail || dispatchIntent.requestedByUserEmail || agentEmail || null,
+            "metadata.lastDialExecutionPhone": phone,
+            "metadata.lastDialExecutionCallerId": callerId,
+            "metadata.lastDialExecutionUii": null,
+            "metadata.lastDialExecutionActiveCall": activeCallCapture?.activeCallSummary || null,
+            "metadata.lastDialExecutionActiveCallCapture": activeCallCapture || null,
+            "metadata.lastDialExecutionCampaignId": publish.campaignId || null,
+            "metadata.lastDialExecutionDialGroupId": publishedDialGroupId,
+            "metadata.lastDialExecutionAccountId": publishedAccountId,
+            "metadata.lastDialExecutionExternId": publish.externId || null,
+            "metadata.lastDialExecutionRingcxPublish": publish,
+            "metadata.lastDialExecutionRingcxCancel": cancelResult,
+            "metadata.lastRingcxPublishedAt": requestedAt,
+            "metadata.lastRingcxPublishedCampaignId": publish.campaignId || null,
+            "metadata.lastRingcxPublishedDialGroupId": publishedDialGroupId,
+            "metadata.lastRingcxPublishedAccountId": publishedAccountId,
+            "metadata.lastRingcxPublishedExternId": publish.externId || null,
+            "metadata.lastRingcxPublishedRoute": publishedRoute,
+            "metadata.lastDialExecutionSource": options.source || "ringcentral-cx",
+            "metadata.lastDialExecutionEventId": dispatchIntent.eventId || null,
+            "metadata.lastDialIntentStatus": "unconfirmed-active-call",
+          }).catch(() => null);
+        }
+
+        if (domain) {
+          await recordWorkflowStage({
+            domain,
+            family: "cx",
+            subtype: "dial-request",
+            stage: "failed",
+            aggregateType: "cx-dial-queue",
+            aggregateId: String(queueItemId || caseId || phone),
+            caseId: Number.isFinite(caseId) ? caseId : null,
+            sourceService: "ringcentral-cx",
+            summary: `CX lead publish was cancelled because RingCX did not confirm active call ${phone}`,
+            payload: {
+              queueItemId,
+              phone,
+              agentEmail,
+              extensionId,
+              callerId,
+              executionMode,
+              publish,
+              cancelResult,
+              activeCallCapture,
+              desiredAvailability: agentState?.cxRouting?.desiredAvailability || null,
+            },
+          }).catch(() => null);
+        }
+
+        dialTraceLog(options.logger, "warn", "ringcx.dialExecution.campaign.unconfirmed", {
+          traceId,
+          queueItemId,
+          campaignId: publish.campaignId || null,
+          dialGroupId: publish.dialGroupId || null,
+          externId: publish.externId || null,
+          activeCallCapture,
+          cancelResult,
+        });
+
+        return {
+          ok: false,
+          executed: false,
+          queued: false,
+          unconfirmed: true,
+          mode: executionMode,
+          queueItemId,
+          caseId: Number.isFinite(caseId) ? caseId : null,
+          phone,
+          agentEmail,
+          callerId,
+          uii: null,
+          callSessionId: null,
+          campaignId: publish.campaignId || null,
+          dialGroupId: publish.dialGroupId || null,
+          externId: publish.externId || null,
+          ringcxPublish: publish,
+          ringcxCancel: cancelResult,
+          activeCallCapture,
+          reason: "ringcx-active-call-not-confirmed",
+          error: "RingCX did not confirm that it is dialing this queue lead.",
+          retryable: false,
+          agentAvailability: agentState?.cxRouting?.desiredAvailability || null,
+        };
+      }
 
       if (queueItemId) {
         await cxDialQueueRepository.updateQueueItem(queueItemId, {
@@ -1893,6 +2052,22 @@ async function executeCxDispatchIntent(options = {}) {
         campaignId: publish.campaignId || null,
         dialGroupId: publish.dialGroupId || null,
         externId: publish.externId || null,
+      });
+      traceCxCallIdentity(options.logger, "ringcx-dial.execution.queued", {
+        extensionId,
+        queueItemId,
+        caseId: Number.isFinite(caseId) ? caseId : null,
+        domain,
+        actionKey: dispatchIntent.actionKey || queueItem?.metadata?.actionKey || null,
+        requestedUii: capturedUii,
+        agentState,
+        currentCall: {
+          channel: "cx",
+          sessionId: capturedUii,
+          telephonySessionId: capturedUii,
+          direction: "outbound",
+        },
+        reason: callPlacedEvent ? "call-placed-event-created" : "queued-without-call-placed-event",
       });
 
       return {

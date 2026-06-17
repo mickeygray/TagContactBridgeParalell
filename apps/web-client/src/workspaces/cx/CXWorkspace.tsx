@@ -18,6 +18,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/Tabs";
 import { api } from "@/lib/api/client";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/Card";
 import { CaseLink } from "@/components/ui/CaseLink";
+import { consumeUiEvent } from "@/lib/events/consumeUiEvent";
 import {
   Dialog,
   DialogContent,
@@ -399,6 +400,32 @@ const QUEUE_FAMILY_DISPLAY: Record<QueueFamilyKey, QueueFamilyDisplay> = {
 };
 
 const QUEUE_LEGEND_FAMILIES: QueueFamilyKey[] = ["fresh-day1", "fresh-day2to10", "fresh-day16to30", "aged"];
+
+function cxTimingEnabled(): boolean {
+  try {
+    if (window.location.search.includes("cxdebug=1")) return true;
+    return window.localStorage.getItem("tcbCxTiming") === "1";
+  } catch {
+    return false;
+  }
+}
+
+function emitCxTiming(event: string, meta: Record<string, unknown> = {}): void {
+  if (!cxTimingEnabled()) return;
+  const payload = {
+    event,
+    at: new Date().toISOString(),
+    ...meta,
+  };
+  try {
+    const timeline = ((window as unknown as { __tcbCxTimeline?: unknown[] }).__tcbCxTimeline ?? []) as unknown[];
+    timeline.push(payload);
+    (window as unknown as { __tcbCxTimeline?: unknown[] }).__tcbCxTimeline = timeline.slice(-250);
+  } catch {
+    /* best-effort local debugging only */
+  }
+  console.info("tcb.cx.timing", payload);
+}
 
 function normalizeQueueFamily(raw: string | null | undefined): QueueFamilyKey | null {
   const value = String(raw || "").trim().toLowerCase();
@@ -2961,33 +2988,27 @@ function InterviewSnapshotCard({
     }
   };
   const handleGenerateStrategyClick = (event: React.MouseEvent<HTMLButtonElement>) => {
-    event.preventDefault();
-    event.stopPropagation();
+    consumeUiEvent(event);
     void generateStrategy();
   };
   const handleSetFormViewClick = (event: React.MouseEvent<HTMLButtonElement>) => {
-    event.preventDefault();
-    event.stopPropagation();
+    consumeUiEvent(event);
     setView("form");
   };
   const handleSetStrategyViewClick = (event: React.MouseEvent<HTMLButtonElement>) => {
-    event.preventDefault();
-    event.stopPropagation();
+    consumeUiEvent(event);
     setView("strategy");
   };
   const handleSaveSnapshotClick = (event: React.MouseEvent<HTMLButtonElement>) => {
-    event.preventDefault();
-    event.stopPropagation();
+    consumeUiEvent(event);
     void saveToSystems();
   };
   const handleBuildPreviewClick = (event: React.MouseEvent<HTMLButtonElement>) => {
-    event.preventDefault();
-    event.stopPropagation();
+    consumeUiEvent(event);
     buildPreview();
   };
   const handleClearSnapshotClick = (event: React.MouseEvent<HTMLButtonElement>) => {
-    event.preventDefault();
-    event.stopPropagation();
+    consumeUiEvent(event);
     clearSnapshot();
   };
 
@@ -3697,6 +3718,31 @@ export function CXWorkspace() {
   const workspace = useCxWorkspace(domain);
   const callQueue = useCxCallQueue(domain);
   const multiCallQueues = useCxCallQueueMulti(isAdminUser ? availableDomains : []);
+  React.useEffect(() => {
+    emitCxTiming("workspace.query_state", {
+      domain,
+      isAdminUser,
+      workspaceLoading: workspace.isLoading,
+      workspaceFetching: workspace.isFetching,
+      workspaceHasData: Boolean(workspace.data),
+      workspaceError: workspace.error instanceof Error ? workspace.error.message : null,
+      callQueueLoading: callQueue.isLoading,
+      callQueueFetching: callQueue.isFetching,
+      callQueueCount: Array.isArray(callQueue.data) ? callQueue.data.length : null,
+      multiDomainCount: isAdminUser ? availableDomains.length : 0,
+    });
+  }, [
+    domain,
+    isAdminUser,
+    availableDomains.length,
+    workspace.isLoading,
+    workspace.isFetching,
+    workspace.data,
+    workspace.error,
+    callQueue.isLoading,
+    callQueue.isFetching,
+    callQueue.data,
+  ]);
 
   // The resolved caseId drives everything in the "existing case" part of
   // the center column: it's whichever of the form caseId (operator typed
@@ -3746,6 +3792,32 @@ export function CXWorkspace() {
   const currentCallUii = currentCallIsSuppressed
     ? ""
     : readString(asRecord(rawCurrentCallSnapshot), "uii", "rcxUii", "callUii");
+  React.useEffect(() => {
+    emitCxTiming("workspace.data_state", {
+      domain,
+      agentEmail: data?.agent?.email || user?.email || null,
+      extensionId: currentExtensionId,
+      activityState: data?.ex?.status || null,
+      desiredAvailability: data?.ex?.cxRouting?.desiredAvailability || null,
+      currentCallSessionId: currentCall?.sessionId || null,
+      currentCallUii: currentCallUii || null,
+      currentCallPhonePresent: Boolean(currentCallPhone),
+      callQueueCount: Array.isArray(data?.callQueue) ? data.callQueue.length : null,
+      counts: data?.counts || null,
+    });
+  }, [
+    domain,
+    data?.agent?.email,
+    user?.email,
+    currentExtensionId,
+    data?.ex?.status,
+    data?.ex?.cxRouting?.desiredAvailability,
+    currentCall?.sessionId,
+    currentCallUii,
+    currentCallPhone,
+    data?.callQueue,
+    data?.counts,
+  ]);
 
   // detail/selectedPhone need clientDetail.data, which comes from a
   // hook declared further down (after lookup resolves caseDomain).
@@ -3892,6 +3964,30 @@ export function CXWorkspace() {
     skipMongoFallback: strictCxFastPath,
     domainFallback: leadLookupFallback,
   });
+  React.useEffect(() => {
+    emitCxTiming("lead_lookup.state", {
+      domain: leadLookupDomain,
+      hasPhone: Boolean(leadLookupPhone),
+      caseId: leadLookupCaseId,
+      strictCxFastPath,
+      isLoading: leadLookup.isLoading,
+      isFetching: leadLookup.isFetching,
+      hasData: Boolean(leadLookup.data),
+      error: leadLookup.error instanceof Error ? leadLookup.error.message : null,
+      matchSource: (leadLookup.data?.match as { source?: unknown } | null | undefined)?.source || null,
+      matchDomain: (leadLookup.data?.match as { domain?: unknown } | null | undefined)?.domain || null,
+      matchCaseId: leadLookup.data?.match?.caseId || null,
+    });
+  }, [
+    leadLookupDomain,
+    leadLookupPhone,
+    leadLookupCaseId,
+    strictCxFastPath,
+    leadLookup.isLoading,
+    leadLookup.isFetching,
+    leadLookup.data,
+    leadLookup.error,
+  ]);
   // Quiet multi-candidate query. The old CX UI rendered every phone
   // match as operator-selectable pills; the queue workflow now trusts
   // the primary lookup and only keeps this around for create-confirm
@@ -4579,8 +4675,14 @@ export function CXWorkspace() {
     if (servedQueueTicketId || servedQueueActionKey || servingQueueKey || servedQueueContact) return;
     const contact = contactFromQueue(activeServingQueueItem);
     const queueDomain = String(activeServingQueueItem.domain || domain || "TAG").trim().toUpperCase();
+    const activeServingMetadata = asRecord(asRecord(activeServingQueueItem).metadata);
+    const activeServingDialStatus = String(activeServingMetadata.lastDialIntentStatus || "")
+      .trim()
+      .toLowerCase();
     const isBackendNextDialRestore =
-      backendNextDialHandoffUntil != null && backendNextDialHandoffUntil > Date.now();
+      backendNextDialHandoffUntil != null &&
+      backendNextDialHandoffUntil > Date.now() &&
+      activeServingDialStatus === "accepted";
     // ── Anti-jitter guards ────────────────────────────────────────────────
     // ONLY for the wrap-up-restore path. During a BACKEND NEXT-DIAL HANDOFF
     // the dialer is actively serving the next lead (sometimes the SAME lead,
@@ -5382,7 +5484,10 @@ export function CXWorkspace() {
         currentCallSnapshot.from ||
         currentCallSnapshot.to,
     );
-  const exCallGateActive = Boolean(freshLeadGate.exCallActive) || hasActiveExCall || cxRoutingReason === "ex-busy";
+  const freshLeadGateHasExSignal = Object.prototype.hasOwnProperty.call(freshLeadGate, "exCallActive");
+  const exCallGateActive = freshLeadGateHasExSignal
+    ? Boolean(freshLeadGate.exCallActive)
+    : hasActiveExCall || cxRoutingReason === "ex-busy";
   const freshLeadBlocked =
     typeof freshLeadGate.blocked === "boolean"
       ? freshLeadGate.blocked
@@ -5667,7 +5772,10 @@ export function CXWorkspace() {
                       variant="secondary"
                       className="border-sky-500/40 bg-sky-600 text-white hover:bg-sky-700"
                       isLoading={createAppointment.isPending || assignCaseToMe.isPending || disposition.isPending}
-                      onClick={() => setAppointmentModalOpen(true)}
+                      onClick={(event) => {
+                        consumeUiEvent(event);
+                        setAppointmentModalOpen(true);
+                      }}
                       title="Schedule a callback, or use the same modal for assign-to-me and postdate."
                     >
                       <CalendarPlus className="h-3.5 w-3.5" />
@@ -5680,7 +5788,8 @@ export function CXWorkspace() {
                       variant="destructive"
                       className="bg-red-600 text-white hover:bg-red-700"
                       isLoading={disposition.isPending}
-                      onClick={() => {
+                      onClick={(event) => {
+                        consumeUiEvent(event);
                         releaseLiveCoachForCurrentCall("queue-disposition-dnc");
                         void run("DNC", () =>
                           disposition.mutateAsync({
@@ -5706,7 +5815,10 @@ export function CXWorkspace() {
                       variant="secondary"
                       className="border-emerald-500/40 bg-emerald-600 text-white hover:bg-emerald-700"
                       isLoading={disposition.isPending}
-                      onClick={() => submitQueueDisposition("answered", "Answered")}
+                      onClick={(event) => {
+                        consumeUiEvent(event);
+                        submitQueueDisposition("answered", "Answered");
+                      }}
                       title="Mark the queue attempt as answered without DNC or Logics status changes."
                     >
                       <CheckCircle2 className="h-3.5 w-3.5" />
@@ -5719,7 +5831,10 @@ export function CXWorkspace() {
                       variant="secondary"
                       className="border-amber-500/50 bg-amber-500 text-amber-950 hover:bg-amber-400"
                       isLoading={disposition.isPending}
-                      onClick={() => submitQueueDisposition("did-not-answer", "Did not answer")}
+                      onClick={(event) => {
+                        consumeUiEvent(event);
+                        submitQueueDisposition("did-not-answer", "Did not answer");
+                      }}
                       title="No answer: count the attempt and reschedule the queue item by cadence rules."
                     >
                       <PhoneOff className="h-3.5 w-3.5" />
@@ -5732,7 +5847,10 @@ export function CXWorkspace() {
                       variant="secondary"
                       className="border-violet-500/40 bg-violet-600 text-white hover:bg-violet-700"
                       disabled={voicemailDropPending || disposition.isPending}
-                      onClick={beginVoicemailDrop}
+                      onClick={(event) => {
+                        consumeUiEvent(event);
+                        beginVoicemailDrop();
+                      }}
                       title="Drop your assigned voicemail: the dialer sends this call to your monitor recording and advances your queue."
                     >
                       <MessageCircleMore className="h-3.5 w-3.5" />

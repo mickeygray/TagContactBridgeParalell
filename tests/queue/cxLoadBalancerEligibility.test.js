@@ -130,6 +130,38 @@ test("buildEligibility blocks connected EX calls", () => {
   }
 });
 
+test("buildEligibility ignores EX artifacts in CX-only runtime mode", () => {
+  const originalGate = process.env.RC_CX_EX_BUSY_GATE_ENABLED;
+  const originalMode = process.env.RC_CX_RUNTIME_MODE;
+  process.env.RC_CX_EX_BUSY_GATE_ENABLED = "true";
+  process.env.RC_CX_RUNTIME_MODE = "cx-only";
+  try {
+    const result = buildEligibility(agent("101", {
+      status: "onCall",
+      activityState: "onCall",
+      exTelephonyStatus: "CallConnected",
+      currentCall: {
+        channel: "ex",
+        direction: "Inbound",
+        sessionId: "connected",
+      },
+      cxRouting: {
+        enabled: true,
+        desiredAvailability: "unavailable",
+        reason: "ex-busy",
+      },
+    }));
+    assert.equal(result.eligible, true);
+    assert.equal(result.reason, "available");
+    assert.equal(result.exArtifactsSuppressed, true);
+  } finally {
+    if (originalGate == null) delete process.env.RC_CX_EX_BUSY_GATE_ENABLED;
+    else process.env.RC_CX_EX_BUSY_GATE_ENABLED = originalGate;
+    if (originalMode == null) delete process.env.RC_CX_RUNTIME_MODE;
+    else process.env.RC_CX_RUNTIME_MODE = originalMode;
+  }
+});
+
 test("rankAgentsForQueueItem skips a busy agent even when their assignment counts are lower", () => {
   const busy = agent("101", {
     activityState: "dialing",

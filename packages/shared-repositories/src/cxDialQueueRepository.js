@@ -132,7 +132,7 @@ function buildExpiredClaimRequeueQuery(now) {
           { "metadata.lastDialIntentStatus": { $exists: false } },
           { "metadata.lastDialIntentStatus": null },
           { "metadata.lastDialIntentStatus": "" },
-          { "metadata.lastDialIntentStatus": { $in: ["relay-failed", "error", "cancelled"] } },
+          { "metadata.lastDialIntentStatus": { $in: ["relay-failed", "error", "cancelled", "unconfirmed-active-call"] } },
         ],
       },
     ],

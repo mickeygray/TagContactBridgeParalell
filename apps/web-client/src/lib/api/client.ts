@@ -73,8 +73,36 @@ function getToken(): string | null {
   }
 }
 
+function apiTimingEnabled(): boolean {
+  try {
+    if (window.location.search.includes("cxdebug=1")) return true;
+    return window.localStorage.getItem("tcbApiTiming") === "1";
+  } catch {
+    return false;
+  }
+}
+
+function emitApiTiming(event: string, meta: Record<string, unknown>): void {
+  if (!apiTimingEnabled()) return;
+  const payload = {
+    event,
+    at: new Date().toISOString(),
+    ...meta,
+  };
+  try {
+    const timeline = ((window as unknown as { __tcbApiTimeline?: unknown[] }).__tcbApiTimeline ?? []) as unknown[];
+    timeline.push(payload);
+    (window as unknown as { __tcbApiTimeline?: unknown[] }).__tcbApiTimeline = timeline.slice(-250);
+  } catch {
+    /* best-effort local debugging only */
+  }
+  // Intentionally console.info so the in-app browser can read the timing trace.
+  console.info("tcb.api.timing", payload);
+}
+
 async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
   const { method = "GET", body, query, signal, auth = true, bodyEncoding = "json" } = options;
+  const startedAt = Date.now();
 
   const isFormData = typeof FormData !== "undefined" && body instanceof FormData;
   const isFormEncoded = bodyEncoding === "form" && body !== undefined && !isFormData;
@@ -125,6 +153,12 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
       signal,
     });
   } catch (err) {
+    emitApiTiming("network_error", {
+      method,
+      path,
+      durationMs: Date.now() - startedAt,
+      error: (err as Error).message,
+    });
     if ((err as Error).name === "AbortError") throw err;
     throw new ApiError(
       `Network error contacting ${path}`,
@@ -161,9 +195,23 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
       onUnauthorized();
     }
 
+    emitApiTiming("response_error", {
+      method,
+      path,
+      status: response.status,
+      durationMs: Date.now() - startedAt,
+      code,
+      message,
+    });
     throw new ApiError(message, response.status, code, body);
   }
 
+  emitApiTiming("response_ok", {
+    method,
+    path,
+    status: response.status,
+    durationMs: Date.now() - startedAt,
+  });
   return payload as T;
 }
 

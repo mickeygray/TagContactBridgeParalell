@@ -51,6 +51,8 @@ const {
 } = require("./controlPlaneRelayService");
 const { recordWorkflowStage } = require("./workflowStateService");
 const { decideExPollCxOwnership, callIdentity } = require("./cxCallStateGuard");
+const { isCxOnlyRuntimeMode } = require("./cxRuntimeModeService");
+const { traceCxCallIdentity } = require("./cxCallTraceService");
 
 // EX->CX decoupling rollout flag (phase-out). DEFAULT OFF: when unset/not "true", the EX presence
 // poll behaves exactly as before. When "true", the poll stops overwriting an agent's held CX
@@ -58,6 +60,78 @@ const { decideExPollCxOwnership, callIdentity } = require("./cxCallStateGuard");
 // controlled test window, not blanket. See docs/cx-handoff-tracey-veronica.PLAN.md.
 function exCxDecoupleEnabled() {
   return String(process.env.RC_CX_EX_DECOUPLE_ENABLED || "").trim().toLowerCase() === "true";
+}
+
+function normalizeExCxPollWriteMode(value) {
+  const raw = String(value || "").trim().toLowerCase();
+  if (["cx-owned", "cx_owned", "cxowned", "full", "ignore-cx", "ignore_cx"].includes(raw)) {
+    return "cx-owned";
+  }
+  if (["preserve", "decouple", "decoupled"].includes(raw)) return "preserve";
+  if (["legacy", "off", "false", "0"].includes(raw)) return "legacy";
+  return null;
+}
+
+function exCxPollWriteMode(options = {}) {
+  const fromOptions = normalizeExCxPollWriteMode(options.cxPollWriteMode);
+  if (fromOptions) return fromOptions;
+  const fromEnv = normalizeExCxPollWriteMode(process.env.RC_CX_EX_POLL_CX_WRITE_MODE);
+  if (fromEnv) return fromEnv;
+  if (isCxOnlyRuntimeMode(options)) return "cx-owned";
+  return exCxDecoupleEnabled() ? "preserve" : "legacy";
+}
+
+function exCxPollCxOwnedMode(options = {}) {
+  return exCxPollWriteMode(options) === "cx-owned";
+}
+
+function normalizePresencePollMode(value) {
+  const raw = String(value || "").trim().toLowerCase();
+  if (["observe", "observe-only", "observe_only", "readonly", "read-only", "read_only", "dry-run", "dry_run"].includes(raw)) {
+    return "observe-only";
+  }
+  if (["off", "disabled", "disable", "false", "0"].includes(raw)) return "off";
+  if (["write", "writes", "legacy", "on", "true", "1"].includes(raw)) return "write";
+  return null;
+}
+
+function exPresencePollMode(options = {}) {
+  const fromOptions = normalizePresencePollMode(options.presencePollMode);
+  if (fromOptions) return fromOptions;
+  const fromEnv = normalizePresencePollMode(
+    process.env.RC_CX_EX_PRESENCE_POLL_MODE
+      || process.env.RC_EX_PRESENCE_POLL_MODE,
+  );
+  return fromEnv || "write";
+}
+
+function exPresencePollObserveOnly(options = {}) {
+  return exPresencePollMode(options) === "observe-only";
+}
+
+function exPresencePollDisabled(options = {}) {
+  return exPresencePollMode(options) === "off";
+}
+
+const CX_OWNED_SUPPRESSION_LOG_TTL_MS = Math.max(
+  Number(process.env.RC_CX_OWNED_SUPPRESSION_LOG_TTL_MS) || 120000,
+  30000,
+);
+const cxOwnedSuppressionLogAt = new Map();
+
+function shouldLogCxOwnedSuppression(key) {
+  const normalized = String(key || "").trim();
+  if (!normalized) return false;
+  const now = Date.now();
+  const last = cxOwnedSuppressionLogAt.get(normalized) || 0;
+  if (now - last < CX_OWNED_SUPPRESSION_LOG_TTL_MS) return false;
+  cxOwnedSuppressionLogAt.set(normalized, now);
+  if (cxOwnedSuppressionLogAt.size > 500) {
+    for (const [entry, loggedAt] of cxOwnedSuppressionLogAt.entries()) {
+      if (now - loggedAt > CX_OWNED_SUPPRESSION_LOG_TTL_MS) cxOwnedSuppressionLogAt.delete(entry);
+    }
+  }
+  return true;
 }
 
 const EX_EVENT_TYPES = Object.freeze({
@@ -911,6 +985,9 @@ function detectPollMismatch(agent, presence, options = {}) {
   const activeCalls = Array.isArray(presence?.activeCalls) ? presence.activeCalls : [];
   const activeCall = activeCalls[0] || null;
 
+  if (exCxPollCxOwnedMode(options) && hasCxCallSnapshot(agent)) {
+    return null;
+  }
   if (shouldHoldCxDisposition(agent, telephonyStatus)) {
     return null;
   }
@@ -1179,9 +1256,36 @@ async function reconcilePresenceMismatch(agent, presence, logger, options = {}) 
 }
 
 async function reconcilePolledPresence(agent, presence, logger, options = {}) {
-  const mismatch = detectPollMismatch(agent, presence, options);
+  const cxPollWriteMode = exCxPollWriteMode(options);
+  const presencePollMode = exPresencePollMode(options);
+  const observeOnly = presencePollMode === "observe-only";
+  const pollOptions = { ...options, cxPollWriteMode, presencePollMode };
+  const mismatch = detectPollMismatch(agent, presence, pollOptions);
   if (mismatch) {
-    return reconcilePresenceMismatch(agent, presence, logger, options);
+    if (observeOnly) {
+      const previous = createStateSnapshot(agent, agent.extensionId);
+      logger?.warn("ringcentral.ex.poll.observe_only_mismatch", {
+        extensionId: agent.extensionId,
+        reason: mismatch.type,
+        previousStatus: previous.status || null,
+        telephonyStatus: presence?.telephonyStatus || "NoCall",
+        activeCallPresent: Boolean(mismatch.activeCall),
+        cxPollWriteMode,
+      });
+      traceCxCallIdentity(logger, "ex-poll.observe-only.mismatch", {
+        extensionId: agent.extensionId,
+        reason: mismatch.type,
+        previousAgentState: previous,
+        observedCall: mismatch.activeCall,
+      });
+      return {
+        changed: false,
+        reason: `observe_${mismatch.type}`,
+        observed: true,
+        current: agent,
+      };
+    }
+    return reconcilePresenceMismatch(agent, presence, logger, pollOptions);
   }
 
   const extensionId = normalizeExtensionId(agent.extensionId);
@@ -1207,13 +1311,43 @@ async function reconcilePolledPresence(agent, presence, logger, options = {}) {
   // the CX clear paths (markAgentAvailableAfterAutoDisposition / clearAgentCxCallState /
   // clearAgentCxCallStateForTerminalOutcome / markMissingCxCallsEnded) count the end. The EX poll
   // counting them would double-count and mis-attribute CX calls as "ex".
+  const previousHasCxCall = hasCxCallSnapshot(previous);
+  const previousCxIdentity = callIdentity(previous.currentCall);
+  const exActiveSnapshot = activeCall ? snapshotCurrentCall(activeCall) : null;
+  const exActiveIdentity = exActiveSnapshot ? callIdentity(exActiveSnapshot) : null;
+  const exActiveIsBridge = exActiveSnapshot ? isLikelyCxBridgeExCall(exActiveSnapshot) : false;
   const cxOwn = decideExPollCxOwnership({
-    enabled: exCxDecoupleEnabled(),
-    previousHasCxCall: hasCxCallSnapshot(previous),
-    previousCxIdentity: callIdentity(previous.currentCall),
-    exActiveIdentity: activeCall ? callIdentity(snapshotCurrentCall(activeCall)) : null,
-    exActiveIsBridge: activeCall ? isLikelyCxBridgeExCall(snapshotCurrentCall(activeCall)) : false,
+    enabled: cxPollWriteMode !== "legacy",
+    mode: cxPollWriteMode,
+    previousHasCxCall,
+    previousCxIdentity,
+    exActiveIdentity,
+    exActiveIsBridge,
   });
+  if (
+    cxPollWriteMode === "cx-owned"
+    && cxOwn.cxOwnsCallState
+    && shouldLogCxOwnedSuppression([
+      extensionId,
+      previousCxIdentity ? "cx-id" : "cx-no-id",
+      exActiveIdentity ? (exActiveIdentity === previousCxIdentity ? "same-ex" : "different-ex") : "no-ex",
+      telephonyStatus,
+    ].join(":"))
+  ) {
+    logger?.info("ringcentral.ex.poll.cx_owned_preserved", {
+      extensionId,
+      cxRuntimeMode: process.env.RC_CX_RUNTIME_MODE || process.env.CX_RUNTIME_MODE || "legacy",
+      cxPollWriteMode,
+      previousStatus: previous.status || null,
+      telephonyStatus,
+      presenceStatus,
+      previousCxIdentityPresent: Boolean(previousCxIdentity),
+      exActiveIdentityPresent: Boolean(exActiveIdentity),
+      identityMatch: Boolean(previousCxIdentity && exActiveIdentity && previousCxIdentity === exActiveIdentity),
+      exActiveIsBridge,
+      forceExNoCall: Boolean(cxOwn.forceExNoCall),
+    });
+  }
   const effectiveStatus = cxOwn.cxOwnsCallState ? (previous.status || nextStatus) : nextStatus;
 
   const nextCurrentCall = cxOwn.cxOwnsCallState
@@ -1297,6 +1431,46 @@ async function reconcilePolledPresence(agent, presence, logger, options = {}) {
     });
   }
 
+  if (observeOnly) {
+    const wouldChange = hasPolledStateChanged(previous, next);
+    if (
+      wouldChange
+      && shouldLogCxOwnedSuppression([
+        "observe-only",
+        extensionId,
+        previous.status || "none",
+        effectiveStatus || "none",
+        telephonyStatus,
+        presenceStatus,
+      ].join(":"))
+    ) {
+      logger?.info("ringcentral.ex.poll.observe_only_status", {
+        extensionId,
+        previousStatus: previous.status || null,
+        observedStatus: effectiveStatus || null,
+        telephonyStatus,
+        presenceStatus,
+        cxPollWriteMode,
+        previousHasCxCall,
+        cxOwnsCallState: Boolean(cxOwn.cxOwnsCallState),
+        wouldChange,
+      });
+      traceCxCallIdentity(logger, "ex-poll.observe-only.status", {
+        extensionId,
+        reason: wouldChange ? "would-change" : "no-change",
+        previousAgentState: previous,
+        nextAgentState: next,
+        observedCall: exActiveSnapshot,
+      });
+    }
+    return {
+      changed: false,
+      reason: wouldChange ? "observe_presence_status_changed" : null,
+      observed: true,
+      current: agent,
+    };
+  }
+
   if (!hasPolledStateChanged(previous, next)) {
     await agentStateRepository.updateAgentState(extensionId, {
       lastPresencePollAt: new Date(),
@@ -1370,6 +1544,7 @@ async function seedPresenceForAgents(logger) {
   const config = getRingCentralConfig();
   const rc = createRingCentralClient();
   const agents = await agentStateRepository.listAgentStates();
+  const presencePollMode = exPresencePollMode();
   const results = [];
 
   for (const agent of agents) {
@@ -1386,17 +1561,21 @@ async function seedPresenceForAgents(logger) {
       const presence = await rc.getPresence(agent.extensionId);
       const result = await reconcilePolledPresence(agent, presence, logger, {
         staleThresholdMs: config.presenceStaleThresholdMs,
+        presencePollMode,
       });
       results.push({
         extensionId: agent.extensionId,
         changed: result.changed,
         reason: result.reason,
+        observed: Boolean(result.observed),
       });
     } catch (error) {
-      await agentStateRepository.updateAgentState(agent.extensionId, {
-        lastPresencePollAt: new Date(),
-        lastPresencePollError: error.message,
-      }).catch(() => null);
+      if (presencePollMode !== "observe-only") {
+        await agentStateRepository.updateAgentState(agent.extensionId, {
+          lastPresencePollAt: new Date(),
+          lastPresencePollError: error.message,
+        }).catch(() => null);
+      }
       results.push({
         extensionId: agent.extensionId,
         changed: false,
@@ -1410,6 +1589,7 @@ async function seedPresenceForAgents(logger) {
   }
 
   return {
+    mode: presencePollMode,
     checked: agents.length,
     pollable: results.filter((entry) => !entry.skipped).length,
     results,
@@ -1424,8 +1604,10 @@ function startPresencePoller(logger) {
     Number(config.presenceFullPollIntervalMs) || 120000,
     intervalMs,
   );
+  const initialMode = exPresencePollMode();
   const state = {
     enabled: true,
+    mode: initialMode,
     running: false,
     intervalMs,
     fullPollIntervalMs,
@@ -1460,6 +1642,24 @@ function startPresencePoller(logger) {
         state.lastResult = {
           skipped: true,
           reason: "parallel-rc-suspended",
+          checked: 0,
+          changed: 0,
+          staleCount: 0,
+          results: [],
+        };
+        state.lastError = null;
+        return;
+      }
+
+      const presencePollMode = exPresencePollMode();
+      state.mode = presencePollMode;
+      if (presencePollMode === "off") {
+        state.lastCompletedAt = new Date();
+        state.lastSkippedAt = new Date();
+        state.lastSkippedReason = "presence-poller-disabled";
+        state.lastResult = {
+          skipped: true,
+          reason: "presence-poller-disabled",
           checked: 0,
           changed: 0,
           staleCount: 0,
@@ -1539,17 +1739,21 @@ function startPresencePoller(logger) {
           const presence = await rc.getPresence(agent.extensionId);
           const result = await reconcilePolledPresence(agent, presence, logger, {
             staleThresholdMs,
+            presencePollMode,
           });
           results.push({
             extensionId: agent.extensionId,
             changed: result.changed,
             reason: result.reason,
+            observed: Boolean(result.observed),
           });
         } catch (error) {
-          await agentStateRepository.updateAgentState(agent.extensionId, {
-            lastPresencePollAt: new Date(),
-            lastPresencePollError: error.message,
-          }).catch(() => null);
+          if (presencePollMode !== "observe-only") {
+            await agentStateRepository.updateAgentState(agent.extensionId, {
+              lastPresencePollAt: new Date(),
+              lastPresencePollError: error.message,
+            }).catch(() => null);
+          }
           results.push({
             extensionId: agent.extensionId,
             changed: false,
@@ -1565,16 +1769,38 @@ function startPresencePoller(logger) {
         state.lastFullPollAt = new Date();
       }
       state.lastCompletedAt = new Date();
+      const changedCount = results.filter((entry) => entry.changed).length;
+      const observedCount = results.filter((entry) => entry.observed).length;
+      const observedReasons = {};
+      for (const entry of results) {
+        if (!entry.observed) continue;
+        const reason = String(entry.reason || "observed").trim() || "observed";
+        observedReasons[reason] = (observedReasons[reason] || 0) + 1;
+      }
       state.lastResult = {
         skipped: false,
         fullPoll: shouldFullPoll,
         totalAgents: allAgents.length,
         pollableAgents: pollableAgents.length,
         checked: agents.length,
-        changed: results.filter((entry) => entry.changed).length,
+        changed: changedCount,
+        observed: observedCount,
+        observedReasons,
         staleCount,
         results,
       };
+      if (presencePollMode === "observe-only") {
+        logger?.info("ringcentral.ex.poll.observe_only_tick", {
+          fullPoll: shouldFullPoll,
+          totalAgents: allAgents.length,
+          pollableAgents: pollableAgents.length,
+          checked: agents.length,
+          changed: changedCount,
+          observed: observedCount,
+          observedReasons,
+          staleCount,
+        });
+      }
       state.lastSkippedReason = null;
       state.lastError = null;
     } catch (error) {
@@ -1595,6 +1821,7 @@ function startPresencePoller(logger) {
     getState() {
       return {
         enabled: state.enabled,
+        mode: state.mode,
         running: state.running,
         intervalMs: state.intervalMs,
         fullPollIntervalMs: state.fullPollIntervalMs,
@@ -1623,6 +1850,10 @@ function startPresencePoller(logger) {
 
 module.exports = {
   EX_EVENT_TYPES,
+  exPresencePollDisabled,
+  exPresencePollMode,
+  exPresencePollObserveOnly,
+  normalizePresencePollMode,
   detectPollMismatch,
   processPresenceEnvelope,
   reconcilePolledPresence,

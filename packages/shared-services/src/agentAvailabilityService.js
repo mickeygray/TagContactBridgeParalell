@@ -5,6 +5,10 @@ const {
   isLeadServingAllowedAgent,
   isLeadServingExcludedAgent,
 } = require("./cxLeadServingEligibilityService");
+const {
+  suppressExArtifactsForCx,
+  suppressExBusyRoutingReason,
+} = require("./cxRuntimeModeService");
 
 const EX_BUSY_TELEPHONY_STATUSES = new Set(["callconnected", "onhold"]);
 const APP_BUSY_STATUSES = new Set(["oncall"]);
@@ -30,6 +34,7 @@ const LOGOUT_PAUSE_TYPE = "logout";
 const COUNTED_BREAK_TYPES = new Set([SHORT_BREAK_TYPE, MEAL_BREAK_TYPE]);
 
 function isExLeadServingGateEnabled() {
+  if (suppressExArtifactsForCx()) return false;
   return String(process.env.RC_CX_EX_BUSY_GATE_ENABLED || "false").toLowerCase() === "true";
 }
 
@@ -635,10 +640,14 @@ function deriveFreshLeadGate(snapshot = {}, routingOverride = null) {
   const routing = routingOverride
     || (snapshot.cxRouting && typeof snapshot.cxRouting === "object" ? snapshot.cxRouting : null);
   const enabled = isCxRoutingEnabled(snapshot, routing);
-  const desiredAvailability = String(
+  const rawDesiredAvailability = String(
     routing?.desiredAvailability || (enabled ? "available" : "unavailable"),
   ).trim().toLowerCase();
-  const routingReason = String(routing?.reason || "").trim().toLowerCase();
+  const rawRoutingReason = String(routing?.reason || "").trim().toLowerCase();
+  const exBusySuppressed = suppressExBusyRoutingReason(rawRoutingReason);
+  const exArtifactSuppressionActive = suppressExArtifactsForCx();
+  const desiredAvailability = exBusySuppressed ? "available" : rawDesiredAvailability;
+  const routingReason = exBusySuppressed ? "ex-idle" : rawRoutingReason;
   const pauseType = normalizeCxPauseType(routing?.pauseType);
   const exCallActive = isExLeadServingGateEnabled()
     && (isExBusySnapshot(snapshot) || routingReason === "ex-busy");
@@ -713,6 +722,9 @@ function deriveFreshLeadGate(snapshot = {}, routingOverride = null) {
     pauseReleaseAt: routing?.pauseReleaseAt || null,
     breakUsage: routingBreakUsage(routing),
     exCallActive,
+    exArtifactsSuppressed: Boolean(exArtifactSuppressionActive && (exBusySuppressed || rawRoutingReason === "ex-busy")),
+    rawDesiredAvailability: rawDesiredAvailability || null,
+    rawReason: rawRoutingReason || null,
     leadServingExcluded,
     workspaceRequired,
     workspaceActive,

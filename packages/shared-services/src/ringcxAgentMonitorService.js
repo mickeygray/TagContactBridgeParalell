@@ -13,6 +13,7 @@ const {
   classifyCxTerminalOutcome,
   handleCxTerminalCallOutcome,
 } = require("./cxCadenceService");
+const { traceCxCallIdentity } = require("./cxCallTraceService");
 
 function isRingcxAgentMonitorEnabled() {
   return String(process.env.RINGCX_AGENT_MONITOR_ENABLED || "true").toLowerCase() !== "false";
@@ -362,11 +363,20 @@ function hasActiveExCall(agentState = {}) {
     && ["CallConnected", "OnHold"].includes(String(agentState.exTelephonyStatus || ""));
 }
 
-async function markAgentCxActive(queueItem = {}, call = {}, now = new Date()) {
+async function markAgentCxActive(queueItem = {}, call = {}, now = new Date(), logger = null) {
   const extensionId = String(queueItem.assignment?.extensionId || "").trim();
   if (!extensionId) return { changed: false, reason: "missing-extension" };
   const existing = await agentStateRepository.findAgentStateByExtensionId(extensionId);
   if (hasActiveExCall(existing || {})) {
+    traceCxCallIdentity(logger, "ringcx-monitor.mark-active.skip-active-ex", {
+      extensionId,
+      reason: "agent-has-active-ex-call",
+      queueItemId: queueItem._id ? String(queueItem._id) : null,
+      caseId: queueItem.caseId,
+      domain: queueItem.domain,
+      agentState: existing,
+      observedCall: call,
+    });
     return { changed: false, skipped: true, reason: "agent-has-active-ex-call", extensionId };
   }
 
@@ -396,6 +406,17 @@ async function markAgentCxActive(queueItem = {}, call = {}, now = new Date()) {
   const sameCall = previousIdentity && uii && previousIdentity === uii
     && existing?.status === "onCall"
     && existing?.activePlatform === "CX";
+  traceCxCallIdentity(logger, "ringcx-monitor.mark-active.before", {
+    extensionId,
+    queueItemId: queueItem._id ? String(queueItem._id) : null,
+    caseId: queueItem.caseId,
+    domain: queueItem.domain,
+    requestedUii: uii,
+    previousAgentState: existing,
+    currentCall,
+    observedCall: call,
+    reason: sameCall ? "same-call" : "new-or-changed-call",
+  });
   const dailyStats = applyCallStartedDailyStats(
     existing || {},
     normalizeDailyStats(existing?.dailyStats, now),
@@ -456,6 +477,17 @@ async function markAgentCxActive(queueItem = {}, call = {}, now = new Date()) {
       },
     ).catch(() => null),
   ]);
+  traceCxCallIdentity(logger, "ringcx-monitor.mark-active.after", {
+    extensionId,
+    queueItemId: queueItem._id ? String(queueItem._id) : null,
+    caseId: queueItem.caseId,
+    domain: queueItem.domain,
+    requestedUii: uii,
+    previousAgentState: existing,
+    nextAgentState: updated,
+    currentCall,
+    reason: sameCall ? "same-call" : "updated-agent-state",
+  });
 
   return {
     changed: !sameCall,
@@ -486,6 +518,13 @@ async function markMissingCxCallsEnded(activeIdentities = new Set(), now = new D
     if (identity && ageMs < endGraceMs) continue;
     if (!identity && ageMs < noUiiStaleMs) continue;
 
+    traceCxCallIdentity(logger, "ringcx-monitor.mark-missing-ended.before", {
+      extensionId: agent.extensionId,
+      reason: identity ? "identity-not-active" : "missing-identity-stale",
+      agentState: agent,
+      currentCall: call,
+      observedUii: identity,
+    });
     const dailyStats = applyCallEndedDailyStats(
       agent,
       normalizeDailyStats(agent.dailyStats, now),
@@ -524,6 +563,14 @@ async function markMissingCxCallsEnded(activeIdentities = new Set(), now = new D
       return null;
     });
     if (updated) {
+      traceCxCallIdentity(logger, "ringcx-monitor.mark-missing-ended.after", {
+        extensionId: agent.extensionId,
+        reason: identity ? "identity-not-active" : "missing-identity-stale",
+        previousAgentState: agent,
+        nextAgentState: updated,
+        currentCall: call,
+        observedUii: identity,
+      });
       ended.push({
         extensionId: agent.extensionId,
         identity,
@@ -577,7 +624,7 @@ async function runRingcxAgentMonitor(options = {}) {
       });
       continue;
     }
-    const result = await markAgentCxActive(match.queueItem, call, now);
+    const result = await markAgentCxActive(match.queueItem, call, now, logger);
     matched.push({
       queueItemId: String(match.queueItem._id),
       extensionId: match.queueItem.assignment?.extensionId || null,

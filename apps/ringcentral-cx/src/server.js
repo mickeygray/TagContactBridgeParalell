@@ -37,6 +37,7 @@ const {
   processPresenceEnvelope,
   processCxCadenceEventBatch,
   publishQueueItemToRingcx,
+  exPresencePollMode,
   getFreshHotLaneSnapshot,
   getCxAgentStateByExtensionId,
   listCxAgentStates,
@@ -51,6 +52,7 @@ const {
   seedPresenceForAgents,
   startPresencePoller,
 } = require("../../../packages/shared-services/src");
+const { getCxRuntimeMode } = require("../../../packages/shared-services/src/cxRuntimeModeService");
 const {
   assignCxQueueBatch,
   cancelCxQueueItem,
@@ -364,7 +366,17 @@ async function startServer() {
   let poller = null;
   try {
     poller = startPresencePoller(runtime.logger);
-    runtime.logger.info("ringcentral.presence_poller.started", poller.getState());
+    const exCxDecoupleEnabled =
+      String(process.env.RC_CX_EX_DECOUPLE_ENABLED || "").trim().toLowerCase() === "true";
+    runtime.logger.info("ringcentral.presence_poller.started", {
+      ...poller.getState(),
+      cxRuntimeMode: getCxRuntimeMode(),
+      exPresencePollMode: exPresencePollMode(),
+      exCxDecoupleEnabled,
+      exCxPollWriteMode:
+        String(process.env.RC_CX_EX_POLL_CX_WRITE_MODE || "").trim()
+        || (getCxRuntimeMode() === "cx-only" ? "cx-owned" : exCxDecoupleEnabled ? "preserve" : "legacy"),
+    });
   } catch (error) {
     runtime.logger.warn("ringcentral.presence_poller.start_failed", {
       error: error.message,

@@ -189,6 +189,21 @@ export function AppRoutes() {
             }
           />
           <Route
+            path="prep"
+            element={
+              <Suspended>
+                <CxWorkHoursGuard>
+                  <CxAuthGuard
+                    startPath="/api/auth/cx/prep/start"
+                    defaultFinalRedirectTo="/cx/prep"
+                  >
+                    <CXWorkspace />
+                  </CxAuthGuard>
+                </CxWorkHoursGuard>
+              </Suspended>
+            }
+          />
+          <Route
             path="clients"
             element={
               <Suspended>

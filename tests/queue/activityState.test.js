@@ -9,6 +9,7 @@ const assert = require("node:assert/strict");
 const {
   deriveActivityState,
   deriveCxRouting,
+  deriveFreshLeadGate,
 } = require("../../packages/shared-services/src/agentAvailabilityService");
 
 test("status=available -> idle", () => {
@@ -159,4 +160,68 @@ test("EX ringing alone does not suppress CX lead serving", () => {
 
   assert.equal(r.desiredAvailability, "available");
   assert.equal(r.reason, "ex-idle");
+});
+
+test("CX-only runtime mode ignores EX busy when deriving CX routing", () => {
+  const originalGate = process.env.RC_CX_EX_BUSY_GATE_ENABLED;
+  const originalMode = process.env.RC_CX_RUNTIME_MODE;
+  process.env.RC_CX_EX_BUSY_GATE_ENABLED = "true";
+  process.env.RC_CX_RUNTIME_MODE = "cx-only";
+  try {
+    const r = deriveCxRouting(
+      {
+        cxAgentId: "20563",
+        status: "onCall",
+        exTelephonyStatus: "CallConnected",
+        currentCall: { channel: "ex", sessionId: "abc" },
+      },
+      {
+        enabled: true,
+        desiredAvailability: "unavailable",
+        reason: "ex-busy",
+        lastSource: "ringbridge",
+      },
+    );
+
+    assert.equal(r.desiredAvailability, "available");
+    assert.equal(r.reason, "ex-idle");
+  } finally {
+    if (originalGate == null) delete process.env.RC_CX_EX_BUSY_GATE_ENABLED;
+    else process.env.RC_CX_EX_BUSY_GATE_ENABLED = originalGate;
+    if (originalMode == null) delete process.env.RC_CX_RUNTIME_MODE;
+    else process.env.RC_CX_RUNTIME_MODE = originalMode;
+  }
+});
+
+test("CX-only runtime mode treats stale ex-busy routing as allowed in the fresh lead gate", () => {
+  const originalGate = process.env.RC_CX_EX_BUSY_GATE_ENABLED;
+  const originalMode = process.env.RC_CX_RUNTIME_MODE;
+  const originalWorkspace = process.env.RC_CX_REQUIRE_WORKSPACE_ACTIVE;
+  process.env.RC_CX_EX_BUSY_GATE_ENABLED = "true";
+  process.env.RC_CX_RUNTIME_MODE = "cx-only";
+  process.env.RC_CX_REQUIRE_WORKSPACE_ACTIVE = "false";
+  try {
+    const gate = deriveFreshLeadGate({
+      status: "onCall",
+      exTelephonyStatus: "CallConnected",
+      currentCall: { channel: "ex", sessionId: "abc" },
+      cxRouting: {
+        enabled: true,
+        desiredAvailability: "unavailable",
+        reason: "ex-busy",
+      },
+    });
+
+    assert.equal(gate.allowed, true);
+    assert.equal(gate.exCallActive, false);
+    assert.equal(gate.exArtifactsSuppressed, true);
+    assert.equal(gate.source, "none");
+  } finally {
+    if (originalGate == null) delete process.env.RC_CX_EX_BUSY_GATE_ENABLED;
+    else process.env.RC_CX_EX_BUSY_GATE_ENABLED = originalGate;
+    if (originalMode == null) delete process.env.RC_CX_RUNTIME_MODE;
+    else process.env.RC_CX_RUNTIME_MODE = originalMode;
+    if (originalWorkspace == null) delete process.env.RC_CX_REQUIRE_WORKSPACE_ACTIVE;
+    else process.env.RC_CX_REQUIRE_WORKSPACE_ACTIVE = originalWorkspace;
+  }
 });

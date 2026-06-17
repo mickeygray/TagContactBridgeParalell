@@ -14,6 +14,9 @@ const {
 const {
   userAccountRepository,
 } = require("../../../../packages/shared-repositories/src");
+const {
+  createCxLoginTrace,
+} = require("../../../../packages/shared-services/src/cxLoginTraceService");
 const { createRateLimiter } = require("../middleware/rateLimit");
 
 // Per-IP rate limits. The OTP service already enforces a per-email cooldown
@@ -51,6 +54,15 @@ function createAuthRouter(config, options = {}) {
     };
   }
 
+  async function timedAuthStep(timings, label, fn) {
+    const startedAt = Date.now();
+    try {
+      return await fn();
+    } finally {
+      timings[label] = Date.now() - startedAt;
+    }
+  }
+
   async function ensureRingcxOffhookAllowed(account, source) {
     try {
       const {
@@ -68,6 +80,50 @@ function createAuthRouter(config, options = {}) {
       });
       return { ok: false, error: error.message };
     }
+  }
+
+  function readBooleanEnv(name, fallback = false) {
+    const raw = process.env[name];
+    if (raw == null || raw === "") return fallback;
+    const normalized = String(raw).trim().toLowerCase();
+    if (["1", "true", "yes", "on"].includes(normalized)) return true;
+    if (["0", "false", "no", "off"].includes(normalized)) return false;
+    return fallback;
+  }
+
+  function loginThinEnabled() {
+    return readBooleanEnv("CX_LOGIN_THIN_ENABLED", false);
+  }
+
+  function asyncOffhookSelfHealEnabled() {
+    return loginThinEnabled() || readBooleanEnv("CX_LOGIN_ASYNC_OFFHOOK_SELF_HEAL", false);
+  }
+
+  function scheduleRingcxOffhookAllowed(account, source, meta = {}) {
+    const startedAt = Date.now();
+    Promise.resolve()
+      .then(() => ensureRingcxOffhookAllowed(account, source))
+      .then((result) => {
+        emitAuthLog("info", "ringcx.offhook.self_heal.async.done", {
+          source,
+          email: account?.email || null,
+          durationMs: Date.now() - startedAt,
+          ok: result?.ok ?? null,
+          skipped: Boolean(result?.skipped),
+          reason: result?.reason || null,
+          patched: Boolean(result?.patched),
+          ...meta,
+        });
+      })
+      .catch((error) => {
+        emitAuthLog("warn", "ringcx.offhook.self_heal.async.failed", {
+          source,
+          email: account?.email || null,
+          durationMs: Date.now() - startedAt,
+          error: error.message,
+          ...meta,
+        });
+      });
   }
 
   function attachSendCodeResponseLog(req, res, email) {
@@ -231,38 +287,135 @@ function createAuthRouter(config, options = {}) {
   );
 
   router.post("/verify-code", verifyCodeLimit, async (req, res) => {
+    const startedAt = Date.now();
+    const timings = {};
+    const normalizedEmail = String(req.body?.email || "").trim().toLowerCase();
+    const traceLogin = createCxLoginTrace(logger, "otp-verify", {
+      email: normalizedEmail || null,
+      origin: req.get("origin") || null,
+      referer: req.get("referer") || null,
+    });
+    traceLogin("start");
     try {
-      const normalizedEmail = String(req.body?.email || "").trim().toLowerCase();
-      const account = await findAccountByEmail(normalizedEmail);
+      const account = await timedAuthStep(timings, "findAccountMs", () => findAccountByEmail(normalizedEmail));
+      traceLogin("account.lookup.done", {
+        account,
+        stepMs: timings.findAccountMs,
+        reason: account ? "found" : "missing",
+      });
       if (!account || account.status === "disabled") {
+        traceLogin("account.rejected", {
+          account,
+          statusCode: 400,
+          reason: account ? "disabled-account" : "unknown-account",
+        });
         return res.status(400).json({ ok: false, error: "Unknown account" });
       }
 
       try {
-        await verifyOtpChallenge(config, account, String(req.body?.code || ""));
+        await timedAuthStep(timings, "verifyOtpMs", () =>
+          verifyOtpChallenge(config, account, String(req.body?.code || "")));
+        traceLogin("otp.verify.done", {
+          account,
+          stepMs: timings.verifyOtpMs,
+        });
       } catch (verifyError) {
         // Surface the attempts-remaining count so the UI can show
         // "2 attempts left" instead of a generic error.
+        traceLogin("otp.verify.failed", {
+          account,
+          stepMs: timings.verifyOtpMs,
+          statusCode: verifyError.status || 401,
+          error: verifyError.message,
+        });
         return res.status(verifyError.status || 401).json({
           ok: false,
           error: verifyError.message,
           attemptsRemaining: verifyError.attemptsRemaining ?? null,
         });
       }
-      await userAccountRepository.touchUserAccountLogin(account.email);
+      await timedAuthStep(timings, "touchLoginMs", () =>
+        userAccountRepository.touchUserAccountLogin(account.email));
+      traceLogin("account.touch-login.done", {
+        account,
+        stepMs: timings.touchLoginMs,
+      });
       if (account.status === "invited") {
-        await userAccountRepository.updateUserAccount(account.id, {
-          status: "active",
+        await timedAuthStep(timings, "activateInvitedAccountMs", () =>
+          userAccountRepository.updateUserAccount(account.id, {
+            status: "active",
+          }));
+        traceLogin("account.activate-invited.done", {
+          account,
+          stepMs: timings.activateInvitedAccountMs,
         });
       }
 
-      const latest = (await findAccountByEmail(normalizedEmail)) || account;
-      await ensureRingcxOffhookAllowed(latest, "auth-verify-code");
+      const latest = (await timedAuthStep(timings, "reloadAccountMs", () =>
+        findAccountByEmail(normalizedEmail))) || account;
+      traceLogin("account.reload.done", {
+        account: latest,
+        stepMs: timings.reloadAccountMs,
+      });
+      let offhookResult = null;
+      const thinLogin = loginThinEnabled();
+      const asyncOffhookSelfHeal = asyncOffhookSelfHealEnabled();
+      if (asyncOffhookSelfHeal) {
+        timings.ringcxOffhookSelfHealScheduled = true;
+        scheduleRingcxOffhookAllowed(latest, "auth-verify-code-async", {
+          email: normalizedEmail || null,
+          loginThinEnabled: thinLogin,
+        });
+        traceLogin("offhook.self-heal.scheduled", {
+          account: latest,
+          loginThinEnabled: thinLogin,
+          asyncOffhookSelfHeal,
+          offhookScheduled: true,
+        });
+      } else {
+        offhookResult = await timedAuthStep(timings, "ringcxOffhookSelfHealMs", () =>
+          ensureRingcxOffhookAllowed(latest, "auth-verify-code"));
+        traceLogin("offhook.self-heal.done", {
+          account: latest,
+          stepMs: timings.ringcxOffhookSelfHealMs,
+          loginThinEnabled: thinLogin,
+          asyncOffhookSelfHeal,
+          result: offhookResult,
+        });
+      }
 
       // Login is intentionally allowed outside the dialing window so agents
       // can review recordings after hours. Dialer/workspace access is gated
       // separately by business-hours checks.
-      const token = issueLoginToken(config, latest);
+      const token = await timedAuthStep(timings, "issueTokenMs", () =>
+        Promise.resolve(issueLoginToken(config, latest)));
+      traceLogin("token.issue.done", {
+        account: latest,
+        stepMs: timings.issueTokenMs,
+      });
+      emitAuthLog("info", "auth.verify_code.timing", getRequestMeta(req, {
+        email: normalizedEmail || null,
+        durationMs: Date.now() - startedAt,
+        timings,
+        loginThinEnabled: thinLogin,
+        asyncOffhookSelfHeal,
+        offhook: offhookResult
+          ? {
+            ok: offhookResult.ok,
+            skipped: Boolean(offhookResult.skipped),
+            reason: offhookResult.reason || null,
+            patched: Boolean(offhookResult.patched),
+          }
+          : null,
+      }));
+      traceLogin("response.ready", {
+        account: latest,
+        statusCode: 200,
+        stepMs: Date.now() - startedAt,
+        loginThinEnabled: thinLogin,
+        asyncOffhookSelfHeal,
+        offhookScheduled: Boolean(timings.ringcxOffhookSelfHealScheduled),
+      });
       return res.json({
         ok: true,
         token,
@@ -270,6 +423,17 @@ function createAuthRouter(config, options = {}) {
         expiresAt: null,
       });
     } catch (error) {
+      traceLogin("failed", {
+        statusCode: error.status || 500,
+        stepMs: Date.now() - startedAt,
+        error: error.message,
+      });
+      emitAuthLog("warn", "auth.verify_code.failed", getRequestMeta(req, {
+        email: normalizedEmail || null,
+        durationMs: Date.now() - startedAt,
+        timings,
+        error: error.message,
+      }));
       return res.status(error.status || 500).json({ ok: false, error: error.message });
     }
   });
@@ -419,6 +583,22 @@ function createAuthRouter(config, options = {}) {
       const result = await cxOAuthService.start({
         user: req.user,
         finalRedirectTo: sanitizeFinalRedirectTo(req.body?.finalRedirectTo),
+      });
+      return res.json(result);
+    } catch (error) {
+      return res.status(500).json({ ok: false, error: error.message });
+    }
+  });
+
+  // Local/test lane for comparing a shallow-cloned OAuth path without changing
+  // the production /cx route. The callback is shared; finalRedirectTo marks the
+  // state so cxOAuthService can avoid blocking the browser on off-hook repair.
+  router.post("/cx/prep/start", requireAuth(config), requireActiveAccount, async (req, res) => {
+    try {
+      const { cxOAuthService } = require("../../../../packages/shared-services/src");
+      const result = await cxOAuthService.start({
+        user: req.user,
+        finalRedirectTo: sanitizeFinalRedirectTo(req.body?.finalRedirectTo) || "/cx/prep",
       });
       return res.json(result);
     } catch (error) {

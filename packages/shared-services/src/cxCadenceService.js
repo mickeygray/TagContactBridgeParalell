@@ -80,6 +80,22 @@ function normalizeExternalId(value) {
   return normalized || null;
 }
 
+function parseBooleanFlag(value, fallback = false) {
+  if (value === undefined || value === null || value === "") return fallback;
+  const normalized = String(value).trim().toLowerCase();
+  if (["1", "true", "yes", "y", "on"].includes(normalized)) return true;
+  if (["0", "false", "no", "n", "off"].includes(normalized)) return false;
+  return fallback;
+}
+
+function shouldStageDispatchIntentAsServing(options = {}, status = "") {
+  if (options.markServing === true) return true;
+  if (options.markServing === false) return false;
+  const enabled = parseBooleanFlag(process.env.CX_DISPATCH_STAGE_AS_SERVING, true);
+  if (!enabled) return false;
+  return status === "serving" || status === "staged";
+}
+
 function buildSyntheticCxSessionId(queueItemId, placedAt = new Date()) {
   const id = normalizeExternalId(queueItemId);
   if (!id) return null;
@@ -4014,10 +4030,7 @@ async function stageCxDispatchIntent(options = {}) {
   }
 
   const status = String(options.status || "").trim().toLowerCase();
-  const markServing =
-    options.markServing === true ||
-    status === "serving" ||
-    status === "staged";
+  const markServing = shouldStageDispatchIntentAsServing(options, status);
   const markClaimed =
     !markServing &&
     status === "queued" &&

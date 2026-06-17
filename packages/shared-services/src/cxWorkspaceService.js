@@ -2223,6 +2223,24 @@ function canViewQueueItemForAgent(queueItem = {}, context = {}) {
   );
 }
 
+function summarizeQueueDebugItem(item = {}) {
+  return {
+    id: item?._id ? String(item._id) : null,
+    domain: item.domain || null,
+    caseId: item.caseId || null,
+    state: item.state || null,
+    queueFamily: item.queueFamily || item.metadata?.queueFamily || null,
+    routeCampaignKey: getQueueItemRouteCampaignKey(item) || null,
+    assignedExtensionId: item.assignment?.extensionId || null,
+    actionKey: item.metadata?.actionKey || null,
+  };
+}
+
+function writeCxWorkspaceQueueDebug(event, meta = {}) {
+  if (!readBooleanEnv("RC_CX_WORKSPACE_QUEUE_DEBUG", false)) return;
+  console.log(`cx.workspace.queue.${event}`, meta);
+}
+
 function parseQueueFamilyList(value, fallback = []) {
   return normalizeLeadQueueFamilyList(value, fallback);
 }
@@ -3952,6 +3970,7 @@ function summarizeServedQueueItem(queueItem, cadenceDoc = null) {
 async function buildCxQueueItems(context, limit = 50) {
   const agentExtensionId = String(context?.account?.extensionId || "").trim();
   if (!agentExtensionId) return [];
+  const queueDebugStartedAt = Date.now();
   await bumpLastActivityAt(agentExtensionId, { source: "cx-workspace" }).catch(() => null);
   const backfillIntervalMs = Math.max(
     Number(process.env.RC_CX_WORKSPACE_ORDERING_BACKFILL_INTERVAL_MS) || 60_000,
@@ -3967,6 +3986,7 @@ async function buildCxQueueItems(context, limit = 50) {
   }
 
   let activeQueueItems = await listActiveCxQueueItemsForAgent(context, agentExtensionId);
+  const initialActiveCount = activeQueueItems.length;
   const routeReconciliation = await reconcileRouteCampaignAssignmentsForAgent({
     context,
     agentExtensionId,
@@ -3981,6 +4001,7 @@ async function buildCxQueueItems(context, limit = 50) {
   }
   let visibleQueueItems = activeQueueItems.filter((item) =>
     canViewQueueItemForAgent(item, context));
+  const initialVisibleCount = visibleQueueItems.length;
   const asyncRefill =
     readBooleanEnv("RC_CX_WORKSPACE_REFILL_ASYNC_ENABLED", true) &&
     !(visibleQueueItems.length === 0 && readBooleanEnv("RC_CX_WORKSPACE_REFILL_SYNC_WHEN_EMPTY", false));
@@ -4023,6 +4044,38 @@ async function buildCxQueueItems(context, limit = 50) {
       item,
       cadenceByCaseId.get(buildQueueCadenceKey(item.domain || context.domain, item.caseId)) || null,
     ));
+  writeCxWorkspaceQueueDebug("build", {
+    durationMs: Date.now() - queueDebugStartedAt,
+    domain: context.domain || null,
+    extensionId: agentExtensionId,
+    accountEmail: context.account?.email || null,
+    initialActiveCount,
+    activeCount: activeQueueItems.length,
+    initialVisibleCount,
+    visibleCount: visibleQueueItems.length,
+    servedCount: servedItems.length,
+    routeReconciliation: routeReconciliation
+      ? {
+          ok: routeReconciliation.ok,
+          released: routeReconciliation.released || 0,
+          attempted: routeReconciliation.attempted || 0,
+          reason: routeReconciliation.reason || null,
+          routeCampaigns: routeReconciliation.routeCampaigns || null,
+          error: routeReconciliation.error || null,
+        }
+      : null,
+    refill: refill
+      ? {
+          ok: refill.ok,
+          assigned: refill.assigned || 0,
+          released: refill.released || 0,
+          skipped: Boolean(refill.skipped),
+          reason: refill.reason || null,
+          error: refill.error || null,
+        }
+      : null,
+    sample: visibleQueueItems.slice(0, 3).map(summarizeQueueDebugItem),
+  });
 
   const sortNow = new Date();
 

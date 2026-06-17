@@ -72,6 +72,26 @@ test("held CX call but a different NON-bridge EX call is active => defer to EX (
   );
 });
 
+test("cx-owned mode: held CX call wins even when EX sees a different session", () => {
+  assert.deepEqual(
+    decideExPollCxOwnership({
+      enabled: true, mode: "cx-owned", previousHasCxCall: true, previousCxIdentity: UII,
+      exActiveIdentity: "SOME-OTHER-EX-SESSION", exActiveIsBridge: false,
+    }),
+    { cxOwnsCallState: true, forceExNoCall: true },
+  );
+});
+
+test("cx-owned mode still requires the caller to enable EX/CX decoupling", () => {
+  assert.deepEqual(
+    decideExPollCxOwnership({
+      enabled: false, mode: "cx-owned", previousHasCxCall: true, previousCxIdentity: UII,
+      exActiveIdentity: "SOME-OTHER-EX-SESSION", exActiveIsBridge: false,
+    }),
+    { cxOwnsCallState: false, forceExNoCall: false },
+  );
+});
+
 test("held CX call, different identity but flagged as bridge => still own it (bridge, not a real EX call)", () => {
   assert.deepEqual(
     decideExPollCxOwnership({
