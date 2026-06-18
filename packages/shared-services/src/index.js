@@ -659,7 +659,23 @@ const {
   AUTO_REPLY_COOLDOWN_MS,
 } = require("./smsAutoResponderService");
 
+const { createAiTaskRunner } = require("./aiTaskRunner");
+const { createAiProviders, createAnthropicAdapter, createOpenAiAdapter, REASONING_KINDS } = require("./aiProviders");
+const { createAiPrimitives, toCall } = require("./aiPrimitives");
+const { createAiTaskClient } = require("./aiTaskClient");
+const aiTaskRegistry = require("./aiTaskRegistry");
+
 module.exports = {
+  // ── AI bus: provider-neutral task runner + primitives + delivery client ──
+  createAiTaskRunner,
+  createAiProviders,
+  createAnthropicAdapter,
+  createOpenAiAdapter,
+  REASONING_KINDS,
+  createAiPrimitives,
+  toCall,
+  createAiTaskClient,
+  aiTaskRegistry,
   // Pacing queue (PR: Universal Call Queue)
   bumpLastActivityAt,
   deriveActivityState,

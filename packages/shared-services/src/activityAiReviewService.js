@@ -3,9 +3,26 @@
 const { createAnthropicClient } = require("../../shared-integrations/src");
 const { activityAiReviewRepository, caseProfileRepository } = require("../../shared-repositories/src");
 const { createLogicsFacade } = require("./logicsFacadeService");
+const { createAiTaskClient } = require("./aiTaskClient");
 
 const PROMPT_VERSION = "v1";
 const REVIEW_TYPE = "contact-safety";
+const ACTIVITY_TASK_ID = "activity.contactSafetyReview";
+
+// Lazy bus client (control-plane 5001 -> ai-bus 7000), built once per process.
+let _aiTaskClient = null;
+function getAiTaskClient() {
+  if (!_aiTaskClient) _aiTaskClient = createAiTaskClient();
+  return _aiTaskClient;
+}
+
+// Same flag the bus uses to enable the task — one switch turns the whole
+// 5001->7000 round-trip on. Default OFF = byte-identical to legacy behavior.
+function activityBusEnabled() {
+  return ["1", "true", "yes", "on"].includes(
+    String(process.env.AI_TASK_ACTIVITY_CONTACTSAFETYREVIEW_ENABLED || "").trim().toLowerCase(),
+  );
+}
 
 function trimText(value, maxLength = 600) {
   const text = String(value || "").trim();
@@ -112,11 +129,63 @@ function normalizeReview(review, activities) {
   };
 }
 
-async function reviewCaseActivities(domain, caseId, options = {}) {
+// ── Model execution step (the only part that moves to the bus) ────────────────
+// Routes through the AI bus (5001 -> 7000 -> 5001) when the task flag is on, and
+// falls back to the legacy direct Anthropic call on ANY bus miss (disabled,
+// contract failure, or transport error) so a down/slow bus never breaks a batch.
+// Returns { parsed (review JSON), rawResponseText, model, provider }.
+async function runActivityModel({ domain, caseId, activities, options = {}, deps = {} }) {
+  const enabled = deps.activityBusEnabled ? deps.activityBusEnabled() : activityBusEnabled();
+  if (enabled) {
+    const client = deps.aiTaskClient || getAiTaskClient();
+    try {
+      const bus = await client.runAiTask(
+        ACTIVITY_TASK_ID,
+        { domain, caseId, activities },
+        { caller: "control-plane.activity-review" },
+      );
+      if (bus && bus.ok && bus.result && typeof bus.result === "object") {
+        return {
+          parsed: bus.result,
+          rawResponseText: JSON.stringify(bus.result),
+          model: bus.model || null,
+          provider: bus.provider || "bus",
+          via: "bus",
+        };
+      }
+      // bus disabled / contract miss / transport failure -> fall through to legacy
+    } catch {
+      // never let the bus break the batch
+    }
+  }
+  return runLegacyActivityModel({ domain, caseId, activities, options, deps });
+}
+
+async function runLegacyActivityModel({ domain, caseId, activities, options = {}, deps = {} }) {
+  const makeClient = deps.createAnthropicClient || createAnthropicClient;
+  const client = makeClient();
+  const response = await client.createMessage({
+    system: buildSystemPrompt(),
+    messages: [{ role: "user", content: buildUserPrompt(domain, caseId, activities) }],
+    model: options.model,
+    maxTokens: options.maxTokens,
+    temperature: options.temperature,
+  });
+  const rawResponseText = client.extractTextBlocks(response);
+  return {
+    parsed: parseReviewJson(rawResponseText),
+    rawResponseText,
+    model: response.model || client.config.model,
+    provider: "anthropic",
+    via: "legacy",
+  };
+}
+
+async function reviewCaseActivities(domain, caseId, options = {}, deps = {}) {
   const normalizedDomain = String(domain || "").toUpperCase();
   const numericCaseId = Number(caseId);
-  const facade = createLogicsFacade(normalizedDomain);
-  const client = createAnthropicClient();
+  const facade = deps.facade || createLogicsFacade(normalizedDomain);
+  const repos = deps.repositories || { activityAiReviewRepository, caseProfileRepository };
 
   const activities = await facade.fetchActivities(numericCaseId);
   if (!Array.isArray(activities) || activities.length === 0) {
@@ -128,35 +197,27 @@ async function reviewCaseActivities(domain, caseId, options = {}) {
     };
   }
 
-  const response = await client.createMessage({
-    system: buildSystemPrompt(),
-    messages: [
-      {
-        role: "user",
-        content: buildUserPrompt(normalizedDomain, numericCaseId, activities),
-      },
-    ],
-    model: options.model,
-    maxTokens: options.maxTokens,
-    temperature: options.temperature,
-  });
-
-  const rawResponseText = client.extractTextBlocks(response);
-  const parsed = parseReviewJson(rawResponseText);
-  const normalized = normalizeReview(parsed, activities);
-
-  const record = await activityAiReviewRepository.createActivityAiReview({
+  const { parsed, rawResponseText, model, provider, via } = await runActivityModel({
     domain: normalizedDomain,
     caseId: numericCaseId,
-    model: response.model || client.config.model,
-    provider: "anthropic",
+    activities,
+    options,
+    deps,
+  });
+  const normalized = normalizeReview(parsed, activities);
+
+  const record = await repos.activityAiReviewRepository.createActivityAiReview({
+    domain: normalizedDomain,
+    caseId: numericCaseId,
+    model,
+    provider,
     rawResponseText,
     rawResponseJson: parsed,
     reviewedAt: new Date(),
     ...normalized,
   });
 
-  await caseProfileRepository.upsertCaseProfile(normalizedDomain, numericCaseId, {
+  await repos.caseProfileRepository.upsertCaseProfile(normalizedDomain, numericCaseId, {
     aiActivityReview: {
       reviewId: record._id,
       status: normalized.status,
@@ -176,6 +237,7 @@ async function reviewCaseActivities(domain, caseId, options = {}) {
     domain: normalizedDomain,
     caseId: numericCaseId,
     activityCount: activities.length,
+    via,
     review: {
       reviewId: record._id,
       status: normalized.status,
@@ -187,7 +249,7 @@ async function reviewCaseActivities(domain, caseId, options = {}) {
       evidence: normalized.evidence,
       riskFlags: normalized.riskFlags,
       reviewedAt: record.reviewedAt,
-      model: response.model || client.config.model,
+      model,
     },
   };
 }
@@ -195,4 +257,9 @@ async function reviewCaseActivities(domain, caseId, options = {}) {
 module.exports = {
   REVIEW_TYPE,
   reviewCaseActivities,
+  // exported for the prompt-parity test + reuse
+  buildSystemPrompt,
+  buildUserPrompt,
+  formatActivitiesForPrompt,
+  activityBusEnabled,
 };

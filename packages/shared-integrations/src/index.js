@@ -5,6 +5,7 @@ const {
   extractTextBlocks,
   extractToolUse,
 } = require("./anthropicClient");
+const { createOpenAiClient, getOpenAiConfig } = require("./openaiClient");
 const { createCallFireClient } = require("./callFireClient");
 const {
   createCallrailClient,
@@ -32,6 +33,8 @@ module.exports = {
   createAnthropicClient,
   extractTextBlocks,
   extractToolUse,
+  createOpenAiClient,
+  getOpenAiConfig,
   createCallFireClient,
   createCallrailClient,
   createCompanyRuntime,

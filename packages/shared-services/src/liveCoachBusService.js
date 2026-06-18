@@ -258,11 +258,29 @@ function startTurnTimings(session, transcript) {
   };
 }
 
-function stampTurnTiming(session, key, extra) {
+function stampTurnTiming(session, key, extra, logger) {
   if (!session?.latest) return;
   const timings = session.latest.turnTimings || (session.latest.turnTimings = {});
   timings[key] = new Date().toISOString();
   if (extra) Object.assign(timings, extra);
+  // At settle, emit ONE structured row with the full per-turn critical path so
+  // coach latency can be AGGREGATED from logs (the in-memory object is
+  // glanceable-only). vadToFirstDeltaMs is the number the rep actually waits for.
+  if (key === "settledAt" && logger && logger.info) {
+    const t = timings;
+    const ms = (a, b) => (a && b ? new Date(b) - new Date(a) : null);
+    logger.info("live_coach.turn.timing", {
+      sessionId: session.id || null,
+      channel: t.channel || null,
+      outcome: t.outcome || null,
+      miniMs: t.miniMs ?? null,
+      vadToComposeMs: ms(t.vadFinalAt, t.composeStartAt),
+      composeToFirstDeltaMs: ms(t.composeStartAt, t.firstDeltaAt),
+      vadToFirstDeltaMs: ms(t.vadFinalAt, t.firstDeltaAt),
+      firstDeltaToSettledMs: ms(t.firstDeltaAt, t.settledAt),
+      totalMs: ms(t.vadFinalAt, t.settledAt),
+    });
+  }
 }
 
 function pushMemory(session, key, value) {
@@ -2191,7 +2209,7 @@ function createLiveCoachBus({
             at: new Date().toISOString(),
             composer: cleanText(composed?.composer || "anthropic", 80),
           };
-          stampTurnTiming(latest, "settledAt", { outcome: "wait" });
+          stampTurnTiming(latest, "settledAt", { outcome: "wait" }, logger);
           emit(latest.id, "dialog", { dialog: latest.latest.dialog });
           return;
         }
@@ -2218,7 +2236,7 @@ function createLiveCoachBus({
             ...latest.latest.dialog,
             suppressedSay: say,
           });
-          stampTurnTiming(latest, "settledAt", { outcome: "suppressed" });
+          stampTurnTiming(latest, "settledAt", { outcome: "suppressed" }, logger);
           emit(latest.id, "dialog", { dialog: latest.latest.dialog });
           return;
         }
@@ -2230,7 +2248,7 @@ function createLiveCoachBus({
           composer: cleanText(composed?.composer || "anthropic", 80),
           model: cleanText(composed?.model || "", 120) || latest.latest.dialog.model || null,
         };
-        stampTurnTiming(latest, "settledAt", { outcome: "ready" });
+        stampTurnTiming(latest, "settledAt", { outcome: "ready" }, logger);
         pushMemory(latest, "coachingSuggestions", latest.latest.dialog);
         writeJsonLine(path.join(latest.dir, "ai", "dialog.ndjson"), latest.latest.dialog);
         emit(latest.id, "dialog", { dialog: latest.latest.dialog });
@@ -2252,7 +2270,7 @@ function createLiveCoachBus({
           at: new Date().toISOString(),
         };
         if (fallbackSay) pushMemory(latest, "coachingSuggestions", latest.latest.dialog);
-        stampTurnTiming(latest, "settledAt", { outcome: "error" });
+        stampTurnTiming(latest, "settledAt", { outcome: "error" }, logger);
         emit(latest.id, "dialog.error", {
           dialog: latest.latest.dialog,
           error: error.message,

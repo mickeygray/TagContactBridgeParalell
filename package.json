@@ -54,6 +54,11 @@
     "rc:live-monitor:diarize-manual": "node scripts/run-ex-diarize-manual-test.js",
     "eval:speaker-labels": "node scripts/eval-speaker-label-models.js",
     "ai:bus": "node apps/ai-bus/src/server.js",
+    "ai:bus:local": "node apps/ai-bus/src/localBusServer.js",
+    "ai:bus:bench": "node scripts/ai-bus-transport-bench.js",
+    "ai:bus:smoke:activity": "node scripts/ai-bus-activity-smoke.js",
+    "ai:bus:replay": "node scripts/ai-bus-replay.js",
+    "ai:bus:probes": "node scripts/ai-bus-shape-probes.js",
     "coach:grpc:janitor": "node scripts/clear-live-coach-grpc-runtime.js"
   },
   "dependencies": {

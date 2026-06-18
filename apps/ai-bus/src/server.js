@@ -58,6 +58,15 @@ const {
 const {
   sendPlainEmail,
 } = require("../../../packages/shared-services/src/sendgridMailService");
+// Runtime, no-restart per-component coach MODEL override (mirrors the composer
+// tier toggle below). Default-off: with no policy row every resolveCoachModel()
+// returns the factory's env default, byte-identical to today.
+const {
+  resolveCoachModel,
+  applyCoachPolicy,
+  getCoachPolicyState,
+  describeCoachComponents,
+} = require("./liveCoachModelPolicy");
 
 let processCrashLogger = null;
 
@@ -337,6 +346,8 @@ function createOpusCallStrategist({ logger } = {}) {
   const maxTokens = Math.max(300, Math.min(2000, Number(process.env.LIVE_COACH_STRATEGY_MAX_TOKENS || 900) || 900));
 
   return async function generateCallStrategy({ interview = {}, contactName = "", agentName = "", caseId = "", priorStrategy = "" } = {}) {
+    // Live per-turn read; clamped to the anthropic allow-set, env-default fallback.
+    const requestModel = resolveCoachModel("liveCoach.callStrategy", null, model);
     const startedAtMs = Date.now();
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), timeoutMs);
@@ -349,7 +360,7 @@ function createOpusCallStrategist({ logger } = {}) {
           "anthropic-version": "2023-06-01",
         },
         body: JSON.stringify({
-          model,
+          model: requestModel,
           max_tokens: maxTokens,
           thinking: { type: "adaptive" },
           system: [
@@ -548,8 +559,12 @@ function createOpenAiRollingDigest({ logger } = {}) {
   }, { force: true });
 
   return async function rollingDigestWithOpenAi({ lastTurns = [], coachLines = [], packets = [], knownFacts = [], priorSummary = "" } = {}) {
+    // Live per-turn read: an enabled policy row swaps the model with no restart;
+    // otherwise this is `model` (the env default) verbatim. Clamped to the
+    // component allow-set inside resolveCoachModel, so a bad id can't reach OpenAI.
+    const requestModel = resolveCoachModel("liveCoach.rollingDigest", null, model);
     const requestBody = {
-      model,
+      model: requestModel,
       ...(serviceTier ? { service_tier: serviceTier } : {}),
       prompt_cache_key: `live-coach-rolling-digest:${MINI_ROLLING_DIGEST_PROMPT_VERSION}`,
       prompt_cache_retention: "in_memory",
@@ -672,10 +687,13 @@ function createOpenAiCallGrader({ logger } = {}) {
       priorCallSummary: cleanText(payload.priorCallSummary || "", 1200),
       counters: payload.counters || {},
     };
+    // Live per-turn read; clamped, env-default fallback. The cache key embeds the
+    // model, so a swap correctly re-keys the OpenAI prompt cache.
+    const requestModel = resolveCoachModel("liveCoach.callGrader", null, model);
     const requestBody = {
-      model,
+      model: requestModel,
       ...(serviceTier ? { service_tier: serviceTier } : {}),
-      prompt_cache_key: `live-coach-call-grader:${CALL_GRADER_PROMPT_VERSION}:${model}`,
+      prompt_cache_key: `live-coach-call-grader:${CALL_GRADER_PROMPT_VERSION}:${requestModel}`,
       ...(promptCacheRetention ? { prompt_cache_retention: promptCacheRetention } : {}),
       input: [
         { role: "developer", content: CALL_GRADER_STATIC_PROMPT },
@@ -844,11 +862,14 @@ function createOpenAiSemanticContextJudge({ logger } = {}) {
       recentProspect,
       recentFiltered,
     };
+    // Live per-turn read; clamped, env-default fallback. The cache key embeds the
+    // model, so a swap correctly re-keys the OpenAI prompt cache.
+    const requestModel = resolveCoachModel("liveCoach.contextJudge", null, model);
     const requestBody = {
-      model,
+      model: requestModel,
       ...(serviceTier ? { service_tier: serviceTier } : {}),
       prompt_cache_key: buildMiniContextJudgeCacheKey({
-        model,
+        model: requestModel,
         metadata: {
           ...metadata,
           ...(context?.metadata || {}),
@@ -3530,6 +3551,51 @@ async function main() {
   const requireDashboardAccess = buildDashboardAccessMiddleware();
   const requireDashboardOrInternalAccess = buildDashboardOrInternalAccessMiddleware(config);
 
+  // ── Universal AI task bus (provider-neutral runner + generic task routes) ──
+  // Additive + FAIL-ISOLATED: GET /api/ai/tasks(/:id) + POST /api/ai/tasks/:id/run
+  // behind requireInternalAccess. Named tasks are sandbox-backed and default-OFF
+  // (flip AI_TASK_<ID>_ENABLED to enable); ai.* primitives are off in production.
+  // Wrapped so a construction error can NEVER break the rest of the 7000 server.
+  try {
+    const { createAnthropicClient, createOpenAiClient } = require("../../../packages/shared-integrations/src");
+    const { createAiProviders } = require("../../../packages/shared-services/src/aiProviders");
+    const { createAiTaskRunner } = require("../../../packages/shared-services/src/aiTaskRunner");
+    const { buildBusRegistry } = require("../../../packages/shared-services/src/aiBusRegistry");
+    const { mountAiTaskRoutes } = require("./aiTaskRoutes");
+    const aiBusRegistry = buildBusRegistry();
+    // Spend telemetry: one structured row per task run (taskId/provider/model/
+    // status/latency/usage). A first control loop so spend governance isn't blind;
+    // a durable AiTaskRun sink can subscribe to this same record() shape later.
+    const aiBusTelemetry = {
+      record: (row) => {
+        try { logger.info("ai_task.run", row); } catch { /* telemetry must never break a task */ }
+      },
+    };
+    const aiBusRunner = createAiTaskRunner({
+      providers: createAiProviders({ anthropic: createAnthropicClient(), openai: createOpenAiClient() }),
+      registry: aiBusRegistry,
+      telemetry: aiBusTelemetry,
+    });
+    // Fail CLOSED: the generic AI task surface requires a real internal secret
+    // regardless of NODE_ENV (7000 can be tunneled/proxied, so the dev no-secret
+    // fall-open is an exposure here). Explicit AI_BUS_ALLOW_INSECURE_LOCAL=true
+    // re-opens it for local dev only. Scoped to these routes so other internal
+    // endpoints keep their existing middleware behavior.
+    const internalSecretConfigured = Boolean(String(config.internalServiceSecret || "").trim());
+    const allowInsecureAiRoutes = boolFromEnv(process.env.AI_BUS_ALLOW_INSECURE_LOCAL, false);
+    const aiRoutesAuth = (req, res, next) => {
+      if (!internalSecretConfigured && !allowInsecureAiRoutes) {
+        return res.status(401).json({ ok: false, error: "AI task routes require INTERNAL_SERVICE_SECRET (set AI_BUS_ALLOW_INSECURE_LOCAL=true for local dev)" });
+      }
+      return requireInternalAccess(req, res, next);
+    };
+    mountAiTaskRoutes(app, { runner: aiBusRunner, registry: aiBusRegistry, auth: aiRoutesAuth });
+    const authMode = internalSecretConfigured ? "secret-required" : allowInsecureAiRoutes ? "INSECURE-local" : "fail-closed";
+    console.log(`[ai-bus] task routes mounted: ${aiBusRegistry.listTasks().length} tasks (${authMode})`);
+  } catch (err) {
+    console.error("[ai-bus] task-route mount failed (non-fatal):", err && err.message);
+  }
+
   app.get("/health", requireHealthAccess, (req, res) => {
     const mongo = {
       ...getMongoState(),
@@ -3925,6 +3991,24 @@ async function main() {
       error: result.error || null,
     });
     res.status(result.ok ? 200 : 400).json(result);
+  });
+
+  // Mid-day, no-restart per-component coach MODEL override (sibling of the
+  // composer-tier toggle above). GET returns the live cache + the allow-sets so
+  // the admin surface renders only legal choices; POST replaces the cache (fed by
+  // the 5001 AiPolicy push / boot cold-load). Default-off: an empty policy leaves
+  // every coach factory on its env default, byte-identical to today.
+  app.get("/api/ai/live-coach/dashboard/model-policy", requireDashboardAccess, (req, res) => {
+    res.json({ ok: true, policy: getCoachPolicyState(), components: describeCoachComponents() });
+  });
+
+  app.post("/api/ai/live-coach/dashboard/model-policy", requireDashboardAccess, (req, res) => {
+    const state = applyCoachPolicy(req.body || {});
+    logger.info("live_coach.model_policy.update", {
+      rev: state.rev,
+      components: Object.keys(state.components || {}),
+    });
+    res.json({ ok: true, policy: state });
   });
 
   app.get("/api/ai/live-coach/dashboard/closeout/stats", requireDashboardAccess, (req, res) => {

@@ -21,6 +21,14 @@ function getAnthropicConfig() {
   };
 }
 
+// Opus 4.7+ reject sampling params (temperature/top_p) with a 400; older models
+// (opus-4-6, sonnet, haiku, 3.x) accept them. Sending ANY temperature — including
+// the config default 0 — to an Opus 4.7/4.8 model kills the request, which made
+// every Opus-on-bus reasoning task fail. Exported for tests.
+function modelRejectsSamplingParams(model) {
+  return /claude-opus-4-(?:[7-9]|\d\d)/.test(String(model || ""));
+}
+
 function extractTextBlocks(payload) {
   const content = Array.isArray(payload?.content) ? payload.content : [];
   return content
@@ -79,16 +87,20 @@ function createAnthropicClient() {
     let lastError = null;
 
     for (const modelName of modelCandidates) {
+      const resolvedTemperature =
+        temperature !== undefined && temperature !== null ? temperature : config.temperature;
       const body = {
         model: modelName,
         max_tokens: maxTokens || config.maxTokens,
-        temperature:
-          temperature !== undefined && temperature !== null
-            ? temperature
-            : config.temperature,
         system,
         messages,
       };
+      // Omit temperature for models that reject sampling params (Opus 4.7+);
+      // every other model keeps it (incl. the deterministic temperature:0 that
+      // classify/json tasks rely on).
+      if (!modelRejectsSamplingParams(modelName) && resolvedTemperature !== undefined && resolvedTemperature !== null) {
+        body.temperature = resolvedTemperature;
+      }
       if (Array.isArray(tools) && tools.length > 0) {
         body.tools = tools;
         // Default `tool_choice` to "any" when tools are provided — we
@@ -188,4 +200,5 @@ module.exports = {
   extractTextBlocks,
   extractToolUse,
   getAnthropicConfig,
+  modelRejectsSamplingParams,
 };
