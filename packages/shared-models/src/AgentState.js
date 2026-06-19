@@ -72,6 +72,10 @@ const agentStateSchema = new mongoose.Schema(
       channel: { type: String, enum: ["ex", "cx"], default: null },
       startTime: Date,
     },
+    // Shadow-only canonical CX call lifecycle payload. This is intentionally
+    // Mixed while the lifecycle shape is observed in production; once the
+    // state machine is authoritative, replace it with a typed sub-schema.
+    cxCall: { type: mongoose.Schema.Types.Mixed, default: null },
     lastCallOutcome: { type: String, default: null },
     lastCallEndedAt: { type: Date, default: null },
     lastCallDirection: { type: String, default: null },

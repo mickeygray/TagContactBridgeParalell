@@ -28,6 +28,13 @@ const {
 const { evaluateCxClear } = require("./cxCallStateGuard");
 const { traceCxCallIdentity } = require("./cxCallTraceService");
 const {
+  buildCxCallLifecyclePatch,
+  buildCxCallTransitionId,
+  isCxCanonicalCallVerboseLoggingEnabled,
+  isCxCanonicalCallWriteEnabled,
+  writeCxCallLifecycleShadowState,
+} = require("./cxCallLifecycleService");
+const {
   cancelPublishedQueueItemInRingcx,
   publishQueueItemToRingcx,
 } = require("./ringcxLeadServingService");
@@ -136,6 +143,19 @@ function parseBooleanFlag(value, fallback = false) {
 function parsePositiveInteger(value, fallback = null) {
   const parsed = Number(value);
   return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : fallback;
+}
+
+function writeShadowCxCallState(extensionId, patch, options = {}) {
+  if (!isCxCanonicalCallWriteEnabled()) return null;
+  if (!extensionId || !patch) return null;
+  return writeCxCallLifecycleShadowState({
+    agentStateRepository,
+    extensionId,
+    patch,
+    logger: options.logger || null,
+    reason: options.reason || null,
+    event: options.event || null,
+  });
 }
 
 function isDialTraceEnabled() {
@@ -575,6 +595,25 @@ async function markAgentAvailableAfterAutoDisposition(extensionId, { logger = nu
       "upstream.source": "ringcx-auto-disposition",
       "upstream.mirroredAt": now,
     });
+    writeShadowCxCallState(
+      normalizedExtensionId,
+      buildCxCallLifecyclePatch({
+        writer: "ringcx-auto-disposition",
+        queueItemId: null,
+        caseId: existing?.caseId || null,
+        phone: existingCall?.to || existingCall?.destination || existingCall?.phone || existingCall?.from || null,
+        uii: existingIdentity || requestedIdentity || null,
+        phase: "released",
+        lastObservedAt: now,
+        lastWriter: "ringcx-auto-disposition",
+        transitionId: buildCxCallTransitionId("ringcx-auto-disposition"),
+      }),
+      {
+        logger,
+        reason: "auto-disposition-release",
+        event: "release",
+      },
+    );
     traceCxCallIdentity(logger, "ringcx-auto-disposition.clear.after", {
       extensionId: normalizedExtensionId,
       reason: "auto-disposition-release",
@@ -814,8 +853,8 @@ async function waitForRingcxCampaignCall(client, {
   externId = null,
   agentEmail = null,
   agentCxAgentId = null,
-  timeoutMs = Number(process.env.RINGCX_CAMPAIGN_CALL_CAPTURE_MS) || 12_000,
-  intervalMs = Number(process.env.RINGCX_CAMPAIGN_CALL_CAPTURE_INTERVAL_MS) || 1_000,
+  timeoutMs = Number(process.env.RINGCX_CAMPAIGN_CALL_CAPTURE_MS) || 8_000,
+  intervalMs = Number(process.env.RINGCX_CAMPAIGN_CALL_CAPTURE_INTERVAL_MS) || 250,
   logger = null,
 } = {}) {
   if (!client || typeof client.listActiveCalls !== "function") {
@@ -851,9 +890,14 @@ async function waitForRingcxCampaignCall(client, {
   let lastError = null;
   let lastCallCount = 0;
   let lastSample = null;
+  let firstPollMs = null;
+  let uiiFoundAt = null;
   do {
     for (const spec of querySpecs) {
       try {
+        if (firstPollMs === null) {
+          firstPollMs = Date.now() - startedAt;
+        }
         const activeCalls = await client.listActiveCalls({
           product: spec.product,
           productId: spec.productId,
@@ -870,12 +914,15 @@ async function waitForRingcxCampaignCall(client, {
           agentEmail,
         });
         if (match) {
+          if (uiiFoundAt === null) uiiFoundAt = Date.now();
           return {
             ok: true,
             uii: extractActiveCallUii(match.call),
             activeCallSummary: summarizeActiveCall(match.call),
             matchReasons: match.reasons,
             queryScope: spec.queryScope || spec.product,
+            firstPollMs,
+            uiiFoundAt,
           };
         }
 
@@ -906,6 +953,8 @@ async function waitForRingcxCampaignCall(client, {
     error: lastError ? lastError.message : null,
     callCount: lastCallCount,
     sample: lastSample,
+    firstPollMs,
+    uiiFoundAt: null,
   };
 }
 
@@ -1659,15 +1708,48 @@ async function executeCxDispatchIntent(options = {}) {
 
   if (executionMode === "ringcx-campaign-queue") {
     try {
+      const canonicalAttemptTransitionId = buildCxCallTransitionId("ringcx-dial-publish");
+      const canonicalPublishPatch = buildCxCallLifecyclePatch({
+        writer: "ringcx-dial-execution",
+        queueItemId,
+        caseId,
+        phone,
+        phase: "publishing",
+        transitionId: canonicalAttemptTransitionId,
+        lastObservedAt: requestedAt,
+      });
+      if (canonicalPublishPatch) {
+        writeShadowCxCallState(extensionId, canonicalPublishPatch, {
+          logger: options.logger || null,
+          reason: "publish-start",
+          event: "publish-attempt",
+        });
+        if (isCxCanonicalCallVerboseLoggingEnabled()) {
+          traceCxCallIdentity(options.logger, "cx-call-lifecycle.observed", {
+            phase: canonicalPublishPatch.phase,
+            queueItemId,
+            transitionId: canonicalPublishPatch.transitionId,
+            event: "publish-start",
+            extensionId,
+            writer: canonicalPublishPatch.lastWriter,
+            queueFamily: queueItem?.queueFamily || queueItem?.metadata?.queueFamily || null,
+          });
+        }
+      }
       const campaignStartedAt = Date.now();
       const campaignTiming = {
         publishMs: null,
         captureForegroundMs: null,
         captureForegroundPhase: null,
         captureForegroundOk: null,
+        captureFirstPollMs: null,
+        captureUiiFoundMs: null,
         queuePatchMs: null,
         workflowStageMs: null,
         callPlacedEventMs: null,
+        metadataWriteMs: null,
+        eventWriteMs: null,
+        responseReturnMs: null,
       };
       dialTraceLog(options.logger, "info", "ringcx.dialExecution.campaign.start", {
         traceId,
@@ -1759,15 +1841,35 @@ async function executeCxDispatchIntent(options = {}) {
       const captureTimeoutMs = Number(process.env.RINGCX_CAMPAIGN_CALL_CAPTURE_MS);
       const resolvedCaptureTimeoutMs = Number.isFinite(captureTimeoutMs) && captureTimeoutMs > 0
         ? captureTimeoutMs
-        : undefined;
-      const captureAsync = parseBooleanFlag(
-        process.env.RINGCX_CAMPAIGN_CALL_CAPTURE_ASYNC,
-        true,
-      );
+        : 8_000;
+      const captureIntervalMs = Number.isFinite(Number(process.env.RINGCX_CAMPAIGN_CALL_CAPTURE_INTERVAL_MS))
+        && Number(process.env.RINGCX_CAMPAIGN_CALL_CAPTURE_INTERVAL_MS) > 0
+        ? Number(process.env.RINGCX_CAMPAIGN_CALL_CAPTURE_INTERVAL_MS)
+        : 250;
+      const confirmationRequired = requireRingcxCampaignActiveCallConfirmation();
+      const captureAsync = confirmationRequired
+        ? false
+        : parseBooleanFlag(
+            process.env.RINGCX_CAMPAIGN_CALL_CAPTURE_ASYNC,
+            true,
+          );
       const captureSyncWindowMs = captureAsync
         ? parsePositiveInteger(process.env.RINGCX_CAMPAIGN_CALL_CAPTURE_SYNC_WINDOW_MS, 0)
         : 0;
       if (captureTimeoutMs !== 0) {
+        const applyCaptureTiming = (captureResult = {}) => {
+          if (Number.isFinite(captureResult.captureFirstPollMs)) {
+            if (
+              !Number.isFinite(campaignTiming.captureFirstPollMs)
+              || captureResult.captureFirstPollMs < campaignTiming.captureFirstPollMs
+            ) {
+              campaignTiming.captureFirstPollMs = captureResult.captureFirstPollMs;
+            }
+          }
+          if (Number.isFinite(captureResult.captureUiiFoundMs)) {
+            campaignTiming.captureUiiFoundMs = captureResult.captureUiiFoundMs;
+          }
+        };
         const captureContext = {
           traceId,
           queueItemId,
@@ -1776,10 +1878,12 @@ async function executeCxDispatchIntent(options = {}) {
           externId: publish.externId || null,
           agentEmail: maskEmailForLog(agentEmail || publish.agentUsername),
           agentCxAgentId,
-          timeoutMs: resolvedCaptureTimeoutMs || null,
+          timeoutMs: captureTimeoutMs !== 0 ? resolvedCaptureTimeoutMs : 0,
+          intervalMs: captureIntervalMs,
           syncWindowMs: captureSyncWindowMs || null,
         };
         const runCapture = async ({ timeoutMs = resolvedCaptureTimeoutMs, phase = "primary" } = {}) => {
+          const captureStartedAt = Date.now();
           const captureClient = createRingcxVoiceClient();
           dialTraceLog(options.logger, "info", "ringcx.dialExecution.campaign.capture.start", {
             ...captureContext,
@@ -1787,19 +1891,35 @@ async function executeCxDispatchIntent(options = {}) {
             phase,
             timeoutMs: timeoutMs || null,
           });
-          return waitForRingcxCampaignCall(captureClient, {
+          const captureResult = await waitForRingcxCampaignCall(captureClient, {
             phone,
             campaignId: publish.campaignId || null,
             externId: publish.externId || null,
             agentEmail: agentEmail || publish.agentUsername || null,
             agentCxAgentId,
             timeoutMs,
+            intervalMs: captureIntervalMs,
             logger: options.logger || null,
           });
+          const captureFirstPollMs = Number.isFinite(captureResult?.firstPollMs)
+            ? captureStartedAt - campaignStartedAt + captureResult.firstPollMs
+            : null;
+          const captureUiiFoundMs = Number.isFinite(captureResult?.uiiFoundAt)
+            ? captureResult.uiiFoundAt - campaignStartedAt
+            : null;
+          const wrappedCaptureResult = {
+            ...captureResult,
+            captureFirstPollMs,
+            captureUiiFoundMs,
+            captureMs: Date.now() - captureStartedAt,
+          };
+          applyCaptureTiming(wrappedCaptureResult);
+          return wrappedCaptureResult;
         };
         const persistBackgroundCapture = (capturePromise, backgroundStartedAt = Date.now()) => {
           capturePromise
             .then(async (captureResult) => {
+              applyCaptureTiming(captureResult || {});
               const backgroundMs = Date.now() - backgroundStartedAt;
               const backgroundCapturedUii = normalizeExternalId(captureResult?.uii);
               dialTraceLog(options.logger, backgroundCapturedUii ? "info" : "warn", "ringcx.dialExecution.campaign.capture.backgroundTiming", {
@@ -1830,6 +1950,8 @@ async function executeCxDispatchIntent(options = {}) {
                 patch["metadata.lastDialExecutionStatus"] = "accepted";
                 patch["metadata.lastDialIntentStatus"] = "accepted";
               }
+              // Strict confirmation never reaches this async fallback; misses
+              // here are observed only for the non-strict fast path.
               await cxDialQueueRepository.updateQueueItem(queueItemId, patch).catch(() => null);
             })
             .catch((error) => {
@@ -1931,8 +2053,6 @@ async function executeCxDispatchIntent(options = {}) {
         },
       });
       const capturedUii = normalizeExternalId(activeCallCapture?.uii);
-      const confirmationRequired = requireRingcxCampaignActiveCallConfirmation();
-
       if (confirmationRequired && !capturedUii) {
         const cancelResult = await cancelPublishedQueueItemInRingcx(queueItem, {
           campaignId: publish.campaignId || null,
@@ -1945,6 +2065,7 @@ async function executeCxDispatchIntent(options = {}) {
         }));
         const claimUntil = new Date(requestedAt.getTime() + 2 * 60 * 1000);
         if (queueItemId) {
+          const queuePatchStartedAt = Date.now();
           await cxDialQueueRepository.updateQueueItem(queueItemId, {
             state: "claimed",
             claimUntil,
@@ -1979,9 +2100,40 @@ async function executeCxDispatchIntent(options = {}) {
             "metadata.lastDialExecutionEventId": dispatchIntent.eventId || null,
             "metadata.lastDialIntentStatus": "unconfirmed-active-call",
           }).catch(() => null);
+          campaignTiming.queuePatchMs = Date.now() - queuePatchStartedAt;
+          campaignTiming.metadataWriteMs = campaignTiming.queuePatchMs;
+        }
+        const canonicalFailurePatch = buildCxCallLifecyclePatch({
+          writer: "ringcx-dial-execution",
+          queueItemId,
+          caseId,
+          phone,
+          uii: null,
+          phase: "failed",
+          transitionId: buildCxCallTransitionId("ringcx-dial-unconfirmed"),
+          expiresAt: claimUntil,
+          lastObservedAt: requestedAt,
+        });
+        if (canonicalFailurePatch) {
+          writeShadowCxCallState(extensionId, canonicalFailurePatch, {
+            logger: options.logger || null,
+            reason: "unconfirmed-active-call",
+            event: "publish-miss",
+          });
+          if (isCxCanonicalCallVerboseLoggingEnabled()) {
+            traceCxCallIdentity(options.logger, "cx-call-lifecycle.observed", {
+              phase: canonicalFailurePatch.phase,
+              queueItemId,
+              transitionId: canonicalFailurePatch.transitionId,
+              event: "unconfirmed-failed",
+              extensionId,
+              writer: canonicalFailurePatch.lastWriter,
+            });
+          }
         }
 
         if (domain) {
+          const workflowStageStartedAt = Date.now();
           await recordWorkflowStage({
             domain,
             family: "cx",
@@ -2005,7 +2157,39 @@ async function executeCxDispatchIntent(options = {}) {
               desiredAvailability: agentState?.cxRouting?.desiredAvailability || null,
             },
           }).catch(() => null);
+          campaignTiming.workflowStageMs = Date.now() - workflowStageStartedAt;
         }
+
+        campaignTiming.responseReturnMs = Date.now() - campaignStartedAt;
+        dialTraceLog(options.logger, "warn", "ringcx.dialExecution.campaign.timing", {
+          traceId,
+          queueItemId,
+          domain,
+          caseId: Number.isFinite(caseId) ? caseId : null,
+          extensionId,
+          agentEmail: maskEmailForLog(agentEmail),
+          queueFamily: queueItem?.queueFamily || queueItem?.metadata?.queueFamily || null,
+          status: "unconfirmed",
+          publishMs: campaignTiming.publishMs,
+          captureFirstPollMs: campaignTiming.captureFirstPollMs,
+          captureUiiFoundMs: campaignTiming.captureUiiFoundMs,
+          captureForegroundMs: campaignTiming.captureForegroundMs,
+          captureForegroundPhase: campaignTiming.captureForegroundPhase,
+          captureForegroundOk: campaignTiming.captureForegroundOk,
+          captureReason: activeCallCapture?.reason || null,
+          captureDeferred: !capturedUii && String(activeCallCapture?.reason || "").startsWith("capture-deferred"),
+          captureSyncWindowMs: captureSyncWindowMs || null,
+          captureTimeoutMs: resolvedCaptureTimeoutMs || null,
+          queuePatchMs: campaignTiming.queuePatchMs,
+          metadataWriteMs: campaignTiming.metadataWriteMs,
+          workflowStageMs: campaignTiming.workflowStageMs,
+          callPlacedEventMs: campaignTiming.callPlacedEventMs,
+          eventWriteMs: campaignTiming.eventWriteMs,
+          callPlacedEventOk: null,
+          capturedUii: false,
+          responseReturnMs: campaignTiming.responseReturnMs,
+          totalMs: campaignTiming.responseReturnMs,
+        });
 
         dialTraceLog(options.logger, "warn", "ringcx.dialExecution.campaign.unconfirmed", {
           traceId,
@@ -2076,6 +2260,35 @@ async function executeCxDispatchIntent(options = {}) {
           "metadata.lastDialIntentStatus": capturedUii ? "accepted" : "queued-in-ringcx",
         }).catch(() => null);
         campaignTiming.queuePatchMs = Date.now() - queuePatchStartedAt;
+        campaignTiming.metadataWriteMs = campaignTiming.queuePatchMs;
+      }
+      const canonicalSuccessPatch = buildCxCallLifecyclePatch({
+        writer: "ringcx-dial-execution",
+        queueItemId,
+        caseId,
+        phone,
+        uii: capturedUii,
+        phase: capturedUii ? "active" : "queued",
+        transitionId: buildCxCallTransitionId("ringcx-dial-confirmed"),
+        lastObservedAt: requestedAt,
+      });
+      if (canonicalSuccessPatch) {
+        writeShadowCxCallState(extensionId, canonicalSuccessPatch, {
+          logger: options.logger || null,
+          reason: capturedUii ? "active-call-confirmed" : "queued-without-capture",
+          event: "publish-confirmed",
+        });
+        if (isCxCanonicalCallVerboseLoggingEnabled()) {
+          traceCxCallIdentity(options.logger, "cx-call-lifecycle.observed", {
+            phase: canonicalSuccessPatch.phase,
+            queueItemId,
+            transitionId: canonicalSuccessPatch.transitionId,
+            event: "publish-successful",
+            uii: capturedUii || null,
+            extensionId,
+            writer: canonicalSuccessPatch.lastWriter,
+          });
+        }
       }
 
       if (domain) {
@@ -2136,8 +2349,10 @@ async function executeCxDispatchIntent(options = {}) {
           error: error.message || "call-placed-event-failed",
         }));
         campaignTiming.callPlacedEventMs = Date.now() - callPlacedEventStartedAt;
+        campaignTiming.eventWriteMs = campaignTiming.callPlacedEventMs;
       }
 
+      campaignTiming.responseReturnMs = Date.now() - campaignStartedAt;
       dialTraceLog(options.logger, "info", "ringcx.dialExecution.campaign.timing", {
         traceId,
         queueItemId,
@@ -2148,6 +2363,8 @@ async function executeCxDispatchIntent(options = {}) {
         queueFamily: queueItem?.queueFamily || queueItem?.metadata?.queueFamily || null,
         status: "completed",
         publishMs: campaignTiming.publishMs,
+        captureFirstPollMs: campaignTiming.captureFirstPollMs,
+        captureUiiFoundMs: campaignTiming.captureUiiFoundMs,
         captureForegroundMs: campaignTiming.captureForegroundMs,
         captureForegroundPhase: campaignTiming.captureForegroundPhase,
         captureForegroundOk: campaignTiming.captureForegroundOk,
@@ -2156,11 +2373,14 @@ async function executeCxDispatchIntent(options = {}) {
         captureSyncWindowMs: captureSyncWindowMs || null,
         captureTimeoutMs: resolvedCaptureTimeoutMs || null,
         queuePatchMs: campaignTiming.queuePatchMs,
+        metadataWriteMs: campaignTiming.metadataWriteMs,
         workflowStageMs: campaignTiming.workflowStageMs,
         callPlacedEventMs: campaignTiming.callPlacedEventMs,
+        eventWriteMs: campaignTiming.eventWriteMs,
         callPlacedEventOk: callPlacedEvent ? callPlacedEvent.ok !== false : null,
         capturedUii: Boolean(capturedUii),
-        totalMs: Date.now() - campaignStartedAt,
+        responseReturnMs: campaignTiming.responseReturnMs,
+        totalMs: campaignTiming.responseReturnMs,
       });
 
       dialTraceLog(options.logger, "info", "ringcx.dialExecution.campaign.completed", {
@@ -2251,6 +2471,33 @@ async function executeCxDispatchIntent(options = {}) {
           },
           "metadata.lastDialIntentStatus": "error",
         }).catch(() => null);
+        const canonicalErrorPatch = buildCxCallLifecyclePatch({
+          writer: "ringcx-dial-execution",
+          queueItemId,
+          caseId,
+          phone,
+          uii: null,
+          phase: "failed",
+          transitionId: buildCxCallTransitionId("ringcx-dial-failed"),
+          lastObservedAt: requestedAt,
+        });
+        if (canonicalErrorPatch) {
+          writeShadowCxCallState(extensionId, canonicalErrorPatch, {
+            logger: options.logger || null,
+            reason: "dial-execution-failed",
+            event: "publish-error",
+          });
+          if (isCxCanonicalCallVerboseLoggingEnabled()) {
+            traceCxCallIdentity(options.logger, "cx-call-lifecycle.observed", {
+              phase: canonicalErrorPatch.phase,
+              queueItemId,
+              transitionId: canonicalErrorPatch.transitionId,
+              event: "dial-execution-failed",
+              extensionId,
+              writer: canonicalErrorPatch.lastWriter,
+            });
+          }
+        }
       }
 
       if (domain) {

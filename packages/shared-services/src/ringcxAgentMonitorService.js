@@ -1,7 +1,7 @@
 "use strict";
 
 const { createRingcxVoiceClient } = require("../../shared-integrations/src");
-const { CxDialQueue } = require("../../shared-models/src");
+const { AgentState, CxDialQueue } = require("../../shared-models/src");
 const { agentStateRepository } = require("../../shared-repositories/src");
 const {
   applyCallEndedDailyStats,
@@ -13,6 +13,14 @@ const {
   classifyCxTerminalOutcome,
   handleCxTerminalCallOutcome,
 } = require("./cxCadenceService");
+const {
+  CX_CALL_BLOCKING_PHASES,
+  buildCxCallLifecyclePatch,
+  buildCxCallTransitionId,
+  isExpiredNoUiiCxCallShell,
+  isCxCanonicalCallWriteEnabled,
+  writeCxCallLifecycleShadowState,
+} = require("./cxCallLifecycleService");
 const { traceCxCallIdentity } = require("./cxCallTraceService");
 
 function isRingcxAgentMonitorEnabled() {
@@ -63,6 +71,19 @@ function normalizePhone(value) {
   if (digits.length === 11 && digits.startsWith("1")) return digits.slice(1);
   if (digits.length >= 10) return digits.slice(-10);
   return digits || null;
+}
+
+function writeShadowCxCallState(extensionId, patch, options = {}) {
+  if (!isCxCanonicalCallWriteEnabled()) return null;
+  if (!extensionId || !patch) return null;
+  return writeCxCallLifecycleShadowState({
+    agentStateRepository,
+    extensionId,
+    patch,
+    logger: options.logger || null,
+    reason: options.reason || null,
+    event: options.event || null,
+  });
 }
 
 function phoneValuesCouldMatch(left, right) {
@@ -437,6 +458,22 @@ async function markAgentCxActive(queueItem = {}, call = {}, now = new Date(), lo
     lastCallDirection: "outbound",
   };
   const routing = deriveCxRouting(stateSnapshot, existing?.cxRouting || null);
+  const canonicalPatch = buildCxCallLifecyclePatch({
+    writer: "ringcx-agent-monitor",
+    queueItemId: queueItem?._id ? String(queueItem._id) : null,
+    caseId: queueItem?.caseId || null,
+    phone: toPhone || queueItem.phone,
+    uii,
+    phase: "active",
+    lastObservedAt: now,
+    lastWriter: "ringcx-agent-monitor",
+  });
+  writeShadowCxCallState(extensionId, canonicalPatch, {
+    logger,
+    reason: sameCall ? "active-call-refresh" : "active-call-observed",
+    event: "active-observed",
+  });
+
   const update = {
     status: "onCall",
     activityState: "onCall",
@@ -531,6 +568,22 @@ async function markMissingCxCallsEnded(activeIdentities = new Set(), now = new D
       { missed: false, date: now },
     );
     const clearLongCallHold = String(agent.cxRouting?.reason || "").trim().toLowerCase() === "long-call-hold";
+    const canonicalPatch = buildCxCallLifecyclePatch({
+      writer: "ringcx-agent-monitor",
+      queueItemId: null,
+      caseId: null,
+      uii: identity || null,
+      phone: call?.to || call?.destination || call?.leadPhone || call?.dnis || call?.phone || call?.ani || null,
+      phase: "dispositioning",
+      lastObservedAt: now,
+      lastWriter: "ringcx-agent-monitor",
+    });
+    writeShadowCxCallState(agent.extensionId, canonicalPatch, {
+      logger,
+      reason: identity ? "active-call-no-longer-present" : "missing-identity-stale",
+      event: "terminal-observed",
+    });
+
     const updated = await agentStateRepository.updateAgentState(agent.extensionId, {
       status: "disposition",
       activityState: "dispositioning",
@@ -649,6 +702,22 @@ async function clearOrphanDispositioningAgents(activeIdentities = new Set(), now
       currentCall: call,
     });
 
+    const canonicalPatch = buildCxCallLifecyclePatch({
+      writer: "ringcx-agent-monitor",
+      queueItemId: null,
+      caseId: null,
+      phone: call?.to || call?.destination || call?.leadPhone || call?.dnis || call?.phone || call?.ani || null,
+      uii: identity || null,
+      phase: "released",
+      lastObservedAt: now,
+      lastWriter: "ringcx-agent-monitor",
+    });
+    writeShadowCxCallState(extensionId, canonicalPatch, {
+      logger,
+      reason: "orphan-disposition-clear",
+      event: "release",
+    });
+
     const updated = await agentStateRepository.updateAgentState(extensionId, {
       status: "available",
       activityState: "idle",
@@ -681,6 +750,69 @@ async function clearOrphanDispositioningAgents(activeIdentities = new Set(), now
         extensionId,
         identity,
         ageMs,
+      });
+    }
+  }
+
+  return cleared;
+}
+
+async function clearExpiredCanonicalNoUiiShells(now = new Date(), logger = null) {
+  if (!isCxCanonicalCallWriteEnabled()) return [];
+  const agents = await AgentState.find({
+    "cxCall.phase": { $in: Array.from(CX_CALL_BLOCKING_PHASES) },
+    "cxCall.expiresAt": { $lte: now },
+    $or: [
+      { "cxCall.uii": { $exists: false } },
+      { "cxCall.uii": null },
+      { "cxCall.uii": "" },
+      { "cxCall.uii": /^\s+$/ },
+      { "cxCall.uii": /^(null|undefined|none|unknown|n\/a|na|\[object object\])$/i },
+    ],
+  })
+    .sort({ "cxCall.expiresAt": 1 })
+    .limit(100)
+    .lean()
+    .catch((error) => {
+      logger?.warn?.("ringcx.agentMonitor.expiredCanonicalShells.scanFailed", {
+        error: error.message,
+      });
+      return [];
+    });
+  const cleared = [];
+
+  for (const agent of agents) {
+    const cxCall = agent?.cxCall && typeof agent.cxCall === "object" ? agent.cxCall : null;
+    if (!cxCall || !isExpiredNoUiiCxCallShell(cxCall, now)) continue;
+    const phase = String(cxCall.phase || "").trim().toLowerCase();
+    const nextPhase = phase === "dispositioning" ? "released" : "failed";
+    const extensionId = String(agent.extensionId || "").trim();
+    if (!extensionId) continue;
+
+    const canonicalPatch = buildCxCallLifecyclePatch({
+      writer: "ringcx-agent-monitor",
+      queueItemId: cxCall.queueItemId || null,
+      caseId: cxCall.caseId != null ? cxCall.caseId : null,
+      phone: cxCall.phone || null,
+      uii: null,
+      phase: nextPhase,
+      transitionId: buildCxCallTransitionId("cx-expired-shell"),
+      lastObservedAt: now,
+      lastWriter: "ringcx-agent-monitor",
+    });
+    const updated = await writeShadowCxCallState(extensionId, canonicalPatch, {
+      logger,
+      reason: `expired-no-uii-${phase || "unknown"}-shell`,
+      event: "expired-shell",
+    });
+    if (updated) {
+      cleared.push({
+        extensionId,
+        oldPhase: phase || null,
+        newPhase: nextPhase,
+        queueItemId: cxCall.queueItemId || null,
+        caseId: cxCall.caseId != null ? cxCall.caseId : null,
+        expiresAt: cxCall.expiresAt || null,
       });
     }
   }
@@ -744,6 +876,7 @@ async function runRingcxAgentMonitor(options = {}) {
 
   const ended = await markMissingCxCallsEnded(activeIdentities, now, logger);
   const orphanCleared = await clearOrphanDispositioningAgents(activeIdentities, now, logger);
+  const expiredCanonicalShells = await clearExpiredCanonicalNoUiiShells(now, logger);
   return {
     enabled: true,
     activeCalls: activeCalls.length,
@@ -751,9 +884,11 @@ async function runRingcxAgentMonitor(options = {}) {
     matched: matched.length,
     ended: ended.length,
     orphanCleared: orphanCleared.length,
+    expiredCanonicalShells: expiredCanonicalShells.length,
     matches: matched.slice(0, 20),
     endedAgents: ended.slice(0, 20),
     orphanClearedAgents: orphanCleared.slice(0, 20),
+    expiredCanonicalShellAgents: expiredCanonicalShells.slice(0, 20),
   };
 }
 

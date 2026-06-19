@@ -157,7 +157,34 @@ Definition of done:
 
 ## Phase 6 — Controlled bloat reduction
 
+### Canonical anti-drift rule for CX campaign dialing
+
+- In `ringcxDialExecutionService.js`, when `RINGCX_CAMPAIGN_REQUIRE_ACTIVE_CALL_CONFIRMATION=true`, async capture is intentionally disabled (`captureAsync=false`) so `executeCxDispatchIntent` does not return success without a confirmed UII.
+- This is the canonical behavior for eliminating UI stage drift: the client may continue awaiting `dialAny.mutateAsync(...)`, and staging should only happen after backend confirmation.
+- Non-confirmed strict mode attempts should fail fast (`unconfirmed-active-call`), and any claimed rows from those attempts must remain reclaimable by `promoteExpiredDialingClaims()` to avoid stranded queue ownership.
+- Next structural step: `CX_CANONICAL_CALL_STATE_ARCHITECTURE.md` proposes a staged `agentstates.cxCall` lifecycle object so `activityState`, `activePlatform`, `currentCall`, queue metadata, RingCX polling, and frontend staging stop acting as separate sources of truth.
+
+| Step | Scope | Files | Runtime behavior |
+|---|---|---|---|
+| Phase 0 | Add canonical lifecycle helper, transition reducer tests, and `cx.lifecycle.*` logs. | `packages/shared-services/src/cxCallLifecycleService.js`, `tests/cx-call-state-*`, touched writer files only for logs. | No behavior change. |
+| Phase 1 | Write `agentstates.cxCall` beside legacy fields and add read-shadow telemetry at one backend boundary. | `ringcxDialExecutionService.js`, `cxWorkspaceService.js`, `cxCadenceService.js`, `ringcxAgentMonitorService.js`. | Legacy fields remain source of truth. |
+| Evidence window | Run one business day with canonical reads shadowed only. | Logs / Mongo inspection. | Compare canonical-vs-legacy decisions before enabling strict gate. |
+| Phase 2 gate | Enable canonical read gate only after Phase 0/1 metrics are clean. | Same boundary first, then additional readers. | Behavior change behind `CX_CANONICAL_CALL_STRICT_GATE=true`. |
+
 27. [packages/shared-services/src/cxWorkspaceService.js](C:/Users/micke/Documents/Codex/2026-06-16/can-you-audit-and-tighten-the/work/tagcontactbridgeparallel/packages/shared-services/src/cxWorkspaceService.js) — extract one bounded helper cluster (queue handoff/disposition cleanup), only after a regression test or assertion is added.
+
+27a. [packages/shared-services/src/ringcxDialExecutionService.js](C:/code/TagContactBridgeParalell/packages/shared-services/src/ringcxDialExecutionService.js) — prefer synchronous confirmation with higher-cadence polling before any UI handoff in strict mode:
+
+- keep `RINGCX_CAMPAIGN_REQUIRE_ACTIVE_CALL_CONFIRMATION=true` as the anti-drift gate,
+- default capture cadence to 250ms (or env override), capture timeout fallback to 8000ms,
+- keep async capture disabled automatically when confirmation is required,
+- separate timing logs so frontend latency is visible without changing queue/login semantics:
+  - `publishMs`
+  - first active-call poll latency
+  - UII found latency
+  - metadata write latency
+  - event write latency
+  - UI response return latency.
 
 28. [packages/shared-services/src/cxCadenceService.js](C:/Users/micke/Documents/Codex/2026-06-16/can-you-audit-and-tighten-the/work/tagcontactbridgeparallel/packages/shared-services/src/cxCadenceService.js) — extract a single cadence predicate helper for repeated eligibility checks.
 
@@ -166,6 +193,65 @@ Definition of done:
 30. [packages/shared-services/src/ringcxDialExecutionService.js](C:/Users/micke/Documents/Codex/2026-06-16/can-you-audit-and-tighten-the/work/tagcontactbridgeparallel/packages/shared-services/src/ringcxDialExecutionService.js) — extract one helper family only if it maps to an active bug class and keep runtime path unchanged.
 
 31. [packages/shared-services/src/taxResolutionSalesTrainerService.js](C:/Users/micke/Documents/Codex/2026-06-16/can-you-audit-and-tighten-the/work/tagcontactbridgeparallel/packages/shared-services/src/taxResolutionSalesTrainerService.js) — similarly extract only one helper block with explicit tests before moving route-facing logic.
+
+## Immediate 7000 Shadow Build (No Restart)
+
+Use this in the next window to run the canonical call-state shadow at runtime without changing user behavior.
+
+### Phase 0.1 today (observability + write-through)
+
+1. Add service file
+   - [C:/code/TagContactBridgeParalell/packages/shared-services/src/cxCallLifecycleService.js](C:/code/TagContactBridgeParalell/packages/shared-services/src/cxCallLifecycleService.js)
+   - Add pure helpers:
+     - `reduceCxCallState`
+     - `projectAgentStateFromCxCall`
+     - `describeCxCallGate`
+     - `buildCxCallTransitionId`
+     - `buildCxCallEvent`
+
+2. Add canonical write-through at existing transition points
+   - [C:/code/TagContactBridgeParalell/packages/shared-services/src/ringcxDialExecutionService.js](C:/code/TagContactBridgeParalell/packages/shared-services/src/ringcxDialExecutionService.js)
+     - dial requested
+     - RingCX publish accepted
+     - UII confirmed
+     - confirmation missed / unconfirmed failure
+   - [C:/code/TagContactBridgeParalell/packages/shared-services/src/cxCadenceService.js](C:/code/TagContactBridgeParalell/packages/shared-services/src/cxCadenceService.js)
+     - `markAgentCxCallState`
+     - terminal outcome writes
+   - [C:/code/TagContactBridgeParalell/packages/shared-services/src/ringcxAgentMonitorService.js](C:/code/TagContactBridgeParalell/packages/shared-services/src/ringcxAgentMonitorService.js)
+     - `markAgentCxActive`
+     - `markMissingCxCallsEnded`
+     - `clearOrphanDispositioningAgents`
+   - [C:/code/TagContactBridgeParalell/packages/shared-services/src/cxWorkspaceService.js](C:/code/TagContactBridgeParalell/packages/shared-services/src/cxWorkspaceService.js)
+     - disposition/no-answer/VM transitions
+     - next-dial ownership checks
+   - Keep old legacy writes intact. `cxCall` is additive only.
+
+3. Add one shadow gate telemetry boundary
+   - [C:/code/TagContactBridgeParalell/packages/shared-services/src/cxWorkspaceService.js](C:/code/TagContactBridgeParalell/packages/shared-services/src/cxWorkspaceService.js)
+   - Emit `cx.lifecycle.shadow_gate` for every next-dial decision.
+   - Include:
+     - `legacyDecision`, `legacyReason`
+     - `canonicalDecision`, `canonicalReason`, `canonicalPhase`
+     - `transitionId`, `queueItemId`, `caseId`, `uiiPresent`
+
+4. Runtime flags
+   - `CX_CANONICAL_CALL_WRITE_ENABLED=true`
+   - `CX_CANONICAL_CALL_READ_ENABLED=true`
+   - `CX_CANONICAL_CALL_STRICT_GATE=false`
+   - `CX_CANONICAL_CALL_PROJECT_LEGACY_FIELDS=false`
+   - `CX_CANONICAL_CALL_VERBOSE_LOGS=true`
+   - `CX_CANONICAL_NO_UII_SHELL_TTL_MS=30000`
+
+5. Live evidence pass (one day)
+   - `cx.lifecycle.transition` logs for publish/confirm/disposition/release.
+   - `cx.lifecycle.shadow_gate` logs without runtime regressions.
+   - No canonical write failures in normal flow.
+   - No increase in user-visible dial/no-answer/VM/refresh regressions.
+
+6. Promotion decision
+   - If clean: flip `CX_CANONICAL_CALL_STRICT_GATE=true`.
+   - Keep strict mode disabled until evidence is stable for one full cycle.
 
 ## Non-goals (still in force)
 

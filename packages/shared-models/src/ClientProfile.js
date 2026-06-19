@@ -34,6 +34,19 @@ const clientProfileSchema = new mongoose.Schema(
     clientName: { type: String, default: "", select: false },
     domain: { type: String, default: "TAG", index: true },
 
+    // ── PII (encrypted at rest) ───────────────────────────────────
+    // Backfilled by scripts/run-wit-ssn-backfill.js from the case's WIT
+    // (Wage & Income) document in Logics. Stored via shared-auth/fieldCrypto
+    // (AES-256-GCM, FIELD_ENCRYPTION_KEY). select:false — never returned by
+    // default; decrypt explicitly (formatSsnForLogics) only to feed THS.
+    ssnEncrypted: { type: String, default: null, select: false },
+    spouseSsnEncrypted: { type: String, default: null, select: false },
+    ssnMatch: {
+      matchedAt: { type: Date, default: null },
+      confidence: { type: String, default: null }, // high | medium
+      source: { type: String, default: null }, // the WIT filename it came from (masked)
+    },
+
     // Means: iSoftPull credit picture.
     credit: {
       score: { type: Number, default: null },

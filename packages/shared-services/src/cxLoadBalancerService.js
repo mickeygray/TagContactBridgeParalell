@@ -165,11 +165,11 @@ function hasActiveExCall(agentState = null) {
   );
 }
 
-function deriveEffectiveActivityState(agentState = null) {
+function deriveEffectiveActivityState(agentState = null, options = {}) {
   const explicit = String(agentState?.activityState || "").trim();
   const currentCallChannel = String(agentState?.currentCall?.channel || "").trim().toLowerCase();
   if (explicit) {
-    if (!isExLeadServingGateEnabled() && currentCallChannel === "ex") return "idle";
+    if (!isExLeadServingGateEnabled(options) && currentCallChannel === "ex") return "idle";
     return explicit;
   }
 
@@ -310,8 +310,9 @@ function buildEligibility(agentState = null, options = {}) {
     };
   }
   const activeExCall = hasActiveExCall(agentState);
-  const activeExSuppressed = suppressExArtifactsForCx() && activeExCall;
-  if (isExLeadServingGateEnabled() && activeExCall) {
+  const activeExSuppressed = suppressExArtifactsForCx(options) && activeExCall;
+  const exLeadServingGateEnabled = isExLeadServingGateEnabled(options);
+  if (exLeadServingGateEnabled && activeExCall) {
     return {
       eligible: false,
       reason: "ex-busy",
@@ -322,7 +323,7 @@ function buildEligibility(agentState = null, options = {}) {
   const routingReason = String(routing.reason || "").trim().toLowerCase();
   if (
     routingDesiredAvailability !== "available"
-    && !suppressExBusyRoutingReason(routingReason)
+    && !suppressExBusyRoutingReason(routingReason, options)
   ) {
     return {
       eligible: false,
@@ -345,7 +346,7 @@ function buildEligibility(agentState = null, options = {}) {
       queuePolicy,
     };
   }
-  const activityState = deriveEffectiveActivityState(agentState);
+  const activityState = deriveEffectiveActivityState(agentState, options);
   if (
     options.ignoreActivityState !== true
     && INELIGIBLE_ACTIVITY_STATES.has(String(activityState || "").trim().toLowerCase())
@@ -369,7 +370,7 @@ function buildEligibility(agentState = null, options = {}) {
     reason: "available",
     queuePolicy,
     maxOpenAssignments,
-    exArtifactsSuppressed: Boolean(activeExSuppressed || suppressExBusyRoutingReason(routingReason)),
+    exArtifactsSuppressed: Boolean(activeExSuppressed || suppressExBusyRoutingReason(routingReason, options)),
   };
 }
 

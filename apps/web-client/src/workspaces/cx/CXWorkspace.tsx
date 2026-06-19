@@ -137,6 +137,11 @@ type CaseForm = {
 
 type CaseFormField = keyof CaseForm;
 type CaseFormDirty = Record<CaseFormField, boolean>;
+type QueueAdvanceTransition = {
+  title: string;
+  description: string;
+  blocking: boolean;
+};
 
 function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" ? (value as Record<string, unknown>) : {};
@@ -345,6 +350,7 @@ type QueueFamilyDisplay = {
 const AUTO_SERVE_DELAY_SECONDS = 1;
 const AUTO_SERVE_HANDOFF_DELAY_SECONDS = 0;
 const AUTO_SERVE_STARTUP_DELAY_SECONDS = 8;
+const AUTO_SERVE_RETRY_DELAY_SECONDS = 5;
 const BACKEND_NEXT_DIAL_HANDOFF_HOLD_MS = 10_000;
 // Last-resort watchdog for the app disposition side of the VM flow. The
 // RingCX voicemail request is fired in the background; the queue disposition
@@ -3460,10 +3466,21 @@ export function CXWorkspace() {
   const [coachReleaseSignal, setCoachReleaseSignal] =
     React.useState<{ key: string; reason: string } | null>(null);
   const [voicemailDropPending, setVoicemailDropPending] = React.useState(false);
+  const [queueAdvanceTransition, setQueueAdvanceTransition] =
+    React.useState<QueueAdvanceTransition | null>(null);
   const autoServeInFlightRef = React.useRef(false);
   const breakAutoLogoutFiredRef = React.useRef(false);
   const lastTerminalOutcomeWorkflowRef = React.useRef<string | null>(null);
   const voicemailDropWatchdogRef = React.useRef<number | null>(null);
+  const queueAdvanceTransitionTimerRef = React.useRef<number | null>(null);
+  const nextDialHandoffTimingRef = React.useRef<{
+    startedAt: number;
+    dispositionKey: string;
+    queueKey: string | null;
+    queueItemId: string | null;
+    caseId: string | null;
+    observedUii: string | null;
+  } | null>(null);
   const lastCoachCallIdentityRef = React.useRef<{
     uii: string;
     callSessionId: string;
@@ -3484,6 +3501,37 @@ export function CXWorkspace() {
       voicemailDropWatchdogRef.current = null;
     }
   }
+
+  function clearQueueAdvanceTransition() {
+    if (queueAdvanceTransitionTimerRef.current != null) {
+      window.clearTimeout(queueAdvanceTransitionTimerRef.current);
+      queueAdvanceTransitionTimerRef.current = null;
+    }
+    setQueueAdvanceTransition(null);
+  }
+
+  function showQueueAdvanceTransition(
+    next: QueueAdvanceTransition,
+    autoClearMs?: number,
+  ) {
+    if (queueAdvanceTransitionTimerRef.current != null) {
+      window.clearTimeout(queueAdvanceTransitionTimerRef.current);
+      queueAdvanceTransitionTimerRef.current = null;
+    }
+    setQueueAdvanceTransition(next);
+    if (autoClearMs && autoClearMs > 0) {
+      queueAdvanceTransitionTimerRef.current = window.setTimeout(() => {
+        queueAdvanceTransitionTimerRef.current = null;
+        setQueueAdvanceTransition(null);
+      }, autoClearMs);
+    }
+  }
+
+  React.useEffect(() => () => {
+    if (queueAdvanceTransitionTimerRef.current != null) {
+      window.clearTimeout(queueAdvanceTransitionTimerRef.current);
+    }
+  }, []);
 
   // Single settle point for the VM button pending flag: successful queue
   // disposition, disposition failure, and the watchdog all pass through here.
@@ -3566,19 +3614,13 @@ export function CXWorkspace() {
           | Record<string, unknown>
           | undefined;
         if (result?.mode === "disposition" && !result?.dropped) {
-          toast.warning("Voicemail request not confirmed", {
-            description: "The queue advanced, but RingCX did not confirm the VM disposition.",
-          });
+          console.warn("[cx] voicemail request not confirmed", result);
         } else if (result?.mode && result.mode !== "disposition" && !result?.played) {
-          toast.warning("Voicemail request not confirmed", {
-            description: "The queue advanced, but the legacy VM fallback did not confirm playback.",
-          });
+          console.warn("[cx] voicemail fallback playback not confirmed", result);
         }
       })
       .catch((error) => {
-        toast.error("Voicemail request failed", {
-          description: error instanceof Error ? error.message : "The queue advanced, but RingCX did not accept the VM request.",
-        });
+        console.warn("[cx] voicemail request failed", error);
       });
   }
 
@@ -3597,7 +3639,6 @@ export function CXWorkspace() {
     fireVoicemailDropRequest();
     try {
       submitQueueDisposition("did-not-answer", "Voicemail", {
-        deferNextDial: true,
         autoServeDelaySeconds: NO_ANSWER_NEXT_LEAD_DELAY_SECONDS,
       });
     } catch (error) {
@@ -3607,9 +3648,6 @@ export function CXWorkspace() {
       });
       return;
     }
-    toast("Voicemail sent", {
-      description: "The queue is advancing while RingCX handles the voicemail transfer.",
-    });
   }
 
   function clearCasePanelForNextQueueLead() {
@@ -3792,6 +3830,23 @@ export function CXWorkspace() {
   const currentCallUii = currentCallIsSuppressed
     ? ""
     : readString(asRecord(rawCurrentCallSnapshot), "uii", "rcxUii", "callUii");
+  React.useEffect(() => {
+    const timing = nextDialHandoffTimingRef.current;
+    if (!timing || !currentCallUii) return;
+    if (timing.observedUii === currentCallUii) return;
+    timing.observedUii = currentCallUii;
+    emitCxTiming("queue_handoff.uii_observed", {
+      elapsedMs: Date.now() - timing.startedAt,
+      dispositionKey: timing.dispositionKey,
+      queueKey: timing.queueKey,
+      queueItemId: timing.queueItemId,
+      caseId: timing.caseId,
+      currentCallUii,
+      currentCallSessionId: currentCall?.sessionId || null,
+      backendNextDialHandoffActive:
+        backendNextDialHandoffUntil != null && backendNextDialHandoffUntil > Date.now(),
+    });
+  }, [currentCallUii, currentCall?.sessionId, backendNextDialHandoffUntil]);
   React.useEffect(() => {
     emitCxTiming("workspace.data_state", {
       domain,
@@ -4379,7 +4434,9 @@ export function CXWorkspace() {
     item: CxCallQueueItem,
     contact: ContactContext,
     queueDomain: string,
+    options: { preserveTransition?: boolean } = {},
   ) {
+    if (!options.preserveTransition) clearQueueAdvanceTransition();
     const snapshot = asRecord(item.payloadSnapshot);
     const leadBody = asRecord(item.leadBody);
     const merged = Object.keys(leadBody).length > 0 ? { ...snapshot, ...leadBody } : snapshot;
@@ -4412,11 +4469,14 @@ export function CXWorkspace() {
     if (queueDomain && queueDomain !== domain) setDomain(queueDomain);
   }
 
-  function stageNextCallHandoffLead(item: CxCallQueueItem) {
+  function stageNextCallHandoffLead(
+    item: CxCallQueueItem,
+    options: { preserveTransition?: boolean } = {},
+  ) {
     const contact = contactFromQueue(item);
     const queueDomain = String(item.domain || domain || "TAG").trim().toUpperCase();
     cancelAutoServe();
-    stageQueueLeadInWorkspace(item, contact, queueDomain);
+    stageQueueLeadInWorkspace(item, contact, queueDomain, options);
     setServingQueueKey(buildQueueItemKey(item));
   }
 
@@ -4449,9 +4509,11 @@ export function CXWorkspace() {
       ...buildQueueDialRequest(item, queueDomain, contact),
       ...(cxDialExecutionModeOverride ? { executionMode: cxDialExecutionModeOverride } : {}),
     };
-    stageQueueLeadInWorkspace(item, contact, queueDomain);
-    if (!contact.phone) return;
-    setServingQueueKey(queueKey);
+    if (!contact.phone) {
+      stageQueueLeadInWorkspace(item, contact, queueDomain);
+      setServingQueueKey(queueKey);
+      return;
+    }
 
     // The simulator path used to be the only option — it spoofs an
     // inbound call locally so the rest of the workspace lights up.
@@ -4469,11 +4531,15 @@ export function CXWorkspace() {
           channel: "cx",
           fromName: contact.name || undefined,
         });
+        stageQueueLeadInWorkspace(item, contact, queueDomain);
+        setServingQueueKey(queueKey);
         toast("CX dial simulated", {
           description: `Serving ${contact.name || contact.phone} through the CX simulator.`,
         });
       } else {
         await dialAny.mutateAsync({ domain: queueDomain, ...dialRequest });
+        stageQueueLeadInWorkspace(item, contact, queueDomain);
+        setServingQueueKey(queueKey);
         toast(cxDialExecutionModeOverride === "manual"
           ? "CX manual dial requested"
           : cxDialExecutionModeOverride === "manual-then-campaign"
@@ -4485,6 +4551,9 @@ export function CXWorkspace() {
     } catch (error) {
       const message = error instanceof Error ? error.message : "Could not place the CX call.";
       clearServedQueueSelection();
+      if (options.source === "auto") {
+        scheduleAutoServe(AUTO_SERVE_RETRY_DELAY_SECONDS, "next");
+      }
       toast.error(cxDialModeIsSimulate ? "CX dial simulation failed" : "CX dial request failed", {
         description: message,
         // Per failure-UX cleanup: dial errors are recoverable — surface
@@ -4555,9 +4624,9 @@ export function CXWorkspace() {
     } = {},
   ) {
     const forceEject = options.forceEject === true;
-    if (!forceEject && !servedQueueActionKey && !servedQueueTicketId) return;
+    if (!forceEject && !servedQueueActionKey && !servedQueueTicketId) return false;
     const row = asRecord(result);
-    if (row.wrapUpRequired === true || row.callHeldOpen === true) return;
+    if (row.wrapUpRequired === true || row.callHeldOpen === true) return false;
     const response = asRecord(row.response);
     const hangup = asRecord(row.hangup);
     const backendNextDialAccepted = isCxNextDialAccepted(row);
@@ -4583,8 +4652,8 @@ export function CXWorkspace() {
       String(hangup.reason || "").toLowerCase() === "no-active-call-after-disposition" ||
       String(hangup.reason || "").toLowerCase() === "disposition-hangup-backgrounded";
     const completed = row.completed === true || cleanupAccepted;
-    if (!completed) return;
-    if (!cleanupAccepted) return;
+    if (!completed) return false;
+    if (!cleanupAccepted) return false;
     if (!options.skipCurrentLeadSuppression) {
       suppressCurrentQueueLead(row);
     }
@@ -4608,33 +4677,7 @@ export function CXWorkspace() {
     ) {
       scheduleAutoServe(options.autoServeDelaySeconds ?? AUTO_SERVE_HANDOFF_DELAY_SECONDS, "next");
     }
-  }
-
-  function optimisticallyEjectDispositionLead(
-    options: { skipAutoServe?: boolean; queueOutcome?: string } = {},
-  ) {
-    if (!servedQueueActionKey && !servedQueueTicketId && !servedQueueCaseId) return;
-    suppressCurrentQueueLead({
-      domain: servedQueueDomain || domain,
-      caseId: servedQueueCaseId,
-      actionKey: servedQueueActionKey,
-      queueItemId: servedQueueTicketId,
-      queueTicketId: servedQueueTicketId,
-      queueOutcome: options.queueOutcome || "completed",
-    });
-    if (rawCurrentCallSessionId) {
-      setSuppressedCallSessionId(rawCurrentCallSessionId);
-    }
-    clearServedQueueSelection();
-    clearCasePanelForNextQueueLead();
-    workspace.refetch();
-    callQueue.refetch();
-    for (const query of multiCallQueues) {
-      query.refetch();
-    }
-    if (!options.skipAutoServe) {
-      scheduleAutoServe(AUTO_SERVE_HANDOFF_DELAY_SECONDS, "next");
-    }
+    return true;
   }
 
   const rawQueueItems = React.useMemo(() => {
@@ -4682,7 +4725,7 @@ export function CXWorkspace() {
     const isBackendNextDialRestore =
       backendNextDialHandoffUntil != null &&
       backendNextDialHandoffUntil > Date.now() &&
-      activeServingDialStatus === "accepted";
+      !["cancelled", "canceled", "failed", "relay-failed"].includes(activeServingDialStatus);
     // ── Anti-jitter guards ────────────────────────────────────────────────
     // ONLY for the wrap-up-restore path. During a BACKEND NEXT-DIAL HANDOFF
     // the dialer is actively serving the next lead (sometimes the SAME lead,
@@ -4717,6 +4760,28 @@ export function CXWorkspace() {
     }
     cancelAutoServe();
     if (isBackendNextDialRestore) setBackendNextDialHandoffUntil(null);
+    if (isBackendNextDialRestore && nextDialHandoffTimingRef.current) {
+      const timing = nextDialHandoffTimingRef.current;
+      const activeServingCallUii =
+        readString(activeServingMetadata, "uii", "rcxUii", "callUii", "lastDialUii", "lastDialIntentUii") ||
+        readString(asRecord(activeServingQueueItem), "uii", "rcxUii", "callUii") ||
+        null;
+      emitCxTiming("queue_handoff.restore_serving", {
+        elapsedMs: Date.now() - timing.startedAt,
+        dispositionKey: timing.dispositionKey,
+        queueKey: timing.queueKey,
+        queueItemId: timing.queueItemId,
+        caseId: timing.caseId,
+        observedUii: timing.observedUii,
+        currentCallUii: currentCallUii || null,
+        activeServingCallUii,
+        activeServingDialStatus,
+        restoredQueueKey: buildQueueItemKey(activeServingQueueItem),
+        restoredQueueItemId: activeServingQueueItem.queueTicketId || null,
+        restoredCaseId: activeServingQueueItem.caseId || null,
+      });
+      nextDialHandoffTimingRef.current = null;
+    }
     setServingQueueKey(buildQueueItemKey(activeServingQueueItem));
     stageQueueLeadInWorkspace(activeServingQueueItem, contact, queueDomain);
     if (isBackendNextDialRestore) {
@@ -5100,7 +5165,7 @@ export function CXWorkspace() {
 
   function submitQueueDisposition(
     dispositionKey: "answered" | "did-not-answer",
-    label: string,
+    _label: string,
     options: {
       coachReleaseReason?: string;
       deferNextDial?: boolean;
@@ -5108,7 +5173,7 @@ export function CXWorkspace() {
     } = {},
   ) {
     if (dispositionCaseId == null) return;
-    const shouldDeferNextDial = options.deferNextDial ?? true;
+    const shouldDeferNextDial = options.deferNextDial ?? false;
     const defaultAutoServeDelaySeconds =
       dispositionKey === "did-not-answer"
         ? NO_ANSWER_NEXT_LEAD_DELAY_SECONDS
@@ -5119,30 +5184,41 @@ export function CXWorkspace() {
     releaseLiveCoachForCurrentCall(options.coachReleaseReason || `queue-disposition-${dispositionKey}`);
     const nextQueueLead = shouldDeferNextDial ? null : pickNextCallHandoffLead();
     const nextDial = buildNextCallHandoffPayload(nextQueueLead);
-    const hasImmediateNextHandoff = nextQueueLead != null && nextDial != null;
-    const shouldOptimisticallyEject = hasImmediateNextHandoff || shouldDeferNextDial;
-    const previousLeadSnapshot = shouldOptimisticallyEject
-      ? {
-          selected,
-          form: { ...form },
-          dirty: { ...dirty },
-          pickedCandidateKey,
-          servingQueueKey,
-          servedQueueCaseId,
-          servedQueueDomain,
-          servedQueueActionKey,
-          servedQueueTicketId,
-          servedQueueContact,
-          servedQueueStartedAt,
-      }
-      : null;
-
-    if (shouldOptimisticallyEject) {
-      optimisticallyEjectDispositionLead({ skipAutoServe: true });
+    const handoffStartedAt = Date.now();
+    const nextQueueKey = nextQueueLead ? buildQueueItemKey(nextQueueLead) : null;
+    if (nextDial) {
+      nextDialHandoffTimingRef.current = {
+        startedAt: handoffStartedAt,
+        dispositionKey,
+        queueKey: nextQueueKey,
+        queueItemId: nextQueueLead?.queueTicketId || null,
+        caseId: nextQueueLead?.caseId || null,
+        observedUii: null,
+      };
+    } else {
+      nextDialHandoffTimingRef.current = null;
     }
+    emitCxTiming("queue_handoff.submit", {
+      dispositionKey,
+      currentCaseId: dispositionCaseId,
+      servedQueueTicketId: servedQueueTicketId || null,
+      servedQueueActionKey: servedQueueActionKey || null,
+      servedQueueCaseId: servedQueueCaseId || null,
+      nextDialRequested: Boolean(nextDial),
+      nextQueueKey,
+      nextQueueItemId: nextQueueLead?.queueTicketId || null,
+      nextCaseId: nextQueueLead?.caseId || null,
+      nextPhonePresent: Boolean(nextDial),
+    });
+    showQueueAdvanceTransition({
+      title: "Finishing current lead",
+      description: nextDial
+        ? "Submitting the disposition and waiting for RingCX to confirm the next call."
+        : "Submitting the disposition before the queue advances.",
+      blocking: true,
+    });
 
-    void run(label, () =>
-      disposition.mutateAsync({
+    void disposition.mutateAsync({
         caseId: String(dispositionCaseId),
         disposition: dispositionKey,
         phone: form.cellPhone || selectedPhone || currentCallPhone,
@@ -5152,57 +5228,73 @@ export function CXWorkspace() {
         queueTicketId: servedQueueTicketId || undefined,
         assignedExtensionId: currentExtensionId || undefined,
         nextDial: nextDial || undefined,
-      }),
-    )
+      })
       .then((result) => {
+        const responseElapsedMs = Date.now() - handoffStartedAt;
         settleVoicemailDropPending();
         const nextDialAccepted = isCxNextDialAccepted(result);
         const nextDialQueuedButUnconfirmed = isCxNextDialQueuedButUnconfirmed(result);
-        releaseQueueAfterSuccess(result, {
+        const nextDialInProgress = nextDialAccepted || nextDialQueuedButUnconfirmed;
+        const nextDialResult = asRecord(asRecord(result).nextDial);
+        const activeCallCapture = asRecord(nextDialResult.activeCallCapture);
+        emitCxTiming("queue_handoff.response", {
+          elapsedMs: responseElapsedMs,
+          dispositionKey,
+          nextDialRequested: Boolean(nextDial),
+          nextDialAccepted,
+          nextDialQueuedButUnconfirmed,
+          nextDialStatus: String(nextDialResult.status || "").trim() || null,
+          nextDialReason: String(nextDialResult.reason || "").trim() || null,
+          nextDialUii:
+            readString(nextDialResult, "uii", "callSessionId", "rcxUii") ||
+            readString(activeCallCapture, "uii", "callSessionId", "rcxUii") ||
+            null,
+        });
+        const released = releaseQueueAfterSuccess(result, {
           forceEject: true,
-          skipAutoServe: nextDialAccepted || nextDialQueuedButUnconfirmed,
-          preserveCurrentLead: nextDialAccepted,
+          skipAutoServe: nextDialInProgress,
+          preserveCurrentLead: false,
           skipCurrentLeadSuppression: false,
           autoServeDelaySeconds,
         });
         if (nextDialAccepted) {
-          if (nextQueueLead) {
-            stageNextCallHandoffLead(nextQueueLead);
-          }
-          toast("Next call sent", {
-            description: "RingCX confirmed the next queue lead.",
+          holdAutoServeForBackendNextDial();
+          showQueueAdvanceTransition({
+            title: "Waiting for next call",
+            description: "RingCX accepted the handoff. The next lead will appear when the call is confirmed.",
+            blocking: true,
           });
         } else if (nextDialQueuedButUnconfirmed) {
           holdAutoServeForBackendNextDial();
-          toast("Next call queued", {
-            description: "Waiting for RingCX to confirm the active call before showing the next lead.",
+          showQueueAdvanceTransition({
+            title: "Waiting for RingCX",
+            description: "The next lead was queued. It will appear when RingCX confirms the active call.",
+            blocking: true,
           });
         } else if (nextDial != null) {
-          const reason = String(asRecord(asRecord(result).nextDial).reason || "").trim();
-          toast.warning("Next call handoff fell back", {
-            description: reason || "Auto serve will retry from the queue.",
+          showQueueAdvanceTransition({
+            title: "Loading next lead",
+            description: "RingCX did not confirm the handoff yet. Checking the queue for the next call.",
+            blocking: true,
           });
           clearServedQueueSelection();
           clearCasePanelForNextQueueLead();
           scheduleAutoServe(autoServeDelaySeconds ?? AUTO_SERVE_HANDOFF_DELAY_SECONDS, "next");
+        } else if (released) {
+          showQueueAdvanceTransition({
+            title: "Loading next lead",
+            description: "Disposition saved. The queue is moving to the next call.",
+            blocking: false,
+          }, 5000);
         }
       })
       .catch(() => {
         settleVoicemailDropPending();
-        if (previousLeadSnapshot) {
-          cancelAutoServe();
-          setSelected(previousLeadSnapshot.selected);
-          setForm(previousLeadSnapshot.form);
-          setDirty(previousLeadSnapshot.dirty);
-          setPickedCandidateKey(previousLeadSnapshot.pickedCandidateKey);
-          setServingQueueKey(previousLeadSnapshot.servingQueueKey);
-          setServedQueueCaseId(previousLeadSnapshot.servedQueueCaseId);
-          setServedQueueDomain(previousLeadSnapshot.servedQueueDomain);
-          setServedQueueActionKey(previousLeadSnapshot.servedQueueActionKey);
-          setServedQueueTicketId(previousLeadSnapshot.servedQueueTicketId);
-          setServedQueueContact(previousLeadSnapshot.servedQueueContact);
-          setServedQueueStartedAt(previousLeadSnapshot.servedQueueStartedAt);
-        }
+        showQueueAdvanceTransition({
+          title: "Checking RingCX",
+          description: "Refreshing the queue state before the next lead appears.",
+          blocking: true,
+        });
         workspace.refetch();
         callQueue.refetch();
       });
@@ -5219,27 +5311,6 @@ export function CXWorkspace() {
     if (assignCaseId == null) return;
     const nextQueueLead = pickNextCallHandoffLead();
     const nextDial = buildNextCallHandoffPayload(nextQueueLead);
-    const hasImmediateNextHandoff = nextQueueLead != null && nextDial != null;
-    const previousLeadSnapshot = hasImmediateNextHandoff
-      ? {
-          selected,
-          form: { ...form },
-          dirty: { ...dirty },
-          pickedCandidateKey,
-          servingQueueKey,
-          servedQueueCaseId,
-          servedQueueDomain,
-          servedQueueActionKey,
-          servedQueueTicketId,
-          servedQueueContact,
-          servedQueueStartedAt,
-        }
-      : null;
-
-    if (hasImmediateNextHandoff && nextQueueLead) {
-      setAppointmentModalOpen(false);
-      optimisticallyEjectDispositionLead({ skipAutoServe: true, queueOutcome: "rescheduled" });
-    }
 
     void run("Appointment", async () => {
       const appointmentResult = await createAppointment.mutateAsync({
@@ -5355,21 +5426,6 @@ export function CXWorkspace() {
         callQueue.refetch();
       })
       .catch(() => {
-        if (previousLeadSnapshot) {
-          cancelAutoServe();
-          setSelected(previousLeadSnapshot.selected);
-          setForm(previousLeadSnapshot.form);
-          setDirty(previousLeadSnapshot.dirty);
-          setPickedCandidateKey(previousLeadSnapshot.pickedCandidateKey);
-          setServingQueueKey(previousLeadSnapshot.servingQueueKey);
-          setServedQueueCaseId(previousLeadSnapshot.servedQueueCaseId);
-          setServedQueueDomain(previousLeadSnapshot.servedQueueDomain);
-          setServedQueueActionKey(previousLeadSnapshot.servedQueueActionKey);
-          setServedQueueTicketId(previousLeadSnapshot.servedQueueTicketId);
-          setServedQueueContact(previousLeadSnapshot.servedQueueContact);
-          setServedQueueStartedAt(previousLeadSnapshot.servedQueueStartedAt);
-          setAppointmentModalOpen(true);
-        }
         workspace.refetch();
         callQueue.refetch();
       });
@@ -5440,6 +5496,7 @@ export function CXWorkspace() {
       : hasLookupHit
         ? "Auto-populated from the best source we found. Review the lead, then finish the attempt from the buttons above."
         : "No matched case yet. Ask for enough information to identify the caller before finishing the attempt.";
+  const queueAdvanceBlocking = queueAdvanceTransition?.blocking === true;
 
   if (workspace.isLoading) {
     return <SkeletonRow count={8} />;
@@ -5667,7 +5724,13 @@ export function CXWorkspace() {
                     onSelect={restoreServedQueueLead}
                   />
                 ) : null}
-                {queueItems.length === 0 ? (
+                {queueAdvanceBlocking ? (
+                  <EmptyState
+                    icon={<Clock3 />}
+                    title="Queue updating"
+                    description="RingCX is confirming the next call."
+                  />
+                ) : queueItems.length === 0 ? (
                   <EmptyState
                     icon={<Clock3 />}
                     title="No queued leads"
@@ -5772,6 +5835,7 @@ export function CXWorkspace() {
                       variant="secondary"
                       className="border-sky-500/40 bg-sky-600 text-white hover:bg-sky-700"
                       isLoading={createAppointment.isPending || assignCaseToMe.isPending || disposition.isPending}
+                      disabled={queueAdvanceBlocking}
                       onClick={(event) => {
                         consumeUiEvent(event);
                         setAppointmentModalOpen(true);
@@ -5788,6 +5852,7 @@ export function CXWorkspace() {
                       variant="destructive"
                       className="bg-red-600 text-white hover:bg-red-700"
                       isLoading={disposition.isPending}
+                      disabled={queueAdvanceBlocking}
                       onClick={(event) => {
                         consumeUiEvent(event);
                         releaseLiveCoachForCurrentCall("queue-disposition-dnc");
@@ -5815,6 +5880,7 @@ export function CXWorkspace() {
                       variant="secondary"
                       className="border-emerald-500/40 bg-emerald-600 text-white hover:bg-emerald-700"
                       isLoading={disposition.isPending}
+                      disabled={queueAdvanceBlocking}
                       onClick={(event) => {
                         consumeUiEvent(event);
                         submitQueueDisposition("answered", "Answered");
@@ -5831,6 +5897,7 @@ export function CXWorkspace() {
                       variant="secondary"
                       className="border-amber-500/50 bg-amber-500 text-amber-950 hover:bg-amber-400"
                       isLoading={disposition.isPending}
+                      disabled={queueAdvanceBlocking}
                       onClick={(event) => {
                         consumeUiEvent(event);
                         submitQueueDisposition("did-not-answer", "Did not answer");
@@ -5846,7 +5913,7 @@ export function CXWorkspace() {
                       size="sm"
                       variant="secondary"
                       className="border-violet-500/40 bg-violet-600 text-white hover:bg-violet-700"
-                      disabled={voicemailDropPending || disposition.isPending}
+                      disabled={voicemailDropPending || disposition.isPending || queueAdvanceBlocking}
                       onClick={(event) => {
                         consumeUiEvent(event);
                         beginVoicemailDrop();
@@ -5859,9 +5926,39 @@ export function CXWorkspace() {
                   ) : null}
                 </div>
               </div>
+              {queueAdvanceTransition ? (
+                <div
+                  className={cn(
+                    "flex items-start gap-2 rounded-md border px-3 py-2 text-xs",
+                    queueAdvanceBlocking
+                      ? "border-sky-500/30 bg-sky-500/10 text-sky-950 dark:text-sky-100"
+                      : "border-emerald-500/30 bg-emerald-500/10 text-emerald-950 dark:text-emerald-100",
+                  )}
+                  role="status"
+                  aria-live="polite"
+                >
+                  <Clock3
+                    className={cn(
+                      "mt-0.5 h-3.5 w-3.5 flex-none",
+                      queueAdvanceBlocking ? "animate-spin" : "",
+                    )}
+                  />
+                  <div className="min-w-0">
+                    <div className="font-semibold">{queueAdvanceTransition.title}</div>
+                    <div className="text-[11px] opacity-80">
+                      {queueAdvanceTransition.description}
+                    </div>
+                  </div>
+                </div>
+              ) : null}
               <div className="text-[11px] text-muted-foreground">{formSubtitle}</div>
             </CardHeader>
-            <CardContent className="space-y-2 pt-0">
+            <CardContent
+              className={cn(
+                "space-y-2 pt-0 transition-opacity",
+                queueAdvanceBlocking ? "pointer-events-none opacity-50" : "",
+              )}
+            >
               {/* Multi-candidate picker — when the inbound phone matches
                   multiple cases, the operator picks rather than guessing.
                   Once they click one, the rest collapse to a small "(N

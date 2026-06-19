@@ -46,6 +46,11 @@ const {
 const { resolveCaseContactEligibility, stopCaseContact } = require("./contactEligibilityService");
 const { evaluateCxClear } = require("./cxCallStateGuard");
 const { cancelPublishedQueueItemInRingcx } = require("./ringcxLeadServingService");
+const {
+  buildCxCallLifecyclePatch,
+  isCxCanonicalCallWriteEnabled,
+  writeCxCallLifecycleShadowState,
+} = require("./cxCallLifecycleService");
 const { syncCallLedgerFromCallLog } = require("./callLedgerService");
 const {
   applyCallEndedDailyStats,
@@ -1201,6 +1206,19 @@ async function hydrateClaimedQueueItemCxTouchState(item = {}) {
   };
 }
 
+function writeShadowCxCallState(extensionId, patch, options = {}) {
+  if (!isCxCanonicalCallWriteEnabled()) return null;
+  if (!extensionId || !patch) return null;
+  return writeCxCallLifecycleShadowState({
+    agentStateRepository,
+    extensionId,
+    patch,
+    logger: options.logger || null,
+    reason: options.reason || null,
+    event: options.event || null,
+  });
+}
+
 async function markAgentCxCallState(queueItem = null, payload = {}, placedAt = new Date()) {
   const extensionId = String(queueItem?.assignment?.extensionId || "").trim();
   if (!extensionId) return null;
@@ -1236,6 +1254,20 @@ async function markAgentCxCallState(queueItem = null, payload = {}, placedAt = n
     platform: "cx",
     direction: "outbound",
     date: startedAt,
+  });
+  const canonicalPatch = buildCxCallLifecyclePatch({
+    writer: "cx-cadence",
+    queueItemId,
+    caseId: currentCall.caseId,
+    phone,
+    uii,
+    phase: "active",
+    lastObservedAt: startedAt,
+    lastWriter: "cx-cadence-call-placed",
+  });
+  writeShadowCxCallState(extensionId, canonicalPatch, {
+    reason: "call-placed",
+    event: "active-observed",
   });
   return agentStateRepository.updateAgentState(extensionId, {
     status: "onCall",
@@ -1472,6 +1504,25 @@ async function clearAgentCxCallStateForTerminalOutcome(queueItem = null, payload
       date: outcomeAt,
     })
     : normalizeDailyStats(existing?.dailyStats, outcomeAt);
+  const canonicalPatch = buildCxCallLifecyclePatch({
+    writer: "cx-cadence",
+    queueItemId: queueItem?._id ? String(queueItem._id) : null,
+    caseId: queueItem?.caseId || null,
+    phone: queueItem?.phone || null,
+    uii:
+      payload.uii ||
+      payload.callSessionId ||
+      queueItem?.metadata?.lastDialExecutionUii ||
+      queueItem?.metadata?.lastQueueAttemptUii ||
+      null,
+    phase: "released",
+    lastObservedAt: outcomeAt,
+    lastWriter: "cx-cadence-terminal-outcome",
+  });
+  writeShadowCxCallState(extensionId, canonicalPatch, {
+    reason: payload.normalizedOutcome || payload.outcome || "terminal-outcome-release",
+    event: "release",
+  });
 
   const updated = await agentStateRepository.updateAgentState(extensionId, {
     status: "available",
@@ -1522,15 +1573,40 @@ function isProtectedServingQueueItem(queueItem = {}, now = new Date()) {
 }
 
 function buildClaimedDialingEvidenceQuery() {
+  const correlatedDialEvidence = [
+    { "metadata.servingAt": { $exists: true, $ne: null } },
+    { "metadata.lastQueueAttemptAt": { $exists: true, $ne: null } },
+    { "metadata.lastQueueAttemptHeldForDisposition": true },
+    { "metadata.lastQueueAttemptUii": { $exists: true, $nin: [null, ""] } },
+    { "metadata.lastDialExecutionAt": { $exists: true, $ne: null } },
+    { "metadata.lastDialExecutionUii": { $exists: true, $nin: [null, ""] } },
+    { "metadata.lastRingcxPublishedAt": { $exists: true, $ne: null } },
+    { "metadata.lastRingcxPublishedExternId": { $exists: true, $nin: [null, ""] } },
+    { "metadata.lastDialExecutionRingcxPublish": { $exists: true, $ne: null } },
+    { "metadata.lastDialIntentLocalStage": { $exists: true, $ne: null } },
+  ];
   return {
     $or: [
-      { "metadata.servingAt": { $exists: true, $ne: null } },
-      { "metadata.lastDialExecutionUii": { $exists: true, $nin: [null, ""] } },
-      { "metadata.lastQueueAttemptHeldForDisposition": true },
+      ...correlatedDialEvidence,
       {
         "metadata.lastDialIntentStatus": {
-          $in: ["staged", "relayed", "queued-in-ringcx", "accepted", "relay-timeout-pending"],
+          $in: [
+            "staged",
+            "relayed",
+            "queued-in-ringcx",
+            "accepted",
+            "relay-timeout-pending",
+            "unconfirmed-active-call",
+            "unconfirmed",
+            "awaiting-confirmation",
+          ],
         },
+      },
+      {
+        $and: [
+          { "metadata.lastDialIntentStatus": "relay-failed" },
+          { $or: correlatedDialEvidence },
+        ],
       },
     ],
   };
@@ -4584,6 +4660,7 @@ module.exports = {
   CX_CADENCE_EVENT_TYPES,
   buildCxCadenceRuntimeSnapshot,
   backfillCxQueueOrdering,
+  buildClaimedDialingEvidenceQuery,
   claimNextCxQueueItem,
   completeCxQueueItem,
   createCxCallPlacedEvent,

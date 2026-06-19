@@ -69,6 +69,15 @@ const {
   stageCxDispatchIntent,
 } = require("./cxCadenceService");
 const {
+  buildCxCallLifecyclePatch,
+  describeCxCallGate,
+  isCxCanonicalCallReadEnabled,
+  isCxCanonicalCallStrictGateEnabled,
+  isCxCanonicalCallVerboseLoggingEnabled,
+  isCxCanonicalCallWriteEnabled,
+  writeCxCallLifecycleShadowState,
+} = require("./cxCallLifecycleService");
+const {
   cancelCxAppointmentsForCase,
   resolveCxAppointmentAfterDisposition,
 } = require("./cxAppointmentService");
@@ -1582,6 +1591,19 @@ function queueCxTerminalDispositionBackgroundCleanup({
     });
 }
 
+function writeShadowCxCallState(extensionId, patch, options = {}) {
+  if (!isCxCanonicalCallWriteEnabled()) return null;
+  if (!extensionId || !patch) return null;
+  return writeCxCallLifecycleShadowState({
+    agentStateRepository,
+    extensionId,
+    patch,
+    logger: options.logger || null,
+    reason: options.reason || null,
+    event: options.event || null,
+  });
+}
+
 async function clearAgentCxCallState(extensionId, source = "cx-call-state-clear", options = {}) {
   const normalizedExtensionId = String(extensionId || "").trim();
   if (!normalizedExtensionId) return null;
@@ -1637,6 +1659,24 @@ async function clearAgentCxCallState(extensionId, source = "cx-call-state-clear"
     "upstream.source": source,
     "upstream.mirroredAt": now,
   }).catch(() => null);
+  writeShadowCxCallState(
+    normalizedExtensionId,
+    buildCxCallLifecyclePatch({
+      writer: "cx-workspace",
+      queueItemId: options.queueItemId || options.queueTicketId || null,
+      caseId: options.caseId != null ? options.caseId : existing?.caseId || null,
+      phone: options.phone || existingCall?.to || existingCall?.from || null,
+      uii: options.uii || options.rcxUii || null,
+      phase: "released",
+      lastObservedAt: now,
+      lastWriter: source,
+    }),
+    {
+      logger: options.logger || null,
+      reason: source || "cx-call-state-clear",
+      event: "release",
+    },
+  );
   if (
     updated?.activityState === "idle"
     && String(updated?.cxRouting?.desiredAvailability || "available").toLowerCase() === "available"
@@ -5403,13 +5443,16 @@ async function requestCxDisposition(domain, user, input = {}) {
         ...input,
         actorEmail: context.account?.email || user?.email || null,
       });
-    const clearResult = await clearAgentCxCallState(
+  const clearResult = await clearAgentCxCallState(
       context.account?.extensionId || user?.extensionId || input.assignedExtensionId || null,
       `cx-${normalizedDisposition}`,
       {
         uii: input.uii || input.rcxUii || queueItem?.metadata?.lastDialExecutionUii || null,
+        caseId: queueItem?.caseId || null,
+        phone: input.phone || queueItem?.phone || null,
+        queueItemId: queueItem?._id ? String(queueItem._id) : null,
       },
-    );
+  );
     queueCxTerminalDispositionBackgroundCleanup({
       context,
       user,
@@ -5478,13 +5521,16 @@ async function requestCxDisposition(domain, user, input = {}) {
       ...input,
       actorEmail: context.account?.email || user?.email || null,
     });
-    const clearResult = await clearAgentCxCallState(
+  const clearResult = await clearAgentCxCallState(
       context.account?.extensionId || user?.extensionId || input.assignedExtensionId || null,
       "cx-callback-eject",
       {
         uii: input.uii || input.rcxUii || queueItem?.metadata?.lastDialExecutionUii || null,
+        caseId: queueItem?.caseId || null,
+        phone: input.phone || queueItem?.phone || null,
+        queueItemId: queueItem?._id ? String(queueItem._id) : null,
       },
-    );
+  );
     queueCxCallbackBackgroundCleanup({
       context,
       user,
@@ -6622,6 +6668,59 @@ async function assertNoUnresolvedCxDispositionBeforeDial(context = {}, user = {}
     throw err;
   }
 
+  if (isCxCanonicalCallReadEnabled()) {
+    const requestedPhone = queueItem?.phone || queueItem?.metadata?.lastDialExecutionPhone || null;
+    const canonicalGate = describeCxCallGate(context.agentState?.cxCall, requestedQueueItemId, {
+      blockReason: "active-cx-call-in-canonical-state",
+      now: new Date(),
+    });
+    const canonicalBlocked = Boolean(canonicalGate.blocked);
+    const legacyDecision = currentCallBlock.block ? "block" : "allow";
+    const canonicalDecision = canonicalBlocked ? "block" : "allow";
+
+    if (isCxCanonicalCallVerboseLoggingEnabled()) {
+      context?.logger?.info?.("cx.lifecycle.shadow_gate", {
+        extensionId: actorExtensionId,
+        requestedQueueItemId,
+        requestedPhone,
+        requestedCaseId: queueItem?.caseId || null,
+        legacyDecision,
+        legacyReason: currentCallBlock.reason || null,
+        canonicalDecision,
+        canonicalReason: canonicalGate.reason || null,
+        canonicalPhase: canonicalGate.phase || null,
+        canonicalTransitionId: canonicalGate.transitionId || null,
+        canonicalExpiresAt: canonicalGate.expiresAt || null,
+        canonicalExpiredShell: canonicalGate.expiredShell === true,
+      });
+    }
+
+    if (canonicalBlocked && isCxCanonicalCallStrictGateEnabled()) {
+      const canonicalErr = new Error("Finish the current lead before starting another call.");
+      canonicalErr.status = 409;
+      canonicalErr.details = {
+        reason: "canonical-call-state",
+        phase: canonicalGate.phase,
+        transitionId: canonicalGate.transitionId,
+        queueItemId: canonicalGate.queueItemId,
+        phone: canonicalGate.phone,
+        uii: canonicalGate.uii,
+        caseId: canonicalGate.caseId,
+        expiresAt: canonicalGate.expiresAt || null,
+        expiredShell: canonicalGate.expiredShell === true,
+      };
+      if (isCxCanonicalCallVerboseLoggingEnabled()) {
+        context?.logger?.warn?.("cx-call-canonical-gate.blocked", {
+          extensionId: actorExtensionId,
+          requestedQueueItemId,
+          requestedPhone,
+          reason: canonicalGate.reason,
+        });
+      }
+      throw canonicalErr;
+    }
+  }
+
   const servingItems = await cxDialQueueRepository.listQueueItems({
     assignedExtensionId: actorExtensionId,
     states: ["serving"],
@@ -6727,7 +6826,12 @@ async function hangupCxCallAfterDisposition({
     }).catch(() => null);
   }
   if (relayAccepted && assignedExtensionId && input.skipAgentStateClearAfterRelay !== true) {
-    await clearAgentCxCallState(assignedExtensionId, "cx-disposition-complete", { uii });
+    await clearAgentCxCallState(assignedExtensionId, "cx-disposition-complete", {
+      uii,
+      caseId,
+      phone,
+      queueItemId,
+    });
   }
 
   await recordWorkflowStage({
@@ -7109,7 +7213,10 @@ async function requestCxDial(domain, user, input = {}) {
         }).catch(() => null),
       );
     }
-    await clearAgentCxCallState(contextExtensionId, "cx-dial-relay-failed");
+    await clearAgentCxCallState(contextExtensionId, "cx-dial-relay-failed", {
+      phone,
+      queueItemId: effectiveQueueItemId,
+    });
     const err = new Error(relayResult.reason || "CX dial dispatch failed");
     err.status = relayResult.status || 502;
     err.details = relayResult.details || null;

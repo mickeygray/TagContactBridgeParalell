@@ -46,6 +46,34 @@ function extractCaseIdFromResponse(value) {
   return null;
 }
 
+// Map a filename extension to a Content-Type for the multipart file part.
+// Informational for Logics (it keys off the upload itself), but a correct
+// type keeps the document preview/icon right in their UI.
+function guessContentType(name) {
+  const ext = String(name).toLowerCase().match(/\.([a-z0-9]+)$/)?.[1] || "";
+  switch (ext) {
+    case "pdf":
+      return "application/pdf";
+    case "html":
+    case "htm":
+      return "text/html";
+    case "txt":
+      return "text/plain";
+    case "csv":
+      return "text/csv";
+    case "png":
+      return "image/png";
+    case "jpg":
+    case "jpeg":
+      return "image/jpeg";
+    case "tif":
+    case "tiff":
+      return "image/tiff";
+    default:
+      return "application/octet-stream";
+  }
+}
+
 function createLogicsClient(companyKey, options = {}) {
   const runtime = getCompanyRuntime(companyKey, options);
   const { company } = runtime;
@@ -195,6 +223,119 @@ function createLogicsClient(companyKey, options = {}) {
         method: "POST",
         body: payload,
       });
+    },
+    /**
+     * Upload a file to a case as a Logics "Case Document".
+     *
+     * POST publicapi/V4/Documents/CaseDocument — multipart/form-data, Basic
+     * auth (the same credentials every other call uses). Per the Logics API
+     * the file rides in the `File` form field while CaseID / Comment /
+     * FileCategoryID are sent as REQUEST HEADERS (not form fields). The hard
+     * 6 MB ceiling is theirs; we enforce it here so an oversized file fails
+     * fast with a clear error instead of a server 500.
+     *
+     * This is the ONLY write path that pushes an actual file into Logics, and
+     * it deliberately does NOT go through `request()` — that helper forces
+     * `Content-Type: application/json`, but multipart must let fetch set its
+     * own boundary, so we hit `requestJson` directly with no Content-Type.
+     *
+     * Resolves to the raw Logics envelope on success:
+     *   { Success: true, data: { CaseDocumentID }, message, StatusCode }
+     * Throws ExternalServiceError on transport failure or a non-success body
+     * (401 missing/invalid Basic auth, 403 missing case.write scope, 5xx).
+     */
+    async uploadCaseDocument({ caseId, file, filename, contentType, comment, fileCategoryId } = {}) {
+      const id = Number(caseId);
+      if (!Number.isFinite(id) || id <= 0) {
+        throw new ExternalServiceError("logics", "uploadCaseDocument requires a numeric caseId", {
+          status: 400,
+          retryable: false,
+          details: { company: company.key, caseId },
+        });
+      }
+      if (file == null) {
+        throw new ExternalServiceError("logics", "uploadCaseDocument requires a file", {
+          status: 400,
+          retryable: false,
+          details: { company: company.key, caseId: id },
+        });
+      }
+
+      const buffer = Buffer.isBuffer(file) ? file : Buffer.from(file);
+      const MAX_BYTES = 6 * 1024 * 1024; // Logics hard cap — compress/optimize upstream.
+      if (buffer.length > MAX_BYTES) {
+        throw new ExternalServiceError(
+          "logics",
+          `Case document exceeds the 6MB Logics limit (${buffer.length} bytes)`,
+          {
+            status: 413,
+            retryable: false,
+            details: { company: company.key, caseId: id, bytes: buffer.length },
+          },
+        );
+      }
+
+      const safeName = String(filename || "document").trim() || "document";
+      const part =
+        file instanceof Blob
+          ? file
+          : new Blob([buffer], { type: contentType || guessContentType(safeName) });
+      const form = new FormData();
+      form.append("File", part, safeName);
+
+      // CaseID / Comment / FileCategoryID are header params per the Logics
+      // spec. Header values must be ASCII-safe, so strip CR/LF from Comment so
+      // a multi-line comment can't corrupt the request.
+      const headers = runtime.basicAuthHeaders({ CaseID: String(id) });
+      const cleanComment =
+        comment == null ? "" : String(comment).replace(/[\r\n]+/g, " ").trim();
+      if (cleanComment) headers.Comment = cleanComment;
+      if (fileCategoryId != null && String(fileCategoryId).trim() !== "") {
+        headers.FileCategoryID = String(fileCategoryId).trim();
+      }
+
+      const url = buildUrl("Documents/CaseDocument");
+      let response;
+      try {
+        response = await requestJson(
+          url,
+          { method: "POST", headers, body: form },
+          { timeoutMs: 120000, retries: 0 },
+        );
+      } catch (error) {
+        throw new ExternalServiceError(
+          "logics",
+          `Logics CaseDocument upload errored for ${company.key} case ${id}: ${error.message}`,
+          {
+            status: 502,
+            retryable: true,
+            details: { company: company.key, caseId: id, cause: error.message },
+          },
+        );
+      }
+
+      const data = response.data;
+      const ok =
+        response.ok &&
+        data &&
+        (data.Success === true || data.success === true || data?.data?.CaseDocumentID);
+      if (!ok) {
+        throw new ExternalServiceError(
+          "logics",
+          `Logics CaseDocument upload rejected for ${company.key} case ${id}: ${response.status}`,
+          {
+            status: 502,
+            retryable: response.status >= 500,
+            details: {
+              company: company.key,
+              caseId: id,
+              responseStatus: response.status,
+              responseBody: data,
+            },
+          },
+        );
+      }
+      return data;
     },
     updateCase(payload) {
       return request("UpdateCase/UpdateCase", {

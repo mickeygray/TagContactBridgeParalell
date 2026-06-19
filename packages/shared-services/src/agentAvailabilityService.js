@@ -33,8 +33,11 @@ const LONG_CALL_HOLD_TYPE = "long-call-hold";
 const LOGOUT_PAUSE_TYPE = "logout";
 const COUNTED_BREAK_TYPES = new Set([SHORT_BREAK_TYPE, MEAL_BREAK_TYPE]);
 
-function isExLeadServingGateEnabled() {
-  if (suppressExArtifactsForCx()) return false;
+function isExLeadServingGateEnabled(options = {}) {
+  if (suppressExArtifactsForCx(options)) return false;
+  if (typeof options.exBusyGateEnabled === "boolean") {
+    return options.exBusyGateEnabled;
+  }
   return String(process.env.RC_CX_EX_BUSY_GATE_ENABLED || "false").toLowerCase() === "true";
 }
 
@@ -523,8 +526,8 @@ function resolveCurrentCallStartAt(snapshot = {}) {
   return startedAt && !Number.isNaN(startedAt.getTime()) ? startedAt : null;
 }
 
-function hasLongActiveCall(snapshot = {}, now = new Date()) {
-  const exCallCountsForServing = isExLeadServingGateEnabled() && hasActiveExCall(snapshot);
+function hasLongActiveCall(snapshot = {}, now = new Date(), options = {}) {
+  const exCallCountsForServing = isExLeadServingGateEnabled(options) && hasActiveExCall(snapshot);
   if (!exCallCountsForServing && !hasCxActiveCall(snapshot)) return false;
   const startedAt = resolveCurrentCallStartAt(snapshot);
   if (!startedAt) return false;
@@ -636,7 +639,7 @@ function deriveCxRouting(snapshot = {}, existingRouting = null) {
   };
 }
 
-function deriveFreshLeadGate(snapshot = {}, routingOverride = null) {
+function deriveFreshLeadGate(snapshot = {}, routingOverride = null, options = {}) {
   const routing = routingOverride
     || (snapshot.cxRouting && typeof snapshot.cxRouting === "object" ? snapshot.cxRouting : null);
   const enabled = isCxRoutingEnabled(snapshot, routing);
@@ -644,12 +647,12 @@ function deriveFreshLeadGate(snapshot = {}, routingOverride = null) {
     routing?.desiredAvailability || (enabled ? "available" : "unavailable"),
   ).trim().toLowerCase();
   const rawRoutingReason = String(routing?.reason || "").trim().toLowerCase();
-  const exBusySuppressed = suppressExBusyRoutingReason(rawRoutingReason);
-  const exArtifactSuppressionActive = suppressExArtifactsForCx();
+  const exBusySuppressed = suppressExBusyRoutingReason(rawRoutingReason, options);
+  const exArtifactSuppressionActive = suppressExArtifactsForCx(options);
   const desiredAvailability = exBusySuppressed ? "available" : rawDesiredAvailability;
   const routingReason = exBusySuppressed ? "ex-idle" : rawRoutingReason;
   const pauseType = normalizeCxPauseType(routing?.pauseType);
-  const exCallActive = isExLeadServingGateEnabled()
+  const exCallActive = isExLeadServingGateEnabled(options)
     && (isExBusySnapshot(snapshot) || routingReason === "ex-busy");
   const leadServingExcluded = isLeadServingExcludedAgent(snapshot);
   const workspaceRequired = isCxWorkspacePresenceRequired();
