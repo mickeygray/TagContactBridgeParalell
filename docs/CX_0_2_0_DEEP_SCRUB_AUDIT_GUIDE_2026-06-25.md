@@ -2366,3 +2366,34 @@ Implementation cadence suggestion for this section:
 2. Add tests around items 3,5,8 once state contract is stable.
 3. Complete items 6-9 once route and runtime ownership boundaries are agreed.
 4. Backfill 10-11 as cleanup to keep behavior aligned after core edits.
+
+## 20.10 Final scrub — verification of the reconciled §20.8 blocker list against current code (2026-06-26)
+
+Third pass (the "scrub to end all scrubs"). Method: re-read **each** reconciled §20.8 blocker against the
+**current working copy** (the rail advanced past §20.8 — a cleanup pass landed every fix) and ran the failable
+check. **Test ground truth: `node --test tests/cx-bulk-load/*.test.js` → 208 pass / 0 fail** (was 155/2 at §20.8;
+the 2 RED reconciler tests are green).
+
+**Every §20.8 pre-pilot blocker is now CLOSED in current code (verified line-by-line, not assumed):**
+
+| §20.8 blocker | Status | Evidence (current code) |
+|---|---|---|
+| [RED] reconciler metadata-merge | ✓ FIXED | `cxReservationReconcilerService.js:58-62` builds `adopted = {...row, ...adoptedRow, metadata:{...row.metadata, ...adoptedRow.metadata}}` and uses it for `terminalEvidence`/`completeCxQueueItem`/`releaseReserved` (66,79,72,85). The 2 RED tests pass. |
+| reconciler evidence-error-release (adopt-then-strand) | ✓ FIXED | the evidence `catch` (`:67-74`) now `releaseReserved([adopted], "reservation-reconciler:evidence-error")` — releases, not just logs. |
+| releaseReserved missing-session guard | ✓ FIXED | `cxQueueReservationService.js:113-115` skips+logs a row with no `metadata.reservationSessionId`; CAS matches the real id (`:131`), not `?? null`. |
+| existsForLead / UCQ-interlock fail-closed | ✓ FIXED | `assertNotActiveInUcq` catch (`:94-101`) releases the row as `cross-pool-interlock:lead-check-failed` (fail-CLOSED), does not keep it. |
+| reserveMode policy bypass | ✓ FIXED | `cxReserveModeService.js:36` green-first guards `open("fresh-day1") > 0 ? deficit : 0`; `:48` `if (disabled) return targets;` before the aged floor (`:50`). |
+| outcome idem-key too coarse | ✓ FIXED | `cxBulkLoadOutcomeAdapter.js:34-36` UII anchors when present (`${qid}:${u}` or `${sessionId}:uii:${u}`) + `eventType` appended on non-terminal corrections; `:100` `written: result != null && result.written !== false`. |
+| publisher accept-unsent + cancel guard | ✓ FIXED | `cxBulkLoadRingcxPublisher.js:155` maps result against `uploadedCandidates` (not `input.candidates`), `:156` returns `notUploaded` as rejected; `cancelBatchForSession` requires `campaignId` (`:170`); publish requires it (`:136`). |
+| drain scan-failure crash | ✓ FIXED | `cxTerminalOutboxDrain.js:37-42` wraps the scan in try/catch → `{scanned:0,drained:0,failed:0,scanError:true}`; non-array→`[]` (`:43`). |
+| watcher/refill per-session serialization (double-reserve) | ✓ FIXED | `cxAccountActiveCallWatcherService.js:585` runs `applyProjection` (refill→reserve + version-guarded persist) inside `runSessionApply`; `withSessionApply` shares the same per-session `sessionOperationTails` serializer as command mutations (`cxBulkLoadRuntimeService.js:314-320`); persist is `__v`/`updatedAt`-guarded (`:558-566`). Covered by `cxBulkLoadRuntimeService.test.js:546` "overlapping account watcher ticks serialize one refill per session". |
+| missing test files | ✓ FIXED | `tests/cx-bulk-load/cxBulkLoadRuntime.test.js` and `cxBulkLoadMutationEligibility.test.js` both present. |
+
+**Changes made by this scrub pass:** none required — every blocker was already closed by the prior cleanup; this
+pass is a verification + documentation pass only. No code was edited. The suite is green.
+
+**Still in flight:** a fresh adversarial sweep (5 finder angles over the whole rail, recall mode) for defects
+NEITHER prior agent caught. If it surfaces anything confirmed, it gets its own fix+test and a follow-up note here.
+
+**Pilot-ready bar (§20.8) met:** 2 reconciler tests green ✓ · 7 ✗ defects fixed ✓ · 2 test files added ✓ ·
+`node --test tests/cx-bulk-load/*.test.js` clean (208/0) ✓.
