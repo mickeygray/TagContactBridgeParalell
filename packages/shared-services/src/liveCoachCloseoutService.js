@@ -3,6 +3,17 @@
 const fs = require("fs");
 const path = require("path");
 
+const {
+  writeCxCallWrapSummary,
+} = require("./cxCallWrapService");
+const {
+  writeAgentCallNoteFromCloseout,
+} = require("./cxAgentCallNoteService");
+const {
+  normalizeRollingSummaryPayload,
+  rollingSummaryToText,
+} = require("./liveCoachRollingSummaryService");
+
 function cleanText(value, maxLength = 500) {
   return String(value || "")
     .replace(/\s+/g, " ")
@@ -156,6 +167,13 @@ function recentProspectSnippets(session = {}) {
   );
 }
 
+function rollingSummaryFromSession(session = {}) {
+  const summary = session.latest?.rollingSummary || session.memory?.rollingSummary || null;
+  if (!summary) return null;
+  const normalized = normalizeRollingSummaryPayload(summary);
+  return Array.isArray(normalized.summary) && normalized.summary.length ? normalized : null;
+}
+
 function summarizeFacts(session = {}) {
   const facts = session.factLedger && typeof session.factLedger === "object" ? session.factLedger : {};
   return Object.entries(facts)
@@ -209,14 +227,16 @@ function buildSparseOperationalSummary(session = {}, input = {}) {
   const metadata = sessionMetadata(session);
   const durationSec = approxDurationSec(session);
   const outcome = classifyOutcome(session, input.reason);
+  const rollingSummary = rollingSummaryFromSession(session);
   const majorIssue = inferMajorIssue(session);
   const nextStep = inferNextStep(session);
   const factLines = summarizeFacts(session).slice(0, 4);
+  const rollingText = cleanText(rollingSummary?.summaryText || rollingSummaryToText(rollingSummary?.summary || []), 900);
   const lines = [
     `Outcome: ${outcome}`,
     `Agent: ${metadata.agentName || metadata.agentEmail || metadata.agentExtension || "unknown"}`,
     durationSec ? `Duration: ${durationSec}s` : "",
-    `Discussed: ${majorIssue}`,
+    `Discussed: ${rollingText || majorIssue}`,
     factLines.length ? `Facts captured: ${factLines.join("; ")}` : "",
     `Next step: ${nextStep}`,
   ].filter(Boolean);
@@ -295,6 +315,7 @@ function buildLiveCoachCloseout(session = {}, input = {}) {
   const agentFeedback = buildAgentFeedback(session, input);
   const contextKeys = selectedContextKeys(session);
   const facts = summarizeFacts(session);
+  const rollingSummary = rollingSummaryFromSession(session);
   const now = new Date();
   return {
     id: `${session.id || "session"}:${timestampForFile(now)}`,
@@ -303,6 +324,8 @@ function buildLiveCoachCloseout(session = {}, input = {}) {
     reason: cleanText(input.reason || "", 120),
     metadata,
     sparse,
+    rollingSummary,
+    callSummary: rollingSummary?.summaryText || session.callSummary || sparse.text || "",
     agentFeedback,
     facts,
     contextKeys,
@@ -525,6 +548,7 @@ function shouldSendManagerOutlierEmail(closeout = {}, config = {}) {
 function createLiveCoachCloseoutWorker({
   rootDir,
   logger,
+  agentCallNoteRepository = null,
   caseProfileRepository = null,
   leadCadenceRepository = null,
   logicsClientFactory = null,
@@ -559,37 +583,6 @@ function createLiveCoachCloseoutWorker({
     return file;
   }
 
-  async function writeCaseProfileCommunication(closeout) {
-    if (!config.caseProfileCommunicationEnabled || !caseProfileRepository?.appendCommunicationEntry) {
-      return { skipped: true, reason: "case-profile-disabled" };
-    }
-    const { domain, caseId, phone, agentEmail, agentName } = closeout.metadata || {};
-    if (!domain || !Number.isFinite(Number(caseId))) {
-      return { skipped: true, reason: "missing-domain-or-case" };
-    }
-    const result = await caseProfileRepository.appendCommunicationEntry(domain, Number(caseId), "call", {
-      direction: "outbound",
-      status: closeout.sparse?.outcome || "completed",
-      provider: "live-coach",
-      threadKey: `live-coach:${closeout.sessionId}`,
-      phone: phone || null,
-      subject: "Live coach call summary",
-      body: closeout.sparse?.text || "",
-      actorEmail: agentEmail || null,
-      actorName: agentName || null,
-      happenedAt: closeout.createdAt,
-      source: "live-coach-closeout",
-      metadata: {
-        sessionId: closeout.sessionId,
-        uii: closeout.metadata?.uii || null,
-        queueItemId: closeout.metadata?.queueItemId || null,
-        contextKeys: closeout.contextKeys || [],
-        durationSec: closeout.sparse?.durationSec || 0,
-      },
-    });
-    return { skipped: false, id: result?._id ? String(result._id) : null };
-  }
-
   async function writeLeadCadenceSummary(closeout) {
     if (!config.leadCadenceSummaryEnabled || !leadCadenceRepository?.saveLiveCoachCloseoutSummary) {
       return { skipped: true, reason: "lead-cadence-disabled" };
@@ -602,10 +595,11 @@ function createLiveCoachCloseoutWorker({
       sessionId: closeout.sessionId,
       at: closeout.createdAt,
       outcome: closeout.sparse?.outcome || null,
-      summary: closeout.sparse?.text || "",
+      summary: closeout.callSummary || closeout.sparse?.text || "",
       nextStep: closeout.sparse?.nextStep || "",
       contextKeys: closeout.contextKeys || [],
       facts: closeout.facts || [],
+      rollingSummary: closeout.rollingSummary || null,
       grade: closeout.callGrade?.grade
         ? {
           overallScore: closeout.callGrade.grade.overallScore,
@@ -618,24 +612,72 @@ function createLiveCoachCloseoutWorker({
     });
   }
 
-  async function writeLogicsActivity(closeout) {
-    if (!config.logicsActivityEnabled || typeof logicsClientFactory !== "function") {
-      return { skipped: true, reason: "logics-disabled" };
+  async function writeCallWrapSummary(closeout) {
+    const metadata = closeout.metadata || {};
+    const actor = {
+      actorEmail: metadata.agentEmail || null,
+      actorName: metadata.agentName || metadata.agentEmail || null,
+    };
+    return writeCxCallWrapSummary(
+      {
+        domain: metadata.domain,
+        caseId: metadata.caseId,
+        actor,
+        agentEmail: metadata.agentEmail || null,
+        agentName: metadata.agentName || null,
+        phone: metadata.phone || null,
+        prospectName: metadata.contactName || null,
+        source: "live-coach-closeout",
+        provider: "live-coach",
+        subject: config.logicsSubject || "Live coach call summary",
+        threadKey: metadata.uii ? `cx-call:${metadata.uii}` : `live-coach:${closeout.sessionId}`,
+        coachSessionId: closeout.sessionId,
+        uii: metadata.uii || null,
+        queueItemId: metadata.queueItemId || null,
+        terminalOutcome: closeout.sparse?.outcome || "completed",
+        summary: formatLogicsActivityComment(closeout),
+        nextStep: closeout.sparse?.nextStep || "",
+        happenedAt: closeout.createdAt,
+        durationSec: closeout.sparse?.durationSec || 0,
+        contextKeys: closeout.contextKeys || [],
+        facts: closeout.facts || [],
+        rollingSummary: closeout.rollingSummary || null,
+        grade: closeout.callGrade?.grade || null,
+        metrics: closeout.metrics || {},
+        transcriptArtifactPath: closeout.artifactPath || "",
+      },
+      {
+        caseProfileRepository,
+        writeLogicsActivity: async (domain, _actor, activity) => {
+          if (!config.logicsActivityEnabled || typeof logicsClientFactory !== "function") {
+            return { skipped: true, reason: "logics-disabled" };
+          }
+          const client = logicsClientFactory(domain);
+          const result = await client.createActivity({
+            CaseID: Number(activity.caseId),
+            ActivityType: config.logicsActivityType || activity.activityType || "General",
+            Subject: activity.subject || config.logicsSubject || "CX call summary",
+            Comment: activity.note,
+            Popup: false,
+            Pin: false,
+          });
+          return { skipped: false, result };
+        },
+        logger,
+      },
+      {
+        allowSparse: false,
+        writeCaseProfileCommunication: config.caseProfileCommunicationEnabled !== false,
+        writeLogicsActivity: config.logicsActivityEnabled !== false,
+      },
+    );
+  }
+
+  async function writeAgentCallNote(closeout) {
+    if (config.agentCallNotesEnabled === false || !agentCallNoteRepository?.upsertCallNote) {
+      return { skipped: true, reason: "agent-call-notes-disabled" };
     }
-    const { domain, caseId } = closeout.metadata || {};
-    if (!domain || !Number.isFinite(Number(caseId))) {
-      return { skipped: true, reason: "missing-domain-or-case" };
-    }
-    const client = logicsClientFactory(domain);
-    const result = await client.createActivity({
-      CaseID: Number(caseId),
-      ActivityType: config.logicsActivityType || "General",
-      Subject: config.logicsSubject || "CX call summary",
-      Comment: formatLogicsActivityComment(closeout),
-      Popup: false,
-      Pin: false,
-    });
-    return { skipped: false, result };
+    return writeAgentCallNoteFromCloseout(closeout, { agentCallNoteRepository });
   }
 
   async function maybeSendAgentEmail(closeout) {
@@ -753,13 +795,23 @@ function createLiveCoachCloseoutWorker({
       caseProfile: null,
       leadCadence: null,
       logics: null,
+      agentCallNote: null,
       agentEmail: null,
     };
 
+    result.agentCallNote = await writeAgentCallNote(closeout).catch((error) => {
+      logger?.warn?.("live_coach.closeout.agent_call_note_failed", {
+        sessionId: closeout.sessionId,
+        error: error.message,
+      });
+      return { skipped: true, reason: "agent-call-note-error", error: error.message };
+    });
+
     if (!skipReason) {
-      result.caseProfile = await writeCaseProfileCommunication(closeout);
+      const callWrap = await writeCallWrapSummary(closeout);
+      result.caseProfile = callWrap.communication;
       result.leadCadence = await writeLeadCadenceSummary(closeout);
-      result.logics = await writeLogicsActivity(closeout);
+      result.logics = callWrap.logicsActivity;
       result.agentEmail = await maybeSendAgentEmail(closeout);
     }
 

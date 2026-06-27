@@ -47,6 +47,9 @@ const { resolveCaseContactEligibility, stopCaseContact } = require("./contactEli
 const { evaluateCxClear } = require("./cxCallStateGuard");
 const { cancelPublishedQueueItemInRingcx } = require("./ringcxLeadServingService");
 const {
+  observeCxBucketTerminalOutcome,
+} = require("./cxDialQueueMediatorService");
+const {
   buildCxCallLifecyclePatch,
   isCxCanonicalCallWriteEnabled,
   writeCxCallLifecycleShadowState,
@@ -184,10 +187,38 @@ function collectOutcomeCandidates(payload = {}) {
 
 function classifyCxTerminalOutcome(payload = {}) {
   const candidates = collectOutcomeCandidates(payload);
+  const trustedManualSource = String(payload.sourceService || "").trim().toLowerCase() === "cx-bulk-load";
   for (const candidate of candidates) {
     const token = normalizeOutcomeToken(candidate);
     if (!token) continue;
     const compact = token.replace(/_/g, "");
+
+    if (trustedManualSource && (
+      token === "answered"
+      || token === "answer"
+      || token === "connected"
+      || compact === "answered"
+    )) {
+      return {
+        safeToAdvance: true,
+        normalizedOutcome: "answered",
+        matchedValue: candidate,
+      };
+    }
+
+    if (trustedManualSource && (
+      token === "dnc"
+      || token === "do_not_call"
+      || token === "donotcall"
+      || token === "do-not-call"
+      || compact === "donotcall"
+    )) {
+      return {
+        safeToAdvance: true,
+        normalizedOutcome: "dnc",
+        matchedValue: candidate,
+      };
+    }
 
     // "No voicemail box" is a failed drop-style signal, not a confirmed
     // RingCX voicemail outcome. Keep it out of the fast-skip lane.
@@ -1538,6 +1569,21 @@ async function clearAgentCxCallStateForTerminalOutcome(queueItem = null, payload
     "upstream.mirroredAt": outcomeAt,
   });
 
+  const terminalOutcome = {
+    extensionId,
+    queueItemId: queueItem?._id ? String(queueItem._id) : null,
+    caseId: queueItem?.caseId || null,
+    phone: queueItem?.phone || null,
+    uii: payload.uii || payload.callSessionId
+      || queueItem?.metadata?.lastDialExecutionUii
+      || queueItem?.metadata?.lastQueueAttemptUii
+      || null,
+    outcome: payload.normalizedOutcome || payload.outcome || "terminal-outcome",
+    drainCurrentCall: true,
+    logger: payload.logger || null,
+  };
+  observeCxBucketTerminalOutcome(terminalOutcome).catch(() => null);
+
   return {
     ok: true,
     extensionId,
@@ -1706,6 +1752,15 @@ async function requeueStaleServingQueueItems(now = new Date(), limit = 50) {
           lastStatusChange: now,
           "upstream.source": "stale-serving-timeout",
           "upstream.mirroredAt": now,
+        }).catch(() => null);
+        observeCxBucketTerminalOutcome({
+          extensionId: previousAssignment.extensionId,
+          queueItemId: item?._id ? String(item._id) : null,
+          caseId: item.caseId || null,
+          phone: item.phone || null,
+          uii: item.metadata?.lastDialExecutionUii || item.metadata?.lastQueueAttemptUii || null,
+          outcome: "stale-serving-timeout",
+          drainCurrentCall: true,
         }).catch(() => null);
       }
     }
@@ -2251,6 +2306,9 @@ async function handleCxCallPlaced(payload = {}) {
         ? String(queueMetadata.rcxVisibilityAccountId)
         : null,
       externId: queueMetadata.rcxVisibilityExternId || null,
+      queueItemId: String(queueItem._id),
+      agentEmail: payload.agentEmail || null,
+      actionKey: payload.actionKey || queueItem.metadata?.actionKey || null,
     };
     // Stamp routeCampaignKey at write time so the vendor families
     // rollup can split LD into ld-custom / ld-general without waiting
@@ -2404,12 +2462,17 @@ async function handleCxCallPlaced(payload = {}) {
     nextPlacedCalls,
   );
   const confirmedClaimedCxCall = confirmedCall && queueState === "claimed";
+  const confirmedExplicitDispositionHold =
+    confirmedCall && payload.holdUntilDisposition === true;
   const holdUntilDisposition =
     queueState === "serving"
     || queueItem.metadata?.dealHandoffHold === true
-    || confirmedClaimedCxCall;
+    || confirmedClaimedCxCall
+    || confirmedExplicitDispositionHold;
   const holdReason = confirmedClaimedCxCall
     ? "confirmed-claimed-call"
+    : confirmedExplicitDispositionHold
+      ? "confirmed-explicit-disposition-hold"
     : queueItem.metadata?.dealHandoffHold === true
       ? "deal-handoff-hold"
       : "serving-call";
@@ -2612,10 +2675,13 @@ async function handleCxTerminalCallOutcome(payload = {}) {
   const caseId = Number(queueItem.caseId);
   const outcomeAt = payload.outcomeAt ? new Date(payload.outcomeAt) : new Date();
   const safeOutcomeAt = Number.isNaN(outcomeAt.getTime()) ? new Date() : outcomeAt;
+  const normalizedOutcome = classification.normalizedOutcome;
+  const nonConnectOutcome = normalizedOutcome === "voicemail" || normalizedOutcome === "did_not_connect";
+  const contactOutcome = normalizedOutcome === "answered" || normalizedOutcome === "dnc";
   const terminalMetadata = {
     lastTerminalOutcomeAt: safeOutcomeAt,
     lastTerminalOutcome: payload.outcome || payload.result || payload.disposition || null,
-    lastTerminalOutcomeNormalized: classification.normalizedOutcome,
+    lastTerminalOutcomeNormalized: normalizedOutcome,
     lastTerminalOutcomeMatchedValue: classification.matchedValue,
     lastTerminalOutcomeSource: payload.sourceService || payload.source || "ringcentral-cx",
     lastTerminalOutcomeUii:
@@ -2648,6 +2714,7 @@ async function handleCxTerminalCallOutcome(payload = {}) {
     queueState === "serving"
     || queueItem.metadata?.lastQueueAttemptHeldForDisposition === true
     || queueItem.metadata?.wrapUpRequired === true;
+  const bulkTerminalBypass = shouldBypassHeldGateForBulkTerminal({ payload, queueItem, queueState });
   if (["completed", "cancelled"].includes(queueState)) {
     await cxDialQueueRepository.updateQueueItem(queueItem._id, {
       "metadata.lastTerminalOutcomeIgnoredAt": safeOutcomeAt,
@@ -2666,7 +2733,7 @@ async function handleCxTerminalCallOutcome(payload = {}) {
       classification,
     };
   }
-  if (!heldForDisposition) {
+  if (!heldForDisposition && !bulkTerminalBypass) {
     await cxDialQueueRepository.updateQueueItem(queueItem._id, {
       "metadata.lastTerminalOutcomeIgnoredAt": safeOutcomeAt,
       "metadata.lastTerminalOutcomeIgnoredReason": "not-held-for-disposition",
@@ -2694,14 +2761,16 @@ async function handleCxTerminalCallOutcome(payload = {}) {
       queueItem?.metadata?.cxAnsweredContacts ||
       0,
   ) || 0, 0);
-  const nextCxNoAnswerCalls = Math.max(Number(
+  const priorCxNoAnswerCalls = Math.max(Number(
     lead?.counterCadence?.cxNoAnswerCalls ||
       lead?.payloadSnapshot?.cxNoAnswerCalls ||
       queueItem?.metadata?.unansweredCalls ||
       queueItem?.metadata?.noAnswerCalls ||
       queueItem?.metadata?.cxNoAnswerCalls ||
       0,
-  ) || 0, 0) + 1;
+  ) || 0, 0);
+  const nextCxAnsweredContacts = priorCxAnsweredContacts + (contactOutcome ? 1 : 0);
+  const nextCxNoAnswerCalls = priorCxNoAnswerCalls + (nonConnectOutcome ? 1 : 0);
   const pendingCxActions = (lead?.schedule?.actions || []).filter(
     (entry) => entry.channel === "cx" && (entry.status === "pending" || entry.status === "requested"),
   );
@@ -2715,23 +2784,37 @@ async function handleCxTerminalCallOutcome(payload = {}) {
   if (pendingCxAction) {
     await leadCadenceRepository.markScheduledActionStatus(domain, caseId, pendingCxAction.key, "completed", {
       currentStage:
-        classification.normalizedOutcome === "voicemail"
+        normalizedOutcome === "voicemail"
           ? "cx-call-voicemail"
-          : "cx-call-no-answer",
+          : normalizedOutcome === "did_not_connect"
+            ? "cx-call-no-answer"
+            : normalizedOutcome === "dnc"
+              ? "cx-call-dnc"
+              : "cx-call-answered",
     });
     await leadCadenceRepository.syncLeadCadenceState(domain, caseId).catch(() => null);
   }
+  const leadCadenceSet = {
+    "counterCadence.cxNoAnswerCalls": nextCxNoAnswerCalls,
+    "payloadSnapshot.cxNoAnswerCalls": nextCxNoAnswerCalls,
+    "payloadSnapshot.cxAnsweredContacts": nextCxAnsweredContacts,
+  };
+  if (nonConnectOutcome) {
+    leadCadenceSet["counterCadence.lastCxNoAnswerAt"] = safeOutcomeAt;
+    leadCadenceSet["payloadSnapshot.lastCxNoAnswerAt"] = safeOutcomeAt;
+  }
+  if (contactOutcome) {
+    leadCadenceSet["counterCadence.cxAnsweredContacts"] = nextCxAnsweredContacts;
+    leadCadenceSet["counterCadence.lastCxAnsweredAt"] = safeOutcomeAt;
+    leadCadenceSet["payloadSnapshot.lastCxAnsweredAt"] = safeOutcomeAt;
+  }
+  if (normalizedOutcome === "dnc") {
+    leadCadenceSet["counterCadence.lastCxDncAt"] = safeOutcomeAt;
+    leadCadenceSet["payloadSnapshot.lastCxDncAt"] = safeOutcomeAt;
+  }
   await LeadCadence.updateOne(
     { domain, caseId },
-    {
-      $set: {
-        "counterCadence.cxNoAnswerCalls": nextCxNoAnswerCalls,
-        "counterCadence.lastCxNoAnswerAt": safeOutcomeAt,
-        "payloadSnapshot.cxNoAnswerCalls": nextCxNoAnswerCalls,
-        "payloadSnapshot.lastCxNoAnswerAt": safeOutcomeAt,
-        "payloadSnapshot.cxAnsweredContacts": priorCxAnsweredContacts,
-      },
-    },
+    { $set: leadCadenceSet },
   ).catch(() => null);
 
   const currentPlan = normalizeCallPlanForQueueFamily(
@@ -2743,8 +2826,8 @@ async function handleCxTerminalCallOutcome(payload = {}) {
     : null;
   const baseMetadata = {
     ...terminalMetadata,
-    answeredContacts: priorCxAnsweredContacts,
-    cxAnsweredContacts: priorCxAnsweredContacts,
+    answeredContacts: nextCxAnsweredContacts,
+    cxAnsweredContacts: nextCxAnsweredContacts,
     unansweredCalls: nextCxNoAnswerCalls,
     noAnswerCalls: nextCxNoAnswerCalls,
     cxNoAnswerCalls: nextCxNoAnswerCalls,
@@ -2764,11 +2847,16 @@ async function handleCxTerminalCallOutcome(payload = {}) {
     postOutcomeDialability?.ok === false && postOutcomeDialability.lifecycleHold?.terminal,
   );
   let queueMutation = null;
-  if (nextDelayMinutes == null || terminalPolicyHold) {
+  if (contactOutcome || nextDelayMinutes == null || terminalPolicyHold) {
     queueMutation = await completeCxQueueItem({
       queueItemId: String(queueItem._id),
-      queueOutcome: "cadence-finished",
-      disposition: classification.normalizedOutcome,
+      queueOutcome:
+        normalizedOutcome === "dnc"
+          ? "dnc"
+          : normalizedOutcome === "answered"
+            ? "answered"
+            : "cadence-finished",
+      disposition: normalizedOutcome,
       extraUpdate: {
         metadata: {
           ...baseMetadata,
@@ -2785,7 +2873,7 @@ async function handleCxTerminalCallOutcome(payload = {}) {
     queueMutation = await rescheduleCxQueueItem({
       queueItemId: String(queueItem._id),
       releaseAt: timing.nextAllowedAt,
-      reason: `terminal-${classification.normalizedOutcome}`,
+      reason: `terminal-${normalizedOutcome}`,
       actorEmail: payload.actorEmail || payload.agentEmail || null,
       cancelRingcxInBackground: true,
       extraUpdate: {
@@ -2808,12 +2896,17 @@ async function handleCxTerminalCallOutcome(payload = {}) {
       extensionId: queueItem.assignment?.extensionId || payload.assignedExtensionId || null,
       executionOwner: "ringcentral-cx",
       platform: "cx",
-      missed: true,
+      missed: nonConnectOutcome,
       callEndTime: safeOutcomeAt,
+      "ringcx.queueItemId": String(queueItem._id),
+      "ringcx.externId": queueItem.metadata?.rcxVisibilityExternId || payload.externId || null,
+      "ringcx.agentEmail": payload.actorEmail || payload.agentEmail || null,
+      "ringcx.actionKey": payload.actionKey || queueItem.metadata?.actionKey || null,
+      "ringcx.terminalSource": payload.sourceService || payload.source || "ringcentral-cx",
       audit: {
         dispatchSource: "cx-terminal-outcome",
-        intent: "cx-non-connect-fast-advance",
-        normalizedOutcome: classification.normalizedOutcome,
+        intent: contactOutcome ? "cx-contact-terminal-outcome" : "cx-non-connect-fast-advance",
+        normalizedOutcome,
         matchedValue: classification.matchedValue,
         queueItemId: String(queueItem._id),
       },
@@ -2822,7 +2915,7 @@ async function handleCxTerminalCallOutcome(payload = {}) {
 
   const agentClear = await clearAgentCxCallStateForTerminalOutcome(queueItem, {
     ...payload,
-    normalizedOutcome: classification.normalizedOutcome,
+    normalizedOutcome,
   }, safeOutcomeAt).catch((error) => ({
     ok: false,
     error: error.message || "agent-clear-failed",
@@ -2858,9 +2951,13 @@ async function handleCxTerminalCallOutcome(payload = {}) {
     sourceService: "ringcentral-cx",
     title: "CX terminal outcome advanced queue",
     summary:
-      classification.normalizedOutcome === "voicemail"
+      normalizedOutcome === "voicemail"
         ? "RingCX reported voicemail; queue advanced without Logics disposition"
-        : "RingCX reported no answer; queue advanced without Logics disposition",
+        : normalizedOutcome === "did_not_connect"
+          ? "RingCX reported no answer; queue advanced without Logics disposition"
+          : normalizedOutcome === "dnc"
+            ? "Bulk DNC disposition completed the queue item"
+            : "Bulk answered disposition completed the queue item",
     payload,
     result: {
       classification,
@@ -3595,6 +3692,13 @@ function normalizeExtraQueueUpdate(extraUpdate = null) {
 
 function buildClearedDialRuntimeMetadata({ now = new Date(), reason = null } = {}) {
   return {
+    // M3 FM-8c — null the reservation lease on every clear/complete/reschedule/assign so a
+    // requeued row never keeps a stale lease that the M2 reaper-exclusion would pin with no
+    // live owner. reserveReadyRows (M1) is the ONLY writer of these; the assigner and reserve
+    // paths are mutually exclusive per row (see M3 Wires/Why — invariant to preserve).
+    "metadata.reservationSessionId": null,
+    "metadata.reservedAt": null,
+    "metadata.reservationExpiresAt": null,
     "metadata.lastDialIntent": null,
     "metadata.lastDialIntentAt": null,
     "metadata.lastDialIntentWorkflowId": null,
@@ -3736,6 +3840,24 @@ function buildQueueItemMutationMatch(item = null, options = {}) {
   return match;
 }
 
+function isBulkLoadOwnedCxQueueItem(item = null) {
+  const metadata = item?.metadata && typeof item.metadata === "object" ? item.metadata : {};
+  return (
+    String(metadata.reservationRail || "").trim() === "bulk_load" ||
+    Boolean(String(metadata.bulkLoadSessionId || "").trim())
+  );
+}
+
+function shouldBypassHeldGateForBulkTerminal({ payload = {}, queueItem = null, queueState = "" } = {}) {
+  const source = String(payload.sourceService || payload.source || "").trim().toLowerCase();
+  if (source !== "cx-bulk-load") return false;
+  if (!isBulkLoadOwnedCxQueueItem(queueItem)) return false;
+  const state = String(queueState || queueItem?.state || "").trim().toLowerCase();
+  if (!["claimed", "serving"].includes(state)) return false;
+  const uii = normalizeExternalId(payload.uii || payload.callSessionId);
+  return Boolean(uii);
+}
+
 async function resolveQueueItemForMutation(options = {}) {
   const queueItemId = String(options.queueItemId || "").trim();
   if (queueItemId) {
@@ -3764,6 +3886,16 @@ async function releaseCxQueueItem(options = {}) {
   const item = await resolveQueueItemForMutation(options);
   if (!item) {
     return { ok: true, mutated: false, reason: "queue-item-not-found" };
+  }
+  if (isBulkLoadOwnedCxQueueItem(item) && options.allowBulkLoadRelease !== true) {
+    return {
+      ok: false,
+      mutated: false,
+      reason: "bulk-load-owned-queue-item",
+      queueItemId: String(item._id),
+      caseId: Number(item.caseId),
+      state: item.state || null,
+    };
   }
 
   const now = options.now ? new Date(options.now) : new Date();
@@ -4661,11 +4793,14 @@ module.exports = {
   buildCxCadenceRuntimeSnapshot,
   backfillCxQueueOrdering,
   buildClaimedDialingEvidenceQuery,
+  buildClearedDialRuntimeMetadata, // exported for offline M3 reservation-trio-null test; pure
   claimNextCxQueueItem,
   completeCxQueueItem,
   createCxCallPlacedEvent,
   createCxCallTerminalOutcomeEvent,
   classifyCxTerminalOutcome,
+  isBulkLoadOwnedCxQueueItem,
+  shouldBypassHeldGateForBulkTerminal,
   handleCxTerminalCallOutcome,
   handleCxCallPlaced,
   processCxCadenceEventBatch,

@@ -9,16 +9,20 @@
 // The daily-runner calls this on Wednesdays AND when the Friday
 // rotation lands on "current-event".
 
-const Anthropic = require("@anthropic-ai/sdk");
+const { createAnthropicClient } = require("../packages/shared-integrations/src");
+const { createAiProviders } = require("../packages/shared-services/src/aiProviders");
+const { createAiTaskRunner } = require("../packages/shared-services/src/aiTaskRunner");
+const { SUBMIT_CURRENT_EVENT_BLOG } = require("../packages/shared-services/src/aiSandbox/schemas");
+const { splitBodyIntoBlocks } = require("./bloggerContentUtils");
 
-const SONNET_MODEL = "claude-sonnet-4-5-20250929";
+// The current-event blog now runs through the unified AI bus as the agentic
+// `blogger.currentEvent` task (kind: "search" — a web_search → submit loop). The
+// bus owns provider routing, failover-readiness, contract validation, fail-closed,
+// and telemetry; the agent (`claude -p`) provider slots in ahead of the API later.
+const BLOG_TASK = "blogger.currentEvent";
 const DEFAULT_TOTAL_TIMEOUT_MS = readPositiveIntegerEnv(
   "BLOGGER_CURRENT_EVENT_TIMEOUT_MS",
   90 * 1000,
-);
-const DEFAULT_REQUEST_TIMEOUT_MS = readPositiveIntegerEnv(
-  "BLOGGER_CURRENT_EVENT_REQUEST_TIMEOUT_MS",
-  45 * 1000,
 );
 
 const ALLOWED_DOMAINS = [
@@ -36,18 +40,6 @@ const ALLOWED_DOMAINS = [
 function readPositiveIntegerEnv(name, fallback) {
   const value = Number.parseInt(process.env[name] || "", 10);
   return Number.isFinite(value) && value > 0 ? value : fallback;
-}
-
-function createRequestAbort(timeoutMs) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => {
-    controller.abort(new Error(`request timed out after ${timeoutMs}ms`));
-  }, timeoutMs);
-  if (typeof timer.unref === "function") timer.unref();
-  return {
-    signal: controller.signal,
-    clear: () => clearTimeout(timer),
-  };
 }
 
 function buildSystemPrompt() {
@@ -99,185 +91,77 @@ function buildUserPrompt({ recentPublishedTitles = [] } = {}) {
   ].join("\n");
 }
 
-const SUBMIT_TOOL = {
-  name: "submit_current_event_blog",
-  description:
-    "Submit the finished current-event blog draft. bodyHtml must be the complete blog body as one HTML string with each block element on its own line, separated by newlines.",
-  input_schema: {
-    type: "object",
-    required: [
-      "id",
-      "title",
-      "teaser",
-      "contentTitle",
-      "bodyHtml",
-      "slide",
-      "sourcesUsed",
-    ],
-    properties: {
-      id: {
-        type: "string",
-        description: "kebab-case slug, includes a date hint (e.g., 'foo-bar-april-2026').",
-      },
-      title: { type: "string" },
-      teaser: { type: "string" },
-      contentTitle: { type: "string" },
-      bodyHtml: {
-        type: "string",
-        description:
-          "Complete body HTML, block elements separated by single newlines. First element is disclaimer; last is Bottom line.",
-      },
-      slide: {
-        type: "object",
-        required: [
-          "eyebrow",
-          "headline1",
-          "headline2",
-          "badgeTop",
-          "badgeCenter",
-          "badgeBottom",
-          "subhead1",
-          "subhead2",
-        ],
-        properties: {
-          eyebrow: { type: "string" },
-          headline1: { type: "string" },
-          headline2: { type: "string" },
-          badgeTop: { type: "string" },
-          badgeCenter: { type: "string" },
-          badgeBottom: { type: "string" },
-          subhead1: { type: "string" },
-          subhead2: { type: "string" },
-        },
-      },
-      sourcesUsed: {
-        type: "array",
-        items: { type: "string" },
-        description: "URLs of the sources used to support the post.",
-      },
-    },
-  },
+const WEB_SEARCH_TOOL = {
+  type: "web_search_20250305",
+  name: "web_search",
+  max_uses: 6,
+  allowed_domains: ALLOWED_DOMAINS,
 };
 
-function splitBodyIntoBlocks(html) {
-  const text = String(html || "").trim();
-  if (!text) return [];
-  const blocks = text.match(
-    /<(h[1-6]|p|ul|ol|blockquote|figure|hr)\b[^>]*>[\s\S]*?<\/\1>/gi,
-  );
-  if (blocks && blocks.length > 0) return blocks.map((b) => b.trim());
-  return text
-    .split(/\n\s*\n/)
-    .map((b) => b.trim())
-    .filter(Boolean);
+// Anthropic-only in-process runner — the web_search agentic loop is Anthropic's
+// server-side tool (OpenAI can't do it), so the task's providerOrder is
+// ["anthropic"] and we wire only that client. Lazy; injectable for tests.
+// Telemetry emits the bus's standard `ai_task.run` row (task/provider/model/
+// status/usage) so blog spend is attributed on the same shape as every other bus
+// task — closing the split-brain-telemetry gap for this service.
+let _runner = null;
+function defaultRunner() {
+  if (_runner) return _runner;
+  _runner = createAiTaskRunner({
+    providers: createAiProviders({ anthropic: createAnthropicClient() }),
+    telemetry: {
+      record: (row) => {
+        try {
+          console.log("[blogger] ai_task.run", JSON.stringify(row));
+        } catch {
+          /* telemetry must never break the post */
+        }
+      },
+    },
+  });
+  return _runner;
 }
 
 async function generateCurrentEventBlog(options = {}) {
-  const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) throw new Error("ANTHROPIC_API_KEY not set");
+  const runner = options.runner || defaultRunner();
   const totalTimeoutMs =
     Number.isFinite(Number(options.timeoutMs)) && Number(options.timeoutMs) > 0
       ? Number(options.timeoutMs)
       : DEFAULT_TOTAL_TIMEOUT_MS;
-  const startedAt = Date.now();
-  const deadlineAt = startedAt + totalTimeoutMs;
-  const client = new Anthropic({
-    apiKey,
-    maxRetries: 0,
-    timeout: Math.min(DEFAULT_REQUEST_TIMEOUT_MS, totalTimeoutMs),
-  });
 
-  // Anthropic's web-search tool is built-in. We allow Claude to make
-  // multiple search/fetch calls before finally calling our submit tool.
-  let messages = [{ role: "user", content: buildUserPrompt(options) }];
-  let result = null;
-  const MAX_TURNS = 8;
-  for (let turn = 0; turn < MAX_TURNS; turn += 1) {
-    const remainingMs = deadlineAt - Date.now();
-    if (remainingMs <= 0) {
-      throw new Error(
-        `current-event generation timed out after ${totalTimeoutMs}ms`,
-      );
-    }
+  const res = await runner.runAiTask(
+    BLOG_TASK,
+    {
+      system: buildSystemPrompt(),
+      user: buildUserPrompt(options),
+      tools: [WEB_SEARCH_TOOL],
+      submitTool: {
+        name: SUBMIT_CURRENT_EVENT_BLOG.name,
+        description: SUBMIT_CURRENT_EVENT_BLOG.description,
+        schema: SUBMIT_CURRENT_EVENT_BLOG.input_schema,
+      },
+      maxToolTurns: 8,
+      timeoutMs: totalTimeoutMs,
+    },
+    { label: BLOG_TASK },
+  );
 
-    const requestTimeoutMs = Math.max(
-      1000,
-      Math.min(DEFAULT_REQUEST_TIMEOUT_MS, remainingMs),
-    );
-    const abort = createRequestAbort(requestTimeoutMs);
-    let response;
-    try {
-      response = await client.messages.create(
-        {
-          model: SONNET_MODEL,
-          max_tokens: 8000,
-          system: buildSystemPrompt(),
-          tools: [
-            {
-              type: "web_search_20250305",
-              name: "web_search",
-              max_uses: 6,
-              allowed_domains: ALLOWED_DOMAINS,
-            },
-            SUBMIT_TOOL,
-          ],
-          messages,
-        },
-        {
-          maxRetries: 0,
-          signal: abort.signal,
-          timeout: requestTimeoutMs,
-        },
-      );
-    } catch (err) {
-      if (abort.signal.aborted) {
-        throw new Error(
-          `current-event generation timed out after ${Date.now() - startedAt}ms`,
-        );
-      }
-      throw err;
-    } finally {
-      abort.clear();
-    }
-
-    // Did Claude call the submit tool? If so, we're done.
-    const submitCall = response.content.find(
-      (block) =>
-        block.type === "tool_use" && block.name === "submit_current_event_blog",
-    );
-    if (submitCall) {
-      result = submitCall.input;
-      break;
-    }
-
-    // If Claude stopped without calling submit and didn't request more
-    // tool input, that means it gave up. Bail.
-    if (response.stop_reason !== "tool_use") {
-      throw new Error(
-        `Claude stopped without calling submit_current_event_blog (stop_reason: ${response.stop_reason})`,
-      );
-    }
-
-    // Append the assistant turn and let the SDK auto-handle the
-    // server-side web_search tool — actually, web_search is a
-    // server-side tool, results come back inline. We just need to
-    // pass the response back through and continue the loop.
-    messages = messages.concat([
-      { role: "assistant", content: response.content },
-    ]);
-    // For server-side tools (web_search_20250305), Anthropic handles
-    // the tool execution and returns the result inline in the
-    // assistant message. The next iteration's `messages.create` call
-    // will let Claude continue from that state. No manual tool_result
-    // injection needed.
+  // Bus failure (provider error / timeout / contract-invalid / disabled) comes
+  // back as ok:false. Throw so the daily-runner's static-draft fallback fires —
+  // preserving the original contract exactly.
+  if (!res || res.ok === false) {
+    const lastAttempt =
+      res && Array.isArray(res.attempts) && res.attempts.length
+        ? res.attempts[res.attempts.length - 1]
+        : null;
+    const reason =
+      (res && res.code) ||
+      (lastAttempt && (lastAttempt.error || lastAttempt.reason)) ||
+      "unknown";
+    throw new Error(`current-event generation failed: ${reason}`);
   }
 
-  if (!result) {
-    throw new Error(
-      `Hit MAX_TURNS (${MAX_TURNS}) without Claude calling submit_current_event_blog`,
-    );
-  }
-
+  const result = res.result || {};
   const contentBody = splitBodyIntoBlocks(result.bodyHtml);
   if (contentBody.length < 5) {
     throw new Error(
@@ -293,9 +177,9 @@ async function generateCurrentEventBlog(options = {}) {
     contentBody,
     category: "current-event",
     slide: result.slide,
-    sourceNotes: `Web search (${result.sourcesUsed.length} sources)`,
-    sourcesUsed: result.sourcesUsed,
-    generatedBy: SONNET_MODEL,
+    sourceNotes: `Web search (${(result.sourcesUsed || []).length} sources)`,
+    sourcesUsed: result.sourcesUsed || [],
+    generatedBy: res.model || "anthropic",
     generatedAt: new Date().toISOString(),
   };
 }

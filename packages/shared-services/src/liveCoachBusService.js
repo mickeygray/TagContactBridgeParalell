@@ -15,6 +15,15 @@ const {
 const {
   createLiveCoachStreamWatcher,
 } = require("./liveCoachStreamWatcherService");
+const {
+  buildActiveLiveCoachChangeSet,
+  buildActiveLiveCoachBatch,
+} = require("./liveCoachBatchProjectionService");
+const {
+  buildLiveCoachGuidanceDispatchPlan,
+} = require("./liveCoachBatchGuidanceDispatchService");
+const { createCoachFloorLoop } = require("./coachFloorLoop");
+const { applyRollingSummaryToSession } = require("./liveCoachRollingSummaryService");
 
 const TERMINAL_SESSION_STATUSES = Object.freeze(["stopped", "stale", "voicemail_rejected", "released"]);
 const GRPC_SESSION_SOURCES = Object.freeze(["grpc", "grpc-mongo", "grpc-live-bridge", "mongo-cx", "control-plane-cx"]);
@@ -825,6 +834,18 @@ function createLiveCoachBus({
   // the call before coaching appears. 0 (default) = show from the first
   // turn; production sets 3 via LIVE_COACH_VISIBLE_AFTER_TURNS in server.js.
   visibleAfterTurns = 0,
+  // ── Whole-floor batch coach (default-OFF) ──────────────────────────────────
+  // Injected model transports for the two-tier batch coach: { runReactor, runDeep }.
+  // null (default) => the floor loop never starts and the per-turn path is
+  // byte-identical to today. server.js only injects these when
+  // LIVE_COACH_RUNTIME_MODE_BATCH_ENABLED is on.
+  batchModelRunners = null,
+  // (session) => { mode: 'deterministic'|'batch'|'hybrid' }. null (default) =>
+  // every agent resolves 'deterministic' (today's behavior). Gates per-agent
+  // delivery + the per-turn composer skip.
+  resolveRuntimeMode = null,
+  // { reference, reactorIntervalMs, deepIntervalMs, batchOptions } for the loop.
+  floorCoach = null,
 } = {}) {
   const runtimeRoot = path.join(rootDir || process.cwd(), "runtime", "ai-bus", "live-coach");
   ensureDir(runtimeRoot);
@@ -1275,6 +1296,19 @@ function createLiveCoachBus({
 
   function listSessionSummaries() {
     return Array.from(sessions.values()).map(serializeSessionSummary);
+  }
+
+  function buildActiveConversationBatch(input = {}) {
+    return buildActiveLiveCoachBatch(listSessions(), input);
+  }
+
+  function buildActiveConversationChanges(input = {}) {
+    return buildActiveLiveCoachChangeSet(listSessions(), input);
+  }
+
+  function buildBatchGuidanceDispatchPlan(input = {}) {
+    const activeBatch = input.activeBatch || buildActiveConversationBatch(input.batchOptions || {});
+    return buildLiveCoachGuidanceDispatchPlan(activeBatch, input.response || input.modelResponse || input.guidance || {}, input);
   }
 
   function getSummary() {
@@ -2007,6 +2041,10 @@ function createLiveCoachBus({
   function requestDialogComposition(session, context, dialog) {
     if (!session || !context || !dialog || typeof dialogComposer !== "function") return;
     if (TERMINAL_SESSION_STATUSES.includes(session.status)) return;
+    // In pure 'batch' mode the whole-floor batch coach owns this agent's dialog;
+    // skip the per-turn composer to avoid two writers racing latest.dialog.
+    // Default (no resolver injected) => 'deterministic' => never skips (today's behavior).
+    if (sessionRuntimeMode(session).mode === "batch") return;
     const recentMemory = buildRecentCallMemory(session, context);
     const baseDialog = { ...attachRecentMemoryToDialog(dialog, recentMemory) };
     const signature = buildComposeSignature(context);
@@ -3094,6 +3132,170 @@ function createLiveCoachBus({
     };
   }
 
+  // ── Whole-floor batch coach attachment (dormant unless transports injected) ──
+
+  function sessionRuntimeMode(session) {
+    if (typeof resolveRuntimeMode === "function") {
+      try {
+        return resolveRuntimeMode(session) || { mode: "deterministic" };
+      } catch (_error) {
+        return { mode: "deterministic" };
+      }
+    }
+    return { mode: "deterministic" };
+  }
+
+  // Compose the per-call dialog the cockpits already render (parseNavigatorSay /
+  // lane.dialog.say understand "Read:/Steer:/Try:") from a batch guidance delta,
+  // and route it to that agent's own session stream. Delivers ONLY to batch/hybrid
+  // agents, never to a terminal session.
+  function emitBatchGuidance(dispatch) {
+    if (!dispatch || !dispatch.target || !dispatch.payload) return;
+    const sessionId = String(dispatch.target.sessionId || "");
+    const session = sessions.get(sessionId);
+    if (!session || TERMINAL_SESSION_STATUSES.includes(session.status)) return;
+    const mode = sessionRuntimeMode(session).mode;
+    if (mode !== "batch" && mode !== "hybrid") return;
+    const payload = dispatch.payload;
+    const say = [
+      payload.read ? `Read: ${payload.read}` : "",
+      payload.steer ? `Steer: ${payload.steer}` : "",
+      payload.try ? `Try: "${payload.try}"` : "",
+    ]
+      .filter(Boolean)
+      .join("\n");
+    if (!say) return;
+    const dialog = {
+      id: payload.id || `batch-${sessionId}-${(session.counters && session.counters.transcript) || 0}`,
+      at: new Date().toISOString(),
+      status: "ready",
+      label: payload.mode || "guidance",
+      say,
+      guidance: Array.isArray(payload.next) && payload.next.length ? payload.next.join(" / ") : payload.steer || "",
+      composer: "batch",
+      model: "batch-coach",
+    };
+    session.latest = session.latest || {};
+    session.latest.dialog = dialog; // snapshot replay so a late-joining cockpit paints it
+    emit(sessionId, "dialog", { dialog });
+  }
+
+  // Deep-pull steering writeback: callStrategy feeds the fast reactor; cockpit
+  // state feeds the UI. callSummary stays solely owned by the rolling digest
+  // (writing it here would race + poison the scribe).
+  function applyDeepSteering(updates) {
+    for (const update of Array.isArray(updates) ? updates : []) {
+      const session = sessions.get(String(update.sessionId || ""));
+      if (!session || TERMINAL_SESSION_STATUSES.includes(session.status)) continue;
+      if (update.callStrategy) session.callStrategy = update.callStrategy;
+      const hasCockpitState = update.currentSection ||
+        update.summary ||
+        (Array.isArray(update.beats) && update.beats.length) ||
+        (Array.isArray(update.remember) && update.remember.length) ||
+        (Array.isArray(update.says) && update.says.length) ||
+        (Array.isArray(update.priorFlags) && update.priorFlags.length);
+      if (!hasCockpitState) continue;
+      // Coalesce per-field against the prior cockpit: a terse deep tick (e.g. currentSection
+      // but empty beats/remember/says) must NOT blank a full minute of good overlay. Keep the
+      // prior array when the incoming one is empty AND we're still in the same section.
+      const prior = (session.latest && session.latest.cockpit) || {};
+      const section = update.currentSection || null;
+      const sameSection = Boolean(prior.currentSection) && prior.currentSection === section;
+      const coalesce = (incoming, previous) => {
+        const arr = Array.isArray(incoming) ? incoming : [];
+        if (arr.length) return arr;
+        return sameSection && Array.isArray(previous) ? previous : [];
+      };
+      const cockpit = {
+        currentSection: section || (sameSection ? prior.currentSection : null),
+        summary: update.summary || (sameSection ? prior.summary || null : null),
+        beats: coalesce(update.beats, prior.beats),
+        remember: coalesce(update.remember, prior.remember),
+        says: coalesce(update.says, prior.says),
+        priorFlags: coalesce(update.priorFlags, prior.priorFlags),
+        generatedAt: update.generatedAt || null,
+        at: new Date().toISOString(),
+      };
+      session.latest = session.latest || {};
+      session.latest.cockpit = cockpit;
+      emit(session.id, "coach.cockpit", { cockpit });
+    }
+  }
+
+  // Rolling-summary writeback (the SUMMARY sidecar cadence). Applies each plan row to its
+  // live session: writes session.latest.rollingSummary + session.memory.rollingSummary so
+  // the cockpit's SUMMARY column (taxIssues) + CASE column (factsCaptured) bind to it, and
+  // it rides serializeSession for free under `latest`. writeCallSummary:false — the rolling
+  // DIGEST scribe owns session.callSummary; writing it here would race + poison it mid-call.
+  function applyRollingSummary(applyPlan) {
+    const applies = Array.isArray(applyPlan?.applies) ? applyPlan.applies : [];
+    const written = []; // sessionIds actually persisted — the cursor advances ONLY over these
+    for (const apply of applies) {
+      const session = sessions.get(String(apply.target?.sessionId || ""));
+      if (!session || TERMINAL_SESSION_STATUSES.includes(session.status)) continue;
+      applyRollingSummaryToSession(session, apply.payload, { mutate: true, writeCallSummary: false });
+      emit(session.id, "coach.summary", { rollingSummary: session.latest.rollingSummary });
+      written.push(session.id);
+    }
+    return written;
+  }
+
+  // Only sessions whose resolved mode is batch/hybrid feed the floor loop — so on
+  // a purely deterministic floor the loop sees zero active conversations and the
+  // firing gate skips the model entirely (no wasted Opus/Haiku spend).
+  function batchModeSessions() {
+    return listSessions().filter((session) => {
+      const mode = sessionRuntimeMode(session).mode;
+      return mode === "batch" || mode === "hybrid";
+    });
+  }
+
+  let floorCoachLoop = null;
+  function startFloorCoach() {
+    const runners = batchModelRunners || {};
+    if (!runners.runReactor && !runners.runDeep && !runners.runSummary) return null; // dormant: nothing to run
+    if (floorCoachLoop) {
+      floorCoachLoop.start();
+      return floorCoachLoop;
+    }
+    const cfg = floorCoach || {};
+    floorCoachLoop = createCoachFloorLoop({
+      buildChanges: (input) => buildActiveLiveCoachChangeSet(batchModeSessions(), input),
+      buildBatch: (input) => buildActiveLiveCoachBatch(batchModeSessions(), input),
+      buildDispatchPlan: (activeBatch, response) => buildBatchGuidanceDispatchPlan({ activeBatch, response }),
+      emitGuidance: emitBatchGuidance,
+      applySteering: applyDeepSteering,
+      // SUMMARY cadence (sidecar): same active-batch source as deep, its own transport + writeback.
+      buildSummaryBatch: (input) => buildActiveLiveCoachBatch(batchModeSessions(), input),
+      runSummary: runners.runSummary || null,
+      applySummary: applyRollingSummary,
+      runReactor: runners.runReactor || null,
+      runDeep: runners.runDeep || null,
+      reference: cfg.reference || "",
+      batchOptions: cfg.batchOptions || {},
+      reactorIntervalMs: cfg.reactorIntervalMs || 4000,
+      deepIntervalMs: cfg.deepIntervalMs || 60000,
+      summaryIntervalMs: cfg.summaryIntervalMs || 120000,
+      startInterval: (fn, ms) => {
+        const handle = setInterval(fn, ms);
+        if (handle && typeof handle.unref === "function") handle.unref();
+        return handle;
+      },
+      stopInterval: (handle) => clearInterval(handle),
+      logger,
+    });
+    floorCoachLoop.start();
+    logger?.info?.("live_coach.floor_coach.started", {
+      reactor: Boolean(runners.runReactor),
+      deep: Boolean(runners.runDeep),
+      summary: Boolean(runners.runSummary),
+    });
+    return floorCoachLoop;
+  }
+  function stopFloorCoach() {
+    if (floorCoachLoop) floorCoachLoop.stop();
+  }
+
   return {
     startSession,
     ensureSession,
@@ -3106,6 +3308,11 @@ function createLiveCoachBus({
     getSession,
     listSessions,
     listSessionSummaries,
+    buildActiveConversationBatch,
+    buildActiveConversationChanges,
+    buildBatchGuidanceDispatchPlan,
+    startFloorCoach,
+    stopFloorCoach,
     getSummary,
     getCloseoutStats: () => closeoutWorker?.getStats?.() || null,
     runFixture,

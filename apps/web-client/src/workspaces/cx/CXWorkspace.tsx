@@ -64,10 +64,17 @@ import {
   useCxLogicsUpdateCase,
   useCxReleaseAppointment,
   useCxSetStatus,
+  useCxSimpleLoopAdvance,
+  useCxSimpleLoopDisposition,
+  useCxSimpleLoopKill,
+  useCxSimpleLoopSession,
+  useCxSimpleLoopSkip,
+  useCxSimpleLoopStart,
   useCxSimulateCallAny,
   useCxWorkspace,
 } from "@/lib/api/queries/cx";
 import { useClientDetail } from "@/lib/api/queries/clients";
+import type { CxSimpleLoopSession } from "@/lib/api/queries/cx";
 import type {
   CxCallQueueItem,
   CxAppointment,
@@ -81,13 +88,30 @@ import type { CommLogEntry } from "@/lib/api/queries/cx";
 import { KNOWN_DOMAINS, useDomainStore } from "@/lib/domain/domainStore";
 import { useSession } from "@/lib/auth/useSession";
 import { cn } from "@/lib/utils/cn";
+import { AppointmentList as SharedAppointmentList } from "./AppointmentList";
 import { LiveCoachPanel } from "./LiveCoachPanel";
+import { CoachCockpit } from "@/workspaces/live-coach/CoachCockpit";
 
 const LIVE_COACH_PANEL_ENABLED = ["1", "true", "yes", "on"].includes(
   String(import.meta.env.VITE_LIVE_COACH_PANEL_ENABLED || "").trim().toLowerCase(),
 );
+// The new Focus Card cockpit, default-OFF. Needs the coach panel too (it resolves the
+// current call's session id, which the cockpit streams). Drive with no model spend by booting
+// the ai-bus with LIVE_COACH_RUNTIME_MODE_BATCH_ENABLED=1 LIVE_COACH_BATCH_TRANSPORT=stub.
+const LIVE_COACH_COCKPIT_ENABLED = ["1", "true", "yes", "on"].includes(
+  String(import.meta.env.VITE_LIVE_COACH_COCKPIT_ENABLED || "").trim().toLowerCase(),
+);
 const CX_VOICEMAIL_BUTTON_ENABLED = !["0", "false", "no", "off", "disabled"].includes(
   String(import.meta.env.VITE_CX_VOICEMAIL_BUTTON_ENABLED || "true").trim().toLowerCase(),
+);
+const CX_SIMPLE_LOOP_PANEL_ENV_ENABLED = ["1", "true", "yes", "on"].includes(
+  String(import.meta.env.VITE_CX_SIMPLE_LOOP_PANEL_ENABLED || "").trim().toLowerCase(),
+);
+const CX_SIMPLE_LOOP_PANEL_EMAILS = new Set(
+  String(import.meta.env.VITE_CX_SIMPLE_LOOP_PANEL_EMAILS || "")
+    .split(",")
+    .map((email) => email.trim().toLowerCase())
+    .filter(Boolean),
 );
 
 type ContactContext = {
@@ -189,6 +213,247 @@ function normalizeComparablePhone(value: string | null | undefined) {
   if (!digits) return "";
   if (digits.length === 11 && digits.startsWith("1")) return digits.slice(1);
   return digits.length > 10 ? digits.slice(-10) : digits;
+}
+
+function readCxSimpleLoopPanelEnabled(userIdentifier?: string | null) {
+  void CX_SIMPLE_LOOP_PANEL_ENV_ENABLED;
+  void CX_SIMPLE_LOOP_PANEL_EMAILS;
+  void userIdentifier;
+  return false;
+}
+
+function describeSimpleLoopCurrent(session: CxSimpleLoopSession | null | undefined) {
+  const current = session?.current;
+  if (!current) return "No current call";
+  const bits = [
+    current.name || "Unknown",
+    current.caseId ? `case ${current.caseId}` : null,
+    current.phoneLast4 ? `***${current.phoneLast4}` : null,
+    current.phase || current.status || null,
+    current.uii ? `UII ${current.uii}` : null,
+  ].filter(Boolean);
+  return bits.join(" · ");
+}
+
+type SimpleLoopDisposition = "answered" | "did-not-answer" | "voicemail";
+
+function describeSimpleLoopMatch(session: CxSimpleLoopSession | null | undefined) {
+  const current = session?.current;
+  if (!current) return null;
+  const activeCallSummary = current.activeCallSummary || {};
+  const reasons = Array.isArray(current.matchReasons) ? current.matchReasons.filter(Boolean) : [];
+  const bits = [
+    activeCallSummary.state ? `CX ${String(activeCallSummary.state)}` : null,
+    reasons.length > 0 ? `match ${reasons.join("+")}` : null,
+    current.activeEvidenceAt ? `seen ${String(current.activeEvidenceAt).slice(11, 19)}` : null,
+  ].filter(Boolean);
+  return bits.length > 0 ? bits.join(" · ") : null;
+}
+
+function describeSimpleLoopLastCompleted(session: CxSimpleLoopSession | null | undefined) {
+  const completed = Array.isArray(session?.completed) ? session.completed : [];
+  const last = completed[completed.length - 1];
+  if (!last) return null;
+  const dispositionResult = last.dispositionResult || {};
+  const status =
+    dispositionResult.dispositionStatus ||
+    dispositionResult.hangupStatus ||
+    dispositionResult.reason ||
+    last.outcome ||
+    "completed";
+  return `Last: ${last.name || "Unknown"} · ${last.outcome || "done"} · ${String(status)}`;
+}
+
+function SimpleLoopTestPanel({
+  session,
+  isLoading,
+  isFetching,
+  error,
+  mode,
+  setMode,
+  limit,
+  setLimit,
+  reverse,
+  setReverse,
+  isBusy,
+  onStart,
+  onStartAndDial,
+  onAdvance,
+  onDisposition,
+  onSkip,
+  onKill,
+  onRefresh,
+}: {
+  session: CxSimpleLoopSession | null | undefined;
+  isLoading: boolean;
+  isFetching: boolean;
+  error: unknown;
+  mode: "single" | "bulk-mirror";
+  setMode: (mode: "single" | "bulk-mirror") => void;
+  limit: number;
+  setLimit: (limit: number) => void;
+  reverse: boolean;
+  setReverse: (reverse: boolean) => void;
+  isBusy: boolean;
+  onStart: () => void;
+  onStartAndDial: () => void;
+  onAdvance: () => void;
+  onDisposition: (outcome: SimpleLoopDisposition) => void;
+  onSkip: () => void;
+  onKill: () => void;
+  onRefresh: () => void;
+}) {
+  const current = session?.current || null;
+  const bufferCount = Array.isArray(session?.queue) ? session.queue.length : 0;
+  const completedCount = Array.isArray(session?.completed) ? session.completed.length : 0;
+  const matchDescription = describeSimpleLoopMatch(session);
+  const lastCompletedDescription = describeSimpleLoopLastCompleted(session);
+  const events = Array.isArray(session?.events) ? session.events.slice(-5).reverse() : [];
+  const statusTone =
+    session?.status === "running"
+      ? "success"
+      : session?.status === "paused"
+        ? "warning"
+        : session?.status
+          ? "neutral"
+          : "info";
+
+  return (
+    <Card className="mb-3 border-sky-500/30 bg-sky-500/5">
+      <CardHeader className="pb-2">
+        <div className="flex items-center justify-between gap-2">
+          <CardTitle className="text-sm">Simple loop test</CardTitle>
+          <StatusPill tone={statusTone} dotted>
+            {session?.status || (isLoading ? "loading" : "ready")}
+          </StatusPill>
+        </div>
+        <div className="text-[11px] text-muted-foreground">
+          Local harness: queue → current → completed. Enable with <span className="font-mono">?cxSimpleLoop=1</span>.
+        </div>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        <div className="grid grid-cols-[1fr_72px] gap-2">
+          <Select value={mode} onValueChange={(value) => setMode(value === "bulk-mirror" ? "bulk-mirror" : "single")}>
+            <SelectTrigger className="h-8 text-xs">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {/* M11 gate 11: the legacy "bulk-mirror" mode is the old queue-mirror bulk path (no
+                  reservation service) — it is NOT the new reservation-backed bulk rail and is no
+                  longer user-selectable. Single publish only. */}
+              <SelectItem value="single">Single publish</SelectItem>
+            </SelectContent>
+          </Select>
+          <Input
+            type="number"
+            min={1}
+            max={50}
+            value={String(limit)}
+            onChange={(event) => setLimit(Math.max(1, Math.min(50, Number(event.target.value) || 1)))}
+            className="h-8 text-xs"
+            title="Target CX buffer size"
+          />
+        </div>
+
+        <label className="flex items-center gap-2 text-[11px] text-muted-foreground">
+          <input
+            type="checkbox"
+            checked={reverse}
+            onChange={(event) => setReverse(event.target.checked)}
+          />
+          Reverse queue before publish
+        </label>
+
+        <div className="grid grid-cols-2 gap-2">
+          <Button size="sm" isLoading={isBusy && !session} disabled={isBusy} onClick={onStart}>
+            Start
+          </Button>
+          <Button size="sm" variant="secondary" isLoading={isBusy && !session} disabled={isBusy} onClick={onStartAndDial}>
+            Start + dial
+          </Button>
+        </div>
+
+        <div className="grid grid-cols-1 gap-2">
+          <Button size="sm" variant="secondary" isLoading={isBusy && Boolean(session)} disabled={isBusy || !session} onClick={onAdvance}>
+            {mode === "bulk-mirror" ? "Mirror/watch" : "Advance"}
+          </Button>
+        </div>
+
+        <div className="rounded-md border border-border/70 bg-card/70 p-2">
+          <div className="text-[10px] font-semibold uppercase tracking-[0.12em] text-muted-foreground">
+            Current
+          </div>
+          <div className="mt-1 text-xs text-foreground">
+            {describeSimpleLoopCurrent(session)}
+          </div>
+          {matchDescription ? (
+            <div className="mt-1 text-[10px] text-muted-foreground">
+              {matchDescription}
+            </div>
+          ) : null}
+          <div className="mt-1 flex flex-wrap gap-1 text-[10px] text-muted-foreground">
+            <span>Buffer {bufferCount}</span>
+            <span>·</span>
+            <span>Done {completedCount}</span>
+            {isFetching ? (
+              <>
+                <span>·</span>
+                <span>polling</span>
+              </>
+            ) : null}
+          </div>
+          {lastCompletedDescription ? (
+            <div className="mt-1 truncate text-[10px] text-muted-foreground">
+              {lastCompletedDescription}
+            </div>
+          ) : null}
+        </div>
+
+        <div className="grid grid-cols-3 gap-1.5">
+          <Button size="sm" variant="secondary" disabled={isBusy || !current} onClick={() => onDisposition("answered")}>
+            Answer
+          </Button>
+          <Button size="sm" variant="secondary" disabled={isBusy || !current} onClick={() => onDisposition("did-not-answer")}>
+            No ans
+          </Button>
+          <Button size="sm" variant="secondary" disabled={isBusy || !current} onClick={() => onDisposition("voicemail")}>
+            VM
+          </Button>
+        </div>
+
+        <div className="grid grid-cols-3 gap-1.5">
+          <Button size="sm" variant="ghost" disabled={isBusy || !current} onClick={onSkip}>
+            Skip
+          </Button>
+          <Button size="sm" variant="ghost" disabled={isBusy} onClick={onRefresh}>
+            Refresh
+          </Button>
+          <Button size="sm" variant="destructive" disabled={isBusy || !session} onClick={onKill}>
+            Kill
+          </Button>
+        </div>
+
+        {error ? (
+          <div className="rounded-md border border-destructive/30 bg-destructive/10 p-2 text-[11px] text-destructive">
+            {error instanceof Error ? error.message : "Simple loop request failed"}
+          </div>
+        ) : null}
+
+        {events.length > 0 ? (
+          <div className="space-y-1">
+            <div className="text-[10px] font-semibold uppercase tracking-[0.12em] text-muted-foreground">
+              Last events
+            </div>
+            {events.map((event, index) => (
+              <div key={`${String(event.type || "event")}-${String(event.at || index)}`} className="truncate text-[10px] text-muted-foreground">
+                {String(event.at || "").slice(11, 19)} · {String(event.type || "event")}
+              </div>
+            ))}
+          </div>
+        ) : null}
+      </CardContent>
+    </Card>
+  );
 }
 
 function contactFromQueue(item: CxCallQueueItem): ContactContext {
@@ -358,6 +623,7 @@ const BACKEND_NEXT_DIAL_HANDOFF_HOLD_MS = 10_000;
 const VOICEMAIL_DROP_WATCHDOG_MS = 180_000;
 const DISPOSITION_NEXT_LEAD_DELAY_SECONDS = 2;
 const NO_ANSWER_NEXT_LEAD_DELAY_SECONDS = 8;
+const DEFER_DISPOSITION_NEXT_DIAL = true;
 const QUEUE_RESTORE_DEBOUNCE_MS = 8_000;
 const STALE_SERVED_QUEUE_RESET_MS = 20_000;
 const SHOW_POSTDATE_DISPOSITION = true;
@@ -1169,7 +1435,7 @@ function AppointmentModal({
   );
 }
 
-function AppointmentList({
+export function AppointmentList({
   appointments,
   onCallNow,
   onRelease,
@@ -2359,8 +2625,13 @@ function CommLogRow({ entry }: { entry: CommLogEntry }) {
       : entry.direction === "inbound"
         ? "text-foreground"
         : "text-muted-foreground";
+  const metadata = entry.metadata || {};
+  const callDurationSec = Number(metadata.durationSeconds ?? metadata.durationSec ?? 0) || 0;
+  const callSubject = typeof metadata.subject === "string" ? metadata.subject : null;
   const bodyPreview = entry.body
     ? entry.body.replace(/\s+/g, " ").trim().slice(0, 140)
+    : entry.channel === "call" && callSubject
+      ? callSubject
     : null;
 
   return (
@@ -2381,9 +2652,9 @@ function CommLogRow({ entry }: { entry: CommLogEntry }) {
           </div>
           {bodyPreview ? (
             <div className="mt-0.5 truncate text-foreground">{bodyPreview}</div>
-          ) : entry.channel === "call" && entry.metadata?.durationSeconds ? (
+          ) : entry.channel === "call" && callDurationSec ? (
             <div className="mt-0.5 text-muted-foreground">
-              {Math.round(Number(entry.metadata.durationSeconds))}s call
+              {Math.round(callDurationSec)}s call
               {entry.actor?.name ? ` | ${entry.actor.name}` : ""}
             </div>
           ) : entry.actor?.name ? (
@@ -3399,6 +3670,9 @@ export function CXWorkspace() {
   });
   const [nameSearchOpen, setNameSearchOpen] = React.useState(false);
   const [coachWindowTab, setCoachWindowTab] = React.useState<"coach" | "interview" | "guidance">("coach");
+  // Resolved by the coach panel (which owns the dashboard-match/lock lifecycle); the new
+  // Focus Card cockpit streams this same session id. Null when no call is locked.
+  const [coachCockpitSessionId, setCoachCockpitSessionId] = React.useState<string | null>(null);
 
   const [appointmentModalOpen, setAppointmentModalOpen] = React.useState(false);
 
@@ -3639,6 +3913,7 @@ export function CXWorkspace() {
     fireVoicemailDropRequest();
     try {
       submitQueueDisposition("did-not-answer", "Voicemail", {
+        deferNextDial: DEFER_DISPOSITION_NEXT_DIAL,
         autoServeDelaySeconds: NO_ANSWER_NEXT_LEAD_DELAY_SECONDS,
       });
     } catch (error) {
@@ -3756,6 +4031,82 @@ export function CXWorkspace() {
   const workspace = useCxWorkspace(domain);
   const callQueue = useCxCallQueue(domain);
   const multiCallQueues = useCxCallQueueMulti(isAdminUser ? availableDomains : []);
+  const simpleLoopPanelEnabled = React.useMemo(
+    () => readCxSimpleLoopPanelEnabled(user?.email || user?.name),
+    [user?.email, user?.name],
+  );
+  // M11 gate 11: default to single — the legacy bulk-mirror path is no longer the default mode.
+  const [simpleLoopMode, setSimpleLoopMode] = React.useState<"single" | "bulk-mirror">("single");
+  const [simpleLoopLimit, setSimpleLoopLimit] = React.useState(30);
+  const [simpleLoopReverse, setSimpleLoopReverse] = React.useState(false);
+  const simpleLoopSession = useCxSimpleLoopSession(simpleLoopPanelEnabled);
+  const simpleLoopStart = useCxSimpleLoopStart();
+  const simpleLoopAdvance = useCxSimpleLoopAdvance();
+  const simpleLoopDisposition = useCxSimpleLoopDisposition();
+  const simpleLoopSkip = useCxSimpleLoopSkip();
+  const simpleLoopKill = useCxSimpleLoopKill();
+  const simpleLoopWatchInFlightRef = React.useRef(false);
+  const simpleLoopBusy =
+    simpleLoopStart.isPending ||
+    simpleLoopAdvance.isPending ||
+    simpleLoopDisposition.isPending ||
+    simpleLoopSkip.isPending ||
+    simpleLoopKill.isPending;
+  const activeSimpleLoopMode = String(simpleLoopSession.data?.mode || simpleLoopMode);
+  const simpleLoopHasMirroredQueue = React.useMemo(() => {
+    const queue = Array.isArray(simpleLoopSession.data?.queue) ? simpleLoopSession.data.queue : [];
+    return queue.some((candidate) => {
+      const status = String(candidate.status || "").trim().toLowerCase();
+      const ringcxStatus = String(candidate.ringcx?.status || "").trim().toLowerCase();
+      return status === "mirrored" || ringcxStatus === "published";
+    });
+  }, [simpleLoopSession.data?.queue]);
+  React.useEffect(() => {
+    const session = simpleLoopSession.data;
+    if (!simpleLoopPanelEnabled) return;
+    if (!session?.sessionId) return;
+    if (String(session.status || "").toLowerCase() !== "running") return;
+    if (String(session.mode || activeSimpleLoopMode) !== "bulk-mirror") return;
+    if (!simpleLoopHasMirroredQueue) return;
+    const tick = () => {
+      if (simpleLoopWatchInFlightRef.current) return;
+      if (
+        simpleLoopStart.isPending ||
+        simpleLoopDisposition.isPending ||
+        simpleLoopSkip.isPending ||
+        simpleLoopKill.isPending
+      ) {
+        return;
+      }
+      simpleLoopWatchInFlightRef.current = true;
+      simpleLoopAdvance.mutate({
+        sessionId: session.sessionId,
+        mode: "bulk-mirror",
+        force: true,
+        timeoutMs: 250,
+        intervalMs: 100,
+      }, {
+        onSettled: () => {
+          simpleLoopWatchInFlightRef.current = false;
+          void simpleLoopSession.refetch();
+        },
+      });
+    };
+    tick();
+    const interval = window.setInterval(tick, 1000);
+    return () => window.clearInterval(interval);
+  }, [
+    activeSimpleLoopMode,
+    simpleLoopAdvance,
+    simpleLoopDisposition.isPending,
+    simpleLoopHasMirroredQueue,
+    simpleLoopKill.isPending,
+    simpleLoopPanelEnabled,
+    simpleLoopSession,
+    simpleLoopSession.data,
+    simpleLoopSkip.isPending,
+    simpleLoopStart.isPending,
+  ]);
   React.useEffect(() => {
     emitCxTiming("workspace.query_state", {
       domain,
@@ -4326,6 +4677,104 @@ export function CXWorkspace() {
     }
   }
 
+  function currentSimpleLoopSessionId() {
+    return String(simpleLoopSession.data?.sessionId || "").trim();
+  }
+
+  async function runSimpleLoopAction(
+    label: string,
+    action: () => Promise<CxSimpleLoopSession | null>,
+  ) {
+    const startedAt = Date.now();
+    try {
+      const result = await action();
+      const elapsedMs = Date.now() - startedAt;
+      toast(label, {
+        description: result
+          ? `${result.status} · ${describeSimpleLoopCurrent(result)} · ${elapsedMs}ms`
+          : `No active simple-loop session · ${elapsedMs}ms`,
+      });
+      void simpleLoopSession.refetch();
+      return result;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Simple loop request failed.";
+      toast.error(`${label} failed`, { description: message });
+      void simpleLoopSession.refetch();
+      throw error;
+    }
+  }
+
+  function handleSimpleLoopStart() {
+    void runSimpleLoopAction("Simple loop started", () =>
+      simpleLoopStart.mutateAsync({
+        mode: simpleLoopMode,
+        limit: simpleLoopLimit,
+        reverse: simpleLoopReverse,
+        replaceExisting: true,
+      }),
+    );
+  }
+
+  function handleSimpleLoopStartAndDial() {
+    void runSimpleLoopAction("Simple loop started dialing", () =>
+      simpleLoopStart.mutateAsync({
+        mode: simpleLoopMode,
+        limit: simpleLoopLimit,
+        reverse: simpleLoopReverse,
+        replaceExisting: true,
+        autoAdvance: true,
+      }),
+    );
+  }
+
+  function handleSimpleLoopAdvance() {
+    const sessionId = currentSimpleLoopSessionId();
+    void runSimpleLoopAction(
+      simpleLoopMode === "bulk-mirror" ? "Simple loop mirror/watch" : "Simple loop advanced",
+      () =>
+        simpleLoopAdvance.mutateAsync({
+          sessionId: sessionId || undefined,
+          mode: simpleLoopMode,
+        }),
+    );
+  }
+
+  function handleSimpleLoopDisposition(outcome: SimpleLoopDisposition) {
+    const sessionId = currentSimpleLoopSessionId();
+    void runSimpleLoopAction(`Simple loop ${outcome}`, () =>
+      simpleLoopDisposition.mutateAsync({
+        sessionId: sessionId || undefined,
+        outcome,
+        disposition: outcome,
+        autoAdvance: simpleLoopMode === "bulk-mirror",
+        mode: simpleLoopMode,
+      }),
+    );
+  }
+
+  function handleSimpleLoopSkip() {
+    const sessionId = currentSimpleLoopSessionId();
+    void runSimpleLoopAction("Simple loop skipped", () =>
+      simpleLoopSkip.mutateAsync({
+        sessionId: sessionId || undefined,
+        reason: "local-ui-skip",
+        autoAdvance: simpleLoopMode === "bulk-mirror",
+        mode: simpleLoopMode,
+      }),
+    );
+  }
+
+  function handleSimpleLoopKill() {
+    const sessionId = currentSimpleLoopSessionId();
+    void runSimpleLoopAction("Simple loop killed", () =>
+      simpleLoopKill.mutateAsync({
+        sessionId: sessionId || undefined,
+        reason: "local-ui-kill",
+        cancelPublished: true,
+      }),
+    );
+  }
+
   async function handleCxAvailabilityChange(
     next: "available" | "unavailable",
     breakType?: "short-break" | "meal-break",
@@ -4714,6 +5163,7 @@ export function CXWorkspace() {
     backendNextDialHandoffUntil != null && backendNextDialHandoffUntil > Date.now();
 
   React.useEffect(() => {
+    if (simpleLoopPanelEnabled) return;
     if (!activeServingQueueItem) return;
     if (servedQueueTicketId || servedQueueActionKey || servingQueueKey || servedQueueContact) return;
     const contact = contactFromQueue(activeServingQueueItem);
@@ -4795,6 +5245,7 @@ export function CXWorkspace() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
+    simpleLoopPanelEnabled,
     activeServingQueueItem,
     servedQueueTicketId,
     servedQueueActionKey,
@@ -4962,7 +5413,10 @@ export function CXWorkspace() {
     return {
       domain: queueDomain,
       ...buildQueueDialRequest(nextQueueLead, queueDomain, contact),
-      ...(cxDialExecutionModeOverride ? { executionMode: cxDialExecutionModeOverride } : {}),
+      // Terminal-button handoff must always load the next lead into the
+      // agent's campaign queue. Manual/active-call execution overrides are
+      // only for explicit queue-card QA clicks.
+      executionMode: "ringcx-campaign-queue",
       assignedExtensionId: currentExtensionId || nextQueueLead.assignedExtensionId || undefined,
       ringcxDialPriority: "IMMEDIATE",
       requestedBySurface: "cx-next-call-handoff",
@@ -5017,6 +5471,7 @@ export function CXWorkspace() {
   const canAttemptStartQueueLead =
     queueItems.length > 0 &&
     canAutoServeForAgentState &&
+    !simpleLoopPanelEnabled &&
     !backendNextDialHandoffActive &&
     !dialAny.isPending &&
     !disposition.isPending;
@@ -5173,7 +5628,7 @@ export function CXWorkspace() {
     } = {},
   ) {
     if (dispositionCaseId == null) return;
-    const shouldDeferNextDial = options.deferNextDial ?? false;
+    const shouldDeferNextDial = options.deferNextDial ?? DEFER_DISPOSITION_NEXT_DIAL;
     const defaultAutoServeDelaySeconds =
       dispositionKey === "did-not-answer"
         ? NO_ANSWER_NEXT_LEAD_DELAY_SECONDS
@@ -5684,6 +6139,28 @@ export function CXWorkspace() {
         {/* ── LEFT: CX queue only ──────────────────────────────────────── */}
         <aside className="flex-shrink-0 lg:w-[260px]">
           <div className="lg:sticky lg:top-20">
+            {simpleLoopPanelEnabled ? (
+              <SimpleLoopTestPanel
+                session={simpleLoopSession.data}
+                isLoading={simpleLoopSession.isLoading}
+                isFetching={simpleLoopSession.isFetching}
+                error={simpleLoopSession.error}
+                mode={simpleLoopMode}
+                setMode={setSimpleLoopMode}
+                limit={simpleLoopLimit}
+                setLimit={setSimpleLoopLimit}
+                reverse={simpleLoopReverse}
+                setReverse={setSimpleLoopReverse}
+                isBusy={simpleLoopBusy}
+                onStart={handleSimpleLoopStart}
+                onStartAndDial={handleSimpleLoopStartAndDial}
+                onAdvance={handleSimpleLoopAdvance}
+                onDisposition={handleSimpleLoopDisposition}
+                onSkip={handleSimpleLoopSkip}
+                onKill={handleSimpleLoopKill}
+                onRefresh={() => void simpleLoopSession.refetch()}
+              />
+            ) : null}
             <Card>
               <CardHeader>
                 <div className="flex items-center justify-between gap-2">
@@ -5883,7 +6360,9 @@ export function CXWorkspace() {
                       disabled={queueAdvanceBlocking}
                       onClick={(event) => {
                         consumeUiEvent(event);
-                        submitQueueDisposition("answered", "Answered");
+                        submitQueueDisposition("answered", "Answered", {
+                          deferNextDial: DEFER_DISPOSITION_NEXT_DIAL,
+                        });
                       }}
                       title="Mark the queue attempt as answered without DNC or Logics status changes."
                     >
@@ -5900,7 +6379,9 @@ export function CXWorkspace() {
                       disabled={queueAdvanceBlocking}
                       onClick={(event) => {
                         consumeUiEvent(event);
-                        submitQueueDisposition("did-not-answer", "Did not answer");
+                        submitQueueDisposition("did-not-answer", "Did not answer", {
+                          deferNextDial: DEFER_DISPOSITION_NEXT_DIAL,
+                        });
                       }}
                       title="No answer: count the attempt and reschedule the queue item by cadence rules."
                     >
@@ -6240,6 +6721,7 @@ export function CXWorkspace() {
               layout="embedded"
               chatPlacement="inline"
               panelView={coachWindowTab}
+              onSessionResolved={LIVE_COACH_COCKPIT_ENABLED ? setCoachCockpitSessionId : undefined}
               headerControls={
                 <div className="flex rounded-md border border-sky-200 bg-white p-0.5 shadow-sm">
                   <button
@@ -6308,12 +6790,16 @@ export function CXWorkspace() {
             </div>
           )}
 
+          {LIVE_COACH_COCKPIT_ENABLED ? (
+            <CoachCockpit sessionId={coachCockpitSessionId} className="mt-3" />
+          ) : null}
+
         </section>
 
         {/* ── RIGHT: appointments + Logics context ──────────────────────── */}
         <aside className="flex-shrink-0 lg:w-[370px]">
           <div className="lg:sticky lg:top-20 space-y-4">
-            <AppointmentList
+            <SharedAppointmentList
               appointments={appointmentItems}
               onCallNow={handleCallAppointmentNow}
               onRelease={handleReleaseAppointment}

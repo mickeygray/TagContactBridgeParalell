@@ -294,4 +294,4 @@ function createAiTaskRunner({
   return { runAiTask };
 }
 
-module.exports = { createAiTaskRunner };
+module.exports = { createAiTaskRunner, validateAgainstSchema };

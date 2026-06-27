@@ -1,0 +1,2880 @@
+
+> tagcontactbridge-parallel@0.1.0 dev:no-ngrok
+> npm run dev:preflight && concurrently -k --handle-input -n cp,in,out,rc,web -c blue,cyan,magenta,green,yellow "npm:dev:control-plane" "npm:dev:inbound" "npm:dev:outbound" "npm:dev:ring" "npm:dev:web"
+
+
+> tagcontactbridge-parallel@0.1.0 dev:preflight
+> node scripts/check-dev-ports.js
+
+[dev:preflight] Required dev ports are free.
+[cp] 
+[cp] > tagcontactbridge-parallel@0.1.0 dev:control-plane
+[cp] > node apps/control-plane/src/server.js
+[cp] 
+[in] 
+[in] > tagcontactbridge-parallel@0.1.0 dev:inbound
+[in] > node apps/inbound-gateway/src/server.js
+[in] 
+[out] 
+[out] > tagcontactbridge-parallel@0.1.0 dev:outbound
+[out] > node apps/outbound-gateway/src/server.js
+[out] 
+[rc] 
+[rc] > tagcontactbridge-parallel@0.1.0 dev:ring
+[rc] > node apps/ringcentral-cx/src/server.js
+[rc] 
+[web] 
+[web] > tagcontactbridge-parallel@0.1.0 dev:web
+[web] > npm run dev --workspace=web-client
+[web] 
+[web] 
+[web] > web-client@0.2.0 dev
+[web] > vite --port 3001
+[web] 
+[web] 
+[web]   [32m[1mVITE[22m v6.4.2[39m  [2mready in [0m[1m446[22m[2m[0m ms[22m
+[web] 
+[web]   [32m➜[39m  [1mLocal[22m:   [36mhttp://localhost:[1m3001[22m/[39m
+[web] [2m  [32m➜[39m  [1mNetwork[22m[2m: use [22m[1m--host[22m[2m to expose[22m
+[out] {"timestamp":"2026-06-24T20:26:29.357Z","level":"info","scope":"outbound-gateway","message":"listening","meta":{"host":"127.0.0.1","port":4002}}
+[in] {"timestamp":"2026-06-24T20:26:29.379Z","level":"info","scope":"inbound-gateway","message":"listening","meta":{"host":"127.0.0.1","port":4001}}
+[cp] {"timestamp":"2026-06-24T20:26:29.393Z","level":"warn","scope":"control-plane","message":"control-plane.callrail.tracking_unconfigured","meta":{"companies":["AMITY"]}}
+[rc] {"timestamp":"2026-06-24T20:26:29.824Z","level":"info","scope":"ringcentral-cx","message":"ringcentral.platform.ready","meta":{"isAuthenticated":true,"lastAuthenticatedAt":"2026-06-24T20:26:29.823Z","lastError":null,"lastCallbackError":null,"refreshIntervalMs":2700000,"lastScheduledSkipAt":null,"lastScheduledRunAt":null,"lastRateLimitedAt":null,"nextAuthAttemptAt":null,"lastApiRateLimitedAt":null,"nextApiAttemptAt":null,"lastApiRateLimitError":null,"hasAccessToken":true,"expiresAt":"2026-06-24T21:26:29.823Z","tokenExpiresInMs":3600000,"tokenFresh":true,"autoReinitializeWindow":{"businessHoursOnly":true,"timezone":"America/Los_Angeles","startHour":7,"endHour":18,"weekdays":[1,2,3,4,5]}}}
+[rc] {"timestamp":"2026-06-24T20:26:34.015Z","level":"info","scope":"ringcentral-cx","message":"ringcentral.ex.poll.status_updated","meta":{"extensionId":"63914587004","previousStatus":"available","newStatus":"available","telephonyStatus":"CallConnected","presenceStatus":"Busy"}}
+[cp] {"timestamp":"2026-06-24T20:26:35.119Z","level":"info","scope":"control-plane","message":"accounts.bootstrap.complete","meta":{"seedsTotal":10,"created":0,"updated":10}}
+[cp] {"timestamp":"2026-06-24T20:26:35.443Z","level":"info","scope":"control-plane","message":"control-plane.web_client_build.serving","meta":{"buildDir":"C:\\code\\TagContactBridgeParalell\\apps\\web-client\\build"}}
+[cp] {"timestamp":"2026-06-24T20:26:35.759Z","level":"warn","scope":"control-plane","message":"lexis.nightly.disabled","meta":{"domain":"WYNN"}}
+[cp] {"timestamp":"2026-06-24T20:26:35.759Z","level":"info","scope":"control-plane","message":"lexis.daily_drop.armed","meta":{"domain":"TAG","hour":2,"minute":0,"nextRunAt":"2026-06-25T09:00:00.000Z","timezone":"America/Los_Angeles","activeWeekdays":[1,2,3,4,5]}}
+[cp] {"timestamp":"2026-06-24T20:26:35.760Z","level":"info","scope":"control-plane","message":"logics.activity_review.armed","meta":{"domain":"WYNN","domains":["TAG","WYNN","AMITY"],"hour":7,"minute":0,"nextRunAt":"2026-06-25T14:00:00.000Z","timezone":"America/Los_Angeles","activeWeekdays":[0,1,2,3,4,5,6],"recipients":["mgray@taxadvocategroup.com","manderson@taxadvocategroup.com"],"includeAiReview":true}}
+[cp] {"timestamp":"2026-06-24T20:26:35.761Z","level":"info","scope":"control-plane","message":"nightly-close.armed","meta":{"domains":["TAG","WYNN"],"hour":21,"minute":30,"timezone":"America/Los_Angeles","activeWeekdays":[1,2,3,4,5],"sendEmail":true,"skipFinalClosePass":false,"recipientCount":4,"financialRecipientCount":4,"leadDataRecipientCount":4,"opsRecipientCount":1,"nextRunAt":"2026-06-25T04:30:00.000Z"}}
+[cp] {"timestamp":"2026-06-24T20:26:35.761Z","level":"info","scope":"control-plane","message":"spend-sync.armed","meta":{"hour":19,"minute":45,"timezone":"America/Los_Angeles","activeWeekdays":[1,2,3,4,5],"nextRunAt":"2026-06-25T02:45:00.000Z"}}
+[cp] {"timestamp":"2026-06-24T20:26:35.762Z","level":"info","scope":"control-plane","message":"recording-archive.eod.armed","meta":{"hour":23,"minute":30,"timezone":"America/Los_Angeles","activeWeekdays":[1,2,3,4,5],"minDurationSec":480,"nextRunAt":"2026-06-25T06:30:00.000Z","notifyRecipients":["mgray@taxadvocategroup.com","manderson@taxadvocategroup.com","abanks@taxadvocategroup.com"]}}
+[cp] {"timestamp":"2026-06-24T20:26:35.762Z","level":"warn","scope":"control-plane","message":"phoneburner.rotation.disabled","meta":{"reason":"PHONEBURNER_ROTATION_ENABLED not set; legacy webhook.js cron may still own this work"}}
+[cp] {"timestamp":"2026-06-24T20:26:35.763Z","level":"warn","scope":"control-plane","message":"demo-ringout.disabled","meta":{"reason":"DEMO_RINGOUT_ENABLED is not true","nextRunAt":null}}
+[cp] {"timestamp":"2026-06-24T20:26:35.764Z","level":"warn","scope":"control-plane","message":"blogger.runtime.disabled","meta":{"nextRunAt":"2026-06-25T15:00:00.000Z"}}
+[cp] {"timestamp":"2026-06-24T20:26:35.766Z","level":"info","scope":"control-plane","message":"listening","meta":{"host":"127.0.0.1","port":5001}}
+[cp] {"timestamp":"2026-06-24T20:26:35.845Z","level":"info","scope":"control-plane","message":"control-plane.hourly.scheduled_phase_mode","meta":{"mode":"business-hours-lite","timezone":"America/Los_Angeles","businessHoursStart":8,"businessHoursEnd":18,"businessDays":[1,2,3,4,5]}}
+[cp] {"timestamp":"2026-06-24T20:26:36.627Z","level":"info","scope":"control-plane","message":"control-plane.hourly.tick","meta":{"features":{"spendSyncEnabled":true,"metricsRefreshEnabled":true,"metricsRefreshPreferLegacyContactActivities":false,"leadCadenceEnforcementEnabled":false,"leadCadenceEnforcementDryRun":true,"callLogHygieneEnabled":true,"callLogHygieneMirrorLegacyContactActivities":false,"callLogHygieneNativeSweepEnabled":true,"callLogHygieneScorePendingCalls":true,"callLogHygieneArchiveRecordings":true,"cxTerminalRectificationEnabled":false,"cxTerminalRectificationDryRun":true},"summary":{"startedAt":"2026-06-24T20:26:35.845Z","finishedAt":"2026-06-24T20:26:36.626Z","durationMs":781,"scheduledPhase":true,"phaseA":{"sessionReconcile":{"unattributedResolved":0,"error":null},"paymentReconcile":{"domains":0,"cases":0,"payments":0,"promotions":0,"ledgerWrites":0,"errors":0},"paymentFieldsSync":{"skipped":true,"reason":"business-hours-lite"},"callLogHygiene":{"skipped":true,"reason":"disabled"},"cxCallActivityBackfill":{"scannedCallPlacedEvents":0,"preparedRows":0,"existingRows":0,"upsertedRows":0,"ledgerSynced":0,"ledgerErrors":0,"errors":0},"cxTerminalRectification":{"skipped":true,"reason":"disabled","dryRun":false,"scanned":0,"strong":0,"medium":0,"weak":0,"ignored":0,"wouldInsert":0,"inserted":0,"duplicates":0,"errors":0,"reasons":{}},"metricsRefresh":{"skipped":true,"reason":"disabled"},"spendSync":null,"leadCadenceEnforcement":{"skipped":true,"reason":"disabled"},"staleCadenceSweep":{"modified":0,"error":null},"ncoaMailbox":{"skipped":true,"reason":"already-completed-today","messagesScanned":0,"attachments":0,"errors":0},"resolutionEmails":{"candidates":0,"sent":0,"failed":0,"skipped":1}},"phaseB":{"claimed":0,"completed":0,"autoResolved":0,"failed":0,"deadLettered":0,"errorCount":0}}}}
+[rc] {"timestamp":"2026-06-24T20:26:36.826Z","level":"warn","scope":"ringcentral-cx","message":"ringcentral.ex.poll.reconciled","meta":{"extensionId":"63555286004","reason":"stuck_oncall","previousStatus":"onCall","newStatus":"available"}}
+[rc] {"timestamp":"2026-06-24T20:26:38.480Z","level":"info","scope":"ringcentral-cx","message":"ringcentral.ex.poll.status_updated","meta":{"extensionId":"63914586004","previousStatus":"available","newStatus":"available","telephonyStatus":"CallConnected","presenceStatus":"Busy"}}
+[rc] {"timestamp":"2026-06-24T20:26:40.846Z","level":"info","scope":"ringcentral-cx","message":"ringcentral.ex.poll.status_updated","meta":{"extensionId":"63704036004","previousStatus":"available","newStatus":"onCall","telephonyStatus":"CallConnected","presenceStatus":"Busy"}}
+[cp] {"timestamp":"2026-06-24T20:26:41.069Z","level":"info","scope":"control-plane","message":"control-plane.worker.batch","meta":{"processed":1,"handled":1}}
+[rc] {"timestamp":"2026-06-24T20:26:42.301Z","level":"info","scope":"ringcentral-cx","message":"ringcentral.ex.poll.status_updated","meta":{"extensionId":"63756126004","previousStatus":"disposition","newStatus":"disposition","telephonyStatus":"NoCall","presenceStatus":"Available"}}
+[rc] {"timestamp":"2026-06-24T20:26:42.559Z","level":"info","scope":"ringcentral-cx","message":"ringcentral.presence.seeded_on_startup","meta":{"mode":"off","checked":12,"pollable":10,"results":[{"extensionId":"sim-mgray-001","changed":false,"skipped":true,"reason":"non-ringcentral-extension-id"},{"extensionId":"sim-mgray-taxadvocategroup-com","changed":false,"skipped":true,"reason":"non-ringcentral-extension-id"},{"extensionId":"63551671004","changed":false,"reason":null,"observed":false},{"extensionId":"2375863005","changed":false,"reason":null,"observed":false},{"extensionId":"2362616005","changed":false,"reason":null,"observed":false},{"extensionId":"63914587004","changed":true,"reason":"presence_status_changed","observed":false},{"extensionId":"63555286004","changed":true,"reason":"stuck_oncall","observed":false},{"extensionId":"63914586004","changed":true,"reason":"presence_status_changed","observed":false},{"extensionId":"2426116005","changed":false,"reason":null,"observed":false},{"extensionId":"63730035004","changed":false,"reason":null,"observed":false},{"extensionId":"63704036004","changed":true,"reason":"presence_status_changed","observed":false},{"extensionId":"63756126004","changed":true,"reason":"presence_status_changed","observed":false}]}}
+[rc] {"timestamp":"2026-06-24T20:26:42.560Z","level":"info","scope":"ringcentral-cx","message":"ringcentral.presence_poller.started","meta":{"enabled":true,"mode":"off","running":false,"intervalMs":30000,"fullPollIntervalMs":120000,"businessHoursOnly":true,"businessWindow":{"active":true,"reason":"inside-business-hours","businessHoursOnly":true,"timezone":"America/Los_Angeles","weekday":3,"hour":13,"startHour":7,"endHour":18,"weekdays":[1,2,3,4,5]},"lastStartedAt":"2026-06-24T20:26:42.560Z","lastCompletedAt":"2026-06-24T20:26:42.560Z","lastSkippedAt":"2026-06-24T20:26:42.560Z","lastSkippedReason":"presence-poller-disabled","lastAuthCheckAt":null,"lastAuthResult":null,"lastFullPollAt":null,"lastError":null,"lastResult":{"skipped":true,"reason":"presence-poller-disabled","checked":0,"changed":0,"staleCount":0,"results":[]},"cxRuntimeMode":"legacy","exPresencePollMode":"off","exCxDecoupleEnabled":false,"exCxPollWriteMode":"legacy"}}
+[rc] {"timestamp":"2026-06-24T20:26:42.560Z","level":"warn","scope":"ringcentral-cx","message":"ringcentral.watchdog.disabled","meta":{"reason":"RC_SUBSCRIPTION_WATCHDOG_ENABLED=false (default). Set to true when Parallel is ready to own the webhook subscription."}}
+[rc] {"timestamp":"2026-06-24T20:26:42.562Z","level":"info","scope":"ringcentral-cx","message":"dial.staleSweep.disabled","meta":null}
+[rc] {"timestamp":"2026-06-24T20:26:42.562Z","level":"info","scope":"ringcentral-cx","message":"ringcx.agentMonitor.registered","meta":{"intervalMs":30000}}
+[rc] {"timestamp":"2026-06-24T20:26:42.565Z","level":"info","scope":"ringcentral-cx","message":"listening","meta":{"host":"127.0.0.1","port":6101}}
+[rc] {"timestamp":"2026-06-24T20:27:06.593Z","level":"info","scope":"ringcentral-cx","message":"ringcentral.cx_queue.swept","meta":{"released":0,"requeued":0,"staleServingRequeued":2}}
+[rc] {"timestamp":"2026-06-24T20:27:06.593Z","level":"info","scope":"ringcentral-cx","message":"ringcentral.cx_queue.assigned","meta":{"requested":25,"assigned":0,"skipped":1}}
+[rc] {"timestamp":"2026-06-24T20:27:06.593Z","level":"info","scope":"ringcentral-cx","message":"ringcentral.cx_queue.assigned_nonfresh","meta":{"requested":65,"assigned":0,"skipped":3,"day2To15Assigned":0,"day16To30Assigned":0,"agedAssigned":0}}
+[rc] {"timestamp":"2026-06-24T20:27:06.593Z","level":"warn","scope":"ringcentral-cx","message":"ringcentral.cx_fresh_hot_lane.disabled","meta":{"reason":"RC_CX_FRESH_HOT_LANE_ENABLED=false"}}
+[rc] {"timestamp":"2026-06-24T20:27:06.598Z","level":"info","scope":"ringcentral-cx","message":"ringcentral.cx_morning_queue_builder.registered","meta":{"hour":7,"minute":0,"enabledBy":"CX_DIAL_RUNTIME_BULK_LOAD_ENABLED","limit":30}}
+[out] {"timestamp":"2026-06-24T20:27:39.874Z","level":"info","scope":"outbound-gateway","message":"outbound.worker.counter_rvm_disposition_poll","meta":{"polled":25,"terminal":0,"markedDnc":0}}
+[out] {"timestamp":"2026-06-24T20:28:53.912Z","level":"info","scope":"outbound-gateway","message":"outbound.worker.counter_rvm_disposition_poll","meta":{"polled":25,"terminal":0,"markedDnc":0}}
+[out] {"timestamp":"2026-06-24T20:30:07.086Z","level":"info","scope":"outbound-gateway","message":"outbound.worker.counter_rvm_disposition_poll","meta":{"polled":25,"terminal":0,"markedDnc":0}}
+[cp] {"timestamp":"2026-06-24T20:30:36.907Z","level":"info","scope":"control-plane","message":"control-plane.cx_recording.tick","meta":{"scheduleMinute":30,"windowStart":"2026-06-24T19:15:00.000Z","windowEnd":"2026-06-24T20:15:00.000Z","minDurationSec":300,"metadata":null,"domains":{"TAG":{"candidateRows":0,"processedCompleted":0,"processedNoRecording":0,"processedErrors":0},"WYNN":{"candidateRows":2,"processedCompleted":0,"processedNoRecording":0,"processedErrors":0}}}}
+[cp] {"timestamp":"2026-06-24T20:31:24.097Z","level":"info","scope":"control-plane","message":"auth.send_code.request","meta":{"ip":"127.0.0.1","forwardedFor":null,"origin":"http://localhost:3001","referer":"http://localhost:3001/login","userAgent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36","email":"slucas@taxadvocategroup.com","hasJsonBody":true}}
+[cp] {"timestamp":"2026-06-24T20:31:25.829Z","level":"info","scope":"control-plane","message":"auth.send_code.delivered","meta":{"ip":"127.0.0.1","forwardedFor":null,"origin":"http://localhost:3001","referer":"http://localhost:3001/login","userAgent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36","email":"slucas@taxadvocategroup.com","challengeId":"6a3c3e9c84ea36eba242a72e","accountStatus":"active","accountRole":"internal-agent","previewEnabled":false}}
+[cp] {"timestamp":"2026-06-24T20:31:25.829Z","level":"info","scope":"control-plane","message":"auth.send_code.response","meta":{"ip":"127.0.0.1","forwardedFor":null,"origin":"http://localhost:3001","referer":"http://localhost:3001/login","userAgent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36","email":"slucas@taxadvocategroup.com","statusCode":200,"durationMs":1732}}
+[cp] {"timestamp":"2026-06-24T20:31:43.693Z","level":"info","scope":"control-plane","message":"auth.verify_code.timing","meta":{"ip":"127.0.0.1","forwardedFor":null,"origin":"http://localhost:3001","referer":"http://localhost:3001/login","userAgent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36","email":"slucas@taxadvocategroup.com","durationMs":716,"timings":{"findAccountMs":75,"verifyOtpMs":159,"touchLoginMs":79,"reloadAccountMs":76,"ringcxOffhookSelfHealMs":325,"issueTokenMs":1},"loginThinEnabled":false,"asyncOffhookSelfHeal":false,"offhook":{"ok":true,"skipped":false,"reason":"already-enabled","patched":false}}}
+[cp] [CXBULK] watch.snapshot {
+[cp]   sessionId: 'cxbl-sean-attach-1782254455371-f087c547',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'waiting_offhook',
+[cp]   currentQueueItemId: '6a3273f6d5da59727f09b025',
+[cp]   currentExternId: 'cxbl-reload-wynn-mqr8os9m-7f09b025',
+[cp]   currentUii: '202606231901389740001228797196',
+[cp]   bufferCount: 22,
+[cp]   completedCount: 7,
+[cp]   liveSlots: 23,
+[cp]   activeCallCount: 1,
+[cp]   at: '2026-06-24T20:31:48.645Z'
+[cp] }
+[cp] [CXBULK] watch.noop {
+[cp]   sessionId: 'cxbl-sean-attach-1782254455371-f087c547',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '6a3273f6d5da59727f09b025',
+[cp]   currentExternId: 'cxbl-reload-wynn-mqr8os9m-7f09b025',
+[cp]   currentUii: '202606231901389740001228797196',
+[cp]   bufferCount: 22,
+[cp]   completedCount: 7,
+[cp]   liveSlots: 23,
+[cp]   transitionKind: 'none',
+[cp]   releaseDiffDirty: true,
+[cp]   activeCallMatched: false,
+[cp]   at: '2026-06-24T20:31:49.082Z'
+[cp] }
+[cp] [CXBULK] watch.snapshot {
+[cp]   sessionId: 'cxbl-sean-attach-1782254455371-f087c547',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '6a3273f6d5da59727f09b025',
+[cp]   currentExternId: 'cxbl-reload-wynn-mqr8os9m-7f09b025',
+[cp]   currentUii: '202606231901389740001228797196',
+[cp]   bufferCount: 22,
+[cp]   completedCount: 7,
+[cp]   liveSlots: 23,
+[cp]   activeCallCount: 1,
+[cp]   at: '2026-06-24T20:31:51.339Z'
+[cp] }
+[cp] [CXBULK] watch.noop {
+[cp]   sessionId: 'cxbl-sean-attach-1782254455371-f087c547',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '6a3273f6d5da59727f09b025',
+[cp]   currentExternId: 'cxbl-reload-wynn-mqr8os9m-7f09b025',
+[cp]   currentUii: '202606231901389740001228797196',
+[cp]   bufferCount: 22,
+[cp]   completedCount: 7,
+[cp]   liveSlots: 23,
+[cp]   transitionKind: 'none',
+[cp]   releaseDiffDirty: false,
+[cp]   activeCallMatched: false,
+[cp]   at: '2026-06-24T20:31:51.461Z'
+[cp] }
+[cp] [CXBULK] watch.snapshot {
+[cp]   sessionId: 'cxbl-sean-attach-1782254455371-f087c547',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '6a3273f6d5da59727f09b025',
+[cp]   currentExternId: 'cxbl-reload-wynn-mqr8os9m-7f09b025',
+[cp]   currentUii: '202606231901389740001228797196',
+[cp]   bufferCount: 22,
+[cp]   completedCount: 7,
+[cp]   liveSlots: 23,
+[cp]   activeCallCount: 0,
+[cp]   at: '2026-06-24T20:31:52.985Z'
+[cp] }
+[cp] [CXBULK] watch.noop {
+[cp]   sessionId: 'cxbl-sean-attach-1782254455371-f087c547',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '6a3273f6d5da59727f09b025',
+[cp]   currentExternId: 'cxbl-reload-wynn-mqr8os9m-7f09b025',
+[cp]   currentUii: '202606231901389740001228797196',
+[cp]   bufferCount: 22,
+[cp]   completedCount: 7,
+[cp]   liveSlots: 23,
+[cp]   transitionKind: 'none',
+[cp]   releaseDiffDirty: true,
+[cp]   activeCallMatched: false,
+[cp]   at: '2026-06-24T20:31:53.498Z'
+[cp] }
+[cp] [CXBULK] watch.snapshot {
+[cp]   sessionId: 'cxbl-sean-attach-1782254455371-f087c547',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '6a3273f6d5da59727f09b025',
+[cp]   currentExternId: 'cxbl-reload-wynn-mqr8os9m-7f09b025',
+[cp]   currentUii: '202606231901389740001228797196',
+[cp]   bufferCount: 22,
+[cp]   completedCount: 7,
+[cp]   liveSlots: 23,
+[cp]   activeCallCount: 0,
+[cp]   at: '2026-06-24T20:31:55.517Z'
+[cp] }
+[cp] [CXBULK] watch.noop {
+[cp]   sessionId: 'cxbl-sean-attach-1782254455371-f087c547',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '6a3273f6d5da59727f09b025',
+[cp]   currentExternId: 'cxbl-reload-wynn-mqr8os9m-7f09b025',
+[cp]   currentUii: '202606231901389740001228797196',
+[cp]   bufferCount: 22,
+[cp]   completedCount: 7,
+[cp]   liveSlots: 23,
+[cp]   transitionKind: 'none',
+[cp]   releaseDiffDirty: false,
+[cp]   activeCallMatched: false,
+[cp]   at: '2026-06-24T20:31:55.655Z'
+[cp] }
+[cp] [CXBULK] watch.snapshot {
+[cp]   sessionId: 'cxbl-sean-attach-1782254455371-f087c547',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '6a3273f6d5da59727f09b025',
+[cp]   currentExternId: 'cxbl-reload-wynn-mqr8os9m-7f09b025',
+[cp]   currentUii: '202606231901389740001228797196',
+[cp]   bufferCount: 22,
+[cp]   completedCount: 7,
+[cp]   liveSlots: 23,
+[cp]   activeCallCount: 1,
+[cp]   at: '2026-06-24T20:31:58.591Z'
+[cp] }
+[cp] [CXBULK] watch.noop {
+[cp]   sessionId: 'cxbl-sean-attach-1782254455371-f087c547',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '6a3273f6d5da59727f09b025',
+[cp]   currentExternId: 'cxbl-reload-wynn-mqr8os9m-7f09b025',
+[cp]   currentUii: '202606231901389740001228797196',
+[cp]   bufferCount: 22,
+[cp]   completedCount: 7,
+[cp]   liveSlots: 23,
+[cp]   transitionKind: 'none',
+[cp]   releaseDiffDirty: true,
+[cp]   activeCallMatched: false,
+[cp]   at: '2026-06-24T20:31:58.789Z'
+[cp] }
+[cp] [CXBULK] watch.snapshot {
+[cp]   sessionId: 'cxbl-sean-attach-1782254455371-f087c547',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '6a3273f6d5da59727f09b025',
+[cp]   currentExternId: 'cxbl-reload-wynn-mqr8os9m-7f09b025',
+[cp]   currentUii: '202606231901389740001228797196',
+[cp]   bufferCount: 22,
+[cp]   completedCount: 7,
+[cp]   liveSlots: 23,
+[cp]   activeCallCount: 1,
+[cp]   at: '2026-06-24T20:32:00.739Z'
+[cp] }
+[cp] [CXBULK] watch.noop {
+[cp]   sessionId: 'cxbl-sean-attach-1782254455371-f087c547',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '6a3273f6d5da59727f09b025',
+[cp]   currentExternId: 'cxbl-reload-wynn-mqr8os9m-7f09b025',
+[cp]   currentUii: '202606231901389740001228797196',
+[cp]   bufferCount: 22,
+[cp]   completedCount: 7,
+[cp]   liveSlots: 23,
+[cp]   transitionKind: 'none',
+[cp]   releaseDiffDirty: false,
+[cp]   activeCallMatched: false,
+[cp]   at: '2026-06-24T20:32:00.866Z'
+[cp] }
+[cp] [CXBULK] watch.snapshot {
+[cp]   sessionId: 'cxbl-sean-attach-1782254455371-f087c547',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '6a3273f6d5da59727f09b025',
+[cp]   currentExternId: 'cxbl-reload-wynn-mqr8os9m-7f09b025',
+[cp]   currentUii: '202606231901389740001228797196',
+[cp]   bufferCount: 22,
+[cp]   completedCount: 7,
+[cp]   liveSlots: 23,
+[cp]   activeCallCount: 1,
+[cp]   at: '2026-06-24T20:32:02.436Z'
+[cp] }
+[cp] [CXBULK] watch.noop {
+[cp]   sessionId: 'cxbl-sean-attach-1782254455371-f087c547',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '6a3273f6d5da59727f09b025',
+[cp]   currentExternId: 'cxbl-reload-wynn-mqr8os9m-7f09b025',
+[cp]   currentUii: '202606231901389740001228797196',
+[cp]   bufferCount: 22,
+[cp]   completedCount: 7,
+[cp]   liveSlots: 23,
+[cp]   transitionKind: 'none',
+[cp]   releaseDiffDirty: false,
+[cp]   activeCallMatched: false,
+[cp]   at: '2026-06-24T20:32:02.553Z'
+[cp] }
+[cp] [CXBULK] watch.snapshot {
+[cp]   sessionId: 'cxbl-sean-attach-1782254455371-f087c547',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '6a3273f6d5da59727f09b025',
+[cp]   currentExternId: 'cxbl-reload-wynn-mqr8os9m-7f09b025',
+[cp]   currentUii: '202606231901389740001228797196',
+[cp]   bufferCount: 22,
+[cp]   completedCount: 7,
+[cp]   liveSlots: 23,
+[cp]   activeCallCount: 1,
+[cp]   at: '2026-06-24T20:32:04.219Z'
+[cp] }
+[cp] [CXBULK] watch.noop {
+[cp]   sessionId: 'cxbl-sean-attach-1782254455371-f087c547',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '6a3273f6d5da59727f09b025',
+[cp]   currentExternId: 'cxbl-reload-wynn-mqr8os9m-7f09b025',
+[cp]   currentUii: '202606231901389740001228797196',
+[cp]   bufferCount: 22,
+[cp]   completedCount: 7,
+[cp]   liveSlots: 23,
+[cp]   transitionKind: 'none',
+[cp]   releaseDiffDirty: false,
+[cp]   activeCallMatched: false,
+[cp]   at: '2026-06-24T20:32:04.340Z'
+[cp] }
+[cp] [CXBULK] watch.snapshot {
+[cp]   sessionId: 'cxbl-sean-attach-1782254455371-f087c547',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '6a3273f6d5da59727f09b025',
+[cp]   currentExternId: 'cxbl-reload-wynn-mqr8os9m-7f09b025',
+[cp]   currentUii: '202606231901389740001228797196',
+[cp]   bufferCount: 22,
+[cp]   completedCount: 7,
+[cp]   liveSlots: 23,
+[cp]   activeCallCount: 1,
+[cp]   at: '2026-06-24T20:32:05.844Z'
+[cp] }
+[cp] [CXBULK] watch.noop {
+[cp]   sessionId: 'cxbl-sean-attach-1782254455371-f087c547',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '6a3273f6d5da59727f09b025',
+[cp]   currentExternId: 'cxbl-reload-wynn-mqr8os9m-7f09b025',
+[cp]   currentUii: '202606231901389740001228797196',
+[cp]   bufferCount: 22,
+[cp]   completedCount: 7,
+[cp]   liveSlots: 23,
+[cp]   transitionKind: 'none',
+[cp]   releaseDiffDirty: false,
+[cp]   activeCallMatched: false,
+[cp]   at: '2026-06-24T20:32:05.963Z'
+[cp] }
+[cp] [CXBULK] watch.snapshot {
+[cp]   sessionId: 'cxbl-sean-attach-1782254455371-f087c547',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '6a3273f6d5da59727f09b025',
+[cp]   currentExternId: 'cxbl-reload-wynn-mqr8os9m-7f09b025',
+[cp]   currentUii: '202606231901389740001228797196',
+[cp]   bufferCount: 22,
+[cp]   completedCount: 7,
+[cp]   liveSlots: 23,
+[cp]   activeCallCount: 1,
+[cp]   at: '2026-06-24T20:32:08.769Z'
+[cp] }
+[cp] [CXBULK] watch.noop {
+[cp]   sessionId: 'cxbl-sean-attach-1782254455371-f087c547',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '6a3273f6d5da59727f09b025',
+[cp]   currentExternId: 'cxbl-reload-wynn-mqr8os9m-7f09b025',
+[cp]   currentUii: '202606231901389740001228797196',
+[cp]   bufferCount: 22,
+[cp]   completedCount: 7,
+[cp]   liveSlots: 23,
+[cp]   transitionKind: 'none',
+[cp]   releaseDiffDirty: false,
+[cp]   activeCallMatched: false,
+[cp]   at: '2026-06-24T20:32:08.889Z'
+[cp] }
+[cp] [CXBULK] watch.snapshot {
+[cp]   sessionId: 'cxbl-sean-attach-1782254455371-f087c547',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '6a3273f6d5da59727f09b025',
+[cp]   currentExternId: 'cxbl-reload-wynn-mqr8os9m-7f09b025',
+[cp]   currentUii: '202606231901389740001228797196',
+[cp]   bufferCount: 22,
+[cp]   completedCount: 7,
+[cp]   liveSlots: 23,
+[cp]   activeCallCount: 1,
+[cp]   at: '2026-06-24T20:32:10.902Z'
+[cp] }
+[cp] [CXBULK] watch.noop {
+[cp]   sessionId: 'cxbl-sean-attach-1782254455371-f087c547',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '6a3273f6d5da59727f09b025',
+[cp]   currentExternId: 'cxbl-reload-wynn-mqr8os9m-7f09b025',
+[cp]   currentUii: '202606231901389740001228797196',
+[cp]   bufferCount: 22,
+[cp]   completedCount: 7,
+[cp]   liveSlots: 23,
+[cp]   transitionKind: 'none',
+[cp]   releaseDiffDirty: false,
+[cp]   activeCallMatched: false,
+[cp]   at: '2026-06-24T20:32:11.034Z'
+[cp] }
+[out] {"timestamp":"2026-06-24T20:32:12.853Z","level":"info","scope":"outbound-gateway","message":"outbound.worker.counter_rvm_disposition_poll","meta":{"polled":25,"terminal":0,"markedDnc":0}}
+[cp] [CXBULK] watch.snapshot {
+[cp]   sessionId: 'cxbl-sean-attach-1782254455371-f087c547',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '6a3273f6d5da59727f09b025',
+[cp]   currentExternId: 'cxbl-reload-wynn-mqr8os9m-7f09b025',
+[cp]   currentUii: '202606231901389740001228797196',
+[cp]   bufferCount: 22,
+[cp]   completedCount: 7,
+[cp]   liveSlots: 23,
+[cp]   activeCallCount: 1,
+[cp]   at: '2026-06-24T20:32:12.952Z'
+[cp] }
+[cp] [CXBULK] watch.noop {
+[cp]   sessionId: 'cxbl-sean-attach-1782254455371-f087c547',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '6a3273f6d5da59727f09b025',
+[cp]   currentExternId: 'cxbl-reload-wynn-mqr8os9m-7f09b025',
+[cp]   currentUii: '202606231901389740001228797196',
+[cp]   bufferCount: 22,
+[cp]   completedCount: 7,
+[cp]   liveSlots: 23,
+[cp]   transitionKind: 'none',
+[cp]   releaseDiffDirty: false,
+[cp]   activeCallMatched: false,
+[cp]   at: '2026-06-24T20:32:13.072Z'
+[cp] }
+[cp] [CXBULK] watch.snapshot {
+[cp]   sessionId: 'cxbl-sean-attach-1782254455371-f087c547',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '6a3273f6d5da59727f09b025',
+[cp]   currentExternId: 'cxbl-reload-wynn-mqr8os9m-7f09b025',
+[cp]   currentUii: '202606231901389740001228797196',
+[cp]   bufferCount: 22,
+[cp]   completedCount: 7,
+[cp]   liveSlots: 23,
+[cp]   activeCallCount: 1,
+[cp]   at: '2026-06-24T20:32:15.541Z'
+[cp] }
+[cp] [CXBULK] watch.noop {
+[cp]   sessionId: 'cxbl-sean-attach-1782254455371-f087c547',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '6a3273f6d5da59727f09b025',
+[cp]   currentExternId: 'cxbl-reload-wynn-mqr8os9m-7f09b025',
+[cp]   currentUii: '202606231901389740001228797196',
+[cp]   bufferCount: 22,
+[cp]   completedCount: 7,
+[cp]   liveSlots: 23,
+[cp]   transitionKind: 'none',
+[cp]   releaseDiffDirty: false,
+[cp]   activeCallMatched: false,
+[cp]   at: '2026-06-24T20:32:15.677Z'
+[cp] }
+[rc] {"timestamp":"2026-06-24T20:32:15.702Z","level":"info","scope":"ringcentral-cx","message":"ringcentral.cx_queue.swept","meta":{"released":3,"requeued":0,"staleServingRequeued":6}}
+[rc] {"timestamp":"2026-06-24T20:32:15.702Z","level":"info","scope":"ringcentral-cx","message":"ringcentral.cx_cadence.batch","meta":{"processed":1,"handled":1}}
+[rc] {"timestamp":"2026-06-24T20:32:15.702Z","level":"info","scope":"ringcentral-cx","message":"ringcentral.cx_queue.assigned","meta":{"requested":25,"assigned":0,"skipped":1}}
+[rc] {"timestamp":"2026-06-24T20:32:15.702Z","level":"info","scope":"ringcentral-cx","message":"ringcentral.cx_queue.assigned_nonfresh","meta":{"requested":65,"assigned":0,"skipped":3,"day2To15Assigned":0,"day16To30Assigned":0,"agedAssigned":0}}
+[cp] [CXBULK] watch.snapshot {
+[cp]   sessionId: 'cxbl-sean-attach-1782254455371-f087c547',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '6a3273f6d5da59727f09b025',
+[cp]   currentExternId: 'cxbl-reload-wynn-mqr8os9m-7f09b025',
+[cp]   currentUii: '202606231901389740001228797196',
+[cp]   bufferCount: 22,
+[cp]   completedCount: 7,
+[cp]   liveSlots: 23,
+[cp]   activeCallCount: 1,
+[cp]   at: '2026-06-24T20:32:18.658Z'
+[cp] }
+[cp] [CXBULK] watch.noop {
+[cp]   sessionId: 'cxbl-sean-attach-1782254455371-f087c547',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '6a3273f6d5da59727f09b025',
+[cp]   currentExternId: 'cxbl-reload-wynn-mqr8os9m-7f09b025',
+[cp]   currentUii: '202606231901389740001228797196',
+[cp]   bufferCount: 22,
+[cp]   completedCount: 7,
+[cp]   liveSlots: 23,
+[cp]   transitionKind: 'none',
+[cp]   releaseDiffDirty: false,
+[cp]   activeCallMatched: false,
+[cp]   at: '2026-06-24T20:32:18.772Z'
+[cp] }
+[cp] [CXBULK] watch.snapshot {
+[cp]   sessionId: 'cxbl-sean-attach-1782254455371-f087c547',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '6a3273f6d5da59727f09b025',
+[cp]   currentExternId: 'cxbl-reload-wynn-mqr8os9m-7f09b025',
+[cp]   currentUii: '202606231901389740001228797196',
+[cp]   bufferCount: 22,
+[cp]   completedCount: 7,
+[cp]   liveSlots: 23,
+[cp]   activeCallCount: 1,
+[cp]   at: '2026-06-24T20:32:20.745Z'
+[cp] }
+[cp] [CXBULK] watch.noop {
+[cp]   sessionId: 'cxbl-sean-attach-1782254455371-f087c547',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '6a3273f6d5da59727f09b025',
+[cp]   currentExternId: 'cxbl-reload-wynn-mqr8os9m-7f09b025',
+[cp]   currentUii: '202606231901389740001228797196',
+[cp]   bufferCount: 22,
+[cp]   completedCount: 7,
+[cp]   liveSlots: 23,
+[cp]   transitionKind: 'none',
+[cp]   releaseDiffDirty: false,
+[cp]   activeCallMatched: false,
+[cp]   at: '2026-06-24T20:32:20.879Z'
+[cp] }
+[cp] [CXBULK] watch.snapshot {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'idle',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 0,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 0,
+[cp]   activeCallCount: 1,
+[cp]   at: '2026-06-24T20:32:24.605Z'
+[cp] }
+[cp] [CXBULK] watch.persist {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'idle',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 0,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 0,
+[cp]   transitionKind: 'none',
+[cp]   activeCallMatched: false,
+[cp]   at: '2026-06-24T20:32:24.720Z'
+[cp] }
+[cp] [CXBULK] watch.snapshot {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'idle',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 0,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 0,
+[cp]   activeCallCount: 1,
+[cp]   at: '2026-06-24T20:32:32.794Z'
+[cp] }
+[cp] [CXBULK] watch.persist {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'idle',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 0,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 0,
+[cp]   transitionKind: 'none',
+[cp]   activeCallMatched: false,
+[cp]   at: '2026-06-24T20:32:32.978Z'
+[cp] }
+[cp] [CXBULK] watch.snapshot {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'idle',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 0,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 0,
+[cp]   activeCallCount: 1,
+[cp]   at: '2026-06-24T20:32:34.770Z'
+[cp] }
+[cp] [CXBULK] watch.persist {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'idle',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 0,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 0,
+[cp]   transitionKind: 'none',
+[cp]   activeCallMatched: false,
+[cp]   at: '2026-06-24T20:32:34.887Z'
+[cp] }
+[cp] [CXBULK] watch.snapshot {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'idle',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 0,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 0,
+[cp]   activeCallCount: 1,
+[cp]   at: '2026-06-24T20:32:36.388Z'
+[cp] }
+[cp] [CXBULK] watch.persist {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'idle',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 0,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 0,
+[cp]   transitionKind: 'none',
+[cp]   activeCallMatched: false,
+[cp]   at: '2026-06-24T20:32:36.510Z'
+[cp] }
+[cp] [CXBULK] watch.snapshot {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 7,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 7,
+[cp]   activeCallCount: 1,
+[cp]   at: '2026-06-24T20:32:39.096Z'
+[cp] }
+[cp] [CXBULK] watch.noop {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 7,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 7,
+[cp]   transitionKind: 'none',
+[cp]   releaseDiffDirty: true,
+[cp]   activeCallMatched: false,
+[cp]   at: '2026-06-24T20:32:39.288Z'
+[cp] }
+[cp] [CXBULK] watch.snapshot {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 7,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 7,
+[cp]   activeCallCount: 1,
+[cp]   at: '2026-06-24T20:32:42.525Z'
+[cp] }
+[cp] [CXBULK] watch.noop {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 7,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 7,
+[cp]   transitionKind: 'none',
+[cp]   releaseDiffDirty: false,
+[cp]   activeCallMatched: false,
+[cp]   at: '2026-06-24T20:32:42.644Z'
+[cp] }
+[cp] [CXBULK] watch.snapshot {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 7,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 7,
+[cp]   activeCallCount: 2,
+[cp]   at: '2026-06-24T20:32:44.076Z'
+[cp] }
+[cp] [CXBULK] watch.noop {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 7,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 7,
+[cp]   transitionKind: 'none',
+[cp]   releaseDiffDirty: true,
+[cp]   activeCallMatched: false,
+[cp]   at: '2026-06-24T20:32:44.293Z'
+[cp] }
+[cp] [CXBULK] watch.snapshot {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 7,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 7,
+[cp]   activeCallCount: 2,
+[cp]   at: '2026-06-24T20:32:47.262Z'
+[cp] }
+[cp] [CXBULK] watch.noop {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 7,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 7,
+[cp]   transitionKind: 'none',
+[cp]   releaseDiffDirty: false,
+[cp]   activeCallMatched: false,
+[cp]   at: '2026-06-24T20:32:47.391Z'
+[cp] }
+[cp] [CXBULK] watch.snapshot {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 7,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 7,
+[cp]   activeCallCount: 2,
+[cp]   at: '2026-06-24T20:32:49.852Z'
+[cp] }
+[cp] [CXBULK] watch.noop {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 7,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 7,
+[cp]   transitionKind: 'none',
+[cp]   releaseDiffDirty: false,
+[cp]   activeCallMatched: false,
+[cp]   at: '2026-06-24T20:32:49.984Z'
+[cp] }
+[cp] [CXBULK] watch.snapshot {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 7,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 7,
+[cp]   activeCallCount: 2,
+[cp]   at: '2026-06-24T20:32:51.699Z'
+[cp] }
+[cp] [CXBULK] watch.noop {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 7,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 7,
+[cp]   transitionKind: 'none',
+[cp]   releaseDiffDirty: false,
+[cp]   activeCallMatched: false,
+[cp]   at: '2026-06-24T20:32:51.831Z'
+[cp] }
+[cp] [CXBULK] watch.snapshot {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 7,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 7,
+[cp]   activeCallCount: 2,
+[cp]   at: '2026-06-24T20:32:53.885Z'
+[cp] }
+[cp] [CXBULK] watch.noop {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 7,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 7,
+[cp]   transitionKind: 'none',
+[cp]   releaseDiffDirty: false,
+[cp]   activeCallMatched: false,
+[cp]   at: '2026-06-24T20:32:54.110Z'
+[cp] }
+[cp] [CXBULK] watch.snapshot {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 7,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 7,
+[cp]   activeCallCount: 2,
+[cp]   at: '2026-06-24T20:32:55.580Z'
+[cp] }
+[cp] [CXBULK] watch.noop {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 7,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 7,
+[cp]   transitionKind: 'none',
+[cp]   releaseDiffDirty: false,
+[cp]   activeCallMatched: false,
+[cp]   at: '2026-06-24T20:32:55.703Z'
+[cp] }
+[cp] [CXBULK] watch.snapshot {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 7,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 7,
+[cp]   activeCallCount: 2,
+[cp]   at: '2026-06-24T20:32:57.121Z'
+[cp] }
+[cp] [CXBULK] watch.noop {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 7,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 7,
+[cp]   transitionKind: 'none',
+[cp]   releaseDiffDirty: false,
+[cp]   activeCallMatched: false,
+[cp]   at: '2026-06-24T20:32:57.250Z'
+[cp] }
+[cp] [CXBULK] watch.snapshot {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 7,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 7,
+[cp]   activeCallCount: 2,
+[cp]   at: '2026-06-24T20:32:58.714Z'
+[cp] }
+[cp] [CXBULK] watch.noop {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 7,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 7,
+[cp]   transitionKind: 'none',
+[cp]   releaseDiffDirty: false,
+[cp]   activeCallMatched: false,
+[cp]   at: '2026-06-24T20:32:58.846Z'
+[cp] }
+[cp] [CXBULK] watch.snapshot {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 7,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 7,
+[cp]   activeCallCount: 2,
+[cp]   at: '2026-06-24T20:33:00.257Z'
+[cp] }
+[cp] [CXBULK] watch.noop {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 7,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 7,
+[cp]   transitionKind: 'none',
+[cp]   releaseDiffDirty: false,
+[cp]   activeCallMatched: false,
+[cp]   at: '2026-06-24T20:33:00.372Z'
+[cp] }
+[cp] [CXBULK] watch.snapshot {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 7,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 7,
+[cp]   activeCallCount: 2,
+[cp]   at: '2026-06-24T20:33:03.012Z'
+[cp] }
+[cp] [CXBULK] watch.noop {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 7,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 7,
+[cp]   transitionKind: 'none',
+[cp]   releaseDiffDirty: false,
+[cp]   activeCallMatched: false,
+[cp]   at: '2026-06-24T20:33:03.132Z'
+[cp] }
+[cp] [CXBULK] watch.snapshot {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 7,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 7,
+[cp]   activeCallCount: 2,
+[cp]   at: '2026-06-24T20:33:04.915Z'
+[cp] }
+[cp] [CXBULK] watch.noop {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 7,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 7,
+[cp]   transitionKind: 'none',
+[cp]   releaseDiffDirty: false,
+[cp]   activeCallMatched: false,
+[cp]   at: '2026-06-24T20:33:05.031Z'
+[cp] }
+[cp] [CXBULK] watch.snapshot {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 7,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 7,
+[cp]   activeCallCount: 1,
+[cp]   at: '2026-06-24T20:33:07.650Z'
+[cp] }
+[cp] [CXBULK] watch.noop {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 7,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 7,
+[cp]   transitionKind: 'none',
+[cp]   releaseDiffDirty: true,
+[cp]   activeCallMatched: false,
+[cp]   at: '2026-06-24T20:33:07.846Z'
+[cp] }
+[cp] [CXBULK] watch.snapshot {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 7,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 7,
+[cp]   activeCallCount: 1,
+[cp]   at: '2026-06-24T20:33:11.055Z'
+[cp] }
+[cp] [CXBULK] watch.noop {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 7,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 7,
+[cp]   transitionKind: 'none',
+[cp]   releaseDiffDirty: false,
+[cp]   activeCallMatched: false,
+[cp]   at: '2026-06-24T20:33:11.193Z'
+[cp] }
+[cp] [CXBULK] watch.snapshot {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 7,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 7,
+[cp]   activeCallCount: 1,
+[cp]   at: '2026-06-24T20:33:14.925Z'
+[cp] }
+[cp] [CXBULK] watch.noop {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 7,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 7,
+[cp]   transitionKind: 'none',
+[cp]   releaseDiffDirty: false,
+[cp]   activeCallMatched: false,
+[cp]   at: '2026-06-24T20:33:15.039Z'
+[cp] }
+[cp] [CXBULK] watch.snapshot {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 7,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 7,
+[cp]   activeCallCount: 1,
+[cp]   at: '2026-06-24T20:33:18.013Z'
+[cp] }
+[cp] [CXBULK] watch.noop {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 7,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 7,
+[cp]   transitionKind: 'none',
+[cp]   releaseDiffDirty: false,
+[cp]   activeCallMatched: false,
+[cp]   at: '2026-06-24T20:33:18.135Z'
+[cp] }
+[cp] [CXBULK] watch.snapshot {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 7,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 7,
+[cp]   activeCallCount: 2,
+[cp]   at: '2026-06-24T20:33:21.021Z'
+[cp] }
+[cp] [CXBULK] watch.noop {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 7,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 7,
+[cp]   transitionKind: 'none',
+[cp]   releaseDiffDirty: true,
+[cp]   activeCallMatched: false,
+[cp]   at: '2026-06-24T20:33:21.230Z'
+[cp] }
+[cp] [CXBULK] watch.snapshot {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 7,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 7,
+[cp]   activeCallCount: 2,
+[cp]   at: '2026-06-24T20:33:24.242Z'
+[cp] }
+[cp] [CXBULK] watch.noop {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 7,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 7,
+[cp]   transitionKind: 'none',
+[cp]   releaseDiffDirty: false,
+[cp]   activeCallMatched: false,
+[cp]   at: '2026-06-24T20:33:24.360Z'
+[cp] }
+[cp] [CXBULK] watch.snapshot {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 7,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 7,
+[cp]   activeCallCount: 2,
+[cp]   at: '2026-06-24T20:33:25.868Z'
+[cp] }
+[cp] [CXBULK] watch.noop {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 7,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 7,
+[cp]   transitionKind: 'none',
+[cp]   releaseDiffDirty: false,
+[cp]   activeCallMatched: false,
+[cp]   at: '2026-06-24T20:33:25.986Z'
+[cp] }
+[cp] [CXBULK] watch.snapshot {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 7,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 7,
+[cp]   activeCallCount: 2,
+[cp]   at: '2026-06-24T20:33:28.379Z'
+[cp] }
+[cp] [CXBULK] watch.noop {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 7,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 7,
+[cp]   transitionKind: 'none',
+[cp]   releaseDiffDirty: false,
+[cp]   activeCallMatched: false,
+[cp]   at: '2026-06-24T20:33:28.494Z'
+[cp] }
+[cp] [CXBULK] watch.snapshot {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 7,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 7,
+[cp]   activeCallCount: 2,
+[cp]   at: '2026-06-24T20:33:30.012Z'
+[cp] }
+[cp] [CXBULK] watch.noop {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 7,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 7,
+[cp]   transitionKind: 'none',
+[cp]   releaseDiffDirty: false,
+[cp]   activeCallMatched: false,
+[cp]   at: '2026-06-24T20:33:30.127Z'
+[cp] }
+[cp] [CXBULK] watch.snapshot {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 7,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 7,
+[cp]   activeCallCount: 2,
+[cp]   at: '2026-06-24T20:33:31.542Z'
+[cp] }
+[cp] [CXBULK] watch.noop {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 7,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 7,
+[cp]   transitionKind: 'none',
+[cp]   releaseDiffDirty: false,
+[cp]   activeCallMatched: false,
+[cp]   at: '2026-06-24T20:33:31.671Z'
+[cp] }
+[cp] [CXBULK] watch.snapshot {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 7,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 7,
+[cp]   activeCallCount: 2,
+[cp]   at: '2026-06-24T20:33:34.560Z'
+[cp] }
+[cp] [CXBULK] watch.noop {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 7,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 7,
+[cp]   transitionKind: 'none',
+[cp]   releaseDiffDirty: false,
+[cp]   activeCallMatched: false,
+[cp]   at: '2026-06-24T20:33:34.678Z'
+[cp] }
+[cp] [CXBULK] watch.snapshot {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 7,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 7,
+[cp]   activeCallCount: 2,
+[cp]   at: '2026-06-24T20:33:38.137Z'
+[cp] }
+[cp] [CXBULK] watch.noop {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 7,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 7,
+[cp]   transitionKind: 'none',
+[cp]   releaseDiffDirty: false,
+[cp]   activeCallMatched: false,
+[cp]   at: '2026-06-24T20:33:38.260Z'
+[cp] }
+[cp] [CXBULK] watch.snapshot {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 7,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 7,
+[cp]   activeCallCount: 1,
+[cp]   at: '2026-06-24T20:33:39.901Z'
+[cp] }
+[cp] [CXBULK] watch.noop {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 7,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 7,
+[cp]   transitionKind: 'none',
+[cp]   releaseDiffDirty: true,
+[cp]   activeCallMatched: false,
+[cp]   at: '2026-06-24T20:33:40.115Z'
+[cp] }
+[cp] [CXBULK] watch.snapshot {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 7,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 7,
+[cp]   activeCallCount: 1,
+[cp]   at: '2026-06-24T20:33:41.531Z'
+[cp] }
+[cp] [CXBULK] watch.noop {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 7,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 7,
+[cp]   transitionKind: 'none',
+[cp]   releaseDiffDirty: false,
+[cp]   activeCallMatched: false,
+[cp]   at: '2026-06-24T20:33:41.708Z'
+[cp] }
+[cp] [CXBULK] watch.snapshot {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 7,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 7,
+[cp]   activeCallCount: 1,
+[cp]   at: '2026-06-24T20:33:43.639Z'
+[cp] }
+[cp] [CXBULK] watch.noop {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 7,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 7,
+[cp]   transitionKind: 'none',
+[cp]   releaseDiffDirty: false,
+[cp]   activeCallMatched: false,
+[cp]   at: '2026-06-24T20:33:43.758Z'
+[cp] }
+[cp] [CXBULK] watch.snapshot {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 7,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 7,
+[cp]   activeCallCount: 1,
+[cp]   at: '2026-06-24T20:33:45.173Z'
+[cp] }
+[cp] [CXBULK] watch.noop {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 7,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 7,
+[cp]   transitionKind: 'none',
+[cp]   releaseDiffDirty: false,
+[cp]   activeCallMatched: false,
+[cp]   at: '2026-06-24T20:33:45.296Z'
+[cp] }
+[cp] [CXBULK] watch.snapshot {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 7,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 7,
+[cp]   activeCallCount: 1,
+[cp]   at: '2026-06-24T20:33:47.115Z'
+[cp] }
+[cp] [CXBULK] watch.noop {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 7,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 7,
+[cp]   transitionKind: 'none',
+[cp]   releaseDiffDirty: false,
+[cp]   activeCallMatched: false,
+[cp]   at: '2026-06-24T20:33:47.248Z'
+[cp] }
+[cp] [CXBULK] watch.snapshot {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 7,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 7,
+[cp]   activeCallCount: 1,
+[cp]   at: '2026-06-24T20:33:48.659Z'
+[cp] }
+[cp] [CXBULK] watch.noop {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 7,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 7,
+[cp]   transitionKind: 'none',
+[cp]   releaseDiffDirty: false,
+[cp]   activeCallMatched: false,
+[cp]   at: '2026-06-24T20:33:48.778Z'
+[cp] }
+[cp] [CXBULK] watch.snapshot {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 7,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 7,
+[cp]   activeCallCount: 1,
+[cp]   at: '2026-06-24T20:33:52.635Z'
+[cp] }
+[cp] [CXBULK] watch.noop {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 7,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 7,
+[cp]   transitionKind: 'none',
+[cp]   releaseDiffDirty: false,
+[cp]   activeCallMatched: false,
+[cp]   at: '2026-06-24T20:33:52.757Z'
+[cp] }
+[cp] [CXBULK] watch.snapshot {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 7,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 7,
+[cp]   activeCallCount: 1,
+[cp]   at: '2026-06-24T20:33:55.742Z'
+[cp] }
+[cp] [CXBULK] watch.noop {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 7,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 7,
+[cp]   transitionKind: 'none',
+[cp]   releaseDiffDirty: false,
+[cp]   activeCallMatched: false,
+[cp]   at: '2026-06-24T20:33:55.877Z'
+[cp] }
+[cp] [CXBULK] watch.snapshot {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 7,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 7,
+[cp]   activeCallCount: 1,
+[cp]   at: '2026-06-24T20:33:57.843Z'
+[cp] }
+[cp] [CXBULK] watch.noop {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 7,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 7,
+[cp]   transitionKind: 'none',
+[cp]   releaseDiffDirty: false,
+[cp]   activeCallMatched: false,
+[cp]   at: '2026-06-24T20:33:57.961Z'
+[cp] }
+[cp] [CXBULK] watch.snapshot {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 7,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 7,
+[cp]   activeCallCount: 1,
+[cp]   at: '2026-06-24T20:34:00.129Z'
+[cp] }
+[cp] [CXBULK] watch.noop {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 7,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 7,
+[cp]   transitionKind: 'none',
+[cp]   releaseDiffDirty: false,
+[cp]   activeCallMatched: false,
+[cp]   at: '2026-06-24T20:34:00.248Z'
+[cp] }
+[cp] [CXBULK] watch.snapshot {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 7,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 7,
+[cp]   activeCallCount: 1,
+[cp]   at: '2026-06-24T20:34:02.429Z'
+[cp] }
+[cp] [CXBULK] watch.noop {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 7,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 7,
+[cp]   transitionKind: 'none',
+[cp]   releaseDiffDirty: false,
+[cp]   activeCallMatched: false,
+[cp]   at: '2026-06-24T20:34:02.545Z'
+[cp] }
+[cp] [CXBULK] watch.snapshot {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 7,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 7,
+[cp]   activeCallCount: 0,
+[cp]   at: '2026-06-24T20:34:04.776Z'
+[cp] }
+[cp] [CXBULK] watch.noop {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 7,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 7,
+[cp]   transitionKind: 'none',
+[cp]   releaseDiffDirty: true,
+[cp]   activeCallMatched: false,
+[cp]   at: '2026-06-24T20:34:05.183Z'
+[cp] }
+[cp] [CXBULK] watch.snapshot {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 7,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 7,
+[cp]   activeCallCount: 0,
+[cp]   at: '2026-06-24T20:34:06.592Z'
+[cp] }
+[cp] [CXBULK] watch.noop {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 7,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 7,
+[cp]   transitionKind: 'none',
+[cp]   releaseDiffDirty: false,
+[cp]   activeCallMatched: false,
+[cp]   at: '2026-06-24T20:34:06.713Z'
+[cp] }
+[cp] [CXBULK] watch.snapshot {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 7,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 7,
+[cp]   activeCallCount: 0,
+[cp]   at: '2026-06-24T20:34:09.501Z'
+[cp] }
+[cp] [CXBULK] watch.noop {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 7,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 7,
+[cp]   transitionKind: 'none',
+[cp]   releaseDiffDirty: false,
+[cp]   activeCallMatched: false,
+[cp]   at: '2026-06-24T20:34:09.623Z'
+[cp] }
+[cp] [CXBULK] watch.snapshot {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 7,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 7,
+[cp]   activeCallCount: 0,
+[cp]   at: '2026-06-24T20:34:11.507Z'
+[cp] }
+[cp] [CXBULK] watch.noop {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 7,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 7,
+[cp]   transitionKind: 'none',
+[cp]   releaseDiffDirty: false,
+[cp]   activeCallMatched: false,
+[cp]   at: '2026-06-24T20:34:11.620Z'
+[cp] }
+[cp] [CXBULK] watch.snapshot {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 7,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 7,
+[cp]   activeCallCount: 0,
+[cp]   at: '2026-06-24T20:34:13.812Z'
+[cp] }
+[cp] [CXBULK] watch.noop {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 7,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 7,
+[cp]   transitionKind: 'none',
+[cp]   releaseDiffDirty: false,
+[cp]   activeCallMatched: false,
+[cp]   at: '2026-06-24T20:34:13.927Z'
+[cp] }
+[cp] [CXBULK] watch.snapshot {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 7,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 7,
+[cp]   activeCallCount: 0,
+[cp]   at: '2026-06-24T20:34:15.757Z'
+[cp] }
+[cp] [CXBULK] watch.noop {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 7,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 7,
+[cp]   transitionKind: 'none',
+[cp]   releaseDiffDirty: false,
+[cp]   activeCallMatched: false,
+[cp]   at: '2026-06-24T20:34:15.890Z'
+[cp] }
+[cp] [CXBULK] watch.snapshot {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 7,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 7,
+[cp]   activeCallCount: 0,
+[cp]   at: '2026-06-24T20:34:17.304Z'
+[cp] }
+[cp] [CXBULK] watch.noop {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 7,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 7,
+[cp]   transitionKind: 'none',
+[cp]   releaseDiffDirty: false,
+[cp]   activeCallMatched: false,
+[cp]   at: '2026-06-24T20:34:17.436Z'
+[cp] }
+[cp] [CXBULK] watch.snapshot {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 7,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 7,
+[cp]   activeCallCount: 0,
+[cp]   at: '2026-06-24T20:34:19.235Z'
+[cp] }
+[cp] [CXBULK] watch.noop {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 7,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 7,
+[cp]   transitionKind: 'none',
+[cp]   releaseDiffDirty: false,
+[cp]   activeCallMatched: false,
+[cp]   at: '2026-06-24T20:34:19.364Z'
+[cp] }
+[out] {"timestamp":"2026-06-24T20:34:19.500Z","level":"info","scope":"outbound-gateway","message":"outbound.worker.counter_rvm_disposition_poll","meta":{"polled":25,"terminal":0,"markedDnc":0}}
+[cp] [CXBULK] watch.snapshot {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 7,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 7,
+[cp]   activeCallCount: 0,
+[cp]   at: '2026-06-24T20:34:20.774Z'
+[cp] }
+[cp] [CXBULK] watch.noop {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 7,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 7,
+[cp]   transitionKind: 'none',
+[cp]   releaseDiffDirty: false,
+[cp]   activeCallMatched: false,
+[cp]   at: '2026-06-24T20:34:20.926Z'
+[cp] }
+[cp] [CXBULK] watch.snapshot {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 7,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 7,
+[cp]   activeCallCount: 0,
+[cp]   at: '2026-06-24T20:34:22.578Z'
+[cp] }
+[cp] [CXBULK] watch.noop {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 7,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 7,
+[cp]   transitionKind: 'none',
+[cp]   releaseDiffDirty: false,
+[cp]   activeCallMatched: false,
+[cp]   at: '2026-06-24T20:34:22.691Z'
+[cp] }
+[cp] [CXBULK] watch.snapshot {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 7,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 7,
+[cp]   activeCallCount: 0,
+[cp]   at: '2026-06-24T20:34:25.043Z'
+[cp] }
+[cp] [CXBULK] watch.noop {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 7,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 7,
+[cp]   transitionKind: 'none',
+[cp]   releaseDiffDirty: false,
+[cp]   activeCallMatched: false,
+[cp]   at: '2026-06-24T20:34:25.173Z'
+[cp] }
+[cp] [CXBULK] watch.snapshot {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 7,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 7,
+[cp]   activeCallCount: 0,
+[cp]   at: '2026-06-24T20:34:26.646Z'
+[cp] }
+[cp] [CXBULK] watch.noop {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 7,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 7,
+[cp]   transitionKind: 'none',
+[cp]   releaseDiffDirty: false,
+[cp]   activeCallMatched: false,
+[cp]   at: '2026-06-24T20:34:26.763Z'
+[cp] }
+[cp] [CXBULK] watch.snapshot {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 7,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 7,
+[cp]   activeCallCount: 0,
+[cp]   at: '2026-06-24T20:34:28.306Z'
+[cp] }
+[cp] [CXBULK] watch.noop {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 7,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 7,
+[cp]   transitionKind: 'none',
+[cp]   releaseDiffDirty: false,
+[cp]   activeCallMatched: false,
+[cp]   at: '2026-06-24T20:34:28.421Z'
+[cp] }
+[cp] [CXBULK] watch.snapshot {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 7,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 7,
+[cp]   activeCallCount: 0,
+[cp]   at: '2026-06-24T20:34:30.082Z'
+[cp] }
+[cp] [CXBULK] watch.noop {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 7,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 7,
+[cp]   transitionKind: 'none',
+[cp]   releaseDiffDirty: false,
+[cp]   activeCallMatched: false,
+[cp]   at: '2026-06-24T20:34:30.199Z'
+[cp] }
+[cp] [CXBULK] watch.snapshot {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 7,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 7,
+[cp]   activeCallCount: 0,
+[cp]   at: '2026-06-24T20:34:33.688Z'
+[cp] }
+[cp] [CXBULK] watch.noop {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 7,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 7,
+[cp]   transitionKind: 'none',
+[cp]   releaseDiffDirty: false,
+[cp]   activeCallMatched: false,
+[cp]   at: '2026-06-24T20:34:33.801Z'
+[cp] }
+[cp] [CXBULK] watch.snapshot {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 7,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 7,
+[cp]   activeCallCount: 0,
+[cp]   at: '2026-06-24T20:34:35.216Z'
+[cp] }
+[cp] [CXBULK] watch.noop {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 7,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 7,
+[cp]   transitionKind: 'none',
+[cp]   releaseDiffDirty: false,
+[cp]   activeCallMatched: false,
+[cp]   at: '2026-06-24T20:34:35.330Z'
+[cp] }
+[cp] [CXBULK] watch.snapshot {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 7,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 7,
+[cp]   activeCallCount: 0,
+[cp]   at: '2026-06-24T20:34:37.959Z'
+[cp] }
+[cp] [CXBULK] watch.noop {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 7,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 7,
+[cp]   transitionKind: 'none',
+[cp]   releaseDiffDirty: false,
+[cp]   activeCallMatched: false,
+[cp]   at: '2026-06-24T20:34:38.098Z'
+[cp] }
+[cp] [CXBULK] watch.snapshot {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 7,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 7,
+[cp]   activeCallCount: 0,
+[cp]   at: '2026-06-24T20:34:39.505Z'
+[cp] }
+[cp] [CXBULK] watch.noop {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 7,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 7,
+[cp]   transitionKind: 'none',
+[cp]   releaseDiffDirty: false,
+[cp]   activeCallMatched: false,
+[cp]   at: '2026-06-24T20:34:39.628Z'
+[cp] }
+[cp] [CXBULK] watch.snapshot {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 7,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 7,
+[cp]   activeCallCount: 1,
+[cp]   at: '2026-06-24T20:34:42.370Z'
+[cp] }
+[cp] [CXBULK] watch.noop {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 7,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 7,
+[cp]   transitionKind: 'none',
+[cp]   releaseDiffDirty: true,
+[cp]   activeCallMatched: false,
+[cp]   at: '2026-06-24T20:34:42.570Z'
+[cp] }
+[cp] [CXBULK] watch.snapshot {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 7,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 7,
+[cp]   activeCallCount: 1,
+[cp]   at: '2026-06-24T20:34:44.357Z'
+[cp] }
+[cp] [CXBULK] watch.noop {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 7,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 7,
+[cp]   transitionKind: 'none',
+[cp]   releaseDiffDirty: false,
+[cp]   activeCallMatched: false,
+[cp]   at: '2026-06-24T20:34:44.476Z'
+[cp] }
+[cp] [CXBULK] watch.snapshot {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 7,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 7,
+[cp]   activeCallCount: 1,
+[cp]   at: '2026-06-24T20:34:46.738Z'
+[cp] }
+[cp] [CXBULK] watch.noop {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 7,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 7,
+[cp]   transitionKind: 'none',
+[cp]   releaseDiffDirty: false,
+[cp]   activeCallMatched: false,
+[cp]   at: '2026-06-24T20:34:46.852Z'
+[cp] }
+[cp] [CXBULK] watch.snapshot {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 7,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 7,
+[cp]   activeCallCount: 1,
+[cp]   at: '2026-06-24T20:34:48.335Z'
+[cp] }
+[cp] [CXBULK] watch.noop {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 7,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 7,
+[cp]   transitionKind: 'none',
+[cp]   releaseDiffDirty: false,
+[cp]   activeCallMatched: false,
+[cp]   at: '2026-06-24T20:34:48.489Z'
+[cp] }
+[cp] [CXBULK] watch.snapshot {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 7,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 7,
+[cp]   activeCallCount: 1,
+[cp]   at: '2026-06-24T20:34:49.912Z'
+[cp] }
+[cp] [CXBULK] watch.noop {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 7,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 7,
+[cp]   transitionKind: 'none',
+[cp]   releaseDiffDirty: false,
+[cp]   activeCallMatched: false,
+[cp]   at: '2026-06-24T20:34:50.030Z'
+[cp] }
+[cp] [CXBULK] watch.snapshot {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 7,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 7,
+[cp]   activeCallCount: 1,
+[cp]   at: '2026-06-24T20:34:51.556Z'
+[cp] }
+[cp] [CXBULK] watch.noop {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 7,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 7,
+[cp]   transitionKind: 'none',
+[cp]   releaseDiffDirty: false,
+[cp]   activeCallMatched: false,
+[cp]   at: '2026-06-24T20:34:51.686Z'
+[cp] }
+[cp] [CXBULK] watch.snapshot {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 7,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 7,
+[cp]   activeCallCount: 1,
+[cp]   at: '2026-06-24T20:34:53.112Z'
+[cp] }
+[cp] [CXBULK] watch.noop {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 7,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 7,
+[cp]   transitionKind: 'none',
+[cp]   releaseDiffDirty: false,
+[cp]   activeCallMatched: false,
+[cp]   at: '2026-06-24T20:34:53.246Z'
+[cp] }
+[cp] [CXBULK] watch.snapshot {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 7,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 7,
+[cp]   activeCallCount: 1,
+[cp]   at: '2026-06-24T20:34:55.776Z'
+[cp] }
+[cp] [CXBULK] watch.noop {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 7,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 7,
+[cp]   transitionKind: 'none',
+[cp]   releaseDiffDirty: false,
+[cp]   activeCallMatched: false,
+[cp]   at: '2026-06-24T20:34:55.896Z'
+[cp] }
+[cp] [CXBULK] watch.snapshot {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 7,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 7,
+[cp]   activeCallCount: 2,
+[cp]   at: '2026-06-24T20:34:58.932Z'
+[cp] }
+[cp] [CXBULK] watch.noop {
+[cp]   sessionId: 'cxbl-b1e27427-c964-4f5d-953c-9757a9b4b659',
+[cp]   agentEmail: 'slucas@taxadvocategroup.com',
+[cp]   agentExtensionId: '63756126004',
+[cp]   domain: 'WYNN',
+[cp]   status: 'running',
+[cp]   phase: 'ready',
+[cp]   currentQueueItemId: '',
+[cp]   currentExternId: null,
+[cp]   currentUii: null,
+[cp]   bufferCount: 7,
+[cp]   completedCount: 0,
+[cp]   liveSlots: 7,
+[cp]   transitionKind: 'none',
+[cp]   releaseDiffDirty: true,
+[cp]   activeCallMatched: false,
+[cp]   at: '2026-06-24T20:34:59.136Z'
+[cp] }
+[in] npm run dev:inbound exited with code 1
+--> Sending SIGTERM to other processes..
+[out] npm run dev:outbound exited with code 1
+--> Sending SIGTERM to other processes..
+[cp] npm run dev:control-plane exited with code 1
+--> Sending SIGTERM to other processes..
+[rc] npm run dev:ring exited with code 1
+--> Sending SIGTERM to other processes..
+[web] npm run dev:web exited with code 1

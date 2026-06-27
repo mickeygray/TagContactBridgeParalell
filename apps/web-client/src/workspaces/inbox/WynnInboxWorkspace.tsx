@@ -9,7 +9,7 @@ import { InboxWorkspace } from "@/workspaces/inbox/InboxWorkspace";
  * doesn't render here because the underlying component reads
  * `forcedDomain` first and skips the dropdown.
  *
- * Path: /cx/inbox  (sits alongside /cx and /cx/clients in CXShell nav)
+ * Path: /cx/inbox  (SMS in the CXShell nav)
  */
 export function WynnInboxWorkspace() {
   return <InboxWorkspace forcedDomain="WYNN" />;

@@ -13,6 +13,7 @@
 //     bot interpolates "Wynn Tax Solutions" or "Tax Advocate Group".
 
 const Anthropic = require("@anthropic-ai/sdk");
+const { splitBodyIntoBlocks } = require("./bloggerContentUtils");
 
 const SONNET_MODEL = "claude-sonnet-4-5-20250929";
 
@@ -86,26 +87,6 @@ const SUBMIT_TOOL = {
     },
   },
 };
-
-// Split the single HTML string into the array shape blogData.js wants
-// (one entry per top-level block element). Regex matches each
-// block-level element greedily but non-overlappingly.
-function splitBodyIntoBlocks(html) {
-  const text = String(html || "").trim();
-  if (!text) return [];
-  // Match <h2>...</h2>, <h3>...</h3>, <p>...</p>, <ul>...</ul>,
-  // <ol>...</ol>, <blockquote>...</blockquote>. Greedy on the
-  // same tag, non-overlapping across tags.
-  const blocks = text.match(
-    /<(h[1-6]|p|ul|ol|blockquote|figure|hr)\b[^>]*>[\s\S]*?<\/\1>/gi,
-  );
-  if (blocks && blocks.length > 0) return blocks.map((b) => b.trim());
-  // Fallback: split by blank lines.
-  return text
-    .split(/\n\s*\n/)
-    .map((b) => b.trim())
-    .filter(Boolean);
-}
 
 async function writeBlogDraft(client, seed) {
   const response = await client.messages.create({

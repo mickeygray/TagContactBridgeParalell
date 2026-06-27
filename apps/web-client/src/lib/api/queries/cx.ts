@@ -94,6 +94,109 @@ export function useCxCallQueueMulti(domains: string[]) {
   });
 }
 
+export interface CxSimpleLoopCandidate {
+  queueItemId?: string | null;
+  domain?: string | null;
+  caseId?: number | string | null;
+  name?: string | null;
+  phoneLast4?: string | null;
+  phoneHash?: string | null;
+  queueFamily?: string | null;
+  queueTier?: string | null;
+  progressiveStageKey?: string | null;
+  state?: string | null;
+  status?: string | null;
+  phase?: string | null;
+  outcome?: string | null;
+  uii?: string | null;
+  activeEvidenceAt?: string | null;
+  activeAt?: string | null;
+  completedAt?: string | null;
+  failedAt?: string | null;
+  matchReasons?: string[];
+  firstPollMs?: number | null;
+  uiiFoundMs?: number | null;
+  activeCallSummary?: Record<string, unknown> | null;
+  ringcx?: Record<string, unknown> | null;
+  dispositionResult?: Record<string, unknown> | null;
+  metadata?: Record<string, unknown> | null;
+}
+
+export interface CxSimpleLoopSession {
+  sessionId: string;
+  status: "running" | "paused" | "completed" | "killed" | "failed" | string;
+  mode: "single" | "bulk-mirror" | string;
+  agentEmail?: string | null;
+  agentExtensionId?: string | null;
+  cxAgentId?: string | null;
+  queue: CxSimpleLoopCandidate[];
+  current: CxSimpleLoopCandidate | null;
+  completed: CxSimpleLoopCandidate[];
+  events: Array<Record<string, unknown>>;
+  stats: Record<string, unknown>;
+  lastError?: unknown;
+  startedAt?: string | null;
+  updatedAt?: string | null;
+}
+
+function simpleLoopQueryKey(agentEmail?: string | null) {
+  return [...queryKeys.cx.all(), "simple-loop", agentEmail || "me"] as const;
+}
+
+function invalidateSimpleLoop(qc: ReturnType<typeof useQueryClient>, agentEmail?: string | null) {
+  qc.invalidateQueries({ queryKey: simpleLoopQueryKey(agentEmail) });
+}
+
+export function useCxSimpleLoopSession(enabled = false, agentEmail?: string | null) {
+  return useQuery({
+    queryKey: simpleLoopQueryKey(agentEmail),
+    queryFn: () =>
+      api
+        .get<{ ok: true; result: CxSimpleLoopSession | null }>(
+          "/api/cx/simple-loop/session",
+          {
+            query: {
+              agentEmail: agentEmail || undefined,
+            },
+          },
+        )
+        .then((r) => r.result),
+    enabled,
+    staleTime: 500,
+    refetchInterval: enabled ? 1000 : false,
+    refetchIntervalInBackground: false,
+    refetchOnWindowFocus: true,
+    retry: 2,
+  });
+}
+
+function buildCxSimpleLoopCommandHook(path: string) {
+  return function useCxSimpleLoopCommand() {
+    const qc = useQueryClient();
+    return useMutation({
+      mutationFn: (body: Record<string, unknown> = {}) =>
+        api
+          .post<{ ok: true; result: CxSimpleLoopSession | null }>(
+            `/api/cx/simple-loop/${path}`,
+            body,
+          )
+          .then((r) => r.result),
+      onSuccess: (_result, vars) => {
+        const agentEmail = typeof vars?.agentEmail === "string" ? vars.agentEmail : null;
+        invalidateSimpleLoop(qc, agentEmail);
+        qc.invalidateQueries({ queryKey: queryKeys.cx.callQueue("TAG") });
+        qc.invalidateQueries({ queryKey: queryKeys.cx.callQueue("WYNN") });
+      },
+    });
+  };
+}
+
+export const useCxSimpleLoopStart = buildCxSimpleLoopCommandHook("start");
+export const useCxSimpleLoopAdvance = buildCxSimpleLoopCommandHook("advance");
+export const useCxSimpleLoopDisposition = buildCxSimpleLoopCommandHook("disposition");
+export const useCxSimpleLoopSkip = buildCxSimpleLoopCommandHook("skip");
+export const useCxSimpleLoopKill = buildCxSimpleLoopCommandHook("kill");
+
 export function useCxPostDateHolds(
   domain: string,
   filters: { status?: string; date?: string; from?: string; to?: string; caseId?: string } = {},

@@ -76,6 +76,10 @@ const agentStateSchema = new mongoose.Schema(
     // Mixed while the lifecycle shape is observed in production; once the
     // state machine is authoritative, replace it with a typed sub-schema.
     cxCall: { type: mongoose.Schema.Types.Mixed, default: null },
+    // Shadow-only bucket lifecycle payload for the next CX handoff model:
+    // candidate queue, currently observed CX call, and post-call completion
+    // buffer. Kept Mixed while this runs beside legacy state.
+    cxCallBuckets: { type: mongoose.Schema.Types.Mixed, default: null },
     lastCallOutcome: { type: String, default: null },
     lastCallEndedAt: { type: Date, default: null },
     lastCallDirection: { type: String, default: null },

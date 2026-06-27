@@ -52,6 +52,11 @@ const {
   seedPresenceForAgents,
   startPresencePoller,
 } = require("../../../packages/shared-services/src");
+const {
+  isCxMorningQueueBuilderEnabled,
+  readCxMorningQueueBuilderOptionsFromEnv,
+  runCxMorningQueueBuilder,
+} = require("../../../packages/shared-services/src/cxMorningQueueBuilderService");
 const { getCxRuntimeMode } = require("../../../packages/shared-services/src/cxRuntimeModeService");
 const {
   assignCxQueueBatch,
@@ -311,8 +316,10 @@ async function startServer() {
   const cadenceWorkerState = createWorkerState();
   const freshHotLaneState = createWorkerState();
   const freshHotLaneMorningState = createWorkerState();
+  const morningQueueBuilderState = createWorkerState();
   let freshHotLaneTimer = null;
   let freshHotLaneMorningTimer = null;
+  let morningQueueBuilderTimer = null;
   runtime.installSignalHandlers();
   const rc = createRingCentralClient();
   const rcConfig = getRingCentralConfig();
@@ -663,8 +670,8 @@ async function startServer() {
     });
     const now = new Date();
     const probe = new Date(now);
-    for (let i = 0; i < 7 * 24 * 12; i += 1) {
-      probe.setTime(now.getTime() + (i + 1) * 5 * 60 * 1000);
+    for (let i = 0; i < 7 * 24 * 60; i += 1) {
+      probe.setTime(now.getTime() + (i + 1) * 60 * 1000);
       const parts = fmt.formatToParts(probe);
       const lookup = (type) => parts.find((part) => part.type === type)?.value;
       const weekday = lookup("weekday");
@@ -803,6 +810,111 @@ async function startServer() {
   //   - PacingConfig.enabled is false
   //   - It's outside the configured business window (per-cron, with
   //     morning-prep being the explicit off-hours exception)
+  function startMorningQueueBuilderWorker() {
+    const enabled = isCxMorningQueueBuilderEnabled(process.env);
+    morningQueueBuilderState.enabled = enabled;
+    if (!enabled) {
+      runtime.logger?.info?.("ringcentral.cx_morning_queue_builder.disabled", {
+        reason: "CX_MORNING_QUEUE_BUILDER_ENABLED=false or bulk-load runtime disabled",
+      });
+      return;
+    }
+
+    const hour = Math.max(0, Math.min(23, Number(process.env.CX_MORNING_QUEUE_BUILDER_HOUR) || 7));
+    const minute = Math.max(0, Math.min(59, Number(process.env.CX_MORNING_QUEUE_BUILDER_MINUTE) || 0));
+
+    const scheduleNextMorningQueueBuilder = () => {
+      if (morningQueueBuilderTimer) {
+        clearTimeout(morningQueueBuilderTimer);
+        morningQueueBuilderTimer = null;
+      }
+
+      const target = findNextPacificWeekdayTime(hour, minute);
+      if (!target) {
+        morningQueueBuilderTimer = setTimeout(scheduleNextMorningQueueBuilder, 60 * 60 * 1000);
+        if (typeof morningQueueBuilderTimer.unref === "function") {
+          morningQueueBuilderTimer.unref();
+        }
+        return;
+      }
+
+      const delayMs = Math.max(target.getTime() - Date.now(), 1000);
+      morningQueueBuilderState.intervalMs = delayMs;
+      morningQueueBuilderTimer = setTimeout(async () => {
+        if (morningQueueBuilderState.running) {
+          scheduleNextMorningQueueBuilder();
+          return;
+        }
+        morningQueueBuilderState.running = true;
+        morningQueueBuilderState.lastStartedAt = new Date();
+        try {
+          const result = await runCxMorningQueueBuilder(
+            readCxMorningQueueBuilderOptionsFromEnv(process.env, runtime.logger),
+          );
+          morningQueueBuilderState.lastResult = {
+            ok: result.ok,
+            startedAt: result.startedAt,
+            finishedAt: result.finishedAt,
+            totals: result.totals,
+            agents: result.agents.map((row) => ({
+              email: row.agent?.email || null,
+              extensionId: row.agent?.extensionId || null,
+              domain: row.agent?.domain || null,
+              drain: row.drain && {
+                candidates: row.drain.candidates,
+                cancelled: row.drain.cancelled,
+                errors: row.drain.errors?.length || 0,
+              },
+              build: row.build && {
+                ok: row.build.ok,
+                built: row.build.built,
+                before: row.build.before,
+                after: row.build.after,
+                targetOpen: row.build.targetOpen,
+              },
+              mirror: row.mirror && {
+                attempted: row.mirror.attempted,
+                published: row.mirror.published,
+                reused: row.mirror.reused,
+                deferred: row.mirror.deferred,
+                errored: row.mirror.errored,
+                skipped: row.mirror.skipped,
+              },
+              elapsedMs: row.elapsedMs,
+              error: row.error,
+            })),
+          };
+          morningQueueBuilderState.lastError = null;
+          runtime.logger?.info?.("ringcentral.cx_morning_queue_builder.completed", {
+            totals: morningQueueBuilderState.lastResult.totals,
+          });
+        } catch (error) {
+          morningQueueBuilderState.lastError = error.message;
+          runtime.logger?.warn?.("ringcentral.cx_morning_queue_builder.failed", {
+            error: error.message,
+          });
+        } finally {
+          morningQueueBuilderState.lastCompletedAt = new Date();
+          morningQueueBuilderState.running = false;
+          scheduleNextMorningQueueBuilder();
+        }
+      }, delayMs);
+      if (typeof morningQueueBuilderTimer.unref === "function") {
+        morningQueueBuilderTimer.unref();
+      }
+    };
+
+    scheduleNextMorningQueueBuilder();
+    runtime.logger?.info?.("ringcentral.cx_morning_queue_builder.registered", {
+      hour,
+      minute,
+      enabledBy: process.env.CX_MORNING_QUEUE_BUILDER_ENABLED
+        ? "CX_MORNING_QUEUE_BUILDER_ENABLED"
+        : "CX_DIAL_RUNTIME_BULK_LOAD_ENABLED",
+      limit: Number(process.env.CX_MORNING_QUEUE_BUILDER_LIMIT) || 30,
+    });
+  }
+
   const pacingQueueEnabled = String(process.env.PACING_QUEUE_ENABLED || "")
     .toLowerCase() === "true";
   const pacingHourlyState = createWorkerState();
@@ -1087,6 +1199,14 @@ async function startServer() {
         lastError: freshHotLaneState.lastError,
         snapshot: getFreshHotLaneSnapshot(),
       },
+      morningQueueBuilder: {
+        enabled: morningQueueBuilderState.enabled,
+        running: morningQueueBuilderState.running,
+        intervalMs: morningQueueBuilderState.intervalMs,
+        lastStartedAt: morningQueueBuilderState.lastStartedAt,
+        lastCompletedAt: morningQueueBuilderState.lastCompletedAt,
+        lastError: morningQueueBuilderState.lastError,
+      },
       staleDialSweep: {
         enabled: staleDialSweepState.enabled,
         running: staleDialSweepState.running,
@@ -1145,6 +1265,15 @@ async function startServer() {
           lastError: freshHotLaneMorningState.lastError,
         },
         snapshot: getFreshHotLaneSnapshot(),
+      },
+      morningQueueBuilder: {
+        enabled: morningQueueBuilderState.enabled,
+        running: morningQueueBuilderState.running,
+        intervalMs: morningQueueBuilderState.intervalMs,
+        lastStartedAt: morningQueueBuilderState.lastStartedAt,
+        lastCompletedAt: morningQueueBuilderState.lastCompletedAt,
+        lastResult: morningQueueBuilderState.lastResult,
+        lastError: morningQueueBuilderState.lastError,
       },
       staleDialSweep: {
         enabled: staleDialSweepState.enabled,
@@ -2290,6 +2419,10 @@ async function startServer() {
       clearInterval(ringcxAgentMonitorTimer);
       ringcxAgentMonitorTimer = null;
     }
+    if (morningQueueBuilderTimer) {
+      clearTimeout(morningQueueBuilderTimer);
+      morningQueueBuilderTimer = null;
+    }
     clearInterval(watchdogTimer);
     rc.stopWarmupTimer();
   });
@@ -2316,6 +2449,12 @@ async function startServer() {
       freshHotLaneMorningTimer = null;
     }
   });
+  runtime.registerCleanup("ringcentral-morning-queue-builder", async () => {
+    if (morningQueueBuilderTimer) {
+      clearTimeout(morningQueueBuilderTimer);
+      morningQueueBuilderTimer = null;
+    }
+  });
   runtime.registerCleanup("ringcentral-stale-dial-sweep", async () => {
     if (staleDialSweepTimer) {
       clearInterval(staleDialSweepTimer);
@@ -2340,6 +2479,7 @@ async function startServer() {
 
   await startCxCadenceWorker();
   startFreshHotLaneWorker();
+  startMorningQueueBuilderWorker();
 
   return server;
 }

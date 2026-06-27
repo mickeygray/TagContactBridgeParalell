@@ -131,7 +131,41 @@ const RESOLUTION_VERDICT_SCHEMA = {
 
 // ── Blogger + trainer + ops tool schemas (field lists from the dictionary) ────
 const SUBMIT_BLOG_DRAFT = { name: "submit_blog_draft", input_schema: { type: "object", properties: { teaser: { type: "string", description: "200-280 chars" }, contentTitle: { type: "string" }, bodyHtml: { type: "string", description: "block elements newline-separated; first=disclaimer, last=Bottom line" } }, required: ["teaser", "contentTitle", "bodyHtml"] } };
-const SUBMIT_CURRENT_EVENT_BLOG = { name: "submit_current_event_blog", input_schema: { type: "object", properties: { id: { type: "string" }, title: { type: "string" }, teaser: { type: "string" }, contentTitle: { type: "string" }, bodyHtml: { type: "string" }, slide: { type: "object" }, sourcesUsed: { type: "array", items: { type: "string" } } }, required: ["id", "title", "teaser", "contentTitle", "bodyHtml"] } };
+// Authoritative current-event blog tool def — the SINGLE source. `scripts/blogger-current-event.js`
+// imports this rather than re-declaring it. The detailed slide sub-schema + field descriptions are
+// what guide the model to fill every slide field, so keep them here (don't flatten back to a loose
+// `slide:{type:object}`).
+const SUBMIT_CURRENT_EVENT_BLOG = {
+  name: "submit_current_event_blog",
+  description:
+    "Submit the finished current-event blog draft. bodyHtml must be the complete blog body as one HTML string with each block element on its own line, separated by newlines.",
+  input_schema: {
+    type: "object",
+    required: ["id", "title", "teaser", "contentTitle", "bodyHtml", "slide", "sourcesUsed"],
+    properties: {
+      id: { type: "string", description: "kebab-case slug, includes a date hint (e.g., 'foo-bar-april-2026')." },
+      title: { type: "string" },
+      teaser: { type: "string" },
+      contentTitle: { type: "string" },
+      bodyHtml: { type: "string", description: "Complete body HTML, block elements separated by single newlines. First element is disclaimer; last is Bottom line." },
+      slide: {
+        type: "object",
+        required: ["eyebrow", "headline1", "headline2", "badgeTop", "badgeCenter", "badgeBottom", "subhead1", "subhead2"],
+        properties: {
+          eyebrow: { type: "string" },
+          headline1: { type: "string" },
+          headline2: { type: "string" },
+          badgeTop: { type: "string" },
+          badgeCenter: { type: "string" },
+          badgeBottom: { type: "string" },
+          subhead1: { type: "string" },
+          subhead2: { type: "string" },
+        },
+      },
+      sourcesUsed: { type: "array", items: { type: "string" }, description: "URLs of the sources used to support the post." },
+    },
+  },
+};
 const PROPOSE_RECOVERY_PLAN = { name: "propose_recovery_plan", input_schema: { type: "object", properties: { classification: { type: "string", enum: ["rollback-aftermath", "dirty-state", "build-failure", "deploy-failure", "unknown"] }, confidence: { type: "string", enum: ["high", "medium", "low"] }, diagnosis: { type: "string" }, actions: { type: "array", items: { type: "object", properties: { type: { type: "string", enum: ["git-restore"] }, repo: { type: "string", enum: ["wynn", "tag"] }, paths: { type: "array", items: { type: "string" } }, reason: { type: "string" } } } }, autoExecutable: { type: "boolean" }, manualSteps: { type: "string" } }, required: ["classification", "confidence", "actions"] } };
 const SUMMARIZE_CASE = { name: "summarize_case", input_schema: { type: "object", properties: { workProduct: { type: "string" }, servicesPitched: { type: "string" }, lastThingPitched: { type: "string" }, clientTemperature: { type: "string", enum: ["hot", "warm", "cold", "unknown"] }, temperamentSignals: { type: "string" } } } };
 // Trainer profile/playbook tools — partial (full field set in taxResolutionSalesTrainerService.js CALLER_PROFILE_TOOL / CALLER_PLAYBOOK_TOOL; copy on migration).

@@ -105,7 +105,12 @@ function createAnthropicClient() {
         body.tools = tools;
         // Default `tool_choice` to "any" when tools are provided — we
         // explicitly want the model to call one of them, not return free text.
-        body.tool_choice = toolChoice || { type: "any" };
+        // `toolChoice === false` means OMIT tool_choice entirely: the agentic
+        // web_search loop lets the model freely search OR submit, and forcing a
+        // tool every turn breaks Anthropic's server-side search flow.
+        if (toolChoice !== false) {
+          body.tool_choice = toolChoice || { type: "any" };
+        }
       }
 
       const abortController = new AbortController();

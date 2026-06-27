@@ -812,6 +812,24 @@ async function publishQueueItemToRingcx(options = {}) {
       : null);
   const queueItem = item?.toObject ? item.toObject() : item;
 
+  // M5: cross-pool publish interlock (symmetric with the reservation claim-time guard). Refuse to
+  // publish if a DIFFERENT active CxDialQueue claim/serving row already exists for this caseId — a
+  // caseId must never be live in both pools. Runs in BOTH the UCQ-enqueue and legacy-push branches.
+  if (queueItem?._id && queueItem.caseId != null) {
+    const activeSibling = await cxDialQueueRepository
+      .findActiveClaimForCase(queueItem.domain, queueItem.caseId, queueItem._id)
+      .catch(() => null);
+    if (activeSibling) {
+      return {
+        ok: false,
+        published: false,
+        skipped: true,
+        reason: "cross-pool-interlock:active-cxdialqueue-claim",
+        queueItemId: queueItem._id,
+      };
+    }
+  }
+
   // ── New path: enqueue into UCQ instead of pushing to RingCX ────
   if (isPacingQueueEnabled() && queueItem?._id) {
     const enqueueLead = getEnqueueLead();

@@ -55,7 +55,7 @@ const DISPOSITION_MAP = Object.freeze({
   // ── Recycling outcomes (lead stays in pool, bumped to bottom) ───
   did_not_connect: {
     label: "No Answer",
-    rcxCode: "NoAnswer",
+    rcxCode: "Auto Dispo",
     rescheduleRule: "+30m",
     queueItemState: "recycled",
     requiresPayload: [],
@@ -63,7 +63,7 @@ const DISPOSITION_MAP = Object.freeze({
   },
   voicemail: {
     label: "Left Voicemail",
-    rcxCode: "LeftMessage",
+    rcxCode: "VM DROP",
     rescheduleRule: "+1d",
     queueItemState: "recycled",
     requiresPayload: [],

@@ -35,6 +35,11 @@ const {
   writeCxCallLifecycleShadowState,
 } = require("./cxCallLifecycleService");
 const {
+  observeCxBucketActiveCall,
+  observeCxBucketTerminalOutcome,
+  primeCxBucketNewCalls,
+} = require("./cxDialQueueMediatorService");
+const {
   cancelPublishedQueueItemInRingcx,
   publishQueueItemToRingcx,
 } = require("./ringcxLeadServingService");
@@ -614,6 +619,21 @@ async function markAgentAvailableAfterAutoDisposition(extensionId, { logger = nu
         event: "release",
       },
     );
+    observeCxBucketTerminalOutcome({
+      extensionId: normalizedExtensionId,
+      queueItemId: null,
+      caseId: existing?.caseId || null,
+      phone: existingCall?.to || existingCall?.destination || existingCall?.phone || existingCall?.from || null,
+      uii: existingIdentity || requestedIdentity || null,
+      outcome: "ringcx-auto-disposition",
+      drainCurrentCall: true,
+      logger,
+    }).catch((error) => {
+      logger?.warn?.("ringcx.autoDisposition.bucketClear.failed", {
+        extensionId: normalizedExtensionId,
+        error: error.message,
+      });
+    });
     traceCxCallIdentity(logger, "ringcx-auto-disposition.clear.after", {
       extensionId: normalizedExtensionId,
       reason: "auto-disposition-release",
@@ -660,6 +680,63 @@ function extractActiveCallUii(call = null) {
   return extractUii(call)
     || String(call?.activeCallId || call?.id || "").trim()
     || null;
+}
+
+async function findActiveRingcxCallByUii(client, uii, context = {}) {
+  const normalizedUii = normalizeExternalId(uii);
+  if (!normalizedUii || !client || typeof client.listActiveCalls !== "function") return null;
+  const payload = await client.listActiveCalls({
+    product: "ACCOUNT",
+    productId: context.accountId || client.config?.accountId,
+  });
+  return coerceActiveCallList(payload).find((call) => extractActiveCallUii(call) === normalizedUii) || null;
+}
+
+async function hangupRingcxCallUntilCleared(client, uii, context = {}) {
+  const normalizedUii = normalizeExternalId(uii);
+  const attempts = [];
+  let response = null;
+  let lastError = null;
+  if (!normalizedUii) {
+    return { status: "missing-uii", response, attempts, error: null, activeCall: null };
+  }
+
+  for (let index = 0; index < 3; index += 1) {
+    const _a0 = Date.now();
+    try {
+      response = await client.hangupCall(normalizedUii);
+      console.log(`[DISPTRACE] hangup:client.hangupCall #${index + 1} ACCEPTED +${Date.now() - _a0}ms`);
+      attempts.push({ index: index + 1, status: "accepted", at: new Date().toISOString() });
+    } catch (error) {
+      console.log(`[DISPTRACE] hangup:client.hangupCall #${index + 1} ERROR +${Date.now() - _a0}ms`, error && error.message);
+      lastError = error;
+      const alreadyEnded = isAlreadyEndedHangupError(error);
+      attempts.push({
+        index: index + 1,
+        status: alreadyEnded ? "already-ended" : "error",
+        at: new Date().toISOString(),
+        error: error.message || String(error),
+      });
+      if (alreadyEnded) return { status: "already-ended", response, attempts, error: null, activeCall: null };
+    }
+
+    if (index < 2) await sleep(250);
+    const _v0 = Date.now();
+    try {
+      const activeCall = await findActiveRingcxCallByUii(client, normalizedUii, context);
+      console.log(`[DISPTRACE] hangup:verify-active #${index + 1} stillActive=${Boolean(activeCall)} +${Date.now() - _v0}ms`);
+      attempts[attempts.length - 1].stillActive = Boolean(activeCall);
+      if (!activeCall) return { status: "accepted", response, attempts, error: null, activeCall: null };
+      if (index === 2) return { status: "still-active", response, attempts, error: null, activeCall };
+    } catch (error) {
+      attempts[attempts.length - 1].verifyError = error.message || String(error);
+      if (index === 2) {
+        return { status: "verify-error", response, attempts, error, activeCall: null };
+      }
+    }
+  }
+
+  return { status: "error", response, attempts, error: lastError, activeCall: null };
 }
 
 function collectScalarStrings(value, output = [], depth = 0) {
@@ -1063,14 +1140,15 @@ function splitDispositionList(value) {
 function addDispositionAttempt(attempts, seen, attempt) {
   const disposition = String(attempt.disposition || "").trim();
   if (!disposition) return;
-  const callback = attempt.callback ? "true" : "";
+  const hasCallback = attempt.callback !== undefined && attempt.callback !== null;
+  const callback = hasCallback ? String(attempt.callback) : "";
   const callBackDTS = attempt.callBackDTS || "";
   const key = `${disposition}|${callback}|${callBackDTS}`;
   if (seen.has(key)) return;
   seen.add(key);
   attempts.push({
     disposition,
-    callback: attempt.callback || undefined,
+    callback: hasCallback ? attempt.callback : undefined,
     callBackDTS: attempt.callBackDTS || undefined,
     source: attempt.source || "candidate",
   });
@@ -1106,7 +1184,7 @@ function buildRingcxDispositionAttempts(dispositionRequest = {}) {
       });
     }
   } else {
-    append(primary, { source: "primary" });
+    append(primary, { callback: false, source: "primary" });
   }
 
   const envKey = normalizeDispositionEnvKey(dispositionKey);
@@ -1115,7 +1193,7 @@ function buildRingcxDispositionAttempts(dispositionRequest = {}) {
     ...splitDispositionList(envKey ? process.env[`RINGCX_DISPOSITION_${envKey}`] : ""),
   ]) {
     append(configured, {
-      callback: dispositionKey === "callback" ? "true" : undefined,
+      callback: dispositionKey === "callback" ? "true" : false,
       callBackDTS: dispositionKey === "callback" ? localCallbackDts : undefined,
       source: "env",
     });
@@ -1127,14 +1205,16 @@ function buildRingcxDispositionAttempts(dispositionRequest = {}) {
     deal: ["SALE", "Sale", "default", "Default", "COMPLETED"],
     dnc: ["DNC", "DoNotCall", "default", "Default", "COMPLETED"],
     wrong_number: ["WRONG_NUMBER", "WrongNumber", "default", "Default", "COMPLETED"],
-    did_not_connect: ["NO_ANSWER", "NoAnswer", "default", "Default", "COMPLETED"],
-    voicemail: ["LEFT_MESSAGE", "LeftMessage", "default", "Default", "COMPLETED"],
+    did_not_connect: ["Auto Dispo", "NO_ANSWER", "NoAnswer", "default", "Default", "COMPLETED"],
+    voicemail: ["VM DROP", "LEFT_MESSAGE", "LeftMessage", "default", "Default", "COMPLETED"],
   };
   for (const fallback of fallbackByKey[dispositionKey] || ["COMPLETED"]) {
     const callbackFallback = dispositionKey === "callback"
       && !["default", "Default", "DEFAULT", "COMPLETED"].includes(fallback);
     append(fallback, {
-      callback: callbackFallback ? "true" : undefined,
+      callback: dispositionKey === "callback"
+        ? (callbackFallback ? "true" : undefined)
+        : false,
       callBackDTS: callbackFallback ? localCallbackDts : undefined,
       source: "built-in-fallback",
     });
@@ -1832,6 +1912,30 @@ async function executeCxDispatchIntent(options = {}) {
         agentUsername: publish.agentUsername || agentEmail || null,
         agentCxAgentId: agentCxAgentId || null,
       };
+      primeCxBucketNewCalls({
+        extensionId,
+        queueItems: [{
+          ...queueItem,
+          metadata: {
+            ...(queueItem?.metadata || {}),
+            lastRingcxPublishedRoute: publishedRoute,
+            lastRingcxPublishedExternId: publish.externId || null,
+            lastRingcxPublishedCampaignId: publish.campaignId || null,
+            lastRingcxPublishedDialGroupId: publishedDialGroupId,
+          },
+        }],
+        source: "dial-execution-publish",
+        now: requestedAt,
+        logger: options.logger || null,
+      }).catch((error) => {
+        dialTraceLog(options.logger, "warn", "cx.bucket.queue_primed.failed", {
+          traceId,
+          queueItemId,
+          extensionId,
+          source: "dial-execution-publish",
+          error: error.message || String(error),
+        });
+      });
 
       let activeCallCapture = {
         ok: false,
@@ -1953,6 +2057,28 @@ async function executeCxDispatchIntent(options = {}) {
               // Strict confirmation never reaches this async fallback; misses
               // here are observed only for the non-strict fast path.
               await cxDialQueueRepository.updateQueueItem(queueItemId, patch).catch(() => null);
+              if (backgroundCapturedUii) {
+                observeCxBucketActiveCall({
+                  extensionId,
+                  queueItem,
+                  activeCall: captureResult?.activeCallSummary || { uii: backgroundCapturedUii },
+                  matchResult: {
+                    queueItem,
+                    score: 100,
+                    reasons: ["uii"],
+                  },
+                  now: new Date(),
+                  logger: options.logger || null,
+                }).catch((error) => {
+                  dialTraceLog(options.logger, "warn", "cx.bucket.active_match.failed", {
+                    traceId,
+                    queueItemId,
+                    extensionId,
+                    source: "dial-execution-background-capture",
+                    error: error.message || String(error),
+                  });
+                });
+              }
             })
             .catch((error) => {
               dialTraceLog(options.logger, "warn", "ringcx.dialExecution.campaign.capture.backgroundTiming", {
@@ -2053,24 +2179,37 @@ async function executeCxDispatchIntent(options = {}) {
         },
       });
       const capturedUii = normalizeExternalId(activeCallCapture?.uii);
+      if (capturedUii) {
+        observeCxBucketActiveCall({
+          extensionId,
+          queueItem,
+          activeCall: activeCallCapture?.activeCallSummary || { uii: capturedUii },
+          matchResult: {
+            queueItem,
+            score: 100,
+            reasons: ["uii"],
+          },
+          now: requestedAt,
+          logger: options.logger || null,
+        }).catch((error) => {
+          dialTraceLog(options.logger, "warn", "cx.bucket.active_match.failed", {
+            traceId,
+            queueItemId,
+            extensionId,
+            source: "dial-execution-capture",
+            error: error.message || String(error),
+          });
+        });
+      }
       if (confirmationRequired && !capturedUii) {
-        const cancelResult = await cancelPublishedQueueItemInRingcx(queueItem, {
-          campaignId: publish.campaignId || null,
-          externId: publish.externId || null,
-          reason: "unconfirmed-active-call",
-        }).catch((error) => ({
-          ok: false,
-          cancelled: false,
-          error: error.message || "ringcx-cancel-unconfirmed-lead-failed",
-        }));
-        const claimUntil = new Date(requestedAt.getTime() + 2 * 60 * 1000);
+        const claimUntil = new Date(requestedAt.getTime() + 10 * 60 * 1000);
         if (queueItemId) {
           const queuePatchStartedAt = Date.now();
           await cxDialQueueRepository.updateQueueItem(queueItemId, {
-            state: "claimed",
+            state: "serving",
             claimUntil,
-            "metadata.servingAt": null,
-            "metadata.lastDialExecutionStatus": "unconfirmed",
+            "metadata.servingAt": queueItem?.metadata?.servingAt || requestedAt,
+            "metadata.lastDialExecutionStatus": "pending-confirmation",
             "metadata.lastDialExecutionTraceId": traceId,
             "metadata.lastDialExecutionMode": executionMode,
             "metadata.lastDialExecutionAt": requestedAt,
@@ -2089,7 +2228,7 @@ async function executeCxDispatchIntent(options = {}) {
             "metadata.lastDialExecutionAccountId": publishedAccountId,
             "metadata.lastDialExecutionExternId": publish.externId || null,
             "metadata.lastDialExecutionRingcxPublish": publish,
-            "metadata.lastDialExecutionRingcxCancel": cancelResult,
+            "metadata.lastDialExecutionRingcxCancel": null,
             "metadata.lastRingcxPublishedAt": requestedAt,
             "metadata.lastRingcxPublishedCampaignId": publish.campaignId || null,
             "metadata.lastRingcxPublishedDialGroupId": publishedDialGroupId,
@@ -2098,36 +2237,36 @@ async function executeCxDispatchIntent(options = {}) {
             "metadata.lastRingcxPublishedRoute": publishedRoute,
             "metadata.lastDialExecutionSource": options.source || "ringcentral-cx",
             "metadata.lastDialExecutionEventId": dispatchIntent.eventId || null,
-            "metadata.lastDialIntentStatus": "unconfirmed-active-call",
+            "metadata.lastDialIntentStatus": "awaiting-confirmation",
           }).catch(() => null);
           campaignTiming.queuePatchMs = Date.now() - queuePatchStartedAt;
           campaignTiming.metadataWriteMs = campaignTiming.queuePatchMs;
         }
-        const canonicalFailurePatch = buildCxCallLifecyclePatch({
+        const canonicalPendingPatch = buildCxCallLifecyclePatch({
           writer: "ringcx-dial-execution",
           queueItemId,
           caseId,
           phone,
           uii: null,
-          phase: "failed",
-          transitionId: buildCxCallTransitionId("ringcx-dial-unconfirmed"),
-          expiresAt: claimUntil,
+          phase: "queued",
+          transitionId: buildCxCallTransitionId("ringcx-dial-pending"),
+          expiresAt: null,
           lastObservedAt: requestedAt,
         });
-        if (canonicalFailurePatch) {
-          writeShadowCxCallState(extensionId, canonicalFailurePatch, {
+        if (canonicalPendingPatch) {
+          writeShadowCxCallState(extensionId, canonicalPendingPatch, {
             logger: options.logger || null,
-            reason: "unconfirmed-active-call",
-            event: "publish-miss",
+            reason: "active-call-pending",
+            event: "publish-pending-confirmation",
           });
           if (isCxCanonicalCallVerboseLoggingEnabled()) {
             traceCxCallIdentity(options.logger, "cx-call-lifecycle.observed", {
-              phase: canonicalFailurePatch.phase,
+              phase: canonicalPendingPatch.phase,
               queueItemId,
-              transitionId: canonicalFailurePatch.transitionId,
-              event: "unconfirmed-failed",
+              transitionId: canonicalPendingPatch.transitionId,
+              event: "pending-confirmation",
               extensionId,
-              writer: canonicalFailurePatch.lastWriter,
+              writer: canonicalPendingPatch.lastWriter,
             });
           }
         }
@@ -2138,12 +2277,12 @@ async function executeCxDispatchIntent(options = {}) {
             domain,
             family: "cx",
             subtype: "dial-request",
-            stage: "failed",
+            stage: "queued",
             aggregateType: "cx-dial-queue",
             aggregateId: String(queueItemId || caseId || phone),
             caseId: Number.isFinite(caseId) ? caseId : null,
             sourceService: "ringcentral-cx",
-            summary: `CX lead publish was cancelled because RingCX did not confirm active call ${phone}`,
+            summary: `CX lead was accepted by RingCX and is awaiting active-call confirmation for ${phone}`,
             payload: {
               queueItemId,
               phone,
@@ -2152,7 +2291,6 @@ async function executeCxDispatchIntent(options = {}) {
               callerId,
               executionMode,
               publish,
-              cancelResult,
               activeCallCapture,
               desiredAvailability: agentState?.cxRouting?.desiredAvailability || null,
             },
@@ -2161,7 +2299,7 @@ async function executeCxDispatchIntent(options = {}) {
         }
 
         campaignTiming.responseReturnMs = Date.now() - campaignStartedAt;
-        dialTraceLog(options.logger, "warn", "ringcx.dialExecution.campaign.timing", {
+        dialTraceLog(options.logger, "info", "ringcx.dialExecution.campaign.timing", {
           traceId,
           queueItemId,
           domain,
@@ -2169,7 +2307,7 @@ async function executeCxDispatchIntent(options = {}) {
           extensionId,
           agentEmail: maskEmailForLog(agentEmail),
           queueFamily: queueItem?.queueFamily || queueItem?.metadata?.queueFamily || null,
-          status: "unconfirmed",
+          status: "pending-confirmation",
           publishMs: campaignTiming.publishMs,
           captureFirstPollMs: campaignTiming.captureFirstPollMs,
           captureUiiFoundMs: campaignTiming.captureUiiFoundMs,
@@ -2191,21 +2329,23 @@ async function executeCxDispatchIntent(options = {}) {
           totalMs: campaignTiming.responseReturnMs,
         });
 
-        dialTraceLog(options.logger, "warn", "ringcx.dialExecution.campaign.unconfirmed", {
+        dialTraceLog(options.logger, "info", "ringcx.dialExecution.campaign.pendingConfirmation", {
           traceId,
           queueItemId,
           campaignId: publish.campaignId || null,
           dialGroupId: publish.dialGroupId || null,
           externId: publish.externId || null,
           activeCallCapture,
-          cancelResult,
         });
 
         return {
-          ok: false,
-          executed: false,
-          queued: false,
+          ok: true,
+          accepted: true,
+          executed: true,
+          queued: true,
+          pending: true,
           unconfirmed: true,
+          status: "pending",
           mode: executionMode,
           queueItemId,
           caseId: Number.isFinite(caseId) ? caseId : null,
@@ -2218,11 +2358,10 @@ async function executeCxDispatchIntent(options = {}) {
           dialGroupId: publish.dialGroupId || null,
           externId: publish.externId || null,
           ringcxPublish: publish,
-          ringcxCancel: cancelResult,
           activeCallCapture,
-          reason: "ringcx-active-call-not-confirmed",
-          error: "RingCX did not confirm that it is dialing this queue lead.",
-          retryable: false,
+          reason: "ringcx-active-call-pending",
+          message: "RingCX accepted the lead; waiting for active-call confirmation.",
+          retryable: true,
           agentAvailability: agentState?.cxRouting?.desiredAvailability || null,
         };
       }
@@ -2803,6 +2942,10 @@ async function executeCxDispatchIntent(options = {}) {
 }
 
 async function executeCxHangupRequest(options = {}) {
+  const _t0 = Date.now();
+  const _step = (label, extra) =>
+    console.log(`[DISPTRACE] hangup:${label} +${Date.now() - _t0}ms`, extra !== undefined ? extra : "");
+  _step("ENTER", { uii: options.uii, phone: maskPhoneForLog(options.phone), disposition: options.disposition, caseId: options.caseId });
   const dispatchIntent =
     options.dispatchIntent && typeof options.dispatchIntent === "object"
       ? options.dispatchIntent
@@ -2907,8 +3050,10 @@ async function executeCxHangupRequest(options = {}) {
     };
   }
 
+  _step("route/agent/queueItem resolved", { uii, campaignId, dialGroupId, externId, hasDispositionIntent });
   let activeCallCapture = null;
   if (!uii) {
+    _step("NO uii on input → waitForRingcxCampaignCall (POLL UP TO 5s) START", { phone, campaignId, externId });
     activeCallCapture = await waitForRingcxCampaignCall(client, {
       phone,
       campaignId,
@@ -2919,6 +3064,7 @@ async function executeCxHangupRequest(options = {}) {
       logger: options.logger || null,
     });
     uii = normalizeExternalId(activeCallCapture?.uii);
+    _step("waitForRingcxCampaignCall DONE", { foundUii: uii || null });
     if (queueItemId) {
       await cxDialQueueRepository.updateQueueItem(queueItemId, {
         "metadata.lastHangupActiveCallCapture": activeCallCapture || null,
@@ -2930,6 +3076,7 @@ async function executeCxHangupRequest(options = {}) {
   }
 
   if (!uii) {
+    _step("STILL NO uii → HANGUP SKIPPED (call NOT dropped; it rings out to VM on its own)");
     let autoDispositionRelease = null;
     if (hasDispositionIntent) {
       autoDispositionRelease = await markAgentAvailableAfterAutoDisposition(extensionId, {
@@ -2985,7 +3132,25 @@ async function executeCxHangupRequest(options = {}) {
     dispositionStatus = "unknown-disposition";
   }
 
-  if (dispositionRequest.rcxCode && forceRcxDisposition) {
+  let response = null;
+  let hangupError = null;
+  let hangupStatus = "pending";
+  let hangupAttempts = [];
+  let hangupStillActiveCall = null;
+  _step("hangupRingcxCallUntilCleared (FIRE HANGUP + POLL UNTIL CALL CLEARS) START", { uii });
+  const hangupResult = await hangupRingcxCallUntilCleared(client, uii, {
+    accountId: activeCallRoute.accountId,
+  });
+  _step("hangupRingcxCallUntilCleared DONE", { status: hangupResult.status, attempts: (hangupResult.attempts || []).length });
+  response = hangupResult.response || null;
+  hangupStatus = hangupResult.status || "error";
+  hangupAttempts = hangupResult.attempts || [];
+  hangupStillActiveCall = hangupResult.activeCall || null;
+  hangupError = hangupResult.error || null;
+
+  let autoDispositionRelease = null;
+  const callEndedForDisposition = hangupStatus === "accepted" || hangupStatus === "already-ended";
+  if (callEndedForDisposition && dispositionRequest.rcxCode && forceRcxDisposition) {
     const dispositionResult = await applyRingcxDisposition(client, uii, dispositionRequest, {
       notes: dispositionRequest.payload?.notes || dispatchIntent.notes || undefined,
       phone: phone || undefined,
@@ -2995,72 +3160,38 @@ async function executeCxHangupRequest(options = {}) {
     dispositionStatus = dispositionResult.status || (dispositionResult.ok ? "accepted" : "error");
     dispositionAttempts = dispositionResult.attempts || [];
     acceptedDispositionAttempt = dispositionResult.acceptedAttempt || null;
-  } else if (!forceRcxDisposition) {
+  } else if (callEndedForDisposition && !forceRcxDisposition) {
+    const waitMs = getAutoDispositionWaitMs();
+    if (waitMs > 0) await sleep(waitMs);
     const autoDispositionResult = await applyRingcxAutoDisposition(client, uii, {
-      source: "auto-disposition-before-hangup",
-      phase: "before-hangup",
+      source: "auto-disposition-after-hangup",
+      phase: "after-hangup",
       notes: dispositionRequest.payload?.notes || dispatchIntent.notes || undefined,
       phone: phone || undefined,
       campaignId,
       dialGroupId,
     });
-    dispositionResponse = autoDispositionResult.response || null;
-    dispositionError = autoDispositionResult.error || null;
-    dispositionStatus = autoDispositionResult.ok
-      ? "auto-disposition-accepted-before-hangup"
-      : `auto-disposition-${autoDispositionResult.status}-before-hangup`;
-    dispositionAttempts = autoDispositionResult.attempts || [];
-    acceptedDispositionAttempt = autoDispositionResult.acceptedAttempt || null;
-  }
-
-  let response = null;
-  let hangupError = null;
-  let hangupStatus = "pending";
-  try {
-    response = await client.hangupCall(uii);
-    hangupStatus = "accepted";
-  } catch (error) {
-    hangupError = error;
-    hangupStatus = isAlreadyEndedHangupError(error) ? "already-ended" : "error";
-  }
-
-  let autoDispositionRelease = null;
-  if (!forceRcxDisposition) {
-    if (hangupStatus === "accepted") {
-      const waitMs = getAutoDispositionWaitMs();
-      if (waitMs > 0) await sleep(waitMs);
-      if (!acceptedDispositionAttempt) {
-        const autoDispositionResult = await applyRingcxAutoDisposition(client, uii, {
-          source: "auto-disposition-after-hangup",
-          phase: "after-hangup",
-          notes: dispositionRequest.payload?.notes || dispatchIntent.notes || undefined,
-          phone: phone || undefined,
-          campaignId,
-          dialGroupId,
-        });
-        dispositionAttempts = [
-          ...dispositionAttempts,
-          ...(autoDispositionResult.attempts || []),
-        ];
-        if (autoDispositionResult.ok) {
-          dispositionResponse = autoDispositionResult.response || null;
-          dispositionError = null;
-          dispositionStatus = "auto-disposition-accepted-after-hangup";
-          acceptedDispositionAttempt = autoDispositionResult.acceptedAttempt || null;
-        } else {
-          dispositionResponse = dispositionResponse || autoDispositionResult.response || null;
-          dispositionError = autoDispositionResult.error || dispositionError;
-          dispositionStatus = `auto-disposition-${autoDispositionResult.status}-after-hangup`;
-        }
-      }
+    dispositionAttempts = [
+      ...dispositionAttempts,
+      ...(autoDispositionResult.attempts || []),
+    ];
+    if (autoDispositionResult.ok) {
+      dispositionResponse = autoDispositionResult.response || null;
+      dispositionError = null;
+      dispositionStatus = "auto-disposition-accepted-after-hangup";
+      acceptedDispositionAttempt = autoDispositionResult.acceptedAttempt || null;
+    } else {
+      dispositionResponse = dispositionResponse || autoDispositionResult.response || null;
+      dispositionError = autoDispositionResult.error || dispositionError;
+      dispositionStatus = `auto-disposition-${autoDispositionResult.status}-after-hangup`;
     }
-    if (acceptedDispositionAttempt || isAutoDispositionAccepted(dispositionStatus)) {
-      autoDispositionRelease = await markAgentAvailableAfterAutoDisposition(extensionId, {
-        logger: options.logger || null,
-        waitMs: 0,
-        uii,
-      });
-    }
+  }
+  if (acceptedDispositionAttempt || isAutoDispositionAccepted(dispositionStatus)) {
+    autoDispositionRelease = await markAgentAvailableAfterAutoDisposition(extensionId, {
+      logger: options.logger || null,
+      waitMs: 0,
+      uii,
+    });
   }
 
   const dispositionRequired = Boolean(dispositionRequest.dispositionKey) && forceRcxDisposition;
@@ -3084,7 +3215,7 @@ async function executeCxHangupRequest(options = {}) {
     ? (dispositionStatus === "accepted" || callEndedAfterDispositionIntent)
       && (hangupStatus === "accepted" || hangupStatus === "already-ended")
     : (autoDispositionAccepted || callEndedAfterDispositionIntent)
-      && ["accepted", "already-ended", "error"].includes(hangupStatus);
+      && (hangupStatus === "accepted" || hangupStatus === "already-ended");
   if (queueItemId) {
     await cxDialQueueRepository.updateQueueItem(queueItemId, {
       "metadata.lastHangupRequestStatus": accepted ? "accepted" : "error",
@@ -3097,6 +3228,8 @@ async function executeCxHangupRequest(options = {}) {
       "metadata.lastHangupRequestDialGroupId": dialGroupId,
       "metadata.lastHangupRequestResponse": response || null,
       "metadata.lastHangupRequestHangupStatus": hangupStatus,
+      "metadata.lastHangupRequestHangupAttempts": hangupAttempts,
+      "metadata.lastHangupRequestStillActiveCall": hangupStillActiveCall || null,
       "metadata.lastHangupRequestDisposition": dispositionRequest.dispositionKey || null,
       "metadata.lastHangupRequestRcxDisposition": dispositionRequest.rcxCode || null,
       "metadata.lastHangupRequestRcxDispositionAccepted": acceptedDispositionAttempt
@@ -3147,6 +3280,8 @@ async function executeCxHangupRequest(options = {}) {
         forceRcxDisposition,
         autoDispositionRelease,
         hangupStatus,
+        hangupAttempts,
+        hangupStillActiveCall,
         response,
         dispositionResponse,
         dispositionError: dispositionError ? serializeError(dispositionError, "disposition-call-failed") : null,
@@ -3169,6 +3304,7 @@ async function executeCxHangupRequest(options = {}) {
       dialGroupId,
       response,
       hangupStatus,
+      hangupAttempts,
       dispositionStatus,
       disposition: dispositionRequest.dispositionKey || null,
       rcxDisposition: dispositionRequest.rcxCode || null,
@@ -3199,6 +3335,8 @@ async function executeCxHangupRequest(options = {}) {
     details: hangupError?.details || dispositionError?.details || null,
     retryable: Boolean(hangupError?.retryable || dispositionError?.retryable),
     hangupStatus,
+    hangupAttempts,
+    hangupStillActiveCall,
     dispositionStatus,
     disposition: dispositionRequest.dispositionKey || null,
     rcxDisposition: dispositionRequest.rcxCode || null,

@@ -278,6 +278,10 @@ const callLogSchema = new mongoose.Schema(
       dialGroupId: { type: String, default: null },
       accountId: { type: String, default: null },
       externId: { type: String, default: null, index: true },
+      queueItemId: { type: String, default: null, index: true },
+      agentEmail: { type: String, default: null },
+      actionKey: { type: String, default: null },
+      terminalSource: { type: String, default: null },
       // Populated by the bulk archive / spot-download path once the
       // interaction-metadata POST returns. Allows direct GET of
       // recordings/dialogs/{dialogId}/segments/{segmentId} without a
@@ -324,6 +328,15 @@ callLogSchema.index({ domain: 1, platform: 1, callStartTime: -1 });
 // but on callEndTime (which differs by call duration; Mongo can't share
 // the index across both fields).
 callLogSchema.index({ domain: 1, platform: 1, callEndTime: -1 });
+
+// CX terminal rectification: find a real CX call by its owning queue row
+// without relying on unstructured audit blobs.
+callLogSchema.index({
+  domain: 1,
+  platform: 1,
+  "ringcx.queueItemId": 1,
+  telephonySessionId: 1,
+});
 
 module.exports =
   mongoose.models.ControlPlaneCallLog ||

@@ -9,6 +9,8 @@ const {
   buildCxCallQueue,
   buildCxCommLog,
   buildCxWorkspace,
+  getCxBucketLiveRead,
+  getCxBucketSnapshotForExtension,
   listCxAppointments,
   listCxLogicsTasks,
   listCxPostDateHolds,
@@ -894,6 +896,35 @@ function createReadCxRouter(auth) {
   router.get("/call-queue/:domain", auth.requireAuth, auth.requireUser, requireCxDomainAccess, async (req, res) => {
     try {
       const result = await buildCxCallQueue(req.params.domain, req.user);
+      return res.json({ ok: true, result });
+    } catch (error) {
+      return res.status(error.status || 500).json(toErrorResponse(error));
+    }
+  });
+
+  router.get("/call-buckets/:domain", auth.requireAuth, auth.requireUser, requireCxDomainAccess, async (req, res) => {
+    try {
+      const isAdmin = String(req.user?.role || "").toLowerCase() === "admin";
+      const extensionId = isAdmin && req.query.extensionId
+        ? String(req.query.extensionId)
+        : String(req.user?.extensionId || "");
+      const result = await getCxBucketSnapshotForExtension(extensionId, {
+        force: isAdmin && String(req.query.force || "").toLowerCase() === "true",
+      });
+      return res.json({ ok: true, result });
+    } catch (error) {
+      return res.status(error.status || 500).json(toErrorResponse(error));
+    }
+  });
+
+  router.get("/call-buckets/:domain/live-read", auth.requireAuth, auth.requireAdmin, requireCxDomainAccess, async (req, res) => {
+    try {
+      const result = await getCxBucketLiveRead({
+        domain: req.params.domain,
+        force: String(req.query.force || "").toLowerCase() === "true",
+        activeOnly: String(req.query.activeOnly || "true").toLowerCase() !== "false",
+        staleCurrentMs: req.query.staleCurrentMs || null,
+      });
       return res.json({ ok: true, result });
     } catch (error) {
       return res.status(error.status || 500).json(toErrorResponse(error));

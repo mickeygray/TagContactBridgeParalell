@@ -65,6 +65,46 @@ export type LiveCoachDialog = {
   composerError?: string | null;
 };
 
+// Codex's rolling semantic summary (whole-call memory). Rides coach.summary events and
+// session.latest/memory.rollingSummary on the snapshot. The cockpit SUMMARY column's
+// tax-memory binds to taxIssues; factsCaptured pre-fills discovery.
+export type LiveCoachRollingSummary = {
+  summaryText?: string | null;
+  factsCaptured?: string[] | null;
+  openQuestions?: string[] | null;
+  objections?: string[] | null;
+  taxIssues?: string[] | null;
+  nextBestFocus?: string | null;
+  confidence?: string | null;
+  generatedAt?: string | null;
+};
+
+export type LiveCoachCockpitState = {
+  currentSection?: string | null;
+  beats?: Array<{
+    beatId?: string | null;
+    point?: string | null;
+    status?: "hit" | "pending" | "fumbled" | string | null;
+  }> | null;
+  remember?: Array<{
+    text?: string | null;
+    kind?: "watch" | "key" | string | null;
+  }> | null;
+  says?: Array<{
+    type?: "objection" | "tactic" | "line" | string | null;
+    tag?: string | null;
+    rec?: boolean | null;
+    text?: string | null;
+  }> | null;
+  priorFlags?: Array<{
+    section?: string | null;
+    issue?: string | null;
+  }> | null;
+  summary?: string | null;
+  generatedAt?: string | null;
+  at?: string | null;
+};
+
 export type LiveCoachStreamStatus = {
   at?: string | null;
   role?: string | null;
@@ -98,6 +138,7 @@ export type LiveCoachSession = {
     queueItemId?: string | null;
     caseId?: string | null;
     phone?: string | null;
+    contactName?: string | null;
     domain?: string | null;
     streamId?: string | null;
     callStrategy?: string | null;
@@ -120,6 +161,8 @@ export type LiveCoachSession = {
     transcript?: LiveCoachTranscript | null;
     context?: LiveCoachContext | null;
     dialog?: LiveCoachDialog | null;
+    cockpit?: LiveCoachCockpitState | null;
+    rollingSummary?: LiveCoachRollingSummary | null;
     streamStatus?: LiveCoachStreamStatus | null;
   } | null;
   // Rolling call memory from the bus (serializeSession ships it whole).
@@ -130,6 +173,7 @@ export type LiveCoachSession = {
     // Finished agent-initiated asks (the coach chat thread, cap 30) — snapshot
     // seeding repaints the chat on reconnect/late join.
     asks?: LiveCoachAsk[] | null;
+    rollingSummary?: LiveCoachRollingSummary | null;
   } | null;
   // Durable whole-call memory from the mini scribe: the facts ledger never
   // rolls off and the summary is the cumulative story so far.
@@ -150,6 +194,8 @@ export type LiveCoachEvent = {
   provisionalTranscript?: LiveCoachTranscript;
   context?: LiveCoachContext;
   dialog?: LiveCoachDialog;
+  cockpit?: LiveCoachCockpitState;
+  rollingSummary?: LiveCoachRollingSummary;
   action?: string;
   hold?: { reason?: string | null; match?: string | null } | null;
   candidates?: Array<{ key?: string | null; label?: string | null; family?: string | null }> | null;

@@ -22,11 +22,13 @@ const LiveCoachWallboardWorkspace = React.lazy(() =>
     default: m.LiveCoachWallboardWorkspace,
   })),
 );
+const CoachCockpitWorkspace = React.lazy(() =>
+  import("@/workspaces/live-coach/CoachCockpitWorkspace").then((m) => ({
+    default: m.CoachCockpitWorkspace,
+  })),
+);
 const InboxWorkspace = React.lazy(() =>
   import("@/workspaces/inbox/InboxWorkspace").then((m) => ({ default: m.InboxWorkspace })),
-);
-const ClientsWorkspace = React.lazy(() =>
-  import("@/workspaces/clients/ClientsWorkspace").then((m) => ({ default: m.ClientsWorkspace })),
 );
 const DispatchWorkspace = React.lazy(() =>
   import("@/workspaces/dispatch/DispatchWorkspace").then((m) => ({ default: m.DispatchWorkspace })),
@@ -49,7 +51,7 @@ const DeployWorkspace = React.lazy(() =>
   import("@/workspaces/deploy/DeployWorkspace").then((m) => ({ default: m.DeployWorkspace })),
 );
 const CXWorkspace = React.lazy(() =>
-  import("@/workspaces/cx/CXWorkspace").then((m) => ({ default: m.CXWorkspace })),
+  import("@/workspaces/cx/CXWorkspaceRouter").then((m) => ({ default: m.CXWorkspaceRouter })),
 );
 const WynnInboxWorkspace = React.lazy(() =>
   import("@/workspaces/inbox/WynnInboxWorkspace").then((m) => ({
@@ -112,6 +114,14 @@ export function AppRoutes() {
             element={
               <Suspended>
                 <LiveCoachWallboardWorkspace />
+              </Suspended>
+            }
+          />
+          <Route
+            path="live-coach/cockpit"
+            element={
+              <Suspended>
+                <CoachCockpitWorkspace />
               </Suspended>
             }
           />
@@ -205,11 +215,7 @@ export function AppRoutes() {
           />
           <Route
             path="clients"
-            element={
-              <Suspended>
-                <ClientsWorkspace />
-              </Suspended>
-            }
+            element={<Navigate to="/cx" replace />}
           />
           <Route
             path="inbox"
@@ -224,6 +230,14 @@ export function AppRoutes() {
             element={
               <Suspended>
                 <CxCallTrackerWorkspace scope="user" />
+              </Suspended>
+            }
+          />
+          <Route
+            path="coach"
+            element={
+              <Suspended>
+                <SalesTrainerWorkspace />
               </Suspended>
             }
           />

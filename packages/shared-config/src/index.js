@@ -305,6 +305,47 @@ function getSharedConfig(overrides = {}) {
       testEmail: env("PARALLEL_TEST_EMAIL", env("ADMIN_EMAIL", "admin@example.com")).toLowerCase(),
       testPhone: env("PARALLEL_TEST_PHONE", "3106665997"),
     },
+    aiAgents: {
+      enabled: boolFromEnv(
+        overrides.aiAgentsEnabled !== undefined
+          ? overrides.aiAgentsEnabled
+          : process.env.AI_AGENTS_ENABLED,
+        false,
+      ),
+      user: env("AI_AGENT_USER", "parallel"),
+      resultRoot: env("AI_AGENT_RESULT_ROOT", path.join(ROOT_DIR, "runtime", "ai-agent-results")),
+      stripApiKeys: boolFromEnv(
+        overrides.aiAgentStripApiKeys !== undefined
+          ? overrides.aiAgentStripApiKeys
+          : process.env.AI_AGENT_STRIP_API_KEYS,
+        true,
+      ),
+      codex: {
+        enabled: boolFromEnv(
+          overrides.aiAgentCodexEnabled !== undefined
+            ? overrides.aiAgentCodexEnabled
+            : process.env.AI_AGENT_CODEX_ENABLED,
+          false,
+        ),
+        cliPath: env("CODEX_CLI_PATH", "codex"),
+        home: env("CODEX_HOME", "/opt/tagcontactbridge-parallel/runtime/codex-agent-home"),
+        model: env("CODEX_AGENT_MODEL", ""),
+        timeoutMs: Math.max(10000, envInt("CODEX_AGENT_TIMEOUT_MS", 60000)),
+      },
+      claude: {
+        enabled: boolFromEnv(
+          overrides.aiAgentClaudeEnabled !== undefined
+            ? overrides.aiAgentClaudeEnabled
+            : process.env.AI_AGENT_CLAUDE_ENABLED,
+          false,
+        ),
+        cliPath: env("CLAUDE_CLI_PATH", "claude"),
+        home: env("CLAUDE_AGENT_HOME", "/home/parallel"),
+        authMode: env("CLAUDE_AGENT_AUTH_MODE", "max"),
+        model: env("CLAUDE_AGENT_MODEL", "sonnet"),
+        timeoutMs: Math.max(10000, envInt("CLAUDE_AGENT_TIMEOUT_MS", 60000)),
+      },
+    },
     demoRingout: {
       enabled: boolFromEnv(
         overrides.demoRingoutEnabled !== undefined
@@ -604,6 +645,30 @@ function getSharedConfig(overrides = {}) {
           ? overrides.hourlyCallLogHygieneArchiveRecordings
           : process.env.HOURLY_CALL_LOG_HYGIENE_ARCHIVE_RECORDINGS,
         true,
+      ),
+      cxTerminalRectificationEnabled: boolFromEnv(
+        overrides.hourlyCxTerminalRectificationEnabled !== undefined
+          ? overrides.hourlyCxTerminalRectificationEnabled
+          : process.env.HOURLY_CX_TERMINAL_RECTIFICATION_ENABLED,
+        false,
+      ),
+      cxTerminalRectificationDryRun: boolFromEnv(
+        overrides.hourlyCxTerminalRectificationDryRun !== undefined
+          ? overrides.hourlyCxTerminalRectificationDryRun
+          : process.env.HOURLY_CX_TERMINAL_RECTIFICATION_DRY_RUN,
+        true,
+      ),
+      cxTerminalRectificationSinceMs: Math.max(
+        5 * 60 * 1000,
+        envInt("HOURLY_CX_TERMINAL_RECTIFICATION_SINCE_MS", 65 * 60 * 1000),
+      ),
+      cxTerminalRectificationMinAgeMs: Math.max(
+        30 * 1000,
+        envInt("HOURLY_CX_TERMINAL_RECTIFICATION_MIN_AGE_MS", 5 * 60 * 1000),
+      ),
+      cxTerminalRectificationLimit: Math.max(
+        1,
+        envInt("HOURLY_CX_TERMINAL_RECTIFICATION_LIMIT", 1000),
       ),
       cxRecordingMinute: Math.max(
         0,
@@ -990,6 +1055,74 @@ function getSharedConfig(overrides = {}) {
           process.env.NIGHTLY_CLOSE_OPS_RECIPIENTS ||
           env("ADMIN_EMAIL", DEFAULT_NIGHTLY_OPS_RECIPIENTS),
       ).map((value) => String(value || "").trim().toLowerCase()).filter(Boolean),
+    },
+    nightlyCallGrade: {
+      enabled: boolFromEnv(
+        overrides.nightlyCallGradeEnabled !== undefined
+          ? overrides.nightlyCallGradeEnabled
+          : process.env.CX_NIGHTLY_CALL_GRADE_ENABLED,
+        false,
+      ),
+      hour: Math.max(0, Math.min(23, envInt("CX_NIGHTLY_CALL_GRADE_HOUR", 18))),
+      minute: Math.max(0, Math.min(59, envInt("CX_NIGHTLY_CALL_GRADE_MINUTE", 0))),
+      timezone:
+        overrides.nightlyCallGradeTimezone ||
+        process.env.CX_NIGHTLY_CALL_GRADE_TIMEZONE ||
+        "America/Los_Angeles",
+      intervalMs: Math.max(
+        10000,
+        envInt("CX_NIGHTLY_CALL_GRADE_INTERVAL_MS", 60000),
+      ),
+      activeWeekdays: parseOriginList(
+        overrides.nightlyCallGradeActiveWeekdays ||
+          process.env.CX_NIGHTLY_CALL_GRADE_ACTIVE_WEEKDAYS ||
+          "1,2,3,4,5",
+      )
+        .map((value) => Number(value))
+        .filter((value) => Number.isInteger(value) && value >= 0 && value <= 6),
+      minDurationSec: Math.max(
+        0,
+        envInt("CX_NIGHTLY_CALL_GRADE_MIN_DURATION_SEC", 120),
+      ),
+      minSummaryChars: Math.max(
+        0,
+        envInt("CX_NIGHTLY_CALL_GRADE_MIN_SUMMARY_CHARS", 80),
+      ),
+      limit: Math.max(
+        1,
+        Math.min(envInt("CX_NIGHTLY_CALL_GRADE_LIMIT", 500), 2000),
+      ),
+      timeoutMs: Math.max(
+        1000,
+        envInt("CX_NIGHTLY_CALL_GRADE_TIMEOUT_MS", 60000),
+      ),
+      sendEmail: boolFromEnv(
+        overrides.nightlyCallGradeSendEmail !== undefined
+          ? overrides.nightlyCallGradeSendEmail
+          : process.env.CX_NIGHTLY_CALL_GRADE_SEND_EMAIL,
+        false,
+      ),
+      recipients: parseOriginList(
+        overrides.nightlyCallGradeRecipients ||
+          process.env.CX_NIGHTLY_CALL_GRADE_RECIPIENTS ||
+          env("ADMIN_EMAIL", DEFAULT_NIGHTLY_OPS_RECIPIENTS),
+      ).map((value) => String(value || "").trim().toLowerCase()).filter(Boolean),
+      emailCompanyKey:
+        overrides.nightlyCallGradeEmailCompanyKey ||
+        process.env.CX_NIGHTLY_CALL_GRADE_EMAIL_COMPANY_KEY ||
+        "TAG",
+      qualityMode:
+        overrides.nightlyCallGradeQualityMode ||
+        process.env.CX_NIGHTLY_CALL_GRADE_QUALITY_MODE ||
+        "",
+      preferProvider:
+        overrides.nightlyCallGradePreferProvider ||
+        process.env.CX_NIGHTLY_CALL_GRADE_PREFER_PROVIDER ||
+        "",
+      preferModel:
+        overrides.nightlyCallGradePreferModel ||
+        process.env.CX_NIGHTLY_CALL_GRADE_PREFER_MODEL ||
+        "",
     },
     phoneburnerRotation: {
       // Bridge runtime — owns the 7am Mon–Fri PhoneBurner folder

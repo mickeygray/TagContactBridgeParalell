@@ -1,5 +1,5 @@
 import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
-import { ArrowLeft, GraduationCap, Headphones, Headset, Inbox, LogOut, Users } from "lucide-react";
+import { ArrowLeft, GraduationCap, Headphones, Headset, Inbox, LogOut } from "lucide-react";
 import { Button } from "@/components/ui/Button";
 import { CaseInspector } from "@/components/ui/CaseInspector";
 import { ErrorBoundary } from "@/components/ui/ErrorBoundary";
@@ -16,14 +16,10 @@ interface CxNavItem {
 }
 
 const CX_NAV: CxNavItem[] = [
-  { to: "/cx", label: "My workspace", icon: Headset, end: true },
-  // WYNN-only inbox for the agent shell. Reps cycle between dial queue
-  // (My workspace), inbound prospecting SMS (Inbox), and existing
-  // clients to keep prospecting and client work cleanly separated.
+  { to: "/cx", label: "Workspace", icon: Headset, end: true },
+  { to: "/cx/inbox", label: "SMS", icon: Inbox },
   { to: "/cx/call-library", label: "Calls", icon: Headphones },
-  { to: "/cx/inbox", label: "Inbox", icon: Inbox },
-  { to: "/cx/clients", label: "Clients", icon: Users },
-  { to: "/trainer", label: "Trainer", icon: GraduationCap },
+  { to: "/cx/coach", label: "Coach", icon: GraduationCap },
 ];
 
 export function CXShell() {

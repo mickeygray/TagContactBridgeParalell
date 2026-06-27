@@ -12,31 +12,18 @@
 
 const baseRegistry = require("./aiTaskRegistry");
 const sandbox = require("./aiSandbox");
+// ONE schema validator across the bus. Import the runner's (stricter — rejects
+// arrays-as-objects, handles null / string / multi-type) instead of keeping a
+// weaker local copy. A malformed answer is now judged the SAME way on the live
+// bus and in the failover path, so "right shape out" means one thing everywhere.
+// (No require cycle: aiTaskRunner depends on aiTaskRegistry, not on this file.)
+const { validateAgainstSchema } = require("./aiTaskRunner");
 
 const REASONING = new Set(["compose", "json", "classify"]);
 const MODALITY = new Set(["transcribe", "image", "tts"]);
 
 function unwrap(schema) {
   return schema && schema.input_schema ? schema.input_schema : schema;
-}
-
-// Pragmatic "right shape out" check: required keys present, enum membership,
-// primitive types. Not a full JSON-schema validator — enough to fail-over on a
-// malformed answer and never ship one.
-function validateAgainstSchema(value, schema) {
-  const sc = unwrap(schema);
-  if (!sc) return { ok: true };
-  if (sc.type === "object" && (value === null || typeof value !== "object")) return { ok: false, reason: "not-object" };
-  for (const key of sc.required || []) {
-    if (value[key] === undefined) return { ok: false, reason: `missing:${key}` };
-  }
-  for (const [k, def] of Object.entries(sc.properties || {})) {
-    if (value[k] === undefined || value[k] === null) continue;
-    if (def.enum && !def.enum.includes(value[k])) return { ok: false, reason: `enum:${k}` };
-    if (def.type === "number" && typeof value[k] !== "number") return { ok: false, reason: `type:${k}` };
-    if (def.type === "boolean" && typeof value[k] !== "boolean") return { ok: false, reason: `type:${k}` };
-  }
-  return { ok: true };
 }
 
 const otherProvider = (p) => (p === "anthropic" ? "openai" : "anthropic");
@@ -155,11 +142,14 @@ function buildBusRegistry() {
   for (const st of sandbox.listSandboxTasks()) {
     if (!isReady(st)) continue;
     const rt = toRegistryTask(st);
+    if (tasks[rt.id]) {
+      throw new Error(`aiBusRegistry: task id "${rt.id}" collides between the sandbox and the primitive surface`);
+    }
     tasks[rt.id] = rt;
     if (rt.contract) validators[rt.id] = (result) => validateAgainstSchema(result, rt._schema);
   }
 
-  return {
+  const registry = {
     envKey: baseRegistry.envKey,
     getTask: (id) => tasks[id] || null,
     listTasks: () => Object.values(tasks),
@@ -177,6 +167,38 @@ function buildBusRegistry() {
       source: task.source || null,
     }),
   };
+  assertBusRegistryIntegrity(registry);
+  return registry;
 }
 
-module.exports = { buildBusRegistry, toRegistryTask, validateAgainstSchema, normalizeKind, isReady };
+// Boot-time invariants — fail LOUD at registry build rather than silently shipping
+// a drifted task surface (mirrors aiTaskRegistry.assertRegistryIntegrity). Every
+// task must declare a fail-closed policy, every contract must resolve to a real
+// validator, and every provider in a task's order must have a non-empty model
+// ladder (the dead-ladder bug that let a stale grader ladder silently no-op).
+function assertBusRegistryIntegrity(registry) {
+  for (const t of registry.listTasks()) {
+    if (!("failClosed" in t)) {
+      throw new Error(`aiBusRegistry: task "${t.id}" declares no failClosed policy (use null to opt out explicitly)`);
+    }
+    if (t.contract && typeof registry.getValidator(t.contract) !== "function") {
+      throw new Error(`aiBusRegistry: task "${t.id}" contract "${t.contract}" resolves to no validator`);
+    }
+    for (const p of t.providerOrder || []) {
+      const models = (t.models && t.models[p]) || [];
+      if (!models.length) {
+        throw new Error(`aiBusRegistry: task "${t.id}" provider "${p}" has an empty model ladder (dead failover)`);
+      }
+    }
+  }
+  return registry;
+}
+
+module.exports = {
+  buildBusRegistry,
+  assertBusRegistryIntegrity,
+  toRegistryTask,
+  validateAgainstSchema,
+  normalizeKind,
+  isReady,
+};

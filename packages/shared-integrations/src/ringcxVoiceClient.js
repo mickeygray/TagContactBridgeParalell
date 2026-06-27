@@ -194,7 +194,7 @@ function normalizeRateLimitGroup(value) {
 
 function classifyApiUsageGroups(scope) {
   const normalized = String(scope || "api").toLowerCase();
-  const groups = ["ringcx-api"];
+  const groups = [];
   if (["active-call-list", "active-call-control", "manual-outbound"].includes(normalized)) {
     groups.push("active-calls");
   } else if (["campaign-read", "campaign-write", "lead-action"].includes(normalized)) {
@@ -954,13 +954,16 @@ function createRingcxVoiceClient(options = {}) {
   async function listActiveCalls(options = {}) {
     const hasProduct = Object.prototype.hasOwnProperty.call(options, "product");
     const hasProductId = Object.prototype.hasOwnProperty.call(options, "productId");
-    const product = hasProduct ? options.product : "ACCOUNT";
-    const productId = hasProductId ? options.productId : config.accountId;
+    const externalId = options.externalId;
+    const product = hasProduct && options.product != null ? options.product : "ACCOUNT";
+    const productId = hasProductId && options.productId != null ? options.productId : config.accountId;
     return request("GET", adminPath("activeCalls/list"), {
       query: {
-        product,
-        productId,
-        externalId: options.externalId,
+        product: externalId ? undefined : product,
+        productId: externalId ? undefined : productId,
+        externalId,
+        page: options.page,
+        maxRows: options.maxRows,
       },
     });
   }

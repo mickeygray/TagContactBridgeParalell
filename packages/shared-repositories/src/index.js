@@ -11,8 +11,12 @@ const conversationWorkflowRepository = require("./conversationWorkflowRepository
 const callSessionRepository = require("./callSessionRepository");
 const leadActivityRepository = require("./leadActivityRepository");
 const rcOAuthStateRepository = require("./rcOAuthStateRepository");
+const cxAgentCallNoteRepository = require("./cxAgentCallNoteRepository");
 const cxAppointmentRepository = require("./cxAppointmentRepository");
+const cxBulkLoadSessionRepository = require("./cxBulkLoadSessionRepository");
 const cxDialQueueRepository = require("./cxDialQueueRepository");
+const cxSlowLaneSessionRepository = require("./cxSlowLaneSessionRepository");
+const cxTerminalOutboxRepository = require("./cxTerminalOutboxRepository");
 const dailyCallStatRepository = require("./dailyCallStatRepository");
 const eventRepository = require("./eventRepository");
 const hourlyJobEventRepository = require("./hourlyJobEventRepository");
@@ -55,8 +59,12 @@ module.exports = {
   callSessionRepository,
   leadActivityRepository,
   rcOAuthStateRepository,
+  cxAgentCallNoteRepository,
   cxAppointmentRepository,
+  cxBulkLoadSessionRepository,
   cxDialQueueRepository,
+  cxSlowLaneSessionRepository,
+  cxTerminalOutboxRepository,
   dailyCallStatRepository,
   deepCutRunRepository,
   dispatchListRepository,

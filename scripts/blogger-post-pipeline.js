@@ -19,7 +19,7 @@
 
 const fs = require("fs");
 const path = require("path");
-const { execFileSync } = require("child_process");
+const { execFileSync, spawnSync } = require("child_process");
 const {
   loadSharp,
   npmCommand,
@@ -235,6 +235,10 @@ function escapeXml(text) {
 // writer set it. Otherwise we synthesize a generic editorial prompt
 // from the slide eyebrow + headlines so existing drafts still work.
 
+// `BLOG_IMAGE_PROVIDER=codex` uses Linux headless Codex `$imagegen`.
+// It strips API keys, reads the dedicated subscription CODEX_HOME, and
+// harvests the real generated_images/**/ig_*.png artifact. It fails
+// closed instead of silently returning to the old SVG fallback.
 function buildOpenAiImagePrompt(draft) {
   if (typeof draft.imagePrompt === "string" && draft.imagePrompt.trim()) {
     return draft.imagePrompt.trim();
@@ -260,6 +264,166 @@ function buildOpenAiImagePrompt(draft) {
   ]
     .filter(Boolean)
     .join(" ");
+}
+
+function imageProvider() {
+  return String(process.env.BLOG_IMAGE_PROVIDER || "svg").trim().toLowerCase();
+}
+
+function homeDir() {
+  return process.env.USERPROFILE || process.env.HOME || "";
+}
+
+function defaultCodexImageSshKey() {
+  return path.join(homeDir(), ".ssh", "id_ed25519_contactbridge_ubuntu");
+}
+
+function defaultCodexImageTransport() {
+  return process.platform === "win32" ? "ssh" : "local";
+}
+
+function codexImageConfig() {
+  return {
+    transport: String(process.env.CODEX_IMAGE_TRANSPORT || defaultCodexImageTransport())
+      .trim()
+      .toLowerCase(),
+    codexBin: String(process.env.CODEX_IMAGE_CODEX_BIN || "codex").trim(),
+    host: String(process.env.CODEX_IMAGE_SSH_HOST || "ubuntu@tagcontactbridge").trim(),
+    key: String(process.env.CODEX_IMAGE_SSH_KEY || defaultCodexImageSshKey()).trim(),
+    runAs: String(process.env.CODEX_IMAGE_REMOTE_USER || "parallel").trim(),
+    codexHome: String(
+      process.env.CODEX_IMAGE_CODEX_HOME ||
+        "/opt/tagcontactbridge-parallel/runtime/codex-agent-home",
+    ).trim(),
+    connectTimeoutSeconds: Math.max(
+      5,
+      Number.parseInt(process.env.CODEX_IMAGE_SSH_CONNECT_TIMEOUT_SECONDS || "10", 10) || 10,
+    ),
+    timeoutMs: Math.max(
+      60_000,
+      Number.parseInt(process.env.CODEX_IMAGE_TIMEOUT_MS || "300000", 10) || 300_000,
+    ),
+  };
+}
+
+function assertSafeShellIdentifier(value, name) {
+  if (!/^[a-z_][a-z0-9_-]*$/i.test(value || "")) {
+    throw new Error(`${name} contains unsafe characters: ${value}`);
+  }
+}
+
+function shellQuote(value) {
+  return `'${String(value).replace(/'/g, `'\\''`)}'`;
+}
+
+function codexImageChildEnv(config) {
+  const env = { ...process.env, CODEX_HOME: config.codexHome };
+  delete env.OPENAI_API_KEY;
+  delete env.OPENAI_BASE_URL;
+  delete env.ANTHROPIC_API_KEY;
+  return env;
+}
+
+function buildCodexImageShellScript(prompt, config = codexImageConfig()) {
+  const promptB64 = Buffer.from(prompt, "utf8").toString("base64");
+  return `set -euo pipefail
+unset OPENAI_API_KEY OPENAI_BASE_URL ANTHROPIC_API_KEY
+workdir="$(mktemp -d /tmp/codex-blog-image.XXXXXX)"
+marker="$workdir/marker"
+: > "$marker"
+printf '%s' '${promptB64}' | base64 -d > "$workdir/image-prompt.txt"
+{
+  printf '$imagegen '
+  cat "$workdir/image-prompt.txt"
+  printf '\\n\\nGenerate exactly one square PNG blog hero image. No readable text, no logos, no people faces. Reply with the generated artifact path only.'
+} > "$workdir/codex-prompt.txt"
+cd "$workdir"
+${shellQuote(config.codexBin)} exec --ephemeral --ignore-rules --skip-git-repo-check --sandbox workspace-write - < "$workdir/codex-prompt.txt" >&2
+image_path="$(find "$CODEX_HOME/generated_images" -type f -name 'ig_*.png' -newer "$marker" -printf '%T@ %p\\n' 2>/dev/null | sort -nr | head -1 | cut -d' ' -f2-)"
+if [ -z "$image_path" ] || [ ! -s "$image_path" ]; then
+  echo "Codex imagegen did not produce a readable ig_*.png under $CODEX_HOME/generated_images" >&2
+  exit 72
+fi
+file "$image_path" >&2 || true
+base64 -w0 "$image_path"
+`;
+}
+
+function runCodexImageLocal(prompt, config) {
+  return spawnSync("bash", ["-s"], {
+    input: buildCodexImageShellScript(prompt, config),
+    encoding: "utf8",
+    env: codexImageChildEnv(config),
+    maxBuffer: 20 * 1024 * 1024,
+    timeout: config.timeoutMs,
+  });
+}
+
+function runCodexImageSsh(prompt, config) {
+  if (!config.host) throw new Error("BLOG_IMAGE_PROVIDER=codex but CODEX_IMAGE_SSH_HOST is empty");
+  if (!config.key || !fs.existsSync(config.key)) {
+    throw new Error(`BLOG_IMAGE_PROVIDER=codex but SSH key not found: ${config.key}`);
+  }
+  assertSafeShellIdentifier(config.runAs, "CODEX_IMAGE_REMOTE_USER");
+
+  const sshArgs = [
+    "-i",
+    config.key,
+    "-o",
+    "BatchMode=yes",
+    "-o",
+    `ConnectTimeout=${config.connectTimeoutSeconds}`,
+    config.host,
+    [
+      `sudo -u ${config.runAs} -H`,
+      "env -u OPENAI_API_KEY -u OPENAI_BASE_URL -u ANTHROPIC_API_KEY",
+      `CODEX_HOME=${shellQuote(config.codexHome)}`,
+      "bash -s",
+    ].join(" "),
+  ];
+  return spawnSync("ssh", sshArgs, {
+    input: buildCodexImageShellScript(prompt, config),
+    encoding: "utf8",
+    maxBuffer: 20 * 1024 * 1024,
+    timeout: config.timeoutMs,
+  });
+}
+
+async function renderCodexHeaderBuffer(draft) {
+  const config = codexImageConfig();
+  const startedAt = Date.now();
+  const prompt = buildOpenAiImagePrompt(draft);
+  const result =
+    config.transport === "local"
+      ? runCodexImageLocal(prompt, config)
+      : config.transport === "ssh"
+        ? runCodexImageSsh(prompt, config)
+        : null;
+  if (!result) {
+    throw new Error(`unsupported CODEX_IMAGE_TRANSPORT: ${config.transport}`);
+  }
+  if (result.error) {
+    throw new Error(`Codex imagegen ${config.transport} failed: ${result.error.message}`);
+  }
+  if (result.status !== 0) {
+    const stderr = String(result.stderr || "").trim().slice(-2000);
+    throw new Error(`Codex imagegen ${config.transport} failed (${result.status}): ${stderr}`);
+  }
+  const b64 = String(result.stdout || "").replace(/\s/g, "");
+  const buffer = Buffer.from(b64, "base64");
+  if (buffer.length < 10_000) {
+    const stderr = String(result.stderr || "").trim().slice(-1000);
+    throw new Error(`Codex imagegen returned an invalid image buffer (${buffer.length} bytes): ${stderr}`);
+  }
+  return {
+    buffer,
+    model: "codex:$imagegen",
+    quality: "codex-default",
+    size: "codex-default",
+    elapsedMs: Date.now() - startedAt,
+    usage: null,
+    promptUsed: prompt,
+  };
 }
 
 async function renderOpenAiHeaderBuffer(draft) {
@@ -309,9 +473,17 @@ async function renderOpenAiHeaderBuffer(draft) {
 
 async function renderHeaderImage(draft) {
   const outPath = path.join(WYNN_REPO, "client", "public", "images", `${draft.id}.png`);
-  const provider = String(process.env.BLOG_IMAGE_PROVIDER || "svg")
-    .trim()
-    .toLowerCase();
+  const provider = imageProvider();
+
+  if (provider === "codex") {
+    const result = await renderCodexHeaderBuffer(draft);
+    await sharp(result.buffer).png({ quality: 95 }).toFile(outPath);
+    console.log(
+      `[blog-image] codex imagegen ${(result.buffer.length / 1024).toFixed(0)}KB in ` +
+        `${(result.elapsedMs / 1000).toFixed(1)}s`,
+    );
+    return outPath;
+  }
 
   if (provider === "openai") {
     try {
@@ -473,6 +645,43 @@ function checkRequiredEnv() {
   return missing.length > 0
     ? { ok: false, reason: `missing env vars: ${missing.join(", ")}` }
     : { ok: true };
+}
+
+function checkImageProviderConfigured() {
+  const provider = imageProvider();
+  if (!["svg", "openai", "codex"].includes(provider)) {
+    return { ok: false, reason: `unsupported BLOG_IMAGE_PROVIDER: ${provider}` };
+  }
+  if (provider !== "codex") return { ok: true };
+
+  const config = codexImageConfig();
+  if (!["local", "ssh"].includes(config.transport)) {
+    return { ok: false, reason: `unsupported CODEX_IMAGE_TRANSPORT: ${config.transport}` };
+  }
+  if (!config.codexBin) return { ok: false, reason: "CODEX_IMAGE_CODEX_BIN is empty" };
+  try {
+    if (config.transport === "local") {
+      execFileSync("bash", ["--version"], { stdio: "pipe", encoding: "utf8" });
+      execFileSync(config.codexBin, ["--version"], {
+        env: codexImageChildEnv(config),
+        stdio: "pipe",
+        encoding: "utf8",
+      });
+    } else {
+      if (!config.host) return { ok: false, reason: "CODEX_IMAGE_SSH_HOST is empty" };
+      if (!config.key || !fs.existsSync(config.key)) {
+        return { ok: false, reason: `CODEX_IMAGE_SSH_KEY not found: ${config.key}` };
+      }
+      assertSafeShellIdentifier(config.runAs, "CODEX_IMAGE_REMOTE_USER");
+      execFileSync("ssh", ["-V"], {
+        stdio: "pipe",
+        encoding: "utf8",
+      });
+    }
+  } catch (err) {
+    return { ok: false, reason: `codex image provider preflight failed: ${err.message}` };
+  }
+  return { ok: true };
 }
 
 // Paths that the bot exclusively owns. If a dirty file matches one of
@@ -716,6 +925,7 @@ async function runPreflight(draft) {
   const checks = [
     { name: "draft-shape", fn: () => checkDraftShape(draft) },
     { name: "env-vars", fn: () => checkRequiredEnv() },
+    { name: "image-provider", fn: () => checkImageProviderConfigured() },
     { name: "blog-ids-in-sync", fn: () => checkBlogIdsInSync() },
     { name: "state-vs-published", fn: () => checkStateLastPostedIsPublished() },
     { name: "wynn-clean", fn: () => checkRepoIsClean(WYNN_REPO) },

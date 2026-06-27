@@ -441,6 +441,57 @@ async function countCallLogs(domain, filters = {}) {
   return CallLog.countDocuments(query);
 }
 
+async function listCxCallLogsForTerminalRectification({
+  from,
+  to,
+  domains,
+  limit = 1000,
+} = {}) {
+  const fromDate = toDate(from) || new Date(Date.now() - 65 * 60 * 1000);
+  const toDateValue = toDate(to) || new Date();
+  const selectedDomains = Array.isArray(domains)
+    ? [...new Set(domains.map(normalizeDomain).filter(Boolean))]
+    : [];
+  const query = {
+    platform: "cx",
+    telephonySessionId: {
+      $exists: true,
+      $nin: [null, ""],
+      $not: /^cx-synth:/,
+    },
+    "ringcx.queueItemId": { $exists: true, $nin: [null, ""] },
+    $or: [
+      { callStartTime: { $gte: fromDate, $lte: toDateValue } },
+      { callEndTime: { $gte: fromDate, $lte: toDateValue } },
+    ],
+  };
+  if (selectedDomains.length > 0) {
+    query.domain = { $in: selectedDomains };
+  }
+
+  const cap = Math.min(Math.max(Number(limit) || 1000, 1), 5000);
+  return CallLog.find(
+    query,
+    {
+      domain: 1,
+      telephonySessionId: 1,
+      callSessionId: 1,
+      callStartTime: 1,
+      callEndTime: 1,
+      caseId: 1,
+      phone: 1,
+      extensionId: 1,
+      agentName: 1,
+      missed: 1,
+      platform: 1,
+      ringcx: 1,
+    },
+  )
+    .sort({ callStartTime: 1, createdAt: 1 })
+    .limit(cap)
+    .lean();
+}
+
 /**
  * Atomically bump retry counters + update fields as the sweeper re-runs.
  */
@@ -469,6 +520,7 @@ module.exports = {
   linkCaseProfileId,
   listCallLogs,
   listCallLogsByCaseId,
+  listCxCallLogsForTerminalRectification,
   listPendingRetries,
   markRetryOutcome,
   upsertCallLog,

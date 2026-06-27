@@ -27,6 +27,9 @@ const { createAuthRouter } = require("./routes/auth");
 const { createCallrailRouter } = require("./routes/callrail");
 const { createCommandsClientsRouter } = require("./routes/commandsClients");
 const { createCommandsCxRouter } = require("./routes/commandsCx");
+const { createCxSimpleLoopRouter } = require("./routes/cxSimpleLoop");
+const { createCxSlowSingleRouter } = require("./routes/cxSlowSingle");
+const { createCxBulkLoadRouter } = require("./routes/cxBulkLoad");
 const { createCommandsDeployRouter } = require("./routes/commandsDeploy");
 const { createCommandsInboxRouter } = require("./routes/commandsInbox");
 const { createCommandsSocialRouter } = require("./routes/commandsSocial");
@@ -66,6 +69,7 @@ const { createLexisNightlyRuntime } = require("./services/lexisNightlyService");
 const { createLexisDailyDropRuntime } = require("./services/lexisDailyDropRuntime");
 const { createLogicsActivityReviewRuntime } = require("./services/logicsActivityReviewRuntime");
 const { createNightlyCloseRuntime } = require("./services/nightlyCloseRuntime");
+const { createCxNightlyCallGradeRuntime } = require("./services/cxNightlyCallGradeRuntime");
 const { createEodRecordingArchiveRuntime } = require("./services/eodRecordingArchiveRuntime");
 const { createPhoneburnerRotationRuntime } = require("./services/phoneburnerRotationRuntime");
 const { createDemoRingoutRuntime } = require("./services/demoRingoutRuntime");
@@ -75,7 +79,15 @@ const { createEvent } = require("../../../packages/event-core/src");
 const { toErrorResponse } = require("../../../packages/shared-errors/src");
 const {
   leadCadenceRepository,
+  caseProfileRepository,
+  cxAgentCallNoteRepository,
+  cxBulkLoadSessionRepository,
+  cxDialQueueRepository,
+  cxTerminalOutboxRepository,
 } = require("../../../packages/shared-repositories/src");
+const {
+  LiveCoachSession,
+} = require("../../../packages/shared-models/src");
 
 const CLIENT_RUNTIME_STARTED_AT = new Date();
 const CLIENT_RUNTIME_ID = `${CLIENT_RUNTIME_STARTED_AT.toISOString()}-${crypto
@@ -105,9 +117,19 @@ const {
   runDueCxAppointments,
   runCxRecordingHourly,
   summarizeHourlySweepResult,
+  completeCxQueueItem,
+  createCxQueueReservationService,
+  createCxReservationReconcilerService,
+  createCxTerminalOutboxDrain,
+  enrichTerminalPacketWithCoachSummary,
+  handleCxTerminalCallOutcome,
+  writeAgentCallNoteFromTerminal,
+  writeCxCallWrapSummary,
+  watchCxBulkLoadAccountActiveCalls,
 } = require("../../../packages/shared-services/src");
 const { bootstrapSeedAccounts } = require("../../../packages/shared-auth/src");
 const {
+  createLogicsClient,
   validateCompanyTrackingNumbers,
 } = require("../../../packages/shared-integrations/src");
 
@@ -157,6 +179,70 @@ function getMongoReadyState(runtime) {
   }
 }
 
+function cxBulkTerminalEvidenceKeys(row = {}) {
+  const queueItemId = String(row?._id || row?.queueItemId || "").trim();
+  if (!queueItemId) return [];
+  const metadata = row.metadata && typeof row.metadata === "object" ? row.metadata : {};
+  const uiis = [
+    row.uii,
+    metadata.lastQueueAttemptUii,
+    metadata.lastDialExecutionUii,
+    metadata.lastRingcxActiveCall?.uii,
+    metadata.lastRingcxActiveCall?.callId,
+    metadata.lastRingcxActiveCall?.sessionId,
+  ]
+    .map((value) => String(value || "").trim())
+    .filter(Boolean);
+  return [...new Set(uiis.map((uii) => `${queueItemId}:${uii}`))];
+}
+
+async function hasCxBulkTerminalEvidence(row = {}) {
+  const keys = cxBulkTerminalEvidenceKeys(row);
+  if (!keys.length) return false;
+  const rows = await cxTerminalOutboxRepository.findByIdemKeys(keys);
+  return Array.isArray(rows) && rows.length > 0;
+}
+
+async function runStartupCxReservationReconciliation({ runtime }) {
+  const enabled = String(process.env.CX_RESERVATION_RECONCILER_STARTUP_ENABLED || "true").toLowerCase() !== "false";
+  if (!enabled) {
+    runtime.logger.warn("control-plane.cx_reservation_reconciler.startup.disabled");
+    return { skipped: true, reason: "disabled" };
+  }
+  const mongoState = getMongoReadyState(runtime);
+  if (!mongoState.connected) {
+    runtime.logger.warn("control-plane.cx_reservation_reconciler.startup.skipped", {
+      reason: "mongo-not-connected",
+      mongo: mongoState,
+    });
+    return { skipped: true, reason: "mongo-not-connected", mongo: mongoState };
+  }
+
+  const activeSessions = await cxBulkLoadSessionRepository.listActiveBulkLoadSessions({});
+  const activeSessionIds = [...new Set(
+    (Array.isArray(activeSessions) ? activeSessions : [])
+      .map((session) => String(session?.sessionId || "").trim())
+      .filter(Boolean),
+  )];
+  const reconciler = createCxReservationReconcilerService({
+    cxDialQueueRepository,
+    cxCadenceService: { completeCxQueueItem },
+    cxQueueReservationService: createCxQueueReservationService({ cxDialQueueRepository }),
+    terminalEvidence: hasCxBulkTerminalEvidence,
+    logger: runtime.logger,
+  });
+  const result = await reconciler.reconcileDanglingReservations({ activeSessionIds });
+  runtime.logger.info("control-plane.cx_reservation_reconciler.startup", {
+    activeSessionCount: activeSessionIds.length,
+    scanned: Number(result.scanned || 0),
+    adopted: Number(result.adopted || 0),
+    completed: Number(result.completed || 0),
+    released: Number(result.released || 0),
+    skipped: Number(result.skipped || 0),
+  });
+  return result;
+}
+
 const BUSINESS_HOURS_LITE_HOURLY_HANDLER_KEYS = Object.freeze([
   "retryCxLogicsAction",
   "cancelFailedOutboundText",
@@ -190,6 +276,8 @@ function summarizeHourlySweepConfig(config = {}) {
     callLogHygieneScorePendingCalls: config.callLogHygieneScorePendingCalls !== false,
     callLogHygieneArchiveRecordings:
       config.callLogHygieneArchiveRecordings !== false,
+    cxTerminalRectificationEnabled: Boolean(config.cxTerminalRectificationEnabled),
+    cxTerminalRectificationDryRun: config.cxTerminalRectificationDryRun !== false,
   };
 }
 
@@ -592,6 +680,16 @@ async function startHourlySweepWorker({ config, runtime, workerState, spendSyncR
         callLogHygieneArchiveRecordings:
           config.hourlySweep?.callLogHygieneArchiveRecordings !== false,
         cxCallActivityBackfillEnabled: !scheduledPhaseLite,
+        cxTerminalRectificationEnabled:
+          !scheduledPhaseLite && Boolean(config.hourlySweep?.cxTerminalRectificationEnabled),
+        cxTerminalRectificationDryRun:
+          config.hourlySweep?.cxTerminalRectificationDryRun !== false,
+        cxTerminalRectificationSinceMs:
+          config.hourlySweep?.cxTerminalRectificationSinceMs,
+        cxTerminalRectificationMinAgeMs:
+          config.hourlySweep?.cxTerminalRectificationMinAgeMs,
+        cxTerminalRectificationLimit:
+          config.hourlySweep?.cxTerminalRectificationLimit,
         cxRecordingHourlyEnabled: !scheduledPhaseLite,
         calllogBridgeEnabled: !scheduledPhaseLite,
         staleCadenceSweepEnabled: !scheduledPhaseLite,
@@ -819,8 +917,10 @@ async function startCxAppointmentWorker({ config, runtime, workerState }) {
         runtime.logger.info("control-plane.cx_appointments.tick", {
           checked: result.checked,
           fired: result.fired,
+          due: result.due,
           deferred: result.deferred,
           blocked: result.blocked,
+          autoFireEnabled: result.autoFireEnabled,
         });
       }
     } catch (error) {
@@ -842,6 +942,295 @@ async function startCxAppointmentWorker({ config, runtime, workerState }) {
   setImmediate(() => {
     tick().catch((error) => {
       runtime.logger.error("control-plane.cx_appointments.first_tick_failed", {
+        error: error.message,
+      });
+    });
+  });
+}
+
+async function enqueueCxCallWrapFromTerminal({ payload = {}, row = {}, terminalResult = null, logger = console } = {}) {
+  const hasWrapMaterial = Boolean(
+    payload.coachSessionId ||
+      payload.callSummary ||
+      payload.summary ||
+      payload.rollingSummary ||
+      payload.codexRollingSummary ||
+      payload.interviewSnapshot ||
+      payload.interviewSnapshotWorkflowId ||
+      payload.transcriptArtifactPath,
+  );
+  if (!hasWrapMaterial) {
+    return { skipped: true, reason: "no-call-wrap-material" };
+  }
+
+  const result = await writeCxCallWrapSummary(
+    {
+      domain: payload.domain,
+      caseId: payload.caseId,
+      queueItemId: payload.queueItemId,
+      uii: payload.uii,
+      externId: payload.externId,
+      terminalOutcome: payload.outcome || payload.terminalOutcome,
+      happenedAt: payload.at || payload.outcomeAt || new Date().toISOString(),
+      durationSec: payload.durationSec || payload.durationSeconds,
+      phone: payload.phone || payload.prospectPhone,
+      subject: payload.subject || "CX call summary",
+      source: payload.source || "cx-terminal-outbox-drain",
+      provider: "cx-terminal-outbox",
+      summary: payload.callSummary || payload.summary || payload.activityNote || payload.note || "",
+      nextStep: payload.nextStep || payload.nextAction || "",
+      coachSessionId: payload.coachSessionId,
+      interviewSnapshotWorkflowId: payload.interviewSnapshotWorkflowId,
+      transcriptArtifactPath: payload.transcriptArtifactPath,
+      contextKeys: Array.isArray(payload.contextKeys) ? payload.contextKeys : [],
+      facts: Array.isArray(payload.facts) ? payload.facts : [],
+      // Terminal drain persists call evidence only; nightly grading owns grade output.
+      grade: null,
+      rollingSummary: payload.rollingSummary || payload.codexRollingSummary || null,
+      interviewSnapshot: payload.interviewSnapshot || null,
+      actor: {
+        actorEmail: payload.agentEmail || null,
+        actorName: payload.agentName || payload.agentEmail || null,
+      },
+      metadata: {
+        idemKey: row.idemKey || payload.idemKey || null,
+        terminalStatus: terminalResult?.status || terminalResult?.outcome || null,
+      },
+    },
+    {
+      caseProfileRepository,
+      writeLogicsActivity: async (domain, _actor, activity) => {
+        const client = createLogicsClient(domain);
+        const response = await client.createActivity({
+          CaseID: Number(activity.caseId),
+          ActivityType: activity.activityType || "General",
+          Subject: activity.subject || "CX call summary",
+          Comment: activity.note,
+          Popup: false,
+          Pin: false,
+        });
+        return { skipped: false, result: response };
+      },
+      logger,
+    },
+    {
+      allowSparse: false,
+      writeCaseProfileCommunication: true,
+      writeLogicsActivity: true,
+    },
+  );
+
+  logger.info?.("control-plane.cx_terminal_outbox.call_wrap_ready", {
+    idemKey: row.idemKey || payload.idemKey || null,
+    domain: payload.domain || null,
+    caseId: payload.caseId || null,
+    queueItemId: payload.queueItemId || null,
+    uii: payload.uii || null,
+    coachSessionId: payload.coachSessionId || null,
+    hasCallSummary: Boolean(payload.callSummary || payload.summary),
+    hasInterviewSnapshot: Boolean(payload.interviewSnapshotWorkflowId),
+    terminalStatus: terminalResult?.status || terminalResult?.outcome || null,
+    skipped: result.skipped === true,
+    reason: result.reason || null,
+    threadKey: result.packet?.threadKey || null,
+  });
+  return result;
+}
+
+async function startCxTerminalOutboxWorker({ runtime, workerState }) {
+  const intervalMs = Math.max(
+    Number(process.env.CX_TERMINAL_OUTBOX_DRAIN_INTERVAL_MS) || 15_000,
+    5_000,
+  );
+  const limit = Math.max(
+    1,
+    Math.min(Number(process.env.CX_TERMINAL_OUTBOX_DRAIN_LIMIT) || 50, 200),
+  );
+  workerState.enabled = String(process.env.CX_TERMINAL_OUTBOX_DRAIN_ENABLED || "true").toLowerCase() !== "false";
+  workerState.intervalMs = intervalMs;
+  workerState.limit = limit;
+  if (!workerState.enabled) {
+    workerState.lastResult = { skipped: true, reason: "disabled" };
+    runtime.logger.warn("control-plane.cx_terminal_outbox.disabled");
+    return;
+  }
+
+  const drain = createCxTerminalOutboxDrain({
+    outboxRepository: cxTerminalOutboxRepository,
+    logger: runtime.logger,
+    enrichTerminalPacket: (packet) =>
+      enrichTerminalPacketWithCoachSummary(packet, {
+        LiveCoachSession,
+        logger: runtime.logger,
+      }),
+    recordCadenceEvent: async (event = {}) => handleCxTerminalCallOutcome({
+      queueItemId: event.queueItemId,
+      domain: event.domain,
+      caseId: event.caseId,
+      uii: event.uii,
+      externId: event.externId,
+      outcome: event.outcome,
+      disposition: event.outcome,
+      source: event.source || "cx-bulk-load",
+      sourceService: "cx-bulk-load",
+      actorEmail: event.agentEmail,
+      outcomeAt: event.at || new Date().toISOString(),
+    }),
+    writeCallNote: (packet) =>
+      writeAgentCallNoteFromTerminal(packet, {
+        agentCallNoteRepository: cxAgentCallNoteRepository,
+      }),
+    enqueueCallWrap: (packet) =>
+      enqueueCxCallWrapFromTerminal({
+        ...packet,
+        logger: runtime.logger,
+      }),
+  });
+
+  const tick = async () => {
+    if (workerState.running) return;
+    const mongoState = getMongoReadyState(runtime);
+    if (!mongoState.connected) {
+      workerState.lastCompletedAt = new Date();
+      workerState.lastResult = {
+        skipped: true,
+        reason: "mongo-not-connected",
+        mongo: mongoState,
+      };
+      workerState.lastError = "mongo-not-connected";
+      return;
+    }
+
+    workerState.running = true;
+    workerState.lastStartedAt = new Date();
+    try {
+      const result = await drain.drainOnce({ limit });
+      workerState.lastCompletedAt = new Date();
+      workerState.lastResult = result;
+      workerState.lastError = null;
+      if (result.scanned > 0 || result.failed > 0) {
+        runtime.logger.info("control-plane.cx_terminal_outbox.tick", result);
+      }
+    } catch (error) {
+      workerState.lastCompletedAt = new Date();
+      workerState.lastError = error.message;
+      runtime.logger.error("control-plane.cx_terminal_outbox.failed", {
+        error: error.message,
+      });
+    } finally {
+      workerState.running = false;
+    }
+  };
+
+  workerState.timer = setInterval(tick, intervalMs);
+  if (typeof workerState.timer.unref === "function") {
+    workerState.timer.unref();
+  }
+
+  setImmediate(() => {
+    tick().catch((error) => {
+      runtime.logger.error("control-plane.cx_terminal_outbox.first_tick_failed", {
+        error: error.message,
+      });
+    });
+  });
+}
+
+function summarizeCxAccountActiveCallWatcherResult(result = {}) {
+  const applied = result.applied || {};
+  return {
+    checkedAt: result.checkedAt || null,
+    summary: result.summary || {},
+    accounts: (Array.isArray(result.accounts) ? result.accounts : []).map((account) => ({
+      accountId: account.accountId || null,
+      sessionCount: Number(account.sessionCount || 0),
+      activeCallCount: Number(account.activeCallCount || 0),
+      error: account.error || null,
+    })),
+    applied: {
+      writeCount: Number(applied.writeCount || 0),
+      terminalWriteCount: Number(applied.terminalWriteCount || 0),
+      skippedCount: Number(applied.skippedCount || 0),
+      writes: (Array.isArray(applied.writes) ? applied.writes : []).slice(0, 20),
+      terminalWrites: (Array.isArray(applied.terminalWrites) ? applied.terminalWrites : []).slice(0, 20),
+      skipped: (Array.isArray(applied.skipped) ? applied.skipped : []).slice(0, 20),
+    },
+  };
+}
+
+async function startCxAccountActiveCallWatcherWorker({ runtime, workerState }) {
+  const intervalMs = Math.max(
+    Number(process.env.CX_ACCOUNT_ACTIVE_CALL_WATCHER_INTERVAL_MS) || 1_000,
+    500,
+  );
+  workerState.enabled = String(process.env.CX_ACCOUNT_ACTIVE_CALL_WATCHER_ENABLED || "true").toLowerCase() !== "false";
+  workerState.intervalMs = intervalMs;
+  if (!workerState.enabled) {
+    workerState.lastResult = { skipped: true, reason: "disabled" };
+    runtime.logger.warn("control-plane.cx_account_active_call_watcher.disabled");
+    return;
+  }
+
+  const tick = async () => {
+    if (workerState.running) return;
+    const mongoState = getMongoReadyState(runtime);
+    if (!mongoState.connected) {
+      workerState.lastCompletedAt = new Date();
+      workerState.lastResult = {
+        skipped: true,
+        reason: "mongo-not-connected",
+        mongo: mongoState,
+      };
+      workerState.lastError = "mongo-not-connected";
+      return;
+    }
+
+    workerState.running = true;
+    workerState.lastStartedAt = new Date();
+    try {
+      const result = await watchCxBulkLoadAccountActiveCalls();
+      const summary = summarizeCxAccountActiveCallWatcherResult(result);
+      workerState.lastCompletedAt = new Date();
+      workerState.lastResult = summary;
+      workerState.lastError = null;
+      const applied = summary.applied || {};
+      const overview = summary.summary || {};
+      if (
+        Number(overview.sessionCount || 0) > 0 ||
+        Number(applied.writeCount || 0) > 0 ||
+        Number(applied.terminalWriteCount || 0) > 0 ||
+        Number(applied.skippedCount || 0) > 0 ||
+        Number(overview.errorCount || 0) > 0
+      ) {
+        runtime.logger.info("control-plane.cx_account_active_call_watcher.tick", {
+          summary: overview,
+          applied: {
+            writeCount: applied.writeCount,
+            terminalWriteCount: applied.terminalWriteCount,
+            skippedCount: applied.skippedCount,
+          },
+          accounts: summary.accounts,
+        });
+      }
+    } catch (error) {
+      workerState.lastCompletedAt = new Date();
+      workerState.lastError = error.message;
+      runtime.logger.error("control-plane.cx_account_active_call_watcher.failed", {
+        error: error.message,
+      });
+    } finally {
+      workerState.running = false;
+    }
+  };
+
+  workerState.timer = setInterval(tick, intervalMs);
+  if (typeof workerState.timer.unref === "function") {
+    workerState.timer.unref();
+  }
+
+  setImmediate(() => {
+    tick().catch((error) => {
+      runtime.logger.error("control-plane.cx_account_active_call_watcher.first_tick_failed", {
         error: error.message,
       });
     });
@@ -981,6 +1370,10 @@ async function startServer() {
     // spendSyncRuntime must be constructed before nightlyCloseRuntime.
     spendSyncRuntime,
   });
+  const cxNightlyCallGradeRuntime = createCxNightlyCallGradeRuntime({
+    config: config.nightlyCallGrade || {},
+    runtime,
+  });
   const eodRecordingArchiveRuntime = createEodRecordingArchiveRuntime({
     config: config.recordingArchive?.endOfDay || {},
     runtime,
@@ -1008,6 +1401,8 @@ async function startServer() {
   const hourlySweepState = createWorkerState();
   const cxRecordingState = createWorkerState();
   const cxAppointmentState = createWorkerState();
+  const cxTerminalOutboxState = createWorkerState();
+  const cxAccountActiveCallWatcherState = createWorkerState();
   const inboundProxy = buildServiceProxy({
     port: PORTS.inboundGateway,
     runtime,
@@ -1043,12 +1438,15 @@ async function startServer() {
       ),
       cxRecording: summarizeWorkerState(cxRecordingState),
       cxAppointments: summarizeWorkerState(cxAppointmentState),
+      cxTerminalOutbox: summarizeWorkerState(cxTerminalOutboxState),
+      cxAccountActiveCallWatcher: summarizeWorkerState(cxAccountActiveCallWatcherState),
     },
     runtimes: {
       lexisNightly: lexisNightlyRuntime.getState(),
       lexisDailyDrop: lexisDailyDropRuntime.getState(),
       logicsActivityReview: logicsActivityReviewRuntime.getState(),
       nightlyClose: nightlyCloseRuntime.getState(),
+      cxNightlyCallGrade: cxNightlyCallGradeRuntime.getState(),
       spendSync: spendSyncRuntime.getState(),
       eodRecordingArchive: eodRecordingArchiveRuntime.getState(),
       demoRingout: demoRingoutRuntime.getState(),
@@ -1235,6 +1633,9 @@ async function startServer() {
   app.use("/api/callrail", createCallrailRouter(auth));
   app.use("/api/commands/clients", createCommandsClientsRouter(auth));
   app.use("/api/commands/cx", createCommandsCxRouter(auth, { logger: runtime.logger }));
+  app.use("/api/cx/simple-loop", createCxSimpleLoopRouter(auth, { logger: runtime.logger }));
+  app.use("/api/cx/slow-single", createCxSlowSingleRouter(auth, { logger: runtime.logger }));
+  app.use("/api/cx/bulk-load", createCxBulkLoadRouter(auth, { logger: runtime.logger }));
   app.use("/api/commands/deploy", createCommandsDeployRouter(auth, { bloggerRuntime }));
   app.use("/api/commands/inbox", createCommandsInboxRouter(auth));
   app.use("/api/commands/social", createCommandsSocialRouter(auth));
@@ -1304,6 +1705,14 @@ async function startServer() {
     res.status(error.status || 500).json(toErrorResponse(error));
   });
 
+  if (config.controlPlaneWorker?.enabled !== false) {
+    await runStartupCxReservationReconciliation({ runtime }).catch((error) => {
+      runtime.logger.error("control-plane.cx_reservation_reconciler.startup.failed", {
+        error: error.message || String(error),
+      });
+    });
+  }
+
   if (config.controlPlaneWorker?.enabled) {
     await startControlPlaneWorker({ config, runtime, workerState });
   } else {
@@ -1347,10 +1756,31 @@ async function startServer() {
     runtime.logger.warn("control-plane.cx_appointments.disabled");
   }
 
+  if (config.controlPlaneWorker?.enabled !== false) {
+    await startCxTerminalOutboxWorker({
+      runtime,
+      workerState: cxTerminalOutboxState,
+    });
+  } else {
+    cxTerminalOutboxState.enabled = false;
+    runtime.logger.warn("control-plane.cx_terminal_outbox.disabled");
+  }
+
+  if (config.controlPlaneWorker?.enabled !== false) {
+    await startCxAccountActiveCallWatcherWorker({
+      runtime,
+      workerState: cxAccountActiveCallWatcherState,
+    });
+  } else {
+    cxAccountActiveCallWatcherState.enabled = false;
+    runtime.logger.warn("control-plane.cx_account_active_call_watcher.disabled");
+  }
+
   await lexisNightlyRuntime.start();
   await lexisDailyDropRuntime.start();
   await logicsActivityReviewRuntime.start();
   await nightlyCloseRuntime.start();
+  await cxNightlyCallGradeRuntime.start();
   await spendSyncRuntime.start();
   await eodRecordingArchiveRuntime.start();
   await phoneburnerRotationRuntime.start();
@@ -1377,6 +1807,14 @@ async function startServer() {
     if (cxAppointmentState.timer) {
       clearInterval(cxAppointmentState.timer);
       cxAppointmentState.timer = null;
+    }
+    if (cxTerminalOutboxState.timer) {
+      clearInterval(cxTerminalOutboxState.timer);
+      cxTerminalOutboxState.timer = null;
+    }
+    if (cxAccountActiveCallWatcherState.timer) {
+      clearInterval(cxAccountActiveCallWatcherState.timer);
+      cxAccountActiveCallWatcherState.timer = null;
     }
   });
 
@@ -1429,6 +1867,28 @@ async function startServer() {
       });
     }
   }
+  async function waitForCxTerminalOutboxIdle(maxWaitMs = 25_000) {
+    const deadline = Date.now() + maxWaitMs;
+    while (cxTerminalOutboxState.running && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+    if (cxTerminalOutboxState.running) {
+      runtime.logger.warn("control-plane.cx_terminal_outbox.shutdown.tick_timeout", {
+        waitedMs: maxWaitMs,
+      });
+    }
+  }
+  async function waitForCxAccountActiveCallWatcherIdle(maxWaitMs = 25_000) {
+    const deadline = Date.now() + maxWaitMs;
+    while (cxAccountActiveCallWatcherState.running && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+    if (cxAccountActiveCallWatcherState.running) {
+      runtime.logger.warn("control-plane.cx_account_active_call_watcher.shutdown.tick_timeout", {
+        waitedMs: maxWaitMs,
+      });
+    }
+  }
 
   runtime.registerCleanup("control-plane-server", () => new Promise((resolve) => server.close(() => resolve())));
   runtime.registerCleanup("control-plane-worker", async () => {
@@ -1459,6 +1919,20 @@ async function startServer() {
     }
     await waitForCxAppointmentsIdle();
   });
+  runtime.registerCleanup("control-plane-cx-terminal-outbox", async () => {
+    if (cxTerminalOutboxState.timer) {
+      clearInterval(cxTerminalOutboxState.timer);
+      cxTerminalOutboxState.timer = null;
+    }
+    await waitForCxTerminalOutboxIdle();
+  });
+  runtime.registerCleanup("control-plane-cx-account-active-call-watcher", async () => {
+    if (cxAccountActiveCallWatcherState.timer) {
+      clearInterval(cxAccountActiveCallWatcherState.timer);
+      cxAccountActiveCallWatcherState.timer = null;
+    }
+    await waitForCxAccountActiveCallWatcherIdle();
+  });
   runtime.registerCleanup("control-plane-lexis-nightly", async () => {
     await lexisNightlyRuntime.stop();
   });
@@ -1470,6 +1944,9 @@ async function startServer() {
   });
   runtime.registerCleanup("control-plane-nightly-close", async () => {
     await nightlyCloseRuntime.stop();
+  });
+  runtime.registerCleanup("control-plane-cx-nightly-call-grade", async () => {
+    await cxNightlyCallGradeRuntime.stop();
   });
   runtime.registerCleanup("control-plane-spend-sync", async () => {
     await spendSyncRuntime.stop();

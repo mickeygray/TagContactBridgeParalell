@@ -51,10 +51,26 @@ function validateCallGrade(result) {
   return { ok: true };
 }
 
+function validateTranslation(result) {
+  if (!result || typeof result !== "object") return { ok: false, reason: "not-object" };
+  if (typeof result.text !== "string" || !result.text.trim()) return { ok: false, reason: "no-text" };
+  return { ok: true };
+}
+
+function validateBlogDraft(result) {
+  if (!result || typeof result !== "object") return { ok: false, reason: "not-object" };
+  if (typeof result.id !== "string" || !result.id.trim()) return { ok: false, reason: "no-id" };
+  if (typeof result.bodyHtml !== "string" || !result.bodyHtml.trim()) return { ok: false, reason: "no-body" };
+  if (!result.slide || typeof result.slide !== "object") return { ok: false, reason: "no-slide" };
+  return { ok: true };
+}
+
 const VALIDATORS = {
   activityReview: validateActivityReview,
   smsClassification: validateSmsClassification,
   callGrade: validateCallGrade,
+  translation: validateTranslation,
+  blogDraft: validateBlogDraft,
 };
 
 // ── Schemas (used as Anthropic tool input_schema / OpenAI json target) ────────
@@ -178,6 +194,32 @@ const TASKS = {
     },
   },
 
+  "liveCoach.translate": {
+    id: "liveCoach.translate",
+    kind: "json",
+    family: "live-coach",
+    // OpenAI-first so the high-volume per-utterance translation is cheap; Claude
+    // is the automatic failover. Flip with AI_TASK_LIVECOACH_TRANSLATE_PROVIDER.
+    providerOrder: ["openai", "anthropic"],
+    models: { openai: ["gpt-5.4-mini"], anthropic: ["claude-haiku-4-5"] },
+    contract: "translation",
+    caps: { maxOutputTokens: 400, timeoutMs: 700 },
+    enabledEnv: "AI_TASK_LIVECOACH_TRANSLATE_ENABLED",
+    enabledDefault: false,
+    failClosed: null, // caller falls back to the deterministic regex text
+    buildRequest(payload = {}) {
+      return {
+        system: payload.system,
+        user: payload.user,
+        schema: payload.schema,
+        tool: { name: "clean_transcript", schema: payload.schema },
+        maxTokens: 400,
+        temperature: 0,
+        timeoutMs: 700,
+      };
+    },
+  },
+
   "resolution.pitch": {
     id: "resolution.pitch",
     kind: "compose",
@@ -195,6 +237,40 @@ const TASKS = {
         user: payload.user,
         maxTokens: 8000,
         timeoutMs: 75000,
+      };
+    },
+  },
+
+  "blogger.currentEvent": {
+    id: "blogger.currentEvent",
+    kind: "search",
+    family: "blogger",
+    // Agentic web_search loop (Anthropic server-side web_search → forced submit).
+    // Anthropic-only today; once the `claude -p` agent adapter lands it goes
+    // FIRST in the order — ["agent", "anthropic"] — making the Max agent the
+    // default and the API the rollover (the v1 substrate target).
+    providerOrder: ["anthropic"],
+    models: { anthropic: ["claude-sonnet-4-6"] },
+    contract: "blogDraft",
+    caps: { maxOutputTokens: 8000, timeoutMs: 90000 },
+    // The daily-runner invoking it IS the intent to run; env kill switch available.
+    enabledEnv: "AI_TASK_BLOGGER_CURRENTEVENT_ENABLED",
+    enabledDefault: true,
+    // Caller (blogger-current-event.js) throws on !ok so the daily-runner's
+    // existing static-draft fallback fires — preserve that, don't ship a shape.
+    failClosed: null,
+    buildRequest(payload = {}) {
+      return {
+        system: payload.system,
+        user: payload.user,
+        tools: payload.tools, // [{ type:"web_search_20250305", ... }]
+        submitTool: payload.submitTool, // { name, description, schema }
+        maxToolTurns: payload.maxToolTurns || 8,
+        // Blog writing wants creativity; the bus client defaults temperature to 0,
+        // so set Anthropic's default (1) explicitly to preserve original behavior.
+        temperature: payload.temperature !== undefined ? payload.temperature : 1,
+        maxTokens: 8000,
+        timeoutMs: payload.timeoutMs || 90000,
       };
     },
   },

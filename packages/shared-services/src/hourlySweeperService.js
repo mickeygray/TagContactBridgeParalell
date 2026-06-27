@@ -35,6 +35,9 @@ const {
   recoverCxCallLogs,
 } = require("./cxCallActivityBackfillService");
 const {
+  runCxTerminalRectification,
+} = require("./cxTerminalRectificationService");
+const {
   reconcileUnattributedSessions,
 } = require("./ringcentralReconcileService");
 const {
@@ -224,6 +227,25 @@ function summarizeHourlySweepResult(result = null) {
                 errors: Array.isArray(result.phaseA.cxCallActivityBackfill.errors)
                   ? result.phaseA.cxCallActivityBackfill.errors.length
                   : 0,
+              }
+            : null,
+          cxTerminalRectification: result.phaseA?.cxTerminalRectification
+            ? {
+                skipped: Boolean(result.phaseA.cxTerminalRectification.skipped),
+                reason: result.phaseA.cxTerminalRectification.reason || null,
+                dryRun: Boolean(result.phaseA.cxTerminalRectification.dryRun),
+                scanned: Number(result.phaseA.cxTerminalRectification.scanned || 0),
+                strong: Number(result.phaseA.cxTerminalRectification.strong || 0),
+                medium: Number(result.phaseA.cxTerminalRectification.medium || 0),
+                weak: Number(result.phaseA.cxTerminalRectification.weak || 0),
+                ignored: Number(result.phaseA.cxTerminalRectification.ignored || 0),
+                wouldInsert: Number(result.phaseA.cxTerminalRectification.wouldInsert || 0),
+                inserted: Number(result.phaseA.cxTerminalRectification.inserted || 0),
+                duplicates: Number(result.phaseA.cxTerminalRectification.duplicates || 0),
+                errors: Array.isArray(result.phaseA.cxTerminalRectification.errors)
+                  ? result.phaseA.cxTerminalRectification.errors.length
+                  : 0,
+                reasons: result.phaseA.cxTerminalRectification.reasons || {},
               }
             : null,
           metricsRefresh: result.phaseA?.metricsRefresh?.skipped
@@ -937,6 +959,46 @@ async function runCxCallActivityBackfill({
   }
 }
 
+async function runCxTerminalRectificationStep({
+  logger,
+  domains,
+  sinceMs,
+  minAgeMs,
+  limit,
+  dryRun = true,
+  now = new Date(),
+} = {}) {
+  try {
+    const result = await runCxTerminalRectification({
+      domains,
+      sinceMs,
+      minAgeMs,
+      limit,
+      dryRun,
+      now,
+    });
+    logger?.info?.("hourly.cx_terminal_rectification", {
+      dryRun: result.dryRun,
+      scanned: result.scanned,
+      strong: result.strong,
+      wouldInsert: result.wouldInsert,
+      inserted: result.inserted,
+      errors: Array.isArray(result.errors) ? result.errors.length : 0,
+      reasons: result.reasons,
+    });
+    return result;
+  } catch (error) {
+    logger?.warn?.("hourly.cx_terminal_rectification_failed", {
+      error: error.message,
+    });
+    return {
+      error: error.message,
+      dryRun,
+      skipped: false,
+    };
+  }
+}
+
 async function runHourlySweep({
   workerName = "hourly-sweeper",
   lane = "hourly",
@@ -965,6 +1027,11 @@ async function runHourlySweep({
   callLogHygieneScorePendingCalls = true,
   callLogHygieneArchiveRecordings = true,
   cxCallActivityBackfillEnabled = true,
+  cxTerminalRectificationEnabled = false,
+  cxTerminalRectificationDryRun = true,
+  cxTerminalRectificationSinceMs,
+  cxTerminalRectificationMinAgeMs,
+  cxTerminalRectificationLimit,
   cxRecordingHourlyEnabled = true,
   calllogBridgeEnabled = true,
   staleCadenceSweepEnabled = true,
@@ -1051,6 +1118,16 @@ async function runHourlySweep({
             sinceMs: callLogHygieneSinceMs,
           })
         : { skipped: true, reason: "business-hours-lite" },
+      cxTerminalRectification: cxTerminalRectificationEnabled
+        ? await runCxTerminalRectificationStep({
+            logger,
+            domains,
+            sinceMs: cxTerminalRectificationSinceMs || callLogHygieneSinceMs,
+            minAgeMs: cxTerminalRectificationMinAgeMs,
+            limit: cxTerminalRectificationLimit,
+            dryRun: cxTerminalRectificationDryRun,
+          })
+        : { skipped: true, reason: "disabled" },
       metricsRefresh: metricsRefreshEnabled
         ? await runMetricsRefresh({
             logger,

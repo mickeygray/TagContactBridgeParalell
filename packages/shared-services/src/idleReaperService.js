@@ -13,6 +13,9 @@ const {
   isCxWorkspacePresenceRequired,
 } = require("./agentAvailabilityService");
 const { callIdentity } = require("./cxCallStateGuard");
+const {
+  observeCxBucketTerminalOutcome,
+} = require("./cxDialQueueMediatorService");
 
 // idleReaperService — releases active slices for agents who've been
 // idle (no activity) for longer than `unavailReaperMinutes`.
@@ -171,6 +174,9 @@ async function clearOrphanCxDispositionStates({ asOf = new Date() } = {}) {
     });
     if (assignedCount > 0) continue;
 
+    const existingCall = agent.currentCall && typeof agent.currentCall === "object"
+      ? agent.currentCall
+      : {};
     const updated = await agentStateRepository.updateAgentState(extensionId, {
       status: "available",
       activityState: "idle",
@@ -185,6 +191,17 @@ async function clearOrphanCxDispositionStates({ asOf = new Date() } = {}) {
       "upstream.source": "idle-reaper-orphan-disposition",
       "upstream.mirroredAt": asOf,
     }).catch(() => null);
+    if (updated) {
+      observeCxBucketTerminalOutcome({
+        extensionId,
+        queueItemId: null,
+        caseId: updated?.caseId || null,
+        phone: existingCall?.to || existingCall?.destination || existingCall?.phone || existingCall?.from || null,
+        uii: callIdentity(existingCall) || null,
+        outcome: "idle-reaper-orphan-clear",
+        drainCurrentCall: true,
+      }).catch(() => null);
+    }
 
     if (!updated) continue;
     try {

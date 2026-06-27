@@ -21,6 +21,19 @@ const DEFAULT_APPOINTMENT_TIMEZONE = "America/Los_Angeles";
 const APPOINTMENT_PRIORITY = 1000;
 const ACTIVE_STATUSES = new Set(["scheduled", "due", "fired", "blocked"]);
 
+function readBooleanEnv(name, fallback = false) {
+  const value = process.env[name];
+  if (value === undefined || value === null || value === "") return fallback;
+  const normalized = String(value).trim().toLowerCase();
+  if (["1", "true", "yes", "y", "on"].includes(normalized)) return true;
+  if (["0", "false", "no", "n", "off"].includes(normalized)) return false;
+  return fallback;
+}
+
+function isAppointmentAutoFireEnabled() {
+  return readBooleanEnv("CX_APPOINTMENT_AUTO_FIRE_ENABLED", false);
+}
+
 function normalizeDomain(domain) {
   return String(domain || "").trim().toUpperCase();
 }
@@ -248,6 +261,7 @@ async function ensureAppointmentQueueItem({
   const now = new Date();
   const actionKey = queueItem?.metadata?.actionKey || buildAppointmentActionKey(appointmentId);
   let effectiveQueueItem = queueItem || null;
+  const isNewlyCreated = !effectiveQueueItem;
 
   if (!effectiveQueueItem) {
     const queueResult = await queueCxDialRequest({
@@ -290,6 +304,22 @@ async function ensureAppointmentQueueItem({
     const error = new Error("appointment queue item could not be resolved");
     error.status = 409;
     throw error;
+  }
+
+  // M6 (I1/G-appt): a freshly-created appointment row must never be observably
+  // `ready` before it is pinned `paused` below. `queueCxDialRequest` lands the row
+  // `queued` for a future `legalDialAt` (the common case) but `ready` when the legal
+  // window is already open — a brief window the legacy ready-claim rail
+  // (buildReadyClaimQuery, which does NOT exclude appointmentId) could otherwise grab.
+  // CAS-guarded ready->paused: a no-op when the row is `queued`/already `paused`.
+  // Defense-in-depth atop reserveReadyRows' appointmentId exclusion (bulk/slow rails)
+  // and the dialabilityHoldUntil gate; makes the row self-protecting regardless.
+  if (isNewlyCreated) {
+    await cxDialQueueRepository.transitionQueueItemState(
+      queueItemId,
+      ["ready"],
+      { state: "paused" },
+    );
   }
 
   const existingAssignment = String(effectiveQueueItem.assignment?.extensionId || "").trim();
@@ -441,6 +471,9 @@ async function createCxAppointment(domain, user, input = {}) {
     createdByEmail: context.account.email,
     updatedByEmail: context.account.email,
     metadata: {
+      ...(activeAppointment?.metadata && typeof activeAppointment.metadata === "object"
+        ? activeAppointment.metadata
+        : {}),
       queueStateBeforeAppointment: existingQueueItem?.state || null,
       requestedQueueItemId: input.queueItemId || input.queueTicketId || null,
       requestedQueueActionKey: input.queueActionKey || input.actionKey || null,
@@ -841,14 +874,157 @@ async function fireOneDueAppointment(appointment, options = {}) {
   };
 }
 
+async function markOneDueAppointmentManualOnly(appointment, options = {}) {
+  const now = options.now ? new Date(options.now) : new Date();
+  const queueItem =
+    appointment.cxQueueRecordId
+      ? queueItemObject(await cxDialQueueRepository.findQueueItemById(appointment.cxQueueRecordId))
+      : queueItemObject(await cxDialQueueRepository.findActiveQueueItem(
+        appointment.domain,
+        appointment.caseId,
+      ));
+
+  if (queueItem) {
+    const timing = resolveQueueDialTimeWindow(queueItem || appointment, now);
+    if (!timing.allowed) {
+      const nextAt = timing.nextAllowedAt || new Date(now.getTime() + 15 * 60 * 1000);
+      const updated = await cxAppointmentRepository.patchAppointment(
+        appointment.appointmentId,
+        {
+          status: "scheduled",
+          legalDialAt: nextAt,
+          legalDialTimezone: timing.timeZone || appointment.legalDialTimezone,
+          legalDialReason: timing.reason || "deferred-to-legal-window",
+          blockedReason: timing.reason || null,
+          updatedByEmail: "appointment-worker",
+        },
+        {
+          type: "appointment-deferred",
+          actorEmail: "appointment-worker",
+          payload: {
+            reason: timing.reason,
+            nextAllowedAt: nextAt,
+            timeZone: timing.timeZone,
+            autoFireEnabled: false,
+          },
+        },
+      );
+      await cxAppointmentRepository.mirrorAgentAppointment(appointment.agentExtensionId, updated).catch(() => null);
+      if (queueItem?._id) {
+        await cxDialQueueRepository.updateQueueItem(queueItem._id, {
+          state: "paused",
+          releaseAt: nextAt,
+          claimUntil: null,
+          "metadata.appointmentStatus": "scheduled",
+          "metadata.dialabilityHoldUntil": nextAt,
+          "metadata.appointmentDeferredReason": timing.reason || null,
+        }).catch(() => null);
+      }
+      return {
+        ok: true,
+        deferred: true,
+        appointmentId: appointment.appointmentId,
+        caseId: appointment.caseId,
+        nextAllowedAt: nextAt,
+        reason: timing.reason,
+        autoFireEnabled: false,
+      };
+    }
+  }
+
+  const queueItemId = String(queueItem?._id || appointment.cxQueueRecordId || "").trim();
+  const updated = await cxAppointmentRepository.patchAppointment(
+    appointment.appointmentId,
+    {
+      status: "due",
+      cxQueueRecordId: queueItemId || appointment.cxQueueRecordId || null,
+      updatedByEmail: "appointment-worker",
+      blockedReason: null,
+      "metadata.dueAt": now,
+      "metadata.manualCallRequired": true,
+    },
+    {
+      type: "appointment-due",
+      actorEmail: "appointment-worker",
+      payload: {
+        queueItemId,
+        autoFireEnabled: false,
+        manualCallRequired: true,
+      },
+    },
+  );
+  await cxAppointmentRepository.patchAgentAppointment(
+    appointment.agentExtensionId,
+    appointment.appointmentId,
+    {
+      status: "due",
+      cxQueueRecordId: queueItemId || appointment.cxQueueRecordId || null,
+    },
+  ).catch(() => null);
+  if (queueItemId) {
+    await cxDialQueueRepository.updateQueueItem(queueItemId, {
+      state: "paused",
+      releaseAt: appointment.legalDialAt || now,
+      claimUntil: null,
+      priorityScore: Math.max(Number(queueItem.priorityScore || 0) || 0, APPOINTMENT_PRIORITY),
+      assignment: {
+        extensionId: appointment.agentExtensionId,
+        agentName: appointment.agentName || null,
+        assignedAt: queueItem.assignment?.assignedAt || now,
+        queueFamilySnapshot: queueItem.assignment?.queueFamilySnapshot || queueItem.queueFamily || null,
+      },
+      "metadata.appointmentId": appointment.appointmentId,
+      "metadata.appointmentStatus": "due",
+      "metadata.appointmentDueAt": now,
+      "metadata.queueReason": "appointment-due-manual-call-required",
+      "metadata.dialabilityHoldReason": "appointment",
+      "metadata.dialabilityHoldUntil": null,
+      "metadata.assignedExtensionId": appointment.agentExtensionId,
+      "metadata.assignedAgentName": appointment.agentName || null,
+    }).catch(() => null);
+  }
+  await recordWorkflowStage({
+    domain: appointment.domain,
+    family: "cx",
+    subtype: "appointment",
+    stage: "due",
+    aggregateType: "cx-appointment",
+    aggregateId: appointment.appointmentId,
+    caseId: appointment.caseId,
+    sourceService: "control-plane",
+    title: "CX appointment due",
+    summary: `Appointment ready for manual call button for case ${appointment.caseId}`,
+    payload: {
+      appointmentId: appointment.appointmentId,
+      queueItemId,
+      agentExtensionId: appointment.agentExtensionId,
+      autoFireEnabled: false,
+    },
+  }).catch(() => null);
+  return {
+    ok: true,
+    due: true,
+    autoFireEnabled: false,
+    appointment: updated?.toObject ? updated.toObject() : updated,
+    queueItem,
+  };
+}
+
 async function runDueCxAppointments(options = {}) {
   const now = options.now ? new Date(options.now) : new Date();
   const limit = Math.min(Math.max(Number(options.limit) || 50, 1), 200);
   const due = await cxAppointmentRepository.listDueAppointments(now, limit);
   const results = [];
+  const autoFireEnabled = options.autoFireEnabled == null
+    ? isAppointmentAutoFireEnabled()
+    : Boolean(options.autoFireEnabled);
   for (const appointment of due) {
     try {
-      results.push(await fireOneDueAppointment(appointment, { now }));
+      results.push(
+        autoFireEnabled
+          ? await fireOneDueAppointment(appointment, { now })
+          : await markOneDueAppointmentManualOnly(appointment, { now }),
+      );
     } catch (error) {
       results.push({
         ok: false,
@@ -860,8 +1036,10 @@ async function runDueCxAppointments(options = {}) {
   }
   return {
     ok: true,
+    autoFireEnabled,
     checked: due.length,
     fired: results.filter((row) => row.fired).length,
+    due: results.filter((row) => row.due).length,
     deferred: results.filter((row) => row.deferred).length,
     blocked: results.filter((row) => row.ok === false).length,
     results,

@@ -1,0 +1,149 @@
+{"timestamp":"2026-06-23T16:25:15.632Z","level":"warn","scope":"control-plane","message":"control-plane.callrail.tracking_unconfigured","meta":{"companies":["AMITY"]}}
+{"timestamp":"2026-06-23T16:25:20.203Z","level":"info","scope":"control-plane","message":"accounts.bootstrap.complete","meta":{"seedsTotal":10,"created":0,"updated":10}}
+{"timestamp":"2026-06-23T16:25:20.365Z","level":"info","scope":"control-plane","message":"control-plane.web_client_build.serving","meta":{"buildDir":"C:\\code\\TagContactBridgeParalell\\apps\\web-client\\build"}}
+{"timestamp":"2026-06-23T16:25:20.525Z","level":"warn","scope":"control-plane","message":"lexis.nightly.disabled","meta":{"domain":"WYNN"}}
+{"timestamp":"2026-06-23T16:25:20.527Z","level":"info","scope":"control-plane","message":"lexis.daily_drop.armed","meta":{"domain":"TAG","hour":2,"minute":0,"nextRunAt":"2026-06-24T09:00:00.000Z","timezone":"America/Los_Angeles","activeWeekdays":[1,2,3,4,5]}}
+{"timestamp":"2026-06-23T16:25:20.528Z","level":"info","scope":"control-plane","message":"logics.activity_review.armed","meta":{"domain":"WYNN","domains":["TAG","WYNN","AMITY"],"hour":7,"minute":0,"nextRunAt":"2026-06-24T14:00:00.000Z","timezone":"America/Los_Angeles","activeWeekdays":[0,1,2,3,4,5,6],"recipients":["mgray@taxadvocategroup.com","manderson@taxadvocategroup.com"],"includeAiReview":true}}
+{"timestamp":"2026-06-23T16:25:20.528Z","level":"info","scope":"control-plane","message":"nightly-close.armed","meta":{"domains":["TAG","WYNN"],"hour":21,"minute":30,"timezone":"America/Los_Angeles","activeWeekdays":[1,2,3,4,5],"sendEmail":true,"skipFinalClosePass":false,"recipientCount":4,"financialRecipientCount":4,"leadDataRecipientCount":4,"opsRecipientCount":1,"nextRunAt":"2026-06-24T04:30:00.000Z"}}
+{"timestamp":"2026-06-23T16:25:20.529Z","level":"info","scope":"control-plane","message":"spend-sync.armed","meta":{"hour":19,"minute":45,"timezone":"America/Los_Angeles","activeWeekdays":[1,2,3,4,5],"nextRunAt":"2026-06-24T02:45:00.000Z"}}
+{"timestamp":"2026-06-23T16:25:20.530Z","level":"info","scope":"control-plane","message":"recording-archive.eod.armed","meta":{"hour":23,"minute":30,"timezone":"America/Los_Angeles","activeWeekdays":[1,2,3,4,5],"minDurationSec":480,"nextRunAt":"2026-06-24T06:30:00.000Z","notifyRecipients":["mgray@taxadvocategroup.com","manderson@taxadvocategroup.com","abanks@taxadvocategroup.com"]}}
+{"timestamp":"2026-06-23T16:25:20.530Z","level":"warn","scope":"control-plane","message":"phoneburner.rotation.disabled","meta":{"reason":"PHONEBURNER_ROTATION_ENABLED not set; legacy webhook.js cron may still own this work"}}
+{"timestamp":"2026-06-23T16:25:20.531Z","level":"warn","scope":"control-plane","message":"demo-ringout.disabled","meta":{"reason":"DEMO_RINGOUT_ENABLED is not true","nextRunAt":null}}
+{"timestamp":"2026-06-23T16:25:20.532Z","level":"warn","scope":"control-plane","message":"blogger.runtime.disabled","meta":{"nextRunAt":"2026-06-24T15:00:00.000Z"}}
+{"timestamp":"2026-06-23T16:25:20.534Z","level":"info","scope":"control-plane","message":"listening","meta":{"host":"127.0.0.1","port":5001}}
+{"timestamp":"2026-06-23T16:25:20.610Z","level":"info","scope":"control-plane","message":"control-plane.hourly.scheduled_phase_mode","meta":{"mode":"business-hours-lite","timezone":"America/Los_Angeles","businessHoursStart":8,"businessHoursEnd":18,"businessDays":[1,2,3,4,5]}}
+{"timestamp":"2026-06-23T16:25:21.463Z","level":"info","scope":"control-plane","message":"control-plane.hourly.tick","meta":{"features":{"spendSyncEnabled":true,"metricsRefreshEnabled":true,"metricsRefreshPreferLegacyContactActivities":false,"leadCadenceEnforcementEnabled":false,"leadCadenceEnforcementDryRun":true,"callLogHygieneEnabled":true,"callLogHygieneMirrorLegacyContactActivities":false,"callLogHygieneNativeSweepEnabled":true,"callLogHygieneScorePendingCalls":true,"callLogHygieneArchiveRecordings":true},"summary":{"startedAt":"2026-06-23T16:25:20.612Z","finishedAt":"2026-06-23T16:25:21.462Z","durationMs":850,"scheduledPhase":true,"phaseA":{"sessionReconcile":{"unattributedResolved":0,"error":null},"paymentReconcile":{"domains":0,"cases":0,"payments":0,"promotions":0,"ledgerWrites":0,"errors":0},"paymentFieldsSync":{"skipped":true,"reason":"business-hours-lite"},"callLogHygiene":{"skipped":true,"reason":"disabled"},"cxCallActivityBackfill":{"scannedCallPlacedEvents":0,"preparedRows":0,"existingRows":0,"upsertedRows":0,"ledgerSynced":0,"ledgerErrors":0,"errors":0},"metricsRefresh":{"skipped":true,"reason":"disabled"},"spendSync":null,"leadCadenceEnforcement":{"skipped":true,"reason":"disabled"},"staleCadenceSweep":{"modified":0,"error":null},"ncoaMailbox":{"skipped":true,"reason":"no-attachments","messagesScanned":0,"attachments":0,"errors":0},"resolutionEmails":{"candidates":0,"sent":0,"failed":0,"skipped":1}},"phaseB":{"claimed":0,"completed":0,"autoResolved":0,"failed":0,"deadLettered":0,"errorCount":0}}}}
+[DISPTRACE] runtime:ENTER +0ms {
+  sessionId: 'cxbl-mickey-seed-1782231799040',
+  disposition: 'voicemail'
+}
+[DISPTRACE] runtime:loadState DONE +80ms { hasState: true, hasCurrent: true }
+[DISPTRACE] runtime:current +82ms {
+  uii: '202606231226119250001655947933',
+  caseId: 101617,
+  phone: '3106665997',
+  domain: 'WYNN',
+  outcome: 'voicemail'
+}
+[DISPTRACE] runtime:terminalExecutor (HANGUP) START +82ms 
+[DISPTRACE] bulkDispose:ENTER +0ms {
+  uii: '202606231226119250001655947933',
+  outcome: 'voicemail',
+  disposition: 'VM DROP'
+}
+[DISPTRACE] bulkDispose:dispositionCall DONE +136ms { ok: true, response: 'accepted' }
+[DISPTRACE] runtime:terminalExecutor (HANGUP) DONE +218ms {
+  ok: true,
+  executed: true,
+  skipped: undefined,
+  reason: undefined,
+  hangupStatus: undefined,
+  dispositionStatus: 'accepted'
+}
+[DISPTRACE] runtime:persistTerminalOutcome (DB WRITE) START +218ms 
+[DISPTRACE] runtime:persistTerminalOutcome (DB WRITE) DONE +376ms 
+[DISPTRACE] runtime:maybeRefill (PUBLISH MORE LEADS) START +449ms 
+[DISPTRACE] runtime:maybeRefill DONE +975ms 
+[DISPTRACE] runtime:persist DONE → RETURN ok (TOTAL) +1057ms 
+[DISPTRACE] runtime:ENTER +0ms {
+  sessionId: 'cxbl-mickey-seed-1782231799040',
+  disposition: 'voicemail'
+}
+[DISPTRACE] runtime:loadState DONE +76ms { hasState: true, hasCurrent: true }
+[DISPTRACE] runtime:current +76ms {
+  uii: '202606231226414300000223648269',
+  caseId: 101617,
+  phone: '3106665997',
+  domain: 'WYNN',
+  outcome: 'voicemail'
+}
+[DISPTRACE] runtime:terminalExecutor (HANGUP) START +77ms 
+[DISPTRACE] bulkDispose:ENTER +0ms {
+  uii: '202606231226414300000223648269',
+  outcome: 'voicemail',
+  disposition: 'VM DROP'
+}
+[DISPTRACE] bulkDispose:dispositionCall DONE +137ms { ok: true, response: 'accepted' }
+[DISPTRACE] runtime:terminalExecutor (HANGUP) DONE +216ms {
+  ok: true,
+  executed: true,
+  skipped: undefined,
+  reason: undefined,
+  hangupStatus: undefined,
+  dispositionStatus: 'accepted'
+}
+[DISPTRACE] runtime:persistTerminalOutcome (DB WRITE) START +216ms 
+[DISPTRACE] runtime:persistTerminalOutcome (DB WRITE) DONE +370ms 
+[DISPTRACE] runtime:maybeRefill (PUBLISH MORE LEADS) START +378ms 
+[DISPTRACE] runtime:maybeRefill DONE +586ms 
+[DISPTRACE] runtime:persist DONE → RETURN ok (TOTAL) +670ms 
+[DISPTRACE] runtime:ENTER +0ms {
+  sessionId: 'cxbl-mickey-seed-1782231799040',
+  disposition: 'did-not-answer'
+}
+[DISPTRACE] runtime:loadState DONE +117ms { hasState: true, hasCurrent: true }
+[DISPTRACE] runtime:current +118ms {
+  uii: '202606231227224060000613741833',
+  caseId: 101617,
+  phone: '3106665997',
+  domain: 'WYNN',
+  outcome: 'did-not-answer'
+}
+[DISPTRACE] runtime:terminalExecutor (HANGUP) START +119ms 
+[DISPTRACE] bulkDispose:ENTER +0ms {
+  uii: '202606231227224060000613741833',
+  outcome: 'did-not-answer',
+  disposition: 'Auto Dispo'
+}
+[DISPTRACE] bulkDispose:dispositionCall DONE +348ms { ok: true, response: 'accepted' }
+[DISPTRACE] runtime:terminalExecutor (HANGUP) DONE +471ms {
+  ok: true,
+  executed: true,
+  skipped: undefined,
+  reason: undefined,
+  hangupStatus: undefined,
+  dispositionStatus: 'accepted'
+}
+[DISPTRACE] runtime:persistTerminalOutcome (DB WRITE) START +472ms 
+[DISPTRACE] runtime:persistTerminalOutcome (DB WRITE) DONE +628ms 
+[DISPTRACE] runtime:maybeRefill (PUBLISH MORE LEADS) START +628ms 
+[DISPTRACE] runtime:maybeRefill DONE +992ms 
+[DISPTRACE] runtime:persist DONE → RETURN ok (TOTAL) +1078ms 
+{"timestamp":"2026-06-23T16:30:21.146Z","level":"info","scope":"control-plane","message":"control-plane.cx_recording.tick","meta":{"scheduleMinute":30,"windowStart":"2026-06-23T15:15:00.000Z","windowEnd":"2026-06-23T16:15:00.000Z","minDurationSec":300,"metadata":null,"domains":{"TAG":{"candidateRows":0,"processedCompleted":0,"processedNoRecording":0,"processedErrors":0},"WYNN":{"candidateRows":2,"processedCompleted":0,"processedNoRecording":0,"processedErrors":0}}}}
+{"timestamp":"2026-06-23T16:45:08.325Z","level":"info","scope":"control-plane","message":"control-plane.worker.batch","meta":{"processed":2,"handled":2}}
+{"timestamp":"2026-06-23T17:00:20.853Z","level":"info","scope":"control-plane","message":"control-plane.hourly.scheduled_phase_mode","meta":{"mode":"business-hours-lite","timezone":"America/Los_Angeles","businessHoursStart":8,"businessHoursEnd":18,"businessDays":[1,2,3,4,5]}}
+{"timestamp":"2026-06-23T17:00:21.240Z","level":"info","scope":"control-plane","message":"control-plane.hourly.tick","meta":{"features":{"spendSyncEnabled":true,"metricsRefreshEnabled":true,"metricsRefreshPreferLegacyContactActivities":false,"leadCadenceEnforcementEnabled":false,"leadCadenceEnforcementDryRun":true,"callLogHygieneEnabled":true,"callLogHygieneMirrorLegacyContactActivities":false,"callLogHygieneNativeSweepEnabled":true,"callLogHygieneScorePendingCalls":true,"callLogHygieneArchiveRecordings":true},"summary":{"startedAt":"2026-06-23T17:00:20.857Z","finishedAt":"2026-06-23T17:00:21.240Z","durationMs":383,"scheduledPhase":true,"phaseA":{"sessionReconcile":{"unattributedResolved":0,"error":null},"paymentReconcile":{"domains":0,"cases":0,"payments":0,"promotions":0,"ledgerWrites":0,"errors":0},"paymentFieldsSync":{"skipped":true,"reason":"business-hours-lite"},"callLogHygiene":{"skipped":true,"reason":"disabled"},"cxCallActivityBackfill":{"scannedCallPlacedEvents":0,"preparedRows":0,"existingRows":0,"upsertedRows":0,"ledgerSynced":0,"ledgerErrors":0,"errors":0},"metricsRefresh":{"skipped":true,"reason":"disabled"},"spendSync":null,"leadCadenceEnforcement":{"skipped":true,"reason":"disabled"},"staleCadenceSweep":{"modified":0,"error":null},"ncoaMailbox":{"skipped":true,"reason":"no-attachments","messagesScanned":0,"attachments":0,"errors":0},"resolutionEmails":{"candidates":0,"sent":0,"failed":0,"skipped":1}},"phaseB":{"claimed":0,"completed":0,"autoResolved":0,"failed":0,"deadLettered":0,"errorCount":0}}}}
+{"timestamp":"2026-06-23T17:05:30.234Z","level":"info","scope":"control-plane","message":"control-plane.worker.batch","meta":{"processed":2,"handled":2}}
+{"timestamp":"2026-06-23T17:11:25.744Z","level":"info","scope":"control-plane","message":"control-plane.worker.batch","meta":{"processed":2,"handled":2}}
+{"timestamp":"2026-06-23T17:16:09.786Z","level":"info","scope":"control-plane","message":"control-plane.worker.batch","meta":{"processed":2,"handled":2}}
+{"timestamp":"2026-06-23T17:30:20.165Z","level":"info","scope":"control-plane","message":"control-plane.cx_recording.tick","meta":{"scheduleMinute":30,"windowStart":"2026-06-23T16:15:00.000Z","windowEnd":"2026-06-23T17:15:00.000Z","minDurationSec":300,"metadata":null,"domains":{"TAG":{"candidateRows":0,"processedCompleted":0,"processedNoRecording":0,"processedErrors":0},"WYNN":{"candidateRows":2,"processedCompleted":0,"processedNoRecording":0,"processedErrors":0}}}}
+{"timestamp":"2026-06-23T17:45:01.931Z","level":"info","scope":"control-plane","message":"control-plane.worker.batch","meta":{"processed":1,"handled":1}}
+{"timestamp":"2026-06-23T17:45:06.916Z","level":"info","scope":"control-plane","message":"control-plane.worker.batch","meta":{"processed":1,"handled":1}}
+{"timestamp":"2026-06-23T17:55:13.308Z","level":"info","scope":"control-plane","message":"control-plane.worker.batch","meta":{"processed":2,"handled":2}}
+{"timestamp":"2026-06-23T18:00:20.156Z","level":"info","scope":"control-plane","message":"control-plane.hourly.scheduled_phase_mode","meta":{"mode":"business-hours-lite","timezone":"America/Los_Angeles","businessHoursStart":8,"businessHoursEnd":18,"businessDays":[1,2,3,4,5]}}
+{"timestamp":"2026-06-23T18:00:20.800Z","level":"info","scope":"control-plane","message":"control-plane.hourly.tick","meta":{"features":{"spendSyncEnabled":true,"metricsRefreshEnabled":true,"metricsRefreshPreferLegacyContactActivities":false,"leadCadenceEnforcementEnabled":false,"leadCadenceEnforcementDryRun":true,"callLogHygieneEnabled":true,"callLogHygieneMirrorLegacyContactActivities":false,"callLogHygieneNativeSweepEnabled":true,"callLogHygieneScorePendingCalls":true,"callLogHygieneArchiveRecordings":true},"summary":{"startedAt":"2026-06-23T18:00:20.156Z","finishedAt":"2026-06-23T18:00:20.799Z","durationMs":643,"scheduledPhase":true,"phaseA":{"sessionReconcile":{"unattributedResolved":0,"error":null},"paymentReconcile":{"domains":0,"cases":0,"payments":0,"promotions":0,"ledgerWrites":0,"errors":0},"paymentFieldsSync":{"skipped":true,"reason":"business-hours-lite"},"callLogHygiene":{"skipped":true,"reason":"disabled"},"cxCallActivityBackfill":{"scannedCallPlacedEvents":0,"preparedRows":0,"existingRows":0,"upsertedRows":0,"ledgerSynced":0,"ledgerErrors":0,"errors":0},"metricsRefresh":{"skipped":true,"reason":"disabled"},"spendSync":null,"leadCadenceEnforcement":{"skipped":true,"reason":"disabled"},"staleCadenceSweep":{"modified":0,"error":null},"ncoaMailbox":{"skipped":true,"reason":"no-attachments","messagesScanned":0,"attachments":0,"errors":0},"resolutionEmails":{"candidates":0,"sent":0,"failed":0,"skipped":1}},"phaseB":{"claimed":0,"completed":0,"autoResolved":0,"failed":0,"deadLettered":0,"errorCount":0}}}}
+{"timestamp":"2026-06-23T18:03:44.069Z","level":"info","scope":"control-plane","message":"control-plane.worker.batch","meta":{"processed":2,"handled":2}}
+{"timestamp":"2026-06-23T18:19:10.397Z","level":"info","scope":"control-plane","message":"control-plane.worker.batch","meta":{"processed":2,"handled":2}}
+{"timestamp":"2026-06-23T18:23:55.781Z","level":"info","scope":"control-plane","message":"control-plane.worker.batch","meta":{"processed":2,"handled":2}}
+{"timestamp":"2026-06-23T18:30:20.649Z","level":"info","scope":"control-plane","message":"control-plane.cx_recording.tick","meta":{"scheduleMinute":30,"windowStart":"2026-06-23T17:15:00.000Z","windowEnd":"2026-06-23T18:15:00.000Z","minDurationSec":300,"metadata":null,"domains":{"TAG":{"candidateRows":0,"processedCompleted":0,"processedNoRecording":0,"processedErrors":0},"WYNN":{"candidateRows":3,"processedCompleted":0,"processedNoRecording":0,"processedErrors":0}}}}
+{"timestamp":"2026-06-23T18:40:32.416Z","level":"info","scope":"control-plane","message":"control-plane.worker.batch","meta":{"processed":2,"handled":2}}
+{"timestamp":"2026-06-23T18:43:32.735Z","level":"info","scope":"control-plane","message":"control-plane.worker.batch","meta":{"processed":2,"handled":2}}
+{"timestamp":"2026-06-23T18:44:12.768Z","level":"info","scope":"control-plane","message":"control-plane.worker.batch","meta":{"processed":2,"handled":2}}
+{"timestamp":"2026-06-23T18:49:15.582Z","level":"info","scope":"control-plane","message":"control-plane.worker.batch","meta":{"processed":1,"handled":1}}
+{"timestamp":"2026-06-23T18:49:44.557Z","level":"info","scope":"control-plane","message":"control-plane.worker.batch","meta":{"processed":1,"handled":1}}
+{"timestamp":"2026-06-23T19:00:20.295Z","level":"info","scope":"control-plane","message":"control-plane.hourly.scheduled_phase_mode","meta":{"mode":"business-hours-lite","timezone":"America/Los_Angeles","businessHoursStart":8,"businessHoursEnd":18,"businessDays":[1,2,3,4,5]}}
+{"timestamp":"2026-06-23T19:00:20.927Z","level":"info","scope":"control-plane","message":"control-plane.hourly.tick","meta":{"features":{"spendSyncEnabled":true,"metricsRefreshEnabled":true,"metricsRefreshPreferLegacyContactActivities":false,"leadCadenceEnforcementEnabled":false,"leadCadenceEnforcementDryRun":true,"callLogHygieneEnabled":true,"callLogHygieneMirrorLegacyContactActivities":false,"callLogHygieneNativeSweepEnabled":true,"callLogHygieneScorePendingCalls":true,"callLogHygieneArchiveRecordings":true},"summary":{"startedAt":"2026-06-23T19:00:20.299Z","finishedAt":"2026-06-23T19:00:20.927Z","durationMs":628,"scheduledPhase":true,"phaseA":{"sessionReconcile":{"unattributedResolved":0,"error":null},"paymentReconcile":{"domains":0,"cases":0,"payments":0,"promotions":0,"ledgerWrites":0,"errors":0},"paymentFieldsSync":{"skipped":true,"reason":"business-hours-lite"},"callLogHygiene":{"skipped":true,"reason":"disabled"},"cxCallActivityBackfill":{"scannedCallPlacedEvents":0,"preparedRows":0,"existingRows":0,"upsertedRows":0,"ledgerSynced":0,"ledgerErrors":0,"errors":0},"metricsRefresh":{"skipped":true,"reason":"disabled"},"spendSync":null,"leadCadenceEnforcement":{"skipped":true,"reason":"disabled"},"staleCadenceSweep":{"modified":0,"error":null},"ncoaMailbox":{"skipped":true,"reason":"no-attachments","messagesScanned":0,"attachments":0,"errors":0},"resolutionEmails":{"candidates":0,"sent":0,"failed":0,"skipped":1}},"phaseB":{"claimed":0,"completed":0,"autoResolved":0,"failed":0,"deadLettered":0,"errorCount":0}}}}
+{"timestamp":"2026-06-23T19:15:00.527Z","level":"info","scope":"control-plane","message":"control-plane.worker.batch","meta":{"processed":2,"handled":2}}
+{"timestamp":"2026-06-23T19:26:01.426Z","level":"info","scope":"control-plane","message":"control-plane.worker.batch","meta":{"processed":1,"handled":1}}
+{"timestamp":"2026-06-23T19:26:16.526Z","level":"info","scope":"control-plane","message":"control-plane.worker.batch","meta":{"processed":2,"handled":2}}
+{"timestamp":"2026-06-23T19:27:31.657Z","level":"info","scope":"control-plane","message":"control-plane.worker.batch","meta":{"processed":2,"handled":2}}
+{"timestamp":"2026-06-23T19:30:21.068Z","level":"info","scope":"control-plane","message":"control-plane.cx_recording.tick","meta":{"scheduleMinute":30,"windowStart":"2026-06-23T18:15:00.000Z","windowEnd":"2026-06-23T19:15:00.000Z","minDurationSec":300,"metadata":null,"domains":{"TAG":{"candidateRows":0,"processedCompleted":0,"processedNoRecording":0,"processedErrors":0},"WYNN":{"candidateRows":3,"processedCompleted":0,"processedNoRecording":0,"processedErrors":0}}}}
+{"timestamp":"2026-06-23T19:45:08.247Z","level":"info","scope":"control-plane","message":"control-plane.worker.batch","meta":{"processed":2,"handled":2}}
+{"timestamp":"2026-06-23T20:00:20.733Z","level":"info","scope":"control-plane","message":"control-plane.hourly.scheduled_phase_mode","meta":{"mode":"business-hours-lite","timezone":"America/Los_Angeles","businessHoursStart":8,"businessHoursEnd":18,"businessDays":[1,2,3,4,5]}}
+{"timestamp":"2026-06-23T20:00:21.380Z","level":"info","scope":"control-plane","message":"control-plane.hourly.tick","meta":{"features":{"spendSyncEnabled":true,"metricsRefreshEnabled":true,"metricsRefreshPreferLegacyContactActivities":false,"leadCadenceEnforcementEnabled":false,"leadCadenceEnforcementDryRun":true,"callLogHygieneEnabled":true,"callLogHygieneMirrorLegacyContactActivities":false,"callLogHygieneNativeSweepEnabled":true,"callLogHygieneScorePendingCalls":true,"callLogHygieneArchiveRecordings":true},"summary":{"startedAt":"2026-06-23T20:00:20.734Z","finishedAt":"2026-06-23T20:00:21.380Z","durationMs":646,"scheduledPhase":true,"phaseA":{"sessionReconcile":{"unattributedResolved":0,"error":null},"paymentReconcile":{"domains":0,"cases":0,"payments":0,"promotions":0,"ledgerWrites":0,"errors":0},"paymentFieldsSync":{"skipped":true,"reason":"business-hours-lite"},"callLogHygiene":{"skipped":true,"reason":"disabled"},"cxCallActivityBackfill":{"scannedCallPlacedEvents":0,"preparedRows":0,"existingRows":0,"upsertedRows":0,"ledgerSynced":0,"ledgerErrors":0,"errors":0},"metricsRefresh":{"skipped":true,"reason":"disabled"},"spendSync":null,"leadCadenceEnforcement":{"skipped":true,"reason":"disabled"},"staleCadenceSweep":{"modified":0,"error":null},"ncoaMailbox":{"skipped":true,"reason":"no-attachments","messagesScanned":0,"attachments":0,"errors":0},"resolutionEmails":{"candidates":0,"sent":0,"failed":0,"skipped":1}},"phaseB":{"claimed":0,"completed":0,"autoResolved":0,"failed":0,"deadLettered":0,"errorCount":0}}}}
+{"timestamp":"2026-06-23T20:30:21.516Z","level":"info","scope":"control-plane","message":"control-plane.cx_recording.tick","meta":{"scheduleMinute":30,"windowStart":"2026-06-23T19:15:00.000Z","windowEnd":"2026-06-23T20:15:00.000Z","minDurationSec":300,"metadata":null,"domains":{"TAG":{"candidateRows":0,"processedCompleted":0,"processedNoRecording":0,"processedErrors":0},"WYNN":{"candidateRows":4,"processedCompleted":0,"processedNoRecording":0,"processedErrors":0}}}}
+{"timestamp":"2026-06-23T21:00:21.207Z","level":"info","scope":"control-plane","message":"control-plane.hourly.scheduled_phase_mode","meta":{"mode":"business-hours-lite","timezone":"America/Los_Angeles","businessHoursStart":8,"businessHoursEnd":18,"businessDays":[1,2,3,4,5]}}
+{"timestamp":"2026-06-23T21:00:21.845Z","level":"info","scope":"control-plane","message":"control-plane.hourly.tick","meta":{"features":{"spendSyncEnabled":true,"metricsRefreshEnabled":true,"metricsRefreshPreferLegacyContactActivities":false,"leadCadenceEnforcementEnabled":false,"leadCadenceEnforcementDryRun":true,"callLogHygieneEnabled":true,"callLogHygieneMirrorLegacyContactActivities":false,"callLogHygieneNativeSweepEnabled":true,"callLogHygieneScorePendingCalls":true,"callLogHygieneArchiveRecordings":true},"summary":{"startedAt":"2026-06-23T21:00:21.208Z","finishedAt":"2026-06-23T21:00:21.845Z","durationMs":637,"scheduledPhase":true,"phaseA":{"sessionReconcile":{"unattributedResolved":0,"error":null},"paymentReconcile":{"domains":0,"cases":0,"payments":0,"promotions":0,"ledgerWrites":0,"errors":0},"paymentFieldsSync":{"skipped":true,"reason":"business-hours-lite"},"callLogHygiene":{"skipped":true,"reason":"disabled"},"cxCallActivityBackfill":{"scannedCallPlacedEvents":0,"preparedRows":0,"existingRows":0,"upsertedRows":0,"ledgerSynced":0,"ledgerErrors":0,"errors":0},"metricsRefresh":{"skipped":true,"reason":"disabled"},"spendSync":null,"leadCadenceEnforcement":{"skipped":true,"reason":"disabled"},"staleCadenceSweep":{"modified":0,"error":null},"ncoaMailbox":{"skipped":true,"reason":"no-attachments","messagesScanned":0,"attachments":0,"errors":0},"resolutionEmails":{"candidates":0,"sent":0,"failed":0,"skipped":1}},"phaseB":{"claimed":0,"completed":0,"autoResolved":0,"failed":0,"deadLettered":0,"errorCount":0}}}}
+{"timestamp":"2026-06-23T21:30:21.956Z","level":"info","scope":"control-plane","message":"control-plane.cx_recording.tick","meta":{"scheduleMinute":30,"windowStart":"2026-06-23T20:15:00.000Z","windowEnd":"2026-06-23T21:15:00.000Z","minDurationSec":300,"metadata":null,"domains":{"TAG":{"candidateRows":0,"processedCompleted":0,"processedNoRecording":0,"processedErrors":0},"WYNN":{"candidateRows":1,"processedCompleted":0,"processedNoRecording":0,"processedErrors":0}}}}
+{"timestamp":"2026-06-23T22:00:20.245Z","level":"info","scope":"control-plane","message":"control-plane.hourly.scheduled_phase_mode","meta":{"mode":"business-hours-lite","timezone":"America/Los_Angeles","businessHoursStart":8,"businessHoursEnd":18,"businessDays":[1,2,3,4,5]}}
+{"timestamp":"2026-06-23T22:00:20.861Z","level":"info","scope":"control-plane","message":"control-plane.hourly.tick","meta":{"features":{"spendSyncEnabled":true,"metricsRefreshEnabled":true,"metricsRefreshPreferLegacyContactActivities":false,"leadCadenceEnforcementEnabled":false,"leadCadenceEnforcementDryRun":true,"callLogHygieneEnabled":true,"callLogHygieneMirrorLegacyContactActivities":false,"callLogHygieneNativeSweepEnabled":true,"callLogHygieneScorePendingCalls":true,"callLogHygieneArchiveRecordings":true},"summary":{"startedAt":"2026-06-23T22:00:20.247Z","finishedAt":"2026-06-23T22:00:20.861Z","durationMs":614,"scheduledPhase":true,"phaseA":{"sessionReconcile":{"unattributedResolved":0,"error":null},"paymentReconcile":{"domains":0,"cases":0,"payments":0,"promotions":0,"ledgerWrites":0,"errors":0},"paymentFieldsSync":{"skipped":true,"reason":"business-hours-lite"},"callLogHygiene":{"skipped":true,"reason":"disabled"},"cxCallActivityBackfill":{"scannedCallPlacedEvents":0,"preparedRows":0,"existingRows":0,"upsertedRows":0,"ledgerSynced":0,"ledgerErrors":0,"errors":0},"metricsRefresh":{"skipped":true,"reason":"disabled"},"spendSync":null,"leadCadenceEnforcement":{"skipped":true,"reason":"disabled"},"staleCadenceSweep":{"modified":0,"error":null},"ncoaMailbox":{"skipped":true,"reason":"no-attachments","messagesScanned":0,"attachments":0,"errors":0},"resolutionEmails":{"candidates":0,"sent":0,"failed":0,"skipped":1}},"phaseB":{"claimed":0,"completed":0,"autoResolved":0,"failed":0,"deadLettered":0,"errorCount":0}}}}

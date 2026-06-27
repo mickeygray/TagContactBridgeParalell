@@ -1,0 +1,55 @@
+
+> web-client@0.2.0 dev
+> vite --port 3001 --port 3001
+
+
+  [32m[1mVITE[22m v6.4.2[39m  [2mready in [0m[1m229[22m[2m[0m ms[22m
+
+  [32m➜[39m  [1mLocal[22m:   [36mhttp://localhost:[1m3001[22m/[39m
+[2m  [32m➜[39m  [1mNetwork[22m[2m: use [22m[1m--host[22m[2m to expose[22m
+[2m2:26:50 PM[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/workspaces/cx/CXWorkspaceBulkLoad.tsx, /src/design/globals.css[22m
+[2m2:27:04 PM[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/workspaces/cx/CXWorkspaceBulkLoad.tsx, /src/design/globals.css[22m
+[2m2:31:23 PM[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/workspaces/cx/CXWorkspaceBulkLoad.tsx, /src/design/globals.css[22m
+[2m2:31:32 PM[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/workspaces/cx/CXWorkspaceBulkLoad.tsx, /src/design/globals.css[22m
+[2m2:31:39 PM[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/workspaces/cx/CXWorkspaceBulkLoad.tsx, /src/design/globals.css[22m
+[2m2:31:53 PM[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/workspaces/cx/CXWorkspaceBulkLoad.tsx, /src/design/globals.css[22m
+[2m2:31:59 PM[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/workspaces/cx/CXWorkspaceBulkLoad.tsx, /src/design/globals.css[22m
+[2m2:33:52 PM[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/workspaces/cx/CXWorkspaceBulkLoad.tsx, /src/design/globals.css[22m
+[2m3:13:24 PM[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/workspaces/cx/CXWorkspaceBulkLoad.tsx, /src/design/globals.css[22m
+[2m3:13:36 PM[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/workspaces/cx/CXWorkspace.tsx, /src/design/globals.css[22m
+[2m8:22:03 AM[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/workspaces/cx/CXWorkspaceBulkLoad.tsx, /src/design/globals.css[22m
+[2m8:22:20 AM[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/design/globals.css, /src/workspaces/cx/CXWorkspaceBulkLoad.tsx[22m
+[2m9:13:12 AM[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/app/CXShell.tsx, /src/design/globals.css[22m
+[2m9:13:21 AM[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/app/routes.tsx, /src/design/globals.css[22m
+[2m9:13:45 AM[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/design/globals.css, /src/app/AdminShell.tsx[22m
+[2m11:57:33 AM[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/workspaces/cx/CXWorkspaceBulkLoad.tsx, /src/design/globals.css[22m
+[2m11:57:48 AM[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/workspaces/cx/CXWorkspaceBulkLoad.tsx, /src/design/globals.css[22m
+[2m12:07:43 PM[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/design/globals.css, /src/workspaces/cx/CXWorkspaceBulkLoad.tsx[22m
+[2m12:07:45 PM[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/design/globals.css, /src/workspaces/cx/CXWorkspaceBulkLoad.tsx[22m
+[2m12:07:46 PM[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/workspaces/cx/CXWorkspaceBulkLoad.tsx, /src/design/globals.css[22m
+[2m12:07:48 PM[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/workspaces/cx/CXWorkspaceBulkLoad.tsx, /src/design/globals.css[22m
+[2m12:07:54 PM[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/workspaces/cx/CXWorkspaceBulkLoad.tsx, /src/design/globals.css[22m
+[2m12:07:56 PM[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/workspaces/cx/CXWorkspaceBulkLoad.tsx, /src/design/globals.css[22m
+[2m12:07:57 PM[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/workspaces/cx/CXWorkspaceBulkLoad.tsx, /src/design/globals.css[22m
+[2m12:12:23 PM[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/workspaces/cx/CXWorkspaceBulkLoad.tsx, /src/design/globals.css[22m
+[2m12:12:36 PM[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/workspaces/cx/CXWorkspaceBulkLoad.tsx, /src/design/globals.css[22m
+[2m12:13:23 PM[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/design/globals.css, /src/workspaces/cx/CXWorkspaceBulkLoad.tsx[22m
+[2m1:40:48 PM[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/workspaces/cx/LiveCoachPanel.tsx, /src/design/globals.css[22m
+[2m1:40:57 PM[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/workspaces/cx/LiveCoachPanel.tsx[22m
+[2m3:08:15 PM[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/design/globals.css, /src/workspaces/cx/legacy/LegacyLiveCoachPanel.tsx[22m
+[2m4:01:11 PM[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/design/globals.css, /src/workspaces/cx/legacy/LegacyLiveCoachPanel.tsx[22m
+[2m4:01:14 PM[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/design/globals.css, /src/workspaces/cx/legacy/LegacyLiveCoachPanel.tsx[22m
+[2m4:01:23 PM[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/design/globals.css, /src/workspaces/cx/legacy/LegacyLiveCoachPanel.tsx[22m
+[2m4:01:27 PM[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/design/globals.css, /src/workspaces/cx/legacy/LegacyLiveCoachPanel.tsx[22m
+[2m4:02:32 PM[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/app/routes.tsx, /src/design/globals.css[22m
+[2m4:02:36 PM[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/app/routes.tsx, /src/design/globals.css[22m
+[2m4:02:50 PM[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/design/globals.css, /src/app/AdminShell.tsx[22m
+[2m4:02:53 PM[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/design/globals.css, /src/app/AdminShell.tsx[22m
+[2m4:03:14 PM[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/design/globals.css, /src/workspaces/cx/legacy/LegacyLiveCoachPanel.tsx[22m
+[2m4:15:37 PM[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/workspaces/cx/legacy/LegacyLiveCoachPanel.tsx, /src/design/globals.css[22m
+[2m4:15:40 PM[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/workspaces/cx/legacy/LegacyLiveCoachPanel.tsx, /src/design/globals.css[22m
+[2m4:15:44 PM[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/workspaces/cx/legacy/LegacyLiveCoachPanel.tsx, /src/design/globals.css[22m
+[2m4:16:09 PM[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/workspaces/cx/CXWorkspace.tsx, /src/design/globals.css[22m
+[2m4:16:17 PM[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/workspaces/cx/CXWorkspace.tsx, /src/design/globals.css[22m
+[2m4:16:22 PM[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/workspaces/cx/CXWorkspace.tsx, /src/design/globals.css[22m
+[2m4:16:27 PM[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/workspaces/cx/CXWorkspace.tsx, /src/design/globals.css[22m

@@ -49,6 +49,7 @@ const {
   createLiveCoachCloseoutWorker,
 } = require("../../../packages/shared-services/src/liveCoachCloseoutService");
 const {
+  cxAgentCallNoteRepository,
   caseProfileRepository,
   leadCadenceRepository,
 } = require("../../../packages/shared-repositories/src");
@@ -67,6 +68,19 @@ const {
   getCoachPolicyState,
   describeCoachComponents,
 } = require("./liveCoachModelPolicy");
+// Whole-floor batch coach (default-OFF behind LIVE_COACH_RUNTIME_MODE_BATCH_ENABLED).
+const {
+  createDeepPullTransport,
+  createReactorTransport,
+  createSummaryTransport,
+  createStubTransport,
+} = require("./coachBatchTransports");
+const {
+  resolveLiveCoachRuntimeMode,
+} = require("../../../packages/shared-services/src/liveCoachRuntimeModeService");
+const {
+  buildReferenceBody: buildCoachReferenceBody,
+} = require("../../../packages/shared-services/src/coachReferenceLibrary");
 
 let processCrashLogger = null;
 
@@ -632,7 +646,7 @@ const CALL_GRADER_STATIC_PROMPT = [
 ].join("\n");
 
 function createOpenAiCallGrader({ logger } = {}) {
-  const enabled = boolFromEnv(process.env.LIVE_COACH_CALL_GRADER_ENABLED, true);
+  const enabled = boolFromEnv(process.env.LIVE_COACH_CALL_GRADER_ENABLED, false);
   const apiKey = String(process.env.OPENAI_API_KEY || "").trim();
   if (!enabled || !apiKey) return null;
   const model = String(
@@ -1366,7 +1380,7 @@ function buildLiveCoachCloseoutConfig() {
     // closeout should never make a live call transition wait on external APIs.
     logicsActivityEnabled: boolFromEnv(process.env.LIVE_COACH_CLOSEOUT_LOGICS_ENABLED, false),
     agentEmailEnabled: boolFromEnv(process.env.LIVE_COACH_CLOSEOUT_AGENT_EMAIL_ENABLED, true),
-    callGraderEnabled: boolFromEnv(process.env.LIVE_COACH_CALL_GRADER_ENABLED, true),
+    callGraderEnabled: boolFromEnv(process.env.LIVE_COACH_CALL_GRADER_ENABLED, false),
     callGraderMinDurationSec: Math.max(0, numberFromEnv("LIVE_COACH_CALL_GRADER_MIN_SECONDS", 90)),
     callGraderMinTranscriptChars: Math.max(0, numberFromEnv("LIVE_COACH_CALL_GRADER_MIN_CHARS", 350)),
     agentEmailOverride: cleanText(process.env.LIVE_COACH_CLOSEOUT_AGENT_EMAIL_TO || "", 180),
@@ -3433,6 +3447,7 @@ async function main() {
   const closeoutWorker = createLiveCoachCloseoutWorker({
     rootDir: config.rootDir,
     logger,
+    agentCallNoteRepository: mongoRuntime.connected ? cxAgentCallNoteRepository : null,
     caseProfileRepository,
     leadCadenceRepository,
     logicsClientFactory: createLogicsClient,
@@ -3443,12 +3458,78 @@ async function main() {
   const semanticContextJudge = boolFromEnv(process.env.LIVE_COACH_CONTEXT_JUDGE_ENABLED, false)
     ? createOpenAiSemanticContextJudge({ logger })
     : null;
+  // ── Whole-floor batch coach (default-OFF) ───────────────────────────────────
+  // Dormant unless LIVE_COACH_RUNTIME_MODE_BATCH_ENABLED is on. When off, the
+  // transports + resolver are null, the floor loop never starts, and the per-turn
+  // path is byte-identical to today. Even when on, only agents resolved to
+  // batch/hybrid (via LIVE_COACH_RUNTIME_MODE_AGENT_OVERRIDES) are coached by it.
+  const liveCoachBatchEnabled = boolFromEnv(process.env.LIVE_COACH_RUNTIME_MODE_BATCH_ENABLED, false);
+  // The rolling-summary SIDECAR cadence rides the same floor loop, behind its OWN flag
+  // (default-OFF). It needs batch on too — it only summarizes batch/hybrid sessions, and
+  // it feeds the cockpit's SUMMARY/CASE columns. createSummaryTransport returns null unless
+  // its substrate is configured, so the cadence stays dormant until explicitly turned on.
+  const liveCoachRollingSummaryEnabled = boolFromEnv(process.env.LIVE_COACH_ROLLING_SUMMARY_ENABLED, false);
+  // DEV: LIVE_COACH_BATCH_TRANSPORT=stub swaps the real (paid) reactor/deep runners for a
+  // no-spend stub that drives the WHOLE real pipeline with canned guidance — so the cockpit
+  // component can be built against live-shaped SSE with no keys/model. HARD-GATED to non-prod:
+  // a leftover env var must NEVER silently replace the live coach with canned lines in production.
+  const liveCoachIsProduction = String(process.env.NODE_ENV || "").trim().toLowerCase() === "production";
+  const liveCoachStubRequested = String(process.env.LIVE_COACH_BATCH_TRANSPORT || "").trim().toLowerCase() === "stub";
+  if (liveCoachStubRequested && liveCoachIsProduction) {
+    logger?.warn?.("live_coach.batch.stub_suppressed_in_production", { reason: "LIVE_COACH_BATCH_TRANSPORT=stub ignored in production" });
+  }
+  const liveCoachStubTransport = liveCoachStubRequested && !liveCoachIsProduction;
+  let liveCoachCodexClient = null;
+  const batchModelRunners = liveCoachBatchEnabled
+    ? (liveCoachStubTransport
+      ? {
+        runReactor: createStubTransport({ logger, kind: "reactor" }),
+        runDeep: createStubTransport({ logger, kind: "deep" }),
+        runSummary: null,
+      }
+      : {
+        // Haiku reactor on a SEPARATE metered key; null if that key is unset.
+        runReactor: createReactorTransport({ logger }),
+        // Opus deep pull on claude -p (Max pool).
+        runDeep: createDeepPullTransport({ logger }),
+        // Rolling-summary sidecar (Codex/api substrate); null unless flag + substrate configured.
+        runSummary: liveCoachRollingSummaryEnabled
+          ? createSummaryTransport({
+            logger,
+            resolveCodexClient: () => liveCoachCodexClient,
+            env: process.env,
+          })
+          : null,
+      })
+    : null;
+  const resolveCoachRuntimeMode = liveCoachBatchEnabled
+    ? (session) => resolveLiveCoachRuntimeMode({ agentEmail: session?.metadata?.agentEmail }, process.env)
+    : null;
+  let coachReferenceBody = "";
+  if (liveCoachBatchEnabled) {
+    try {
+      coachReferenceBody = buildCoachReferenceBody();
+    } catch (error) {
+      logger?.warn?.("live_coach.batch.reference_error", { error: error.message });
+    }
+  }
+
   const coachBus = createLiveCoachBus({
     rootDir: config.rootDir,
     logger,
     persistence: coachPersistence,
     closeoutWorker,
     dialogComposer: createAnthropicDialogComposer({ logger }),
+    // Whole-floor batch coach (default-OFF; see liveCoachBatchEnabled above).
+    batchModelRunners,
+    resolveRuntimeMode: resolveCoachRuntimeMode,
+    floorCoach: {
+      reference: coachReferenceBody,
+      reactorIntervalMs: Math.max(1000, Number(process.env.LIVE_COACH_REACTOR_INTERVAL_MS || 4000) || 4000),
+      deepIntervalMs: Math.max(15000, Number(process.env.LIVE_COACH_DEEP_INTERVAL_MS || 60000) || 60000),
+      summaryIntervalMs: Math.max(30000, Number(process.env.LIVE_COACH_SUMMARY_INTERVAL_MS || 120000) || 120000),
+      batchOptions: { maxSessions: Math.max(1, Number(process.env.LIVE_COACH_BATCH_MAX_SESSIONS || 12) || 12) },
+    },
     // semantic_vad only decides when STT should release text. This optional API judge is the
     // fuzzy filter that ranks deterministic candidates before Sonnet composes a line.
     semanticContextJudge,
@@ -3489,6 +3570,20 @@ async function main() {
   });
   const callStrategist = createOpusCallStrategist({ logger });
   const resolutionPitchAgent = createOpusResolutionPitchAgent({ logger });
+  if (liveCoachBatchEnabled) {
+    const startedLoop = coachBus.startFloorCoach();
+    logger.info("live_coach.floor_coach.config", {
+      enabled: true,
+      started: Boolean(startedLoop),
+      reactor: Boolean(batchModelRunners && batchModelRunners.runReactor),
+      deep: Boolean(batchModelRunners && batchModelRunners.runDeep),
+      summary: Boolean(batchModelRunners && batchModelRunners.runSummary),
+      summaryEnabled: liveCoachRollingSummaryEnabled,
+      defaultMode: cleanText(process.env.LIVE_COACH_RUNTIME_MODE_DEFAULT || "deterministic", 20),
+      agentOverrides: cleanText(process.env.LIVE_COACH_RUNTIME_MODE_AGENT_OVERRIDES || "", 200),
+      referenceChars: coachReferenceBody.length,
+    });
+  }
   logger.info("live_coach.runtime_config", {
     mongoConnected: Boolean(mongoRuntime.connected),
     contextJudgeEnabled: Boolean(semanticContextJudge),
@@ -3562,6 +3657,25 @@ async function main() {
     const { createAiTaskRunner } = require("../../../packages/shared-services/src/aiTaskRunner");
     const { buildBusRegistry } = require("../../../packages/shared-services/src/aiBusRegistry");
     const { mountAiTaskRoutes } = require("./aiTaskRoutes");
+
+    const aiAgentConfig = config?.aiAgents || {};
+    liveCoachCodexClient = null;
+    const aiAgentProviders = {
+      anthropic: createAnthropicClient(),
+      openai: createOpenAiClient(),
+    };
+    if (aiAgentConfig?.codex?.enabled) {
+      const { createCodexMcpClient } = require("../../../scripts/codex-agent/codexMcpClient");
+      const codexConfig = aiAgentConfig.codex || {};
+      liveCoachCodexClient = createCodexMcpClient({
+        codexBin: codexConfig.cliPath,
+        codexHome: codexConfig.home,
+        model: codexConfig.model || undefined,
+        timeoutMs: codexConfig.timeoutMs,
+      });
+      aiAgentProviders.codex = liveCoachCodexClient;
+    }
+
     const aiBusRegistry = buildBusRegistry();
     // Spend telemetry: one structured row per task run (taskId/provider/model/
     // status/latency/usage). A first control loop so spend governance isn't blind;
@@ -3572,7 +3686,7 @@ async function main() {
       },
     };
     const aiBusRunner = createAiTaskRunner({
-      providers: createAiProviders({ anthropic: createAnthropicClient(), openai: createOpenAiClient() }),
+      providers: createAiProviders(aiAgentProviders),
       registry: aiBusRegistry,
       telemetry: aiBusTelemetry,
     });
@@ -4188,6 +4302,29 @@ async function main() {
     res.json({ ok: true, sessions: coachBus.listSessions() });
   });
 
+  app.get("/api/ai/live-coach/grpc/active-conversation-batch", requireInternalAccess, (req, res) => {
+    res.json({
+      ok: true,
+      batch: coachBus.buildActiveConversationBatch(req.query || {}),
+    });
+  });
+
+  app.post("/api/ai/live-coach/grpc/active-conversation-changes", requireInternalAccess, (req, res) => {
+    const body = typeof req.body === "object" && req.body ? req.body : {};
+    res.json({
+      ok: true,
+      changes: coachBus.buildActiveConversationChanges(body),
+    });
+  });
+
+  app.post("/api/ai/live-coach/grpc/batch-guidance-dispatch-plan", requireInternalAccess, (req, res) => {
+    const body = typeof req.body === "object" && req.body ? req.body : {};
+    res.json({
+      ok: true,
+      dispatchPlan: coachBus.buildBatchGuidanceDispatchPlan(body),
+    });
+  });
+
   app.get("/api/ai/live-coach/grpc/dashboard/sessions", requireInternalAccess, async (req, res, next) => {
     try {
       res.json(await buildLiveCoachDashboardPayload(req));
@@ -4454,6 +4591,19 @@ async function main() {
   function shutdown(reason) {
     logger.info("shutdown", { reason });
     if (staleSweepTimer) clearInterval(staleSweepTimer);
+    try {
+      coachBus.stopFloorCoach();
+      if (batchModelRunners?.runSummary?.stop) {
+        batchModelRunners.runSummary.stop();
+      }
+    } catch (error) {
+      logger.warn("live_coach.floor_coach.stop_error", { error: error.message });
+    }
+    try {
+      if (liveCoachCodexClient && typeof liveCoachCodexClient.stop === "function") {
+        liveCoachCodexClient.stop();
+      }
+    } catch (_error) {}
     server.close(async () => {
       await disconnectMongo().catch((error) => {
         logger.warn("mongo.disconnect.error", { error: error.message });

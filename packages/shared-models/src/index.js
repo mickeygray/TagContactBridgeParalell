@@ -9,8 +9,13 @@ const AuthOtpChallenge = require("./AuthOtpChallenge");
 const CaseProfile = require("./CaseProfile");
 const ConversationMessage = require("./ConversationMessage");
 const ConversationWorkflow = require("./ConversationWorkflow");
+const CxAgentCallNote = require("./CxAgentCallNote");
 const CxAppointment = require("./CxAppointment");
+const CxBulkLoadSession = require("./CxBulkLoadSession");
 const CxDialQueue = require("./CxDialQueue");
+const CxSlowLaneSession = require("./CxSlowLaneSession");
+const CxTerminalOutbox = require("./CxTerminalOutbox");
+const CxSimpleLoopSession = require("./CxSimpleLoopSession");
 const DailyCallStat = require("./DailyCallStat");
 const DeepCutRun = require("./DeepCutRun");
 const DispatchList = require("./DispatchList");
@@ -57,8 +62,13 @@ const MODEL_REGISTRY = Object.freeze({
   CaseProfile,
   ConversationMessage,
   ConversationWorkflow,
+  CxAgentCallNote,
   CxAppointment,
+  CxBulkLoadSession,
   CxDialQueue,
+  CxSlowLaneSession,
+  CxSimpleLoopSession,
+  CxTerminalOutbox,
   DailyCallStat,
   DeepCutRun,
   DispatchList,
@@ -109,8 +119,13 @@ module.exports = {
   CaseProfile,
   ConversationMessage,
   ConversationWorkflow,
+  CxAgentCallNote,
   CxAppointment,
+  CxBulkLoadSession,
   CxDialQueue,
+  CxSlowLaneSession,
+  CxSimpleLoopSession,
+  CxTerminalOutbox,
   DailyCallStat,
   DeepCutRun,
   DispatchList,

@@ -7,6 +7,7 @@ const {
   caseProfileRepository,
   conversationMessageRepository,
   conversationWorkflowRepository,
+  cxAppointmentRepository,
   cxDialQueueRepository,
   leadCadenceRepository,
   paymentLedgerRepository,
@@ -77,6 +78,13 @@ const {
   isCxCanonicalCallWriteEnabled,
   writeCxCallLifecycleShadowState,
 } = require("./cxCallLifecycleService");
+const {
+  writeCxCallWrapSummary,
+} = require("./cxCallWrapService");
+const {
+  observeCxBucketTerminalOutcome,
+  primeCxBucketNewCalls,
+} = require("./cxDialQueueMediatorService");
 const {
   cancelCxAppointmentsForCase,
   resolveCxAppointmentAfterDisposition,
@@ -1677,6 +1685,22 @@ async function clearAgentCxCallState(extensionId, source = "cx-call-state-clear"
       event: "release",
     },
   );
+  observeCxBucketTerminalOutcome({
+    extensionId: normalizedExtensionId,
+    queueItemId: options.queueItemId || options.queueTicketId || null,
+    caseId: options.caseId != null ? options.caseId : existing?.caseId || null,
+    phone: options.phone || existingCall?.to || existingCall?.from || null,
+    uii: options.uii || options.rcxUii || null,
+    outcome: source || "cx-call-state-clear",
+    drainCurrentCall: true,
+    logger: options.logger || null,
+  }).catch((error) => {
+    options.logger?.warn?.("cx.bucket.terminal_observed.failed", {
+      extensionId: normalizedExtensionId,
+      queueItemId: options.queueItemId || options.queueTicketId || null,
+      error: error.message || String(error),
+    });
+  });
   if (
     updated?.activityState === "idle"
     && String(updated?.cxRouting?.desiredAvailability || "available").toLowerCase() === "available"
@@ -2504,7 +2528,13 @@ function getQueueItemState(queueItem = {}) {
   return String(queueItem?.state || "").trim().toLowerCase();
 }
 
+function isBulkLoadReservedQueueItem(queueItem = {}) {
+  const metadata = queueItem?.metadata && typeof queueItem.metadata === "object" ? queueItem.metadata : {};
+  return String(metadata.reservationRail || "").trim() === "bulk_load" || Boolean(metadata.bulkLoadSessionId);
+}
+
 function isQueueItemReleasableFromWorkspacePack(queueItem = {}) {
+  if (isBulkLoadReservedQueueItem(queueItem)) return false;
   const state = getQueueItemState(queueItem);
   return ["claimed", "queued", "ready", "paused"].includes(state);
 }
@@ -4122,7 +4152,7 @@ async function buildCxQueueItems(context, limit = 50) {
 
   const sortNow = new Date();
 
-  return servedItems
+  const sortedServedItems = servedItems
     .sort((left, right) => {
       const leftFamily = getCxQueueServeRank(left, { now: sortNow });
       const rightFamily = getCxQueueServeRank(right, { now: sortNow });
@@ -4137,6 +4167,18 @@ async function buildCxQueueItems(context, limit = 50) {
       if (leftTime !== rightTime) return leftTime - rightTime;
       return String(left.caseId || "").localeCompare(String(right.caseId || ""));
     });
+  primeCxBucketNewCalls({
+    extensionId: agentExtensionId,
+    queueItems: visibleQueueItems,
+    source: "workspace-queue",
+    now: sortNow,
+  }).catch((error) => {
+    writeCxWorkspaceQueueDebug("bucket-prime-failed", {
+      extensionId: agentExtensionId,
+      error: error.message || String(error),
+    });
+  });
+  return sortedServedItems;
 }
 
 function normalizeCxQueueFamily(value) {
@@ -5453,24 +5495,78 @@ async function requestCxDisposition(domain, user, input = {}) {
         queueItemId: queueItem?._id ? String(queueItem._id) : null,
       },
   );
-    queueCxTerminalDispositionBackgroundCleanup({
-      context,
-      user,
-      input,
-      queueItem,
-      caseId: normalizedCaseId,
-      title,
-      summary,
-      disposition: normalizedDisposition,
-      outcome,
-      requested,
-    });
+    const hasNextDialRequest = Boolean(input.nextDial && typeof input.nextDial === "object" && input.nextDial.phone);
     // Do NOT serve the next lead if the CX clear was SKIPPED because the agent is still on a live
     // CX call (missing-uii / different-active-cx-call) — advancing then is the Tracey->Veronica leak.
     const clearSkipped = Boolean(clearResult?.skipped);
-    const nextDial = clearSkipped
-      ? { ok: false, skipped: true, reason: clearResult.reason || "cx-clear-skipped" }
-      : await requestCxNextDialHandoff({ context, user, input });
+    let hangup = null;
+    let nextDial = null;
+    if (clearSkipped) {
+      queueCxTerminalDispositionBackgroundCleanup({
+        context,
+        user,
+        input,
+        queueItem,
+        caseId: normalizedCaseId,
+        title,
+        summary,
+        disposition: normalizedDisposition,
+        outcome,
+        requested,
+      });
+      nextDial = { ok: false, skipped: true, reason: clearResult.reason || "cx-clear-skipped" };
+    } else if (hasNextDialRequest) {
+      hangup = await hangupCxCallAfterDisposition({
+        context,
+        user,
+        input: {
+          ...input,
+          skipAgentStateClearAfterRelay: true,
+        },
+        queueItem,
+        caseId: normalizedCaseId,
+        disposition: normalizedDisposition,
+      });
+      await recordWorkflowStage({
+        domain: context.domain,
+        family: "cx",
+        subtype: "disposition",
+        stage: "completed",
+        aggregateType: "case-profile",
+        aggregateId: input.caseId,
+        caseId: input.caseId,
+        sourceService: "control-plane",
+        title,
+        summary: `${summary} completed`,
+        result: {
+          requested,
+          response: outcome,
+          hangup,
+        },
+      }).catch(() => null);
+      nextDial = dispositionHangupRelayAccepted(hangup)
+        ? await requestCxNextDialHandoff({ context, user, input })
+        : {
+            ok: false,
+            skipped: true,
+            reason: hangup?.reason || hangup?.error || "disposition-hangup-not-accepted",
+            hangup,
+          };
+    } else {
+      queueCxTerminalDispositionBackgroundCleanup({
+        context,
+        user,
+        input,
+        queueItem,
+        caseId: normalizedCaseId,
+        title,
+        summary,
+        disposition: normalizedDisposition,
+        outcome,
+        requested,
+      });
+      nextDial = await requestCxNextDialHandoff({ context, user, input });
+    }
     return {
       ...requested,
       completed: !clearSkipped,
@@ -5486,7 +5582,7 @@ async function requestCxDisposition(domain, user, input = {}) {
       nextDial,
       callHeldOpen: clearSkipped,
       wrapUpRequired: false,
-      hangup: {
+      hangup: hangup || {
         ok: !clearSkipped,
         acceptedLocally: !clearSkipped,
         backgroundPending: !clearSkipped,
@@ -7965,6 +8061,148 @@ async function requestCxAssignCaseToMe(domain, user, input = {}) {
   };
 }
 
+function cleanWorkbenchText(value, maxLength = 800) {
+  return String(value || "")
+    .replace(/\r\n/g, "\n")
+    .split("\n")
+    .map((line) => line.replace(/\s+/g, " ").trim())
+    .filter(Boolean)
+    .join("\n")
+    .slice(0, maxLength)
+    || null;
+}
+
+function toPlainRecord(value) {
+  return value && typeof value.toObject === "function" ? value.toObject() : plainObject(value);
+}
+
+function formatWorkbenchDate(value, timeZone = "America/Los_Angeles") {
+  const date = parseDateOrNull(value);
+  if (!date) return null;
+  try {
+    return new Intl.DateTimeFormat("en-US", {
+      timeZone: timeZone || "America/Los_Angeles",
+      month: "short",
+      day: "numeric",
+      year: "numeric",
+      hour: "numeric",
+      minute: "2-digit",
+      timeZoneName: "short",
+    }).format(date);
+  } catch {
+    return date.toISOString();
+  }
+}
+
+function buildAppointmentWorkbenchNote(appointment = {}) {
+  const scheduled = formatWorkbenchDate(
+    appointment.appointmentAt,
+    appointment.appointmentTimezone || appointment.requestedTimezone || "America/Los_Angeles",
+  );
+  const legalDial = formatWorkbenchDate(
+    appointment.legalDialAt,
+    appointment.legalDialTimezone || appointment.appointmentTimezone || "America/Los_Angeles",
+  );
+  return [
+    "CX appointment scheduled.",
+    appointment.prospectName ? `Prospect: ${appointment.prospectName}` : "",
+    appointment.phone ? `Phone: ${appointment.phone}` : "",
+    scheduled ? `Appointment: ${scheduled}` : "",
+    legalDial && legalDial !== scheduled ? `Legal dial: ${legalDial}` : "",
+    appointment.agentName || appointment.agentEmail
+      ? `Agent: ${appointment.agentName || appointment.agentEmail}`
+      : "",
+    appointment.note ? `Note: ${appointment.note}` : "",
+  ].filter(Boolean).join("\n");
+}
+
+async function executeCxAppointmentWorkbenchActions(domain, user, input = {}) {
+  const appointment = toPlainRecord(input.appointment || input.result?.appointment || input);
+  const appointmentId = String(appointment.appointmentId || "").trim();
+  const caseId = Number(appointment.caseId || input.caseId);
+  if (!appointmentId || !Number.isFinite(caseId) || caseId <= 0) {
+    return { ok: false, skipped: true, reason: "missing-appointment-identity" };
+  }
+
+  const metadata = plainObject(appointment.metadata);
+  const workbench = plainObject(metadata.workbench);
+  const dueDate = appointment.legalDialAt || appointment.appointmentAt;
+  if (!dueDate) return { ok: false, skipped: true, reason: "missing-appointment-time" };
+
+  const note = buildAppointmentWorkbenchNote(appointment);
+  const subject = cleanWorkbenchText(
+    `CX appointment${appointment.prospectName ? ` - ${appointment.prospectName}` : ""}`,
+    120,
+  ) || "CX appointment";
+
+  const result = {
+    ok: true,
+    appointmentId,
+    task: workbench.logicsTaskCompletedAt ? { skipped: true, reason: "already-created" } : null,
+    activity: workbench.logicsActivityCompletedAt ? { skipped: true, reason: "already-created" } : null,
+  };
+
+  if (!result.task) {
+    try {
+      result.task = await executeCxLogicsTask(domain, user, {
+        caseId,
+        subject,
+        comments: note,
+        dueDate,
+        reminderAt: dueDate,
+        taskType: 1,
+      });
+    } catch (error) {
+      result.ok = false;
+      result.task = { ok: false, error: error.message, details: error.details || null };
+    }
+  }
+
+  if (!result.activity) {
+    try {
+      result.activity = await executeCxLogicsActivity(domain, user, {
+        caseId,
+        subject: "CX appointment scheduled",
+        activityType: "General",
+        note,
+      });
+    } catch (error) {
+      result.ok = false;
+      result.activity = { ok: false, error: error.message, details: error.details || null };
+    }
+  }
+
+  const patch = {
+    "metadata.workbench.lastAttemptAt": new Date(),
+    "metadata.workbench.lastAttemptOk": result.ok,
+  };
+  if (result.task?.completed) {
+    patch["metadata.workbench.logicsTaskCompletedAt"] = new Date();
+    patch["metadata.workbench.logicsTaskWorkflowId"] = result.task.completionWorkflowId || null;
+  } else if (result.task?.error) {
+    patch["metadata.workbench.logicsTaskError"] = result.task.error;
+  }
+  if (result.activity?.completed) {
+    patch["metadata.workbench.logicsActivityCompletedAt"] = new Date();
+    patch["metadata.workbench.logicsActivityWorkflowId"] = result.activity.completionWorkflowId || null;
+  } else if (result.activity?.error) {
+    patch["metadata.workbench.logicsActivityError"] = result.activity.error;
+  }
+  await cxAppointmentRepository.patchAppointment(appointmentId, patch, {
+    type: "appointment-workbench-sync",
+    actorEmail: user?.email || null,
+    note: result.ok ? "Logics task/activity synced" : "Logics task/activity sync attempted",
+    payload: {
+      taskCompleted: Boolean(result.task?.completed),
+      activityCompleted: Boolean(result.activity?.completed),
+      taskError: result.task?.error || null,
+      activityError: result.activity?.error || null,
+    },
+  }).catch(() => null);
+
+  return result;
+}
+
 async function executeCxLogicsTask(domain, user, input = {}) {
   if (!input.caseId) {
     const err = new Error("caseId is required");
@@ -8230,7 +8468,67 @@ async function executeCxLogicsActivity(domain, user, input = {}) {
 // appended to the case as a structured "Spouse intake" activity-note
 // elsewhere (see appendSpouseIntakeNote). They're omitted from this
 // map so we don't accidentally send them as fields Logics will drop.
-// Persist a structured interview snapshot to LeadCadence and Logics.
+async function writeCxWorkspaceCallWrap(domain, user, input = {}, options = {}) {
+  const actor = normalizeActor(user);
+  return writeCxCallWrapSummary(
+    {
+      ...input,
+      domain,
+      actor,
+      agentEmail: input.agentEmail || actor.actorEmail,
+      agentName: input.agentName || actor.actorName,
+    },
+    {
+      caseProfileRepository,
+      writeLogicsActivity: (activityDomain, _actor, activityInput) =>
+        executeCxLogicsActivity(activityDomain, user, activityInput),
+    },
+    options,
+  );
+}
+
+// Persist a call summary to CaseProfile communications and Logics through the shared call-wrap writer.
+async function executeCxCallSummary(domain, user, input = {}) {
+  const context = await resolveCxUserContext(domain, user);
+  const caseId = Number(input.caseId ?? input.CaseID);
+  if (!Number.isFinite(caseId) || caseId <= 0) {
+    const err = new Error("caseId is required");
+    err.status = 400;
+    throw err;
+  }
+
+  const result = await writeCxWorkspaceCallWrap(context.domain, user, {
+    ...input,
+    caseId,
+    source: input.source || "cx-call-summary",
+    provider: input.provider || "cx-workspace",
+    subject: input.subject || "CX call summary",
+  }, {
+    allowSparse: input.allowSparse !== false,
+    writeCaseProfileCommunication: input.writeCaseProfileCommunication !== false,
+    writeLogicsActivity: input.writeLogicsActivity !== false,
+  });
+
+  if (result.reason === "missing-call-wrap-body") {
+    const err = new Error("summary, note, or allowSparse summary input is required");
+    err.status = 400;
+    throw err;
+  }
+
+  return {
+    ok: result.ok !== false,
+    domain: context.domain,
+    caseId,
+    communication: result.communication,
+    logicsActivity: result.logicsActivity,
+    callWrap: {
+      skipped: result.skipped === true,
+      reason: result.reason || null,
+      threadKey: result.packet?.threadKey || null,
+    },
+  };
+}
+
 async function executeCxInterviewSnapshot(domain, user, input = {}) {
   const normalizedDomain = normalizeDomain(domain);
   const caseId = Number(input.caseId);
@@ -8277,21 +8575,51 @@ async function executeCxInterviewSnapshot(domain, user, input = {}) {
     snapshotPayload,
   );
 
-  const logicsResult = await executeCxLogicsActivity(normalizedDomain, user, {
+  const workflowId = String(input.interviewSnapshotWorkflowId || input.workflowId || "").trim();
+  const interviewThreadKey = String(input.threadKey || "").trim()
+    || (workflowId ? `cx-interview:${workflowId}` : "")
+    || (input.uii ? "" : `cx-interview:${caseId}:${now.toISOString()}`);
+  const wrapResult = await writeCxWorkspaceCallWrap(normalizedDomain, user, {
     caseId,
     subject: "CX interview snapshot",
+    provider: "cx-workspace",
+    source: snapshotPayload.source,
+    status: "interview-snapshot",
+    terminalOutcome: input.terminalOutcome || "interview-snapshot",
     activityType: "General",
     note: activityNote,
-    snapshot: snapshotPayload.snapshot,
-    source: snapshotPayload.source,
+    activityNote,
+    phone: snapshotPayload.phone,
+    prospectName: snapshotPayload.prospectName,
+    queueItemId: snapshotPayload.queue.itemId,
+    queueTicketId: snapshotPayload.queue.ticketId,
+    uii: input.uii || input.telephonySessionId || input.callSessionId || "",
+    threadKey: interviewThreadKey || undefined,
+    interviewSnapshotWorkflowId: workflowId,
+    interviewSnapshot: snapshotPayload.snapshot,
+    callStrategy: snapshotPayload.callStrategy,
+    metadata: {
+      queue: snapshotPayload.queue,
+      updatedBy: actor,
+    },
+  }, {
+    allowSparse: true,
+    writeCaseProfileCommunication: input.writeCaseProfileCommunication !== false,
+    writeLogicsActivity: input.writeLogicsActivity !== false,
   });
 
   return {
-    completed: logicsResult?.completed === true,
+    completed: wrapResult?.logicsActivity?.completed === true,
     response: {
       cadence: cadenceResult,
       cadenceMatched: Number(cadenceResult?.matchedCount || 0) > 0,
-      logics: logicsResult,
+      communication: wrapResult.communication,
+      logics: wrapResult.logicsActivity,
+      callWrap: {
+        skipped: wrapResult.skipped === true,
+        reason: wrapResult.reason || null,
+        threadKey: wrapResult.packet?.threadKey || null,
+      },
     },
   };
 }
@@ -9033,6 +9361,8 @@ module.exports = {
   buildCxQueuesForAgents,
   buildCxWorkspace,
   listCxPlacedCallsToday,
+  executeCxAppointmentWorkbenchActions,
+  executeCxCallSummary,
   executeCxLogicsCreateCase,
   executeCxSaveCaseProfileFromLogics,
   executeCxLogicsFindMatch,

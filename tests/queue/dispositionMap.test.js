@@ -40,6 +40,11 @@ test("terminal dispositions match the queueItemState=completed rule", () => {
   }
 });
 
+test("RingCX recycling outcomes use campaign disposition labels", () => {
+  assert.equal(DISPOSITION_MAP.did_not_connect.rcxCode, "Auto Dispo");
+  assert.equal(DISPOSITION_MAP.voicemail.rcxCode, "VM DROP");
+});
+
 test("listDispositions returns array with key + meta", () => {
   const list = listDispositions();
   assert.ok(Array.isArray(list));

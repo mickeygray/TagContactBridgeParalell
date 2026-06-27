@@ -19,6 +19,9 @@ const {
   makeMongoAgentFinder,
 } = require("./voicemailServingService");
 const { createRingcxVoiceClient } = require("../../shared-integrations/src/ringcxVoiceClient");
+const {
+  observeCxBucketTerminalOutcome,
+} = require("./cxDialQueueMediatorService");
 
 // Agent key -> campaign disposition name. Override with
 // VM_DROP_AGENT_DISPOSITIONS_JSON when RingCX disposition names change.
@@ -414,6 +417,23 @@ async function requestAgentDispositionDrop(domain, user, body = {}, options = {}
     uii,
     disposition: drop.disposition,
     dropKey: drop.key || null,
+  });
+  observeCxBucketTerminalOutcome({
+    extensionId: user?.extensionId || user?.agentExtensionId || null,
+    queueItemId: body.queueItemId || body.queueTicketId || null,
+    caseId: body.caseId || null,
+    phone,
+    uii,
+    outcome: "voicemail",
+    drainCurrentCall: true,
+    logger,
+  }).catch((error) => {
+    logWarn(logger, "cx.bucket.terminal_observed.failed", {
+      requestId,
+      domain,
+      queueItemId: body.queueItemId || body.queueTicketId || null,
+      error: error.message || String(error),
+    });
   });
 
   return {

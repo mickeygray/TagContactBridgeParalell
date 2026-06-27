@@ -19,8 +19,8 @@ export type WorkspaceKey =
   | "metrics"
   | "ringbridge"
   | "live-coach"
+  | "live-coach-cockpit"
   | "inbox"
-  | "clients"
   | "dispatch"
   | "postdates"
   | "social"
@@ -67,6 +67,14 @@ export const adminWorkspaces: WorkspaceDef[] = [
     label: "Live Coach",
     description: "Agent coach streams, transcript, context, and dialog.",
     icon: Radio,
+    audience: "admin",
+  },
+  {
+    key: "live-coach-cockpit",
+    path: "/admin/live-coach/cockpit",
+    label: "Coach Cockpit",
+    description: "Per-session Focus Card — say zone, script spine, summary, case.",
+    icon: Headphones,
     audience: "admin",
   },
   {
@@ -149,8 +157,8 @@ export const cxWorkspaces: WorkspaceDef[] = [
   {
     key: "cx",
     path: "/cx",
-    label: "My Workspace",
-    description: "Calls, tasks, Logics, SMS.",
+    label: "Workspace",
+    description: "Dialing, SMS, calls, and coach tools.",
     icon: UserCog,
     audience: "user",
   },

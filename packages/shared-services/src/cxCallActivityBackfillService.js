@@ -327,7 +327,12 @@ async function recoverCxCallLogs({ start, end, dryRun = false, limit = 25000, do
       sourceChannel: sourceChannel || undefined,
       routeCampaignKey: routeCampaignKey || undefined,
       routeCampaignName: routeCampaignName || undefined,
-      ringcx: pickRingcxStamp(metadata),
+      ringcx: {
+        ...pickRingcxStamp(metadata),
+        queueItemId: queueItemId || (row?._id ? String(row._id) : null),
+        agentEmail: payload.agentEmail || metadata.assignedAgentEmail || null,
+        actionKey: payload.actionKey || metadata.actionKey || null,
+      },
       audit: {
         dispatchSource: "cx-call-placed-event-backlog",
         eventId: String(event._id),
@@ -394,7 +399,12 @@ async function recoverCxCallLogs({ start, end, dryRun = false, limit = 25000, do
       sourceChannel: sourceChannel || undefined,
       routeCampaignKey: routeCampaignKey || undefined,
       routeCampaignName: routeCampaignName || undefined,
-      ringcx: pickRingcxStamp(metadata),
+      ringcx: {
+        ...pickRingcxStamp(metadata),
+        queueItemId: String(row._id),
+        agentEmail: metadata.assignedAgentEmail || null,
+        actionKey: metadata.actionKey || null,
+      },
       audit: {
         dispatchSource: "cx-call-placed-queue-backlog",
         queueItemId: String(row._id),

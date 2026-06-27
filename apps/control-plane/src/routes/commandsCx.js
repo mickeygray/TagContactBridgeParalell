@@ -5,6 +5,8 @@ const express = require("express");
 const {
   executeCxLogicsCreateCase,
   executeCxSaveCaseProfileFromLogics,
+  executeCxAppointmentWorkbenchActions,
+  executeCxCallSummary,
   enqueueCxSmokeLead,
   executeCxLogicsFindMatch,
   simulateCxIncomingCall,
@@ -395,6 +397,13 @@ function createCommandsCxRouter(auth, options = {}) {
     async (req, res) => {
       try {
         const result = await createCxAppointment(req.params.domain, req.user, req.body || {});
+        const workbench = await executeCxAppointmentWorkbenchActions(req.params.domain, req.user, result)
+          .catch((error) => ({
+            ok: false,
+            error: error.message || "appointment-workbench-failed",
+            details: error.details || null,
+          }));
+        result.workbench = workbench;
         return res.json({ ok: true, result });
       } catch (error) {
         return res.status(error.status || 500).json(toErrorResponse(error));
@@ -463,6 +472,7 @@ function createCommandsCxRouter(auth, options = {}) {
           queueActionKey: appointment.queueActionKey || queueItem?.metadata?.actionKey || undefined,
           assignedExtensionId: appointment.agentExtensionId || undefined,
           priority: "appointment-now",
+          dialPriority: "IMMEDIATE",
           ringcxDialPriority: "IMMEDIATE",
           notes: "appointment-call-now",
         });
@@ -508,6 +518,21 @@ function createCommandsCxRouter(auth, options = {}) {
       return res.status(error.status || 500).json(toErrorResponse(error));
     }
   });
+
+  router.post(
+    "/:domain/coach/call-summary",
+    auth.requireAuth,
+    auth.requireUser,
+    auth.requirePermission("queue.dispose"),
+    async (req, res) => {
+      try {
+        const result = await executeCxCallSummary(req.params.domain, req.user, req.body || {});
+        return res.json({ ok: true, result });
+      } catch (error) {
+        return res.status(error.status || 500).json(toErrorResponse(error));
+      }
+    },
+  );
 
   router.post("/:domain/logics/update-case", auth.requireAuth, auth.requireUser, async (req, res) => {
     try {

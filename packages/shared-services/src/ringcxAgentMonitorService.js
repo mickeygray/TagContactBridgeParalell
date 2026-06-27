@@ -21,6 +21,11 @@ const {
   isCxCanonicalCallWriteEnabled,
   writeCxCallLifecycleShadowState,
 } = require("./cxCallLifecycleService");
+const {
+  observeCxBucketActiveCall,
+  reconcileCxBucketCurrentCalls,
+  primeCxBucketNewCalls,
+} = require("./cxDialQueueMediatorService");
 const { traceCxCallIdentity } = require("./cxCallTraceService");
 
 function isRingcxAgentMonitorEnabled() {
@@ -845,11 +850,51 @@ async function runRingcxAgentMonitor(options = {}) {
     .sort({ updatedAt: -1 })
     .limit(limit)
     .lean();
+  const queueItemsByExtension = new Map();
+  for (const item of queueItems) {
+    const extensionId = String(item?.assignment?.extensionId || "").trim();
+    if (!extensionId) continue;
+    if (!queueItemsByExtension.has(extensionId)) queueItemsByExtension.set(extensionId, []);
+    queueItemsByExtension.get(extensionId).push(item);
+  }
+  for (const [extensionId, items] of queueItemsByExtension.entries()) {
+    primeCxBucketNewCalls({
+      extensionId,
+      queueItems: items,
+      source: "ringcx-agent-monitor",
+      now,
+      logger,
+    }).catch((error) => {
+      logger?.warn?.("cx.bucket.queue_primed.failed", {
+        extensionId,
+        source: "ringcx-agent-monitor",
+        error: error.message || String(error),
+      });
+    });
+  }
 
   const matched = [];
   for (const call of activeCalls) {
     const match = findQueueItemForActiveCall(queueItems, call);
     if (!match) continue;
+    observeCxBucketActiveCall({
+      extensionId: match.queueItem.assignment?.extensionId || null,
+      queueItem: match.queueItem,
+      activeCall: call,
+      matchResult: {
+        queueItem: match.queueItem,
+        score: match.score,
+        reasons: match.reasons,
+      },
+      now,
+      logger,
+    }).catch((error) => {
+      logger?.warn?.("cx.bucket.active_match.failed", {
+        extensionId: match.queueItem.assignment?.extensionId || null,
+        queueItemId: match.queueItem?._id ? String(match.queueItem._id) : null,
+        error: error.message || String(error),
+      });
+    });
     const terminalOutcome = await maybeHandleTerminalOutcome(match.queueItem, call, now, logger);
     if (terminalOutcome.terminal) {
       matched.push({
@@ -877,6 +922,12 @@ async function runRingcxAgentMonitor(options = {}) {
   const ended = await markMissingCxCallsEnded(activeIdentities, now, logger);
   const orphanCleared = await clearOrphanDispositioningAgents(activeIdentities, now, logger);
   const expiredCanonicalShells = await clearExpiredCanonicalNoUiiShells(now, logger);
+  const staleBucketCurrent = await reconcileCxBucketCurrentCalls({
+    activeIdentities,
+    now,
+    logger,
+    repository: null,
+  });
   return {
     enabled: true,
     activeCalls: activeCalls.length,
@@ -885,10 +936,12 @@ async function runRingcxAgentMonitor(options = {}) {
     ended: ended.length,
     orphanCleared: orphanCleared.length,
     expiredCanonicalShells: expiredCanonicalShells.length,
+    staleBucketCurrent: staleBucketCurrent?.reconciledCount || 0,
     matches: matched.slice(0, 20),
     endedAgents: ended.slice(0, 20),
     orphanClearedAgents: orphanCleared.slice(0, 20),
     expiredCanonicalShellAgents: expiredCanonicalShells.slice(0, 20),
+    staleBucketCurrentAgents: staleBucketCurrent?.reconciled || [],
   };
 }
 

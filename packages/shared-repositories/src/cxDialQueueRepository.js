@@ -135,12 +135,44 @@ function buildExpiredClaimRequeueQuery(now) {
           { "metadata.lastDialIntentStatus": { $in: ["relay-failed", "error", "cancelled", "unconfirmed-active-call"] } },
         ],
       },
+      // M2 §3.1 — HARD ownership exclusion: a session-held (reserved) row is invisible to the
+      // global reaper, regardless of lease age. Only the owning session (releaseReserved) or the
+      // crash reconciler frees it. $exists:false keeps current non-reserved rows reaped as before.
+      {
+        $or: [
+          { "metadata.reservationSessionId": { $exists: false } },
+          { "metadata.reservationSessionId": null },
+          { "metadata.reservationSessionId": "" },
+        ],
+      },
+      // FM-5 — appointment rows are never reaper-freed (defense-in-depth alongside the $match exclude).
+      {
+        $or: [
+          { "metadata.appointmentId": { $exists: false } },
+          { "metadata.appointmentId": null },
+          { "metadata.appointmentId": "" },
+        ],
+      },
     ],
   };
 }
 
 async function findActiveQueueItem(domain, caseId, options = {}) {
   return CxDialQueue.findOne(activeQueueFilter(domain, caseId, options));
+}
+
+// M5: cross-pool publish interlock. Finds a DIFFERENT active (claimed/serving) sibling for this
+// caseId — NOT actionKey-scoped, so it catches a concurrent claim under any actionKey, and the
+// _id exclusion stops the publishing row from masking its own collision (unlike findActiveQueueItem,
+// which is a self-matching single-doc lookup over any active state).
+async function findActiveClaimForCase(domain, caseId, excludeId = null) {
+  const query = {
+    domain: normalizeDomain(domain),
+    caseId: Number(caseId),
+    state: { $in: ["claimed", "serving"] },
+  };
+  if (excludeId) query._id = { $ne: excludeId };
+  return CxDialQueue.findOne(query);
 }
 
 async function upsertQueueItem(domain, caseId, update = {}, options = {}) {
@@ -291,6 +323,129 @@ async function claimNextReadyQueueItem(domain = null, claimMinutes = 5, options 
   );
 }
 
+// Atomic bulk claim of `ready` rows per family, in TOUCH_BALANCED_QUEUE_SORT order.
+// updateMany CANNOT sort, so we find+sort+limit candidate _ids, then bulk-claim with a
+// re-asserted {state:'ready'} guard (closes the select->update TOCTOU). `modifiedCount`
+// is the true reserved count; one same-tick re-plan retry distinguishes "claimed
+// elsewhere" (FM-10, transient) from genuine short supply (returned in `missing`).
+// Reservation provenance is written as DOTTED $set keys so it never clobbers sibling
+// metadata/assignment. NET-NEW (M1): not consumed by any rail until M4 ships behind M2.
+async function reserveReadyRows(domain, familyTargets = {}, options = {}) {
+  const now = options.now instanceof Date ? options.now : new Date();
+  const claimMinutes = Math.max(Number(options.claimMinutes) || 5, 1); // G3a: caller passes explicit
+  const sessionId = String(options.sessionId || "").trim();
+  if (!sessionId) throw new Error("reserveReadyRows requires a sessionId");
+  const extensionId = options.agentExtensionId ? String(options.agentExtensionId) : null;
+  const rcxAccountId = options.rcxAccountId ? String(options.rcxAccountId).trim() : null;
+  const rcxCampaignId = options.rcxCampaignId ? String(options.rcxCampaignId).trim() : null;
+  const rcxDialGroupId = options.rcxDialGroupId ? String(options.rcxDialGroupId).trim() : null;
+  // M8b §3 — rail provenance: stamp which rail reserved this row so publish can echo it and
+  // a cross-rail actor can fail closed. Additive/dotted; null when the caller passes no rail.
+  const reservationRail = options.metadata?.rail ? String(options.metadata.rail) : null;
+  const reservedRows = [];
+  const missing = {};
+  // family order = rank order (green,blue,yellow,red); normalize keys through the SAME normalizer.
+  for (const family of normalizeQueueFamilies(Object.keys(familyTargets))) {
+    const n = Math.max(Number(familyTargets[family]) || 0, 0);
+    if (n <= 0) continue;
+    const familyMatch = {
+      state: "ready",
+      releaseAt: { $lte: now },
+      queueFamily: family,
+      "metadata.appointmentId": { $in: [null, ""] }, // G-appt: appointment rows structurally excluded
+      ...(domain ? { domain: normalizeDomain(domain) } : {}),
+      ...(rcxAccountId ? { rcxAccountId } : {}),
+      ...(rcxCampaignId ? { rcxCampaignId } : {}),
+      ...(rcxDialGroupId ? { rcxDialGroupId } : {}),
+    };
+    // --- one bulk claim, plus ONE same-tick re-plan retry on residual deficit ---
+    let need = n;
+    const attemptedIds = [];
+    for (let attempt = 0; attempt < 2 && need > 0; attempt += 1) {
+      const candidates = await CxDialQueue.find(familyMatch)
+        .sort({ ...TOUCH_BALANCED_QUEUE_SORT })
+        .limit(need)
+        .select({ _id: 1 })
+        .lean();
+      if (candidates.length === 0) break;
+      const ids = candidates.map((c) => c._id);
+      attemptedIds.push(...ids);
+      // Re-assert ready/released: rows claimed or cooled down between read+write won't match.
+      const res = await CxDialQueue.updateMany(
+        { _id: { $in: ids }, state: "ready", releaseAt: { $lte: now } },
+        {
+          $set: {
+            ...buildClaimPatch(now, claimMinutes), // state:'claimed', lastClaimedAt, claimUntil
+            "assignment.extensionId": extensionId,
+            "assignment.assignedAt": now,
+            "assignment.queueFamilySnapshot": family,
+            "metadata.reservationSessionId": sessionId,
+            "metadata.reservedAt": now,
+            "metadata.reservationExpiresAt": new Date(now.getTime() + claimMinutes * 60 * 1000),
+            "metadata.reservationRail": reservationRail,
+            "metadata.lastRingcxPublishedAt": null,
+            "metadata.lastRingcxPublishedExternId": null,
+            "metadata.lastDialExecutionUii": null,
+            "metadata.lastQueueAttemptUii": null,
+            "metadata.lastDialIntentStatus": null,
+            "metadata.servingAt": null,
+            "metadata.lastRingcxActiveCall": null,
+            "metadata.lastRingcxMatchReasons": [],
+            "metadata.lastQueueAttemptHeldForDisposition": false,
+            "metadata.wrapUpRequired": false,
+            "metadata.lastReleasedAt": null,
+            "metadata.lastReleaseReason": null,
+            "metadata.lastReleasedExtensionId": null,
+            "metadata.lastReleasedAgentName": null,
+            "metadata.lastReleasedBy": null,
+          },
+        },
+      );
+      // modifiedCount is the TRUE reserved count this round (FM-10).
+      const won = Number(res?.modifiedCount || res?.nModified || 0);
+      need -= won;
+      if (won === 0) break; // nothing left to win this tick
+    }
+    // Re-read exactly the attempted ids this session now owns in this family.
+    // Do not key correctness on metadata.reservedAt timestamp equality: BSON
+    // precision/serialization should never make a won claim disappear from the
+    // caller's buffer. reservedAt remains an audit stamp only.
+    if (attemptedIds.length > 0 && need < n) {
+      const claimed = await CxDialQueue.find({
+        _id: { $in: [...new Set(attemptedIds.map((id) => String(id)))] },
+        ...(domain ? { domain: normalizeDomain(domain) } : {}),
+        queueFamily: family,
+        state: "claimed",
+        "metadata.reservationSessionId": sessionId,
+      }).sort({ ...TOUCH_BALANCED_QUEUE_SORT });
+      reservedRows.push(...claimed.map((doc) => doc.toObject()));
+    }
+    if (need > 0) missing[family] = need; // genuine short supply, NOT elsewhere-claim
+  }
+  return { reserved: reservedRows, missing };
+}
+
+// renewClaim (M2 §3.2) — ONE guarded CAS per row. Re-confirms {state:'claimed',
+// reservationSessionId} at write time, so it silently no-ops once the row goes 'serving'
+// or another owner holds it. This is a LIVENESS heartbeat, NOT the safety mechanism (that
+// is the reaper ownership-exclusion above). Returns the ids actually renewed; the caller
+// drops the rest from its heartbeat set.
+async function renewClaim(ids = [], claimMinutes = 5, sessionId = null) {
+  const now = new Date();
+  const minutes = Math.max(Number(claimMinutes) || 5, 1);
+  const until = new Date(now.getTime() + minutes * 60 * 1000);
+  const renewed = [];
+  for (const id of ids) {
+    const updated = await CxDialQueue.findOneAndUpdate(
+      { _id: id, state: "claimed", "metadata.reservationSessionId": sessionId },
+      { $set: { claimUntil: until, "metadata.reservationExpiresAt": until } },
+      { new: true },
+    );
+    if (updated) renewed.push(updated._id);
+  }
+  return renewed;
+}
+
 async function markQueueItemCompleted(id) {
   return CxDialQueue.findByIdAndUpdate(
     id,
@@ -305,13 +460,26 @@ async function markQueueItemCompleted(id) {
   );
 }
 
-async function cancelActiveQueueItems(domain, caseId, reason = null) {
+async function cancelActiveQueueItems(domain, caseId, reason = null, options = {}) {
+  const query = {
+    domain: normalizeDomain(domain),
+    caseId: Number(caseId),
+    state: { $in: ["queued", "ready", "claimed", "serving", "paused"] },
+  };
+  if (options.includeReserved !== true) {
+    query.$and = [
+      ...(Array.isArray(query.$and) ? query.$and : []),
+      {
+        $or: [
+          { "metadata.reservationSessionId": { $exists: false } },
+          { "metadata.reservationSessionId": null },
+          { "metadata.reservationSessionId": "" },
+        ],
+      },
+    ];
+  }
   const result = await CxDialQueue.updateMany(
-    {
-      domain: normalizeDomain(domain),
-      caseId: Number(caseId),
-      state: { $in: ["queued", "ready", "claimed", "serving", "paused"] },
-    },
+    query,
     {
       $set: {
         state: "cancelled",
@@ -368,6 +536,71 @@ async function findQueueItemById(id) {
   return CxDialQueue.findById(id);
 }
 
+async function listClaimedByReservationSession(input = {}) {
+  const sessionId = String(
+    typeof input === "string" ? input : input.sessionId || "",
+  ).trim();
+  if (!sessionId) return [];
+  const rawStates = Array.isArray(input.states) && input.states.length > 0
+    ? input.states
+    : ["claimed"];
+  const states = rawStates.map((state) => String(state || "").trim()).filter(Boolean);
+  if (!states.length) return [];
+  const cursor = CxDialQueue.find({
+    state: { $in: states },
+    "metadata.reservationSessionId": sessionId,
+  }).sort({ claimUntil: 1, createdAt: 1, _id: 1 });
+  const unbounded =
+    input.limitAll === true ||
+    input.noLimit === true ||
+    String(input.limit || "").trim().toLowerCase() === "all" ||
+    Number(input.limit) === 0;
+  if (!unbounded) {
+    cursor.limit(Math.min(Number(input.limit) || 1000, 5000));
+  }
+  return cursor.lean();
+}
+
+async function findQueueItemsByRingcxExternIds(externIds = [], filters = {}) {
+  const ids = Array.from(
+    new Set(
+      (Array.isArray(externIds) ? externIds : [externIds])
+        .map((value) => String(value || "").trim())
+        .filter(Boolean),
+    ),
+  );
+  if (!ids.length) return [];
+
+  const query = {
+    $or: [
+      { "metadata.rcxVisibilityExternId": { $in: ids } },
+      { "metadata.lastRingcxPublishedExternId": { $in: ids } },
+      { "metadata.lastDialExecutionRingcxPublish.externId": { $in: ids } },
+    ],
+  };
+  if (filters.domain) query.domain = normalizeDomain(filters.domain);
+  if (Array.isArray(filters.states) && filters.states.length > 0) {
+    query.state = { $in: filters.states.map((value) => String(value || "").trim()).filter(Boolean) };
+  }
+  const campaignId = String(filters.campaignId || "").trim();
+  if (campaignId) {
+    query.$and = [
+      ...(Array.isArray(query.$and) ? query.$and : []),
+      {
+        $or: [
+          { rcxCampaignId: campaignId },
+          { "metadata.rcxCampaignId": campaignId },
+          { "metadata.lastRingcxPublishedCampaignId": campaignId },
+        ],
+      },
+    ];
+  }
+
+  return CxDialQueue.find(query)
+    .limit(Math.min(ids.length * 3, 100))
+    .lean();
+}
+
 async function findClaimedQueueItemByRequestKey(domain, requestKey) {
   const normalizedRequestKey = String(requestKey || "").trim();
   if (!normalizedRequestKey) return null;
@@ -388,6 +621,12 @@ async function listQueueItems(filters = {}) {
   if (filters.state) query.state = filters.state;
   if (Array.isArray(filters.states) && filters.states.length > 0) {
     query.state = { $in: filters.states };
+  }
+  if (Array.isArray(filters.excludeIds) && filters.excludeIds.length > 0) {
+    const excluded = filters.excludeIds.map((id) => String(id || "").trim()).filter(Boolean);
+    if (excluded.length > 0) {
+      query._id = { $nin: excluded };
+    }
   }
   if (filters.queueFamily) {
     const families = normalizeQueueFamilies(filters.queueFamily);
@@ -417,8 +656,21 @@ async function listQueueItems(filters = {}) {
     }
   }
 
+  // M3 — reconciler filter: claimed rows whose owning session is NOT currently live. The $ne:null
+  // ensures a reconcile target actually carries a (stale) sessionId, never a non-reserved row.
+  if (Array.isArray(filters.metadataReservationSessionIdNotIn) && filters.metadataReservationSessionIdNotIn.length > 0) {
+    query["metadata.reservationSessionId"] = {
+      $nin: filters.metadataReservationSessionIdNotIn,
+      $ne: null,
+    };
+  }
+
   const cursor = CxDialQueue.find(query)
-    .sort(TOUCH_BALANCED_QUEUE_SORT);
+    .sort(
+      filters.sort && typeof filters.sort === "object" && !Array.isArray(filters.sort)
+        ? filters.sort
+        : TOUCH_BALANCED_QUEUE_SORT,
+    );
 
   const unbounded =
     filters.limitAll === true ||
@@ -469,16 +721,22 @@ async function countQueueItems(filters = {}) {
 }
 
 module.exports = {
+  buildExpiredClaimRequeueQuery, // exported for offline reaper-exclusion tests (M2/M8); pure
   cancelActiveQueueItems,
   claimNextReadyQueueItem,
   countQueueItems,
+  findActiveClaimForCase,
   findActiveQueueItem,
   findClaimedQueueItemByRequestKey,
   findQueueItemById,
+  findQueueItemsByRingcxExternIds,
+  listClaimedByReservationSession,
   listQueueItems,
   markQueueItemCompleted,
   releaseDueQueueItems,
+  renewClaim,
   requeueExpiredClaims,
+  reserveReadyRows,
   transitionQueueItemState,
   updateQueueItem,
   upsertQueueItem,

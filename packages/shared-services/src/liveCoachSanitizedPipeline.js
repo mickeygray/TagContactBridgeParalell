@@ -2239,6 +2239,7 @@ module.exports = {
   CALL_SCREENER_MATCHES,
   SYSTEM_CONTEXT_CLEAR_MATCHES,
   CONTEXT_RULES,
+  TACTIC_RULES,
   VOICEMAIL_MATCHES,
   analyzeCallScreener,
   analyzeSystemContextClear,
