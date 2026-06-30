@@ -123,6 +123,7 @@ const {
   createCxTerminalOutboxDrain,
   enrichTerminalPacketWithCoachSummary,
   handleCxTerminalCallOutcome,
+  buildTerminalEvidenceKeys,
   writeAgentCallNoteFromTerminal,
   writeCxCallWrapSummary,
   watchCxBulkLoadAccountActiveCalls,
@@ -179,21 +180,13 @@ function getMongoReadyState(runtime) {
   }
 }
 
+// Delegate to the outcome adapter's read-side key builder so the reconciler's terminal-evidence
+// lookup mirrors EVERY idemKey shape the single writer (makeOutcomeIdemKey) can emit — including
+// the no-UII terminal shapes that skip / kill-manual-reset writes produce. Hand-rolling only
+// `queueItemId:uii` (and short-circuiting on a missing queueItemId) silently re-dialed a
+// terminally dispositioned lead. (#12 — see cxBulkLoadOutcomeAdapter.buildTerminalEvidenceKeys)
 function cxBulkTerminalEvidenceKeys(row = {}) {
-  const queueItemId = String(row?._id || row?.queueItemId || "").trim();
-  if (!queueItemId) return [];
-  const metadata = row.metadata && typeof row.metadata === "object" ? row.metadata : {};
-  const uiis = [
-    row.uii,
-    metadata.lastQueueAttemptUii,
-    metadata.lastDialExecutionUii,
-    metadata.lastRingcxActiveCall?.uii,
-    metadata.lastRingcxActiveCall?.callId,
-    metadata.lastRingcxActiveCall?.sessionId,
-  ]
-    .map((value) => String(value || "").trim())
-    .filter(Boolean);
-  return [...new Set(uiis.map((uii) => `${queueItemId}:${uii}`))];
+  return buildTerminalEvidenceKeys(row);
 }
 
 async function hasCxBulkTerminalEvidence(row = {}) {

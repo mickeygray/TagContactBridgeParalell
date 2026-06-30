@@ -40,6 +40,113 @@ function makeOutcomeIdemKey({ sessionId, queueItemId, uii = null, caseId = null,
   return `${str(sessionId)}:${qid}:${kind}`;
 }
 
+// PURE. Read-side counterpart to makeOutcomeIdemKey. Given a queue row as the reservation
+// reconciler sees it, produce the FULL set of idemKeys any terminal write for that row could
+// have used, so an exact `idemKey: { $in: keys }` lookup against the outbox is a SUPERSET of
+// whatever was actually written. Mirrors every branch of makeOutcomeIdemKey — the UII-bearing
+// (`queueItemId:uii` / `sessionId:uii:uii`) shapes AND the no-UII terminal shapes
+// (`sessionId:queueItemId:terminal` / `sessionId:case:caseId:terminal`) that skip and
+// kill-manual-reset writes produce. The reconciler previously hand-rolled only `queueItemId:uii`
+// and short-circuited when queueItemId was set, so a no-UII terminal row went unmatched and an
+// already-dispositioned lead was RELEASED back to ready (re-dialed). (#12)
+function buildTerminalEvidenceKeys(row = {}) {
+  const metadata = row && typeof row.metadata === "object" && row.metadata ? row.metadata : {};
+  const queueItemId = str(row && (row._id || row.queueItemId));
+  const sessionId = str(
+    metadata.reservationSessionId
+      || (row && row.sessionId)
+      || metadata.bulkLoadSessionId
+      || metadata.lastBulkLoadSessionId,
+  );
+  const caseKey = str(row && row.caseId);
+  const uiis = [
+    row && row.uii,
+    metadata.lastQueueAttemptUii,
+    metadata.lastDialExecutionUii,
+    metadata.lastRingcxActiveCall && metadata.lastRingcxActiveCall.uii,
+    metadata.lastRingcxActiveCall && metadata.lastRingcxActiveCall.callId,
+    metadata.lastRingcxActiveCall && metadata.lastRingcxActiveCall.sessionId,
+  ]
+    .map(str)
+    .filter(Boolean);
+  const keys = new Set();
+  for (const uii of uiis) {
+    const key = makeOutcomeIdemKey({ sessionId, queueItemId, uii, caseId: row && row.caseId, eventType: "terminal" });
+    if (key) keys.add(key);
+  }
+  // The no-UII terminal key. Guard against the degenerate `sessionId::terminal` (no qid AND no
+  // case) so we never emit a key broad enough to match an unrelated row.
+  if (queueItemId || caseKey) {
+    const key = makeOutcomeIdemKey({ sessionId, queueItemId, caseId: row && row.caseId, eventType: "terminal" });
+    if (key) keys.add(key);
+  }
+  return [...keys];
+}
+
+// PURE (#4). Build a DNC rectification outbox row — a SEPARATE durable record, NOT a mutation of the
+// in-flight terminal row the drain may already be replaying. Keyed with eventType "review-dnc" so it
+// can never collide with the original terminal idemKey (`queueItemId:uii`), and a repeated review
+// dedups via insertOnce's unique index. It copies the original terminal row's payload (the proven
+// drain shape) and flips outcome -> "dnc", so the same drain machinery routes the DNC to Logics —
+// giving the correction a guaranteed lane even AFTER the original terminal row drained. Falls back to
+// a minimal payload when no original row is found.
+function buildReviewCorrectionRow({
+  sessionId,
+  queueItemId,
+  uii,
+  original = null,
+  domain = null,
+  agentEmail = null,
+  caseId = null,
+  at = null,
+} = {}) {
+  const ts = at || new Date().toISOString();
+  const basePayload = original && original.payload && typeof original.payload === "object" ? original.payload : null;
+  const pick = (...vals) => {
+    for (const v of vals) {
+      if (v != null && !(typeof v === "string" && v.trim() === "")) return v;
+    }
+    return null;
+  };
+  const resolvedDomain = pick(domain, original && original.domain, basePayload && basePayload.domain);
+  const resolvedCaseId = pick(
+    caseId,
+    original && original.caseId,
+    basePayload && basePayload.caseId,
+  );
+  const resolvedAgentEmail = pick(original && original.agentEmail, basePayload && basePayload.agentEmail, agentEmail);
+  const externId = pick(original && original.externId, basePayload && basePayload.externId);
+  const overrides = {
+    queueItemId,
+    uii,
+    domain: resolvedDomain,
+    caseId: resolvedCaseId,
+    externId,
+    outcome: "dnc",
+    source: "agent-auto-review",
+    reviewSource: "agent-auto-review",
+    reviewedAt: ts,
+    at: ts,
+  };
+  const payload = basePayload
+    ? { ...basePayload, ...overrides }
+    : { ...overrides, agentEmail: resolvedAgentEmail };
+  return {
+    idemKey: makeOutcomeIdemKey({ sessionId, queueItemId, uii, eventType: "review-dnc" }),
+    sessionId,
+    rail: "bulk_load",
+    domain: resolvedDomain,
+    queueItemId,
+    uii,
+    caseId: resolvedCaseId,
+    agentEmail: resolvedAgentEmail,
+    externId,
+    outcome: "dnc",
+    source: "agent-auto-review",
+    payload,
+  };
+}
+
 // PURE. Narrow projection of a completion into the cadence/metric event shape the
 // existing finalizers consume. No I/O, no derived business decisions.
 function buildCadenceEvent({ session = {}, candidate = {}, outcome = null, source = null, at = null } = {}) {
@@ -110,6 +217,8 @@ function createCxBulkLoadOutcomeAdapter(deps = {}) {
 
 module.exports = {
   makeOutcomeIdemKey,
+  buildTerminalEvidenceKeys,
+  buildReviewCorrectionRow,
   buildCadenceEvent,
   createCxBulkLoadOutcomeAdapter,
 };

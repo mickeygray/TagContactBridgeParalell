@@ -12,6 +12,8 @@
 //
 // dialPriority defaults to NORMAL: bulk dials in load order (FIFO), not LIFO.
 
+const { logCxAlpha } = require("./cxAlphaTraceService");
+
 function str(value) {
   return String(value == null ? "" : value).trim();
 }
@@ -153,7 +155,34 @@ async function publishBatchToRingcx(client, input = {}) {
     }));
   const result = await client.loadLeads(campaignId, payload);
   const patch = toCandidatePublishPatch(result, uploadedCandidates);
-  return { supplied: payload.uploadLeads.length, accepted: patch.accepted, rejected: [...patch.rejected, ...notUploaded], result };
+  // ALPHA observability: log the RingCX publish-batch reconciliation at the transport boundary —
+  // the one place the "publish accepted but RingCX never dialed" / phantom-lead class shows up
+  // (RingCX reports leadsInserted < what we counted accepted). The service trace only carries the
+  // accepted externId; this surfaces processingStatus + leadsInserted + reject reasons. Gated by
+  // CX_ALPHA_TRACE_ENABLED, PII-redacted, never throws.
+  const rejectAll = [...patch.rejected, ...notUploaded];
+  const insertedCount = readInsertedCount(result);
+  const rejectReasons = {};
+  for (const r of rejectAll) {
+    const reason = str(r && r.reason) || "unknown";
+    rejectReasons[reason] = (rejectReasons[reason] || 0) + 1;
+  }
+  logCxAlpha("cx.alpha.publish.batch", {
+    rail: "bulk_load",
+    campaignId,
+    dialPriority: str(input.dialPriority) || "NORMAL",
+    supplied: payload.uploadLeads.length,
+    acceptedCount: patch.accepted.length,
+    rejectedCount: rejectAll.length,
+    insertedCount, // RingCX leadsInserted (null = not reported in the response)
+    processingStatus: str(result && result.processingStatus) || null,
+    rejectReasons,
+    acceptedExternIds: patch.accepted.map((a) => a.externId).filter(Boolean),
+    acceptedQueueItemIds: patch.accepted.map((a) => str(a.queueItemId)).filter(Boolean),
+    // accepted by us but RingCX inserted fewer -> these may never actually dial (phantom lead).
+    phantomSuspected: patch.accepted.length > 0 && insertedCount !== null && insertedCount < patch.accepted.length,
+  });
+  return { supplied: payload.uploadLeads.length, accepted: patch.accepted, rejected: rejectAll, result };
 }
 
 // Thin I/O. Cancel still-buffered candidates for a killed session (no dial ever

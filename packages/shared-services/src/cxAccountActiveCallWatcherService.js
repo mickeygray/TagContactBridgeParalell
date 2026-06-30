@@ -1,11 +1,16 @@
 "use strict";
 
 const bulkWatcher = require("./cxBulkLoadActiveCallWatcher");
+const { logCxAlpha } = require("./cxAlphaTraceService");
 const { reduceCxBulkLoadState } = require("./cxBulkLoadStateMachine");
-const { describeBulkLoadMutationEligibility } = require("./cxBulkLoadMutationEligibility");
+const { describeBulkLoadMutationEligibility, buildVersionGuardOptions } = require("./cxBulkLoadMutationEligibility");
 
 function str(value) {
   return String(value == null ? "" : value).trim();
+}
+
+function traceWatcher(event, payload = {}) {
+  logCxAlpha(event, { rail: "bulk_load", ...payload });
 }
 
 function isRealRingcxUii(value) {
@@ -33,6 +38,29 @@ function queueItemKey(value = null) {
 
 function hasTerminalWriteProof(candidate = null) {
   return Boolean(queueItemKey(candidate) && isRealRingcxUii(candidate?.uii));
+}
+
+function summarizeProjection(projection = {}) {
+  return {
+    sessionId: projection.sessionId || null,
+    agentEmail: projection.agentEmail || null,
+    agentExtensionId: projection.agentExtensionId || null,
+    accountId: projection.accountId || null,
+    changed: Boolean(projection.changed),
+    error: projection.error || null,
+    activeCallCount: Number(projection.activeCallCount || 0),
+    relevantActiveCallCount: Number(projection.relevantActiveCallCount || 0),
+    releasedCount: Number(projection.releasedCount || 0),
+    terminalObservationCount: Array.isArray(projection.terminalObservations)
+      ? projection.terminalObservations.length
+      : 0,
+    matchStatus: projection.matchStatus || null,
+    transitionKind: projection.transitionKind || null,
+    currentQueueItemId: projection.currentQueueItemId || null,
+    currentUii: projection.currentUii || null,
+    currentPromotionRequired: Boolean(projection.currentPromotion?.required),
+    currentPromotionKind: projection.currentPromotion?.kind || null,
+  };
 }
 
 function reviewHoldUntilMs(state = {}) {
@@ -353,6 +381,11 @@ async function buildCxAccountActiveCallWatchPlan(input = {}) {
   for (const [accountId, accountSessions] of byAccount.entries()) {
     let activeCalls = [];
     let error = null;
+    const readStartedAt = Date.now();
+    traceWatcher("cx.alpha.watch.account.read_started", {
+      accountId,
+      sessionCount: accountSessions.length,
+    });
     try {
       activeCalls = await watcher.loadActiveCallsSnapshot(client, {
         product: "ACCOUNT",
@@ -362,6 +395,13 @@ async function buildCxAccountActiveCallWatchPlan(input = {}) {
     } catch (err) {
       error = err;
     }
+    traceWatcher("cx.alpha.watch.account.read_finished", {
+      accountId,
+      sessionCount: accountSessions.length,
+      activeCallCount: Array.isArray(activeCalls) ? activeCalls.length : 0,
+      error: error ? (error.message || String(error)) : null,
+      elapsedMs: Date.now() - readStartedAt,
+    });
 
     accounts.push({
       accountId,
@@ -380,6 +420,14 @@ async function buildCxAccountActiveCallWatchPlan(input = {}) {
           changed: false,
           error: error.message || String(error),
         });
+        traceWatcher("cx.alpha.watch.session.projected", {
+          sessionId: session.sessionId || null,
+          agentEmail: session.agentEmail || null,
+          agentExtensionId: session.agentExtensionId || null,
+          accountId,
+          changed: false,
+          error: error.message || String(error),
+        });
       }
       continue;
     }
@@ -393,12 +441,31 @@ async function buildCxAccountActiveCallWatchPlan(input = {}) {
           now: at,
         });
       }
-      projections.push(projectBulkSessionFromAccountSnapshot(session, activeCalls, {
+      const projection = projectBulkSessionFromAccountSnapshot(session, activeCalls, {
         watcher,
         reduce: input.reduce || reduceCxBulkLoadState,
         externalCandidates,
         now: at,
-      }));
+      });
+      // Bind a re-projection against THIS tick's same active-call snapshot so the apply step can
+      // recover from a __v race (version-miss) by re-reading the latest session row and re-deriving
+      // the release diff, instead of dropping the recomputed anchors. Non-enumerable so it never
+      // leaks into the serialized plan result / logs. (#6)
+      Object.defineProperty(projection, "reproject", {
+        value: (freshSession) =>
+          projectBulkSessionFromAccountSnapshot(freshSession, activeCalls, {
+            watcher,
+            reduce: input.reduce || reduceCxBulkLoadState,
+            externalCandidates,
+            now: at,
+          }),
+        enumerable: false,
+      });
+      projections.push(projection);
+      traceWatcher("cx.alpha.watch.session.projected", {
+        ...summarizeProjection(projection),
+        externalCandidateCount: Array.isArray(externalCandidates) ? externalCandidates.length : 0,
+      });
     }
   }
 
@@ -462,6 +529,15 @@ async function runCxAccountActiveCallWatchOnce(input = {}) {
     resolveExternalCandidates: input.resolveExternalCandidates,
     now: input.now,
   });
+  traceWatcher("cx.alpha.watch.tick.summary", {
+    checkedAt: plan.checkedAt || null,
+    accountCount: plan.summary?.accountCount || 0,
+    sessionCount: plan.summary?.sessionCount || 0,
+    changedCount: plan.summary?.changedCount || 0,
+    errorCount: plan.summary?.errorCount || 0,
+    skippedCount: (plan.summary?.skippedCount || 0) + busySkipped.length,
+    busySkippedCount: busySkipped.length,
+  });
 
   const writes = [];
   const skipped = [...busySkipped];
@@ -471,6 +547,15 @@ async function runCxAccountActiveCallWatchOnce(input = {}) {
     for (const observation of projection.terminalObservations || []) {
       if (typeof input.outcomeAdapter?.persistTerminalOutcome !== "function") continue;
       if (!hasTerminalWriteProof(observation.candidate)) {
+        traceWatcher("cx.alpha.terminal.observation.skipped", {
+          sessionId: projection.sessionId,
+          agentEmail: projection.agentEmail || null,
+          accountId: projection.accountId || null,
+          reason: "missing-queue-item-or-uii",
+          queueItemId: queueItemKey(observation.candidate) || null,
+          uii: str(observation.candidate?.uii) || null,
+          source: observation.source || "active-call-release",
+        });
         skipped.push({
           sessionId: projection.sessionId,
           agentEmail: projection.agentEmail || null,
@@ -487,6 +572,15 @@ async function runCxAccountActiveCallWatchOnce(input = {}) {
         source: observation.source || "active-call-release",
         eventType: "terminal",
       });
+      traceWatcher("cx.alpha.terminal.outbox_insert.finished", {
+        sessionId: projection.sessionId,
+        agentEmail: projection.agentEmail || null,
+        accountId: projection.accountId || null,
+        queueItemId: queueItemKey(observation.candidate),
+        uii: str(observation.candidate?.uii) || null,
+        outcome: observation.outcome || "did_not_connect",
+        source: observation.source || "active-call-release",
+      });
       terminalWrites.push({
         sessionId: projection.sessionId,
         agentEmail: projection.agentEmail || null,
@@ -502,22 +596,96 @@ async function runCxAccountActiveCallWatchOnce(input = {}) {
     ? input.applySessionMutation
     : async (_sessionId, work) => work();
 
+  // #6: bounded re-read + re-project + retry on a version-miss, scoped to the safe pure-release
+  // path. Returns { saved, projection, write } on success, or { saved:null, reason } otherwise.
+  // No-ops (returns plain "version-miss") when the runtime did not inject loadLatestState or the
+  // projection carries no reproject binding, preserving the legacy single-shot behavior.
+  async function retryReleaseProjectionOnVersionMiss(projection, maxAttempts = 2) {
+    if (typeof input.loadLatestState !== "function" || typeof projection.reproject !== "function") {
+      return { saved: null, reason: "version-miss" };
+    }
+    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+      const latest = await input.loadLatestState(projection.sessionId);
+      if (!latest) return { saved: null, reason: "version-miss-session-gone" };
+      if (typeof input.isSessionBusy === "function" && input.isSessionBusy(projection.sessionId)) {
+        return { saved: null, reason: "version-miss-busy" };
+      }
+      const fresh = projection.reproject(latest);
+      if (!fresh || !fresh.changed) return { saved: null, reason: "version-miss-no-change" };
+      // A fresh promotion would need a serving-ownership stamp we have NOT taken here; bail rather
+      // than write a current the queue row isn't stamped serving for. The pure release/terminal
+      // path (no required promotion) is safe to re-drive.
+      if (fresh.currentPromotion && fresh.currentPromotion.required) {
+        return { saved: null, reason: "version-miss-needs-promotion" };
+      }
+      const writeOptions = buildVersionGuardOptions(latest);
+      const patch = { ...fresh.after };
+      delete patch._id;
+      delete patch.__v;
+      const saved = await sessionRepository.updateBulkLoadSession(projection.sessionId, patch, writeOptions);
+      if (saved) {
+        return {
+          saved,
+          projection: fresh,
+          write: {
+            sessionId: projection.sessionId,
+            agentEmail: projection.agentEmail || null,
+            accountId: projection.accountId || null,
+            transitionKind: fresh.transitionKind || null,
+            currentQueueItemId: saved.current?.queueItemId || fresh.currentQueueItemId || null,
+            currentUii: saved.current?.uii || fresh.currentUii || null,
+            releasedCount: fresh.releasedCount || 0,
+            retriedVersionMiss: true,
+          },
+        };
+      }
+      // still racing — loop and re-read against an even fresher row
+    }
+    return { saved: null, reason: "version-miss-exhausted" };
+  }
+
   async function applyProjection(projection) {
+    const promotion = projection.currentPromotion || null;
+    const promotionRequired = Boolean(
+      promotion && promotion.required && typeof input.queueStateAdapter?.markCandidateServing === "function",
+    );
+    // Only pay for a latest-state read when we are about to take a Mongo side-effect (the serving
+    // ownership stamp) BEFORE the version-guarded session write — that is the one spot where a stale
+    // projection can orphan a queue-row serving/wrapUpRequired stamp the session never adopts. Pure
+    // release/version-guarded writes are already protected by the write's own version guard. (#10)
+    const latest = promotionRequired && typeof input.loadLatestState === "function"
+      ? await input.loadLatestState(projection.sessionId)
+      : null;
     const eligibility = describeBulkLoadMutationEligibility({
       session: projection.before,
+      latest,
       busy: typeof input.isSessionBusy === "function" && input.isSessionBusy(projection.sessionId),
     });
     if (!eligibility.ok) {
+      traceWatcher("cx.alpha.watch.session.skipped", {
+        sessionId: projection.sessionId,
+        agentEmail: projection.agentEmail || null,
+        agentExtensionId: projection.agentExtensionId || null,
+        accountId: projection.accountId || null,
+        reason: eligibility.reason === "session-busy"
+          ? "session-busy-apply"
+          : eligibility.reason === "stale-projection"
+            ? "stale-projection-apply"
+            : eligibility.reason,
+      });
       skipped.push({
         sessionId: projection.sessionId,
         agentEmail: projection.agentEmail || null,
         accountId: projection.accountId || null,
-        reason: eligibility.reason === "session-busy" ? "session-busy-apply" : eligibility.reason,
+        reason: eligibility.reason === "session-busy"
+          ? "session-busy-apply"
+          : eligibility.reason === "stale-projection"
+            ? "stale-projection-apply"
+            : eligibility.reason,
       });
       return;
     }
-    const promotion = projection.currentPromotion || null;
-    if (promotion && promotion.required && typeof input.queueStateAdapter?.markCandidateServing === "function") {
+    if (promotionRequired) {
       const adopted = promotion.candidate?.adoption?.source === "ringcx-active-external-id";
       const servingMethod =
         adopted && typeof input.queueStateAdapter.markAdoptedCandidateServing === "function"
@@ -533,6 +701,21 @@ async function runCxAccountActiveCallWatchOnce(input = {}) {
         })
         .catch(() => null);
       if (!served) {
+        // The departing call's terminal outcome is INDEPENDENT of whether the incoming candidate
+        // can be adopted — flush co-attached terminal observations before bailing, or a real,
+        // already-ended call (queueItemId + UII) loses its did_not_connect and the lead's attempt
+        // accounting is corrupted. persistTerminalObservations self-guards each obs with
+        // hasTerminalWriteProof, and this branch returns before the line-~579 flush so there is no
+        // double-write. The session state patch (B's promotion) is correctly NOT written here. (#7)
+        await persistTerminalObservations(projection);
+        traceWatcher("cx.alpha.watch.serving_stamp.missed", {
+          sessionId: projection.sessionId,
+          agentEmail: projection.agentEmail || null,
+          accountId: projection.accountId || null,
+          currentQueueItemId: projection.currentQueueItemId || null,
+          currentUii: projection.currentUii || null,
+          adopted,
+        });
         skipped.push({
           sessionId: projection.sessionId,
           agentEmail: projection.agentEmail || null,
@@ -543,6 +726,15 @@ async function runCxAccountActiveCallWatchOnce(input = {}) {
         });
         return;
       }
+      traceWatcher("cx.alpha.watch.serving_stamp.accepted", {
+        sessionId: projection.sessionId,
+        agentEmail: projection.agentEmail || null,
+        accountId: projection.accountId || null,
+        currentQueueItemId: projection.currentQueueItemId || null,
+        currentUii: projection.currentUii || null,
+        adopted,
+        servingMethod,
+      });
     }
 
     let after = projection.after;
@@ -558,16 +750,46 @@ async function runCxAccountActiveCallWatchOnce(input = {}) {
     const writeOptions = eligibility.writeOptions || {};
     const saved = await sessionRepository.updateBulkLoadSession(projection.sessionId, patch, writeOptions);
     if (!saved) {
-      skipped.push({
+      // A concurrent writer bumped __v between our read and this write. Re-read the latest row and
+      // re-PROJECT against THIS tick's same active-call snapshot, then retry the guarded write, so a
+      // lead that went active->released entirely inside the race gap is still counted — its terminal
+      // observation (and the recomputed release anchors) would otherwise be dropped. We never
+      // blind-resend the stale patch (that would clobber the very writer the version guard protects
+      // against); the retry only re-drives the pure release/terminal path. (#6)
+      const retried = await retryReleaseProjectionOnVersionMiss(projection);
+      if (retried.saved) {
+        writes.push(retried.write);
+        traceWatcher("cx.alpha.watch.version_miss.recovered", retried.write);
+        await persistTerminalObservations(retried.projection);
+      } else {
+        traceWatcher("cx.alpha.watch.version_miss.unrecovered", {
+          sessionId: projection.sessionId,
+          agentEmail: projection.agentEmail || null,
+          accountId: projection.accountId || null,
+          reason: retried.reason || "version-miss",
+          expectedVersion: writeOptions.expectedVersion ?? null,
+          expectedUpdatedAt: writeOptions.expectedUpdatedAt ?? null,
+        });
+        skipped.push({
+          sessionId: projection.sessionId,
+          agentEmail: projection.agentEmail || null,
+          accountId: projection.accountId || null,
+          reason: retried.reason || "version-miss",
+          expectedVersion: writeOptions.expectedVersion ?? null,
+          expectedUpdatedAt: writeOptions.expectedUpdatedAt ?? null,
+        });
+      }
+    } else {
+      writes.push({
         sessionId: projection.sessionId,
         agentEmail: projection.agentEmail || null,
         accountId: projection.accountId || null,
-        reason: "version-miss",
-        expectedVersion: writeOptions.expectedVersion ?? null,
-        expectedUpdatedAt: writeOptions.expectedUpdatedAt ?? null,
+        transitionKind: projection.transitionKind || null,
+        currentQueueItemId: saved.current?.queueItemId || projection.currentQueueItemId || null,
+        currentUii: saved.current?.uii || projection.currentUii || null,
+        releasedCount: projection.releasedCount || 0,
       });
-    } else {
-      writes.push({
+      traceWatcher("cx.alpha.watch.session.persisted", {
         sessionId: projection.sessionId,
         agentEmail: projection.agentEmail || null,
         accountId: projection.accountId || null,
@@ -585,7 +807,7 @@ async function runCxAccountActiveCallWatchOnce(input = {}) {
     await runSessionApply(projection.sessionId, () => applyProjection(projection));
   }
 
-  return {
+  const result = {
     ...plan,
     applied: {
       writeCount: writes.length,
@@ -596,6 +818,16 @@ async function runCxAccountActiveCallWatchOnce(input = {}) {
       terminalWrites,
     },
   };
+  traceWatcher("cx.alpha.watch.tick.applied", {
+    checkedAt: result.checkedAt || null,
+    writeCount: writes.length,
+    skippedCount: skipped.length,
+    terminalWriteCount: terminalWrites.length,
+    writeSamples: writes.slice(0, 5),
+    skippedSamples: skipped.slice(0, 5),
+    terminalWriteSamples: terminalWrites.slice(0, 5),
+  });
+  return result;
 }
 
 module.exports = {

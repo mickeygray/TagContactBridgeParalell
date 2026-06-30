@@ -37,6 +37,9 @@ function createCxQueueReservationService({
     totalLimit = null,
     claimMinutes,
     metadata = {},
+    firstTouchOnly = false,
+    greenCoverageBatchId = null,
+    queueLane = null,
   } = {}) {
     if (!sessionId) throw new Error("reserveFromFamilyOrder requires a sessionId");
     let remaining = Number.isFinite(totalLimit) ? Math.max(Number(totalLimit), 0) : Infinity;
@@ -58,6 +61,9 @@ function createCxQueueReservationService({
         rcxAccountId: metadata.rcxAccountId,
         rcxCampaignId: metadata.rcxCampaignId,
         rcxDialGroupId: metadata.rcxDialGroupId,
+        firstTouchOnly,
+        greenCoverageBatchId,
+        queueLane,
       });
 
       // M5: claim-time cross-pool interlock — drop+release any reserved row already active in the UCQ pool.
@@ -134,10 +140,48 @@ function createCxQueueReservationService({
     }
   }
 
+  // Terminalize reserved rows that must never return to ready. This is for fail-closed
+  // inventory outcomes such as enforced DNC/contact blocking after claim.
+  async function cancelReserved(rows = [], reason = "reserved-cancelled") {
+    for (const row of rows) {
+      const reservationSessionId = row?.metadata?.reservationSessionId;
+      if (!reservationSessionId) {
+        logger.warn?.("cancelReserved skipped row without reservationSessionId", { id: String(row?._id) });
+        continue;
+      }
+      await cxDialQueueRepository
+        .transitionQueueItemState(
+          row._id,
+          ["claimed", "ready"],
+          {
+            state: "cancelled",
+            claimUntil: null,
+            cancelledAt: new Date(),
+            assignment: { extensionId: null, agentName: null, assignedAt: null, queueFamilySnapshot: null },
+            "metadata.reservationSessionId": null,
+            "metadata.reservedAt": null,
+            "metadata.reservationExpiresAt": null,
+            "metadata.lastReleasedAt": new Date(),
+            "metadata.lastReleaseReason": reason,
+            "metadata.cancelledByReservation": true,
+            "metadata.cancelledReason": reason,
+          },
+          { match: { "metadata.reservationSessionId": reservationSessionId } },
+        )
+        .catch((err) => logger.warn?.("cancelReserved miss", { id: String(row?._id), err: err?.message }));
+    }
+  }
+
   // renewReserved (M2 §3.2) — heartbeat the lease for rows still held in the rail's buffer.
   // Delegates to the repo guarded CAS, grouping ids by reservationSessionId so a stray
   // foreign-session row can never be renewed under the wrong owner. Returns the ids actually
   // renewed; the caller drops the rest (serving / reaped / re-owned) from its heartbeat set.
+  //
+  // UNWIRED (#13): no production caller invokes this — the lease is single-shot and reserved rows
+  // are reaper-exempt by ownership (cxDialQueueRepository buildExpiredClaimRequeueQuery), so no
+  // heartbeat is needed for safety. Kept as M2 scaffolding + tested in isolation. If renewal is ever
+  // wanted, wire it from the BULK watch tick only (cxBulkLoadRuntimeService) — never here, since this
+  // is the shared instance the slow-lane rail also uses.
   async function renewReserved(rows = [], claimMinutes) {
     if (typeof cxDialQueueRepository.renewClaim !== "function") {
       throw new Error("cxQueueReservationService.renewReserved requires cxDialQueueRepository.renewClaim");
@@ -175,6 +219,7 @@ function createCxQueueReservationService({
   return {
     reserveFromFamilyOrder,
     listReservedForSession,
+    cancelReserved,
     releaseReserved,
     renewReserved,
     newSessionId: () => randomUUID(),

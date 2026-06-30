@@ -57,6 +57,20 @@ cxBulkLoadSessionSchema.index({ agentEmail: 1, status: 1, updatedAt: -1 });
 cxBulkLoadSessionSchema.index({ agentExtensionId: 1, status: 1, updatedAt: -1 });
 cxBulkLoadSessionSchema.index({ domain: 1, status: 1, updatedAt: -1 });
 
+// #2: one-running-session-per-agent DB backstop. The in-memory start serializer only protects a
+// single process; this partial-unique index is the multi-process / multi-pod guarantee that two
+// concurrent /start requests for one agent cannot both create a running session. Keyed on
+// agentEmail (always required; agentExtensionId is nullable and would collide on null).
+//
+// NOT auto-built in prod (autoIndex is off; see scripts/sync-indexes.js) — promote it explicitly
+// with `node scripts/sync-indexes.js CxBulkLoadSession`. It will FAIL to build if duplicate running
+// rows already exist, so sweep/kill duplicate running sessions per agent FIRST. The start path
+// handles the resulting E11000 gracefully (retire-the-conflict + retry, else recover the winner).
+cxBulkLoadSessionSchema.index(
+  { agentEmail: 1 },
+  { unique: true, partialFilterExpression: { status: "running" }, name: "uniq_running_session_per_agent" },
+);
+
 module.exports =
   mongoose.models.ControlPlaneCxBulkLoadSession ||
   mongoose.model("ControlPlaneCxBulkLoadSession", cxBulkLoadSessionSchema);

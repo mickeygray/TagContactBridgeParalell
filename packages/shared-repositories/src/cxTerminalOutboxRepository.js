@@ -55,6 +55,23 @@ async function findByIdemKeys(idemKeys = []) {
   return Array.isArray(rows) ? rows : [];
 }
 
+// Most-recent outbox row for an identity in ANY status. Read-only context lookup for the DNC
+// rectification lane (#4): the review path copies the original terminal row's payload shape into a
+// NEW correction row rather than mutating the in-flight terminal row. Works even after the original
+// drained (status is unfiltered), so a post-drain DNC correction still gets full case context.
+async function findByIdentity(input = {}) {
+  const sessionId = String(input.sessionId || "").trim();
+  const queueItemId = String(input.queueItemId || "").trim();
+  const uii = String(input.uii || "").trim();
+  if (!sessionId || !queueItemId || !uii) return null;
+  return CxTerminalOutbox.findOne({ sessionId, queueItemId, uii })
+    .sort({ createdAt: -1 })
+    .lean();
+}
+
+// DEPRECATED for the bulk review path (#4): mutating the in-flight terminal row races the drain and
+// can silently lose a DNC correction. The bulk rail now inserts a separate rectification row instead
+// (see submitCxBulkLoadReviewOutcome). Left in place for any other caller / rollback.
 async function updatePendingOutcomeByIdentity(input = {}) {
   const sessionId = String(input.sessionId || "").trim();
   const queueItemId = String(input.queueItemId || "").trim();
@@ -112,6 +129,7 @@ async function markFailed(idemKey, error) {
 
 module.exports = {
   findByIdemKeys,
+  findByIdentity,
   insertOnce,
   listPendingForDrain,
   markDrained,

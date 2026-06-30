@@ -273,6 +273,27 @@ function classifyCxTerminalOutcome(payload = {}) {
   };
 }
 
+function buildTerminalAttemptProofPatch(queueItem = {}, payload = {}, outcomeAt = new Date(), terminalMetadata = {}) {
+  const terminalSource = String(payload.sourceService || payload.source || "").trim().toLowerCase();
+  const terminalUii = normalizeExternalId(
+    terminalMetadata.lastTerminalOutcomeUii ||
+      payload.uii ||
+      payload.callSessionId,
+  );
+  if (terminalSource !== "cx-bulk-load" || !terminalUii) {
+    return {
+      countable: false,
+      terminalUii: terminalUii || null,
+      queuePatch: {},
+    };
+  }
+  return {
+    countable: true,
+    terminalUii,
+    queuePatch: buildCallAttemptPatch(queueItem, outcomeAt),
+  };
+}
+
 function resolveRcxQueueRouting(queueFamily, payload = {}) {
   const metadata = payload?.metadata && typeof payload.metadata === "object"
     ? payload.metadata
@@ -2690,6 +2711,9 @@ async function handleCxTerminalCallOutcome(payload = {}) {
       || queueItem.metadata?.lastQueueAttemptUii
       || null,
   };
+  const terminalAttemptProof = buildTerminalAttemptProofPatch(queueItem, payload, safeOutcomeAt, terminalMetadata);
+  const countableBulkTerminalAttempt = terminalAttemptProof.countable;
+  const terminalAttemptPatch = terminalAttemptProof.queuePatch;
 
   if (!classification.safeToAdvance) {
     await cxDialQueueRepository.updateQueueItem(queueItem._id, {
@@ -2794,6 +2818,16 @@ async function handleCxTerminalCallOutcome(payload = {}) {
     });
     await leadCadenceRepository.syncLeadCadenceState(domain, caseId).catch(() => null);
   }
+  if (countableBulkTerminalAttempt) {
+    await markLeadCxTouchState({
+      domain,
+      caseId,
+      queueItem,
+      payload,
+      placedAt: safeOutcomeAt,
+      confirmedCall: true,
+    }).catch(() => null);
+  }
   const leadCadenceSet = {
     "counterCadence.cxNoAnswerCalls": nextCxNoAnswerCalls,
     "payloadSnapshot.cxNoAnswerCalls": nextCxNoAnswerCalls,
@@ -2834,11 +2868,25 @@ async function handleCxTerminalCallOutcome(payload = {}) {
     lastQueueAttemptHeldForDisposition: false,
     wrapUpRequired: false,
     wrapUpReason: null,
+    ...(countableBulkTerminalAttempt
+      ? {
+        lastTerminalAttemptCountedAt: safeOutcomeAt,
+        lastTerminalAttemptCountedUii: terminalMetadata.lastTerminalOutcomeUii,
+      }
+      : {}),
   };
   const projectedQueueItem = {
     ...queueItem,
+    ...Object.fromEntries(
+      Object.entries(terminalAttemptPatch).filter(([key]) => !key.startsWith("metadata.")),
+    ),
     metadata: {
       ...(queueItem.metadata || {}),
+      ...Object.fromEntries(
+        Object.entries(terminalAttemptPatch)
+          .filter(([key]) => key.startsWith("metadata."))
+          .map(([key, value]) => [key.slice("metadata.".length), value]),
+      ),
       ...baseMetadata,
     },
   };
@@ -2858,6 +2906,7 @@ async function handleCxTerminalCallOutcome(payload = {}) {
             : "cadence-finished",
       disposition: normalizedOutcome,
       extraUpdate: {
+        ...terminalAttemptPatch,
         metadata: {
           ...baseMetadata,
           lastPolicyHoldReason: terminalPolicyHold ? postOutcomeDialability.reason : null,
@@ -2877,6 +2926,7 @@ async function handleCxTerminalCallOutcome(payload = {}) {
       actorEmail: payload.actorEmail || payload.agentEmail || null,
       cancelRingcxInBackground: true,
       extraUpdate: {
+        ...terminalAttemptPatch,
         metadata: {
           ...baseMetadata,
           terminalOutcomeNextDelayMinutes: nextDelayMinutes,
@@ -4798,6 +4848,7 @@ module.exports = {
   completeCxQueueItem,
   createCxCallPlacedEvent,
   createCxCallTerminalOutcomeEvent,
+  buildTerminalAttemptProofPatch,
   classifyCxTerminalOutcome,
   isBulkLoadOwnedCxQueueItem,
   shouldBypassHeldGateForBulkTerminal,

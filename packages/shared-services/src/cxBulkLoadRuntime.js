@@ -25,9 +25,11 @@ const { createCxAppointment } = require("./cxAppointmentService");
 const leadSource = require("./cxBulkLoadLeadSourceService");
 const publisher = require("./cxBulkLoadRingcxPublisher");
 const watcher = require("./cxBulkLoadActiveCallWatcher");
-const { createCxBulkLoadOutcomeAdapter, makeOutcomeIdemKey } = require("./cxBulkLoadOutcomeAdapter");
+const { createCxBulkLoadOutcomeAdapter, makeOutcomeIdemKey, buildReviewCorrectionRow } = require("./cxBulkLoadOutcomeAdapter");
+const { logCxAlpha } = require("./cxAlphaTraceService");
 const { createCxBulkLoadRuntimeService } = require("./cxBulkLoadRuntimeService");
 const { reduceCxBulkLoadState } = require("./cxBulkLoadStateMachine");
+const { createCxGreenFirstTouchSupplyPlanner } = require("./cxGreenFirstTouchSupplyService");
 const { createCxQueueReservationService } = require("./cxQueueReservationService");
 const { buildFamilyTargets } = require("./cxReserveModeService");
 const { resolveCxDialRuntimeMode, isCxBulkLoadRuntime } = require("./cxDialRuntimeModeService");
@@ -56,6 +58,12 @@ function readBooleanEnv(name, fallback = false) {
 function readDurationEnvMs(name, fallback) {
   const value = Number(readEnv(name, ""));
   return Number.isFinite(value) && value >= 0 ? value : fallback;
+}
+
+function readIntegerEnv(name, fallback, min = Number.MIN_SAFE_INTEGER, max = Number.MAX_SAFE_INTEGER) {
+  const value = Number(readEnv(name, ""));
+  if (!Number.isFinite(value)) return fallback;
+  return Math.max(min, Math.min(max, Math.trunc(value)));
 }
 
 function isDispositionTraceEnabled() {
@@ -310,6 +318,10 @@ async function confirmRingcxUiiReleased(client, uii, options = {}) {
   const waits = Array.isArray(options.waits) && options.waits.length ? options.waits : [250, 600, 900];
   let lastActiveCall = null;
   let lastError = null;
+  // Track WHEN each observation happened so a stale early sighting cannot outrank a later
+  // transient error. A still-active determination must rest on the MOST RECENT poll. (#5)
+  let activeSeenAt = -1;
+  let errorSeenAt = -1;
   for (let index = 0; index < waits.length; index += 1) {
     const waitMs = Math.max(Number(waits[index]) || 0, 0);
     if (waitMs > 0) await sleep(waitMs);
@@ -329,11 +341,18 @@ async function confirmRingcxUiiReleased(client, uii, options = {}) {
         externalId: normalizeExternalId(match.externalId || match.externId),
         callState: match.callState || match.state || match.status || null,
       };
+      activeSeenAt = index;
     } catch (error) {
       lastError = error;
+      errorSeenAt = index;
     }
   }
-  if (lastError && !lastActiveCall) {
+  // Report still-active ONLY when the latest observation was an actual sighting. If the last
+  // thing we saw was a transient error (errorSeenAt > activeSeenAt — covers the throws-only case
+  // where activeSeenAt stays -1), the still-active claim would rest on a stale earlier snapshot;
+  // return verification-failed (inconclusive/retryable) so an already-released call's terminal
+  // outcome is not stranded on a false positive. (#5)
+  if (lastError && errorSeenAt > activeSeenAt) {
     return {
       ok: false,
       reason: "active-call-release-verification-failed",
@@ -557,6 +576,11 @@ function isBulkLoginOffhook(summary = {}) {
   if (summary.offHook === false) return false;
   if (summary.ghostLogin === true) return false;
   if (summary.loggedIn === false) return false;
+  // The summarizer sets ready = (no failures); failures include agent-session-busy and
+  // agent-pending-disposition. A merely-logged-in agent who is mid-call has a truthy
+  // sessionId but ready=false — fail CLOSED so a bulk start never reserves/publishes leads
+  // into a live RingCX call buffer. (Don't treat a bare sessionId as "off-hook".)
+  if (summary.ready === false) return false;
   return (
     summary.offHook === true
     || Boolean(summary.sessionId)
@@ -720,13 +744,26 @@ function getService() {
           payload: event,
         })
         .catch(async (err) => {
-          // If the outbox itself is unavailable, fail open to the old direct dispatch so
-          // terminal events are not silently lost. This is an outage path, not normal flow.
-          await dispatchCadenceEvent(event);
-          return { idemKey, fallbackDispatched: true, error: err };
+          // If the outbox itself is unavailable, fail open to the old direct dispatch so terminal
+          // events are not silently lost. This is an outage path, not normal flow. The fallback
+          // dispatch runs shared DNC stop/sync cleanup and can ALSO throw; if it does, return a
+          // structured fallbackFailed status instead of rejecting, so the disposition can still
+          // advance the reducer past terminal.started (the call already hung up) and stamp a replay
+          // marker rather than leaving the call uncounted with `current` stuck. (#8)
+          try {
+            await dispatchCadenceEvent(event);
+            return { idemKey, fallbackDispatched: true, error: err };
+          } catch (dispatchErr) {
+            return { idemKey, fallbackDispatched: false, fallbackFailed: true, error: dispatchErr };
+          }
         });
       if (inserted === null) {
         return { written: false, idemKey, reason: "duplicate" };
+      }
+      if (inserted?.fallbackFailed === true) {
+        // Double-fault: durable outbox insert AND fallback dispatch both failed. Surface it (do not
+        // throw) so the caller advances the reducer + marks for replay rather than stranding. (#8)
+        return { written: false, idemKey, fallbackFailed: true, error: inserted.error };
       }
       return {
         written: true,
@@ -921,9 +958,36 @@ function getService() {
       const disposition = bulkOutcomeDisposition(outcome);
       const _step = createDispositionTrace("bulkDispose");
       _step("ENTER", { uii, outcome, disposition });
+      // ALPHA observability: one consolidated event per disposition at the RingCX transport boundary
+      // (dispositionCall accepted/rejected + UII release verification). The per-step DISPTRACE detail
+      // lives under CX_BULK_LOAD_DISPOSITION_TRACE; this surfaces the OUTCOME in the unified cx.alpha.*
+      // stream. Pass-through: it returns the result unchanged and never throws, so nothing functional
+      // depends on the log firing.
+      const traceDisposition = (result) => {
+        try {
+          logCxAlpha("cx.alpha.disposition.transport", {
+            rail: "bulk_load",
+            sessionId: session.sessionId || null,
+            agentExtensionId: session.agentExtensionId || null,
+            domain: session.domain || candidate.domain || null,
+            queueItemId: String(candidate.queueItemId || candidate.id || candidate._id || "") || null,
+            uii,
+            disposition,
+            outcome,
+            ok: result.ok === true,
+            executed: result.executed === true,
+            dispositionStatus: result.dispositionStatus || (result.ok === true ? "accepted" : (result.reason || "unknown")),
+            releaseStatus: result.releaseStatus || null,
+            releaseAttempts: result.releaseAttempts != null ? result.releaseAttempts : null,
+            reason: result.reason || null,
+            error: result.error || null,
+          });
+        } catch (_err) { /* logging must never affect the disposition result */ }
+        return result;
+      };
       if (!uii) {
         _step("NO uii on candidate → cannot disposition");
-        return { ok: false, executed: false, reason: "missing-uii", disposition };
+        return traceDisposition({ ok: false, executed: false, reason: "missing-uii", disposition });
       }
       try {
         const response = await client.dispositionCall(uii, {
@@ -934,14 +998,14 @@ function getService() {
         const ok = response !== false;
         _step("dispositionCall DONE", { ok, response: ok ? "accepted" : response });
         if (!ok) {
-          return {
+          return traceDisposition({
             ok: false,
             executed: true,
             disposition,
             uii,
             dispositionStatus: "rejected",
             response,
-          };
+          });
         }
         if (agentLifecycleAdapter && typeof agentLifecycleAdapter.pauseProgressiveDialing === "function") {
           agentLifecycleAdapter
@@ -964,7 +1028,7 @@ function getService() {
         });
         _step("release verification DONE", release);
         if (!release.ok) {
-          return {
+          return traceDisposition({
             ok: false,
             executed: true,
             disposition,
@@ -974,9 +1038,9 @@ function getService() {
             activeCall: release.activeCall || null,
             error: release.error || null,
             response,
-          };
+          });
         }
-        return {
+        return traceDisposition({
           ok: true,
           executed: true,
           disposition,
@@ -985,19 +1049,19 @@ function getService() {
           releaseStatus: release.status,
           releaseAttempts: release.attempts,
           response,
-        };
+        });
       } catch (error) {
         _step("dispositionCall ERROR", {
           status: error && error.status,
           message: error && error.message ? error.message : String(error),
         });
-        return {
+        return traceDisposition({
           ok: false,
           executed: false,
           disposition,
           uii,
           error: error && error.message ? error.message : String(error),
-        };
+        });
       }
     },
     queueStateAdapter,
@@ -1097,6 +1161,12 @@ function getService() {
     // (assertNotActiveInUcq → existsForLead) is LIVE on this rail, not dormant — a caseId
     // already active in the legacy UCQ pool is dropped+released at reserve time.
     reservationService: createCxQueueReservationService({ cxDialQueueRepository, queueItemRepository }),
+    greenFirstTouchPlanner: createCxGreenFirstTouchSupplyPlanner({
+      enabled: readBooleanEnv("CX_GREEN_FIRST_TOUCH_BULK_ENABLED", false),
+      queueRepository: cxDialQueueRepository,
+      cutoffHour: readIntegerEnv("CX_GREEN_FIRST_TOUCH_CUTOFF_HOUR", 7, 0, 23),
+      cutoffMinute: readIntegerEnv("CX_GREEN_FIRST_TOUCH_CUTOFF_MINUTE", 45, 0, 59),
+    }),
     contactEligibilityAdapter: {
       async resolve({ domain, caseId } = {}) {
         const eligibility = await resolveCaseContactEligibility(domain, caseId, {
@@ -1223,6 +1293,13 @@ async function submitCxBulkLoadAppointmentWrap(input = {}, options = {}) {
     throw makeHttpError("Bulk-load appointment requires a valid caseId", 400, "cx-bulk-load-appointment-case-required");
   }
 
+  // #11: hold the session busy for the WHOLE wrap (try/finally below) so the account watcher SKIPS it
+  // and cannot clear state.current during the multi-second Logics appointment commit — which would
+  // make the terminal disposition a no-op (missing-current) and strand resume after an
+  // already-committed appointment. Busy-counter only (no serializer tail), so the inner
+  // submitCxBulkLoadDisposition's withSessionMutation still runs (empty tail) — no self-deadlock.
+  const releaseBusy = getService().markSessionBusy(session.sessionId);
+  try {
   const domain = normalizeDomain(input.domain || current.domain || session.domain || agent.account?.company);
   const result = {
     ok: true,
@@ -1388,9 +1465,15 @@ async function submitCxBulkLoadAppointmentWrap(input = {}, options = {}) {
 
   if (result.terminal.dispositionOk !== true) {
     result.ok = false;
+    // #11: distinguish "appointment already committed in Logics but the terminal could not finalize
+    // (e.g. current was cleared just before we locked the session)" from a clean failure — so the
+    // caller can retry the terminal/resume instead of treating the appointment as lost.
+    const appointmentCommitted = result.appointment && result.appointment.ok === true;
+    const terminalReason = result.terminal.reason || result.terminal.error || "terminal-rejected";
+    if (appointmentCommitted) result.appointmentCommittedTerminalDeferred = true;
     result.resume = {
       skipped: true,
-      reason: result.terminal.reason || result.terminal.error || "terminal-rejected",
+      reason: appointmentCommitted ? `appointment-committed-terminal-deferred:${terminalReason}` : terminalReason,
     };
     return result;
   }
@@ -1416,6 +1499,10 @@ async function submitCxBulkLoadAppointmentWrap(input = {}, options = {}) {
   );
   if (!result.resume.ok) result.ok = false;
   return result;
+  } finally {
+    // #11: always release the busy hold so the watcher resumes managing this session.
+    releaseBusy();
+  }
 }
 
 async function submitCxBulkLoadReviewOutcome(input = {}, options = {}) {
@@ -1434,21 +1521,34 @@ async function submitCxBulkLoadReviewOutcome(input = {}, options = {}) {
   if (!queueItemId || !uii) {
     throw makeHttpError("Bulk-load review requires queueItemId and uii", 400, "cx-bulk-load-review-identity-required");
   }
-  const updated = await cxTerminalOutboxRepository.updatePendingOutcomeByIdentity({
+  // #4 — rectification lane. Record the DNC correction as its OWN durable outbox row instead of
+  // mutating the in-flight terminal row (which races the drain and can silently lose the DNC). The
+  // same drain machinery replays this row's payload (outcome="dnc") into the cadence/Logics DNC
+  // branch, idempotently, and it works even AFTER the original terminal row drained — so the
+  // post-call DNC correction has a guaranteed lane. A repeated review dedups on the distinct
+  // "review-dnc" idemKey (insertOnce returns null on a dup, still ok).
+  const original = typeof cxTerminalOutboxRepository.findByIdentity === "function"
+    ? await cxTerminalOutboxRepository.findByIdentity({ sessionId: session.sessionId, queueItemId, uii })
+    : null;
+  const row = buildReviewCorrectionRow({
     sessionId: session.sessionId,
     queueItemId,
     uii,
-    outcome,
-    source: "agent-auto-review",
+    original,
+    domain: session.domain || null,
+    agentEmail: agent.agentEmail || agent.email || null,
+    caseId: input.caseId != null ? Number(input.caseId) : null,
   });
+  const inserted = await cxTerminalOutboxRepository.insertOnce(row);
   return {
-    ok: Boolean(updated),
-    updated: Boolean(updated),
-    reason: updated ? null : "terminal-outbox-already-drained-or-missing",
+    ok: true,
+    recorded: inserted !== null,
+    deduped: inserted === null,
     sessionId: session.sessionId,
     queueItemId,
     uii,
     outcome,
+    idemKey: row.idemKey,
   };
 }
 
@@ -1536,5 +1636,6 @@ module.exports = {
     confirmRingcxUiiReleased,
     pauseRingcxProgressiveDialing,
     resumeRingcxProgressiveDialing,
+    isBulkLoginOffhook,
   },
 };

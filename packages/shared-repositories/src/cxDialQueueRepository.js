@@ -55,6 +55,65 @@ function resolveQueueFamilies(options = {}) {
   ]);
 }
 
+function appendAndClauses(query, clauses = []) {
+  const clean = clauses.filter(Boolean);
+  if (!clean.length) return query;
+  query.$and = [
+    ...(Array.isArray(query.$and) ? query.$and : []),
+    ...clean,
+  ];
+  return query;
+}
+
+function zeroOrMissing(field) {
+  return {
+    $or: [
+      { [field]: { $exists: false } },
+      { [field]: null },
+      { [field]: { $lte: 0 } },
+    ],
+  };
+}
+
+function applyFirstTouchClaimFilter(query, options = {}) {
+  if (options.firstTouchOnly !== true) return query;
+  const batchId = String(options.greenCoverageBatchId || "").trim();
+  const lane = String(options.queueLane || "").trim();
+  const clauses = [
+    zeroOrMissing("placedCalls"),
+    zeroOrMissing("dailyPlacedCalls"),
+    zeroOrMissing("progressiveStageIndex"),
+  ];
+  if (batchId) {
+    clauses.push({ "metadata.greenCoverageBatchId": batchId });
+  }
+  if (lane) {
+    clauses.push({ "metadata.queueLane": lane });
+  }
+  if (!batchId && !lane) {
+    // Fail closed: first-touch filtering must always be scoped to a finite batch or lane.
+    clauses.push({ _id: { $exists: false } });
+  }
+  return appendAndClauses(query, clauses);
+}
+
+function buildReadyReservationQuery(domain, family, options = {}, now = new Date()) {
+  const rcxAccountId = options.rcxAccountId ? String(options.rcxAccountId).trim() : null;
+  const rcxCampaignId = options.rcxCampaignId ? String(options.rcxCampaignId).trim() : null;
+  const rcxDialGroupId = options.rcxDialGroupId ? String(options.rcxDialGroupId).trim() : null;
+  const query = {
+    state: "ready",
+    releaseAt: { $lte: now },
+    queueFamily: family,
+    "metadata.appointmentId": { $in: [null, ""] },
+    ...(domain ? { domain: normalizeDomain(domain) } : {}),
+    ...(rcxAccountId ? { rcxAccountId } : {}),
+    ...(rcxCampaignId ? { rcxCampaignId } : {}),
+    ...(rcxDialGroupId ? { rcxDialGroupId } : {}),
+  };
+  return applyFirstTouchClaimFilter(query, options);
+}
+
 function buildReadyClaimQuery(domain = null, options = {}) {
   const query = { state: "ready" };
   if (domain) {
@@ -91,6 +150,7 @@ function buildReadyClaimQuery(domain = null, options = {}) {
       },
     ];
   }
+  applyFirstTouchClaimFilter(query, options);
   return query;
 }
 
@@ -182,6 +242,7 @@ async function upsertQueueItem(domain, caseId, update = {}, options = {}) {
       domain: normalizeDomain(domain),
       caseId: Number(caseId),
       "metadata.actionKey": actionKey,
+      state: { $nin: ["completed", "cancelled"] },
     }
     : {
       domain: normalizeDomain(domain),
@@ -348,16 +409,7 @@ async function reserveReadyRows(domain, familyTargets = {}, options = {}) {
   for (const family of normalizeQueueFamilies(Object.keys(familyTargets))) {
     const n = Math.max(Number(familyTargets[family]) || 0, 0);
     if (n <= 0) continue;
-    const familyMatch = {
-      state: "ready",
-      releaseAt: { $lte: now },
-      queueFamily: family,
-      "metadata.appointmentId": { $in: [null, ""] }, // G-appt: appointment rows structurally excluded
-      ...(domain ? { domain: normalizeDomain(domain) } : {}),
-      ...(rcxAccountId ? { rcxAccountId } : {}),
-      ...(rcxCampaignId ? { rcxCampaignId } : {}),
-      ...(rcxDialGroupId ? { rcxDialGroupId } : {}),
-    };
+    const familyMatch = buildReadyReservationQuery(domain, family, options, now);
     // --- one bulk claim, plus ONE same-tick re-plan retry on residual deficit ---
     let need = n;
     const attemptedIds = [];
@@ -423,6 +475,25 @@ async function reserveReadyRows(domain, familyTargets = {}, options = {}) {
     if (need > 0) missing[family] = need; // genuine short supply, NOT elsewhere-claim
   }
   return { reserved: reservedRows, missing };
+}
+
+async function countReadyFirstTouchRows({
+  domain = null,
+  greenCoverageBatchId = null,
+  queueLane = null,
+  rcxAccountId = null,
+  rcxCampaignId = null,
+  rcxDialGroupId = null,
+  now = new Date(),
+} = {}) {
+  return CxDialQueue.countDocuments(buildReadyReservationQuery(domain, "fresh-day1", {
+    firstTouchOnly: true,
+    greenCoverageBatchId,
+    queueLane,
+    rcxAccountId,
+    rcxCampaignId,
+    rcxDialGroupId,
+  }, now instanceof Date ? now : new Date(now)));
 }
 
 // renewClaim (M2 §3.2) — ONE guarded CAS per row. Re-confirms {state:'claimed',
@@ -722,8 +793,11 @@ async function countQueueItems(filters = {}) {
 
 module.exports = {
   buildExpiredClaimRequeueQuery, // exported for offline reaper-exclusion tests (M2/M8); pure
+  buildReadyClaimQuery,
+  buildReadyReservationQuery,
   cancelActiveQueueItems,
   claimNextReadyQueueItem,
+  countReadyFirstTouchRows,
   countQueueItems,
   findActiveClaimForCase,
   findActiveQueueItem,

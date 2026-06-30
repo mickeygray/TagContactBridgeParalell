@@ -307,6 +307,11 @@ const {
 } = require("./cxAccountActiveCallWatcherService");
 const { createCxQueueReservationService } = require("./cxQueueReservationService");
 const { createCxReservationReconcilerService } = require("./cxReservationReconcilerService");
+const {
+  createCxStaleServingReconcilerService,
+  classifyStaleServingRow,
+  resolveServingIdentity,
+} = require("./cxStaleServingReconcilerService");
 const { createCxTerminalOutboxDrain } = require("./cxTerminalOutboxDrain");
 const {
   buildCxCallWrapBody,
@@ -332,7 +337,30 @@ const {
   previewCxTerminalRectification,
   runCxTerminalRectification,
 } = require("./cxTerminalRectificationService");
+const {
+  makeOutcomeIdemKey,
+  buildTerminalEvidenceKeys,
+} = require("./cxBulkLoadOutcomeAdapter");
 const { buildFamilyTargets } = require("./cxReserveModeService");
+const {
+  buildMorningCoverageSupplyPlan,
+  buildNormalSupplyPlan,
+  createCxGreenFirstTouchSupplyPlanner,
+  resolveMorningCoverageBatchWindow,
+  summarizeMorningCoverageDebt,
+} = require("./cxGreenFirstTouchSupplyService");
+const {
+  buildCadenceQuery: buildGreenFirstTouchCadenceQuery,
+  buildGreenFirstTouchQueueRow,
+  createCxGreenFirstTouchQueueMaterializer,
+  materializeGreenFirstTouchQueueRows,
+} = require("./cxGreenFirstTouchQueueMaterializerService");
+const {
+  alphaTraceEnabled,
+  logCxAlpha,
+  redactCxAlphaPayload,
+  traceMatchesFilter: traceCxAlphaMatchesFilter,
+} = require("./cxAlphaTraceService");
 const {
   buildControlPlaneHealthReport,
   buildProviderHealth,
@@ -1090,6 +1118,9 @@ module.exports = {
   runCxAccountActiveCallWatchOnce,
   createCxQueueReservationService,
   createCxReservationReconcilerService,
+  createCxStaleServingReconcilerService,
+  classifyStaleServingRow,
+  resolveServingIdentity,
   createCxTerminalOutboxDrain,
   buildCxCallWrapBody,
   buildCxCallWrapThreadKey,
@@ -1109,7 +1140,22 @@ module.exports = {
   normalizeRectificationWindow,
   previewCxTerminalRectification,
   runCxTerminalRectification,
+  makeOutcomeIdemKey,
+  buildTerminalEvidenceKeys,
   buildFamilyTargets,
+  buildMorningCoverageSupplyPlan,
+  buildNormalSupplyPlan,
+  createCxGreenFirstTouchSupplyPlanner,
+  buildGreenFirstTouchCadenceQuery,
+  buildGreenFirstTouchQueueRow,
+  createCxGreenFirstTouchQueueMaterializer,
+  materializeGreenFirstTouchQueueRows,
+  alphaTraceEnabled,
+  logCxAlpha,
+  redactCxAlphaPayload,
+  traceCxAlphaMatchesFilter,
+  resolveMorningCoverageBatchWindow,
+  summarizeMorningCoverageDebt,
   confirmCxSlowSingleCurrent,
   getCxSimpleLoopSession,
   getCxSlowSingleSession,

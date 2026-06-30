@@ -31,6 +31,9 @@ const KNOWN_MODELS = [
   "CallLog",
   "CallLedger",
   "CaseProfile",
+  // CX 0.2.0 #2: one-running-session-per-agent partial-unique index. SWEEP duplicate running
+  // sessions per agent BEFORE the first sync (the unique build fails otherwise).
+  "CxBulkLoadSession",
   "HourlyJobEvent",
   "LeadCadence",
   "MasterProspectIndex",

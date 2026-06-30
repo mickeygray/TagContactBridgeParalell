@@ -827,6 +827,21 @@ function createRingcxVoiceClient(options = {}) {
     ensure(campaignId, "campaignId");
     return request("GET", adminPath(`dialGroups/${dialGroupId}/campaigns/${campaignId}/campaignDispositions`));
   }
+  async function createCampaignDisposition(campaignId, payload, dialGroupId = config.defaultDialGroupId) {
+    ensure(dialGroupId, "dialGroupId");
+    ensure(campaignId, "campaignId");
+    return request("POST", adminPath(`dialGroups/${dialGroupId}/campaigns/${campaignId}/campaignDispositions`), {
+      body: payload,
+    });
+  }
+  async function updateCampaignDisposition(campaignId, dispositionId, patch, dialGroupId = config.defaultDialGroupId) {
+    ensure(dialGroupId, "dialGroupId");
+    ensure(campaignId, "campaignId");
+    ensure(dispositionId, "dispositionId");
+    return request("PUT", adminPath(`dialGroups/${dialGroupId}/campaigns/${campaignId}/campaignDispositions/${dispositionId}`), {
+      body: patch,
+    });
+  }
   async function createCampaign(payload, dialGroupId = config.defaultDialGroupId) {
     ensure(dialGroupId, "dialGroupId (or RINGCX_VOICE_DEFAULT_DIAL_GROUP_ID)");
     return request("POST", adminPath(`dialGroups/${dialGroupId}/campaigns`), { body: payload });
@@ -1237,6 +1252,8 @@ function createRingcxVoiceClient(options = {}) {
     listCampaigns,
     getCampaign,
     listCampaignDispositions,
+    createCampaignDisposition,
+    updateCampaignDisposition,
     createCampaign,
     updateCampaign,
     cloneCampaign,

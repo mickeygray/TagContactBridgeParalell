@@ -1,6 +1,7 @@
 "use strict";
 
 const { runCxAccountActiveCallWatchOnce } = require("./cxAccountActiveCallWatcherService");
+const { logCxAlpha } = require("./cxAlphaTraceService");
 const { buildVersionGuardOptions, describeBulkLoadMutationEligibility } = require("./cxBulkLoadMutationEligibility");
 
 // Bulk_load runtime service — the ONLY sequencer.
@@ -17,14 +18,35 @@ const { buildVersionGuardOptions, describeBulkLoadMutationEligibility } = requir
 // M11 gate 8: canonical full inventory is 35 (15/10/5/5 mix); 30 was never the target.
 const DEFAULT_TARGET_BUFFER = 35;
 const DEFAULT_REFILL_THRESHOLD = 5;
-// M4: reservation lease length. Must be ≥ renewal-interval·2 (G3a); 10 min gives the bulk
-// watch tick ample room to renew before the lease lapses.
+// M4: reservation lease length. The lease is stamped ONCE at reserve time and is NOT heartbeated —
+// there is no renewal tick. Reserved rows are safe regardless of lease age because the expired-claim
+// reaper HARD-excludes any row carrying metadata.reservationSessionId (cxDialQueueRepository
+// buildExpiredClaimRequeueQuery ownership guard); only the owning session (releaseReserved/
+// cancelReserved) or the crash reconciler frees a reserved row. So claimUntil/reservationExpiresAt
+// are single-shot audit values, not a live lease. (cxQueueReservationService.renewReserved exists as
+// unwired M2 scaffolding; wiring it would be a bulk-watch-tick-only change — never a shared-service
+// heartbeat, which would silently alter slow-lane semantics.) (#13)
 const DEFAULT_RESERVE_CLAIM_MINUTES = 10;
 
 // ── pure helpers ────────────────────────────────────────────────────────
 
 function str(value) {
   return String(value == null ? "" : value).trim();
+}
+
+// #2: stable per-agent serializer key so concurrent /start requests for ONE agent run one-at-a-time
+// (the freshly minted sessionId differs per request and would not serialize them). Prefer the
+// always-present agentEmail; fall back to the extension.
+function agentMutationKey(input = {}) {
+  const email = str(input.agentEmail).toLowerCase();
+  const ext = str(input.agentExtensionId);
+  return `bulk-start:${email || ext || "unknown"}`;
+}
+
+// #2: Mongo duplicate-key (E11000) detection for the one-running-session-per-agent partial-unique
+// index backstop.
+function isDuplicateKeyError(error) {
+  return Number(error?.code) === 11000 || String(error?.codeName || "") === "DuplicateKey";
 }
 
 function isDispositionTraceEnabled() {
@@ -100,13 +122,23 @@ function summarizeFlowState(state = {}) {
   };
 }
 
+function alphaEventFromBulkStage(stage) {
+  const suffix = str(stage)
+    .replace(/[^a-zA-Z0-9]+/g, ".")
+    .replace(/^\.+|\.+$/g, "")
+    .toLowerCase();
+  return suffix ? `cx.alpha.bulk.${suffix}` : "cx.alpha.bulk.event";
+}
+
 function traceBulkFlow(stage, state = {}, extra = {}) {
-  if (!isBulkFlowTraceEnabled() || !flowTraceMatchesAgent(state)) return;
-  console.info("[CXBULK]", stage, {
+  const payload = {
     ...summarizeFlowState(state),
     ...extra,
     at: new Date().toISOString(),
-  });
+  };
+  logCxAlpha(alphaEventFromBulkStage(stage), payload);
+  if (!isBulkFlowTraceEnabled() || !flowTraceMatchesAgent(state)) return;
+  console.info("[CXBULK]", stage, payload);
 }
 
 // Pool the matcher looks at: the buffer plus the present current (so an unchanged
@@ -132,6 +164,46 @@ function familyRefillTargets(state, familyTargets = {}) {
     if (need > 0) residual[fam] = need;
   }
   return residual;
+}
+
+function normalizeFirstTouchSupplyPlan(plan = null, normalFamilyTargets = {}) {
+  if (!plan || typeof plan !== "object") {
+    return {
+      lane: "normal",
+      familyTargets: { ...(normalFamilyTargets || {}) },
+      firstTouchOnly: false,
+      claimFilter: { firstTouchOnly: false },
+      reason: "no-first-touch-plan",
+    };
+  }
+  const claimFilter = plan.claimFilter && typeof plan.claimFilter === "object" ? plan.claimFilter : {};
+  const batchId = str(claimFilter.greenCoverageBatchId || plan.batchId);
+  const queueLane = str(claimFilter.queueLane || plan.queueLane);
+  const firstTouchOnly = plan.firstTouchOnly === true || claimFilter.firstTouchOnly === true;
+  const scoped = Boolean(batchId || queueLane);
+  if (firstTouchOnly && !scoped) {
+    return {
+      lane: "normal",
+      familyTargets: { ...(normalFamilyTargets || {}) },
+      firstTouchOnly: false,
+      claimFilter: { firstTouchOnly: false },
+      counts: plan.counts || {},
+      reason: "first-touch-plan-unscoped",
+    };
+  }
+  return {
+    ...plan,
+    familyTargets: plan.familyTargets && typeof plan.familyTargets === "object"
+      ? plan.familyTargets
+      : { ...(normalFamilyTargets || {}) },
+    firstTouchOnly,
+    claimFilter: {
+      ...claimFilter,
+      firstTouchOnly,
+      greenCoverageBatchId: batchId || null,
+      queueLane: queueLane || null,
+    },
+  };
 }
 
 // The mutable domain fields we persist back — never the reducer's string
@@ -200,10 +272,25 @@ function buildReviewHoldUntil(base = new Date()) {
   return new Date(at.getTime() + holdMs).toISOString();
 }
 
+// The watcher's activeCallSummary carries raw ani/dnis phone digits (compactActiveCall). Strip
+// them so the same redaction intent as `delete out.phone` isn't defeated by a nested object.
+function sanitizeActiveCallSummary(summary = null) {
+  if (!summary || typeof summary !== "object") return summary;
+  const out = { ...summary };
+  delete out.ani;
+  delete out.dnis;
+  delete out.phone;
+  return out;
+}
+
 function sanitizeCandidateForClient(candidate = null) {
   if (!candidate || typeof candidate !== "object") return candidate;
   const out = { ...candidate };
   delete out.phone;
+  delete out.leadPhone;
+  if (out.activeCallSummary && typeof out.activeCallSummary === "object") {
+    out.activeCallSummary = sanitizeActiveCallSummary(out.activeCallSummary);
+  }
   return out;
 }
 
@@ -248,6 +335,7 @@ function createCxBulkLoadRuntimeService(deps = {}) {
     agentLifecycleAdapter = {},
     manualDialer = null,
     leadStarter = null,
+    greenFirstTouchPlanner = null,
     resolveExternalCandidates = null,
     contactEligibilityAdapter = {},
     offhookGate,
@@ -319,6 +407,29 @@ function createCxBulkLoadRuntimeService(deps = {}) {
     return withSessionOperation(sessionId, work, { markBusy: false });
   }
 
+  // #2: serialize concurrent starts for one agent on a stable agent key. markBusy:false — the key is
+  // not a sessionId, so it must not enter busySessionCounts (which the watcher's skip set reads).
+  async function withAgentMutation(agentKey, work) {
+    return withSessionOperation(agentKey, work, { markBusy: false });
+  }
+
+  // #11: hold the per-session BUSY counter (the watcher-skip signal) WITHOUT the serializer tail, so
+  // a long external sequence (the appointment wrap's Logics commit) can keep the account watcher from
+  // clearing state.current mid-flight. Because it does NOT chain sessionOperationTails, an inner
+  // withSessionMutation on the same sessionId still runs (empty tail) — no self-deadlock. Returns an
+  // idempotent release the caller MUST invoke (try/finally).
+  function markSessionBusy(sessionId) {
+    const key = str(sessionId);
+    if (!key) return () => {};
+    addBusySession(key);
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      removeBusySession(key);
+    };
+  }
+
   // Reservation-sourced refill (M4): the SOURCE is now an atomic claim. Reserve up to the
   // deficit ready->claimed per family (policy-driven familyTargets), then publish ONE AT A TIME
   // in family order. Reserved rows are already `claimed` and owned by this session; on a publish
@@ -344,8 +455,11 @@ function createCxBulkLoadRuntimeService(deps = {}) {
       queueFamily: row.queueFamily || null,
       reason,
       releaseReserved: options.releaseReserved !== false,
+      cancelReserved: options.cancelReserved === true,
     });
-    if (options.releaseReserved !== false) {
+    if (options.cancelReserved === true && typeof reservationService.cancelReserved === "function") {
+      await reservationService.cancelReserved([row], options.cancelReason || reason);
+    } else if (options.releaseReserved !== false) {
       await reservationService.releaseReserved([row], options.releaseReason || reason);
     }
     return next;
@@ -389,10 +503,35 @@ function createCxBulkLoadRuntimeService(deps = {}) {
     }
 
     const desiredFamilyTargets = familyRefillTargets(state, (state.stats && state.stats.familyTargets) || {});
+    let firstTouchPlan = normalizeFirstTouchSupplyPlan(null, desiredFamilyTargets);
+    if (greenFirstTouchPlanner && typeof greenFirstTouchPlanner.resolvePlan === "function") {
+      try {
+        firstTouchPlan = normalizeFirstTouchSupplyPlan(await greenFirstTouchPlanner.resolvePlan({
+          state,
+          domain: state.domain,
+          agentExtensionId: state.agentExtensionId,
+          ringcx: state.ringcx || {},
+          deficit,
+          normalFamilyTargets: desiredFamilyTargets,
+          asOf: now(),
+        }), desiredFamilyTargets);
+      } catch (error) {
+        traceBulkFlow("fill.first_touch_plan_failed", state, {
+          error: error && error.message ? error.message : String(error),
+        });
+      }
+    }
+    const effectiveFamilyTargets = firstTouchPlan.familyTargets || desiredFamilyTargets;
+    const claimFilter = firstTouchPlan.claimFilter || {};
     traceBulkFlow("fill.reserve_started", state, {
       targetBuffer: targetBufferFor(state),
       deficit,
-      familyTargets: desiredFamilyTargets,
+      familyTargets: effectiveFamilyTargets,
+      firstTouchLane: firstTouchPlan.lane || null,
+      firstTouchOnly: firstTouchPlan.firstTouchOnly === true,
+      greenCoverageBatchId: claimFilter.greenCoverageBatchId || firstTouchPlan.batchId || null,
+      firstTouchReason: firstTouchPlan.reason || null,
+      firstTouchCounts: firstTouchPlan.counts || null,
     });
 
     const { reserved } = await reservationService.reserveFromFamilyOrder({
@@ -400,7 +539,7 @@ function createCxBulkLoadRuntimeService(deps = {}) {
       agentExtensionId: state.agentExtensionId,
       sessionId: state.sessionId,
       // M11 gate 8: residual per-family deficits from the live buffer, not the static start map.
-      familyTargets: desiredFamilyTargets,
+      familyTargets: effectiveFamilyTargets,
       totalLimit: deficit,
       claimMinutes: Number((state.stats && state.stats.claimMinutes) || DEFAULT_RESERVE_CLAIM_MINUTES),
       metadata: {
@@ -409,11 +548,17 @@ function createCxBulkLoadRuntimeService(deps = {}) {
         rcxCampaignId: state.ringcx && state.ringcx.campaignId,
         rcxDialGroupId: state.ringcx && state.ringcx.dialGroupId,
       },
+      firstTouchOnly: firstTouchPlan.firstTouchOnly === true,
+      greenCoverageBatchId: claimFilter.greenCoverageBatchId || firstTouchPlan.batchId || null,
+      queueLane: claimFilter.queueLane || firstTouchPlan.queueLane || null,
     });
     traceBulkFlow("fill.reserve_finished", state, {
       requested: deficit,
       reserved: reserved.length,
-      familyTargets: desiredFamilyTargets,
+      familyTargets: effectiveFamilyTargets,
+      firstTouchLane: firstTouchPlan.lane || null,
+      firstTouchOnly: firstTouchPlan.firstTouchOnly === true,
+      greenCoverageBatchId: claimFilter.greenCoverageBatchId || firstTouchPlan.batchId || null,
     });
     if (!reserved.length) return state;
 
@@ -444,6 +589,8 @@ function createCxBulkLoadRuntimeService(deps = {}) {
         const reason = contactEligibility.reason || "contact-blocked";
         next = await dropReservedCandidate(next, row, reason, {
           releaseReason: `bulk-contact-blocked:${reason}`,
+          cancelReason: `bulk-contact-blocked:${reason}`,
+          cancelReserved: contactEligibility.enforced === true,
           releaseReserved: contactEligibility.enforced !== true,
         });
         continue;
@@ -551,59 +698,97 @@ function createCxBulkLoadRuntimeService(deps = {}) {
 
   // ── public API ─────────────────────────────────────────────────────────
 
-  async function startCxBulkLoadSession(input = {}) {
-    const sessionId = input.sessionId || newSessionId();
-    return withSessionMutation(sessionId, async () => {
-    // One live session per agent: retire any prior one through the full runtime kill path,
-    // not the repository shortcut, so RC buffered leads and reserved rows are released.
+  // Retire any prior running session(s) for this agent through the full runtime kill path (not the
+  // repository shortcut) so RC buffered leads and reserved rows are released. Reused on the E11000
+  // recovery path. (#2)
+  async function retireActiveSessionsForAgent(input = {}, exceptSessionId = null) {
     const activeSessions = typeof repo.findActiveBulkLoadSessionsForAgent === "function"
       ? await repo.findActiveBulkLoadSessionsForAgent({ agentEmail: input.agentEmail, agentExtensionId: input.agentExtensionId })
       : [await repo.findActiveBulkLoadSessionForAgent({ agentEmail: input.agentEmail, agentExtensionId: input.agentExtensionId })].filter(Boolean);
     for (const existing of activeSessions) {
-      if (!existing || existing.sessionId === sessionId) continue;
+      if (!existing || existing.sessionId === exceptSessionId) continue;
       await killCxBulkLoadSession({ sessionId: existing.sessionId, reason: "replaced-by-new-session" });
     }
+    return activeSessions;
+  }
 
-    const created = await repo.createBulkLoadSession({
-      sessionId,
-      agentEmail: input.agentEmail,
-      agentExtensionId: input.agentExtensionId,
-      cxAgentId: input.cxAgentId,
-      domain: input.domain,
-      status: "running",
-      phase: "idle",
-      ringcx: input.ringcx || {},
-      stats: {
-        targetSize: Number(input.targetSize || DEFAULT_TARGET_BUFFER),
-        refillThreshold: Number(input.refillThreshold || DEFAULT_REFILL_THRESHOLD),
-        // M4: policy-driven reservation config, computed once at start and carried in the
-        // free-form (persisted) stats so fillBuffer reserves without re-resolving policy per tick.
-        familyTargets: input.familyTargets && typeof input.familyTargets === "object" ? input.familyTargets : {},
-        claimMinutes: Number(input.claimMinutes || DEFAULT_RESERVE_CLAIM_MINUTES),
-      },
-    });
-    traceBulkFlow("session.created", created, {
-      targetBuffer: targetBufferFor(created),
-      refillThreshold: refillThresholdFor(created),
-      familyTargets: created.stats && created.stats.familyTargets,
-      ringcx: created.ringcx || {},
-    });
+  async function startCxBulkLoadSession(input = {}) {
+    const sessionId = input.sessionId || newSessionId();
+    const agentKey = agentMutationKey(input);
+    // #2: serialize concurrent starts for the SAME agent on a STABLE agent key (two no-sessionId
+    // starts mint different ids and would NOT serialize, creating two running sessions per agent).
+    // The inner sessionId mutation still marks the NEW session busy so the account watcher skips it
+    // during preload. agentKey != sessionId, so the nested locks never self-deadlock.
+    return withAgentMutation(agentKey, async () =>
+      withSessionMutation(sessionId, async () => {
+        await retireActiveSessionsForAgent(input, sessionId);
 
-    let state = reduce(created, { type: "session.started" }, now());
-    const offhook = await offhookGate.isAgentOffhook(state, { client });
-    if (!offhook.ok) {
-      state = reduce(state, { type: "agent.waiting_offhook", reason: offhook.reason || "agent-not-offhook" }, now());
-      traceBulkFlow("session.waiting_offhook", state, { reason: offhook.reason || "agent-not-offhook" });
-    } else {
-      state = reduce(state, { type: "agent.offhook_ready", reason: offhook.reason || "agent-offhook" }, now());
-      state = reduce(state, { type: "buffer.preload_started", targetSize: targetBufferFor(state) }, now());
-      traceBulkFlow("session.preload_started", state, { targetBuffer: targetBufferFor(state) });
-      state = await fillBuffer(state);
-      traceBulkFlow("session.preload_finished", state, { targetBuffer: targetBufferFor(state) });
-    }
-    await persist(state);
-    return sanitizeSession(state);
-    });
+        const seed = {
+          sessionId,
+          agentEmail: input.agentEmail,
+          agentExtensionId: input.agentExtensionId,
+          cxAgentId: input.cxAgentId,
+          domain: input.domain,
+          status: "running",
+          phase: "idle",
+          ringcx: input.ringcx || {},
+          stats: {
+            targetSize: Number(input.targetSize || DEFAULT_TARGET_BUFFER),
+            refillThreshold: Number(input.refillThreshold || DEFAULT_REFILL_THRESHOLD),
+            // M4: policy-driven reservation config, computed once at start and carried in the
+            // free-form (persisted) stats so fillBuffer reserves without re-resolving policy per tick.
+            familyTargets: input.familyTargets && typeof input.familyTargets === "object" ? input.familyTargets : {},
+            claimMinutes: Number(input.claimMinutes || DEFAULT_RESERVE_CLAIM_MINUTES),
+          },
+        };
+
+        let created;
+        try {
+          created = await repo.createBulkLoadSession(seed);
+        } catch (err) {
+          if (!isDuplicateKeyError(err)) throw err;
+          // #2 backstop: the one-running-session-per-agent partial-unique index rejected this insert
+          // — a concurrent process raced our retire-then-create. Retire the conflicting running
+          // session(s) and retry once; if it STILL conflicts, recover the winner rather than
+          // creating a duplicate.
+          await retireActiveSessionsForAgent(input, sessionId);
+          try {
+            created = await repo.createBulkLoadSession(seed);
+          } catch (retryErr) {
+            if (!isDuplicateKeyError(retryErr)) throw retryErr;
+            const winner = typeof repo.findActiveBulkLoadSessionForAgent === "function"
+              ? await repo.findActiveBulkLoadSessionForAgent({ agentEmail: input.agentEmail, agentExtensionId: input.agentExtensionId })
+              : null;
+            const recovered = winner ? await loadState(winner.sessionId) : null;
+            if (recovered) {
+              traceBulkFlow("session.start_recovered_existing", recovered, { sessionId: recovered.sessionId });
+              return sanitizeSession(recovered);
+            }
+            throw retryErr;
+          }
+        }
+        traceBulkFlow("session.created", created, {
+          targetBuffer: targetBufferFor(created),
+          refillThreshold: refillThresholdFor(created),
+          familyTargets: created.stats && created.stats.familyTargets,
+          ringcx: created.ringcx || {},
+        });
+
+        let state = reduce(created, { type: "session.started" }, now());
+        const offhook = await offhookGate.isAgentOffhook(state, { client });
+        if (!offhook.ok) {
+          state = reduce(state, { type: "agent.waiting_offhook", reason: offhook.reason || "agent-not-offhook" }, now());
+          traceBulkFlow("session.waiting_offhook", state, { reason: offhook.reason || "agent-not-offhook" });
+        } else {
+          state = reduce(state, { type: "agent.offhook_ready", reason: offhook.reason || "agent-offhook" }, now());
+          state = reduce(state, { type: "buffer.preload_started", targetSize: targetBufferFor(state) }, now());
+          traceBulkFlow("session.preload_started", state, { targetBuffer: targetBufferFor(state) });
+          state = await fillBuffer(state);
+          traceBulkFlow("session.preload_finished", state, { targetBuffer: targetBufferFor(state) });
+        }
+        await persist(state);
+        return sanitizeSession(state);
+      }));
   }
 
   async function getCxBulkLoadSession(query = {}) {
@@ -691,16 +876,31 @@ function createCxBulkLoadRuntimeService(deps = {}) {
     }
 
     // single idempotent terminal write, then complete + clear current.
+    // The call has ALREADY hung up (terminalExecutor succeeded above; terminal.ok===false returned
+    // earlier). Durable recording must NOT be allowed to strand the reducer at terminal.started: if
+    // persistTerminalOutcome throws, or reports the double-fault (outbox insert AND fallback dispatch
+    // both failed), capture a replay marker and STILL advance to terminal.accepted so the lead is
+    // counted and current is cleared. The outbox idemKey keeps any later drain/reconciler re-record
+    // idempotent. Do NOT use terminal.failed here — that path is for a call that did NOT hang up. (#8)
     _step("persistTerminalOutcome (DB WRITE) START");
-    await outcomeAdapter.persistTerminalOutcome({
-      session: state,
-      candidate: current,
-      outcome,
-      source: "disposition",
-      eventType: "terminal",
-    });
-    _step("persistTerminalOutcome (DB WRITE) DONE");
-    await clearTerminalHold(state, current, outcome);
+    let terminalRecordError = null;
+    try {
+      const persistResult = await outcomeAdapter.persistTerminalOutcome({
+        session: state,
+        candidate: current,
+        outcome,
+        source: "disposition",
+        eventType: "terminal",
+      });
+      if (persistResult && persistResult.written === false && persistResult.result?.fallbackFailed === true) {
+        const err = persistResult.result?.error;
+        terminalRecordError = (err && (err.message || String(err))) || "terminal-record-fallback-failed";
+      }
+    } catch (err) {
+      terminalRecordError = err?.message || String(err);
+    }
+    _step("persistTerminalOutcome (DB WRITE) DONE", { terminalRecordError });
+    await clearTerminalHold(state, current, outcome).catch(() => null);
     const acceptedAt = now();
     next = reduce(next, {
       type: "terminal.accepted",
@@ -712,13 +912,21 @@ function createCxBulkLoadRuntimeService(deps = {}) {
     _step("maybeRefill (PUBLISH MORE LEADS) START");
     next = await maybeRefill(next);
     _step("maybeRefill DONE");
+    if (terminalRecordError) {
+      // Fail-CLOSED to an observable replay marker, not fail-silent: the reducer reached a terminal
+      // state (call counted, current cleared) but durable cadence/DNC recording did not land. Stamp
+      // AFTER maybeRefill so the reduce path there does not clear it.
+      next = { ...next, lastError: `terminal-record-deferred: ${terminalRecordError}` };
+      traceBulkFlow("disposition.terminal_record_deferred", next, { outcome, error: terminalRecordError });
+    }
     await persist(next);
     traceBulkFlow("disposition.finished", next, {
       outcome,
       terminalOk: terminal ? terminal.ok !== false : null,
+      terminalRecordDeferred: Boolean(terminalRecordError),
     });
     _step("persist DONE → RETURN ok (TOTAL)");
-    return { ...sanitizeSession(next), dispositionOk: true, terminal };
+    return { ...sanitizeSession(next), dispositionOk: true, terminal, terminalRecordDeferred: Boolean(terminalRecordError) };
     });
   }
 
@@ -993,6 +1201,11 @@ function createCxBulkLoadRuntimeService(deps = {}) {
     }
     const next = reduce(state, { type: "session.killed", reason: input.reason || "manual" }, now());
     await persist(next);
+    traceBulkFlow("session.killed", next, {
+      reason: input.reason || "manual",
+      reservedReleased: reservedRows.length,
+      currentTerminalized: Boolean(state.current),
+    });
     return sanitizeSession(next);
     });
   }
@@ -1015,6 +1228,9 @@ function createCxBulkLoadRuntimeService(deps = {}) {
       skipSessionIds: Array.from(busySessionCounts.keys()),
       isSessionBusy,
       applySessionMutation: withSessionApply,
+      // #10/#6: a latest-state read for the apply-time staleness guard (before the serving stamp)
+      // and for the version-miss re-projection retry. Same loader the beforePersist hook uses.
+      loadLatestState: (sessionId) => loadState(sessionId),
       beforePersist: async ({ projection, state }) => {
         const latest = await loadState(projection.sessionId);
         const eligibility = describeBulkLoadMutationEligibility({
@@ -1042,6 +1258,7 @@ function createCxBulkLoadRuntimeService(deps = {}) {
     startCxBulkLoadGetLeads,
     skipCxBulkLoadCurrent,
     killCxBulkLoadSession,
+    markSessionBusy, // #11: appointment wrap holds this across its Logics commit
     // exposed for tests/diagnostics
     _fillBuffer: fillBuffer,
   };
