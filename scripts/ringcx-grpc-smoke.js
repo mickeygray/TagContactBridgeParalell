@@ -14,7 +14,7 @@
 //   node scripts/ringcx-grpc-smoke.js
 //     → runs both local + ngrok tests with defaults
 //
-//   node scripts/ringcx-grpc-smoke.js --url https://bethel-twee-agonisedly.ngrok-free.dev/ringcx/stream
+//   node scripts/ringcx-grpc-smoke.js --url grpc://bethel-twee-agonisedly.ngrok-free.dev/ringcx/stream
 //     → custom target
 //
 //   node scripts/ringcx-grpc-smoke.js --payload "hello probe"
@@ -26,8 +26,8 @@
 const http2 = require("http2");
 const { URL } = require("url");
 
-const DEFAULT_LOCAL = "http://localhost:3334/ringcx/stream";
-const DEFAULT_NGROK = "https://bethel-twee-agonisedly.ngrok-free.dev/ringcx/stream";
+const DEFAULT_LOCAL = "grpc://localhost:3334/ringcx/stream";
+const DEFAULT_NGROK = "grpc://bethel-twee-agonisedly.ngrok-free.dev/ringcx/stream";
 
 function readFlag(name, fallback = null) {
   const argv = process.argv.slice(2);
@@ -51,9 +51,22 @@ function buildGrpcFrame(payload) {
   return Buffer.concat([header, body]);
 }
 
+function normalizeTransportUrl(target) {
+  const value = String(target || "").trim();
+  if (/^grpcs:\/\//i.test(value)) {
+    return new URL(value.replace(/^grpcs:\/\//i, "https://"));
+  }
+  if (/^grpc:\/\//i.test(value)) {
+    const probe = new URL(value.replace(/^grpc:\/\//i, "http://"));
+    const host = probe.hostname.toLowerCase();
+    const cleartext = host === "localhost" || host === "127.0.0.1" || host === "::1";
+    return new URL(value.replace(/^grpc:\/\//i, cleartext ? "http://" : "https://"));
+  }
+  return new URL(value);
+}
+
 async function runOne({ label, target, payload }) {
-  const url = new URL(target);
-  const isHttps = url.protocol === "https:";
+  const url = normalizeTransportUrl(target);
   const authority = `${url.protocol}//${url.host}`;
   // http2.connect with allowHTTP1 false. For https we go through TLS, which
   // includes ALPN-negotiated h2. For http (local h2c) we explicitly tell

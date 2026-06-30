@@ -19,8 +19,8 @@ function hasFlag(argv, name) {
 
 function normalizeTarget(raw) {
   const value = String(raw || "").trim();
-  if (/^https?:\/\//i.test(value) || /^grpc:\/\//i.test(value)) {
-    const url = new URL(value.replace(/^grpc:\/\//i, "https://"));
+  if (/^https?:\/\//i.test(value) || /^grpcs?:\/\//i.test(value)) {
+    const url = new URL(value.replace(/^grpcs?:\/\//i, "https://"));
     return `${url.hostname}:${url.port || "443"}`;
   }
   return value;

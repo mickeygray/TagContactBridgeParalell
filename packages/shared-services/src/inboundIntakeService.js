@@ -146,6 +146,112 @@ function extractClientIp(headers = {}) {
   return cleanString(forwarded.split(",")[0]);
 }
 
+function readFirstContactForwardConfig(envVars = process.env) {
+  const url = cleanString(envVars.CX_FIRST_CONTACT_FORWARD_URL);
+  const enabled = String(envVars.CX_FIRST_CONTACT_FORWARD_ENABLED || "").trim().toLowerCase() === "true";
+  const timeoutMs = Math.max(
+    250,
+    Math.min(5000, Number(envVars.CX_FIRST_CONTACT_FORWARD_TIMEOUT_MS) || 1500),
+  );
+  return {
+    enabled: Boolean(enabled && url),
+    url,
+    secret: cleanString(envVars.CX_FIRST_CONTACT_FORWARD_SECRET),
+    timeoutMs,
+  };
+}
+
+function buildFirstContactForwardPayload(leadCadence = {}, cxResult = {}, options = {}) {
+  const queueItem = cxResult?.queueItem && typeof cxResult.queueItem === "object"
+    ? cxResult.queueItem
+    : {};
+  const metadata = queueItem.metadata && typeof queueItem.metadata === "object"
+    ? queueItem.metadata
+    : {};
+  const domain = leadCadence.domain || queueItem.domain || null;
+  const caseId = leadCadence.caseId || queueItem.caseId || null;
+  const queueItemId = queueItem._id ? String(queueItem._id) : null;
+  const leadCadenceId = leadCadence._id ? String(leadCadence._id) : queueItem.leadCadenceId || null;
+  const actionKey = metadata.actionKey || `first-cx:${caseId || ""}`;
+  const dedupeKey = [
+    "cx-first-contact",
+    domain || "unknown-domain",
+    caseId || "unknown-case",
+    actionKey || queueItemId || leadCadenceId || "unknown-action",
+  ].join(":");
+
+  return {
+    event: "cx.first_contact.queued",
+    occurredAt: new Date().toISOString(),
+    sourceService: options.sourceService || "inbound-gateway",
+    domain,
+    caseId,
+    leadCadenceId,
+    queueItemId,
+    actionKey,
+    dedupeKey,
+    deduped: cxResult?.deduped === true,
+    queueFamily: queueItem.queueFamily || metadata.queueFamily || null,
+    state: queueItem.state || null,
+    releaseAt: queueItem.releaseAt || null,
+    rcxAccountId: queueItem.rcxAccountId || metadata.rcxAccountId || null,
+    rcxDialGroupId: queueItem.rcxDialGroupId || metadata.rcxDialGroupId || null,
+    rcxCampaignId: queueItem.rcxCampaignId || metadata.rcxCampaignId || null,
+    intakeSource: leadCadence.intakeSource || queueItem.intakeSource || null,
+    intakeRoute: leadCadence.intakeRoute || queueItem.intakeRoute || null,
+    sourceName: leadCadence.sourceName || queueItem.sourceName || null,
+  };
+}
+
+async function forwardFirstContactCxQueue(leadCadence = {}, cxResult = {}, options = {}) {
+  if (!cxResult?.queued) return { ok: false, skipped: true, reason: "cx-not-queued" };
+
+  const config = readFirstContactForwardConfig();
+  if (!config.enabled) return { ok: false, skipped: true, reason: "forward-disabled" };
+  if (typeof fetch !== "function") return { ok: false, skipped: true, reason: "fetch-unavailable" };
+
+  const payload = buildFirstContactForwardPayload(leadCadence, cxResult, options);
+  const controller = typeof AbortController === "function" ? new AbortController() : null;
+  const timeout = controller
+    ? setTimeout(() => controller.abort(), config.timeoutMs)
+    : null;
+
+  try {
+    const headers = {
+      "content-type": "application/json",
+      "x-forward-event": payload.event,
+      "x-forward-id": payload.dedupeKey,
+    };
+    if (config.secret) {
+      headers["x-service-secret"] = config.secret;
+    }
+
+    const response = await fetch(config.url, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(payload),
+      signal: controller?.signal,
+    });
+    if (!response.ok) {
+      return {
+        ok: false,
+        status: response.status,
+        statusText: response.statusText,
+        dedupeKey: payload.dedupeKey,
+      };
+    }
+    return { ok: true, status: response.status, dedupeKey: payload.dedupeKey };
+  } catch (error) {
+    return {
+      ok: false,
+      error: error.name === "AbortError" ? "forward-timeout" : error.message,
+      dedupeKey: payload.dedupeKey,
+    };
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
+}
+
 function extractAffiliatePostbackUrl(payload = {}) {
   return extractFirstValue(
     payload.postback_url,
@@ -2283,6 +2389,36 @@ async function fireImmediateContact(leadCadence, validation = {}, options = {}) 
         requestedBy: "intake-first-contact",
         executionOwner: "ringcentral-cx",
       });
+      if (result.cx?.queued) {
+        forwardFirstContactCxQueue(lc, result.cx, {
+          sourceService: options.sourceService || "inbound-gateway",
+        }).then((forwardResult) => {
+          if (forwardResult?.ok) {
+            logger?.info?.("first-contact.cx-forward.sent", {
+              domain,
+              caseId,
+              dedupeKey: forwardResult.dedupeKey,
+              status: forwardResult.status,
+            });
+            return;
+          }
+          if (!forwardResult?.skipped) {
+            logger?.warn?.("first-contact.cx-forward.failed", {
+              domain,
+              caseId,
+              dedupeKey: forwardResult?.dedupeKey || null,
+              error: forwardResult?.error || forwardResult?.statusText || "forward-failed",
+              status: forwardResult?.status || null,
+            });
+          }
+        }).catch((error) => {
+          logger?.warn?.("first-contact.cx-forward.failed", {
+            domain,
+            caseId,
+            error: error.message,
+          });
+        });
+      }
     } catch (error) {
       result.cx = { ok: false, error: error.message };
       logger?.warn?.("first-contact.cx-queue.failed", { domain, caseId, error: error.message });

@@ -296,6 +296,19 @@ function resolveSkipLogicsCreate(req) {
   };
 }
 
+function requireInternalServiceSecret(req, res, next) {
+  const expected = String(process.env.INTERNAL_SERVICE_SECRET || "").trim();
+  const provided = String(
+    req.headers["x-service-secret"] ||
+      req.headers["x-internal-service-secret"] ||
+      "",
+  ).trim();
+  if (expected && provided && safeTimingCompare(provided, expected)) {
+    return next();
+  }
+  return res.status(401).json({ ok: false, error: "invalid_service_secret" });
+}
+
 function getTikTokWebhookVerifyToken() {
   return String(
     process.env.TIKTOK_WEBHOOK_VERIFY_TOKEN ||
@@ -533,6 +546,33 @@ async function startServer() {
       runtime.logger.error("inbound demo publish failed", { message: error.message });
       res.status(500).json({ ok: false, error: error.message });
     }
+  });
+
+  app.post("/api/inbound/cx-first-contact-forward", requireInternalServiceSecret, async (req, res) => {
+    const payload = req.body && typeof req.body === "object" ? req.body : {};
+    const event = String(payload.event || "").trim() || "unknown";
+    const dedupeKey = String(payload.dedupeKey || req.headers["x-forward-id"] || "").trim() || null;
+    const domain = String(payload.domain || "").trim().toUpperCase() || null;
+    const caseId = payload.caseId == null ? null : String(payload.caseId).trim();
+
+    runtime.logger.info("inbound.cx_first_contact_forward.received", {
+      event,
+      domain,
+      caseId,
+      leadCadenceId: payload.leadCadenceId || null,
+      queueItemId: payload.queueItemId || null,
+      queueFamily: payload.queueFamily || null,
+      state: payload.state || null,
+      dedupeKey,
+      sourceService: payload.sourceService || null,
+    });
+
+    return res.status(202).json({
+      ok: true,
+      accepted: true,
+      event,
+      dedupeKey,
+    });
   });
 
   app.get("/fb/webhook", async (req, res) => {
