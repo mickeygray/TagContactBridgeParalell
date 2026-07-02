@@ -194,13 +194,18 @@ function reduceCxBulkLoadState(previous = {}, event = {}, nowInput = new Date())
         updatedAt: nowIso,
       };
       if (event.completePrevious === true && state.current) {
-        state.completed = pushCompletedOnce(state.completed, {
+        const previous = {
           ...state.current,
           // M11 gate 9: never default a completed record to the synthetic `auto_advanced`
           // outcome — a no-intent auto-advance release is `did_not_connect`.
           outcome: event.previousOutcome || "did_not_connect",
           releasedAt: nowIso,
-        });
+        };
+        state.completed = pushCompletedOnce(state.completed, previous);
+        // TRUNK (2026-07-02): a superseded ANSWERED call (connectedAt latched, no
+        // manual disposition) must stay reachable for the answered-undisposed
+        // correction card — lastOutcome is where the UI reads it.
+        state.lastOutcome = previous;
       }
       state.current = candidate;
       state.acceptedBuffer = removeByQueueItemId(state.acceptedBuffer, candidate);

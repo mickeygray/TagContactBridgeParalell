@@ -454,13 +454,6 @@ function activeCallList(payload) {
   return [];
 }
 
-function normalizeBulkTerminalOutcome(value) {
-  return String(value || "")
-    .trim()
-    .toLowerCase()
-    .replace(/[\s-]+/g, "_");
-}
-
 function isAlreadyEndedHangupError(error) {
   if (!error) return false;
   const status = Number(error.status || error.details?.responseStatus || 0);

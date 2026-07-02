@@ -1080,6 +1080,7 @@ function createCxBulkLoadRuntimeService(deps = {}) {
       sessionId: input.sessionId,
       agentEmail: input.agentEmail,
       agentExtensionId: input.agentExtensionId,
+      answeredMinConnectedMs: input.answeredMinConnectedMs,
       watcher,
       reduce,
       queueStateAdapter,

@@ -143,8 +143,8 @@ test("WO-3 watcher never phone-attaches an active call", async () => {
 });
 
 
-test("projectBulkSessionFromAccountSnapshot releases current when RingCX drops it", () => {
-  const current = { ...candidate("q1", "cxbl-q1"), uii: "u1" };
+test("TRUNK: a connected current dropped by RingCX wraps — no outcome, current held", () => {
+  const current = { ...candidate("q1", "cxbl-q1"), uii: "u1", connectedAt: "2026-06-23T11:59:00.000Z" };
   const s = {
     ...session("s1", "acct-a", [candidate("q2", "cxbl-q2")], current),
     prevActiveExternIds: ["cxbl-q1"],
@@ -160,24 +160,120 @@ test("projectBulkSessionFromAccountSnapshot releases current when RingCX drops i
   );
 
   assert.equal(projected.changed, true);
-  assert.equal(projected.matchStatus, "held-review");
-  assert.equal(projected.transitionKind, "held-review");
-  assert.equal(projected.terminalObservations.length, 1);
-  assert.equal(projected.terminalObservations[0].candidate.queueItemId, "q1");
-  assert.equal(projected.terminalObservations[0].candidate.uii, "u1");
-  assert.equal(projected.after.current, null);
-  assert.equal(projected.after.completed.length, 1);
-  assert.equal(projected.after.completed[0].queueItemId, "q1");
-  assert.equal(projected.after.trace.accountActiveCallWatcher.currentReleased, true);
+  assert.equal(projected.terminalObservations.length, 0, "call end is NOT an outcome for a touched call");
+  assert.equal(projected.after.current.queueItemId, "q1", "current is HELD, not cleared");
+  assert.equal(projected.after.current.uii, "u1");
+  assert.equal(projected.after.current.wrap.reason, "ringcx-current-released");
+  assert.equal(projected.after.completed.length, 0);
 });
 
-test("projectBulkSessionFromAccountSnapshot releases UII-bearing current after prev-active cache is lost", () => {
+test("TRUNK: a wrapped current holds steady on the next tick (no duplicate processing)", () => {
   const current = {
     ...candidate("q1", "cxbl-q1"),
     uii: "u1",
-    activeCallSummary: { externId: "cxbl-q1", uii: "u1" },
+    wrap: { at: "2026-06-23T11:59:30.000Z", reason: "ringcx-current-released" },
   };
-  const s = session("s1", "acct-a", [candidate("q2", "cxbl-q2")], current);
+  const s = {
+    ...session("s1", "acct-a", [], current),
+    prevActiveExternIds: [],
+    trace: { prevActiveCalls: [] },
+  };
+
+  const projected = projectBulkSessionFromAccountSnapshot(
+    s,
+    [],
+    { now: new Date("2026-06-23T12:00:00.000Z") },
+  );
+
+  assert.equal(projected.changed, false, "inside the entry window nothing changes");
+  assert.equal(projected.terminalObservations.length, 0);
+  assert.equal(projected.after.current.queueItemId, "q1");
+  assert.equal(projected.after.current.wrap.at, "2026-06-23T11:59:30.000Z");
+});
+
+test("TRUNK: wrap timeout is the walk-away guard — expiry records ANSWERED (the machine knows)", () => {
+  const current = {
+    ...candidate("q1", "cxbl-q1"),
+    uii: "u1",
+    connectedAt: "2026-06-23T11:55:00.000Z",
+    wrap: { at: "2026-06-23T11:56:00.000Z", reason: "ringcx-current-released" },
+  };
+  const s = {
+    ...session("s1", "acct-a", [], current),
+    prevActiveExternIds: [],
+    trace: { prevActiveCalls: [{ externId: "cxbl-q1", uii: "u1" }] },
+  };
+
+  const projected = projectBulkSessionFromAccountSnapshot(
+    s,
+    [],
+    { now: new Date("2026-06-23T12:00:00.000Z"), wrapTimeoutMs: 180000 }, // 240s > explicit 180s
+  );
+
+  assert.equal(projected.changed, true);
+  assert.equal(projected.terminalObservations.length, 1);
+  assert.equal(projected.terminalObservations[0].source, "wrap-timeout");
+  assert.equal(projected.terminalObservations[0].outcome, "answered", "walked-away answered call records answered");
+  assert.equal(projected.after.current, null);
+  assert.equal(projected.after.completed[0].queueItemId, "q1");
+});
+
+test("TRUNK: connected wrap has no default timeout", () => {
+  const current = {
+    ...candidate("q1", "cxbl-q1"),
+    uii: "u1",
+    wrap: { at: "2026-06-23T11:56:00.000Z", reason: "ringcx-current-released" },
+  };
+  const s = {
+    ...session("s1", "acct-a", [], current),
+    prevActiveExternIds: [],
+    trace: { prevActiveCalls: [{ externId: "cxbl-q1", uii: "u1" }] },
+  };
+
+  const projected = projectBulkSessionFromAccountSnapshot(
+    s,
+    [],
+    { now: new Date("2026-06-23T12:30:00.000Z") },
+  );
+
+  assert.equal(projected.changed, false);
+  assert.equal(projected.terminalObservations.length, 0);
+  assert.equal(projected.after.current.queueItemId, "q1");
+  assert.equal(projected.after.current.wrap.at, "2026-06-23T11:56:00.000Z");
+  assert.equal(projected.after.completed.length, 0);
+});
+
+test("TRUNK: a reappearing call clears the wrap flag (resume)", () => {
+  const current = {
+    ...candidate("q1", "cxbl-q1"),
+    uii: "u1",
+    wrap: { at: "2026-06-23T11:59:30.000Z", reason: "ringcx-current-released" },
+  };
+  const s = {
+    ...session("s1", "acct-a", [], current),
+    prevActiveExternIds: [],
+    trace: { prevActiveCalls: [] },
+  };
+
+  const projected = projectBulkSessionFromAccountSnapshot(
+    s,
+    [{ externalId: "cxbl-q1", uii: "u1", callState: "ACTIVE" }],
+    { now: new Date("2026-06-23T12:00:00.000Z") },
+  );
+
+  assert.equal(projected.after.current.wrap, null, "resumed call is live again");
+  assert.equal(projected.terminalObservations.length, 0);
+});
+
+test("TRUNK: a never-connected current (no uii) still releases immediately — the machine's own outcome", () => {
+  const current = { ...candidate("q1", "cxbl-q1") }; // no uii: no human ever touched it
+  const s = {
+    ...session("s1", "acct-a", [candidate("q2", "cxbl-q2")], current),
+    prevActiveExternIds: ["cxbl-q1"],
+    trace: {
+      prevActiveCalls: [{ externId: "cxbl-q1", externalId: "cxbl-q1", uii: "u1" }],
+    },
+  };
 
   const projected = projectBulkSessionFromAccountSnapshot(
     s,
@@ -186,15 +282,9 @@ test("projectBulkSessionFromAccountSnapshot releases UII-bearing current after p
   );
 
   assert.equal(projected.changed, true);
-  assert.equal(projected.matchStatus, "held-review");
-  assert.equal(projected.transitionKind, "held-review");
-  assert.equal(projected.terminalObservations.length, 1);
-  assert.equal(projected.terminalObservations[0].candidate.queueItemId, "q1");
-  assert.equal(projected.terminalObservations[0].candidate.uii, "u1");
-  assert.equal(projected.after.current, null);
+  assert.equal(projected.after.current, null, "untouched calls auto-release as before");
   assert.equal(projected.after.completed.length, 1);
   assert.equal(projected.after.completed[0].queueItemId, "q1");
-  assert.equal(projected.after.trace.accountActiveCallWatcher.currentReleased, true);
 });
 
 test("projectBulkSessionFromAccountSnapshot respects a review hold before promoting the next active call", () => {
@@ -425,10 +515,16 @@ test("runCxAccountActiveCallWatchOnce requires the serving ownership stamp befor
   assert.equal(result.applied.skipped[0].reason, "serving-ownership-stamp-miss");
 });
 
-test("runCxAccountActiveCallWatchOnce writes terminal observations for released UIIs", async () => {
+test("runCxAccountActiveCallWatchOnce writes terminal observations for released UIIs (wrap expired)", async () => {
   const writes = [];
   const terminalWrites = [];
-  const current = { ...candidate("q1", "cxbl-q1"), uii: "u1" };
+  // TRUNK: a connected current only terminals after its wrap window expires —
+  // seed an already-expired wrap so the persistence pipeline runs this tick.
+  const current = {
+    ...candidate("q1", "cxbl-q1"),
+    uii: "u1",
+    wrap: { at: "2026-06-23T11:56:00.000Z", reason: "ringcx-current-released" },
+  };
   const s1 = {
     ...session("s1", "acct-a", [], current),
     prevActiveExternIds: ["cxbl-q1"],
@@ -452,6 +548,7 @@ test("runCxAccountActiveCallWatchOnce writes terminal observations for released 
   const result = await runCxAccountActiveCallWatchOnce({
     sessionRepository,
     client,
+    wrapTimeoutMs: 180000,
     outcomeAdapter: {
       async persistTerminalOutcome(input) {
         terminalWrites.push(input);
@@ -462,7 +559,7 @@ test("runCxAccountActiveCallWatchOnce writes terminal observations for released 
   });
 
   assert.equal(terminalWrites.length, 1);
-  assert.equal(terminalWrites[0].source, "active-call-release");
+  assert.equal(terminalWrites[0].source, "wrap-timeout");
   assert.equal(terminalWrites[0].candidate.queueItemId, "q1");
   assert.equal(terminalWrites[0].candidate.uii, "u1");
   assert.equal(terminalWrites[0].outcome, "did_not_connect");
@@ -556,7 +653,13 @@ test("#6 a version-miss on a released current re-reads + re-projects terminal ev
   // snapshot, and still writes the release without dropping terminal evidence.
   const writes = [];
   const terminalWrites = [];
-  const current = { ...candidate("q1", "cxbl-q1"), uii: "u1" };
+  // TRUNK: the #6 machinery is exercised via an expired wrap (the terminal path
+  // for a connected current) — the version-miss retry semantics are unchanged.
+  const current = {
+    ...candidate("q1", "cxbl-q1"),
+    uii: "u1",
+    wrap: { at: "2026-06-23T11:56:00.000Z", reason: "ringcx-current-released" },
+  };
   const s1 = {
     ...session("s1", "acct-a", [], current),
     __v: 1,
@@ -579,6 +682,7 @@ test("#6 a version-miss on a released current re-reads + re-projects terminal ev
     sessionRepository,
     client,
     loadLatestState: async () => ({ ...s1, __v: 2 }), // bumped row still carries the release anchors
+    wrapTimeoutMs: 180000,
     outcomeAdapter: {
       async persistTerminalOutcome(input) { terminalWrites.push(input); return { written: true }; },
     },
@@ -593,4 +697,162 @@ test("#6 a version-miss on a released current re-reads + re-projects terminal ev
   assert.equal(terminalWrites[0].candidate.queueItemId, "q1");
   assert.equal(terminalWrites[0].candidate.uii, "u1");
   assert.equal(result.applied.terminalWriteCount, 1);
+});
+
+test("CONGESTION label: a never-connected release matched in RingCX's congestion set carries systemDisposition", async () => {
+  const terminalWrites = [];
+  const current = { ...candidate("q1", "cxbl-q1") }; // no uii on current: never connected
+  const s1 = {
+    ...session("s1", "acct-a", [], current),
+    ringcx: { accountId: "acct-a", campaignId: 2306 },
+    prevActiveExternIds: ["cxbl-q1"],
+    trace: { prevActiveCalls: [{ externId: "cxbl-q1", uii: "u1" }] },
+  };
+  const sessionRepository = {
+    async listActiveBulkLoadSessions() { return [s1]; },
+    async updateBulkLoadSession(sessionId, patch) { return patch; },
+  };
+  const searchCalls = [];
+  const client = {
+    async listActiveCalls() { return []; },
+    async searchLeads(payload) {
+      searchCalls.push(payload);
+      assert.equal(payload.campaignId, 2306);
+      // Row carries no readable disposition field -> the family probe can't say
+      // WHICH, so the CONGESTION-only fallback answers the loop-breaker case.
+      return { leads: [{ externId: "cxbl-q1", leadState: "READY" }] };
+    },
+  };
+
+  await runCxAccountActiveCallWatchOnce({
+    sessionRepository,
+    client,
+    outcomeAdapter: {
+      async persistTerminalOutcome(input) { terminalWrites.push(input); return { written: true }; },
+    },
+    now: new Date("2026-06-23T12:00:00.000Z"),
+  });
+
+  assert.equal(searchCalls.length, 2, "family probe first, then CONGESTION fallback");
+  assert.ok(searchCalls[0].systemDispositions.includes("BUSY"), "first probe filters the whole never-connected family");
+  assert.deepEqual(searchCalls[1].systemDispositions, ["CONGESTION"]);
+  assert.equal(terminalWrites.length, 1);
+  assert.equal(terminalWrites[0].outcome, "did_not_connect", "outcome ENUM is untouched");
+  assert.equal(terminalWrites[0].systemDisposition, "CONGESTION", "the label rides along");
+});
+
+test("SYSTEM DISPOSITION label is general: RingCX's own per-lead value is stamped verbatim (BUSY)", async () => {
+  const terminalWrites = [];
+  const searchCalls = [];
+  const current = { ...candidate("q1", "cxbl-q1") };
+  const s1 = {
+    ...session("s1", "acct-a", [], current),
+    ringcx: { accountId: "acct-a", campaignId: 2306 },
+    prevActiveExternIds: ["cxbl-q1"],
+    trace: { prevActiveCalls: [{ externId: "cxbl-q1", uii: "u1" }] },
+  };
+  const sessionRepository = {
+    async listActiveBulkLoadSessions() { return [s1]; },
+    async updateBulkLoadSession(sessionId, patch) { return patch; },
+  };
+  const client = {
+    async listActiveCalls() { return []; },
+    async searchLeads(payload) {
+      searchCalls.push(payload);
+      // Row DOES carry the per-lead system disposition -> read it directly, one call.
+      return { leads: [{ externId: "cxbl-q1", systemDisposition: "BUSY" }] };
+    },
+  };
+
+  await runCxAccountActiveCallWatchOnce({
+    sessionRepository,
+    client,
+    outcomeAdapter: {
+      async persistTerminalOutcome(input) { terminalWrites.push(input); return { written: true }; },
+    },
+    now: new Date("2026-06-23T12:00:00.000Z"),
+  });
+
+  assert.equal(searchCalls.length, 1, "one probe suffices when the row says which");
+  assert.equal(terminalWrites.length, 1);
+  assert.equal(terminalWrites[0].outcome, "did_not_connect");
+  assert.equal(terminalWrites[0].systemDisposition, "BUSY", "THEIR value, verbatim — not ours");
+});
+
+test("CONGESTION label: a failing leadSearch keeps the plain record (fail-soft)", async () => {
+  const terminalWrites = [];
+  const current = { ...candidate("q1", "cxbl-q1") };
+  const s1 = {
+    ...session("s1", "acct-a", [], current),
+    ringcx: { accountId: "acct-a", campaignId: 2306 },
+    prevActiveExternIds: ["cxbl-q1"],
+    trace: { prevActiveCalls: [{ externId: "cxbl-q1", uii: "u1" }] },
+  };
+  const sessionRepository = {
+    async listActiveBulkLoadSessions() { return [s1]; },
+    async updateBulkLoadSession(sessionId, patch) { return patch; },
+  };
+  const client = {
+    async listActiveCalls() { return []; },
+    async searchLeads() { throw new Error("ringcx down"); },
+  };
+
+  await runCxAccountActiveCallWatchOnce({
+    sessionRepository,
+    client,
+    outcomeAdapter: {
+      async persistTerminalOutcome(input) { terminalWrites.push(input); return { written: true }; },
+    },
+    now: new Date("2026-06-23T12:00:00.000Z"),
+  });
+
+  assert.equal(terminalWrites.length, 1);
+  assert.equal(terminalWrites[0].outcome, "did_not_connect");
+  assert.equal(terminalWrites[0].systemDisposition, undefined, "no label on failure — never blocks the record");
+});
+
+test("REAL-PICKUP guard: a short screener/VM-kick connect (<10s) superseded records did_not_connect", () => {
+  const current = {
+    ...candidate("q1", "cxbl-q1"),
+    uii: "u1",
+    connectedAt: "2026-06-23T12:00:00.000Z", // SIP-answered (Google screener / VM kick)
+  };
+  const s = {
+    ...session("s1", "acct-a", [candidate("q2", "cxbl-q2")], current),
+    prevActiveExternIds: ["cxbl-q1"],
+    trace: { prevActiveCalls: [{ externId: "cxbl-q1", uii: "u1" }] },
+  };
+
+  const projected = projectBulkSessionFromAccountSnapshot(
+    s,
+    [{ externalId: "cxbl-q2", uii: "u2", callState: "ACTIVE" }],
+    { now: new Date("2026-06-23T12:00:03.000Z") }, // connected only 3s — not a human pickup
+  );
+
+  assert.equal(projected.terminalObservations.length, 1);
+  assert.equal(projected.terminalObservations[0].outcome, "did_not_connect", "3s SIP-connect is not answered");
+  assert.equal(projected.after.current.queueItemId, "q2");
+});
+
+test("REAL-PICKUP guard: a real conversation (>=10s) superseded records answered", () => {
+  const current = {
+    ...candidate("q1", "cxbl-q1"),
+    uii: "u1",
+    connectedAt: "2026-06-23T12:00:00.000Z",
+  };
+  const s = {
+    ...session("s1", "acct-a", [candidate("q2", "cxbl-q2")], current),
+    prevActiveExternIds: ["cxbl-q1"],
+    trace: { prevActiveCalls: [{ externId: "cxbl-q1", uii: "u1" }] },
+  };
+
+  const projected = projectBulkSessionFromAccountSnapshot(
+    s,
+    [{ externalId: "cxbl-q2", uii: "u2", callState: "ACTIVE" }],
+    { now: new Date("2026-06-23T12:00:30.000Z") }, // 30s of conversation
+  );
+
+  assert.equal(projected.terminalObservations.length, 1);
+  assert.equal(projected.terminalObservations[0].outcome, "answered", "a real pickup records answered");
+  assert.equal(projected.after.lastOutcome.outcome, "answered", "and lands on the answered worklist");
 });

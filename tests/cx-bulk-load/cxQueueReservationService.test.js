@@ -22,11 +22,6 @@ function fakeRepo({ reserveResult = { reserved: [], missing: {} }, reserveImpl =
       if (transitionThrows) throw new Error("transition boom");
       return { _id: id };
     },
-    // Default: echo the ids back as "renewed"; renewReturns can override per session.
-    renewClaim: async (ids, claimMinutes, sessionId) => {
-      calls.renew.push({ ids, claimMinutes, sessionId });
-      return renewReturns ? renewReturns(sessionId, ids) : ids;
-    },
   };
 }
 
@@ -290,53 +285,6 @@ test("releaseReserved is fail-soft: a transition error is logged, never thrown",
   assert.equal(warns.length, 1);
 });
 
-test("renewReserved groups ids by reservationSessionId and delegates one CAS batch per owner", async () => {
-  const repo = fakeRepo();
-  const svc = createCxQueueReservationService({ cxDialQueueRepository: repo });
-  const renewed = await svc.renewReserved(
-    [
-      { _id: "a", metadata: { reservationSessionId: "sess-1" } },
-      { _id: "b", metadata: { reservationSessionId: "sess-1" } },
-      { _id: "c", metadata: { reservationSessionId: "sess-2" } },
-    ],
-    10,
-  );
-  assert.equal(repo.calls.renew.length, 2); // one batch per session
-  const s1 = repo.calls.renew.find((c) => c.sessionId === "sess-1");
-  assert.deepEqual(s1.ids, ["a", "b"]);
-  assert.equal(s1.claimMinutes, 10);
-  assert.deepEqual(renewed.sort(), ["a", "b", "c"]); // union of renewed ids
-});
-
-test("renewReserved skips rows missing an id or a reservationSessionId", async () => {
-  const repo = fakeRepo();
-  const svc = createCxQueueReservationService({ cxDialQueueRepository: repo });
-  await svc.renewReserved([
-    { _id: "a", metadata: { reservationSessionId: "sess-1" } },
-    { _id: "b", metadata: {} }, // no sessionId -> skipped
-    { metadata: { reservationSessionId: "sess-1" } }, // no _id -> skipped
-  ]);
-  assert.equal(repo.calls.renew.length, 1);
-  assert.deepEqual(repo.calls.renew[0].ids, ["a"]);
-});
-
-test("renewReserved returns only the ids the CAS actually renewed (serving/reaped rows drop out)", async () => {
-  // sess-1 row 'b' lost its lease (serving/reaped) -> CAS returns only 'a'.
-  const repo = fakeRepo({ renewReturns: () => ["a"] });
-  const svc = createCxQueueReservationService({ cxDialQueueRepository: repo });
-  const renewed = await svc.renewReserved([
-    { _id: "a", metadata: { reservationSessionId: "sess-1" } },
-    { _id: "b", metadata: { reservationSessionId: "sess-1" } },
-  ]);
-  assert.deepEqual(renewed, ["a"]);
-});
-
-test("renewReserved requires cxDialQueueRepository.renewClaim", async () => {
-  const svc = createCxQueueReservationService({
-    cxDialQueueRepository: { reserveReadyRows: async () => ({ reserved: [], missing: {} }) },
-  });
-  await assert.rejects(() => svc.renewReserved([{ _id: "a", metadata: { reservationSessionId: "s" } }]), /renewClaim/);
-});
 
 test("reserveFromFamilyOrder drops + releases a reserved row already active in the UCQ pool (M5 interlock)", async () => {
   const repo = fakeRepo({

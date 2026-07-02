@@ -33,10 +33,35 @@ function createCxBulkLoadRouter(auth, options = {}) {
   }
 
   async function sendBulkCommand(req, res, command, source) {
+    const input = source(req);
     try {
-      const result = await command(source(req), { user: req.user, logger });
+      const result = await command(input, { user: req.user, logger });
+      // A mutating command that resolves null means "no active session matched" —
+      // the entry function returns null instead of throwing. Without this line the
+      // client sees HTTP 200 and the server records nothing (field lesson 2026-07-02:
+      // a disposition click can vanish with zero evidence on either side).
+      if (result === null && req.method === "POST") {
+        logger.warn("[cx.bulk.http] null-result", {
+          path: req.path,
+          sessionId: input?.sessionId || null,
+          disposition: input?.disposition || null,
+          user: req.user?.email || null,
+        });
+      }
       return success(res, result);
     } catch (error) {
+      // Guard rejections (auth context, runtime gate, session ownership) throw from
+      // the entry function BEFORE any cx.alpha trace fires — unlogged, they are
+      // indistinguishable from a request that never arrived.
+      logger.warn("[cx.bulk.http] rejected", {
+        path: req.path,
+        status: error.status || 500,
+        code: error.code || null,
+        message: error.message || String(error),
+        sessionId: input?.sessionId || null,
+        disposition: input?.disposition || null,
+        user: req.user?.email || null,
+      });
       return failure(res, error);
     }
   }

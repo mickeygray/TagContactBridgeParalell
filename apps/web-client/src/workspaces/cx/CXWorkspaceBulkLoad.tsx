@@ -4404,39 +4404,15 @@ export function CXWorkspaceBulkLoad() {
   }, [bulkRunning, bulkConfirmedCurrent, bulkLastOutcome]);
 
   React.useEffect(() => {
-    if (!bulkRunning) {
-      setBulkAutoReview(null);
-      return;
-    }
-    const key = bulkCallReviewKey(bulkLastOutcome);
-    if (!key || lastBulkAutoReviewKeyRef.current === key) return;
-    lastBulkAutoReviewKeyRef.current = key;
-
-    const manualTerminal = manualBulkTerminalRef.current;
-    if (manualTerminal?.key === key) {
-      manualBulkTerminalRef.current = null;
-      return;
-    }
-
-    const outcome = String(bulkLastOutcome?.outcome || "").trim().toLowerCase();
-    if (outcome && outcome !== "did_not_connect") return;
-    if (bulkReviewHoldReason !== "ringcx-current-released") return;
-    const releasedAtMs = Date.parse(String(
-      (bulkLastOutcome as { releasedAt?: unknown; updatedAt?: unknown } | null)?.releasedAt ||
-        (bulkLastOutcome as { releasedAt?: unknown; updatedAt?: unknown } | null)?.updatedAt ||
-        "",
-    ));
-    if (Number.isFinite(releasedAtMs) && Date.now() - releasedAtMs > 10_000) return;
-
-    const serverExpiresAt = Date.parse(String(bulkReviewHoldUntil || ""));
-    if (!Number.isFinite(serverExpiresAt) || serverExpiresAt <= Date.now()) return;
-    const expiresAt = serverExpiresAt;
-    setBulkAutoReview({
-      key,
-      candidate: bulkLastOutcome as CxBulkLoadCurrent,
-      expiresAt,
-      status: "open",
-    });
+    // AUTO-REVIEW BANNER RETIRED (Mickey, 2026-07-02 night 2): the banner popped
+    // "auto-advanced — DNC?" even after a manual No-answer click (screener-bot
+    // call). Design law: never-connects get a status line and the next dial — no
+    // prompt; DNC/appointment recovery for answered calls is the worklist's job
+    // (WO-32 / BLOCK I). This effect now only holds the banner closed; the full
+    // excision (state, JSX banner, review candidate in the display cascade)
+    // belongs to WO-16's projector rework. Deps kept so the hold-field reads
+    // survive noUnusedLocals until then.
+    setBulkAutoReview(null);
   }, [bulkRunning, bulkLastOutcome, bulkReviewHoldReason, bulkReviewHoldUntil]);
 
   React.useEffect(() => {

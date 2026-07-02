@@ -199,7 +199,10 @@ function build(liveCalls, overrides = {}) {
 }
 
 async function syncFromRingCx(svc, sessionId = "s1") {
-  await svc.watchAccountActiveCalls({ sessionId });
+  // answeredMinConnectedMs: 0 — the harness clock is frozen (now: () => NOW), so the
+  // real-pickup duration guard is exercised by its own explicit-time pins at the
+  // pure projection layer, not here.
+  await svc.watchAccountActiveCalls({ sessionId, answeredMinConnectedMs: 0 });
   return svc.getCxBulkLoadSession({ sessionId });
 }
 
@@ -830,16 +833,18 @@ test("watch auto-advance writes one terminal outcome for the departed current", 
   const liveCalls = { value: [] };
   const { svc, outcomeAdapter } = build(liveCalls);
   await svc.startCxBulkLoadSession({ agentEmail: "a@x.com", domain: "TAG", ringcx: { accountId: "acct1", campaignId: "camp1" }, targetSize: 3, refillThreshold: 1 });
-  liveCalls.value = [{ externalId: externFor("q1"), uii: "u1" }];
+  liveCalls.value = [{ externalId: externFor("q1"), uii: "u1", callState: "ACTIVE" }];
   await syncFromRingCx(svc); // q1 active
-  liveCalls.value = [{ externalId: externFor("q2"), uii: "u2" }];
-  const snap = await syncFromRingCx(svc); // RingCX swapped to q2 -> q1 auto-completes
-  assert.equal(outcomeAdapter.writes.length, 1, "the departed current is durably terminalized");
-  assert.equal(outcomeAdapter.writes[0].source, "active-call-release");
+  liveCalls.value = [{ externalId: externFor("q2"), uii: "u2", callState: "ACTIVE" }];
+  const snap = await syncFromRingCx(svc); // RingCX swapped to q2: the wrapped q1 is SUPERSEDED
+  // TRUNK: a genuine next-call arrival ends q1's wrap window via the switch path —
+  // one durable terminal for q1, and q2 promotes immediately (no hold gap).
+  assert.equal(outcomeAdapter.writes.length, 1, "the superseded current is durably terminalized");
+  assert.equal(outcomeAdapter.writes[0].source, "active-call-switch");
   assert.equal(outcomeAdapter.writes[0].candidate.queueItemId, "q1");
   assert.equal(outcomeAdapter.writes[0].candidate.uii, "u1");
-  assert.equal(outcomeAdapter.writes[0].outcome, "did_not_connect");
-  assert.equal(snap.current, null);
+  assert.equal(outcomeAdapter.writes[0].outcome, "answered", "connected supersede defaults to answered");
+  assert.equal(snap.current.queueItemId, "q2", "the next call promotes without a hold gap");
 });
 
 test("watch release evidence clears current after a rejected disposition attempt", async () => {
@@ -847,7 +852,7 @@ test("watch release evidence clears current after a rejected disposition attempt
   const { svc, client, outcomeAdapter } = build(liveCalls);
   client.dispositionCall = async () => false;
   await svc.startCxBulkLoadSession({ agentEmail: "a@x.com", domain: "TAG", ringcx: { accountId: "acct1", campaignId: "camp1" }, targetSize: 3, refillThreshold: 1 });
-  liveCalls.value = [{ externalId: externFor("q1"), uii: "u1" }];
+  liveCalls.value = [{ externalId: externFor("q1"), uii: "u1", callState: "ACTIVE" }];
   const failed = await syncFromRingCx(svc);
   assert.equal(failed.current.queueItemId, "q1");
 
@@ -857,28 +862,55 @@ test("watch release evidence clears current after a rejected disposition attempt
   assert.equal(retryable.current.outcome, "voicemail");
   assert.equal(outcomeAdapter.writes.length, 0);
 
-  liveCalls.value = [{ externalId: externFor("q2"), uii: "u2" }];
+  liveCalls.value = [{ externalId: externFor("q2"), uii: "u2", callState: "ACTIVE" }];
   const snap = await syncFromRingCx(svc);
+  // TRUNK: q1 wraps on release, then q2's arrival supersedes it via the switch path.
   assert.equal(outcomeAdapter.writes.length, 1);
+  assert.equal(outcomeAdapter.writes[0].source, "active-call-switch");
   assert.equal(outcomeAdapter.writes[0].candidate.queueItemId, "q1");
   assert.equal(outcomeAdapter.writes[0].candidate.uii, "u1");
-  assert.equal(outcomeAdapter.writes[0].outcome, "did_not_connect");
-  assert.equal(snap.current, null);
+  assert.equal(snap.current.queueItemId, "q2");
   assert.equal(snap.completedCount, 1);
 });
 
-test("watch clears and terminalizes current when RingCX drops it without a replacement", async () => {
+test("TRUNK: RingCX dropping a connected current without a replacement WRAPS it (the Joe case)", async () => {
   const liveCalls = { value: [] };
   const { svc, outcomeAdapter } = build(liveCalls);
   await svc.startCxBulkLoadSession({ agentEmail: "a@x.com", domain: "TAG", ringcx: { accountId: "acct1", campaignId: "camp1" }, targetSize: 3, refillThreshold: 1 });
-  liveCalls.value = [{ externalId: externFor("q1"), uii: "u1" }];
+  liveCalls.value = [{ externalId: externFor("q1"), uii: "u1", callState: "ACTIVE" }];
   await syncFromRingCx(svc);
   liveCalls.value = [];
   const snap = await syncFromRingCx(svc);
+  // Call end is not an outcome: nothing written, the lead stays on screen for the
+  // agent's disposition — which remains the record.
+  assert.equal(outcomeAdapter.writes.length, 0);
+  assert.equal(snap.current.queueItemId, "q1");
+  assert.equal(snap.current.uii, "u1");
+  assert.ok(snap.current.wrap && snap.current.wrap.at, "current is held in wrap");
+  assert.equal(snap.completedCount, 0);
+});
+
+test("TRUNK: the outcome entered on a wrapped current IS the record — stable, written once", async () => {
+  const liveCalls = { value: [] };
+  const { svc, outcomeAdapter } = build(liveCalls);
+  await svc.startCxBulkLoadSession({ agentEmail: "a@x.com", domain: "TAG", ringcx: { accountId: "acct1", campaignId: "camp1" }, targetSize: 3, refillThreshold: 1 });
+  liveCalls.value = [{ externalId: externFor("q1"), uii: "u1", callState: "ACTIVE" }];
+  await syncFromRingCx(svc);
+  liveCalls.value = [];
+  await syncFromRingCx(svc); // q1 wraps
+
+  const result = await svc.submitCxBulkLoadDisposition({ sessionId: "s1", disposition: "voicemail" });
+  assert.equal(result.dispositionOk, true, "disposition on a wrapped current is the normal path");
+  assert.equal(outcomeAdapter.writes.length, 1, "exactly one record");
+  assert.equal(outcomeAdapter.writes[0].outcome, "voicemail", "the HUMAN's outcome, not the machine's");
+  assert.equal(outcomeAdapter.writes[0].candidate.queueItemId, "q1");
+  assert.equal(outcomeAdapter.writes[0].candidate.uii, "u1");
+  assert.equal(result.current, null, "cleared only after the human's record landed");
+
+  // And it stays stable: a follow-up watcher tick neither re-terminals nor resurrects it.
+  const after = await syncFromRingCx(svc);
   assert.equal(outcomeAdapter.writes.length, 1);
-  assert.equal(outcomeAdapter.writes[0].source, "active-call-release");
-  assert.equal(snap.current, null);
-  assert.equal(snap.completedCount, 1);
+  assert.equal(after.completedCount, 1);
 });
 
 test("overlapping account watcher ticks serialize one refill per session", async () => {
@@ -896,12 +928,13 @@ test("overlapping account watcher ticks serialize one refill per session", async
     domain: "TAG",
     ringcx: { accountId: "acct1", campaignId: "camp1" },
     stats: { targetSize: 2, refillThreshold: 1, familyTargets: { "fresh-day1": 2 }, claimMinutes: 10 },
+    // never-connected current (no uii): releases immediately under the trunk rule,
+    // keeping this test focused on its real subject — refill serialization.
     current: {
       queueItemId: "current-1",
       externId: externFor("current-1"),
       ringcx: { externId: externFor("current-1") },
       queueFamily: "fresh-day1",
-      uii: "u-current-1",
     },
     acceptedBuffer: [],
     prevActiveExternIds: [externFor("current-1")],
@@ -1125,4 +1158,25 @@ test("WO-3 manual-dial mutator is not exported", () => {
   assert.equal(runtime.startCxBulkLoadNextManualCall, undefined, "runtime exposes no manual-start wrapper");
   const barrel = require("../../packages/shared-services/src");
   assert.equal(barrel.startCxBulkLoadNextManualCall, undefined, "shared-services barrel exposes no manual-start export");
+});
+
+test("TRUNK: a hung-up-on ANSWERED call superseded by the next call stays correctable (connectedAt survives)", async () => {
+  const liveCalls = { value: [] };
+  const { svc, outcomeAdapter } = build(liveCalls);
+  await svc.startCxBulkLoadSession({ agentEmail: "a@x.com", domain: "TAG", ringcx: { accountId: "acct1", campaignId: "camp1" }, targetSize: 3, refillThreshold: 1 });
+  liveCalls.value = [{ externalId: externFor("q1"), uii: "u1", callState: "ACTIVE" }];
+  await syncFromRingCx(svc); // q1 answered (connected latch)
+  liveCalls.value = [{ externalId: externFor("q2"), uii: "u2", callState: "ACTIVE" }];
+  const snap = await syncFromRingCx(svc); // prospect hung up; RingCX advanced to q2
+
+  // The new call owns the screen; the previous answered call is provisionally
+  // recorded but must stay identifiable as answered-undisposed for the modal +
+  // correction lane (lastOutcome.connectedAt + no manual outcome = show the card).
+  assert.equal(snap.current.queueItemId, "q2", "next call promotes without a gap");
+  assert.equal(outcomeAdapter.writes.length, 1);
+  assert.equal(outcomeAdapter.writes[0].candidate.queueItemId, "q1");
+  assert.ok(outcomeAdapter.writes[0].candidate.connectedAt, "the terminal record knows q1 was answered");
+  assert.equal(snap.lastOutcome.queueItemId, "q1");
+  assert.ok(snap.lastOutcome.connectedAt, "lastOutcome carries the answered signal for the modal");
+  assert.equal(snap.lastOutcome.outcome, "answered", "the machine KNOWS it was answered — the card is an opportunity, not a correction");
 });

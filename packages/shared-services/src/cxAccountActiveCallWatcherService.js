@@ -152,6 +152,22 @@ function groupBulkSessionsByAccount(sessions = []) {
   return { byAccount, skipped };
 }
 
+// REAL-PICKUP GUARD (Mickey, 2026-07-02): "answered" must mean a human picked up.
+// A Google-screener / carrier-VM kick SIP-answers for a few seconds; a conversation
+// lasts. If the machine-defaulted outcome is "answered" but the connection lasted
+// less than answeredMinConnectedMs, downgrade to did_not_connect. Explicit option
+// wins; env CX_BULK_ANSWERED_MIN_CONNECTED_MS next; default 10000ms; 0 disables.
+function applyAnsweredGuard(outcome, current = null, at = new Date(), options = {}) {
+  if (outcome !== "answered") return outcome;
+  const fromEnv = Number(process.env.CX_BULK_ANSWERED_MIN_CONNECTED_MS);
+  const minMs = options.answeredMinConnectedMs != null
+    ? Number(options.answeredMinConnectedMs)
+    : (Number.isFinite(fromEnv) ? fromEnv : 10000);
+  if (!Number.isFinite(minMs) || minMs <= 0) return outcome;
+  const connectedMs = current?.connectedAt ? at.getTime() - new Date(current.connectedAt).getTime() : 0;
+  return connectedMs >= minMs ? outcome : "did_not_connect";
+}
+
 function withWatcherTrace(state = {}, patch = {}, at = new Date()) {
   const checkedAt = nowDate(at).toISOString();
   return {
@@ -201,6 +217,22 @@ function projectBulkSessionFromAccountSnapshot(session = {}, activeCalls = [], o
     }
     next = reduce(next, { type: "buffer.released", candidate: released, outcome: "did_not_connect" }, at);
   }
+  // CONNECTED LATCH (congestion fix, 2026-07-02): a UII is assigned at DIAL time —
+  // OUTDIAL attempts (incl. carrier-congested calls that flash into the list and
+  // vanish) carry one too, so UII presence must never mean "a human answered".
+  // The honest signal is the state transition: stamp connectedAt ONCE when the
+  // current's uii is observed in a connected-family state. Field evidence: all
+  // promotion-time stamps read OUTDIAL; congestion = uii + OUTDIAL-only + vanish.
+  const CONNECTED_STATES = new Set(["ACTIVE", "CONNECTED", "ONHOLD", "HOLD", "TRANSFER"]);
+  if (next.current && str(next.current.uii) && !next.current.connectedAt) {
+    const liveRow = relevantCalls.find(
+      (call) => str(call.uii) === str(next.current.uii) && CONNECTED_STATES.has(str(call.callState).toUpperCase()),
+    );
+    if (liveRow) {
+      next = { ...next, current: { ...next.current, connectedAt: at.toISOString() } };
+    }
+  }
+
   const currentReleased = watcher.deriveCurrentRelease
     ? watcher.deriveCurrentRelease({
         current: next.current,
@@ -209,20 +241,64 @@ function projectBulkSessionFromAccountSnapshot(session = {}, activeCalls = [], o
       })
     : null;
   if (currentReleased) {
-    if (hasTerminalWriteProof(currentReleased)) {
-      terminalObservations.push({
-        source: "active-call-release",
-        outcome: "did_not_connect",
-        candidate: currentReleased,
-      });
+    // TRUNK RULING (2026-07-02): call end ≠ outcome for a CONNECTED call. A current
+    // that reached a connected state was a human's call — hold it in WRAP (same
+    // current, buttons stay live, the agent's disposition IS the record) instead of
+    // auto-writing did_not_connect out from under them. RingCX sits in
+    // dispositioning-hold waiting for that disposition, so the hold costs no
+    // advancement. Never-connected releases (ring-outs, carrier congestion) keep the
+    // old immediate terminal path — the machine's own outcome, and the loop moves on.
+    // The wrap timeout is test/ops opt-in only: a default timeout is unsafe because
+    // RingCX can drop the active-call row while the human call is still alive.
+    // A genuine next-call arrival still supersedes via the current.matched switch
+    // path below (completePrevious), which the correction lane can amend later.
+    const wasConnected = Boolean(next.current?.connectedAt);
+    const wrapTimeoutMs = Number(options.wrapTimeoutMs) > 0 ? Number(options.wrapTimeoutMs) : 0;
+    const wrappedAtMs = next.current?.wrap?.at ? new Date(next.current.wrap.at).getTime() : null;
+    const wrapExpired = wrapTimeoutMs > 0 && wrappedAtMs != null && at.getTime() - wrappedAtMs >= wrapTimeoutMs;
+    if (wrappedAtMs != null && !wrapExpired) {
+      // already wrapped, inside the entry window — hold, no writes (an existing wrap
+      // is honored regardless of how connectivity was judged when it was set)
+    } else if (wasConnected && wrappedAtMs == null) {
+      next = {
+        ...next,
+        current: {
+          ...next.current,
+          wrap: { at: at.toISOString(), reason: "ringcx-current-released" },
+        },
+      };
+    } else {
+      // ANSWERED DEFAULT (Mickey, 2026-07-02): an auto-close of a call that reached
+      // a connected state records "answered" (the machine knows); only a
+      // never-connected release records did_not_connect. The real-pickup guard
+      // downgrades short screener/VM-kick connects.
+      const releaseOutcome = applyAnsweredGuard(
+        next.current?.connectedAt ? "answered" : "did_not_connect",
+        next.current,
+        at,
+        options,
+      );
+      if (hasTerminalWriteProof(currentReleased)) {
+        terminalObservations.push({
+          source: wrapExpired ? "wrap-timeout" : "active-call-release",
+          outcome: releaseOutcome,
+          candidate: currentReleased,
+        });
+      }
+      next = reduce(next, {
+        type: "current.released",
+        outcome: releaseOutcome,
+        reason: wrapExpired ? "wrap-timeout" : "ringcx-current-released",
+        reviewHoldUntil: buildReviewHoldUntil(options, at),
+        reviewHoldReason: "ringcx-current-released",
+      }, at);
     }
-    next = reduce(next, {
-      type: "current.released",
-      outcome: "did_not_connect",
-      reason: "ringcx-current-released",
-      reviewHoldUntil: buildReviewHoldUntil(options, at),
-      reviewHoldReason: "ringcx-current-released",
-    }, at);
+  } else if (next.current?.wrap) {
+    // The call reappeared in the active list — resume; clear the wrap flag.
+    const currentExt = candidateExternId(next.current);
+    if (currentExt && relevantCalls.some((call) => call.externId === currentExt)) {
+      next = { ...next, current: { ...next.current, wrap: null } };
+    }
   }
 
   next = {
@@ -300,10 +376,22 @@ function projectBulkSessionFromAccountSnapshot(session = {}, activeCalls = [], o
       transition.kind === "same" &&
       str(next.current?.uii) === str(transition.uii) &&
       queueItemKey(next.current) === queueItemKey(transition.candidate);
+    // ANSWERED DEFAULT (Mickey, 2026-07-02): a superseded call that reached a
+    // connected state defaults to "answered" — the machine KNOWS it was answered.
+    // REAL-PICKUP GUARD: a Google-screener / VM-kick connect is SIP-answered for a
+    // few seconds without a human — "answered" additionally requires the connection
+    // to have lasted answeredMinConnectedMs (env CX_BULK_ANSWERED_MIN_CONNECTED_MS,
+    // default 10s; 0 disables). Short connects downgrade to did_not_connect.
+    const supersededOutcome = applyAnsweredGuard(
+      transition.previousOutcome || (next.current?.connectedAt ? "answered" : "did_not_connect"),
+      next.current,
+      at,
+      options,
+    );
     if (!sameCurrent && transition.completePrevious === true && hasTerminalWriteProof(next.current)) {
       terminalObservations.push({
         source: "active-call-switch",
-        outcome: transition.previousOutcome || "did_not_connect",
+        outcome: supersededOutcome,
         candidate: next.current,
       });
     }
@@ -323,14 +411,22 @@ function projectBulkSessionFromAccountSnapshot(session = {}, activeCalls = [], o
         activeCallSummary: match.activeCall || null,
         matchReasons: transition.matchReasons,
         completePrevious: transition.completePrevious === true,
-        previousOutcome: transition.previousOutcome,
+        previousOutcome: supersededOutcome,
       }, at);
+    }
+    // Connected latch, promotion half: if the matched call is ALREADY in a
+    // connected state at promotion time, stamp it now (the per-tick latch above
+    // covers later transitions on subsequent polls).
+    const promotedState = str(match.activeCall?.callState).toUpperCase();
+    if (next.current && !next.current.connectedAt && CONNECTED_STATES.has(promotedState)) {
+      next = { ...next, current: { ...next.current, connectedAt: at.toISOString() } };
     }
   }
 
   const currentAfter = queueItemKey(next.current);
+  const wrapChanged = Boolean(session.current?.wrap) !== Boolean(next.current?.wrap);
   const currentChanged = currentBefore !== currentAfter || str(session.current?.uii) !== str(next.current?.uii);
-  const changed = releaseChanged || currentChanged;
+  const changed = releaseChanged || currentChanged || wrapChanged;
 
   next = withWatcherTrace(next, {
     accountId,
@@ -456,6 +552,8 @@ async function buildCxAccountActiveCallWatchPlan(input = {}) {
         watcher,
         reduce: input.reduce || reduceCxBulkLoadState,
         now: at,
+        wrapTimeoutMs: input.wrapTimeoutMs,
+        answeredMinConnectedMs: input.answeredMinConnectedMs,
       });
       // Bind a re-projection against THIS tick's same active-call snapshot so the apply step can
       // recover from a __v race (version-miss) by re-reading the latest session row and re-deriving
@@ -467,6 +565,8 @@ async function buildCxAccountActiveCallWatchPlan(input = {}) {
             watcher,
             reduce: input.reduce || reduceCxBulkLoadState,
             now: at,
+            wrapTimeoutMs: input.wrapTimeoutMs,
+        answeredMinConnectedMs: input.answeredMinConnectedMs,
           }),
         enumerable: false,
       });
@@ -535,6 +635,8 @@ async function runCxAccountActiveCallWatchOnce(input = {}) {
     watcher: input.watcher,
     reduce: input.reduce,
     now: input.now,
+    wrapTimeoutMs: input.wrapTimeoutMs,
+        answeredMinConnectedMs: input.answeredMinConnectedMs,
   });
   traceWatcher("cx.alpha.watch.tick.summary", {
     checkedAt: plan.checkedAt || null,
@@ -549,6 +651,136 @@ async function runCxAccountActiveCallWatchOnce(input = {}) {
   const writes = [];
   const skipped = [...busySkipped];
   const terminalWrites = [];
+
+  // SYSTEM-DISPOSITION RELABEL (fail-soft, 2026-07-02): when a never-connected
+  // current vanishes, RingCX knows WHY — ITS system disposition vocabulary
+  // (CONGESTION / BUSY / INTERCEPT / NOANSWER / MACHINE / ABANDON). We READ their
+  // value, never invent one. One bounded leadSearch filtered to the whole
+  // never-connected family; the per-lead disposition field is undocumented, so we
+  // try their plausible field names and TRACE the row's keys once so the first live
+  // hit documents the real response shape in our logs; if the row carries no
+  // readable value, one CONGESTION-only fallback probe answers the case that broke
+  // the loop. The outcome ENUM stays did_not_connect either way — this is a label,
+  // not routing. Any error, timeout, or non-match keeps the plain record.
+  const NEVER_CONNECTED_SYSTEM_DISPOSITIONS = ["CONGESTION", "BUSY", "INTERCEPT", "NOANSWER", "MACHINE", "ABANDON"];
+  async function boundedSearch(payload) {
+    const timeoutSentinel = { timedOut: true };
+    const timeout = new Promise((resolve) => setTimeout(() => resolve(timeoutSentinel), 2000));
+    const res = await Promise.race([input.client.searchLeads(payload), timeout]);
+    if (res === timeoutSentinel) return { leads: [], timedOut: true };
+    return { leads: Array.isArray(res) ? res : res?.leads || res?.records || [], timedOut: false };
+  }
+  function readLeadSystemDisposition(lead = {}) {
+    const candidates = [
+      ["systemDisposition", lead.systemDisposition],
+      ["lastSystemDisposition", lead.lastSystemDisposition],
+      ["callResult", lead.callResult],
+      ["lastCallResult", lead.lastCallResult],
+      ["passDisposition", lead.passDisposition],
+    ];
+    for (const [field, raw] of candidates) {
+      const value = str(raw).toUpperCase();
+      if (NEVER_CONNECTED_SYSTEM_DISPOSITIONS.includes(value)) return { value, field };
+    }
+    return null;
+  }
+  async function lookupSystemDispositionLabel(projection, observation) {
+    const traceBase = {
+      sessionId: projection.sessionId,
+      agentEmail: projection.agentEmail || null,
+      accountId: projection.accountId || null,
+      queueItemId: queueItemKey(observation.candidate) || null,
+      uii: str(observation.candidate?.uii) || null,
+      outcome: observation.outcome || "did_not_connect",
+      source: observation.source || "active-call-release",
+    };
+    try {
+      // Gate on the OUTCOME, not the source: a superseded short-connect (screener
+      // kick followed immediately by the next call) is a never-connect wearing an
+      // "active-call-switch" source — it deserves its label too. Answered rows
+      // never need a lookup (connectedAt + duration already told us).
+      if (observation.outcome !== "did_not_connect") return null;
+      if (typeof input.client?.searchLeads !== "function") {
+        traceWatcher("cx.alpha.system_disposition.lookup.skipped", {
+          ...traceBase,
+          reason: "missing-searchLeads-client",
+        });
+        return null;
+      }
+      const campaignId = projection.before?.ringcx?.campaignId;
+      const externId = candidateExternId(observation.candidate);
+      if (!campaignId || !externId) {
+        traceWatcher("cx.alpha.system_disposition.lookup.skipped", {
+          ...traceBase,
+          campaignId: campaignId || null,
+          externId: externId || null,
+          reason: !campaignId ? "missing-campaign-id" : "missing-extern-id",
+        });
+        return null;
+      }
+      traceWatcher("cx.alpha.system_disposition.lookup.started", {
+        ...traceBase,
+        campaignId,
+        externId,
+        systemDispositions: NEVER_CONNECTED_SYSTEM_DISPOSITIONS,
+      });
+      const familyResult = await boundedSearch({ campaignId, systemDispositions: NEVER_CONNECTED_SYSTEM_DISPOSITIONS });
+      const family = familyResult.leads;
+      const hit = family.find((lead) => str(lead?.externId) === externId);
+      traceWatcher("cx.alpha.system_disposition.lookup.family_result", {
+        ...traceBase,
+        campaignId,
+        externId,
+        timedOut: Boolean(familyResult.timedOut),
+        rowCount: family.length,
+        matched: Boolean(hit),
+      });
+      if (hit) {
+        if (!lookupSystemDispositionLabel.shapeTraced) {
+          lookupSystemDispositionLabel.shapeTraced = true;
+          traceWatcher("cx.bulk.leadsearch.row_shape", { keys: Object.keys(hit).slice(0, 24) });
+        }
+        const direct = readLeadSystemDisposition(hit);
+        if (direct) {
+          traceWatcher("cx.alpha.system_disposition.lookup.matched", {
+            ...traceBase,
+            campaignId,
+            externId,
+            systemDisposition: direct.value,
+            field: direct.field,
+            matchSource: "family-filter",
+          });
+          return direct.value;
+        }
+        traceWatcher("cx.alpha.system_disposition.lookup.unlabeled_hit", {
+          ...traceBase,
+          campaignId,
+          externId,
+          reason: "matched-row-has-no-readable-system-disposition",
+        });
+      }
+      // Response didn't say WHICH — answer the operationally-important one directly.
+      const congestedResult = await boundedSearch({ campaignId, systemDispositions: ["CONGESTION"] });
+      const congested = congestedResult.leads;
+      const congestionMatched = congested.some((lead) => str(lead?.externId) === externId);
+      traceWatcher("cx.alpha.system_disposition.lookup.congestion_result", {
+        ...traceBase,
+        campaignId,
+        externId,
+        timedOut: Boolean(congestedResult.timedOut),
+        rowCount: congested.length,
+        matched: congestionMatched,
+        systemDisposition: congestionMatched ? "CONGESTION" : null,
+      });
+      return congestionMatched ? "CONGESTION" : null;
+    } catch (error) {
+      traceWatcher("cx.alpha.system_disposition.lookup.failed", {
+        ...traceBase,
+        error: error?.message || "lookup-failed",
+      });
+      return null; // fail-soft: the plain did_not_connect record stands
+    }
+  }
 
   async function persistTerminalObservations(projection) {
     for (const observation of projection.terminalObservations || []) {
@@ -572,12 +804,14 @@ async function runCxAccountActiveCallWatchOnce(input = {}) {
         });
         continue;
       }
+      const systemDisposition = await lookupSystemDispositionLabel(projection, observation);
       await input.outcomeAdapter.persistTerminalOutcome({
         session: projection.before,
         candidate: observation.candidate,
         outcome: observation.outcome || "did_not_connect",
         source: observation.source || "active-call-release",
         eventType: "terminal",
+        ...(systemDisposition ? { systemDisposition } : {}),
       });
       traceWatcher("cx.alpha.terminal.outbox_insert.finished", {
         sessionId: projection.sessionId,
@@ -587,6 +821,7 @@ async function runCxAccountActiveCallWatchOnce(input = {}) {
         uii: str(observation.candidate?.uii) || null,
         outcome: observation.outcome || "did_not_connect",
         source: observation.source || "active-call-release",
+        systemDisposition: systemDisposition || null,
       });
       terminalWrites.push({
         sessionId: projection.sessionId,
@@ -595,6 +830,7 @@ async function runCxAccountActiveCallWatchOnce(input = {}) {
         uii: str(observation.candidate?.uii) || null,
         outcome: observation.outcome || "did_not_connect",
         source: observation.source || "active-call-release",
+        systemDisposition: systemDisposition || null,
       });
     }
   }

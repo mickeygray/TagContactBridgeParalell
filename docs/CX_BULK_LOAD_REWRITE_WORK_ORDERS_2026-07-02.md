@@ -68,7 +68,8 @@ Everything not listed under I-DO below. By phase:
   anytime, its client cleanup only AFTER my WO-16 lands.
 - **Phase D (record):** WO-22, 24, 25. (WO-24 must not reshape idemKey — that second pass is
   mine.) NOTE: WO-31 (released-call correction lane) is textually filed after WO-25 but RUNS in
-  Phase C alongside WO-17 — the M1 wrap-up modal needs its lane live for the Unit-3 session.
+  Phase C alongside WO-17. WO-32 (answered-calls worklist — replaces the answered-undisposed
+  modal entirely) runs with it.
 - **Phase E (room):** WO-26, 27, 28 (WO-27 last, after the Unit-3/4 human bars).
 - **Phase F:** WO-29, 30 (now-half).
 - **Coach side:** the SSE reconnect fix (stream.ts — spec'd as D1/D2 in
@@ -612,7 +613,40 @@ New small module or a block in the existing hourly sweeper: running `CxBulkLoadS
 with injected clock.
 **DONE WHEN:** test green; THE GATE passes.
 
-### WO-31 🟡 The released-call correction lane — server half (added 2026-07-02, field evidence)
+### THE TRUNK RULING (2026-07-02 evening, after the answered-call eject — supersedes parts of
+WO-31's framing and DELETES the M1 modal)
+
+The trunk, in Mickey's words: **poller matches → doesn't corrupt call state → you can enter the
+outcome → the outcome you enter is stable.** The live test broke link three: an ANSWERED call
+was auto-released and auto-labeled before the agent could enter the outcome. The fix is not a
+correction mechanism — it's that **call end ≠ outcome** for a call a human touched.
+
+- **Connected current releases (uii + ACTIVE seen) → WRAP STATE, not a terminal write.** The
+  watcher's release DETECTION is unchanged; its response becomes: keep the lead as
+  `current.wrap = true` (or equivalent state field), write NO outcome, clear NOTHING. The same
+  buttons stay live on the same lead; the agent's click IS the outcome, submitted through the
+  one normal disposition path. RingCX is already in dispositioning-hold waiting for it — the
+  early auto-write never bought advancement.
+- **Never-connected releases → auto `did_not_connect` exactly as today** (the machine's own
+  outcome for a call no human touched).
+- **Wrap timeout:** `CX_BULK_WRAP_TIMEOUT_MS` (default 180000). Expiry writes
+  `did_not_connect` with `source:"wrap-timeout"` and clears — the walk-away guard. The
+  correction lane below remains the safety net for that case and for never-connected mislabels.
+- **M1 wrap-up modal: DELETED from the modal inventory.** The wrap state on the base screen IS
+  the wrap-up — same lead, same buttons, one status sentence ("Call ended — enter the outcome
+  for <name>"). Fewer cases, more one-screen. M2 (new-lead) and M3 (appointment) stand.
+- **Consistency notes:** this does NOT conflict with the no-veto rule — that rule forbids
+  blocking AFTER an accepted disposition; the wrap state holds BEFORE any disposition exists.
+  The DO-NOT-CUT "review-hold concept" is generalized by this: for touched calls the hold is
+  until-outcome-or-timeout, not 3 seconds. BLOCK A/E/F in the code-blocks doc are amended by
+  this ruling (projection gains `mode:"wrap"` with buttons enabled + no modal; BLOCK F is
+  retired before it was ever built).
+- **Unit-3's bar now states the trunk explicitly:** ten calls where every outcome on record is
+  the one the human entered (or the machine's honest never-connected/timeout default) — zero
+  overwrites.
+
+### WO-31 🟡 The released-call correction lane — server half (added 2026-07-02, field evidence;
+DEMOTED to safety net by the trunk ruling above — build it, but the wrap state is the primary)
 **Why (the Joe case, reproduced live):** RingCX released a proven current before the agent
 could choose Voicemail; the watcher honestly recorded `did_not_connect`
 (`source: active-call-release`), cleared current, the loop advanced — correct — but the agent
@@ -661,6 +695,27 @@ is WO-16's fixed button-row + status-line + closed modal inventory (big guns); e
 build UI for this. Note WO-17's amended three-way routing is the entry point into this lane.
 **DO NOT:** touch the release path's timing, the watcher's release detection, or
 `makeOutcomeIdemKey`'s existing shapes (extend, don't reshape — the 4→2 flatten stays mine).
+
+### WO-32 🟡 The answered-calls worklist (added 2026-07-02 — Mickey: "instead of a modal that
+gets cloggy just keep a record of answered calls done and dusted... map it to the client under
+appointments as like work for the guy to do")
+**THE RULING (kills the answered-undisposed modal before it was built — modal inventory is
+now TWO: M2 new-lead, M3 appointment wrap):** a superseded or auto-closed call that reached a
+connected state records `answered` — DONE AND DUSTED, zero interruptions. The pure watcher now
+defaults it (`deriveCurrentTransition` + the release/timeout paths: connected → "answered",
+never-connected → "did_not_connect"; 282/282, pinned). The record becomes WORK, not a popup:
+an answered-calls list in the client's APPOINTMENTS area — follow-up when there's a minute.
+**Steps:**
+1. Server: a read endpoint on the bulk routes listing the agent's recent `answered` outcomes —
+   query the terminal records by agentEmail + outcome `answered` + date window; PII-masked
+   shape {queueItemId, caseId, name, at, uii}. Read-only, zero session writes.
+2. Client: render in/next to the appointments panel ("Answered today — follow up"); each row
+   offers **Set appointment** (existing appointment flow keyed to caseId) and **DNC** (WO-17
+   route-2 → WO-31 correction lane with the record's queueItemId+uii). Acting removes the row.
+   No modal, no toast.
+3. Pins: answered outcomes appear; DNC from the list writes a review-correction row (never
+   mutates the original `answered` record); never-connected outcomes never appear.
+**DONE WHEN:** pins green; THE GATE passes; modal inventory verified at two.
 
 ---
 

@@ -125,51 +125,13 @@ async function updateBulkLoadSession(sessionId, update = {}, options = {}) {
   ).lean();
 }
 
-async function appendBulkLoadSessionEvent(sessionId, event = {}, options = {}) {
-  const session = await findBulkLoadSessionById(sessionId);
-  if (!session) return null;
-  const now = options.now instanceof Date ? options.now : new Date();
-  const events = trimEvents([
-    ...(Array.isArray(session.events) ? session.events : []),
-    {
-      type: event.type || "event",
-      at: now.toISOString(),
-      ...event,
-    },
-  ]);
-  return updateBulkLoadSession(sessionId, { events, updatedAt: now }, options);
-}
 
-async function killActiveBulkLoadSessionsForAgent(input = {}) {
-  const agentEmail = normalizeEmail(input.agentEmail);
-  const agentExtensionId = normalizeExternalId(input.agentExtensionId);
-  const reason = String(input.reason || "replaced").trim() || "replaced";
-  const query = { status: { $in: ACTIVE_STATUSES } };
-  if (agentEmail) {
-    query.agentEmail = agentEmail;
-  } else if (agentExtensionId) {
-    query.agentExtensionId = agentExtensionId;
-  } else {
-    return { matchedCount: 0, modifiedCount: 0 };
-  }
-  return CxBulkLoadSession.updateMany(query, {
-    $set: {
-      status: "killed",
-      phase: "released",
-      current: null,
-      killedAt: new Date(),
-      lastError: reason,
-    },
-  });
-}
 
 module.exports = {
-  appendBulkLoadSessionEvent,
   createBulkLoadSession,
   findActiveBulkLoadSessionForAgent,
   findActiveBulkLoadSessionsForAgent,
   findBulkLoadSessionById,
-  killActiveBulkLoadSessionsForAgent,
   listActiveBulkLoadSessions,
   updateBulkLoadSession,
 };

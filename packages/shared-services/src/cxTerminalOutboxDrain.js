@@ -20,6 +20,7 @@ function summarizeDrainRow(row = {}) {
     uii: payload.uii || row?.uii || null,
     outcome: payload.outcome || row?.outcome || null,
     source: payload.source || row?.source || null,
+    systemDisposition: payload.systemDisposition || row?.systemDisposition || null,
   };
 }
 

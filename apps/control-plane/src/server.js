@@ -1056,19 +1056,36 @@ async function startCxTerminalOutboxWorker({ runtime, workerState }) {
         LiveCoachSession,
         logger: runtime.logger,
       }),
-    recordCadenceEvent: async (event = {}) => handleCxTerminalCallOutcome({
-      queueItemId: event.queueItemId,
-      domain: event.domain,
-      caseId: event.caseId,
-      uii: event.uii,
-      externId: event.externId,
-      outcome: event.outcome,
-      disposition: event.outcome,
-      source: event.source || "cx-bulk-load",
-      sourceService: "cx-bulk-load",
-      actorEmail: event.agentEmail,
-      outcomeAt: event.at || new Date().toISOString(),
-    }),
+    recordCadenceEvent: async (event = {}) => {
+      if (event.systemDisposition) {
+        runtime.logger.info?.("control-plane.cx_terminal_outbox.system_disposition.forwarded", {
+          idemKey: event.idemKey || null,
+          sessionId: event.sessionId || null,
+          queueItemId: event.queueItemId || null,
+          uii: event.uii || null,
+          outcome: event.outcome || null,
+          source: event.source || "cx-bulk-load",
+          systemDisposition: event.systemDisposition,
+        });
+      }
+      return handleCxTerminalCallOutcome({
+        queueItemId: event.queueItemId,
+        domain: event.domain,
+        caseId: event.caseId,
+        uii: event.uii,
+        externId: event.externId,
+        outcome: event.outcome,
+        disposition: event.outcome,
+        source: event.source || "cx-bulk-load",
+        sourceService: "cx-bulk-load",
+        actorEmail: event.agentEmail,
+        outcomeAt: event.at || new Date().toISOString(),
+        // RingCX's own verdict (CONGESTION/BUSY/INTERCEPT/...) - evidence, not routing.
+        // The watcher stamped it; the drain forwards it unchanged so cadence/call-log
+        // can store it (lead health: INTERCEPT=dead number, BUSY=timing, CONGESTION=route).
+        systemDisposition: event.systemDisposition || null,
+      });
+    },
     writeCallNote: (packet) =>
       writeAgentCallNoteFromTerminal(packet, {
         agentCallNoteRepository: cxAgentCallNoteRepository,

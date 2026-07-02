@@ -446,26 +446,6 @@ async function reserveReadyRows(domain, familyTargets = {}, options = {}) {
 }
 
 
-// renewClaim (M2 §3.2) — ONE guarded CAS per row. Re-confirms {state:'claimed',
-// reservationSessionId} at write time, so it silently no-ops once the row goes 'serving'
-// or another owner holds it. This is a LIVENESS heartbeat, NOT the safety mechanism (that
-// is the reaper ownership-exclusion above). Returns the ids actually renewed; the caller
-// drops the rest from its heartbeat set.
-async function renewClaim(ids = [], claimMinutes = 5, sessionId = null) {
-  const now = new Date();
-  const minutes = Math.max(Number(claimMinutes) || 5, 1);
-  const until = new Date(now.getTime() + minutes * 60 * 1000);
-  const renewed = [];
-  for (const id of ids) {
-    const updated = await CxDialQueue.findOneAndUpdate(
-      { _id: id, state: "claimed", "metadata.reservationSessionId": sessionId },
-      { $set: { claimUntil: until, "metadata.reservationExpiresAt": until } },
-      { new: true },
-    );
-    if (updated) renewed.push(updated._id);
-  }
-  return renewed;
-}
 
 async function markQueueItemCompleted(id) {
   return CxDialQueue.findByIdAndUpdate(
@@ -582,45 +562,6 @@ async function listClaimedByReservationSession(input = {}) {
   return cursor.lean();
 }
 
-async function findQueueItemsByRingcxExternIds(externIds = [], filters = {}) {
-  const ids = Array.from(
-    new Set(
-      (Array.isArray(externIds) ? externIds : [externIds])
-        .map((value) => String(value || "").trim())
-        .filter(Boolean),
-    ),
-  );
-  if (!ids.length) return [];
-
-  const query = {
-    $or: [
-      { "metadata.rcxVisibilityExternId": { $in: ids } },
-      { "metadata.lastRingcxPublishedExternId": { $in: ids } },
-      { "metadata.lastDialExecutionRingcxPublish.externId": { $in: ids } },
-    ],
-  };
-  if (filters.domain) query.domain = normalizeDomain(filters.domain);
-  if (Array.isArray(filters.states) && filters.states.length > 0) {
-    query.state = { $in: filters.states.map((value) => String(value || "").trim()).filter(Boolean) };
-  }
-  const campaignId = String(filters.campaignId || "").trim();
-  if (campaignId) {
-    query.$and = [
-      ...(Array.isArray(query.$and) ? query.$and : []),
-      {
-        $or: [
-          { rcxCampaignId: campaignId },
-          { "metadata.rcxCampaignId": campaignId },
-          { "metadata.lastRingcxPublishedCampaignId": campaignId },
-        ],
-      },
-    ];
-  }
-
-  return CxDialQueue.find(query)
-    .limit(Math.min(ids.length * 3, 100))
-    .lean();
-}
 
 async function findClaimedQueueItemByRequestKey(domain, requestKey) {
   const normalizedRequestKey = String(requestKey || "").trim();
@@ -752,12 +693,10 @@ module.exports = {
   findActiveQueueItem,
   findClaimedQueueItemByRequestKey,
   findQueueItemById,
-  findQueueItemsByRingcxExternIds,
   listClaimedByReservationSession,
   listQueueItems,
   markQueueItemCompleted,
   releaseDueQueueItems,
-  renewClaim,
   requeueExpiredClaims,
   reserveReadyRows,
   transitionQueueItemState,

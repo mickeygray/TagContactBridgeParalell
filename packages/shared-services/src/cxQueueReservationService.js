@@ -168,34 +168,6 @@ function createCxQueueReservationService({
     }
   }
 
-  // renewReserved (M2 §3.2) — heartbeat the lease for rows still held in the rail's buffer.
-  // Delegates to the repo guarded CAS, grouping ids by reservationSessionId so a stray
-  // foreign-session row can never be renewed under the wrong owner. Returns the ids actually
-  // renewed; the caller drops the rest (serving / reaped / re-owned) from its heartbeat set.
-  //
-  // UNWIRED (#13): no production caller invokes this — the lease is single-shot and reserved rows
-  // are reaper-exempt by ownership (cxDialQueueRepository buildExpiredClaimRequeueQuery), so no
-  // heartbeat is needed for safety. Kept as M2 scaffolding + tested in isolation. If renewal is ever
-  // wanted, wire it from the BULK watch tick only (cxBulkLoadRuntimeService) — never here, since this
-  // is the shared instance the slow-lane rail also uses.
-  async function renewReserved(rows = [], claimMinutes) {
-    if (typeof cxDialQueueRepository.renewClaim !== "function") {
-      throw new Error("cxQueueReservationService.renewReserved requires cxDialQueueRepository.renewClaim");
-    }
-    const idsBySession = new Map();
-    for (const row of rows) {
-      const sessionId = row?.metadata?.reservationSessionId;
-      if (!sessionId || !row?._id) continue;
-      if (!idsBySession.has(sessionId)) idsBySession.set(sessionId, []);
-      idsBySession.get(sessionId).push(row._id);
-    }
-    const renewed = [];
-    for (const [sessionId, ids] of idsBySession) {
-      const got = await cxDialQueueRepository.renewClaim(ids, claimMinutes, sessionId);
-      renewed.push(...got);
-    }
-    return renewed;
-  }
 
   async function listReservedForSession(sessionId, options = {}) {
     const normalizedSessionId = String(sessionId || "").trim();
@@ -217,7 +189,6 @@ function createCxQueueReservationService({
     listReservedForSession,
     cancelReserved,
     releaseReserved,
-    renewReserved,
     newSessionId: () => randomUUID(),
   };
 }

@@ -133,10 +133,14 @@ function deriveCurrentTransition(current, matchResult) {
     uii,
     matchReasons,
     completePrevious: true,
-    // M11 gate 9: a RingCX auto-advance with no agent button intent is a released call that
-    // did not connect — bucket it as the cadence outcome `did_not_connect`. The synthetic
-    // `cx-auto-advanced` survives only as a separate debug reason, never as the outcome.
-    previousOutcome: "did_not_connect",
+    // M11 gate 9 + ANSWERED DEFAULT (2026-07-02): auto-advance never invents a
+    // disposition, but the machine records what it KNOWS. A departing current that
+    // reached a connected state (connectedAt latch) was ANSWERED — done and dusted,
+    // no modal; it lands on the agent's answered-calls worklist for follow-up
+    // (appointment / DNC via the correction lane). A never-connected departure is
+    // `did_not_connect`. The synthetic `cx-auto-advanced` survives only as a debug
+    // reason, never as the outcome.
+    previousOutcome: current && current.connectedAt ? "answered" : "did_not_connect",
     previousReason: "cx-auto-advanced",
   };
 }
