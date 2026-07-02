@@ -16,26 +16,6 @@
 
 const { randomUUID } = require("crypto");
 
-function isFirstTouchReservation(row = {}) {
-  const metadata = row && typeof row.metadata === "object" ? row.metadata : {};
-  return metadata.firstTouchOnly === true || Boolean(metadata.greenCoverageBatchId);
-}
-
-function shouldCountFirstTouchRelease(reason = "") {
-  const value = String(reason || "").trim().toLowerCase();
-  return value !== "session-killed";
-}
-
-function firstTouchReleasePatch(row = {}, at = new Date(), reason = "") {
-  if (!isFirstTouchReservation(row)) return {};
-  if (!shouldCountFirstTouchRelease(reason)) return {};
-  const metadata = row && typeof row.metadata === "object" ? row.metadata : {};
-  const attempts = Math.max(Number(metadata.firstTouchAttempts) || 0, 0) + 1;
-  return {
-    "metadata.firstTouchAttempts": attempts,
-    "metadata.firstTouchLastAttemptAt": at,
-  };
-}
 
 function createCxQueueReservationService({
   cxDialQueueRepository, // reserveReadyRows, transitionQueueItemState (+ findActiveClaimForCase in M5)
@@ -58,10 +38,6 @@ function createCxQueueReservationService({
     totalLimit = null,
     claimMinutes,
     metadata = {},
-    firstTouchOnly = false,
-    greenCoverageBatchId = null,
-    queueLane = null,
-    firstTouchMaxAttempts = null,
   } = {}) {
     if (!sessionId) throw new Error("reserveFromFamilyOrder requires a sessionId");
     let remaining = Number.isFinite(totalLimit) ? Math.max(Number(totalLimit), 0) : Infinity;
@@ -83,10 +59,6 @@ function createCxQueueReservationService({
         rcxAccountId: metadata.rcxAccountId,
         rcxCampaignId: metadata.rcxCampaignId,
         rcxDialGroupId: metadata.rcxDialGroupId,
-        firstTouchOnly,
-        greenCoverageBatchId,
-        queueLane,
-        firstTouchMaxAttempts,
       });
 
       // M5: claim-time cross-pool interlock — drop+release any reserved row already active in the UCQ pool.
@@ -157,7 +129,6 @@ function createCxQueueReservationService({
             "metadata.reservationExpiresAt": null,
             "metadata.lastReleasedAt": releasedAt,
             "metadata.lastReleaseReason": reason,
-            ...firstTouchReleasePatch(row, releasedAt, reason),
           },
           { match: { "metadata.reservationSessionId": reservationSessionId } },
         )

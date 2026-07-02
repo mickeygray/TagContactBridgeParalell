@@ -146,7 +146,7 @@ test("reserveFromFamilyOrder forwards rail provenance metadata to the repo (M8b 
   assert.deepEqual(repo.calls.reserve[0].options.metadata, { rail: "bulk_load" });
 });
 
-test("reserveFromFamilyOrder forwards first-touch claim options to the repo", async () => {
+test("WO-1 reserveFromFamilyOrder ignores legacy first-touch claim options", async () => {
   const repo = fakeRepo();
   const svc = createCxQueueReservationService({ cxDialQueueRepository: repo });
   await svc.reserveFromFamilyOrder({
@@ -158,10 +158,10 @@ test("reserveFromFamilyOrder forwards first-touch claim options to the repo", as
     firstTouchMaxAttempts: 1,
   });
   const options = repo.calls.reserve[0].options;
-  assert.equal(options.firstTouchOnly, true);
-  assert.equal(options.greenCoverageBatchId, "green-coverage-2026-06-29-WYNN");
-  assert.equal(options.queueLane, "firstContact");
-  assert.equal(options.firstTouchMaxAttempts, 1);
+  assert.equal(options.firstTouchOnly, undefined);
+  assert.equal(options.greenCoverageBatchId, undefined);
+  assert.equal(options.queueLane, undefined);
+  assert.equal(options.firstTouchMaxAttempts, undefined);
 });
 
 test("releaseReserved clears claimed/ready reserved rows with a reservationSessionId-guarded CAS", async () => {
@@ -189,7 +189,7 @@ test("releaseReserved clears claimed/ready reserved rows with a reservationSessi
   assert.deepEqual(repo.calls.transition[1].options.match, { "metadata.reservationSessionId": "sess-2" });
 });
 
-test("releaseReserved stamps first-touch attempts so a released row does not re-enter first-touch immediately", async () => {
+test("WO-1 releaseReserved no longer stamps first-touch attempts", async () => {
   const repo = fakeRepo();
   const svc = createCxQueueReservationService({ cxDialQueueRepository: repo });
   await svc.releaseReserved(
@@ -206,12 +206,12 @@ test("releaseReserved stamps first-touch attempts so a released row does not re-
 
   assert.equal(repo.calls.transition.length, 1);
   const update = repo.calls.transition[0].update;
-  assert.equal(update["metadata.firstTouchAttempts"], 1);
-  assert.ok(update["metadata.firstTouchLastAttemptAt"] instanceof Date);
+  assert.equal(update["metadata.firstTouchAttempts"], undefined);
+  assert.equal(update["metadata.firstTouchLastAttemptAt"], undefined);
   assert.equal(update["metadata.lastReleaseReason"], "publish-rejected");
 });
 
-test("releaseReserved increments existing first-touch attempt snapshots", async () => {
+test("WO-1 releaseReserved ignores existing first-touch attempt snapshots", async () => {
   const repo = fakeRepo();
   const svc = createCxQueueReservationService({ cxDialQueueRepository: repo });
   await svc.releaseReserved([
@@ -225,7 +225,7 @@ test("releaseReserved increments existing first-touch attempt snapshots", async 
     },
   ]);
 
-  assert.equal(repo.calls.transition[0].update["metadata.firstTouchAttempts"], 2);
+  assert.equal(repo.calls.transition[0].update["metadata.firstTouchAttempts"], undefined);
 });
 
 test("releaseReserved does not count session cleanup as a first-touch attempt", async () => {

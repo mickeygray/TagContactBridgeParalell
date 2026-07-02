@@ -65,56 +65,6 @@ function appendAndClauses(query, clauses = []) {
   return query;
 }
 
-function zeroOrMissing(field) {
-  return {
-    $or: [
-      { [field]: { $exists: false } },
-      { [field]: null },
-      { [field]: { $lte: 0 } },
-    ],
-  };
-}
-
-function applyFirstTouchClaimFilter(query, options = {}) {
-  if (options.firstTouchOnly !== true) return query;
-  const batchId = String(options.greenCoverageBatchId || "").trim();
-  const lane = String(options.queueLane || "").trim();
-  const rawMaxAttempts = options.firstTouchMaxAttempts;
-  const hasMaxAttempts =
-    rawMaxAttempts !== undefined &&
-    rawMaxAttempts !== null &&
-    String(rawMaxAttempts).trim() !== "";
-  const maxAttempts = hasMaxAttempts && Number.isFinite(Number(rawMaxAttempts))
-    ? Math.max(Number(rawMaxAttempts), 0)
-    : 1;
-  const clauses = [
-    zeroOrMissing("placedCalls"),
-    zeroOrMissing("dailyPlacedCalls"),
-    zeroOrMissing("progressiveStageIndex"),
-  ];
-  if (maxAttempts <= 0) {
-    clauses.push({ _id: { $exists: false } });
-  } else {
-    clauses.push({
-      $or: [
-        { "metadata.firstTouchAttempts": { $exists: false } },
-        { "metadata.firstTouchAttempts": null },
-        { "metadata.firstTouchAttempts": { $lt: maxAttempts } },
-      ],
-    });
-  }
-  if (batchId) {
-    clauses.push({ "metadata.greenCoverageBatchId": batchId });
-  }
-  if (lane) {
-    clauses.push({ "metadata.queueLane": lane });
-  }
-  if (!batchId && !lane) {
-    // Fail closed: first-touch filtering must always be scoped to a finite batch or lane.
-    clauses.push({ _id: { $exists: false } });
-  }
-  return appendAndClauses(query, clauses);
-}
 
 function buildReadyReservationQuery(domain, family, options = {}, now = new Date()) {
   const rcxAccountId = options.rcxAccountId ? String(options.rcxAccountId).trim() : null;
@@ -130,7 +80,7 @@ function buildReadyReservationQuery(domain, family, options = {}, now = new Date
     ...(rcxCampaignId ? { rcxCampaignId } : {}),
     ...(rcxDialGroupId ? { rcxDialGroupId } : {}),
   };
-  return applyFirstTouchClaimFilter(query, options);
+  return query;
 }
 
 function buildReadyClaimQuery(domain = null, options = {}) {
@@ -169,7 +119,6 @@ function buildReadyClaimQuery(domain = null, options = {}) {
       },
     ];
   }
-  applyFirstTouchClaimFilter(query, options);
   return query;
 }
 
@@ -496,26 +445,6 @@ async function reserveReadyRows(domain, familyTargets = {}, options = {}) {
   return { reserved: reservedRows, missing };
 }
 
-async function countReadyFirstTouchRows({
-  domain = null,
-  greenCoverageBatchId = null,
-  queueLane = null,
-  firstTouchMaxAttempts = null,
-  rcxAccountId = null,
-  rcxCampaignId = null,
-  rcxDialGroupId = null,
-  now = new Date(),
-} = {}) {
-  return CxDialQueue.countDocuments(buildReadyReservationQuery(domain, "fresh-day1", {
-    firstTouchOnly: true,
-    greenCoverageBatchId,
-    queueLane,
-    firstTouchMaxAttempts,
-    rcxAccountId,
-    rcxCampaignId,
-    rcxDialGroupId,
-  }, now instanceof Date ? now : new Date(now)));
-}
 
 // renewClaim (M2 §3.2) — ONE guarded CAS per row. Re-confirms {state:'claimed',
 // reservationSessionId} at write time, so it silently no-ops once the row goes 'serving'
@@ -818,7 +747,6 @@ module.exports = {
   buildReadyReservationQuery,
   cancelActiveQueueItems,
   claimNextReadyQueueItem,
-  countReadyFirstTouchRows,
   countQueueItems,
   findActiveClaimForCase,
   findActiveQueueItem,

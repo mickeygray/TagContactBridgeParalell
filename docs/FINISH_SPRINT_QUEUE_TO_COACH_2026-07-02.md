@@ -1,282 +1,313 @@
 # Finish Sprint — Queue to Coach (starts 2026-07-02)
 
-Unit-by-unit sprint to finish the two halves: the bulk-load rail (queue first) forward to the
-live coach (buttoned up last). Every unit has the same three legs:
+The spec, in the owner's words: **"simpler. less if-this-then-this. atomic functions do one
+thing. one owner. it's really just picking up the phone and hanging it up over and over again
+and writing down what happened in the background."**
 
-- **Build** — the code fixes scoped to this unit (from `docs/CX_BULK_LOAD_FINISH_PLAN_2026-07-01.md`
-  and the coach landing in `docs/CX_COACH_STATE_OF_PLAY_2026-07-01.md`).
-- **Pin** — the tests that make the unit's behavior impossible to silently regress.
-- **Load & Run** — a hands-on human session with the real tool. Node tests prove the code works;
-  this leg proves it's *useful*. Each has a script (what to do) and a **feels-right bar** (what
-  a human must be able to say afterward). A unit isn't done until a human says the bar is met.
+So the goal is **weed whack and build** — not patch. A full complexity read of the whole
+bulk-load area (8 scans, every attack line-anchored) says the boring loop honestly needs
+**~3,000 server lines + ~650 UI lines**. What exists is ~14,000 server + 7,100 UI. The
+difference is five kinds of weed: dark features behind never-set flags, second implementations
+of solved problems, forensics rigs from closed investigations, injection ceremony with one real
+implementation, and display varnish. The full attack list is the appendix at the bottom;
+each unit below carries its targets.
 
-**Standing rules for the whole sprint:** Mickey restarts services — never from an agent. No
-control-plane + cx bounces together during floor hours (7000 restarts + web rebuilds are fine).
-Each unit ends with the full relevant suite green before the human session, so live time is spent
-judging the tool, not debugging the code. One unit per working day is the target pace; a unit
-that isn't at its bar rolls forward — don't start the next one on top of a wobbly one.
+Every unit now has FOUR legs, in this order:
 
-**Unit 0 (tonight / first thing):** commit the baseline. The working tree carries the July-1
-bulk simplification (+~500 lines), the field manual, and the audit docs — all uncommitted on
-`release/0.2.0-alpha`. Commit it as the sprint baseline so every unit diffs against something.
-(Mickey's call, as always, but the sprint really wants a fixed floor under it.)
+- **Whack** — cut this unit's weeds first, so fixes land on clean ground.
+- **Build** — the correctness fixes (from `docs/CX_BULK_LOAD_FINISH_PLAN_2026-07-01.md`).
+- **Pin** — the tests that make the unit impossible to silently regress.
+- **Load & Run** — a human session with the real tool and a feels-right bar. Node tests prove
+  the code works; this proves it's useful. A unit isn't done until a human says so.
+
+**Standing rules:** Mickey restarts services. No control-plane + cx bounces together during
+floor hours. Full suite green after every whack AND every fix — the 296 tests are the machete's
+safety net (most weeds aren't pinned by any test, so most cuts are green by construction; where
+a cut touches a pinned invariant, the appendix says so). One unit per day target; a wobbly unit
+rolls forward.
+
+**Unit 0 (first thing):** commit the baseline — the July-1 simplification, the field manual,
+the docs. Then every whack is a reviewable diff against a fixed floor.
 
 ---
 
 ## Phase 1 — The Queue (Units 1–6)
 
-### Unit 1 — The Pool (supply, reservation, honest session builds)
+### Unit 1 — The Pool
 
-The foundation: a session builds through the production path, every row carries its reservation
-proof, and a human can *see* the pool at a glance.
+One supply owner: reservation. A session builds through the production path and a human can see
+the pool at a glance.
 
-**Build**
-- Loader → API route: `local-ordered-mickey-bulk-load.js` seeds rows as `ready` with test
-  metadata only, then drives `POST /api/cx/bulk-load/start` — local sessions now run the real
-  reservation + publish path with the real full-queueItemId extern shape (kills B6).
-- Cadence-dedupe guard: the legacy dedupe patch can no longer strip a reserved/claimed row's
-  metadata from a stale read (`cxCadenceService.js:2118` — B2, the reservationSessionId killer).
-- Release-of-published pairing: preserve the extern stamp + `releasedWhilePublished` marker, RC
-  cancel where the client is available (B3).
-- Dup-running-session sweep → `sync-indexes` → prove `uniq_running_session_per_agent` built
-  (ops caveat #2, self-verifying script).
-- **Build the microscope now:** `scripts/cx-bulk-session-inspect.js` — session + acceptedBuffer +
-  reserved rows + published externs, PII-masked, `--json`. Every later unit uses it.
+**Whack** (~1,100 lines)
+- **BG-3**: green-first-touch, end to end — materializer (387 lines, ZERO callers: the only
+  writer of the rows the planner counts, so the feature is inert even flag-on), planner (330,
+  incl. a hand-rolled timezone lib), repo filter, release patch, runtime normalization.
+  Live-box `.env` verified clean (2026-07-01) — cleared to cut. ~890 prod + ~700 test lines.
+- Unwired lease heartbeat `renewReserved`/`renewClaim` (the code's own comment admits no
+  caller; reaper ownership-exclusion is the real mechanism). `findQueueItemsByRingcxExternIds`
+  (zero refs). Collapse `releaseReserved`+`cancelReserved` → one `endReservation`. Flatten
+  `cxReserveModeService` to the 4-line mix map (knobs set nowhere, live box verified). Collapse
+  the nested family loops into one `reserveReadyRows` call. Shared filter builder for
+  `listQueueItems`/`countQueueItems`. Move the claim-time UCQ interlock to the publish gate
+  (one check, one place). **Flag, don't touch:** the legacy claim engine dies at floor cutover.
 
-**Pin** — cadence-guard test; release-pairing tests; sweep script asserts zero dups before sync.
+**Build** — loader→API route (kills the 8-char extern drift); cadence-dedupe guard (B2);
+release-of-published pairing (B3); dup-sweep → `sync-indexes` (ops caveat #2); build
+`scripts/cx-bulk-session-inspect.js` — the sprint's microscope.
 
-**Load & Run (Mickey, ~45 min)**
-1. Drain the CX-side queue. Build a 10-lead session through the API route.
-2. `cx-bulk-session-inspect` → all 10 rows: `reservationSessionId` stamped, extern shape matches
-   RingCX-side, app-order = CX-order.
-3. Kill the session. Inspect again: rows released clean, extern history preserved. Check the
-   RingCX portal: are the published leads actually cancelled or does RC keep dialing them?
-   (This answers the open B3-shape question — write down what RC does.)
-4. Rebuild. Do it twice more until it's boring.
+**Pin** — cadence-guard test; release-pairing tests; sweep asserts zero dups.
 
-**Feels-right bar:** *"I can build, inspect, and kill a session in under two minutes, the counts
-always match, and I trust what the inspect script tells me more than the UI."*
+**Load & Run (Mickey, ~45 min)** — drain CX queue → build a 10-lead session through the API
+route → inspect: every row stamped, extern shapes match, app order = CX order → kill → inspect
+clean + check the RingCX portal (do published leads actually stop dialing? write down what RC
+does — it shapes B3) → rebuild until boring.
 
-### Unit 2 — The Proof (watcher, serving, matching)
+**Bar:** *"Build, inspect, kill in under two minutes; the counts always match; I trust the
+inspect script over the UI."*
 
-RingCX proves the call; the app never guesses.
+### Unit 2 — The Proof
 
-**Build**
-- Debounce release proof: 2 consecutive miss ticks before terminalizing a live current (B5 —
-  rewrite the test at `cxAccountActiveCallWatcherService.test.js:125` that pins the 1-tick
-  behavior).
-- Stamp-miss escalation: per-queueItemId counter, alert after N consecutive ticks, surfaced in
-  the session trace (B4 — the silent freeze becomes loud).
-- Delete `markAdoptedCandidateServing` + the watcher adoption branch (B15). Assert
-  `session.sessionId` truthy in the CAS helpers.
+One current-call owner: the watcher. RingCX proves; nothing guesses.
 
-**Pin** — real CAS shapes against a recorded `transitionQueueItemState` (the reservationSessionId
-match options actually exercised); assert `cx.alpha.watch.serving_stamp.missed` EMITS (zero test
-hits today); watcher version-miss variants.
+**Whack** (~400 lines)
+- **BG-11**: the adoption/external-candidates path, end to end — `markAdoptedCandidateServing`,
+  the watcher branch, the pass-through. Production hard-codes it null with a comment banning
+  adoption; zero tests reference it. The purest weed in the codebase — all 8 scans agree.
+- One review-hold duration owner (three copies + a knob nobody passes). Drop the second
+  terminal-proof re-check and the `beforePersist` eligibility re-derivation (keep the module —
+  it's the ONE shared stale/busy definition). Flatten `extractActiveCallList` 5 envelope shapes
+  → the 2 RingCX returns. Merge the two active-call normalizers.
+- **BG-8 is OPT-IN, not a whack**: collapsing the watcher's version-miss apparatus into
+  project-inside-the-tail touches the locked #6/#10 defect fixes. Only as a deliberate
+  re-architecture with those scenarios re-expressed as tests first — or skip it entirely.
 
-**Load & Run (Mickey, ~45 min)**
-1. Session up, RingCX dialing. Watch the middle panel promote **only** on proof — compare against
-   the RingCX portal side by side for 5 calls.
-2. Sabotage a poll (briefly cut the network / block the route): the live call must NOT vanish on
-   the one bad tick; the debounce should visibly hold it.
-3. Manufacture a stamp-miss (stale row from Unit 1's kill/rebuild): confirm the alert fires and
-   the inspect script names the frozen row — no more silent "poller stopped matching."
+**Build** — release debounce, 2 ticks (B5 — REWRITE the test at
+`cxAccountActiveCallWatcherService.test.js:125` that pins the wrong 1-tick behavior);
+stamp-miss escalation counter + alert (B4); assert sessionId truthy in the CAS helpers.
 
-**Feels-right bar:** *"The current call on screen is always the call RingCX says is live, it
-never flickers, and when matching breaks the system tells me instead of freezing."*
+**Pin** — real CAS shapes (reservationSessionId match options actually exercised);
+`serving_stamp.missed` EMITS (zero test hits today); version-miss variants.
 
-### Unit 3 — The Button (the disposition loop — the heart)
+**Load & Run (Mickey, ~45 min)** — 5 calls side-by-side with the RingCX portal; sabotage one
+poll (a live call must survive the bad tick); manufacture a stamp-miss and watch the alert name
+the frozen row.
 
-One click = one command = accepted = advance. This is the unit the whole project is about.
+**Bar:** *"The current call on screen is always RingCX's live call, it never flickers, and when
+matching breaks the system tells me instead of freezing."*
 
-**Build**
-- Disposition POST carries `queueItemId`+`uii`; server rejects on mismatch with its current (B7).
-- Gate the 20s "Queue recovered" watchdog on `bulkRunning` + `bulkDisposition.isPending` (B1 —
-  the mid-call wipe).
-- Staging-effect guard to `bulkDisplayIsCurrent` (B13 — no ended-call re-staging).
-- Timeout on the RingCX voice fetch / race the hangup probe (B10). Auto-clear on the "Finishing
-  current lead" transition (B14). Harden the auto-review gate ordering (B16).
-- `skip` on a live proven call ends/cancels the RC call or is rejected (B12).
-- Progressive-pause restore self-heal + alert (B9 — "loads but doesn't dial" dies here).
+### Unit 3 — The Button
 
-**Pin** — the big three: **real terminal executor** tests (accepted → advance even when the probe
-hangs/errors; a stale follow-up poll neither vetoes nor re-promotes — today a re-added veto
-passes the suite); backend reviewHold-clear on accepted manual terminal; extract the auto-review
-predicate + display latch into `bulkLoadProjection.ts` and table-test it (first web-client test).
+One disposition path. The UI becomes what it was always supposed to be: a projector and four
+buttons. This unit whacks the most because the button fixes should land in a small file.
 
-**Load & Run (Mickey, ~1.5 hr — the no-answer session)**
-1. Ten calls, **no-answer every one**, disposition + probe logs open. Watch: click → hangup →
-   clear → next, every time, no auto-review, no toasts.
-2. Voicemail next, same logging — the known-good comparison.
-3. Adversarial clicking: double-click the button; click during a release; click skip mid-ring;
-   let a call run >20s mid-conversation (the watchdog soak — no "Queue recovered" wipe).
-4. Pull the plug once mid-disposition: UI must recover to a retryable state, never a dead
-   button row.
+**Whack FIRST, then build** (~6,300 lines out of the workspace file)
+- **BG-1**: un-fork the legacy panel mirror — ~3,300 lines of Tasks/Activities/Invoices/
+  Payments/CommLog/Logics panels that are byte-near-identical to `CXWorkspace.tsx` move to a
+  shared module (wanted features in the wrong file — moved, not deleted; only 386 of ~3,430
+  lines differ).
+- **BG-2**: the three literal-false rails — legacy queue-serving machinery behind
+  `legacyQueueEnabled = false` (~1,100), the simple-loop test panel (~420), the lead-lookup/
+  scramble ladder (~460). All three kill switches are hardcoded literals with zero writers.
+- **BG-6**: the UI's second ownership of the current call — the 9-atom mirror effect, the
+  display ladder + latch + 250ms ticker, the parallel toast/timer machine, write-only atoms.
+  The 1s session poll already carries everything; the projector is the fixed three-slot screen:
+  current in color, lastOutcome greyed between calls, one status line, no banner. Two behaviors
+  MOVE, don't die: manual-vs-auto review suppression goes server-side; the `setDomain` flip is
+  kept/derived.
+- **BG-7**: the manual-dial side door, end to end — `/start-next` (zero callers), the staging
+  of `current` WITHOUT RingCX proof, `manualStartPending`, and with the lane gone the last
+  phone-only matcher (`findManualStartedActiveCall`) is dead-by-construction. This settles the
+  finish plan's B8 as REMOVE.
+- Small game: `watchCxBulkLoadSession` compat endpoint (no route, no caller); dead knobs;
+  `handleAppointmentSubmit` six-toast ladder → one; collapse the twin client mutation factories;
+  the third copy of the env-route resolver.
 
-**Feels-right bar:** the July-1 checkpoint feeling, restored and sturdier — *"fast, accurate,
-hung up immediately on click — and I couldn't break it on purpose."*
+**Build** — disposition POST carries `queueItemId`+`uii`, server rejects mismatch (B7); the 20s
+watchdog dies WITH the legacy rail in BG-2 (it was legacy machinery — verify nothing re-arms);
+fetch timeout (B10); transition auto-clear (B14); auto-review gate hardening (B16 — now mostly
+server-side per BG-6); skip ends the RC call or is rejected (B12); progressive-pause self-heal
+(B9 — and KEEP the pause/supersede machinery: deleting it resurrects "loads but doesn't dial").
 
-### Unit 4 — The Record (terminal, outbox, once-only)
+**Pin** — the real terminal executor tests (a re-added veto must fail the suite); backend
+reviewHold-clear; `bulkLoadProjection.ts` extracted + table-tested (first web-client test —
+after BG-6 the projection is small enough to BE a module).
 
-Every call leaves exactly one mark, and a lost mark is loud.
+**Load & Run (Mickey, ~1.5 hr)** — ten no-answers with logs open; voicemail comparison;
+adversarial clicking (double-click, click-during-release, skip mid-ring, >20s soak); one
+pulled plug mid-disposition must recover to a retryable state.
 
-**Build**
-- Drain attempts cap + `dead` status excluded from pending, surfaced in health (B20 — no
-  head-of-line starvation).
-- `terminal_record_deferred` unconditional log + counter + alert (ops caveat #8 closed).
-- Kill-path deferred marker instead of `.catch(() => null)` (B23).
-- Terminal rectifier: run enabled+dryRun, review output with Mickey, flip dryRun off (B21).
-- Idle-session reaper: auto-kill running sessions idle > N minutes (B24).
+**Bar:** *"Fast, accurate, hung up immediately on click — and I couldn't break it on purpose."*
 
-**Pin** — drain retry/starvation semantics; markDrained-throw replay; **trace
-`handleCxTerminalCallOutcome` idempotency** (the untraced load-bearing guarantee — code read +
-one integration probe with a deliberate replay).
+### Unit 4 — The Record
 
-**Load & Run (Mickey, ~1 hr)**
-1. Run 10 mixed-outcome calls, then follow every one downstream: outbox row → drained →
-   CallLog/cadence/Logics. Exactly once each. (Extend the inspect script to show the outbox
-   tail if that's easier than Mongo spelunking.)
-2. Poison one outbox row on purpose → watch it dead-letter after the cap instead of starving
-   the batch; alert fires.
-3. Kill a session mid-call → the in-flight outcome still lands (deferred marker path).
+One record owner: the outcome adapter writes once; the outbox drains in the background; ONE
+janitor cleans up calls that ended with nothing written down.
 
-**Feels-right bar:** *"I would show these counts to a manager. Nothing double-counted, nothing
-missing, and if recording ever breaks I find out the same hour, not at month-end."*
+**Whack** (~1,200 lines)
+- **BG-4**: one janitor — delete the diagnostic-only stale-serving reconciler (496 + script +
+  313 test lines; zero production wiring, and hand-run scripts never get run), promote the
+  rectifier as the single permanent janitor. FIRST transplant its one good idea (externId-first
+  still-active match) into the rectifier, THEN cut. Exclude bulk rows from the legacy requeue
+  at cutover.
+- **BG-10**: the cadence crossing — extract `applyCxTerminalOutcome` (the write half of
+  `handleCxTerminalCallOutcome`), drain calls it directly; delete the three bulk-only carve-outs
+  that exist only because bulk tunnels through legacy gates; gate the EX-era agent-state kick
+  OFF for bulk rows. **Characterization test FIRST — nothing pins the handler end-to-end.**
+  The write half stays ONE shared implementation (a private bulk writer would be a second owner
+  of cadence bookkeeping — worse).
+- `normalizeBulkTerminalOutcome` — VERIFIED zero callers (grep 2026-07-01: only its own
+  definition). Delete. Plus: `previewCxTerminalRectification` (zero callers), rectifier knob
+  algebra, evidence taxonomy → insert|skip + reason, the always-'terminal' param, twin drain
+  hook blocks → one helper. The idemKey 4→2 flatten is SECOND-PASS ONLY (it reshapes the #12
+  fix — reconciler tests green first, mirror updated in lockstep).
 
-### Unit 5 — The Room (EX silence, UI polish, a real shift's feel)
+**Build** — drain attempts cap + `dead` status (B20); `terminal_record_deferred` alert (ops
+caveat #8); kill-path deferred marker (B23); rectifier dry-run → review with Mickey → on (B21,
+now doubled in importance: it's THE janitor); idle-session reaper (B24).
 
-Now — and only now — make it pleasant. The loop is locked; polish can't hurt it.
+**Pin** — drain retry/starvation; the BG-10 characterization test; the
+`handleCxTerminalCallOutcome` idempotency probe.
 
-**Build**
-- EX: explicit mode-gated no-op (not a comment), gate inside `processPresenceEnvelope`, surface
-  `{cxRuntimeMode, exPresencePollMode, exWebhookState}` in `/session` + render in the bulk header.
-  Confirm-and-remove `/ringbridge/agent-state` if nothing posts to it.
-- Polish, render-only: wipe-between-calls as `displayForm` (state untouched); grey fixed-height
-  empty/banner slot (kills the layout shove); detached DNC-only correction card (DNC + X = keep);
-  the middle-section jump dies with these + the Unit-3 staging guard.
-- Dead-code sweep (monitor/* handled separately in the bus tranche; here: the rail's
-  `normalizeTerminalResult` identity, stale copy, misleading "RingCX still has the call" copy).
+**Load & Run (Mickey, ~1 hr)** — follow 10 mixed outcomes downstream (exactly once each);
+poison an outbox row → dead-letters after the cap, alert fires; kill mid-call → outcome still
+lands.
 
-**Pin** — EX gate tests in the pilot suite (bulk-alpha ⇒ poll off + zero repo writes); projection
-module tests extended over the polish states.
+**Bar:** *"I'd show these counts to a manager, and if recording breaks I find out the same
+hour."*
 
-**Load & Run (Mickey + one agent if possible, ~2 hr)**
-1. A 20–30 call session at natural pace — the first session judged purely as a WORKPLACE, with
-   someone who didn't build it clicking the buttons.
-2. Watch the seams the polish touched: between-calls blank is calm grey (not popups), the DNC
-   correction never overlays live buttons, nothing jumps.
-3. Header shows EX modes; log window shows zero `ex.presence|ex.poll|ex.webhook` lines.
+### Unit 5 — The Room
 
-**Feels-right bar (the agent answers, not us):** *"I'd work a full shift on this without wanting
-the old screen back."*
+The state shape says what the loop says: buffer, current, completed, stats. The wiring is plain
+construction. Then make it pleasant.
 
-### Unit 6 — Bulk Acceptance (the gate)
+**Whack** (~700 lines)
+- **BG-9**: DI ceremony in the runtime — require `reduce`/`watcher`/`leadSource`/`publisher`
+  directly (every seam has exactly one production implementation); delete the two
+  required-but-never-read deps; keep only `buildExternId`/`buildExternSessionToken` of the lead
+  source (~40 of its lines); delete the watcher interface probes (a probe-miss silently disables
+  release detection — worse than dead). `getService()` shrinks from 517 lines toward plain
+  construction. The runtime/runtimeService WALL stays — the wall is right, the tenants were
+  the problem.
+- State shape: delete 4 reducer events nothing emits + the unreachable statuses they gate; the
+  zero-caller `events` append-log; the second worse kill (`killActiveBulkLoadSessionsForAgent`
+  — leaks RC buffers); flatten the 10-value `phase` no code branches on → 4 derived values;
+  collapse terminal.accepted/current.released/buffer.released → one `call.completed{source}`;
+  per-item phase AND status → status; `lastOutcome` → `completed.at(-1)`; write-only stats;
+  persisted fields 15 → ~8. One typed watcher-owned `prevActiveCalls` (the release-diff anchor
+  SURVIVES — it's an organ); the reducer loses the `trace` grab-bag.
 
-**Build** — `scripts/cx-loop-acceptance.js`: the rubric's stop-gates as machine checks that exit
-nonzero (first-item extern match, accepted-advance timing, zero auto-review-on-manual, zero
-deferred-terminal, EX silence, reconciler `released:0`).
+**Build** — EX: explicit mode-gated no-op (not a comment), gate inside
+`processPresenceEnvelope`, modes surfaced in `/session` + the bulk header; confirm-and-remove
+`/ringbridge/agent-state`. Polish, render-only (trivial after BG-6): displayForm wipe, grey
+fixed-height empty state — and the ONE-SCREEN design law (Mickey 2026-07-02): a fixed
+three-slot layout (lead slot always filled — live in color, last lead greyed between calls;
+the SAME button row always, which after an auto-release keeps working against the greyed lead
+and the server routes the click to the correction lane; one plain-words status line as the only
+text that ever changes). No correction card, no banners, no toasts in normal flow. Supersedes
+both the DNC-only-modal direction and the card concept; server half = WO-31, routing = WO-17,
+render = the WO-16 projector.
 
-**Load & Run** — the handoff's live sequence end-to-end, one sitting: drained queue → fresh
-session → no-answer first → voicemail comparison → >20s soak → acceptance script green.
+**Pin** — EX gate tests in the pilot suite; reducer table tests over the shrunken event set;
+projection tests extended.
 
-**Exit:** bulk rail declared pilot-ready. The multi-agent/floor-cutover conversation gets
-scheduled from here — it is NOT part of this sprint.
+**Load & Run (Mickey + one agent, ~2 hr)** — a 20–30 call session at natural pace, judged as a
+workplace by someone who didn't build it; header shows EX modes; zero `ex.*` lines in the logs.
+
+**Bar (the agent's words):** *"I'd work a full shift on this without wanting the old screen
+back."*
+
+### Unit 6 — Acceptance
+
+**Build** — `scripts/cx-loop-acceptance.js`: the stop-gates as machine checks that exit nonzero.
+**Whack (timed):** DISPTRACE runtime-service copy + flow-trace now; the transport-boundary
+probes and alpha-trace stay through the pilot (the pilot wants probe logs open), then die —
+**BG-5**, ~560 lines, scheduled for right after.
+
+**Load & Run** — the live sequence end-to-end in one sitting: drained queue → fresh session →
+no-answer first → voicemail comparison → >20s soak → acceptance script green.
+
+**Exit:** bulk rail pilot-ready, and roughly **9,000 lines lighter** than it started the week.
 
 ---
 
 ## Phase 2 — The Coach (Units 7–9)
 
-### Unit 7 — The Manual as a Tool (human read of the static middle)
+*(unchanged in scope — the coach side already landed on its simple shape: the manual is the
+product, the AI wakes only on a clear moment)*
 
-The manual is the product; it's built (111 entries at `/cx/manual`); nobody has *used* it yet.
+### Unit 7 — The Manual as a Tool
+Human read: 60-second lookup drills, mid-call lookup simulation, a rep's red pen over one full
+part, compliance spine reads as guidance. Fix what a rep flags.
+**Bar:** *"A new rep would read this between calls; a veteran would still look things up."*
 
-**Build** — nits only, driven by the session below. Candidates already flagged: the v2 tax
-entries (self-employment / audit / innocent-spouse), a "Reference" deep-link from the coach
-panel into manual entries.
+### Unit 8 — The A-Station
+Substrate fixes first (shared metered transport w/ stop_reason + backoff; commit-only growth
+signature — same code the substance floor lands in; callStrategy serialization). Then: 3-turn
+accumulator + substance floor, 2–3 turn window incl. the agent's line, floored + gated Haiku
+prompt, `$3,500` in context, fires-vs-ticks + one-tap "useful?" logging built in.
+Fixture replay through the REAL runtime, then a live dev call before any agent sees it.
+**Bar:** *"It spoke maybe twice in ten minutes, both times I'd have wanted it to, and the rest
+of the time I forgot it was there."*
 
-**Load & Run (Mickey + one rep, ~1 hr)**
-1. Between-calls simulation: 60 seconds on the clock — find the play for "I need to talk to my
-   wife." Did search get you there? Was the entry readable in the gap?
-2. Mid-call simulation: manual open on the side, someone reads objections off the trainer
-   taxonomy aloud, the rep looks up the counter live.
-3. Study read: the rep reads one full part (objections) and marks every entry that's wrong,
-   floor-inaccurate, or preachy. The floor voice is the product — fix what a rep flags, not
-   what we think.
-4. Check the compliance spine reads as guidance, not legal boilerplate.
-
-**Feels-right bar:** *"A new rep would actually read this between calls, and a veteran would
-still look things up in it."*
-
-### Unit 8 — The A-Station (the chime engine, built on a fixed substrate)
-
-The runtime that runs the validated prompts on the landed cadence — plus the three bus-audit
-fixes that sit exactly where it gets built.
-
-**Build**
-- Pre-pilot substrate fixes (from `docs/AI_BUS_AUDIT_2026-07-01.md`): shared metered-Anthropic
-  transport with `stop_reason` detection + backoff (kills the truncation retry loop, A1/A2/A4);
-  commit-only growth signature (A3 — and it's the same code the substance floor lands in);
-  `callStrategy` serialization fix (A5); `emitBatchGuidance` return + hold-timer clears.
-- The A-station: 3-substantive-turn accumulator with the deterministic substance floor; A fed a
-  2–3 turn window including the agent's line; the floored + coachability-gated Haiku prompt
-  (already validated) wired live; `$3,500` in A's context; B every 5 min on the solo substrate.
-- **Fires-vs-ticks logging + the one-tap "was that useful?"** — the pilot's measurement
-  instrument is part of the build, not an afterthought.
-
-**Pin** — trigger determinism goldens over the 7 fixtures (substance floor: the noise fixture
-must fire ~0 extra); transport stop_reason + backoff tests; the existing 296-suite + coach tests
-stay green.
-
-**Load & Run (Mickey, ~1.5 hr — before any agent sees it)**
-1. Fixture replay through the REAL runtime (not the eval harness): watch fires-vs-ticks — the
-   hostile-DNC fixture must go terminal-silent, the noise fixture must sleep through.
-2. A live dev call: Mickey plays both sides on a real mic. Judge the chimes as a rep would:
-   did it wake on the clear moment? Was the one thing it said the right *type* (say / objection /
-   opening)? Did silence feel like "keep going"?
-3. Tune nothing by feel yet — log what you'd tune and let the pilot data decide.
-
-**Feels-right bar:** *"In ten minutes of live talk it spoke maybe twice, both times I'd have
-wanted it to, and the rest of the time I forgot it was there."*
-
-### Unit 9 — The Layered UI + the Sean Pilot (buttoning it up)
-
-**Build**
-- The two-layer UI: static script canvas (the manual's method part IS the content) + B's
-  read-along highlighting (section lit, beats ticking) + the single typed chime card + the
-  interview form. Decide the three open questions in the dev session, on the real screen:
-  chime persist-vs-fade, rail-vs-float, drill-follows-vs-tracks.
-- SSE client reconnect contract (bus audit D1/D2 — reconnect on graceful close, reset the retry
-  budget) so a bus restart can't freeze the panel mid-shift.
-- Per-agent opt-in, default-off, Sean only.
-
-**Load & Run (Sean, one real week)**
-1. Sean opts in. Coach runs his real calls. Every chime logs the one-tap "useful?".
-2. Mid-week check: fires/hour, useful-rate, cost/day actuals vs the $34–48/mo model, cold-start
-   DNC-timing histogram (the last unmeasured numbers).
-3. End of week, the three verdicts: Sean ("did it help or annoy?"), the log (wake precision),
-   the invoice (real cost). Tune the gate threshold from the "useful?" data — this is the
-   calibration fixtures can't do.
-
-**Feels-right bar (Sean's words, not ours):** *"Leave it on."*
-
-**Exit / sprint done:** manual live and read; loop boring and machine-gated; coach quiet, legal,
-useful, and priced. Decisions that come AFTER the sprint, armed with its data: floor-wide bulk
-cutover; coach rollout past Sean; the Aug-31 Sonnet intro-pricing step (+~50%) — decide with a
-week of real cost data in hand, before September.
+### Unit 9 — The Layered UI + the Sean Pilot
+Static script canvas + read-along + one typed chime card + interview form; decide
+persist-vs-fade / rail-vs-float / drill-follow on the real screen. SSE reconnect fix rides
+along. Sean opts in for one real week; the one-tap data calibrates the gate; the invoice
+answers the Aug-31 pricing question (decide before September).
+**Bar (Sean):** *"Leave it on."*
 
 ---
 
-## Sprint map (one line each)
+## Sprint map
 
-| Unit | Day | Theme | Human session | Bar |
+| Unit | Day | Theme | Whack | Human bar |
 |---|---|---|---|---|
-| 0 | tonight | Commit the baseline | — | fixed floor under the sprint |
-| 1 | Day 1 | The pool | build/kill/inspect sessions | trust the inspect script |
-| 2 | Day 2 | The proof | side-by-side vs RingCX portal + sabotage | never guesses, never freezes silently |
-| 3 | Day 3 | The button | the no-answer session + adversarial clicking | fast, accurate, unbreakable on purpose |
-| 4 | Day 4 | The record | follow 10 outcomes downstream + poison one | manager-grade counts, loud failures |
-| 5 | Day 5 | The room | 20–30 call shift-feel session w/ an agent | "I'd work a shift on this" |
-| 6 | Day 6 | Acceptance | the live gate run, machine-checked | bulk = pilot-ready |
-| 7 | Day 7 | The manual | timed lookups + a rep's red pen | reps would actually read it |
-| 8 | Day 8–9 | The A-station | fixture replay + live dev call | quiet, right, forgettable |
-| 9 | Week 2 | UI + Sean pilot | one real week, one-tap feedback | "leave it on" |
+| 0 | first thing | Commit baseline | — | fixed floor under the sprint |
+| 1 | Day 1 | The pool | green-first-touch + supply knobs (~1.1k) | trust the inspect script |
+| 2 | Day 2 | The proof | adoption path + watcher dedup (~400) | never guesses, never freezes silently |
+| 3 | Day 3 | The button | mirror un-fork + false rails + UI-as-owner + side door (~6.3k) | unbreakable on purpose |
+| 4 | Day 4 | The record | one janitor + cadence crossing (~1.2k) | manager-grade counts |
+| 5 | Day 5 | The room | DI ceremony + state shape (~700) | "I'd work a shift on this" |
+| 6 | Day 6 | Acceptance | trace rigs (timed, post-pilot) | machine-gated pilot-ready |
+| 7 | Day 7 | The manual | — | reps would read it |
+| 8 | Day 8–9 | The A-station | (bus fixes are the whack) | quiet, right, forgettable |
+| 9 | Week 2 | UI + Sean pilot | — | "leave it on" |
+
+---
+
+## Appendix — The Weed-Whack List (2026-07-01 scan, 8 areas, merged + verified)
+
+**The honest core:** ~3,000 server + ~650 UI lines against ~14,000 + 7,100 existing. Per area:
+runtime pair ~1,250 (vs 3,089) · state trio ~270 (vs 588) · watchers ~400 (vs 1,121) · supply
+~250 (vs 2,014) · terminal family ~320 (vs ~1,490) · UI ~650 (+~3,300 legacy panels that MOVE
+to a shared module, not die).
+
+**Big game (payoff order):** BG-1 un-fork the legacy mirror (~3,300 moved, U3) · BG-2 three
+literal-false UI rails (~1,980, U3) · BG-3 green-first-touch end-to-end (~890+700 tests, U1,
+live-env verified clean) · BG-4 one janitor (~960, U4, transplant the externId match first) ·
+BG-5 trace rigs (~560, U6, AFTER the pilot) · BG-6 UI's second ownership of current (~720, U3,
+two behaviors move server-side) · BG-7 manual-dial side door (~260, U3, settles B8=remove) ·
+BG-8 watcher version-miss collapse (~210, U2, **OPT-IN — touches locked #6/#10 fixes**) ·
+BG-9 DI ceremony (~200 + getService shrink, U5) · BG-10 cadence crossing (~120, U4,
+characterization test first) · BG-11 adoption path (~133, U2, purest weed — all scans agree).
+
+**Do-not-cut (organs that look like weeds):** the reaper ownership-exclusion; `reserveReadyRows`
+atomic claim + FM-10 retry; the 16-field claim stamp reset; `TOUCH_BALANCED_QUEUE_SORT`;
+`reservationRail` provenance; reservationSessionId CAS on every release; the outbox
+insertOnce + fallback double-fault chain (the byzantine look IS the #8 fix);
+`buildTerminalEvidenceKeys` (#12); rectifier fail-closed skips; review-dnc as a separate row
+(#4); `cxBulkLoadMutationEligibility` (the one shared stale/busy definition); drain fail-soft
+hook isolation; `withSessionOperation` serializer + `markSessionBusy` (the double-reserve fix —
+the "only a Set" finding was stale); E11000 recovery + the partial-unique index; kill's
+two-source sweep; fillBuffer's fail-closed ladder + DNC gate; the prevActive diff (calls dial
+AND release inside one 1s gap); the no-phone-matching rule (the 06-17 incident guard);
+progressive-pause supersede map (deleting it resurrects "loads but doesn't dial"); the 1s UI
+poll (the projector transport — don't upgrade to push); uii-gated disposition buttons.
+
+**Conflicts, resolved:** `normalizeBulkTerminalOutcome` → VERIFIED zero callers, delete
+(2026-07-01 grep). Dark knobs → VERIFIED unset on the live box, cut. Manual-dial matcher →
+dies with the lane (decide the lane once: remove). DISPTRACE → transport-scope probes live
+through the pilot, the rest dies now/after. BG-8 → opt-in re-architecture only. idemKey
+flatten → second pass. Cross-pool interlock move → consolidate into fillBuffer's ladder at
+publish-time (human blesses the milliseconds-wider window vs the vestigial UCQ pool). `trace`
+strip → the watcher keeps one typed `prevActiveCalls`; the reducer loses the grab-bag.

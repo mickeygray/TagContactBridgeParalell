@@ -70,29 +70,78 @@ test("projectBulkSessionFromAccountSnapshot promotes the matched candidate witho
   assert.equal(projected.after.trace.prevActiveCalls[0].ani, "5551112222");
 });
 
-test("projectBulkSessionFromAccountSnapshot attaches UII to a manually-started current by scoped phone proof", () => {
-  const current = {
-    ...candidate("q1", "cxbl-q1"),
-    phone: "3106665997",
-    manualStartPending: true,
-    matchReasons: ["manual-start-request"],
+test("WO-2 injected external candidates are ignored by the account watcher", async () => {
+  const writes = [];
+  const servingAttempts = [];
+  let resolverCalls = 0;
+  const s1 = session("s1", "acct-a", []);
+  const externalOnly = candidate("q-ext", "cxbl-external-only");
+  const sessionRepository = {
+    async listActiveBulkLoadSessions() { return [s1]; },
+    async updateBulkLoadSession(sessionId, patch) { writes.push({ sessionId, patch }); return patch; },
   };
-  const s = session("s1", "acct-a", [], current);
-  const projected = projectBulkSessionFromAccountSnapshot(
-    s,
-    [{ uii: "u-manual", callState: "ACTIVE", dnis: "+13106665997" }],
-    { now: new Date("2026-06-23T12:00:00.000Z") },
-  );
+  const client = { async listActiveCalls() { return [{ externalId: "cxbl-external-only", uii: "u-ext" }]; } };
 
-  assert.equal(projected.changed, true);
-  assert.equal(projected.transitionKind, "same");
-  assert.equal(projected.after.current.queueItemId, "q1");
-  assert.equal(projected.after.current.uii, "u-manual");
-  assert.deepEqual(projected.after.current.matchReasons, ["externId"]);
-  assert.equal(projected.after.acceptedBuffer.length, 0);
-  assert.equal(projected.terminalObservations.length, 0);
-  assert.equal(projected.after.trace.accountActiveCallWatcher.relevantActiveCallCount, 1);
+  const result = await runCxAccountActiveCallWatchOnce({
+    sessionRepository,
+    client,
+    resolveExternalCandidates: async () => {
+      resolverCalls += 1;
+      return [{ ...externalOnly, adoption: { source: "ringcx-active-external-id" } }];
+    },
+    queueStateAdapter: {
+      async markCandidateServing(input) {
+        servingAttempts.push(input);
+        return { ok: true };
+      },
+      async markAdoptedCandidateServing() {
+        throw new Error("WO-2 disabled adoption path should not be called");
+      },
+    },
+    now: new Date("2026-06-23T12:00:00.000Z"),
+  });
+
+  assert.equal(resolverCalls, 0);
+  assert.equal(servingAttempts.length, 0);
+  assert.equal(writes.length, 0);
+  assert.equal(result.summary.changedCount, 0);
+  assert.equal(result.applied.writeCount, 0);
 });
+
+test("WO-3 watcher never phone-attaches an active call", async () => {
+  const writes = [];
+  const servingAttempts = [];
+  const phoneOnly = { ...candidate("q9", "cxbl-q9"), phone: "5551112222" };
+  const s1 = session("s1", "acct-a", [phoneOnly]);
+  const sessionRepository = {
+    async listActiveBulkLoadSessions() { return [s1]; },
+    async updateBulkLoadSession(sessionId, patch) { writes.push({ sessionId, patch }); return patch; },
+  };
+  // Active call shares the candidate's phone digits but matches no externId/queueItemId/uii.
+  const client = {
+    async listActiveCalls() {
+      return [{ externalId: "parallel:TAG:999:legacy", uii: "u-phone", ani: "5551112222", callState: "ACTIVE" }];
+    },
+  };
+
+  const result = await runCxAccountActiveCallWatchOnce({
+    sessionRepository,
+    client,
+    queueStateAdapter: {
+      async markCandidateServing(input) {
+        servingAttempts.push(input);
+        return { ok: true };
+      },
+    },
+    now: new Date("2026-06-23T12:00:00.000Z"),
+  });
+
+  assert.equal(servingAttempts.length, 0);
+  assert.equal(writes.length, 0);
+  assert.equal(result.summary.changedCount, 0);
+  assert.equal(result.applied.writeCount, 0);
+});
+
 
 test("projectBulkSessionFromAccountSnapshot releases current when RingCX drops it", () => {
   const current = { ...candidate("q1", "cxbl-q1"), uii: "u1" };

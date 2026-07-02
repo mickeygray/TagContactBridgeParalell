@@ -4026,11 +4026,7 @@ export function CXWorkspaceBulkLoad() {
           "",
       )}`
     : "";
-  const bulkCurrentAwaitingUii = Boolean(
-    bulkCurrent &&
-      !bulkCurrent.uii &&
-      (bulkCurrent as { manualStartPending?: boolean | null }).manualStartPending === true,
-  );
+  const bulkCurrentAwaitingUii = false;
   const bulkHasCurrent = Boolean(bulkSessionId && bulkCurrent);
   const bulkCanDispositionCurrent = Boolean(bulkHasCurrent && bulkDisplayIsCurrent);
   const bulkCaseIdStr = bulkDisplayCandidate?.caseId != null ? String(bulkDisplayCandidate.caseId).trim() : "";

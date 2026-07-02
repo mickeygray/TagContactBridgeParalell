@@ -10,6 +10,7 @@ This repository is in the middle of CX 0.2 alpha live-testing recovery after a C
 - Use evidence-first alpha testing. UI state alone is not enough for pass/fail conclusions.
 - Check app and service state before editing or restarting anything. At recovery time, the `Parallel*` NSSM services were stopped.
 - Hard live-test rule: if any `Parallel*`/NSSM service needs a restart, ask Mickey to do it and wait for confirmation. Do not attempt service restarts from Codex.
+- 2026-07-02 bulk rewrite rule: do not physically delete code during the weed-whack pass. Disable, comment out, or hard-gate old paths; write the replacement path; run the named tests/gate; report what is now pending deletion; then advance. Permanent deletion waits for Mickey's approval after proof.
 
 ## First Reads
 

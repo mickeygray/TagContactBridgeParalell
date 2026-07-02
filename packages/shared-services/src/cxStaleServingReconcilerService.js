@@ -94,8 +94,8 @@ function collectStoredExternIds(metadata = {}, row = {}) {
   return out;
 }
 
-// PURE. The identity facts a serving row carries. Reads the BULK fields (markCandidateServing /
-// markAdoptedCandidateServing in cxBulkLoadRuntime.js) — the RingCX account lives on the top-level
+// PURE. The identity facts a serving row carries. Reads the BULK serving fields;
+// WO-2 removed the old adopted-active variant. The RingCX account lives on the top-level
 // rcxAccountId column (and metadata.rcxAccountId on reserved rows), NOT lastDialExecutionAccountId
 // (that is the legacy non-bulk dial path). No I/O.
 function resolveServingIdentity(row = {}) {

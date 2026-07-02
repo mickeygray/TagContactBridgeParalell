@@ -294,7 +294,6 @@ const {
   skipCxBulkLoadCurrent,
   startCxBulkLoadGetLeads,
   startCxBulkLoadSession,
-  startCxBulkLoadNextManualCall,
   submitCxBulkLoadDisposition,
   submitCxBulkLoadReviewOutcome,
   submitCxBulkLoadAppointmentWrap,
@@ -342,19 +341,6 @@ const {
   buildTerminalEvidenceKeys,
 } = require("./cxBulkLoadOutcomeAdapter");
 const { buildFamilyTargets } = require("./cxReserveModeService");
-const {
-  buildMorningCoverageSupplyPlan,
-  buildNormalSupplyPlan,
-  createCxGreenFirstTouchSupplyPlanner,
-  resolveMorningCoverageBatchWindow,
-  summarizeMorningCoverageDebt,
-} = require("./cxGreenFirstTouchSupplyService");
-const {
-  buildCadenceQuery: buildGreenFirstTouchCadenceQuery,
-  buildGreenFirstTouchQueueRow,
-  createCxGreenFirstTouchQueueMaterializer,
-  materializeGreenFirstTouchQueueRows,
-} = require("./cxGreenFirstTouchQueueMaterializerService");
 const {
   alphaTraceEnabled,
   logCxAlpha,
@@ -1108,7 +1094,6 @@ module.exports = {
   skipCxBulkLoadCurrent,
   startCxBulkLoadGetLeads,
   startCxBulkLoadSession,
-  startCxBulkLoadNextManualCall,
   submitCxBulkLoadDisposition,
   submitCxBulkLoadReviewOutcome,
   submitCxBulkLoadAppointmentWrap,
@@ -1143,19 +1128,10 @@ module.exports = {
   makeOutcomeIdemKey,
   buildTerminalEvidenceKeys,
   buildFamilyTargets,
-  buildMorningCoverageSupplyPlan,
-  buildNormalSupplyPlan,
-  createCxGreenFirstTouchSupplyPlanner,
-  buildGreenFirstTouchCadenceQuery,
-  buildGreenFirstTouchQueueRow,
-  createCxGreenFirstTouchQueueMaterializer,
-  materializeGreenFirstTouchQueueRows,
   alphaTraceEnabled,
   logCxAlpha,
   redactCxAlphaPayload,
   traceCxAlphaMatchesFilter,
-  resolveMorningCoverageBatchWindow,
-  summarizeMorningCoverageDebt,
   confirmCxSlowSingleCurrent,
   getCxSimpleLoopSession,
   getCxSlowSingleSession,

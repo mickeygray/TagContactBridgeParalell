@@ -81,7 +81,7 @@ That service writes one terminal row, then lets the drain and wrap writers fan o
 - [CXWorkspaceBulkLoad.tsx](C:/code/TagContactBridgeParalell/apps/web-client/src/workspaces/cx/CXWorkspaceBulkLoad.tsx:3973) - bulk display state, auto-review state, latched call, current call projection.
 - [CXWorkspaceBulkLoad.tsx](C:/code/TagContactBridgeParalell/apps/web-client/src/workspaces/cx/CXWorkspaceBulkLoad.tsx:4447) - bulk empty-display effect that clears served selection/case panel.
 - [CXWorkspaceBulkLoad.tsx](C:/code/TagContactBridgeParalell/apps/web-client/src/workspaces/cx/CXWorkspaceBulkLoad.tsx:4455) - bulk display candidate projected into selected/form/served queue state.
-- [CXWorkspaceBulkLoad.tsx](C:/code/TagContactBridgeParalell/apps/web-client/src/workspaces/cx/CXWorkspaceBulkLoad.tsx:4500) - preview get-leads/start-next function.
+- [CXWorkspaceBulkLoad.tsx](C:/code/TagContactBridgeParalell/apps/web-client/src/workspaces/cx/CXWorkspaceBulkLoad.tsx:4500) - preview get-leads function.
 - [CXWorkspaceBulkLoad.tsx](C:/code/TagContactBridgeParalell/apps/web-client/src/workspaces/cx/CXWorkspaceBulkLoad.tsx:5337) - legacy recent workflow terminal effect.
 - [CXWorkspaceBulkLoad.tsx](C:/code/TagContactBridgeParalell/apps/web-client/src/workspaces/cx/CXWorkspaceBulkLoad.tsx:5701) - `submitQueueDisposition`.
 - [CXWorkspaceBulkLoad.tsx](C:/code/TagContactBridgeParalell/apps/web-client/src/workspaces/cx/CXWorkspaceBulkLoad.tsx:5797) - appointment modal open/pause.
@@ -95,7 +95,7 @@ That service writes one terminal row, then lets the drain and wrap writers fan o
 ### Browser bulk API
 
 - [cxBulkLoad.ts](C:/code/TagContactBridgeParalell/apps/web-client/src/lib/api/queries/cxBulkLoad.ts:91) - session polling.
-- [cxBulkLoad.ts](C:/code/TagContactBridgeParalell/apps/web-client/src/lib/api/queries/cxBulkLoad.ts:146) - disposition/get-leads/start-next/pause/resume hooks.
+- [cxBulkLoad.ts](C:/code/TagContactBridgeParalell/apps/web-client/src/lib/api/queries/cxBulkLoad.ts:146) - disposition/get-leads/pause/resume hooks.
 - [cxBulkLoad.ts](C:/code/TagContactBridgeParalell/apps/web-client/src/lib/api/queries/cxBulkLoad.ts:159) - review outcome correction hook.
 
 ### Control-plane route boundary

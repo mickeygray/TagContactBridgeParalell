@@ -9,7 +9,6 @@ const {
   skipCxBulkLoadCurrent,
   startCxBulkLoadGetLeads,
   startCxBulkLoadSession,
-  startCxBulkLoadNextManualCall,
   submitCxBulkLoadDisposition,
   submitCxBulkLoadReviewOutcome,
   submitCxBulkLoadAppointmentWrap,
@@ -68,12 +67,14 @@ function createCxBulkLoadRouter(auth, options = {}) {
     return sendBulkCommand(req, res, submitCxBulkLoadReviewOutcome, (request) => request.body || {});
   });
 
-  router.post("/start-next", auth.requireAuth, auth.requireUser, async (req, res) => {
-    return sendBulkCommand(req, res, startCxBulkLoadNextManualCall, (request) => request.body || {});
-  });
 
   router.post("/get-leads", auth.requireAuth, auth.requireUser, async (req, res) => {
     return sendBulkCommand(req, res, startCxBulkLoadGetLeads, (request) => request.body || {});
+  });
+
+  // WO-3 tripwire: manual dial is retired — see attic/manual-dial-lane.attic.md
+  router.post("/start-next", auth.requireAuth, auth.requireUser, (req, res) => {
+    return res.status(410).json({ ok: false, code: "manual-dial-disabled", use: "/api/cx/bulk-load/get-leads" });
   });
 
   router.post("/pause-progressive", auth.requireAuth, auth.requireUser, async (req, res) => {

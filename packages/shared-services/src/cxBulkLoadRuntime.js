@@ -29,7 +29,6 @@ const { createCxBulkLoadOutcomeAdapter, makeOutcomeIdemKey, buildReviewCorrectio
 const { logCxAlpha, redactCxAlphaPayload } = require("./cxAlphaTraceService");
 const { createCxBulkLoadRuntimeService } = require("./cxBulkLoadRuntimeService");
 const { reduceCxBulkLoadState } = require("./cxBulkLoadStateMachine");
-const { createCxGreenFirstTouchSupplyPlanner } = require("./cxGreenFirstTouchSupplyService");
 const { createCxQueueReservationService } = require("./cxQueueReservationService");
 const { buildFamilyTargets } = require("./cxReserveModeService");
 const { resolveCxDialRuntimeMode, isCxBulkLoadRuntime } = require("./cxDialRuntimeModeService");
@@ -478,38 +477,6 @@ function isAlreadyEndedHangupError(error) {
   return /already\s+(ended|complete|completed|disconnected)|no\s+active\s+call|active\s+call\s+not\s+found|call\s+not\s+found|cannot\s+find\s+call/.test(haystack);
 }
 
-async function resolveBulkManualDialContext(session = {}) {
-  const account = session.agentExtensionId
-    ? await userAccountRepository.findUserAccountByExtensionId(session.agentExtensionId).catch(() => null)
-    : session.agentEmail
-      ? await userAccountRepository.findUserAccountByEmail(session.agentEmail).catch(() => null)
-      : null;
-  const domain = normalizeDomain(session.domain);
-  const username = firstNonEmpty(
-    account?.metadata?.ringcxUsername,
-    account?.metadata?.ringcxAgentUsername,
-    account?.metadata?.ringcxAgentEmail,
-    account?.metadata?.cxUsername,
-    account?.cxSession?.rcxAgentEmail,
-    account?.cxAuth?.rcUserEmail,
-    account?.email,
-    session.agentEmail,
-    process.env.RINGCX_VOICE_AGENT_EMAIL,
-  );
-  const callerId = firstNonEmpty(
-    account?.metadata?.ringcxCallerId,
-    account?.metadata?.cxCallerId,
-    account?.phone,
-    domain === "WYNN" ? process.env.WYNN_PROSPECT_CONTACT_PHONE : process.env.TAG_CLIENT_CONTACT_PHONE,
-    domain === "WYNN" ? process.env.WYNN_RINGOUT_CALLER : process.env.TAG_RINGOUT_CALLER,
-  );
-  return {
-    username,
-    callerId,
-    usernameSource: username ? "account-or-env" : null,
-    callerIdSource: callerId ? "account-or-env" : null,
-  };
-}
 
 // Map a bulk call outcome to the REAL RingCX disposition name (the ones actually
 // configured on the campaigns). Dispositioning the active call is what ends it
@@ -967,49 +934,6 @@ function getService() {
         { match: { "metadata.reservationSessionId": session.sessionId } },
       );
     },
-    async markAdoptedCandidateServing({ session = {}, candidate = {}, uii = null, activeCallSummary = null, matchReasons = [] } = {}) {
-      const queueItemId = normalizeExternalId(candidate.queueItemId || candidate.id || candidate._id);
-      const externId = normalizeExternalId(candidate.externId || candidate.ringcx?.externId);
-      if (!queueItemId || !externId) return null;
-      const now = new Date();
-      return cxDialQueueRepository.transitionQueueItemState(
-        queueItemId,
-        ["queued", "ready", "claimed", "serving"],
-        {
-          state: "serving",
-          claimUntil: null,
-          lastClaimedAt: now,
-          "assignment.extensionId": session.agentExtensionId || null,
-          "assignment.agentName": session.agentEmail || null,
-          "assignment.assignedAt": now,
-          "assignment.queueFamilySnapshot": candidate.queueFamily || null,
-          "metadata.reservationSessionId": session.sessionId || null,
-          "metadata.bulkLoadSessionId": session.sessionId || null,
-          "metadata.bulkLoadActiveAt": now,
-          "metadata.bulkLoadRuntime": "bulk_load",
-          "metadata.servingAt": now,
-          "metadata.lastDialExecutionUii": uii || null,
-          "metadata.lastQueueAttemptUii": uii || null,
-          "metadata.lastDialExecutionSource": "cx-bulk-load-adopted-active",
-          "metadata.lastDialIntentStatus": "active",
-          "metadata.lastQueueAttemptHeldForDisposition": true,
-          "metadata.wrapUpRequired": true,
-          "metadata.wrapUpReason": "bulk-load-active-call",
-          "metadata.lastRingcxActiveCall": activeCallSummary || null,
-          "metadata.lastRingcxMatchReasons": Array.isArray(matchReasons) ? matchReasons : [],
-        },
-        {
-          match: {
-            domain: normalizeDomain(session.domain || candidate.domain),
-            $or: [
-              { "metadata.rcxVisibilityExternId": externId },
-              { "metadata.lastRingcxPublishedExternId": externId },
-              { "metadata.lastDialExecutionRingcxPublish.externId": externId },
-            ],
-          },
-        },
-      );
-    },
   };
   const agentLifecycleAdapter = {
     async pauseProgressiveDialing({ session = {}, reason = null, waitForRestore = false } = {}) {
@@ -1061,12 +985,6 @@ function getService() {
     leadSource,
     publisher,
     watcher,
-    // Bulk mode owns a closed buffer. The account watcher may observe every
-    // active RingCX call, but it must only promote calls already present in this
-    // session's acceptedBuffer/current. Adopting arbitrary matching queue rows
-    // lets unrelated campaign activity steal the session and hide the terminal
-    // buttons for the agent.
-    resolveExternalCandidates: null,
     outcomeAdapter,
     terminalExecutor: async ({ session = {}, candidate = {}, outcome = null, notes = null } = {}) => {
       // SIMPLEST PATH: no hangup. Dispositioning the active call is what ends it
@@ -1199,38 +1117,6 @@ function getService() {
     },
     queueStateAdapter,
     agentLifecycleAdapter,
-    manualDialer: {
-      async startNext({ session = {}, candidate = {}, ringDuration = null } = {}) {
-        const destination = firstNonEmpty(candidate.phone);
-        if (!destination) return { ok: false, reason: "missing-destination" };
-        const context = await resolveBulkManualDialContext(session);
-        if (!context.username) return { ok: false, reason: "missing-ringcx-username" };
-        if (!context.callerId) return { ok: false, reason: "missing-caller-id" };
-        const startedAt = Date.now();
-        try {
-          const response = await client.placeManualCall({
-            username: context.username,
-            destination,
-            callerId: context.callerId,
-            ringDuration: Number(ringDuration) > 0 ? Number(ringDuration) : 5,
-          });
-          return {
-            ok: response !== false,
-            elapsedMs: Date.now() - startedAt,
-            response: response === true ? true : undefined,
-            usernameSource: context.usernameSource,
-            callerIdSource: context.callerIdSource,
-          };
-        } catch (error) {
-          return {
-            ok: false,
-            elapsedMs: Date.now() - startedAt,
-            reason: "place-manual-call-failed",
-            error: error && error.message ? error.message : String(error),
-          };
-        }
-      },
-    },
     leadStarter: {
       async getLeads({ session = {}, candidate = {} } = {}) {
         return requestNativeRingcxGetLeads(client, { session, candidate });
@@ -1294,13 +1180,6 @@ function getService() {
     // (assertNotActiveInUcq → existsForLead) is LIVE on this rail, not dormant — a caseId
     // already active in the legacy UCQ pool is dropped+released at reserve time.
     reservationService: createCxQueueReservationService({ cxDialQueueRepository, queueItemRepository }),
-    greenFirstTouchPlanner: createCxGreenFirstTouchSupplyPlanner({
-      enabled: readBooleanEnv("CX_GREEN_FIRST_TOUCH_BULK_ENABLED", false),
-      queueRepository: cxDialQueueRepository,
-      cutoffHour: readIntegerEnv("CX_GREEN_FIRST_TOUCH_CUTOFF_HOUR", 7, 0, 23),
-      cutoffMinute: readIntegerEnv("CX_GREEN_FIRST_TOUCH_CUTOFF_MINUTE", 45, 0, 59),
-      firstTouchMaxAttempts: readIntegerEnv("CX_GREEN_FIRST_TOUCH_MAX_ATTEMPTS", 1, 1, 10),
-    }),
     contactEligibilityAdapter: {
       async resolve({ domain, caseId } = {}) {
         const eligibility = await resolveCaseContactEligibility(domain, caseId, {
@@ -1686,16 +1565,6 @@ async function submitCxBulkLoadReviewOutcome(input = {}, options = {}) {
   };
 }
 
-async function startCxBulkLoadNextManualCall(input = {}, options = {}) {
-  const agent = await resolveAgentContext(input, options.user || {});
-  assertBulkRuntime(agent);
-  const sessionId = await resolveSessionId(input, agent);
-  if (!sessionId) return null;
-  return getService().startCxBulkLoadNextManualCall({
-    sessionId,
-    ringDuration: input.ringDuration,
-  });
-}
 
 async function startCxBulkLoadGetLeads(input = {}, options = {}) {
   const agent = await resolveAgentContext(input, options.user || {});
@@ -1757,7 +1626,6 @@ module.exports = {
   watchCxBulkLoadSession,
   watchCxBulkLoadAccountActiveCalls,
   submitCxBulkLoadDisposition,
-  startCxBulkLoadNextManualCall,
   startCxBulkLoadGetLeads,
   pauseCxBulkLoadProgressiveDialing,
   resumeCxBulkLoadProgressiveDialing,

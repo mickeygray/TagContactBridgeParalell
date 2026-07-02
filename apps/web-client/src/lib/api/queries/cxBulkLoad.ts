@@ -14,9 +14,6 @@ export interface CxBulkLoadCurrent {
   outcome?: string | null;
   uii?: string | null;
   activeAt?: string | null;
-  manualStartPending?: boolean | null;
-  manualStartedAt?: string | null;
-  manualStartSource?: string | null;
   activeCallSummary?: Record<string, unknown> | null;
   matchReasons?: string[];
   externId?: string | null;
@@ -42,13 +39,6 @@ export interface CxBulkLoadSession {
   lastError?: unknown;
   // present only on the disposition response
   dispositionOk?: boolean;
-  manualStart?: {
-    ok?: boolean;
-    reason?: string | null;
-    error?: string | null;
-    queueItemId?: string | null;
-    elapsedMs?: number | null;
-  };
   getLeads?: {
     ok?: boolean;
     reason?: string | null;
@@ -182,7 +172,6 @@ function buildBulkLoadSideEffectHook(path: string) {
 export const useCxBulkLoadStart = buildBulkLoadCommandHook("start");
 export const useCxBulkLoadDisposition = buildBulkLoadCommandHook("disposition");
 export const useCxBulkLoadGetLeads = buildBulkLoadCommandHook("get-leads");
-export const useCxBulkLoadStartNext = buildBulkLoadCommandHook("start-next");
 export const useCxBulkLoadPauseProgressive = buildBulkLoadSideEffectHook("pause-progressive");
 export const useCxBulkLoadResumeProgressive = buildBulkLoadSideEffectHook("resume-progressive");
 export const useCxBulkLoadSkip = buildBulkLoadCommandHook("skip");

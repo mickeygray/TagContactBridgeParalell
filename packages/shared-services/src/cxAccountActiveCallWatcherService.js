@@ -112,11 +112,10 @@ function compactActiveCalls(calls = []) {
     .filter((call) => call.externId || call.uii);
 }
 
-function candidatePool(state = {}, extraCandidates = []) {
+function candidatePool(state = {}) {
   const pool = [];
   if (Array.isArray(state.acceptedBuffer)) pool.push(...state.acceptedBuffer);
   if (state.current) pool.push(state.current);
-  if (Array.isArray(extraCandidates)) pool.push(...extraCandidates);
   return pool;
 }
 
@@ -137,23 +136,6 @@ function compactCandidate(candidate = {}) {
   };
 }
 
-function findManualStartedActiveCall(current = null, compactCalls = []) {
-  if (!current || current.uii || current.manualStartPending !== true) return null;
-  const targetPhone = normalizePhoneDigits(current.phone);
-  if (!targetPhone) return null;
-  const matches = (Array.isArray(compactCalls) ? compactCalls : []).filter((call) => {
-    if (!call?.uii) return false;
-    const ani = normalizePhoneDigits(call.ani);
-    const dnis = normalizePhoneDigits(call.dnis);
-    return ani === targetPhone || dnis === targetPhone;
-  });
-  if (matches.length !== 1) return null;
-  return {
-    ...matches[0],
-    externId: candidateExternId(current) || queueItemKey(current),
-    manualStartMatched: true,
-  };
-}
 
 function groupBulkSessionsByAccount(sessions = []) {
   const byAccount = new Map();
@@ -194,17 +176,11 @@ function projectBulkSessionFromAccountSnapshot(session = {}, activeCalls = [], o
     ? activeCalls.map((call) => watcher.normalizeActiveCall ? watcher.normalizeActiveCall(call) : compactActiveCall(call))
     : [];
   const compactCalls = compactActiveCalls(normalizedCalls);
-  const externalCandidates = Array.isArray(options.externalCandidates) ? options.externalCandidates : [];
-  const pool = candidatePool(session, externalCandidates);
+  const pool = candidatePool(session);
   const candidateExternIds = new Set(pool.map(candidateExternId).filter(Boolean));
   let relevantCalls = compactCalls.filter((call) => call.externId && candidateExternIds.has(call.externId));
-  const manualStartedCall = findManualStartedActiveCall(session.current, compactCalls);
   const currentBefore = queueItemKey(session.current);
   const currentUiiBefore = str(session.current?.uii);
-  if (manualStartedCall) {
-    const alreadyIncluded = relevantCalls.some((call) => call.uii && call.uii === manualStartedCall.uii);
-    relevantCalls = alreadyIncluded ? relevantCalls : [...relevantCalls, manualStartedCall];
-  }
 
   const releaseDiff = watcher.deriveReleasedCandidates({
     prevActiveExternIds: session.prevActiveExternIds || [],
@@ -271,7 +247,6 @@ function projectBulkSessionFromAccountSnapshot(session = {}, activeCalls = [], o
       relevantActiveCallCount: relevantCalls.length,
       releasedCount: releaseDiff.released.length,
       currentReleased: Boolean(currentReleased),
-      externalCandidateCount: externalCandidates.length,
       matchStatus: "held-review",
       transitionKind: "held-review",
       currentQueueItemId: next.current?.queueItemId || null,
@@ -316,7 +291,7 @@ function projectBulkSessionFromAccountSnapshot(session = {}, activeCalls = [], o
     };
   }
 
-  const match = watcher.matchActiveCallToCandidates(relevantCalls, candidatePool(next, externalCandidates));
+  const match = watcher.matchActiveCallToCandidates(relevantCalls, candidatePool(next));
   const transition = watcher.deriveCurrentTransition(next.current, match);
   let currentPromotion = null;
 
@@ -363,7 +338,6 @@ function projectBulkSessionFromAccountSnapshot(session = {}, activeCalls = [], o
     relevantActiveCallCount: relevantCalls.length,
     releasedCount: releaseDiff.released.length,
     currentReleased: Boolean(currentReleased),
-    externalCandidateCount: externalCandidates.length,
     matchStatus: match.status || "unknown",
     transitionKind: transition.kind || "none",
     currentQueueItemId: next.current?.queueItemId || null,
@@ -378,7 +352,7 @@ function projectBulkSessionFromAccountSnapshot(session = {}, activeCalls = [], o
     accountId,
     activeCalls: compactCalls,
     relevantActiveCalls: relevantCalls,
-    candidatePool: candidatePool(next, externalCandidates).map(compactCandidate).filter(Boolean),
+    candidatePool: candidatePool(next).map(compactCandidate).filter(Boolean),
     current: compactCandidate(next.current),
     matchStatus: match.status || "unknown",
     matchReason: match.reason || null,
@@ -478,18 +452,9 @@ async function buildCxAccountActiveCallWatchPlan(input = {}) {
     }
 
     for (const session of accountSessions) {
-      let externalCandidates = [];
-      if (typeof input.resolveExternalCandidates === "function") {
-        externalCandidates = await input.resolveExternalCandidates({
-          session,
-          activeCalls,
-          now: at,
-        });
-      }
       const projection = projectBulkSessionFromAccountSnapshot(session, activeCalls, {
         watcher,
         reduce: input.reduce || reduceCxBulkLoadState,
-        externalCandidates,
         now: at,
       });
       // Bind a re-projection against THIS tick's same active-call snapshot so the apply step can
@@ -501,7 +466,6 @@ async function buildCxAccountActiveCallWatchPlan(input = {}) {
           projectBulkSessionFromAccountSnapshot(freshSession, activeCalls, {
             watcher,
             reduce: input.reduce || reduceCxBulkLoadState,
-            externalCandidates,
             now: at,
           }),
         enumerable: false,
@@ -509,7 +473,6 @@ async function buildCxAccountActiveCallWatchPlan(input = {}) {
       projections.push(projection);
       traceWatcher("cx.alpha.watch.session.projected", {
         ...summarizeProjection(projection),
-        externalCandidateCount: Array.isArray(externalCandidates) ? externalCandidates.length : 0,
       });
     }
   }
@@ -571,7 +534,6 @@ async function runCxAccountActiveCallWatchOnce(input = {}) {
     sessions,
     watcher: input.watcher,
     reduce: input.reduce,
-    resolveExternalCandidates: input.resolveExternalCandidates,
     now: input.now,
   });
   traceWatcher("cx.alpha.watch.tick.summary", {
@@ -731,13 +693,8 @@ async function runCxAccountActiveCallWatchOnce(input = {}) {
       return;
     }
     if (promotionRequired) {
-      const adopted = promotion.candidate?.adoption?.source === "ringcx-active-external-id";
-      const servingMethod =
-        adopted && typeof input.queueStateAdapter.markAdoptedCandidateServing === "function"
-          ? "markAdoptedCandidateServing"
-          : "markCandidateServing";
       const served = await input.queueStateAdapter
-        [servingMethod]({
+        .markCandidateServing({
           session: projection.before,
           candidate: promotion.candidate,
           uii: promotion.uii,
@@ -759,7 +716,6 @@ async function runCxAccountActiveCallWatchOnce(input = {}) {
           accountId: projection.accountId || null,
           currentQueueItemId: projection.currentQueueItemId || null,
           currentUii: projection.currentUii || null,
-          adopted,
         });
         skipped.push({
           sessionId: projection.sessionId,
@@ -767,7 +723,6 @@ async function runCxAccountActiveCallWatchOnce(input = {}) {
           reason: "serving-ownership-stamp-miss",
           currentQueueItemId: projection.currentQueueItemId || null,
           currentUii: projection.currentUii || null,
-          adopted,
         });
         return;
       }
@@ -777,8 +732,7 @@ async function runCxAccountActiveCallWatchOnce(input = {}) {
         accountId: projection.accountId || null,
         currentQueueItemId: projection.currentQueueItemId || null,
         currentUii: projection.currentUii || null,
-        adopted,
-        servingMethod,
+        servingMethod: "markCandidateServing",
       });
     }
 

@@ -167,49 +167,6 @@ function familyRefillTargets(state, familyTargets = {}) {
   return residual;
 }
 
-function normalizeFirstTouchSupplyPlan(plan = null, normalFamilyTargets = {}) {
-  if (!plan || typeof plan !== "object") {
-    return {
-      lane: "normal",
-      familyTargets: { ...(normalFamilyTargets || {}) },
-      firstTouchOnly: false,
-      claimFilter: { firstTouchOnly: false },
-      reason: "no-first-touch-plan",
-    };
-  }
-  const claimFilter = plan.claimFilter && typeof plan.claimFilter === "object" ? plan.claimFilter : {};
-  const batchId = str(claimFilter.greenCoverageBatchId || plan.batchId);
-  const queueLane = str(claimFilter.queueLane || plan.queueLane);
-  const firstTouchOnly = plan.firstTouchOnly === true || claimFilter.firstTouchOnly === true;
-  const firstTouchMaxAttempts = Number.isFinite(Number(claimFilter.firstTouchMaxAttempts ?? plan.firstTouchMaxAttempts))
-    ? Math.max(Number(claimFilter.firstTouchMaxAttempts ?? plan.firstTouchMaxAttempts), 0)
-    : null;
-  const scoped = Boolean(batchId || queueLane);
-  if (firstTouchOnly && !scoped) {
-    return {
-      lane: "normal",
-      familyTargets: { ...(normalFamilyTargets || {}) },
-      firstTouchOnly: false,
-      claimFilter: { firstTouchOnly: false },
-      counts: plan.counts || {},
-      reason: "first-touch-plan-unscoped",
-    };
-  }
-  return {
-    ...plan,
-    familyTargets: plan.familyTargets && typeof plan.familyTargets === "object"
-      ? plan.familyTargets
-      : { ...(normalFamilyTargets || {}) },
-    firstTouchOnly,
-    claimFilter: {
-      ...claimFilter,
-      firstTouchOnly,
-      greenCoverageBatchId: batchId || null,
-      queueLane: queueLane || null,
-      ...(firstTouchMaxAttempts != null ? { firstTouchMaxAttempts } : {}),
-    },
-  };
-}
 
 // The mutable domain fields we persist back — never the reducer's string
 // updatedAt/startedAt (Mongoose timestamps own those) nor identity.
@@ -338,10 +295,7 @@ function createCxBulkLoadRuntimeService(deps = {}) {
     terminalExecutor,
     queueStateAdapter = {},
     agentLifecycleAdapter = {},
-    manualDialer = null,
     leadStarter = null,
-    greenFirstTouchPlanner = null,
-    resolveExternalCandidates = null,
     contactEligibilityAdapter = {},
     offhookGate,
     client,
@@ -502,37 +456,11 @@ function createCxBulkLoadRuntimeService(deps = {}) {
       return state;
     }
 
-    const desiredFamilyTargets = familyRefillTargets(state, (state.stats && state.stats.familyTargets) || {});
-    let firstTouchPlan = normalizeFirstTouchSupplyPlan(null, desiredFamilyTargets);
-    if (greenFirstTouchPlanner && typeof greenFirstTouchPlanner.resolvePlan === "function") {
-      try {
-        firstTouchPlan = normalizeFirstTouchSupplyPlan(await greenFirstTouchPlanner.resolvePlan({
-          state,
-          domain: state.domain,
-          agentExtensionId: state.agentExtensionId,
-          ringcx: state.ringcx || {},
-          deficit,
-          normalFamilyTargets: desiredFamilyTargets,
-          asOf: now(),
-        }), desiredFamilyTargets);
-      } catch (error) {
-        traceBulkFlow("fill.first_touch_plan_failed", state, {
-          error: error && error.message ? error.message : String(error),
-        });
-      }
-    }
-    const effectiveFamilyTargets = firstTouchPlan.familyTargets || desiredFamilyTargets;
-    const claimFilter = firstTouchPlan.claimFilter || {};
+    const effectiveFamilyTargets = familyRefillTargets(state, (state.stats && state.stats.familyTargets) || {});
     traceBulkFlow("fill.reserve_started", state, {
       targetBuffer: targetBufferFor(state),
       deficit,
       familyTargets: effectiveFamilyTargets,
-      firstTouchLane: firstTouchPlan.lane || null,
-      firstTouchOnly: firstTouchPlan.firstTouchOnly === true,
-      greenCoverageBatchId: claimFilter.greenCoverageBatchId || firstTouchPlan.batchId || null,
-      firstTouchReason: firstTouchPlan.reason || null,
-      firstTouchCounts: firstTouchPlan.counts || null,
-      firstTouchMaxAttempts: claimFilter.firstTouchMaxAttempts ?? null,
     });
 
     const { reserved } = await reservationService.reserveFromFamilyOrder({
@@ -549,18 +477,11 @@ function createCxBulkLoadRuntimeService(deps = {}) {
         rcxCampaignId: state.ringcx && state.ringcx.campaignId,
         rcxDialGroupId: state.ringcx && state.ringcx.dialGroupId,
       },
-      firstTouchOnly: firstTouchPlan.firstTouchOnly === true,
-      greenCoverageBatchId: claimFilter.greenCoverageBatchId || firstTouchPlan.batchId || null,
-      queueLane: claimFilter.queueLane || firstTouchPlan.queueLane || null,
-      firstTouchMaxAttempts: claimFilter.firstTouchMaxAttempts ?? null,
     });
     traceBulkFlow("fill.reserve_finished", state, {
       requested: deficit,
       reserved: reserved.length,
       familyTargets: effectiveFamilyTargets,
-      firstTouchLane: firstTouchPlan.lane || null,
-      firstTouchOnly: firstTouchPlan.firstTouchOnly === true,
-      greenCoverageBatchId: claimFilter.greenCoverageBatchId || firstTouchPlan.batchId || null,
     });
     if (!reserved.length) return state;
 
@@ -1072,106 +993,6 @@ function createCxBulkLoadRuntimeService(deps = {}) {
     });
   }
 
-  async function startCxBulkLoadNextManualCall(input = {}) {
-    return withSessionMutation(input.sessionId, async () => {
-    const state = await loadState(input.sessionId);
-    if (!state) return null;
-    if (state.status !== "running") {
-      return {
-        ...sanitizeSession(state),
-        manualStart: { ok: false, reason: "session-not-running" },
-      };
-    }
-    if (state.current) {
-      return {
-        ...sanitizeSession(state),
-        manualStart: {
-          ok: false,
-          reason: state.current.uii ? "current-call-active" : "current-call-awaiting-uii",
-          queueItemId: queueItemKey(state.current) || null,
-        },
-      };
-    }
-    const candidate = firstStartableBufferCandidate(state);
-    if (!candidate) {
-      return {
-        ...sanitizeSession(state),
-        manualStart: { ok: false, reason: "no-startable-buffer-candidate" },
-      };
-    }
-    if (!manualDialer || typeof manualDialer.startNext !== "function") {
-      return {
-        ...sanitizeSession(state),
-        manualStart: { ok: false, reason: "manual-dialer-unavailable" },
-      };
-    }
-
-    traceBulkFlow("manual_start.started", state, {
-      queueItemId: queueItemKey(candidate),
-      externId: str(candidate.externId) || null,
-      ringDuration: input.ringDuration || null,
-    });
-    const manualStart = await manualDialer.startNext({
-      session: state,
-      candidate,
-      ringDuration: input.ringDuration,
-    });
-    if (!manualStart || manualStart.ok === false) {
-      traceBulkFlow("manual_start.failed", state, {
-        queueItemId: queueItemKey(candidate),
-        reason: manualStart?.reason || manualStart?.error || "manual-start-failed",
-      });
-      return {
-        ...sanitizeSession(state),
-        manualStart: {
-          ok: false,
-          reason: manualStart?.reason || "manual-start-failed",
-          error: manualStart?.error || null,
-        },
-      };
-    }
-
-    const startedAt = now();
-    let next = reduce(state, {
-      type: "current.matched",
-      candidate: {
-        ...candidate,
-        manualStartPending: true,
-        manualStartedAt: startedAt.toISOString(),
-        manualStartSource: "createManualAgentCall",
-      },
-      uii: null,
-      activeCallSummary: {
-        source: "createManualAgentCall",
-        elapsedMs: manualStart.elapsedMs || null,
-      },
-      matchReasons: ["manual-start-request"],
-      completePrevious: false,
-    }, startedAt);
-    next = {
-      ...next,
-      stats: {
-        ...(next.stats || {}),
-        lastManualStartAt: startedAt.toISOString(),
-        lastManualStartQueueItemId: queueItemKey(candidate) || null,
-        lastManualStartElapsedMs: manualStart.elapsedMs || null,
-      },
-    };
-    await persist(next);
-    traceBulkFlow("manual_start.accepted", next, {
-      queueItemId: queueItemKey(candidate),
-      elapsedMs: manualStart.elapsedMs || null,
-    });
-    return {
-      ...sanitizeSession(next),
-      manualStart: {
-        ok: true,
-        queueItemId: queueItemKey(candidate) || null,
-        elapsedMs: manualStart.elapsedMs || null,
-      },
-    };
-    });
-  }
 
   async function startCxBulkLoadGetLeads(input = {}) {
     return withSessionMutation(input.sessionId, async () => {
@@ -1261,7 +1082,6 @@ function createCxBulkLoadRuntimeService(deps = {}) {
       agentExtensionId: input.agentExtensionId,
       watcher,
       reduce,
-      resolveExternalCandidates: input.resolveExternalCandidates || resolveExternalCandidates,
       queueStateAdapter,
       outcomeAdapter,
       agentLifecycleAdapter,
@@ -1294,7 +1114,6 @@ function createCxBulkLoadRuntimeService(deps = {}) {
     watchCxBulkLoadSession,
     watchAccountActiveCalls,
     submitCxBulkLoadDisposition,
-    startCxBulkLoadNextManualCall,
     startCxBulkLoadGetLeads,
     skipCxBulkLoadCurrent,
     killCxBulkLoadSession,

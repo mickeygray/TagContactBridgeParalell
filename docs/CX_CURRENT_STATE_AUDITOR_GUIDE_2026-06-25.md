@@ -80,7 +80,7 @@ Start here, in order. Do not begin in the UI.
 ### Routing and client API
 
 - `apps/control-plane/src/routes/cxBulkLoad.js`
-  - Thin route layer for `session`, `start`, `disposition`, `skip`, `start-next`, `get-leads`, `pause-progressive`, and `resume-progressive`.
+  - Thin route layer for `session`, `start`, `disposition`, `skip`, `get-leads`, `pause-progressive`, and `resume-progressive`.
   - Audit target: keep it auth + service call only.
 
 - `apps/web-client/src/lib/api/queries/cxBulkLoad.ts`
@@ -391,4 +391,3 @@ Smoke tests run:
 Manual test result:
 - agent, campaign, number of calls, button outcomes, refill behavior, outbox count.
 ```
-

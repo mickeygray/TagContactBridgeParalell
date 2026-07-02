@@ -61,7 +61,11 @@ function makeRepo() {
 
 // Fake RingCX client; `liveCalls` is mutated by the test to simulate dialing.
 function makeClient(liveCalls) {
-  const calls = { dispositions: [], cancels: [], loads: [], manualStarts: [] };
+  const calls = {
+    dispositions: [],
+    cancels: [],
+    loads: [],
+  };
   return {
     calls,
     async loadLeads(campaignId, payload) {
@@ -73,10 +77,6 @@ function makeClient(liveCalls) {
     },
     async dispositionCall(uii, opts) {
       calls.dispositions.push({ uii, opts });
-      return true;
-    },
-    async placeManualCall(opts) {
-      calls.manualStarts.push(opts);
       return true;
     },
     async leadAction(action, body) {
@@ -177,7 +177,6 @@ function build(liveCalls, overrides = {}) {
     outcomeAdapter,
     reservationService: reservation,
     ...(overrides.queueStateAdapter ? { queueStateAdapter: overrides.queueStateAdapter } : {}),
-    ...(overrides.manualDialer ? { manualDialer: overrides.manualDialer } : {}),
     ...(overrides.leadStarter ? { leadStarter: overrides.leadStarter } : {}),
     ...(overrides.greenFirstTouchPlanner ? { greenFirstTouchPlanner: overrides.greenFirstTouchPlanner } : {}),
     ...(overrides.contactEligibilityAdapter ? { contactEligibilityAdapter: overrides.contactEligibilityAdapter } : {}),
@@ -315,7 +314,7 @@ test("start preloads RingCX leads while on hook, then waits offhook", async () =
   assert.equal(reservation.reserves.length, 1);
 });
 
-test("green first-touch planner can narrow bulk reservation to a finite morning batch", async () => {
+test("WO-1 legacy green first-touch planner is ignored by bulk reservation", async () => {
   const liveCalls = { value: [] };
   const plans = [];
   const greenFirstTouchPlanner = {
@@ -337,6 +336,7 @@ test("green first-touch planner can narrow bulk reservation to a finite morning 
     },
   };
   const { svc, reservation } = build(liveCalls, { greenFirstTouchPlanner });
+  const normalTargets = { "fresh-day1": 15, "fresh-day2to10": 10, aged: 5 };
 
   await svc.startCxBulkLoadSession({
     agentEmail: "a@x.com",
@@ -345,21 +345,22 @@ test("green first-touch planner can narrow bulk reservation to a finite morning 
     ringcx: { accountId: "acct1", campaignId: "camp1", dialGroupId: "dg1" },
     targetSize: 2,
     refillThreshold: 1,
-    familyTargets: { "fresh-day1": 15, "fresh-day2to10": 10, aged: 5 },
+    familyTargets: normalTargets,
   });
 
-  assert.equal(plans.length, 1);
-  assert.equal(plans[0].deficit, 2);
-  assert.deepEqual(reservation.reserves[0].familyTargets, { "fresh-day1": 2 });
-  assert.equal(reservation.reserves[0].firstTouchOnly, true);
-  assert.equal(reservation.reserves[0].greenCoverageBatchId, "green-coverage-2026-06-22-TAG");
-  assert.equal(reservation.reserves[0].queueLane, null);
+  assert.equal(plans.length, 0);
+  assert.deepEqual(reservation.reserves[0].familyTargets, normalTargets);
+  assert.equal(reservation.reserves[0].firstTouchOnly, undefined);
+  assert.equal(reservation.reserves[0].greenCoverageBatchId, undefined);
+  assert.equal(reservation.reserves[0].queueLane, undefined);
 });
 
-test("green first-touch planner cannot enable unscoped first-touch reservations", async () => {
+test("WO-1 unscoped legacy first-touch planner injection is ignored", async () => {
   const liveCalls = { value: [] };
+  const plans = [];
   const greenFirstTouchPlanner = {
     async resolvePlan() {
+      plans.push(true);
       return {
         lane: "morningCoverage",
         firstTouchOnly: true,
@@ -382,10 +383,11 @@ test("green first-touch planner cannot enable unscoped first-touch reservations"
     familyTargets: normalTargets,
   });
 
+  assert.equal(plans.length, 0);
   assert.deepEqual(reservation.reserves[0].familyTargets, normalTargets);
-  assert.equal(reservation.reserves[0].firstTouchOnly, false);
-  assert.equal(reservation.reserves[0].greenCoverageBatchId, null);
-  assert.equal(reservation.reserves[0].queueLane, null);
+  assert.equal(reservation.reserves[0].firstTouchOnly, undefined);
+  assert.equal(reservation.reserves[0].greenCoverageBatchId, undefined);
+  assert.equal(reservation.reserves[0].queueLane, undefined);
 });
 
 test("start sources the buffer from the reservation service, scoped to agent + domain + session", async () => {
@@ -985,39 +987,6 @@ test("fillBuffer reserves up to the deficit and publishes each reserved row one-
   assert.equal(client.calls.loads[0].payload.uploadLeads[0].leadPhone, familyOrdered[0].phone);
 });
 
-test("manual start-next probe promotes the first accepted buffer lead and waits for watcher UII", async () => {
-  const liveCalls = { value: [] };
-  const starts = [];
-  const manualDialer = {
-    async startNext({ candidate, ringDuration }) {
-      starts.push({ candidate, ringDuration });
-      return { ok: true, elapsedMs: 42 };
-    },
-  };
-  const { svc, outcomeAdapter } = build(liveCalls, { manualDialer });
-
-  const started = await svc.startCxBulkLoadSession({
-    agentEmail: "mickey@example.com",
-    agentExtensionId: "mickey-ext",
-    domain: "TAG",
-    ringcx: { accountId: "acct1", campaignId: "camp1" },
-    targetSize: 2,
-    refillThreshold: 1,
-  });
-  assert.equal(started.bufferCount, 2);
-
-  const snap = await svc.startCxBulkLoadNextManualCall({ sessionId: "s1" });
-  assert.equal(snap.manualStart.ok, true);
-  assert.equal(starts.length, 1);
-  assert.equal(starts[0].candidate.queueItemId, "q1");
-  assert.equal(snap.current.queueItemId, "q1");
-  assert.equal(snap.current.uii, null);
-  assert.equal(snap.current.manualStartPending, true);
-  assert.deepEqual(snap.current.matchReasons, ["manual-start-request"]);
-  assert.equal(snap.bufferCount, 1);
-  assert.equal(snap.remainingQueue[0].queueItemId, "q2");
-  assert.equal(outcomeAdapter.writes.length, 0);
-});
 
 test("get-leads asks RingCX for the next preview lead without staging a current call", async () => {
   const liveCalls = { value: [] };
@@ -1147,4 +1116,13 @@ test("PII: sanitizeSession strips raw phone digits (ani/dnis/leadPhone) from cur
   assert.equal(projected.current.activeCallSummary.dnis, undefined, "current dnis stripped");
   assert.equal(projected.current.activeCallSummary.state, "active", "non-PII fields preserved");
   assert.equal(projected.remainingQueue[0].activeCallSummary.ani, undefined, "buffered candidate ani stripped too");
+});
+
+test("WO-3 manual-dial mutator is not exported", () => {
+  const { svc } = build({ value: [] });
+  assert.equal(svc.startCxBulkLoadNextManualCall, undefined, "runtime service exposes no manual-start mutator");
+  const runtime = require("../../packages/shared-services/src/cxBulkLoadRuntime");
+  assert.equal(runtime.startCxBulkLoadNextManualCall, undefined, "runtime exposes no manual-start wrapper");
+  const barrel = require("../../packages/shared-services/src");
+  assert.equal(barrel.startCxBulkLoadNextManualCall, undefined, "shared-services barrel exposes no manual-start export");
 });
