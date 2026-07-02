@@ -5,10 +5,13 @@ const assert = require("node:assert/strict");
 
 const {
   detectPollMismatch,
+  exPresencePollMode,
   normalizePresencePollMode,
   reconcilePolledPresence,
+  seedPresenceForAgents,
 } = require("../../packages/shared-services/src/ringcentralExService");
 const {
+  getCxRuntimeMode,
   normalizeCxRuntimeMode,
 } = require("../../packages/shared-services/src/cxRuntimeModeService");
 
@@ -31,6 +34,29 @@ function exPresenceWithDifferentSession() {
     telephonyStatus: "CallConnected",
     activeCalls: [{ sessionId: "EX-DIFFERENT-SESSION" }],
   };
+}
+
+async function withEnv(patch, fn) {
+  const previous = {};
+  for (const key of Object.keys(patch)) {
+    previous[key] = process.env[key];
+    if (patch[key] === undefined) {
+      delete process.env[key];
+    } else {
+      process.env[key] = patch[key];
+    }
+  }
+  try {
+    return await fn();
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    }
+  }
 }
 
 test("legacy mode still detects a session mismatch", () => {
@@ -83,6 +109,27 @@ test("presence poll mode parser supports observe-only and off", () => {
   assert.equal(normalizePresencePollMode("read-only"), "observe-only");
   assert.equal(normalizePresencePollMode("disabled"), "off");
   assert.equal(normalizePresencePollMode("legacy"), "write");
+});
+
+test("bulk-load alpha resolves CX runtime to cx-only and boots EX presence polling", async () => {
+  await withEnv(
+    {
+      RC_CX_RUNTIME_MODE: undefined,
+      CX_RUNTIME_MODE: undefined,
+      RC_CX_EX_PRESENCE_POLL_MODE: undefined,
+      RC_EX_PRESENCE_POLL_MODE: undefined,
+      CX_DIAL_RUNTIME_BULK_LOAD_ENABLED: "true",
+      VITE_CX_WORKSPACE_MODE: "bulk_load",
+    },
+    async () => {
+      assert.equal(getCxRuntimeMode(), "cx-only");
+      assert.equal(exPresencePollMode(), "off");
+      const seeded = await seedPresenceForAgents({ info() {} });
+      assert.equal(seeded.skipped, true);
+      assert.equal(seeded.reason, "presence-poll-off");
+      assert.equal(seeded.checked, 0);
+    },
+  );
 });
 
 test("runtime mode parser does not alias cx-owned write mode into cx-only runtime mode", () => {

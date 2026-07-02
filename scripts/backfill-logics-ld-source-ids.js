@@ -16,6 +16,7 @@ function parseArgs(argv) {
     since: "2026-05-14T00:00:00.000Z",
     customId: 45,
     custom2Id: 47,
+    custom3Id: 48,
     generalId: 46,
     concurrency: 3,
     delayMs: 150,
@@ -33,6 +34,9 @@ function parseArgs(argv) {
       index += 1;
     } else if (arg === "--custom-2-id") {
       args.custom2Id = Number(argv[index + 1]) || args.custom2Id;
+      index += 1;
+    } else if (arg === "--custom-3-id") {
+      args.custom3Id = Number(argv[index + 1]) || args.custom3Id;
       index += 1;
     } else if (arg === "--general-id") {
       args.generalId = Number(argv[index + 1]) || args.generalId;
@@ -112,6 +116,7 @@ async function collectCases(since, limit) {
   const configs = [
     { key: "ld-custom", label: "LD CUSTOM", sourceId: null },
     { key: "ld-custom-2", label: "LD CUSTOM 2", sourceId: null },
+    { key: "ld-custom-3", label: "LD CUSTOM 3", sourceId: null },
     { key: "ld-general", label: "LD GENERAL", sourceId: null },
   ];
   const items = [];
@@ -161,6 +166,7 @@ async function runPool(items, workerCount, worker) {
   await mongoose.connect(config.mongoUri, { dbName: config.parallelDbName });
   await ensureCanonicalSourceId("ld-custom", "LD CUSTOM", args.customId);
   await ensureCanonicalSourceId("ld-custom-2", "LD CUSTOM 2", args.custom2Id);
+  await ensureCanonicalSourceId("ld-custom-3", "LD CUSTOM 3", args.custom3Id);
   await ensureCanonicalSourceId("ld-general", "LD GENERAL", args.generalId);
   const cases = await collectCases(since, args.limit);
   await mongoose.disconnect();
@@ -168,6 +174,7 @@ async function runPool(items, workerCount, worker) {
   const sourceByKey = {
     "ld-custom": Number(args.customId),
     "ld-custom-2": Number(args.custom2Id),
+    "ld-custom-3": Number(args.custom3Id),
     "ld-general": Number(args.generalId),
   };
   const summary = {

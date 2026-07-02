@@ -14,6 +14,19 @@ function normalizeDomain(value) {
   return str(value).toUpperCase() || "TAG";
 }
 
+function externIdPart(value) {
+  return str(value)
+    .toLowerCase()
+    .replace(/[^a-z0-9-]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
+
+function buildExternSessionToken(sessionId) {
+  const raw = str(sessionId).replace(/^cxbl-/i, "");
+  return raw.replace(/[^a-z0-9]+/gi, "").slice(-12).toLowerCase() || null;
+}
+
 function digits(value) {
   return str(value).replace(/\D+/g, "");
 }
@@ -58,13 +71,18 @@ function isQueueRowContactable(row = {}) {
   return true;
 }
 
-// PURE. A stable, RingCX-safe externId unique per queue row. The publisher loads
-// the lead WITH this id; RingCX echoes it on the active call; the watcher matches
-// on it. queueItemId is already unique, domain just keeps tenants disjoint.
-function buildExternId({ domain, queueItemId } = {}) {
-  const qid = str(queueItemId);
+// PURE. A stable, RingCX-safe externId. The publisher loads the lead WITH this
+// id; RingCX echoes it on the active call; the watcher matches on it. Active
+// bulk sessions must pass sessionId so stale RingCX rows cannot collide with a
+// later session that reuses the same queue row id.
+function buildExternId({ domain, queueItemId, sessionId } = {}) {
+  const qid = externIdPart(queueItemId);
   if (!qid) return null;
-  return `cxbl-${normalizeDomain(domain)}-${qid}`.toLowerCase();
+  const token = buildExternSessionToken(sessionId);
+  const parts = ["cxbl", normalizeDomain(domain).toLowerCase()];
+  if (token) parts.push(token);
+  parts.push(qid);
+  return parts.join("-");
 }
 
 function normalizeQueueRow(row = {}) {
@@ -125,6 +143,7 @@ async function snapshotCandidates(deps = {}, input = {}) {
 
 module.exports = {
   buildExternId,
+  buildExternSessionToken,
   isQueueRowContactable,
   normalizeQueueRows,
   excludeSessionCandidates,

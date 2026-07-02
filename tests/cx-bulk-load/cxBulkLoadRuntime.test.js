@@ -38,18 +38,6 @@ test("bulkOutcomeDisposition maps bulk UI outcomes to configured RingCX disposit
   assert.equal(_test.bulkOutcomeDisposition("answered"), "Auto Dispo");
 });
 
-test("confirmRingcxUiiReleased reports still-active UIIs without throwing", async () => {
-  const client = {
-    async listActiveCalls() {
-      return { activeCalls: [{ uii: "u1", externalId: "cxbl-tag-q1", callState: "ACTIVE" }] };
-    },
-  };
-  const result = await _test.confirmRingcxUiiReleased(client, "u1", { waits: [0] });
-  assert.equal(result.ok, false);
-  assert.equal(result.reason, "active-call-still-active-after-disposition");
-  assert.equal(result.activeCall.uii, "u1");
-});
-
 test("progressive pause holdUntilResume pauses without scheduling restore and resume makes available", async () => withEnv({
   CX_BULK_LOAD_PROGRESSIVE_PAUSE_ENABLED: "true",
   CX_BULK_LOAD_PROGRESSIVE_PAUSE_MS: "10",
@@ -96,3 +84,13 @@ test("progressive pause can be disabled by env", async () => withEnv({
   assert.equal(result.reason, "disabled");
   assert.equal(client.calls.length, 0);
 }));
+
+test("off-hook gate fails closed on a busy/on-call agent (ready=false despite a truthy sessionId)", () => {
+  const offhook = _test.isBulkLoginOffhook;
+  // Mid-call agent: merely logged in (truthy sessionId) but the summarizer flagged a failure.
+  assert.equal(offhook({ sessionId: "sess-1", offHook: null, ready: false, failures: ["agent-session-busy"] }), false, "busy agent must NOT pass the off-hook gate");
+  assert.equal(offhook({ sessionId: "sess-1", ready: false, failures: ["agent-pending-disposition"] }), false, "pending-disposition agent rejected");
+  // Clean off-hook: logged in, no failures -> ready true.
+  assert.equal(offhook({ sessionId: "sess-1", ready: true, offHook: true }), true, "a clean off-hook agent passes");
+  assert.equal(offhook({ sessionId: "sess-1", ready: true }), true, "logged-in + ready (no failures) passes on sessionId");
+});

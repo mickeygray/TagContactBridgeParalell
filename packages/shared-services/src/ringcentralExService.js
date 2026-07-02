@@ -98,11 +98,13 @@ function normalizePresencePollMode(value) {
 function exPresencePollMode(options = {}) {
   const fromOptions = normalizePresencePollMode(options.presencePollMode);
   if (fromOptions) return fromOptions;
+  if (isCxOnlyRuntimeMode(options)) return "off";
   const fromEnv = normalizePresencePollMode(
     process.env.RC_CX_EX_PRESENCE_POLL_MODE
       || process.env.RC_EX_PRESENCE_POLL_MODE,
   );
-  return fromEnv || "write";
+  if (fromEnv) return fromEnv;
+  return "write";
 }
 
 function exPresencePollObserveOnly(options = {}) {
@@ -1541,11 +1543,26 @@ async function reconcilePolledPresence(agent, presence, logger, options = {}) {
 }
 
 async function seedPresenceForAgents(logger) {
+  const presencePollMode = exPresencePollMode();
+  const results = [];
+  if (presencePollMode === "off") {
+    logger?.info?.("ringcentral.presence.seed.skipped", {
+      mode: presencePollMode,
+      reason: "presence-poll-off",
+      checked: 0,
+    });
+    return {
+      mode: presencePollMode,
+      checked: 0,
+      pollable: 0,
+      skipped: true,
+      reason: "presence-poll-off",
+      results,
+    };
+  }
   const config = getRingCentralConfig();
   const rc = createRingCentralClient();
   const agents = await agentStateRepository.listAgentStates();
-  const presencePollMode = exPresencePollMode();
-  const results = [];
 
   for (const agent of agents) {
     if (!isPollableExtensionId(agent.extensionId)) {

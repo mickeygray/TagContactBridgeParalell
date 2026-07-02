@@ -287,6 +287,23 @@ function buildTerminalAttemptProofPatch(queueItem = {}, payload = {}, outcomeAt 
       queuePatch: {},
     };
   }
+  // IDEMPOTENCY GUARD: this exact terminal UII was already counted for this row. buildCallAttemptPatch
+  // computes an ABSOLUTE +1, so counting the same physical dial twice inflates placedCalls/daily/monthly
+  // and prematurely throttles/advances the lead. Two replay sources make this real: an outbox REPLAY
+  // after a partial-apply/markFailed, and the review-dnc rectification lane re-draining the same dial
+  // (both carry sourceService cx-bulk-load + the same UII). The marker is written alongside the +1 in
+  // baseMetadata (metadata.lastTerminalAttemptCountedUii) on the first successful count.
+  const alreadyCountedUii = normalizeExternalId(
+    queueItem.metadata && queueItem.metadata.lastTerminalAttemptCountedUii,
+  );
+  if (alreadyCountedUii && alreadyCountedUii === terminalUii) {
+    return {
+      countable: false,
+      terminalUii,
+      alreadyCounted: true,
+      queuePatch: {},
+    };
+  }
   return {
     countable: true,
     terminalUii,

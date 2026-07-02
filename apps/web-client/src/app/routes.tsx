@@ -64,6 +64,11 @@ const SalesTrainerWorkspace = React.lazy(() =>
 const ResolutionWorkspace = React.lazy(() =>
   import("@/workspaces/resolution/ResolutionWorkspace").then((m) => ({ default: m.ResolutionWorkspace })),
 );
+const FieldManualWorkspace = React.lazy(() =>
+  import("@/workspaces/field-manual/FieldManualWorkspace").then((m) => ({
+    default: m.FieldManualWorkspace,
+  })),
+);
 
 function WorkspaceFallback() {
   return (
@@ -238,6 +243,14 @@ export function AppRoutes() {
             element={
               <Suspended>
                 <SalesTrainerWorkspace />
+              </Suspended>
+            }
+          />
+          <Route
+            path="manual"
+            element={
+              <Suspended>
+                <FieldManualWorkspace />
               </Suspended>
             }
           />

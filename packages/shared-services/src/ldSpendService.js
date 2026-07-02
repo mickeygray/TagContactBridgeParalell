@@ -3,7 +3,7 @@
 // ldSpendService — turn LD lead counts into REAL spend entries.
 //
 // LD leads have been counted (lead cadences carry routeCampaignKey
-// ld-custom / ld-custom-2 / ld-general) and the nightly email has shown an
+// ld-custom / ld-custom-2 / ld-custom-3 / ld-general) and the nightly email has shown an
 // "estimated cost" for months — but nothing ever wrote that cost into the
 // spend ledger, so the metrics panel ran LD revenue against zero spend
 // (funny money), patched by occasional manual nudges.
@@ -13,7 +13,7 @@
 //   - COUNTS come from buildVendorDailySummary — the exact rows the nightly
 //     email prints. One code path; the email and the ledger cannot drift.
 //   - RATES live here (env-overridable) and are exported so the email's
-//     estimators read the SAME numbers: general $1.50, custom $3, custom-2 $3.
+//     estimators read the SAME numbers: general $1.50, custom $3, custom-2 $3, custom-3 $3.
 //   - WRITES are idempotent: SpendEntry identity (date, domain, channel,
 //     campaign=familyKey) — re-running a date corrects the row in place.
 //   - MANUAL NUDGES WIN: if a date already has an LD-looking spend row that
@@ -37,6 +37,7 @@ const LD_FAMILIES = Object.freeze([
   { key: "ld-general", label: "LD GENERAL", rateEnv: "LD_GENERAL_COST_PER_LEAD", defaultRate: 1.5 },
   { key: "ld-custom", label: "LD CUSTOM", rateEnv: "LD_CUSTOM_COST_PER_LEAD", defaultRate: 3 },
   { key: "ld-custom-2", label: "LD CUSTOM 2", rateEnv: "LD_CUSTOM_2_COST_PER_LEAD", defaultRate: 3 },
+  { key: "ld-custom-3", label: "LD CUSTOM 3", rateEnv: "LD_CUSTOM_3_COST_PER_LEAD", defaultRate: 3 },
 ]);
 
 function rateFor(family) {
@@ -90,7 +91,7 @@ function findLdCollisions({ existingRows = [], dateKey }) {
     if (String(row.date) !== String(dateKey)) continue;
     if (row.raw?.computedBy === "ld-spend-materializer") continue;
     const family = classifyVendorFamily(row.source, row.channel, row.campaign);
-    if (["ld-general", "ld-custom", "ld-custom-2", "ld-posting"].includes(family.key)
+    if (["ld-general", "ld-custom", "ld-custom-2", "ld-custom-3", "ld-posting"].includes(family.key)
       && Number(row.spend || 0) !== 0) {
       collisions.push({
         familyKey: family.key,
@@ -172,7 +173,7 @@ function ldSpendDateKey(now = new Date()) {
 }
 
 // Pure: a lead's routeCampaignKey -> { family, label, rate } if it is an LD family, else null.
-// custom / custom-2 = $3, general = $1.50 (env-overridable via getLdRates). Exported for tests.
+// custom / custom-2 / custom-3 = $3, general = $1.50 (env-overridable via getLdRates). Exported for tests.
 function resolveLdLeadSpend(routeCampaignKey, rates = getLdRates()) {
   const key = String(routeCampaignKey || "").trim().toLowerCase();
   if (!key) return null;

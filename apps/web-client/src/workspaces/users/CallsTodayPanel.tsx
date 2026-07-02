@@ -54,6 +54,7 @@ function routeCampaignLabel(row: CallReviewRow): string | null {
   if (row.routeCampaignName) return row.routeCampaignName;
   if (row.routeCampaignKey === "ld-custom") return "LD Custom";
   if (row.routeCampaignKey === "ld-custom-2") return "LD Custom 2";
+  if (row.routeCampaignKey === "ld-custom-3") return "LD Custom 3";
   if (row.routeCampaignKey === "ld-general") return "LD General";
   if (row.routeCampaignKey) return row.routeCampaignKey;
   return row.sourceName || null;

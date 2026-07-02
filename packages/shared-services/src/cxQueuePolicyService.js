@@ -288,8 +288,9 @@ function normalizeRouteCampaigns(value) {
         .filter(Boolean),
     ),
   );
-  if (normalized.includes("ld-custom") && !normalized.includes("ld-custom-2")) {
-    normalized.push("ld-custom-2");
+  if (normalized.includes("ld-custom")) {
+    if (!normalized.includes("ld-custom-2")) normalized.push("ld-custom-2");
+    if (!normalized.includes("ld-custom-3")) normalized.push("ld-custom-3");
   }
   return normalized.length > 0 ? normalized : null;
 }
@@ -301,7 +302,8 @@ function normalizeRouteCampaigns(value) {
 // the returned policy object as `routeCampaigns`. Empty / unset = "all"
 // (back-compat for every existing agent). The intake path already
 // stamps `routeCampaignKey` on every LeadCadence (see ROUTE_CAMPAIGNS
-// in inboundIntakeService.js — `ld-custom` and `ld-general` are live),
+// in inboundIntakeService.js — `ld-custom`, `ld-custom-2`, `ld-custom-3`,
+// and `ld-general` are live),
 // so the filter consumer just needs to read the policy field. No
 // schema migration required — cxQueuePolicy is Mixed.
 //

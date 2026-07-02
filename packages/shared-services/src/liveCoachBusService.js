@@ -23,6 +23,7 @@ const {
   buildLiveCoachGuidanceDispatchPlan,
 } = require("./liveCoachBatchGuidanceDispatchService");
 const { createCoachFloorLoop } = require("./coachFloorLoop");
+const { createCoachSoloLoop } = require("./coachSoloLoop");
 const { applyRollingSummaryToSession } = require("./liveCoachRollingSummaryService");
 
 const TERMINAL_SESSION_STATUSES = Object.freeze(["stopped", "stale", "voicemail_rejected", "released"]);
@@ -3149,13 +3150,16 @@ function createLiveCoachBus({
   // lane.dialog.say understand "Read:/Steer:/Try:") from a batch guidance delta,
   // and route it to that agent's own session stream. Delivers ONLY to batch/hybrid
   // agents, never to a terminal session.
+  // Returns true when the dialog was emitted, false on any silent no-op (missing/terminal
+  // session, non-batch mode, empty say) — so the solo loop can record its dedup key ONLY on
+  // confirmed delivery. The floor loop ignores the return value.
   function emitBatchGuidance(dispatch) {
-    if (!dispatch || !dispatch.target || !dispatch.payload) return;
+    if (!dispatch || !dispatch.target || !dispatch.payload) return false;
     const sessionId = String(dispatch.target.sessionId || "");
     const session = sessions.get(sessionId);
-    if (!session || TERMINAL_SESSION_STATUSES.includes(session.status)) return;
+    if (!session || TERMINAL_SESSION_STATUSES.includes(session.status)) return false;
     const mode = sessionRuntimeMode(session).mode;
-    if (mode !== "batch" && mode !== "hybrid") return;
+    if (mode !== "batch" && mode !== "hybrid") return false;
     const payload = dispatch.payload;
     const say = [
       payload.read ? `Read: ${payload.read}` : "",
@@ -3164,7 +3168,7 @@ function createLiveCoachBus({
     ]
       .filter(Boolean)
       .join("\n");
-    if (!say) return;
+    if (!say) return false;
     const dialog = {
       id: payload.id || `batch-${sessionId}-${(session.counters && session.counters.transcript) || 0}`,
       at: new Date().toISOString(),
@@ -3296,6 +3300,45 @@ function createLiveCoachBus({
     if (floorCoachLoop) floorCoachLoop.stop();
   }
 
+  // The COLLAPSED single-call coach (coachSoloLoop): one Sonnet call on the deep "big
+  // prompt" every ~10s, growth-gated. Reuses the SAME batch session routing as the floor
+  // loop (batch/hybrid sessions, applyDeepSteering -> cockpit, emitBatchGuidance -> live
+  // say) — only the loop + transport differ. Dormant unless batchModelRunners.runSolo is set.
+  let soloCoachLoop = null;
+  function startSoloCoach() {
+    const runners = batchModelRunners || {};
+    if (!runners.runSolo) return null; // dormant: no solo transport configured
+    if (soloCoachLoop) {
+      soloCoachLoop.start();
+      return soloCoachLoop;
+    }
+    const cfg = floorCoach || {};
+    soloCoachLoop = createCoachSoloLoop({
+      buildChanges: (input) => buildActiveLiveCoachChangeSet(batchModeSessions(), input),
+      buildBatch: (input) => buildActiveLiveCoachBatch(batchModeSessions(), input),
+      applySteering: applyDeepSteering,
+      emitGuidance: emitBatchGuidance,
+      runSolo: runners.runSolo,
+      reference: cfg.reference || "",
+      batchOptions: cfg.batchOptions || {},
+      soloIntervalMs: cfg.soloIntervalMs || 10000,
+      growthGated: cfg.soloGrowthGated !== false,
+      startInterval: (fn, ms) => {
+        const handle = setInterval(fn, ms);
+        if (handle && typeof handle.unref === "function") handle.unref();
+        return handle;
+      },
+      stopInterval: (handle) => clearInterval(handle),
+      logger,
+    });
+    soloCoachLoop.start();
+    logger?.info?.("live_coach.solo_coach.started", { soloIntervalMs: cfg.soloIntervalMs || 10000 });
+    return soloCoachLoop;
+  }
+  function stopSoloCoach() {
+    if (soloCoachLoop) soloCoachLoop.stop();
+  }
+
   return {
     startSession,
     ensureSession,
@@ -3313,6 +3356,8 @@ function createLiveCoachBus({
     buildBatchGuidanceDispatchPlan,
     startFloorCoach,
     stopFloorCoach,
+    startSoloCoach,
+    stopSoloCoach,
     getSummary,
     getCloseoutStats: () => closeoutWorker?.getStats?.() || null,
     runFixture,

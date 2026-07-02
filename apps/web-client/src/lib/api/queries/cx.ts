@@ -47,7 +47,7 @@ export function useCxWorkspace(domain: string) {
   });
 }
 
-export function useCxCallQueue(domain: string) {
+export function useCxCallQueue(domain: string, enabled = true) {
   return useQuery({
     queryKey: queryKeys.cx.callQueue(domain),
     queryFn: () =>
@@ -56,7 +56,7 @@ export function useCxCallQueue(domain: string) {
           `/api/read/cx/call-queue/${domain}`,
         )
         .then((r) => r.result.items),
-    enabled: Boolean(domain),
+    enabled: Boolean(enabled && domain),
     // Tight polling so queue items popping off / new dial requests
     // landing show up promptly while the operator is on a call.
     // staleTime aligned to refetchInterval so window-focus/remount don't
@@ -68,7 +68,7 @@ export function useCxCallQueue(domain: string) {
   });
 }
 
-export function useCxCallQueueMulti(domains: string[]) {
+export function useCxCallQueueMulti(domains: string[], enabled = true) {
   const normalizedDomains = Array.from(
     new Set(
       (domains || [])
@@ -86,7 +86,7 @@ export function useCxCallQueueMulti(domains: string[]) {
             `/api/read/cx/call-queue/${domain}`,
           )
           .then((r) => r.result.items),
-      enabled: Boolean(domain),
+      enabled: Boolean(enabled && domain),
       staleTime: 1_000,
       refetchInterval: 2_000,
       refetchIntervalInBackground: false,

@@ -26,7 +26,7 @@ const leadSource = require("./cxBulkLoadLeadSourceService");
 const publisher = require("./cxBulkLoadRingcxPublisher");
 const watcher = require("./cxBulkLoadActiveCallWatcher");
 const { createCxBulkLoadOutcomeAdapter, makeOutcomeIdemKey, buildReviewCorrectionRow } = require("./cxBulkLoadOutcomeAdapter");
-const { logCxAlpha } = require("./cxAlphaTraceService");
+const { logCxAlpha, redactCxAlphaPayload } = require("./cxAlphaTraceService");
 const { createCxBulkLoadRuntimeService } = require("./cxBulkLoadRuntimeService");
 const { reduceCxBulkLoadState } = require("./cxBulkLoadStateMachine");
 const { createCxGreenFirstTouchSupplyPlanner } = require("./cxGreenFirstTouchSupplyService");
@@ -83,6 +83,152 @@ function createDispositionTrace(scope) {
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function dispositionProbeBase(session = {}, candidate = {}, extra = {}) {
+  return {
+    rail: "bulk_load",
+    sessionId: session.sessionId || null,
+    agentEmail: session.agentEmail || null,
+    agentExtensionId: session.agentExtensionId || null,
+    cxAgentId: session.cxAgentId || null,
+    accountId: session.ringcx?.accountId || candidate.accountId || candidate.ringcx?.accountId || null,
+    domain: session.domain || candidate.domain || null,
+    queueItemId: String(candidate.queueItemId || candidate.id || candidate._id || "") || null,
+    externId: candidate.externId || candidate.ringcx?.externId || null,
+    uii: normalizeExternalId(candidate.uii) || null,
+    ...extra,
+  };
+}
+
+function logDispositionProbe(event, payload = {}) {
+  try {
+    logCxAlpha(event, redactCxAlphaPayload(payload), { force: true });
+  } catch (_err) {
+    // Diagnostics must never affect call handling.
+  }
+}
+
+function summarizeDispositionProbeActiveCall(call = {}) {
+  if (!call || typeof call !== "object") return null;
+  return redactCxAlphaPayload({
+    uii: normalizeExternalId(call.uii) || null,
+    externalId: normalizeExternalId(call.externalId || call.externId) || null,
+    callState: call.callState || call.state || call.status || null,
+    state: call.state || null,
+    status: call.status || null,
+    direction: call.direction || call.callDirection || null,
+    campaignId: call.campaignId || call.campaign?.id || null,
+    dialGroupId: call.dialGroupId || call.dialGroup?.id || null,
+    ani: call.ani || call.from || call.fromNumber || null,
+    dnis: call.dnis || call.to || call.toNumber || null,
+    phone: call.phone || call.leadPhone || call.destination || null,
+  });
+}
+
+function logDispositionProbeSent({ session = {}, candidate = {}, uii, disposition, outcome, response } = {}) {
+  const normalizedUii = normalizeExternalId(uii);
+  if (!normalizedUii) return;
+  logDispositionProbe("cx.alpha.disposition.probe.sent", dispositionProbeBase(session, candidate, {
+    uii: normalizedUii,
+    outcome,
+    disposition,
+    callback: false,
+    request: { disposition, callback: false },
+    response,
+  }));
+}
+
+async function runPostDispositionHangupProbe(client, { session = {}, candidate = {}, uii, disposition, outcome } = {}) {
+  const normalizedUii = normalizeExternalId(uii);
+  const base = dispositionProbeBase(session, candidate, {
+    uii: normalizedUii,
+    outcome,
+    disposition,
+    callback: false,
+  });
+  if (!client || typeof client.hangupCall !== "function" || !normalizedUii) {
+    const result = { ok: false, executed: false, skipped: true, reason: "hangup-unavailable" };
+    logDispositionProbe("cx.alpha.disposition.probe.post_hangup.skipped", { ...base, ...result });
+    return result;
+  }
+  logDispositionProbe("cx.alpha.disposition.probe.post_hangup.started", {
+    ...base,
+    request: { hangupCall: true },
+  });
+  try {
+    const response = await client.hangupCall(normalizedUii);
+    const ok = response !== false;
+    const result = {
+      ok,
+      executed: true,
+      status: ok ? "accepted" : "returned-false",
+      response,
+    };
+    logDispositionProbe("cx.alpha.disposition.probe.post_hangup.finished", { ...base, ...result });
+    return result;
+  } catch (error) {
+    const alreadyEnded = isAlreadyEndedHangupError(error);
+    const result = {
+      ok: alreadyEnded,
+      executed: true,
+      status: alreadyEnded ? "already-ended" : "error",
+      alreadyEnded,
+      error: error && error.message ? error.message : String(error),
+      httpStatus: error && error.status ? error.status : null,
+    };
+    logDispositionProbe("cx.alpha.disposition.probe.post_hangup.error", { ...base, ...result });
+    return result;
+  }
+}
+
+function scheduleDispositionProbeSnapshots(client, { session = {}, candidate = {}, uii, disposition, outcome, postDispositionHangup = null } = {}) {
+  const normalizedUii = normalizeExternalId(uii);
+  if (!client || typeof client.listActiveCalls !== "function" || !normalizedUii) return;
+  const accountId = session.ringcx?.accountId || candidate.accountId || candidate.ringcx?.accountId || null;
+  const startedAt = Date.now();
+  const base = dispositionProbeBase(session, candidate, {
+    uii: normalizedUii,
+    outcome,
+    disposition,
+    callback: false,
+    postDispositionHangup,
+  });
+
+  for (const delayMs of [0, 1000, 3000, 8000]) {
+    const timer = setTimeout(async () => {
+      try {
+        const payload = await client.listActiveCalls({
+          product: "ACCOUNT",
+          productId: accountId || undefined,
+          maxRows: 100,
+        });
+        const calls = activeCallList(payload);
+        const matches = calls
+          .filter((call) => normalizeExternalId(call?.uii) === normalizedUii)
+          .map(summarizeDispositionProbeActiveCall)
+          .filter(Boolean);
+        logDispositionProbe("cx.alpha.disposition.probe.active_call_snapshot", {
+          ...base,
+          delayMs,
+          elapsedMs: Date.now() - startedAt,
+          activeCallCount: calls.length,
+          matchedUiiCount: matches.length,
+          matchedUiiStillActive: matches.length > 0,
+          matches,
+        });
+      } catch (error) {
+        logDispositionProbe("cx.alpha.disposition.probe.active_call_snapshot_error", {
+          ...base,
+          delayMs,
+          elapsedMs: Date.now() - startedAt,
+          error: error && error.message ? error.message : String(error),
+          status: error && error.status ? error.status : null,
+        });
+      }
+    }, delayMs);
+    if (typeof timer.unref === "function") timer.unref();
+  }
 }
 
 function normalizeEmail(value) {
@@ -309,61 +455,27 @@ function activeCallList(payload) {
   return [];
 }
 
-async function confirmRingcxUiiReleased(client, uii, options = {}) {
-  const normalizedUii = normalizeExternalId(uii);
-  if (!client || typeof client.listActiveCalls !== "function" || !normalizedUii) {
-    return { ok: false, reason: "missing-active-call-verifier" };
-  }
-  const accountId = normalizeExternalId(options.accountId);
-  const waits = Array.isArray(options.waits) && options.waits.length ? options.waits : [250, 600, 900];
-  let lastActiveCall = null;
-  let lastError = null;
-  // Track WHEN each observation happened so a stale early sighting cannot outrank a later
-  // transient error. A still-active determination must rest on the MOST RECENT poll. (#5)
-  let activeSeenAt = -1;
-  let errorSeenAt = -1;
-  for (let index = 0; index < waits.length; index += 1) {
-    const waitMs = Math.max(Number(waits[index]) || 0, 0);
-    if (waitMs > 0) await sleep(waitMs);
-    try {
-      const payload = await client.listActiveCalls({
-        product: "ACCOUNT",
-        productId: accountId || undefined,
-        maxRows: 100,
-      });
-      const match = activeCallList(payload)
-        .find((call) => normalizeExternalId(call?.uii) === normalizedUii);
-      if (!match) {
-        return { ok: true, status: "released", attempts: index + 1 };
-      }
-      lastActiveCall = {
-        uii: normalizeExternalId(match.uii),
-        externalId: normalizeExternalId(match.externalId || match.externId),
-        callState: match.callState || match.state || match.status || null,
-      };
-      activeSeenAt = index;
-    } catch (error) {
-      lastError = error;
-      errorSeenAt = index;
-    }
-  }
-  // Report still-active ONLY when the latest observation was an actual sighting. If the last
-  // thing we saw was a transient error (errorSeenAt > activeSeenAt — covers the throws-only case
-  // where activeSeenAt stays -1), the still-active claim would rest on a stale earlier snapshot;
-  // return verification-failed (inconclusive/retryable) so an already-released call's terminal
-  // outcome is not stranded on a false positive. (#5)
-  if (lastError && errorSeenAt > activeSeenAt) {
-    return {
-      ok: false,
-      reason: "active-call-release-verification-failed",
-      error: lastError.message || String(lastError),
-    };
-  }
-  return {
-    ok: false,
-    reason: "active-call-still-active-after-disposition",
-    activeCall: lastActiveCall,
-  };
+function normalizeBulkTerminalOutcome(value) {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[\s-]+/g, "_");
+}
+
+function isAlreadyEndedHangupError(error) {
+  if (!error) return false;
+  const status = Number(error.status || error.details?.responseStatus || 0);
+  if (status === 404 || status === 410) return true;
+  const responseBody = error.details?.responseBody;
+  const haystack = [
+    error.message,
+    typeof responseBody === "string" ? responseBody : "",
+    responseBody && typeof responseBody === "object" ? JSON.stringify(responseBody) : "",
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+  return /already\s+(ended|complete|completed|disconnected)|no\s+active\s+call|active\s+call\s+not\s+found|call\s+not\s+found|cannot\s+find\s+call/.test(haystack);
 }
 
 async function resolveBulkManualDialContext(session = {}) {
@@ -822,29 +934,36 @@ function getService() {
       const queueItemId = normalizeExternalId(candidate.queueItemId || candidate.id || candidate._id);
       if (!queueItemId) return null;
       const now = new Date();
-      // M11 gate 5: ownership-guarded serving stamp. Only a row THIS session still holds
-      // (claimed/serving + matching reservationSessionId) may be moved to `serving`. A miss
-      // (null return) is the signal the runtime uses to NOT promote the lead to `current`.
+      // M11 gate 5: dead-simple ownership. The watcher may only promote rows this session
+      // explicitly reserved. Missing reservation is a data/load bug, not an alternate path.
+      const servingPatch = {
+        state: "serving",
+        claimUntil: null,
+        lastClaimedAt: now,
+        "assignment.extensionId": session.agentExtensionId || null,
+        "assignment.agentName": session.agentEmail || null,
+        "assignment.assignedAt": now,
+        "assignment.queueFamilySnapshot": candidate.queueFamily || null,
+        "metadata.reservationSessionId": session.sessionId || null,
+        "metadata.reservationRail": "bulk_load",
+        "metadata.bulkLoadSessionId": session.sessionId || null,
+        "metadata.bulkLoadActiveAt": now,
+        "metadata.bulkLoadRuntime": "bulk_load",
+        "metadata.servingAt": now,
+        "metadata.lastDialExecutionUii": uii || null,
+        "metadata.lastQueueAttemptUii": uii || null,
+        "metadata.lastDialExecutionSource": "cx-bulk-load",
+        "metadata.lastDialIntentStatus": "active",
+        "metadata.lastQueueAttemptHeldForDisposition": true,
+        "metadata.wrapUpRequired": true,
+        "metadata.wrapUpReason": "bulk-load-active-call",
+        "metadata.lastRingcxActiveCall": activeCallSummary || null,
+        "metadata.lastRingcxMatchReasons": Array.isArray(matchReasons) ? matchReasons : [],
+      };
       return cxDialQueueRepository.transitionQueueItemState(
         queueItemId,
         ["claimed", "serving"],
-        {
-          state: "serving",
-          claimUntil: null,
-          "metadata.bulkLoadSessionId": session.sessionId || null,
-          "metadata.bulkLoadActiveAt": now,
-          "metadata.bulkLoadRuntime": "bulk_load",
-          "metadata.servingAt": now,
-          "metadata.lastDialExecutionUii": uii || null,
-          "metadata.lastQueueAttemptUii": uii || null,
-          "metadata.lastDialExecutionSource": "cx-bulk-load",
-          "metadata.lastDialIntentStatus": "active",
-          "metadata.lastQueueAttemptHeldForDisposition": true,
-          "metadata.wrapUpRequired": true,
-          "metadata.wrapUpReason": "bulk-load-active-call",
-          "metadata.lastRingcxActiveCall": activeCallSummary || null,
-          "metadata.lastRingcxMatchReasons": Array.isArray(matchReasons) ? matchReasons : [],
-        },
+        servingPatch,
         { match: { "metadata.reservationSessionId": session.sessionId } },
       );
     },
@@ -979,6 +1098,11 @@ function getService() {
             dispositionStatus: result.dispositionStatus || (result.ok === true ? "accepted" : (result.reason || "unknown")),
             releaseStatus: result.releaseStatus || null,
             releaseAttempts: result.releaseAttempts != null ? result.releaseAttempts : null,
+            postDispositionHangupOk: result.postDispositionHangup
+              ? result.postDispositionHangup.ok === true
+              : null,
+            postDispositionHangupStatus: result.postDispositionHangup?.status || null,
+            postDispositionHangupError: result.postDispositionHangup?.error || null,
             reason: result.reason || null,
             error: result.error || null,
           });
@@ -997,6 +1121,7 @@ function getService() {
         });
         const ok = response !== false;
         _step("dispositionCall DONE", { ok, response: ok ? "accepted" : response });
+        logDispositionProbeSent({ session, candidate, uii, disposition, outcome, response });
         if (!ok) {
           return traceDisposition({
             ok: false,
@@ -1007,6 +1132,23 @@ function getService() {
             response,
           });
         }
+        _step("post-disposition hangup START");
+        const postDispositionHangup = await runPostDispositionHangupProbe(client, {
+          session,
+          candidate,
+          uii,
+          disposition,
+          outcome,
+        });
+        _step("post-disposition hangup DONE", postDispositionHangup);
+        scheduleDispositionProbeSnapshots(client, {
+          session,
+          candidate,
+          uii,
+          disposition,
+          outcome,
+          postDispositionHangup,
+        });
         if (agentLifecycleAdapter && typeof agentLifecycleAdapter.pauseProgressiveDialing === "function") {
           agentLifecycleAdapter
             .pauseProgressiveDialing({
@@ -1023,31 +1165,13 @@ function getService() {
               });
             });
         }
-        const release = await confirmRingcxUiiReleased(client, uii, {
-          accountId: session.ringcx?.accountId || candidate.accountId || candidate.ringcx?.accountId,
-        });
-        _step("release verification DONE", release);
-        if (!release.ok) {
-          return traceDisposition({
-            ok: false,
-            executed: true,
-            disposition,
-            uii,
-            dispositionStatus: "accepted-but-still-active",
-            reason: release.reason || "active-call-release-unconfirmed",
-            activeCall: release.activeCall || null,
-            error: release.error || null,
-            response,
-          });
-        }
         return traceDisposition({
           ok: true,
           executed: true,
           disposition,
           uii,
           dispositionStatus: "accepted",
-          releaseStatus: release.status,
-          releaseAttempts: release.attempts,
+          postDispositionHangup,
           response,
         });
       } catch (error) {
@@ -1055,6 +1179,15 @@ function getService() {
           status: error && error.status,
           message: error && error.message ? error.message : String(error),
         });
+        logDispositionProbe("cx.alpha.disposition.probe.error", dispositionProbeBase(session, candidate, {
+          uii,
+          outcome,
+          disposition,
+          callback: false,
+          request: { disposition, callback: false },
+          error: error && error.message ? error.message : String(error),
+          status: error && error.status ? error.status : null,
+        }));
         return traceDisposition({
           ok: false,
           executed: false,
@@ -1166,6 +1299,7 @@ function getService() {
       queueRepository: cxDialQueueRepository,
       cutoffHour: readIntegerEnv("CX_GREEN_FIRST_TOUCH_CUTOFF_HOUR", 7, 0, 23),
       cutoffMinute: readIntegerEnv("CX_GREEN_FIRST_TOUCH_CUTOFF_MINUTE", 45, 0, 59),
+      firstTouchMaxAttempts: readIntegerEnv("CX_GREEN_FIRST_TOUCH_MAX_ATTEMPTS", 1, 1, 10),
     }),
     contactEligibilityAdapter: {
       async resolve({ domain, caseId } = {}) {
@@ -1633,7 +1767,6 @@ module.exports = {
   killCxBulkLoadSession,
   _test: {
     bulkOutcomeDisposition,
-    confirmRingcxUiiReleased,
     pauseRingcxProgressiveDialing,
     resumeRingcxProgressiveDialing,
     isBulkLoginOffhook,

@@ -23,21 +23,17 @@ const VENDOR_FAMILY_DEFS = Object.freeze([
     matches: (source, channel) =>
       channel === "affiliate" || source.includes("affiliate"),
   },
-  // LD CUSTOM — checked FIRST so it wins when routeCampaignKey is set.
-  // The ld-posting fallback below catches legacy rows with no route
-  // campaign key. ld-custom / ld-general distinction comes from the
-  // `routeCampaignKey` field on CallLog (mirrored from LeadCadence at
-  // intake — VFD/GS03RB7W → ld-custom, JM8K5B7Y → ld-general). The
-  // matcher only fires when routeCampaignKey is plumbed through; the
-  // classifier wrapper that calls into this list passes the campaign
-  // key as a third argument.
+  // LD split families are checked before the ld-posting fallback. Custom 3
+  // is first so labels like "LD Custom 3" do not collapse into plain Custom.
   {
-    key: "ld-custom",
-    label: "LD CUSTOM",
+    key: "ld-custom-3",
+    label: "LD CUSTOM 3",
     matches: (source, channel, routeCampaignKey) =>
-      routeCampaignKey === "ld-custom" ||
-      source === "ld custom" ||
-      (source.includes("ld custom") && !source.includes("ld custom 2")),
+      routeCampaignKey === "ld-custom-3" ||
+      source === "ld custom 3" ||
+      source.includes("ld custom 3") ||
+      source.includes("ld custom3") ||
+      source.includes("ldcustom3"),
   },
   {
     key: "ld-custom-2",
@@ -45,7 +41,19 @@ const VENDOR_FAMILY_DEFS = Object.freeze([
     matches: (source, channel, routeCampaignKey) =>
       routeCampaignKey === "ld-custom-2" ||
       source === "ld custom 2" ||
-      source.includes("ld custom 2"),
+      source.includes("ld custom 2") ||
+      source.includes("ld custom2") ||
+      source.includes("ldcustom2"),
+  },
+  {
+    key: "ld-custom",
+    label: "LD CUSTOM",
+    matches: (source, channel, routeCampaignKey) =>
+      routeCampaignKey === "ld-custom" ||
+      source === "ld custom" ||
+      (source.includes("ld custom") &&
+        !source.includes("ld custom 2") &&
+        !source.includes("ld custom 3")),
   },
   {
     key: "ld-general",
@@ -120,6 +128,7 @@ const VENDOR_FAMILY_DEFS = Object.freeze([
 const TRACKED_VENDOR_FAMILIES = new Set([
   "ld-custom",
   "ld-custom-2",
+  "ld-custom-3",
   "ld-general",
   "ld-posting",
   "affiliate",
@@ -610,7 +619,7 @@ async function buildVendorDailySummary(domain, options = {}) {
     addMetrics(ensureFamilyRow(byFamily, source, channel, routeCampaignKey), patch);
   }
 
-  for (const familyKey of ["ld-custom", "ld-custom-2", "ld-general", "ld-posting"]) {
+  for (const familyKey of ["ld-custom", "ld-custom-2", "ld-custom-3", "ld-general", "ld-posting"]) {
     ensureFamilyRowByKey(byFamily, familyKey);
   }
 

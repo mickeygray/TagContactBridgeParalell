@@ -5,6 +5,7 @@ const assert = require("node:assert/strict");
 
 const {
   buildExternId,
+  buildExternSessionToken,
   isQueueRowContactable,
   normalizeQueueRows,
   excludeSessionCandidates,
@@ -13,9 +14,11 @@ const {
 
 // ── buildExternId ───────────────────────────────────────────────────────
 test("buildExternId is deterministic, tenant-disjoint, and null without a queueItemId", () => {
+  assert.equal(buildExternSessionToken("cxbl-ac467317-1208-4304-9303-0a763e1db836"), "0a763e1db836");
+  assert.equal(buildExternId({ domain: "TAG", queueItemId: "q1", sessionId: "cxbl-ac467317-1208-4304-9303-0a763e1db836" }), "cxbl-tag-0a763e1db836-q1");
+  assert.equal(buildExternId({ domain: "WYNN", queueItemId: "q1", sessionId: "cxbl-ac467317-1208-4304-9303-0a763e1db836" }), "cxbl-wynn-0a763e1db836-q1");
+  assert.equal(buildExternId({ domain: "TAG", queueItemId: "q1", sessionId: "s1" }), buildExternId({ domain: "TAG", queueItemId: "q1", sessionId: "s1" }));
   assert.equal(buildExternId({ domain: "TAG", queueItemId: "q1" }), "cxbl-tag-q1");
-  assert.equal(buildExternId({ domain: "WYNN", queueItemId: "q1" }), "cxbl-wynn-q1");
-  assert.equal(buildExternId({ domain: "TAG", queueItemId: "q1" }), buildExternId({ domain: "TAG", queueItemId: "q1" }));
   assert.equal(buildExternId({ domain: "TAG" }), null);
 });
 

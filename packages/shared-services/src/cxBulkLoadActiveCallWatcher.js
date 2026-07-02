@@ -38,6 +38,10 @@ function normalizeActiveCall(raw = {}) {
     dnis: str(raw.dnis || raw.dnisE164) || null,
     ani: str(raw.ani || raw.aniE164) || null,
     agentId: str(raw.agentId || raw.username) || null,
+    // CORROBORATION ONLY: carried onto metadata.lastRingcxActiveCall at serving time so the
+    // stale-serving diagnostic has a dequeue stamp for bulk shells (the legacy monitor field it also
+    // reads is never written on the bulk path). NEVER used for matching — purely informational.
+    dequeueTime: raw.dequeueTime != null ? raw.dequeueTime : null,
   };
 }
 
@@ -183,12 +187,26 @@ function deriveCurrentRelease({ current = null, prevActiveCalls = [], activeCall
   const previous = (Array.isArray(prevActiveCalls) ? prevActiveCalls : [])
     .map(normalizeActiveCall)
     .find((call) => call.externId === ext && call.uii);
-  if (!previous) return null;
+  const currentUii = str(current.uii);
+  const releaseFromCurrentProof = !previous && currentUii && nowActive.size === 0;
+  if (!previous && !releaseFromCurrentProof) return null;
+
+  // A promoted current already carries RingCX proof. If the watcher was held
+  // during disposition and the prev-active cache is lost, do not strand it once
+  // no other session call is visible for the normal switch path to promote.
+  const fallbackSummary = currentUii
+    ? normalizeActiveCall({
+        ...(current.activeCallSummary || {}),
+        externalId: ext,
+        externId: ext,
+        uii: currentUii,
+      })
+    : null;
 
   return {
     ...current,
-    uii: current.uii || previous.uii || null,
-    activeCallSummary: previous,
+    uii: currentUii || previous.uii || null,
+    activeCallSummary: previous || fallbackSummary,
   };
 }
 

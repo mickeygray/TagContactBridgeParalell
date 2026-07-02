@@ -40,6 +40,185 @@ RingCX Workflow Studio URL            -> grpc://bethel-twee-agonisedly.ngrok-fre
 | Alpha aggregate | `runtime\alpha-test-monitor\alpha-test-monitor-*.jsonl` | One timeline for ports, health, ngrok, and new gRPC events |
 | Legacy/live reference | Live service logs on Linux plus Mongo records | Confirms whether a bug is new alpha behavior or existing live behavior |
 
+## Alpha Test Regimen
+
+Use this order before calling an alpha block "done." Do not skip ahead after a failure; fix or intentionally defer the failed layer first.
+
+### Phase 0: Preflight, No Dialing
+
+Goal: prove the test environment is pointed at the right services before an agent touches RingCX.
+
+1. Start the local app stack.
+2. Start the alpha monitor.
+3. Confirm ports, ngrok routes, and health checks in section 1.
+4. Confirm AI/coach intended state: on, intentionally off, or blocked by credits.
+5. Confirm test agent, domain, campaign, and mode are the expected ones.
+6. Confirm live forward hooks are disabled unless that specific test is planned.
+
+Done when:
+
+- `tag-webhook` routes to the app, `bethel` routes to gRPC only when coach is being tested, and no required local port is down.
+- The alpha monitor is writing JSONL.
+
+### Phase 1: Login And Empty Workspace Smoke
+
+Goal: prove the client can load the right rail without stale state.
+
+1. Log in as the chosen test agent.
+2. Confirm the selected workspace/mode is the one being tested.
+3. Confirm the middle card is blank unless RingCX truly has an active call.
+4. Confirm queue/session reads return `200`.
+5. Confirm no stale last lead from legacy/live appears in the middle card.
+
+Done when:
+
+- Workspace data, agent identity, domain, and mode all match.
+- No active-call UI is shown without current RingCX proof.
+
+### Phase 2: Queue Build And Upload
+
+Goal: prove the local queue and RingCX queue are made from the intended pool only.
+
+1. Build the test queue from the intended source pool.
+2. Verify client/prospect filters before upload.
+3. Upload using the intended strategy: one-at-a-time accepted upload for ordered preload, or the configured bulk path.
+4. Confirm every accepted RingCX row maps back to local `caseId`, `leadCadenceId`, `externId/actionKey`, phone, campaign, and agent/session identity.
+5. Confirm test rows did not leak to other agents and real rows did not leak into the test agent unexpectedly.
+
+Done when:
+
+- RingCX accepted evidence exists for the active buffer.
+- The app queue and RingCX accepted rows are reconcilable without phone-only guessing.
+
+### Phase 3: First Active Call Projection
+
+Goal: prove RingCX owns current-call truth and the app follows it.
+
+1. Put the agent in the correct RingCX state for the campaign.
+2. Wait for the first active call from RingCX.
+3. Confirm the watcher projects that call into the middle card.
+4. Confirm the visible middle card matches the RingCX active UII and local queue identity.
+5. Confirm buttons render only after the call is confirmed.
+
+Done when:
+
+- The first active call appears in the middle card without manual client refresh.
+- The queue removes or marks only the row that RingCX actually dialed.
+
+### Phase 4: Button And Terminal Command Pass
+
+Goal: prove each button sends the correct terminal command without prematurely ejecting the current card.
+
+Run each outcome with a fresh current UII when possible:
+
+1. No Answer.
+2. Voicemail.
+3. Answered.
+4. DNC.
+5. Appointment / call wrap, if enabled for the test.
+
+For each button:
+
+1. Capture the pre-click UII and visible lead.
+2. Click the button once.
+3. Confirm the button route returns a structured result.
+4. Confirm RingCX receives the intended disposition/terminal command.
+5. Confirm the middle card stays visible until RingCX advances or a deliberate hold/wrap state owns the screen.
+6. Confirm the terminal/outbox path records the outcome once.
+
+Done when:
+
+- Every tested button maps to the expected RingCX disposition.
+- No button writes to the wrong UII, wrong case, or wrong agent.
+- No button click alone clears the middle card before RingCX current-call proof changes.
+
+### Phase 5: Auto-Advance And Hang-Up Handling
+
+Goal: prove calls that advance without a usable button window still get captured.
+
+1. Let at least one RingCX auto-advance happen without clicking a terminal button.
+2. Confirm the watcher sees the released UII and next UII.
+3. Confirm the released call enters terminal buffer/drain with UII evidence.
+4. Confirm the default outcome is safe and correct for cadence when no manual outcome was captured.
+5. Confirm any post-call correction surface, if enabled, does not block the next call loop.
+
+Done when:
+
+- Auto-advanced calls do not disappear from counting.
+- The next current call appears quickly and correctly.
+- No live watcher path performs expensive Logics or grading work.
+
+### Phase 6: Refill And Pool Integrity
+
+Goal: prove the queue can run past the initial batch.
+
+1. Dial down to the refill threshold.
+2. Confirm exactly one refill starts.
+3. Confirm refill pulls from the intended pool/family order.
+4. Confirm accepted rows append to the pending buffer only after RingCX acceptance.
+5. Confirm the current call does not flicker or reset during refill.
+
+Done when:
+
+- Pending buffer returns to target size or records a clear `refill-empty`/shortage reason.
+- No duplicate refill loop runs while one refill is already in flight.
+- Client/prospect/test-leak filters still hold after refill.
+
+### Phase 7: Drain, Cadence, And Logics Persistence
+
+Goal: prove the non-latency-critical writes catch up without corrupting live call flow.
+
+1. Inspect terminal/outbox rows for every completed test UII.
+2. Confirm cadence/contact counts update once per UII.
+3. Confirm no duplicate drain/event writes count the same call twice.
+4. Confirm DNC and appointment paths create the required Logics-side work or retryable records.
+5. Confirm communication/call-summary records persist where the grader and contact view can read them.
+
+Done when:
+
+- Every completed UII has one durable terminal outcome or one explicit deferred-review record.
+- Cadence and communication records match the observed calls.
+
+### Phase 8: Coach And gRPC, If In Scope
+
+Goal: prove transport and model behavior separately.
+
+1. Run the gRPC smoke test.
+2. Confirm real RingCX streams create `stream.start`, `dialogInit`, media, and `stream.end`.
+3. Confirm UII binding reaches the coach data object.
+4. If AI is on, confirm transcript/summary/guidance events reach the agent UI.
+5. If AI is off, record that coach/STT was intentionally excluded from the pass.
+
+Done when:
+
+- Transport works independently of AI model availability.
+- Coach results, when enabled, return to the correct agent/call identity.
+
+### Phase 9: Multi-Agent Mini Scale
+
+Goal: prove the system remains coherent with more than one active agent.
+
+1. Run two agents at once before any floor-wide attempt.
+2. Confirm account-level active-call polling does not multiply into one RingCX read per agent.
+3. Confirm each active UII maps to only one agent/session.
+4. Confirm one agent's busy/wrap/appointment state does not pause every other agent.
+5. Confirm refill and drain work independently per session.
+
+Done when:
+
+- No cross-agent lead, UII, queue, or terminal writes are observed.
+- Polling remains stable with no active-call `429` pattern.
+
+### Phase 10: Done Decision
+
+Call the test block done only when:
+
+- Sections 1 through 8 are pass or intentionally not in scope.
+- Any section marked "continue but flag" has an owner and next action.
+- There are no stop-test issues from section 12.
+- The Daily Verdict Template is filled in with exact log files and timestamps.
+- Test tunnels/processes are shut down or explicitly left running for the next block.
+
 ## 1. Stack And Tunnel Readiness
 
 Thumbs up:

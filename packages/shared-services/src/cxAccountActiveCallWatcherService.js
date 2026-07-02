@@ -124,6 +124,19 @@ function candidateExternId(candidate = {}) {
   return str(candidate.externId || candidate.ringcx?.externId);
 }
 
+function compactCandidate(candidate = {}) {
+  if (!candidate || typeof candidate !== "object") return null;
+  return {
+    queueItemId: queueItemKey(candidate) || null,
+    externId: candidateExternId(candidate) || null,
+    caseId: candidate.caseId || null,
+    name: str(candidate.name) || null,
+    status: candidate.status || candidate.phase || null,
+    uii: str(candidate.uii) || null,
+    queueFamily: candidate.queueFamily || null,
+  };
+}
+
 function findManualStartedActiveCall(current = null, compactCalls = []) {
   if (!current || current.uii || current.manualStartPending !== true) return null;
   const targetPhone = normalizePhoneDigits(current.phone);
@@ -267,6 +280,20 @@ function projectBulkSessionFromAccountSnapshot(session = {}, activeCalls = [], o
       terminalObservations,
       currentPromotion: null,
     }, at);
+    traceWatcher("cx.alpha.watch.match_diagnostic", {
+      sessionId: session.sessionId || null,
+      agentEmail: session.agentEmail || null,
+      agentExtensionId: session.agentExtensionId || null,
+      accountId,
+      activeCalls: compactCalls,
+      relevantActiveCalls: relevantCalls,
+      candidatePool: pool.map(compactCandidate).filter(Boolean),
+      current: compactCandidate(next.current),
+      matchStatus: "held-review",
+      transitionKind: "held-review",
+      reviewHoldUntil: next.reviewHoldUntil || null,
+      currentReleased: Boolean(currentReleased),
+    });
 
     return {
       rail: "bulk_load",
@@ -344,6 +371,24 @@ function projectBulkSessionFromAccountSnapshot(session = {}, activeCalls = [], o
     terminalObservations,
     currentPromotion,
   }, at);
+  traceWatcher("cx.alpha.watch.match_diagnostic", {
+    sessionId: session.sessionId || null,
+    agentEmail: session.agentEmail || null,
+    agentExtensionId: session.agentExtensionId || null,
+    accountId,
+    activeCalls: compactCalls,
+    relevantActiveCalls: relevantCalls,
+    candidatePool: candidatePool(next, externalCandidates).map(compactCandidate).filter(Boolean),
+    current: compactCandidate(next.current),
+    matchStatus: match.status || "unknown",
+    matchReason: match.reason || null,
+    matchedCandidate: compactCandidate(match.candidate),
+    matchedActiveCall: match.activeCall || null,
+    transitionKind: transition.kind || "none",
+    transitionReason: transition.reason || null,
+    currentReleased: Boolean(currentReleased),
+    currentPromotion,
+  });
 
   return {
     rail: "bulk_load",

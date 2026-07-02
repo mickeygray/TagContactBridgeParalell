@@ -185,6 +185,7 @@ function buildMorningCoverageSupplyPlan(input = {}) {
       (normalizeCount(debt.queued) + normalizeCount(debt.missingQueueRows)),
   );
   const target = normalizeCount(input.target || input.deficit || remaining);
+  const firstTouchMaxAttempts = Math.max(Number(input.firstTouchMaxAttempts) || 1, 1);
   if (remaining <= 0 || target <= 0) {
     return buildNormalSupplyPlan({
       batchId,
@@ -203,6 +204,7 @@ function buildMorningCoverageSupplyPlan(input = {}) {
     claimFilter: {
       firstTouchOnly: true,
       greenCoverageBatchId: batchId || null,
+      firstTouchMaxAttempts,
     },
     counts: { ...debt, remaining },
     reason: "morning-coverage-open",
@@ -233,6 +235,7 @@ function createCxGreenFirstTouchSupplyPlanner({
   queueRepository = null,
   cutoffHour = DEFAULT_CUTOFF_HOUR,
   cutoffMinute = DEFAULT_CUTOFF_MINUTE,
+  firstTouchMaxAttempts = 1,
   now = () => new Date(),
   logger = console,
 } = {}) {
@@ -270,6 +273,7 @@ function createCxGreenFirstTouchSupplyPlanner({
         rcxAccountId: ringcx.accountId || input.rcxAccountId || null,
         rcxCampaignId: ringcx.campaignId || input.rcxCampaignId || null,
         rcxDialGroupId: ringcx.dialGroupId || input.rcxDialGroupId || null,
+        firstTouchMaxAttempts,
         now: asOf,
       });
       const debt = summarizeMorningCoverageDebt({
@@ -286,6 +290,7 @@ function createCxGreenFirstTouchSupplyPlanner({
           debt,
           deficit: input.deficit,
           normalFamilyTargets,
+          firstTouchMaxAttempts,
         }),
         cutoffAt: window.cutoffAt,
         windowStartAt: window.windowStartAt,

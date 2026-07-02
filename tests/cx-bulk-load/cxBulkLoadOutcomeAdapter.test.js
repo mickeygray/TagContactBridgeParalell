@@ -5,6 +5,8 @@ const assert = require("node:assert/strict");
 
 const {
   makeOutcomeIdemKey,
+  buildTerminalEvidenceKeys,
+  buildReviewCorrectionRow,
   buildCadenceEvent,
   createCxBulkLoadOutcomeAdapter,
 } = require("../../packages/shared-services/src/cxBulkLoadOutcomeAdapter");
@@ -177,4 +179,79 @@ test("different leads in the same session each write once", async () => {
 
 test("factory rejects missing effects", () => {
   assert.throws(() => createCxBulkLoadOutcomeAdapter({}), /requires recordCadenceEvent/);
+});
+
+// ── #12: buildTerminalEvidenceKeys (read-side) reproduces every writer idemKey shape ──
+test("#12 buildTerminalEvidenceKeys matches the no-UII terminal key a skip/manual-reset writes", () => {
+  // The writer keys a no-UII terminal (skip / kill-manual-reset on a current with no live call) as
+  // `${sessionId}:${queueItemId}:terminal`. The reconciler sees the queue row carrying the
+  // reservationSessionId — the evidence set MUST include that exact key or the lead gets re-dialed.
+  const written = makeOutcomeIdemKey({ sessionId: "S1", queueItemId: "Q1", uii: null, eventType: "terminal" });
+  assert.equal(written, "S1:Q1:terminal");
+  const row = { _id: "Q1", metadata: { reservationSessionId: "S1" } }; // no uii anywhere
+  assert.ok(buildTerminalEvidenceKeys(row).includes(written), "no-UII terminal key must be reproduced");
+});
+
+test("#12 buildTerminalEvidenceKeys matches the no-qid UII key shape (no _id on the row)", () => {
+  // The writer's no-qid-with-UII shape is `${sessionId}:uii:${uii}`. A row whose only call identity
+  // is metadata.lastQueueAttemptUii (and which has no _id) must still match — the old early-return
+  // on a missing queueItemId returned [] and missed it.
+  const written = makeOutcomeIdemKey({ sessionId: "S1", queueItemId: null, uii: "U9", eventType: "terminal" });
+  assert.equal(written, "S1:uii:U9");
+  const row = { metadata: { reservationSessionId: "S1", lastQueueAttemptUii: "U9" } };
+  assert.ok(buildTerminalEvidenceKeys(row).includes(written), "no-qid UII key must be reproduced");
+});
+
+test("#12 buildTerminalEvidenceKeys reproduces the UII-bearing key and the no-UII fallback together", () => {
+  const row = { _id: "Q1", uii: "U1", caseId: 42, metadata: { reservationSessionId: "S1" } };
+  const keys = buildTerminalEvidenceKeys(row);
+  assert.ok(keys.includes(makeOutcomeIdemKey({ sessionId: "S1", queueItemId: "Q1", uii: "U1" })), "Q1:U1");
+  assert.ok(keys.includes(makeOutcomeIdemKey({ sessionId: "S1", queueItemId: "Q1", uii: null })), "no-UII fallback");
+});
+
+test("#12 buildTerminalEvidenceKeys never emits a degenerate session-only key", () => {
+  // No queueItemId, no caseId, no UII, no session -> there is nothing specific to prove terminal
+  // evidence, so the set is empty (returning a broad key would force-complete an unrelated lead).
+  assert.deepEqual(buildTerminalEvidenceKeys({}), []);
+  assert.deepEqual(buildTerminalEvidenceKeys({ metadata: { reservationSessionId: "S1" } }), []);
+});
+
+// ── #4: buildReviewCorrectionRow (rectification lane — a NEW row, not a terminal-row mutation) ──
+test("#4 buildReviewCorrectionRow keys the DNC correction DISTINCTLY from the original terminal row", () => {
+  const terminalKey = makeOutcomeIdemKey({ sessionId: "S1", queueItemId: "Q1", uii: "U1", eventType: "terminal" });
+  const row = buildReviewCorrectionRow({ sessionId: "S1", queueItemId: "Q1", uii: "U1", at: "2026-06-29T00:00:00.000Z" });
+  assert.equal(row.idemKey, "Q1:U1:review-dnc");
+  assert.notEqual(row.idemKey, terminalKey, "must not collide with the terminal row's idemKey");
+  assert.equal(row.outcome, "dnc");
+  assert.equal(row.payload.outcome, "dnc");
+  assert.equal(row.rail, "bulk_load");
+});
+
+test("#4 buildReviewCorrectionRow copies case context from the original terminal row and flips outcome to dnc", () => {
+  const original = {
+    domain: "TAG",
+    caseId: 4242,
+    externId: "cxbl-tag-q1",
+    agentEmail: "sean@x.com",
+    payload: { queueItemId: "Q1", uii: "U1", domain: "TAG", caseId: 4242, externId: "cxbl-tag-q1", outcome: "did_not_connect", agentEmail: "sean@x.com", at: "2026-06-29T00:00:00.000Z" },
+  };
+  const row = buildReviewCorrectionRow({ sessionId: "S1", queueItemId: "Q1", uii: "U1", original, at: "2026-06-29T01:00:00.000Z" });
+  assert.equal(row.caseId, 4242, "caseId carried so the drain routes the DNC to Logics");
+  assert.equal(row.domain, "TAG");
+  assert.equal(row.payload.outcome, "dnc", "the replayed payload outcome is dnc, not the stale did_not_connect");
+  assert.equal(row.payload.caseId, 4242);
+  assert.equal(row.payload.reviewSource, "agent-auto-review");
+  assert.equal(row.source, "agent-auto-review");
+});
+
+test("#4 buildReviewCorrectionRow falls back to a minimal payload when no original row exists", () => {
+  const row = buildReviewCorrectionRow({
+    sessionId: "S1", queueItemId: "Q1", uii: "U1", domain: "WYNN", caseId: 77, agentEmail: "a@x.com",
+    at: "2026-06-29T00:00:00.000Z",
+  });
+  assert.equal(row.idemKey, "Q1:U1:review-dnc");
+  assert.equal(row.domain, "WYNN");
+  assert.equal(row.caseId, 77);
+  assert.equal(row.payload.outcome, "dnc");
+  assert.equal(row.payload.agentEmail, "a@x.com");
 });

@@ -7,6 +7,7 @@ const {
   createCxBulkLoadRuntimeService,
   familyRefillTargets,
   DEFAULT_TARGET_BUFFER,
+  sanitizeSession,
 } = require("../../packages/shared-services/src/cxBulkLoadRuntimeService");
 const { reduceCxBulkLoadState } = require("../../packages/shared-services/src/cxBulkLoadStateMachine");
 const watcher = require("../../packages/shared-services/src/cxBulkLoadActiveCallWatcher");
@@ -96,8 +97,10 @@ function makeOutcomeAdapter() {
 function makeReservation(pool) {
   const rows = pool.map((r) => ({ ...r }));
   const released = [];
+  const cancelled = [];
   const reserves = [];
   return {
+    cancelled,
     released,
     reserves,
     async reserveFromFamilyOrder(args = {}) {
@@ -108,6 +111,9 @@ function makeReservation(pool) {
     },
     async releaseReserved(items = []) {
       for (const it of items) { released.push(it._id); rows.unshift(it); }
+    },
+    async cancelReserved(items = []) {
+      for (const it of items) { cancelled.push(it._id); }
     },
   };
 }
@@ -141,7 +147,7 @@ function rangeRows(prefix, family, start, count) {
 
 function bufferCandidate(queueItemId, family, ordinal, patch = {}) {
   const row = mickeyRow(queueItemId, family, ordinal);
-  const externId = `cxbl-tag-${row._id}`.toLowerCase();
+  const externId = externFor(row._id);
   return {
     queueItemId: row._id,
     domain: row.domain,
@@ -154,10 +160,14 @@ function bufferCandidate(queueItemId, family, ordinal, patch = {}) {
   };
 }
 
+function externFor(queueItemId, sessionId = "s1", domain = "TAG") {
+  return leadSource.buildExternId({ domain, queueItemId, sessionId });
+}
+
 function build(liveCalls, overrides = {}) {
-  const repo = makeRepo();
+  const repo = overrides.repo || makeRepo();
   const client = makeClient(liveCalls);
-  const outcomeAdapter = makeOutcomeAdapter();
+  const outcomeAdapter = overrides.outcomeAdapter || makeOutcomeAdapter();
   const reservation = makeReservation(overrides.reservationPool || ROWS);
   const svc = createCxBulkLoadRuntimeService({
     repo,
@@ -169,6 +179,7 @@ function build(liveCalls, overrides = {}) {
     ...(overrides.queueStateAdapter ? { queueStateAdapter: overrides.queueStateAdapter } : {}),
     ...(overrides.manualDialer ? { manualDialer: overrides.manualDialer } : {}),
     ...(overrides.leadStarter ? { leadStarter: overrides.leadStarter } : {}),
+    ...(overrides.greenFirstTouchPlanner ? { greenFirstTouchPlanner: overrides.greenFirstTouchPlanner } : {}),
     ...(overrides.contactEligibilityAdapter ? { contactEligibilityAdapter: overrides.contactEligibilityAdapter } : {}),
     terminalExecutor: overrides.terminalExecutor || (async ({ candidate, outcome }) => {
       try {
@@ -183,7 +194,7 @@ function build(liveCalls, overrides = {}) {
     listReadyQueueItems: overrides.listReadyQueueItems || (async () => ROWS), // still a required dep; fillBuffer no longer reads it (M4)
     reduce: reduceCxBulkLoadState,
     now: () => NOW,
-    newSessionId: () => "s1",
+    newSessionId: overrides.newSessionId || (() => "s1"),
   });
   return { svc, repo, client, outcomeAdapter, reservation };
 }
@@ -235,6 +246,7 @@ test("reserved rows blocked by contact eligibility are not published to RingCX",
   assert.equal(snap.stats.failedPublishCount, 1);
   assert.equal(snap.lastError, "blocked-stage");
   assert.deepEqual(reservation.released, [], "adapter-enforced blocked rows are not re-released to ready");
+  assert.deepEqual(reservation.cancelled, ["q1"], "adapter-enforced blocked rows are terminalized out of the queue");
 });
 
 test("M11 gate 8: the canonical default target buffer is 35", () => {
@@ -266,7 +278,7 @@ test("M11 gate 8: an empty buffer yields the full family targets (fresh start)",
 
 test("start fills the buffer to target via one publish and goes ready", async () => {
   const liveCalls = { value: [] };
-  const { svc } = build(liveCalls);
+  const { svc, client } = build(liveCalls);
   const snap = await svc.startCxBulkLoadSession({
     agentEmail: "a@x.com",
     domain: "TAG",
@@ -278,7 +290,102 @@ test("start fills the buffer to target via one publish and goes ready", async ()
   assert.equal(snap.phase, "ready");
   assert.equal(snap.bufferCount, 2); // q1, q2
   assert.equal(snap.remainingQueue.length, 2);
+  assert.equal(client.calls.loads[0].payload.uploadLeads[0].externId, externFor("q1"));
+  assert.equal(snap.remainingQueue[0].externId, externFor("q1"));
   assert.equal("phone" in snap.remainingQueue[0], false);
+});
+
+test("start preloads RingCX leads while on hook, then waits offhook", async () => {
+  const liveCalls = { value: [] };
+  const { svc, client, reservation } = build(liveCalls, {
+    offhookGate: { isAgentOffhook: async () => ({ ok: false, reason: "agent-not-offhook" }) },
+  });
+  const snap = await svc.startCxBulkLoadSession({
+    agentEmail: "a@x.com",
+    domain: "TAG",
+    ringcx: { accountId: "acct1", campaignId: "camp1" },
+    targetSize: 2,
+    refillThreshold: 1,
+  });
+
+  assert.equal(snap.status, "running");
+  assert.equal(snap.phase, "waiting_offhook");
+  assert.equal(snap.bufferCount, 2);
+  assert.equal(client.calls.loads.length, 2);
+  assert.equal(reservation.reserves.length, 1);
+});
+
+test("green first-touch planner can narrow bulk reservation to a finite morning batch", async () => {
+  const liveCalls = { value: [] };
+  const plans = [];
+  const greenFirstTouchPlanner = {
+    async resolvePlan(input) {
+      plans.push(input);
+      return {
+        lane: "morningCoverage",
+        batchId: "green-coverage-2026-06-22-TAG",
+        firstTouchOnly: true,
+        coverageOpen: true,
+        familyTargets: { "fresh-day1": 2 },
+        claimFilter: {
+          firstTouchOnly: true,
+          greenCoverageBatchId: "green-coverage-2026-06-22-TAG",
+        },
+        counts: { remaining: 2 },
+        reason: "morning-coverage-open",
+      };
+    },
+  };
+  const { svc, reservation } = build(liveCalls, { greenFirstTouchPlanner });
+
+  await svc.startCxBulkLoadSession({
+    agentEmail: "a@x.com",
+    agentExtensionId: "63914587001",
+    domain: "TAG",
+    ringcx: { accountId: "acct1", campaignId: "camp1", dialGroupId: "dg1" },
+    targetSize: 2,
+    refillThreshold: 1,
+    familyTargets: { "fresh-day1": 15, "fresh-day2to10": 10, aged: 5 },
+  });
+
+  assert.equal(plans.length, 1);
+  assert.equal(plans[0].deficit, 2);
+  assert.deepEqual(reservation.reserves[0].familyTargets, { "fresh-day1": 2 });
+  assert.equal(reservation.reserves[0].firstTouchOnly, true);
+  assert.equal(reservation.reserves[0].greenCoverageBatchId, "green-coverage-2026-06-22-TAG");
+  assert.equal(reservation.reserves[0].queueLane, null);
+});
+
+test("green first-touch planner cannot enable unscoped first-touch reservations", async () => {
+  const liveCalls = { value: [] };
+  const greenFirstTouchPlanner = {
+    async resolvePlan() {
+      return {
+        lane: "morningCoverage",
+        firstTouchOnly: true,
+        familyTargets: { "fresh-day1": 1 },
+        claimFilter: { firstTouchOnly: true },
+        reason: "missing-scope-bug",
+      };
+    },
+  };
+  const { svc, reservation } = build(liveCalls, { greenFirstTouchPlanner });
+  const normalTargets = { "fresh-day1": 15, "fresh-day2to10": 10, aged: 5 };
+
+  await svc.startCxBulkLoadSession({
+    agentEmail: "a@x.com",
+    agentExtensionId: "63914587001",
+    domain: "TAG",
+    ringcx: { accountId: "acct1", campaignId: "camp1", dialGroupId: "dg1" },
+    targetSize: 2,
+    refillThreshold: 1,
+    familyTargets: normalTargets,
+  });
+
+  assert.deepEqual(reservation.reserves[0].familyTargets, normalTargets);
+  assert.equal(reservation.reserves[0].firstTouchOnly, false);
+  assert.equal(reservation.reserves[0].greenCoverageBatchId, null);
+  assert.equal(reservation.reserves[0].queueLane, null);
 });
 
 test("start sources the buffer from the reservation service, scoped to agent + domain + session", async () => {
@@ -306,7 +413,7 @@ test("watch matches the live call to a buffered candidate and makes it current",
   await svc.startCxBulkLoadSession({ agentEmail: "a@x.com", domain: "TAG", ringcx: { accountId: "acct1", campaignId: "camp1" }, targetSize: 2, refillThreshold: 1 });
 
   // RingCX dials q1
-  liveCalls.value = [{ externalId: "cxbl-tag-q1", uii: "u1", callState: "connected" }];
+  liveCalls.value = [{ externalId: externFor("q1"), uii: "u1", callState: "connected" }];
   const snap = await syncFromRingCx(svc);
   assert.equal(snap.current.queueItemId, "q1");
   assert.equal(snap.current.uii, "u1");
@@ -322,7 +429,7 @@ test("watch promotes a matched active call even when offhook gate is stale", asy
   await svc.startCxBulkLoadSession({ agentEmail: "a@x.com", domain: "TAG", ringcx: { accountId: "acct1", campaignId: "camp1" }, targetSize: 2, refillThreshold: 1 });
 
   offhook.ok = false;
-  liveCalls.value = [{ externalId: "cxbl-tag-q1", uii: "u1", callState: "connected" }];
+  liveCalls.value = [{ externalId: externFor("q1"), uii: "u1", callState: "connected" }];
   const snap = await syncFromRingCx(svc);
   assert.equal(snap.current.queueItemId, "q1");
   assert.equal(snap.current.uii, "u1");
@@ -334,7 +441,7 @@ test("disposition closes current once and RingCX-side advance refills the buffer
   const liveCalls = { value: [] };
   const { svc, client, outcomeAdapter } = build(liveCalls);
   await svc.startCxBulkLoadSession({ agentEmail: "a@x.com", domain: "TAG", ringcx: { accountId: "acct1", campaignId: "camp1" }, targetSize: 2, refillThreshold: 1 });
-  liveCalls.value = [{ externalId: "cxbl-tag-q1", uii: "u1" }];
+  liveCalls.value = [{ externalId: externFor("q1"), uii: "u1" }];
   await syncFromRingCx(svc);
 
   const snap = await svc.submitCxBulkLoadDisposition({ sessionId: "s1", disposition: "ANSWER" });
@@ -347,12 +454,101 @@ test("disposition closes current once and RingCX-side advance refills the buffer
   assert.equal(snap.bufferCount, 2); // q2 + refilled q3 (live had dropped to 1 <= threshold)
 });
 
+test("did_not_connect disposition requests next preview without staging current", async () => {
+  const liveCalls = { value: [] };
+  const requests = [];
+  const leadStarter = {
+    async getLeads({ session, candidate }) {
+      requests.push({ sessionId: session.sessionId, candidate });
+      return { ok: true, elapsedMs: 31, source: "setAgentState" };
+    },
+  };
+  const { svc, outcomeAdapter } = build(liveCalls, { leadStarter });
+  await svc.startCxBulkLoadSession({ agentEmail: "a@x.com", domain: "TAG", ringcx: { accountId: "acct1", campaignId: "camp1" }, targetSize: 2, refillThreshold: 1 });
+  liveCalls.value = [{ externalId: externFor("q1"), uii: "u1" }];
+  await syncFromRingCx(svc);
+
+  const snap = await svc.submitCxBulkLoadDisposition({ sessionId: "s1", disposition: "did_not_connect" });
+  assert.equal(snap.dispositionOk, true);
+  assert.equal(snap.current, null);
+  assert.equal(snap.completedCount, 1);
+  assert.equal(outcomeAdapter.writes.length, 1);
+  assert.equal(requests.length, 1);
+  assert.equal(snap.getLeads.ok, true);
+  assert.equal(snap.getLeads.queueItemId, "q2");
+  assert.equal(snap.stats.lastGetLeadsQueueItemId, "q2");
+  assert.equal(snap.remainingQueue[0].queueItemId, "q2");
+  assert.equal(requests[0].candidate.queueItemId, "q2");
+});
+
+test("did_not_connect does not advance when the terminal executor rejects the disposition", async () => {
+  const liveCalls = { value: [] };
+  const requests = [];
+  const leadStarter = {
+    async getLeads({ session, candidate }) {
+      requests.push({ sessionId: session.sessionId, candidate });
+      return { ok: true, elapsedMs: 28, source: "setAgentState" };
+    },
+  };
+  const terminalExecutor = async ({ candidate, outcome }) => ({
+    ok: false,
+    executed: true,
+    disposition: "Auto Dispo",
+    uii: candidate.uii,
+    dispositionStatus: "rejected",
+    reason: "terminal-rejected",
+    activeCall: { uii: candidate.uii, externalId: candidate.externId, callState: "ACTIVE" },
+    outcome,
+  });
+  const { svc, outcomeAdapter } = build(liveCalls, { leadStarter, terminalExecutor });
+  await svc.startCxBulkLoadSession({ agentEmail: "a@x.com", domain: "TAG", ringcx: { accountId: "acct1", campaignId: "camp1" }, targetSize: 2, refillThreshold: 1 });
+  liveCalls.value = [{ externalId: externFor("q1"), uii: "u1" }];
+  await syncFromRingCx(svc);
+
+  const snap = await svc.submitCxBulkLoadDisposition({ sessionId: "s1", disposition: "did_not_connect" });
+  assert.equal(snap.dispositionOk, false);
+  assert.equal(snap.terminal.ok, false);
+  assert.equal(snap.current.queueItemId, "q1");
+  assert.equal(snap.completedCount, 0);
+  assert.equal(outcomeAdapter.writes.length, 0);
+  assert.equal(requests.length, 0);
+  assert.equal(snap.getLeads, undefined);
+});
+
+test("rolling refill tops up at threshold regardless of hook state", async () => {
+  const liveCalls = { value: [] };
+  const { svc, client, outcomeAdapter, reservation } = build(liveCalls, {
+    offhookGate: { isAgentOffhook: async () => ({ ok: false, reason: "agent-not-offhook" }) },
+  });
+  await svc.startCxBulkLoadSession({
+    agentEmail: "a@x.com",
+    domain: "TAG",
+    ringcx: { accountId: "acct1", campaignId: "camp1" },
+    targetSize: 2,
+    refillThreshold: 1,
+  });
+  assert.equal(client.calls.loads.length, 2, "initial preload is allowed while on hook");
+  assert.equal(reservation.reserves.length, 1);
+
+  liveCalls.value = [{ externalId: externFor("q1"), uii: "u1" }];
+  await syncFromRingCx(svc);
+
+  const snap = await svc.submitCxBulkLoadDisposition({ sessionId: "s1", disposition: "ANSWER" });
+  assert.equal(snap.dispositionOk, true);
+  assert.equal(outcomeAdapter.writes.length, 1);
+  assert.equal(snap.current, null);
+  assert.equal(snap.completedCount, 1);
+  assert.equal(snap.bufferCount, 2, "rolling refill tops up from q2 to q2+q3 while on hook");
+  assert.equal(client.calls.loads.length, 3);
+  assert.equal(reservation.reserves.length, 2);
+});
+
 test("a rejected dispositionCall never completes the lead (no fake outcome)", async () => {
   const liveCalls = { value: [] };
   const { svc, client, outcomeAdapter } = build(liveCalls);
   client.dispositionCall = async () => false; // RingCX soft-fail
   await svc.startCxBulkLoadSession({ agentEmail: "a@x.com", domain: "TAG", ringcx: { accountId: "acct1", campaignId: "camp1" }, targetSize: 2, refillThreshold: 1 });
-  liveCalls.value = [{ externalId: "cxbl-tag-q1", uii: "u1" }];
+  liveCalls.value = [{ externalId: externFor("q1"), uii: "u1" }];
   await syncFromRingCx(svc);
 
   const snap = await svc.submitCxBulkLoadDisposition({ sessionId: "s1", disposition: "ANSWER" });
@@ -367,6 +563,52 @@ test("a rejected dispositionCall never completes the lead (no fake outcome)", as
   assert.equal(snap.lastError, "disposition-rejected");
 });
 
+test("#8 a double-fault in durable recording still advances the (already hung-up) call past terminal.started", async () => {
+  // terminalExecutor (hangup) SUCCEEDS, but durable recording reports the double-fault (outbox
+  // insert AND fallback dispatch both failed). The call already ended, so the reducer MUST reach
+  // terminal.accepted (counted + current cleared), with a replay marker — never stranded at
+  // terminal.started, uncounted.
+  const liveCalls = { value: [] };
+  const outcomeAdapter = {
+    writes: [],
+    async persistTerminalOutcome(x) {
+      this.writes.push(x);
+      return { written: false, idemKey: "k", result: { fallbackFailed: true, error: new Error("outbox+fallback down") } };
+    },
+  };
+  const { svc } = build(liveCalls, { outcomeAdapter });
+  await svc.startCxBulkLoadSession({ agentEmail: "a@x.com", domain: "TAG", ringcx: { accountId: "acct1", campaignId: "camp1" }, targetSize: 2, refillThreshold: 1 });
+  liveCalls.value = [{ externalId: externFor("q1"), uii: "u1" }];
+  await syncFromRingCx(svc);
+
+  const snap = await svc.submitCxBulkLoadDisposition({ sessionId: "s1", disposition: "ANSWER" });
+  assert.equal(snap.dispositionOk, true, "call still dispositions ok (it hung up)");
+  assert.equal(snap.current, null, "current cleared — not stranded at terminal.started");
+  assert.equal(snap.completedCount, 1, "lead is counted");
+  assert.notEqual(snap.phase, "releasing", "reducer advanced past the RELEASING/terminal.started state");
+  assert.equal(snap.terminalRecordDeferred, true);
+  assert.match(snap.lastError, /terminal-record-deferred/);
+});
+
+test("#8 a THROWN persistTerminalOutcome on an already hung-up call still completes the lead", async () => {
+  const liveCalls = { value: [] };
+  const outcomeAdapter = {
+    writes: [],
+    async persistTerminalOutcome() { throw new Error("mongo down"); },
+  };
+  const { svc } = build(liveCalls, { outcomeAdapter });
+  await svc.startCxBulkLoadSession({ agentEmail: "a@x.com", domain: "TAG", ringcx: { accountId: "acct1", campaignId: "camp1" }, targetSize: 2, refillThreshold: 1 });
+  liveCalls.value = [{ externalId: externFor("q1"), uii: "u1" }];
+  await syncFromRingCx(svc);
+
+  const snap = await svc.submitCxBulkLoadDisposition({ sessionId: "s1", disposition: "ANSWER" });
+  assert.equal(snap.dispositionOk, true);
+  assert.equal(snap.current, null);
+  assert.equal(snap.completedCount, 1);
+  assert.equal(snap.terminalRecordDeferred, true);
+  assert.match(snap.lastError, /terminal-record-deferred: mongo down/);
+});
+
 test("a thrown dispositionCall leaves current retryable and visible", async () => {
   const liveCalls = { value: [] };
   const { svc, client, outcomeAdapter } = build(liveCalls);
@@ -374,7 +616,7 @@ test("a thrown dispositionCall leaves current retryable and visible", async () =
     throw new Error("ringcx-timeout");
   };
   await svc.startCxBulkLoadSession({ agentEmail: "a@x.com", domain: "TAG", ringcx: { accountId: "acct1", campaignId: "camp1" }, targetSize: 2, refillThreshold: 1 });
-  liveCalls.value = [{ externalId: "cxbl-tag-q1", uii: "u1" }];
+  liveCalls.value = [{ externalId: externFor("q1"), uii: "u1" }];
   await syncFromRingCx(svc);
 
   const snap = await svc.submitCxBulkLoadDisposition({ sessionId: "s1", disposition: "ANSWER" });
@@ -413,7 +655,7 @@ test("M11 gate 10: kill terminalizes the in-flight current row (manual-reset rel
   const liveCalls = { value: [] };
   const { svc, outcomeAdapter } = build(liveCalls);
   await svc.startCxBulkLoadSession({ agentEmail: "a@x.com", domain: "TAG", ringcx: { accountId: "acct1", campaignId: "camp1" }, targetSize: 2, refillThreshold: 1 });
-  liveCalls.value = [{ externalId: "cxbl-tag-q1", uii: "u1" }];
+  liveCalls.value = [{ externalId: externFor("q1"), uii: "u1" }];
   await syncFromRingCx(svc); // q1 becomes current
   await svc.killCxBulkLoadSession({ sessionId: "s1", reason: "manual" });
   const resetWrite = outcomeAdapter.writes.find((w) => w.source === "manual-reset");
@@ -456,6 +698,74 @@ test("start replaces a prior active session through full kill cleanup", async ()
   assert.equal(resetWrite.candidate.queueItemId, "old-current");
 });
 
+test("#2 two concurrent no-sessionId starts for one agent produce exactly ONE running session", async () => {
+  // The agent-keyed start serializer must make the second start wait, see the first's running
+  // session, and retire it — instead of two distinct minted sessionIds both creating a running row.
+  const liveCalls = { value: [] };
+  let n = 0;
+  const { svc, repo } = build(liveCalls, { newSessionId: () => `s${++n}` });
+  await Promise.all([
+    svc.startCxBulkLoadSession({ agentEmail: "sean@x.com", domain: "TAG", ringcx: { accountId: "acct1", campaignId: "camp1" }, targetSize: 2, refillThreshold: 1 }),
+    svc.startCxBulkLoadSession({ agentEmail: "sean@x.com", domain: "TAG", ringcx: { accountId: "acct1", campaignId: "camp1" }, targetSize: 2, refillThreshold: 1 }),
+  ]);
+  const running = Array.from(repo.store.values()).filter((d) => d.agentEmail === "sean@x.com" && d.status === "running");
+  const killed = Array.from(repo.store.values()).filter((d) => d.status === "killed");
+  assert.equal(running.length, 1, "the agent-keyed start lock prevents two concurrent running sessions");
+  assert.equal(killed.length, 1, "the second start retired the first through the kill path");
+});
+
+test("#2 E11000 on create (DB backstop) retires the conflict and retries instead of duplicating", async () => {
+  // Simulate the multi-process race the in-memory lock cannot catch: a concurrent insert landed
+  // between our retire and create, so the partial-unique index rejects ours with E11000. The start
+  // must retire the conflict and retry rather than throwing or duplicating.
+  const base = makeRepo();
+  await base.createBulkLoadSession({ sessionId: "rival", agentEmail: "sean@x.com", status: "running", domain: "TAG" });
+  let createCalls = 0;
+  const repo = {
+    ...base,
+    async createBulkLoadSession(seed) {
+      createCalls += 1;
+      if (createCalls === 1) {
+        const err = new Error("E11000 duplicate key error");
+        err.code = 11000;
+        throw err;
+      }
+      return base.createBulkLoadSession(seed);
+    },
+  };
+  const { svc } = build({ value: [] }, { repo, newSessionId: () => "s-new" });
+  const snap = await svc.startCxBulkLoadSession({ agentEmail: "sean@x.com", domain: "TAG", ringcx: { accountId: "a", campaignId: "c" }, sessionId: "s-new", targetSize: 1, refillThreshold: 1 });
+  assert.ok(createCalls >= 2, "first create hit E11000, then retried after retiring the conflict");
+  assert.equal(snap.sessionId, "s-new", "the new session was created on retry");
+  assert.equal(base.store.get("rival").status, "killed", "the conflicting running session was retired");
+});
+
+test("#11 a held busy flag makes the watcher SKIP the session, preserving current across a wrap (no deadlock)", async () => {
+  // The appointment-wrap race: while the wrap commits the Logics appointment, a watcher tick that
+  // sees the call released would clear state.current -> the terminal becomes a no-op (missing-current)
+  // and the wrap strands resume after an already-committed appointment. markSessionBusy holds the
+  // watcher-skip flag for the whole wrap so current survives, and (being a counter, not the serializer
+  // tail) the inner disposition's withSessionMutation still runs without self-deadlock.
+  const liveCalls = { value: [] };
+  const { svc } = build(liveCalls);
+  await svc.startCxBulkLoadSession({ agentEmail: "a@x.com", domain: "TAG", ringcx: { accountId: "acct1", campaignId: "camp1" }, targetSize: 2, refillThreshold: 1 });
+  liveCalls.value = [{ externalId: externFor("q1"), uii: "u1" }];
+  await syncFromRingCx(svc); // current = q1/u1
+
+  const release = svc.markSessionBusy("s1");
+  liveCalls.value = []; // RingCX shows the current call released mid-wrap
+  await syncFromRingCx(svc); // watcher tick — must SKIP (busy), NOT clear current
+
+  const mid = await svc.getCxBulkLoadSession({ sessionId: "s1" });
+  assert.ok(mid.current && mid.current.queueItemId === "q1", "watcher skipped the busy session; current preserved");
+
+  const snap = await svc.submitCxBulkLoadDisposition({ sessionId: "s1", disposition: "ANSWER" });
+  release();
+  assert.equal(snap.dispositionOk, true, "inner disposition completes while busy is held (no self-deadlock)");
+  assert.equal(snap.current, null, "lead dispositioned after the wrap");
+  assert.equal(snap.completedCount, 1);
+});
+
 test("account watcher is a no-op write when there is no match and the buffer is healthy", async () => {
   const liveCalls = { value: [] };
   const { svc, repo } = build(liveCalls);
@@ -472,7 +782,7 @@ test("browser watch is read-only; account watcher owns RingCX projection", async
   await svc.startCxBulkLoadSession({ agentEmail: "a@x.com", domain: "TAG", ringcx: { accountId: "acct1", campaignId: "camp1" }, targetSize: 2, refillThreshold: 1 });
   const before = repo.counters.updates;
 
-  liveCalls.value = [{ externalId: "cxbl-tag-q1", uii: "u1" }];
+  liveCalls.value = [{ externalId: externFor("q1"), uii: "u1" }];
   const readOnly = await svc.watchCxBulkLoadSession({ sessionId: "s1" });
 
   assert.equal(repo.counters.updates, before);
@@ -487,7 +797,7 @@ test("skip routes its terminal write through the outcome adapter (single writer)
   const liveCalls = { value: [] };
   const { svc, outcomeAdapter } = build(liveCalls);
   await svc.startCxBulkLoadSession({ agentEmail: "a@x.com", domain: "TAG", ringcx: { accountId: "acct1", campaignId: "camp1" }, targetSize: 2, refillThreshold: 1 });
-  liveCalls.value = [{ externalId: "cxbl-tag-q1", uii: "u1" }];
+  liveCalls.value = [{ externalId: externFor("q1"), uii: "u1" }];
   await syncFromRingCx(svc);
   await svc.skipCxBulkLoadCurrent({ sessionId: "s1" });
   assert.equal(outcomeAdapter.writes.length, 1);
@@ -499,10 +809,10 @@ test("watch observes a buffer lead released between polls and terminalizes it on
   const { svc, outcomeAdapter } = build(liveCalls);
   await svc.startCxBulkLoadSession({ agentEmail: "a@x.com", domain: "TAG", ringcx: { accountId: "acct1", campaignId: "camp1" }, targetSize: 3, refillThreshold: 1 });
   // tick 1: q1 AND q2 both active (ambiguous -> no current promoted) — records the prior active set.
-  liveCalls.value = [{ externalId: "cxbl-tag-q1", uii: "u1" }, { externalId: "cxbl-tag-q2", uii: "u2" }];
+  liveCalls.value = [{ externalId: externFor("q1"), uii: "u1" }, { externalId: externFor("q2"), uii: "u2" }];
   await syncFromRingCx(svc);
   // tick 2: q2 is gone (RingCX dialed+released it between polls), q1 still active.
-  liveCalls.value = [{ externalId: "cxbl-tag-q1", uii: "u1" }];
+  liveCalls.value = [{ externalId: externFor("q1"), uii: "u1" }];
   const snap = await syncFromRingCx(svc);
   assert.equal(outcomeAdapter.writes.length, 1, "RingCX-proven released UIIs are durably terminalized");
   assert.equal(outcomeAdapter.writes[0].source, "active-call-release");
@@ -518,22 +828,48 @@ test("watch auto-advance writes one terminal outcome for the departed current", 
   const liveCalls = { value: [] };
   const { svc, outcomeAdapter } = build(liveCalls);
   await svc.startCxBulkLoadSession({ agentEmail: "a@x.com", domain: "TAG", ringcx: { accountId: "acct1", campaignId: "camp1" }, targetSize: 3, refillThreshold: 1 });
-  liveCalls.value = [{ externalId: "cxbl-tag-q1", uii: "u1" }];
+  liveCalls.value = [{ externalId: externFor("q1"), uii: "u1" }];
   await syncFromRingCx(svc); // q1 active
-  liveCalls.value = [{ externalId: "cxbl-tag-q2", uii: "u2" }];
-  await syncFromRingCx(svc); // RingCX swapped to q2 -> q1 auto-completes
+  liveCalls.value = [{ externalId: externFor("q2"), uii: "u2" }];
+  const snap = await syncFromRingCx(svc); // RingCX swapped to q2 -> q1 auto-completes
   assert.equal(outcomeAdapter.writes.length, 1, "the departed current is durably terminalized");
   assert.equal(outcomeAdapter.writes[0].source, "active-call-release");
   assert.equal(outcomeAdapter.writes[0].candidate.queueItemId, "q1");
   assert.equal(outcomeAdapter.writes[0].candidate.uii, "u1");
   assert.equal(outcomeAdapter.writes[0].outcome, "did_not_connect");
+  assert.equal(snap.current, null);
+});
+
+test("watch release evidence clears current after a rejected disposition attempt", async () => {
+  const liveCalls = { value: [] };
+  const { svc, client, outcomeAdapter } = build(liveCalls);
+  client.dispositionCall = async () => false;
+  await svc.startCxBulkLoadSession({ agentEmail: "a@x.com", domain: "TAG", ringcx: { accountId: "acct1", campaignId: "camp1" }, targetSize: 3, refillThreshold: 1 });
+  liveCalls.value = [{ externalId: externFor("q1"), uii: "u1" }];
+  const failed = await syncFromRingCx(svc);
+  assert.equal(failed.current.queueItemId, "q1");
+
+  const retryable = await svc.submitCxBulkLoadDisposition({ sessionId: "s1", disposition: "voicemail" });
+  assert.equal(retryable.dispositionOk, false);
+  assert.equal(retryable.current.queueItemId, "q1");
+  assert.equal(retryable.current.outcome, "voicemail");
+  assert.equal(outcomeAdapter.writes.length, 0);
+
+  liveCalls.value = [{ externalId: externFor("q2"), uii: "u2" }];
+  const snap = await syncFromRingCx(svc);
+  assert.equal(outcomeAdapter.writes.length, 1);
+  assert.equal(outcomeAdapter.writes[0].candidate.queueItemId, "q1");
+  assert.equal(outcomeAdapter.writes[0].candidate.uii, "u1");
+  assert.equal(outcomeAdapter.writes[0].outcome, "did_not_connect");
+  assert.equal(snap.current, null);
+  assert.equal(snap.completedCount, 1);
 });
 
 test("watch clears and terminalizes current when RingCX drops it without a replacement", async () => {
   const liveCalls = { value: [] };
   const { svc, outcomeAdapter } = build(liveCalls);
   await svc.startCxBulkLoadSession({ agentEmail: "a@x.com", domain: "TAG", ringcx: { accountId: "acct1", campaignId: "camp1" }, targetSize: 3, refillThreshold: 1 });
-  liveCalls.value = [{ externalId: "cxbl-tag-q1", uii: "u1" }];
+  liveCalls.value = [{ externalId: externFor("q1"), uii: "u1" }];
   await syncFromRingCx(svc);
   liveCalls.value = [];
   const snap = await syncFromRingCx(svc);
@@ -560,14 +896,14 @@ test("overlapping account watcher ticks serialize one refill per session", async
     stats: { targetSize: 2, refillThreshold: 1, familyTargets: { "fresh-day1": 2 }, claimMinutes: 10 },
     current: {
       queueItemId: "current-1",
-      externId: "cxbl-tag-current-1",
-      ringcx: { externId: "cxbl-tag-current-1" },
+      externId: externFor("current-1"),
+      ringcx: { externId: externFor("current-1") },
       queueFamily: "fresh-day1",
       uii: "u-current-1",
     },
     acceptedBuffer: [],
-    prevActiveExternIds: ["cxbl-tag-current-1"],
-    trace: { prevActiveCalls: [{ externId: "cxbl-tag-current-1", externalId: "cxbl-tag-current-1", uii: "u-current-1" }] },
+    prevActiveExternIds: [externFor("current-1")],
+    trace: { prevActiveCalls: [{ externId: externFor("current-1"), externalId: externFor("current-1"), uii: "u-current-1" }] },
     completed: [],
     __v: 0,
   });
@@ -586,6 +922,7 @@ test("overlapping account watcher ticks serialize one refill per session", async
   assert.equal(reservation.reserves.length, 1);
   const snap = await repo.findBulkLoadSessionById("s1");
   assert.equal((snap.acceptedBuffer || []).length, 2);
+  assert.equal(snap.current, null);
 });
 
 test("M11 gate 4+5: a serving-stamp miss (unowned row) does NOT promote the lead to current", async () => {
@@ -598,7 +935,7 @@ test("M11 gate 4+5: a serving-stamp miss (unowned row) does NOT promote the lead
   };
   const { svc } = build(liveCalls, { queueStateAdapter });
   await svc.startCxBulkLoadSession({ agentEmail: "a@x.com", domain: "TAG", ringcx: { accountId: "acct1", campaignId: "camp1" }, targetSize: 2, refillThreshold: 1 });
-  liveCalls.value = [{ externalId: "cxbl-tag-q1", uii: "u1" }];
+  liveCalls.value = [{ externalId: externFor("q1"), uii: "u1" }];
   const snap = await syncFromRingCx(svc);
   assert.ok(stampCalls.serving >= 1, "the serving stamp was attempted");
   // The CAS missed -> the lead must NOT be promoted to current (no ghost current the DB doesn't own).
@@ -789,3 +1126,25 @@ test("a publish reject drops the candidate from the buffer and releases its rese
   assert.deepEqual(reservation.released, [pool[1]._id]); // the rejected row's claim was released
 });
 
+
+test("PII: sanitizeSession strips raw phone digits (ani/dnis/leadPhone) from current.activeCallSummary", () => {
+  const projected = sanitizeSession({
+    sessionId: "s1",
+    status: "running",
+    phase: "dialing",
+    current: {
+      queueItemId: "q1",
+      phone: "5125551234",
+      leadPhone: "5125551234",
+      activeCallSummary: { ani: "5125551234", dnis: "8005550000", state: "active", elapsedMs: 12 },
+    },
+    acceptedBuffer: [{ queueItemId: "q2", phone: "5125559999", activeCallSummary: { ani: "5125559999" } }],
+    completed: [],
+  });
+  assert.equal(projected.current.phone, undefined, "top-level phone stripped");
+  assert.equal(projected.current.leadPhone, undefined, "leadPhone stripped");
+  assert.equal(projected.current.activeCallSummary.ani, undefined, "current ani stripped");
+  assert.equal(projected.current.activeCallSummary.dnis, undefined, "current dnis stripped");
+  assert.equal(projected.current.activeCallSummary.state, "active", "non-PII fields preserved");
+  assert.equal(projected.remainingQueue[0].activeCallSummary.ani, undefined, "buffered candidate ani stripped too");
+});

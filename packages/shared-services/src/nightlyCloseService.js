@@ -69,10 +69,11 @@ const { getInternalFromEmail } = require("../../shared-config/src");
 
 const UNRESOLVED_HOURLY_STATUSES = ["pending", "processing", "failed", "dead-letter"];
 const REQUIRED_NIGHTLY_DOMAINS = ["WYNN", "TAG"];
-const LD_VENDOR_FAMILY_KEYS = new Set(["ld-custom", "ld-custom-2", "ld-general"]);
+const LD_VENDOR_FAMILY_KEYS = new Set(["ld-custom", "ld-custom-2", "ld-custom-3", "ld-general"]);
 const LD_CAMPAIGN_LABELS = {
   "ld-custom": "LD CUSTOM",
   "ld-custom-2": "LD CUSTOM 2",
+  "ld-custom-3": "LD CUSTOM 3",
   "ld-general": "LD GENERAL",
   "ld-posting": "LD Posting",
   "ld": "LD (unsplit)",
@@ -146,28 +147,35 @@ function sumVendorRows(rows = [], field) {
 function buildLdCostSummary(rows = []) {
   const custom = rows.find((row) => vendorFamilyKey(row) === "ld-custom") || {};
   const custom2 = rows.find((row) => vendorFamilyKey(row) === "ld-custom-2") || {};
+  const custom3 = rows.find((row) => vendorFamilyKey(row) === "ld-custom-3") || {};
   const general = rows.find((row) => vendorFamilyKey(row) === "ld-general") || {};
   const customCount = toNumber(custom.leads);
   const custom2Count = toNumber(custom2.leads);
+  const custom3Count = toNumber(custom3.leads);
   const generalCount = toNumber(general.leads);
   const rates = require("./ldSpendService").getLdRates();
   const customRate = toNumber(rates["ld-custom"]);
   const custom2Rate = toNumber(rates["ld-custom-2"]);
+  const custom3Rate = toNumber(rates["ld-custom-3"]);
   const generalRate = toNumber(rates["ld-general"]);
   const customCost = customCount * customRate;
   const custom2Cost = custom2Count * custom2Rate;
+  const custom3Cost = custom3Count * custom3Rate;
   const generalCost = generalCount * generalRate;
   return {
     customCount,
     custom2Count,
+    custom3Count,
     generalCount,
     customRate,
     custom2Rate,
+    custom3Rate,
     generalRate,
     customCost,
     custom2Cost,
+    custom3Cost,
     generalCost,
-    total: customCost + custom2Cost + generalCost,
+    total: customCost + custom2Cost + custom3Cost + generalCost,
   };
 }
 
@@ -2499,7 +2507,7 @@ function buildLeadDataEmailBody(domain, dateKey, daily, vendorReport, bugWrap) {
     "",
     `LD leads: ${ldLeadCount}`,
     `LD calls: ${ldCallCount} (${ldCallsOver5} over 5 min)`,
-    `LD cost: ${formatMoney(ldCost.total)} (LD CUSTOM ${ldCost.customCount} x $${ldCost.customRate} + LD CUSTOM 2 ${ldCost.custom2Count} x $${ldCost.custom2Rate} + LD GENERAL ${ldCost.generalCount} x $${ldCost.generalRate})`,
+    `LD cost: ${formatMoney(ldCost.total)} (LD CUSTOM ${ldCost.customCount} x $${ldCost.customRate} + LD CUSTOM 2 ${ldCost.custom2Count} x $${ldCost.custom2Rate} + LD CUSTOM 3 ${ldCost.custom3Count} x $${ldCost.custom3Rate} + LD GENERAL ${ldCost.generalCount} x $${ldCost.generalRate})`,
     "",
     "LD family summary",
     `Attribution held out: ${toNumber(attributionReview.skipped)} skipped, ${toNumber(attributionReview.queued)} newly queued, ${toNumber(attributionReview.resolved)} resolved by manual mapping, ${toNumber(attributionReview.ignored)} ignored`,
@@ -2531,7 +2539,7 @@ function buildNightlyEmailBody(domain, dateKey, managementSnapshot, vendorReport
     "",
     "Management snapshot",
     `LD leads: ${sumVendorRows(topVendorFamilyRows, "leads")}`,
-    `LD cost: ${formatMoney(ldCost.total)} (LD CUSTOM ${ldCost.customCount} x $${ldCost.customRate} + LD CUSTOM 2 ${ldCost.custom2Count} x $${ldCost.custom2Rate} + LD GENERAL ${ldCost.generalCount} x $${ldCost.generalRate})`,
+    `LD cost: ${formatMoney(ldCost.total)} (LD CUSTOM ${ldCost.customCount} x $${ldCost.customRate} + LD CUSTOM 2 ${ldCost.custom2Count} x $${ldCost.custom2Rate} + LD CUSTOM 3 ${ldCost.custom3Count} x $${ldCost.custom3Rate} + LD GENERAL ${ldCost.generalCount} x $${ldCost.generalRate})`,
     `Spend: $${managementSnapshot.spend.total.toFixed(2)}`,
     `Payments: $${managementSnapshot.payments.totalAmount.toFixed(2)} (${managementSnapshot.payments.totalCount})`,
     `LD calls: ${sumVendorRows(topVendorFamilyRows, "calls")} (${sumVendorRows(topVendorFamilyRows, "callsOver5")} over 5 min)`,
@@ -2728,8 +2736,8 @@ async function sendLeadDataCloseEmail(domain, payload, options = {}) {
 
   const leadEntries = [];
 
-  // Lead intake split by routeCampaignKey — surfaces the LD CUSTOM /
-  // LD GENERAL split. Non-LD source detail stays in the attached CSVs.
+  // Lead intake split by routeCampaignKey: LD CUSTOM / CUSTOM 2 /
+  // CUSTOM 3 / GENERAL. Non-LD source detail stays in the attached CSVs.
   // stamps at ingest time. Rows without a routeCampaignKey roll up
   // under "(uncategorized)" rather than getting dropped. Sorted by
   // volume desc.

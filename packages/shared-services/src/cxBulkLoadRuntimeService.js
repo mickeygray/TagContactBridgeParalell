@@ -3,6 +3,7 @@
 const { runCxAccountActiveCallWatchOnce } = require("./cxAccountActiveCallWatcherService");
 const { logCxAlpha } = require("./cxAlphaTraceService");
 const { buildVersionGuardOptions, describeBulkLoadMutationEligibility } = require("./cxBulkLoadMutationEligibility");
+const { buildExternId: buildBulkLoadExternId } = require("./cxBulkLoadLeadSourceService");
 
 // Bulk_load runtime service — the ONLY sequencer.
 //
@@ -180,6 +181,9 @@ function normalizeFirstTouchSupplyPlan(plan = null, normalFamilyTargets = {}) {
   const batchId = str(claimFilter.greenCoverageBatchId || plan.batchId);
   const queueLane = str(claimFilter.queueLane || plan.queueLane);
   const firstTouchOnly = plan.firstTouchOnly === true || claimFilter.firstTouchOnly === true;
+  const firstTouchMaxAttempts = Number.isFinite(Number(claimFilter.firstTouchMaxAttempts ?? plan.firstTouchMaxAttempts))
+    ? Math.max(Number(claimFilter.firstTouchMaxAttempts ?? plan.firstTouchMaxAttempts), 0)
+    : null;
   const scoped = Boolean(batchId || queueLane);
   if (firstTouchOnly && !scoped) {
     return {
@@ -202,6 +206,7 @@ function normalizeFirstTouchSupplyPlan(plan = null, normalFamilyTargets = {}) {
       firstTouchOnly,
       greenCoverageBatchId: batchId || null,
       queueLane: queueLane || null,
+      ...(firstTouchMaxAttempts != null ? { firstTouchMaxAttempts } : {}),
     },
   };
 }
@@ -488,11 +493,6 @@ function createCxBulkLoadRuntimeService(deps = {}) {
   }
 
   async function fillBuffer(state) {
-    const offhook = await offhookGate.isAgentOffhook(state, { client });
-    if (!offhook.ok) {
-      traceBulkFlow("fill.offhook_wait", state, { reason: offhook.reason || "agent-not-offhook" });
-      return reduce(state, { type: "agent.waiting_offhook", reason: offhook.reason || "agent-not-offhook" }, now());
-    }
     const deficit = bufferDeficit(state, targetBufferFor(state));
     if (deficit <= 0) {
       traceBulkFlow("fill.no_deficit", state, {
@@ -532,6 +532,7 @@ function createCxBulkLoadRuntimeService(deps = {}) {
       greenCoverageBatchId: claimFilter.greenCoverageBatchId || firstTouchPlan.batchId || null,
       firstTouchReason: firstTouchPlan.reason || null,
       firstTouchCounts: firstTouchPlan.counts || null,
+      firstTouchMaxAttempts: claimFilter.firstTouchMaxAttempts ?? null,
     });
 
     const { reserved } = await reservationService.reserveFromFamilyOrder({
@@ -551,6 +552,7 @@ function createCxBulkLoadRuntimeService(deps = {}) {
       firstTouchOnly: firstTouchPlan.firstTouchOnly === true,
       greenCoverageBatchId: claimFilter.greenCoverageBatchId || firstTouchPlan.batchId || null,
       queueLane: claimFilter.queueLane || firstTouchPlan.queueLane || null,
+      firstTouchMaxAttempts: claimFilter.firstTouchMaxAttempts ?? null,
     });
     traceBulkFlow("fill.reserve_finished", state, {
       requested: deficit,
@@ -595,7 +597,11 @@ function createCxBulkLoadRuntimeService(deps = {}) {
         });
         continue;
       }
-      const externId = `cxbl-${String(state.domain).toUpperCase()}-${row._id}`.toLowerCase();
+      const externId = buildBulkLoadExternId({
+        domain: state.domain,
+        sessionId: state.sessionId,
+        queueItemId: row._id,
+      });
       let pub = null;
       try {
         pub = await publisher.publishBatchToRingcx(client, {
@@ -692,6 +698,95 @@ function createCxBulkLoadRuntimeService(deps = {}) {
       .catch(() => null);
   }
 
+  function shouldGetLeadsAfterDisposition(outcome) {
+    return String(outcome || "").trim().toLowerCase().replace(/[\s-]+/g, "_") === "did_not_connect";
+  }
+
+  function normalizeTerminalResult(terminal) {
+    return terminal;
+  }
+
+  async function runGetLeadsFromReadyState(state, trigger = "get-leads") {
+    if (!state) return { state, getLeads: null };
+    if (state.status !== "running") {
+      return { state, getLeads: { ok: false, reason: "session-not-running" } };
+    }
+    if (state.current) {
+      return {
+        state,
+        getLeads: {
+          ok: false,
+          reason: state.current.uii ? "current-call-active" : "current-call-awaiting-uii",
+          queueItemId: queueItemKey(state.current) || null,
+        },
+      };
+    }
+    const candidate = firstStartableBufferCandidate(state);
+    if (!candidate) {
+      return { state, getLeads: { ok: false, reason: "no-startable-buffer-candidate" } };
+    }
+    if (!leadStarter || typeof leadStarter.getLeads !== "function") {
+      return { state, getLeads: { ok: false, reason: "get-leads-unavailable" } };
+    }
+
+    traceBulkFlow("get_leads.started", state, {
+      trigger,
+      queueItemId: queueItemKey(candidate),
+      externId: str(candidate.externId) || null,
+    });
+    const getLeads = await leadStarter.getLeads({ session: state, candidate });
+    if (!getLeads || getLeads.ok === false) {
+      traceBulkFlow("get_leads.failed", state, {
+        trigger,
+        queueItemId: queueItemKey(candidate),
+        reason: getLeads?.reason || getLeads?.error || "get-leads-failed",
+      });
+      return {
+        state,
+        getLeads: {
+          ok: false,
+          reason: getLeads?.reason || "get-leads-failed",
+          error: getLeads?.error || null,
+        },
+      };
+    }
+
+    const startedAt = now();
+    const next = {
+      ...state,
+      phase: state.phase || "ready",
+      stats: {
+        ...(state.stats || {}),
+        lastGetLeadsAt: startedAt.toISOString(),
+        lastGetLeadsQueueItemId: queueItemKey(candidate) || null,
+        lastGetLeadsElapsedMs: getLeads.elapsedMs || null,
+      },
+      trace: {
+        ...(state.trace || {}),
+        lastGetLeads: {
+          at: startedAt.toISOString(),
+          trigger,
+          queueItemId: queueItemKey(candidate) || null,
+          externId: str(candidate.externId) || null,
+          source: getLeads.source || "ringcx-preview-sdk",
+        },
+      },
+    };
+    traceBulkFlow("get_leads.accepted", next, {
+      trigger,
+      queueItemId: queueItemKey(candidate),
+      elapsedMs: getLeads.elapsedMs || null,
+    });
+    return {
+      state: next,
+      getLeads: {
+        ok: true,
+        queueItemId: queueItemKey(candidate) || null,
+        elapsedMs: getLeads.elapsedMs || null,
+      },
+    };
+  }
+
   async function loadState(sessionId) {
     return repo.findBulkLoadSessionById(sessionId);
   }
@@ -776,15 +871,25 @@ function createCxBulkLoadRuntimeService(deps = {}) {
 
         let state = reduce(created, { type: "session.started" }, now());
         const offhook = await offhookGate.isAgentOffhook(state, { client });
-        if (!offhook.ok) {
-          state = reduce(state, { type: "agent.waiting_offhook", reason: offhook.reason || "agent-not-offhook" }, now());
-          traceBulkFlow("session.waiting_offhook", state, { reason: offhook.reason || "agent-not-offhook" });
-        } else {
+        if (offhook.ok) {
           state = reduce(state, { type: "agent.offhook_ready", reason: offhook.reason || "agent-offhook" }, now());
-          state = reduce(state, { type: "buffer.preload_started", targetSize: targetBufferFor(state) }, now());
-          traceBulkFlow("session.preload_started", state, { targetBuffer: targetBufferFor(state) });
-          state = await fillBuffer(state);
-          traceBulkFlow("session.preload_finished", state, { targetBuffer: targetBufferFor(state) });
+          traceBulkFlow("session.offhook_ready", state, { reason: offhook.reason || "agent-offhook" });
+        }
+        state = reduce(state, { type: "buffer.preload_started", targetSize: targetBufferFor(state) }, now());
+        traceBulkFlow("session.preload_started", state, {
+          targetBuffer: targetBufferFor(state),
+          offhookOk: Boolean(offhook.ok),
+        });
+        state = await fillBuffer(state);
+        traceBulkFlow("session.preload_finished", state, {
+          targetBuffer: targetBufferFor(state),
+          offhookOk: Boolean(offhook.ok),
+        });
+        if (!offhook.ok) {
+          const preloadError = state.lastError;
+          state = reduce(state, { type: "agent.waiting_offhook", reason: offhook.reason || "agent-not-offhook" }, now());
+          if (preloadError) state.lastError = preloadError;
+          traceBulkFlow("session.waiting_offhook", state, { reason: offhook.reason || "agent-not-offhook" });
         }
         await persist(state);
         return sanitizeSession(state);
@@ -846,7 +951,7 @@ function createCxBulkLoadRuntimeService(deps = {}) {
     let next = reduce(state, { type: "terminal.started", outcome }, now());
 
     _step("terminalExecutor (HANGUP) START");
-    const terminal = typeof terminalExecutor === "function"
+    let terminal = typeof terminalExecutor === "function"
       ? await terminalExecutor({
           session: state,
           candidate: current,
@@ -864,6 +969,7 @@ function createCxBulkLoadRuntimeService(deps = {}) {
       hangupStatus: terminal && terminal.hangupStatus,
       dispositionStatus: terminal && terminal.dispositionStatus,
     });
+    terminal = normalizeTerminalResult(terminal);
     if (terminal && terminal.ok === false) {
       next = reduce(next, { type: "terminal.failed", error: terminal.error || terminal.reason || "terminal-rejected" }, now());
       await persist(next);
@@ -906,12 +1012,20 @@ function createCxBulkLoadRuntimeService(deps = {}) {
       type: "terminal.accepted",
       outcome,
       hangup: terminal || input.hangup,
-      reviewHoldUntil: buildReviewHoldUntil(acceptedAt),
-      reviewHoldReason: "manual-disposition",
+      reviewHoldUntil: null,
+      reviewHoldReason: null,
     }, acceptedAt);
     _step("maybeRefill (PUBLISH MORE LEADS) START");
     next = await maybeRefill(next);
     _step("maybeRefill DONE");
+    let getLeads = null;
+    if (shouldGetLeadsAfterDisposition(outcome)) {
+      _step("getLeadsAfterDisposition START");
+      const getLeadsResult = await runGetLeadsFromReadyState(next, "after-disposition");
+      next = getLeadsResult.state || next;
+      getLeads = getLeadsResult.getLeads;
+      _step("getLeadsAfterDisposition DONE", getLeads);
+    }
     if (terminalRecordError) {
       // Fail-CLOSED to an observable replay marker, not fail-silent: the reducer reached a terminal
       // state (call counted, current cleared) but durable cadence/DNC recording did not land. Stamp
@@ -923,10 +1037,12 @@ function createCxBulkLoadRuntimeService(deps = {}) {
     traceBulkFlow("disposition.finished", next, {
       outcome,
       terminalOk: terminal ? terminal.ok !== false : null,
+      getLeadsOk: getLeads ? getLeads.ok === true : null,
+      getLeadsReason: getLeads?.reason || null,
       terminalRecordDeferred: Boolean(terminalRecordError),
     });
     _step("persist DONE → RETURN ok (TOTAL)");
-    return { ...sanitizeSession(next), dispositionOk: true, terminal, terminalRecordDeferred: Boolean(terminalRecordError) };
+    return { ...sanitizeSession(next), dispositionOk: true, terminal, getLeads, terminalRecordDeferred: Boolean(terminalRecordError) };
     });
   }
 
@@ -1061,88 +1177,12 @@ function createCxBulkLoadRuntimeService(deps = {}) {
     return withSessionMutation(input.sessionId, async () => {
     const state = await loadState(input.sessionId);
     if (!state) return null;
-    if (state.status !== "running") {
-      return {
-        ...sanitizeSession(state),
-        getLeads: { ok: false, reason: "session-not-running" },
-      };
-    }
-    if (state.current) {
-      return {
-        ...sanitizeSession(state),
-        getLeads: {
-          ok: false,
-          reason: state.current.uii ? "current-call-active" : "current-call-awaiting-uii",
-          queueItemId: queueItemKey(state.current) || null,
-        },
-      };
-    }
-    const candidate = firstStartableBufferCandidate(state);
-    if (!candidate) {
-      return {
-        ...sanitizeSession(state),
-        getLeads: { ok: false, reason: "no-startable-buffer-candidate" },
-      };
-    }
-    if (!leadStarter || typeof leadStarter.getLeads !== "function") {
-      return {
-        ...sanitizeSession(state),
-        getLeads: { ok: false, reason: "get-leads-unavailable" },
-      };
-    }
-
-    traceBulkFlow("get_leads.started", state, {
-      queueItemId: queueItemKey(candidate),
-      externId: str(candidate.externId) || null,
-    });
-    const getLeads = await leadStarter.getLeads({ session: state, candidate });
-    if (!getLeads || getLeads.ok === false) {
-      traceBulkFlow("get_leads.failed", state, {
-        queueItemId: queueItemKey(candidate),
-        reason: getLeads?.reason || getLeads?.error || "get-leads-failed",
-      });
-      return {
-        ...sanitizeSession(state),
-        getLeads: {
-          ok: false,
-          reason: getLeads?.reason || "get-leads-failed",
-          error: getLeads?.error || null,
-        },
-      };
-    }
-
-    const startedAt = now();
-    const next = {
-      ...state,
-      phase: state.phase || "ready",
-      stats: {
-        ...(state.stats || {}),
-        lastGetLeadsAt: startedAt.toISOString(),
-        lastGetLeadsQueueItemId: queueItemKey(candidate) || null,
-        lastGetLeadsElapsedMs: getLeads.elapsedMs || null,
-      },
-      trace: {
-        ...(state.trace || {}),
-        lastGetLeads: {
-          at: startedAt.toISOString(),
-          queueItemId: queueItemKey(candidate) || null,
-          externId: str(candidate.externId) || null,
-          source: getLeads.source || "ringcx-preview-sdk",
-        },
-      },
-    };
+    const getLeadsResult = await runGetLeadsFromReadyState(state, "api-get-leads");
+    const next = getLeadsResult.state || state;
     await persist(next);
-    traceBulkFlow("get_leads.accepted", next, {
-      queueItemId: queueItemKey(candidate),
-      elapsedMs: getLeads.elapsedMs || null,
-    });
     return {
       ...sanitizeSession(next),
-      getLeads: {
-        ok: true,
-        queueItemId: queueItemKey(candidate) || null,
-        elapsedMs: getLeads.elapsedMs || null,
-      },
+      getLeads: getLeadsResult.getLeads,
     };
     });
   }

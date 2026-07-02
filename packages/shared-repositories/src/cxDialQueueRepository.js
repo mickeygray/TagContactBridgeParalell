@@ -79,11 +79,30 @@ function applyFirstTouchClaimFilter(query, options = {}) {
   if (options.firstTouchOnly !== true) return query;
   const batchId = String(options.greenCoverageBatchId || "").trim();
   const lane = String(options.queueLane || "").trim();
+  const rawMaxAttempts = options.firstTouchMaxAttempts;
+  const hasMaxAttempts =
+    rawMaxAttempts !== undefined &&
+    rawMaxAttempts !== null &&
+    String(rawMaxAttempts).trim() !== "";
+  const maxAttempts = hasMaxAttempts && Number.isFinite(Number(rawMaxAttempts))
+    ? Math.max(Number(rawMaxAttempts), 0)
+    : 1;
   const clauses = [
     zeroOrMissing("placedCalls"),
     zeroOrMissing("dailyPlacedCalls"),
     zeroOrMissing("progressiveStageIndex"),
   ];
+  if (maxAttempts <= 0) {
+    clauses.push({ _id: { $exists: false } });
+  } else {
+    clauses.push({
+      $or: [
+        { "metadata.firstTouchAttempts": { $exists: false } },
+        { "metadata.firstTouchAttempts": null },
+        { "metadata.firstTouchAttempts": { $lt: maxAttempts } },
+      ],
+    });
+  }
   if (batchId) {
     clauses.push({ "metadata.greenCoverageBatchId": batchId });
   }
@@ -481,6 +500,7 @@ async function countReadyFirstTouchRows({
   domain = null,
   greenCoverageBatchId = null,
   queueLane = null,
+  firstTouchMaxAttempts = null,
   rcxAccountId = null,
   rcxCampaignId = null,
   rcxDialGroupId = null,
@@ -490,6 +510,7 @@ async function countReadyFirstTouchRows({
     firstTouchOnly: true,
     greenCoverageBatchId,
     queueLane,
+    firstTouchMaxAttempts,
     rcxAccountId,
     rcxCampaignId,
     rcxDialGroupId,

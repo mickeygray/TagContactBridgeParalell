@@ -94,6 +94,60 @@ test("projectBulkSessionFromAccountSnapshot attaches UII to a manually-started c
   assert.equal(projected.after.trace.accountActiveCallWatcher.relevantActiveCallCount, 1);
 });
 
+test("projectBulkSessionFromAccountSnapshot releases current when RingCX drops it", () => {
+  const current = { ...candidate("q1", "cxbl-q1"), uii: "u1" };
+  const s = {
+    ...session("s1", "acct-a", [candidate("q2", "cxbl-q2")], current),
+    prevActiveExternIds: ["cxbl-q1"],
+    trace: {
+      prevActiveCalls: [{ externId: "cxbl-q1", externalId: "cxbl-q1", uii: "u1" }],
+    },
+  };
+
+  const projected = projectBulkSessionFromAccountSnapshot(
+    s,
+    [],
+    { now: new Date("2026-06-23T12:00:00.000Z") },
+  );
+
+  assert.equal(projected.changed, true);
+  assert.equal(projected.matchStatus, "held-review");
+  assert.equal(projected.transitionKind, "held-review");
+  assert.equal(projected.terminalObservations.length, 1);
+  assert.equal(projected.terminalObservations[0].candidate.queueItemId, "q1");
+  assert.equal(projected.terminalObservations[0].candidate.uii, "u1");
+  assert.equal(projected.after.current, null);
+  assert.equal(projected.after.completed.length, 1);
+  assert.equal(projected.after.completed[0].queueItemId, "q1");
+  assert.equal(projected.after.trace.accountActiveCallWatcher.currentReleased, true);
+});
+
+test("projectBulkSessionFromAccountSnapshot releases UII-bearing current after prev-active cache is lost", () => {
+  const current = {
+    ...candidate("q1", "cxbl-q1"),
+    uii: "u1",
+    activeCallSummary: { externId: "cxbl-q1", uii: "u1" },
+  };
+  const s = session("s1", "acct-a", [candidate("q2", "cxbl-q2")], current);
+
+  const projected = projectBulkSessionFromAccountSnapshot(
+    s,
+    [],
+    { now: new Date("2026-06-23T12:00:00.000Z") },
+  );
+
+  assert.equal(projected.changed, true);
+  assert.equal(projected.matchStatus, "held-review");
+  assert.equal(projected.transitionKind, "held-review");
+  assert.equal(projected.terminalObservations.length, 1);
+  assert.equal(projected.terminalObservations[0].candidate.queueItemId, "q1");
+  assert.equal(projected.terminalObservations[0].candidate.uii, "u1");
+  assert.equal(projected.after.current, null);
+  assert.equal(projected.after.completed.length, 1);
+  assert.equal(projected.after.completed[0].queueItemId, "q1");
+  assert.equal(projected.after.trace.accountActiveCallWatcher.currentReleased, true);
+});
+
 test("projectBulkSessionFromAccountSnapshot respects a review hold before promoting the next active call", () => {
   const held = {
     ...session("s1", "acct-a", [candidate("q2", "cxbl-q2")], null),
@@ -365,5 +419,129 @@ test("runCxAccountActiveCallWatchOnce writes terminal observations for released 
   assert.equal(terminalWrites[0].outcome, "did_not_connect");
   assert.equal(writes.length, 1);
   assert.equal(writes[0].patch.current, null);
+  assert.equal(result.applied.terminalWriteCount, 1);
+});
+
+test("a different active call while current exists terminalizes prior current before promotion", async () => {
+  const writes = [];
+  const terminalWrites = [];
+  const current = { ...candidate("q1", "cxbl-q1"), uii: "u1" };
+  const s1 = session("s1", "acct-a", [candidate("q2", "cxbl-q2")], current);
+  const sessionRepository = {
+    async listActiveBulkLoadSessions() { return [s1]; },
+    async updateBulkLoadSession(sessionId, patch) { writes.push({ sessionId, patch }); return patch; },
+  };
+  const client = { async listActiveCalls() { return [{ externalId: "cxbl-q2", uii: "u2" }]; } };
+
+  const result = await runCxAccountActiveCallWatchOnce({
+    sessionRepository,
+    client,
+    queueStateAdapter: { async markCandidateServing() { return null; } }, // CAS miss for B
+    outcomeAdapter: {
+      async persistTerminalOutcome(input) { terminalWrites.push(input); return { written: true }; },
+    },
+    now: new Date("2026-06-23T12:00:00.000Z"),
+  });
+
+  assert.equal(result.applied.skippedCount, 1, "incoming promotion still requires the serving CAS");
+  assert.equal(result.applied.skipped[0].reason, "serving-ownership-stamp-miss");
+  assert.equal(writes.length, 0, "the incoming lead is not promoted when its serving stamp misses");
+  assert.equal(terminalWrites.length, 1, "the departed current is still terminalized");
+  assert.equal(terminalWrites[0].source, "active-call-switch");
+  assert.equal(terminalWrites[0].candidate.queueItemId, "q1");
+  assert.equal(terminalWrites[0].candidate.uii, "u1");
+  assert.equal(terminalWrites[0].outcome, "did_not_connect");
+});
+
+test("#10 a stale projection is rejected BEFORE the serving CAS fires (no orphan serving stamp)", async () => {
+  // loadLatestState reports a newer __v than the projection was built from -> the promotion is
+  // stale; the serving stamp (a Mongo side-effect) must NOT fire and no session write happens.
+  const writes = [];
+  const servingAttempts = [];
+  const s1 = { ...session("s1", "acct-a", [candidate("q1", "cxbl-q1")]), __v: 1 };
+  const sessionRepository = {
+    async listActiveBulkLoadSessions() { return [s1]; },
+    async updateBulkLoadSession(sessionId, patch) { writes.push({ sessionId, patch }); return patch; },
+  };
+  const client = { async listActiveCalls() { return [{ externalId: "cxbl-q1", uii: "u1" }]; } };
+
+  const result = await runCxAccountActiveCallWatchOnce({
+    sessionRepository,
+    client,
+    loadLatestState: async () => ({ ...s1, __v: 2 }), // concurrent mutation bumped the version
+    queueStateAdapter: { async markCandidateServing(input) { servingAttempts.push(input); return { ok: true }; } },
+    now: new Date("2026-06-23T12:00:00.000Z"),
+  });
+
+  assert.equal(servingAttempts.length, 0, "serving stamp must not fire on a stale projection");
+  assert.equal(writes.length, 0, "no session write on a stale projection");
+  assert.equal(result.applied.skipped[0].reason, "stale-projection-apply");
+});
+
+test("#10 happy path: latest __v matches -> the serving CAS fires once and the session writes", async () => {
+  const writes = [];
+  const servingAttempts = [];
+  const s1 = { ...session("s1", "acct-a", [candidate("q1", "cxbl-q1")]), __v: 5 };
+  const sessionRepository = {
+    async listActiveBulkLoadSessions() { return [s1]; },
+    async updateBulkLoadSession(sessionId, patch) { writes.push({ sessionId, patch }); return patch; },
+  };
+  const client = { async listActiveCalls() { return [{ externalId: "cxbl-q1", uii: "u1" }]; } };
+
+  const result = await runCxAccountActiveCallWatchOnce({
+    sessionRepository,
+    client,
+    loadLatestState: async () => ({ ...s1, __v: 5 }), // unchanged
+    queueStateAdapter: { async markCandidateServing(input) { servingAttempts.push(input); return { ok: true }; } },
+    now: new Date("2026-06-23T12:00:00.000Z"),
+  });
+
+  assert.equal(servingAttempts.length, 1);
+  assert.equal(writes.length, 1);
+  assert.equal(result.applied.writeCount, 1);
+});
+
+test("#6 a version-miss on a released current re-reads + re-projects terminal evidence", async () => {
+  // A is current and RingCX omits it. The first session write version-misses (a concurrent
+  // writer bumped __v); the retry re-reads the latest row, re-projects against the same empty active
+  // snapshot, and still writes the release without dropping terminal evidence.
+  const writes = [];
+  const terminalWrites = [];
+  const current = { ...candidate("q1", "cxbl-q1"), uii: "u1" };
+  const s1 = {
+    ...session("s1", "acct-a", [], current),
+    __v: 1,
+    prevActiveExternIds: ["cxbl-q1"],
+    trace: { prevActiveCalls: [{ externId: "cxbl-q1", uii: "u1" }] },
+  };
+  let updateCalls = 0;
+  const sessionRepository = {
+    async listActiveBulkLoadSessions() { return [s1]; },
+    async updateBulkLoadSession(sessionId, patch) {
+      updateCalls += 1;
+      if (updateCalls === 1) return null; // version-miss on the first attempt
+      writes.push({ sessionId, patch });
+      return patch;
+    },
+  };
+  const client = { async listActiveCalls() { return []; } };
+
+  const result = await runCxAccountActiveCallWatchOnce({
+    sessionRepository,
+    client,
+    loadLatestState: async () => ({ ...s1, __v: 2 }), // bumped row still carries the release anchors
+    outcomeAdapter: {
+      async persistTerminalOutcome(input) { terminalWrites.push(input); return { written: true }; },
+    },
+    now: new Date("2026-06-23T12:00:00.000Z"),
+  });
+
+  assert.equal(updateCalls, 2, "first write misses, retry re-attempts");
+  assert.equal(writes.length, 1, "the retry persists the release observation");
+  assert.equal(writes[0].patch.current, null);
+  assert.equal(writes[0].patch.completed[0].queueItemId, "q1");
+  assert.equal(terminalWrites.length, 1, "a RingCX-proven released current is counted");
+  assert.equal(terminalWrites[0].candidate.queueItemId, "q1");
+  assert.equal(terminalWrites[0].candidate.uii, "u1");
   assert.equal(result.applied.terminalWriteCount, 1);
 });

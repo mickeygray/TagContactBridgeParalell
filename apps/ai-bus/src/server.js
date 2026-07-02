@@ -75,6 +75,7 @@ const {
   createSummaryTransport,
   createStubTransport,
 } = require("./coachBatchTransports");
+const { createSoloTransport } = require("./coachSoloTransport");
 const {
   resolveLiveCoachRuntimeMode,
 } = require("../../../packages/shared-services/src/liveCoachRuntimeModeService");
@@ -3480,8 +3481,23 @@ async function main() {
   }
   const liveCoachStubTransport = liveCoachStubRequested && !liveCoachIsProduction;
   let liveCoachCodexClient = null;
+  // Coach lane selector: "batch" (3-lane reactor/deep/summary, default) or "solo" (one
+  // Sonnet call on the deep big prompt every ~10s). Solo rides the same batch session routing.
+  const coachMode = cleanText(process.env.LIVE_COACH_COACH_MODE || "batch", 12).toLowerCase();
+  const liveCoachSoloMode = liveCoachBatchEnabled && coachMode === "solo";
   const batchModelRunners = liveCoachBatchEnabled
-    ? (liveCoachStubTransport
+    ? (liveCoachSoloMode
+      ? {
+        // COLLAPSED single-call coach. Dev stub drives the SAME loop with canned deep
+        // guidance; otherwise the real Sonnet transport on its own metered key.
+        runSolo: liveCoachStubTransport
+          ? createStubTransport({ logger, kind: "deep" })
+          : createSoloTransport({ logger }),
+        runReactor: null,
+        runDeep: null,
+        runSummary: null,
+      }
+      : liveCoachStubTransport
       ? {
         runReactor: createStubTransport({ logger, kind: "reactor" }),
         runDeep: createStubTransport({ logger, kind: "deep" }),
@@ -3528,6 +3544,9 @@ async function main() {
       reactorIntervalMs: Math.max(1000, Number(process.env.LIVE_COACH_REACTOR_INTERVAL_MS || 4000) || 4000),
       deepIntervalMs: Math.max(15000, Number(process.env.LIVE_COACH_DEEP_INTERVAL_MS || 60000) || 60000),
       summaryIntervalMs: Math.max(30000, Number(process.env.LIVE_COACH_SUMMARY_INTERVAL_MS || 120000) || 120000),
+      // Solo (collapsed single-call) coach cadence + growth gate.
+      soloIntervalMs: Math.max(2000, Number(process.env.LIVE_COACH_SOLO_INTERVAL_MS || 10000) || 10000),
+      soloGrowthGated: boolFromEnv(process.env.LIVE_COACH_SOLO_GROWTH_GATED, true),
       batchOptions: { maxSessions: Math.max(1, Number(process.env.LIVE_COACH_BATCH_MAX_SESSIONS || 12) || 12) },
     },
     // semantic_vad only decides when STT should release text. This optional API judge is the
@@ -3571,9 +3590,11 @@ async function main() {
   const callStrategist = createOpusCallStrategist({ logger });
   const resolutionPitchAgent = createOpusResolutionPitchAgent({ logger });
   if (liveCoachBatchEnabled) {
-    const startedLoop = coachBus.startFloorCoach();
+    const startedLoop = liveCoachSoloMode ? coachBus.startSoloCoach() : coachBus.startFloorCoach();
     logger.info("live_coach.floor_coach.config", {
       enabled: true,
+      coachMode,
+      solo: liveCoachSoloMode,
       started: Boolean(startedLoop),
       reactor: Boolean(batchModelRunners && batchModelRunners.runReactor),
       deep: Boolean(batchModelRunners && batchModelRunners.runDeep),
@@ -4593,6 +4614,7 @@ async function main() {
     if (staleSweepTimer) clearInterval(staleSweepTimer);
     try {
       coachBus.stopFloorCoach();
+      coachBus.stopSoloCoach();
       if (batchModelRunners?.runSummary?.stop) {
         batchModelRunners.runSummary.stop();
       }

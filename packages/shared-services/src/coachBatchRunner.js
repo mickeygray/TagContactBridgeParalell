@@ -352,6 +352,41 @@ function stripFences(text) {
     .trim();
 }
 
+/**
+ * Parse model JSON that may be lightly malformed. Sonnet occasionally emits a trailing comma
+ * before a closing } or ] (observed ~1/28 strategist regrounds in the 7-fixture scale eval) — strict
+ * JSON.parse rejects it and the whole reground is lost. This repairs the KNOWN-safe failure modes
+ * (code fences, a trailing comma, a leading/trailing prose wrapper around the outermost object/array)
+ * and returns null only when the text is genuinely not JSON. The trailing-comma strip only matches a
+ * comma immediately followed by whitespace-then-brace, so commas INSIDE string values are never touched.
+ */
+function repairModelJson(text) {
+  const raw = stripFences(text);
+  if (!raw) return null;
+  const attempt = (candidate) => {
+    try {
+      return JSON.parse(candidate);
+    } catch (_error) {
+      return undefined;
+    }
+  };
+  // 1. strict
+  let out = attempt(raw);
+  if (out !== undefined) return out;
+  // 2. strip trailing commas (`, }` / `, ]`), then retry
+  const noTrailingCommas = raw.replace(/,(\s*[}\]])/g, "$1");
+  out = attempt(noTrailingCommas);
+  if (out !== undefined) return out;
+  // 3. isolate the outermost object/array (drop any prose wrapper), repair its trailing commas, retry
+  const first = raw.search(/[[{]/);
+  const last = Math.max(raw.lastIndexOf("}"), raw.lastIndexOf("]"));
+  if (first !== -1 && last > first) {
+    out = attempt(raw.slice(first, last + 1).replace(/,(\s*[}\]])/g, "$1"));
+    if (out !== undefined) return out;
+  }
+  return null;
+}
+
 function coerceResponse(res) {
   if (res && typeof res === "object") {
     if (res.json && typeof res.json === "object" && (Array.isArray(res.json.guidance) || Array.isArray(res.json.items))) {
@@ -363,11 +398,8 @@ function coerceResponse(res) {
     return res;
   }
   if (typeof res === "string") {
-    try {
-      return JSON.parse(stripFences(res));
-    } catch (_error) {
-      return { guidance: [] };
-    }
+    const parsed = repairModelJson(res);
+    return parsed == null ? { guidance: [] } : parsed;
   }
   return { guidance: [] };
 }
@@ -614,6 +646,8 @@ module.exports = {
   // the repair layer — guarantee the canonical object for a tier
   repairGuidanceRow,
   repairSayItem,
+  // lenient parse for lightly-malformed model JSON (trailing commas, prose wrapper); null if not JSON
+  repairModelJson,
   // exported for tests / inspection
   renderConversation,
   buildGuidanceSchema,

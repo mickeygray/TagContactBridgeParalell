@@ -60,7 +60,9 @@ export interface CxBulkLoadSession {
 
 export interface CxBulkLoadReviewOutcomeResult {
   ok: boolean;
-  updated: boolean;
+  updated?: boolean;
+  recorded?: boolean;
+  deduped?: boolean;
   reason?: string | null;
   sessionId?: string | null;
   queueItemId?: string | null;

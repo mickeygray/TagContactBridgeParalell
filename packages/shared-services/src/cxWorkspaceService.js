@@ -86,9 +86,16 @@ const {
   primeCxBucketNewCalls,
 } = require("./cxDialQueueMediatorService");
 const {
+  isCxBulkLoadRuntime,
+  resolveCxDialRuntimeMode,
+} = require("./cxDialRuntimeModeService");
+const {
   cancelCxAppointmentsForCase,
   resolveCxAppointmentAfterDisposition,
 } = require("./cxAppointmentService");
+const {
+  resolveCaseContactEligibility,
+} = require("./contactEligibilityService");
 const { extractPaymentRows } = require("./paymentReconcileService");
 const { deriveQueueFamily } = require("./cxLoadBalancerService");
 const {
@@ -2760,6 +2767,35 @@ function isCxBlockedLeadCadence(doc = {}) {
   return Boolean(cxDnc?.blocked || doc.dncCheckpoints?.hit);
 }
 
+async function isCxMaterializationContactEligible(domain, caseId, options = {}) {
+  const normalizedCaseId = Number(caseId);
+  if (!Number.isFinite(normalizedCaseId)) {
+    return { ok: false, reason: "invalid-case-id" };
+  }
+  try {
+    const eligibility = await resolveCaseContactEligibility(domain, normalizedCaseId, {
+      enforceStop: true,
+      requireFreshLogicsStatus: true,
+      currentStage: "contact-blocked",
+      sourceService: options.sourceService || "cx-workspace-refill",
+      now: options.now || new Date(),
+    });
+    return {
+      ok: Boolean(eligibility?.ok),
+      reason: eligibility?.reason || null,
+      detail: eligibility?.detail || null,
+      liveLogicsStatus: eligibility?.liveLogicsStatus ?? null,
+      enforced: Boolean(eligibility?.enforcement),
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      reason: "contact-eligibility-check-failed",
+      detail: error?.message || String(error),
+    };
+  }
+}
+
 function readCadenceCxTouchState(cadence = {}) {
   const counter = cadence?.counterCadence && typeof cadence.counterCadence === "object"
     ? cadence.counterCadence
@@ -3014,6 +3050,8 @@ async function materializeDay2To15QueueItems(domain, neededCount, options = {}) 
       now,
     });
     if (policyBlock.blocked) continue;
+    const eligibility = await isCxMaterializationContactEligible(normalizedDomain, caseId, { now });
+    if (!eligibility.ok) continue;
     const activeDay = businessAgeDays + 1;
     await cxDialQueueRepository.upsertQueueItem(
       normalizedDomain,
@@ -3119,6 +3157,8 @@ async function materializeDay16To30QueueItems(domain, neededCount, options = {})
       now,
     });
     if (policyBlock.blocked) continue;
+    const eligibility = await isCxMaterializationContactEligible(normalizedDomain, caseId, { now });
+    if (!eligibility.ok) continue;
     const activeDay = businessAgeDays + 1;
     await cxDialQueueRepository.upsertQueueItem(
       normalizedDomain,
@@ -3229,6 +3269,8 @@ async function materializeAgedQueueItems(domain, neededCount, options = {}) {
       now,
     });
     if (policyBlock.blocked) continue;
+    const eligibility = await isCxMaterializationContactEligible(normalizedDomain, caseId, { now });
+    if (!eligibility.ok) continue;
 
     await cxDialQueueRepository.upsertQueueItem(
       normalizedDomain,
@@ -3309,6 +3351,8 @@ async function materializeAgedQueueItems(domain, neededCount, options = {}) {
       now,
     });
     if (policyBlock.blocked) continue;
+    const eligibility = await isCxMaterializationContactEligible(normalizedDomain, caseId, { now });
+    if (!eligibility.ok) continue;
 
     await cxDialQueueRepository.upsertQueueItem(
       normalizedDomain,
@@ -7022,6 +7066,15 @@ async function hangupCxCallAfterDisposition({
 
 async function requestCxDial(domain, user, input = {}) {
   const context = await ensureCxAgentExtensionContext(await resolveCxUserContext(domain, user), user);
+  const runtime = resolveCxDialRuntimeMode({
+    userEmail: context.account?.email || user?.email || null,
+  });
+  if (isCxBulkLoadRuntime(runtime)) {
+    const err = new Error("Bulk load mode owns dialing for this agent; use the bulk-load rail instead of the legacy dial command.");
+    err.status = 409;
+    err.code = "cx-bulk-load-legacy-dial-blocked";
+    throw err;
+  }
   const phone = String(input.phone || "").trim();
   if (!phone) {
     const err = new Error("phone is required");

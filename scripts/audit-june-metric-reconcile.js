@@ -318,7 +318,7 @@ async function tagInitialReconciliation({ domain, start, end }) {
   };
 }
 
-const LD_REGEX = /(^|[^a-z0-9])(ld|ldcustom|ldcustom2|ldgeneral|ld-posting|lead[\s_-]*data)([^a-z0-9]|$)/i;
+const LD_REGEX = /(^|[^a-z0-9])(ld|ldcustom|ldcustom2|ldcustom3|ldgeneral|ld-posting|lead[\s_-]*data)([^a-z0-9]|$)/i;
 const MAILER_REGEX =
   /(^|[^a-z])(mailer|mail[-_\s]?intake|ncoa|lexis|lien|regional|urgent third|affordability|abc)([^a-z]|$)/i;
 
@@ -355,6 +355,7 @@ function ldHaystack(row = {}) {
 
 function classifyLdFamily(row = {}) {
   const text = ldHaystack(row);
+  if (/ld[\s_-]*custom[\s_-]*3|ldcustom3|custom[\s_-]*3|sourceid[\s_-]*48/.test(text)) return "ld-custom-3";
   if (/ld[\s_-]*custom[\s_-]*2|ldcustom2|custom[\s_-]*2|sourceid[\s_-]*47/.test(text)) return "ld-custom-2";
   if (/ld[\s_-]*custom|ldcustom|sourceid[\s_-]*45/.test(text)) return "ld-custom";
   if (/ld[\s_-]*general|ldgeneral|general/.test(text)) return "ld-general";

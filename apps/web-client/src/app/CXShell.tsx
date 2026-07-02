@@ -1,5 +1,5 @@
 import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
-import { ArrowLeft, GraduationCap, Headphones, Headset, Inbox, LogOut } from "lucide-react";
+import { ArrowLeft, BookOpen, GraduationCap, Headphones, Headset, Inbox, LogOut } from "lucide-react";
 import { Button } from "@/components/ui/Button";
 import { CaseInspector } from "@/components/ui/CaseInspector";
 import { ErrorBoundary } from "@/components/ui/ErrorBoundary";
@@ -20,6 +20,7 @@ const CX_NAV: CxNavItem[] = [
   { to: "/cx/inbox", label: "SMS", icon: Inbox },
   { to: "/cx/call-library", label: "Calls", icon: Headphones },
   { to: "/cx/coach", label: "Coach", icon: GraduationCap },
+  { to: "/cx/manual", label: "Manual", icon: BookOpen },
 ];
 
 export function CXShell() {

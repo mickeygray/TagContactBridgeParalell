@@ -57,7 +57,10 @@ const {
   readCxMorningQueueBuilderOptionsFromEnv,
   runCxMorningQueueBuilder,
 } = require("../../../packages/shared-services/src/cxMorningQueueBuilderService");
-const { getCxRuntimeMode } = require("../../../packages/shared-services/src/cxRuntimeModeService");
+const {
+  getCxRuntimeMode,
+  isBulkLoadAlphaRuntime,
+} = require("../../../packages/shared-services/src/cxRuntimeModeService");
 const {
   assignCxQueueBatch,
   cancelCxQueueItem,
@@ -491,6 +494,14 @@ async function startServer() {
   app.use(express.static(path.resolve(__dirname, "..", "public")));
 
   async function startCxCadenceWorker() {
+    if (bulkLoadAlphaRuntime) {
+      cadenceWorkerState.enabled = false;
+      runtime.logger.warn("ringcentral.cx_cadence.disabled", {
+        reason: "bulk-load-alpha-runtime",
+      });
+      return;
+    }
+
     const cadenceWorkerEnabledRaw =
       process.env.RC_CX_CADENCE_WORKER_ENABLED
       ?? config.ringCentralCxCadenceWorker?.enabled
@@ -729,6 +740,15 @@ async function startServer() {
   }
 
   function startFreshHotLaneWorker() {
+    if (bulkLoadAlphaRuntime) {
+      freshHotLaneState.enabled = false;
+      freshHotLaneMorningState.enabled = false;
+      runtime.logger?.warn?.("ringcentral.cx_fresh_hot_lane.disabled", {
+        reason: "bulk-load-alpha-runtime",
+      });
+      return;
+    }
+
     const enabled = String(process.env.RC_CX_FRESH_HOT_LANE_ENABLED || "true").toLowerCase() !== "false";
     freshHotLaneState.enabled = enabled;
     freshHotLaneMorningState.enabled = enabled;
@@ -1088,8 +1108,10 @@ async function startServer() {
     });
   }
 
+  const bulkLoadAlphaRuntime = isBulkLoadAlphaRuntime();
   const staleDialSweepEnabled =
-    String(process.env.RCX_STALE_DIAL_SWEEP_ENABLED || "true").toLowerCase() !== "false";
+    !bulkLoadAlphaRuntime
+    && String(process.env.RCX_STALE_DIAL_SWEEP_ENABLED || "true").toLowerCase() !== "false";
   const staleDialSweepIntervalMs = Math.max(
     Number(process.env.RCX_STALE_DIAL_SWEEP_INTERVAL_MS) || 30_000,
     10_000,
@@ -1123,11 +1145,14 @@ async function startServer() {
       intervalMs: staleDialSweepIntervalMs,
     });
   } else {
-    runtime.logger?.info?.("dial.staleSweep.disabled");
+    runtime.logger?.info?.("dial.staleSweep.disabled", {
+      reason: bulkLoadAlphaRuntime ? "bulk-load-alpha-runtime" : "env-disabled",
+    });
   }
 
   const ringcxAgentMonitorEnabled =
-    String(process.env.RINGCX_AGENT_MONITOR_ENABLED || "true").toLowerCase() !== "false";
+    !bulkLoadAlphaRuntime
+    && String(process.env.RINGCX_AGENT_MONITOR_ENABLED || "true").toLowerCase() !== "false";
   const ringcxAgentMonitorIntervalMs = Math.max(
     Number(process.env.RINGCX_AGENT_MONITOR_INTERVAL_MS) || 30_000,
     10_000,
@@ -1163,7 +1188,9 @@ async function startServer() {
       intervalMs: ringcxAgentMonitorIntervalMs,
     });
   } else {
-    runtime.logger?.info?.("ringcx.agentMonitor.disabled");
+    runtime.logger?.info?.("ringcx.agentMonitor.disabled", {
+      reason: bulkLoadAlphaRuntime ? "bulk-load-alpha-runtime" : "env-disabled",
+    });
   }
 
   app.get("/health", requireHealthAccess, (req, res) => {
@@ -2292,6 +2319,11 @@ async function startServer() {
 
     res.status(200).send("OK");
 
+    runtime.logger.info("ringcentral.ex.webhook.ack_only", {
+      reason: "cx-bulk-alpha-test-disable-ex-presence-side-effects",
+    });
+
+    /*
     // Presence webhooks share the same RC subscription as session
     // events, so a delivery here also counts as proof-of-life.
     recordRingcentralEvent("ringcentral.ex.presence");
@@ -2308,6 +2340,7 @@ async function startServer() {
         error: error.message,
       });
     }
+    */
   }
 
   app.post("/webhook/ex", handlePresenceWebhook);

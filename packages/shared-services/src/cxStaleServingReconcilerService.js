@@ -121,7 +121,17 @@ function resolveServingIdentity(row = {}) {
       || metadata.lastRingcxPublishedAccountId
       || metadata.lastDialExecutionAccountId,
   );
-  const dequeueRaw = metadata.lastRingcxMonitorActiveCall && metadata.lastRingcxMonitorActiveCall.raw;
+  // dequeueTime source. The legacy slow-lane monitor stamps it under lastRingcxMonitorActiveCall.raw;
+  // the BULK serving stamp carries it flat on lastRingcxActiveCall (normalizeActiveCall). Read both —
+  // the bulk field is the one populated for the rows this diagnostic targets. (.raw fallback kept for
+  // any summary shape that nests it.)
+  const monitorRaw = metadata.lastRingcxMonitorActiveCall && metadata.lastRingcxMonitorActiveCall.raw;
+  const bulkActive = metadata.lastRingcxActiveCall;
+  const dequeueTimeValue =
+    (monitorRaw && monitorRaw.dequeueTime != null) ? monitorRaw.dequeueTime
+      : (bulkActive && bulkActive.dequeueTime != null) ? bulkActive.dequeueTime
+        : (bulkActive && bulkActive.raw && bulkActive.raw.dequeueTime != null) ? bulkActive.raw.dequeueTime
+          : null;
   return {
     queueItemId: str(row._id || row.queueItemId),
     caseId: row.caseId != null ? row.caseId : null,
@@ -136,7 +146,7 @@ function resolveServingIdentity(row = {}) {
     servingAtMs: timeMs(metadata.servingAt),
     // dequeueTime is CORROBORATING ONLY (unreliable — a real terminal was seen with dequeueTime:null
     // and Bruce had it set). It RAISES confidence; it is never load-bearing on its own.
-    dequeueTime: dequeueRaw && dequeueRaw.dequeueTime != null ? dequeueRaw.dequeueTime : null,
+    dequeueTime: dequeueTimeValue,
   };
 }
 
@@ -253,15 +263,21 @@ function classifyStaleServingRow({
       verdict: "stale-shell",
     };
   }
-  // idle shape. An EMPTY account snapshot with no dequeue corroboration is LOW confidence (could be a
-  // pause/lull, not a real release) and is NOT actionable.
+  // idle shape. NOT actionable when either:
+  //  (a) an EMPTY account snapshot with no dequeue corroboration (could be a pause/lull, not a real
+  //      release), OR
+  //  (b) the snapshot carried active calls but NONE bore an agentId (agentMap empty while the snapshot
+  //      is non-empty) -> the agent-advanced check above ran BLIND, so we cannot rule out THIS agent
+  //      being live on an unattributable replacement call. Down-rank rather than over-report it idle.
+  const agentAdvancedBlind = Boolean(id.agentKey) && agentMap.size === 0 && !emptyAccountSnapshot;
   const lowConfidence = emptyAccountSnapshot && id.dequeueTime == null;
+  const notActionable = lowConfidence || agentAdvancedBlind;
   return {
     ...base,
     shape: "idle-stale-shell",
-    confidence: lowConfidence ? "low-empty-snapshot" : "high",
-    actionable: !lowConfidence,
-    recommendedAction: lowConfidence ? "observe-only" : "release-shell-and-observe", // DIAGNOSTIC — not executed
+    confidence: lowConfidence ? "low-empty-snapshot" : (agentAdvancedBlind ? "low-agent-visibility" : "high"),
+    actionable: !notActionable,
+    recommendedAction: notActionable ? "observe-only" : "release-shell-and-observe", // DIAGNOSTIC — not executed
     verdict: "stale-shell",
   };
 }

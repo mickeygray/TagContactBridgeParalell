@@ -8,6 +8,7 @@ const {
   REACTOR,
   repairGuidanceRow,
   parseBatchGuidance,
+  repairModelJson,
 } = require("../../packages/shared-services/src/coachBatchRunner");
 
 const DEEP_KEYS = ["sessionId", "uii", "agentEmail", "currentSection", "beats", "remember", "says", "priorFlags"];
@@ -120,4 +121,58 @@ test("parse auto-detects the tier per row when not told", () => {
   const parsed = parseBatchGuidance(mixed); // no tier passed
   assert.ok(Array.isArray(parsed.guidance[0].beats), "row 1 repaired as deep");
   assert.equal(parsed.guidance[1].say.text, "go", "row 2 repaired as reactor");
+});
+
+// ── repairModelJson — lenient parse for lightly-malformed model output ──────────
+// Motivated by the 7-fixture scale eval: Sonnet emitted a trailing comma before the closing brace on
+// ~1/28 strategist regrounds; strict JSON.parse dropped the whole reground to {guidance:[]}.
+
+test("repairModelJson: clean JSON parses (object and array)", () => {
+  assert.deepEqual(repairModelJson('{"a":1,"b":[2,3]}'), { a: 1, b: [2, 3] });
+  assert.deepEqual(repairModelJson('[{"x":1},{"y":2}]'), [{ x: 1 }, { y: 2 }]);
+});
+
+test("repairModelJson: a trailing comma before } or ] is repaired", () => {
+  assert.deepEqual(repairModelJson('{"a":1,"b":2,}'), { a: 1, b: 2 });
+  assert.deepEqual(repairModelJson('{"list":["a","b",]}'), { list: ["a", "b"] });
+  assert.deepEqual(repairModelJson('{"a":1,\n  "b":2 ,\n}'), { a: 1, b: 2 }, "whitespace/newline before the brace");
+});
+
+test("repairModelJson: reproduces the live failure shape (summary + trailing comma)", () => {
+  const raw = '{"guidance":[{"currentSection":"4B","says":[{"type":"tactic","rec":true,"text":"Take the yes."}]}],"summary":"He leaned toward the four-month option but wants to loop in his wife before signing anything.",\n}';
+  const out = repairModelJson(raw);
+  assert.ok(out && Array.isArray(out.guidance), "recovered instead of null");
+  assert.equal(out.guidance[0].currentSection, "4B");
+  assert.ok(out.summary.includes("four-month"));
+});
+
+test("repairModelJson: a comma INSIDE a string value is never touched", () => {
+  // The comma in "half today, half next month" must survive — only comma-before-brace is stripped.
+  const out = repairModelJson('{"text":"half today, half next month","n":1,}');
+  assert.equal(out.text, "half today, half next month");
+  assert.equal(out.n, 1);
+});
+
+test("repairModelJson: code fences and a prose wrapper are stripped", () => {
+  assert.deepEqual(repairModelJson('```json\n{"a":1}\n```'), { a: 1 });
+  assert.deepEqual(
+    repairModelJson('Here is the JSON you asked for:\n{"a":1,"b":2,}\nHope that helps!'),
+    { a: 1, b: 2 },
+    "outermost object is isolated out of the prose and repaired",
+  );
+});
+
+test("repairModelJson: genuinely non-JSON returns null (caller falls back to empty)", () => {
+  for (const junk of ["", "   ", "not json at all", "{unclosed", null, undefined]) {
+    assert.equal(repairModelJson(junk), null, `null for: ${JSON.stringify(junk)}`);
+  }
+});
+
+test("parseBatchGuidance: a raw string with a trailing comma now survives end-to-end (production path)", () => {
+  // Previously coerceResponse dropped this to {guidance:[]}; now the reground is recovered.
+  const raw = '{"guidance":[{"sessionId":"s1","currentSection":"4B","says":[{"type":"tactic","rec":true,"text":"Lock the split."}],}],"summary":"at the fee",}';
+  const parsed = parseBatchGuidance(raw, { tier: DEEP_PULL });
+  assert.equal(parsed.guidance.length, 1, "the row is recovered, not dropped");
+  assert.equal(parsed.guidance[0].currentSection, "4B");
+  assert.equal(parsed.guidance[0].says.filter((s) => s.rec).length, 1);
 });

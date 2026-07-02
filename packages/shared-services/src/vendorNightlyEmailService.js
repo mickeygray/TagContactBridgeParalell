@@ -34,7 +34,7 @@ const DEFAULT_TIMEZONE = "America/Los_Angeles";
 const DEFAULT_MAX_CALL_ROWS = 10000;
 const DEFAULT_MAX_LEAD_ROWS = 20000;
 const DEFAULT_MAX_PAYMENT_ROWS = 20000;
-const LD_VENDOR_FAMILY_KEYS = new Set(["ld-custom", "ld-custom-2", "ld-general"]);
+const LD_VENDOR_FAMILY_KEYS = new Set(["ld-custom", "ld-custom-2", "ld-custom-3", "ld-general"]);
 
 function normalizeDomain(domain) {
   return String(domain || "").trim().toUpperCase();
@@ -60,6 +60,7 @@ function ldFamilyEstimatedCost(row = {}) {
   const key = vendorFamilyKey(row);
   if (key === "ld-custom") return leads * 3;
   if (key === "ld-custom-2") return leads * 3;
+  if (key === "ld-custom-3") return leads * 3;
   if (key === "ld-general") return leads * 2;
   return 0;
 }
@@ -78,27 +79,34 @@ function sumVendorRows(rows = [], field) {
 function buildLdCostSummary(rows = []) {
   const custom = rows.find((row) => vendorFamilyKey(row) === "ld-custom") || {};
   const custom2 = rows.find((row) => vendorFamilyKey(row) === "ld-custom-2") || {};
+  const custom3 = rows.find((row) => vendorFamilyKey(row) === "ld-custom-3") || {};
   const general = rows.find((row) => vendorFamilyKey(row) === "ld-general") || {};
   const customCount = toNumber(custom.leads);
   const custom2Count = toNumber(custom2.leads);
+  const custom3Count = toNumber(custom3.leads);
   const generalCount = toNumber(general.leads);
   const customRate = 3;
   const custom2Rate = 3;
+  const custom3Rate = 3;
   const generalRate = 2;
   const customCost = customCount * customRate;
   const custom2Cost = custom2Count * custom2Rate;
+  const custom3Cost = custom3Count * custom3Rate;
   const generalCost = generalCount * generalRate;
   return {
     customCount,
     custom2Count,
+    custom3Count,
     generalCount,
     customRate,
     custom2Rate,
+    custom3Rate,
     generalRate,
     customCost,
     custom2Cost,
+    custom3Cost,
     generalCost,
-    total: customCost + custom2Cost + generalCost,
+    total: customCost + custom2Cost + custom3Cost + generalCost,
   };
 }
 
@@ -876,7 +884,7 @@ function buildVendorNightlyBody(domain, dateKey, summary, details, closePass) {
     "",
     "Top line",
     `LD leads: ${sumVendorRows(trackedFamilies, "leads")}`,
-    `LD cost: $${formatCurrency(ldCost.total)} (LD CUSTOM ${ldCost.customCount} x $${ldCost.customRate} + LD CUSTOM 2 ${ldCost.custom2Count} x $${ldCost.custom2Rate} + LD GENERAL ${ldCost.generalCount} x $${ldCost.generalRate})`,
+    `LD cost: $${formatCurrency(ldCost.total)} (LD CUSTOM ${ldCost.customCount} x $${ldCost.customRate} + LD CUSTOM 2 ${ldCost.custom2Count} x $${ldCost.custom2Rate} + LD CUSTOM 3 ${ldCost.custom3Count} x $${ldCost.custom3Rate} + LD GENERAL ${ldCost.generalCount} x $${ldCost.generalRate})`,
     `LD calls: ${sumVendorRows(trackedFamilies, "calls")} (${sumVendorRows(trackedFamilies, "callsOver2")} over 2m, ${sumVendorRows(trackedFamilies, "callsOver5")} over 5m)`,
     `Scored LD calls: ${sumVendorRows(trackedFamilies, "scoredCalls")}`,
     `DNC today: ${sumVendorRows(trackedFamilies, "dncToday")}`,

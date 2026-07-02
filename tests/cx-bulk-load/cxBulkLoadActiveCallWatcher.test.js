@@ -28,7 +28,7 @@ test("deriveReleasedCandidates flags a buffer lead active last poll but gone thi
   assert.equal(released[0].queueItemId, "q1");
   assert.equal(released[0].uii, "u1");
   assert.deepEqual(nextActiveExternIds, ["cxbl-tag-q2"]);
-  assert.deepEqual(nextActiveCalls, [{ externId: "cxbl-tag-q2", uii: "u2", callState: null, dnis: null, ani: null, agentId: null }]);
+  assert.deepEqual(nextActiveCalls, [{ externId: "cxbl-tag-q2", uii: "u2", callState: null, dnis: null, ani: null, agentId: null, dequeueTime: null }]);
 });
 
 test("deriveReleasedCandidates does not count a prior active shell without UII", () => {
@@ -67,6 +67,21 @@ test("deriveCurrentRelease flags current active last poll but gone this poll", (
   });
   assert.equal(released.queueItemId, "q1");
   assert.equal(released.uii, "u1");
+});
+
+test("deriveCurrentRelease releases a UII-bearing current when the prev-active cache is empty", () => {
+  const released = deriveCurrentRelease({
+    current: {
+      ...candidate("q1", "cxbl-tag-q1"),
+      uii: "u1",
+      activeCallSummary: { externId: "cxbl-tag-q1", uii: "u1" },
+    },
+    prevActiveCalls: [],
+    activeCalls: [],
+  });
+  assert.equal(released.queueItemId, "q1");
+  assert.equal(released.uii, "u1");
+  assert.equal(released.activeCallSummary.externId, "cxbl-tag-q1");
 });
 
 test("deriveCurrentRelease does not release a current that is still active", () => {
@@ -137,8 +152,6 @@ test("match different from current -> switch completes prior as did_not_connect 
   const t = deriveCurrentTransition({ queueItemId: "q1" }, match);
   assert.equal(t.kind, "switch");
   assert.equal(t.completePrevious, true);
-  // The departing lead's cadence outcome is did_not_connect; the synthetic label survives
-  // only as a separate debug reason, never as the outcome.
   assert.equal(t.previousOutcome, "did_not_connect");
   assert.equal(t.previousReason, "cx-auto-advanced");
   assert.equal(t.candidate.queueItemId, "q2");
@@ -166,4 +179,9 @@ test("normalizeActiveCall maps externalId/uii/dnis aliases", () => {
   assert.equal(n.externId, "xZ");
   assert.equal(n.uii, "uZ");
   assert.equal(n.dnis, "+15550000");
+});
+
+test("normalizeActiveCall carries dequeueTime through (stale-serving corroboration), null when absent", () => {
+  assert.equal(normalizeActiveCall({ uii: "uZ", dequeueTime: "2026-06-29T18:03:55Z" }).dequeueTime, "2026-06-29T18:03:55Z");
+  assert.equal(normalizeActiveCall({ uii: "uZ" }).dequeueTime, null);
 });

@@ -159,3 +159,43 @@ test("cancelBatchForSession requires campaignId before scoped cancel", async () 
     /campaignId/,
   );
 });
+
+// ── alpha publish-batch observability (the phantom-lead diagnostic) ──
+async function capturePublish(client, input, alphaEnabled) {
+  const prevEnv = process.env.CX_ALPHA_TRACE_ENABLED;
+  const prevInfo = console.info;
+  const logs = [];
+  process.env.CX_ALPHA_TRACE_ENABLED = alphaEnabled ? "true" : "";
+  console.info = (...a) => logs.push(a);
+  try {
+    await publishBatchToRingcx(client, input);
+  } finally {
+    console.info = prevInfo;
+    if (prevEnv === undefined) delete process.env.CX_ALPHA_TRACE_ENABLED;
+    else process.env.CX_ALPHA_TRACE_ENABLED = prevEnv;
+  }
+  return logs.filter((l) => l[0] === "cx.alpha.publish.batch").map((l) => l[1]);
+}
+
+test("publish logs cx.alpha.publish.batch with phantomSuspected when RingCX inserts fewer than accepted", async () => {
+  const client = { loadLeads: async () => ({ processingStatus: "SUCCESS", leadsInserted: 1, rejectedRows: [] }) };
+  const input = { campaignId: "camp1", candidates: [candidate("q1"), candidate("q2")] };
+  const events = await capturePublish(client, input, true);
+  assert.equal(events.length, 1);
+  const p = events[0];
+  assert.equal(p.supplied, 2);
+  assert.equal(p.acceptedCount, 2);
+  assert.equal(p.insertedCount, 1);
+  assert.equal(p.phantomSuspected, true, "accepted 2 but RingCX inserted 1 -> phantom");
+  // PII redaction: no raw phone digits in the payload
+  assert.equal(JSON.stringify(p).includes("5551234567"), false, "raw phone must not leak into the alpha log");
+});
+
+test("publish alpha event is gated off by default (no CX_ALPHA_TRACE_ENABLED)", async () => {
+  const client = { loadLeads: async () => ({ processingStatus: "SUCCESS", leadsInserted: 2, rejectedRows: [] }) };
+  const input = { campaignId: "camp1", candidates: [candidate("q1"), candidate("q2")] };
+  const off = await capturePublish(client, input, false);
+  assert.equal(off.length, 0, "no alpha event when the trace flag is off");
+  const on = await capturePublish(client, input, true);
+  assert.equal(on[0].phantomSuspected, false, "inserted==accepted -> not phantom");
+});

@@ -109,15 +109,6 @@ const LIVE_COACH_PANEL_ENABLED = ["1", "true", "yes", "on"].includes(
 const CX_VOICEMAIL_BUTTON_ENABLED = !["0", "false", "no", "off", "disabled"].includes(
   String(import.meta.env.VITE_CX_VOICEMAIL_BUTTON_ENABLED || "true").trim().toLowerCase(),
 );
-const CX_SIMPLE_LOOP_PANEL_ENV_ENABLED = ["1", "true", "yes", "on"].includes(
-  String(import.meta.env.VITE_CX_SIMPLE_LOOP_PANEL_ENABLED || "").trim().toLowerCase(),
-);
-const CX_SIMPLE_LOOP_PANEL_EMAILS = new Set(
-  String(import.meta.env.VITE_CX_SIMPLE_LOOP_PANEL_EMAILS || "")
-    .split(",")
-    .map((email) => email.trim().toLowerCase())
-    .filter(Boolean),
-);
 type ContactContext = {
   caseId?: string | null;
   name?: string | null;
@@ -266,13 +257,6 @@ function normalizeComparablePhone(value: string | null | undefined) {
   if (!digits) return "";
   if (digits.length === 11 && digits.startsWith("1")) return digits.slice(1);
   return digits.length > 10 ? digits.slice(-10) : digits;
-}
-
-function readCxSimpleLoopPanelEnabled(userIdentifier?: string | null) {
-  void CX_SIMPLE_LOOP_PANEL_ENV_ENABLED;
-  void CX_SIMPLE_LOOP_PANEL_EMAILS;
-  void userIdentifier;
-  return false;
 }
 
 function describeSimpleLoopCurrent(session: CxSimpleLoopSession | null | undefined) {
@@ -3861,12 +3845,17 @@ export function CXWorkspaceBulkLoad() {
 
   // Data
   const workspace = useCxWorkspace(domain);
-  const callQueue = useCxCallQueue(domain);
-  const multiCallQueues = useCxCallQueueMulti(isAdminUser ? availableDomains : []);
-  const simpleLoopPanelEnabled = React.useMemo(
-    () => readCxSimpleLoopPanelEnabled(user?.email || user?.name),
-    [user?.email, user?.name],
+  const legacyQueueEnabled = false;
+  const callQueue = useCxCallQueue(domain, legacyQueueEnabled);
+  const multiCallQueues = useCxCallQueueMulti(
+    legacyQueueEnabled && isAdminUser ? availableDomains : [],
+    legacyQueueEnabled,
   );
+  const refetchLegacyQueue = React.useCallback(() => {
+    if (!legacyQueueEnabled) return Promise.resolve(null);
+    return callQueue.refetch();
+  }, [legacyQueueEnabled, callQueue]);
+  const simpleLoopPanelEnabled = false;
   // M11 gate 11: default to single — the legacy bulk-mirror path is no longer the default mode.
   const [simpleLoopMode, setSimpleLoopMode] = React.useState<"single" | "bulk-mirror">("single");
   const [simpleLoopLimit, setSimpleLoopLimit] = React.useState(30);
@@ -4013,6 +4002,7 @@ export function CXWorkspaceBulkLoad() {
   const bulkSessionEnded = Boolean(bulkSessionId && bulkSessionStatus && bulkSessionStatus !== "running");
   const bulkLastOutcome = bulk.data?.lastOutcome ?? null;
   const bulkReviewHoldUntil = bulk.data?.reviewHoldUntil ?? null;
+  const bulkReviewHoldReason = String(bulk.data?.reviewHoldReason || "").trim();
   const bulkReviewHoldActive = Boolean(
     bulkAutoReview &&
       bulkAutoReview.status === "open" &&
@@ -4429,11 +4419,12 @@ export function CXWorkspaceBulkLoad() {
     const manualTerminal = manualBulkTerminalRef.current;
     if (manualTerminal?.key === key) {
       manualBulkTerminalRef.current = null;
-      if (manualTerminal.disposition !== "did_not_connect") return;
+      return;
     }
 
     const outcome = String(bulkLastOutcome?.outcome || "").trim().toLowerCase();
     if (outcome && outcome !== "did_not_connect") return;
+    if (bulkReviewHoldReason !== "ringcx-current-released") return;
     const releasedAtMs = Date.parse(String(
       (bulkLastOutcome as { releasedAt?: unknown; updatedAt?: unknown } | null)?.releasedAt ||
         (bulkLastOutcome as { releasedAt?: unknown; updatedAt?: unknown } | null)?.updatedAt ||
@@ -4442,16 +4433,15 @@ export function CXWorkspaceBulkLoad() {
     if (Number.isFinite(releasedAtMs) && Date.now() - releasedAtMs > 10_000) return;
 
     const serverExpiresAt = Date.parse(String(bulkReviewHoldUntil || ""));
-    const expiresAt = Number.isFinite(serverExpiresAt) && serverExpiresAt > Date.now()
-      ? serverExpiresAt
-      : Date.now() + 3000;
+    if (!Number.isFinite(serverExpiresAt) || serverExpiresAt <= Date.now()) return;
+    const expiresAt = serverExpiresAt;
     setBulkAutoReview({
       key,
       candidate: bulkLastOutcome as CxBulkLoadCurrent,
       expiresAt,
       status: "open",
     });
-  }, [bulkRunning, bulkLastOutcome, bulkReviewHoldUntil]);
+  }, [bulkRunning, bulkLastOutcome, bulkReviewHoldReason, bulkReviewHoldUntil]);
 
   React.useEffect(() => {
     if (!bulkAutoReview || bulkAutoReview.status !== "open") {
@@ -5022,7 +5012,7 @@ export function CXWorkspaceBulkLoad() {
     setBreakResumeDueAt(null);
     setBreakResumeRemaining(null);
     workspace.refetch();
-    callQueue.refetch();
+    void refetchLegacyQueue();
   }
 
   async function handleBreakTimeoutLogout(reason = "break-timeout") {
@@ -5112,6 +5102,10 @@ export function CXWorkspaceBulkLoad() {
     item: CxCallQueueItem,
     options: { source?: "manual" | "auto" } = {},
   ) {
+    if (bulk.data?.status === "running") {
+      void runBulkPreviewFetchAndDial(options.source === "auto" ? "auto-queue-select" : "queue-select");
+      return;
+    }
     if (options.source !== "auto") cancelAutoServe();
     const contact = contactFromQueue(item);
     const queueKey = buildQueueItemKey(item);
@@ -5243,13 +5237,14 @@ export function CXWorkspaceBulkLoad() {
 
 
   const rawQueueItems = React.useMemo(() => {
+    if (!legacyQueueEnabled) return [];
     return isAdminUser
       ? multiCallQueues.flatMap((query) => {
         const items = Array.isArray(query.data) ? query.data : [];
         return items as CxCallQueueItem[];
       })
       : ((callQueue.data ?? data?.callQueue ?? []) as CxCallQueueItem[]);
-  }, [isAdminUser, multiCallQueues, callQueue.data, data?.callQueue]);
+  }, [legacyQueueEnabled, isAdminUser, multiCallQueues, callQueue.data, data?.callQueue]);
 
   const isQueueItemLocallySuppressed = React.useCallback(
     (item: CxCallQueueItem) => {
@@ -5790,13 +5785,13 @@ export function CXWorkspaceBulkLoad() {
           return;
         }
         releaseLiveCoachForCurrentCall(coachReleaseReason);
-        if (dispositionKey === "did_not_connect") {
-          await runBulkPreviewFetchAndDial("after-no-answer", result);
-          return;
-        }
+        const nextLeadRequested = result?.getLeads?.ok === true;
+        const nextLeadReason = result?.getLeads?.reason || result?.getLeads?.error || null;
         showQueueAdvanceTransition({
-          title: "Loading next lead",
-          description: "Disposition saved. Waiting for RingCX to report who is on the phone now.",
+          title: nextLeadRequested ? "Next lead requested" : "Loading next lead",
+          description: nextLeadReason
+            ? `Disposition saved. RingCX did not accept the next-lead request yet: ${nextLeadReason}.`
+            : "Disposition saved. Waiting for RingCX to report who is on the phone now.",
           blocking: true,
         });
         const refreshed = await bulk.refetch().catch(() => null);
@@ -5815,7 +5810,7 @@ export function CXWorkspaceBulkLoad() {
         }, 3500);
         void bulk.refetch();
         workspace.refetch();
-        callQueue.refetch();
+        void refetchLegacyQueue();
       });
   }
 
@@ -5948,11 +5943,11 @@ export function CXWorkspaceBulkLoad() {
           });
           void bulk.refetch();
           workspace.refetch();
-          callQueue.refetch();
+          void refetchLegacyQueue();
         })
         .catch(() => {
           workspace.refetch();
-          callQueue.refetch();
+          void refetchLegacyQueue();
         });
       return;
     }
@@ -6070,11 +6065,11 @@ export function CXWorkspaceBulkLoad() {
           scheduleAutoServe(AUTO_SERVE_HANDOFF_DELAY_SECONDS, "next");
         }
         workspace.refetch();
-        callQueue.refetch();
+        void refetchLegacyQueue();
       })
       .catch(() => {
         workspace.refetch();
-        callQueue.refetch();
+        void refetchLegacyQueue();
       });
   }
 
@@ -6087,7 +6082,7 @@ export function CXWorkspaceBulkLoad() {
     )
       .then(() => {
         workspace.refetch();
-        callQueue.refetch();
+        void refetchLegacyQueue();
       })
       .catch(() => undefined);
   }
@@ -6116,7 +6111,7 @@ export function CXWorkspaceBulkLoad() {
           });
         }
         workspace.refetch();
-        callQueue.refetch();
+        void refetchLegacyQueue();
       })
       .catch((error) => {
         const classified = classifyCommandError(error);
@@ -6124,7 +6119,7 @@ export function CXWorkspaceBulkLoad() {
           description: classified.description,
         });
         workspace.refetch();
-        callQueue.refetch();
+        void refetchLegacyQueue();
       });
   }
 

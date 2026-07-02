@@ -10,9 +10,10 @@ const {
 } = require("../../packages/shared-services/src/ldSpendService");
 
 // ── pure: resolveLdLeadSpend ──────────────────────────────────────────────────
-test("resolveLdLeadSpend maps LD families to their rate ($3 custom/custom-2, $1.50 general)", () => {
+test("resolveLdLeadSpend maps LD families to their rate ($3 custom/custom-2/custom-3, $1.50 general)", () => {
   assert.deepEqual(resolveLdLeadSpend("ld-custom"), { family: "ld-custom", label: "LD CUSTOM", rate: 3 });
   assert.deepEqual(resolveLdLeadSpend("ld-custom-2"), { family: "ld-custom-2", label: "LD CUSTOM 2", rate: 3 });
+  assert.deepEqual(resolveLdLeadSpend("ld-custom-3"), { family: "ld-custom-3", label: "LD CUSTOM 3", rate: 3 });
   assert.deepEqual(resolveLdLeadSpend("ld-general"), { family: "ld-general", label: "LD GENERAL", rate: 1.5 });
 });
 

@@ -5,6 +5,7 @@ const assert = require("node:assert/strict");
 
 const {
   CX_CADENCE_EVENT_TYPES,
+  buildTerminalAttemptProofPatch,
   classifyCxTerminalOutcome,
   isBulkLoadOwnedCxQueueItem,
 } = require("../../packages/shared-services/src/cxCadenceService");
@@ -83,6 +84,69 @@ test("bulk-owned CX queue rows are identifiable before legacy release paths muta
   assert.equal(isBulkLoadOwnedCxQueueItem({ metadata: { bulkLoadSessionId: "cxbl-1" } }), true);
   assert.equal(isBulkLoadOwnedCxQueueItem({ metadata: { reservationRail: "legacy" } }), false);
   assert.equal(isBulkLoadOwnedCxQueueItem({ metadata: {} }), false);
+});
+
+test("bulk terminal attempt proof counts only UII-backed bulk terminal events", () => {
+  const queueItem = {
+    placedCalls: 0,
+    dailyPlacedCalls: 0,
+    monthlyPlacedCalls: 0,
+  };
+  const placedAt = new Date("2026-06-29T16:00:00.000Z");
+  const counted = buildTerminalAttemptProofPatch(queueItem, {
+    sourceService: "cx-bulk-load",
+    uii: "uii-1",
+  }, placedAt);
+
+  assert.equal(counted.countable, true);
+  assert.equal(counted.terminalUii, "uii-1");
+  assert.equal(counted.queuePatch.placedCalls, 1);
+  assert.equal(counted.queuePatch.lastPlacedAt, placedAt);
+
+  const legacy = buildTerminalAttemptProofPatch(queueItem, {
+    sourceService: "ringcx-agent-monitor",
+    uii: "uii-1",
+  }, placedAt);
+  assert.equal(legacy.countable, false);
+  assert.deepEqual(legacy.queuePatch, {});
+
+  const noUii = buildTerminalAttemptProofPatch(queueItem, {
+    sourceService: "cx-bulk-load",
+  }, placedAt);
+  assert.equal(noUii.countable, false);
+  assert.deepEqual(noUii.queuePatch, {});
+});
+
+test("bulk terminal attempt proof is idempotent: the same UII is never counted twice", () => {
+  const placedAt = new Date("2026-06-29T16:00:00.000Z");
+  // First terminal for uii-1 counts (0 -> 1).
+  const first = buildTerminalAttemptProofPatch(
+    { placedCalls: 0, dailyPlacedCalls: 0 },
+    { sourceService: "cx-bulk-load", uii: "uii-1" },
+    placedAt,
+  );
+  assert.equal(first.countable, true);
+  assert.equal(first.queuePatch.placedCalls, 1);
+
+  // An outbox REPLAY (or the review-dnc lane) of the SAME uii on a row that already recorded it is
+  // suppressed -> no second +1.
+  const replay = buildTerminalAttemptProofPatch(
+    { placedCalls: 1, dailyPlacedCalls: 1, metadata: { lastTerminalAttemptCountedUii: "uii-1" } },
+    { sourceService: "cx-bulk-load", uii: "uii-1" },
+    placedAt,
+  );
+  assert.equal(replay.countable, false);
+  assert.equal(replay.alreadyCounted, true);
+  assert.deepEqual(replay.queuePatch, {});
+
+  // A genuinely DIFFERENT dial (new uii) on the same row still counts (1 -> 2).
+  const nextDial = buildTerminalAttemptProofPatch(
+    { placedCalls: 1, dailyPlacedCalls: 1, metadata: { lastTerminalAttemptCountedUii: "uii-1" } },
+    { sourceService: "cx-bulk-load", uii: "uii-2" },
+    placedAt,
+  );
+  assert.equal(nextDial.countable, true);
+  assert.equal(nextDial.queuePatch.placedCalls, 2);
 });
 
 test("RingCX monitor payload can feed terminal outcome classification", () => {
