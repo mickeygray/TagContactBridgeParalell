@@ -135,6 +135,7 @@ async function main() {
     const s = report.session;
     console.log(`SESSION ${s.sessionId}  status=${s.status} phase=${s.phase} agent=${s.agentEmail} v=${s.v} updated=${s.updatedAt}`);
     console.log(`CURRENT: ${s.current ? `${s.current.queueItemId} (${s.current.name}) uii=${s.current.uii} lane=${s.current.connectedAt ? `CONNECTED@${s.current.connectedAt}` : "never-connected"} wrap=${s.current.wrap ? JSON.stringify(s.current.wrap) : "no"}` : "(none)"}`);
+    if (session.resync) console.log(`RESYNC: ${session.resync.at || "-"} reason=${session.resync.reason || "-"} removed=${(session.resync.removed || []).map((r) => `${r.queueItemId}(${r.why})`).join(", ") || "-"}`);
     console.log(`LAST OUTCOME: ${s.lastOutcome ? `${s.lastOutcome.queueItemId} -> ${s.lastOutcome.outcome} source=${s.lastOutcome.source} at=${s.lastOutcome.at}` : "(none)"}`);
     console.log(`REVIEW HOLD: ${s.reviewHoldReason || "(none)"} until=${s.reviewHoldUntil || "-"}`);
     console.log(`BUFFER (${s.bufferCount}): ${s.buffer.map((b) => `${b.queueItemId}${b.uii ? "*" : ""}`).join(", ") || "-"}`);

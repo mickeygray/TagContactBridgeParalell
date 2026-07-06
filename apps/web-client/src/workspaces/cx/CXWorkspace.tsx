@@ -4487,10 +4487,22 @@ export function CXWorkspace() {
     clearVoicemailDropWatchdog();
   }, []);
   const updateCase = useCxLogicsUpdateCase(caseDomain);
-  // Case detail (calls + texts) — also case-scoped.
-  const clientDetail = useClientDetail(caseDomain, resolvedCaseId);
-  const detail = clientDetail.data;
-  const selectedPhone = detail?.phone || selected?.phone || "";
+  // Live CX hot guard (2026-07-03): the shared client-detail route is
+  // currently returning 500s on every case detail hydration. Keep the
+  // operator loop on projected CX/form state until the backend helper import
+  // is fixed and control-plane is restarted.
+  const liveCxClientDetailHydrationEnabled = false;
+  const clientDetail = useClientDetail(
+    caseDomain,
+    liveCxClientDetailHydrationEnabled ? resolvedCaseId : null,
+  );
+  const detail = liveCxClientDetailHydrationEnabled ? clientDetail.data : null;
+  const selectedPhone =
+    form.cellPhone ||
+    currentCallPhone ||
+    selected?.phone ||
+    servedQueueContact?.phone ||
+    "";
   const appointmentItems = data?.agent.appointments || [];
 
   // ── Operator/case-scoped mutations ──

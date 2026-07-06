@@ -1816,20 +1816,55 @@ async function decrementOpenAssignmentsForQueueItem(queueItem = null) {
   return decrementAgentOpenAssignments(extensionId);
 }
 
+// A queue row can hold a RingCX lead copy through TWO publish contracts: the legacy
+// visibility publisher (rcxVisibility*) and the bulk_load publisher (lastRingcxPublished*).
+// This guard used to read only the legacy fields, so every bulk-published row answered
+// "no-published-ringcx-copy" and the release skipped the RingCX unload — leaving ghost
+// leads loaded in the campaign (2026-07-06 incident: the long-call-hold reaper released
+// a bulk batch app-side after lease expiry, RingCX kept + dialed the leads, and an
+// answered call went unrecorded). A successful cancel stamps rcxVisibilityCancelledAt,
+// so a bulk copy counts as live only when published AFTER the last cancel.
+function resolveRingcxPublishedCopies(metadata = {}) {
+  const copies = [];
+  const status = String(metadata.rcxVisibilityStatus || "").trim().toLowerCase();
+  if (status === "published" && metadata.rcxVisibilityExternId && metadata.rcxVisibilityCampaignId) {
+    copies.push({ channel: "legacy" });
+  }
+  const bulkExternId = String(metadata.lastRingcxPublishedExternId || "").trim();
+  const bulkCampaignId = String(metadata.lastRingcxPublishedCampaignId || "").trim();
+  const publishedAtMs = Date.parse(String(metadata.lastRingcxPublishedAt || ""));
+  const cancelledAtMs = Date.parse(String(metadata.rcxVisibilityCancelledAt || ""));
+  if (
+    bulkExternId
+    && bulkCampaignId
+    && Number.isFinite(publishedAtMs)
+    && (!Number.isFinite(cancelledAtMs) || cancelledAtMs < publishedAtMs)
+  ) {
+    copies.push({ channel: "bulk", externId: bulkExternId, campaignId: bulkCampaignId });
+  }
+  return copies;
+}
+
 async function cancelRingcxPublishedCopyForQueueItem(queueItem = null, reason = "parallel-queue-release") {
-  const status = String(queueItem?.metadata?.rcxVisibilityStatus || "").trim().toLowerCase();
-  const hasRingcxCopy = Boolean(
-    queueItem?.metadata?.rcxVisibilityExternId
-      && queueItem?.metadata?.rcxVisibilityCampaignId,
-  );
-  if (status !== "published" || !hasRingcxCopy) {
+  const copies = resolveRingcxPublishedCopies(queueItem?.metadata || {});
+  if (!copies.length) {
     return { ok: true, cancelled: false, skipped: true, reason: "no-published-ringcx-copy" };
   }
-  return cancelPublishedQueueItemInRingcx(queueItem, { reason }).catch((error) => ({
-    ok: false,
-    cancelled: false,
-    error: error.message || "ringcx-cancel-copy-failed",
-  }));
+  let result = null;
+  for (const copy of copies) {
+    const overrides = copy.channel === "bulk"
+      ? { externId: copy.externId, campaignId: copy.campaignId }
+      : {};
+    const attempt = await cancelPublishedQueueItemInRingcx(queueItem, { reason, ...overrides }).catch((error) => ({
+      ok: false,
+      cancelled: false,
+      error: error.message || "ringcx-cancel-copy-failed",
+    }));
+    result = result
+      ? { ...attempt, ok: result.ok !== false && attempt.ok !== false, previousChannelResult: result }
+      : attempt;
+  }
+  return result;
 }
 
 async function buildClaimedOpenAssignmentMap(domain = null, options = {}) {
@@ -4882,5 +4917,6 @@ module.exports = {
   releaseCxQueueItem,
   releaseCxQueueBatch,
   rescheduleCxQueueItem,
+  resolveRingcxPublishedCopies, // exported for the ghost-guard pins; pure
   stageCxDispatchIntent,
 };

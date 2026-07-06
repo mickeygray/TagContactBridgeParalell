@@ -275,6 +275,10 @@ function sanitizeSession(state) {
     completedCount: Array.isArray(state.completed) ? state.completed.length : 0,
     stats: state.stats || {},
     lastError: state.lastError != null ? state.lastError : null,
+    // RESYNC annotation (2026-07-06): {at, reason, removed[{queueItemId,rowState,why}]} —
+    // no PII (ids + states only). Exposed so the UI can render a "batch resynced" status
+    // line when that lands (WO-16 territory); inspect prints it today.
+    resync: state.resync || null,
   };
 }
 

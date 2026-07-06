@@ -43,6 +43,10 @@ const cxBulkLoadSessionSchema = new mongoose.Schema(
     trace: { type: mongoose.Schema.Types.Mixed, default: {} },
     events: { type: mongoose.Schema.Types.Mixed, default: [] },
     lastOutcome: { type: mongoose.Schema.Types.Mixed, default: null },
+    // RESYNC annotation (2026-07-06): stamped by the watcher's buffer audit when it prunes
+    // candidates whose queue rows drifted (cancelled/reaped/foreign). Schema path required —
+    // strict mode would silently drop the $set otherwise. {at, reason, removed[]}.
+    resync: { type: mongoose.Schema.Types.Mixed, default: null },
     reviewHoldUntil: { type: Date, default: null },
     reviewHoldReason: { type: String, default: null },
     lastError: { type: mongoose.Schema.Types.Mixed, default: null },

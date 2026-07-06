@@ -298,6 +298,28 @@ function reduceCxBulkLoadState(previous = {}, event = {}, nowInput = new Date())
       state.acceptedBuffer = removeByQueueItemId(state.acceptedBuffer, releasedCandidate);
       break;
     }
+    case "buffer.invalidated": {
+      // RESYNC (2026-07-06 ghost incident): a buffered candidate whose queue row can no
+      // longer pass the serving CAS (cancelled out-of-band / reaped to ready / reserved
+      // by another session) is dead weight — the watcher can match its ghost call forever
+      // and adopt nothing. Drop it from the buffer WITHOUT recording an outcome (the lead
+      // was never worked; inventing did_not_connect would corrupt attempt accounting) and
+      // stamp the resync annotation for the UI/inspect. Queue rows are never touched here.
+      const invalidated = Array.isArray(event.removed) ? event.removed : [];
+      for (const entry of invalidated) {
+        state.acceptedBuffer = removeByQueueItemId(state.acceptedBuffer, entry);
+      }
+      state.resync = {
+        at: nowIso,
+        reason: event.reason || "buffer-audit",
+        removed: invalidated.map((entry) => ({
+          queueItemId: entry.queueItemId || null,
+          rowState: entry.rowState || null,
+          why: entry.why || null,
+        })),
+      };
+      break;
+    }
     case "session.completed": {
       state.status = "completed";
       state.phase = CX_BULK_LOAD_PHASES.RELEASED;

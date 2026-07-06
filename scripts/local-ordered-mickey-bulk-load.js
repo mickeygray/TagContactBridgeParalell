@@ -20,6 +20,23 @@ const DOMAIN = "WYNN";
 const CASE_ID = 101617;
 const TEST_KEY = "mgray-simple-loop-bulk";
 
+function readArgValue(names, fallback = null) {
+  const flags = Array.isArray(names) ? names : [names];
+  for (let i = 0; i < process.argv.length; i += 1) {
+    const raw = String(process.argv[i] || "");
+    for (const flag of flags) {
+      if (raw === flag) return process.argv[i + 1] ?? fallback;
+      if (raw.startsWith(`${flag}=`)) return raw.slice(flag.length + 1);
+    }
+  }
+  return fallback;
+}
+
+function parsePositiveInteger(value, fallback = null) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : fallback;
+}
+
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -198,6 +215,7 @@ async function main() {
   await mongoose.connect(config.mongoUri, { dbName: config.parallelDbName });
   const client = createRingcxVoiceClient();
   const now = new Date();
+  const requestedCount = parsePositiveInteger(readArgValue(["--count", "--limit", "-n"]), null);
 
   const oldSessions = await CxBulkLoadSession.find({ agentExtensionId: AGENT_EXTENSION_ID }).lean();
   const rowsToCancel = await CxDialQueue.find({
@@ -208,10 +226,48 @@ async function main() {
       { name: /^Mickey/i, phone: PHONE },
     ],
   }).sort({ createdAt: 1, _id: 1 }).lean();
-  const rowsToLoad = await CxDialQueue.find({ "metadata.manualDialTest": TEST_KEY }).sort({ createdAt: 1, _id: 1 }).lean();
+  const allRowsToLoad = await CxDialQueue.find({ "metadata.manualDialTest": TEST_KEY }).sort({ createdAt: 1, _id: 1 }).lean();
+  const rowsToLoad = requestedCount ? allRowsToLoad.slice(0, requestedCount) : allRowsToLoad;
+  if (!rowsToLoad.length) {
+    throw new Error(`No Mickey ordered bulk source rows found for tag ${TEST_KEY}`);
+  }
+  const rowIdsToLoad = rowsToLoad.map((row) => row._id);
   const sessionId = `cxbl-ordered-${Date.now()}`;
   const cancelResult = await cancelKnownTestCopies(client, rowsToCancel, oldSessions);
   await sleep(750);
+  if (requestedCount && allRowsToLoad.length > rowsToLoad.length) {
+    const skippedIds = allRowsToLoad
+      .slice(rowsToLoad.length)
+      .map((row) => row._id)
+      .filter(Boolean);
+    if (skippedIds.length) {
+      await CxDialQueue.updateMany(
+        { _id: { $in: skippedIds }, "metadata.manualDialTest": TEST_KEY },
+        {
+          $set: {
+            state: "cancelled",
+            cancelledAt: now,
+            "metadata.reservationSessionId": null,
+            "metadata.reservedAt": null,
+            "metadata.reservationExpiresAt": null,
+            "metadata.bulkLoadSessionId": null,
+            "metadata.bulkLoadPublishedAt": null,
+            "metadata.bulkLoadRuntime": null,
+            "metadata.lastRingcxPublishedAt": null,
+            "metadata.lastRingcxPublishedCampaignId": null,
+            "metadata.lastRingcxPublishedDialGroupId": null,
+            "metadata.lastRingcxPublishedExternId": null,
+            "metadata.lastReleaseReason": "ordered-loader-count-trim",
+            "metadata.lastReleasedAt": now,
+            "metadata.lastReleasedBy": "local-ordered-mickey-bulk-load",
+            "metadata.lastReleasedExtensionId": AGENT_EXTENSION_ID,
+            "metadata.dialRuntimeClearedAt": now,
+            "metadata.dialRuntimeClearedReason": "ordered-loader-count-trim",
+          },
+        },
+      );
+    }
+  }
 
   await CxBulkLoadSession.updateMany(
     { agentExtensionId: AGENT_EXTENSION_ID, status: "running" },
@@ -220,7 +276,7 @@ async function main() {
   await normalizeLocalTestProfiles(rowsToLoad, now);
   await resetRows(rowsToLoad, now, sessionId);
 
-  const rows = await CxDialQueue.find({ "metadata.manualDialTest": TEST_KEY }).sort({ name: 1 }).lean();
+  const rows = await CxDialQueue.find({ _id: { $in: rowIdsToLoad } }).sort({ name: 1 }).lean();
   await CxBulkLoadSession.create({
     sessionId,
     status: "running",

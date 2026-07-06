@@ -592,6 +592,57 @@ async function buildCxAccountActiveCallWatchPlan(input = {}) {
   };
 }
 
+// RESYNC AUDIT (Mickey, 2026-07-06, after the ghost-lead incident): the serving CAS
+// refuses buffered candidates whose queue rows drifted (cancelled out-of-band, reaped to
+// ready after lease expiry, re-reserved by another session). The refusal is correct — but
+// silently permanent: the dead candidate stays in acceptedBuffer, the watcher re-matches
+// its ghost forever (16 consecutive misses in the incident), and the session wedges with
+// no signal. This audit mirrors the CAS precondition EXACTLY (state claimed/serving AND
+// this session's reservation) and flags only candidates that can never pass it. It reads
+// queue rows and prunes the SESSION's view — queue rows themselves are never mutated.
+function deriveBufferInvalidations(session = {}, rows = []) {
+  const buffer = Array.isArray(session.acceptedBuffer) ? session.acceptedBuffer : [];
+  if (!buffer.length) return [];
+  const sessionId = str(session.sessionId);
+  const rowById = new Map(
+    (Array.isArray(rows) ? rows : [])
+      .filter(Boolean)
+      .map((row) => [str(row._id || row.queueItemId), row]),
+  );
+  const invalid = [];
+  for (const candidateRow of buffer) {
+    const queueItemId = str(candidateRow?.queueItemId);
+    if (!queueItemId) continue;
+    const row = rowById.get(queueItemId);
+    if (!row) {
+      invalid.push({ queueItemId, rowState: null, why: "row-missing" });
+      continue;
+    }
+    const rowState = str(row.state).toLowerCase();
+    if (!["claimed", "serving"].includes(rowState)) {
+      invalid.push({
+        queueItemId,
+        rowState,
+        why: rowState === "cancelled" ? "row-cancelled" : "row-state-unadoptable",
+      });
+      continue;
+    }
+    if (str(row.metadata?.reservationSessionId) !== sessionId) {
+      invalid.push({ queueItemId, rowState, why: "reservation-foreign" });
+    }
+  }
+  return invalid;
+}
+
+const RESYNC_SWEEP_MIN_INTERVAL_MS = 60_000;
+const resyncSweepClock = new Map(); // sessionId -> last audit ms (in-memory; a restart just re-audits once)
+
+function resyncFeatureEnabled(input = {}) {
+  if (input.resyncEnabled === false) return false;
+  if (input.resyncEnabled === true) return true;
+  return String(process.env.CX_BULK_RESYNC_ENABLED ?? "true").trim().toLowerCase() !== "false";
+}
+
 async function runCxAccountActiveCallWatchOnce(input = {}) {
   const sessionRepository = input.sessionRepository;
   if (!sessionRepository || typeof sessionRepository.listActiveBulkLoadSessions !== "function") {
@@ -651,6 +702,55 @@ async function runCxAccountActiveCallWatchOnce(input = {}) {
   const writes = [];
   const skipped = [...busySkipped];
   const terminalWrites = [];
+
+  // RESYNC runner (see deriveBufferInvalidations above). Fail-closed on every edge:
+  // no row reader wired / no session version to guard on / row read failed -> do
+  // nothing and let a later trigger retry. The session write is version-guarded so a
+  // stale snapshot can never clobber a concurrent writer — a miss just waits for the
+  // next trigger. Kill switch: CX_BULK_RESYNC_ENABLED=false (default on).
+  const resyncOn = resyncFeatureEnabled(input);
+  async function resyncSessionBuffer(sessionState, reason) {
+    if (!resyncOn) return null;
+    const loadRows = input.queueStateAdapter?.loadCandidateRows;
+    if (typeof loadRows !== "function") return null;
+    const sessionId = str(sessionState?.sessionId);
+    const buffer = Array.isArray(sessionState?.acceptedBuffer) ? sessionState.acceptedBuffer : [];
+    if (!sessionId || !buffer.length) return null;
+    if (sessionState.__v === undefined || sessionState.__v === null) return null;
+    // Rate limit applies to EVERY trigger, not just the sweep: a persistent serving miss
+    // the audit cannot cure (e.g. transient CAS failures on a healthy row) must not re-run
+    // the sequential buffer read on every 1s tick (adversarial-verify finding, 2026-07-06).
+    // The first miss after drift still audits immediately — one audit covers ALL dead rows.
+    const lastAuditMs = resyncSweepClock.get(sessionId) || 0;
+    if (Date.now() - lastAuditMs < RESYNC_SWEEP_MIN_INTERVAL_MS) return null;
+    resyncSweepClock.set(sessionId, Date.now());
+    const ids = buffer.map((c) => str(c?.queueItemId)).filter(Boolean);
+    const rows = await loadRows(ids).catch(() => null);
+    if (!Array.isArray(rows)) return null;
+    const removed = deriveBufferInvalidations(sessionState, rows);
+    if (!removed.length) return { pruned: 0 };
+    const reduce = input.reduce || reduceCxBulkLoadState;
+    const next = reduce(sessionState, { type: "buffer.invalidated", removed, reason }, input.now ? new Date(input.now) : new Date());
+    const patch = { ...next };
+    delete patch._id;
+    delete patch.__v;
+    const saved = await sessionRepository
+      .updateBulkLoadSession(sessionId, patch, {
+        expectedVersion: sessionState.__v,
+        versionGuard: true,
+      })
+      .catch(() => null);
+    traceWatcher("cx.alpha.watch.resync.pruned", {
+      sessionId,
+      agentEmail: sessionState.agentEmail || null,
+      accountId: normalizeAccountId(sessionState.ringcx?.accountId || sessionState.accountId),
+      reason,
+      prunedCount: removed.length,
+      removed,
+      saved: Boolean(saved),
+    });
+    return { pruned: removed.length, saved: Boolean(saved) };
+  }
 
   // SYSTEM-DISPOSITION RELABEL (fail-soft, 2026-07-02): when a never-connected
   // current vanishes, RingCX knows WHY — ITS system disposition vocabulary
@@ -960,6 +1060,10 @@ async function runCxAccountActiveCallWatchOnce(input = {}) {
           currentQueueItemId: projection.currentQueueItemId || null,
           currentUii: projection.currentUii || null,
         });
+        // RESYNC Trigger A: the miss IS the drift alarm — audit the buffer NOW so a dead
+        // candidate (cancelled/reaped/foreign row) can't wedge the session by being
+        // re-matched every tick (2026-07-06 incident: 16 consecutive misses, zero writes).
+        await resyncSessionBuffer(latest || projection.before, "serving-stamp-miss").catch(() => null);
         return;
       }
       traceWatcher("cx.alpha.watch.serving_stamp.accepted", {
@@ -1042,6 +1146,34 @@ async function runCxAccountActiveCallWatchOnce(input = {}) {
     await runSessionApply(projection.sessionId, () => applyProjection(projection));
   }
 
+  // RESYNC Trigger B: quiet-drift sweep. A reaped batch is RC-unloaded (post ghost-guard
+  // fix), so no ghost ever dials and Trigger A never fires — the session just sits frozen
+  // holding a dead buffer. Sweep sessions that project NO current while still holding
+  // buffered candidates, at most once a minute each, under the same per-session serializer
+  // as the apply step. Healthy claimed rows audit to zero prunes — a cheap indexed read.
+  if (resyncOn) {
+    const sweepNowMs = Date.now();
+    for (const projection of plan.projections) {
+      if (projection.error || !projection.sessionId) continue;
+      if (projection.currentQueueItemId) continue;
+      const before = projection.before;
+      if (!Array.isArray(before?.acceptedBuffer) || before.acceptedBuffer.length === 0) continue;
+      const lastAuditMs = resyncSweepClock.get(projection.sessionId) || 0;
+      if (sweepNowMs - lastAuditMs < RESYNC_SWEEP_MIN_INTERVAL_MS) continue;
+      await runSessionApply(projection.sessionId, () => resyncSessionBuffer(before, "idle-drift-sweep").catch(() => null));
+    }
+    // Clock hygiene: only on an UNSCOPED run, and keyed off ALL listed sessions (incl.
+    // busy-skipped) — a scoped invocation or a busy tick must not purge other sessions'
+    // stamps and reset their rate limit (adversarial-verify finding, 2026-07-06).
+    const runScoped = Boolean(input.sessionId || input.agentEmail || input.agentExtensionId || input.accountId || input.domain);
+    if (!runScoped) {
+      const activeSessionIds = new Set(allSessions.map((s) => str(s?.sessionId)).filter(Boolean));
+      for (const key of resyncSweepClock.keys()) {
+        if (!activeSessionIds.has(key)) resyncSweepClock.delete(key);
+      }
+    }
+  }
+
   const result = {
     ...plan,
     applied: {
@@ -1069,6 +1201,7 @@ module.exports = {
   buildCxAccountActiveCallWatchPlan,
   compactActiveCall,
   compactActiveCalls,
+  deriveBufferInvalidations,
   groupBulkSessionsByAccount,
   projectBulkSessionFromAccountSnapshot,
   runCxAccountActiveCallWatchOnce,

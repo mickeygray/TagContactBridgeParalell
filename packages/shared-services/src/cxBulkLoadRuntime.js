@@ -146,6 +146,16 @@ async function runPostDispositionHangupProbe(client, { session = {}, candidate =
     disposition,
     callback: false,
   });
+  if (String(outcome || "").trim().toLowerCase() === "voicemail") {
+    // VM DROP is an xfer:2 disposition — RingCX ends the call BY TRANSFERRING the
+    // leg to the drop system, so the leg must stay alive for the playback handoff.
+    // Hanging up here kills the drop mid-transfer (field find 2026-07-06: VM DROP
+    // accepted, our hangup accepted 1s later, no voicemail ever landed). This
+    // probe exists for Auto Dispo (xfer:0), which records but doesn't drop.
+    const result = { ok: true, executed: false, skipped: true, reason: "voicemail-transfer-owns-call-end" };
+    logDispositionProbe("cx.alpha.disposition.probe.post_hangup.skipped", { ...base, ...result });
+    return result;
+  }
   if (!client || typeof client.hangupCall !== "function" || !normalizedUii) {
     const result = { ok: false, executed: false, skipped: true, reason: "hangup-unavailable" };
     logDispositionProbe("cx.alpha.disposition.probe.post_hangup.skipped", { ...base, ...result });
@@ -850,6 +860,23 @@ function getService() {
     // queue row? Mirrors the slow/legacy publisher's findActiveClaimForCase guard.
     async findActiveSibling({ domain = null, caseId = null, excludeId = null } = {}) {
       return cxDialQueueRepository.findActiveClaimForCase(domain, caseId, excludeId);
+    },
+    // RESYNC read (2026-07-06): raw queue rows for the watcher's buffer audit — full rows,
+    // any state, so the audit can tell row-cancelled from reaped from foreign-reservation.
+    // NO per-id error swallow: a transient read failure must reject the WHOLE batch (the
+    // caller treats a rejected read as "do nothing this trigger"). Swallowing it made a
+    // Mongo blip indistinguishable from a deleted row, and the audit would prune healthy
+    // leads as row-missing (adversarial-verify blocker, 2026-07-06).
+    async loadCandidateRows(queueItemIds = []) {
+      const ids = (Array.isArray(queueItemIds) ? queueItemIds : [])
+        .map((id) => String(id || "").trim())
+        .filter(Boolean);
+      const rows = [];
+      for (const id of ids) {
+        const row = await cxDialQueueRepository.findQueueItemById(id);
+        if (row) rows.push(row.toObject ? row.toObject() : row);
+      }
+      return rows;
     },
     async markCandidatePublished({ session = {}, candidate = {}, externId = null, campaignId = null } = {}) {
       const queueItemId = normalizeExternalId(candidate.queueItemId || candidate.id || candidate._id);
@@ -1631,5 +1658,6 @@ module.exports = {
     pauseRingcxProgressiveDialing,
     resumeRingcxProgressiveDialing,
     isBulkLoginOffhook,
+    runPostDispositionHangupProbe,
   },
 };

@@ -85,6 +85,51 @@ test("progressive pause can be disabled by env", async () => withEnv({
   assert.equal(client.calls.length, 0);
 }));
 
+function hangupClient() {
+  const calls = [];
+  return {
+    calls,
+    async hangupCall(uii) {
+      calls.push(uii);
+      return true;
+    },
+  };
+}
+
+test("voicemail outcome skips the post-disposition hangup — the VM DROP transfer owns the call end", async () => {
+  // Field find 2026-07-06: VM DROP is xfer:2 — RingCX ends the call by transferring
+  // the leg to the drop system. Hanging up right after the disposition kills the
+  // drop mid-transfer (disposition accepted, hangup accepted, no voicemail landed).
+  const client = hangupClient();
+  const result = await _test.runPostDispositionHangupProbe(client, {
+    session: { sessionId: "cxbl-test" },
+    candidate: { queueItemId: "qi-vm" },
+    uii: "20260706000000000000000000001",
+    disposition: "VM DROP",
+    outcome: "voicemail",
+  });
+  assert.equal(result.skipped, true);
+  assert.equal(result.executed, false);
+  assert.equal(result.reason, "voicemail-transfer-owns-call-end");
+  assert.equal(result.ok, true);
+  assert.deepEqual(client.calls, [], "hangupCall must never fire for a voicemail disposition");
+});
+
+test("did_not_connect outcome still runs the post-disposition hangup (Auto Dispo records but doesn't drop)", async () => {
+  const client = hangupClient();
+  const result = await _test.runPostDispositionHangupProbe(client, {
+    session: { sessionId: "cxbl-test" },
+    candidate: { queueItemId: "qi-dnc" },
+    uii: "20260706000000000000000000002",
+    disposition: "Auto Dispo",
+    outcome: "did_not_connect",
+  });
+  assert.equal(result.executed, true);
+  assert.equal(result.ok, true);
+  assert.equal(result.status, "accepted");
+  assert.deepEqual(client.calls, ["20260706000000000000000000002"]);
+});
+
 test("off-hook gate fails closed on a busy/on-call agent (ready=false despite a truthy sessionId)", () => {
   const offhook = _test.isBulkLoginOffhook;
   // Mid-call agent: merely logged in (truthy sessionId) but the summarizer flagged a failure.

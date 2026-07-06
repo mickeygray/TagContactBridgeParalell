@@ -181,6 +181,87 @@ on the worklist; if field data shows screeners routinely exceed 10s, the fix is 
 threshold or letting a MACHINE-family sys label veto the answered default — decide on data,
 not tonight.
 
+**2026-07-06 — VM DROP foot-on-the-hose (F6's server half), FIXED IN-TREE:** NSSM stdout
+logs (C:\tools\logs\ — stdout IS live evidence, third surface alongside Mongo traces +
+inspect) proved the VM press reached the server: VM DROP accepted by RingCX, then our
+post-disposition hangup accepted ~1s later, no voicemail ever landed. Root cause (Mickey's
+call, Codex-confirmed, code-verified): VM DROP is xfer:2 — RingCX ends the call BY
+TRANSFERRING the leg to the drop system; `runPostDispositionHangupProbe` had no voicemail
+exception and killed the transfer. Fix: voicemail outcome now skips the probe
+(reason `voicemail-transfer-owns-call-end`, logged through the same probe channel;
+cxBulkLoadRuntime.js:141 block). The probe still runs for everything else — Auto Dispo
+(xfer:0) records but doesn't drop, which is why it exists. Pins: 2 new in
+tests/cx-bulk-load/cxBulkLoadRuntime.test.js (voicemail never calls hangupCall /
+did_not_connect still does). Gate 282/282 (280 + 2 declared). VERIFY LIVE (needs restart):
+rebuild a mini queue, press VM once on a real VM box, confirm the drop actually plays and
+the stdout trail shows probe.post_hangup.skipped with the voicemail reason. Side note from
+the same sample: the sys-label lookup on the following auto-release found no matching row
+before the 2s timeout — fail-soft worked, but watch whether label misses cluster (F1-F4
+evidence). Duplicate "Mickey Answer Test" labels in the local batch make the flow FEEL
+haunted — queue IDs/UIIs are distinct; consider unique names in the next test batch.
+
+**2026-07-06 — GHOST-LEAD INCIDENT ("poller didn't connect to Mickey Answer Test 03"),
+DIAGNOSED FROM LOGS+MONGO, NOT A CODE REGRESSION:** timeline: row 6a355aab (case 114149)
+reserved 15:22:14 + published to RingCX campaign 2306 at 15:22:22 by Mickey's live session
+cxbl-8d1f…; at 15:47:30 an out-of-band `codex-live-contamination-cleanup` CANCELLED the app
+row (reason "remove-local-mickey-test-row-from-chris-live-queue") **without unloading the
+published RingCX copy and ignoring the live reservation**; RingCX dialed the ghost at
+15:50:25; control-plane restarted 15:50:37 (incidental); the new process **matched the call
+16 consecutive ticks** (matchStatus=matched, promotion switch) but every apply skipped on
+`cx.alpha.watch.serving_stamp.missed` — the serving CAS only accepts claimed/serving rows and
+this one was cancelled. Call ended: **answered by a human, ZERO record anywhere** (apply-skip
+discards the whole projection). Session frozen at v=13/phase=ready since 15:28. Sweep
+confirmed this was the ONLY ghost from that cleanup. Boot was clean — the day's in-tree
+changes (VM-hangup skip, route logging, banner neuter) are exonerated; VM fix still unverified.
+
+Laws + defects this buys:
+- **LAW: nobody cancels a published queue row out-of-band.** Any cleanup must go through the
+  session kill (releases reservations + cancels RC leads) or be reservation-aware AND
+  RingCX-unload-aware. An app-side cancel that leaves the RC copy loaded = a ghost lead that
+  dials a real phone with no record — on a live queue that's a compliance hole, not a bug.
+- **D6 — ghost-call recording hole (trunk-adjacent, WO-16/23 candidate):** when the serving
+  CAS misses but the matched call is real (and possibly CONNECTED), the watcher discards
+  everything. Minimum fix: persist a terminal observation (source=serving-miss-orphan) so an
+  answered human call can never vanish; adoption can still be refused.
+- **D7 — reservation TTL vs slow test sessions:** reservation expired 15:32 (10-min lease,
+  reservedAt 15:22; the renew heartbeat was never wired — atticked as dead code, correctly).
+  Slow human-paced test sessions outlive the lease; production pace likely doesn't. Watch S2
+  soak for serving-miss clusters on slow sessions before designing anything.
+- **Coordination fact:** local test rows publish into campaign 2306, which Codex treats as
+  Chris's LIVE queue — the collision was two owners mutating one pool. Separate the test
+  campaign or announce test sessions; either way, out-of-band cleanups follow the LAW above.
+Recovery for the wedged session: kill it (proven path — reservedReleased + RC cancel +
+currentTerminalized), rebuild a fresh mini queue, and note the ghost's RC-side lead in 2306
+already consumed its dial.
+
+**SAME DAY, THE SYSTEMIC HALF (Mickey: "isolate the issue if it exists outside of one-offs")
+— IT DID. D8, THE GHOST FACTORY, FIXED IN-TREE:** Mongo showed the other 5 rows of the batch
+in state `ready` with live published externs: at 15:33:45 (90s after the 10-min reservation
+lease expired) the **long-call-hold reaper** released the whole remaining batch app-side, and
+its RingCX-unload guard skipped with "no-published-ringcx-copy" on every row. Root cause =
+reads→writes contract drift: `cancelRingcxPublishedCopyForQueueItem`
+(cxCadenceService.js:~1819) read only the LEGACY `rcxVisibility*` publish fields; the bulk
+publisher writes `lastRingcxPublished*`. So ANY release of a bulk-published row (reaper,
+logout, manual-unavailable) freed the row app-side and left the lead loaded in RingCX =
+ghost. Path map: session kill = correct (bulk-aware `cancelBatchForSession`); reaper = was
+the factory; out-of-band = the Codex one-off. FIX: new pure `resolveRingcxPublishedCopies`
+(exported for pins) recognizes both contracts — legacy status=published+extern+campaign, and
+bulk extern+campaign+publishedAt newer than the last `rcxVisibilityCancelledAt` (so cancels
+dedupe and republish revives); the guard now cancels EVERY live copy, passing the bulk
+extern/campaign as overrides to `cancelPublishedQueueItemInRingcx` (which already accepted
+them). Live floor unaffected until bulk rows exist there (legacy rows behave identically).
+Pins: 4 in tests/cx-bulk-load/cxCadenceGhostGuard.test.js (incident shape / legacy unchanged
+/ no-evidence skip / cancel-then-republish). **Gate 286/286** (282 + 4 declared).
+DESIGN ITEM (not coded — refactor-fragile reservation territory): the lease still expires
+under a living session (10 min, no renewal — the atticked `renewReserved`/`renewClaim`
+heartbeat was BUILT for this and never wired; revival candidate per the attic's provenance,
+OR teach the reaper to skip rows whose reservationRail=bulk_load while the owning session is
+status=running). Decide after S2 soak data. OPS SEQUENCE for the retest: (1) KILL the frozen
+session FIRST — its cancelBatchForSession unloads the 5 ghosts still sitting in campaign
+2306; (2) restart ParallelControlPlane (picks up VM-hangup fix + route logging + ghost
+guard); (3) fresh mini queue with UNIQUE lead names; (4) the two-call latch verify + one VM
+press.
+
 **Retest protocol (the un-contaminated run):** restart ParallelControlPlane FIRST; fresh
 queue; confirm CX_ALPHA_TRACE_ENABLED is set (name only); browser console open — `[disp]
 PRESS` at CXWorkspaceBulkLoad.tsx:5737 is the client-side proof-of-click (its absence = button

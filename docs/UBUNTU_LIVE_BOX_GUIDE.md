@@ -29,6 +29,85 @@ cd /opt/tagcontactbridge-parallel
 sudo -H -u parallel npm run build:web
 ```
 
+## Windows PowerShell + SSH Formatting Notes
+
+When running live read-only checks from Windows, keep remote commands simple.
+PowerShell easily mangles nested quotes, pipes, `grep -E`, `awk`, and command
+substitution before the text ever reaches Ubuntu. If a command needs more than
+one pipe or any real parsing, send a small script over SSH instead of fighting
+inline quoting.
+
+Good pattern for multi-step log parsing:
+
+```powershell
+@'
+import json
+import re
+from pathlib import Path
+
+# Keep output summarized and masked. Do not print raw env, tokens, phones,
+# emails, customer names, or full request bodies.
+for line in Path("/var/log/nginx/access.log").read_text(errors="ignore").splitlines():
+    if "/api/read/clients/case/" in line and " 500 " in line:
+        print(line[:180])
+'@ | ssh -i C:\Users\micke\.ssh\id_ed25519_contactbridge_ubuntu ubuntu@tagcontactbridge "python3 -"
+```
+
+For Node diagnostics that need repo code, change directory on the remote side
+and pipe the script:
+
+```powershell
+@'
+process.chdir("/opt/tagcontactbridge-parallel");
+console.log(JSON.stringify({ ok: true }));
+'@ | ssh -i C:\Users\micke\.ssh\id_ed25519_contactbridge_ubuntu ubuntu@tagcontactbridge "cd /opt/tagcontactbridge-parallel && node -"
+```
+
+Rules of thumb from 2026-07-03 live checks:
+
+- Prefer `python3 -` or `node -` over inline `grep | awk | sed` chains from PowerShell.
+- Use `journalctl -o cat --no-pager` when you want parseable JSON log lines.
+- Keep SSH one-liners to simple reads: `systemctl show`, `curl /health`, `tail`, `git status`.
+- If the service environment is needed for a reproduction, borrow it inside the remote script from the running process and do not print it.
+- `parallel-live-coach-grpc` on port `3344` is gRPC. A normal HTTP health curl can fail oddly; verify it with `systemctl` and journals instead.
+- `systemctl cat` / `systemctl status` may warn that a unit changed on disk and needs `daemon-reload`. Do not run `daemon-reload` or restart live services unless Mickey explicitly asks.
+- Nginx access logs often show route/status evidence that the app journal does not, because some Express routes catch errors and return `500` without logging the stack.
+- For customer-facing failures, report counts, route names, masked agent/email/phone fragments, and exception names/messages. Do not paste raw log rows unless Mickey specifically asks and the data is safe.
+
+## After-Hours Ownership Cleanup Notes
+
+2026-07-03 live hotfix context: `npm run build:web` succeeded through
+typecheck as `parallel`, but Vite could not clear
+`/opt/tagcontactbridge-parallel/apps/web-client/build/assets` because that
+build output is root-owned. The web bundle was rebuilt with `sudo npm run
+build:web` as a daytime mitigation, without restarting services. That worked,
+but it keeps the ownership mess alive.
+
+After hours, clean this up so normal deploy/build steps do not alternate
+between "run as `parallel`" and "use sudo because the previous build was root":
+
+- Inspect ownership for repo source, `apps/web-client/build`, `node_modules`,
+  `runtime`, and service-write directories before changing anything.
+- Preserve secrets and runtime data. Do not chown `.env`, private keys, raw
+  recordings, or unrelated mounted/backed-up paths blindly.
+- Desired state: source and build artifacts under
+  `/opt/tagcontactbridge-parallel` should be writable by the deploy/build user
+  path we actually use; service runtime directories should be writable by the
+  service user that writes them.
+- Preferred build test after cleanup:
+
+```bash
+cd /opt/tagcontactbridge-parallel
+sudo -H -u parallel npm run build:web
+```
+
+- If that still fails, fix the specific denied path rather than building with
+  sudo again.
+- Re-run `stat -c '%U:%G %a %n'` on the corrected paths and record the final
+  owner/group pattern here once settled.
+- This is an after-hours maintenance task. Do not do broad ownership repairs in
+  the middle of live CX calling.
+
 ## Main Paths
 
 ```text

@@ -165,6 +165,10 @@ export function useClientList(domain: string, filters: ClientListFilters = {}) {
 }
 
 export function useClientDetail(domain: string, caseId: string | null | undefined) {
+  const cxRouteClientDetailDisabled =
+    typeof window !== "undefined" &&
+    /^\/cx(?:\/|$)/.test(window.location.pathname);
+
   return useQuery({
     queryKey: queryKeys.clients.detail(domain, caseId ?? ""),
     queryFn: () =>
@@ -228,7 +232,8 @@ export function useClientDetail(domain: string, caseId: string | null | undefine
             textChain: (result.textChain ?? []) as unknown as ClientCaseMessage[],
           } satisfies ClientDetail;
         }),
-    enabled: Boolean(domain) && Boolean(caseId),
+    enabled: !cxRouteClientDetailDisabled && Boolean(domain) && Boolean(caseId),
+    retry: false,
     staleTime: 15_000,
   });
 }
