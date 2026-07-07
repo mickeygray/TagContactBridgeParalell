@@ -83,17 +83,17 @@ test("reducer buffer.invalidated prunes the buffer, stamps resync, and records N
   assert.equal(next.resync.removed[0].why, "row-cancelled");
 });
 
-function makeResyncHarness({ sessionId, activeCalls, rowsById, servingResult }) {
+function makeResyncHarness({ sessionId, activeCalls, rowsById, servingResult, rescueResult = null, current = null }) {
   const sessionDoc = {
     sessionId,
     __v: 7,
     status: "running",
-    phase: "ready",
+    phase: current ? "active" : "ready",
     agentEmail: `${sessionId}@example.test`,
     agentExtensionId: sessionId,
     domain: "TAG",
     ringcx: { accountId: "acct-1" },
-    current: null,
+    current,
     acceptedBuffer: [candidate("qi-dead", `cxbl-${sessionId}-qi-dead`)],
     completed: [],
     stats: {},
@@ -108,18 +108,34 @@ function makeResyncHarness({ sessionId, activeCalls, rowsById, servingResult }) 
     },
   };
   const client = { async listActiveCalls() { return activeCalls; } };
+  const rcxCancels = [];
+  const rescues = [];
+  const hangups = [];
   const queueStateAdapter = {
     async markCandidateServing() { return servingResult; },
+    async rescueCandidateServing({ candidate }) {
+      rescues.push(candidate.queueItemId);
+      return rescueResult;
+    },
+    async hangupGhostCall({ uii }) {
+      hangups.push(uii);
+      return { ok: true, executed: true };
+    },
     async loadCandidateRows(ids) { return ids.map((id) => rowsById[id]).filter(Boolean); },
+    async cancelPrunedCandidateCopies({ removed }) {
+      rcxCancels.push(...removed.map((r) => r.queueItemId));
+      return removed.map((r) => ({ queueItemId: r.queueItemId, cancelled: true, ok: true }));
+    },
   };
-  return { sessionRepository, client, queueStateAdapter, updates, sessionDoc };
+  return { sessionRepository, client, queueStateAdapter, updates, rcxCancels, rescues, hangups, sessionDoc };
 }
 
-test("Trigger A: a serving-stamp miss on a cancelled row prunes it from the buffer (the incident cure)", async () => {
+test("RINGING ghost: the miss is recorded but the prune is DEFERRED — the rescue window stays open", async () => {
+  // Mickey's catch (2026-07-06): every ghost rings before it connects. Pruning mid-ring
+  // would sweep the candidate before the callee answers and the rescue could never fire.
   const sessionId = "cxbl-resync-A";
   const harness = makeResyncHarness({
     sessionId,
-    // the ghost call: RingCX dials the cancelled row's extern
     activeCalls: [{ externId: `cxbl-${sessionId}-qi-dead`, uii: "u-ghost", callState: "OUTDIAL" }],
     rowsById: { "qi-dead": row("qi-dead", "cancelled", sessionId) },
     servingResult: null, // the CAS refuses — exactly the incident
@@ -134,11 +150,174 @@ test("Trigger A: a serving-stamp miss on a cancelled row prunes it from the buff
     result.applied.skipped.some((s) => s.reason === "serving-ownership-stamp-miss"),
     "the adoption itself must still be refused",
   );
+  assert.equal(harness.updates.filter((u) => u.patch.resync).length, 0, "NO prune while the ghost is ringing");
+  assert.deepEqual(harness.rescues, [], "a RINGING ghost is never rescued — only a connected one");
+  assert.deepEqual(harness.hangups, [], "a RINGING ghost is never hung up — hangup is a no-op on ringing anyway");
+  assert.deepEqual(harness.rcxCancels, [], "no RC cancel mid-ring — the sweep handles a never-connect later");
+});
+
+test("GHOST POLICY: a CONNECTED ghost that passes the rescue gate gets SYNCED — adopted as current, no prune, no hangup", async () => {
+  const sessionId = "cxbl-resync-rescue";
+  const harness = makeResyncHarness({
+    sessionId,
+    activeCalls: [{ externId: `cxbl-${sessionId}-qi-dead`, uii: "u-ghost", callState: "ACTIVE" }],
+    rowsById: { "qi-dead": row("qi-dead", "cancelled", sessionId) },
+    servingResult: null,                       // normal CAS refuses (the row is dead)
+    rescueResult: { adopted: { ok: true } },   // the compliance-gated rescue re-claims it
+  });
+  const result = await runCxAccountActiveCallWatchOnce({
+    sessionRepository: harness.sessionRepository,
+    client: harness.client,
+    queueStateAdapter: harness.queueStateAdapter,
+    now: new Date("2026-07-06T17:00:00.000Z"),
+  });
+  assert.deepEqual(harness.rescues, ["qi-dead"], "the connected ghost must attempt rescue");
+  assert.deepEqual(harness.hangups, [], "a rescued call is never hung up");
+  assert.equal(harness.updates.filter((u) => u.patch.resync).length, 0, "no prune — the candidate came back to life");
+  assert.ok(
+    result.applied.skipped.every((s) => s.reason !== "serving-ownership-stamp-miss"),
+    "a rescued adoption is not a miss",
+  );
+  const sessionWrite = harness.updates.find((u) => u.patch.current);
+  assert.ok(sessionWrite, "the session write must proceed — the ghost becomes current");
+  assert.equal(sessionWrite.patch.current.queueItemId, "qi-dead");
+});
+
+test("GHOST POLICY: a CONNECTED ghost the rescue REFUSES gets hung up, then pruned — agent freed without touching CX", async () => {
+  const sessionId = "cxbl-resync-hangup";
+  const harness = makeResyncHarness({
+    sessionId,
+    activeCalls: [{ externId: `cxbl-${sessionId}-qi-dead`, uii: "u-ghost", callState: "ACTIVE" }],
+    rowsById: { "qi-dead": row("qi-dead", "cancelled", sessionId) },
+    servingResult: null,
+    rescueResult: { refused: "contact-blocked", definitive: true }, // compliance says no, PROVABLY
+  });
+  const result = await runCxAccountActiveCallWatchOnce({
+    sessionRepository: harness.sessionRepository,
+    client: harness.client,
+    queueStateAdapter: harness.queueStateAdapter,
+    now: new Date("2026-07-06T17:10:00.000Z"),
+  });
+  assert.deepEqual(harness.rescues, ["qi-dead"], "the rescue must be attempted first");
+  assert.deepEqual(harness.hangups, ["u-ghost"], "the refused connected ghost must be hung up by the system");
+  assert.ok(result.applied.skipped.some((s) => s.reason === "serving-ownership-stamp-miss"));
   const resyncWrite = harness.updates.find((u) => u.patch.resync);
-  assert.ok(resyncWrite, "the miss must trigger a resync write");
-  assert.deepEqual(resyncWrite.patch.acceptedBuffer, [], "the dead candidate must leave the buffer");
+  assert.ok(resyncWrite, "a CONNECTED-refused ghost prunes immediately (post-hangup)");
+  assert.deepEqual(resyncWrite.patch.acceptedBuffer, []);
   assert.equal(resyncWrite.patch.resync.removed[0].why, "row-cancelled");
   assert.equal(resyncWrite.options.expectedVersion, 7, "the resync write must be version-guarded");
+  assert.deepEqual(harness.rcxCancels, ["qi-dead"], "the pruner must tell RingCX to stop the pruned lead");
+});
+
+test("SWITCH GUARD: a ghost promotion that would complete a LIVE current is never rescued — the flicker clobber stays dead", async () => {
+  // Adversarial blocker #1 (2026-07-06): live connected current C1 flickers out of one
+  // snapshot while a connected ghost G matches — the switch would force-complete C1 as
+  // "answered" MID-CONVERSATION and install the ghost. The rescue must refuse any
+  // promotion with completePrevious, restoring the pre-rescue harmless miss (no write).
+  const sessionId = "cxbl-resync-switch";
+  const harness = makeResyncHarness({
+    sessionId,
+    current: {
+      queueItemId: "qi-live",
+      caseId: 999,
+      domain: "TAG",
+      name: "Live Human",
+      uii: "u-live-conversation",
+      externId: `cxbl-${sessionId}-qi-live`,
+      ringcx: { externId: `cxbl-${sessionId}-qi-live` },
+      connectedAt: "2026-07-06T17:29:00.000Z",
+    },
+    // C1's call is MISSING from this snapshot (the flicker); only the ghost shows.
+    activeCalls: [{ externId: `cxbl-${sessionId}-qi-dead`, uii: "u-ghost", callState: "ACTIVE" }],
+    rowsById: { "qi-dead": row("qi-dead", "cancelled", sessionId) },
+    servingResult: null,
+    rescueResult: { adopted: { ok: true } }, // would succeed if ever asked — it must not be asked
+  });
+  const result = await runCxAccountActiveCallWatchOnce({
+    sessionRepository: harness.sessionRepository,
+    client: harness.client,
+    queueStateAdapter: harness.queueStateAdapter,
+    now: new Date("2026-07-06T17:30:00.000Z"),
+  });
+  assert.deepEqual(harness.rescues, [], "a completePrevious promotion must never attempt rescue");
+  assert.deepEqual(harness.hangups, [], "and never hang up");
+  assert.equal(harness.updates.length, 0, "NO session write — the flicker tick stays harmless, C1 survives");
+  assert.ok(result.applied.skipped.some((s) => s.reason === "serving-ownership-stamp-miss"));
+});
+
+test("RETRY GUARD: a non-definitive refusal on a CANCELLED row does NOT prune — the retry it promises stays possible", async () => {
+  // Adversarial blocker #2 (2026-07-06): the audit calls every rescuable row (ready/
+  // cancelled) "unadoptable", so pruning on a transient refusal would delete the exact
+  // candidate the next-tick retry needs — stranding the answered human forever.
+  const sessionId = "cxbl-resync-retry";
+  const harness = makeResyncHarness({
+    sessionId,
+    activeCalls: [{ externId: `cxbl-${sessionId}-qi-dead`, uii: "u-ghost", callState: "ACTIVE" }],
+    rowsById: { "qi-dead": row("qi-dead", "cancelled", sessionId) },
+    servingResult: null,
+    rescueResult: { refused: "eligibility-unavailable", definitive: false }, // transient blip
+  });
+  await runCxAccountActiveCallWatchOnce({
+    sessionRepository: harness.sessionRepository,
+    client: harness.client,
+    queueStateAdapter: harness.queueStateAdapter,
+    now: new Date("2026-07-06T17:40:00.000Z"),
+  });
+  assert.deepEqual(harness.rescues, ["qi-dead"], "the rescue was attempted");
+  assert.deepEqual(harness.hangups, [], "no hangup on a transient refusal");
+  assert.equal(harness.updates.filter((u) => u.patch.resync).length, 0, "and NO prune — the candidate survives for the retry");
+});
+
+test("FLICKER GUARD: a non-definitive refusal (healthy-row race / read blip) hangs up NOTHING and just retries", async () => {
+  // Mickey's question (2026-07-06): "no way for the rescue to fire unnecessarily for a
+  // flicker effect?" The dangerous shape: a HEALTHY row's serving stamp misses for one
+  // tick (Mongo blip) while the agent is mid-conversation. The rescue refuses with a
+  // non-definitive reason — the hangup must NOT fire, or a database hiccup kills a live
+  // good call. The next tick retries the normal stamp.
+  const sessionId = "cxbl-resync-flicker";
+  const harness = makeResyncHarness({
+    sessionId,
+    activeCalls: [{ externId: `cxbl-${sessionId}-qi-dead`, uii: "u-live-good-call", callState: "ACTIVE" }],
+    rowsById: { "qi-dead": row("qi-dead", "claimed", sessionId) }, // HEALTHY row — the miss was a race
+    servingResult: null, // transient CAS miss
+    rescueResult: { refused: "state-claimed", definitive: false },
+  });
+  const result = await runCxAccountActiveCallWatchOnce({
+    sessionRepository: harness.sessionRepository,
+    client: harness.client,
+    queueStateAdapter: harness.queueStateAdapter,
+    now: new Date("2026-07-06T17:20:00.000Z"),
+  });
+  assert.deepEqual(harness.hangups, [], "NEVER hang up on a non-definitive refusal");
+  assert.equal(harness.updates.filter((u) => u.patch.resync).length, 0, "the audit finds the healthy row valid — nothing pruned");
+  assert.ok(
+    result.applied.skipped.some((s) => s.reason === "serving-ownership-stamp-miss"),
+    "the miss is recorded and the next tick retries",
+  );
+});
+
+test("the RingCX cancel is fail-soft: a canceller crash never undoes the prune", async () => {
+  const sessionId = "cxbl-resync-cancelfail";
+  const harness = makeResyncHarness({
+    sessionId,
+    // connected + DEFINITIVELY refused ghost — the only shape that prunes immediately
+    activeCalls: [{ externId: `cxbl-${sessionId}-qi-dead`, uii: "u-ghost", callState: "ACTIVE" }],
+    rowsById: { "qi-dead": row("qi-dead", "cancelled", sessionId) },
+    servingResult: null,
+    rescueResult: { refused: "contact-blocked", definitive: true },
+  });
+  harness.queueStateAdapter.cancelPrunedCandidateCopies = async () => {
+    throw new Error("ringcx-down");
+  };
+  await runCxAccountActiveCallWatchOnce({
+    sessionRepository: harness.sessionRepository,
+    client: harness.client,
+    queueStateAdapter: harness.queueStateAdapter,
+    now: new Date("2026-07-06T16:50:00.000Z"),
+  });
+  const resyncWrite = harness.updates.find((u) => u.patch.resync);
+  assert.ok(resyncWrite, "the prune must land even when the RingCX cancel crashes");
+  assert.deepEqual(resyncWrite.patch.acceptedBuffer, []);
 });
 
 test("Trigger B: an idle session holding a reaped (ready) batch gets swept without any call activity", async () => {
@@ -167,34 +346,34 @@ test("a failed row read prunes NOTHING — a Mongo blip must never look like a d
   // Adversarial-verify blocker (2026-07-06): loadCandidateRows used to swallow per-id
   // errors, so a transient read failure produced a partial array and healthy leads got
   // pruned as row-missing. The contract: any read failure rejects the whole batch and
-  // the trigger does nothing.
+  // the trigger does nothing. Exercised via the idle sweep (the read-then-prune path).
   const sessionId = "cxbl-resync-readfail";
   const harness = makeResyncHarness({
     sessionId,
-    activeCalls: [{ externId: `cxbl-${sessionId}-qi-dead`, uii: "u-ghost", callState: "OUTDIAL" }],
+    activeCalls: [], // idle-drift shape — the sweep is what reads rows here
     rowsById: {},
     servingResult: null,
   });
   harness.queueStateAdapter.loadCandidateRows = async () => {
     throw new Error("mongo-transient-timeout");
   };
-  const result = await runCxAccountActiveCallWatchOnce({
+  await runCxAccountActiveCallWatchOnce({
     sessionRepository: harness.sessionRepository,
     client: harness.client,
     queueStateAdapter: harness.queueStateAdapter,
     now: new Date("2026-07-06T16:40:00.000Z"),
   });
-  assert.ok(result.applied.skipped.some((s) => s.reason === "serving-ownership-stamp-miss"));
   assert.equal(harness.updates.filter((u) => u.patch.resync).length, 0, "no prune on a failed read");
 });
 
-test("kill switch: resyncEnabled=false leaves the buffer alone even on a serving miss", async () => {
+test("kill switch: resyncEnabled=false disables rescue, hangup, and prune even on a connected ghost", async () => {
   const sessionId = "cxbl-resync-off";
   const harness = makeResyncHarness({
     sessionId,
-    activeCalls: [{ externId: `cxbl-${sessionId}-qi-dead`, uii: "u-ghost", callState: "OUTDIAL" }],
+    activeCalls: [{ externId: `cxbl-${sessionId}-qi-dead`, uii: "u-ghost", callState: "ACTIVE" }],
     rowsById: { "qi-dead": row("qi-dead", "cancelled", sessionId) },
     servingResult: null,
+    rescueResult: { ok: true },
   });
   await runCxAccountActiveCallWatchOnce({
     sessionRepository: harness.sessionRepository,
@@ -203,5 +382,25 @@ test("kill switch: resyncEnabled=false leaves the buffer alone even on a serving
     resyncEnabled: false,
     now: new Date("2026-07-06T16:30:00.000Z"),
   });
-  assert.equal(harness.updates.filter((u) => u.patch.resync).length, 0);
+  assert.equal(harness.updates.filter((u) => u.patch.resync).length, 0, "no prune");
+  assert.deepEqual(harness.rescues, [], "no rescue");
+  assert.deepEqual(harness.hangups, [], "no hangup");
+});
+
+test("WRAP JANITOR: unresolved wraps default to a 30-minute auto-resolve; explicit 0 restores hold-forever", () => {
+  const { resolveWrapTimeoutMs } = require("../../packages/shared-services/src/cxAccountActiveCallWatcherService");
+  const prior = process.env.CX_BULK_WRAP_TIMEOUT_MS;
+  try {
+    delete process.env.CX_BULK_WRAP_TIMEOUT_MS;
+    assert.equal(resolveWrapTimeoutMs({}), 30 * 60 * 1000, "the auto-opt-out default (Mickey's ruling 2026-07-06)");
+    assert.equal(resolveWrapTimeoutMs({ wrapTimeoutMs: 5000 }), 5000, "per-call option wins");
+    assert.equal(resolveWrapTimeoutMs({ wrapTimeoutMs: 0 }), 0, "explicit option 0 = hold forever");
+    process.env.CX_BULK_WRAP_TIMEOUT_MS = "120000";
+    assert.equal(resolveWrapTimeoutMs({}), 120000, "env override");
+    process.env.CX_BULK_WRAP_TIMEOUT_MS = "0";
+    assert.equal(resolveWrapTimeoutMs({}), 0, "env 0 = hold forever, the pre-ruling behavior");
+  } finally {
+    if (prior == null) delete process.env.CX_BULK_WRAP_TIMEOUT_MS;
+    else process.env.CX_BULK_WRAP_TIMEOUT_MS = prior;
+  }
 });

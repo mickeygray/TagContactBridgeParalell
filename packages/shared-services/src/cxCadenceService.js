@@ -2724,6 +2724,28 @@ async function handleCxCallPlaced(payload = {}) {
   };
 }
 
+// MINIMAL TERMINAL RESOLUTION (Mickey's ruling, 2026-07-06 late: "just resolve the lead for
+// the bare minimum which would be the string tied back to the account. sorta err on the side
+// of caution"). When the full effect chain keeps failing, the drain calls THIS instead: one
+// idempotent $set stamping the outcome string onto the queue row — the durable fact tied
+// back to the lead — and nothing else. No counters, no cadence advance, no CallLog, no
+// Logics; better to lose bookkeeping than to loop forever or double-write.
+async function recordMinimalTerminalResolution(payload = {}) {
+  const queueItemId = normalizeExternalId(payload.queueItemId);
+  if (!queueItemId) return { ok: false, skipped: true, reason: "no-queue-item" };
+  const at = payload.outcomeAt ? new Date(payload.outcomeAt) : new Date();
+  const patch = {
+    "metadata.lastTerminalOutcomeAt": Number.isNaN(at.getTime()) ? new Date() : at,
+    "metadata.lastTerminalOutcome": payload.outcome || payload.disposition || null,
+    "metadata.lastTerminalOutcomeSource": payload.sourceService || payload.source || "cx-bulk-load",
+    "metadata.lastTerminalOutcomeUii": normalizeExternalId(payload.uii) || null,
+    "metadata.lastTerminalSystemDisposition": String(payload.systemDisposition || "").trim() || null,
+    "metadata.lastTerminalResolution": "minimal-drain",
+  };
+  await CxDialQueue.updateOne({ _id: queueItemId }, { $set: patch });
+  return { ok: true, minimal: true, queueItemId };
+}
+
 async function handleCxTerminalCallOutcome(payload = {}) {
   const classification = classifyCxTerminalOutcome(payload);
   const queueItemId = String(payload.queueItemId || payload.queueTicketId || "").trim();
@@ -2757,6 +2779,11 @@ async function handleCxTerminalCallOutcome(payload = {}) {
     lastTerminalOutcomeNormalized: normalizedOutcome,
     lastTerminalOutcomeMatchedValue: classification.matchedValue,
     lastTerminalOutcomeSource: payload.sourceService || payload.source || "ringcentral-cx",
+    // WO-23 label store (2026-07-06): RingCX's own verdict (CONGESTION/BUSY/INTERCEPT/…),
+    // stamped by the watcher, forwarded by the drain bridge — previously died right here.
+    // terminalMetadata spreads onto metadata.* on EVERY exit path (incl. the ignore
+    // branches), so the label lands durably on the queue row for lead-health forensics.
+    lastTerminalSystemDisposition: String(payload.systemDisposition || "").trim() || null,
     lastTerminalOutcomeUii:
       normalizeExternalId(payload.uii || payload.callSessionId)
       || queueItem.metadata?.lastDialExecutionUii
@@ -2898,8 +2925,19 @@ async function handleCxTerminalCallOutcome(payload = {}) {
     leadCadenceSet["counterCadence.lastCxDncAt"] = safeOutcomeAt;
     leadCadenceSet["payloadSnapshot.lastCxDncAt"] = safeOutcomeAt;
   }
+  // REPLAY-DRIFT GUARD (2026-07-06 drain hardening): these counters are read-prior-then-
+  // write prior+1 — a partial-apply replay (queue mutation threw after this write landed)
+  // used to re-increment them every retry, unbounded. Per-UII CAS: the same terminal UII can
+  // only count once. No-UII rows keep the legacy unguarded write (rare; and total drift is
+  // now bounded anyway by the outbox dead-letter cap).
+  const terminalCounterUii = String(terminalMetadata.lastTerminalOutcomeUii || "").trim();
+  if (terminalCounterUii) {
+    leadCadenceSet["counterCadence.lastCxTerminalCountedUii"] = terminalCounterUii;
+  }
   await LeadCadence.updateOne(
-    { domain, caseId },
+    terminalCounterUii
+      ? { domain, caseId, "counterCadence.lastCxTerminalCountedUii": { $ne: terminalCounterUii } }
+      : { domain, caseId },
     { $set: leadCadenceSet },
   ).catch(() => null);
 
@@ -3005,6 +3043,7 @@ async function handleCxTerminalCallOutcome(payload = {}) {
       "ringcx.agentEmail": payload.actorEmail || payload.agentEmail || null,
       "ringcx.actionKey": payload.actionKey || queueItem.metadata?.actionKey || null,
       "ringcx.terminalSource": payload.sourceService || payload.source || "ringcentral-cx",
+      "ringcx.systemDisposition": String(payload.systemDisposition || "").trim() || null,
       audit: {
         dispatchSource: "cx-terminal-outcome",
         intent: contactOutcome ? "cx-contact-terminal-outcome" : "cx-non-connect-fast-advance",
@@ -4914,6 +4953,7 @@ module.exports = {
   reconcileRequestedCxCadence,
   releaseAssignedCxQueueForAgent,
   releaseManualUnavailableAgentQueues,
+  recordMinimalTerminalResolution,
   releaseCxQueueItem,
   releaseCxQueueBatch,
   rescheduleCxQueueItem,

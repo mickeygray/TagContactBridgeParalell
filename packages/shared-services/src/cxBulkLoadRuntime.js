@@ -33,7 +33,8 @@ const { createCxQueueReservationService } = require("./cxQueueReservationService
 const { buildFamilyTargets } = require("./cxReserveModeService");
 const { resolveCxDialRuntimeMode, isCxBulkLoadRuntime } = require("./cxDialRuntimeModeService");
 const { resolveCaseContactEligibility } = require("./contactEligibilityService");
-const { handleCxTerminalCallOutcome } = require("./cxCadenceService");
+const { handleCxTerminalCallOutcome, resolveRingcxPublishedCopies } = require("./cxCadenceService");
+const { cancelPublishedQueueItemInRingcx } = require("./ringcxLeadServingService");
 const { executeCxHangupRequest } = require("./ringcxDialExecutionService");
 const {
   executeCxAppointmentWorkbenchActions,
@@ -481,6 +482,26 @@ function isAlreadyEndedHangupError(error) {
 }
 
 
+// GHOST RESCUE decision (pure; 2026-07-06). A ghost call a human answered can be re-adopted
+// ("synced") ONLY when the row died innocently. Never rescued: DNC/contact-blocked cancels
+// (compliance owns those rows), rows another live session reserved (theirs), and rows in
+// claimed/serving (the normal stamp owns those — a miss there is a race, retried next tick).
+function deriveRescueDecision(row = null, sessionId = null) {
+  if (!row) return { rescue: false, reason: "row-missing" };
+  const meta = row.metadata || {};
+  // BOTH reason keys: cancelReserved writes metadata.cancelledReason, but the compliance
+  // stop path (stopCaseContact → cancelActiveQueueItems) writes metadata.cancelReason —
+  // reading only one disarmed this gate against the system's own primary DNC writer
+  // (adversarial finding, 2026-07-06).
+  const cancelledReason = `${meta.cancelledReason || ""} ${meta.cancelReason || ""}`;
+  if (/dnc|contact-blocked/i.test(cancelledReason)) return { rescue: false, reason: "contact-blocked" };
+  const owner = String(meta.reservationSessionId || "");
+  if (owner && owner !== String(sessionId || "")) return { rescue: false, reason: "reservation-foreign" };
+  const state = String(row.state || "").trim().toLowerCase();
+  if (!["ready", "cancelled"].includes(state)) return { rescue: false, reason: `state-${state || "unknown"}` };
+  return { rescue: true, reason: `rescue-from-${state}` };
+}
+
 // Map a bulk call outcome to the REAL RingCX disposition name (the ones actually
 // configured on the campaigns). Dispositioning the active call is what ends it
 // and advances the dialer — so the name must be one RingCX recognizes.
@@ -878,6 +899,60 @@ function getService() {
       }
       return rows;
     },
+    // RESYNC → RingCX (Mickey's ruling, 2026-07-06 "the pruner needs to talk to cx very
+    // conservatively and say this lead is a problem, stop it"): when the audit prunes a
+    // candidate, kill its still-loaded RingCX copy so the ghost cannot dial (again). This
+    // is LEAD-LIST surgery only — never a call operation; an in-flight dial is a sunk cost
+    // (hangup on RINGING is a no-op, on ACTIVE it drops a human). Reuses the ghost guard's
+    // own copy-resolver (single source of truth for "is a copy live") and the stamping
+    // canceller (so repeat cancels dedupe via rcxVisibilityCancelledAt). Fail-soft per row:
+    // a cancel failure is reported, never thrown — the prune stands either way and the next
+    // trigger retries.
+    async cancelPrunedCandidateCopies({ removed = [], rows = [] } = {}) {
+      const rowById = new Map(
+        (Array.isArray(rows) ? rows : [])
+          .filter(Boolean)
+          .map((row) => [String(row._id || row.queueItemId || ""), row]),
+      );
+      const results = [];
+      for (const entry of Array.isArray(removed) ? removed : []) {
+        const queueItemId = String(entry?.queueItemId || "");
+        if (String(entry?.why || "") === "reservation-foreign") {
+          // Another live session re-reserved this row — its current RingCX copy is THEIRS
+          // (their publish overwrote lastRingcxPublished*). Cancelling it would break their
+          // session; their lifecycle cleans it up.
+          results.push({ queueItemId, cancelled: false, skipped: true, reason: "reservation-foreign-not-ours" });
+          continue;
+        }
+        const row = rowById.get(queueItemId);
+        if (!row) {
+          results.push({ queueItemId, cancelled: false, skipped: true, reason: "row-not-loaded" });
+          continue;
+        }
+        const copies = resolveRingcxPublishedCopies(row.metadata || {});
+        if (!copies.length) {
+          results.push({ queueItemId, cancelled: false, skipped: true, reason: "no-live-ringcx-copy" });
+          continue;
+        }
+        for (const copy of copies) {
+          const overrides = copy.channel === "bulk"
+            ? { externId: copy.externId, campaignId: copy.campaignId }
+            : {};
+          const attempt = await cancelPublishedQueueItemInRingcx(row, {
+            reason: "resync-prune",
+            ...overrides,
+          }).catch((error) => ({ ok: false, cancelled: false, error: error.message || "ringcx-cancel-failed" }));
+          results.push({
+            queueItemId,
+            channel: copy.channel,
+            cancelled: attempt.cancelled === true,
+            ok: attempt.ok !== false,
+            error: attempt.error || null,
+          });
+        }
+      }
+      return results;
+    },
     async markCandidatePublished({ session = {}, candidate = {}, externId = null, campaignId = null } = {}) {
       const queueItemId = normalizeExternalId(candidate.queueItemId || candidate.id || candidate._id);
       if (!queueItemId) return null;
@@ -953,6 +1028,127 @@ function getService() {
         servingPatch,
         { match: { "metadata.reservationSessionId": session.sessionId } },
       );
+    },
+    // GHOST RESCUE (Mickey's ruling, 2026-07-06 "lead is answered, try to sync it"): a ghost
+    // call a HUMAN answered is a live prospect stranded outside the app. If the row died for
+    // an innocent reason (reaped lease, housekeeping cancel), re-claim it for this session and
+    // adopt normally — the agent works the call in OUR app, no RingCX habits. NEVER rescued:
+    // DNC/contact-blocked cancels (compliance owns those rows) and rows another live session
+    // reserved (theirs). Eligibility re-checks through the SAME gate the loader uses,
+    // fail-closed: no verdict = no rescue. The watcher only calls this for calls the connected
+    // latch proved ANSWERED — ringing ghosts self-resolve via RingCX ring-out.
+    async rescueCandidateServing({ session = {}, candidate = {}, uii = null, activeCallSummary = null, matchReasons = [] } = {}) {
+      const queueItemId = normalizeExternalId(candidate.queueItemId || candidate.id || candidate._id);
+      if (!queueItemId) return { refused: "candidate-id-missing", definitive: false };
+      // A refusal is DEFINITIVE only when the call is provably unworkable (compliance owns
+      // the row, another session owns it, or the row is confirmed gone). Transient shapes —
+      // a read failure, a healthy row whose serving stamp raced, an eligibility service
+      // outage — are NOT definitive: the watcher must not hang up a possibly-good live call
+      // on a blip; the next tick simply retries the whole rescue (Mickey's flicker question,
+      // 2026-07-06 — this distinction is the answer).
+      let row;
+      try {
+        row = await cxDialQueueRepository.findQueueItemById(queueItemId);
+      } catch (error) {
+        return { refused: "row-read-failed", definitive: false, error: error.message || String(error) };
+      }
+      const rowObj = row && row.toObject ? row.toObject() : row;
+      const decision = deriveRescueDecision(rowObj, session.sessionId);
+      if (!decision.rescue) {
+        // Definitive = the CALL is provably unworkable: compliance owns the row, or the row
+        // is confirmed gone. reservation-foreign is NOT definitive (adversarial finding: a
+        // foreign owner holds only a FUTURE dial intent — the LIVE call on OUR extern may be
+        // a genuinely good conversation; hanging it up serves no compliance purpose).
+        const definitive = ["contact-blocked", "row-missing"].includes(decision.reason);
+        return { refused: decision.reason, definitive };
+      }
+      // READ-ONLY eligibility, deliberately softer than the loader's: enforceStop:false (a
+      // rescue needs a VERDICT, not case-wide enforcement — the loader's enforceStop cancels
+      // the whole case's queue inventory, an insane side effect for a hangup decision) and
+      // requireFreshLogicsStatus:false (a Logics outage under that flag arrives as a
+      // well-formed ok:false and would masquerade as a definitive compliance block — the
+      // false-definitive hangup the adversarial pass constructed). Belt-and-suspenders: an
+      // infrastructure-flavored block reason is still treated as non-definitive.
+      const eligibility = await resolveCaseContactEligibility(
+        rowObj.domain || session.domain || null,
+        rowObj.caseId,
+        {
+          enforceStop: false,
+          requireFreshLogicsStatus: false,
+          currentStage: "contact-blocked",
+          sourceService: "cx-bulk-load-rescue",
+        },
+      ).catch(() => null);
+      if (!eligibility) return { refused: "eligibility-unavailable", definitive: false };
+      if (eligibility.ok !== true) {
+        const infraFlavored = /check-failed|unavailable|timeout|error/i.test(String(eligibility.reason || ""));
+        return { refused: "contact-ineligible", definitive: !infraFlavored };
+      }
+      // TOCTOU lock (adversarial finding, 2026-07-06): the eligibility await is a real race
+      // window — a compliance stop landing inside it re-cancels the row, and a from-state
+      // CAS alone can't tell an innocent cancel from that fresh block. Re-assert the exact
+      // document we DECIDED on via updatedAt: any concurrent write bumps it, the CAS misses,
+      // and the next tick re-reads with fresh eyes. No lockable timestamp = no rescue.
+      if (!rowObj.updatedAt) return { refused: "row-not-lockable", definitive: false };
+      const now = new Date();
+      const adopted = await cxDialQueueRepository.transitionQueueItemState(
+        queueItemId,
+        ["ready", "cancelled"],
+        {
+          state: "serving",
+          claimUntil: null,
+          lastClaimedAt: now,
+          cancelledAt: null,
+          "assignment.extensionId": session.agentExtensionId || null,
+          "assignment.agentName": session.agentEmail || null,
+          "assignment.assignedAt": now,
+          "assignment.queueFamilySnapshot": candidate.queueFamily || null,
+          "metadata.reservationSessionId": session.sessionId || null,
+          "metadata.reservationRail": "bulk_load",
+          "metadata.reservedAt": now,
+          "metadata.reservationExpiresAt": new Date(now.getTime() + 10 * 60 * 1000),
+          "metadata.bulkLoadSessionId": session.sessionId || null,
+          "metadata.bulkLoadActiveAt": now,
+          "metadata.bulkLoadRuntime": "bulk_load",
+          "metadata.servingAt": now,
+          "metadata.lastDialExecutionUii": uii || null,
+          "metadata.lastQueueAttemptUii": uii || null,
+          "metadata.lastDialExecutionSource": "cx-bulk-load-rescue",
+          "metadata.lastDialIntentStatus": "active",
+          "metadata.lastQueueAttemptHeldForDisposition": true,
+          "metadata.wrapUpRequired": true,
+          "metadata.wrapUpReason": "bulk-load-active-call",
+          "metadata.lastRingcxActiveCall": activeCallSummary || null,
+          "metadata.lastRingcxMatchReasons": Array.isArray(matchReasons) ? matchReasons : [],
+          "metadata.rescuedAt": now,
+          "metadata.rescuedFromState": rowObj.state || null,
+          "metadata.rescuedReason": decision.reason,
+        },
+        { match: { updatedAt: rowObj.updatedAt } },
+      );
+      // The row moved between our read and the CAS (e.g. another session claimed it):
+      // non-definitive — walk away, no hangup, next tick re-evaluates.
+      if (!adopted) return { refused: "rescue-cas-miss", definitive: false };
+      return { adopted };
+    },
+    // GHOST HANGUP (Mickey's ruling, 2026-07-06): a CONNECTED ghost the rescue REFUSED has
+    // no compliant way to be worked — if a DNC'd human answered, ending the call IS the
+    // compliant action; if it's a voicemail box, dropping costs nothing. Hangup works on
+    // ACTIVE legs (the VM-fix saga proved it kills live legs); on a RINGING call it's a
+    // documented no-op, which is fine — ringing ghosts self-resolve via ring-out. The system
+    // does this so the agent never forms the hang-up-in-CX habit. Fail-soft always.
+    async hangupGhostCall({ uii = null } = {}) {
+      const normalizedUii = normalizeExternalId(uii);
+      if (!normalizedUii || typeof client.hangupCall !== "function") {
+        return { ok: false, skipped: true, reason: "hangup-unavailable" };
+      }
+      try {
+        const response = await client.hangupCall(normalizedUii);
+        return { ok: response !== false, executed: true, response };
+      } catch (error) {
+        const alreadyEnded = isAlreadyEndedHangupError(error);
+        return { ok: alreadyEnded, executed: true, alreadyEnded, error: error.message || String(error) };
+      }
     },
   };
   const agentLifecycleAdapter = {
@@ -1655,6 +1851,7 @@ module.exports = {
   killCxBulkLoadSession,
   _test: {
     bulkOutcomeDisposition,
+    deriveRescueDecision,
     pauseRingcxProgressiveDialing,
     resumeRingcxProgressiveDialing,
     isBulkLoginOffhook,

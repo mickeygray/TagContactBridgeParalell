@@ -84,6 +84,7 @@ const {
   cxBulkLoadSessionRepository,
   cxDialQueueRepository,
   cxTerminalOutboxRepository,
+  cxCallWrapCardRepository,
 } = require("../../../packages/shared-repositories/src");
 const {
   LiveCoachSession,
@@ -123,6 +124,10 @@ const {
   createCxTerminalOutboxDrain,
   enrichTerminalPacketWithCoachSummary,
   handleCxTerminalCallOutcome,
+  recordMinimalTerminalResolution,
+  createCxCallWrapCardService,
+  buildCxReviewCorrectionRow,
+  requestCxLeadStatusUpdate,
   buildTerminalEvidenceKeys,
   writeAgentCallNoteFromTerminal,
   writeCxCallWrapSummary,
@@ -1048,9 +1053,47 @@ async function startCxTerminalOutboxWorker({ runtime, workerState }) {
     return;
   }
 
+  // CALL WRAP QUEUE (design: docs/CX_CALL_WRAP_QUEUE_DESIGN_2026-07-06.md). Default OFF —
+  // when enabled, answered calls produce wrap CARDS instead of the legacy auto-summary
+  // (the purity law: the card is the only case-land writer; interview files at resolution).
+  const wrapQueueEnabled = String(process.env.CX_CALL_WRAP_QUEUE_ENABLED || "false").trim().toLowerCase() === "true";
+  const wrapCards = createCxCallWrapCardService({
+    cardRepository: cxCallWrapCardRepository,
+    outboxRepository: cxTerminalOutboxRepository,
+    buildCorrectionRow: buildCxReviewCorrectionRow,
+    // Interview activity = the EXISTING wrap-summary pipeline (threadKey dedup included),
+    // fed the card's frozen payload — fired at RESOLUTION time, never at outcome time.
+    writeInterview: (card) =>
+      enqueueCxCallWrapFromTerminal({
+        payload: { ...(card.payload || {}), callSummary: card.coachSummary || (card.payload || {}).callSummary },
+        row: { idemKey: card.idemKey },
+        terminalResult: null,
+        logger: runtime.logger,
+      }),
+    // The Logics DNC status write — the card-DNC compliance half (closes the D3 gap for
+    // card-initiated DNC; the same call the workspace disposition path uses).
+    updateLogicsDncStatus: (card) =>
+      requestCxLeadStatusUpdate(card.domain, { email: card.agentEmail }, {
+        caseId: card.caseId,
+        status: "dnc",
+        notes: "DNC set from call wrap card",
+      }),
+    createAppointment: ({ card, appointmentAt, user }) =>
+      createCxAppointment(card.domain, user, {
+        caseId: card.caseId,
+        appointmentAt,
+        queueItemId: card.queueItemId,
+        source: "cx-wrap-card",
+      }),
+    logger: runtime.logger,
+  });
+
   const drain = createCxTerminalOutboxDrain({
     outboxRepository: cxTerminalOutboxRepository,
     logger: runtime.logger,
+    // Minimal resolution (Mickey's ruling 2026-07-06): after repeated replay failures the
+    // drain stamps the bare outcome string back onto the queue row and clears the row.
+    resolveMinimal: ({ payload }) => recordMinimalTerminalResolution(payload),
     enrichTerminalPacket: (packet) =>
       enrichTerminalPacketWithCoachSummary(packet, {
         LiveCoachSession,
@@ -1091,10 +1134,12 @@ async function startCxTerminalOutboxWorker({ runtime, workerState }) {
         agentCallNoteRepository: cxAgentCallNoteRepository,
       }),
     enqueueCallWrap: (packet) =>
-      enqueueCxCallWrapFromTerminal({
-        ...packet,
-        logger: runtime.logger,
-      }),
+      wrapQueueEnabled
+        ? wrapCards.createFromDrain(packet)
+        : enqueueCxCallWrapFromTerminal({
+          ...packet,
+          logger: runtime.logger,
+        }),
   });
 
   const tick = async () => {
@@ -1115,6 +1160,14 @@ async function startCxTerminalOutboxWorker({ runtime, workerState }) {
     workerState.lastStartedAt = new Date();
     try {
       const result = await drain.drainOnce({ limit });
+      if (wrapQueueEnabled) {
+        // The wrap janitor rides the drain tick (the auto-opt-out ruling): passive expiry
+        // resolves through the same pipeline as a button press.
+        const janitor = await wrapCards.expireDue().catch(() => null);
+        if (janitor && janitor.expired > 0) {
+          runtime.logger.info("control-plane.cx_wrap_cards.expired", janitor);
+        }
+      }
       workerState.lastCompletedAt = new Date();
       workerState.lastResult = result;
       workerState.lastError = null;
@@ -1645,7 +1698,7 @@ async function startServer() {
   app.use("/api/commands/cx", createCommandsCxRouter(auth, { logger: runtime.logger }));
   app.use("/api/cx/simple-loop", createCxSimpleLoopRouter(auth, { logger: runtime.logger }));
   app.use("/api/cx/slow-single", createCxSlowSingleRouter(auth, { logger: runtime.logger }));
-  app.use("/api/cx/bulk-load", createCxBulkLoadRouter(auth, { logger: runtime.logger }));
+  app.use("/api/cx/bulk-load", createCxBulkLoadRouter(auth, { logger: runtime.logger, wrapCards: wrapQueueEnabled ? wrapCards : null }));
   app.use("/api/commands/deploy", createCommandsDeployRouter(auth, { bloggerRuntime }));
   app.use("/api/commands/inbox", createCommandsInboxRouter(auth));
   app.use("/api/commands/social", createCommandsSocialRouter(auth));

@@ -15,6 +15,7 @@ const CxBulkLoadSession = require("./CxBulkLoadSession");
 const CxDialQueue = require("./CxDialQueue");
 const CxSlowLaneSession = require("./CxSlowLaneSession");
 const CxTerminalOutbox = require("./CxTerminalOutbox");
+const CxCallWrapCard = require("./CxCallWrapCard");
 const CxSimpleLoopSession = require("./CxSimpleLoopSession");
 const DailyCallStat = require("./DailyCallStat");
 const DeepCutRun = require("./DeepCutRun");
@@ -69,6 +70,7 @@ const MODEL_REGISTRY = Object.freeze({
   CxSlowLaneSession,
   CxSimpleLoopSession,
   CxTerminalOutbox,
+  CxCallWrapCard,
   DailyCallStat,
   DeepCutRun,
   DispatchList,
@@ -126,6 +128,7 @@ module.exports = {
   CxSlowLaneSession,
   CxSimpleLoopSession,
   CxTerminalOutbox,
+  CxCallWrapCard,
   DailyCallStat,
   DeepCutRun,
   DispatchList,

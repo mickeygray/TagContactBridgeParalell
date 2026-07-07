@@ -33,6 +33,13 @@ const cxTerminalOutboxSchema = new mongoose.Schema(
     attempts: { type: Number, default: 0 },
     lastError: { type: String, default: null },
     drainedAt: { type: Date, default: null },
+    // Backoff gate: a failed row is only re-eligible for the drain once nextAttemptAt passes
+    // (null = immediately eligible, the pre-hardening behavior for pending rows).
+    nextAttemptAt: { type: Date, default: null },
+    // How the row left the queue (Mickey's ruling 2026-07-06 late): "full" effects, or
+    // "minimal" (repeated failures → bare-minimum outcome stamp on the lead, then drained),
+    // or "malformed" (nothing to tie back — do nothing and drain it). Nothing ever parks.
+    resolution: { type: String, default: null },
   },
   { timestamps: true },
 );

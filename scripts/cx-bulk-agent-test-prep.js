@@ -381,8 +381,6 @@ async function main() {
       refillPreview: args.refillPreview,
       dialPriority: "NORMAL",
       flowTraceEnv: {
-        CX_BULK_LOAD_FLOW_TRACE: "true",
-        CX_BULK_LOAD_FLOW_TRACE_AGENT: agent.agentEmail,
         CX_BULK_LOAD_DISPOSITION_TRACE: "true",
       },
     },

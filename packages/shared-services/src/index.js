@@ -225,6 +225,7 @@ const {
   createCxCallTerminalOutcomeEvent,
   classifyCxTerminalOutcome,
   handleCxTerminalCallOutcome,
+  recordMinimalTerminalResolution,
   processCxCadenceEventBatch,
   processNextCxCadenceEvent,
   queueCxDialRequest,
@@ -318,6 +319,12 @@ const {
   normalizeCxCallWrapPacket,
   writeCxCallWrapSummary,
 } = require("./cxCallWrapService");
+const {
+  createCxCallWrapCardService,
+  wrapCardNeeded,
+  RESOLUTION_RULES: CX_WRAP_RESOLUTION_RULES,
+} = require("./cxCallWrapCardService");
+const { buildReviewCorrectionRow: buildCxReviewCorrectionRow } = require("./cxBulkLoadOutcomeAdapter");
 const {
   buildAgentCallNoteFromCloseout,
   buildAgentCallNoteFromTerminal,
@@ -1026,6 +1033,7 @@ module.exports = {
   createCxCallTerminalOutcomeEvent,
   classifyCxTerminalOutcome,
   handleCxTerminalCallOutcome,
+  recordMinimalTerminalResolution,
   createLogicsFacade,
   downloadLatestLexisZip,
   buildProspectStatusDiff,
@@ -1111,6 +1119,9 @@ module.exports = {
   buildCxCallWrapThreadKey,
   normalizeCxCallWrapPacket,
   writeCxCallWrapSummary,
+  createCxCallWrapCardService,
+  wrapCardNeeded,
+  CX_WRAP_RESOLUTION_RULES,
   buildAgentCallNoteFromCloseout,
   buildAgentCallNoteFromTerminal,
   hasAgentCallNoteGradeEvidence,
@@ -1126,6 +1137,7 @@ module.exports = {
   previewCxTerminalRectification,
   runCxTerminalRectification,
   makeOutcomeIdemKey,
+  buildCxReviewCorrectionRow,
   buildTerminalEvidenceKeys,
   buildFamilyTargets,
   alphaTraceEnabled,

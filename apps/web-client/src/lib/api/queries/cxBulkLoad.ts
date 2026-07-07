@@ -206,3 +206,51 @@ export function useCxBulkLoadReviewOutcome() {
     },
   });
 }
+
+// CALL WRAP CARDS (docs/CX_CALL_WRAP_QUEUE_DESIGN_2026-07-06.md). Server answers
+// {enabled:false, cards:[]} when CX_CALL_WRAP_QUEUE_ENABLED is off — the bar renders
+// nothing and the feature is invisible by default.
+export type CxWrapCard = {
+  idemKey: string;
+  name: string | null;
+  caseId: number | null;
+  queueItemId: string | null;
+  uii: string | null;
+  calledAt: string | null;
+  expiresAt: string | null;
+  systemDisposition: string | null;
+  coachSummary: string | null;
+};
+
+export type CxWrapCardsResult = { enabled: boolean; cards: CxWrapCard[] };
+
+export function useCxWrapCards(enabled: boolean) {
+  return useQuery({
+    queryKey: ["cx-wrap-cards"],
+    queryFn: () =>
+      api
+        .get<{ ok: true; result: CxWrapCardsResult }>("/api/cx/bulk-load/wrap-cards")
+        .then((r) => r.result),
+    enabled,
+    staleTime: 5_000,
+    refetchInterval: enabled ? 15_000 : false,
+    refetchIntervalInBackground: false,
+    retry: 1,
+  });
+}
+
+export function useCxWrapCardResolve() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: { idemKey: string; action: "dnc" | "appointment" | "dismiss"; appointmentAt?: string }) =>
+      api
+        .post<{ ok: true; result: { resolution: string | null; noop: boolean } }>(
+          "/api/cx/bulk-load/wrap-cards/resolve",
+          body,
+        )
+        .then((r) => r.result),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ["cx-wrap-cards"] });
+    },
+  });
+}

@@ -65,6 +65,11 @@ async function main() {
         queueFamily: 1,
         "metadata.reservationSessionId": 1,
         "metadata.lastRingcxPublishedExternId": 1,
+        "metadata.lastRingcxReleaseCancel": 1,
+        "metadata.lastRingcxReleaseCancelAt": 1,
+        "metadata.rcxVisibilityCancelledAt": 1,
+        "metadata.rcxVisibilityStatus": 1,
+        "metadata.lastReleasedBy": 1,
         "metadata.servingAt": 1,
         "metadata.wrapUpRequired": 1,
         updatedAt: 1,
@@ -111,6 +116,15 @@ async function main() {
         family: row.queueFamily || null,
         reservationSessionId: row.metadata?.reservationSessionId || null,
         publishedExtern: row.metadata?.lastRingcxPublishedExternId || null,
+        // TWO success shapes (field lesson 2026-07-06 run 4): the cadence release path
+        // stamps lastRingcxReleaseCancel/At; the resync pruner's cancel goes through the
+        // canceller, which stamps rcxVisibilityCancelledAt + status "stale-cancelled".
+        rcxCancelled: row.metadata?.lastRingcxReleaseCancel?.cancelled === true
+          || Boolean(row.metadata?.rcxVisibilityCancelledAt),
+        rcxCancelledAt: row.metadata?.rcxVisibilityCancelledAt
+          || row.metadata?.lastRingcxReleaseCancelAt
+          || null,
+        releasedBy: row.metadata?.lastReleasedBy || null,
         servingAt: row.metadata?.servingAt || null,
         wrapUpRequired: row.metadata?.wrapUpRequired ?? null,
         updatedAt: row.updatedAt || null,
@@ -143,7 +157,7 @@ async function main() {
     for (const c of s.completedTail) console.log(`  ${c.at || "-"}  ${c.queueItemId} -> ${c.outcome} source=${c.source || "-"} uii=${c.uii || "-"}`);
     console.log(`PREV ACTIVE EXTERNS: ${s.prevActiveExternIds.join(", ") || "-"}`);
     console.log(`RESERVED ROWS (${report.reservedRows.length}):`);
-    for (const r of report.reservedRows) console.log(`  ${r.state.padEnd(9)} case=${String(r.caseId).padEnd(8)} extern=${r.publishedExtern || "-"} sess=${r.reservationSessionId ? "ok" : "MISSING"} serving=${r.servingAt || "-"}`);
+    for (const r of report.reservedRows) console.log(`  ${r.state.padEnd(9)} case=${String(r.caseId).padEnd(8)} extern=${r.publishedExtern || "-"} sess=${r.reservationSessionId ? "ok" : "MISSING"} serving=${r.servingAt || "-"} rcxCancel=${r.rcxCancelled ? `YES@${r.rcxCancelledAt || "?"}` : "no"}${r.releasedBy ? ` releasedBy=${r.releasedBy}` : ""}`);
     console.log(`OUTBOX TAIL (${report.outboxTail.length}):`);
     for (const o of report.outboxTail) console.log(`  ${o.at || "-"}  [${o.eventType}] ${o.queueItemId} -> ${o.outcome} source=${o.source || "-"}${o.systemDisposition ? ` sys=${o.systemDisposition}` : ""} status=${o.status} uii=${o.uii || "-"}`);
   } finally {

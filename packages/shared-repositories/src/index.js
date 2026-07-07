@@ -17,6 +17,7 @@ const cxBulkLoadSessionRepository = require("./cxBulkLoadSessionRepository");
 const cxDialQueueRepository = require("./cxDialQueueRepository");
 const cxSlowLaneSessionRepository = require("./cxSlowLaneSessionRepository");
 const cxTerminalOutboxRepository = require("./cxTerminalOutboxRepository");
+const cxCallWrapCardRepository = require("./cxCallWrapCardRepository");
 const dailyCallStatRepository = require("./dailyCallStatRepository");
 const eventRepository = require("./eventRepository");
 const hourlyJobEventRepository = require("./hourlyJobEventRepository");
@@ -65,6 +66,7 @@ module.exports = {
   cxDialQueueRepository,
   cxSlowLaneSessionRepository,
   cxTerminalOutboxRepository,
+  cxCallWrapCardRepository,
   dailyCallStatRepository,
   deepCutRunRepository,
   dispatchListRepository,

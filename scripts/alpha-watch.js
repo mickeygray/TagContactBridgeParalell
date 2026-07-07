@@ -23,7 +23,9 @@ const FILES = {
 // MEANINGFUL -> wake the agent. Anything not matched (housekeeping) is silently consumed.
 const MEANINGFUL = [
   /dialExecution|\.capture\.|capturedUii|activeCall|active-call/i,   // dial / watcher / UII capture (legacy + bulk)
-  /markCandidateServing|markAdoptedCandidateServing|cxBulkLoad|reserveFromFamily/i, // BULK rail serving/reserve
+  // markAdoptedCandidateServing removed 2026-07-07 (delete-ledger item 2): the adoption
+  // path is attic-only (attic/adoption-path.attic.md) — the event can no longer occur.
+  /markCandidateServing|cxBulkLoad|reserveFromFamily/i, // BULK rail serving/reserve
   /publishResult|leadsInserted|"rejected/i,                         // RingCX publish outcomes
   // NOTE: routine cx_queue.assigned is intentionally NOT a wake trigger — it fires every cycle
   // once the agent is off-hook; the DIAL (dialExecution/publish) is the real progression event.

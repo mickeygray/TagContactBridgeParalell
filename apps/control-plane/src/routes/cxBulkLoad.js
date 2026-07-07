@@ -23,6 +23,7 @@ const { toErrorResponse } = require("../../../../packages/shared-errors/src");
 function createCxBulkLoadRouter(auth, options = {}) {
   const router = express.Router();
   const logger = options.logger || console;
+  const wrapCards = options.wrapCards || null; // null = CX_CALL_WRAP_QUEUE_ENABLED off
 
   function success(res, result) {
     return res.json({ ok: true, result });
@@ -72,6 +73,68 @@ function createCxBulkLoadRouter(auth, options = {}) {
 
   router.post("/start", auth.requireAuth, auth.requireUser, async (req, res) => {
     return sendBulkCommand(req, res, startCxBulkLoadSession, (request) => request.body || {});
+  });
+
+  // CALL WRAP CARDS (design: docs/CX_CALL_WRAP_QUEUE_DESIGN_2026-07-06.md). Cards exist
+  // only when CX_CALL_WRAP_QUEUE_ENABLED=true; with the flag off both routes answer
+  // wrap-queue-disabled so the client renders nothing (zero UI disturbance by default).
+  router.get("/wrap-cards", auth.requireAuth, auth.requireUser, async (req, res) => {
+    if (!wrapCards) return res.json({ ok: true, result: { enabled: false, cards: [] } });
+    try {
+      const email = String(req.user?.email || "").trim().toLowerCase();
+      const cards = await wrapCards.listPending(email);
+      return res.json({
+        ok: true,
+        result: {
+          enabled: true,
+          cards: cards.map((card) => ({
+            idemKey: card.idemKey,
+            name: card.name || null,
+            caseId: card.caseId || null,
+            queueItemId: card.queueItemId || null,
+            uii: card.uii || null,
+            calledAt: card.calledAt || null,
+            expiresAt: card.expiresAt || null,
+            systemDisposition: card.systemDisposition || null,
+            coachSummary: typeof card.coachSummary === "string"
+              ? card.coachSummary.slice(0, 600)
+              : card.coachSummary || null,
+          })),
+        },
+      });
+    } catch (error) {
+      logger.warn("[cx.bulk.http] rejected", { path: req.path, status: 500, message: error.message });
+      return failure(res, error);
+    }
+  });
+
+  router.post("/wrap-cards/resolve", auth.requireAuth, auth.requireUser, async (req, res) => {
+    if (!wrapCards) return res.status(409).json({ ok: false, code: "wrap-queue-disabled" });
+    try {
+      const { idemKey, action, appointmentAt } = req.body || {};
+      const requester = String(req.user?.email || "").trim().toLowerCase();
+      const card = await wrapCards.getCard(idemKey);
+      if (!card) return res.status(404).json({ ok: false, code: "wrap-card-not-found" });
+      const isAdmin = String(req.user?.role || "").toLowerCase() === "admin";
+      if (!isAdmin && String(card.agentEmail || "").toLowerCase() !== requester) {
+        logger.warn("[cx.bulk.http] rejected", { path: req.path, status: 403, code: "wrap-card-forbidden", user: requester });
+        return res.status(403).json({ ok: false, code: "wrap-card-forbidden" });
+      }
+      // ✕ from the client arrives as "dismiss" — the rules table speaks "dismissed".
+      const normalized = String(action || "").trim().toLowerCase();
+      const result = await wrapCards.resolve({
+        idemKey,
+        action: normalized === "dismiss" ? "dismissed" : normalized,
+        appointmentAt: appointmentAt || null,
+        user: req.user,
+        resolvedBy: requester,
+      });
+      if (!result.ok) return res.status(400).json({ ok: false, code: result.reason || "wrap-resolve-failed" });
+      return res.json({ ok: true, result: { resolution: result.resolution || null, noop: Boolean(result.noop) } });
+    } catch (error) {
+      logger.warn("[cx.bulk.http] rejected", { path: req.path, status: 500, message: error.message });
+      return failure(res, error);
+    }
   });
 
   router.post("/disposition", auth.requireAuth, auth.requireUser, async (req, res) => {

@@ -7,6 +7,72 @@ shape a dialer floor actually produces, then soak it for stability. Companions:
 `docs/CX_BULK_LOAD_CODE_BLOCKS_2026-07-02.md` (paste-ready blocks incl. BLOCK I),
 `docs/rewrite-reports/WO-wrap-state.md` (tonight's full change log, addenda 1–5).
 
+## ⚡ MARCHING ORDERS — NEXT TEST SESSION (written 2026-07-06 night, gate 297/297)
+
+One sitting, ~45 min + one coffee break. Everything below rides ONE commit + ONE restart.
+Execute top to bottom; each step has its own PASS bar; fill the results table at the bottom
+of §S3 as you go. ✅ HOLD LIFTED: the rescue-lane adversarial review landed 2 blockers + 3
+real findings — ALL FIXED + PINNED (see §GHOST CALL POLICY verdict record); final gate
+**299/299**. The orders below stand as written.
+
+**STEP 0 — PREFLIGHT (non-negotiable, in order):**
+1. COMMIT THE TREE. It carries: outcome engine, ghost guard, resync spine, rescue/hangup
+   lane, VM-hangup fix (live-verified), route logging, banner retirement, inspect upgrades,
+   drill script — 297 green tests of uncommitted value.
+2. Restart `ParallelControlPlane`. Confirm clean boot: err-log tail empty after the rotate.
+3. Name-only env checks: `CX_ALPHA_TRACE_ENABLED` set; `CX_BULK_RESYNC_ENABLED` absent or true.
+4. Kill any stale bulk session (kill path is proven). Fresh mini queue, 6 leads, UNIQUE
+   names (`T0706-01`…`T0706-06`).
+5. Open three evidence windows: stdout tail (`Get-Content C:\tools\logs\parallel-parallelcontrolplane.out.log -Wait -Tail 5`),
+   browser console (`[disp] PRESS` is proof-of-click), and a terminal for
+   `node scripts/cx-bulk-session-inspect.js`. Save the baseline inspect.
+
+**STEP 1 — TRUNK LATCH VERIFY (the last big unknown: is RingCX's answered state in our set?):**
+- Call #1: answer it yourself, stay on ≥15s. MID-CALL inspect must show `lane=CONNECTED@<time>`.
+  Hang up from the prospect side → lead HOLDS in wrap, buttons live → click an outcome →
+  that click is the one record in the outbox. FAIL if lane stays `never-connected` while
+  you're talking → capture inspect + the active-call callState from stdout; the fix is
+  widening CONNECTED_STATES (one line) — stop and report.
+- Call #2: let it ring out, don't touch anything → `did_not_connect` + `sys=` label in the
+  outbox tail, next dial ~1s, NO prompt (banner is dead).
+- BAR: *"the latch fires when a human answers, and only then."*
+
+**STEP 2 — R1 BRANCH A, ghost that rings out (full protocol in §S3/R1):**
+`node scripts/cx-resync-drill.js` dry → `--arm` → go available → DON'T answer.
+Expect: misses-without-prune while ringing → call vanishes → `resync.pruned
+reason=idle-drift-sweep` ≤60s → `rcxCancel=YES` on the row → NO outcome row for the drilled
+id → session keeps rolling. BAR: *"refused, swept, source killed, nothing invented."*
+
+**STEP 3 — R1 BRANCH B, ghost you ANSWER (the rescue):**
+Re-run the drill on another lead → go available → ANSWER the ghost.
+Expect: middle slot fills ON THE CONNECT TICK ONLY (`serving_stamp.rescued` in stdout, never
+during ring), buttons live, disposition normally; row shows `rescuedFromState=cancelled`; NO
+resync line; your click is the record. BAR: *"a good call is never burned — it lands in MY
+app with MY buttons."*
+
+**STEP 4 — R2 WALK-AWAY (the coffee break; full protocol in §S3/R2):**
+Take one normal call, disposition it, then IDLE 13 minutes.
+Expect at ~12 min: rows `ready releasedBy=long-call-hold-reaper` with `rcxCancel=YES@fresh`
+(the ghost guard beating the dialer) → ≤60s later `resync.pruned reason=idle-drift-sweep`,
+BUFFER (0), RESYNC line. YOUR PHONE MUST NEVER RING. Cleanup: kill + note the kill log.
+BAR: *"walking away costs the batch, loudly — never the truth."*
+
+**STEP 5 — OPTIONAL, F3 label calibration:** one lead with a known-dead number → expect
+`did_not_connect sys=INTERCEPT` (or the carrier's verdict), status-line advance, guard silent.
+
+**STOP-IF TRIPWIRES (any of these = stop, capture inspect + stdout, report):**
+- An outcome row appears for a drilled queueItemId (LAW violation — record invented).
+- The phone rings during Step 4 (ghost guard failed live).
+- A lead leaves the middle without your click or a machine verdict (TRUNK bug — outranks
+  everything else in this doc).
+- Wrap doesn't hold after a real answered call ends (Step 1 regression).
+- Buttons stay dead >15s after a disposition resolves (known D1 overlay — don't stop, but
+  note the timestamp; it feeds WO-16/17).
+
+**END-OF-RUN LEDGER:** calls placed == outbox rows, exactly; zero rows for drilled ids;
+every `sys=` label matches what your ears heard. File PASS/FAIL per step in the §S3 results
+table; every mismatch becomes a pin before the next round.
+
 ## What landed tonight (ALL UNCOMMITTED — the ledger for cold pickup)
 
 The outcome engine, in `cxAccountActiveCallWatcherService.js` + `cxBulkLoadActiveCallWatcher.js`
@@ -90,6 +156,78 @@ against the day's feel (congestion clusters = carrier trouble, not lead trouble)
 anything — only to look."*
 
 ### Unit S3 — Recovery drills (break it on purpose)
+
+---
+#### R1 — Trigger A drill: the incident replay (explicit protocol)
+
+*Proves: a row cancelled out from under a live session (Monday's exact shape) self-cures —
+one refused ghost dial, one prune, no invented outcome, session keeps rolling.*
+
+**Preconditions (do in order, skip nothing):**
+- P1. Tree committed; `ParallelControlPlane` restarted AFTER the commit (ghost guard, resync,
+  VM skip, route logging all ride this bounce).
+- P2. `CX_ALPHA_TRACE_ENABLED` set (name-only check) — the drill's evidence is trace lines.
+- P3. Fresh mini queue, 5–6 leads, UNIQUE names (`RESYNC-A-01`…). Start the session.
+- P4. Baseline: `node scripts/cx-bulk-session-inspect.js` → SAVE the output. Must show:
+  all reserved rows `state=claimed sess=ok rcxCancel=no`, BUFFER = lead count, no RESYNC line.
+- P5. Second terminal tailing stdout: `Get-Content C:\tools\logs\parallel-parallelcontrolplane.out.log -Wait -Tail 5`.
+
+**Steps → expected at each:**
+| # | Do | Expect | PASS if |
+|---|---|---|---|
+| 1 | Take call #1 normally, disposition it | normal loop; outbox row drains | baseline sanity — loop works pre-drill |
+| 2 | `node scripts/cx-resync-drill.js` (dry) | prints TARGET = next buffer row, `row.state=claimed owned=yes`, refuses nothing | dry run names the lead you expect |
+| 3 | Same + `--arm` | `ARMED: <id> cancelled out-of-band` | script confirms CAS took |
+| 4 | Inspect again | target row `state=cancelled`; session BUFFER **still lists it** (drift is real); RESYNC line **absent** | drift manufactured, not yet healed |
+| 5a | **Branch RING-OUT:** go available, let the ghost dial, DON'T answer | stdout: `match_diagnostic` (matched) + `serving_stamp.missed` per tick WHILE RINGING — **no prune yet** (the rescue window); call rings out and vanishes; within ≤60s the sweep fires `resync.pruned reason=idle-drift-sweep … why=row-cancelled` with `ringcxCancels cancelled:true` | miss ≠ prune while ringing; the sweep cleans up after the vanish |
+| 5b | **Branch ANSWER (run the drill twice to do both):** answer the ghost | on the connect tick: `serving_stamp.rescued` (NOT missed→pruned); **the lead APPEARS IN THE MIDDLE with live buttons**; disposition it normally (voicemail → click Voicemail); row shows `rescuedFromState=cancelled` | the rescue: connected ghost + innocent death = synced, agent works it in OUR app |
+| 6 | Inspect after (branch 5a) | `RESYNC: <time> reason=idle-drift-sweep removed=<id>(row-cancelled)`; BUFFER −1, target gone; **OUTBOX has NO row for the drilled id**; drilled row shows `rcxCancel=YES@<fresh>`; session `status=running`. (Branch 5b instead: your disposition's outcome row in the outbox, rescue stamps on the row, NO resync line) | forecast healed or call salvaged — never both, never neither |
+| 7 | Let the next lead dial; work it normally | normal adoption, disposition, advance | the session never wedged |
+
+**Deliberate non-goal:** the ghost call itself gets NO record (you manufactured an outlawed
+state; its evidence is the trace pair in stdout). That's D6 territory, by design for now.
+
+**Failure meanings:** no miss at step 5 → ghost didn't dial (check the row's extern is still
+in RingCX) or watcher isn't ticking. Misses repeat past ~60s with no prune → resync not live
+(env kill switch? pre-restart process?). Prune with wrong `why` → audit logic bug, STOP.
+**Any outcome row for the drilled id → LAW violation, stop everything and call Fable.**
+
+---
+#### R2 — Trigger B + ghost-guard drill: the walk-away (explicit protocol)
+
+*Proves: the lease-expiry reaper now unloads RingCX (Monday it lied "no copy"), and the idle
+sweep prunes the dead buffer — no ghost ever dials, nothing freezes silently.*
+
+**Preconditions:** P1/P2 as R1. Fresh mini queue (`RESYNC-B-01`…), start session, take ONE
+call, disposition it. Baseline inspect saved.
+
+**Steps → expected:**
+| # | Do | Expect | PASS if |
+|---|---|---|---|
+| 1 | IDLE. Stay logged in, take nothing. Set a 13-minute timer | nothing for ~11 min (lease = reservedAt+10min, reaper ≈ +90s more) | patience |
+| 2 | At ~12 min: inspect | reserved rows `state=ready releasedBy=long-call-hold-reaper` AND **`rcxCancel=YES@<fresh time>`** on every published row | THE GHOST GUARD: RC-unload actually ran (Monday: `rcxCancel=no` + "no-published-ringcx-copy") |
+| 3 | Within ≤60s of step 2 (next sweep) | stdout `cx.alpha.watch.resync.pruned reason=idle-drift-sweep` all remaining ids `why=row-state-unadoptable`; `ringcxCancels` shows `skipped … no-live-ringcx-copy` for every row (the ghost guard already unloaded them at reap time — the dedupe proving both layers agree); inspect: BUFFER (0) + RESYNC line | quiet drift swept; defense-in-depth layers don't double-fire |
+| 4 | Whole drill: your phone | NEVER rings | no ghost exists to dial — the guard beat the dialer |
+| 5 | Cleanup: kill the session, rebuild fresh for whatever's next | kill log clean (`reservedReleased`, no orphans) | standard recovery still holds |
+
+**Failure meanings:** step 2 `rcxCancel=no` → ghost guard not live (restart taken? code
+present?) — do NOT proceed to step 3, the leads are still loaded in RingCX. Step 3 no prune →
+resync off/env. **Step 4 phone rings → guard failed live, capture inspect + stdout instantly,
+that's a blocker.**
+
+---
+#### R3 — Mickey's wrong-number run (matrix row F3, NOT a guard test)
+Put a known-bad number on one lead. Expected: normal never-connect — `did_not_connect` +
+`sys=INTERCEPT` (or carrier's verdict) in the outbox tail, status-line advance ~1s, NO prompt,
+row healthy throughout, resync silent. This calibrates the LABELS; the guard never wakes.
+File the result in the F-matrix, not here.
+
+**Results table (fill as you run):**
+| Run | Step | Observed | PASS/FAIL |
+|---|---|---|---|
+| R1 | | | |
+| R2 | | | |
+| R3 | | | |
 Restart control-plane MID-CALL (wrap must survive the restart — it's on the session doc);
 restart mid-wrap then click (the click must still be the record); kill a session holding a
 wrapped current (reservations released, RC leads cancelled, no orphan outcome); rebuild over a
@@ -262,12 +400,205 @@ session FIRST — its cancelBatchForSession unloads the 5 ghosts still sitting i
 guard); (3) fresh mini queue with UNIQUE lead names; (4) the two-call latch verify + one VM
 press.
 
+**2026-07-06 — RESYNC SPINE (Mickey's "enforce resyncing" ask, built + adversarially
+verified):** VOICEMAIL LIVE-VERIFIED the same day (drop plays; dispo/hangup saga CLOSED);
+Mickey declared the call loop "pretty tight" and named the next three priorities:
+(1) consistent queue building, (2) new-call second-queue flow (M2), (3) edit outcomes
+after the fact (completed list + modified wrap-ups → WO-31 generalized correction +
+WO-32 worklist). Sequencing deferred to Fable: commit → restart → compressed latch verify →
+S2 soak; build track = WO-16 → WO-31/32 → M2; executors WO-6 next; + a self-verifying
+queue-build check to fold into the queue units.
+
+THE SPINE: `buffer.invalidated` reducer event (prunes acceptedBuffer, stamps
+session.resync{at,reason,removed[]}, records NO outcome); pure `deriveBufferInvalidations`
+mirrors the serving-CAS precondition exactly (claimed/serving + this session's reservation;
+reasons row-missing/row-cancelled/row-state-unadoptable/reservation-foreign); Trigger A =
+serving-stamp miss (the drift alarm — the incident's 16 silent misses now self-cure on the
+first one); Trigger B = idle-drift sweep (no current + buffered candidates, ≥60s apart —
+catches the post-reaper frozen shape that never ghost-dials); queueStateAdapter gains
+loadCandidateRows; schema gains the `resync` path (strict mode would have silently dropped
+the stamp — caught pre-verify); sanitizeSession exposes `resync` (no PII); inspect prints a
+RESYNC line. Version-guarded writes, same per-session serializer, kill switch
+CX_BULK_RESYNC_ENABLED=false, default ON.
+
+**GHOST CALL POLICY — FINAL 3-BRANCH MATRIX (Mickey's ruling, 2026-07-06 late, gate
+296/296).** Born from his live experience: a ghost hit VOICEMAIL — a CONNECTED call, so
+RingCX never ring-out-advanced and he sat welded to a greeting with no buttons. The policy:
+| Ghost shape | What happens | Why it's safe |
+|---|---|---|
+| RINGING | NOTHING — miss recorded, prune DEFERRED (Mickey's catch: every ghost rings first; pruning mid-ring closes the rescue window before the callee answers). Never connects → call vanishes, idle sweep prunes + RC-cancels ≤60s later | hangup is a proven no-op on ringing; RingCX ring-out advances it; the sweep's CANCEL_LEADS stops repeats |
+| CONNECTED + rescue gate PASSES | **SYNCED**: `rescueCandidateServing` re-claims the row (from ready/cancelled), the lead becomes current, buttons live — human → work it, voicemail → click Voicemail (VM DROP works). `serving_stamp.rescued` trace; row stamped rescuedAt/FromState/Reason | the human is the human-vs-VM classifier; the click is the record; the app stays the only surface |
+| CONNECTED + rescue REFUSED | **AUTO-HANGUP** (`ghost_call.hangup` trace) then prune + RC-cancel | a DNC'd human answered = ending the call IS compliance; a VM costs nothing; the agent is freed without ever touching CX |
+Rescue gate (deriveRescueDecision, pure + pinned): row must exist, cancelledReason must NOT
+match DNC/contact-blocked, reservation must not belong to another session, state must be
+ready/cancelled (claimed/serving = the normal stamp's race, retried next tick), AND the
+loader's own contact-eligibility check re-passes fresh (fail-closed: no verdict = no rescue).
+Foreign rows are additionally never RC-cancelled by the pruner (their copy is theirs).
+Everything gated by the same CX_BULK_RESYNC_ENABLED switch.
+**R1 PROTOCOL CHANGE:** the drill's cancel reason is benign, so the drilled ghost is
+RESCUE-ELIGIBLE — R1 now tests both branches: LET IT RING → prune path as written (steps
+5-6); ANSWER IT → the lead should APPEAR IN THE MIDDLE with live buttons (rescued), you
+disposition normally, row shows `rescuedFromState=cancelled`, no resync line. Run it both
+ways. To manufacture branch 3 (refused→hangup), re-run the drill against a lead whose case
+is contact-blocked, or trust the pins.
+
+**RESCUE-LANE ADVERSARIAL VERDICT (2-lens refutation pass, 2026-07-06 late — 2 blockers +
+3 real findings, ALL FIXED same night, gate 299/299):**
+- **B1 (flicker clobber):** a one-tick snapshot flicker of a LIVE connected current + a
+  connected ghost → the switch would force-complete the live call "answered" MID-conversation
+  and install the ghost as current, permanently. FIX: SWITCH GUARD — a promotion carrying
+  `completePrevious` is never rescued (promotion now carries the flag); the flicker tick
+  reverts to the pre-rescue harmless miss. Self-sequencing: once the agent resolves their
+  current, the ghost promotes with no previous and rescues cleanly. PINNED.
+- **B2 (foreclosed retry):** the same-tick prune deleted the candidate the promised
+  next-tick retry needed (the audit calls every rescuable row "unadoptable"). FIX: Trigger A
+  prunes ONLY on a DEFINITIVE refusal; transient refusals retry with the candidate intact;
+  Trigger B sweeps abandoned ones after the call leaves the snapshot. PINNED.
+- **F1 (false-definitive under CX_BULK_LOAD_REQUIRE_FRESH_LOGICS_STATUS):** a Logics outage
+  arrived as a well-formed ok:false → definitive → hangup on a live eligible human + a
+  case-wide enforceStop cancel. FIX: the rescue's eligibility check is now READ-ONLY
+  (enforceStop:false, fresh-status never required) and infrastructure-flavored block reasons
+  are non-definitive.
+- **F2 (TOCTOU):** a compliance stop landing inside the eligibility await could be silently
+  overridden by the rescue CAS. FIX: the CAS re-asserts the decided-upon document via
+  `updatedAt` match — any concurrent write makes it miss and re-read.
+- **F3 (dead gate):** deriveRescueDecision read `cancelledReason` but the compliance stop
+  writes `cancelReason` — the DNC fast-gate never fired for the system's own primary DNC
+  writer. FIX: both keys read. Also: reservation-foreign demoted to NON-definitive (a
+  foreign owner holds a future dial intent; the live call may be a good conversation —
+  never hang it up for that).
+- Refuted by the skeptics (stays good): no nonsense match constructible (extern-only,
+  session-fingerprinted, pre-filtered); no row steal (from-state CAS closes it); no
+  session-write clobber (version guards); no unbounded retry storm; no double-hangup.
+
+**RESYNC LAW (Mickey's non-invasiveness ruling, 2026-07-06):** the buffer is a FORECAST —
+heal it freely (no call happened, pruning invents nothing). The current is a FACT — the
+resync reads around it but NEVER touches it; the middle slot is governed by the human click
++ wrap law, and every historical middle-slot bug came from something "helpfully" mutating
+it. The client is a 1s MIRROR of the session doc — no independent state, self-heals by
+construction (its one real wedge, the blocking overlay, is client-local: D1/WO-16/17).
+Walk-away wrap strays are COUNTED in the S2 soak, decided as policy, never auto-healed.
+If the soak surfaces a real current-drift case, the sanctioned extension is a TRACE-ONLY
+current check in the same audit — evidence, no action, and only after one real occurrence.
+
+ADVERSARIAL VERIFY (2 lenses, both tried to refute): 1 BLOCKER found+fixed — per-id error
+swallow in loadCandidateRows made a Mongo blip look like a deleted row (would prune healthy
+leads as row-missing during a replica election; now any read error rejects the whole batch →
+trigger does nothing; pinned). 1 real-minor fixed — Trigger A now respects the 60s rate
+limit (a stubborn un-curable miss no longer re-reads the buffer every 1s tick). 2 nits
+fixed — sanitize passthrough (above) + clock hygiene (scoped runs / busy ticks no longer
+purge other sessions' rate-limit stamps). REFUTED by the skeptics (good news): the
+prune→refill→re-reserve path is clean (only reaped `ready` rows can re-enter, via a fresh
+reservation+publish). Pins: 6 in tests/cx-bulk-load/cxBulkLoadResync.test.js incl. the
+read-failure pin. **Gate 292/292.** Needs the restart to go live (same bounce as the ghost
+guard + VM fix).
+
 **Retest protocol (the un-contaminated run):** restart ParallelControlPlane FIRST; fresh
 queue; confirm CX_ALPHA_TRACE_ENABLED is set (name only); browser console open — `[disp]
 PRESS` at CXWorkspaceBulkLoad.tsx:5737 is the client-side proof-of-click (its absence = button
 disabled/unmounted, its presence + no server log = D2/D4 territory); inspect script now prints
 `lane=CONNECTED@…/never-connected` on CURRENT. Then re-run: answered→hangup (expect wrap,
 buttons stay), next call (expect supersede→answered), never-connect (expect sys= label).
+
+## RUN 4 RESULTS (2026-07-06 ~11:18-11:22 — the ghost lane's first live PASS + one UI find)
+
+**GHOST PREVENTION LIVE-VERIFIED, END TO END:** drilled lead (Mickey Gray 01) was pruned by
+the resync at 11:18:21 (row-cancelled) and its RingCX copy pulled with CANCEL_LEADS
+`leadUpdateCount:1, dialerRefreshed:true` — **before it ever dialed**. No outbox row. RingCX's
+own receipt confirms the lead was in dialable inventory (a not-found cancel returns count 0).
+Leads 02/03 ran the boring loop: current → manual did_not_connect → drain replayed → call
+notes → RC copies cancelled. This closes R1/R2's prevention branch with field evidence.
+
+**Microscope gap (FIXED):** inspect said `rcxCancel=no` for 01 — it only read the release
+path's `lastRingcxReleaseCancel` stamp; the resync's cancel stamps `rcxVisibilityCancelledAt`
+via the canceller. Inspect now reads BOTH success shapes.
+
+**THE NAME-VANISH BUG (FIXED, client):** "anytime the call picked up for 2 or 3 the name
+disappeared from the middle" — root cause was NOT the pickup and NOT F16: the legacy
+stale-served-queue recovery (`STALE_SERVED_QUEUE_RESET_MS = 20s`, CXWorkspaceBulkLoad.tsx
+~5509) had NO bulk guard. In bulk mode the legacy queue is empty, so 20s after a lead landed
+it always "recovered" — wiping the case panel (form → formHeading → the name) right around
+when a ~15s ring got answered. Quick ring-outs advanced before the timer, which is why only
+answered calls showed it. Buttons survived because they key off the server current (the
+"happy accident"). FIX: `if (bulkRunning) return;` — the same guard its sibling legacy
+effects already wear. tsc clean. Takes effect on the next client build/reload.
+
+**FLICKER PARTLY REPAIRED, STILL OBSERVED (Mickey, post-fix run) → THE FIELD MICROPHONE:**
+static analysis missed the wiper twice, so the client now confesses: every case-panel wipe
+logs `[cx][wipe] {source}` (sources: bulk-session-ended / legacy-terminal-workflow /
+legacy-stale-served-queue / next-call-handoff-fallback / next-call-rescheduled /
+fresh-call-scramble-reset) and every panel populate logs `[cx][identity] populate {key,name}`.
+VERDICT (same day): **STALE BUNDLE.** The pre-rebuild console showed hashed bundle
+`CXWorkspaceRouter-CADvIyIz.js` unchanged across refreshes and zero microphone lines — the
+web client is a BUILT bundle served by the control plane (server.js ~525 express.static), so
+**client fixes need `npm run build` in apps/web-client, not a browser refresh**. None of the
+day's client fixes had ever run ("partly repaired" = timing noise). POST-REBUILD
+(`-BYRWoGn_.js`), first answered-call test: `[cx][identity] populate` fires with the name on
+land AND on the post-dispo review handoff (same name, key flips current:→review:), and ZERO
+`[cx][wipe]` lines — the name STAYED. n=1; the microphone stays armed — if the vanish ever
+recurs, the console names the source. BONUS from the same logs: the `resync` annotation rides
+the client projection as designed (an idle-drift-sweep prune visible in the disposition
+response), and dispositions resolve ~2s with `terminal.ok=true`.
+
+## DRAIN HARDENING LANDED (2026-07-06 night — Mickey's "stable for oddities + auto opt-out" directive, gate 304/304)
+From the drain characterization's findings, all in-tree (restart to go live):
+1. **Minimal resolution + backoff (SIMPLIFIED per Mickey same night — "we don't need to try
+   24 times on something that's never going to work"):** failed rows back off quadratically
+   (15s → 30-min cap); after **3** failed full replays the drain stops trying the effect
+   chain, stamps the BARE MINIMUM back onto the lead (`recordMinimalTerminalResolution`: the
+   outcome string + at/uii/sys-label + `lastTerminalResolution: "minimal-drain"` on the queue
+   row — "the string tied back to the account"), and drains the row (`resolution: "minimal"`,
+   `cx.alpha.drain.row.minimal_resolved` + warn). MALFORMED rows (no payload / no queue-item
+   identity — "no button press") drain immediately with zero retries and zero writes
+   (`resolution: "malformed"`). **Nothing ever parks; no dead-letter queue for a human to
+   forget.** Kills poison-retry-forever, batch starvation, and bounds all replay drift at 3.
+2. **markDrained is a CAS** (pending/failed only) + `drained_cas_miss` trace = concurrent-drain evidence.
+3. **`oldestPendingAgeMs`** in every tick result — the stuck-ness dashboard number.
+4. **LeadCadence counter replay-guard:** per-UII CAS on the counter write — the prior+1
+   double-increment on partial-apply replays is dead.
+5. **Sys-label store landed** (the WO-23 one-liners): `metadata.lastTerminalSystemDisposition`
+   on every handler exit path + `ringcx.systemDisposition` on CallLog.
+6. **WRAP JANITOR (policy change):** default wrap timeout is now **30 minutes** — an
+   abandoned wrap self-resolves via the answered guard (source `wrap-timeout`), superseding
+   hold-forever. `CX_BULK_WRAP_TIMEOUT_MS=0` restores the old behavior. The old hold-forever
+   trunk pin is rewritten as held-at-14-min / swept-at-34-min.
+Known remainder (documented, deliberate): bulk DNC's Logics half still doesn't exist — that
+lands with the wrap queue (design doc), DNC cutover LAST.
+
+## SCALE RISKS — the ghost/resync/rescue lane beyond isolated tests (Mickey's ask, 2026-07-06)
+
+Per-event the lane is correct; at floor scale correct actions in bulk become POLICY, and
+policy needs caps, corroboration, and a human tripwire. Ranked:
+
+1. **Tick-time contamination (top risk).** The watcher tick is the floor's heartbeat; the
+   lane adds variable-latency work to it (row reads, eligibility checks, RC cancels,
+   hangups). A stranded connected ghost retries its rescue EVERY TICK incl. an eligibility
+   call — ten of those during a Mongo/Logics brownout slow the tick, and a slow tick
+   mis-times the latch → real answered calls mis-classify. HARDEN: per-candidate rescue
+   backoff (~5s, not per-tick); treat tick duration as a metric with an alarm.
+2. **Storm amplification.** A systemic drift producer (bad TTL, bad deploy, rogue cleanup)
+   makes the WHOLE floor "provably dead" → mass prune + hundreds of sequential CANCEL_LEADS
+   → RingCX throttling, tick stalls, the floor's loaded work destroyed in minutes — loudly
+   but automatically. HARDEN: per-tick prune/cancel caps per session + a CIRCUIT BREAKER
+   (>X% of floor rows dead in a window = systemic event → freeze the healer, page a human).
+3. **Hangup trusts historical metadata.** The definitive gate keys partly on cancelledReason
+   strings written by OTHERS; a lazy future script stamping blocked-flavored reasons on
+   innocent rows = systematic hangups on live humans "for compliance". HARDEN (highest-value
+   single change): the hangup requires the FRESH eligibility verdict to corroborate — a
+   string match alone is refuse-without-hangup.
+4. **The healer hides the disease.** Chronic drift used to scream (wedges); now it hums —
+   pruned leads look like "the queue ran dry", a slow dial-volume leak behind a health mask.
+   HARDEN: aggregate the prune counts somewhere a human looks (metrics panel / daily line)
+   with a go-find-the-wounder threshold.
+5. **Noted, smaller:** rescue re-claims outside the family-order reservation machinery
+   (off-books path — note in the invariant docs); system hangups flip agents available →
+   machine-gun cadence under mass drift (per-session hangup rate cap, e.g. 3-in-5-min then
+   stop+alarm); the whole lane assumes the SINGLETON watcher (in-memory clocks duplicate
+   across pods — revisit before any multi-process control plane).
+
+Shortlist if/when hardening is ordered: #3 corroborated hangups → #1 rescue backoff →
+#2 caps+breaker → #4 prune surfacing. None are big; all are the difference between a tool
+and a lawnmower running unattended.
 
 ## Post-review patch (same night, after the read-only second-opinion pass)
 The reviewer confirmed the label chain but found the drain bridge dropping it. Fixed in-tree:

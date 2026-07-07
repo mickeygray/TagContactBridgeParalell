@@ -130,6 +130,26 @@ test("did_not_connect outcome still runs the post-disposition hangup (Auto Dispo
   assert.deepEqual(client.calls, ["20260706000000000000000000002"]);
 });
 
+test("ghost-rescue decision: innocent deaths rescue, compliance/foreign/racing rows never do", () => {
+  const d = _test.deriveRescueDecision;
+  const sess = "cxbl-me";
+  // innocent bleed — rescueable
+  assert.deepEqual(d({ state: "cancelled", metadata: { cancelledReason: "drill-manufactured-drift" } }, sess), { rescue: true, reason: "rescue-from-cancelled" });
+  assert.deepEqual(d({ state: "ready", metadata: {} }, sess), { rescue: true, reason: "rescue-from-ready" });
+  // compliance owns DNC/contact-blocked rows — never rescued, under EITHER reason key
+  // (cancelReserved writes cancelledReason; stopCaseContact→cancelActiveQueueItems writes
+  // cancelReason — the adversarial pass caught the gate reading only one of them)
+  assert.equal(d({ state: "cancelled", metadata: { cancelledReason: "bulk-contact-blocked:dnc" } }, sess).rescue, false);
+  assert.equal(d({ state: "cancelled", metadata: { cancelledReason: "enforced-DNC" } }, sess).reason, "contact-blocked");
+  assert.equal(d({ state: "cancelled", metadata: { cancelReason: "contact-blocked" } }, sess).reason, "contact-blocked");
+  assert.equal(d({ state: "cancelled", metadata: { cancelReason: "dnc" } }, sess).rescue, false);
+  // another live session's row — theirs
+  assert.equal(d({ state: "ready", metadata: { reservationSessionId: "cxbl-someone-else" } }, sess).reason, "reservation-foreign");
+  // claimed/serving = the normal stamp's territory; a miss there is a race, not a death
+  assert.equal(d({ state: "claimed", metadata: { reservationSessionId: sess } }, sess).reason, "state-claimed");
+  assert.equal(d(null, sess).reason, "row-missing");
+});
+
 test("off-hook gate fails closed on a busy/on-call agent (ready=false despite a truthy sessionId)", () => {
   const offhook = _test.isBulkLoginOffhook;
   // Mid-call agent: merely logged in (truthy sessionId) but the summarizer flagged a failure.

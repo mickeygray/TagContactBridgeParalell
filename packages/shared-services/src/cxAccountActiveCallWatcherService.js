@@ -223,7 +223,6 @@ function projectBulkSessionFromAccountSnapshot(session = {}, activeCalls = [], o
   // The honest signal is the state transition: stamp connectedAt ONCE when the
   // current's uii is observed in a connected-family state. Field evidence: all
   // promotion-time stamps read OUTDIAL; congestion = uii + OUTDIAL-only + vanish.
-  const CONNECTED_STATES = new Set(["ACTIVE", "CONNECTED", "ONHOLD", "HOLD", "TRANSFER"]);
   if (next.current && str(next.current.uii) && !next.current.connectedAt) {
     const liveRow = relevantCalls.find(
       (call) => str(call.uii) === str(next.current.uii) && CONNECTED_STATES.has(str(call.callState).toUpperCase()),
@@ -253,7 +252,7 @@ function projectBulkSessionFromAccountSnapshot(session = {}, activeCalls = [], o
     // A genuine next-call arrival still supersedes via the current.matched switch
     // path below (completePrevious), which the correction lane can amend later.
     const wasConnected = Boolean(next.current?.connectedAt);
-    const wrapTimeoutMs = Number(options.wrapTimeoutMs) > 0 ? Number(options.wrapTimeoutMs) : 0;
+    const wrapTimeoutMs = resolveWrapTimeoutMs(options);
     const wrappedAtMs = next.current?.wrap?.at ? new Date(next.current.wrap.at).getTime() : null;
     const wrapExpired = wrapTimeoutMs > 0 && wrappedAtMs != null && at.getTime() - wrappedAtMs >= wrapTimeoutMs;
     if (wrappedAtMs != null && !wrapExpired) {
@@ -398,6 +397,11 @@ function projectBulkSessionFromAccountSnapshot(session = {}, activeCalls = [], o
     currentPromotion = {
       required: !sameCurrent,
       kind: transition.kind,
+      // Carried for the ghost-rescue gate: a promotion that COMPLETES a previous current
+      // must never be rescued (adversarial blocker, 2026-07-06: a one-tick flicker of the
+      // live current + a connected ghost would force-complete the live call "answered"
+      // mid-conversation and clobber current with the ghost).
+      completePrevious: transition.completePrevious === true,
       candidate: transition.candidate || null,
       uii: transition.uii || null,
       activeCallSummary: match.activeCall || null,
@@ -592,6 +596,29 @@ async function buildCxAccountActiveCallWatchPlan(input = {}) {
   };
 }
 
+// Connected-family RingCX call states — the honest "a human (or machine) picked up" signal.
+// Used by the connected latch (projection) and the ghost-rescue gate (apply).
+const CONNECTED_STATES = new Set(["ACTIVE", "CONNECTED", "ONHOLD", "HOLD", "TRANSFER"]);
+
+// WRAP JANITOR (Mickey's auto-opt-out ruling, 2026-07-06: "if someone gets lazy or something
+// gets stuck there's a mechanism to clean things up"). Wrap previously held FOREVER by
+// default — right for an attentive agent, but a walked-away or stuck wrap wedged the lane
+// silently. New default: an unresolved wrap self-resolves after 30 minutes through the
+// answered guard (source "wrap-timeout", machine-classified — the agent's click still wins
+// any time before that). Explicit CX_BULK_WRAP_TIMEOUT_MS=0 restores hold-forever; any
+// positive env value overrides; per-call options.wrapTimeoutMs overrides everything.
+const DEFAULT_WRAP_TIMEOUT_MS = 30 * 60 * 1000;
+function resolveWrapTimeoutMs(options = {}) {
+  if (Number(options.wrapTimeoutMs) > 0) return Number(options.wrapTimeoutMs);
+  if (options.wrapTimeoutMs === 0) return 0;
+  const raw = String(process.env.CX_BULK_WRAP_TIMEOUT_MS ?? "").trim();
+  if (raw !== "") {
+    const env = Number(raw);
+    if (Number.isFinite(env) && env >= 0) return env;
+  }
+  return DEFAULT_WRAP_TIMEOUT_MS;
+}
+
 // RESYNC AUDIT (Mickey, 2026-07-06, after the ghost-lead incident): the serving CAS
 // refuses buffered candidates whose queue rows drifted (cancelled out-of-band, reaped to
 // ready after lease expiry, re-reserved by another session). The refusal is correct — but
@@ -740,6 +767,15 @@ async function runCxAccountActiveCallWatchOnce(input = {}) {
         versionGuard: true,
       })
       .catch(() => null);
+    // Pruned candidates may still have live RingCX lead copies (that IS the ghost) — kill
+    // them so the lead cannot dial (again). Lead-list surgery only, fail-soft, and only
+    // after the prune write landed: on a version miss the next trigger redoes both.
+    let ringcxCancels = null;
+    if (saved && typeof input.queueStateAdapter?.cancelPrunedCandidateCopies === "function") {
+      ringcxCancels = await input.queueStateAdapter
+        .cancelPrunedCandidateCopies({ session: sessionState, removed, rows })
+        .catch((error) => [{ ok: false, error: error?.message || "cancel-pruned-copies-failed" }]);
+    }
     traceWatcher("cx.alpha.watch.resync.pruned", {
       sessionId,
       agentEmail: sessionState.agentEmail || null,
@@ -748,8 +784,9 @@ async function runCxAccountActiveCallWatchOnce(input = {}) {
       prunedCount: removed.length,
       removed,
       saved: Boolean(saved),
+      ringcxCancels,
     });
-    return { pruned: removed.length, saved: Boolean(saved) };
+    return { pruned: removed.length, saved: Boolean(saved), ringcxCancels };
   }
 
   // SYSTEM-DISPOSITION RELABEL (fail-soft, 2026-07-02): when a never-connected
@@ -1038,33 +1075,108 @@ async function runCxAccountActiveCallWatchOnce(input = {}) {
           matchReasons: promotion.matchReasons || [],
         })
         .catch(() => null);
+      let servingMethod = "markCandidateServing";
       if (!served) {
-        // The departing call's terminal outcome is INDEPENDENT of whether the incoming candidate
-        // can be adopted — flush co-attached terminal observations before bailing, or a real,
-        // already-ended call (queueItemId + UII) loses its did_not_connect and the lead's attempt
-        // accounting is corrupted. persistTerminalObservations self-guards each obs with
-        // hasTerminalWriteProof, and this branch returns before the line-~579 flush so there is no
-        // double-write. The session state patch (B's promotion) is correctly NOT written here. (#7)
-        await persistTerminalObservations(projection);
-        traceWatcher("cx.alpha.watch.serving_stamp.missed", {
-          sessionId: projection.sessionId,
-          agentEmail: projection.agentEmail || null,
-          accountId: projection.accountId || null,
-          currentQueueItemId: projection.currentQueueItemId || null,
-          currentUii: projection.currentUii || null,
-        });
-        skipped.push({
-          sessionId: projection.sessionId,
-          agentEmail: projection.agentEmail || null,
-          reason: "serving-ownership-stamp-miss",
-          currentQueueItemId: projection.currentQueueItemId || null,
-          currentUii: projection.currentUii || null,
-        });
-        // RESYNC Trigger A: the miss IS the drift alarm — audit the buffer NOW so a dead
-        // candidate (cancelled/reaped/foreign row) can't wedge the session by being
-        // re-matched every tick (2026-07-06 incident: 16 consecutive misses, zero writes).
-        await resyncSessionBuffer(latest || projection.before, "serving-stamp-miss").catch(() => null);
-        return;
+        // GHOST POLICY (Mickey's ruling, 2026-07-06). A refused adoption whose call a human
+        // (or machine) actually PICKED UP is a live prospect stranded outside the app. Try
+        // to RESCUE it (adapter re-checks compliance eligibility and re-claims the row) so
+        // the agent works the call with buttons in OUR app — human → work it, voicemail →
+        // click Voicemail. If the rescue is refused (DNC/foreign/ineligible) there is no
+        // compliant way to work the call: HANG IT UP (works on ACTIVE legs; documented
+        // no-op on ringing) so the agent is freed without touching CX. Ringing ghosts are
+        // never rescued or hung up — RingCX ring-out advances them on its own.
+        const ghostCallState = str(promotion.activeCallSummary?.callState).toUpperCase();
+        const ghostConnected = CONNECTED_STATES.has(ghostCallState);
+        // SWITCH GUARD (adversarial blocker, 2026-07-06): a promotion that completes a
+        // previous current is NEVER rescued. If the previous current's call merely
+        // flickered out of one snapshot, adopting the ghost would persist a false
+        // "answered" terminal for a LIVE conversation and make it invisible forever.
+        // Refusing here restores the pre-rescue harmlessness (miss, no write); once the
+        // agent resolves their current (click/wrap end), the next tick promotes the ghost
+        // with no previous to complete and the rescue proceeds — self-sequencing.
+        const rescueSafe = ghostConnected && promotion.completePrevious !== true;
+        let rescueResult = null;
+        if (resyncOn && rescueSafe && typeof input.queueStateAdapter?.rescueCandidateServing === "function") {
+          rescueResult = await input.queueStateAdapter
+            .rescueCandidateServing({
+              session: projection.before,
+              candidate: promotion.candidate,
+              uii: promotion.uii,
+              activeCallSummary: promotion.activeCallSummary || null,
+              matchReasons: promotion.matchReasons || [],
+            })
+            .catch(() => null);
+        }
+        const rescued = rescueResult?.adopted || null;
+        if (rescued) {
+          servingMethod = "rescueCandidateServing";
+          traceWatcher("cx.alpha.watch.serving_stamp.rescued", {
+            sessionId: projection.sessionId,
+            agentEmail: projection.agentEmail || null,
+            accountId: projection.accountId || null,
+            currentQueueItemId: projection.currentQueueItemId || null,
+            currentUii: projection.currentUii || null,
+            ghostCallState,
+          });
+        } else {
+          // HANGUP GATE (Mickey's flicker question, 2026-07-06): only a DEFINITIVE refusal
+          // (contact-blocked / foreign-owned / row confirmed gone) may end the leg. A
+          // transient refusal — read failure, healthy-row race, eligibility outage, rescue
+          // CAS miss — hangs up NOTHING and simply retries on the next tick; a Mongo blip
+          // must never kill a live conversation.
+          const definitiveRefusal = Boolean(rescueResult?.refused && rescueResult.definitive === true);
+          if (resyncOn && rescueSafe && definitiveRefusal && typeof input.queueStateAdapter?.hangupGhostCall === "function") {
+            const hangup = await input.queueStateAdapter
+              .hangupGhostCall({ uii: promotion.uii })
+              .catch(() => null);
+            traceWatcher("cx.alpha.watch.ghost_call.hangup", {
+              sessionId: projection.sessionId,
+              agentEmail: projection.agentEmail || null,
+              accountId: projection.accountId || null,
+              currentQueueItemId: projection.currentQueueItemId || null,
+              currentUii: projection.currentUii || null,
+              ghostCallState,
+              rescueRefusal: rescueResult?.refused || null,
+              ok: hangup ? hangup.ok !== false : false,
+              detail: hangup || null,
+            });
+          }
+          // The departing call's terminal outcome is INDEPENDENT of whether the incoming candidate
+          // can be adopted — flush co-attached terminal observations before bailing, or a real,
+          // already-ended call (queueItemId + UII) loses its did_not_connect and the lead's attempt
+          // accounting is corrupted. persistTerminalObservations self-guards each obs with
+          // hasTerminalWriteProof, and this branch returns before the line-~579 flush so there is no
+          // double-write. The session state patch (B's promotion) is correctly NOT written here. (#7)
+          await persistTerminalObservations(projection);
+          traceWatcher("cx.alpha.watch.serving_stamp.missed", {
+            sessionId: projection.sessionId,
+            agentEmail: projection.agentEmail || null,
+            accountId: projection.accountId || null,
+            currentQueueItemId: projection.currentQueueItemId || null,
+            currentUii: projection.currentUii || null,
+            ghostCallState,
+            rescueRefusal: rescueResult?.refused || null,
+          });
+          skipped.push({
+            sessionId: projection.sessionId,
+            agentEmail: projection.agentEmail || null,
+            reason: "serving-ownership-stamp-miss",
+            currentQueueItemId: projection.currentQueueItemId || null,
+            currentUii: projection.currentUii || null,
+          });
+          // RESYNC Trigger A — DEFINITIVELY-refused connected ghosts only (adversarial
+          // blocker #2, 2026-07-06): the audit's "unadoptable" classifier (not claimed/
+          // serving) flags exactly the rows the rescue calls rescuable (ready/cancelled),
+          // so pruning on a NON-definitive refusal would delete the candidate the promised
+          // next-tick retry needs — one transient blip and the answered human is stranded
+          // forever, unrescued AND unhung-up. Non-definitive → no prune, retry next tick.
+          // RINGING ghosts also never prune here (the rescue window). Never-connects and
+          // abandoned retries are swept by Trigger B once the call leaves the snapshot.
+          if (ghostConnected && definitiveRefusal) {
+            await resyncSessionBuffer(latest || projection.before, "serving-stamp-miss").catch(() => null);
+          }
+          return;
+        }
       }
       traceWatcher("cx.alpha.watch.serving_stamp.accepted", {
         sessionId: projection.sessionId,
@@ -1072,7 +1184,7 @@ async function runCxAccountActiveCallWatchOnce(input = {}) {
         accountId: projection.accountId || null,
         currentQueueItemId: projection.currentQueueItemId || null,
         currentUii: projection.currentUii || null,
-        servingMethod: "markCandidateServing",
+        servingMethod,
       });
     }
 
@@ -1204,5 +1316,6 @@ module.exports = {
   deriveBufferInvalidations,
   groupBulkSessionsByAccount,
   projectBulkSessionFromAccountSnapshot,
+  resolveWrapTimeoutMs, // exported for pins; pure
   runCxAccountActiveCallWatchOnce,
 };

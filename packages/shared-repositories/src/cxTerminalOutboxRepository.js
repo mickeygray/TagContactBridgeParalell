@@ -24,10 +24,30 @@ async function insertOnce(row = {}) {
   }
 }
 
-// Oldest pending/failed rows for the drain to replay.
+// DRAIN HARDENING (2026-07-06, simplified per Mickey's ruling: "we don't need to try 24
+// times on something that's never going to work"): failed rows back off between retries so
+// a poison row can't churn every ~15s tick; after a FEW attempts the DRAIN resolves the
+// lead minimally and clears the row (see cxTerminalOutboxDrain) — nothing parks, nothing
+// retries forever, and replay drift is bounded at the attempt cap by construction.
+const BACKOFF_BASE_MS = 15_000;
+const BACKOFF_CAP_MS = 30 * 60 * 1000;
+
+function computeDrainBackoffMs(attempts = 0) {
+  const n = Math.max(Number(attempts) || 0, 1);
+  return Math.min(n * n * BACKOFF_BASE_MS, BACKOFF_CAP_MS);
+}
+
+// Oldest eligible pending/failed rows for the drain to replay. A failed row waits out its
+// backoff window; dead rows never return here.
 async function listPendingForDrain(limit = 50) {
   const cap = Math.max(Number(limit) || 0, 1);
-  const rows = await CxTerminalOutbox.find({ status: { $in: ["pending", "failed"] } })
+  const now = new Date();
+  const rows = await CxTerminalOutbox.find({
+    $or: [
+      { status: "pending" },
+      { status: "failed", nextAttemptAt: { $not: { $gt: now } } }, // null OR <= now
+    ],
+  })
     .sort({ createdAt: 1 })
     .limit(cap)
     .lean();
@@ -104,20 +124,33 @@ async function updatePendingOutcomeByIdentity(input = {}) {
   ).lean();
 }
 
-async function markDrained(idemKey) {
+// CAS: only an in-flight (pending/failed) row can be marked drained. A null return means a
+// concurrent drainer already marked it — evidence for the drain layer to log, and the
+// double-mark can no longer silently overwrite drainedAt/lastError. `resolution` records
+// HOW the row left: "full" effects (default), "minimal", or "malformed".
+async function markDrained(idemKey, resolution = null) {
   const key = String(idemKey || "").trim();
   if (!key) return null;
   return CxTerminalOutbox.findOneAndUpdate(
-    { idemKey: key },
-    { $set: { status: "drained", drainedAt: new Date(), lastError: null } },
+    { idemKey: key, status: { $in: ["pending", "failed"] } },
+    {
+      $set: {
+        status: "drained",
+        drainedAt: new Date(),
+        ...(resolution ? { resolution } : {}),
+        ...(resolution === "minimal" || resolution === "malformed" ? {} : { lastError: null }),
+      },
+    },
     { new: true },
   ).lean();
 }
 
+// Failure path: increment attempts and schedule the backoff. The drain layer decides when
+// enough is enough (minimal-resolve + drain) — this function never parks anything.
 async function markFailed(idemKey, error) {
   const key = String(idemKey || "").trim();
   if (!key) return null;
-  return CxTerminalOutbox.findOneAndUpdate(
+  const row = await CxTerminalOutbox.findOneAndUpdate(
     { idemKey: key },
     {
       $set: { status: "failed", lastError: String(error || "drain-failed").slice(0, 500) },
@@ -125,9 +158,16 @@ async function markFailed(idemKey, error) {
     },
     { new: true },
   ).lean();
+  if (!row) return null;
+  await CxTerminalOutbox.updateOne(
+    { idemKey: key, status: "failed" },
+    { $set: { nextAttemptAt: new Date(Date.now() + computeDrainBackoffMs(row.attempts)) } },
+  ).catch(() => null);
+  return row;
 }
 
 module.exports = {
+  computeDrainBackoffMs, // exported for pins; pure
   findByIdemKeys,
   findByIdentity,
   insertOnce,

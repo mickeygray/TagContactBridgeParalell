@@ -218,7 +218,11 @@ test("TRUNK: wrap timeout is the walk-away guard — expiry records ANSWERED (th
   assert.equal(projected.after.completed[0].queueItemId, "q1");
 });
 
-test("TRUNK: connected wrap has no default timeout", () => {
+test("TRUNK→JANITOR: wrap holds at human timescales; an ABANDONED wrap self-resolves at the 30-min janitor default", () => {
+  // SUPERSEDES the hold-forever pin (Mickey's auto-opt-out ruling, 2026-07-06: "if someone
+  // gets lazy or something gets stuck there's a mechanism to clean things up"). The agent's
+  // click is still the record any time BEFORE the janitor line; only a walked-away wrap
+  // gets machine-resolved, loudly, via the answered guard (source wrap-timeout).
   const current = {
     ...candidate("q1", "cxbl-q1"),
     uii: "u1",
@@ -230,17 +234,30 @@ test("TRUNK: connected wrap has no default timeout", () => {
     trace: { prevActiveCalls: [{ externId: "cxbl-q1", uii: "u1" }] },
   };
 
-  const projected = projectBulkSessionFromAccountSnapshot(
+  // 14 minutes into the wrap: HELD — buttons live, no writes, the human owns the moment.
+  const held = projectBulkSessionFromAccountSnapshot(
+    s,
+    [],
+    { now: new Date("2026-06-23T12:10:00.000Z") },
+  );
+  assert.equal(held.changed, false);
+  assert.equal(held.terminalObservations.length, 0);
+  assert.equal(held.after.current.queueItemId, "q1");
+  assert.equal(held.after.current.wrap.at, "2026-06-23T11:56:00.000Z");
+
+  // 34 minutes in: the janitor resolves the abandoned wrap — never-connected fixture
+  // (no connectedAt) classifies did_not_connect through the guard, source wrap-timeout.
+  const swept = projectBulkSessionFromAccountSnapshot(
     s,
     [],
     { now: new Date("2026-06-23T12:30:00.000Z") },
   );
-
-  assert.equal(projected.changed, false);
-  assert.equal(projected.terminalObservations.length, 0);
-  assert.equal(projected.after.current.queueItemId, "q1");
-  assert.equal(projected.after.current.wrap.at, "2026-06-23T11:56:00.000Z");
-  assert.equal(projected.after.completed.length, 0);
+  assert.equal(swept.changed, true);
+  assert.equal(swept.after.current, null);
+  assert.equal(swept.after.completed.length, 1);
+  assert.equal(swept.terminalObservations.length, 1);
+  assert.equal(swept.terminalObservations[0].source, "wrap-timeout");
+  assert.equal(swept.terminalObservations[0].outcome, "did_not_connect");
 });
 
 test("TRUNK: a reappearing call clears the wrap flag (resume)", () => {

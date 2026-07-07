@@ -88,6 +88,8 @@ import { KNOWN_DOMAINS, useDomainStore } from "@/lib/domain/domainStore";
 import {
   useCxBulkLoadSession,
   useCxBulkLoadDisposition,
+  useCxWrapCards,
+  useCxWrapCardResolve,
   useCxBulkLoadReviewOutcome,
   useCxBulkLoadGetLeads,
   useCxBulkLoadPauseProgressive,
@@ -3742,7 +3744,11 @@ export function CXWorkspaceBulkLoad() {
     });
   }
 
-  function clearCasePanelForNextQueueLead() {
+  function clearCasePanelForNextQueueLead(source = "unknown") {
+    // [cx][wipe] — the field microphone (2026-07-06): the middle-section name kept
+    // vanishing and static analysis missed the wiper twice. Every case-panel wipe now
+    // names its trigger in the console so the next flicker confesses its source.
+    console.info("[cx][wipe] clearCasePanelForNextQueueLead", { source, at: new Date().toISOString() });
     setSelected(null);
     setDirty(BLANK_DIRTY);
     setForm(BLANK_FORM);
@@ -3983,6 +3989,12 @@ export function CXWorkspaceBulkLoad() {
   // above the legacy current-call scramble effects so those effects can stand down.
   const bulk = useCxBulkLoadSession(true);
   const bulkDisposition = useCxBulkLoadDisposition();
+  // CALL WRAP CARDS (docs/CX_CALL_WRAP_QUEUE_DESIGN_2026-07-06.md): the "answered today"
+  // follow-up bar. Server returns {enabled:false, cards:[]} while the feature flag is off,
+  // so this renders nothing by default. [DNC] [Appointment->picker] [X], per the design.
+  const wrapCardsQuery = useCxWrapCards(true);
+  const wrapResolve = useCxWrapCardResolve();
+  const [wrapApptPicker, setWrapApptPicker] = React.useState<Record<string, string>>({});
   const bulkReviewOutcome = useCxBulkLoadReviewOutcome();
   const bulkGetLeads = useCxBulkLoadGetLeads();
   const bulkPauseProgressive = useCxBulkLoadPauseProgressive();
@@ -4180,6 +4192,7 @@ export function CXWorkspaceBulkLoad() {
     // match. (Operator-typed fields would normally be preserved via
     // dirty flags, but we just cleared dirty too — a fresh call
     // means the operator's prior typing is no longer relevant.)
+    console.info("[cx][wipe] fresh-call-scramble-reset", { currentCallSessionId, at: new Date().toISOString() });
     setForm(BLANK_FORM);
     setDirty(BLANK_DIRTY);
     setPickedCandidateKey(null);
@@ -4444,7 +4457,7 @@ export function CXWorkspaceBulkLoad() {
     if (!bulkSessionEnded) return;
     lastBulkKeyRef.current = null;
     clearServedQueueSelection();
-    clearCasePanelForNextQueueLead();
+    clearCasePanelForNextQueueLead("bulk-session-ended");
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [bulkSessionEnded, bulkSessionId]);
 
@@ -4460,6 +4473,7 @@ export function CXWorkspaceBulkLoad() {
     if (lastBulkKeyRef.current === key) return;
     lastBulkKeyRef.current = key;
     const bulkName = String(bulkDisplayCandidate.name || "").trim();
+    console.info("[cx][identity] populate", { key, name: bulkName || "(empty)", at: new Date().toISOString() });
     const bulkNameParts = bulkName.split(/\s+/).filter(Boolean);
     const bulkFirstName = bulkNameParts[0] || "";
     const bulkLastName = bulkNameParts.length > 1 ? bulkNameParts.slice(1).join(" ") : "";
@@ -5407,7 +5421,7 @@ export function CXWorkspaceBulkLoad() {
       },
     });
     clearServedQueueSelection();
-    clearCasePanelForNextQueueLead();
+    clearCasePanelForNextQueueLead("legacy-terminal-workflow");
     scheduleAutoServe(AUTO_SERVE_HANDOFF_DELAY_SECONDS, "next");
   }, [
     data?.recentWorkflowStages,
@@ -5506,6 +5520,12 @@ export function CXWorkspaceBulkLoad() {
   }
 
   React.useEffect(() => {
+    // BULK GUARD (field find 2026-07-06 run 4): in bulk mode the LEGACY queue is empty, so
+    // this recovery could never find a "serving" row — 20s after a lead landed (≈ exactly
+    // when a ~15s ring got answered) it wiped the case panel mid-call ("the name disappeared
+    // from the middle"). The bulk display cascade owns the middle while a session runs;
+    // legacy queue recovery must not touch it. Same guard its sibling effects wear.
+    if (bulkRunning) return;
     if (!(servedQueueTicketId || servingQueueKey)) return;
     if (servedQueueStartedAt == null) return;
     if (dialAny.isPending || disposition.isPending) return;
@@ -5520,7 +5540,7 @@ export function CXWorkspaceBulkLoad() {
     if (matchingItem && matchingState === "serving") return;
 
     clearServedQueueSelection();
-    clearCasePanelForNextQueueLead();
+    clearCasePanelForNextQueueLead("legacy-stale-served-queue");
     scheduleAutoServe(AUTO_SERVE_HANDOFF_DELAY_SECONDS, "next");
     toast.warning("Queue recovered", {
       description: "The previous lead was no longer active, so the next lead can start.",
@@ -6021,7 +6041,7 @@ export function CXWorkspaceBulkLoad() {
             description: reason || "Auto serve will retry from the queue.",
           });
           clearServedQueueSelection();
-          clearCasePanelForNextQueueLead();
+          clearCasePanelForNextQueueLead("next-call-handoff-fallback");
           scheduleAutoServe(AUTO_SERVE_HANDOFF_DELAY_SECONDS, "next");
         } else if (servedQueueActionKey || servedQueueTicketId || servedQueueCaseId) {
           suppressCurrentQueueLead({
@@ -6033,7 +6053,7 @@ export function CXWorkspaceBulkLoad() {
             queueOutcome: "rescheduled",
           });
           clearServedQueueSelection();
-          clearCasePanelForNextQueueLead();
+          clearCasePanelForNextQueueLead("next-call-rescheduled");
           scheduleAutoServe(AUTO_SERVE_HANDOFF_DELAY_SECONDS, "next");
         }
         workspace.refetch();
@@ -6671,6 +6691,114 @@ export function CXWorkspaceBulkLoad() {
               ) : null}
               <div className="text-[11px] text-muted-foreground">{formSubtitle}</div>
             </CardHeader>
+            {(wrapCardsQuery.data?.cards?.length ?? 0) > 0 ? (
+              <div className="border-t border-border/60 bg-muted/20 px-4 py-2 space-y-1.5">
+                <div className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+                  Call wrap-up — answered today ({wrapCardsQuery.data?.cards.length})
+                </div>
+                {(wrapCardsQuery.data?.cards ?? []).map((card) => (
+                  <div
+                    key={card.idemKey}
+                    className="flex flex-wrap items-center gap-2 rounded-md border border-border bg-background px-2 py-1.5"
+                  >
+                    <div className="min-w-0 flex-1">
+                      <div className="truncate text-sm font-medium">{card.name || `Case ${card.caseId ?? "?"}`}</div>
+                      <div className="truncate text-[11px] text-muted-foreground">
+                        {card.caseId ? `Case ${card.caseId} · ` : ""}
+                        {card.calledAt ? new Date(card.calledAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : ""}
+                        {card.expiresAt ? ` · expires ${new Date(card.expiresAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}` : ""}
+                      </div>
+                      {card.coachSummary ? (
+                        <div className="mt-0.5 line-clamp-2 text-[11px] text-muted-foreground">{String(card.coachSummary)}</div>
+                      ) : null}
+                    </div>
+                    {wrapApptPicker[card.idemKey] !== undefined ? (
+                      <div className="flex items-center gap-1">
+                        <input
+                          type="datetime-local"
+                          className="h-8 rounded-md border border-border bg-background px-2 text-xs"
+                          value={wrapApptPicker[card.idemKey]}
+                          onChange={(event) => {
+                            const value = event.target.value;
+                            setWrapApptPicker((prev) => ({ ...prev, [card.idemKey]: value }));
+                          }}
+                        />
+                        <Button
+                          size="sm"
+                          variant="secondary"
+                          disabled={!wrapApptPicker[card.idemKey] || wrapResolve.isPending}
+                          onClick={(event) => {
+                            consumeUiEvent(event);
+                            void wrapResolve
+                              .mutateAsync({ idemKey: card.idemKey, action: "appointment", appointmentAt: wrapApptPicker[card.idemKey] })
+                              .then(() => setWrapApptPicker((prev) => {
+                                const next = { ...prev };
+                                delete next[card.idemKey];
+                                return next;
+                              }))
+                              .catch(() => null);
+                          }}
+                        >
+                          Book
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          onClick={(event) => {
+                            consumeUiEvent(event);
+                            setWrapApptPicker((prev) => {
+                              const next = { ...prev };
+                              delete next[card.idemKey];
+                              return next;
+                            });
+                          }}
+                        >
+                          Cancel
+                        </Button>
+                      </div>
+                    ) : (
+                      <div className="flex items-center gap-1">
+                        <Button
+                          size="sm"
+                          variant="destructive"
+                          disabled={wrapResolve.isPending}
+                          title="Do not call — stops every channel; the call record still files"
+                          onClick={(event) => {
+                            consumeUiEvent(event);
+                            void wrapResolve.mutateAsync({ idemKey: card.idemKey, action: "dnc" }).catch(() => null);
+                          }}
+                        >
+                          DNC
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="secondary"
+                          disabled={wrapResolve.isPending}
+                          onClick={(event) => {
+                            consumeUiEvent(event);
+                            setWrapApptPicker((prev) => ({ ...prev, [card.idemKey]: "" }));
+                          }}
+                        >
+                          Appointment
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          disabled={wrapResolve.isPending}
+                          title="No action needed — the call record still files"
+                          onClick={(event) => {
+                            consumeUiEvent(event);
+                            void wrapResolve.mutateAsync({ idemKey: card.idemKey, action: "dismiss" }).catch(() => null);
+                          }}
+                        >
+                          ✕
+                        </Button>
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            ) : null}
             <CardContent
               className={cn(
                 "space-y-2 pt-0 transition-opacity",

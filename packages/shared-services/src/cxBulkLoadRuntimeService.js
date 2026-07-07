@@ -50,21 +50,6 @@ function isDuplicateKeyError(error) {
   return Number(error?.code) === 11000 || String(error?.codeName || "") === "DuplicateKey";
 }
 
-function isDispositionTraceEnabled() {
-  return /^(1|true|yes|on)$/i.test(str(process.env.CX_BULK_LOAD_DISPOSITION_TRACE));
-}
-
-function createDispositionTrace(scope) {
-  if (!isDispositionTraceEnabled()) return () => {};
-  const startedAt = Date.now();
-  return (label, extra) => {
-    console.log(
-      `[DISPTRACE] ${scope}:${label} +${Date.now() - startedAt}ms`,
-      extra !== undefined ? extra : "",
-    );
-  };
-}
-
 function queueItemKey(candidate = null) {
   return str(candidate?.queueItemId || candidate?.id || candidate?._id);
 }
@@ -87,23 +72,6 @@ function liveSlots(state) {
 function bufferDeficit(state, targetBuffer) {
   const deficit = Number(targetBuffer || 0) - liveSlots(state);
   return deficit > 0 ? deficit : 0;
-}
-
-function isBulkFlowTraceEnabled() {
-  return /^(1|true|yes|on)$/i.test(str(process.env.CX_BULK_LOAD_FLOW_TRACE));
-}
-
-function flowTraceMatchesAgent(state = {}) {
-  const filter = str(process.env.CX_BULK_LOAD_FLOW_TRACE_AGENT).toLowerCase();
-  if (!filter) return true;
-  const haystack = [
-    state.sessionId,
-    state.agentEmail,
-    state.agentExtensionId,
-    state.cxAgentId,
-    state.domain,
-  ].map(str).join(" ").toLowerCase();
-  return haystack.includes(filter);
 }
 
 function summarizeFlowState(state = {}) {
@@ -138,8 +106,6 @@ function traceBulkFlow(stage, state = {}, extra = {}) {
     at: new Date().toISOString(),
   };
   logCxAlpha(alphaEventFromBulkStage(stage), payload);
-  if (!isBulkFlowTraceEnabled() || !flowTraceMatchesAgent(state)) return;
-  console.info("[CXBULK]", stage, payload);
 }
 
 // Pool the matcher looks at: the buffer plus the present current (so an unchanged
@@ -843,12 +809,8 @@ function createCxBulkLoadRuntimeService(deps = {}) {
   // RingCX advances to the next buffered lead; the next watch picks it up.
   async function submitCxBulkLoadDisposition(input = {}) {
     return withSessionMutation(input.sessionId, async () => {
-    const _step = createDispositionTrace("runtime");
-    _step("ENTER", { sessionId: input.sessionId, disposition: input.disposition });
     const state = await loadState(input.sessionId);
-    _step("loadState DONE", { hasState: Boolean(state), hasCurrent: Boolean(state && state.current) });
     if (!state || !state.current) {
-      _step("RETURN early — no state/current (NOTHING SENT TO RINGCX)");
       traceBulkFlow("disposition.no_current", state || {}, {
         requestedDisposition: input.disposition || null,
       });
@@ -871,11 +833,9 @@ function createCxBulkLoadRuntimeService(deps = {}) {
       uii: str(current?.uii) || null,
     });
     // M8b §5 — PII-safe trace: caseId/domain/uii are the correlators; full phone is dropped.
-    _step("current", { uii: current.uii, caseId: current.caseId, domain: current.domain, outcome });
 
     let next = reduce(state, { type: "terminal.started", outcome }, now());
 
-    _step("terminalExecutor (HANGUP) START");
     let terminal = typeof terminalExecutor === "function"
       ? await terminalExecutor({
           session: state,
@@ -886,14 +846,6 @@ function createCxBulkLoadRuntimeService(deps = {}) {
           notes: input.notes,
         })
       : null;
-    _step("terminalExecutor (HANGUP) DONE", {
-      ok: terminal && terminal.ok,
-      executed: terminal && terminal.executed,
-      skipped: terminal && terminal.skipped,
-      reason: terminal && terminal.reason,
-      hangupStatus: terminal && terminal.hangupStatus,
-      dispositionStatus: terminal && terminal.dispositionStatus,
-    });
     terminal = normalizeTerminalResult(terminal);
     if (terminal && terminal.ok === false) {
       next = reduce(next, { type: "terminal.failed", error: terminal.error || terminal.reason || "terminal-rejected" }, now());
@@ -902,7 +854,6 @@ function createCxBulkLoadRuntimeService(deps = {}) {
         outcome,
         reason: terminal.error || terminal.reason || "terminal-rejected",
       });
-      _step("RETURN — terminal FAILED");
       return { ...sanitizeSession(next), dispositionOk: false, terminal };
     }
 
@@ -913,7 +864,6 @@ function createCxBulkLoadRuntimeService(deps = {}) {
     // both failed), capture a replay marker and STILL advance to terminal.accepted so the lead is
     // counted and current is cleared. The outbox idemKey keeps any later drain/reconciler re-record
     // idempotent. Do NOT use terminal.failed here — that path is for a call that did NOT hang up. (#8)
-    _step("persistTerminalOutcome (DB WRITE) START");
     let terminalRecordError = null;
     try {
       const persistResult = await outcomeAdapter.persistTerminalOutcome({
@@ -930,7 +880,6 @@ function createCxBulkLoadRuntimeService(deps = {}) {
     } catch (err) {
       terminalRecordError = err?.message || String(err);
     }
-    _step("persistTerminalOutcome (DB WRITE) DONE", { terminalRecordError });
     await clearTerminalHold(state, current, outcome).catch(() => null);
     const acceptedAt = now();
     next = reduce(next, {
@@ -940,16 +889,12 @@ function createCxBulkLoadRuntimeService(deps = {}) {
       reviewHoldUntil: null,
       reviewHoldReason: null,
     }, acceptedAt);
-    _step("maybeRefill (PUBLISH MORE LEADS) START");
     next = await maybeRefill(next);
-    _step("maybeRefill DONE");
     let getLeads = null;
     if (shouldGetLeadsAfterDisposition(outcome)) {
-      _step("getLeadsAfterDisposition START");
       const getLeadsResult = await runGetLeadsFromReadyState(next, "after-disposition");
       next = getLeadsResult.state || next;
       getLeads = getLeadsResult.getLeads;
-      _step("getLeadsAfterDisposition DONE", getLeads);
     }
     if (terminalRecordError) {
       // Fail-CLOSED to an observable replay marker, not fail-silent: the reducer reached a terminal
@@ -966,7 +911,6 @@ function createCxBulkLoadRuntimeService(deps = {}) {
       getLeadsReason: getLeads?.reason || null,
       terminalRecordDeferred: Boolean(terminalRecordError),
     });
-    _step("persist DONE → RETURN ok (TOTAL)");
     return { ...sanitizeSession(next), dispositionOk: true, terminal, getLeads, terminalRecordDeferred: Boolean(terminalRecordError) };
     });
   }

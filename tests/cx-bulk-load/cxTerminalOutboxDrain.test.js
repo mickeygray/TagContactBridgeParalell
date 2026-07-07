@@ -36,7 +36,7 @@ test("drainOnce replays each pending payload and marks it drained", async () => 
   const result = await drain.drainOnce();
   assert.deepEqual(replayed.map((e) => e.queueItemId), ["q1", "q2"]);
   assert.deepEqual(outbox.calls.drained, ["q1:u1", "q2:u2"]);
-  assert.deepEqual(result, { scanned: 2, drained: 2, failed: 0 });
+  assert.deepEqual(result, { scanned: 2, drained: 2, failed: 0, minimalResolved: 0, oldestPendingAgeMs: 0 });
 });
 
 test("a replay failure marks THAT row failed and never aborts the rest of the batch", async () => {
@@ -52,7 +52,7 @@ test("a replay failure marks THAT row failed and never aborts the rest of the ba
   const result = await drain.drainOnce();
   assert.deepEqual(outbox.calls.failed.map((f) => f.idemKey), ["q1:u1"]); // q1 failed
   assert.deepEqual(outbox.calls.drained, ["q2:u2"]); // q2 still drained
-  assert.deepEqual(result, { scanned: 2, drained: 1, failed: 1 });
+  assert.deepEqual(result, { scanned: 2, drained: 1, failed: 1, minimalResolved: 0, oldestPendingAgeMs: 0 });
 });
 
 test("a scan failure returns an explicit scanError result instead of aborting the drain", async () => {
@@ -67,7 +67,7 @@ test("a scan failure returns an explicit scanError result instead of aborting th
     logger: { warn: (...a) => warns.push(a) },
   });
   const result = await drain.drainOnce();
-  assert.deepEqual(result, { scanned: 0, drained: 0, failed: 0, scanError: true });
+  assert.deepEqual(result, { scanned: 0, drained: 0, failed: 0, minimalResolved: 0, oldestPendingAgeMs: 0, scanError: true });
   assert.equal(warns.length, 1);
 });
 
@@ -97,7 +97,7 @@ test("post-drain call wrap hook runs after terminal replay and receives terminal
   assert.equal(wrapped[0].row.idemKey, "q1:u1");
   assert.equal(wrapped[0].payload.uii, "u1");
   assert.deepEqual(wrapped[0].terminalResult, { counted: true, queueItemId: "q1" });
-  assert.deepEqual(result, { scanned: 1, drained: 1, failed: 0, callWrapQueued: 1, callWrapSkipped: 0, callWrapFailed: 0 });
+  assert.deepEqual(result, { scanned: 1, drained: 1, failed: 0, minimalResolved: 0, oldestPendingAgeMs: 0, callWrapQueued: 1, callWrapSkipped: 0, callWrapFailed: 0 });
 });
 
 test("post-drain call note hook runs independently from call wrap", async () => {
@@ -121,6 +121,8 @@ test("post-drain call note hook runs independently from call wrap", async () => 
     scanned: 1,
     drained: 1,
     failed: 0,
+    minimalResolved: 0,
+    oldestPendingAgeMs: 0,
     callNotesWritten: 1,
     callNotesSkipped: 0,
     callNotesFailed: 0,
@@ -149,6 +151,8 @@ test("post-drain call note failure does not fail terminal replay", async () => {
     scanned: 1,
     drained: 1,
     failed: 0,
+    minimalResolved: 0,
+    oldestPendingAgeMs: 0,
     callNotesWritten: 0,
     callNotesSkipped: 0,
     callNotesFailed: 1,
@@ -170,7 +174,7 @@ test("post-drain call wrap failure does not fail the terminal row", async () => 
   assert.deepEqual(outbox.calls.drained, ["q1:u1"]);
   assert.deepEqual(outbox.calls.failed, []);
   assert.equal(warns.length, 1);
-  assert.deepEqual(result, { scanned: 1, drained: 1, failed: 0, callWrapQueued: 0, callWrapSkipped: 0, callWrapFailed: 1 });
+  assert.deepEqual(result, { scanned: 1, drained: 1, failed: 0, minimalResolved: 0, oldestPendingAgeMs: 0, callWrapQueued: 0, callWrapSkipped: 0, callWrapFailed: 1 });
 });
 
 test("post-drain call wrap hook can explicitly skip rows without wrap material", async () => {
@@ -184,5 +188,80 @@ test("post-drain call wrap hook can explicitly skip rows without wrap material",
   });
   const result = await drain.drainOnce();
   assert.deepEqual(outbox.calls.drained, ["q1:u1"]);
-  assert.deepEqual(result, { scanned: 1, drained: 1, failed: 0, callWrapQueued: 0, callWrapSkipped: 1, callWrapFailed: 0 });
+  assert.deepEqual(result, { scanned: 1, drained: 1, failed: 0, minimalResolved: 0, oldestPendingAgeMs: 0, callWrapQueued: 0, callWrapSkipped: 1, callWrapFailed: 0 });
+});
+
+// ---- 2026-07-06 drain hardening pins (dead-letter, CAS, stuck-ness metric) ----
+
+test("MINIMAL RESOLUTION: past the attempt threshold the drain stamps the bare outcome and clears the row", async () => {
+  // Mickey's ruling (2026-07-06 late): don't try 24 times on something that's never going
+  // to work — resolve the lead with the bare minimum (the outcome string tied back to the
+  // row) and drain it. The full effect chain must NOT be re-attempted.
+  const resolved = [];
+  const outbox = fakeOutbox([
+    { idemKey: "poison-1", attempts: 3, lastError: "still-broken", payload: { queueItemId: "q-poison", outcome: "did_not_connect" }, createdAt: new Date(Date.now() - 60_000) },
+    { idemKey: "ok-1", payload: { queueItemId: "q-ok", outcome: "answered" }, createdAt: new Date() },
+  ]);
+  let replays = 0;
+  const drain = createCxTerminalOutboxDrain({
+    outboxRepository: outbox,
+    recordCadenceEvent: async () => { replays += 1; return { ok: true }; },
+    resolveMinimal: async ({ payload }) => { resolved.push(payload.queueItemId); return { ok: true, minimal: true }; },
+    logger: { warn() {}, error() {} },
+  });
+  const result = await drain.drainOnce({ limit: 10 });
+  assert.equal(result.minimalResolved, 1);
+  assert.equal(result.drained, 1, "the healthy row still drains normally");
+  assert.equal(replays, 1, "the poison row's effect chain must NOT be replayed again");
+  assert.deepEqual(resolved, ["q-poison"], "the bare-minimum stamp goes back to the lead");
+  assert.ok(outbox.calls.drained.includes("poison-1"), "the poison row leaves the queue");
+});
+
+test("MALFORMED: a row with no queue-item identity drains immediately — no retries, no writes", async () => {
+  // Mickey: "if there is no button press ie a malformed lead do nothing and just drain it."
+  const resolved = [];
+  const outbox = fakeOutbox([
+    { idemKey: "junk-1", payload: { outcome: "answered" }, createdAt: new Date() }, // no queueItemId
+  ]);
+  let replays = 0;
+  const drain = createCxTerminalOutboxDrain({
+    outboxRepository: outbox,
+    recordCadenceEvent: async () => { replays += 1; return { ok: true }; },
+    resolveMinimal: async ({ payload }) => { resolved.push(payload); return { ok: true }; },
+    logger: { warn() {}, error() {} },
+  });
+  const result = await drain.drainOnce({ limit: 10 });
+  assert.equal(replays, 0, "nothing to tie back — never replayed");
+  assert.deepEqual(resolved, [], "no minimal write either — do nothing and drain it");
+  assert.ok(outbox.calls.drained.includes("junk-1"));
+  assert.equal(result.failed, 0);
+});
+
+test("a markDrained CAS miss (concurrent drain) is absorbed and logged, never thrown", async () => {
+  const outbox = fakeOutbox([{ idemKey: "raced-1", payload: { queueItemId: "q-raced", outcome: "answered" }, createdAt: new Date() }]);
+  outbox.markDrained = async (idemKey) => {
+    outbox.calls.drained.push(idemKey);
+    return null; // another drainer already marked it
+  };
+  const drain = createCxTerminalOutboxDrain({
+    outboxRepository: outbox,
+    recordCadenceEvent: async () => ({ ok: true }),
+    logger: { warn() {}, error() {} },
+  });
+  const result = await drain.drainOnce({ limit: 10 });
+  assert.equal(result.drained, 1, "the effects ran; the row still counts as drained this tick");
+  assert.equal(result.failed, 0);
+});
+
+test("oldestPendingAgeMs reports the stuck-ness of the scan set", async () => {
+  const outbox = fakeOutbox([
+    { idemKey: "old-1", payload: { outcome: "answered" }, createdAt: new Date(Date.now() - 120_000) },
+  ]);
+  const drain = createCxTerminalOutboxDrain({
+    outboxRepository: outbox,
+    recordCadenceEvent: async () => ({ ok: true }),
+    logger: { warn() {}, error() {} },
+  });
+  const result = await drain.drainOnce({ limit: 10 });
+  assert.ok(result.oldestPendingAgeMs >= 110_000, "the oldest row's age must surface as the health metric");
 });

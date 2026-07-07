@@ -24,12 +24,19 @@ function summarizeDrainRow(row = {}) {
   };
 }
 
+// After this many failed full replays the drain stops trying the effect chain and resolves
+// the lead MINIMALLY (Mickey's ruling, 2026-07-06 late): the injected resolveMinimal stamps
+// the bare outcome string back onto the queue row, then the row drains. Err on the side of
+// caution — better a lead carrying the truth minus the bookkeeping than a row looping.
+const MINIMAL_RESOLVE_AFTER_ATTEMPTS = 3;
+
 function createCxTerminalOutboxDrain({
   outboxRepository,
   recordCadenceEvent,
   writeCallNote = null,
   enqueueCallWrap = null,
   enrichTerminalPacket = null,
+  resolveMinimal = null,
   logger = console,
 } = {}) {
   if (!outboxRepository || typeof outboxRepository.listPendingForDrain !== "function") {
@@ -57,7 +64,7 @@ function createCxTerminalOutboxDrain({
     } catch (err) {
       logCxAlpha("cx.alpha.drain.scan.failed", { limit, error: err?.message }, { logger });
       logger.warn?.("cxTerminalOutboxDrain scan failed", { err: err?.message });
-      return { scanned: 0, drained: 0, failed: 0, scanError: true };
+      return { scanned: 0, drained: 0, failed: 0, minimalResolved: 0, oldestPendingAgeMs: 0, scanError: true };
     }
     const pending = Array.isArray(rawPending) ? rawPending : [];
     logCxAlpha("cx.alpha.drain.tick.started", { limit, pendingCount: pending.length }, { logger });
@@ -71,6 +78,7 @@ function createCxTerminalOutboxDrain({
     }
     let drained = 0;
     let failed = 0;
+    let minimalResolved = 0;
     let callNotesWritten = 0;
     let callNotesSkipped = 0;
     let callNotesFailed = 0;
@@ -79,14 +87,37 @@ function createCxTerminalOutboxDrain({
     let callWrapFailed = 0;
     for (const row of pending) {
       logCxAlpha("cx.alpha.drain.row.started", summarizeDrainRow(row), { logger });
-      if (!row || !row.payload) {
-        // No replayable payload — mark drained so it can't wedge the queue; the queue-item
-        // terminal transition is the backstop count for this edge.
-        await outboxRepository.markDrained(row && row.idemKey).catch(() => null);
+      if (!row || !row.payload || !String(row.payload.queueItemId || "").trim()) {
+        // MALFORMED (Mickey: "if there is no button press ie a malformed lead do nothing and
+        // just drain it"). No payload, or no queue-item identity to tie anything back to —
+        // no retries, no writes, out of the queue.
+        await outboxRepository.markDrained(row && row.idemKey, "malformed").catch(() => null);
         logCxAlpha("cx.alpha.drain.row.skipped", {
           ...summarizeDrainRow(row),
-          reason: "missing-payload",
+          reason: !row || !row.payload ? "missing-payload" : "missing-queue-item",
         }, { logger });
+        continue;
+      }
+      if (Number(row.attempts) >= MINIMAL_RESOLVE_AFTER_ATTEMPTS) {
+        // MINIMAL RESOLUTION (Mickey: "we don't need to try 24 times on something that's
+        // never going to work"). The full effect chain failed repeatedly — stamp the bare
+        // outcome string back onto the lead (fail-soft) and clear the row. Nothing parks.
+        const minimal = resolveMinimal
+          ? await resolveMinimal({ row, payload: row.payload }).catch((err) => ({ ok: false, error: err?.message }))
+          : null;
+        await outboxRepository.markDrained(row.idemKey, "minimal").catch(() => null);
+        minimalResolved += 1;
+        logCxAlpha("cx.alpha.drain.row.minimal_resolved", {
+          ...summarizeDrainRow(row),
+          attempts: row.attempts ?? null,
+          lastError: row.lastError || null,
+          minimalOk: minimal ? minimal.ok !== false : null,
+        }, { logger });
+        logger.warn?.("cxTerminalOutboxDrain row resolved MINIMALLY after repeated failures", {
+          idemKey: row.idemKey,
+          attempts: row.attempts,
+          lastError: row.lastError,
+        });
         continue;
       }
       try {
@@ -127,7 +158,16 @@ function createCxTerminalOutboxDrain({
             });
           }
         }
-        await outboxRepository.markDrained(row.idemKey);
+        const drainedRow = await outboxRepository.markDrained(row.idemKey);
+        if (!drainedRow) {
+          // CAS miss: a concurrent drainer (second process / restart race) already marked it.
+          // The business effects ran twice — downstream guards absorb it, but it must not
+          // happen silently (the singleton-drain assumption just failed).
+          logCxAlpha("cx.alpha.drain.row.drained_cas_miss", summarizeDrainRow(row), { logger });
+          logger.warn?.("cxTerminalOutboxDrain markDrained CAS miss — concurrent drain?", {
+            idemKey: row.idemKey,
+          });
+        }
         drained += 1;
         if (enqueueCallWrap) {
           try {
@@ -157,18 +197,30 @@ function createCxTerminalOutboxDrain({
           }
         }
       } catch (err) {
-        await outboxRepository
+        const failedRow = await outboxRepository
           .markFailed(row.idemKey, err && err.message ? err.message : String(err))
           .catch(() => null);
         logCxAlpha("cx.alpha.drain.row.failed", {
           ...summarizeDrainRow(row),
+          attempts: failedRow?.attempts ?? null,
           error: err?.message || String(err),
         }, { logger });
         logger.warn?.("cxTerminalOutboxDrain replay failed", { idemKey: row.idemKey, err: err?.message });
         failed += 1;
       }
     }
-    const result = { scanned: Array.isArray(pending) ? pending.length : 0, drained, failed };
+    // Stuck-ness health metric: the age of the oldest row still in the scan set — a growing
+    // number here means the exit path is falling behind (the janitor's dashboard number).
+    const oldestPendingAgeMs = pending.length && pending[0]?.createdAt
+      ? Math.max(Date.now() - new Date(pending[0].createdAt).getTime(), 0)
+      : 0;
+    const result = {
+      scanned: Array.isArray(pending) ? pending.length : 0,
+      drained,
+      failed,
+      minimalResolved,
+      oldestPendingAgeMs,
+    };
     if (writeCallNote) {
       result.callNotesWritten = callNotesWritten;
       result.callNotesSkipped = callNotesSkipped;
