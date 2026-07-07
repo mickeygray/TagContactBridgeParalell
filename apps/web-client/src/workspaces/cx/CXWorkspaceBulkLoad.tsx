@@ -58,17 +58,10 @@ import {
   useCxLogicsTask,
   useCxReleaseAppointment,
   useCxSetStatus,
-  useCxSimpleLoopAdvance,
-  useCxSimpleLoopDisposition,
-  useCxSimpleLoopKill,
-  useCxSimpleLoopSession,
-  useCxSimpleLoopSkip,
-  useCxSimpleLoopStart,
   useCxSimulateCallAny,
   useCxWorkspace,
 } from "@/lib/api/queries/cx";
 import { useClientDetail } from "@/lib/api/queries/clients";
-import type { CxSimpleLoopSession } from "@/lib/api/queries/cx";
 import type {
   CxCallQueueItem,
   CxAppointment,
@@ -189,238 +182,6 @@ function normalizeComparablePhone(value: string | null | undefined) {
   if (!digits) return "";
   if (digits.length === 11 && digits.startsWith("1")) return digits.slice(1);
   return digits.length > 10 ? digits.slice(-10) : digits;
-}
-
-function describeSimpleLoopCurrent(session: CxSimpleLoopSession | null | undefined) {
-  const current = session?.current;
-  if (!current) return "No current call";
-  const bits = [
-    current.name || "Unknown",
-    current.caseId ? `case ${current.caseId}` : null,
-    current.phoneLast4 ? `***${current.phoneLast4}` : null,
-    current.phase || current.status || null,
-    current.uii ? `UII ${current.uii}` : null,
-  ].filter(Boolean);
-  return bits.join(" · ");
-}
-
-type SimpleLoopDisposition = "answered" | "did-not-answer" | "voicemail";
-
-function describeSimpleLoopMatch(session: CxSimpleLoopSession | null | undefined) {
-  const current = session?.current;
-  if (!current) return null;
-  const activeCallSummary = current.activeCallSummary || {};
-  const reasons = Array.isArray(current.matchReasons) ? current.matchReasons.filter(Boolean) : [];
-  const bits = [
-    activeCallSummary.state ? `CX ${String(activeCallSummary.state)}` : null,
-    reasons.length > 0 ? `match ${reasons.join("+")}` : null,
-    current.activeEvidenceAt ? `seen ${String(current.activeEvidenceAt).slice(11, 19)}` : null,
-  ].filter(Boolean);
-  return bits.length > 0 ? bits.join(" · ") : null;
-}
-
-function describeSimpleLoopLastCompleted(session: CxSimpleLoopSession | null | undefined) {
-  const completed = Array.isArray(session?.completed) ? session.completed : [];
-  const last = completed[completed.length - 1];
-  if (!last) return null;
-  const dispositionResult = last.dispositionResult || {};
-  const status =
-    dispositionResult.dispositionStatus ||
-    dispositionResult.hangupStatus ||
-    dispositionResult.reason ||
-    last.outcome ||
-    "completed";
-  return `Recent: ${last.name || "Unknown"} · ${last.outcome || "done"} · ${String(status)}`;
-}
-
-function SimpleLoopTestPanel({
-  session,
-  isLoading,
-  isFetching,
-  error,
-  mode,
-  setMode,
-  limit,
-  setLimit,
-  reverse,
-  setReverse,
-  isBusy,
-  onStart,
-  onStartAndDial,
-  onAdvance,
-  onDisposition,
-  onSkip,
-  onKill,
-  onRefresh,
-}: {
-  session: CxSimpleLoopSession | null | undefined;
-  isLoading: boolean;
-  isFetching: boolean;
-  error: unknown;
-  mode: "single" | "bulk-mirror";
-  setMode: (mode: "single" | "bulk-mirror") => void;
-  limit: number;
-  setLimit: (limit: number) => void;
-  reverse: boolean;
-  setReverse: (reverse: boolean) => void;
-  isBusy: boolean;
-  onStart: () => void;
-  onStartAndDial: () => void;
-  onAdvance: () => void;
-  onDisposition: (outcome: SimpleLoopDisposition) => void;
-  onSkip: () => void;
-  onKill: () => void;
-  onRefresh: () => void;
-}) {
-  const current = session?.current || null;
-  const bufferCount = Array.isArray(session?.queue) ? session.queue.length : 0;
-  const completedCount = Array.isArray(session?.completed) ? session.completed.length : 0;
-  const matchDescription = describeSimpleLoopMatch(session);
-  const lastCompletedDescription = describeSimpleLoopLastCompleted(session);
-  const events = Array.isArray(session?.events) ? session.events.slice(-5).reverse() : [];
-  const statusTone =
-    session?.status === "running"
-      ? "success"
-      : session?.status === "paused"
-        ? "warning"
-        : session?.status
-          ? "neutral"
-          : "info";
-
-  return (
-    <Card className="mb-3 border-sky-500/30 bg-sky-500/5">
-      <CardHeader className="pb-2">
-        <div className="flex items-center justify-between gap-2">
-          <CardTitle className="text-sm">Simple loop test</CardTitle>
-          <StatusPill tone={statusTone} dotted>
-            {session?.status || (isLoading ? "loading" : "ready")}
-          </StatusPill>
-        </div>
-        <div className="text-[11px] text-muted-foreground">
-          Local harness: queue → current → completed. Enable with <span className="font-mono">?cxSimpleLoop=1</span>.
-        </div>
-      </CardHeader>
-      <CardContent className="space-y-3">
-        <div className="grid grid-cols-[1fr_72px] gap-2">
-          <Select value={mode} onValueChange={(value) => setMode(value === "bulk-mirror" ? "bulk-mirror" : "single")}>
-            <SelectTrigger className="h-8 text-xs">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              {/* M11 gate 11: legacy bulk-mirror is no longer user-selectable (not the new rail). */}
-              <SelectItem value="single">Single publish</SelectItem>
-            </SelectContent>
-          </Select>
-          <Input
-            type="number"
-            min={1}
-            max={50}
-            value={String(limit)}
-            onChange={(event) => setLimit(Math.max(1, Math.min(50, Number(event.target.value) || 1)))}
-            className="h-8 text-xs"
-            title="Target CX buffer size"
-          />
-        </div>
-
-        <label className="flex items-center gap-2 text-[11px] text-muted-foreground">
-          <input
-            type="checkbox"
-            checked={reverse}
-            onChange={(event) => setReverse(event.target.checked)}
-          />
-          Reverse queue before publish
-        </label>
-
-        <div className="grid grid-cols-2 gap-2">
-          <Button size="sm" isLoading={isBusy && !session} disabled={isBusy} onClick={onStart}>
-            Start
-          </Button>
-          <Button size="sm" variant="secondary" isLoading={isBusy && !session} disabled={isBusy} onClick={onStartAndDial}>
-            Start + dial
-          </Button>
-        </div>
-
-        <div className="grid grid-cols-1 gap-2">
-          <Button size="sm" variant="secondary" isLoading={isBusy && Boolean(session)} disabled={isBusy || !session} onClick={onAdvance}>
-            {mode === "bulk-mirror" ? "Mirror/watch" : "Advance"}
-          </Button>
-        </div>
-
-        <div className="rounded-md border border-border/70 bg-card/70 p-2">
-          <div className="text-[10px] font-semibold uppercase tracking-[0.12em] text-muted-foreground">
-            Current
-          </div>
-          <div className="mt-1 text-xs text-foreground">
-            {describeSimpleLoopCurrent(session)}
-          </div>
-          {matchDescription ? (
-            <div className="mt-1 text-[10px] text-muted-foreground">
-              {matchDescription}
-            </div>
-          ) : null}
-          <div className="mt-1 flex flex-wrap gap-1 text-[10px] text-muted-foreground">
-            <span>Buffer {bufferCount}</span>
-            <span>·</span>
-            <span>Done {completedCount}</span>
-            {isFetching ? (
-              <>
-                <span>·</span>
-                <span>polling</span>
-              </>
-            ) : null}
-          </div>
-          {lastCompletedDescription ? (
-            <div className="mt-1 truncate text-[10px] text-muted-foreground">
-              {lastCompletedDescription}
-            </div>
-          ) : null}
-        </div>
-
-        <div className="grid grid-cols-3 gap-1.5">
-          <Button size="sm" variant="secondary" disabled={isBusy || !current} onClick={() => onDisposition("answered")}>
-            Answer
-          </Button>
-          <Button size="sm" variant="secondary" disabled={isBusy || !current} onClick={() => onDisposition("did-not-answer")}>
-            No ans
-          </Button>
-          <Button size="sm" variant="secondary" disabled={isBusy || !current} onClick={() => onDisposition("voicemail")}>
-            VM
-          </Button>
-        </div>
-
-        <div className="grid grid-cols-3 gap-1.5">
-          <Button size="sm" variant="ghost" disabled={isBusy || !current} onClick={onSkip}>
-            Skip
-          </Button>
-          <Button size="sm" variant="ghost" disabled={isBusy} onClick={onRefresh}>
-            Refresh
-          </Button>
-          <Button size="sm" variant="destructive" disabled={isBusy || !session} onClick={onKill}>
-            Kill
-          </Button>
-        </div>
-
-        {error ? (
-          <div className="rounded-md border border-destructive/30 bg-destructive/10 p-2 text-[11px] text-destructive">
-            {error instanceof Error ? error.message : "Simple loop request failed"}
-          </div>
-        ) : null}
-
-        {events.length > 0 ? (
-          <div className="space-y-1">
-            <div className="text-[10px] font-semibold uppercase tracking-[0.12em] text-muted-foreground">
-              Last events
-            </div>
-            {events.map((event, index) => (
-              <div key={`${String(event.type || "event")}-${String(event.at || index)}`} className="truncate text-[10px] text-muted-foreground">
-                {String(event.at || "").slice(11, 19)} · {String(event.type || "event")}
-              </div>
-            ))}
-          </div>
-        ) : null}
-      </CardContent>
-    </Card>
-  );
 }
 
 function contactFromQueue(item: CxCallQueueItem): ContactContext {
@@ -3500,79 +3261,6 @@ export function CXWorkspaceBulkLoad() {
     if (!legacyQueueEnabled) return Promise.resolve(null);
     return callQueue.refetch();
   }, [legacyQueueEnabled, callQueue]);
-  const simpleLoopPanelEnabled = false;
-  // M11 gate 11: default to single — the legacy bulk-mirror path is no longer the default mode.
-  const [simpleLoopMode, setSimpleLoopMode] = React.useState<"single" | "bulk-mirror">("single");
-  const [simpleLoopLimit, setSimpleLoopLimit] = React.useState(30);
-  const [simpleLoopReverse, setSimpleLoopReverse] = React.useState(false);
-  const simpleLoopSession = useCxSimpleLoopSession(simpleLoopPanelEnabled);
-  const simpleLoopStart = useCxSimpleLoopStart();
-  const simpleLoopAdvance = useCxSimpleLoopAdvance();
-  const simpleLoopDisposition = useCxSimpleLoopDisposition();
-  const simpleLoopSkip = useCxSimpleLoopSkip();
-  const simpleLoopKill = useCxSimpleLoopKill();
-  const simpleLoopWatchInFlightRef = React.useRef(false);
-  const simpleLoopBusy =
-    simpleLoopStart.isPending ||
-    simpleLoopAdvance.isPending ||
-    simpleLoopDisposition.isPending ||
-    simpleLoopSkip.isPending ||
-    simpleLoopKill.isPending;
-  const activeSimpleLoopMode = String(simpleLoopSession.data?.mode || simpleLoopMode);
-  const simpleLoopHasMirroredQueue = React.useMemo(() => {
-    const queue = Array.isArray(simpleLoopSession.data?.queue) ? simpleLoopSession.data.queue : [];
-    return queue.some((candidate) => {
-      const status = String(candidate.status || "").trim().toLowerCase();
-      const ringcxStatus = String(candidate.ringcx?.status || "").trim().toLowerCase();
-      return status === "mirrored" || ringcxStatus === "published";
-    });
-  }, [simpleLoopSession.data?.queue]);
-  React.useEffect(() => {
-    const session = simpleLoopSession.data;
-    if (!simpleLoopPanelEnabled) return;
-    if (!session?.sessionId) return;
-    if (String(session.status || "").toLowerCase() !== "running") return;
-    if (String(session.mode || activeSimpleLoopMode) !== "bulk-mirror") return;
-    if (!simpleLoopHasMirroredQueue) return;
-    const tick = () => {
-      if (simpleLoopWatchInFlightRef.current) return;
-      if (
-        simpleLoopStart.isPending ||
-        simpleLoopDisposition.isPending ||
-        simpleLoopSkip.isPending ||
-        simpleLoopKill.isPending
-      ) {
-        return;
-      }
-      simpleLoopWatchInFlightRef.current = true;
-      simpleLoopAdvance.mutate({
-        sessionId: session.sessionId,
-        mode: "bulk-mirror",
-        force: true,
-        timeoutMs: 250,
-        intervalMs: 100,
-      }, {
-        onSettled: () => {
-          simpleLoopWatchInFlightRef.current = false;
-          void simpleLoopSession.refetch();
-        },
-      });
-    };
-    tick();
-    const interval = window.setInterval(tick, 1000);
-    return () => window.clearInterval(interval);
-  }, [
-    activeSimpleLoopMode,
-    simpleLoopAdvance,
-    simpleLoopDisposition.isPending,
-    simpleLoopHasMirroredQueue,
-    simpleLoopKill.isPending,
-    simpleLoopPanelEnabled,
-    simpleLoopSession,
-    simpleLoopSession.data,
-    simpleLoopSkip.isPending,
-    simpleLoopStart.isPending,
-  ]);
   React.useEffect(() => {
     emitCxTiming("workspace.query_state", {
       domain,
@@ -4310,104 +3998,6 @@ export function CXWorkspaceBulkLoad() {
     }
   }
 
-  function currentSimpleLoopSessionId() {
-    return String(simpleLoopSession.data?.sessionId || "").trim();
-  }
-
-  async function runSimpleLoopAction(
-    label: string,
-    action: () => Promise<CxSimpleLoopSession | null>,
-  ) {
-    const startedAt = Date.now();
-    try {
-      const result = await action();
-      const elapsedMs = Date.now() - startedAt;
-      toast(label, {
-        description: result
-          ? `${result.status} · ${describeSimpleLoopCurrent(result)} · ${elapsedMs}ms`
-          : `No active simple-loop session · ${elapsedMs}ms`,
-      });
-      void simpleLoopSession.refetch();
-      return result;
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "Simple loop request failed.";
-      toast.error(`${label} failed`, { description: message });
-      void simpleLoopSession.refetch();
-      throw error;
-    }
-  }
-
-  function handleSimpleLoopStart() {
-    void runSimpleLoopAction("Simple loop started", () =>
-      simpleLoopStart.mutateAsync({
-        mode: simpleLoopMode,
-        limit: simpleLoopLimit,
-        reverse: simpleLoopReverse,
-        replaceExisting: true,
-      }),
-    );
-  }
-
-  function handleSimpleLoopStartAndDial() {
-    void runSimpleLoopAction("Simple loop started dialing", () =>
-      simpleLoopStart.mutateAsync({
-        mode: simpleLoopMode,
-        limit: simpleLoopLimit,
-        reverse: simpleLoopReverse,
-        replaceExisting: true,
-        autoAdvance: true,
-      }),
-    );
-  }
-
-  function handleSimpleLoopAdvance() {
-    const sessionId = currentSimpleLoopSessionId();
-    void runSimpleLoopAction(
-      simpleLoopMode === "bulk-mirror" ? "Simple loop mirror/watch" : "Simple loop advanced",
-      () =>
-        simpleLoopAdvance.mutateAsync({
-          sessionId: sessionId || undefined,
-          mode: simpleLoopMode,
-        }),
-    );
-  }
-
-  function handleSimpleLoopDisposition(outcome: SimpleLoopDisposition) {
-    const sessionId = currentSimpleLoopSessionId();
-    void runSimpleLoopAction(`Simple loop ${outcome}`, () =>
-      simpleLoopDisposition.mutateAsync({
-        sessionId: sessionId || undefined,
-        outcome,
-        disposition: outcome,
-        autoAdvance: simpleLoopMode === "bulk-mirror",
-        mode: simpleLoopMode,
-      }),
-    );
-  }
-
-  function handleSimpleLoopSkip() {
-    const sessionId = currentSimpleLoopSessionId();
-    void runSimpleLoopAction("Simple loop skipped", () =>
-      simpleLoopSkip.mutateAsync({
-        sessionId: sessionId || undefined,
-        reason: "local-ui-skip",
-        autoAdvance: simpleLoopMode === "bulk-mirror",
-        mode: simpleLoopMode,
-      }),
-    );
-  }
-
-  function handleSimpleLoopKill() {
-    const sessionId = currentSimpleLoopSessionId();
-    void runSimpleLoopAction("Simple loop killed", () =>
-      simpleLoopKill.mutateAsync({
-        sessionId: sessionId || undefined,
-        reason: "local-ui-kill",
-        cancelPublished: true,
-      }),
-    );
-  }
-
   async function handleCxAvailabilityChange(
     next: "available" | "unavailable",
     breakType?: "short-break" | "meal-break",
@@ -4783,7 +4373,6 @@ export function CXWorkspaceBulkLoad() {
     backendNextDialHandoffUntil != null && backendNextDialHandoffUntil > Date.now();
 
   React.useEffect(() => {
-    if (simpleLoopPanelEnabled) return;
     if (!activeServingQueueItem) return;
     if (servedQueueTicketId || servedQueueActionKey || servingQueueKey || servedQueueContact) return;
     const contact = contactFromQueue(activeServingQueueItem);
@@ -4865,7 +4454,6 @@ export function CXWorkspaceBulkLoad() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
-    simpleLoopPanelEnabled,
     activeServingQueueItem,
     servedQueueTicketId,
     servedQueueActionKey,
@@ -5076,7 +4664,6 @@ export function CXWorkspaceBulkLoad() {
   const canAttemptStartQueueLead =
     queueItems.length > 0 &&
     canAutoServeForAgentState &&
-    !simpleLoopPanelEnabled &&
     !backendNextDialHandoffActive &&
     !dialAny.isPending &&
     !disposition.isPending;
@@ -5374,24 +4961,6 @@ export function CXWorkspaceBulkLoad() {
     );
   }
 
-  const cxRouting = asRecord(data.ex?.cxRouting);
-  const cxDesiredAvailability = String(cxRouting.desiredAvailability || "").trim().toLowerCase();
-  const cxPauseType = String(cxRouting.pauseType || "").trim();
-  const cxBreakUsage = asRecord(cxRouting.breakUsage);
-  const shortBreaksAllowed = Number(cxBreakUsage.shortBreaksAllowed ?? 2);
-  const shortBreaksUsed = Number(cxBreakUsage.shortBreaksUsed ?? 0);
-  const shortBreaksRemaining = Math.max(
-    (Number.isFinite(shortBreaksAllowed) ? shortBreaksAllowed : 2)
-      - (Number.isFinite(shortBreaksUsed) ? shortBreaksUsed : 0),
-    0,
-  );
-  const mealBreaksAllowed = Number(cxBreakUsage.mealBreaksAllowed ?? 1);
-  const mealBreaksUsed = Number(cxBreakUsage.mealBreaksUsed ?? 0);
-  const mealBreaksRemaining = Math.max(
-    (Number.isFinite(mealBreaksAllowed) ? mealBreaksAllowed : 1)
-      - (Number.isFinite(mealBreaksUsed) ? mealBreaksUsed : 0),
-    0,
-  );
   const cxAvailabilityPending =
     setCxStatus.isPending ||
     bulkPauseProgressive.isPending ||
@@ -5414,89 +4983,11 @@ export function CXWorkspaceBulkLoad() {
         }}
       />
       <div className="flex min-h-[calc(100vh-6rem)] flex-col gap-4">
-      {/* ─── TOP BAR: sticky routing controls ───────────────────────────── */}
-      {false ? (
-      <div className="sticky top-0 z-30 -mx-4 border-b border-border bg-background/95 px-4 py-3 backdrop-blur supports-[backdrop-filter]:bg-background/80">
-        <div className="flex flex-col gap-2 md:flex-row md:items-center">
-          {/*
-              // creation. It does NOT unload the active case — a
-          */}
-          <div className="flex flex-wrap gap-2 md:ml-auto">
-            {cxDesiredAvailability === "unavailable" ? (
-              <Button
-                size="sm"
-                variant="primary"
-                isLoading={cxAvailabilityPending}
-                disabled={cxAvailabilityPending}
-                title="Resume RingCX dialing."
-                onClick={() => void handleCxAvailabilityChange("available")}
-              >
-                Resume
-              </Button>
-            ) : (
-              <>
-                <Button
-                  size="sm"
-                  variant="secondary"
-                  isLoading={cxAvailabilityPending && cxPauseType === "short-break"}
-                  disabled={cxAvailabilityPending || shortBreaksRemaining <= 0}
-                  title={
-                    shortBreaksRemaining <= 0
-                      ? "Both 5 minute breaks are used for this work block."
-                      : "Start a 5 minute break."
-                  }
-                  onClick={() => void handleCxAvailabilityChange("unavailable", "short-break")}
-                >
-                  5 min ({shortBreaksRemaining})
-                </Button>
-                <Button
-                  size="sm"
-                  variant="secondary"
-                  isLoading={cxAvailabilityPending && cxPauseType === "meal-break"}
-                  disabled={cxAvailabilityPending || mealBreaksRemaining <= 0}
-                  title={
-                    mealBreaksRemaining <= 0
-                      ? "The 15 minute break is used for this work block."
-                      : "Start a 15 minute break."
-                  }
-                  onClick={() => void handleCxAvailabilityChange("unavailable", "meal-break")}
-                >
-                  15 min ({mealBreaksRemaining})
-                </Button>
-              </>
-            )}
-          </div>
-        </div>
-      </div>
-      ) : null}
-
       {/* ─── THREE-COLUMN BODY ──────────────────────────────────────────── */}
       <div className="flex flex-1 flex-col gap-4 lg:flex-row">
         {/* ── LEFT: CX queue only ──────────────────────────────────────── */}
         <aside className="flex-shrink-0 lg:w-[260px]">
           <div className="lg:sticky lg:top-20">
-            {simpleLoopPanelEnabled ? (
-              <SimpleLoopTestPanel
-                session={simpleLoopSession.data}
-                isLoading={simpleLoopSession.isLoading}
-                isFetching={simpleLoopSession.isFetching}
-                error={simpleLoopSession.error}
-                mode={simpleLoopMode}
-                setMode={setSimpleLoopMode}
-                limit={simpleLoopLimit}
-                setLimit={setSimpleLoopLimit}
-                reverse={simpleLoopReverse}
-                setReverse={setSimpleLoopReverse}
-                isBusy={simpleLoopBusy}
-                onStart={handleSimpleLoopStart}
-                onStartAndDial={handleSimpleLoopStartAndDial}
-                onAdvance={handleSimpleLoopAdvance}
-                onDisposition={handleSimpleLoopDisposition}
-                onSkip={handleSimpleLoopSkip}
-                onKill={handleSimpleLoopKill}
-                onRefresh={() => void simpleLoopSession.refetch()}
-              />
-            ) : null}
             <Card>
               <CardHeader>
                 <div className="flex items-center justify-between gap-2">

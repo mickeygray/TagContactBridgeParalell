@@ -27,7 +27,11 @@ export function CXShell() {
   const { user, logout } = useSession();
   const navigate = useNavigate();
   const location = useLocation();
-  const showCxControls = location.pathname === "/cx" || location.pathname === "/cx/";
+  const showCxControls =
+    location.pathname === "/cx" ||
+    location.pathname === "/cx/" ||
+    location.pathname === "/cx/prep" ||
+    location.pathname === "/cx/prep/";
 
   return (
     <div className="shell-gradient flex min-h-screen flex-col text-foreground">

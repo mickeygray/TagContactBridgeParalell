@@ -35,6 +35,30 @@ Purpose: capture the old CX/bulk-load machinery that should move to attic or be 
 - ⏸ Items 1 (tripwire), 3 (EX ownership / WO-28), 7 (banner plumbing / WO-16), 8 (WO-22),
   9 (floor acceptance) — triggers not met; untouched per the ledger's own rules.
 
+## Progress (Codex, 2026-07-07 least-risk cut pass)
+
+- DONE: `/cx/prep` now shows the same navbar CX controls as `/cx`; this was the pre-test
+  visibility fix, not a behavior rewrite.
+- DONE: removed the old page-level break strip from `CXWorkspaceBulkLoad.tsx`. The live
+  `BreakResumePrompt`, timed-break resume path, and navbar availability controls remain.
+- DONE: removed the disabled simple-loop client harness from the bulk workspace and removed
+  the now-orphaned simple-loop client API hooks. The shared service/model tests remain for
+  archaeology until the service bundle is deliberately deleted.
+- DONE: removed the orphan slow-single client API hooks and tombstoned `/api/cx/slow-single`
+  with `410 cx-slow-single-retired`.
+- DONE: tombstoned `/api/cx/simple-loop` with `410 cx-simple-loop-retired` after updating
+  the stale Mickey test script instruction that still referenced `?cxSimpleLoop=1`.
+- Outcome note: `docs/CX_DELETE_RUN_FLEET_OUTCOMES_2026-07-07.md`.
+- Validation run:
+  - `node --test tests/cx-bulk-load/cxDeleteRunFleet.test.js`
+  - `npm.cmd run typecheck --workspace=web-client`
+  - `node --test tests/cx-bulk-load/cxBulkLoadRuntimeService.test.js tests/queue/cxWorkspacePresenceHeal.test.js tests/queue/cxManualUnavailableRelease.test.js`
+  - `node --test tests/cx-bulk-load/cxServerWireAudit.test.js tests/cx-simple-loop/cxSimpleCallLoopService.test.js`
+  - route syntax checks for both tombstone route files
+- Stop point: legacy queue auto-serve, auto-review, wrap cutover, EX ownership, and
+  appointment-wrap cuts are still direct-path or trigger-gated. Do not batch them into this
+  cleanup pass.
+
 ## Second-Pass Gotchas (Codex, 2026-07-07 Navbar/Break Sweep)
 
 These are not all delete-now items. They are places where old code can still mislead testing, hide a new UI change, or leave a callable side door after the visible CX rail has moved to bulk.

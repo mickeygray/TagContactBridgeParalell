@@ -318,7 +318,7 @@ async function seedBulk(apply) {
 
   const result = await CxDialQueue.bulkWrite(operations, { ordered: false });
   console.log(`  matched=${result.matchedCount || 0} modified=${result.modifiedCount || 0} upserted=${result.upsertedCount || 0}`);
-  console.log("  -> open /cx?cxSimpleLoop=1, set target to the same count, then Start + dial.");
+  console.log("  -> open /cx and load through the bulk rail; the simple-loop harness is retired.");
   console.log("     Note: if every row uses the same phone, treat this as app-state evidence, not RingCX ordering evidence.");
 }
 
