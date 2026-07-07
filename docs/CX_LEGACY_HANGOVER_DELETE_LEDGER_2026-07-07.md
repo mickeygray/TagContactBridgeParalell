@@ -35,6 +35,350 @@ Purpose: capture the old CX/bulk-load machinery that should move to attic or be 
 - ⏸ Items 1 (tripwire), 3 (EX ownership / WO-28), 7 (banner plumbing / WO-16), 8 (WO-22),
   9 (floor acceptance) — triggers not met; untouched per the ledger's own rules.
 
+## Second-Pass Gotchas (Codex, 2026-07-07 Navbar/Break Sweep)
+
+These are not all delete-now items. They are places where old code can still mislead testing, hide a new UI change, or leave a callable side door after the visible CX rail has moved to bulk.
+
+### A. `/cx/prep` Mounts Bulk Workspace But Hides Navbar CX Controls
+
+Current refs:
+- `apps/web-client/src/app/routes.tsx:193` mounts `CXShell` at `/cx`.
+- `apps/web-client/src/app/routes.tsx:206` through `219` mounts the same `CXWorkspace` under `/cx/prep`.
+- `apps/web-client/src/app/CXShell.tsx:30` only shows `CxConnectButton` and `CxAvailabilityToggle` on exact `/cx` or `/cx/`.
+
+Why gotcha:
+- The navbar break buttons can be correctly built and bundled, but still invisible if the agent lands on `/cx/prep`.
+- This looks like a failed frontend patch even though the route shell is hiding the controls.
+
+Safe next step:
+- If `/cx/prep` is still a real agent workspace entry, include it in `showCxControls`.
+- Do not broaden this to every `/cx/*` route unless inbox/calls/coach/manual should also show dialing controls.
+
+### B. Old Page-Level Break Strip Is Hidden, Not Removed
+
+Current refs:
+- `apps/web-client/src/workspaces/cx/CXWorkspaceBulkLoad.tsx:5418` wraps the old sticky break strip in `{false ? (...) : null}`.
+- `apps/web-client/src/workspaces/cx/CXWorkspaceBulkLoad.tsx:5425` through `5465` still contains the old `Resume`, `5 min`, and `15 min` page-level controls.
+- `apps/web-client/src/workspaces/cx/CXWorkspaceBulkLoad.tsx:5377` through `5398` still computes values mostly for that hidden strip.
+
+Why gotcha:
+- It does not render, but stale strings and stale availability plumbing remain in the biggest file in the app.
+- Future grep/debug can point at the dead strip and make it look like the live break UI still lives inside the workspace body.
+
+Safe next step:
+- After the navbar break controls pass one local visual/live-state test, remove only the dead strip and any variables used exclusively by it.
+- Keep `BreakResumePrompt`, timed-break resume logic, and the underlying set-status/resume behavior until the navbar path fully owns the same behavior.
+
+### C. Simple-Loop Harness Is UI-Dead But Still In The Bulk File
+
+Current refs:
+- `apps/web-client/src/workspaces/cx/CXWorkspaceBulkLoad.tsx:236` defines `SimpleLoopTestPanel`.
+- `apps/web-client/src/workspaces/cx/CXWorkspaceBulkLoad.tsx:3503` hard-sets `simpleLoopPanelEnabled = false`.
+- `apps/web-client/src/workspaces/cx/CXWorkspaceBulkLoad.tsx:3508` through `3513` still creates simple-loop query/mutation hooks.
+- `apps/web-client/src/lib/api/queries/cx.ts:150` through `198` still exports simple-loop client hooks.
+- `apps/control-plane/src/server.js:1743` still mounts `/api/cx/simple-loop`.
+- `packages/shared-services/src/cxSimpleCallLoopService.js:105` defaults `CX_SIMPLE_LOOP_ENABLED` false, so the service is normally disabled but still present.
+
+Why gotcha:
+- The visible query-param harness is dead now, but the code remains in the active workspace and the backend route remains mounted.
+- A stale script or env flip can still hit the old rail and create confusing test evidence.
+
+Safe next step:
+- Remove the panel and client hooks from `CXWorkspaceBulkLoad.tsx` first.
+- Leave or tombstone the backend route separately after checking scripts/tests that intentionally use `CX_SIMPLE_LOOP_ENABLED`.
+
+### D. Slow-Single UI Is Gone, Backend Route Still Mounted
+
+Current refs:
+- `apps/web-client/src/workspaces/cx/slow-single/CXWorkspaceSlowSingle.tsx` is deleted in the current WIP.
+- `apps/web-client/src/workspaces/cx/CXWorkspaceRouter.tsx` unconditionally returns `CXWorkspaceBulkLoad`.
+- `apps/web-client/src/lib/api/queries/cxSlowSingle.ts` still defines slow-single hooks.
+- `apps/control-plane/src/server.js:1744` still mounts `/api/cx/slow-single`.
+- `packages/shared-services/src/cxSlowLaneService.js` still contains the slow-single state machine.
+
+Why gotcha:
+- No visible route should reach slow-single, but the server route is still callable.
+- Unlike simple-loop, this route is not obviously protected by a single default-off env flag in the route layer.
+
+Safe next step:
+- If slow-single is truly retired, convert `/api/cx/slow-single/*` to an explicit 410/tombstone or move the route behind a deliberately named env gate before deleting the service.
+- Do not delete the shared RingCX lead-publishing primitive with it; bulk still uses that class of publisher.
+
+### E. Legacy Queue Plumbing Is Constant-Off But Still Interleaved
+
+Current refs:
+- `apps/web-client/src/workspaces/cx/CXWorkspaceBulkLoad.tsx:3497` sets `legacyQueueEnabled = false`.
+- `apps/web-client/src/workspaces/cx/CXWorkspaceBulkLoad.tsx:3498` still calls `useCxCallQueue(domain, legacyQueueEnabled)`.
+- `apps/web-client/src/workspaces/cx/CXWorkspaceBulkLoad.tsx:3499` through `3502` keeps `refetchLegacyQueue` as a no-op wrapper.
+- `apps/web-client/src/workspaces/cx/CXWorkspaceBulkLoad.tsx:4757` still branches on the disabled legacy queue.
+
+Why gotcha:
+- This is currently inert, but it keeps the old queue vocabulary in the live bulk file.
+- It can waste debugging time when a tester is trying to prove the bulk session and RingCX pool, not the old local queue.
+
+Safe next step:
+- Remove after simple-loop panel removal, because both are part of the same "old workspace rails inside the bulk file" cleanup.
+
+### F. Control-Plane App Serves Built Web Bundle, Not Vite Source
+
+Current refs:
+- `apps/control-plane/src/server.js:519` uses `apps/web-client/build`.
+- `apps/control-plane/src/server.js:530` serves that build with `express.static`.
+- `apps/control-plane/src/server.js:1798` attaches the static web build after API routes.
+- `apps/web-client/.gitignore:2` ignores `build`.
+
+Why gotcha:
+- `3001` can show current source while `5001`/ngrok/control-plane still shows the previous built bundle.
+- This was the reason a navbar source change could exist but not appear in the app until `npm run build --workspace=web-client` regenerated `apps/web-client/build`.
+
+Safe next step:
+- Treat any frontend UI patch as two checks: source/typecheck, then web-client build if the app is being viewed through control-plane/ngrok/static.
+
+### G. EX Lead-Serving Gates Still Exist Under Availability/Load-Balancer
+
+Current refs:
+- `packages/shared-services/src/agentAvailabilityService.js:36` defines `isExLeadServingGateEnabled`.
+- `packages/shared-services/src/agentAvailabilityService.js:613` can derive `ex-busy`.
+- `packages/shared-services/src/agentAvailabilityService.js:655` can mark fresh-lead gating as `ex-call`.
+- `packages/shared-services/src/cxLoadBalancerService.js:314` can block eligibility on an active EX call when the EX gate is enabled.
+
+Why gotcha:
+- The default env appears off, and cx-runtime suppression exists, so this is not automatically a live bug.
+- It is still the same old conceptual coupling: EX state can influence CX lead serving if the gate is enabled or called without cx-only suppression options.
+
+Safe next step:
+- Before deleting, confirm which production/local envs set `RC_CX_EX_BUSY_GATE_ENABLED`.
+- For bulk, prefer an explicit cx-runtime mode option over relying on global defaults.
+
+## Final Excision Pre-Test Cut Map (Codex, 2026-07-07)
+
+Purpose: this is the exact cut list to review before the next local proof run. It traces both sides of each old lane. Do not apply all of this as one giant patch; cut one slice, run typecheck/tests/build, then test the app.
+
+### 0. Visibility Fix, Not Excision: `/cx/prep` Hides New Navbar Controls
+
+Trace:
+- `apps/web-client/src/app/routes.tsx:193` mounts `CXShell` under `/cx`.
+- `apps/web-client/src/app/routes.tsx:206` through `220` mounts the same `CXWorkspace` under `/cx/prep`.
+- `apps/web-client/src/app/CXShell.tsx:30` sets `showCxControls` to exact `/cx` or `/cx/`.
+- `apps/web-client/src/app/CXShell.tsx:70` through `76` renders `CxConnectButton` and `CxAvailabilityToggle` only if `showCxControls`.
+
+Pre-test fix:
+- Change `apps/web-client/src/app/CXShell.tsx:30` so `/cx/prep` also shows the controls, if `/cx/prep` remains a real agent entry route.
+- Keep the fix narrow. Do not show dial/break controls on `/cx/inbox`, `/cx/call-library`, `/cx/coach`, or `/cx/manual` unless that is a deliberate product decision.
+
+### 1. Client Simple-Loop Harness: First Client-Side Cut
+
+Trace:
+- UI slab: `apps/web-client/src/workspaces/cx/CXWorkspaceBulkLoad.tsx`.
+- Client hooks: `apps/web-client/src/lib/api/queries/cx.ts`.
+- Server mount: `apps/control-plane/src/server.js`.
+- Route adapter: `apps/control-plane/src/routes/cxSimpleLoop.js`.
+- Shared service/model/tests/scripts: `packages/shared-services/src/cxSimpleCallLoopService.js`, `packages/shared-models/src/CxSimpleLoopSession.js`, `tests/cx-simple-loop/cxSimpleCallLoopService.test.js`, `scripts/mickey-test-queue.js`, `scripts/local-ordered-mickey-bulk-load.js`.
+
+Client cut set:
+- `apps/web-client/src/workspaces/cx/CXWorkspaceBulkLoad.tsx:61` through `66`: remove `useCxSimpleLoop*` imports.
+- `apps/web-client/src/workspaces/cx/CXWorkspaceBulkLoad.tsx:71`: remove `CxSimpleLoopSession` type import.
+- `apps/web-client/src/workspaces/cx/CXWorkspaceBulkLoad.tsx:194` through `234`: remove `describeSimpleLoopCurrent`, `SimpleLoopDisposition`, `describeSimpleLoopMatch`, `describeSimpleLoopLastCompleted`.
+- `apps/web-client/src/workspaces/cx/CXWorkspaceBulkLoad.tsx:236` through `424`: remove `SimpleLoopTestPanel`.
+- `apps/web-client/src/workspaces/cx/CXWorkspaceBulkLoad.tsx:3503` through `3575`: remove the hard-off simple-loop state, hooks, busy flag, mirror watcher, and polling effect.
+- `apps/web-client/src/workspaces/cx/CXWorkspaceBulkLoad.tsx:4313` through `4409`: remove `currentSimpleLoopSessionId`, `runSimpleLoopAction`, `handleSimpleLoopStart`, `handleSimpleLoopStartAndDial`, `handleSimpleLoopAdvance`, `handleSimpleLoopDisposition`, `handleSimpleLoopSkip`, and `handleSimpleLoopKill`.
+- `apps/web-client/src/workspaces/cx/CXWorkspaceBulkLoad.tsx:5478` through `5499`: remove the disabled panel render.
+- `apps/web-client/src/workspaces/cx/CXWorkspaceBulkLoad.tsx:4786`, `4868`, and `5079`: remove the remaining `simpleLoopPanelEnabled` guards/dependency once the variable is gone.
+
+Client API cleanup after the bulk file no longer imports these:
+- `apps/web-client/src/lib/api/queries/cx.ts:97` through `140`: remove `CxSimpleLoopCandidate` and `CxSimpleLoopSession` if there are no other client imports.
+- `apps/web-client/src/lib/api/queries/cx.ts:142` through `198`: remove `simpleLoopQueryKey`, `invalidateSimpleLoop`, `useCxSimpleLoopSession`, `buildCxSimpleLoopCommandHook`, and all five exported command hooks.
+
+Server follow-up:
+- `apps/control-plane/src/server.js:30`: remove `createCxSimpleLoopRouter` import.
+- `apps/control-plane/src/server.js:1743`: remove or tombstone the `/api/cx/simple-loop` mount.
+- `apps/control-plane/src/routes/cxSimpleLoop.js:1` through `67`: delete the route file only after no scripts/tests intentionally use it, or replace it with a 410 tombstone.
+- `packages/shared-services/src/index.js:269` through `277` and `1138` through `1155`: remove simple-loop imports/exports after the route is gone.
+- `packages/shared-services/src/cxSimpleCallLoopService.js`: delete after route exports are gone. Important functions currently exported at `1453` through `1462`.
+- `packages/shared-models/src/CxSimpleLoopSession.js` and `packages/shared-models/src/index.js:19`, `71`, `129`: remove only after old `cxsimpleloopsessions` data no longer needs app-level tooling.
+
+Validation:
+- `rg -n "simpleLoopPanelEnabled|SimpleLoopTestPanel|useCxSimpleLoop|CxSimpleLoopSession|cxSimpleLoop|simple-loop" apps/web-client/src apps/control-plane/src packages/shared-services/src packages/shared-models/src scripts tests`
+- Expected after full cut: no active source hits except historical docs or explicit tombstone tests.
+
+### 2. Slow-Single Server Rail: Tombstone Before Delete
+
+Trace:
+- UI file is already gone: `apps/web-client/src/workspaces/cx/slow-single/CXWorkspaceSlowSingle.tsx` is deleted in this WIP.
+- Router is one-lane: `apps/web-client/src/workspaces/cx/CXWorkspaceRouter.tsx` returns `CXWorkspaceBulkLoad`.
+- Client hooks still exist: `apps/web-client/src/lib/api/queries/cxSlowSingle.ts`.
+- Server mount still exists: `apps/control-plane/src/server.js:31` and `1744`.
+- Route adapter: `apps/control-plane/src/routes/cxSlowSingle.js`.
+- Shared service/repository/model: `packages/shared-services/src/cxSlowLaneService.js`, `packages/shared-services/src/cxSlowLaneStateMachine.js`, `packages/shared-repositories/src/cxSlowLaneSessionRepository.js`, `packages/shared-models/src/CxSlowLaneSession.js`.
+
+Cut/tombstone set:
+- Delete `apps/web-client/src/lib/api/queries/cxSlowSingle.ts:1` through `93` after confirming no client imports remain.
+- `apps/control-plane/src/server.js:31`: remove `createCxSlowSingleRouter` import.
+- `apps/control-plane/src/server.js:1744`: remove or tombstone `/api/cx/slow-single`.
+- `apps/control-plane/src/routes/cxSlowSingle.js:1` through `59`: delete after mount is removed, or leave as explicit 410 if stale callers are likely.
+- `packages/shared-services/src/index.js:282` through `289` and `1143` through `1155`: remove slow-single imports/exports.
+- `packages/shared-services/src/cxSlowLaneService.js`: exported functions to remove are `confirmCxSlowSingleCurrent`, `getCxSlowSingleSession`, `killCxSlowSingleSession`, `normalizeSlowSingleOutcome`, `startCxSlowSingleCall`, and `submitCxSlowSingleOutcome` at `1014` through `1020`.
+- `packages/shared-services/src/cxSlowLaneStateMachine.js`, `packages/shared-repositories/src/cxSlowLaneSessionRepository.js`, and `packages/shared-models/src/CxSlowLaneSession.js`: delete only after the route/service export cut passes and no admin cleanup tooling needs old slow-lane sessions.
+
+Validation:
+- `rg -n "cxSlowSingle|CxSlowSingle|slow-single|cxSlowLane|CxSlowLaneSession|CX_SLOW" apps packages scripts tests`
+- Expected after full cut: no active source hits except historical docs or tombstones.
+
+### 3. Legacy Queue Auto-Serve Inside Bulk Workspace: Largest Client Cut
+
+Trace of the old path:
+- `apps/web-client/src/workspaces/cx/CXWorkspaceBulkLoad.tsx:3498` calls `useCxCallQueue(domain, false)`.
+- `apps/web-client/src/workspaces/cx/CXWorkspaceBulkLoad.tsx:4756` through `4759` builds `rawQueueItems` from `callQueue.data` or `data.callQueue`.
+- `apps/web-client/src/workspaces/cx/CXWorkspaceBulkLoad.tsx:4965` through `5023` builds old `queueItems`.
+- `apps/web-client/src/workspaces/cx/CXWorkspaceBulkLoad.tsx:4620` through `4705` has `handleSelectFromQueue`, which can call `useCxDialAny`/`useCxSimulateCallAny`.
+- `apps/web-client/src/lib/api/queries/cx.ts:739` through `775` defines `useCxDialAny` and `useCxSimulateCallAny`.
+- `apps/control-plane/src/routes/commandsCx.js:292` through `307` maps `/api/commands/cx/:domain/dial` to `requestCxDial`.
+- `apps/control-plane/src/routes/commandsCx.js:458` through `475` also uses `requestCxDial` for appointment call-now. That route is not bulk dead code; do not delete it globally.
+
+Bulk-workspace cut set:
+- `apps/web-client/src/workspaces/cx/CXWorkspaceBulkLoad.tsx:43`: remove `useCxCallQueue` import.
+- `apps/web-client/src/workspaces/cx/CXWorkspaceBulkLoad.tsx:50`, `51`, `67`: remove `useCxDialAny`, `useCxDisposition`, `useCxSimulateCallAny` if no non-legacy references remain after this cut.
+- `apps/web-client/src/workspaces/cx/CXWorkspaceBulkLoad.tsx:426` through `453`: remove `contactFromQueue` and `buildQueueDialRequest` if no later queue path remains.
+- `apps/web-client/src/workspaces/cx/CXWorkspaceBulkLoad.tsx:582` through `598`: remove `AUTO_SERVE_*` and `AUTO_SERVE_BLOCKED_AGENT_STATES` if no old auto-serve effects remain.
+- `apps/web-client/src/workspaces/cx/CXWorkspaceBulkLoad.tsx:815` through `833`: remove `buildQueueItemKey` and `getQueueItemSuppressionKeys` after old queue suppression is gone.
+- `apps/web-client/src/workspaces/cx/CXWorkspaceBulkLoad.tsx:3251` through `3260`: remove old served-queue identity/contact state if bulk display state has replaced every use.
+- `apps/web-client/src/workspaces/cx/CXWorkspaceBulkLoad.tsx:3262` through `3266` and `3270`, `3275`, `3277`: remove auto-serve timers/refs and old terminal workflow ref if their effects are gone.
+- `apps/web-client/src/workspaces/cx/CXWorkspaceBulkLoad.tsx:3332` through `3356`: remove `clearServedQueueSelection` or collapse it into a bulk-only panel clear if still needed.
+- `apps/web-client/src/workspaces/cx/CXWorkspaceBulkLoad.tsx:3415` through `3469`: remove `cancelAutoServe`, `scheduleAutoServe`, and `suppressCurrentQueueLead`.
+- `apps/web-client/src/workspaces/cx/CXWorkspaceBulkLoad.tsx:3497` through `3502`: remove `legacyQueueEnabled`, `callQueue`, and `refetchLegacyQueue`.
+- `apps/web-client/src/workspaces/cx/CXWorkspaceBulkLoad.tsx:3584` through `3586` and `3594` through `3596`: remove callQueue timing fields/deps.
+- `apps/web-client/src/workspaces/cx/CXWorkspaceBulkLoad.tsx:4568` through `4705`: remove `restoreServedQueueLead`, `stageQueueLeadInWorkspace`, and `handleSelectFromQueue`.
+- `apps/web-client/src/workspaces/cx/CXWorkspaceBulkLoad.tsx:4756` through `4781`: remove `rawQueueItems`, `isQueueItemLocallySuppressed`, and `activeServingQueueItem`.
+- `apps/web-client/src/workspaces/cx/CXWorkspaceBulkLoad.tsx:4785` through `4876`: remove the old active-serving restore effect.
+- `apps/web-client/src/workspaces/cx/CXWorkspaceBulkLoad.tsx:4878` through `4963`: remove the old terminal-workflow auto-advance effect.
+- `apps/web-client/src/workspaces/cx/CXWorkspaceBulkLoad.tsx:4965` through `5023`: remove old `queueItems`.
+- `apps/web-client/src/workspaces/cx/CXWorkspaceBulkLoad.tsx:5025` through `5058`: remove legacy stale-served-queue recovery.
+- `apps/web-client/src/workspaces/cx/CXWorkspaceBulkLoad.tsx:5060` through `5160`: remove old auto-serve scheduling/gating.
+
+Survivors:
+- `apps/web-client/src/workspaces/cx/CXWorkspaceBulkLoad.tsx:3678` through `3680` is the bulk `remainingQueue`.
+- `apps/web-client/src/workspaces/cx/CXWorkspaceBulkLoad.tsx:940` defines `BulkBufferList`.
+- `apps/web-client/src/workspaces/cx/CXWorkspaceBulkLoad.tsx:5522` through `5538` renders the real RingCX bulk buffer from `bulkRemainingQueue`.
+- `apps/control-plane/src/routes/commandsCx.js:292` through `307` should stay for non-bulk/manual/admin command surfaces unless a separate floor-wide decision removes them.
+
+Validation:
+- `rg -n "legacyQueueEnabled|rawQueueItems|activeServingQueueItem|handleSelectFromQueue|scheduleAutoServe|AUTO_SERVE|legacy-stale-served-queue|legacy-terminal-workflow|useCxCallQueue" apps/web-client/src/workspaces/cx/CXWorkspaceBulkLoad.tsx`
+- Expected after cut: zero hits in `CXWorkspaceBulkLoad.tsx`.
+
+### 4. Old Page-Level Break Strip: Remove After Navbar Button Smoke
+
+Trace:
+- New navbar controls live in `apps/web-client/src/components/cx/CxAvailabilityToggle.tsx`.
+- Old page strip is in `apps/web-client/src/workspaces/cx/CXWorkspaceBulkLoad.tsx`.
+
+Cut set:
+- `apps/web-client/src/workspaces/cx/CXWorkspaceBulkLoad.tsx:5377` through `5394`: remove `cxRouting`, `cxDesiredAvailability`, `cxPauseType`, break allowance, and break remaining calculations if they are only feeding the hidden strip.
+- Keep the pending expression at `apps/web-client/src/workspaces/cx/CXWorkspaceBulkLoad.tsx:5395` through `5398`, because `BreakResumePrompt` still uses it at `5407`.
+- `apps/web-client/src/workspaces/cx/CXWorkspaceBulkLoad.tsx:5417` through `5471`: remove the `{false ? (...) : null}` hidden top bar entirely.
+- Keep `handleCxAvailabilityChange` at `apps/web-client/src/workspaces/cx/CXWorkspaceBulkLoad.tsx:4411` through `4498` until `handleResumeWorkFromBreak` and `BreakResumePrompt` no longer need the same set-status/resume path.
+
+Also update:
+- `apps/web-client/src/components/cx/CxAvailabilityToggle.tsx:14` through `36` has stale comments saying it posts to `/api/agents/:extensionId/available|unavailable`; the live code uses `/api/commands/cx/WYNN/set-status`.
+
+Validation:
+- `rg -n "TOP BAR: sticky routing controls|Resume RingCX dialing|cxDesiredAvailability|cxPauseType|shortBreaksRemaining|mealBreaksRemaining" apps/web-client/src/workspaces/cx/CXWorkspaceBulkLoad.tsx`
+
+### 5. Retired Auto-Review Banner And `/review-outcome`
+
+Trace:
+- Client state/UI: `apps/web-client/src/workspaces/cx/CXWorkspaceBulkLoad.tsx`.
+- Client API hook: `apps/web-client/src/lib/api/queries/cxBulkLoad.ts`.
+- Server route: `apps/control-plane/src/routes/cxBulkLoad.js`.
+- Runtime endpoint: `packages/shared-services/src/cxBulkLoadRuntime.js`.
+- Shared correction builder: `packages/shared-services/src/cxBulkLoadOutcomeAdapter.js`.
+- Wrap cards also use a correction builder path, so do not delete the builder just because the old auto-review endpoint goes away.
+
+Client cut set:
+- `apps/web-client/src/workspaces/cx/CXWorkspaceBulkLoad.tsx:86`: remove `useCxBulkLoadReviewOutcome` import.
+- `apps/web-client/src/workspaces/cx/CXWorkspaceBulkLoad.tsx:126` through `131`: remove the `BulkAutoReview` type.
+- `apps/web-client/src/workspaces/cx/CXWorkspaceBulkLoad.tsx:3634`: remove `bulkReviewOutcome`.
+- `apps/web-client/src/workspaces/cx/CXWorkspaceBulkLoad.tsx:3638` through `3655`: remove `bulkAutoReview`, remaining countdown state, `bulkReviewHoldUntil`, `bulkReviewHoldReason`, `bulkReviewHoldActive`, and `bulkReviewCandidate`.
+- `apps/web-client/src/workspaces/cx/CXWorkspaceBulkLoad.tsx:3656` through `3663`: simplify `bulkDisplayCandidate` so it no longer includes `bulkReviewCandidate`.
+- `apps/web-client/src/workspaces/cx/CXWorkspaceBulkLoad.tsx:3683`: remove `lastBulkAutoReviewKeyRef`.
+- `apps/web-client/src/workspaces/cx/CXWorkspaceBulkLoad.tsx:4026` through `4031`: remove auto-review reset work but keep bulk latch reset.
+- `apps/web-client/src/workspaces/cx/CXWorkspaceBulkLoad.tsx:4046` through `4081`: remove the "AUTO-REVIEW BANNER RETIRED" hold-closed effect and countdown effect.
+- `apps/web-client/src/workspaces/cx/CXWorkspaceBulkLoad.tsx:4500` through `4535`: remove `handleBulkAutoReviewDnc`.
+- `apps/web-client/src/workspaces/cx/CXWorkspaceBulkLoad.tsx:5730` through `5775`: remove the banner JSX.
+
+Client/server API cut set:
+- `apps/web-client/src/lib/api/queries/cxBulkLoad.ts:51` through `61`: remove `CxBulkLoadReviewOutcomeResult` after no client uses it.
+- `apps/web-client/src/lib/api/queries/cxBulkLoad.ts:196` through `207`: remove `useCxBulkLoadReviewOutcome`.
+- `apps/control-plane/src/routes/cxBulkLoad.js:13`: remove `submitCxBulkLoadReviewOutcome` import.
+- `apps/control-plane/src/routes/cxBulkLoad.js:154` through `156`: remove or tombstone `/review-outcome`.
+- `packages/shared-services/src/cxBulkLoadRuntime.js:1729` through `1774`: remove `submitCxBulkLoadReviewOutcome` after route is gone.
+- `packages/shared-services/src/cxBulkLoadRuntime.js:1840`: remove it from module exports.
+- `packages/shared-services/src/index.js:299` and `1104`: remove import/export.
+
+Survivor:
+- Keep `packages/shared-services/src/cxBulkLoadOutcomeAdapter.js:93` `buildReviewCorrectionRow` while wrap-card DNC/correction code still depends on it. Tests show wrap-card usage in `tests/cx-bulk-load/cxCallWrapCardService.test.js:80`.
+
+Validation:
+- `rg -n "BulkAutoReview|bulkAutoReview|useCxBulkLoadReviewOutcome|review-outcome|submitCxBulkLoadReviewOutcome|agent-auto-review" apps packages tests`
+- Expected after endpoint/UI cut: hits may remain only in `cxBulkLoadOutcomeAdapter`, wrap-card tests, or historical docs until the correction builder is renamed.
+
+### 6. Dead `/appointment-wrap` Freeze Route: Server/API Cut Only
+
+Current state:
+- The old live-call appointment-freeze hook is not imported by `CXWorkspaceBulkLoad.tsx` anymore.
+- The visible appointment action at `apps/web-client/src/workspaces/cx/CXWorkspaceBulkLoad.tsx:6180` is the wrap-card survivor: `wrapResolve.mutateAsync({ action: "appointment", appointmentAt })`.
+- `SharedAppointmentList` at `apps/web-client/src/workspaces/cx/CXWorkspaceBulkLoad.tsx:6250` through `6257` is the existing appointment list/call-now surface, not the old appointment-wrap creator.
+
+Cut set:
+- `apps/web-client/src/lib/api/queries/cxBulkLoad.ts:84` through `108`: remove `CxBulkLoadAppointmentWrapResult` after no hooks use it.
+- `apps/web-client/src/lib/api/queries/cxBulkLoad.ts:179` through `194`: remove `useCxBulkLoadAppointmentWrap`.
+- `apps/control-plane/src/routes/cxBulkLoad.js:14`: remove `submitCxBulkLoadAppointmentWrap` import.
+- `apps/control-plane/src/routes/cxBulkLoad.js:144` through `152`: remove or tombstone `/appointment-wrap`.
+- `packages/shared-services/src/cxBulkLoadRuntime.js:1499` through `1727`: remove `submitCxBulkLoadAppointmentWrap`.
+- `packages/shared-services/src/cxBulkLoadRuntime.js:1841`: remove it from module exports.
+- `packages/shared-services/src/index.js:300` and `1105`: remove import/export.
+- `tests/cx-bulk-load/cxBulkLoadRuntimeService.test.js:749` and nearby appointment-wrap race tests become obsolete unless they are rewritten around wrap-card appointment resolution.
+
+Survivors:
+- `apps/web-client/src/workspaces/cx/CXWorkspaceBulkLoad.tsx:6180` wrap-card appointment resolution.
+- `apps/control-plane/src/routes/cxBulkLoad.js:111` through `138` wrap-card resolve route.
+- `packages/shared-services/src/cxAppointmentService.js` and `createCxAppointment`; wrap-card appointment resolution still needs the real appointment writer.
+- `apps/control-plane/src/routes/commandsCx.js:458` through `475` appointment call-now path, unless separately removed from appointment operations.
+
+Validation:
+- `rg -n "appointment-wrap|useCxBulkLoadAppointmentWrap|CxBulkLoadAppointmentWrapResult|submitCxBulkLoadAppointmentWrap" apps packages tests`
+- Expected after full cut: zero active source hits.
+
+### 7. Live Dialer DNC Button: Decision Gate, Not Blind Cut
+
+Current refs:
+- `apps/web-client/src/workspaces/cx/CXWorkspaceBulkLoad.tsx:5625` through `5638` renders live-call `DNC`.
+- `apps/web-client/src/workspaces/cx/CXWorkspaceBulkLoad.tsx:5633` sends `submitQueueDisposition("dnc", "DNC")`.
+- `apps/web-client/src/workspaces/cx/CXWorkspaceBulkLoad.tsx:6208` through `6219` renders wrap-card `DNC`, which is the intended survivor lane.
+
+Decision:
+- If the next proof run is specifically "all post-call status-changing actions happen through wrap cards," remove the live DNC button before the run.
+- If the next proof run still needs live DNC as an emergency operator action, leave it but record that it is not the final design.
+
+Server note:
+- Do not remove backend `dnc` disposition handling until every client/script caller has moved to wrap-card DNC.
+
+Validation:
+- `rg -n "submitQueueDisposition\\(\"dnc\"|>DNC<|action: \"dnc\"" apps/web-client/src packages tests`
+
+### 8. Exact String Check: Already Gone From Active Source
+
+Checked active source for:
+- `Start Queue`
+- `start queue`
+- `Ring CX bulk buffer`
+- `bulk buffer`
+- `Stop last call text`
+- `last call text`
+
+Result:
+- No active `apps`, `packages`, `scripts`, or `tests` hits for those exact strings in this scan.
+- The current left rail label is `RingCX` at `apps/web-client/src/workspaces/cx/CXWorkspaceBulkLoad.tsx:5510`, and the real list is `BulkBufferList` at `5538`.
+
 ## Delete Candidates
 
 ### 1. WO-3 Manual-Dial Tripwire Stub

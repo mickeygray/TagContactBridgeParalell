@@ -121,6 +121,19 @@ function buildBlockedReason(caseProfile, leadCadence, config = {}, now = new Dat
     };
   }
 
+  // H4 (write audit, 2026-07-07): the per-channel DNC flag was invisible to every
+  // dial-time gate — only queue BUILD read it, so a lead flagged AFTER its rows were
+  // minted (the federal-DNC recheck, and soon the wrap-click DNC) still dialed. Every
+  // dial path funnels through this function; this one check closes all gates at once.
+  // Blast radius measured before landing: 16 WYNN leads carried the flag.
+  const cxDnc = leadCadence?.cadenceState?.channelDnc?.cx;
+  if (cxDnc && cxDnc.blocked) {
+    return {
+      reason: "channel-dnc-cx",
+      detail: `CX channel is DNC-blocked${cxDnc.reason ? ` (${cxDnc.reason})` : ""}`,
+    };
+  }
+
   const stageSignals = [
     leadCadence?.currentStage,
     caseProfile?.scrubSummary?.status,
@@ -303,6 +316,7 @@ function resolveUpsellContactEligibility({
 }
 
 module.exports = {
+  buildBlockedReason, // exported for pins; pure
   resolveCaseContactEligibility,
   stopCaseContact,
   getUpsellContactAllowList,

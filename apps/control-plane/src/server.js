@@ -126,6 +126,9 @@ const {
   handleCxTerminalCallOutcome,
   recordMinimalTerminalResolution,
   createCxCallWrapCardService,
+  createCxFirstTouchDispatcher,
+  createCxAppointmentDispatcher,
+  createCxAppointment,
   buildCxReviewCorrectionRow,
   requestCxLeadStatusUpdate,
   buildTerminalEvidenceKeys,
@@ -135,6 +138,7 @@ const {
 } = require("../../../packages/shared-services/src");
 const { bootstrapSeedAccounts } = require("../../../packages/shared-auth/src");
 const {
+  createRingcxVoiceClient,
   createLogicsClient,
   validateCompanyTrackingNumbers,
 } = require("../../../packages/shared-integrations/src");
@@ -1035,7 +1039,49 @@ async function enqueueCxCallWrapFromTerminal({ payload = {}, row = {}, terminalR
   return result;
 }
 
-async function startCxTerminalOutboxWorker({ runtime, workerState }) {
+function createControlPlaneCxCallWrapCards({ runtime }) {
+  return createCxCallWrapCardService({
+    cardRepository: cxCallWrapCardRepository,
+    outboxRepository: cxTerminalOutboxRepository,
+    buildCorrectionRow: buildCxReviewCorrectionRow,
+    // Interview activity = the existing wrap-summary pipeline, fired at resolution time.
+    writeInterview: (card) =>
+      enqueueCxCallWrapFromTerminal({
+        payload: { ...(card.payload || {}), callSummary: card.coachSummary || (card.payload || {}).callSummary },
+        row: { idemKey: card.idemKey },
+        terminalResult: null,
+        logger: runtime.logger,
+      }),
+    updateLogicsDncStatus: (card) =>
+      requestCxLeadStatusUpdate(card.domain, { email: card.agentEmail }, {
+        caseId: card.caseId,
+        status: "dnc",
+        notes: "DNC set from call wrap card",
+      }),
+    createAppointment: ({ card, appointmentAt, user }) => {
+      const payload = card?.payload && typeof card.payload === "object" ? card.payload : {};
+      const phone = payload.phone || payload.prospectPhone || payload.leadPhone || null;
+      return createCxAppointment(card.domain, user, {
+        caseId: card.caseId,
+        appointmentAt,
+        queueItemId: card.queueItemId,
+        prospectName: card.name || payload.name || payload.prospectName || payload.contactName || null,
+        phone,
+        searchPhone: phone,
+        sourceName: payload.sourceName || payload.intakeSource || null,
+        source: "cx-wrap-card",
+      });
+    },
+    logger: runtime.logger,
+  });
+}
+
+async function startCxTerminalOutboxWorker({
+  runtime,
+  workerState,
+  wrapQueueEnabled = false,
+  wrapCards = null,
+}) {
   const intervalMs = Math.max(
     Number(process.env.CX_TERMINAL_OUTBOX_DRAIN_INTERVAL_MS) || 15_000,
     5_000,
@@ -1052,41 +1098,6 @@ async function startCxTerminalOutboxWorker({ runtime, workerState }) {
     runtime.logger.warn("control-plane.cx_terminal_outbox.disabled");
     return;
   }
-
-  // CALL WRAP QUEUE (design: docs/CX_CALL_WRAP_QUEUE_DESIGN_2026-07-06.md). Default OFF —
-  // when enabled, answered calls produce wrap CARDS instead of the legacy auto-summary
-  // (the purity law: the card is the only case-land writer; interview files at resolution).
-  const wrapQueueEnabled = String(process.env.CX_CALL_WRAP_QUEUE_ENABLED || "false").trim().toLowerCase() === "true";
-  const wrapCards = createCxCallWrapCardService({
-    cardRepository: cxCallWrapCardRepository,
-    outboxRepository: cxTerminalOutboxRepository,
-    buildCorrectionRow: buildCxReviewCorrectionRow,
-    // Interview activity = the EXISTING wrap-summary pipeline (threadKey dedup included),
-    // fed the card's frozen payload — fired at RESOLUTION time, never at outcome time.
-    writeInterview: (card) =>
-      enqueueCxCallWrapFromTerminal({
-        payload: { ...(card.payload || {}), callSummary: card.coachSummary || (card.payload || {}).callSummary },
-        row: { idemKey: card.idemKey },
-        terminalResult: null,
-        logger: runtime.logger,
-      }),
-    // The Logics DNC status write — the card-DNC compliance half (closes the D3 gap for
-    // card-initiated DNC; the same call the workspace disposition path uses).
-    updateLogicsDncStatus: (card) =>
-      requestCxLeadStatusUpdate(card.domain, { email: card.agentEmail }, {
-        caseId: card.caseId,
-        status: "dnc",
-        notes: "DNC set from call wrap card",
-      }),
-    createAppointment: ({ card, appointmentAt, user }) =>
-      createCxAppointment(card.domain, user, {
-        caseId: card.caseId,
-        appointmentAt,
-        queueItemId: card.queueItemId,
-        source: "cx-wrap-card",
-      }),
-    logger: runtime.logger,
-  });
 
   const drain = createCxTerminalOutboxDrain({
     outboxRepository: cxTerminalOutboxRepository,
@@ -1134,13 +1145,47 @@ async function startCxTerminalOutboxWorker({ runtime, workerState }) {
         agentCallNoteRepository: cxAgentCallNoteRepository,
       }),
     enqueueCallWrap: (packet) =>
-      wrapQueueEnabled
+      wrapQueueEnabled && wrapCards
         ? wrapCards.createFromDrain(packet)
         : enqueueCxCallWrapFromTerminal({
           ...packet,
           logger: runtime.logger,
         }),
   });
+
+  // SEPARATE CONCERNS, SEPARATE ROUTES (Mickey, 2026-07-07: "drain can wait if it's
+  // safer — appointments should run as soon as all the data is gathered"). The wrap card
+  // is the HUMAN'S queue: it mints the moment the terminal row lands, on its own route,
+  // with the same enrich + the same idemKey exactly-once. The drain's heartbeat is
+  // untouched and its enqueueCallWrap above stays as the BACKSTOP — rows inserted
+  // out-of-process (scripts, replays) get carded on the next tick; duplicates no-op.
+  if (wrapQueueEnabled && wrapCards) {
+    cxTerminalOutboxRepository.onCxTerminalRowEnqueued((row) => {
+      (async () => {
+        const packet = await enrichTerminalPacketWithCoachSummary(
+          { row, payload: row.payload || {} },
+          { LiveCoachSession, logger: runtime.logger },
+        ).catch(() => ({ row, payload: row.payload || {}, coachSummary: null }));
+        const result = await wrapCards.createFromDrain({
+          row: packet.row || row,
+          payload: packet.payload || row.payload || {},
+          coachSummary: packet.coachSummary || null,
+        });
+        if (result?.created) {
+          runtime.logger.info("control-plane.cx_wrap_cards.fast_minted", {
+            idemKey: row.idemKey,
+            agentEmail: row.agentEmail || null,
+            outcome: row.outcome || null,
+          });
+        }
+      })().catch((error) => {
+        runtime.logger.warn("control-plane.cx_wrap_cards.fast_mint_failed", {
+          idemKey: row.idemKey,
+          error: error?.message,
+        });
+      });
+    });
+  }
 
   const tick = async () => {
     if (workerState.running) return;
@@ -1160,7 +1205,7 @@ async function startCxTerminalOutboxWorker({ runtime, workerState }) {
     workerState.lastStartedAt = new Date();
     try {
       const result = await drain.drainOnce({ limit });
-      if (wrapQueueEnabled) {
+      if (wrapQueueEnabled && wrapCards) {
         // The wrap janitor rides the drain tick (the auto-opt-out ruling): passive expiry
         // resolves through the same pipeline as a button press.
         const janitor = await wrapCards.expireDue().catch(() => null);
@@ -1409,6 +1454,8 @@ async function startServer() {
   app.set("trust proxy", "loopback");
   const auth = buildAuthMiddleware(config);
   const workerState = createWorkerState();
+  const wrapQueueEnabled = String(process.env.CX_CALL_WRAP_QUEUE_ENABLED || "false").trim().toLowerCase() === "true";
+  const wrapCards = wrapQueueEnabled ? createControlPlaneCxCallWrapCards({ runtime }) : null;
   const lexisNightlyRuntime = createLexisNightlyRuntime({
     config: config.lexisNightly || {},
     runtime,
@@ -1823,10 +1870,48 @@ async function startServer() {
     await startCxTerminalOutboxWorker({
       runtime,
       workerState: cxTerminalOutboxState,
+      wrapQueueEnabled,
+      wrapCards,
     });
   } else {
     cxTerminalOutboxState.enabled = false;
     runtime.logger.warn("control-plane.cx_terminal_outbox.disabled");
+  }
+
+  if (config.controlPlaneWorker?.enabled !== false) {
+    // CX LANE DISPATCHERS (2026-07-07, serving boundary): first-touch drip + appointment
+    // clock. Both flag-gated INSIDE tickOnce (CX_FIRST_TOUCH_ENABLED / CX_APPT_LANE_ENABLED,
+    // default off) — with the flags off these ticks are two no-op env reads. Fail-soft:
+    // a tick error is logged, never thrown into the interval.
+    const laneDispatchClient = createRingcxVoiceClient();
+    const firstTouchDispatcher = createCxFirstTouchDispatcher({
+      client: laneDispatchClient,
+      logger: runtime.logger,
+    });
+    const appointmentDispatcher = createCxAppointmentDispatcher({
+      client: laneDispatchClient,
+      logger: runtime.logger,
+    });
+    const firstTouchTimer = setInterval(() => {
+      firstTouchDispatcher.tickOnce().then((result) => {
+        if (result && !result.skipped && (result.dispatched || result.failed)) {
+          runtime.logger.info("control-plane.cx_first_touch.dispatch.tick", result);
+        }
+      }).catch((error) => {
+        runtime.logger.warn("control-plane.cx_first_touch.dispatch.failed", { error: error?.message });
+      });
+    }, 15_000);
+    if (typeof firstTouchTimer.unref === "function") firstTouchTimer.unref();
+    const appointmentTimer = setInterval(() => {
+      appointmentDispatcher.tickOnce().then((result) => {
+        if (result && !result.skipped && (result.dispatched || result.failed)) {
+          runtime.logger.info("control-plane.cx_appt_lane.dispatch.tick", result);
+        }
+      }).catch((error) => {
+        runtime.logger.warn("control-plane.cx_appt_lane.dispatch.failed", { error: error?.message });
+      });
+    }, 30_000);
+    if (typeof appointmentTimer.unref === "function") appointmentTimer.unref();
   }
 
   if (config.controlPlaneWorker?.enabled !== false) {

@@ -708,9 +708,9 @@ function deriveFreshLeadGate(snapshot = {}, routingOverride = null, options = {}
     : routingReason === "long-call-hold"
       ? "This agent has been on a call long enough to trigger a timed pause. Ending the call clears the pause before queue release."
     : routingReason === "manual-unavailable" && pauseType === MEAL_BREAK_TYPE
-      ? "This agent is on a 15 minute break. Held leads release when the break window expires."
+      ? "This agent is on a 15 minute break. Fresh leads stay paused until the agent resumes work."
     : routingReason === "manual-unavailable" && pauseType === SHORT_BREAK_TYPE
-      ? "This agent is on a 5 minute break. Held leads release when the break window expires."
+      ? "This agent is on a 5 minute break. Fresh leads stay paused until the agent resumes work."
     : blocked
       ? "Manual pause keeps this agent out of fresh lead serving."
       : "EX is idle and this agent profile can receive fresh leads.";
@@ -963,6 +963,55 @@ async function bumpLastActivityAt(extensionId, { source = null } = {}) {
   return agentStateRepository.updateAgentState(extensionId, patch);
 }
 
+function shouldHealStaleLogoutFromWorkspaceHeartbeat(existingState = null, {
+  active = true,
+  source = "cx-workspace",
+} = {}) {
+  if (active === false) return false;
+  const normalizedSource = String(source || "").trim().toLowerCase();
+  if (normalizedSource !== "cx-workspace") return false;
+
+  const routing = existingState?.cxRouting && typeof existingState.cxRouting === "object"
+    ? existingState.cxRouting
+    : {};
+  const desiredAvailability = String(routing.desiredAvailability || "").trim().toLowerCase();
+  const reason = String(routing.reason || "").trim().toLowerCase();
+  const pauseType = normalizeCxPauseType(routing.pauseType);
+  if (desiredAvailability !== "unavailable") return false;
+  if (reason !== "logout" && pauseType !== LOGOUT_PAUSE_TYPE) return false;
+
+  const status = String(existingState?.status || "").trim().toLowerCase();
+  const activityState = String(existingState?.activityState || "").trim().toLowerCase();
+  const activePlatform = String(existingState?.activePlatform || "none").trim().toLowerCase();
+  if (status !== "available") return false;
+  if (activityState && activityState !== "idle") return false;
+  if (activePlatform && activePlatform !== "none") return false;
+  if (hasCxActiveCall(existingState) || hasActiveExCall(existingState)) return false;
+
+  const openAssignments = Number(routing.assignmentStats?.openAssignments || 0);
+  return !Number.isFinite(openAssignments) || openAssignments <= 0;
+}
+
+function buildStaleLogoutWorkspaceHealPatch(existingState = {}, now = new Date()) {
+  const routing = existingState?.cxRouting && typeof existingState.cxRouting === "object"
+    ? existingState.cxRouting
+    : {};
+  return {
+    "cxRouting.enabled": routing.enabled !== false,
+    "cxRouting.desiredAvailability": "available",
+    "cxRouting.reason": "manual-available",
+    "cxRouting.syncedAt": now,
+    "cxRouting.lastSource": "cx-workspace",
+    "cxRouting.manualUnavailableAt": null,
+    "cxRouting.pauseType": null,
+    "cxRouting.pauseStartedAt": null,
+    "cxRouting.pauseReleaseAt": null,
+    "cxRouting.breakUsage": routingBreakUsage(routing, now),
+    "cxRouting.lastQueueReleaseAt": routing.lastQueueReleaseAt || null,
+    "cxRouting.assignmentStats": routingAssignmentStats(routing),
+  };
+}
+
 async function touchCxWorkspacePresence(
   extensionId,
   {
@@ -970,6 +1019,7 @@ async function touchCxWorkspacePresence(
     source = "cx-workspace",
     userEmail = null,
     sessionId = null,
+    existingState = null,
   } = {},
 ) {
   const normalizedExtensionId = String(extensionId || "").trim();
@@ -989,6 +1039,17 @@ async function touchCxWorkspacePresence(
   };
   if (isActive) {
     patch.lastActivityAt = now;
+  }
+  let stateForHeal = existingState;
+  if (isActive && !stateForHeal && normalizedSource === "cx-workspace") {
+    stateForHeal = await agentStateRepository.findAgentStateByExtensionId(normalizedExtensionId)
+      .catch(() => null);
+  }
+  if (shouldHealStaleLogoutFromWorkspaceHeartbeat(stateForHeal, {
+    active: isActive,
+    source: normalizedSource,
+  })) {
+    Object.assign(patch, buildStaleLogoutWorkspaceHealPatch(stateForHeal, now));
   }
   return agentStateRepository.updateAgentState(normalizedExtensionId, patch);
 }

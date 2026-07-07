@@ -368,6 +368,15 @@ async function ensureAppointmentQueueItem({
   return queueItemObject(patched) || effectiveQueueItem;
 }
 
+// H6 (write audit, 2026-07-07): the hold stamp was never cleared on resolve/release —
+// any future reader excluding on the lead-side stamp would exclude FOREVER. Targeted
+// dotted clear, no upsert (a missing cadence must not be created by a cleanup).
+async function clearLeadAppointmentHold(domain, caseId) {
+  return leadCadenceRepository
+    .clearLeadCadenceFields(domain, caseId, { "payloadSnapshot.cxAppointment": null })
+    .catch(() => null);
+}
+
 async function upsertLeadAppointmentHold(domain, caseId, appointment = {}) {
   return leadCadenceRepository.upsertLeadCadence(domain, caseId, {
     active: true,
@@ -438,6 +447,8 @@ async function createCxAppointment(domain, user, input = {}) {
     input: {
       ...input,
       appointmentAt,
+      prospectName,
+      phone,
     },
     legalDialAt: timing.legalDialAt,
     queueItem: existingQueueItem,
@@ -644,6 +655,7 @@ async function releaseCxAppointment(domain, user, input = {}) {
       },
     }).catch(() => null);
   }
+  await clearLeadAppointmentHold(context.domain, appointment.caseId);
   await recordWorkflowStage({
     domain: context.domain,
     family: "cx",
@@ -1153,6 +1165,7 @@ async function resolveCxAppointmentAfterDisposition({
       "metadata.dialabilityHoldUntil": null,
     }).catch(() => null);
   }
+  await clearLeadAppointmentHold(domain || appointment.domain, appointment.caseId);
   return {
     ok: true,
     appointment: updated?.toObject ? updated.toObject() : updated,

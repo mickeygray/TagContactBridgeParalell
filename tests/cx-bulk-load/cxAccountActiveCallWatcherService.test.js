@@ -750,9 +750,12 @@ test("CONGESTION label: a never-connected release matched in RingCX's congestion
     now: new Date("2026-06-23T12:00:00.000Z"),
   });
 
-  assert.equal(searchCalls.length, 2, "family probe first, then CONGESTION fallback");
-  assert.ok(searchCalls[0].systemDispositions.includes("BUSY"), "first probe filters the whole never-connected family");
-  assert.deepEqual(searchCalls[1].systemDispositions, ["CONGESTION"]);
+  // Direct-extern search is the primary read since 2026-07-07 (the ANSWER discovery);
+  // the family + CONGESTION probes are the did_not_connect fallback chain.
+  assert.equal(searchCalls.length, 3, "direct extern first, then family probe, then CONGESTION fallback");
+  assert.deepEqual(searchCalls[0].externIds, ["cxbl-q1"], "the primary read is extern-scoped");
+  assert.ok(searchCalls[1].systemDispositions.includes("BUSY"), "fallback filters the whole never-connected family");
+  assert.deepEqual(searchCalls[2].systemDispositions, ["CONGESTION"]);
   assert.equal(terminalWrites.length, 1);
   assert.equal(terminalWrites[0].outcome, "did_not_connect", "outcome ENUM is untouched");
   assert.equal(terminalWrites[0].systemDisposition, "CONGESTION", "the label rides along");
@@ -872,4 +875,73 @@ test("REAL-PICKUP guard: a real conversation (>=10s) superseded records answered
   assert.equal(projected.terminalObservations.length, 1);
   assert.equal(projected.terminalObservations[0].outcome, "answered", "a real pickup records answered");
   assert.equal(projected.after.lastOutcome.outcome, "answered", "and lands on the answered worklist");
+});
+
+test("ANSWER discovery (2026-07-07): lastPassDispo=ANSWER is read via the direct extern search and rides the write", async () => {
+  const terminalWrites = [];
+  const searchCalls = [];
+  const current = { ...candidate("q1", "cxbl-q1") }; // never latched → guard says did_not_connect
+  const s1 = {
+    ...session("s1", "acct-a", [], current),
+    ringcx: { accountId: "acct-a", campaignId: 2306 },
+    prevActiveExternIds: ["cxbl-q1"],
+    trace: { prevActiveCalls: [{ externId: "cxbl-q1", uii: "u1" }] },
+  };
+  const sessionRepository = {
+    async listActiveBulkLoadSessions() { return [s1]; },
+    async updateBulkLoadSession(sessionId, patch) { return patch; },
+  };
+  const client = {
+    async listActiveCalls() { return []; },
+    async searchLeads(payload) {
+      searchCalls.push(payload);
+      // The exact shape Mickey's probe captured: composite lastPassDisposition.
+      return { leads: [{ externId: "cxbl-q1", lastPassDispo: "ANSWER", lastPassDisposition: "ANSWER : Auto Dispo" }] };
+    },
+  };
+  await runCxAccountActiveCallWatchOnce({
+    sessionRepository,
+    client,
+    outcomeAdapter: {
+      async persistTerminalOutcome(input) { terminalWrites.push(input); return { written: true }; },
+    },
+    now: new Date("2026-07-07T12:00:00.000Z"),
+  });
+  assert.equal(searchCalls.length, 1, "the direct extern read suffices");
+  assert.equal(terminalWrites.length, 1);
+  assert.equal(terminalWrites[0].systemDisposition, "ANSWER", "the proven token rides the write");
+  assert.equal(terminalWrites[0].outcome, "did_not_connect", "flag OFF: the guard's verdict still stands");
+});
+
+test("ANSWER + classifier flag ON: the guard's did_not_connect upgrades to answered (the wrap card's case)", async () => {
+  const terminalWrites = [];
+  const current = { ...candidate("q1", "cxbl-q1") };
+  const s1 = {
+    ...session("s1", "acct-a", [], current),
+    ringcx: { accountId: "acct-a", campaignId: 2306 },
+    prevActiveExternIds: ["cxbl-q1"],
+    trace: { prevActiveCalls: [{ externId: "cxbl-q1", uii: "u1" }] },
+  };
+  const sessionRepository = {
+    async listActiveBulkLoadSessions() { return [s1]; },
+    async updateBulkLoadSession(sessionId, patch) { return patch; },
+  };
+  const client = {
+    async listActiveCalls() { return []; },
+    async searchLeads() {
+      return { leads: [{ externId: "cxbl-q1", lastPassDispo: "ANSWER" }] };
+    },
+  };
+  await runCxAccountActiveCallWatchOnce({
+    sessionRepository,
+    client,
+    sysDispoClassifierEnabled: true,
+    outcomeAdapter: {
+      async persistTerminalOutcome(input) { terminalWrites.push(input); return { written: true }; },
+    },
+    now: new Date("2026-07-07T12:10:00.000Z"),
+  });
+  assert.equal(terminalWrites.length, 1);
+  assert.equal(terminalWrites[0].outcome, "answered", "RingCX's ANSWER verdict overrides the guard");
+  assert.equal(terminalWrites[0].systemDisposition, "ANSWER");
 });

@@ -661,8 +661,85 @@ function deriveBufferInvalidations(session = {}, rows = []) {
   return invalid;
 }
 
+// SYS-DISPO CLASSIFIER (Mickey's ruling 2026-07-07, FLAG-GATED until RingCX's answered
+// token is proven on real calls — CX_SYSDISPO_CLASSIFIER_ENABLED, default off): auto-
+// advanced outcomes route by RINGCX'S OWN VERDICT. A never-connect-family label DOWNGRADES
+// a guard-approved "answered" (the long screener/VM the 10s guard can't tell from a human);
+// an answered-family label UPGRADES a guard-downgraded release (real conversation, hung up
+// on us → the wrap card gets its case). No label = the latch+guard verdict stands. Human
+// clicks never route through here — only watcher observations do.
+// THE OFFICIAL CLOSED VOCABULARY (RingCX lead-search docs, verified 2026-07-07 — Mickey's
+// point: WE might have unknowns, system dispositions shouldn't). 15 values total. ANSWER is
+// the only wrap-up token (his binary rule); every other official value routes no-answer.
+// A token outside this set = API/vocabulary DRIFT and fires cx.alpha.sysdispo.unknown_token.
+// (INBOUND_CALLBACK arguably involved a conversation — flagged for the owner; routed
+// no-answer per the strict binary rule until ruled otherwise.)
+const SYSDISPO_ANSWERED = new Set(["ANSWER"]);
+const SYSDISPO_NEVER_CONNECTED = new Set([
+  "NOANSWER", "BUSY", "MACHINE", "INTERCEPT", "DISCONNECT", "ABANDON", "CONGESTION",
+  "MANUAL_PASS", "INBOUND_CALLBACK", "APP_DNC", "APP_REQUEUE", "APP_REQUEUE_COMPLETE",
+  "APP_REQUEUE_ABANDON", "INBOUND_ABANDON",
+]);
+
+function sysDispoClassifierEnabled(input = {}) {
+  if (input.sysDispoClassifierEnabled === true) return true;
+  if (input.sysDispoClassifierEnabled === false) return false;
+  return String(process.env.CX_SYSDISPO_CLASSIFIER_ENABLED || "false").trim().toLowerCase() === "true";
+}
+
+// THE SMALL RETRY QUEUE (Mickey, 2026-07-07: "a small retry queue that looks for 429 404
+// whatever specifically from rc — other than that assume we have what we need from system").
+// When the classifier is driving and a terminal observation could not get a LABEL — the
+// read errored/timed out (RC's 429/404/5xx lane) OR the read was clean but the lead's pass
+// wasn't stamped yet (his premise says we always see something; seeing nothing means "not
+// yet") — the terminal write DEFERS and the extern is re-read on the next watcher tick.
+// ONE re-read (~5s), then Mickey's default (2026-07-07: "retry once and then default to
+// did not answer"): if RingCX hasn't said ANSWER by then, it wasn't an answer —
+// did_not_connect, no third path, no guard resurrection. Entries live on the session doc
+// (crash-safe) and ONLY this lane writes the field — every whole-state session save
+// explicitly leaves sysDispoRetries alone.
+const SYSDISPO_RETRY_MAX = 1; // one re-read after the initial read
+const SYSDISPO_RETRY_BACKOFF_MS = [5000]; // wait before the single re-read
+
+function deriveSysDispoRetryDecision(report = {}, guardOutcome, { enabled = false } = {}) {
+  if (!enabled) return "persist"; // flag off: byte-for-byte legacy, no deferral machinery
+  if (guardOutcome !== "answered" && guardOutcome !== "did_not_connect") return "persist";
+  if (report.label) return "persist"; // RingCX spoke — route now
+  if (report.reason === "error" || report.reason === "timeout") return "defer"; // RC's 429/404/whatever
+  if (report.reason === "clean") return "defer"; // clean-but-unstamped: not "something" yet
+  return "persist"; // structural (no client / missing ids): a retry can never help
+}
+
+// Field values arrive both bare ("ANSWER") and composite ("ANSWER : Auto Dispo" — RingCX's
+// "system verdict : agent disposition" shape, proven by Mickey's one-dial probe 2026-07-07).
+// Parse = first segment before ":", trimmed, uppercased; only recognized tokens return.
+function parseSysDispoToken(value) {
+  const first = String(value == null ? "" : value).split(":")[0].trim().toUpperCase();
+  if (!first) return null;
+  if (SYSDISPO_ANSWERED.has(first) || SYSDISPO_NEVER_CONNECTED.has(first)) return first;
+  return null;
+}
+
+function applySysDispoClassifier(outcome, systemDisposition, { enabled = false, read = true } = {}) {
+  if (!enabled) return outcome;
+  // Mickey's rule, TIGHTENED 2026-07-07 ("we should have no no-label — as long as we are
+  // reading system to drive this we will see something every time, so the machine needs to
+  // be the gamut of anything but answer"): when RingCX WAS READ, the verdict is total.
+  // ANSWER routes to answered (the wrap card); EVERYTHING ELSE — any other token AND a
+  // clean read that shows no label — routes to did_not_connect. Clean silence IS the
+  // no-answer verdict, not an unknown. The one survivor of the old fallback: read=false
+  // (API error / timeout — we never actually saw RingCX) keeps the latch+guard verdict,
+  // because a read that failed is OUR blindness, not their silence; an RC blip must never
+  // mass-downgrade real conversations. Only the two machine outcomes route here.
+  if (outcome !== "answered" && outcome !== "did_not_connect") return outcome;
+  if (read === false) return outcome;
+  const label = String(systemDisposition || "").trim().toUpperCase();
+  return SYSDISPO_ANSWERED.has(label) ? "answered" : "did_not_connect";
+}
+
 const RESYNC_SWEEP_MIN_INTERVAL_MS = 60_000;
 const resyncSweepClock = new Map(); // sessionId -> last audit ms (in-memory; a restart just re-audits once)
+let sysDispoOrphanSweepAtMs = 0; // last orphan-flush sweep (in-memory; a restart just re-sweeps once)
 
 function resyncFeatureEnabled(input = {}) {
   if (input.resyncEnabled === false) return false;
@@ -693,6 +770,9 @@ async function runCxAccountActiveCallWatchOnce(input = {}) {
   });
   const busySkipped = [];
   const sessions = [];
+  // Entries deferred THIS tick, per session — the retry pass merges these into its stash
+  // write so processing old entries can never clobber a same-tick enqueue.
+  const sysDispoTickEnqueues = new Map();
   for (const session of allSessions) {
     const sessionId = str(session?.sessionId);
     if (sessionId && busySessionIds.has(sessionId)) {
@@ -761,6 +841,7 @@ async function runCxAccountActiveCallWatchOnce(input = {}) {
     const patch = { ...next };
     delete patch._id;
     delete patch.__v;
+    delete patch.sysDispoRetries; // owned exclusively by the retry lane's targeted writes
     const saved = await sessionRepository
       .updateBulkLoadSession(sessionId, patch, {
         expectedVersion: sessionState.__v,
@@ -799,16 +880,33 @@ async function runCxAccountActiveCallWatchOnce(input = {}) {
   // readable value, one CONGESTION-only fallback probe answers the case that broke
   // the loop. The outcome ENUM stays did_not_connect either way — this is a label,
   // not routing. Any error, timeout, or non-match keeps the plain record.
-  const NEVER_CONNECTED_SYSTEM_DISPOSITIONS = ["CONGESTION", "BUSY", "INTERCEPT", "NOANSWER", "MACHINE", "ABANDON"];
+  const NEVER_CONNECTED_SYSTEM_DISPOSITIONS = ["CONGESTION", "BUSY", "INTERCEPT", "NOANSWER", "MACHINE", "ABANDON", "DISCONNECT"];
   async function boundedSearch(payload) {
     const timeoutSentinel = { timedOut: true };
     const timeout = new Promise((resolve) => setTimeout(() => resolve(timeoutSentinel), 2000));
     const res = await Promise.race([input.client.searchLeads(payload), timeout]);
     if (res === timeoutSentinel) return { leads: [], timedOut: true };
-    return { leads: Array.isArray(res) ? res : res?.leads || res?.records || [], timedOut: false };
+    // A "clean read" requires ARRAY EVIDENCE. A degraded-but-200 response (empty/non-JSON
+    // body, envelope drift) must count as OUR blindness — never as RingCX silence, or an
+    // RC incident mass-downgrades every latched answered call (adversarial find, 2026-07-07).
+    const rows = Array.isArray(res) ? res
+      : Array.isArray(res?.leads) ? res.leads
+      : Array.isArray(res?.records) ? res.records
+      : null;
+    if (rows === null) return { leads: [], timedOut: true, malformed: true };
+    return { leads: rows, timedOut: false };
   }
   function readLeadSystemDisposition(lead = {}) {
+    // Field order = trust order. lastPassDispo/lastPassDisposition are THE fields RingCX
+    // actually populates (proven 2026-07-07: all three answered test calls carried
+    // lastPassDispo=ANSWER, lastPassDisposition="ANSWER : Auto Dispo"); the rest are the
+    // original guesses kept as fallbacks. Composite values parse via parseSysDispoToken.
+    const nested = lead.campaignLead && typeof lead.campaignLead === "object" ? lead.campaignLead : {};
     const candidates = [
+      ["lastPassDispo", lead.lastPassDispo],
+      ["lastPassDisposition", lead.lastPassDisposition],
+      ["campaignLead.lastPassDispo", nested.lastPassDispo],
+      ["campaignLead.lastPassDisposition", nested.lastPassDisposition],
       ["systemDisposition", lead.systemDisposition],
       ["lastSystemDisposition", lead.lastSystemDisposition],
       ["callResult", lead.callResult],
@@ -816,8 +914,8 @@ async function runCxAccountActiveCallWatchOnce(input = {}) {
       ["passDisposition", lead.passDisposition],
     ];
     for (const [field, raw] of candidates) {
-      const value = str(raw).toUpperCase();
-      if (NEVER_CONNECTED_SYSTEM_DISPOSITIONS.includes(value)) return { value, field };
+      const token = parseSysDispoToken(raw);
+      if (token) return { value: token, field };
     }
     return null;
   }
@@ -832,17 +930,19 @@ async function runCxAccountActiveCallWatchOnce(input = {}) {
       source: observation.source || "active-call-release",
     };
     try {
-      // Gate on the OUTCOME, not the source: a superseded short-connect (screener
-      // kick followed immediately by the next call) is a never-connect wearing an
-      // "active-call-switch" source — it deserves its label too. Answered rows
-      // never need a lookup (connectedAt + duration already told us).
-      if (observation.outcome !== "did_not_connect") return null;
+      // UNIFIED DIRECT LOOKUP (Mickey's one-dial proof, 2026-07-07): answered leads carry
+      // lastPassDispo=ANSWER — INVISIBLE to the never-connect family filter that used to be
+      // the only read for did_not_connect (his 3 answered test calls all came back
+      // label-null). So: direct extern search FIRST for BOTH machine outcomes; the family +
+      // CONGESTION probes survive below as the did_not_connect fallback (the original
+      // loop-breaker). Label-only unless CX_SYSDISPO_CLASSIFIER_ENABLED flips routing.
+      if (observation.outcome !== "did_not_connect" && observation.outcome !== "answered") return { label: null, read: false, reason: "not-attempted" };
       if (typeof input.client?.searchLeads !== "function") {
         traceWatcher("cx.alpha.system_disposition.lookup.skipped", {
           ...traceBase,
           reason: "missing-searchLeads-client",
         });
-        return null;
+        return { label: null, read: false, reason: "no-client" };
       }
       const campaignId = projection.before?.ringcx?.campaignId;
       const externId = candidateExternId(observation.candidate);
@@ -853,8 +953,68 @@ async function runCxAccountActiveCallWatchOnce(input = {}) {
           externId: externId || null,
           reason: !campaignId ? "missing-campaign-id" : "missing-extern-id",
         });
-        return null;
+        return { label: null, read: false, reason: "missing-ids" };
       }
+      const directResult = await boundedSearch({ campaignId, externIds: [externId] });
+      const directLead = directResult.leads.find((row) => str(row?.externId) === externId)
+        || directResult.leads[0]
+        || null;
+      // read=true means we genuinely SAW RingCX: either we hold the lead row, or the
+      // search completed cleanly and the row was not there. A timeout is not a read.
+      const directRead = Boolean(directLead) || !directResult.timedOut;
+      if (directLead) {
+        traceWatcher("cx.alpha.system_disposition.lookup.direct", {
+          ...traceBase,
+          campaignId,
+          externId,
+          rawFields: {
+            lastPassDispo: directLead.lastPassDispo ?? null,
+            lastPassDisposition: directLead.lastPassDisposition ?? null,
+            systemDisposition: directLead.systemDisposition ?? null,
+            lastSystemDisposition: directLead.lastSystemDisposition ?? null,
+            callResult: directLead.callResult ?? null,
+            lastCallResult: directLead.lastCallResult ?? null,
+            passDisposition: directLead.passDisposition ?? null,
+            leadState: directLead.leadState ?? null,
+            status: directLead.status ?? null,
+          },
+        });
+        const direct = readLeadSystemDisposition(directLead);
+        if (direct) {
+          traceWatcher("cx.alpha.system_disposition.lookup.matched", {
+            ...traceBase,
+            campaignId,
+            externId,
+            systemDisposition: direct.value,
+            field: direct.field,
+            matchSource: "direct-extern",
+          });
+          return { label: direct.value, read: true, reason: "clean" };
+        }
+        // The vocabulary is CLOSED (15 official values). A non-empty disposition field that
+        // parses to nothing = drift in RingCX's API or our list — alarm, don't guess.
+        const unparsed = [directLead.lastPassDispo, directLead.lastPassDisposition]
+          .map((v) => String(v == null ? "" : v).trim())
+          .filter(Boolean);
+        if (unparsed.length) {
+          traceWatcher("cx.alpha.sysdispo.unknown_token", {
+            ...traceBase,
+            campaignId,
+            externId,
+            values: unparsed.slice(0, 4),
+          });
+        }
+      } else {
+        traceWatcher("cx.alpha.system_disposition.lookup.direct", {
+          ...traceBase,
+          campaignId,
+          externId,
+          timedOut: Boolean(directResult.timedOut),
+          matched: false,
+        });
+      }
+      // Answered leads are invisible to the family filter — nothing more to try.
+      if (observation.outcome === "answered") return { label: null, read: directRead, reason: directRead ? "clean" : "timeout" };
       traceWatcher("cx.alpha.system_disposition.lookup.started", {
         ...traceBase,
         campaignId,
@@ -887,7 +1047,7 @@ async function runCxAccountActiveCallWatchOnce(input = {}) {
             field: direct.field,
             matchSource: "family-filter",
           });
-          return direct.value;
+          return { label: direct.value, read: true, reason: "clean" };
         }
         traceWatcher("cx.alpha.system_disposition.lookup.unlabeled_hit", {
           ...traceBase,
@@ -909,17 +1069,26 @@ async function runCxAccountActiveCallWatchOnce(input = {}) {
         matched: congestionMatched,
         systemDisposition: congestionMatched ? "CONGESTION" : null,
       });
-      return congestionMatched ? "CONGESTION" : null;
+      // The CONGESTION probe completing cleanly IS a genuine read of RingCX, even when the
+      // direct search timed out (adversarial nit, 2026-07-07: read=false must never carry a
+      // label while the telemetry claims blindness).
+      const congestionRead = directRead || !congestedResult.timedOut;
+      return {
+        label: congestionMatched ? "CONGESTION" : null,
+        read: congestionRead,
+        reason: congestionRead ? "clean" : "timeout",
+      };
     } catch (error) {
       traceWatcher("cx.alpha.system_disposition.lookup.failed", {
         ...traceBase,
         error: error?.message || "lookup-failed",
       });
-      return null; // fail-soft: the plain did_not_connect record stands
+      return { label: null, read: false, reason: "error", error: error?.message || "lookup-failed" }; // fail-soft: the guard verdict stands
     }
   }
 
   async function persistTerminalObservations(projection) {
+    const sysDispoDeferred = [];
     for (const observation of projection.terminalObservations || []) {
       if (typeof input.outcomeAdapter?.persistTerminalOutcome !== "function") continue;
       if (!hasTerminalWriteProof(observation.candidate)) {
@@ -941,11 +1110,80 @@ async function runCxAccountActiveCallWatchOnce(input = {}) {
         });
         continue;
       }
-      const systemDisposition = await lookupSystemDispositionLabel(projection, observation);
+      const dispoRead = await lookupSystemDispositionLabel(projection, observation);
+      const systemDisposition = dispoRead.label;
+      const guardOutcome = observation.outcome || "did_not_connect";
+      const classifierOn = sysDispoClassifierEnabled(input);
+      const retryDecision = deriveSysDispoRetryDecision(dispoRead, guardOutcome, { enabled: classifierOn });
+      if (retryDecision === "defer") {
+        // No label yet (RC error/timeout, or a clean read of an unstamped pass) — the
+        // terminal write WAITS for the retry lane rather than routing on a non-answer.
+        const nowMs = input.now ? new Date(input.now).getTime() : Date.now();
+        const candidate = observation.candidate || {};
+        // Carry EVERYTHING buildCadenceEvent harvests from the candidate — a retry-landed
+        // terminal must be byte-equivalent to an immediate one (adversarial find: deferred
+        // writes were dropping phone/duration and thinning the call note + wrap card).
+        const entryDurationSec = Number(
+          candidate.durationSec ??
+            candidate.durationSeconds ??
+            candidate.activeCallSummary?.durationSec ??
+            candidate.activeCallSummary?.durationSeconds,
+        );
+        const entry = {
+          queueItemId: queueItemKey(candidate) || null,
+          uii: str(candidate.uii) || null,
+          caseId: candidate.caseId ?? null,
+          domain: candidate.domain || null,
+          name: candidate.name || null,
+          externId: candidateExternId(candidate) || null,
+          campaignId: projection.before?.ringcx?.campaignId || null,
+          phone: str(candidate.phone || candidate.leadPhone || candidate.activeCallSummary?.phone) || null,
+          phoneLast4: str(candidate.phoneLast4) || null,
+          durationSec: Number.isFinite(entryDurationSec) ? entryDurationSec : null,
+          coachSessionId: str(candidate.coachSessionId || candidate.liveCoachSessionId) || null,
+          callSummary: str(candidate.callSummary || candidate.summary) || null,
+          interviewSnapshotWorkflowId: str(candidate.interviewSnapshotWorkflowId) || null,
+          guardOutcome,
+          source: observation.source || "active-call-release",
+          sawClean: dispoRead.reason === "clean",
+          attempts: 0,
+          enqueuedAt: new Date(nowMs).toISOString(),
+          nextAttemptAt: new Date(nowMs + SYSDISPO_RETRY_BACKOFF_MS[0]).toISOString(),
+          lastReason: dispoRead.reason || null,
+          lastError: dispoRead.error || null,
+        };
+        sysDispoDeferred.push(entry);
+        traceWatcher("cx.alpha.sysdispo.retry.enqueued", {
+          sessionId: projection.sessionId,
+          agentEmail: projection.agentEmail || null,
+          accountId: projection.accountId || null,
+          queueItemId: entry.queueItemId,
+          uii: entry.uii,
+          guardOutcome,
+          reason: entry.lastReason,
+          error: entry.lastError,
+        });
+        continue;
+      }
+      const outcome = applySysDispoClassifier(guardOutcome, systemDisposition, {
+        enabled: classifierOn,
+        read: dispoRead.read,
+      });
+      if (outcome !== guardOutcome) {
+        traceWatcher("cx.alpha.sysdispo.classified", {
+          sessionId: projection.sessionId,
+          agentEmail: projection.agentEmail || null,
+          queueItemId: queueItemKey(observation.candidate) || null,
+          uii: str(observation.candidate?.uii) || null,
+          from: guardOutcome,
+          to: outcome,
+          systemDisposition,
+        });
+      }
       await input.outcomeAdapter.persistTerminalOutcome({
         session: projection.before,
         candidate: observation.candidate,
-        outcome: observation.outcome || "did_not_connect",
+        outcome,
         source: observation.source || "active-call-release",
         eventType: "terminal",
         ...(systemDisposition ? { systemDisposition } : {}),
@@ -956,7 +1194,8 @@ async function runCxAccountActiveCallWatchOnce(input = {}) {
         accountId: projection.accountId || null,
         queueItemId: queueItemKey(observation.candidate),
         uii: str(observation.candidate?.uii) || null,
-        outcome: observation.outcome || "did_not_connect",
+        outcome, // what was PERSISTED (adversarial find: this must never diverge from the row)
+        guardOutcome,
         source: observation.source || "active-call-release",
         systemDisposition: systemDisposition || null,
       });
@@ -965,10 +1204,62 @@ async function runCxAccountActiveCallWatchOnce(input = {}) {
         agentEmail: projection.agentEmail || null,
         queueItemId: queueItemKey(observation.candidate),
         uii: str(observation.candidate?.uii) || null,
-        outcome: observation.outcome || "did_not_connect",
+        outcome,
+        guardOutcome,
         source: observation.source || "active-call-release",
         systemDisposition: systemDisposition || null,
       });
+    }
+    if (sysDispoDeferred.length) {
+      // Durable BEFORE the tick ends (a crash between defer and retry must not lose the
+      // outcome). This targeted write is the ONLY writer of sysDispoRetries; whole-state
+      // session saves all delete the key from their patches.
+      const existing = Array.isArray(projection.before?.sysDispoRetries)
+        ? projection.before.sysDispoRetries
+        : [];
+      // Dedupe by (queueItemId, uii): the serving-stamp-miss loop re-derives the same
+      // release every tick — one entry per call, not one per sighting (adversarial find).
+      const seenKeys = new Set(existing.map((e) => `${e?.queueItemId}:${e?.uii}`));
+      const fresh = [];
+      for (const entry of sysDispoDeferred) {
+        const key = `${entry.queueItemId}:${entry.uii}`;
+        if (seenKeys.has(key)) continue;
+        seenKeys.add(key);
+        fresh.push(entry);
+      }
+      if (fresh.length) {
+        sysDispoTickEnqueues.set(
+          projection.sessionId,
+          [...(sysDispoTickEnqueues.get(projection.sessionId) || []), ...fresh],
+        );
+        const saved = await sessionRepository
+          .updateBulkLoadSession(projection.sessionId, { sysDispoRetries: [...existing, ...fresh] })
+          .catch((error) => {
+            traceWatcher("cx.alpha.sysdispo.retry.stash_write_failed", {
+              sessionId: projection.sessionId,
+              error: error?.message || "stash-write-failed",
+            });
+            return null;
+          });
+        if (!saved) {
+          // FAIL CLOSED to legacy (adversarial find: a swallowed stash-write failure lost
+          // the outcome outright). The deferral's only durable home didn't land — persist
+          // the guard verdict NOW, exactly the pre-classifier write. Never lose a call.
+          sysDispoTickEnqueues.set(
+            projection.sessionId,
+            (sysDispoTickEnqueues.get(projection.sessionId) || []).filter((e) => !fresh.includes(e)),
+          );
+          for (const entry of fresh) {
+            await persistSysDispoRetryEntry(
+              projection.before,
+              entry,
+              entry.guardOutcome === "answered" ? "answered" : "did_not_connect",
+              null,
+              "stash-write-failed-flush",
+            );
+          }
+        }
+      }
     }
   }
 
@@ -1002,6 +1293,7 @@ async function runCxAccountActiveCallWatchOnce(input = {}) {
       const patch = { ...fresh.after };
       delete patch._id;
       delete patch.__v;
+      delete patch.sysDispoRetries; // owned exclusively by the retry lane's targeted writes
       const saved = await sessionRepository.updateBulkLoadSession(projection.sessionId, patch, writeOptions);
       if (saved) {
         return {
@@ -1198,6 +1490,7 @@ async function runCxAccountActiveCallWatchOnce(input = {}) {
     const patch = { ...after };
     delete patch._id;
     delete patch.__v;
+    delete patch.sysDispoRetries; // owned exclusively by the retry lane's targeted writes
     const writeOptions = eligibility.writeOptions || {};
     const saved = await sessionRepository.updateBulkLoadSession(projection.sessionId, patch, writeOptions);
     if (!saved) {
@@ -1258,6 +1551,246 @@ async function runCxAccountActiveCallWatchOnce(input = {}) {
     await runSessionApply(projection.sessionId, () => applyProjection(projection));
   }
 
+  // THE SMALL RETRY QUEUE, processing side: sessions carrying deferred terminal writes get
+  // their externs re-read; a label routes by the gamut rule, exhaustion finalizes by what
+  // the reads actually were (clean-silence -> gamut, never-read -> guard). Runs under the
+  // same per-session serializer as every other session mutation.
+  async function persistSysDispoRetryEntry(session, entry, outcome, label, resolution) {
+    const candidate = {
+      queueItemId: entry.queueItemId,
+      uii: entry.uii,
+      caseId: entry.caseId,
+      domain: entry.domain,
+      name: entry.name,
+      externId: entry.externId,
+      ringcx: { externId: entry.externId },
+      phone: entry.phone || null,
+      phoneLast4: entry.phoneLast4 || null,
+      durationSec: entry.durationSec ?? null,
+      coachSessionId: entry.coachSessionId || null,
+      callSummary: entry.callSummary || null,
+      interviewSnapshotWorkflowId: entry.interviewSnapshotWorkflowId || null,
+    };
+    try {
+      await input.outcomeAdapter.persistTerminalOutcome({
+        session,
+        candidate,
+        outcome,
+        source: entry.source || "active-call-release",
+        eventType: "terminal",
+        // `at` = the release tick (when the call actually ended), not the retry tick —
+        // the wrap card's calledAt and the 2h clock must not drift with the backoff.
+        ...(entry.enqueuedAt ? { now: entry.enqueuedAt } : {}),
+        ...(label ? { systemDisposition: label } : {}),
+      });
+    } catch (error) {
+      traceWatcher("cx.alpha.sysdispo.retry.persist_failed", {
+        sessionId: str(session.sessionId),
+        queueItemId: entry.queueItemId,
+        uii: entry.uii,
+        error: error?.message || "persist-failed",
+      });
+      return false;
+    }
+    traceWatcher("cx.alpha.sysdispo.retry.finished", {
+      sessionId: str(session.sessionId),
+      agentEmail: session.agentEmail || null,
+      accountId: normalizeAccountId(session?.ringcx?.accountId || session?.accountId),
+      queueItemId: entry.queueItemId,
+      uii: entry.uii,
+      guardOutcome: entry.guardOutcome || null,
+      outcome,
+      systemDisposition: label || null,
+      resolution,
+      attempts: Number(entry.attempts) || 0,
+    });
+    terminalWrites.push({
+      sessionId: str(session.sessionId),
+      agentEmail: session.agentEmail || null,
+      queueItemId: entry.queueItemId,
+      uii: entry.uii,
+      outcome,
+      guardOutcome: entry.guardOutcome || null,
+      source: entry.source || "active-call-release",
+      systemDisposition: label || null,
+      resolution,
+    });
+    return true;
+  }
+
+  const sysDispoClassifierOn = sysDispoClassifierEnabled(input);
+  const sysDispoRetryNowMs = input.now ? new Date(input.now).getTime() : Date.now();
+
+  // ORPHAN FLUSH (adversarial find: a session that leaves "running" — kill, fatal fail,
+  // replaced — strands its pending entries forever; the outcome never persists and the
+  // still-claimed queue row re-dials an already-answered lead after the next restart).
+  // Sweep dead sessions holding stashes: one last read when the classifier drives, then
+  // the verdict lands and the stash clears. Unscoped ticks only, rate-limited.
+  const sysDispoSweepScoped = Boolean(
+    input.sessionId || input.agentEmail || input.agentExtensionId || input.accountId || input.domain,
+  );
+  const sysDispoOrphanMinIntervalMs = input.sysDispoOrphanSweepMinIntervalMs ?? 60_000;
+  if (
+    !sysDispoSweepScoped
+    && typeof sessionRepository.listBulkLoadSessionsWithPendingSysDispoRetries === "function"
+    && typeof input.outcomeAdapter?.persistTerminalOutcome === "function"
+    && Date.now() - sysDispoOrphanSweepAtMs >= sysDispoOrphanMinIntervalMs
+  ) {
+    sysDispoOrphanSweepAtMs = Date.now();
+    const orphanSessions = await sessionRepository
+      .listBulkLoadSessionsWithPendingSysDispoRetries()
+      .catch(() => []);
+    for (const dead of orphanSessions || []) {
+      const deadSessionId = str(dead?.sessionId);
+      const deadPending = Array.isArray(dead?.sysDispoRetries) ? dead.sysDispoRetries : [];
+      if (!deadSessionId || !deadPending.length) continue;
+      await runSessionApply(deadSessionId, async () => {
+        const unflushed = [];
+        for (const entry of deadPending) {
+          const guardOutcome = entry.guardOutcome === "answered" ? "answered" : "did_not_connect";
+          let outcome = guardOutcome;
+          let label = null;
+          if (sysDispoClassifierOn) {
+            const report = await lookupSystemDispositionLabel(
+              {
+                sessionId: deadSessionId,
+                agentEmail: dead.agentEmail || null,
+                accountId: normalizeAccountId(dead?.ringcx?.accountId || dead?.accountId),
+                before: dead,
+              },
+              {
+                outcome: guardOutcome,
+                source: entry.source || "active-call-release",
+                candidate: {
+                  queueItemId: entry.queueItemId,
+                  uii: entry.uii,
+                  caseId: entry.caseId,
+                  domain: entry.domain,
+                  name: entry.name,
+                  externId: entry.externId,
+                  ringcx: { externId: entry.externId },
+                },
+              },
+            );
+            if (report.label) {
+              label = report.label;
+              outcome = applySysDispoClassifier(guardOutcome, report.label, { enabled: true, read: true });
+            } else {
+              // Mickey's default: this entry already had its chance — no ANSWER = no answer.
+              outcome = "did_not_connect";
+            }
+          }
+          const ok = await persistSysDispoRetryEntry(dead, entry, outcome, label, "orphan-flush");
+          if (!ok) unflushed.push(entry);
+        }
+        await sessionRepository
+          .updateBulkLoadSession(deadSessionId, { sysDispoRetries: unflushed.length ? unflushed : null })
+          .catch(() => null);
+      });
+    }
+  }
+  for (const session of sessions) {
+    const pending = Array.isArray(session.sysDispoRetries) ? session.sysDispoRetries : [];
+    if (!pending.length) continue;
+    const sessionId = str(session.sessionId);
+    if (!sessionId) continue;
+    if (typeof input.outcomeAdapter?.persistTerminalOutcome !== "function") continue;
+    await runSessionApply(sessionId, async () => {
+      const kept = [];
+      let mutated = false;
+      for (const entry of pending) {
+        const guardOutcome = entry.guardOutcome === "answered" ? "answered" : "did_not_connect";
+        if (!sysDispoClassifierOn) {
+          // Flag flipped off mid-flight: flush with the guard verdict, no re-read.
+          const ok = await persistSysDispoRetryEntry(session, entry, guardOutcome, null, "flag-off-flush");
+          if (ok) { mutated = true; continue; }
+          kept.push(entry);
+          continue;
+        }
+        const dueMs = new Date(entry.nextAttemptAt || 0).getTime();
+        if (Number.isFinite(dueMs) && dueMs > sysDispoRetryNowMs) {
+          kept.push(entry);
+          continue;
+        }
+        const report = await lookupSystemDispositionLabel(
+          {
+            sessionId,
+            agentEmail: session.agentEmail || null,
+            accountId: normalizeAccountId(session?.ringcx?.accountId || session?.accountId),
+            before: session,
+          },
+          {
+            outcome: guardOutcome,
+            source: entry.source || "active-call-release",
+            candidate: {
+              queueItemId: entry.queueItemId,
+              uii: entry.uii,
+              caseId: entry.caseId,
+              domain: entry.domain,
+              name: entry.name,
+              externId: entry.externId,
+              ringcx: { externId: entry.externId },
+            },
+          },
+        );
+        if (report.label) {
+          const outcome = applySysDispoClassifier(guardOutcome, report.label, { enabled: true, read: true });
+          const ok = await persistSysDispoRetryEntry(session, entry, outcome, report.label, "retry-resolved");
+          if (ok) { mutated = true; continue; }
+          kept.push(entry);
+          continue;
+        }
+        const attempts = (Number(entry.attempts) || 0) + 1;
+        const sawClean = Boolean(entry.sawClean) || report.reason === "clean";
+        if (attempts >= SYSDISPO_RETRY_MAX) {
+          // Exhausted. Mickey's default: no ANSWER after the retry = DID NOT ANSWER.
+          // No gamut-vs-blind split, no guard resurrection — one rule, one outcome.
+          const ok = await persistSysDispoRetryEntry(
+            session,
+            { ...entry, attempts, sawClean },
+            "did_not_connect",
+            null,
+            "retry-exhausted",
+          );
+          if (ok) { mutated = true; continue; }
+          kept.push({ ...entry, attempts, sawClean });
+          continue;
+        }
+        kept.push({
+          ...entry,
+          attempts,
+          sawClean,
+          nextAttemptAt: new Date(
+            sysDispoRetryNowMs + SYSDISPO_RETRY_BACKOFF_MS[Math.min(attempts, SYSDISPO_RETRY_BACKOFF_MS.length - 1)],
+          ).toISOString(),
+          lastReason: report.reason || null,
+          lastError: report.error || null,
+        });
+        mutated = true;
+        traceWatcher("cx.alpha.sysdispo.retry.rescheduled", {
+          sessionId,
+          agentEmail: session.agentEmail || null,
+          queueItemId: entry.queueItemId,
+          uii: entry.uii,
+          attempts,
+          reason: report.reason || null,
+          error: report.error || null,
+        });
+      }
+      if (mutated) {
+        const merged = [...kept, ...(sysDispoTickEnqueues.get(sessionId) || [])];
+        await sessionRepository
+          .updateBulkLoadSession(sessionId, { sysDispoRetries: merged.length ? merged : null })
+          .catch((error) => {
+            traceWatcher("cx.alpha.sysdispo.retry.stash_write_failed", {
+              sessionId,
+              error: error?.message || "stash-write-failed",
+            });
+          });
+      }
+    });
+  }
+
   // RESYNC Trigger B: quiet-drift sweep. A reaped batch is RC-unloaded (post ghost-guard
   // fix), so no ghost ever dials and Trigger A never fires — the session just sits frozen
   // holding a dead buffer. Sweep sessions that project NO current while still holding
@@ -1310,6 +1843,8 @@ async function runCxAccountActiveCallWatchOnce(input = {}) {
 }
 
 module.exports = {
+  applySysDispoClassifier, // exported for pins; pure
+  deriveSysDispoRetryDecision, // exported for pins; pure
   buildCxAccountActiveCallWatchPlan,
   compactActiveCall,
   compactActiveCalls,

@@ -163,10 +163,23 @@ function buildCadenceEvent({ session = {}, candidate = {}, outcome = null, sourc
     agentName: session.agentName || (session.agent && session.agent.name) || null,
     queueItemId: candidateKey(candidate) || null,
     caseId: candidate.caseId != null ? candidate.caseId : null,
+    name: str(
+      candidate.name ||
+        candidate.prospectName ||
+        candidate.contactName ||
+        candidate.fullName ||
+        candidate.payloadSnapshot?.name,
+    ) || null,
     externId: str(candidate.externId || (candidate.ringcx && candidate.ringcx.externId)) || null,
     uii: str(candidate.uii) || null,
     phone: str(candidate.phone || candidate.leadPhone || candidate.activeCallSummary?.phone) || null,
     phoneLast4: str(candidate.phoneLast4) || null,
+    sourceName: str(
+      candidate.sourceName ||
+        candidate.intakeSource ||
+        candidate.payloadSnapshot?.sourceName ||
+        candidate.payloadSnapshot?.intakeSource,
+    ) || null,
     durationSec: Number.isFinite(durationSec) ? durationSec : null,
     coachSessionId: str(candidate.coachSessionId || candidate.liveCoachSessionId) || null,
     callSummary: str(candidate.callSummary || candidate.summary) || null,

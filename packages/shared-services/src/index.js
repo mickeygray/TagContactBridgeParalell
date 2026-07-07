@@ -233,6 +233,15 @@ const {
   releaseCxQueueBatch,
 } = require("./cxCadenceService");
 const {
+  LANES: CX_LANES,
+  buildLaneExternId,
+  parseLaneFromExternId,
+  parseAgentQueueMap,
+} = require("./cxLaneRegistry");
+const { createCxFirstTouchDispatcher } = require("./cxFirstTouchDispatchService");
+const { createCxAppointmentDispatcher } = require("./cxAppointmentDispatchService");
+
+const {
   computeFreshHotLaneWindow,
   getFreshHotLaneSnapshot,
   rebuildFreshHotLane,
@@ -299,7 +308,6 @@ const {
   submitCxBulkLoadReviewOutcome,
   submitCxBulkLoadAppointmentWrap,
   watchCxBulkLoadAccountActiveCalls,
-  watchCxBulkLoadSession,
 } = require("./cxBulkLoadRuntime");
 const {
   buildCxAccountActiveCallWatchPlan,
@@ -340,7 +348,6 @@ const {
   extractRectificationKeysFromCallLog,
   isRealRingcxUii,
   normalizeRectificationWindow,
-  previewCxTerminalRectification,
   runCxTerminalRectification,
 } = require("./cxTerminalRectificationService");
 const {
@@ -800,6 +807,13 @@ const { createAiTaskClient } = require("./aiTaskClient");
 const aiTaskRegistry = require("./aiTaskRegistry");
 
 module.exports = {
+  // ── CX lane registry + dispatchers (first-touch drip, appointment clock) ──
+  CX_LANES,
+  buildLaneExternId,
+  parseLaneFromExternId,
+  parseAgentQueueMap,
+  createCxFirstTouchDispatcher,
+  createCxAppointmentDispatcher,
   // ── AI bus: provider-neutral task runner + primitives + delivery client ──
   createAiTaskRunner,
   createAiProviders,
@@ -1106,7 +1120,6 @@ module.exports = {
   submitCxBulkLoadReviewOutcome,
   submitCxBulkLoadAppointmentWrap,
   watchCxBulkLoadAccountActiveCalls,
-  watchCxBulkLoadSession,
   buildCxAccountActiveCallWatchPlan,
   runCxAccountActiveCallWatchOnce,
   createCxQueueReservationService,
@@ -1134,7 +1147,6 @@ module.exports = {
   extractRectificationKeysFromCallLog,
   isRealRingcxUii,
   normalizeRectificationWindow,
-  previewCxTerminalRectification,
   runCxTerminalRectification,
   makeOutcomeIdemKey,
   buildCxReviewCorrectionRow,

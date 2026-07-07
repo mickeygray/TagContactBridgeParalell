@@ -23,6 +23,14 @@ F13 (double-click), plus the rescue-answer branch (R1-B — UNTESTED).
    ⚠ THE LESSON OF 2026-07-06: the client is a BUILT bundle served by the control plane —
    browser refresh does NOT ship client fixes. Verify after rebuild: the browser console's
    bundle filename hash CHANGED from the previous session.
+   ⚠ THE LESSON OF 2026-07-07 (the workspace fork): `/cx` routes to the BULK workspace
+   only when `VITE_CX_WORKSPACE_MODE=bulk_load` was in the environment AT BUILD TIME
+   (`apps/web-client/.env.local` carries it in this repo — a Vite env var is baked into
+   the bundle, not read at runtime). Any OTHER checkout/box building without that flag
+   serves the LEGACY workspace on /cx — the old queue/dial/dispo pipeline, no bulk UI.
+   Verify on the surface itself before testing: the bulk workspace shows the bulk session
+   controls (queue preview / bulk start); the legacy one shows the coach cockpit instead.
+   If the floor tests from a machine that isn't this repo's build, check its flag FIRST.
 3. **Restart `ParallelControlPlane`.** Verify clean boot: err-log tail empty post-rotate.
 4. Env name-checks (values not needed, just presence): `CX_ALPHA_TRACE_ENABLED` set;
    `CX_BULK_RESYNC_ENABLED` absent or true.

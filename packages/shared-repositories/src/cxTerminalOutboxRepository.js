@@ -9,6 +9,27 @@ function isDuplicateKeyError(error) {
   return Number(error?.code) === 11000 || String(error?.codeName || "") === "DuplicateKey";
 }
 
+// SEPARATE CONCERNS, SEPARATE ROUTES (Mickey, 2026-07-07): the drain keeps its safe
+// heartbeat for ledger work, but latency-sensitive consumers (the wrap card — the
+// human's queue) subscribe HERE and run as soon as the terminal data is gathered.
+// In-process only; listeners are fail-soft and never block or fail the insert.
+const enqueueListeners = new Set();
+function onCxTerminalRowEnqueued(listener) {
+  if (typeof listener === "function") enqueueListeners.add(listener);
+  return () => enqueueListeners.delete(listener);
+}
+function notifyEnqueued(row) {
+  for (const listener of enqueueListeners) {
+    setImmediate(() => {
+      try {
+        listener(row);
+      } catch {
+        /* listener errors never touch the write path */
+      }
+    });
+  }
+}
+
 // Insert the terminal record exactly once. Returns the created row on the FIRST write, or null if
 // a row with this idemKey already exists — the durable dedup that survives a process restart (an
 // in-memory Set cannot). The caller treats null as "already counted; do not re-dispatch".
@@ -17,7 +38,9 @@ async function insertOnce(row = {}) {
   if (!idemKey) throw new Error("cxTerminalOutboxRepository.insertOnce requires an idemKey");
   try {
     const doc = await CxTerminalOutbox.create({ ...row, idemKey, status: "pending", attempts: 0 });
-    return doc ? doc.toObject() : null;
+    const created = doc ? doc.toObject() : null;
+    if (created) notifyEnqueued(created); // first write only — duplicates stay silent
+    return created;
   } catch (error) {
     if (isDuplicateKeyError(error)) return null;
     throw error;
@@ -171,6 +194,7 @@ module.exports = {
   findByIdemKeys,
   findByIdentity,
   insertOnce,
+  onCxTerminalRowEnqueued,
   listPendingForDrain,
   markDrained,
   markFailed,

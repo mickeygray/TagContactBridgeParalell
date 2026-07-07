@@ -1,3 +1,19 @@
+/*
+ * ATTIC — LEGACY EMERGENCY CX WORKSPACE (fork twin), retired 2026-07-07.
+ *
+ * Provenance: this was the original CXWorkspace that /cx served whenever
+ * VITE_CX_WORKSPACE_MODE was unset (mode "legacy_emergency"). CXWorkspaceBulkLoad.tsx
+ * was forked from it and became the real floor surface (~103 helpers + ~115 component
+ * declarations were byte-identical twins; the old queue/dial/dispo pipeline, the
+ * VM-drop path, and the live-coach cockpit lived only here). Mickey's ruling
+ * 2026-07-07: "merge down to one file — there is no multiple lanes, just bulk."
+ * The router now mounts CXWorkspaceBulkLoad unconditionally.
+ *
+ * Resurrect by: copying the needed section back into the live workspace — do NOT
+ * re-route to this file; the endpoints it calls are the legacy pipeline the delete
+ * ledger is retiring. The coach cockpit section (search "coach") is the one piece
+ * expected to be PORTED into the bulk workspace when the live-coach pilot wires in.
+ */
 import * as React from "react";
 import { useNavigate } from "react-router-dom";
 import {
@@ -81,7 +97,6 @@ import type {
   CxLeadCandidate,
   CxLeadLookupMatch,
   CxLeadLookupSource,
-  FreshLeadGate,
   WorkflowRecord,
 } from "@/lib/api/types";
 import type { CommLogEntry } from "@/lib/api/queries/cx";
@@ -629,6 +644,11 @@ const STALE_SERVED_QUEUE_RESET_MS = 20_000;
 const SHOW_POSTDATE_DISPOSITION = true;
 type AutoServeCountdownMode = "startup" | "next";
 type ResumePromptBreakType = "short-break" | "meal-break" | string;
+
+const START_DIALING_RESUME_MESSAGE =
+  "Please press the Start Dialing button in the CX workspace to resume work.";
+const BREAK_TIMER_EXPIRED_MESSAGE =
+  "Press Resume work when you are ready, then press the Start Dialing button in the CX workspace.";
 const AUTO_SERVE_BLOCKED_AGENT_STATES = new Set([
   "dialing",
   "dispositioning",
@@ -903,19 +923,6 @@ function extractTerminalOutcomeWorkflow(record: WorkflowRecord | null | undefine
   };
 }
 
-function humanizeCxRoutingReason(reason: string | null | undefined) {
-  const value = String(reason || "").trim().toLowerCase();
-  if (!value) return "";
-  if (value === "ex-busy") return "auto-blocked by EX activity";
-  if (value === "manual-unavailable") return "manually paused";
-  if (value === "manual-available") return "manually resumed";
-  if (value === "long-call-hold") return "long call pause";
-  if (value === "cx-call-ended") return "call ended";
-  if (value === "ex-idle") return "ready for CX leads";
-  if (value === "cx-routing-disabled") return "routing not enabled";
-  return value.replace(/[-_]+/g, " ");
-}
-
 function extractQueueActionKey(item: CxCallQueueItem) {
   return readString(asRecord(item.cxAction), "key") || null;
 }
@@ -1019,7 +1026,9 @@ function BreakResumePrompt({
         <DialogHeader>
           <DialogTitle>Resume work</DialogTitle>
           <DialogDescription>
-            {title} is running. Resume before the timer ends or this session signs out and releases your leads.
+            {title} is running. When the timer ends, calls stay paused until you press Resume work.
+            {" "}
+            {START_DIALING_RESUME_MESSAGE}
           </DialogDescription>
         </DialogHeader>
         <div className="rounded-md border border-primary/25 bg-primary/5 px-3 py-3">
@@ -3735,7 +3744,7 @@ export function CXWorkspace() {
   const [startupAutoServeQueued, setStartupAutoServeQueued] = React.useState(false);
   const [breakResumeDueAt, setBreakResumeDueAt] = React.useState<number | null>(null);
   const [breakResumeRemaining, setBreakResumeRemaining] = React.useState<number | null>(null);
-  const [breakAutoLogoutRunning, setBreakAutoLogoutRunning] = React.useState(false);
+  const [breakTimeoutActionRunning, setBreakTimeoutActionRunning] = React.useState(false);
   const [suppressedQueueItems, setSuppressedQueueItems] = React.useState<Record<string, number>>({});
   const [coachReleaseSignal, setCoachReleaseSignal] =
     React.useState<{ key: string; reason: string } | null>(null);
@@ -3743,7 +3752,7 @@ export function CXWorkspace() {
   const [queueAdvanceTransition, setQueueAdvanceTransition] =
     React.useState<QueueAdvanceTransition | null>(null);
   const autoServeInFlightRef = React.useRef(false);
-  const breakAutoLogoutFiredRef = React.useRef(false);
+  const breakTimeoutFiredRef = React.useRef(false);
   const lastTerminalOutcomeWorkflowRef = React.useRef<string | null>(null);
   const voicemailDropWatchdogRef = React.useRef<number | null>(null);
   const queueAdvanceTransitionTimerRef = React.useRef<number | null>(null);
@@ -4790,6 +4799,10 @@ export function CXWorkspace() {
   async function handleCxAvailabilityChange(
     next: "available" | "unavailable",
     breakType?: "short-break" | "meal-break",
+    options: {
+      availableTitle?: string;
+      availableDescription?: string;
+    } = {},
   ) {
     // We can't use the generic `run()` helper here because the success
     // path needs to detect the EX-busy override the server may apply
@@ -4808,11 +4821,11 @@ export function CXWorkspace() {
       const response = (result?.response ?? null) as
         | {
             cxRouting?: { desiredAvailability?: string; reason?: string; pauseType?: string | null } | null;
-            freshLeadGate?: FreshLeadGate | null;
           }
         | null;
       const resolvedAvailability = response?.cxRouting?.desiredAvailability;
       const resolvedReason = response?.cxRouting?.reason;
+      const effectiveAvailability = resolvedAvailability || next;
 
       if (
         next === "available"
@@ -4827,13 +4840,18 @@ export function CXWorkspace() {
       }
 
       const pauseType = String(response?.cxRouting?.pauseType || breakType || "").trim();
-      toast(`CX availability set to ${resolvedAvailability || next}`, {
-        description: resolvedAvailability === "available"
-          ? "You'll start receiving CX leads."
-          : pauseType === "meal-break"
-            ? "You are on a 15 minute break. Held leads release when that window expires."
-            : "You are on a 5 minute break. Held leads release when that window expires.",
-      });
+      toast(
+        effectiveAvailability === "available"
+          ? options.availableTitle || "CX availability set to available"
+          : `CX availability set to ${effectiveAvailability}`,
+        {
+          description: effectiveAvailability === "available"
+            ? options.availableDescription || START_DIALING_RESUME_MESSAGE
+            : pauseType === "meal-break"
+              ? "You are on a 15 minute break. Calls stay paused until you press Resume work."
+              : "You are on a 5 minute break. Calls stay paused until you press Resume work.",
+        },
+      );
     } catch (error) {
       const message = error instanceof Error ? error.message : "Something went wrong.";
       toast.error("CX availability change failed", {
@@ -4850,7 +4868,7 @@ export function CXWorkspace() {
   }
 
   async function handleResumeWorkFromBreak() {
-    breakAutoLogoutFiredRef.current = false;
+    breakTimeoutFiredRef.current = false;
     await handleCxAvailabilityChange("available");
     setBreakResumeDueAt(null);
     setBreakResumeRemaining(null);
@@ -4858,21 +4876,25 @@ export function CXWorkspace() {
     callQueue.refetch();
   }
 
-  async function handleBreakTimeoutLogout(reason = "break-timeout") {
-    if (breakAutoLogoutFiredRef.current) return;
-    breakAutoLogoutFiredRef.current = true;
-    setBreakAutoLogoutRunning(true);
+  async function handleBreakTimeoutAction(reason = "break-timeout") {
+    if (breakTimeoutFiredRef.current) return;
+    breakTimeoutFiredRef.current = true;
+    setBreakTimeoutActionRunning(true);
     cancelAutoServe();
     try {
-      if (reason === "break-timeout") {
-        toast.warning("Break timer expired", {
-          description: "Signing out and releasing held leads.",
-        });
+      if (reason !== "break-timeout") {
+        await logout();
+        navigate("/login", { replace: true });
+        return;
       }
-      await logout();
+      toast.warning("Break timer expired", {
+        description: BREAK_TIMER_EXPIRED_MESSAGE,
+      });
+    } catch (error) {
+      breakTimeoutFiredRef.current = false;
+      throw error;
     } finally {
-      setBreakAutoLogoutRunning(false);
-      navigate("/login", { replace: true });
+      setBreakTimeoutActionRunning(false);
     }
   }
 
@@ -5571,12 +5593,12 @@ export function CXWorkspace() {
     if (!isManualTimedBreak) {
       setBreakResumeDueAt(null);
       setBreakResumeRemaining(null);
-      breakAutoLogoutFiredRef.current = false;
+      breakTimeoutFiredRef.current = false;
       return;
     }
     setBreakResumeDueAt(breakPauseReleaseAtMs);
     setBreakResumeRemaining(Math.max(0, Math.ceil((breakPauseReleaseAtMs - Date.now()) / 1000)));
-    breakAutoLogoutFiredRef.current = false;
+    breakTimeoutFiredRef.current = false;
   }, [isManualTimedBreak, breakPauseReleaseAtMs]);
 
   React.useEffect(() => {
@@ -5596,7 +5618,7 @@ export function CXWorkspace() {
     if (!isManualTimedBreak) return;
     if (breakResumeDueAt == null) return;
     if (breakResumeRemaining !== 0) return;
-    void handleBreakTimeoutLogout();
+    void handleBreakTimeoutAction();
   }, [isManualTimedBreak, breakResumeDueAt, breakResumeRemaining]);
 
   const queueDebugLine = React.useMemo(() => {
@@ -5978,12 +6000,9 @@ export function CXWorkspace() {
   }
 
   const cxRouting = asRecord(data.ex?.cxRouting);
-  const freshLeadGate = asRecord(data.ex?.freshLeadGate);
-  const currentCallSnapshot = asRecord(data.ex?.currentCall);
   const cxDesiredAvailability = String(cxRouting.desiredAvailability || "").trim().toLowerCase();
-  const cxRoutingReason = String(cxRouting.reason || "").trim();
   const cxPauseType = String(cxRouting.pauseType || "").trim();
-  const cxBreakUsage = asRecord(cxRouting.breakUsage || freshLeadGate.breakUsage);
+  const cxBreakUsage = asRecord(cxRouting.breakUsage);
   const shortBreaksAllowed = Number(cxBreakUsage.shortBreaksAllowed ?? 2);
   const shortBreaksUsed = Number(cxBreakUsage.shortBreaksUsed ?? 0);
   const shortBreaksRemaining = Math.max(
@@ -5998,41 +6017,6 @@ export function CXWorkspace() {
       - (Number.isFinite(mealBreaksUsed) ? mealBreaksUsed : 0),
     0,
   );
-  const currentCallChannel = String(currentCallSnapshot.channel || "").trim().toLowerCase();
-  const hasActiveExCall =
-    !internalCurrentCallSuppressed &&
-    currentCallChannel === "ex" &&
-    Boolean(
-      currentCallSnapshot.sessionId ||
-        currentCallSnapshot.telephonySessionId ||
-        currentCallSnapshot.from ||
-        currentCallSnapshot.to,
-    );
-  const freshLeadGateHasExSignal = Object.prototype.hasOwnProperty.call(freshLeadGate, "exCallActive");
-  const exCallGateActive = freshLeadGateHasExSignal
-    ? Boolean(freshLeadGate.exCallActive)
-    : hasActiveExCall || cxRoutingReason === "ex-busy";
-  const freshLeadBlocked =
-    typeof freshLeadGate.blocked === "boolean"
-      ? freshLeadGate.blocked
-      : exCallGateActive || cxDesiredAvailability === "unavailable";
-  const cxRoutingLabel =
-    String(freshLeadGate.label || "").trim() ||
-    (exCallGateActive
-      ? "Fresh leads paused: EX call"
-      : freshLeadBlocked
-        ? "Fresh leads paused"
-        : "Fresh leads allowed");
-  const cxRoutingTone = freshLeadBlocked ? "warning" : "success";
-  const cxRoutingHint =
-    String(freshLeadGate.detail || "").trim() ||
-    (exCallGateActive
-      ? "This agent is on an EX call, so fresh leads stay off until EX returns idle."
-      : freshLeadBlocked
-        ? "Manual pause keeps you out of CX lead serving."
-        : "EX is idle and this agent profile can receive CX leads.");
-  const exCallStateLabel = exCallGateActive ? "On EX call" : "Off EX call";
-  const cxRoutingReasonLabel = humanizeCxRoutingReason(cxRoutingReason);
 
   // ─── Contact history lists ────────────────────────────────────────────────
   return (
@@ -6042,12 +6026,12 @@ export function CXWorkspace() {
         breakType={breakPauseType}
         remaining={breakResumeRemaining}
         isResuming={setCxStatus.isPending}
-        isSigningOut={breakAutoLogoutRunning}
+        isSigningOut={breakTimeoutActionRunning}
         onResume={() => {
           void handleResumeWorkFromBreak();
         }}
         onSignOut={() => {
-          void handleBreakTimeoutLogout("manual-signout");
+          void handleBreakTimeoutAction("manual-signout");
         }}
       />
       <div className="flex min-h-[calc(100vh-6rem)] flex-col gap-4">
@@ -6066,42 +6050,14 @@ export function CXWorkspace() {
               setDomain(next);
             }}
           />
-        </div>
-        <div className="mt-2 flex flex-col gap-2 rounded-lg border border-border/70 bg-card/60 px-3 py-2 md:flex-row md:items-center md:justify-between">
-          <div className="min-w-0">
-            <div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-muted-foreground">
-              Lead serving
-            </div>
-            <div className="mt-1 flex flex-wrap items-center gap-2">
-              <StatusPill tone={cxRoutingTone} dotted>
-                {cxRoutingLabel}
-              </StatusPill>
-              <StatusPill tone={exCallGateActive ? "info" : "neutral"} dotted>
-                {exCallStateLabel}
-              </StatusPill>
-              {cxRoutingReasonLabel ? (
-                <span className="text-xs text-muted-foreground">{cxRoutingReasonLabel}</span>
-              ) : null}
-              {data.ex?.exTelephonyStatus ? (
-                <span className="text-[11px] text-muted-foreground">
-                  EX: {String(data.ex.exTelephonyStatus)}
-                </span>
-              ) : null}
-            </div>
-            <div className="mt-1 text-[11px] text-muted-foreground">{cxRoutingHint}</div>
-          </div>
-          <div className="flex flex-wrap gap-2">
+          <div className="flex flex-wrap gap-2 md:ml-auto">
             {cxDesiredAvailability === "unavailable" ? (
               <Button
                 size="sm"
                 variant="primary"
                 isLoading={setCxStatus.isPending}
-                disabled={exCallGateActive && cxRoutingReason === "ex-busy"}
-                title={
-                  exCallGateActive && cxRoutingReason === "ex-busy"
-                    ? "EX call is active; CX lead serving reopens when EX returns idle."
-                    : undefined
-                }
+                disabled={setCxStatus.isPending}
+                title="Resume RingCX dialing."
                 onClick={() => void handleCxAvailabilityChange("available")}
               >
                 Resume
@@ -6112,13 +6068,11 @@ export function CXWorkspace() {
                   size="sm"
                   variant="secondary"
                   isLoading={setCxStatus.isPending && cxPauseType === "short-break"}
-                  disabled={setCxStatus.isPending || shortBreaksRemaining <= 0 || freshLeadBlocked}
+                  disabled={setCxStatus.isPending || shortBreaksRemaining <= 0}
                   title={
                     shortBreaksRemaining <= 0
                       ? "Both 5 minute breaks are used for this work block."
-                      : freshLeadBlocked
-                        ? "Lead serving is already blocked."
-                        : "Start a 5 minute break."
+                      : "Start a 5 minute break."
                   }
                   onClick={() => void handleCxAvailabilityChange("unavailable", "short-break")}
                 >
@@ -6128,13 +6082,11 @@ export function CXWorkspace() {
                   size="sm"
                   variant="secondary"
                   isLoading={setCxStatus.isPending && cxPauseType === "meal-break"}
-                  disabled={setCxStatus.isPending || mealBreaksRemaining <= 0 || freshLeadBlocked}
+                  disabled={setCxStatus.isPending || mealBreaksRemaining <= 0}
                   title={
                     mealBreaksRemaining <= 0
                       ? "The 15 minute break is used for this work block."
-                      : freshLeadBlocked
-                        ? "Lead serving is already blocked."
-                        : "Start a 15 minute break."
+                      : "Start a 15 minute break."
                   }
                   onClick={() => void handleCxAvailabilityChange("unavailable", "meal-break")}
                 >

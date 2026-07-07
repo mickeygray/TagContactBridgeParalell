@@ -75,6 +75,10 @@ function buildReadyReservationQuery(domain, family, options = {}, now = new Date
     releaseAt: { $lte: now },
     queueFamily: family,
     "metadata.appointmentId": { $in: [null, ""] },
+    // H5/F1 (2026-07-07): lane flags — INERT until the stamps land (missing/null pass).
+    // firstTouchPending is a boolean; appointmentPending is an OBJECT ($in, never $ne:true).
+    "metadata.firstTouchPending": { $ne: true },
+    "metadata.appointmentPending": { $in: [null, false] },
     ...(domain ? { domain: normalizeDomain(domain) } : {}),
     ...(rcxAccountId ? { rcxAccountId } : {}),
     ...(rcxCampaignId ? { rcxCampaignId } : {}),
@@ -84,7 +88,15 @@ function buildReadyReservationQuery(domain, family, options = {}, now = new Date
 }
 
 function buildReadyClaimQuery(domain = null, options = {}) {
-  const query = { state: "ready" };
+  const query = {
+    state: "ready",
+    // H5 (write audit, 2026-07-07): the legacy rail excluded NOTHING — the appointment
+    // machinery papered over it with a ready->paused pin (cxAppointmentService FM-5).
+    // Parity with the reservation rail: appointment holds + the lane flags (inert today).
+    "metadata.appointmentId": { $in: [null, ""] },
+    "metadata.firstTouchPending": { $ne: true },
+    "metadata.appointmentPending": { $in: [null, false] },
+  };
   if (domain) {
     query.domain = normalizeDomain(domain);
   }

@@ -232,8 +232,10 @@ export function useCxWrapCards(enabled: boolean) {
         .get<{ ok: true; result: CxWrapCardsResult }>("/api/cx/bulk-load/wrap-cards")
         .then((r) => r.result),
     enabled,
-    staleTime: 5_000,
-    refetchInterval: enabled ? 15_000 : false,
+    staleTime: 2_000,
+    // the fast-mint route cards a call ~1s after the disposition — a 5s poll keeps the
+    // sidebar within a breath of the terminal event without hammering anything
+    refetchInterval: enabled ? 5_000 : false,
     refetchIntervalInBackground: false,
     retry: 1,
   });

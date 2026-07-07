@@ -47,6 +47,10 @@ const cxBulkLoadSessionSchema = new mongoose.Schema(
     // candidates whose queue rows drifted (cancelled/reaped/foreign). Schema path required —
     // strict mode would silently drop the $set otherwise. {at, reason, removed[]}.
     resync: { type: mongoose.Schema.Types.Mixed, default: null },
+    // The sys-dispo small retry queue (deferred terminal writes awaiting a RingCX label).
+    // Written ONLY by the watcher's retry lane via targeted updates; whole-state saves
+    // delete the key from their patches.
+    sysDispoRetries: { type: mongoose.Schema.Types.Mixed, default: null },
     reviewHoldUntil: { type: Date, default: null },
     reviewHoldReason: { type: String, default: null },
     lastError: { type: mongoose.Schema.Types.Mixed, default: null },

@@ -2031,6 +2031,7 @@ async function touchCxWorkspacePresenceForContext(context, user) {
     active: true,
     source: "cx-workspace",
     userEmail: context?.account?.email || user?.email || null,
+    existingState: context?.agentState || null,
   }).catch(() => null);
   return agentState
     ? {

@@ -14,6 +14,10 @@
 
 const WRAP_CARD_TTL_MS = 2 * 60 * 60 * 1000; // the 2-hour quarantine clock
 
+function cleanText(value) {
+  return String(value == null ? "" : value).replace(/\s+/g, " ").trim() || null;
+}
+
 const RESOLUTION_RULES = {
   dnc: { logicsStatus: true, interview: true, correctionRow: "dnc" },
   appointment: { appointment: true, interview: true },
@@ -44,12 +48,23 @@ function buildWrapCard({ row = {}, payload = {}, coachSummary = null } = {}) {
     caseId: Number(payload.caseId ?? row.caseId) || null,
     agentEmail: String(payload.agentEmail || row.agentEmail || "").trim().toLowerCase() || null,
     agentName: payload.agentName || row.agentName || null,
-    name: payload.name || row.name || null,
+    name: cleanText(
+      payload.name ||
+        payload.prospectName ||
+        payload.contactName ||
+        payload.fullName ||
+        row.name ||
+        row.prospectName,
+    ),
     outcome: payload.outcome || row.outcome || null,
     systemDisposition: payload.systemDisposition || null,
     calledAt: safeCalledAt,
     coachSessionId: payload.coachSessionId || row.coachSessionId || null,
-    coachSummary: coachSummary || payload.callSummary || payload.summary || null,
+    // STRING-ONLY: a status/report object in any summary slot must never shadow the
+    // payload text fallback (2026-07-07 live find) — non-strings are treated as absent.
+    coachSummary: [coachSummary, payload.callSummary, payload.summary]
+      .map((v) => (typeof v === "string" && v.trim() ? v.trim() : null))
+      .find(Boolean) || null,
     formSnapshot: payload.formSnapshot || null, // arrives with WO-17
     payload,
     expiresAt: new Date(safeCalledAt.getTime() + WRAP_CARD_TTL_MS),
@@ -106,11 +121,22 @@ function createCxCallWrapCardService({
     if (!card) return { ok: true, noop: true, reason: "already-resolved-or-missing" };
 
     const effects = { interview: null, correction: null, appointment: null, logicsStatus: null };
+    // Every effect runs through this guard: the card is ALREADY resolved (CAS-first), so
+    // no effect failure — async rejection OR synchronous throw (2026-07-07 live find: a
+    // missing import threw a ReferenceError past .catch and 500'd the route mid-protocol)
+    // — may escape; it degrades to {ok:false} and the log tells the story.
+    const runEffect = async (fn) => {
+      try {
+        return await fn();
+      } catch (err) {
+        return { ok: false, error: err?.message || "effect-failed" };
+      }
+    };
 
     // Interview activity — every resolution files it when there's material (fail-soft:
     // the card is already resolved; a Logics blip must not un-resolve it).
     if (rules.interview && writeInterview && hasInterviewMaterial(card)) {
-      effects.interview = await writeInterview(card).catch((err) => ({ ok: false, error: err?.message }));
+      effects.interview = await runEffect(() => writeInterview(card));
     }
 
     // DNC app-side: a correction ROW into the outbox — the drain applies it (layering law).
@@ -136,13 +162,12 @@ function createCxCallWrapCardService({
         effects.correction = { ok: false, error: err?.message };
       }
       if (rules.logicsStatus && updateLogicsDncStatus) {
-        effects.logicsStatus = await updateLogicsDncStatus(card).catch((err) => ({ ok: false, error: err?.message }));
+        effects.logicsStatus = await runEffect(() => updateLogicsDncStatus(card));
       }
     }
 
     if (rules.appointment && createAppointment) {
-      effects.appointment = await createAppointment({ card, appointmentAt, user })
-        .catch((err) => ({ ok: false, error: err?.message }));
+      effects.appointment = await runEffect(() => createAppointment({ card, appointmentAt, user }));
     }
 
     logger.info?.("cx.wrap_card.resolved", {
@@ -155,6 +180,8 @@ function createCxCallWrapCardService({
       interviewOk: effects.interview ? effects.interview.ok !== false : null,
       correctionOk: effects.correction ? effects.correction.ok !== false : null,
       appointmentOk: effects.appointment ? effects.appointment.ok !== false : null,
+      // the compliance-critical effect must never be the silent one (2026-07-07 find)
+      logicsStatusOk: effects.logicsStatus ? effects.logicsStatus.ok !== false : null,
     });
     return { ok: true, resolution, card, effects };
   }

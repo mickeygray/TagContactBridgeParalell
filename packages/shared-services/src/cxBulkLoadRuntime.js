@@ -1470,14 +1470,6 @@ async function getCxBulkLoadSession(input = {}, options = {}) {
   });
 }
 
-async function watchCxBulkLoadSession(input = {}, options = {}) {
-  const agent = await resolveAgentContext(input, options.user || {});
-  assertBulkRuntime(agent);
-  const sessionId = await resolveSessionId(input, agent);
-  if (!sessionId) return null;
-  return getService().watchCxBulkLoadSession({ sessionId });
-}
-
 async function watchCxBulkLoadAccountActiveCalls(input = {}) {
   return getService().watchAccountActiveCalls({
     domain: input.domain,
@@ -1839,7 +1831,6 @@ async function killCxBulkLoadSession(input = {}, options = {}) {
 module.exports = {
   startCxBulkLoadSession,
   getCxBulkLoadSession,
-  watchCxBulkLoadSession,
   watchCxBulkLoadAccountActiveCalls,
   submitCxBulkLoadDisposition,
   startCxBulkLoadGetLeads,

@@ -2037,7 +2037,7 @@ async function writeProspectAndCadence(normalized, options = {}) {
       // bimonthly DNC sweep enforces channel locks if still listed.
       consentTier,
     },
-  });
+  }, { machineryOnInsert: true });
 
   // Real-time LD-spend tick (best-effort): when an LD-family lead lands, increment the day's LD
   // SpendEntry by $rate exactly once per lead (CAS-guarded on the cadence). The nightly materializer

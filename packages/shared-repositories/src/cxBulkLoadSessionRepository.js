@@ -89,6 +89,15 @@ async function listActiveBulkLoadSessions(input = {}) {
   return CxBulkLoadSession.find(query).sort({ "ringcx.accountId": 1, agentEmail: 1, updatedAt: -1 }).lean();
 }
 
+// Sessions that left "running" while still holding deferred sys-dispo terminal writes —
+// the watcher's orphan flush drains these so no call outcome ever strands on a dead doc.
+async function listBulkLoadSessionsWithPendingSysDispoRetries() {
+  return CxBulkLoadSession.find({
+    status: { $ne: "running" },
+    sysDispoRetries: { $ne: null },
+  }).lean();
+}
+
 async function updateBulkLoadSession(sessionId, update = {}, options = {}) {
   const normalized = String(sessionId || "").trim();
   if (!normalized) return null;
@@ -134,4 +143,5 @@ module.exports = {
   findBulkLoadSessionById,
   listActiveBulkLoadSessions,
   updateBulkLoadSession,
+  listBulkLoadSessionsWithPendingSysDispoRetries,
 };

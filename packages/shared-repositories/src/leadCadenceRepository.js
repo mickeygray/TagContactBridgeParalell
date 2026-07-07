@@ -92,11 +92,53 @@ async function findLeadCadence(domain, caseId) {
   return normalizeLegacyLeadCadence(doc);
 }
 
-async function upsertLeadCadence(domain, caseId, update = {}) {
-  const setOnInsert = buildAgedDncCheckpointOnInsert(update);
+// H2 (write audit, 2026-07-07): a re-ingest that survives the email dedup used to $set
+// these wholesale — resetting drain-owned counters, zeroing cadenceCounters, flipping a
+// stopped lead back active:true, and rebuilding channelDnc EMPTY (erasing DNC blocks).
+// These are the lead's MACHINERY: created once at first ingest, owned by the cadence/
+// drain machinery afterwards. Pure + exported for pins.
+const LEAD_CADENCE_MACHINERY_KEYS = [
+  "cadenceCounters",
+  "lastTouched",
+  "counterCadence",
+  "currentStage",
+  "firstContactRequestedAt",
+  "firstContactEventId",
+  "schedule",
+  "cadenceState",
+  "active",
+  "cadenceMode",
+];
+function splitLeadCadenceUpsertUpdate(update = {}) {
+  const set = {};
+  const setOnInsert = {};
+  for (const [key, value] of Object.entries(update || {})) {
+    if (LEAD_CADENCE_MACHINERY_KEYS.includes(key)) setOnInsert[key] = value;
+    else set[key] = value;
+  }
+  return { set, setOnInsert };
+}
+
+// Targeted, NON-upserting field clear — cleanups must never create cadence husks.
+async function clearLeadCadenceFields(domain, caseId, fields = {}) {
+  if (!Object.keys(fields).length) return null;
+  return LeadCadence.updateOne(
+    { domain: String(domain || "").toUpperCase(), caseId: Number(caseId) },
+    { $set: fields },
+  );
+}
+
+async function upsertLeadCadence(domain, caseId, update = {}, options = {}) {
+  // machineryOnInsert is OPT-IN (the intake path only): six other callers intentionally
+  // $set machinery fields (appointment holds, workspace deactivation, seeds) — their
+  // semantics are untouched.
+  const split = options.machineryOnInsert
+    ? splitLeadCadenceUpsertUpdate(update)
+    : { set: update, setOnInsert: {} };
+  const setOnInsert = { ...split.setOnInsert, ...buildAgedDncCheckpointOnInsert(update) };
   const updateDoc = Object.keys(setOnInsert).length
-    ? { $set: update, $setOnInsert: setOnInsert }
-    : { $set: update };
+    ? { $set: split.set, $setOnInsert: setOnInsert }
+    : { $set: split.set };
   return LeadCadence.findOneAndUpdate(
     {
       domain: String(domain || "").toUpperCase(),
@@ -853,6 +895,16 @@ function buildCadenceStateFromActions(actions = [], existingCaps = {}, existingC
   };
 }
 
+// H1 (write audit, 2026-07-07): the recompute REPLACED the whole cadenceState subtree,
+// and buildCadenceStateFromActions only returns the 10 keys it owns — every sync erased
+// dncCheck (the federal-DNC recheck schedule: the lead silently dropped out of rechecks
+// forever), bypassChannelTiming, and optedOutChannels. Merge: rebuilt keys win, keys the
+// rebuild does not own survive. Pure; exported for pins.
+function mergeCadenceState(prior = {}, rebuilt = {}) {
+  const base = prior && typeof prior === "object" ? prior : {};
+  return { ...base, ...(rebuilt || {}) };
+}
+
 async function syncLeadCadenceState(domain, caseId) {
   const doc = await LeadCadence.findOne({
     domain: String(domain || "").toUpperCase(),
@@ -873,7 +925,10 @@ async function syncLeadCadenceState(domain, caseId) {
       doc.cadenceState?.caps || {},
       doc.cadenceState?.channelDnc || {},
     );
-    doc.cadenceState = cadenceState;
+    doc.cadenceState = mergeCadenceState(
+      typeof doc.cadenceState?.toObject === "function" ? doc.cadenceState.toObject() : doc.cadenceState,
+      cadenceState,
+    );
     await doc.save();
     return doc.toObject();
   }
@@ -896,7 +951,10 @@ async function syncLeadCadenceState(domain, caseId) {
     currentStage = "cadence-complete";
   }
 
-  doc.cadenceState = cadenceState;
+  doc.cadenceState = mergeCadenceState(
+    typeof doc.cadenceState?.toObject === "function" ? doc.cadenceState.toObject() : doc.cadenceState,
+    cadenceState,
+  );
   doc.currentStage = currentStage;
   doc.active = Boolean(nextActionType);
   await doc.save();
@@ -1487,6 +1545,9 @@ function evaluateChannelDnc(cadenceState, channel) {
 }
 
 module.exports = {
+  mergeCadenceState,
+  splitLeadCadenceUpsertUpdate,
+  clearLeadCadenceFields,
   buildCadenceStateFromActions,
   cancelPendingActions,
   cancelStaleScheduledActions,

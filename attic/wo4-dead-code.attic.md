@@ -273,12 +273,100 @@ async function appendBulkLoadSessionEvent(sessionId, event = {}, options = {}) {
 4. appendBulkLoadSessionEvent (session repo) — 14 lines
 5. killActiveBulkLoadSessionsForAgent (session repo) — 22 lines
 
-NEXT ITEM (analyzed, NOT moved — stop point): watchCxBulkLoadSession. Bigger than the scan
-said: runtime wrapper (cxBulkLoadRuntime.js:~1250 + export), SERVICE implementation
-(cxBulkLoadRuntimeService.js:~830 + export), barrel (index.js:301+1101), and a read-only
-invariant test (cxBulkLoadRuntimeService.test.js:~791) whose delta must be declared. Then:
-MATCH_ORDER export + the agentLifecycleAdapter pass-through (runtimeService passes it at the
-runCxAccountActiveCallWatchOnce delegation ~:1086 — remove BOTH ends), previewCxTerminal-
-Rectification, fallbackRuntime + buildCxDialRuntimeMetadata (cxDialRuntimeModeService — touch
-NOTHING else in that file), dead client knobs (waitForRestore, input.hangup, useCxBulkLoadStart
-if zero imports), always-null releaseStatus/releaseAttempts.
+2026-07-07: moved 3 more side-only items, replacing the browser-watch positive test with a
+negative export pin so the compatibility mutator cannot grow back:
+6. watchCxBulkLoadSession compatibility read (runtime service + runtime wrapper + barrel)
+7. MATCH_ORDER export (constant was only exported, never read)
+8. previewCxTerminalRectification (duplicate of runCxTerminalRectification dry-run default)
+
+NEXT ITEM (analyzed, NOT moved - stop point): fallbackRuntime + buildCxDialRuntimeMetadata
+(cxDialRuntimeModeService - touch NOTHING else in that file), dead client knobs
+(waitForRestore, input.hangup, useCxBulkLoadStart if zero imports), always-null
+releaseStatus/releaseAttempts. agentLifecycleAdapter itself is NOT dead: it still clears
+terminal holds and pauses progressive dialing; only the pass-through into the watcher was
+removed because the watcher never read it.
+
+## packages/shared-services/src/cxBulkLoadRuntimeService.js - watchCxBulkLoadSession - browser read compatibility wrapper, no route/caller
+
+```js
+  // Compatibility endpoint only. The browser should never project RingCX state,
+  // write terminals, or refill from here; the account watcher is the single
+  // active-call writer. Keep this as a read so old callers do not fail.
+  async function watchCxBulkLoadSession(input = {}) {
+    const state = await loadState(input.sessionId);
+    traceBulkFlow("watch.read_only", state || {}, {
+      sessionId: input.sessionId || null,
+      busy: isSessionBusy(input.sessionId),
+    });
+    return sanitizeSession(state);
+  }
+```
+
+## packages/shared-services/src/cxBulkLoadRuntime.js - watchCxBulkLoadSession - public wrapper, no route/caller
+
+```js
+async function watchCxBulkLoadSession(input = {}, options = {}) {
+  const agent = await resolveAgentContext(input, options.user || {});
+  assertBulkRuntime(agent);
+  const sessionId = await resolveSessionId(input, agent);
+  if (!sessionId) return null;
+  return getService().watchCxBulkLoadSession({ sessionId });
+}
+```
+
+## packages/shared-services/src/index.js - watchCxBulkLoadSession barrel entries
+
+```js
+  watchCxBulkLoadSession,
+```
+
+## tests/cx-bulk-load/cxBulkLoadRuntimeService.test.js - old positive browser-watch invariant
+
+```js
+test("browser watch is read-only; account watcher owns RingCX projection", async () => {
+  const liveCalls = { value: [] };
+  const { svc, repo } = build(liveCalls);
+  await svc.startCxBulkLoadSession({ agentEmail: "a@x.com", domain: "TAG", ringcx: { accountId: "acct1", campaignId: "camp1" }, targetSize: 2, refillThreshold: 1 });
+  const before = repo.counters.updates;
+
+  liveCalls.value = [{ externalId: externFor("q1"), uii: "u1" }];
+  const readOnly = await svc.watchCxBulkLoadSession({ sessionId: "s1" });
+
+  assert.equal(repo.counters.updates, before);
+  assert.equal(readOnly.current, null);
+
+  const projected = await syncFromRingCx(svc);
+  assert.equal(projected.current.queueItemId, "q1");
+  assert.equal(projected.current.uii, "u1");
+});
+```
+
+## packages/shared-services/src/cxBulkLoadActiveCallWatcher.js - MATCH_ORDER export-only constant
+
+```js
+const MATCH_ORDER = Object.freeze(["externId", "queueItemId"]);
+
+module.exports = {
+  MATCH_ORDER,
+  // ...
+};
+```
+
+## packages/shared-services/src/cxTerminalRectificationService.js - previewCxTerminalRectification - duplicate dry-run wrapper
+
+```js
+async function previewCxTerminalRectification(depsOrOptions = {}, maybeOptions = {}) {
+  const { deps, options } = resolveDepsAndOptions(depsOrOptions, maybeOptions);
+  const context = buildRunContext(options);
+  const summary = emptySummary({
+    dryRun: true,
+    window: context.window,
+    domains: context.domains,
+    limit: context.limit,
+  });
+  const rows = await buildEvidenceRows(deps, context);
+  summary.scanned = rows.length;
+  for (const row of rows) addEvidenceToSummary(summary, row.evidence);
+  return summary;
+}
+```

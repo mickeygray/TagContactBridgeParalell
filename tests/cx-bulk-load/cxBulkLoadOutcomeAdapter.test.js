@@ -27,7 +27,14 @@ function fakeDeps() {
 }
 
 const SESSION = { sessionId: "s1", domain: "TAG", agentEmail: "a@x.com" };
-const CANDIDATE = { queueItemId: "q1", caseId: 42, externId: "x1", uii: "u1" };
+const CANDIDATE = {
+  queueItemId: "q1",
+  caseId: 42,
+  externId: "x1",
+  uii: "u1",
+  name: "Test Prospect",
+  sourceName: "Mickey local bulk test",
+};
 const NOW = new Date("2026-06-22T10:00:00.000Z");
 
 // ── pure builders ───────────────────────────────────────────────────────
@@ -63,13 +70,30 @@ test("buildCadenceEvent is a narrow pure projection", () => {
   assert.equal(e.sessionId, "s1");
   assert.equal(e.queueItemId, "q1");
   assert.equal(e.caseId, 42);
+  assert.equal(e.name, "Test Prospect");
   assert.equal(e.externId, "x1");
   assert.equal(e.domain, "TAG");
   assert.equal(e.agentEmail, "a@x.com");
   assert.equal(e.uii, "u1");
+  assert.equal(e.sourceName, "Mickey local bulk test");
   assert.equal(e.outcome, "ANSWER");
   assert.equal(e.source, "disposition");
   assert.equal(e.at, NOW.toISOString());
+});
+
+test("buildCadenceEvent carries display-name aliases into terminal payloads", () => {
+  const e = buildCadenceEvent({
+    session: SESSION,
+    candidate: {
+      queueItemId: "q-alias",
+      caseId: 43,
+      prospectName: "Alias Prospect",
+      payloadSnapshot: { sourceName: "Snapshot Source" },
+    },
+    outcome: "answered",
+  });
+  assert.equal(e.name, "Alias Prospect");
+  assert.equal(e.sourceName, "Snapshot Source");
 });
 
 test("buildCadenceEvent falls back to nested agent email and ringcx externId", () => {

@@ -12,8 +12,6 @@
 // Matching is externId-first and NEVER promotes on phone alone — that ambient
 // phone-inference is the 2026-06-17 footgun. Phone is diagnostic only.
 
-const MATCH_ORDER = Object.freeze(["externId", "queueItemId"]);
-
 function str(value) {
   return String(value == null ? "" : value).trim();
 }
@@ -229,7 +227,6 @@ async function loadActiveCallsSnapshot(client, options = {}) {
 }
 
 module.exports = {
-  MATCH_ORDER,
   normalizeActiveCall,
   matchActiveCallToCandidates,
   deriveCurrentTransition,

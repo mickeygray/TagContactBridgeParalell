@@ -34,8 +34,25 @@ test("THE 2H CLOCK: the card expires exactly two hours after the call", () => {
   });
   assert.equal(card.idemKey, "q1:u1");
   assert.equal(card.agentEmail, "a@x.com", "agent email normalized");
+  assert.equal(card.name, "Lead");
   assert.equal(card.expiresAt.getTime() - card.calledAt.getTime(), WRAP_CARD_TTL_MS);
   assert.equal(card.coachSummary, "spoke about 941 debt");
+});
+
+test("DOSSIER: wrap cards keep display names from terminal payload aliases", () => {
+  const card = buildWrapCard({
+    row: { idemKey: "q2:u2" },
+    payload: {
+      queueItemId: "q2",
+      uii: "u2",
+      outcome: "answered",
+      prospectName: "Alias Prospect",
+      at: "2026-07-06T20:00:00.000Z",
+      caseId: 8,
+      agentEmail: "a@x.com",
+    },
+  });
+  assert.equal(card.name, "Alias Prospect");
 });
 
 function makeHarness({ resolveResult } = {}) {
@@ -103,4 +120,38 @@ test("CAS EXACTLY-ONCE: an already-resolved card is a clean no-op — no effects
   assert.equal(result.noop, true);
   assert.equal(calls.interview.length, 0);
   assert.equal(calls.correction.length, 0);
+});
+
+test("SUMMARY IS TEXT: a status object leaking into the coachSummary slot never shadows the payload text (2026-07-07 live find)", () => {
+  const { buildWrapCard } = require("../../packages/shared-services/src/cxCallWrapCardService");
+  const payload = {
+    queueItemId: "q1", uii: "u1", caseId: 101617, domain: "WYNN",
+    agentEmail: "a@x.com", outcome: "answered", eventType: "terminal",
+    callSummary: "prospect engaged, wants callback after 3pm",
+    at: "2026-07-07T17:00:00.000Z",
+  };
+  // the exact live shape: the enrich bridge's skip-report object in the summary slot
+  const card = buildWrapCard({
+    row: { idemKey: "k1" },
+    payload,
+    coachSummary: { skipped: true, reason: "missing-rolling-summary", source: "livecoach_sessions" },
+  });
+  assert.equal(card.coachSummary, "prospect engaged, wants callback after 3pm", "the payload text wins over any object");
+  // and a real string still takes precedence
+  const card2 = buildWrapCard({ row: { idemKey: "k2" }, payload, coachSummary: "coach says: close on the levy timeline" });
+  assert.equal(card2.coachSummary, "coach says: close on the levy timeline");
+  // nothing usable → honest null, never an object
+  const card3 = buildWrapCard({ row: { idemKey: "k3" }, payload: { ...payload, callSummary: null }, coachSummary: { skipped: true } });
+  assert.equal(card3.coachSummary ?? null, null);
+});
+
+test("SUMMARY IS TEXT: the enrich bridge emits text-or-null in coachSummary; the report rides its own field", async () => {
+  const { enrichTerminalPacketWithCoachSummary } = require("../../packages/shared-services/src/cxTerminalCoachSummaryBridge");
+  // no rolling summary anywhere -> coachSummary null + skip report aside
+  const skipped = await enrichTerminalPacketWithCoachSummary(
+    { row: {}, payload: { queueItemId: "q1", uii: "u1" } },
+    { loadLiveCoachSessionDoc: async () => null },
+  );
+  assert.equal(skipped.coachSummary ?? null, null, "skip = null in the summary slot, never an object");
+  assert.equal(skipped.coachSummaryReport?.skipped, true, "the report survives in its own field");
 });

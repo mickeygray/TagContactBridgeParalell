@@ -373,6 +373,117 @@ language covers SMS (web-form leads — check the landing-page terms before enab
 one text per voicemail, deduped by the wrap item's inherited idemKey (exactly-once by
 construction).
 
+## THE SYS-DISPO CLASSIFIER (Mickey's simplification, 2026-07-07 morning)
+*"both the wrap and the drain need to know system disposition information… anything auto
+advanced that didn't get the system disposition of Answered just goes straight to the drain
+with 'no answer' to tick, otherwise it goes to the wrap up queue."*
+- **The rule (pending one proof):** auto-advanced calls route by RINGCX'S OWN VERDICT —
+  sys ≠ Answered → drain as `did_not_connect`, counters tick, NO card; sys = Answered (we
+  got hung up on mid-conversation) → wrap card. The connectedAt latch + 10s real-pickup
+  guard DEMOTE to fallback classifiers for when the lookup fails. RingCX already separates
+  MACHINE from answered — the sys verdict does natively what the guard approximated.
+- ~~The proof gate~~ **TOKEN PROVEN (Mickey's one-dial experiment ×3, 2026-07-07 morning):
+  `ANSWER`**, in `lastPassDispo` (bare) and `lastPassDisposition` (composite
+  `"ANSWER : Auto Dispo"` = system verdict : agent disposition). The probe also exposed the
+  lookup bug: the never-connect FAMILY FILTER is blind to answered leads (all 3 answered
+  test calls came back label-null), and the old field reader didn't read lastPassDispo*.
+  **FIXED same hour (gate 312/312):** the lookup is now DIRECT-EXTERN-FIRST for both machine
+  outcomes (family + CONGESTION probes survive as the did_not_connect fallback), the field
+  reader knows lastPassDispo/lastPassDisposition (+ nested campaignLead.*) with composite
+  parsing (`parseSysDispoToken`), and the classifier's answered set already contained
+  ANSWER. His 3 test calls under the new rule: guard said did_not_connect (short calls),
+  RingCX said ANSWER → upgraded → wrap cards. Pinned both directions + flag-off inertness.
+  **The routing flip is one env flag (`CX_SYSDISPO_CLASSIFIER_ENABLED=true`) — recommended
+  to ride the SAME restart as the wrap cutover: the classifier and the card trigger are one
+  design.**
+- **THE CLOSED VOCABULARY (2026-07-07, gate 313):** system dispositions are a 15-value
+  official set (RingCX lead-search docs; no API endpoint — a hardcoded table): `ANSWER`
+  (the ONLY wrap-up token) + `NOANSWER BUSY MACHINE INTERCEPT DISCONNECT ABANDON CONGESTION
+  MANUAL_PASS INBOUND_CALLBACK APP_DNC APP_REQUEUE APP_REQUEUE_COMPLETE APP_REQUEUE_ABANDON
+  INBOUND_ABANDON` (all → no-answer per the binary rule). Speculative aliases removed —
+  a closed set needs no guesses. An unrecognized non-empty token now fires
+  `cx.alpha.sysdispo.unknown_token` (vocabulary DRIFT alarm, never a routing guess).
+  Completeness pin runs all 15 through the classifier both directions. Open ruling for
+  Mickey: `INBOUND_CALLBACK` (the prospect called back — arguably a conversation) currently
+  routes no-answer; one-token move if callbacks should mint cards.
+- **THE GAMUT RULE (Mickey, 2026-07-07, tightening the binary rule; gate 317):** "we should
+  have no no-label — as long as we are reading system to drive this we will see something
+  every time, so the machine needs to be the gamut of anything but answer." When RingCX
+  WAS READ, the verdict is total: `ANSWER` → answered/card; everything else — any other
+  token AND a clean read that shows no label — → did_not_connect. **Clean silence IS the
+  no-answer verdict**, not an unknown; there is no third routing outcome. The ONE survivor
+  of the old guard-fallback, drawn from his own wording ("as long as we are READING"):
+  `read=false` (leadSearch error/timeout — OUR blindness, not their silence) keeps the
+  latch+guard verdict, so an RC blip can never mass-downgrade real conversations. Plumbing:
+  `lookupSystemDispositionLabel` returns `{label, read}`; a blind classification attempt
+  fires `cx.alpha.sysdispo.unread` (a run of those = RC trouble). Watch on the floor: if
+  `cx.alpha.sysdispo.classified` shows answered→did_not_connect downgrades with
+  `systemDisposition: null` on calls agents say were real conversations, RingCX stamps
+  lastPassDispo LATE and we add a one-tick re-read — the traces will say so before anyone
+  has to wonder.
+- **THE SMALL RETRY QUEUE (Mickey, 2026-07-07: "a small retry queue that looks for 429 404
+  whatever specifically from rc — other than that assume we have what we need from system";
+  gate 324):** when the classifier is driving and a terminal observation got NO LABEL, the
+  terminal write DEFERS instead of routing on a non-answer: RC failures (429/404/5xx/
+  timeout) retry because they're OUR blindness; clean-but-empty reads retry because the
+  premise says we always see something — seeing nothing means *not stamped yet* (this
+  folded in the adversarial stamp-race finding, so the one-tick re-read shipped WITH the
+  rule instead of after floor complaints). **FINAL FORM (Mickey: "retry once and then
+  default to did not answer"): ONE re-read (~5s), then did_not_connect, period — the
+  gamut-vs-blind exhaustion split and the guard resurrection are deleted. A full RC
+  outage costs the wrap CARD, never the lead: the row still completes and drains
+  cleanly.** Entries are crash-safe on the
+  session doc (`sysDispoRetries`, Mixed) and ONLY the retry lane's targeted writes touch
+  the field — all three whole-state session save sites delete the key from their patches.
+  A resolved late ANSWER lands the deferred write with the label and the wrap card mints
+  off it (the recovery lane pin — Mickey's own 429-then-answer scenario); flag-off flushes
+  pending entries with guard verdicts (nothing is ever stranded); the outbox idemKey makes
+  any double-persist a no-op. Adversarial hardenings folded in same pass: boundedSearch
+  requires ARRAY EVIDENCE for a clean read (a degraded-but-200 RC incident reads as
+  blindness, not silence — kills the mass-downgrade class), the CONGESTION-probe path
+  reports read-honesty, and the tick report/finished trace now carry the CLASSIFIED
+  outcome + guardOutcome (they could silently diverge from the persisted row before).
+  Traces: retry.enqueued / rescheduled / finished (resolution: retry-resolved |
+  retry-exhausted | flag-off-flush | orphan-flush | stash-write-failed-flush) /
+  persist_failed / stash_write_failed.
+  **Round-2 adversarial verify (3 skeptics, spine NOT refuted — idemKey dedupe, loss-safe
+  ordering, and the ownership fences held; 4 real finds ALL FIXED + pinned, gate 327):**
+  (1) session-kill orphans → the ORPHAN FLUSH pass: dead sessions (status ≠ running)
+  holding stashes get one last read and their verdicts land (new repo query
+  `listBulkLoadSessionsWithPendingSysDispoRetries`; unscoped ticks, 60s rate limit) — no
+  outcome ever strands on a dead doc, no answered lead re-dials uncounted; (2) a failed
+  stash write now FAILS CLOSED to the legacy immediate guard-verdict persist (the outcome
+  can no longer evaporate); (3) enqueue dedupes by (queueItemId, uii) — the
+  serving-stamp-miss loop can't pile up duplicates; (4) PAYLOAD PARITY — entries carry
+  phone/phoneLast4/durationSec/coach ids and the deferred persist stamps `at` = the
+  hang-up tick, so a retry-landed terminal is byte-equivalent to an immediate one (wrap
+  card's 2h clock never drifts with the backoff). Noted-open, deliberate: flag-OFF now
+  costs one bounded leadSearch per answered auto-advance (the label capture — moot once
+  the ceremony flips the flag); requeued leads carry the PRIOR pass's label with no
+  pass-identity check (floor watch; leadSearch `loadedDts` is the future recency source);
+  first-write-wins on idemKey means a late divergent resolve is telemetry-only.
+- **THE SPLIT, SYNTHESIZED END-TO-END (2026-07-07, gate 317):**
+  `tests/cx-bulk-load/cxSysDispoSplit.test.js` chains the REAL modules — watcher (classifier
+  ON, probe-proven lead shape) → real outcome adapter → the runtime's verbatim outbox-row
+  build (`payload` = the whole cadence event) → real drain → real wrap-card service, wired
+  exactly as server.js wires them. Three lanes pinned: ANSWER → outcome upgraded to
+  answered, label rides payload→drain→card, card inherits the row's idemKey, row still
+  drains (card is additive); MACHINE → did_not_connect, label still forwarded to the drain
+  lane (forensics), NO card, callWrapSkipped counted; GAMUT lane → a latched 30s call whose
+  abandoned wrap the janitor sweeps + a CLEAN read with no label = downgraded to
+  did_not_connect, no card (clean silence joins the gamut); BLIND lane → same latched call
+  but leadSearch THROWS = the guard's answered verdict survives, the card mints carrying an
+  honest null label. The fake RingCX is filter-honest (disposition-filtered probes only
+  match leads that have one), which is what proves the fallback chain doesn't fabricate
+  labels.
+- **Drain item + wrap card BOTH exist, on purpose (Mickey's question answered):** the drain
+  item is the call's FACT (recorded once, immediately — counters, CallLog, and the queue row
+  COMPLETES on answered, so no re-dial sits behind the card); the card is the human's
+  DECISION (applied later; DNC amends the completed record via correction + Logics status).
+  Two items, two jobs, no race from the row itself. The residual DNC exposure is
+  cross-channel only (other machinery minting a new touch for the case inside the card's
+  2h) — which is the quarantine stamp's job, hereby PROMOTED from deferred to next.
+
 ## Open questions for the owner
 - ~~DNC double-home~~ ANSWERED by the purity law: DNC exists only on the card; the 2-hour
   quarantine is what makes the async window compliant (nothing can re-dial the lead before

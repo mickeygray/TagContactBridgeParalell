@@ -104,17 +104,26 @@ async function loadRollingSummaryForTerminalPayload(payload = {}, deps = {}) {
 async function enrichTerminalPacketWithCoachSummary(packet = {}, deps = {}) {
   const payload = packet.payload || {};
   const lookup = await loadRollingSummaryForTerminalPayload(payload, deps);
+  // packet.coachSummary is consumed by the wrap-card lane as SUMMARY TEXT (string|null) —
+  // it must never carry a status object (2026-07-07 live find: the skip-report leaked into
+  // wrap cards as "[object Object]", shadowing the payload.callSummary fallback). The
+  // status report lives in coachSummaryReport, which nothing routes on.
   if (!lookup.summary) {
     return {
       ...packet,
-      coachSummary: { skipped: true, reason: lookup.reason || "missing-rolling-summary", source: lookup.source },
+      coachSummary: null,
+      coachSummaryReport: { skipped: true, reason: lookup.reason || "missing-rolling-summary", source: lookup.source },
     };
   }
   const enriched = enrichPayloadWithRollingSummary(payload, { rollingSummary: lookup.summary });
+  const summaryText = typeof enriched.payload?.callSummary === "string" && enriched.payload.callSummary.trim()
+    ? enriched.payload.callSummary.trim()
+    : (typeof enriched.payload?.summary === "string" && enriched.payload.summary.trim() ? enriched.payload.summary.trim() : null);
   return {
     ...packet,
     payload: enriched.payload,
-    coachSummary: {
+    coachSummary: summaryText,
+    coachSummaryReport: {
       skipped: false,
       source: lookup.source,
       summaryLength: lookup.summary.summary.length,

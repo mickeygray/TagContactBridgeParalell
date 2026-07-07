@@ -96,6 +96,20 @@ function parseBooleanFlag(value, fallback = false) {
   return fallback;
 }
 
+const EXPLICIT_LOGOUT_QUEUE_RELEASE_REASONS = new Set([
+  "logout",
+  "agent-logout",
+  "auth-logout",
+  "end-of-day-logout",
+  "eod-logout",
+  "scheduled-logout",
+  "system-logout",
+]);
+
+function isExplicitLogoutQueueReleaseReason(reason) {
+  return EXPLICIT_LOGOUT_QUEUE_RELEASE_REASONS.has(String(reason || "").trim().toLowerCase());
+}
+
 function shouldStageDispatchIntentAsServing(options = {}, status = "") {
   if (options.markServing === true) return true;
   if (options.markServing === false) return false;
@@ -1958,17 +1972,19 @@ async function backfillCxQueueOrdering(domain = null, limit = 250) {
     );
     if (!needsPatch) continue;
 
-    await cxDialQueueRepository.updateQueueItem(item._id, {
+    // H3 (write audit, 2026-07-07): dotted keys, new values only — the old whole-metadata
+    // spread re-asserted stale reads over concurrent writers (the field-ownership law).
+    const orderingPatch = {
       queueFamily: progression.queueFamily,
       queueFamilyRank: progression.queueFamilyRank,
       progressiveStageKey: progression.progressiveStageKey,
       progressiveStageIndex: progression.progressiveStageIndex,
       progressiveStageLabel: progression.progressiveStageLabel,
-      metadata: {
-        ...(item.metadata || {}),
-        ...(progression.metadata || {}),
-      },
-    });
+    };
+    for (const [key, value] of Object.entries(progression.metadata || {})) {
+      orderingPatch[`metadata.${key}`] = value;
+    }
+    await cxDialQueueRepository.updateQueueItem(item._id, orderingPatch);
   }
 }
 
@@ -2003,6 +2019,25 @@ async function maybeBackfillCxQueueOrdering(domain = null, limit = 250, options 
   cxQueueOrderingBackfillMemo.set(cacheKey, now);
   await backfillCxQueueOrdering(domain, normalizedLimit);
   return { ok: true, skipped: false };
+}
+
+// F0 SLICE (2026-07-07, first-touch plan): new leads minted from the 4001 intake carry
+// requestedBy "intake-first-contact" / actionKey "first-cx:<caseId>" — when the lane flag
+// is on, the row is stamped firstTouchPending at MINT so the exclusion filters (H5) hold
+// it out of the bulk families until the cxft lane consumes it. Flag default OFF: the
+// stamp must never land before the lane that serves stamped rows exists (F2/F3).
+// Pure; exported for pins.
+function deriveFirstTouchStamp(payload = {}, options = {}) {
+  const enabled = options.enabled === true
+    || (options.enabled === undefined
+      && String(process.env.CX_FIRST_TOUCH_ENABLED || "false").trim().toLowerCase() === "true");
+  if (!enabled) return {};
+  const requestedBy = String(payload.requestedBy || "").trim().toLowerCase();
+  const actionKey = String(payload.actionKey || "").trim().toLowerCase();
+  if (requestedBy === "intake-first-contact" || actionKey.startsWith("first-cx:")) {
+    return { firstTouchPending: true };
+  }
+  return {};
 }
 
 async function queueCxDialRequest(payload = {}) {
@@ -2150,24 +2185,30 @@ async function queueCxDialRequest(payload = {}) {
         progressiveStageLabel: progression.progressiveStageLabel,
         priorityScore: requestedPriorityScore,
         callPlan: existingCallPlan,
-        metadata: {
-          ...(existingObject.metadata || {}),
-          ...(payload.metadata || {}),
-          ...(progression.metadata || {}),
-          actionKey: actionKey || existingActionKey || null,
-          ...(leadState ? { leadState } : {}),
-          ...(leadTimeZone ? { leadTimeZone } : {}),
-          rcxAccountId: requestedRouting.rcxAccountId,
-          rcxDialGroupId: requestedRouting.rcxDialGroupId,
-          rcxCampaignId: requestedRouting.rcxCampaignId,
-        },
       };
+      // H3 (write audit, 2026-07-07): this used to $set a whole rebuilt metadata object
+      // (read-spread-write) — re-asserting stale values over anything written between the
+      // read and this write, and clobbering other owners' flags (the field-ownership law).
+      // Dotted keys, NEW values only: a key we don't write is a key we can't clobber.
+      const metadataPatch = {
+        ...(payload.metadata || {}),
+        ...(progression.metadata || {}),
+        actionKey: actionKey || existingActionKey || null,
+        ...(leadState ? { leadState } : {}),
+        ...(leadTimeZone ? { leadTimeZone } : {}),
+        rcxAccountId: requestedRouting.rcxAccountId,
+        rcxDialGroupId: requestedRouting.rcxDialGroupId,
+        rcxCampaignId: requestedRouting.rcxCampaignId,
+      };
+      for (const [key, value] of Object.entries(metadataPatch)) {
+        patch[`metadata.${key}`] = value;
+      }
       if (needsReleasePatch) {
         patch.releaseAt = requestedReleaseTiming.releaseAt;
         patch.state = requestedReleaseTiming.state;
         patch.claimUntil = null;
-        patch.metadata.requestedReleaseAt = requestedReleaseAt;
-        patch.metadata.requestedReleaseTimingReason = payload.metadata?.callbackQueueTimingReason || null;
+        patch["metadata.requestedReleaseAt"] = requestedReleaseAt;
+        patch["metadata.requestedReleaseTimingReason"] = payload.metadata?.callbackQueueTimingReason || null;
       }
       const patched = await cxDialQueueRepository.updateQueueItem(existingObject._id, patch);
       return { queued: true, deduped: true, queueItem: patched?.toObject ? patched.toObject() : patched };
@@ -2238,6 +2279,7 @@ async function queueCxDialRequest(payload = {}) {
       rcxAccountId: rcxRouting.rcxAccountId,
       rcxDialGroupId: rcxRouting.rcxDialGroupId,
       rcxCampaignId: rcxRouting.rcxCampaignId,
+      ...deriveFirstTouchStamp(payload),
     },
   }, actionKey ? { actionKey } : {});
 
@@ -4132,7 +4174,7 @@ async function releaseAssignedCxQueueForAgent(options = {}) {
   const normalizedReason = String(reason || "").trim().toLowerCase();
   const releaseReason = normalizedReason.includes("long-call-hold")
     ? "long-call-hold"
-    : normalizedReason.includes("logout")
+    : isExplicitLogoutQueueReleaseReason(normalizedReason)
       ? "logout"
       : "manual-unavailable";
   const releaseSource = releaseReason === "long-call-hold"
@@ -4212,7 +4254,7 @@ function getManualUnavailableReleaseDelayMs(pauseType = "short-break") {
 
 async function releaseManualUnavailableAgentQueues(options = {}) {
   const enabled =
-    String(process.env.RC_CX_MANUAL_UNAVAILABLE_RELEASE_ENABLED || "true").toLowerCase() !== "false";
+    String(process.env.RC_CX_MANUAL_UNAVAILABLE_RELEASE_ENABLED || "false").toLowerCase() === "true";
   if (!enabled) {
     return { ok: true, released: 0, skipped: true, reason: "manual-unavailable-release-disabled" };
   }
@@ -4245,7 +4287,7 @@ async function releaseManualUnavailableAgentQueues(options = {}) {
     const released = await releaseAssignedCxQueueForAgent({
       extensionId: agent.extensionId,
       now,
-      reason: reason === "long-call-hold" ? "long-call-hold-timeout" : "manual-unavailable-timeout-logout",
+      reason: reason === "long-call-hold" ? "long-call-hold-timeout" : "manual-unavailable-timeout",
       actorEmail: reason === "long-call-hold" ? "long-call-hold-reaper" : "manual-unavailable-reaper",
     }).catch((error) => ({ ok: false, error: error.message, released: 0, scanned: 0 }));
     results.push({
@@ -4928,6 +4970,7 @@ async function buildCxCadenceRuntimeSnapshot(domain = null) {
 }
 
 module.exports = {
+  deriveFirstTouchStamp,
   assignCxQueueBatch,
   cancelCxQueueItem,
   CX_CADENCE_EVENT_TYPES,

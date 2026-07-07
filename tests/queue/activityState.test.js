@@ -138,6 +138,30 @@ test("manual CX unavailable survives connected EX calls", () => {
   }
 });
 
+test("manual break gate copy does not promise automatic queue release", () => {
+  const gate = deriveFreshLeadGate({
+    status: "available",
+    exTelephonyStatus: "NoCall",
+    currentCall: {},
+    appPresence: {
+      cxWorkspaceActive: true,
+      lastSeenAt: new Date(),
+    },
+    cxRouting: {
+      enabled: true,
+      desiredAvailability: "unavailable",
+      reason: "manual-unavailable",
+      pauseType: "short-break",
+    },
+  });
+
+  assert.equal(gate.allowed, false);
+  assert.equal(gate.source, "manual");
+  assert.equal(gate.label, "Fresh leads paused: 5 minute break");
+  assert.match(gate.detail, /stay paused until the agent resumes work/);
+  assert.equal(gate.detail.includes("Held leads release"), false);
+});
+
 test("EX ringing alone does not suppress CX lead serving", () => {
   const r = deriveCxRouting(
     {

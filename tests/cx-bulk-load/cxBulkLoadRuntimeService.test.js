@@ -781,21 +781,13 @@ test("account watcher is a no-op write when there is no match and the buffer is 
   assert.equal(repo.counters.updates, before);
 });
 
-test("browser watch is read-only; account watcher owns RingCX projection", async () => {
-  const liveCalls = { value: [] };
-  const { svc, repo } = build(liveCalls);
-  await svc.startCxBulkLoadSession({ agentEmail: "a@x.com", domain: "TAG", ringcx: { accountId: "acct1", campaignId: "camp1" }, targetSize: 2, refillThreshold: 1 });
-  const before = repo.counters.updates;
-
-  liveCalls.value = [{ externalId: externFor("q1"), uii: "u1" }];
-  const readOnly = await svc.watchCxBulkLoadSession({ sessionId: "s1" });
-
-  assert.equal(repo.counters.updates, before);
-  assert.equal(readOnly.current, null);
-
-  const projected = await syncFromRingCx(svc);
-  assert.equal(projected.current.queueItemId, "q1");
-  assert.equal(projected.current.uii, "u1");
+test("WO-4 browser watch compatibility mutator is not exported", () => {
+  const { svc } = build({ value: [] });
+  assert.equal(svc.watchCxBulkLoadSession, undefined, "runtime service exposes no browser watch mutator");
+  const runtime = require("../../packages/shared-services/src/cxBulkLoadRuntime");
+  assert.equal(runtime.watchCxBulkLoadSession, undefined, "runtime exposes no browser watch wrapper");
+  const barrel = require("../../packages/shared-services/src");
+  assert.equal(barrel.watchCxBulkLoadSession, undefined, "shared-services barrel exposes no browser watch export");
 });
 
 test("skip routes its terminal write through the outcome adapter (single writer)", async () => {

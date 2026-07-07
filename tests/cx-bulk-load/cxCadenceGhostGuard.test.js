@@ -63,3 +63,16 @@ test("cancel-after-publish clears the bulk copy; republish after cancel revives 
   assert.equal(revived.length, 1);
   assert.equal(revived[0].channel, "bulk");
 });
+
+test("SCHEMA DECLARATION GUARD: every LeadCadence path the drain's counter writes target is declared (strict mode strips undeclared paths from their own $set — the dead-replay-guard bug, 2026-07-07)", () => {
+  const { LeadCadence } = require("../../packages/shared-models/src");
+  const mustExist = [
+    "counterCadence.lastCxTerminalCountedUii", // the June replay-drift CAS guard field
+    "counterCadence.lastCxDncAt",
+    "counterCadence.cxAnsweredContacts",
+    "counterCadence.cxNoAnswerCalls",
+    "counterCadence.lastCxDialedAt",
+  ];
+  const missing = mustExist.filter((path) => !LeadCadence.schema.path(path));
+  assert.deepEqual(missing, [], `undeclared LeadCadence paths (writes to these are silently stripped): ${missing.join(", ")}`);
+});

@@ -347,21 +347,6 @@ function buildRunContext(options = {}) {
   };
 }
 
-async function previewCxTerminalRectification(depsOrOptions = {}, maybeOptions = {}) {
-  const { deps, options } = resolveDepsAndOptions(depsOrOptions, maybeOptions);
-  const context = buildRunContext(options);
-  const summary = emptySummary({
-    dryRun: true,
-    window: context.window,
-    domains: context.domains,
-    limit: context.limit,
-  });
-  const rows = await buildEvidenceRows(deps, context);
-  summary.scanned = rows.length;
-  for (const row of rows) addEvidenceToSummary(summary, row.evidence);
-  return summary;
-}
-
 async function runCxTerminalRectification(depsOrOptions = {}, maybeOptions = {}) {
   const { deps, options } = resolveDepsAndOptions(depsOrOptions, maybeOptions);
   const dryRun = options.dryRun !== false;
@@ -407,6 +392,5 @@ module.exports = {
   extractRectificationKeysFromCallLog,
   isRealRingcxUii,
   normalizeRectificationWindow,
-  previewCxTerminalRectification,
   runCxTerminalRectification,
 };

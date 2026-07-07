@@ -2,7 +2,6 @@ import * as React from "react";
 import { useNavigate } from "react-router-dom";
 import {
   CalendarClock,
-  CalendarPlus,
   ChevronDown,
   ChevronUp,
   CheckCircle2,
@@ -41,16 +40,13 @@ import { SkeletonRow } from "@/components/ui/Skeleton";
 import { StatusPill, toneFromStatus } from "@/components/ui/StatusPill";
 import { toast } from "@/components/ui/Toaster";
 import {
-  useCxAssignCaseToMe,
   useCxCallQueue,
-  useCxCallQueueMulti,
   useCxCaseActivities,
   useCxCaseInvoices,
   useCxCasePayments,
   useCxCaseTasks,
   useCxCallAppointmentNowAny,
   useCxCommLog,
-  useCxCreateAppointment,
   useCxDialAny,
   useCxDisposition,
   useCxInterviewSnapshot,
@@ -60,7 +56,6 @@ import {
   useCxLogicsAmortization,
   useCxLogicsInvoice,
   useCxLogicsTask,
-  useCxLogicsUpdateCase,
   useCxReleaseAppointment,
   useCxSetStatus,
   useCxSimpleLoopAdvance,
@@ -80,24 +75,18 @@ import type {
   CxLeadCandidate,
   CxLeadLookupMatch,
   CxLeadLookupSource,
-  FreshLeadGate,
   WorkflowRecord,
 } from "@/lib/api/types";
 import type { CommLogEntry } from "@/lib/api/queries/cx";
-import { KNOWN_DOMAINS, useDomainStore } from "@/lib/domain/domainStore";
 import {
   useCxBulkLoadSession,
   useCxBulkLoadDisposition,
   useCxWrapCards,
   useCxWrapCardResolve,
   useCxBulkLoadReviewOutcome,
-  useCxBulkLoadGetLeads,
   useCxBulkLoadPauseProgressive,
   useCxBulkLoadResumeProgressive,
   useCxBulkLoadSkip,
-  useCxBulkLoadKill,
-  useCxBulkLoadAppointmentWrap,
-  type CxBulkLoadSession,
   type CxBulkLoadCurrent,
 } from "@/lib/api/queries/cxBulkLoad";
 import { useSession } from "@/lib/auth/useSession";
@@ -150,7 +139,7 @@ function bulkCallReviewKey(candidate?: CxBulkLoadCurrent | null) {
 
 function bulkCallName(candidate?: CxBulkLoadCurrent | null) {
   const name = String(candidate?.name || "").trim();
-  return name || (candidate?.caseId != null ? `Case ${candidate.caseId}` : "Last call");
+  return name || (candidate?.caseId != null ? `Case ${candidate.caseId}` : "Call review");
 }
 
 type CaseForm = {
@@ -161,7 +150,7 @@ type CaseForm = {
   cellPhone: string;        // primary phone
   homePhone: string;        // secondary phone
   // Spouse fields — kept on the case so we can run full onboarding
-  // here without bouncing into Logics. Logics' updateCase passes
+  // here without bouncing into Logics. The case writer passes
   // unknown fields through; missing ones land as no-ops.
   spouseFirstName: string;
   spouseLastName: string;
@@ -193,65 +182,6 @@ function readString(record: Record<string, unknown>, ...keys: string[]) {
     if (typeof value === "string" && value.trim()) return value;
   }
   return "";
-}
-
-function toBulkStepStatus(value: unknown, fallbackReason: string) {
-  const record = asRecord(value);
-  const nestedResult = asRecord(record.result);
-  const nestedTerminal = asRecord(record.terminal);
-  const failed =
-    record.ok === false ||
-    record.dispositionOk === false ||
-    nestedResult.ok === false ||
-    nestedResult.dispositionOk === false ||
-    nestedTerminal.ok === false ||
-    nestedTerminal.dispositionOk === false;
-  const ok = failed
-    ? false
-    : record.ok === true ||
-        record.dispositionOk === true ||
-        nestedResult.ok === true ||
-        nestedResult.dispositionOk === true
-      ? true
-      : undefined;
-  return {
-    ok,
-    skipped: record.skipped === true,
-    reason:
-      readString(record, "reason", "error") ||
-      readString(nestedTerminal, "reason", "error") ||
-      readString(nestedResult, "reason", "error") ||
-      fallbackReason,
-  };
-}
-
-function isCxNextDialAccepted(result: unknown) {
-  const row = asRecord(result);
-  const nextDial = asRecord(row.nextDial);
-  if (Object.keys(nextDial).length === 0) return false;
-  const activeCallCapture = asRecord(nextDial.activeCallCapture);
-  const hasConfirmedCall =
-    Boolean(readString(nextDial, "uii", "callSessionId", "rcxUii")) ||
-    Boolean(readString(activeCallCapture, "uii", "callSessionId", "rcxUii")) ||
-    nextDial.confirmedCall === true;
-  if (nextDial.accepted === true && hasConfirmedCall) return true;
-  if (nextDial.ok === true && hasConfirmedCall) return true;
-  const status = String(nextDial.status || "").trim().toLowerCase();
-  return ["accepted", "dialing"].includes(status) && hasConfirmedCall;
-}
-
-function isCxNextDialQueuedButUnconfirmed(result: unknown) {
-  if (isCxNextDialAccepted(result)) return false;
-  const row = asRecord(result);
-  const nextDial = asRecord(row.nextDial);
-  if (Object.keys(nextDial).length === 0) return false;
-  if (nextDial.accepted === false || nextDial.ok === false) return false;
-  const status = String(nextDial.status || "").trim().toLowerCase();
-  return (
-    nextDial.queued === true ||
-    nextDial.pending === true ||
-    ["queued", "pending"].includes(status)
-  );
 }
 
 function normalizeComparablePhone(value: string | null | undefined) {
@@ -300,7 +230,7 @@ function describeSimpleLoopLastCompleted(session: CxSimpleLoopSession | null | u
     dispositionResult.reason ||
     last.outcome ||
     "completed";
-  return `Last: ${last.name || "Unknown"} · ${last.outcome || "done"} · ${String(status)}`;
+  return `Recent: ${last.name || "Unknown"} · ${last.outcome || "done"} · ${String(status)}`;
 }
 
 function SimpleLoopTestPanel({
@@ -513,7 +443,7 @@ function buildQueueDialRequest(item: CxCallQueueItem, domain: string, contact: C
   const snapshot = asRecord(item.payloadSnapshot);
   const leadBody = asRecord(item.leadBody);
   const merged = Object.keys(leadBody).length > 0 ? { ...snapshot, ...leadBody } : snapshot;
-  const queueDomain = String(item.domain || domain || "TAG").trim().toUpperCase();
+  const queueDomain = String(item.domain || domain || CX_WORKSPACE_DEFAULT_DOMAIN).trim().toUpperCase();
   return {
     phone: contact.phone || null,
     caseId: contact.caseId || null,
@@ -653,15 +583,18 @@ const AUTO_SERVE_DELAY_SECONDS = 1;
 const AUTO_SERVE_HANDOFF_DELAY_SECONDS = 0;
 const AUTO_SERVE_STARTUP_DELAY_SECONDS = 8;
 const AUTO_SERVE_RETRY_DELAY_SECONDS = 5;
-const BACKEND_NEXT_DIAL_HANDOFF_HOLD_MS = 10_000;
 // Last-resort watchdog for the app disposition side of the VM flow. The
 // RingCX voicemail request is fired in the background; the queue disposition
 // owns the button lifecycle so agents are not held on playback/release.
 const QUEUE_RESTORE_DEBOUNCE_MS = 8_000;
 const STALE_SERVED_QUEUE_RESET_MS = 20_000;
-const SHOW_POSTDATE_DISPOSITION = true;
 type AutoServeCountdownMode = "startup" | "next";
 type ResumePromptBreakType = "short-break" | "meal-break" | string;
+
+const START_DIALING_RESUME_MESSAGE =
+  "Go off hook in RingCX to resume work.";
+const BREAK_TIMER_EXPIRED_MESSAGE =
+  "Go off hook in RingCX when you are ready; dialing resumes after RingCX confirms it.";
 const AUTO_SERVE_BLOCKED_AGENT_STATES = new Set([
   "dialing",
   "dispositioning",
@@ -934,19 +867,6 @@ function extractTerminalOutcomeWorkflow(record: WorkflowRecord | null | undefine
   };
 }
 
-function humanizeCxRoutingReason(reason: string | null | undefined) {
-  const value = String(reason || "").trim().toLowerCase();
-  if (!value) return "";
-  if (value === "ex-busy") return "auto-blocked by EX activity";
-  if (value === "manual-unavailable") return "manually paused";
-  if (value === "manual-available") return "manually resumed";
-  if (value === "long-call-hold") return "long call pause";
-  if (value === "cx-call-ended") return "call ended";
-  if (value === "ex-idle") return "ready for CX leads";
-  if (value === "cx-routing-disabled") return "routing not enabled";
-  return value.replace(/[-_]+/g, " ");
-}
-
 function extractQueueActionKey(item: CxCallQueueItem) {
   return readString(asRecord(item.cxAction), "key") || null;
 }
@@ -980,7 +900,9 @@ function BreakResumePrompt({
         <DialogHeader>
           <DialogTitle>Resume work</DialogTitle>
           <DialogDescription>
-            {title} is running. Resume before the timer ends or this session signs out and releases your leads.
+            {title} is running. When the timer ends, calls stay paused until you press Resume work.
+            {" "}
+            {START_DIALING_RESUME_MESSAGE}
           </DialogDescription>
         </DialogHeader>
         <div className="rounded-md border border-primary/25 bg-primary/5 px-3 py-3">
@@ -1112,26 +1034,6 @@ function formatAppointmentDateTime(value?: string | null) {
   });
 }
 
-function toDateInputValue(date = new Date(Date.now() + 60 * 60 * 1000)) {
-  const rounded = roundToNextQuarterHour(date);
-  const year = rounded.getFullYear();
-  const month = String(rounded.getMonth() + 1).padStart(2, "0");
-  const day = String(rounded.getDate()).padStart(2, "0");
-  return `${year}-${month}-${day}`;
-}
-
-function roundToNextQuarterHour(date = new Date()) {
-  const rounded = new Date(date);
-  const minutes = Math.ceil(rounded.getMinutes() / 15) * 15;
-  rounded.setMinutes(minutes, 0, 0);
-  return rounded;
-}
-
-function toTimeInputValue(date = new Date(Date.now() + 60 * 60 * 1000)) {
-  const rounded = roundToNextQuarterHour(date);
-  return `${String(rounded.getHours()).padStart(2, "0")}:${String(rounded.getMinutes()).padStart(2, "0")}`;
-}
-
 type CollapsibleProps = {
   title: string;
   open: boolean;
@@ -1160,166 +1062,6 @@ function Collapsible({ title, open, onToggle, right, children }: CollapsibleProp
       </button>
       {open ? <div className="border-t border-border">{children}</div> : null}
     </Card>
-  );
-}
-
-type AppointmentModalProps = {
-  open: boolean;
-  onClose: () => void;
-  caseId: string | null;
-  prospectName: string;
-  phone: string;
-  sourceName: string;
-  isLoading: boolean;
-  canPostdate: boolean;
-  canAssign: boolean;
-  onSubmit: (payload: {
-    appointmentDate?: string;
-    appointmentTime?: string;
-    appointmentTimezone?: string;
-    assignToMe?: boolean;
-    postdate?: boolean;
-    note?: string;
-  }) => void;
-};
-
-function AppointmentModal({
-  open,
-  onClose,
-  caseId,
-  prospectName,
-  phone,
-  sourceName,
-  isLoading,
-  canPostdate,
-  canAssign,
-  onSubmit,
-}: AppointmentModalProps) {
-  const [date, setDate] = React.useState(toDateInputValue());
-  const [time, setTime] = React.useState(toTimeInputValue());
-  const [timezone, setTimezone] = React.useState("America/Los_Angeles");
-  const [assignToMe, setAssignToMe] = React.useState(false);
-  const [postdate, setPostdate] = React.useState(false);
-  const [note, setNote] = React.useState("");
-
-  React.useEffect(() => {
-    if (!open) return;
-    const next = new Date(Date.now() + 60 * 60 * 1000);
-    setDate(toDateInputValue(next));
-    setTime(toTimeInputValue(next));
-    setTimezone("America/Los_Angeles");
-    setAssignToMe(false);
-    setPostdate(false);
-    setNote("");
-  }, [open]);
-
-  return (
-    <Dialog open={open} onOpenChange={(next) => (!next ? onClose() : null)}>
-      <DialogContent className="max-w-lg">
-        <DialogHeader>
-          <DialogTitle>Set appointment</DialogTitle>
-          <DialogDescription>
-            Reserve this lead for your queue, pause normal dialing until the appointment time, then move to the next lead.
-          </DialogDescription>
-        </DialogHeader>
-        <div className="space-y-4">
-          <div className="rounded-md border border-border bg-muted/20 px-3 py-2">
-            <div className="text-sm font-medium text-foreground">
-              {prospectName || "Current lead"}
-            </div>
-            <div className="mt-0.5 flex flex-wrap gap-x-3 gap-y-1 text-xs text-muted-foreground">
-              <span>{caseId ? `Case ${caseId}` : "No case loaded"}</span>
-              {phone ? <span>{phone}</span> : null}
-              {sourceName ? <span>{sourceName}</span> : null}
-            </div>
-          </div>
-
-          <div className="grid gap-3 sm:grid-cols-3">
-            <div className="space-y-1.5">
-              <Label>Date</Label>
-              <Input type="date" value={date} onChange={(event) => setDate(event.target.value)} />
-            </div>
-            <div className="space-y-1.5">
-              <Label>Time</Label>
-              <Input type="time" value={time} onChange={(event) => setTime(event.target.value)} />
-            </div>
-            <div className="space-y-1.5">
-              <Label>Timezone</Label>
-              <Select value={timezone} onValueChange={setTimezone}>
-                <SelectTrigger>
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="America/Los_Angeles">Pacific</SelectItem>
-                  <SelectItem value="America/Denver">Mountain</SelectItem>
-                  <SelectItem value="America/Chicago">Central</SelectItem>
-                  <SelectItem value="America/New_York">Eastern</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-          </div>
-
-          {(canAssign || canPostdate) ? (
-            <div className="grid gap-2 sm:grid-cols-2">
-              {canAssign ? (
-                <label className="flex items-center gap-2 rounded-md border border-border px-3 py-2 text-sm">
-                  <input
-                    type="checkbox"
-                    checked={assignToMe}
-                    onChange={(event) => setAssignToMe(event.target.checked)}
-                    className="h-4 w-4 accent-primary"
-                  />
-                  <span>Assign to me</span>
-                </label>
-              ) : null}
-              {canPostdate ? (
-                <label className="flex items-center gap-2 rounded-md border border-border px-3 py-2 text-sm">
-                  <input
-                    type="checkbox"
-                    checked={postdate}
-                    onChange={(event) => setPostdate(event.target.checked)}
-                    className="h-4 w-4 accent-primary"
-                  />
-                  <span>Postdate</span>
-                </label>
-              ) : null}
-            </div>
-          ) : null}
-
-          <div className="space-y-1.5">
-            <Label>Note</Label>
-            <textarea
-              value={note}
-              onChange={(event) => setNote(event.target.value)}
-              rows={3}
-              className="min-h-20 w-full rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground outline-none transition focus-visible:ring-2 focus-visible:ring-ring"
-              placeholder="Optional appointment context"
-            />
-          </div>
-        </div>
-        <DialogFooter>
-          <Button variant="secondary" onClick={onClose} disabled={isLoading}>
-            Cancel
-          </Button>
-          <Button
-            isLoading={isLoading}
-            disabled={!caseId || !date || !time}
-            onClick={() =>
-              onSubmit({
-                appointmentDate: date,
-                appointmentTime: time,
-                appointmentTimezone: timezone,
-                assignToMe,
-                postdate,
-                note: note.trim() || undefined,
-              })
-            }
-          >
-            Set appointment and next lead
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
   );
 }
 
@@ -1441,13 +1183,13 @@ function ExpandableList<T>({
   );
 }
 
-// Per-domain brand accent for the CX domain switcher. CX agents don't
-// have the sidebar DomainSwitcher (roles scope them out of admin chrome),
-// so the top bar needs both the visual reminder AND the flip control.
-// The dropdown is gated to domains where the logged-in agent has a
-// Logics pairing (tagLogicsId / wynnLogicsId on their UA) — an agent
-// who only works TAG gets a read-only badge; an agent paired to both
-// sees both in the dropdown.
+// Per-domain brand accent for the CX domain badge.
+// The active CX workspace fallback is fixed to WYNN, while lead/case
+// metadata can still display a different resolved tenant.
+// CX bulk testing is WYNN-first. Queue/case metadata still overrides this
+// fallback when the backend has resolved a concrete tenant for a lead.
+const CX_WORKSPACE_DEFAULT_DOMAIN = "WYNN";
+
 const DOMAIN_BADGE_STYLES: Record<string, { label: string; className: string }> = {
   TAG: {
     label: "TAG",
@@ -1475,92 +1217,6 @@ function getDomainBadgeStyle(domain: string) {
     }
   );
 }
-
-function CxDomainSwitcher({
-  domain,
-  availableDomains,
-  onChange,
-}: {
-  domain: string;
-  availableDomains: string[];
-  onChange: (next: string) => void;
-}) {
-  const [open, setOpen] = React.useState(false);
-  const ref = React.useRef<HTMLDivElement>(null);
-  const current = getDomainBadgeStyle(domain);
-  const canSwap = availableDomains.length > 1;
-
-  React.useEffect(() => {
-    if (!open) return;
-    const handler = (event: MouseEvent) => {
-      if (!ref.current?.contains(event.target as Node)) setOpen(false);
-    };
-    document.addEventListener("mousedown", handler);
-    return () => document.removeEventListener("mousedown", handler);
-  }, [open]);
-
-  // Read-only badge when the agent has exactly one domain paired —
-  // don't show a dropdown they can't use.
-  if (!canSwap) {
-    return (
-      <span
-        className={cn(
-          "inline-flex h-9 items-center rounded-md border px-3 text-xs font-semibold uppercase tracking-wider",
-          current.className,
-        )}
-        title={`You are operating in the ${current.label} tenant. All sends, dispositions, and Logics actions target this domain.`}
-      >
-        {current.label}
-      </span>
-    );
-  }
-
-  return (
-    <div ref={ref} className="relative">
-      <button
-        type="button"
-        onClick={() => setOpen((prev) => !prev)}
-        className={cn(
-          "inline-flex h-9 items-center gap-1.5 rounded-md border px-3 text-xs font-semibold uppercase tracking-wider transition-colors",
-          current.className,
-        )}
-        title="Switch between TAG and Wynn — every send and Logics action targets the selected tenant."
-      >
-        {current.label}
-        <ChevronDown className="h-3.5 w-3.5" />
-      </button>
-      {open ? (
-        <div className="absolute left-0 top-full z-40 mt-1 min-w-[160px] rounded-md border border-border bg-popover p-1 shadow-lg">
-          {availableDomains.map((d) => {
-            const style = getDomainBadgeStyle(d);
-            const active = d === domain;
-            return (
-              <button
-                key={d}
-                type="button"
-                onClick={() => {
-                  onChange(d);
-                  setOpen(false);
-                }}
-                className={cn(
-                  "flex w-full items-center justify-between rounded-md px-2 py-1.5 text-left text-xs font-semibold uppercase tracking-wider hover:bg-muted",
-                  active && "bg-muted",
-                )}
-              >
-                <span>{style.label}</span>
-                {active ? (
-                  <span className="text-[10px] font-normal text-muted-foreground">active</span>
-                ) : null}
-              </button>
-            );
-          })}
-        </div>
-      ) : null}
-    </div>
-  );
-}
-
-// ─── Logics workspace helpers ───────────────────────────────────────────────
 
 function formatMaybeDate(value: unknown): string {
   if (!value) return "—";
@@ -3528,16 +3184,10 @@ function InterviewSnapshotCard({
 }
 
 export function CXWorkspaceBulkLoad() {
-  const domain = useDomainStore((s) => s.domain || "TAG");
-  const setDomain = useDomainStore((s) => s.setDomain);
+  const domain = CX_WORKSPACE_DEFAULT_DOMAIN;
   const navigate = useNavigate();
   const { user, logout } = useSession();
   const isAdminUser = user?.role === "admin" || user?.audience === "admin";
-  // Company is one operating group across brands, so CX users can move
-  // between all known domains instead of being pinned to account.company.
-  const availableDomains = React.useMemo<string[]>(() => {
-    return [...KNOWN_DOMAINS];
-  }, []);
   const [selected, setSelected] = React.useState<ContactContext | null>(null);
   // When the operator clicks a candidate button (in the "found this
   // number in N places, pick one" bar), we stash its key here so
@@ -3558,8 +3208,6 @@ export function CXWorkspaceBulkLoad() {
   });
   const [nameSearchOpen, setNameSearchOpen] = React.useState(false);
   const [coachWindowTab, setCoachWindowTab] = React.useState<"coach" | "interview" | "guidance">("coach");
-
-  const [appointmentModalOpen, setAppointmentModalOpen] = React.useState(false);
 
   // ─── Center-column case form ────────────────────────────────────────────
   // Per-field dirty flags keep operator edits from being clobbered when a
@@ -3618,14 +3266,14 @@ export function CXWorkspaceBulkLoad() {
   const [startupAutoServeQueued, setStartupAutoServeQueued] = React.useState(false);
   const [breakResumeDueAt, setBreakResumeDueAt] = React.useState<number | null>(null);
   const [breakResumeRemaining, setBreakResumeRemaining] = React.useState<number | null>(null);
-  const [breakAutoLogoutRunning, setBreakAutoLogoutRunning] = React.useState(false);
+  const [breakTimeoutActionRunning, setBreakTimeoutActionRunning] = React.useState(false);
   const [suppressedQueueItems, setSuppressedQueueItems] = React.useState<Record<string, number>>({});
   const [coachReleaseSignal, setCoachReleaseSignal] =
     React.useState<{ key: string; reason: string } | null>(null);
   const [queueAdvanceTransition, setQueueAdvanceTransition] =
     React.useState<QueueAdvanceTransition | null>(null);
   const autoServeInFlightRef = React.useRef(false);
-  const breakAutoLogoutFiredRef = React.useRef(false);
+  const breakTimeoutFiredRef = React.useRef(false);
   const lastTerminalOutcomeWorkflowRef = React.useRef<string | null>(null);
   const queueAdvanceTransitionTimerRef = React.useRef<number | null>(null);
   const nextDialHandoffTimingRef = React.useRef<{
@@ -3770,11 +3418,6 @@ export function CXWorkspaceBulkLoad() {
     autoServeInFlightRef.current = false;
   }
 
-  function holdAutoServeForBackendNextDial() {
-    cancelAutoServe();
-    setBackendNextDialHandoffUntil(Date.now() + BACKEND_NEXT_DIAL_HANDOFF_HOLD_MS);
-  }
-
   function scheduleAutoServe(
     delaySeconds = AUTO_SERVE_DELAY_SECONDS,
     _mode: AutoServeCountdownMode = "next",
@@ -3853,10 +3496,6 @@ export function CXWorkspaceBulkLoad() {
   const workspace = useCxWorkspace(domain);
   const legacyQueueEnabled = false;
   const callQueue = useCxCallQueue(domain, legacyQueueEnabled);
-  const multiCallQueues = useCxCallQueueMulti(
-    legacyQueueEnabled && isAdminUser ? availableDomains : [],
-    legacyQueueEnabled,
-  );
   const refetchLegacyQueue = React.useCallback(() => {
     if (!legacyQueueEnabled) return Promise.resolve(null);
     return callQueue.refetch();
@@ -3945,12 +3584,9 @@ export function CXWorkspaceBulkLoad() {
       callQueueLoading: callQueue.isLoading,
       callQueueFetching: callQueue.isFetching,
       callQueueCount: Array.isArray(callQueue.data) ? callQueue.data.length : null,
-      multiDomainCount: isAdminUser ? availableDomains.length : 0,
     });
   }, [
     domain,
-    isAdminUser,
-    availableDomains.length,
     workspace.isLoading,
     workspace.isFetching,
     workspace.data,
@@ -3975,12 +3611,12 @@ export function CXWorkspaceBulkLoad() {
     : selected?.caseId || null;
   // Case-scoped queries + mutations are bound *after* the lookup
   // resolves a domain (caseDomain is derived below). Until then we
-  // fall back to the active switcher domain for these hooks — but
+  // fall back to the fixed CX workspace domain for these hooks — but
   // every render after the lookup lands rebinds them to the case's
   // real tenant.
   //
   // Operator-scoped hooks (text/email send routed via the agent's EX
-  // shell, new-case create) stay on the active switcher domain — they
+  // shell, new-case create) stay on the fixed CX workspace domain — they
   // represent the operator's choice of tenant for outgoing comms or
   // brand-new cases that don't yet have a tenant.
 
@@ -3996,13 +3632,9 @@ export function CXWorkspaceBulkLoad() {
   const wrapResolve = useCxWrapCardResolve();
   const [wrapApptPicker, setWrapApptPicker] = React.useState<Record<string, string>>({});
   const bulkReviewOutcome = useCxBulkLoadReviewOutcome();
-  const bulkGetLeads = useCxBulkLoadGetLeads();
   const bulkPauseProgressive = useCxBulkLoadPauseProgressive();
   const bulkResumeProgressive = useCxBulkLoadResumeProgressive();
   const bulkSkip = useCxBulkLoadSkip();
-  const bulkKill = useCxBulkLoadKill();
-  const bulkAppointmentWrap = useCxBulkLoadAppointmentWrap();
-  const [bulkPreviewDialPending, setBulkPreviewDialPending] = React.useState(false);
   const [bulkAutoReview, setBulkAutoReview] = React.useState<BulkAutoReview | null>(null);
   const [bulkAutoReviewRemaining, setBulkAutoReviewRemaining] = React.useState(0);
   const [bulkLatchedCall, setBulkLatchedCall] = React.useState<CxBulkLoadCurrent | null>(null);
@@ -4047,9 +3679,6 @@ export function CXWorkspaceBulkLoad() {
     () => Array.isArray(bulk.data?.remainingQueue) ? bulk.data.remainingQueue : [],
     [bulk.data?.remainingQueue],
   );
-  const bulkQueueDebugLine = bulk.data
-    ? `bulk ${bulkDomain} | buffer ${bulkRemainingQueue.length} | done ${Number(bulk.data.completedCount || 0)}`
-    : "bulk queue idle";
   const lastBulkKeyRef = React.useRef<string | null>(null);
   const lastBulkAutoReviewKeyRef = React.useRef<string | null>(null);
   const manualBulkTerminalRef = React.useRef<{ key: string; disposition: string } | null>(null);
@@ -4217,7 +3846,7 @@ export function CXWorkspaceBulkLoad() {
   ]);
 
   // (Old single-domain Logics-match-on-call effect was removed — it
-  // hardcoded the active CX switcher domain, hit Logics for that
+  // hardcoded the old active CX workspace domain, hit Logics for that
   // tenant only, and wrote whatever caseId it found into `selected`.
   // That contaminated the lookup ladder and overrode the WYNN→TAG
   // phone walk. The unified `useCxLeadLookup` below is the single
@@ -4350,17 +3979,15 @@ export function CXWorkspaceBulkLoad() {
   }, [bulkRunning, currentCallSessionId]);
 
   // The case lives in whichever tenant the lookup ladder resolved to —
-  // independent of the active CX switcher (which only drives search +
-  // queue). Once a case is loaded, every case-scoped read/write
+  // independent of the fixed CX workspace fallback. Once a case is loaded,
+  // every case-scoped read/write
   // (activities, tasks, invoices, payments, save, DNC, postdate,
   // append-comment, identity update) targets THIS domain, not whatever
   // the operator happens to be filtering search by.
   const caseDomain = servedQueueDomain || domain;
 
   // ── Case-scoped mutations (bound to the case's resolved domain) ──
-  const assignCaseToMe = useCxAssignCaseToMe(caseDomain);
   const disposition = useCxDisposition(caseDomain);
-  const createAppointment = useCxCreateAppointment(caseDomain);
   const releaseAppointment = useCxReleaseAppointment(caseDomain);
   const callAppointmentNow = useCxCallAppointmentNowAny();
 
@@ -4369,7 +3996,6 @@ export function CXWorkspaceBulkLoad() {
     hardPruneLiveCoachForCurrentCall("call-session-ended");
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentCallSessionId]);
-  const updateCase = useCxLogicsUpdateCase(caseDomain);
   // Case detail (calls + texts) — also case-scoped.
   const clientDetail = useClientDetail(caseDomain, resolvedCaseId);
   const detail = clientDetail.data;
@@ -4379,19 +4005,20 @@ export function CXWorkspaceBulkLoad() {
   const appointmentItems = data?.agent.appointments || [];
 
   // ── Operator/case-scoped mutations ──
-  // New-case create stays on the active tenant.
+  // New-case create stays on the fixed workspace fallback until the backend
+  // grows a domainless/create-from-case path.
   const setCxStatus = useCxSetStatus(domain);
   const simulateCxCallAny = useCxSimulateCallAny();
   // dialAny accepts { domain, ...body } so a queue pick on a different tenant
   // routes to the correct /api/commands/cx/:domain/dial without waiting for
-  // setDomain() to land. (See handleSelectFromQueue.)
+  // any workspace fallback state to land. (See handleSelectFromQueue.)
   const dialAny = useCxDialAny();
 
   // ── bulk_load rail wiring ───────────────────────────────────────────────
   // This workspace is the bulk_load front plate: identical to legacy, but the
   // dial/disposition is driven by the bulk rail instead of the legacy queue
   // engine. RingCX owns the dial buffer; the agent dispositions and RingCX
-  // advances to the next buffered lead, which the watcher surfaces as `current`.
+  // advances to the next lead, which the watcher surfaces as `current`.
   // Keystone: mirror the bulk active call into the workspace's current case so
   // every kept panel (activities / payments / tasks / Logics / coach) follows it
   // with zero panel edits — they all read resolvedCaseId + caseDomain, which
@@ -4499,106 +4126,12 @@ export function CXWorkspaceBulkLoad() {
     setServedQueueTicketId(bulkDisplayCandidate.queueItemId || null);
     setServedQueueContact(contact);
     setServedQueueStartedAt(Date.now());
-    if (bulkDomain !== domain) setDomain(bulkDomain);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [bulkDisplayKey, bulkCaseIdStr, bulkDomain]);
-
-  // One function per RingCX next-lead action: ask the backend to nudge the
-  // next accepted campaign lead, then wait for the account watcher to prove it.
-  // Durable queue state stays in the backend; the client only reports the
-  // transition.
-  async function runBulkPreviewFetchAndDial(
-    source = "queue-header",
-    sessionSnapshot?: CxBulkLoadSession | null,
-  ) {
-    const session = sessionSnapshot ?? bulk.data ?? null;
-    const sessionId = session?.sessionId || bulkSessionId;
-    if (!sessionId) return;
-    const remainingQueue = Array.isArray(session?.remainingQueue)
-      ? session.remainingQueue
-      : bulkRemainingQueue;
-    const nextLead = remainingQueue[0] || null;
-    if (!nextLead) {
-      showQueueAdvanceTransition({
-        title: "No buffered lead",
-        description: "The bulk session has no accepted lead ready for RingCX preview.",
-        blocking: false,
-      }, 3000);
-      return;
-    }
-    if (session?.current) {
-      showQueueAdvanceTransition({
-        title: "Current call still active",
-        description: "Finish the current RingCX call before fetching the next preview lead.",
-        blocking: false,
-      }, 3000);
-      return;
-    }
-    const startedAt = Date.now();
-    console.log("[bulk-preview] START_NEXT", {
-      source,
-      sessionId,
-      bufferCount: remainingQueue.length,
-      nextQueueItemId: nextLead.queueItemId || null,
-      nextExternId: nextLead.externId || null,
-      nextCaseId: nextLead.caseId || null,
-    });
-    showQueueAdvanceTransition({
-      title: "Starting RingCX preview lead",
-      description: "Requesting RingCX to surface the next buffered campaign lead.",
-      blocking: true,
-    });
-    setBulkPreviewDialPending(true);
-    try {
-      const nextSession = await bulkGetLeads.mutateAsync({ sessionId });
-      const getLeads = nextSession?.getLeads || {};
-      console.log("[bulk-preview] START_NEXT_RESULT", {
-        source,
-        elapsedMs: Date.now() - startedAt,
-        getLeads,
-      });
-      if (!getLeads.ok) {
-        const reason = getLeads.reason || getLeads.error || "RingCX did not accept the next-lead request.";
-        showQueueAdvanceTransition({
-          title: "RingCX preview did not fire",
-          description: String(reason),
-          blocking: false,
-        }, 5000);
-        toast.warning("RingCX preview did not fire", {
-          description: String(reason),
-        });
-        return;
-      }
-
-      showQueueAdvanceTransition({
-        title: "Preview lead request accepted",
-        description: "Waiting for RingCX to report the active call before showing it here.",
-        blocking: false,
-      }, 2500);
-      await bulk.refetch().catch(() => null);
-    } catch (error) {
-      console.error("[bulk-preview] FAILED", error);
-      showQueueAdvanceTransition({
-        title: "Start queue failed",
-        description: error instanceof Error ? error.message : "RingCX rejected the preview request.",
-        blocking: false,
-      }, 3500);
-    } finally {
-      setBulkPreviewDialPending(false);
-    }
-  }
-
-  function handleBulkPreviewFetchAndDial(source = "queue-header") {
-    void runBulkPreviewFetchAndDial(source);
-  }
 
   function handleBulkSkip() {
     if (!bulkSessionId) return;
     void bulkSkip.mutateAsync({ sessionId: bulkSessionId }).catch(() => null);
-  }
-  function handleBulkClearSession() {
-    if (!bulkSessionId) return;
-    void bulkKill.mutateAsync({ sessionId: bulkSessionId, reason: "manual-clear" }).catch(() => null);
   }
 
   // Dev escape hatch — `?cxDialMode=simulate` keeps the simulator path
@@ -4878,6 +4411,10 @@ export function CXWorkspaceBulkLoad() {
   async function handleCxAvailabilityChange(
     next: "available" | "unavailable",
     breakType?: "short-break" | "meal-break",
+    options: {
+      availableTitle?: string;
+      availableDescription?: string;
+    } = {},
   ) {
     // We can't use the generic `run()` helper here because the success
     // path needs to detect the EX-busy override the server may apply
@@ -4905,11 +4442,11 @@ export function CXWorkspaceBulkLoad() {
       const response = (result?.response ?? null) as
         | {
             cxRouting?: { desiredAvailability?: string; reason?: string; pauseType?: string | null } | null;
-            freshLeadGate?: FreshLeadGate | null;
           }
         | null;
       const resolvedAvailability = response?.cxRouting?.desiredAvailability;
       const resolvedReason = response?.cxRouting?.reason;
+      const effectiveAvailability = resolvedAvailability || next;
 
       if (
         next === "available"
@@ -4931,13 +4468,18 @@ export function CXWorkspaceBulkLoad() {
       }
 
       const pauseType = String(response?.cxRouting?.pauseType || breakType || "").trim();
-      toast(`CX availability set to ${resolvedAvailability || next}`, {
-        description: resolvedAvailability === "available"
-          ? "You'll start receiving CX leads."
-          : pauseType === "meal-break"
-            ? "You are on a 15 minute break. Held leads release when that window expires."
-            : "You are on a 5 minute break. Held leads release when that window expires.",
-      });
+      toast(
+        effectiveAvailability === "available"
+          ? options.availableTitle || "Dialing resumed"
+          : "Break started",
+        {
+          description: effectiveAvailability === "available"
+            ? options.availableDescription || START_DIALING_RESUME_MESSAGE
+            : pauseType === "meal-break"
+              ? "You are on a 15 minute break."
+              : "You are on a 5 minute break.",
+        },
+      );
     } catch (error) {
       const message = error instanceof Error ? error.message : "Something went wrong.";
       toast.error("CX availability change failed", {
@@ -4993,7 +4535,7 @@ export function CXWorkspaceBulkLoad() {
   }
 
   async function handleResumeWorkFromBreak() {
-    breakAutoLogoutFiredRef.current = false;
+    breakTimeoutFiredRef.current = false;
     await handleCxAvailabilityChange("available");
     setBreakResumeDueAt(null);
     setBreakResumeRemaining(null);
@@ -5001,28 +4543,31 @@ export function CXWorkspaceBulkLoad() {
     void refetchLegacyQueue();
   }
 
-  async function handleBreakTimeoutLogout(reason = "break-timeout") {
-    if (breakAutoLogoutFiredRef.current) return;
-    breakAutoLogoutFiredRef.current = true;
-    setBreakAutoLogoutRunning(true);
+  async function handleBreakTimeoutAction(reason = "break-timeout") {
+    if (breakTimeoutFiredRef.current) return;
+    breakTimeoutFiredRef.current = true;
+    setBreakTimeoutActionRunning(true);
     cancelAutoServe();
     try {
-      if (reason === "break-timeout") {
-        toast.warning("Break timer expired", {
-          description: "Signing out and releasing held leads.",
-        });
+      if (reason !== "break-timeout") {
+        await logout();
+        navigate("/login", { replace: true });
+        return;
       }
-      await logout();
+      toast.warning("Break timer expired", {
+        description: BREAK_TIMER_EXPIRED_MESSAGE,
+      });
+    } catch (error) {
+      breakTimeoutFiredRef.current = false;
+      throw error;
     } finally {
-      setBreakAutoLogoutRunning(false);
-      navigate("/login", { replace: true });
+      setBreakTimeoutActionRunning(false);
     }
   }
 
   function restoreServedQueueLead() {
     if (!servedQueueContact) return false;
     setSelected(servedQueueContact);
-    if (servedQueueDomain && servedQueueDomain !== domain) setDomain(servedQueueDomain);
     if (servedQueueCaseId) {
       setForm((prev) => ({
         ...prev,
@@ -5070,18 +4615,6 @@ export function CXWorkspaceBulkLoad() {
     setServedQueueTicketId(item.queueTicketId || null);
     setServedQueueContact(contact);
     setServedQueueStartedAt(Date.now());
-    if (queueDomain && queueDomain !== domain) setDomain(queueDomain);
-  }
-
-  function stageNextCallHandoffLead(
-    item: CxCallQueueItem,
-    options: { preserveTransition?: boolean } = {},
-  ) {
-    const contact = contactFromQueue(item);
-    const queueDomain = String(item.domain || domain || "TAG").trim().toUpperCase();
-    cancelAutoServe();
-    stageQueueLeadInWorkspace(item, contact, queueDomain, options);
-    setServingQueueKey(buildQueueItemKey(item));
   }
 
   async function handleSelectFromQueue(
@@ -5089,13 +4622,12 @@ export function CXWorkspaceBulkLoad() {
     options: { source?: "manual" | "auto" } = {},
   ) {
     if (bulk.data?.status === "running") {
-      void runBulkPreviewFetchAndDial(options.source === "auto" ? "auto-queue-select" : "queue-select");
       return;
     }
     if (options.source !== "auto") cancelAutoServe();
     const contact = contactFromQueue(item);
     const queueKey = buildQueueItemKey(item);
-    const queueDomain = String(item.domain || domain || "TAG").trim().toUpperCase();
+    const queueDomain = String(item.domain || domain || CX_WORKSPACE_DEFAULT_DOMAIN).trim().toUpperCase();
     const itemTicketId = String(item.queueTicketId || "").trim();
     const sameServedQueueItem =
       (servingQueueKey && queueKey === servingQueueKey) ||
@@ -5110,9 +4642,8 @@ export function CXWorkspaceBulkLoad() {
       return;
     }
     // Build the dial request against queueDomain rather than the workspace's
-    // current `domain`. `setDomain(queueDomain)` below is async — using
-    // `domain` here would post the dial to the wrong tenant when the user
-    // clicks a queue item from a different domain than the active switcher.
+    // fallback `domain`. Using the fallback here would post the dial to the
+    // wrong tenant when the row already carries a concrete tenant.
     const dialRequest = {
       ...buildQueueDialRequest(item, queueDomain, contact),
       ...(cxDialExecutionModeOverride ? { executionMode: cxDialExecutionModeOverride } : {}),
@@ -5128,7 +4659,7 @@ export function CXWorkspaceBulkLoad() {
     // Real dial goes through `useCxDialAny` -> `/api/commands/cx/:domain/dial`,
     // which queues an outbound CX dial command in `ringcentral-cx`. Pass
     // `queueDomain` explicitly so a click on a non-active-tenant card
-    // doesn't race the setDomain() above.
+    // doesn't race any workspace fallback state.
     // Dev/QA can opt back into the simulator with `?cxDialMode=simulate`.
     try {
       if (cxDialModeIsSimulate) {
@@ -5224,13 +4755,8 @@ export function CXWorkspaceBulkLoad() {
 
   const rawQueueItems = React.useMemo(() => {
     if (!legacyQueueEnabled) return [];
-    return isAdminUser
-      ? multiCallQueues.flatMap((query) => {
-        const items = Array.isArray(query.data) ? query.data : [];
-        return items as CxCallQueueItem[];
-      })
-      : ((callQueue.data ?? data?.callQueue ?? []) as CxCallQueueItem[]);
-  }, [legacyQueueEnabled, isAdminUser, multiCallQueues, callQueue.data, data?.callQueue]);
+    return ((callQueue.data ?? data?.callQueue ?? []) as CxCallQueueItem[]);
+  }, [legacyQueueEnabled, callQueue.data, data?.callQueue]);
 
   const isQueueItemLocallySuppressed = React.useCallback(
     (item: CxCallQueueItem) => {
@@ -5261,7 +4787,7 @@ export function CXWorkspaceBulkLoad() {
     if (!activeServingQueueItem) return;
     if (servedQueueTicketId || servedQueueActionKey || servingQueueKey || servedQueueContact) return;
     const contact = contactFromQueue(activeServingQueueItem);
-    const queueDomain = String(activeServingQueueItem.domain || domain || "TAG").trim().toUpperCase();
+    const queueDomain = String(activeServingQueueItem.domain || domain || CX_WORKSPACE_DEFAULT_DOMAIN).trim().toUpperCase();
     const activeServingMetadata = asRecord(asRecord(activeServingQueueItem).metadata);
     const activeServingDialStatus = String(activeServingMetadata.lastDialIntentStatus || "")
       .trim()
@@ -5439,7 +4965,7 @@ export function CXWorkspaceBulkLoad() {
   const queueItems = React.useMemo(() => {
     const deduped = new Map<string, CxCallQueueItem>();
     for (const item of rawQueueItems) {
-      const itemDomain = String(item.domain || domain || "TAG").trim().toUpperCase();
+      const itemDomain = String(item.domain || domain || CX_WORKSPACE_DEFAULT_DOMAIN).trim().toUpperCase();
       const normalizedItem = itemDomain === item.domain ? item : { ...item, domain: itemDomain };
       if (isQueueItemLocallySuppressed(normalizedItem)) continue;
       const assignedExtensionId = String(normalizedItem.assignedExtensionId || "").trim();
@@ -5495,29 +5021,6 @@ export function CXWorkspaceBulkLoad() {
     isQueueItemLocallySuppressed,
     currentExtensionId,
   ]);
-
-  function pickNextCallHandoffLead() {
-    return queueItems.find((item) => Boolean(contactFromQueue(item).phone)) || null;
-  }
-
-  function buildNextCallHandoffPayload(item: CxCallQueueItem | null | undefined) {
-    const nextQueueLead = item || null;
-    if (!nextQueueLead) return null;
-    const contact = contactFromQueue(nextQueueLead);
-    if (!contact.phone) return null;
-    const queueDomain = String(nextQueueLead.domain || domain || "TAG").trim().toUpperCase();
-    return {
-      domain: queueDomain,
-      ...buildQueueDialRequest(nextQueueLead, queueDomain, contact),
-      // Terminal-button handoff must always load the next lead into the
-      // agent's campaign queue. Manual/active-call execution overrides are
-      // only for explicit queue-card QA clicks.
-      executionMode: "ringcx-campaign-queue",
-      assignedExtensionId: currentExtensionId || nextQueueLead.assignedExtensionId || undefined,
-      ringcxDialPriority: "IMMEDIATE",
-      requestedBySurface: "cx-next-call-handoff",
-    };
-  }
 
   React.useEffect(() => {
     // BULK GUARD (field find 2026-07-06 run 4): in bulk mode the LEGACY queue is empty, so
@@ -5662,12 +5165,12 @@ export function CXWorkspaceBulkLoad() {
     if (!isManualTimedBreak) {
       setBreakResumeDueAt(null);
       setBreakResumeRemaining(null);
-      breakAutoLogoutFiredRef.current = false;
+      breakTimeoutFiredRef.current = false;
       return;
     }
     setBreakResumeDueAt(breakPauseReleaseAtMs);
     setBreakResumeRemaining(Math.max(0, Math.ceil((breakPauseReleaseAtMs - Date.now()) / 1000)));
-    breakAutoLogoutFiredRef.current = false;
+    breakTimeoutFiredRef.current = false;
   }, [isManualTimedBreak, breakPauseReleaseAtMs]);
 
   React.useEffect(() => {
@@ -5687,39 +5190,19 @@ export function CXWorkspaceBulkLoad() {
     if (!isManualTimedBreak) return;
     if (breakResumeDueAt == null) return;
     if (breakResumeRemaining !== 0) return;
-    void handleBreakTimeoutLogout();
+    void handleBreakTimeoutAction();
   }, [isManualTimedBreak, breakResumeDueAt, breakResumeRemaining]);
 
-  const queueDebugLine = React.useMemo(() => {
-    if (isAdminUser) {
-      const parts = availableDomains.map((availableDomain, index) => {
-        const query = multiCallQueues[index];
-        const count = Array.isArray(query?.data) ? query.data.length : 0;
-        const state = query?.isLoading ? "loading" : query?.error ? "err" : count;
-        return `${availableDomain}:${state}`;
-      });
+/*
       return `active ${domain} • ${parts.join(" • ")}`;
     }
-    const count = Array.isArray(callQueue.data) ? callQueue.data.length : Array.isArray(data?.callQueue) ? data.callQueue.length : 0;
-    const state = callQueue.isLoading ? "loading" : callQueue.error ? "err" : count;
     return `active ${domain} • ${domain}:${state}`;
-  }, [isAdminUser, availableDomains, multiCallQueues, domain, callQueue.data, callQueue.isLoading, callQueue.error, data?.callQueue]);
-  void queueDebugLine;
+*/
   const sourceBadge = sourceBadgeFor(lookupSource);
   const authoritativeLogicsCaseIdNumber: number | null =
     lookupSource === "logics" && lookupMatch?.caseId
       ? Number(lookupMatch.caseId) || null
       : null;
-  const servedQueueCaseText =
-    servedQueueCaseId != null ? String(servedQueueCaseId).trim() : "";
-  const servedQueueCaseNumber =
-    servedQueueCaseText
-      ? Number(servedQueueCaseText) || null
-      : null;
-  const dispositionCaseId = authoritativeLogicsCaseIdNumber ?? servedQueueCaseNumber;
-  const assignCaseId =
-    dispositionCaseId ??
-    (resolvedCaseId && Number.isFinite(Number(resolvedCaseId)) ? Number(resolvedCaseId) : null);
 
   function submitQueueDisposition(
     dispositionKey: string,
@@ -5760,7 +5243,7 @@ export function CXWorkspaceBulkLoad() {
     const coachReleaseReason = options.coachReleaseReason || `queue-disposition-${dispositionKey}`;
     showQueueAdvanceTransition({
       title: "Finishing current lead",
-      description: "Submitting the disposition; RingCX advances to the next buffered call.",
+          description: "Submitting the disposition; RingCX advances to the next call.",
       blocking: true,
     });
     void bulkDisposition
@@ -5801,265 +5284,6 @@ export function CXWorkspaceBulkLoad() {
           blocking: false,
         }, 3500);
         void bulk.refetch();
-        workspace.refetch();
-        void refetchLegacyQueue();
-      });
-  }
-
-  function resumeBulkAppointmentHold(reason: string) {
-    if (!bulkRunning || !bulkSessionId) return Promise.resolve(null);
-    return bulkResumeProgressive
-      .mutateAsync({ sessionId: bulkSessionId, reason })
-      .catch((error) => {
-        toast.warning("RingCX resume did not confirm", {
-          description: error instanceof Error ? error.message : "Set yourself available in RingCX before continuing.",
-        });
-        return null;
-      });
-  }
-
-  function handleAppointmentModalOpen() {
-    if (!bulkRunning || !bulkSessionId) {
-      setAppointmentModalOpen(true);
-      return;
-    }
-    void bulkPauseProgressive
-      .mutateAsync({
-        sessionId: bulkSessionId,
-        reason: "bulk-appointment-open",
-        holdUntilResume: true,
-      })
-      .then(() => {
-        setAppointmentModalOpen(true);
-      })
-      .catch((error) => {
-        toast.warning("RingCX pause did not confirm", {
-          description: error instanceof Error ? error.message : "The appointment form is open, but RingCX may keep dialing.",
-        });
-        setAppointmentModalOpen(true);
-      });
-  }
-
-  function handleAppointmentModalClose() {
-    setAppointmentModalOpen(false);
-    void resumeBulkAppointmentHold("bulk-appointment-cancelled");
-  }
-
-  function handleAppointmentSubmit(payload: {
-    appointmentDate?: string;
-    appointmentTime?: string;
-    appointmentTimezone?: string;
-    assignToMe?: boolean;
-    postdate?: boolean;
-    note?: string;
-  }) {
-    if (assignCaseId == null) return;
-    if (bulkRunning) {
-      if (!bulkSessionId) {
-        toast.warning("Bulk appointment needs an active RingCX session.");
-        return;
-      }
-      void run("Appointment", async () => {
-        const appointmentWrapResult = await bulkAppointmentWrap.mutateAsync({
-          caseId: String(assignCaseId),
-          appointmentDate: payload.appointmentDate,
-          appointmentTime: payload.appointmentTime,
-          appointmentTimezone: payload.appointmentTimezone,
-          note: payload.note,
-          phone: form.cellPhone || selectedPhone || currentCallPhone,
-          searchPhone: currentCallPhone || selectedPhone || undefined,
-          prospectName:
-            `${form.firstName} ${form.lastName}`.trim() ||
-            selected?.name ||
-            servedQueueContact?.name ||
-            undefined,
-          sourceName: form.sourceName || selected?.source || servedQueueContact?.source || undefined,
-          queueActionKey: servedQueueActionKey || undefined,
-          queueItemId: bulkCurrent?.queueItemId || servedQueueTicketId || undefined,
-          queueTicketId: bulkCurrent?.queueItemId || servedQueueTicketId || undefined,
-          assignedExtensionId: currentExtensionId || undefined,
-          assignToMe: payload.assignToMe === true,
-          postdate: payload.postdate === true,
-          sessionId: bulkSessionId,
-          domain: bulkCurrent?.domain || bulk.data?.domain || null,
-        });
-        return {
-          appointmentWrapResult,
-        };
-      })
-        .then((result) => {
-          const appointmentFlowResult = asRecord(result);
-          const wrapResult = asRecord(appointmentFlowResult.appointmentWrapResult);
-          const appointmentStatus = toBulkStepStatus(wrapResult.appointment, "Appointment create failed.");
-          const workbenchStatus = toBulkStepStatus(wrapResult.workbench, "Appointment workbench did not complete.");
-          const assignStatus = toBulkStepStatus(wrapResult.assign, "Assign-to-me did not complete.");
-          const postdateStatus = toBulkStepStatus(wrapResult.postdate, "Logics postdate did not complete.");
-          const terminalStatus = toBulkStepStatus(wrapResult.terminal, "Terminal disposition was not accepted.");
-          const resumeStatus = toBulkStepStatus(wrapResult.resume, "RingCX resume did not complete.");
-          if (appointmentStatus.ok !== true) {
-            toast.warning("Appointment was not saved", {
-              description: appointmentStatus.reason,
-            });
-            return;
-          }
-          setAppointmentModalOpen(false);
-          if (workbenchStatus.ok === false) {
-            toast.warning("Appointment saved, workbench sync failed", {
-              description: workbenchStatus.reason,
-            });
-          }
-          if (assignStatus.ok === false) {
-            toast.warning("Appointment saved, assign failed", {
-              description: assignStatus.reason,
-            });
-          }
-          if (postdateStatus.ok === false) {
-            toast.warning("Appointment saved, postdate failed", {
-              description: postdateStatus.reason,
-            });
-          }
-          if (terminalStatus.ok === false) {
-            toast.warning("Appointment saved, but close failed", {
-              description: `${terminalStatus.reason} You can retry disposition from the workspace.`,
-            });
-          }
-          if (resumeStatus.ok === false) {
-            toast.warning("Appointment saved, but RingCX is still on hold", {
-              description: "Set yourself available in RingCX to continue the queue.",
-            });
-          }
-          showQueueAdvanceTransition({
-            title: "Loading next lead",
-            description: "Appointment saved. Waiting for RingCX to report who is on the phone now.",
-            blocking: true,
-          });
-          void bulk.refetch();
-          workspace.refetch();
-          void refetchLegacyQueue();
-        })
-        .catch(() => {
-          workspace.refetch();
-          void refetchLegacyQueue();
-        });
-      return;
-    }
-    const nextQueueLead = pickNextCallHandoffLead();
-    const nextDial = buildNextCallHandoffPayload(nextQueueLead);
-
-    void run("Appointment", async () => {
-      const appointmentResult = await createAppointment.mutateAsync({
-        caseId: String(assignCaseId),
-        appointmentDate: payload.appointmentDate,
-        appointmentTime: payload.appointmentTime,
-        appointmentTimezone: payload.appointmentTimezone,
-        note: payload.note,
-        phone: form.cellPhone || selectedPhone || currentCallPhone,
-        searchPhone: currentCallPhone || selectedPhone || undefined,
-        prospectName:
-          `${form.firstName} ${form.lastName}`.trim() ||
-          selected?.name ||
-          servedQueueContact?.name ||
-          undefined,
-        sourceName: form.sourceName || selected?.source || servedQueueContact?.source || undefined,
-        queueActionKey: servedQueueActionKey || undefined,
-        queueItemId: servedQueueTicketId || undefined,
-        queueTicketId: servedQueueTicketId || undefined,
-        assignedExtensionId: currentExtensionId || undefined,
-      });
-      const assignResult = payload.assignToMe
-        ? await assignCaseToMe.mutateAsync({
-            caseId: String(assignCaseId),
-            note: payload.note,
-          }).catch((error) => ({
-            ok: false,
-            status: error?.status || null,
-            reason: error instanceof Error ? error.message : "Assign-to-me failed.",
-          }))
-        : null;
-      const postdateResult = payload.postdate
-        ? await updateCase.mutateAsync({
-            caseId: String(assignCaseId),
-            CaseID: String(assignCaseId),
-            status: "post-date",
-            skipQueueFinalize: true,
-            notes: payload.note,
-          }).catch((error) => ({
-            ok: false,
-            status: error?.status || null,
-            reason: error instanceof Error ? error.message : "Postdate update failed.",
-          }))
-        : null;
-      const nextDialResult = nextDial
-        ? await dialAny.mutateAsync(nextDial).catch((error) => ({
-            ok: false,
-            accepted: false,
-            status: error?.status || null,
-            reason: error instanceof Error ? error.message : "Next CX dial handoff failed.",
-          }))
-        : null;
-      return {
-        appointmentResult,
-        assignResult,
-        postdateResult,
-        nextDial: nextDialResult,
-      };
-    })
-      .then((result) => {
-        const appointmentFlowResult = asRecord(result);
-        const assignResult = asRecord(appointmentFlowResult.assignResult);
-        const postdateResult = asRecord(appointmentFlowResult.postdateResult);
-        const nextDialResult = appointmentFlowResult.nextDial;
-        setAppointmentModalOpen(false);
-        if (assignResult.ok === false) {
-          toast.warning("Appointment saved, assign failed", {
-            description: String(assignResult.reason || "Assign-to-me did not complete."),
-          });
-        }
-        if (postdateResult.ok === false) {
-          toast.warning("Appointment saved, postdate failed", {
-            description: String(postdateResult.reason || "Logics postdate did not complete."),
-          });
-        }
-        const nextDialAccepted = isCxNextDialAccepted({ nextDial: nextDialResult });
-        const nextDialQueuedButUnconfirmed = isCxNextDialQueuedButUnconfirmed({ nextDial: nextDialResult });
-        if (nextDialAccepted) {
-          holdAutoServeForBackendNextDial();
-          if (nextQueueLead) {
-            stageNextCallHandoffLead(nextQueueLead);
-          }
-          toast("Next call sent", {
-            description: "RingCX confirmed the next queue lead.",
-          });
-        } else if (nextDialQueuedButUnconfirmed) {
-          holdAutoServeForBackendNextDial();
-          toast("Next call queued", {
-            description: "Waiting for RingCX to confirm the active call before showing the next lead.",
-          });
-        } else if (nextDial != null) {
-          const reason = String(asRecord(nextDialResult).reason || "").trim();
-          toast.warning("Next call handoff fell back", {
-            description: reason || "Auto serve will retry from the queue.",
-          });
-          clearServedQueueSelection();
-          clearCasePanelForNextQueueLead("next-call-handoff-fallback");
-          scheduleAutoServe(AUTO_SERVE_HANDOFF_DELAY_SECONDS, "next");
-        } else if (servedQueueActionKey || servedQueueTicketId || servedQueueCaseId) {
-          suppressCurrentQueueLead({
-            domain: servedQueueDomain || caseDomain,
-            caseId: servedQueueCaseId || assignCaseId,
-            actionKey: servedQueueActionKey,
-            queueItemId: servedQueueTicketId,
-            queueTicketId: servedQueueTicketId,
-            queueOutcome: "rescheduled",
-          });
-          clearServedQueueSelection();
-          clearCasePanelForNextQueueLead("next-call-rescheduled");
-          scheduleAutoServe(AUTO_SERVE_HANDOFF_DELAY_SECONDS, "next");
-        }
-        workspace.refetch();
-        void refetchLegacyQueue();
-      })
-      .catch(() => {
         workspace.refetch();
         void refetchLegacyQueue();
       });
@@ -6129,7 +5353,7 @@ export function CXWorkspaceBulkLoad() {
       ? bulkCurrent
         ? "Current lead comes from RingCX. Logics context is shown in the side panels."
         : bulkShowingHeldCall
-          ? "Last call is held here for review until RingCX reports the next lead."
+          ? "Call review is held here until RingCX reports the next lead."
           : "Waiting for RingCX to report the next lead."
       : authoritativeLogicsCaseIdNumber != null
       ? "Matched case loaded from Logics. Use the call-cycle buttons above to finish the attempt."
@@ -6151,12 +5375,9 @@ export function CXWorkspaceBulkLoad() {
   }
 
   const cxRouting = asRecord(data.ex?.cxRouting);
-  const freshLeadGate = asRecord(data.ex?.freshLeadGate);
-  const currentCallSnapshot = asRecord(data.ex?.currentCall);
   const cxDesiredAvailability = String(cxRouting.desiredAvailability || "").trim().toLowerCase();
-  const cxRoutingReason = String(cxRouting.reason || "").trim();
   const cxPauseType = String(cxRouting.pauseType || "").trim();
-  const cxBreakUsage = asRecord(cxRouting.breakUsage || freshLeadGate.breakUsage);
+  const cxBreakUsage = asRecord(cxRouting.breakUsage);
   const shortBreaksAllowed = Number(cxBreakUsage.shortBreaksAllowed ?? 2);
   const shortBreaksUsed = Number(cxBreakUsage.shortBreaksUsed ?? 0);
   const shortBreaksRemaining = Math.max(
@@ -6171,41 +5392,6 @@ export function CXWorkspaceBulkLoad() {
       - (Number.isFinite(mealBreaksUsed) ? mealBreaksUsed : 0),
     0,
   );
-  const currentCallChannel = String(currentCallSnapshot.channel || "").trim().toLowerCase();
-  const hasActiveExCall =
-    !internalCurrentCallSuppressed &&
-    currentCallChannel === "ex" &&
-    Boolean(
-      currentCallSnapshot.sessionId ||
-        currentCallSnapshot.telephonySessionId ||
-        currentCallSnapshot.from ||
-        currentCallSnapshot.to,
-    );
-  const freshLeadGateHasExSignal = Object.prototype.hasOwnProperty.call(freshLeadGate, "exCallActive");
-  const exCallGateActive = freshLeadGateHasExSignal
-    ? Boolean(freshLeadGate.exCallActive)
-    : hasActiveExCall || cxRoutingReason === "ex-busy";
-  const freshLeadBlocked =
-    typeof freshLeadGate.blocked === "boolean"
-      ? freshLeadGate.blocked
-      : exCallGateActive || cxDesiredAvailability === "unavailable";
-  const cxRoutingLabel =
-    String(freshLeadGate.label || "").trim() ||
-    (exCallGateActive
-      ? "Fresh leads paused: EX call"
-      : freshLeadBlocked
-        ? "Fresh leads paused"
-        : "Fresh leads allowed");
-  const cxRoutingTone = freshLeadBlocked ? "warning" : "success";
-  const cxRoutingHint =
-    String(freshLeadGate.detail || "").trim() ||
-    (exCallGateActive
-      ? "This agent is on an EX call, so fresh leads stay off until EX returns idle."
-      : freshLeadBlocked
-        ? "Manual pause keeps you out of CX lead serving."
-        : "EX is idle and this agent profile can receive CX leads.");
-  const exCallStateLabel = exCallGateActive ? "On EX call" : "Off EX call";
-  const cxRoutingReasonLabel = humanizeCxRoutingReason(cxRoutingReason);
   const cxAvailabilityPending =
     setCxStatus.isPending ||
     bulkPauseProgressive.isPending ||
@@ -6219,66 +5405,30 @@ export function CXWorkspaceBulkLoad() {
         breakType={breakPauseType}
         remaining={breakResumeRemaining}
         isResuming={cxAvailabilityPending}
-        isSigningOut={breakAutoLogoutRunning}
+        isSigningOut={breakTimeoutActionRunning}
         onResume={() => {
           void handleResumeWorkFromBreak();
         }}
         onSignOut={() => {
-          void handleBreakTimeoutLogout("manual-signout");
+          void handleBreakTimeoutAction("manual-signout");
         }}
       />
       <div className="flex min-h-[calc(100vh-6rem)] flex-col gap-4">
       {/* ─── TOP BAR: sticky routing controls ───────────────────────────── */}
+      {false ? (
       <div className="sticky top-0 z-30 -mx-4 border-b border-border bg-background/95 px-4 py-3 backdrop-blur supports-[backdrop-filter]:bg-background/80">
         <div className="flex flex-col gap-2 md:flex-row md:items-center">
-          <CxDomainSwitcher
-            domain={domain}
-            availableDomains={availableDomains}
-            onChange={(next) => {
-              // The switcher only drives queue + new-case
+          {/*
               // creation. It does NOT unload the active case — a
-              // resolved case is bound to its own tenant via the
-              // lookup result, so flipping the switcher to a different
-              // tenant does not change the loaded case's comms/actions.
-              setDomain(next);
-            }}
-          />
-        </div>
-        <div className="mt-2 flex flex-col gap-2 rounded-lg border border-border/70 bg-card/60 px-3 py-2 md:flex-row md:items-center md:justify-between">
-          <div className="min-w-0">
-            <div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-muted-foreground">
-              Lead serving
-            </div>
-            <div className="mt-1 flex flex-wrap items-center gap-2">
-              <StatusPill tone={cxRoutingTone} dotted>
-                {cxRoutingLabel}
-              </StatusPill>
-              <StatusPill tone={exCallGateActive ? "info" : "neutral"} dotted>
-                {exCallStateLabel}
-              </StatusPill>
-              {cxRoutingReasonLabel ? (
-                <span className="text-xs text-muted-foreground">{cxRoutingReasonLabel}</span>
-              ) : null}
-              {data.ex?.exTelephonyStatus ? (
-                <span className="text-[11px] text-muted-foreground">
-                  EX: {String(data.ex.exTelephonyStatus)}
-                </span>
-              ) : null}
-            </div>
-            <div className="mt-1 text-[11px] text-muted-foreground">{cxRoutingHint}</div>
-          </div>
-          <div className="flex flex-wrap gap-2">
+          */}
+          <div className="flex flex-wrap gap-2 md:ml-auto">
             {cxDesiredAvailability === "unavailable" ? (
               <Button
                 size="sm"
                 variant="primary"
                 isLoading={cxAvailabilityPending}
-                disabled={cxAvailabilityPending || (exCallGateActive && cxRoutingReason === "ex-busy")}
-                title={
-                  exCallGateActive && cxRoutingReason === "ex-busy"
-                    ? "EX call is active; CX lead serving reopens when EX returns idle."
-                    : undefined
-                }
+                disabled={cxAvailabilityPending}
+                title="Resume RingCX dialing."
                 onClick={() => void handleCxAvailabilityChange("available")}
               >
                 Resume
@@ -6289,13 +5439,11 @@ export function CXWorkspaceBulkLoad() {
                   size="sm"
                   variant="secondary"
                   isLoading={cxAvailabilityPending && cxPauseType === "short-break"}
-                  disabled={cxAvailabilityPending || shortBreaksRemaining <= 0 || freshLeadBlocked}
+                  disabled={cxAvailabilityPending || shortBreaksRemaining <= 0}
                   title={
                     shortBreaksRemaining <= 0
                       ? "Both 5 minute breaks are used for this work block."
-                      : freshLeadBlocked
-                        ? "Lead serving is already blocked."
-                        : "Start a 5 minute break."
+                      : "Start a 5 minute break."
                   }
                   onClick={() => void handleCxAvailabilityChange("unavailable", "short-break")}
                 >
@@ -6305,13 +5453,11 @@ export function CXWorkspaceBulkLoad() {
                   size="sm"
                   variant="secondary"
                   isLoading={cxAvailabilityPending && cxPauseType === "meal-break"}
-                  disabled={cxAvailabilityPending || mealBreaksRemaining <= 0 || freshLeadBlocked}
+                  disabled={cxAvailabilityPending || mealBreaksRemaining <= 0}
                   title={
                     mealBreaksRemaining <= 0
                       ? "The 15 minute break is used for this work block."
-                      : freshLeadBlocked
-                        ? "Lead serving is already blocked."
-                        : "Start a 15 minute break."
+                      : "Start a 15 minute break."
                   }
                   onClick={() => void handleCxAvailabilityChange("unavailable", "meal-break")}
                 >
@@ -6322,6 +5468,7 @@ export function CXWorkspaceBulkLoad() {
           </div>
         </div>
       </div>
+      ) : null}
 
       {/* ─── THREE-COLUMN BODY ──────────────────────────────────────────── */}
       <div className="flex flex-1 flex-col gap-4 lg:flex-row">
@@ -6355,27 +5502,6 @@ export function CXWorkspaceBulkLoad() {
                 <div className="flex items-center justify-between gap-2">
                   <CardTitle className="text-sm">CX queue</CardTitle>
                   <div className="flex items-center gap-1.5">
-                    <Button
-                      size="sm"
-                      variant="secondary"
-                      isLoading={bulkPreviewDialPending}
-                      disabled={
-                        !bulkRunning ||
-                        !bulkSessionId ||
-                        bulkRemainingQueue.length === 0 ||
-                        Boolean(bulkCurrent) ||
-                        queueAdvanceBlocking ||
-                        bulkPreviewDialPending
-                      }
-                      onClick={(event) => {
-                        consumeUiEvent(event);
-                        handleBulkPreviewFetchAndDial("queue-header");
-                      }}
-                      title="Requests RingCX to surface the next buffered campaign lead."
-                    >
-                      <Phone className="h-3.5 w-3.5" />
-                      Start queue
-                    </Button>
                     <div
                       className="inline-flex h-7 items-center gap-1 rounded-md border border-border bg-muted/30 px-2 text-[11px] font-medium text-muted-foreground"
                       title="Leads are served automatically from the top of the queue."
@@ -6385,24 +5511,19 @@ export function CXWorkspaceBulkLoad() {
                     </div>
                   </div>
                 </div>
-                <div className="flex items-center justify-between gap-2">
-                  <div className="min-w-0 truncate text-[10px] text-muted-foreground">
-                    {bulkQueueDebugLine}
-                  </div>
-                </div>
               </CardHeader>
               <CardContent>
                 {!bulk.data ? (
                   <EmptyState
                     icon={<Clock3 />}
-                    title="No bulk session"
-                    description="Load a RingCX buffer to start this rail."
+                    title="Waiting for RingCX"
+                    description="Dialing begins after the agent is off hook and RingCX surfaces the next lead."
                   />
                 ) : bulkRemainingQueue.length === 0 ? (
                   <EmptyState
                     icon={<Clock3 />}
-                    title="No buffered leads"
-                    description="RingCX has no accepted buffer rows to show."
+                    title="Waiting for leads"
+                    description="RingCX will surface the next accepted lead automatically."
                   />
                 ) : (
                   <div className="space-y-2">
@@ -6411,7 +5532,7 @@ export function CXWorkspaceBulkLoad() {
                         className="rounded-md border border-sky-500/30 bg-sky-500/10 px-2 py-1.5 text-[11px] text-sky-950 dark:text-sky-100"
                         role="status"
                       >
-                        Confirming next call. Buffer is held in place.
+                        Confirming next call. Dialing is held until RingCX reports the active lead.
                       </div>
                     ) : null}
                     <BulkBufferList items={bulkRemainingQueue} />
@@ -6447,7 +5568,7 @@ export function CXWorkspaceBulkLoad() {
                 <div className="flex min-w-0 flex-wrap items-center gap-2">
                   {(() => {
                     // Show the RESOLVED domain (where the lookup actually
-                    // landed), not just the active CX switcher. With the
+                    // landed), not just the fixed CX workspace fallback. With the
                     // WYNN→TAG fallback walk, the case can live in the
                     // OTHER tenant — and the badge needs to reflect that
                     // truth so the operator doesn't think a WYNN case
@@ -6464,7 +5585,7 @@ export function CXWorkspaceBulkLoad() {
                         )}
                         title={
                           mismatched
-                            ? `Matched in ${resolvedDomain} (CX switcher is on ${domain})`
+                            ? `Matched in ${resolvedDomain} (workspace fallback is ${domain})`
                             : undefined
                         }
                       >
@@ -6491,7 +5612,7 @@ export function CXWorkspaceBulkLoad() {
                   <span className="text-base text-muted-foreground">·</span>
                   <CardTitle className="text-base">{formHeading}</CardTitle>
                   {bulkShowingHeldCall ? (
-                    <StatusPill tone="warning">Last call</StatusPill>
+                    <StatusPill tone="warning">Review</StatusPill>
                   ) : null}
                   {bulk.data?.status !== "running" && detail?.status ? (
                     <StatusPill tone={toneFromStatus(detail.status)}>{detail.status}</StatusPill>
@@ -6501,29 +5622,6 @@ export function CXWorkspaceBulkLoad() {
                   ) : null}
                 </div>
                 <div className="flex flex-wrap items-center gap-1.5">
-                  {assignCaseId != null ? (
-                    <Button
-                      size="sm"
-                      variant="secondary"
-                      className="border-sky-500/40 bg-sky-600 text-white hover:bg-sky-700"
-                      isLoading={
-                        createAppointment.isPending ||
-                        assignCaseToMe.isPending ||
-                        disposition.isPending ||
-                        bulkPauseProgressive.isPending ||
-                        bulkResumeProgressive.isPending
-                      }
-                      disabled={bulkRunning ? !bulkDisplayCandidate : queueAdvanceBlocking}
-                      onClick={(event) => {
-                        consumeUiEvent(event);
-                        handleAppointmentModalOpen();
-                      }}
-                      title="Schedule a callback, or use the same modal for assign-to-me and postdate."
-                    >
-                      <CalendarPlus className="h-3.5 w-3.5" />
-                      Set appointment
-                    </Button>
-                  ) : null}
                   {bulkCanDispositionCurrent ? (
                     <Button
                       size="sm"
@@ -6581,7 +5679,7 @@ export function CXWorkspaceBulkLoad() {
                         consumeUiEvent(event);
                         submitQueueDisposition("voicemail", "Voicemail");
                       }}
-                      title="Mark the current bulk call as voicemail and advance to the next buffered lead."
+                      title="Mark the current bulk call as voicemail and advance to the next lead."
                     >
                       <MessageCircleMore className="h-3.5 w-3.5" />
                       Voicemail
@@ -6597,23 +5695,9 @@ export function CXWorkspaceBulkLoad() {
                         consumeUiEvent(event);
                         handleBulkSkip();
                       }}
-                      title="Skip this lead and move to the next buffered call."
+                      title="Skip this lead and move to the next call."
                     >
                       Skip
-                    </Button>
-                  ) : null}
-                  {bulk.data?.status === "running" ? (
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      isLoading={bulkKill.isPending}
-                      onClick={(event) => {
-                        consumeUiEvent(event);
-                        handleBulkClearSession();
-                      }}
-                      title="Stop the bulk session and cancel buffered leads."
-                    >
-                      Stop
                     </Button>
                   ) : null}
                 </div>
@@ -6691,114 +5775,6 @@ export function CXWorkspaceBulkLoad() {
               ) : null}
               <div className="text-[11px] text-muted-foreground">{formSubtitle}</div>
             </CardHeader>
-            {(wrapCardsQuery.data?.cards?.length ?? 0) > 0 ? (
-              <div className="border-t border-border/60 bg-muted/20 px-4 py-2 space-y-1.5">
-                <div className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
-                  Call wrap-up — answered today ({wrapCardsQuery.data?.cards.length})
-                </div>
-                {(wrapCardsQuery.data?.cards ?? []).map((card) => (
-                  <div
-                    key={card.idemKey}
-                    className="flex flex-wrap items-center gap-2 rounded-md border border-border bg-background px-2 py-1.5"
-                  >
-                    <div className="min-w-0 flex-1">
-                      <div className="truncate text-sm font-medium">{card.name || `Case ${card.caseId ?? "?"}`}</div>
-                      <div className="truncate text-[11px] text-muted-foreground">
-                        {card.caseId ? `Case ${card.caseId} · ` : ""}
-                        {card.calledAt ? new Date(card.calledAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : ""}
-                        {card.expiresAt ? ` · expires ${new Date(card.expiresAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}` : ""}
-                      </div>
-                      {card.coachSummary ? (
-                        <div className="mt-0.5 line-clamp-2 text-[11px] text-muted-foreground">{String(card.coachSummary)}</div>
-                      ) : null}
-                    </div>
-                    {wrapApptPicker[card.idemKey] !== undefined ? (
-                      <div className="flex items-center gap-1">
-                        <input
-                          type="datetime-local"
-                          className="h-8 rounded-md border border-border bg-background px-2 text-xs"
-                          value={wrapApptPicker[card.idemKey]}
-                          onChange={(event) => {
-                            const value = event.target.value;
-                            setWrapApptPicker((prev) => ({ ...prev, [card.idemKey]: value }));
-                          }}
-                        />
-                        <Button
-                          size="sm"
-                          variant="secondary"
-                          disabled={!wrapApptPicker[card.idemKey] || wrapResolve.isPending}
-                          onClick={(event) => {
-                            consumeUiEvent(event);
-                            void wrapResolve
-                              .mutateAsync({ idemKey: card.idemKey, action: "appointment", appointmentAt: wrapApptPicker[card.idemKey] })
-                              .then(() => setWrapApptPicker((prev) => {
-                                const next = { ...prev };
-                                delete next[card.idemKey];
-                                return next;
-                              }))
-                              .catch(() => null);
-                          }}
-                        >
-                          Book
-                        </Button>
-                        <Button
-                          size="sm"
-                          variant="ghost"
-                          onClick={(event) => {
-                            consumeUiEvent(event);
-                            setWrapApptPicker((prev) => {
-                              const next = { ...prev };
-                              delete next[card.idemKey];
-                              return next;
-                            });
-                          }}
-                        >
-                          Cancel
-                        </Button>
-                      </div>
-                    ) : (
-                      <div className="flex items-center gap-1">
-                        <Button
-                          size="sm"
-                          variant="destructive"
-                          disabled={wrapResolve.isPending}
-                          title="Do not call — stops every channel; the call record still files"
-                          onClick={(event) => {
-                            consumeUiEvent(event);
-                            void wrapResolve.mutateAsync({ idemKey: card.idemKey, action: "dnc" }).catch(() => null);
-                          }}
-                        >
-                          DNC
-                        </Button>
-                        <Button
-                          size="sm"
-                          variant="secondary"
-                          disabled={wrapResolve.isPending}
-                          onClick={(event) => {
-                            consumeUiEvent(event);
-                            setWrapApptPicker((prev) => ({ ...prev, [card.idemKey]: "" }));
-                          }}
-                        >
-                          Appointment
-                        </Button>
-                        <Button
-                          size="sm"
-                          variant="ghost"
-                          disabled={wrapResolve.isPending}
-                          title="No action needed — the call record still files"
-                          onClick={(event) => {
-                            consumeUiEvent(event);
-                            void wrapResolve.mutateAsync({ idemKey: card.idemKey, action: "dismiss" }).catch(() => null);
-                          }}
-                        >
-                          ✕
-                        </Button>
-                      </div>
-                    )}
-                  </div>
-                ))}
-              </div>
-            ) : null}
             <CardContent
               className={cn(
                 "space-y-2 pt-0 transition-opacity",
@@ -7159,6 +6135,118 @@ export function CXWorkspaceBulkLoad() {
         {/* ── RIGHT: appointments + Logics context ──────────────────────── */}
         <aside className="flex-shrink-0 lg:w-[370px]">
           <div className="lg:sticky lg:top-20 space-y-4">
+            {(wrapCardsQuery.data?.cards?.length ?? 0) > 0 ? (
+              <Card>
+                <CardHeader>
+                  <CardTitle className="flex items-center gap-2 text-sm">
+                    Call wrap-up — answered today ({wrapCardsQuery.data?.cards.length})
+                  </CardTitle>
+                </CardHeader>
+                <CardContent className="space-y-1.5">
+                {(wrapCardsQuery.data?.cards ?? []).map((card) => (
+                  <div
+                    key={card.idemKey}
+                    className="flex flex-wrap items-center gap-2 rounded-md border border-border bg-background px-2 py-1.5"
+                  >
+                    <div className="min-w-0 flex-1">
+                      <div className="truncate text-sm font-medium">{card.name || `Case ${card.caseId ?? "?"}`}</div>
+                      <div className="truncate text-[11px] text-muted-foreground">
+                        {card.caseId ? `Case ${card.caseId} · ` : ""}
+                        {card.calledAt ? new Date(card.calledAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : ""}
+                        {card.expiresAt ? ` · expires ${new Date(card.expiresAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}` : ""}
+                      </div>
+                      {card.coachSummary ? (
+                        <div className="mt-0.5 line-clamp-2 text-[11px] text-muted-foreground">{String(card.coachSummary)}</div>
+                      ) : null}
+                    </div>
+                    {wrapApptPicker[card.idemKey] !== undefined ? (
+                      <div className="flex items-center gap-1">
+                        <input
+                          type="datetime-local"
+                          className="h-8 rounded-md border border-border bg-background px-2 text-xs"
+                          value={wrapApptPicker[card.idemKey]}
+                          onChange={(event) => {
+                            const value = event.target.value;
+                            setWrapApptPicker((prev) => ({ ...prev, [card.idemKey]: value }));
+                          }}
+                        />
+                        <Button
+                          size="sm"
+                          variant="secondary"
+                          disabled={!wrapApptPicker[card.idemKey] || wrapResolve.isPending}
+                          onClick={(event) => {
+                            consumeUiEvent(event);
+                            void wrapResolve
+                              .mutateAsync({ idemKey: card.idemKey, action: "appointment", appointmentAt: wrapApptPicker[card.idemKey] })
+                              .then(() => setWrapApptPicker((prev) => {
+                                const next = { ...prev };
+                                delete next[card.idemKey];
+                                return next;
+                              }))
+                              .catch(() => null);
+                          }}
+                        >
+                          Book
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          onClick={(event) => {
+                            consumeUiEvent(event);
+                            setWrapApptPicker((prev) => {
+                              const next = { ...prev };
+                              delete next[card.idemKey];
+                              return next;
+                            });
+                          }}
+                        >
+                          Cancel
+                        </Button>
+                      </div>
+                    ) : (
+                      <div className="flex items-center gap-1">
+                        <Button
+                          size="sm"
+                          variant="destructive"
+                          disabled={wrapResolve.isPending}
+                          title="Do not call — stops every channel; the call record still files"
+                          onClick={(event) => {
+                            consumeUiEvent(event);
+                            void wrapResolve.mutateAsync({ idemKey: card.idemKey, action: "dnc" }).catch(() => null);
+                          }}
+                        >
+                          DNC
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="secondary"
+                          disabled={wrapResolve.isPending}
+                          onClick={(event) => {
+                            consumeUiEvent(event);
+                            setWrapApptPicker((prev) => ({ ...prev, [card.idemKey]: "" }));
+                          }}
+                        >
+                          Appointment
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          disabled={wrapResolve.isPending}
+                          title="No action needed — the call record still files"
+                          onClick={(event) => {
+                            consumeUiEvent(event);
+                            void wrapResolve.mutateAsync({ idemKey: card.idemKey, action: "dismiss" }).catch(() => null);
+                          }}
+                        >
+                          ✕
+                        </Button>
+                      </div>
+                    )}
+                  </div>
+                ))}
+                </CardContent>
+              </Card>
+            ) : null}
             <SharedAppointmentList
               appointments={appointmentItems}
               onCallNow={handleCallAppointmentNow}
@@ -7180,27 +6268,6 @@ export function CXWorkspaceBulkLoad() {
         </aside>
       </div>
 
-      {/* ─── Modals ───────────────────────────────────────────────────── */}
-      <AppointmentModal
-        open={appointmentModalOpen}
-        onClose={handleAppointmentModalClose}
-        caseId={assignCaseId != null ? String(assignCaseId) : null}
-        prospectName={`${form.firstName} ${form.lastName}`.trim() || selected?.name || ""}
-        phone={form.cellPhone || selectedPhone || currentCallPhone || ""}
-        sourceName={form.sourceName || selected?.source || ""}
-                      isLoading={
-                        createAppointment.isPending ||
-                        assignCaseToMe.isPending ||
-                        bulkAppointmentWrap.isPending ||
-                        disposition.isPending ||
-                        bulkDisposition.isPending ||
-                        bulkPauseProgressive.isPending ||
-                        bulkResumeProgressive.isPending
-                      }
-        canAssign={assignCaseId != null}
-        canPostdate={SHOW_POSTDATE_DISPOSITION && dispositionCaseId != null}
-        onSubmit={handleAppointmentSubmit}
-      />
       </div>
     </>
   );

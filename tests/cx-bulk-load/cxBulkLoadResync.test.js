@@ -404,3 +404,60 @@ test("WRAP JANITOR: unresolved wraps default to a 30-minute auto-resolve; explic
     else process.env.CX_BULK_WRAP_TIMEOUT_MS = prior;
   }
 });
+
+test("SYS-DISPO CLASSIFIER: when RingCX was READ its verdict is total — ANSWER vs the gamut; only a FAILED read keeps the guard", () => {
+  const { applySysDispoClassifier } = require("../../packages/shared-services/src/cxAccountActiveCallWatcherService");
+  const on = { enabled: true };
+  // downgrade: the guard approved a long screener/VM; RingCX says MACHINE
+  assert.equal(applySysDispoClassifier("answered", "MACHINE", on), "did_not_connect");
+  assert.equal(applySysDispoClassifier("answered", "NOANSWER", on), "did_not_connect");
+  // upgrade: the guard downgraded a short real conversation; RingCX says it was answered.
+  // ANSWER is the ONLY wrap-up token in the official closed vocabulary (2026-07-07).
+  assert.equal(applySysDispoClassifier("did_not_connect", "ANSWER", on), "answered");
+  assert.equal(applySysDispoClassifier("did_not_connect", "APP_DNC", on), "did_not_connect");
+  assert.equal(applySysDispoClassifier("answered", "DISCONNECT", on), "did_not_connect");
+  assert.equal(applySysDispoClassifier("answered", "INBOUND_CALLBACK", on), "did_not_connect");
+  // agreement
+  assert.equal(applySysDispoClassifier("answered", "ANSWER", on), "answered");
+  assert.equal(applySysDispoClassifier("did_not_connect", "CONGESTION", on), "did_not_connect");
+  // Mickey's gamut rule (tightened 2026-07-07: "we should have no no-label — we will see
+  // something every time"): a CLEAN read with no label IS the no-answer verdict, and
+  // unknown vocabulary is still not-ANSWER. There is no third routing outcome.
+  assert.equal(applySysDispoClassifier("answered", null, on), "did_not_connect");
+  assert.equal(applySysDispoClassifier("did_not_connect", null, on), "did_not_connect");
+  assert.equal(applySysDispoClassifier("answered", "SOME_NEW_TOKEN", on), "did_not_connect");
+  assert.equal(applySysDispoClassifier("did_not_connect", "SOME_NEW_TOKEN", on), "did_not_connect");
+  // THE ONE SURVIVOR of the old fallback: read=false = API error/timeout = OUR blindness,
+  // not RingCX silence. The guard verdict stands, so an RC blip can never mass-downgrade
+  // real conversations (and can never upgrade on a label we didn't actually read).
+  assert.equal(applySysDispoClassifier("answered", null, { enabled: true, read: false }), "answered");
+  assert.equal(applySysDispoClassifier("did_not_connect", null, { enabled: true, read: false }), "did_not_connect");
+  assert.equal(applySysDispoClassifier("did_not_connect", "ANSWER", { enabled: true, read: false }), "did_not_connect");
+  // flag off (today's default): byte-for-byte the guard's verdict
+  assert.equal(applySysDispoClassifier("answered", "MACHINE", { enabled: false }), "answered");
+  assert.equal(applySysDispoClassifier("answered", null, { enabled: false }), "answered");
+  assert.equal(applySysDispoClassifier("did_not_connect", "ANSWER", {}), "did_not_connect");
+  // voicemail/other outcomes are never touched
+  assert.equal(applySysDispoClassifier("voicemail", "ANSWER", on), "voicemail");
+  assert.equal(applySysDispoClassifier("voicemail", null, on), "voicemail");
+});
+
+test("THE CLOSED VOCABULARY: all 15 official RingCX system dispositions classify — ANSWER alone routes to wrap-up", () => {
+  const { applySysDispoClassifier } = require("../../packages/shared-services/src/cxAccountActiveCallWatcherService");
+  const OFFICIAL = [
+    "ANSWER", "NOANSWER", "BUSY", "MACHINE", "INTERCEPT", "DISCONNECT", "ABANDON",
+    "CONGESTION", "MANUAL_PASS", "INBOUND_CALLBACK", "APP_DNC", "APP_REQUEUE",
+    "APP_REQUEUE_COMPLETE", "APP_REQUEUE_ABANDON", "INBOUND_ABANDON",
+  ];
+  for (const token of OFFICIAL) {
+    const fromAnswered = applySysDispoClassifier("answered", token, { enabled: true });
+    const fromNoAnswer = applySysDispoClassifier("did_not_connect", token, { enabled: true });
+    if (token === "ANSWER") {
+      assert.equal(fromAnswered, "answered", `${token} from answered`);
+      assert.equal(fromNoAnswer, "answered", `${token} upgrades`);
+    } else {
+      assert.equal(fromAnswered, "did_not_connect", `${token} downgrades`);
+      assert.equal(fromNoAnswer, "did_not_connect", `${token} stays no-answer`);
+    }
+  }
+});

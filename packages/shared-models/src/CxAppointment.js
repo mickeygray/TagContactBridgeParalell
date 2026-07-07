@@ -44,6 +44,10 @@ const cxAppointmentSchema = new mongoose.Schema(
     appointmentAt: { type: Date, required: true, index: true },
     appointmentTimezone: { type: String, default: "America/Los_Angeles" },
     legalDialAt: { type: Date, required: true, index: true },
+    // The cxapt lane's RingCX dispatch claim/receipt (2026-07-07): stamped by the clock
+    // dispatcher exactly once (CAS on null), never by the app-side fire flow. Declared
+    // because strict mode silently strips undeclared paths (the dead-replay-guard lesson).
+    rcxDispatch: { type: mongoose.Schema.Types.Mixed, default: null },
     legalDialTimezone: { type: String, default: "America/Los_Angeles" },
     legalDialReason: { type: String, default: null },
 

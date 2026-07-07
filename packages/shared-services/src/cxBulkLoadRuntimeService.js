@@ -794,17 +794,6 @@ function createCxBulkLoadRuntimeService(deps = {}) {
     return sanitizeSession(state);
   }
 
-  // Compatibility endpoint only. The browser should never project RingCX state,
-  // write terminals, or refill from here; the account watcher is the single
-  // active-call writer. Keep this as a read so old callers do not fail.
-  async function watchCxBulkLoadSession(input = {}) {
-    const state = await loadState(input.sessionId);
-    traceBulkFlow("watch.read_only", state || {}, {
-      sessionId: input.sessionId || null,
-      busy: isSessionBusy(input.sessionId),
-    });
-    return sanitizeSession(state);
-  }
   // Close the current call. Terminal executor -> single terminal write -> complete.
   // RingCX advances to the next buffered lead; the next watch picks it up.
   async function submitCxBulkLoadDisposition(input = {}) {
@@ -1033,7 +1022,6 @@ function createCxBulkLoadRuntimeService(deps = {}) {
       reduce,
       queueStateAdapter,
       outcomeAdapter,
-      agentLifecycleAdapter,
       skipSessionIds: Array.from(busySessionCounts.keys()),
       isSessionBusy,
       applySessionMutation: withSessionApply,
@@ -1060,7 +1048,6 @@ function createCxBulkLoadRuntimeService(deps = {}) {
   return {
     startCxBulkLoadSession,
     getCxBulkLoadSession,
-    watchCxBulkLoadSession,
     watchAccountActiveCalls,
     submitCxBulkLoadDisposition,
     startCxBulkLoadGetLeads,

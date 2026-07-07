@@ -124,6 +124,14 @@ const leadCadenceSchema = new mongoose.Schema(
       cxDailyCalls: { type: Number, default: 0 },
       cxMonthlyMonthKey: { type: String, default: null },
       cxMonthlyCalls: { type: Number, default: 0 },
+      // THE STRICT-SCHEMA LESSON, third strike (audit 2026-07-07): these two paths were
+      // written by the drain since 2026-06/07 but never declared — mongoose strict mode
+      // silently stripped them from their own $set, which made the June replay-drift
+      // guard ($ne CAS on lastCxTerminalCountedUii) DEAD CODE: the field never persisted,
+      // the guard always passed, and partial-apply replays could re-increment counters
+      // unbounded. Declaring them is the entire fix.
+      lastCxTerminalCountedUii: { type: String, default: null },
+      lastCxDncAt: { type: Date, default: null },
     },
     firstContactRequestedAt: { type: Date, default: null },
     firstContactEventId: { type: String, default: null },
