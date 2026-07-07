@@ -746,11 +746,9 @@ test("#2 E11000 on create (DB backstop) retires the conflict and retries instead
 });
 
 test("#11 a held busy flag makes the watcher SKIP the session, preserving current across a wrap (no deadlock)", async () => {
-  // The appointment-wrap race: while the wrap commits the Logics appointment, a watcher tick that
-  // sees the call released would clear state.current -> the terminal becomes a no-op (missing-current)
-  // and the wrap strands resume after an already-committed appointment. markSessionBusy holds the
-  // watcher-skip flag for the whole wrap so current survives, and (being a counter, not the serializer
-  // tail) the inner disposition's withSessionMutation still runs without self-deadlock.
+  // Wrap work can still take longer than a watcher tick. markSessionBusy holds the watcher-skip flag
+  // while that work runs, so current survives, and the inner disposition's withSessionMutation still
+  // runs without self-deadlock.
   const liveCalls = { value: [] };
   const { svc } = build(liveCalls);
   await svc.startCxBulkLoadSession({ agentEmail: "a@x.com", domain: "TAG", ringcx: { accountId: "acct1", campaignId: "camp1" }, targetSize: 2, refillThreshold: 1 });

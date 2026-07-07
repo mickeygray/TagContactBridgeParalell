@@ -20,7 +20,6 @@ const {
   queueItemRepository,
   userAccountRepository,
 } = require("../../shared-repositories/src");
-const { createCxAppointment } = require("./cxAppointmentService");
 
 const leadSource = require("./cxBulkLoadLeadSourceService");
 const publisher = require("./cxBulkLoadRingcxPublisher");
@@ -36,11 +35,6 @@ const { resolveCaseContactEligibility } = require("./contactEligibilityService")
 const { handleCxTerminalCallOutcome, resolveRingcxPublishedCopies } = require("./cxCadenceService");
 const { cancelPublishedQueueItemInRingcx } = require("./ringcxLeadServingService");
 const { executeCxHangupRequest } = require("./ringcxDialExecutionService");
-const {
-  executeCxAppointmentWorkbenchActions,
-  executeCxLogicsUpdateCase,
-  requestCxAssignCaseToMe,
-} = require("./cxWorkspaceService");
 
 function readEnv(name, fallback = "") {
   const v = process.env[name];
@@ -697,34 +691,6 @@ function makeHttpError(message, status = 400, code = null) {
   error.status = status;
   if (code) error.code = code;
   return error;
-}
-
-function readErrorMessage(error) {
-  return error && error.message ? error.message : String(error);
-}
-
-function readErrorStatus(error) {
-  return error?.status || error?.statusCode || error?.response?.status || null;
-}
-
-async function safeBulkAppointmentStep(executor, fallback = {}, map = (value) => ({ result: value })) {
-  try {
-    const mapped = map(await executor()) || {};
-    const step = {
-      ...fallback,
-      ...mapped,
-    };
-    if (step.ok == null && step.skipped !== true) step.ok = true;
-    return step;
-  } catch (error) {
-    return {
-      ...fallback,
-      ok: false,
-      skipped: false,
-      error: readErrorMessage(error),
-      status: readErrorStatus(error),
-    };
-  }
 }
 
 function bulkSessionBelongsToAgent(session = {}, agent = {}) {
@@ -1496,236 +1462,6 @@ async function submitCxBulkLoadDisposition(input = {}, options = {}) {
   });
 }
 
-async function submitCxBulkLoadAppointmentWrap(input = {}, options = {}) {
-  const agent = await resolveAgentContext(input, options.user || {});
-  assertBulkRuntime(agent);
-  const session = await resolveOwnedBulkSession(input, agent);
-  if (!session) return null;
-  if (String(session.status || "") !== "running") {
-    throw makeHttpError("Bulk-load session is not running", 409, "cx-bulk-load-session-not-running");
-  }
-  const current = session.current && typeof session.current === "object" ? session.current : {};
-  const resolvedCaseId = Number(
-    input.caseId ??
-      input.CaseID ??
-      current.caseId,
-  );
-  if (!Number.isFinite(resolvedCaseId) || resolvedCaseId <= 0) {
-    throw makeHttpError("Bulk-load appointment requires a valid caseId", 400, "cx-bulk-load-appointment-case-required");
-  }
-
-  // #11: hold the session busy for the WHOLE wrap (try/finally below) so the account watcher SKIPS it
-  // and cannot clear state.current during the multi-second Logics appointment commit — which would
-  // make the terminal disposition a no-op (missing-current) and strand resume after an
-  // already-committed appointment. Busy-counter only (no serializer tail), so the inner
-  // submitCxBulkLoadDisposition's withSessionMutation still runs (empty tail) — no self-deadlock.
-  const releaseBusy = getService().markSessionBusy(session.sessionId);
-  try {
-  const domain = normalizeDomain(input.domain || current.domain || session.domain || agent.account?.company);
-  const result = {
-    ok: true,
-    session,
-    appointment: {
-      ok: false,
-      skipped: true,
-      reason: "not-attempted",
-    },
-    workbench: {
-      skipped: true,
-      reason: "not-attempted",
-    },
-    assign: {
-      skipped: true,
-      reason: "not-requested",
-    },
-    postdate: {
-      skipped: true,
-      reason: "not-requested",
-    },
-    terminal: {
-      skipped: true,
-      reason: "not-attempted",
-    },
-    resume: {
-      skipped: true,
-      reason: "not-attempted",
-    },
-  };
-
-  const appointmentStep = await safeBulkAppointmentStep(
-    () => createCxAppointment(domain, options.user || {}, {
-      caseId: resolvedCaseId,
-      appointmentDate: input.appointmentDate,
-      appointmentTime: input.appointmentTime,
-      appointmentTimezone: input.appointmentTimezone,
-      note: input.note,
-      phone: input.phone || current.phone || null,
-      searchPhone: input.searchPhone || current.phone || current.searchPhone || null,
-      prospectName: input.prospectName || current.name || null,
-      sourceName: input.sourceName || current.sourceName || current.intakeSource || null,
-      queueItemId: input.queueItemId || current.queueItemId || current.queueTicketId || null,
-      queueTicketId: input.queueTicketId || input.queueItemId || current.queueTicketId || current.queueItemId || null,
-      queueActionKey: input.queueActionKey || current.queueActionKey || null,
-      assignedExtensionId: input.assignedExtensionId || null,
-    }),
-    {
-      ok: false,
-      skipped: false,
-      reason: "appointment-create-failed",
-    },
-    (appointmentResult) => ({
-      ok: appointmentResult?.ok !== false,
-      skipped: false,
-      reason: appointmentResult?.reason || null,
-      error: appointmentResult?.error || null,
-      status: appointmentResult?.status || null,
-      result: appointmentResult,
-    }),
-  );
-  result.appointment = appointmentStep;
-  if (appointmentStep.ok !== true) {
-    result.ok = false;
-    return result;
-  }
-
-  const appointmentResult = appointmentStep.result;
-  result.workbench = await safeBulkAppointmentStep(
-    () => executeCxAppointmentWorkbenchActions(domain, options.user || {}, appointmentResult),
-    {
-      ok: false,
-      reason: "workbench-failed",
-    },
-    (workbenchResult) => ({
-      ok: workbenchResult?.ok !== false,
-      skipped: workbenchResult?.skipped === true,
-      reason: workbenchResult?.reason || null,
-      task: workbenchResult?.task || null,
-      activity: workbenchResult?.activity || null,
-      error: workbenchResult?.error || null,
-      details: workbenchResult?.details || null,
-    }),
-  );
-
-  if (input.assignToMe === true) {
-    result.assign = await safeBulkAppointmentStep(
-      () => requestCxAssignCaseToMe(domain, options.user || {}, {
-        caseId: resolvedCaseId,
-        note: input.note,
-      }),
-      {
-        ok: false,
-        skipped: false,
-        reason: "assign-failed",
-      },
-      (assignResult) => ({
-        ok: assignResult?.ok !== false,
-        skipped: false,
-        reason: assignResult?.reason || null,
-        error: assignResult?.error || null,
-        status: assignResult?.status || null,
-        result: assignResult,
-      }),
-    );
-  } else {
-    result.assign = { skipped: true, reason: "not-requested" };
-  }
-
-  if (input.postdate === true) {
-    result.postdate = await safeBulkAppointmentStep(
-      () => executeCxLogicsUpdateCase(domain, options.user || {}, {
-        caseId: resolvedCaseId,
-        CaseID: resolvedCaseId,
-        status: "post-date",
-        skipQueueFinalize: true,
-        notes: input.note,
-      }),
-      {
-        ok: false,
-        skipped: false,
-        reason: "postdate-failed",
-      },
-      (postdateResult) => ({
-        ok: postdateResult?.ok !== false,
-        skipped: postdateResult?.skipped === true,
-        reason: postdateResult?.reason || null,
-        error: postdateResult?.error || null,
-        status: postdateResult?.status || null,
-        result: postdateResult,
-      }),
-    );
-  } else {
-    result.postdate = { skipped: true, reason: "not-requested" };
-  }
-
-  result.terminal = await safeBulkAppointmentStep(
-    () => submitCxBulkLoadDisposition({
-      sessionId: session.sessionId,
-      disposition: "answered",
-      notes: input.note,
-    }, options),
-    {
-      ok: false,
-      skipped: false,
-      dispositionOk: false,
-      reason: "terminal-disposition-failed",
-    },
-    (terminal) => ({
-      ok: terminal?.dispositionOk === true,
-      dispositionOk: terminal?.dispositionOk === true,
-      skipped: terminal == null,
-      reason: terminal == null
-        ? "terminal-missing"
-        : terminal?.terminal?.reason || terminal?.reason || null,
-      error: terminal?.terminal?.error || terminal?.error || null,
-      status: terminal?.terminal?.status || terminal?.status || null,
-      result: terminal || null,
-    }),
-  );
-  const terminal = result.terminal.result;
-  result.session = terminal || session;
-
-  if (result.terminal.dispositionOk !== true) {
-    result.ok = false;
-    // #11: distinguish "appointment already committed in Logics but the terminal could not finalize
-    // (e.g. current was cleared just before we locked the session)" from a clean failure — so the
-    // caller can retry the terminal/resume instead of treating the appointment as lost.
-    const appointmentCommitted = result.appointment && result.appointment.ok === true;
-    const terminalReason = result.terminal.reason || result.terminal.error || "terminal-rejected";
-    if (appointmentCommitted) result.appointmentCommittedTerminalDeferred = true;
-    result.resume = {
-      skipped: true,
-      reason: appointmentCommitted ? `appointment-committed-terminal-deferred:${terminalReason}` : terminalReason,
-    };
-    return result;
-  }
-
-  result.resume = await safeBulkAppointmentStep(
-    () => resumeCxBulkLoadProgressiveDialing({
-      sessionId: session.sessionId,
-      reason: "bulk-appointment-wrap-complete",
-    }, options),
-    {
-      ok: false,
-      reason: "progressive-resume-failed",
-    },
-    (resume) => ({
-      ok: resume?.ok === true,
-      resumed: resume?.resumed === true,
-      restored: resume?.restored === true,
-      skipped: resume == null,
-      error: resume?.error || null,
-      reason: resume?.reason || null,
-      status: resume?.status || null,
-    }),
-  );
-  if (!result.resume.ok) result.ok = false;
-  return result;
-  } finally {
-    // #11: always release the busy hold so the watcher resumes managing this session.
-    releaseBusy();
-  }
-}
-
 async function submitCxBulkLoadReviewOutcome(input = {}, options = {}) {
   const agent = await resolveAgentContext(input, options.user || {});
   assertBulkRuntime(agent);
@@ -1838,7 +1574,6 @@ module.exports = {
   resumeCxBulkLoadProgressiveDialing,
   skipCxBulkLoadCurrent,
   submitCxBulkLoadReviewOutcome,
-  submitCxBulkLoadAppointmentWrap,
   killCxBulkLoadSession,
   _test: {
     bulkOutcomeDisposition,

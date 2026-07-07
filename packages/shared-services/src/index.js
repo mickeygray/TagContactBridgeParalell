@@ -306,7 +306,6 @@ const {
   startCxBulkLoadSession,
   submitCxBulkLoadDisposition,
   submitCxBulkLoadReviewOutcome,
-  submitCxBulkLoadAppointmentWrap,
   watchCxBulkLoadAccountActiveCalls,
 } = require("./cxBulkLoadRuntime");
 const {
@@ -1118,7 +1117,6 @@ module.exports = {
   startCxBulkLoadSession,
   submitCxBulkLoadDisposition,
   submitCxBulkLoadReviewOutcome,
-  submitCxBulkLoadAppointmentWrap,
   watchCxBulkLoadAccountActiveCalls,
   buildCxAccountActiveCallWatchPlan,
   runCxAccountActiveCallWatchOnce,

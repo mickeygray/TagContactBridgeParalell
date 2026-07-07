@@ -347,20 +347,22 @@ Validation:
 
 ### 6. Dead `/appointment-wrap` Freeze Route: Server/API Cut Only
 
+Status 2026-07-07:
+- Cut complete in this pass. The retired client hook/type, HTTP route, runtime command, shared exports, and stale appointment-wrap test wording were removed.
+- Proof recorded in `docs/CX_DELETE_RUN_FLEET_OUTCOMES_2026-07-07.md` under "Pass 2: Appointment-Wrap Command Cut".
+- Validation complete: retired-path search returned zero active hits, route/runtime syntax passed, delete-run fleet passed 3/0, focused bulk/wrap suite passed 70/0, and web typecheck/build passed.
+
 Current state:
 - The old live-call appointment-freeze hook is not imported by `CXWorkspaceBulkLoad.tsx` anymore.
 - The visible appointment action at `apps/web-client/src/workspaces/cx/CXWorkspaceBulkLoad.tsx:6180` is the wrap-card survivor: `wrapResolve.mutateAsync({ action: "appointment", appointmentAt })`.
 - `SharedAppointmentList` at `apps/web-client/src/workspaces/cx/CXWorkspaceBulkLoad.tsx:6250` through `6257` is the existing appointment list/call-now surface, not the old appointment-wrap creator.
 
-Cut set:
-- `apps/web-client/src/lib/api/queries/cxBulkLoad.ts:84` through `108`: remove `CxBulkLoadAppointmentWrapResult` after no hooks use it.
-- `apps/web-client/src/lib/api/queries/cxBulkLoad.ts:179` through `194`: remove `useCxBulkLoadAppointmentWrap`.
-- `apps/control-plane/src/routes/cxBulkLoad.js:14`: remove `submitCxBulkLoadAppointmentWrap` import.
-- `apps/control-plane/src/routes/cxBulkLoad.js:144` through `152`: remove or tombstone `/appointment-wrap`.
-- `packages/shared-services/src/cxBulkLoadRuntime.js:1499` through `1727`: remove `submitCxBulkLoadAppointmentWrap`.
-- `packages/shared-services/src/cxBulkLoadRuntime.js:1841`: remove it from module exports.
-- `packages/shared-services/src/index.js:300` and `1105`: remove import/export.
-- `tests/cx-bulk-load/cxBulkLoadRuntimeService.test.js:749` and nearby appointment-wrap race tests become obsolete unless they are rewritten around wrap-card appointment resolution.
+Cut set removed:
+- `apps/web-client/src/lib/api/queries/cxBulkLoad.ts`: `CxBulkLoadAppointmentWrapResult` and `useCxBulkLoadAppointmentWrap`.
+- `apps/control-plane/src/routes/cxBulkLoad.js`: `/appointment-wrap` route and import.
+- `packages/shared-services/src/cxBulkLoadRuntime.js`: `submitCxBulkLoadAppointmentWrap` implementation/export.
+- `packages/shared-services/src/index.js`: `submitCxBulkLoadAppointmentWrap` barrel import/export.
+- `tests/cx-bulk-load/cxBulkLoadRuntimeService.test.js`: stale appointment-wrap-specific wording around the busy-session watcher test.
 
 Survivors:
 - `apps/web-client/src/workspaces/cx/CXWorkspaceBulkLoad.tsx:6180` wrap-card appointment resolution.

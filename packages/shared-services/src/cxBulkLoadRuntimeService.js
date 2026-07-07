@@ -343,7 +343,7 @@ function createCxBulkLoadRuntimeService(deps = {}) {
   }
 
   // #11: hold the per-session BUSY counter (the watcher-skip signal) WITHOUT the serializer tail, so
-  // a long external sequence (the appointment wrap's Logics commit) can keep the account watcher from
+  // a long external sequence can keep the account watcher from
   // clearing state.current mid-flight. Because it does NOT chain sessionOperationTails, an inner
   // withSessionMutation on the same sessionId still runs (empty tail) — no self-deadlock. Returns an
   // idempotent release the caller MUST invoke (try/finally).
@@ -1053,7 +1053,7 @@ function createCxBulkLoadRuntimeService(deps = {}) {
     startCxBulkLoadGetLeads,
     skipCxBulkLoadCurrent,
     killCxBulkLoadSession,
-    markSessionBusy, // #11: appointment wrap holds this across its Logics commit
+    markSessionBusy, // #11: long wrap work can hold this while preserving current
     // exposed for tests/diagnostics
     _fillBuffer: fillBuffer,
   };

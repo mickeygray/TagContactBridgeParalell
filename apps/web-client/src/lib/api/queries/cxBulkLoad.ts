@@ -60,14 +60,6 @@ export interface CxBulkLoadReviewOutcomeResult {
   outcome?: string | null;
 }
 
-export interface CxBulkLoadSideEffectStatus {
-  ok?: boolean;
-  skipped?: boolean;
-  reason?: string | null;
-  error?: string;
-  status?: number | null;
-}
-
 export interface CxBulkLoadSideEffectResult {
   ok?: boolean;
   skipped?: boolean;
@@ -79,32 +71,6 @@ export interface CxBulkLoadSideEffectResult {
   restoreScheduled?: boolean;
   holdUntilResume?: boolean;
   pauseMs?: number | null;
-}
-
-export interface CxBulkLoadAppointmentWrapResult {
-  ok: boolean;
-  session: CxBulkLoadSession | null;
-  appointment: CxBulkLoadSideEffectStatus & {
-    result?: Record<string, unknown> | null;
-  };
-  workbench: CxBulkLoadSideEffectStatus & {
-    task?: Record<string, unknown> | null;
-    activity?: Record<string, unknown> | null;
-  };
-  assign: CxBulkLoadSideEffectStatus & {
-    result?: Record<string, unknown> | null;
-  };
-  postdate: CxBulkLoadSideEffectStatus & {
-    result?: Record<string, unknown> | null;
-  };
-  terminal: CxBulkLoadSideEffectStatus & {
-    dispositionOk?: boolean;
-    result?: Record<string, unknown> | null;
-  };
-  resume: CxBulkLoadSideEffectStatus & {
-    resumed?: boolean;
-    restored?: boolean;
-  };
 }
 
 function bulkLoadQueryKey(agentEmail?: string | null) {
@@ -176,23 +142,6 @@ export const useCxBulkLoadPauseProgressive = buildBulkLoadSideEffectHook("pause-
 export const useCxBulkLoadResumeProgressive = buildBulkLoadSideEffectHook("resume-progressive");
 export const useCxBulkLoadSkip = buildBulkLoadCommandHook("skip");
 export const useCxBulkLoadKill = buildBulkLoadCommandHook("kill");
-export const useCxBulkLoadAppointmentWrap = () => {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: (body: Record<string, unknown> = {}) =>
-      api
-        .post<{ ok: true; result: CxBulkLoadAppointmentWrapResult }>("/api/cx/bulk-load/appointment-wrap", body)
-        .then((r) => r.result),
-    onSuccess: (result, vars) => {
-      const agentEmail = typeof vars?.agentEmail === "string" ? vars.agentEmail : null;
-      if (result?.session) {
-        qc.setQueryData(bulkLoadQueryKey(agentEmail), result.session);
-      }
-      invalidateBulkLoad(qc, agentEmail);
-    },
-  });
-};
-
 export function useCxBulkLoadReviewOutcome() {
   const qc = useQueryClient();
   return useMutation({

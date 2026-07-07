@@ -11,7 +11,6 @@ const {
   startCxBulkLoadSession,
   submitCxBulkLoadDisposition,
   submitCxBulkLoadReviewOutcome,
-  submitCxBulkLoadAppointmentWrap,
 } = require("../../../../packages/shared-services/src");
 const { toErrorResponse } = require("../../../../packages/shared-errors/src");
 
@@ -140,16 +139,6 @@ function createCxBulkLoadRouter(auth, options = {}) {
   router.post("/disposition", auth.requireAuth, auth.requireUser, async (req, res) => {
     return sendBulkCommand(req, res, submitCxBulkLoadDisposition, (request) => request.body || {});
   });
-
-  router.post(
-    "/appointment-wrap",
-    auth.requireAuth,
-    auth.requireUser,
-    auth.requirePermission("queue.dispose"),
-    async (req, res) => {
-      return sendBulkCommand(req, res, submitCxBulkLoadAppointmentWrap, (request) => request.body || {});
-    },
-  );
 
   router.post("/review-outcome", auth.requireAuth, auth.requireUser, async (req, res) => {
     return sendBulkCommand(req, res, submitCxBulkLoadReviewOutcome, (request) => request.body || {});

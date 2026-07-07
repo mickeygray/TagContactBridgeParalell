@@ -61,13 +61,58 @@ Result: route syntax, web typecheck, and production web build all passed.
 - Appointment dispatch still uses the owning agent campaign and `cxapt` externs; future or unmapped appointments did not publish early or borrow another queue.
 - Simple-loop and slow-single HTTP surfaces are now explicit retired responses. Their services/models remain in source for deliberate later deletion and archaeology tests.
 
+## Pass 2: Appointment-Wrap Command Cut
+
+Deletes under test:
+- Removed the unused `CxBulkLoadAppointmentWrapResult` and `useCxBulkLoadAppointmentWrap` client API surface.
+- Removed the `/api/cx/bulk-load/appointment-wrap` control-plane route.
+- Removed `submitCxBulkLoadAppointmentWrap` from the bulk runtime and shared-services barrel exports.
+- Removed stale appointment-wrap wording from the busy-session runtime test/comments.
+
+Survivors intentionally kept:
+- Wrap-card appointment resolution via `/api/cx/bulk-load/wrap-cards/resolve`.
+- `createCxAppointment`, appointment dispatch, and appointment list/call-now surfaces.
+- The busy-session primitive, because long wrap work can still need watcher protection independent of the retired endpoint.
+
+Pre-fleet verification:
+
+```powershell
+rg -n "appointment-wrap|appointment wrap|submitCxBulkLoadAppointmentWrap|CxBulkLoadAppointmentWrapResult|useCxBulkLoadAppointmentWrap|bulk-appointment-wrap|appointmentCommittedTerminalDeferred" apps packages tests scripts
+node --check packages/shared-services/src/cxBulkLoadRuntime.js
+node --check packages/shared-services/src/cxBulkLoadRuntimeService.js
+node --check apps/control-plane/src/routes/cxBulkLoad.js
+```
+
+Result before fleet: zero active source hits for the retired command names; runtime, runtime-service, and route syntax passed.
+
+Post-cut verification:
+
+```powershell
+node --test tests/cx-bulk-load/cxDeleteRunFleet.test.js
+```
+
+Result: 3 pass, 0 fail.
+
+```powershell
+node --test tests/cx-bulk-load/cxDeleteRunFleet.test.js tests/cx-bulk-load/cxLaneDispatch.test.js tests/cx-bulk-load/cxBulkLoadRuntimeService.test.js tests/cx-bulk-load/cxCallWrapCardService.test.js tests/cx-bulk-load/cxServerWireAudit.test.js tests/queue/cxWorkspacePresenceHeal.test.js tests/queue/cxManualUnavailableRelease.test.js
+```
+
+Result: 70 pass, 0 fail.
+
+```powershell
+npm.cmd run typecheck --workspace=web-client
+npm.cmd run build --workspace=web-client
+```
+
+Result: web typecheck and production web build passed.
+
 ## Remaining Not Certified By This Run
 
 - Real RingCX transport behavior.
 - Real Logics writes.
 - Real Mongo indexes and unique-key behavior.
 - Live service restart/bundle pickup.
-- Legacy queue auto-serve, auto-review, EX ownership, wrap cutover, and appointment-wrap removal. Those are still separate cut-guide items.
+- Legacy queue auto-serve, auto-review, EX ownership, and wrap cutover. Those are still separate cut-guide items.
 
 ## Standard Use After Future Deletes
 
