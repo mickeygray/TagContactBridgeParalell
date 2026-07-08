@@ -2,6 +2,8 @@
 
 const bulkWatcher = require("./cxBulkLoadActiveCallWatcher");
 const { logCxAlpha } = require("./cxAlphaTraceService");
+const { parseLaneExternId } = require("./cxLaneRegistry");
+const { setLaneCall } = require("./cxLaneCallRegistry");
 const { reduceCxBulkLoadState } = require("./cxBulkLoadStateMachine");
 const { describeBulkLoadMutationEligibility, buildVersionGuardOptions } = require("./cxBulkLoadMutationEligibility");
 
@@ -485,6 +487,74 @@ function projectBulkSessionFromAccountSnapshot(session = {}, activeCalls = [], o
   };
 }
 
+// THE LANE RECOGNITION PASS (Mickey's modal ruling, 2026-07-08): for every active call
+// in the account snapshot — UII PRESENT (no uii, no modal), extern parsed against the
+// three sources: cxbl (the session pool — the bulk UI's job, ignored here), cxft (the
+// queue row rides IN the extern id), cxapt (the extern IS the appointment key). A match
+// resolves the agent from the dispatch stamp itself and refreshes the lane-call registry
+// the client's modal polls. Fail-soft per call: recognition failing = no modal, never a
+// broken tick.
+async function detectLaneCallsForAccount(activeCalls, deps = {}) {
+  const calls = compactActiveCalls(activeCalls);
+  const seen = [];
+  for (const call of calls) {
+    if (!call.uii) continue; // THE UII GATE
+    const laneRef = parseLaneExternId(call.externId);
+    if (!laneRef || laneRef.lane === "bulk") continue;
+    try {
+      if (laneRef.lane === "firstTouch") {
+        const queueItemId = laneRef.queueItemId;
+        const row = deps.loadFirstTouchRow
+          ? await deps.loadFirstTouchRow(queueItemId)
+          : await require("../../shared-models/src").CxDialQueue.findById(queueItemId).lean();
+        const agentEmail = row?.metadata?.firstTouchDispatch?.agentEmail || null;
+        if (!agentEmail) continue;
+        setLaneCall(agentEmail, {
+          lane: laneRef.lane,
+          uii: call.uii,
+          externId: call.externId,
+          callState: call.callState || null,
+          caseId: row.caseId ?? null,
+          name: row.name || null,
+          domain: row.domain || null,
+          meta: {
+            mintedAt: row.createdAt || null,
+            phone: row.phone || null,
+            phoneLast4: String(row.phone || "").slice(-4) || null,
+          },
+        }, deps.nowMs != null ? { nowMs: deps.nowMs } : {});
+        seen.push(agentEmail);
+      } else if (laneRef.lane === "appointment") {
+        const appointmentId = laneRef.appointmentId;
+        const appt = deps.loadAppointment
+          ? await deps.loadAppointment(appointmentId)
+          : await require("../../shared-models/src").CxAppointment.findOne({ appointmentId }).lean();
+        const agentEmail = appt?.agentEmail || null;
+        if (!agentEmail) continue;
+        setLaneCall(agentEmail, {
+          lane: laneRef.lane,
+          uii: call.uii,
+          externId: call.externId,
+          callState: call.callState || null,
+          caseId: appt.caseId ?? null,
+          name: appt.prospectName || null,
+          domain: appt.domain || null,
+          meta: {
+            appointmentAt: appt.appointmentAt || null,
+            bookedBy: appt.agentEmail || null,
+            phone: appt.phone || null,
+            phoneLast4: String(appt.phone || "").slice(-4) || null,
+          },
+        }, deps.nowMs != null ? { nowMs: deps.nowMs } : {});
+        seen.push(agentEmail);
+      }
+    } catch {
+      // fail-soft: no modal beats a broken poller tick
+    }
+  }
+  return seen;
+}
+
 async function buildCxAccountActiveCallWatchPlan(input = {}) {
   const client = input.client;
   if (!client || typeof client.listActiveCalls !== "function") {
@@ -528,6 +598,13 @@ async function buildCxAccountActiveCallWatchPlan(input = {}) {
       activeCallCount: Array.isArray(activeCalls) ? activeCalls.length : 0,
       error: error ? (error.message || String(error)) : null,
     });
+
+    if (!error) {
+      await detectLaneCallsForAccount(activeCalls, {
+        loadFirstTouchRow: input.loadFirstTouchRow,
+        loadAppointment: input.loadAppointment,
+      }).catch(() => null);
+    }
 
     if (error) {
       for (const session of accountSessions) {
@@ -1717,7 +1794,11 @@ async function runCxAccountActiveCallWatchOnce(input = {}) {
             sessionId,
             agentEmail: session.agentEmail || null,
             accountId: normalizeAccountId(session?.ringcx?.accountId || session?.accountId),
-            before: session,
+            // the entry's own campaignId snapshot wins (audit nit 2026-07-07: a session
+            // whose ringcx block mutated mid-flight must not misroute the re-read)
+            before: entry.campaignId
+              ? { ...session, ringcx: { ...(session.ringcx || {}), campaignId: entry.campaignId } }
+              : session,
           },
           {
             outcome: guardOutcome,
@@ -1845,6 +1926,7 @@ async function runCxAccountActiveCallWatchOnce(input = {}) {
 module.exports = {
   applySysDispoClassifier, // exported for pins; pure
   deriveSysDispoRetryDecision, // exported for pins; pure
+  detectLaneCallsForAccount, // exported for pins (lane recognition, injected sources)
   buildCxAccountActiveCallWatchPlan,
   compactActiveCall,
   compactActiveCalls,

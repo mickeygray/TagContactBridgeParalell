@@ -40,10 +40,28 @@ function buildLaneExternId(lane, parts = {}) {
 }
 
 function parseLaneFromExternId(externId) {
-  const value = str(externId).toLowerCase();
+  const parsed = parseLaneExternId(externId);
+  return parsed ? parsed.lane : null;
+}
+
+function parseLaneExternId(externId) {
+  const raw = str(externId);
+  const value = raw.toLowerCase();
   if (!value) return null;
-  for (const [lane, prefix] of Object.entries(LANES)) {
-    if (value === prefix || value.startsWith(`${prefix}-`)) return lane;
+  if (value.startsWith(`${LANES.appointment}-`)) {
+    const appointmentId = raw.slice(LANES.appointment.length + 1).trim();
+    return appointmentId ? { lane: "appointment", appointmentId } : null;
+  }
+  if (value.startsWith(`${LANES.firstTouch}-`)) {
+    const rest = raw.slice(LANES.firstTouch.length + 1).trim();
+    const firstDash = rest.indexOf("-");
+    if (firstDash <= 0) return null;
+    const domain = rest.slice(0, firstDash).trim();
+    const queueItemId = rest.slice(firstDash + 1).trim();
+    return domain && queueItemId ? { lane: "firstTouch", domain, queueItemId } : null;
+  }
+  if (value === LANES.bulk || value.startsWith(`${LANES.bulk}-`)) {
+    return { lane: "bulk" };
   }
   return null;
 }
@@ -77,6 +95,7 @@ function parseAgentQueueMap(raw) {
 module.exports = {
   LANES,
   buildLaneExternId,
+  parseLaneExternId,
   parseLaneFromExternId,
   parseAgentQueueMap,
 };

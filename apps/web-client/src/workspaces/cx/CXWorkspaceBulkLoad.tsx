@@ -2,11 +2,9 @@ import * as React from "react";
 import { useNavigate } from "react-router-dom";
 import {
   CalendarClock,
-  ChevronDown,
-  ChevronUp,
   CheckCircle2,
   Clock3,
-  Mail,
+  List,
   MessageCircleMore,
   Phone,
   PhoneOff,
@@ -37,7 +35,7 @@ import {
   SelectValue,
 } from "@/components/ui/Select";
 import { SkeletonRow } from "@/components/ui/Skeleton";
-import { StatusPill, toneFromStatus } from "@/components/ui/StatusPill";
+import { StatusPill } from "@/components/ui/StatusPill";
 import { toast } from "@/components/ui/Toaster";
 import {
   useCxCallQueue,
@@ -75,12 +73,14 @@ import {
   useCxBulkLoadSession,
   useCxBulkLoadDisposition,
   useCxWrapCards,
+  useCxLaneCall,
+  useCxLaneCallDisposition,
   useCxWrapCardResolve,
   useCxBulkLoadReviewOutcome,
   useCxBulkLoadPauseProgressive,
   useCxBulkLoadResumeProgressive,
-  useCxBulkLoadSkip,
   type CxBulkLoadCurrent,
+  type CxLaneCall,
 } from "@/lib/api/queries/cxBulkLoad";
 import { useSession } from "@/lib/auth/useSession";
 import { cn } from "@/lib/utils/cn";
@@ -123,6 +123,18 @@ type BulkAutoReview = {
   status: "open" | "saving";
 };
 
+function laneMinutesAgoLabel(value?: string | null) {
+  const ts = value ? new Date(value).getTime() : NaN;
+  if (!Number.isFinite(ts)) return null;
+  return `came in ${Math.max(1, Math.round((Date.now() - ts) / 60000))} min ago`;
+}
+
+function laneAppointmentTimeLabel(value?: string | null) {
+  const ts = value ? new Date(value).getTime() : NaN;
+  if (!Number.isFinite(ts)) return null;
+  return `booked for ${new Date(ts).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`;
+}
+
 function bulkCallReviewKey(candidate?: CxBulkLoadCurrent | null) {
   const queueItemId = String(candidate?.queueItemId || "").trim();
   const uii = String(candidate?.uii || "").trim();
@@ -133,6 +145,31 @@ function bulkCallReviewKey(candidate?: CxBulkLoadCurrent | null) {
 function bulkCallName(candidate?: CxBulkLoadCurrent | null) {
   const name = String(candidate?.name || "").trim();
   return name || (candidate?.caseId != null ? `Case ${candidate.caseId}` : "Call review");
+}
+
+function laneCallReviewKey(call?: CxLaneCall | null) {
+  const lane = String(call?.lane || "").trim();
+  const externId = String(call?.externId || "").trim();
+  const uii = String(call?.uii || "").trim();
+  if (!lane || !externId || !uii) return "";
+  return `${lane}:${externId}:${uii}`;
+}
+
+function laneCallDisplayCandidate(call?: CxLaneCall | null): CxBulkLoadCurrent | null {
+  if (!call?.uii) return null;
+  return {
+    queueItemId: call.externId || null,
+    domain: call.domain || null,
+    caseId: call.caseId,
+    name: call.name || null,
+    phone: null,
+    phoneLast4: call.meta?.phoneLast4 || null,
+    phase: call.lane,
+    status: call.callState || null,
+    uii: call.uii,
+    externId: call.externId || null,
+    ringcx: { lane: call.lane },
+  };
 }
 
 type CaseForm = {
@@ -511,6 +548,21 @@ function inferQueueFamily(item: CxCallQueueItem): QueueFamilyKey {
   return "unassigned";
 }
 
+function leadTypeLabel(value?: string | null) {
+  const normalized = normalizeQueueFamily(value || "");
+  if (normalized === "fresh-day1") return "Fresh day 1";
+  if (normalized === "fresh-day2to10") return "Fresh day 2-10";
+  if (normalized === "fresh-day16to30") return "Fresh day 16-30";
+  if (normalized === "aged") return "Aged";
+  if (normalized === "dead") return "Dead";
+  const raw = String(value || "").trim();
+  return raw
+    ? raw
+        .replace(/[_-]+/g, " ")
+        .replace(/\b\w/g, (char) => char.toUpperCase())
+    : "";
+}
+
 function readQueuePlacedCalls(item: CxCallQueueItem) {
   const snapshot = asRecord(item.payloadSnapshot);
   const leadBody = asRecord(item.leadBody);
@@ -770,18 +822,7 @@ function applyLookupToForm(
   return next;
 }
 
-function sourceBadgeFor(source: CxLeadLookupSource | null):
-  | { label: string; tone: "accent" | "info" | "warning" | "neutral" }
-  | null {
-  if (source === "caseProfile") return { label: "CaseProfile", tone: "accent" };
-  if (source === "masterProspect") return { label: "MasterProspect", tone: "info" };
-  if (source === "leadCadence") return { label: "LeadCadence", tone: "warning" };
-  if (source === "logics") return { label: "Logics", tone: "neutral" };
-  if (source === "none") return { label: "New prospect", tone: "neutral" };
-  return null;
-}
-
-// ─── Collapsible section shell ──────────────────────────────────────────────
+// ─── Case panel shell ────────────────────────────────────────────────────────
 
 function formatAppointmentDateTime(value?: string | null) {
   if (!value) return "Not set";
@@ -795,34 +836,37 @@ function formatAppointmentDateTime(value?: string | null) {
   });
 }
 
-type CollapsibleProps = {
-  title: string;
-  open: boolean;
-  onToggle: () => void;
+// One compact case-context pane. The outer frame owns the height; each pane
+// only owns its header and scroll body.
+function CasePanel({
+  icon,
+  title,
+  right,
+  tabs,
+  children,
+}: {
+  icon?: React.ReactNode;
+  title?: string;
   right?: React.ReactNode;
+  tabs?: React.ReactNode;
   children: React.ReactNode;
-};
+}) {
+  const hasHeader = !!title || !!icon || !!right;
 
-function Collapsible({ title, open, onToggle, right, children }: CollapsibleProps) {
   return (
-    <Card>
-      <button
-        type="button"
-        onClick={onToggle}
-        className="flex w-full items-center justify-between gap-3 px-5 py-3 text-left hover:bg-muted/40"
-      >
-        <div className="flex items-center gap-2">
-          {open ? (
-            <ChevronUp className="h-4 w-4 text-muted-foreground" />
-          ) : (
-            <ChevronDown className="h-4 w-4 text-muted-foreground" />
-          )}
-          <span className="text-sm font-semibold text-foreground">{title}</span>
+    <div className="flex h-full min-w-0 flex-col overflow-hidden">
+      {hasHeader ? (
+        <div className="flex flex-none items-center justify-between gap-3 px-3 py-1.5">
+          <div className="flex min-w-0 items-center gap-2">
+            {icon}
+            {title ? <span className="truncate text-xs font-semibold text-foreground">{title}</span> : null}
+          </div>
+          {right}
         </div>
-        {right}
-      </button>
-      {open ? <div className="border-t border-border">{children}</div> : null}
-    </Card>
+      ) : null}
+      {tabs ? <div className="flex-none border-b border-border/60 pb-1">{tabs}</div> : null}
+      <div className="min-h-0 flex-1 overflow-y-auto">{children}</div>
+    </div>
   );
 }
 
@@ -1017,12 +1061,18 @@ function extractPassthroughList(data: unknown): Array<Record<string, unknown>> {
 
 // ─── Tasks subsection ───────────────────────────────────────────────────────
 
+type SubsectionMode = "list" | "add";
+
 function TasksSubsection({
   domain,
   resolvedCaseId,
+  mode,
+  onModeChange,
 }: {
   domain: string;
   resolvedCaseId: string;
+  mode: SubsectionMode;
+  onModeChange: (mode: SubsectionMode) => void;
 }) {
   // Per-case Logics tasks. Replaces the old agent-scoped useCxTasks
   // (which was showing the operator's own tasks across all cases).
@@ -1032,8 +1082,6 @@ function TasksSubsection({
   const [subject, setSubject] = React.useState("");
   const [dueDate, setDueDate] = React.useState("");
   const [reminderAt, setReminderAt] = React.useState("");
-  const [taskType, setTaskType] = React.useState("1");
-  const [endDate, setEndDate] = React.useState("");
   const [comments, setComments] = React.useState("");
 
   const rows = React.useMemo(() => {
@@ -1052,16 +1100,14 @@ function TasksSubsection({
         subject,
         dueDate,
         reminderAt,
-        taskType: Number(taskType) || 1,
-        endDate: taskType === "2" ? endDate : undefined,
+        taskType: 1,
         comments,
       });
       setSubject("");
       setDueDate("");
       setReminderAt("");
-      setTaskType("1");
-      setEndDate("");
       setComments("");
+      onModeChange("list");
       tasks.refetch();
       toast("Task queued", { description: "Logics task create was accepted." });
     } catch (error) {
@@ -1070,10 +1116,10 @@ function TasksSubsection({
     }
   }
 
-  const [addOpen, setAddOpen] = React.useState(false);
-
   return (
     <div className="space-y-2 p-3">
+      {mode === "list" ? (
+        <>
       {tasks.isLoading ? (
         <div className="text-[11px] text-muted-foreground">Loading tasks…</div>
       ) : null}
@@ -1100,17 +1146,9 @@ function TasksSubsection({
           );
         }}
       />
-      <div className="flex justify-end">
-        <Button
-          size="sm"
-          variant={addOpen ? "ghost" : "secondary"}
-          onClick={() => setAddOpen((v) => !v)}
-        >
-          {addOpen ? "Cancel" : "+ Add task"}
-        </Button>
-      </div>
-      {addOpen ? (
-        <div className="space-y-2 rounded-md border border-border bg-muted/20 p-2">
+        </>
+      ) : (
+        <div className="space-y-1.5">
           <div className="grid gap-2 sm:grid-cols-2">
             <div className="space-y-1 sm:col-span-2">
               <Label>Subject</Label>
@@ -1136,32 +1174,10 @@ function TasksSubsection({
                 onChange={(e) => setReminderAt(e.target.value)}
               />
             </div>
-            <div className="space-y-1">
-              <Label>Type</Label>
-              <Select value={taskType} onValueChange={setTaskType}>
-                <SelectTrigger>
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="1">Task</SelectItem>
-                  <SelectItem value="2">Event</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-            {taskType === "2" ? (
-              <div className="space-y-1">
-                <Label>End date</Label>
-                <Input
-                  type="datetime-local"
-                  value={endDate}
-                  onChange={(e) => setEndDate(e.target.value)}
-                />
-              </div>
-            ) : null}
             <div className="space-y-1 sm:col-span-2">
               <Label>Comments</Label>
               <textarea
-                className="min-h-[50px] w-full rounded-md border border-input bg-card px-2 py-1.5 text-xs"
+                className="min-h-[42px] w-full rounded-md border border-input bg-card px-2 py-1.5 text-xs"
                 value={comments}
                 onChange={(e) => setComments(e.target.value)}
                 placeholder="Optional details..."
@@ -1171,18 +1187,22 @@ function TasksSubsection({
           <div className="flex justify-end">
             <Button
               size="sm"
+              variant="ghost"
+              onClick={() => onModeChange("list")}
+            >
+              Cancel
+            </Button>
+            <Button
+              size="sm"
               isLoading={createTask.isPending}
               disabled={!subject.trim() || !dueDate || !reminderAt}
-              onClick={async () => {
-                await handleSubmit();
-                setAddOpen(false);
-              }}
+              onClick={handleSubmit}
             >
               Create task
             </Button>
           </div>
         </div>
-      ) : null}
+      )}
     </div>
   );
 }
@@ -1337,9 +1357,13 @@ function ActivityCard({
 function ActivitiesSubsection({
   domain,
   resolvedCaseId,
+  mode,
+  onModeChange,
 }: {
   domain: string;
   resolvedCaseId: string;
+  mode: SubsectionMode;
+  onModeChange: (mode: SubsectionMode) => void;
 }) {
   const activities = useCxCaseActivities(domain, Number(resolvedCaseId));
   const createActivity = useCxLogicsActivity(domain);
@@ -1372,6 +1396,7 @@ function ActivitiesSubsection({
       });
       setSubject("");
       setNote("");
+      onModeChange("list");
       activities.refetch();
       toast("Activity created", {
         description: "Logics activity create was accepted.",
@@ -1382,11 +1407,10 @@ function ActivitiesSubsection({
     }
   }
 
-  const [addOpen, setAddOpen] = React.useState(false);
-
   return (
     <div className="space-y-2 p-3">
-      {activities.isLoading ? (
+      {mode === "list" ? (
+        activities.isLoading ? (
         <div className="text-[11px] text-muted-foreground">Loading activities…</div>
       ) : rows.length === 0 ? (
         <div className="rounded-md border border-dashed border-border p-2 text-[11px] text-muted-foreground">
@@ -1408,18 +1432,9 @@ function ActivitiesSubsection({
             />
           )}
         />
-      )}
-      <div className="flex justify-end">
-        <Button
-          size="sm"
-          variant={addOpen ? "ghost" : "secondary"}
-          onClick={() => setAddOpen((v) => !v)}
-        >
-          {addOpen ? "Cancel" : "+ New activity"}
-        </Button>
-      </div>
-      {addOpen ? (
-        <div className="space-y-2 rounded-md border border-border bg-muted/20 p-2">
+        )
+      ) : (
+        <div className="space-y-2">
           <div className="grid gap-2 sm:grid-cols-2">
             <div className="space-y-1">
               <Label>Activity type</Label>
@@ -1450,18 +1465,22 @@ function ActivitiesSubsection({
           <div className="flex justify-end">
             <Button
               size="sm"
+              variant="ghost"
+              onClick={() => onModeChange("list")}
+            >
+              Cancel
+            </Button>
+            <Button
+              size="sm"
               isLoading={createActivity.isPending}
               disabled={!subject.trim() && !note.trim()}
-              onClick={async () => {
-                await handleCreate();
-                setAddOpen(false);
-              }}
+              onClick={handleCreate}
             >
               Create activity
             </Button>
           </div>
         </div>
-      ) : null}
+      )}
     </div>
   );
 }
@@ -1471,16 +1490,19 @@ function ActivitiesSubsection({
 function InvoicesSubsection({
   domain,
   resolvedCaseId,
+  mode,
+  onModeChange,
 }: {
   domain: string;
   resolvedCaseId: string;
+  mode: SubsectionMode;
+  onModeChange: (mode: SubsectionMode) => void;
 }) {
   const invoices = useCxCaseInvoices(domain, Number(resolvedCaseId));
   const createInvoice = useCxLogicsInvoice(domain);
 
   const [invoiceTypeName, setInvoiceTypeName] = React.useState("Other Fee");
   const [unitPrice, setUnitPrice] = React.useState("");
-  const [quantity, setQuantity] = React.useState("1");
   const [date, setDate] = React.useState(() => {
     const now = new Date();
     return now.toISOString().slice(0, 10);
@@ -1503,13 +1525,13 @@ function InvoicesSubsection({
         caseId: resolvedCaseId,
         invoiceTypeName,
         unitPrice: unitPriceNum,
-        quantity: Number(quantity) || 1,
+        quantity: 1,
         date,
         description,
       });
       setUnitPrice("");
-      setQuantity("1");
       setDescription("");
+      onModeChange("list");
       invoices.refetch();
       toast("Invoice queued", { description: "Logics invoice create was accepted." });
     } catch (error) {
@@ -1518,10 +1540,10 @@ function InvoicesSubsection({
     }
   }
 
-  const [addOpen, setAddOpen] = React.useState(false);
-
   return (
     <div className="space-y-2 p-3">
+      {mode === "list" ? (
+        <>
       <ExpandableList
         items={rows}
         initial={5}
@@ -1555,19 +1577,11 @@ function InvoicesSubsection({
           );
         }}
       />
-      <div className="flex justify-end">
-        <Button
-          size="sm"
-          variant={addOpen ? "ghost" : "secondary"}
-          onClick={() => setAddOpen((v) => !v)}
-        >
-          {addOpen ? "Cancel" : "+ Add invoice"}
-        </Button>
-      </div>
-      {addOpen ? (
-        <div className="space-y-2 rounded-md border border-border bg-muted/20 p-2">
-          <div className="grid gap-2 sm:grid-cols-2">
-            <div className="space-y-1 sm:col-span-2">
+        </>
+      ) : (
+        <div className="space-y-1.5">
+          <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_8rem]">
+            <div className="space-y-1">
               <Label>Invoice type</Label>
               <Input
                 value={invoiceTypeName}
@@ -1576,20 +1590,12 @@ function InvoicesSubsection({
               />
             </div>
             <div className="space-y-1">
-              <Label>Unit price</Label>
+              <Label>Price</Label>
               <Input
                 type="number"
                 value={unitPrice}
                 onChange={(e) => setUnitPrice(e.target.value)}
                 placeholder="0.00"
-              />
-            </div>
-            <div className="space-y-1">
-              <Label>Quantity</Label>
-              <Input
-                type="number"
-                value={quantity}
-                onChange={(e) => setQuantity(e.target.value)}
               />
             </div>
             <div className="space-y-1 sm:col-span-2">
@@ -1603,7 +1609,7 @@ function InvoicesSubsection({
             <div className="space-y-1 sm:col-span-2">
               <Label>Description</Label>
               <textarea
-                className="min-h-[50px] w-full rounded-md border border-input bg-card px-2 py-1.5 text-xs"
+                className="min-h-[42px] w-full rounded-md border border-input bg-card px-2 py-1.5 text-xs"
                 value={description}
                 onChange={(e) => setDescription(e.target.value)}
                 placeholder="Optional details..."
@@ -1613,18 +1619,22 @@ function InvoicesSubsection({
           <div className="flex justify-end">
             <Button
               size="sm"
+              variant="ghost"
+              onClick={() => onModeChange("list")}
+            >
+              Cancel
+            </Button>
+            <Button
+              size="sm"
               isLoading={createInvoice.isPending}
               disabled={!unitPrice.trim()}
-              onClick={async () => {
-                await handleSubmit();
-                setAddOpen(false);
-              }}
+              onClick={handleSubmit}
             >
               Add invoice
             </Button>
           </div>
         </div>
-      ) : null}
+      )}
     </div>
   );
 }
@@ -1754,7 +1764,7 @@ export function AmortizationSubsection({
 //
 // CX agents see payment history but don't post payments here — that lives
 // in finance. Pulled live from Logics getCasePayments.
-function PaymentsSubsection({
+export function PaymentsSubsection({
   domain,
   resolvedCaseId,
 }: {
@@ -1828,28 +1838,97 @@ function PanelTabs({
   tabs,
   active,
   onChange,
+  action,
 }: {
   tabs: { key: string; label: string }[];
   active: string;
   onChange: (key: string) => void;
+  action?: React.ReactNode;
 }) {
   return (
-    <div className="flex flex-wrap gap-1 px-3 pt-2">
-      {tabs.map((tab) => (
-        <button
-          key={tab.key}
-          type="button"
-          onClick={() => onChange(tab.key)}
-          className={cn(
-            "rounded-md px-2 py-1 text-[11px] font-semibold uppercase tracking-[0.1em] transition-colors",
-            active === tab.key
-              ? "bg-primary/10 text-primary"
-              : "text-muted-foreground hover:bg-muted/40",
-          )}
-        >
-          {tab.label}
-        </button>
-      ))}
+    <div className="flex items-center justify-between gap-2 px-3 pt-2">
+      <div className="flex min-w-0 flex-wrap gap-1">
+        {tabs.map((tab) => (
+          <button
+            key={tab.key}
+            type="button"
+            onClick={() => onChange(tab.key)}
+            className={cn(
+              "rounded-md px-2 py-1 text-[11px] font-semibold uppercase tracking-[0.1em] transition-colors",
+              active === tab.key
+                ? "bg-primary/10 text-primary"
+                : "text-muted-foreground hover:bg-muted/40",
+            )}
+          >
+            {tab.label}
+          </button>
+        ))}
+      </div>
+      {action ? <div className="flex-none">{action}</div> : null}
+    </div>
+  );
+}
+
+function SubsectionModeIconButton({
+  mode,
+  onChange,
+  label,
+}: {
+  mode: SubsectionMode;
+  onChange: (mode: SubsectionMode) => void;
+  label: string;
+}) {
+  const adding = mode === "add";
+  const nextMode: SubsectionMode = adding ? "list" : "add";
+
+  return (
+    <button
+      type="button"
+      onClick={() => onChange(nextMode)}
+      className="inline-flex h-6 w-6 items-center justify-center rounded-md border border-border bg-background text-muted-foreground transition-colors hover:bg-muted/50 hover:text-foreground"
+      title={adding ? `View ${label}` : `Add ${label}`}
+      aria-label={adding ? `View ${label}` : `Add ${label}`}
+    >
+      {adding ? <List className="h-3.5 w-3.5" /> : <Plus className="h-3.5 w-3.5" />}
+    </button>
+  );
+}
+
+function CaseFact({
+  label,
+  value,
+  mono = false,
+  emphasis = false,
+  hideWhenEmpty = false,
+}: {
+  label: string;
+  value?: React.ReactNode;
+  mono?: boolean;
+  emphasis?: boolean;
+  hideWhenEmpty?: boolean;
+}) {
+  const hasValue =
+    value !== null &&
+    value !== undefined &&
+    (typeof value !== "string" || value.trim().length > 0);
+
+  if (!hasValue && hideWhenEmpty) return null;
+
+  return (
+    <div className="flex min-w-0 items-center gap-1.5 text-xs">
+      <span className="shrink-0 font-semibold uppercase tracking-[0.1em] text-muted-foreground">
+        {label}
+      </span>
+      <span
+        className={cn(
+          "min-w-0 truncate text-foreground",
+          mono ? "font-mono tabular-nums" : "",
+          emphasis ? "text-sm font-semibold" : "",
+          !hasValue ? "text-muted-foreground" : "",
+        )}
+      >
+        {hasValue ? value : "—"}
+      </span>
     </div>
   );
 }
@@ -1886,23 +1965,7 @@ function CommLogSubsection({
   }
 
   return (
-    <div className="space-y-1.5 p-3">
-      <div className="flex items-center justify-between text-[11px] text-muted-foreground">
-        <div>
-          <span className="font-medium text-foreground">{log.data?.counts.total ?? 0}</span> entries
-          {log.data?.counts.callLogs ? <> | {log.data.counts.callLogs} calls</> : null}
-          {log.data?.counts.conversationMessages ? <> | {log.data.counts.conversationMessages} messages</> : null}
-          {log.data?.counts.leadCadence ? <> | cadence active</> : null}
-        </div>
-        <button
-          type="button"
-          onClick={() => log.refetch()}
-          disabled={log.isFetching}
-          className="text-primary hover:underline disabled:opacity-50"
-        >
-          {log.isFetching ? "Refreshing..." : "Refresh"}
-        </button>
-      </div>
+    <div className="p-3">
       <ExpandableList
         items={entries}
         initial={10}
@@ -1987,51 +2050,97 @@ function LogicsWorkspaceCard({
   resolvedCaseId: string;
   resolvedPhone: string | null;
 }) {
-  const [commLogOpen, setCommLogOpen] = React.useState(true);
-  const [logicsInfoOpen, setLogicsInfoOpen] = React.useState(true);
   const [logicsInfoTab, setLogicsInfoTab] = React.useState<
-    "activities" | "tasks" | "payments" | "invoices"
+    "activities" | "tasks" | "invoices"
   >("activities");
+  const [activityMode, setActivityMode] = React.useState<SubsectionMode>("list");
+  const [taskMode, setTaskMode] = React.useState<SubsectionMode>("list");
+  const [invoiceMode, setInvoiceMode] = React.useState<SubsectionMode>("list");
+  const activeSubsectionMode =
+    logicsInfoTab === "activities"
+      ? activityMode
+      : logicsInfoTab === "tasks"
+        ? taskMode
+        : invoiceMode;
+  const activeSubsectionLabel =
+    logicsInfoTab === "activities"
+      ? "activity"
+      : logicsInfoTab === "tasks"
+        ? "task"
+        : "invoice";
+  const setActiveSubsectionMode = React.useCallback(
+    (mode: SubsectionMode) => {
+      if (logicsInfoTab === "activities") {
+        setActivityMode(mode);
+      } else if (logicsInfoTab === "tasks") {
+        setTaskMode(mode);
+      } else {
+        setInvoiceMode(mode);
+      }
+    },
+    [logicsInfoTab],
+  );
 
+  // Side-by-side panes inside one compact parent frame. Each pane scrolls,
+  // but the pair stays short enough that Coach remains in view.
   return (
-    <div className="space-y-2">
-      <Collapsible
-        title="Communications"
-        open={commLogOpen}
-        onToggle={() => setCommLogOpen((v) => !v)}
-      >
-        <CommLogSubsection
-          domain={domain}
-          resolvedCaseId={resolvedCaseId}
-          resolvedPhone={resolvedPhone}
-        />
-      </Collapsible>
+    <div className="grid h-[calc(32vh+50px)] min-h-[310px] max-h-[490px] min-w-0 overflow-hidden border-t border-border/60 xl:grid-cols-2">
+        <CasePanel
+          title="Communications"
+          icon={<MessageCircleMore className="h-3.5 w-3.5 text-muted-foreground" aria-hidden="true" />}
+        >
+          <CommLogSubsection
+            domain={domain}
+            resolvedCaseId={resolvedCaseId}
+            resolvedPhone={resolvedPhone}
+          />
+        </CasePanel>
 
-      <Collapsible
-        title="Logics info"
-        open={logicsInfoOpen}
-        onToggle={() => setLogicsInfoOpen((v) => !v)}
-      >
-        <PanelTabs
-          tabs={[
-            { key: "activities", label: "Activities" },
-            { key: "tasks", label: "Tasks" },
-            { key: "payments", label: "Payments" },
-            { key: "invoices", label: "Invoices" },
-          ]}
-          active={logicsInfoTab}
-          onChange={(k) => setLogicsInfoTab(k as typeof logicsInfoTab)}
-        />
-        {logicsInfoTab === "activities" ? (
-          <ActivitiesSubsection domain={domain} resolvedCaseId={resolvedCaseId} />
-        ) : logicsInfoTab === "tasks" ? (
-          <TasksSubsection domain={domain} resolvedCaseId={resolvedCaseId} />
-        ) : logicsInfoTab === "payments" ? (
-          <PaymentsSubsection domain={domain} resolvedCaseId={resolvedCaseId} />
-        ) : (
-          <InvoicesSubsection domain={domain} resolvedCaseId={resolvedCaseId} />
-        )}
-      </Collapsible>
+        <div className="min-h-0 border-t border-border xl:border-l xl:border-t-0">
+          <CasePanel
+            tabs={
+              <PanelTabs
+                tabs={[
+                  { key: "activities", label: "Activities" },
+                  { key: "tasks", label: "Tasks" },
+                  { key: "invoices", label: "Invoices" },
+                ]}
+                active={logicsInfoTab}
+                onChange={(k) => setLogicsInfoTab(k as typeof logicsInfoTab)}
+                action={
+                  <SubsectionModeIconButton
+                    mode={activeSubsectionMode}
+                    onChange={setActiveSubsectionMode}
+                    label={activeSubsectionLabel}
+                  />
+                }
+              />
+            }
+          >
+            {logicsInfoTab === "activities" ? (
+              <ActivitiesSubsection
+                domain={domain}
+                resolvedCaseId={resolvedCaseId}
+                mode={activityMode}
+                onModeChange={setActivityMode}
+              />
+            ) : logicsInfoTab === "tasks" ? (
+              <TasksSubsection
+                domain={domain}
+                resolvedCaseId={resolvedCaseId}
+                mode={taskMode}
+                onModeChange={setTaskMode}
+              />
+            ) : (
+              <InvoicesSubsection
+                domain={domain}
+                resolvedCaseId={resolvedCaseId}
+                mode={invoiceMode}
+                onModeChange={setInvoiceMode}
+              />
+            )}
+          </CasePanel>
+        </div>
     </div>
   );
 }
@@ -3317,12 +3426,14 @@ export function CXWorkspaceBulkLoad() {
   // follow-up bar. Server returns {enabled:false, cards:[]} while the feature flag is off,
   // so this renders nothing by default. [DNC] [Appointment->picker] [X], per the design.
   const wrapCardsQuery = useCxWrapCards(true);
+  const laneCallQuery = useCxLaneCall(true);
+  const laneCall = laneCallQuery.data?.laneCall ?? null;
+  const laneDisposition = useCxLaneCallDisposition();
   const wrapResolve = useCxWrapCardResolve();
   const [wrapApptPicker, setWrapApptPicker] = React.useState<Record<string, string>>({});
   const bulkReviewOutcome = useCxBulkLoadReviewOutcome();
   const bulkPauseProgressive = useCxBulkLoadPauseProgressive();
   const bulkResumeProgressive = useCxBulkLoadResumeProgressive();
-  const bulkSkip = useCxBulkLoadSkip();
   const [bulkAutoReview, setBulkAutoReview] = React.useState<BulkAutoReview | null>(null);
   const [bulkAutoReviewRemaining, setBulkAutoReviewRemaining] = React.useState(0);
   const [bulkLatchedCall, setBulkLatchedCall] = React.useState<CxBulkLoadCurrent | null>(null);
@@ -3343,12 +3454,32 @@ export function CXWorkspaceBulkLoad() {
   const bulkReviewCandidate = bulkReviewHoldActive ? bulkAutoReview?.candidate ?? null : null;
   const bulkDisplayCandidate =
     bulkConfirmedCurrent ?? bulkReviewCandidate ?? bulkLatchedCall ?? (bulkRunning ? bulkLastOutcome : null);
+  const laneDisplayCandidate = React.useMemo(
+    () => laneCallDisplayCandidate(laneCall),
+    [laneCall],
+  );
+  const laneDisplayKey = laneCallReviewKey(laneCall);
+  // TRANSIENT ANNOUNCE (Mickey, 2026-07-08): the banner pops to say "this is happening",
+  // then — once the call persists to the middle section — collapses to a pill. A NEW
+  // lane call (new key) re-announces; call ends -> pill vanishes with laneCall.
+  const [laneBannerExpanded, setLaneBannerExpanded] = React.useState(false);
+  React.useEffect(() => {
+    if (!laneDisplayKey) {
+      setLaneBannerExpanded(false);
+      return;
+    }
+    setLaneBannerExpanded(true);
+    const collapse = window.setTimeout(() => setLaneBannerExpanded(false), 4500);
+    return () => window.clearTimeout(collapse);
+  }, [laneDisplayKey]);
+  const laneCaseIdStr = laneDisplayCandidate?.caseId != null ? String(laneDisplayCandidate.caseId).trim() : "";
+  const laneDomain = String(laneDisplayCandidate?.domain || "").trim().toUpperCase() || domain;
+  const laneCanDispositionCurrent = Boolean(laneCall?.uii);
   const bulkDisplayIsCurrent = Boolean(
     bulkConfirmedCurrent &&
       bulkDisplayCandidate &&
       bulkCallReviewKey(bulkDisplayCandidate) === bulkCallReviewKey(bulkConfirmedCurrent),
   );
-  const bulkShowingHeldCall = Boolean(bulkRunning && bulkDisplayCandidate && !bulkDisplayIsCurrent);
   const bulkDisplayKey = bulkDisplayCandidate
     ? `${bulkDisplayIsCurrent ? "current" : "review"}:${String(
         bulkDisplayCandidate.queueItemId ||
@@ -3360,7 +3491,8 @@ export function CXWorkspaceBulkLoad() {
     : "";
   const bulkCurrentAwaitingUii = false;
   const bulkHasCurrent = Boolean(bulkSessionId && bulkCurrent);
-  const bulkCanDispositionCurrent = Boolean(bulkHasCurrent && bulkDisplayIsCurrent);
+  const bulkCanDispositionCurrent = Boolean(!laneCanDispositionCurrent && bulkHasCurrent && bulkDisplayIsCurrent);
+  const canDispositionCurrent = laneCanDispositionCurrent || bulkCanDispositionCurrent;
   const bulkCaseIdStr = bulkDisplayCandidate?.caseId != null ? String(bulkDisplayCandidate.caseId).trim() : "";
   const bulkDomain = String(bulkDisplayCandidate?.domain || "").trim().toUpperCase() || domain;
   const bulkRemainingQueue = React.useMemo(
@@ -3368,6 +3500,7 @@ export function CXWorkspaceBulkLoad() {
     [bulk.data?.remainingQueue],
   );
   const lastBulkKeyRef = React.useRef<string | null>(null);
+  const lastLaneKeyRef = React.useRef<string | null>(null);
   const lastBulkAutoReviewKeyRef = React.useRef<string | null>(null);
   const manualBulkTerminalRef = React.useRef<{ key: string; disposition: string } | null>(null);
 
@@ -3777,6 +3910,56 @@ export function CXWorkspaceBulkLoad() {
   }, [bulkSessionEnded, bulkSessionId]);
 
   React.useEffect(() => {
+    if (!laneDisplayKey) {
+      if (lastLaneKeyRef.current) {
+        lastLaneKeyRef.current = null;
+        clearServedQueueSelection();
+        clearCasePanelForNextQueueLead("lane-call-ended");
+        void bulk.refetch();
+      }
+      return;
+    }
+    if (!laneDisplayCandidate || !/^\d+$/.test(laneCaseIdStr)) return;
+    clearQueueAdvanceTransition();
+    if (lastLaneKeyRef.current === laneDisplayKey) return;
+    lastLaneKeyRef.current = laneDisplayKey;
+    const laneName = String(laneDisplayCandidate.name || "").trim();
+    console.info("[cx][identity] lane populate", {
+      key: laneDisplayKey,
+      lane: laneCall?.lane || null,
+      name: laneName || "(empty)",
+      at: new Date().toISOString(),
+    });
+    const laneNameParts = laneName.split(/\s+/).filter(Boolean);
+    const laneFirstName = laneNameParts[0] || "";
+    const laneLastName = laneNameParts.length > 1 ? laneNameParts.slice(1).join(" ") : "";
+    const lanePhone = String(laneCall?.meta?.phone || "").trim();
+    const contact: ContactContext = {
+      caseId: laneCaseIdStr,
+      name: laneName,
+      phone: lanePhone,
+      channel: "cx",
+    };
+    setSelected(contact);
+    setDirty(BLANK_DIRTY);
+    setForm({
+      ...BLANK_FORM,
+      caseId: laneCaseIdStr,
+      firstName: laneFirstName,
+      lastName: laneLastName,
+      cellPhone: lanePhone,
+    });
+    setServedQueueCaseId(laneCaseIdStr);
+    setServedQueueDomain(laneDomain);
+    setServedQueueActionKey(laneDisplayCandidate.externId || null);
+    setServedQueueTicketId(laneDisplayCandidate.externId || null);
+    setServedQueueContact(contact);
+    setServedQueueStartedAt(Date.now());
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [laneDisplayKey, laneCaseIdStr, laneDomain]);
+
+  React.useEffect(() => {
+    if (laneCanDispositionCurrent) return;
     if (!bulkDisplayCandidate || !/^\d+$/.test(bulkCaseIdStr)) return;
     const key = bulkDisplayKey || String(
       bulkDisplayCandidate.queueItemId ||
@@ -3815,12 +3998,7 @@ export function CXWorkspaceBulkLoad() {
     setServedQueueContact(contact);
     setServedQueueStartedAt(Date.now());
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [bulkDisplayKey, bulkCaseIdStr, bulkDomain]);
-
-  function handleBulkSkip() {
-    if (!bulkSessionId) return;
-    void bulkSkip.mutateAsync({ sessionId: bulkSessionId }).catch(() => null);
-  }
+  }, [laneCanDispositionCurrent, bulkDisplayKey, bulkCaseIdStr, bulkDomain]);
 
   // Dev escape hatch — `?cxDialMode=simulate` keeps the simulator path
   // available for QA / smoke tests. Default behavior on the queue
@@ -4337,12 +4515,6 @@ export function CXWorkspaceBulkLoad() {
     }));
   }
 
-  function handleFormChange(field: CaseFormField, value: string) {
-    setForm((prev) => ({ ...prev, [field]: value }));
-    setDirty((prev) => (prev[field] ? prev : { ...prev, [field]: true }));
-  }
-
-
   const rawQueueItems = React.useMemo(() => {
     if (!legacyQueueEnabled) return [];
     return ((callQueue.data ?? data?.callQueue ?? []) as CxCallQueueItem[]);
@@ -4785,17 +4957,79 @@ export function CXWorkspaceBulkLoad() {
     }
     return `active ${domain} • ${domain}:${state}`;
 */
-  const sourceBadge = sourceBadgeFor(lookupSource);
-  const authoritativeLogicsCaseIdNumber: number | null =
-    lookupSource === "logics" && lookupMatch?.caseId
-      ? Number(lookupMatch.caseId) || null
-      : null;
-
   function submitQueueDisposition(
     dispositionKey: string,
     _label: string,
     options: { coachReleaseReason?: string } = {},
   ) {
+    if (laneCanDispositionCurrent && laneCall) {
+      if (dispositionKey === "dnc") {
+        toast.warning("DNC needs the wrap path", {
+          description: "This lane button only controls the active RingCX call for now.",
+        });
+        return;
+      }
+      const t0 = Date.now();
+      const ms = () => `${Date.now() - t0}ms`;
+      console.log("[disp] LANE PRESS", {
+        lane: laneCall.lane,
+        disposition: dispositionKey,
+        uii: laneCall.uii,
+        externId: laneCall.externId,
+        caseId: laneCall.caseId ?? null,
+      });
+      const coachReleaseReason = options.coachReleaseReason || `lane-disposition-${dispositionKey}`;
+      showQueueAdvanceTransition({
+        title: "Finishing lane call",
+        description: "Submitting the disposition; RingCX should release this call.",
+        blocking: true,
+      });
+      void laneDisposition
+        .mutateAsync({
+          disposition: dispositionKey,
+          uii: laneCall.uii,
+          externId: laneCall.externId,
+        })
+        .then(async (result) => {
+          console.log(`[disp] lane disposition RESOLVED after ${ms()}`, result);
+          if (result?.dispositionOk === false) {
+            showQueueAdvanceTransition({
+              title: "RingCX did not confirm",
+              description: result.reason
+                ? `Lane disposition was not accepted: ${result.reason}.`
+                : "Lane disposition was not accepted. Keep the call visible and try again.",
+              blocking: false,
+            }, 3500);
+            void laneCallQuery.refetch();
+            return;
+          }
+          hardPruneLiveCoachForCurrentCall(coachReleaseReason, {
+            uii: laneCall.uii,
+            queueItemId: laneCall.externId,
+            agentEmail: String(data?.agent?.email || user?.email || "").trim(),
+            agentExtensionId: String(currentExtensionId || "").trim(),
+          });
+          showQueueAdvanceTransition({
+            title: "Lane call finished",
+            description: "Returning to the bulk queue underneath.",
+            blocking: false,
+          }, 2500);
+          await laneCallQuery.refetch().catch(() => null);
+          await bulk.refetch().catch(() => null);
+        })
+        .catch((error) => {
+          console.error(`[disp] lane disposition FAILED after ${ms()}`, error);
+          showQueueAdvanceTransition({
+            title: "Checking RingCX",
+            description: "The lane disposition did not confirm cleanly. Refreshing call state.",
+            blocking: false,
+          }, 3500);
+          void laneCallQuery.refetch();
+          workspace.refetch();
+        });
+      return;
+    }
+
     const t0 = Date.now();
     const ms = () => `${Date.now() - t0}ms`;
     // DEBUG: fires the instant the button's onClick runs. If you press a button
@@ -4926,27 +5160,38 @@ export function CXWorkspaceBulkLoad() {
       });
   }
 
-  const isExistingCase = Boolean(resolvedCaseId);
-  const hasLookupHit = Boolean(lookupMatch);
-  const formHeading = isExistingCase
-    ? form.firstName || form.lastName
-      ? `${form.firstName} ${form.lastName}`.trim()
-      : `Case ${resolvedCaseId}`
-    : hasLookupHit
-      ? "Match found"
-      : "Start a new case";
-  const formSubtitle =
-    bulk.data?.status === "running"
-      ? bulkCurrent
-        ? "Current lead comes from RingCX. Logics context is shown in the side panels."
-        : bulkShowingHeldCall
-          ? "Call review is held here until RingCX reports the next lead."
-          : "Waiting for RingCX to report the next lead."
-      : authoritativeLogicsCaseIdNumber != null
-      ? "Matched case loaded from Logics. Use the call-cycle buttons above to finish the attempt."
-      : hasLookupHit
-        ? "Auto-populated from the best source we found. Review the lead, then finish the attempt from the buttons above."
-        : "No matched case yet. Ask for enough information to identify the caller before finishing the attempt.";
+  const caseDisplayName =
+    `${form.firstName} ${form.lastName}`.trim()
+    || selected?.name
+    || servedQueueContact?.name
+    || detail?.name
+    || [lookupMatch?.firstName, lookupMatch?.lastName].filter(Boolean).join(" ")
+    || (resolvedCaseId ? `Case ${resolvedCaseId}` : "");
+  const casePhoneDisplay =
+    form.cellPhone
+    || selectedPhone
+    || currentCallPhone
+    || selected?.phone
+    || detail?.phone
+    || lookupMatch?.phone
+    || "";
+  const caseEmailDisplay =
+    form.email
+    || selected?.email
+    || detail?.email
+    || lookupMatch?.email
+    || "";
+  const leadTypeDisplay =
+    laneCall?.lane === "firstTouch"
+      ? "First touch"
+      : laneCall?.lane === "appointment"
+        ? "Appointment"
+        : leadTypeLabel(
+          bulkDisplayCandidate?.phase
+          || String(bulkDisplayCandidate?.ringcx?.queueFamily || "")
+          || String(bulkDisplayCandidate?.ringcx?.progressiveStageKey || "")
+          || String(bulkDisplayCandidate?.ringcx?.progressiveStageLabel || ""),
+        ) || "Bulk";
   const queueAdvanceBlocking = queueAdvanceTransition?.blocking === true;
 
   if (workspace.isLoading) {
@@ -5051,147 +5296,29 @@ export function CXWorkspaceBulkLoad() {
                 <div className="h-full w-1/3 animate-[cx-scramble_1.1s_ease-in-out_infinite] bg-primary" />
               </div>
             ) : null}
-            <CardHeader className="pb-2">
-              {/* Top row: domain badge + case id are the FIRST things the
-                  operator sees on a connect — "WYNN · 123456" is the
-                  unique routing key for any inbound call. */}
-              <div className="flex flex-wrap items-center gap-2">
-                <div className="flex min-w-0 flex-wrap items-center gap-2">
-                  {(() => {
-                    // Show the RESOLVED domain (where the lookup actually
-                    // landed), not just the fixed CX workspace fallback. With the
-                    // WYNN→TAG fallback walk, the case can live in the
-                    // OTHER tenant — and the badge needs to reflect that
-                    // truth so the operator doesn't think a WYNN case
-                    // is a TAG case.
-                    const resolvedDomain = caseDomain;
-                    const ds = getDomainBadgeStyle(resolvedDomain);
-                    const mismatched =
-                      resolvedDomain.toUpperCase() !== domain.toUpperCase();
-                    return (
-                      <span
-                        className={cn(
-                          "rounded-md border px-2 py-0.5 text-[11px] font-semibold uppercase tracking-[0.12em]",
-                          ds.className,
-                        )}
-                        title={
-                          mismatched
-                            ? `Matched in ${resolvedDomain} (workspace fallback is ${domain})`
-                            : undefined
-                        }
-                      >
-                        {ds.label}
-                        {mismatched ? " ↗" : ""}
-                      </span>
-                    );
-                  })()}
-                  <span className="font-mono text-base font-semibold tabular-nums text-foreground">
-                    {resolvedCaseId ? (
-                      <CaseLink
-                        caseId={resolvedCaseId}
-                        domain={caseDomain}
-                        compact
-                      >
+            <CardHeader className="px-4 py-2">
+              <div className="flex min-w-0 flex-wrap items-center gap-x-4 gap-y-1">
+                <CaseFact label="Name" value={caseDisplayName} emphasis />
+                <CaseFact
+                  label="Case"
+                  mono
+                  value={
+                    resolvedCaseId ? (
+                      <CaseLink caseId={resolvedCaseId} domain={caseDomain} compact>
                         {resolvedCaseId}
                       </CaseLink>
                     ) : !bulkRunning && leadLookup.isFetching ? (
-                      <span className="text-muted-foreground">scrambling…</span>
+                      "scrambling..."
                     ) : (
-                      <span className="text-muted-foreground">no case</span>
-                    )}
-                  </span>
-                  <span className="text-base text-muted-foreground">·</span>
-                  <CardTitle className="text-base">{formHeading}</CardTitle>
-                  {bulkShowingHeldCall ? (
-                    <StatusPill tone="warning">Review</StatusPill>
-                  ) : null}
-                  {bulk.data?.status !== "running" && detail?.status ? (
-                    <StatusPill tone={toneFromStatus(detail.status)}>{detail.status}</StatusPill>
-                  ) : null}
-                  {bulk.data?.status !== "running" && sourceBadge ? (
-                    <StatusPill tone={sourceBadge.tone}>{sourceBadge.label}</StatusPill>
-                  ) : null}
-                </div>
-                <div className="flex flex-wrap items-center gap-1.5">
-                  {bulkCanDispositionCurrent ? (
-                    <Button
-                      size="sm"
-                      variant="destructive"
-                      className="bg-red-600 text-white hover:bg-red-700"
-                      disabled={queueAdvanceBlocking || bulkCurrentAwaitingUii}
-                      onClick={(event) => {
-                        consumeUiEvent(event);
-                        submitQueueDisposition("dnc", "DNC");
-                      }}
-                      title="Mark this contact as Do-Not-Call (stops cadence on every channel)"
-                    >
-                      DNC
-                    </Button>
-                  ) : null}
-                  {bulkCanDispositionCurrent ? (
-                    <Button
-                      size="sm"
-                      variant="secondary"
-                      className="border-emerald-500/40 bg-emerald-600 text-white hover:bg-emerald-700"
-                      disabled={queueAdvanceBlocking || bulkCurrentAwaitingUii}
-                      onClick={(event) => {
-                        consumeUiEvent(event);
-                        submitQueueDisposition("answered", "Answered");
-                      }}
-                      title="Mark the queue attempt as answered without DNC or Logics status changes."
-                    >
-                      <CheckCircle2 className="h-3.5 w-3.5" />
-                      Answer
-                    </Button>
-                  ) : null}
-                  {bulkCanDispositionCurrent ? (
-                    <Button
-                      size="sm"
-                      variant="secondary"
-                      className="border-amber-500/50 bg-amber-500 text-amber-950 hover:bg-amber-400"
-                      disabled={queueAdvanceBlocking || bulkCurrentAwaitingUii}
-                      onClick={(event) => {
-                        consumeUiEvent(event);
-                        submitQueueDisposition("did_not_connect", "Did not answer");
-                      }}
-                      title="No answer: count the attempt and reschedule the queue item by cadence rules."
-                    >
-                      <PhoneOff className="h-3.5 w-3.5" />
-                      No answer
-                    </Button>
-                  ) : null}
-                  {CX_VOICEMAIL_BUTTON_ENABLED && bulkCanDispositionCurrent ? (
-                    <Button
-                      size="sm"
-                      variant="secondary"
-                      className="border-violet-500/40 bg-violet-600 text-white hover:bg-violet-700"
-                      disabled={queueAdvanceBlocking || bulkCurrentAwaitingUii}
-                      onClick={(event) => {
-                        consumeUiEvent(event);
-                        submitQueueDisposition("voicemail", "Voicemail");
-                      }}
-                      title="Mark the current bulk call as voicemail and advance to the next lead."
-                    >
-                      <MessageCircleMore className="h-3.5 w-3.5" />
-                      Voicemail
-                    </Button>
-                  ) : null}
-                  {bulkCanDispositionCurrent ? (
-                    <Button
-                      size="sm"
-                      variant="secondary"
-                      isLoading={bulkSkip.isPending}
-                      disabled={queueAdvanceBlocking || bulkCurrentAwaitingUii}
-                      onClick={(event) => {
-                        consumeUiEvent(event);
-                        handleBulkSkip();
-                      }}
-                      title="Skip this lead and move to the next call."
-                    >
-                      Skip
-                    </Button>
-                  ) : null}
-                </div>
+                      ""
+                    )
+                  }
+                />
+                <CaseFact label="Phone" value={casePhoneDisplay} mono />
+                <CaseFact label="Email" value={caseEmailDisplay} />
+                <span className="rounded-md border border-sky-500/30 bg-sky-500/10 px-2 py-0.5 text-[11px] font-semibold uppercase tracking-[0.1em] text-sky-800 dark:text-sky-100">
+                  {leadTypeDisplay}
+                </span>
               </div>
               {queueAdvanceTransition ? (
                 <div
@@ -5264,7 +5391,6 @@ export function CXWorkspaceBulkLoad() {
                   </div>
                 </div>
               ) : null}
-              <div className="text-[11px] text-muted-foreground">{formSubtitle}</div>
             </CardHeader>
             <CardContent
               className={cn(
@@ -5439,96 +5565,89 @@ export function CXWorkspaceBulkLoad() {
                 </div>
               ) : null}
 
-              {/* Primary identity */}
-              <div className="grid gap-2 sm:grid-cols-2 md:grid-cols-4">
-                <Input
-                  value={form.firstName}
-                  onChange={(e) => handleFormChange("firstName", e.target.value)}
-                  placeholder="First name"
+              {/* Call-outcome row — hard data above, actions below, nothing else
+                  on the card. LIVE DNC BUTTON REMOVED (ledger #6, trigger met
+                  2026-07-07 by the wrap-card DNC proof: interview + correction
+                  drained + Logics status confirmed by external read). The live
+                  row records the CALL RESULT only; "never call me" = Answered
+                  here, DNC on the wrap card seconds later — the card is the one
+                  case-land decision channel. Backend dnc disposition handling
+                  survives (the card writes through it). NO AGENT-FACING SKIP
+                  either — Mickey's road-to-floor checklist ruling: every served
+                  lead leaves through a recorded outcome. The skip command stays
+                  server-side (useCxBulkLoadSkip is retained but uncalled). */}
+              {canDispositionCurrent ? (
+                <div className="flex flex-wrap items-center gap-1.5 border-t border-border/60 pt-1.5">
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    className="border-emerald-500/40 bg-emerald-600 text-white hover:bg-emerald-700"
+                    disabled={queueAdvanceBlocking || (!laneCanDispositionCurrent && bulkCurrentAwaitingUii) || laneDisposition.isPending}
+                    onClick={(event) => {
+                      consumeUiEvent(event);
+                      submitQueueDisposition("answered", "Answered");
+                    }}
+                    title="Mark the queue attempt as answered without DNC or Logics status changes."
+                  >
+                    <CheckCircle2 className="h-4 w-4" />
+                    Answer
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    className="border-amber-500/50 bg-amber-500 text-amber-950 hover:bg-amber-400"
+                    disabled={queueAdvanceBlocking || (!laneCanDispositionCurrent && bulkCurrentAwaitingUii) || laneDisposition.isPending}
+                    onClick={(event) => {
+                      consumeUiEvent(event);
+                      submitQueueDisposition("did_not_connect", "Did not answer");
+                    }}
+                    title="No answer: count the attempt and reschedule the queue item by cadence rules."
+                  >
+                    <PhoneOff className="h-4 w-4" />
+                    No answer
+                  </Button>
+                  {CX_VOICEMAIL_BUTTON_ENABLED ? (
+                    <Button
+                      size="sm"
+                      variant="secondary"
+                      className="border-violet-500/40 bg-violet-600 text-white hover:bg-violet-700"
+                      disabled={queueAdvanceBlocking || (!laneCanDispositionCurrent && bulkCurrentAwaitingUii) || laneDisposition.isPending}
+                      onClick={(event) => {
+                        consumeUiEvent(event);
+                        submitQueueDisposition("voicemail", "Voicemail");
+                      }}
+                      title="Mark the current bulk call as voicemail and advance to the next lead."
+                    >
+                      <MessageCircleMore className="h-4 w-4" />
+                      Voicemail
+                    </Button>
+                  ) : null}
+                </div>
+              ) : null}
+              {resolvedCaseId ? (
+                <LogicsWorkspaceCard
+                  domain={caseDomain}
+                  resolvedCaseId={resolvedCaseId}
+                  resolvedPhone={
+                    selected?.phone || lookupResult?.match?.phone || currentCallPhone || null
+                  }
                 />
-                <Input
-                  value={form.lastName}
-                  onChange={(e) => handleFormChange("lastName", e.target.value)}
-                  placeholder="Last name"
-                />
-                <Input
-                  value={form.email}
-                  onChange={(e) => handleFormChange("email", e.target.value)}
-                  placeholder="Email"
-                  leadingIcon={<Mail />}
-                />
-                <Input
-                  type="password"
-                  value={form.ssn}
-                  onChange={(e) => handleFormChange("ssn", e.target.value)}
-                  placeholder="SSN (leave blank to keep current)"
-                  autoComplete="off"
-                />
-              </div>
-              <div className="grid gap-2 sm:grid-cols-2 md:grid-cols-4">
-                <Input
-                  value={form.cellPhone}
-                  onChange={(e) => handleFormChange("cellPhone", e.target.value)}
-                  placeholder="Cell / phone 1"
-                  leadingIcon={<Phone />}
-                />
-                <Input
-                  value={form.homePhone}
-                  onChange={(e) => handleFormChange("homePhone", e.target.value)}
-                  placeholder="Home / phone 2"
-                  leadingIcon={<Phone />}
-                />
-                <Input
-                  value={form.caseId}
-                  onChange={(e) => handleFormChange("caseId", e.target.value)}
-                  placeholder="Case ID — paste to look up"
-                  className="font-mono"
-                />
-              </div>
-              {/* Spouse — same shape, separated by a tiny header so it's
-                  obvious where the second person's fields begin. */}
-              <div className="pt-1 text-[10px] font-semibold uppercase tracking-[0.14em] text-muted-foreground">
-                Spouse
-              </div>
-              <div className="grid gap-2 sm:grid-cols-2 md:grid-cols-4">
-                <Input
-                  value={form.spouseFirstName}
-                  onChange={(e) => handleFormChange("spouseFirstName", e.target.value)}
-                  placeholder="Spouse first name"
-                />
-                <Input
-                  value={form.spouseLastName}
-                  onChange={(e) => handleFormChange("spouseLastName", e.target.value)}
-                  placeholder="Spouse last name"
-                />
-                <Input
-                  value={form.spouseEmail}
-                  onChange={(e) => handleFormChange("spouseEmail", e.target.value)}
-                  placeholder="Spouse email"
-                  leadingIcon={<Mail />}
-                />
-                <Input
-                  type="password"
-                  value={form.spouseSsn}
-                  onChange={(e) => handleFormChange("spouseSsn", e.target.value)}
-                  placeholder="Spouse SSN"
-                  autoComplete="off"
-                />
-              </div>
-              <div className="grid gap-2 sm:grid-cols-2 md:grid-cols-4">
-                <Input
-                  value={form.spouseCellPhone}
-                  onChange={(e) => handleFormChange("spouseCellPhone", e.target.value)}
-                  placeholder="Spouse cell / phone 1"
-                  leadingIcon={<Phone />}
-                />
-                <Input
-                  value={form.spouseHomePhone}
-                  onChange={(e) => handleFormChange("spouseHomePhone", e.target.value)}
-                  placeholder="Spouse home / phone 2"
-                  leadingIcon={<Phone />}
-                />
-              </div>
+              ) : (
+                <div className="grid h-[calc(32vh+50px)] min-h-[290px] max-h-[470px] min-w-0 overflow-hidden border-t border-border/60 xl:grid-cols-2">
+                  {["Communications", "Activities / tasks"].map((title, idx) => (
+                    <div
+                      key={title}
+                      className={cn(
+                        "flex min-h-0 flex-col items-center justify-center gap-1 bg-muted/10 text-sm text-muted-foreground",
+                        idx > 0 ? "border-t border-border xl:border-l xl:border-t-0" : "",
+                      )}
+                    >
+                      <span className="font-medium text-foreground/70">{title}</span>
+                      <span className="text-xs">No case context loaded.</span>
+                    </div>
+                  ))}
+                </div>
+              )}
             </CardContent>
           </Card>
 
@@ -5623,9 +5742,65 @@ export function CXWorkspaceBulkLoad() {
 
         </section>
 
-        {/* ── RIGHT: appointments + Logics context ──────────────────────── */}
+        {/* ── RIGHT: appointments + close-outs ─────────────────────────── */}
         <aside className="flex-shrink-0 lg:w-[370px]">
           <div className="lg:sticky lg:top-20 space-y-4">
+            {laneCall && laneBannerExpanded ? (
+              <div
+                aria-live="polite"
+                className={cn(
+                  "pointer-events-none fixed left-1/2 top-16 z-50 w-[min(420px,calc(100vw-24px))] -translate-x-1/2 rounded-lg border-2 p-3 shadow-xl",
+                  laneCall.lane === "firstTouch"
+                    ? "border-emerald-500 bg-emerald-50"
+                    : "border-sky-500 bg-sky-50",
+                )}
+              >
+                <div className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wide">
+                  {laneCall.lane === "firstTouch" ? (
+                    <Phone className="h-3.5 w-3.5" aria-hidden="true" />
+                  ) : (
+                    <CalendarClock className="h-3.5 w-3.5" aria-hidden="true" />
+                  )}
+                  <span>{laneCall.lane === "firstTouch" ? "First touch - new lead calling" : "Appointment call"}</span>
+                </div>
+                <div className="mt-0.5 text-base font-semibold">
+                  {laneCall.name || (laneCall.caseId ? `Case ${laneCall.caseId}` : "Incoming lead")}
+                </div>
+                <div className="text-xs text-muted-foreground">
+                  {laneCall.caseId ? `Case ${laneCall.caseId} · ` : ""}
+                  {laneCall.lane === "firstTouch" && laneCall.meta?.mintedAt
+                    ? laneMinutesAgoLabel(laneCall.meta.mintedAt)
+                    : null}
+                  {laneCall.lane === "appointment" && laneCall.meta?.appointmentAt
+                    ? laneAppointmentTimeLabel(laneCall.meta.appointmentAt)
+                    : null}
+                  {laneCall.meta?.phoneLast4 ? ` · ***${laneCall.meta.phoneLast4}` : ""}
+                </div>
+                <div className="mt-1 text-[11px] text-muted-foreground">
+                  Loading into the workspace — the case panel takes it from here.
+                </div>
+              </div>
+            ) : null}
+            {laneCall && !laneBannerExpanded ? (
+              <div
+                aria-live="polite"
+                className={cn(
+                  "pointer-events-none fixed left-1/2 top-16 z-50 flex -translate-x-1/2 items-center gap-1.5 rounded-full border px-3 py-1 text-xs font-medium shadow-md",
+                  laneCall.lane === "firstTouch"
+                    ? "border-emerald-500 bg-emerald-50 text-emerald-900"
+                    : "border-sky-500 bg-sky-50 text-sky-900",
+                )}
+              >
+                <span
+                  className={cn(
+                    "h-2 w-2 animate-pulse rounded-full",
+                    laneCall.lane === "firstTouch" ? "bg-emerald-500" : "bg-sky-500",
+                  )}
+                  aria-hidden="true"
+                />
+                <span>{laneCall.lane === "firstTouch" ? "First touch" : "Appointment"}</span>
+              </div>
+            ) : null}
             {(wrapCardsQuery.data?.cards?.length ?? 0) > 0 ? (
               <Card>
                 <CardHeader>
@@ -5746,15 +5921,6 @@ export function CXWorkspaceBulkLoad() {
               isReleasing={releaseAppointment.isPending}
               isCallingNow={callAppointmentNow.isPending}
             />
-            {resolvedCaseId ? (
-              <LogicsWorkspaceCard
-                domain={caseDomain}
-                resolvedCaseId={resolvedCaseId}
-                resolvedPhone={
-                  selected?.phone || lookupResult?.match?.phone || currentCallPhone || null
-                }
-              />
-            ) : null}
           </div>
         </aside>
       </div>

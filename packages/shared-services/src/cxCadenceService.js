@@ -2075,11 +2075,18 @@ async function queueCxDialRequest(payload = {}) {
     existing = await cxDialQueueRepository.findActiveQueueItem(
       domain,
       caseId,
-      actionKey ? { actionKey } : {},
+      {
+        ...(actionKey ? { actionKey } : {}),
+        ...(payload.excludeLaneRows === true ? { excludeLaneRows: true } : {}),
+      },
     );
   }
   if (!existing && actionKey) {
-    existing = await cxDialQueueRepository.findActiveQueueItem(domain, caseId);
+    existing = await cxDialQueueRepository.findActiveQueueItem(
+      domain,
+      caseId,
+      payload.excludeLaneRows === true ? { excludeLaneRows: true } : {},
+    );
   }
   if (existing) {
     const existingObject = existing.toObject ? existing.toObject() : existing;
@@ -2831,6 +2838,14 @@ async function handleCxTerminalCallOutcome(payload = {}) {
       || queueItem.metadata?.lastDialExecutionUii
       || queueItem.metadata?.lastQueueAttemptUii
       || null,
+    // F2 CONSUMPTION (Mickey's flag model, 2026-07-08): ANY terminal on a flagged row
+    // releases the first-touch mark — one loop, no bleed. Covers BOTH serving modes:
+    // overnight rows served through the bulk session (cxbl) and drip rows dispositioned
+    // on the lane call (the lane terminal persists to the same queueItemId). Spreads
+    // onto metadata.* on EVERY exit path, so ignore-branches consume too.
+    ...(queueItem.metadata?.firstTouchPending
+      ? { firstTouchPending: null, firstTouchConsumedAt: safeOutcomeAt }
+      : {}),
   };
   const terminalAttemptProof = buildTerminalAttemptProofPatch(queueItem, payload, safeOutcomeAt, terminalMetadata);
   const countableBulkTerminalAttempt = terminalAttemptProof.countable;

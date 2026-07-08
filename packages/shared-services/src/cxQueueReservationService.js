@@ -30,6 +30,20 @@ function createCxQueueReservationService({
   // Reserve up to the per-family targets, in family (rank) order, capped at totalLimit.
   // Returns the atomically-claimed rows (already state:'claimed', owned by this session)
   // plus a `missing` map of genuine short supply per family.
+  // THE POST-8AM BUILD: overnight-assigned first-touch rows reserve FIRST for their
+  // agent — arrival order, before any family fill. Flag-checked by the CALLER (the
+  // runtime knows CX_FIRST_TOUCH_ENABLED); this is just the reservation mechanics.
+  async function reserveAssignedFirstTouch({ domain, agentEmail, agentExtensionId, sessionId, limit, claimMinutes } = {}) {
+    if (typeof cxDialQueueRepository.reserveAssignedFirstTouchRows !== "function") return [];
+    return cxDialQueueRepository.reserveAssignedFirstTouchRows(domain, {
+      agentEmail,
+      agentExtensionId,
+      sessionId,
+      limit,
+      claimMinutes,
+    });
+  }
+
   async function reserveFromFamilyOrder({
     domain,
     agentExtensionId,
@@ -186,6 +200,7 @@ function createCxQueueReservationService({
 
   return {
     reserveFromFamilyOrder,
+    reserveAssignedFirstTouch,
     listReservedForSession,
     cancelReserved,
     releaseReserved,

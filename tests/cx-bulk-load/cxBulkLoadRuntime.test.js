@@ -130,6 +130,40 @@ test("did_not_connect outcome still runs the post-disposition hangup (Auto Dispo
   assert.deepEqual(client.calls, ["20260706000000000000000000002"]);
 });
 
+test("lane disposition controls the active lane UII without requiring a bulk session", async () => {
+  const calls = [];
+  const client = {
+    async dispositionCall(uii, opts) {
+      calls.push({ type: "disposition", uii, opts });
+      return { ok: true };
+    },
+    async hangupCall(uii) {
+      calls.push({ type: "hangup", uii });
+      return true;
+    },
+  };
+  const result = await _test.executeLaneCallDisposition({
+    client,
+    laneCall: {
+      lane: "firstTouch",
+      uii: "uii-lane-1",
+      externId: "cxft-wynn-row1",
+      caseId: 101,
+      domain: "WYNN",
+      name: "Lane Test",
+    },
+    outcome: "did_not_connect",
+    agent: { agentEmail: "mgray@taxadvocategroup.com", agentExtensionId: "101" },
+  });
+  assert.equal(result.dispositionOk, true);
+  assert.equal(result.disposition, "Auto Dispo");
+  assert.equal(result.persisted, false, "lane consumption is deliberately not hidden in this control slice");
+  assert.deepEqual(calls, [
+    { type: "disposition", uii: "uii-lane-1", opts: { disposition: "Auto Dispo", callback: false, notes: undefined } },
+    { type: "hangup", uii: "uii-lane-1" },
+  ]);
+});
+
 test("ghost-rescue decision: innocent deaths rescue, compliance/foreign/racing rows never do", () => {
   const d = _test.deriveRescueDecision;
   const sess = "cxbl-me";

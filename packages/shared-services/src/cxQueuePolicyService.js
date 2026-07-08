@@ -681,18 +681,24 @@ function resolveLeadDialRules(state, parts = null) {
   };
 }
 
-function resolveQueueDialTimeWindow(item = {}, now = new Date()) {
+function resolveQueueDialTimeWindow(item = {}, now = new Date(), options = {}) {
   const state = resolveLeadState(item);
   const timeZone = resolveLeadTimeZone(item);
   let cursor = new Date(now);
 
   for (let guard = 0; guard < 20; guard += 1) {
-    const operational = evaluateDailyWindow(cursor, {
-      timeZone: OPERATIONAL_TIMEZONE,
-      startHour: readOperationalStartHour(),
-      endHour: Math.max(readOperationalEndHour(), readOperationalStartHour() + 1),
-      activeWeekdays: [1, 2, 3, 4, 5],
-    });
+    // ignoreOperationalWindow (2026-07-08, appointments only): an explicit human
+    // commitment is floored by the LEAD-legal window alone — the ops window must not
+    // push a 5pm appointment to tomorrow morning. Default OFF: every cadence/queue
+    // caller keeps the ops window exactly as before.
+    const operational = options.ignoreOperationalWindow
+      ? { allowed: true, nextAllowedAt: cursor }
+      : evaluateDailyWindow(cursor, {
+        timeZone: OPERATIONAL_TIMEZONE,
+        startHour: readOperationalStartHour(),
+        endHour: Math.max(readOperationalEndHour(), readOperationalStartHour() + 1),
+        activeWeekdays: [1, 2, 3, 4, 5],
+      });
     const leadParts = getZonedParts(cursor, timeZone);
     const leadRules = resolveLeadDialRules(state, leadParts);
     const lead = evaluateDailyWindow(cursor, {

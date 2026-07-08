@@ -643,3 +643,20 @@ Do not delete with:
 6. Wrap appointment cutover: remove post-call appointment freeze path once card appointment is proven.
 7. WO-22: port the stale-serving guard into terminal rectification, then delete the diagnostic stale-serving bundle.
 8. After floor acceptance: remove remaining stale-serving legacy freer and leftover DISPTRACE/probe scaffolding.
+
+## Additions (Fable, 2026-07-08 hardening pass)
+
+- **DONE: ledger #6 executed** — the live-dialer DNC button is cut (trigger met 07-07 by
+  the wrap-card DNC proof: interview + correction drained + Logics status confirmed by
+  external read). The live row records call results only; backend dnc handling survives
+  (wrap cards write through it). Comment tombstone at the old render site.
+- **NEW CANDIDATE: the internal cx-queue claim routes** —
+  `/api/ringcentral/cx-queue/claim-next|process-batch|build-agents` on the ringcentral-cx
+  app (requireInternalAccess) drive `claimNextCxQueueItem`, the legacy distribution rail.
+  Verified 2026-07-08: NOT in the bulk loop (bulk reserves via cxQueueReservationService);
+  hardened with the same H5 exclusions. Delete trigger: one floor week of logs showing
+  zero calls to these routes → 410 tombstones, then the claim fn per its own map.
+- **KNOWN-FAILING SUITE (not a delete item): tests/live-coach/uiiReconcile.test.js**
+  (4/6 red, pre-existing — the coach is parked/unwired; pins drifted from some earlier
+  change). Reconcile when the coach pilot wires in; do not "fix" pins against unknown
+  intended behavior before then.

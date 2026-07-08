@@ -123,6 +123,13 @@ function normalizeLeadQueueFamily(value) {
   ) {
     return "dead";
   }
+  // "pilot" — the agent-pilot isolation family (2026-07-08). Recognized here so the
+  // bulk reservation path can target it, but NO floor query (cadence assigner, refill
+  // materializers, morning builder) ever enumerates it: rows in this family serve
+  // ONLY through a bulk session started with CX_BULK_RESERVE_PILOT_FAMILY set.
+  if (normalized === "pilot") {
+    return "pilot";
+  }
   return "unassigned";
 }
 

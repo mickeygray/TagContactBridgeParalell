@@ -45,3 +45,7 @@ ops/scheduled-logs/*.log
 # Local Drop.co fire-test harnesses. Production voicemail drop uses the RingCX
 # barge path; keep campaign one-offs out of patches and GitHub.
 scripts/drop-phonefrom-local-server.js
+
+# runtime logs (untracked 2026-07-08 review note: local-web-current.err.log alone carried 521k stale lines)
+logs/
+tmp-alpha-audit-tests.*

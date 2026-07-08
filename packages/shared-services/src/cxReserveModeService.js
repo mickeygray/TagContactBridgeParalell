@@ -28,6 +28,17 @@ function readEnvNonNegInt(name, fallback, env = process.env) {
 function buildFamilyTargets({ policy, totalDeficit, env = process.env } = {}) {
   const mode = String(env.RC_CX_RESERVE_MODE || "mix").trim().toLowerCase();
   const deficit = Math.max(Number(totalDeficit) || 0, 0);
+
+  // PILOT ISOLATION MODE (2026-07-08, default off): when CX_BULK_RESERVE_PILOT_FAMILY
+  // names a family, every bulk session on this box reserves EXCLUSIVELY from it —
+  // no floor families, no aged floor. This is the serving half of the one-agent
+  // pilot: the floor's claim queries never enumerate the pilot family, and a pilot
+  // session never touches the floor's hopper. Exclusive by design — do not blend.
+  const pilotFamily = String(env.CX_BULK_RESERVE_PILOT_FAMILY || "").trim().toLowerCase();
+  if (pilotFamily) {
+    return { [pilotFamily]: deficit };
+  }
+
   const open = (family) => getQueueFamilyTargetOpen(policy, family); // account-aware; 0 when disabled/ineligible
   const disabled = policy && typeof policy === "object" && policy.enabled === false;
 

@@ -433,13 +433,37 @@ function createCxBulkLoadRuntimeService(deps = {}) {
       familyTargets: effectiveFamilyTargets,
     });
 
-    const { reserved } = await reservationService.reserveFromFamilyOrder({
+    // THE POST-8AM BUILD (Mickey, 2026-07-08): the agent's overnight-assigned
+    // first-touch rows come FIRST — arrival order — then the family mix fills the rest.
+    // Flag-gated: with CX_FIRST_TOUCH_ENABLED off this is a zero-cost empty array.
+    let firstTouchReserved = [];
+    const firstTouchOn = String(process.env.CX_FIRST_TOUCH_ENABLED || "false").trim().toLowerCase() === "true";
+    if (firstTouchOn && state.agentEmail && typeof reservationService.reserveAssignedFirstTouch === "function") {
+      firstTouchReserved = await reservationService.reserveAssignedFirstTouch({
+        domain: state.domain,
+        agentEmail: state.agentEmail,
+        agentExtensionId: state.agentExtensionId,
+        sessionId: state.sessionId,
+        limit: deficit,
+        claimMinutes: Number((state.stats && state.stats.claimMinutes) || DEFAULT_RESERVE_CLAIM_MINUTES),
+      }).catch(() => []);
+      if (firstTouchReserved.length) {
+        traceBulkFlow("fill.first_touch_reserved", state, {
+          count: firstTouchReserved.length,
+          queueItemIds: firstTouchReserved.slice(0, 10).map((r) => String(r._id)),
+        });
+      }
+    }
+    const familyDeficit = Math.max(deficit - firstTouchReserved.length, 0);
+
+    const { reserved: familyReserved } = familyDeficit > 0
+      ? await reservationService.reserveFromFamilyOrder({
       domain: state.domain,
       agentExtensionId: state.agentExtensionId,
       sessionId: state.sessionId,
       // M11 gate 8: residual per-family deficits from the live buffer, not the static start map.
       familyTargets: effectiveFamilyTargets,
-      totalLimit: deficit,
+      totalLimit: familyDeficit,
       claimMinutes: Number((state.stats && state.stats.claimMinutes) || DEFAULT_RESERVE_CLAIM_MINUTES),
       metadata: {
         rail: "bulk_load",
@@ -447,10 +471,13 @@ function createCxBulkLoadRuntimeService(deps = {}) {
         rcxCampaignId: state.ringcx && state.ringcx.campaignId,
         rcxDialGroupId: state.ringcx && state.ringcx.dialGroupId,
       },
-    });
+    })
+      : { reserved: [] };
+    const reserved = [...firstTouchReserved, ...familyReserved];
     traceBulkFlow("fill.reserve_finished", state, {
       requested: deficit,
       reserved: reserved.length,
+      firstTouch: firstTouchReserved.length,
       familyTargets: effectiveFamilyTargets,
     });
     if (!reserved.length) return state;

@@ -34,6 +34,10 @@ const KNOWN_MODELS = [
   // CX 0.2.0 #2: one-running-session-per-agent partial-unique index. SWEEP duplicate running
   // sessions per agent BEFORE the first sync (the unique build fails otherwise).
   "CxBulkLoadSession",
+  // Wrap cards: the exactly-once dedupe lives in the unique idemKey index (fast-mint +
+  // drain backstop both rely on it). Live collection verified 2026-07-08; listed here so
+  // fresh environments get it promoted too.
+  "CxCallWrapCard",
   "HourlyJobEvent",
   "LeadCadence",
   "MasterProspectIndex",

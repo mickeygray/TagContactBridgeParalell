@@ -1,1 +1,0 @@
-{"timestamp":"2026-06-24T18:30:19.371Z","level":"error","scope":"control-plane","message":"recording-archive.eod.failed","meta":{"error":"Timed out waiting for recording pipeline idle state (eod-recording-archive)"}}

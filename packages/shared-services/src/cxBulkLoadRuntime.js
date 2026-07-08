@@ -35,6 +35,8 @@ const { resolveCaseContactEligibility } = require("./contactEligibilityService")
 const { handleCxTerminalCallOutcome, resolveRingcxPublishedCopies } = require("./cxCadenceService");
 const { cancelPublishedQueueItemInRingcx } = require("./ringcxLeadServingService");
 const { executeCxHangupRequest } = require("./ringcxDialExecutionService");
+const { getLaneCall, clearLaneCall } = require("./cxLaneCallRegistry");
+const { parseLaneExternId } = require("./cxLaneRegistry");
 
 function readEnv(name, fallback = "") {
   const v = process.env[name];
@@ -81,7 +83,7 @@ function sleep(ms) {
 
 function dispositionProbeBase(session = {}, candidate = {}, extra = {}) {
   return {
-    rail: "bulk_load",
+    rail: session.rail || "bulk_load",
     sessionId: session.sessionId || null,
     agentEmail: session.agentEmail || null,
     agentExtensionId: session.agentExtensionId || null,
@@ -512,6 +514,239 @@ function bulkOutcomeDisposition(outcome) {
     case "did_not_connect":
     default:
       return "Auto Dispo";
+  }
+}
+
+function normalizeLaneOutcome(value) {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (normalized === "did-not-answer" || normalized === "no-answer" || normalized === "no_answer") {
+    return "did_not_connect";
+  }
+  if (["answered", "did_not_connect", "voicemail"].includes(normalized)) return normalized;
+  return null;
+}
+
+// F2 CONSUMPTION (2026-07-08): a dispositioned lane call persists a REAL terminal into
+// the trunk — the same outbox row an ordinary bulk disposition writes, keyed to the REAL
+// queue row (the cxft extern carries the row id; the cxapt extern carries the appointment
+// key). The drain then does everything it always does: completes the row, counts cadence,
+// RELEASES the firstTouchPending mark (the terminal handler consumes it), and an answered
+// call mints its wrap card via the fast-mint route. Appointments additionally resolve
+// through the existing resolver (completed + resolvedDisposition — kept/missed by verdict).
+// deps injectable for pins; fail-soft: consumption failing never un-dispositions the call.
+async function persistLaneCallConsumption({ laneCall = {}, session = {}, outcome = null, agentEmail = null, deps = {} } = {}) {
+  const parsed = parseLaneExternId(laneCall.externId);
+  if (!parsed) return { ok: false, reason: "unparseable-extern" };
+  const insertOutboxRow = deps.insertOutboxRow
+    || ((row) => cxTerminalOutboxRepository.insertOnce(row));
+  const at = new Date().toISOString();
+
+  async function persistTerminalFor(queueItemId, extra = {}) {
+    if (!queueItemId) return { ok: false, reason: "no-queue-item" };
+    const idemKey = makeOutcomeIdemKey({
+      sessionId: session.sessionId,
+      queueItemId,
+      uii: laneCall.uii,
+      eventType: "terminal",
+    });
+    const payload = {
+      sessionId: session.sessionId || null,
+      domain: laneCall.domain || null,
+      agentEmail: agentEmail || null,
+      queueItemId: String(queueItemId),
+      caseId: laneCall.caseId ?? null,
+      externId: laneCall.externId || null,
+      uii: laneCall.uii || null,
+      name: laneCall.name || null,
+      outcome,
+      eventType: "terminal",
+      lane: laneCall.lane || parsed.lane,
+      source: "lane-call-disposition",
+      sourceService: "cx-lane-call",
+      at,
+      idemKey,
+      ...extra,
+    };
+    const inserted = await insertOutboxRow({
+      idemKey,
+      sessionId: session.sessionId || null,
+      rail: "lane_call",
+      domain: laneCall.domain || null,
+      queueItemId: String(queueItemId),
+      uii: laneCall.uii || null,
+      caseId: laneCall.caseId ?? null,
+      agentEmail: agentEmail || null,
+      externId: laneCall.externId || null,
+      outcome,
+      payload,
+    });
+    return { ok: true, idemKey, duplicate: inserted === null };
+  }
+
+  if (parsed.lane === "firstTouch") {
+    const terminal = await persistTerminalFor(parsed.queueItemId);
+    return { ok: terminal.ok, lane: "firstTouch", terminalPersisted: terminal.ok, idemKey: terminal.idemKey || null, duplicate: terminal.duplicate === true };
+  }
+
+  if (parsed.lane === "appointment") {
+    const resolveAppointment = deps.resolveAppointment
+      || ((input) => require("./cxAppointmentService").resolveCxAppointmentAfterDisposition(input));
+    const resolved = await resolveAppointment({
+      domain: laneCall.domain || null,
+      caseId: laneCall.caseId ?? null,
+      // the extern IS the appointment key — hand it to the resolver via the synthetic row
+      queueItem: { metadata: { appointmentId: parsed.appointmentId } },
+      disposition: outcome,
+      actorEmail: agentEmail || "cx-lane-call",
+      cancel: false,
+    }).catch((error) => ({ ok: false, error: error?.message }));
+    const appointment = resolved?.appointment || null;
+    const queueItemId = appointment?.cxQueueRecordId ? String(appointment.cxQueueRecordId) : null;
+    const terminal = queueItemId ? await persistTerminalFor(queueItemId) : { ok: false, reason: "no-appointment-queue-row" };
+    return {
+      ok: resolved?.ok !== false,
+      lane: "appointment",
+      appointmentResolved: resolved?.ok !== false,
+      terminalPersisted: terminal.ok === true,
+      idemKey: terminal.idemKey || null,
+    };
+  }
+
+  return { ok: false, reason: "bulk-extern-not-lane" };
+}
+
+async function executeLaneCallDisposition({ laneCall = null, outcome = null, client = null, agent = {}, notes = null } = {}) {
+  const normalizedOutcome = normalizeLaneOutcome(outcome);
+  if (!normalizedOutcome) {
+    throw makeHttpError("Unsupported lane call disposition", 400, "cx-lane-call-disposition-unsupported");
+  }
+  const uii = normalizeExternalId(laneCall?.uii);
+  if (!laneCall || !uii) {
+    return {
+      ok: false,
+      dispositionOk: false,
+      reason: "missing-lane-call-uii",
+      terminal: { ok: false, executed: false, reason: "missing-lane-call-uii" },
+    };
+  }
+  const ringcx = client || createRingcxVoiceClient();
+  const disposition = bulkOutcomeDisposition(normalizedOutcome);
+  const session = {
+    rail: "lane_call",
+    sessionId: `lane:${normalizeEmail(agent.agentEmail) || "unknown"}`,
+    agentEmail: normalizeEmail(agent.agentEmail) || null,
+    agentExtensionId: normalizeExternalId(agent.agentExtensionId || ""),
+    domain: laneCall.domain || null,
+    ringcx: {},
+  };
+  const candidate = {
+    queueItemId: laneCall.externId || laneCall.uii || null,
+    caseId: laneCall.caseId ?? null,
+    domain: laneCall.domain || null,
+    name: laneCall.name || null,
+    uii,
+    externId: laneCall.externId || null,
+    ringcx: { externId: laneCall.externId || null },
+  };
+
+  try {
+    const response = await ringcx.dispositionCall(uii, {
+      disposition,
+      callback: false,
+      notes: notes || undefined,
+    });
+    const accepted = response !== false;
+    logDispositionProbeSent({ session, candidate, uii, disposition, outcome: normalizedOutcome, response });
+    if (!accepted) {
+      logCxAlpha("cx.alpha.disposition.transport", {
+        rail: "lane_call",
+        lane: laneCall.lane || null,
+        agentEmail: session.agentEmail,
+        domain: candidate.domain,
+        caseId: candidate.caseId,
+        externId: candidate.externId,
+        uii,
+        disposition,
+        outcome: normalizedOutcome,
+        ok: false,
+        executed: true,
+        dispositionStatus: "rejected",
+      });
+      return {
+        ok: false,
+        dispositionOk: false,
+        laneCall,
+        outcome: normalizedOutcome,
+        disposition,
+        terminal: { ok: false, executed: true, dispositionStatus: "rejected", response },
+      };
+    }
+    const postDispositionHangup = await runPostDispositionHangupProbe(ringcx, {
+      session,
+      candidate,
+      uii,
+      disposition,
+      outcome: normalizedOutcome,
+    });
+    const consumption = await persistLaneCallConsumption({
+      laneCall,
+      session,
+      outcome: normalizedOutcome,
+      agentEmail: session.agentEmail,
+    }).catch((error) => ({ ok: false, error: error?.message || "lane-consumption-failed" }));
+    logCxAlpha("cx.alpha.disposition.transport", {
+      rail: "lane_call",
+      lane: laneCall.lane || null,
+      agentEmail: session.agentEmail,
+      domain: candidate.domain,
+      caseId: candidate.caseId,
+      externId: candidate.externId,
+      uii,
+      disposition,
+      outcome: normalizedOutcome,
+      ok: true,
+      executed: true,
+      dispositionStatus: "accepted",
+      postDispositionHangupOk: postDispositionHangup?.ok === true,
+      postDispositionHangupStatus: postDispositionHangup?.status || null,
+      persisted: consumption?.ok === true,
+      consumption,
+    });
+    return {
+      ok: true,
+      dispositionOk: true,
+      laneCall,
+      outcome: normalizedOutcome,
+      disposition,
+      terminal: { ok: true, executed: true, dispositionStatus: "accepted", response },
+      postDispositionHangup,
+      persisted: consumption?.ok === true,
+      consumption,
+    };
+  } catch (error) {
+    logDispositionProbe("cx.alpha.disposition.probe.error", dispositionProbeBase(session, candidate, {
+      uii,
+      outcome: normalizedOutcome,
+      disposition,
+      callback: false,
+      request: { disposition, callback: false },
+      error: error && error.message ? error.message : String(error),
+      status: error && error.status ? error.status : null,
+    }));
+    return {
+      ok: false,
+      dispositionOk: false,
+      laneCall,
+      outcome: normalizedOutcome,
+      disposition,
+      terminal: {
+        ok: false,
+        executed: false,
+        dispositionStatus: "error",
+        error: error && error.message ? error.message : String(error),
+        status: error && error.status ? error.status : null,
+      },
+    };
   }
 }
 
@@ -1462,6 +1697,42 @@ async function submitCxBulkLoadDisposition(input = {}, options = {}) {
   });
 }
 
+async function submitCxLaneCallDisposition(input = {}, options = {}) {
+  const agent = await resolveAgentContext(input, options.user || {});
+  assertBulkRuntime(agent);
+  const laneCall = getLaneCall(agent.agentEmail);
+  if (!laneCall) {
+    return {
+      ok: false,
+      dispositionOk: false,
+      reason: "missing-lane-call",
+      laneCall: null,
+      terminal: { ok: false, executed: false, reason: "missing-lane-call" },
+    };
+  }
+  const requestedUii = normalizeExternalId(input.uii);
+  const currentUii = normalizeExternalId(laneCall.uii);
+  if (requestedUii && currentUii && requestedUii !== currentUii) {
+    throw makeHttpError("Lane call UII no longer matches", 409, "cx-lane-call-uii-mismatch");
+  }
+  const requestedExternId = normalizeExternalId(input.externId);
+  const currentExternId = normalizeExternalId(laneCall.externId);
+  if (requestedExternId && currentExternId && requestedExternId !== currentExternId) {
+    throw makeHttpError("Lane call extern no longer matches", 409, "cx-lane-call-extern-mismatch");
+  }
+  const result = await executeLaneCallDisposition({
+    laneCall,
+    outcome: input.disposition || input.outcome,
+    client: options.client || null,
+    agent,
+    notes: input.notes,
+  });
+  if (result?.dispositionOk === true) {
+    clearLaneCall(agent.agentEmail);
+  }
+  return result;
+}
+
 async function submitCxBulkLoadReviewOutcome(input = {}, options = {}) {
   const agent = await resolveAgentContext(input, options.user || {});
   assertBulkRuntime(agent);
@@ -1565,10 +1836,12 @@ async function killCxBulkLoadSession(input = {}, options = {}) {
 }
 
 module.exports = {
+  persistLaneCallConsumption, // F2 consumption; deps injectable for pins
   startCxBulkLoadSession,
   getCxBulkLoadSession,
   watchCxBulkLoadAccountActiveCalls,
   submitCxBulkLoadDisposition,
+  submitCxLaneCallDisposition,
   startCxBulkLoadGetLeads,
   pauseCxBulkLoadProgressiveDialing,
   resumeCxBulkLoadProgressiveDialing,
@@ -1577,6 +1850,7 @@ module.exports = {
   killCxBulkLoadSession,
   _test: {
     bulkOutcomeDisposition,
+    executeLaneCallDisposition,
     deriveRescueDecision,
     pauseRingcxProgressiveDialing,
     resumeRingcxProgressiveDialing,

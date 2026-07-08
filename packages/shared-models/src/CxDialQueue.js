@@ -23,7 +23,7 @@ const cxDialQueueSchema = new mongoose.Schema(
     },
     queueFamily: {
       type: String,
-      enum: ["fresh-day1", "fresh-day2to10", "fresh-day16to30", "aged", "dead", "unassigned"],
+      enum: ["fresh-day1", "fresh-day2to10", "fresh-day16to30", "aged", "dead", "unassigned", "pilot"],
       default: "fresh-day1",
       index: true,
     },

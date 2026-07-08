@@ -29,6 +29,12 @@ function activeQueueFilter(domain, caseId, options = {}) {
   };
   const actionKey = String(options.actionKey || options.metadataActionKey || "").trim();
   if (actionKey) filter["metadata.actionKey"] = actionKey;
+  if (options.excludeLaneRows === true) {
+    appendAndClauses(filter, [
+      { "metadata.firstTouchPending": { $ne: true } },
+      { "metadata.appointmentPending": { $in: [null, false] } },
+    ]);
+  }
   return filter;
 }
 
@@ -371,6 +377,77 @@ async function claimNextReadyQueueItem(domain = null, claimMinutes = 5, options 
 // elsewhere" (FM-10, transient) from genuine short supply (returned in `missing`).
 // Reservation provenance is written as DOTTED $set keys so it never clobbers sibling
 // metadata/assignment. NET-NEW (M1): not consumed by any rail until M4 ships behind M2.
+// THE POST-8AM BUILD (Mickey's operating plan, 2026-07-08): overnight-assigned
+// first-touch rows are reserved FIRST for their assigned agent — before any family
+// fill. PURE query builder + the reserve, mirroring reserveReadyRows' claim contract.
+function buildAssignedFirstTouchQuery(domain, agentEmail, now = new Date()) {
+  return {
+    state: "ready",
+    releaseAt: { $lte: now },
+    "metadata.firstTouchPending": true,
+    "metadata.firstTouchDispatch": null,
+    "metadata.firstTouchAssignment.agentEmail": String(agentEmail || "").trim().toLowerCase(),
+    ...(domain ? { domain: normalizeDomain(domain) } : {}),
+  };
+}
+
+async function reserveAssignedFirstTouchRows(domain, options = {}) {
+  const now = options.now instanceof Date ? options.now : new Date();
+  const claimMinutes = Math.max(Number(options.claimMinutes) || 5, 1);
+  const sessionId = String(options.sessionId || "").trim();
+  const agentEmail = String(options.agentEmail || "").trim().toLowerCase();
+  if (!sessionId) throw new Error("reserveAssignedFirstTouchRows requires a sessionId");
+  if (!agentEmail) return [];
+  const limit = Math.max(Number(options.limit) || 0, 0);
+  if (limit <= 0) return [];
+  const extensionId = options.agentExtensionId ? String(options.agentExtensionId) : null;
+  const match = buildAssignedFirstTouchQuery(domain, agentEmail, now);
+  const candidates = await CxDialQueue.find(match)
+    .sort({ createdAt: 1 }) // arrival order — the overnight promise
+    .limit(limit)
+    .select({ _id: 1 })
+    .lean();
+  if (!candidates.length) return [];
+  const ids = candidates.map((c) => c._id);
+  await CxDialQueue.updateMany(
+    { _id: { $in: ids }, state: "ready", releaseAt: { $lte: now } },
+    {
+      $set: {
+        ...buildClaimPatch(now, claimMinutes),
+        "assignment.extensionId": extensionId,
+        "assignment.assignedAt": now,
+        "assignment.queueFamilySnapshot": "first-touch",
+        "metadata.reservationSessionId": sessionId,
+        "metadata.reservedAt": now,
+        "metadata.reservationExpiresAt": new Date(now.getTime() + claimMinutes * 60 * 1000),
+        "metadata.reservationRail": "bulk_load",
+        "metadata.lastRingcxPublishedAt": null,
+        "metadata.lastRingcxPublishedExternId": null,
+        "metadata.lastDialExecutionUii": null,
+        "metadata.lastQueueAttemptUii": null,
+        "metadata.lastDialIntentStatus": null,
+        "metadata.servingAt": null,
+        "metadata.lastRingcxActiveCall": null,
+        "metadata.lastRingcxMatchReasons": [],
+        "metadata.lastQueueAttemptHeldForDisposition": false,
+        "metadata.wrapUpRequired": false,
+        "metadata.lastReleasedAt": null,
+        "metadata.lastReleaseReason": null,
+        "metadata.lastReleasedExtensionId": null,
+        "metadata.lastReleasedAgentName": null,
+        "metadata.lastReleasedBy": null,
+      },
+    },
+  );
+  // the winners are whoever now carries OUR session id (CAS semantics of the re-assert)
+  return CxDialQueue.find({
+    _id: { $in: ids },
+    "metadata.reservationSessionId": sessionId,
+  })
+    .sort({ createdAt: 1 })
+    .lean();
+}
+
 async function reserveReadyRows(domain, familyTargets = {}, options = {}) {
   const now = options.now instanceof Date ? options.now : new Date();
   const claimMinutes = Math.max(Number(options.claimMinutes) || 5, 1); // G3a: caller passes explicit
@@ -695,9 +772,12 @@ async function countQueueItems(filters = {}) {
 }
 
 module.exports = {
+  activeQueueFilter, // exported for lane-ownership pins; pure
   buildExpiredClaimRequeueQuery, // exported for offline reaper-exclusion tests (M2/M8); pure
+  buildAssignedFirstTouchQuery,
   buildReadyClaimQuery,
   buildReadyReservationQuery,
+  reserveAssignedFirstTouchRows,
   cancelActiveQueueItems,
   claimNextReadyQueueItem,
   countQueueItems,

@@ -12,7 +12,7 @@ const {
   mergeCadenceState,
   splitLeadCadenceUpsertUpdate,
 } = require("../../packages/shared-repositories/src/leadCadenceRepository");
-const { buildReadyReservationQuery, buildReadyClaimQuery } = (() => {
+const { activeQueueFilter, buildReadyReservationQuery, buildReadyClaimQuery } = (() => {
   const repo = require("../../packages/shared-repositories/src/cxDialQueueRepository");
   return repo;
 })();
@@ -91,6 +91,16 @@ test("H5: BOTH ready rails exclude appointment holds and the (inert) lane flags"
     assert.deepEqual(q["metadata.firstTouchPending"], { $ne: true }, `${label}: first-touch rows excluded once stamped`);
     assert.deepEqual(q["metadata.appointmentPending"], { $in: [null, false] }, `${label}: appointmentPending is an OBJECT — $in, never $ne:true`);
   }
+});
+
+test("H5b: plain appointment case lookups can ignore lane-owned queue rows", () => {
+  const query = activeQueueFilter("WYNN", 101617, { excludeLaneRows: true });
+  assert.equal(query.domain, "WYNN");
+  assert.equal(query.caseId, 101617);
+  assert.deepEqual(query.$and, [
+    { "metadata.firstTouchPending": { $ne: true } },
+    { "metadata.appointmentPending": { $in: [null, false] } },
+  ]);
 });
 
 test("F0: the first-touch stamp — intake mints stamp when the flag is on, nothing else ever stamps", () => {

@@ -36,7 +36,7 @@ function defaultDeps() {
     resolveLeadMs: () => Math.max(Number(process.env.CX_APPT_DISPATCH_LEAD_MS) || 0, 0),
     listDispatchable: (now, limit) =>
       CxAppointment.find({
-        status: "scheduled",
+        status: { $in: ["scheduled", "due"] },
         rcxDispatch: null,
         appointmentAt: { $lte: new Date(now.getTime() + 24 * 60 * 60 * 1000) }, // day window; due math below
       })
@@ -45,7 +45,7 @@ function defaultDeps() {
         .lean(),
     claimAppointment: async (appointmentId, claim) => {
       const result = await CxAppointment.updateOne(
-        { appointmentId, status: "scheduled", rcxDispatch: null },
+        { appointmentId, status: { $in: ["scheduled", "due"] }, rcxDispatch: null },
         { $set: { rcxDispatch: claim } },
       );
       return (result.modifiedCount ?? result.nModified ?? 0) > 0;

@@ -159,3 +159,86 @@ the system records — deliberately last.
 - Touch definition: any cxft terminal (a ring-out consumes — it was a touch).
 - Still open: drip queues-behind vs skips a mid-call agent (drafted: queue behind);
   mid-morning rebalance time (drafted 10:00).
+
+---
+
+## THE LOADER OPERATING PLAN (Mickey's ruling, 2026-07-08 — build toward this)
+
+**The clock (all PT):**
+- **Until 5pm** — live mode: new mints ride the first-contact drip (per-agent campaign,
+  IMMEDIATE, front of the line) and pop the client-side first-contact experience.
+- **5pm** — the drip STOPS. New mints go to the buffer (stamped rows, undispatched).
+  Agents are finishing their queues 5-6pm; nothing new interrupts them.
+- **6pm** — the LOADER starts: back-load the 5-6pm stragglers, then consume the buffer
+  round-robin across the agent roster, and keep assigning round-robin as leads arrive
+  overnight. Assignment = building each agent's next-morning queue IN ADVANCE.
+- **By 8am** — each agent's UI queue is built and the dial list is ready to go. Zero
+  morning ceremony: the first queue of the day IS the overnight backlog, served through
+  the normal bulk-session trunk (cxbl externs, wrap cards, sys-dispo — everything proven).
+- **8am** — the drip turns back on. Live mints jump the line via the first-contact queue.
+
+**The pools (8am on):** collect piles by contact-count/age — everything active (the
+colors-are-families model). **The 5-lead threshold:** when an agent's new-lead queue drops
+to 5, their list REBUILDS from the pool. New live mints always front-run via first-contact.
+
+**The split ruling (2026-07-08):** the first-contact campaign is the BUSINESS-HOURS
+SINGLE-LEAD insert source only. Blasts/backlogs never touch RingCX in advance — they serve
+from OUR queue through the session machinery. Hygiene by construction: the campaign stays
+tiny; the queue UI owns volume.
+
+**Bound facts (2026-07-08):**
+- Campaigns exist for 5 agents (probe: scripts/cx-campaign-map.js): Sean 2831/2902,
+  Bruce 2828/2899, Phil 2830/2901, Brad 2827/2898, Chris 2829/2900 (FT/Appt).
+  Anthony + James: no lane campaigns yet (console act when rostered in).
+- Roster bound from Mongo: slucas/ballen/polson/bhansen/cbolt @taxadvocategroup.com
+  (Brad=bhansen, Bruce=ballen — resolved from appointment agentName pairs).
+- Maps live in .env (CX_FIRST_TOUCH_QUEUE_MAP / CX_APPT_QUEUE_MAP), inert until flags.
+
+**Appointment early-fire (Mickey's bug report) — RESOLVED 2026-07-08:**
+- Forensics: worker fires are query-bound to legalDialAt and cannot be early; the early
+  fires in the data were MANUAL Call-Now clicks wearing the worker's name in history
+  (actor mislabel — fixed: fires now record the real actor + manual flag), and evening
+  appointments were getting legalDialAt pushed to NEXT MORNING by the operational window
+  (making on-time auto-fire impossible and inviting early manual clicks — fixed:
+  appointments are floored by the LEAD-legal window only, ops window no longer applies;
+  cadence callers unchanged, pinned).
+
+**Still to build (the remaining order):** the 5pm/6pm/8am window logic on the dispatcher +
+loader; the first-touch-first reserve step in the session queue build; the 5-lead
+threshold rebuild; F2 consumption (any terminal on a flagged row releases the mark);
+watcher cxft-/cxapt- recognition; the first-contact popup (M2).
+
+---
+
+## THE LANE UI INTERACTIONS (design draft, 2026-07-08 — for Mickey's review)
+
+**The structural gift:** RingCX only delivers a call when the agent is AVAILABLE, so lane
+interruptions land BETWEEN calls (at wrap/disposition moments), never mid-conversation.
+And the bulk rail's next dial simply waits behind agent availability — no formal session
+hold is needed; the machinery already interleaves. The UI's whole job is: tell the agent
+WHAT this ring is.
+
+**The lane banner (the build):**
+- Detection: watcher lane-recognition (parseLaneFromExternId on the agent's active call)
+  → agent/session state carries `laneCall: { lane, caseId, name, meta }` → the client's
+  existing 1s poll renders it.
+- FIRST TOUCH face: full-width banner — "FIRST TOUCH — <Name>, came in <x> min ago" —
+  case panel loads the new lead's identity. Queue area visually dims: "queue resumes
+  after this call."
+- APPOINTMENT face: "APPOINTMENT — <Name>, booked <time> by <who>" + the booking notes;
+  case panel loads. BONUS (cheap): a countdown chip from the sidebar's own data —
+  "appointment in 2 min" BEFORE it fires (the clock knows in advance; no new server work).
+- INCOMING pre-ring beat: the dispatch stamp lands seconds before RingCX dials — the
+  banner can show "incoming first touch…" from the stamp, so the ring is never a surprise.
+- Normal queue: NO banner. The session UI is the announcement.
+
+**The V1 principle — the banner is INFORMATIONAL ONLY:** lane calls get no disposition
+buttons. The trunk already handles everything: the sys-dispo classifier routes the
+outcome, answered mints a wrap card, and DNC/re-book/appointment decisions happen on the
+card — the same one-channel law as everything else. No new write paths, no new buttons,
+no mid-call UI. The banner tells; the card decides.
+
+**Build order:** watcher lane-recognition (feeds F2 consumption too) → laneCall state →
+client banner + case-panel load + appointment countdown chip. The interrupt drill
+(scripts/cx-lane-drill.js --interrupt) is the acceptance test: run it before the banner
+build (phone rings, workspace blind) and after (banner narrates both interruptions).

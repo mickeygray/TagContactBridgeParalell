@@ -1,5 +1,6 @@
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api/client";
+import { toast } from "@/components/ui/Toaster";
 import { queryKeys } from "@/lib/api/queries/keys";
 
 export interface CxBulkLoadCurrent {
@@ -142,6 +143,7 @@ export const useCxBulkLoadPauseProgressive = buildBulkLoadSideEffectHook("pause-
 export const useCxBulkLoadResumeProgressive = buildBulkLoadSideEffectHook("resume-progressive");
 export const useCxBulkLoadSkip = buildBulkLoadCommandHook("skip");
 export const useCxBulkLoadKill = buildBulkLoadCommandHook("kill");
+
 export function useCxBulkLoadReviewOutcome() {
   const qc = useQueryClient();
   return useMutation({
@@ -171,6 +173,70 @@ export type CxWrapCard = {
   coachSummary: string | null;
 };
 
+export type CxLaneCall = {
+  lane: "firstTouch" | "appointment";
+  uii: string;
+  externId: string;
+  callState: string | null;
+  caseId: number | null;
+  name: string | null;
+  domain: string | null;
+  meta?: {
+    mintedAt?: string | null;
+    phone?: string | null;
+    phoneLast4?: string | null;
+    appointmentAt?: string | null;
+    bookedBy?: string | null;
+  };
+};
+
+export type CxLaneDispositionResult = {
+  ok: boolean;
+  dispositionOk: boolean;
+  reason?: string | null;
+  laneCall?: CxLaneCall | null;
+  outcome?: string | null;
+  disposition?: string | null;
+  persisted?: boolean;
+  terminal?: Record<string, unknown> | null;
+  postDispositionHangup?: Record<string, unknown> | null;
+};
+
+export type CxLaneCallResult = { enabled?: boolean; laneCall: CxLaneCall | null };
+
+export function useCxLaneCall(enabled: boolean) {
+  return useQuery({
+    queryKey: ["cx-lane-call"],
+    queryFn: () =>
+      api
+        .get<{ ok: true; result: CxLaneCallResult }>("/api/cx/bulk-load/lane-call")
+        .then((r) => r.result),
+    enabled,
+    staleTime: 1_000,
+    // ONE PROBE DECIDES (rollout note 2026-07-08): lanes off server-side -> polling stops
+    // entirely, so dormant floors carry zero moving parts. A flag flip re-arms on the
+    // next page load (rollout = restart + refresh anyway).
+    refetchInterval: (query) =>
+      enabled && query.state.data?.enabled !== false ? 2_000 : false,
+    refetchIntervalInBackground: false,
+    retry: 1,
+  });
+}
+
+export function useCxLaneCallDisposition() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: Record<string, unknown> = {}) =>
+      api
+        .post<{ ok: true; result: CxLaneDispositionResult }>("/api/cx/bulk-load/lane-call/disposition", body)
+        .then((r) => r.result),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ["cx-lane-call"] });
+      invalidateBulkLoad(qc);
+    },
+  });
+}
+
 export type CxWrapCardsResult = { enabled: boolean; cards: CxWrapCard[] };
 
 export function useCxWrapCards(enabled: boolean) {
@@ -190,18 +256,42 @@ export function useCxWrapCards(enabled: boolean) {
   });
 }
 
+export type CxWrapResolveResult = {
+  resolution: string | null;
+  noop: boolean;
+  effects?: {
+    interviewOk: boolean | null;
+    correctionOk: boolean | null;
+    appointmentOk: boolean | null;
+    logicsStatusOk: boolean | null;
+  };
+  failedEffects?: { name: string; error: string }[];
+};
+
 export function useCxWrapCardResolve() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (body: { idemKey: string; action: "dnc" | "appointment" | "dismiss"; appointmentAt?: string }) =>
       api
-        .post<{ ok: true; result: { resolution: string | null; noop: boolean } }>(
+        .post<{ ok: true; result: CxWrapResolveResult }>(
           "/api/cx/bulk-load/wrap-cards/resolve",
           body,
         )
         .then((r) => r.result),
-    onSuccess: () => {
+    onSuccess: (result) => {
       void qc.invalidateQueries({ queryKey: ["cx-wrap-cards"] });
+      // Cert blocker #5: a failed external effect must never hide behind a resolved
+      // card. Loud and specific — the operator repair path starts with knowing.
+      const failed = result?.failedEffects ?? [];
+      if (failed.length) {
+        const detail = failed.map((f) => `${f.name}: ${f.error}`).join("; ");
+        // persistent (no auto-dismiss) — the repair path starts with knowing, but a
+        // blocking alert is wrong for the floor (review note 2026-07-08).
+        toast.error("Card resolved, but an external write FAILED — tell an admin", {
+          description: detail,
+          duration: Infinity,
+        });
+      }
     },
   });
 }

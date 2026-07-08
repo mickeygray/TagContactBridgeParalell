@@ -225,7 +225,12 @@ function buildQueueTimingProbe(input = {}, queueItem = null, appointmentAt = new
 
 function resolveLegalDialTiming(input = {}, queueItem = null, appointmentAt = new Date()) {
   const probe = buildQueueTimingProbe(input, queueItem, appointmentAt);
-  const timing = resolveQueueDialTimeWindow(probe, appointmentAt);
+  // 2026-07-08 (the early/weird-fire forensics): an evening appointment (e.g. 5pm PT,
+  // booked at the operational close) used to get legalDialAt pushed to NEXT MORNING by
+  // the OPS window — on-time auto-fire became impossible and agents manually fired early
+  // to compensate. An appointment is an explicit human commitment: only the LEAD-legal
+  // dial window floors it; the ops window does not apply.
+  const timing = resolveQueueDialTimeWindow(probe, appointmentAt, { ignoreOperationalWindow: true });
   return {
     timing,
     legalDialAt: timing.nextAllowedAt || appointmentAt,
@@ -238,16 +243,33 @@ async function resolveQueueItemForAppointment(domain, caseId, input = {}) {
   const queueItemId = String(input.queueItemId || input.queueTicketId || "").trim();
   if (queueItemId) {
     const byId = await cxDialQueueRepository.findQueueItemById(queueItemId);
-    if (byId) return queueItemObject(byId);
+    if (byId && !isLaneOwnedQueueItem(byId)) return queueItemObject(byId);
   }
   const actionKey = String(input.queueActionKey || input.actionKey || input.queueKey || "").trim();
   const byAction = await cxDialQueueRepository.findActiveQueueItem(
     domain,
     caseId,
-    actionKey ? { actionKey } : {},
+    actionKey ? { actionKey, excludeLaneRows: true } : { excludeLaneRows: true },
   );
   if (byAction) return queueItemObject(byAction);
-  return queueItemObject(await cxDialQueueRepository.findActiveQueueItem(domain, caseId));
+  return queueItemObject(await cxDialQueueRepository.findActiveQueueItem(domain, caseId, { excludeLaneRows: true }));
+}
+
+function isLaneOwnedQueueItem(queueItem = {}) {
+  const meta = queueItem?.metadata || {};
+  return meta.firstTouchPending === true || Boolean(meta.appointmentPending);
+}
+
+async function loadAppointmentQueueItem(appointment = {}) {
+  const byId = appointment.cxQueueRecordId
+    ? queueItemObject(await cxDialQueueRepository.findQueueItemById(appointment.cxQueueRecordId))
+    : null;
+  if (byId && !isLaneOwnedQueueItem(byId)) return byId;
+  return queueItemObject(await cxDialQueueRepository.findActiveQueueItem(
+    appointment.domain,
+    appointment.caseId,
+    { excludeLaneRows: true },
+  ));
 }
 
 async function ensureAppointmentQueueItem({
@@ -278,6 +300,7 @@ async function ensureAppointmentQueueItem({
       releaseAt: legalDialAt,
       requestedBy: "cx-appointment",
       requestedByUserEmail: context.account.email,
+      excludeLaneRows: true,
       metadata: {
         ...(input.metadata || {}),
         actionKey,
@@ -682,13 +705,8 @@ async function releaseCxAppointment(domain, user, input = {}) {
 
 async function fireOneDueAppointment(appointment, options = {}) {
   const now = options.now ? new Date(options.now) : new Date();
-  const queueItem =
-    appointment.cxQueueRecordId
-      ? queueItemObject(await cxDialQueueRepository.findQueueItemById(appointment.cxQueueRecordId))
-      : queueItemObject(await cxDialQueueRepository.findActiveQueueItem(
-        appointment.domain,
-        appointment.caseId,
-      ));
+  const firedBy = String(options.firedBy || "").trim() || "appointment-worker";
+  const queueItem = await loadAppointmentQueueItem(appointment);
   let effectiveQueueItem = queueItem;
   if (!effectiveQueueItem) {
     const queueResult = await queueCxDialRequest({
@@ -705,6 +723,7 @@ async function fireOneDueAppointment(appointment, options = {}) {
       releaseAt: now,
       requestedBy: "cx-appointment-due",
       requestedByUserEmail: appointment.agentEmail || null,
+      excludeLaneRows: true,
       metadata: {
         appointmentId: appointment.appointmentId,
         appointmentStatus: "due",
@@ -842,14 +861,17 @@ async function fireOneDueAppointment(appointment, options = {}) {
       status: "fired",
       firedAt: now,
       cxQueueRecordId: queueItemId || appointment.cxQueueRecordId || null,
-      updatedByEmail: "appointment-worker",
+      updatedByEmail: firedBy,
       blockedReason: null,
     },
     {
       type: "appointment-fired",
-      actorEmail: "appointment-worker",
+      // 2026-07-08 forensics fix: manual Call-Now fires used to wear the worker's name,
+      // making agent early-clicks look like the system firing early ("randomly").
+      actorEmail: firedBy,
       payload: {
         queueItemId,
+        manual: firedBy !== "appointment-worker" || undefined,
       },
     },
   );
@@ -888,13 +910,7 @@ async function fireOneDueAppointment(appointment, options = {}) {
 
 async function markOneDueAppointmentManualOnly(appointment, options = {}) {
   const now = options.now ? new Date(options.now) : new Date();
-  const queueItem =
-    appointment.cxQueueRecordId
-      ? queueItemObject(await cxDialQueueRepository.findQueueItemById(appointment.cxQueueRecordId))
-      : queueItemObject(await cxDialQueueRepository.findActiveQueueItem(
-        appointment.domain,
-        appointment.caseId,
-      ));
+  const queueItem = await loadAppointmentQueueItem(appointment);
 
   if (queueItem) {
     const timing = resolveQueueDialTimeWindow(queueItem || appointment, now);
@@ -1096,7 +1112,10 @@ async function fireCxAppointmentNow(domain, user, input = {}) {
     throw error;
   }
 
-  const result = await fireOneDueAppointment(appointment, { now: input.now || new Date() });
+  const result = await fireOneDueAppointment(appointment, {
+    now: input.now || new Date(),
+    firedBy: context.account.email || "manual-fire",
+  });
   return {
     ok: Boolean(result?.ok),
     manual: true,

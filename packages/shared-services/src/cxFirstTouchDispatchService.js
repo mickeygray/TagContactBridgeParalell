@@ -21,6 +21,36 @@ function str(value) {
   return String(value == null ? "" : value).trim();
 }
 
+// THE CLOCK (Mickey's operating plan, 2026-07-08): "5pm new stuff stops writing to the
+// call-now queue and goes to a buffer; 6pm consume that buffer round-robin building each
+// agent's morning queue in advance, and keep assigning as they come in; 8am it turns on."
+//   drip   Mon-Fri 08:00-16:59 PT — live dispatch to the first-contact campaigns
+//   hold   Mon-Fri 17:00-17:59 PT — agents finishing queues; buffer accumulates untouched
+//   assign 18:00-07:59 + weekends — round-robin ASSIGNMENT (no RingCX); the morning
+//          queue build consumes assigned rows first (the post-8am build).
+// PURE; env force-override CX_FIRST_TOUCH_WINDOW_MODE for tests/off-hours drills.
+function deriveFirstTouchWindowMode(now = new Date(), opts = {}) {
+  const forced = String(opts.force ?? process.env.CX_FIRST_TOUCH_WINDOW_MODE ?? "").trim().toLowerCase();
+  if (forced === "drip" || forced === "hold" || forced === "assign") return forced;
+  const timeZone = opts.timeZone || process.env.CX_FIRST_TOUCH_TZ || "America/Los_Angeles";
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    hour12: false,
+    weekday: "short",
+    hour: "numeric",
+  }).formatToParts(now);
+  const get = (type) => parts.find((p) => p.type === type)?.value;
+  const weekday = String(get("weekday") || "");
+  const hour = Number(get("hour")) % 24;
+  const isWeekend = weekday === "Sat" || weekday === "Sun";
+  const dripStart = Number(opts.dripStartHour ?? process.env.CX_FIRST_TOUCH_DRIP_START_HOUR) || 8;
+  const dripEnd = Number(opts.dripEndHour ?? process.env.CX_FIRST_TOUCH_DRIP_END_HOUR) || 17;
+  const assignStart = Number(opts.assignStartHour ?? process.env.CX_FIRST_TOUCH_ASSIGN_START_HOUR) || 18;
+  if (!isWeekend && hour >= dripStart && hour < dripEnd) return "drip";
+  if (!isWeekend && hour >= dripEnd && hour < assignStart) return "hold";
+  return "assign";
+}
+
 // PURE. Deterministic round-robin: row i (oldest first) goes to agent (offset + i) % n.
 function assignRoundRobin(rows = [], agents = [], offset = 0) {
   if (!rows.length || !agents.length) return [];
@@ -39,11 +69,31 @@ function defaultDeps() {
       CxDialQueue.find({
         "metadata.firstTouchPending": true,
         "metadata.firstTouchDispatch": null,
+        // morning-assigned rows belong to the post-8am QUEUE BUILD, never the drip
+        "metadata.firstTouchAssignment": null,
         state: { $in: ["queued", "ready"] },
       })
         .sort({ createdAt: 1 })
         .limit(limit)
         .lean(),
+    loadUnassignedRows: (limit) =>
+      CxDialQueue.find({
+        "metadata.firstTouchPending": true,
+        "metadata.firstTouchDispatch": null,
+        "metadata.firstTouchAssignment": null,
+        state: { $in: ["queued", "ready"] },
+      })
+        .sort({ createdAt: 1 })
+        .limit(limit)
+        .lean(),
+    assignRow: async (rowId, assignment) => {
+      const result = await CxDialQueue.updateOne(
+        { _id: rowId, "metadata.firstTouchAssignment": null },
+        { $set: { "metadata.firstTouchAssignment": assignment } },
+      );
+      return (result.modifiedCount ?? result.nModified ?? 0) > 0;
+    },
+    resolveWindowMode: (now) => deriveFirstTouchWindowMode(now),
     // the CAS claim: only the winner sees modifiedCount 1
     claimRow: async (rowId, claim) => {
       const result = await CxDialQueue.updateOne(
@@ -64,73 +114,141 @@ function createCxFirstTouchDispatcher(input = {}) {
   const { client, logger = console } = input;
   let rrOffset = 0; // in-memory fairness cursor; a restart just restarts the rotation
 
-  async function tickOnce({ now = new Date(), limit = 25 } = {}) {
+  async function tickOnce({ now = new Date(), limit = 25, maxPages = 40 } = {}) {
     if (!deps.isEnabled()) return { skipped: true, reason: "flag-off" };
     const agents = deps.resolveQueueMap();
     if (!agents.length) {
       logCxAlpha("cx.alpha.firsttouch.dispatch.skipped", { reason: "empty-queue-map" }, { logger });
       return { skipped: true, reason: "empty-queue-map" };
     }
-    const rows = await deps.loadPendingRows(limit);
-    if (!rows.length) return { dispatched: 0, pending: 0 };
-
-    const assignments = assignRoundRobin(rows, agents, rrOffset);
-    rrOffset = (rrOffset + rows.length) % agents.length;
+    const mode = deps.resolveWindowMode(now);
+    if (mode === "hold") return { skipped: true, mode, reason: "hold-window" };
+    if (mode === "assign") {
+      // THE 6PM LOADER: round-robin assignment only — no RingCX. The morning queue
+      // build consumes these first (the post-8am build), so 8am needs zero ceremony.
+      let assigned = 0;
+      let pages = 0;
+      for (;;) {
+        const rows = await deps.loadUnassignedRows(limit);
+        if (!rows.length) break;
+        pages += 1;
+        const assignments = assignRoundRobin(rows, agents, rrOffset);
+        rrOffset = (rrOffset + rows.length) % agents.length;
+        for (const { row, agent } of assignments) {
+          const won = await deps.assignRow(row._id, {
+            agentEmail: agent.agentEmail,
+            campaignId: agent.campaignId,
+            assignedAt: now.toISOString(),
+          }).catch(() => false);
+          if (won) {
+            assigned += 1;
+            logCxAlpha("cx.alpha.firsttouch.assigned", {
+              queueItemId: String(row._id),
+              caseId: row.caseId,
+              agentEmail: agent.agentEmail,
+            }, { logger });
+          }
+        }
+        if (rows.length < limit || pages >= maxPages) break;
+      }
+      return { mode, assigned, pages };
+    }
 
     let dispatched = 0;
     let failed = 0;
-    for (const { row, agent } of assignments) {
-      const externId = buildLaneExternId("firstTouch", {
-        domain: row.domain,
-        queueItemId: row._id,
-      });
-      const claim = {
-        claimedAt: now.toISOString(),
-        agentEmail: agent.agentEmail,
-        campaignId: agent.campaignId,
-        externId,
-      };
-      const won = await deps.claimRow(row._id, claim).catch(() => false);
-      if (!won) continue; // another tick/process owns it
+    let pages = 0;
+    // BURST-UNTIL-EMPTY (2026-07-08, the 750-weekend-leads math): a backlog drains in one
+    // tick — pages keep coming while full, capped so a runaway can't hold the interval.
+    for (;;) {
+      const rows = await deps.loadPendingRows(limit);
+      if (!rows.length) break;
+      pages += 1;
 
-      try {
-        const publish = await deps.publishBatch(client, {
-          campaignId: agent.campaignId,
-          dialPriority: "IMMEDIATE",
-          candidates: [{
-            externId,
-            phone: row.phone || null,
-            name: row.name || row.metadata?.name || null,
-            domain: row.domain,
-            caseId: row.caseId,
-            queueItemId: String(row._id),
-          }],
-        });
-        const accepted = Array.isArray(publish?.accepted) && publish.accepted.length > 0;
-        if (!accepted) throw new Error(publish?.rejected?.[0]?.reason || "publish-rejected");
-        await deps.stampRow(row._id, {
-          "metadata.firstTouchDispatch": { ...claim, dispatchedAt: new Date().toISOString() },
-          "metadata.firstTouchExternId": externId,
-        });
-        dispatched += 1;
-        logCxAlpha("cx.alpha.firsttouch.dispatched", {
-          queueItemId: String(row._id),
-          caseId: row.caseId,
-          agentEmail: agent.agentEmail,
-          campaignId: agent.campaignId,
-          externId,
-        }, { logger });
-      } catch (error) {
-        failed += 1;
-        await deps.releaseClaim(row._id).catch(() => null); // next tick retries
-        logCxAlpha("cx.alpha.firsttouch.dispatch.failed", {
-          queueItemId: String(row._id),
-          agentEmail: agent.agentEmail,
-          error: error?.message,
-        }, { logger });
+      const assignments = assignRoundRobin(rows, agents, rrOffset);
+      rrOffset = (rrOffset + rows.length) % agents.length;
+
+      // PER-AGENT BATCHING: loadLeads is a batch API — one call per agent per page,
+      // not one per lead. The publisher reconciles accept/reject per candidate.
+      const byAgent = new Map();
+      for (const { row, agent } of assignments) {
+        if (!byAgent.has(agent.agentEmail)) byAgent.set(agent.agentEmail, { agent, rows: [] });
+        byAgent.get(agent.agentEmail).rows.push(row);
       }
+
+      for (const { agent, rows: agentRows } of byAgent.values()) {
+        const claimed = [];
+        for (const row of agentRows) {
+          const externId = buildLaneExternId("firstTouch", { domain: row.domain, queueItemId: row._id });
+          const claim = {
+            claimedAt: now.toISOString(),
+            agentEmail: agent.agentEmail,
+            campaignId: agent.campaignId,
+            externId,
+          };
+          const won = await deps.claimRow(row._id, claim).catch(() => false);
+          if (won) claimed.push({ row, externId, claim });
+        }
+        if (!claimed.length) continue;
+
+        try {
+          const publish = await deps.publishBatch(client, {
+            campaignId: agent.campaignId,
+            dialPriority: "IMMEDIATE",
+            candidates: claimed.map(({ row, externId }) => ({
+              externId,
+              phone: row.phone || null,
+              name: row.name || row.metadata?.name || null,
+              domain: row.domain,
+              caseId: row.caseId,
+              queueItemId: String(row._id),
+            })),
+          });
+          const acceptedKeys = new Set(
+            (Array.isArray(publish?.accepted) ? publish.accepted : [])
+              .flatMap((c) => [String(c.queueItemId || ""), String(c.externId || "")])
+              .filter(Boolean),
+          );
+          for (const { row, externId, claim } of claimed) {
+            const accepted = acceptedKeys.has(String(row._id)) || acceptedKeys.has(externId);
+            if (accepted) {
+              await deps.stampRow(row._id, {
+                "metadata.firstTouchDispatch": { ...claim, dispatchedAt: new Date().toISOString() },
+                "metadata.firstTouchExternId": externId,
+              });
+              dispatched += 1;
+              logCxAlpha("cx.alpha.firsttouch.dispatched", {
+                queueItemId: String(row._id),
+                caseId: row.caseId,
+                agentEmail: agent.agentEmail,
+                campaignId: agent.campaignId,
+                externId,
+              }, { logger });
+            } else {
+              failed += 1;
+              await deps.releaseClaim(row._id).catch(() => null); // next tick retries
+              logCxAlpha("cx.alpha.firsttouch.dispatch.failed", {
+                queueItemId: String(row._id),
+                agentEmail: agent.agentEmail,
+                reason: "rejected-by-ringcx",
+              }, { logger });
+            }
+          }
+        } catch (error) {
+          for (const { row } of claimed) {
+            failed += 1;
+            await deps.releaseClaim(row._id).catch(() => null);
+          }
+          logCxAlpha("cx.alpha.firsttouch.dispatch.failed", {
+            agentEmail: agent.agentEmail,
+            batchSize: claimed.length,
+            error: error?.message,
+          }, { logger });
+        }
+      }
+
+      if (rows.length < limit || pages >= maxPages) break;
     }
-    return { dispatched, failed, pending: rows.length - dispatched - failed };
+    return { dispatched, failed, pages };
   }
 
   return { tickOnce };
@@ -139,4 +257,5 @@ function createCxFirstTouchDispatcher(input = {}) {
 module.exports = {
   createCxFirstTouchDispatcher,
   assignRoundRobin, // exported for pins; pure
+  deriveFirstTouchWindowMode, // exported for pins; pure
 };

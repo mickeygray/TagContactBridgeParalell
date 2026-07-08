@@ -240,6 +240,7 @@ const {
 } = require("./cxLaneRegistry");
 const { createCxFirstTouchDispatcher } = require("./cxFirstTouchDispatchService");
 const { createCxAppointmentDispatcher } = require("./cxAppointmentDispatchService");
+const { getLaneCall } = require("./cxLaneCallRegistry");
 
 const {
   computeFreshHotLaneWindow,
@@ -305,6 +306,7 @@ const {
   startCxBulkLoadGetLeads,
   startCxBulkLoadSession,
   submitCxBulkLoadDisposition,
+  submitCxLaneCallDisposition,
   submitCxBulkLoadReviewOutcome,
   watchCxBulkLoadAccountActiveCalls,
 } = require("./cxBulkLoadRuntime");
@@ -813,6 +815,7 @@ module.exports = {
   parseAgentQueueMap,
   createCxFirstTouchDispatcher,
   createCxAppointmentDispatcher,
+  getLaneCall,
   // ── AI bus: provider-neutral task runner + primitives + delivery client ──
   createAiTaskRunner,
   createAiProviders,
@@ -1116,6 +1119,7 @@ module.exports = {
   startCxBulkLoadGetLeads,
   startCxBulkLoadSession,
   submitCxBulkLoadDisposition,
+  submitCxLaneCallDisposition,
   submitCxBulkLoadReviewOutcome,
   watchCxBulkLoadAccountActiveCalls,
   buildCxAccountActiveCallWatchPlan,

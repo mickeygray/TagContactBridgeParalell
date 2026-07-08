@@ -2,6 +2,7 @@
 
 const express = require("express");
 const {
+  getLaneCall,
   getCxBulkLoadSession,
   killCxBulkLoadSession,
   pauseCxBulkLoadProgressiveDialing,
@@ -10,6 +11,7 @@ const {
   startCxBulkLoadGetLeads,
   startCxBulkLoadSession,
   submitCxBulkLoadDisposition,
+  submitCxLaneCallDisposition,
   submitCxBulkLoadReviewOutcome,
 } = require("../../../../packages/shared-services/src");
 const { toErrorResponse } = require("../../../../packages/shared-errors/src");
@@ -77,6 +79,23 @@ function createCxBulkLoadRouter(auth, options = {}) {
   // CALL WRAP CARDS (design: docs/CX_CALL_WRAP_QUEUE_DESIGN_2026-07-06.md). Cards exist
   // only when CX_CALL_WRAP_QUEUE_ENABLED=true; with the flag off both routes answer
   // wrap-queue-disabled so the client renders nothing (zero UI disturbance by default).
+  // THE LANE-CALL MODAL SOURCE (Mickey's ruling, 2026-07-08): the poller recognizes
+  // uii-bearing lane calls (cxft/cxapt externs resolved against their sources) into an
+  // in-memory registry; this route is the client's 2s poll. Null = no modal.
+  router.get("/lane-call", auth.requireAuth, auth.requireUser, (req, res) => {
+    const email = String(req.user?.email || "").trim().toLowerCase();
+    // enabled rides the response so dormant floors stop polling after one probe
+    // (rollout note 2026-07-08: no moving parts for users the lanes don't serve yet).
+    const enabled =
+      String(process.env.CX_FIRST_TOUCH_ENABLED || "false").trim().toLowerCase() === "true"
+      || String(process.env.CX_APPT_LANE_ENABLED || "false").trim().toLowerCase() === "true";
+    res.json({ ok: true, result: { enabled, laneCall: enabled ? getLaneCall(email) : null } });
+  });
+
+  router.post("/lane-call/disposition", auth.requireAuth, auth.requireUser, async (req, res) => {
+    return sendBulkCommand(req, res, submitCxLaneCallDisposition, (request) => request.body || {});
+  });
+
   router.get("/wrap-cards", auth.requireAuth, auth.requireUser, async (req, res) => {
     if (!wrapCards) return res.json({ ok: true, result: { enabled: false, cards: [] } });
     try {
@@ -129,7 +148,28 @@ function createCxBulkLoadRouter(auth, options = {}) {
         resolvedBy: requester,
       });
       if (!result.ok) return res.status(400).json({ ok: false, code: result.reason || "wrap-resolve-failed" });
-      return res.json({ ok: true, result: { resolution: result.resolution || null, noop: Boolean(result.noop) } });
+      // Cert blocker #5 (2026-07-08): effect failures were log-only — a failed Logics
+      // write could hide behind a resolved card. Surface per-effect status booleans
+      // (null = effect not applicable to this resolution).
+      const effects = result.effects || {};
+      const effectOk = (e) => (e ? e.ok !== false : null);
+      const failedEffects = Object.entries(effects)
+        .filter(([, e]) => e && e.ok === false)
+        .map(([name, e]) => ({ name, error: e.error || "failed" }));
+      return res.json({
+        ok: true,
+        result: {
+          resolution: result.resolution || null,
+          noop: Boolean(result.noop),
+          effects: {
+            interviewOk: effectOk(effects.interview),
+            correctionOk: effectOk(effects.correction),
+            appointmentOk: effectOk(effects.appointment),
+            logicsStatusOk: effectOk(effects.logicsStatus),
+          },
+          failedEffects,
+        },
+      });
     } catch (error) {
       logger.warn("[cx.bulk.http] rejected", { path: req.path, status: 500, message: error.message });
       return failure(res, error);
