@@ -139,8 +139,22 @@ test("buildEligibility does not block inbound EX ringing broadcasts", () => {
 });
 
 test("buildEligibility blocks connected EX calls", () => {
-  const original = process.env.RC_CX_EX_BUSY_GATE_ENABLED;
+  const originals = {
+    RC_CX_EX_BUSY_GATE_ENABLED: process.env.RC_CX_EX_BUSY_GATE_ENABLED,
+    RC_CX_RUNTIME_MODE: process.env.RC_CX_RUNTIME_MODE,
+    CX_RUNTIME_MODE: process.env.CX_RUNTIME_MODE,
+    VITE_CX_WORKSPACE_MODE: process.env.VITE_CX_WORKSPACE_MODE,
+    CX_DIAL_RUNTIME_DEFAULT: process.env.CX_DIAL_RUNTIME_DEFAULT,
+    CX_DIAL_RUNTIME_BULK_LOAD_ENABLED: process.env.CX_DIAL_RUNTIME_BULK_LOAD_ENABLED,
+    RC_CX_EX_ARTIFACT_MODE: process.env.RC_CX_EX_ARTIFACT_MODE,
+  };
   process.env.RC_CX_EX_BUSY_GATE_ENABLED = "true";
+  process.env.CX_DIAL_RUNTIME_BULK_LOAD_ENABLED = "false";
+  delete process.env.RC_CX_RUNTIME_MODE;
+  delete process.env.CX_RUNTIME_MODE;
+  delete process.env.VITE_CX_WORKSPACE_MODE;
+  delete process.env.CX_DIAL_RUNTIME_DEFAULT;
+  delete process.env.RC_CX_EX_ARTIFACT_MODE;
   try {
     const result = buildEligibility(agent("101", {
       status: "onCall",
@@ -155,8 +169,10 @@ test("buildEligibility blocks connected EX calls", () => {
     assert.equal(result.eligible, false);
     assert.equal(result.reason, "ex-busy");
   } finally {
-    if (original == null) delete process.env.RC_CX_EX_BUSY_GATE_ENABLED;
-    else process.env.RC_CX_EX_BUSY_GATE_ENABLED = original;
+    for (const [key, value] of Object.entries(originals)) {
+      if (value == null) delete process.env[key];
+      else process.env[key] = value;
+    }
   }
 });
 
