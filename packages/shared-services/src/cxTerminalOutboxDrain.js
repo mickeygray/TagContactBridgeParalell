@@ -36,6 +36,7 @@ function createCxTerminalOutboxDrain({
   writeCallNote = null,
   enqueueCallWrap = null,
   enrichTerminalPacket = null,
+  handleBadNumberOutcome = null,
   resolveMinimal = null,
   logger = console,
 } = {}) {
@@ -53,6 +54,9 @@ function createCxTerminalOutboxDrain({
   }
   if (enrichTerminalPacket != null && typeof enrichTerminalPacket !== "function") {
     throw new Error("createCxTerminalOutboxDrain enrichTerminalPacket must be a function");
+  }
+  if (handleBadNumberOutcome != null && typeof handleBadNumberOutcome !== "function") {
+    throw new Error("createCxTerminalOutboxDrain handleBadNumberOutcome must be a function");
   }
 
   // Process one batch of pending rows. Each row is independent: a replay failure marks THAT row
@@ -85,6 +89,8 @@ function createCxTerminalOutboxDrain({
     let callWrapQueued = 0;
     let callWrapSkipped = 0;
     let callWrapFailed = 0;
+    let badNumberHandled = 0;
+    let badNumberSkipped = 0;
     for (const row of pending) {
       logCxAlpha("cx.alpha.drain.row.started", summarizeDrainRow(row), { logger });
       if (!row || !row.payload || !String(row.payload.queueItemId || "").trim()) {
@@ -158,6 +164,21 @@ function createCxTerminalOutboxDrain({
             });
           }
         }
+        if (handleBadNumberOutcome) {
+          const badNumberResult = await handleBadNumberOutcome({
+            row: packet.row || row,
+            payload: packet.payload,
+            terminalResult,
+          });
+          if (badNumberResult?.skipped) badNumberSkipped += 1;
+          else badNumberHandled += 1;
+          logCxAlpha("cx.alpha.drain.bad_number.finished", {
+            ...summarizeDrainRow(packet.row || row),
+            skipped: Boolean(badNumberResult?.skipped),
+            reason: badNumberResult?.reason || null,
+            ok: badNumberResult ? badNumberResult.ok !== false : null,
+          }, { logger });
+        }
         const drainedRow = await outboxRepository.markDrained(row.idemKey);
         if (!drainedRow) {
           // CAS miss: a concurrent drainer (second process / restart race) already marked it.
@@ -230,6 +251,10 @@ function createCxTerminalOutboxDrain({
       result.callWrapQueued = callWrapQueued;
       result.callWrapSkipped = callWrapSkipped;
       result.callWrapFailed = callWrapFailed;
+    }
+    if (handleBadNumberOutcome) {
+      result.badNumberHandled = badNumberHandled;
+      result.badNumberSkipped = badNumberSkipped;
     }
     logCxAlpha("cx.alpha.drain.tick.finished", result, { logger });
     return result;

@@ -924,6 +924,7 @@ async function runRingcxAgentMonitor(options = {}) {
   const expiredCanonicalShells = await clearExpiredCanonicalNoUiiShells(now, logger);
   const staleBucketCurrent = await reconcileCxBucketCurrentCalls({
     activeIdentities,
+    activeIdentitiesKnown: true,
     now,
     logger,
     repository: null,

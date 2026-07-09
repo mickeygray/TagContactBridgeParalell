@@ -240,6 +240,7 @@ const {
 } = require("./cxLaneRegistry");
 const { createCxFirstTouchDispatcher } = require("./cxFirstTouchDispatchService");
 const { createCxAppointmentDispatcher } = require("./cxAppointmentDispatchService");
+const { createCxSeanFirstTouchDrip } = require("./cxSeanFirstTouchDripService");
 const { getLaneCall } = require("./cxLaneCallRegistry");
 
 const {
@@ -305,6 +306,7 @@ const {
   skipCxBulkLoadCurrent,
   startCxBulkLoadGetLeads,
   startCxBulkLoadSession,
+  syncCxBulkLoadActiveCall,
   submitCxBulkLoadDisposition,
   submitCxLaneCallDisposition,
   submitCxBulkLoadReviewOutcome,
@@ -333,6 +335,11 @@ const {
   wrapCardNeeded,
   RESOLUTION_RULES: CX_WRAP_RESOLUTION_RULES,
 } = require("./cxCallWrapCardService");
+const {
+  buildBadNumberAlertEmail,
+  createCxBadNumberOutcomeHandler,
+  isBadNumberOutcome,
+} = require("./cxBadNumberOutcomeService");
 const { buildReviewCorrectionRow: buildCxReviewCorrectionRow } = require("./cxBulkLoadOutcomeAdapter");
 const {
   buildAgentCallNoteFromCloseout,
@@ -815,6 +822,7 @@ module.exports = {
   parseAgentQueueMap,
   createCxFirstTouchDispatcher,
   createCxAppointmentDispatcher,
+  createCxSeanFirstTouchDrip,
   getLaneCall,
   // ── AI bus: provider-neutral task runner + primitives + delivery client ──
   createAiTaskRunner,
@@ -1118,6 +1126,7 @@ module.exports = {
   skipCxBulkLoadCurrent,
   startCxBulkLoadGetLeads,
   startCxBulkLoadSession,
+  syncCxBulkLoadActiveCall,
   submitCxBulkLoadDisposition,
   submitCxLaneCallDisposition,
   submitCxBulkLoadReviewOutcome,
@@ -1137,6 +1146,9 @@ module.exports = {
   createCxCallWrapCardService,
   wrapCardNeeded,
   CX_WRAP_RESOLUTION_RULES,
+  buildBadNumberAlertEmail,
+  createCxBadNumberOutcomeHandler,
+  isBadNumberOutcome,
   buildAgentCallNoteFromCloseout,
   buildAgentCallNoteFromTerminal,
   hasAgentCallNoteGradeEvidence,

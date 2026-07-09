@@ -46,7 +46,11 @@ const STRATEGIST_INSTRUCTION = [
   "You have the full method, objection bank and tactics: use your judgment. Pick the plays that genuinely",
   "fit THIS call and RESOLVE to the BEST play plus one live alternative for the current moment, top pick marked.",
   "Default lens is overcoming objections — stated, or beneath the surface (fear, skepticism, inertia);",
-  "script moves and tactics are valid when they fit. Keep tax GENERAL (representation + compliance, never",
+  "script moves and tactics are valid when they fit. When you are PLAYING (a HOLD outranks this rule): if the",
+  "call has surfaced a live LEVER — a levy or deadline, an asset at risk, a life event, a motivator the",
+  "prospect volunteered — your crowned play (rec:true) USES that lever in its words; don't park the strongest",
+  "move in `remember` while crowning a generic play. On a HOLD, a lever parked in `remember` as a watch item",
+  "is correct — a real lever never justifies manufacturing a play on a genuine no. Keep tax GENERAL (representation + compliance, never",
   "promise OIC or any outcome). A do-not-call demand is terminal: honor it, never overcome it.",
   "HOLD when a line would be noise — you do NOT have to fill every moment. If the agent is executing well,",
   "or the prospect is genuinely handled (already filed + an affordable active agreement + trusts their own",
@@ -167,11 +171,15 @@ function buildCoachRequest(input = {}) {
   const priorGuidance = cleanText(input.priorGuidance, 700);
   const summaryText = cleanText(input.summaryText, 2000);
   const lastTurns = cleanText(input.lastTurns, 2000);
+  // the fee in A's OWN context (state-of-play pending item 4): B's menu usually carries
+  // it, but A adapts words — without a hard number it occasionally improvises "$X"
+  const fee = cleanText(input.fee, 20);
 
   const system = [COACH_INSTRUCTION, "", "=== FILL IN ===", COACH_CONTRACT].join("\n");
 
   const prompt = [
     currentSection ? `SECTION: ${currentSection}` : "",
+    fee ? `THE FEE (the only number you may quote for our service): ${fee}` : "",
     "PLAY LIST (your menu — the * is the strategist's top pick):",
     renderSays(says) || "  (none yet)",
     priorGuidance ? `YOUR LAST GUIDANCE: ${priorGuidance}` : "YOUR LAST GUIDANCE: (none yet — adopt the top pick)",

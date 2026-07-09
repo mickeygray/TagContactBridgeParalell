@@ -96,6 +96,20 @@ function normalizeRingcxPhone(value) {
   return digits;
 }
 
+// A login/off-hook destination is either a PSTN DID (→ bare 10-digit) or a SIP URI
+// (→ untouched). RingCX validates defaultLoginDest as "10-digit DID or SIP" and
+// REJECTS E.164 ("+1818…") — a malformed dest is a total seat outage for that agent
+// while the dial queue looks healthy (the 2026-07-08 Chris incident). Heuristic:
+// letters or "@" (ignoring a leading "+") ⇒ SIP, pass through; otherwise normalize as
+// a US phone. This is the single source of truth for login-dest formatting.
+function normalizeRingcxLoginDest(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return null;
+  const looksLikeSip = /[a-z@]/i.test(raw.replace(/^\+/, ""));
+  if (looksLikeSip) return raw;
+  return normalizeRingcxPhone(raw); // "+18183375982" → "8183375982"
+}
+
 function normalizeRingcxUsername(value) {
   const raw = String(value || "").trim();
   if (!raw) return null;
@@ -1294,6 +1308,7 @@ module.exports = {
   createRingcxVoiceClient,
   getRingcxVoiceRateLimitState: getRateLimitState,
   normalizeRingcxPhone,
+  normalizeRingcxLoginDest,
   // Exported for the discovery/bootstrap scripts so they can clear the
   // cache between runs without instantiating a client first.
   _clearTokenCache: clearCache,

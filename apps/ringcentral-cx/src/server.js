@@ -2424,6 +2424,33 @@ async function startServer() {
     });
   });
 
+  app.post("/api/inbound/cx-first-contact-forward", requireInternalAccess, async (req, res) => {
+    const payload = req.body && typeof req.body === "object" ? req.body : {};
+    const event = String(payload.event || "").trim() || "unknown";
+    const dedupeKey = String(payload.dedupeKey || req.headers["x-forward-id"] || "").trim() || null;
+    const domain = String(payload.domain || "").trim().toUpperCase() || null;
+    const caseId = payload.caseId == null ? null : String(payload.caseId).trim();
+
+    runtime.logger.info("ringcentral.cx_first_contact_forward.received", {
+      event,
+      domain,
+      caseId,
+      leadCadenceId: payload.leadCadenceId || null,
+      queueItemId: payload.queueItemId || null,
+      queueFamily: payload.queueFamily || null,
+      state: payload.state || null,
+      dedupeKey,
+      sourceService: payload.sourceService || null,
+    });
+
+    return res.status(202).json({
+      ok: true,
+      accepted: true,
+      event,
+      dedupeKey,
+    });
+  });
+
   app.use((error, _req, res, _next) => {
     runtime.logger.error("ringcentral.request.failed", {
       error: error.message,

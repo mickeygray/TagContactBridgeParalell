@@ -43,7 +43,11 @@ const {
   resolveQueueDialability,
   resolveQueueDialTimeWindow,
 } = require("./cxQueuePolicyService");
-const { resolveCaseContactEligibility, stopCaseContact } = require("./contactEligibilityService");
+const {
+  isTransientContactEligibilityBlock,
+  resolveCaseContactEligibility,
+  stopCaseContact,
+} = require("./contactEligibilityService");
 const { evaluateCxClear } = require("./cxCallStateGuard");
 const { cancelPublishedQueueItemInRingcx } = require("./ringcxLeadServingService");
 const {
@@ -59,6 +63,7 @@ const {
   applyCallEndedDailyStats,
   applyCallStartedDailyStats,
   getPauseReleaseDelayMs,
+  isUntimedCxPauseType,
   isCxWorkspacePresenceActive,
   normalizeCxPauseType,
   normalizeDailyStats,
@@ -225,7 +230,20 @@ function classifyCxTerminalOutcome(payload = {}) {
       || token === "do_not_call"
       || token === "donotcall"
       || token === "do-not-call"
+      || token === "bad_number"
+      || token === "bad-number"
+      || token === "badnumber"
+      || token === "wrong_number"
+      || token === "wrong-number"
+      || token === "wrongnumber"
+      || token === "disconnected"
+      || token === "out_of_service"
+      || token === "out-of-service"
+      || token === "outofservice"
       || compact === "donotcall"
+      || compact === "badnumber"
+      || compact === "wrongnumber"
+      || compact === "outofservice"
     )) {
       return {
         safeToAdvance: true,
@@ -1770,6 +1788,21 @@ async function requeueStaleServingQueueItems(now = new Date(), limit = 50) {
       }).catch(() => null);
       continue;
     }
+    // DAMPENING LAW (Mickey, 2026-07-08 — "anything that autonomously decides the
+    // value of a lead or the execution of a dial gets dampened"): ABSENCE of evidence
+    // is not evidence of inactivity. A missing/unreadable AgentState (Mongo blip, read
+    // error swallowed to null, state churn) must HOLD the serving row and say so —
+    // never yank a lead an agent may be talking on. This exact path requeued live
+    // serving rows during the 07-08 dual-writer incident. Only a POSITIVE inactive
+    // read (fresh agent state that shows the agent elsewhere) may requeue.
+    if (activeServing.reason === "missing-agent-state") {
+      await cxDialQueueRepository.updateQueueItem(item._id, {
+        "metadata.lastServingReconcileAt": now,
+        "metadata.lastServingReconcileReason": "held-missing-agent-state",
+        "metadata.lastServingReconcileSource": "stale-serving-guard",
+      }).catch(() => null);
+      continue;
+    }
     const updated = await cxDialQueueRepository.transitionQueueItemState(
       item._id,
       ["serving"],
@@ -1794,7 +1827,10 @@ async function requeueStaleServingQueueItems(now = new Date(), limit = 50) {
         .findAgentStateByExtensionId(previousAssignment.extensionId)
         .catch(() => null);
       const latestActiveServing = evaluateServingQueueActivity(item, latestAgentState, now);
-      if (!latestActiveServing.active) {
+      // Same dampening law as above: a NULL latest read must never force-idle an agent
+      // and drain their current call — that is flattening a possibly-live human off a
+      // failed read. Only a POSITIVE "this agent is provably elsewhere" acts here.
+      if (!latestActiveServing.active && latestActiveServing.reason !== "missing-agent-state") {
         await agentStateRepository.updateAgentState(previousAssignment.extensionId, {
           status: "available",
           activityState: "idle",
@@ -2064,6 +2100,7 @@ async function queueCxDialRequest(payload = {}) {
       skipped: true,
       reason: eligibility.reason,
       detail: eligibility.detail || null,
+      transient: isTransientContactEligibilityBlock(eligibility),
     };
   }
 
@@ -2739,7 +2776,7 @@ async function handleCxCallPlaced(payload = {}) {
     },
   });
 
-  if (!eligibility.ok) {
+  if (!eligibility.ok && !isTransientContactEligibilityBlock(eligibility)) {
     await stopCaseContact(domain, caseId, {
       reason: eligibility.reason,
       detail: eligibility.detail || "Future contact cancelled after CX call placed",
@@ -2833,6 +2870,8 @@ async function handleCxTerminalCallOutcome(payload = {}) {
     // terminalMetadata spreads onto metadata.* on EVERY exit path (incl. the ignore
     // branches), so the label lands durably on the queue row for lead-health forensics.
     lastTerminalSystemDisposition: String(payload.systemDisposition || "").trim() || null,
+    lastTerminalBadNumber: payload.badNumber === true || String(payload.outcome || "").trim().toLowerCase().replace(/[\s-]+/g, "_") === "bad_number",
+    lastTerminalBadNumberReason: String(payload.badNumberReason || "").trim() || null,
     lastTerminalOutcomeUii:
       normalizeExternalId(payload.uii || payload.callSessionId)
       || queueItem.metadata?.lastDialExecutionUii
@@ -3582,19 +3621,40 @@ async function claimNextCxQueueItem(options = {}) {
     sourceService: "ringcentral-cx",
   });
   if (!eligibility.ok) {
-    await cancelCxQueueItem({
-      queueItemId: String(item._id),
-      reason: eligibility.reason || "contact-blocked",
-      queueOutcome: "cancelled",
-      statusCategory: "contact-blocked",
-      statusLabel: eligibility.detail || eligibility.reason || "contact blocked",
-    }).catch(() => null);
+    const transientEligibility = isTransientContactEligibilityBlock(eligibility);
+    let retryAt = null;
+    if (transientEligibility) {
+      const retryMinutes = Math.max(Number(process.env.RC_CX_LOGICS_STATUS_RETRY_MINUTES) || 5, 1);
+      retryAt = new Date(Date.now() + retryMinutes * 60 * 1000);
+      await cxDialQueueRepository.transitionQueueItemState(item._id, ["claimed"], {
+        state: "queued",
+        claimUntil: null,
+        releaseAt: retryAt,
+        "metadata.lastContactEligibilityHoldAt": new Date(),
+        "metadata.lastContactEligibilityHoldReason": eligibility.reason || "logics-status-check-failed",
+        "metadata.lastContactEligibilityHoldDetail": eligibility.detail || null,
+        "metadata.lastContactEligibilityHoldReleaseAt": retryAt,
+        "metadata.lastContactEligibilityTransient": true,
+      }, {
+        match: buildQueueItemMutationMatch(item),
+      }).catch(() => null);
+    } else {
+      await cancelCxQueueItem({
+        queueItemId: String(item._id),
+        reason: eligibility.reason || "contact-blocked",
+        queueOutcome: "cancelled",
+        statusCategory: "contact-blocked",
+        statusLabel: eligibility.detail || eligibility.reason || "contact blocked",
+      }).catch(() => null);
+    }
     return {
       ok: true,
       claimed: false,
       skipped: true,
       reason: eligibility.reason,
       detail: eligibility.detail || null,
+      transient: transientEligibility,
+      deferUntil: transientEligibility ? retryAt : null,
     };
   }
 
@@ -4202,7 +4262,7 @@ async function releaseAssignedCxQueueForAgent(options = {}) {
       ? "logout"
       : releaseReason === "long-call-hold"
         ? "long-call-hold"
-        : normalizeCxPauseType(agentState?.cxRouting?.pauseType) || "short-break";
+        : normalizeCxPauseType(options.pauseType || agentState?.cxRouting?.pauseType) || "short-break";
   const pauseStartedAt =
     agentState?.cxRouting?.pauseStartedAt
     || agentState?.cxRouting?.manualUnavailableAt
@@ -4211,7 +4271,9 @@ async function releaseAssignedCxQueueForAgent(options = {}) {
     agentState?.cxRouting?.pauseReleaseAt
     || (pauseType === "logout"
       ? now
-      : new Date(new Date(pauseStartedAt).getTime() + getPauseReleaseDelayMs(pauseType)));
+      : isUntimedCxPauseType(pauseType)
+        ? null
+        : new Date(new Date(pauseStartedAt).getTime() + getPauseReleaseDelayMs(pauseType)));
   const logoutPresencePatch = releaseReason === "logout"
     ? {
       "appPresence.cxWorkspaceActive": false,
@@ -4286,6 +4348,7 @@ async function releaseManualUnavailableAgentQueues(options = {}) {
     if (!["manual-unavailable", "long-call-hold"].includes(reason)) continue;
     const pauseType = normalizeCxPauseType(routing.pauseType)
       || (reason === "long-call-hold" ? "long-call-hold" : "short-break");
+    if (isUntimedCxPauseType(pauseType)) continue;
     const manualUnavailableAt = routing.manualUnavailableAt ? new Date(routing.manualUnavailableAt) : null;
     if (!manualUnavailableAt || Number.isNaN(manualUnavailableAt.getTime())) continue;
     const pauseReleaseAt = routing.pauseReleaseAt ? new Date(routing.pauseReleaseAt) : null;

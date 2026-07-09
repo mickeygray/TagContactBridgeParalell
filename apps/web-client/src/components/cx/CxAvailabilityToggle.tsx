@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Loader2, CheckCircle2, Clock3, Coffee, PhoneCall, Utensils } from "lucide-react";
+import { Loader2, CheckCircle2, Clock3, Coffee, Pause, PhoneCall, Utensils } from "lucide-react";
 import { api, ApiError } from "@/lib/api/client";
 import { queryKeys } from "@/lib/api/queries/keys";
 import {
@@ -57,6 +57,7 @@ type AgentStateResponse = {
 
 const TOGGLE_DISABLED_STATES = new Set(["dialing", "onCall", "dispositioning"]);
 const CX_WORKSPACE_STATUS_DOMAIN = "WYNN";
+type CxPauseType = "short-break" | "meal-break" | "work-pause";
 
 function numberFrom(value: unknown, fallback = 0) {
   const parsed = Number(value);
@@ -142,13 +143,22 @@ export function CxAvailabilityToggle() {
       ? "15 min break"
       : pauseType === "short-break"
         ? "5 min break"
-        : "Break";
+        : pauseType === "work-pause"
+          ? "Working"
+          : "Paused";
 
-  async function changeAvailability(next: "available" | "unavailable", breakType?: "short-break" | "meal-break") {
+  function pauseDescription(value?: string | null) {
+    if (value === "meal-break") return "You are on a 15 minute break.";
+    if (value === "short-break") return "You are on a 5 minute break.";
+    if (value === "work-pause") return "Dialing is paused while you work outside the CX queue. Use Available to resume.";
+    return "Dialing is paused. Use Available to resume.";
+  }
+
+  async function changeAvailability(next: "available" | "unavailable", nextPauseType?: CxPauseType) {
     if (bulkSessionId && next === "unavailable") {
       await pauseProgressive.mutateAsync({
         sessionId: bulkSessionId,
-        reason: breakType ? `bulk-${breakType}` : "bulk-manual-unavailable",
+        reason: nextPauseType ? `bulk-${nextPauseType}` : "bulk-manual-unavailable",
         holdUntilResume: true,
       });
     }
@@ -156,7 +166,7 @@ export function CxAvailabilityToggle() {
     const result = await setStatus.mutateAsync({
       status: next,
       reason: next === "available" ? "manual-available" : "manual-unavailable",
-      ...(next === "unavailable" && breakType ? { breakType } : {}),
+      ...(next === "unavailable" && nextPauseType ? { pauseType: nextPauseType } : {}),
     });
     const commandResult = result?.result && typeof result.result === "object" ? result.result : {};
     const commandResponse = commandResult.response && typeof commandResult.response === "object"
@@ -164,7 +174,7 @@ export function CxAvailabilityToggle() {
       : null;
     const resolvedRouting = commandResponse?.cxRouting || null;
     const resolvedAvailability = resolvedRouting?.desiredAvailability || next;
-    const resolvedPauseType = resolvedRouting?.pauseType || breakType || "";
+    const resolvedPauseType = resolvedRouting?.pauseType || nextPauseType || "";
 
     if (next === "available" && resolvedAvailability === "unavailable" && resolvedRouting?.reason === "ex-busy") {
       toast.warning("Held unavailable - EX call active", {
@@ -180,13 +190,18 @@ export function CxAvailabilityToggle() {
       });
     }
 
-    toast(resolvedAvailability === "available" ? "Dialing resumed" : "Break started", {
+    toast(
+      resolvedAvailability === "available"
+        ? "Dialing resumed"
+        : resolvedPauseType === "work-pause"
+          ? "Dialing paused"
+          : "Break started",
+      {
       description: resolvedAvailability === "available"
         ? "Go off hook in RingCX to resume work."
-        : resolvedPauseType === "meal-break"
-          ? "You are on a 15 minute break."
-          : "You are on a 5 minute break.",
-    });
+        : pauseDescription(resolvedPauseType),
+      },
+    );
   }
 
   return (
@@ -233,6 +248,24 @@ export function CxAvailabilityToggle() {
             </span>
           ) : (
             <>
+              <button
+                type="button"
+                disabled={inFlight || !platformReady}
+                onClick={() => void changeAvailability("unavailable", "work-pause").catch(() => null)}
+                className={cn(
+                  "inline-flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium transition-colors",
+                  "bg-muted text-muted-foreground hover:bg-sky-500/10 hover:text-sky-700",
+                  inFlight && "opacity-60 cursor-wait",
+                )}
+                title="Pause CX dialing for a mail call or other work. Use Available to resume."
+              >
+                {pauseProgressive.isPending && pauseType === "work-pause" ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                ) : (
+                  <Pause className="h-3.5 w-3.5" />
+                )}
+                Pause dials
+              </button>
               <button
                 type="button"
                 disabled={inFlight || !platformReady || shortBreaksRemaining <= 0}

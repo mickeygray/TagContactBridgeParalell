@@ -881,6 +881,70 @@ function createRingCentralClient() {
         `/restapi/v1.0/account/~/extension/${encodeURIComponent(extensionId)}/phone-number`,
       );
     },
+    async listAccountPhoneNumbers(options = {}) {
+      const perPage = Math.max(1, Math.min(Number(options.perPage || 100) || 100, 1000));
+      const records = [];
+      let page = Math.max(Number(options.page || 1) || 1, 1);
+      let totalPages = page;
+      let lastPayload = null;
+
+      do {
+        const payload = await request("GET", "/restapi/v1.0/account/~/phone-number", {
+          query: { perPage, page },
+        });
+        lastPayload = payload;
+        records.push(...(Array.isArray(payload?.records) ? payload.records : []));
+        totalPages = Number(payload?.paging?.totalPages || page) || page;
+        page += 1;
+      } while (options.allPages !== false && page <= totalPages);
+
+      return {
+        ...(lastPayload || {}),
+        records,
+      };
+    },
+    async listAccountPhoneNumbersV2(options = {}) {
+      const perPage = Math.max(1, Math.min(Number(options.perPage || 100) || 100, 1000));
+      const records = [];
+      let page = Math.max(Number(options.page || 1) || 1, 1);
+      let totalPages = page;
+      let lastPayload = null;
+
+      do {
+        const query = { perPage, page };
+        if (options.usageType) query.usageType = String(options.usageType).trim();
+        const payload = await request("GET", "/restapi/v2/accounts/~/phone-numbers", { query });
+        lastPayload = payload;
+        records.push(...(Array.isArray(payload?.records) ? payload.records : []));
+        totalPages = Number(payload?.paging?.totalPages || page) || page;
+        page += 1;
+      } while (options.allPages !== false && page <= totalPages);
+
+      return {
+        ...(lastPayload || {}),
+        records,
+      };
+    },
+    assignPhoneNumberV2(phoneNumberId, payload = {}) {
+      return request(
+        "PATCH",
+        `/restapi/v2/accounts/~/phone-numbers/${encodeURIComponent(phoneNumberId)}`,
+        { body: payload },
+      );
+    },
+    getExtensionCallerId(extensionId = "~") {
+      return request(
+        "GET",
+        `/restapi/v1.0/account/~/extension/${extensionPath(extensionId)}/caller-id`,
+      );
+    },
+    updateExtensionCallerId(extensionId = "~", payload = {}) {
+      return request(
+        "PUT",
+        `/restapi/v1.0/account/~/extension/${extensionPath(extensionId)}/caller-id`,
+        { body: payload },
+      );
+    },
     sendExtensionSms(extensionId, { fromPhoneNumber, toPhoneNumber, text }) {
       return request(
         "POST",

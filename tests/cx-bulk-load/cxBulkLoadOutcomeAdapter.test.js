@@ -96,6 +96,19 @@ test("buildCadenceEvent carries display-name aliases into terminal payloads", ()
   assert.equal(e.sourceName, "Snapshot Source");
 });
 
+test("buildCadenceEvent carries bad-number flags for the drain side effects", () => {
+  const e = buildCadenceEvent({
+    session: SESSION,
+    candidate: CANDIDATE,
+    outcome: "bad_number",
+    badNumber: true,
+    badNumberReason: "disconnected-or-out-of-service",
+  });
+  assert.equal(e.outcome, "bad_number");
+  assert.equal(e.badNumber, true);
+  assert.equal(e.badNumberReason, "disconnected-or-out-of-service");
+});
+
 test("buildCadenceEvent falls back to nested agent email and ringcx externId", () => {
   const e = buildCadenceEvent({
     session: { sessionId: "s2", domain: "WYNN", agent: { email: "b@x.com" } },

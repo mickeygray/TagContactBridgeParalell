@@ -319,6 +319,13 @@ export async function streamLiveCoachEvents(path: string, handlers: StreamHandle
         boundary = buffer.indexOf("\n\n");
       }
     }
+    // D1 (bus audit): a server-side close (bus restart, idle recycle, proxy drop) is
+    // NOT success. Returning normally here made the retry wrapper treat it as terminal
+    // and the cockpit froze with the connection showing "open". Only an intentional
+    // abort may end the stream quietly.
+    if (!handlers.signal?.aborted) {
+      throw new Error("Coach stream closed by server");
+    }
   } catch (error) {
     if ((error as Error).name === "AbortError") return;
     const err = error instanceof Error ? error : new Error("Coach stream failed");
@@ -355,11 +362,22 @@ export async function streamLiveCoachEventsWithRetry(
   const { initialDelayMs, maxDelayMs, maxRetries } = { ...DEFAULT_RETRY_CONFIG, ...config };
   let attempt = 0;
   for (;;) {
+    let connectedAtMs = 0;
     try {
-      await streamLiveCoachEvents(path, { ...handlers, onError: undefined });
+      await streamLiveCoachEvents(path, {
+        ...handlers,
+        onError: undefined,
+        onOpen: () => {
+          connectedAtMs = Date.now();
+          handlers.onOpen?.();
+        },
+      });
       return;
     } catch (error) {
       if ((error as Error)?.name === "AbortError" || handlers.signal?.aborted) return;
+      // D2 (bus audit): a connection that held for a while was HEALTHY — reset the
+      // retry budget so a shift's worth of transient blips can never exhaust it.
+      if (connectedAtMs && Date.now() - connectedAtMs > 15_000) attempt = 0;
       if (attempt >= maxRetries) {
         const fatal = error instanceof Error ? error : new Error("Coach stream failed");
         handlers.onError?.(fatal);

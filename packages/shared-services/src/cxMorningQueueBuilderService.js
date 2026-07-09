@@ -117,14 +117,25 @@ function normalizeOptions(input = {}) {
   const companies = Array.isArray(input.companies)
     ? input.companies.filter(Boolean)
     : splitList(input.companies);
+  const agentEmails = (Array.isArray(input.agentEmails) ? input.agentEmails : splitList(input.agentEmails))
+    .map((entry) => String(entry || "").trim().toLowerCase())
+    .filter(Boolean);
+  const extensionIds = (Array.isArray(input.extensionIds) ? input.extensionIds : splitList(input.extensionIds))
+    .map((entry) => String(entry || "").trim())
+    .filter(Boolean);
+  const hasTargetAllowlist = agentEmails.length > 0 || extensionIds.length > 0;
 
   return {
     apply: input.apply === true,
-    all: input.all === true || (!input.email && !input.extensionId),
+    all: !hasTargetAllowlist && (input.all === true || (!input.email && !input.extensionId)),
     confirmAll: input.confirmAll === true,
     email: String(input.email || "").trim().toLowerCase() || null,
     extensionId: String(input.extensionId || "").trim() || null,
-    domain: String(input.domain || "").trim().toUpperCase() || null,
+    agentEmails,
+    extensionIds,
+    // The sales queue is WYNN by default even though many UserAccount.company values
+    // still read TAG. Operators can override this explicitly when a TAG queue is wanted.
+    domain: String(input.domain || "WYNN").trim().toUpperCase() || "WYNN",
     companies: (companies.length ? companies : DEFAULT_COMPANIES).map((entry) => String(entry).toUpperCase()),
     limit: normalizePositiveInt(input.limit, 30, 250),
     maxAgents: input.maxAgents == null ? null : normalizePositiveInt(input.maxAgents, 1, 1000),
@@ -134,6 +145,7 @@ function normalizeOptions(input = {}) {
     reverse: input.reverse === true,
     forcePublish: input.forcePublish !== false,
     respectPresence: input.respectPresence === true,
+    allowBroadDiscovery: input.allowBroadDiscovery === true,
     statesToMirror: statesToMirror.length ? statesToMirror : [...DEFAULT_STATES_TO_MIRROR],
     statesToDrain: statesToDrain.length ? statesToDrain : [...DEFAULT_STATES_TO_DRAIN],
     paceMs: Math.max(0, Number(input.paceMs) || 0),
@@ -147,6 +159,8 @@ function summarizeOptions(options) {
     apply: options.apply,
     email: options.email,
     extensionId: options.extensionId,
+    agentEmails: options.agentEmails,
+    extensionIds: options.extensionIds,
     all: options.all,
     domain: options.domain,
     companies: options.companies,
@@ -158,6 +172,7 @@ function summarizeOptions(options) {
     reverse: options.reverse,
     forcePublish: options.forcePublish,
     respectPresence: options.respectPresence,
+    allowBroadDiscovery: options.allowBroadDiscovery,
     statesToMirror: options.statesToMirror,
     statesToDrain: options.statesToDrain,
     paceMs: options.paceMs,
@@ -192,9 +207,33 @@ async function resolveSingleAgent(options) {
   return null;
 }
 
+function filterTargetAgentsByAllowlist(agents = [], options = {}) {
+  const emailAllowlist = new Set((options.agentEmails || []).map((entry) => String(entry || "").trim().toLowerCase()).filter(Boolean));
+  const extensionAllowlist = new Set((options.extensionIds || []).map((entry) => String(entry || "").trim()).filter(Boolean));
+  if (emailAllowlist.size === 0 && extensionAllowlist.size === 0) return agents;
+
+  return agents.filter(({ account = {} }) => {
+    const email = String(account.email || "").trim().toLowerCase();
+    const extensionId = String(account.extensionId || "").trim();
+    return (email && emailAllowlist.has(email)) || (extensionId && extensionAllowlist.has(extensionId));
+  });
+}
+
+function hasTargetAllowlist(options = {}) {
+  return (options.agentEmails || []).length > 0 || (options.extensionIds || []).length > 0;
+}
+
 async function listTargetAgents(options) {
   const single = await resolveSingleAgent(options);
   if (single) return single;
+
+  if (!hasTargetAllowlist(options) && options.allowBroadDiscovery !== true) {
+    log(options.logger, "warn", "cx.morning_queue_builder.no_explicit_targets", {
+      reason: "broad-discovery-disabled",
+      source: options.source,
+    });
+    return [];
+  }
 
   const byExtension = new Map();
   for (const company of options.companies) {
@@ -223,7 +262,7 @@ async function listTargetAgents(options) {
     }
   }
 
-  const agents = Array.from(byExtension.values())
+  const agents = filterTargetAgentsByAllowlist(Array.from(byExtension.values()), options)
     .sort((left, right) => String(left.account.name || left.account.email)
       .localeCompare(String(right.account.name || right.account.email)));
   return options.maxAgents ? agents.slice(0, options.maxAgents) : agents;
@@ -511,13 +550,18 @@ async function runCxMorningQueueBuilder(input = {}) {
 }
 
 function readCxMorningQueueBuilderOptionsFromEnv(env = process.env, logger = null) {
+  const agentEmails = splitList(env.CX_MORNING_QUEUE_BUILDER_AGENT_EMAILS);
+  const extensionIds = splitList(env.CX_MORNING_QUEUE_BUILDER_EXTENSION_IDS);
+
   return {
     apply: true,
-    all: true,
+    all: agentEmails.length === 0 && extensionIds.length === 0,
     confirmAll: true,
     logger,
     source: "cx-morning-queue-builder-7am",
-    domain: String(env.CX_MORNING_QUEUE_BUILDER_DOMAIN || "").trim().toUpperCase() || null,
+    agentEmails,
+    extensionIds,
+    domain: String(env.CX_MORNING_QUEUE_BUILDER_DOMAIN || "WYNN").trim().toUpperCase() || "WYNN",
     companies: splitList(env.CX_MORNING_QUEUE_BUILDER_COMPANIES || "TAG,WYNN"),
     limit: normalizePositiveInt(env.CX_MORNING_QUEUE_BUILDER_LIMIT, 30, 250),
     maxAgents: env.CX_MORNING_QUEUE_BUILDER_MAX_AGENTS
@@ -533,6 +577,7 @@ function readCxMorningQueueBuilderOptionsFromEnv(env = process.env, logger = nul
     reverse: normalizeBoolean(env.CX_MORNING_QUEUE_BUILDER_REVERSE, false),
     forcePublish: normalizeBoolean(env.CX_MORNING_QUEUE_BUILDER_FORCE_PUBLISH, true),
     respectPresence: normalizeBoolean(env.CX_MORNING_QUEUE_BUILDER_RESPECT_PRESENCE, false),
+    allowBroadDiscovery: normalizeBoolean(env.CX_MORNING_QUEUE_BUILDER_ALLOW_BROAD_DISCOVERY, false),
     paceMs: Math.max(0, Number(env.CX_MORNING_QUEUE_BUILDER_PACE_MS) || 0),
   };
 }
@@ -549,6 +594,9 @@ module.exports = {
   DEFAULT_COMPANIES,
   DEFAULT_STATES_TO_DRAIN,
   DEFAULT_STATES_TO_MIRROR,
+  agentDomain,
+  filterTargetAgentsByAllowlist,
+  hasTargetAllowlist,
   isCxMorningQueueBuilderEnabled,
   normalizeOptions,
   readCxMorningQueueBuilderOptionsFromEnv,

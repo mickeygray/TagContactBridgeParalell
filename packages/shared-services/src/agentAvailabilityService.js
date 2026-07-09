@@ -31,7 +31,9 @@ const SHORT_BREAK_TYPE = "short-break";
 const MEAL_BREAK_TYPE = "meal-break";
 const LONG_CALL_HOLD_TYPE = "long-call-hold";
 const LOGOUT_PAUSE_TYPE = "logout";
+const WORK_PAUSE_TYPE = "work-pause";
 const COUNTED_BREAK_TYPES = new Set([SHORT_BREAK_TYPE, MEAL_BREAK_TYPE]);
+const UNTIMED_PAUSE_TYPES = new Set([WORK_PAUSE_TYPE]);
 
 function isExLeadServingGateEnabled(options = {}) {
   if (suppressExArtifactsForCx(options)) return false;
@@ -131,10 +133,18 @@ function normalizeCxPauseType(value) {
   if (["long-call", "long-call-hold", "call-hold", "call-grace"].includes(token)) {
     return LONG_CALL_HOLD_TYPE;
   }
+  if (["work", "working", "work-pause", "pause-work", "mail", "mail-call", "pause-dials", "dial-pause"].includes(token)) {
+    return WORK_PAUSE_TYPE;
+  }
   if (["logout", "log-out", "signed-out", "auth-logout"].includes(token)) {
     return LOGOUT_PAUSE_TYPE;
   }
   return null;
+}
+
+function isUntimedCxPauseType(value) {
+  const normalized = normalizeCxPauseType(value);
+  return Boolean(normalized && UNTIMED_PAUSE_TYPES.has(normalized));
 }
 
 function isCxWorkspacePresenceRequired() {
@@ -277,24 +287,33 @@ function toValidDate(value) {
 
 function buildPauseTiming(existingRouting = null, pauseType, now = new Date(), options = {}) {
   const normalized = normalizeCxPauseType(pauseType) || SHORT_BREAK_TYPE;
+  const untimed = UNTIMED_PAUSE_TYPES.has(normalized);
   const existingType = normalizeCxPauseType(existingRouting?.pauseType);
-  const existingReleaseAt = toValidDate(existingRouting?.pauseReleaseAt);
+  const existingReleaseAt = untimed ? null : toValidDate(existingRouting?.pauseReleaseAt);
   const existingStartedAt = toValidDate(existingRouting?.pauseStartedAt)
     || toValidDate(existingRouting?.manualUnavailableAt);
   const reuseExisting =
-    existingType === normalized
+    !untimed
+    && existingType === normalized
     && existingStartedAt
     && existingReleaseAt
     && (options.reuseExpired === true || existingReleaseAt > now);
-  const startedAt = reuseExisting ? existingStartedAt : now;
-  const releaseAt = reuseExisting
+  const reuseUntimed =
+    untimed
+    && existingType === normalized
+    && existingStartedAt
+    && !toValidDate(existingRouting?.pauseReleaseAt);
+  const startedAt = reuseExisting || reuseUntimed ? existingStartedAt : now;
+  const releaseAt = untimed
+    ? null
+    : reuseExisting
     ? existingReleaseAt
     : new Date(startedAt.getTime() + getPauseReleaseDelayMs(normalized));
   return {
     pauseType: normalized,
     pauseStartedAt: startedAt,
     pauseReleaseAt: releaseAt,
-    reuseExisting,
+    reuseExisting: Boolean(reuseExisting || reuseUntimed),
   };
 }
 
@@ -656,7 +675,7 @@ function deriveFreshLeadGate(snapshot = {}, routingOverride = null, options = {}
     && (isExBusySnapshot(snapshot) || routingReason === "ex-busy");
   const leadServingExcluded = isLeadServingExcludedAgent(snapshot);
   const workspaceRequired = isCxWorkspacePresenceRequired();
-  const workspaceActive = isCxWorkspacePresenceActive(snapshot);
+  const workspaceActive = isCxWorkspacePresenceActive(snapshot, options.now || new Date());
 
   let source = "none";
   if (!enabled) {
@@ -690,6 +709,8 @@ function deriveFreshLeadGate(snapshot = {}, routingOverride = null, options = {}
       ? "Fresh leads paused: CX workspace inactive"
     : routingReason === "long-call-hold"
       ? "Fresh leads paused: long call"
+    : routingReason === "manual-unavailable" && pauseType === WORK_PAUSE_TYPE
+      ? "Fresh leads paused: working"
     : routingReason === "manual-unavailable" && pauseType === MEAL_BREAK_TYPE
       ? "Fresh leads paused: 15 minute break"
     : routingReason === "manual-unavailable" && pauseType === SHORT_BREAK_TYPE
@@ -707,6 +728,8 @@ function deriveFreshLeadGate(snapshot = {}, routingOverride = null, options = {}
       ? "Open the CX workspace to receive leads. RingCentral availability alone is not enough."
     : routingReason === "long-call-hold"
       ? "This agent has been on a call long enough to trigger a timed pause. Ending the call clears the pause before queue release."
+    : routingReason === "manual-unavailable" && pauseType === WORK_PAUSE_TYPE
+      ? "This agent paused dialing for other work. Fresh leads stay paused until the agent resumes work."
     : routingReason === "manual-unavailable" && pauseType === MEAL_BREAK_TYPE
       ? "This agent is on a 15 minute break. Fresh leads stay paused until the agent resumes work."
     : routingReason === "manual-unavailable" && pauseType === SHORT_BREAK_TYPE
@@ -1077,6 +1100,7 @@ module.exports = {
   getPauseReleaseDelayMs,
   hasActiveExCall,
   incrementDailyStats,
+  isUntimedCxPauseType,
   isLikelyCxBridgeExCall,
   isExLeadServingGateEnabled,
   isExBusySnapshot,

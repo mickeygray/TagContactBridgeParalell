@@ -24,6 +24,7 @@ const {
 } = require("./liveCoachBatchGuidanceDispatchService");
 const { createCoachFloorLoop } = require("./coachFloorLoop");
 const { createCoachSoloLoop } = require("./coachSoloLoop");
+const { createCoachTwoStationLoop } = require("./coachTwoStationLoop");
 const { applyRollingSummaryToSession } = require("./liveCoachRollingSummaryService");
 
 const TERMINAL_SESSION_STATUSES = Object.freeze(["stopped", "stale", "voicemail_rejected", "released"]);
@@ -1273,10 +1274,19 @@ function createLiveCoachBus({
     if (!id || !sessions.has(id)) return startSession(input);
 
     const session = sessions.get(id);
+    // normalizeMetadata is a fixed whitelist WITHOUT callStrategy — and ensureSession
+    // fires every ~10s from the dashboard sync. Without this carry-over, the attached
+    // call strategy (attachCallStrategy + the deep-steering A5 mirror) silently
+    // evaporates mid-call for every reader (reactor prompt, askCoach, hybrid pipeline,
+    // the panel chip).
+    const carriedCallStrategy = session.metadata && session.metadata.callStrategy;
     session.metadata = normalizeMetadata({
       ...session.metadata,
       ...input,
     });
+    if (carriedCallStrategy && !session.metadata.callStrategy) {
+      session.metadata.callStrategy = carriedCallStrategy;
+    }
     session.binding = input.binding || session.binding || null;
     session.updatedAt = new Date().toISOString();
     fs.writeFileSync(path.join(session.dir, "metadata.json"), JSON.stringify(session.metadata, null, 2));
@@ -3191,7 +3201,13 @@ function createLiveCoachBus({
     for (const update of Array.isArray(updates) ? updates : []) {
       const session = sessions.get(String(update.sessionId || ""));
       if (!session || TERMINAL_SESSION_STATUSES.includes(session.status)) continue;
-      if (update.callStrategy) session.callStrategy = update.callStrategy;
+      if (update.callStrategy) {
+        session.callStrategy = update.callStrategy;
+        // A5 (bus audit): session.callStrategy is write-only — serializeSession has no
+        // such field and the projection reads metadata.callStrategy. Mirror it there
+        // (attachCallStrategy's exact write) so steering actually reaches readers.
+        session.metadata = { ...session.metadata, callStrategy: update.callStrategy };
+      }
       const hasCockpitState = update.currentSection ||
         update.summary ||
         (Array.isArray(update.beats) && update.beats.length) ||
@@ -3339,6 +3355,51 @@ function createLiveCoachBus({
     if (soloCoachLoop) soloCoachLoop.stop();
   }
 
+  // THE TWO-STATION COACH (coachTwoStationLoop): B/STRATEGIST regrounds the cockpit on a
+  // slow clock (immediately on a session's first substantive turn), A/COACH fires every
+  // ~3 substance-floored turns off B's menu. Same session routing + writeback channels as
+  // the floor/solo loops. Dormant unless BOTH two-station transports are configured.
+  let twoStationCoachLoop = null;
+  function startTwoStationCoach() {
+    const runners = batchModelRunners || {};
+    if (!runners.runStrategist || !runners.runCoach) return null; // dormant: transports unset
+    if (twoStationCoachLoop) {
+      twoStationCoachLoop.start();
+      return twoStationCoachLoop;
+    }
+    const cfg = floorCoach || {};
+    const twoStation = cfg.twoStation || {};
+    // the $___ fee placeholder fix (state-of-play pending item 4): the fee rides the
+    // reference, so B's plays quote a real number and A inherits it through the menu
+    const fee = cleanText(twoStation.feeAmount || "$3,500", 20) || "$3,500";
+    twoStationCoachLoop = createCoachTwoStationLoop({
+      buildBatch: (input) => buildActiveLiveCoachBatch(batchModeSessions(), input),
+      applySteering: applyDeepSteering,
+      emitGuidance: emitBatchGuidance,
+      runStrategist: runners.runStrategist,
+      runCoach: runners.runCoach,
+      reference: String(cfg.reference || "").replace(/\$___/g, fee),
+      feeAmount: fee,
+      tickMs: twoStation.tickMs,
+      bIntervalMs: twoStation.bIntervalMs,
+      aTurnThreshold: twoStation.aTurnThreshold,
+      maxSessions: cfg.batchOptions && cfg.batchOptions.maxSessions,
+      logger,
+    });
+    twoStationCoachLoop.start();
+    logger?.info?.("live_coach.two_station.started", {
+      bIntervalMs: twoStation.bIntervalMs || null,
+      aTurnThreshold: twoStation.aTurnThreshold || null,
+    });
+    return twoStationCoachLoop;
+  }
+  function stopTwoStationCoach() {
+    if (twoStationCoachLoop) twoStationCoachLoop.stop();
+  }
+  function getTwoStationCounters() {
+    return twoStationCoachLoop ? twoStationCoachLoop.getCounters() : null;
+  }
+
   return {
     startSession,
     ensureSession,
@@ -3358,6 +3419,9 @@ function createLiveCoachBus({
     stopFloorCoach,
     startSoloCoach,
     stopSoloCoach,
+    startTwoStationCoach,
+    stopTwoStationCoach,
+    getTwoStationCounters,
     getSummary,
     getCloseoutStats: () => closeoutWorker?.getStats?.() || null,
     runFixture,

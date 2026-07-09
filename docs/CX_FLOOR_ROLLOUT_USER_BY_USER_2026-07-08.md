@@ -39,8 +39,9 @@ the floor keeps dialing exactly as today. Wave 1 = **Sean, tomorrow morning**.
 | Tool | What | Writes? |
 |------|------|---------|
 | `scripts/cx-pilot-queue.js build --count 300 [--arm]` | mint the pilot batch from the safe pool: active WYNN leads, no cx dial in 30d, **no active queue row for the case** (2,353 busy cases auto-excluded in tonight's dry-run), not DNC/staged-out, phone+name present | dry-run default |
-| `scripts/cx-pilot-queue.js refresh --max 5 [--arm]` | **the new-stuff tee**: MOVE up to N brand-new, still-unassigned `fresh-day1` intake rows into the pilot family (move, never copy — one-active-row law; the rest of intake flows to the floor untouched; reversible via `undo`) | dry-run default |
-| `scripts/cx-pilot-queue.js status / cleanup / undo` | count by state / cancel unserved batch rows / restore teed rows | cleanup+undo need `--arm`; never touch a row that already dialed |
+| **the Sean first-touch drip** (service worker, Mickey's patch shape — see the section below) | occasionally assigns ONE unassigned fresh intake mint to Sean and publishes it IMMEDIATE into his **First Touch campaign 2831** through the existing publish primitive — the fresh-touch experience test, full legacy semantics | flag-gated off + dry-run mode |
+| `scripts/cx-pilot-queue.js refresh --max 5 [--arm]` | the bulk-workspace alternative tee: MOVE up to N unassigned `fresh-day1` intake rows into the pilot family so his BULK session serves them (move, never copy — one-active-row law; reversible via `undo`). Use the drip OR this per block, not both at once | dry-run default |
+| `scripts/cx-pilot-queue.js status / cleanup / undo / drip-status / drip-cleanup` | count by state / cancel unserved batch rows / restore teed rows / account for + release undialed drip rows | cleanup+undo+drip-cleanup need `--arm`; never touch a row that already dialed |
 | `scripts/cx-floor-watch.js` | **the logs-that-watch-everything station**: every agent's session journeys (DIAL→ANSWER→TERMINAL→DRAIN→CARD→RESOLVE + stall warnings) + live tail of the NSSM service logs (red-flags: unknown sysdispo token, [cx][wipe], drain failures, publish rejects) — everything mirrored to `logs/floor-rollout/watch-<stamp>.log` | only its own sink file |
 | `scripts/cx-floor-pilot-report.js --agent slucas@... --archive` | end-of-block scoreboard with fail-closed verdicts + date-windowed log extract archived to `logs/floor-rollout/slucas-<date>/` | only its archive dir |
 
@@ -48,6 +49,61 @@ Safety net behind all of it: fillBuffer re-checks Logics contact eligibility liv
 (enforceStop) per case at serve time, and Sean's pilot terminals write the SAME
 LeadCadence touch state the floor reads — so the floor sees his attempts (budget
 consumed, scheduled cx actions suppressed): suppression, never double-dialing.
+
+## THE SEAN FIRST-TOUCH DRIP (Mickey's patch shape, built 2026-07-08, 8/8 pins, gate 379/379)
+
+Mickey's live read-only investigation set the shape: 4001 keeps minting fresh rows
+exactly as it does today (`intake -> fireImmediateContact -> queueCxDialRequest`,
+fresh-day1); a Sean-only flag occasionally selects one still-unassigned mint, assigns
+it to Sean, and the existing RingCX publish loads it into his **First Touch campaign**.
+No 4001 rewrite, no cxft lane machinery, no broad changes. Two adaptations from the
+recon, both in Mickey's favor:
+
+1. **It runs on THIS box, not live.** The shared Atlas Mongo means rows minted by
+   live's 4001 are visible here instantly — the worker ticks inside this box's
+   control-plane next to the lane dispatchers. Zero live patches, zero 4001 touches,
+   zero live restarts. (Mickey's restart-cost analysis was for patching live; here the
+   normal morning restart carries it.)
+2. **It publishes via `publishBatchToRingcx` with the explicit campaign id** — the
+   queue-item publisher resolves the per-agent env route FIRST (slucas → 2344, his
+   bulk/live lane) and row stamps cannot override it; the batch publisher takes
+   campaignId verbatim (same path the lane dispatchers used in the passed interrupt
+   test). Extern stays the LEGACY convention (`parallel:WYNN:<caseId>:<rowId>`) so the
+   call lands on Sean exactly like a floor fresh lead — cadence counters, follow-ups,
+   his normal workspace handling, all unchanged.
+
+Sean's known IDs (Mickey-verified): email slucas@taxadvocategroup.com · RC ext 445 ·
+extension id 63756126004 · CX agent id 20845 · First Touch DG 1011 / campaign 2831 ·
+bulk campaign 2344 (separate, untouched by the drip).
+
+Flags (all read per tick; worker interval 60s inside the control-plane worker gate):
+
+```
+CX_SEAN_FIRST_TOUCH_TEST_ENABLED=true     # master (default false)
+CX_SEAN_FIRST_TOUCH_DRY_RUN=true          # select+narrate, ZERO writes — run this first
+CX_SEAN_FIRST_TOUCH_EXTENSION_ID=63756126004
+CX_SEAN_FIRST_TOUCH_CAMPAIGN_ID=2831
+CX_SEAN_FIRST_TOUCH_MAX_PER_TICK=1
+CX_SEAN_FIRST_TOUCH_MIN_GAP_MINUTES=10    # "occasional", crash-safe (state in Mongo)
+CX_SEAN_FIRST_TOUCH_WINDOW_MINUTES=30     # only genuinely NEW mints
+```
+
+Logs, exactly the requested set (all `cx.alpha.sean_ft.*`, phone/name masked, visible
+live in `cx-floor-watch.js`): candidate seen · selected/skipped + reason (incl.
+`claim-lost` when a floor claimer wins the race — their lead by design) · queue row id ·
+assignment · publish result · extern id. Publish reject auto-releases the claim back to
+the floor pool.
+
+**Dry-run → live restart calculus:** flags load at boot, so flipping DRY_RUN off needs
+a control-plane restart. Two clean paths — (a) morning restart WITH dry-run on, watch a
+few narrated selections, then one brief control-plane-only restart mid-morning while
+Sean has no bulk session running (the floor's dialing lives in ringcentral-cx + RingCX,
+not here); or (b) go straight to live at the morning restart — blast radius is one
+narrated lead per 10 minutes, max. Mickey's call on the day.
+
+**End of test:** `node scripts/cx-pilot-queue.js drip-status` for the ledger;
+`drip-cleanup --arm` releases undialed drip rows back to the floor pool (they are real
+fresh leads) and prints the exact campaign/extern pairs to clear from 2831 in console.
 
 ## WAVE 1 — SEAN (tomorrow)
 
@@ -60,6 +116,8 @@ CX_FIRST_TOUCH_ENABLED=false          # TRAP 2: still true from the interrupt te
 CX_APPT_LANE_ENABLED=false            # TRAP 2: same
 CX_ALPHA_TRACE_AGENT=                 # TRAP 1: currently mgray-only -> Sean would trace ZERO lines
 CX_BULK_RESERVE_PILOT_FAMILY=pilot    # the isolation switch (this box only)
+CX_SEAN_FIRST_TOUCH_TEST_ENABLED=true # the fresh-touch drip (see its section)
+CX_SEAN_FIRST_TOUCH_DRY_RUN=true      # narrate-only until you flip it (restart calculus in the drip section)
 ```
 
 Note: while the pilot switch is set, EVERY bulk session on this box reserves only the
@@ -107,14 +165,12 @@ node scripts/cx-floor-watch.js
 ```
 
 (Optional second terminal: `node scripts/cx-answer-progression.js` for the single-session
-close-up.) Mid-morning, tee him a taste of new stuff:
-
-```
-node scripts/cx-pilot-queue.js refresh --max 5 --arm   # newest unassigned intake -> his queue
-```
-
-His running session picks the teed rows up on the next buffer refill — fresh lead, new
-workspace, floor never saw them.
+close-up.) The new stuff comes through **the first-touch drip** (its own section above):
+dry-run narrations visible from the morning restart, flipped live on your call — one
+fresh lead at a time ringing Sean through campaign 2831 exactly like a floor fresh
+lead. Watch `cx.alpha.sean_ft.*` in the floor watch. (Alternative for a bulk-session
+block: `node scripts/cx-pilot-queue.js refresh --max 5 --arm` moves fresh mints into
+his pilot queue instead — one mechanism at a time, never both.)
 
 Watch for: journeys completing end-to-end; `sys=` labels matching ears; cards minting
 seconds after answered terminals; the persistent red toast on any failed card effect
@@ -143,6 +199,19 @@ what surprised you / what was slower / what did you look for and not find / did 
 feel lost / would you keep it tomorrow. Accept → Sean keeps his pilot blocks and wave 2
 schedules. Reject → rollback (above), findings become fixes.
 
+## THE 8:30 NO-SHOW CHECK (Mickey's 07-08 rule, corrected same morning; iron out BEFORE FRIDAY)
+
+An agent who got a morning batch and hasn't started dialing by ~8:30 forfeits it. The
+mechanics, per Mickey's second pass: **no priority weight** (they're fresh leads —
+divvied out like the other ones); **the load-bearing step is the RingCX cleanout**
+(cancel their campaign's undialed copies so a late login can't double-dial/count-
+conflict — extern-scoped, keyed on the rcxVisibility publish stamps); redistribution
+is `pool` (organic refill) or `bottom` (round-robin NORMAL-priority batch append —
+NORMAL lands at the bottom of the list natively). One-at-a-time re-feed: rejected.
+Never touches a row that already dialed. Tool: `cx-pilot-queue.js noshow-release`
+(dry-run default). Full mechanics + the open distribution choice:
+`.ai/context/CX_ROLLOUT_MARCHING_ORDERS_CODEX_2026-07-08.md` Work Order 1.
+
 ## WAVES 2-5 (one agent per clean day)
 
 Bruce (ballen@, 1012/2345) → Phil (polson@, 1014/2347) → Brad (bhansen@, 1067/2457) →
@@ -155,6 +224,51 @@ two consecutive clean waves, two agents/day is allowed.
 **Full floor** = every agent accepted + road-to-floor Phase 1 items done. THEN the
 Ubuntu deploy conversation starts, at the Phase 4b flag gate (wrap flags into the live
 `.env` BEFORE the deploy restart — without them a deployed floor has zero DNC path).
+
+## UBUNTU PUSH-DAY CHECKLIST (produce only; no live-box writes from Codex)
+
+This is a deploy-day checklist, not permission to touch the live box during rollout.
+Mickey owns the live `.env`, deploy command, and restart timing.
+
+**Required live `.env` gate before the deploy restart:**
+
+```
+CX_CALL_WRAP_QUEUE_ENABLED=true
+CX_SYSDISPO_CLASSIFIER_ENABLED=true
+```
+
+Those two flags are not optional for a floor deploy: without wrap cards and the system
+disposition classifier, answered-call DNC/appointment closeout and RingCX's own
+ANSWER/BUSY/CONGESTION evidence do not have the production path this alpha is proving.
+
+**Must stay absent/off on live unless a separate lane rollout explicitly says otherwise:**
+
+```
+CX_BULK_RESERVE_PILOT_FAMILY
+CX_FIRST_TOUCH_ENABLED
+CX_APPT_LANE_ENABLED
+CX_SEAN_FIRST_TOUCH_TEST_ENABLED
+CX_SEAN_FIRST_TOUCH_DRY_RUN
+CX_SEAN_FIRST_TOUCH_EXTENSION_ID
+CX_SEAN_FIRST_TOUCH_CAMPAIGN_ID
+```
+
+**Code that can ride the push inert:**
+
+- `pilot` queue-family enum and reserve-mode support: inert without
+  `CX_BULK_RESERVE_PILOT_FAMILY`.
+- `cx-pilot-queue.js noshow-release`: manual tool only, dry-run default.
+- Sean first-touch drip code: inert without `CX_SEAN_FIRST_TOUCH_TEST_ENABLED`.
+- Lane dispatch/recognition code: inert while lane flags stay absent/off.
+
+**Push-day readback after Mickey deploys/restarts:**
+
+- Confirm live health endpoint and control-plane boot logs.
+- Confirm no lane/drip worker logs appear on live.
+- Confirm wrap-card route answers enabled.
+- Confirm system-disposition classifier flag is active in startup/runtime logs.
+- Confirm `sync-indexes` allowlist includes `CxCallWrapCard` before relying on card rows.
+- Run read-only watch/report tooling only; no queue writes from Codex on Ubuntu.
 
 ## WHAT STAYS OFF / UNTOUCHED
 

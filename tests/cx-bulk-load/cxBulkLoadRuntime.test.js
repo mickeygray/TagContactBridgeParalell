@@ -35,6 +35,7 @@ function pauseClient() {
 test("bulkOutcomeDisposition maps bulk UI outcomes to configured RingCX dispositions", () => {
   assert.equal(_test.bulkOutcomeDisposition("voicemail"), "VM DROP");
   assert.equal(_test.bulkOutcomeDisposition("dnc"), "Auto Dispo");
+  assert.equal(_test.bulkOutcomeDisposition("bad_number"), "Auto Dispo");
   assert.equal(_test.bulkOutcomeDisposition("answered"), "Auto Dispo");
 });
 
@@ -128,6 +129,21 @@ test("did_not_connect outcome still runs the post-disposition hangup (Auto Dispo
   assert.equal(result.ok, true);
   assert.equal(result.status, "accepted");
   assert.deepEqual(client.calls, ["20260706000000000000000000002"]);
+});
+
+test("bad_number outcome still runs the post-disposition hangup", async () => {
+  const client = hangupClient();
+  const result = await _test.runPostDispositionHangupProbe(client, {
+    session: { sessionId: "cxbl-test" },
+    candidate: { queueItemId: "qi-bad" },
+    uii: "20260708000000000000000000001",
+    disposition: "Auto Dispo",
+    outcome: "bad_number",
+  });
+  assert.equal(result.executed, true);
+  assert.equal(result.ok, true);
+  assert.equal(result.status, "accepted");
+  assert.deepEqual(client.calls, ["20260708000000000000000000001"]);
 });
 
 test("lane disposition controls the active lane UII without requiring a bulk session", async () => {

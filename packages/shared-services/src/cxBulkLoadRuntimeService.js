@@ -54,6 +54,10 @@ function queueItemKey(candidate = null) {
   return str(candidate?.queueItemId || candidate?.id || candidate?._id);
 }
 
+function candidateExternId(candidate = null) {
+  return str(candidate?.externId || candidate?.ringcx?.externId);
+}
+
 function hasTerminalWriteProof(candidate = null) {
   const uii = str(candidate?.uii);
   return Boolean(queueItemKey(candidate) && uii && !uii.toLowerCase().startsWith("cx-synth:"));
@@ -617,7 +621,13 @@ function createCxBulkLoadRuntimeService(deps = {}) {
   }
 
   function shouldGetLeadsAfterDisposition(outcome) {
-    return String(outcome || "").trim().toLowerCase().replace(/[\s-]+/g, "_") === "did_not_connect";
+    const normalized = String(outcome || "").trim().toLowerCase().replace(/[\s-]+/g, "_");
+    return normalized === "did_not_connect" || normalized === "bad_number";
+  }
+
+  function isBadNumberDisposition(outcome) {
+    const normalized = String(outcome || "").trim().toLowerCase().replace(/[\s-]+/g, "_");
+    return normalized === "bad_number" || normalized === "wrong_number";
   }
 
   function normalizeTerminalResult(terminal) {
@@ -707,6 +717,108 @@ function createCxBulkLoadRuntimeService(deps = {}) {
 
   async function loadState(sessionId) {
     return repo.findBulkLoadSessionById(sessionId);
+  }
+
+  async function resolveActiveCallForDisposition(state = {}, input = {}) {
+    if (!state || state.status !== "running") return state;
+    if (!client || typeof client.listActiveCalls !== "function") return state;
+
+    const pool = candidatePool(state).filter((candidate) => candidateExternId(candidate));
+    if (!pool.length) return state;
+
+    let activeCalls = [];
+    try {
+      const loadSnapshot = watcher && typeof watcher.loadActiveCallsSnapshot === "function"
+        ? watcher.loadActiveCallsSnapshot
+        : null;
+      const raw = loadSnapshot
+        ? await loadSnapshot(client, {
+            accountId: state.ringcx?.accountId || state.accountId || null,
+          })
+        : await client.listActiveCalls({
+            product: "ACCOUNT",
+            productId: state.ringcx?.accountId || state.accountId || undefined,
+          });
+      activeCalls = Array.isArray(raw)
+        ? raw
+        : Array.isArray(raw?.activeCalls)
+          ? raw.activeCalls
+          : [];
+    } catch (error) {
+      traceBulkFlow("disposition.active_call_resolve_failed", state, {
+        requestedDisposition: input.disposition || null,
+        error: serializeError(error),
+      });
+      return state;
+    }
+
+    const normalize = watcher && typeof watcher.normalizeActiveCall === "function"
+      ? watcher.normalizeActiveCall
+      : (call) => call;
+    const calls = activeCalls
+      .map((call) => normalize(call))
+      .filter((call) => str(call?.externId) && str(call?.uii));
+    const candidatesByExternId = new Map();
+    for (const candidate of pool) {
+      const externId = candidateExternId(candidate);
+      if (externId && !candidatesByExternId.has(externId)) {
+        candidatesByExternId.set(externId, candidate);
+      }
+    }
+
+    const matches = [];
+    for (const call of calls) {
+      const externId = str(call.externId);
+      const candidate = candidatesByExternId.get(externId);
+      if (candidate) matches.push({ externId, candidate, call });
+    }
+
+    const currentExternId = candidateExternId(state.current);
+    const currentMatch = currentExternId
+      ? matches.find((match) => match.externId === currentExternId)
+      : null;
+    const chosen = currentMatch || (matches.length === 1 ? matches[0] : null);
+    if (!chosen) {
+      traceBulkFlow("disposition.active_call_resolve_no_match", state, {
+        requestedDisposition: input.disposition || null,
+        activeMatchCount: matches.length,
+        hadCurrent: Boolean(state.current),
+        currentExternId: currentExternId || null,
+      });
+      return state;
+    }
+
+    const sameCurrent = Boolean(currentExternId && chosen.externId === currentExternId);
+    const candidate = {
+      ...chosen.candidate,
+      uii: str(chosen.call.uii) || chosen.candidate.uii || null,
+      activeCallSummary: chosen.call,
+      matchReasons: [
+        ...new Set([
+          ...(Array.isArray(chosen.candidate.matchReasons) ? chosen.candidate.matchReasons : []),
+          "disposition-active-call-read",
+        ]),
+      ],
+    };
+    if (sameCurrent && str(state.current?.uii) === str(candidate.uii)) return state;
+
+    const next = reduce(state, {
+      type: "current.matched",
+      candidate,
+      uii: candidate.uii,
+      activeCallSummary: chosen.call,
+      matchReasons: candidate.matchReasons,
+      completePrevious: Boolean(state.current && !sameCurrent),
+    }, now());
+    await persist(next);
+    traceBulkFlow("disposition.active_call_resolved", next, {
+      requestedDisposition: input.disposition || null,
+      queueItemId: queueItemKey(candidate),
+      externId: chosen.externId || null,
+      uii: candidate.uii || null,
+      replacedCurrent: Boolean(state.current && !sameCurrent),
+    });
+    return next;
   }
 
   // ── public API ─────────────────────────────────────────────────────────
@@ -825,7 +937,8 @@ function createCxBulkLoadRuntimeService(deps = {}) {
   // RingCX advances to the next buffered lead; the next watch picks it up.
   async function submitCxBulkLoadDisposition(input = {}) {
     return withSessionMutation(input.sessionId, async () => {
-    const state = await loadState(input.sessionId);
+    let state = await loadState(input.sessionId);
+    state = await resolveActiveCallForDisposition(state, input);
     if (!state || !state.current) {
       traceBulkFlow("disposition.no_current", state || {}, {
         requestedDisposition: input.disposition || null,
@@ -842,6 +955,7 @@ function createCxBulkLoadRuntimeService(deps = {}) {
     }
     const current = state.current;
     const outcome = input.disposition || "did_not_connect";
+    const badNumber = isBadNumberDisposition(outcome);
     traceBulkFlow("disposition.started", state, {
       outcome,
       queueItemId: queueItemKey(current),
@@ -860,6 +974,7 @@ function createCxBulkLoadRuntimeService(deps = {}) {
           callback: input.callback,
           callBackDTS: input.callBackDTS,
           notes: input.notes,
+          badNumber,
         })
       : null;
     terminal = normalizeTerminalResult(terminal);
@@ -888,6 +1003,8 @@ function createCxBulkLoadRuntimeService(deps = {}) {
         outcome,
         source: "disposition",
         eventType: "terminal",
+        badNumber,
+        badNumberReason: badNumber ? "disconnected-or-out-of-service" : null,
       });
       if (persistResult && persistResult.written === false && persistResult.result?.fallbackFailed === true) {
         const err = persistResult.result?.error;

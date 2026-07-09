@@ -80,7 +80,7 @@ function createCxCallWrapCardService({
   outboxRepository = null,       // findByIdentity + insertOnce (the correction-row lane)
   buildCorrectionRow = null,     // buildReviewCorrectionRow from the outcome adapter
   writeInterview = null,         // async (card) => {} — the Logics activity + case comm
-  createAppointment = null,      // async ({card, appointmentAt, user}) => {}
+  createAppointment = null,      // async ({card, appointmentAt, appointmentDate, appointmentTime, appointmentTimezone, user}) => {}
   updateLogicsDncStatus = null,  // async (card) => {} — optional until the Logics DNC lands
   logger = console,
 } = {}) {
@@ -107,16 +107,33 @@ function createCxCallWrapCardService({
 
   // THE UNIFIED RESOLUTION PROTOCOL. One pipeline; the rules row is the only difference.
   // CAS-first: a card resolves exactly once; every later attempt is a clean no-op.
-  async function resolve({ idemKey, action, appointmentAt = null, user = null, resolvedBy = null } = {}) {
+  async function resolve({
+    idemKey,
+    action,
+    appointmentAt = null,
+    appointmentDate = null,
+    appointmentTime = null,
+    appointmentTimezone = null,
+    user = null,
+    resolvedBy = null,
+  } = {}) {
     const resolution = String(action || "").trim().toLowerCase();
     const rules = RESOLUTION_RULES[resolution];
     if (!rules) return { ok: false, reason: "unknown-action" };
-    if (resolution === "appointment" && !appointmentAt) {
+    const appointmentInput = {
+      appointmentAt: appointmentAt || null,
+      appointmentDate: appointmentDate || null,
+      appointmentTime: appointmentTime || null,
+      appointmentTimezone: appointmentTimezone || null,
+    };
+    const hasAppointmentDateTime = Boolean(appointmentInput.appointmentDate && appointmentInput.appointmentTime);
+    const hasAppointmentTarget = Boolean(appointmentInput.appointmentAt || hasAppointmentDateTime);
+    if (resolution === "appointment" && !hasAppointmentTarget) {
       return { ok: false, reason: "appointment-requires-datetime" };
     }
     const card = await cardRepository.resolveCard(idemKey, resolution, {
       resolvedBy,
-      detail: appointmentAt ? { appointmentAt } : null,
+      detail: hasAppointmentTarget ? appointmentInput : null,
     });
     if (!card) return { ok: true, noop: true, reason: "already-resolved-or-missing" };
 
@@ -167,7 +184,7 @@ function createCxCallWrapCardService({
     }
 
     if (rules.appointment && createAppointment) {
-      effects.appointment = await runEffect(() => createAppointment({ card, appointmentAt, user }));
+      effects.appointment = await runEffect(() => createAppointment({ card, ...appointmentInput, user }));
     }
 
     logger.info?.("cx.wrap_card.resolved", {

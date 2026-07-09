@@ -126,11 +126,14 @@ const {
   handleCxTerminalCallOutcome,
   recordMinimalTerminalResolution,
   createCxCallWrapCardService,
+  createCxBadNumberOutcomeHandler,
   createCxFirstTouchDispatcher,
   createCxAppointmentDispatcher,
+  createCxSeanFirstTouchDrip,
   createCxAppointment,
   buildCxReviewCorrectionRow,
   requestCxLeadStatusUpdate,
+  sendMail,
   buildTerminalEvidenceKeys,
   writeAgentCallNoteFromTerminal,
   writeCxCallWrapSummary,
@@ -1058,12 +1061,15 @@ function createControlPlaneCxCallWrapCards({ runtime }) {
         status: "dnc",
         notes: "DNC set from call wrap card",
       }),
-    createAppointment: ({ card, appointmentAt, user }) => {
+    createAppointment: ({ card, appointmentAt, appointmentDate, appointmentTime, appointmentTimezone, user }) => {
       const payload = card?.payload && typeof card.payload === "object" ? card.payload : {};
       const phone = payload.phone || payload.prospectPhone || payload.leadPhone || null;
       return createCxAppointment(card.domain, user, {
         caseId: card.caseId,
         appointmentAt,
+        appointmentDate,
+        appointmentTime,
+        appointmentTimezone,
         queueItemId: card.queueItemId,
         prospectName: card.name || payload.name || payload.prospectName || payload.contactName || null,
         phone,
@@ -1098,6 +1104,19 @@ async function startCxTerminalOutboxWorker({
     runtime.logger.warn("control-plane.cx_terminal_outbox.disabled");
     return;
   }
+
+  const badNumberHandler = createCxBadNumberOutcomeHandler({
+    findQueueItemById: (queueItemId) => cxDialQueueRepository.findQueueItemById(queueItemId),
+    updateQueueItem: (queueItemId, patch) => cxDialQueueRepository.updateQueueItem(queueItemId, patch),
+    updateLogicsDncStatus: ({ domain, caseId, actorEmail, notes }) =>
+      requestCxLeadStatusUpdate(domain, { email: actorEmail || "cx-bad-number" }, {
+        caseId,
+        status: "dnc",
+        notes,
+      }),
+    sendMail,
+    logger: runtime.logger,
+  });
 
   const drain = createCxTerminalOutboxDrain({
     outboxRepository: cxTerminalOutboxRepository,
@@ -1138,8 +1157,11 @@ async function startCxTerminalOutboxWorker({
         // The watcher stamped it; the drain forwards it unchanged so cadence/call-log
         // can store it (lead health: INTERCEPT=dead number, BUSY=timing, CONGESTION=route).
         systemDisposition: event.systemDisposition || null,
+        badNumber: event.badNumber === true,
+        badNumberReason: event.badNumberReason || null,
       });
     },
+    handleBadNumberOutcome: (packet) => badNumberHandler.handle(packet),
     writeCallNote: (packet) =>
       writeAgentCallNoteFromTerminal(packet, {
         agentCallNoteRepository: cxAgentCallNoteRepository,
@@ -1912,6 +1934,26 @@ async function startServer() {
       });
     }, 30_000);
     if (typeof appointmentTimer.unref === "function") appointmentTimer.unref();
+
+    // Sean first-touch drip (pilot fresh-touch test, 2026-07-08; default off via
+    // CX_SEAN_FIRST_TOUCH_TEST_ENABLED). Occasionally assigns ONE unassigned fresh
+    // intake mint to Sean and publishes it IMMEDIATE into his First Touch campaign
+    // through the same batch publisher the lane dispatchers use. Flag-off ticks are
+    // one env read.
+    const seanFirstTouchDrip = createCxSeanFirstTouchDrip({
+      client: laneDispatchClient,
+      logger: runtime.logger,
+    });
+    const seanFirstTouchTimer = setInterval(() => {
+      seanFirstTouchDrip.tickOnce().then((result) => {
+        if (result && !result.skipped && (result.published || result.failed || result.candidates)) {
+          runtime.logger.info("control-plane.cx_sean_first_touch.drip.tick", result);
+        }
+      }).catch((error) => {
+        runtime.logger.warn("control-plane.cx_sean_first_touch.drip.failed", { error: error?.message });
+      });
+    }, 60_000);
+    if (typeof seanFirstTouchTimer.unref === "function") seanFirstTouchTimer.unref();
   }
 
   if (config.controlPlaneWorker?.enabled !== false) {

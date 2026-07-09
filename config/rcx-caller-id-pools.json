@@ -1,0 +1,50 @@
+{
+  "_comment": "Per-dial-group caller-ID pools for hourly rotation. Every number must be a tenant-owned DID whose callbacks route to that group's agent; never use VM-drop monitor DIDs. Current pool is the 2026-07-08 five-agent batch Mickey pasted from RingCentral inventory. Anthony/James are intentionally not in this cycle.",
+  "_agentOrder": [
+    {
+      "order": 1,
+      "name": "Sean Lucas",
+      "email": "slucas@taxadvocategroup.com",
+      "dialGroupId": "1011",
+      "extensionId": "63756126004",
+      "extensionNumber": "445"
+    },
+    {
+      "order": 2,
+      "name": "Bruce Allen",
+      "email": "ballen@taxadvocategroup.com",
+      "dialGroupId": "1012",
+      "extensionId": "63555286004",
+      "extensionNumber": "966"
+    },
+    {
+      "order": 3,
+      "name": "Phil Olson",
+      "email": "polson@taxadvocategroup.com",
+      "dialGroupId": "1014",
+      "extensionId": "63704036004",
+      "extensionNumber": "319"
+    },
+    {
+      "order": 4,
+      "name": "Brad Hansen",
+      "email": "bhansen@taxadvocategroup.com",
+      "dialGroupId": "1067",
+      "extensionId": "63914587004",
+      "extensionNumber": "742"
+    },
+    {
+      "order": 5,
+      "name": "Chris Bolt",
+      "email": "cbolt@taxadvocategroup.com",
+      "dialGroupId": "1068",
+      "extensionId": "63914586004",
+      "extensionNumber": "741"
+    }
+  ],
+  "1011": ["2133344946", "2133410164", "7472933389", "7473180605", "7474444923"],
+  "1012": ["8182302961", "2137841087", "7473180469", "7473180621", "7478002216"],
+  "1014": ["2137232674", "8183345587", "7473180551", "7473181121", "7478002249"],
+  "1067": ["8182064601", "6283004750", "7473180561", "7473181179", "7478002363"],
+  "1068": ["9492732787", "5593724252", "7473180572", "7474444693"]
+}

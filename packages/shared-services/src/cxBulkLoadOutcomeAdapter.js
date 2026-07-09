@@ -149,7 +149,16 @@ function buildReviewCorrectionRow({
 
 // PURE. Narrow projection of a completion into the cadence/metric event shape the
 // existing finalizers consume. No I/O, no derived business decisions.
-function buildCadenceEvent({ session = {}, candidate = {}, outcome = null, source = null, at = null, systemDisposition = null } = {}) {
+function buildCadenceEvent({
+  session = {},
+  candidate = {},
+  outcome = null,
+  source = null,
+  at = null,
+  systemDisposition = null,
+  badNumber = false,
+  badNumberReason = null,
+} = {}) {
   const durationSec = Number(
     candidate.durationSec ??
       candidate.durationSeconds ??
@@ -188,6 +197,8 @@ function buildCadenceEvent({ session = {}, candidate = {}, outcome = null, sourc
     source: source || null,
     // RingCX system disposition label (e.g. CONGESTION) — reporting only, never routing.
     systemDisposition: str(systemDisposition) || null,
+    badNumber: badNumber === true,
+    badNumberReason: str(badNumberReason) || null,
     at: at || null,
   };
 }
@@ -203,7 +214,16 @@ function createCxBulkLoadOutcomeAdapter(deps = {}) {
   // Write a terminal outcome exactly once. Returns what happened; never throws on
   // a duplicate (a re-fire is a no-op, not an error).
   async function persistTerminalOutcome(input = {}) {
-    const { session = {}, candidate = {}, outcome = null, source = null, eventType = "terminal", systemDisposition = null } = input;
+    const {
+      session = {},
+      candidate = {},
+      outcome = null,
+      source = null,
+      eventType = "terminal",
+      systemDisposition = null,
+      badNumber = false,
+      badNumberReason = null,
+    } = input;
     const at = (input.now instanceof Date ? input.now : (input.now ? new Date(input.now) : new Date())).toISOString();
     const idemKey = makeOutcomeIdemKey({
       sessionId: session.sessionId,
@@ -214,7 +234,16 @@ function createCxBulkLoadOutcomeAdapter(deps = {}) {
     });
 
     const cadenceEvent = {
-      ...buildCadenceEvent({ session, candidate, outcome, source, at, systemDisposition }),
+      ...buildCadenceEvent({
+        session,
+        candidate,
+        outcome,
+        source,
+        at,
+        systemDisposition,
+        badNumber,
+        badNumberReason,
+      }),
       idemKey,
     };
     const result = await recordCadenceEvent(cadenceEvent);

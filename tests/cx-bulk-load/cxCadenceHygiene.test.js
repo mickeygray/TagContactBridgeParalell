@@ -17,7 +17,10 @@ const { activeQueueFilter, buildReadyReservationQuery, buildReadyClaimQuery } = 
   return repo;
 })();
 const { deriveFirstTouchStamp } = require("../../packages/shared-services/src/cxCadenceService");
-const { buildBlockedReason } = require("../../packages/shared-services/src/contactEligibilityService");
+const {
+  buildBlockedReason,
+  isTransientContactEligibilityBlock,
+} = require("../../packages/shared-services/src/contactEligibilityService");
 
 test("H1: cadenceState recompute PRESERVES what it does not own (dncCheck/bypass/optedOut), rebuilt keys win", () => {
   const prior = {
@@ -81,6 +84,31 @@ test("H4: the CX channel-DNC flag blocks at the shared eligibility gate (every d
     { active: true, statusId: 2, cadenceState: { channelDnc: { sms: { blocked: true } } } },
   );
   assert.notEqual(clean?.reason, "channel-dnc-cx", "other channels' blocks do not bleed into cx");
+});
+
+test("H4b: fresh Logics status miss is a non-destructive hold, not a lead-value verdict", () => {
+  const config = { logicsProspectStatusIds: [1, 2], logicsDncStatusIds: [99] };
+  const transient = buildBlockedReason(
+    { statusId: 2, statusCategory: "prospect" },
+    { active: true, statusId: 2 },
+    config,
+    new Date(),
+    { requireFreshLogicsStatus: true, liveStatusId: null, liveStatusError: "timeout" },
+  );
+  assert.equal(transient?.reason, "logics-status-check-failed");
+  assert.equal(transient?.transient, true);
+  assert.equal(transient?.destructive, false);
+  assert.equal(isTransientContactEligibilityBlock(transient), true);
+
+  const storedStop = buildBlockedReason(
+    { statusId: 48, statusCategory: "closed" },
+    { active: true, statusId: 48 },
+    config,
+    new Date(),
+    { requireFreshLogicsStatus: true, liveStatusId: null, liveStatusError: "timeout" },
+  );
+  assert.equal(storedStop?.reason, "logics-nonprospect-status");
+  assert.equal(isTransientContactEligibilityBlock(storedStop), false);
 });
 
 test("H5: BOTH ready rails exclude appointment holds and the (inert) lane flags", () => {

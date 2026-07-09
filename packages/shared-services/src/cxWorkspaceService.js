@@ -65,6 +65,7 @@ const {
   cancelCxQueueItem,
   completeCxQueueItem,
   releaseCxQueueItem,
+  releaseAssignedCxQueueForAgent,
   rescheduleCxQueueItem,
   queueCxDialRequest,
   stageCxDispatchIntent,
@@ -94,6 +95,7 @@ const {
   resolveCxAppointmentAfterDisposition,
 } = require("./cxAppointmentService");
 const {
+  isTransientContactEligibilityBlock,
   resolveCaseContactEligibility,
 } = require("./contactEligibilityService");
 const { extractPaymentRows } = require("./paymentReconcileService");
@@ -2786,6 +2788,7 @@ async function isCxMaterializationContactEligible(domain, caseId, options = {}) 
       reason: eligibility?.reason || null,
       detail: eligibility?.detail || null,
       liveLogicsStatus: eligibility?.liveLogicsStatus ?? null,
+      transient: isTransientContactEligibilityBlock(eligibility),
       enforced: Boolean(eligibility?.enforcement),
     };
   } catch (error) {
@@ -5276,7 +5279,7 @@ async function requestCxStatusChange(domain, user, input = {}) {
       ? "unavailable"
       : "idle";
 
-  const updatedState = await agentStateRepository.upsertAgentState({
+  let updatedState = await agentStateRepository.upsertAgentState({
     ...stateSnapshot,
     activityState,
     lastActivityAt: new Date(),
@@ -5294,8 +5297,29 @@ async function requestCxStatusChange(domain, user, input = {}) {
     pauseReleaseAt && !Number.isNaN(pauseReleaseAt.getTime())
       ? Math.max(pauseReleaseAt.getTime() - now.getTime(), 0)
       : 0;
-  const queueRelease = desiredAvailability === "unavailable"
-    ? {
+  let queueRelease = null;
+  if (desiredAvailability === "unavailable" && requestedBreakType === "work-pause") {
+    try {
+      queueRelease = await releaseAssignedCxQueueForAgent({
+        extensionId: context.account.extensionId,
+        now,
+        reason: "manual-work-pause",
+        actorEmail: user.email,
+        pauseType: requestedBreakType,
+      });
+      updatedState = await agentStateRepository
+        .findAgentStateByExtensionId(context.account.extensionId)
+        .catch(() => updatedState) || updatedState;
+    } catch (error) {
+      queueRelease = {
+        ok: false,
+        released: 0,
+        reason: "manual-work-pause-release-failed",
+        error: error.message,
+      };
+    }
+  } else if (desiredAvailability === "unavailable") {
+    queueRelease = {
       ok: true,
       pending: true,
       released: 0,
@@ -5305,8 +5329,8 @@ async function requestCxStatusChange(domain, user, input = {}) {
         pauseReleaseAt && !Number.isNaN(pauseReleaseAt.getTime())
           ? pauseReleaseAt
           : null,
-    }
-    : null;
+    };
+  }
   const breakUsage = getBreakUsageSummary(updatedState?.cxRouting?.breakUsage || {});
   let eligibilityKick = null;
   if (

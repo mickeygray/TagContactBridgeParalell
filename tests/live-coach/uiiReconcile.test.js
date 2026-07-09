@@ -15,6 +15,13 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 
+// The bridge resolves its kill-file path at MODULE LOAD (a const). On a dev box the
+// operational kill switch (runtime/live-coach.killed) is often engaged, which silently
+// no-ops ensureCoachSession and fails 4/6 of these pins for a reason that has nothing
+// to do with the code under test. Point the const at a path that never exists BEFORE
+// the require. Never delete the real kill file to make tests pass — it is live state.
+process.env.LIVE_COACH_KILL_FILE = path.join(os.tmpdir(), `uii-reconcile-no-kill-${process.pid}`);
+
 const bridge = require("../../scripts/ringcx-grpc-live-coach-bridge.js");
 const {
   createSegmentState,

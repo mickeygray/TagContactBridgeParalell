@@ -29,7 +29,10 @@ const {
   evaluateFrequencyCap,
 } = require("./contactTimingPolicyService");
 const { createLogicsFacade } = require("./logicsFacadeService");
-const { resolveCaseContactEligibility } = require("./contactEligibilityService");
+const {
+  isTransientContactEligibilityBlock,
+  resolveCaseContactEligibility,
+} = require("./contactEligibilityService");
 const { evaluateOutboundRateLimit } = require("./outboundRateShaperService");
 const { recordWorkflowStage } = require("./workflowStateService");
 const { emitHourlyJobEvent } = require("./hourlyJobEventService");
@@ -889,7 +892,8 @@ async function dispatchForLead(lead, {
     sourceService: "outbound-gateway",
   });
   if (!eligibility.ok) {
-    if (action) {
+    const transientEligibility = isTransientContactEligibilityBlock(eligibility);
+    if (action && !transientEligibility) {
       // Contact-stop is terminal — cancel the pending action so the
       // scheduler stops offering it, rather than leaving it floating
       // in pending status.
@@ -906,13 +910,16 @@ async function dispatchForLead(lead, {
       skipped: true,
       reason: eligibility.reason,
       detail: eligibility.detail || null,
+      transient: transientEligibility,
     };
     await recordOutboundLeadStage({
       domain,
       caseId,
       channel,
       stage: "skipped",
-      summary: eligibility.detail || "Contact blocked before dispatch",
+      summary: transientEligibility
+        ? (eligibility.detail || "Contact check unavailable before dispatch")
+        : (eligibility.detail || "Contact blocked before dispatch"),
       payload: {
         actionType,
         actionKey,
@@ -1577,6 +1584,7 @@ async function runManual(payload, channel) {
         sourceService: "outbound-gateway",
       });
       if (!caseEligibility.ok) {
+        const transientEligibility = isTransientContactEligibilityBlock(caseEligibility);
         logCallfireDebug(callfireDebugEnabled, "outbound.callfire.manual.lead_skipped", {
           caseId: lead.caseId,
           reason: caseEligibility.reason,
@@ -1599,6 +1607,7 @@ async function runManual(payload, channel) {
             skipped: true,
             reason: caseEligibility.reason,
             detail: caseEligibility.detail || null,
+            transient: transientEligibility,
           },
         });
         continue;
@@ -1900,6 +1909,7 @@ async function runManual(payload, channel) {
       sourceService: "outbound-gateway",
     });
     if (!caseEligibility.ok) {
+      const transientEligibility = isTransientContactEligibilityBlock(caseEligibility);
       if (channel === "callfire") {
         logCallfireDebug(callfireDebugEnabled, "outbound.callfire.manual.lead_skipped", {
           caseId: lead.caseId,
@@ -1924,6 +1934,7 @@ async function runManual(payload, channel) {
           skipped: true,
           reason: caseEligibility.reason,
           detail: caseEligibility.detail || null,
+          transient: transientEligibility,
         },
       });
       continue;

@@ -56,12 +56,13 @@ test("DOSSIER: wrap cards keep display names from terminal payload aliases", () 
 });
 
 function makeHarness({ resolveResult } = {}) {
-  const calls = { interview: [], correction: [], appointment: [], dnc: [] };
+  const calls = { interview: [], correction: [], appointment: [], dnc: [], resolutions: [] };
   const cardRepository = {
     async insertOnce(card) { calls.inserted = card; return card; },
     async findByIdemKey() { return null; },
     async listPendingForAgent() { return []; },
-    async resolveCard(idemKey, resolution) {
+    async resolveCard(idemKey, resolution, detail) {
+      calls.resolutions.push({ idemKey, resolution, detail });
       if (resolveResult === null) return null;
       return {
         idemKey, status: resolution,
@@ -79,7 +80,10 @@ function makeHarness({ resolveResult } = {}) {
     },
     buildCorrectionRow: (input) => ({ idemKey: `${input.queueItemId}:${input.uii}:review-dnc`, payload: { outcome: "dnc" } }),
     writeInterview: async (card) => { calls.interview.push(card.idemKey); return { ok: true }; },
-    createAppointment: async ({ appointmentAt }) => { calls.appointment.push(appointmentAt); return { ok: true }; },
+    createAppointment: async ({ appointmentAt, appointmentDate, appointmentTime, appointmentTimezone }) => {
+      calls.appointment.push({ appointmentAt, appointmentDate, appointmentTime, appointmentTimezone });
+      return { ok: true };
+    },
     logger: { info() {} },
   });
   return { service, calls };
@@ -111,6 +115,36 @@ test("PROTOCOL: dnc = interview + correction row; appointment = interview + book
   const bad = await service.resolve({ idemKey: "k5", action: "appointment" });
   assert.equal(bad.ok, false, "appointment without a datetime is refused");
   assert.deepEqual(Object.keys(RESOLUTION_RULES).sort(), ["appointment", "dismissed", "dnc", "expired"]);
+});
+
+test("APPOINTMENT: explicit date/time/timezone rides through the wrap card effect", async () => {
+  const { service, calls } = makeHarness();
+
+  const result = await service.resolve({
+    idemKey: "k-appointment-explicit",
+    action: "appointment",
+    appointmentDate: "2026-07-25",
+    appointmentTime: "10:00",
+    appointmentTimezone: "America/Los_Angeles",
+    resolvedBy: "a@x.com",
+  });
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(calls.appointment.at(-1), {
+    appointmentAt: null,
+    appointmentDate: "2026-07-25",
+    appointmentTime: "10:00",
+    appointmentTimezone: "America/Los_Angeles",
+  });
+  assert.deepEqual(calls.resolutions.at(-1)?.detail, {
+    resolvedBy: "a@x.com",
+    detail: {
+      appointmentAt: null,
+      appointmentDate: "2026-07-25",
+      appointmentTime: "10:00",
+      appointmentTimezone: "America/Los_Angeles",
+    },
+  });
 });
 
 test("CAS EXACTLY-ONCE: an already-resolved card is a clean no-op — no effects fire twice", async () => {

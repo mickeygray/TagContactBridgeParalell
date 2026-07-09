@@ -10,6 +10,7 @@ const {
   skipCxBulkLoadCurrent,
   startCxBulkLoadGetLeads,
   startCxBulkLoadSession,
+  syncCxBulkLoadActiveCall,
   submitCxBulkLoadDisposition,
   submitCxLaneCallDisposition,
   submitCxBulkLoadReviewOutcome,
@@ -129,7 +130,14 @@ function createCxBulkLoadRouter(auth, options = {}) {
   router.post("/wrap-cards/resolve", auth.requireAuth, auth.requireUser, async (req, res) => {
     if (!wrapCards) return res.status(409).json({ ok: false, code: "wrap-queue-disabled" });
     try {
-      const { idemKey, action, appointmentAt } = req.body || {};
+      const {
+        idemKey,
+        action,
+        appointmentAt,
+        appointmentDate,
+        appointmentTime,
+        appointmentTimezone,
+      } = req.body || {};
       const requester = String(req.user?.email || "").trim().toLowerCase();
       const card = await wrapCards.getCard(idemKey);
       if (!card) return res.status(404).json({ ok: false, code: "wrap-card-not-found" });
@@ -144,6 +152,9 @@ function createCxBulkLoadRouter(auth, options = {}) {
         idemKey,
         action: normalized === "dismiss" ? "dismissed" : normalized,
         appointmentAt: appointmentAt || null,
+        appointmentDate: appointmentDate || null,
+        appointmentTime: appointmentTime || null,
+        appointmentTimezone: appointmentTimezone || null,
         user: req.user,
         resolvedBy: requester,
       });
@@ -178,6 +189,10 @@ function createCxBulkLoadRouter(auth, options = {}) {
 
   router.post("/disposition", auth.requireAuth, auth.requireUser, async (req, res) => {
     return sendBulkCommand(req, res, submitCxBulkLoadDisposition, (request) => request.body || {});
+  });
+
+  router.post("/sync-active", auth.requireAuth, auth.requireUser, async (req, res) => {
+    return sendBulkCommand(req, res, syncCxBulkLoadActiveCall, (request) => request.body || {});
   });
 
   router.post("/review-outcome", auth.requireAuth, auth.requireUser, async (req, res) => {

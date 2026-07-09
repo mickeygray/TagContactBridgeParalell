@@ -251,6 +251,35 @@ test("reserved rows blocked by contact eligibility are not published to RingCX",
   assert.deepEqual(reservation.cancelled, ["q1"], "adapter-enforced blocked rows are terminalized out of the queue");
 });
 
+test("transient Logics eligibility misses release reserved rows instead of cancelling inventory", async () => {
+  const liveCalls = { value: [] };
+  const contactEligibilityAdapter = {
+    async resolve() {
+      return {
+        ok: false,
+        reason: "logics-status-check-failed",
+        transient: true,
+        enforced: false,
+      };
+    },
+  };
+  const { svc, client, reservation } = build(liveCalls, { contactEligibilityAdapter });
+  const snap = await svc.startCxBulkLoadSession({
+    agentEmail: "a@x.com",
+    domain: "TAG",
+    ringcx: { accountId: "acct1", campaignId: "camp1" },
+    targetSize: 1,
+    refillThreshold: 1,
+  });
+
+  assert.equal(client.calls.loads.length, 0, "transient Logics misses never publish to RingCX");
+  assert.equal(snap.bufferCount, 0);
+  assert.equal(snap.stats.failedPublishCount, 1);
+  assert.equal(snap.lastError, "logics-status-check-failed");
+  assert.deepEqual(reservation.released, ["q1"], "transient misses go back to the pool for retry");
+  assert.deepEqual(reservation.cancelled, [], "transient misses never terminalize inventory");
+});
+
 test("M11 gate 8: the canonical default target buffer is 35", () => {
   assert.equal(DEFAULT_TARGET_BUFFER, 35);
 });
@@ -459,6 +488,39 @@ test("disposition closes current once and RingCX-side advance refills the buffer
   assert.equal(snap.bufferCount, 2); // q2 + refilled q3 (live had dropped to 1 <= threshold)
 });
 
+test("disposition click resolves the active RingCX UII when the poller has not promoted current", async () => {
+  const liveCalls = { value: [] };
+  const { svc, client, outcomeAdapter } = build(liveCalls);
+  await svc.startCxBulkLoadSession({ agentEmail: "a@x.com", domain: "TAG", ringcx: { accountId: "acct1", campaignId: "camp1" }, targetSize: 2, refillThreshold: 1 });
+  liveCalls.value = [{ externalId: externFor("q1"), uii: "u1", callState: "connected" }];
+
+  const snap = await svc.submitCxBulkLoadDisposition({ sessionId: "s1", disposition: "voicemail" });
+  assert.equal(snap.dispositionOk, true);
+  assert.equal(client.calls.dispositions.length, 1);
+  assert.equal(client.calls.dispositions[0].uii, "u1");
+  assert.equal(outcomeAdapter.writes.length, 1);
+  assert.equal(outcomeAdapter.writes[0].candidate.queueItemId, "q1");
+  assert.equal(outcomeAdapter.writes[0].candidate.uii, "u1");
+  assert.equal(snap.current, null);
+  assert.equal(snap.completedCount, 1);
+});
+
+test("disposition click does not guess when multiple active RingCX candidates match a blank current", async () => {
+  const liveCalls = { value: [] };
+  const { svc, client, outcomeAdapter } = build(liveCalls);
+  await svc.startCxBulkLoadSession({ agentEmail: "a@x.com", domain: "TAG", ringcx: { accountId: "acct1", campaignId: "camp1" }, targetSize: 2, refillThreshold: 1 });
+  liveCalls.value = [
+    { externalId: externFor("q1"), uii: "u1", callState: "connected" },
+    { externalId: externFor("q2"), uii: "u2", callState: "connected" },
+  ];
+
+  const snap = await svc.submitCxBulkLoadDisposition({ sessionId: "s1", disposition: "voicemail" });
+  assert.equal(snap.dispositionOk, false);
+  assert.equal(snap.terminal.reason, "missing-current-call");
+  assert.equal(client.calls.dispositions.length, 0);
+  assert.equal(outcomeAdapter.writes.length, 0);
+});
+
 test("did_not_connect disposition requests next preview without staging current", async () => {
   const liveCalls = { value: [] };
   const requests = [];
@@ -484,6 +546,33 @@ test("did_not_connect disposition requests next preview without staging current"
   assert.equal(snap.stats.lastGetLeadsQueueItemId, "q2");
   assert.equal(snap.remainingQueue[0].queueItemId, "q2");
   assert.equal(requests[0].candidate.queueItemId, "q2");
+});
+
+test("bad_number disposition records bad-number flags and requests next preview", async () => {
+  const liveCalls = { value: [] };
+  const requests = [];
+  const leadStarter = {
+    async getLeads({ session, candidate }) {
+      requests.push({ sessionId: session.sessionId, candidate });
+      return { ok: true, elapsedMs: 29, source: "setAgentState" };
+    },
+  };
+  const { svc, outcomeAdapter } = build(liveCalls, { leadStarter });
+  await svc.startCxBulkLoadSession({ agentEmail: "a@x.com", domain: "TAG", ringcx: { accountId: "acct1", campaignId: "camp1" }, targetSize: 2, refillThreshold: 1 });
+  liveCalls.value = [{ externalId: externFor("q1"), uii: "u1" }];
+  await syncFromRingCx(svc);
+
+  const snap = await svc.submitCxBulkLoadDisposition({ sessionId: "s1", disposition: "bad_number" });
+  assert.equal(snap.dispositionOk, true);
+  assert.equal(snap.current, null);
+  assert.equal(snap.completedCount, 1);
+  assert.equal(outcomeAdapter.writes.length, 1);
+  assert.equal(outcomeAdapter.writes[0].outcome, "bad_number");
+  assert.equal(outcomeAdapter.writes[0].badNumber, true);
+  assert.equal(outcomeAdapter.writes[0].badNumberReason, "disconnected-or-out-of-service");
+  assert.equal(requests.length, 1);
+  assert.equal(snap.getLeads.ok, true);
+  assert.equal(snap.getLeads.queueItemId, "q2");
 });
 
 test("did_not_connect does not advance when the terminal executor rejects the disposition", async () => {

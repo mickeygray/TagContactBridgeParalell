@@ -76,6 +76,7 @@ const {
   createStubTransport,
 } = require("./coachBatchTransports");
 const { createSoloTransport } = require("./coachSoloTransport");
+const { createTwoStationTransports } = require("./coachTwoStationTransports");
 const {
   resolveLiveCoachRuntimeMode,
 } = require("../../../packages/shared-services/src/liveCoachRuntimeModeService");
@@ -3485,8 +3486,20 @@ async function main() {
   // Sonnet call on the deep big prompt every ~10s). Solo rides the same batch session routing.
   const coachMode = cleanText(process.env.LIVE_COACH_COACH_MODE || "batch", 12).toLowerCase();
   const liveCoachSoloMode = liveCoachBatchEnabled && coachMode === "solo";
+  const liveCoachTwoStationMode = liveCoachBatchEnabled && coachMode === "two_station";
+  let twoStationMeterTimer = null;
   const batchModelRunners = liveCoachBatchEnabled
-    ? (liveCoachSoloMode
+    ? (liveCoachTwoStationMode
+      ? {
+        // TWO-STATION coach: B/STRATEGIST (Sonnet) + A/COACH (Haiku) on the shared
+        // metered key. Rides the same batch session routing; only the loop differs.
+        ...createTwoStationTransports({ logger }),
+        runSolo: null,
+        runReactor: null,
+        runDeep: null,
+        runSummary: null,
+      }
+      : liveCoachSoloMode
       ? {
         // COLLAPSED single-call coach. Dev stub drives the SAME loop with canned deep
         // guidance; otherwise the real Sonnet transport on its own metered key.
@@ -3548,6 +3561,13 @@ async function main() {
       soloIntervalMs: Math.max(2000, Number(process.env.LIVE_COACH_SOLO_INTERVAL_MS || 10000) || 10000),
       soloGrowthGated: boolFromEnv(process.env.LIVE_COACH_SOLO_GROWTH_GATED, true),
       batchOptions: { maxSessions: Math.max(1, Number(process.env.LIVE_COACH_BATCH_MAX_SESSIONS || 12) || 12) },
+      // Two-station cadence knobs (loop defaults apply when unset).
+      twoStation: {
+        tickMs: Number(process.env.LIVE_COACH_TWO_STATION_TICK_MS) || undefined,
+        bIntervalMs: Number(process.env.LIVE_COACH_TWO_STATION_B_INTERVAL_MS) || undefined,
+        aTurnThreshold: Number(process.env.LIVE_COACH_TWO_STATION_A_TURNS) || undefined,
+        feeAmount: String(process.env.LIVE_COACH_FEE_AMOUNT || "").trim() || undefined,
+      },
     },
     // semantic_vad only decides when STT should release text. This optional API judge is the
     // fuzzy filter that ranks deterministic candidates before Sonnet composes a line.
@@ -3590,11 +3610,27 @@ async function main() {
   const callStrategist = createOpusCallStrategist({ logger });
   const resolutionPitchAgent = createOpusResolutionPitchAgent({ logger });
   if (liveCoachBatchEnabled) {
-    const startedLoop = liveCoachSoloMode ? coachBus.startSoloCoach() : coachBus.startFloorCoach();
+    const startedLoop = liveCoachTwoStationMode
+      ? coachBus.startTwoStationCoach()
+      : liveCoachSoloMode
+        ? coachBus.startSoloCoach()
+        : coachBus.startFloorCoach();
+    // Two-station cost meter: fires-vs-ticks + token spend every 5 minutes while the
+    // loop runs — the pilot's real fire-rate + $ numbers come from these lines.
+    if (liveCoachTwoStationMode && startedLoop) {
+      twoStationMeterTimer = setInterval(() => {
+        const counters = coachBus.getTwoStationCounters?.();
+        if (counters && (counters.ticks || 0) > 0) {
+          logger.info("live_coach.two_station.meter", counters);
+        }
+      }, 5 * 60 * 1000);
+      if (typeof twoStationMeterTimer.unref === "function") twoStationMeterTimer.unref();
+    }
     logger.info("live_coach.floor_coach.config", {
       enabled: true,
       coachMode,
       solo: liveCoachSoloMode,
+      twoStation: liveCoachTwoStationMode,
       started: Boolean(startedLoop),
       reactor: Boolean(batchModelRunners && batchModelRunners.runReactor),
       deep: Boolean(batchModelRunners && batchModelRunners.runDeep),
@@ -4615,6 +4651,8 @@ async function main() {
     try {
       coachBus.stopFloorCoach();
       coachBus.stopSoloCoach();
+    coachBus.stopTwoStationCoach();
+    if (twoStationMeterTimer) clearInterval(twoStationMeterTimer);
       if (batchModelRunners?.runSummary?.stop) {
         batchModelRunners.runSummary.stop();
       }

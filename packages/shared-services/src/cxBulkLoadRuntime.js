@@ -31,7 +31,10 @@ const { reduceCxBulkLoadState } = require("./cxBulkLoadStateMachine");
 const { createCxQueueReservationService } = require("./cxQueueReservationService");
 const { buildFamilyTargets } = require("./cxReserveModeService");
 const { resolveCxDialRuntimeMode, isCxBulkLoadRuntime } = require("./cxDialRuntimeModeService");
-const { resolveCaseContactEligibility } = require("./contactEligibilityService");
+const {
+  isTransientContactEligibilityBlock,
+  resolveCaseContactEligibility,
+} = require("./contactEligibilityService");
 const { handleCxTerminalCallOutcome, resolveRingcxPublishedCopies } = require("./cxCadenceService");
 const { cancelPublishedQueueItemInRingcx } = require("./ringcxLeadServingService");
 const { executeCxHangupRequest } = require("./ringcxDialExecutionService");
@@ -506,8 +509,10 @@ function bulkOutcomeDisposition(outcome) {
     case "voicemail":
       return "VM DROP";
     case "dnc":
+    case "bad_number":
+    case "wrong_number":
       // RingCX only needs the fast close disposition here. The app outcome
-      // remains `dnc` for terminal/outbox/Logics handling.
+      // remains specific in the terminal outbox for app-side handling.
       return "Auto Dispo";
     case "answered":
     case "did-not-answer":
@@ -522,7 +527,7 @@ function normalizeLaneOutcome(value) {
   if (normalized === "did-not-answer" || normalized === "no-answer" || normalized === "no_answer") {
     return "did_not_connect";
   }
-  if (["answered", "did_not_connect", "voicemail"].includes(normalized)) return normalized;
+  if (["answered", "did_not_connect", "voicemail", "bad_number"].includes(normalized)) return normalized;
   return null;
 }
 
@@ -543,6 +548,7 @@ async function persistLaneCallConsumption({ laneCall = {}, session = {}, outcome
 
   async function persistTerminalFor(queueItemId, extra = {}) {
     if (!queueItemId) return { ok: false, reason: "no-queue-item" };
+    const badNumber = String(outcome || "").trim().toLowerCase().replace(/[\s-]+/g, "_") === "bad_number";
     const idemKey = makeOutcomeIdemKey({
       sessionId: session.sessionId,
       queueItemId,
@@ -563,6 +569,8 @@ async function persistLaneCallConsumption({ laneCall = {}, session = {}, outcome
       lane: laneCall.lane || parsed.lane,
       source: "lane-call-disposition",
       sourceService: "cx-lane-call",
+      badNumber,
+      badNumberReason: badNumber ? "disconnected-or-out-of-service" : null,
       at,
       idemKey,
       ...extra,
@@ -1609,6 +1617,7 @@ function getService() {
           ok: eligibility.ok,
           reason: eligibility.reason || null,
           detail: eligibility.detail || null,
+          transient: isTransientContactEligibilityBlock(eligibility),
           enforced: Boolean(eligibility.enforcement),
         };
       },
@@ -1679,6 +1688,26 @@ async function watchCxBulkLoadAccountActiveCalls(input = {}) {
     agentEmail: input.agentEmail,
     agentExtensionId: input.agentExtensionId,
     now: input.now,
+  });
+}
+
+async function syncCxBulkLoadActiveCall(input = {}, options = {}) {
+  const agent = await resolveAgentContext(input, options.user || {});
+  assertBulkRuntime(agent);
+  const sessionId = await resolveSessionId(input, agent);
+  if (!sessionId) return null;
+  await getService().watchAccountActiveCalls({
+    domain: input.domain,
+    accountId: input.accountId,
+    sessionId,
+    agentEmail: agent.agentEmail,
+    agentExtensionId: agent.agentExtensionId,
+    now: input.now,
+  });
+  return getService().getCxBulkLoadSession({
+    sessionId,
+    agentEmail: agent.agentEmail,
+    agentExtensionId: agent.agentExtensionId,
   });
 }
 
@@ -1840,6 +1869,7 @@ module.exports = {
   startCxBulkLoadSession,
   getCxBulkLoadSession,
   watchCxBulkLoadAccountActiveCalls,
+  syncCxBulkLoadActiveCall,
   submitCxBulkLoadDisposition,
   submitCxLaneCallDisposition,
   startCxBulkLoadGetLeads,

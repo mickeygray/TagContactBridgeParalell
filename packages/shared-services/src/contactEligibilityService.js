@@ -58,13 +58,6 @@ function buildBlockedReason(caseProfile, leadCadence, config = {}, now = new Dat
     };
   }
 
-  if (requireFreshLogicsStatus && liveStatusId == null) {
-    return {
-      reason: "logics-status-check-failed",
-      detail: "Unable to verify live Logics status before contact",
-    };
-  }
-
   if (liveStatusId == null && statusIds.length > 0 && !statusIds.some((value) => allowedProspectStatusSet.has(value))) {
     return {
       reason: "logics-nonprospect-status",
@@ -158,7 +151,25 @@ function buildBlockedReason(caseProfile, leadCadence, config = {}, now = new Dat
     };
   }
 
+  if (requireFreshLogicsStatus && liveStatusId == null) {
+    return {
+      reason: "logics-status-check-failed",
+      detail: options.liveStatusError || "Unable to verify live Logics status before contact",
+      transient: true,
+      destructive: false,
+    };
+  }
+
   return null;
+}
+
+function isTransientContactEligibilityBlock(result = {}) {
+  if (!result || typeof result !== "object") return false;
+  if (result.transient === true || result.destructive === false) return true;
+  return [
+    "logics-status-check-failed",
+    "contact-eligibility-check-failed",
+  ].includes(String(result.reason || "").trim().toLowerCase());
 }
 
 async function stopCaseContact(domain, caseId, options = {}) {
@@ -210,18 +221,26 @@ async function resolveCaseContactEligibility(domain, caseId, options = {}) {
   ]);
 
   let liveLogicsStatus = null;
+  let liveLogicsStatusError = null;
   if (options.requireFreshLogicsStatus) {
-    const facade = createLogicsFacade(normalizedDomain);
-    const liveCase = await facade.fetchCaseInfo(normalizedCaseId);
-    if (liveCase.ok) {
-      const parsed = Number(liveCase.status);
-      liveLogicsStatus = Number.isFinite(parsed) ? parsed : null;
+    try {
+      const facade = createLogicsFacade(normalizedDomain);
+      const liveCase = await facade.fetchCaseInfo(normalizedCaseId);
+      if (liveCase.ok) {
+        const parsed = Number(liveCase.status);
+        liveLogicsStatus = Number.isFinite(parsed) ? parsed : null;
+      } else {
+        liveLogicsStatusError = liveCase.error || liveCase.reason || "Logics status lookup failed";
+      }
+    } catch (error) {
+      liveLogicsStatusError = error?.message || String(error);
     }
   }
 
   const block = buildBlockedReason(caseProfile, leadCadence, config, options.now || new Date(), {
     liveStatusId: liveLogicsStatus,
     requireFreshLogicsStatus: options.requireFreshLogicsStatus,
+    liveStatusError: liveLogicsStatusError,
   });
   if (!block) {
     return {
@@ -232,7 +251,8 @@ async function resolveCaseContactEligibility(domain, caseId, options = {}) {
     };
   }
 
-  const enforcement = options.enforceStop
+  const transient = isTransientContactEligibilityBlock(block);
+  const enforcement = options.enforceStop && !transient
     ? await stopCaseContact(normalizedDomain, normalizedCaseId, {
         ...block,
         currentStage: options.currentStage || "contact-blocked",
@@ -245,9 +265,12 @@ async function resolveCaseContactEligibility(domain, caseId, options = {}) {
     skipped: true,
     reason: block.reason,
     detail: block.detail,
+    transient,
+    destructive: block.destructive !== false,
     caseProfile,
     leadCadence,
     liveLogicsStatus,
+    liveLogicsStatusError,
     enforcement,
   };
 }
@@ -317,6 +340,7 @@ function resolveUpsellContactEligibility({
 
 module.exports = {
   buildBlockedReason, // exported for pins; pure
+  isTransientContactEligibilityBlock,
   resolveCaseContactEligibility,
   stopCaseContact,
   getUpsellContactAllowList,

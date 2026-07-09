@@ -132,6 +132,76 @@ test("post-drain call note hook runs independently from call wrap", async () => 
   });
 });
 
+test("bad-number hook runs before the terminal row is marked drained", async () => {
+  const outbox = fakeOutbox([
+    {
+      idemKey: "q1:u1",
+      domain: "WYNN",
+      caseId: 101617,
+      payload: {
+        queueItemId: "q1",
+        uii: "u1",
+        domain: "WYNN",
+        caseId: 101617,
+        outcome: "bad_number",
+        badNumber: true,
+      },
+    },
+  ]);
+  const order = [];
+  outbox.markDrained = async (idemKey) => {
+    order.push("drained");
+    outbox.calls.drained.push(idemKey);
+    return { idemKey, status: "drained" };
+  };
+  const badNumbers = [];
+  const drain = createCxTerminalOutboxDrain({
+    outboxRepository: outbox,
+    recordCadenceEvent: async () => {
+      order.push("cadence");
+      return { ok: true };
+    },
+    handleBadNumberOutcome: async (packet) => {
+      order.push("bad-number");
+      badNumbers.push(packet);
+      return { ok: true };
+    },
+  });
+  const result = await drain.drainOnce();
+  assert.deepEqual(order, ["cadence", "bad-number", "drained"]);
+  assert.equal(badNumbers.length, 1);
+  assert.equal(badNumbers[0].payload.badNumber, true);
+  assert.deepEqual(outbox.calls.failed, []);
+  assert.deepEqual(result, {
+    scanned: 1,
+    drained: 1,
+    failed: 0,
+    minimalResolved: 0,
+    oldestPendingAgeMs: 0,
+    badNumberHandled: 1,
+    badNumberSkipped: 0,
+  });
+});
+
+test("bad-number hook failure keeps the terminal row retryable", async () => {
+  const outbox = fakeOutbox([
+    { idemKey: "q1:u1", payload: { queueItemId: "q1", uii: "u1", outcome: "bad_number", badNumber: true } },
+  ]);
+  const drain = createCxTerminalOutboxDrain({
+    outboxRepository: outbox,
+    recordCadenceEvent: async () => ({ ok: true }),
+    handleBadNumberOutcome: async () => {
+      throw new Error("bad-number side effect down");
+    },
+    logger: { warn() {} },
+  });
+  const result = await drain.drainOnce();
+  assert.deepEqual(outbox.calls.drained, []);
+  assert.deepEqual(outbox.calls.failed.map((f) => f.idemKey), ["q1:u1"]);
+  assert.equal(result.drained, 0);
+  assert.equal(result.failed, 1);
+});
+
 test("post-drain call note failure does not fail terminal replay", async () => {
   const warns = [];
   const outbox = fakeOutbox([

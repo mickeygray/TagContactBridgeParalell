@@ -138,6 +138,7 @@ function buildBulkLoadSideEffectHook(path: string) {
 
 export const useCxBulkLoadStart = buildBulkLoadCommandHook("start");
 export const useCxBulkLoadDisposition = buildBulkLoadCommandHook("disposition");
+export const useCxBulkLoadSyncActive = buildBulkLoadCommandHook("sync-active");
 export const useCxBulkLoadGetLeads = buildBulkLoadCommandHook("get-leads");
 export const useCxBulkLoadPauseProgressive = buildBulkLoadSideEffectHook("pause-progressive");
 export const useCxBulkLoadResumeProgressive = buildBulkLoadSideEffectHook("resume-progressive");
@@ -271,7 +272,14 @@ export type CxWrapResolveResult = {
 export function useCxWrapCardResolve() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (body: { idemKey: string; action: "dnc" | "appointment" | "dismiss"; appointmentAt?: string }) =>
+    mutationFn: (body: {
+      idemKey: string;
+      action: "dnc" | "appointment" | "dismiss";
+      appointmentAt?: string;
+      appointmentDate?: string;
+      appointmentTime?: string;
+      appointmentTimezone?: string;
+    }) =>
       api
         .post<{ ok: true; result: CxWrapResolveResult }>(
           "/api/cx/bulk-load/wrap-cards/resolve",

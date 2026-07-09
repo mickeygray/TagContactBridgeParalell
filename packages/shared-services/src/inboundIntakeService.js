@@ -2435,6 +2435,15 @@ async function fireImmediateContact(leadCadence, validation = {}, options = {}) 
             });
             return;
           }
+          if (forwardResult?.skipped) {
+            logger?.info?.("first-contact.cx-forward.skipped", {
+              domain,
+              caseId,
+              reason: forwardResult.reason || "forward-skipped",
+              dedupeKey: forwardResult.dedupeKey || null,
+            });
+            return;
+          }
           if (!forwardResult?.skipped) {
             logger?.warn?.("first-contact.cx-forward.failed", {
               domain,

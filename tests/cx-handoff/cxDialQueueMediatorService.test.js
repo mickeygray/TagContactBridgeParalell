@@ -11,6 +11,7 @@ const {
   hashPhone,
   normalizeCxBucketCandidate,
   normalizeCxCallBuckets,
+  reconcileCxBucketCurrentCalls,
   upsertCxBucketCandidate,
 } = require("../../packages/shared-services/src/cxDialQueueMediatorService");
 
@@ -275,4 +276,75 @@ test("live read classifies legacy active with queued candidates as missing activ
   assert.equal(row.verdict.bucket, "missing-active-match");
   assert.equal(row.comparisons.missingActiveMatch, true);
   assert.equal(row.verdict.nextLook, "active-call-matcher-inputs");
+});
+
+test("stale bucket reconciler skips when the active-call snapshot is unknown", async () => {
+  const previous = process.env.CX_BUCKET_SHADOW_ENABLED;
+  process.env.CX_BUCKET_SHADOW_ENABLED = "true";
+  const writes = [];
+  const repository = {
+    async listAgentStates() { throw new Error("should not read agents without active-call evidence"); },
+    async updateAgentState(...args) { writes.push(args); },
+  };
+  try {
+    const result = await reconcileCxBucketCurrentCalls({
+      now: new Date("2026-06-19T12:01:00Z"),
+      repository,
+    });
+    assert.equal(result.skipped, true);
+    assert.equal(result.reason, "active-identities-unknown");
+    assert.equal(writes.length, 0);
+  } finally {
+    if (previous === undefined) delete process.env.CX_BUCKET_SHADOW_ENABLED;
+    else process.env.CX_BUCKET_SHADOW_ENABLED = previous;
+  }
+});
+
+test("stale bucket reconciler clears only after an explicit active-call snapshot", async () => {
+  const previous = process.env.CX_BUCKET_SHADOW_ENABLED;
+  process.env.CX_BUCKET_SHADOW_ENABLED = "true";
+  const agent = {
+    extensionId: "101",
+    activityState: "idle",
+    activePlatform: "none",
+    currentCall: {},
+    cxCallBuckets: {
+      agentExtensionId: "101",
+      currentCall: {
+        ...normalizeCxBucketCandidate(queueItem()),
+        phase: "active",
+        telephonyActive: true,
+        uii: "uii-1",
+        activeObservedAt: "2026-06-19T12:00:00Z",
+      },
+      newCalls: [],
+      completionBuffer: [],
+      stats: {},
+      updatedAt: "2026-06-19T12:00:00Z",
+    },
+  };
+  const writes = [];
+  const repository = {
+    async listAgentStates() { return [agent]; },
+    async findAgentStateByExtensionId() { return agent; },
+    async updateAgentState(extensionId, patch) {
+      writes.push({ extensionId, patch });
+      return { ...agent, ...patch };
+    },
+  };
+  try {
+    const result = await reconcileCxBucketCurrentCalls({
+      activeIdentities: new Set(),
+      activeIdentitiesKnown: true,
+      now: new Date("2026-06-19T12:01:00Z"),
+      repository,
+    });
+    assert.equal(result.reconciledCount, 1);
+    assert.equal(writes.length, 1);
+    assert.equal(writes[0].patch.cxCallBuckets.currentCall, null);
+    assert.equal(writes[0].patch.cxCallBuckets.stats.staleCurrentClears, 1);
+  } finally {
+    if (previous === undefined) delete process.env.CX_BUCKET_SHADOW_ENABLED;
+    else process.env.CX_BUCKET_SHADOW_ENABLED = previous;
+  }
 });

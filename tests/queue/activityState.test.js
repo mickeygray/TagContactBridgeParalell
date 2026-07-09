@@ -7,9 +7,12 @@ const { test } = require("node:test");
 const assert = require("node:assert/strict");
 
 const {
+  buildManualCxRouting,
   deriveActivityState,
   deriveCxRouting,
   deriveFreshLeadGate,
+  isUntimedCxPauseType,
+  normalizeCxPauseType,
 } = require("../../packages/shared-services/src/agentAvailabilityService");
 
 test("status=available -> idle", () => {
@@ -160,6 +163,49 @@ test("manual break gate copy does not promise automatic queue release", () => {
   assert.equal(gate.label, "Fresh leads paused: 5 minute break");
   assert.match(gate.detail, /stay paused until the agent resumes work/);
   assert.equal(gate.detail.includes("Held leads release"), false);
+});
+
+test("work pause blocks fresh leads without becoming a timed break", () => {
+  const now = new Date("2026-07-08T16:00:00.000Z");
+  const routing = buildManualCxRouting(
+    {
+      status: "available",
+      exTelephonyStatus: "NoCall",
+      currentCall: {},
+      appPresence: {
+        cxWorkspaceActive: true,
+        lastSeenAt: now,
+      },
+    },
+    "unavailable",
+    { pauseType: "work-pause", now },
+  );
+
+  assert.equal(normalizeCxPauseType("pause-dials"), "work-pause");
+  assert.equal(isUntimedCxPauseType("mail-call"), true);
+  assert.equal(routing.desiredAvailability, "unavailable");
+  assert.equal(routing.reason, "manual-unavailable");
+  assert.equal(routing.pauseType, "work-pause");
+  assert.equal(routing.pauseReleaseAt, null);
+  assert.equal(Number(routing.breakUsage.shortBreaksUsed || 0), 0);
+  assert.equal(Number(routing.breakUsage.mealBreaksUsed || 0), 0);
+
+  const gate = deriveFreshLeadGate({
+    status: "available",
+    exTelephonyStatus: "NoCall",
+    currentCall: {},
+    appPresence: {
+      cxWorkspaceActive: true,
+      lastSeenAt: now,
+    },
+    cxRouting: routing,
+  }, null, { now });
+
+  assert.equal(gate.allowed, false);
+  assert.equal(gate.source, "manual");
+  assert.equal(gate.pauseType, "work-pause");
+  assert.equal(gate.label, "Fresh leads paused: working");
+  assert.match(gate.detail, /paused dialing for other work/);
 });
 
 test("EX ringing alone does not suppress CX lead serving", () => {

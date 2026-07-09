@@ -69,6 +69,36 @@ test("buildEligibility treats idle available agents as eligible", () => {
   assert.equal(result.reason, "available");
 });
 
+test("work-pause agent is invisible to regular cadence assignment", () => {
+  const paused = agent("101", {
+    activityState: "idle",
+    cxRouting: {
+      enabled: true,
+      desiredAvailability: "unavailable",
+      reason: "manual-unavailable",
+      pauseType: "work-pause",
+      assignmentStats: {
+        date: "2026-07-08",
+        totalAssigned: 0,
+        freshDay1Assigned: 0,
+        freshDay2to10Assigned: 0,
+        agedAssigned: 0,
+        openAssignments: 0,
+      },
+    },
+  });
+  const available = agent("102");
+
+  const result = buildEligibility(paused, { queueFamily: "aged" });
+  assert.equal(result.eligible, false);
+  assert.equal(result.reason, "manual-unavailable");
+
+  const ranking = rankAgentsForQueueItem([paused, available], { queueFamily: "aged" });
+  assert.equal(ranking.selected.extensionId, "102");
+  assert.equal(ranking.ranked[1].extensionId, "101");
+  assert.equal(ranking.ranked[1].eligibility.reason, "manual-unavailable");
+});
+
 test("buildEligibility lets explicit fresh targets beat the global cap", () => {
   const result = buildEligibility(agent("101", {
     cxQueuePolicyExplicit: true,

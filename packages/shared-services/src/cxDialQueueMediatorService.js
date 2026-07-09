@@ -796,15 +796,22 @@ function applyCxBucketTerminalOutcome(bucketInput, outcomeInput = {}, options = 
   };
 }
 
-async function reconcileCxBucketCurrentCalls({
-  activeIdentities = new Set(),
-  now = new Date(),
-  logger = null,
-  repository = null,
-} = {}) {
+async function reconcileCxBucketCurrentCalls(options = {}) {
+  const {
+    activeIdentities = null,
+    now = new Date(),
+    logger = null,
+    repository = null,
+  } = options || {};
   if (!isCxBucketShadowEnabled()) return { ok: true, skipped: true, reason: "bucket-shadow-disabled" };
   if (!isCxBucketStaleReconcileEnabled()) {
     return { ok: true, skipped: true, reason: "stale-reconcile-disabled" };
+  }
+  const activeIdentitiesKnown = options.activeIdentitiesKnown === true
+    || Array.isArray(activeIdentities)
+    || activeIdentities instanceof Set;
+  if (!activeIdentitiesKnown) {
+    return { ok: true, skipped: true, reason: "active-identities-unknown" };
   }
 
   const normalizedIdentities = new Set();

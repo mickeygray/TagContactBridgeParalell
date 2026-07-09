@@ -21,7 +21,7 @@ const readline = require("readline");
 require("dotenv").config({ path: path.resolve(__dirname, "..", ".env") });
 
 const { createRingCentralClient } = require("../packages/shared-integrations/src");
-const { createRingcxVoiceClient } = require("../packages/shared-integrations/src/ringcxVoiceClient");
+const { createRingcxVoiceClient, normalizeRingcxLoginDest } = require("../packages/shared-integrations/src/ringcxVoiceClient");
 const { findExShellsForEmail } = require("../packages/shared-data/src/exShellDirectory");
 
 function readFlag(argv, name) {
@@ -168,7 +168,8 @@ async function createRingcxAgent(client, { email, rcExtension, agentGroupId, def
     allowLoginControl: true,
     allowLoginUpdates: true,
     allowOffHook: true,
-    defaultLoginDest: defaultLoginDest || undefined,
+    // RingCX rejects E.164 login dests ("+1818…") — SIP-safe normalize at every write
+    defaultLoginDest: normalizeRingcxLoginDest(defaultLoginDest) || undefined,
     manualOutboundDefaultCallerId: callerId || undefined,
     manualOutboundDefaultCallerIdE164: callerId ? toE164(callerId) : undefined,
   }, agentGroupId);
@@ -186,7 +187,7 @@ async function patchRingcxAgent(client, { agent, agentGroupId, rcExtension, defa
     allowLoginControl: true,
     allowLoginUpdates: true,
     allowOffHook: true,
-    defaultLoginDest: defaultLoginDest || agent.defaultLoginDest || "",
+    defaultLoginDest: normalizeRingcxLoginDest(defaultLoginDest) || agent.defaultLoginDest || "",
     manualOutboundDefaultCallerId: callerId || agent.manualOutboundDefaultCallerId || "",
     manualOutboundDefaultCallerIdE164: callerId ? toE164(callerId) : agent.manualOutboundDefaultCallerIdE164 || "",
   };

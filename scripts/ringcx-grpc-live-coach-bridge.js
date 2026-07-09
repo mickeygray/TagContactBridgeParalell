@@ -877,6 +877,29 @@ function liveCoachKilledVia() {
 }
 function isLiveCoachKilled() { return liveCoachKilledVia() !== null; }
 
+// TEST-SCOPE AGENT ALLOWLIST (2026-07-08, the 3002 coach rig): unset = allow everyone
+// (production behavior, zero change). When set (comma-separated emails), coach sessions
+// run ONLY for listed agents: a known-foreign identity is skipped at session start, and
+// a bind/enrichment that RESOLVES to a foreign email stops the session it just opened.
+// Unknown identities stay ALLOWED (fail-open) — real dials often bind via Mongo after
+// the stream opens, and failing closed would block the tester's own calls. Residual:
+// identity-less foreign streams still transcribe (STT) until torn down — scope the test
+// window (outside floor dialing hours) accordingly. Read per call, like the kill file,
+// so a flip needs no restart.
+function coachAgentAllowlist() {
+  return String(process.env.LIVE_COACH_AGENT_EMAIL_ALLOWLIST || "")
+    .split(",")
+    .map((entry) => entry.trim().toLowerCase())
+    .filter(Boolean);
+}
+function isAgentAllowedForCoach(email) {
+  const allowlist = coachAgentAllowlist();
+  if (!allowlist.length) return true;
+  const normalized = String(email || "").trim().toLowerCase();
+  if (!normalized) return true; // unknown: fail-open (see header note)
+  return allowlist.includes(normalized);
+}
+
 // Prospect always transcribes; agent transcribes only when the agent channel is
 // enabled (LIVE_COACH_AGENT_STT_ENABLED) — context-only, cheap model, no coach
 // session of its own.
@@ -1261,6 +1284,20 @@ async function enrichCoachBinding(segment) {
     return null;
   }
   segment.coachBinding = bound.binding || null;
+  const enrichedAgentEmail = bound.session?.metadata?.agentEmail || "";
+  if (enrichedAgentEmail && !isAgentAllowedForCoach(enrichedAgentEmail)) {
+    writeJsonLine(segment.eventLog, {
+      type: "coach.session.agent_not_allowlisted",
+      at: new Date().toISOString(),
+      streamId: segment.streamId,
+      agentEmail: enrichedAgentEmail,
+      stage: "enrichment",
+      coachSessionId: segment.coachSessionId || null,
+    });
+    segment.allowlistSkipLogged = true;
+    stopCoachSession(segment, "agent-not-allowlisted").catch(() => {});
+    return;
+  }
   segment.coachSessionMetadata = bound.session.metadata || segment.coachSessionMetadata;
   // Names just arrived (or improved) — refresh the STT primer mid-call so the
   // engine hears the prospect/agent names spelled right from here on.
@@ -1285,6 +1322,20 @@ async function enrichCoachBinding(segment) {
 async function ensureCoachSession(segment, options = {}) {
   if (segment.role !== "prospect") return null;
   if (isLiveCoachKilled()) return null; // kill switch: never start a coach session / LLM call
+  const earlyAgentEmail = segment.dialogIdentity?.agentEmail || "";
+  if (earlyAgentEmail && !isAgentAllowedForCoach(earlyAgentEmail)) {
+    if (!segment.allowlistSkipLogged) {
+      segment.allowlistSkipLogged = true;
+      writeJsonLine(segment.eventLog, {
+        type: "coach.session.agent_not_allowlisted",
+        at: new Date().toISOString(),
+        streamId: segment.streamId,
+        agentEmail: earlyAgentEmail,
+        stage: "pre-bind",
+      });
+    }
+    return null;
+  }
   if (segment.coachSessionStarted) {
     // Unbound sessions keep trying to pick up CX metadata in the background.
     scheduleCoachBindingEnrichment(segment);
@@ -1356,6 +1407,25 @@ async function ensureCoachSession(segment, options = {}) {
         ...bindInput,
       }, 8000);
       if (bound?.session?.id) {
+        const boundAgentEmail = bound.session?.metadata?.agentEmail || "";
+        if (!isAgentAllowedForCoach(boundAgentEmail)) {
+          // the bind resolved a FOREIGN agent — this call is not ours to coach
+          writeJsonLine(segment.eventLog, {
+            type: "coach.session.agent_not_allowlisted",
+            at: new Date().toISOString(),
+            streamId: segment.streamId,
+            agentEmail: boundAgentEmail,
+            stage: "post-bind",
+            coachSessionId: bound.session.id,
+          });
+          segment.allowlistSkipLogged = true;
+          try {
+            await postJson(`${segment.aiBusUrl}/api/ai/live-coach/grpc/${encodeURIComponent(bound.session.id)}/stop`, {
+              reason: "agent-not-allowlisted",
+            }, 5000);
+          } catch {}
+          return null;
+        }
         segment.coachSessionId = bound.session.id;
         segment.coachSessionStarted = true;
         segment.coachBinding = bound.binding || null;
@@ -3292,6 +3362,7 @@ if (require.main === module) {
 }
 
 module.exports = {
+  isAgentAllowedForCoach,
   createSegmentState,
   ensureCoachSession,
   postCoachInput,

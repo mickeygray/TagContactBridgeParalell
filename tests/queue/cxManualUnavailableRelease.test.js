@@ -8,6 +8,7 @@ const {
   cxDialQueueRepository,
 } = require("../../packages/shared-repositories/src");
 const {
+  releaseAssignedCxQueueForAgent,
   releaseManualUnavailableAgentQueues,
 } = require("../../packages/shared-services/src/cxCadenceService");
 
@@ -133,5 +134,92 @@ test("manual-unavailable timeout release does not stamp an explicit logout", asy
   } finally {
     stub.restore();
     restoreEnv();
+  }
+});
+
+test("manual work pause is not released by the timed break watcher", async () => {
+  const restoreEnv = setEnv("RC_CX_MANUAL_UNAVAILABLE_RELEASE_ENABLED", "true");
+  const now = new Date("2026-07-08T20:00:00.000Z");
+  const pauseStartedAt = new Date("2026-07-08T15:00:00.000Z");
+  const stub = stubManualUnavailableRepositories({
+    extensionId: "63914587004",
+    name: "Sean Pilot",
+    activityState: "unavailable",
+    cxRouting: {
+      enabled: true,
+      desiredAvailability: "unavailable",
+      reason: "manual-unavailable",
+      lastSource: "cx-workspace",
+      manualUnavailableAt: pauseStartedAt,
+      pauseStartedAt,
+      pauseReleaseAt: null,
+      pauseType: "work-pause",
+      assignmentStats: { openAssignments: 0 },
+    },
+    appPresence: {
+      cxWorkspaceActive: true,
+      sessionId: "workspace-session",
+    },
+  });
+
+  try {
+    const result = await releaseManualUnavailableAgentQueues({ now });
+
+    assert.equal(result.ok, true);
+    assert.equal(result.matchedAgents, 0);
+    assert.equal(result.released, 0);
+    assert.equal(stub.calls.listedQueueItems, 0);
+    assert.equal(stub.calls.updatedAgentStates.length, 0);
+  } finally {
+    stub.restore();
+    restoreEnv();
+  }
+});
+
+test("manual work pause immediate queue release keeps the pause untimed", async () => {
+  const now = new Date("2026-07-08T20:00:00.000Z");
+  const pauseStartedAt = new Date("2026-07-08T19:45:00.000Z");
+  const stub = stubManualUnavailableRepositories({
+    extensionId: "63914587004",
+    name: "Sean Pilot",
+    activityState: "unavailable",
+    cxRouting: {
+      enabled: true,
+      desiredAvailability: "unavailable",
+      reason: "manual-unavailable",
+      lastSource: "cx-workspace",
+      manualUnavailableAt: pauseStartedAt,
+      pauseStartedAt,
+      pauseReleaseAt: null,
+      pauseType: "work-pause",
+      assignmentStats: { openAssignments: 3 },
+    },
+  });
+
+  try {
+    const result = await releaseAssignedCxQueueForAgent({
+      extensionId: "63914587004",
+      now,
+      reason: "manual-work-pause",
+      actorEmail: "sean@example.test",
+      pauseType: "work-pause",
+    });
+
+    assert.equal(result.ok, true);
+    assert.equal(result.scanned, 0);
+    assert.equal(result.released, 0);
+    assert.equal(stub.calls.listedQueueItems, 1);
+    assert.equal(stub.calls.updatedAgentStates.length, 1);
+
+    const patch = stub.calls.updatedAgentStates[0].patch;
+    assert.equal(patch.activityState, "unavailable");
+    assert.equal(patch["cxRouting.desiredAvailability"], "unavailable");
+    assert.equal(patch["cxRouting.reason"], "manual-unavailable");
+    assert.equal(patch["cxRouting.pauseType"], "work-pause");
+    assert.equal(patch["cxRouting.pauseReleaseAt"], null);
+    assert.equal(patch["cxRouting.lastQueueReleaseAt"].toISOString(), now.toISOString());
+    assert.equal(patch["upstream.source"], "manual-work-pause");
+  } finally {
+    stub.restore();
   }
 });
