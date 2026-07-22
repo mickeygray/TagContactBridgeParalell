@@ -148,6 +148,7 @@ test("bad_number outcome still runs the post-disposition hangup", async () => {
 
 test("lane disposition controls the active lane UII without requiring a bulk session", async () => {
   const calls = [];
+  const outboxRows = [];
   const client = {
     async dispositionCall(uii, opts) {
       calls.push({ type: "disposition", uii, opts });
@@ -169,15 +170,56 @@ test("lane disposition controls the active lane UII without requiring a bulk ses
       name: "Lane Test",
     },
     outcome: "did_not_connect",
-    agent: { agentEmail: "mgray@taxadvocategroup.com", agentExtensionId: "101" },
+    agent: {
+      agentEmail: "mgray@taxadvocategroup.com",
+      cxAgentId: "7007",
+      agentExtensionId: "101",
+    },
+    deps: {
+      insertOutboxRow: async (row) => {
+        outboxRows.push(row);
+        return row;
+      },
+    },
   });
   assert.equal(result.dispositionOk, true);
   assert.equal(result.disposition, "Auto Dispo");
-  assert.equal(result.persisted, false, "lane consumption is deliberately not hidden in this control slice");
+  assert.equal(result.persisted, true);
+  assert.equal(outboxRows.length, 1);
+  assert.equal(outboxRows[0].agentId, "7007", "RingCX agent ID is not replaced by the extension ID");
+  assert.equal(outboxRows[0].agentExtensionId, "101");
+  assert.equal(outboxRows[0].payload.agentId, "7007");
+  assert.equal(outboxRows[0].payload.agentExtensionId, "101");
   assert.deepEqual(calls, [
     { type: "disposition", uii: "uii-lane-1", opts: { disposition: "Auto Dispo", callback: false, notes: undefined } },
     { type: "hangup", uii: "uii-lane-1" },
   ]);
+});
+
+test("legacy direct terminal dispatch preserves both agent identities", async () => {
+  let received = null;
+  const result = await _test.dispatchCadenceEvent({
+    queueItemId: "q-1",
+    domain: "WYNN",
+    caseId: 101,
+    uii: "uii-1",
+    externId: "cxbl-wynn-q-1",
+    agentId: "7007",
+    agentExtensionId: "101",
+    agentEmail: "agent@example.com",
+    outcome: "answered",
+    source: "agent-button",
+    at: "2026-07-09T12:00:00.000Z",
+  }, async (payload) => {
+    received = payload;
+    return { ok: true };
+  });
+
+  assert.deepEqual(result, { ok: true });
+  assert.equal(received.agentId, "7007");
+  assert.equal(received.agentExtensionId, "101");
+  assert.equal(received.actorEmail, "agent@example.com");
+  assert.equal(received.outcomeAt, "2026-07-09T12:00:00.000Z");
 });
 
 test("ghost-rescue decision: innocent deaths rescue, compliance/foreign/racing rows never do", () => {

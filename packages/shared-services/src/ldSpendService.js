@@ -21,11 +21,11 @@
 //     reported as a collision — never double-counted.
 
 const {
-  upsertSpendEntry,
   listSpendEntries,
   incrementSpendEntry,
 } = require("../../shared-repositories/src/spendEntryRepository");
 const leadCadenceRepository = require("../../shared-repositories/src/leadCadenceRepository");
+const marketingMoneyService = require("./marketingMoneyService");
 const {
   buildVendorDailySummary,
   classifyVendorFamily,
@@ -138,7 +138,7 @@ async function materializeLdSpendForDate({ domain, dateKey, dryRun = false, logg
       });
       continue;
     }
-    await upsertSpendEntry(entry);
+    await marketingMoneyService.recordComputedSpend(entry);
     results.push({
       family: entry.campaign,
       leads: entry.leadsReported,
@@ -203,6 +203,11 @@ async function recordRealtimeLdLeadSpend({
   const numericCaseId = Number(caseId);
   if (!normalizedDomain || !Number.isFinite(numericCaseId) || numericCaseId <= 0) {
     return { skipped: true, reason: "missing-identity" };
+  }
+  const realtimeEnabled = deps.legacyRealtimeEnabled ??
+    (String(process.env.LEGACY_REALTIME_LD_SPEND_ENABLED || "false").toLowerCase() === "true");
+  if (!realtimeEnabled) {
+    return { skipped: true, reason: "single-owner-reconciliation", family: spend.family };
   }
   const dateKey = ldSpendDateKey(now);
   const claim = deps.claimLdSpendTick || leadCadenceRepository.claimLdSpendTick;

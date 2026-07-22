@@ -121,5 +121,19 @@ test("worker enablement is explicit, or follows bulk-load runtime", () => {
   assert.equal(isCxMorningQueueBuilderEnabled({ CX_MORNING_QUEUE_BUILDER_ENABLED: "false", CX_DIAL_RUNTIME_BULK_LOAD_ENABLED: "true" }), false);
   assert.equal(isCxMorningQueueBuilderEnabled({ CX_MORNING_QUEUE_BUILDER_ENABLED: "true" }), true);
   assert.equal(isCxMorningQueueBuilderEnabled({ CX_DIAL_RUNTIME_BULK_LOAD_ENABLED: "true" }), true);
+  assert.equal(isCxMorningQueueBuilderEnabled({ CX_BORING_DIALER_ENABLED: "true" }), true);
   assert.equal(isCxMorningQueueBuilderEnabled({}), false);
+});
+
+test("boring dialer mode makes the morning builder local-queue-only", () => {
+  const options = normalizeOptions({
+    boringDialerEnabled: true,
+    drain: true,
+    mirror: true,
+  });
+
+  assert.equal(options.build, true);
+  assert.equal(options.drain, false);
+  assert.equal(options.mirror, false);
+  assert.equal(options.boringDialerEnabled, true);
 });

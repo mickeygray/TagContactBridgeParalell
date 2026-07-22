@@ -19,6 +19,7 @@ const { buildExternId: buildBulkLoadExternId } = require("./cxBulkLoadLeadSource
 // M11 gate 8: canonical full inventory is 35 (15/10/5/5 mix); 30 was never the target.
 const DEFAULT_TARGET_BUFFER = 35;
 const DEFAULT_REFILL_THRESHOLD = 5;
+const DEFAULT_AUTO_GET_LEADS_COOLDOWN_MS = 5000;
 // M4: reservation lease length. The lease is stamped ONCE at reserve time and is NOT heartbeated —
 // there is no renewal tick. Reserved rows are safe regardless of lease age because the expired-claim
 // reaper HARD-excludes any row carrying metadata.reservationSessionId (cxDialQueueRepository
@@ -291,6 +292,12 @@ function createCxBulkLoadRuntimeService(deps = {}) {
   }
   function refillThresholdFor(state) {
     return Number((state.stats && state.stats.refillThreshold) || DEFAULT_REFILL_THRESHOLD);
+  }
+
+  function autoGetLeadsCooldownMs() {
+    const explicit = Number(process.env.CX_BULK_AUTO_GET_LEADS_COOLDOWN_MS);
+    if (Number.isFinite(explicit) && explicit >= 0) return explicit;
+    return DEFAULT_AUTO_GET_LEADS_COOLDOWN_MS;
   }
 
   function isSessionBusy(sessionId) {
@@ -620,11 +627,6 @@ function createCxBulkLoadRuntimeService(deps = {}) {
       .catch(() => null);
   }
 
-  function shouldGetLeadsAfterDisposition(outcome) {
-    const normalized = String(outcome || "").trim().toLowerCase().replace(/[\s-]+/g, "_");
-    return normalized === "did_not_connect" || normalized === "bad_number";
-  }
-
   function isBadNumberDisposition(outcome) {
     const normalized = String(outcome || "").trim().toLowerCase().replace(/[\s-]+/g, "_");
     return normalized === "bad_number" || normalized === "wrong_number";
@@ -713,6 +715,119 @@ function createCxBulkLoadRuntimeService(deps = {}) {
         elapsedMs: getLeads.elapsedMs || null,
       },
     };
+  }
+
+  function describeAutoGetLeadsEligibility(state = {}) {
+    if (!state) return { ok: false, reason: "missing-session" };
+    if (state.status !== "running") return { ok: false, reason: "session-not-running" };
+    if (state.current) {
+      return {
+        ok: false,
+        reason: state.current.uii ? "current-call-active" : "current-call-awaiting-uii",
+        queueItemId: queueItemKey(state.current) || null,
+      };
+    }
+    const candidate = firstStartableBufferCandidate(state);
+    if (!candidate) return { ok: false, reason: "no-startable-buffer-candidate" };
+    if (!leadStarter || typeof leadStarter.getLeads !== "function") {
+      return { ok: false, reason: "get-leads-unavailable", candidate };
+    }
+    const watchTrace = state.trace?.accountActiveCallWatcher || {};
+    if (Number(watchTrace.relevantActiveCallCount || 0) > 0) {
+      return {
+        ok: false,
+        reason: "active-call-awaiting-match",
+        candidate,
+        queueItemId: queueItemKey(candidate) || null,
+      };
+    }
+    const lastAtMs = Date.parse(String(state.stats?.lastGetLeadsAt || ""));
+    const currentMs = now().getTime();
+    const cooldownMs = autoGetLeadsCooldownMs();
+    const queueItemId = queueItemKey(candidate) || null;
+    if (
+      cooldownMs > 0 &&
+      Number.isFinite(lastAtMs) &&
+      currentMs - lastAtMs < cooldownMs &&
+      str(state.stats?.lastGetLeadsQueueItemId) === str(queueItemId)
+    ) {
+      return {
+        ok: false,
+        reason: "cooldown",
+        candidate,
+        queueItemId,
+        nextAllowedAt: new Date(lastAtMs + cooldownMs).toISOString(),
+      };
+    }
+    return { ok: true, candidate, queueItemId };
+  }
+
+  function stampAutoGetLeadsFailure(state = {}, candidate = {}, trigger = "watch-auto-get-leads", getLeads = {}) {
+    const at = now();
+    const queueItemId = queueItemKey(candidate) || null;
+    const reason = getLeads?.reason || getLeads?.error || "get-leads-failed";
+    return {
+      ...state,
+      stats: {
+        ...(state.stats || {}),
+        lastGetLeadsAt: at.toISOString(),
+        lastGetLeadsQueueItemId: queueItemId,
+        lastGetLeadsError: reason,
+      },
+      trace: {
+        ...(state.trace || {}),
+        lastGetLeads: {
+          at: at.toISOString(),
+          trigger,
+          queueItemId,
+          externId: str(candidate?.externId || candidate?.ringcx?.externId) || null,
+          ok: false,
+          reason,
+        },
+      },
+      lastError: `get-leads-failed: ${reason}`,
+    };
+  }
+
+  async function autoGetLeadsForSession(sessionId, trigger = "watch-auto-get-leads") {
+    return withSessionMutation(sessionId, async () => {
+      const state = await loadState(sessionId);
+      const eligibility = describeAutoGetLeadsEligibility(state);
+      if (!eligibility.ok) {
+        traceBulkFlow("auto_get_leads.skipped", state || {}, {
+          trigger,
+          reason: eligibility.reason,
+          queueItemId: eligibility.queueItemId || null,
+          nextAllowedAt: eligibility.nextAllowedAt || null,
+        });
+        return {
+          ok: false,
+          skipped: true,
+          reason: eligibility.reason,
+          sessionId,
+          queueItemId: eligibility.queueItemId || null,
+        };
+      }
+      const result = await runGetLeadsFromReadyState(state, trigger);
+      let next = result.state || state;
+      const getLeads = result.getLeads || null;
+      if (!getLeads || getLeads.ok === false) {
+        next = stampAutoGetLeadsFailure(next, eligibility.candidate, trigger, getLeads);
+      }
+      await persist(next);
+      traceBulkFlow(getLeads && getLeads.ok === true ? "auto_get_leads.accepted" : "auto_get_leads.failed", next, {
+        trigger,
+        queueItemId: eligibility.queueItemId || null,
+        reason: getLeads?.reason || getLeads?.error || null,
+      });
+      return {
+        ok: getLeads ? getLeads.ok === true : false,
+        skipped: false,
+        reason: getLeads?.reason || getLeads?.error || null,
+        sessionId,
+        queueItemId: eligibility.queueItemId || null,
+      };
+    });
   }
 
   async function loadState(sessionId) {
@@ -1023,12 +1138,6 @@ function createCxBulkLoadRuntimeService(deps = {}) {
       reviewHoldReason: null,
     }, acceptedAt);
     next = await maybeRefill(next);
-    let getLeads = null;
-    if (shouldGetLeadsAfterDisposition(outcome)) {
-      const getLeadsResult = await runGetLeadsFromReadyState(next, "after-disposition");
-      next = getLeadsResult.state || next;
-      getLeads = getLeadsResult.getLeads;
-    }
     if (terminalRecordError) {
       // Fail-CLOSED to an observable replay marker, not fail-silent: the reducer reached a terminal
       // state (call counted, current cleared) but durable cadence/DNC recording did not land. Stamp
@@ -1040,11 +1149,9 @@ function createCxBulkLoadRuntimeService(deps = {}) {
     traceBulkFlow("disposition.finished", next, {
       outcome,
       terminalOk: terminal ? terminal.ok !== false : null,
-      getLeadsOk: getLeads ? getLeads.ok === true : null,
-      getLeadsReason: getLeads?.reason || null,
       terminalRecordDeferred: Boolean(terminalRecordError),
     });
-    return { ...sanitizeSession(next), dispositionOk: true, terminal, getLeads, terminalRecordDeferred: Boolean(terminalRecordError) };
+    return { ...sanitizeSession(next), dispositionOk: true, terminal, terminalRecordDeferred: Boolean(terminalRecordError) };
     });
   }
 
@@ -1153,7 +1260,7 @@ function createCxBulkLoadRuntimeService(deps = {}) {
   }
 
   async function watchAccountActiveCalls(input = {}) {
-    return runCxAccountActiveCallWatchOnce({
+    const result = await runCxAccountActiveCallWatchOnce({
       sessionRepository: repo,
       client,
       domain: input.domain,
@@ -1187,6 +1294,35 @@ function createCxBulkLoadRuntimeService(deps = {}) {
       },
       now: input.now,
     });
+    const sessions = await repo.listActiveBulkLoadSessions({
+      domain: input.domain,
+      accountId: input.accountId,
+      sessionId: input.sessionId,
+      agentEmail: input.agentEmail,
+      agentExtensionId: input.agentExtensionId,
+    });
+    const autoGetLeads = [];
+    for (const session of Array.isArray(sessions) ? sessions : []) {
+      const sessionId = str(session?.sessionId);
+      if (!sessionId || isSessionBusy(sessionId)) continue;
+      const auto = await autoGetLeadsForSession(sessionId, "watch-auto-get-leads").catch((error) => ({
+        ok: false,
+        skipped: false,
+        reason: error?.message || "auto-get-leads-failed",
+        sessionId,
+      }));
+      autoGetLeads.push(auto);
+    }
+    return {
+      ...result,
+      autoGetLeads: {
+        attemptCount: autoGetLeads.filter((entry) => entry && entry.skipped !== true).length,
+        acceptedCount: autoGetLeads.filter((entry) => entry && entry.ok === true).length,
+        skippedCount: autoGetLeads.filter((entry) => entry && entry.skipped === true).length,
+        failedCount: autoGetLeads.filter((entry) => entry && entry.skipped !== true && entry.ok !== true).length,
+        entries: autoGetLeads,
+      },
+    };
   }
 
   return {

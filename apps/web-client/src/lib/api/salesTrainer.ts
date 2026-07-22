@@ -237,6 +237,22 @@ function unwrap<T>(payload: { ok: boolean; result: T }): T {
   return payload.result;
 }
 
+export interface TrainerDrillGrade {
+  score: number;
+  verdict: "nailed" | "close" | "partial" | "miss";
+  strengths: string[];
+  gaps: string[];
+  coaching: string;
+  suggestedLine: string | null;
+  doctrineFlag: string | null;
+  model: string | null;
+}
+
+export interface TrainerScoredCall {
+  transcript: string;
+  score: Record<string, unknown>;
+}
+
 export const salesTrainerApi = {
   async checkAuth() {
     return trainerRequest<{ ok: true; user: Record<string, unknown> }>(
@@ -280,6 +296,8 @@ export const salesTrainerApi = {
     difficulty?: string | null;
     mode?: string | null;
     scenarioArchetype?: string | null;
+    situation?: string | null;
+    demographicOverrides?: Record<string, unknown>;
     includeAudio?: boolean;
     audio?: Record<string, unknown>;
   }) {
@@ -387,6 +405,35 @@ export const salesTrainerApi = {
     return unwrap(
       await trainerRequest<{ ok: true; result: TrainerCoachPanel }>(
         "/api/sales-trainer/coach",
+        { method: "POST", body },
+      ),
+    );
+  },
+  // Training Center: model-graded drill answer (quiz over the field manual).
+  async gradeDrill(body: {
+    topic?: string;
+    question: string;
+    referenceAnswer?: string;
+    answer: string;
+  }) {
+    return unwrap(
+      await trainerRequest<{ ok: true; result: TrainerDrillGrade }>(
+        "/api/sales-trainer/quiz/grade",
+        { method: "POST", body },
+      ),
+    );
+  },
+  // Training Center: score one of my recorded calls on demand.
+  async scoreCall(body: {
+    driveFileId: string;
+    domain?: string;
+    phone?: string;
+    direction?: string;
+    durationSec?: number;
+  }) {
+    return unwrap(
+      await trainerRequest<{ ok: true; result: TrainerScoredCall }>(
+        "/api/sales-trainer/score-call",
         { method: "POST", body },
       ),
     );

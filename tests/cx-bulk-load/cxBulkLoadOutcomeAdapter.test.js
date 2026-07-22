@@ -26,7 +26,13 @@ function fakeDeps() {
   };
 }
 
-const SESSION = { sessionId: "s1", domain: "TAG", agentEmail: "a@x.com" };
+const SESSION = {
+  sessionId: "s1",
+  domain: "TAG",
+  cxAgentId: "agent-7",
+  agentExtensionId: "101",
+  agentEmail: "a@x.com",
+};
 const CANDIDATE = {
   queueItemId: "q1",
   caseId: 42,
@@ -73,6 +79,8 @@ test("buildCadenceEvent is a narrow pure projection", () => {
   assert.equal(e.name, "Test Prospect");
   assert.equal(e.externId, "x1");
   assert.equal(e.domain, "TAG");
+  assert.equal(e.agentId, "agent-7");
+  assert.equal(e.agentExtensionId, "101");
   assert.equal(e.agentEmail, "a@x.com");
   assert.equal(e.uii, "u1");
   assert.equal(e.sourceName, "Mickey local bulk test");
@@ -269,14 +277,23 @@ test("#4 buildReviewCorrectionRow copies case context from the original terminal
     domain: "TAG",
     caseId: 4242,
     externId: "cxbl-tag-q1",
+    agentId: "agent-7",
+    agentExtensionId: "7007",
     agentEmail: "sean@x.com",
-    payload: { queueItemId: "Q1", uii: "U1", domain: "TAG", caseId: 4242, externId: "cxbl-tag-q1", outcome: "did_not_connect", agentEmail: "sean@x.com", at: "2026-06-29T00:00:00.000Z" },
+    phone: "3105551212",
+    payload: { queueItemId: "Q1", uii: "U1", domain: "TAG", caseId: 4242, externId: "cxbl-tag-q1", outcome: "did_not_connect", agentId: "agent-7", agentExtensionId: "7007", agentEmail: "sean@x.com", phone: "3105551212", at: "2026-06-29T00:00:00.000Z" },
   };
   const row = buildReviewCorrectionRow({ sessionId: "S1", queueItemId: "Q1", uii: "U1", original, at: "2026-06-29T01:00:00.000Z" });
   assert.equal(row.caseId, 4242, "caseId carried so the drain routes the DNC to Logics");
   assert.equal(row.domain, "TAG");
   assert.equal(row.payload.outcome, "dnc", "the replayed payload outcome is dnc, not the stale did_not_connect");
   assert.equal(row.payload.caseId, 4242);
+  assert.equal(row.agentId, "agent-7");
+  assert.equal(row.agentExtensionId, "7007");
+  assert.equal(row.phone, "3105551212");
+  assert.equal(row.payload.agentId, "agent-7");
+  assert.equal(row.payload.agentExtensionId, "7007");
+  assert.equal(row.payload.phone, "3105551212");
   assert.equal(row.payload.reviewSource, "agent-auto-review");
   assert.equal(row.source, "agent-auto-review");
 });

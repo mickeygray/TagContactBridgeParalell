@@ -6,6 +6,11 @@ const {
   extractToolUse,
 } = require("./anthropicClient");
 const { createOpenAiClient, getOpenAiConfig } = require("./openaiClient");
+const {
+  createPhoneBurnerClient,
+  createPhoneBurnerDurableCredentialStore,
+  createPhoneBurnerEnvironmentCredentialStore,
+} = require("./phoneBurnerClient");
 const { createCallFireClient } = require("./callFireClient");
 const {
   createCallrailClient,
@@ -34,6 +39,9 @@ module.exports = {
   extractTextBlocks,
   extractToolUse,
   createOpenAiClient,
+  createPhoneBurnerClient,
+  createPhoneBurnerDurableCredentialStore,
+  createPhoneBurnerEnvironmentCredentialStore,
   getOpenAiConfig,
   createCallFireClient,
   createCallrailClient,

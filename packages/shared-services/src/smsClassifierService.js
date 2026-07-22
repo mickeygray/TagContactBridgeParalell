@@ -13,6 +13,10 @@ const {
 const {
   getObjectionPlaybook,
 } = require("./liveCoachObjectionBank");
+const {
+  asksCompanyLocation,
+  containsCompanyLocationClaim,
+} = require("./smsCompanyFactSafety");
 
 const CLASSIFIER_MODEL = env("SMS_CLASSIFIER_MODEL", "claude-opus-4-6");
 const CLASSIFIER_MAX_TOKENS = Number(env("SMS_CLASSIFIER_MAX_TOKENS", 900));
@@ -382,6 +386,7 @@ const SYSTEM_PROMPT = [
   "  - soft_defer: 'not now,' 'needs more info,' or a partial no. Prospect stays in the funnel. Reply is short and door-open. If they offered a callback time, capture it.",
   "  - callback_prompt: engaged or might buy now. Cost/process/timeline questions, notice/balance/levy/lien/garnishment mentions, 'can you help,' scheduling, describes a tax problem, asks an in-reach tax question. The reply offers one piece of value and confirms a rep will be calling them back.",
   "  - needs_human: legal threats, hostility, garbled/spam/unrelated, sensitive case-specific analysis ('should I pay this?' / 'do I qualify for X?' / 'is my lien valid?'), licensing-bait, anything outside this prompt's safe range. No reply sent. Alert goes to a human.",
+  "  - You have no verified Wynn office, address, city, or state facts in this prompt. Never infer a company location from the Wynn name or general knowledge. Questions about where Wynn is based, located, headquartered, or has an office are needs_human with suggested_reply empty.",
   "",
   "DNC philosophy - read carefully. This fires a Logics status change:",
   "  Fire dnc_confirm in only three categories of moment:",
@@ -564,6 +569,19 @@ async function classifySms(input = {}) {
     });
   }
 
+  if (asksCompanyLocation(text)) {
+    return baseClassification({
+      intent: "asked_business_location",
+      tier: "needs_human",
+      prospectState: "skeptical",
+      confidence: 1,
+      rationale: "Company-location question requires a verified business fact; no automated reply was sent.",
+      hotIntent: noHot,
+      model: "deterministic-company-fact-guard",
+      validationError: "company-location-not-configured",
+    });
+  }
+
   const historyLines = Array.isArray(input.history)
     ? input.history
         .slice(-6)
@@ -660,6 +678,18 @@ async function classifySms(input = {}) {
       hotIntent: noHot,
       model: response?.model || null,
       validationError: replyCheck.reason,
+    });
+  }
+  if (containsCompanyLocationClaim(replyCheck.reply)) {
+    return baseClassification({
+      intent: String(raw.intent || "unsupported_company_location_claim"),
+      tier: "needs_human",
+      prospectState,
+      confidence: 0,
+      rationale: "Classifier drafted an unsupported company-location claim; no automated reply was sent.",
+      hotIntent: noHot,
+      model: response?.model || null,
+      validationError: "company-location-not-configured",
     });
   }
   return baseClassification({

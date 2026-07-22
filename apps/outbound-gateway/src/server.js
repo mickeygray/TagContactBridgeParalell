@@ -366,6 +366,8 @@ async function startServer() {
 
   const runtime = await initializeServiceRuntime(config);
   const workerState = createWorkerState();
+  const leadDeliveryEnabled = String(process.env.LEAD_DELIVERY_ENABLED || "false")
+    .trim().toLowerCase() === "true";
   const requireInternalAccess = buildInternalAccessMiddleware(config);
   const requireHealthAccess = buildHealthAccessMiddleware(config);
   runtime.installSignalHandlers();
@@ -609,6 +611,9 @@ async function startServer() {
   }));
 
   app.post("/api/outbound/cadence/phoneburner-round", requireInternalAccess, asyncHandler(async (req, res) => {
+    if (leadDeliveryEnabled) {
+      return res.status(409).json({ ok: false, error: "lead-delivery-owns-phoneburner" });
+    }
     return acceptOutboundEvent(res, {
       eventType: OUTBOUND_EVENT_TYPES.PHONEBURNER_ROUND_REQUESTED,
       aggregateId: req.body?.domain || "outbound-phoneburner-round",
@@ -645,6 +650,9 @@ async function startServer() {
   }));
 
   app.post("/api/outbound/manual/phoneburner", requireInternalAccess, asyncHandler(async (req, res) => {
+    if (leadDeliveryEnabled) {
+      return res.status(409).json({ ok: false, error: "lead-delivery-owns-phoneburner" });
+    }
     return acceptOutboundEvent(res, {
       eventType: OUTBOUND_EVENT_TYPES.PHONEBURNER_MANUAL_REQUESTED,
       aggregateId: req.body?.domain || "outbound-phoneburner-manual",

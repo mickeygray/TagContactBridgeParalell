@@ -59,6 +59,11 @@ export interface CallStatsBucket {
   inboundCalls: number;
   cxCalls: number;
   exCalls: number;
+  phoneBurnerCalls: number;
+  connectedCalls: number;
+  appointmentsSet: number;
+  dncOutcomes: number;
+  talkDurationSec: number;
   longestCallSec: number;
   lastCallAt: string | null;
 }

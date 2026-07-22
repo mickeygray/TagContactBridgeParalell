@@ -1,7 +1,7 @@
 "use strict";
 
 const { requestJson } = require("../../shared-integrations/src");
-const { spendEntryRepository } = require("../../shared-repositories/src");
+const marketingMoneyService = require("./marketingMoneyService");
 const {
   getMailerConfigState,
   isMailerConfigLoaded,
@@ -404,23 +404,21 @@ async function syncSheet(sheetConfig) {
       );
     }
 
-    let upserted = 0;
-    let skipped = 0;
-    for (const row of parsedRows) {
-      try {
-        await spendEntryRepository.upsertSpendEntry(row);
-        upserted += 1;
-      } catch (_error) {
-        skipped += 1;
-      }
-    }
+    const moneyResult = await marketingMoneyService.reconcileSpendSheet({
+      rows: parsedRows,
+      sheetId: sheetConfig.id,
+      domain: sheetConfig.domain,
+      channel: sheetConfig.channel,
+      runId: `sheet-${sheetConfig.id}-${Date.now()}`,
+    });
 
     return {
       sheet: sheetConfig.id,
       label: sheetConfig.label,
       parsedRows: rawRows.length,
-      upserted,
-      skipped,
+      upserted: Number(moneyResult.upsertedCount || 0) + Number(moneyResult.modifiedCount || 0),
+      retired: Number(moneyResult.retiredCount || 0),
+      skipped: 0,
       reconcileResult,
     };
   }

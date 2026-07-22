@@ -7,6 +7,7 @@ const {
   buildStrategistRequest,
   buildCoachRequest,
   BEAT_CATALOG,
+  ANALYST_DOCTRINE,
 } = require("../../packages/shared-services/src/coachTwoStationPrompts");
 const {
   parseBatchGuidance,
@@ -112,6 +113,51 @@ test("COACH request: lean — section + the play menu (with top pick) + prior gu
   // lean: A never carries the reference / beat catalog
   assert.ok(!req.system.includes("SCRIPT BEATS BY SECTION") && !req.system.includes("COACH REFERENCE"), "A carries no materials");
   assert.ok(/keep applying your LAST guidance/i.test(req.system) && /switch to the matching play/i.test(req.system), "sticky-guidance rule present");
+});
+
+// ── HOUSE DOCTRINE (the analyst re-pointing, 2026-07-20) ─────────────────────
+
+test("DOCTRINE rides both stations' systems: advisory frame, four tenets, legitimacy read, identity/service language", () => {
+  const b = buildStrategistRequest({ reference: "r", transcript: "t" });
+  const a = buildCoachRequest({ says: [], lastTurns: "x" });
+  for (const [station, system] of [["strategist", b.system], ["coach", a.system]]) {
+    assert.ok(system.includes("HOUSE DOCTRINE"), `${station}: doctrine card present`);
+    assert.ok(/ADVISORY, NEVER DIRECTIVE/.test(system), `${station}: advisory frame`);
+    assert.ok(/ANALYST, NOT SCRIPTWRITER/.test(system), `${station}: analyst posture`);
+    assert.ok(/Bob and weave/i.test(system), `${station}: tenet 1`);
+    assert.ok(/Certain without promising/i.test(system), `${station}: tenet 3`);
+    assert.ok(/Compliance and representation ONLY/i.test(system), `${station}: tenet 4`);
+    assert.ok(/READ THE PERSON FIRST/.test(system), `${station}: legitimacy read`);
+    assert.ok(/FISHING/.test(system), `${station}: bad-actor flag doctrine`);
+    assert.ok(system.includes("The Tax Group"), `${station}: firm name`);
+    assert.ok(system.includes("enrolled agents, tax preparers, and other tax specialists"), `${station}: approved roster`);
+    assert.ok(system.includes("the attorney's staff") && !/attorney-led/.test(system.replace("not 'attorney-led'", "")), `${station}: attorney's staff, never attorney-led`);
+    assert.ok(/\$350 per return/.test(system) && /\$1,200 for/.test(system), `${station}: quote rules of thumb`);
+    assert.ok(/protected today by filing the/i.test(system), `${station}: POA-protection urgency, no IRS clocks`);
+    assert.ok(/online inquiry/.test(system), `${station}: lead-source language`);
+  }
+});
+
+test("DOCTRINE cacheability: the system prompt is byte-stable across calls (only the prompt varies)", () => {
+  const b1 = buildStrategistRequest({ reference: "SAME REF", transcript: "call one", priorSummaryText: "s1" });
+  const b2 = buildStrategistRequest({ reference: "SAME REF", transcript: "a totally different call", priorSummaryText: "s2" });
+  assert.equal(b1.system, b2.system, "B system identical across calls -> cached prefix holds");
+  assert.notEqual(b1.prompt, b2.prompt, "volatile content rides the uncached prompt");
+
+  const a1 = buildCoachRequest({ currentSection: "4B", says: [{ tag: "x", text: "y" }], lastTurns: "turn one" });
+  const a2 = buildCoachRequest({ currentSection: "1", says: [{ tag: "z", text: "w" }], lastTurns: "another turn" });
+  assert.equal(a1.system, a2.system, "A system identical across calls");
+  assert.notEqual(a1.prompt, a2.prompt);
+
+  // The doctrine itself contains no interpolation seams.
+  assert.equal(typeof ANALYST_DOCTRINE, "string");
+  assert.ok(!/\$\{/.test(ANALYST_DOCTRINE), "no template holes in the doctrine card");
+});
+
+test("COACH is analyst-first: guidance is the primary channel, say is reserved for moments that need words", () => {
+  const req = buildCoachRequest({ says: [], lastTurns: "x" });
+  assert.ok(/LEAD WITH THE READ/.test(req.system), "read-first instruction present");
+  assert.ok(/only when the/.test(req.system) && /genuinely needs words/.test(req.system), "say demoted to genuine-need moments");
 });
 
 test("COACH output flows through the dispatch normalizer into dialog{say, guidance}", () => {

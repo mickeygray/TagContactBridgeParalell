@@ -24,6 +24,12 @@ const DncAudit = require("./DncAudit");
 const EventRecord = require("../../event-core/src/models/EventRecord");
 const HourlyJobEvent = require("./HourlyJobEvent");
 const LeadCadence = require("./LeadCadence");
+const LeadDeliveryAgent = require("./LeadDeliveryAgent");
+const LeadDeliveryCheckpoint = require("./LeadDeliveryCheckpoint");
+const LeadDeliveryEvent = require("./LeadDeliveryEvent");
+const LeadDeliveryFairPickCursor = require("./LeadDeliveryFairPickCursor");
+const LeadDeliveryItem = require("./LeadDeliveryItem");
+const DailyDial = require("./DailyDial");
 const MailImport = require("./MailImport");
 const MailerConfig = require("./MailerConfig");
 const MasterProspectIndex = require("./MasterProspectIndex");
@@ -78,6 +84,12 @@ const MODEL_REGISTRY = Object.freeze({
   EventRecord,
   HourlyJobEvent,
   LeadCadence,
+  LeadDeliveryAgent,
+  LeadDeliveryCheckpoint,
+  LeadDeliveryEvent,
+  LeadDeliveryFairPickCursor,
+  LeadDeliveryItem,
+  DailyDial,
   MailImport,
   MailerConfig,
   MasterProspectIndex,
@@ -136,6 +148,12 @@ module.exports = {
   EventRecord,
   HourlyJobEvent,
   LeadCadence,
+  LeadDeliveryAgent,
+  LeadDeliveryCheckpoint,
+  LeadDeliveryEvent,
+  LeadDeliveryFairPickCursor,
+  LeadDeliveryItem,
+  DailyDial,
   MailImport,
   MailerConfig,
   MasterProspectIndex,

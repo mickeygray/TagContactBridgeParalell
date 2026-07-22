@@ -1,0 +1,20 @@
+{
+  "_comment": "REGISTERED caller-ID rotation pools (2026-07-09, Mickey's spec). Each dial group = one agent; the service rotates the agent's presented caller ID through this pool every tick (intended cadence: every 2h, business hours) across ALL of that agent's active campaigns. Stateless round-robin: next = pool[(indexOf(current)+1) % len]. RULE: every number here must be REGISTERED at the Free Caller Registry under the company. Pool = each agent's primary (their current live number) + their 747 numbers, per Mickey's 2026-07-09 instruction.",
+  "_assumptions_confirm": [
+    "BRUCE PRIMARY = 9498893027 — this is Bruce's currently-live number, BUT on the RC account it is assigned to extension 63898141004 (NOT Bruce's ext 63555286004), so callbacks to it route elsewhere. Confirm or replace.",
+    "CHRIS gets 2 of Bruce's four 747s: 7473180605 and 7478002363 (Bruce keeps 7473180561, 7473180572). Swap which two if you prefer. NOTE: these are on Bruce's extension, so callbacks to them ring Bruce, not Chris — Mickey directed this move explicitly.",
+    "BRAD's 213 number 2137232674 is included in Brad's pool per instruction."
+  ],
+  "_agentOrder": [
+    { "order": 1, "name": "Sean Lucas", "email": "slucas@taxadvocategroup.com", "dialGroupId": "1011", "extensionId": "63756126004", "extensionNumber": "445" },
+    { "order": 2, "name": "Bruce Allen", "email": "ballen@taxadvocategroup.com", "dialGroupId": "1012", "extensionId": "63555286004", "extensionNumber": "966" },
+    { "order": 3, "name": "Phil Olson", "email": "polson@taxadvocategroup.com", "dialGroupId": "1014", "extensionId": "63704036004", "extensionNumber": "319" },
+    { "order": 4, "name": "Brad Hansen", "email": "bhansen@taxadvocategroup.com", "dialGroupId": "1067", "extensionId": "63914587004", "extensionNumber": "742" },
+    { "order": 5, "name": "Chris Bolt", "email": "cbolt@taxadvocategroup.com", "dialGroupId": "1068", "extensionId": "63914586004", "extensionNumber": "741" }
+  ],
+  "1011": ["8184625451", "7472933389", "7473181179", "7478002249"],
+  "1012": ["9498893027", "7473180561", "7473180572"],
+  "1014": ["8184625709", "7473180469", "7473180551", "7474444693"],
+  "1067": ["8182246182", "7473181121", "7478002216", "2137232674"],
+  "1068": ["8183375982", "7473180621", "7474444923", "7473180605", "7478002363"]
+}

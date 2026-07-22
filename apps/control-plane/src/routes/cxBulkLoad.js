@@ -15,6 +15,23 @@ const {
   submitCxLaneCallDisposition,
   submitCxBulkLoadReviewOutcome,
 } = require("../../../../packages/shared-services/src");
+const {
+  boringDialerAvailabilityNoop,
+  getCxBoringDialerSession,
+  killCxBoringDialerSession,
+  startCxBoringDialerGetLeads,
+  startCxBoringDialerSession,
+  submitCxBoringDialerDisposition,
+  syncCxBoringDialerActiveCall,
+} = require("../../../../packages/shared-services/src/cxBoringDialerRuntime");
+const {
+  boringWebhookAvailabilityNoop,
+  getCxBoringWebhookSession,
+  killCxBoringWebhookSession,
+  startCxBoringWebhookGetLeads,
+  startCxBoringWebhookSession,
+  syncCxBoringWebhookActiveCall,
+} = require("../../../../packages/shared-services/src/cxBoringWebhookRuntime");
 const { toErrorResponse } = require("../../../../packages/shared-errors/src");
 
 // Bulk_load rail HTTP surface. Each handler does only: auth -> entry function
@@ -26,6 +43,20 @@ function createCxBulkLoadRouter(auth, options = {}) {
   const router = express.Router();
   const logger = options.logger || console;
   const wrapCards = options.wrapCards || null; // null = CX_CALL_WRAP_QUEUE_ENABLED off
+  const dispatchBoringButtonAction = options.dispatchBoringButtonAction || null;
+
+  function boringEnabled() {
+    return String(process.env.CX_BORING_DIALER_ENABLED || "false").trim().toLowerCase() === "true";
+  }
+
+  function boringWebhookEnabled() {
+    return String(process.env.CX_BORING_WEBHOOK_ENABLED || "false").trim().toLowerCase() === "true";
+  }
+
+  function dialerCommand(current, replacement, webhookReplacement = replacement) {
+    if (boringWebhookEnabled()) return webhookReplacement;
+    return boringEnabled() ? replacement : current;
+  }
 
   function success(res, result) {
     return res.json({ ok: true, result });
@@ -35,10 +66,13 @@ function createCxBulkLoadRouter(auth, options = {}) {
     return res.status(error.status || 500).json(toErrorResponse(error));
   }
 
-  async function sendBulkCommand(req, res, command, source) {
+  async function sendBulkCommand(req, res, command, source, afterSuccess = null) {
     const input = source(req);
     try {
-      const result = await command(input, { user: req.user, logger });
+      let result = await command(input, { user: req.user, logger });
+      if (result && typeof afterSuccess === "function") {
+        result = await afterSuccess(result, input);
+      }
       // A mutating command that resolves null means "no active session matched" —
       // the entry function returns null instead of throwing. Without this line the
       // client sees HTTP 200 and the server records nothing (field lesson 2026-07-02:
@@ -70,11 +104,11 @@ function createCxBulkLoadRouter(auth, options = {}) {
   }
 
   router.get("/session", auth.requireAuth, auth.requireUser, async (req, res) => {
-    return sendBulkCommand(req, res, getCxBulkLoadSession, (request) => request.query || {});
+    return sendBulkCommand(req, res, dialerCommand(getCxBulkLoadSession, getCxBoringDialerSession, getCxBoringWebhookSession), (request) => request.query || {});
   });
 
   router.post("/start", auth.requireAuth, auth.requireUser, async (req, res) => {
-    return sendBulkCommand(req, res, startCxBulkLoadSession, (request) => request.body || {});
+    return sendBulkCommand(req, res, dialerCommand(startCxBulkLoadSession, startCxBoringDialerSession, startCxBoringWebhookSession), (request) => request.body || {});
   });
 
   // CALL WRAP CARDS (design: docs/CX_CALL_WRAP_QUEUE_DESIGN_2026-07-06.md). Cards exist
@@ -115,6 +149,7 @@ function createCxBulkLoadRouter(auth, options = {}) {
             calledAt: card.calledAt || null,
             expiresAt: card.expiresAt || null,
             systemDisposition: card.systemDisposition || null,
+            appointmentOnly: card.payload?.appointmentOnly === true,
             coachSummary: typeof card.coachSummary === "string"
               ? card.coachSummary.slice(0, 600)
               : card.coachSummary || null,
@@ -177,6 +212,7 @@ function createCxBulkLoadRouter(auth, options = {}) {
             correctionOk: effectOk(effects.correction),
             appointmentOk: effectOk(effects.appointment),
             logicsStatusOk: effectOk(effects.logicsStatus),
+            cadenceOk: effectOk(effects.cadence),
           },
           failedEffects,
         },
@@ -188,11 +224,58 @@ function createCxBulkLoadRouter(auth, options = {}) {
   });
 
   router.post("/disposition", auth.requireAuth, auth.requireUser, async (req, res) => {
-    return sendBulkCommand(req, res, submitCxBulkLoadDisposition, (request) => request.body || {});
+    if (boringWebhookEnabled()) {
+      return res.status(410).json({ ok: false, code: "ringcx-dispositions-only" });
+    }
+    return sendBulkCommand(
+      req,
+      res,
+      dialerCommand(submitCxBulkLoadDisposition, submitCxBoringDialerDisposition),
+      (request) => request.body || {},
+      async (result, input) => {
+        if (!boringEnabled() || result.dispositionOk !== true || !dispatchBoringButtonAction) return result;
+        let buttonAction;
+        try {
+          buttonAction = await dispatchBoringButtonAction({
+            nextAction: input.nextAction,
+            terminal: result.dispositionResult?.terminal || null,
+          });
+        } catch (error) {
+          buttonAction = {
+            ok: false,
+            action: input.nextAction || null,
+            reason: "direct-action-failed-retry-queued",
+            error: error?.message || String(error),
+          };
+        }
+        let refillSnapshot = null;
+        let buttonRefill = null;
+        try {
+          refillSnapshot = await startCxBoringDialerGetLeads(
+            { sessionId: input.sessionId, agentEmail: input.agentEmail },
+            { user: req.user, logger },
+          );
+          buttonRefill = refillSnapshot?.refillResult || { ok: true, skipped: true, reason: "no-active-session" };
+        } catch (error) {
+          buttonRefill = {
+            ok: false,
+            reason: "ringcx-refill-check-failed",
+            error: error?.message || String(error),
+          };
+        }
+        return {
+          ...(refillSnapshot || result),
+          dispositionOk: result.dispositionOk,
+          dispositionResult: result.dispositionResult,
+          buttonAction,
+          buttonRefill,
+        };
+      },
+    );
   });
 
   router.post("/sync-active", auth.requireAuth, auth.requireUser, async (req, res) => {
-    return sendBulkCommand(req, res, syncCxBulkLoadActiveCall, (request) => request.body || {});
+    return sendBulkCommand(req, res, dialerCommand(syncCxBulkLoadActiveCall, syncCxBoringDialerActiveCall, syncCxBoringWebhookActiveCall), (request) => request.body || {});
   });
 
   router.post("/review-outcome", auth.requireAuth, auth.requireUser, async (req, res) => {
@@ -201,7 +284,7 @@ function createCxBulkLoadRouter(auth, options = {}) {
 
 
   router.post("/get-leads", auth.requireAuth, auth.requireUser, async (req, res) => {
-    return sendBulkCommand(req, res, startCxBulkLoadGetLeads, (request) => request.body || {});
+    return sendBulkCommand(req, res, dialerCommand(startCxBulkLoadGetLeads, startCxBoringDialerGetLeads, startCxBoringWebhookGetLeads), (request) => request.body || {});
   });
 
   // WO-3 tripwire: manual dial is retired — see attic/manual-dial-lane.attic.md
@@ -210,19 +293,20 @@ function createCxBulkLoadRouter(auth, options = {}) {
   });
 
   router.post("/pause-progressive", auth.requireAuth, auth.requireUser, async (req, res) => {
-    return sendBulkCommand(req, res, pauseCxBulkLoadProgressiveDialing, (request) => request.body || {});
+    return sendBulkCommand(req, res, dialerCommand(pauseCxBulkLoadProgressiveDialing, boringDialerAvailabilityNoop, boringWebhookAvailabilityNoop), (request) => request.body || {});
   });
 
   router.post("/resume-progressive", auth.requireAuth, auth.requireUser, async (req, res) => {
-    return sendBulkCommand(req, res, resumeCxBulkLoadProgressiveDialing, (request) => request.body || {});
+    return sendBulkCommand(req, res, dialerCommand(resumeCxBulkLoadProgressiveDialing, boringDialerAvailabilityNoop, boringWebhookAvailabilityNoop), (request) => request.body || {});
   });
 
   router.post("/skip", auth.requireAuth, auth.requireUser, async (req, res) => {
+    if (boringEnabled()) return res.status(410).json({ ok: false, code: "skip-disabled-record-an-outcome" });
     return sendBulkCommand(req, res, skipCxBulkLoadCurrent, (request) => request.body || {});
   });
 
   router.post("/kill", auth.requireAuth, auth.requireUser, async (req, res) => {
-    return sendBulkCommand(req, res, killCxBulkLoadSession, (request) => request.body || {});
+    return sendBulkCommand(req, res, dialerCommand(killCxBulkLoadSession, killCxBoringDialerSession, killCxBoringWebhookSession), (request) => request.body || {});
   });
 
   return router;

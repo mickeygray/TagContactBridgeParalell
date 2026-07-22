@@ -49,7 +49,7 @@ $ServiceCatalog = @{
     ParallelRingCentralCx   = @{ Label = "RingCentral CX";   Optional = $false; Ports = @($RingcentralCxPort);   Skip = $false; HealthUrls = @("http://127.0.0.1:${RingcentralCxPort}/health"); HealthRequired = $true }
     ParallelBlogger         = @{ Label = "Blogger";          Optional = $true;  Ports = @();     Skip = [bool]$SkipBlogger; HealthUrls = @(); HealthRequired = $false }
     ParallelNginx           = @{ Label = "nginx";            Optional = $true;  Ports = @(80, 81); Skip = [bool]$SkipNginx; HealthUrls = @("http://127.0.0.1:81/"); HealthRequired = $true }
-    ParallelNgrok           = @{ Label = "ngrok";            Optional = $true;  Ports = @();     Skip = [bool]$SkipNgrok;   HealthUrls = @("https://tagcontactbridge.ngrok.app/"); HealthRequired = $false }
+    ParallelNgrok           = @{ Label = "ngrok";            Optional = $true;  Ports = @();     Skip = [bool]$SkipNgrok;   HealthUrls = @("https://tag-webhook.ngrok.app/login"); HealthRequired = $false }
 }
 
 $StopOrder = @(
@@ -79,6 +79,7 @@ function Write-Step($message) {
 }
 
 $script:RestartSummary = @()
+$script:RestartFailures = @()
 
 function Add-Summary($serviceName, $result, $detail = "") {
     $entry = Get-CatalogEntry $serviceName
@@ -271,11 +272,25 @@ if ($BuildWeb) {
 }
 
 foreach ($serviceName in $StopOrder) {
-    Stop-StackService $serviceName
+    try {
+        Stop-StackService $serviceName
+    } catch {
+        $message = $_.Exception.Message
+        Write-Step "[error] $(Get-ServiceLabel $serviceName) stop failed: $message"
+        Add-Summary $serviceName "stop failed" $message
+        $script:RestartFailures += "${serviceName} stop: $message"
+    }
 }
 
 foreach ($serviceName in $StartOrder) {
-    Start-StackService $serviceName
+    try {
+        Start-StackService $serviceName
+    } catch {
+        $message = $_.Exception.Message
+        Write-Step "[error] $(Get-ServiceLabel $serviceName) start/health failed: $message"
+        Add-Summary $serviceName "start/health failed" $message
+        $script:RestartFailures += "${serviceName} start/health: $message"
+    }
 }
 
 if ($Healthcheck) {
@@ -299,6 +314,11 @@ if ($Healthcheck) {
 if ($script:RestartSummary.Count -gt 0) {
     Write-Step "Restart summary"
     $script:RestartSummary | Format-Table -AutoSize
+}
+
+if ($script:RestartFailures.Count -gt 0) {
+    Write-Step "Universal Parallel restart finished with $($script:RestartFailures.Count) failure(s); every included service was still attempted."
+    throw ($script:RestartFailures -join " | ")
 }
 
 Write-Step "Universal Parallel restart complete"

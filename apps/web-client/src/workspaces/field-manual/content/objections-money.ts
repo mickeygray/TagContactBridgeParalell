@@ -112,13 +112,13 @@ export const OBJECTION_MONEY_ENTRIES: ManualEntry[] = [
       "lot of money",
     ],
     lead:
-      "This is a different animal from “I can’t afford it” — they HAVE the capacity but doubt the value. They are comparing your fee to TurboTax, a CPA’s hourly rate, or the $205 do-it-yourself OIC fee they read about online. The answer is never to defend the number with vague value language and never to cave — it is to itemize the work and re-anchor the fee against the balance and the cost of doing nothing.",
+      "This is a different animal from “I can’t afford it” — they HAVE the capacity but doubt the value. They are comparing your fee to TurboTax, a CPA’s hourly rate, or They are comparing your fee to TurboTax, a CPA’s hourly rate, or the couple-hundred-dollar do-it-yourself OIC application fee they read about online.. The answer is never to defend the number with vague value language and never to cave — it is to itemize the work and re-anchor the fee against the balance and the cost of doing nothing.",
     blocks: [
       {
         kind: "prose",
         heading: "What it really means",
         text:
-          "Price scrutiny is not rejection — it is a prospect doing the math out loud, and often it is fair scrutiny. They have no way to know what representation actually involves, so they anchor to the only numbers they’ve seen: software prices and application fees. Your job is to move the anchor. The fee should never be compared to TurboTax; it should be compared to the balance, to the penalties that accrued just this year, and to what failure on the cheap route costs. And hold this rule absolutely: never cave on price without a reason. A drop with no justification tells the prospect the original price was inflated — it converts a value question into a trust problem, which is far worse.",
+          "Price scrutiny is usually not rejection — it is a prospect doing the math out loud, and often it is fair scrutiny., and often it is fair scrutiny. They have no way to know what representation actually involves, so they anchor to the only numbers they’ve seen: software prices and application fees. Your job is to move the anchor. The fee should never be compared to TurboTax; it should be compared to the balance, to the penalties that accrued just this year, and to what failure on the cheap route costs. And hold this rule absolutely: never cave on price without a reason. A drop with no justification tells the prospect the original price was inflated — it converts a value question into a trust problem, which is far worse.",
       },
       {
         kind: "moves",
@@ -202,13 +202,13 @@ export const OBJECTION_MONEY_ENTRIES: ManualEntry[] = [
       "how much are we talking",
     ],
     lead:
-      "An early price question is a BUYING SIGNAL wearing an objection’s clothes — nobody asks the price of something they don’t want. It dies two ways: dodging it (reads evasive, confirms scam fears) or quoting a number blind (anchors wrong and invites comparison shopping). The play is to answer the momentum without quoting the engagement.",
+      "An early price question is usually a BUYING SIGNAL wearing an objection’s clothes — people rarely ask the price of something they don’t want. It dies two ways: dodging it (reads evasive, confirms scam fears) or quoting a number blind (anchors wrong and invites comparison shopping). The play is to answer the momentum without quoting the engagement.",
     blocks: [
       {
         kind: "prose",
         heading: "What it really means",
         text:
-          "A prospect asking “how much” two minutes into the call is picturing themselves as a client — that is the single most encouraging thing they can say early. Treat it that way: as momentum, not as an attack on your pitch order (see [[strat.buying-signals]] and [[strat.answer-the-momentum]]). The danger is entirely in HOW you answer. Deflect with “we’ll get to that” and you sound like every evasive operation they were warned about — evasion on price undoes every trust move you have made. But quote the full engagement before you know the case and you have anchored a number to a situation you haven’t seen, invited them to shop it against firms quoting equally blind, and cheapened the diagnosis. The honest middle: give the SHAPE of the fee, and let the price question itself pull the discovery forward.",
+          "A prospect asking “how much” two minutes into the call is A prospect asking “how much” two minutes into the call is usually picturing themselves as a client — one of the most encouraging things they can say early. Treat it that way: as momentum, not as an attack on your pitch order (see [[strat.buying-signals]] and [[strat.answer-the-momentum]]). The danger is entirely in HOW you answer. Deflect with “we’ll get to that” and you sound like every evasive operation they were warned about — evasion on price undoes every trust move you have made. But quote the full engagement before you know the case and you have anchored a number to a situation you haven’t seen, invited them to shop it against firms quoting equally blind, and cheapened the diagnosis. The honest middle: give the SHAPE of the fee, and let the price question itself pull the discovery forward.",
       },
       {
         kind: "moves",
@@ -388,7 +388,7 @@ export const OBJECTION_MONEY_ENTRIES: ManualEntry[] = [
         kind: "lines",
         heading: "Lines in the floor’s voice",
         items: [
-          "If someone promises you pennies on the dollar on a first phone call, hang up on them. What I’ll commit to is this: within two weeks you’ll know exactly what you qualify for, from your actual transcripts.",
+          "If someone promises you pennies on the dollar on a first phone call, hang up on them. What I’ll commit to is this: once your transcripts are in, you’ll know exactly what you qualify for — from the record, not a guess.",
           "No — and anyone who guarantees that is lying to you. Here’s what I CAN promise: a licensed rep on your case, every option on the table reviewed against your real numbers, and straight answers the whole way.",
           "I’m not going to promise you a settlement number — anyone who does on a first call is lying to you. What I can tell you is exactly what we’d do first.",
         ],
@@ -418,7 +418,7 @@ export const OBJECTION_MONEY_ENTRIES: ManualEntry[] = [
         prompt:
           "Prospect says: “The last company I talked to said they could settle it for ten cents on the dollar. Can you beat that?” — what’s your move?",
         answer:
-          "Do not compete with the lie — expose it, gently: “Nobody can promise you ten cents on the dollar before seeing your transcripts — the IRS decides that off your actual financials, not off a sales call. A firm that promises the outcome before seeing the file is telling you what you want to hear.” Then replace: licensed rep, full option review, qualification answer within two weeks of pulling transcripts. The prospect asked you to join a bidding war of promises; you win by refusing to enter it.",
+          "Do not compete with the lie — expose it, gently: “Nobody can promise you ten cents on the dollar before seeing your transcripts — the IRS decides that off your actual financials, not off a sales call. A firm that promises the outcome before seeing the file is telling you what you want to hear.” Then replace: licensed rep, full option review, qualification answer as soon as the transcripts are back. The prospect asked you to join a bidding war of promises; you win by refusing to enter it.",
       },
       {
         kind: "compliance",
@@ -532,7 +532,7 @@ export const OBJECTION_MONEY_ENTRIES: ManualEntry[] = [
       "years of this",
     ],
     lead:
-      "This is not an objection — it is a confession. Years of avoidance and shame talking, from a person braced for judgment. Honor the difficulty instead of waving it away, then show them that complicated is the firm’s daily diet: complicated is not impossible, and the first step is one signature, not the whole mountain.",
+      "More often than not, this is not an objection — it is a confession. Years of avoidance and shame talking, from a person braced for judgment. Honor the difficulty instead of waving it away, then show them that complicated is the firm’s daily diet: complicated is not impossible, and the first step is one signature, not the whole mountain.",
     blocks: [
       {
         kind: "prose",
@@ -696,14 +696,14 @@ export const OBJECTION_MONEY_ENTRIES: ManualEntry[] = [
         kind: "prose",
         heading: "What it really means",
         text:
-          "Silence isn’t spoken, which is why it’s the objection agents handle worst — there’s nothing to respond to, so the untrained instinct is to pour more words into the gap. That instinct is wrong in every one of the three cases. The stoic archetype is quiet because that is how they are on the phone; talking more just gives them more to sit through. The processor is quiet because they are actually thinking — usually about money or commitment — and interrupting the thought resets it. And the one about to hang up is looking for confirmation that this is a pressure call; an anxious babble of extra pitch is exactly that confirmation. There is also a special, load-bearing silence: the one right after a number or a stakes statement lands. That silence belongs to the prospect. Whoever fills it first gives something up — and it will not be you (see [[strat.silence-after-number]]). The universal play across all three: hold the quiet a beat longer than feels natural, then hand them one open, calibrated question and go quiet again.",
+          "Silence isn’t spoken, which is why it’s the objection agents handle worst — there’s nothing to respond to, so the untrained instinct is to pour more words into the gap. That instinct is wrong in every one of the three cases. The stoic archetype is quiet because that is how they are on the phone; talking more just gives them more to sit through. The processor is quiet because they are actually thinking — usually about money or commitment — and interrupting the thought resets it. And the one about to hang up is looking for confirmation that this is a pressure call; an anxious babble of extra pitch is exactly that confirmation. There is also a special, load-bearing silence: the one right after a number or a stakes statement lands. That silence belongs to the prospect. Nine times out of ten, whoever fills it first gives something up — and it will not be you (see [[strat.silence-after-number]]). The universal play across all three: hold the quiet a beat longer than feels natural, then hand them one open, calibrated question and go quiet again.",
       },
       {
         kind: "moves",
         heading: "The plays, in order",
         items: [
           "Be comfortable with silence — hold it a full beat or two past your own discomfort. The pause feels three times longer to you than to them.",
-          "After a number or a stakes statement lands: STOP TALKING, absolutely. That silence is theirs; whoever fills it first gives something up.",
+          "After a number or a stakes statement lands: STOP TALKING, absolutely. That silence is theirs; whoever fills it first usually gives something up.",
           "When the silence needs breaking, break it with one open question, not a pitch: “What’s going through your mind?” — then go quiet again and let the question work. See [[psych.voss.calibrated-questions]].",
           "If you get one-word answers and “mmm-hmm,” mirror the last meaningful thing they said and wait ([[strat.mirror-to-open]]) — mirrors pull the stoic forward without pressure.",
           "Read what breaks the silence: what they say first after the pause is usually the real objection — treat it as the most honest sentence of the call.",
@@ -742,7 +742,7 @@ export const OBJECTION_MONEY_ENTRIES: ManualEntry[] = [
         prompt:
           "You lay out the fee and the phone goes completely quiet. Five seconds. Eight. What’s your move?",
         answer:
-          "Nothing. That is the move — the silence after a number belongs to the prospect, and whoever speaks first gives something up. Hold it. If it stretches truly long (fifteen-plus seconds) and you must break it, break it with an open question, never a concession: “What’s going through your mind?” Then be quiet again. What they say next is the real objection — handle THAT, not the silence.",
+          "Nothing. That is the move — the silence after a number belongs to the prospect, and whoever speaks first usually gives something up. Hold it. If it stretches truly long (fifteen-plus seconds) and you must break it, break it with an open question, never a concession: “What’s going through your mind?” Then be quiet again. What they say next is the real objection — handle THAT, not the silence.",
       },
     ],
     links: [

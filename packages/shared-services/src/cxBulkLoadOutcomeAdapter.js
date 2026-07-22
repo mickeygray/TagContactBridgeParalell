@@ -96,8 +96,11 @@ function buildReviewCorrectionRow({
   uii,
   original = null,
   domain = null,
+  agentId = null,
+  agentExtensionId = null,
   agentEmail = null,
   caseId = null,
+  phone = null,
   at = null,
 } = {}) {
   const ts = at || new Date().toISOString();
@@ -115,12 +118,23 @@ function buildReviewCorrectionRow({
     basePayload && basePayload.caseId,
   );
   const resolvedAgentEmail = pick(original && original.agentEmail, basePayload && basePayload.agentEmail, agentEmail);
+  const resolvedAgentId = pick(original && original.agentId, basePayload && basePayload.agentId, agentId);
+  const resolvedAgentExtensionId = pick(
+    original && original.agentExtensionId,
+    basePayload && basePayload.agentExtensionId,
+    agentExtensionId,
+  );
+  const resolvedPhone = pick(original && original.phone, basePayload && basePayload.phone, phone);
   const externId = pick(original && original.externId, basePayload && basePayload.externId);
   const overrides = {
     queueItemId,
     uii,
     domain: resolvedDomain,
     caseId: resolvedCaseId,
+    agentId: resolvedAgentId,
+    agentExtensionId: resolvedAgentExtensionId,
+    agentEmail: resolvedAgentEmail,
+    phone: resolvedPhone,
     externId,
     outcome: "dnc",
     source: "agent-auto-review",
@@ -139,8 +153,11 @@ function buildReviewCorrectionRow({
     queueItemId,
     uii,
     caseId: resolvedCaseId,
+    agentId: resolvedAgentId,
+    agentExtensionId: resolvedAgentExtensionId,
     agentEmail: resolvedAgentEmail,
     externId,
+    phone: resolvedPhone,
     outcome: "dnc",
     source: "agent-auto-review",
     payload,
@@ -158,6 +175,7 @@ function buildCadenceEvent({
   systemDisposition = null,
   badNumber = false,
   badNumberReason = null,
+  nextAction = null,
 } = {}) {
   const durationSec = Number(
     candidate.durationSec ??
@@ -168,6 +186,8 @@ function buildCadenceEvent({
   return {
     sessionId: str(session.sessionId) || null,
     domain: session.domain || candidate.domain || null,
+    agentId: str(session.cxAgentId || session.agentId || session.agentExtensionId || session.agent?.id) || null,
+    agentExtensionId: str(session.agentExtensionId || session.agent?.extensionId) || null,
     agentEmail: session.agentEmail || (session.agent && session.agent.email) || null,
     agentName: session.agentName || (session.agent && session.agent.name) || null,
     queueItemId: candidateKey(candidate) || null,
@@ -199,6 +219,7 @@ function buildCadenceEvent({
     systemDisposition: str(systemDisposition) || null,
     badNumber: badNumber === true,
     badNumberReason: str(badNumberReason) || null,
+    nextAction: str(nextAction) || null,
     at: at || null,
   };
 }
@@ -223,6 +244,7 @@ function createCxBulkLoadOutcomeAdapter(deps = {}) {
       systemDisposition = null,
       badNumber = false,
       badNumberReason = null,
+      nextAction = null,
     } = input;
     const at = (input.now instanceof Date ? input.now : (input.now ? new Date(input.now) : new Date())).toISOString();
     const idemKey = makeOutcomeIdemKey({
@@ -243,6 +265,7 @@ function createCxBulkLoadOutcomeAdapter(deps = {}) {
         systemDisposition,
         badNumber,
         badNumberReason,
+        nextAction,
       }),
       idemKey,
     };

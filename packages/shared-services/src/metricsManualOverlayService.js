@@ -88,7 +88,9 @@ function cloneOverlayRow(row = {}) {
   return {
     source: row.source || "Unknown",
     channel: row.channel || null,
-    spend: Number(row.spend || 0),
+    // Historical overlays may preserve lead counts, never money. Spend facts
+    // must be reconciled into SpendEntry by marketingMoneyService.
+    spend: 0,
     pieces: Number(row.pieces || 0),
     impressions: Number(row.impressions || 0),
     clicks: Number(row.clicks || 0),

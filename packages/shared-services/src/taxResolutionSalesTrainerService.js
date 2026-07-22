@@ -10,6 +10,104 @@ const {
   TAX_RESOLUTION_SALES_TRAINER_PROMPT,
   TAX_RESOLUTION_SALES_TRAINER_LIVE_TURN_PROMPT,
 } = require("./taxResolutionSalesTrainerPrompt");
+// The house analyst doctrine, shared with the live two-station coach so the
+// trainer's coaching + debrief speak the SAME posture the real-call coach does
+// (docs/COACH_ANALYST_DOCTRINE_2026-07-20.md). One source of truth.
+const { ANALYST_DOCTRINE } = require("./coachTwoStationPrompts");
+// ── QUIZ / DRILL GRADING (Training Center) ───────────────────────────────────
+// The field manual's drill blocks are the quiz bank (fixed questions + house
+// reference answers). The trainee's free-text answer is graded by the coach
+// model against the reference's SUBSTANCE + the analyst doctrine — doctrine
+// violations (promised outcomes, invented figures, chin-leading) cap the score.
+const QUIZ_GRADE_TOOL = {
+  name: "submit_drill_grade",
+  description: "Grade a trainee's answer to a sales-drill question.",
+  input_schema: {
+    type: "object",
+    additionalProperties: false,
+    required: ["score", "verdict", "strengths", "gaps", "coaching"],
+    properties: {
+      score: { type: "integer", minimum: 0, maximum: 100 },
+      verdict: { type: "string", enum: ["nailed", "close", "partial", "miss"] },
+      strengths: { type: "array", maxItems: 3, items: { type: "string", maxLength: 200 } },
+      gaps: { type: "array", maxItems: 3, items: { type: "string", maxLength: 200 } },
+      coaching: { type: "string", maxLength: 600, description: "2-3 sentences, analyst voice, something to consider — not a lecture" },
+      suggestedLine: { type: "string", maxLength: 300, description: "one floor-voice line that would have worked, only if genuinely useful" },
+      doctrineFlag: { type: "string", maxLength: 200, description: "set ONLY if the answer violated doctrine (promise/figure/chin-lead/pressure)" },
+    },
+  },
+};
+
+async function gradeSalesTrainerQuizAnswer({
+  topic = "",
+  question,
+  referenceAnswer,
+  answer,
+  model = null,
+  timeoutMs = null,
+} = {}) {
+  const q = cleanText(question, 2000);
+  const ref = cleanText(referenceAnswer, 4000);
+  const given = cleanText(answer, 4000);
+  if (!q || !given) throw new ValidationError("question and answer are required");
+  const config = getSalesTrainerConfig();
+  const client = createAnthropicClient();
+  const raw = await client.createMessage({
+    system:
+      "You grade a tax-resolution sales trainee's answer to a drill question from the house field manual. "
+      + "Grade SUBSTANCE against the reference answer, not wording — a different route that honors the same principles can score high. "
+      + "Score guide: 85+ = the move and the reasoning are right; 60-84 = right direction, real gaps; 35-59 = partially there; <35 = wrong move. "
+      + "HARD RULE: if the answer promises an outcome, invents a figure/timeline, pressures past a no, or leads with a pitch before trust, set doctrineFlag and cap score at 40 regardless of polish.\n\n"
+      + ANALYST_DOCTRINE
+      + "\n\nOutput strictly via submit_drill_grade. Coaching is advisory analyst voice: brief, concrete, something to consider.",
+    messages: [{
+      role: "user",
+      content: [
+        topic ? `Drill topic: ${cleanText(topic, 200)}` : "",
+        `QUESTION:\n${q}`,
+        `HOUSE REFERENCE ANSWER (the substance to grade against):\n${ref || "(none — grade on doctrine + sales judgment alone)"}`,
+        `TRAINEE'S ANSWER:\n${given}`,
+      ].filter(Boolean).join("\n\n"),
+    }],
+    model: model || config.coachModel || config.anthropicModel,
+    maxTokens: 700,
+    temperature: 0.2,
+    tools: [QUIZ_GRADE_TOOL],
+    toolChoice: { type: "tool", name: "submit_drill_grade" },
+    timeoutMs: timeoutMs || config.timeoutMs,
+  });
+  const content = Array.isArray(raw?.content) ? raw.content : [];
+  const toolUse = content.find((b) => b && b.type === "tool_use" && b.name === "submit_drill_grade");
+  if (!toolUse || !toolUse.input) {
+    throw new ExternalServiceError("anthropic", "Drill grader did not return a tool_use block", {
+      status: 502,
+      retryable: true,
+    });
+  }
+  const g = toolUse.input;
+  return {
+    score: Math.min(100, Math.max(0, Math.round(Number(g.score) || 0))),
+    verdict: ["nailed", "close", "partial", "miss"].includes(g.verdict) ? g.verdict : "partial",
+    strengths: (Array.isArray(g.strengths) ? g.strengths : []).slice(0, 3).map((s) => cleanText(s, 200)),
+    gaps: (Array.isArray(g.gaps) ? g.gaps : []).slice(0, 3).map((s) => cleanText(s, 200)),
+    coaching: cleanText(g.coaching, 600),
+    suggestedLine: cleanText(g.suggestedLine, 300) || null,
+    doctrineFlag: cleanText(g.doctrineFlag, 200) || null,
+    model: raw?.model || null,
+  };
+}
+
+// The prospect's disposition ledger — the anti-bimodality spine. The model
+// emits <PROSPECT_STATE> each turn; the server merges it under clamped physics
+// (trust +/-1 per turn, resolved concerns stay resolved, disclosure monotonic)
+// and re-injects the sanitized ledger into the next turn's session header.
+const {
+  emptyProspectState,
+  parseProspectState,
+  stripProspectStateTag,
+  mergeProspectState,
+  formatProspectStateForHeader,
+} = require("./trainerProspectStateService");
 const {
   createAnthropicClient,
   extractTextBlocks: extractAnthropicTextBlocks,
@@ -105,6 +203,34 @@ const COACHING_PHASE_KEYS = Object.freeze([
   "wrap",
 ]);
 const salesTrainerUiState = new Map();
+
+// sessionId -> { state, expiresAt }: the prospect's disposition ledger between
+// turns. Server-owned memory (the client strips all tags from history, so the
+// model would otherwise be amnesiac about its own disposition — the root cause
+// of the roll-over/wall bimodality). Same TTL policy as the UI state map.
+const salesTrainerProspectState = new Map();
+
+function pruneTrainerProspectState(now = Date.now()) {
+  for (const [key, row] of salesTrainerProspectState) {
+    if (!row || row.expiresAt <= now) salesTrainerProspectState.delete(key);
+  }
+}
+
+function getTrainerProspectState(sessionId) {
+  if (!sessionId) return null;
+  pruneTrainerProspectState();
+  const row = salesTrainerProspectState.get(String(sessionId));
+  return row?.state || null;
+}
+
+function setTrainerProspectState(sessionId, state) {
+  if (!sessionId || !state) return;
+  pruneTrainerProspectState();
+  salesTrainerProspectState.set(String(sessionId), {
+    state,
+    expiresAt: Date.now() + SALES_TRAINER_UI_STATE_TTL_MS,
+  });
+}
 
 function normalizeProvider(value) {
   const v = String(value || "").trim().toLowerCase();
@@ -423,7 +549,7 @@ function sanitizeAudioExt(format) {
 // We also strip leftover code fences (the briefing block uses triple
 // backticks) and squash double-blank-lines so the spoken output flows.
 function stripTrainerUiTags(text) {
-  return String(text || "")
+  return stripProspectStateTag(String(text || ""))
     .replace(/<UI_(HEALTH|PAYLOAD|SCORECARD)>[\s\S]*?<\/UI_\1>/g, "")
     // Strip stage directions and tone labels that would otherwise be
     // read aloud verbatim by the TTS:
@@ -635,7 +761,7 @@ function normalizeMessages(messages) {
     .filter((message) => message.content);
 }
 
-function buildSessionHeader({ mode, scenario, user, profile, playbook = null } = {}) {
+function buildSessionHeader({ mode, scenario, user, profile, playbook = null, prospectState = null } = {}) {
   // Adapter between the v2 prompt's launch protocol and our actual flow.
   //
   // v2's <call_initiation_protocol> says the simulator's first chat
@@ -795,6 +921,22 @@ function buildSessionHeader({ mode, scenario, user, profile, playbook = null } =
     parts.push(JSON.stringify(playbook, null, 2));
   }
 
+  // The prospect's DISPOSITION LEDGER — server-held memory of where this
+  // character actually stands (trust, mood, what's been disclosed, which
+  // concerns are live/engaged/resolved/parked). This SUPERSEDES any mental
+  // trust tracking: the model reads its position from here and emits its
+  // updated <PROSPECT_STATE> at the end of the turn; the server clamps the
+  // movement (trust +/-1 max, resolved stays resolved) and carries it
+  // forward. This is what makes the character warm and cool GRADUALLY
+  // instead of snapping between roll-over and wall.
+  if (prospectState && typeof prospectState === "object") {
+    parts.push("");
+    parts.push(formatProspectStateForHeader(prospectState));
+    parts.push(
+      "This ledger is your ONLY memory of your own disposition — the trustArc in the playbook describes the character's tendencies; the ledger says where you ARE. When they conflict, the ledger wins.",
+    );
+  }
+
   // Tail anchor: last thing the model reads before processing the
   // conversation history. Repeats the role anchor in compact form
   // because long contexts + faster (cheaper) models tend to lose the
@@ -809,7 +951,7 @@ function buildSessionHeader({ mode, scenario, user, profile, playbook = null } =
   return parts.join("\n");
 }
 
-function buildInput({ messages, mode, scenario, user, profile, playbook = null }) {
+function buildInput({ messages, mode, scenario, user, profile, playbook = null, prospectState = null }) {
   const normalized = normalizeMessages(messages);
   if (normalized.length === 0) {
     throw new ValidationError("At least one trainer message is required");
@@ -818,7 +960,7 @@ function buildInput({ messages, mode, scenario, user, profile, playbook = null }
   const input = [
     {
       role: "developer",
-      content: buildSessionHeader({ mode, scenario, user, profile, playbook }),
+      content: buildSessionHeader({ mode, scenario, user, profile, playbook, prospectState }),
     },
     ...normalized,
   ];
@@ -1900,6 +2042,7 @@ const CALLER_PROFILE_TOOL = {
       "voiceHints",
       "practiceMode",
       "scenarioArchetype",
+      "startingDisposition",
     ],
     properties: {
       callerFirstName: { type: "string" },
@@ -2033,6 +2176,38 @@ const CALLER_PROFILE_TOOL = {
           },
         },
       },
+      startingDisposition: {
+        type: "object",
+        description:
+          "The caller's INITIAL memory/disposition the instant they pick up — derived from difficulty + persona + situation. This SEEDS the prospect's disposition ledger (where they begin before the agent has done anything).",
+        required: ["trust", "mood", "concerns"],
+        properties: {
+          trust: {
+            type: "integer",
+            minimum: 1,
+            maximum: 4,
+            description:
+              "Starting trust 1-4. Easy callers begin around 4 (mildly guarded); hard / skeptical / been-burned callers begin around 2; a fishing caller begins at 2. NEVER above 4 — trust is earned across the call.",
+          },
+          mood: {
+            type: "string",
+            description: "One short phrase for how they feel as they answer (e.g. 'wary, expecting a scam', 'anxious and rushed', 'tired and defeated').",
+          },
+          concerns: {
+            type: "array",
+            maxItems: 3,
+            description: "0-3 concerns already live in their head before the agent speaks (e.g. 'is this a scam', 'can't afford help', 'ashamed of unfiled years'). Empty array if they start open.",
+            items: {
+              type: "object",
+              required: ["topic", "intensity"],
+              properties: {
+                topic: { type: "string" },
+                intensity: { type: "integer", minimum: 1, maximum: 5 },
+              },
+            },
+          },
+        },
+      },
     },
   },
 };
@@ -2044,6 +2219,7 @@ function buildProfilePrompt({
   scenarioArchetype,
   demographics,
   presetLabel,
+  situation = null,
 }) {
   const constraints = [];
   if (leadSource) constraints.push(`Lead source MUST be: ${leadSource}.`);
@@ -2065,6 +2241,16 @@ function buildProfilePrompt({
     constraints.push(`Scenario archetype MUST be: ${scenarioArchetype}.`);
   } else {
     constraints.push("Scenario archetype is operator-randomized across realistic tax-debt caller types.");
+  }
+
+  // Operator free-text — the trainer types who they want to practice against.
+  // It SHAPES the caller (tax stack, mood, backstory, opening line) but must
+  // NOT override the LOCKED demographics below, and never breaks realism/
+  // compliance (no impossible debts, no scripted outcome the agent must hit).
+  if (situation && String(situation).trim()) {
+    constraints.push(
+      `OPERATOR SITUATION NOTE (shape the caller to fit this, within the locked demographics and realistic tax facts): "${String(situation).trim().slice(0, 600)}"`,
+    );
   }
 
   // Demographics are pre-rolled SERVER-SIDE. Pin them verbatim — the
@@ -2096,12 +2282,16 @@ function buildProfilePrompt({
     : [];
 
   return [
-    "Generate a single realistic caller profile for tax-resolution sales practice. Output via the submit_caller_profile tool.",
+    "You are building the FOUNDATION for one tax-resolution practice call — the rules of this call's little universe. Take EVERY input below (difficulty, scenario, the locked persona demographics, and the situation note) and forge them into ONE coherent, specific human being with a real problem. Output via the submit_caller_profile tool.",
     "",
-    "Constraints for this roll:",
+    "The selections that define this call's universe:",
     ...constraints,
     ...demographicLock,
     ...presetLine,
+    "",
+    "Everything must cohere: the persona's demographics, the scenario, and the situation are not separate knobs — they are one person. Reconcile them into a single believable caller (name, city, employment, tax stack, mood, opening line, voice).",
+    "",
+    "The starting disposition IS the caller's opening memory — set startingDisposition from the whole foundation: difficulty sets the trust band (easy ~4, hard ~2), and the persona + situation set the mood and any concerns already in their head (a skeptical or been-burned caller starts guarded with a live trust concern; an ashamed unfiled-years caller starts with that concern). This seeds how they behave before the agent has earned anything.",
     "",
     "Realism rules (apply within the locked demographics above):",
     "- Name and city must match the locked ethnicity + state plausibly. Don't pick a stereotypically Anglo name for a Hispanic-locked profile or vice versa.",
@@ -2129,6 +2319,9 @@ async function generateCallerProfile({
   // full preset. Shape: { ethnicity, age, sex, education, affluency,
   // employmentCategory, spouseStatus, ageBucket }.
   demographicOverrides = null,
+  // Operator free-text describing the caller/situation to practice against.
+  // Threaded into the formation prompt as a shaping constraint.
+  situation = null,
   model = null,
   timeoutMs = null,
 } = {}) {
@@ -2170,6 +2363,7 @@ async function generateCallerProfile({
     scenarioArchetype: effectiveScenarioArchetype,
     demographics,
     presetLabel: preset?.label || null,
+    situation,
   });
 
   const raw = await client.createMessage({
@@ -2690,6 +2884,8 @@ async function startSalesTrainerSession({
   // ethnicity for this practice round) without committing to a full
   // preset.
   demographicOverrides = null,
+  // Operator free-text describing who to practice against — shapes the caller.
+  situation = null,
   includeAudio = true,
   audio = {},
   user = null,
@@ -2703,6 +2899,7 @@ async function startSalesTrainerSession({
       scenarioArchetype,
       presetKey,
       demographicOverrides,
+      situation,
     });
 
   // 2. Pick voice + generate playbook in parallel.
@@ -2760,6 +2957,46 @@ async function startSalesTrainerSession({
   const sessionId = crypto.randomUUID
     ? crypto.randomUUID()
     : `sess-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+
+  // Seed the disposition ledger — the caller's OPENING MEMORY — from the
+  // foundation the profile prompt just built. The model set startingDisposition
+  // (trust band, mood, concerns already in their head) from ALL the selections;
+  // we seed the ledger from it, falling back to difficulty when absent. Hard mode
+  // still rolls the FISHING caller (~1 in 6) so trainees drill the legitimacy read.
+  {
+    const disp = profile?.startingDisposition && typeof profile.startingDisposition === "object"
+      ? profile.startingDisposition
+      : null;
+    const effectiveDifficulty = String(profile?.difficulty || difficulty || "easy").toLowerCase();
+    const fallbackTrust = effectiveDifficulty === "hard" ? 2 : 4;
+    const fishing = effectiveDifficulty === "hard" && Math.random() < 1 / 6;
+    const seedTrust = Number.isFinite(Number(disp?.trust))
+      ? Math.min(4, Math.max(1, Math.round(Number(disp.trust))))
+      : fallbackTrust;
+    const seed = emptyProspectState({
+      trust: fishing ? 2 : seedTrust,
+      mood: cleanText(disp?.mood || profile?.mood, 120) || undefined,
+      fishing,
+    });
+    if (Array.isArray(disp?.concerns)) {
+      seed.concerns = disp.concerns
+        .slice(0, 3)
+        .map((c) => {
+          const topic = cleanText(c?.topic, 80);
+          if (!topic) return null;
+          return {
+            id: topic.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 48) || "concern",
+            topic,
+            status: "live",
+            intensity: Math.min(5, Math.max(1, Math.round(Number(c?.intensity) || 3))),
+            raisedTurn: 0,
+            resurfacedOnce: false,
+          };
+        })
+        .filter(Boolean);
+    }
+    setTrainerProspectState(sessionId, seed);
+  }
 
   // Persist opening prospect audio as turn 0 so the training session
   // folder reflects what the rep actually heard before they spoke.
@@ -3029,8 +3266,8 @@ function buildCoachingPrompt({ messages, profile, scenario, previousPhase } = {}
     "Analyze this live tax-resolution sales-practice call for a UI coaching panel only.",
     "Do not write a prospect response. Do not include coaching inside the roleplay chat.",
     "Classify the current call phase and give short tactical guidance the UI can display beside the chat.",
-    "Keep guidance sales-process oriented: discovery, pain, qualification, solution framing, objection handling, or closing.",
-    "Avoid tax/legal advice and avoid over-coaching. Prefer practical next moves.",
+    "The house method is an eight-step arc — read the person (legitimacy/trust), intro, discovery (the five facts), expert framing, representation pitch, fee/payment, information collection, close. Place the call in that arc and coach the current step against it: has trust been earned before disclosure? are the discovery facts captured before the pitch? is the fee framed against a diagnosed problem?",
+    "Keep guidance sales-process oriented and demeanor-conditional. Avoid tax/legal advice and avoid over-coaching. Prefer practical next moves.",
     "",
     `Scenario: ${cleanText(scenario || "Tax-resolution roleplay", 400)}`,
     `Previous phase: ${cleanText(previousPhase || "unknown", 80) || "unknown"}`,
@@ -3046,7 +3283,9 @@ async function callAnthropicCoachingPanel({ prompt, model, timeoutMs }) {
   const client = createAnthropicClient();
   const raw = await client.createMessage({
     system:
-      "You are a quiet live-call coach. Output strictly via submit_call_coaching_panel. Your content is for UI guidance only, never for the roleplay chat.",
+      "You are a quiet live-call coach. Output strictly via submit_call_coaching_panel. Your content is for UI guidance only, never for the roleplay chat.\n\n"
+      + ANALYST_DOCTRINE
+      + "\n\nApply that doctrine to your panel: your tips/moves/questions are an ANALYST's read (something for the trainee to consider), phrased around reading THIS prospect's demeanor and the trust-first sequence — never chin-leading, never coaching a promise or a figure. Flag it in riskFlags when the trainee leads with a pitch, pushes for sensitive info before trust, or edges toward an outcome promise.",
     messages: [{ role: "user", content: prompt }],
     // Coach uses the heavier model by default (Sonnet) — it's a
     // side-channel UI render, not user-facing latency. Caller can
@@ -3207,6 +3446,9 @@ Rules:
 - Honest, not cruel. If they got hammered, say so. If they did fine, say that too.
 - NO meta. NO stage directions. NO references to "the scorecard" or "the JSON" or "the playbook." Just talk like a coach reviewing the call.
 - NO markup. No asterisks, no parentheses for tone, no brackets. The TTS reads everything verbatim.
+- Coach to the HOUSE DOCTRINE below: reward reading the person and earning trust before disclosure; reward "certain about what WE do, no promises about the IRS"; and when the rep led with their chin, promised an outcome, named a figure, or pushed for sensitive info before trust, that is the thing to name — even if the call still closed.
+
+${ANALYST_DOCTRINE}
 
 Examples of what good sounds like:
 
@@ -3353,8 +3595,12 @@ async function runTaxResolutionSalesTrainer({
   // turn runs the same Sonnet + slim path.
   // eslint-disable-next-line no-unused-vars
   turnNumber = null,
+  // The disposition ledger for THIS session (server-held; see
+  // trainerProspectStateService). Injected into the session header so the
+  // character knows where it stands; omitted = legacy fresh-start behavior.
+  prospectState = null,
 } = {}) {
-  const input = buildInput({ messages, mode, scenario, user, profile, playbook });
+  const input = buildInput({ messages, mode, scenario, user, profile, playbook, prospectState });
   const effectiveProvider = normalizeProvider(provider || getSalesTrainerConfig().provider);
 
   if (effectiveProvider === "anthropic") {
@@ -3496,6 +3742,25 @@ async function runSalesTrainerTurn({
     }
   }
   if (!userText) {
+    if (transcript) {
+      // STT ran and heard nothing usable (silence, mic noise, or the
+      // primer-echo guard suppressed a hallucinated transcript). Return a
+      // SUCCESS payload carrying the empty transcript — the client's
+      // "No speech detected" retry UX keys off exactly this shape. Throwing
+      // here turned every quiet clip into a hard 400 and stalled the voice
+      // loop instead of prompting the rep to try again.
+      return {
+        transcript,
+        sttError: null,
+        response: null,
+        audio: null,
+        audioError: null,
+        playback: null,
+        recordings: null,
+        messages: Array.isArray(messages) ? messages : [],
+        elapsedMs: Date.now() - turnStartedAt,
+      };
+    }
     throw new ValidationError("No audio or text supplied for this turn");
   }
 
@@ -3553,6 +3818,9 @@ async function runSalesTrainerTurn({
   ];
 
   // --- 3. Claude (or OpenAI fallback) ---
+  // Pull the session's disposition ledger (server-held prospect memory) so the
+  // character knows where it stands; absent = legacy fresh-start behavior.
+  const priorProspectState = getTrainerProspectState(sessionId);
   const responseResult = await runTaxResolutionSalesTrainer({
     messages: nextMessages,
     mode,
@@ -3565,7 +3833,25 @@ async function runSalesTrainerTurn({
     maxOutputTokens,
     promptVariant,
     turnNumber,
+    prospectState: priorProspectState,
   });
+
+  // --- 3b. Disposition ledger: merge the model's proposed state under the
+  // clamped physics (trust +/-1 per turn, resolved stays resolved, disclosure
+  // monotonic), persist for the next turn, and strip the tag so it never
+  // reaches the client, the chat history, or the TTS. Best-effort: a parse
+  // failure just carries the prior ledger forward.
+  if (sessionId && responseResult?.text) {
+    try {
+      const proposed = parseProspectState(responseResult.text);
+      if (proposed) {
+        setTrainerProspectState(sessionId, mergeProspectState(priorProspectState, proposed));
+      }
+      responseResult.text = stripProspectStateTag(responseResult.text);
+    } catch {
+      /* ledger is an enhancement — never let it break the turn */
+    }
+  }
 
   // --- 4. TTS (best-effort; UI can retry via /speech if it fails) ---
   let responseAudio = null;
@@ -3791,6 +4077,7 @@ module.exports = {
   generateCallerProfile,
   generateCallerPlaybook,
   generateCoachingNarration,
+  gradeSalesTrainerQuizAnswer,
   extractScorecardPayload,
   // Exported for diagnostic tooling (scripts/show-trainer-prompt.js):
   // these are normally internal but useful for inspecting exactly what
@@ -3801,6 +4088,8 @@ module.exports = {
   splitIntoSpeechChunks,
   getSalesTrainerUiState,
   getSalesTrainerConfig,
+  getTrainerProspectState,
+  setTrainerProspectState,
   isAnthropicConfigured,
   isConfigured,
   isEmailAllowedForSalesTrainer,

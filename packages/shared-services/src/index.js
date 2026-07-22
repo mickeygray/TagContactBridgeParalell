@@ -239,6 +239,11 @@ const {
   parseAgentQueueMap,
 } = require("./cxLaneRegistry");
 const { createCxFirstTouchDispatcher } = require("./cxFirstTouchDispatchService");
+const {
+  createCxCallerIdRotationService,
+  filterRotationConfig: filterCxCallerIdRotationConfig,
+  loadRotationConfig: loadCxCallerIdRotationConfig,
+} = require("./cxCallerIdRotationService");
 const { createCxAppointmentDispatcher } = require("./cxAppointmentDispatchService");
 const { createCxSeanFirstTouchDrip } = require("./cxSeanFirstTouchDripService");
 const { getLaneCall } = require("./cxLaneCallRegistry");
@@ -324,6 +329,17 @@ const {
   resolveServingIdentity,
 } = require("./cxStaleServingReconcilerService");
 const { createCxTerminalOutboxDrain } = require("./cxTerminalOutboxDrain");
+const {
+  ACTIONS: CX_BORING_WEBHOOK_ACTIONS,
+  OUTCOMES: CX_BORING_WEBHOOK_OUTCOMES,
+  actionForEvent: actionForCxBoringWebhookEvent,
+  classifyDisposition: classifyCxBoringWebhookDisposition,
+  createCxBoringWebhookActionDrain,
+  createCxBoringWebhookCallPoller,
+  createCxBoringWebhookService,
+  normalizeRingcxWebhook: normalizeCxBoringRingcxWebhook,
+  parseDirectExternId: parseCxBoringDirectExternId,
+} = require("./cxBoringWebhookService");
 const {
   buildCxCallWrapBody,
   buildCxCallWrapThreadKey,
@@ -587,6 +603,7 @@ const {
   reconcilePaymentsForCase,
   reconcilePaymentsForDomain,
 } = require("./paymentReconcileService");
+const marketingMoneyService = require("./marketingMoneyService");
 const {
   runPaymentFieldsSync,
 } = require("./caseProfilePaymentSyncService");
@@ -813,14 +830,21 @@ const { createAiProviders, createAnthropicAdapter, createOpenAiAdapter, REASONIN
 const { createAiPrimitives, toCall } = require("./aiPrimitives");
 const { createAiTaskClient } = require("./aiTaskClient");
 const aiTaskRegistry = require("./aiTaskRegistry");
+const leadDeliveryService = require("./leadDeliveryService");
+const dailyDialLedgerService = require("./dailyDialLedgerService");
 
 module.exports = {
+  leadDeliveryService,
+  dailyDialLedgerService,
   // ── CX lane registry + dispatchers (first-touch drip, appointment clock) ──
   CX_LANES,
   buildLaneExternId,
   parseLaneFromExternId,
   parseAgentQueueMap,
   createCxFirstTouchDispatcher,
+  createCxCallerIdRotationService,
+  filterCxCallerIdRotationConfig,
+  loadCxCallerIdRotationConfig,
   createCxAppointmentDispatcher,
   createCxSeanFirstTouchDrip,
   getLaneCall,
@@ -1139,6 +1163,15 @@ module.exports = {
   classifyStaleServingRow,
   resolveServingIdentity,
   createCxTerminalOutboxDrain,
+  CX_BORING_WEBHOOK_ACTIONS,
+  CX_BORING_WEBHOOK_OUTCOMES,
+  actionForCxBoringWebhookEvent,
+  classifyCxBoringWebhookDisposition,
+  createCxBoringWebhookActionDrain,
+  createCxBoringWebhookCallPoller,
+  createCxBoringWebhookService,
+  normalizeCxBoringRingcxWebhook,
+  parseCxBoringDirectExternId,
   buildCxCallWrapBody,
   buildCxCallWrapThreadKey,
   normalizeCxCallWrapPacket,
@@ -1391,6 +1424,7 @@ module.exports = {
   summarizeHourlySweepResult,
   reconcilePaymentsForCase,
   reconcilePaymentsForDomain,
+  marketingMoneyService,
   runPaymentFieldsSync,
   runSubscriptionWatchdog,
   checkRingcentralEventSilence,

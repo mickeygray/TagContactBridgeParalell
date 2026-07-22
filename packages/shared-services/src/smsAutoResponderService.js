@@ -15,6 +15,9 @@ const {
 } = require("../../shared-repositories/src");
 const { emitHourlyJobEvent } = require("./hourlyJobEventService");
 const { createLogicsFacade } = require("./logicsFacadeService");
+const {
+  containsCompanyLocationClaim,
+} = require("./smsCompanyFactSafety");
 
 // Minimum gap between auto-replies to the same phone. Prevents the bot
 // from chaining responses if a prospect double-texts or a webhook fires
@@ -267,6 +270,9 @@ function validateReplyForAutoSend(reply, domain = "WYNN") {
   const escapedSuffix = suffix.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   if (!new RegExp(`${escapedSuffix}\\s*$`, "i").test(body)) {
     return { ok: false, reason: "suggested-reply-missing-required-suffix" };
+  }
+  if (containsCompanyLocationClaim(body)) {
+    return { ok: false, reason: "company-location-not-configured" };
   }
   return { ok: true, body };
 }

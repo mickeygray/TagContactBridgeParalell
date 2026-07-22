@@ -18,6 +18,7 @@ const cxDialQueueRepository = require("./cxDialQueueRepository");
 const cxSlowLaneSessionRepository = require("./cxSlowLaneSessionRepository");
 const cxTerminalOutboxRepository = require("./cxTerminalOutboxRepository");
 const cxCallWrapCardRepository = require("./cxCallWrapCardRepository");
+const cxBoringWebhookRepository = require("./cxBoringWebhookRepository");
 const dailyCallStatRepository = require("./dailyCallStatRepository");
 const eventRepository = require("./eventRepository");
 const hourlyJobEventRepository = require("./hourlyJobEventRepository");
@@ -26,6 +27,7 @@ const deepCutRunRepository = require("./deepCutRunRepository");
 const dispatchListRepository = require("./dispatchListRepository");
 const dncAuditRepository = require("./dncAuditRepository");
 const leadCadenceRepository = require("./leadCadenceRepository");
+const leadDeliveryRepository = require("./leadDeliveryRepository");
 const mailerConfigRepository = require("./mailerConfigRepository");
 const masterProspectRepository = require("./masterProspectRepository");
 const metricsSnapshotRepository = require("./metricsSnapshotRepository");
@@ -67,6 +69,7 @@ module.exports = {
   cxSlowLaneSessionRepository,
   cxTerminalOutboxRepository,
   cxCallWrapCardRepository,
+  cxBoringWebhookRepository,
   dailyCallStatRepository,
   deepCutRunRepository,
   dispatchListRepository,
@@ -74,6 +77,7 @@ module.exports = {
   eventRepository,
   hourlyJobEventRepository,
   leadCadenceRepository,
+  leadDeliveryRepository,
   mailerConfigRepository,
   masterProspectRepository,
   metricsSnapshotRepository,

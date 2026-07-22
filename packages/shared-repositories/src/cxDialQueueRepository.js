@@ -448,6 +448,33 @@ async function reserveAssignedFirstTouchRows(domain, options = {}) {
     .lean();
 }
 
+// Boring-dialer handoff: preserve the overnight first-contact assignment, but turn
+// those rows into ordinary ready queue work. RingCX publication belongs only to the
+// agent's button-driven bulk session.
+async function activateAssignedFirstTouchRows(domain, options = {}) {
+  const now = options.now instanceof Date ? options.now : new Date();
+  const agentEmail = String(options.agentEmail || "").trim().toLowerCase();
+  const extensionId = String(options.agentExtensionId || "").trim();
+  if (!agentEmail || !extensionId) return { matched: 0, activated: 0 };
+  const match = buildAssignedFirstTouchQuery(domain, agentEmail, now);
+  const result = await CxDialQueue.updateMany(match, {
+    $set: {
+      state: "ready",
+      releaseAt: now,
+      "assignment.extensionId": extensionId,
+      "assignment.assignedAt": now,
+      "assignment.queueFamilySnapshot": "first-touch",
+      "metadata.firstTouchPending": false,
+      "metadata.firstTouchRoutedTo": "boring-dial-queue",
+      "metadata.firstTouchRoutedAt": now,
+    },
+  });
+  return {
+    matched: Number(result.matchedCount ?? result.n ?? 0),
+    activated: Number(result.modifiedCount ?? result.nModified ?? 0),
+  };
+}
+
 async function reserveReadyRows(domain, familyTargets = {}, options = {}) {
   const now = options.now instanceof Date ? options.now : new Date();
   const claimMinutes = Math.max(Number(options.claimMinutes) || 5, 1); // G3a: caller passes explicit
@@ -772,6 +799,7 @@ async function countQueueItems(filters = {}) {
 }
 
 module.exports = {
+  activateAssignedFirstTouchRows,
   activeQueueFilter, // exported for lane-ownership pins; pure
   buildExpiredClaimRequeueQuery, // exported for offline reaper-exclusion tests (M2/M8); pure
   buildAssignedFirstTouchQuery,

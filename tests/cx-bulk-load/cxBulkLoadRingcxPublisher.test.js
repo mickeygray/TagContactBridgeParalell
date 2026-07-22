@@ -106,6 +106,15 @@ test("publishBatchToRingcx makes one loadLeads call and returns the patch", asyn
   assert.equal(out.accepted.length, 2);
 });
 
+test("publishBatchToRingcx rejects a success-shaped body with no acceptance evidence", async () => {
+  const fakeClient = { loadLeads: async () => ({ unexpected: true }) };
+
+  await assert.rejects(
+    () => publishBatchToRingcx(fakeClient, { campaignId: "camp1", candidates: [candidate("q1")] }),
+    (error) => error?.code === "ringcx-load-unverified",
+  );
+});
+
 test("publishBatchToRingcx never accepts a candidate that was not uploaded", async () => {
   const calls = [];
   const fakeClient = {
@@ -177,18 +186,13 @@ async function capturePublish(client, input, alphaEnabled) {
   return logs.filter((l) => l[0] === "cx.alpha.publish.batch").map((l) => l[1]);
 }
 
-test("publish logs cx.alpha.publish.batch with phantomSuspected when RingCX inserts fewer than accepted", async () => {
+test("publish rejects a partial count when RingCX does not identify the rejected extern", async () => {
   const client = { loadLeads: async () => ({ processingStatus: "SUCCESS", leadsInserted: 1, rejectedRows: [] }) };
   const input = { campaignId: "camp1", candidates: [candidate("q1"), candidate("q2")] };
-  const events = await capturePublish(client, input, true);
-  assert.equal(events.length, 1);
-  const p = events[0];
-  assert.equal(p.supplied, 2);
-  assert.equal(p.acceptedCount, 2);
-  assert.equal(p.insertedCount, 1);
-  assert.equal(p.phantomSuspected, true, "accepted 2 but RingCX inserted 1 -> phantom");
-  // PII redaction: no raw phone digits in the payload
-  assert.equal(JSON.stringify(p).includes("5551234567"), false, "raw phone must not leak into the alpha log");
+  await assert.rejects(
+    () => publishBatchToRingcx(client, input),
+    (error) => error?.code === "ringcx-load-partial-unverified",
+  );
 });
 
 test("publish alpha event is gated off by default (no CX_ALPHA_TRACE_ENABLED)", async () => {
@@ -197,5 +201,6 @@ test("publish alpha event is gated off by default (no CX_ALPHA_TRACE_ENABLED)", 
   const off = await capturePublish(client, input, false);
   assert.equal(off.length, 0, "no alpha event when the trace flag is off");
   const on = await capturePublish(client, input, true);
-  assert.equal(on[0].phantomSuspected, false, "inserted==accepted -> not phantom");
+  assert.equal(on[0].acceptedCount, 2);
+  assert.equal(on[0].insertedCount, 2);
 });

@@ -188,7 +188,12 @@ function summarizeState(state) {
   };
 }
 
-function createNightlyCloseRuntime({ config = {}, runtime, spendSyncRuntime = null }) {
+function createNightlyCloseRuntime({
+  config = {},
+  runtime,
+  spendSyncRuntime = null,
+  reconcileDailyDialCalls = null,
+}) {
   const state = createState(config);
   // Held in closure so the per-tick `runNightlyClose` can pass it
   // through to the grouped service, which uses it to trigger one final
@@ -262,6 +267,7 @@ function createNightlyCloseRuntime({ config = {}, runtime, spendSyncRuntime = nu
           options.skipFinalClosePass !== undefined
             ? Boolean(options.skipFinalClosePass)
             : state.skipFinalClosePass,
+        reconcileDailyDialCalls: options.reconcileDailyDialCalls || reconcileDailyDialCalls,
         email: {
           ...commonEmail,
           recipients:

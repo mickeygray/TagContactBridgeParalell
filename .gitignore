@@ -49,3 +49,8 @@ scripts/drop-phonefrom-local-server.js
 # runtime logs (untracked 2026-07-08 review note: local-web-current.err.log alone carried 521k stale lines)
 logs/
 tmp-alpha-audit-tests.*
+
+# Local data artifacts — never commit (PII / large / generated)
+exports/
+live-captures/
+outputs/

@@ -77,7 +77,28 @@ async function releaseRunLock(name, token) {
   });
 }
 
+async function extendRunLock(name, token, ttlMs) {
+  const lockName = normalizeName(name);
+  const lockToken = String(token || "").trim();
+  if (!lockName || !lockToken) return null;
+  const ttl = Math.max(Number(ttlMs) || 0, 1000);
+  const now = new Date();
+  const lockedUntil = new Date(now.getTime() + ttl);
+  const doc = await RunLock.findOneAndUpdate(
+    {
+      _id: lockName,
+      token: lockToken,
+      lockedUntil: { $gt: now },
+    },
+    { $set: { lockedUntil } },
+    { new: true },
+  ).lean();
+  if (!doc) return null;
+  return { name: lockName, token: lockToken, lockedUntil };
+}
+
 module.exports = {
   acquireRunLock,
+  extendRunLock,
   releaseRunLock,
 };

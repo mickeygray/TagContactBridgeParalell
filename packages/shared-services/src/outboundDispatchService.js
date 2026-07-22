@@ -387,7 +387,19 @@ function evaluateCachedPhoneValidation(lead, channel) {
   };
 }
 
-async function validateLeadForDispatch(lead, channel) {
+function readCachedEmailValidation(lead = {}) {
+  const cached = lead.validationContext?.email || lead.payloadSnapshot?.validation?.email || null;
+  if (!cached || typeof cached.canSend !== "boolean") return null;
+  return {
+    ...cached,
+    cached: true,
+    source: cached.source || "intake-validation",
+  };
+}
+
+async function validateLeadForDispatch(lead, channel, {
+  emailValidator = neverBounceClient,
+} = {}) {
   const normalizedChannel = String(channel || "").toLowerCase();
   const phone = lead?.primaryPhone || lead?.normalizedPhone || null;
   const email = lead?.email || null;
@@ -396,7 +408,43 @@ async function validateLeadForDispatch(lead, channel) {
     (hasEmbeddedConsentEvidence(lead) || await hasStoredConsentEvidence(lead));
 
   if (normalizedChannel === "email") {
-    const emailValidation = await neverBounceClient.validateEmail(email);
+    const cachedEmailValidation = readCachedEmailValidation(lead);
+    if (cachedEmailValidation) {
+      if (!cachedEmailValidation.canSend) {
+        return {
+          ok: false,
+          skipped: true,
+          reason: "email-validation-failed",
+          detail: cachedEmailValidation.result || cachedEmailValidation.error || null,
+          validation: { email: cachedEmailValidation },
+        };
+      }
+      return {
+        ok: true,
+        validation: { email: cachedEmailValidation },
+      };
+    }
+
+    let emailValidation = null;
+    try {
+      emailValidation = await emailValidator.validateEmail(email);
+    } catch (_error) {
+      return {
+        ok: false,
+        skipped: true,
+        transient: true,
+        reason: "email-validation-unavailable",
+        detail: "Email validation is temporarily unavailable",
+        deferUntil: new Date(Date.now() + 60 * 60 * 1000),
+        validation: {
+          email: {
+            result: "unavailable",
+            canSend: false,
+            transient: true,
+          },
+        },
+      };
+    }
     if (!emailValidation.canSend) {
       return {
         ok: false,
@@ -500,18 +548,28 @@ async function createOutboundEvent(input = {}) {
   });
 }
 
+function buildCadenceSweepChecks({
+  leadDeliveryEnabled = String(process.env.LEAD_DELIVERY_ENABLED || "false")
+    .trim().toLowerCase() === "true",
+} = {}) {
+  const checks = [
+    { channel: "sms", eventType: OUTBOUND_EVENT_TYPES.TEXT_ROUND_REQUESTED },
+    { channel: "email", eventType: OUTBOUND_EVENT_TYPES.EMAIL_ROUND_REQUESTED },
+    { channel: "rvm", eventType: OUTBOUND_EVENT_TYPES.RVM_ROUND_REQUESTED },
+  ];
+  if (!leadDeliveryEnabled) {
+    checks.push({ channel: "cx", eventType: OUTBOUND_EVENT_TYPES.CX_ROUND_REQUESTED });
+  }
+  return checks;
+}
+
 async function createCadenceSweepEvents({
   sourceService = "outbound-gateway",
   domains = getCompanyKeys(),
   now = new Date(),
 } = {}) {
   const normalizedDomains = domains.map(normalizeDomain).filter(Boolean);
-  const checks = [
-    { channel: "sms", eventType: OUTBOUND_EVENT_TYPES.TEXT_ROUND_REQUESTED },
-    { channel: "email", eventType: OUTBOUND_EVENT_TYPES.EMAIL_ROUND_REQUESTED },
-    { channel: "rvm", eventType: OUTBOUND_EVENT_TYPES.RVM_ROUND_REQUESTED },
-    { channel: "cx", eventType: OUTBOUND_EVENT_TYPES.CX_ROUND_REQUESTED },
-  ];
+  const checks = buildCadenceSweepChecks();
   const bucket = minuteBucketKey(now);
   const accepted = [];
 
@@ -2164,18 +2222,35 @@ async function runManual(payload, channel) {
   return summary;
 }
 
-function buildOutboundHandlers() {
+function buildOutboundHandlers({
+  leadDeliveryEnabled = String(process.env.LEAD_DELIVERY_ENABLED || "false")
+    .trim().toLowerCase() === "true",
+  runRoundHandler = runRound,
+  runManualHandler = runManual,
+} = {}) {
   return {
-    [OUTBOUND_EVENT_TYPES.TEXT_ROUND_REQUESTED]: (event) => runRound(event.payload || {}, "sms"),
-    [OUTBOUND_EVENT_TYPES.EMAIL_ROUND_REQUESTED]: (event) => runRound(event.payload || {}, "email"),
-    [OUTBOUND_EVENT_TYPES.RVM_ROUND_REQUESTED]: (event) => runRound(event.payload || {}, "rvm"),
-    [OUTBOUND_EVENT_TYPES.CX_ROUND_REQUESTED]: (event) => runRound(event.payload || {}, "cx"),
-    [OUTBOUND_EVENT_TYPES.PHONEBURNER_ROUND_REQUESTED]: (event) => runRound(event.payload || {}, "phoneburner"),
-    [OUTBOUND_EVENT_TYPES.TEXT_MANUAL_REQUESTED]: (event) => runManual(event.payload || {}, "sms"),
-    [OUTBOUND_EVENT_TYPES.EMAIL_MANUAL_REQUESTED]: (event) => runManual(event.payload || {}, "email"),
-    [OUTBOUND_EVENT_TYPES.RVM_MANUAL_REQUESTED]: (event) => runManual(event.payload || {}, "rvm"),
-    [OUTBOUND_EVENT_TYPES.PHONEBURNER_MANUAL_REQUESTED]: (event) => runManual(event.payload || {}, "phoneburner"),
-    [OUTBOUND_EVENT_TYPES.CALLFIRE_MANUAL_REQUESTED]: (event) => runManual(event.payload || {}, "callfire"),
+    [OUTBOUND_EVENT_TYPES.TEXT_ROUND_REQUESTED]: (event) => runRoundHandler(event.payload || {}, "sms"),
+    [OUTBOUND_EVENT_TYPES.EMAIL_ROUND_REQUESTED]: (event) => runRoundHandler(event.payload || {}, "email"),
+    [OUTBOUND_EVENT_TYPES.RVM_ROUND_REQUESTED]: (event) => runRoundHandler(event.payload || {}, "rvm"),
+    [OUTBOUND_EVENT_TYPES.CX_ROUND_REQUESTED]: (event) => (
+      leadDeliveryEnabled
+        ? Promise.resolve({ ok: true, skipped: true, reason: "lead-delivery-owns-voice" })
+        : runRoundHandler(event.payload || {}, "cx")
+    ),
+    [OUTBOUND_EVENT_TYPES.PHONEBURNER_ROUND_REQUESTED]: (event) => (
+      leadDeliveryEnabled
+        ? Promise.resolve({ ok: true, skipped: true, reason: "lead-delivery-owns-phoneburner" })
+        : runRoundHandler(event.payload || {}, "phoneburner")
+    ),
+    [OUTBOUND_EVENT_TYPES.TEXT_MANUAL_REQUESTED]: (event) => runManualHandler(event.payload || {}, "sms"),
+    [OUTBOUND_EVENT_TYPES.EMAIL_MANUAL_REQUESTED]: (event) => runManualHandler(event.payload || {}, "email"),
+    [OUTBOUND_EVENT_TYPES.RVM_MANUAL_REQUESTED]: (event) => runManualHandler(event.payload || {}, "rvm"),
+    [OUTBOUND_EVENT_TYPES.PHONEBURNER_MANUAL_REQUESTED]: (event) => (
+      leadDeliveryEnabled
+        ? Promise.resolve({ ok: true, skipped: true, reason: "lead-delivery-owns-phoneburner" })
+        : runManualHandler(event.payload || {}, "phoneburner")
+    ),
+    [OUTBOUND_EVENT_TYPES.CALLFIRE_MANUAL_REQUESTED]: (event) => runManualHandler(event.payload || {}, "callfire"),
   };
 }
 
@@ -2298,6 +2373,7 @@ async function pollOutboundRvmDispositions({ now = new Date(), limit = 25 } = {}
 
 module.exports = {
   OUTBOUND_EVENT_TYPES,
+  buildCadenceSweepChecks,
   buildOutboundHandlers,
   createCadenceSweepEvents,
   createOutboundEvent,
@@ -2305,6 +2381,8 @@ module.exports = {
   // inboundIntakeService.fireImmediateContact — fires a single channel
   // for a single lead without going through the round-sweep poller.
   dispatchForLead,
+  readCachedEmailValidation,
+  validateLeadForDispatch,
   pollOutboundRvmDispositions,
   processNextOutboundEvent,
   processOutboundEventBatch,

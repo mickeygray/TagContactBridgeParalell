@@ -139,6 +139,22 @@ export const STRATEGY_PLAYS_ENTRIES: ManualEntry[] = [
     blocks: [
       {
         kind: "prose",
+        heading: "Legitimacy runs both directions",
+        text: "The prospect is entitled to basic public verification, and the firm is entitled to determine whether the prospect is engaging in good faith. Give the public basics cleanly: your first name, firm name, truthful call reason, public website or main line, and that we are not the IRS. Do not turn that duty into an unlimited download of office details, internal structure, staff information, tax tactics, or individualized advice. Deeper disclosure follows reciprocal engagement. The question is not whether they are skeptical; skepticism is normal. The question is whether they also answer ordinary questions and let the exchange move toward their actual tax problem."
+      },
+      {
+        kind: "moves",
+        heading: "Phase 1 prospect qualification",
+        items: [
+          "Ask one ordinary case question after giving the public basics. A legitimate prospect usually gives you something usable in return.",
+          "Confirm there is a real tax issue within our scope — a balance, unfiled returns, a notice, collections, or another concrete problem.",
+          "Watch the pattern, not one guarded answer. Privacy caution is reasonable; sustained refusal paired with continued information fishing is different.",
+          "Test whether they will participate in an interview about the case. If every answer redirects to company details or free tax advice, stop deepening the disclosure.",
+          "When good faith is uncertain, offer independent verification through the public website/main line and end cleanly. Do not argue, accuse, bluff, or improvise facts."
+        ]
+      },
+      {
+        kind: "prose",
         heading: "The moment it fires",
         text: "“Who is this?” “What company?” “Why are you calling me?” “Is this a scam?” The prospect is not objecting to tax help — they’re objecting to a stranger. Every unknown caller starts in the same hole, and the instinct to power through it with pitch energy only digs deeper. Clarity beats charm here: until legitimacy is restored, nothing else you say is being evaluated on its merits.",
       },
@@ -422,7 +438,7 @@ export const STRATEGY_PLAYS_ENTRIES: ManualEntry[] = [
       {
         kind: "prose",
         heading: "How the play works",
-        text: "Know which phase you’re in — the arc in [[script.method]] — and move the call exactly one phase forward at a time. Not two: an agent who leaps from first pain straight to the close feels grabby, and an agent who tries to solve the whole case inside one answer gives away the consultation and kills the reason to engage. The mechanical habit is the transition sentence: every answer you give ends with the next question or the next named step. “That’s the notice, good — now here’s what I need next.” “That covers the years; the next step is a quick look at income.” Prospects relax when someone competent is clearly driving; the itinerary IS the reassurance.",
+        text: "Know which phase you’re in — the arc in [[script.method]] — and move the call exactly one phase forward at a time. Not two: an agent who leaps from first pain straight to the close feels grabby, and an agent who tries to solve the whole case inside one answer gives away the consultation and kills the reason to engage. The mechanical habit is the transition sentence: every answer you give ends with the next question or the next named step. “That’s the notice, good — now here’s what I need next.” “That covers the years; the next step is a quick look at income.” Most prospects relax when someone competent is clearly driving; for those callers, the itinerary IS the reassurance.",
       },
       {
         kind: "lines",
@@ -523,7 +539,7 @@ export const STRATEGY_PLAYS_ENTRIES: ManualEntry[] = [
       {
         kind: "prose",
         heading: "How the play works",
-        text: "Do not litigate the lead source — explaining web forms and data flows sounds exactly like a scammer covering tracks, and every apologetic syllable confirms their suspicion. Instead, state the anchor once, flatly, with the calm of someone reading a fact off a screen: an inquiry about a tax issue is connected to them, and you can actually help with that. Then pivot immediately to the diagnostic question — “do you owe the IRS, or not?” — because the fastest way past “did I sign up” is to make the conversation about the thing that made them sign up. If they genuinely owe, the denial usually evaporates mid-answer; the problem is more interesting to them than the provenance. This pairs with [[strat.permission-legitimacy]] — that play is for honest “who are you” questions; this one is for the denial.",
+        text: "Do not litigate the lead source — explaining web forms and data flows sounds exactly like a scammer covering tracks, and every apologetic syllable confirms their suspicion. Instead, state the anchor once, flatly, with the calm of someone reading a fact off a screen: an inquiry about a tax issue is connected to them, and you can actually help with that. Then pivot immediately to the diagnostic question — “do you owe the IRS, or not?” — Then pivot immediately to the diagnostic question — “do you owe the IRS, or not?” — because the fastest way past “did I sign up” is usually to make the conversation about the thing that made them sign up.. If they genuinely owe, the denial usually evaporates mid-answer; the problem is more interesting to them than the provenance. This pairs with [[strat.permission-legitimacy]] — that play is for honest “who are you” questions; this one is for the denial.",
       },
       {
         kind: "lines",
@@ -636,12 +652,12 @@ export const STRATEGY_PLAYS_ENTRIES: ManualEntry[] = [
       "we file jointly",
       "get them on the phone",
     ],
-    lead: "“I have to talk to my spouse” loses the deal not because the spouse says no, but because your pitch dies in translation. Affirm that looping them in is smart, then work to get them on THIS call — or keep gathering facts now so the conversation they have is an informed one. A retold pitch always loses.",
+    lead: "“I have to talk to my spouse” loses the deal not because the spouse says no, but because your pitch dies in translation. Affirm that looping them in is smart, then work to get them on THIS call — or keep gathering facts now so the conversation they have is an informed one. A retold pitch almost always loses.",
     blocks: [
       {
         kind: "prose",
         heading: "The moment it fires",
-        text: "“My wife handles the money.” “I need to run it by my husband.” “We file jointly, so it’s both of us.” Sometimes it’s a genuine decision structure — and on a joint return the spouse literally IS a party to the problem. Sometimes it’s a polite exit wearing a wedding ring. Either way, the math is brutal: tonight over dinner, your forty-minute consultation becomes “some tax company called today.” Every number is fuzzy, every credential is gone, and the spouse — who owes their partner the protective answer — says “sounds like a scam.” The pitch you don’t deliver yourself always loses.",
+        text: "“My wife handles the money.” “I need to run it by my husband.” “We file jointly, so it’s both of us.” Sometimes it’s a genuine decision structure — and on a joint return the spouse literally IS a party to the problem. Sometimes it’s a polite exit wearing a wedding ring. Either way, the math is brutal: tonight over dinner, your forty-minute consultation becomes “some tax company called today.” Every number is fuzzy, every credential is gone, and the spouse — who owes their partner the protective answer — says “sounds like a scam.” The pitch you don’t deliver yourself almost always loses.",
       },
       {
         kind: "prose",
@@ -691,12 +707,12 @@ export const STRATEGY_PLAYS_ENTRIES: ManualEntry[] = [
       "not a good time",
       "surface the real concern",
     ],
-    lead: "A stall is an unvoiced concern wearing a polite mask — “think about it,” “send me something,” “call back later” almost always means cost, trust, or “is this even worth it.” Don’t fight the stall and don’t obey it; gently surface which concern is underneath, because you can answer a concern and you can’t answer a fog.",
+    lead: "A stall is usually an unvoiced concern wearing a polite mask — “think about it,” “send me something,” “call back later” most often means cost, trust, or “is this even worth it.” Don’t fight the stall and don’t obey it; gently surface which concern is underneath, because you can answer a concern and you can’t answer a fog.",
     blocks: [
       {
         kind: "prose",
         heading: "The moment it fires",
-        text: "“Let me think about it.” “Just email me the details.” “Now’s not a good time — call me next week.” None of these are answers; they’re exits dressed as delays. The prospect has a real hesitation they haven’t said out loud — usually the cost, whether you’re legit, or a quiet doubt that their problem is bad enough to bother with — and the stall is how they leave without the discomfort of voicing it. Take the stall at face value and you inherit its future: the email goes unread, next week’s call goes to voicemail, and “thinking about it” turns out to mean “stopped thinking about it the moment we hung up.”",
+        text: "“Let me think about it.” “Just email me the details.” “Now’s not a good time — call me next week.” More often than not, these aren’t answers; they’re exits dressed as delays. The prospect has a real hesitation they haven’t said out loud — usually the cost, whether you’re legit, or a quiet doubt that their problem is bad enough to bother with — and the stall is how they leave without the discomfort of voicing it. Take the stall at face value and you inherit its future: the email goes unread, next week’s call goes to voicemail, and “thinking about it” turns out to mean “stopped thinking about it the moment we hung up.”",
       },
       {
         kind: "prose",
@@ -932,7 +948,7 @@ export const STRATEGY_PLAYS_ENTRIES: ManualEntry[] = [
       {
         kind: "prose",
         heading: "The moment it fires",
-        text: "“How does this all work?” “How long does something like this take?” “What happens first?” “Who would I actually be working with?” Read what’s underneath: nobody asks for the itinerary of a trip they aren’t considering taking. These questions mean the internal movie has started — they’re imagining the process with themselves in it, and they’re checking whether the picture holds up. The question’s literal content is almost secondary; the fact that they asked it is the message.",
+        text: "“How does this all work?” “How long does something like this take?” “What happens first?” “Who would I actually be working with?” Read what’s underneath: Read what’s underneath: people rarely ask for the itinerary of a trip they aren’t considering taking.. These questions usually mean the internal movie has started — they’re imagining the process with themselves in it, and they’re checking whether the picture holds up., and they’re checking whether the picture holds up. The question’s literal content is almost secondary; the fact that they asked it is the message.",
       },
       {
         kind: "prose",
@@ -983,7 +999,7 @@ export const STRATEGY_PLAYS_ENTRIES: ManualEntry[] = [
       "no hook yet",
       "label the undercurrent",
     ],
-    lead: "When the prospect is talking but hasn’t handed you a hook, don’t interrogate — open them. Repeat their last meaningful few words back as a question, or label the undercurrent you hear. People correct and expand on mirrors and labels far more than they answer direct questions.",
+    lead: "When the prospect is talking but hasn’t handed you a hook, don’t interrogate — open them. Repeat their last meaningful few words back as a question, or label the undercurrent you hear. People tend to correct and expand on mirrors and labels far more readily than they answer direct questions.",
     blocks: [
       {
         kind: "prose",
@@ -993,7 +1009,7 @@ export const STRATEGY_PLAYS_ENTRIES: ManualEntry[] = [
       {
         kind: "prose",
         heading: "How the play works",
-        text: "Two tools, both borrowed straight from [[psych.voss.mirroring]] and [[psych.voss.labeling]]. The mirror: take their last one-to-three meaningful words and hand them back with a slight upward inflection — “…took everything out of the account?” It works on a quirk of conversation: people experience a mirror as proof of attention, and they respond by elaborating, almost involuntarily. The label: name the undercurrent instead of the content — “sounds like this has been sitting on you for a while.” Start with “it sounds like” or “it seems like,” never “I understand” — a label offers a hypothesis they can correct, which is exactly what you want, because both the confirmation and the correction carry new facts. Then the hard part: silence. The mirror or label is the cast; the quiet after it is the reel. And don’t decorate them — mirrors and labels carry their own warmth, and stacking sympathy on top smothers the effect.",
+        text: "Two tools, both borrowed straight from [[psych.voss.mirroring]] and [[psych.voss.labeling]]. The mirror: take their last one-to-three meaningful words and hand them back with a slight upward inflection — “…took everything out of the account?” It works on a quirk of conversation: It works on a quirk of conversation: people tend to experience a mirror as proof of attention, and they usually respond by elaborating, almost involuntarily.. The label: name the undercurrent instead of the content — “sounds like this has been sitting on you for a while.” Start with “it sounds like” or “it seems like,” never “I understand” — a label offers a hypothesis they can correct, which is exactly what you want, because both the confirmation and the correction carry new facts. Then the hard part: silence. The mirror or label is the cast; the quiet after it is the reel. And don’t decorate them — mirrors and labels carry their own warmth, and stacking sympathy on top smothers the effect.",
       },
       {
         kind: "lines",

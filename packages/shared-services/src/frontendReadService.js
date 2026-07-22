@@ -71,11 +71,11 @@ function boolFromEnv(value, fallback = false) {
 }
 
 function legacySpendFallbackEnabled() {
-  return boolFromEnv(process.env.FRONTEND_LEGACY_SPEND_FALLBACK_ENABLED, false);
+  return false;
 }
 
 function legacyMetricsFallbackEnabled() {
-  return boolFromEnv(process.env.FRONTEND_LEGACY_METRICS_FALLBACK_ENABLED, false);
+  return false;
 }
 
 // Legacy dailyspends fallback for metric views. Disabled by default now
@@ -1201,8 +1201,7 @@ async function buildMetricSourcesWorkspace(domain, filters = {}) {
     entry.prospects += Number(row.prospects || 0);
     entry.dnc += Number(row.dnc || 0);
     entry.lifetimeDeals += Number(row.lifetimeDeals || 0);
-    entry.lifetimePaid += Number(row.lifetimePaid || 0);
-    entry.lifetimeInitials += Number(row.lifetimeInitials || 0);
+    // Money comes from PaymentLedger below; CaseProfile is a projection only.
   }
 
   for (const row of paymentRows) {
@@ -1211,12 +1210,17 @@ async function buildMetricSourcesWorkspace(domain, filters = {}) {
     const entry = ensureMetricEntry(source, channel);
     entry.payments += Number(row.payments || 0);
     entry.initialPayments += Number(row.initialPayments || 0);
+    entry.lifetimePaid += Number(row.payments || 0);
+    entry.lifetimeInitials += Number(row.initialPayments || 0);
     entry.initialPaymentCount += Number(row.initialPaymentCount || 0);
     entry.paymentCount = Number(entry.initialPaymentCount || 0);
   }
 
   const caseInitialFallbackRows = new Map();
-  for (const row of caseInitialRows) {
+  // Compatibility code retained for deletion review; it cannot contribute
+  // money now that PaymentLedger is authoritative.
+  const disabledCaseInitialRows = [];
+  for (const row of disabledCaseInitialRows) {
     const source = row._id?.source || row.source || "Unknown";
     const channel = row._id?.channel || row.channel || null;
     const meta = resolveCanonicalMetricMeta(source, channel, canonicalLookup);
@@ -1266,7 +1270,6 @@ async function buildMetricSourcesWorkspace(domain, filters = {}) {
 
   for (const row of manualRows) {
     const entry = ensureMetricEntry(row.source || "Unknown", row.channel || null);
-    entry.spend += Number(row.spend || 0);
     entry.pieces += Number(row.pieces || 0);
     entry.impressions += Number(row.impressions || 0);
     entry.clicks += Number(row.clicks || 0);
@@ -1451,7 +1454,6 @@ async function buildDailySummaryWorkspace(domain, filters = {}) {
 
   for (const row of manualRows) {
     const entry = ensureDailySummaryEntry(row.source || "Unknown", row.channel || null);
-    entry.spend += Number(row.spend || 0);
     entry.pieces += Number(row.pieces || 0);
     entry.impressions += Number(row.impressions || 0);
     entry.clicks += Number(row.clicks || 0);

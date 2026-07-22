@@ -185,7 +185,7 @@ export const OBJECTION_CAPABILITY_ENTRIES: ManualEntry[] = [
         heading: "The plays, in order",
         items: [
           "Ask how it’s going before anything else — tone of the answer tells you which sub-case you have.",
-          "Run the value audit, not an attack: “what did you pay, and what’s the last thing they actually did on your file?” If they have to think about it, that IS the answer — let them arrive there.",
+          "Run the value audit, not an attack: “what did you pay, and what’s the last thing they actually did on your file?” If they have to think about it, that usually IS the answer — let them arrive there.",
           "Ask the two verifiable questions: was a power of attorney filed with the IRS? Were your transcripts pulled? These are yes/no facts, not opinions, and most stalled clients answer “I don’t know” — which says everything.",
           "Name the standard they should be getting anywhere: POA filed week one, transcripts pulled, a named case manager, a plan they can repeat back. Not our pitch — the industry’s baseline.",
           "OIC reality check where it applies: if the incumbent filed or promised an Offer in Compromise with no real financial workup, it is not getting approved — say it plainly. Naming the industry’s signature false-hope move builds instant credibility.",
@@ -248,7 +248,7 @@ export const OBJECTION_CAPABILITY_ENTRIES: ManualEntry[] = [
       "previous firm ripped me off",
       "lost money on this before",
     ],
-    lead: "The hardest trust state on the phone: they did the right thing once and got robbed — and there’s shame riding under the anger. Ask what happened, listen longer than feels efficient, then differentiate with process, not adjectives. You inherit the last firm’s burden of proof.",
+    lead: "One of the hardest trust states on the phone: they did the right thing once and got robbed — and often there’s shame riding under the anger. Ask what happened, listen longer than feels efficient, then differentiate with process, not adjectives. You inherit the last firm’s burden of proof.",
     blocks: [
       {
         kind: "prose",
@@ -327,7 +327,7 @@ export const OBJECTION_CAPABILITY_ENTRIES: ManualEntry[] = [
       {
         kind: "prose",
         heading: "What it really means",
-        text: "Respect what’s underneath this: competence, self-reliance, and a fair suspicion of middlemen. And here’s the part weak agents can’t bring themselves to say — sometimes they’re right. One year, a small balance, no enforcement in motion? That person can call the IRS, set up a payment plan, and be fine. Telling them so is the strongest move you have, because it proves you tell the truth even when it costs you. Then draw the honest line: the math changes with liens, levies, a revenue officer assignment, payroll tax, or an audit — see [[tax.levy-garnishment]] and [[tax.payroll-941-tfrp]]. The reframe isn’t “you can’t handle them” — that’s untrue and disrespectful. It’s asymmetry: the agent on that IRS line works for the IRS, everything said is recorded and usable, and they’ll be negotiating their first case against someone who has handled thousands. Representation flips who the system listens to. The takeaway close does the heavy lifting here: concede the simple case honestly and a defensive prospect will start arguing your side — “well, it’s actually four years…”",
+        text: "Respect what’s underneath this: competence, self-reliance, and a fair suspicion of middlemen. And here’s the part weak agents can’t bring themselves to say — sometimes they’re right. One year, a small balance, no enforcement in motion? That person can call the IRS, set up a payment plan, and be fine. Telling them so is one of the strongest moves you have, because it proves you tell the truth even when it costs you. Then draw the honest line: the math changes with liens, levies, a revenue officer assignment, payroll tax, or an audit — see [[tax.levy-garnishment]] and [[tax.payroll-941-tfrp]]. The reframe isn’t “you can’t handle them” — that’s untrue and disrespectful. It’s asymmetry: the agent on that IRS line works for the IRS, everything said is recorded and usable, and they’ll be negotiating their first case against someone who has handled thousands. Representation flips who the system listens to. The takeaway close does the heavy lifting here: concede the simple case honestly and a defensive prospect will start arguing your side — “well, it’s actually four years…”",
       },
       {
         kind: "moves",
@@ -400,7 +400,7 @@ export const OBJECTION_CAPABILITY_ENTRIES: ManualEntry[] = [
       {
         kind: "prose",
         heading: "What it really means",
-        text: "Treat this prospect as what they are: a researcher testing whether you’ll lie to them. They found the real IRS fee, and if your first move is “that won’t work,” you fail the test — because sometimes it does work, and they may know that too. So confirm their facts first: yes, the application fee is real; yes, anyone can file one. That honesty is the whole opening. Then teach where the work actually lives. An OIC isn’t a form — it’s a financial case. The Form 433-A OIC package is a full disclosure of income, assets, and allowable expenses; the offer amount has to be computed from that math in a way the IRS unit will find defensible; then there’s the back-and-forth when they push back, and the appeal when a defensible offer still gets rejected. Most DIY offers die not because the taxpayer wasn’t allowed to file, but because the number wasn’t built to survive review. That framing respects their research and reframes the fee as buying the case, not the paperwork — see [[tax.resolution-options]].",
+        text: "Treat this prospect as what they usually are: a researcher testing whether you’ll lie to them. They found the real IRS fee, and if your first move is “that won’t work,” you fail the test — because sometimes it does work, and they may know that too. So confirm their facts first: yes, the application fee is real; yes, anyone can file one. That honesty is the whole opening. Then teach where the work actually lives. An OIC isn’t a form — it’s a financial case. The Form 433-A OIC package is a full disclosure of income, assets, and allowable expenses; the offer amount has to be computed from that math in a way the IRS unit will find defensible; then there’s the back-and-forth when they push back, and the appeal when a defensible offer still gets rejected. Most DIY offers die not because the taxpayer wasn’t allowed to file, but because the number wasn’t built to survive review. That framing respects their research and reframes the fee as buying the case, not the paperwork — see [[tax.resolution-options]].",
       },
       {
         kind: "moves",
@@ -474,13 +474,13 @@ export const OBJECTION_CAPABILITY_ENTRIES: ManualEntry[] = [
       {
         kind: "prose",
         heading: "What it really means",
-        text: "This question is a credential check from someone who did their reading — they know representation before the IRS is limited to enrolled agents, CPAs, and attorneys, and they know a boiler room when a rep gets fuzzy about it. So understand your own role cleanly: you, the person on this call, are not their representative — the licensed professionals on staff are, operating under the power of attorney in [[tax.representation]]. Saying that plainly is not a weakness; it’s the correct answer, and the sophisticated caller knows it. A vague “oh yeah, we’re fully licensed” is exactly the hedge they’re listening for. The strong play is specificity plus access: name the credential types on staff — enrolled agents, CPAs, tax attorneys — explain who signs the POA and does the negotiating, and offer to introduce them, on this call or right after engagement. An agent who offers the introduction unprompted has nothing to hide, and this prospect closes on exactly that.",
+        text: "This question is a credential check from someone who did their reading — they know representation before the IRS is limited to enrolled agents, CPAs, and attorneys, and they know a boiler room when a rep gets fuzzy about it. So understand your own role cleanly: you, the person on this call, are not their representative — the licensed professionals on staff are, operating under the power of attorney in [[tax.representation]]. Saying that plainly is not a weakness; it’s the correct answer, and the sophisticated caller knows it. A vague “oh yeah, we’re fully licensed” is exactly the hedge they’re listening for. The strong play is specificity plus access: name the credential types on staff — enrolled agents, tax preparers, and other tax specialists, with enrolled agents handling IRS representation — explain who signs the POA and does the negotiating, and offer to introduce them, on this call or right after engagement. An agent who offers the introduction unprompted has nothing to hide, and this prospect closes on exactly that.",
       },
       {
         kind: "moves",
         heading: "The plays, in order",
         items: [
-          "Answer directly and specifically — name the licensed roles on staff (enrolled agents, CPAs, tax attorneys). No hedging, no “basically.”",
+          "Answer directly and specifically — name the licensed roles on staff (enrolled agents, tax preparers, and other tax specialists). No hedging, no “basically.”",
           "Clarify the structure honestly: your job is the intake and the fit; the licensed professional signs the power of attorney and stands before the IRS. Precision here reads as competence, not smallness.",
           "Offer the introduction: “I can get one of our enrolled agents on the line, or you’ll be introduced the day your case opens.” Access is the proof.",
           "Invite verification — EA enrollment and CPA/bar licenses are checkable, and telling them how to check is a trust move only a legitimate firm can make.",
@@ -491,7 +491,7 @@ export const OBJECTION_CAPABILITY_ENTRIES: ManualEntry[] = [
         kind: "lines",
         heading: "Lines in the floor’s voice",
         items: [
-          "Good question, and I’ll answer it straight: I’m your point of contact, and the people who represent you before the IRS are our licensed staff — enrolled agents, CPAs, and tax attorneys. One of them signs your power of attorney, not me.",
+          "Good question, and I’ll answer it straight: I’m your point of contact, and the people who represent you before the IRS are our licensed staff — enrolled agents, supported by tax preparers and other tax specialists. An enrolled agent signs your power of attorney, not me.",
           "Want to talk to one? I can set that up. And their credentials are verifiable — EA enrollment and CPA licenses are public. Check before you send a dollar.",
           "You clearly know how representation works, so you know why it matters: the POA is what makes the IRS deal with our licensed rep instead of with you.",
         ],
@@ -508,7 +508,7 @@ export const OBJECTION_CAPABILITY_ENTRIES: ManualEntry[] = [
       {
         kind: "example",
         weak: "“Oh yeah, we’re fully licensed, we handle IRS stuff all day. Don’t worry about that part.”",
-        strong: "“Straight answer: I’m your intake contact — the representation itself is done by our licensed staff, enrolled agents, CPAs, and tax attorneys. One of them signs your power of attorney. If you want, I’ll get an EA on the line before you commit to anything, and every credential I just named is publicly verifiable.”",
+        strong: "“Straight answer: I’m your intake contact — the representation itself is done by our licensed staff — enrolled agents, with tax preparers and other tax specialists behind them. An enrolled agent signs your power of attorney. If you want, I’ll get an EA on the line before you commit to anything, and every credential I just named is publicly verifiable.”",
         note: "The weak version hedges on the exact point being tested. The strong version names credentials, draws the honest line between intake and representation, and offers access plus verification — the three things a sophisticated caller is actually shopping for.",
       },
       {
@@ -563,7 +563,7 @@ export const OBJECTION_CAPABILITY_ENTRIES: ManualEntry[] = [
         items: [
           "Success at what? Getting a levy released is a different question from getting an offer accepted. Tell me which one you’re asking about and I’ll give you a straight answer for it.",
           "Anyone who gives you one clean percentage for the whole business is selling you. The honest answer is that it depends on the case — and the good news is your case is checkable. Your transcripts tell us what you actually qualify for.",
-          "Here’s the number I can stand behind: within a couple of weeks of the POA going on file, you’ll know exactly which programs your file supports. That’s not a rate — it’s a commitment.",
+          "Here’s the number I can stand behind: once your transcripts come back — that part runs on the IRS’s clock — you’ll know exactly which programs your file supports. That’s not a rate — it’s a commitment.",
         ],
       },
       {
@@ -693,7 +693,7 @@ export const OBJECTION_CAPABILITY_ENTRIES: ManualEntry[] = [
       {
         kind: "prose",
         heading: "What it really means",
-        text: "Someone asking “how long” is already picturing the other side of this — which makes it a buying signal wearing a question’s clothes. But it’s powered by anxiety: they’ve been carrying this weight and they want to know when it comes off. The temptation is to say what they want to hear — “thirty days, easy” — and that lie has a fuse on it: the client who was promised thirty days becomes the furious review-writer in week five, and worse, they may make real decisions (ignoring a notice, skipping a payment) based on your fake timeline. The honest answer is genuinely satisfying if you structure it right, because the truth has a fast part: protection moves quickly — power of attorney on file within days, transcripts requested, contact rerouted through the firm, holds requested where enforcement is active. That’s when the phone stops being scary. Resolution — the installment agreement, the offer, hardship status — is a months-scale process because it runs on IRS review timelines nobody controls. Lead with what happens FIRST and in what order, and the months stop feeling like fog and start feeling like a plan. See [[tax.resolution-options]] for what each track involves.",
+        text: "Someone asking “how long” is often already picturing the other side of this — which makes it, more often than not, a buying signal wearing a question’s clothes. But it’s powered by anxiety: they’ve been carrying this weight and they want to know when it comes off. The temptation is to say what they want to hear — “thirty days, easy” — and that lie has a fuse on it: the client who was promised thirty days becomes the furious review-writer in week five, and worse, they may make real decisions (ignoring a notice, skipping a payment) based on your fake timeline. The honest answer is genuinely satisfying if you structure it right, because the truth has a fast part: protection moves quickly — power of attorney on file within days, transcripts requested, contact rerouted through the firm, holds requested where enforcement is active. That’s when the phone stops being scary. Resolution — the installment agreement, the offer, hardship status — is a months-scale process because it runs on IRS review timelines nobody controls. Lead with what happens FIRST and in what order, and the months stop feeling like fog and start feeling like a plan. See [[tax.resolution-options]] for what each track involves.",
       },
       {
         kind: "moves",
@@ -710,7 +710,7 @@ export const OBJECTION_CAPABILITY_ENTRIES: ManualEntry[] = [
         kind: "lines",
         heading: "Lines in the floor’s voice",
         items: [
-          "Two honest clocks. The protection part is fast — power of attorney on file in days, and from that point their letters and calls come to us, not you. The resolution part — the actual deal with the IRS — is months, because it runs on their review timelines, not ours.",
+          "Two honest clocks. The protection part starts today — filing the power of attorney is what gets you protected, and from there their letters and calls come to us, not you. The resolution part — the actual deal with the IRS — is months, because it runs on their review timelines, not ours.",
           "Here’s what happens first, in order: POA filed, transcripts pulled, and a straight read of where you stand — usually inside the first couple of weeks. You’ll know your whole picture before the first month is out.",
           "Anyone who tells you thirty days for the whole thing is telling you what you want to hear. What I’ll tell you instead is what happens in the first two weeks — and every bit of it is checkable.",
         ],

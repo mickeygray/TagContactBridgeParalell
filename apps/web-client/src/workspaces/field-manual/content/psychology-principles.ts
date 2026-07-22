@@ -88,7 +88,7 @@ export const PSYCH_PRINCIPLES_ENTRIES: ManualEntry[] = [
       {
         kind: "drill",
         prompt: "Two minutes in, the prospect says: “Look, before I tell you anything — what IS this letter? What does LT11 even mean?” What’s your move?",
-        answer: "Answer it, fully and first. The LT11 is a final notice of intent to levy with appeal rights on a clock — explain that plainly, tell them where it sits on the ladder and what typically follows. You just gave real value before asking for anything; the obligation now runs your way, and the seriousness of what you explained honestly sets up the urgency. THEN resume discovery: “Now — so I can tell you what your options look like, how many years are we dealing with?”",
+        answer: "First establish that there is a real notice and reciprocal good-faith engagement. If they answer a basic case question, explain the LT11 plainly: it is a final notice of intent to levy with appeal rights on a clock, where it sits on the collection ladder, and what typically follows. Keep it educational until you have enough facts for individualized guidance. Then resume discovery: “So I can tell whether this is within our scope, how many years are we dealing with?” If they refuse every ordinary case question and only press for free analysis, give the high-level public explanation and stop there.",
       },
     ],
     links: ["strat.earn-trust-with-proof", "strat.expert-specificity", "script.expert", "tax.collections-ladder"],
@@ -125,12 +125,12 @@ export const PSYCH_PRINCIPLES_ENTRIES: ManualEntry[] = [
         kind: "example",
         weak: "“Ma’am, your situation is serious. You owe for four years, the penalties are stacking, and if you don’t act they’ll levy. You need help.”",
         strong: "“Walk me through it — how long has this been hanging over you? … Four years. And what’s it been costing you, living with it? … So in your own words, what happens if it’s still sitting there next year?”",
-        note: "The weak version is the agent’s position; the prospect can resist it. The strong version ends with the prospect stating the stakes themselves — and people do not argue with their own words. Every answer is a small commitment the close will later stand on.",
+        note: "The weak version is the agent’s position; the prospect can resist it. The strong version ends with the prospect stating the stakes themselves — and people rarely argue with their own words. Every answer is a small commitment the close will later stand on.",
       },
       {
         kind: "drill",
         prompt: "The prospect has agreed with everything you said, nodding along — “yeah… uh-huh… right” — but has stated nothing themselves. Are you ahead?",
-        answer: "No — you have compliance, not commitment. Passive nods are the weakest possible position; nothing they said binds them, and the “think it over” stall is coming. Hand them the microphone: “Tell me in your own words — what’s the piece of this that actually worries you?” Do not move to the pitch until the problem has come out of THEIR mouth.",
+        answer: "No — what you likely have is compliance, not commitment. Passive nods are one of the weakest positions to close from; nothing they said binds them, and the “think it over” stall is usually right behind them. Hand them the microphone: “Tell me in your own words — what’s the piece of this that actually worries you?” Do not move to the pitch until the problem has come out of THEIR mouth.",
       },
     ],
     links: ["strat.take-the-yes", "strat.commitment-language", "psych.voss.thats-right", "strat.pain-funnel", "psych.sandler.pain-funnel"],
@@ -375,12 +375,12 @@ export const PSYCH_PRINCIPLES_ENTRIES: ManualEntry[] = [
       {
         kind: "prose",
         heading: "Why the contrarian calm fits this floor",
-        text: "Our prospects have been trained by every robocall and scam warning to expect a pusher. When the push does not come — when the voice on the phone is calm, asks questions a doctor would ask, and is visibly willing to conclude “this might not be for you” — the prospect’s defense script has nothing to grab. That pattern-break IS the persuasion. It is also simply the truthful posture: we genuinely are diagnosing (the notice, the years, the balance, the transcript decide what we can do), and a person whose situation does not fit genuinely should not buy. Sandler’s stature rule has one house translation above all: never apologize for the fee, and never beg. A doctor does not discount the surgery to win your approval.",
+        text: "Our prospects have been trained by every robocall and scam warning to expect a pusher. When the push does not come — when the voice on the phone is calm, asks questions a doctor would ask, and is visibly willing to conclude “this might not be for you” — the prospect’s defense script has nothing to grab. That pattern-break IS the persuasion. It is also simply the truthful posture: we genuinely are diagnosing (the notice, the years, the balance, the transcript decide what we can do), and a person whose situation does not fit genuinely should not buy. Sandler’s stature rule has one house translation above all: never apologize for the fee, and never beg. A doctor does not discount the surgery just to win your approval.",
       },
       {
         kind: "prose",
         heading: "On our floor",
-        text: "The three Sandler tools each have a house play built on them. The pain funnel ([[psych.sandler.pain-funnel]]) runs discovery — pain, not interest, is what buys, and [[script.discovery]] is structured to find it. The negative reverse ([[psych.sandler.negative-reverse]]) is the [[strat.takeaway]] — the gentle step-back that makes a defensive prospect argue your side. The up-front contract ([[psych.sandler.upfront-contract]]) is how we pre-empt “let me think about it” by agreeing at the start what a decision looks like. And equal stature runs under [[strat.confident-value-frame]]: the fee is the fee, the process is the process, and we present both like the professionals we are.",
+        text: "The three Sandler tools each have a house play built on them. The pain funnel ([[psych.sandler.pain-funnel]]) runs discovery — pain, far more than interest, is what buys, and [[script.discovery]] is structured to find it. The negative reverse ([[psych.sandler.negative-reverse]]) is the [[strat.takeaway]] — the gentle step-back that makes a defensive prospect argue your side. The up-front contract ([[psych.sandler.upfront-contract]]) is how we pre-empt “let me think about it” by agreeing at the start what a decision looks like. And equal stature runs under [[strat.confident-value-frame]]: the fee is the fee, the process is the process, and we present both like the professionals we are.",
       },
       {
         kind: "lines",
@@ -406,7 +406,7 @@ export const PSYCH_PRINCIPLES_ENTRIES: ManualEntry[] = [
     section: "sandler",
     title: "The pain funnel: pain buys, interest browses",
     aliases: ["pain funnel", "pain questions", "tell me more", "what's it costing you", "emotional discovery"],
-    lead: "Sandler’s most famous tool: a graduated ladder of questions — tell me more, how long, what have you tried, how did that work, what has it cost you, how do you feel about that — that walks a prospect from a stated problem down to its felt cost. People buy emotionally and justify intellectually; the funnel finds the emotion.",
+    lead: "Sandler’s most famous tool: a graduated ladder of questions — tell me more, how long, what have you tried, how did that work, what has it cost you, how do you feel about that — that walks a prospect from a stated problem down to its felt cost. People tend to buy emotionally and justify intellectually; the funnel finds the emotion.",
     blocks: [
       {
         kind: "prose",
@@ -437,7 +437,7 @@ export const PSYCH_PRINCIPLES_ENTRIES: ManualEntry[] = [
       {
         kind: "drill",
         prompt: "Prospect says flatly: “I owe about thirty grand, I just want to know what you charge.” They are at the top of the funnel demanding the bottom of the pitch. What’s your move?",
-        answer: "Do not pitch a price to a painless prospect — a number without stakes is always “too much.” Take one step down the funnel first, honestly framed: “I’ll get you real numbers — and they depend on what we’re dealing with, so give me sixty seconds. How long has the thirty been building? … What have you tried so far? … What’s it costing you letting it ride?” Two or three rungs down, the price question becomes a value question — and you answer it into a problem they have now said out loud they want gone.",
+        answer: "Don’t rush the price to a painless prospect — a number without stakes almost always lands as “too much.” Take one step down the funnel first, honestly framed: “I’ll get you real numbers — and they depend on what we’re dealing with, so give me sixty seconds. How long has the thirty been building? … What have you tried so far? … What’s it costing you letting it ride?” Two or three rungs down, the price question becomes a value question — and you answer it into a problem they have now said out loud they want gone.",
       },
     ],
     links: ["strat.pain-funnel", "strat.cost-of-waiting", "script.discovery", "psych.cialdini.commitment", "strat.shame-reduction", "obj.early-price-probe"],
@@ -474,7 +474,7 @@ export const PSYCH_PRINCIPLES_ENTRIES: ManualEntry[] = [
         kind: "example",
         weak: "Prospect: “I’ll probably just deal with the IRS myself.” Agent: “That’s a huge mistake — people who go in alone get eaten alive. You really need representation, trust me.”",
         strong: "Prospect: “I’ll probably just deal with the IRS myself.” Agent: “Okay — honestly, some people do handle it themselves. Maybe you’re one of them. Just so I don’t leave you worse off: you called the number on that notice yet? … Twice, and gave up on hold. So the self-service plan — how’s it going so far?”",
-        note: "The weak version pushes, so the prospect defends the DIY plan harder. The strong version agrees, steps back, and asks one calm diagnostic — and the prospect, defending nothing, hears their own answer: the plan already failed. They talk themselves toward help, which no push could have done.",
+        note: "The weak version pushes, and push invites push-back — the prospect digs in and defends the DIY plan harder. The strong version agrees, steps back, and asks one calm diagnostic — and the prospect, defending nothing, hears their own answer: the plan already failed. They talk themselves toward help, which no push could have done.",
       },
       {
         kind: "drill",
@@ -538,7 +538,7 @@ export const PSYCH_PRINCIPLES_ENTRIES: ManualEntry[] = [
       {
         kind: "prose",
         heading: "The question arc",
-        text: "NEPQ organizes a call as a staged progression of question types. CONNECTION questions open without triggering the salesperson alarm — status and situation framed with disarming curiosity. SITUATION questions map the facts of where they are now. PROBLEM-AWARENESS questions surface what is not working and let the prospect articulate it as a problem in their own words. SOLUTION-AWARENESS questions turn them toward what fixing it would look like — what have you considered, what would it mean if this were handled. CONSEQUENCE questions — Miner’s signature — ask the cost of NOT acting: “what happens if you do nothing and this is still here a year from now?” And COMMITMENT questions convert the momentum into a next step. The structural lineage is plain and worth knowing: the situation → problem → implication → need-payoff spine is Neil Rackham’s SPIN ([[psych.spin]]), and letting the prospect state their own pain is pure Sandler ([[psych.sandler.pain-funnel]]). What NEPQ genuinely adds is the combination of the two threads: the consequence question asked in the detached tone — future-pacing the cost of inaction so gently that the PROSPECT, not the seller, ends up saying the scariest true sentence on the call. A seller who says “this will get worse” is pressure; a prospect who answers “honestly? they’d probably start garnishing me” has persuaded themselves.",
+        text: "NEPQ organizes a call as a staged progression of question types. CONNECTION questions open without triggering the salesperson alarm — status and situation framed with disarming curiosity. SITUATION questions map the facts of where they are now. PROBLEM-AWARENESS questions surface what is not working and let the prospect articulate it as a problem in their own words. SOLUTION-AWARENESS questions turn them toward what fixing it would look like — what have you considered, what would it mean if this were handled. CONSEQUENCE questions — Miner’s signature — ask the cost of NOT acting: “what happens if you do nothing and this is still here a year from now?” And COMMITMENT questions convert the momentum into a next step. The structural lineage is plain and worth knowing: the situation → problem → implication → need-payoff spine is Neil Rackham’s SPIN ([[psych.spin]]), and letting the prospect state their own pain is pure Sandler ([[psych.sandler.pain-funnel]]). What NEPQ genuinely adds is the combination of the two threads: the consequence question asked in the detached tone — future-pacing the cost of inaction so gently that the PROSPECT, not the seller, ends up saying the scariest true sentence on the call. A seller who says “this will get worse” tends to land as pressure; a prospect who answers “honestly? they’d probably start garnishing me” has persuaded themselves.",
       },
       {
         kind: "prose",
@@ -558,7 +558,7 @@ export const PSYCH_PRINCIPLES_ENTRIES: ManualEntry[] = [
         kind: "example",
         weak: "“Sir, if you don’t act, they WILL levy your bank account and garnish your wages. It’s going to get much worse. You can’t afford to wait.”",
         strong: "“Can I ask you something straight? If this just keeps sitting the way it has been — what do you figure their next move is? … Yeah. And if that garnishment actually hit, what does that do to your month?”",
-        note: "Both versions carry the same true consequence. The weak one is the seller saying it — pressure, guard up, fight-or-flight. The strong one is two calm questions, and the prospect says “garnishment” and then prices it themselves. Same facts, opposite nervous-system response — and the self-stated version binds.",
+        note: "Both versions carry the same true consequence. The weak one is the seller saying it — pressure, guard up, fight-or-flight. The strong one is two calm questions, and the prospect says “garnishment” and then prices it themselves. Same facts, opposite nervous-system response — and the self-stated version is the one that tends to bind.",
       },
       {
         kind: "drill",

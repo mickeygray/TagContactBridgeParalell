@@ -14,9 +14,35 @@ function buildPaymentDateRangeQuery(filters = {}) {
 }
 
 async function upsertPaymentLedger(casePaymentId, update = {}) {
+  return reconcilePaymentLedger(casePaymentId, update);
+}
+
+async function reconcilePaymentLedger(casePaymentId, update = {}) {
   return PaymentLedger.findOneAndUpdate(
     { casePaymentId: Number(casePaymentId) },
-    { $set: update },
+    { $set: {
+      ...update,
+      authoritativeSource: "logics-reconcile",
+      authoritativeAt: new Date(),
+    } },
+    { new: true, upsert: true, setDefaultsOnInsert: true },
+  );
+}
+
+async function observePaymentLedger(casePaymentId, observation = {}) {
+  const now = new Date();
+  return PaymentLedger.findOneAndUpdate(
+    { casePaymentId: Number(casePaymentId) },
+    {
+      $set: { lastObservedAt: now },
+      $setOnInsert: {
+        ...observation,
+        casePaymentId: Number(casePaymentId),
+        transactionStatus: observation.transactionStatus || null,
+        authoritativeSource: "event-observation",
+        authoritativeAt: null,
+      },
+    },
     { new: true, upsert: true, setDefaultsOnInsert: true },
   );
 }
@@ -270,6 +296,8 @@ async function summarizeSuccessfulPaymentsBySource(domain, filters = {}) {
 
 module.exports = {
   countPayments,
+  observePaymentLedger,
+  reconcilePaymentLedger,
   listPayments,
   listPaymentsByDateRange,
   listPaymentsForCase,

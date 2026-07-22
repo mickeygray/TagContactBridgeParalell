@@ -4,8 +4,9 @@ const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
 const express = require("express");
+const mongoose = require("mongoose");
 const cors = require("cors");
-const { getCorsOriginResolver, PORTS } = require("../../../packages/shared-config/src");
+const { getCompanyKeys, getCorsOriginResolver, PORTS } = require("../../../packages/shared-config/src");
 const {
   buildHealthAccessMiddleware,
   buildPublicHealthPayload,
@@ -60,6 +61,8 @@ const { createReadRingcentralRouter } = require("./routes/readRingcentral");
 const { createReadSocialRouter } = require("./routes/readSocial");
 const { createReadWorkspaceRouter } = require("./routes/readWorkspace");
 const { createRingCentralRouter } = require("./routes/ringcentral");
+const { createRingcxWebServiceCanaryRouter } = require("./routes/ringcxWebServiceCanary");
+const { createPhoneBurnerLeadDeliveryRuntime } = require("./routes/phoneBurnerLeadDelivery");
 const { createSalesTrainerRouter } = require("./routes/salesTrainer");
 const { createSendgridRouter } = require("./routes/sendgrid");
 const { createWorkflowsRouter } = require("./routes/workflows");
@@ -72,6 +75,16 @@ const { createNightlyCloseRuntime } = require("./services/nightlyCloseRuntime");
 const { createCxNightlyCallGradeRuntime } = require("./services/cxNightlyCallGradeRuntime");
 const { createEodRecordingArchiveRuntime } = require("./services/eodRecordingArchiveRuntime");
 const { createPhoneburnerRotationRuntime } = require("./services/phoneburnerRotationRuntime");
+const {
+  createRecordLeadDeliveryCadenceCall,
+} = require("./services/leadDeliveryCadenceAction");
+const {
+  createPersistDailyDialsToCadence,
+  createRecordLeadDeliveryDailyDial,
+} = require("./services/leadDeliveryDailyDialAction");
+const {
+  createDailyDialCallLogProjection,
+} = require("../../../packages/shared-services/src/dailyDialCallLogProjectionService");
 const { createDemoRingoutRuntime } = require("./services/demoRingoutRuntime");
 const { createBloggerRuntime } = require("./services/bloggerRuntime");
 const { initializeServiceRuntime } = require("../../../packages/shared-runtime/src");
@@ -85,8 +98,16 @@ const {
   cxDialQueueRepository,
   cxTerminalOutboxRepository,
   cxCallWrapCardRepository,
+  cxBoringWebhookRepository,
+  callLogRepository,
+  leadDeliveryRepository,
+  runLockRepository,
+  userAccountRepository,
 } = require("../../../packages/shared-repositories/src");
 const {
+  CxDialQueue,
+  DailyDial,
+  LeadCadence,
   LiveCoachSession,
 } = require("../../../packages/shared-models/src");
 
@@ -94,6 +115,38 @@ const CLIENT_RUNTIME_STARTED_AT = new Date();
 const CLIENT_RUNTIME_ID = `${CLIENT_RUNTIME_STARTED_AT.toISOString()}-${crypto
   .randomBytes(6)
   .toString("hex")}`;
+
+const LEGACY_VOICE_WRITER_SETTINGS = Object.freeze([
+  ["PHONEBURNER_ROTATION_ENABLED", false],
+  ["RC_CX_CADENCE_WORKER_ENABLED", true],
+  ["RC_CX_FRESH_HOT_LANE_ENABLED", true],
+  ["RC_CX_FRESH_HOT_LANE_IMMEDIATE_ENABLED", true],
+  ["PACING_QUEUE_ENABLED", false],
+  ["CX_DIAL_RUNTIME_BULK_LOAD_ENABLED", false],
+  ["CX_MORNING_QUEUE_BUILDER_ENABLED", false],
+  ["CX_FIRST_TOUCH_ENABLED", false],
+  ["CX_SEAN_FIRST_TOUCH_TEST_ENABLED", false],
+  ["CX_APPT_LANE_ENABLED", false],
+  ["CX_APPOINTMENT_AUTO_FIRE_ENABLED", false],
+  ["CX_APPOINTMENT_WORKER_ENABLED", true],
+  ["CX_BORING_DIALER_ENABLED", false],
+  ["CX_BORING_WEBHOOK_ENABLED", false],
+  ["CX_BORING_WEBHOOK_ACTIONS_ENABLED", false],
+  ["CX_ACCOUNT_ACTIVE_CALL_WATCHER_ENABLED", true],
+  ["CX_CALLER_ID_ROTATION_ENABLED", false],
+  ["CX_CALLER_ID_ROTATION_ARM", false],
+]);
+
+function findArmedLegacyVoiceWriters(env = process.env) {
+  return LEGACY_VOICE_WRITER_SETTINGS
+    .filter(([name, defaultEnabled]) => {
+      const configured = env?.[name];
+      if (configured == null || String(configured).trim() === "") return defaultEnabled;
+      const normalized = String(configured).trim().toLowerCase();
+      return defaultEnabled ? normalized !== "false" : normalized === "true";
+    })
+    .map(([name]) => name);
+}
 
 // Hard-stop SMS keywords. Match the legacy TCB list for parity. Per
 // the per-channel-DNC design, a HARD STOP marks the lead's `sms`
@@ -128,9 +181,13 @@ const {
   createCxCallWrapCardService,
   createCxBadNumberOutcomeHandler,
   createCxFirstTouchDispatcher,
+  createCxCallerIdRotationService,
+  filterCxCallerIdRotationConfig,
+  loadCxCallerIdRotationConfig,
   createCxAppointmentDispatcher,
   createCxSeanFirstTouchDrip,
   createCxAppointment,
+  executeCxLogicsTask,
   buildCxReviewCorrectionRow,
   requestCxLeadStatusUpdate,
   sendMail,
@@ -138,13 +195,25 @@ const {
   writeAgentCallNoteFromTerminal,
   writeCxCallWrapSummary,
   watchCxBulkLoadAccountActiveCalls,
+  CX_BORING_WEBHOOK_ACTIONS,
+  createCxBoringWebhookActionDrain,
+  createCxBoringWebhookCallPoller,
+  createCxBoringWebhookService,
+  leadDeliveryService,
 } = require("../../../packages/shared-services/src");
-const { bootstrapSeedAccounts } = require("../../../packages/shared-auth/src");
+const { bootstrapSeedAccounts, isFieldEncryptionConfigured } = require("../../../packages/shared-auth/src");
 const {
+  createPhoneBurnerClient,
+  createPhoneBurnerDurableCredentialStore,
   createRingcxVoiceClient,
   createLogicsClient,
   validateCompanyTrackingNumbers,
 } = require("../../../packages/shared-integrations/src");
+const { resolveQueueDialTimeWindow } = require("../../../packages/shared-services/src/cxQueuePolicyService");
+const leadDeliveryConfiguration = require("../../../config/lead-delivery-agents.json");
+const {
+  watchCxBoringDialerActiveCalls,
+} = require("../../../packages/shared-services/src/cxBoringDialerRuntime");
 
 function createWorkerState() {
   return {
@@ -1061,6 +1130,7 @@ function createControlPlaneCxCallWrapCards({ runtime }) {
         status: "dnc",
         notes: "DNC set from call wrap card",
       }),
+    releaseToCadence: (card) => recordCxTerminalCadenceEvent(card.payload || {}, runtime),
     createAppointment: ({ card, appointmentAt, appointmentDate, appointmentTime, appointmentTimezone, user }) => {
       const payload = card?.payload && typeof card.payload === "object" ? card.payload : {};
       const phone = payload.phone || payload.prospectPhone || payload.leadPhone || null;
@@ -1082,11 +1152,420 @@ function createControlPlaneCxCallWrapCards({ runtime }) {
   });
 }
 
+function createControlPlaneCxBadNumberHandler({ runtime }) {
+  return createCxBadNumberOutcomeHandler({
+    findQueueItemById: (queueItemId) => cxDialQueueRepository.findQueueItemById(queueItemId),
+    updateQueueItem: (queueItemId, patch) => cxDialQueueRepository.updateQueueItem(queueItemId, patch),
+    updateLogicsDncStatus: ({ domain, caseId, actorEmail, notes }) =>
+      requestCxLeadStatusUpdate(domain, { email: actorEmail || "cx-bad-number" }, {
+        caseId,
+        status: "dnc",
+        notes,
+      }),
+    sendMail,
+    logger: runtime.logger,
+  });
+}
+
+async function resolveCxBoringWebhookLead(event = {}) {
+  const db = mongoose.connection.db;
+  const externId = String(event.externId || "").trim();
+  let domain = String(event.domain || "").trim().toUpperCase() || null;
+  let caseId = Number(event.caseId) || null;
+  let queueItem = null;
+  let feedRow = null;
+
+  if (externId && db) {
+    feedRow = await db.collection("cx_direct_four_agent_feed").findOne(
+      { externId },
+      { projection: { _id: 1, agent: 1, agentEmail: 1 } },
+    );
+    const match = String(feedRow?._id || "").match(/^([^:]+):(\d+)$/);
+    if (match) {
+      domain = match[1].toUpperCase();
+      caseId = Number(match[2]);
+    }
+  }
+
+  if (externId) {
+    queueItem = await CxDialQueue.findOne({
+      $or: [
+        { "metadata.lastRingcxPublishedExternId": externId },
+        { "metadata.rcxVisibilityExternId": externId },
+        { "metadata.lastPublishedExternId": externId },
+      ],
+    }).sort({ updatedAt: -1 }).lean().catch(() => null);
+    if (queueItem) {
+      domain = String(queueItem.domain || domain || "").toUpperCase() || null;
+      caseId = Number(queueItem.caseId || caseId) || null;
+    }
+  }
+
+  const cadence = domain && caseId
+    ? await LeadCadence.findOne({ domain, caseId }).lean().catch(() => null)
+    : null;
+  return {
+    domain,
+    caseId,
+    queueItemId: queueItem?._id || cadence?._id || null,
+    name: queueItem?.name || cadence?.name || [cadence?.firstName, cadence?.lastName].filter(Boolean).join(" ") || null,
+    phone: queueItem?.phone || cadence?.primaryPhone || cadence?.normalizedPhone || null,
+    agentEmail: event.agentEmail || feedRow?.agentEmail || ({
+      chris: "cbolt@taxadvocategroup.com",
+      brad: "bhansen@taxadvocategroup.com",
+      sean: "slucas@taxadvocategroup.com",
+      phil: "polson@taxadvocategroup.com",
+    })[String(feedRow?.agent || "").toLowerCase()] || null,
+  };
+}
+
+function createControlPlaneCxBoringWebhookHandlers({ runtime, wrapCards }) {
+  async function stampFeed(action, patch = {}) {
+    if (!mongoose.connection.db || !action.domain || !action.caseId) return null;
+    return mongoose.connection.db.collection("cx_direct_four_agent_feed").updateOne(
+      { _id: `${action.domain}:${action.caseId}` },
+      { $set: { ...patch, lastWebhookOutcome: action.outcome, lastWebhookUii: action.uii, updatedAt: new Date() } },
+    );
+  }
+
+  return {
+    [CX_BORING_WEBHOOK_ACTIONS.LOGICS_DNC]: async (action) => {
+      const result = await requestCxLeadStatusUpdate(
+        action.domain,
+        { email: action.agentEmail || "ringcx-webhook" },
+        {
+          caseId: action.caseId,
+          status: "dnc",
+          notes: `DNC from RingCX disposition (${action.disposition || action.outcome || "DNC"}).`,
+        },
+      );
+      if (result?.ok === false) return result;
+      const now = new Date();
+      await LeadCadence.updateOne(
+        { domain: action.domain, caseId: Number(action.caseId) },
+        { $set: {
+          "cadenceState.channelDnc.cx.blocked": true,
+          "cadenceState.channelDnc.cx.reason": "ringcx-disposition",
+          "cadenceState.channelDnc.cx.at": now,
+          "counterCadence.lastCxDncAt": now,
+        } },
+      );
+      await stampFeed(action, { status: "blocked", blockedAt: now, blockReason: "ringcx-dnc" });
+      return { ok: true, logics: result || null };
+    },
+
+    [CX_BORING_WEBHOOK_ACTIONS.CADENCE]: async (action) => {
+      const now = action.observedAt ? new Date(action.observedAt) : new Date();
+      const nextEligibleAt = action.nextEligibleAt ? new Date(action.nextEligibleAt) : null;
+      await LeadCadence.updateOne(
+        {
+          domain: action.domain,
+          caseId: Number(action.caseId),
+          "counterCadence.lastCxTerminalCountedUii": { $ne: action.uii },
+        },
+        {
+          $set: {
+            "counterCadence.lastCxTerminalCountedUii": action.uii,
+            "counterCadence.lastCxDialedAt": now,
+            "counterCadence.lastCxNoAnswerAt": now,
+            "lastTouched.cx": now,
+            "payloadSnapshot.cxDirectLastOutcome": {
+              outcome: action.outcome,
+              uii: action.uii,
+              at: now,
+              nextEligibleAt,
+            },
+          },
+          $inc: {
+            "cadenceCounters.cx": 1,
+            "counterCadence.cxNoAnswerCalls": 1,
+          },
+        },
+      );
+      await stampFeed(action, { nextEligibleAt, lastAttemptAt: now });
+      return { ok: true, nextEligibleAt };
+    },
+
+    [CX_BORING_WEBHOOK_ACTIONS.APPOINTMENT_PROMPT]: async (action) => {
+      if (!wrapCards) throw new Error("appointment fallback requires CX_CALL_WRAP_QUEUE_ENABLED=true");
+      const idemKey = `ringcx-webhook:${action.uii}:appointment`;
+      return wrapCards.createFromDrain({
+        row: { idemKey, uii: action.uii, domain: action.domain, caseId: action.caseId, queueItemId: action.queueItemId },
+        payload: {
+          idemKey,
+          eventType: "terminal",
+          outcome: "answered",
+          nextAction: "call_wrap",
+          source: "ringcx-webhook",
+          appointmentOnly: true,
+          uii: action.uii,
+          externId: action.externId,
+          domain: action.domain,
+          caseId: action.caseId,
+          queueItemId: action.queueItemId,
+          agentEmail: action.agentEmail,
+          name: action.name,
+          phone: action.phone,
+          at: action.observedAt,
+        },
+      });
+    },
+
+    [CX_BORING_WEBHOOK_ACTIONS.APPOINTMENT]: async (action) => {
+      const account = await userAccountRepository.findUserAccountByEmail(action.agentEmail).catch(() => null);
+      if (!account) throw new Error("RingCX appointment agent is not mapped to a Boring account");
+      const appointment = await createCxAppointment(action.domain, account, {
+        caseId: action.caseId,
+        appointmentAt: action.appointmentAt,
+        appointmentDate: action.appointmentDate,
+        appointmentTime: action.appointmentTime,
+        appointmentTimezone: action.appointmentTimezone,
+        queueItemId: action.queueItemId,
+        prospectName: action.name,
+        phone: action.phone,
+        source: "ringcx-webhook",
+      });
+      await stampFeed(action, { status: "appointment", appointmentAt: appointment?.appointmentAt || null });
+      return { ok: true, appointmentId: appointment?.appointmentId || null };
+    },
+  };
+}
+
+function collectLogicsTaskRows(value, { depth = 0, rows = [], seen = new Set() } = {}) {
+  if (value == null || depth > 6 || rows.length >= 5000) return rows;
+  if (typeof value === "string") {
+    const text = value.trim();
+    if ((text.startsWith("{") && text.endsWith("}")) || (text.startsWith("[") && text.endsWith("]"))) {
+      try {
+        collectLogicsTaskRows(JSON.parse(text), { depth: depth + 1, rows, seen });
+      } catch {
+        // A non-JSON string is ordinary task data, never a task container.
+      }
+    }
+    return rows;
+  }
+  if (typeof value !== "object" || seen.has(value)) return rows;
+  seen.add(value);
+  if (Array.isArray(value)) {
+    for (const entry of value) collectLogicsTaskRows(entry, { depth: depth + 1, rows, seen });
+    return rows;
+  }
+  rows.push(value);
+  for (const child of Object.values(value)) {
+    collectLogicsTaskRows(child, { depth: depth + 1, rows, seen });
+  }
+  return rows;
+}
+
+function createControlPlaneLeadDeliveryActionHandlers({
+  configuration,
+  serviceEmail,
+  findUserAccountByEmail = (email) => userAccountRepository.findUserAccountByEmail(email),
+}) {
+  const recordCadence = createRecordLeadDeliveryCadenceCall({ LeadCadence });
+  const reconcileDailyDialsToCallLog = createDailyDialCallLogProjection({
+    DailyDial,
+    upsertCallLog: callLogRepository.upsertCallLog,
+    resolveAgent: async (agentId) => {
+      const configured = configuration?.agents?.[String(agentId || "").trim().toLowerCase()] || null;
+      const email = String(configured?.applicationAccountEmail || "").trim().toLowerCase();
+      const account = email ? await findUserAccountByEmail(email) : null;
+      return {
+        extensionId: account?.extensionId || null,
+        name: account?.name || configured?.displayName || null,
+      };
+    },
+  });
+
+  return {
+    record_daily_dial: createRecordLeadDeliveryDailyDial({ DailyDial }),
+    persist_daily_dials_to_cadence: createPersistDailyDialsToCadence({
+      DailyDial,
+      recordCadence,
+    }),
+    reconcile_daily_dials_to_call_log: reconcileDailyDialsToCallLog,
+
+    logics_dnc: async (action) => {
+      const result = await requestCxLeadStatusUpdate(
+        action.domain,
+        { email: serviceEmail },
+        {
+          caseId: action.caseId,
+          status: "dnc",
+          notes: `DNC from PhoneBurner disposition (${action.normalizedOutcome || "dnc"}).`,
+          skipQueueFinalize: true,
+        },
+      );
+      if (result?.ok === false) throw new Error("phoneburner Logics DNC update failed");
+      const at = new Date();
+      await LeadCadence.updateOne(
+        { domain: String(action.domain || "").toUpperCase(), caseId: Number(action.caseId) },
+        { $set: {
+          "cadenceState.channelDnc.cx.blocked": true,
+          "cadenceState.channelDnc.cx.reason": "phoneburner-disposition",
+          "cadenceState.channelDnc.cx.at": at,
+          "counterCadence.lastCxDncAt": at,
+        } },
+      );
+      return { ok: true };
+    },
+  };
+}
+
+function summarizeLeadDeliveryPreview(preview = {}) {
+  const countsByPool = preview?.recipe?.countsByPool && typeof preview.recipe.countsByPool === "object"
+    ? Object.fromEntries(Object.entries(preview.recipe.countsByPool).map(([pool, count]) => [pool, Number(count) || 0]))
+    : {};
+  return {
+    status: String(preview?.status || "unknown"),
+    agentId: String(preview?.agentId || "").trim().toLowerCase() || null,
+    enabled: preview?.enabled === true,
+    shiftEnabled: preview?.shiftEnabled === true,
+    currentOutstanding: Number(preview?.currentOutstanding || 0),
+    acceptedInFlight: Number(preview?.acceptedInFlight || 0),
+    needed: Number(preview?.needed || 0),
+    selected: Array.isArray(preview?.recipe?.items) ? preview.recipe.items.length : 0,
+    countsByPool,
+    unfilled: Number(preview?.recipe?.unfilled || 0),
+    anomalyCount: Array.isArray(preview?.anomalies) ? preview.anomalies.length : 0,
+  };
+}
+
+function summarizeLeadDeliveryOperatorResult(result = {}) {
+  return {
+    status: String(result?.status || "unknown"),
+    agentId: String(result?.agentId || "").trim().toLowerCase() || null,
+    requested: Number(result?.requested || 0),
+    claimed: Number(result?.claimed || 0),
+    accepted: Number(result?.accepted || 0),
+    cancelled: result?.cancelled === true,
+    shiftEnabled: result?.shiftEnabled === true,
+    activeUntil: result?.activeUntil || null,
+    repaired: result?.repaired === true,
+    estimatedOutstanding: Number(result?.estimatedOutstanding || 0),
+    preview: result?.preview ? summarizeLeadDeliveryPreview(result.preview) : null,
+  };
+}
+
+async function startCxBoringWebhookActionWorker({ runtime, workerState, drain }) {
+  const enabled = String(process.env.CX_BORING_WEBHOOK_ACTIONS_ENABLED || "false").trim().toLowerCase() === "true";
+  workerState.enabled = enabled;
+  workerState.intervalMs = Math.max(Number(process.env.CX_BORING_WEBHOOK_ACTION_INTERVAL_MS) || 5_000, 1_000);
+  if (!enabled) {
+    workerState.lastResult = { skipped: true, reason: "disabled" };
+    return;
+  }
+  const tick = async () => {
+    if (workerState.running) return;
+    workerState.running = true;
+    workerState.lastStartedAt = new Date();
+    try {
+      workerState.lastResult = await drain.drainOnce({ limit: 50 });
+      workerState.lastCompletedAt = new Date();
+      workerState.lastError = null;
+    } catch (error) {
+      workerState.lastCompletedAt = new Date();
+      workerState.lastError = error?.message || String(error);
+      runtime.logger.warn("control-plane.cx_boring_webhook.drain_failed", { error: workerState.lastError });
+    } finally {
+      workerState.running = false;
+    }
+  };
+  workerState.timer = setInterval(tick, workerState.intervalMs);
+  if (typeof workerState.timer.unref === "function") workerState.timer.unref();
+  await tick();
+}
+
+async function startCxBoringWebhookPollerWorker({ runtime, workerState, poller }) {
+  const enabled = String(process.env.CX_BORING_WEBHOOK_ENABLED || "false").trim().toLowerCase() === "true";
+  workerState.enabled = enabled;
+  workerState.intervalMs = Math.max(Number(process.env.CX_BORING_WEBHOOK_POLL_INTERVAL_MS) || 2_000, 1_000);
+  if (!enabled) {
+    workerState.lastResult = { skipped: true, reason: "disabled" };
+    return;
+  }
+  const tick = async () => {
+    if (workerState.running) return;
+    workerState.running = true;
+    workerState.lastStartedAt = new Date();
+    try {
+      workerState.lastResult = await poller.pollOnce({ now: new Date() });
+      workerState.lastCompletedAt = new Date();
+      workerState.lastError = null;
+    } catch (error) {
+      workerState.lastCompletedAt = new Date();
+      workerState.lastError = error?.message || String(error);
+      runtime.logger.warn("control-plane.cx_boring_webhook.poll_failed", { error: workerState.lastError });
+    } finally {
+      workerState.running = false;
+    }
+  };
+  workerState.timer = setInterval(tick, workerState.intervalMs);
+  if (typeof workerState.timer.unref === "function") workerState.timer.unref();
+  await tick();
+}
+
+function recordCxTerminalCadenceEvent(event = {}, runtime) {
+  if (event.systemDisposition) {
+    runtime.logger.info?.("control-plane.cx_terminal_outbox.system_disposition.forwarded", {
+      idemKey: event.idemKey || null,
+      sessionId: event.sessionId || null,
+      queueItemId: event.queueItemId || null,
+      uii: event.uii || null,
+      outcome: event.outcome || null,
+      source: event.source || "cx-bulk-load",
+      systemDisposition: event.systemDisposition,
+    });
+  }
+  return handleCxTerminalCallOutcome({
+    queueItemId: event.queueItemId,
+    domain: event.domain,
+    caseId: event.caseId,
+    uii: event.uii,
+    externId: event.externId,
+    agentId: event.agentId,
+    agentExtensionId: event.agentExtensionId,
+    outcome: event.outcome,
+    disposition: event.outcome,
+    source: event.source || "cx-bulk-load",
+    sourceService: "cx-bulk-load",
+    actorEmail: event.agentEmail,
+    outcomeAt: event.at || new Date().toISOString(),
+    systemDisposition: event.systemDisposition || null,
+    badNumber: event.badNumber === true,
+    badNumberReason: event.badNumberReason || null,
+  });
+}
+
+function createBoringButtonActionDispatcher({ runtime, wrapCards, badNumberHandler }) {
+  return async function dispatchBoringButtonAction({ nextAction, terminal } = {}) {
+    const action = String(nextAction || "").trim().toLowerCase();
+    const payload = terminal?.cadenceEvent || null;
+    const row = terminal?.result || null;
+    if (!payload || !row) return { ok: false, reason: "missing-terminal-receipt", action };
+    if (action === "call_wrap") {
+      if (!wrapCards) return { ok: true, skipped: true, reason: "call-wrap-disabled", action };
+      return { action, ...(await wrapCards.createFromDrain({ row, payload })) };
+    }
+    if (action === "cadence") {
+      return { action, ...(await recordCxTerminalCadenceEvent(payload, runtime)) };
+    }
+    if (action === "logics_dnc") {
+      return { action, ...(await badNumberHandler.handle({ row, payload })) };
+    }
+    if (action === "ringcx_vm_drop") {
+      return { ok: true, action, deferred: true, reason: "ringcx-completes-vm-drop" };
+    }
+    return { ok: false, reason: "unknown-button-action", action };
+  };
+}
+
 async function startCxTerminalOutboxWorker({
   runtime,
   workerState,
   wrapQueueEnabled = false,
   wrapCards = null,
+  badNumberHandler = null,
 }) {
   const intervalMs = Math.max(
     Number(process.env.CX_TERMINAL_OUTBOX_DRAIN_INTERVAL_MS) || 15_000,
@@ -1105,18 +1584,7 @@ async function startCxTerminalOutboxWorker({
     return;
   }
 
-  const badNumberHandler = createCxBadNumberOutcomeHandler({
-    findQueueItemById: (queueItemId) => cxDialQueueRepository.findQueueItemById(queueItemId),
-    updateQueueItem: (queueItemId, patch) => cxDialQueueRepository.updateQueueItem(queueItemId, patch),
-    updateLogicsDncStatus: ({ domain, caseId, actorEmail, notes }) =>
-      requestCxLeadStatusUpdate(domain, { email: actorEmail || "cx-bad-number" }, {
-        caseId,
-        status: "dnc",
-        notes,
-      }),
-    sendMail,
-    logger: runtime.logger,
-  });
+  const resolvedBadNumberHandler = badNumberHandler || createControlPlaneCxBadNumberHandler({ runtime });
 
   const drain = createCxTerminalOutboxDrain({
     outboxRepository: cxTerminalOutboxRepository,
@@ -1129,39 +1597,8 @@ async function startCxTerminalOutboxWorker({
         LiveCoachSession,
         logger: runtime.logger,
       }),
-    recordCadenceEvent: async (event = {}) => {
-      if (event.systemDisposition) {
-        runtime.logger.info?.("control-plane.cx_terminal_outbox.system_disposition.forwarded", {
-          idemKey: event.idemKey || null,
-          sessionId: event.sessionId || null,
-          queueItemId: event.queueItemId || null,
-          uii: event.uii || null,
-          outcome: event.outcome || null,
-          source: event.source || "cx-bulk-load",
-          systemDisposition: event.systemDisposition,
-        });
-      }
-      return handleCxTerminalCallOutcome({
-        queueItemId: event.queueItemId,
-        domain: event.domain,
-        caseId: event.caseId,
-        uii: event.uii,
-        externId: event.externId,
-        outcome: event.outcome,
-        disposition: event.outcome,
-        source: event.source || "cx-bulk-load",
-        sourceService: "cx-bulk-load",
-        actorEmail: event.agentEmail,
-        outcomeAt: event.at || new Date().toISOString(),
-        // RingCX's own verdict (CONGESTION/BUSY/INTERCEPT/...) - evidence, not routing.
-        // The watcher stamped it; the drain forwards it unchanged so cadence/call-log
-        // can store it (lead health: INTERCEPT=dead number, BUSY=timing, CONGESTION=route).
-        systemDisposition: event.systemDisposition || null,
-        badNumber: event.badNumber === true,
-        badNumberReason: event.badNumberReason || null,
-      });
-    },
-    handleBadNumberOutcome: (packet) => badNumberHandler.handle(packet),
+    recordCadenceEvent: (event) => recordCxTerminalCadenceEvent(event, runtime),
+    handleBadNumberOutcome: (packet) => resolvedBadNumberHandler.handle(packet),
     writeCallNote: (packet) =>
       writeAgentCallNoteFromTerminal(packet, {
         agentCallNoteRepository: cxAgentCallNoteRepository,
@@ -1285,6 +1722,33 @@ function summarizeCxAccountActiveCallWatcherResult(result = {}) {
       terminalWrites: (Array.isArray(applied.terminalWrites) ? applied.terminalWrites : []).slice(0, 20),
       skipped: (Array.isArray(applied.skipped) ? applied.skipped : []).slice(0, 20),
     },
+    boring: result.boring || null,
+  };
+}
+
+async function runCxActiveCallOwnersOnce(options = {}) {
+  const legacyWatcher = options.legacyWatcher || watchCxBulkLoadAccountActiveCalls;
+  const boringWatcher = options.boringWatcher || watchCxBoringDialerActiveCalls;
+  const boringEnabled = options.boringEnabled === undefined
+    ? String(process.env.CX_BORING_DIALER_ENABLED || "false").trim().toLowerCase() === "true"
+    : options.boringEnabled === true;
+  if (!boringEnabled) {
+    const legacy = await legacyWatcher(options.input || {});
+    return { ...(legacy || {}), boring: null };
+  }
+  const boring = await boringWatcher(options.input || {});
+  return {
+    checkedAt: boring?.checkedAt || new Date().toISOString(),
+    summary: {
+      accountCount: 0,
+      sessionCount: 0,
+      changedCount: 0,
+      errorCount: 0,
+      skippedCount: 0,
+    },
+    accounts: [],
+    applied: { writes: [], terminalWrites: [], skipped: [] },
+    boring: boring || null,
   };
 }
 
@@ -1318,19 +1782,22 @@ async function startCxAccountActiveCallWatcherWorker({ runtime, workerState }) {
     workerState.running = true;
     workerState.lastStartedAt = new Date();
     try {
-      const result = await watchCxBulkLoadAccountActiveCalls();
+      const result = await runCxActiveCallOwnersOnce();
       const summary = summarizeCxAccountActiveCallWatcherResult(result);
       workerState.lastCompletedAt = new Date();
       workerState.lastResult = summary;
       workerState.lastError = null;
       const applied = summary.applied || {};
       const overview = summary.summary || {};
+      const boring = summary.boring?.summary || {};
       if (
         Number(overview.sessionCount || 0) > 0 ||
         Number(applied.writeCount || 0) > 0 ||
         Number(applied.terminalWriteCount || 0) > 0 ||
         Number(applied.skippedCount || 0) > 0 ||
-        Number(overview.errorCount || 0) > 0
+        Number(overview.errorCount || 0) > 0 ||
+        Number(boring.sessionCount || 0) > 0 ||
+        Number(boring.errorCount || 0) > 0
       ) {
         runtime.logger.info("control-plane.cx_account_active_call_watcher.tick", {
           summary: overview,
@@ -1340,6 +1807,7 @@ async function startCxAccountActiveCallWatcherWorker({ runtime, workerState }) {
             skippedCount: applied.skippedCount,
           },
           accounts: summary.accounts,
+          boring,
         });
       }
     } catch (error) {
@@ -1478,6 +1946,131 @@ async function startServer() {
   const workerState = createWorkerState();
   const wrapQueueEnabled = String(process.env.CX_CALL_WRAP_QUEUE_ENABLED || "false").trim().toLowerCase() === "true";
   const wrapCards = wrapQueueEnabled ? createControlPlaneCxCallWrapCards({ runtime }) : null;
+  const leadDeliveryEnabled = String(process.env.LEAD_DELIVERY_ENABLED || "false").trim().toLowerCase() === "true";
+  const leadDeliveryCallbackCaptureEnabled = String(
+    process.env.LEAD_DELIVERY_CALLBACK_CAPTURE_ENABLED || "false",
+  ).trim().toLowerCase() === "true";
+  const leadDeliveryActionsEnabled = String(process.env.LEAD_DELIVERY_ACTIONS_ENABLED || "false")
+    .trim().toLowerCase() === "true";
+  const leadDeliveryRefillEnabled = String(process.env.LEAD_DELIVERY_REFILL_ENABLED || "false")
+    .trim().toLowerCase() === "true";
+  const leadDeliveryProviderPostMinimumIntervalMs = Math.max(
+    Number(process.env.LEAD_DELIVERY_PROVIDER_POST_MIN_INTERVAL_MS) || 1,
+    1,
+  );
+  const leadDeliveryTickIntervalMs = Math.max(
+    Number(process.env.LEAD_DELIVERY_TICK_INTERVAL_MS) || 60 * 1000,
+    60_000,
+  );
+  const armedLegacyVoiceWriters = findArmedLegacyVoiceWriters(process.env);
+  const leadDeliveryServiceEmail = String(
+    process.env.PARALLEL_SERVICE_EMAIL || "service@taxadvocategroup.com",
+  ).trim().toLowerCase();
+  if (leadDeliveryActionsEnabled && !leadDeliveryEnabled) {
+    throw new Error("LEAD_DELIVERY_ACTIONS_ENABLED requires LEAD_DELIVERY_ENABLED");
+  }
+  if (leadDeliveryActionsEnabled && !leadDeliveryCallbackCaptureEnabled) {
+    throw new Error("LEAD_DELIVERY_ACTIONS_ENABLED requires LEAD_DELIVERY_CALLBACK_CAPTURE_ENABLED");
+  }
+  if (leadDeliveryRefillEnabled && !leadDeliveryActionsEnabled) {
+    throw new Error("LEAD_DELIVERY_REFILL_ENABLED requires LEAD_DELIVERY_ACTIONS_ENABLED");
+  }
+  if (leadDeliveryEnabled && armedLegacyVoiceWriters.length > 0) {
+    throw new Error(`LEAD_DELIVERY_ENABLED conflicts with legacy voice writers: ${armedLegacyVoiceWriters.join(", ")}`);
+  }
+  const phoneBurnerCredentialStore = createPhoneBurnerDurableCredentialStore({
+    serviceEmail: leadDeliveryServiceEmail,
+    credentialRepository: userAccountRepository,
+  });
+  if (leadDeliveryActionsEnabled) {
+    if (!isFieldEncryptionConfigured()) {
+      throw new Error("PhoneBurner lead delivery actions require field encryption");
+    }
+    // Prove the durable Mongo credential pair before any action-capable
+    // runtime can start. This may perform the one-time encrypted env->Mongo
+    // bootstrap, but it does not call PhoneBurner.
+    await phoneBurnerCredentialStore.read();
+  }
+  const phoneBurnerClient = createPhoneBurnerClient({
+    credentialStore: phoneBurnerCredentialStore,
+    logger: runtime.logger,
+  });
+  const leadDeliveryCadenceSource = leadDeliveryService.createLeadDeliveryCadenceSource({
+    repository: leadDeliveryRepository,
+    domains: getCompanyKeys(),
+    policyForDomain: () => ({
+      allowedProspectStatusIds: config.logicsProspectStatusIds,
+      dncStatusIds: config.logicsDncStatusIds,
+    }),
+    contactWindowEvaluator: (row, at) => resolveQueueDialTimeWindow(row, at),
+    overnightBatchResolver: (item, at) => leadDeliveryService.assignPacificMorningBatch(item, { now: at }),
+  });
+  const leadDeliveryActionHandlers = createControlPlaneLeadDeliveryActionHandlers({
+    configuration: leadDeliveryConfiguration,
+    serviceEmail: leadDeliveryServiceEmail,
+  });
+  const leadDeliveryRuntime = leadDeliveryService.createLeadDeliveryRuntime({
+    repository: leadDeliveryRepository,
+    source: leadDeliveryCadenceSource,
+    phoneBurner: phoneBurnerClient,
+    actionHandlers: leadDeliveryActionHandlers,
+    persistDailyDialOutcomes: leadDeliveryActionHandlers.persist_daily_dials_to_cadence,
+    reconcileDailyDialCalls: leadDeliveryActionHandlers.reconcile_daily_dials_to_call_log,
+    configuration: leadDeliveryConfiguration,
+    enabled: leadDeliveryEnabled,
+    actionsEnabled: leadDeliveryActionsEnabled,
+    refillEnabled: leadDeliveryRefillEnabled,
+    providerPostMinimumIntervalMs: leadDeliveryProviderPostMinimumIntervalMs,
+    tickIntervalMs: leadDeliveryTickIntervalMs,
+    deliveryWindowEvaluator: leadDeliveryService.isPacificDeliveryWindowOpen,
+    currentOvernightBatchKey: (at) => leadDeliveryService.resolvePacificMorningBatchWindow(at).batchKey,
+    providerInventoryAuthoritative: true,
+    providerConsumptionOrder: String(process.env.PHONEBURNER_PROVIDER_CONSUMPTION_ORDER || "").trim() || null,
+    // SIMPLE LOOP ONLY: legacy seed/fill/preload/refill methods remain in the
+    // file for the no-delete proof window but have no production authority.
+    legacyOperatorSurfaceEnabled: false,
+    simpleOperatorDirectAccessEnabled: false,
+    productivityRebalanceEnabled: true,
+    acquireProviderPostSlot: ({ laneKey, leaseMs }) => runLockRepository.acquireRunLock(
+      laneKey,
+      leaseMs,
+      CLIENT_RUNTIME_ID,
+    ),
+    extendProviderPostSlot: ({ laneKey, slot, leaseMs }) => runLockRepository.extendRunLock(
+      laneKey,
+      slot?.token,
+      leaseMs,
+    ),
+    releaseProviderPostSlot: ({ laneKey, slot }) => runLockRepository.releaseRunLock(
+      laneKey,
+      slot?.token,
+    ),
+    logger: runtime.logger,
+  });
+  const badNumberHandler = createControlPlaneCxBadNumberHandler({ runtime });
+  const dispatchBoringButtonAction = createBoringButtonActionDispatcher({
+    runtime,
+    wrapCards,
+    badNumberHandler,
+  });
+  const boringWebhookProcessingEnabled = String(process.env.CX_BORING_WEBHOOK_ENABLED || "false")
+    .trim().toLowerCase() === "true";
+  const boringWebhookService = createCxBoringWebhookService({
+    repository: cxBoringWebhookRepository,
+    resolveLead: resolveCxBoringWebhookLead,
+    cadenceDelayMs: Number(process.env.CX_BORING_WEBHOOK_CADENCE_DELAY_MS) || 60 * 60 * 1000,
+  });
+  const boringWebhookActionDrain = createCxBoringWebhookActionDrain({
+    repository: cxBoringWebhookRepository,
+    handlers: createControlPlaneCxBoringWebhookHandlers({ runtime, wrapCards }),
+    logger: runtime.logger,
+  });
+  const boringWebhookCallPoller = createCxBoringWebhookCallPoller({
+    client: createRingcxVoiceClient(),
+    service: boringWebhookService,
+    repository: cxBoringWebhookRepository,
+    logger: runtime.logger,
+  });
   const lexisNightlyRuntime = createLexisNightlyRuntime({
     config: config.lexisNightly || {},
     runtime,
@@ -1501,6 +2094,7 @@ async function startServer() {
     // syncAll() during its final-reconcile step. Order matters here:
     // spendSyncRuntime must be constructed before nightlyCloseRuntime.
     spendSyncRuntime,
+    reconcileDailyDialCalls: leadDeliveryActionHandlers.reconcile_daily_dials_to_call_log,
   });
   const cxNightlyCallGradeRuntime = createCxNightlyCallGradeRuntime({
     config: config.nightlyCallGrade || {},
@@ -1515,7 +2109,12 @@ async function startServer() {
   // via PHONEBURNER_ROTATION_ENABLED=true once you've commented out
   // the equivalent cron in legacy webhook.js (avoids double-fire).
   const phoneburnerRotationRuntime = createPhoneburnerRotationRuntime({
-    config: config.phoneburnerRotation || {},
+    // SIMPLE LOOP ONLY: the old 7am folder-rotation bridge must never share
+    // PhoneBurner ownership with lead delivery, even if stale configuration
+    // accidentally leaves its flag armed.
+    config: leadDeliveryEnabled
+      ? { ...(config.phoneburnerRotation || {}), enabled: false }
+      : (config.phoneburnerRotation || {}),
     runtime,
   });
   const demoRingoutRuntime = createDemoRingoutRuntime({
@@ -1534,6 +2133,9 @@ async function startServer() {
   const cxRecordingState = createWorkerState();
   const cxAppointmentState = createWorkerState();
   const cxTerminalOutboxState = createWorkerState();
+  const cxBoringWebhookActionState = createWorkerState();
+  const cxBoringWebhookPollerState = createWorkerState();
+  const cxCallerIdRotationState = createWorkerState();
   const cxAccountActiveCallWatcherState = createWorkerState();
   const inboundProxy = buildServiceProxy({
     port: PORTS.inboundGateway,
@@ -1571,6 +2173,9 @@ async function startServer() {
       cxRecording: summarizeWorkerState(cxRecordingState),
       cxAppointments: summarizeWorkerState(cxAppointmentState),
       cxTerminalOutbox: summarizeWorkerState(cxTerminalOutboxState),
+      cxBoringWebhookActions: summarizeWorkerState(cxBoringWebhookActionState),
+      cxBoringWebhookPoller: summarizeWorkerState(cxBoringWebhookPollerState),
+      cxCallerIdRotation: summarizeWorkerState(cxCallerIdRotationState),
       cxAccountActiveCallWatcher: summarizeWorkerState(cxAccountActiveCallWatcherState),
     },
     runtimes: {
@@ -1581,6 +2186,11 @@ async function startServer() {
       cxNightlyCallGrade: cxNightlyCallGradeRuntime.getState(),
       spendSync: spendSyncRuntime.getState(),
       eodRecordingArchive: eodRecordingArchiveRuntime.getState(),
+      leadDelivery: {
+        ...leadDeliveryRuntime.getState(),
+        callbackCaptureEnabled: leadDeliveryCallbackCaptureEnabled,
+        callbackAuthentication: "none",
+      },
       demoRingout: demoRingoutRuntime.getState(),
       blogger: bloggerRuntime.getState(),
     },
@@ -1589,6 +2199,39 @@ async function startServer() {
   app.use(cors({ origin: getCorsOriginResolver(), credentials: true }));
   app.use(express.json({ limit: "1mb", verify: captureRawBody }));
   app.use(express.urlencoded({ extended: true, limit: "1mb", verify: captureRawBody }));
+  // Public-but-signed PhoneBurner callbacks. Capture is durable before ACK;
+  // the injected runtime drain remains independently gated by the action flag.
+  const phoneBurnerLeadDeliveryCallbackRuntime = createPhoneBurnerLeadDeliveryRuntime({
+    captureEnabled: leadDeliveryCallbackCaptureEnabled,
+    actionsEnabled: leadDeliveryActionsEnabled,
+    logger: runtime.logger,
+    allowedAgentIds: Object.entries(leadDeliveryConfiguration.agents)
+      .filter(([, agent]) => agent.enabled === true)
+      .map(([agentId]) => agentId),
+    // The legacy URL-agent/pulse hook is intentionally not injected. The exact
+    // persisted event below resolves its owner from provider identity, deletes
+    // that attempt, and invokes the runtime's one per-agent capacity owner.
+    drain: {
+      drainEvent: async (event) => leadDeliveryRuntime.drainCapturedEvent(event, {
+        waitForRefillCompletion: false,
+      }),
+      drainOnce: async (options = {}) => leadDeliveryRuntime.drainEvents({
+        ...options,
+        waitForRefillCompletion: false,
+      }),
+    },
+  });
+  app.use(
+    "/api/lead-delivery/phoneburner",
+    phoneBurnerLeadDeliveryCallbackRuntime.router,
+  );
+  // Signed RingCX intake. Capture is always durable; fresh Boring processing is
+  // independently gated and only enqueues Mongo work before ACKing RingCX.
+  app.use("/api/cx/ringcx-web-service-canary", createRingcxWebServiceCanaryRouter({
+    processor: boringWebhookService,
+    processingEnabled: boringWebhookProcessingEnabled,
+    logger: runtime.logger,
+  }));
 
   app.get("/health", requireHealthAccess, (req, res) => {
     if (!isDetailedHealthRequest(req)) {
@@ -1751,6 +2394,67 @@ async function startServer() {
   app.all("/webhook/ringcentral/ex", ringcentralProxy);
   app.all("/webhook/ringcentral/session-events", ringcentralProxy);
 
+  app.get("/api/admin/lead-delivery/:agentId/preview", auth.requireAdmin, async (req, res, next) => {
+    try {
+      const preview = await leadDeliveryRuntime.previewAgent(req.params.agentId);
+      return res.json({ ok: true, preview: summarizeLeadDeliveryPreview(preview) });
+    } catch (error) {
+      return next(error);
+    }
+  });
+  app.post("/api/admin/lead-delivery/:agentId/seed", auth.requireAdmin, async (req, res, next) => {
+    // SIMPLE LOOP ONLY: old explicit seed/preposition writer disabled. Morning
+    // cold start belongs to durable runDayStart.
+    return res.status(410).json({ ok: false, error: "lead-delivery-simple-loop-only" });
+  });
+  app.post("/api/admin/lead-delivery/:agentId/launch", auth.requireAdmin, async (req, res, next) => {
+    // SIMPLE LOOP ONLY: old launch writer disabled. The daily marker owns
+    // activation and prevents duplicate morning packets.
+    return res.status(410).json({ ok: false, error: "lead-delivery-simple-loop-only" });
+  });
+  app.post("/api/admin/lead-delivery/:agentId/cancel", auth.requireAdmin, async (req, res, next) => {
+    try {
+      const result = await leadDeliveryRuntime.cancelAgent(req.params.agentId);
+      return res.json({ ok: true, result: summarizeLeadDeliveryOperatorResult(result) });
+    } catch (error) {
+      return next(error);
+    }
+  });
+  app.post("/api/admin/lead-delivery/:agentId/reconcile", auth.requireAdmin, async (req, res, next) => {
+    try {
+      const result = await leadDeliveryRuntime.reconcileAgent(req.params.agentId);
+      return res.json({ ok: true, result: summarizeLeadDeliveryOperatorResult(result) });
+    } catch (error) {
+      return next(error);
+    }
+  });
+  app.post("/api/admin/lead-delivery/tick", auth.requireAdmin, async (_req, res, next) => {
+    try {
+      const result = await leadDeliveryRuntime.tick();
+      return res.json({
+        ok: true,
+        result: {
+          status: String(result?.status || "unknown"),
+          ingestion: {
+            status: String(result?.ingestion?.status || "unknown"),
+            read: Number(result?.ingestion?.read || 0),
+            inserted: Number(result?.ingestion?.inserted || 0),
+            skipped: Number(result?.ingestion?.skipped || 0),
+            done: result?.ingestion?.done === true,
+          },
+          events: {
+            status: String(result?.events?.status || "unknown"),
+            seen: Number(result?.events?.seen || 0),
+            processed: Number(result?.events?.processed || 0),
+          },
+          automaticCount: Array.isArray(result?.automatic) ? result.automatic.length : 0,
+        },
+      });
+    } catch (error) {
+      return next(error);
+    }
+  });
+
   app.use("/api/admin/accounts", createAdminAccountsRouter(auth));
   // Per-agent and per-lead call review (Calls Today, who-dialed-who).
   app.use("/api/admin/call-review", createAdminCallReviewRouter(auth));
@@ -1767,7 +2471,11 @@ async function startServer() {
   app.use("/api/commands/cx", createCommandsCxRouter(auth, { logger: runtime.logger }));
   app.use("/api/cx/simple-loop", createCxSimpleLoopRouter(auth, { logger: runtime.logger }));
   app.use("/api/cx/slow-single", createCxSlowSingleRouter(auth, { logger: runtime.logger }));
-  app.use("/api/cx/bulk-load", createCxBulkLoadRouter(auth, { logger: runtime.logger, wrapCards: wrapQueueEnabled ? wrapCards : null }));
+  app.use("/api/cx/bulk-load", createCxBulkLoadRouter(auth, {
+    logger: runtime.logger,
+    wrapCards: wrapQueueEnabled ? wrapCards : null,
+    dispatchBoringButtonAction,
+  }));
   app.use("/api/commands/deploy", createCommandsDeployRouter(auth, { bloggerRuntime }));
   app.use("/api/commands/inbox", createCommandsInboxRouter(auth));
   app.use("/api/commands/social", createCommandsSocialRouter(auth));
@@ -1894,10 +2602,31 @@ async function startServer() {
       workerState: cxTerminalOutboxState,
       wrapQueueEnabled,
       wrapCards,
+      badNumberHandler,
     });
   } else {
     cxTerminalOutboxState.enabled = false;
     runtime.logger.warn("control-plane.cx_terminal_outbox.disabled");
+  }
+
+  if (config.controlPlaneWorker?.enabled !== false) {
+    await startCxBoringWebhookActionWorker({
+      runtime,
+      workerState: cxBoringWebhookActionState,
+      drain: boringWebhookActionDrain,
+    });
+  } else {
+    cxBoringWebhookActionState.enabled = false;
+  }
+
+  if (config.controlPlaneWorker?.enabled !== false) {
+    await startCxBoringWebhookPollerWorker({
+      runtime,
+      workerState: cxBoringWebhookPollerState,
+      poller: boringWebhookCallPoller,
+    });
+  } else {
+    cxBoringWebhookPollerState.enabled = false;
   }
 
   if (config.controlPlaneWorker?.enabled !== false) {
@@ -1906,17 +2635,16 @@ async function startServer() {
     // default off) — with the flags off these ticks are two no-op env reads. Fail-soft:
     // a tick error is logged, never thrown into the interval.
     const laneDispatchClient = createRingcxVoiceClient();
+    const boringDialerEnabled = String(process.env.CX_BORING_DIALER_ENABLED || "false")
+      .trim().toLowerCase() === "true";
     const firstTouchDispatcher = createCxFirstTouchDispatcher({
       client: laneDispatchClient,
       logger: runtime.logger,
     });
-    const appointmentDispatcher = createCxAppointmentDispatcher({
-      client: laneDispatchClient,
-      logger: runtime.logger,
-    });
     const firstTouchTimer = setInterval(() => {
+      if (boringWebhookProcessingEnabled) return;
       firstTouchDispatcher.tickOnce().then((result) => {
-        if (result && !result.skipped && (result.dispatched || result.failed)) {
+        if (result && !result.skipped && (result.dispatched || result.queued || result.assigned || result.failed)) {
           runtime.logger.info("control-plane.cx_first_touch.dispatch.tick", result);
         }
       }).catch((error) => {
@@ -1924,46 +2652,141 @@ async function startServer() {
       });
     }, 15_000);
     if (typeof firstTouchTimer.unref === "function") firstTouchTimer.unref();
-    const appointmentTimer = setInterval(() => {
-      appointmentDispatcher.tickOnce().then((result) => {
-        if (result && !result.skipped && (result.dispatched || result.failed)) {
-          runtime.logger.info("control-plane.cx_appt_lane.dispatch.tick", result);
-        }
-      }).catch((error) => {
-        runtime.logger.warn("control-plane.cx_appt_lane.dispatch.failed", { error: error?.message });
+    if (!boringDialerEnabled && !boringWebhookProcessingEnabled) {
+      const appointmentDispatcher = createCxAppointmentDispatcher({
+        client: laneDispatchClient,
+        logger: runtime.logger,
       });
-    }, 30_000);
-    if (typeof appointmentTimer.unref === "function") appointmentTimer.unref();
+      const appointmentTimer = setInterval(() => {
+        appointmentDispatcher.tickOnce().then((result) => {
+          if (result && !result.skipped && (result.dispatched || result.failed)) {
+            runtime.logger.info("control-plane.cx_appt_lane.dispatch.tick", result);
+          }
+        }).catch((error) => {
+          runtime.logger.warn("control-plane.cx_appt_lane.dispatch.failed", { error: error?.message });
+        });
+      }, 30_000);
+      if (typeof appointmentTimer.unref === "function") appointmentTimer.unref();
+    }
 
     // Sean first-touch drip (pilot fresh-touch test, 2026-07-08; default off via
     // CX_SEAN_FIRST_TOUCH_TEST_ENABLED). Occasionally assigns ONE unassigned fresh
     // intake mint to Sean and publishes it IMMEDIATE into his First Touch campaign
     // through the same batch publisher the lane dispatchers use. Flag-off ticks are
     // one env read.
-    const seanFirstTouchDrip = createCxSeanFirstTouchDrip({
-      client: laneDispatchClient,
-      logger: runtime.logger,
-    });
-    const seanFirstTouchTimer = setInterval(() => {
-      seanFirstTouchDrip.tickOnce().then((result) => {
-        if (result && !result.skipped && (result.published || result.failed || result.candidates)) {
-          runtime.logger.info("control-plane.cx_sean_first_touch.drip.tick", result);
-        }
-      }).catch((error) => {
-        runtime.logger.warn("control-plane.cx_sean_first_touch.drip.failed", { error: error?.message });
+    if (!boringDialerEnabled && !boringWebhookProcessingEnabled) {
+      const seanFirstTouchDrip = createCxSeanFirstTouchDrip({
+        client: laneDispatchClient,
+        logger: runtime.logger,
       });
-    }, 60_000);
-    if (typeof seanFirstTouchTimer.unref === "function") seanFirstTouchTimer.unref();
+      const seanFirstTouchTimer = setInterval(() => {
+        seanFirstTouchDrip.tickOnce().then((result) => {
+          if (result && !result.skipped && (result.published || result.failed || result.candidates)) {
+            runtime.logger.info("control-plane.cx_sean_first_touch.drip.tick", result);
+          }
+        }).catch((error) => {
+          runtime.logger.warn("control-plane.cx_sean_first_touch.drip.failed", { error: error?.message });
+        });
+      }, 60_000);
+      if (typeof seanFirstTouchTimer.unref === "function") seanFirstTouchTimer.unref();
+    }
   }
 
-  if (config.controlPlaneWorker?.enabled !== false) {
+  // CX CALLER-ID ROTATION (2026-07-09, registered-pool). Every ~2h during business hours,
+  // rotate each agent's presented caller ID through their REGISTERED pool
+  // (config/cx-caller-id-rotation-pools.json) across all their active campaigns — to spread
+  // outbound volume and rest burned ANIs. DEFAULT OFF and DRY-RUN until explicitly armed:
+  //   CX_CALLER_ID_ROTATION_ENABLED=true  -> worker ticks (computes + logs the plan, writes nothing)
+  //   CX_CALLER_ID_ROTATION_ARM=true      -> actually writes campaign caller IDs (GET->PUT->verify)
+  // Registered-pool + business-hours + write-then-verify keep this on the legitimate side of the
+  // FCC "snowshoeing" line (see docs/CX_CALLER_ID_REPUTATION_RUNBOOK_2026-07-09.md).
+  const callerIdRotationEnabled = String(process.env.CX_CALLER_ID_ROTATION_ENABLED || "false")
+    .trim().toLowerCase() === "true";
+  if (config.controlPlaneWorker?.enabled !== false
+    && boringWebhookProcessingEnabled
+    && callerIdRotationEnabled) {
+    const ownedDialGroupIds = String(process.env.CX_BORING_CALLER_ID_DIAL_GROUP_IDS || "1011,1067,1068")
+      .split(",").map((value) => value.trim()).filter(Boolean);
+    const rotationConfig = filterCxCallerIdRotationConfig(
+      loadCxCallerIdRotationConfig(),
+      ownedDialGroupIds,
+    );
+    const callerIdRotation = createCxCallerIdRotationService({
+      client: createRingcxVoiceClient(),
+      config: rotationConfig,
+      logger: runtime.logger,
+    });
+    const rotationArmed = String(process.env.CX_CALLER_ID_ROTATION_ARM || "false").trim().toLowerCase() === "true";
+    const rotationIntervalMs = Math.max(
+      Number(process.env.CX_CALLER_ID_ROTATION_INTERVAL_MS) || 7_200_000, // 2h default
+      600_000, // floor: never faster than 10 min
+    );
+    cxCallerIdRotationState.enabled = true;
+    cxCallerIdRotationState.intervalMs = rotationIntervalMs;
+    const tickCallerIdRotation = async () => {
+      if (cxCallerIdRotationState.running) return;
+      cxCallerIdRotationState.running = true;
+      cxCallerIdRotationState.lastStartedAt = new Date();
+      cxCallerIdRotationState.lastError = null;
+      try {
+        if (rotationArmed) {
+          const lock = await runLockRepository.acquireRunLock(
+            "cx-boring-caller-id-rotation",
+            rotationIntervalMs,
+            CLIENT_RUNTIME_ID,
+          );
+          if (!lock) {
+            cxCallerIdRotationState.lastResult = { skipped: true, reason: "another-instance-owns-interval" };
+            return;
+          }
+        }
+        const result = await callerIdRotation.rotateOnce({ dryRun: !rotationArmed });
+        cxCallerIdRotationState.lastResult = {
+          ...result,
+          armed: rotationArmed,
+          ownedDialGroupIds,
+        };
+        if (result && !result.skipped && ((result.moves && result.moves.length) || result.failed)) {
+          runtime.logger.info("control-plane.cx_caller_id_rotation.tick", cxCallerIdRotationState.lastResult);
+        }
+      } catch (error) {
+        cxCallerIdRotationState.lastError = error?.message || String(error);
+        runtime.logger.warn("control-plane.cx_caller_id_rotation.failed", { error: cxCallerIdRotationState.lastError });
+      } finally {
+        cxCallerIdRotationState.running = false;
+        cxCallerIdRotationState.lastCompletedAt = new Date();
+      }
+    };
+    cxCallerIdRotationState.timer = setInterval(tickCallerIdRotation, rotationIntervalMs);
+    if (typeof cxCallerIdRotationState.timer.unref === "function") cxCallerIdRotationState.timer.unref();
+    runtime.logger.info("control-plane.cx_caller_id_rotation.enabled", {
+      armed: rotationArmed,
+      intervalMs: rotationIntervalMs,
+      ownedDialGroupIds,
+    });
+    await tickCallerIdRotation();
+  } else {
+    cxCallerIdRotationState.enabled = false;
+    cxCallerIdRotationState.lastResult = {
+      skipped: true,
+      reason: config.controlPlaneWorker?.enabled === false
+        ? "control-plane-worker-disabled"
+        : !boringWebhookProcessingEnabled
+          ? "boring-webhook-disabled"
+          : "caller-id-rotation-disabled",
+    };
+  }
+
+  if (config.controlPlaneWorker?.enabled !== false && !boringWebhookProcessingEnabled) {
     await startCxAccountActiveCallWatcherWorker({
       runtime,
       workerState: cxAccountActiveCallWatcherState,
     });
   } else {
     cxAccountActiveCallWatcherState.enabled = false;
-    runtime.logger.warn("control-plane.cx_account_active_call_watcher.disabled");
+    runtime.logger.warn("control-plane.cx_account_active_call_watcher.disabled", {
+      reason: boringWebhookProcessingEnabled ? "boring-webhook-owns-call-memory" : "control-plane-worker-disabled",
+    });
   }
 
   await lexisNightlyRuntime.start();
@@ -1974,6 +2797,7 @@ async function startServer() {
   await spendSyncRuntime.start();
   await eodRecordingArchiveRuntime.start();
   await phoneburnerRotationRuntime.start();
+  if (leadDeliveryEnabled) await leadDeliveryRuntime.start();
   await demoRingoutRuntime.start();
   await bloggerRuntime.start();
 
@@ -2068,6 +2892,33 @@ async function startServer() {
       });
     }
   }
+  async function waitForCxBoringWebhookActionsIdle(maxWaitMs = 25_000) {
+    const deadline = Date.now() + maxWaitMs;
+    while (cxBoringWebhookActionState.running && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+    if (cxBoringWebhookActionState.running) {
+      runtime.logger.warn("control-plane.cx_boring_webhook.shutdown.tick_timeout", { waitedMs: maxWaitMs });
+    }
+  }
+  async function waitForCxBoringWebhookPollerIdle(maxWaitMs = 25_000) {
+    const deadline = Date.now() + maxWaitMs;
+    while (cxBoringWebhookPollerState.running && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+    if (cxBoringWebhookPollerState.running) {
+      runtime.logger.warn("control-plane.cx_boring_webhook.poll_shutdown_timeout", { waitedMs: maxWaitMs });
+    }
+  }
+  async function waitForCxCallerIdRotationIdle(maxWaitMs = 25_000) {
+    const deadline = Date.now() + maxWaitMs;
+    while (cxCallerIdRotationState.running && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+    if (cxCallerIdRotationState.running) {
+      runtime.logger.warn("control-plane.cx_caller_id_rotation.shutdown.tick_timeout", { waitedMs: maxWaitMs });
+    }
+  }
   async function waitForCxAccountActiveCallWatcherIdle(maxWaitMs = 25_000) {
     const deadline = Date.now() + maxWaitMs;
     while (cxAccountActiveCallWatcherState.running && Date.now() < deadline) {
@@ -2116,6 +2967,27 @@ async function startServer() {
     }
     await waitForCxTerminalOutboxIdle();
   });
+  runtime.registerCleanup("control-plane-cx-boring-webhook-actions", async () => {
+    if (cxBoringWebhookActionState.timer) {
+      clearInterval(cxBoringWebhookActionState.timer);
+      cxBoringWebhookActionState.timer = null;
+    }
+    await waitForCxBoringWebhookActionsIdle();
+  });
+  runtime.registerCleanup("control-plane-cx-boring-webhook-poller", async () => {
+    if (cxBoringWebhookPollerState.timer) {
+      clearInterval(cxBoringWebhookPollerState.timer);
+      cxBoringWebhookPollerState.timer = null;
+    }
+    await waitForCxBoringWebhookPollerIdle();
+  });
+  runtime.registerCleanup("control-plane-cx-caller-id-rotation", async () => {
+    if (cxCallerIdRotationState.timer) {
+      clearInterval(cxCallerIdRotationState.timer);
+      cxCallerIdRotationState.timer = null;
+    }
+    await waitForCxCallerIdRotationIdle();
+  });
   runtime.registerCleanup("control-plane-cx-account-active-call-watcher", async () => {
     if (cxAccountActiveCallWatcherState.timer) {
       clearInterval(cxAccountActiveCallWatcherState.timer);
@@ -2147,6 +3019,9 @@ async function startServer() {
   runtime.registerCleanup("control-plane-phoneburner-rotation", async () => {
     await phoneburnerRotationRuntime.stop();
   });
+  runtime.registerCleanup("control-plane-lead-delivery", async () => {
+    await leadDeliveryRuntime.stop();
+  });
   runtime.registerCleanup("control-plane-demo-ringout", async () => {
     await demoRingoutRuntime.stop();
   });
@@ -2165,5 +3040,9 @@ if (require.main === module) {
 }
 
 module.exports = {
+  collectLogicsTaskRows,
+  createControlPlaneLeadDeliveryActionHandlers,
+  findArmedLegacyVoiceWriters,
+  runCxActiveCallOwnersOnce,
   startServer,
 };

@@ -106,7 +106,7 @@ export const OBJECTION_TRUST_ENTRIES: ManualEntry[] = [
         kind: "prose",
         heading: "What it really means",
         text:
-          "“Not interested” in the first thirty seconds is almost never a judgment about your offer — they haven’t heard your offer. It’s a judgment about unknown callers, delivered on autopilot while they’re making dinner. They want out of a category (sales calls), not out of a solution to a problem that does not go away on its own. That distinction is your whole opening: you are not selling — you are returning THEIR inquiry.",
+          "“Not interested” in the first thirty seconds is usually a reflex, not a verdict on your offer — they haven’t heard your offer yet. Trust your read: an autopilot brush-off sounds different from a considered no, and only the first one is yours to coach through. It’s a judgment about unknown callers, delivered on autopilot while they’re making dinner. They want out of a category (sales calls), not out of a solution to a problem that does not go away on its own. That distinction is your whole opening: you are not selling — you are returning THEIR inquiry.",
       },
       {
         kind: "prose",
@@ -197,8 +197,8 @@ export const OBJECTION_TRUST_ENTRIES: ManualEntry[] = [
         heading: "The play",
         items: [
           "Validate first: “you’re right to be careful” lands better than any defense. That’s an accusation audit — name their suspicion before they harden into it. See [[psych.voss.accusation-audit]].",
-          "Offer live verification: spell the firm name, give the city, tell them to pull up the website or the licensed-practitioner registry while you’re on the phone — and offer the main line so they can call back directly.",
-          "Shift from promises to process: explain WHAT happens (POA, transcripts, compliance review) — process talk is what scammers can’t do.",
+          "Offer public verification: spell the firm name, provide the approved public website and main line, and invite them to verify independently. Then ask one ordinary case question before offering any deeper company detail or tax guidance.",
+          "Shift from promises to process: explain WHAT happens (POA, transcripts, compliance review) — concrete process talk is what scammers almost never bother to offer.",
           "Never promise outcomes or savings numbers — guarantee-talk confirms their fear. Refusing to guarantee IS the credibility move.",
         ],
       },
@@ -208,7 +208,7 @@ export const OBJECTION_TRUST_ENTRIES: ManualEntry[] = [
         items: [
           "Honestly? You should be skeptical — there’s been garbage in this industry. Pull up our site right now while we talk; I’ll wait.",
           "I’m not going to promise you a settlement number — anyone who does on a first call is lying to you. What I can tell you is exactly what we’d do first.",
-          "Fair question — I’d ask the same thing. Here’s our name spelled out, our city, and our website. Take a minute and look us up — I’m not going anywhere.",
+          "Fair question — I’d ask the same thing. Here’s our name spelled out, our public website, and our main line. Take a minute and verify us; then let me confirm whether there’s an actual tax issue we can help with.",
         ],
       },
       {
@@ -227,14 +227,14 @@ export const OBJECTION_TRUST_ENTRIES: ManualEntry[] = [
         strong:
           "“Honestly? You should be skeptical — there’s been garbage in this industry. Pull up our site right now while we talk; I’ll wait. And I’m not going to promise you a settlement number — anyone who does on a first call is lying to you.”",
         note:
-          "The weak version denies, reassures, and promises — the exact three-beat pattern of every scam call they’ve ever gotten. The strong version agrees with the skepticism, hands them something checkable, and refuses to guarantee. Confidence plus an invitation to verify beats insistence on legitimacy every time.",
+          "The weak version denies, reassures, and promises — the exact three-beat pattern of every scam call they’ve ever gotten. The strong version agrees with the skepticism, hands them something checkable, and refuses to guarantee. Confidence plus an invitation to verify will usually beat insistence on legitimacy.",
       },
       {
         kind: "drill",
         prompt:
           "Prospect says: “How do I know you’re not one of those tax-relief scams I keep hearing about?” — what’s your move?",
         answer:
-          "Agree first — “you don’t yet, and you’re right to ask” — then hand them verification: spell the name, give the city, invite them to pull up the site while you hold. Then pivot to process: “here’s exactly what happens first — power of attorney, your transcripts, a compliance read. No promises about numbers; anyone promising numbers on a first call is who you should hang up on.”",
+          "Agree first — “you don’t yet, and you’re right to ask” — then provide the approved public verification: spell the firm name, give the public website and main line, and invite them to verify independently. Ask one ordinary question about the tax issue. If they reciprocate, explain the high-level process: “we begin by establishing authorization, reviewing the records, and determining compliance. No promises about numbers; anyone promising numbers on a first call is who you should hang up on.”",
       },
       {
         kind: "compliance",
@@ -287,8 +287,8 @@ export const OBJECTION_TRUST_ENTRIES: ManualEntry[] = [
         kind: "lines",
         heading: "Lines in the floor’s voice",
         items: [
-          "Fair question. I’m [name] with Wynn Tax — we represent people who owe the IRS. You’d reached out about a back-tax balance, and that’s the only reason I’m calling. Is that still sitting there?",
-          "I get it — you don’t know me from the last five robocalls. I’m [name], Wynn Tax, and the reason you specifically: the tax inquiry you sent in. Thirty seconds to tell you why it matters now?",
+          "Fair question. I’m [name] with The Tax Group — we represent people who owe the IRS. You’d reached out about a back-tax balance, and that’s the only reason I’m calling. Is that still sitting there?",
+          "I get it — you don’t know me from the last five robocalls. I’m [name] with The Tax Group, and the reason you specifically: the tax inquiry you sent in. Thirty seconds to tell you why it matters now?",
         ],
       },
       {
@@ -305,7 +305,7 @@ export const OBJECTION_TRUST_ENTRIES: ManualEntry[] = [
         weak:
           "“Uh, sorry — I know these calls are annoying, I’m just calling from a tax services company, we help people with tax problems, anyway the reason for my call today is a great program that—”",
         strong:
-          "“Fair question. I’m [name] with Wynn Tax — we represent people who owe the IRS. You’d reached out about a back-tax balance, and that’s the only reason I’m calling. Is that still sitting there?”",
+          "“Fair question. I’m [name] with The Tax Group — we represent people who owe the IRS. You’d reached out about a back-tax balance, and that’s the only reason I’m calling. Is that still sitting there?”",
         note:
           "The weak version apologizes, identifies vaguely, and bulldozes into a pitch — three confirmations that this is exactly the call they thought it was. The strong version answers the actual question completely, gives one reason to stay, and ends on a question about their facts. Calm, complete, done.",
       },
@@ -416,56 +416,56 @@ export const OBJECTION_TRUST_ENTRIES: ManualEntry[] = [
       "give me your phone number",
     ],
     lead:
-      "They’re going to Google you while you’re on the phone — this is the best objection you can get, because it means they’re engaged enough to verify. Spell it slowly, give the city and state, invite the search, and then hold the silence while they type.",
+      "Treat the request as a verification gate, not automatic buying behavior. Give basic public identity cleanly, then test for reciprocal good-faith engagement before offering detailed company information or case-specific guidance.",
     blocks: [
       {
         kind: "prose",
         heading: "What it really means",
         text:
-          "A prospect who asks you to spell the firm’s name is not brushing you off — brush-offs don’t require homework. They are actively deciding whether you’re real, and they’re about to check. This is verification behavior, and verification behavior is buying behavior: nobody Googles a company they’ve already decided to hang up on. Your entire job is to make the search easy and then get out of its way. Hesitation, mumbled spelling, or dodging the address each read as “caught” — and the deal dies in the pause.",
+          "A request to verify the firm may be healthy skepticism, a privacy concern, a brush-off, or information fishing. Do not decide which from the question alone. Answer the public basics without hesitation, then ask one ordinary question about the tax issue. Good-faith prospects usually reciprocate over the next few exchanges. A person who will not provide any case information but keeps pressing for office details, internal information, or free tax analysis has not demonstrated a legitimate desire to interact. Verification earns a path to continue; it does not automatically earn every detail.",
       },
       {
         kind: "moves",
         heading: "The play",
         items: [
-          "Spell the firm name slowly and clearly — letter by letter, no rush, like you’ve done it a thousand times (you have).",
-          "Give the city and state of the office without being asked twice. Offer the website and the main line so they can call back directly.",
-          "Invite the search out loud: “pull us up right now — I’ll wait.” The invitation is the credibility; scammers don’t volunteer scrutiny.",
-          "Then HOLD THE SILENCE while they type. Do not fill it, do not narrate, do not keep selling. The quiet while they read your reviews is working harder than anything you could say.",
+          "Give the public basics clearly: firm name, spelling, public website, main line, truthful reason for the call, and that we are not the IRS.",
+          "Do not volunteer an office address, employee details, internal structure, direct contacts, or operational information merely because someone asks.",
+          "After the public basics, ask one simple case question: do they actually owe, have unfiled returns, or have a notice? Read their willingness to reciprocate across the exchange.",
+          "If they engage in good faith, continue progressively. If they only fish, offer the public verification path and end the call without accusation or debate.",
         ],
       },
       {
         kind: "lines",
         heading: "Lines in the floor’s voice",
         items: [
-          "Absolutely. It’s W-Y-N-N — Wynn Tax. We’re in [city, state]. Pull us up right now while we’re on the phone — I’ll wait.",
-          "And write down our main line: [number]. If you’d rather hang up and call us back through the front door, do it — I’d respect that.",
+          "Absolutely. It’s The Tax Group. Our public website and main line are [approved public details], and you’re welcome to verify us or call back through the front door.",
+          "Before I go deeper, let me make sure this is a real fit: are you dealing with an IRS balance, unfiled returns, or a state issue?",
         ],
       },
       {
         kind: "avoid",
         items: [
-          "Hesitating before answering — the pause is the tell they’re listening for.",
-          "Mumbled or rushed spelling — if they can’t catch it, it reads as evasion.",
-          "Refusing or deflecting the address question — “why do you need that?” from you sounds exactly like what a scammer says.",
-          "Talking over their search. Filling the silence with more pitch tells them you’re nervous about what they’ll find.",
+          "Dodging the firm name, public website, main line, or truthful call reason. Basic identity is not conditional.",
+          "Volunteering office addresses, staff information, internal details, or direct contacts before good-faith reciprocity is established.",
+          "Treating every skeptical prospect as a bad actor. Read the pattern across several exchanges and respect ordinary privacy concerns.",
+          "Giving individualized tax advice to keep an information-fishing caller engaged. Advice requires a legitimate prospect and enough verified facts.",
         ],
       },
       {
         kind: "example",
         weak:
-          "“Uh, it’s Wynn… W-y-n-n, I think our main office is — look, the address isn’t really important, what matters is what we can do for your tax situation—”",
+          "“Why do you need our information? You called us — answer my questions first.”",
         strong:
-          "“Absolutely. W-Y-N-N — Wynn Tax, [city, state]. Pull us up right now while we’re on the phone; I’ll wait. And take down our main line in case you ever want to call back through the front door.”",
+          "“Absolutely. It’s The Tax Group. Here are our approved public website and main line so you can verify us. Before I give you case-specific guidance, are you actually dealing with an IRS balance, unfiled returns, or a state issue?”",
         note:
-          "The weak version hesitates, rushes, and deflects the address — three tells in ten seconds, and no pitch survives them. The strong version treats verification as a gift: easy spelling, full location, an invitation, and then silence. The prospect who finishes that Google search is warmer than any prospect you could talk at.",
+          "The weak version turns caution into hostility and makes a legitimate prospect feel accused. The strong version provides public verification, then asks for one reciprocal fact before deepening the exchange. It protects the firm without acting evasive.",
       },
       {
         kind: "drill",
         prompt:
           "Prospect says: “Hold on. Spell the company name for me. And where exactly are you located?” — what’s your move?",
         answer:
-          "Slow spelling, city and state, website and main line, and the invitation: “look us up right now — I’ll wait.” Then go quiet and let them search. When they come back, don’t re-pitch; ask one question that resumes the conversation where it left off: “What did you find? Good — so, about that balance…”",
+          "Give the firm name, spelling, public website, main line, and truthful call reason. Do not volunteer the office address or internal details yet. Then ask one reciprocal qualifying question about the actual tax issue. If they engage, disclose progressively; if they continue collecting information while refusing every case question, invite them to verify through the public channel and end cleanly.",
       },
     ],
     links: [
@@ -502,8 +502,8 @@ export const OBJECTION_TRUST_ENTRIES: ManualEntry[] = [
         kind: "moves",
         heading: "The play",
         items: [
-          "Offer verifiable specifics, not vibes: the licensed professionals on staff (EA, CPA, attorney), registration they can look up, and how the firm is paid — a clear fee for defined work, not a commission on debt reduction. See [[strat.earn-trust-with-proof]].",
-          "Invite them to verify everything BEFORE committing anything: “check all of it before you send a dollar.” The invitation is the proof.",
+          "Offer verifiable specifics, not vibes: the licensed professionals on staff (enrolled agents, tax preparers, other tax specialists), registration they can look up, and how the firm is paid — a clear fee for defined work, not a commission on debt reduction. See [[strat.earn-trust-with-proof]].",
+          "Invite them to verify everything BEFORE committing anything: “check all of it before you send a dollar.” The invitation itself does most of the proving.",
           "When the objection is about sharing information: name the specific use case for the specific item — “the last four and your DOB are what the IRS requires to release your transcript to us; that’s how we see exactly what they have on you.”",
           "Affirm the caution — “you’re right to be careful with that” — and offer to take less first and earn the rest. Start with what they’re comfortable giving; the rest comes after the value shows up.",
         ],
@@ -533,7 +533,7 @@ export const OBJECTION_TRUST_ENTRIES: ManualEntry[] = [
         strong:
           "“You’re right to be careful with that. Here’s exactly what it’s for: the IRS requires your DOB and last four before they’ll release your transcript to us — that’s how we see what they actually have on you. And check us out first: licensed practitioners, registration, flat fee. Verify it all before you send a dollar.”",
         note:
-          "The weak version stacks a non-answer (“it’s required”) on unverifiable proof (“thousands of people”) with a pinch of impatience — the full scam-call bingo card. The strong version affirms the caution, names the specific use for the specific data, and hands over checkable facts. Specificity is what a fraudster can’t fake.",
+          "The weak version stacks a non-answer (“it’s required”) on unverifiable proof (“thousands of people”) with a pinch of impatience — the full scam-call bingo card. The strong version affirms the caution, names the specific use for the specific data, and hands over checkable facts. Specificity is the hardest thing for a fraudster to fake.",
       },
       {
         kind: "drill",
@@ -564,7 +564,7 @@ export const OBJECTION_TRUST_ENTRIES: ManualEntry[] = [
       "how do you have my number",
     ],
     lead:
-      "The most common outbound-killer, usually in the first thirty seconds. Specificity is the ONLY working answer — source, date, partial email — because vagueness confirms “scam.” If you don’t have this answer ready before you dial, the call dies here.",
+      "The most common outbound-killer, usually in the first thirty seconds. Specificity — source, date, partial email — is far and away your strongest answer, because vagueness reads as “scam.” Have that answer ready before you dial; without it, this call is brutally hard to save.",
     blocks: [
       {
         kind: "prose",
@@ -656,7 +656,7 @@ export const OBJECTION_TRUST_ENTRIES: ManualEntry[] = [
         items: [
           "Normalize the forgetting first: “that happens a lot — these forms blend together.” No accusation, no insistence.",
           "Partial reveal, never full: the masked email, the approximate date, the debt range they indicated. Enough to jog memory and prove the data is real — nothing more.",
-          "Ask the confirming question and let THEM close the gap: “does any of that ring a bell?” Their own memory doing the work beats your assertion every time.",
+          "Ask the confirming question and let THEM close the gap: “does any of that ring a bell?” Their own memory doing the work tends to beat your assertion.",
           "Once it rings — or even if it half-rings — bridge to the issue itself: the balance is real whether or not the form is remembered. If it hardens into a removal demand instead, honor it.",
         ],
       },
@@ -664,7 +664,7 @@ export const OBJECTION_TRUST_ENTRIES: ManualEntry[] = [
         kind: "lines",
         heading: "Lines in the floor’s voice",
         items: [
-          "That happens a lot — these forms blend together, especially if you filled out a few. You used an email that starts with j and ends in @gmail, and you indicated you were dealing with somewhere around twenty to thirty thousand in tax debt. Does any of that ring a bell?",
+          "That happens a lot — these forms blend together, especially if you filled out a few. You used an email that starts with j and ends in @gmail, and you indicated you were dealing with somewhere around [the range from their inquiry] in tax debt. Does any of that ring a bell?",
           "No worries either way — the form’s not the point, the balance is. Is the back-tax issue itself still sitting there?",
         ],
       },
@@ -719,7 +719,7 @@ export const OBJECTION_TRUST_ENTRIES: ManualEntry[] = [
       "need to process",
     ],
     lead:
-      "Almost never about thinking — it’s an unvoiced concern (price, trust, fear of commitment) they’d rather not say out loud. Your job is surfacing WHICH one, gently, and answering that — because “thinking” never calls back.",
+      "Usually not about thinking — more often it’s an unvoiced concern (price, trust, fear of commitment) they’d rather not say out loud. Your job is surfacing WHICH one, gently, and answering that — because “thinking” never calls back.",
     blocks: [
       {
         kind: "prose",
@@ -899,7 +899,7 @@ export const OBJECTION_TRUST_ENTRIES: ManualEntry[] = [
         heading: "Lines in the floor’s voice",
         items: [
           "Happy to. While I pull that up — so I send the right version — is this just IRS, or is the state involved too?",
-          "It’ll be in your inbox in an hour, and I’ll put Thursday 10am on it to walk through questions. Fair?",
+          "I’ll send it as soon as we’re off the line, and I’ll put Thursday 10am on it to walk through questions. Fair?",
           "What should I make sure is in there — the engagement letter, the fee schedule, the list of what we actually do first? I’d rather send you the three pages you’ll read than the twenty you won’t.",
         ],
       },
@@ -967,7 +967,7 @@ export const OBJECTION_TRUST_ENTRIES: ManualEntry[] = [
         heading: "The play",
         items: [
           "If they’re driving: safety first — “don’t try to talk through traffic; when do you land somewhere you can pull over or sit down?” Lock the time against that.",
-          "Offer the 90-second version OR a precise window: “two options — 90 seconds now, or 4:30 today. Which?” Never accept “later” — later is a brush-off wearing a watch. See [[strat.alternative-choice]].",
+          "Offer the 90-second version OR a precise window: “two options — 90 seconds now, or 4:30 today. Which?” Don’t settle for a vague “later” — an unclocked “later” is usually a brush-off wearing a watch; convert it to a specific time. See [[strat.alternative-choice]].",
           "Get a micro-commitment before release: confirm the number and one fact (“is the balance still around 30?”). A prospect who confirms a fact has agreed to the next call.",
           "Log it and ACTUALLY call at the time — to the minute. Punctuality is the trust play: the callback that arrives exactly when promised is the first promise you keep.",
         ],

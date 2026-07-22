@@ -9,6 +9,11 @@ const spendEntrySchema = new mongoose.Schema(
     channel: { type: String, required: true, index: true },
     source: { type: String, required: true, index: true },
     sheetId: { type: String, default: null, index: true },
+    entryKey: { type: String, default: null, index: true },
+    active: { type: Boolean, default: true, index: true },
+    factOwner: { type: String, default: "marketing-money", index: true },
+    reconciliationRunId: { type: String, default: null, index: true },
+    retiredAt: { type: Date, default: null },
     sourceCanonicalId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "ControlPlaneSourceCanonical",
@@ -50,6 +55,7 @@ const spendEntrySchema = new mongoose.Schema(
 
 spendEntrySchema.index({ date: 1, domain: 1, channel: 1, source: 1, sheetId: 1 });
 spendEntrySchema.index({ domain: 1, channel: 1, date: -1 });
+spendEntrySchema.index({ domain: 1, date: 1, entryKey: 1 });
 
 module.exports =
   mongoose.models.ControlPlaneSpendEntry ||

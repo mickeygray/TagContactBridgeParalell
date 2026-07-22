@@ -7,6 +7,7 @@ const {
   reviewQueueRepository,
 } = require("../../shared-repositories/src");
 const { emitHourlyJobEvent } = require("./hourlyJobEventService");
+const marketingMoneyService = require("./marketingMoneyService");
 
 // Sensible defaults — overridable per call.
 const DEFAULT_STALE_AFTER_MS = 60 * 60 * 1000; // re-check after 1 hour
@@ -324,7 +325,7 @@ async function reconcilePaymentsForCase({
     const priorStatus = String(prior?.transactionStatus || "").toUpperCase();
     const newStatus = String(payment.transactionStatus || "").toUpperCase();
 
-    const ledgerRow = await paymentLedgerRepository.upsertPaymentLedger(payment.casePaymentId, {
+    const ledgerRow = await marketingMoneyService.reconcilePayment(payment.casePaymentId, {
       domain: normalizedDomain,
       caseId: payment.caseId,
       casePaymentId: payment.casePaymentId,

@@ -19,10 +19,6 @@
 //   node scripts/sync-indexes.js --dry-run       # show plan, don't apply
 
 const path = require("path");
-require("dotenv").config({ path: path.resolve(__dirname, "..", ".env") });
-
-const mongoose = require("mongoose");
-const models = require("../packages/shared-models/src");
 
 // Allowlist — keep it small so a "sync everything" run doesn't churn
 // every collection's indexes. Append here when adding new model index
@@ -40,6 +36,10 @@ const KNOWN_MODELS = [
   "CxCallWrapCard",
   "HourlyJobEvent",
   "LeadCadence",
+  "LeadDeliveryAgent",
+  "LeadDeliveryCheckpoint",
+  "LeadDeliveryEvent",
+  "LeadDeliveryItem",
   "MasterProspectIndex",
   "UserAccount",
   "WorkflowRecord",
@@ -54,7 +54,73 @@ function parseArgs(argv) {
   return args;
 }
 
+function stableJsonValue(value) {
+  if (Array.isArray(value)) return value.map(stableJsonValue);
+  if (!value || typeof value !== "object") return value;
+
+  return Object.fromEntries(
+    Object.keys(value)
+      .sort()
+      .map((key) => [key, stableJsonValue(value[key])]),
+  );
+}
+
+function normalizeIndexDefinition(fields, options = {}) {
+  return {
+    // Compound-index field order is significant, so retain entry order here.
+    fields: Object.entries(fields || {}),
+    options: {
+      unique: options.unique === true,
+      sparse: options.sparse === true,
+      partialFilterExpression: options.partialFilterExpression
+        ? stableJsonValue(options.partialFilterExpression)
+        : null,
+    },
+  };
+}
+
+function indexDefinitionsMatch(declared, actual) {
+  const declaredDefinition = normalizeIndexDefinition(
+    declared.fields,
+    declared.options,
+  );
+  const actualDefinition = normalizeIndexDefinition(actual.key, actual);
+  return JSON.stringify(declaredDefinition) === JSON.stringify(actualDefinition);
+}
+
+function planIndexChanges(declared, actual) {
+  const matchedActualIndexes = new Set();
+  const toAdd = [];
+
+  for (const declaredIndex of declared) {
+    const actualIndexPosition = actual.findIndex(
+      (actualIndex, index) =>
+        !matchedActualIndexes.has(index) &&
+        indexDefinitionsMatch(declaredIndex, actualIndex),
+    );
+
+    if (actualIndexPosition === -1) {
+      toAdd.push(declaredIndex);
+    } else {
+      matchedActualIndexes.add(actualIndexPosition);
+    }
+  }
+
+  const toDrop = actual.filter(
+    (actualIndex, index) =>
+      actualIndex.name !== "_id_" && !matchedActualIndexes.has(index),
+  );
+
+  return { toAdd, toDrop };
+}
+
 async function main() {
+  // Keep environment/model loading behind the CLI entry point. Requiring this
+  // module for pure plan tests must not read .env or initialize Mongoose.
+  require("dotenv").config({ path: path.resolve(__dirname, "..", ".env") });
+  const mongoose = require("mongoose");
+  const models = require("../packages/shared-models/src");
+
   const args = parseArgs(process.argv.slice(2));
   const targets = args.only ? [args.only] : KNOWN_MODELS;
 
@@ -79,15 +145,7 @@ async function main() {
       options,
     }));
     const actual = await Model.collection.indexes().catch(() => []);
-    const actualKeys = actual.map((idx) => JSON.stringify(idx.key));
-    const declaredKeys = declared.map((idx) => JSON.stringify(idx.fields));
-
-    const toAdd = declared.filter((idx) => !actualKeys.includes(JSON.stringify(idx.fields)));
-    const toDrop = actual.filter(
-      (idx) =>
-        idx.name !== "_id_" &&
-        !declaredKeys.includes(JSON.stringify(idx.key)),
-    );
+    const { toAdd, toDrop } = planIndexChanges(declared, actual);
 
     console.log(`  Declared in schema: ${declared.length} index(es)`);
     console.log(`  Currently in Atlas: ${actual.length} index(es)`);
@@ -125,8 +183,22 @@ async function main() {
   console.log("\nDone.");
 }
 
-main().catch(async (error) => {
-  console.error(error);
-  try { await mongoose.disconnect(); } catch (_) {}
-  process.exit(1);
-});
+if (require.main === module) {
+  main().catch(async (error) => {
+    console.error(error);
+    try {
+      const mongoose = require("mongoose");
+      await mongoose.disconnect();
+    } catch (_) {}
+    process.exit(1);
+  });
+}
+
+module.exports = {
+  KNOWN_MODELS,
+  indexDefinitionsMatch,
+  main,
+  normalizeIndexDefinition,
+  parseArgs,
+  planIndexChanges,
+};

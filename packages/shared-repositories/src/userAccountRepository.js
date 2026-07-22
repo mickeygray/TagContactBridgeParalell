@@ -10,9 +10,62 @@ const CX_QUEUE_POLICY_TIERS = new Set([
   "fresh_capped",
   "fresh_priority",
 ]);
+const PHONEBURNER_PROVIDER = "phoneburner";
+const PHONEBURNER_CREDENTIAL_PATH = "providerCredentials.phoneBurner";
 
 function normalizeEmail(email) {
   return String(email || "").trim().toLowerCase();
+}
+
+function requirePhoneBurnerProvider(provider = PHONEBURNER_PROVIDER) {
+  const normalized = String(provider || "").trim().toLowerCase();
+  if (normalized !== PHONEBURNER_PROVIDER) {
+    throw new TypeError("provider must be phoneburner");
+  }
+  return normalized;
+}
+
+function requireCredentialCiphertext(value, name) {
+  if (typeof value !== "string" || !value.trim()) {
+    throw new TypeError(`${name} is required`);
+  }
+  return value.trim();
+}
+
+function requireCredentialRevision(value) {
+  const revision = Number(value);
+  if (!Number.isSafeInteger(revision) || revision < 0) {
+    throw new TypeError("expectedRevision must be a non-negative integer");
+  }
+  return revision;
+}
+
+function normalizeCredentialDate(value, name) {
+  if (value == null || value === "") return null;
+  const date = value instanceof Date ? new Date(value.getTime()) : new Date(value);
+  if (!Number.isFinite(date.getTime())) throw new TypeError(`${name} must be a valid date`);
+  return date;
+}
+
+function toPhoneBurnerCredentialRecord(doc, { includeCiphertext = false } = {}) {
+  if (!doc) return null;
+  const plain = typeof doc.toObject === "function" ? doc.toObject() : doc;
+  const credential = plain.providerCredentials?.phoneBurner || {};
+  const revision = Number(credential.revision);
+  const record = {
+    accountId: String(plain._id),
+    provider: PHONEBURNER_PROVIDER,
+    tokenType: credential.tokenType || null,
+    accessTokenExpiresAt: credential.accessTokenExpiresAt || null,
+    revision: Number.isSafeInteger(revision) && revision >= 0 ? revision : 0,
+    migratedAt: credential.migratedAt || null,
+    refreshedAt: credential.refreshedAt || null,
+  };
+  if (includeCiphertext) {
+    record.accessTokenEnc = credential.accessTokenEnc || null;
+    record.refreshTokenEnc = credential.refreshTokenEnc || null;
+  }
+  return record;
 }
 
 function normalizeExtension(extensionId) {
@@ -469,6 +522,100 @@ async function updateUserAccount(id, patch = {}) {
   return toAccountRecord(doc);
 }
 
+async function readServiceProviderCredentialPair({
+  serviceEmail,
+  provider = PHONEBURNER_PROVIDER,
+} = {}) {
+  requirePhoneBurnerProvider(provider);
+  const email = normalizeEmail(serviceEmail);
+  if (!email) throw new TypeError("serviceEmail is required");
+
+  const doc = await UserAccount.findOne({ email, role: "service" })
+    .select([
+      "_id",
+      `${PHONEBURNER_CREDENTIAL_PATH}.tokenType`,
+      `${PHONEBURNER_CREDENTIAL_PATH}.accessTokenExpiresAt`,
+      `${PHONEBURNER_CREDENTIAL_PATH}.revision`,
+      `${PHONEBURNER_CREDENTIAL_PATH}.migratedAt`,
+      `${PHONEBURNER_CREDENTIAL_PATH}.refreshedAt`,
+      `+${PHONEBURNER_CREDENTIAL_PATH}.accessTokenEnc`,
+      `+${PHONEBURNER_CREDENTIAL_PATH}.refreshTokenEnc`,
+    ].join(" "))
+    .lean();
+  return toPhoneBurnerCredentialRecord(doc, { includeCiphertext: true });
+}
+
+async function writeServiceProviderCredentialPair({
+  serviceEmail,
+  provider = PHONEBURNER_PROVIDER,
+  accessTokenEnc,
+  refreshTokenEnc,
+  tokenType = null,
+  accessTokenExpiresAt = null,
+  expectedRevision,
+  migratedAt,
+  refreshedAt = new Date(),
+} = {}) {
+  requirePhoneBurnerProvider(provider);
+  const email = normalizeEmail(serviceEmail);
+  if (!email) throw new TypeError("serviceEmail is required");
+  const accessCiphertext = requireCredentialCiphertext(accessTokenEnc, "accessTokenEnc");
+  const refreshCiphertext = requireCredentialCiphertext(refreshTokenEnc, "refreshTokenEnc");
+  const revision = requireCredentialRevision(expectedRevision);
+  const refreshDate = normalizeCredentialDate(refreshedAt, "refreshedAt");
+  if (!refreshDate) throw new TypeError("refreshedAt is required");
+
+  const filter = {
+    email,
+    role: "service",
+  };
+  if (revision === 0) {
+    filter.$or = [
+      { [`${PHONEBURNER_CREDENTIAL_PATH}.revision`]: 0 },
+      { [`${PHONEBURNER_CREDENTIAL_PATH}.revision`]: { $exists: false } },
+    ];
+  } else {
+    filter[`${PHONEBURNER_CREDENTIAL_PATH}.revision`] = revision;
+  }
+  const set = {
+    [`${PHONEBURNER_CREDENTIAL_PATH}.accessTokenEnc`]: accessCiphertext,
+    [`${PHONEBURNER_CREDENTIAL_PATH}.refreshTokenEnc`]: refreshCiphertext,
+    [`${PHONEBURNER_CREDENTIAL_PATH}.tokenType`]: tokenType == null
+      ? null
+      : String(tokenType).trim() || null,
+    [`${PHONEBURNER_CREDENTIAL_PATH}.accessTokenExpiresAt`]: normalizeCredentialDate(
+      accessTokenExpiresAt,
+      "accessTokenExpiresAt",
+    ),
+    [`${PHONEBURNER_CREDENTIAL_PATH}.refreshedAt`]: refreshDate,
+  };
+  if (migratedAt != null && migratedAt !== "") {
+    set[`${PHONEBURNER_CREDENTIAL_PATH}.migratedAt`] = normalizeCredentialDate(
+      migratedAt,
+      "migratedAt",
+    );
+  }
+
+  const doc = await UserAccount.findOneAndUpdate(
+    filter,
+    {
+      $set: set,
+      $inc: { [`${PHONEBURNER_CREDENTIAL_PATH}.revision`]: 1 },
+    },
+    { new: true, runValidators: true },
+  )
+    .select([
+      "_id",
+      `${PHONEBURNER_CREDENTIAL_PATH}.tokenType`,
+      `${PHONEBURNER_CREDENTIAL_PATH}.accessTokenExpiresAt`,
+      `${PHONEBURNER_CREDENTIAL_PATH}.revision`,
+      `${PHONEBURNER_CREDENTIAL_PATH}.migratedAt`,
+      `${PHONEBURNER_CREDENTIAL_PATH}.refreshedAt`,
+    ].join(" "))
+    .lean();
+  return toPhoneBurnerCredentialRecord(doc);
+}
+
 async function touchUserAccountLogin(email) {
   const normalized = normalizeEmail(email);
   if (!normalized) return;
@@ -484,7 +631,9 @@ module.exports = {
   findUserAccountById,
   findUserAccountByExtensionId,
   listUserAccounts,
+  readServiceProviderCredentialPair,
   touchUserAccountLogin,
   updateUserAccount,
   upsertUserAccount,
+  writeServiceProviderCredentialPair,
 };

@@ -25,6 +25,7 @@ const {
   listConfiguredProviders,
   listPresetProfiles,
   getSalesTrainerUiState,
+  gradeSalesTrainerQuizAnswer,
   publishSalesTrainerUiState,
   runSalesTrainerCoachingPanel,
   runSalesTrainerTurn,
@@ -59,6 +60,19 @@ const coachLimit = createRateLimiter({
   windowMs: 60_000,
   max: 90,
   message: "Too many trainer coach requests. Try again shortly.",
+});
+
+// Drill grading is one small model call; score-my-call is a heavy
+// download + whisper + score pipeline — keep the latter tight.
+const drillLimit = createRateLimiter({
+  windowMs: 60_000,
+  max: 30,
+  message: "Too many drill submissions. Try again shortly.",
+});
+const scoreCallLimit = createRateLimiter({
+  windowMs: 60_000,
+  max: 6,
+  message: "Too many call-scoring requests. Try again shortly.",
 });
 
 // One end-to-end voice turn = STT + Claude + TTS. Limit slightly tighter
@@ -379,6 +393,9 @@ function createSalesTrainerRouter(auth, config = {}) {
         // Shape: { ethnicity, age, sex, education, affluency,
         // employmentCategory, spouseStatus, ageBucket }.
         demographicOverrides: req.body?.demographicOverrides,
+        // Operator free-text describing who to practice against — shapes the
+        // generated caller (tax stack, mood, backstory) within locked demographics.
+        situation: req.body?.situation,
         includeAudio: req.body?.includeAudio,
         audio: req.body?.audio,
         user: req.salesTrainerUser || req.user,
@@ -393,6 +410,66 @@ function createSalesTrainerRouter(auth, config = {}) {
   // Cheap, sync — no auth-sensitive data, just labels + keys.
   router.get("/session/presets", requireSalesTrainerAccess, async (_req, res) => {
     return res.json({ ok: true, presets: listPresetProfiles() });
+  });
+
+  // Training Center: model-graded drills. The client sends the fixed question
+  // + the field manual's reference answer + the trainee's free-text answer;
+  // the coach model grades substance against the reference under the analyst
+  // doctrine (promises/figures/chin-leads cap the score).
+  router.post("/quiz/grade", drillLimit, requireSalesTrainerAccess, async (req, res) => {
+    try {
+      const result = await gradeSalesTrainerQuizAnswer({
+        topic: req.body?.topic,
+        question: req.body?.question,
+        referenceAnswer: req.body?.referenceAnswer,
+        answer: req.body?.answer,
+        model: req.body?.model,
+      });
+      return res.json({ ok: true, result });
+    } catch (error) {
+      return res.status(error.status || 500).json(toErrorResponse(error));
+    }
+  });
+
+  // Training Center: score one of MY calls on demand — the same
+  // download → whisper → score pipeline the nightly grader runs, for a single
+  // recording the trainee picked from the library.
+  router.post("/score-call", scoreCallLimit, requireSalesTrainerAccess, async (req, res) => {
+    const scoring = require("../../../../packages/shared-services/src/transcriptionScoringService");
+    const fs = require("fs");
+    let audioPath = null;
+    try {
+      const driveFileId = String(req.body?.driveFileId || "").trim();
+      if (!driveFileId) {
+        return res.status(400).json({ ok: false, error: "driveFileId is required" });
+      }
+      if (!scoring.isScoringConfigured()) {
+        return res.status(503).json({ ok: false, error: "call scoring is not configured on this server" });
+      }
+      const safeId = driveFileId.replace(/[^\w-]/g, "").slice(0, 60) || "score-call";
+      audioPath = await scoring.downloadRecordingFromDrive(driveFileId, `training-${safeId}`);
+      if (!audioPath) {
+        return res.status(502).json({ ok: false, error: "recording could not be downloaded" });
+      }
+      const transcript = await scoring.transcribeWithWhisper(audioPath);
+      if (!transcript || !String(transcript).trim()) {
+        return res.status(422).json({ ok: false, error: "no speech found in the recording" });
+      }
+      const score = await scoring.scoreWithClaude(transcript, {
+        agentName: req.salesTrainerUser?.name || req.salesTrainerUser?.email || "Trainee",
+        domain: String(req.body?.domain || "").toUpperCase() || "Unknown",
+        phone: String(req.body?.phone || "") || "Unknown",
+        direction: String(req.body?.direction || "") || "Unknown",
+        durationSec: Number(req.body?.durationSec) || 0,
+      });
+      return res.json({ ok: true, result: { transcript: String(transcript).slice(0, 20000), score } });
+    } catch (error) {
+      return res.status(error.status || 500).json(toErrorResponse(error));
+    } finally {
+      if (audioPath) {
+        try { fs.unlinkSync(audioPath); } catch { /* temp cleanup is best-effort */ }
+      }
+    }
   });
 
   router.post("/coach", coachLimit, requireSalesTrainerAccess, async (req, res) => {

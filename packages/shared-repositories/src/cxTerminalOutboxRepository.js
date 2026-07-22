@@ -2,6 +2,18 @@
 
 const { CxTerminalOutbox } = require("../../shared-models/src");
 
+function normalizePhone(value) {
+  const digits = String(value || "").replace(/\D+/g, "");
+  if (digits.length === 11 && digits.startsWith("1")) return digits.slice(1);
+  return digits.length === 10 ? digits : null;
+}
+
+function normalizeCaseId(value) {
+  if (value == null || String(value).trim() === "") return null;
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : null;
+}
+
 // M11 gate 2 — durable terminal-outbox repository. Thin Mongo I/O; the once-semantics live in
 // the unique idemKey index, the drain logic lives in cxTerminalOutboxDrain (pure).
 
@@ -37,7 +49,13 @@ async function insertOnce(row = {}) {
   const idemKey = String(row.idemKey || "").trim();
   if (!idemKey) throw new Error("cxTerminalOutboxRepository.insertOnce requires an idemKey");
   try {
-    const doc = await CxTerminalOutbox.create({ ...row, idemKey, status: "pending", attempts: 0 });
+    const doc = await CxTerminalOutbox.create({
+      ...row,
+      idemKey,
+      normalizedPhone: normalizePhone(row.normalizedPhone || row.phone),
+      status: "pending",
+      attempts: 0,
+    });
     const created = doc ? doc.toObject() : null;
     if (created) notifyEnqueued(created); // first write only — duplicates stay silent
     return created;
@@ -45,6 +63,63 @@ async function insertOnce(row = {}) {
     if (isDuplicateKeyError(error)) return null;
     throw error;
   }
+}
+
+// One batched daily made-call lookup. Case identity is canonical; phone participates
+// only for candidates (and historical terminal rows) that genuinely have no case id.
+async function listLatestTodayForLeads(input = {}) {
+  const domain = String(input.domain || "").trim().toUpperCase();
+  if (!domain) return [];
+  const caseIds = [...new Set((Array.isArray(input.caseIds) ? input.caseIds : [])
+    .map(normalizeCaseId).filter((value) => value != null))];
+  const phones = [...new Set((Array.isArray(input.phones) ? input.phones : [])
+    .map(normalizePhone).filter(Boolean))];
+  const identities = [];
+  if (caseIds.length) identities.push({ caseId: { $in: caseIds } });
+  if (phones.length) {
+    const caseLess = { $or: [{ caseId: null }, { caseId: { $exists: false } }] };
+    identities.push({
+      $and: [
+        caseLess,
+        { $or: [{ normalizedPhone: { $in: phones } }, { phone: { $in: phones } }] },
+      ],
+    });
+    // Bounded same-day compatibility for rows written before normalizedPhone existed.
+    // The requested-key filter below still admits only the caller's exact phone set.
+    identities.push({
+      $and: [
+        caseLess,
+        { $or: [{ normalizedPhone: null }, { normalizedPhone: { $exists: false } }] },
+      ],
+    });
+  }
+  if (!identities.length) return [];
+  const now = input.now instanceof Date ? input.now : new Date(input.now || Date.now());
+  const start = input.startAt instanceof Date ? input.startAt : new Date(input.startAt || now);
+  if (!input.startAt) start.setUTCHours(0, 0, 0, 0);
+  const rows = await CxTerminalOutbox.find({
+    domain,
+    createdAt: { $gte: start, $lte: now },
+    $or: identities,
+  }).sort({ createdAt: -1, _id: -1 }).lean();
+
+  const latest = [];
+  const seen = new Set();
+  const requested = new Set([
+    ...caseIds.map((caseId) => `${domain}:case:${caseId}`),
+    ...phones.map((phone) => `${domain}:phone:${phone}`),
+  ]);
+  for (const row of Array.isArray(rows) ? rows : []) {
+    const caseId = normalizeCaseId(row?.caseId);
+    const phone = normalizePhone(row?.normalizedPhone || row?.phone);
+    const key = caseId != null
+      ? `${domain}:case:${caseId}`
+      : (phone ? `${domain}:phone:${phone}` : null);
+    if (!key || !requested.has(key) || seen.has(key)) continue;
+    seen.add(key);
+    latest.push(row);
+  }
+  return latest;
 }
 
 // DRAIN HARDENING (2026-07-06, simplified per Mickey's ruling: "we don't need to try 24
@@ -108,6 +183,17 @@ async function findByIdentity(input = {}) {
   const uii = String(input.uii || "").trim();
   if (!sessionId || !queueItemId || !uii) return null;
   return CxTerminalOutbox.findOne({ sessionId, queueItemId, uii })
+    .sort({ createdAt: -1 })
+    .lean();
+}
+
+// Universal retired-call lookup: once an agent/UII pair has a terminal fact in any
+// outbox state, that RingCX call identity can never become current again.
+async function findByAgentUii(input = {}) {
+  const agentId = String(input.agentId || "").trim();
+  const uii = String(input.uii || "").trim();
+  if (!agentId || !uii) return null;
+  return CxTerminalOutbox.findOne({ agentId, uii })
     .sort({ createdAt: -1 })
     .lean();
 }
@@ -191,9 +277,11 @@ async function markFailed(idemKey, error) {
 
 module.exports = {
   computeDrainBackoffMs, // exported for pins; pure
+  findByAgentUii,
   findByIdemKeys,
   findByIdentity,
   insertOnce,
+  listLatestTodayForLeads,
   onCxTerminalRowEnqueued,
   listPendingForDrain,
   markDrained,

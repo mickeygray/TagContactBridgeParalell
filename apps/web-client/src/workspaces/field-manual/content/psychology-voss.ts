@@ -21,7 +21,7 @@ export const PSYCH_VOSS_ENTRIES: ManualEntry[] = [
         kind: "prose",
         heading: "Who taught it and what he claims",
         text:
-          "Chris Voss was the FBI’s lead international kidnapping negotiator, and his book “Never Split the Difference” (2016) is the closest thing modern sales has to a field manual on high-stakes conversation. His core claim overturns the old picture of negotiation as a rational chess match: people are not rational actors who occasionally feel things — they are emotional actors who occasionally reason. Decisions get made in the feeling part of the brain and justified afterward. So the negotiator’s first job is not to argue, present, or persuade; it is to understand what the other person is feeling and wanting, and then to demonstrate that understanding by vocalizing it. Voss calls this “tactical empathy.” It is not sympathy, and it is emphatically not agreement — you can fully understand a kidnapper without approving of him. It is deliberate, applied understanding: hearing the emotion behind the words and saying it back so the other person feels heard. A person who feels heard calms down, talks more, and becomes open to influence. A person who feels processed digs in.",
+          "Chris Voss was the FBI’s lead international kidnapping negotiator, and his book “Never Split the Difference” (2016) is the closest thing modern sales has to a field manual on high-stakes conversation. His core claim overturns the old picture of negotiation as a rational chess match: people are not rational actors who occasionally feel things — they are emotional actors who occasionally reason. Decisions get made in the feeling part of the brain and justified afterward. So the negotiator’s first job is not to argue, present, or persuade; it is to understand what the other person is feeling and wanting, and then to demonstrate that understanding by vocalizing it. Voss calls this “tactical empathy.” It is not sympathy, and it is emphatically not agreement — you can fully understand a kidnapper without approving of him. It is deliberate, applied understanding: hearing the emotion behind the words and saying it back so the other person feels heard. A person who feels heard usually calms down, talks more, and becomes open to influence. A person who feels processed tends to dig in.",
       },
       {
         kind: "prose",
@@ -108,7 +108,7 @@ export const PSYCH_VOSS_ENTRIES: ManualEntry[] = [
     title: "Labeling — “it sounds like…”",
     aliases: ["label", "labeling", "it sounds like", "it seems like", "affect labeling"],
     lead:
-      "Name the emotion you hear — “it sounds like…”, “it seems like…” — and the emotion loses power. Never say “I understand”: a label is about them; “I understand” is a claim about you, and it invites “no, you don’t.”",
+      "Name the emotion you hear — “it sounds like…”, “it seems like…” — and the emotion loses power. Lean away from “I understand”: a label is about them; “I understand” is a claim about you, and it often invites “no, you don’t.”",
     blocks: [
       {
         kind: "prose",
@@ -120,7 +120,7 @@ export const PSYCH_VOSS_ENTRIES: ManualEntry[] = [
         kind: "prose",
         heading: "On our floor",
         text:
-          "Two of the house’s core plays are labels with a job to do. [[strat.shame-reduction]] labels the embarrassment that keeps people from talking about years of unfiled returns — “it sounds like you’ve been dreading this conversation” — and normalizes it, because a prospect who feels judged shuts down and a prospect who feels seen opens the file drawer. [[strat.human-reassurance]] labels the fear itself when a levy notice or garnishment has them rattled. Labels earn their keep the moment emotion enters the call: hostility, dread, embarrassment, exhaustion. Label first, then proceed — an answered emotion stops blocking the conversation.",
+          "Two of the house’s core plays are labels with a job to do. [[strat.shame-reduction]] labels the embarrassment that keeps people from talking about years of unfiled returns — “it sounds like you’ve been dreading this conversation” — and normalizes it, because a prospect who feels judged usually shuts down, and a prospect who feels seen tends to open the file drawer. [[strat.human-reassurance]] labels the fear itself when a levy notice or garnishment has them rattled. Labels earn their keep the moment emotion enters the call: hostility, dread, embarrassment, exhaustion. Label first, then proceed — an answered emotion stops blocking the conversation.",
       },
       {
         kind: "lines",
@@ -169,7 +169,7 @@ export const PSYCH_VOSS_ENTRIES: ManualEntry[] = [
       "how what questions",
     ],
     lead:
-      "Open questions that start with “how” or “what” give the other person the feeling of control while putting your problem on their desk. Never “why” — in every language, “why” sounds like an accusation.",
+      "Open questions that start with “how” or “what” give the other person the feeling of control while putting your problem on their desk. Favor “how” and “what” over “why” — to most ears, “why” sounds like an accusation.",
     blocks: [
       {
         kind: "prose",
@@ -222,7 +222,7 @@ export const PSYCH_VOSS_ENTRIES: ManualEntry[] = [
       "name it first",
     ],
     lead:
-      "List the worst things the other side could be thinking about you — out loud, before they say them. “You’re probably thinking this is another scam call.” Named first, an accusation deflates; left unspoken, it festers and runs the call from the shadows.",
+      "List the worst things the other side could be thinking about you — out loud, before they say them. “You’re probably thinking this is another scam call.” Named first, an accusation usually deflates; left unspoken, it tends to fester and run the call from the shadows.",
     blocks: [
       {
         kind: "prose",
@@ -234,7 +234,7 @@ export const PSYCH_VOSS_ENTRIES: ManualEntry[] = [
         kind: "prose",
         heading: "On our floor",
         text:
-          "Nowhere does the audit earn its keep like the top of a cold call to someone drowning in IRS mail and predatory “tax relief” robocalls. The single best opener against [[obj.scam-distrust]] is to say it before they do: “you’re probably thinking this is another one of those scam tax calls — fair, you’ve probably gotten ten this month.” The prospect’s loaded defense fires at nothing, and what is left is curiosity. It works the same against the quieter suspicions: that you are reading a script, that you are going to pressure them, that you will judge the unfiled years. Audit honestly — name only charges that are plausibly in their head, and never follow the audit with the very behavior you just disclaimed. The audit buys you a hearing; the rest of the call has to deserve it.",
+          "Nowhere does the audit earn its keep like the top of a cold call to someone drowning in IRS mail and predatory “tax relief” robocalls. One of the strongest openers against [[obj.scam-distrust]] is to say it before they do: “you’re probably thinking this is another one of those scam tax calls — fair, you’ve probably gotten ten this month.” The prospect’s loaded defense fires at nothing, and what is left is curiosity. It works the same against the quieter suspicions: that you are reading a script, that you are going to pressure them, that you will judge the unfiled years. Audit honestly — name only charges that are plausibly in their head, and never follow the audit with the very behavior you just disclaimed. The audit buys you a hearing; the rest of the call has to deserve it.",
       },
       {
         kind: "lines",
@@ -282,7 +282,7 @@ export const PSYCH_VOSS_ENTRIES: ManualEntry[] = [
         kind: "prose",
         heading: "On our floor",
         text:
-          "The summary belongs at the bottom of discovery, right before the pitch — it is the hinge between [[strat.pain-funnel]] and [[script.pitch]]. After the funnel has surfaced the years, the notices, the failed attempts, and the cost, wrap it in one clean summary: their story, their stakes, their feeling, in one or two sentences. A “that’s right” there means the prospect has just heard their own case for acting — made by you — and agreed with it. That is worth more than any close. Warning read: if you are getting a lot of “you’re right, you’re right” with a flat tone, you are pushing, not understanding — stop presenting, back up, and label what you actually hear.",
+          "The summary belongs at the bottom of discovery, right before the pitch — it is the hinge between [[strat.pain-funnel]] and [[script.pitch]]. After the funnel has surfaced the years, the notices, the failed attempts, and the cost, wrap it in one clean summary: their story, their stakes, their feeling, in one or two sentences. A “that’s right” there means the prospect has just heard their own case for acting — made by you — and agreed with it. That can be worth more than any close. Warning read: if you are getting a lot of “you’re right, you’re right” with a flat tone, you are pushing, not understanding — stop presenting, back up, and label what you actually hear.",
       },
       {
         kind: "lines",
@@ -323,7 +323,7 @@ export const PSYCH_VOSS_ENTRIES: ManualEntry[] = [
       "have you given up",
     ],
     lead:
-      "Questions built to be answered “no” — “is now a bad time to talk?” — feel safe, because “no” is protection. Chasing “yes” does the opposite: every forced little yes raises the prospect’s guard, because they can feel the trap being built.",
+      "Questions built to be answered “no” — “is now a bad time to talk?” — feel safe, because “no” is protection. Chasing “yes” often does the opposite: every forced little yes raises the prospect’s guard, because they can feel the trap being built.",
     blocks: [
       {
         kind: "prose",
@@ -351,7 +351,7 @@ export const PSYCH_VOSS_ENTRIES: ManualEntry[] = [
         prompt:
           "A lead inquired a month ago, then went dark through six call attempts. You finally get a pickup and a wary “…hello?” — what’s your no-oriented open?",
         answer:
-          "“Hi, it’s ___ with Wynn Tax — you reached out about the IRS balance a while back. Have you given up on getting that handled?” The question is safe to answer, impossible to ignore, and either answer moves you forward: “no, I haven’t” reopens the file with their commitment attached; “yes, actually” is real information, and you get to ask what changed. Compare chasing “are you still interested?” — which practically begs for a brush-off yes-then-hangup.",
+          "“Hi, it’s ___ with The Tax Group — you reached out about the IRS balance a while back. Have you given up on getting that handled?” The question is safe to answer, impossible to ignore, and either answer moves you forward: “no, I haven’t” reopens the file with their commitment attached; “yes, actually” is real information, and you get to ask what changed. Compare chasing “are you still interested?” — which practically begs for a brush-off yes-then-hangup.",
       },
       {
         kind: "compliance",
@@ -388,7 +388,7 @@ export const PSYCH_VOSS_ENTRIES: ManualEntry[] = [
         kind: "prose",
         heading: "On our floor",
         text:
-          "This is the house tone doctrine, [[strat.tone]], with a byline: calm authority always, and never match their heat. A prospect screaming about the tenth tax call this week, or shaking over a levy notice, is not hearing your words yet — they are sampling your nervous system. The DJ voice is the delivery system for [[strat.hostility-resilience]]: slow, low, downward, unbothered, while the storm passes. It is also the voice for the moments that decide the deal — reading back the fee, sitting in the silence after a number ([[strat.silence-after-number]]), answering “is this going to make things worse?” A fee stated in a flat, downward, settled tone sounds like a fact; the same fee with a rising tail sounds like an opening bid. And the house corollary Voss would endorse: no humor under enforcement, fear, distrust, or anger — warmth reads as mockery there. Save the light voice for a prospect who is genuinely at ease.",
+          "This is the house tone doctrine, [[strat.tone]], with a byline: calm authority always, and never match their heat. A prospect screaming about the tenth tax call this week, or shaking over a levy notice, is not hearing your words yet — they are sampling your nervous system. The DJ voice is the delivery system for [[strat.hostility-resilience]]: slow, low, downward, unbothered, while the storm passes. It is also the voice for the moments that decide the deal — reading back the fee, sitting in the silence after a number ([[strat.silence-after-number]]), answering “is this going to make things worse?” A fee stated in a flat, downward, settled tone usually reads as a fact; the same fee with a rising tail reads more like an opening bid. And the house corollary Voss would endorse: no humor under enforcement, fear, distrust, or anger — warmth reads as mockery there. Save the light voice for a prospect who is genuinely at ease.",
       },
       {
         kind: "lines",
@@ -404,7 +404,7 @@ export const PSYCH_VOSS_ENTRIES: ManualEntry[] = [
         prompt:
           "Prospect picks up mid-meltdown: “You people call me EVERY DAY, my check just got garnished, I don’t even know who you ARE—” — what does your voice do before your words do anything?",
         answer:
-          "Drop the pace by half and the pitch a step; end every sentence going DOWN. “You’re right to be fed up. …I’m not one of the robocalls. …I’m calling because of the garnishment — that part I can actually do something about.” The content is an accusation audit plus a label, but the delivery is the play: your calm is the first proof you’re different from the ten calls that came before. Match their heat even a little and the call is over.",
+          "Drop the pace by half and the pitch a step; end every sentence going DOWN. “You’re right to be fed up. …I’m not one of the robocalls. …I’m calling because of the garnishment — that part I can actually do something about.” The content is an accusation audit plus a label, but the delivery is the play: your calm is the first proof you’re different from the ten calls that came before. Match their heat even a little and the call is usually over.",
       },
     ],
     links: [

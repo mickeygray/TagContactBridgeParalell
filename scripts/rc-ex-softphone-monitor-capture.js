@@ -591,7 +591,9 @@ async function main() {
   }, null, 2));
 }
 
-main().catch((error) => {
+// Force exit: ringcentral-softphone keeps SIP keepalive timers alive, so the
+// process (and its live supervision leg) never exits on its own after revoke().
+main().then(() => process.exit(0)).catch((error) => {
   console.error(`fatal: ${error.message}`);
   process.exit(1);
 });

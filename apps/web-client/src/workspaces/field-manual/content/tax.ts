@@ -164,7 +164,7 @@ export const TAX_ENTRIES: ManualEntry[] = [
       {
         kind: "prose",
         heading: "Public record — the honest answer to “how did you get my number?”",
-        text: "Lien filings are public documents, recorded at the county or with the state. That public record is where outbound lead lists come from — which means the legitimacy question that opens half your outbound calls has a completely honest answer. The approved opener already carries it: “Your name appeared in public tax records — often a state or federal filing or lien.” You are not dodging; you are explaining exactly how you knew to call. Said plainly, it converts the creepiest moment of a cold call into proof that the problem is real: the government published it.",
+        text: "Lien filings are public documents, recorded at the county or with the state. That public record is where some outbound lead lists come from. Today’s floor works mostly from online inquiries — and when that is the source, say that. But when a lead genuinely traces to a lien filing, the legitimacy question that opens the call has a completely honest answer: “Your name appeared in public tax records — often a state or federal filing or lien.” You are not dodging; you are explaining exactly how you knew to call — and the provenance you give must match where the lead actually came from. Said plainly, it converts the creepiest moment of a cold call into proof that the problem is real: the government published it.",
       },
       {
         kind: "prose",
@@ -175,7 +175,7 @@ export const TAX_ENTRIES: ManualEntry[] = [
         kind: "lines",
         heading: "Lines in the floor's voice",
         items: [
-          "“Your name appeared in public tax records — often a state or federal filing or lien. I'd like to confirm whether you still have an active matter that needs representation. Sound fair?”",
+          "Only when the lead source is a lien filing: “Your name appeared in public tax records — often a state or federal filing or lien. I'd like to confirm whether you still have an active matter that needs representation. Sound fair?”",
           "“A lien doesn't seize anything today — it secures the government's claim, so if you ever sell or refinance, they get paid first. It's a hold on your whole financial life more than a raid on it.”",
           "“Fair question — lien filings are public record, that's exactly how we knew to reach out. The IRS published it; we'd rather you hear from us than from their next letter.”",
           "“Once the file is open we verify the lien is even accurate — what it's attached to and what's really behind it. You'd be surprised how often the recorded number doesn't match the real balance.”",
@@ -234,7 +234,7 @@ export const TAX_ENTRIES: ManualEntry[] = [
       {
         kind: "prose",
         heading: "How representation attacks it",
-        text: "Once the 8821 and 2848 are on file, we pull the wage & income transcripts — the IRS's own record of every W-2, 1099, and payer report for each missing year. That's what lets the returns get filed correctly instead of from a shoebox and a guess: real income data, plus the deductions and status the SFR ignored. A correctly filed return can replace the SFR's assessment, and the balance moves to what it actually should be. In discovery, find the shape of it first — which years are missing, and what kind of income (W-2 versus 1099 changes everything). Frame cleanup as the first step before anyone guesses at resolution.",
+        text: "Once the 8821 and 2848 are on file, the first move is usually pulling the wage & income transcripts — the IRS's own record of every W-2, 1099, and payer report for each missing year. That's what lets the returns get filed correctly instead of from a shoebox and a guess: real income data, plus the deductions and status the SFR ignored. A correctly filed return can replace the SFR's assessment, and the balance moves to what it actually should be. In discovery, find the shape of it first — which years are missing, and what kind of income (W-2 versus 1099 changes everything). Frame cleanup as the first step before anyone guesses at resolution.",
       },
       {
         kind: "lines",
@@ -371,7 +371,7 @@ export const TAX_ENTRIES: ManualEntry[] = [
       {
         kind: "prose",
         heading: "A foundation, not a fix",
-        text: "The script's own framing is the one to keep: these forms don't change your balance; they open the door so we can see the facts and communicate lawfully. Never oversell the POA as the thing that solves the debt — it is the thing that makes solving it possible. That honesty is also the setup for healthy urgency: tax-debt work is a marathon, not a sprint, and representation is the starting line. If the prospect has had active IRS communication, the sooner representation is filed, the sooner the legal team engages — and nothing moves forward without it. Once filed, the file gets a full compliance check and attorney-led review in the first few weeks; that is the concrete thing they are buying today.",
+        text: "The script's own framing is the one to keep: these forms don't change your balance; they open the door so we can see the facts and communicate lawfully. Never oversell the POA as the thing that solves the debt — it is the thing that makes solving it possible. That honesty is also the setup for healthy urgency: tax-debt work is a marathon, not a sprint, and representation is the starting line. If the prospect has had active IRS communication, the sooner representation is filed, the sooner the legal team engages — and nothing moves forward without it. Once filed, the file gets a full compliance check and review by the attorney’s staff as the record comes back; that is the concrete thing they are buying today.",
       },
       {
         kind: "prose",

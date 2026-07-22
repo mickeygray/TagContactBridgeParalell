@@ -922,7 +922,7 @@ async function rebuildMetricSnapshots(domain, from, to) {
     }
     const [spendAgg, paymentAgg, callAgg, mailLeadAgg] = await Promise.all([
       SpendEntry.aggregate([
-        { $match: { domain: normalizedDomain, date } },
+        { $match: { domain: normalizedDomain, date, active: { $ne: false } } },
         {
           $group: {
             _id: null,
@@ -932,7 +932,7 @@ async function rebuildMetricSnapshots(domain, from, to) {
         },
       ]),
       PaymentLedger.aggregate([
-        { $match: { domain: normalizedDomain, paymentDateKey: date } },
+        { $match: { domain: normalizedDomain, paymentDateKey: date, transactionStatus: "SUCCESS" } },
         {
           $group: {
             _id: null,
@@ -1010,7 +1010,7 @@ async function rebuildMetricSnapshots(domain, from, to) {
   }
   const [lifetimeSpendAgg, lifetimePaymentAgg, lifetimeCallAgg, lifetimeMailLeadAgg] = await Promise.all([
     SpendEntry.aggregate([
-      { $match: { domain: normalizedDomain } },
+      { $match: { domain: normalizedDomain, active: { $ne: false } } },
       {
         $group: {
           _id: null,
@@ -1020,7 +1020,7 @@ async function rebuildMetricSnapshots(domain, from, to) {
       },
     ]),
     PaymentLedger.aggregate([
-      { $match: { domain: normalizedDomain } },
+      { $match: { domain: normalizedDomain, transactionStatus: "SUCCESS" } },
       { $group: { _id: null, revenue: { $sum: "$amount" } } },
     ]),
     DailyCallStat.aggregate([

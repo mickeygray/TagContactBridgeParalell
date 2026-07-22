@@ -154,6 +154,26 @@ async function publishBatchToRingcx(client, input = {}) {
       reason: "NOT_UPLOADED",
     }));
   const result = await client.loadLeads(campaignId, payload);
+  const hasVerifiableResult = Boolean(str(result?.processingStatus))
+    || readInsertedCount(result) !== null
+    || Array.isArray(result?.rejectedRows);
+  if (!hasVerifiableResult) {
+    const error = new Error("RingCX lead loader returned an unverified response");
+    error.code = "ringcx-load-unverified";
+    throw error;
+  }
+  const insertedCount = readInsertedCount(result);
+  const uploadedExternIdsForCheck = new Set(uploadedCandidates.map((candidate) => candidate.externId));
+  const rejectedCount = [...extractRejectedExternIds(result)]
+    .filter((externId) => uploadedExternIdsForCheck.has(externId)).length;
+  if (
+    insertedCount !== null
+    && insertedCount + rejectedCount !== uploadedCandidates.length
+  ) {
+    const error = new Error("RingCX lead loader returned an ambiguous partial result");
+    error.code = "ringcx-load-partial-unverified";
+    throw error;
+  }
   const patch = toCandidatePublishPatch(result, uploadedCandidates);
   // ALPHA observability: log the RingCX publish-batch reconciliation at the transport boundary —
   // the one place the "publish accepted but RingCX never dialed" / phantom-lead class shows up
@@ -161,7 +181,6 @@ async function publishBatchToRingcx(client, input = {}) {
   // accepted externId; this surfaces processingStatus + leadsInserted + reject reasons. Gated by
   // CX_ALPHA_TRACE_ENABLED, PII-redacted, never throws.
   const rejectAll = [...patch.rejected, ...notUploaded];
-  const insertedCount = readInsertedCount(result);
   const rejectReasons = {};
   for (const r of rejectAll) {
     const reason = str(r && r.reason) || "unknown";
@@ -179,8 +198,6 @@ async function publishBatchToRingcx(client, input = {}) {
     rejectReasons,
     acceptedExternIds: patch.accepted.map((a) => a.externId).filter(Boolean),
     acceptedQueueItemIds: patch.accepted.map((a) => str(a.queueItemId)).filter(Boolean),
-    // accepted by us but RingCX inserted fewer -> these may never actually dial (phantom lead).
-    phantomSuspected: patch.accepted.length > 0 && insertedCount !== null && insertedCount < patch.accepted.length,
   });
   return { supplied: payload.uploadLeads.length, accepted: patch.accepted, rejected: rejectAll, result };
 }

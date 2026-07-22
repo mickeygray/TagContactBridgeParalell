@@ -31,7 +31,8 @@ function deriveAppointmentDispatchDue(appointment = {}, { leadMs = 0 } = {}) {
 function defaultDeps() {
   return {
     isEnabled: () =>
-      String(process.env.CX_APPT_LANE_ENABLED || "false").trim().toLowerCase() === "true",
+      String(process.env.CX_APPT_LANE_ENABLED || "false").trim().toLowerCase() === "true"
+      && String(process.env.CX_BORING_DIALER_ENABLED || "false").trim().toLowerCase() !== "true",
     resolveQueueMap: () => parseAgentQueueMap(process.env.CX_APPT_QUEUE_MAP),
     resolveLeadMs: () => Math.max(Number(process.env.CX_APPT_DISPATCH_LEAD_MS) || 0, 0),
     listDispatchable: (now, limit) =>
@@ -45,7 +46,11 @@ function defaultDeps() {
         .lean(),
     claimAppointment: async (appointmentId, claim) => {
       const result = await CxAppointment.updateOne(
-        { appointmentId, status: { $in: ["scheduled", "due"] }, rcxDispatch: null },
+        {
+          appointmentId,
+          status: { $in: ["scheduled", "due"] },
+          rcxDispatch: null,
+        },
         { $set: { rcxDispatch: claim } },
       );
       return (result.modifiedCount ?? result.nModified ?? 0) > 0;

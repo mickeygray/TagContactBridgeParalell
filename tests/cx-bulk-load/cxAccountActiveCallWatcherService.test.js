@@ -493,6 +493,31 @@ test("runCxAccountActiveCallWatchOnce skips only busy sessions and still updates
   assert.equal(result.applied.skipped[0].reason, "session-busy");
 });
 
+test("retired account watcher refuses replacement-owned sessions even if the repository returns one", async () => {
+  const replacement = {
+    ...session("replacement", "acct-a", [candidate("q1", "cxbl-q1")]),
+    runtime: "boring",
+  };
+  let activeReads = 0;
+  let writes = 0;
+  const result = await runCxAccountActiveCallWatchOnce({
+    sessionRepository: {
+      async listActiveBulkLoadSessions() { return [replacement]; },
+      async updateBulkLoadSession() { writes += 1; return null; },
+    },
+    client: {
+      async listActiveCalls() { activeReads += 1; return []; },
+    },
+    now: new Date("2026-06-23T12:00:00.000Z"),
+  });
+
+  assert.equal(activeReads, 0);
+  assert.equal(writes, 0);
+  assert.equal(result.applied.skippedCount, 1);
+  assert.equal(result.applied.skipped[0].sessionId, "replacement");
+  assert.equal(result.applied.skipped[0].reason, "replacement-runtime-owned-elsewhere");
+});
+
 test("runCxAccountActiveCallWatchOnce requires the serving ownership stamp before current promotion", async () => {
   const writes = [];
   const servingAttempts = [];

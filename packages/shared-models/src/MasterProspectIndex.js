@@ -170,6 +170,7 @@ masterProspectIndexSchema.index({ domain: 1, telephonySessionIds: 1 });
 masterProspectIndexSchema.index({ domain: 1, caseId: 1 }, { unique: true });
 masterProspectIndexSchema.index({ domain: 1, statusId: 1 });
 masterProspectIndexSchema.index({ domain: 1, statusCategory: 1 });
+masterProspectIndexSchema.index({ domain: 1, firstSeenAt: 1 });
 
 // Compound index on (domain, cellPhone) for fast phone-based lookups
 // AND as the foundation for the future phone-unique constraint that

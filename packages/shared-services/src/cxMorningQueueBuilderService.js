@@ -108,6 +108,9 @@ function policyHasQueue(account = {}) {
 }
 
 function normalizeOptions(input = {}) {
+  const boringDialerEnabled = input.boringDialerEnabled === true
+    || (input.boringDialerEnabled === undefined
+      && String(process.env.CX_BORING_DIALER_ENABLED || "false").trim().toLowerCase() === "true");
   const statesToMirror = Array.isArray(input.statesToMirror)
     ? input.statesToMirror.filter(Boolean)
     : splitList(input.statesToMirror);
@@ -140,8 +143,9 @@ function normalizeOptions(input = {}) {
     limit: normalizePositiveInt(input.limit, 30, 250),
     maxAgents: input.maxAgents == null ? null : normalizePositiveInt(input.maxAgents, 1, 1000),
     build: input.build !== false,
-    drain: input.drain !== false,
-    mirror: input.mirror !== false,
+    drain: boringDialerEnabled ? false : input.drain !== false,
+    mirror: boringDialerEnabled ? false : input.mirror !== false,
+    boringDialerEnabled,
     reverse: input.reverse === true,
     forcePublish: input.forcePublish !== false,
     respectPresence: input.respectPresence === true,
@@ -169,6 +173,7 @@ function summarizeOptions(options) {
     build: options.build,
     drain: options.drain,
     mirror: options.mirror,
+    boringDialerEnabled: options.boringDialerEnabled,
     reverse: options.reverse,
     forcePublish: options.forcePublish,
     respectPresence: options.respectPresence,
@@ -372,10 +377,17 @@ async function drainRingcxRows(agent, rows, options) {
 
 async function buildLocalQueue(agent, options) {
   if (!options.apply) return { dryRun: true };
-  return buildCxQueueForAgent(agentDomain(agent, options), agent.account.extensionId, {
+  const firstTouch = options.boringDialerEnabled
+    ? await cxDialQueueRepository.activateAssignedFirstTouchRows(agentDomain(agent, options), {
+        agentEmail: agent.account.email,
+        agentExtensionId: agent.account.extensionId,
+      })
+    : null;
+  const built = await buildCxQueueForAgent(agentDomain(agent, options), agent.account.extensionId, {
     previewLimit: options.limit,
     source: options.source,
   });
+  return { ...built, firstTouch };
 }
 
 async function mirrorQueueRows(agent, options) {
@@ -579,6 +591,7 @@ function readCxMorningQueueBuilderOptionsFromEnv(env = process.env, logger = nul
     respectPresence: normalizeBoolean(env.CX_MORNING_QUEUE_BUILDER_RESPECT_PRESENCE, false),
     allowBroadDiscovery: normalizeBoolean(env.CX_MORNING_QUEUE_BUILDER_ALLOW_BROAD_DISCOVERY, false),
     paceMs: Math.max(0, Number(env.CX_MORNING_QUEUE_BUILDER_PACE_MS) || 0),
+    boringDialerEnabled: normalizeBoolean(env.CX_BORING_DIALER_ENABLED, false),
   };
 }
 
@@ -587,7 +600,8 @@ function isCxMorningQueueBuilderEnabled(env = process.env) {
   if (explicit !== undefined && explicit !== null && explicit !== "") {
     return normalizeBoolean(explicit, false);
   }
-  return normalizeBoolean(env.CX_DIAL_RUNTIME_BULK_LOAD_ENABLED, false);
+  return normalizeBoolean(env.CX_BORING_DIALER_ENABLED, false)
+    || normalizeBoolean(env.CX_DIAL_RUNTIME_BULK_LOAD_ENABLED, false);
 }
 
 module.exports = {

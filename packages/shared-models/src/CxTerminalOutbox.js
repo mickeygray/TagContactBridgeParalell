@@ -19,10 +19,13 @@ const cxTerminalOutboxSchema = new mongoose.Schema(
     queueItemId: { type: String, default: null, index: true },
     uii: { type: String, default: null },
     caseId: { type: Number, default: null },
+    agentId: { type: String, default: null, index: true },
+    agentExtensionId: { type: String, default: null },
     agentEmail: { type: String, default: null },
     agentName: { type: String, default: null },
     externId: { type: String, default: null },
     phone: { type: String, default: null },
+    normalizedPhone: { type: String, default: null, index: true },
     phoneLast4: { type: String, default: null },
     durationSec: { type: Number, default: null },
     coachSessionId: { type: String, default: null, index: true },
@@ -46,6 +49,9 @@ const cxTerminalOutboxSchema = new mongoose.Schema(
 
 // Drain reads oldest-pending first.
 cxTerminalOutboxSchema.index({ status: 1, createdAt: 1 });
+cxTerminalOutboxSchema.index({ agentId: 1, uii: 1 });
+cxTerminalOutboxSchema.index({ domain: 1, caseId: 1, createdAt: -1 });
+cxTerminalOutboxSchema.index({ domain: 1, normalizedPhone: 1, createdAt: -1 });
 
 module.exports =
   mongoose.models.ControlPlaneCxTerminalOutbox ||

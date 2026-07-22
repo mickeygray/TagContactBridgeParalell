@@ -38,7 +38,6 @@ import {
   salesTrainerApi,
   type TrainerAudio,
   type TrainerCoachPanel,
-  type TrainerConfig,
   type TrainerMessage,
   type TrainerSessionBundle,
   type TrainerVoiceProfile,
@@ -54,6 +53,16 @@ import {
   type UiPhasePayload,
   type UiScorecardPayload,
 } from "./uiPayloads";
+import { StudyPanel, MyCallsPanel } from "./TrainingCenterPanels";
+
+// Practice = the call cockpit (start + health + coaching). Study = the guide and
+// its drills, merged (read, answer, discuss). My calls = score recordings, last.
+type TrainingCenterTab = "practice" | "study" | "calls";
+const TRAINING_TABS: Array<{ key: TrainingCenterTab; label: string }> = [
+  { key: "practice", label: "Practice call" },
+  { key: "study", label: "Study" },
+  { key: "calls", label: "My calls" },
+];
 
 const PHASES = [
   { key: "opening", label: "Open" },
@@ -128,6 +137,61 @@ const SCENARIO_ARCHETYPES = [
   { value: "payroll", label: "Payroll" },
   { value: "farmer", label: "Farmer" },
   { value: "divorced", label: "Divorced" },
+];
+// Pre-described situations — common tax issues. Clicking one fills the Situation
+// text (the character-formation prompt shaper); the text stays editable.
+const SITUATION_PRESETS: Array<{ label: string; text: string }> = [
+  { label: "Wage garnishment", text: "The IRS is garnishing their paycheck right now and they're scared about covering rent this month." },
+  { label: "Levy threat (final notice)", text: "They just got a final notice of intent to levy and don't fully understand what it means or how urgent it is." },
+  { label: "Years unfiled", text: "They have several years of unfiled returns and have been avoiding it out of fear and embarrassment." },
+  { label: "Tax lien filed", text: "A federal tax lien was filed against them and they're worried it means the IRS is about to take their house." },
+  { label: "Payroll / 941 trouble", text: "A small-business owner who has fallen behind on 941 payroll taxes and is anxious about personal liability." },
+  { label: "Wants to settle", text: "They heard ads about settling for pennies on the dollar and want to know if they qualify for an Offer in Compromise." },
+  { label: "Big balance, fixed income", text: "Retired on a fixed income with a large balance they can't realistically pay, feeling hopeless about it." },
+  { label: "Burned before", text: "They already paid another tax-resolution firm that did nothing, so they're skeptical and defensive from the first hello." },
+  { label: "Plan not working", text: "They're on a self-negotiated IRS installment plan but the balance keeps growing and they can't figure out why." },
+];
+
+// Named personas — specific people, ethnicity/gender-appropriate names, with a
+// defined behavioral profile. Selecting one locks ethnicity + sex (+ age) via
+// demographicOverrides and composes a rich note into the formation prompt so the
+// bot plays THAT person: their goals, what opens them up, what shuts them down,
+// and how a close is actually earned. `ethnicity`/`sex` MUST be valid pool
+// values (server rollDemographics): ethnicity ∈ {White (non-Hispanic),
+// Hispanic/Latino, Black, Asian American, Mixed / Other}; sex ∈ {male, female}.
+interface TrainerPersona {
+  id: string;
+  name: string;
+  sex: "male" | "female";
+  ethnicity: string;   // valid rollDemographics pool value
+  ethLabel: string;    // short display label
+  age: number;
+  employment: string;  // valid EMPLOYMENT_CATEGORY_POOL value
+  blurb: string;       // plug-and-play temperament — feeds the foundation, not the UI
+}
+// A balanced roster: the 8 gender × ethnicity combinations across two age bands
+// (30s–40s and 50s–70s). Selecting one locks age/gender/ethnicity/employment via
+// demographicOverrides; the blurb plugs into the one foundation prompt that builds
+// the caller and seeds their opening memory. mood, tax stack, and voice fit.
+const TRAINER_PERSONAS: TrainerPersona[] = [
+  // 30s–40s
+  { id: "ryan-carter", name: "Ryan Carter", sex: "male", ethnicity: "White (non-Hispanic)", ethLabel: "White", age: 34, employment: "skilled trade (plumber, electrician, mechanic, HVAC, etc.)", blurb: "Proud tradesman who assumes cold callers are scams; warms to plain respect and straight talk, bristles at polish and pressure." },
+  { id: "katie-boyd", name: "Katie Boyd", sex: "female", ethnicity: "White (non-Hispanic)", ethLabel: "White", age: 37, employment: "W-2 employee (clerical, retail, healthcare aide, factory)", blurb: "Stretched thin and a little frazzled; responds to warmth and someone who won't waste her time, cools to a runaround." },
+  { id: "deshawn-harris", name: "DeShawn Harris", sex: "male", ethnicity: "Black", ethLabel: "Black", age: 33, employment: "gig economy (Uber/DoorDash + side hustle)", blurb: "Guarded and busy, half-expects a hustle; opens up when you actually listen instead of pitch." },
+  { id: "tanya-brooks", name: "Tanya Brooks", sex: "female", ethnicity: "Black", ethLabel: "Black", age: 39, employment: "W-2 employee (clerical, retail, healthcare aide, factory)", blurb: "Caring but exhausted and worried about her family; warms to empathy, shuts down under pressure." },
+  { id: "kevin-park", name: "Kevin Park", sex: "male", ethnicity: "Asian American", ethLabel: "Asian", age: 35, employment: "small business owner (retail, restaurant, service)", blurb: "Analytical, wants demonstrated competence and specifics; distrusts vague reassurance." },
+  { id: "mai-tran", name: "Mai Tran", sex: "female", ethnicity: "Asian American", ethLabel: "Asian", age: 38, employment: "sole proprietor / 1099 contractor", blurb: "Anxious perfectionist terrified of losing her business; needs calm, ordered steps, panics at rushing." },
+  { id: "luis-ramirez", name: "Luis Ramirez", sex: "male", ethnicity: "Hispanic/Latino", ethLabel: "Hispanic", age: 36, employment: "sole proprietor / 1099 contractor", blurb: "Hardworking and wary of paperwork; responds to being treated as a peer, not a mark." },
+  { id: "elena-cruz", name: "Elena Cruz", sex: "female", ethnicity: "Hispanic/Latino", ethLabel: "Hispanic", age: 40, employment: "small business owner (retail, restaurant, service)", blurb: "Protective of her family and her shop; warms to patience, cools to being hurried." },
+  // 50s–70s
+  { id: "gary-whitfield", name: "Gary Whitfield", sex: "male", ethnicity: "White (non-Hispanic)", ethLabel: "White", age: 61, employment: "retired (Social Security + pension and/or 401k)", blurb: "Gruff, skeptical of salespeople, on a fixed income; responds to honesty and an invitation to verify, hates upsell energy." },
+  { id: "susan-miller", name: "Susan Miller", sex: "female", ethnicity: "White (non-Hispanic)", ethLabel: "White", age: 57, employment: "W-2 employee (clerical, retail, healthcare aide, factory)", blurb: "Detail-minded and cautious bookkeeper; wants clear facts and no runaround." },
+  { id: "reginald-moore", name: "Reginald Moore", sex: "male", ethnicity: "Black", ethLabel: "Black", age: 64, employment: "retired (Social Security + pension and/or 401k)", blurb: "Dignified and careful, been around long enough to smell a con; opens to respect and straight answers." },
+  { id: "gloria-jackson", name: "Gloria Jackson", sex: "female", ethnicity: "Black", ethLabel: "Black", age: 67, employment: "retired (Social Security + pension and/or 401k)", blurb: "Warm but no-nonsense, protective of her savings; responds to patience and plain talk." },
+  { id: "hiroshi-tanaka", name: "Hiroshi Tanaka", sex: "male", ethnicity: "Asian American", ethLabel: "Asian", age: 62, employment: "small business owner (retail, restaurant, service)", blurb: "Reserved and precise, weighs everything; trusts demonstrated competence, not enthusiasm." },
+  { id: "grace-chen", name: "Grace Chen", sex: "female", ethnicity: "Asian American", ethLabel: "Asian", age: 70, employment: "retired (Social Security + pension and/or 401k)", blurb: "Gentle, easily confused by tax jargon, frightened of scams; needs slow, kind explanation and a chance to verify." },
+  { id: "roberto-delgado", name: "Roberto Delgado", sex: "male", ethnicity: "Hispanic/Latino", ethLabel: "Hispanic", age: 55, employment: "truck driver / owner-operator", blurb: "Blunt and time-pressed, taking the call from the road; responds to brevity and respect, not chit-chat." },
+  { id: "maria-flores", name: "Maria Flores", sex: "female", ethnicity: "Hispanic/Latino", ethLabel: "Hispanic", age: 58, employment: "sole proprietor / 1099 contractor", blurb: "Hardworking and a little ashamed of the tax mess; warms to zero judgment and reassurance." },
 ];
 
 function isTrainerAudio(value: unknown): value is TrainerAudio {
@@ -1020,13 +1084,37 @@ function ScorecardPanel({
   );
 }
 
-function CallStatusPanel({ phaseKey }: { phaseKey?: string }) {
+function CallStatusPanel({ phaseKey, hasSession }: { phaseKey?: string; hasSession?: boolean }) {
+  if (hasSession) {
+    return (
+      <div className="space-y-4 p-4">
+        <PhaseRail activeKey={phaseKey} />
+        <div className="rounded-md border border-border bg-muted/30 p-4">
+          <div className="text-sm font-semibold">Roleplay active</div>
+          <div className="mt-1 text-xs text-muted-foreground">
+            Coaching appears here as the call develops — feedback on what's happening and the approach that fits, drawn from the guide. It only speaks up when there's something worth saying.
+          </div>
+        </div>
+      </div>
+    );
+  }
   return (
     <div className="space-y-4 p-4">
       <PhaseRail activeKey={phaseKey} />
       <div className="rounded-md border border-border bg-muted/30 p-4">
-        <div className="text-sm font-semibold">Roleplay active</div>
-        <div className="mt-1 text-xs text-muted-foreground">Awaiting phase break</div>
+        <div className="text-sm font-semibold">How this works</div>
+        <ul className="mt-2 space-y-2 text-xs text-muted-foreground">
+          <li><span className="font-medium text-foreground">Pick who you call.</span> Set difficulty, scenario, and a free-text situation — the bot builds a realistic caller to match, then answers as that person.</li>
+          <li><span className="font-medium text-foreground">Just talk.</span> It's a voice call: you speak, it replies in voice. No transcript to read, nothing to type.</li>
+          <li><span className="font-medium text-foreground">The coach watches.</span> An analyst — not a script — reads the call against the guide and offers what to consider. It stays quiet when you're doing fine.</li>
+          <li><span className="font-medium text-foreground">The caller has memory.</span> Trust builds and cools gradually with your technique; earn the door and they open up, lead with your chin and they stay guarded.</li>
+        </ul>
+      </div>
+      <div className="rounded-md border border-dashed border-border p-4">
+        <div className="text-sm font-semibold">Your stats</div>
+        <div className="mt-1 text-xs text-muted-foreground">
+          Once you've run some calls, your trend shows up here — calls practiced, average score, the sections you're strongest and weakest on.
+        </div>
       </div>
     </div>
   );
@@ -1061,7 +1149,7 @@ function SidePanel({
       ) : phaseNotes ? (
         <PhaseNotesCard notes={phaseNotes} countdown={countdown} onCommand={onCommand} />
       ) : (
-        <CallStatusPanel phaseKey={coach?.phase.key} />
+        <CallStatusPanel phaseKey={coach?.phase.key} hasSession={Boolean(profile)} />
       )}
     </aside>
   );
@@ -1075,6 +1163,7 @@ function Transcript({
   onAudioPending,
   onAudioPlaying,
   onAudioComplete,
+  compact = false,
 }: {
   messages: TrainerMessage[];
   lastAudio: TrainerAudio | null;
@@ -1083,6 +1172,10 @@ function Transcript({
   onAudioPending: () => void;
   onAudioPlaying: () => void;
   onAudioComplete: () => void;
+  // compact = the trainee is on a VOICE call; they hear the prospect, they
+  // don't read a transcript. Render just the header + audio player, no scrolling
+  // bubble history. The audio wiring is identical to full mode.
+  compact?: boolean;
 }) {
   const bottomRef = useRef<HTMLDivElement | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
@@ -1119,12 +1212,12 @@ function Transcript({
   }
 
   return (
-    <div className="flex min-h-[520px] flex-1 flex-col rounded-lg border border-border bg-card">
+    <div className={cn("flex flex-col rounded-lg border border-border bg-card", !compact && "min-h-[520px] flex-1")}>
       <div className="flex items-center justify-between border-b border-border px-4 py-3">
         <div className="flex items-center gap-2">
           <MessageSquare className="h-4 w-4 text-primary" />
           <div>
-            <div className="text-sm font-semibold">Roleplay</div>
+            <div className="text-sm font-semibold">{compact ? "On the call" : "Roleplay"}</div>
             <div className="text-xs text-muted-foreground">{messages.length} turns</div>
           </div>
         </div>
@@ -1173,6 +1266,7 @@ function Transcript({
           ) : null}
         </div>
       ) : null}
+      {compact ? null : (
       <div className="flex-1 space-y-3 overflow-y-auto p-4">
         {messages.length === 0 ? (
           <div className="flex h-full min-h-[420px] items-center justify-center text-sm text-muted-foreground">
@@ -1205,6 +1299,7 @@ function Transcript({
         )}
         <div ref={bottomRef} />
       </div>
+      )}
     </div>
   );
 }
@@ -1213,7 +1308,6 @@ export function SalesTrainerWorkspace() {
   const navigate = useNavigate();
   const appUser = useAuthStore((state) => state.user);
   const [authState, setAuthState] = useState<"checking" | "signed-out" | "signed-in">("checking");
-  const [config, setConfig] = useState<TrainerConfig | null>(null);
   const [session, setSession] = useState<TrainerSessionBundle | null>(null);
   const [messages, setMessages] = useState<TrainerMessage[]>([]);
   const [coach, setCoach] = useState<TrainerCoachPanel | null>(null);
@@ -1226,11 +1320,18 @@ export function SalesTrainerWorkspace() {
   const [phaseNotes, setPhaseNotes] = useState<UiPhasePayload | null>(null);
   const [scorecard, setScorecard] = useState<UiScorecardPayload | null>(null);
   const [countdown, setCountdown] = useState<number | null>(null);
-  const [inputFocused, setInputFocused] = useState(false);
+  // Voice-only surface has no text input to focus; kept false so the phase
+  // countdown never pauses on a focus that can't happen.
+  const [inputFocused] = useState(false);
   const [voiceProfile, setVoiceProfile] = useState<TrainerVoiceProfile | null>(null);
   const [lastAudio, setLastAudio] = useState<TrainerAudio | null>(null);
   const [audioNotice, setAudioNotice] = useState("");
   const [callMode, setCallMode] = useState<TrainerCallMode | null>(null);
+  const [centerTab, setCenterTab] = useState<TrainingCenterTab>("practice");
+  // Session-builder shaping: a pre-described tax issue and/or a named persona.
+  // Both are optional and compose into the character-formation prompt.
+  const [situation, setSituation] = useState("");
+  const [personaId, setPersonaId] = useState("random");
   const [difficulty, setDifficulty] = useState("random");
   const [scenarioArchetype, setScenarioArchetype] = useState("random");
   const [openingDelivered, setOpeningDelivered] = useState(false);
@@ -1295,7 +1396,6 @@ export function SalesTrainerWorkspace() {
     try {
       await salesTrainerApi.checkAuth();
       const nextConfig = await salesTrainerApi.config();
-      setConfig(nextConfig);
       setProvider(nextConfig.providers.default || nextConfig.providers.available[0] || "anthropic");
       setAuthState("signed-in");
     } catch {
@@ -1577,10 +1677,19 @@ export function SalesTrainerWorkspace() {
     setProspectAudioPending(false);
     setProspectAudioPlaying(false);
     try {
+      const persona = TRAINER_PERSONAS.find((p) => p.id === personaId) || null;
+      const personaNote = persona
+        ? `The caller's name is exactly ${persona.name} — use this name, do not invent another. Temperament: ${persona.blurb}`
+        : "";
+      const composedSituation = [personaNote, situation.trim()].filter(Boolean).join("\n\n");
       const bundle = await salesTrainerApi.startSession({
         difficulty: toNullableChoice(difficulty),
         mode: selectedMode,
         scenarioArchetype: toNullableChoice(scenarioArchetype),
+        situation: composedSituation || null,
+        demographicOverrides: persona
+          ? { ethnicity: persona.ethnicity, sex: persona.sex, age: persona.age, employmentCategory: persona.employment }
+          : undefined,
         includeAudio: true,
         audio: {
           responseFormat: "mp3",
@@ -1677,6 +1786,7 @@ export function SalesTrainerWorkspace() {
     autoContinueRef.current = false;
     setError("");
     setSending(true);
+    console.info("[trainer] submitTrainerTurn: sending clip to /turn", { bytes: opts.blob.size });
     try {
       const result = await salesTrainerApi.turn({
         blob: opts.blob,
@@ -1700,8 +1810,9 @@ export function SalesTrainerWorkspace() {
       // Server gives us the transcript inside the result. Build the user
       // message from that — no separate /transcribe call.
       const userText = (result.transcript?.text || "").trim();
+      console.info("[trainer] /turn returned", { you: userText.slice(0, 80), prospect: (result.response?.text || "").slice(0, 80), sttError: result.sttError });
       if (!userText) {
-        setMicError("No speech detected");
+        setMicError("No speech detected — try talking a bit louder, then pause.");
         return;
       }
       const userTurn: TrainerMessage = { role: "user", content: userText };
@@ -1741,6 +1852,7 @@ export function SalesTrainerWorkspace() {
         await refreshCoach(nextMessages);
       }
     } catch (err) {
+      console.error("[trainer] /turn failed", err);
       setError(err instanceof Error ? err.message : "Could not send turn");
     } finally {
       setSending(false);
@@ -1949,6 +2061,7 @@ export function SalesTrainerWorkspace() {
             const elapsedMs = now - countdownStartedAt;
             if (elapsedMs >= SILENCE_SEND_COUNTDOWN_SECONDS * 1000) {
               setSilenceCountdown(null);
+              console.info("[trainer] VAD: silence → auto-sending your turn");
               if (stopRecording({ autoSend: true })) setVoiceAutoSending(true);
               return;
             }
@@ -2069,13 +2182,16 @@ export function SalesTrainerWorkspace() {
       voiceAutoSending ||
       recordingStartInFlightRef.current
     ) {
+      console.info("[trainer] startRecording skipped (busy)", { sending, transcribing, recording, voiceAutoSending });
       return false;
     }
     if (!micSupported) {
+      console.warn("[trainer] startRecording: mic unsupported");
       setMicError("Microphone unavailable");
       if (options.automatic) setHandsFreeEnabled(false);
       return false;
     }
+    console.info("[trainer] startRecording: requesting mic", options);
 
     recordingStartInFlightRef.current = true;
     setMicError("");
@@ -2144,6 +2260,7 @@ export function SalesTrainerWorkspace() {
       recorder.start(250);
       setRecording(true);
       setRecordingMs(0);
+      console.info("[trainer] mic recording started — talk now");
       return true;
     } catch (err) {
       clearRecordingState();
@@ -2200,6 +2317,7 @@ export function SalesTrainerWorkspace() {
     }
 
     const id = window.setTimeout(() => {
+      console.info("[trainer] hands-free: auto-arming mic");
       void startRecording({ automatic: true });
     }, 250);
     return () => window.clearTimeout(id);
@@ -2217,6 +2335,22 @@ export function SalesTrainerWorkspace() {
     phaseNotes,
     scorecard,
   ]);
+
+  // Safety net: if the prospect audio flags stay "pending/playing" too long,
+  // the opening (or a prior turn's) `onEnded` was almost certainly missed
+  // (autoplay quirk, element swap). Those flags gate BOTH auto-arm and the mic
+  // button, so a stuck flag = "can't talk back." Force-clear after a cap so the
+  // mic frees up. A real prospect turn is 1-3 sentences (well under the cap).
+  useEffect(() => {
+    if (!prospectAudioPending && !prospectAudioPlaying) return undefined;
+    const id = window.setTimeout(() => {
+      console.warn("[trainer] audio-state safety clear — prospect audio was stuck; freeing the mic");
+      pendingChunksRef.current = [];
+      setProspectAudioPending(false);
+      setProspectAudioPlaying(false);
+    }, 15000);
+    return () => window.clearTimeout(id);
+  }, [prospectAudioPending, prospectAudioPlaying]);
 
   if (authState === "checking") {
     return (
@@ -2271,7 +2405,22 @@ export function SalesTrainerWorkspace() {
       </header>
 
       <main className="mx-auto max-w-[1500px] space-y-4 px-6 py-6">
-        <section className="grid gap-4 rounded-lg border border-border bg-card p-4 lg:grid-cols-[minmax(0,1.15fr)_minmax(360px,0.85fr)]">
+        {/* Training Center tabs — the learning environment around the call bot */}
+        <nav className="flex flex-wrap gap-2">
+          {TRAINING_TABS.map((tab) => (
+            <Button
+              key={tab.key}
+              size="sm"
+              variant={centerTab === tab.key ? "primary" : "secondary"}
+              onClick={() => setCenterTab(tab.key)}
+            >
+              {tab.label}
+            </Button>
+          ))}
+        </nav>
+        {centerTab === "practice" ? (
+          <>
+        <section className="rounded-lg border border-border bg-card p-4">
           <div className="space-y-3">
             <div className="grid gap-2 sm:grid-cols-2">
               <Button
@@ -2294,8 +2443,10 @@ export function SalesTrainerWorkspace() {
               </Button>
             </div>
 
-            {callMode ? (
-              <div className="grid gap-3 sm:grid-cols-3">
+            <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+              Build your caller
+            </div>
+            <div className="grid gap-3 sm:grid-cols-3">
                 <div className="space-y-1.5">
                   <Label>Difficulty</Label>
                   <Select value={difficulty} onValueChange={setDifficulty}>
@@ -2327,56 +2478,48 @@ export function SalesTrainerWorkspace() {
                   </Select>
                 </div>
                 <div className="space-y-1.5">
-                  <Label>Logic engine</Label>
-                  <Select value={provider} onValueChange={setProvider}>
+                  <Label>Persona</Label>
+                  <Select value={personaId} onValueChange={setPersonaId}>
                     <SelectTrigger>
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
-                      {(config?.providers.available.length ? config.providers.available : ["anthropic", "openai"]).map(
-                        (item) => (
-                          <SelectItem key={item} value={item}>
-                            {item === "anthropic" ? "Claude" : "GPT"}
-                          </SelectItem>
-                        ),
-                      )}
+                      <SelectItem value="random">Random</SelectItem>
+                      {TRAINER_PERSONAS.map((p) => (
+                        <SelectItem key={p.id} value={p.id}>
+                          {p.name} — {p.ethLabel} {p.sex === "male" ? "man" : "woman"}, {p.age}
+                        </SelectItem>
+                      ))}
                     </SelectContent>
                   </Select>
                 </div>
               </div>
-            ) : null}
-          </div>
 
-          <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_auto]">
-            <div className="grid grid-cols-2 gap-2 text-xs lg:grid-cols-4">
-              <div className="rounded-md border border-border px-3 py-2">
-                <div className="text-muted-foreground">Mode</div>
-                <div className="truncate font-medium capitalize">
-                  {profileString(profile, "practiceMode") !== "-"
-                    ? profileString(profile, "practiceMode")
-                    : callMode || "-"}
-                </div>
-              </div>
-              <div className="rounded-md border border-border px-3 py-2">
-                <div className="text-muted-foreground">Scenario</div>
-                <div className="truncate font-medium">
-                  {profileString(profile, "scenarioArchetype") !== "-"
-                    ? profileString(profile, "scenarioArchetype")
-                    : scenarioArchetype}
-                </div>
-              </div>
-              <div className="rounded-md border border-border px-3 py-2">
-                <div className="text-muted-foreground">Debt</div>
-                <div className="truncate font-medium">${profileString(profile, "approxDebtUsd")}</div>
-              </div>
-              <div className="rounded-md border border-border px-3 py-2">
-                <div className="text-muted-foreground">Mood</div>
-                <div className="truncate font-medium">{profileString(profile, "mood")}</div>
+            <div className="space-y-1.5">
+              <Label>Tax issue (optional)</Label>
+              <div className="flex flex-wrap gap-1.5">
+                {SITUATION_PRESETS.map((preset) => (
+                  <button
+                    key={preset.label}
+                    type="button"
+                    onClick={() => setSituation((cur) => (cur === preset.text ? "" : preset.text))}
+                    disabled={starting}
+                    className={cn(
+                      "rounded-full border px-3 py-1 text-xs transition-colors disabled:opacity-50",
+                      situation === preset.text
+                        ? "border-primary bg-primary/10 text-primary"
+                        : "border-border text-muted-foreground hover:border-primary/50 hover:text-foreground",
+                    )}
+                  >
+                    {preset.label}
+                  </button>
+                ))}
               </div>
             </div>
 
             <Button
-              className="lg:self-end"
+              size="lg"
+              className="w-full sm:w-auto"
               onClick={() => {
                 primeAudioOutput();
                 void startSession();
@@ -2385,7 +2528,7 @@ export function SalesTrainerWorkspace() {
               isLoading={starting}
             >
               <Play className="h-4 w-4" />
-              Go
+              {callMode ? "Start the call" : "Pick inbound or outbound first"}
             </Button>
           </div>
         </section>
@@ -2396,9 +2539,12 @@ export function SalesTrainerWorkspace() {
           </div>
         ) : null}
 
-        <section className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_420px]">
-          <div className="flex min-h-[640px] flex-col gap-3">
+        <section className="space-y-4">
+          {/* Call strip — hear the prospect, talk back. No transcript to read,
+              no box to type in: it's a voice call. */}
+          <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_minmax(280px,340px)]">
             <Transcript
+              compact
               messages={messages}
               lastAudio={lastAudio}
               audioNotice={audioNotice}
@@ -2408,19 +2554,11 @@ export function SalesTrainerWorkspace() {
               onAudioComplete={handleAudioComplete}
             />
             <div className="rounded-lg border border-border bg-card p-3">
-              <div className="flex flex-col gap-2 sm:flex-row">
-                <textarea
-                  ref={draftInputRef}
-                  value={draft}
-                  onFocus={() => setInputFocused(true)}
-                  onBlur={() => setInputFocused(false)}
-                  readOnly
-                  disabled
-                  rows={3}
-                  className="min-h-20 flex-1 resize-none rounded-md border border-input bg-card px-3 py-2 text-sm shadow-sm placeholder:text-muted-foreground focus-visible:border-ring disabled:cursor-not-allowed disabled:opacity-50"
-                  placeholder={session ? "Voice-only mode" : "Press Go to start"}
-                />
-                <div className="flex shrink-0 gap-2 sm:flex-col sm:justify-end">
+              <div className="flex h-full flex-col justify-between gap-2">
+                <div className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                  {session ? "Your turn — talk; it sends on a pause" : "Press Go to start"}
+                </div>
+                <div className="flex gap-2">
                   <Button
                     variant={recording ? "destructive" : "secondary"}
                     onClick={() => {
@@ -2559,6 +2697,8 @@ export function SalesTrainerWorkspace() {
             </div>
           </div>
 
+          {/* The cockpit — call health, phase, and the live coaching, one panel
+              under the call strip. Reading and drills live in the Study tab. */}
           <SidePanel
             health={health}
             phaseNotes={phaseNotes}
@@ -2569,6 +2709,12 @@ export function SalesTrainerWorkspace() {
             onCommand={(command) => void sendCommand(command)}
           />
         </section>
+          </>
+        ) : centerTab === "study" ? (
+          <StudyPanel />
+        ) : (
+          <MyCallsPanel />
+        )}
       </main>
     </div>
   );

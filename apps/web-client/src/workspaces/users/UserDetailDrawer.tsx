@@ -291,7 +291,7 @@ function CallStatsGrid({ bucket }: { bucket: CallStatsBucket }) {
         label="EX (desk app)"
         value={formatNumber(bucket.exCalls)}
         hint={
-          bucket.cxCalls + bucket.exCalls === 0 && bucket.totalCalls > 0
+          bucket.cxCalls + bucket.exCalls + (bucket.phoneBurnerCalls ?? 0) === 0 && bucket.totalCalls > 0
             ? "platform stamping started recently — historical rows un-tagged"
             : undefined
         }
@@ -299,6 +299,22 @@ function CallStatsGrid({ bucket }: { bucket: CallStatsBucket }) {
       <Field
         label="CX (queue)"
         value={formatNumber(bucket.cxCalls)}
+      />
+      <Field
+        label="PhoneBurner"
+        value={formatNumber(bucket.phoneBurnerCalls ?? 0)}
+      />
+      <Field
+        label="Connected"
+        value={formatNumber(bucket.connectedCalls ?? 0)}
+      />
+      <Field
+        label="Appointments · DNC"
+        value={`${formatNumber(bucket.appointmentsSet ?? 0)} · ${formatNumber(bucket.dncOutcomes ?? 0)}`}
+      />
+      <Field
+        label="Connected talk time"
+        value={formatDurationSec(bucket.talkDurationSec ?? 0)}
       />
     </dl>
   );

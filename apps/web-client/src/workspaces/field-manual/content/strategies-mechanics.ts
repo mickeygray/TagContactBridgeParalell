@@ -19,7 +19,7 @@ export const STRATEGY_MECHANICS_ENTRIES: ManualEntry[] = [
       "true constraint",
     ],
     lead:
-      "An objection is a request for more information — the prospect is asking you to convince them. A condition is a genuine inability — no amount of persuasion changes it. Every mechanic in this manual works on objections and wastes your breath on conditions, so your first move is always to find out which one you have.",
+      "An objection is a request for more information — the prospect is asking you to convince them. A condition is a genuine inability — no amount of persuasion changes it. Every mechanic in this manual works on objections and wastes your breath on conditions, so unless the call has already made it obvious, your first move is to find out which one you have.",
     blocks: [
       {
         kind: "prose",
@@ -144,7 +144,7 @@ export const STRATEGY_MECHANICS_ENTRIES: ManualEntry[] = [
         kind: "prose",
         heading: "The conditional close",
         text:
-          "The moment the prospect confirms the objection stands alone, convert it: “So if the fee piece made sense, you’d be ready to get this moving today?” That sentence transforms an objection into the terms of the sale. You are no longer selling — you are jointly solving the one named problem, with the close already agreed as the outcome. This is why you never answer an unisolated objection: answering first spends your ammunition before you know whether hitting the target wins anything.",
+          "The moment the prospect confirms the objection stands alone, convert it: “So if the fee piece made sense, you’d be ready to get this moving today?” That sentence transforms an objection into the terms of the sale. You are no longer selling — you are jointly solving the one named problem, with the close already agreed as the outcome. This is why isolating before you answer is the strong default: answering first spends your ammunition before you know whether hitting the target wins anything.",
       },
       {
         kind: "lines",
@@ -158,7 +158,7 @@ export const STRATEGY_MECHANICS_ENTRIES: ManualEntry[] = [
       {
         kind: "avoid",
         items: [
-          "Answering the first objection you hear. Answer five in a row and you’ve run a seminar, not a close — isolate first, always.",
+          "Answering the first objection you hear. Answer five in a row and you’ve run a seminar, not a close — make isolate-first your default.",
           "Isolating and then forgetting to convert. “Is there anything else?” — “No.” — and then more pitching. The “no” IS the opening for the conditional close; take it.",
           "Machine-gunning the isolation question after every sentence. It’s one deliberate move at the decision point, not a nervous habit.",
         ],
@@ -314,7 +314,7 @@ export const STRATEGY_MECHANICS_ENTRIES: ManualEntry[] = [
       "counter-question",
     ],
     lead:
-      "When a prospect tosses you a prickly question, don’t hug it — toss back a better one. The porcupine answers a question with a question, keeping control of the call and converting their curiosity into your discovery.",
+      "When a prospect tosses you a prickly question, often the best move isn’t to hug it — it’s to toss back a better one. The porcupine answers a question with a question, keeping control of the call and converting their curiosity into your discovery.",
     blocks: [
       {
         kind: "prose",
@@ -543,7 +543,7 @@ export const STRATEGY_MECHANICS_ENTRIES: ManualEntry[] = [
       "hold the pause",
     ],
     lead:
-      "After a stakes statement or a number lands — the fee, the balance, the penalty math — STOP TALKING. That silence belongs to the prospect: they’re doing the only math that matters, and whoever fills the silence first gives something up.",
+      "After a stakes statement or a number lands — the fee, the balance, the penalty math — STOP TALKING. That silence belongs to the prospect: they’re doing the math that matters most, and the agent who fills it first usually gives something up.",
     blocks: [
       {
         kind: "prose",
@@ -561,7 +561,7 @@ export const STRATEGY_MECHANICS_ENTRIES: ManualEntry[] = [
         kind: "lines",
         heading: "Lines in the floor’s voice",
         items: [
-          "“The first phase — power of attorney, your transcripts, the full compliance read — is $1,500.” (Then nothing. Not one more word until they speak.)",
+          "“The first phase — power of attorney, your transcripts, the full compliance read — is $___.” (Then nothing. Not one more word until they speak.)",
           "“The penalties this year alone are likely more than the first phase of the fee.” (Silence — let the comparison finish landing.)",
         ],
       },
@@ -576,9 +576,9 @@ export const STRATEGY_MECHANICS_ENTRIES: ManualEntry[] = [
       {
         kind: "example",
         weak:
-          "“So the investigation phase is $1,500… which, I know, sounds like a lot, but honestly for everything you get it’s really reasonable, and if that’s tough we do have some flexibility, so…”",
+          "“So the investigation phase is $___… which, I know, sounds like a lot, but honestly for everything you get it’s really reasonable, and if that’s tough we do have some flexibility, so…”",
         strong:
-          "“The investigation phase — POA filed, transcripts pulled, full compliance read — is $1,500.” … (four seconds of silence) … “Okay. Can I split that up?” — “Absolutely. Two payments work?”",
+          "“The investigation phase — POA filed, transcripts pulled, full compliance read — is $___.” … (four seconds of silence) … “Okay. Can I split that up?” — “Absolutely. Two payments work?”",
         note:
           "The weak version buries the number under apology and discounts it before the prospect reacts at all. The strong version states it flat, holds the silence, and the prospect’s own next words move the call forward — into a payment question, which is a buying signal, not an objection.",
       },
@@ -587,7 +587,7 @@ export const STRATEGY_MECHANICS_ENTRIES: ManualEntry[] = [
         prompt:
           "You quote the fee. Five full seconds of dead air. Every instinct says fix it. What do you do, and why?",
         answer:
-          "Nothing. Hold it. The silence is the prospect doing arithmetic, and it belongs to them — whoever fills it first gives something up. If you speak, you’ll either discount unprompted or re-open the pitch. Their next words tell you the real state of the deal: objection (isolate it), payment question (buying signal — answer and advance), or yes (stop selling, start scheduling).",
+          "Nothing. Hold it. The silence is usually the prospect doing arithmetic, and it belongs to them — fill it first and you’ll likely give something up. If you speak, you’ll either discount unprompted or re-open the pitch. Their next words tell you the real state of the deal: objection (isolate it), payment question (buying signal — answer and advance), or yes (stop selling, start scheduling).",
       },
     ],
     links: ["psych.voss", "obj.silence", "script.payment", "strat.tone"],
@@ -605,7 +605,7 @@ export const STRATEGY_MECHANICS_ENTRIES: ManualEntry[] = [
       "answer the momentum",
     ],
     lead:
-      "Price, timeline, and how-does-it-work questions are buying signals dressed as objections — nobody asks the cost of something they don’t want. And remember the broader read: a prospect who argues is still on the phone. Objections mean engagement; silence is the real enemy.",
+      "Price, timeline, and how-does-it-work questions are often buying signals dressed as objections — people rarely ask the cost of something they don’t want. And remember the broader read: a prospect who argues is still on the phone. Objections usually mean engagement; silence is the bigger warning sign.",
     blocks: [
       {
         kind: "prose",
@@ -623,7 +623,7 @@ export const STRATEGY_MECHANICS_ENTRIES: ManualEntry[] = [
         kind: "lines",
         heading: "Lines in the floor’s voice",
         items: [
-          "“Good question — here’s the shape of it. Week one: POA on file and transcripts requested. Week two to three: we’ve got the full picture and you get the compliance read. Then we price the fix off what’s actually there. So for your file — how many years are we dealing with?”",
+          "“Good question — here’s the shape of it. Right away: POA filed and transcripts requested. Once the IRS sends them back — typically a few weeks — we’ve got the full picture and you get the compliance read. Then we price the fix off what’s actually there. So for your file — how many years are we dealing with?”",
           "“Fair question, and I won’t dance around it. The first phase is fixed and small; the fix gets priced off what we find. How many years are we talking?”",
           "“How fast can we start? Today — it’s one signature. What’s the best email for the POA?”",
         ],
@@ -641,7 +641,7 @@ export const STRATEGY_MECHANICS_ENTRIES: ManualEntry[] = [
         prompt:
           "Mid-call, the prospect interrupts your pitch with: “Okay, but how long does something like this actually take?” — what just happened, and what’s your move?",
         answer:
-          "That’s a buying signal — they’re running the movie of being a client. Stop pitching immediately. Answer briefly and concretely (“first phase, two to three weeks to the full read; the fix depends on what the transcripts show”), then advance as if working together is the plan: “which means the sooner the POA is in, the sooner the clock starts — what’s the best email for it?”",
+          "That’s a buying signal — they’re running the movie of being a client. Stop pitching immediately. Answer briefly and concretely (“first phase: POA filed now, transcripts requested, full read once the IRS returns them; the fix depends on what they show”), then advance as if working together is the plan: “which means the sooner the POA is in, the sooner the clock starts — what’s the best email for it?”",
       },
     ],
     links: [
@@ -664,7 +664,7 @@ export const STRATEGY_MECHANICS_ENTRIES: ManualEntry[] = [
       "verbal buying signs",
     ],
     lead:
-      "Listen for the tense shift: “would” turning into “will,” “if” turning into “when.” When a prospect’s language moves from conditional to future, they have already decided — stop selling and start scheduling, because talking past the close is how sold deals die.",
+      "Listen for the tense shift: “would” turning into “will,” “if” turning into “when.” When a prospect’s language moves from conditional to future, they have usually already decided — that’s your cue to stop selling and start scheduling, because talking past the close is how sold deals die.",
     blocks: [
       {
         kind: "prose",
@@ -676,14 +676,14 @@ export const STRATEGY_MECHANICS_ENTRIES: ManualEntry[] = [
         kind: "prose",
         heading: "Why you stop selling",
         text:
-          "Every value sentence delivered after the decision is made re-opens the decision. A prospect at yes who hears one more benefit doesn’t get more sold — they get reminded the choice was optional, and some fraction of them steps back through the door you just re-opened. This is the single most common way strong calls die: the agent, on a roll, keeps pitching a person who already bought. The moment the tense shifts, your job changes from persuading to organizing — next concrete step, what to have in hand, when it happens. Brief, assumptive, in motion: “perfect — here’s what happens next.”",
+          "Every value sentence delivered after the decision is made re-opens the decision. A prospect at yes who hears one more benefit doesn’t get more sold — they get reminded the choice was optional, and some fraction of them steps back through the door you just re-opened. This is one of the most common ways strong calls die: the agent, on a roll, keeps pitching a person who already bought. The moment the tense shifts, your job changes from persuading to organizing — next concrete step, what to have in hand, when it happens. Brief, assumptive, in motion: “perfect — here’s what happens next.”",
       },
       {
         kind: "lines",
         heading: "Lines in the floor’s voice",
         items: [
-          "Prospect: “So when you guys pull the transcripts, how long till I hear back?” — Agent (selling is over): “About two weeks to the full read. Here’s what happens next: the POA goes to your email today — what’s the best address?”",
-          "“Perfect — here’s the order: signature today, transcripts this week, your compliance read the week after. Only thing I need from you right now is the email for the POA.”",
+          "Prospect: “So when you guys pull the transcripts, how long till I hear back?” — Agent (selling is over): “Usually a couple of weeks — the transcripts run on the IRS’s clock. Here’s what happens next: the POA goes to your email today — what’s the best address?”",
+          "“Perfect — here’s the order: signature today, transcript requests out immediately, your compliance read as soon as they’re back. Only thing I need from you right now is the email for the POA.”",
         ],
       },
       {
@@ -736,7 +736,7 @@ export const STRATEGY_MECHANICS_ENTRIES: ManualEntry[] = [
         kind: "prose",
         heading: "Why the funnel builds trust while it digs",
         text:
-          "Notice what you are NOT doing on the way down: pitching. Five rungs of genuine questions means five rungs of the prospect talking and you listening, and people trust the person who asked and listened far more than the person who explained. By the bottom, two things are simultaneously true — the problem feels as serious as it actually is, and you are the first person who took it seriously with them. That’s why the funnel comes before the pitch, always: a solution offered before the pain is felt is priced against nothing.",
+          "Notice what you are NOT doing on the way down: pitching. Five rungs of genuine questions means five rungs of the prospect talking and you listening, and people trust the person who asked and listened far more than the person who explained. By the bottom, two things are simultaneously true — the problem feels as serious as it actually is, and you are the first person who took it seriously with them. That’s why the funnel comes before the pitch on almost every call: a solution offered before the pain is felt is priced against nothing.",
       },
       {
         kind: "lines",
@@ -836,7 +836,7 @@ export const STRATEGY_MECHANICS_ENTRIES: ManualEntry[] = [
         kind: "prose",
         heading: "How it works",
         text:
-          "“Why does it cost so much?” is almost never about the arithmetic — it’s about the invisible. The prospect is comparing your fee to the things they can see: TurboTax, a CPA’s hourly rate, the $205 DIY offer fee they read about. The audit makes the invisible visible. Phase one alone: power of attorney filed so the IRS talks to us instead of them, full transcript pull and analysis showing every balance, penalty, and deadline the way the IRS sees it, compliance returns for the unfiled years, a written read of exactly where they stand. Behind it: licensed representatives — enrolled agents and attorneys — whose hours are what the fee actually buys, plus the negotiation posture that changes how the IRS treats the file. Vague “we handle it” justifies nothing; a named list of professional work justifies itself. Then close the loop with an isolate: “if the value was clear, is the number itself workable?”",
+          "“Why does it cost so much?” is almost never about the arithmetic — it’s about the invisible. The prospect is comparing your fee to the things they can see: TurboTax, a CPA’s hourly rate, the $205 DIY offer fee they read about. The audit makes the invisible visible. Phase one alone: power of attorney filed so the IRS talks to us instead of them, full transcript pull and analysis showing every balance, penalty, and deadline the way the IRS sees it, compliance returns for the unfiled years, a written read of exactly where they stand. Behind it: licensed representatives — enrolled agents, backed by tax preparers and other tax specialists — whose hours are what the fee actually buys, plus the negotiation posture that changes how the IRS treats the file. Vague “we handle it” justifies nothing; a named list of professional work justifies itself. Then close the loop with an isolate: “if the value was clear, is the number itself workable?”",
       },
       {
         kind: "prose",

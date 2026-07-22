@@ -84,6 +84,11 @@ const leadCadenceSchema = new mongoose.Schema(
     statusId: { type: Number, default: null },
     active: { type: Boolean, default: true, index: true },
     currentStage: { type: String, default: "new" },
+    // Provider-neutral voice-attempt facts. These are dual-written with the
+    // CX-era cadence paths during migration so delivery policy never depends
+    // on a provider-specific field name.
+    totalAttemptCount: { type: Number, default: 0, min: 0 },
+    lastContactAt: { type: Date, default: null },
     cadenceMode: {
       type: String,
       enum: ["scheduled-actions", "legacy-time-count"],
@@ -124,13 +129,16 @@ const leadCadenceSchema = new mongoose.Schema(
       cxDailyCalls: { type: Number, default: 0 },
       cxMonthlyMonthKey: { type: String, default: null },
       cxMonthlyCalls: { type: Number, default: 0 },
-      // THE STRICT-SCHEMA LESSON, third strike (audit 2026-07-07): these two paths were
+      // THE STRICT-SCHEMA LESSON, third strike (audit 2026-07-07): these paths were
       // written by the drain since 2026-06/07 but never declared — mongoose strict mode
       // silently stripped them from their own $set, which made the June replay-drift
       // guard ($ne CAS on lastCxTerminalCountedUii) DEAD CODE: the field never persisted,
       // the guard always passed, and partial-apply replays could re-increment counters
       // unbounded. Declaring them is the entire fix.
       lastCxTerminalCountedUii: { type: String, default: null },
+      lastLeadDeliveryCountedCallId: { type: String, default: null },
+      lastLeadDeliveryCountedAttemptKey: { type: String, default: null },
+      leadDeliveryCountedAttemptKeys: { type: [String], default: [] },
       lastCxDncAt: { type: Date, default: null },
     },
     firstContactRequestedAt: { type: Date, default: null },
@@ -234,6 +242,7 @@ const leadCadenceSchema = new mongoose.Schema(
 leadCadenceSchema.index({ domain: 1, caseId: 1 }, { unique: true });
 leadCadenceSchema.index({ domain: 1, active: 1, "schedule.nextActionAt": 1 });
 leadCadenceSchema.index({ domain: 1, active: 1, cadenceMode: 1, createdAt: 1 });
+leadCadenceSchema.index({ domain: 1, createdAt: 1 });
 // Daily aged-refresh sweep query. Sparse so the bulk of leads (with
 // nextAt === null) don't bloat the index.
 leadCadenceSchema.index(

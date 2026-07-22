@@ -3,6 +3,7 @@
 // modules; this file owns ordering, titles, and link integrity.
 
 import type { ManualEntry, ManualPart } from "./types";
+import { READ_ENTRIES } from "./read";
 import { SCRIPT_ENTRIES } from "./script";
 import { TAX_ENTRIES } from "./tax";
 import { OBJECTION_TRUST_ENTRIES } from "./objections-trust";
@@ -30,6 +31,7 @@ export const PARTS: PartMeta[] = [
     blurb:
       "The tax-resolution call start to finish — the seven-section method everything else hangs off, plus the house point of view on the tax topics that come up.",
     sections: [
+      { id: "read", title: "Read the person first — legitimacy & trust" },
       { id: "method", title: "The method — the call, start to finish" },
       { id: "tax", title: "Tax topics — the house point of view" },
     ],
@@ -77,6 +79,7 @@ export const PARTS: PartMeta[] = [
 ];
 
 export const ALL_ENTRIES: ManualEntry[] = [
+  ...READ_ENTRIES,
   ...SCRIPT_ENTRIES,
   ...TAX_ENTRIES,
   ...OBJECTION_TRUST_ENTRIES,

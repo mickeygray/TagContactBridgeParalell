@@ -200,20 +200,13 @@ test("SPLIT, wrap lane: RingCX says ANSWER → the label rides end-of-call → o
   assert.equal(outboxRows[0].payload.systemDisposition, "ANSWER", "the label rides the payload");
 
   // drain lane: the business replay received BOTH the outcome and the label.
-  assert.equal(drainForwarded.length, 1);
-  assert.equal(drainForwarded[0].outcome, "answered");
-  assert.equal(drainForwarded[0].systemDisposition, "ANSWER");
+  assert.equal(drainForwarded.length, 0, "a watcher fact has no click destination");
 
   // wrap lane: the card exists, inherits the row's idemKey, and carries the whole dossier.
-  assert.equal(cards.length, 1, "an answered call mints exactly one wrap card");
-  assert.equal(cards[0].idemKey, outboxRows[0].idemKey, "exactly-once key inherited from the outbox row");
-  assert.equal(cards[0].systemDisposition, "ANSWER");
-  assert.equal(cards[0].outcome, "answered");
-  assert.equal(cards[0].agentEmail, "s1@example.test");
-  assert.equal(cards[0].payload.systemDisposition, "ANSWER", "the frozen payload keeps the label too");
+  assert.equal(cards.length, 0, "RingCX evidence cannot invent a Call Wrap click");
 
   assert.equal(drainResult.drained, 1);
-  assert.equal(drainResult.callWrapQueued, 1);
+  assert.equal(drainResult.callWrapQueued, 0);
   assert.equal(outboxRows[0].status, "drained", "the row still drains — the card is additive");
 });
 
@@ -227,14 +220,12 @@ test("SPLIT, drain-only lane: any non-ANSWER verdict (MACHINE) → no-answer to 
   assert.equal(outboxRows[0].payload.systemDisposition, "MACHINE");
 
   // the drain lane still gets the label — forensics and metrics keep RingCX's own verdict.
-  assert.equal(drainForwarded.length, 1);
-  assert.equal(drainForwarded[0].outcome, "did_not_connect");
-  assert.equal(drainForwarded[0].systemDisposition, "MACHINE");
+  assert.equal(drainForwarded.length, 0, "a watcher fact cannot invent a cadence click");
 
   // and the wrap lane stays empty: nobody spoke to a human, nobody gets a card.
   assert.equal(cards.length, 0, "no card for a machine");
   assert.equal(drainResult.drained, 1, "the no-answer lane completes fully");
-  assert.equal(drainResult.callWrapSkipped, 1, "the split explicitly declined the card");
+  assert.equal(drainResult.callWrapSkipped, 0);
   assert.equal(outboxRows[0].status, "drained");
 });
 
@@ -255,8 +246,7 @@ test("SPLIT, gamut lane: clean silence IS the no-answer verdict — one retry, t
   assert.equal(outboxRows[0].payload.outcome, "did_not_connect", "clean silence joins the gamut: not ANSWER = no answer");
   assert.equal(outboxRows[0].payload.systemDisposition ?? null, null, "no label is invented that RingCX never said");
 
-  assert.equal(drainForwarded.length, 1);
-  assert.equal(drainForwarded[0].outcome, "did_not_connect");
+  assert.equal(drainForwarded.length, 0);
   assert.equal(cards.length, 0, "no ANSWER, no card");
   assert.equal(drainResult.drained, 1);
   assert.equal(session.sysDispoRetries ?? null, null, "the retry stash cleared itself");
@@ -279,8 +269,7 @@ test("SPLIT, outage lane: RingCX unreachable through the retry → Mickey's defa
   assert.equal(outboxRows[0].payload.outcome, "did_not_connect", "no ANSWER by the retry = did not answer");
   assert.equal(outboxRows[0].payload.systemDisposition ?? null, null, "no invented label");
 
-  assert.equal(drainForwarded.length, 1);
-  assert.equal(drainForwarded[0].outcome, "did_not_connect");
+  assert.equal(drainForwarded.length, 0);
   assert.equal(cards.length, 0, "no ANSWER, no card");
   assert.equal(drainResult.drained, 1, "the row still completes — the default costs a card, never a lead");
   assert.equal(session.sysDispoRetries ?? null, null, "the retry stash cleared itself");
@@ -301,12 +290,9 @@ test("SPLIT, recovery lane: a 429 on the first read, ANSWER on the retry — the
   assert.equal(outboxRows[0].payload.outcome, "answered", "the late ANSWER upgraded the guard's no-answer");
   assert.equal(outboxRows[0].payload.systemDisposition, "ANSWER", "the label rides the deferred write");
 
-  assert.equal(drainForwarded.length, 1);
-  assert.equal(drainForwarded[0].outcome, "answered");
-  assert.equal(cards.length, 1, "the wrap card mints off the retry-landed write");
-  assert.equal(cards[0].systemDisposition, "ANSWER");
-  assert.equal(cards[0].idemKey, outboxRows[0].idemKey, "exactly-once key intact through the deferral");
-  assert.equal(drainResult.callWrapQueued, 1);
+  assert.equal(drainForwarded.length, 0);
+  assert.equal(cards.length, 0, "the retry may prove a fact but cannot invent a wrap click");
+  assert.equal(drainResult.callWrapQueued, 0);
   assert.equal(session.sysDispoRetries ?? null, null, "the retry stash cleared itself");
   // PAYLOAD PARITY (adversarial find): the deferred write must be byte-equivalent to an
   // immediate one — phone/duration carried, and `at` frozen at the hang-up tick, not the

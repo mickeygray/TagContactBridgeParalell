@@ -6,11 +6,10 @@ const {
 } = require("../../shared-models/src");
 const {
   callLedgerRepository,
-  caseProfileRepository,
-  leadCadenceRepository,
   spendEntryRepository,
 } = require("../../shared-repositories/src");
 const { listRoiEligiblePayments } = require("./paymentRoiService");
+const { buildMarketingCaseDiscovery } = require("./marketingCaseDiscoveryService");
 const { reconcileMetricsAttributionCandidates } = require("./metricsAttributionReviewService");
 const { buildTimezoneDateWindow } = require("./timezoneDateWindowService");
 
@@ -437,12 +436,12 @@ async function buildVendorDailySummary(domain, options = {}) {
   );
   const { start, end } = buildTimezoneDateWindow(dateKey, timeZone);
 
-  const [spendRows, leadRows, callRows, roiPayments, outcomeProfiles] =
+  const [spendRows, leadDiscovery, callRows, roiPayments, outcomeProfiles] =
     await Promise.all([
       spendEntryRepository.summarizeSpendBySource(normalizedDomain, { date: dateKey }),
-      leadCadenceRepository.listLeadCadence(normalizedDomain, {
-        createdAtAfter: dateKey,
-        createdAtBefore: dateKey,
+      options.leadDiscovery || buildMarketingCaseDiscovery(normalizedDomain, {
+        date: dateKey,
+        timezone: timeZone,
         limit: leadLimit,
       }),
       callLedgerRepository.summarizeCallLedgerBySource(normalizedDomain, {
@@ -455,17 +454,7 @@ async function buildVendorDailySummary(domain, options = {}) {
       fetchOutcomeProfiles(normalizedDomain, dateKey, { timezone: timeZone }),
     ]);
 
-  const leadCaseIds = [...new Set(
-    leadRows
-      .map((row) => Number(row.caseId))
-      .filter(Number.isFinite),
-  )];
-  const leadProfiles = leadCaseIds.length > 0
-    ? await caseProfileRepository.listCaseProfilesByCaseIds(normalizedDomain, leadCaseIds)
-    : [];
-  const leadProfileByCaseId = new Map(
-    leadProfiles.map((profile) => [Number(profile.caseId), profile]),
-  );
+  const leadRows = Array.isArray(leadDiscovery?.rows) ? leadDiscovery.rows : [];
 
   const bySource = new Map();
   const byFamily = new Map();
@@ -491,31 +480,25 @@ async function buildVendorDailySummary(domain, options = {}) {
   }
 
   for (const row of leadRows) {
-    const profile = leadProfileByCaseId.get(Number(row.caseId)) || null;
-    const source =
-      profile?.sourceName ||
-      row.sourceName ||
-      row.intakeSource ||
-      row.partnerSource ||
-      "Unknown";
-    const channel =
-      profile?.sourceChannel ||
-      row.sourceChannel ||
-      row.intakeRoute ||
-      null;
+    const source = row.sourceName || row.intakeSource || "Unknown";
+    const channel = row.sourceChannel || row.intakeRoute || null;
     const routeCampaignKey = row.routeCampaignKey || null;
-    if (!isTrackedVendorCandidate(source, channel, routeCampaignKey)) continue;
+    const tracked = isTrackedVendorCandidate(source, channel, routeCampaignKey);
+    const uncertain = row.attributionState !== "attributed";
+    if (!tracked && !uncertain) continue;
     candidates.push(createCandidate("lead", source, channel, {
       leads: 1,
     }, {
       dateKey,
       routeCampaignKey,
+      forceReview: uncertain,
       caseId: Number.isFinite(Number(row.caseId)) ? Number(row.caseId) : null,
       sample: {
         caseId: Number.isFinite(Number(row.caseId)) ? Number(row.caseId) : null,
         intakeSource: row.intakeSource || null,
         intakeRoute: row.intakeRoute || null,
         routeCampaignKey,
+        observedToday: row.observedToday || [],
       },
     }));
   }
@@ -677,6 +660,7 @@ async function buildVendorDailySummary(domain, options = {}) {
     trackedFamilies: families.filter((row) => row.tracked),
     rows: sources,
     attributionReview: attribution.review,
+    discoveryCoverage: leadDiscovery?.coverage || null,
   };
 }
 

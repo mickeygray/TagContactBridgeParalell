@@ -13,6 +13,7 @@
 // campaign ids). No map = no dispatch, loudly.
 
 const { CxDialQueue } = require("../../shared-models/src");
+const { userAccountRepository } = require("../../shared-repositories/src");
 const { publishBatchToRingcx } = require("./cxBulkLoadRingcxPublisher");
 const { buildLaneExternId, parseAgentQueueMap } = require("./cxLaneRegistry");
 const { logCxAlpha } = require("./cxAlphaTraceService");
@@ -65,6 +66,13 @@ function defaultDeps() {
     isEnabled: () =>
       String(process.env.CX_FIRST_TOUCH_ENABLED || "false").trim().toLowerCase() === "true",
     resolveQueueMap: () => parseAgentQueueMap(process.env.CX_FIRST_TOUCH_QUEUE_MAP),
+    isMainQueueMode: () =>
+      String(process.env.CX_BORING_DIALER_ENABLED || "false").trim().toLowerCase() === "true",
+    resolveMainQueueAgent: async (agent) => {
+      const account = await userAccountRepository.findUserAccountByEmail(agent.agentEmail).catch(() => null);
+      const agentExtensionId = String(account?.extensionId || "").trim();
+      return agentExtensionId ? { ...agent, agentExtensionId } : null;
+    },
     loadPendingRows: (limit) =>
       CxDialQueue.find({
         "metadata.firstTouchPending": true,
@@ -93,6 +101,29 @@ function defaultDeps() {
       );
       return (result.modifiedCount ?? result.nModified ?? 0) > 0;
     },
+    activateRow: async (rowId, assignment, now) => {
+      const result = await CxDialQueue.updateOne(
+        {
+          _id: rowId,
+          "metadata.firstTouchPending": true,
+          "metadata.firstTouchDispatch": null,
+        },
+        {
+          $set: {
+            state: "ready",
+            releaseAt: now,
+            "assignment.extensionId": assignment.agentExtensionId,
+            "assignment.assignedAt": now,
+            "assignment.queueFamilySnapshot": "first-touch",
+            "metadata.firstTouchPending": false,
+            "metadata.firstTouchAssignment": assignment,
+            "metadata.firstTouchRoutedTo": "boring-dial-queue",
+            "metadata.firstTouchRoutedAt": now,
+          },
+        },
+      );
+      return (result.modifiedCount ?? result.nModified ?? 0) > 0;
+    },
     resolveWindowMode: (now) => deriveFirstTouchWindowMode(now),
     // the CAS claim: only the winner sees modifiedCount 1
     claimRow: async (rowId, claim) => {
@@ -116,12 +147,18 @@ function createCxFirstTouchDispatcher(input = {}) {
 
   async function tickOnce({ now = new Date(), limit = 25, maxPages = 40 } = {}) {
     if (!deps.isEnabled()) return { skipped: true, reason: "flag-off" };
-    const agents = deps.resolveQueueMap();
+    let agents = deps.resolveQueueMap();
     if (!agents.length) {
       logCxAlpha("cx.alpha.firsttouch.dispatch.skipped", { reason: "empty-queue-map" }, { logger });
       return { skipped: true, reason: "empty-queue-map" };
     }
     const mode = deps.resolveWindowMode(now);
+    const mainQueueMode = deps.isMainQueueMode();
+    if (mainQueueMode) {
+      agents = (await Promise.all(agents.map((agent) => deps.resolveMainQueueAgent(agent))))
+        .filter(Boolean);
+      if (!agents.length) return { skipped: true, mode, reason: "no-main-queue-agents" };
+    }
     if (mode === "hold") return { skipped: true, mode, reason: "hold-window" };
     if (mode === "assign") {
       // THE 6PM LOADER: round-robin assignment only — no RingCX. The morning queue
@@ -138,6 +175,7 @@ function createCxFirstTouchDispatcher(input = {}) {
           const won = await deps.assignRow(row._id, {
             agentEmail: agent.agentEmail,
             campaignId: agent.campaignId,
+            agentExtensionId: agent.agentExtensionId || null,
             assignedAt: now.toISOString(),
           }).catch(() => false);
           if (won) {
@@ -152,6 +190,31 @@ function createCxFirstTouchDispatcher(input = {}) {
         if (rows.length < limit || pages >= maxPages) break;
       }
       return { mode, assigned, pages };
+    }
+
+    if (mainQueueMode) {
+      let queued = 0;
+      let failed = 0;
+      let pages = 0;
+      for (;;) {
+        const rows = await deps.loadPendingRows(limit);
+        if (!rows.length) break;
+        pages += 1;
+        const assignments = assignRoundRobin(rows, agents, rrOffset);
+        rrOffset = (rrOffset + rows.length) % agents.length;
+        for (const { row, agent } of assignments) {
+          const activated = await deps.activateRow(row._id, {
+            agentEmail: agent.agentEmail,
+            campaignId: agent.campaignId,
+            agentExtensionId: agent.agentExtensionId,
+            assignedAt: now.toISOString(),
+          }, now).catch(() => false);
+          if (activated) queued += 1;
+          else failed += 1;
+        }
+        if (rows.length < limit || pages >= maxPages) break;
+      }
+      return { mode, routedTo: "boring-dial-queue", queued, failed, pages };
     }
 
     let dispatched = 0;

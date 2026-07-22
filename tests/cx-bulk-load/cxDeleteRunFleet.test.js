@@ -220,8 +220,7 @@ test("DELETE-RUN FLEET: Mickey bulk lead publish, poller match, button dispositi
   assert.equal(outcomeAdapter.writes.length, 1);
   assert.equal(outcomeAdapter.writes[0].outcome, "did_not_connect");
   assert.equal(client.calls.dispositions[0].uii, "uii-mickey-1");
-  assert.equal(getLeadRequests.length, 1, "no-answer asks RingCX for the next preview lead");
-  assert.equal(getLeadRequests[0].queueItemId, "mickey-q2");
+  assert.equal(getLeadRequests.length, 0, "RingCX owns the next call; the app does not prefetch a preview lead");
 
   const nextLead = noAnswer.remainingQueue.find((candidate) => candidate.queueItemId === "mickey-q2");
   assert.ok(nextLead, "next lead remains available for the watcher to match");
@@ -324,6 +323,7 @@ function terminalDrainPacket({ queueItemId, uii, idemKey }) {
     uii,
     outcome: "answered",
     eventType: "terminal",
+    nextAction: "call_wrap",
     domain: MICKEY.domain,
     caseId: 101617,
     agentEmail: MICKEY.email,

@@ -521,7 +521,7 @@ test("disposition click does not guess when multiple active RingCX candidates ma
   assert.equal(outcomeAdapter.writes.length, 0);
 });
 
-test("did_not_connect disposition requests next preview without staging current", async () => {
+test("did_not_connect disposition records terminal; watcher owner requests next preview", async () => {
   const liveCalls = { value: [] };
   const requests = [];
   const leadStarter = {
@@ -540,15 +540,19 @@ test("did_not_connect disposition requests next preview without staging current"
   assert.equal(snap.current, null);
   assert.equal(snap.completedCount, 1);
   assert.equal(outcomeAdapter.writes.length, 1);
+  assert.equal(requests.length, 0);
+  assert.equal(snap.getLeads, undefined);
+
+  const watched = await svc.watchAccountActiveCalls({ sessionId: "s1" });
   assert.equal(requests.length, 1);
-  assert.equal(snap.getLeads.ok, true);
-  assert.equal(snap.getLeads.queueItemId, "q2");
-  assert.equal(snap.stats.lastGetLeadsQueueItemId, "q2");
-  assert.equal(snap.remainingQueue[0].queueItemId, "q2");
+  assert.equal(watched.autoGetLeads.acceptedCount, 1);
+  const afterWatch = await svc.getCxBulkLoadSession({ sessionId: "s1" });
+  assert.equal(afterWatch.stats.lastGetLeadsQueueItemId, "q2");
+  assert.equal(afterWatch.remainingQueue[0].queueItemId, "q2");
   assert.equal(requests[0].candidate.queueItemId, "q2");
 });
 
-test("bad_number disposition records bad-number flags and requests next preview", async () => {
+test("bad_number disposition records bad-number flags; watcher owner requests next preview", async () => {
   const liveCalls = { value: [] };
   const requests = [];
   const leadStarter = {
@@ -570,9 +574,13 @@ test("bad_number disposition records bad-number flags and requests next preview"
   assert.equal(outcomeAdapter.writes[0].outcome, "bad_number");
   assert.equal(outcomeAdapter.writes[0].badNumber, true);
   assert.equal(outcomeAdapter.writes[0].badNumberReason, "disconnected-or-out-of-service");
+  assert.equal(requests.length, 0);
+  assert.equal(snap.getLeads, undefined);
+
+  const watched = await svc.watchAccountActiveCalls({ sessionId: "s1" });
   assert.equal(requests.length, 1);
-  assert.equal(snap.getLeads.ok, true);
-  assert.equal(snap.getLeads.queueItemId, "q2");
+  assert.equal(watched.autoGetLeads.acceptedCount, 1);
+  assert.equal(requests[0].candidate.queueItemId, "q2");
 });
 
 test("did_not_connect does not advance when the terminal executor rejects the disposition", async () => {
@@ -1130,6 +1138,64 @@ test("get-leads asks RingCX for the next preview lead without staging a current 
   assert.equal(snap.remainingQueue[0].queueItemId, "q1");
   assert.equal(snap.stats.lastGetLeadsQueueItemId, "q1");
   assert.equal(outcomeAdapter.writes.length, 0);
+});
+
+test("watcher owner auto-requests the next lead for a ready buffered session", async () => {
+  const liveCalls = { value: [] };
+  const requests = [];
+  const leadStarter = {
+    async getLeads({ session, candidate }) {
+      requests.push({ sessionId: session.sessionId, candidate });
+      return { ok: true, elapsedMs: 18, source: "setAgentState" };
+    },
+  };
+  const { svc } = build(liveCalls, { leadStarter });
+  await svc.startCxBulkLoadSession({
+    agentEmail: "mickey@example.com",
+    agentExtensionId: "mickey-ext",
+    domain: "TAG",
+    ringcx: { accountId: "acct1", campaignId: "camp1" },
+    targetSize: 2,
+    refillThreshold: 1,
+  });
+
+  const watched = await svc.watchAccountActiveCalls({ sessionId: "s1" });
+  assert.equal(watched.autoGetLeads.acceptedCount, 1);
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].candidate.queueItemId, "q1");
+
+  const snap = await svc.getCxBulkLoadSession({ sessionId: "s1" });
+  assert.equal(snap.current, null, "get-leads asks RingCX; watcher still attaches the active call");
+  assert.equal(snap.stats.lastGetLeadsQueueItemId, "q1");
+});
+
+test("watcher owner does not spam the same candidate inside the get-leads cooldown", async () => {
+  const liveCalls = { value: [] };
+  const requests = [];
+  const leadStarter = {
+    async getLeads({ session, candidate }) {
+      requests.push({ sessionId: session.sessionId, candidate });
+      return { ok: true, elapsedMs: 18, source: "setAgentState" };
+    },
+  };
+  const { svc } = build(liveCalls, { leadStarter });
+  await svc.startCxBulkLoadSession({
+    agentEmail: "mickey@example.com",
+    agentExtensionId: "mickey-ext",
+    domain: "TAG",
+    ringcx: { accountId: "acct1", campaignId: "camp1" },
+    targetSize: 2,
+    refillThreshold: 1,
+  });
+
+  const first = await svc.watchAccountActiveCalls({ sessionId: "s1" });
+  const second = await svc.watchAccountActiveCalls({ sessionId: "s1" });
+
+  assert.equal(first.autoGetLeads.acceptedCount, 1);
+  assert.equal(second.autoGetLeads.acceptedCount, 0);
+  assert.equal(second.autoGetLeads.skippedCount, 1);
+  assert.equal(second.autoGetLeads.entries[0].reason, "cooldown");
+  assert.equal(requests.length, 1);
 });
 
 test("bulk refill at the threshold tops the buffer back to 35 in residual family order", async () => {

@@ -38,6 +38,44 @@ const BEAT_CATALOG = TAX_GROUP_SECTIONS
 
 const SECTION_IDS = SCRIPT_SECTION_IDS.join(", ");
 
+// ── HOUSE DOCTRINE (stable, shared by both stations) ─────────────────────────
+// Byte-stable by design: it is part of the cached system prefix (the transport marks
+// the whole system block cache_control:ephemeral), so the doctrine costs ~nothing per
+// call. NO per-call interpolation may ever be added here — that would break the cache.
+// Source: docs/COACH_ANALYST_DOCTRINE_2026-07-20.md + the 2026-07-20 assertion-pass
+// decisions (docs/ASSERTION_PASS_DECISIONS_2026-07-20.md).
+const ANALYST_DOCTRINE = [
+  "=== HOUSE DOCTRINE (applies to everything you produce) ===",
+  "ADVISORY, NEVER DIRECTIVE: everything you surface is something for the agent to consider — management's",
+  "instructions and the agent's own read of the person always come first. Phrase guidance as an analyst's",
+  "read ('worth considering...', 'the guide's play here is...'), never as a command.",
+  "ANALYST, NOT SCRIPTWRITER: your job is (1) custom feedback on what is actually happening on this call and",
+  "(2) guidance — the approach that fits, drawn from the guide. Approaches over dialog; exact words are the",
+  "rare exception for a moment that truly needs them.",
+  "THE FOUR TENETS: (1) Bob and weave — the agent must not get pinned into specifics they can't honestly",
+  "give; declining to speculate IS the expertise, never evasion: answer the honest core, decline the guess,",
+  "return to their situation. (2) Expertise without specifics — command of process (notices, the collections",
+  "ladder, what the agency does next) with no numbers, timelines, or outcomes attached to THIS case.",
+  "(3) Certain without promising — full confidence ONLY about firm-controlled actions: we get authorized,",
+  "we get you compliant, we represent you, we pursue what the facts support. Anything the IRS decides is",
+  "spoken of only as possibility. (4) Compliance and representation ONLY is the product — never settlements,",
+  "forgiveness, or outcomes.",
+  "READ THE PERSON FIRST: track the prospect's legitimacy the way the agent should — are they giving their",
+  "name and the information asked for; are they engaging their own problem; are they willing to listen rather",
+  "than fixating on who we are? When the guard is up, advise LESS disclosure and more asking — information is",
+  "earned, not traded into a closed door. If the caller is FISHING (pushing for quotable promises or figures,",
+  "inviting rule-breaking, one-way interrogation while giving nothing), flag it plainly: the play is calm,",
+  "concede nothing, keep it a short polite boring call, exit cleanly.",
+  "IDENTITY & SERVICE LANGUAGE (for any words you suggest): the firm is The Tax Group — a licensed firm with",
+  "enrolled agents, tax preparers, and other tax specialists; say 'the attorney's staff', not 'attorney-led'.",
+  "Leads come from the prospect's own online inquiry. Do not produce a fee total on your own: if a fee is",
+  "supplied in context it is the only service number available; otherwise the quote is built from scope of",
+  "work and ability to pay (rules of thumb: about $350 per return to prepare, at least $1,200 for",
+  "representation per institution), and when unsure the right play is a brief hold to confer with the team.",
+  "Do not promise how long the IRS will take — the honest urgency is getting protected today by filing the",
+  "power of attorney.",
+].join(" ");
+
 // ── B / STRATEGIST ────────────────────────────────────────────────────────────
 const STRATEGIST_INSTRUCTION = [
   "You are the STRATEGIST for a live tax-resolution sales call on The Tax Group's approved 7-section",
@@ -90,6 +128,8 @@ function buildStrategistRequest(input = {}) {
   const system = [
     STRATEGIST_INSTRUCTION,
     "",
+    ANALYST_DOCTRINE,
+    "",
     "=== COACH REFERENCE (stable) ===",
     reference || "(reference not supplied)",
     "",
@@ -130,7 +170,10 @@ const COACH_INSTRUCTION = [
   "the real moments too. If you're not sure a line genuinely helps RIGHT NOW, it doesn't. Don't fill silence.",
   "If it IS clearly coachable: keep applying your LAST guidance — adapt its line to the latest turn — UNLESS the turn",
   "is broadly a different situation; then switch to the matching play in the LIST, and that becomes your new",
-  "guidance. Give the agent ONE line to say now, in the floor's voice, never verbatim. Plays ADVANCE —",
+  "guidance. LEAD WITH THE READ: `guidance` is your analyst channel — what is happening and the approach that",
+  "fits, phrased as something to consider. Offer a `say` line (floor's voice, never verbatim) only when the",
+  "moment genuinely needs words in the agent's mouth — a compliance-critical beat, a pivotal turn being",
+  "fumbled, a clear opening being missed; otherwise let the read do the work. Plays ADVANCE —",
   "toward sensitive info, toward agreeing to pay, toward continuing; don't apologize for the call or the fee.",
   "Calm authority; silence after a number or a question is powerful.",
   "COMPLIANCE FLOOR — this holds even when the LIST does not cover the turn; NEVER break it, it outranks 'advance':",
@@ -175,7 +218,7 @@ function buildCoachRequest(input = {}) {
   // it, but A adapts words — without a hard number it occasionally improvises "$X"
   const fee = cleanText(input.fee, 20);
 
-  const system = [COACH_INSTRUCTION, "", "=== FILL IN ===", COACH_CONTRACT].join("\n");
+  const system = [COACH_INSTRUCTION, "", ANALYST_DOCTRINE, "", "=== FILL IN ===", COACH_CONTRACT].join("\n");
 
   const prompt = [
     currentSection ? `SECTION: ${currentSection}` : "",
@@ -196,4 +239,4 @@ function buildCoachRequest(input = {}) {
   return { system, prompt, station: "coach" };
 }
 
-module.exports = { buildStrategistRequest, buildCoachRequest, BEAT_CATALOG };
+module.exports = { buildStrategistRequest, buildCoachRequest, BEAT_CATALOG, ANALYST_DOCTRINE };

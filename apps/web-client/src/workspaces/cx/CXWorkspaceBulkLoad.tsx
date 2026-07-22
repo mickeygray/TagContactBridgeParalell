@@ -12,7 +12,6 @@ import {
   Phone,
   PhoneOff,
   Plus,
-  RefreshCw,
 } from "lucide-react";
 import { Button } from "@/components/ui/Button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/Tabs";
@@ -75,17 +74,18 @@ import type {
 import type { CommLogEntry } from "@/lib/api/queries/cx";
 import {
   useCxBulkLoadSession,
+  useCxBulkLoadStart,
   useCxBulkLoadDisposition,
-  useCxBulkLoadSyncActive,
   useCxWrapCards,
   useCxLaneCall,
   useCxLaneCallDisposition,
   useCxWrapCardResolve,
-  useCxBulkLoadReviewOutcome,
   useCxBulkLoadPauseProgressive,
   useCxBulkLoadResumeProgressive,
+  type CxBulkLoadDispositionRequest,
   type CxBulkLoadCurrent,
   type CxLaneCall,
+  type CxWrapCard,
 } from "@/lib/api/queries/cxBulkLoad";
 import { useSession } from "@/lib/auth/useSession";
 import { cn } from "@/lib/utils/cn";
@@ -135,6 +135,174 @@ function buildWrapAppointmentDraft(date = new Date()): WrapAppointmentDraft {
   };
 }
 
+type CallWrapResolution = {
+  idemKey: string;
+  action: "dnc" | "appointment" | "dismiss";
+  appointmentDate?: string;
+  appointmentTime?: string;
+  appointmentTimezone?: string;
+};
+
+function CallWrapPanel({
+  cards,
+  isResolving,
+  onResolve,
+}: {
+  cards: CxWrapCard[];
+  isResolving: boolean;
+  onResolve: (resolution: CallWrapResolution) => Promise<unknown>;
+}) {
+  const [appointmentDrafts, setAppointmentDrafts] = React.useState<Record<string, WrapAppointmentDraft>>({});
+
+  function closeAppointment(idemKey: string) {
+    setAppointmentDrafts((previous) => {
+      const next = { ...previous };
+      delete next[idemKey];
+      return next;
+    });
+  }
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-sm">Call wrap-up ({cards.length})</CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-1.5">
+        {cards.length === 0 ? (
+          <EmptyState
+            icon={<CheckCircle2 />}
+            title="Caught up"
+            description="Answered calls that need a decision will appear here."
+          />
+        ) : cards.map((card) => {
+          const draft = appointmentDrafts[card.idemKey]
+            || (card.appointmentOnly ? buildWrapAppointmentDraft() : undefined);
+          return (
+            <div key={card.idemKey} className="space-y-2 rounded-md border border-border bg-background px-2 py-2">
+              <div className="min-w-0">
+                <div className="truncate text-sm font-medium">{card.name || `Case ${card.caseId ?? "?"}`}</div>
+                <div className="truncate text-[11px] text-muted-foreground">
+                  {card.caseId ? `Case ${card.caseId} · ` : ""}
+                  {card.calledAt ? new Date(card.calledAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : ""}
+                  {card.expiresAt ? ` · expires ${new Date(card.expiresAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}` : ""}
+                </div>
+                {card.coachSummary ? (
+                  <div className="mt-0.5 line-clamp-2 text-[11px] text-muted-foreground">{String(card.coachSummary)}</div>
+                ) : null}
+              </div>
+
+              {draft ? (
+                <div className="space-y-1.5">
+                  <div className="grid grid-cols-2 gap-1">
+                    <input
+                      type="date"
+                      aria-label="Appointment date"
+                      className="h-8 min-w-0 rounded-md border border-border bg-background px-2 text-xs"
+                      value={draft.date}
+                      onChange={(event) => setAppointmentDrafts((previous) => ({
+                        ...previous,
+                        [card.idemKey]: { ...draft, date: event.target.value },
+                      }))}
+                    />
+                    <input
+                      type="time"
+                      aria-label="Appointment time"
+                      className="h-8 min-w-0 rounded-md border border-border bg-background px-2 text-xs"
+                      value={draft.time}
+                      onChange={(event) => setAppointmentDrafts((previous) => ({
+                        ...previous,
+                        [card.idemKey]: { ...draft, time: event.target.value },
+                      }))}
+                    />
+                  </div>
+                  <Select
+                    value={draft.timezone}
+                    onValueChange={(value) => setAppointmentDrafts((previous) => ({
+                      ...previous,
+                      [card.idemKey]: { ...draft, timezone: value },
+                    }))}
+                  >
+                    <SelectTrigger className="h-8 w-full text-xs" aria-label="Appointment timezone">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {WRAP_APPOINTMENT_TIMEZONES.map((option) => (
+                        <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  <div className="flex items-center gap-1">
+                    <Button
+                      size="sm"
+                      variant="secondary"
+                      disabled={!draft.date || !draft.time || !draft.timezone || isResolving}
+                      onClick={(event) => {
+                        consumeUiEvent(event);
+                        void onResolve({
+                          idemKey: card.idemKey,
+                          action: "appointment",
+                          appointmentDate: draft.date,
+                          appointmentTime: draft.time,
+                          appointmentTimezone: draft.timezone,
+                        }).then(() => closeAppointment(card.idemKey)).catch(() => null);
+                      }}
+                    >
+                      Book
+                    </Button>
+                    {!card.appointmentOnly ? (
+                      <Button size="sm" variant="ghost" onClick={() => closeAppointment(card.idemKey)}>
+                        Cancel
+                      </Button>
+                    ) : null}
+                  </div>
+                </div>
+              ) : (
+                <div className="flex flex-wrap items-center gap-1">
+                  <Button
+                    size="sm"
+                    variant="destructive"
+                    disabled={isResolving}
+                    title="Do not call — stops every channel; the call record still files"
+                    onClick={(event) => {
+                      consumeUiEvent(event);
+                      void onResolve({ idemKey: card.idemKey, action: "dnc" }).catch(() => null);
+                    }}
+                  >
+                    DNC
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    disabled={isResolving}
+                    onClick={() => setAppointmentDrafts((previous) => ({
+                      ...previous,
+                      [card.idemKey]: buildWrapAppointmentDraft(),
+                    }))}
+                  >
+                    Appointment
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    disabled={isResolving}
+                    title="No action needed — the call record still files"
+                    onClick={(event) => {
+                      consumeUiEvent(event);
+                      void onResolve({ idemKey: card.idemKey, action: "dismiss" }).catch(() => null);
+                    }}
+                  >
+                    ✕
+                  </Button>
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </CardContent>
+    </Card>
+  );
+}
+
 type ContactContext = {
   caseId?: string | null;
   name?: string | null;
@@ -158,13 +326,6 @@ type ContactContext = {
   interviewSnapshot?: Record<string, unknown> | null;
 };
 
-type BulkAutoReview = {
-  key: string;
-  candidate: CxBulkLoadCurrent;
-  expiresAt: number;
-  status: "open" | "saving";
-};
-
 function laneMinutesAgoLabel(value?: string | null) {
   const ts = value ? new Date(value).getTime() : NaN;
   if (!Number.isFinite(ts)) return null;
@@ -175,18 +336,6 @@ function laneAppointmentTimeLabel(value?: string | null) {
   const ts = value ? new Date(value).getTime() : NaN;
   if (!Number.isFinite(ts)) return null;
   return `booked for ${new Date(ts).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`;
-}
-
-function bulkCallReviewKey(candidate?: CxBulkLoadCurrent | null) {
-  const queueItemId = String(candidate?.queueItemId || "").trim();
-  const uii = String(candidate?.uii || "").trim();
-  if (!queueItemId || !uii) return "";
-  return `${queueItemId}:${uii}`;
-}
-
-function bulkCallName(candidate?: CxBulkLoadCurrent | null) {
-  const name = String(candidate?.name || "").trim();
-  return name || (candidate?.caseId != null ? `Case ${candidate.caseId}` : "Call review");
 }
 
 function laneCallReviewKey(call?: CxLaneCall | null) {
@@ -789,49 +938,6 @@ function BreakResumePrompt({
         </DialogFooter>
       </DialogContent>
     </Dialog>
-  );
-}
-
-function BulkBufferList({ items }: { items: CxBulkLoadCurrent[] }) {
-  return (
-    <div className="space-y-1.5">
-      {items.map((item, idx) => {
-        const domain = String(item.domain || "").trim().toUpperCase();
-        const domainStyle = getDomainBadgeStyle(domain);
-        const caseId = item.caseId != null ? String(item.caseId).trim() : "";
-        const label = item.name || (caseId ? `Case ${caseId}` : "Buffered lead");
-        const phoneLine = item.phoneLast4 ? `***${item.phoneLast4}` : "Phone hidden";
-        const status = String(item.status || item.phase || "buffered").trim();
-        const ringcx = asRecord(item.ringcx);
-        const externId = readString({ ...ringcx, externId: item.externId }, "externId", "externalId");
-
-        return (
-          <div
-            key={`${item.queueItemId || item.externId || caseId || "bulk"}:${idx}`}
-            className="w-full rounded-md border border-border bg-card px-2.5 py-2 text-left"
-          >
-            <div className="flex items-start gap-2">
-              <span className="mt-1 h-2.5 w-2.5 shrink-0 rounded-full bg-sky-500" aria-hidden="true" />
-              <div className="min-w-0 flex-1">
-                <div className="break-words text-[13px] font-medium leading-tight text-foreground">
-                  {label}
-                </div>
-                <div className="truncate text-[11px] leading-tight text-muted-foreground">
-                  {phoneLine}
-                  {externId ? ` | ${externId}` : ""}
-                </div>
-              </div>
-              <div className="mt-0.5 max-w-[86px] shrink-0 text-right text-[10px] font-semibold uppercase leading-tight text-muted-foreground">
-                {caseId ? `${domainStyle.label} ${caseId}` : domainStyle.label || "Bulk"}
-              </div>
-            </div>
-            <div className="mt-1 text-[10px] font-medium text-sky-700 dark:text-sky-300">
-              {status}
-            </div>
-          </div>
-        );
-      })}
-    </div>
   );
 }
 
@@ -3508,9 +3614,26 @@ export function CXWorkspaceBulkLoad() {
   // bulk_load owns the center panel while it is running. Keep these hooks
   // above the legacy current-call scramble effects so those effects can stand down.
   const bulk = useCxBulkLoadSession(true);
+  const bulkStart = useCxBulkLoadStart();
+  const bulkLoginStartRef = React.useRef<string | null>(null);
+  React.useEffect(() => {
+    const agentEmail = String(user?.email || "").trim().toLowerCase();
+    if (!agentEmail || !bulk.isSuccess) return;
+    const startKey = `${agentEmail}:${domain}`;
+    if (bulkLoginStartRef.current === startKey) return;
+    bulkLoginStartRef.current = startKey;
+    bulkStart.mutate(
+      { agentEmail, domain },
+      {
+        onError: (error) => {
+          toast("Dialer could not start", { description: error.message });
+        },
+      },
+    );
+  }, [bulk.isSuccess, bulkStart.mutate, domain, user?.email]);
   // ── FEED-STALENESS TRIPWIRE (2026-07-08, the "dead tab" class) ──
-  // The session poll runs every 1s with keepPreviousData: when fetches silently
-  // fail (service restart, network blip, box swap), the LAST GOOD snapshot keeps
+  // The session poll runs every 1s. When fetches silently fail (service restart,
+  // network blip, box swap), the query cache keeps its LAST GOOD snapshot
   // rendering as if live — a frozen lead, dead buttons, no signal, forever. The
   // tripwire makes staleness VISIBLE (amber at 10s) and TERMINAL-honest (red at
   // 30s: the snapshot is a lie; outcome buttons gate off; refresh recovers).
@@ -3536,7 +3659,6 @@ export function CXWorkspaceBulkLoad() {
   const bulkFeedStale = bulk.dataUpdatedAt > 0 && !document.hidden && bulkFeedAgeMs > 10_000;
   const bulkFeedDead = bulk.dataUpdatedAt > 0 && !document.hidden && bulkFeedAgeMs > 30_000;
   const bulkDisposition = useCxBulkLoadDisposition();
-  const bulkSyncActive = useCxBulkLoadSyncActive();
   // CALL WRAP CARDS (docs/CX_CALL_WRAP_QUEUE_DESIGN_2026-07-06.md): the "answered today"
   // follow-up bar. Server returns {enabled:false, cards:[]} while the feature flag is off,
   // so this renders nothing by default. [DNC] [Appointment->picker] [X], per the design.
@@ -3545,18 +3667,13 @@ export function CXWorkspaceBulkLoad() {
   const laneCall = laneCallQuery.data?.laneCall ?? null;
   const laneDisposition = useCxLaneCallDisposition();
   const wrapResolve = useCxWrapCardResolve();
-  const [wrapApptPicker, setWrapApptPicker] = React.useState<Record<string, WrapAppointmentDraft>>({});
-  const bulkReviewOutcome = useCxBulkLoadReviewOutcome();
   const bulkPauseProgressive = useCxBulkLoadPauseProgressive();
   const bulkResumeProgressive = useCxBulkLoadResumeProgressive();
-  const [bulkAutoReview, setBulkAutoReview] = React.useState<BulkAutoReview | null>(null);
-  const [bulkAutoReviewRemaining, setBulkAutoReviewRemaining] = React.useState(0);
-  const [bulkLatchedCall, setBulkLatchedCall] = React.useState<CxBulkLoadCurrent | null>(null);
-  const bulkCurrent = bulk.data?.current ?? null;
-  const bulkConfirmedCurrent = bulkCurrent?.uii ? bulkCurrent : null;
   const bulkSessionId = bulk.data?.sessionId ?? null;
   const bulkSessionStatus = bulk.data?.status ?? null;
   const bulkRunning = bulkSessionStatus === "running";
+  const bulkCurrent = bulkRunning && !bulk.isError ? bulk.data?.current ?? null : null;
+  const bulkConfirmedCurrent = bulkCurrent?.externId && bulkCurrent?.uii ? bulkCurrent : null;
   const bulkSessionEnded = Boolean(bulkSessionId && bulkSessionStatus && bulkSessionStatus !== "running");
   // ── OFFHOOK-STUCK GUIDANCE (2026-07-08, the "polson wedged 40min" class) ──
   // A session sitting in waiting_offhook means RingCX never established the agent's
@@ -3573,22 +3690,12 @@ export function CXWorkspaceBulkLoad() {
     }
   }, [bulkRunning, bulkPhase]);
   const bulkOffhookStuck = Boolean(offhookSince != null && nowTick - offhookSince > 60_000);
-  const bulkLastOutcome = bulk.data?.lastOutcome ?? null;
-  const bulkReviewHoldUntil = bulk.data?.reviewHoldUntil ?? null;
-  const bulkReviewHoldReason = String(bulk.data?.reviewHoldReason || "").trim();
-  const bulkReviewHoldActive = Boolean(
-    bulkAutoReview &&
-      bulkAutoReview.status === "open" &&
-      Date.now() < bulkAutoReview.expiresAt,
-  );
-  const bulkReviewCandidate = bulkReviewHoldActive ? bulkAutoReview?.candidate ?? null : null;
-  const bulkDisplayCandidate =
-    bulkConfirmedCurrent ?? bulkReviewCandidate ?? bulkLatchedCall ?? (bulkRunning ? bulkLastOutcome : null);
   const laneDisplayCandidate = React.useMemo(
     () => laneCallDisplayCandidate(laneCall),
     [laneCall],
   );
   const laneDisplayKey = laneCallReviewKey(laneCall);
+  const laneIdentityObserved = Boolean(laneCall?.uii);
   // TRANSIENT ANNOUNCE (Mickey, 2026-07-08): the banner pops to say "this is happening",
   // then — once the call persists to the middle section — collapses to a pill. A NEW
   // lane call (new key) re-announces; call ends -> pill vanishes with laneCall.
@@ -3604,14 +3711,16 @@ export function CXWorkspaceBulkLoad() {
   }, [laneDisplayKey]);
   const laneCaseIdStr = laneDisplayCandidate?.caseId != null ? String(laneDisplayCandidate.caseId).trim() : "";
   const laneDomain = String(laneDisplayCandidate?.domain || "").trim().toUpperCase() || domain;
-  const laneCanDispositionCurrent = Boolean(laneCall?.uii);
-  const bulkDisplayIsCurrent = Boolean(
-    bulkConfirmedCurrent &&
-      bulkDisplayCandidate &&
-      bulkCallReviewKey(bulkDisplayCandidate) === bulkCallReviewKey(bulkConfirmedCurrent),
+  const laneIdentityReady = Boolean(
+    !laneCallQuery.isError
+      && laneCall?.uii
+      && laneCall?.externId
+      && laneDisplayCandidate
+      && /^\d+$/.test(laneCaseIdStr),
   );
+  const bulkDisplayCandidate = laneIdentityObserved || !bulkCurrent?.externId ? null : bulkCurrent;
   const bulkDisplayKey = bulkDisplayCandidate
-    ? `${bulkDisplayIsCurrent ? "current" : "review"}:${String(
+    ? `current:${String(
         bulkDisplayCandidate.queueItemId ||
           bulkDisplayCandidate.uii ||
           bulkDisplayCandidate.externId ||
@@ -3619,20 +3728,22 @@ export function CXWorkspaceBulkLoad() {
           "",
       )}`
     : "";
-  const bulkCurrentAwaitingUii = false;
-  const bulkHasCurrent = Boolean(bulkSessionId && bulkCurrent);
-  const bulkCanDispositionCurrent = Boolean(!laneCanDispositionCurrent && bulkHasCurrent && bulkDisplayIsCurrent);
-  const canDispositionCurrent = laneCanDispositionCurrent || bulkCanDispositionCurrent || Boolean(bulkRunning && bulkSessionId);
+  const bulkHasCurrent = Boolean(bulkRunning && bulkSessionId && bulkDisplayCandidate);
   const bulkCaseIdStr = bulkDisplayCandidate?.caseId != null ? String(bulkDisplayCandidate.caseId).trim() : "";
   const bulkDomain = String(bulkDisplayCandidate?.domain || "").trim().toUpperCase() || domain;
-  const bulkRemainingQueue = React.useMemo(
-    () => Array.isArray(bulk.data?.remainingQueue) ? bulk.data.remainingQueue : [],
-    [bulk.data?.remainingQueue],
-  );
   const lastBulkKeyRef = React.useRef<string | null>(null);
   const lastLaneKeyRef = React.useRef<string | null>(null);
-  const lastBulkAutoReviewKeyRef = React.useRef<string | null>(null);
-  const manualBulkTerminalRef = React.useRef<{ key: string; disposition: string } | null>(null);
+  const laneCanDispositionCurrent = Boolean(
+    laneIdentityReady && laneDisplayKey && lastLaneKeyRef.current === laneDisplayKey,
+  );
+  const bulkCanDispositionCurrent = Boolean(
+    !laneIdentityObserved
+      && bulkHasCurrent
+      && bulkConfirmedCurrent
+      && bulkDisplayKey
+      && lastBulkKeyRef.current === bulkDisplayKey,
+  );
+  const canDispositionCurrent = laneCanDispositionCurrent || bulkCanDispositionCurrent;
 
   const currentExtensionId =
     String(data?.agent?.extensionId || user?.extensionId || "").trim() || null;
@@ -3975,61 +4086,13 @@ export function CXWorkspaceBulkLoad() {
   // with zero panel edits — they all read resolvedCaseId + caseDomain, which
   // derive from selected / form.caseId / servedQueue* set here.
   React.useEffect(() => {
-    lastBulkAutoReviewKeyRef.current = null;
-    manualBulkTerminalRef.current = null;
-    setBulkLatchedCall(null);
-    setBulkAutoReview(null);
-  }, [bulkSessionId]);
-
-  React.useEffect(() => {
-    if (!bulkRunning) {
-      setBulkLatchedCall(null);
-      return;
-    }
-    if (bulkConfirmedCurrent) {
-      setBulkLatchedCall(bulkConfirmedCurrent);
-      return;
-    }
-    if (!bulkLastOutcome) return;
-    setBulkLatchedCall((previous) => previous ?? (bulkLastOutcome as CxBulkLoadCurrent));
-  }, [bulkRunning, bulkConfirmedCurrent, bulkLastOutcome]);
-
-  React.useEffect(() => {
-    // AUTO-REVIEW BANNER RETIRED (Mickey, 2026-07-02 night 2): the banner popped
-    // "auto-advanced — DNC?" even after a manual No-answer click (screener-bot
-    // call). Design law: never-connects get a status line and the next dial — no
-    // prompt; DNC/appointment recovery for answered calls is the worklist's job
-    // (WO-32 / BLOCK I). This effect now only holds the banner closed; the full
-    // excision (state, JSX banner, review candidate in the display cascade)
-    // belongs to WO-16's projector rework. Deps kept so the hold-field reads
-    // survive noUnusedLocals until then.
-    setBulkAutoReview(null);
-  }, [bulkRunning, bulkLastOutcome, bulkReviewHoldReason, bulkReviewHoldUntil]);
-
-  React.useEffect(() => {
-    if (!bulkAutoReview || bulkAutoReview.status !== "open") {
-      setBulkAutoReviewRemaining(0);
-      return;
-    }
-    const tick = () => {
-      const remainingMs = bulkAutoReview.expiresAt - Date.now();
-      if (bulkConfirmedCurrent) {
-        setBulkAutoReview(null);
-        setBulkAutoReviewRemaining(0);
-        return;
-      }
-      if (remainingMs <= 0) {
-        setBulkAutoReview(null);
-        setBulkAutoReviewRemaining(0);
-        return;
-      }
-      const remaining = Math.max(0, Math.ceil(remainingMs / 1000));
-      setBulkAutoReviewRemaining(remaining);
-    };
-    tick();
-    const interval = window.setInterval(tick, 250);
-    return () => window.clearInterval(interval);
-  }, [bulkAutoReview, bulkConfirmedCurrent]);
+    if (bulkDisplayCandidate || laneIdentityReady) return;
+    lastBulkKeyRef.current = null;
+    clearQueueAdvanceTransition();
+    clearServedQueueSelection();
+    clearCasePanelForNextQueueLead("no-proven-ringcx-current");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [bulkDisplayCandidate, laneIdentityReady]);
 
   React.useEffect(() => {
     if (!bulkSessionEnded) return;
@@ -4040,12 +4103,21 @@ export function CXWorkspaceBulkLoad() {
   }, [bulkSessionEnded, bulkSessionId]);
 
   React.useEffect(() => {
+    if (!laneIdentityObserved) return;
+    lastBulkKeyRef.current = null;
+    if (laneIdentityReady) return;
+    clearServedQueueSelection();
+    clearCasePanelForNextQueueLead("lane-identity-unresolved");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [laneIdentityObserved, laneIdentityReady]);
+
+  React.useEffect(() => {
     if (!laneDisplayKey) {
       if (lastLaneKeyRef.current) {
         lastLaneKeyRef.current = null;
+        lastBulkKeyRef.current = null;
         clearServedQueueSelection();
         clearCasePanelForNextQueueLead("lane-call-ended");
-        void bulk.refetch();
       }
       return;
     }
@@ -4057,7 +4129,6 @@ export function CXWorkspaceBulkLoad() {
     console.info("[cx][identity] lane populate", {
       key: laneDisplayKey,
       lane: laneCall?.lane || null,
-      name: laneName || "(empty)",
       at: new Date().toISOString(),
     });
     const laneNameParts = laneName.split(/\s+/).filter(Boolean);
@@ -4089,7 +4160,7 @@ export function CXWorkspaceBulkLoad() {
   }, [laneDisplayKey, laneCaseIdStr, laneDomain]);
 
   React.useEffect(() => {
-    if (laneCanDispositionCurrent) return;
+    if (laneIdentityObserved) return;
     if (!bulkDisplayCandidate || !/^\d+$/.test(bulkCaseIdStr)) return;
     const key = bulkDisplayKey || String(
       bulkDisplayCandidate.queueItemId ||
@@ -4101,7 +4172,7 @@ export function CXWorkspaceBulkLoad() {
     if (lastBulkKeyRef.current === key) return;
     lastBulkKeyRef.current = key;
     const bulkName = String(bulkDisplayCandidate.name || "").trim();
-    console.info("[cx][identity] populate", { key, name: bulkName || "(empty)", at: new Date().toISOString() });
+    console.info("[cx][identity] populate", { key, at: new Date().toISOString() });
     const bulkNameParts = bulkName.split(/\s+/).filter(Boolean);
     const bulkFirstName = bulkNameParts[0] || "";
     const bulkLastName = bulkNameParts.length > 1 ? bulkNameParts.slice(1).join(" ") : "";
@@ -4128,7 +4199,7 @@ export function CXWorkspaceBulkLoad() {
     setServedQueueContact(contact);
     setServedQueueStartedAt(Date.now());
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [laneCanDispositionCurrent, bulkDisplayKey, bulkCaseIdStr, bulkDomain]);
+  }, [laneIdentityObserved, bulkDisplayKey, bulkCaseIdStr, bulkDomain]);
 
   // Dev escape hatch — `?cxDialMode=simulate` keeps the simulator path
   // available for QA / smoke tests. Default behavior on the queue
@@ -4393,43 +4464,6 @@ export function CXWorkspaceBulkLoad() {
       });
       throw error;
     }
-  }
-
-  function handleBulkAutoReviewDnc() {
-    const review = bulkAutoReview;
-    const sessionId = bulkSessionId;
-    const candidate = review?.candidate || null;
-    const queueItemId = String(candidate?.queueItemId || "").trim();
-    const uii = String(candidate?.uii || "").trim();
-    if (!review || !sessionId || !queueItemId || !uii) return;
-
-    setBulkAutoReview({ ...review, status: "saving" });
-    void bulkReviewOutcome
-      .mutateAsync({
-        sessionId,
-        queueItemId,
-        uii,
-        outcome: "dnc",
-      })
-      .then((result) => {
-        if (result?.updated) {
-          toast("DNC correction queued", {
-            description: `${bulkCallName(candidate)} will drain as DNC instead of no answer.`,
-          });
-        } else {
-          toast.warning("DNC correction not applied", {
-            description: "That terminal row already drained or was no longer pending.",
-          });
-        }
-        setBulkAutoReview(null);
-        void bulk.refetch();
-      })
-      .catch((error) => {
-        setBulkAutoReview({ ...review, status: "open" });
-        toast.error("DNC correction failed", {
-          description: error instanceof Error ? error.message : "The auto-advanced call could not be updated.",
-        });
-      });
   }
 
   async function handleResumeWorkFromBreak() {
@@ -5088,8 +5122,9 @@ export function CXWorkspaceBulkLoad() {
     return `active ${domain} • ${domain}:${state}`;
 */
   function submitQueueDisposition(
-    dispositionKey: string,
+    dispositionKey: CxBulkLoadDispositionRequest["disposition"] | "dnc",
     _label: string,
+    nextAction?: CxBulkLoadDispositionRequest["nextAction"],
     options: { coachReleaseReason?: string } = {},
   ) {
     if (laneCanDispositionCurrent && laneCall) {
@@ -5120,7 +5155,7 @@ export function CXWorkspaceBulkLoad() {
           uii: laneCall.uii,
           externId: laneCall.externId,
         })
-        .then(async (result) => {
+        .then((result) => {
           console.log(`[disp] lane disposition RESOLVED after ${ms()}`, result);
           if (result?.dispositionOk === false) {
             showQueueAdvanceTransition({
@@ -5130,7 +5165,6 @@ export function CXWorkspaceBulkLoad() {
                 : "Lane disposition was not accepted. Keep the call visible and try again.",
               blocking: false,
             }, 3500);
-            void laneCallQuery.refetch();
             return;
           }
           hardPruneLiveCoachForCurrentCall(coachReleaseReason, {
@@ -5144,8 +5178,6 @@ export function CXWorkspaceBulkLoad() {
             description: "Returning to the bulk queue underneath.",
             blocking: false,
           }, 2500);
-          await laneCallQuery.refetch().catch(() => null);
-          await bulk.refetch().catch(() => null);
         })
         .catch((error) => {
           console.error(`[disp] lane disposition FAILED after ${ms()}`, error);
@@ -5154,11 +5186,13 @@ export function CXWorkspaceBulkLoad() {
             description: "The lane disposition did not confirm cleanly. Refreshing call state.",
             blocking: false,
           }, 3500);
-          void laneCallQuery.refetch();
           workspace.refetch();
         });
       return;
     }
+
+    if (dispositionKey === "dnc") return;
+    if (!nextAction) return;
 
     const t0 = Date.now();
     const ms = () => `${Date.now() - t0}ms`;
@@ -5172,14 +5206,13 @@ export function CXWorkspaceBulkLoad() {
       queueAdvanceBlocking,
       sessionId: bulkSessionId,
       currentUii: bulkCurrent?.uii ?? null,
-      currentCaseId: bulkCurrent?.caseId ?? null,
-      currentPhone: bulkCurrent?.phone ?? null,
+      currentExternId: bulkCurrent?.externId ?? null,
     });
-    if (!bulkSessionId) {
+    if (!bulkRunning || !bulkSessionId || !bulkConfirmedCurrent?.externId || !bulkConfirmedCurrent.uii) {
       console.warn("[disp] EARLY RETURN — no session; nothing sent to the server", {
+        bulkRunning,
         bulkSessionId,
-        bulkCurrent,
-        bulkData: bulk.data,
+        hasCurrent: Boolean(bulkConfirmedCurrent),
       });
       return;
     }
@@ -5187,44 +5220,49 @@ export function CXWorkspaceBulkLoad() {
       sessionId: bulkSessionId,
       disposition: dispositionKey,
     });
-    manualBulkTerminalRef.current = {
-      key: bulkCurrent ? bulkCallReviewKey(bulkCurrent) : `session:${bulkSessionId}`,
-      disposition: dispositionKey,
-    };
     const coachReleaseReason = options.coachReleaseReason || `queue-disposition-${dispositionKey}`;
     showQueueAdvanceTransition({
       title: "Finishing current lead",
-          description: "Submitting the disposition; RingCX advances to the next call.",
+      description: "Submitting the result to this exact RingCX call.",
       blocking: true,
     });
     void bulkDisposition
-      .mutateAsync({ sessionId: bulkSessionId, disposition: dispositionKey })
-      .then(async (result) => {
+      .mutateAsync({
+        sessionId: bulkSessionId,
+        disposition: dispositionKey,
+        expectedExternId: bulkConfirmedCurrent.externId,
+        expectedUii: bulkConfirmedCurrent.uii,
+        nextAction,
+      })
+      .then((result) => {
         console.log(`[disp] disposition RESOLVED after ${ms()}`, result);
         if (result?.dispositionOk === false) {
+          const identityChanged = result.dispositionResult?.reason === "active-call-identity-changed";
           showQueueAdvanceTransition({
-            title: "RingCX still has the call",
-            description: "The disposition was not applied because RingCX still reports this call as active. Keep the current lead up and try again after RingCX releases it.",
+            title: identityChanged ? "Call changed — nothing submitted" : "RingCX did not accept the result",
+            description: identityChanged
+              ? "The active UII no longer matches the person you saw. The middle is refreshing to the proven caller."
+              : "The result was not applied. Keep the current caller up while the middle refreshes.",
             blocking: false,
           }, 3500);
-          void bulk.refetch();
           return;
         }
+        if (result?.buttonAction?.ok === false) {
+          toast.warning("Call result saved; its next click action is queued for retry", {
+            description: result.buttonAction.error || result.buttonAction.reason || undefined,
+          });
+        }
+        if (result?.buttonRefill?.ok === false) {
+          toast.warning("Call result saved; RingCX refill check will need another click", {
+            description: result.buttonRefill.error || result.buttonRefill.reason || undefined,
+          });
+        }
         releaseLiveCoachForCurrentCall(coachReleaseReason);
-        const nextLeadRequested = result?.getLeads?.ok === true;
-        const nextLeadReason = result?.getLeads?.reason || result?.getLeads?.error || null;
         showQueueAdvanceTransition({
-          title: nextLeadRequested ? "Next lead requested" : "Loading next lead",
-          description: nextLeadReason
-            ? `Disposition saved. RingCX did not accept the next-lead request yet: ${nextLeadReason}.`
-            : "Disposition saved. Waiting for RingCX to report who is on the phone now.",
+          title: "Result saved",
+          description: "Waiting for RingCX to report who is on the phone now.",
           blocking: true,
         });
-        const refreshed = await bulk.refetch().catch(() => null);
-        const refreshedSession = refreshed?.data;
-        if (refreshedSession?.current?.uii) {
-          clearQueueAdvanceTransition();
-        }
         console.log(`[disp] DONE after ${ms()}`);
       })
       .catch((error) => {
@@ -5234,35 +5272,6 @@ export function CXWorkspaceBulkLoad() {
           description: "The disposition did not confirm cleanly. Refreshing state; the watcher will reopen the buttons when RingCX reports the active call.",
           blocking: false,
         }, 3500);
-        void bulk.refetch();
-        workspace.refetch();
-        void refetchLegacyQueue();
-      });
-  }
-
-  function handleSyncActiveCall() {
-    if (!bulkSessionId) {
-      toast.warning("No active session", {
-        description: "Start a bulk session before syncing RingCX.",
-      });
-      return;
-    }
-    void bulkSyncActive
-      .mutateAsync({ sessionId: bulkSessionId })
-      .then((result) => {
-        if (result?.current?.uii) {
-          clearQueueAdvanceTransition();
-          return;
-        }
-        toast.warning("No matched RingCX call", {
-          description: "RingCX did not return exactly one active call for this session yet.",
-        });
-      })
-      .catch((error) => {
-        console.error("[cx] sync active call failed", error);
-        toast.error("RingCX sync failed", {
-          description: "The app could not refresh the active call. Try again in a moment.",
-        });
       });
   }
 
@@ -5386,52 +5395,14 @@ export function CXWorkspaceBulkLoad() {
       <div className="flex min-h-[calc(100vh-6rem)] flex-col gap-4">
       {/* ─── THREE-COLUMN BODY ──────────────────────────────────────────── */}
       <div className="flex flex-1 flex-col gap-4 lg:flex-row">
-        {/* ── LEFT: CX queue only ──────────────────────────────────────── */}
-        <aside className="flex-shrink-0 lg:w-[260px]">
+        {/* ── LEFT: completed calls that still need a human decision ──── */}
+        <aside className="flex-shrink-0 lg:w-[320px]">
           <div className="lg:sticky lg:top-20">
-            <Card>
-              <CardHeader>
-                <div className="flex items-center justify-between gap-2">
-                  <CardTitle className="text-sm">CX queue</CardTitle>
-                  <div className="flex items-center gap-1.5">
-                    <div
-                      className="inline-flex h-7 items-center gap-1 rounded-md border border-border bg-muted/30 px-2 text-[11px] font-medium text-muted-foreground"
-                      title="Leads are served automatically from the top of the queue."
-                    >
-                      <Clock3 className="h-3 w-3" />
-                      RingCX
-                    </div>
-                  </div>
-                </div>
-              </CardHeader>
-              <CardContent>
-                {!bulk.data ? (
-                  <EmptyState
-                    icon={<Clock3 />}
-                    title="Waiting for RingCX"
-                    description="Dialing begins after the agent is off hook and RingCX surfaces the next lead."
-                  />
-                ) : bulkRemainingQueue.length === 0 ? (
-                  <EmptyState
-                    icon={<Clock3 />}
-                    title="Waiting for leads"
-                    description="RingCX will surface the next accepted lead automatically."
-                  />
-                ) : (
-                  <div className="space-y-2">
-                    {queueAdvanceBlocking ? (
-                      <div
-                        className="rounded-md border border-sky-500/30 bg-sky-500/10 px-2 py-1.5 text-[11px] text-sky-950 dark:text-sky-100"
-                        role="status"
-                      >
-                        Confirming next call. Dialing is held until RingCX reports the active lead.
-                      </div>
-                    ) : null}
-                    <BulkBufferList items={bulkRemainingQueue} />
-                  </div>
-                )}
-              </CardContent>
-            </Card>
+            <CallWrapPanel
+              cards={wrapCardsQuery.data?.cards ?? []}
+              isResolving={wrapResolve.isPending}
+              onResolve={(resolution) => wrapResolve.mutateAsync(resolution)}
+            />
           </div>
         </aside>
 
@@ -5540,58 +5511,9 @@ export function CXWorkspaceBulkLoad() {
                   </div>
                 </div>
               ) : null}
-              {bulkAutoReview ? (
-                <div
-                  className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-950 dark:text-amber-100"
-                  role="status"
-                  aria-live="polite"
-                >
-                  <div className="min-w-0">
-                    <div className="font-semibold">
-                      Auto-advanced as no answer
-                    </div>
-                    <div className="text-[11px] opacity-80">
-                      {bulkCallName(bulkAutoReview.candidate)}
-                      {bulkAutoReview.candidate.caseId ? ` · ${bulkAutoReview.candidate.domain || caseDomain} ${bulkAutoReview.candidate.caseId}` : ""}
-                      {bulkAutoReviewRemaining > 0 ? ` · ${bulkAutoReviewRemaining}s` : ""}
-                    </div>
-                  </div>
-                  <div className="flex flex-wrap items-center gap-1.5">
-                    <Button
-                      size="sm"
-                      variant="destructive"
-                      className="bg-red-600 text-white hover:bg-red-700"
-                      isLoading={bulkAutoReview.status === "saving" || bulkReviewOutcome.isPending}
-                      disabled={bulkAutoReview.status === "saving" || bulkReviewOutcome.isPending}
-                      onClick={(event) => {
-                        consumeUiEvent(event);
-                        handleBulkAutoReviewDnc();
-                      }}
-                      title="Correct this auto-advanced answered call to DNC before the terminal row drains."
-                    >
-                      DNC
-                    </Button>
-                    <Button
-                      size="sm"
-                      variant="secondary"
-                      disabled={bulkAutoReview.status === "saving" || bulkReviewOutcome.isPending}
-                      onClick={(event) => {
-                        consumeUiEvent(event);
-                        setBulkAutoReview(null);
-                      }}
-                      title="Leave the auto-advanced outcome as no answer."
-                    >
-                      Leave no answer
-                    </Button>
-                  </div>
-                </div>
-              ) : null}
             </CardHeader>
             <CardContent
-              className={cn(
-                "space-y-2 pt-0 transition-opacity",
-                queueAdvanceBlocking ? "pointer-events-none opacity-50" : "",
-              )}
+              className="space-y-2 pt-0"
             >
               {/* Multi-candidate picker — when the inbound phone matches
                   multiple cases, the operator picks rather than guessing.
@@ -5771,32 +5693,16 @@ export function CXWorkspaceBulkLoad() {
                   either — Mickey's road-to-floor checklist ruling: every served
                   lead leaves through a recorded outcome. The skip command stays
                   server-side (useCxBulkLoadSkip is retained but uncalled). */}
-              {canDispositionCurrent ? (
+              {canDispositionCurrent && bulk.data?.controls?.outcomes !== false ? (
                 <div className="flex flex-wrap items-center gap-1.5 border-t border-border/60 pt-1.5">
-                  {bulkRunning && bulkSessionId ? (
-                    <Button
-                      size="sm"
-                      variant="secondary"
-                      className="border-border"
-                      disabled={bulkFeedDead || bulkSyncActive.isPending || bulkDisposition.isPending || laneDisposition.isPending}
-                      onClick={(event) => {
-                        consumeUiEvent(event);
-                        handleSyncActiveCall();
-                      }}
-                      title="Ask RingCX which session call is active and refresh the middle panel."
-                    >
-                      <RefreshCw className={cn("h-4 w-4", bulkSyncActive.isPending ? "animate-spin" : "")} />
-                      Sync call
-                    </Button>
-                  ) : null}
                   <Button
                     size="sm"
                     variant="secondary"
                     className="border-emerald-500/40 bg-emerald-600 text-white hover:bg-emerald-700"
-                    disabled={bulkFeedDead || queueAdvanceBlocking || (!laneCanDispositionCurrent && bulkCurrentAwaitingUii) || laneDisposition.isPending}
+                    disabled={queueAdvanceBlocking || bulkFeedDead || bulkDisposition.isPending || laneDisposition.isPending}
                     onClick={(event) => {
                       consumeUiEvent(event);
-                      submitQueueDisposition("answered", "Answered");
+                      submitQueueDisposition("answered", "Answered", "call_wrap");
                     }}
                     title="Mark the queue attempt as answered without DNC or Logics status changes."
                   >
@@ -5807,10 +5713,10 @@ export function CXWorkspaceBulkLoad() {
                     size="sm"
                     variant="secondary"
                     className="border-amber-500/50 bg-amber-500 text-amber-950 hover:bg-amber-400"
-                    disabled={bulkFeedDead || queueAdvanceBlocking || (!laneCanDispositionCurrent && bulkCurrentAwaitingUii) || laneDisposition.isPending}
+                    disabled={queueAdvanceBlocking || bulkFeedDead || bulkDisposition.isPending || laneDisposition.isPending}
                     onClick={(event) => {
                       consumeUiEvent(event);
-                      submitQueueDisposition("did_not_connect", "Did not answer");
+                      submitQueueDisposition("did_not_connect", "Did not answer", "cadence");
                     }}
                     title="No answer: count the attempt and reschedule the queue item by cadence rules."
                   >
@@ -5821,10 +5727,10 @@ export function CXWorkspaceBulkLoad() {
                     size="sm"
                     variant="secondary"
                     className="border-red-500/40 bg-red-600 text-white hover:bg-red-700"
-                    disabled={bulkFeedDead || queueAdvanceBlocking || (!laneCanDispositionCurrent && bulkCurrentAwaitingUii) || laneDisposition.isPending}
+                    disabled={queueAdvanceBlocking || bulkFeedDead || bulkDisposition.isPending || laneDisposition.isPending}
                     onClick={(event) => {
                       consumeUiEvent(event);
-                      submitQueueDisposition("bad_number", "Bad Number");
+                      submitQueueDisposition("bad_number", "Bad Number", "logics_dnc");
                     }}
                     title="Bad number: disconnected or out of service. Marks the case DNC and alerts Mickey."
                   >
@@ -5836,10 +5742,10 @@ export function CXWorkspaceBulkLoad() {
                       size="sm"
                       variant="secondary"
                       className="border-violet-500/40 bg-violet-600 text-white hover:bg-violet-700"
-                      disabled={bulkFeedDead || queueAdvanceBlocking || (!laneCanDispositionCurrent && bulkCurrentAwaitingUii) || laneDisposition.isPending}
+                      disabled={queueAdvanceBlocking || bulkFeedDead || bulkDisposition.isPending || laneDisposition.isPending}
                       onClick={(event) => {
                         consumeUiEvent(event);
-                        submitQueueDisposition("voicemail", "Voicemail");
+                        submitQueueDisposition("voicemail", "Voicemail", "ringcx_vm_drop");
                       }}
                       title="Mark the current bulk call as voicemail and advance to the next lead."
                     >
@@ -6034,177 +5940,6 @@ export function CXWorkspaceBulkLoad() {
                 />
                 <span>{laneCall.lane === "firstTouch" ? "First touch" : "Appointment"}</span>
               </div>
-            ) : null}
-            {(wrapCardsQuery.data?.cards?.length ?? 0) > 0 ? (
-              <Card>
-                <CardHeader>
-                  <CardTitle className="flex items-center gap-2 text-sm">
-                    Call wrap-up — answered today ({wrapCardsQuery.data?.cards.length})
-                  </CardTitle>
-                </CardHeader>
-                <CardContent className="space-y-1.5">
-                {(wrapCardsQuery.data?.cards ?? []).map((card) => (
-                  <div
-                    key={card.idemKey}
-                    className="flex flex-wrap items-center gap-2 rounded-md border border-border bg-background px-2 py-1.5"
-                  >
-                    <div className="min-w-0 flex-1">
-                      <div className="truncate text-sm font-medium">{card.name || `Case ${card.caseId ?? "?"}`}</div>
-                      <div className="truncate text-[11px] text-muted-foreground">
-                        {card.caseId ? `Case ${card.caseId} · ` : ""}
-                        {card.calledAt ? new Date(card.calledAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : ""}
-                        {card.expiresAt ? ` · expires ${new Date(card.expiresAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}` : ""}
-                      </div>
-                      {card.coachSummary ? (
-                        <div className="mt-0.5 line-clamp-2 text-[11px] text-muted-foreground">{String(card.coachSummary)}</div>
-                      ) : null}
-                    </div>
-                    {wrapApptPicker[card.idemKey] !== undefined ? (
-                      <div className="flex flex-wrap items-center gap-1">
-                        <input
-                          type="date"
-                          aria-label="Appointment date"
-                          className="h-8 w-[130px] rounded-md border border-border bg-background px-2 text-xs"
-                          value={wrapApptPicker[card.idemKey]?.date || ""}
-                          onChange={(event) => {
-                            const value = event.target.value;
-                            setWrapApptPicker((prev) => ({
-                              ...prev,
-                              [card.idemKey]: {
-                                ...(prev[card.idemKey] || buildWrapAppointmentDraft()),
-                                date: value,
-                              },
-                            }));
-                          }}
-                        />
-                        <input
-                          type="time"
-                          aria-label="Appointment time"
-                          className="h-8 w-[86px] rounded-md border border-border bg-background px-2 text-xs"
-                          value={wrapApptPicker[card.idemKey]?.time || ""}
-                          onChange={(event) => {
-                            const value = event.target.value;
-                            setWrapApptPicker((prev) => ({
-                              ...prev,
-                              [card.idemKey]: {
-                                ...(prev[card.idemKey] || buildWrapAppointmentDraft()),
-                                time: value,
-                              },
-                            }));
-                          }}
-                        />
-                        <Select
-                          value={wrapApptPicker[card.idemKey]?.timezone || DEFAULT_WRAP_APPOINTMENT_TIMEZONE}
-                          onValueChange={(value) => {
-                            setWrapApptPicker((prev) => ({
-                              ...prev,
-                              [card.idemKey]: {
-                                ...(prev[card.idemKey] || buildWrapAppointmentDraft()),
-                                timezone: value,
-                              },
-                            }));
-                          }}
-                        >
-                          <SelectTrigger className="h-8 w-[96px] text-xs" aria-label="Appointment timezone">
-                            <SelectValue />
-                          </SelectTrigger>
-                          <SelectContent>
-                            {WRAP_APPOINTMENT_TIMEZONES.map((option) => (
-                              <SelectItem key={option.value} value={option.value}>
-                                {option.label}
-                              </SelectItem>
-                            ))}
-                          </SelectContent>
-                        </Select>
-                        <Button
-                          size="sm"
-                          variant="secondary"
-                          disabled={
-                            !wrapApptPicker[card.idemKey]?.date ||
-                            !wrapApptPicker[card.idemKey]?.time ||
-                            !wrapApptPicker[card.idemKey]?.timezone ||
-                            wrapResolve.isPending
-                          }
-                          onClick={(event) => {
-                            consumeUiEvent(event);
-                            const draft = wrapApptPicker[card.idemKey];
-                            if (!draft?.date || !draft.time || !draft.timezone) return;
-                            void wrapResolve
-                              .mutateAsync({
-                                idemKey: card.idemKey,
-                                action: "appointment",
-                                appointmentDate: draft.date,
-                                appointmentTime: draft.time,
-                                appointmentTimezone: draft.timezone,
-                              })
-                              .then(() => setWrapApptPicker((prev) => {
-                                const next = { ...prev };
-                                delete next[card.idemKey];
-                                return next;
-                              }))
-                              .catch(() => null);
-                          }}
-                        >
-                          Book
-                        </Button>
-                        <Button
-                          size="sm"
-                          variant="ghost"
-                          onClick={(event) => {
-                            consumeUiEvent(event);
-                            setWrapApptPicker((prev) => {
-                              const next = { ...prev };
-                              delete next[card.idemKey];
-                              return next;
-                            });
-                          }}
-                        >
-                          Cancel
-                        </Button>
-                      </div>
-                    ) : (
-                      <div className="flex items-center gap-1">
-                        <Button
-                          size="sm"
-                          variant="destructive"
-                          disabled={wrapResolve.isPending}
-                          title="Do not call — stops every channel; the call record still files"
-                          onClick={(event) => {
-                            consumeUiEvent(event);
-                            void wrapResolve.mutateAsync({ idemKey: card.idemKey, action: "dnc" }).catch(() => null);
-                          }}
-                        >
-                          DNC
-                        </Button>
-                        <Button
-                          size="sm"
-                          variant="secondary"
-                          disabled={wrapResolve.isPending}
-                          onClick={(event) => {
-                            consumeUiEvent(event);
-                            setWrapApptPicker((prev) => ({ ...prev, [card.idemKey]: buildWrapAppointmentDraft() }));
-                          }}
-                        >
-                          Appointment
-                        </Button>
-                        <Button
-                          size="sm"
-                          variant="ghost"
-                          disabled={wrapResolve.isPending}
-                          title="No action needed — the call record still files"
-                          onClick={(event) => {
-                            consumeUiEvent(event);
-                            void wrapResolve.mutateAsync({ idemKey: card.idemKey, action: "dismiss" }).catch(() => null);
-                          }}
-                        >
-                          ✕
-                        </Button>
-                      </div>
-                    )}
-                  </div>
-                ))}
-                </CardContent>
-              </Card>
             ) : null}
             <SharedAppointmentList
               appointments={appointmentItems}

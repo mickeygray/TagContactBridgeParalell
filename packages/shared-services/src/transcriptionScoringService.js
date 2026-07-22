@@ -668,4 +668,9 @@ module.exports = {
   processCallLogRecording,
   scoreCallLogTranscript,
   scoreWithClaude, // exported for grounding smoke (prompt-bleed regression)
+  // Exported for the Training Center's on-demand "score my call" flow —
+  // the same download → whisper → score pipeline the nightly grader runs,
+  // but for a single recording the trainee picked.
+  downloadRecordingFromDrive,
+  transcribeWithWhisper,
 };

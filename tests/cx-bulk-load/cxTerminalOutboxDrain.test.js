@@ -28,21 +28,32 @@ test("factory requires outboxRepository.listPendingForDrain + recordCadenceEvent
 
 test("drainOnce replays each pending payload and marks it drained", async () => {
   const outbox = fakeOutbox([
-    { idemKey: "q1:u1", payload: { queueItemId: "q1", outcome: "ANSWER" } },
-    { idemKey: "q2:u2", payload: { queueItemId: "q2", outcome: "did_not_connect" } },
+    {
+      idemKey: "q1:u1",
+      payload: {
+        queueItemId: "q1",
+        outcome: "ANSWER",
+        agentId: "7007",
+        agentExtensionId: "101",
+        nextAction: "cadence",
+      },
+    },
+    { idemKey: "q2:u2", payload: { queueItemId: "q2", outcome: "did_not_connect", nextAction: "cadence" } },
   ]);
   const replayed = [];
   const drain = createCxTerminalOutboxDrain({ outboxRepository: outbox, recordCadenceEvent: async (e) => replayed.push(e) });
   const result = await drain.drainOnce();
   assert.deepEqual(replayed.map((e) => e.queueItemId), ["q1", "q2"]);
+  assert.equal(replayed[0].agentId, "7007");
+  assert.equal(replayed[0].agentExtensionId, "101");
   assert.deepEqual(outbox.calls.drained, ["q1:u1", "q2:u2"]);
   assert.deepEqual(result, { scanned: 2, drained: 2, failed: 0, minimalResolved: 0, oldestPendingAgeMs: 0 });
 });
 
 test("a replay failure marks THAT row failed and never aborts the rest of the batch", async () => {
   const outbox = fakeOutbox([
-    { idemKey: "q1:u1", payload: { queueItemId: "q1" } },
-    { idemKey: "q2:u2", payload: { queueItemId: "q2" } },
+    { idemKey: "q1:u1", payload: { queueItemId: "q1", nextAction: "cadence" } },
+    { idemKey: "q2:u2", payload: { queueItemId: "q2", nextAction: "cadence" } },
   ]);
   const drain = createCxTerminalOutboxDrain({
     outboxRepository: outbox,
@@ -81,9 +92,28 @@ test("a pending row with no payload is marked drained (not wedged) and not repla
   assert.equal(result.drained, 0); // payload-less rows don't count as a replayed drain
 });
 
-test("post-drain call wrap hook runs after terminal replay and receives terminal result", async () => {
+test("a watcher terminal fact without a click destination cannot route business work", async () => {
   const outbox = fakeOutbox([
     { idemKey: "q1:u1", payload: { queueItemId: "q1", uii: "u1", outcome: "answered" } },
+  ]);
+  const calls = { cadence: 0, wrap: 0, badNumber: 0 };
+  const drain = createCxTerminalOutboxDrain({
+    outboxRepository: outbox,
+    recordCadenceEvent: async () => { calls.cadence += 1; },
+    enqueueCallWrap: async () => { calls.wrap += 1; },
+    handleBadNumberOutcome: async () => { calls.badNumber += 1; },
+  });
+
+  const result = await drain.drainOnce();
+
+  assert.deepEqual(calls, { cadence: 0, wrap: 0, badNumber: 0 });
+  assert.deepEqual(outbox.calls.drained, ["q1:u1"]);
+  assert.equal(result.drained, 1);
+});
+
+test("click-stamped call wrap runs without sending Answer to cadence", async () => {
+  const outbox = fakeOutbox([
+    { idemKey: "q1:u1", payload: { queueItemId: "q1", uii: "u1", outcome: "answered", nextAction: "call_wrap" } },
   ]);
   const wrapped = [];
   const drain = createCxTerminalOutboxDrain({
@@ -96,13 +126,13 @@ test("post-drain call wrap hook runs after terminal replay and receives terminal
   assert.equal(wrapped.length, 1);
   assert.equal(wrapped[0].row.idemKey, "q1:u1");
   assert.equal(wrapped[0].payload.uii, "u1");
-  assert.deepEqual(wrapped[0].terminalResult, { counted: true, queueItemId: "q1" });
+  assert.deepEqual(wrapped[0].terminalResult, { ok: true, skipped: true, reason: "routed-call_wrap" });
   assert.deepEqual(result, { scanned: 1, drained: 1, failed: 0, minimalResolved: 0, oldestPendingAgeMs: 0, callWrapQueued: 1, callWrapSkipped: 0, callWrapFailed: 0 });
 });
 
 test("post-drain call note hook runs independently from call wrap", async () => {
   const outbox = fakeOutbox([
-    { idemKey: "q1:u1", payload: { queueItemId: "q1", uii: "u1", outcome: "answered" } },
+    { idemKey: "q1:u1", payload: { queueItemId: "q1", uii: "u1", outcome: "answered", nextAction: "call_wrap" } },
   ]);
   const notes = [];
   const wrapped = [];
@@ -145,6 +175,7 @@ test("bad-number hook runs before the terminal row is marked drained", async () 
         caseId: 101617,
         outcome: "bad_number",
         badNumber: true,
+        nextAction: "logics_dnc",
       },
     },
   ]);
@@ -168,7 +199,7 @@ test("bad-number hook runs before the terminal row is marked drained", async () 
     },
   });
   const result = await drain.drainOnce();
-  assert.deepEqual(order, ["cadence", "bad-number", "drained"]);
+  assert.deepEqual(order, ["bad-number", "drained"]);
   assert.equal(badNumbers.length, 1);
   assert.equal(badNumbers[0].payload.badNumber, true);
   assert.deepEqual(outbox.calls.failed, []);
@@ -185,7 +216,7 @@ test("bad-number hook runs before the terminal row is marked drained", async () 
 
 test("bad-number hook failure keeps the terminal row retryable", async () => {
   const outbox = fakeOutbox([
-    { idemKey: "q1:u1", payload: { queueItemId: "q1", uii: "u1", outcome: "bad_number", badNumber: true } },
+    { idemKey: "q1:u1", payload: { queueItemId: "q1", uii: "u1", outcome: "bad_number", badNumber: true, nextAction: "logics_dnc" } },
   ]);
   const drain = createCxTerminalOutboxDrain({
     outboxRepository: outbox,
@@ -205,7 +236,7 @@ test("bad-number hook failure keeps the terminal row retryable", async () => {
 test("post-drain call note failure does not fail terminal replay", async () => {
   const warns = [];
   const outbox = fakeOutbox([
-    { idemKey: "q1:u1", payload: { queueItemId: "q1", uii: "u1", outcome: "answered" } },
+    { idemKey: "q1:u1", payload: { queueItemId: "q1", uii: "u1", outcome: "did_not_connect", nextAction: "cadence" } },
   ]);
   const drain = createCxTerminalOutboxDrain({
     outboxRepository: outbox,
@@ -229,10 +260,10 @@ test("post-drain call note failure does not fail terminal replay", async () => {
   });
 });
 
-test("post-drain call wrap failure does not fail the terminal row", async () => {
+test("call wrap failure keeps the click-stamped terminal row retryable", async () => {
   const warns = [];
   const outbox = fakeOutbox([
-    { idemKey: "q1:u1", payload: { queueItemId: "q1", uii: "u1", outcome: "answered" } },
+    { idemKey: "q1:u1", payload: { queueItemId: "q1", uii: "u1", outcome: "answered", nextAction: "call_wrap" } },
   ]);
   const drain = createCxTerminalOutboxDrain({
     outboxRepository: outbox,
@@ -241,15 +272,16 @@ test("post-drain call wrap failure does not fail the terminal row", async () => 
     logger: { warn: (...args) => warns.push(args) },
   });
   const result = await drain.drainOnce();
-  assert.deepEqual(outbox.calls.drained, ["q1:u1"]);
-  assert.deepEqual(outbox.calls.failed, []);
+  assert.deepEqual(outbox.calls.drained, []);
+  assert.deepEqual(outbox.calls.failed.map((row) => row.idemKey), ["q1:u1"]);
   assert.equal(warns.length, 1);
-  assert.deepEqual(result, { scanned: 1, drained: 1, failed: 0, minimalResolved: 0, oldestPendingAgeMs: 0, callWrapQueued: 0, callWrapSkipped: 0, callWrapFailed: 1 });
+  assert.equal(result.drained, 0);
+  assert.equal(result.failed, 1);
 });
 
-test("post-drain call wrap hook can explicitly skip rows without wrap material", async () => {
+test("cadence clicks never invoke the call-wrap hook", async () => {
   const outbox = fakeOutbox([
-    { idemKey: "q1:u1", payload: { queueItemId: "q1", uii: "u1", outcome: "did_not_connect" } },
+    { idemKey: "q1:u1", payload: { queueItemId: "q1", uii: "u1", outcome: "did_not_connect", nextAction: "cadence" } },
   ]);
   const drain = createCxTerminalOutboxDrain({
     outboxRepository: outbox,
@@ -258,7 +290,7 @@ test("post-drain call wrap hook can explicitly skip rows without wrap material",
   });
   const result = await drain.drainOnce();
   assert.deepEqual(outbox.calls.drained, ["q1:u1"]);
-  assert.deepEqual(result, { scanned: 1, drained: 1, failed: 0, minimalResolved: 0, oldestPendingAgeMs: 0, callWrapQueued: 0, callWrapSkipped: 1, callWrapFailed: 0 });
+  assert.deepEqual(result, { scanned: 1, drained: 1, failed: 0, minimalResolved: 0, oldestPendingAgeMs: 0, callWrapQueued: 0, callWrapSkipped: 0, callWrapFailed: 0 });
 });
 
 // ---- 2026-07-06 drain hardening pins (dead-letter, CAS, stuck-ness metric) ----
@@ -270,7 +302,7 @@ test("MINIMAL RESOLUTION: past the attempt threshold the drain stamps the bare o
   const resolved = [];
   const outbox = fakeOutbox([
     { idemKey: "poison-1", attempts: 3, lastError: "still-broken", payload: { queueItemId: "q-poison", outcome: "did_not_connect" }, createdAt: new Date(Date.now() - 60_000) },
-    { idemKey: "ok-1", payload: { queueItemId: "q-ok", outcome: "answered" }, createdAt: new Date() },
+    { idemKey: "ok-1", payload: { queueItemId: "q-ok", outcome: "did_not_connect", nextAction: "cadence" }, createdAt: new Date() },
   ]);
   let replays = 0;
   const drain = createCxTerminalOutboxDrain({

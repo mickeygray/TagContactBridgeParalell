@@ -16,7 +16,7 @@
 //       THE HOURLY ROTATION (Mickey's design, 2026-07-08): each agent's campaigns swap
 //       caller ID to the NEXT number in that dial group's POOL — every pool number is
 //       a tenant DID that routes callbacks to that same agent's phone. Pools live in
-//       config/rcx-caller-id-pools.json ({ "<dialGroupId>": ["<10d>", ...] }). The
+//       config/cx-caller-id-rotation-pools.json ({ "<dialGroupId>": ["<10d>", ...] }). The
 //       rotation is STATELESS: next = pool[(indexOf(current) + 1) % len]; a current
 //       number not in the pool starts at pool[0]. Unmapped groups are never touched;
 //       pools with fewer than 2 numbers are skipped loudly. Schedule (after ONE
@@ -92,7 +92,9 @@ async function listAll(client) {
 
 function loadPoolConfig() {
   const fs = require("fs");
-  const poolPath = path.resolve(__dirname, "..", "config", "rcx-caller-id-pools.json");
+  // One source of truth: the backend Boring worker and this manual tool both
+  // consume the registered-pool config. rcx-caller-id-pools.json is legacy.
+  const poolPath = path.resolve(__dirname, "..", "config", "cx-caller-id-rotation-pools.json");
   if (!fs.existsSync(poolPath)) {
     console.error(`no pool file at ${poolPath} — create { "<dialGroupId>": ["<10-digit>", ...] }`);
     process.exit(2);
@@ -438,9 +440,132 @@ async function rotateOrdered(client) {
   if (failed) process.exitCode = 1;
 }
 
+// ── rotate-daily (Mickey, 2026-07-08 — DESIGN/SCRIPT stage, not app-wired) ─────────────
+// Read each agent's EXTENSION pool (the DIDs assigned to their ext — self-maintaining: rest
+// or add a DID on the extension and the pool follows), track today's used numbers, and
+// REPLACE the current campaign caller-ID with one that has NOT been used today. A replaced
+// number is recorded as used and won't come back until TOMORROW (a new Pacific date wipes the
+// state). This is the one stateful bit — a small per-day file — the deliberate departure from
+// the stateless `rotate`. Dry-run default: computes + prints the plan, writes NOTHING and
+// records NOTHING without --arm. Intended cadence is every 2h via schedule (one run per slot);
+// each armed run advances one number, so a 5-number ext pool supports ~4 rotations/day.
+const USED_TODAY_PATH = path.resolve(__dirname, "..", "config", "rcx-caller-id-used-today.json");
+
+function pacificDateKey(now = new Date()) {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/Los_Angeles",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(now);
+}
+
+function loadUsedToday(dateKey) {
+  const fs = require("fs");
+  let raw = {};
+  try {
+    raw = JSON.parse(fs.readFileSync(USED_TODAY_PATH, "utf8"));
+  } catch {
+    raw = {};
+  }
+  return raw && typeof raw[dateKey] === "object" && raw[dateKey] ? raw[dateKey] : {};
+}
+
+function saveUsedToday(dateKey, todayMap) {
+  const fs = require("fs");
+  // prune to today only so the state file never grows across days
+  fs.writeFileSync(USED_TODAY_PATH, `${JSON.stringify({ [dateKey]: todayMap }, null, 2)}\n`, "utf8");
+}
+
+function extensionPoolFromRecords(byNumber, extensionId) {
+  const pool = [];
+  for (const [number, record] of byNumber) {
+    if (String(record?.extension?.id || "").trim() === String(extensionId) && number.length === 10) {
+      pool.push(number);
+    }
+  }
+  return pool;
+}
+
+async function rotateDaily(client, rcClient) {
+  const { agentOrder } = loadPoolConfig();
+  const onlyGroup = readFlag("--group");
+  const dateKey = pacificDateKey();
+  const usedToday = loadUsedToday(dateKey);
+
+  const byNumber = await loadPhoneNumberRecords(rcClient);
+  const rows = await listAll(client);
+
+  const plan = [];
+  for (const agent of agentOrder) {
+    if (onlyGroup && String(agent.dialGroupId) !== String(onlyGroup)) continue;
+    const pool = extensionPoolFromRecords(byNumber, agent.extensionId);
+    const campaigns = rows.filter((r) => String(r.groupId) === String(agent.dialGroupId) && r.active);
+    if (!campaigns.length) {
+      plan.push({ agent, skip: "no active campaigns" });
+      continue;
+    }
+    if (pool.length < 2) {
+      plan.push({ agent, skip: `extension pool has ${pool.length} number(s) — need >= 2` });
+      continue;
+    }
+    const currents = [...new Set(campaigns.map((c) => digits(c.callerId)).filter((d) => d.length === 10))];
+    // "used today" = anything already recorded today PLUS whatever is presented right now
+    const used = new Set([...(usedToday[agent.extensionId] || []), ...currents]);
+    const pick = pool.find((n) => !used.has(n)) || null; // first pool number not used today
+    plan.push({ agent, pool, campaigns, currents, pick, usedCount: used.size });
+  }
+
+  console.log(`ROTATE-DAILY ${ARM ? "(ARMED)" : "(dry-run)"} — ${dateKey} (Pacific) — ${plan.filter((p) => p.pick).length}/${plan.length} agent(s) rotating`);
+  for (const p of plan) {
+    if (p.skip) {
+      console.log(`  SKIP [${p.agent.dialGroupId}] ${p.agent.name}: ${p.skip}`);
+      continue;
+    }
+    if (!p.pick) {
+      console.log(`  EXHAUSTED [${p.agent.dialGroupId}] ${p.agent.name}: all ${p.pool.length} ext number(s) used today — HOLDING ${p.currents.join("/") || "(none)"}`);
+      continue;
+    }
+    console.log(`  [${p.agent.dialGroupId}] ${p.agent.name} (${p.campaigns.length} campaign(s)): ${p.currents.join("/") || "(none)"} -> ${p.pick}   [used today ${p.usedCount}/${p.pool.length}]`);
+  }
+  if (!ARM) {
+    console.log("dry-run: nothing written, no state recorded. Re-run with --arm.");
+    return;
+  }
+
+  let failed = 0;
+  const nextUsed = { ...usedToday };
+  for (const p of plan) {
+    if (!p.pick) continue;
+    let agentOk = true;
+    for (const c of p.campaigns) {
+      const full = await client.getCampaign(c.campaignId, c.groupId);
+      full.callerId = p.pick;
+      full.callerIdE164 = toE164(p.pick);
+      await client.updateCampaign(c.campaignId, full, c.groupId);
+      const verify = await client.getCampaign(c.campaignId, c.groupId);
+      const ok = digits(verify.callerId) === p.pick;
+      if (!ok) {
+        failed += 1;
+        agentOk = false;
+      }
+      console.log(`  ${ok ? "OK " : "FAILED-VERIFY"} [${c.groupId}] ${c.campaignId}: -> ${verify.callerId}`);
+    }
+    // record the replaced current(s) + the new pick so none repeat until tomorrow
+    if (agentOk) {
+      nextUsed[p.agent.extensionId] = [
+        ...new Set([...(nextUsed[p.agent.extensionId] || []), ...p.currents, p.pick]),
+      ];
+    }
+  }
+  saveUsedToday(dateKey, nextUsed);
+  console.log(`state: today's used numbers recorded -> ${USED_TODAY_PATH}`);
+  if (failed) process.exitCode = 1;
+}
+
 async function main() {
-  if (!["list", "shift", "rotate", "assign-pools"].includes(cmd)) {
-    console.error("Usage: node scripts/rcx-shift-caller-ids.js <list | shift --to <10d> (--campaigns a,b | --group <id>) | rotate [--group <id>] [--with-extensions] | assign-pools [--group <id>] [--allow-reassign]> [--arm]");
+  if (!["list", "shift", "rotate", "rotate-daily", "assign-pools"].includes(cmd)) {
+    console.error("Usage: node scripts/rcx-shift-caller-ids.js <list | shift --to <10d> (--campaigns a,b | --group <id>) | rotate [--group <id>] [--with-extensions] | rotate-daily [--group <id>] | assign-pools [--group <id>] [--allow-reassign]> [--arm]");
     process.exit(2);
   }
 
@@ -452,6 +577,11 @@ async function main() {
   const client = createRingcxVoiceClient();
   if (cmd === "rotate") {
     await rotateOrdered(client);
+    return;
+  }
+  if (cmd === "rotate-daily") {
+    const rcClient = createRingCentralClient();
+    await rotateDaily(client, rcClient);
     return;
   }
 

@@ -5,6 +5,12 @@ const mongoose = require("mongoose");
 const cxBulkLoadSessionSchema = new mongoose.Schema(
   {
     sessionId: { type: String, required: true, unique: true, index: true },
+    runtime: {
+      type: String,
+      enum: ["bulk_load", "boring"],
+      default: "bulk_load",
+      index: true,
+    },
     status: {
       type: String,
       enum: ["running", "completed", "killed", "failed"],

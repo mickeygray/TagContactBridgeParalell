@@ -384,6 +384,7 @@ test("F2 CONSUMPTION: a dispositioned first-touch call persists a REAL terminal 
       uii: "u-ft-9",
       domain: "WYNN",
       caseId: 42,
+      phone: "+1 (818) 555-0001",
       name: "Fresh Lead",
     },
     session: { sessionId: "lane:brad@x.com" },
@@ -397,6 +398,8 @@ test("F2 CONSUMPTION: a dispositioned first-touch call persists a REAL terminal 
   const row = inserted[0];
   assert.equal(row.queueItemId, "row42", "the REAL queue row id parsed from the extern");
   assert.equal(row.outcome, "answered");
+  assert.equal(row.phone, "8185550001", "the daily terminal ledger receives a full normalized phone");
+  assert.equal(row.payload.phone, "8185550001");
   assert.equal(row.payload.eventType, "terminal", "the drain treats it like any terminal — wrap card, cadence, flag release");
   assert.equal(row.payload.source, "lane-call-disposition");
   assert.ok(row.idemKey.includes("row42"), "idemKey keyed to the row — exactly-once with any other terminal");
@@ -413,6 +416,7 @@ test("F2 CONSUMPTION: a dispositioned appointment call resolves the appointment 
       uii: "u-apt-9",
       domain: "WYNN",
       caseId: 43,
+      meta: { phone: "818-555-0002" },
       name: "Booked Person",
     },
     session: { sessionId: "lane:brad@x.com" },
@@ -432,7 +436,30 @@ test("F2 CONSUMPTION: a dispositioned appointment call resolves the appointment 
   assert.equal(resolved[0].queueItem.metadata.appointmentId, "appointment:a99", "the extern IS the appointment key");
   assert.equal(resolved[0].disposition, "answered", "kept/missed rides resolvedDisposition");
   assert.equal(inserted.length, 1);
+  assert.equal(inserted[0].phone, "8185550002");
   assert.equal(inserted[0].queueItemId, "qrow7", "the appointment's queue row gets its terminal — cadence counts the attempt");
+});
+
+test("F2 CONSUMPTION: lane terminals fail closed without a canonical case or full phone", async () => {
+  const { persistLaneCallConsumption } = require("../../packages/shared-services/src/cxBulkLoadRuntime.js");
+  const inserted = [];
+  const result = await persistLaneCallConsumption({
+    laneCall: {
+      lane: "firstTouch",
+      externId: "cxft-wynn-row42",
+      uii: "u-ft-no-identity",
+      domain: "WYNN",
+      caseId: null,
+      meta: { phoneLast4: "0001" },
+    },
+    session: { sessionId: "lane:brad@x.com" },
+    outcome: "answered",
+    deps: { insertOutboxRow: async (row) => { inserted.push(row); return row; } },
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.terminalPersisted, false);
+  assert.equal(inserted.length, 0);
 });
 
 test("F2 CONSUMPTION: a bulk extern is not lane material; consumption failing never throws", async () => {
@@ -444,4 +471,36 @@ test("F2 CONSUMPTION: a bulk extern is not lane material; consumption failing ne
   });
   assert.equal(bulk.ok, false);
   assert.equal(bulk.reason, "bulk-extern-not-lane");
+});
+
+test("BORING MODE: first-contact round robin routes into the main queue and never publishes", async () => {
+  const rows = [{ _id: "q1" }, { _id: "q2" }, { _id: "q3" }];
+  const routed = [];
+  const dispatcher = createCxFirstTouchDispatcher({
+    isEnabled: () => true,
+    isMainQueueMode: () => true,
+    resolveWindowMode: () => "drip",
+    resolveQueueMap: () => [
+      { agentEmail: "brad@x.com", campaignId: "111" },
+      { agentEmail: "amy@x.com", campaignId: "222" },
+    ],
+    resolveMainQueueAgent: async (agent) => ({
+      ...agent,
+      agentExtensionId: agent.agentEmail.startsWith("brad") ? "ext-1" : "ext-2",
+    }),
+    loadPendingRows: async (limit) => rows.filter((row) => !row.routed).slice(0, limit),
+    activateRow: async (rowId, assignment) => {
+      rows.find((row) => row._id === rowId).routed = true;
+      routed.push({ rowId, assignment });
+      return true;
+    },
+    publishBatch: async () => { throw new Error("boring mode must not publish directly"); },
+    logger: { info() {}, warn() {} },
+  });
+
+  const result = await dispatcher.tickOnce({ limit: 25 });
+
+  assert.equal(result.routedTo, "boring-dial-queue");
+  assert.equal(result.queued, 3);
+  assert.deepEqual(routed.map((row) => row.assignment.agentExtensionId), ["ext-1", "ext-2", "ext-1"]);
 });

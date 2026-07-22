@@ -4,6 +4,9 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
+const {
+  runCxActiveCallOwnersOnce,
+} = require("../../apps/control-plane/src/server");
 
 // THE WIRE AUDIT (2026-07-07): twice now a live route has crashed on a ReferenceError
 // because server.js CALLED a shared-services helper it never imported (June:
@@ -56,3 +59,54 @@ test(`WIRE AUDIT: every Cx helper ${serverPath.split("/").slice(-3).join("/")} c
   assert.deepEqual(missing, [], serverPath + " calls these without importing/defining them: " + missing.join(", "));
 });
 }
+
+test("boring mode invokes only the replacement active-call owner", async () => {
+  const calls = [];
+  const result = await runCxActiveCallOwnersOnce({
+    boringEnabled: true,
+    input: { sessionId: "session-1" },
+    legacyWatcher: async (input) => {
+      calls.push(["legacy", input]);
+      return { summary: { sessionCount: 0 }, applied: {} };
+    },
+    boringWatcher: async (input) => {
+      calls.push(["boring", input]);
+      return { summary: { sessionCount: 1, refreshedCount: 1 } };
+    },
+  });
+
+  assert.deepEqual(calls, [["boring", { sessionId: "session-1" }]]);
+  assert.equal(result.summary.sessionCount, 0);
+  assert.equal(result.boring.summary.refreshedCount, 1);
+});
+
+test("legacy mode invokes only the retired active-call owner", async () => {
+  const calls = [];
+  const result = await runCxActiveCallOwnersOnce({
+    boringEnabled: false,
+    input: { sessionId: "session-1" },
+    legacyWatcher: async (input) => {
+      calls.push(["legacy", input]);
+      return { summary: { sessionCount: 1 }, applied: {} };
+    },
+    boringWatcher: async (input) => {
+      calls.push(["boring", input]);
+      return { summary: { sessionCount: 0 } };
+    },
+  });
+
+  assert.deepEqual(calls, [["legacy", { sessionId: "session-1" }]]);
+  assert.equal(result.summary.sessionCount, 1);
+  assert.equal(result.boring, null);
+});
+
+test("caller-ID rotation is owned by Boring and single-owner by interval", () => {
+  const src = fs.readFileSync(
+    path.join(__dirname, "../../apps/control-plane/src/server.js"),
+    "utf-8",
+  );
+  assert.match(src, /boringWebhookProcessingEnabled\s*&&\s*callerIdRotationEnabled/);
+  assert.match(src, /CX_BORING_CALLER_ID_DIAL_GROUP_IDS\s*\|\|\s*"1011,1067,1068"/);
+  assert.match(src, /acquireRunLock\(\s*"cx-boring-caller-id-rotation"/);
+  assert.match(src, /CX_CALLER_ID_ROTATION_ARM\s*\|\|\s*"false"/);
+});

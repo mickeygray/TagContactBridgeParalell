@@ -2859,6 +2859,12 @@ async function handleCxTerminalCallOutcome(payload = {}) {
   const normalizedOutcome = classification.normalizedOutcome;
   const nonConnectOutcome = normalizedOutcome === "voicemail" || normalizedOutcome === "did_not_connect";
   const contactOutcome = normalizedOutcome === "answered" || normalizedOutcome === "dnc";
+  const terminalAgentId = normalizeExternalId(
+    payload.agentId || queueItem.metadata?.rcxVisibilityAgentId,
+  );
+  const terminalAgentExtensionId = normalizeExternalId(
+    payload.agentExtensionId || queueItem.assignment?.extensionId || payload.assignedExtensionId,
+  );
   const terminalMetadata = {
     lastTerminalOutcomeAt: safeOutcomeAt,
     lastTerminalOutcome: payload.outcome || payload.result || payload.disposition || null,
@@ -2872,6 +2878,8 @@ async function handleCxTerminalCallOutcome(payload = {}) {
     lastTerminalSystemDisposition: String(payload.systemDisposition || "").trim() || null,
     lastTerminalBadNumber: payload.badNumber === true || String(payload.outcome || "").trim().toLowerCase().replace(/[\s-]+/g, "_") === "bad_number",
     lastTerminalBadNumberReason: String(payload.badNumberReason || "").trim() || null,
+    lastTerminalAgentId: terminalAgentId || null,
+    lastTerminalAgentExtensionId: terminalAgentExtensionId || null,
     lastTerminalOutcomeUii:
       normalizeExternalId(payload.uii || payload.callSessionId)
       || queueItem.metadata?.lastDialExecutionUii
@@ -3129,13 +3137,14 @@ async function handleCxTerminalCallOutcome(payload = {}) {
       direction: "outbound",
       caseId,
       phone: payload.phone || queueItem.phone || null,
-      extensionId: queueItem.assignment?.extensionId || payload.assignedExtensionId || null,
+      extensionId: terminalAgentExtensionId || null,
       executionOwner: "ringcentral-cx",
       platform: "cx",
       missed: nonConnectOutcome,
       callEndTime: safeOutcomeAt,
       "ringcx.queueItemId": String(queueItem._id),
       "ringcx.externId": queueItem.metadata?.rcxVisibilityExternId || payload.externId || null,
+      ...(terminalAgentId ? { "ringcx.agentId": terminalAgentId } : {}),
       "ringcx.agentEmail": payload.actorEmail || payload.agentEmail || null,
       "ringcx.actionKey": payload.actionKey || queueItem.metadata?.actionKey || null,
       "ringcx.terminalSource": payload.sourceService || payload.source || "ringcentral-cx",

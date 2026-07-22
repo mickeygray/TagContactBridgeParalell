@@ -1,4 +1,4 @@
-import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api/client";
 import { toast } from "@/components/ui/Toaster";
 import { queryKeys } from "@/lib/api/queries/keys";
@@ -29,17 +29,37 @@ export interface CxBulkLoadSession {
   domain?: string | null;
   agentEmail?: string | null;
   current: CxBulkLoadCurrent | null;
-  remainingQueue?: CxBulkLoadCurrent[];
   completed?: CxBulkLoadCurrent[];
   lastOutcome?: CxBulkLoadCurrent | null;
   reviewHoldUntil?: string | null;
   reviewHoldReason?: string | null;
-  bufferCount: number;
   completedCount: number;
   stats: Record<string, unknown>;
+  controls?: {
+    outcomes?: boolean;
+    queue?: boolean;
+    appointmentFallback?: boolean;
+  };
   lastError?: unknown;
   // present only on the disposition response
   dispositionOk?: boolean;
+  dispositionResult?: {
+    ok?: boolean;
+    reason?: string | null;
+  };
+  buttonAction?: {
+    ok?: boolean;
+    action?: string | null;
+    reason?: string | null;
+    error?: string | null;
+  };
+  buttonRefill?: {
+    ok?: boolean;
+    reason?: string | null;
+    error?: string | null;
+    outstanding?: number | null;
+    target?: number | null;
+  };
   getLeads?: {
     ok?: boolean;
     reason?: string | null;
@@ -74,26 +94,36 @@ export interface CxBulkLoadSideEffectResult {
   pauseMs?: number | null;
 }
 
+export interface CxBulkLoadDispositionRequest {
+  [key: string]: unknown;
+  sessionId: string;
+  disposition: "answered" | "did_not_connect" | "bad_number" | "voicemail";
+  expectedExternId: string;
+  expectedUii: string;
+  nextAction: "call_wrap" | "cadence" | "logics_dnc" | "ringcx_vm_drop";
+  agentEmail?: string;
+}
+
 function bulkLoadQueryKey(agentEmail?: string | null) {
   return [...queryKeys.cx.all(), "bulk-load", agentEmail || "me"] as const;
 }
 
 function invalidateBulkLoad(qc: ReturnType<typeof useQueryClient>, agentEmail?: string | null) {
-  qc.invalidateQueries({ queryKey: bulkLoadQueryKey(agentEmail) });
+  return qc.invalidateQueries({ queryKey: bulkLoadQueryKey(agentEmail) });
 }
 
 export function useCxBulkLoadSession(enabled = false, agentEmail?: string | null) {
-  return useQuery({
+  return useQuery<CxBulkLoadSession | null>({
     queryKey: bulkLoadQueryKey(agentEmail),
-    queryFn: () =>
+    queryFn: ({ signal }) =>
       api
         .get<{ ok: true; result: CxBulkLoadSession | null }>("/api/cx/bulk-load/session", {
           query: { agentEmail: agentEmail || undefined },
+          signal,
         })
         .then((r) => r.result),
     enabled,
     staleTime: 500,
-    placeholderData: keepPreviousData,
     refetchInterval: enabled ? 1000 : false,
     refetchIntervalInBackground: false,
     refetchOnWindowFocus: true,
@@ -101,20 +131,27 @@ export function useCxBulkLoadSession(enabled = false, agentEmail?: string | null
   });
 }
 
-function buildBulkLoadCommandHook(path: string) {
+function buildBulkLoadCommandHook<TBody extends Record<string, unknown> = Record<string, unknown>>(path: string) {
   return function useCxBulkLoadCommand() {
     const qc = useQueryClient();
-    return useMutation({
-      mutationFn: (body: Record<string, unknown> = {}) =>
+    return useMutation<CxBulkLoadSession | null, Error, TBody>({
+      mutationFn: (body: TBody) =>
         api
           .post<{ ok: true; result: CxBulkLoadSession | null }>(`/api/cx/bulk-load/${path}`, body)
           .then((r) => r.result),
+      onMutate: async (vars) => {
+        const agentEmail = typeof vars?.agentEmail === "string" ? vars.agentEmail : null;
+        await qc.cancelQueries({ queryKey: bulkLoadQueryKey(agentEmail) });
+      },
       onSuccess: (result, vars) => {
         const agentEmail = typeof vars?.agentEmail === "string" ? vars.agentEmail : null;
-        if (result) {
+        if (result && (result.status !== "running" || !result.current)) {
           qc.setQueryData(bulkLoadQueryKey(agentEmail), result);
         }
-        invalidateBulkLoad(qc, agentEmail);
+      },
+      onSettled: (_result, _error, vars) => {
+        const agentEmail = typeof vars?.agentEmail === "string" ? vars.agentEmail : null;
+        return invalidateBulkLoad(qc, agentEmail);
       },
     });
   };
@@ -137,8 +174,7 @@ function buildBulkLoadSideEffectHook(path: string) {
 }
 
 export const useCxBulkLoadStart = buildBulkLoadCommandHook("start");
-export const useCxBulkLoadDisposition = buildBulkLoadCommandHook("disposition");
-export const useCxBulkLoadSyncActive = buildBulkLoadCommandHook("sync-active");
+export const useCxBulkLoadDisposition = buildBulkLoadCommandHook<CxBulkLoadDispositionRequest>("disposition");
 export const useCxBulkLoadGetLeads = buildBulkLoadCommandHook("get-leads");
 export const useCxBulkLoadPauseProgressive = buildBulkLoadSideEffectHook("pause-progressive");
 export const useCxBulkLoadResumeProgressive = buildBulkLoadSideEffectHook("resume-progressive");
@@ -171,6 +207,7 @@ export type CxWrapCard = {
   calledAt: string | null;
   expiresAt: string | null;
   systemDisposition: string | null;
+  appointmentOnly?: boolean;
   coachSummary: string | null;
 };
 
@@ -208,9 +245,9 @@ export type CxLaneCallResult = { enabled?: boolean; laneCall: CxLaneCall | null 
 export function useCxLaneCall(enabled: boolean) {
   return useQuery({
     queryKey: ["cx-lane-call"],
-    queryFn: () =>
+    queryFn: ({ signal }) =>
       api
-        .get<{ ok: true; result: CxLaneCallResult }>("/api/cx/bulk-load/lane-call")
+        .get<{ ok: true; result: CxLaneCallResult }>("/api/cx/bulk-load/lane-call", { signal })
         .then((r) => r.result),
     enabled,
     staleTime: 1_000,
@@ -231,9 +268,12 @@ export function useCxLaneCallDisposition() {
       api
         .post<{ ok: true; result: CxLaneDispositionResult }>("/api/cx/bulk-load/lane-call/disposition", body)
         .then((r) => r.result),
-    onSuccess: () => {
-      void qc.invalidateQueries({ queryKey: ["cx-lane-call"] });
-      invalidateBulkLoad(qc);
+    onMutate: () => qc.cancelQueries({ queryKey: ["cx-lane-call"] }),
+    onSettled: () => {
+      return Promise.all([
+        qc.invalidateQueries({ queryKey: ["cx-lane-call"] }),
+        invalidateBulkLoad(qc),
+      ]);
     },
   });
 }
@@ -265,6 +305,7 @@ export type CxWrapResolveResult = {
     correctionOk: boolean | null;
     appointmentOk: boolean | null;
     logicsStatusOk: boolean | null;
+    cadenceOk: boolean | null;
   };
   failedEffects?: { name: string; error: string }[];
 };

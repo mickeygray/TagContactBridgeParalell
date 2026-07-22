@@ -71,6 +71,21 @@ export const SCRIPT_ENTRIES: ManualEntry[] = [
     blocks: [
       {
         kind: "prose",
+        heading: "Phase 1 is a two-way legitimacy screen",
+        text: "The opening does not only prove that we are legitimate; it determines whether the person on the other end intends to have a legitimate conversation. Basic identification is always available: your first name, the firm name, the truthful reason for the call, the public website or main line, and the fact that we are not the IRS. Everything beyond those public basics is progressive disclosure. Before giving detailed company information, internal details, or case-specific tax guidance, look for reciprocity: do they answer reasonable questions about themselves, describe a real tax problem we can help with, respond without staying permanently defensive, and allow the conversation to become an interview instead of a one-way examination of the firm? Caution is not hostility. A privacy-conscious prospect may need time or may prefer to call the public number back. Give them that path. But a person who only fishes for details while refusing every ordinary question has not earned deeper disclosure or advice. The full read — and the caller who is fishing — is covered in [[read.legitimacy]] and [[read.bad-actor]]."
+      },
+      {
+        kind: "moves",
+        heading: "The four legitimacy signals",
+        items: [
+          "Reciprocity — they provide ordinary information about their situation when asked, rather than demanding an unlimited one-way disclosure.",
+          "A valid problem — they can describe a federal or state tax issue that is plausibly within our scope.",
+          "Receptiveness — they answer reasonable qualifying questions without remaining defensive throughout the exchange.",
+          "Interview posture — they are open to being interviewed about the case, not solely collecting company facts, tax tactics, or free advice."
+        ]
+      },
+      {
+        kind: "prose",
         heading: "Why the first thirty seconds decide the call",
         text: "On an outbound call, the prospect’s first instinct is defense: unknown number, unknown voice, and a topic — tax debt — they may be actively avoiding. Everything in the intro is aimed at lowering that defense before it hardens. You do that with three things said early and plainly: who you are, what firm you are with, and why this call exists. A prospect who still does not know what firm they are talking to sixty seconds in is a prospect deciding how to hang up. On inbound the dynamic is easier — they called you — but the beats are the same: identity, firm, and a warm invitation to talk. Whatever you do, do not open with scripted-sounding boilerplate like “this is a recorded line” before you have even said your name. Sound like a person first."
       },
@@ -81,7 +96,7 @@ export const SCRIPT_ENTRIES: ManualEntry[] = [
           "Identify yourself — your first name, said like you would say it to a neighbor.",
           "Name the firm — clearly and early, not buried mid-sentence.",
           "Confirm the prospect — “Is this [name]?” — so you are not pitching a spouse or a voicemail.",
-          "Say why you are calling — the public-records or inquiry framing, honestly stated.",
+          "Say why you are calling — anchored to their online inquiry, honestly stated.",
           "Bridge to permission — ask a small question they can say yes to (“Sound fair?” / “Do you have a minute?”) before you ask anything else of them."
         ]
       },
@@ -90,10 +105,10 @@ export const SCRIPT_ENTRIES: ManualEntry[] = [
         heading: "The real lines — adapt, don’t recite",
         items: [
           "Inbound: “Thank you for calling The Tax Group, this is [name]. How can I help you today?”",
-          "Outbound: “Your name appeared in public tax records — often a state or federal filing or lien. I’d like to confirm whether you still have an active matter that needs representation. Sound fair?”",
-          "Who we are: “We’re a licensed tax representation firm — enrolled agents, tax preparers, consultants. Our goal is to represent you with the IRS or state so you’re not left guessing about your records.”",
+          "Outbound: “You reached out through an online inquiry about tax help — I’m following up to confirm whether you’ve still got an active matter that needs representation. Sound fair?”",
+          "Who we are: “We’re a licensed firm with enrolled agents, tax preparers, and other tax specialists. Our goal is to represent you with the IRS or state so you’re not left guessing about your records.”",
           "If they ask “are you the IRS?”: “We’re not the IRS. We’re a team of licensed tax professionals — our job is to represent people with the IRS, not collect for them.”",
-          "If they lead with “how did you get my number?”: “It came through public tax filings, or a site you interacted with about tax help. We only reach out to people who show signs of an active or unresolved issue.”",
+          "If they lead with “how did you get my number?”: “It came through your online inquiry about tax help — a form you filled out about a tax balance. That’s the only reason I’m calling.”",
           "If they’re busy: “No problem — I’ll be brief. This will take about sixty seconds just to see if it’s even relevant to you. Fair enough?”"
         ]
       },
@@ -105,20 +120,26 @@ export const SCRIPT_ENTRIES: ManualEntry[] = [
       {
         kind: "example",
         weak: "“Hi, this is a recorded line, I’m calling about your tax debt situation, can you verify your date of birth for me?”",
-        strong: "“Hi, this is Marcus with The Tax Group. Is this David? … Great — your name came up in public tax records, usually that’s a state or federal filing or a lien, and I wanted to confirm whether you’ve still got an active matter that needs representation. Sound fair?”",
+        strong: "“Hi, this is Marcus with The Tax Group. Is this David? … Great — you sent in an online inquiry about tax help a little while back, and I wanted to confirm whether you’ve still got an active matter that needs representation. Sound fair?”",
         note: "The weak open leads with compliance boilerplate, never names a human or a firm, and asks for PII before earning anything. The strong open is name, firm, confirmation, honest reason, and a permission bridge — in four breaths."
       },
       {
         kind: "drill",
         prompt: "Ten seconds into your outbound opener the prospect cuts in: “Just tell me what you want.” What’s your move?",
-        answer: "Take the invitation — compress, don’t defend. “Fair enough. I’m [name] with The Tax Group, we’re a licensed tax representation firm. Your name showed up in public tax records and I’m calling to see if you’ve still got an open matter with the IRS or the state. Sixty seconds to find out if this is even relevant to you — fair?” You just cleared the whole gate in one answer and re-asked for permission."
+        answer: "Take the invitation — compress, don’t defend. “Fair enough. I’m [name] with The Tax Group, we’re a licensed firm with enrolled agents, tax preparers, and other tax specialists. You sent in an online inquiry about tax help and I’m calling to see if you’ve still got an open matter with the IRS or the state. Sixty seconds to find out if this is even relevant to you — fair?” You just cleared the whole gate in one answer and re-asked for permission."
       },
       {
         kind: "compliance",
         text: "If the prospect says “take me off your list,” “stop calling,” or anything that means do-not-call, that is terminal. Acknowledge it, confirm it will be honored, and end the call — no last pitch, no “before you go.” There is no save to attempt on a revocation."
+      },
+      {
+        kind: "compliance",
+        text: "Progressive disclosure never permits deception or evasiveness. Give basic public identity and compliance information accurately, and never invent a location, credential, result, or tax answer. Detailed company information and individualized tax guidance come only after reciprocal good-faith engagement and enough facts to answer responsibly. If legitimacy remains doubtful, offer the public website/main line for independent verification and end the exchange cleanly rather than arguing or improvising."
       }
     ],
     links: [
+      "read.legitimacy",
+      "read.bad-actor",
       "script.discovery",
       "obj.how-got-number",
       "obj.scam-distrust",
@@ -308,9 +329,9 @@ export const SCRIPT_ENTRIES: ManualEntry[] = [
         heading: "The real lines — adapt, don’t recite",
         items: [
           "The pitch: “The first step toward resolving any tax matter is getting you formally represented with the IRS and any state agencies. That involves three authorizations: IRS Form 2848, Form 8821, and the state POA if applicable.”",
-          "Foundation, not fix: “These forms don’t change your balance — they open the door so we can see the facts and communicate lawfully. Once they’re filed, we run a full compliance check and give you follow-up guidance in the first few weeks.”",
+          "Foundation, not fix: “These forms don’t change your balance — they open the door so we can see the facts and communicate lawfully. Once they’re filed, we run a full compliance check and follow up with guidance as your record comes back.”",
           "Expectation: “Tax-debt work is a marathon, not a sprint — each step has to be accurate so the next one means something. Representation is the starting line; until we’re inside your file, it’s premature to comment on strategy.”",
-          "Honest urgency: “But if you’ve had active IRS communication, time matters — the sooner representation is filed, the sooner your legal team engages. Nothing moves forward without review.”",
+          "Honest urgency: “But if you’ve had active IRS communication, time matters — we can’t control how long the IRS takes, which is exactly why we need to get you protected today by filing the power of attorney. Nothing moves forward without it.”",
           "Differentiation: “A lot of companies rush to big promises. We don’t. We take the responsible path — get you represented, gather verified data, then outline real options based on facts.”"
         ]
       },
@@ -363,8 +384,13 @@ export const SCRIPT_ENTRIES: ManualEntry[] = [
     blocks: [
       {
         kind: "prose",
+        heading: "Building the quote — scope and capacity first",
+        text: "The number you state is built, not recited. Two inputs decide it: the scope of work — how many returns need preparing, how many agencies need representation, what the collection posture looks like — and the prospect’s realistic ability to pay, which discovery already gave you. The floor’s general rules of thumb: about $350 per tax return that needs preparing, and at least $1,200 for representation per institution — IRS or state. Treat those as starting points for judgment, not a menu to read aloud. And when the case is unusual or the right number isn’t obvious, use the play that costs nothing: put them on a brief hold and confer with the team about the best quote. “Give me one moment — I want to make sure I quote you exactly right” sounds like diligence because it is. Never invent a number under pressure; a short hold beats a guessed quote every time."
+      },
+      {
+        kind: "prose",
         heading: "State the fee, then pause",
-        text: "The fee line is one sentence, delivered like a fact: the flat legal fee for representation, what it covers, done. Then the hardest move in the section: silence. Do not justify, do not soften, do not fill the gap — let them react. Most agents lose the close in the three seconds after the number, talking it down before the prospect has even objected. If they agree, you are done here; move straight to [[script.info]]. If they hesitate — “that’s a bit high,” “I can’t do that all at once” — that is not a rejection, it is your cue to walk the ladder. And note what the hesitation is actually about: a prospect who asks “what am I paying for?” didn’t hear the value; go back and re-anchor scope before offering structure. Itemize what is included — the POA forms, transcript retrieval, the attorney-led compliance review — before the number, not as a rescue after it."
+        text: "The fee line is one sentence, delivered like a fact: the flat legal fee for representation, what it covers, done. Then the hardest move in the section: silence. Do not justify, do not soften, do not fill the gap — let them react. Most agents lose the close in the three seconds after the number, talking it down before the prospect has even objected. If they agree, you are done here; move straight to [[script.info]]. If they hesitate — “that’s a bit high,” “I can’t do that all at once” — don’t hear a rejection yet: most of the time that is your cue to walk the ladder. And note what the hesitation is actually about: a prospect who asks “what am I paying for?” didn’t hear the value; go back and re-anchor scope before offering structure. Itemize what is included — the POA forms, transcript retrieval, the compliance review by the attorney’s staff — before the number, not as a rescue after it."
       },
       {
         kind: "moves",
@@ -383,7 +409,7 @@ export const SCRIPT_ENTRIES: ManualEntry[] = [
         kind: "lines",
         heading: "The real lines — adapt, don’t recite",
         items: [
-          "The fee: “The flat legal fee for representation is $___. That covers preparing and filing the federal and state POA forms, transcript retrieval, and your initial attorney-led compliance review.” (Then silence.)",
+          "The fee: “The flat legal fee for representation is $___. That covers preparing and filing the federal and state POA forms, transcript retrieval, and your initial compliance review by the attorney’s staff.” (Then silence.)",
           "Anchor full: “Most clients take care of this all at once so their file moves immediately — once payment and signed docs are in, the POA is filed and representation is activated the same day.”",
           "Two-payment: “Half today to open the case, the balance in 30 days — that still gets your POA filed right away.”",
           "Four-month: “Four monthly payments, minimum $350 a month, to keep the file moving and in good standing.”",
@@ -397,8 +423,8 @@ export const SCRIPT_ENTRIES: ManualEntry[] = [
       },
       {
         kind: "example",
-        weak: "“So the fee is $3,500… I know that’s a lot, I’m really sorry — but we might be able to do a discount, maybe $2,800? Would that work for you?”",
-        strong: "“The flat legal fee for representation is $3,500. That covers the federal and state POA forms, transcript retrieval, and your attorney-led compliance review. … (silence) … Most clients take care of it all at once so the file moves immediately — the day payment and signed docs are in, your POA is filed. If it’s easier to structure, we can do half today and the balance in 30 days. Which works best to get representation started today?”",
+        weak: "“So the fee is $___… I know that’s a lot, I’m really sorry — but we might be able to do a discount? Would that work for you?”",
+        strong: "“The flat legal fee for representation is $___. That covers the federal and state POA forms, transcript retrieval, and your compliance review by the attorney’s staff. … (silence) … Most clients take care of it all at once so the file moves immediately — the day payment and signed docs are in, your POA is filed. If it’s easier to structure, we can do half today and the balance in 30 days. Which works best to get representation started today?”",
         note: "The weak version apologizes, then cuts the price unprompted — the prospect now believes the number was padded, and the trainer flags exactly this (“agent dropped price without a reason”). The strong version states, pauses, anchors full, offers structure only in response to hesitation, and exits on an alternative-choice close."
       },
       {
@@ -468,7 +494,7 @@ export const SCRIPT_ENTRIES: ManualEntry[] = [
       {
         kind: "prose",
         heading: "When they freeze",
-        text: "A hesitation here is almost never about the data — it is the last flare of the scam fear. The wrong move is to push; the right move is to hand them control. Invite verification: have them write down the firm name and look it up while you are on the line, and remind them that nothing is filed until they have reviewed and signed the DocuSign themselves. A prospect who was on the verge of guarding their information will flip to participating the moment you make verification their idea. The review-before-filing point is your strongest card: they are not surrendering anything on this call — they are preparing documents that they will read and sign before a single form goes anywhere."
+        text: "A hesitation here is usually not about the data — most of the time it is the last flare of the scam fear. Read which one you are facing before you answer. Pushing is the one move that reliably backfires; the strongest play is almost always to hand them control. Invite verification: have them write down the firm name and look it up while you are on the line, and remind them that nothing is filed until they have reviewed and signed the DocuSign themselves. A prospect who was on the verge of guarding their information will flip to participating the moment you make verification their idea. The review-before-filing point is your strongest card: they are not surrendering anything on this call — they are preparing documents that they will read and sign before a single form goes anywhere."
       },
       {
         kind: "example",
@@ -520,7 +546,7 @@ export const SCRIPT_ENTRIES: ManualEntry[] = [
         items: [
           "Summarize the plan — what we file, what we pull, who reviews it, and what they get back. Specific, short, in their language.",
           "Reinforce the value — representation is the foundation; now they will know exactly where they stand.",
-          "Set the welcome call — the concrete next touch: welcome call and confirmation email within one business day.",
+          "Set the welcome call — the concrete next touch: welcome call and confirmation email typically within one business day.",
           "End on respect for the decision — they got in front of this today; say so.",
           "Then stop talking. The worst close is the one that keeps going."
         ]
@@ -531,17 +557,17 @@ export const SCRIPT_ENTRIES: ManualEntry[] = [
         items: [
           "Summarize: “We’ll file your limited Power of Attorney, request your IRS and state transcripts, and have the attorney’s staff review everything for accuracy. Then you get a complete summary and next steps.”",
           "Reinforce: “Representation is the foundation for anything that follows — knowing exactly where you stand, so your next decisions are informed.”",
-          "The welcome: “Thank you for getting in front of this. You’ll receive your welcome call and confirmation email within one business day.”"
+          "The welcome: “Thank you for getting in front of this. You’ll receive your welcome call and confirmation email typically within one business day.”"
         ]
       },
       {
         kind: "drill",
         prompt: "Card collected, docs sent — and as you start wrapping up the client asks: “So how long until this is all resolved?” What’s your move?",
-        answer: "Summarize what is scheduled instead of predicting what is not: “Here’s what I can put a clock on: your POA gets filed as soon as your signed docs are in, the transcript requests go out, and you’ll have your welcome call within one business day. Once the attorney’s staff has your actual record, they’ll walk you through the realistic timeline for your case — that way it’s based on your file, not a guess from me.” You gave certainty about our steps and honesty about theirs."
+        answer: "Summarize what is scheduled instead of predicting what is not: “Here’s what I can put a clock on: your POA gets filed as soon as your signed docs are in, the transcript requests go out, and you’ll have your welcome call typically within one business day. Once the attorney’s staff has your actual record, they’ll walk you through the realistic timeline for your case — that way it’s based on your file, not a guess from me.” You gave certainty about our steps and honesty about theirs."
       },
       {
         kind: "compliance",
-        text: "The summary restates what WE do — file the POA, request transcripts, licensed review, follow-up guidance — never what the IRS will decide or when. The only dates in the close are ours to keep: the welcome call and confirmation email within one business day. Promise the process, never the outcome."
+        text: "The summary restates what WE do — file the POA, request transcripts, licensed review, follow-up guidance — never what the IRS will decide or when. The only dates in the close are ours to keep: the welcome call and confirmation email typically within one business day. Promise the process, never the outcome."
       }
     ],
     links: [

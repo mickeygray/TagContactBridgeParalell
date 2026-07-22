@@ -17,8 +17,8 @@ const {
 } = require("../../packages/shared-services/src/cxCallWrapCardService");
 
 test("TRIGGER: only OUR answered on terminal rows makes a card — corrections and non-contacts never do", () => {
-  assert.equal(wrapCardNeeded({ outcome: "answered" }), true);
-  assert.equal(wrapCardNeeded({ outcome: "answered", eventType: "terminal" }), true);
+  assert.equal(wrapCardNeeded({ outcome: "answered" }), false, "facts without a click destination never make work");
+  assert.equal(wrapCardNeeded({ outcome: "answered", eventType: "terminal", nextAction: "call_wrap" }), true);
   assert.equal(wrapCardNeeded({ outcome: "answered", eventType: "review-dnc" }), false, "corrections never card — no cycles");
   assert.equal(wrapCardNeeded({ outcome: "voicemail" }), false);
   assert.equal(wrapCardNeeded({ outcome: "did_not_connect" }), false);
@@ -29,7 +29,7 @@ test("TRIGGER: only OUR answered on terminal rows makes a card — corrections a
 test("THE 2H CLOCK: the card expires exactly two hours after the call", () => {
   const card = buildWrapCard({
     row: { idemKey: "q1:u1" },
-    payload: { queueItemId: "q1", uii: "u1", outcome: "answered", at: "2026-07-06T20:00:00.000Z", caseId: 7, agentEmail: "A@X.com", name: "Lead" },
+    payload: { queueItemId: "q1", uii: "u1", outcome: "answered", nextAction: "call_wrap", at: "2026-07-06T20:00:00.000Z", caseId: 7, agentEmail: "A@X.com", name: "Lead" },
     coachSummary: "spoke about 941 debt",
   });
   assert.equal(card.idemKey, "q1:u1");
@@ -46,6 +46,7 @@ test("DOSSIER: wrap cards keep display names from terminal payload aliases", () 
       queueItemId: "q2",
       uii: "u2",
       outcome: "answered",
+      nextAction: "call_wrap",
       prospectName: "Alias Prospect",
       at: "2026-07-06T20:00:00.000Z",
       caseId: 8,
@@ -56,7 +57,7 @@ test("DOSSIER: wrap cards keep display names from terminal payload aliases", () 
 });
 
 function makeHarness({ resolveResult } = {}) {
-  const calls = { interview: [], correction: [], appointment: [], dnc: [], resolutions: [] };
+  const calls = { interview: [], correction: [], appointment: [], cadence: [], dnc: [], resolutions: [] };
   const cardRepository = {
     async insertOnce(card) { calls.inserted = card; return card; },
     async findByIdemKey() { return null; },
@@ -84,6 +85,7 @@ function makeHarness({ resolveResult } = {}) {
       calls.appointment.push({ appointmentAt, appointmentDate, appointmentTime, appointmentTimezone });
       return { ok: true };
     },
+    releaseToCadence: async (card) => { calls.cadence.push(card.idemKey); return { ok: true }; },
     logger: { info() {} },
   });
   return { service, calls };
@@ -97,12 +99,14 @@ test("PROTOCOL: dnc = interview + correction row; appointment = interview + book
   assert.equal(calls.interview.length, 1, "dnc files the interview (accidental-DNC recoverability)");
   assert.equal(calls.correction.length, 1, "dnc emits the correction ROW — the drain applies app-side (layering law)");
   assert.equal(calls.appointment.length, 0);
+  assert.equal(calls.cadence.length, 0);
 
   const appt = await service.resolve({ idemKey: "k2", action: "appointment", appointmentAt: "2026-07-08T17:00" });
   assert.equal(appt.ok, true);
   assert.equal(calls.appointment.length, 1);
   assert.equal(calls.correction.length, 1, "appointment adds no correction row in v1");
   assert.equal(calls.interview.length, 2);
+  assert.equal(calls.cadence.length, 0);
 
   const dismiss = await service.resolve({ idemKey: "k3", action: "dismissed" });
   const expire = await service.resolve({ idemKey: "k4", action: "expired" });
@@ -111,6 +115,7 @@ test("PROTOCOL: dnc = interview + correction row; appointment = interview + book
   assert.equal(calls.interview.length, 4, "✕ AND expiry still file the interview — a real call reaches the case file");
   assert.equal(calls.correction.length, 1);
   assert.equal(calls.appointment.length, 1);
+  assert.deepEqual(calls.cadence, ["k3"], "only the human X click releases to cadence");
 
   const bad = await service.resolve({ idemKey: "k5", action: "appointment" });
   assert.equal(bad.ok, false, "appointment without a datetime is refused");
@@ -160,7 +165,7 @@ test("SUMMARY IS TEXT: a status object leaking into the coachSummary slot never 
   const { buildWrapCard } = require("../../packages/shared-services/src/cxCallWrapCardService");
   const payload = {
     queueItemId: "q1", uii: "u1", caseId: 101617, domain: "WYNN",
-    agentEmail: "a@x.com", outcome: "answered", eventType: "terminal",
+        agentEmail: "a@x.com", outcome: "answered", eventType: "terminal", nextAction: "call_wrap",
     callSummary: "prospect engaged, wants callback after 3pm",
     at: "2026-07-07T17:00:00.000Z",
   };
