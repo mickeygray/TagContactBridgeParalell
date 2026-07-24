@@ -75,7 +75,11 @@ const PHASES = [
   { key: "wrap", label: "Wrap" },
 ];
 const PHASE_COUNTDOWN_SECONDS = 30;
-const LIVE_COACH_ENABLED = false;
+// Re-enabled 2026-07-23: the two-station observer now publishes panels
+// server-side via ui-state (cheap 1.5s poll against an in-memory map) —
+// the old reason to keep this off (slow per-turn /coach calls from the
+// client) no longer applies in two-station mode.
+const LIVE_COACH_ENABLED = true;
 const TRAINER_TTS_GENERATION_SPEED = 1.35;
 const TRAINER_AUDIO_PLAYBACK_RATE = 1;
 const MIN_RECORDING_BYTES = 900;
@@ -1084,23 +1088,71 @@ function ScorecardPanel({
   );
 }
 
-function CallStatusPanel({ phaseKey, hasSession }: { phaseKey?: string; hasSession?: boolean }) {
+function CoachGuidanceCard({ coach }: { coach: TrainerCoachPanel }) {
+  return (
+    <div className="space-y-3">
+      <div className="rounded-md border border-border bg-muted/30 p-4">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2 text-xs font-semibold uppercase text-muted-foreground">
+            <Lightbulb className="h-3.5 w-3.5" />
+            Coach — {coach.phase.label}
+          </div>
+          <span className="text-[10px] text-muted-foreground">
+            {Math.round((coach.confidence || 0) * 100)}%
+          </span>
+        </div>
+        {coach.oneSentenceFocus ? (
+          <div className="mt-2 text-sm font-medium">{coach.oneSentenceFocus}</div>
+        ) : null}
+        {coach.tips.length > 0 ? (
+          <ul className="mt-2 list-disc space-y-1 pl-4 text-xs text-muted-foreground">
+            {coach.tips.map((tip) => (
+              <li key={tip}>{tip}</li>
+            ))}
+          </ul>
+        ) : null}
+      </div>
+      {coach.riskFlags.length > 0 ? (
+        <div className="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-xs">
+          <div className="mb-1 font-semibold uppercase text-muted-foreground">Watch out</div>
+          <ul className="list-disc space-y-1 pl-4">
+            {coach.riskFlags.map((flag) => (
+              <li key={flag}>{flag}</li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+      {coach.nextBestQuestion ? (
+        <div className="rounded-md border border-success/30 bg-success/10 p-3 text-xs">
+          <div className="mb-1 font-semibold uppercase text-muted-foreground">Try asking</div>
+          {coach.nextBestQuestion}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function CallStatusPanel({ coach, hasSession }: { coach: TrainerCoachPanel | null; hasSession?: boolean }) {
   if (hasSession) {
     return (
       <div className="space-y-4 p-4">
-        <PhaseRail activeKey={phaseKey} />
-        <div className="rounded-md border border-border bg-muted/30 p-4">
-          <div className="text-sm font-semibold">Roleplay active</div>
-          <div className="mt-1 text-xs text-muted-foreground">
-            Coaching appears here as the call develops — feedback on what's happening and the approach that fits, drawn from the guide. It only speaks up when there's something worth saying.
+        <PhaseRail activeKey={coach?.phase.key} />
+        {coach ? (
+          <CoachGuidanceCard coach={coach} />
+        ) : (
+          <div className="rounded-md border border-border bg-muted/30 p-4">
+            <div className="text-sm font-semibold">Roleplay active</div>
+            <div className="mt-1 text-xs text-muted-foreground">
+              Coaching appears here as the call develops — feedback on what's happening and the approach that fits, drawn from the guide. It only speaks up when there's something worth saying.
+            </div>
           </div>
-        </div>
+        )}
       </div>
     );
   }
   return (
     <div className="space-y-4 p-4">
-      <PhaseRail activeKey={phaseKey} />
+      <PhaseRail activeKey={coach?.phase.key} />
       <div className="rounded-md border border-border bg-muted/30 p-4">
         <div className="text-sm font-semibold">How this works</div>
         <ul className="mt-2 space-y-2 text-xs text-muted-foreground">
@@ -1149,7 +1201,7 @@ function SidePanel({
       ) : phaseNotes ? (
         <PhaseNotesCard notes={phaseNotes} countdown={countdown} onCommand={onCommand} />
       ) : (
-        <CallStatusPanel phaseKey={coach?.phase.key} hasSession={Boolean(profile)} />
+        <CallStatusPanel coach={coach} hasSession={Boolean(profile)} />
       )}
     </aside>
   );
@@ -1353,6 +1405,10 @@ export function SalesTrainerWorkspace() {
   const [prospectAudioPending, setProspectAudioPending] = useState(false);
   const [prospectAudioPlaying, setProspectAudioPlaying] = useState(false);
   const uiStateVersionRef = useRef(0);
+  // Two-station mode (from /config): the server-side observer publishes the
+  // coach panel via ui-state — the legacy per-turn /coach call must not fire
+  // on top of it or the two race for the panel.
+  const twoStationRef = useRef(false);
   const draftRef = useRef("");
   const draftInputRef = useRef<HTMLTextAreaElement | null>(null);
   const healthQueueRef = useRef<UiHealthPayload[]>([]);
@@ -1397,6 +1453,7 @@ export function SalesTrainerWorkspace() {
       await salesTrainerApi.checkAuth();
       const nextConfig = await salesTrainerApi.config();
       setProvider(nextConfig.providers.default || nextConfig.providers.available[0] || "anthropic");
+      twoStationRef.current = nextConfig.twoStation?.enabled === true;
       setAuthState("signed-in");
     } catch {
       setAuthState("signed-out");
@@ -1435,8 +1492,13 @@ export function SalesTrainerWorkspace() {
     return () => window.clearInterval(id);
   }, [recording]);
 
-  useEffect(
-    () => () => {
+  useEffect(() => {
+    // StrictMode dev double-mount runs this cleanup once on the throwaway
+    // mount; without re-arming here the flag stays true forever and every
+    // !unmountedRef guard (mic meter, transcribe, clearRecordingState)
+    // silently no-ops on the live component.
+    unmountedRef.current = false;
+    return () => {
       unmountedRef.current = true;
       const recorder = mediaRecorderRef.current;
       if (recorder && recorder.state !== "inactive") {
@@ -1450,9 +1512,8 @@ export function SalesTrainerWorkspace() {
         }
       }
       stopMicTracks();
-    },
-    [],
-  );
+    };
+  }, []);
 
   function drainHealthQueue() {
     if (healthAnimatingRef.current) return;
@@ -1552,6 +1613,9 @@ export function SalesTrainerWorkspace() {
       setCoach(null);
       return;
     }
+    // Two-station mode: the observer owns the panel (arrives via the
+    // ui-state poll above) — firing /coach here would double-write it.
+    if (twoStationRef.current) return;
     if (nextMessages.length === 0) return;
     try {
       const panel = await salesTrainerApi.coach({
@@ -1739,7 +1803,7 @@ export function SalesTrainerWorkspace() {
           setAudioFailure("Prospect text is ready, but no opening voice audio was returned.");
         }
       }
-      if (LIVE_COACH_ENABLED) {
+      if (LIVE_COACH_ENABLED && !twoStationRef.current) {
         const panel = await salesTrainerApi.coach({
           messages: modelMessages(initialMessages),
           profile: bundle.profile,

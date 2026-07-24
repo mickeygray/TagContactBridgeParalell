@@ -363,6 +363,13 @@ function createSalesTrainerRouter(auth, config = {}) {
         },
         allowlistConfigured:
           config.allowedEmails.length > 0 || config.allowedDomains.length > 0,
+        // Two-station trainer: when enabled, the server-side observer owns
+        // the coach panel (published via ui-state) — clients must NOT fire
+        // the legacy per-turn /coach call on top of it.
+        twoStation: {
+          enabled: Boolean(config.twoStationEnabled),
+          dialogueModel: config.dialogueModel,
+        },
         modes: ["auto", "roleplay", "coach", "objection-drill", "transcript-review"],
       },
     });

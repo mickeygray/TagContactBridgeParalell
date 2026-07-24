@@ -7089,7 +7089,7 @@ function createLeadDeliveryRuntime({
             error.code = "SIMPLE_REFILL_COUNT_FAILED";
             throw error;
           }
-          if (Number(physical.count) >= SIMPLE_POOL_LOW_WATER) {
+          if (Number(physical.count) > SIMPLE_POOL_LOW_WATER) {
             return { status: "pool-above-low-water", accepted: 0 };
           }
           const refill = await postTopOfQueue(agentId, { count: SIMPLE_PACKET_SIZE });
@@ -7329,7 +7329,7 @@ function createLeadDeliveryRuntime({
         agentResults.push({ agentId, status: physical.status, accepted: 0 });
         continue;
       }
-      if (Number(physical.count) >= SIMPLE_POOL_LOW_WATER) {
+      if (Number(physical.count) > SIMPLE_POOL_LOW_WATER) {
         const marked = await setAgentDayStartState(agentId, dateKey, "completed", at, {
           reason: "already-stocked",
         });
@@ -7621,9 +7621,6 @@ function createLeadDeliveryRuntime({
     if (!folder.ok) {
       noteProviderInventoryBackpressure(folder);
       return { status: folder.reason || "folder-read-failed", moved: 0, targetOffset };
-    }
-    if (folder.contacts.length <= PRODUCTIVITY_REBALANCE_CUSHION_SIZE) {
-      return { status: "already-cushioned", moved: 0, targetOffset };
     }
     const localByContactId = new Map(localItems
       .map((item) => [String(item.providerContactId || "").trim(), item])

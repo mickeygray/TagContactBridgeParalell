@@ -72,6 +72,13 @@ export interface TrainerConfig {
     profileLocking: string;
     disclosure: string;
   };
+  // Two-station trainer: when enabled the server-side observer publishes
+  // the coach panel via ui-state; the client must not fire the legacy
+  // per-turn /coach call on top of it.
+  twoStation?: {
+    enabled: boolean;
+    dialogueModel?: string;
+  };
   modes: string[];
 }
 

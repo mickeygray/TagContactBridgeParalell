@@ -384,7 +384,9 @@ function getSharedConfig(overrides = {}) {
       externalNotifyPollSeconds: envInt("DEMO_RINGOUT_EXTERNAL_NOTIFY_POLL_SECONDS", 60),
     },
     anthropic: {
-      model: env("ANTHROPIC_MODEL", "claude-3-5-haiku-latest"),
+      // Retired 3.5-haiku default 404s — keep in lockstep with
+      // anthropicClient.js's default ladder.
+      model: env("ANTHROPIC_MODEL", "claude-sonnet-5"),
       maxTokens: envInt("ANTHROPIC_MAX_TOKENS", 1200),
       temperature: Number(env("ANTHROPIC_TEMPERATURE", "0")),
     },
