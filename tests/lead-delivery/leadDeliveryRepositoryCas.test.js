@@ -520,6 +520,85 @@ test("runtime reads normalize identities and return only time-eligible storage c
   await assert.rejects(() => repository.listAgents({ enabledOnly: "true" }), /enabledOnly must be a boolean/);
 });
 
+test("packet candidate and overnight barrier queries scope to allowed domains", async () => {
+  const { repository, Item } = makeRepository({
+    items: [
+      {
+        _id: "tag-aged",
+        sourceIdentity: "TAG:case-tag",
+        domain: "TAG",
+        sourcePool: "older_available",
+        state: "eligible",
+        activeAttempt: true,
+        providerContactId: null,
+        reservedAgentId: null,
+        lastContactAt: null,
+        receivedAt: new Date("2026-07-01T18:00:00Z"),
+      },
+      {
+        _id: "wynn-aged",
+        sourceIdentity: "WYNN:case-wynn",
+        domain: "WYNN",
+        sourcePool: "older_available",
+        state: "eligible",
+        activeAttempt: true,
+        providerContactId: null,
+        reservedAgentId: null,
+        lastContactAt: null,
+        receivedAt: new Date("2026-07-02T18:00:00Z"),
+      },
+      {
+        _id: "wynn-overnight",
+        sourceIdentity: "WYNN:case-overnight",
+        domain: "WYNN",
+        sourcePool: "overnight",
+        state: "eligible",
+        activeAttempt: true,
+        providerContactId: null,
+        reservedAgentId: null,
+        totalAttemptCount: 0,
+        lastContactAt: null,
+        receivedAt: new Date("2026-07-10T12:00:00Z"),
+      },
+    ],
+  });
+  const at = new Date("2026-07-10T23:00:00Z");
+
+  const scoped = await repository.listPacketCandidateItems({
+    agentId: "bruce",
+    sourcePools: ["older_available"],
+    now: at,
+    limit: 10,
+    domains: ["tag"],
+  });
+  assert.deepEqual(scoped.map((row) => row._id), ["tag-aged"]);
+  assert.deepEqual(Item.findCalls.at(-1).filter.domain, { $in: ["TAG"] });
+
+  const unscoped = await repository.listPacketCandidateItems({
+    agentId: "bruce",
+    sourcePools: ["older_available"],
+    now: at,
+    limit: 10,
+  });
+  assert.deepEqual(unscoped.map((row) => row._id), ["tag-aged", "wynn-aged"]);
+  assert.equal(Object.hasOwn(Item.findCalls.at(-1).filter, "domain"), false,
+    "no-domains query filter must stay byte-identical to the pre-domains shape");
+
+  assert.equal(await repository.hasUnconsumedOvernightFirstContact({ domains: ["TAG"] }), false);
+  assert.equal(await repository.hasUnconsumedOvernightFirstContact({ domains: ["WYNN"] }), true);
+  assert.equal(await repository.hasUnconsumedOvernightFirstContact(), true);
+  await assert.rejects(
+    () => repository.listPacketCandidateItems({
+      agentId: "bruce",
+      sourcePools: ["older_available"],
+      now: at,
+      limit: 10,
+      domains: [],
+    }),
+    /domains must be a non-empty array/,
+  );
+});
+
 test("agent configuration upsert changes only configuration fields and rejects runtime or secret material", async () => {
   const { repository, Agent } = makeRepository({ agents: [{
     _id: "agent-bruce",

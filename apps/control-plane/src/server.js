@@ -1995,12 +1995,30 @@ async function startServer() {
     credentialStore: phoneBurnerCredentialStore,
     logger: runtime.logger,
   });
+  // Logics status-ID conventions can differ per company tenant. A per-domain
+  // env override (e.g. LOGICS_PROSPECT_STATUS_IDS_WYNN) applies to that domain
+  // only; every domain without one keeps the global lists.
+  const statusIdListForDomain = (envPrefix, fallback) => (domain) => {
+    const key = `${envPrefix}_${String(domain || "").trim().toUpperCase()}`;
+    const raw = String(process.env[key] || "").trim();
+    if (!raw) return fallback;
+    const parsed = raw.split(",").map((value) => Number(String(value).trim())).filter(Number.isFinite);
+    return parsed.length ? parsed : fallback;
+  };
+  const prospectStatusIdsForDomain = statusIdListForDomain(
+    "LOGICS_PROSPECT_STATUS_IDS",
+    config.logicsProspectStatusIds,
+  );
+  const dncStatusIdsForDomain = statusIdListForDomain(
+    "LOGICS_DNC_STATUS_IDS",
+    config.logicsDncStatusIds,
+  );
   const leadDeliveryCadenceSource = leadDeliveryService.createLeadDeliveryCadenceSource({
     repository: leadDeliveryRepository,
     domains: getCompanyKeys(),
-    policyForDomain: () => ({
-      allowedProspectStatusIds: config.logicsProspectStatusIds,
-      dncStatusIds: config.logicsDncStatusIds,
+    policyForDomain: (domain) => ({
+      allowedProspectStatusIds: prospectStatusIdsForDomain(domain),
+      dncStatusIds: dncStatusIdsForDomain(domain),
     }),
     contactWindowEvaluator: (row, at) => resolveQueueDialTimeWindow(row, at),
     overnightBatchResolver: (item, at) => leadDeliveryService.assignPacificMorningBatch(item, { now: at }),

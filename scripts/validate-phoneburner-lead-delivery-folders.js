@@ -47,8 +47,11 @@ async function main() {
   }
 
   const agentFilter = requestedAgent();
+  // Disabled seats have no provider folders yet; validate them only when
+  // explicitly requested via --agent.
   const entries = Object.entries(config.agents)
-    .filter(([agentId]) => !agentFilter || agentId === agentFilter);
+    .filter(([agentId]) => !agentFilter || agentId === agentFilter)
+    .filter(([, agent]) => agentFilter || agent.enabled === true);
   if (!entries.length) {
     console.log(JSON.stringify({ ok: false, reason: "agent-not-configured" }));
     process.exitCode = 1;

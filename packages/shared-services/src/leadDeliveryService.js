@@ -183,6 +183,7 @@ function validateLeadDeliveryConfiguration(config = {}) {
     "leadStreamId",
     "subscribedPools",
     "packetAllowances",
+    "domains",
   ]);
   for (const field of Object.keys(config)) {
     if (!topLevelFields.has(field)) errors.push(`config contains unknown field ${field}`);
@@ -306,6 +307,20 @@ function validateLeadDeliveryConfiguration(config = {}) {
     if (memberId && username) errors.push(`${prefix} may configure at most one PhoneBurner owner identity`);
     if (applicationAccountEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(applicationAccountEmail)) {
       errors.push(`${prefix}.applicationAccountEmail must be an email when supplied`);
+    }
+
+    if (entry.domains != null) {
+      if (!Array.isArray(entry.domains) || entry.domains.length === 0) {
+        errors.push(`${prefix}.domains must be a non-empty array when supplied`);
+      } else {
+        const normalizedDomains = entry.domains.map((domain) => String(domain || "").trim().toUpperCase());
+        if (normalizedDomains.some((domain) => !/^[A-Z0-9]+$/.test(domain))) {
+          errors.push(`${prefix}.domains must contain alphanumeric domain keys`);
+        }
+        if (new Set(normalizedDomains).size !== normalizedDomains.length) {
+          errors.push(`${prefix}.domains contains duplicates`);
+        }
+      }
     }
 
     const subscriptions = Array.isArray(entry.subscribedPools)
@@ -520,6 +535,14 @@ function stableWorkItemId(item = {}) {
   const caseId = String(item.caseId ?? "").trim();
   if (domain && caseId) return `${domain}:${caseId}`;
   throw new TypeError("work item requires a stable identity");
+}
+
+function agentServesDomain(agent = {}, domain) {
+  const allowed = Array.isArray(agent?.domains) ? agent.domains : null;
+  if (!allowed || allowed.length === 0) return true;
+  const normalized = String(domain || "").trim().toUpperCase();
+  if (!normalized) return false;
+  return allowed.some((entry) => String(entry || "").trim().toUpperCase() === normalized);
 }
 
 function isActiveAttemptState(value) {
@@ -3097,6 +3120,9 @@ function createLeadDeliveryRuntime({
       },
       subscribedPools: [...entry.subscribedPools],
       packetAllowances: { ...entry.packetAllowances },
+      domains: Array.isArray(entry.domains) && entry.domains.length
+        ? [...new Set(entry.domains.map((domain) => String(domain || "").trim().toUpperCase()))]
+        : null,
       providerBufferTarget: configuration.defaults.providerBufferTarget,
       refillAtOrBelow: configuration.defaults.refillAtOrBelow,
       freshReservationRange: configuration.defaults.freshReservationRange,
@@ -3177,6 +3203,7 @@ function createLeadDeliveryRuntime({
           providerConfig: clone(policy.providerConfig),
           subscribedPools: [...policy.subscribedPools],
           packetAllowances: clone(policy.packetAllowances),
+          domains: policy.domains ? [...policy.domains] : null,
           providerBufferTarget: policy.providerBufferTarget,
           refillAtOrBelow: policy.refillAtOrBelow,
           freshReservationRange: policy.freshReservationRange,
@@ -3749,7 +3776,12 @@ function createLeadDeliveryRuntime({
       reservationSequence += 1;
       const deadline = new Date(parseDate(candidate.receivedAt, "receivedAt").getTime() + 15 * 60_000);
       eligibleAgents = await freshEligibleAgents(candidateReservationAt, { prepositionAgentId });
-      const requester = eligibleAgents.find((agent) => agent.agentId === requestId) || null;
+      // Domain-scoped seats may not take another company's lead; a candidate
+      // with no serving seat is skipped without stalling the rest of the queue.
+      const domainEligibleAgents = eligibleAgents
+        .filter((agent) => agentServesDomain(agent, candidate.domain));
+      if (!domainEligibleAgents.length) continue;
+      const requester = domainEligibleAgents.find((agent) => agent.agentId === requestId) || null;
       let selectedAgent = null;
       let requesterClaim = false;
       if (deadline.getTime() <= candidateReservationAt.getTime() && requester) {
@@ -3761,10 +3793,10 @@ function createLeadDeliveryRuntime({
       } else {
         const fairPick = await claimFairAgent(
           "fresh",
-          eligibleAgents.map((agent) => agent.agentId),
+          domainEligibleAgents.map((agent) => agent.agentId),
         );
         if (fairPick.status !== "picked") break;
-        selectedAgent = eligibleAgents.find((agent) => agent.agentId === fairPick.agentId);
+        selectedAgent = domainEligibleAgents.find((agent) => agent.agentId === fairPick.agentId);
       }
       if (!selectedAgent) break;
       if (await reserveFreshForAgent(candidate, selectedAgent, candidateReservationAt, {
@@ -3863,12 +3895,13 @@ function createLeadDeliveryRuntime({
           sourcePools: [pool],
           now: atNow(),
           limit: Math.max(25, needed * 4),
+          domains: policy.domains,
         })
       )))).flat()
       : [];
     const previewAt = atNow();
     const blockAgedForOvernightFirstContact = needed > 0
-      ? await repository.hasUnconsumedOvernightFirstContact()
+      ? await repository.hasUnconsumedOvernightFirstContact({ domains: policy.domains })
       : false;
     const grouped = candidateGroups(candidates, id, previewAt);
     const recipe = composePacketRecipe({
@@ -4292,10 +4325,23 @@ function createLeadDeliveryRuntime({
         pick = await readNextFairAgent("fresh", [owner]);
       } else {
         const candidates = await listFreshWorkCandidates();
-        item = candidates[0] || null;
-        if (!item) return { status: accepted > 0 ? "posted" : "queue-empty", accepted };
+        if (!candidates.length) return { status: accepted > 0 ? "posted" : "queue-empty", accepted };
         const agents = await immediateFreshAgents(atNow());
-        pick = await readNextFairAgent("fresh", agents.map((agent) => agent.agentId));
+        // The head of the fresh queue may belong to a company no active seat
+        // serves; take the first servable candidate instead of stalling.
+        item = null;
+        let servingAgents = [];
+        for (const candidate of candidates) {
+          const serving = agents.filter((agent) => agentServesDomain(agent, candidate.domain));
+          if (!serving.length) continue;
+          item = candidate;
+          servingAgents = serving;
+          break;
+        }
+        if (!item) {
+          return { status: accepted > 0 ? "posted-partial-no-active-agent" : "no-active-agent", accepted };
+        }
+        pick = await readNextFairAgent("fresh", servingAgents.map((agent) => agent.agentId));
         if (pick.status !== "picked") {
           return { status: accepted > 0 ? "posted-partial-no-active-agent" : "no-active-agent", accepted };
         }
@@ -4697,6 +4743,7 @@ function createLeadDeliveryRuntime({
         sourcePools: [pool],
         now: packetAt,
         limit: Math.min(5000, Math.max(requested * 3, 50)),
+        domains: policy.domains,
       });
       for (const item of candidates) {
         if (accepted >= requested) break;
@@ -7557,6 +7604,7 @@ function createLeadDeliveryRuntime({
         sourcePools: [pool],
         now: at,
         limit: 5000,
+        domains: policy.domains,
       });
       candidates.push(...rows.filter((item) => (
         leadAgeInPacificDays(item, at) >= PRODUCTIVITY_REBALANCE_MINIMUM_CUSHION_AGE_DAYS
@@ -7657,7 +7705,13 @@ function createLeadDeliveryRuntime({
     let offset = targetOffset;
     const results = [];
     for (const item of plan.removed) {
-      const fairPick = await claimFairAgent("redistribution", targetAgentIds);
+      const domainTargetIds = targetAgentIds
+        .filter((targetId) => agentServesDomain(agentPolicy(targetId), item.domain));
+      if (!domainTargetIds.length) {
+        results.push({ status: "no-domain-eligible-target", targetAgentId: null });
+        continue;
+      }
+      const fairPick = await claimFairAgent("redistribution", domainTargetIds);
       if (fairPick.status !== "picked") {
         results.push({ status: fairPick.status, targetAgentId: null });
         break;
@@ -8762,6 +8816,7 @@ module.exports = {
   PRODUCTIVITY_REBALANCE_MINIMUM_CUSHION_AGE_DAYS,
   PACIFIC_TIME_ZONE,
   POOLS,
+  agentServesDomain,
   assignPacificMorningBatch,
   buildEventDedupeKey,
   buildProviderAttemptKey,

@@ -129,6 +129,7 @@ const AGENT_CONFIGURATION_FIELDS = new Set([
   "leadStreamId",
   "subscribedPools",
   "packetAllowances",
+  "domains",
   "providerBufferTarget",
   "refillAtOrBelow",
   "freshReservationRange",
@@ -1554,6 +1555,7 @@ function createLeadDeliveryRepository({
     sourcePools,
     now = null,
     limit = 500,
+    domains = null,
     session = null,
   } = {}) {
     const normalizedAgentId = requireString(agentId, "agentId").toLowerCase();
@@ -1569,12 +1571,13 @@ function createLeadDeliveryRepository({
     }
     const cap = requireVersion(limit, "limit");
     if (cap < 1 || cap > 5000) throw new TypeError("limit must be between 1 and 5000");
+    const normalizedDomains = domains == null ? null : normalizeSourceDomains(domains);
     const poolPredicates = normalizedPools.map((pool) => (
       pool === "follow_up_due"
         ? { sourcePool: pool, nextContactAt: { $lte: at } }
         : { sourcePool: pool }
     ));
-    let query = LeadDeliveryItem.find({
+    const filter = {
       activeAttempt: true,
       providerContactId: null,
       state: { $in: PACKET_CANDIDATE_STATES },
@@ -1585,7 +1588,9 @@ function createLeadDeliveryRepository({
           { reservedAgentId: normalizedAgentId },
         ] },
       ],
-    });
+    };
+    if (normalizedDomains) filter.domain = { $in: normalizedDomains };
+    let query = LeadDeliveryItem.find(filter);
     if (typeof query.sort === "function") {
       const pool = normalizedPools.length === 1 ? normalizedPools[0] : null;
       const sort = pool === "new_today"
@@ -1619,13 +1624,16 @@ function createLeadDeliveryRepository({
     return lean(query);
   }
 
-  async function hasUnconsumedOvernightFirstContact({ session = null } = {}) {
-    let query = LeadDeliveryItem.findOne({
+  async function hasUnconsumedOvernightFirstContact({ domains = null, session = null } = {}) {
+    const normalizedDomains = domains == null ? null : normalizeSourceDomains(domains);
+    const filter = {
       activeAttempt: true,
       sourcePool: "overnight",
       totalAttemptCount: 0,
       lastContactAt: null,
-    });
+    };
+    if (normalizedDomains) filter.domain = { $in: normalizedDomains };
+    let query = LeadDeliveryItem.findOne(filter);
     if (typeof query.select === "function") query = query.select({ _id: 1 });
     query = applySession(query, session);
     return Boolean(await lean(query));

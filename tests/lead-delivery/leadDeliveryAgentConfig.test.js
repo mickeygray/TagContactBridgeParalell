@@ -58,6 +58,7 @@ test("checked-in floor config preserves folder pairs and enables all five floor 
     sean_lucas: { displayName: "Sean Lucas", distributionFolderId: "66252216", receivingFolderId: "66252217" },
     brad_hansen: { displayName: "Brad Hansen", distributionFolderId: "66252214", receivingFolderId: "66252215" },
     chris_bolt: { displayName: "Chris Bolt", distributionFolderId: "66252212", receivingFolderId: "66252213" },
+    bruce_allen_wynn: { displayName: "Bruce Allen (Wynn)", distributionFolderId: "", receivingFolderId: "" },
   });
   const enabledCanary = new Set([
     "bruce_allen",
@@ -71,6 +72,7 @@ test("checked-in floor config preserves folder pairs and enables all five floor 
     assert.equal(agent.phoneBurnerMemberId, "");
     assert.equal(agent.phoneBurnerUsername, "");
     assert.equal(agent.leadStreamId, "");
+    assert.deepEqual(agent.domains, agentId === "bruce_allen_wynn" ? ["WYNN"] : ["TAG"]);
     assert.deepEqual(agent.subscribedPools, [
       POOLS.NEW_TODAY,
       POOLS.OVERNIGHT,
@@ -209,5 +211,27 @@ test("curator folders are optional, distinct, provider-shaped, and cannot overla
     { callbacksFolderId: "distribution-test-1", expiredDailyContactsFolderId: "70002" },
   ]) {
     assert.equal(validateLeadDeliveryConfiguration({ ...base, curatorFolders }).valid, false);
+  }
+});
+
+test("agent domains are optional, non-empty, alphanumeric, and duplicate-free", () => {
+  const valid = (agents) => validateLeadDeliveryConfiguration({ defaults: DEFAULTS, agents });
+  assert.equal(valid({ agent_test: configuredAgent() }).valid, true);
+  assert.equal(valid({ agent_test: configuredAgent({ domains: ["TAG"] }) }).valid, true);
+  assert.equal(valid({ agent_test: configuredAgent({ domains: ["tag", "WYNN"] }) }).valid, true);
+
+  for (const [domains, expected] of [
+    [[], "domains must be a non-empty array when supplied"],
+    ["TAG", "domains must be a non-empty array when supplied"],
+    [["TAG", "tag"], "domains contains duplicates"],
+    [["TAG:1"], "domains must contain alphanumeric domain keys"],
+    [[""], "domains must contain alphanumeric domain keys"],
+  ]) {
+    const result = valid({ agent_test: configuredAgent({ domains }) });
+    assert.equal(result.valid, false);
+    assert.ok(
+      result.errors.some((error) => error.includes(expected)),
+      `missing error: ${expected} for ${JSON.stringify(domains)}`,
+    );
   }
 });

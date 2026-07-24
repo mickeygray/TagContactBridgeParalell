@@ -266,8 +266,10 @@ test("apply forwards dryRun false and returns only whitelisted PII-free counts",
   assert.doesNotMatch(rendered, /not-safe/);
   const configuration = checkedInConfiguration();
   for (const agent of Object.values(configuration.agents)) {
-    assert.equal(rendered.includes(String(agent.distributionFolderId)), false);
-    assert.equal(rendered.includes(String(agent.receivingFolderId)), false);
+    for (const folderId of [agent.distributionFolderId, agent.receivingFolderId]) {
+      if (!String(folderId || "").trim()) continue;
+      assert.equal(rendered.includes(String(folderId)), false);
+    }
   }
 });
 

@@ -206,7 +206,12 @@ function buildPreloadConfiguration(configuration, {
   if (!configuration || typeof configuration !== "object") {
     throw new PreloadCliError("configuration-invalid");
   }
-  const configuredAgentIds = Object.keys(configuration.agents || {}).sort();
+  // Disabled seats (e.g. domain templates awaiting provider folders) may sit
+  // in the floor config; the preload set must match the ENABLED seats exactly.
+  const configuredAgentIds = Object.entries(configuration.agents || {})
+    .filter(([, agent]) => agent?.enabled === true)
+    .map(([agentId]) => agentId)
+    .sort();
   const expectedAgentIds = [...PRELOAD_AGENT_IDS].sort();
   if (configuredAgentIds.length !== expectedAgentIds.length
       || configuredAgentIds.some((agentId, index) => agentId !== expectedAgentIds[index])) {
@@ -217,9 +222,10 @@ function buildPreloadConfiguration(configuration, {
   }
 
   const copy = cloneJson(configuration);
-  for (const agentId of PRELOAD_AGENT_IDS) {
-    copy.agents[agentId].enabled = true;
-  }
+  copy.agents = Object.fromEntries(PRELOAD_AGENT_IDS.map((agentId) => [
+    agentId,
+    { ...cloneJson(configuration.agents[agentId]), enabled: true },
+  ]));
   let validation;
   try {
     validation = validate(copy);

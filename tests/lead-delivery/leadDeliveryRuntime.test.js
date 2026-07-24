@@ -255,12 +255,16 @@ class FakeRepository {
       .map(copy);
   }
 
-  async listPacketCandidateItems({ agentId, sourcePools, now, limit }) {
+  async listPacketCandidateItems({ agentId, sourcePools, now, limit, domains = null }) {
     const at = now == null ? null : new Date(now);
+    const allowedDomains = domains == null
+      ? null
+      : domains.map((domain) => String(domain).toUpperCase());
     return [...this.items.values()]
       .filter((item) => item.activeAttempt
         && item.providerContactId == null
         && sourcePools.includes(item.sourcePool)
+        && (allowedDomains == null || allowedDomains.includes(String(item.domain).toUpperCase()))
         && (item.sourcePool !== POOLS.FOLLOW_UP_DUE
           || (at && item.nextContactAt && new Date(item.nextContactAt).getTime() <= at.getTime()))
         && ["eligible", "follow_up_wait", "reserved"].includes(item.state)
@@ -283,12 +287,16 @@ class FakeRepository {
       .map(copy);
   }
 
-  async hasUnconsumedOvernightFirstContact() {
+  async hasUnconsumedOvernightFirstContact({ domains = null } = {}) {
+    const allowedDomains = domains == null
+      ? null
+      : domains.map((domain) => String(domain).toUpperCase());
     return [...this.items.values()].some((item) => (
       item.activeAttempt === true
       && item.sourcePool === "overnight"
       && Number(item.totalAttemptCount || 0) === 0
       && item.lastContactAt == null
+      && (allowedDomains == null || allowedDomains.includes(String(item.domain).toUpperCase()))
     ));
   }
 
@@ -4903,4 +4911,61 @@ test("explicit preposition may refill a paused agent after the final daily close
   // explicitly staged post-close packet.
   assert.equal((await h.runtime.runEndOfDayFolderDrain()).status, "completed");
   assert.equal(h.providerContacts.size, 1);
+});
+
+test("domain-scoped seats receive only their company's leads and fresh dispatch skips unservable head items", async () => {
+  const configuration = config({ target: 5, refill: 1 });
+  configuration.agents.bruce_allen.domains = ["TAG"];
+  configuration.agents.wynn_bruce = {
+    ...copy(configuration.agents.bruce_allen),
+    displayName: "Bruce Allen (Wynn)",
+    distributionFolderId: "pool-wynn",
+    receivingFolderId: "consumer-wynn",
+    domains: ["WYNN"],
+  };
+  const rows = [
+    sourceRow(1, { receivedAt: new Date("2026-07-09T17:00:00.000Z") }),
+    sourceRow(2, { domain: "WYNN", caseId: "9002", receivedAt: new Date("2026-07-09T17:00:00.000Z") }),
+    sourceRow(3, { domain: "WYNN", caseId: "9003", receivedAt: new Date(START.getTime() - 60_000) }),
+  ];
+  const h = harness({ rows, configuration, actionsEnabled: true });
+  await h.runtime.start();
+  await h.runtime.stop();
+  await h.runtime.ingestOnce();
+
+  const ownership = Object.fromEntries([...h.repository.items.values()]
+    .map((item) => [item.sourceIdentity, item.deliveryAgentId]));
+  assert.deepEqual(ownership, {
+    "TAG:1": "bruce_allen",
+    "WYNN:9002": "wynn_bruce",
+    "WYNN:9003": null,
+  }, "packet fill must respect each seat's domains");
+
+  async function armAgent(agentId) {
+    const agent = await h.repository.getAgentById(agentId);
+    await h.repository.compareAndSetAgent({
+      agentId,
+      expectedVersion: agent.version,
+      set: {
+        shiftEnabled: true,
+        activeUntil: new Date(START.getTime() + 30 * 60_000),
+        lastProviderEvidenceAt: START,
+      },
+    });
+  }
+
+  await armAgent("bruce_allen");
+  const skipped = await h.runtime.dispatchImmediateFresh();
+  assert.equal(skipped.accepted, 0);
+  assert.equal(skipped.status, "no-active-agent");
+  const freshItem = [...h.repository.items.values()]
+    .find((item) => item.sourceIdentity === "WYNN:9003");
+  assert.equal(freshItem.state, "eligible", "WYNN fresh lead must not be claimed by a TAG-only seat");
+
+  await armAgent("wynn_bruce");
+  const dispatched = await h.runtime.dispatchImmediateFresh();
+  assert.equal(dispatched.accepted, 1);
+  const delivered = [...h.repository.items.values()]
+    .find((item) => item.sourceIdentity === "WYNN:9003");
+  assert.equal(delivered.deliveryAgentId, "wynn_bruce");
 });

@@ -33,7 +33,10 @@
         "overnight": 1,
         "older_available": 1,
         "follow_up_due": 1
-      }
+      },
+      "domains": [
+        "TAG"
+      ]
     },
     "phil_olson": {
       "enabled": true,
@@ -56,7 +59,10 @@
         "overnight": 1,
         "older_available": 1,
         "follow_up_due": 1
-      }
+      },
+      "domains": [
+        "TAG"
+      ]
     },
     "sean_lucas": {
       "enabled": true,
@@ -79,7 +85,10 @@
         "overnight": 1,
         "older_available": 1,
         "follow_up_due": 1
-      }
+      },
+      "domains": [
+        "TAG"
+      ]
     },
     "brad_hansen": {
       "enabled": true,
@@ -102,7 +111,10 @@
         "overnight": 1,
         "older_available": 1,
         "follow_up_due": 1
-      }
+      },
+      "domains": [
+        "TAG"
+      ]
     },
     "chris_bolt": {
       "enabled": true,
@@ -114,6 +126,35 @@
       "distributionFolderId": "66252212",
       "receivingFolderId": "66252213",
       "leadStreamId": "",
+      "subscribedPools": [
+        "new_today",
+        "overnight",
+        "older_available",
+        "follow_up_due"
+      ],
+      "packetAllowances": {
+        "new_today": 2,
+        "overnight": 1,
+        "older_available": 1,
+        "follow_up_due": 1
+      },
+      "domains": [
+        "TAG"
+      ]
+    },
+    "bruce_allen_wynn": {
+      "enabled": false,
+      "displayName": "Bruce Allen (Wynn)",
+      "provider": "phoneburner",
+      "phoneBurnerMemberId": "",
+      "phoneBurnerUsername": "",
+      "applicationAccountEmail": "ballen@wynntaxsolutions.com",
+      "distributionFolderId": "",
+      "receivingFolderId": "",
+      "leadStreamId": "",
+      "domains": [
+        "WYNN"
+      ],
       "subscribedPools": [
         "new_today",
         "overnight",
