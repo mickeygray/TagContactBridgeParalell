@@ -1,0 +1,143 @@
+"use strict";
+
+// THE REPORT SCHEDULER RUNTIME — fires saved shapes on a clock.
+//
+// One poll, several definitions. Each definition owns its own time, weekday
+// and day-of-month rules, so this loop holds no schedule of its own; it only
+// asks "what is due?" and runs those.
+//
+// Two safety properties, both learned the hard way on this box:
+//
+//  1. The running guard is taken BEFORE any early return can skip it. A
+//     previous runtime set state.running = true and cleared it in a `finally`
+//     that belonged to a different try — one early return wedged the loop for
+//     good.
+//  2. Due-ness is decided against the definition's persisted lastRunKey, not
+//     an in-memory flag, so a control-plane restart at 09:00 cannot re-send
+//     the 07:00 report.
+
+const {
+  dueDefinitions, isDue, pacificKey, runDefinition,
+} = require("../../../../packages/shared-services/src/reportDefinitionService");
+const { sendMail } = require("../../../../packages/shared-services/src/mailerService");
+const { getInternalFromEmail } = require("../../../../packages/shared-config/src");
+
+const DEFAULT_POLL_MS = 5 * 60 * 1000;
+
+function createReportScheduleRuntime({ config = {}, runtime = {} } = {}) {
+  const state = {
+    // Default OFF. Arming a loop that emails people is Mickey's call, not a
+    // side effect of deploying the code.
+    enabled: config.enabled === true || String(process.env.REPORT_SCHEDULER_ENABLED) === "true",
+    pollMs: Math.max(60000, Number(config.pollMs || process.env.REPORT_SCHEDULER_POLL_MS) || DEFAULT_POLL_MS),
+    running: false,
+    timer: null,
+    lastPollAt: null,
+    lastRunAt: null,
+    lastResults: [],
+    lastError: null,
+    ranToday: [],
+  };
+
+  const log = runtime.logger || null;
+
+  async function poll({ force = false } = {}) {
+    // Guard FIRST: every early return below must be unable to skip the
+    // release, so the flag can never be left set.
+    if (state.running) return { skipped: "already running" };
+    if (!state.enabled && !force) return { skipped: "disabled" };
+    state.running = true;
+    const started = Date.now();
+    try {
+      state.lastPollAt = new Date().toISOString();
+      const due = await dueDefinitions();
+      if (!due.length) return { ran: 0 };
+
+      const results = [];
+      for (const def of due) {
+        try {
+          const result = await runDefinition(def, {
+            logger: log ? { info: (m) => log.info?.("report_schedule.step", { message: String(m).slice(0, 200) }) } : null,
+            sendMail,
+            fromEmail: getInternalFromEmail(),
+          });
+          results.push({
+            name: def.name, range: result.range, delivered: result.delivered,
+            sections: result.sections, errors: result.errors, durationMs: result.durationMs,
+          });
+          log?.info?.("report_schedule.ran", {
+            definition: def.name, from: result.range.from, to: result.range.to,
+            delivered: result.delivered, durationMs: result.durationMs,
+          });
+        } catch (error) {
+          // One bad definition must not stop the others from going out.
+          results.push({ name: def.name, error: String(error.message).slice(0, 300) });
+          log?.error?.("report_schedule.failed", { definition: def.name, error: String(error.message) });
+          try {
+            def.lastError = String(error.message).slice(0, 400);
+            // Deliberately NOT stamping lastRunKey: a failed run is not a run,
+            // so the next poll retries it rather than skipping the day.
+            if (typeof def.save === "function") await def.save();
+          } catch { /* bookkeeping must not mask the real error */ }
+        }
+      }
+      state.lastRunAt = new Date().toISOString();
+      state.lastResults = results;
+      state.ranToday = [...new Set([...state.ranToday, ...results.map((r) => r.name)])];
+      return { ran: results.length, results, durationMs: Date.now() - started };
+    } catch (error) {
+      state.lastError = String(error.message).slice(0, 300);
+      log?.error?.("report_schedule.poll_failed", { error: String(error.message) });
+      return { error: state.lastError };
+    } finally {
+      state.running = false;
+    }
+  }
+
+  async function start() {
+    if (!state.enabled) {
+      log?.info?.("report_schedule.disabled", { hint: "set REPORT_SCHEDULER_ENABLED=true to arm" });
+      return;
+    }
+    if (state.timer) return;
+    state.timer = setInterval(() => { poll().catch(() => {}); }, state.pollMs);
+    if (state.timer.unref) state.timer.unref();
+    log?.info?.("report_schedule.started", { pollMs: state.pollMs });
+    await poll();
+  }
+
+  function stop() {
+    if (state.timer) clearInterval(state.timer);
+    state.timer = null;
+  }
+
+  // Synchronous, like every other runtime's getState — the health endpoint
+  // is a sync handler and must not be made to await a database round-trip.
+  function getState() {
+    return {
+      enabled: state.enabled, running: state.running, pollMs: state.pollMs,
+      today: pacificKey(), lastPollAt: state.lastPollAt, lastRunAt: state.lastRunAt,
+      lastResults: state.lastResults, lastError: state.lastError,
+    };
+  }
+
+  /** The DB-backed view: what is armed, and why each one is or is not due. */
+  async function listDefinitions() {
+    const { ReportDefinition } = require("../../../../packages/shared-services/src/reportDefinitionService");
+    const all = await ReportDefinition.find({ archivedAt: null }).sort({ name: 1 });
+    return all.map((d) => {
+      const verdict = isDue(d);
+      return {
+        name: d.name, range: d.range, blocks: d.blocks || [], domain: d.domain || null,
+        at: `${String(d.schedule?.hour ?? 0).padStart(2, "0")}:${String(d.schedule?.minute ?? 0).padStart(2, "0")} PT`,
+        enabled: Boolean(d.schedule?.enabled),
+        lastRunKey: d.lastRunKey, lastRunAt: d.lastRunAt, lastError: d.lastError || null,
+        due: verdict.due, reason: verdict.reason, recipients: d.recipients || [],
+      };
+    });
+  }
+
+  return { getState, listDefinitions, poll, start, stop };
+}
+
+module.exports = { createReportScheduleRuntime };

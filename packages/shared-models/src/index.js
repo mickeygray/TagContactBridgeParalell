@@ -43,6 +43,11 @@ const PacingConfig = require("./PacingConfig");
 const PacingReport = require("./PacingReport");
 const PaymentAlert = require("./PaymentAlert");
 const PaymentLedger = require("./PaymentLedger");
+const ActivityEvent = require("./ActivityEvent");
+const PaymentTruth = require("./PaymentTruth");
+const ReportDefinition = require("./ReportDefinition");
+const DailyLoopRun = require("./DailyLoopRun");
+const PaymentsSheetImport = require("./PaymentsSheetImport");
 const PostDateHold = require("./PostDateHold");
 const PoolBudget = require("./PoolBudget");
 const PrePing = require("./PrePing");
@@ -57,6 +62,7 @@ const SpendEntry = require("./SpendEntry");
 const UserAccount = require("./UserAccount");
 const WorkflowRecord = require("./WorkflowRecord");
 const ClientProfile = require("./ClientProfile");
+const TrainingCallReview = require("./TrainingCallReview");
 
 const MODEL_REGISTRY = Object.freeze({
   AgentState,
@@ -102,6 +108,11 @@ const MODEL_REGISTRY = Object.freeze({
   PacingReport,
   PaymentAlert,
   PaymentLedger,
+  ActivityEvent,
+  PaymentTruth,
+  ReportDefinition,
+  DailyLoopRun,
+  PaymentsSheetImport,
   PostDateHold,
   PoolBudget,
   PrePing,
@@ -116,6 +127,7 @@ const MODEL_REGISTRY = Object.freeze({
   SpendEntry,
   UserAccount,
   WorkflowRecord,
+  TrainingCallReview,
 });
 
 function listModels() {
@@ -167,6 +179,11 @@ module.exports = {
   PaymentAlert,
   MODEL_REGISTRY,
   PaymentLedger,
+  ActivityEvent,
+  PaymentTruth,
+  ReportDefinition,
+  DailyLoopRun,
+  PaymentsSheetImport,
   PostDateHold,
   PoolBudget,
   PrePing,
@@ -181,5 +198,6 @@ module.exports = {
   SpendEntry,
   UserAccount,
   WorkflowRecord,
+  TrainingCallReview,
   listModels,
 };

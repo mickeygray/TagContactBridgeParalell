@@ -135,6 +135,16 @@ const {
   resolveInboundCallSource,
 } = require("./callAttributionResolverService");
 const { buildMetricsPulse } = require("./metricsPulseService");
+const { buildSimpleMarketingSummary } = require("./simpleMarketingReadService");
+const { syncCallrailDailyStats } = require("./callrailDailyStatSyncService");
+const { importLogicsPaymentsCsv } = require("./logicsPaymentsCsvImportService");
+const {
+  evaluatePaymentsSheetGate,
+  readPaymentsSheetStatus,
+  recordPaymentsSheetImport,
+  verifyPaymentsCsvDomain,
+} = require("./paymentsSheetGateService");
+const { reconcileSheetCases } = require("./paymentsSheetReconcileService");
 const { emitServiceRequest } = require("./serviceRequestService");
 const {
   syncUsersFromRcExtensions,
@@ -419,19 +429,12 @@ const {
 const {
   buildClientDetail,
   buildClientWorkspaceList,
-  buildCallrailWorkspace,
-  buildDailySummaryWorkspace,
   buildDeployWorkspace,
   buildInboxWorkspace,
   buildLibraryWorkspace,
-  buildMailCostWorkspace,
-  buildMetricsWorkspace,
-  buildMetricSourcesWorkspace,
-  buildRedlineWorkspace,
   buildReviewWorkspace,
   buildRingBridgeWorkspace,
   buildRingCentralWorkspace,
-  buildWorkspaceShell,
   listRingCentralEvents,
   listReviewWorkspaceItems,
   searchClientWorkspace,
@@ -450,6 +453,16 @@ const {
 const { buildContactLibraryCatalog } = require("./contactLibraryService");
 const { runClientCaseScrub } = require("./clientScrubService");
 const { reviewCaseActivities } = require("./activityAiReviewService");
+const { REPORTS, generateReport } = require("./reportingService");
+const reportOps = require("./reportOpsService");
+const reportDefinitions = require("./reportDefinitionService");
+const sourceSanitizer = require("./logicsSourceSanitizerService");
+const { createGatherSession, pruneGatherCache } = require("./gatherSessionService");
+const {
+  classifyRow,
+  insertActivityEvents,
+  parseReportRows,
+} = require("./activityEventService");
 const { listLastMonthInboundCalls, lookupInboundCall } = require("./callrailLookupService");
 const { buildControlPlaneSummary, getControlPlaneDomain, listControlPlaneDomains } = require("./controlPlaneService");
 const { buildDataHygieneOverview, runDataHygieneSmoke } = require("./dataHygieneService");
@@ -463,25 +476,10 @@ const {
   startDailyDeepCutVerification,
 } = require("./dailyDeepCutService");
 const {
-  buildManagementSnapshot,
-  buildMonthToDateSnapshot,
-  buildNightlyClosePlan,
-  buildVendorReport,
-  buildTransitionsBySource,
-  buildDealsBySource,
-  buildSpendByChannel,
-  buildTodaysCalls,
-  buildTodaysPaymentAlerts,
-  buildOpenServiceAlerts,
-  buildGroupedNightlyPayload,
-  executeNightlyCloseRun,
   runGroupedNightlyClose,
-  sendFinancialCloseEmail,
-  sendLeadDataCloseEmail,
-  sendRedlineAlertEmail,
+  reconcilePhoneBurnerCallsForNightly,
   sendOpsStatusEmail,
   sendAgedRefreshReportEmail,
-  startNightlyCloseRun,
   wrapHourlyJobs,
 } = require("./nightlyCloseService");
 const { publishDemoEvent } = require("./demoEventService");
@@ -533,9 +531,6 @@ const {
   runHourlyLeadCadenceEnforcement,
 } = require("./hourlyLeadCadenceEnforcementService");
 const {
-  runHourlyMetricsRefresh,
-} = require("./hourlyMetricsRefreshService");
-const {
   runHourlyCallLogHygiene,
   runHourlyCallLogHygieneForDomain,
 } = require("./hourlyCallLogHygieneService");
@@ -586,6 +581,10 @@ const {
   reopenMetricsAttributionReviewItem,
   resolveMetricsAttributionReviewItem,
 } = require("./metricsAttributionReviewService");
+const {
+  resolveMetricsPaymentReviewItem,
+  scanPaymentMetricsExceptions,
+} = require("./paymentMetricsReviewService");
 const {
   previewCallLedgerForDomain,
   previewHourlyCallLedger,
@@ -681,16 +680,6 @@ const {
   buildSpendSyncRead,
 } = require("./spendSyncReadService");
 const {
-  buildVendorDailySummary,
-} = require("./vendorDailySummaryService");
-const {
-  runVendorNightlyEmail,
-  runVendorNightlyClosePass,
-  buildVendorCallRows,
-  buildVendorLeadRows,
-  buildVendorOutcomeRows,
-} = require("./vendorNightlyEmailService");
-const {
   backfillCallLogSourceFromLeadCadence,
 } = require("./callLogSourceBackfillService");
 const {
@@ -726,15 +715,6 @@ const {
   runNcoaMailboxIngest,
   runNcoaMailboxIngestIfDue,
 } = require("./ncoaMailboxIngestService");
-const {
-  getLegacyMetricsMirrorStatus,
-  syncLegacyMetricsMirror,
-} = require("./legacyMetricsMirrorService");
-const { backfillLegacyMetricsRange } = require("./metricsBackfillService");
-const {
-  canonicalizeMirroredMetrics,
-  syncLegacyAttributionMaps,
-} = require("./legacyAttributionSyncService");
 const { createLogicsFacade, parseLogicsData } = require("./logicsFacadeService");
 const { buildProspectStatusDiff } = require("./logicsStatusDiffService");
 const {
@@ -952,7 +932,6 @@ module.exports = {
   enqueueCxSmokeLead,
   simulateCxIncomingCall,
   reviewCaseActivities,
-  canonicalizeMirroredMetrics,
   CONTROL_PLANE_EVENT_TYPES,
   buildControlPlaneHealthReport,
   relayControlPlaneEvent,
@@ -962,12 +941,9 @@ module.exports = {
   buildControlPlaneReadOverview,
   buildClientDetail,
   buildClientWorkspaceList,
-  buildCallrailWorkspace,
-  buildDailySummaryWorkspace,
   buildDeployWorkspace,
   buildInboxWorkspace,
   buildLibraryWorkspace,
-  buildMailCostWorkspace,
   buildHourlyHygienePlan,
   claimNextHourlyJobEvent,
   computeNextLaneRunAt,
@@ -1003,7 +979,6 @@ module.exports = {
   classifyActivityForAttribution,
   buildContactLibraryCatalog,
   runClientCaseScrub,
-  backfillLegacyMetricsRange,
   listLastMonthInboundCalls,
   lookupInboundCall,
   listCxAgentStates,
@@ -1016,6 +991,8 @@ module.exports = {
   recoverCxCallLogs,
   recoverCxCallLogsForDate,
   previewHourlyFinancialSync,
+  resolveMetricsPaymentReviewItem,
+  scanPaymentMetricsExceptions,
   previewScheduledBlast,
   listMetricsAttributionReviewItems,
   reconcileMetricsAttributionCandidates,
@@ -1026,23 +1003,24 @@ module.exports = {
   listCxTasks,
   extractMailerLabel,
   buildDataHygieneOverview,
-  buildMetricsWorkspace,
-  buildMetricSourcesWorkspace,
-  buildRedlineWorkspace,
+  buildSimpleMarketingSummary,
+  syncCallrailDailyStats,
+  importLogicsPaymentsCsv,
+  evaluatePaymentsSheetGate,
+  readPaymentsSheetStatus,
+  recordPaymentsSheetImport,
+  verifyPaymentsCsvDomain,
+  reconcileSheetCases,
   buildReviewWorkspace,
   buildRingBridgeWorkspace,
   buildRingCentralWorkspace,
-  buildWorkspaceShell,
   buildDailyDeepCutDashboard,
   buildDailyDeepCutPlan,
-  buildManagementSnapshot,
-  buildNightlyClosePlan,
   getDailyDeepCutRun,
   listDailyDeepCutRuns,
   recordDailyDeepCutRun,
   startDailyDeepCutRun,
   startDailyDeepCutVerification,
-  buildVendorReport,
   buildControlPlaneSummary,
   createControlPlaneEvent,
   createOutboundEvent,
@@ -1062,12 +1040,6 @@ module.exports = {
   buildLogicsScanSummary,
   buildRecommendedWorkflow,
   buildSpendSyncRead,
-  buildVendorDailySummary,
-  runVendorNightlyEmail,
-  runVendorNightlyClosePass,
-  buildVendorCallRows,
-  buildVendorLeadRows,
-  buildVendorOutcomeRows,
   backfillCallLogSourceFromLeadCadence,
   getActiveMailers,
   getMailerConfigState,
@@ -1105,7 +1077,6 @@ module.exports = {
   evaluateAutoSendGates,
   enforceReplyConstraints,
   AUTO_REPLY_COOLDOWN_MS,
-  getLegacyMetricsMirrorStatus,
   listActiveSourceCanonicals,
   listMetaWebhookDomains,
   isMailerConfigLoaded,
@@ -1355,22 +1326,11 @@ module.exports = {
   runNightlyCallGrading,
   sendMail,
   sendPlainEmail,
-  sendFinancialCloseEmail,
-  sendLeadDataCloseEmail,
-  sendRedlineAlertEmail,
   sendOpsStatusEmail,
   sendAgedRefreshReportEmail,
   runGroupedNightlyClose,
-  buildGroupedNightlyPayload,
   renderEmailHtml,
   clearMailerCaches,
-  buildMonthToDateSnapshot,
-  buildTransitionsBySource,
-  buildDealsBySource,
-  buildSpendByChannel,
-  buildTodaysCalls,
-  buildTodaysPaymentAlerts,
-  buildOpenServiceAlerts,
   sendLexisDailyDropMail,
   sendLexisRegionalMail,
   sendTestEmail,
@@ -1393,7 +1353,6 @@ module.exports = {
   parseMailerRow,
   parseMetaRow,
   emitHourlyJobEvent,
-  executeNightlyCloseRun,
   markHourlyJobCompleted,
   markHourlyJobFailed,
   notifyHourlyJobAlert,
@@ -1412,7 +1371,6 @@ module.exports = {
   runHourlyLeadCadenceEnforcement,
   runHourlyCallLogHygiene,
   runHourlyCallLogHygieneForDomain,
-  runHourlyMetricsRefresh,
   runHourlySweep,
   runFillerPoolRefresh,
   runDailyAgedRefresh,
@@ -1432,8 +1390,6 @@ module.exports = {
   getRingcentralWatchdogState,
   getFreshHotLaneSnapshot,
   summarizeSuccessfulPayments,
-  syncLegacyAttributionMaps,
-  syncLegacyMetricsMirror,
   unzipLexisArchive,
   uploadNcoaRows,
   runNcoaMailboxIngest,
@@ -1444,8 +1400,17 @@ module.exports = {
   validateLeadWebhook,
   listWorkflowStages,
   saveSocialResponderConfig,
+  REPORTS,
+  createGatherSession,
+  generateReport,
+  pruneGatherCache,
+  reportDefinitions,
+  sourceSanitizer,
+  reportOps,
+  classifyRow,
+  insertActivityEvents,
+  parseReportRows,
   stopCaseContact,
-  startNightlyCloseRun,
   wakeInboxWorkflow,
   wrapHourlyJobs,
 };

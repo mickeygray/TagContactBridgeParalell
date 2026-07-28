@@ -384,7 +384,9 @@ function getSharedConfig(overrides = {}) {
       externalNotifyPollSeconds: envInt("DEMO_RINGOUT_EXTERNAL_NOTIFY_POLL_SECONDS", 60),
     },
     anthropic: {
-      model: env("ANTHROPIC_MODEL", "claude-3-5-haiku-latest"),
+      // Retired 3.5-haiku default 404s — keep in lockstep with
+      // anthropicClient.js's default ladder.
+      model: env("ANTHROPIC_MODEL", "claude-sonnet-5"),
       maxTokens: envInt("ANTHROPIC_MAX_TOKENS", 1200),
       temperature: Number(env("ANTHROPIC_TEMPERATURE", "0")),
     },
@@ -781,6 +783,28 @@ function getSharedConfig(overrides = {}) {
         process.env.LEXIS_DAILY_DROP_ALERT_TEXT ||
         "",
     },
+    // The night board (pipeline contract Parts I+II). Scheduled AFTER the
+    // activity review (20:20 vs 20:00) so the day's Logics writes have
+    // settled; claims different DailyLoopRun fields, so the two never
+    // collide.
+    nightBoard: {
+      enabled: boolFromEnv(process.env.NIGHT_BOARD_ENABLED, false),
+      hour: Math.max(0, Math.min(23, envInt("NIGHT_BOARD_HOUR", 20))),
+      minute: Math.max(0, Math.min(59, envInt("NIGHT_BOARD_MINUTE", 20))),
+      timezone: process.env.NIGHT_BOARD_TIMEZONE || "America/Los_Angeles",
+      intervalMs: Math.max(10000, envInt("NIGHT_BOARD_INTERVAL_MS", 60000)),
+      activeWeekdays: parseOriginList(process.env.NIGHT_BOARD_ACTIVE_WEEKDAYS || "0,1,2,3,4,5,6"),
+      domains: parseOriginList(process.env.NIGHT_BOARD_DOMAINS || "TAG,WYNN,AMITY")
+        .map((v) => String(v || "").trim().toUpperCase()).filter(Boolean),
+      recipients: process.env.NIGHT_BOARD_RECIPIENTS
+        || process.env.SIMPLE_NIGHTLY_RECIPIENTS
+        || "mgray@taxadvocategroup.com",
+      apply: boolFromEnv(process.env.NIGHT_BOARD_APPLY, true),
+      // Links carry the audio (verified pre-authenticated), so attaching
+      // 20MB files buys nothing and risks the send. Opt in if ever needed.
+      attach: boolFromEnv(process.env.NIGHT_BOARD_ATTACH, false),
+      sendEmail: boolFromEnv(process.env.NIGHT_BOARD_SEND_EMAIL, true),
+    },
     logicsActivityReview: {
       enabled: boolFromEnv(
         overrides.logicsActivityReviewEnabled !== undefined
@@ -798,8 +822,26 @@ function getSharedConfig(overrides = {}) {
           process.env.LOGICS_ACTIVITY_REVIEW_DOMAINS ||
           "TAG,WYNN,AMITY",
       ).map((value) => String(value || "").trim().toUpperCase()).filter(Boolean),
-      hour: Math.max(0, Math.min(23, envInt("LOGICS_ACTIVITY_REVIEW_HOUR", 6))),
+      // Moved to END OF DAY (Mickey 2026-07-27): "move the entire daily
+      // reconciliation to the end of the day instead of running the doc
+      // search in the morning on the following day" — so the close can
+      // count DNCs and post-dates from Activities same-day. 20:00 runs
+      // before the 21:00 nightly close. sameDay makes the run cover TODAY
+      // (the service's historical default window was yesterday, which was
+      // only correct for the old 6 AM schedule).
+      hour: Math.max(0, Math.min(23, envInt("LOGICS_ACTIVITY_REVIEW_HOUR", 20))),
       minute: Math.max(0, Math.min(59, envInt("LOGICS_ACTIVITY_REVIEW_MINUTE", 0))),
+      // sameDay defaults from the RUN HOUR, not a constant: an evening run
+      // reviews today, a morning run reviews yesterday. This keeps a
+      // pinned LOGICS_ACTIVITY_REVIEW_HOUR=7 in .env correct (yesterday,
+      // complete) instead of silently reviewing only midnight-to-7am.
+      // Explicit LOGICS_ACTIVITY_REVIEW_SAME_DAY always wins.
+      sameDay: boolFromEnv(
+        overrides.logicsActivityReviewSameDay !== undefined
+          ? overrides.logicsActivityReviewSameDay
+          : process.env.LOGICS_ACTIVITY_REVIEW_SAME_DAY,
+        Math.max(0, Math.min(23, envInt("LOGICS_ACTIVITY_REVIEW_HOUR", 20))) >= 12,
+      ),
       intervalMs: Math.max(
         10000,
         envInt("LOGICS_ACTIVITY_REVIEW_INTERVAL_MS", 60000),
@@ -1667,7 +1709,10 @@ function getMarketingFromEmail() {
   return MARKETING_FROM_EMAIL;
 }
 
+const staffRoster = require("./staffRoster");
+
 module.exports = {
+  ...staffRoster,
   INTERNAL_FROM_EMAIL,
   MARKETING_FROM_EMAIL,
   DEFAULT_COMPANY,

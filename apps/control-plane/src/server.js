@@ -7,6 +7,7 @@ const express = require("express");
 const mongoose = require("mongoose");
 const cors = require("cors");
 const { getCompanyKeys, getCorsOriginResolver, PORTS } = require("../../../packages/shared-config/src");
+const { dncStatusIdsForDomain } = require("../../../packages/shared-config/src/statusMap");
 const {
   buildHealthAccessMiddleware,
   buildPublicHealthPayload,
@@ -59,7 +60,6 @@ const { createReadReviewRouter } = require("./routes/readReview");
 const { createRuntimeRouter } = require("./routes/runtime");
 const { createReadRingcentralRouter } = require("./routes/readRingcentral");
 const { createReadSocialRouter } = require("./routes/readSocial");
-const { createReadWorkspaceRouter } = require("./routes/readWorkspace");
 const { createRingCentralRouter } = require("./routes/ringcentral");
 const { createRingcxWebServiceCanaryRouter } = require("./routes/ringcxWebServiceCanary");
 const { createPhoneBurnerLeadDeliveryRuntime } = require("./routes/phoneBurnerLeadDelivery");
@@ -72,6 +72,9 @@ const { createLexisNightlyRuntime } = require("./services/lexisNightlyService");
 const { createLexisDailyDropRuntime } = require("./services/lexisDailyDropRuntime");
 const { createLogicsActivityReviewRuntime } = require("./services/logicsActivityReviewRuntime");
 const { createNightlyCloseRuntime } = require("./services/nightlyCloseRuntime");
+const { createNightBoardRuntime } = require("./services/nightBoardRuntime");
+const { createReportScheduleRuntime } = require("./services/reportScheduleRuntime");
+const { createNightlyHygieneRuntime } = require("./services/nightlyHygieneRuntime");
 const { createCxNightlyCallGradeRuntime } = require("./services/cxNightlyCallGradeRuntime");
 const { createEodRecordingArchiveRuntime } = require("./services/eodRecordingArchiveRuntime");
 const { createPhoneburnerRotationRuntime } = require("./services/phoneburnerRotationRuntime");
@@ -1998,9 +2001,19 @@ async function startServer() {
   const leadDeliveryCadenceSource = leadDeliveryService.createLeadDeliveryCadenceSource({
     repository: leadDeliveryRepository,
     domains: getCompanyKeys(),
-    policyForDomain: () => ({
+    // policyForDomain IGNORED its domain argument, so one DNC id list was
+    // applied to every tenant — and LOGICS_DNC_STATUS_IDS is unset, so that
+    // list was empty. Status ids are tenant-scoped and collide (TAG marks
+    // BOTH 39 and 173 DNC; WYNN 39 is "Wrong Number"), so DNC is now read
+    // per-domain off the status catalog, with configured ids layered on top.
+    policyForDomain: (domain) => ({
       allowedProspectStatusIds: config.logicsProspectStatusIds,
-      dncStatusIds: config.logicsDncStatusIds,
+      dncStatusIds: [
+        ...new Set([
+          ...dncStatusIdsForDomain(domain),
+          ...(Array.isArray(config.logicsDncStatusIds) ? config.logicsDncStatusIds : []),
+        ]),
+      ],
     }),
     contactWindowEvaluator: (row, at) => resolveQueueDialTimeWindow(row, at),
     overnightBatchResolver: (item, at) => leadDeliveryService.assignPacificMorningBatch(item, { now: at }),
@@ -2081,6 +2094,24 @@ async function startServer() {
   });
   const logicsActivityReviewRuntime = createLogicsActivityReviewRuntime({
     config: config.logicsActivityReview || {},
+    runtime,
+  });
+  const nightBoardRuntime = createNightBoardRuntime({
+    config: config.nightBoard || {},
+    runtime,
+  });
+  // Saved report shapes on a clock. Default OFF — arm with
+  // REPORT_SCHEDULER_ENABLED=true once the definitions read right.
+  const reportScheduleRuntime = createReportScheduleRuntime({
+    config: config.reportSchedule || {},
+    runtime,
+  });
+  // THE nightly service: one loop, a registry of hygiene chores (today:
+  // writing the mail piece onto the Logics case so reports READ attribution
+  // instead of rebuilding it). Default OFF; each task needs its own write
+  // switch on top of NIGHTLY_HYGIENE_ENABLED.
+  const nightlyHygieneRuntime = createNightlyHygieneRuntime({
+    config: config.nightlyHygiene || {},
     runtime,
   });
   const spendSyncRuntime = createSpendSyncRuntime({
@@ -2184,6 +2215,9 @@ async function startServer() {
       logicsActivityReview: logicsActivityReviewRuntime.getState(),
       nightlyClose: nightlyCloseRuntime.getState(),
       cxNightlyCallGrade: cxNightlyCallGradeRuntime.getState(),
+      nightBoard: nightBoardRuntime.getState(),
+      reportSchedule: reportScheduleRuntime.getState(),
+      nightlyHygiene: nightlyHygieneRuntime.getState(),
       spendSync: spendSyncRuntime.getState(),
       eodRecordingArchive: eodRecordingArchiveRuntime.getState(),
       leadDelivery: {
@@ -2509,7 +2543,6 @@ async function startServer() {
   app.use("/api/read/review", createReadReviewRouter(auth));
   app.use("/api/read/ringcentral", createReadRingcentralRouter(auth));
   app.use("/api/read/social", createReadSocialRouter(auth));
-  app.use("/api/read/workspace", createReadWorkspaceRouter(auth));
   // Public-but-signed: streaming proxy for the Apps Script audio
   // player. Auth is via HMAC-signed URL minted by Apps Script (NOT
   // session JWT) so the player can render on a phone without our
@@ -2794,6 +2827,9 @@ async function startServer() {
   await logicsActivityReviewRuntime.start();
   await nightlyCloseRuntime.start();
   await cxNightlyCallGradeRuntime.start();
+  await nightBoardRuntime.start();
+  await reportScheduleRuntime.start();
+  await nightlyHygieneRuntime.start();
   await spendSyncRuntime.start();
   await eodRecordingArchiveRuntime.start();
   await phoneburnerRotationRuntime.start();

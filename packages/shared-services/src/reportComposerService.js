@@ -1,0 +1,748 @@
+"use strict";
+
+// THE COMPOSER — tick blocks, pick a range, get an output.
+//
+// Everything expensive happens here ONCE. The blocks declare what raw
+// material they need; the composer takes the union and gathers only that.
+// Tick five blocks that all read payments and you pay for one gather.
+//
+// Live by default (faceplate thesis): the material comes from the
+// authoritative services. Spend / call stats / dials come from Mongo
+// because that is where those facts ORIGINATE — the mail-sheet sync,
+// CallRail's daily sync, PhoneBurner callback capture — not because we
+// keep a copy of somebody else's numbers.
+
+const { resolveSelection, neededSources } = require("./reportBlocksService");
+
+const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
+
+// Day-scoped gathers (queue, recordings, callsRange) must LOOP or REJECT
+// over a range — never silently report the last day as if it were the whole
+// window, which is what the composer did before.
+const RANGE_DAY_LOOP_MAX = Math.max(1, Number(process.env.RANGE_DAY_LOOP_MAX) || 31);
+
+// The queue gather is RingCentral-backed and PAGED, so a day-loop is
+// days x pages of requests. Mickey 2026-07-27: "absolutely do not re auth
+// every time for rc thats a great way to get 100000 429s in 30 seconds...
+// ring central is always a fall back or targeted slow trickle." Hence a
+// much lower day cap than the CallRail/Mongo gathers, plus a pause between
+// days. Refuse the range rather than trickle for a month.
+const QUEUE_DAY_LOOP_MAX = Math.max(1, Number(process.env.QUEUE_DAY_LOOP_MAX) || 7);
+const QUEUE_DAY_PAUSE_MS = Math.max(0, Number(process.env.QUEUE_DAY_PAUSE_MS) || 300);
+// One Logics call per case without a stored phone. Bounded by DEALS, not by
+// days, so a month is ~33. Refuse rather than grind if a filter is missing.
+const CASE_CONTACT_MAX = Math.max(1, Number(process.env.CASE_CONTACT_MAX) || 400);
+const CALLS_LOOKBACK_DAYS = Math.max(0, Number(process.env.CALLS_LOOKBACK_DAYS) || 45);
+const CALLS_DAY_MAX = Math.max(1, Number(process.env.CALLS_DAY_MAX) || 120);
+
+function addDaysKey(key, delta) {
+  return new Date(Date.parse(`${key}T00:00:00Z`) + delta * 86400000).toISOString().slice(0, 10);
+}
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+function dayRange(from, to) {
+  const days = [];
+  const end = Date.parse(`${to}T00:00:00Z`);
+  for (let t = Date.parse(`${from}T00:00:00Z`); t <= end; t += 86400000) {
+    days.push(new Date(t).toISOString().slice(0, 10));
+  }
+  return days;
+}
+
+// ── FILTERS ─────────────────────────────────────────────────────────────
+// Mickey 2026-07-28: "how much money did we make from cases generated in
+// 2024 in march of 2026. how many 10 minute plus calls didnt turn into
+// deals from LD leads."
+//
+// Both are the same shape: SLICE the material, then measure it. So filters
+// are orthogonal to blocks — they narrow what every ticked calculation sees,
+// rather than each block growing its own options.
+//
+//   cohort=2024      cases that became clients that year (first payment)
+//   source=LD        source at sale (prefix match, so LD covers LD CUSTOM*)
+//   officer="X"      officer at sale
+//   domain=TAG       tenant
+//   minutes>10       call length (recordings)
+//   outcome=no-deal  call did NOT become a deal (recordings)
+const FILTER_KEYS = ["cohort", "source", "officer", "domain", "minutes", "outcome"];
+
+function parseFilters(input) {
+  // Accepts { cohort: "2024" } or ["cohort=2024", "minutes>10"].
+  const out = [];
+  const push = (key, op, value) => {
+    const k = String(key || "").trim().toLowerCase();
+    if (!FILTER_KEYS.includes(k)) return { unknown: k };
+    out.push({ key: k, op, value: String(value).trim() });
+    return null;
+  };
+  const unknown = [];
+  const items = Array.isArray(input) ? input
+    : input && typeof input === "object" ? Object.entries(input).map(([k, v]) => `${k}=${v}`)
+      : String(input || "").split(",").filter(Boolean);
+  for (const raw of items) {
+    const m = String(raw).match(/^\s*([a-z]+)\s*(>=|<=|!=|>|<|=)\s*(.+?)\s*$/i);
+    if (!m) { unknown.push(String(raw)); continue; }
+    const bad = push(m[1], m[2], m[3]);
+    if (bad) unknown.push(bad.unknown);
+  }
+  return { filters: out, unknown };
+}
+
+const cohortOf = (p) => String(p.metricsTreatment?.firstPaidDateKey || p.paymentDateKey || "").slice(0, 4);
+
+function matchOne(value, op, target) {
+  const v = value == null ? "" : String(value);
+  const t = String(target);
+  const numeric = Number(v);
+  const numTarget = Number(t);
+  const bothNumeric = Number.isFinite(numeric) && Number.isFinite(numTarget);
+  switch (op) {
+    case ">": return bothNumeric && numeric > numTarget;
+    case "<": return bothNumeric && numeric < numTarget;
+    case ">=": return bothNumeric && numeric >= numTarget;
+    case "<=": return bothNumeric && numeric <= numTarget;
+    case "!=": return v.toLowerCase() !== t.toLowerCase();
+    default:
+      // Prefix match so `source=LD` catches LD CUSTOM / LD CUSTOM 2 without
+      // the caller having to know the feed names.
+      return v.toLowerCase() === t.toLowerCase() || v.toLowerCase().startsWith(t.toLowerCase());
+  }
+}
+
+function filterPayments(payments = [], filters = []) {
+  const applicable = filters.filter((f) => ["cohort", "source", "officer", "domain"].includes(f.key));
+  if (!applicable.length) return payments;
+  return payments.filter((p) => applicable.every((f) => {
+    if (f.key === "cohort") return matchOne(cohortOf(p), f.op, f.value);
+    if (f.key === "source") return matchOne(p.sourceAtSale, f.op, f.value);
+    if (f.key === "officer") return matchOne(p.officerAtSale, f.op, f.value);
+    return matchOne(p.domain, f.op, f.value);
+  }));
+}
+
+function filterRecordings(recordings = [], filters = []) {
+  const applicable = filters.filter((f) => ["minutes", "outcome", "source", "officer"].includes(f.key));
+  if (!applicable.length) return recordings;
+  return recordings.filter((c) => applicable.every((f) => {
+    if (f.key === "minutes") return matchOne(c.minutes, f.op, f.value);
+    if (f.key === "outcome") {
+      const converted = Boolean(c.reasons?.includes("DEAL"));
+      const want = String(f.value).toLowerCase();
+      const isDeal = want === "deal" || want === "converted";
+      return f.op === "!=" ? converted !== isDeal : converted === isDeal;
+    }
+    if (f.key === "source") return matchOne(c.source, f.op, f.value);
+    return matchOne(c.officer, f.op, f.value);
+  }));
+}
+
+/** Gather exactly the raw material the ticked blocks asked for. */
+async function gatherMaterial({
+  needs, from, to, domain = null, live = true, logger = null, session = null,
+}) {
+  const want = new Set(needs);
+  const material = { from, to };
+  const notes = [];
+  // ONE session for the whole report: activity pulled for payments is the
+  // same activity the recordings / postdate / lag steps want, and without
+  // this they each paid for it separately.
+  const gatherSession = session || (() => {
+    const { createGatherSession } = require("./gatherSessionService");
+    return createGatherSession({ logger });
+  })();
+  material.session = gatherSession;
+
+  // ── payments + activity: ONE live gather serves both ──
+  if (want.has("payments") || want.has("activity")) {
+    if (live) {
+      const { gatherRange } = require("./liveGatherService");
+      const domains = domain ? [String(domain).toUpperCase()] : ["TAG", "WYNN", "AMITY"];
+      const g = await gatherRange({ from, to, domains, logger, session: gatherSession });
+      // SUCCESS-ONLY, matching the cached branch exactly. The live gather
+      // returns every history row INCLUDING declines; letting those through
+      // inflated live cash while the cached path filtered them out, so the
+      // same question answered two different ways. Declines are not
+      // discarded — they become their own material key for the redline
+      // blocks that actually want them.
+      material.payments = g.payments.filter((p) => p.transactionStatus === "SUCCESS");
+      material.declines = g.payments.filter((p) => p.transactionStatus === "DECLINED");
+      // Attribution is the ONE fact a live re-pull cannot reconstruct: Logics
+      // returns who owns the case TODAY, not who closed it. reportingService
+      // already solved this for the officer report; the builder must use the
+      // same snapshot or it prints "(unassigned)" over attributed money.
+      try {
+        const { enrichAttribution } = require("./reportingService");
+        material.payments = await enrichAttribution(material.payments);
+        material.declines = await enrichAttribution(material.declines);
+        const missing = material.payments.filter((x) => x.attributionSnapshot === "missing").length;
+        if (missing) notes.push(`${missing} payment(s) have no attribution snapshot yet — shown as (no snapshot), not (unassigned)`);
+      } catch (error) {
+        notes.push(`attribution snapshots unavailable — ${String(error.message).slice(0, 70)}`);
+      }
+      material.events = g.activity.events;
+      material.gathered = {
+        activityRows: g.activity.rows, casesConfirmed: g.totals.casesConfirmed,
+        durationMs: g.durationMs, unconfirmed: g.unconfirmed.length,
+      };
+      notes.push(...g.errors);
+      // (Attribution enrichment happens once, above, immediately after the
+      // SUCCESS split — it covers declines too and records why a row has no
+      // snapshot. A second pass here re-queried PaymentTruth for the same
+      // ids and threw the answer away.)
+    } else {
+      const { PaymentTruth, ActivityEvent } = require("../../shared-models/src");
+      const f = { paymentDateKey: { $gte: from, $lte: to }, transactionStatus: "SUCCESS", supersededAt: null };
+    const declineFilter = { ...f, transactionStatus: "DECLINED" };
+      if (domain) f.domain = String(domain).toUpperCase();
+      material.payments = await PaymentTruth.find(f).lean();
+      // The cache stores declines too; expose them the same way so a block
+      // sees an identical material shape in both modes.
+      material.declines = await PaymentTruth.find(declineFilter).lean().catch(() => []);
+      material.events = await ActivityEvent.find({ dateKey: { $gte: from, $lte: to } }).lean();
+      material.gathered = { cached: true };
+    }
+  }
+
+  // ── spend: originates with us (mail-sheet sync + BCD pay-per-call) ──
+  if (want.has("spend") || want.has("source")) {
+    const SpendEntry = require("../../shared-models/src/SpendEntry");
+    const DailyCallStat = require("../../shared-models/src/DailyCallStat");
+    const rows = await SpendEntry.find({ date: { $gte: from, $lte: to }, active: { $ne: false } })
+      .select("channel source spend cost pieces leadsReported").lean();
+    const bcdRows = await DailyCallStat.find({
+      date: { $gte: from, $lte: to }, channel: "bcd", active: { $ne: false },
+    }).select("totalCalls").lean();
+
+    const bcdRate = Number(process.env.BCD_COST_PER_CALL) > 0 ? Number(process.env.BCD_COST_PER_CALL) : 4;
+    const bcdCalls = bcdRows.reduce((s, r) => s + (Number(r.totalCalls) || 0), 0);
+    const spendBySource = {};
+    let ld = 0; let mail = 0; let ldLeads = 0; let mailPieces = 0;
+    for (const r of rows) {
+      const amt = Number(r.spend || 0);
+      spendBySource[r.source] = spendBySource[r.source] || { spend: 0, leads: 0 };
+      spendBySource[r.source].spend = round2(spendBySource[r.source].spend + amt);
+      spendBySource[r.source].leads += Number(r.leadsReported || 0);
+      if (r.channel === "lead-data") { ld = round2(ld + amt); ldLeads += Number(r.leadsReported || 0); }
+      else if (r.channel === "mailer") { mail = round2(mail + amt); mailPieces += Number(r.pieces || 0); }
+    }
+    const bcd = round2(bcdCalls * bcdRate);
+    if (bcdCalls) spendBySource.BCD = { spend: bcd, leads: 0 };
+    material.spend = { ld, mail, bcd, bcdCalls, bcdRate, ldLeads, mailPieces, total: round2(ld + mail + bcd) };
+    material.spendBySource = spendBySource;
+    if (!rows.length) notes.push(`no spend rows recorded for ${from}..${to}`);
+  }
+
+  // ── calls: CallRail daily stats (the declared response feed) ──
+  if (want.has("calls") || want.has("source")) {
+    const DailyCallStat = require("../../shared-models/src/DailyCallStat");
+    const rows = await DailyCallStat.find({
+      date: { $gte: from, $lte: to }, syncSource: "callrail-direct", active: { $ne: false },
+    }).select("piece totalCalls firstTimeCallers").lean();
+    const callsBySource = {};
+    for (const r of rows) {
+      callsBySource[r.piece] = callsBySource[r.piece] || { calls: 0, responses: 0 };
+      callsBySource[r.piece].calls += Number(r.totalCalls || 0);
+      callsBySource[r.piece].responses += Number(r.firstTimeCallers || 0);
+    }
+    material.callsBySource = callsBySource;
+  }
+
+  // ── queue connections: who took the calls (bounded RC trickle + PB) ──
+  if (want.has("queue")) {
+    const byAgent = {};
+    const streamTotals = {};
+    const days = dayRange(from, to);
+    if (days.length > QUEUE_DAY_LOOP_MAX) {
+      notes.push(`queue counts skipped — ${days.length} days exceeds QUEUE_DAY_LOOP_MAX (${QUEUE_DAY_LOOP_MAX}); RingCentral is a slow-trickle source`);
+      material.queueByAgent = {};
+      material.queueStreams = {};
+    } else {
+      try {
+        const { readStreamConnections, normalizePhoneBurnerAgent } = require("./mailerQueueService");
+        const { readLdDials } = require("./nightReportService");
+        let first = true;
+        for (const day of days) {
+          if (!first) await sleep(QUEUE_DAY_PAUSE_MS);
+          first = false;
+          const q = await readStreamConnections({ dateKey: day, maxPages: 6, logger });
+          for (const [key, stream] of Object.entries(q.streams || {})) {
+            streamTotals[key] = streamTotals[key] || { calls: 0, connected: 0, missed: 0 };
+            streamTotals[key].calls += stream.calls || 0;
+            streamTotals[key].connected += stream.connected || 0;
+            streamTotals[key].missed += stream.missed || 0;
+            for (const [agent, n] of Object.entries(stream.byAgent || {})) {
+              byAgent[agent] = byAgent[agent] || {};
+              byAgent[agent][key] = (byAgent[agent][key] || 0) + n;
+            }
+          }
+          if (q.rateLimited) { notes.push(`queue read rate-limited on ${day} — partial`); break; }
+          const ld = await readLdDials(day);
+          for (const [id, n] of Object.entries(ld.byAgent || {})) {
+            const name = normalizePhoneBurnerAgent(id);
+            byAgent[name] = byAgent[name] || {};
+            byAgent[name].LD = (byAgent[name].LD || 0) + n;
+          }
+        }
+      } catch (error) {
+        notes.push(`queue connections unavailable — ${String(error.message).slice(0, 90)}`);
+      }
+      material.queueByAgent = byAgent;
+      material.queueStreams = streamTotals;
+    }
+  }
+
+  // ── recordings: notable calls with listen links ──
+  if (want.has("recordings")) {
+    try {
+      const { listNotableCalls } = require("./nightRecordingsService");
+      const { foldCasePhones } = require("./casePhoneFoldService");
+      const { createLogicsClient } = require("../../shared-integrations/src");
+      const { unwrapLogics } = require("./paymentTruthService");
+
+      // A call can only be matched to a sale by PHONE, and a live gather
+      // does not resolve phones — so deal calls were landing in the
+      // "no-deal" bucket, which is exactly backwards for coaching. Fold
+      // phones for the deal cases only (a handful), so outcome=deal /
+      // no-deal means what it says.
+      const dealRows = (material.payments || [])
+        .filter((p) => p.paymentType === "initial" && !p.isChargeback);
+      const deals = [];
+      for (const p of dealRows) {
+        let sourceVia = p.sourceVia || null;
+        if (!sourceVia) {
+          try {
+            const info = unwrapLogics(await createLogicsClient(p.domain).getCaseInfo(p.caseId));
+            const phone = foldCasePhones(info || {}).normalizedPhones[0];
+            if (phone) sourceVia = `callrail:${phone}`;
+          } catch { /* an unmatched deal is a missing tag, not a failed report */ }
+        }
+        deals.push({
+          caseId: p.caseId, name: p.clientName, amount: p.amount,
+          officer: p.officerAtSale, sourceVia,
+        });
+      }
+      if (dealRows.length && !deals.some((d) => d.sourceVia)) {
+        notes.push("no deal phone resolved — outcome= filters may under-report deals");
+      }
+      const days = dayRange(from, to);
+      if (days.length > RANGE_DAY_LOOP_MAX) {
+        material.recordings = [];
+        notes.push(`recordings skipped — ${days.length} days exceeds RANGE_DAY_LOOP_MAX (${RANGE_DAY_LOOP_MAX})`);
+      } else {
+        const collected = [];
+        for (const day of days) {
+          const dayCalls = await listNotableCalls({ domain: "TAG", dateKey: day, deals, logger });
+          collected.push(...dayCalls);
+        }
+        material.recordings = collected;
+      }
+    } catch (error) {
+      material.recordings = [];
+      notes.push(`recordings unavailable — ${String(error.message).slice(0, 90)}`);
+    }
+  }
+
+  // ── case contacts: phone + name for the cases already in play ──
+  // The lag and declines blocks need a phone to join on, and payment truth
+  // does not carry one. This is a single indexed read over cases we already
+  // gathered, not a new sweep.
+  if (want.has("caseContacts") && (material.payments || material.declines)) {
+    const rows = [...(material.payments || []), ...(material.declines || [])];
+    const ids = [...new Set(rows.map((r) => Number(r.caseId)).filter(Boolean))];
+    if (ids.length) {
+      try {
+        const CaseProfile = require("../../shared-models/src/CaseProfile");
+        const profiles = await CaseProfile.find({ caseId: { $in: ids } })
+          .select("domain caseId name firstName lastName primaryPhone homePhone").lean();
+        const byCase = new Map();
+        for (const pr of profiles) byCase.set(`${String(pr.domain).toUpperCase()}:${pr.caseId}`, pr);
+        const attach = (list) => (list || []).map((r) => {
+          const pr = byCase.get(`${String(r.domain).toUpperCase()}:${Number(r.caseId)}`);
+          if (!pr) return r;
+          return {
+            ...r,
+            phone: r.phone || pr.primaryPhone || pr.homePhone || null,
+            name: r.name || r.clientName || pr.name
+              || [pr.firstName, pr.lastName].filter(Boolean).join(" ") || null,
+          };
+        });
+        material.payments = attach(material.payments);
+        material.declines = attach(material.declines);
+      } catch (error) {
+        notes.push(`case contacts unavailable — ${String(error.message).slice(0, 70)}`);
+      }
+
+      // Our CaseProfile mirror carried a phone for 1 of 8 recent deals, so
+      // the mirror alone leaves every call join empty. Logics is the
+      // authority; fold ALL its numbers (cell/home/work/spouse) because a
+      // client rarely calls in on the one field we picked as "primary".
+      // Fetch the Logics case when we need a PHONE to join on, or when the row
+      // is a DEAL — because the same call also carries SourceCampaignID, which
+      // is where the mail piece lives once the sanitizer has written it back.
+      // Attribution then becomes a READ instead of a reconstruction.
+      const needLookup = [...(material.payments || []), ...(material.declines || [])]
+        .filter((r) => !r.phone || (r.paymentType === "initial" && !r.isChargeback));
+      const wanted = [...new Map(needLookup.map((r) => [`${r.domain}:${Number(r.caseId)}`, r])).values()];
+      if (wanted.length) {
+        if (wanted.length > CASE_CONTACT_MAX) {
+          notes.push(`case phone lookup skipped — ${wanted.length} cases exceeds CASE_CONTACT_MAX (${CASE_CONTACT_MAX})`);
+        } else {
+          try {
+            const { createLogicsClient } = require("../../shared-integrations/src");
+            const { foldCasePhones } = require("./casePhoneFoldService");
+            const { unwrapLogics, mapLimit } = require("./paymentTruthService");
+            const { labelForSourceId, pieceForSourceId } = require("./logicsSourceWriterService");
+            const clients = new Map();
+            const folded = new Map();
+            let failed = 0;
+            let fromLogics = 0;
+            let onCatchAll = 0;
+            await mapLimit(wanted, 3, async (r) => {
+              const dom = String(r.domain).toUpperCase();
+              if (!clients.has(dom)) clients.set(dom, createLogicsClient(dom));
+              try {
+                const info = unwrapLogics(await clients.get(dom).getCaseInfo(r.caseId));
+                const campaignId = info?.SourceCampaignID ?? null;
+                folded.set(`${dom}:${Number(r.caseId)}`, {
+                  phones: foldCasePhones(info || {}),
+                  campaignId,
+                  // Registered mail piece first; else any CONFIRMED id label
+                  // (LD CUSTOM, BCD, ...) — those are real attribution too,
+                  // and their names match the spend keys exactly.
+                  piece: pieceForSourceId(dom, campaignId)
+                    || (labelForSourceId(dom, campaignId)?.catchAll === false
+                      ? labelForSourceId(dom, campaignId).label : null),
+                  catchAllLabel: labelForSourceId(dom, campaignId)?.catchAll
+                    ? labelForSourceId(dom, campaignId).label : null,
+                });
+              } catch { failed += 1; }
+            });
+            const attachPhones = (list) => (list || []).map((r) => {
+              const hit = folded.get(`${String(r.domain).toUpperCase()}:${Number(r.caseId)}`);
+              if (!hit) return r;
+              const f = hit.phones;
+              const out = {
+                ...r,
+                phone: r.phone || f.primaryPhone || f.normalizedPhones?.[0] || null,
+                phones: f.normalizedPhones || [],
+                sourceCampaignId: hit.campaignId,
+              };
+              // The stored snapshot still wins: it records who/what the case was
+              // at the moment of sale, and Logics can be edited afterwards.
+              if (!out.sourceAtSale && hit.piece) {
+                out.sourceAtSale = hit.piece;
+                out.sourceOrigin = "logics";
+                fromLogics += 1;
+              } else if (!out.sourceAtSale && hit.campaignId != null) {
+                // Known id, no real source behind it — the catch-all. Say so
+                // rather than printing "(unsourced)", which reads as no data.
+                out.sourceAtSale = null;
+                out.sourceOrigin = "catch-all";
+                out.catchAllLabel = hit.catchAllLabel || null;
+                onCatchAll += 1;
+              } else if (out.sourceAtSale && !out.sourceOrigin) {
+                out.sourceOrigin = "snapshot";
+              }
+              return out;
+            });
+            material.payments = attachPhones(material.payments);
+            material.declines = attachPhones(material.declines);
+            if (fromLogics) notes.push(`${fromLogics} payment(s) took their source straight off the Logics case`);
+            if (onCatchAll) notes.push(`${onCatchAll} payment(s) sit on the Logics catch-all — run scripts/sanitize-logics-source.js to resolve the piece`);
+            if (failed) notes.push(`${failed} case(s) had no reachable Logics contact record`);
+          } catch (error) {
+            notes.push(`case phone lookup unavailable — ${String(error.message).slice(0, 70)}`);
+          }
+        }
+      }
+    }
+  }
+
+  // ── dials: DailyDial per-case rows (ours, range-native, cheap) ──
+  if (want.has("dials")) {
+    try {
+      const DailyDial = require("../../shared-models/src/DailyDial");
+      const q = { dateKey: { $gte: from, $lte: to } };
+      if (domain) q.domain = String(domain).toLowerCase();
+      material.dials = await DailyDial.find(q)
+        .select("domain caseId dateKey attempts originPool durationSeconds lastOutcome")
+        .lean();
+    } catch (error) {
+      material.dials = [];
+      notes.push(`dials unavailable — ${String(error.message).slice(0, 90)}`);
+    }
+  }
+
+  // ── postdateBilling: per-case FULL history for post-dated cases ──
+  // Cost scales with post-dated cases (~51/month), not with days. A 404 is
+  // "no billing record", which is the finding, not a failure to look.
+  if (want.has("postdateBilling")) {
+    const events = material.events || [];
+    const postdated = new Map();
+    for (const e of events) {
+      if (e.kind !== "status-change" || e.payload?.safetyClass !== "postdate") continue;
+      if (e.payload?.selfTransition) continue;
+      const key = `${e.domain}:${e.caseId}`;
+      const at = e.createdAt ? new Date(e.createdAt).toISOString().slice(0, 10) : from;
+      const prev = postdated.get(key);
+      if (!prev || at < prev.postdatedOn) {
+        postdated.set(key, { domain: e.domain, caseId: e.caseId, postdatedOn: at, toStatus: e.payload?.toStatus || null, times: (prev?.times || 0) + 1 });
+      } else if (prev) prev.times += 1;
+    }
+    const { createLogicsClient } = require("../../shared-integrations/src");
+    const { unwrapLogics, mapLimit } = require("./paymentTruthService");
+    const clients = new Map();
+    material.postdateBilling = await mapLimit([...postdated.values()], 3, async (c) => {
+      if (!clients.has(c.domain)) clients.set(c.domain, createLogicsClient(c.domain));
+      try {
+        const rows = unwrapLogics(await clients.get(c.domain).getCasePayments(c.caseId)) || [];
+        const list = Array.isArray(rows) ? rows : [];
+        const paid = list.filter((x) => String(x.TransactionStatus).toUpperCase() === "SUCCESS" && Number(x.Amount) > 0);
+        const declined = list.filter((x) => String(x.TransactionStatus).toUpperCase() === "DECLINED");
+        const after = paid.filter((x) => String(x.PaidDate).slice(0, 10) >= c.postdatedOn);
+        return {
+          ...c, everPaid: paid.length > 0, paidAfter: after.length > 0,
+          amountAfter: Math.round(after.reduce((sum, x) => sum + Number(x.Amount), 0) * 100) / 100,
+          declinedCount: declined.length,
+          declinedAmount: Math.round(declined.reduce((sum, x) => sum + Math.abs(Number(x.Amount)), 0) * 100) / 100,
+          noBillingRecord: false,
+        };
+      } catch (error) {
+        if (error?.details?.responseStatus === 404 || /: 404$/.test(String(error.message))) {
+          return { ...c, everPaid: false, paidAfter: false, amountAfter: 0, declinedCount: 0, declinedAmount: 0, noBillingRecord: true };
+        }
+        return { ...c, error: String(error.message).slice(0, 80) };
+      }
+    });
+  }
+
+  // ── callsRange: CallRail per day, under the day cap ──
+  // The call that produced a deal usually landed BEFORE the reporting window.
+  // Gathering only [from,to] made every lag measure 0 days — an artifact of
+  // the window, not a fact about the funnel. So reach back before `from`.
+  // CallRail tolerates this: it is the robust API, one cheap call per day.
+  if (want.has("callsRange")) {
+    const callsFrom = addDaysKey(from, -CALLS_LOOKBACK_DAYS);
+    const days = dayRange(callsFrom, to);
+    if (days.length > CALLS_DAY_MAX) {
+      material.callsRange = [];
+      notes.push(`call detail skipped — ${days.length} days exceeds CALLS_DAY_MAX (${CALLS_DAY_MAX})`);
+    } else {
+      material.callsLookbackFrom = callsFrom;
+      notes.push(`inbound calls gathered from ${callsFrom} (${CALLS_LOOKBACK_DAYS}-day lookback) so call-to-close lag is not clipped to the window`);
+      const { createCallrailClient } = require("../../shared-integrations/src");
+      const cr = createCallrailClient("TAG");
+      const all = [];
+      for (const day of days) {
+        try {
+          const rows = await gatherSession.fetch("callrail", { domain: "TAG", from: day, to: day },
+            async () => {
+              const res = await cr.listInboundCallsForRange({ startDate: day, endDate: day });
+              return res?.calls || [];
+            });
+          for (const c of rows) {
+            all.push({
+              callId: c.id, phone: c.customer_phone_number, source: c.source_name || null,
+              startedAt: c.start_time, durationSec: Number(c.duration) || 0, dateKey: day,
+              // CallRail's own caller history — authoritative over anything we
+              // could rebuild, because it counts calls we never match to a case.
+              firstCall: c.first_call === undefined ? null : Boolean(c.first_call),
+              priorCalls: c.prior_calls === undefined ? null : Number(c.prior_calls),
+              totalCalls: c.total_calls === undefined ? null : Number(c.total_calls),
+              answered: c.answered === undefined ? null : Boolean(c.answered),
+            });
+          }
+        } catch (error) {
+          notes.push(`calls ${day} unavailable — ${String(error.message).slice(0, 60)}`);
+        }
+      }
+      material.callsRange = all;
+      // CallRail is a single TAG tenant — say so once, here, rather than
+      // letting a WYNN-heavy report look like it had no calls.
+      notes.push("call detail is CallRail (TAG tenant) only");
+    }
+  }
+
+  material.notes = notes;
+  material.gatherStats = gatherSession.stats();
+  return material;
+}
+
+/**
+ * Compose a report from a block selection.
+ * `selection` accepts block ids, preset names, or a mix.
+ */
+async function composeReport({
+  selection = "daily", from, to, domain = null, live = true, logger = null, where = null,
+} = {}) {
+  const range = { from: String(from || "").slice(0, 10), to: String(to || from || "").slice(0, 10) };
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(range.from) || !/^\d{4}-\d{2}-\d{2}$/.test(range.to)) {
+    throw new Error("composeReport requires from/to as YYYY-MM-DD");
+  }
+  const { blocks, unknown } = resolveSelection(selection);
+  if (!blocks.length) throw new Error(`no known blocks in "${selection}"`);
+
+  const { filters, unknown: badFilters } = parseFilters(where);
+  const needs = neededSources(blocks);
+  const material = await gatherMaterial({ needs, ...range, domain, live, logger });
+
+  // Slice BEFORE the blocks compute, so every ticked calculation describes
+  // the same population.
+  const beforeCounts = { payments: (material.payments || []).length, recordings: (material.recordings || []).length };
+  if (filters.length) {
+    if (material.payments) material.payments = filterPayments(material.payments, filters);
+    if (material.declines) material.declines = filterPayments(material.declines, filters);
+    if (material.recordings) material.recordings = filterRecordings(material.recordings, filters);
+  }
+
+  const sections = [];
+  for (const block of blocks) {
+    try {
+      sections.push({ id: block.id, label: block.label, data: block.compute(material), block });
+    } catch (error) {
+      sections.push({ id: block.id, label: block.label, error: String(error.message).slice(0, 140), block });
+    }
+  }
+
+  return {
+    ...range,
+    domain: domain || "ALL",
+    selection: blocks.map((b) => b.id),
+    filters,
+    filtered: filters.length
+      ? { before: beforeCounts, after: { payments: (material.payments || []).length, recordings: (material.recordings || []).length } }
+      : null,
+    unknown: [...unknown, ...badFilters],
+    source: live ? "live" : "cached",
+    gathered: material.gathered || null,
+    gatherStats: material.gatherStats || null,
+    notes: material.notes || [],
+    sections,
+  };
+}
+
+/** Plain-text render — every ticked block, in the order ticked. */
+function renderText(report) {
+  const L = [];
+  L.push(`REPORT  ${report.from}${report.to !== report.from ? ` → ${report.to}` : ""}   ${report.domain}`);
+  L.push("=".repeat(70));
+  L.push("");
+  for (const s of report.sections) {
+    if (s.error) { L.push(`${s.label}: unavailable — ${s.error}`); L.push(""); continue; }
+    L.push(s.block.renderText(s.data));
+    L.push("");
+  }
+  if (report.filters?.length) {
+    const f = report.filters.map((x) => `${x.key}${x.op}${x.value}`).join(" · ");
+    L.push(`filtered: ${f}   (${report.filtered.after.payments}/${report.filtered.before.payments} payments, ${report.filtered.after.recordings}/${report.filtered.before.recordings} calls)`);
+  }
+  if (report.unknown?.length) L.push(`ignored: ${report.unknown.join(", ")}`);
+  for (const n of report.notes) L.push(`note: ${n}`);
+  if (report.gathered?.activityRows) {
+    L.push(`\nlive · ${report.gathered.activityRows} activity rows · ${report.gathered.casesConfirmed} case(s) confirmed · ${Math.round((report.gathered.durationMs || 0) / 1000)}s`);
+  }
+  return L.join("\n");
+}
+
+// ── HTML ──────────────────────────────────────────────────────────────────
+// Derived from the SAME column declarations the CSV uses, so a block gains an
+// HTML table by existing rather than by growing a third renderer that can
+// drift from the other two. A block may still define renderHtml() when a
+// table is the wrong shape (the recordings list, for one).
+
+const esc = (v) => String(v === null || v === undefined ? "" : v)
+  .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+
+const HEADER_LABEL = (h) => String(h).replace(/_/g, " ");
+const MONEY_COL = /(cash|amount|spend|collected|revenue|cost|net|profit)/i;
+const isNum = (v) => typeof v === "number" && Number.isFinite(v);
+
+function cellHtml(value, header) {
+  if (value === null || value === undefined || value === "") return '<td class="muted">—</td>';
+  if (typeof value === "boolean") return `<td>${value ? "yes" : "no"}</td>`;
+  if (isNum(value)) {
+    const text = MONEY_COL.test(header)
+      ? `$${value.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+      : value.toLocaleString("en-US");
+    return `<td class="num">${esc(text)}</td>`;
+  }
+  const str = String(value);
+  if (/^https?:\/\//.test(str)) return `<td><a href="${esc(str)}">recording</a></td>`;
+  return `<td>${esc(str)}</td>`;
+}
+
+function sectionHtml(section) {
+  if (section.error) {
+    return `<section><h2>${esc(section.label)}</h2><p class="err">unavailable — ${esc(section.error)}</p></section>`;
+  }
+  if (typeof section.block.renderHtml === "function") {
+    return `<section><h2>${esc(section.label)}</h2>${section.block.renderHtml(section.data)}</section>`;
+  }
+  let table;
+  try {
+    table = section.block.csv(section.data);
+  } catch (error) {
+    return `<section><h2>${esc(section.label)}</h2><pre>${esc(section.block.renderText(section.data))}</pre></section>`;
+  }
+  const rows = table.rows || [];
+  if (!rows.length) {
+    return `<section><h2>${esc(section.label)}</h2><p class="muted">nothing in this range.</p></section>`;
+  }
+  const head = table.columns.map((c) => `<th>${esc(HEADER_LABEL(c.header))}</th>`).join("");
+  const body = rows.map((r) => `<tr>${table.columns.map((c) => cellHtml(c.get(r), c.header)).join("")}</tr>`).join("");
+  return `<section><h2>${esc(section.label)}</h2>`
+    + `<div class="scroll"><table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div></section>`;
+}
+
+const STYLE = `
+  body{font:14px/1.5 -apple-system,Segoe UI,Helvetica,Arial,sans-serif;color:#1a1a1a;background:#fff;margin:0;padding:24px}
+  h1{font-size:20px;margin:0 0 4px}
+  h2{font-size:15px;margin:28px 0 8px;padding-bottom:6px;border-bottom:2px solid #1a1a1a}
+  .range{color:#666;margin:0 0 8px}
+  .scroll{overflow-x:auto}
+  table{border-collapse:collapse;width:100%;font-size:13px}
+  th{text-align:left;font-weight:600;color:#555;border-bottom:1px solid #ccc;padding:6px 10px 6px 0;white-space:nowrap}
+  td{padding:5px 10px 5px 0;border-bottom:1px solid #eee;vertical-align:top}
+  td.num{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+  td.muted,.muted{color:#999}
+  .err{color:#b00}
+  .notes{margin-top:28px;padding-top:12px;border-top:1px solid #ddd;color:#666;font-size:12px}
+  .notes li{margin:2px 0}
+  a{color:#0b57d0}
+`;
+
+/**
+ * The same report, as email-ready HTML.
+ *
+ * Notes render as a visible list rather than being dropped: a caveat that
+ * only exists in the plain-text copy is a caveat nobody reads.
+ */
+function renderHtml(report) {
+  const title = `${report.from}${report.to !== report.from ? ` → ${report.to}` : ""}`;
+  const notes = [...(report.notes || [])];
+  if (report.filters?.length) {
+    notes.unshift(`filtered: ${report.filters.map((x) => `${x.key}${x.op}${x.value}`).join(" · ")}`
+      + ` (${report.filtered.after.payments}/${report.filtered.before.payments} payments)`);
+  }
+  if (report.unknown?.length) notes.push(`ignored: ${report.unknown.join(", ")}`);
+  if (report.gathered?.activityRows) {
+    notes.push(`live · ${report.gathered.activityRows} activity rows · ${report.gathered.casesConfirmed} case(s) confirmed`
+      + ` · ${Math.round((report.gathered.durationMs || 0) / 1000)}s`);
+  }
+  return `<!doctype html><html><head><meta charset="utf-8">`
+    + `<meta name="viewport" content="width=device-width,initial-scale=1">`
+    + `<title>Report ${esc(title)}</title><style>${STYLE}</style></head><body>`
+    + `<h1>${esc(report.domain === "ALL" ? "Report" : `${report.domain} report`)}</h1>`
+    + `<p class="range">${esc(title)}</p>`
+    + report.sections.map(sectionHtml).join("")
+    + (notes.length ? `<div class="notes"><ul>${notes.map((n) => `<li>${esc(n)}</li>`).join("")}</ul></div>` : "")
+    + `</body></html>`;
+}
+
+module.exports = {
+  FILTER_KEYS,
+  renderHtml,
+  RANGE_DAY_LOOP_MAX,
+  dayRange, composeReport, filterPayments, filterRecordings,
+  gatherMaterial, parseFilters, renderText,
+};

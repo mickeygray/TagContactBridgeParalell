@@ -17,6 +17,13 @@ const DEFAULT_FIELDS = [
   "start_time",
   "duration",
   "direction",
+  // CallRail already counts how many times this caller has reached us.
+  // Reconstructing it from our own matched set is both more work and less
+  // accurate — the provider sees calls we never join to a case.
+  "first_call",
+  "prior_calls",
+  "total_calls",
+  "answered",
 ];
 
 function normalizePhone(phone) {

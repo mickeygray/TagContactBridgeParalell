@@ -32,6 +32,17 @@ async function lookupInboundCall(companyKey, phone, options = {}) {
   };
 }
 
+/**
+ * Every inbound call for a phone, mapped — for callers applying the
+ * attribution rule (longest call on the close day), which needs the full
+ * set, not just the most recent.
+ */
+async function listInboundCallsForPhone(companyKey, phone, options = {}) {
+  const client = createCallrailClient(companyKey);
+  const payload = await client.lookupInboundCallByPhone(phone, options);
+  return (payload.calls || []).map(mapCall).filter(Boolean);
+}
+
 async function listLastMonthInboundCalls(companyKey, options = {}) {
   const client = createCallrailClient(companyKey);
   const payload = await client.listInboundCallsForLastMonth(options);
@@ -51,6 +62,7 @@ async function listLastMonthInboundCalls(companyKey, options = {}) {
 }
 
 module.exports = {
+  listInboundCallsForPhone,
   listLastMonthInboundCalls,
   lookupInboundCall,
   mapCall,
