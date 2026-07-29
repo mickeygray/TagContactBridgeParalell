@@ -458,6 +458,20 @@ export const salesTrainerApi = {
       ),
     );
   },
+  async speech(body: {
+    text: string;
+    voice?: string;
+    persona?: string;
+    responseFormat?: string;
+    speed?: number;
+  }) {
+    return unwrap(
+      await trainerRequest<{ ok: true; result: TrainerAudio }>(
+        "/api/sales-trainer/speech",
+        { method: "POST", body },
+      ),
+    );
+  },
   // One-shot turn: STT + Claude + TTS server-side, one round-trip.
   // Replaces the legacy two-step pattern of transcribeAudio() →
   // respond(), saving ~150-300ms of network overhead and keeping the

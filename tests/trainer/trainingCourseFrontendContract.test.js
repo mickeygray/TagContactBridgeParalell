@@ -151,6 +151,11 @@ test("Targeted Talk client sends learner text only and renders only behind capab
   assert.match(player, /isGauntlet && home\?\.capabilities\.gauntletV1Enabled === true/);
   assert.match(gauntlet, /turnEventRef\.current\?\.input === outbound/);
   assert.match(gauntlet, /Practice only this part of the call/);
+  assert.match(gauntlet, /navigator\.mediaDevices\.getUserMedia/);
+  assert.match(gauntlet, /salesTrainerApi\.transcribeAudio/);
+  assert.match(gauntlet, /salesTrainerApi\.speech/);
+  assert.match(gauntlet, /Start voice session/);
+  assert.match(gauntlet, /Text fallback and transcript/);
 });
 
 test("course Free Call wrapper keeps natural practice on the unchanged legacy cockpit", () => {

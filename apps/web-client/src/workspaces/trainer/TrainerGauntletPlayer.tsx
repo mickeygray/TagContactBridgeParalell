@@ -1,6 +1,20 @@
-import { useEffect, useRef, useState } from "react";
-import { Loader2, MessageCircle, RotateCcw, Send } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  Headphones,
+  Loader2,
+  MessageCircle,
+  Mic,
+  RotateCcw,
+  Send,
+  Square,
+  Volume2,
+} from "lucide-react";
 import { Button } from "@/components/ui/Button";
+import {
+  audioDataUrl,
+  salesTrainerApi,
+  type TrainerAudio,
+} from "@/lib/api/salesTrainer";
 import {
   createTrainingRequestId,
   trainingCourseApi,
@@ -21,6 +35,33 @@ type TapeTurn = {
   text: string;
 };
 
+const RECORDING_MIME_TYPES = [
+  "audio/webm;codecs=opus",
+  "audio/webm",
+  "audio/ogg;codecs=opus",
+  "audio/mp4",
+];
+const MIN_RECORDING_MS = 350;
+const MIN_RECORDING_BYTES = 900;
+
+function pickRecordingMimeType() {
+  if (typeof MediaRecorder === "undefined" || !MediaRecorder.isTypeSupported) {
+    return "";
+  }
+  return RECORDING_MIME_TYPES.find((type) => MediaRecorder.isTypeSupported(type)) || "";
+}
+
+function extensionForMimeType(mimeType: string) {
+  const normalized = mimeType.toLowerCase();
+  if (normalized.includes("ogg")) return "ogg";
+  if (normalized.includes("mp4") || normalized.includes("m4a")) return "m4a";
+  return "webm";
+}
+
+function stopTracks(stream: MediaStream | null) {
+  stream?.getTracks().forEach((track) => track.stop());
+}
+
 export function TrainerGauntletPlayer({
   item,
   attempt,
@@ -30,9 +71,25 @@ export function TrainerGauntletPlayer({
   const [tape, setTape] = useState<TapeTurn[]>([]);
   const [text, setText] = useState("");
   const [busy, setBusy] = useState(false);
+  const [recording, setRecording] = useState(false);
+  const [transcribing, setTranscribing] = useState(false);
+  const [prospectSpeaking, setProspectSpeaking] = useState(false);
+  const [prospectAudio, setProspectAudio] = useState<TrainerAudio | null>(null);
+  const [lastProspectText, setLastProspectText] = useState("");
+  const [audioNotice, setAudioNotice] = useState("");
   const [error, setError] = useState("");
   const initializeEventRef = useRef<string | null>(null);
   const turnEventRef = useRef<{ input: string; eventId: string } | null>(null);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const mediaStreamRef = useRef<MediaStream | null>(null);
+  const audioChunksRef = useRef<Blob[]>([]);
+  const recordingStartedAtRef = useRef(0);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const prospectAudioUrl = useMemo(() => audioDataUrl(prospectAudio), [prospectAudio]);
+  const micSupported =
+    typeof navigator !== "undefined" &&
+    Boolean(navigator.mediaDevices?.getUserMedia) &&
+    typeof MediaRecorder !== "undefined";
 
   useEffect(() => {
     if (!attempt || runtime) return;
@@ -42,6 +99,78 @@ export function TrainerGauntletPlayer({
       .catch(() => undefined);
     return () => controller.abort();
   }, [attempt, runtime]);
+
+  useEffect(() => {
+    return () => {
+      const recorder = mediaRecorderRef.current;
+      if (recorder && recorder.state !== "inactive") recorder.stop();
+      stopTracks(mediaStreamRef.current);
+      window.speechSynthesis?.cancel();
+    };
+  }, []);
+
+  useEffect(() => {
+    const player = audioRef.current;
+    if (!player || !prospectAudioUrl) return;
+    player.currentTime = 0;
+    player.load();
+    void player.play().catch(() => {
+      setAudioNotice("Click Replay if browser autoplay is blocked.");
+      setProspectSpeaking(false);
+    });
+  }, [prospectAudioUrl]);
+
+  function speakWithBrowser(textToSpeak: string) {
+    if (!("speechSynthesis" in window) || typeof SpeechSynthesisUtterance === "undefined") {
+      setAudioNotice("Prospect audio is unavailable; the line is shown below.");
+      setProspectSpeaking(false);
+      return;
+    }
+    window.speechSynthesis.cancel();
+    const utterance = new SpeechSynthesisUtterance(textToSpeak);
+    utterance.rate = 1.08;
+    utterance.pitch = 0.95;
+    utterance.onstart = () => setProspectSpeaking(true);
+    utterance.onend = () => setProspectSpeaking(false);
+    utterance.onerror = () => {
+      setAudioNotice("Prospect audio could not play; the line is shown below.");
+      setProspectSpeaking(false);
+    };
+    window.speechSynthesis.speak(utterance);
+  }
+
+  async function speakProspect(textToSpeak: string) {
+    const clean = textToSpeak.trim();
+    if (!clean) return;
+    setLastProspectText(clean);
+    setAudioNotice("");
+    setProspectSpeaking(true);
+    try {
+      const audio = await salesTrainerApi.speech({
+        text: clean,
+        responseFormat: "mp3",
+        speed: 1.35,
+      });
+      if (!audio.audioBase64) throw new Error("No prospect audio returned");
+      setProspectAudio(audio);
+    } catch {
+      setProspectAudio(null);
+      speakWithBrowser(clean);
+    }
+  }
+
+  function replayProspect() {
+    if (prospectAudioUrl && audioRef.current) {
+      setAudioNotice("");
+      audioRef.current.currentTime = 0;
+      void audioRef.current.play().catch(() => {
+        setAudioNotice("Browser blocked playback.");
+        setProspectSpeaking(false);
+      });
+      return;
+    }
+    if (lastProspectText) speakWithBrowser(lastProspectText);
+  }
 
   async function begin() {
     setBusy(true);
@@ -56,12 +185,13 @@ export function TrainerGauntletPlayer({
         { eventId, expectedVersion: started.version },
       );
       initializeEventRef.current = null;
+      const opening =
+        result.prospectReply?.text ||
+        result.reactionIntent ||
+        "The prospect is ready. Respond to the situation in this section of the call.";
       setRuntime(result);
-      setTape([{
-        id: "opening",
-        speaker: "prospect",
-        text: "The prospect is ready. Respond to the situation in this section of the call.",
-      }]);
+      setTape([{ id: "opening", speaker: "prospect", text: opening }]);
+      void speakProspect(opening);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Could not start this Talk Session.");
     } finally {
@@ -69,8 +199,8 @@ export function TrainerGauntletPlayer({
     }
   }
 
-  async function submit() {
-    const outbound = text.trim();
+  async function submit(outboundOverride?: string) {
+    const outbound = (outboundOverride ?? text).trim();
     const currentAttempt = runtime?.attempt || attempt;
     if (!outbound || !runtime?.state || !currentAttempt || busy) return;
     setBusy(true);
@@ -92,20 +222,124 @@ export function TrainerGauntletPlayer({
       turnEventRef.current = null;
       setText("");
       setRuntime(result);
+      const reply =
+        result.prospectReply?.text ||
+        result.reactionIntent ||
+        "The prospect responds and keeps this section moving.";
       setTape((current) => [
         ...current,
         { id: mutation.eventId, speaker: "learner", text: outbound },
         ...(result.terminal ? [] : [{
           id: `${mutation.eventId}-prospect`,
           speaker: "prospect" as const,
-          text: result.prospectReply?.text || result.reactionIntent || "The prospect responds and keeps this section moving.",
+          text: reply,
         }]),
       ]);
+      if (!result.terminal) void speakProspect(reply);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Could not submit this turn.");
     } finally {
       setBusy(false);
     }
+  }
+
+  async function transcribeAndSubmit(blob: Blob, mimeType: string, capturedMs: number) {
+    if (capturedMs < MIN_RECORDING_MS || blob.size < MIN_RECORDING_BYTES) {
+      setError("No speech detected. Hold the button long enough to say your response.");
+      return;
+    }
+    setTranscribing(true);
+    setError("");
+    try {
+      const transcript = await salesTrainerApi.transcribeAudio({
+        blob,
+        filename: `targeted-talk-${Date.now()}.${extensionForMimeType(mimeType)}`,
+        prompt: `Tax resolution sales training, ${item.title}. Transcribe only the agent's spoken response.`,
+      });
+      const spoken = transcript.text.trim();
+      if (!spoken) throw new Error("No speech detected");
+      await submit(spoken);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Could not transcribe your response.");
+    } finally {
+      setTranscribing(false);
+    }
+  }
+
+  async function startRecording() {
+    if (!micSupported || busy || transcribing || prospectSpeaking) return;
+    setError("");
+    setAudioNotice("");
+    try {
+      window.speechSynthesis?.cancel();
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        },
+      });
+      stopTracks(mediaStreamRef.current);
+      mediaStreamRef.current = stream;
+      const mimeType = pickRecordingMimeType();
+      const options: MediaRecorderOptions = { audioBitsPerSecond: 64000 };
+      if (mimeType) options.mimeType = mimeType;
+      let recorder: MediaRecorder;
+      try {
+        recorder = new MediaRecorder(stream, options);
+      } catch {
+        recorder = new MediaRecorder(stream);
+      }
+      mediaRecorderRef.current = recorder;
+      audioChunksRef.current = [];
+      recordingStartedAtRef.current = Date.now();
+      recorder.ondataavailable = (event) => {
+        if (event.data.size > 0) audioChunksRef.current.push(event.data);
+      };
+      recorder.onerror = () => {
+        setError("Microphone recording failed.");
+        setRecording(false);
+        stopTracks(mediaStreamRef.current);
+      };
+      recorder.onstop = () => {
+        const chunks = audioChunksRef.current.slice();
+        const capturedMs = Date.now() - recordingStartedAtRef.current;
+        const type = recorder.mimeType || mimeType || "audio/webm";
+        setRecording(false);
+        stopTracks(mediaStreamRef.current);
+        mediaStreamRef.current = null;
+        if (chunks.length === 0) {
+          setError("No speech detected.");
+          return;
+        }
+        void transcribeAndSubmit(new Blob(chunks, { type }), type, capturedMs);
+      };
+      recorder.start(250);
+      setRecording(true);
+    } catch (cause) {
+      const name =
+        cause && typeof cause === "object" && "name" in cause
+          ? String((cause as { name?: unknown }).name)
+          : "";
+      setError(
+        name === "NotAllowedError" || name === "SecurityError"
+          ? "Microphone permission denied."
+          : "Could not start the microphone.",
+      );
+      stopTracks(mediaStreamRef.current);
+      mediaStreamRef.current = null;
+    }
+  }
+
+  function stopRecording() {
+    const recorder = mediaRecorderRef.current;
+    if (!recorder || recorder.state === "inactive") return;
+    try {
+      recorder.requestData();
+    } catch {
+      // The final dataavailable event still fires on stop in supported browsers.
+    }
+    recorder.stop();
   }
 
   async function retry() {
@@ -123,6 +357,8 @@ export function TrainerGauntletPlayer({
       );
       setRuntime(result);
       setTape([]);
+      setProspectAudio(null);
+      setLastProspectText("");
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Could not begin another run.");
     } finally {
@@ -133,7 +369,7 @@ export function TrainerGauntletPlayer({
   if (!runtime) {
     return (
       <div className="rounded-lg border border-primary/25 bg-primary/5 p-6">
-        <MessageCircle className="h-7 w-7 text-primary" />
+        <Headphones className="h-7 w-7 text-primary" />
         <h2 className="mt-3 text-lg font-semibold">Targeted Talk Session</h2>
         <p className="mt-2 text-sm leading-6 text-muted-foreground">
           Practice only this part of the call. The prospect can vary, but the
@@ -144,14 +380,15 @@ export function TrainerGauntletPlayer({
         ) : null}
         {error ? <p role="alert" className="mt-3 text-sm text-destructive">{error}</p> : null}
         <Button className="mt-5" onClick={() => void begin()} disabled={busy}>
-          {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <MessageCircle className="h-4 w-4" />}
-          Start Talk Session
+          {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Headphones className="h-4 w-4" />}
+          Start voice session
         </Button>
       </div>
     );
   }
 
   const terminal = runtime.state.status === "passed" || runtime.state.status === "failed";
+  const voiceBusy = busy || transcribing || prospectSpeaking;
   return (
     <div className="space-y-5">
       <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border bg-muted/20 p-4">
@@ -169,14 +406,72 @@ export function TrainerGauntletPlayer({
         </div>
       </div>
 
-      <div aria-label="Talk session transcript" className="max-h-[420px] space-y-3 overflow-y-auto rounded-lg border border-border p-4">
-        {tape.map((turn) => (
-          <div key={turn.id} className={turn.speaker === "learner" ? "ml-auto max-w-[85%] rounded-lg bg-primary p-3 text-sm text-primary-foreground" : "max-w-[85%] rounded-lg bg-muted p-3 text-sm"}>
-            <div className="mb-1 text-[10px] font-semibold uppercase opacity-70">{turn.speaker}</div>
-            {turn.text}
-          </div>
-        ))}
-      </div>
+      <section className="rounded-xl border border-border bg-gradient-to-b from-primary/5 to-card p-6 text-center">
+        <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-full bg-primary/10 text-primary">
+          {prospectSpeaking ? (
+            <Volume2 className="h-8 w-8 animate-pulse" />
+          ) : transcribing || busy ? (
+            <Loader2 className="h-8 w-8 animate-spin" />
+          ) : recording ? (
+            <Mic className="h-8 w-8 animate-pulse" />
+          ) : (
+            <MessageCircle className="h-8 w-8" />
+          )}
+        </div>
+        <h2 className="mt-4 text-lg font-semibold">
+          {prospectSpeaking
+            ? "Prospect speaking"
+            : transcribing
+              ? "Turning your speech into a response"
+              : busy
+                ? "Prospect is responding"
+                : recording
+                  ? "Listening — say your move"
+                  : "Your turn"}
+        </h2>
+        <p className="mx-auto mt-2 max-w-xl text-sm leading-6 text-muted-foreground">
+          {lastProspectText || "Listen to the prospect, then answer out loud. This session will not leave the assigned call section."}
+        </p>
+
+        {prospectAudioUrl ? (
+          <audio
+            ref={audioRef}
+            aria-label="Prospect audio"
+            className="sr-only"
+            src={prospectAudioUrl}
+            onPlay={() => setProspectSpeaking(true)}
+            onEnded={() => setProspectSpeaking(false)}
+            onError={() => setProspectSpeaking(false)}
+          />
+        ) : null}
+
+        <div className="mt-6 flex flex-wrap justify-center gap-3">
+          <Button
+            size="lg"
+            variant={recording ? "destructive" : "primary"}
+            onClick={recording ? stopRecording : () => void startRecording()}
+            disabled={!micSupported || voiceBusy && !recording || terminal}
+          >
+            {recording ? <Square className="h-5 w-5" /> : <Mic className="h-5 w-5" />}
+            {recording ? "Finish and send" : "Talk"}
+          </Button>
+          <Button
+            size="lg"
+            variant="secondary"
+            onClick={replayProspect}
+            disabled={!lastProspectText || recording || transcribing}
+          >
+            <Volume2 className="h-5 w-5" />
+            Replay prospect
+          </Button>
+        </div>
+        {!micSupported ? (
+          <p className="mt-3 text-xs text-warning">
+            This browser cannot capture microphone audio. Use the text fallback below.
+          </p>
+        ) : null}
+        {audioNotice ? <p className="mt-3 text-xs text-muted-foreground">{audioNotice}</p> : null}
+      </section>
 
       {error ? <p role="alert" className="text-sm text-destructive">{error}</p> : null}
       {terminal ? (
@@ -193,19 +488,30 @@ export function TrainerGauntletPlayer({
           ) : null}
         </div>
       ) : (
-        <div className="flex gap-2">
-          <textarea
-            aria-label="Your response"
-            value={text}
-            onChange={(event) => setText(event.target.value)}
-            className="min-h-24 flex-1 rounded-md border border-input bg-background p-3 text-sm"
-            placeholder="Say what you would say to the prospect..."
-            disabled={busy}
-          />
-          <Button aria-label="Send response" onClick={() => void submit()} disabled={busy || !text.trim()}>
-            {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
-          </Button>
-        </div>
+        <details className="rounded-lg border border-border bg-muted/10 p-4">
+          <summary className="cursor-pointer text-sm font-medium">Text fallback and transcript</summary>
+          <div aria-label="Talk session transcript" className="mt-4 max-h-[280px] space-y-3 overflow-y-auto rounded-lg border border-border bg-background p-4">
+            {tape.map((turn) => (
+              <div key={turn.id} className={turn.speaker === "learner" ? "ml-auto max-w-[85%] rounded-lg bg-primary p-3 text-sm text-primary-foreground" : "max-w-[85%] rounded-lg bg-muted p-3 text-sm"}>
+                <div className="mb-1 text-[10px] font-semibold uppercase opacity-70">{turn.speaker}</div>
+                {turn.text}
+              </div>
+            ))}
+          </div>
+          <div className="mt-3 flex gap-2">
+            <textarea
+              aria-label="Text response fallback"
+              value={text}
+              onChange={(event) => setText(event.target.value)}
+              className="min-h-20 flex-1 rounded-md border border-input bg-background p-3 text-sm"
+              placeholder="Type only when voice capture is unavailable..."
+              disabled={voiceBusy}
+            />
+            <Button aria-label="Send text response" onClick={() => void submit()} disabled={voiceBusy || !text.trim()}>
+              {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
+            </Button>
+          </div>
+        </details>
       )}
     </div>
   );

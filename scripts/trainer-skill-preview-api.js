@@ -8,7 +8,18 @@
  * preview. The real course registry and persistence paths remain untouched.
  */
 
+const path = require("path");
+require("dotenv").config({
+  path: path.resolve(__dirname, "..", ".env"),
+  quiet: true,
+});
 const express = require("express");
+const multer = require("multer");
+const {
+  isOpenAiConfigured,
+  synthesizeSalesTrainerSpeech,
+  transcribeSalesTrainerAudio,
+} = require("../packages/shared-services/src/taxResolutionSalesTrainerService");
 const {
   CONTENT_VERSION,
   RULE_REVISION,
@@ -24,6 +35,10 @@ const ENROLLMENT_ID = "local-preview-enrollment";
 const app = express();
 app.disable("x-powered-by");
 app.use(express.json({ limit: "64kb" }));
+const previewAudioUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { files: 1, fileSize: 8 * 1024 * 1024 },
+});
 
 const packetsByItemId = new Map(
   TAX_RESOLUTION_SKILL_PACKETS.map((packet) => [packet.id, packet]),
@@ -221,6 +236,73 @@ app.get("/api/sales-trainer/config", (_req, res) => {
     },
     modes: ["targeted-talk-preview"],
   });
+});
+
+app.post(
+  "/api/sales-trainer/transcribe",
+  previewAudioUpload.single("audio"),
+  async (req, res) => {
+    if (!req.file?.buffer?.length) {
+      return res.status(400).json({
+        ok: false,
+        preview: true,
+        error: "The local preview did not receive microphone audio.",
+      });
+    }
+    if (!isOpenAiConfigured()) {
+      return ok(res, {
+        text: "This is a local voice-preview response.",
+        language: "en",
+        durationSec: null,
+        model: "local-preview-placeholder",
+        byteLength: req.file.buffer.length,
+      });
+    }
+    try {
+      const result = await transcribeSalesTrainerAudio({
+        buffer: req.file.buffer,
+        mimeType: req.file.mimetype || "audio/webm",
+        filename: req.file.originalname || "targeted-talk.webm",
+        prompt: req.body?.prompt || "Tax resolution sales training. Transcribe only the agent.",
+      });
+      return ok(res, result);
+    } catch {
+      return res.status(502).json({
+        ok: false,
+        preview: true,
+        code: "preview_transcription_failed",
+        error: "The local preview could not transcribe that microphone turn.",
+      });
+    }
+  },
+);
+
+app.post("/api/sales-trainer/speech", async (req, res) => {
+  if (!isOpenAiConfigured()) {
+    return res.status(503).json({
+      ok: false,
+      preview: true,
+      code: "preview_browser_voice",
+      error: "Use browser speech synthesis for this local preview.",
+    });
+  }
+  try {
+    const result = await synthesizeSalesTrainerSpeech({
+      text: req.body?.text,
+      voice: req.body?.voice,
+      persona: req.body?.persona,
+      responseFormat: req.body?.responseFormat || "mp3",
+      speed: req.body?.speed || 1.35,
+    });
+    return ok(res, result);
+  } catch {
+    return res.status(502).json({
+      ok: false,
+      preview: true,
+      code: "preview_speech_failed",
+      error: "The local preview could not render the prospect voice.",
+    });
+  }
 });
 
 app.get("/api/sales-trainer/course/home", (_req, res) => {
