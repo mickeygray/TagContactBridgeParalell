@@ -849,6 +849,14 @@ app.post(
   async (req, res) => {
     const record = findAttempt(req, res);
     if (!record) return;
+    if (record.status !== "passed") {
+      return res.status(409).json({
+        ok: false,
+        preview: true,
+        code: "preview_module_talk_incomplete",
+        error: "Complete the voice practice before answering the reflection.",
+      });
+    }
     const answer = String(req.body?.answer || "").trim();
     if (!answer) {
       return res.status(400).json({
