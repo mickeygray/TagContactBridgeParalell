@@ -7,6 +7,8 @@
 
 const { test } = require("node:test");
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const path = require("node:path");
 
 const {
   buildDedupeKey,
@@ -17,7 +19,16 @@ const {
 } = require("../../packages/shared-services/src/activityEventService");
 const { ActivityEvent } = require("../../packages/shared-models/src");
 
-const FIXTURE = require("../fixtures/activities-2026-07-23_2026-07-27.json");
+// The live replay export is intentionally not committed because it contains
+// customer-shaped activity data. Developers who possess the private fixture
+// still run the census tests; clean release artifacts keep the grammar tests
+// runnable without copying that export.
+const FIXTURE_PATH = path.join(
+  __dirname,
+  "../fixtures/activities-2026-07-23_2026-07-27.json",
+);
+const FIXTURE = fs.existsSync(FIXTURE_PATH) ? require(FIXTURE_PATH) : null;
+const replayTest = FIXTURE ? test : test.skip;
 
 function replayAll() {
   const agg = { rows: 0, staff: 0, system: 0, byKind: {} };
@@ -43,13 +54,13 @@ function replayAll() {
 
 // ── the replay: pinned against the independent censuses ──────────────────
 
-test("replay: every row classifies — zero unclassified across 4,130 rows", () => {
+replayTest("replay: every row classifies — zero unclassified across 4,130 rows", () => {
   const { agg } = replayAll();
   assert.equal(agg.rows, 4130);
   assert.equal(agg.byKind.unclassified ?? 0, 0, "an unclassified row means the grammar regressed");
 });
 
-test("replay: the system partition matches the census exactly", () => {
+replayTest("replay: the system partition matches the census exactly", () => {
   const { agg } = replayAll();
   // 3,389 signature rows (2,904 ABC + 191 LD intake + 294 API echo)
   // + 3 RuleEngine rows deliberately reclassified system-echo = 3,392.
@@ -59,13 +70,13 @@ test("replay: the system partition matches the census exactly", () => {
   assert.equal(agg.staff, 738);
 });
 
-test("replay: the money tip-off lane is exactly the censused 89", () => {
+replayTest("replay: the money tip-off lane is exactly the censused 89", () => {
   const { agg } = replayAll();
   // Type Payment 78 + CaseAccount 9 + LOAN 2 — the lane Logics itself types.
   assert.equal(agg.byKind["payment-claim"], 89);
 });
 
-test("replay: structured lanes match the censuses", () => {
+replayTest("replay: structured lanes match the censuses", () => {
   const { agg } = replayAll();
   assert.equal(agg.byKind.assignment, 63);        // 57 Set.Officer + 3 AS433a + 2 CPA + 1 OG
   assert.equal(agg.byKind["doc-upload"], 218);
@@ -77,7 +88,7 @@ test("replay: structured lanes match the censuses", () => {
   assert.equal(agg.byKind["credit-score"], 14);   // 11 typed softpull + 3 General score lines
 });
 
-test("replay: cross-day resurfacing is real and dedupe catches it", () => {
+replayTest("replay: cross-day resurfacing is real and dedupe catches it", () => {
   const { uniqueKeys, resurfaced } = replayAll();
   // The window keys on LastModifiedDate: 50 rows appear in BOTH days'
   // pulls with identical Created — the dedupeKey must collapse them.
@@ -85,7 +96,7 @@ test("replay: cross-day resurfacing is real and dedupe catches it", () => {
   assert.equal(uniqueKeys, 4080);
 });
 
-test("replay: moneyCases unions payment-lane with ALL staff-touched cases", () => {
+replayTest("replay: moneyCases unions payment-lane with ALL staff-touched cases", () => {
   // The $29,405-check lesson: 2/9 real payments had no payment activity.
   const rows = FIXTURE["2026-07-23"].TAG;
   const out = parseReportRows(rows, { domain: "TAG", dateKey: "2026-07-23" });
@@ -156,7 +167,7 @@ test("intake keeps its source; API echoes are never interpreted", () => {
 
 // ── the writer: first-seen vs resurfaced from insert outcomes ────────────
 
-test("insertActivityEvents counts first-seen vs resurfaced from outcomes", async () => {
+replayTest("insertActivityEvents counts first-seen vs resurfaced from outcomes", async () => {
   const stored = new Set();
   const original = ActivityEvent.insertMany;
   ActivityEvent.insertMany = async (docs) => {

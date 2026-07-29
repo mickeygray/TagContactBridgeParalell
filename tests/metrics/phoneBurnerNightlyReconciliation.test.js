@@ -9,7 +9,7 @@ const {
   reconcilePhoneBurnerCallsForNightly,
 } = require("../../packages/shared-services/src/nightlyCloseService");
 
-test("nightly close reuses the exact DailyDial projector as an idempotent retry trigger", async () => {
+test("nightly close retries the selected day and two preceding DailyDial days", async () => {
   const calls = [];
   const result = await reconcilePhoneBurnerCallsForNightly("2026-07-17", {
     reconcileDailyDialCalls: async (input) => {
@@ -18,10 +18,14 @@ test("nightly close reuses the exact DailyDial projector as an idempotent retry 
     },
   });
 
-  assert.deepEqual(calls, [{ dateKey: "2026-07-17" }]);
+  assert.deepEqual(calls, [
+    { dateKey: "2026-07-15" },
+    { dateKey: "2026-07-16" },
+    { dateKey: "2026-07-17" },
+  ]);
   assert.equal(result.status, "completed");
-  assert.equal(result.trigger, "nightly-retry");
-  assert.equal(result.reconciled, 7);
+  assert.equal(result.trigger, "nightly-retry-lookback");
+  assert.equal(result.reconciled, 21);
 });
 
 test("nightly PB reconciliation failure stays visible and does not invent success", async () => {
@@ -34,8 +38,10 @@ test("nightly PB reconciliation failure stays visible and does not invent succes
   });
 
   assert.equal(result.status, "failed");
-  assert.equal(result.trigger, "nightly-retry");
+  assert.equal(result.trigger, "nightly-retry-lookback");
   assert.equal(result.errorCode, "DB_TEMPORARY");
+  assert.equal(result.dates.length, 3);
+  assert.ok(result.dates.every((row) => row.status === "failed"));
 });
 
 test("preview close never mutates CallLog through the retry trigger", async () => {
@@ -49,9 +55,9 @@ test("preview close never mutates CallLog through the retry trigger", async () =
   assert.equal(result.status, "skipped");
 });
 
-test("scheduled vendor calls have one live source and PB reconciliation precedes enrichment", () => {
-  const vendorSource = fs.readFileSync(
-    path.join(__dirname, "../../packages/shared-services/src/vendorNightlyEmailService.js"),
+test("scheduled reporting reads CallLog and PB reconciliation precedes enrichment", () => {
+  const marketingSource = fs.readFileSync(
+    path.join(__dirname, "../../packages/shared-services/src/simpleMarketingReadService.js"),
     "utf8",
   );
   const nightlySource = fs.readFileSync(
@@ -62,13 +68,10 @@ test("scheduled vendor calls have one live source and PB reconciliation precedes
     path.join(__dirname, "../../apps/control-plane/src/server.js"),
     "utf8",
   );
-  const liveBuilder = vendorSource.match(
-    /async function buildVendorCallRows[\s\S]*?\n}\n\nasync function _legacy_buildVendorLeadRows_unused/,
-  )?.[0] || "";
 
-  assert.match(vendorSource, /async function _legacy_buildVendorCallRows_unused/);
-  assert.match(liveBuilder, /CallLog\.find/);
-  assert.doesNotMatch(liveBuilder, /CallLedger\.find/);
+  assert.match(marketingSource, /collection\("controlplanecalllogs"\)/);
+  assert.match(marketingSource, /LONG_CALL_RECORDING_PLATFORMS/);
+  assert.doesNotMatch(marketingSource, /CallLedger\.find/);
   assert.ok(
     nightlySource.indexOf("reconcilePhoneBurnerCallsForNightly(dateKey")
       < nightlySource.indexOf("runNightlyFinalClosePass(selectedDomains"),
