@@ -150,10 +150,38 @@ async function readLdDials(dateKey) {
 /** 4 — mail calls RECEIVED. Doctrine: only callrail-direct rows count; a
  * repeat caller is not a response, so firstTimeCallers is the response
  * number. Calls can never be split by domain (one CallRail tenant). */
-async function readMailCalls(dateKey) {
-  const rows = await DailyCallStat.find({ date: dateKey, syncSource: "callrail-direct", active: { $ne: false } })
-    .select("piece channel totalCalls firstTimeCallers uniqueCallers").lean();
-  const out = { totalCalls: 0, responses: 0, bySource: {}, missing: rows.length === 0, excludedNonCallrail: 0 };
+async function readMailCalls(dateKey, { apply = false } = {}) {
+  // Fill our own input. Mickey 2026-07-29: "combine activity read with all of
+  // those sweeps in a way that runs it at the time of report generation
+  // because we arent doing a live metrics panel at the moment."
+  //
+  // This feed used to be written ONLY by the hourly sweeper. When the services
+  // stopped on 2026-07-27 the board reported 0 responses for the 28th while
+  // CallRail held 38 first-time callers — a live mail piece reading as dead.
+  // The sync is one range-native API call, validates completeness before
+  // writing, and upserts, so doing it here is cheap and idempotent.
+  // `apply` is threaded so a DRY RUN stays dry: the sync still fetches and
+  // proves the CallRail image, but persists nothing. The report reads the
+  // returned image either way, so a preview and the real send show the same
+  // numbers — the only difference is whether the cache is updated.
+  let syncError = null;
+  let fresh = null;
+  try {
+    const { syncCallrailDailyStats } = require("./callrailDailyStatSyncService");
+    fresh = await syncCallrailDailyStats({
+      from: dateKey, to: dateKey, companyKey: "TAG", dryRun: !apply,
+    });
+  } catch (error) {
+    syncError = String(error.message).slice(0, 140);
+  }
+  const rows = fresh?.byDatePiece?.length
+    ? fresh.byDatePiece
+    : await DailyCallStat.find({ date: dateKey, syncSource: "callrail-direct", active: { $ne: false } })
+      .select("piece channel totalCalls firstTimeCallers uniqueCallers").lean();
+  const out = {
+    totalCalls: 0, responses: 0, bySource: {},
+    missing: rows.length === 0, syncError, excludedNonCallrail: 0,
+  };
   for (const r of rows) {
     out.totalCalls += Number(r.totalCalls || 0);
     out.responses += Number(r.firstTimeCallers || 0);
@@ -212,11 +240,11 @@ async function readLongCalls(dateKey, { minDurationSec = 300, limit = 15 } = {})
 }
 
 /** Assemble every section. `night` is the run-night pass output. */
-async function buildNightReport({ dateKey, night }) {
+async function buildNightReport({ dateKey, night, apply = false }) {
   const [spend, ldDials, mailCalls, longCalls, bcd] = await Promise.all([
     readSpend(dateKey).catch((e) => ({ error: e.message })),
     readLdDials(dateKey).catch((e) => ({ error: e.message })),
-    readMailCalls(dateKey).catch((e) => ({ error: e.message })),
+    readMailCalls(dateKey, { apply }).catch((e) => ({ error: e.message })),
     // Legacy CallLog-based long calls. The board now renders the NOTABLE set
     // (deals / post dates / 10min+, both platforms) — kept only so an older
     // caller does not break.
@@ -275,8 +303,15 @@ async function buildNightReport({ dateKey, night }) {
   // different call volume is the thing worth seeing, and it only shows
   // when the columns sit together.
   const byOfficer = {};
+  // Queue labels arrive on the same channel as agent names — "Origination
+  // Call Queu" sat on this board as a settlement officer with 1 mail call.
+  // The report blocks already gate on isNotAPerson; this board did not, which
+  // is the same one-rule-two-implementations bug in a different place.
+  // Returns null for a non-person so callers skip it entirely.
+  const { canonicalStaffName, isNotAPerson } = require("../../shared-config/src/staffRoster");
   const officerRow = (name) => {
-    const o = name || "(unassigned)";
+    if (name && isNotAPerson(name)) return null;
+    const o = (name && canonicalStaffName(name)) || name || "(unassigned)";
     byOfficer[o] = byOfficer[o] || { officer: o, deals: 0, amount: 0, cases: [], mailCalls: 0, ldDials: 0, bcdCalls: 0 };
     return byOfficer[o];
   };
@@ -285,20 +320,24 @@ async function buildNightReport({ dateKey, night }) {
   for (const [key, stream] of Object.entries(night.streams?.streams || {})) {
     for (const [agent, n] of Object.entries(stream.byAgent || {})) {
       const row = officerRow(agent);
+      if (!row) continue;                        // a queue is not an officer
       if (key === "MAILER") row.mailCalls += n;
       else if (key === "BCD") row.bcdCalls += n;
       else if (key === "LD") row.ldDials += n;
     }
   }
   for (const [agent, n] of Object.entries(night.streams?.ldByAgent || {})) {
-    officerRow(agent).ldDials += n;
+    const row = officerRow(agent);
+    if (row) row.ldDials += n;
   }
   for (const d of night.lanes.deals) {
-    const o = d.officer || "(unassigned)";
-    officerRow(o);
-    byOfficer[o].deals += 1;
-    byOfficer[o].amount = round2(byOfficer[o].amount + d.amount);
-    byOfficer[o].cases.push(`${d.domain} ${d.caseId}`);
+    // Money is never dropped: if the closer is somehow a non-person label the
+    // deal still has to land somewhere, so it falls to (unassigned) rather
+    // than vanishing from the board.
+    const row = officerRow(d.officer) || officerRow(null);
+    row.deals += 1;
+    row.amount = round2(row.amount + d.amount);
+    row.cases.push(`${d.domain} ${d.caseId}`);
   }
 
   // ONE source for both renders: the notable set when the pass produced it,
@@ -333,7 +372,15 @@ function renderNightReportText(r) {
   L.push(`NET (vs recorded)   ${money(round2(c.confirmedAmountToday - totalSpend))}${r.spend.mail?.lastRecordedDate ? "   ← mail spend missing, so this is overstated" : ""}`);
   L.push("");
   L.push(`LD calls made       ${r.ldDials.dials ?? "—"}${r.ldDials.cases ? ` across ${r.ldDials.cases} cases · ${r.ldDials.connected} connected` : ""}`);
-  L.push(`Mail calls received ${r.mailCalls.totalCalls ?? "—"}${r.mailCalls.responses != null ? ` · ${r.mailCalls.responses} first-time (responses)` : ""}`);
+  // A feed that did not answer is UNKNOWN, never 0. "0 responses" against a
+  // live mail piece reads as "the mail is dead" and is the most expensive
+  // wrong number this board can print.
+  if (r.mailCalls.missing) {
+    L.push(`Mail calls received UNKNOWN — response feed empty for this day`
+      + `${r.mailCalls.syncError ? ` (refresh failed: ${r.mailCalls.syncError})` : ""}`);
+  } else {
+    L.push(`Mail calls received ${r.mailCalls.totalCalls ?? "—"}${r.mailCalls.responses != null ? ` · ${r.mailCalls.responses} first-time (responses)` : ""}`);
+  }
   L.push(`LD leads bought     ${r.spend.ld?.leads ?? "—"}   ·  mail pieces ${r.spend.mail?.pieces ?? "—"}`);
   L.push("");
   L.push(`Status changes      ${n.lanes.statusChanges.dnc} DNC · ${n.lanes.statusChanges.postdate} post-date · ${n.lanes.statusChanges.suspended} redline/suspended · ${n.lanes.conversions.length} converted to client`);

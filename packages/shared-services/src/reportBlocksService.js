@@ -154,7 +154,7 @@ const BLOCKS = [
       const {
         AGED_LABEL, isActiveSource, sourceBucket, sourceChannel,
       } = require("../../shared-config/src/activeSources");
-      const { applyFunctions, pickAttributionCall } = require("./reportOpsService");
+      const { applyFunctions, pickAttributionCall, resolveSourceRow, attributionDateResolver, foldSourceKey } = require("./reportOpsService");
 
       // Index the window's inbound calls by number so each payment can find
       // the call that sourced it — same rule the snapshot writer uses, so the
@@ -163,59 +163,26 @@ const BLOCKS = [
         const d = String(x || "").replace(/\D/g, "");
         return d.length >= 10 ? d.slice(-10) : null;
       };
-      const callsByPhone = new Map();
-      for (const call of callsRange) {
-        const k = last10(call.phone);
-        if (!k) continue;
-        // Only MARKETING-line calls are evidence of a marketing response.
-        // CallRail also tracks servicing numbers ("Client Contact - TAG",
-        // 26 calls in July), and an existing client ringing support must not
-        // make their case look freshly sourced — that would quietly keep
-        // years-old money attached to a live piece.
-        if (sourceChannel(call.source) === "other") continue;
-        if (!callsByPhone.has(k)) callsByPhone.set(k, []);
-        callsByPhone.get(k).push(call);
-      }
-      const attributionDateFor = (p) => {
-        const keys = [...new Set([p.phone, ...(p.phones || [])].map(last10).filter(Boolean))];
-        if (!keys.length) return null;
-        const calls = keys.flatMap((k) => callsByPhone.get(k) || []);
-        if (!calls.length) return null;
-        const picked = pickAttributionCall(calls, p.paymentDateKey);
-        const c = picked.call || calls[0];
-        return String(c?.dateKey || c?.startedAt || "").slice(0, 10) || null;
-      };
+      // One attribution rule, shared with scripts/ask.js — see
+      // reportOpsService.attributionDateResolver. A caller that skips it
+      // reports a different set of deals for the same range.
+      const attributionDateFor = attributionDateResolver(callsRange);
       const by = new Map();
       const row = (k) => {
         if (!by.has(k)) by.set(k, { source: k, deals: 0, dealCases: new Set(), newCash: 0, recurringCash: 0, spend: 0, responses: 0, leads: 0 });
         return by.get(k);
       };
       for (const p of payments.filter((x) => !x.isChargeback)) {
-        // A stored snapshot can carry the literal string "ABC" (case 394513),
-        // which is the catch-all bucket wearing a piece's clothes. Route it to
-        // the same row as an id-derived catch-all rather than letting the
-        // mail-house placeholder masquerade as a mail piece.
-        const folded = canonicalSourceName(p.domain, p.sourceAtSale);
-        const label = folded
-          ? (isCatchAllName(folded) ? `${folded} (catch-all)` : folded)
-          : p.sourceOrigin === "catch-all"
-            ? (p.catchAllLabel ? `${p.catchAllLabel} (catch-all)` : "(Logics catch-all)")
-            : "(unsourced)";
-        // Two ways to be Aged: the SOURCE stopped running, or the CASE is
-        // older than a month. The second is what catches an upsell to someone
-        // who came in years ago — it wears the source's name but is not that
-        // source's return, and it is how BCD reached 23,125% on $8.00.
-        const r = row(
-          folded && !isCatchAllName(folded)
-            ? sourceBucket(folded, {
-              firstPaidDateKey: p.metricsTreatment?.firstPaidDateKey || null,
-              caseCreatedDate: p.caseCreatedDate,
-              attributionCallDate: attributionDateFor(p),
-              rangeStart: from,
-              rangeEnd: to,
-            })
-            : label,
-        );
+        // ONE resolver, shared with scripts/ask.js — see
+        // reportOpsService.resolveSourceRow. It folds aliases, routes the
+        // mail-house placeholder to the catch-all, and applies the aged
+        // rule. Two copies of this logic is exactly how the same question
+        // came to have two different answers.
+        const r = row(resolveSourceRow(p, {
+          rangeStart: from,
+          rangeEnd: to,
+          attributionCallDate: attributionDateFor(p),
+        }));
         if (p.paymentType === "initial") {
           r.dealCases.add(`${p.domain}:${p.caseId}`);
           r.deals = r.dealCases.size;                     // sales, not payment rows
@@ -226,10 +193,7 @@ const BLOCKS = [
       // Spend and CallRail responses arrive under their own spellings of the
       // same piece; fold them onto the same row or the money and the calls
       // never meet and every cost-per reads as "—".
-      const bucketFor = (src) => {
-        const f = canonicalSourceName("TAG", src) || src;
-        return isActiveSource(f) || isCatchAllName(f) ? f : AGED_LABEL;
-      };
+      const bucketFor = (src) => foldSourceKey(src);
       for (const [src, v] of Object.entries(spendBySource || {})) {
         const r = row(bucketFor(src));
         r.spend = round2(r.spend + v.spend); r.leads += v.leads || 0;

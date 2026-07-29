@@ -93,7 +93,8 @@ async function main() {
     console.log(`${NEWLINE}CALCULATIONS — tick any combination with --pick${NEWLINE}`);
     for (const b of BLOCKS) console.log(`  [ ] ${b.id.padEnd(12)} ${b.label.padEnd(26)} ${b.hint}`);
     console.log(`${NEWLINE}PRESETS`);
-    for (const [k, v] of Object.entries(PRESETS)) console.log(`      ${k.padEnd(12)} ${v.join(", ")}`);
+    const w = Math.max(...Object.keys(PRESETS).map((k) => k.length)) + 2;
+    for (const [k, v] of Object.entries(PRESETS)) console.log(`      ${k.padEnd(w)}${v.join(", ")}`);
     console.log(`${NEWLINE}RANGE   --today · --yesterday · --week · --month · --from X --to Y`);
     console.log(`OUTPUT  (console) · --csv [--out <dir>] · --html [--out <dir>] · --email [--to addr] · --json`);
     console.log(`SOURCE  live by default · --cached for instant repeats${NEWLINE}`);

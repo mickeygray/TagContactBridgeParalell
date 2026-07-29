@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { CalendarDays, Download, Loader2, Mail, Play, Plus, Trash2 } from "lucide-react";
+import { CalendarDays, Download, Loader2, Mail, Pencil, Play, Plus, Trash2 } from "lucide-react";
 
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
@@ -14,6 +14,7 @@ import {
   usePreviewReport,
   useRunDefinition,
   useSaveDefinition,
+  type ReportDefinition,
   type ReportSection,
 } from "@/lib/api/queries/reports";
 
@@ -34,6 +35,29 @@ function shiftDays(key: string, delta: number): string {
 }
 
 const DOW = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+// 1..28 then 0. Stops at 28 deliberately: 29-31 skip whole months, and 0 is
+// the server's "last day", which is what a month-end report actually wants.
+const MONTH_DAYS = [...Array.from({ length: 28 }, (_, i) => i + 1), 0];
+
+/**
+ * Say the cadence in words.
+ *
+ * The server ANDs weekday and date together, so a schedule can be saved that
+ * looks armed and effectively never fires. Spelling it out is what makes that
+ * visible on the list rather than a month later when nobody got the report.
+ */
+function describeCadence(s?: ReportDefinition["schedule"]): string {
+  if (!s?.enabled) return "not scheduled";
+  const dows = s.daysOfWeek ?? [];
+  const doms = s.daysOfMonth ?? [];
+  const when = doms.length
+    ? `on the ${doms.map((n) => (n === 0 ? "last day" : `${n}`)).join(", ")}`
+    : "";
+  const wd = dows.length ? dows.map((i) => DOW[i]).join(", ") : "";
+  if (!dows.length && !doms.length) return "every day";
+  if (dows.length && doms.length) return `${wd} — but only ${when} (rarely both)`;
+  return dows.length ? `every ${wd}` : `every month ${when}`;
+}
 
 function SectionTable({ section }: { section: ReportSection }) {
   if (section.error) {
@@ -111,6 +135,35 @@ export function ReportsWorkspace() {
   const [minute, setMinute] = useState(0);
   const [recipients, setRecipients] = useState("");
   const [days, setDays] = useState<number[]>([]);
+  // Day-of-month, with 0 meaning LAST DAY — that is how a month-end P/L gets
+  // scheduled, and the 31st would silently skip the short months.
+  const [monthDays, setMonthDays] = useState<number[]>([]);
+  // Set while editing an existing definition, so Save overwrites that shape
+  // instead of quietly minting a near-duplicate under a new name.
+  const [editing, setEditing] = useState<string | null>(null);
+
+  /** Load a saved definition back into the builder. */
+  const loadDefinition = (d: ReportDefinition) => {
+    setEditing(d.name);
+    setName(d.name);
+    setPicked(d.blocks ?? []);
+    setFilters((d.filters ?? []).join(", "));
+    setRange(d.range ?? "yesterday");
+    setRecipients((d.recipients ?? []).join(", "));
+    setHour(d.schedule?.hour ?? 7);
+    setMinute(d.schedule?.minute ?? 0);
+    setDays(d.schedule?.daysOfWeek ?? []);
+    setMonthDays(d.schedule?.daysOfMonth ?? []);
+    setTab("build");
+  };
+
+  const resetForm = () => {
+    setEditing(null);
+    setName("");
+    setRecipients("");
+    setDays([]);
+    setMonthDays([]);
+  };
 
   const whereList = useMemo(
     () => filters.split(",").map((f) => f.trim()).filter(Boolean),
@@ -351,22 +404,62 @@ export function ReportsWorkspace() {
                       </button>
                     ))}
                   </div>
-                  <Button
-                    className="mt-4"
-                    disabled={!name || saveDefinition.isPending}
-                    onClick={() =>
-                      saveDefinition.mutate({
-                        name,
-                        blocks: picked,
-                        filters: whereList,
-                        range,
-                        recipients: recipients.split(",").map((r) => r.trim()).filter(Boolean),
-                        schedule: { enabled: true, hour, minute, daysOfWeek: days, daysOfMonth: [] },
-                      }, { onSuccess: () => { setName(""); setTab("scheduled"); } })
-                    }
-                  >
-                    <Plus className="mr-2 h-4 w-4" />Save schedule
-                  </Button>
+
+                  <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                    <span className="text-xs text-muted-foreground">
+                      Dates (none = any date):
+                    </span>
+                    {MONTH_DAYS.map((n) => (
+                      <button
+                        key={n}
+                        type="button"
+                        title={n === 0 ? "Last day of the month" : `Day ${n}`}
+                        onClick={() =>
+                          setMonthDays((p) => (p.includes(n) ? p.filter((x) => x !== n) : [...p, n]))
+                        }
+                        className={`rounded border px-1.5 py-0.5 text-[11px] tabular-nums ${
+                          monthDays.includes(n) ? "bg-primary text-primary-foreground" : "bg-background"
+                        }`}
+                      >
+                        {n === 0 ? "last" : n}
+                      </button>
+                    ))}
+                  </div>
+                  {days.length > 0 && monthDays.length > 0 && (
+                    <p className="mt-2 text-xs text-amber-600 dark:text-amber-500">
+                      Both are set, so this only sends when the weekday <em>and</em> the date
+                      match — often never. Pick one.
+                    </p>
+                  )}
+                  <div className="mt-4 flex items-center gap-2">
+                    <Button
+                      disabled={!name || saveDefinition.isPending}
+                      onClick={() =>
+                        saveDefinition.mutate({
+                          name,
+                          blocks: picked,
+                          filters: whereList,
+                          range,
+                          recipients: recipients.split(",").map((r) => r.trim()).filter(Boolean),
+                          schedule: {
+                            enabled: true, hour, minute,
+                            daysOfWeek: days, daysOfMonth: monthDays,
+                          },
+                        }, { onSuccess: () => { resetForm(); setTab("scheduled"); } })
+                      }
+                    >
+                      <Plus className="mr-2 h-4 w-4" />
+                      {editing ? `Update "${editing}"` : "Save schedule"}
+                    </Button>
+                    {editing && (
+                      <Button variant="ghost" onClick={resetForm}>Cancel</Button>
+                    )}
+                  </div>
+                  {editing && editing !== name && (
+                    <p className="mt-2 text-xs text-amber-600 dark:text-amber-500">
+                      Renaming saves a NEW schedule — “{editing}” stays as it is.
+                    </p>
+                  )}
                   <p className="mt-2 text-xs text-muted-foreground">
                     Nothing sends until the scheduler is armed on the server.
                   </p>
@@ -401,6 +494,7 @@ export function ReportsWorkspace() {
                     {d.blocks.join(" · ")} — {d.range}
                     {d.resolvedRange ? ` (${d.resolvedRange.from}…${d.resolvedRange.to})` : ""}
                   </p>
+                  <p className="text-xs text-muted-foreground">{describeCadence(d.schedule)}</p>
                   <p className="text-xs text-muted-foreground">
                     to {d.recipients.length ? d.recipients.join(", ") : "nobody"}
                     {d.lastRunKey ? ` · last ran ${d.lastRunKey}` : " · never run"}
@@ -410,6 +504,12 @@ export function ReportsWorkspace() {
                   )}
                 </div>
                 <div className="flex gap-2">
+                  <Button
+                    variant="secondary" size="sm"
+                    onClick={() => loadDefinition(d)}
+                  >
+                    <Pencil className="mr-1 h-3 w-3" />Edit
+                  </Button>
                   <Button
                     variant="secondary" size="sm"
                     disabled={runDefinition.isPending}

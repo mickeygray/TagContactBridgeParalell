@@ -271,8 +271,41 @@ async function gatherMaterial({
   }
 
   // ── calls: CallRail daily stats (the declared response feed) ──
+  //
+  // Mickey 2026-07-29: "combine activity read with all of those sweeps in a
+  // way that runs it at the time of report generation because we arent doing
+  // a live metrics panel at the moment."
+  //
+  // The feed used to be filled ONLY by the hourly sweeper
+  // (hourlySweeperService.js:1120). With no live panel there is nothing to
+  // keep a store warm FOR, and the coupling bit: the sweeper stopped with the
+  // services on 2026-07-27, so the 28th reported "0 responses" while CallRail
+  // held 38 first-time callers. A board that says a live mail piece produced
+  // nothing is worse than one that says it does not know.
+  //
+  // So the report fills its own input. The sync is range-native (one API call
+  // for the whole window), validates completeness BEFORE writing, and upserts
+  // — so running it per report is cheap and idempotent. The rows are cached
+  // immutable provider facts, which is a storage class the doctrine allows.
   if (want.has("calls") || want.has("source")) {
     const DailyCallStat = require("../../shared-models/src/DailyCallStat");
+    let feedStale = null;
+    if (live) {
+      try {
+        const { syncCallrailDailyStats } = require("./callrailDailyStatSyncService");
+        // CallRail is ONE TAG tenant — never loop tenants here.
+        const r = await gatherSession.fetch("callrail-sync", { from, to },
+          async () => syncCallrailDailyStats({ from, to, companyKey: "TAG" }));
+        notes.push(`response feed synced from CallRail for ${from}..${to}`
+          + (r && r.written ? ` (${r.written} row(s))` : ""));
+      } catch (error) {
+        // NEVER fall through to a silent 0. Say the feed is stale and let the
+        // renderers print UNKNOWN — a confident zero is the failure mode this
+        // whole path exists to stop.
+        feedStale = String(error.message).slice(0, 120);
+        notes.push(`RESPONSE FEED NOT REFRESHED — ${feedStale}; response counts below may be incomplete`);
+      }
+    }
     const rows = await DailyCallStat.find({
       date: { $gte: from, $lte: to }, syncSource: "callrail-direct", active: { $ne: false },
     }).select("piece totalCalls firstTimeCallers").lean();
@@ -283,6 +316,12 @@ async function gatherMaterial({
       callsBySource[r.piece].responses += Number(r.firstTimeCallers || 0);
     }
     material.callsBySource = callsBySource;
+    material.callsFeedStale = feedStale;
+    // An empty feed over a range that HAS days in it is itself a finding —
+    // it means nothing has ever filled it, not that nobody called.
+    if (!rows.length && !feedStale) {
+      notes.push(`response feed is EMPTY for ${from}..${to} — mail responses will read 0`);
+    }
   }
 
   // ── queue connections: who took the calls (bounded RC trickle + PB) ──

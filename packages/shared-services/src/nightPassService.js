@@ -428,7 +428,7 @@ async function runNightPass({
   } catch { /* LD dial detail is a nicety, not a dependency */ }
 
   // ── THE BOARD ───────────────────────────────────────────────────────────
-  const board = await buildNightReport({ dateKey, night });
+  const board = await buildNightReport({ dateKey, night, apply });
   const text = renderNightReportText(board);
   const emailData = buildNightEmailData(board);
   night.durationMs = Date.now() - started;

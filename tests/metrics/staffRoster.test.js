@@ -129,3 +129,32 @@ test("with real queue data the counts come back", () => {
   assert.ok(!text.includes("UNAVAILABLE"));
   assert.match(text, /Phil Olson\s+27\s+79/);
 });
+
+// Logics records integration identities through the same CreatedBy channel as
+// people, and an unknown name deliberately defaults to the SALES floor so a new
+// hire stays visible. That default is right for people and wrong for machines:
+// without an explicit guard, "Public API" ranks on the sales board.
+test("integration identities are not people", () => {
+  for (const label of [
+    "Public API", "Logics Support", "Zapier", "RuleEngine",
+    "Origination Call Qu", "Voicemail", "--Unassigned--",
+  ]) {
+    assert.equal(roster.isNotAPerson(label), true, `${label} must not count as staff`);
+  }
+});
+
+test("real people still pass, including someone not yet on the roster", () => {
+  // The default must keep working — a new hire has to show up on the board
+  // before anyone remembers to add them.
+  assert.equal(roster.isNotAPerson("Phil Olson"), false);
+  assert.equal(roster.isNotAPerson("Some New Hire"), false);
+  assert.equal(roster.isSalesFloor("Some New Hire"), true);
+});
+
+test("the owner name used by the API is still a person", () => {
+  // "Mickey Gray" authored 36,961 of 45,582 July rows as the integration
+  // identity — but he is also a real human who types real notes. The service
+  // account is separated per ROW by the classifier (intake and system-echo
+  // carry staff:false), never by blanking the name here.
+  assert.equal(roster.isNotAPerson("Mickey Gray"), false);
+});

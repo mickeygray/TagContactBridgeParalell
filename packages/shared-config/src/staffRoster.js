@@ -117,7 +117,10 @@ function listStaff(role = null) {
 // names. "Origination Call Qu" appeared on the sales board as a person.
 // Unknown PEOPLE still default to the sales floor so a new hire is visible;
 // these are not people at all.
-const NOT_A_PERSON = /(queue|call qu|origination|voicemail|unassigned|ring group|overflow|after hours|main line|ivr|auto ?attendant|system)/i;
+// Integration identities arrive through the same channel too: Logics records
+// "Public API" and "Logics Support" as CreatedBy, and an unknown name defaults
+// to the SALES floor — so without this they rank as salespeople.
+const NOT_A_PERSON = /(queue|call qu|origination|voicemail|unassigned|ring group|overflow|after hours|main line|ivr|auto ?attendant|system|public api|logics support|integration|service account|api user|zapier|rule ?engine|automation)/i;
 
 /** Is this label a queue or system rather than a human being? */
 function isNotAPerson(name) {

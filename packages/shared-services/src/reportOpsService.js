@@ -95,7 +95,12 @@ function measure(bucketOrRows, measures = ["count"]) {
       case "cash": out.cash = round2(rows.reduce((s, r) => s + (Number(r.amount) || 0), 0)); break;
       case "newCash": out.newCash = round2(rows.filter((r) => r.paymentType === "initial").reduce((s, r) => s + (Number(r.amount) || 0), 0)); break;
       case "recurringCash": out.recurringCash = round2(rows.filter((r) => r.paymentType !== "initial").reduce((s, r) => s + (Number(r.amount) || 0), 0)); break;
-      case "deals": out.deals = rows.filter((r) => r.paymentType === "initial").length; break;
+      // A DEAL is a SALE, not a payment row. A first invoice paid in two
+      // installments is two initial rows and one deal; counting rows
+      // inflates every deal-based ratio (cost per acquisition falls, close
+      // rate rises) for exactly the cases that were hardest to collect.
+      case "deals": out.deals = new Set(rows.filter((r) => r.paymentType === "initial")
+        .map((r) => `${r.domain}:${r.caseId}`)).size; break;
       case "declines": out.declines = rows.length; break;
       case "declinedAmount": out.declinedAmount = round2(rows.reduce((s, r) => s + Math.abs(Number(r.amount) || 0), 0)); break;
       case "dials": out.dials = rows.reduce((s, r) => s + (Array.isArray(r.attempts) ? r.attempts.length : 1), 0); break;
@@ -523,8 +528,96 @@ function formatFunction(name, value) {
   return `$${Number(value).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
+
+/**
+ * Which row a payment's money belongs on, in the source view.
+ *
+ * Extracted so the `source` block and the ad-hoc ask tool cannot drift. Run
+ * raw, groupBy("source") splits one mail piece across every spelling it has
+ * ever had (measured: the pink piece appeared as three separate rows, with
+ * spend landing on only one of them) and lets residual money keep a live
+ * piece's name.
+ */
+function resolveSourceRow(payment, { rangeStart = null, rangeEnd = null, attributionCallDate = null } = {}) {
+  const {
+    canonicalSourceName, isCatchAllName,
+  } = require("./logicsSourceWriterService");
+  const { sourceBucket } = require("../../shared-config/src/activeSources");
+
+  const folded = canonicalSourceName(payment.domain, payment.sourceAtSale);
+  if (!folded) {
+    if (payment.sourceOrigin === "catch-all") {
+      return payment.catchAllLabel ? `${payment.catchAllLabel} (catch-all)` : "(Logics catch-all)";
+    }
+    return "(unsourced)";
+  }
+  if (isCatchAllName(folded)) return `${folded} (catch-all)`;
+  return sourceBucket(folded, {
+    firstPaidDateKey: payment.metricsTreatment?.firstPaidDateKey || null,
+    caseCreatedDate: payment.caseCreatedDate,
+    attributionCallDate,
+    rangeStart,
+    rangeEnd,
+  });
+}
+
+/**
+ * Fold a SPEND or CALL source spelling onto the row its money lands on.
+ *
+ * Spend, CallRail responses and payments each arrive under their own
+ * spelling of the same piece. Join them raw and the cost sits on one row
+ * while the deals sit on another: every cost-per reads "—" and the piece
+ * that actually paid for itself shows an infinite return.
+ *
+ * A spelling nobody is running any more folds to Aged, which is what keeps
+ * last year's mail from wearing a live piece's name.
+ */
+function foldSourceKey(source, { mailTenant = "TAG" } = {}) {
+  const { canonicalSourceName, isCatchAllName } = require("./logicsSourceWriterService");
+  const { isActiveSource, AGED_LABEL } = require("../../shared-config/src/activeSources");
+  const folded = canonicalSourceName(mailTenant, source) || source;
+  return isActiveSource(folded) || isCatchAllName(folded) ? folded : AGED_LABEL;
+}
+
+/**
+ * Build the payment -> attribution-date lookup from a range of calls.
+ *
+ * Mickey 2026-07-28: "attribution for me is longest call on the day the deal
+ * closed." That date decides whether a payment counts for a live piece or
+ * demotes to Aged, so a caller that skips it silently reports a DIFFERENT
+ * set of deals — which is exactly how ask.js and the source block came to
+ * disagree by a deal per row.
+ *
+ * MARKETING lines only: CallRail also tracks servicing numbers, and an
+ * existing client ringing support must not make their case look freshly
+ * sourced.
+ */
+function attributionDateResolver(callsRange = []) {
+  const { sourceChannel } = require("../../shared-config/src/activeSources");
+  const byPhone = new Map();
+  for (const call of callsRange) {
+    const k = last10(call.phone);
+    if (!k) continue;
+    if (sourceChannel(call.source) === "other") continue;
+    if (!byPhone.has(k)) byPhone.set(k, []);
+    byPhone.get(k).push(call);
+  }
+  return function attributionDateFor(payment) {
+    const keys = [...new Set([payment.phone, ...(payment.phones || [])].map(last10).filter(Boolean))];
+    if (!keys.length) return null;
+    const calls = keys.flatMap((k) => byPhone.get(k) || []);
+    if (!calls.length) return null;
+    const picked = pickAttributionCall(calls, payment.paymentDateKey);
+    const c = picked.call || calls[0];
+    return String(c?.dateKey || c?.startedAt || "").slice(0, 10) || null;
+  };
+}
+
 module.exports = {
+  attributionDateResolver,
+  foldSourceKey,
   FUNCTIONS,
+  resolveSourceRow,
   PROFIT_MARGIN_RATE,
   applyFunctions,
   formatFunction,

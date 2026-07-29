@@ -49,7 +49,10 @@ function registerHelpers() {
   Handlebars.registerHelper("money", function (value) {
     const num = Number(value || 0);
     if (!Number.isFinite(num)) return "$0.00";
-    return `$${num.toFixed(2)}`;
+    // Thousands separators. The text body has always grouped, so without this
+    // the SAME figure read "$36,268.55" in the plain-text part and
+    // "$36268.55" in the HTML of one email.
+    return `$${num.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
   });
   Handlebars.registerHelper("int", function (value) {
     const num = Number(value || 0);

@@ -25,12 +25,37 @@ const MONEY_LANES = new Set(["Payment", "CaseAccount", "LOAN"]);
 const PAYMENT_VERB_RE = /^Payment (made|Declined|deleted)\s*\$([\d,]+\.?\d*)/i;
 
 // ── General-lane grammar (subjects are structured where Logics wrote them)
+// Logics quotes the status names — EXCEPT when it doesn't. Measured on July
+// 2026: 20 of 548 status rows arrive unquoted, and they are not a random 20 —
+// they are DO NOT CALL and Disconnected Number transitions. Missing those
+// undercounts exactly the safety statuses that must never be missed.
+// The unquoted form also repeats the bracket ("… to [Bad/Inactive] -
+// [Bad/Inactive]-DO NOT CALL"), so the tail is taken and re-parsed.
 const STATUS_RE = /^Status changed from\s+"(.+?)"\s+to\s+"(.+?)"/i;
+const STATUS_BARE_RE = /^Status changed from\s+(.+?)\s+to\s+(.+?)\s*$/i;
 const ASSIGN_RE = /^Assigned to\s+(.+?)\s*:\s*(.+)$/;
 const CONVERSION_RE = /^(Converted from prospect to client|Approved - Converted to client|Converted to Prospect|Submitted for approval|Case created)\s*$/i;
 const LIABILITY_RE = /^Tax Liability changed to\s+([\d,.]+)\s+from\s+([\d,.]+)/i;
 const SOURCE_RE = /^Source updated to\s+(.+)$/i;
-const SCORE_RE = /(?:isoftpull|transunion).*?score:\s*(\d{3})/i;
+// The soft pull is FREE TEXT and staff spell it at least eight ways:
+//   iSoftpull TransUnion Score: 648 (Raymond)   ISOFTPULL TRANSUNION SCORE: (VINCENT) 728
+//   SOFT PULL 615 KERI VANDERHOF                SOFTPULL-VINCENT-636
+//   PER SOFTPULL FICO SCORE 652                 Isoftpull Transunion (RAYMOND) 644
+//   Credit Score - 706                          Credit Score: 477 Exp
+// The old pattern required both a bureau word AND a literal "score:", so it
+// missed 31 of 187 rows outright and extracted nothing from 38.
+// Two regexes now: one to recognise the CONTEXT, one to find the number
+// anywhere in it. Matching a credit-range number is what makes the name and
+// the phone number in the same string harmless.
+const SOFTPULL_CONTEXT_RE = /soft\s*pull|softpull|transunion|credit\s*score|fico/i;
+const SOFTPULL_SCORE_RE = /\b([3-8]\d{2})\b/;
+const SOFTPULL_FROZEN_RE = /\bfrozen\b/i;
+// "Exp" / "Experian" appears on a handful — bureaus are not interchangeable,
+// so the score carries which one it came from rather than assuming TransUnion.
+const BUREAU_RE = /\b(transunion|experian|equifax|exp)\b/i;
+const BUREAU_CANON = Object.freeze({
+  transunion: "TransUnion", experian: "Experian", exp: "Experian", equifax: "Equifax",
+});
 const TASK_RE = /^(New task assigned to|Task updated|Task Completed|Task marked as completed|Task deleted)/i;
 
 // Status names are "[Bracket]-Label". Safety classes match on the LABEL
@@ -95,23 +120,55 @@ function classifyRow(row) {
   if (/^New File Uploaded$/i.test(type)) return { kind: "doc-upload", staff: true, payload: null };
   if (/^Document sent$/i.test(type)) return { kind: "doc-sent", staff: true, payload: null };
   if (/^Conversation$/i.test(type)) return { kind: "conversation", staff: true, payload: null };
-  if (/softpull/i.test(type) || SCORE_RE.test(subject)) {
-    const score = subject.match(SCORE_RE);
-    return { kind: "credit-score", staff: true, payload: score ? { score: Number(score[1]), bureau: "TransUnion" } : null };
+  // Type carries "1SOFTPULL" / "iSoftpull" / "iSoft Pull" / "Credit" — four
+  // spellings of one lane — but 80 of 184 soft pulls in July were typed
+  // "General", so the SUBJECT is the reliable signal and Type only adds to it.
+  if (/soft\s*pull|softpull|credit/i.test(type) || SOFTPULL_CONTEXT_RE.test(subject)) {
+    const hit = subject.match(SOFTPULL_SCORE_RE);
+    // Canonical spelling, not the typed one. Staff write TransUnion three
+    // ways and title-casing the raw match just reproduces the split in a
+    // tidier font — which is the whole failure this codebase keeps hitting.
+    const bureauHit = subject.match(BUREAU_RE);
+    const bureau = bureauHit ? BUREAU_CANON[bureauHit[1].toLowerCase()] || null : null;
+    // A reported 0 is NOT a credit score of zero — it is "no hit": a thin
+    // file, a frozen report, or no match. Averaging those in drags the mean
+    // 42 points (635.2 -> 593.3 on July), so they are recorded as noScore.
+    const frozen = SOFTPULL_FROZEN_RE.test(subject);
+    return {
+      kind: "credit-score",
+      staff: true,
+      payload: {
+        score: hit ? Number(hit[1]) : null,
+        bureau,
+        noScore: !hit,
+        reason: hit ? null : (frozen ? "frozen" : "no-score-returned"),
+      },
+    };
   }
 
-  const status = subject.match(STATUS_RE);
+  const status = subject.match(STATUS_RE) || subject.match(STATUS_BARE_RE);
   if (status) {
-    const from = parseStatusName(status[1]);
-    const to = parseStatusName(status[2]);
+    // The unquoted variant repeats the bracket: "[Bad/Inactive] -
+    // [Bad/Inactive]-DO NOT CALL". Keep the LAST bracketed run, which is the
+    // real status; otherwise safetyClass reads off the duplicated prefix and
+    // a DO NOT CALL lands as an ordinary move.
+    const tidy = (s) => {
+      const t = String(s).trim();
+      const last = t.lastIndexOf("[");
+      return last > 0 ? t.slice(last) : t;
+    };
+    const rawFrom = tidy(status[1]);
+    const rawTo = tidy(status[2]);
+    const from = parseStatusName(rawFrom);
+    const to = parseStatusName(rawTo);
     return {
       kind: "status-change",
       staff: true,
       payload: {
-        fromStatus: status[1].trim(), toStatus: status[2].trim(),
+        fromStatus: rawFrom, toStatus: rawTo,
         fromLabel: from.label, toLabel: to.label,
         toBracket: to.bracket, safetyClass: to.safetyClass,
-        selfTransition: status[1].trim() === status[2].trim(),
+        selfTransition: rawFrom === rawTo,
       },
     };
   }
