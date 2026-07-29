@@ -11,6 +11,9 @@ import { LoginPage } from "@/workspaces/auth/LoginPage";
 // Route-level code splitting — each workspace ships its own chunk and is
 // only fetched when the user lands on it. Keeps the initial admin payload
 // small and avoids the 500kB chunk-size warning.
+const ReportsWorkspace = React.lazy(() =>
+  import("@/workspaces/reports/ReportsWorkspace").then((m) => ({ default: m.ReportsWorkspace })),
+);
 const MetricsWorkspace = React.lazy(() =>
   import("@/workspaces/metrics/MetricsWorkspace").then((m) => ({ default: m.MetricsWorkspace })),
 );
@@ -87,7 +90,7 @@ export function AppRoutes() {
     <Routes>
       <Route path="/login" element={<LoginPage />} />
       <Route
-        path="/trainer"
+        path="/trainer/*"
         element={
           <Suspended>
             <SalesTrainerWorkspace />
@@ -98,6 +101,14 @@ export function AppRoutes() {
       <Route element={<AuthGate audience="admin" />}>
         <Route path="/admin" element={<AdminShell />}>
           <Route index element={<Navigate to="metrics" replace />} />
+          <Route
+            path="reports"
+            element={
+              <Suspended>
+                <ReportsWorkspace />
+              </Suspended>
+            }
+          />
           <Route
             path="metrics"
             element={
@@ -239,7 +250,7 @@ export function AppRoutes() {
             }
           />
           <Route
-            path="coach"
+            path="coach/*"
             element={
               <Suspended>
                 <SalesTrainerWorkspace />

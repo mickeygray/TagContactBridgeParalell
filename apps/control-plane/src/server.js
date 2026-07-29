@@ -55,6 +55,7 @@ const { createReadDeployRouter } = require("./routes/readDeploy");
 const { createReadInboxRouter } = require("./routes/readInbox");
 const { createReadLibraryRouter } = require("./routes/readLibrary");
 const { createReadMetricsRouter } = require("./routes/readMetrics");
+const { createReportsRouter } = require("./routes/reports");
 const { createReadRouter } = require("./routes/read");
 const { createReadReviewRouter } = require("./routes/readReview");
 const { createRuntimeRouter } = require("./routes/runtime");
@@ -2539,6 +2540,7 @@ async function startServer() {
   app.use("/api/read/inbox", createReadInboxRouter(auth));
   app.use("/api/read/library", createReadLibraryRouter(auth));
   app.use("/api/read/metrics", createReadMetricsRouter(auth));
+  app.use("/api/reports", createReportsRouter(auth));
   app.use("/api/read", createReadRouter(auth));
   app.use("/api/read/review", createReadReviewRouter(auth));
   app.use("/api/read/ringcentral", createReadRingcentralRouter(auth));

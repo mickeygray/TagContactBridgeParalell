@@ -1,6 +1,7 @@
 import type { ComponentType } from "react";
 import {
   BarChart3,
+  FileBarChart,
   CalendarClock,
   Gem,
   GraduationCap,
@@ -16,6 +17,7 @@ import {
 } from "lucide-react";
 
 export type WorkspaceKey =
+  | "reports"
   | "metrics"
   | "ringbridge"
   | "live-coach"
@@ -45,6 +47,14 @@ export interface WorkspaceDef {
 // sidebar. Daily-driver workspaces toward the top, ops toward the
 // bottom.
 export const adminWorkspaces: WorkspaceDef[] = [
+  {
+    key: "reports",
+    path: "/admin/reports",
+    label: "Reports",
+    description: "Build, preview and schedule reports. ROI by source, officer performance, P/L.",
+    icon: FileBarChart,
+    audience: "admin",
+  },
   {
     key: "metrics",
     path: "/admin/metrics",
