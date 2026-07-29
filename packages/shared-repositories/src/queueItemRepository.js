@@ -392,6 +392,17 @@ async function existsForLead(leadId) {
   return QueueItem.exists(activeLeadFilter(leadId));
 }
 
+async function listActiveLeadIds(leadIds = []) {
+  const normalized = [...new Set((Array.isArray(leadIds) ? leadIds : [])
+    .map(normalizeLeadId).filter(Boolean))];
+  if (!normalized.length) return [];
+  const rows = await QueueItem.find({
+    leadId: { $in: normalized },
+    state: { $in: ACTIVE_QUEUE_STATES },
+  }, { leadId: 1 }).lean();
+  return [...new Set((Array.isArray(rows) ? rows : []).map((row) => normalizeLeadId(row.leadId)).filter(Boolean))];
+}
+
 module.exports = {
   // reads
   listInPool,
@@ -404,6 +415,7 @@ module.exports = {
   listExpiredFreshAssignments,
   listPendingAssignments,
   existsForLead,
+  listActiveLeadIds,
   // writes
   upsertActiveItemForLead,
   insertItem,

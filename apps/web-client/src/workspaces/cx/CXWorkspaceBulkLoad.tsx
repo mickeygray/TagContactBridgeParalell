@@ -5194,7 +5194,7 @@ export function CXWorkspaceBulkLoad() {
     const coachReleaseReason = options.coachReleaseReason || `queue-disposition-${dispositionKey}`;
     showQueueAdvanceTransition({
       title: "Finishing current lead",
-          description: "Submitting the disposition; RingCX advances to the next call.",
+      description: "Submitting the disposition; the server will pull the next RingCX lead.",
       blocking: true,
     });
     void bulkDisposition
@@ -5588,10 +5588,7 @@ export function CXWorkspaceBulkLoad() {
               ) : null}
             </CardHeader>
             <CardContent
-              className={cn(
-                "space-y-2 pt-0 transition-opacity",
-                queueAdvanceBlocking ? "pointer-events-none opacity-50" : "",
-              )}
+              className="space-y-2 pt-0"
             >
               {/* Multi-candidate picker — when the inbound phone matches
                   multiple cases, the operator picks rather than guessing.
@@ -5793,7 +5790,7 @@ export function CXWorkspaceBulkLoad() {
                     size="sm"
                     variant="secondary"
                     className="border-emerald-500/40 bg-emerald-600 text-white hover:bg-emerald-700"
-                    disabled={bulkFeedDead || queueAdvanceBlocking || (!laneCanDispositionCurrent && bulkCurrentAwaitingUii) || laneDisposition.isPending}
+                    disabled={bulkFeedDead || bulkDisposition.isPending || (!laneCanDispositionCurrent && bulkCurrentAwaitingUii) || laneDisposition.isPending}
                     onClick={(event) => {
                       consumeUiEvent(event);
                       submitQueueDisposition("answered", "Answered");
@@ -5807,7 +5804,7 @@ export function CXWorkspaceBulkLoad() {
                     size="sm"
                     variant="secondary"
                     className="border-amber-500/50 bg-amber-500 text-amber-950 hover:bg-amber-400"
-                    disabled={bulkFeedDead || queueAdvanceBlocking || (!laneCanDispositionCurrent && bulkCurrentAwaitingUii) || laneDisposition.isPending}
+                    disabled={bulkFeedDead || bulkDisposition.isPending || (!laneCanDispositionCurrent && bulkCurrentAwaitingUii) || laneDisposition.isPending}
                     onClick={(event) => {
                       consumeUiEvent(event);
                       submitQueueDisposition("did_not_connect", "Did not answer");
@@ -5821,7 +5818,7 @@ export function CXWorkspaceBulkLoad() {
                     size="sm"
                     variant="secondary"
                     className="border-red-500/40 bg-red-600 text-white hover:bg-red-700"
-                    disabled={bulkFeedDead || queueAdvanceBlocking || (!laneCanDispositionCurrent && bulkCurrentAwaitingUii) || laneDisposition.isPending}
+                    disabled={bulkFeedDead || bulkDisposition.isPending || (!laneCanDispositionCurrent && bulkCurrentAwaitingUii) || laneDisposition.isPending}
                     onClick={(event) => {
                       consumeUiEvent(event);
                       submitQueueDisposition("bad_number", "Bad Number");
@@ -5836,7 +5833,7 @@ export function CXWorkspaceBulkLoad() {
                       size="sm"
                       variant="secondary"
                       className="border-violet-500/40 bg-violet-600 text-white hover:bg-violet-700"
-                      disabled={bulkFeedDead || queueAdvanceBlocking || (!laneCanDispositionCurrent && bulkCurrentAwaitingUii) || laneDisposition.isPending}
+                      disabled={bulkFeedDead || bulkDisposition.isPending || (!laneCanDispositionCurrent && bulkCurrentAwaitingUii) || laneDisposition.isPending}
                       onClick={(event) => {
                         consumeUiEvent(event);
                         submitQueueDisposition("voicemail", "Voicemail");

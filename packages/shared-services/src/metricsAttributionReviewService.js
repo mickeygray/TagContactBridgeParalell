@@ -2,6 +2,11 @@
 
 const { getCompanyKeys } = require("../../shared-config/src");
 const { ReviewQueueItem } = require("../../shared-models/src");
+const {
+  caseProfileRepository,
+  masterProspectRepository,
+} = require("../../shared-repositories/src");
+const { listActiveSourceCanonicals } = require("./sourceCanonicalService");
 
 const GLOBAL_METRICS_DOMAIN = "ALL";
 const REVIEW_WORKFLOW = "attribution-review";
@@ -48,6 +53,22 @@ function normalizeText(value) {
     .trim()
     .toLowerCase()
     .replace(/\s+/g, " ");
+}
+
+function findCanonicalResolution(canonicals = [], source, channel = null) {
+  const wantedSource = normalizeText(source);
+  const wantedChannel = normalizeText(channel);
+  const matches = canonicals.filter((row) => {
+    const names = [row.internalName, row.canonicalKey, ...(row.aliases || [])]
+      .map(normalizeText)
+      .filter(Boolean);
+    return names.includes(wantedSource);
+  });
+  if (wantedChannel) {
+    const channelMatch = matches.find((row) => normalizeText(row.channel) === wantedChannel);
+    if (channelMatch) return channelMatch;
+  }
+  return matches.length === 1 ? matches[0] : null;
 }
 
 function toNumber(value) {
@@ -437,6 +458,20 @@ async function resolveMetricsAttributionReviewItem(id, input = {}, actor = {}) {
 
   const resolvedChannel = String(input.resolvedChannel || "").trim() || null;
   const note = String(input.note || "").trim() || null;
+  const caseId = Number(doc.payload?.raw?.caseId ?? doc.caseId);
+  let canonical = null;
+  if (Number.isFinite(caseId)) {
+    canonical = findCanonicalResolution(
+      await listActiveSourceCanonicals(doc.domain),
+      resolvedSource,
+      resolvedChannel,
+    );
+    if (!canonical?._id) {
+      const error = new Error("Resolved case source must match one active canonical source");
+      error.status = 400;
+      throw error;
+    }
+  }
   const payload = {
     ...(doc.payload || {}),
     resolution: {
@@ -447,6 +482,29 @@ async function resolveMetricsAttributionReviewItem(id, input = {}, actor = {}) {
       resolvedAt: new Date().toISOString(),
     },
   };
+
+  let propagation = null;
+  if (canonical?._id && Number.isFinite(caseId)) {
+    const [caseProfile, masterProspect] = await Promise.all([
+      caseProfileRepository.writeSourceAttribution(doc.domain, caseId, {
+        sourceCanonicalId: canonical._id,
+        matchedBy: "metrics-review",
+        confidence: "manual",
+        lockedManual: true,
+        allowOverwriteLocked: true,
+        forceMirrorSourceName: true,
+      }),
+      masterProspectRepository.upsertMasterProspect(doc.domain, caseId, {
+        sourceCanonicalId: canonical._id,
+        needsSourceRefresh: false,
+      }),
+    ]);
+    propagation = {
+      sourceCanonicalId: String(canonical._id),
+      caseProfile,
+      masterProspectUpdated: Boolean(masterProspect),
+    };
+  }
 
   const updated = await ReviewQueueItem.findByIdAndUpdate(
     id,
@@ -461,7 +519,7 @@ async function resolveMetricsAttributionReviewItem(id, input = {}, actor = {}) {
     { new: true },
   ).lean();
 
-  return mapReviewItem(updated);
+  return { ...mapReviewItem(updated), propagation };
 }
 
 async function ignoreMetricsAttributionReviewItem(id, input = {}, actor = {}) {
@@ -536,6 +594,7 @@ module.exports = {
   STATUS_OPEN,
   STATUS_RESOLVED,
   buildMetricsAttributionReviewKey,
+  findCanonicalResolution,
   isGlobalMetricsDomain,
   listMetricsAttributionReviewItems,
   listMetricsDomains,

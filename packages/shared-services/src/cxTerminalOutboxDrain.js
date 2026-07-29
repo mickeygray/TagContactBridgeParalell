@@ -13,6 +13,7 @@ function summarizeDrainRow(row = {}) {
   return {
     idemKey: row?.idemKey || null,
     domain: payload.domain || row?.domain || null,
+    agentId: payload.agentId || row?.agentId || null,
     agentEmail: payload.agentEmail || row?.agentEmail || null,
     agentExtensionId: payload.agentExtensionId || row?.agentExtensionId || null,
     queueItemId: payload.queueItemId || row?.queueItemId || null,
@@ -130,7 +131,13 @@ function createCxTerminalOutboxDrain({
         const packet = enrichTerminalPacket
           ? await enrichTerminalPacket({ row, payload: row.payload })
           : { row, payload: row.payload };
-        const terminalResult = await recordCadenceEvent(packet.payload);
+        const nextAction = String(packet.payload?.nextAction || "").trim().toLowerCase();
+        const routeToCallWrap = nextAction === "call_wrap";
+        const routeToCadence = nextAction === "cadence" || nextAction === "ringcx_vm_drop";
+        const routeToBadNumber = nextAction === "logics_dnc";
+        const terminalResult = routeToCadence
+          ? await recordCadenceEvent(packet.payload)
+          : { ok: true, skipped: true, reason: nextAction ? `routed-${nextAction}` : "fact-only-no-click-action" };
         logCxAlpha("cx.alpha.drain.row.replayed", {
           ...summarizeDrainRow(packet.row || row),
           terminalResultOk: terminalResult?.ok !== false,
@@ -164,7 +171,7 @@ function createCxTerminalOutboxDrain({
             });
           }
         }
-        if (handleBadNumberOutcome) {
+        if (handleBadNumberOutcome && routeToBadNumber) {
           const badNumberResult = await handleBadNumberOutcome({
             row: packet.row || row,
             payload: packet.payload,
@@ -179,6 +186,21 @@ function createCxTerminalOutboxDrain({
             ok: badNumberResult ? badNumberResult.ok !== false : null,
           }, { logger });
         }
+        if (enqueueCallWrap && routeToCallWrap) {
+          const wrapResult = await enqueueCallWrap({
+            row: packet.row || row,
+            payload: packet.payload,
+            terminalResult,
+            coachSummary: packet.coachSummary || null,
+          });
+          if (wrapResult?.skipped) callWrapSkipped += 1;
+          else callWrapQueued += 1;
+          logCxAlpha("cx.alpha.drain.call_wrap.finished", {
+            ...summarizeDrainRow(packet.row || row),
+            skipped: Boolean(wrapResult?.skipped),
+            reason: wrapResult?.reason || null,
+          }, { logger });
+        }
         const drainedRow = await outboxRepository.markDrained(row.idemKey);
         if (!drainedRow) {
           // CAS miss: a concurrent drainer (second process / restart race) already marked it.
@@ -190,33 +212,6 @@ function createCxTerminalOutboxDrain({
           });
         }
         drained += 1;
-        if (enqueueCallWrap) {
-          try {
-            const wrapResult = await enqueueCallWrap({
-              row: packet.row || row,
-              payload: packet.payload,
-              terminalResult,
-              coachSummary: packet.coachSummary || null,
-            });
-            if (wrapResult?.skipped) callWrapSkipped += 1;
-            else callWrapQueued += 1;
-            logCxAlpha("cx.alpha.drain.call_wrap.finished", {
-              ...summarizeDrainRow(packet.row || row),
-              skipped: Boolean(wrapResult?.skipped),
-              reason: wrapResult?.reason || null,
-            }, { logger });
-          } catch (err) {
-            callWrapFailed += 1;
-            logCxAlpha("cx.alpha.drain.call_wrap.failed", {
-              ...summarizeDrainRow(packet.row || row),
-              error: err?.message,
-            }, { logger });
-            logger.warn?.("cxTerminalOutboxDrain call wrap enqueue failed", {
-              idemKey: row.idemKey,
-              err: err?.message,
-            });
-          }
-        }
       } catch (err) {
         const failedRow = await outboxRepository
           .markFailed(row.idemKey, err && err.message ? err.message : String(err))

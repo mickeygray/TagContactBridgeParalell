@@ -43,6 +43,16 @@ const callLogSchema = new mongoose.Schema(
       default: "unknown",
       index: true,
     },
+    // Provider-neutral exact identity. `telephonySessionId` remains the
+    // cross-provider unique key; these fields retain the provider's native
+    // identity without making metrics parse an ID prefix.
+    provider: { type: String, default: null, trim: true, lowercase: true, index: true },
+    providerCallId: { type: String, default: null, trim: true, index: true },
+    providerAttemptKey: { type: String, default: null, trim: true, index: true },
+    providerAgentId: { type: String, default: null, trim: true, lowercase: true, index: true },
+    outcome: { type: String, default: null, trim: true, lowercase: true, index: true },
+    connected: { type: Boolean, default: null, index: true },
+    originPool: { type: String, default: null, trim: true },
     phone: { type: String, default: null, index: true },
     normalizedPhone: { type: String, default: null, index: true },
     contactName: { type: String, default: null },
@@ -61,7 +71,7 @@ const callLogSchema = new mongoose.Schema(
     // Powers the per-agent call-stats breakdown in the Users drawer.
     platform: {
       type: String,
-      enum: ["ex", "cx", null],
+      enum: ["ex", "cx", "phoneburner", null],
       default: null,
       index: true,
     },
@@ -120,6 +130,7 @@ const callLogSchema = new mongoose.Schema(
         "legs[0]",
         "did",
         "legacy",            // from RB_ContactActivity
+        "lead-delivery",     // exact DailyDial attempt reconciled after close
         "none",
       ],
       default: "none",
@@ -322,6 +333,7 @@ callLogSchema.index({ "recordingArchive.status": 1, createdAt: 1 });
 // the whole tenant. With this index, `{ domain: $in, platform: "cx",
 // callStartTime: $gte }` becomes a bounded range scan.
 callLogSchema.index({ domain: 1, platform: 1, callStartTime: -1 });
+callLogSchema.index({ domain: 1, provider: 1, providerCallId: 1 });
 
 // Hourly CX recording archive sweep — queries on callEndTime + platform
 // + non-terminal archive status. Same shape as the Tracker index above

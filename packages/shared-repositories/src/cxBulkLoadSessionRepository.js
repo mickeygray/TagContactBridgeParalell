@@ -31,9 +31,17 @@ function asPlain(doc = null) {
   return typeof doc.toObject === "function" ? doc.toObject() : doc;
 }
 
+function applyRuntimeScope(query, input = {}) {
+  const runtime = String(input.runtime || "").trim();
+  if (runtime) query.runtime = runtime;
+  else query.runtime = { $ne: "boring" };
+  return query;
+}
+
 async function createBulkLoadSession(input = {}) {
   const session = await CxBulkLoadSession.create({
     ...input,
+    runtime: String(input.runtime || "bulk_load").trim(),
     agentEmail: normalizeEmail(input.agentEmail),
     agentExtensionId: normalizeExternalId(input.agentExtensionId),
     cxAgentId: normalizeExternalId(input.cxAgentId),
@@ -54,7 +62,7 @@ async function findBulkLoadSessionById(sessionId) {
 async function findActiveBulkLoadSessionForAgent(input = {}) {
   const agentEmail = normalizeEmail(input.agentEmail);
   const agentExtensionId = normalizeExternalId(input.agentExtensionId);
-  const query = { status: { $in: ACTIVE_STATUSES } };
+  const query = applyRuntimeScope({ status: { $in: ACTIVE_STATUSES } }, input);
   if (agentEmail) {
     query.agentEmail = agentEmail;
   } else if (agentExtensionId) {
@@ -68,7 +76,7 @@ async function findActiveBulkLoadSessionForAgent(input = {}) {
 async function findActiveBulkLoadSessionsForAgent(input = {}) {
   const agentEmail = normalizeEmail(input.agentEmail);
   const agentExtensionId = normalizeExternalId(input.agentExtensionId);
-  const query = { status: { $in: ACTIVE_STATUSES } };
+  const query = applyRuntimeScope({ status: { $in: ACTIVE_STATUSES } }, input);
   if (agentEmail) {
     query.agentEmail = agentEmail;
   } else if (agentExtensionId) {
@@ -80,7 +88,7 @@ async function findActiveBulkLoadSessionsForAgent(input = {}) {
 }
 
 async function listActiveBulkLoadSessions(input = {}) {
-  const query = { status: { $in: ACTIVE_STATUSES } };
+  const query = applyRuntimeScope({ status: { $in: ACTIVE_STATUSES } }, input);
   if (input.sessionId) query.sessionId = String(input.sessionId || "").trim();
   if (input.agentEmail) query.agentEmail = normalizeEmail(input.agentEmail);
   if (input.agentExtensionId) query.agentExtensionId = normalizeExternalId(input.agentExtensionId);
@@ -108,6 +116,7 @@ async function updateBulkLoadSession(sessionId, update = {}, options = {}) {
   if (patch.agentExtensionId !== undefined) patch.agentExtensionId = normalizeExternalId(patch.agentExtensionId);
   if (patch.cxAgentId !== undefined) patch.cxAgentId = normalizeExternalId(patch.cxAgentId);
   if (patch.domain !== undefined) patch.domain = normalizeDomain(patch.domain);
+  if (patch.runtime !== undefined) patch.runtime = String(patch.runtime || "bulk_load").trim();
   if (patch.ringcx !== undefined && (!patch.ringcx || typeof patch.ringcx !== "object" || Array.isArray(patch.ringcx))) {
     patch.ringcx = {};
   }

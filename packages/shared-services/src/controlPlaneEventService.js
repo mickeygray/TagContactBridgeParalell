@@ -23,6 +23,7 @@ const { classifySms, fastStopCheck } = require("./smsClassifierService");
 const { runAutoResponder } = require("./smsAutoResponderService");
 const { autoRouteHotInboundWorkflow } = require("./hotIntentRouterService");
 const { sendPlainEmail } = require("./sendgridMailService");
+const marketingMoneyService = require("./marketingMoneyService");
 
 const CONTROL_PLANE_EVENT_TYPES = Object.freeze({
   LEAD_OBSERVED: "control-plane.lead.observed",
@@ -385,7 +386,7 @@ async function handlePaymentObserved(event) {
   const caseId = Number(payload.caseId);
   const casePaymentId = Number(payload.casePaymentId);
 
-  await paymentLedgerRepository.upsertPaymentLedger(casePaymentId, {
+  await marketingMoneyService.observePayment(casePaymentId, {
     domain,
     caseId,
     caseProfileId: payload.caseProfileId || null,
@@ -395,7 +396,7 @@ async function handlePaymentObserved(event) {
     paymentDateKey: String(payload.paymentDate).slice(0, 10),
     amount: Number(payload.amount || 0),
     paymentType: payload.paymentType || "unknown",
-    transactionStatus: payload.transactionStatus || "SUCCESS",
+    transactionStatus: payload.transactionStatus || null,
     needsSourceReview: Boolean(payload.needsSourceReview),
     reviewReason: payload.reviewReason || null,
     raw: payload.raw || payload,
@@ -414,7 +415,7 @@ async function handlePaymentObserved(event) {
     payload: {
       amount: Number(payload.amount || 0),
       paymentDate: payload.paymentDate,
-      transactionStatus: payload.transactionStatus || "SUCCESS",
+      transactionStatus: payload.transactionStatus || null,
     },
   });
 

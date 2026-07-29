@@ -4,7 +4,7 @@
  * agentCallStatsService
  *
  * Per-agent call rollups (today / week / month / lifetime) split by
- * direction (inbound/outbound) and platform (ex/cx).
+ * direction (inbound/outbound) and platform (ex/cx/phoneburner).
  *
  * Lazy-computed: the GET /api/admin/accounts/:id/call-stats route
  * calls `getOrComputeAgentCallStats` which:
@@ -139,6 +139,21 @@ async function aggregateBucket(extensionIds, since) {
         exCalls: {
           $sum: { $cond: [{ $eq: ["$platform", "ex"] }, 1, 0] },
         },
+        phoneBurnerCalls: {
+          $sum: { $cond: [{ $eq: ["$platform", "phoneburner"] }, 1, 0] },
+        },
+        connectedCalls: {
+          $sum: { $cond: [{ $eq: ["$connected", true] }, 1, 0] },
+        },
+        appointmentsSet: {
+          $sum: { $cond: [{ $eq: ["$outcome", "appointment"] }, 1, 0] },
+        },
+        dncOutcomes: {
+          $sum: { $cond: [{ $in: ["$outcome", ["dnc", "bad_lead"]] }, 1, 0] },
+        },
+        talkDurationSec: {
+          $sum: { $cond: [{ $eq: ["$connected", true] }, { $ifNull: ["$durationSec", 0] }, 0] },
+        },
         longestCallSec: { $max: "$durationSec" },
         lastCallAt: { $max: "$callStartTime" },
       },
@@ -151,6 +166,11 @@ async function aggregateBucket(extensionIds, since) {
         inboundCalls: 1,
         cxCalls: 1,
         exCalls: 1,
+        phoneBurnerCalls: 1,
+        connectedCalls: 1,
+        appointmentsSet: 1,
+        dncOutcomes: 1,
+        talkDurationSec: 1,
         longestCallSec: { $ifNull: ["$longestCallSec", 0] },
         lastCallAt: 1,
       },
@@ -166,6 +186,11 @@ function emptyBucket() {
     inboundCalls: 0,
     cxCalls: 0,
     exCalls: 0,
+    phoneBurnerCalls: 0,
+    connectedCalls: 0,
+    appointmentsSet: 0,
+    dncOutcomes: 0,
+    talkDurationSec: 0,
     longestCallSec: 0,
     lastCallAt: null,
   };

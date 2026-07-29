@@ -80,6 +80,10 @@ const {
 } = require("../../../packages/shared-services/src/ringcentralSubscriptionWatchdogService");
 const { createEvent } = require("../../../packages/event-core/src");
 
+function isLeadDeliveryVoiceOwnerEnabled(env = process.env) {
+  return String(env?.LEAD_DELIVERY_ENABLED || "").trim().toLowerCase() === "true";
+}
+
 function buildInternalAccessMiddleware(config) {
   const bearerAuth = requireAuth(config);
   const configuredSecret = String(config.internalServiceSecret || "").trim();
@@ -316,6 +320,11 @@ async function startServer() {
   };
 
   const runtime = await initializeServiceRuntime(config);
+  // Provider-neutral lead delivery and the legacy RingCX queue builders must
+  // never own voice inventory at the same time. This service can still serve
+  // read-only RingCX diagnostics and non-voice infrastructure while the new
+  // owner is active; only the queue-building/maintenance writers below go dark.
+  const leadDeliveryOwnsVoice = isLeadDeliveryVoiceOwnerEnabled(process.env);
   const cadenceWorkerState = createWorkerState();
   const freshHotLaneState = createWorkerState();
   const freshHotLaneMorningState = createWorkerState();
@@ -494,6 +503,13 @@ async function startServer() {
   app.use(express.static(path.resolve(__dirname, "..", "public")));
 
   async function startCxCadenceWorker() {
+    if (leadDeliveryOwnsVoice) {
+      cadenceWorkerState.enabled = false;
+      runtime.logger.warn("ringcentral.cx_cadence.disabled", {
+        reason: "lead-delivery-owns-voice",
+      });
+      return;
+    }
     if (bulkLoadAlphaRuntime) {
       cadenceWorkerState.enabled = false;
       runtime.logger.warn("ringcentral.cx_cadence.disabled", {
@@ -740,6 +756,14 @@ async function startServer() {
   }
 
   function startFreshHotLaneWorker() {
+    if (leadDeliveryOwnsVoice) {
+      freshHotLaneState.enabled = false;
+      freshHotLaneMorningState.enabled = false;
+      runtime.logger?.warn?.("ringcentral.cx_fresh_hot_lane.disabled", {
+        reason: "lead-delivery-owns-voice",
+      });
+      return;
+    }
     if (bulkLoadAlphaRuntime) {
       freshHotLaneState.enabled = false;
       freshHotLaneMorningState.enabled = false;
@@ -831,11 +855,13 @@ async function startServer() {
   //   - It's outside the configured business window (per-cron, with
   //     morning-prep being the explicit off-hours exception)
   function startMorningQueueBuilderWorker() {
-    const enabled = isCxMorningQueueBuilderEnabled(process.env);
+    const enabled = !leadDeliveryOwnsVoice && isCxMorningQueueBuilderEnabled(process.env);
     morningQueueBuilderState.enabled = enabled;
     if (!enabled) {
       runtime.logger?.info?.("ringcentral.cx_morning_queue_builder.disabled", {
-        reason: "CX_MORNING_QUEUE_BUILDER_ENABLED=false or bulk-load runtime disabled",
+        reason: leadDeliveryOwnsVoice
+          ? "lead-delivery-owns-voice"
+          : "CX_MORNING_QUEUE_BUILDER_ENABLED=false or bulk-load runtime disabled",
       });
       return;
     }
@@ -935,8 +961,8 @@ async function startServer() {
     });
   }
 
-  const pacingQueueEnabled = String(process.env.PACING_QUEUE_ENABLED || "")
-    .toLowerCase() === "true";
+  const pacingQueueEnabled = !leadDeliveryOwnsVoice
+    && String(process.env.PACING_QUEUE_ENABLED || "").toLowerCase() === "true";
   const pacingHourlyState = createWorkerState();
   const pacingTickState = createWorkerState();
   const pacingMorningPrepState = createWorkerState();
@@ -1110,7 +1136,8 @@ async function startServer() {
 
   const bulkLoadAlphaRuntime = isBulkLoadAlphaRuntime();
   const staleDialSweepEnabled =
-    !bulkLoadAlphaRuntime
+    !leadDeliveryOwnsVoice
+    && !bulkLoadAlphaRuntime
     && String(process.env.RCX_STALE_DIAL_SWEEP_ENABLED || "true").toLowerCase() !== "false";
   const staleDialSweepIntervalMs = Math.max(
     Number(process.env.RCX_STALE_DIAL_SWEEP_INTERVAL_MS) || 30_000,
@@ -1151,7 +1178,8 @@ async function startServer() {
   }
 
   const ringcxAgentMonitorEnabled =
-    !bulkLoadAlphaRuntime
+    !leadDeliveryOwnsVoice
+    && !bulkLoadAlphaRuntime
     && String(process.env.RINGCX_AGENT_MONITOR_ENABLED || "true").toLowerCase() !== "false";
   const ringcxAgentMonitorIntervalMs = Math.max(
     Number(process.env.RINGCX_AGENT_MONITOR_INTERVAL_MS) || 30_000,
@@ -2552,5 +2580,6 @@ if (require.main === module) {
 }
 
 module.exports = {
+  isLeadDeliveryVoiceOwnerEnabled,
   startServer,
 };

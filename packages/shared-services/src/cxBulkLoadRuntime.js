@@ -531,6 +531,18 @@ function normalizeLaneOutcome(value) {
   return null;
 }
 
+function normalizeLanePhone(value) {
+  const digits = String(value || "").replace(/\D+/g, "");
+  if (digits.length === 11 && digits.startsWith("1")) return digits.slice(1);
+  return digits.length === 10 ? digits : null;
+}
+
+function normalizeLaneCaseId(value) {
+  if (value == null || String(value).trim() === "") return null;
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : null;
+}
+
 // F2 CONSUMPTION (2026-07-08): a dispositioned lane call persists a REAL terminal into
 // the trunk — the same outbox row an ordinary bulk disposition writes, keyed to the REAL
 // queue row (the cxft extern carries the row id; the cxapt extern carries the appointment
@@ -548,6 +560,11 @@ async function persistLaneCallConsumption({ laneCall = {}, session = {}, outcome
 
   async function persistTerminalFor(queueItemId, extra = {}) {
     if (!queueItemId) return { ok: false, reason: "no-queue-item" };
+    const caseId = normalizeLaneCaseId(laneCall.caseId);
+    const phone = normalizeLanePhone(
+      laneCall.phone || laneCall.phoneNumber || laneCall.dnis || laneCall.meta?.phone,
+    );
+    if (caseId == null && !phone) return { ok: false, reason: "missing-lead-identity" };
     const badNumber = String(outcome || "").trim().toLowerCase().replace(/[\s-]+/g, "_") === "bad_number";
     const idemKey = makeOutcomeIdemKey({
       sessionId: session.sessionId,
@@ -558,9 +575,12 @@ async function persistLaneCallConsumption({ laneCall = {}, session = {}, outcome
     const payload = {
       sessionId: session.sessionId || null,
       domain: laneCall.domain || null,
+      agentId: session.cxAgentId || session.agentId || session.agentExtensionId || null,
+      agentExtensionId: session.agentExtensionId || null,
       agentEmail: agentEmail || null,
       queueItemId: String(queueItemId),
-      caseId: laneCall.caseId ?? null,
+      caseId,
+      phone,
       externId: laneCall.externId || null,
       uii: laneCall.uii || null,
       name: laneCall.name || null,
@@ -582,7 +602,10 @@ async function persistLaneCallConsumption({ laneCall = {}, session = {}, outcome
       domain: laneCall.domain || null,
       queueItemId: String(queueItemId),
       uii: laneCall.uii || null,
-      caseId: laneCall.caseId ?? null,
+      caseId,
+      phone,
+      agentId: payload.agentId,
+      agentExtensionId: payload.agentExtensionId,
       agentEmail: agentEmail || null,
       externId: laneCall.externId || null,
       outcome,
@@ -623,7 +646,7 @@ async function persistLaneCallConsumption({ laneCall = {}, session = {}, outcome
   return { ok: false, reason: "bulk-extern-not-lane" };
 }
 
-async function executeLaneCallDisposition({ laneCall = null, outcome = null, client = null, agent = {}, notes = null } = {}) {
+async function executeLaneCallDisposition({ laneCall = null, outcome = null, client = null, agent = {}, notes = null, deps = {} } = {}) {
   const normalizedOutcome = normalizeLaneOutcome(outcome);
   if (!normalizedOutcome) {
     throw makeHttpError("Unsupported lane call disposition", 400, "cx-lane-call-disposition-unsupported");
@@ -643,6 +666,7 @@ async function executeLaneCallDisposition({ laneCall = null, outcome = null, cli
     rail: "lane_call",
     sessionId: `lane:${normalizeEmail(agent.agentEmail) || "unknown"}`,
     agentEmail: normalizeEmail(agent.agentEmail) || null,
+    cxAgentId: normalizeExternalId(agent.cxAgentId || agent.agentId || ""),
     agentExtensionId: normalizeExternalId(agent.agentExtensionId || ""),
     domain: laneCall.domain || null,
     ringcx: {},
@@ -701,6 +725,7 @@ async function executeLaneCallDisposition({ laneCall = null, outcome = null, cli
       session,
       outcome: normalizedOutcome,
       agentEmail: session.agentEmail,
+      deps,
     }).catch((error) => ({ ok: false, error: error?.message || "lane-consumption-failed" }));
     logCxAlpha("cx.alpha.disposition.transport", {
       rail: "lane_call",
@@ -1004,25 +1029,29 @@ function assertBulkRuntime(agent) {
   return resolution;
 }
 
+// M11 gate 2: dispatch one cadence event into the existing finalizer.
+async function dispatchCadenceEvent(event = {}, handler = handleCxTerminalCallOutcome) {
+  return handler({
+    queueItemId: event.queueItemId,
+    domain: event.domain,
+    caseId: event.caseId,
+    uii: event.uii,
+    externId: event.externId,
+    agentId: event.agentId,
+    agentExtensionId: event.agentExtensionId,
+    outcome: event.outcome,
+    disposition: event.outcome,
+    source: event.source || "cx-bulk-load",
+    sourceService: "cx-bulk-load",
+    actorEmail: event.agentEmail,
+    outcomeAt: event.at || new Date().toISOString(),
+  });
+}
+
 let _service = null;
 function getService() {
   if (_service) return _service;
   const client = createRingcxVoiceClient();
-  // M11 gate 2: dispatch one cadence event into the existing finalizer.
-  const dispatchCadenceEvent = async (event) =>
-    handleCxTerminalCallOutcome({
-      queueItemId: event.queueItemId,
-      domain: event.domain,
-      caseId: event.caseId,
-      uii: event.uii,
-      externId: event.externId,
-      outcome: event.outcome,
-      disposition: event.outcome,
-      source: event.source || "cx-bulk-load",
-      sourceService: "cx-bulk-load",
-      actorEmail: event.agentEmail,
-      outcomeAt: event.at || new Date().toISOString(),
-    });
   const outcomeAdapter = createCxBulkLoadOutcomeAdapter({
     recordCadenceEvent: async (event) => {
       // M11 gate 2: DURABLE terminal recording. The live click path only writes the
@@ -1044,6 +1073,8 @@ function getService() {
           queueItemId: event.queueItemId || null,
           uii: event.uii || null,
           caseId: event.caseId != null ? Number(event.caseId) : null,
+          agentId: event.agentId || null,
+          agentExtensionId: event.agentExtensionId || null,
           agentEmail: event.agentEmail || null,
           agentName: event.agentName || null,
           externId: event.externId || null,
@@ -1881,6 +1912,7 @@ module.exports = {
   _test: {
     bulkOutcomeDisposition,
     executeLaneCallDisposition,
+    dispatchCadenceEvent,
     deriveRescueDecision,
     pauseRingcxProgressiveDialing,
     resumeRingcxProgressiveDialing,

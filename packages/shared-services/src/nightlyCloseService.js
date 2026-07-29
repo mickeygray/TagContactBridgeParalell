@@ -36,7 +36,11 @@ const {
   buildCallLogCsv,
   buildRedlineCsv,
 } = require("./nightlyCsvBuilders");
-const { buildVendorDailySummary } = require("./vendorDailySummaryService");
+const {
+  buildVendorDailySummary,
+  classifyVendorFamily,
+} = require("./vendorDailySummaryService");
+const { buildMarketingCaseDiscovery } = require("./marketingCaseDiscoveryService");
 const {
   buildDetailBackedVendorSummary,
   buildVendorCallRows,
@@ -69,7 +73,7 @@ const { getInternalFromEmail } = require("../../shared-config/src");
 
 const UNRESOLVED_HOURLY_STATUSES = ["pending", "processing", "failed", "dead-letter"];
 const REQUIRED_NIGHTLY_DOMAINS = ["WYNN", "TAG"];
-const LD_VENDOR_FAMILY_KEYS = new Set(["ld-custom", "ld-custom-2", "ld-custom-3", "ld-general"]);
+const LD_VENDOR_FAMILY_KEYS = new Set(["ld-custom", "ld-custom-2", "ld-custom-3", "ld-general", "ld-posting"]);
 const LD_CAMPAIGN_LABELS = {
   "ld-custom": "LD CUSTOM",
   "ld-custom-2": "LD CUSTOM 2",
@@ -989,6 +993,7 @@ async function buildVendorReport(domain, dateKey, options = {}) {
   return buildVendorDailySummary(domain, {
     date: dateKey,
     timezone: options.timezone || "America/Los_Angeles",
+    leadDiscovery: options.leadDiscovery || null,
   });
 }
 
@@ -1470,7 +1475,7 @@ async function buildMtdRoiBySource(domains, dateKey, options = {}) {
   // those exactly so the email and the SPA agree row-for-row.
   const out = rows.map((row) => {
     const spend = toNumber(row.spend);
-    const leads = toNumber(row.count) || toNumber(row.leadsReported);
+    const leads = toNumber(row.leadsReported) || toNumber(row.count);
     const deals = toNumber(row.initialPaymentCount);
     const initials = toNumber(row.initialPayments);
     const paid = toNumber(row.payments);
@@ -2390,16 +2395,28 @@ async function buildGroupedNightlyPayload(domains, dateKey, options = {}) {
   // Vendor report — WYNN only. Run AFTER the attribution refresh so
   // the vendor email's per-source rollup also reads the corrected
   // attribution from CaseProfile.
-  const vendorReport = list.includes(normalizeDomain(vendorDomain))
-    ? await buildVendorReport(normalizeDomain(vendorDomain), dateKey, { timezone: timeZone })
-    : { rows: [], families: [], trackedFamilies: [], attributionReview: {}, totals: {} };
-
   const vendorDetailDomain = normalizeDomain(vendorDomain);
+  const vendorLeadDiscovery = list.includes(vendorDetailDomain)
+    ? await buildMarketingCaseDiscovery(vendorDetailDomain, {
+        date: dateKey,
+        timezone: timeZone,
+        limit: options.vendorLeadRowLimit || 50000,
+      })
+    : { rows: [], coverage: null };
+  const vendorReport = list.includes(vendorDetailDomain)
+    ? await buildVendorReport(vendorDetailDomain, dateKey, {
+        timezone: timeZone,
+        leadDiscovery: vendorLeadDiscovery,
+      })
+    : { rows: [], families: [], trackedFamilies: [], attributionReview: {}, totals: {}, discoveryCoverage: null };
+
   const [vendorLeadRows, vendorCallRows, vendorOutcomeRows] = list.includes(vendorDetailDomain)
     ? await Promise.all([
         buildVendorLeadRows(vendorDetailDomain, dateKey, {
           timezone: timeZone,
           limit: options.vendorLeadRowLimit || 50000,
+          leadDiscovery: vendorLeadDiscovery,
+          includeUntracked: true,
         }).catch(() => []),
         buildVendorCallRows(vendorDetailDomain, dateKey, {
           timezone: timeZone,
@@ -2422,6 +2439,11 @@ async function buildGroupedNightlyPayload(domains, dateKey, options = {}) {
   // metrics. Drives the bottom of the financial email + the metrics-
   // page-style CSV attachment.
   const mtdRoiBySource = await buildMtdRoiBySource(list, dateKey, {}).catch(() => []);
+  const vendorMtdRoiBySource = list.includes(vendorDetailDomain)
+    ? await buildMtdRoiBySource([vendorDetailDomain], dateKey, {
+        groupKey: vendorDetailDomain,
+      }).catch(() => [])
+    : [];
 
   return {
     date: dateKey,
@@ -2447,6 +2469,7 @@ async function buildGroupedNightlyPayload(domains, dateKey, options = {}) {
     vendorCallRows,
     vendorOutcomeRows,
     mtdRoiBySource,
+    vendorMtdRoiBySource,
     attributionReview: mergeAttributionReviews([detailBackedVendorReport.attributionReview]),
     attributionRefresh,
   };
@@ -2487,7 +2510,7 @@ function buildFinancialEmailBody(domain, dateKey, daily, mtd, extras = {}) {
   ].join("\n");
 }
 
-function buildLeadDataEmailBody(domain, dateKey, daily, vendorReport, bugWrap) {
+function buildLeadDataEmailBody(domain, dateKey, daily, vendorReport, bugWrap, extras = {}) {
   const topVendorFamilyRows =
     (vendorReport.trackedFamilies?.length > 0
       ? vendorReport.trackedFamilies
@@ -2501,6 +2524,9 @@ function buildLeadDataEmailBody(domain, dateKey, daily, vendorReport, bugWrap) {
   const ldLeadCount = sumVendorRows(topVendorFamilyRows, "leads");
   const ldCallCount = sumVendorRows(topVendorFamilyRows, "calls");
   const ldCallsOver5 = sumVendorRows(topVendorFamilyRows, "callsOver5");
+  const coverage = extras.discoveryCoverage || vendorReport.discoveryCoverage || {};
+  const mtdRows = Array.isArray(extras.mtdVendorRows) ? extras.mtdVendorRows : [];
+  const mtd = extras.mtdTotals || {};
 
   return [
     `[${domain}] Daily lead data + scoring — ${dateKey}`,
@@ -2508,6 +2534,14 @@ function buildLeadDataEmailBody(domain, dateKey, daily, vendorReport, bugWrap) {
     `LD leads: ${ldLeadCount}`,
     `LD calls: ${ldCallCount} (${ldCallsOver5} over 5 min)`,
     `LD cost: ${formatMoney(ldCost.total)} (LD CUSTOM ${ldCost.customCount} x $${ldCost.customRate} + LD CUSTOM 2 ${ldCost.custom2Count} x $${ldCost.custom2Rate} + LD CUSTOM 3 ${ldCost.custom3Count} x $${ldCost.custom3Rate} + LD GENERAL ${ldCost.generalCount} x $${ldCost.generalRate})`,
+    "",
+    "New-case discovery coverage",
+    `Observed: ${toNumber(coverage.discovered)} unique cases; sourced ${toNumber(coverage.attributed)}; unattributed ${toNumber(coverage.unattributed)}; conflicts ${toNumber(coverage.conflicts)}; missing cadence ${toNumber(coverage.missingCadence)}`,
+    coverage.truncated ? "WARNING: at least one discovery source hit its safety limit." : "Discovery scan complete within configured limits.",
+    "",
+    `LD month-to-date (${mtd.monthStart || `${dateKey.slice(0, 7)}-01`} to ${mtd.monthEnd || dateKey})`,
+    `Spend ${formatMoney(mtd.spend)}; leads ${toNumber(mtd.leads)}; deals ${toNumber(mtd.deals)}; initials ${formatMoney(mtd.initials)}; collected ${formatMoney(mtd.paid)}; net ${formatMoney(mtd.net)}`,
+    ...mtdRows.map((row) => `${row.source}: spend ${formatMoney(row.spend)}, leads ${toNumber(row.leads)}, deals ${toNumber(row.deals)}, initials ${formatMoney(row.initials)}, collected ${formatMoney(row.paid)}`),
     "",
     "LD family summary",
     `Attribution held out: ${toNumber(attributionReview.skipped)} skipped, ${toNumber(attributionReview.queued)} newly queued, ${toNumber(attributionReview.resolved)} resolved by manual mapping, ${toNumber(attributionReview.ignored)} ignored`,
@@ -2699,9 +2733,45 @@ async function sendLeadDataCloseEmail(domain, payload, options = {}) {
   const leadRows = Array.isArray(payload.leadRows) ? payload.leadRows : [];
   const todaysCalls = Array.isArray(payload.todaysCalls) ? payload.todaysCalls : [];
   const outcomeRows = Array.isArray(payload.outcomeRows) ? payload.outcomeRows : [];
+  const phoneBurnerCallReconciliation = payload.phoneBurnerCallReconciliation || {
+    status: "not-configured",
+    rejected: 0,
+  };
+  const phoneBurnerCallProjectionHealthy =
+    String(phoneBurnerCallReconciliation.status || "") === "completed"
+    && toNumber(phoneBurnerCallReconciliation.rejected) === 0;
   const ldLeadRows = leadRows.filter(isLdVendorFamily);
   const ldTodaysCalls = todaysCalls.filter(isLdVendorFamily);
   const ldOutcomeRows = outcomeRows.filter(isLdVendorFamily);
+  const discoveryCoverage = vendorReport.discoveryCoverage || {
+    discovered: leadRows.length,
+    attributed: leadRows.filter((row) => row.attributionState === "attributed").length,
+    unattributed: leadRows.filter((row) => row.attributionState === "unattributed").length,
+    conflicts: leadRows.filter((row) => row.attributionState === "conflict").length,
+    missingCadence: leadRows.filter((row) => row.cadencePresent === "no").length,
+    truncated: false,
+  };
+  const mtdVendorRows = (Array.isArray(payload.mtdRoiBySource) ? payload.mtdRoiBySource : [])
+    .map((row) => {
+      const family = classifyVendorFamily(row.source, row.channel);
+      return { ...row, family: family.key, familyLabel: family.label };
+    })
+    .filter(isLdVendorFamily);
+  const mtdTotals = mtdVendorRows.reduce((totals, row) => {
+    totals.spend += toNumber(row.spend);
+    totals.leads += toNumber(row.leads);
+    totals.deals += toNumber(row.deals);
+    totals.initials += toNumber(row.initials);
+    totals.paid += toNumber(row.paid);
+    return totals;
+  }, {
+    monthStart: `${String(payload.date).slice(0, 7)}-01`,
+    monthEnd: payload.date,
+    spend: 0, leads: 0, deals: 0, initials: 0, paid: 0,
+  });
+  mtdTotals.net = mtdTotals.paid - mtdTotals.spend;
+  mtdTotals.roas = mtdTotals.spend > 0 ? mtdTotals.initials / mtdTotals.spend : null;
+  mtdTotals.roi = mtdTotals.spend > 0 ? mtdTotals.net / mtdTotals.spend : null;
   const transitions = outcomeRows.length > 0
     ? rollupVendorOutcomeRows(ldOutcomeRows)
     : (payload.transitions || []).filter(isLdTransitionRow);
@@ -2722,6 +2792,7 @@ async function sendLeadDataCloseEmail(domain, payload, options = {}) {
     dateKey: payload.date,
     vendorRows,
     vendorFamilies,
+    mtdRows: mtdVendorRows,
   });
   const callLogCsv = buildCallLogCsv({
     domain,
@@ -2827,7 +2898,14 @@ async function sendLeadDataCloseEmail(domain, payload, options = {}) {
   const ldCallsOver5 = sumVendorRows(vendorFamilies, "callsOver5");
 
   const topTiles = [
+    { label: "New cases observed", value: toNumber(discoveryCoverage.discovered), tone: "blue" },
     { label: "LD leads", value: ldLeadCount, tone: "blue" },
+    { label: "Source review", value: toNumber(discoveryCoverage.unattributed) + toNumber(discoveryCoverage.conflicts), tone: "amber" },
+    {
+      label: "PB call projection",
+      value: phoneBurnerCallProjectionHealthy ? "OK" : String(phoneBurnerCallReconciliation.status || "unknown"),
+      tone: phoneBurnerCallProjectionHealthy ? "green" : "amber",
+    },
     { label: "LD calls", value: ldCallCount, tone: "blue" },
     { label: "LD cost", value: formatMoney(ldCost.total), tone: "amber" },
     { label: "Unique callers", value: uniqueCallerCount, tone: "blue" },
@@ -2870,6 +2948,10 @@ async function sendLeadDataCloseEmail(domain, payload, options = {}) {
       avg: avgScore,
     },
     attributionReview: vendorReport.attributionReview || {},
+    discoveryCoverage,
+    phoneBurnerCallReconciliation,
+    mtdVendorRows,
+    mtdTotals,
     hourlyBugs: (bugWrap.unresolved || []).slice(0, 10),
   };
 
@@ -2884,7 +2966,11 @@ async function sendLeadDataCloseEmail(domain, payload, options = {}) {
     replyTo: internalFromHeader("Parallel Lead Data"),
     template: "nightly/lead-data-vendor",
     data,
-    text: buildLeadDataEmailBody(domain, payload.date, daily, vendorReport, bugWrap),
+    text: buildLeadDataEmailBody(domain, payload.date, daily, vendorReport, bugWrap, {
+      discoveryCoverage,
+      mtdVendorRows,
+      mtdTotals,
+    }),
     attachments,
   });
 
@@ -3114,6 +3200,35 @@ async function sendNightlyCloseEmail(domain, payload, options = {}) {
 // vendor domain (WYNN) for the vendor email and TAG for the rest, so
 // each domain's SendGrid reputation stays clean.
 
+async function reconcilePhoneBurnerCallsForNightly(dateKey, options = {}) {
+  if (options.skip === true) {
+    return { status: "skipped", reason: "final-close-pass-skipped", dateKey };
+  }
+  if (typeof options.reconcileDailyDialCalls !== "function") {
+    return { status: "not-configured", reason: "daily-dial-projector-unavailable", dateKey };
+  }
+  try {
+    const result = await options.reconcileDailyDialCalls({ dateKey });
+    return {
+      ...(result || {}),
+      status: String(result?.status || "completed"),
+      dateKey,
+      trigger: "nightly-retry",
+    };
+  } catch (error) {
+    const errorCode = String(error?.code || error?.name || "daily-dial-call-log-failed").slice(0, 80);
+    options.logger?.error?.("nightly-close.phoneburner_call_reconciliation_failed", {
+      reason: errorCode,
+    });
+    return {
+      status: "failed",
+      dateKey,
+      trigger: "nightly-retry",
+      errorCode,
+    };
+  }
+}
+
 async function runGroupedNightlyClose(domains, options = {}) {
   const dateKey = options.date
     || formatDateKey(new Date(), options.timezone || "America/Los_Angeles");
@@ -3121,6 +3236,12 @@ async function runGroupedNightlyClose(domains, options = {}) {
   const vendorDomain = options.vendorDomain || "WYNN";
   const selectedDomains = normalizeNightlyDomains(domains);
   const shouldSendEmail = options.sendEmail !== false;
+
+  const phoneBurnerCallReconciliation = await reconcilePhoneBurnerCallsForNightly(dateKey, {
+    reconcileDailyDialCalls: options.reconcileDailyDialCalls,
+    skip: options.skipFinalClosePass === true,
+    logger: options.logger,
+  });
 
   const finalClose = options.skipFinalClosePass
     ? {
@@ -3134,6 +3255,8 @@ async function runGroupedNightlyClose(domains, options = {}) {
         vendorDomain,
         dateKey,
       });
+
+  finalClose.phoneBurnerCallReconciliation = phoneBurnerCallReconciliation;
 
   const payload = await buildGroupedNightlyPayload(selectedDomains, dateKey, {
     ...options,
@@ -3227,6 +3350,8 @@ async function runGroupedNightlyClose(domains, options = {}) {
           ? payload.vendorCallRows
           : vendorPerDomain.todaysCalls || [],
         outcomeRows: payload.vendorOutcomeRows || [],
+        mtdRoiBySource: payload.vendorMtdRoiBySource || [],
+        phoneBurnerCallReconciliation,
       }, options.leadDataEmail || options.email || {});
     } catch (error) {
       results.leadData = { sent: false, error: error.message, pool: "leadData" };
@@ -3751,6 +3876,7 @@ module.exports = {
   buildGroupedNightlyPayload,
   executeNightlyCloseRun,
   runGroupedNightlyClose,
+  reconcilePhoneBurnerCallsForNightly,
   sendFinancialCloseEmail,
   sendLeadDataCloseEmail,
   sendRedlineAlertEmail,

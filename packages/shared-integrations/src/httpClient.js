@@ -30,6 +30,9 @@ async function requestJson(url, options = {}, policy = {}) {
       });
       clearTimeout(timer);
       const data = await parseResponse(response);
+      const retryAfter = typeof response.headers?.get === "function"
+        ? response.headers.get("retry-after")
+        : null;
 
       if (!response.ok && retryStatuses.has(response.status) && attempt < retries) {
         await pause((attempt + 1) * 500);
@@ -40,6 +43,7 @@ async function requestJson(url, options = {}, policy = {}) {
         ok: response.ok,
         status: response.status,
         data,
+        ...(retryAfter == null ? {} : { headers: { "retry-after": retryAfter } }),
       };
     } catch (error) {
       clearTimeout(timer);

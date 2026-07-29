@@ -705,6 +705,9 @@ async function releaseCxAppointment(domain, user, input = {}) {
 
 async function fireOneDueAppointment(appointment, options = {}) {
   const now = options.now ? new Date(options.now) : new Date();
+  const boringDialerEnabled = options.boringDialerEnabled === true
+    || (options.boringDialerEnabled === undefined
+      && String(process.env.CX_BORING_DIALER_ENABLED || "false").trim().toLowerCase() === "true");
   const firedBy = String(options.firedBy || "").trim() || "appointment-worker";
   const queueItem = await loadAppointmentQueueItem(appointment);
   let effectiveQueueItem = queueItem;
@@ -816,7 +819,9 @@ async function fireOneDueAppointment(appointment, options = {}) {
           assignedAt: effectiveQueueItem.assignment?.assignedAt || now,
           queueFamilySnapshot: effectiveQueueItem.assignment?.queueFamilySnapshot || effectiveQueueItem.queueFamily || null,
         },
-        "metadata.appointmentId": appointment.appointmentId,
+        "metadata.appointmentId": boringDialerEnabled ? null : appointment.appointmentId,
+        "metadata.boringAppointmentId": boringDialerEnabled ? appointment.appointmentId : null,
+        "metadata.appointmentPending": false,
         "metadata.appointmentStatus": "fired",
         "metadata.appointmentFiredAt": now,
         "metadata.queueReason": "appointment-due",

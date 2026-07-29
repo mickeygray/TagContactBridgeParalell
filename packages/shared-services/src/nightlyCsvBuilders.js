@@ -209,7 +209,7 @@ function buildFinancialCsv({
 // One row per (family, source). Columns track exactly what the user
 // asked for: leads, calls today and their scores by vendor, outcome
 // changes, money in.
-function buildVendorCsv({ domain, dateKey, vendorRows = [], vendorFamilies = [] }) {
+function buildVendorCsv({ domain, dateKey, vendorRows = [], vendorFamilies = [], mtdRows = [] }) {
   const rows = [];
   rows.push(csvRow(["[VENDOR DAILY ROLLUP]", domain, dateKey]));
   rows.push("");
@@ -253,6 +253,21 @@ function buildVendorCsv({ domain, dateKey, vendorRows = [], vendorFamilies = [] 
     ]));
   }
 
+  rows.push("");
+  rows.push(csvRow(["[MONTH TO DATE BY SOURCE]"]));
+  rows.push(csvRow([
+    "source", "channel", "family", "spend", "leads", "calls", "calls_over_5min",
+    "deals", "initials", "total_collected", "cpl", "cpa", "roas", "roi",
+  ]));
+  for (const r of mtdRows) {
+    rows.push(csvRow([
+      r.source || "Unknown", r.channel || "", r.familyLabel || r.family || "",
+      moneyCell(r.spend), num(r.leads), num(r.calls), num(r.callsOver5),
+      num(r.deals), moneyCell(r.initials), moneyCell(r.paid),
+      r.cpl ?? "", r.cpa ?? "", r.roas ?? "", r.roi ?? "",
+    ]));
+  }
+
   return {
     filename: `${domain}-vendor-rollup-${dateKey}.csv`,
     content: buildCsvBuffer(rows),
@@ -270,7 +285,8 @@ function buildLeadReconciliationCsv({ domain, dateKey, leads = [] }) {
     "date", "created_at", "domain", "case_id", "logics_result",
     "name", "phone", "email", "source_family", "source_family_key",
     "source", "channel", "intake_source", "intake_route",
-    "current_stage", "active",
+    "current_stage", "active", "attribution_state", "source_conflict",
+    "observed_in", "cadence_present",
   ]));
   for (const lead of leads) {
     const caseId = lead.caseId || "";
@@ -291,6 +307,10 @@ function buildLeadReconciliationCsv({ domain, dateKey, leads = [] }) {
       lead.intakeRoute || "",
       lead.currentStage || "",
       lead.active || "",
+      lead.attributionState || "",
+      lead.sourceConflict || "",
+      lead.observedToday || "",
+      lead.cadencePresent || "",
     ]));
   }
   return {

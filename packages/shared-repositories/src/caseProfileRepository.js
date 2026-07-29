@@ -923,13 +923,13 @@ async function listCaseProfiles(domain, filters = {}) {
   return docs.map((doc) => normalizeCurrentCaseProfile(doc, null, null));
 }
 
-async function listCaseProfilesByCaseIds(domain, caseIds = []) {
+async function listCaseProfilesByCaseIds(domain, caseIds = [], options = {}) {
   const normalizedIds = caseIds.map((value) => Number(value)).filter(Number.isFinite);
   if (normalizedIds.length === 0) return [];
 
   const normalizedDomain = String(domain || "").toUpperCase();
   const [legacyDocs, currentDocs] = await Promise.all([
-    legacyCaseProfileReadsEnabled()
+    legacyCaseProfileReadsEnabled() && options.currentOnly !== true
       ? legacyCaseProfileCollection()
           .find({
             domain: normalizedDomain,
@@ -973,7 +973,7 @@ async function listCaseProfilesByCaseIds(domain, caseIds = []) {
   for (const doc of currentDocs) {
     const caseId = Number(doc?.caseId);
     if (!Number.isFinite(caseId)) continue;
-    const legacyDoc = byCaseId.get(caseId) || null;
+    const legacyDoc = options.currentOnly === true ? null : (byCaseId.get(caseId) || null);
     const canonical = sourceCanonicalById.get(String(doc.sourceCanonicalId || "")) || null;
     byCaseId.set(
       caseId,
@@ -984,6 +984,46 @@ async function listCaseProfilesByCaseIds(domain, caseIds = []) {
   return normalizedIds
     .map((caseId) => byCaseId.get(Number(caseId)) || null)
     .filter(Boolean);
+}
+
+async function listCaseProfilesByPhones(domain, phones = [], options = {}) {
+  const normalizedPhones = [...new Set((Array.isArray(phones) ? phones : [])
+    .map((value) => {
+      const digits = String(value || "").replace(/\D+/g, "");
+      if (digits.length === 11 && digits.startsWith("1")) return digits.slice(1);
+      return digits.length === 10 ? digits : null;
+    })
+    .filter(Boolean))];
+  if (!normalizedPhones.length) return [];
+  const normalizedDomain = String(domain || "").toUpperCase();
+  const phonePatterns = normalizedPhones.map((phone) => new RegExp(`${phone}$`));
+  const [legacyDocs, currentDocs] = await Promise.all([
+    legacyCaseProfileReadsEnabled() && options.currentOnly !== true
+      ? legacyCaseProfileCollection().find({
+          domain: normalizedDomain,
+          $or: [
+            { normalizedPhones: { $in: normalizedPhones } },
+            ...phonePatterns.map((pattern) => ({ primaryPhone: pattern })),
+            ...phonePatterns.map((pattern) => ({ phone: pattern })),
+          ],
+        }).sort({ updatedAt: -1, createdAt: -1 }).toArray()
+      : Promise.resolve([]),
+    CaseProfile.find({
+      domain: normalizedDomain,
+      $or: [
+        { normalizedPhones: { $in: normalizedPhones } },
+        ...phonePatterns.map((pattern) => ({ primaryPhone: pattern })),
+      ],
+    }).sort({ updatedAt: -1, createdAt: -1 }).lean(),
+  ]);
+  const legacyByCase = new Map(legacyDocs.map((doc) => [Number(doc.caseId), normalizeLegacyCaseProfile(doc)]));
+  const currentCaseIds = new Set(currentDocs.map((doc) => Number(doc.caseId)).filter(Number.isFinite));
+  return [
+    ...currentDocs.map((doc) => normalizeCurrentCaseProfile(doc, null, legacyByCase.get(Number(doc.caseId)) || null)),
+    ...legacyDocs
+      .filter((doc) => !currentCaseIds.has(Number(doc.caseId)))
+      .map(normalizeLegacyCaseProfile),
+  ];
 }
 
 function buildDealStatusExpression(fieldPath = "$statusCategory") {
@@ -1328,6 +1368,7 @@ module.exports = {
   findCaseProfilesDueForPaymentReconcile,
   listCaseProfiles,
   listCaseProfilesByCaseIds,
+  listCaseProfilesByPhones,
   summarizeCaseProfilesBySource,
   summarizeInitialPaymentsBySource,
   setAttributionIfEmpty,

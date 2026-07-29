@@ -1,5 +1,6 @@
 "use strict";
 
+const crypto = require("crypto");
 const { SpendEntry } = require("../../shared-models/src");
 
 function normalizeDomain(domain) {
@@ -19,6 +20,7 @@ function buildDateRangeQuery(filters = {}) {
 async function listSpendEntries(domain, filters = {}) {
   const query = {
     domain: normalizeDomain(domain),
+    active: { $ne: false },
     ...buildDateRangeQuery(filters),
   };
 
@@ -36,6 +38,7 @@ async function listSpendEntries(domain, filters = {}) {
 async function summarizeSpendBySource(domain, filters = {}) {
   const query = {
     domain: normalizeDomain(domain),
+    active: { $ne: false },
     ...buildDateRangeQuery(filters),
   };
 
@@ -62,6 +65,7 @@ async function summarizeMailCosts(domain, filters = {}) {
   const query = {
     domain: normalizeDomain(domain),
     channel: "mailer",
+    active: { $ne: false },
     ...buildDateRangeQuery(filters),
   };
 
@@ -84,6 +88,7 @@ async function summarizeMailCosts(domain, filters = {}) {
 async function getSpendTotals(domain, filters = {}) {
   const query = {
     domain: normalizeDomain(domain),
+    active: { $ne: false },
     ...buildDateRangeQuery(filters),
   };
 
@@ -141,11 +146,29 @@ function buildSpendEntryIdentity(entry = {}) {
   return identity;
 }
 
+function buildSpendEntryKey(entry = {}) {
+  const identity = buildSpendEntryIdentity(entry);
+  const canonical = Object.keys(identity)
+    .sort()
+    .map((key) => `${key}=${identity[key] == null ? "" : String(identity[key]).trim()}`)
+    .join("|");
+  return crypto.createHash("sha256").update(canonical).digest("hex");
+}
+
 async function upsertSpendEntry(entry = {}) {
   const identity = buildSpendEntryIdentity(entry);
+  const entryKey = entry.entryKey || buildSpendEntryKey(entry);
   return SpendEntry.findOneAndUpdate(
-    identity,
-    { $set: { ...entry, domain: normalizeDomain(entry.domain), syncedAt: entry.syncedAt || new Date() } },
+    { $or: [{ entryKey }, identity] },
+    { $set: {
+      ...entry,
+      entryKey,
+      active: true,
+      factOwner: "marketing-money",
+      retiredAt: null,
+      domain: normalizeDomain(entry.domain),
+      syncedAt: entry.syncedAt || new Date(),
+    } },
     { new: true, upsert: true, setDefaultsOnInsert: true },
   );
 }
@@ -157,10 +180,17 @@ async function upsertSpendEntries(entries = []) {
 
   const operations = entries.map((entry) => ({
     updateOne: {
-      filter: buildSpendEntryIdentity(entry),
+      filter: { $or: [
+        { entryKey: entry.entryKey || buildSpendEntryKey(entry) },
+        buildSpendEntryIdentity(entry),
+      ] },
       update: {
         $set: {
           ...entry,
+          entryKey: entry.entryKey || buildSpendEntryKey(entry),
+          active: true,
+          factOwner: "marketing-money",
+          retiredAt: null,
           domain: normalizeDomain(entry.domain),
           syncedAt: entry.syncedAt || new Date(),
         },
@@ -170,6 +200,49 @@ async function upsertSpendEntries(entries = []) {
   }));
 
   return SpendEntry.bulkWrite(operations, { ordered: false });
+}
+
+async function reconcileSpendEntries(entries = [], scope = {}) {
+  const rows = Array.isArray(entries) ? entries : [];
+  const domain = normalizeDomain(scope.domain || rows[0]?.domain);
+  const channel = String(scope.channel || rows[0]?.channel || "").trim();
+  const sheetId = scope.sheetId || rows[0]?.sheetId || null;
+  const runId = String(scope.runId || `spend-${Date.now()}`);
+  if (!domain || !channel || !sheetId) {
+    throw new Error("reconcileSpendEntries requires domain, channel, and sheetId");
+  }
+  if (rows.length === 0 && scope.allowEmpty !== true) {
+    throw new Error("reconcileSpendEntries refuses to retire a source from an empty result");
+  }
+
+  const stamped = rows.map((row) => ({
+    ...row,
+    domain,
+    channel,
+    sheetId,
+    entryKey: buildSpendEntryKey({ ...row, domain, channel, sheetId }),
+    reconciliationRunId: runId,
+  }));
+  const writeResult = await upsertSpendEntries(stamped);
+  const activeKeys = stamped.map((row) => row.entryKey);
+  const retireResult = await SpendEntry.updateMany(
+    {
+      domain,
+      channel,
+      sheetId,
+      active: { $ne: false },
+      reconciliationRunId: { $ne: runId },
+      ...(activeKeys.length ? { entryKey: { $nin: activeKeys } } : {}),
+    },
+    { $set: { active: false, retiredAt: new Date(), reconciliationRunId: runId } },
+  );
+  return {
+    matchedCount: Number(writeResult.matchedCount || 0),
+    modifiedCount: Number(writeResult.modifiedCount || 0),
+    upsertedCount: Number(writeResult.upsertedCount || 0),
+    retiredCount: Number(retireResult.modifiedCount || 0),
+    runId,
+  };
 }
 
 // Atomic per-event INCREMENT of a spend row (real-time LD-lead tick). Adds spend / leadsReported
@@ -191,10 +264,12 @@ async function incrementSpendEntry(identity = {}, deltas = {}, onInsert = {}) {
 }
 
 module.exports = {
+  buildSpendEntryKey,
   buildSpendEntryIdentity,
   getSpendTotals,
   incrementSpendEntry,
   listSpendEntries,
+  reconcileSpendEntries,
   summarizeMailCosts,
   summarizeSpendBySource,
   upsertSpendEntries,

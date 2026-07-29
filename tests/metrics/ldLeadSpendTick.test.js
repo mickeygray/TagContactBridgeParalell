@@ -37,6 +37,7 @@ function spies({ claimResult = true, incrementThrows = false } = {}) {
   return {
     calls,
     deps: {
+      legacyRealtimeEnabled: true,
       claimLdSpendTick: async (domain, caseId, meta) => { calls.claim.push({ domain, caseId, meta }); return claimResult; },
       incrementSpendEntry: async (identity, deltas, onInsert) => {
         calls.increment.push({ identity, deltas, onInsert });
@@ -63,6 +64,26 @@ test("missing identity: skipped, no writes", async () => {
   assert.equal(r.skipped, true);
   assert.equal(r.reason, "missing-identity");
   assert.equal(calls.increment.length, 0);
+});
+
+test("LD realtime writer is disabled by default so reconciliation is the only spend owner", async () => {
+  const calls = { claim: 0, increment: 0 };
+  const result = await recordRealtimeLdLeadSpend({
+    domain: "TAG",
+    caseId: 128300,
+    routeCampaignKey: "ld-custom",
+    now: NOW,
+    deps: {
+      claimLdSpendTick: async () => { calls.claim += 1; },
+      incrementSpendEntry: async () => { calls.increment += 1; },
+    },
+  });
+  assert.deepEqual(result, {
+    skipped: true,
+    reason: "single-owner-reconciliation",
+    family: "ld-custom",
+  });
+  assert.deepEqual(calls, { claim: 0, increment: 0 });
 });
 
 test("LD lead, claim won: increments the day's SpendEntry once with the right identity/deltas/metadata", async () => {

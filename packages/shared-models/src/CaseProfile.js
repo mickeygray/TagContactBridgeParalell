@@ -306,6 +306,7 @@ const caseProfileSchema = new mongoose.Schema(
 
 caseProfileSchema.index({ domain: 1, caseId: 1 }, { unique: true });
 caseProfileSchema.index({ domain: 1, sourceCanonicalId: 1, convertedAt: -1 });
+caseProfileSchema.index({ domain: 1, caseCreatedDate: 1 });
 caseProfileSchema.index({
   domain: 1,
   sourceCanonicalId: 1,

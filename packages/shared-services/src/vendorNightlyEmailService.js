@@ -19,6 +19,7 @@ const {
   reconcilePaymentsForDomain,
 } = require("./paymentReconcileService");
 const { listRoiEligiblePayments } = require("./paymentRoiService");
+const { buildMarketingCaseDiscovery } = require("./marketingCaseDiscoveryService");
 const { sendPlainEmail } = require("./sendgridMailService");
 const {
   buildVendorDailySummary,
@@ -34,7 +35,7 @@ const DEFAULT_TIMEZONE = "America/Los_Angeles";
 const DEFAULT_MAX_CALL_ROWS = 10000;
 const DEFAULT_MAX_LEAD_ROWS = 20000;
 const DEFAULT_MAX_PAYMENT_ROWS = 20000;
-const LD_VENDOR_FAMILY_KEYS = new Set(["ld-custom", "ld-custom-2", "ld-custom-3", "ld-general"]);
+const LD_VENDOR_FAMILY_KEYS = new Set(["ld-custom", "ld-custom-2", "ld-custom-3", "ld-general", "ld-posting"]);
 
 function normalizeDomain(domain) {
   return String(domain || "").trim().toUpperCase();
@@ -372,7 +373,7 @@ async function runVendorNightlyClosePass(domain, options = {}) {
   return result;
 }
 
-async function buildVendorCallRows(domain, dateKey, options = {}) {
+async function _legacy_buildVendorCallRows_unused(domain, dateKey, options = {}) {
   const normalizedDomain = normalizeDomain(domain);
   const limit = Math.min(Math.max(Number(options.limit) || DEFAULT_MAX_CALL_ROWS, 1), 50000);
 
@@ -497,7 +498,112 @@ async function buildVendorCallRows(domain, dateKey, options = {}) {
     .map(({ tracked, ...rest }) => rest);
 }
 
-async function buildVendorLeadRows(domain, dateKey, options = {}) {
+async function buildVendorCallRows(domain, dateKey, options = {}) {
+  const normalizedDomain = normalizeDomain(domain);
+  const limit = Math.min(Math.max(Number(options.limit) || DEFAULT_MAX_CALL_ROWS, 1), 50000);
+  const { start, end } = buildTimezoneDateWindow(
+    dateKey,
+    options.timezone || DEFAULT_TIMEZONE,
+  );
+  const rows = await CallLog.find(
+    {
+      domain: normalizedDomain,
+      callStartTime: { $gte: start, $lte: end },
+    },
+    {
+      telephonySessionId: 1,
+      callStartTime: 1,
+      callEndTime: 1,
+      durationSec: 1,
+      durationSeconds: 1,
+      direction: 1,
+      phone: 1,
+      normalizedPhone: 1,
+      contactName: 1,
+      caseId: 1,
+      sourceName: 1,
+      sourceChannel: 1,
+      routeCampaignKey: 1,
+      routeCampaignName: 1,
+      caseMatch: 1,
+      transcription: 1,
+      callScore: 1,
+      agentName: 1,
+      extensionId: 1,
+      missed: 1,
+      outcome: 1,
+      provider: 1,
+      providerCallId: 1,
+      providerAttemptKey: 1,
+    },
+  )
+    .sort({ callStartTime: 1, telephonySessionId: 1 })
+    .limit(limit)
+    .lean();
+
+  const caseIds = [...new Set(
+    rows.map((row) => Number(row.caseId)).filter(Number.isFinite),
+  )];
+  const profiles = caseIds.length > 0
+    ? await caseProfileRepository.listCaseProfilesByCaseIds(normalizedDomain, caseIds)
+    : [];
+  const profileByCaseId = new Map(
+    profiles.map((profile) => [Number(profile.caseId), profile]),
+  );
+
+  return rows
+    .map((row) => {
+      const profile = profileByCaseId.get(Number(row.caseId)) || null;
+      const sourceName = row.sourceName || row.caseMatch?.sourceName || profile?.sourceName || "Unknown";
+      const sourceChannel = row.sourceChannel || row.caseMatch?.sourceChannel || profile?.sourceChannel || null;
+      const routeCampaignKey = row.routeCampaignKey || null;
+      const meta = trackedVendorMeta(sourceName, sourceChannel, routeCampaignKey);
+      const rawScoreOverall = row.callScore?.overall ?? "";
+      const scoreVerdict = row.callScore?.lead_verdict || "";
+      const numericScore = Number(rawScoreOverall);
+      const scoreOverall = Number.isFinite(numericScore) && (numericScore > 0 || scoreVerdict)
+        ? rawScoreOverall
+        : "";
+      const durationSec = toNumber(row.durationSec || row.durationSeconds);
+      return {
+        date: dateKey,
+        callStartTime: formatIso(row.callStartTime),
+        callEndTime: formatIso(row.callEndTime),
+        telephonySessionId: row.telephonySessionId || "",
+        provider: row.provider || "",
+        providerCallId: row.providerCallId || "",
+        providerAttemptKey: row.providerAttemptKey || "",
+        caseId: row.caseId ?? "",
+        phone: row.phone || row.normalizedPhone || "",
+        contactName: row.contactName || "",
+        sourceFamily: meta.familyLabel,
+        sourceFamilyKey: meta.familyKey,
+        sourceName: meta.source,
+        sourceChannel: meta.channel || "",
+        routeCampaignKey,
+        routeCampaignName: row.routeCampaignName || "",
+        direction: row.direction || "",
+        disposition: row.outcome || "",
+        durationSec,
+        callsOver2: durationSec >= 120 ? 1 : 0,
+        callsOver5: durationSec >= 300 ? 1 : 0,
+        recordingAvailable: row.transcription?.recordingUri ? "yes" : "no",
+        transcriptAvailable: row.transcription?.text ? "yes" : "no",
+        transcriptionStatus: row.transcription?.status || "",
+        scoreOverall,
+        scoreVerdict,
+        scoreSummary: row.callScore?.summary || "",
+        agentName: row.agentName || "",
+        extensionId: row.extensionId || "",
+        missed: row.missed ? "yes" : "no",
+        tracked: meta.tracked,
+      };
+    })
+    .filter((row) => row.tracked)
+    .map(({ tracked, ...rest }) => rest);
+}
+
+async function _legacy_buildVendorLeadRows_unused(domain, dateKey, options = {}) {
   const normalizedDomain = normalizeDomain(domain);
   const limit = Math.min(Math.max(Number(options.limit) || DEFAULT_MAX_LEAD_ROWS, 1), 50000);
   const rows = await leadCadenceRepository.listLeadCadence(normalizedDomain, {
@@ -564,6 +670,49 @@ async function buildVendorLeadRows(domain, dateKey, options = {}) {
       };
     })
     .filter((row) => row.tracked)
+    .map(({ tracked, ...rest }) => rest);
+}
+
+async function buildVendorLeadRows(domain, dateKey, options = {}) {
+  const normalizedDomain = normalizeDomain(domain);
+  const limit = Math.min(Math.max(Number(options.limit) || DEFAULT_MAX_LEAD_ROWS, 1), 50000);
+  const discovery = options.leadDiscovery || await buildMarketingCaseDiscovery(normalizedDomain, {
+    date: dateKey,
+    timezone: options.timezone || DEFAULT_TIMEZONE,
+    limit,
+  });
+  const includeUntracked = options.includeUntracked === true;
+
+  return (discovery.rows || []).map((row) => {
+    const sourceName = row.sourceName || row.intakeSource || "Unknown";
+    const sourceChannel = row.sourceChannel || row.intakeRoute || null;
+    const routeCampaignKey = row.routeCampaignKey || null;
+    const meta = trackedVendorMeta(sourceName, sourceChannel, routeCampaignKey);
+    return {
+      date: dateKey,
+      createdAt: formatIso(row.observedAt),
+      caseId: row.caseId ?? "",
+      name: row.name || [row.firstName, row.lastName].filter(Boolean).join(" ").trim() || "",
+      phone: row.phone || "",
+      email: row.email || "",
+      sourceFamily: meta.familyLabel,
+      sourceFamilyKey: meta.familyKey,
+      sourceName: meta.source,
+      sourceChannel: meta.channel || "",
+      intakeSource: row.intakeSource || "",
+      intakeRoute: row.intakeRoute || "",
+      routeCampaignKey,
+      routeCampaignName: row.routeCampaignName || null,
+      currentStage: row.currentStage || "",
+      active: row.active === false ? "no" : "yes",
+      attributionState: row.attributionState || "unattributed",
+      sourceConflict: row.sourceConflict ? "yes" : "no",
+      observedToday: (row.observedToday || []).join("|"),
+      cadencePresent: row.cadencePresent ? "yes" : "no",
+      tracked: meta.tracked,
+    };
+  })
+    .filter((row) => includeUntracked || row.tracked)
     .map(({ tracked, ...rest }) => rest);
 }
 
@@ -869,6 +1018,7 @@ function buildDetailBackedVendorSummary(baseSummary, callRows, leadRows, outcome
     trackedFamilies,
     rows,
     attributionReview: baseSummary?.attributionReview || {},
+    discoveryCoverage: baseSummary?.discoveryCoverage || null,
   };
 }
 

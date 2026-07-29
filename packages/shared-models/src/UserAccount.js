@@ -121,6 +121,21 @@ const userAccountSchema = new mongoose.Schema(
       updatedAt: { type: Date, default: null },
       updatedBy: { type: String, default: null },
     },
+    // Provider credentials owned by the control-plane service principal.
+    // Token ciphertext is deliberately excluded from ordinary queries and
+    // from the public account serializer. Both PhoneBurner token fields are
+    // replaced together by the dedicated repository compare-and-swap.
+    providerCredentials: {
+      phoneBurner: {
+        accessTokenEnc: { type: String, default: null, select: false },
+        refreshTokenEnc: { type: String, default: null, select: false },
+        tokenType: { type: String, default: null },
+        accessTokenExpiresAt: { type: Date, default: null },
+        revision: { type: Number, default: 0, min: 0 },
+        migratedAt: { type: Date, default: null },
+        refreshedAt: { type: Date, default: null },
+      },
+    },
     // ── CX (RingCX) authentication state ──────────────────────────
     //
     // Populated by the 3-legged OAuth flow (PR-C). When the agent

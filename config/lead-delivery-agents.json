@@ -1,0 +1,131 @@
+{
+  "defaults": {
+    "providerBufferTarget": 20,
+    "refillAtOrBelow": 5,
+    "freshReservationRange": 20,
+    "freshReservationMinutes": 15,
+    "activeEvidenceMinutes": 15,
+    "maxPendingFreshReservations": 1
+  },
+  "curatorFolders": {
+    "callbacksFolderId": "66253042",
+    "expiredDailyContactsFolderId": "66209775"
+  },
+  "agents": {
+    "bruce_allen": {
+      "enabled": true,
+      "displayName": "Bruce Allen",
+      "provider": "phoneburner",
+      "phoneBurnerMemberId": "",
+      "phoneBurnerUsername": "",
+      "applicationAccountEmail": "ballen@taxadvocategroup.com",
+      "distributionFolderId": "66252220",
+      "receivingFolderId": "66252221",
+      "leadStreamId": "",
+      "subscribedPools": [
+        "new_today",
+        "overnight",
+        "older_available",
+        "follow_up_due"
+      ],
+      "packetAllowances": {
+        "new_today": 2,
+        "overnight": 1,
+        "older_available": 1,
+        "follow_up_due": 1
+      }
+    },
+    "phil_olson": {
+      "enabled": true,
+      "displayName": "Phil Olson",
+      "provider": "phoneburner",
+      "phoneBurnerMemberId": "",
+      "phoneBurnerUsername": "",
+      "applicationAccountEmail": "polson@taxadvocategroup.com",
+      "distributionFolderId": "66252218",
+      "receivingFolderId": "66252219",
+      "leadStreamId": "",
+      "subscribedPools": [
+        "new_today",
+        "overnight",
+        "older_available",
+        "follow_up_due"
+      ],
+      "packetAllowances": {
+        "new_today": 2,
+        "overnight": 1,
+        "older_available": 1,
+        "follow_up_due": 1
+      }
+    },
+    "sean_lucas": {
+      "enabled": true,
+      "displayName": "Sean Lucas",
+      "provider": "phoneburner",
+      "phoneBurnerMemberId": "",
+      "phoneBurnerUsername": "",
+      "applicationAccountEmail": "slucas@taxadvocategroup.com",
+      "distributionFolderId": "66252216",
+      "receivingFolderId": "66252217",
+      "leadStreamId": "",
+      "subscribedPools": [
+        "new_today",
+        "overnight",
+        "older_available",
+        "follow_up_due"
+      ],
+      "packetAllowances": {
+        "new_today": 2,
+        "overnight": 1,
+        "older_available": 1,
+        "follow_up_due": 1
+      }
+    },
+    "brad_hansen": {
+      "enabled": true,
+      "displayName": "Brad Hansen",
+      "provider": "phoneburner",
+      "phoneBurnerMemberId": "",
+      "phoneBurnerUsername": "",
+      "applicationAccountEmail": "bhansen@taxadvocategroup.com",
+      "distributionFolderId": "66252214",
+      "receivingFolderId": "66252215",
+      "leadStreamId": "",
+      "subscribedPools": [
+        "new_today",
+        "overnight",
+        "older_available",
+        "follow_up_due"
+      ],
+      "packetAllowances": {
+        "new_today": 2,
+        "overnight": 1,
+        "older_available": 1,
+        "follow_up_due": 1
+      }
+    },
+    "chris_bolt": {
+      "enabled": true,
+      "displayName": "Chris Bolt",
+      "provider": "phoneburner",
+      "phoneBurnerMemberId": "",
+      "phoneBurnerUsername": "",
+      "applicationAccountEmail": "cbolt@taxadvocategroup.com",
+      "distributionFolderId": "66252212",
+      "receivingFolderId": "66252213",
+      "leadStreamId": "",
+      "subscribedPools": [
+        "new_today",
+        "overnight",
+        "older_available",
+        "follow_up_due"
+      ],
+      "packetAllowances": {
+        "new_today": 2,
+        "overnight": 1,
+        "older_available": 1,
+        "follow_up_due": 1
+      }
+    }
+  }
+}

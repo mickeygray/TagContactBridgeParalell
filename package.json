@@ -42,6 +42,7 @@
     "check:cutover": "node scripts/check-cutover-readiness.js",
     "preview:hourly-calls": "node scripts/preview-hourly-calls.js",
     "preview:hourly-finance": "node scripts/preview-hourly-finance.js",
+    "phoneburner:july-preload": "node scripts/phoneburner-july-preload.js",
     "smoke": "node scripts/smoke-test.js",
     "rc:prospect-coach": "node scripts/prospect-coach-repl.js",
     "rc:live-monitor": "node scripts/rc-ex-live-trainer-oneoff.js",

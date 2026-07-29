@@ -846,12 +846,23 @@ async function runCxAccountActiveCallWatchOnce(input = {}) {
     agentExtensionId: input.agentExtensionId,
   });
   const busySkipped = [];
+  const ownershipSkipped = [];
   const sessions = [];
   // Entries deferred THIS tick, per session — the retry pass merges these into its stash
   // write so processing old entries can never clobber a same-tick enqueue.
   const sysDispoTickEnqueues = new Map();
   for (const session of allSessions) {
     const sessionId = str(session?.sessionId);
+    if (str(session?.runtime).toLowerCase() === "boring") {
+      ownershipSkipped.push({
+        sessionId,
+        agentEmail: session?.agentEmail || null,
+        agentExtensionId: session?.agentExtensionId || null,
+        accountId: normalizeAccountId(session?.ringcx?.accountId || session?.accountId),
+        reason: "replacement-runtime-owned-elsewhere",
+      });
+      continue;
+    }
     if (sessionId && busySessionIds.has(sessionId)) {
       busySkipped.push({
         sessionId,
@@ -879,12 +890,13 @@ async function runCxAccountActiveCallWatchOnce(input = {}) {
     sessionCount: plan.summary?.sessionCount || 0,
     changedCount: plan.summary?.changedCount || 0,
     errorCount: plan.summary?.errorCount || 0,
-    skippedCount: (plan.summary?.skippedCount || 0) + busySkipped.length,
+    skippedCount: (plan.summary?.skippedCount || 0) + busySkipped.length + ownershipSkipped.length,
     busySkippedCount: busySkipped.length,
+    ownershipSkippedCount: ownershipSkipped.length,
   });
 
   const writes = [];
-  const skipped = [...busySkipped];
+  const skipped = [...busySkipped, ...ownershipSkipped];
   const terminalWrites = [];
 
   // RESYNC runner (see deriveBufferInvalidations above). Fail-closed on every edge:

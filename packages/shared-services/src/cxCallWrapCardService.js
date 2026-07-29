@@ -21,7 +21,7 @@ function cleanText(value) {
 const RESOLUTION_RULES = {
   dnc: { logicsStatus: true, interview: true, correctionRow: "dnc" },
   appointment: { appointment: true, interview: true },
-  dismissed: { interview: true },
+  dismissed: { interview: true, cadence: true },
   expired: { interview: true },
 };
 
@@ -31,7 +31,8 @@ function wrapCardNeeded(payload = {}) {
   const eventType = String(payload.eventType || "terminal").trim().toLowerCase();
   if (eventType !== "terminal") return false;
   const outcome = String(payload.outcome || "").trim().toLowerCase();
-  return outcome === "answered";
+  const nextAction = String(payload.nextAction || "").trim().toLowerCase();
+  return outcome === "answered" && nextAction === "call_wrap";
 }
 
 // Pure card constructor — the dossier frozen at hang-up.
@@ -82,6 +83,7 @@ function createCxCallWrapCardService({
   writeInterview = null,         // async (card) => {} — the Logics activity + case comm
   createAppointment = null,      // async ({card, appointmentAt, appointmentDate, appointmentTime, appointmentTimezone, user}) => {}
   updateLogicsDncStatus = null,  // async (card) => {} — optional until the Logics DNC lands
+  releaseToCadence = null,
   logger = console,
 } = {}) {
   if (!cardRepository || typeof cardRepository.insertOnce !== "function") {
@@ -137,7 +139,7 @@ function createCxCallWrapCardService({
     });
     if (!card) return { ok: true, noop: true, reason: "already-resolved-or-missing" };
 
-    const effects = { interview: null, correction: null, appointment: null, logicsStatus: null };
+    const effects = { interview: null, correction: null, appointment: null, logicsStatus: null, cadence: null };
     // Every effect runs through this guard: the card is ALREADY resolved (CAS-first), so
     // no effect failure — async rejection OR synchronous throw (2026-07-07 live find: a
     // missing import threw a ReferenceError past .catch and 500'd the route mid-protocol)
@@ -187,6 +189,10 @@ function createCxCallWrapCardService({
       effects.appointment = await runEffect(() => createAppointment({ card, ...appointmentInput, user }));
     }
 
+    if (rules.cadence && releaseToCadence) {
+      effects.cadence = await runEffect(() => releaseToCadence(card));
+    }
+
     logger.info?.("cx.wrap_card.resolved", {
       idemKey: card.idemKey,
       resolution,
@@ -199,6 +205,7 @@ function createCxCallWrapCardService({
       appointmentOk: effects.appointment ? effects.appointment.ok !== false : null,
       // the compliance-critical effect must never be the silent one (2026-07-07 find)
       logicsStatusOk: effects.logicsStatus ? effects.logicsStatus.ok !== false : null,
+      cadenceOk: effects.cadence ? effects.cadence.ok !== false : null,
     });
     return { ok: true, resolution, card, effects };
   }

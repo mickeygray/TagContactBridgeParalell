@@ -21,6 +21,9 @@ const paymentLedgerSchema = new mongoose.Schema(
       default: "unknown",
     },
     transactionStatus: { type: String, default: null, index: true },
+    authoritativeSource: { type: String, default: null, index: true },
+    authoritativeAt: { type: Date, default: null },
+    lastObservedAt: { type: Date, default: null },
     sourceCanonicalId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "ControlPlaneSourceCanonical",

@@ -132,7 +132,9 @@ const agentStateSchema = new mongoose.Schema(
     // the result here. Drawer reads from this field directly.
     //
     // Each bucket: { totalCalls, outboundCalls, inboundCalls,
-    //                cxCalls, exCalls, longestCallSec, lastCallAt }
+    //                cxCalls, exCalls, phoneBurnerCalls, connectedCalls,
+    //                appointmentsSet, dncOutcomes, talkDurationSec,
+    //                longestCallSec, lastCallAt }
     // — CX/EX counts only populate from rows written after the
     // CallLog.platform stamp landed; historical rows count toward
     // totals but not toward the platform split.

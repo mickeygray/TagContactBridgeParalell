@@ -62,7 +62,8 @@ function maskName(name) {
 
 function readConfig() {
   return {
-    enabled: envBool("CX_SEAN_FIRST_TOUCH_TEST_ENABLED", false),
+    enabled: envBool("CX_SEAN_FIRST_TOUCH_TEST_ENABLED", false)
+      && !envBool("CX_BORING_DIALER_ENABLED", false),
     dryRun: envBool("CX_SEAN_FIRST_TOUCH_DRY_RUN", false),
     extensionId: envStr("CX_SEAN_FIRST_TOUCH_EXTENSION_ID", "63756126004"),
     agentEmail: envStr("CX_SEAN_FIRST_TOUCH_AGENT_EMAIL", "slucas@taxadvocategroup.com").toLowerCase(),
