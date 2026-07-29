@@ -42,6 +42,7 @@
     "check:cutover": "node scripts/check-cutover-readiness.js",
     "preview:hourly-calls": "node scripts/preview-hourly-calls.js",
     "preview:hourly-finance": "node scripts/preview-hourly-finance.js",
+    "preview:trainer-skills": "concurrently -k -n trainer-api,trainer-web -c cyan,yellow \"node scripts/trainer-skill-preview-api.js\" \"npm run dev --workspace=web-client -- --host 127.0.0.1\"",
     "phoneburner:july-preload": "node scripts/phoneburner-july-preload.js",
     "smoke": "node scripts/smoke-test.js",
     "rc:prospect-coach": "node scripts/prospect-coach-repl.js",
