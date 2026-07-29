@@ -224,6 +224,16 @@ export interface MetricsAttributionReviewItem {
   reviewKey?: string | null;
   kind?: string | null;
   dateKey?: string | null;
+  paymentException?: {
+    reasons: string[];
+    paymentIds: number[];
+    positiveInitialCount: number;
+    negativeInitialCount: number;
+    initialAmount: number;
+    totalAmount: number;
+    currentTreatment?: "count-one-deal" | "chargeback-pair" | "chargeback-reversal" | "source-override" | null;
+    currentReportingBucket?: "Aged" | null;
+  } | null;
   raw?: {
     source?: string | null;
     channel?: string | null;
@@ -240,6 +250,8 @@ export interface MetricsAttributionReviewItem {
     resolvedAt?: string | null;
     ignoredByEmail?: string | null;
     ignoredAt?: string | null;
+    treatmentKind?: "count-one-deal" | "chargeback-pair" | "chargeback-reversal" | "source-override" | null;
+    reportingBucket?: "Aged" | null;
   } | null;
 }
 

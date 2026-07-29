@@ -60,7 +60,8 @@
     "ai:bus:smoke:activity": "node scripts/ai-bus-activity-smoke.js",
     "ai:bus:replay": "node scripts/ai-bus-replay.js",
     "ai:bus:probes": "node scripts/ai-bus-shape-probes.js",
-    "coach:grpc:janitor": "node scripts/clear-live-coach-grpc-runtime.js"
+    "coach:grpc:janitor": "node scripts/clear-live-coach-grpc-runtime.js",
+    "watch:web": "npm run build:watch --workspace=web-client"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.91.1",

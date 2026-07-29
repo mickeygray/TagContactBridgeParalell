@@ -72,6 +72,18 @@ export interface TrainerConfig {
     profileLocking: string;
     disclosure: string;
   };
+  // Two-station trainer: when enabled the server-side observer publishes
+  // the coach panel via ui-state; the client must not fire the legacy
+  // per-turn /coach call on top of it.
+  twoStation?: {
+    enabled: boolean;
+    dialogueModel?: string;
+  };
+  features?: {
+    courseV1Enabled: boolean;
+    gauntletV1Enabled: boolean;
+    callReviewV1Enabled: boolean;
+  };
   modes: string[];
 }
 
@@ -251,6 +263,111 @@ export interface TrainerDrillGrade {
 export interface TrainerScoredCall {
   transcript: string;
   score: Record<string, unknown>;
+}
+
+export type TrainerCallReviewProvider = "ex" | "phoneburner" | "callrail";
+export type TrainerCallReviewRecordingStatus =
+  | "available"
+  | "pending"
+  | "unavailable";
+export type TrainerCallReviewStatus =
+  | "not_started"
+  | "processing"
+  | "completed"
+  | "failed";
+
+export interface TrainerCaseReviewCall {
+  sourceId: string | null;
+  provider: TrainerCallReviewProvider;
+  startedAt: string;
+  durationSec: number;
+  direction: string;
+  agentName: string | null;
+  outcome: string | null;
+  recordingStatus: TrainerCallReviewRecordingStatus;
+  reviewStatus: TrainerCallReviewStatus;
+  reviewId: string | null;
+}
+
+export interface TrainerCaseReviewLookup {
+  caseSourceId: string;
+  domain: string;
+  caseNumber: string | number;
+  authorizationCheckedAt: string;
+  calls: TrainerCaseReviewCall[];
+}
+
+export interface TrainerCallReviewStart {
+  reviewId: string;
+  status: TrainerCallReviewStatus;
+  generation: number;
+}
+
+export interface TrainerCallReviewSource {
+  provider: TrainerCallReviewProvider;
+  startedAt: string;
+  durationSec: number;
+  direction: string;
+  agentName: string | null;
+  outcome: string | null;
+}
+
+export interface TrainerCallReviewTranscriptSegment {
+  segmentId: string;
+  startMs: number;
+  endMs: number;
+  speaker: "agent" | "prospect" | "unknown";
+  speakerConfidence: number | null;
+  text: string;
+}
+
+export interface TrainerCallReviewCitation {
+  segmentId: string;
+  startMs: number;
+  endMs: number;
+  quote: string;
+}
+
+export interface TrainerCallReviewFinding {
+  findingId: string;
+  title: string;
+  summary: string;
+  confidence: number | null;
+  citations: TrainerCallReviewCitation[];
+}
+
+export type TrainerCallReviewScriptStatus =
+  | "observed"
+  | "partial"
+  | "missed"
+  | "not_applicable"
+  | "uncertain";
+
+export interface TrainerCallReviewScriptFinding
+  extends TrainerCallReviewFinding {
+  sectionId: string | null;
+  beatId: string | null;
+  status: TrainerCallReviewScriptStatus;
+}
+
+export interface TrainerCallReviewResult {
+  reviewId: string;
+  status: TrainerCallReviewStatus;
+  generation: number;
+  versions: {
+    scriptVersion: string | null;
+    transcriptVersion: string | null;
+    graderVersion: string | null;
+  };
+  source: TrainerCallReviewSource;
+  transcript: {
+    segments: TrainerCallReviewTranscriptSegment[];
+  } | null;
+  scriptFindings: TrainerCallReviewScriptFinding[];
+  thingsToConsider: TrainerCallReviewFinding[];
+  createdAt: string;
+  completedAt: string | null;
+  errorCode: string | null;
 }
 
 export const salesTrainerApi = {
@@ -435,6 +552,38 @@ export const salesTrainerApi = {
       await trainerRequest<{ ok: true; result: TrainerScoredCall }>(
         "/api/sales-trainer/score-call",
         { method: "POST", body },
+      ),
+    );
+  },
+  async caseReviewCaseCalls(body: { domain: string; caseNumber: string }) {
+    const result = unwrap(
+      await trainerRequest<{ ok: true; result: Omit<TrainerCaseReviewLookup, "domain" | "caseNumber"> }>(
+        "/api/sales-trainer/call-review/case-calls",
+        { method: "POST", body },
+      ),
+    );
+    return {
+      ...result,
+      domain: body.domain,
+      caseNumber: body.caseNumber,
+    };
+  },
+  async startCallReview(body: {
+    caseSourceId: string;
+    sourceId: string;
+    requestId: string;
+  }) {
+    return unwrap(
+      await trainerRequest<{ ok: true; result: TrainerCallReviewStart }>(
+        "/api/sales-trainer/call-reviews",
+        { method: "POST", body },
+      ),
+    );
+  },
+  async callReview(reviewId: string) {
+    return unwrap(
+      await trainerRequest<{ ok: true; result: TrainerCallReviewResult }>(
+        `/api/sales-trainer/call-reviews/${encodeURIComponent(reviewId)}`,
       ),
     );
   },

@@ -815,11 +815,15 @@ const aiTaskRegistry = require("./aiTaskRegistry");
 const leadDeliveryService = require("./leadDeliveryService");
 const dailyDialLedgerService = require("./dailyDialLedgerService");
 const trainingCourseService = require("./trainingCourseService");
+const trainerGauntletState = require("./trainerGauntletState");
+const trainingGauntletController = require("./trainingGauntletController");
 
 module.exports = {
   leadDeliveryService,
   dailyDialLedgerService,
   trainingCourseService,
+  trainerGauntletState,
+  trainingGauntletController,
   // ── CX lane registry + dispatchers (first-touch drip, appointment clock) ──
   CX_LANES,
   buildLaneExternId,

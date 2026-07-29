@@ -16,12 +16,11 @@ import {
   Send,
   ShieldCheck,
   Sparkles,
-  Square,
   Target,
   Trophy,
   Volume2,
 } from "lucide-react";
-import { useNavigate } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/Button";
 import { Input, Label } from "@/components/ui/Input";
 import {
@@ -38,6 +37,7 @@ import {
   salesTrainerApi,
   type TrainerAudio,
   type TrainerCoachPanel,
+  type TrainerConfig,
   type TrainerMessage,
   type TrainerSessionBundle,
   type TrainerVoiceProfile,
@@ -54,6 +54,8 @@ import {
   type UiScorecardPayload,
 } from "./uiPayloads";
 import { StudyPanel, MyCallsPanel } from "./TrainingCenterPanels";
+import { CaseReviewPanel } from "./CaseReviewPanel";
+import { TrainerCourseShell } from "./TrainerCourseShell";
 
 // Practice = the call cockpit (start + health + coaching). Study = the guide and
 // its drills, merged (read, answer, discuss). My calls = score recordings, last.
@@ -75,7 +77,11 @@ const PHASES = [
   { key: "wrap", label: "Wrap" },
 ];
 const PHASE_COUNTDOWN_SECONDS = 30;
-const LIVE_COACH_ENABLED = false;
+// Re-enabled 2026-07-23: the two-station observer now publishes panels
+// server-side via ui-state (cheap 1.5s poll against an in-memory map) —
+// the old reason to keep this off (slow per-turn /coach calls from the
+// client) no longer applies in two-station mode.
+const LIVE_COACH_ENABLED = true;
 const TRAINER_TTS_GENERATION_SPEED = 1.35;
 const TRAINER_AUDIO_PLAYBACK_RATE = 1;
 const MIN_RECORDING_BYTES = 900;
@@ -1084,23 +1090,71 @@ function ScorecardPanel({
   );
 }
 
-function CallStatusPanel({ phaseKey, hasSession }: { phaseKey?: string; hasSession?: boolean }) {
+function CoachGuidanceCard({ coach }: { coach: TrainerCoachPanel }) {
+  return (
+    <div className="space-y-3">
+      <div className="rounded-md border border-border bg-muted/30 p-4">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2 text-xs font-semibold uppercase text-muted-foreground">
+            <Lightbulb className="h-3.5 w-3.5" />
+            Coach — {coach.phase.label}
+          </div>
+          <span className="text-[10px] text-muted-foreground">
+            {Math.round((coach.confidence || 0) * 100)}%
+          </span>
+        </div>
+        {coach.oneSentenceFocus ? (
+          <div className="mt-2 text-sm font-medium">{coach.oneSentenceFocus}</div>
+        ) : null}
+        {coach.tips.length > 0 ? (
+          <ul className="mt-2 list-disc space-y-1 pl-4 text-xs text-muted-foreground">
+            {coach.tips.map((tip) => (
+              <li key={tip}>{tip}</li>
+            ))}
+          </ul>
+        ) : null}
+      </div>
+      {coach.riskFlags.length > 0 ? (
+        <div className="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-xs">
+          <div className="mb-1 font-semibold uppercase text-muted-foreground">Watch out</div>
+          <ul className="list-disc space-y-1 pl-4">
+            {coach.riskFlags.map((flag) => (
+              <li key={flag}>{flag}</li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+      {coach.nextBestQuestion ? (
+        <div className="rounded-md border border-success/30 bg-success/10 p-3 text-xs">
+          <div className="mb-1 font-semibold uppercase text-muted-foreground">Try asking</div>
+          {coach.nextBestQuestion}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function CallStatusPanel({ coach, hasSession }: { coach: TrainerCoachPanel | null; hasSession?: boolean }) {
   if (hasSession) {
     return (
       <div className="space-y-4 p-4">
-        <PhaseRail activeKey={phaseKey} />
-        <div className="rounded-md border border-border bg-muted/30 p-4">
-          <div className="text-sm font-semibold">Roleplay active</div>
-          <div className="mt-1 text-xs text-muted-foreground">
-            Coaching appears here as the call develops — feedback on what's happening and the approach that fits, drawn from the guide. It only speaks up when there's something worth saying.
+        <PhaseRail activeKey={coach?.phase.key} />
+        {coach ? (
+          <CoachGuidanceCard coach={coach} />
+        ) : (
+          <div className="rounded-md border border-border bg-muted/30 p-4">
+            <div className="text-sm font-semibold">Roleplay active</div>
+            <div className="mt-1 text-xs text-muted-foreground">
+              Coaching appears here as the call develops — feedback on what's happening and the approach that fits, drawn from the guide. It only speaks up when there's something worth saying.
+            </div>
           </div>
-        </div>
+        )}
       </div>
     );
   }
   return (
     <div className="space-y-4 p-4">
-      <PhaseRail activeKey={phaseKey} />
+      <PhaseRail activeKey={coach?.phase.key} />
       <div className="rounded-md border border-border bg-muted/30 p-4">
         <div className="text-sm font-semibold">How this works</div>
         <ul className="mt-2 space-y-2 text-xs text-muted-foreground">
@@ -1149,7 +1203,7 @@ function SidePanel({
       ) : phaseNotes ? (
         <PhaseNotesCard notes={phaseNotes} countdown={countdown} onCommand={onCommand} />
       ) : (
-        <CallStatusPanel phaseKey={coach?.phase.key} hasSession={Boolean(profile)} />
+        <CallStatusPanel coach={coach} hasSession={Boolean(profile)} />
       )}
     </aside>
   );
@@ -1306,6 +1360,7 @@ function Transcript({
 
 export function SalesTrainerWorkspace() {
   const navigate = useNavigate();
+  const location = useLocation();
   const appUser = useAuthStore((state) => state.user);
   const [authState, setAuthState] = useState<"checking" | "signed-out" | "signed-in">("checking");
   const [session, setSession] = useState<TrainerSessionBundle | null>(null);
@@ -1328,6 +1383,18 @@ export function SalesTrainerWorkspace() {
   const [audioNotice, setAudioNotice] = useState("");
   const [callMode, setCallMode] = useState<TrainerCallMode | null>(null);
   const [centerTab, setCenterTab] = useState<TrainingCenterTab>("practice");
+  const [trainerConfig, setTrainerConfig] = useState<TrainerConfig | null>(null);
+  const callReviewEnabled =
+    trainerConfig?.features?.callReviewV1Enabled === true;
+  const courseEnabled = trainerConfig?.features?.courseV1Enabled === true;
+  const trainerBasePath = location.pathname.startsWith("/cx/coach")
+    ? "/cx/coach"
+    : "/trainer";
+  const coursePracticeActive =
+    courseEnabled && location.pathname === `${trainerBasePath}/practice`;
+  // Call setup collapses once a session is live — during a call the
+  // builder is dead weight and was eating half the screen.
+  const [setupCollapsed, setSetupCollapsed] = useState(false);
   // Session-builder shaping: a pre-described tax issue and/or a named persona.
   // Both are optional and compose into the character-formation prompt.
   const [situation, setSituation] = useState("");
@@ -1353,6 +1420,10 @@ export function SalesTrainerWorkspace() {
   const [prospectAudioPending, setProspectAudioPending] = useState(false);
   const [prospectAudioPlaying, setProspectAudioPlaying] = useState(false);
   const uiStateVersionRef = useRef(0);
+  // Two-station mode (from /config): the server-side observer publishes the
+  // coach panel via ui-state — the legacy per-turn /coach call must not fire
+  // on top of it or the two race for the panel.
+  const twoStationRef = useRef(false);
   const draftRef = useRef("");
   const draftInputRef = useRef<HTMLTextAreaElement | null>(null);
   const healthQueueRef = useRef<UiHealthPayload[]>([]);
@@ -1396,9 +1467,12 @@ export function SalesTrainerWorkspace() {
     try {
       await salesTrainerApi.checkAuth();
       const nextConfig = await salesTrainerApi.config();
+      setTrainerConfig(nextConfig);
       setProvider(nextConfig.providers.default || nextConfig.providers.available[0] || "anthropic");
+      twoStationRef.current = nextConfig.twoStation?.enabled === true;
       setAuthState("signed-in");
     } catch {
+      setTrainerConfig(null);
       setAuthState("signed-out");
     }
   }
@@ -1420,12 +1494,21 @@ export function SalesTrainerWorkspace() {
   }, []);
 
   useEffect(() => {
-    if (authState !== "signed-in" || !micSupported || micPermissionRequestedRef.current) {
+    if (
+      authState !== "signed-in" ||
+      !micSupported ||
+      micPermissionRequestedRef.current ||
+      (courseEnabled && !coursePracticeActive)
+    ) {
       return;
     }
     micPermissionRequestedRef.current = true;
     void requestInitialMicrophonePermission();
-  }, [authState, micSupported]);
+  }, [authState, courseEnabled, coursePracticeActive, micSupported]);
+
+  useEffect(() => {
+    if (coursePracticeActive) setCenterTab("practice");
+  }, [coursePracticeActive]);
 
   useEffect(() => {
     if (!recording) return undefined;
@@ -1435,8 +1518,13 @@ export function SalesTrainerWorkspace() {
     return () => window.clearInterval(id);
   }, [recording]);
 
-  useEffect(
-    () => () => {
+  useEffect(() => {
+    // StrictMode dev double-mount runs this cleanup once on the throwaway
+    // mount; without re-arming here the flag stays true forever and every
+    // !unmountedRef guard (mic meter, transcribe, clearRecordingState)
+    // silently no-ops on the live component.
+    unmountedRef.current = false;
+    return () => {
       unmountedRef.current = true;
       const recorder = mediaRecorderRef.current;
       if (recorder && recorder.state !== "inactive") {
@@ -1450,9 +1538,8 @@ export function SalesTrainerWorkspace() {
         }
       }
       stopMicTracks();
-    },
-    [],
-  );
+    };
+  }, []);
 
   function drainHealthQueue() {
     if (healthAnimatingRef.current) return;
@@ -1552,6 +1639,9 @@ export function SalesTrainerWorkspace() {
       setCoach(null);
       return;
     }
+    // Two-station mode: the observer owns the panel (arrives via the
+    // ui-state poll above) — firing /coach here would double-write it.
+    if (twoStationRef.current) return;
     if (nextMessages.length === 0) return;
     try {
       const panel = await salesTrainerApi.coach({
@@ -1715,6 +1805,7 @@ export function SalesTrainerWorkspace() {
       const initialMessages =
         selectedMode === "outbound" ? [setupTurn, opening] : [setupTurn, inboundBriefing];
       setSession(bundle);
+      setSetupCollapsed(true);
       uiStateVersionRef.current = 0;
       healthQueueRef.current = [];
       healthAnimatingRef.current = false;
@@ -1739,7 +1830,7 @@ export function SalesTrainerWorkspace() {
           setAudioFailure("Prospect text is ready, but no opening voice audio was returned.");
         }
       }
-      if (LIVE_COACH_ENABLED) {
+      if (LIVE_COACH_ENABLED && !twoStationRef.current) {
         const panel = await salesTrainerApi.coach({
           messages: modelMessages(initialMessages),
           profile: bundle.profile,
@@ -2368,6 +2459,22 @@ export function SalesTrainerWorkspace() {
     );
   }
 
+  if (courseEnabled && !coursePracticeActive) {
+    return (
+      <TrainerCourseShell
+        basePath={trainerBasePath}
+        learnerLabel={appUser?.email || "Trainer session"}
+        onBack={() => navigate(-1)}
+        onOpenPractice={() => navigate(`${trainerBasePath}/practice`)}
+        onSignOut={() => {
+          clearTrainerToken();
+          setTrainerConfig(null);
+          setAuthState("signed-out");
+        }}
+      />
+    );
+  }
+
   return (
     <div className="shell-gradient min-h-screen text-foreground">
       <header className="border-b border-border bg-card/70 backdrop-blur">
@@ -2377,7 +2484,9 @@ export function SalesTrainerWorkspace() {
               <Sparkles className="h-5 w-5" />
             </div>
             <div>
-              <div className="text-sm font-semibold">Sales Trainer</div>
+              <div className="text-sm font-semibold">
+                Sales Trainer{courseEnabled ? " - Legacy Free Call" : ""}
+              </div>
               <div className="text-xs text-muted-foreground">
                 {appUser?.email || "Trainer session"}
               </div>
@@ -2385,6 +2494,11 @@ export function SalesTrainerWorkspace() {
           </div>
 
           <div className="flex items-center gap-2">
+            {courseEnabled ? (
+              <Button variant="secondary" size="sm" onClick={() => navigate(trainerBasePath)}>
+                Course home
+              </Button>
+            ) : null}
             <Button variant="ghost" size="sm" onClick={() => navigate(-1)}>
               <ArrowLeft className="h-3.5 w-3.5" />
               Back
@@ -2394,6 +2508,7 @@ export function SalesTrainerWorkspace() {
               size="sm"
               onClick={() => {
                 clearTrainerToken();
+                setTrainerConfig(null);
                 setAuthState("signed-out");
               }}
             >
@@ -2406,21 +2521,49 @@ export function SalesTrainerWorkspace() {
 
       <main className="mx-auto max-w-[1500px] space-y-4 px-6 py-6">
         {/* Training Center tabs — the learning environment around the call bot */}
-        <nav className="flex flex-wrap gap-2">
-          {TRAINING_TABS.map((tab) => (
-            <Button
-              key={tab.key}
-              size="sm"
-              variant={centerTab === tab.key ? "primary" : "secondary"}
-              onClick={() => setCenterTab(tab.key)}
-            >
-              {tab.label}
-            </Button>
-          ))}
-        </nav>
+        {!courseEnabled ? (
+          <nav className="flex flex-wrap gap-2">
+            {TRAINING_TABS.map((tab) => (
+              <Button
+                key={tab.key}
+                size="sm"
+                variant={centerTab === tab.key ? "primary" : "secondary"}
+                onClick={() => setCenterTab(tab.key)}
+              >
+                {tab.key === "calls" && callReviewEnabled ? "Case review" : tab.label}
+              </Button>
+            ))}
+          </nav>
+        ) : null}
         {centerTab === "practice" ? (
           <>
         <section className="rounded-lg border border-border bg-card p-4">
+          {session && setupCollapsed ? (
+            // On a live call the builder is dead weight — collapse it to a
+            // single line so the call strip and coach own the screen.
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div className="flex min-w-0 flex-wrap items-center gap-2 text-xs">
+                <span className="rounded-full border border-primary/40 bg-primary/10 px-2 py-0.5 font-medium uppercase tracking-wide text-primary">
+                  {callMode}
+                </span>
+                <span className="truncate font-medium text-foreground">
+                  {[
+                    profile?.callerFirstName ?? profile?.firstName,
+                    profile?.callerLastName ?? profile?.lastName,
+                  ]
+                    .map((part) => String(part ?? "").trim())
+                    .filter(Boolean)
+                    .join(" ") || "Caller"}
+                </span>
+                <span className="truncate text-muted-foreground">
+                  {String(profile?.mood ?? "").trim()}
+                </span>
+              </div>
+              <Button size="sm" variant="secondary" onClick={() => setSetupCollapsed(false)}>
+                New call
+              </Button>
+            </div>
+          ) : (
           <div className="space-y-3">
             <div className="grid gap-2 sm:grid-cols-2">
               <Button
@@ -2531,6 +2674,7 @@ export function SalesTrainerWorkspace() {
               {callMode ? "Start the call" : "Pick inbound or outbound first"}
             </Button>
           </div>
+          )}
         </section>
 
         {error ? (
@@ -2553,80 +2697,51 @@ export function SalesTrainerWorkspace() {
               onAudioPlaying={handleAudioPlaying}
               onAudioComplete={handleAudioComplete}
             />
-            <div className="rounded-lg border border-border bg-card p-3">
-              <div className="flex h-full flex-col justify-between gap-2">
-                <div className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-                  {session ? "Your turn — talk; it sends on a pause" : "Press Go to start"}
-                </div>
-                <div className="flex gap-2">
-                  <Button
-                    variant={recording ? "destructive" : "secondary"}
-                    onClick={() => {
-                      if (recording) {
-                        // Manual stop = push-to-talk release. Pass
-                        // autoSend so the captured clip flows straight
-                        // to /transcribe → submitTrainerMessage instead
-                        // of just filling the draft field. This mirrors
-                        // the hands-free VAD path at the silence-detect
-                        // hook above. Without this flag the user has to
-                        // click the mic, speak, click again to stop,
-                        // then click Send — three clicks per turn.
-                        stopRecording({ autoSend: true });
-                      } else {
-                        primeAudioOutput();
-                        setHandsFreeEnabled(true);
-                        void startRecording({ automatic: true });
-                      }
-                    }}
-                    disabled={
-                      !session ||
-                      sending ||
-                      transcribing ||
-                      voiceAutoSending ||
-                      !micSupported ||
-                      (!recording && (prospectAudioPending || prospectAudioPlaying))
-                    }
-                    isLoading={transcribing || voiceAutoSending}
-                    title={!micSupported ? "Microphone unavailable" : undefined}
-                  >
-                    {recording ? <Square className="h-4 w-4" /> : <Mic className="h-4 w-4" />}
-                    {voiceAutoSending
-                      ? "Generating"
-                      : transcribing
-                        ? "Transcribing"
-                        : recording
-                          ? formatRecordingTime(recordingMs)
-                          : handsFreeEnabled
-                            ? "Auto"
-                            : "Mic"}
-                  </Button>
-                  <Button
-                    onClick={() => {
-                      // route through the same /transcribe → /respond
-                      if (recording) {
-                        stopRecording({ autoSend: true });
-                      }
-                    }}
-                    disabled={
-                      !session ||
-                      sending ||
-                      transcribing ||
-                      voiceAutoSending ||
-                      // Only require a draft when NOT recording — while
-                      // recording, the audio clip IS the message.
-                      !recording
-                    }
-                    isLoading={sending || transcribing || voiceAutoSending}
-                    variant="primary"
-                    title="Send your recording for transcription"
-                  >
-                    <Send className="h-4 w-4" />
-                    Done talking
-                  </Button>
-                </div>
+            <div className="flex flex-col gap-2 rounded-lg border border-border bg-card p-3">
+              <div className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                {session ? "Your turn — talk; it sends on a pause" : "Press Go to start"}
               </div>
+              {/* ONE action button. There used to be two (Mic + Done
+                  talking) that both stop-and-send while recording — the
+                  redundancy is what made the send feel weird. This morphs:
+                  Start talking → Done talking · 0:04. */}
+              <Button
+                className="w-full"
+                variant={recording ? "primary" : "secondary"}
+                onClick={() => {
+                  if (recording) {
+                    // Manual stop = push-to-talk release. Pass autoSend so
+                    // the captured clip flows straight to /transcribe →
+                    // submitTrainerMessage instead of filling the draft.
+                    stopRecording({ autoSend: true });
+                  } else {
+                    primeAudioOutput();
+                    setHandsFreeEnabled(true);
+                    void startRecording({ automatic: true });
+                  }
+                }}
+                disabled={
+                  !session ||
+                  sending ||
+                  transcribing ||
+                  voiceAutoSending ||
+                  !micSupported ||
+                  (!recording && (prospectAudioPending || prospectAudioPlaying))
+                }
+                isLoading={sending || transcribing || voiceAutoSending}
+                title={!micSupported ? "Microphone unavailable" : undefined}
+              >
+                {recording ? <Send className="h-4 w-4" /> : <Mic className="h-4 w-4" />}
+                {voiceAutoSending
+                  ? "Generating"
+                  : transcribing
+                    ? "Transcribing"
+                    : recording
+                      ? `Done talking · ${formatRecordingTime(recordingMs)}`
+                      : "Start talking"}
+              </Button>
               {micError ? (
-                <div className="mt-2 rounded-md border border-warning/40 bg-warning/10 px-3 py-2 text-xs text-warning">
+                <div className="rounded-md border border-warning/40 bg-warning/10 px-3 py-2 text-xs text-warning">
                   {micError}
                 </div>
               ) : null}
@@ -2636,7 +2751,7 @@ export function SalesTrainerWorkspace() {
               voiceAutoSending ||
               prospectAudioPending ||
               prospectAudioPlaying ? (
-                <div className="mt-2 rounded-md border border-border bg-muted/30 px-3 py-2">
+                <div className="rounded-md border border-border bg-muted/30 px-3 py-2">
                   <div className="flex items-center justify-between text-xs text-muted-foreground">
                     <span>
                       {voiceAutoSending
@@ -2713,7 +2828,7 @@ export function SalesTrainerWorkspace() {
         ) : centerTab === "study" ? (
           <StudyPanel />
         ) : (
-          <MyCallsPanel />
+          callReviewEnabled ? <CaseReviewPanel /> : <MyCallsPanel />
         )}
       </main>
     </div>

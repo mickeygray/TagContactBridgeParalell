@@ -35,8 +35,17 @@ const {
   transcribeSalesTrainerAudio,
   verifySalesTrainerToken,
 } = require("../../../../packages/shared-services/src/taxResolutionSalesTrainerService");
+const {
+  getSalesTrainerFeatureFlags,
+} = require("../../../../packages/shared-services/src/salesTrainerFeatureFlags");
 const { toErrorResponse } = require("../../../../packages/shared-errors/src");
 const { createRateLimiter } = require("../middleware/rateLimit");
+const {
+  createSalesTrainerCallReviewRouter,
+} = require("./salesTrainerCallReview");
+const {
+  createSalesTrainerCourseRouter,
+} = require("./salesTrainerCourse");
 
 const sendCodeLimit = createRateLimiter({
   windowMs: 60_000,
@@ -73,6 +82,16 @@ const scoreCallLimit = createRateLimiter({
   windowMs: 60_000,
   max: 6,
   message: "Too many call-scoring requests. Try again shortly.",
+});
+const callReviewLookupLimit = createRateLimiter({
+  windowMs: 60_000,
+  max: 30,
+  message: "Too many Case Review lookups. Try again shortly.",
+});
+const courseLimit = createRateLimiter({
+  windowMs: 60_000,
+  max: 60,
+  message: "Too many Trainer course requests. Try again shortly.",
 });
 
 // One end-to-end voice turn = STT + Claude + TTS. Limit slightly tighter
@@ -207,6 +226,13 @@ function createSalesTrainerRouter(auth, config = {}) {
         if (!account || !isSalesTrainerAccountAllowed(account, trainerSession.email)) {
           return res.status(403).json({ ok: false, error: "Account is not allowed for the sales trainer" });
         }
+      } else if (trainerSession.access === "allowlist") {
+        if (!isEmailAllowedForSalesTrainer(trainerSession.email)) {
+          return res.status(403).json({ ok: false, error: "Account is not allowed for the sales trainer" });
+        }
+        account = buildSalesTrainerAccount(trainerSession.email);
+      } else {
+        return res.status(403).json({ ok: false, error: "Account is not allowed for the sales trainer" });
       }
       req.salesTrainerUser = {
         ...(account || {}),
@@ -258,6 +284,20 @@ function createSalesTrainerRouter(auth, config = {}) {
     }
     return requireSalesTrainerAccess(req, res, next);
   }
+  router.use(
+    createSalesTrainerCourseRouter({
+      requireSalesTrainerAccess,
+      courseLimit,
+    }),
+  );
+  router.use(
+    createSalesTrainerCallReviewRouter({
+      requireSalesTrainerAccess,
+      analyzeLimit: scoreCallLimit,
+      lookupLimit: callReviewLookupLimit,
+      config,
+    }),
+  );
 
   router.post("/auth/send-code", sendCodeLimit, async (req, res) => {
     try {
@@ -327,6 +367,7 @@ function createSalesTrainerRouter(auth, config = {}) {
 
   router.get("/config", requireSalesTrainerAccess, async (_req, res) => {
     const config = getSalesTrainerConfig();
+    const features = getSalesTrainerFeatureFlags();
     return res.json({
       ok: true,
       result: {
@@ -363,6 +404,17 @@ function createSalesTrainerRouter(auth, config = {}) {
         },
         allowlistConfigured:
           config.allowedEmails.length > 0 || config.allowedDomains.length > 0,
+        // Public rollback surface only. These are resolved booleans; the
+        // environment keys and all private policy/configuration stay
+        // server-side.
+        features,
+        // Two-station trainer: when enabled, the server-side observer owns
+        // the coach panel (published via ui-state) — clients must NOT fire
+        // the legacy per-turn /coach call on top of it.
+        twoStation: {
+          enabled: Boolean(config.twoStationEnabled),
+          dialogueModel: config.dialogueModel,
+        },
         modes: ["auto", "roleplay", "coach", "objection-drill", "transcript-review"],
       },
     });
@@ -435,6 +487,14 @@ function createSalesTrainerRouter(auth, config = {}) {
   // download → whisper → score pipeline the nightly grader runs, for a single
   // recording the trainee picked from the library.
   router.post("/score-call", scoreCallLimit, requireSalesTrainerAccess, async (req, res) => {
+    if (getSalesTrainerFeatureFlags().callReviewV1Enabled) {
+      return res.status(503).json({
+        ok: false,
+        error: "Legacy call scoring is unavailable while Case Review is enabled.",
+        code: "TRAINER_LEGACY_SCORE_CALL_DISABLED",
+      });
+    }
+
     const scoring = require("../../../../packages/shared-services/src/transcriptionScoringService");
     const fs = require("fs");
     let audioPath = null;

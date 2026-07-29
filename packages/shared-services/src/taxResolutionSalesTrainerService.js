@@ -136,13 +136,12 @@ const DEFAULT_MODEL = "gpt-5-mini";
 //     calls (CALLER_PROFILE_TOOL uses SALES_TRAINER_PROFILE_MODEL,
 //     coaching panel can use SALES_TRAINER_COACH_MODEL).
 //
-// Sonnet 4.6 is the default for live turns. The training-mode block in
+// Sonnet 5 is the default for live turns. The training-mode block in
 // the slim prompt + the per-turn session header give Sonnet enough
 // grounding to behave on-spec without the 27k master prompt.
 // Overrides:
 //   SALES_TRAINER_ANTHROPIC_MODEL=claude-haiku-4-5  (faster, cheaper, less reliable on nuance)
-//   SALES_TRAINER_ANTHROPIC_MODEL=claude-opus-4-6   (slowest, for eval)
-const DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-4-6";
+const DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-5";
 const DEFAULT_PROVIDER = "anthropic";
 const DEFAULT_TTS_MODEL = "gpt-4o-mini-tts";
 const DEFAULT_TTS_VOICE = "cedar";
@@ -245,9 +244,9 @@ function getSalesTrainerConfig() {
     model: env("SALES_TRAINER_MODEL", DEFAULT_MODEL),
     // Anthropic (Messages API) — alternative provider, default.
     //
-    // Three-tier model split for the trainer:
-    //   - anthropicModel (this one): live in-character turns. Sonnet 4.6
-    //     by default — reliable on the training-mode principles
+    // Model split for the trainer — Sonnet 5 across the board:
+    //   - anthropicModel (this one): live in-character turns. Sonnet
+    //     stays reliable on the training-mode principles
     //     (progression-first, one-per-category, accept-reasonable-as-truth)
     //     where Haiku was drifting. ~2-3s per reply with the slim prompt
     //     + session header, which is acceptable on the voice path.
@@ -258,7 +257,14 @@ function getSalesTrainerConfig() {
     //     scorecard insights.
     anthropicApiKey: env("ANTHROPIC_API_KEY", ""),
     anthropicModel: env("SALES_TRAINER_ANTHROPIC_MODEL", DEFAULT_ANTHROPIC_MODEL),
-    coachModel: env("SALES_TRAINER_COACH_MODEL", "claude-sonnet-4-6"),
+    coachModel: env("SALES_TRAINER_COACH_MODEL", "claude-sonnet-5"),
+    // Two-station trainer (the coach's B/A split applied to the prospect):
+    // Haiku voices the dialogue on the latency-critical path; a post-turn
+    // Sonnet observer writes the coach panel + the prospect's memory off
+    // the critical path (see runTwoStationTrainerObserver). Next Haiku
+    // turn reads that memory — Haiku acts, Sonnet remembers.
+    twoStationEnabled: env("SALES_TRAINER_TWO_STATION", "false") === "true",
+    dialogueModel: env("SALES_TRAINER_DIALOGUE_MODEL", "claude-haiku-4-5-20251001"),
     // Provider selection — env override falls back to anthropic
     provider: normalizeProvider(env("SALES_TRAINER_PROVIDER", DEFAULT_PROVIDER)),
     // Shared output controls
@@ -2353,7 +2359,7 @@ async function generateCallerProfile({
   // once per session and benefits from richer persona variety.
   const profileModel =
     model ||
-    env("SALES_TRAINER_PROFILE_MODEL", "claude-sonnet-4-5") ||
+    env("SALES_TRAINER_PROFILE_MODEL", "claude-sonnet-5") ||
     config.anthropicModel;
 
   const prompt = buildProfilePrompt({
@@ -2726,7 +2732,7 @@ async function generateCallerPlaybook({
   // it runs once per session and benefits from the deeper planning.
   const playbookModel =
     model ||
-    env("SALES_TRAINER_PLAYBOOK_MODEL", "claude-sonnet-4-6") ||
+    env("SALES_TRAINER_PLAYBOOK_MODEL", "claude-sonnet-5") ||
     config.coachModel ||
     config.anthropicModel;
 
@@ -3244,6 +3250,126 @@ function getSalesTrainerUiState(sessionId, { sinceVersion = null } = {}) {
   return state;
 }
 
+// ── Two-station trainer observer (the B-station) ─────────────────────
+// The voice path stays fast: Haiku writes the DIALOGUE and nothing else.
+// After each turn this observer runs ONE Sonnet call off the critical
+// path that does both slow-lane jobs at once:
+//   1. the coach panel — same doctrine as runSalesTrainerCoachingPanel,
+//      published through the ui-state store the workspace already polls;
+//   2. the prospect's memory — proposes the disposition ledger the NEXT
+//      Haiku turn reads, merged under the same clamped physics as the
+//      in-band <PROSPECT_STATE> tag (trust still can't cliff-jump).
+// HOLD is first-class: the observer may decline to publish a panel
+// (hold=true) while still writing memory — silence is a valid coaching
+// output; the memory write never is.
+const TWO_STATION_OBSERVER_TOOL = {
+  name: "submit_two_station_observation",
+  description:
+    "Submit the analyst read of the current training call: an optional coaching panel plus the prospect's updated disposition ledger.",
+  input_schema: {
+    type: "object",
+    required: ["prospectMemory"],
+    properties: {
+      hold: {
+        type: "boolean",
+        description:
+          "true = nothing merits new on-screen guidance this turn; the coach panel is not published. Memory is still written.",
+      },
+      coach: COACHING_PANEL_TOOL.input_schema,
+      prospectMemory: {
+        type: "object",
+        required: ["trust"],
+        properties: {
+          trust: { type: "integer", minimum: 0, maximum: 10 },
+          mood: { type: "string", maxLength: 120 },
+          disclosed: {
+            type: "object",
+            properties: {
+              name: { type: "boolean" },
+              problem: { type: "boolean" },
+              numbers: { type: "boolean" },
+              sensitive: { type: "boolean" },
+            },
+          },
+          concerns: {
+            type: "array",
+            maxItems: 6,
+            items: {
+              type: "object",
+              properties: {
+                id: { type: "string", maxLength: 60 },
+                topic: { type: "string", maxLength: 120 },
+                status: { type: "string", enum: ["live", "engaged", "resolved", "parked"] },
+                intensity: { type: "integer", minimum: 1, maximum: 5 },
+              },
+            },
+          },
+        },
+      },
+    },
+  },
+};
+
+async function runTwoStationTrainerObserver({
+  sessionId,
+  messages,
+  profile = null,
+  scenario = "",
+  previousPhase = null,
+  prospectState = null,
+} = {}) {
+  const config = getSalesTrainerConfig();
+  const client = createAnthropicClient();
+  const prompt = [
+    buildCoachingPrompt({ messages, profile, scenario, previousPhase }),
+    "",
+    "PROSPECT MEMORY (second job, always required): you are also the scribe for",
+    "the prospect's disposition ledger. From the full transcript, report where",
+    "the prospect genuinely IS right now — trust (the server clamps per-turn",
+    "steps, so report the true level), mood, which disclosure gates have opened",
+    "(name/problem/numbers/sensitive), and the live/engaged/resolved/parked",
+    "concern list. Prior ledger: " + JSON.stringify(prospectState || null),
+    "",
+    "If nothing merits NEW on-screen guidance this turn, set hold=true and omit",
+    "the coach panel — silence is a valid coaching output. The memory write never is.",
+  ].join("\n");
+  const raw = await client.createMessage({
+    system:
+      "You are the two-station observer for a tax-resolution sales TRAINING call: analyst and scribe in one pass. Output strictly via submit_two_station_observation. Nothing you write reaches the roleplay chat.\n\n"
+      + ANALYST_DOCTRINE,
+    messages: [{ role: "user", content: prompt }],
+    model: config.coachModel || config.anthropicModel,
+    maxTokens: 1100,
+    temperature: 0.3,
+    tools: [TWO_STATION_OBSERVER_TOOL],
+    toolChoice: { type: "tool", name: "submit_two_station_observation" },
+    timeoutMs: config.timeoutMs,
+  });
+  const content = Array.isArray(raw?.content) ? raw.content : [];
+  const toolUse = content.find(
+    (block) => block && block.type === "tool_use" && block.name === "submit_two_station_observation",
+  );
+  const observation = toolUse?.input || null;
+  if (!observation) return null;
+
+  // Memory first — it's what the next turn depends on. Same clamped
+  // physics as the in-band tag path: trust steps, monotonic disclosure.
+  if (sessionId && observation.prospectMemory) {
+    setTrainerProspectState(
+      sessionId,
+      mergeProspectState(getTrainerProspectState(sessionId), observation.prospectMemory),
+    );
+  }
+  if (sessionId && observation.coach && observation.hold !== true) {
+    publishSalesTrainerUiState(
+      sessionId,
+      { coach: observation.coach, source: "two-station-observer" },
+      { email: "two-station-observer", source: "internal" },
+    );
+  }
+  return observation;
+}
+
 function buildCoachingTranscript(messages) {
   const normalized = normalizeMessages(messages);
   return normalized
@@ -3481,11 +3607,11 @@ async function generateCoachingNarration({
 
   const client = createAnthropicClient();
   const config = getSalesTrainerConfig();
-  // Default to Opus for richer coaching synthesis. Env override drops
-  // to Sonnet or Haiku for cost-sensitive deployments.
+  // Sonnet 5 across the board — Opus didn't add anything at this scope.
+  // Env override drops to Haiku for cost-sensitive deployments.
   const narratorModel =
     model ||
-    env("SALES_TRAINER_COACH_NARRATOR_MODEL", "claude-opus-4-6") ||
+    env("SALES_TRAINER_COACH_NARRATOR_MODEL", "claude-sonnet-5") ||
     config.coachModel ||
     config.anthropicModel;
 
@@ -3821,6 +3947,12 @@ async function runSalesTrainerTurn({
   // Pull the session's disposition ledger (server-held prospect memory) so the
   // character knows where it stands; absent = legacy fresh-start behavior.
   const priorProspectState = getTrainerProspectState(sessionId);
+  // Two-station: the fast station (Haiku) owns the dialogue — its only
+  // job is "say the next line as this person given this memory." An
+  // explicit caller model override still wins.
+  const trainerConfig = getSalesTrainerConfig();
+  const dialogueModel =
+    model || (trainerConfig.twoStationEnabled ? trainerConfig.dialogueModel : null);
   const responseResult = await runTaxResolutionSalesTrainer({
     messages: nextMessages,
     mode,
@@ -3829,7 +3961,7 @@ async function runSalesTrainerTurn({
     profile,
     playbook,
     provider,
-    model,
+    model: dialogueModel,
     maxOutputTokens,
     promptVariant,
     turnNumber,
@@ -3850,6 +3982,29 @@ async function runSalesTrainerTurn({
       responseResult.text = stripProspectStateTag(responseResult.text);
     } catch {
       /* ledger is an enhancement — never let it break the turn */
+    }
+  }
+
+  // --- 3c. Two-station observer (fire-and-forget) — one Sonnet call off
+  // the critical path writes the coach panel + supervises the prospect
+  // memory while TTS renders below. The turn NEVER waits on it; failures
+  // are silent because the observer is an enhancement, not a dependency.
+  if (trainerConfig.twoStationEnabled && sessionId && responseResult?.text) {
+    try {
+      const observerPreviousPhase =
+        getSalesTrainerUiState(sessionId)?.coach?.phase?.key || null;
+      void runTwoStationTrainerObserver({
+        sessionId,
+        messages: [...nextMessages, { role: "assistant", content: responseResult.text }],
+        profile,
+        scenario,
+        previousPhase: observerPreviousPhase,
+        prospectState: getTrainerProspectState(sessionId),
+      }).catch(() => {
+        /* best-effort by design */
+      });
+    } catch {
+      /* never let the observer kickoff break the turn */
     }
   }
 
@@ -4104,6 +4259,7 @@ module.exports = {
   publishSalesTrainerUiState,
   runSalesTrainerCoachingPanel,
   runSalesTrainerTurn,
+  runTwoStationTrainerObserver,
   runTaxResolutionSalesTrainer,
   startSalesTrainerSession,
   synthesizeSalesTrainerSpeech,
