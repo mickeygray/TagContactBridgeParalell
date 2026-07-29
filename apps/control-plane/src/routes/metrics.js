@@ -1,31 +1,170 @@
 "use strict";
 
 const express = require("express");
+const multer = require("multer");
 const {
   backfillCallLogSourceFromLeadCadence,
-  backfillLegacyMetricsRange,
+  importLogicsPaymentsCsv,
   buildSpendSyncRead,
-  buildVendorCallRows,
   computeCxRecordingHourlyWindow,
   ignoreMetricsAttributionReviewItem,
-  buildVendorDailySummary,
-  buildVendorLeadRows,
-  buildVendorOutcomeRows,
-  canonicalizeMirroredMetrics,
   getActiveMailers,
-  getLegacyMetricsMirrorStatus,
   getMailerConfigState,
   reopenMetricsAttributionReviewItem,
   resolveMetricsAttributionReviewItem,
+  resolveMetricsPaymentReviewItem,
   runCxRecordingHourly,
-  runVendorNightlyEmail,
-  syncLegacyAttributionMaps,
-  syncLegacyMetricsMirror,
 } = require("../../../../packages/shared-services/src");
+const {
+  describePaymentsCsv,
+  hashBuffer,
+  readPaymentsSheetStatus,
+  recordPaymentsSheetImport,
+  verifyPaymentsCsvDomain,
+} = require("../../../../packages/shared-services/src/paymentsSheetGateService");
+const {
+  reconcileSheetCases,
+} = require("../../../../packages/shared-services/src/paymentsSheetReconcileService");
+const {
+  triggerActivitiesAsync,
+} = require("../../../../packages/shared-services/src/dailyLoopService");
+const {
+  currentPacificDateKey,
+} = require("../../../../packages/shared-services/src/simpleMarketingReadService");
 const { toErrorResponse } = require("../../../../packages/shared-errors/src");
 
 function createMetricsRouter(auth, spendSyncRuntime) {
   const router = express.Router();
+
+  // Logics PaymentsReport CSV — kept in memory, parsed, discarded. 8 MB is
+  // generous for a month of settlement-officer rows.
+  const paymentsCsvUpload = multer({
+    storage: multer.memoryStorage(),
+    limits: { fileSize: 8 * 1024 * 1024 },
+  });
+
+  // Daily payments truth-up: Mickey exports the Logics PaymentsReport and
+  // drops it here. CSV rows correct/insert PaymentLedger rows (see
+  // logicsPaymentsCsvImportService). ?dryRun=true previews without writes.
+  router.post(
+    "/payments-csv/:domain",
+    auth.requireAuth,
+    auth.requireAdmin,
+    paymentsCsvUpload.single("file"),
+    async (req, res) => {
+      try {
+        if (String(process.env.LOGICS_PAYMENTS_CSV_IMPORT_ENABLED || "false").toLowerCase() !== "true") {
+          return res.status(404).json({ ok: false, error: "Payments CSV import is disabled" });
+        }
+        if (!req.file?.buffer) {
+          return res.status(400).json({ ok: false, error: "CSV file is required (field name: file)" });
+        }
+        const dryRun = String(req.query.dryRun || "") === "true";
+        const domain = String(req.params.domain || "").trim().toUpperCase();
+        const shape = describePaymentsCsv(req.file.buffer);
+
+        // The export does not name its own company, so the picker is the
+        // only thing asserting which it is. A mis-pick would write a whole
+        // company's payments under the wrong domain, so fingerprint the
+        // case ids against the ledger before touching anything.
+        const fingerprint = await verifyPaymentsCsvDomain({
+          domain,
+          caseIds: shape.caseIds,
+        });
+        if (!fingerprint.ok) {
+          return res.status(409).json({
+            ok: false,
+            error:
+              `This export looks like ${fingerprint.detected}, not ${domain} `
+              + `(${fingerprint.matched} of ${fingerprint.total} case ids match ${fingerprint.detected}). `
+              + "Pick the matching company, or re-export.",
+            fingerprint,
+          });
+        }
+
+        const result = await importLogicsPaymentsCsv({
+          domain,
+          buffer: req.file.buffer,
+          dryRun,
+        });
+
+        // Reconcile pass — the same sheet corrects case/client profiles:
+        // creates the legacy paying clients that never came through the
+        // lead flow, fills missing names/sources (never overwrites a real
+        // profile source), and recomputes payment rollups from the ledger.
+        let reconcile = null;
+        try {
+          reconcile = await reconcileSheetCases({
+            domain,
+            rows: shape.rows,
+            dryRun,
+          });
+        } catch (error) {
+          // Money import already landed; a reconcile failure is reported,
+          // not allowed to fail the upload.
+          reconcile = { error: String(error.message).slice(0, 200) };
+        }
+
+        // Receipt: the nightly money pass refuses to publish until the day's
+        // authority has landed for every required company.
+        const dateKey = String(req.query.dateKey || "").trim()
+          || shape.coversThrough
+          || currentPacificDateKey();
+        const receipt = await recordPaymentsSheetImport({
+          domain,
+          dateKey,
+          summary: result,
+          coversFrom: shape.coversFrom,
+          coversThrough: shape.coversThrough,
+          fileName: req.file.originalname || null,
+          fileHash: hashBuffer(req.file.buffer),
+          importedBy: req.user?.email || req.user?.username || null,
+          dryRun,
+        });
+
+        const gate = dryRun ? null : await readPaymentsSheetStatus({ dateKey });
+
+        // SHEET-TRIGGERED LOOP (F1.1): the moment every required company's
+        // sheet is in, pull the day's Logics activities. Fire-and-forget —
+        // the upload response must never wait on it, and a failure there
+        // must never fail the import. A per-day claim in DailyLoopRun makes
+        // this exactly-once across re-uploads AND process restarts; the
+        // 20:00 scheduled review claims the same guard as a fallback.
+        let activitiesTriggered = { scheduled: false, reason: "dry-run" };
+        if (!dryRun && gate?.ready) {
+          activitiesTriggered = triggerActivitiesAsync({
+            dateKey,
+            triggeredBy: domain,
+            logger: req.log || null,
+          });
+        } else if (!dryRun) {
+          activitiesTriggered = {
+            scheduled: false,
+            reason: "gate-not-ready",
+            missing: gate?.missing || [],
+          };
+        }
+
+        return res.json({
+          ok: true,
+          result,
+          coverage: {
+            from: shape.coversFrom,
+            through: shape.coversThrough,
+            dateKey,
+            rows: shape.rowCount,
+          },
+          fingerprint,
+          reconcile,
+          gate,
+          activitiesTriggered,
+          recorded: receipt.recorded === true,
+        });
+      } catch (error) {
+        return res.status(error.status || 500).json(toErrorResponse(error));
+      }
+    },
+  );
 
   router.get("/spend-sync/status", auth.requireAuth, auth.requireAdmin, async (_req, res) => {
     return res.json({
@@ -64,111 +203,10 @@ function createMetricsRouter(auth, spendSyncRuntime) {
     }
   });
 
-  router.get("/vendor-summary/:domain", auth.requireAuth, auth.requireAdmin, async (req, res) => {
-    try {
-      const result = await buildVendorDailySummary(req.params.domain, {
-        date: req.query.date,
-      });
-      return res.json({
-        ok: true,
-        result,
-      });
-    } catch (error) {
-      return res.status(error.status || 500).json(toErrorResponse(error));
-    }
-  });
+  // Vendor routes RETIRED 2026-07-27 with the vendor/lead-data email:
+  // /vendor-summary, /vendor-nightly/{preview,run,calls,leads,outcomes}.
+  // The web client never called them; reported money is the payment sheet.
 
-  router.get("/vendor-nightly/preview/:domain", auth.requireAuth, auth.requireAdmin, async (req, res) => {
-    try {
-      const result = await runVendorNightlyEmail(req.params.domain, {
-        date: req.query.date,
-        timezone: req.query.timezone,
-        performClosePass: String(req.query.performClosePass || "false").toLowerCase() === "true",
-        sendEmail: false,
-      });
-      return res.json({
-        ok: true,
-        result: {
-          domain: result.domain,
-          date: result.date,
-          summary: result.summary,
-          closePass: result.closePass,
-          emailResult: result.emailResult,
-          body: result.body,
-          attachments: result.attachmentMeta,
-        },
-      });
-    } catch (error) {
-      return res.status(error.status || 500).json(toErrorResponse(error));
-    }
-  });
-
-  router.post("/vendor-nightly/run/:domain", auth.requireAuth, auth.requireAdmin, async (req, res) => {
-    try {
-      const result = await runVendorNightlyEmail(req.params.domain, {
-        date: req.body?.date,
-        timezone: req.body?.timezone,
-        performClosePass: req.body?.performClosePass !== false,
-        sendEmail: req.body?.sendEmail !== false,
-        recipients: req.body?.recipients,
-        callSinceMs: req.body?.callSinceMs,
-        callLimitPerDomain: req.body?.callLimitPerDomain,
-        minDurationSec: req.body?.minDurationSec,
-        maxCaseRefreshesPerDomain: req.body?.maxCaseRefreshesPerDomain,
-        maxScoringPerDomain: req.body?.maxScoringPerDomain,
-        maxPaymentCases: req.body?.maxPaymentCases,
-        callRowLimit: req.body?.callRowLimit,
-        leadRowLimit: req.body?.leadRowLimit,
-        outcomeRowLimit: req.body?.outcomeRowLimit,
-      });
-      return res.json({
-        ok: true,
-        result: {
-          domain: result.domain,
-          date: result.date,
-          summary: result.summary,
-          closePass: result.closePass,
-          emailResult: result.emailResult,
-          body: result.body,
-          attachments: result.attachmentMeta,
-        },
-      });
-    } catch (error) {
-      return res.status(error.status || 500).json(toErrorResponse(error));
-    }
-  });
-
-  router.get("/vendor-nightly/calls/:domain", auth.requireAuth, auth.requireAdmin, async (req, res) => {
-    try {
-      const date = String(req.query.date || "").trim();
-      const result = await buildVendorCallRows(req.params.domain, date);
-      return res.json({ ok: true, result });
-    } catch (error) {
-      return res.status(error.status || 500).json(toErrorResponse(error));
-    }
-  });
-
-  router.get("/vendor-nightly/leads/:domain", auth.requireAuth, auth.requireAdmin, async (req, res) => {
-    try {
-      const date = String(req.query.date || "").trim();
-      const result = await buildVendorLeadRows(req.params.domain, date);
-      return res.json({ ok: true, result });
-    } catch (error) {
-      return res.status(error.status || 500).json(toErrorResponse(error));
-    }
-  });
-
-  router.get("/vendor-nightly/outcomes/:domain", auth.requireAuth, auth.requireAdmin, async (req, res) => {
-    try {
-      const date = String(req.query.date || "").trim();
-      const result = await buildVendorOutcomeRows(req.params.domain, date, {
-        timezone: req.query.timezone,
-      });
-      return res.json({ ok: true, result });
-    } catch (error) {
-      return res.status(error.status || 500).json(toErrorResponse(error));
-    }
-  });
 
   // On-demand source-name backfill — stamps CallLog rows that have a
   // caseId but no sourceName with the case's LeadCadence attribution.
@@ -264,62 +302,11 @@ function createMetricsRouter(auth, spendSyncRuntime) {
     });
   });
 
-  router.get("/legacy-mirror/status/:domain", auth.requireAuth, auth.requireAdmin, async (req, res) => {
-    try {
-      const result = await getLegacyMetricsMirrorStatus(req.params.domain);
-      return res.json({
-        ok: true,
-        result,
-      });
-    } catch (error) {
-      return res.status(error.status || 500).json(toErrorResponse(error));
-    }
-  });
-
-  router.post("/legacy-mirror/sync/:domain", auth.requireAuth, auth.requireAdmin, async (req, res) => {
-    try {
-      const result = await syncLegacyMetricsMirror(req.params.domain || req.body?.domain);
-      return res.json({
-        ok: true,
-        result,
-      });
-    } catch (error) {
-      return res.status(error.status || 500).json(toErrorResponse(error));
-    }
-  });
-
-  router.post("/legacy-attribution/sync/:domain", auth.requireAuth, auth.requireAdmin, async (req, res) => {
-    try {
-      const domain = req.params.domain || req.body?.domain;
-      const maps = await syncLegacyAttributionMaps();
-      const canonicalized = await canonicalizeMirroredMetrics(domain);
-      return res.json({
-        ok: true,
-        result: {
-          maps,
-          canonicalized,
-        },
-      });
-    } catch (error) {
-      return res.status(error.status || 500).json(toErrorResponse(error));
-    }
-  });
-
-  router.post("/backfill/:domain", auth.requireAuth, auth.requireAdmin, async (req, res) => {
-    try {
-      const result = await backfillLegacyMetricsRange({
-        domain: req.params.domain || req.body?.domain,
-        from: req.body?.from,
-        to: req.body?.to,
-      });
-      return res.json({
-        ok: true,
-        result,
-      });
-    } catch (error) {
-      return res.status(error.status || 500).json(toErrorResponse(error));
-    }
-  });
+  // Legacy-mirror / legacy-backfill admin routes removed 2026-07-27: the
+  // migration they served is over (FRONTEND_LEGACY_METRICS_FALLBACK_ENABLED
+  // and METRICS_DEDUP_LEGACY_READS_ENABLED are off, web-client never called
+  // them), and the simple board reads only marker-stamped rows the legacy
+  // backfill could never produce.
 
   router.get("/mailer-config/active", auth.requireAuth, auth.requireAdmin, async (_req, res) => {
     return res.json({
@@ -338,6 +325,22 @@ function createMetricsRouter(auth, spendSyncRuntime) {
       return res.status(error.status || 500).json(toErrorResponse(error));
     }
   });
+
+  router.post(
+    "/attribution-review/:id/resolve-payment",
+    auth.requireAuth,
+    auth.requireAdmin,
+    async (req, res) => {
+      try {
+        const result = await resolveMetricsPaymentReviewItem(req.params.id, req.body || {}, {
+          email: req.user?.email || null,
+        });
+        return res.json({ ok: true, result });
+      } catch (error) {
+        return res.status(error.status || 500).json(toErrorResponse(error));
+      }
+    },
+  );
 
   router.post("/attribution-review/:id/ignore", auth.requireAuth, auth.requireAdmin, async (req, res) => {
     try {

@@ -58,7 +58,6 @@ async function indexRecordingsByCallId({
           if (call.callId && call.recordingUrl) {
             byCallId.set(String(call.callId), {
               recordingUrl: call.recordingUrl,
-              hasTranscript: Boolean(call.transcript || call.transcriptId),
             });
           }
         }

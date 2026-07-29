@@ -1,0 +1,208 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Daily Board {{dateKey}}</title>
+  </head>
+  <body style="margin:0;padding:0;background:#f4f5f7;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#1f2933;">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f4f5f7;padding:24px 12px;">
+      <tr><td align="center">
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:720px;background:#ffffff;border-radius:10px;overflow:hidden;box-shadow:0 1px 3px rgba(16,24,40,.1);">
+
+          <tr>
+            <td style="background:#0f172a;padding:20px 24px;">
+              <div style="color:#94a3b8;font-size:11px;letter-spacing:.09em;text-transform:uppercase;">Daily Board</div>
+              <div style="color:#ffffff;font-size:22px;font-weight:600;margin-top:2px;">{{dateKey}}</div>
+              <div style="color:#64748b;font-size:12px;margin-top:4px;">{{domains}}</div>
+            </td>
+          </tr>
+
+          {{!-- headline numbers --}}
+          <tr><td style="padding:20px 24px 4px;">
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+              <tr>
+                <td width="50%" style="padding:0 8px 12px 0;">
+                  <div style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;padding:12px 14px;">
+                    <div style="font-size:11px;color:#15803d;letter-spacing:.05em;text-transform:uppercase;">Money in</div>
+                    <div style="font-size:24px;font-weight:600;color:#14532d;">{{money totals.confirmedAmount}}</div>
+                    <div style="font-size:12px;color:#166534;">{{int totals.confirmedCount}} payments · {{int totals.deals}} deal(s)</div>
+                  </div>
+                </td>
+                <td width="50%" style="padding:0 0 12px 8px;">
+                  <div style="background:#fef2f2;border:1px solid #fecaca;border-radius:8px;padding:12px 14px;">
+                    <div style="font-size:11px;color:#b91c1c;letter-spacing:.05em;text-transform:uppercase;">Spend</div>
+                    <div style="font-size:24px;font-weight:600;color:#7f1d1d;">{{money totals.spend}}</div>
+                    <div style="font-size:12px;color:#991b1b;">LD {{money totals.ldSpend}} · mail {{money totals.mailSpend}}{{#if totals.bcdCalls}} · BCD {{money totals.bcdSpend}}{{/if}}</div>
+                    {{#if totals.bcdCalls}}<div style="font-size:11px;color:#b91c1c;">{{int totals.bcdCalls}} BCD call(s) × {{money totals.bcdRate}}</div>{{/if}}
+                  </div>
+                </td>
+              </tr>
+              <tr><td colspan="2" style="padding:0 0 4px;">
+                <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:10px 14px;font-size:13px;">
+                  <strong style="font-size:16px;">Net {{money totals.net}}</strong>
+                  {{#if totals.mailStale}}<span style="color:#94a3b8;font-size:12px;"> · mail spend pending</span>{{/if}}
+                </div>
+              </td></tr>
+            </table>
+          </td></tr>
+
+          {{!-- activity strip --}}
+          <tr><td style="padding:8px 24px 0;">
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="font-size:13px;border-collapse:collapse;">
+              <tr>
+                <td style="padding:6px 0;border-bottom:1px solid #f1f5f9;">LD calls made</td>
+                <td align="right" style="padding:6px 0;border-bottom:1px solid #f1f5f9;"><strong>{{int calls.ldDials}}</strong> <span style="color:#64748b;">across {{int calls.ldCases}} cases · {{int calls.ldConnected}} connected</span></td>
+              </tr>
+              <tr>
+                <td style="padding:6px 0;border-bottom:1px solid #f1f5f9;">Mail calls received</td>
+                <td align="right" style="padding:6px 0;border-bottom:1px solid #f1f5f9;"><strong>{{int calls.mailCalls}}</strong> <span style="color:#64748b;">· {{int calls.responses}} first-time (responses)</span></td>
+              </tr>
+              <tr>
+                <td style="padding:6px 0;border-bottom:1px solid #f1f5f9;">Bought / mailed</td>
+                <td align="right" style="padding:6px 0;border-bottom:1px solid #f1f5f9;">{{int calls.ldLeads}} LD leads · {{int calls.mailPieces}} pieces</td>
+              </tr>
+              <tr>
+                <td style="padding:6px 0;">Status changes</td>
+                <td align="right" style="padding:6px 0;">
+                  <span style="color:#b91c1c;">{{int status.dnc}} DNC</span> ·
+                  {{int status.postdate}} post-date ·
+                  {{int status.suspended}} redline ·
+                  <span style="color:#15803d;">{{int status.converted}} converted</span>
+                </td>
+              </tr>
+            </table>
+          </td></tr>
+
+          {{!-- by source --}}
+          <tr><td style="padding:22px 24px 0;">
+            <div style="font-size:12px;font-weight:600;letter-spacing:.07em;text-transform:uppercase;color:#475569;margin-bottom:2px;">Return by source</div>
+            <div style="font-size:11px;color:#94a3b8;margin-bottom:8px;">LD + the three active mail pieces</div>
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="font-size:13px;border-collapse:collapse;">
+              <tr style="background:#f8fafc;">
+                <th align="left"   style="padding:7px 8px;font-size:11px;color:#64748b;font-weight:600;">SOURCE</th>
+                <th align="right"  style="padding:7px 8px;font-size:11px;color:#64748b;font-weight:600;">DEALS</th>
+                <th align="right"  style="padding:7px 8px;font-size:11px;color:#64748b;font-weight:600;">MONEY</th>
+                <th align="right"  style="padding:7px 8px;font-size:11px;color:#64748b;font-weight:600;">SPEND</th>
+                <th align="right"  style="padding:7px 8px;font-size:11px;color:#64748b;font-weight:600;">RESP</th>
+                <th align="right"  style="padding:7px 8px;font-size:11px;color:#64748b;font-weight:600;">COST EA</th>
+                <th align="right"  style="padding:7px 8px;font-size:11px;color:#64748b;font-weight:600;">NET</th>
+              </tr>
+              {{#each bySource}}
+              <tr>
+                <td style="padding:7px 8px;border-bottom:1px solid #f1f5f9;">{{this.source}}</td>
+                <td align="right" style="padding:7px 8px;border-bottom:1px solid #f1f5f9;">{{#if this.deals}}<strong>{{int this.deals}}</strong>{{else}}<span style="color:#cbd5e1;">0</span>{{/if}}</td>
+                <td align="right" style="padding:7px 8px;border-bottom:1px solid #f1f5f9;">{{money this.dealAmount}}</td>
+                <td align="right" style="padding:7px 8px;border-bottom:1px solid #f1f5f9;color:#991b1b;">{{money this.spend}}</td>
+                <td align="right" style="padding:7px 8px;border-bottom:1px solid #f1f5f9;">{{#if this.ldLeads}}{{int this.ldLeads}}{{else}}{{int this.responses}}{{/if}}</td>
+                <td align="right" style="padding:7px 8px;border-bottom:1px solid #f1f5f9;">{{#if this.cpr}}{{money this.cpr}}{{else}}<span style="color:#cbd5e1;">—</span>{{/if}}</td>
+                <td align="right" style="padding:7px 8px;border-bottom:1px solid #f1f5f9;">{{#if this.roi}}<strong style="color:{{#if (gt this.roi 0)}}#15803d{{else}}#b91c1c{{/if}};">{{money this.roi}}</strong>{{else}}<span style="color:#cbd5e1;">—</span>{{/if}}</td>
+              </tr>
+              {{/each}}
+            </table>
+          </td></tr>
+
+          {{!-- by officer --}}
+          <tr><td style="padding:22px 24px 0;">
+            <div style="font-size:12px;font-weight:600;letter-spacing:.07em;text-transform:uppercase;color:#475569;margin-bottom:2px;">By settlement officer</div>
+            <div style="font-size:11px;color:#94a3b8;margin-bottom:8px;">money closed alongside calls handled</div>
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="font-size:13px;border-collapse:collapse;">
+              <tr style="background:#f8fafc;">
+                <th align="left"  style="padding:7px 8px;font-size:11px;color:#64748b;font-weight:600;">OFFICER</th>
+                <th align="right" style="padding:7px 8px;font-size:11px;color:#64748b;font-weight:600;">DEALS</th>
+                <th align="right" style="padding:7px 8px;font-size:11px;color:#64748b;font-weight:600;">COLLECTED</th>
+                <th align="right" style="padding:7px 8px;font-size:11px;color:#64748b;font-weight:600;">MAIL CALLS</th>
+                <th align="right" style="padding:7px 8px;font-size:11px;color:#64748b;font-weight:600;">LD DIALS</th>
+              </tr>
+              {{#each byOfficer}}
+              <tr>
+                <td style="padding:7px 8px;border-bottom:1px solid #f1f5f9;"><strong>{{this.officer}}</strong></td>
+                <td align="right" style="padding:7px 8px;border-bottom:1px solid #f1f5f9;">{{#if this.deals}}{{int this.deals}}{{else}}<span style="color:#cbd5e1;">0</span>{{/if}}</td>
+                <td align="right" style="padding:7px 8px;border-bottom:1px solid #f1f5f9;">{{money this.amount}}</td>
+                <td align="right" style="padding:7px 8px;border-bottom:1px solid #f1f5f9;">{{#if this.mailCalls}}{{int this.mailCalls}}{{else}}<span style="color:#cbd5e1;">—</span>{{/if}}</td>
+                <td align="right" style="padding:7px 8px;border-bottom:1px solid #f1f5f9;">{{#if this.ldDials}}{{int this.ldDials}}{{else}}<span style="color:#cbd5e1;">—</span>{{/if}}</td>
+              </tr>
+              {{else}}
+              <tr><td colspan="5" style="padding:7px 8px;color:#94a3b8;">No activity today.</td></tr>
+              {{/each}}
+            </table>
+          </td></tr>
+
+          {{!-- deals detail --}}
+          <tr><td style="padding:22px 24px 0;">
+            <div style="font-size:12px;font-weight:600;letter-spacing:.07em;text-transform:uppercase;color:#475569;margin-bottom:8px;">Initial payments — source</div>
+            {{#each deals}}
+            <div style="border:1px solid #e2e8f0;border-radius:8px;padding:10px 12px;margin-bottom:8px;">
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="font-size:13px;">
+                <tr>
+                  <td><strong>{{this.name}}</strong> <span style="color:#94a3b8;">{{this.domain}} {{this.caseId}}</span></td>
+                  <td align="right"><strong>{{money this.amount}}</strong></td>
+                </tr>
+                <tr><td colspan="2" style="padding-top:4px;font-size:12px;color:#475569;">
+                  <span style="background:#eff6ff;color:#1d4ed8;border-radius:4px;padding:2px 7px;">{{default this.source "UNSOURCED"}}</span>
+                  <span style="color:#94a3b8;"> {{this.sourceVia}}</span> · officer {{default this.officer "?"}}
+                </td></tr>
+              </table>
+            </div>
+            {{else}}
+            <div style="font-size:13px;color:#94a3b8;">No initial payments today.</div>
+            {{/each}}
+          </td></tr>
+
+          {{!-- redlines --}}
+          {{#if redlines.length}}
+          <tr><td style="padding:22px 24px 0;">
+            <div style="font-size:12px;font-weight:600;letter-spacing:.07em;text-transform:uppercase;color:#475569;margin-bottom:8px;">Redlines</div>
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="font-size:13px;border-collapse:collapse;">
+              {{#each redlines}}
+              <tr>
+                <td style="padding:8px;border-bottom:1px solid #f1f5f9;">
+                  <strong>{{this.domain}} {{this.caseId}}</strong>
+                  {{#if this.attemptCount}}<span style="color:#64748b;"> · {{int this.attemptCount}} failed attempt(s)</span>{{/if}}
+                  <div style="font-size:12px;color:#475569;margin-top:2px;">
+                    {{#if this.statusChange}}→ {{this.statusChange}}{{else}}<span style="color:#b45309;">no status change — needs action</span>{{/if}}
+                  </div>
+                </td>
+                <td align="right" style="padding:8px;border-bottom:1px solid #f1f5f9;white-space:nowrap;">
+                  {{#if this.declinedTotal}}<span style="color:#b91c1c;">{{money this.declinedTotal}}</span>{{/if}}
+                  {{#if this.chargebackTotal}}<div style="color:#7f1d1d;font-size:12px;">CB {{money this.chargebackTotal}}</div>{{/if}}
+                  <div>
+                    {{#if (eq this.classification "confirmed")}}<span style="background:#fee2e2;color:#991b1b;font-size:10px;border-radius:4px;padding:2px 6px;">CONFIRMED</span>{{/if}}
+                    {{#if (eq this.classification "unactioned")}}<span style="background:#fef3c7;color:#92400e;font-size:10px;border-radius:4px;padding:2px 6px;">UNACTIONED</span>{{/if}}
+                    {{#if (eq this.classification "status-only")}}<span style="background:#f1f5f9;color:#475569;font-size:10px;border-radius:4px;padding:2px 6px;">STATUS ONLY</span>{{/if}}
+                  </div>
+                </td>
+              </tr>
+              {{/each}}
+            </table>
+          </td></tr>
+          {{/if}}
+
+          {{!-- long calls --}}
+          <tr><td style="padding:22px 24px 0;">
+            <div style="font-size:12px;font-weight:600;letter-spacing:.07em;text-transform:uppercase;color:#475569;margin-bottom:2px;">Long calls</div>
+            <div style="font-size:11px;color:#94a3b8;margin-bottom:8px;">deals, post dates, and anything over 10 minutes</div>
+            {{#each longCalls}}
+            <div style="font-size:13px;padding:6px 0;border-bottom:1px solid #f1f5f9;">
+              {{#if this.isDealCall}}<span style="background:#dcfce7;color:#15803d;font-size:10px;border-radius:4px;padding:2px 6px;margin-right:4px;">DEAL{{#if this.amount}} {{money this.amount}}{{/if}}</span>{{/if}}
+              {{#if this.isPostDate}}<span style="background:#fef3c7;color:#92400e;font-size:10px;border-radius:4px;padding:2px 6px;margin-right:4px;">POST DATE</span>{{/if}}
+              <strong>{{this.minutes}}m</strong>
+              {{#if this.source}}<span style="color:#1d4ed8;"> {{this.source}}</span>{{/if}}
+              <span style="color:#64748b;"> · {{default this.caller this.phone}}{{#if this.officer}} → {{this.officer}}{{/if}}{{#if this.caseId}} · case {{this.caseId}}{{/if}}</span>
+              {{#if this.hasTranscript}}<span style="color:#94a3b8;font-size:11px;"> · transcript</span>{{/if}}
+              {{#if this.listenUrl}}<a href="{{this.listenUrl}}" style="color:#2563eb;text-decoration:none;"> ▸ listen</a>{{/if}}
+            </div>
+            {{else}}
+            <div style="font-size:13px;color:#94a3b8;">No long calls on an allowed platform today.</div>
+            {{/each}}
+          </td></tr>
+
+          <tr><td style="padding:20px 24px 26px;">
+            <div style="font-size:11px;color:#cbd5e1;text-align:center;">Parallel · generated {{dateKey}}</div>
+          </td></tr>
+
+        </table>
+      </td></tr>
+    </table>
+  </body>
+</html>

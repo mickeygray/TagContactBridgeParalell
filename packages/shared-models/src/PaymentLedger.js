@@ -2,6 +2,18 @@
 
 const mongoose = require("mongoose");
 
+const metricsTreatmentSchema = new mongoose.Schema(
+  {
+    kind: { type: String, default: null },
+    groupKey: { type: String, default: null },
+    reportingBucket: { type: String, default: null },
+    resolvedAt: { type: Date, default: null },
+    resolvedBy: { type: String, default: null },
+    note: { type: String, default: null },
+  },
+  { _id: false },
+);
+
 // IDENTIFIER SCOPE: `casePaymentId` is globally unique because all companies
 // share a single Logics billing tenant — Logics issues a monotonic payment id
 // across the whole account. If a new company joins on its own Logics tenant,
@@ -44,6 +56,7 @@ const paymentLedgerSchema = new mongoose.Schema(
     },
     needsSourceReview: { type: Boolean, default: false, index: true },
     reviewReason: { type: String, default: null },
+    metricsTreatment: { type: metricsTreatmentSchema, default: null },
     recordedAt: { type: Date, default: Date.now },
     raw: { type: mongoose.Schema.Types.Mixed, default: null },
   },

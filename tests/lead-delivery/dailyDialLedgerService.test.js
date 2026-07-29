@@ -115,6 +115,7 @@ test("DailyDial records one exact attempt and later strengthens its outcome with
     callStartedAt: new Date("2026-07-14T18:00:00.000Z"),
     callEndedAt: new Date("2026-07-14T18:01:00.000Z"),
     durationSeconds: 60,
+    recordingUrl: "https://recordings.example.invalid/call/1.mp3?token=test",
     nextContactAt: new Date("2026-07-14T19:31:00.000Z"),
   };
   const first = await recordDailyDialOffload({ ...base, normalizedOutcome: "review" });
@@ -124,6 +125,7 @@ test("DailyDial records one exact attempt and later strengthens its outcome with
   assert.equal(model.doc.attempts[0].provider, "phoneburner");
   assert.equal(model.doc.attempts[0].connected, false);
   assert.equal(model.doc.attempts[0].outcome, "review");
+  assert.equal(model.doc.attempts[0].recordingUrl, "https://recordings.example.invalid/call/1.mp3?token=test");
   assert.equal(model.doc.capped, false);
   assert.equal(model.doc.leadReceivedAt.toISOString(), "2026-07-14T15:00:00.000Z");
   assert.equal(model.doc.lastOffloadAt.toISOString(), "2026-07-14T18:01:00.000Z");
@@ -149,6 +151,7 @@ test("DailyDial records one exact attempt and later strengthens its outcome with
   assert.equal(weakReplay.counted, false);
   assert.equal(model.doc.attempts[0].outcome, "dnc");
   assert.equal(model.doc.attempts[0].connected, false);
+  assert.equal(model.doc.attempts[0].recordingUrl, "https://recordings.example.invalid/call/1.mp3?token=test");
   assert.equal(model.doc.terminal, true);
   assert.equal(model.doc.nextEligibleAt, null);
 });

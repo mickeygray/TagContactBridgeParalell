@@ -7,13 +7,12 @@ function getAnthropicConfig() {
   const config = getSharedConfig();
   return {
     apiKey: env("ANTHROPIC_API_KEY", ""),
-    model: env("ANTHROPIC_MODEL", "claude-3-5-haiku-latest"),
+    // Default + ladder must be LIVE model ids — the previous ladder was all
+    // retired 3.x/4.0 models, so every fallback attempt 404'd in series.
+    model: env("ANTHROPIC_MODEL", "claude-sonnet-5"),
     fallbackModels: [
-      "claude-3-5-haiku-20241022",
-      "claude-3-5-sonnet-20241022",
-      "claude-3-7-sonnet-20250219",
-      "claude-sonnet-4-20250514",
-      "claude-opus-4-20250514",
+      "claude-sonnet-5",
+      "claude-haiku-4-5-20251001",
     ],
     maxTokens: Number(env("ANTHROPIC_MAX_TOKENS", 1200)),
     temperature: Number(env("ANTHROPIC_TEMPERATURE", 0)),
@@ -21,12 +20,16 @@ function getAnthropicConfig() {
   };
 }
 
-// Opus 4.7+ reject sampling params (temperature/top_p) with a 400; older models
-// (opus-4-6, sonnet, haiku, 3.x) accept them. Sending ANY temperature — including
-// the config default 0 — to an Opus 4.7/4.8 model kills the request, which made
-// every Opus-on-bus reasoning task fail. Exported for tests.
+// Opus 4.7+ and the Claude 5 family (sonnet-5, fable-5, ...) reject sampling
+// params (temperature/top_p) with a 400 — "`temperature` is deprecated for this
+// model." Older models (opus-4-6, sonnet-4-x, haiku-4-5, 3.x) accept them.
+// Sending ANY temperature — including the config default 0 — to a rejecting
+// model kills the request. Exported for tests.
+// Note: /claude-[a-z]+-5(?!\d)/ matches sonnet-5 / fable-5 but NOT
+// haiku-4-5 (the "-4-" breaks the letters-then--5 sequence).
 function modelRejectsSamplingParams(model) {
-  return /claude-opus-4-(?:[7-9]|\d\d)/.test(String(model || ""));
+  const name = String(model || "");
+  return /claude-opus-4-(?:[7-9]|\d\d)/.test(name) || /claude-[a-z]+-5(?!\d)/.test(name);
 }
 
 function extractTextBlocks(payload) {

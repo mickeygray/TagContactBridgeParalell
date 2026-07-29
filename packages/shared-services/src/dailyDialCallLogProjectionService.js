@@ -137,9 +137,9 @@ function createDailyDialCallLogProjection({
           status: "resolved",
           resolvedAt,
           resolverActor: "reconcile",
+          ...(attempt.recordingUrl ? { "recordingArchive.provider": provider, "recordingArchive.sourceUri": attempt.recordingUrl } : {}),
           setOnInsert: {
             transcription: { status: "skipped", source: `${provider}-daily-dial` },
-            recordingArchive: { status: "not_queued", provider },
           },
         });
         result.reconciled += 1;

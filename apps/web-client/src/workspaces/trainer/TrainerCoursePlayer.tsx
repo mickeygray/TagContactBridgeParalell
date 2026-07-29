@@ -1,7 +1,11 @@
 import { ArrowLeft, Loader2, LockKeyhole, RotateCcw } from "lucide-react";
+import { useCallback, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/Button";
-import type { TrainingCourseHome } from "@/lib/api/trainingCourse";
+import type {
+  TrainingCourseHome,
+  TrainingCourseModuleProgress,
+} from "@/lib/api/trainingCourse";
 import { TrainerCurriculumRail } from "./TrainerCurriculumRail";
 import { TrainerLessonItem } from "./TrainerLessonItem";
 import { TrainerQuizItem } from "./TrainerQuizItem";
@@ -27,6 +31,16 @@ export function TrainerCoursePlayer({
   const navigate = useNavigate();
   const attemptState = useTrainingAttempt(courseId, itemId);
   const items = home?.enrollment?.items || [];
+  // Lifted here so the curriculum rail can show the OPEN section's practices
+  // (4B.1–4B.4) instead of listing every section again. Declared above the
+  // early returns below — hook order has to stay stable across renders.
+  const [moduleProgress, setModuleProgress] = useState<TrainingCourseModuleProgress | null>(null);
+  const handleModuleProgress = useCallback(
+    (progress: { currentModuleId: string | null; completedModuleIds: string[] }) => {
+      setModuleProgress({ itemId, ...progress });
+    },
+    [itemId],
+  );
 
   if (attemptState.status === "loading") {
     return (
@@ -92,6 +106,7 @@ export function TrainerCoursePlayer({
           <TrainerCurriculumRail
             items={items}
             activeItemId={itemId}
+            moduleProgress={moduleProgress}
             onOpenItem={(next) =>
               navigate(
                 `${basePath}/course/${encodeURIComponent(courseId)}/item/${encodeURIComponent(next.itemId)}`,
@@ -125,6 +140,7 @@ export function TrainerCoursePlayer({
               item={item}
               attempt={attemptState.attempt}
               onStart={attemptState.start}
+              onModuleProgress={handleModuleProgress}
             />
           ) : isLesson ? (
             <TrainerLessonItem

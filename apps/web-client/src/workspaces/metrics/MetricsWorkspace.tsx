@@ -1,43 +1,25 @@
 import * as React from "react";
-import {
-  AlertTriangle,
-  Banknote,
-  CalendarRange,
-  CircleDollarSign,
-  Handshake,
-  Mail,
-  PhoneCall,
-  Shield,
-  TrendingUp,
-  Users,
-} from "lucide-react";
+import { Banknote, CalendarRange, PhoneCall } from "lucide-react";
 import { SectionHeader } from "@/components/ui/SectionHeader";
 import { Button } from "@/components/ui/Button";
 import { Card, CardContent, CardHeader, CardTitle, KpiCard } from "@/components/ui/Card";
 import { Input } from "@/components/ui/Input";
 import { StatusPill } from "@/components/ui/StatusPill";
-import {
-  useMetricsCallrail,
-  useMetricsDailySummary,
-  useMetricsMailCosts,
-  useMetricsPulse,
-  useMetricsRedlines,
-  useMetricsSources,
-  useMetricsWorkspace,
-} from "@/lib/api/queries/metrics";
-import { formatCurrency, formatNumber, formatRatio } from "@/lib/utils/format";
-import { SourcesPanel } from "./SourcesPanel";
-import { DailySummaryPanel } from "./DailySummaryPanel";
-import { RedlinesPanel } from "./RedlinesPanel";
-import { MailCostsPanel } from "./MailCostsPanel";
-import { CallrailPanel } from "./CallrailPanel";
-import { FixedCostsPanel } from "./FixedCostsPanel";
-import { DailyPulsePanel } from "./DailyPulsePanel";
-import { getMetricRowValues } from "./metricFamilies";
+import { useMetricsSimpleSources } from "@/lib/api/queries/metrics";
+import type { SimpleMarketingRow } from "@/lib/api/queries/metrics";
+import { formatCurrency, formatNumber } from "@/lib/utils/format";
 import { AttributionReviewPanel } from "./AttributionReviewPanel";
+import { PaymentsCsvImportCard } from "./PaymentsCsvImportCard";
+
+// Spartan rebuild (2026-07-24): active sources only — the 3 live mailers,
+// one "Aged" rollup for stray trickle, LD when the spend feed lands.
+// Responses = CallRail originations (first-time callers). Reads ONLY the
+// lean /simple-sources endpoint (DailyCallStat + SpendEntry + PaymentLedger
+// + CaseProfile — no legacy aggregation layers, sub-second). Numbers return
+// to this board one at a time as each pipeline is proven.
 
 const METRICS_TIMEZONE = "America/Los_Angeles";
-
+const PAYMENTS_CSV_IMPORT_VISIBLE = false;
 function today() {
   return new Intl.DateTimeFormat("en-CA", {
     timeZone: METRICS_TIMEZONE,
@@ -62,47 +44,84 @@ function prevMonthEnd() {
   return new Date(date.getFullYear(), date.getMonth(), 0).toISOString().slice(0, 10);
 }
 
-function quarterStart() {
-  const date = new Date();
-  return new Date(date.getFullYear(), Math.floor(date.getMonth() / 3) * 3, 1).toISOString().slice(0, 10);
-}
-
-function yearStart() {
-  return `${new Date().getFullYear()}-01-01`;
-}
-
 function daysAgo(count: number) {
   const date = new Date();
   date.setDate(date.getDate() - count);
   return date.toISOString().slice(0, 10);
 }
 
-function buildMonthPresets() {
-  const date = new Date();
-  const year = date.getFullYear();
-  const currentMonth = date.getMonth();
-  const labels = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-
-  return Array.from({ length: currentMonth + 1 }, (_, index) => {
-    const isCurrent = index === currentMonth;
-    return {
-      key: `${year}-${String(index + 1).padStart(2, "0")}`,
-      label: labels[index],
-      from: new Date(year, index, 1).toISOString().slice(0, 10),
-      to: isCurrent ? today() : new Date(year, index + 1, 0).toISOString().slice(0, 10),
-    };
-  });
-}
-
 const QUICK_PRESETS = [
   { label: "Today", from: () => today(), to: () => today() },
+  { label: "Yesterday", from: () => daysAgo(1), to: () => daysAgo(1) },
+  { label: "Last 7d", from: () => daysAgo(7), to: () => today() },
   { label: "MTD", from: () => monthStart(), to: () => today() },
   { label: "Last Mo", from: () => prevMonthStart(), to: () => prevMonthEnd() },
-  { label: "QTD", from: () => quarterStart(), to: () => today() },
-  { label: "YTD", from: () => yearStart(), to: () => today() },
-  { label: "Last 90d", from: () => daysAgo(90), to: () => today() },
-  { label: "All Time", from: () => "2024-01-01", to: () => today() },
 ];
+
+function SourceRowsTable({ rows }: { rows: SimpleMarketingRow[] }) {
+  if (rows.length === 0) {
+    return (
+      <div className="py-8 text-center text-sm text-muted-foreground">
+        No source activity in this range.
+      </div>
+    );
+  }
+  return (
+    <div className="overflow-x-auto">
+      <table className="w-full min-w-[920px] text-sm">
+        <thead>
+          <tr className="border-b border-border text-left text-xs uppercase text-muted-foreground">
+            <th className="px-4 py-2 pl-5 font-medium">Source</th>
+            <th className="px-2 py-2 text-right font-medium">Unique Leads</th>
+            <th className="px-2 py-2 text-right font-medium">Calls</th>
+            <th className="px-2 py-2 text-right font-medium">&gt;5m</th>
+            <th className="px-2 py-2 text-right font-medium">Spend</th>
+            <th className="px-2 py-2 text-right font-medium">Cost/Lead</th>
+            <th className="px-2 py-2 text-right font-medium">Deals</th>
+            <th className="px-2 py-2 text-right font-medium">Initial $</th>
+            <th className="px-2 py-2 text-right font-medium">Collected</th>
+            <th className="px-2 py-2 pr-5 text-right font-medium">Days</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((row) => (
+            <tr
+              key={row.source}
+              className={
+                row.source === "Aged"
+                  ? "border-b border-border/50 text-muted-foreground"
+                  : "border-b border-border/50"
+              }
+            >
+              <td className="px-4 py-2 pl-5">{row.source}</td>
+              <td className="numeric px-2 py-2 text-right font-semibold">{formatNumber(row.responses)}</td>
+              <td className="numeric px-2 py-2 text-right">{formatNumber(row.calls)}</td>
+              <td className="numeric px-2 py-2 text-right">{formatNumber(row.over5)}</td>
+              <td className="numeric px-2 py-2 text-right">
+                {row.spend > 0 ? formatCurrency(row.spend, true) : "—"}
+              </td>
+              <td className="numeric px-2 py-2 text-right">
+                {row.costPerResponse != null ? formatCurrency(row.costPerResponse, true) : "—"}
+              </td>
+              <td className="numeric px-2 py-2 text-right font-semibold">
+                {row.deals !== 0 ? formatNumber(row.deals) : "\u2014"}
+              </td>
+              <td className="numeric px-2 py-2 text-right">
+                {row.initialsNet !== 0 ? formatCurrency(row.initialsNet, true) : "\u2014"}
+              </td>
+              <td className="numeric px-2 py-2 text-right">
+                {row.totalCollected !== 0
+                  ? formatCurrency(row.totalCollected, true)
+                  : "\u2014"}
+              </td>
+              <td className="numeric px-2 py-2 pr-5 text-right">{formatNumber(row.activeDays)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
 
 export function MetricsWorkspace() {
   const metricsScope = "ALL";
@@ -111,40 +130,35 @@ export function MetricsWorkspace() {
     to: today(),
     label: "MTD",
   }));
-  const [selectedDay, setSelectedDay] = React.useState(() => today());
 
-  const monthPresets = React.useMemo(buildMonthPresets, []);
   const rangeFilters = React.useMemo(
-    () => ({
-      from: dateRange.from,
-      to: dateRange.to,
-    }),
+    () => ({ from: dateRange.from, to: dateRange.to }),
     [dateRange.from, dateRange.to],
   );
 
-  const workspace = useMetricsWorkspace(metricsScope);
-  const sources = useMetricsSources(metricsScope, rangeFilters);
-  const dayDetail = useMetricsDailySummary(metricsScope, selectedDay);
-  const mail = useMetricsMailCosts(metricsScope, rangeFilters);
-  const redlines = useMetricsRedlines(metricsScope);
-  const callrail = useMetricsCallrail(metricsScope, rangeFilters);
-  const pulse = useMetricsPulse(metricsScope);
+  const summary = useMetricsSimpleSources(metricsScope, rangeFilters);
+  const rows = summary.data?.rows ?? [];
+  const totals = summary.data?.totals ?? {
+    responses: 0,
+    calls: 0,
+    spend: 0,
+    ldLeads: 0,
+    deals: 0,
+    initialsNet: 0,
+    totalCollected: 0,
+    paymentsCount: 0,
+    multiplePositiveInitialCases: 0,
+    costPerResponse: null,
+  };
+  const feeds = summary.data?.feeds;
 
-  const ws = workspace.data;
-  const lifetimeSlice = ws?.snapshots.lifetime;
-  const sourceRows = sources.data?.rows ?? [];
-  const rangeSpend = sourceRows.reduce((sum, row) => sum + getMetricRowValues(row).spend, 0);
-  const rangeRevenue = sourceRows.reduce((sum, row) => sum + getMetricRowValues(row).paid, 0);
-  const rangeLeads = sourceRows.reduce((sum, row) => {
-    const values = getMetricRowValues(row);
-    if (values.family === "ld" || values.family === "meta") {
-      return sum + values.leads;
-    }
-    return sum;
-  }, 0);
-  const rangeDeals = sourceRows.reduce((sum, row) => sum + getMetricRowValues(row).deals, 0);
-  const rangeCalls = sourceRows.reduce((sum, row) => sum + getMetricRowValues(row).totalCalls, 0);
-  const rangeRoas = rangeSpend > 0 ? rangeRevenue / rangeSpend : null;
+  const feedAge = (iso: string | null | undefined) => {
+    if (!iso) return "never";
+    const mins = Math.round((Date.now() - new Date(iso).getTime()) / 60000);
+    if (mins < 90) return `${mins}m ago`;
+    if (mins < 48 * 60) return `${Math.round(mins / 60)}h ago`;
+    return `${Math.round(mins / (24 * 60))}d ago`;
+  };
 
   const handlePreset = React.useCallback((label: string, from: string, to: string) => {
     setDateRange({ from, to, label });
@@ -155,271 +169,108 @@ export function MetricsWorkspace() {
       <SectionHeader
         eyebrow="Workspace"
         title="Metrics"
-        description="Month-style reporting with expandable presets, plus a separate single-day detail panel."
+        description="Active sources only — unique leads are first-time callers (mail) and delivered leads (LD). Numbers return to this board as each pipeline is proven."
         actions={
-          <StatusPill dotted tone={workspace.isError ? "danger" : workspace.isFetching ? "info" : "success"}>
-            {workspace.isError ? "Stale" : workspace.isFetching ? "Refreshing" : "Live"}
+          <StatusPill dotted tone={summary.isError ? "danger" : summary.isFetching ? "info" : "success"}>
+            {summary.isError ? "Stale" : summary.isFetching ? "Refreshing" : "Live"}
           </StatusPill>
         }
       />
 
       <Card>
-        <CardContent className="space-y-4 pt-6">
-          <div className="flex flex-wrap items-center gap-2">
-            {QUICK_PRESETS.map((preset) => (
-              <Button
-                key={preset.label}
-                variant={dateRange.label === preset.label ? "primary" : "secondary"}
-                size="sm"
-                onClick={() => handlePreset(preset.label, preset.from(), preset.to())}
-              >
-                {preset.label}
-              </Button>
-            ))}
-          </div>
-
-          <div className="flex flex-wrap items-center gap-2">
-            <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-              {new Date().getFullYear()}
-            </span>
-            {monthPresets.map((preset) => (
-              <Button
-                key={preset.key}
-                variant={dateRange.from === preset.from && dateRange.to === preset.to ? "primary" : "secondary"}
-                size="sm"
-                onClick={() => handlePreset(preset.label, preset.from, preset.to)}
-              >
-                {preset.label}
-              </Button>
-            ))}
-            <div className="ml-auto flex flex-wrap items-center gap-2">
-              <Input
-                type="date"
-                value={dateRange.from}
-                onChange={(event) =>
-                  setDateRange((current) => ({
-                    ...current,
-                    from: event.target.value,
-                    label: "Custom",
-                  }))
-                }
-                className="h-9 w-[150px]"
-              />
-              <span className="text-sm text-muted-foreground">to</span>
-              <Input
-                type="date"
-                value={dateRange.to}
-                onChange={(event) =>
-                  setDateRange((current) => ({
-                    ...current,
-                    to: event.target.value,
-                    label: "Custom",
-                  }))
-                }
-                className="h-9 w-[150px]"
-              />
-            </div>
+        <CardContent className="flex flex-wrap items-center gap-2 pt-6">
+          {QUICK_PRESETS.map((preset) => (
+            <Button
+              key={preset.label}
+              variant={dateRange.label === preset.label ? "primary" : "secondary"}
+              size="sm"
+              onClick={() => handlePreset(preset.label, preset.from(), preset.to())}
+            >
+              {preset.label}
+            </Button>
+          ))}
+          <div className="ml-auto flex flex-wrap items-center gap-2">
+            <Input
+              type="date"
+              value={dateRange.from}
+              onChange={(event) =>
+                setDateRange((current) => ({ ...current, from: event.target.value, label: "Custom" }))
+              }
+              className="h-9 w-[150px]"
+            />
+            <span className="text-sm text-muted-foreground">to</span>
+            <Input
+              type="date"
+              value={dateRange.to}
+              onChange={(event) =>
+                setDateRange((current) => ({ ...current, to: event.target.value, label: "Custom" }))
+              }
+              className="h-9 w-[150px]"
+            />
           </div>
         </CardContent>
       </Card>
 
-      <section aria-label="Headline KPIs">
-        <div className="grid grid-cols-2 gap-3 md:grid-cols-4 xl:grid-cols-8">
+      <section aria-label="Headline numbers">
+        <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-5">
           <KpiCard
-            label={`Leads (${dateRange.label})`}
-            value={formatNumber(rangeLeads)}
-            hint={`Range ${dateRange.from} to ${dateRange.to}`}
-            icon={<Users className="h-4 w-4" />}
-          />
-          <KpiCard
-            label={`Calls (${dateRange.label})`}
-            value={formatNumber(rangeCalls)}
-            hint={`Lifetime ${formatNumber(lifetimeSlice?.calls)}`}
+            label={`Unique leads — mail (${dateRange.label})`}
+            value={formatNumber(totals.responses)}
+            hint={`${formatNumber(totals.calls)} total calls · ${formatNumber(totals.ldLeads)} LD leads`}
             icon={<PhoneCall className="h-4 w-4" />}
           />
           <KpiCard
-            label={`Spend (${dateRange.label})`}
-            value={formatCurrency(rangeSpend, true)}
-            hint={`Lifetime ${formatCurrency(lifetimeSlice?.spend)}`}
+            label={`Deals (${dateRange.label})`}
+            value={formatNumber(totals.deals)}
+            hint={`${formatCurrency(totals.initialsNet, true)} net initial payments`}
             icon={<Banknote className="h-4 w-4" />}
           />
           <KpiCard
-            label={`Revenue (${dateRange.label})`}
-            value={formatCurrency(rangeRevenue, true)}
-            hint={`Lifetime ${formatCurrency(lifetimeSlice?.revenue)}`}
-            icon={<CircleDollarSign className="h-4 w-4" />}
+            label={`Collected (${dateRange.label})`}
+            value={formatCurrency(totals.totalCollected, true)}
+            hint={`${formatNumber(totals.paymentsCount)} successful payment rows`}
+            icon={<Banknote className="h-4 w-4" />}
           />
           <KpiCard
-            label={`Deals (${dateRange.label})`}
-            value={formatNumber(rangeDeals)}
-            hint={
-              rangeDeals > 0 && rangeRevenue > 0
-                ? `AOV ${formatCurrency(rangeRevenue / rangeDeals, true)}`
-                : "No deals yet"
-            }
-            icon={<Handshake className="h-4 w-4" />}
+            label={`Marketing spend (${dateRange.label})`}
+            value={totals.spend > 0 ? formatCurrency(totals.spend, true) : "—"}
+            hint={totals.spend > 0 ? "Mail sheet + LD" : "Spend feed coming online"}
+            icon={<Banknote className="h-4 w-4" />}
           />
           <KpiCard
-            label={`CPA (${dateRange.label})`}
-            value={
-              rangeSpend > 0 && rangeDeals > 0
-                ? formatCurrency(rangeSpend / rangeDeals, true)
-                : "—"
-            }
-            hint={
-              rangeDeals > 0
-                ? `${formatNumber(rangeDeals)} deal${rangeDeals === 1 ? "" : "s"}`
-                : "Need deals"
-            }
+            label={`Cost per lead — mail (${dateRange.label})`}
+            value={totals.costPerResponse != null ? formatCurrency(totals.costPerResponse, true) : "—"}
+            hint={`${dateRange.from} to ${dateRange.to}`}
             icon={<CalendarRange className="h-4 w-4" />}
           />
-          <KpiCard
-            label={`ROAS (${dateRange.label})`}
-            value={formatRatio(rangeRoas)}
-            hint={`Lifetime ${formatRatio(lifetimeSlice?.roas)}`}
-            icon={<TrendingUp className="h-4 w-4" />}
-          />
-          <KpiCard
-            label="Redlines pending"
-            value={formatNumber(redlines.data?.counts?.pending)}
-            hint={
-              (redlines.data?.counts?.pending ?? 0) > 0
-                ? "Review in Metrics → Redlines"
-                : "All clear"
-            }
-            icon={
-              (redlines.data?.counts?.pending ?? 0) > 0 ? (
-                <AlertTriangle className="h-4 w-4 text-rose-400" />
-              ) : (
-                <Shield className="h-4 w-4 text-emerald-400" />
-              )
-            }
-          />
         </div>
       </section>
-
-      <section aria-label="Inventory counts">
-        <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
-          <Card className="p-4">
-            <div className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
-              Prospects
-            </div>
-            <div className="numeric mt-1 text-xl font-semibold">
-              {formatNumber(ws?.counts.prospects)}
-            </div>
-          </Card>
-          <Card className="p-4">
-            <div className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
-              Case profiles
-            </div>
-            <div className="numeric mt-1 text-xl font-semibold">
-              {formatNumber(ws?.counts.caseProfiles)}
-            </div>
-          </Card>
-          <Card className="p-4">
-            <div className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
-              Payments tracked
-            </div>
-            <div className="numeric mt-1 text-xl font-semibold">
-              {formatNumber(ws?.counts.payments)}
-            </div>
-          </Card>
-          <Card className="p-4">
-            <div className="flex items-center justify-between">
-              <div>
-                <div className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
-                  Open review items
-                </div>
-                <div className="numeric mt-1 text-xl font-semibold">
-                  {formatNumber(ws?.counts.openReviewItems)}
-                </div>
-              </div>
-              {ws?.counts.openReviewItems && ws.counts.openReviewItems > 0 ? (
-                <AlertTriangle className="h-4 w-4 text-amber-500" />
-              ) : null}
-            </div>
-          </Card>
-        </div>
-      </section>
-
-      <div className="grid grid-cols-1 gap-6 xl:grid-cols-3">
-        <Card className="xl:col-span-2">
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2">
-              Source performance
-              <StatusPill tone="info">{dateRange.label}</StatusPill>
-            </CardTitle>
-          </CardHeader>
-          <CardContent className="pt-0">
-            <SourcesPanel
-              query={sources}
-              emptyHint={`No source metrics in ${dateRange.from} to ${dateRange.to}.`}
-            />
-          </CardContent>
-        </Card>
-
-        <DailyPulsePanel query={pulse} />
-      </div>
-
-      <AttributionReviewPanel domain={metricsScope} />
-
-      <Card>
-        <CardHeader className="space-y-3">
-          <div className="flex items-center justify-between gap-3">
-            <CardTitle>Day detail</CardTitle>
-            <StatusPill tone="accent">{selectedDay}</StatusPill>
-          </div>
-          <Input
-            type="date"
-            value={selectedDay}
-            onChange={(event) => setSelectedDay(event.target.value)}
-            className="h-9 max-w-[180px]"
-          />
-        </CardHeader>
-        <CardContent className="pt-0">
-          <DailySummaryPanel query={dayDetail} />
-        </CardContent>
-      </Card>
-
-      <div className="grid grid-cols-1 gap-6 xl:grid-cols-3">
-        <Card className="xl:col-span-2">
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2">
-              <Mail className="h-4 w-4 text-muted-foreground" />
-              Mail costs
-            </CardTitle>
-          </CardHeader>
-          <CardContent className="pt-0">
-            <MailCostsPanel query={mail} />
-          </CardContent>
-        </Card>
-        <Card>
-          <CardHeader>
-            <CardTitle>Redlines & payment alerts</CardTitle>
-          </CardHeader>
-          <CardContent className="pt-0">
-            <RedlinesPanel query={redlines} />
-          </CardContent>
-        </Card>
-      </div>
-
-      <FixedCostsPanel
-        from={dateRange.from}
-        to={dateRange.to}
-        rangeLabel={dateRange.label}
-      />
 
       <Card>
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
-            <PhoneCall className="h-4 w-4 text-muted-foreground" />
-            Callrail aggregates
+            Source performance
+            <StatusPill tone="info">{dateRange.label}</StatusPill>
           </CardTitle>
         </CardHeader>
         <CardContent className="pt-0">
-          <CallrailPanel query={callrail} />
+          <SourceRowsTable rows={rows} />
         </CardContent>
       </Card>
+
+      {PAYMENTS_CSV_IMPORT_VISIBLE ? <PaymentsCsvImportCard /> : null}
+
+      <AttributionReviewPanel domain={metricsScope} />
+
+      {feeds ? (
+        <div className="text-center text-[11px] text-muted-foreground">
+          Feeds — CallRail sync {feedAge(feeds.callrail.lastSyncedAt)} (through {feeds.callrail.latestDay ?? "—"}) ·
+          Spend sheet {feedAge(feeds.spend.lastSyncedAt)} ·
+          PhoneBurner bridge {feedAge(feeds.phoneburner?.lastProjectedCallAt)} {" / "}
+          Payments reconcile {feedAge(feeds.payments.lastReconciledAt)}
+          {feeds.payments.lastSource ? ` (${feeds.payments.lastSource})` : ""}
+        </div>
+      ) : null}
     </div>
   );
 }

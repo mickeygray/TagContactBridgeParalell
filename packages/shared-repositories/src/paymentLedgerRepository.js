@@ -2,6 +2,41 @@
 
 const { PaymentLedger, SourceCanonical } = require("../../shared-models/src");
 
+function normalizeMetricsTreatment(treatment = {}) {
+  const resolvedAt = treatment.resolvedAt == null
+    ? null
+    : new Date(treatment.resolvedAt);
+  if (resolvedAt && Number.isNaN(resolvedAt.getTime())) {
+    throw new TypeError("metricsTreatment.resolvedAt must be a valid date");
+  }
+
+  const nullableText = (value) => {
+    const text = String(value ?? "").trim();
+    return text || null;
+  };
+
+  return {
+    kind: nullableText(treatment.kind),
+    groupKey: nullableText(treatment.groupKey),
+    reportingBucket: nullableText(treatment.reportingBucket),
+    resolvedAt,
+    resolvedBy: nullableText(treatment.resolvedBy),
+    note: nullableText(treatment.note),
+  };
+}
+
+async function setPaymentLedgerMetricsTreatment(casePaymentId, treatment = {}) {
+  const id = Number(casePaymentId);
+  if (!Number.isFinite(id)) {
+    throw new TypeError("casePaymentId must be numeric");
+  }
+  return PaymentLedger.findOneAndUpdate(
+    { casePaymentId: id },
+    { $set: { metricsTreatment: normalizeMetricsTreatment(treatment) } },
+    { new: true, runValidators: true },
+  );
+}
+
 function buildPaymentDateRangeQuery(filters = {}) {
   if (filters.date) {
     return { paymentDateKey: String(filters.date) };
@@ -18,13 +53,88 @@ async function upsertPaymentLedger(casePaymentId, update = {}) {
 }
 
 async function reconcilePaymentLedger(casePaymentId, update = {}) {
+  const id = Number(casePaymentId);
+  const set = {
+    ...update,
+    authoritativeSource: "logics-reconcile",
+    authoritativeAt: new Date(),
+  };
+  // Operator-reviewed reporting treatment is local policy, not a Logics
+  // payment fact. Reconciliation may refresh money/status fields but must
+  // never overwrite a decision already persisted on the ledger row.
+  delete set.metricsTreatment;
+  // The daily Logics CSV truth-up outranks the API reconcile: rows it has
+  // stamped keep their paymentType (the API's positional inference mistyped
+  // chargebacks/retries as "recurring" — 2026-07-24) and keep the csv
+  // authority stamp. Status/amount/date updates still flow from the API.
+  const existing = await PaymentLedger.findOne({ casePaymentId: id })
+    .select("authoritativeSource")
+    .lean();
+  if (existing?.authoritativeSource === "logics-csv") {
+    delete set.paymentType;
+    delete set.authoritativeSource;
+    delete set.authoritativeAt;
+    set.lastObservedAt = new Date();
+  }
+
+  // Twin absorption: if the API is about to INSERT a payment that the CSV
+  // truth-up already inserted under a synthetic negative id (same case,
+  // same amount, ±3 days), the real Logics row absorbs the synthetic —
+  // inheriting its CSV authority + metadata — instead of double-counting.
+  //
+  // The twin must carry the SAME transactionStatus as the incoming row
+  // (2026-07-27): the sheet now ingests FAILED payments too, so a declined
+  // synthetic must be absorbed by the API's declined row — and a declined
+  // incoming row must never absorb a success synthetic (a card that
+  // bounced then went through is two ledger rows, not one).
+  if (!existing && update.caseId != null && update.amount != null && update.paymentDate) {
+    const anchor = new Date(update.paymentDate);
+    const DAY = 24 * 60 * 60 * 1000;
+    const twins = await PaymentLedger.find({
+      casePaymentId: { $lt: 0 },
+      authoritativeSource: "logics-csv",
+      transactionStatus: String(update.transactionStatus || "SUCCESS").toUpperCase(),
+      domain: update.domain,
+      caseId: Number(update.caseId),
+      amount: Number(update.amount),
+      paymentDate: {
+        $gte: new Date(anchor.getTime() - 3 * DAY),
+        $lte: new Date(anchor.getTime() + 3 * DAY),
+      },
+    })
+      .limit(2)
+      .lean();
+    if (twins.length === 1) {
+      const [twin] = twins;
+      set.paymentType = twin.paymentType;
+      set.authoritativeSource = "logics-csv";
+      set.authoritativeAt = twin.authoritativeAt || new Date();
+      if (twin.raw?.csv) {
+        set.raw = { ...(set.raw && typeof set.raw === "object" ? set.raw : {}), csv: twin.raw.csv };
+      }
+      if (twin.metricsTreatment) {
+        set.metricsTreatment = normalizeMetricsTreatment(twin.metricsTreatment);
+      }
+      const promoted = await PaymentLedger.findOneAndUpdate(
+        {
+          _id: twin._id,
+          casePaymentId: twin.casePaymentId,
+        },
+        {
+          $set: {
+            ...set,
+            casePaymentId: id,
+          },
+        },
+        { new: true, runValidators: true },
+      );
+      if (promoted) return promoted;
+    }
+  }
+
   return PaymentLedger.findOneAndUpdate(
-    { casePaymentId: Number(casePaymentId) },
-    { $set: {
-      ...update,
-      authoritativeSource: "logics-reconcile",
-      authoritativeAt: new Date(),
-    } },
+    { casePaymentId: id },
+    { $set: set },
     { new: true, upsert: true, setDefaultsOnInsert: true },
   );
 }
@@ -301,6 +411,7 @@ module.exports = {
   listPayments,
   listPaymentsByDateRange,
   listPaymentsForCase,
+  setPaymentLedgerMetricsTreatment,
   summarizeSuccessfulPaymentsBySource,
   syncPaymentLedgerSourceForCase,
   upsertPaymentLedger,

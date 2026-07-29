@@ -63,3 +63,32 @@ test("direction-specific criteria are filtered before the short section begins",
     /!requiredDirection \|\| requiredDirection === record\.direction/,
   );
 });
+
+test("strict grading only credits evidence quoted from the learner turn", () => {
+  assert.ok(previewSource.includes("quoteAppearsIn(item?.quote, learnerText)"));
+  assert.ok(previewSource.includes("you must QUOTE the exact fragment"));
+  assert.ok(previewSource.includes("When in doubt, the criterion is NOT satisfied"));
+});
+
+test("a verified prohibited move ends the run instead of costing a point", () => {
+  assert.ok(previewSource.includes("prohibitedMove"));
+  assert.ok(previewSource.includes("record.status = prohibited ? \"failed\""));
+  // A violation names WHICH tier it broke: an engraved hard rule or the
+  // packet-scoped prohibited move.
+  assert.ok(previewSource.includes("kind: record.lastProhibitedMove.ruleId ? \"hard-rule\" : \"prohibited-move\""));
+});
+
+test("a failed run repeats the SAME module with a harder persona", () => {
+  // Mickey 2026-07-29: "you have to accomplish things in a certain way or it
+  // repeats itself." Advancement is earned by a pass; failure escalates the
+  // prospect and rotates the situation but never changes the objective.
+  assert.ok(previewSource.includes("record.moduleAttempt += 1"));
+  assert.ok(previewSource.includes("escalatePersona(record.packet, record.moduleAttempt)"));
+  assert.ok(previewSource.includes("moduleSituations[record.moduleAttempt % moduleSituations.length]"));
+  assert.ok(previewSource.includes("record.moduleIndex = Math.min(record.moduleIndex + 1"));
+});
+
+test("persona difficulty never de-escalates on retry", () => {
+  assert.ok(previewSource.includes("Math.min(attempt, ordered.length - 1)"));
+  assert.ok(previewSource.includes("foundation: 0, intermediate: 1, advanced: 2"));
+});

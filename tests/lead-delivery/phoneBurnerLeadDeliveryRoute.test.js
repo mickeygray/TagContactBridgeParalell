@@ -194,12 +194,14 @@ test("official callback shapes normalize to safe typed fields only", () => {
       notes: "private words",
     },
     recording: "private recording",
+    recording_url: "https://recordings.example.invalid/call/102.mp3?token=test",
   }, { receivedAt: NOW, payloadDigest: digest });
   assert.equal(done.status, "pending");
   assert.equal(done.eventType, "call_done");
   assert.equal(done.normalizedOutcome, "voicemail");
   assert.equal(done.safePayload.connected, true);
   assert.equal(done.safePayload.durationSeconds, 42);
+  assert.equal(done.safePayload.recordingUrl, "https://recordings.example.invalid/call/102.mp3?token=test");
   const serialized = JSON.stringify(done);
   for (const privateValue of ["5555550102", "Private", "private@example.invalid", "private words", "private recording"]) {
     assert.equal(serialized.includes(privateValue), false);
@@ -640,4 +642,41 @@ test("server wire is after raw-body parsers, dark by default, and free of legacy
   const publicBlock = nginxSource.match(/location \^~ \/api\/lead-delivery\/phoneburner\/ \{[\s\S]*?\n    \}/)?.[0] || "";
   assert.match(publicBlock, /proxy_pass http:\/\/parallel_cp/);
   assert.doesNotMatch(publicBlock, /auth_request/);
+});
+
+// ── late-arriving recordings (Mickey 2026-07-28) ─────────────────────────
+// "this has to be forward looking so basically keep it in the call end hook
+// and then pull it when its ready."
+//
+// The recording does not exist when the call ends — it is still being
+// written. So the URL arrives on a LATER callback, and the hook must accept
+// it from whichever one carries it. Gating extraction on call_done silently
+// dropped every late URL, which is why 18,187 call_done events carried zero
+// recordings.
+test("a recording URL is captured from ANY callback, not just call_done", () => {
+  const routeSrc = require("node:fs").readFileSync(
+    require("node:path").join(__dirname, "../../apps/control-plane/src/routes/phoneBurnerLeadDelivery.js"),
+    "utf8",
+  );
+  const gated = /recordingUrl:\s*hook\.eventType\s*===\s*"call_done"/.test(routeSrc);
+  assert.equal(gated, false, "extraction must not be gated on the call_done event type");
+  assert.match(routeSrc, /recordingUrl:\s*callbackRecordingUrl\(/, "the URL is taken from the body unconditionally");
+});
+
+test("dedicated recording callbacks are registered and map to call_done", () => {
+  const routeSrc = require("node:fs").readFileSync(
+    require("node:path").join(__dirname, "../../apps/control-plane/src/routes/phoneBurnerLeadDelivery.js"),
+    "utf8",
+  );
+  // Mapping to call_done is what lets buildCapturedEventUpgrade patch the
+  // URL onto the EXISTING attempt rather than creating a second event —
+  // the upgrade path requires matching eventType.
+  for (const hook of ["recording", "recording-ready"]) {
+    assert.ok(routeSrc.includes(`"${hook}"`) || routeSrc.includes(`${hook}:`), `${hook} hook must be registered`);
+  }
+  const recordingLines = routeSrc.split("\n").filter((l) => /recording(-ready)?["']?:\s*Object\.freeze/.test(l));
+  assert.ok(recordingLines.length >= 2, "both recording hooks present");
+  for (const line of recordingLines) {
+    assert.match(line, /eventType:\s*"call_done"/, "recording hooks must map to call_done for the upgrade path");
+  }
 });

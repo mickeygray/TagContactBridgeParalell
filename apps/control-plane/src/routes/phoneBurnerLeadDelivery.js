@@ -15,6 +15,15 @@ const CALLBACK_HOOKS = Object.freeze({
   "call-begin": Object.freeze({ sourceHook: "call_begin", eventType: "call_begin" }),
   "call-done": Object.freeze({ sourceHook: "call_done", eventType: "call_done" }),
   disposition: Object.freeze({ sourceHook: "disposition", eventType: "call_done" }),
+  // The recording does not exist when the call ends — it is still being
+  // written. So a URL may arrive LATER, on the disposition callback or on a
+  // dedicated recording callback. Both map to call_done so that
+  // buildCapturedEventUpgrade's `recordingEvidenceUpgrade` patches the URL
+  // onto the attempt already recorded, instead of creating a second event.
+  // Registered ahead of need: if PhoneBurner is configured to post one, we
+  // accept it; until then it is simply never called.
+  recording: Object.freeze({ sourceHook: "recording", eventType: "call_done" }),
+  "recording-ready": Object.freeze({ sourceHook: "recording_ready", eventType: "call_done" }),
 });
 
 function boundedText(value, maxLength = 256) {
@@ -48,6 +57,18 @@ function nonNegativeIntegerOrNull(value) {
 function callbackAgentId(value) {
   const normalized = String(value || "").trim().toLowerCase();
   return /^[a-z0-9]+(?:_[a-z0-9]+)*$/.test(normalized) ? normalized : null;
+}
+
+function callbackRecordingUrl(value) {
+  const normalized = boundedText(value, 2048);
+  if (!normalized) return null;
+  try {
+    const parsed = new URL(normalized);
+    if (parsed.protocol !== "https:" || parsed.username || parsed.password) return null;
+    return parsed.toString();
+  } catch {
+    return null;
+  }
 }
 
 function callbackHook(value) {
@@ -135,6 +156,18 @@ function normalizePhoneBurnerCallback(sourceHook, body = {}, {
       identityStrength: classification.identityStrength,
       captureReason: classification.reason,
       sourceAgentId: callbackAgentId(sourceAgentId),
+      // Capture a recording URL from WHATEVER callback carries it. Gating
+      // this on call_done meant a URL arriving on any other hook was
+      // silently dropped — and since the file is not ready at call end,
+      // "later" is the normal case, not the exception.
+      recordingUrl: callbackRecordingUrl(
+        body.recording_url
+        ?? body.recordingUrl
+        ?? body.recording?.url
+        ?? body.recording
+        ?? body.call?.recording_url
+        ?? body.audio_url,
+      ),
     },
     status: classification.status,
     attempts: 0,

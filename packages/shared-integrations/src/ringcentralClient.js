@@ -992,6 +992,14 @@ function createRingCentralClient() {
         `/restapi/v1.0/account/~/extension/${extensionPath(extensionId)}/ring-out/${encodeURIComponent(ringOutId)}`,
       );
     },
+    // Passthrough for endpoints that have no bespoke method yet (Analytics,
+    // call-queue reporting, anything new). Reuses the SAME auth, 401-retry
+    // and rate-limit backoff as every other call — the alternative is
+    // re-implementing OAuth at each call site, which is how token handling
+    // drifts. Read-only by convention: pass an explicit method for writes.
+    apiRequest(method, path, options = {}) {
+      return request(String(method || "GET").toUpperCase(), path, options);
+    },
     reinitializePlatform,
     setRefreshCallback,
     stopWarmupTimer,

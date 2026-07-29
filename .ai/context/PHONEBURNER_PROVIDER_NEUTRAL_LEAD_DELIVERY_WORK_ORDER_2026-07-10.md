@@ -120,6 +120,31 @@ or provider-pool capacity.
   physical Pool is below low water. It may also wake this immediate fresh lane,
   but it does not own fresh selection or timing.
 
+
+### 2.0.2 Physical Pool watchdog and Call End recording evidence (2026-07-28 ruling)
+
+The simple daytime loop must recover when an agent's PhoneBurner Pool becomes
+empty without producing another Call End.
+
+- The existing runtime tick performs a bounded watchdog pass; no second
+  scheduler, service, counter, or queue is introduced.
+- The physical PhoneBurner Pool folder is the only capacity truth. Consumer
+  inventory and `estimatedOutstanding` never suppress a watchdog refill.
+- Call End and watchdog use the same decision helper and the same durable
+  per-agent Pool-operation lock. The physical count is read inside that lock,
+  so concurrent triggers cannot create two packets.
+- At or below the low-water boundary, two agreeing physical Pool reads are
+  required before a packet is posted. Failed or contradictory reads fail
+  closed.
+- The watchdog considers only configured, enabled agents whose shift is
+  enabled and not operator-paused, and it runs only while the delivery window,
+  actions, refill, and provider-authoritative inventory are enabled.
+- A watchdog refill never counts an attempt. Exact, persisted Call End remains
+  the only attempt counter.
+- A validated HTTPS PhoneBurner recording link present on Call End is retained
+  as narrow recording evidence. It is carried through the exact event,
+  `DailyDial` attempt, and downstream `CallLog` projection without retaining
+  the raw callback or logging the URL.
 ### 2.1 One canonical lead-delivery store
 
 Create a new provider-neutral collection/model for this runtime. Do not use:

@@ -23,9 +23,6 @@ const {
   runHourlyLeadCadenceEnforcement,
 } = require("./hourlyLeadCadenceEnforcementService");
 const {
-  runHourlyMetricsRefresh,
-} = require("./hourlyMetricsRefreshService");
-const {
   runHourlyCallLogHygiene,
 } = require("./hourlyCallLogHygieneService");
 const {
@@ -602,27 +599,6 @@ async function runLeadCadenceEnforcement({
   }
 }
 
-async function runMetricsRefresh({
-  logger,
-  preferLegacyContactActivities = false,
-  date = null,
-} = {}) {
-  try {
-    const result = await runHourlyMetricsRefresh({
-      logger,
-      preferLegacyContactActivities,
-      date,
-    });
-    if (result.totals.callStatImports > 0 || result.totals.errors > 0) {
-      logger?.info?.("hourly.metrics.refresh", result.totals);
-    }
-    return result;
-  } catch (error) {
-    logger?.warn?.("hourly.metrics.refresh_failed", { error: error.message });
-    return { error: error.message };
-  }
-}
-
 async function runCallLogHygiene({
   logger,
   lane = "hourly",
@@ -1128,12 +1104,35 @@ async function runHourlySweep({
             dryRun: cxTerminalRectificationDryRun,
           })
         : { skipped: true, reason: "disabled" },
-      metricsRefresh: metricsRefreshEnabled
-        ? await runMetricsRefresh({
-            logger,
-            preferLegacyContactActivities: metricsRefreshPreferLegacyContactActivities,
-          })
-        : { skipped: true, reason: "disabled" },
+      // Legacy hourly metrics recompute RETIRED 2026-07-27: the board and
+      // emails read the payment sheet, not callStat/snapshot rollups.
+      metricsRefresh: { skipped: true, reason: "retired" },
+      // CallRail → DailyCallStat: the declared response-call feeder
+      // (marker-stamped rows; see callrailDailyStatSyncService). Syncs
+      // yesterday+today each pass — full-day recompute, idempotent, one
+      // CallRail API pull. Env-gated here (not via caller params) so the
+      // lite/full phase split can't silently starve it: it runs on EVERY
+      // scheduled tick, business hours included.
+      callrailStatSync:
+        String(process.env.CALLRAIL_STAT_SYNC_ENABLED ?? "false") === "true"
+          ? await (async () => {
+              try {
+                const { syncCallrailDailyStats } = require("./callrailDailyStatSyncService");
+                const dayMs = 24 * 60 * 60 * 1000;
+                const laDay = (offsetDays) =>
+                  new Intl.DateTimeFormat("en-CA", {
+                    timeZone: "America/Los_Angeles",
+                    year: "numeric",
+                    month: "2-digit",
+                    day: "2-digit",
+                  }).format(new Date(Date.now() - offsetDays * dayMs));
+                return await syncCallrailDailyStats({ from: laDay(1), to: laDay(0) });
+              } catch (error) {
+                logger?.warn?.("callrail.stat_sync.failed", { error: error.message });
+                return { error: error.message };
+              }
+            })()
+          : { skipped: true, reason: "disabled" },
       // CX recording archive - pulls the previous :45-to-:45 hour of
       // CX-platform calls from RingCX's interaction-metadata, downloads
       // the WAV per segment, and hands off to the existing archive ->

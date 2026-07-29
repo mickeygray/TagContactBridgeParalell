@@ -53,6 +53,9 @@ const caseProfileSchema = new mongoose.Schema(
       email: { type: String, default: null },
       cellPhone: { type: String, default: null },
       homePhone: { type: String, default: null },
+      // Logics returns SpouseWorkPhone and we had no slot for it — a real
+      // number that can carry attribution (work order §3.5).
+      workPhone: { type: String, default: null },
       ssnEncrypted: { type: String, default: null },
     },
     // ── Mailing address (mirrored from Logics + intake) ───────────
@@ -305,6 +308,12 @@ const caseProfileSchema = new mongoose.Schema(
 );
 
 caseProfileSchema.index({ domain: 1, caseId: 1 }, { unique: true });
+// Phone → case lookup. `normalizedPhones` is the union of the case's own
+// cell/home/work AND the spouse's (see casePhoneFoldService): attribution
+// sometimes hides behind a spouse number, and this array was previously
+// UNINDEXED and unpopulated, so every phone match fell back to a scan or
+// simply missed (work order §3.5; proven on case 415022).
+caseProfileSchema.index({ domain: 1, normalizedPhones: 1 });
 caseProfileSchema.index({ domain: 1, sourceCanonicalId: 1, convertedAt: -1 });
 caseProfileSchema.index({ domain: 1, caseCreatedDate: 1 });
 caseProfileSchema.index({

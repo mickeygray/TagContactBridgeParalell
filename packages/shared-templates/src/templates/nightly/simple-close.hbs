@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">{{> base-css}}</head>
+<body>
+  <div class="wrap">
+    {{> header}}
+
+    {{#if narrativeLines.length}}
+    <div class="section">
+      {{#each narrativeLines}}
+      <p style="margin:0 0 6px 0;">{{this}}</p>
+      {{/each}}
+    </div>
+    {{/if}}
+
+    <div class="section">
+      {{> kpi-tiles tiles=tiles}}
+    </div>
+
+    <div class="section">
+      <h2>By source — {{dateKey}}</h2>
+      <table class="data" cellpadding="0" cellspacing="0">
+        <tr>
+          <th>Source</th>
+          <th class="center">Unique Leads</th>
+          <th class="center">Calls</th>
+          <th class="center">Initials</th>
+          <th class="center">Initials $</th>
+          <th class="center">Spend</th>
+        </tr>
+        {{#each rows}}
+        <tr>
+          <td>{{source}}</td>
+          <td class="center">{{responses}}</td>
+          <td class="center">{{calls}}</td>
+          <td class="center">{{initialsCount}}</td>
+          <td class="center">{{initialsAmountLabel}}</td>
+          <td class="center">{{spendLabel}}</td>
+        </tr>
+        {{/each}}
+      </table>
+    </div>
+
+    {{#if byDomain.length}}
+    <div class="section">
+      <h2>By company</h2>
+      <table class="data" cellpadding="0" cellspacing="0">
+        <tr>
+          <th>Company</th>
+          <th class="center">New Clients</th>
+          <th class="center">Initials $</th>
+          <th class="center">Collected (cash)</th>
+        </tr>
+        {{#each byDomain}}
+        <tr>
+          <td>{{domain}}</td>
+          <td class="center">{{deals}}</td>
+          <td class="center">{{initialsLabel}}</td>
+          <td class="center">{{cashLabel}}</td>
+        </tr>
+        {{/each}}
+      </table>
+    </div>
+    {{/if}}
+
+    {{#if dealsBySource.length}}
+    <div class="section">
+      <h2>Deals by source</h2>
+      <table class="data" cellpadding="0" cellspacing="0">
+        <tr><th>Source</th><th class="center">Deals</th><th class="center">Initials $</th></tr>
+        {{#each dealsBySource}}
+        <tr><td>{{source}}</td><td class="center">{{count}}</td><td class="center">{{amountLabel}}</td></tr>
+        {{/each}}
+      </table>
+    </div>
+    {{/if}}
+
+    {{#if statusChangeRows.length}}
+    <div class="section">
+      <h2>Status changes today (from Activities)</h2>
+      <table class="data" cellpadding="0" cellspacing="0">
+        <tr><th>Category</th><th class="center">Cases</th></tr>
+        {{#each statusChangeRows}}
+        <tr><td>{{category}}</td><td class="center">{{count}}</td></tr>
+        {{/each}}
+      </table>
+    </div>
+    {{/if}}
+
+    {{#if officers.length}}
+    <div class="section">
+      <h2>Cash by settlement officer</h2>
+      <table class="data" cellpadding="0" cellspacing="0">
+        <tr><th>Officer</th><th class="center">Cash</th></tr>
+        {{#each officers}}
+        <tr><td>{{officer}}</td><td class="center">{{cashLabel}}</td></tr>
+        {{/each}}
+      </table>
+    </div>
+    {{/if}}
+
+    {{#if failedPayments.length}}
+    <div class="section">
+      <h2>Payments that didn't process</h2>
+      <table class="data" cellpadding="0" cellspacing="0">
+        <tr><th>Case</th><th>Client</th><th class="center">Amount</th><th class="center">Status</th><th class="center">Date</th></tr>
+        {{#each failedPayments}}
+        <tr>
+          <td>{{caseLabel}}</td>
+          <td>{{client}}</td>
+          <td class="center">{{amountLabel}}</td>
+          <td class="center">{{status}}</td>
+          <td class="center">{{dateKey}}</td>
+        </tr>
+        {{/each}}
+      </table>
+    </div>
+    {{/if}}
+
+    {{#if longCalls.length}}
+    <div class="section">
+      <h2>Long calls (5m+)</h2>
+      <table class="data" cellpadding="0" cellspacing="0">
+        <tr><th>Agent</th><th class="center">Length</th><th>Contact</th><th>Listen</th></tr>
+        {{#each longCalls}}
+        <tr>
+          <td>{{agentName}}</td>
+          <td class="center">{{durationLabel}}</td>
+          <td>{{contactName}} {{caseLabel}}</td>
+          <td>{{#if listenUrl}}<a href="{{listenUrl}}">listen</a>{{else}}recording {{recordingStatus}}{{/if}}</td>
+        </tr>
+        {{/each}}
+      </table>
+    </div>
+    {{/if}}
+
+    {{#if restatements.length}}
+    <div class="section">
+      <h2>Restated to the month of the sale</h2>
+      <table class="data" cellpadding="0" cellspacing="0">
+        <tr>
+          <th>Case</th>
+          <th class="center">What</th>
+          <th class="center">Amount</th>
+          <th class="center">Paid</th>
+          <th class="center">Belongs to</th>
+        </tr>
+        {{#each restatements}}
+        <tr>
+          <td>{{caseLabel}}</td>
+          <td class="center">{{kind}}</td>
+          <td class="center">{{amountLabel}}</td>
+          <td class="center">{{paidOn}}</td>
+          <td class="center">{{soldOn}}</td>
+        </tr>
+        {{/each}}
+      </table>
+      <div class="footer-small">{{restatementNote}}</div>
+    </div>
+    {{/if}}
+
+    <div class="section">
+      <div class="footer-line">{{footerLine}}</div>
+      {{#if reconcileLine}}<div class="footer-small">{{reconcileLine}}</div>{{/if}}
+      {{#if footerSmall}}<div class="footer-small">{{footerSmall}}</div>{{/if}}
+    </div>
+  </div>
+</body></html>

@@ -22,6 +22,21 @@ function isWeakOutcome(value) {
   return ["answered", "review"].includes(String(value || "").trim().toLowerCase());
 }
 
+function normalizeRecordingUrl(value) {
+  if (value == null || value === "") return null;
+  const normalized = String(value).trim();
+  if (!normalized || normalized.length > 2048) throw new TypeError("recordingUrl is invalid");
+  try {
+    const parsed = new URL(normalized);
+    if (parsed.protocol !== "https:" || parsed.username || parsed.password) {
+      throw new TypeError("recordingUrl is invalid");
+    }
+    return parsed.toString();
+  } catch {
+    throw new TypeError("recordingUrl is invalid");
+  }
+}
+
 function snapshotLead(cadence = {}) {
   return {
     normalizedPhone: cadence.normalizedPhone || cadence.phone || null,
@@ -48,6 +63,7 @@ async function recordDailyDialOffload({
   callStartedAt = null,
   callEndedAt = null,
   durationSeconds = null,
+  recordingUrl = null,
   now = new Date(),
   model = DailyDial,
 } = {}) {
@@ -90,6 +106,7 @@ async function recordDailyDialOffload({
   if (seconds != null && (!Number.isFinite(seconds) || seconds < 0)) {
     throw new TypeError("durationSeconds is invalid");
   }
+  const safeRecordingUrl = normalizeRecordingUrl(recordingUrl);
   const identity = { domain: String(cadence.domain).trim().toLowerCase(), caseId: String(cadence.caseId).trim(), dateKey };
   const pool = String(originPool || "unknown").trim() || "unknown";
   const normalizedAgentId = String(agentId || "").trim().toLowerCase() || null;
@@ -112,6 +129,7 @@ async function recordDailyDialOffload({
         callStartedAt: startedAt,
         callEndedAt: at,
         durationSeconds: seconds,
+        recordingUrl: safeRecordingUrl,
         originPool: pool,
         lastAgentId: normalizedAgentId,
         lastOutcome: incomingOutcome,
@@ -164,6 +182,7 @@ async function recordDailyDialOffload({
     callStartedAt: attemptStartedAt,
     callEndedAt: attemptEndedAt,
     durationSeconds: seconds == null ? (existingAttempt?.durationSeconds ?? null) : seconds,
+    recordingUrl: safeRecordingUrl || existingAttempt?.recordingUrl || null,
     originPool: pool === "unknown" ? (existingAttempt?.originPool || pool) : pool,
     dailyAttemptCount: Math.max(canonicalCount, Number(existingAttempt?.dailyAttemptCount || 0)),
     totalAttemptCount: Math.max(canonicalTotal, Number(existingAttempt?.totalAttemptCount || 0)),
@@ -190,6 +209,7 @@ async function recordDailyDialOffload({
     callStartedAt: attemptStartedAt,
     callEndedAt: at,
     durationSeconds: attempt.durationSeconds,
+    recordingUrl: attempt.recordingUrl,
     originPool: attempt.originPool,
     lastAgentId: attempt.agentId,
     lastOutcome: outcome,
@@ -209,6 +229,7 @@ async function recordDailyDialOffload({
       "attempts.$.callStartedAt": attempt.callStartedAt,
       "attempts.$.callEndedAt": attempt.callEndedAt,
       "attempts.$.durationSeconds": attempt.durationSeconds,
+      "attempts.$.recordingUrl": attempt.recordingUrl,
       "attempts.$.originPool": attempt.originPool,
       "attempts.$.dailyAttemptCount": attempt.dailyAttemptCount,
       "attempts.$.totalAttemptCount": attempt.totalAttemptCount,
@@ -234,6 +255,7 @@ async function recordDailyDialOffload({
           "attempts.$.callStartedAt": attempt.callStartedAt,
           "attempts.$.callEndedAt": attempt.callEndedAt,
           "attempts.$.durationSeconds": attempt.durationSeconds,
+          "attempts.$.recordingUrl": attempt.recordingUrl,
           "attempts.$.dailyAttemptCount": attempt.dailyAttemptCount,
           "attempts.$.totalAttemptCount": attempt.totalAttemptCount,
         } },

@@ -17,6 +17,7 @@ const {
   getClientProfileByCaseNumber,
   mergeShorthandFields,
 } = require("../../shared-repositories/src/clientProfileRepository");
+const { rollupStatusChanges } = require("./activityStatusChangeRollupService");
 
 const DEFAULT_DOMAIN = "TAG";
 const DEFAULT_TIMEZONE = "America/Los_Angeles";
@@ -1489,6 +1490,12 @@ function buildEmailText({ domain, dateKey, startDateKey, endDateKey, processed }
     processed.clientProfileNoticeAlerts
       ? `Client profile stamp skips/errors: ${(processed.clientProfileNoticeAlerts.skipped || 0) + (processed.clientProfileNoticeAlerts.failed || 0)}`
       : "",
+    processed.statusChangeCounts && !processed.statusChangeCounts.error
+      ? `DNC'd today (from Activities): ${processed.statusChangeCounts.dnc || 0}`
+      : "",
+    processed.statusChangeCounts && !processed.statusChangeCounts.error
+      ? `Post-dated today (from Activities): ${processed.statusChangeCounts.postdate || 0}`
+      : "",
     `Suspended status changes: ${processed.suspendedStatusChanges || 0}`,
     `Suspended changes still current: ${processed.suspendedCurrentStatusChanges || 0}`,
     `Suspended changes no longer current: ${processed.suspendedStaleStatusChanges || 0}`,
@@ -1607,6 +1614,22 @@ async function runLogicsActivityReviewBatch(options = {}) {
     suspendedCurrentStatusChanges: sumProcessed(results, "suspendedCurrentStatusChanges"),
     suspendedOutputRows: combinedSuspendedRows.length,
     suspendedUniqueCases: combinedSuspendedRows.length,
+    statusChangeCounts: {
+      dnc: sumProcessed(results, "statusChangeCounts.dnc"),
+      postdate: sumProcessed(results, "statusChangeCounts.postdate"),
+      casesChanged: sumProcessed(results, "statusChangeCounts.casesChanged"),
+      unresolved: sumProcessed(results, "statusChangeCounts.unresolved"),
+      byDomain: Object.fromEntries(
+        results.map((result) => [
+          result.domain,
+          {
+            dnc: result.processed?.statusChangeCounts?.dnc || 0,
+            postdate: result.processed?.statusChangeCounts?.postdate || 0,
+            casesChanged: result.processed?.statusChangeCounts?.casesChanged || 0,
+          },
+        ]),
+      ),
+    },
     aiReview: {
       enabled: results.some((result) => result.processed?.aiReview?.enabled),
       reviewedCases: sumProcessed(results, "aiReview.reviewedCases"),
@@ -1716,6 +1739,14 @@ async function runLogicsActivityReview(options = {}) {
     concurrency,
     options,
   });
+  // EOD status-change counts from the same activity feed (Mickey
+  // 2026-07-27: count DNCs and post-dates from the canonical source —
+  // Activities). Counting must never break the review itself.
+  try {
+    processed.statusChangeCounts = rollupStatusChanges({ domain, rows: request.rows });
+  } catch (error) {
+    processed.statusChangeCounts = { error: String(error.message).slice(0, 160) };
+  }
   const email = sendEmail
     ? await emailActivityReview(
         { request, processed },

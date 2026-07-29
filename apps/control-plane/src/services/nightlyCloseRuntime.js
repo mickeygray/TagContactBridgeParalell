@@ -3,7 +3,13 @@
 const {
   recordServiceAlert,
   runGroupedNightlyClose,
+  scanPaymentMetricsExceptions,
 } = require("../../../../packages/shared-services/src");
+const {
+  resolveNightlyEmailMode,
+  sendSimpleNightlyEmail,
+} = require("../../../../packages/shared-services/src/simpleNightlyEmailService");
+const { getCompanyKeys } = require("../../../../packages/shared-config/src");
 
 const REQUIRED_NIGHTLY_DOMAINS = ["WYNN", "TAG"];
 const DEFAULT_WEEKDAYS = Object.freeze([1, 2, 3, 4, 5]);
@@ -257,12 +263,22 @@ function createNightlyCloseRuntime({
         ),
       };
 
+      const requestedLegacyEmail = options.sendEmail !== undefined
+        ? Boolean(options.sendEmail)
+        : state.sendEmail;
+      const emailMode = resolveNightlyEmailMode({
+        legacyEnabled: requestedLegacyEmail,
+        explicitlyDisabled: options.sendEmail === false,
+      });
+      if (emailMode.conflict) {
+        runtime.logger.error("nightly.email_mode_conflict", {
+          reason: "legacy-and-simple-enabled",
+        });
+      }
+
       const groupedResult = await runGroupedNightlyClose(selectedDomains, {
         ...options,
-        sendEmail:
-          options.sendEmail !== undefined
-            ? Boolean(options.sendEmail)
-            : state.sendEmail,
+        sendEmail: emailMode.mode === "legacy",
         skipFinalClosePass:
           options.skipFinalClosePass !== undefined
             ? Boolean(options.skipFinalClosePass)
@@ -282,9 +298,43 @@ function createNightlyCloseRuntime({
         logger: runtime.logger,
       });
 
+      let paymentReview = null;
+      try {
+        paymentReview = await scanPaymentMetricsExceptions({
+          domains: getCompanyKeys(),
+          from: `${String(groupedResult.date).slice(0, 7)}-01`,
+          to: groupedResult.date,
+        });
+        runtime.logger.info("nightly.payment_metrics_review", paymentReview);
+      } catch (error) {
+        paymentReview = { error: error.message };
+        runtime.logger.warn("nightly.payment_metrics_review.failed", {
+          error: error.message,
+        });
+      }
+
+      // Exactly one report mode may send. Historical/manual rebuilds can
+      // pass sendEmail=false to suppress both paths. The simple report uses
+      // the grouped close's explicit date, never the wall clock.
+      let simpleEmail = { sent: false, skipped: true, reason: `email-mode-${emailMode.mode}` };
+      if (emailMode.mode === "simple") {
+        try {
+          simpleEmail = await sendSimpleNightlyEmail({
+            dateKey: groupedResult.date,
+            logger: runtime.logger,
+          });
+          runtime.logger.info("nightly.simple_email", simpleEmail);
+        } catch (error) {
+          simpleEmail = { sent: false, error: error.message };
+          runtime.logger.warn("nightly.simple_email.failed", { error: error.message });
+        }
+      }
       state.lastCompletedAt = new Date();
       state.lastResult = {
         domains: selectedDomains,
+        emailMode,
+        simpleEmail,
+        paymentReview,
         emails: groupedResult.results,
         finalClose: {
           spendSync: groupedResult.finalClose?.spendSync || null,

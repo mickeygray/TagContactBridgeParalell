@@ -204,12 +204,44 @@ function normalizePaymentRows(rawPayments, domain) {
     )
     .sort(comparePaymentRows);
 
+  // Type precedence (fixed 2026-07-24 — the old first=initial/rest=recurring
+  // positional guess OVERRODE Logics' own PaymentType field, mistyping
+  // chargebacks and declined-then-retried initials as "recurring"):
+  //   1. Logics' PaymentType field, when it says initial/recurring.
+  //   2. Negative amounts are REVERSALS: inherit the type of the matching
+  //      positive success (same |amount|) — a charged-back initial must
+  //      reverse under initials, never haunt recurring.
+  //   3. Positional fallback: first POSITIVE success = initial, rest
+  //      recurring.
   const paymentTypeById = new Map();
-  successful.forEach((row, index) => {
+  const positiveSuccesses = successful.filter((row) => parseFloat(row?.Amount) > 0);
+  positiveSuccesses.forEach((row, index) => {
     const casePaymentId = Number(row?.CasePaymentID);
     if (!Number.isFinite(casePaymentId) || casePaymentId <= 0) return;
-    paymentTypeById.set(casePaymentId, index === 0 ? "initial" : "recurring");
+    const fieldType = inferPaymentType(row);
+    paymentTypeById.set(
+      casePaymentId,
+      fieldType !== "unknown" ? fieldType : index === 0 ? "initial" : "recurring",
+    );
   });
+  for (const row of successful) {
+    const casePaymentId = Number(row?.CasePaymentID);
+    if (!Number.isFinite(casePaymentId) || casePaymentId <= 0) continue;
+    const amount = parseFloat(row?.Amount);
+    if (!(amount < 0)) continue;
+    const fieldType = inferPaymentType(row);
+    if (fieldType !== "unknown") {
+      paymentTypeById.set(casePaymentId, fieldType);
+      continue;
+    }
+    const reversed = positiveSuccesses.find(
+      (candidate) => parseFloat(candidate?.Amount) === -amount,
+    );
+    const reversedType = reversed
+      ? paymentTypeById.get(Number(reversed?.CasePaymentID))
+      : null;
+    paymentTypeById.set(casePaymentId, reversedType || "unknown");
+  }
 
   return rows
     .map((row) =>
@@ -531,15 +563,25 @@ async function reconcilePaymentsForDomain({
     maxCases,
   );
 
-  // Unknown-type rows first — dedup against the round-robin batch.
+  // Fresh-case lane: recently created cases re-check every ~2h regardless
+  // of the round-robin — new deals close on new cases, and waiting for
+  // the wheel meant a same-day payment could go days unseen (2026-07-24).
+  const recent = await caseProfileRepository
+    .findRecentCaseProfilesForPaymentReconcile(normalizedDomain)
+    .catch(() => []);
+
+  // Unknown-type rows first — dedup against the other lanes.
   const unknownCaseIds = await findUnknownTypeCaseIds(normalizedDomain)
     .catch(() => []);
   const dueCaseIds = new Set(due.map((p) => Number(p.caseId)));
+  const recentLane = recent.filter((p) => !dueCaseIds.has(Number(p.caseId)));
+  for (const p of recentLane) dueCaseIds.add(Number(p.caseId));
   const healCaseIds = unknownCaseIds.filter((id) => !dueCaseIds.has(id));
 
   const summary = {
     domain: normalizedDomain,
-    casesScanned: due.length + healCaseIds.length,
+    casesScanned: due.length + recentLane.length + healCaseIds.length,
+    recentCaseLane: recentLane.length,
     unknownTypeHeals: healCaseIds.length,
     casesWithPayments: 0,
     newLedgerRows: 0,
@@ -555,7 +597,7 @@ async function reconcilePaymentsForDomain({
     });
   }
 
-  for (const profile of [...healCaseIds.map((caseId) => ({ caseId })), ...due]) {
+  for (const profile of [...healCaseIds.map((caseId) => ({ caseId })), ...recentLane, ...due]) {
     const caseId = Number(profile.caseId);
     if (!Number.isFinite(caseId)) continue;
     const result = await reconcilePaymentsForCase({

@@ -31,7 +31,18 @@ const {
   CONTENT_VERSION,
   RULE_REVISION,
   TAX_RESOLUTION_SKILL_PACKETS,
+  TAX_RESOLUTION_TOPIC_PACKETS,
 } = require("../packages/shared-services/src/trainer-content/taxResolutionSkillPackets.v1");
+const {
+  TAX_RESOLUTION_HARD_RULES,
+} = require("../packages/shared-services/src/trainer-content/taxResolutionHardRules.v1");
+
+// The rail shows the whole grid: the 8 call-arc sections, then the three
+// cross-call topic families (objections / tactics / tax) as sections 8-10.
+const ALL_PREVIEW_PACKETS = [
+  ...TAX_RESOLUTION_SKILL_PACKETS,
+  ...TAX_RESOLUTION_TOPIC_PACKETS,
+];
 
 const HOST = "127.0.0.1";
 const PORT = Number(process.env.TRAINER_SKILL_PREVIEW_PORT || 5001);
@@ -50,7 +61,7 @@ const previewAudioUpload = multer({
 });
 
 const packetsByItemId = new Map(
-  TAX_RESOLUTION_SKILL_PACKETS.map((packet) => [packet.id, packet]),
+  ALL_PREVIEW_PACKETS.map((packet) => [packet.id, packet]),
 );
 const attempts = new Map();
 let enrolled = true;
@@ -257,24 +268,28 @@ async function acceptVoiceTurn(record, {
     };
   }
 
-  const satisfiedIds = await gradeLearnerTurn(record, learnerText);
-  for (const criterionId of satisfiedIds) {
+  const graded = await gradeLearnerTurn(record, learnerText);
+  for (const criterionId of graded.satisfiedIds) {
     record.satisfiedCriterionIds.add(criterionId);
     record.criterionEvidenceTurnIds.set(
       criterionId,
       `preview-turn-${turnNumber}`,
     );
   }
+  record.lastProhibitedMove = graded.prohibited;
   const prospectText = String(voiceTurn.response?.text || "").trim();
   record.tape.push({ speaker: "learner", text: learnerText });
   if (prospectText) record.tape.push({ speaker: "prospect", text: prospectText });
   bundle.messages = voiceTurn.messages || bundle.messages || [];
   record.version += 1;
   record.nextTurn += 1;
-  const passed =
+  // A verified prohibited move ends the run on the spot — the strict rule is
+  // not "lose a point", it is "that is not how this section is done; again."
+  const prohibited = Boolean(graded.prohibited);
+  const passed = !prohibited &&
     record.satisfiedCriterionIds.size >= activeCriteria(record).length;
   const exhausted = record.nextTurn > record.packet.maxTurns;
-  record.status = passed ? "passed" : exhausted ? "failed" : "in_progress";
+  record.status = prohibited ? "failed" : passed ? "passed" : exhausted ? "failed" : "in_progress";
   const nextCriterion = activeCriteria(record).find(
     (criterion) => !record.satisfiedCriterionIds.has(criterion.criterionId),
   );
@@ -295,12 +310,22 @@ async function acceptVoiceTurn(record, {
   };
 }
 
+// Case/whitespace-insensitive substring check so a model-quoted fragment can
+// be verified against what the learner actually said. An uncited satisfaction
+// is worth nothing — that is the strictness Mickey asked for: "you have to
+// accomplish things in a certain way," and the certain way must be quotable.
+function quoteAppearsIn(quote, text) {
+  const fold = (v) => String(v || "").toLowerCase().replace(/[^a-z0-9$%]+/g, " ").trim();
+  const q = fold(quote);
+  return q.length >= 4 && fold(text).includes(q);
+}
+
 async function gradeLearnerTurn(record, learnerText) {
   const pending = activeCriteria(record).filter(
     (criterion) => !record.satisfiedCriterionIds.has(criterion.criterionId),
   );
-  if (pending.length === 0) return [];
-  if (!anthropicClient) return [pending[0].criterionId];
+  if (pending.length === 0) return { satisfiedIds: [], prohibited: null };
+  if (!anthropicClient) return { satisfiedIds: [pending[0].criterionId], prohibited: null };
 
   const response = await anthropicClient.createMessage({
     model: PROSPECT_MODEL,
@@ -308,10 +333,12 @@ async function gradeLearnerTurn(record, learnerText) {
     temperature: 0,
     timeoutMs: 20_000,
     system: [
-      "You are the evidence evaluator for one short tax-resolution sales training section.",
+      "You are the STRICT evidence evaluator for one short tax-resolution sales training section.",
       "Judge only the agent's newest spoken turn against the supplied pending criteria.",
-      "A criterion is satisfied only when the newest turn itself contains clear evidence.",
-      "Do not reward the prospect's words, prior agent turns, vague intent, or partial implication.",
+      "A criterion is satisfied only when the newest turn itself contains clear evidence, and you must QUOTE the exact fragment that demonstrates it.",
+      "Do not reward the prospect's words, prior agent turns, vague intent, partial implication, or merely mentioning the topic. When in doubt, the criterion is NOT satisfied.",
+      "Separately: if the newest turn commits any listed prohibited move OR violates any engraved hard rule, report it with the exact quote (and the ruleId when it is a hard rule). Either is a run-ending event.",
+      "Execution is flexible — the learner may use their own words. The boundaries are not: a half-promise, a misstated identity, or an invented record fact ends the run regardless of phrasing.",
       "Return only the required tool call.",
     ].join("\n"),
     messages: [{
@@ -325,34 +352,80 @@ async function gradeLearnerTurn(record, learnerText) {
           description: criterion.description,
           evidenceGuidance: criterion.evidenceGuidance,
         })),
+        prohibitedMoves: record.packet.prohibitedMoves,
+        // Engraved boundaries — hold in EVERY section; a verified violation
+        // ends the run no matter how well the turn scored otherwise.
+        hardRules: TAX_RESOLUTION_HARD_RULES.map((rule) => ({
+          ruleId: rule.ruleId,
+          statement: rule.statement,
+          detectionGuidance: rule.detectionGuidance,
+        })),
         newestAgentTurn: learnerText,
       }),
     }],
     tools: [{
       name: "record_section_evidence",
-      description: "Record criteria clearly demonstrated in the newest agent turn.",
+      description: "Record criteria clearly demonstrated in the newest agent turn, each with its verbatim evidence quote, and any prohibited move committed.",
       input_schema: {
         type: "object",
         additionalProperties: false,
         properties: {
-          satisfiedCriterionIds: {
+          evidence: {
             type: "array",
             items: {
-              type: "string",
-              enum: pending.map((criterion) => criterion.criterionId),
+              type: "object",
+              additionalProperties: false,
+              properties: {
+                criterionId: {
+                  type: "string",
+                  enum: pending.map((criterion) => criterion.criterionId),
+                },
+                quote: { type: "string", minLength: 4, maxLength: 300 },
+              },
+              required: ["criterionId", "quote"],
             },
           },
+          prohibitedMove: {
+            type: ["object", "null"],
+            additionalProperties: false,
+            properties: {
+              move: { type: "string" },
+              ruleId: {
+                type: ["string", "null"],
+                enum: [...TAX_RESOLUTION_HARD_RULES.map((rule) => rule.ruleId), null],
+              },
+              quote: { type: "string", minLength: 4, maxLength: 300 },
+            },
+            required: ["move", "quote"],
+          },
         },
-        required: ["satisfiedCriterionIds"],
+        required: ["evidence", "prohibitedMove"],
       },
     }],
     toolChoice: { type: "tool", name: "record_section_evidence" },
   });
   const tool = extractToolUse(response, "record_section_evidence");
   const allowed = new Set(pending.map((criterion) => criterion.criterionId));
-  return [...new Set(tool?.input?.satisfiedCriterionIds || [])]
-    .map(String)
-    .filter((criterionId) => allowed.has(criterionId));
+  // Server-side verification: a satisfaction only counts when its quote
+  // actually appears in what the learner said. The model proposes; the
+  // transcript disposes.
+  const satisfiedIds = [];
+  for (const item of tool?.input?.evidence || []) {
+    const criterionId = String(item?.criterionId || "");
+    if (!allowed.has(criterionId) || satisfiedIds.includes(criterionId)) continue;
+    if (!quoteAppearsIn(item?.quote, learnerText)) continue;
+    satisfiedIds.push(criterionId);
+  }
+  let prohibited = null;
+  const flagged = tool?.input?.prohibitedMove;
+  if (flagged && quoteAppearsIn(flagged.quote, learnerText)) {
+    prohibited = {
+      move: String(flagged.move || "prohibited move"),
+      ruleId: flagged.ruleId ? String(flagged.ruleId) : null,
+      quote: String(flagged.quote),
+    };
+  }
+  return { satisfiedIds, prohibited };
 }
 
 async function gradeModuleAnswer(record, answer) {
@@ -504,10 +577,20 @@ function ok(res, result) {
 }
 
 function railItems() {
-  return TAX_RESOLUTION_SKILL_PACKETS.map((packet) => ({
+  return ALL_PREVIEW_PACKETS.map((packet) => ({
     itemId: packet.id,
     itemVersion: packet.version,
-    title: `${packet.sectionId}. ${packet.title}`,
+    // The section number travels as its OWN field. Baking it into the title
+    // made the rail render "5. 4B. Payment Terms" — its array index plus the
+    // curriculum number, neither of which agree.
+    title: packet.title,
+    sectionLabel: packet.sectionId,
+    // The practices inside this section, so an open section can list 4B.1-4B.4
+    // instead of repeating the section list back at the learner.
+    modules: (packet.practiceModules || []).map((moduleDef) => ({
+      moduleId: moduleDef.moduleId,
+      title: moduleDef.title,
+    })),
     type: "gauntlet",
     status: "available",
     required: true,
@@ -620,6 +703,19 @@ function gauntletState(record) {
     nextTurn: record.nextTurn,
     currentNodeId: `section-${record.packet.sectionId}-turn-${record.nextTurn}`,
     variantId: record.variant.variantId,
+    // Why a run ended matters as much as that it ended: a prohibited move is
+    // a different lesson than running out of turns, and the player can say so.
+    failureReason: record.status === "failed"
+      ? (record.lastProhibitedMove
+        ? {
+          kind: record.lastProhibitedMove.ruleId ? "hard-rule" : "prohibited-move",
+          ruleId: record.lastProhibitedMove.ruleId || null,
+          move: record.lastProhibitedMove.move,
+          quote: record.lastProhibitedMove.quote,
+        }
+        : { kind: "turns-exhausted" })
+      : null,
+    completedModuleIds: [...(record.completedModuleIds || [])],
     criteria: activeCriteria(record).map((criterion) => ({
       criterionId: criterion.criterionId,
       ruleId: criterion.ruleId,
@@ -650,7 +746,8 @@ function gauntletResult(record, extras = {}) {
       title: record.module.title,
       objective: record.module.objective,
       reading: record.module.reading,
-      moduleNumber: record.runNumber + 1,
+      moduleNumber: (record.moduleIndex ?? 0) + 1,
+      moduleAttempt: (record.moduleAttempt ?? 0) + 1,
       moduleCount: record.packet.practiceModules.length,
       question: record.module.questions?.[0]
         ? {
@@ -682,6 +779,37 @@ function chooseVariant(packet, runNumber) {
 function chooseModule(packet, runNumber) {
   const modules = packet.practiceModules || [];
   return modules.length > 0 ? modules[runNumber % modules.length] : null;
+}
+
+// Personas ordered by difficulty; each failed attempt at the SAME module faces
+// a harder prospect, and the ceiling holds at the hardest — the learner never
+// escapes upward pressure by failing, and never gets an easier retry.
+const PERSONA_RANK = { foundation: 0, intermediate: 1, advanced: 2 };
+function escalatePersona(packet, attempt) {
+  const ordered = [...(packet.personas || [])].sort(
+    (a, b) => (PERSONA_RANK[a.difficulty] ?? 1) - (PERSONA_RANK[b.difficulty] ?? 1),
+  );
+  if (!ordered.length) return null;
+  return ordered[Math.min(attempt, ordered.length - 1)];
+}
+
+// A module may declare direction "any" when the skill genuinely does not care
+// (most of them — absorbing anger, isolating an objection, explaining a lien).
+// The RUNTIME always cares, in two ways that both break silently:
+//   · the prospect prompt takes `mode` verbatim, so "any" became the nonsense
+//     constraint "Practice mode MUST be: any." instead of the real
+//     both-directions branch (taxResolutionSalesTrainerService.js:2241-2244);
+//   · criterion `appliesWhen.direction` is compared by equality, so "any"
+//     matches neither inbound nor outbound and direction-specific criteria
+//     would drop out of the required set without a word.
+// So resolve to a CONCRETE direction here, rotating by run so a learner who
+// retries sees both sides. Promotion validation also requires inbound|outbound.
+function resolveDirection(moduleDef, packet, runNumber = 0) {
+  const declared = moduleDef?.direction;
+  if (declared === "inbound" || declared === "outbound") return declared;
+  const choices = (packet.directions || []).filter((d) => d === "inbound" || d === "outbound");
+  if (!choices.length) return "inbound";
+  return choices[runNumber % choices.length];
 }
 
 app.get("/api/client/runtime", (_req, res) => {
@@ -828,10 +956,16 @@ app.post("/api/sales-trainer/attempts", (req, res) => {
     attemptId: `local-preview-attempt-${attemptSequence}`,
     packet,
     module: chooseModule(packet, 0),
-    direction: chooseModule(packet, 0)?.direction || packet.directions[0] || "inbound",
+    direction: resolveDirection(chooseModule(packet, 0), packet, 0),
     situation: chooseModule(packet, 0)?.situations?.[0] || packet.situations[0],
-    variant: chooseVariant(packet, 0),
+    variant: escalatePersona(packet, 0),
     runNumber: 0,
+    // Strict progression — Mickey 2026-07-29: "you have to accomplish things
+    // in a certain way or it repeats itself." A failed run repeats THIS module
+    // with a fresh situation and a harder persona; only a pass advances.
+    moduleIndex: 0,
+    moduleAttempt: 0,
+    completedModuleIds: [],
     nextTurn: 0,
     satisfiedCriterionIds: new Set(),
     criterionEvidenceTurnIds: new Map(),
@@ -977,11 +1111,12 @@ app.post("/api/sales-trainer/course/gauntlet/attempts/:attemptId/turns", async (
 
   try {
     const turnNumber = record.nextTurn;
-    const [satisfiedIds, generatedReply] = await Promise.all([
+    const [graded, generatedReply] = await Promise.all([
       gradeLearnerTurn(record, text),
       generateProspectReply(record, text),
     ]);
-    for (const criterionId of satisfiedIds) {
+    record.lastProhibitedMove = graded.prohibited;
+    for (const criterionId of graded.satisfiedIds) {
       record.satisfiedCriterionIds.add(criterionId);
       record.criterionEvidenceTurnIds.set(
         criterionId,
@@ -991,10 +1126,11 @@ app.post("/api/sales-trainer/course/gauntlet/attempts/:attemptId/turns", async (
     record.tape.push({ speaker: "learner", text });
     record.version += 1;
     record.nextTurn += 1;
-    const passed =
+    const prohibited = Boolean(graded.prohibited);
+    const passed = !prohibited &&
       record.satisfiedCriterionIds.size >= activeCriteria(record).length;
     const exhausted = record.nextTurn > record.packet.maxTurns;
-    record.status = passed ? "passed" : exhausted ? "failed" : "in_progress";
+    record.status = prohibited ? "failed" : passed ? "passed" : exhausted ? "failed" : "in_progress";
     if (!passed && !exhausted) {
       record.tape.push({ speaker: "prospect", text: generatedReply });
     }
@@ -1023,18 +1159,32 @@ app.post("/api/sales-trainer/course/gauntlet/attempts/:attemptId/retry", (req, r
   if (!record) return;
   record.version += 1;
   record.runNumber += 1;
-  record.variant = chooseVariant(record.packet, record.runNumber);
-  record.module = chooseModule(record.packet, record.runNumber);
-  record.direction =
-    record.module?.direction || record.packet.directions[record.runNumber % record.packet.directions.length];
+  const modules = record.packet.practiceModules || [];
+  if (record.status === "passed") {
+    // Advancement is EARNED. Only a passed run moves to the next module;
+    // the attempt fresh-starts it against the foundation persona.
+    if (record.module?.moduleId) record.completedModuleIds.push(record.module.moduleId);
+    record.moduleIndex = Math.min(record.moduleIndex + 1, Math.max(0, modules.length - 1));
+    record.moduleAttempt = 0;
+  } else {
+    // A failed (or abandoned) run REPEATS the same module — different
+    // situation, harder persona. The objective does not change because the
+    // learner struggled; the prospect does.
+    record.moduleAttempt += 1;
+  }
+  record.variant = escalatePersona(record.packet, record.moduleAttempt) ||
+    chooseVariant(record.packet, record.runNumber);
+  record.module = modules.length ? modules[record.moduleIndex] : null;
+  record.direction = resolveDirection(record.module, record.packet, record.runNumber);
   const moduleSituations = record.module?.situations || record.packet.situations;
   record.situation =
-    moduleSituations[record.runNumber % moduleSituations.length];
+    moduleSituations[record.moduleAttempt % moduleSituations.length];
   record.nextTurn = 0;
   record.satisfiedCriterionIds = new Set();
   record.criterionEvidenceTurnIds = new Map();
   record.tape = [];
   record.voiceSession = null;
+  record.lastProhibitedMove = null;
   record.status = "ready";
   ok(res, gauntletResult(record));
 });

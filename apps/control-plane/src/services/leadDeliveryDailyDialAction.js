@@ -31,6 +31,7 @@ function createRecordLeadDeliveryDailyDial({ DailyDial } = {}) {
       callStartedAt: action.callStartedAt,
       callEndedAt: action.completedAt,
       durationSeconds: action.durationSeconds,
+      recordingUrl: action.recordingUrl,
     });
     return { ok: true, counted: result.counted, status: result.status };
   };

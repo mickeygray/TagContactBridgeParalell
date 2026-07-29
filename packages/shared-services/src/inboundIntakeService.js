@@ -3,6 +3,7 @@
 const crypto = require("crypto");
 const { createEvent } = require("../../event-core/src");
 const { safeSecretEquals } = require("../../shared-utils/src");
+const { resolveBranchedSourceName } = require("./leadSourceBranchService");
 const {
   createLogicsClient,
   createNeverBounceClient,
@@ -96,6 +97,29 @@ function extractLeadZip(payload = {}) {
     payload.postal_code,
     payload.zi,
   );
+}
+
+function extractLeadLien(payload = {}) {
+  // Lien facts ride vendor payloads under assorted names. They feed the
+  // ST/FD source branch at Logics posting time (leadSourceBranchService);
+  // absent lien data simply posts the base source name unbranched.
+  return {
+    plaintiff: extractFirstValue(
+      payload.plaintiff,
+      payload.Plaintiff,
+      payload.lienPlaintiff,
+      payload.lien_plaintiff,
+      payload.lien?.plaintiff,
+      payload.mailIntake?.plaintiff,
+    ),
+    lienType: extractFirstValue(
+      payload.lienType,
+      payload.lien_type,
+      payload.LienType,
+      payload.lien?.lienType,
+      payload.mailIntake?.lienType,
+    ),
+  };
 }
 
 function extractLeadAddress(payload = {}) {
@@ -1065,6 +1089,7 @@ function normalizeWebsiteLeadPayload(payload = {}, headers = {}) {
     state,
     address: extractLeadAddress(payload),
     zip: extractLeadZip(payload),
+    ...extractLeadLien(payload),
     dateOfBirth: extractFirstValue(payload.dateOfBirth, payload.date_of_birth, payload.dob, payload.DOB),
     gender: extractFirstValue(payload.gender, payload.gn),
     sourceUrl: extractFirstValue(payload.sourceUrl, payload.source_url, payload.url, payload.referer),
@@ -1640,7 +1665,16 @@ function validateLeadWebhook(req) {
 }
 
 function buildLogicsCreatePayload(normalized) {
-  const logicsSourceName = resolveLogicsSourceName(normalized);
+  // ST/FD branch (phase 6, ships disabled): a data lead posts under
+  // "ABC ST" / "ABC FD" based on its lien plaintiff so Logics' per-source
+  // lead costs apply. Identity while LEAD_SOURCE_BRANCH_ENABLED is off,
+  // and identity for any source not in the branch matrix.
+  const branched = resolveBranchedSourceName({
+    sourceName: resolveLogicsSourceName(normalized),
+    plaintiff: normalized.plaintiff || null,
+    lienType: normalized.lienType || null,
+  });
+  const logicsSourceName = branched.sourceName;
   const logicsCampaignName = resolveLogicsCampaignName(normalized);
   const payload = {
     FirstName: normalized.firstName || "Prospect",
@@ -2039,26 +2073,11 @@ async function writeProspectAndCadence(normalized, options = {}) {
     },
   }, { machineryOnInsert: true });
 
-  // Real-time LD-spend tick (best-effort): when an LD-family lead lands, increment the day's LD
-  // SpendEntry by $rate exactly once per lead (CAS-guarded on the cadence). The nightly materializer
-  // remains the reconcile backstop. A metrics write must never break lead intake.
-  try {
-    // eslint-disable-next-line global-require
-    const { recordRealtimeLdLeadSpend } = require("./ldSpendService");
-    await recordRealtimeLdLeadSpend({
-      domain: normalized.domain,
-      caseId,
-      routeCampaignKey: normalized.routeCampaignKey,
-      now,
-      logger: options.logger,
-    });
-  } catch (error) {
-    options.logger?.warn?.("ld_spend.realtime_tick.failed", {
-      domain: normalized.domain,
-      caseId,
-      error: error.message,
-    });
-  }
+  // Realtime LD-spend tick RETIRED (Mickey, 2026-07-27): "LD spend can be
+  // CPL in Logics — no need to do the multiply by 3." Per-lead cost lives
+  // on the Logics source (same model as ABC ST/FD); nothing here estimates
+  // dollars anymore. ldSpendService itself retires with the legacy vendor
+  // email family after the simple-email cutover.
 
   // Capture initial federal-DNC status from the validation we just
   // ran. The validation called RealValidation's full DNCPlus.php

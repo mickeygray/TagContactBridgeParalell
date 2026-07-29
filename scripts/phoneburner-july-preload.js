@@ -350,6 +350,7 @@ function createProgressReporter({ write = (line) => process.stdout.write(line) }
 async function bootstrapRuntime({ configuration, options, env = process.env }) {
   const { connectMongo, disconnectMongo } = require("../packages/event-core/src");
   const { getCompanyKeys, getSharedConfig } = require("../packages/shared-config/src");
+  const { dncStatusIdsForDomain } = require("../packages/shared-config/src/statusMap");
   const { getControlPlaneConfig } = require("../apps/control-plane/src/services/appConfig");
   const {
     leadDeliveryRepository,
@@ -391,9 +392,18 @@ async function bootstrapRuntime({ configuration, options, env = process.env }) {
     const source = createLeadDeliveryCadenceSource({
       repository: leadDeliveryRepository,
       domains: getCompanyKeys(),
-      policyForDomain: () => ({
+      // Per-domain DNC off the status catalog — see the same note in
+      // server.js. Ids are tenant-scoped and a single shared list is wrong.
+      policyForDomain: (domain) => ({
         allowedProspectStatusIds: controlPlaneConfig.logicsProspectStatusIds,
-        dncStatusIds: controlPlaneConfig.logicsDncStatusIds,
+        dncStatusIds: [
+          ...new Set([
+            ...dncStatusIdsForDomain(domain),
+            ...(Array.isArray(controlPlaneConfig.logicsDncStatusIds)
+              ? controlPlaneConfig.logicsDncStatusIds
+              : []),
+          ]),
+        ],
       }),
       contactWindowEvaluator: (row, at) => resolveQueueDialTimeWindow(row, at),
     });

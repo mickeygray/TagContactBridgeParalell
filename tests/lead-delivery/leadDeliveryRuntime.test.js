@@ -824,12 +824,70 @@ test("productivity rebalance posts the missing aged cushion before moving newer 
   assert.deepEqual(operations.slice(5), Array.from({ length: 8 }, () => "move"));
 });
 
-test("productivity rebalance moves culled Pool contacts to active agents and leaves normal posting usable", async () => {
+test("productivity rebalance restores an empty inactive Pool to the exact aged cushion", async () => {
+  const configuration = fiveAgentConfig();
+  configuration.agents.phil_olson.enabled = false;
+  configuration.agents.sean_lucas.enabled = false;
+  configuration.agents.chris_bolt.enabled = false;
   const h = harness({
     rows: [],
     actionsEnabled: true,
     refillEnabled: true,
-    configuration: fiveAgentConfig(),
+    configuration,
+    providerInventoryAuthoritative: true,
+    productivityRebalanceEnabled: true,
+  });
+  await h.runtime.tick();
+  const rebalanceAt = new Date(START.getTime() + 16 * 60_000);
+  for (let index = 0; index < 6; index += 1) {
+    await h.repository.insertActiveItemOnce({
+      ...sourceRow(500 + index, { receivedAt: new Date("2026-06-10T17:00:00.000Z") }),
+      sourcePool: POOLS.OLDER_AVAILABLE,
+      state: "eligible",
+      activeAttempt: true,
+      version: 0,
+    });
+  }
+  await h.repository.insertActiveItemOnce({
+    ...sourceRow(600),
+    sourcePool: POOLS.OLDER_AVAILABLE,
+    state: "terminal",
+    activeAttempt: false,
+    deliveryAgentId: "brad_hansen",
+    providerAttemptSequence: 1,
+    providerAttemptHistory: [{
+      attemptNumber: 1,
+      event: "completed",
+      provider: "phoneburner",
+      providerExternalLeadId: "completed-external",
+      providerContactId: "completed-contact",
+      providerCallId: "completed-call",
+      deliveryAgentId: "brad_hansen",
+      packetId: null,
+      occurredAt: new Date(START.getTime() + 10 * 60_000),
+      outcome: "no_answer",
+      reason: "test",
+    }],
+    version: 0,
+  });
+
+  const result = await h.runtime.runProductivityRebalance(rebalanceAt, { ignoreWarmup: true });
+
+  assert.equal(result.status, "completed");
+  assert.equal(result.moved, 0);
+  assert.equal((await h.phoneBurner.getFolderCount("pool-1")).count, 6);
+  assert.equal(h.calls.length, 6);
+});
+
+test("productivity rebalance moves culled Pool contacts to active agents and leaves normal posting usable", async () => {
+  const configuration = fiveAgentConfig();
+  configuration.agents.phil_olson.enabled = false;
+  configuration.agents.sean_lucas.enabled = false;
+  const h = harness({
+    rows: [],
+    actionsEnabled: true,
+    refillEnabled: true,
+    configuration,
     providerInventoryAuthoritative: true,
     productivityRebalanceEnabled: true,
   });
@@ -1956,7 +2014,9 @@ test("duplicate call_done replay is exact-once for attempt and agent decrement",
   });
   await ingestAndSeed(h);
   const item = acceptedItems(h.repository)[0];
-  addDone(h.repository, item, 1, "voicemail");
+  addDone(h.repository, item, 1, "voicemail", {
+    safePayload: { recordingUrl: "https://recordings.example.invalid/call/1.mp3" },
+  });
   await h.runtime.drainEvents();
   await h.runtime.drainEvents();
   const completed = await h.repository.getItemById(item._id);
@@ -1968,6 +2028,7 @@ test("duplicate call_done replay is exact-once for attempt and agent decrement",
   assert.equal(cadenceWrites, 1);
   assert.equal(cadenceAction.dailyAttemptCount, 1);
   assert.equal(cadenceAction.dailyAttemptDateKey, "2026-07-10");
+  assert.equal(cadenceAction.recordingUrl, "https://recordings.example.invalid/call/1.mp3");
   assert.equal(
     new Date(cadenceAction.completedAt).toISOString(),
     new Date(START.getTime() + 1_000).toISOString(),
@@ -2083,6 +2144,26 @@ test("completed answered callback may strengthen to DNC but strong outcomes neve
   assert.equal(upgrade.expected.status, "completed");
   assert.equal(upgrade.set.status, "pending");
   assert.equal(upgrade.set.localAppliedAt, null);
+  const localAppliedAt = new Date("2026-07-10T17:05:00.000Z");
+  const recordingUpgrade = buildCapturedEventUpgrade(
+    {
+      ...common,
+      status: "completed",
+      normalizedOutcome: "voicemail",
+      localAppliedAt,
+      safePayload: { durationSeconds: 60, recordingUrl: null },
+    },
+    {
+      ...common,
+      status: "pending",
+      normalizedOutcome: "voicemail",
+      safePayload: { recordingUrl: "https://recordings.example.invalid/call/1.mp3" },
+    },
+  );
+  assert.equal(recordingUpgrade.set.status, "pending");
+  assert.equal(recordingUpgrade.set.localAppliedAt, localAppliedAt);
+  assert.equal(recordingUpgrade.set.safePayload.durationSeconds, 60);
+  assert.equal(recordingUpgrade.set.safePayload.recordingUrl, "https://recordings.example.invalid/call/1.mp3");
   for (const status of ["failed", "processing"]) {
     const retryUpgrade = buildCapturedEventUpgrade(
       {
@@ -3128,7 +3209,7 @@ test("provider-authoritative low-water uses pool only and fails closed until rep
   totals = [1, 1];
   const stable = await h.runtime.refreshAgentCapacity("bruce_allen");
 
-  assert.equal(stable.status, "posted");
+  assert.equal(stable.status, "queue-exhausted");
   assert.equal(countReads, 4);
   assert.equal(h.calls.length, 3);
   assert.equal((await h.repository.getAgentById("bruce_allen")).estimatedOutstanding, 2);
@@ -3199,13 +3280,15 @@ test("ordinary refill completes while productivity waits for the same agent Pool
     productivityRebalanceEnabled: true,
   });
   await h.runtime.tick();
-  await h.repository.insertActiveItemOnce({
-    ...sourceRow(8803, { receivedAt: new Date("2026-06-01T17:00:00.000Z") }),
-    sourcePool: POOLS.OLDER_AVAILABLE,
-    state: "eligible",
-    activeAttempt: true,
-    version: 0,
-  });
+  for (let index = 0; index < 6; index += 1) {
+    await h.repository.insertActiveItemOnce({
+      ...sourceRow(8803 + index, { receivedAt: new Date("2026-06-01T17:00:00.000Z") }),
+      sourcePool: POOLS.OLDER_AVAILABLE,
+      state: "eligible",
+      activeAttempt: true,
+      version: 0,
+    });
+  }
 
   let releaseActivityRead;
   let activityReadStarted;
@@ -3512,6 +3595,92 @@ test("simple Call End keeps its durable event retryable when the Pool count fail
   assert.equal(h.calls.length, 3);
 });
 
+test("provider-authoritative simple Call End refills when Pool reaches exactly five", async () => {
+  const h = harness({
+    rows: Array.from({ length: 40 }, (_, index) => sourceRow(index + 1)),
+    actionsEnabled: true,
+    refillEnabled: true,
+    providerInventoryAuthoritative: true,
+    deliveryWindowEvaluator: () => true,
+    legacyOperatorSurfaceEnabled: false,
+    simpleOperatorDirectAccessEnabled: false,
+  });
+  h.setClock("2026-07-10T14:50:00.000Z");
+  const started = await h.runtime.tick();
+  assert.equal(started.dayStart.status, "completed");
+  assert.equal(h.calls.length, 20);
+
+  const initial = acceptedItems(h.repository).slice(0, 20);
+  const completed = initial[0];
+  const retained = new Set(initial.slice(1, 6).map((item) => item.providerContactId));
+  for (const contactId of [...h.providerContacts.keys()]) {
+    if (!retained.has(contactId)) h.providerContacts.delete(contactId);
+  }
+  assert.equal(h.providerContacts.size, 5);
+
+  let poolReads = 0;
+  const getFolderCount = h.phoneBurner.getFolderCount.bind(h.phoneBurner);
+  h.phoneBurner.getFolderCount = async (...args) => {
+    poolReads += 1;
+    return getFolderCount(...args);
+  };
+  const event = addDone(h.repository, completed, 1, "voicemail");
+  await h.runtime.drainCapturedEvent(event);
+
+  assert.equal(h.repository.events.get(event._id).status, "completed");
+  assert.equal(h.calls.length, 40);
+  assert.equal(h.providerContacts.size, 25);
+  assert.equal(poolReads, 2);
+});
+
+test("physical Pool watchdog restores an empty active-agent Pool without a Call End", async () => {
+  const h = harness({
+    rows: Array.from({ length: 60 }, (_, index) => sourceRow(index + 1)),
+    actionsEnabled: true,
+    refillEnabled: true,
+    providerInventoryAuthoritative: true,
+    deliveryWindowEvaluator: () => true,
+    legacyOperatorSurfaceEnabled: false,
+    simpleOperatorDirectAccessEnabled: false,
+  });
+  h.setClock("2026-07-10T14:50:00.000Z");
+  const started = await h.runtime.tick();
+  assert.equal(started.dayStart.status, "completed");
+  assert.equal(h.calls.length, 20);
+
+  h.providerContacts.clear();
+  h.setClock("2026-07-10T14:51:00.000Z");
+  const repaired = await h.runtime.tick();
+
+  assert.equal(h.calls.length, 40);
+  assert.equal(h.providerContacts.size, 20);
+  assert.equal(repaired.automatic.length, 1);
+  assert.equal(repaired.automatic[0].trigger, "physical_pool_watchdog");
+  assert.equal(repaired.automatic[0].physicalCount, 0);
+});
+
+test("physical Pool watchdog does not refill an operator-paused agent", async () => {
+  const h = harness({
+    rows: Array.from({ length: 40 }, (_, index) => sourceRow(index + 1)),
+    actionsEnabled: true,
+    refillEnabled: true,
+    providerInventoryAuthoritative: true,
+    deliveryWindowEvaluator: () => true,
+  });
+  h.setClock("2026-07-10T14:50:00.000Z");
+  await h.runtime.tick();
+  h.providerContacts.clear();
+  const agent = await h.repository.getAgentById("bruce_allen");
+  await h.repository.compareAndSetAgent({
+    agentId: "bruce_allen",
+    expectedVersion: agent.version,
+    set: { operatorPaused: true, shiftEnabled: false },
+  });
+  h.setClock("2026-07-10T14:51:00.000Z");
+  const paused = await h.runtime.tick();
+  assert.equal(h.calls.length, 20);
+  assert.deepEqual(paused.automatic, []);
+});
 test("automated day lifecycle builds before open, starts once at 7:50, drains results, stops at 5, and closes at 5:30", async () => {
   const h = harness({
     rows: Array.from({ length: 25 }, (_, index) => sourceRow(index + 1)),

@@ -201,6 +201,7 @@ function mapReviewItem(doc = {}) {
     reviewKey: payload.reviewKey || null,
     kind: payload.kind || null,
     dateKey: payload.dateKey || null,
+    paymentException: payload.paymentException || null,
   };
 }
 
@@ -506,6 +507,24 @@ async function resolveMetricsAttributionReviewItem(id, input = {}, actor = {}) {
     };
   }
 
+  // Pillar-2 push (2026-07-24): when the resolved source maps to a known
+  // Logics SourceID, write it onto the Logics case itself — resolving a
+  // review item fixes the system of record, so the same case can never
+  // drift back. Best-effort: a Logics hiccup must not block the resolve.
+  let logicsWrite = null;
+  if (Number.isFinite(caseId)) {
+    try {
+      const { writeLogicsCaseSource } = require("./logicsSourceWriterService");
+      logicsWrite = await writeLogicsCaseSource({
+        domain: doc.domain,
+        caseId,
+        piece: resolvedSource,
+      });
+    } catch (error) {
+      logicsWrite = { written: false, error: error.message };
+    }
+  }
+
   const updated = await ReviewQueueItem.findByIdAndUpdate(
     id,
     {
@@ -519,7 +538,7 @@ async function resolveMetricsAttributionReviewItem(id, input = {}, actor = {}) {
     { new: true },
   ).lean();
 
-  return { ...mapReviewItem(updated), propagation };
+  return { ...mapReviewItem(updated), propagation, logicsWrite };
 }
 
 async function ignoreMetricsAttributionReviewItem(id, input = {}, actor = {}) {

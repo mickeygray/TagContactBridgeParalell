@@ -363,7 +363,22 @@ function isAllowListGatedStatus(domain, statusId) {
   return t.tier === 5 || t.resoOnly;
 }
 
+// Every status id this tenant treats as DO-NOT-CALL, read straight off the
+// catalog. Callers must never hardcode a DNC id list: ids are tenant-scoped
+// and collide across tenants (WYNN 173 = "DO NOT CALL", but TAG marks BOTH
+// 39 and 173 DNC, and 176 is "Post-Date" in TAG while it is "New Lead" in
+// WYNN). A hardcoded [173] silently misses TAG's 39.
+function dncStatusIdsForDomain(domain) {
+  const table = STATUS_TABLES[String(domain || "").toUpperCase()];
+  if (!table) return [];
+  return Object.entries(table)
+    .filter(([, entry]) => entry?.category === "dnc")
+    .map(([statusId]) => Number(statusId))
+    .filter(Number.isFinite);
+}
+
 module.exports = {
+  dncStatusIdsForDomain,
   resolveExportStatus,
   resolveStatus,
   resolveStatusTier,

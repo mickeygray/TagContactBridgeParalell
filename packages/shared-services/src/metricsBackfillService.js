@@ -18,6 +18,11 @@ const {
 } = require("../../shared-models/src");
 const { createCallFireClient, createCallrailClient } = require("../../shared-integrations/src");
 const { summarizeLegacyContactActivitiesBySource } = require("./legacyContactActivityService");
+
+// July 2026 forward is owned exclusively by callrailDailyStatSyncService.
+// Legacy rebuilds remain available for older history but cannot write into
+// the direct-source era, even when both schedulers happen to run.
+const DIRECT_CALLRAIL_OWNERSHIP_START = "2026-07-01";
 const { getManualLeadOverlayTotal } = require("./metricsManualOverlayService");
 const { resolveCanonicalSource } = require("./sourceCanonicalService");
 const { buildTimezoneDateWindow } = require("./timezoneDateWindowService");
@@ -452,11 +457,18 @@ async function buildDailyCallStatsFromCallLogs(
 }
 
 async function writeGroupedCallStats(grouped) {
-  const operations = [...grouped.values()].map((entry) => ({
+  const entries = [...grouped.values()];
+  const legacyEntries = entries.filter(
+    (entry) => String(entry.date || "") < DIRECT_CALLRAIL_OWNERSHIP_START,
+  );
+  const operations = legacyEntries.map((entry) => ({
     updateOne: {
       filter: {
         date: entry.date,
         piece: entry.piece,
+        // Fail closed if the direct CallRail owner already claimed this
+        // canonical key. A duplicate-key race is safer than overwriting it.
+        syncSource: { $ne: "callrail-direct" },
       },
       update: {
         $set: {
@@ -796,8 +808,14 @@ async function backfillDailyCallStats(domain, from, to, sourceMaps, options = {}
   ).toArray();
 
   if (!rows.length) return { imported: 0 };
+  const legacyRows = rows.filter(
+    (row) => String(row.date || "") < DIRECT_CALLRAIL_OWNERSHIP_START,
+  );
+  if (!legacyRows.length) {
+    return { imported: 0, skippedDirectOwner: rows.length, source: "legacy-rb_dailycallstats" };
+  }
 
-  const operations = rows.map((row) => {
+  const operations = legacyRows.map((row) => {
     const canonical = resolveSourceCanonicalId(row, sourceMaps);
     const piece = row.piece || row.internalName || "Unknown";
     return {
@@ -805,6 +823,8 @@ async function backfillDailyCallStats(domain, from, to, sourceMaps, options = {}
         filter: {
           date: String(row.date),
           piece: piece,
+          // Legacy mirror imports may never overwrite direct CallRail rows.
+          syncSource: { $ne: "callrail-direct" },
         },
         update: {
           $set: {
@@ -1151,38 +1171,11 @@ async function syncHourlyMetricsForDomain({
   };
 }
 
-async function backfillLegacyMetricsRange({ domain = "TAG", from, to }) {
-  const normalizedDomain = normalizeDomain(domain);
-  if (!from || !to) {
-    throw new Error("from and to are required");
-  }
-
-  const sourceMaps = await buildSourceCanonicalMaps();
-
-  const [spend, calls, payments] = await Promise.all([
-    backfillSpendEntries(normalizedDomain, from, to, sourceMaps),
-    backfillDailyCallStats(normalizedDomain, from, to, sourceMaps, {
-      preferLegacyContactActivities: true,
-    }),
-    backfillPaymentLedger(normalizedDomain, from, to, sourceMaps),
-  ]);
-
-  const snapshots = await rebuildMetricSnapshots(normalizedDomain, from, to);
-
-  return {
-    domain: normalizedDomain,
-    from,
-    to,
-    spend,
-    calls,
-    payments,
-    snapshots,
-    completedAt: new Date().toISOString(),
-  };
-}
+// backfillLegacyMetricsRange removed 2026-07-27 with the legacy-mirror
+// admin routes — the migration it served is over, and the simple board
+// reads only marker-stamped rows it could never produce.
 
 module.exports = {
-  backfillLegacyMetricsRange,
   refreshMetricsSnapshotsForDate,
   syncDailyCallStatsForDate,
   syncHourlyMetricsForDomain,

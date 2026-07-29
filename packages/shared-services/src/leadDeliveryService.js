@@ -35,6 +35,7 @@ const SIMPLE_PROVIDER_STOP_STATUSES = new Set([
 const SIMPLE_REFILL_RETRY_STATUSES = new Set([
   ...SIMPLE_PROVIDER_STOP_STATUSES,
   "pending-provider-post",
+  "pool-operation-busy",
 ]);
 const MAX_PRELOAD_WINDOW_CONTACTS = 5_000;
 const END_OF_DAY_DRAIN_HOUR = 17;
@@ -76,6 +77,10 @@ const TERMINAL_OUTCOMES = new Set([
   "appointment",
   "client",
 ]);
+// Logics status ids that must never be delivered, regardless of per-domain
+// policy. 173 = "[Bad/Inactive]-DO NOT CALL" (WYNN 137190, 2026-07-24).
+// Policy may widen this list but can no longer silently empty it.
+const DEFAULT_DNC_STATUS_IDS = Object.freeze([173]);
 const ACTIVE_ATTEMPT_STATES = new Set([
   "eligible",
   "reserved",
@@ -683,11 +688,14 @@ function buildCapturedEventUpgrade(existing = {}, incoming = {}) {
   const existingStatus = String(existing.status || "").trim();
   const existingOutcome = normalizeOutcome(existing.normalizedOutcome);
   const incomingOutcome = normalizeOutcome(incoming.normalizedOutcome);
+  const existingRecordingUrl = String(existing.safePayload?.recordingUrl || "").trim();
+  const incomingRecordingUrl = String(incoming.safePayload?.recordingUrl || "").trim();
+  const recordingEvidenceUpgrade = !existingRecordingUrl && Boolean(incomingRecordingUrl);
   const strongerCallDoneOutcome = String(existing.eventType || "").trim().toLowerCase() === "call_done"
     && ["answered", "review"].includes(existingOutcome)
     && !["answered", "review"].includes(incomingOutcome);
   const upgradeableWeakStatus = ["pending", "processing", "failed", "completed"].includes(existingStatus)
-    && strongerCallDoneOutcome;
+    && (strongerCallDoneOutcome || recordingEvidenceUpgrade);
   if (existingStatus !== "review" && !upgradeableWeakStatus) return null;
   if (String(incoming.status || "").trim() !== "pending") return null;
   if (String(existing.provider || "").trim().toLowerCase()
@@ -702,17 +710,21 @@ function buildCapturedEventUpgrade(existing = {}, incoming = {}) {
     if (before && after && before !== after) return null;
     if (!before && after) set[field] = after;
   }
-  const outcome = incomingOutcome;
-  if (outcome === "review") return null;
+  if (!strongerCallDoneOutcome && !recordingEvidenceUpgrade) return null;
+  const outcome = strongerCallDoneOutcome ? incomingOutcome : existingOutcome;
+  const safePayload = clone(existing.safePayload || {});
+  for (const [key, value] of Object.entries(incoming.safePayload || {})) {
+    if (value != null) safePayload[key] = clone(value);
+  }
   return {
     expected: { status: existingStatus },
     set: {
       ...set,
       status: "pending",
       normalizedOutcome: outcome,
-      safePayload: clone(incoming.safePayload || {}),
+      safePayload,
       nextAttemptAt: null,
-      localAppliedAt: null,
+      localAppliedAt: strongerCallDoneOutcome ? null : (existing.localAppliedAt || null),
       downstreamAppliedAt: null,
       processedAt: null,
       processingLeaseId: null,
@@ -2074,6 +2086,19 @@ function createLeadDeliveryCadenceSource({
   overnightBatchResolver = null,
   headPageSize = 25,
   retryDelayMinutes = 120,
+  // Max age of the Logics status mirror before a lead is HELD instead of
+  // delivered (2026-07-24 DNC incident — see the freshness gate in
+  // sourceEligibility).
+  //
+  // Defaults to 0 = DISABLED, deliberately: the gate fails closed, and on
+  // 2026-07-24 the live queue was ~94% stale, so arming it before the
+  // status backfill lands would hold nearly every lead and stop the floor.
+  // Run the queue status refresh first, then set
+  // LEAD_DELIVERY_STATUS_MAX_AGE_HOURS=24 to arm it.
+  statusMaxAgeMs = Math.max(
+    0,
+    Number(process.env.LEAD_DELIVERY_STATUS_MAX_AGE_HOURS ?? 0) * 60 * 60 * 1000,
+  ),
 } = {}) {
   for (const method of ["readSourceBatch", "readSourceLead", "readLegacyDailyAttemptFloor"]) {
     if (typeof repository?.[method] !== "function") {
@@ -2124,8 +2149,14 @@ function createLeadDeliveryCadenceSource({
       (Array.isArray(policy.allowedProspectStatusIds) ? policy.allowedProspectStatusIds : [1, 2])
         .map(Number).filter(Number.isFinite),
     );
+    // DEFAULT_DNC_STATUS_IDS makes the DNC rule real: this list was empty
+    // by default, so `logics-dnc-status` was dead code and DNC was only
+    // caught incidentally by the allowedProspectStatusIds whitelist
+    // (2026-07-24). 173 = "[Bad/Inactive]-DO NOT CALL".
     const dncStatuses = new Set(
-      (Array.isArray(policy.dncStatusIds) ? policy.dncStatusIds : [])
+      (Array.isArray(policy.dncStatusIds) && policy.dncStatusIds.length > 0
+        ? policy.dncStatusIds
+        : DEFAULT_DNC_STATUS_IDS)
         .map(Number).filter(Number.isFinite),
     );
     const profileStatusId = Number(caseProfile.statusId);
@@ -2158,6 +2189,30 @@ function createLeadDeliveryCadenceSource({
       return { ok: false, reason: "appointment-scheduled", retryable: false };
     }
     if (!statusIds.length) return { ok: false, reason: "status-not-proven", retryable: true };
+    // FRESHNESS GATE (2026-07-24, WYNN 137190): the status we judge on is a
+    // mirror of Logics, and nothing kept it fresh — the live queue was ~94%
+    // stale (1,720 never checked, 6,966 older than a week). A case could go
+    // DNC in Logics and keep being delivered because we never re-asked.
+    // Fail CLOSED and retryable: a lead whose status age we cannot prove is
+    // held, not dialed, until a refresh proves it.
+    //
+    // The gate deliberately does NOT require a profile status to exist. It
+    // used to be guarded by Number.isFinite(profileStatusId), which meant a
+    // lead with no CaseProfile at all fell through to row.statusId — the
+    // cadence row's INTAKE-TIME status, which nothing ever refreshes — and
+    // skipped the freshness check entirely. That is precisely the case the
+    // gate exists to hold. Measured 2026-07-24: 11 live queue leads had no
+    // CaseProfile, 4 of them (TAG 880101-880104) already 11 days old and
+    // sitting in provider_accepted.
+    if (statusMaxAgeMs > 0) {
+      const checkedAt = Date.parse(caseProfile.lastStatusCheckAt ?? "");
+      if (!Number.isFinite(checkedAt)) {
+        return { ok: false, reason: "status-freshness-unproven", retryable: true };
+      }
+      if (at.getTime() - checkedAt > statusMaxAgeMs) {
+        return { ok: false, reason: "status-stale", retryable: true };
+      }
+    }
     if (statusIds.some((statusId) => dncStatuses.has(statusId))) {
       return { ok: false, reason: "logics-dnc-status", retryable: false };
     }
@@ -6739,6 +6794,7 @@ function createLeadDeliveryRuntime({
           originPool: effectContext?.originPool || local.item?.sourcePool || "unknown",
           callStartedAt: attemptContext?.callBeginAt || attemptContext?.acceptedAt || null,
           durationSeconds: currentEvent.safePayload?.durationSeconds ?? null,
+          recordingUrl: currentEvent.safePayload?.recordingUrl || null,
           idempotencyKey: `${providerName}:${providerAttemptKey}:${actionName}`,
         });
       }
@@ -6915,7 +6971,7 @@ function createLeadDeliveryRuntime({
     // PhoneBurner has already pulled into a session, so counting it here can
     // leave an agent visibly empty while suppressing refill.
     let count = nonNegativeInteger(Number(distribution.count || 0), "provider pool count");
-    if (count < SIMPLE_POOL_LOW_WATER) {
+    if (count <= SIMPLE_POOL_LOW_WATER) {
       // At the refill boundary, require two agreeing Pool reads. Consumer is
       // intentionally irrelevant: PhoneBurner owns it after pulling a contact
       // from Pool into a dial session.
@@ -6951,13 +7007,14 @@ function createLeadDeliveryRuntime({
     };
   }
 
-  function refreshAgentCapacity(agentId, { waitForCompletion = true } = {}) {
+  function refreshAgentCapacity(agentId, {
+    waitForCompletion = true,
+    requireActiveShift = false,
+    trigger = "manual",
+  } = {}) {
     const id = String(agentId || "").trim().toLowerCase();
     const existing = physicalRefreshesByAgent.get(id);
-    if (existing) {
-      existing.requestedAgain = true;
-      return waitForCompletion ? existing.completion : existing.durable;
-    }
+    if (existing) return waitForCompletion ? existing.completion : existing.durable;
     let durableResolved = false;
     let resolveDurable;
     const durable = new Promise((resolve) => {
@@ -6967,28 +7024,54 @@ function createLeadDeliveryRuntime({
         resolve(value);
       };
     });
-    const handle = { requestedAgain: false, durable, completion: null };
+    const handle = { durable, completion: null };
     handle.completion = (async () => {
-      let result = { status: "not-run", agentId: id, accepted: 0 };
-      do {
-        handle.requestedAgain = false;
-        const physical = await readAgentProviderOutstanding(id);
-        result = physical.reliable === true
-          ? await refillAgent(id, {
-            physicalOutstanding: physical.count,
-            onWorkDurable: (details) => resolveDurable({
-              status: "capacity-work-durable",
+      const result = await withAgentPoolOperation(
+        id,
+        "ordinary_refill",
+        async ({ agent, renew }) => {
+          if (refillEnabled !== true || providerInventoryAuthoritative !== true) {
+            return { status: "physical-refill-disabled", agentId: id, accepted: 0 };
+          }
+          if (agent.enabled !== true || agent.operatorPaused === true) {
+            return { status: "agent-not-refillable", agentId: id, accepted: 0 };
+          }
+          if (requireActiveShift === true && agent.shiftEnabled !== true) {
+            return { status: "agent-shift-disabled", agentId: id, accepted: 0 };
+          }
+          const physical = await readAgentProviderOutstanding(id, { repairEstimate: true });
+          if (physical.reliable !== true) {
+            return {
+              status: physical.status,
               agentId: id,
               accepted: 0,
-              details,
-            }),
-          })
-          : { status: physical.status, agentId: id, accepted: 0 };
-        resolveDurable(result);
-      } while (handle.requestedAgain);
+              reliable: false,
+              retryable: true,
+            };
+          }
+          if (Number(physical.count) > SIMPLE_POOL_LOW_WATER) {
+            return {
+              status: "pool-above-low-water",
+              agentId: id,
+              accepted: 0,
+              physicalCount: physical.count,
+            };
+          }
+          await renew();
+          const posted = await postTopOfQueueOnce(id, { count: SIMPLE_PACKET_SIZE });
+          return { ...posted, trigger, physicalCount: physical.count };
+        },
+      );
+      resolveDurable(result);
       return result;
     })().catch((error) => {
-      const result = { status: "capacity-refresh-failed", agentId: id, accepted: 0 };
+      const result = {
+        status: "capacity-refresh-failed",
+        agentId: id,
+        accepted: 0,
+        reliable: false,
+        retryable: true,
+      };
       resolveDurable(result);
       log("error", "lead_delivery.capacity_refresh_failed", {
         agentId: id,
@@ -7083,19 +7166,13 @@ function createLeadDeliveryRuntime({
             error.code = "SIMPLE_REFILL_AGENT_MISSING";
             throw error;
           }
-          const physical = await readAgentProviderOutstanding(agentId, { repairEstimate: false });
-          if (physical.reliable !== true) {
-            const error = new Error(`simple-refill-${String(physical.status || "pool-count-failed")}`);
-            error.code = "SIMPLE_REFILL_COUNT_FAILED";
-            throw error;
-          }
-          if (Number(physical.count) >= SIMPLE_POOL_LOW_WATER) {
-            return { status: "pool-above-low-water", accepted: 0 };
-          }
-          const refill = await postTopOfQueue(agentId, { count: SIMPLE_PACKET_SIZE });
-          if (SIMPLE_REFILL_RETRY_STATUSES.has(String(refill?.status || ""))) {
+          const refill = await refreshAgentCapacity(agentId, { trigger: "call_end" });
+          if (refill?.retryable === true
+            || SIMPLE_REFILL_RETRY_STATUSES.has(String(refill?.status || ""))) {
             const error = new Error(`simple-refill-${refill.status}`);
-            error.code = "SIMPLE_REFILL_POST_FAILED";
+            error.code = refill?.reliable === false
+              ? "SIMPLE_REFILL_COUNT_FAILED"
+              : "SIMPLE_REFILL_POST_FAILED";
             throw error;
           }
           return refill;
@@ -7329,7 +7406,7 @@ function createLeadDeliveryRuntime({
         agentResults.push({ agentId, status: physical.status, accepted: 0 });
         continue;
       }
-      if (Number(physical.count) >= SIMPLE_POOL_LOW_WATER) {
+      if (Number(physical.count) > SIMPLE_POOL_LOW_WATER) {
         const marked = await setAgentDayStartState(agentId, dateKey, "completed", at, {
           reason: "already-stocked",
         });
@@ -7621,9 +7698,6 @@ function createLeadDeliveryRuntime({
     if (!folder.ok) {
       noteProviderInventoryBackpressure(folder);
       return { status: folder.reason || "folder-read-failed", moved: 0, targetOffset };
-    }
-    if (folder.contacts.length <= PRODUCTIVITY_REBALANCE_CUSHION_SIZE) {
-      return { status: "already-cushioned", moved: 0, targetOffset };
     }
     const localByContactId = new Map(localItems
       .map((item) => [String(item.providerContactId || "").trim(), item])
@@ -8540,10 +8614,30 @@ function createLeadDeliveryRuntime({
     const productivityRebalance = await runProductivityRebalance(at);
     const endOfDayDrain = await runEndOfDayFolderDrain(at);
     const automatic = [];
-    // SIMPLE OPERATOR MODE: packets are created only by the Call End path
-    // after reading the agent's physical Pool folder. The former preview /
-    // weighted / background refill loop remains below as a reference, but is
-    // intentionally disabled so the periodic tick cannot add leads.
+    // SIMPLE OPERATOR MODE: Call End and this bounded watchdog share one
+    // physical-Pool decision helper and one durable per-agent operation lock.
+    // The watchdog is repair-only: it never counts an attempt and never uses
+    // Consumer inventory or the local outstanding estimate as capacity truth.
+    if (actionsEnabled === true
+      && refillEnabled === true
+      && providerInventoryAuthoritative === true
+      && deliveryWindowOpen(at) === true) {
+      const agents = await repository.listAgents({ enabledOnly: true });
+      for (const persisted of agents) {
+        const id = String(persisted?.agentId || "").trim().toLowerCase();
+        const policy = agentPolicy(id);
+        if (!policy?.enabled
+          || persisted?.enabled !== true
+          || persisted?.operatorPaused === true
+          || persisted?.shiftEnabled !== true) continue;
+        automatic.push(await refreshAgentCapacity(id, {
+          requireActiveShift: true,
+          trigger: "physical_pool_watchdog",
+        }));
+      }
+    }
+    // The former preview / weighted / estimate-driven refill loop remains
+    // below as a reference during the no-delete proof window.
     /* if (actionsEnabled === true) {
       const agents = await repository.listAgents({ enabledOnly: true });
       for (const persisted of agents) {

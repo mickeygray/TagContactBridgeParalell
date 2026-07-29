@@ -1094,10 +1094,34 @@ async function runDailyAgedRefresh(options = {}) {
   // Pull all due rows. Even with limitPerDomain=500 across two tenants,
   // we're talking ~1k docs — single query is fine. Apply per-domain
   // truncation client-side after a stable sort.
+  // A row with no `nextAt` is INVISIBLE to a bare `$lte: now` filter, so
+  // it can never be scrubbed — found 2026-07-24: 5 active leads aged
+  // 65-108 days with dncCheckpoints { count: 0, nextAt: null } that had
+  // never been scrubbed once and never would be. Treat a missing/null
+  // nextAt past the first checkpoint as due, so nothing can sit in the
+  // dialable pool without a DNC re-scrub.
+  const firstCheckpointCutoff = new Date(
+    now.getTime() - AGED_DAILY_CHECKPOINT_DAYS[0] * MS_PER_DAY,
+  );
+  // NOTE the count guard: a lead that has COMPLETED all checkpoints also
+  // carries nextAt: null (count: 3, cleared: true) and must NOT be pulled
+  // back in — only rows still short of the checkpoint schedule qualify.
+  const checkpointTotal = AGED_DAILY_CHECKPOINT_DAYS.length;
+  const strandedClause = {
+    createdAt: { $lte: firstCheckpointCutoff },
+    $or: [
+      { "dncCheckpoints.count": { $lt: checkpointTotal } },
+      { "dncCheckpoints.count": { $exists: false } },
+    ],
+  };
   const baseQuery = {
     active: true,
-    "dncCheckpoints.nextAt": { $lte: now },
     graduatedAt: null,
+    $or: [
+      { "dncCheckpoints.nextAt": { $lte: now } },
+      { "dncCheckpoints.nextAt": null, ...strandedClause },
+      { "dncCheckpoints.nextAt": { $exists: false }, ...strandedClause },
+    ],
   };
   if (domainsFilter) baseQuery.domain = { $in: domainsFilter };
 

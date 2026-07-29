@@ -27,6 +27,14 @@ interface TrainerGauntletPlayerProps {
   item: TrainingCourseItem;
   attempt: TrainingAttempt | null;
   onStart: () => Promise<TrainingAttempt | null>;
+  /**
+   * Reports which practice is live so the curriculum rail can show this
+   * section's own modules (4B.1-4B.4) instead of the section list again.
+   */
+  onModuleProgress?: (progress: {
+    currentModuleId: string | null;
+    completedModuleIds: string[];
+  }) => void;
 }
 
 type TapeTurn = {
@@ -66,6 +74,7 @@ export function TrainerGauntletPlayer({
   item,
   attempt,
   onStart,
+  onModuleProgress,
 }: TrainerGauntletPlayerProps) {
   const [runtime, setRuntime] = useState<TrainingGauntletResult | null>(null);
   const [tape, setTape] = useState<TapeTurn[]>([]);
@@ -118,6 +127,19 @@ export function TrainerGauntletPlayer({
   useEffect(() => {
     runtimeRef.current = runtime;
   }, [runtime]);
+
+  // Publish which practice is live so the rail can render this section's own
+  // modules. Depends on the ids rather than the object so a re-render of the
+  // same state does not re-notify the parent.
+  const currentModuleId = runtime?.module?.moduleId ?? null;
+  const completedKey = (runtime?.state.completedModuleIds || []).join("|");
+  useEffect(() => {
+    if (!onModuleProgress) return;
+    onModuleProgress({
+      currentModuleId,
+      completedModuleIds: completedKey ? completedKey.split("|") : [],
+    });
+  }, [onModuleProgress, currentModuleId, completedKey]);
 
   useEffect(() => {
     busyRef.current = busy;
@@ -514,7 +536,8 @@ export function TrainerGauntletPlayer({
         {item.content.coachingGuide?.practiceModules?.length ? (
           <div className="mt-4 rounded-md border border-border bg-background p-4">
             <div className="text-xs font-semibold uppercase text-muted-foreground">
-              Five brief Introduction practices
+              {item.content.coachingGuide.practiceModules.length} brief practices ·{" "}
+              {item.title}
             </div>
             <ul className="mt-2 space-y-2 text-sm">
               {item.content.coachingGuide.practiceModules.map((module, index) => (

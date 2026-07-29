@@ -24,6 +24,11 @@ export interface TrainingCourseTarget {
   itemId: string;
 }
 
+export interface TrainingCourseRailModule {
+  moduleId: string;
+  title: string;
+}
+
 export interface TrainingCourseRailItem {
   itemId: string;
   itemVersion: string;
@@ -31,6 +36,21 @@ export interface TrainingCourseRailItem {
   type: TrainingCourseItemType;
   status: TrainingCourseItemState;
   required: boolean;
+  /**
+   * The section's own label ("4B"), kept out of `title` so the rail can number
+   * from the curriculum rather than from array position — otherwise section 4B
+   * renders as "5. 4B. Payment Terms".
+   */
+  sectionLabel?: string;
+  /** The practices inside this section, for N.M numbering when it is open. */
+  modules?: TrainingCourseRailModule[];
+}
+
+/** Which practice the learner is on inside the open section. */
+export interface TrainingCourseModuleProgress {
+  itemId: string;
+  currentModuleId: string | null;
+  completedModuleIds: string[];
 }
 
 export interface TrainingMasterySummary {
@@ -231,6 +251,18 @@ export interface TrainingGauntletState {
   currentNodeId: string;
   variantId: string;
   criteria: TrainingGauntletCriterion[];
+  /** Practices already passed in this section — drives the rail's checkmarks. */
+  completedModuleIds?: string[];
+  /**
+   * Why a run ended. A crossed boundary is a different lesson than running out
+   * of turns, so the debrief can name the rule and quote the learner's words.
+   */
+  failureReason?: {
+    kind: "hard-rule" | "prohibited-move" | "turns-exhausted";
+    ruleId?: string | null;
+    move?: string;
+    quote?: string;
+  } | null;
 }
 
 export interface TrainingGauntletResult {
@@ -249,6 +281,8 @@ export interface TrainingGauntletResult {
     objective: string;
     reading: string;
     moduleNumber: number;
+    /** Which attempt at THIS practice — failure repeats it rather than advancing. */
+    moduleAttempt?: number;
     moduleCount: number;
     question?: {
       prompt: string;

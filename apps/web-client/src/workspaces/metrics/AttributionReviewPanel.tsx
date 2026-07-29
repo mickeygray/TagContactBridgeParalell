@@ -20,6 +20,7 @@ import {
   useMetricsAttributionReview,
   useReopenMetricsAttributionReview,
   useResolveMetricsAttributionReview,
+  useResolveMetricsPaymentReview,
 } from "@/lib/api/queries/metrics";
 import type { MetricsAttributionReviewItem } from "@/lib/api/types";
 import { formatCurrency, formatNumber, formatRelative } from "@/lib/utils/format";
@@ -46,11 +47,56 @@ const CHANNEL_OPTIONS = [
 
 const CHANNEL_VALUE_SET: Set<string> = new Set(CHANNEL_OPTIONS.map((option) => option.value));
 
+type PaymentTreatment =
+  | "count-one-deal"
+  | "chargeback-pair"
+  | "chargeback-reversal"
+  | "source-override";
+
 type DraftState = {
   resolvedSource: string;
   resolvedChannel: string;
+  treatment: PaymentTreatment;
   note: string;
 };
+
+const PAYMENT_TREATMENT_OPTIONS: Array<{ value: PaymentTreatment; label: string }> = [
+  { value: "count-one-deal", label: "Count as one deal" },
+  { value: "chargeback-pair", label: "Chargeback pair" },
+  { value: "chargeback-reversal", label: "Chargeback / reversal" },
+  { value: "source-override", label: "Report as Aged" },
+];
+
+function isPaymentException(item: MetricsAttributionReviewItem) {
+  return Boolean(item.paymentException) || String(item.kind || "").startsWith("payment-");
+}
+
+function defaultPaymentTreatment(item: MetricsAttributionReviewItem): PaymentTreatment {
+  const current = item.paymentException?.currentTreatment;
+  if (current) return current;
+  if (item.paymentException?.currentReportingBucket === "Aged") return "source-override";
+  const reasons = item.paymentException?.reasons || [];
+  if (reasons.includes("offsetting_initial_chargeback")) return "chargeback-pair";
+  if (
+    reasons.includes("negative_initial_payment") ||
+    (reasons.includes("partial_initial_chargeback") &&
+      Number(item.paymentException?.initialAmount || 0) < 0)
+  ) {
+    return "chargeback-reversal";
+  }
+  if (
+    reasons.length === 1 &&
+    reasons[0] === "missing_source"
+  ) {
+    return "source-override";
+  }
+  const kind = String(item.kind || "").toLowerCase();
+  if (kind.includes("chargeback")) return "chargeback-pair";
+  if (kind.includes("aged") || kind.includes("retired") || kind.includes("source")) {
+    return "source-override";
+  }
+  return "count-one-deal";
+}
 
 function toneForStatus(status?: string | null) {
   if (status === "reviewed") return "success";
@@ -98,11 +144,15 @@ function normalizeChannelValue(value: string | null | undefined) {
 function buildDefaultDraft(item: MetricsAttributionReviewItem): DraftState {
   const rawSource = String(item.raw?.source || "").trim();
   const rawChannel = normalizeChannelValue(item.raw?.channel);
+  const treatment = defaultPaymentTreatment(item);
   return {
     resolvedSource:
-      String(item.resolution?.source || "").trim() ||
-      (rawSource.toLowerCase() === "unknown" ? "" : rawSource),
+      treatment === "source-override"
+        ? "Aged"
+        : String(item.resolution?.source || "").trim() ||
+          (rawSource.toLowerCase() === "unknown" ? "" : rawSource),
     resolvedChannel: normalizeChannelValue(item.resolution?.channel || rawChannel),
+    treatment,
     note: String(item.resolution?.note || "").trim(),
   };
 }
@@ -116,6 +166,7 @@ export function AttributionReviewPanel({ domain }: { domain: string }) {
     limit: 50,
   });
   const resolveMutation = useResolveMetricsAttributionReview();
+  const resolvePaymentMutation = useResolveMetricsPaymentReview();
   const ignoreMutation = useIgnoreMetricsAttributionReview();
   const reopenMutation = useReopenMetricsAttributionReview();
 
@@ -131,7 +182,12 @@ export function AttributionReviewPanel({ domain }: { domain: string }) {
     setDrafts((current) => ({
       ...current,
       [id]: {
-        ...(current[id] || { resolvedSource: "", resolvedChannel: "other", note: "" }),
+        ...(current[id] || {
+          resolvedSource: "",
+          resolvedChannel: "other",
+          treatment: "count-one-deal",
+          note: "",
+        }),
         ...patch,
       },
     }));
@@ -158,6 +214,30 @@ export function AttributionReviewPanel({ domain }: { domain: string }) {
       }
     },
     [getDraft, resolveMutation],
+  );
+
+  const handleResolvePayment = React.useCallback(
+    async (item: MetricsAttributionReviewItem) => {
+      const draft = getDraft(item);
+      const reportingBucket = draft.treatment === "source-override" ? "Aged" : undefined;
+      const resolvedSource =
+        reportingBucket ? undefined : draft.resolvedSource.trim() || undefined;
+      try {
+        await resolvePaymentMutation.mutateAsync({
+          id: item.id,
+          treatmentKind: draft.treatment,
+          resolvedSource,
+          reportingBucket,
+          note: draft.note.trim() || undefined,
+        });
+        toast.success("Payment exception resolved.");
+      } catch (error) {
+        toast.error(
+          error instanceof Error ? error.message : "Failed to resolve payment exception.",
+        );
+      }
+    },
+    [getDraft, resolvePaymentMutation],
   );
 
   const handleIgnore = React.useCallback(
@@ -251,8 +331,12 @@ export function AttributionReviewPanel({ domain }: { domain: string }) {
           ? items.map((item) => {
               const draft = getDraft(item);
               const observedParts = summarizeObserved(item);
+              const paymentException = isPaymentException(item);
               const pending =
-                resolveMutation.isPending || ignoreMutation.isPending || reopenMutation.isPending;
+                resolveMutation.isPending ||
+                resolvePaymentMutation.isPending ||
+                ignoreMutation.isPending ||
+                reopenMutation.isPending;
 
               return (
                 <div key={item.id} className="rounded-lg border border-border bg-card/40 p-4">
@@ -290,8 +374,65 @@ export function AttributionReviewPanel({ domain }: { domain: string }) {
                     </div>
                   ) : null}
 
+                  {item.paymentException ? (
+                    <div className="mt-3 flex flex-wrap gap-2">
+                      {item.paymentException.reasons.map((reason) => (
+                        <StatusPill key={reason} tone="warning">
+                          {reason}
+                        </StatusPill>
+                      ))}
+                      <StatusPill tone="warning">
+                        {formatNumber(item.paymentException.positiveInitialCount)} positive initial
+                        {item.paymentException.positiveInitialCount === 1 ? "" : "s"}
+                      </StatusPill>
+                      {item.paymentException.negativeInitialCount > 0 ? (
+                        <StatusPill tone="warning">
+                          {formatNumber(item.paymentException.negativeInitialCount)} negative initial
+                          {item.paymentException.negativeInitialCount === 1 ? "" : "s"}
+                        </StatusPill>
+                      ) : null}
+                      <StatusPill tone="accent">
+                        Initials {formatCurrency(item.paymentException.initialAmount, true)}
+                      </StatusPill>
+                      <StatusPill tone="accent">
+                        Total {formatCurrency(item.paymentException.totalAmount, true)}
+                      </StatusPill>
+                    </div>
+                  ) : null}
+
                   {item.status === "open" ? (
                     <div className="mt-4 grid grid-cols-1 gap-3 xl:grid-cols-[minmax(0,1.4fr)_200px_minmax(0,1fr)_auto]">
+                      {paymentException ? (
+                        <div className="space-y-1">
+                          <Label>Payment treatment</Label>
+                          <Select
+                            value={draft.treatment}
+                            onValueChange={(value) => {
+                              const treatment = value as PaymentTreatment;
+                              patchDraft(item.id, {
+                                treatment,
+                                resolvedSource:
+                                  treatment === "source-override"
+                                    ? "Aged"
+                                    : draft.resolvedSource === "Aged"
+                                      ? ""
+                                      : draft.resolvedSource,
+                              });
+                            }}
+                          >
+                            <SelectTrigger>
+                              <SelectValue placeholder="Choose treatment" />
+                            </SelectTrigger>
+                            <SelectContent>
+                              {PAYMENT_TREATMENT_OPTIONS.map((option) => (
+                                <SelectItem key={option.value} value={option.value}>
+                                  {option.label}
+                                </SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
+                        </div>
+                      ) : null}
                       <div className="space-y-1">
                         <Label htmlFor={`resolved-source-${item.id}`}>Resolved source</Label>
                         <Input
@@ -300,29 +441,40 @@ export function AttributionReviewPanel({ domain }: { domain: string }) {
                           onChange={(event) =>
                             patchDraft(item.id, { resolvedSource: event.target.value })
                           }
-                          placeholder="LD Posting, BCD, Mailer X, VF..."
+                          placeholder={
+                            paymentException
+                              ? draft.treatment === "source-override"
+                                ? "Aged"
+                                : "Affordability Federal, mail piece..."
+                              : "LD Posting, BCD, Mailer X, VF..."
+                          }
+                          disabled={paymentException && draft.treatment === "source-override"}
                         />
                       </div>
-                      <div className="space-y-1">
-                        <Label>Resolved channel</Label>
-                        <Select
-                          value={draft.resolvedChannel || "other"}
-                          onValueChange={(value) =>
-                            patchDraft(item.id, { resolvedChannel: normalizeChannelValue(value) })
-                          }
-                        >
-                          <SelectTrigger>
-                            <SelectValue placeholder="Pick a channel" />
-                          </SelectTrigger>
-                          <SelectContent>
-                            {CHANNEL_OPTIONS.map((option) => (
-                              <SelectItem key={option.value} value={option.value}>
-                                {option.label}
-                              </SelectItem>
-                            ))}
-                          </SelectContent>
-                        </Select>
-                      </div>
+                      {!paymentException ? (
+                        <div className="space-y-1">
+                          <Label>Resolved channel</Label>
+                          <Select
+                            value={draft.resolvedChannel || "other"}
+                            onValueChange={(value) =>
+                              patchDraft(item.id, {
+                                resolvedChannel: normalizeChannelValue(value),
+                              })
+                            }
+                          >
+                            <SelectTrigger>
+                              <SelectValue placeholder="Pick a channel" />
+                            </SelectTrigger>
+                            <SelectContent>
+                              {CHANNEL_OPTIONS.map((option) => (
+                                <SelectItem key={option.value} value={option.value}>
+                                  {option.label}
+                                </SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
+                        </div>
+                      ) : null}
                       <div className="space-y-1">
                         <Label htmlFor={`resolved-note-${item.id}`}>Note</Label>
                         <Input
@@ -335,27 +487,51 @@ export function AttributionReviewPanel({ domain }: { domain: string }) {
                       <div className="flex items-end gap-2">
                         <Button
                           size="sm"
-                          onClick={() => void handleResolve(item)}
-                          isLoading={resolveMutation.isPending}
+                          onClick={() =>
+                            void (paymentException
+                              ? handleResolvePayment(item)
+                              : handleResolve(item))
+                          }
+                          isLoading={
+                            paymentException
+                              ? resolvePaymentMutation.isPending
+                              : resolveMutation.isPending
+                          }
                           disabled={pending}
                         >
                           Resolve
                         </Button>
-                        <Button
-                          variant="secondary"
-                          size="sm"
-                          onClick={() => void handleIgnore(item)}
-                          isLoading={ignoreMutation.isPending}
-                          disabled={pending}
-                        >
-                          Ignore
-                        </Button>
+                        {!paymentException ? (
+                          <Button
+                            variant="secondary"
+                            size="sm"
+                            onClick={() => void handleIgnore(item)}
+                            isLoading={ignoreMutation.isPending}
+                            disabled={pending}
+                          >
+                            Ignore
+                          </Button>
+                        ) : null}
                       </div>
                     </div>
                   ) : (
                     <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-md border border-border bg-muted/30 px-3 py-2">
                       <div className="space-y-1 text-xs text-muted-foreground">
-                        {item.resolution?.source ? (
+                        {paymentException && item.resolution?.treatmentKind ? (
+                          <div>
+                            Treatment{" "}
+                            <span className="font-medium text-foreground">
+                              {PAYMENT_TREATMENT_OPTIONS.find(
+                                (option) => option.value === item.resolution?.treatmentKind,
+                              )?.label || item.resolution.treatmentKind}
+                            </span>
+                            {item.resolution.reportingBucket
+                              ? ` · ${item.resolution.reportingBucket}`
+                              : item.resolution.source
+                                ? ` · ${item.resolution.source}`
+                                : ""}
+                          </div>
+                        ) : item.resolution?.source ? (
                           <div>
                             Routed to <span className="font-medium text-foreground">{item.resolution.source}</span>
                             {item.resolution?.channel ? ` via ${item.resolution.channel}` : ""}

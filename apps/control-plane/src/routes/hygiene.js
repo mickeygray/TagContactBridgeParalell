@@ -16,7 +16,6 @@ const {
   recordDailyDeepCutRun,
   reviewCaseActivities,
   runHourlyLeadCadenceEnforcement,
-  runHourlyMetricsRefresh,
   runHourlySweep,
   runDataHygieneSmoke,
   runProspectSweep,
@@ -382,31 +381,8 @@ function createHygieneRouter(auth, options = {}) {
     },
   );
 
-  router.post(
-    "/hourly-metrics-refresh",
-    auth.requireAuth,
-    auth.requireAdmin,
-    async (req, res) => {
-      try {
-        const result = await runHourlyMetricsRefresh({
-          domain: req.body?.domain ?? req.query.domain,
-          domains: req.body?.domains,
-          date: req.body?.date ?? req.query.date,
-          preferLegacyContactActivities:
-            req.body?.preferLegacyContactActivities !== undefined
-              ? Boolean(req.body.preferLegacyContactActivities)
-              : req.query.preferLegacyContactActivities === "true"
-                ? true
-                : req.query.preferLegacyContactActivities === "false"
-                ? false
-                : hourlySweepConfig.metricsRefreshPreferLegacyContactActivities === true,
-        });
-        return res.json({ ok: true, result });
-      } catch (error) {
-        return res.status(error.status || 500).json(toErrorResponse(error));
-      }
-    },
-  );
+  // POST /hourly-metrics-refresh RETIRED 2026-07-27 with the legacy
+  // metrics recompute (web client never called it).
 
   router.post(
     "/hourly-call-log/run",

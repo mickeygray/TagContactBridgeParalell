@@ -37,6 +37,11 @@ require("dotenv").config({
 // still target a specific backend during local debugging.
 const DEFAULT_PORT = String(process.env.NODE_ENV || "").toLowerCase() === "production" ? "81" : "5001";
 const PORT = String(process.env.NGROK_FORWARD_PORT || DEFAULT_PORT);
+// NGROK_TEMP=true → ephemeral tunnel (random *.ngrok-free.app URL, no
+// --domain claim). Used while the reserved domains point at the legacy
+// live stack — a temp instance can't collide with them. Discover the
+// assigned URL at http://127.0.0.1:4040 (ngrok's local inspector).
+const TEMP = /^(1|true|temp)$/i.test(String(process.env.NGROK_TEMP || "").trim());
 const DOMAIN = process.env.NGROK_DOMAIN || "tagcontactbridge.ngrok.app";
 const WEB_ADDR = String(process.env.NGROK_WEB_ADDR || "").trim();
 const UPSTREAM_PROTOCOL = String(process.env.NGROK_UPSTREAM_PROTOCOL || "").trim().toLowerCase();
@@ -85,10 +90,12 @@ const ngrokBin = resolveNgrokBinary();
 console.log("[run-ngrok] using:", ngrokBin);
 // eslint-disable-next-line no-console
 console.log(
-  "[run-ngrok] forwarding https://" + DOMAIN + " -> http://localhost:" + PORT,
+  TEMP
+    ? "[run-ngrok] TEMP instance -> http://localhost:" + PORT + " (random URL — see http://127.0.0.1:4040)"
+    : "[run-ngrok] forwarding https://" + DOMAIN + " -> http://localhost:" + PORT,
 );
 
-const args = ["http", "--domain=" + DOMAIN, PORT];
+const args = TEMP ? ["http", PORT] : ["http", "--domain=" + DOMAIN, PORT];
 if (WEB_ADDR) args.splice(1, 0, "--web-addr=" + WEB_ADDR);
 if (UPSTREAM_PROTOCOL) args.splice(1, 0, "--upstream-protocol=" + UPSTREAM_PROTOCOL);
 

@@ -315,6 +315,18 @@ function providerText(value) {
   return String(value).trim() || null;
 }
 
+function providerHttpsUrl(value) {
+  const normalized = providerText(value);
+  if (!normalized || normalized.length > 2048) return null;
+  try {
+    const parsed = new URL(normalized);
+    if (parsed.protocol !== "https:" || parsed.username || parsed.password) return null;
+    return parsed.toString();
+  } catch {
+    return null;
+  }
+}
+
 function providerBoolean(value) {
   if (value === true || value === 1 || value === "1") return true;
   if (value === false || value === 0 || value === "0") return false;
@@ -379,6 +391,9 @@ function normalizeSession(value, { includeCalls = false } = {}) {
     sourceTimeZone: "Central",
   };
   if (includeCalls) {
+    // Keep this a narrow whitelist. The recording URL is the only added
+    // evidence needed downstream; phone, notes, caller ID, and transcript
+    // content remain outside the normalized provider contract.
     session.calls = arrayFrom(value.calls).map((call) => ({
       callId: providerId(call?.call_id),
       startedAt: providerText(call?.start_when),
@@ -386,6 +401,7 @@ function normalizeSession(value, { includeCalls = false } = {}) {
       connected: providerBoolean(call?.connected),
       voicemail: providerBoolean(call?.voicemail),
       disposition: providerText(call?.disposition),
+      recordingUrl: providerHttpsUrl(call?.recording_url),
       sourceTimeZone: "Central",
     }));
   }

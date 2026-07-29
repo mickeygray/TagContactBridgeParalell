@@ -58,6 +58,7 @@ test("closed DailyDial attempts replay into one exact PhoneBurner CallLog row", 
       callStartedAt: new Date("2026-07-16T18:00:00.000Z"),
       callEndedAt: new Date("2026-07-16T18:02:00.000Z"),
       durationSeconds: 120,
+      recordingUrl: "https://recordings.example.invalid/call/1.mp3?token=test",
       originPool: "new_today",
       dailyAttemptCount: 1,
       totalAttemptCount: 3,
@@ -99,6 +100,8 @@ test("closed DailyDial attempts replay into one exact PhoneBurner CallLog row", 
   assert.equal(callLog.connected, true);
   assert.equal(callLog.durationSec, 120);
   assert.equal(callLog.status, "resolved");
+  assert.equal(callLog["recordingArchive.provider"], "phoneburner");
+  assert.equal(callLog["recordingArchive.sourceUri"], "https://recordings.example.invalid/call/1.mp3?token=test");
 });
 
 test("projection reports invalid identities instead of inventing metric rows", async () => {

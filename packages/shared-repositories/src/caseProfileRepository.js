@@ -861,6 +861,34 @@ async function findCaseProfilesDueForPaymentReconcile(domain, staleAfterMs, limi
     .lean();
 }
 
+// Fresh-case priority lane for the payment reconcile (2026-07-24): new
+// deals close on RECENTLY CREATED cases, but the round-robin above can
+// take days to revisit any one case. Cases created within the window get
+// re-checked every couple of hours so a fresh payment is never more than
+// ~2h behind — this is the lane that closes the "Gregory Smith paid at
+// 5:47 AM and the ledger didn't know" gap.
+async function findRecentCaseProfilesForPaymentReconcile(
+  domain,
+  { createdWithinMs = 14 * 24 * 60 * 60 * 1000, staleAfterMs = 2 * 60 * 60 * 1000, limit = 40 } = {},
+) {
+  const normalizedDomain = String(domain || "").toUpperCase();
+  const createdCutoff = new Date(Date.now() - Number(createdWithinMs));
+  const staleCutoff = new Date(Date.now() - Number(staleAfterMs));
+  return CaseProfile.find({
+    domain: normalizedDomain,
+    caseId: { $ne: null },
+    createdAt: { $gte: createdCutoff },
+    $or: [
+      { "paymentReconcile.lastCheckedAt": null },
+      { "paymentReconcile.lastCheckedAt": { $exists: false } },
+      { "paymentReconcile.lastCheckedAt": { $lt: staleCutoff } },
+    ],
+  })
+    .sort({ createdAt: -1 })
+    .limit(Math.min(Number(limit) || 40, 500))
+    .lean();
+}
+
 async function countCaseProfilesByDomain(domain) {
   return CaseProfile.countDocuments({
     domain: String(domain || "").toUpperCase(),
@@ -1366,6 +1394,7 @@ module.exports = {
   findCaseProfileByPhone,
   findCaseProfilesDueForAiCaseReview,
   findCaseProfilesDueForPaymentReconcile,
+  findRecentCaseProfilesForPaymentReconcile,
   listCaseProfiles,
   listCaseProfilesByCaseIds,
   listCaseProfilesByPhones,

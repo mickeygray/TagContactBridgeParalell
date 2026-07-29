@@ -705,7 +705,7 @@ test("folder count and delete preserve provider Retry-After backpressure", async
   assert.equal(deleted.retryAfterMs, 9_000);
 });
 
-test("dial-session reads strip phone, caller ID, notes, recordings, and transcripts", async () => {
+test("dial-session reads retain only safe recording evidence and strip customer data", async () => {
   const { client } = createHarness(async (request) => {
     if (pathOf(request) === "/rest/1/dialsession") {
       return {
@@ -732,8 +732,9 @@ test("dial-session reads strip phone, caller ID, notes, recordings, and transcri
             call_count: 2,
             calls: [{
               call_id: "22", phone: BASE_INPUT.phone, note: "private", recording: "secret-url",
+              recording_url: "https://recordings.example.invalid/call/22.mp3?token=test",
               transcript: { summary: "private words" }, connected: "1", voicemail: "0", disposition: "Interested",
-            }, { call_id: "23" }],
+            }, { call_id: "23", recording_url: "http://recordings.example.invalid/unsafe.mp3" }],
           },
         },
       },
@@ -747,8 +748,13 @@ test("dial-session reads strip phone, caller ID, notes, recordings, and transcri
   }
   assert.equal(detail.session.calls[0].callId, "22");
   assert.equal(detail.session.calls[0].connected, true);
+  assert.equal(
+    detail.session.calls[0].recordingUrl,
+    "https://recordings.example.invalid/call/22.mp3?token=test",
+  );
   assert.equal(detail.session.calls[1].connected, null);
   assert.equal(detail.session.calls[1].voicemail, null);
+  assert.equal(detail.session.calls[1].recordingUrl, null);
 });
 
 test("exact dial-session reads reject mismatched IDs and missing call counts", async () => {

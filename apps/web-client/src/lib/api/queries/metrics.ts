@@ -3,13 +3,6 @@ import { api } from "@/lib/api/client";
 import type {
   MetricsAttributionReview,
   MetricsAttributionReviewItem,
-  MetricsCallrailSummary,
-  MetricsDailySummary,
-  MetricsMailCosts,
-  MetricsPulse,
-  MetricsRedlines,
-  MetricsSources,
-  MetricsWorkspace,
   OkEnvelope,
 } from "@/lib/api/types";
 import { queryKeys } from "@/lib/api/queries/keys";
@@ -35,28 +28,57 @@ export interface MetricsAttributionReviewFilters extends Record<string, unknown>
   limit?: number;
 }
 
-export function useMetricsWorkspace(domain: string) {
-  return useQuery({
-    queryKey: queryKeys.metrics.workspace(domain),
-    queryFn: () =>
-      api
-        .get<OkEnvelope<MetricsWorkspace>>(`/api/read/metrics/${domain}`)
-        .then(unwrap),
-    enabled: Boolean(domain),
-    staleTime: 30_000,
-  });
+export interface SimpleMarketingRow {
+  source: string;
+  responses: number;
+  calls: number;
+  over5: number;
+  spend: number;
+  pieces: number;
+  deals: number;
+  initialsNet: number;
+  totalCollected: number;
+  activeDays: number;
+  costPerResponse: number | null;
 }
 
-export function useMetricsSources(domain: string, filters: MetricsRangeFilters = {}) {
+export interface SimpleMarketingSummary {
+  from: string;
+  to: string;
+  rows: SimpleMarketingRow[];
+  totals: {
+    responses: number;
+    calls: number;
+    spend: number;
+    ldLeads: number;
+    deals: number;
+    initialsNet: number;
+    totalCollected: number;
+    paymentsCount: number;
+    multiplePositiveInitialCases: number;
+    costPerResponse: number | null;
+  };
+  excludedCalls: number;
+  activePieces: string[];
+  feeds?: {
+    callrail: { lastSyncedAt: string | null; latestDay: string | null };
+    spend: { lastSyncedAt: string | null; latestDay: string | null };
+    phoneburner: { lastProjectedCallAt: string | null };
+    payments: { lastReconciledAt: string | null; lastSource: string | null };
+  };
+}
+
+// The lean read: active mail pieces + one Aged rollup from the two
+// declared sources (DailyCallStat + SpendEntry). Sub-second.
+export function useMetricsSimpleSources(domain: string, filters: MetricsRangeFilters = {}) {
   return useQuery({
-    queryKey: queryKeys.metrics.sources(domain, filters),
+    queryKey: [...queryKeys.metrics.sources(domain, filters), "simple"],
     queryFn: () =>
       api
-        .get<OkEnvelope<MetricsSources>>(`/api/read/metrics/sources/${domain}`, {
+        .get<OkEnvelope<SimpleMarketingSummary>>(`/api/read/metrics/simple-sources/${domain}`, {
           query: {
             from: filters.from,
             to: filters.to,
-            channel: filters.channel,
           },
         })
         .then(unwrap),
@@ -89,97 +111,6 @@ export function useMetricsAttributionReview(
   });
 }
 
-export function useMetricsDailySummary(domain: string, date?: string) {
-  return useQuery({
-    queryKey: queryKeys.metrics.daily(domain, date),
-    queryFn: () =>
-      api
-        .get<OkEnvelope<MetricsDailySummary>>(
-          `/api/read/metrics/daily-summary/${domain}`,
-          { query: { date } },
-        )
-        .then(unwrap),
-    enabled: Boolean(domain),
-    staleTime: 30_000,
-  });
-}
-
-/**
- * Daily Pulse — locked-to-today multi-group snapshot. Polls every 5min.
- * Optional `date` override for testing or historical replay; default
- * lets the backend pick "today in LA timezone".
- */
-export function useMetricsPulse(domain: string, date?: string) {
-  return useQuery({
-    queryKey: ["metrics", "pulse", domain, date ?? "today"],
-    queryFn: () =>
-      api
-        .get<OkEnvelope<MetricsPulse>>(`/api/read/metrics/pulse/${domain}`, {
-          query: date ? { date } : {},
-        })
-        .then(unwrap),
-    enabled: Boolean(domain),
-    staleTime: 60_000,
-    refetchInterval: 5 * 60 * 1000,
-    refetchIntervalInBackground: false,
-  });
-}
-
-export function useMetricsMailCosts(domain: string, filters: MetricsRangeFilters = {}) {
-  return useQuery({
-    queryKey: queryKeys.metrics.mailCosts(domain, filters),
-    queryFn: () =>
-      api
-        .get<OkEnvelope<MetricsMailCosts>>(`/api/read/metrics/mail-costs/${domain}`, {
-          query: {
-            from: filters.from,
-            to: filters.to,
-            date: filters.date,
-            channel: filters.channel,
-          },
-        })
-        .then(unwrap),
-    enabled: Boolean(domain),
-    staleTime: 60_000,
-  });
-}
-
-export function useMetricsRedlines(domain: string) {
-  return useQuery({
-    queryKey: queryKeys.metrics.redlines(domain),
-    queryFn: () =>
-      api
-        .get<OkEnvelope<MetricsRedlines>>(`/api/read/metrics/redlines/${domain}`)
-        .then(unwrap),
-    enabled: Boolean(domain),
-    staleTime: 30_000,
-    refetchInterval: 60_000,
-    refetchIntervalInBackground: false,
-  });
-}
-
-export function useMetricsCallrail(domain: string, filters: MetricsRangeFilters = {}) {
-  return useQuery({
-    queryKey: queryKeys.metrics.callrail(domain, filters),
-    queryFn: () =>
-      api
-        .get<OkEnvelope<MetricsCallrailSummary>>(
-          `/api/read/metrics/callrail/${domain}`,
-          {
-            query: {
-              date: filters.date,
-              from: filters.from,
-              to: filters.to,
-              channel: filters.channel,
-            },
-          },
-        )
-        .then(unwrap),
-    enabled: Boolean(domain),
-    staleTime: 30_000,
-  });
-}
-
 export function useResolveMetricsAttributionReview() {
   const qc = useQueryClient();
   return useMutation({
@@ -198,6 +129,41 @@ export function useResolveMetricsAttributionReview() {
         .post<OkEnvelope<MetricsAttributionReviewItem>>(
           `/api/metrics/attribution-review/${encodeURIComponent(id)}/resolve`,
           { resolvedSource, resolvedChannel, note },
+        )
+        .then(unwrap),
+    onSuccess: () => invalidateMetricsScope(qc),
+  });
+}
+
+export function useResolveMetricsPaymentReview() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      id,
+      treatmentKind,
+      resolvedSource,
+      reportingBucket,
+      note,
+    }: {
+      id: string;
+      treatmentKind:
+        | "count-one-deal"
+        | "chargeback-pair"
+        | "chargeback-reversal"
+        | "source-override";
+      resolvedSource?: string | null;
+      reportingBucket?: "Aged" | null;
+      note?: string;
+    }) =>
+      api
+        .post<OkEnvelope<MetricsAttributionReviewItem>>(
+          `/api/metrics/attribution-review/${encodeURIComponent(id)}/resolve-payment`,
+          {
+            treatmentKind,
+            resolvedSource,
+            reportingBucket,
+            note,
+          },
         )
         .then(unwrap),
     onSuccess: () => invalidateMetricsScope(qc),
