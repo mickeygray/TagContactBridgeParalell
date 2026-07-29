@@ -100,6 +100,21 @@ export interface TrainingCourseItem {
     prompt: string | null;
     choices: Array<{ choiceId: string; label: string }>;
     estimatedMinutes: number | null;
+    coachingGuide?: {
+      objective: string;
+      exactMoves: Array<{
+        beatId: string;
+        label: string;
+        language: string;
+      }>;
+      responseSignals: Array<{
+        signalId: string;
+        prospectPattern: string;
+        coachNotice: string;
+        suggestedMove: string;
+        listenFor: string;
+      }>;
+    };
   };
 }
 
@@ -220,6 +235,17 @@ export interface TrainingGauntletResult {
   reactionIntent?: string | null;
   prospectReply?: { text: string; speechActs: string[] } | null;
   terminal?: "passed" | "failed" | null;
+  coach?: TrainingTargetedCoach | null;
+}
+
+export interface TrainingTargetedCoach {
+  sectionTitle: string;
+  objective: string;
+  notice: string;
+  prospectPattern?: string | null;
+  suggestedMove?: string | null;
+  exactLanguage?: string | null;
+  listenFor: string;
 }
 
 export interface TrainingTargetedVoiceSession {
@@ -229,6 +255,7 @@ export interface TrainingTargetedVoiceSession {
   openingAudio?: import("./salesTrainer").TrainerAudio | null;
   openingPlayback?: import("./salesTrainer").TrainerPlayback | null;
   voice?: import("./salesTrainer").TrainerVoiceProfile | null;
+  coach?: TrainingTargetedCoach | null;
 }
 
 export interface TrainingTargetedVoiceTurn {

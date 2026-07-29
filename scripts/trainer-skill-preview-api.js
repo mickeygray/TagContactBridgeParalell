@@ -79,10 +79,41 @@ function targetedSessionInstructions(record) {
     `Prospect posture: ${record.variant.posture}.`,
     `Prospect behavior: ${record.variant.behavior}.`,
     `Situation: ${record.situation}`,
+    "Approved section language:",
+    ...record.packet.teaching.exactMoves.map((move) =>
+      `- ${move.label}: ${move.language}`),
+    "Prospect reactions this lesson is designed to practice:",
+    ...record.packet.teaching.responseSignals.map((signal) =>
+      `- ${signal.prospectPattern}: ${signal.coachNotice}`),
     `Never leave this section or move into later phases. Prohibited moves: ${record.packet.prohibitedMoves.join("; ")}.`,
     "Stay a natural prospect. Listen to the agent, answer what they actually say, and keep the exchange inside this section.",
     "Do not coach, grade, mention criteria, announce completion, quote fees, close, or agree to buy.",
   ].join("\n");
+}
+
+function coachForRecord(record, prospectText = "") {
+  const lower = String(prospectText || "").toLowerCase();
+  const signals = record.packet.teaching?.responseSignals || [];
+  const signal = signals.find((entry) =>
+    (entry.matchTerms || []).some((term) => lower.includes(String(term).toLowerCase()))) ||
+    signals[record.runNumber % Math.max(1, signals.length)] ||
+    null;
+  const pending = activeCriteria(record).find(
+    (criterion) => !record.satisfiedCriterionIds.has(criterion.criterionId),
+  );
+  const beatId = pending?.criterionId?.split(".").at(-1);
+  const exactMove = record.packet.teaching?.exactMoves?.find(
+    (move) => move.beatId === beatId,
+  ) || record.packet.teaching?.exactMoves?.[0] || null;
+  return {
+    sectionTitle: record.packet.title,
+    objective: record.packet.localObjective,
+    notice: signal?.coachNotice || "Listen for what the prospect needs before choosing the next approved move.",
+    prospectPattern: signal?.prospectPattern || null,
+    suggestedMove: signal?.suggestedMove || pending?.description || exactMove?.label || null,
+    exactLanguage: exactMove?.language || null,
+    listenFor: signal?.listenFor || "A direct answer, reduced resistance, or permission to continue.",
+  };
 }
 
 function publicVoiceSession(bundle) {
@@ -93,6 +124,7 @@ function publicVoiceSession(bundle) {
     openingAudio: bundle.openingAudio || null,
     openingPlayback: bundle.openingPlayback || null,
     voice: bundle.voice || null,
+    coach: bundle.coach || null,
   };
 }
 
@@ -166,6 +198,7 @@ async function acceptVoiceTurn(record, {
         ? { text: prospectText, speechActs: ["answer"] }
         : null,
       terminal: passed ? "passed" : exhausted ? "failed" : null,
+      coach: coachForRecord(record, prospectText),
     }),
   };
 }
@@ -394,6 +427,17 @@ function publicItem(packet) {
       prompt: packet.situations[0] || null,
       choices: [],
       estimatedMinutes: Math.max(3, Math.ceil(packet.maxTurns / 2)),
+      coachingGuide: {
+        objective: packet.localObjective,
+        exactMoves: packet.teaching.exactMoves,
+        responseSignals: packet.teaching.responseSignals.map((signal) => ({
+          signalId: signal.signalId,
+          prospectPattern: signal.prospectPattern,
+          coachNotice: signal.coachNotice,
+          suggestedMove: signal.suggestedMove,
+          listenFor: signal.listenFor,
+        })),
+      },
     },
   };
 }
@@ -446,6 +490,7 @@ function gauntletResult(record, extras = {}) {
     reactionIntent: extras.reactionIntent || null,
     prospectReply: extras.prospectReply || null,
     terminal: extras.terminal || null,
+    coach: extras.coach || coachForRecord(record, record.tape.at(-1)?.text || ""),
   };
 }
 
@@ -662,6 +707,7 @@ app.post(
       });
       record.voiceSession = {
         ...bundle,
+        coach: coachForRecord(record, bundle.openingLine),
         messages: bundle.openingLine
           ? [{ role: "assistant", content: bundle.openingLine }]
           : [],
@@ -768,6 +814,8 @@ app.post("/api/sales-trainer/course/gauntlet/attempts/:attemptId/retry", (req, r
   record.version += 1;
   record.runNumber += 1;
   record.variant = chooseVariant(record.packet, record.runNumber);
+  record.situation =
+    record.packet.situations[record.runNumber % record.packet.situations.length];
   record.nextTurn = 0;
   record.satisfiedCriterionIds = new Set();
   record.criterionEvidenceTurnIds = new Map();

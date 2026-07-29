@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import {
   Headphones,
+  Lightbulb,
   Loader2,
   MessageCircle,
   Mic,
@@ -19,6 +20,7 @@ import {
   type TrainingAttempt,
   type TrainingCourseItem,
   type TrainingGauntletResult,
+  type TrainingTargetedCoach,
 } from "@/lib/api/trainingCourse";
 
 interface TrainerGauntletPlayerProps {
@@ -74,6 +76,7 @@ export function TrainerGauntletPlayer({
   const [playbackUrls, setPlaybackUrls] = useState<string[]>([]);
   const [playbackIndex, setPlaybackIndex] = useState(0);
   const [handsFreeEnabled, setHandsFreeEnabled] = useState(true);
+  const [coach, setCoach] = useState<TrainingTargetedCoach | null>(null);
   const [lastProspectText, setLastProspectText] = useState("");
   const [audioNotice, setAudioNotice] = useState("");
   const [error, setError] = useState("");
@@ -207,6 +210,7 @@ export function TrainerGauntletPlayer({
         voiceSession.openingLine ||
         "The prospect is ready. Respond to the situation in this section of the call.";
       setRuntime(result);
+      setCoach(voiceSession.coach || result.coach || null);
       setTape([{ id: "opening", speaker: "prospect", text: opening }]);
       playProspect(opening, voiceSession.openingPlayback);
     } catch (cause) {
@@ -239,6 +243,7 @@ export function TrainerGauntletPlayer({
       turnEventRef.current = null;
       setText("");
       setRuntime(result.gauntlet);
+      setCoach(result.gauntlet.coach || null);
       const learnerText =
         result.voiceTurn.transcript?.text?.trim() || outbound;
       const reply =
@@ -374,6 +379,7 @@ export function TrainerGauntletPlayer({
       setPlaybackUrls([]);
       setPlaybackIndex(0);
       setLastProspectText("");
+      setCoach(null);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Could not begin another run.");
     } finally {
@@ -393,6 +399,21 @@ export function TrainerGauntletPlayer({
         {item.content.instructions ? (
           <p className="mt-3 text-sm">{item.content.instructions}</p>
         ) : null}
+        {item.content.coachingGuide?.exactMoves?.length ? (
+          <div className="mt-4 rounded-md border border-border bg-background p-4">
+            <div className="text-xs font-semibold uppercase text-muted-foreground">
+              Approved moves in this section
+            </div>
+            <ul className="mt-2 space-y-2 text-sm">
+              {item.content.coachingGuide.exactMoves.map((move) => (
+                <li key={move.beatId}>
+                  <span className="font-semibold">{move.label}: </span>
+                  {move.language}
+                </li>
+              ))}
+            </ul>
+          </div>
+        ) : null}
         {error ? <p role="alert" className="mt-3 text-sm text-destructive">{error}</p> : null}
         <Button className="mt-5" onClick={() => void begin()} disabled={busy}>
           {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Headphones className="h-4 w-4" />}
@@ -404,6 +425,7 @@ export function TrainerGauntletPlayer({
 
   const terminal = runtime.state.status === "passed" || runtime.state.status === "failed";
   const voiceBusy = busy || prospectSpeaking;
+  const coachingGuide = item.content.coachingGuide;
   return (
     <div className="space-y-5">
       <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border bg-muted/20 p-4">
@@ -442,9 +464,38 @@ export function TrainerGauntletPlayer({
                   ? "Listening — say your move"
                   : "Your turn"}
         </h2>
-        <p className="mx-auto mt-2 max-w-xl text-sm leading-6 text-muted-foreground">
-          {lastProspectText || "Listen to the prospect, then answer out loud. This session will not leave the assigned call section."}
-        </p>
+        {prospectSpeaking ? (
+          <p className="mx-auto mt-2 max-w-xl text-sm leading-6 text-muted-foreground">
+            {lastProspectText}
+          </p>
+        ) : coach ? (
+          <div className="mx-auto mt-4 max-w-2xl rounded-lg border border-primary/25 bg-background/90 p-4 text-left">
+            <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.12em] text-primary">
+              <Lightbulb className="h-4 w-4" />
+              Coach · what to notice
+            </div>
+            <p className="mt-2 text-sm font-medium">{coach.notice}</p>
+            {coach.suggestedMove ? (
+              <p className="mt-2 text-sm text-muted-foreground">
+                <span className="font-semibold text-foreground">Try this move: </span>
+                {coach.suggestedMove}
+              </p>
+            ) : null}
+            {coach.exactLanguage ? (
+              <blockquote className="mt-3 border-l-2 border-primary pl-3 text-sm italic">
+                {coach.exactLanguage}
+              </blockquote>
+            ) : null}
+            <p className="mt-3 text-xs text-muted-foreground">
+              <span className="font-semibold text-foreground">Listen for: </span>
+              {coach.listenFor}
+            </p>
+          </div>
+        ) : (
+          <p className="mx-auto mt-2 max-w-xl text-sm leading-6 text-muted-foreground">
+            Listen to the prospect, then answer out loud. This session will not leave the assigned call section.
+          </p>
+        )}
 
         {prospectAudioUrl ? (
           <audio
@@ -495,6 +546,36 @@ export function TrainerGauntletPlayer({
         ) : null}
         {audioNotice ? <p className="mt-3 text-xs text-muted-foreground">{audioNotice}</p> : null}
       </section>
+
+      {coachingGuide ? (
+        <details className="rounded-lg border border-border bg-muted/10 p-4">
+          <summary className="cursor-pointer text-sm font-semibold">
+            What this section is teaching
+          </summary>
+          <p className="mt-3 text-sm text-muted-foreground">{coachingGuide.objective}</p>
+          <div className="mt-4 grid gap-3 md:grid-cols-2">
+            {coachingGuide.exactMoves.map((move) => (
+              <div key={move.beatId} className="rounded-md border border-border bg-background p-3">
+                <div className="text-xs font-semibold uppercase text-primary">{move.label}</div>
+                <p className="mt-2 text-sm">{move.language}</p>
+              </div>
+            ))}
+          </div>
+          {coachingGuide.responseSignals.length > 0 ? (
+            <div className="mt-4 space-y-2">
+              <div className="text-xs font-semibold uppercase text-muted-foreground">
+                Reactions you will practice
+              </div>
+              {coachingGuide.responseSignals.map((signal) => (
+                <div key={signal.signalId} className="rounded-md border border-border p-3 text-sm">
+                  <div className="font-medium">“{signal.prospectPattern}”</div>
+                  <div className="mt-1 text-muted-foreground">{signal.suggestedMove}</div>
+                </div>
+              ))}
+            </div>
+          ) : null}
+        </details>
+      ) : null}
 
       {error ? <p role="alert" className="text-sm text-destructive">{error}</p> : null}
       {terminal ? (
