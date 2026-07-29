@@ -22,6 +22,8 @@ const {
 const {
   isAnthropicConfigured,
   isOpenAiConfigured,
+  runSalesTrainerTurn,
+  startSalesTrainerSession,
   synthesizeSalesTrainerSpeech,
   transcribeSalesTrainerAudio,
 } = require("../packages/shared-services/src/taxResolutionSalesTrainerService");
@@ -67,6 +69,105 @@ function conversationText(record) {
     .slice(-10)
     .map((turn) => `${turn.speaker === "learner" ? "AGENT" : "PROSPECT"}: ${turn.text}`)
     .join("\n");
+}
+
+function targetedSessionInstructions(record) {
+  return [
+    "TARGETED TALK — this is a short section of a tax-resolution sales call, not an end-to-end call.",
+    `Section: ${record.packet.sectionId}. ${record.packet.title}.`,
+    `Local objective: ${record.packet.localObjective}`,
+    `Prospect posture: ${record.variant.posture}.`,
+    `Prospect behavior: ${record.variant.behavior}.`,
+    `Situation: ${record.situation}`,
+    `Never leave this section or move into later phases. Prohibited moves: ${record.packet.prohibitedMoves.join("; ")}.`,
+    "Stay a natural prospect. Listen to the agent, answer what they actually say, and keep the exchange inside this section.",
+    "Do not coach, grade, mention criteria, announce completion, quote fees, close, or agree to buy.",
+  ].join("\n");
+}
+
+function publicVoiceSession(bundle) {
+  return {
+    sessionId: bundle.sessionId,
+    mode: bundle.mode,
+    openingLine: bundle.openingLine,
+    openingAudio: bundle.openingAudio || null,
+    openingPlayback: bundle.openingPlayback || null,
+    voice: bundle.voice || null,
+  };
+}
+
+async function acceptVoiceTurn(record, {
+  audioBuffer = null,
+  audioMimeType = "audio/webm",
+  audioFilename = "targeted-talk.webm",
+  textInput = "",
+}) {
+  if (!record.voiceSession) {
+    const error = new Error("Targeted Talk voice session is not initialized");
+    error.status = 422;
+    throw error;
+  }
+  const turnNumber = record.nextTurn;
+  const bundle = record.voiceSession;
+  const voiceTurn = await runSalesTrainerTurn({
+    audioBuffer,
+    audioMimeType,
+    audioFilename,
+    textInput,
+    messages: bundle.messages || [],
+    profile: bundle.profile,
+    playbook: bundle.playbook,
+    mode: bundle.mode || record.direction,
+    scenario: targetedSessionInstructions(record),
+    includeAudio: true,
+    audio: { voiceProfile: bundle.voice },
+    sttPrompt: `Tax resolution sales training, ${record.packet.title}. Transcribe only the agent.`,
+    sessionId: bundle.sessionId,
+    turnNumber,
+    recordTurn: true,
+    archiveToDrive: false,
+  });
+  const learnerText = String(
+    voiceTurn.transcript?.text || textInput || "",
+  ).trim();
+  if (!learnerText) {
+    return {
+      voiceTurn,
+      gauntlet: gauntletResult(record),
+    };
+  }
+
+  const satisfiedIds = await gradeLearnerTurn(record, learnerText);
+  for (const criterionId of satisfiedIds) {
+    record.satisfiedCriterionIds.add(criterionId);
+    record.criterionEvidenceTurnIds.set(
+      criterionId,
+      `preview-turn-${turnNumber}`,
+    );
+  }
+  const prospectText = String(voiceTurn.response?.text || "").trim();
+  record.tape.push({ speaker: "learner", text: learnerText });
+  if (prospectText) record.tape.push({ speaker: "prospect", text: prospectText });
+  bundle.messages = voiceTurn.messages || bundle.messages || [];
+  record.version += 1;
+  record.nextTurn += 1;
+  const passed =
+    record.satisfiedCriterionIds.size >= activeCriteria(record).length;
+  const exhausted = record.nextTurn > record.packet.maxTurns;
+  record.status = passed ? "passed" : exhausted ? "failed" : "in_progress";
+  const nextCriterion = activeCriteria(record).find(
+    (criterion) => !record.satisfiedCriterionIds.has(criterion.criterionId),
+  );
+  return {
+    voiceTurn,
+    gauntlet: gauntletResult(record, {
+      reactionIntent: nextCriterion?.description || "section_complete",
+      prospectReply: prospectText
+        ? { text: prospectText, speechActs: ["answer"] }
+        : null,
+      terminal: passed ? "passed" : exhausted ? "failed" : null,
+    }),
+  };
 }
 
 async function gradeLearnerTurn(record, learnerText) {
@@ -534,28 +635,81 @@ app.get("/api/sales-trainer/course/gauntlet/attempts/:attemptId", (req, res) => 
 app.post("/api/sales-trainer/course/gauntlet/attempts/:attemptId/initialize", async (req, res) => {
   const record = findAttempt(req, res);
   if (!record) return;
-  try {
-    const opening = await generateProspectReply(record, "", { opening: true });
-    record.version += 1;
-    record.status = "in_progress";
-    record.nextTurn = 1;
-    record.tape.push({ speaker: "prospect", text: opening });
-    ok(res, gauntletResult(record, {
-      reactionIntent: record.variant.behavior,
-      prospectReply: {
-        text: opening,
-        speechActs: ["question"],
-      },
-    }));
-  } catch {
-    res.status(502).json({
-      ok: false,
-      preview: true,
-      code: "preview_prospect_unavailable",
-      error: "The local preview could not start the prospect conversation.",
-    });
-  }
+  record.version += 1;
+  record.status = "in_progress";
+  record.nextTurn = 1;
+  ok(res, gauntletResult(record, {
+    reactionIntent: record.variant.behavior,
+  }));
 });
+
+app.post(
+  "/api/sales-trainer/course/gauntlet/attempts/:attemptId/voice-session",
+  async (req, res) => {
+    const record = findAttempt(req, res);
+    if (!record) return;
+    if (record.voiceSession) {
+      return ok(res, publicVoiceSession(record.voiceSession));
+    }
+    try {
+      const bundle = await startSalesTrainerSession({
+        leadSource: "trainer-targeted-talk",
+        difficulty: record.variant.difficulty,
+        mode: record.direction,
+        situation: targetedSessionInstructions(record),
+        includeAudio: true,
+        user: { email: "local-targeted-talk-preview" },
+      });
+      record.voiceSession = {
+        ...bundle,
+        messages: bundle.openingLine
+          ? [{ role: "assistant", content: bundle.openingLine }]
+          : [],
+      };
+      if (bundle.openingLine) {
+        record.tape.push({ speaker: "prospect", text: bundle.openingLine });
+      }
+      return ok(res, publicVoiceSession(record.voiceSession));
+    } catch {
+      return res.status(502).json({
+        ok: false,
+        preview: true,
+        code: "preview_voice_session_unavailable",
+        error: "The local preview could not start the Free Call voice session.",
+      });
+    }
+  },
+);
+
+app.post(
+  "/api/sales-trainer/course/gauntlet/attempts/:attemptId/voice-turns",
+  previewAudioUpload.single("audio"),
+  async (req, res) => {
+    const record = findAttempt(req, res);
+    if (!record) return;
+    try {
+      const payload = req.body?.payload
+        ? JSON.parse(String(req.body.payload))
+        : req.body || {};
+      const result = await acceptVoiceTurn(record, {
+        audioBuffer: req.file?.buffer || null,
+        audioMimeType: req.file?.mimetype || "audio/webm",
+        audioFilename: req.file?.originalname || "targeted-talk.webm",
+        textInput: payload.text || payload.textInput || "",
+      });
+      return ok(res, result);
+    } catch (error) {
+      return res.status(error?.status || 502).json({
+        ok: false,
+        preview: true,
+        code: "preview_voice_turn_unavailable",
+        error: error?.status === 422
+          ? "Start the Targeted Talk voice session first."
+          : "The local preview could not complete that Free Call voice turn.",
+      });
+    }
+  },
+);
 
 app.post("/api/sales-trainer/course/gauntlet/attempts/:attemptId/turns", async (req, res) => {
   const record = findAttempt(req, res);
@@ -618,6 +772,7 @@ app.post("/api/sales-trainer/course/gauntlet/attempts/:attemptId/retry", (req, r
   record.satisfiedCriterionIds = new Set();
   record.criterionEvidenceTurnIds = new Map();
   record.tape = [];
+  record.voiceSession = null;
   record.status = "ready";
   ok(res, gauntletResult(record));
 });
@@ -634,7 +789,7 @@ app.use((req, res) => {
 const server = app.listen(PORT, HOST, () => {
   console.log(`[trainer-preview] API listening on http://${HOST}:${PORT}`);
   console.log(`[trainer-preview] Loaded ${TAX_RESOLUTION_SKILL_PACKETS.length} draft section packets`);
-  console.log("[trainer-preview] Deterministic UI adapter only; no model grading or persistence");
+  console.log("[trainer-preview] Local-only Free Call voice stack with section-scoped grading; no production persistence");
 });
 
 function close() {

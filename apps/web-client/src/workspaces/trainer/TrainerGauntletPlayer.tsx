@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   Headphones,
   Loader2,
@@ -11,9 +11,7 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/Button";
 import {
-  audioDataUrl,
-  salesTrainerApi,
-  type TrainerAudio,
+  type TrainerPlayback,
 } from "@/lib/api/salesTrainer";
 import {
   createTrainingRequestId,
@@ -72,9 +70,10 @@ export function TrainerGauntletPlayer({
   const [text, setText] = useState("");
   const [busy, setBusy] = useState(false);
   const [recording, setRecording] = useState(false);
-  const [transcribing, setTranscribing] = useState(false);
   const [prospectSpeaking, setProspectSpeaking] = useState(false);
-  const [prospectAudio, setProspectAudio] = useState<TrainerAudio | null>(null);
+  const [playbackUrls, setPlaybackUrls] = useState<string[]>([]);
+  const [playbackIndex, setPlaybackIndex] = useState(0);
+  const [handsFreeEnabled, setHandsFreeEnabled] = useState(true);
   const [lastProspectText, setLastProspectText] = useState("");
   const [audioNotice, setAudioNotice] = useState("");
   const [error, setError] = useState("");
@@ -85,7 +84,8 @@ export function TrainerGauntletPlayer({
   const audioChunksRef = useRef<Blob[]>([]);
   const recordingStartedAtRef = useRef(0);
   const audioRef = useRef<HTMLAudioElement | null>(null);
-  const prospectAudioUrl = useMemo(() => audioDataUrl(prospectAudio), [prospectAudio]);
+  const autoArmTimerRef = useRef<number | null>(null);
+  const prospectAudioUrl = playbackUrls[playbackIndex] || null;
   const micSupported =
     typeof navigator !== "undefined" &&
     Boolean(navigator.mediaDevices?.getUserMedia) &&
@@ -106,6 +106,7 @@ export function TrainerGauntletPlayer({
       if (recorder && recorder.state !== "inactive") recorder.stop();
       stopTracks(mediaStreamRef.current);
       window.speechSynthesis?.cancel();
+      if (autoArmTimerRef.current) window.clearTimeout(autoArmTimerRef.current);
     };
   }, []);
 
@@ -139,29 +140,30 @@ export function TrainerGauntletPlayer({
     window.speechSynthesis.speak(utterance);
   }
 
-  async function speakProspect(textToSpeak: string) {
+  function playProspect(textToSpeak: string, playback?: TrainerPlayback | null) {
     const clean = textToSpeak.trim();
     if (!clean) return;
     setLastProspectText(clean);
     setAudioNotice("");
-    setProspectSpeaking(true);
-    try {
-      const audio = await salesTrainerApi.speech({
-        text: clean,
-        responseFormat: "mp3",
-        speed: 1.35,
-      });
-      if (!audio.audioBase64) throw new Error("No prospect audio returned");
-      setProspectAudio(audio);
-    } catch {
-      setProspectAudio(null);
+    const urls = playback?.chunks?.length
+      ? playback.chunks.map((chunk) => chunk.dataUrl).filter(Boolean)
+      : playback?.dataUrl
+        ? [playback.dataUrl]
+        : [];
+    if (urls.length === 0) {
+      setPlaybackUrls([]);
       speakWithBrowser(clean);
+      return;
     }
+    setProspectSpeaking(true);
+    setPlaybackIndex(0);
+    setPlaybackUrls(urls);
   }
 
   function replayProspect() {
-    if (prospectAudioUrl && audioRef.current) {
+    if (playbackUrls.length && audioRef.current) {
       setAudioNotice("");
+      setPlaybackIndex(0);
       audioRef.current.currentTime = 0;
       void audioRef.current.play().catch(() => {
         setAudioNotice("Browser blocked playback.");
@@ -170,6 +172,19 @@ export function TrainerGauntletPlayer({
       return;
     }
     if (lastProspectText) speakWithBrowser(lastProspectText);
+  }
+
+  function handlePlaybackEnded() {
+    if (playbackIndex + 1 < playbackUrls.length) {
+      setPlaybackIndex((current) => current + 1);
+      return;
+    }
+    setProspectSpeaking(false);
+    if (handsFreeEnabled && !busy && runtime?.state.status === "in_progress") {
+      autoArmTimerRef.current = window.setTimeout(() => {
+        void startRecording();
+      }, 700);
+    }
   }
 
   async function begin() {
@@ -184,14 +199,16 @@ export function TrainerGauntletPlayer({
         started.attemptId,
         { eventId, expectedVersion: started.version },
       );
+      const voiceSession = await trainingCourseApi.startTargetedVoiceSession(
+        started.attemptId,
+      );
       initializeEventRef.current = null;
       const opening =
-        result.prospectReply?.text ||
-        result.reactionIntent ||
+        voiceSession.openingLine ||
         "The prospect is ready. Respond to the situation in this section of the call.";
       setRuntime(result);
       setTape([{ id: "opening", speaker: "prospect", text: opening }]);
-      void speakProspect(opening);
+      playProspect(opening, voiceSession.openingPlayback);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Could not start this Talk Session.");
     } finally {
@@ -199,43 +216,45 @@ export function TrainerGauntletPlayer({
     }
   }
 
-  async function submit(outboundOverride?: string) {
+  async function submit(outboundOverride?: string, voiceBlob?: Blob, filename?: string) {
     const outbound = (outboundOverride ?? text).trim();
     const currentAttempt = runtime?.attempt || attempt;
-    if (!outbound || !runtime?.state || !currentAttempt || busy) return;
+    if ((!outbound && !voiceBlob) || !runtime?.state || !currentAttempt || busy) return;
     setBusy(true);
     setError("");
-    const mutation = turnEventRef.current?.input === outbound
+    const mutationInput = outbound || `voice-${runtime.state.nextTurn}`;
+    const mutation = turnEventRef.current?.input === mutationInput
       ? turnEventRef.current
-      : { input: outbound, eventId: createTrainingRequestId("talk-turn") };
+      : { input: mutationInput, eventId: createTrainingRequestId("talk-turn") };
     turnEventRef.current = mutation;
     try {
-      const result = await trainingCourseApi.submitGauntletTurn(
+      const result = await trainingCourseApi.submitTargetedVoiceTurn(
         currentAttempt.attemptId,
         {
-          eventId: mutation.eventId,
-          expectedVersion: currentAttempt.version || runtime.version || 0,
-          expectedTurn: runtime.state.nextTurn,
+          blob: voiceBlob,
+          filename,
           text: outbound,
         },
       );
       turnEventRef.current = null;
       setText("");
-      setRuntime(result);
+      setRuntime(result.gauntlet);
+      const learnerText =
+        result.voiceTurn.transcript?.text?.trim() || outbound;
       const reply =
-        result.prospectReply?.text ||
-        result.reactionIntent ||
+        result.voiceTurn.response?.text?.trim() ||
+        result.gauntlet.prospectReply?.text ||
         "The prospect responds and keeps this section moving.";
       setTape((current) => [
         ...current,
-        { id: mutation.eventId, speaker: "learner", text: outbound },
-        ...(result.terminal ? [] : [{
+        { id: mutation.eventId, speaker: "learner", text: learnerText },
+        ...(!reply ? [] : [{
           id: `${mutation.eventId}-prospect`,
           speaker: "prospect" as const,
           text: reply,
         }]),
       ]);
-      if (!result.terminal) void speakProspect(reply);
+      if (reply) playProspect(reply, result.voiceTurn.playback);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Could not submit this turn.");
     } finally {
@@ -243,31 +262,26 @@ export function TrainerGauntletPlayer({
     }
   }
 
-  async function transcribeAndSubmit(blob: Blob, mimeType: string, capturedMs: number) {
+  async function submitVoiceRecording(blob: Blob, mimeType: string, capturedMs: number) {
     if (capturedMs < MIN_RECORDING_MS || blob.size < MIN_RECORDING_BYTES) {
       setError("No speech detected. Hold the button long enough to say your response.");
       return;
     }
-    setTranscribing(true);
     setError("");
     try {
-      const transcript = await salesTrainerApi.transcribeAudio({
+      await submit(
+        "",
         blob,
-        filename: `targeted-talk-${Date.now()}.${extensionForMimeType(mimeType)}`,
-        prompt: `Tax resolution sales training, ${item.title}. Transcribe only the agent's spoken response.`,
-      });
-      const spoken = transcript.text.trim();
-      if (!spoken) throw new Error("No speech detected");
-      await submit(spoken);
+        `targeted-talk-${Date.now()}.${extensionForMimeType(mimeType)}`,
+      );
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Could not transcribe your response.");
     } finally {
-      setTranscribing(false);
     }
   }
 
   async function startRecording() {
-    if (!micSupported || busy || transcribing || prospectSpeaking) return;
+    if (!micSupported || busy || prospectSpeaking || recording) return;
     setError("");
     setAudioNotice("");
     try {
@@ -312,7 +326,7 @@ export function TrainerGauntletPlayer({
           setError("No speech detected.");
           return;
         }
-        void transcribeAndSubmit(new Blob(chunks, { type }), type, capturedMs);
+        void submitVoiceRecording(new Blob(chunks, { type }), type, capturedMs);
       };
       recorder.start(250);
       setRecording(true);
@@ -357,7 +371,8 @@ export function TrainerGauntletPlayer({
       );
       setRuntime(result);
       setTape([]);
-      setProspectAudio(null);
+      setPlaybackUrls([]);
+      setPlaybackIndex(0);
       setLastProspectText("");
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Could not begin another run.");
@@ -388,7 +403,7 @@ export function TrainerGauntletPlayer({
   }
 
   const terminal = runtime.state.status === "passed" || runtime.state.status === "failed";
-  const voiceBusy = busy || transcribing || prospectSpeaking;
+  const voiceBusy = busy || prospectSpeaking;
   return (
     <div className="space-y-5">
       <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border bg-muted/20 p-4">
@@ -410,7 +425,7 @@ export function TrainerGauntletPlayer({
         <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-full bg-primary/10 text-primary">
           {prospectSpeaking ? (
             <Volume2 className="h-8 w-8 animate-pulse" />
-          ) : transcribing || busy ? (
+          ) : busy ? (
             <Loader2 className="h-8 w-8 animate-spin" />
           ) : recording ? (
             <Mic className="h-8 w-8 animate-pulse" />
@@ -421,9 +436,7 @@ export function TrainerGauntletPlayer({
         <h2 className="mt-4 text-lg font-semibold">
           {prospectSpeaking
             ? "Prospect speaking"
-            : transcribing
-              ? "Turning your speech into a response"
-              : busy
+            : busy
                 ? "Prospect is responding"
                 : recording
                   ? "Listening — say your move"
@@ -440,7 +453,7 @@ export function TrainerGauntletPlayer({
             className="sr-only"
             src={prospectAudioUrl}
             onPlay={() => setProspectSpeaking(true)}
-            onEnded={() => setProspectSpeaking(false)}
+            onEnded={handlePlaybackEnded}
             onError={() => setProspectSpeaking(false)}
           />
         ) : null}
@@ -459,7 +472,7 @@ export function TrainerGauntletPlayer({
             size="lg"
             variant="secondary"
             onClick={replayProspect}
-            disabled={!lastProspectText || recording || transcribing}
+            disabled={!lastProspectText || recording || busy}
           >
             <Volume2 className="h-5 w-5" />
             Replay prospect
@@ -469,6 +482,16 @@ export function TrainerGauntletPlayer({
           <p className="mt-3 text-xs text-warning">
             This browser cannot capture microphone audio. Use the text fallback below.
           </p>
+        ) : null}
+        {micSupported ? (
+          <label className="mt-4 inline-flex items-center gap-2 text-xs text-muted-foreground">
+            <input
+              type="checkbox"
+              checked={handsFreeEnabled}
+              onChange={(event) => setHandsFreeEnabled(event.target.checked)}
+            />
+            Hands-free: listen again after the prospect finishes
+          </label>
         ) : null}
         {audioNotice ? <p className="mt-3 text-xs text-muted-foreground">{audioNotice}</p> : null}
       </section>

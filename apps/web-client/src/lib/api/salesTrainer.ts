@@ -120,6 +120,14 @@ export interface TrainerPlayback {
   voice?: string;
   audioBase64: string;
   dataUrl: string;
+  chunks?: Array<{
+    index: number;
+    text: string;
+    mimeType: string;
+    format: string;
+    audioBase64: string;
+    dataUrl: string;
+  }>;
 }
 
 export interface TrainerTurnResult {

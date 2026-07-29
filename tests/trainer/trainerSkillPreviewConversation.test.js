@@ -20,10 +20,18 @@ test("local skill preview uses a model prospect that hears the actual conversati
 });
 
 test("preview grading remains separate and never advances one criterion per turn", () => {
-  assert.match(previewSource, /gradeLearnerTurn\(record, text\)/);
-  assert.match(previewSource, /generateProspectReply\(record, text\)/);
+  assert.match(previewSource, /gradeLearnerTurn\(record, learnerText\)/);
   assert.match(previewSource, /record\.satisfiedCriterionIds\.add\(criterionId\)/);
   assert.doesNotMatch(previewSource, /satisfiedCount\s*\+\s*1/);
+});
+
+test("targeted voice sessions run through the real Free Call turn stack", () => {
+  assert.match(previewSource, /startSalesTrainerSession/);
+  assert.match(previewSource, /runSalesTrainerTurn/);
+  assert.match(previewSource, /messages: bundle\.messages \|\| \[\]/);
+  assert.match(previewSource, /playbook: bundle\.playbook/);
+  assert.match(previewSource, /audio: \{ voiceProfile: bundle\.voice \}/);
+  assert.match(previewSource, /voice-turns/);
 });
 
 test("direction-specific criteria are filtered before the short section begins", () => {

@@ -222,6 +222,20 @@ export interface TrainingGauntletResult {
   terminal?: "passed" | "failed" | null;
 }
 
+export interface TrainingTargetedVoiceSession {
+  sessionId: string;
+  mode?: string;
+  openingLine: string;
+  openingAudio?: import("./salesTrainer").TrainerAudio | null;
+  openingPlayback?: import("./salesTrainer").TrainerPlayback | null;
+  voice?: import("./salesTrainer").TrainerVoiceProfile | null;
+}
+
+export interface TrainingTargetedVoiceTurn {
+  voiceTurn: import("./salesTrainer").TrainerTurnResult;
+  gauntlet: TrainingGauntletResult;
+}
+
 type CourseRequestOptions = {
   method?: "GET" | "POST";
   body?: unknown;
@@ -244,16 +258,21 @@ async function courseRequest<T>(
   { method = "GET", body, signal }: CourseRequestOptions = {},
 ): Promise<T> {
   const token = trainerToken();
+  const formBody = typeof FormData !== "undefined" && body instanceof FormData;
   const response = await fetch(`${API_BASE_URL}/api/sales-trainer${path}`, {
     method,
     credentials: "include",
     signal,
     headers: {
       Accept: "application/json",
-      ...(body === undefined ? {} : { "Content-Type": "application/json" }),
+      ...(body === undefined || formBody ? {} : { "Content-Type": "application/json" }),
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
     },
-    body: body === undefined ? undefined : JSON.stringify(body),
+    body: body === undefined
+      ? undefined
+      : formBody
+        ? body
+        : JSON.stringify(body),
   });
   const text = await response.text();
   let payload: unknown = null;
@@ -403,6 +422,30 @@ export const trainingCourseApi = {
     return courseRequest<TrainingGauntletResult>(
       `/course/gauntlet/attempts/${encodeURIComponent(attemptId)}/retry`,
       { method: "POST", body },
+    );
+  },
+  startTargetedVoiceSession(attemptId: string) {
+    return courseRequest<TrainingTargetedVoiceSession>(
+      `/course/gauntlet/attempts/${encodeURIComponent(attemptId)}/voice-session`,
+      { method: "POST", body: {} },
+    );
+  },
+  submitTargetedVoiceTurn(
+    attemptId: string,
+    body: {
+      blob?: Blob;
+      filename?: string;
+      text?: string;
+    },
+  ) {
+    const form = new FormData();
+    if (body.blob) {
+      form.append("audio", body.blob, body.filename || "targeted-talk.webm");
+    }
+    form.append("payload", JSON.stringify({ text: body.text || "" }));
+    return courseRequest<TrainingTargetedVoiceTurn>(
+      `/course/gauntlet/attempts/${encodeURIComponent(attemptId)}/voice-turns`,
+      { method: "POST", body: form },
     );
   },
 };

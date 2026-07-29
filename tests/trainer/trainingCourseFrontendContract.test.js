@@ -142,18 +142,21 @@ test("ambiguous mutation retries bind IDs to the exact outbound payload", () => 
   );
 });
 
-test("Targeted Talk client sends learner text only and renders only behind capability", () => {
+test("Targeted Talk reuses the one-shot Free Call voice turn behind capability", () => {
   const client = source("apps/web-client/src/lib/api/trainingCourse.ts");
   const player = source("apps/web-client/src/workspaces/trainer/TrainerCoursePlayer.tsx");
   const gauntlet = source("apps/web-client/src/workspaces/trainer/TrainerGauntletPlayer.tsx");
   assert.match(client, /expectedTurn: number;[\s\S]*?text: string/);
   assert.doesNotMatch(client, /submitGauntletTurn[\s\S]{0,500}evidence:/);
   assert.match(player, /isGauntlet && home\?\.capabilities\.gauntletV1Enabled === true/);
-  assert.match(gauntlet, /turnEventRef\.current\?\.input === outbound/);
+  assert.match(gauntlet, /turnEventRef\.current\?\.input === mutationInput/);
   assert.match(gauntlet, /Practice only this part of the call/);
   assert.match(gauntlet, /navigator\.mediaDevices\.getUserMedia/);
-  assert.match(gauntlet, /salesTrainerApi\.transcribeAudio/);
-  assert.match(gauntlet, /salesTrainerApi\.speech/);
+  assert.match(gauntlet, /startTargetedVoiceSession/);
+  assert.match(gauntlet, /submitTargetedVoiceTurn/);
+  assert.match(gauntlet, /result\.voiceTurn\.playback/);
+  assert.doesNotMatch(gauntlet, /salesTrainerApi\.transcribeAudio/);
+  assert.doesNotMatch(gauntlet, /salesTrainerApi\.speech/);
   assert.match(gauntlet, /Start voice session/);
   assert.match(gauntlet, /Text fallback and transcript/);
 });
