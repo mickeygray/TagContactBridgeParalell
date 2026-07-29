@@ -109,4 +109,36 @@ function advanceGauntletTurn({ scenario, state, turnId, evidence = [] }) {
   });
 }
 
-module.exports = { advanceGauntletTurn, evaluateCondition };
+function startRetryRun({ scenario, state, eventId }) {
+  assertScenarioAndState(scenario, state);
+  if (state.status !== "failed" && state.status !== "run_failed") {
+    throw controllerError("GAUNTLET_RETRY_NOT_AVAILABLE");
+  }
+  if ((state.runNumber + 1) > scenario.retryPolicy.runRetryLimit) {
+    throw controllerError("GAUNTLET_RETRY_EXHAUSTED");
+  }
+  if (typeof eventId !== "string" || !eventId.trim()) {
+    throw controllerError("GAUNTLET_TURN_ID_INVALID");
+  }
+  const used = new Set([...(state.completedVariantIds || []), state.variantId]);
+  const nextVariant = (scenario.variants || []).find((variant) => !used.has(variant.variantId));
+  if (!nextVariant) throw controllerError("GAUNTLET_VARIANTS_EXHAUSTED");
+  return Object.freeze({
+    ...state,
+    status: "ready",
+    stateVersion: state.stateVersion + 1,
+    runNumber: state.runNumber + 1,
+    nextTurn: 1,
+    currentNodeId: scenario.startNodeId,
+    variantId: nextVariant.variantId,
+    variantVersion: nextVariant.version,
+    voiceProfileId: nextVariant.voiceProfileId,
+    criteria: state.criteria.map((criterion) => ({ ...criterion, status: "pending", evidenceTurnIds: [] })),
+    retryByNode: {},
+    hintLevelByNode: {},
+    completedVariantIds: [...used],
+    lastAcceptedEventId: eventId,
+  });
+}
+
+module.exports = { advanceGauntletTurn, evaluateCondition, startRetryRun };

@@ -141,3 +141,22 @@ test("ambiguous mutation retries bind IDs to the exact outbound payload", () => 
     /result\.attempt\.status !== "completed" \|\| result\.terminalSummary == null/,
   );
 });
+
+test("Targeted Talk client sends learner text only and renders only behind capability", () => {
+  const client = source("apps/web-client/src/lib/api/trainingCourse.ts");
+  const player = source("apps/web-client/src/workspaces/trainer/TrainerCoursePlayer.tsx");
+  const gauntlet = source("apps/web-client/src/workspaces/trainer/TrainerGauntletPlayer.tsx");
+  assert.match(client, /expectedTurn: number;[\s\S]*?text: string/);
+  assert.doesNotMatch(client, /submitGauntletTurn[\s\S]{0,500}evidence:/);
+  assert.match(player, /isGauntlet && home\?\.capabilities\.gauntletV1Enabled === true/);
+  assert.match(gauntlet, /turnEventRef\.current\?\.input === outbound/);
+  assert.match(gauntlet, /Practice only this part of the call/);
+});
+
+test("course Free Call wrapper keeps natural practice on the unchanged legacy cockpit", () => {
+  const player = source("apps/web-client/src/workspaces/trainer/TrainerCoursePlayer.tsx");
+  const freeCall = source("apps/web-client/src/workspaces/trainer/TrainerFreeCallPlayer.tsx");
+  assert.match(player, /<TrainerFreeCallPlayer onOpenLegacyPractice=\{onOpenPractice\}/);
+  assert.match(freeCall, /does not use[\s\S]*Targeted Talk nodes, phase locks/);
+  assert.match(freeCall, /onOpenLegacyPractice/);
+});

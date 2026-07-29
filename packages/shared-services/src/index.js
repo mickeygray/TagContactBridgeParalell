@@ -817,6 +817,13 @@ const dailyDialLedgerService = require("./dailyDialLedgerService");
 const trainingCourseService = require("./trainingCourseService");
 const trainerGauntletState = require("./trainerGauntletState");
 const trainingGauntletController = require("./trainingGauntletController");
+const trainingGauntletService = require("./trainingGauntletService");
+const trainingEvidenceEvaluatorService = require("./trainingEvidenceEvaluatorService");
+const trainingTargetAudioCacheService = require("./trainingTargetAudioCacheService");
+const trainingReviewCoachService = require("./trainingReviewCoachService");
+const trainingFreeCallCourseService = require("./trainingFreeCallCourseService");
+const trainingProspectDialogueService = require("./trainingProspectDialogueService");
+const trainingDispositionReviewService = require("./trainingDispositionReviewService");
 
 module.exports = {
   leadDeliveryService,
@@ -824,6 +831,13 @@ module.exports = {
   trainingCourseService,
   trainerGauntletState,
   trainingGauntletController,
+  trainingGauntletService,
+  trainingEvidenceEvaluatorService,
+  trainingTargetAudioCacheService,
+  trainingReviewCoachService,
+  trainingFreeCallCourseService,
+  trainingProspectDialogueService,
+  trainingDispositionReviewService,
   // ── CX lane registry + dispatchers (first-touch drip, appointment clock) ──
   CX_LANES,
   buildLaneExternId,

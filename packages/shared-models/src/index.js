@@ -67,6 +67,7 @@ const ClientProfile = require("./ClientProfile");
 const TrainingCallReview = require("./TrainingCallReview");
 const TrainingEnrollment = require("./TrainingEnrollment");
 const TrainingAttempt = require("./TrainingAttempt");
+const TrainingFreeCallSession = require("./TrainingFreeCallSession");
 
 const MODEL_REGISTRY = Object.freeze({
   AgentState,
@@ -136,6 +137,7 @@ const MODEL_REGISTRY = Object.freeze({
   TrainingCallReview,
   TrainingEnrollment,
   TrainingAttempt,
+  TrainingFreeCallSession,
 });
 
 function listModels() {
@@ -211,5 +213,6 @@ module.exports = {
   TrainingCallReview,
   TrainingEnrollment,
   TrainingAttempt,
+  TrainingFreeCallSession,
   listModels,
 };

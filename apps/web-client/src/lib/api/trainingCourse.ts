@@ -190,6 +190,38 @@ export interface TrainingAttemptResult {
   nextAssignment: TrainingCourseTarget | null;
 }
 
+export interface TrainingGauntletCriterion {
+  criterionId: string;
+  ruleId: string;
+  ruleRevision: string;
+  status: "pending" | "satisfied" | "failed" | "uncertain";
+  evidenceTurnIds: string[];
+}
+
+export interface TrainingGauntletState {
+  schemaVersion: "1";
+  experienceMode: "gauntlet";
+  sectionId: string;
+  status: "ready" | "in_progress" | "run_failed" | "passed" | "failed" | "invalidated";
+  stateVersion: number;
+  runNumber: number;
+  nextTurn: number;
+  currentNodeId: string;
+  variantId: string;
+  criteria: TrainingGauntletCriterion[];
+}
+
+export interface TrainingGauntletResult {
+  attemptId?: string;
+  version?: number;
+  attempt?: TrainingAttempt;
+  duplicate?: boolean;
+  state: TrainingGauntletState;
+  reactionIntent?: string | null;
+  prospectReply?: { text: string; speechActs: string[] } | null;
+  terminal?: "passed" | "failed" | null;
+}
+
 type CourseRequestOptions = {
   method?: "GET" | "POST";
   body?: unknown;
@@ -333,6 +365,44 @@ export const trainingCourseApi = {
     return courseRequest<TrainingAttemptResult>(
       `/attempts/${encodeURIComponent(attemptId)}/results`,
       { signal },
+    );
+  },
+  gauntlet(attemptId: string, signal?: AbortSignal) {
+    return courseRequest<TrainingGauntletResult>(
+      `/course/gauntlet/attempts/${encodeURIComponent(attemptId)}`,
+      { signal },
+    );
+  },
+  initializeGauntlet(
+    attemptId: string,
+    body: { eventId: string; expectedVersion: number },
+  ) {
+    return courseRequest<TrainingGauntletResult>(
+      `/course/gauntlet/attempts/${encodeURIComponent(attemptId)}/initialize`,
+      { method: "POST", body },
+    );
+  },
+  submitGauntletTurn(
+    attemptId: string,
+    body: {
+      eventId: string;
+      expectedVersion: number;
+      expectedTurn: number;
+      text: string;
+    },
+  ) {
+    return courseRequest<TrainingGauntletResult>(
+      `/course/gauntlet/attempts/${encodeURIComponent(attemptId)}/turns`,
+      { method: "POST", body },
+    );
+  },
+  retryGauntlet(
+    attemptId: string,
+    body: { eventId: string; expectedVersion: number },
+  ) {
+    return courseRequest<TrainingGauntletResult>(
+      `/course/gauntlet/attempts/${encodeURIComponent(attemptId)}/retry`,
+      { method: "POST", body },
     );
   },
 };

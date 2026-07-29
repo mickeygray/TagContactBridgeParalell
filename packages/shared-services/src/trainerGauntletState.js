@@ -142,8 +142,24 @@ function normalizeGauntletState(value) {
   });
 }
 
+function reconstructGauntletState(events) {
+  if (!Array.isArray(events)) {
+    throw new TypeError("gauntlet events must be an array");
+  }
+  let state = null;
+  for (const event of events) {
+    if (!GAUNTLET_PERSISTED_EVENT_TYPES.includes(event?.type)) continue;
+    if (!isPlainObject(event?.payload?.stateAfter)) {
+      throw new TypeError(`gauntlet event ${event?.eventId || "unknown"} is missing stateAfter`);
+    }
+    state = normalizeGauntletState(event.payload.stateAfter);
+  }
+  return state;
+}
+
 module.exports = {
   GAUNTLET_ATTEMPT_STATUSES,
   GAUNTLET_PERSISTED_EVENT_TYPES,
   normalizeGauntletState,
+  reconstructGauntletState,
 };

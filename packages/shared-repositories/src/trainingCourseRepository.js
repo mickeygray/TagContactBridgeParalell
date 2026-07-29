@@ -5,6 +5,24 @@ const {
   TrainingEnrollment,
 } = require("../../shared-models/src");
 
+function canonicalize(value) {
+  if (value == null || typeof value !== "object") return value;
+  if (Array.isArray(value)) return value.map(canonicalize);
+  return Object.fromEntries(
+    Object.keys(value)
+      .sort()
+      .map((key) => [key, canonicalize(value[key])]),
+  );
+}
+
+function eventPayloadFingerprint(event) {
+  return JSON.stringify(canonicalize({
+    type: event?.type ?? null,
+    expectedPriorVersion: event?.expectedPriorVersion ?? null,
+    payload: event?.payload ?? null,
+    provenance: event?.provenance ?? null,
+  }));
+}
 function leanValue(value) {
   if (!value) return value;
   return typeof value.toObject === "function"
@@ -147,6 +165,7 @@ async function appendAttemptEvent({
   terminalSummary,
   gauntletState,
   expectedGauntletStateVersion,
+  expectedTurn,
 }) {
   const set = {};
   if (terminalSummary !== undefined) {
@@ -172,6 +191,9 @@ async function appendAttemptEvent({
   if (expectedGauntletStateVersion !== undefined) {
     query["gauntletState.stateVersion"] = expectedGauntletStateVersion;
   }
+  if (expectedTurn !== undefined) {
+    query["gauntletState.nextTurn"] = expectedTurn;
+  }
 
   const accepted = await TrainingAttempt.findOneAndUpdate(
     query,
@@ -191,11 +213,11 @@ async function appendAttemptEvent({
     return { attempt: null, duplicate: false, conflict: false };
   }
   if ((current.eventIds || []).includes(eventId)) {
-    return {
-      attempt: current,
-      duplicate: true,
-      conflict: false,
-    };
+    const existing = (current.events || []).find((entry) => entry.eventId === eventId);
+    if (!existing || eventPayloadFingerprint(existing) !== eventPayloadFingerprint(event)) {
+      return { attempt: current, duplicate: false, conflict: true, reused: true };
+    }
+    return { attempt: current, duplicate: true, conflict: false };
   }
   return {
     attempt: current,
@@ -214,6 +236,7 @@ async function createAttempt(document) {
 
 module.exports = {
   appendAttemptEvent,
+  eventPayloadFingerprint,
   createAttempt,
   createEnrollment,
   findActiveEnrollment,

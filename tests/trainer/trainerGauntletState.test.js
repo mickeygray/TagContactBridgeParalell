@@ -8,6 +8,7 @@ const {
   GAUNTLET_ATTEMPT_STATUSES,
   GAUNTLET_PERSISTED_EVENT_TYPES,
   normalizeGauntletState,
+  reconstructGauntletState,
 } = require("../../packages/shared-services/src/trainerGauntletState");
 
 function validState(overrides = {}) {
@@ -92,6 +93,7 @@ test("attempt event append binds the ordinary and Gauntlet state revisions atomi
       eventId: "fixture-event",
       expectedVersion: 1,
       expectedGauntletStateVersion: 1,
+      expectedTurn: 1,
       event: { eventId: "fixture-event", sequence: 2, type: "gauntlet_turn_accepted", occurredAt: new Date("2026-07-29T17:00:00.000Z"), expectedPriorVersion: 1 },
       gauntletState: validState({ stateVersion: 2, nextTurn: 2 }),
     });
@@ -99,9 +101,61 @@ test("attempt event append binds the ordinary and Gauntlet state revisions atomi
     assert.equal(result.duplicate, false);
     assert.equal(captured.query.version, 1);
     assert.equal(captured.query["gauntletState.stateVersion"], 1);
+    assert.equal(captured.query["gauntletState.nextTurn"], 1);
     assert.equal(captured.update.$set.gauntletState.stateVersion, 2);
   } finally {
     TrainingAttempt.findOneAndUpdate = originalFindOneAndUpdate;
     TrainingAttempt.findOne = originalFindOne;
   }
+});
+test("attempt event append rejects a reused event ID with changed payload", async () => {
+  const repository = require("../../packages/shared-repositories/src/trainingCourseRepository");
+  const originalFindOneAndUpdate = TrainingAttempt.findOneAndUpdate;
+  const originalFindOne = TrainingAttempt.findOne;
+  const existingEvent = { eventId: "fixture-event", sequence: 1, type: "gauntlet_turn_accepted", expectedPriorVersion: 0, payload: { answer: "original" }, provenance: null, occurredAt: new Date() };
+  TrainingAttempt.findOneAndUpdate = () => ({ lean: async () => null });
+  TrainingAttempt.findOne = () => ({ lean: async () => ({ attemptId: "fixture-attempt", eventIds: ["fixture-event"], events: [existingEvent] }) });
+  try {
+    const result = await repository.appendAttemptEvent({
+      attemptId: "fixture-attempt", eventId: "fixture-event", expectedVersion: 0,
+      event: { ...existingEvent, payload: { answer: "changed" } },
+    });
+    assert.equal(result.duplicate, false);
+    assert.equal(result.conflict, true);
+    assert.equal(result.reused, true);
+  } finally {
+    TrainingAttempt.findOneAndUpdate = originalFindOneAndUpdate;
+    TrainingAttempt.findOne = originalFindOne;
+  }
+});
+
+test("Targeted Talk state reconstructs the last complete checkpoint after restart", () => {
+  const initialized = validState({ stateVersion: 0, nextTurn: 1 });
+  const advanced = validState({
+    stateVersion: 1,
+    nextTurn: 2,
+    currentNodeId: "fixture-node-recover",
+    lastAcceptedEventId: "fixture-turn-1",
+    criteria: [{
+      ...validState().criteria[0],
+      status: "satisfied",
+      evidenceTurnIds: ["fixture-turn-1"],
+    }],
+  });
+  const rebuilt = reconstructGauntletState([
+    {
+      eventId: "fixture-init",
+      type: "gauntlet_initialized",
+      payload: { stateAfter: initialized },
+    },
+    {
+      eventId: "fixture-turn-1",
+      type: "gauntlet_turn_accepted",
+      payload: { stateAfter: advanced },
+    },
+  ]);
+  assert.equal(rebuilt.currentNodeId, "fixture-node-recover");
+  assert.equal(rebuilt.nextTurn, 2);
+  assert.deepEqual(rebuilt.criteria[0].evidenceTurnIds, ["fixture-turn-1"]);
+  assert.equal(rebuilt.voiceProfileId, initialized.voiceProfileId);
 });

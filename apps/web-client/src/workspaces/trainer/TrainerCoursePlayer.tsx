@@ -5,6 +5,8 @@ import type { TrainingCourseHome } from "@/lib/api/trainingCourse";
 import { TrainerCurriculumRail } from "./TrainerCurriculumRail";
 import { TrainerLessonItem } from "./TrainerLessonItem";
 import { TrainerQuizItem } from "./TrainerQuizItem";
+import { TrainerGauntletPlayer } from "./TrainerGauntletPlayer";
+import { TrainerFreeCallPlayer } from "./TrainerFreeCallPlayer";
 import { useTrainingAttempt } from "./hooks/useTrainingAttempt";
 
 interface TrainerCoursePlayerProps {
@@ -61,6 +63,7 @@ export function TrainerCoursePlayer({
   const busy = attemptState.action !== null;
   const isFreeCall = item.type === "free_call" || item.type === "free-call";
   const isLesson = item.type === "lesson";
+  const isGauntlet = item.type === "gauntlet";
   const isAssessed =
     item.type === "quiz" || item.type === "say_it" || item.type === "say-it";
   const completedAttemptId = item.completedAttemptId;
@@ -116,15 +119,13 @@ export function TrainerCoursePlayer({
             </div>
           ) : null}
           {isFreeCall ? (
-            <div className="rounded-lg border border-primary/30 bg-primary/5 p-5">
-              <h2 className="font-semibold">This course experience is not available yet</h2>
-              <p className="mt-2 text-sm leading-6 text-muted-foreground">
-                Free Call remains available from the separate legacy practice surface while its course-attempt adapter is proven.
-              </p>
-              <Button className="mt-4" onClick={onOpenPractice}>
-                Open legacy Free Call
-              </Button>
-            </div>
+            <TrainerFreeCallPlayer onOpenLegacyPractice={onOpenPractice} />
+          ) : isGauntlet && home?.capabilities.gauntletV1Enabled === true ? (
+            <TrainerGauntletPlayer
+              item={item}
+              attempt={attemptState.attempt}
+              onStart={attemptState.start}
+            />
           ) : isLesson ? (
             <TrainerLessonItem
               item={item}

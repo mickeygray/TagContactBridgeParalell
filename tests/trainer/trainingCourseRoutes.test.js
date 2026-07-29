@@ -160,6 +160,102 @@ test("course routes derive learner/company from authenticated server state", asy
   assert.equal(courseService.calls.at(-1).input.answer, "a");
 });
 
+test("Gauntlet turn route accepts only learner text and server CAS fields", async (t) => {
+  const calls = [];
+  const router = createSalesTrainerCourseRouter({
+    requireSalesTrainerAccess(req, _res, next) {
+      req.salesTrainerUser = { email: "learner@example.test" };
+      req.user = { email: "learner@example.test", company: "TAG" };
+      next();
+    },
+    courseService: serviceStub(),
+    gauntletService: {
+      async submitTextTurn(input) {
+        calls.push(input);
+        return { state: { status: "in_progress", nextTurn: 2 } };
+      },
+    },
+  });
+  const baseUrl = await listen(t, router);
+  const accepted = await requestJson(
+    baseUrl,
+    "/course/gauntlet/attempts/attempt-1/turns",
+    {
+      method: "POST",
+      body: {
+        eventId: "event-1",
+        expectedVersion: 1,
+        expectedTurn: 1,
+        text: "Synthetic learner response.",
+      },
+    },
+  );
+  assert.equal(accepted.status, 200);
+  assert.equal(calls[0].text, "Synthetic learner response.");
+  assert.equal("evidence" in calls[0], false);
+
+  const rejected = await requestJson(
+    baseUrl,
+    "/course/gauntlet/attempts/attempt-1/turns",
+    {
+      method: "POST",
+      body: {
+        eventId: "event-2",
+        expectedVersion: 1,
+        expectedTurn: 1,
+        text: "Synthetic.",
+        evidence: [{ criterionId: "browser-invented" }],
+      },
+    },
+  );
+  assert.equal(rejected.status, 422);
+});
+
+test("sealed Free Call routes reject browser profile and recording authority", async (t) => {
+  const calls = [];
+  const router = createSalesTrainerCourseRouter({
+    requireSalesTrainerAccess(req, _res, next) {
+      req.salesTrainerUser = { email: "learner@example.test" };
+      req.user = { email: "learner@example.test", company: "TAG" };
+      next();
+    },
+    courseService: serviceStub(),
+    freeCallService: {
+      async get(input) { calls.push({ operation: "get", input }); return { status: "ready" }; },
+      async mint(input) { calls.push({ operation: "mint", input }); return { status: "ready" }; },
+      async submitTextTurn(input) { calls.push({ operation: "turn", input }); return { status: "ready" }; },
+      async mergeObserverState(input) { calls.push({ operation: "observer", input }); return { status: "ready" }; },
+    },
+  });
+  const baseUrl = await listen(t, router);
+  const accepted = await requestJson(baseUrl, "/course/free-call/attempts/attempt-1/turns", {
+    method: "POST",
+    body: {
+      eventId: "turn-1",
+      expectedVersion: 0,
+      expectedTurn: 1,
+      text: "Hello.",
+    },
+  });
+  assert.equal(accepted.status, 200);
+  assert.equal(calls.at(-1).operation, "turn");
+  assert.equal("profileId" in calls.at(-1).input, false);
+
+  const rejected = await requestJson(baseUrl, "/course/free-call/attempts/attempt-1/turns", {
+    method: "POST",
+    body: {
+      eventId: "turn-2",
+      expectedVersion: 1,
+      expectedTurn: 2,
+      text: "Hello.",
+      profileId: "browser-selected",
+      recordTurn: false,
+    },
+  });
+  assert.equal(rejected.status, 422);
+  assert.equal(calls.filter((call) => call.operation === "turn").length, 1);
+});
+
 test("course routes reject browser authority fields before the service", async (t) => {
   const courseService = serviceStub();
   const router = createSalesTrainerCourseRouter({

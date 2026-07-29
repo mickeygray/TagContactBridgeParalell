@@ -48,6 +48,9 @@ const sourceCanonicalRepository = require("./sourceCanonicalRepository");
 const spendEntryRepository = require("./spendEntryRepository");
 const userAccountRepository = require("./userAccountRepository");
 const workflowRecordRepository = require("./workflowRecordRepository");
+const trainingCallReviewRepository = require("./trainingCallReviewRepository");
+const trainingCourseRepository = require("./trainingCourseRepository");
+const trainingFreeCallSessionRepository = require("./trainingFreeCallSessionRepository");
 
 module.exports = {
   agentStateRepository,
@@ -98,4 +101,7 @@ module.exports = {
   spendEntryRepository,
   userAccountRepository,
   workflowRecordRepository,
+  trainingCallReviewRepository,
+  trainingCourseRepository,
+  trainingFreeCallSessionRepository,
 };

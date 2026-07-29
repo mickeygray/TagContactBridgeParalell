@@ -14,6 +14,17 @@ const BODY_KEYS = Object.freeze({
   answer: new Set(["answer", "eventId", "expectedVersion"]),
   complete: new Set(["eventId", "expectedVersion"]),
   reflection: new Set(["reflection", "eventId", "expectedVersion"]),
+  gauntletInitialize: new Set(["eventId", "expectedVersion"]),
+  gauntletTurn: new Set([
+    "eventId",
+    "expectedVersion",
+    "expectedTurn",
+    "text",
+  ]),
+  gauntletRetry: new Set(["eventId", "expectedVersion"]),
+  freeCallMint: new Set(["requestId"]),
+  freeCallTurn: new Set(["eventId", "expectedVersion", "expectedTurn", "text"]),
+  freeCallObserver: new Set(["eventId", "expectedVersion", "expectedTurn", "prospectState"]),
 });
 
 function exactBody(body, allowed) {
@@ -102,6 +113,8 @@ function createSalesTrainerCourseRouter(options = {}) {
   const courseService =
     options.courseService ||
     createTrainingCourseService(options.courseServiceOptions);
+  const gauntletService = options.gauntletService || null;
+  const freeCallService = options.freeCallService || null;
   const userAccountRepository =
     options.userAccountRepository || defaultUserAccountRepository;
   const courseLimit =
@@ -284,6 +297,150 @@ function createSalesTrainerCourseRouter(options = {}) {
       }),
     ),
   );
+
+  if (gauntletService) {
+    router.get(
+      "/course/gauntlet/attempts/:attemptId",
+      courseLimit,
+      requireSalesTrainerAccess,
+      handler(async (req) =>
+        gauntletService.getAttempt({
+          principal: await principal(req),
+          attemptId: req.params.attemptId,
+        }),
+      ),
+    );
+
+    router.post(
+      "/course/gauntlet/attempts/:attemptId/initialize",
+      courseLimit,
+      requireSalesTrainerAccess,
+      handler(async (req) => {
+        if (!exactBody(req.body, BODY_KEYS.gauntletInitialize)) {
+          const error = new Error("Invalid Gauntlet initialization request");
+          error.status = 422;
+          throw error;
+        }
+        return gauntletService.initialize({
+          principal: await principal(req),
+          attemptId: req.params.attemptId,
+          eventId: req.body.eventId,
+          expectedVersion: req.body.expectedVersion,
+        });
+      }),
+    );
+
+    router.post(
+      "/course/gauntlet/attempts/:attemptId/turns",
+      courseLimit,
+      requireSalesTrainerAccess,
+      handler(async (req) => {
+        if (!exactBody(req.body, BODY_KEYS.gauntletTurn)) {
+          const error = new Error("Invalid Gauntlet turn request");
+          error.status = 422;
+          throw error;
+        }
+        return gauntletService.submitTextTurn({
+          principal: await principal(req),
+          attemptId: req.params.attemptId,
+          eventId: req.body.eventId,
+          expectedVersion: req.body.expectedVersion,
+          expectedTurn: req.body.expectedTurn,
+          text: req.body.text,
+        });
+      }),
+    );
+
+    router.post(
+      "/course/gauntlet/attempts/:attemptId/retry",
+      courseLimit,
+      requireSalesTrainerAccess,
+      handler(async (req) => {
+        if (!exactBody(req.body, BODY_KEYS.gauntletRetry)) {
+          const error = new Error("Invalid Gauntlet retry request");
+          error.status = 422;
+          throw error;
+        }
+        return gauntletService.retry({
+          principal: await principal(req),
+          attemptId: req.params.attemptId,
+          eventId: req.body.eventId,
+          expectedVersion: req.body.expectedVersion,
+        });
+      }),
+    );
+  }
+
+  if (freeCallService) {
+    router.get(
+      "/course/free-call/attempts/:attemptId",
+      courseLimit,
+      requireSalesTrainerAccess,
+      handler(async (req) =>
+        freeCallService.get({
+          principal: await principal(req),
+          attemptId: req.params.attemptId,
+        }),
+      ),
+    );
+    router.post(
+      "/course/free-call/attempts/:attemptId/session",
+      courseLimit,
+      requireSalesTrainerAccess,
+      handler(async (req) => {
+        if (!exactBody(req.body, BODY_KEYS.freeCallMint)) {
+          const error = new Error("Invalid Free Call session request");
+          error.status = 422;
+          throw error;
+        }
+        return freeCallService.mint({
+          principal: await principal(req),
+          attemptId: req.params.attemptId,
+          requestId: req.body.requestId,
+        });
+      }),
+    );
+    router.post(
+      "/course/free-call/attempts/:attemptId/turns",
+      courseLimit,
+      requireSalesTrainerAccess,
+      handler(async (req) => {
+        if (!exactBody(req.body, BODY_KEYS.freeCallTurn)) {
+          const error = new Error("Invalid Free Call turn request");
+          error.status = 422;
+          throw error;
+        }
+        return freeCallService.submitTextTurn({
+          principal: await principal(req),
+          attemptId: req.params.attemptId,
+          eventId: req.body.eventId,
+          expectedVersion: req.body.expectedVersion,
+          expectedTurn: req.body.expectedTurn,
+          text: req.body.text,
+        });
+      }),
+    );
+    router.post(
+      "/course/free-call/attempts/:attemptId/observer",
+      courseLimit,
+      requireSalesTrainerAccess,
+      handler(async (req) => {
+        if (!exactBody(req.body, BODY_KEYS.freeCallObserver)) {
+          const error = new Error("Invalid Free Call observer request");
+          error.status = 422;
+          throw error;
+        }
+        return freeCallService.mergeObserverState({
+          principal: await principal(req),
+          attemptId: req.params.attemptId,
+          eventId: req.body.eventId,
+          expectedVersion: req.body.expectedVersion,
+          expectedTurn: req.body.expectedTurn,
+          prospectState: req.body.prospectState,
+        });
+      }),
+    );
+  }
 
   return router;
 }

@@ -288,6 +288,8 @@ function createSalesTrainerRouter(auth, config = {}) {
     createSalesTrainerCourseRouter({
       requireSalesTrainerAccess,
       courseLimit,
+      gauntletService: config.trainingGauntletService || null,
+      freeCallService: config.trainingFreeCallService || null,
     }),
   );
   router.use(

@@ -546,7 +546,7 @@ test("later-phase item types stay locked and direct access reauthorizes stale st
       contentProvider: () => content,
       flags: {
         courseV1Enabled: true,
-        gauntletV1Enabled: true,
+        gauntletV1Enabled: false,
         callReviewV1Enabled: false,
       },
     });
@@ -1176,4 +1176,20 @@ test("home repairs accepted failed-answer remediation after a process restart", 
     principal: LEARNER,
   });
   assert.equal(repairedHome.enrollment.activeRemediation.length, 0);
+});
+
+test("Gauntlet availability honors its own feature flag without enabling Free Call", async () => {
+  const content = contentFixture();
+  content.courseManifest.items.push({
+    id: "fixture-item-gauntlet", version: "1.0.0-test", status: "published",
+    type: "gauntlet", ruleIds: ["fixture-rule-alpha"], prerequisiteItemIds: [],
+  }, {
+    id: "fixture-item-free", version: "1.0.0-test", status: "published",
+    type: "free-call", ruleIds: ["fixture-rule-alpha"], prerequisiteItemIds: [],
+  });
+  const flags = { courseV1Enabled: true, gauntletV1Enabled: true, callReviewV1Enabled: false };
+  const { service } = serviceFixture({ contentProvider: () => content, flags });
+  const enrolled = await service.enroll({ principal: LEARNER, requestId: "flagged-gauntlet-enroll" });
+  assert.equal(enrolled.enrollment.items.find((item) => item.itemId === "fixture-item-gauntlet").status, "available");
+  assert.equal(enrolled.enrollment.items.find((item) => item.itemId === "fixture-item-free").status, "locked");
 });

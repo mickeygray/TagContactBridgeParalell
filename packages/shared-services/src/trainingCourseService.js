@@ -214,8 +214,10 @@ function applyCompanyOverlay(item, manifest, company) {
   return result;
 }
 
-function runtimeItemAvailable(item) {
-  return ACTIVE_COURSE_ITEM_TYPES.has(item?.type);
+function runtimeItemAvailable(item, flags = {}) {
+  if (ACTIVE_COURSE_ITEM_TYPES.has(item?.type)) return true;
+  if (item?.type === "gauntlet") return flags.gauntletV1Enabled === true;
+  return false;
 }
 
 function initialItemStates(bundle, company, now, flags) {
