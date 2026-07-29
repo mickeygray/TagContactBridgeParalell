@@ -40,6 +40,21 @@ const TAX_RESOLUTION_RULINGS = Object.freeze({
       + "before anything has been earned, and reads like every pitch call the prospect has "
       + "already learned to dismiss. The skill is the judgment about the moment, not recitation.",
   }),
+  "ruling.ground-generally-no-records-pitch": Object.freeze({
+    rulingId: "ruling.ground-generally-no-records-pitch",
+    date: "2026-07-29",
+    statement:
+      "The outbound opener does not disclose or lean on public tax records. Ground the call "
+      + "GENERALLY in its root — why a call like this happens — which can be provided if the "
+      + "prospect asks. The actual move is identifying whether this person HAS a tax issue.",
+    overrides: Object.freeze([
+      "taxGroupScript.js section 1 beat outbound_opener (the public-records disclosure wording)",
+    ]),
+    reasoning:
+      "Leading with 'your name appeared in public records' spends the first seconds justifying "
+      + "surveillance instead of finding the issue. The opener's job is a truthful general "
+      + "grounding and one limited question; specifics are available on request, not a pitch.",
+  }),
 });
 
 function rulingRef(rulingId) {
