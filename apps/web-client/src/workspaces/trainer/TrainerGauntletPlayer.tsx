@@ -77,6 +77,13 @@ export function TrainerGauntletPlayer({
   const [playbackIndex, setPlaybackIndex] = useState(0);
   const [handsFreeEnabled, setHandsFreeEnabled] = useState(true);
   const [coach, setCoach] = useState<TrainingTargetedCoach | null>(null);
+  const [reflectionAnswer, setReflectionAnswer] = useState("");
+  const [reflectionGrade, setReflectionGrade] = useState<{
+    passed: boolean;
+    score: number;
+    feedback: string;
+  } | null>(null);
+  const [gradingReflection, setGradingReflection] = useState(false);
   const [lastProspectText, setLastProspectText] = useState("");
   const [audioNotice, setAudioNotice] = useState("");
   const [error, setError] = useState("");
@@ -367,23 +374,56 @@ export function TrainerGauntletPlayer({
     setBusy(true);
     setError("");
     try {
-      const result = await trainingCourseApi.retryGauntlet(
+      const reset = await trainingCourseApi.retryGauntlet(
         currentAttempt.attemptId,
         {
           eventId: createTrainingRequestId("talk-retry"),
           expectedVersion: currentAttempt.version || runtime?.version || 0,
         },
       );
-      setRuntime(result);
-      setTape([]);
+      const initialized = await trainingCourseApi.initializeGauntlet(
+        currentAttempt.attemptId,
+        {
+          eventId: createTrainingRequestId("talk-init"),
+          expectedVersion: reset.attempt?.version || reset.version || 0,
+        },
+      );
+      const voiceSession = await trainingCourseApi.startTargetedVoiceSession(
+        currentAttempt.attemptId,
+      );
+      const opening = voiceSession.openingLine ||
+        "The prospect is ready. Respond to the situation in this section of the call.";
+      setRuntime(initialized);
+      setTape([{ id: `opening-${initialized.state.runNumber}`, speaker: "prospect", text: opening }]);
       setPlaybackUrls([]);
       setPlaybackIndex(0);
-      setLastProspectText("");
-      setCoach(null);
+      setLastProspectText(opening);
+      setCoach(voiceSession.coach || initialized.coach || null);
+      setReflectionAnswer("");
+      setReflectionGrade(null);
+      playProspect(opening, voiceSession.openingPlayback);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Could not begin another run.");
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function gradeReflection() {
+    const currentAttempt = runtime?.attempt || attempt;
+    if (!currentAttempt || !reflectionAnswer.trim() || gradingReflection) return;
+    setGradingReflection(true);
+    setError("");
+    try {
+      const grade = await trainingCourseApi.gradeTargetedModuleAnswer(
+        currentAttempt.attemptId,
+        reflectionAnswer.trim(),
+      );
+      setReflectionGrade(grade);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Could not grade that answer.");
+    } finally {
+      setGradingReflection(false);
     }
   }
 
@@ -399,19 +439,27 @@ export function TrainerGauntletPlayer({
         {item.content.instructions ? (
           <p className="mt-3 text-sm">{item.content.instructions}</p>
         ) : null}
-        {item.content.coachingGuide?.exactMoves?.length ? (
+        {item.content.coachingGuide?.practiceModules?.length ? (
           <div className="mt-4 rounded-md border border-border bg-background p-4">
             <div className="text-xs font-semibold uppercase text-muted-foreground">
-              Approved moves in this section
+              Five brief Introduction practices
             </div>
             <ul className="mt-2 space-y-2 text-sm">
-              {item.content.coachingGuide.exactMoves.map((move) => (
-                <li key={move.beatId}>
-                  <span className="font-semibold">{move.label}: </span>
-                  {move.language}
+              {item.content.coachingGuide.practiceModules.map((module, index) => (
+                <li key={module.moduleId}>
+                  <span className="font-semibold">{index + 1}. {module.title}: </span>
+                  {module.objective}
                 </li>
               ))}
             </ul>
+            <div className="mt-4 rounded-md bg-muted/40 p-3 text-sm">
+              <div className="font-semibold">
+                Read first · {item.content.coachingGuide.practiceModules[0].title}
+              </div>
+              <p className="mt-1 text-muted-foreground">
+                {item.content.coachingGuide.practiceModules[0].reading}
+              </p>
+            </div>
           </div>
         ) : null}
         {error ? <p role="alert" className="mt-3 text-sm text-destructive">{error}</p> : null}
@@ -425,13 +473,13 @@ export function TrainerGauntletPlayer({
 
   const terminal = runtime.state.status === "passed" || runtime.state.status === "failed";
   const voiceBusy = busy || prospectSpeaking;
-  const coachingGuide = item.content.coachingGuide;
   return (
     <div className="space-y-5">
       <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border bg-muted/20 p-4">
         <div>
           <div className="text-xs font-semibold uppercase tracking-[0.14em] text-primary">
-            Targeted Talk · Run {runtime.state.runNumber + 1}
+            Targeted Talk · Module {runtime.module?.moduleNumber || runtime.state.runNumber + 1}
+            {runtime.module?.moduleCount ? ` of ${runtime.module.moduleCount}` : ""}
           </div>
           <p className="mt-1 text-sm text-muted-foreground">
             Turn {runtime.state.nextTurn} · {runtime.state.status.replace(/_/g, " ")}
@@ -480,11 +528,6 @@ export function TrainerGauntletPlayer({
                 <span className="font-semibold text-foreground">Try this move: </span>
                 {coach.suggestedMove}
               </p>
-            ) : null}
-            {coach.exactLanguage ? (
-              <blockquote className="mt-3 border-l-2 border-primary pl-3 text-sm italic">
-                {coach.exactLanguage}
-              </blockquote>
             ) : null}
             <p className="mt-3 text-xs text-muted-foreground">
               <span className="font-semibold text-foreground">Listen for: </span>
@@ -547,43 +590,67 @@ export function TrainerGauntletPlayer({
         {audioNotice ? <p className="mt-3 text-xs text-muted-foreground">{audioNotice}</p> : null}
       </section>
 
-      {coachingGuide ? (
+      {runtime.module ? (
         <details className="rounded-lg border border-border bg-muted/10 p-4">
           <summary className="cursor-pointer text-sm font-semibold">
-            What this section is teaching
+            Reading · {runtime.module.title}
           </summary>
-          <p className="mt-3 text-sm text-muted-foreground">{coachingGuide.objective}</p>
-          <div className="mt-4 grid gap-3 md:grid-cols-2">
-            {coachingGuide.exactMoves.map((move) => (
-              <div key={move.beatId} className="rounded-md border border-border bg-background p-3">
-                <div className="text-xs font-semibold uppercase text-primary">{move.label}</div>
-                <p className="mt-2 text-sm">{move.language}</p>
-              </div>
-            ))}
-          </div>
-          {coachingGuide.responseSignals.length > 0 ? (
-            <div className="mt-4 space-y-2">
-              <div className="text-xs font-semibold uppercase text-muted-foreground">
-                Reactions you will practice
-              </div>
-              {coachingGuide.responseSignals.map((signal) => (
-                <div key={signal.signalId} className="rounded-md border border-border p-3 text-sm">
-                  <div className="font-medium">“{signal.prospectPattern}”</div>
-                  <div className="mt-1 text-muted-foreground">{signal.suggestedMove}</div>
-                </div>
-              ))}
-            </div>
-          ) : null}
+          <p className="mt-3 text-sm text-muted-foreground">{runtime.module.reading}</p>
+          <p className="mt-3 text-sm font-medium">{runtime.module.objective}</p>
         </details>
       ) : null}
 
       {error ? <p role="alert" className="text-sm text-destructive">{error}</p> : null}
       {terminal ? (
         <div className="rounded-lg border border-border p-4">
-          <h3 className="font-semibold">{runtime.state.status === "passed" ? "Section passed" : "Run complete"}</h3>
-          <p className="mt-1 text-sm text-muted-foreground">
-            Review the cited skill evidence before moving on.
-          </p>
+          <h3 className="font-semibold">
+            {runtime.state.status === "passed" ? "Talk practice complete" : "Run complete"}
+          </h3>
+          {runtime.state.status === "passed" && runtime.module?.question ? (
+            <div className="mt-4 space-y-3">
+              <div className="text-xs font-semibold uppercase text-muted-foreground">
+                Short model-graded Q&A
+              </div>
+              <p className="text-sm font-medium">{runtime.module.question.prompt}</p>
+              <textarea
+                aria-label="Module reflection answer"
+                value={reflectionAnswer}
+                onChange={(event) => setReflectionAnswer(event.target.value)}
+                className="min-h-24 w-full rounded-md border border-input bg-background p-3 text-sm"
+                placeholder="Explain your reasoning in your own words..."
+                disabled={gradingReflection || reflectionGrade?.passed === true}
+              />
+              <Button
+                onClick={() => void gradeReflection()}
+                disabled={!reflectionAnswer.trim() || gradingReflection}
+              >
+                {gradingReflection ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+                Grade my answer
+              </Button>
+              {reflectionGrade ? (
+                <div className={`rounded-md border p-3 text-sm ${
+                  reflectionGrade.passed
+                    ? "border-success/30 bg-success/10"
+                    : "border-warning/30 bg-warning/10"
+                }`}>
+                  <div className="font-semibold">
+                    {reflectionGrade.passed ? "Understood" : "Think it through once more"}
+                  </div>
+                  <p className="mt-1">{reflectionGrade.feedback}</p>
+                </div>
+              ) : null}
+              {reflectionGrade?.passed &&
+              (runtime.module.moduleNumber || 0) < (runtime.module.moduleCount || 0) ? (
+                <Button variant="secondary" onClick={() => void retry()} disabled={busy}>
+                  Next brief practice
+                </Button>
+              ) : null}
+            </div>
+          ) : (
+            <p className="mt-1 text-sm text-muted-foreground">
+              Review what happened before trying another variation.
+            </p>
+          )}
           {runtime.state.status === "failed" ? (
             <Button className="mt-3" variant="secondary" onClick={() => void retry()} disabled={busy}>
               <RotateCcw className="h-4 w-4" />

@@ -91,6 +91,13 @@ function packet(definition) {
       }))),
       responseSignals: Object.freeze((definition.responseSignals || []).map(Object.freeze)),
     }),
+    practiceModules: Object.freeze((definition.practiceModules || []).map((module) =>
+      Object.freeze({
+        ...module,
+        criterionIds: Object.freeze([...(module.criterionIds || [])]),
+        situations: Object.freeze([...(module.situations || [])]),
+        questions: Object.freeze((module.questions || []).map(Object.freeze)),
+      }))),
     personas: Object.freeze(definition.personas),
     situations: Object.freeze(definition.situations),
     prohibitedMoves: Object.freeze(definition.prohibitedMoves),
@@ -161,6 +168,113 @@ const INTRODUCTION = packet({
       coachNotice: "They are dismissing the interruption. You have room for one respectful reset, not a full pitch.",
       suggestedMove: "Stay calm, identify the firm and reason in one sentence, ask permission to clarify, and respect a repeated refusal.",
       listenFor: "A pause or question means the reset earned attention; another refusal means disengage.",
+    },
+  ],
+  practiceModules: [
+    {
+      moduleId: "intro.start-the-call",
+      title: "Start the call cleanly",
+      direction: "inbound",
+      objective: "Open calmly and create a natural first exchange without rushing ahead.",
+      reading: "A clean opening is short: acknowledge the connection, identify the firm and yourself, and give the other person room to respond. Tone and pacing matter as much as the words.",
+      coachNudge: "Establish calm control, cover the minimum identity needed for this moment, then create space instead of filling it.",
+      listenFor: "The prospect answers naturally instead of asking who is speaking or sounding more confused.",
+      criterionIds: ["tax-resolution.1.inbound_greeting"],
+      situations: [
+        "The prospect connects and waits silently for you to begin.",
+        "The prospect answers with a distracted hello and gives you only a few seconds.",
+      ],
+      questions: [
+        {
+          questionId: "intro-start-reflection",
+          prompt: "Why is a short opening more useful than immediately explaining the entire service?",
+          gradingPoints: ["creates room for a response", "avoids overwhelming the prospect", "establishes identity and calm control"],
+        },
+      ],
+    },
+    {
+      moduleId: "intro.deflect-anger",
+      title: "Absorb anger without fighting",
+      direction: "outbound",
+      objective: "Respond to hostility without matching it, surrendering the call immediately, or launching into a pitch.",
+      reading: "Anger is usually about the interruption, distrust, or fear—not a request for an argument. Lower the temperature, acknowledge the interruption, give one concise truthful reset, and watch whether the prospect meets you halfway.",
+      coachNudge: "Address the emotion and interruption first. You get one brief reset; do not defend yourself or unload the full pitch.",
+      listenFor: "A pause, softer tone, correction, or real question means the temperature changed. A repeated refusal means disengage.",
+      criterionIds: ["tax-resolution.1.outbound_opener"],
+      situations: [
+        "The prospect interrupts with: Why are you bothering me?",
+        "The prospect snaps: Shut up and go away. They will hear one calm reset.",
+      ],
+      questions: [
+        {
+          questionId: "intro-anger-reflection",
+          prompt: "What should you listen for after making one calm reset with an angry prospect?",
+          gradingPoints: ["pause or reduced hostility", "a real question or correction", "a repeated refusal means disengage"],
+        },
+      ],
+    },
+    {
+      moduleId: "intro.identify-the-firm",
+      title: "Identify yourself and the company",
+      direction: "outbound",
+      objective: "Resolve identity and legitimacy concerns before asking for case information.",
+      reading: "A suspicious prospect needs to know who you are, what organization you represent, and what that organization actually does. Never blur the line between a private representation firm and a government agency.",
+      coachNudge: "Solve the legitimacy question before requesting facts. Make each piece of identity unmistakable without overexplaining.",
+      listenFor: "The prospect stops testing identity and begins asking about the firm's role or the reason for contact.",
+      criterionIds: ["tax-resolution.1.who_we_are"],
+      situations: [
+        "The prospect asks: Who are you?",
+        "The prospect asks whether this is the IRS or a scam.",
+      ],
+      questions: [
+        {
+          questionId: "intro-identity-reflection",
+          prompt: "What distinction must be unmistakable when a prospect asks whether you are the IRS?",
+          gradingPoints: ["private licensed representation firm", "not the IRS or government", "represents taxpayers with agencies"],
+        },
+      ],
+    },
+    {
+      moduleId: "intro.explain-the-purpose",
+      title: "Explain why the call is happening",
+      direction: "outbound",
+      objective: "Give a concise and truthful reason for the call and earn permission to continue.",
+      reading: "The purpose statement should answer why this person, why now, and what limited question you are asking. Do not imply that an outbound prospect requested the call when the source is public information.",
+      coachNudge: "Answer why this person is being contacted in one truthful, limited explanation, then let them confirm or correct it.",
+      listenFor: "The prospect confirms an active issue, corrects the premise, or grants permission for one more question.",
+      criterionIds: ["tax-resolution.1.outbound_opener"],
+      situations: [
+        "The prospect asks: Why are you calling me?",
+        "The prospect says: I never asked anybody to call.",
+      ],
+      questions: [
+        {
+          questionId: "intro-purpose-reflection",
+          prompt: "Why is it important not to imply that an outbound prospect requested the call?",
+          gradingPoints: ["truthful source disclosure", "preserves trust", "avoids a false claim about consent or intent"],
+        },
+      ],
+    },
+    {
+      moduleId: "intro.earn-the-story",
+      title: "Earn the first real answer",
+      direction: "inbound",
+      objective: "Move from identity and purpose into an invitation that lets the prospect describe the tax concern in their own words.",
+      reading: "The introduction succeeds when the prospect begins participating. Use an open invitation, listen to the first answer, and resist turning the moment into a checklist or a premature pitch.",
+      coachNudge: "Use an invitation that cannot be answered with only yes or no, then follow the first fact they choose to share.",
+      listenFor: "The prospect begins describing the letter, balance, filing concern, or reason they reached out in their own words.",
+      criterionIds: ["tax-resolution.1.inbound_greeting", "tax-resolution.1.who_we_are"],
+      situations: [
+        "The prospect says only: I got a letter.",
+        "The prospect says they have a tax problem but does not know where to begin.",
+      ],
+      questions: [
+        {
+          questionId: "intro-story-reflection",
+          prompt: "What tells you the introduction has worked and it is appropriate to begin learning about the tax problem?",
+          gradingPoints: ["prospect begins sharing", "permission or willingness to continue", "agent listens to the answer rather than pitching"],
+        },
+      ],
     },
   ],
   prohibitedMoves: [

@@ -35,11 +35,14 @@ test("targeted voice sessions run through the real Free Call turn stack", () => 
 });
 
 test("section packets drive local teaching prompts without replacing the voice loop", () => {
-  assert.match(previewSource, /Approved section language:/);
+  assert.match(previewSource, /Learner reading:/);
   assert.match(previewSource, /function coachForRecord\(record, prospectText/);
   assert.match(previewSource, /coachNotice/);
   assert.match(previewSource, /suggestedMove/);
   assert.match(previewSource, /listenFor/);
+  assert.match(previewSource, /gradeModuleAnswer/);
+  assert.match(previewSource, /module-answer/);
+  assert.match(previewSource, /reveal the approved wording/);
 });
 
 test("direction-specific criteria are filtered before the short section begins", () => {

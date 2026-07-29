@@ -114,6 +114,13 @@ export interface TrainingCourseItem {
         suggestedMove: string;
         listenFor: string;
       }>;
+      practiceModules?: Array<{
+        moduleId: string;
+        title: string;
+        objective: string;
+        reading: string;
+        questionCount: number;
+      }>;
     };
   };
 }
@@ -236,6 +243,17 @@ export interface TrainingGauntletResult {
   prospectReply?: { text: string; speechActs: string[] } | null;
   terminal?: "passed" | "failed" | null;
   coach?: TrainingTargetedCoach | null;
+  module?: {
+    moduleId: string;
+    title: string;
+    objective: string;
+    reading: string;
+    moduleNumber: number;
+    moduleCount: number;
+    question?: {
+      prompt: string;
+    } | null;
+  } | null;
 }
 
 export interface TrainingTargetedCoach {
@@ -473,6 +491,16 @@ export const trainingCourseApi = {
     return courseRequest<TrainingTargetedVoiceTurn>(
       `/course/gauntlet/attempts/${encodeURIComponent(attemptId)}/voice-turns`,
       { method: "POST", body: form },
+    );
+  },
+  gradeTargetedModuleAnswer(attemptId: string, answer: string) {
+    return courseRequest<{
+      passed: boolean;
+      score: number;
+      feedback: string;
+    }>(
+      `/course/gauntlet/attempts/${encodeURIComponent(attemptId)}/module-answer`,
+      { method: "POST", body: { answer } },
     );
   },
 };

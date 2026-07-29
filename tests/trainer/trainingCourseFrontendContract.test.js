@@ -156,8 +156,11 @@ test("Targeted Talk reuses the one-shot Free Call voice turn behind capability",
   assert.match(gauntlet, /submitTargetedVoiceTurn/);
   assert.match(gauntlet, /result\.voiceTurn\.playback/);
   assert.match(gauntlet, /Coach · what to notice/);
-  assert.match(gauntlet, /What this section is teaching/);
+  assert.match(gauntlet, /Five brief Introduction practices/);
+  assert.match(gauntlet, /Short model-graded Q&A/);
+  assert.match(gauntlet, /gradeTargetedModuleAnswer/);
   assert.match(gauntlet, /Listen for:/);
+  assert.doesNotMatch(gauntlet, /coach\.exactLanguage/);
   assert.doesNotMatch(gauntlet, /salesTrainerApi\.transcribeAudio/);
   assert.doesNotMatch(gauntlet, /salesTrainerApi\.speech/);
   assert.match(gauntlet, /Start voice session/);

@@ -58,9 +58,13 @@ let attemptSequence = 0;
 const anthropicClient = isAnthropicConfigured() ? createAnthropicClient() : null;
 
 function activeCriteria(record) {
+  const moduleCriterionIds = new Set(record.module?.criterionIds || []);
   return record.packet.criteria.filter((criterion) => {
     const requiredDirection = criterion.appliesWhen?.direction;
-    return !requiredDirection || requiredDirection === record.direction;
+    const directionApplies = !requiredDirection || requiredDirection === record.direction;
+    const moduleApplies = moduleCriterionIds.size === 0 ||
+      moduleCriterionIds.has(criterion.criterionId);
+    return directionApplies && moduleApplies;
   });
 }
 
@@ -72,22 +76,22 @@ function conversationText(record) {
 }
 
 function targetedSessionInstructions(record) {
+  const module = record.module;
   return [
     "TARGETED TALK — this is a short section of a tax-resolution sales call, not an end-to-end call.",
     `Section: ${record.packet.sectionId}. ${record.packet.title}.`,
-    `Local objective: ${record.packet.localObjective}`,
+    `Practice module: ${module?.title || record.packet.title}.`,
+    `Local objective: ${module?.objective || record.packet.localObjective}`,
     `Prospect posture: ${record.variant.posture}.`,
     `Prospect behavior: ${record.variant.behavior}.`,
     `Situation: ${record.situation}`,
-    "Approved section language:",
-    ...record.packet.teaching.exactMoves.map((move) =>
-      `- ${move.label}: ${move.language}`),
+    `Learner reading: ${module?.reading || record.packet.localObjective}`,
     "Prospect reactions this lesson is designed to practice:",
     ...record.packet.teaching.responseSignals.map((signal) =>
       `- ${signal.prospectPattern}: ${signal.coachNotice}`),
     `Never leave this section or move into later phases. Prohibited moves: ${record.packet.prohibitedMoves.join("; ")}.`,
     "Stay a natural prospect. Listen to the agent, answer what they actually say, and keep the exchange inside this section.",
-    "Do not coach, grade, mention criteria, announce completion, quote fees, close, or agree to buy.",
+    "Do not coach, grade, reveal the approved wording, mention criteria, announce completion, quote fees, close, or agree to buy.",
   ].join("\n");
 }
 
@@ -101,18 +105,20 @@ function coachForRecord(record, prospectText = "") {
   const pending = activeCriteria(record).find(
     (criterion) => !record.satisfiedCriterionIds.has(criterion.criterionId),
   );
-  const beatId = pending?.criterionId?.split(".").at(-1);
-  const exactMove = record.packet.teaching?.exactMoves?.find(
-    (move) => move.beatId === beatId,
-  ) || record.packet.teaching?.exactMoves?.[0] || null;
   return {
-    sectionTitle: record.packet.title,
-    objective: record.packet.localObjective,
+    sectionTitle: record.module?.title || record.packet.title,
+    objective: record.module?.objective || record.packet.localObjective,
     notice: signal?.coachNotice || "Listen for what the prospect needs before choosing the next approved move.",
     prospectPattern: signal?.prospectPattern || null,
-    suggestedMove: signal?.suggestedMove || pending?.description || exactMove?.label || null,
-    exactLanguage: exactMove?.language || null,
-    listenFor: signal?.listenFor || "A direct answer, reduced resistance, or permission to continue.",
+    suggestedMove: record.module?.coachNudge ||
+      (signal
+        ? signal.suggestedMove.replace(/^Use the public-record basis[^.]*\./, "Be concise and truthful about why the call is happening.")
+        : pending
+        ? `Think about what the prospect still needs before they will ${pending.description.toLowerCase()}.`
+        : "Use the reading and the prospect's words to choose your next move."),
+    exactLanguage: null,
+    listenFor: record.module?.listenFor || signal?.listenFor ||
+      "A direct answer, reduced resistance, or permission to continue.",
   };
 }
 
@@ -261,6 +267,67 @@ async function gradeLearnerTurn(record, learnerText) {
   return [...new Set(tool?.input?.satisfiedCriterionIds || [])]
     .map(String)
     .filter((criterionId) => allowed.has(criterionId));
+}
+
+async function gradeModuleAnswer(record, answer) {
+  const question = record.module?.questions?.[0];
+  if (!question) {
+    return { passed: true, score: 1, feedback: "No Q&A is required for this preview module." };
+  }
+  const safeAnswer = String(answer || "").trim();
+  if (!anthropicClient) {
+    return {
+      passed: safeAnswer.length >= 20,
+      score: safeAnswer.length >= 20 ? 0.75 : 0.25,
+      feedback: "Explain the reasoning in your own words and connect it to what you should notice from the prospect.",
+    };
+  }
+  const response = await anthropicClient.createMessage({
+    model: PROSPECT_MODEL,
+    maxTokens: 500,
+    temperature: 0,
+    timeoutMs: 20_000,
+    system: [
+      "You grade a short learner reflection after a tax-resolution voice practice module.",
+      "Use only the supplied grading points. Reward understanding, not memorized wording.",
+      "Give concise feedback without revealing a script line.",
+      "Return only the required tool call.",
+    ].join("\n"),
+    messages: [{
+      role: "user",
+      content: JSON.stringify({
+        moduleTitle: record.module.title,
+        objective: record.module.objective,
+        question: question.prompt,
+        gradingPoints: question.gradingPoints,
+        learnerAnswer: safeAnswer,
+      }),
+    }],
+    tools: [{
+      name: "grade_module_reflection",
+      description: "Grade the learner's understanding of this practice module.",
+      input_schema: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          passed: { type: "boolean" },
+          score: { type: "number", minimum: 0, maximum: 1 },
+          feedback: { type: "string", minLength: 1, maxLength: 500 },
+        },
+        required: ["passed", "score", "feedback"],
+      },
+    }],
+    toolChoice: { type: "tool", name: "grade_module_reflection" },
+  });
+  const tool = extractToolUse(response, "grade_module_reflection");
+  return {
+    passed: tool?.input?.passed === true,
+    score: Math.max(0, Math.min(1, Number(tool?.input?.score) || 0)),
+    feedback: String(
+      tool?.input?.feedback ||
+      "Review the reading and explain what signal you would act on.",
+    ).trim(),
+  };
 }
 
 async function generateProspectReply(record, learnerText, { opening = false } = {}) {
@@ -429,13 +496,14 @@ function publicItem(packet) {
       estimatedMinutes: Math.max(3, Math.ceil(packet.maxTurns / 2)),
       coachingGuide: {
         objective: packet.localObjective,
-        exactMoves: packet.teaching.exactMoves,
-        responseSignals: packet.teaching.responseSignals.map((signal) => ({
-          signalId: signal.signalId,
-          prospectPattern: signal.prospectPattern,
-          coachNotice: signal.coachNotice,
-          suggestedMove: signal.suggestedMove,
-          listenFor: signal.listenFor,
+        exactMoves: [],
+        responseSignals: [],
+        practiceModules: packet.practiceModules.map((module) => ({
+          moduleId: module.moduleId,
+          title: module.title,
+          objective: module.objective,
+          reading: module.reading,
+          questionCount: module.questions.length,
         })),
       },
     },
@@ -491,6 +559,19 @@ function gauntletResult(record, extras = {}) {
     prospectReply: extras.prospectReply || null,
     terminal: extras.terminal || null,
     coach: extras.coach || coachForRecord(record, record.tape.at(-1)?.text || ""),
+    module: record.module ? {
+      moduleId: record.module.moduleId,
+      title: record.module.title,
+      objective: record.module.objective,
+      reading: record.module.reading,
+      moduleNumber: record.runNumber + 1,
+      moduleCount: record.packet.practiceModules.length,
+      question: record.module.questions?.[0]
+        ? {
+            prompt: record.module.questions[0].prompt,
+          }
+        : null,
+    } : null,
   };
 }
 
@@ -510,6 +591,11 @@ function findAttempt(req, res) {
 
 function chooseVariant(packet, runNumber) {
   return packet.personas[runNumber % packet.personas.length];
+}
+
+function chooseModule(packet, runNumber) {
+  const modules = packet.practiceModules || [];
+  return modules.length > 0 ? modules[runNumber % modules.length] : null;
 }
 
 app.get("/api/client/runtime", (_req, res) => {
@@ -655,8 +741,9 @@ app.post("/api/sales-trainer/attempts", (req, res) => {
   const record = {
     attemptId: `local-preview-attempt-${attemptSequence}`,
     packet,
-    direction: packet.directions[0] || "inbound",
-    situation: packet.situations[0],
+    module: chooseModule(packet, 0),
+    direction: chooseModule(packet, 0)?.direction || packet.directions[0] || "inbound",
+    situation: chooseModule(packet, 0)?.situations?.[0] || packet.situations[0],
     variant: chooseVariant(packet, 0),
     runNumber: 0,
     nextTurn: 0,
@@ -757,6 +844,32 @@ app.post(
   },
 );
 
+app.post(
+  "/api/sales-trainer/course/gauntlet/attempts/:attemptId/module-answer",
+  async (req, res) => {
+    const record = findAttempt(req, res);
+    if (!record) return;
+    const answer = String(req.body?.answer || "").trim();
+    if (!answer) {
+      return res.status(400).json({
+        ok: false,
+        preview: true,
+        error: "Answer the reflection question in your own words.",
+      });
+    }
+    try {
+      return ok(res, await gradeModuleAnswer(record, answer));
+    } catch {
+      return res.status(502).json({
+        ok: false,
+        preview: true,
+        code: "preview_module_grading_unavailable",
+        error: "The local preview could not grade that answer.",
+      });
+    }
+  },
+);
+
 app.post("/api/sales-trainer/course/gauntlet/attempts/:attemptId/turns", async (req, res) => {
   const record = findAttempt(req, res);
   if (!record) return;
@@ -814,8 +927,12 @@ app.post("/api/sales-trainer/course/gauntlet/attempts/:attemptId/retry", (req, r
   record.version += 1;
   record.runNumber += 1;
   record.variant = chooseVariant(record.packet, record.runNumber);
+  record.module = chooseModule(record.packet, record.runNumber);
+  record.direction =
+    record.module?.direction || record.packet.directions[record.runNumber % record.packet.directions.length];
+  const moduleSituations = record.module?.situations || record.packet.situations;
   record.situation =
-    record.packet.situations[record.runNumber % record.packet.situations.length];
+    moduleSituations[record.runNumber % moduleSituations.length];
   record.nextTurn = 0;
   record.satisfiedCriterionIds = new Set();
   record.criterionEvidenceTurnIds = new Map();

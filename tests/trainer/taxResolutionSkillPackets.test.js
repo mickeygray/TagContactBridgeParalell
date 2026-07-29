@@ -65,6 +65,28 @@ test("section packets preserve their unique skill boundaries", () => {
   );
 });
 
+test("Introduction is split into five read-talk-reflect practices", () => {
+  const introduction = TAX_RESOLUTION_SKILL_PACKETS.find((packet) => packet.sectionId === "1");
+  assert.equal(introduction.practiceModules.length, 5);
+  assert.deepEqual(
+    introduction.practiceModules.map((module) => module.moduleId),
+    [
+      "intro.start-the-call",
+      "intro.deflect-anger",
+      "intro.identify-the-firm",
+      "intro.explain-the-purpose",
+      "intro.earn-the-story",
+    ],
+  );
+  for (const module of introduction.practiceModules) {
+    assert.ok(module.reading);
+    assert.ok(module.objective);
+    assert.ok(module.situations.length >= 2);
+    assert.ok(module.questions.length >= 1);
+    assert.ok(module.questions[0].gradingPoints.length >= 3);
+  }
+});
+
 test("draft packets are not silently imported into the production registry", () => {
   const production = require("../../packages/shared-services/src/trainer-content/publishedTrainingContent.v1");
   assert.equal(production.courseManifest.items.length, 0);
