@@ -160,47 +160,60 @@ const TASKS = [
     },
   },
   {
-    // "gather the call urls" — step two of the night, as a WATCH not a fetch.
+    // "gather the call urls" — step two of the night, for real.
     //
-    // Mickey 2026-07-28: "we wont be able to backfill so only forward looking
-    // post patch will we have phone burner urls." Confirmed empirically: the
-    // service account cannot enumerate agent-owned dial sessions, so
-    // backfillRecordingUrls indexes 0 sessions on every day tried
-    // (2026-07-24, -27, -28). A nightly backfill would have run forever
-    // reporting "0 to attach" — a task that looks healthy and does nothing.
+    // Mickey 2026-07-29: "you have a pool of links and those are attached to
+    // the call. so youre grabbing and organzing the link info for marketing
+    // calls."
     //
-    // What CAN fail silently is the forward-looking capture path: if it stops
-    // writing recordingUrl, every dial keeps being logged and the URLs just
-    // quietly stop. So this step measures coverage and says so out loud. It
-    // never writes.
-    key: "call-urls",
-    label: "Watch PhoneBurner recording-URL coverage (capture is forward-only)",
-    monitor: true,
-    writesArmed: () => false,
-    async plan() {
-      const DailyDial = require("../../../../packages/shared-models/src/DailyDial");
+    // CallRail hands out recording URLs ONE CALL AT A TIME, so a report that
+    // wants listen links pays a round-trip per call every time it runs. A
+    // finished call's URL never changes, so capturing it once turns that into
+    // a Mongo read — and the link survives whether or not a report ever asks
+    // for that day.
+    //
+    // MARKETING lines only. Servicing calls ("Client Contact - TAG") are real
+    // calls but not marketing, and letting them into the pool is how a client
+    // ringing support starts to look like a fresh response.
+    //
+    // PhoneBurner is NOT here: the service account cannot enumerate its dial
+    // sessions (0 indexed on every day tried), so those URLs can only arrive
+    // from the forward-looking capture path.
+    key: "call-links",
+    label: "Capture marketing call recording links",
+    writesArmed: () => String(process.env.CALL_LINK_CAPTURE_ENABLED || "false").toLowerCase() === "true",
+    async plan({ domains, logger }) {
+      const { captureCallLinks } = require("../../../../packages/shared-services/src/marketingCallLinkService");
       const dateKey = persistTargetDay();
-      const docs = await DailyDial.find({ dateKey }).select("attempts").lean();
-      let attempts = 0;
-      let withUrl = 0;
-      for (const d of docs) {
-        for (const a of d.attempts || []) {
-          attempts += 1;
-          if (a.recordingUrl) withUrl += 1;
-        }
+      const out = [];
+      for (const domain of domains) {
+        // CallRail is ONE tenant; asking per domain is the same account
+        // answered three times.
+        if (String(domain).toUpperCase() !== "TAG") continue;
+        out.push(await captureCallLinks({ dateKey, domain, apply: false, logger }));
       }
-      return [{ dateKey, dials: docs.length, attempts, withUrl }];
+      return out;
     },
-    // A monitor never applies; count 0 keeps apply() unreachable by design.
-    async apply() { return { written: 0, skipped: 0, failed: 0, errors: [] }; },
-    count() { return 0; },
+    async apply(planned, { logger }) {
+      const { captureCallLinks } = require("../../../../packages/shared-services/src/marketingCallLinkService");
+      const out = { written: 0, skipped: 0, failed: 0, errors: [] };
+      for (const p of planned) {
+        const r = await captureCallLinks({ dateKey: p.dateKey, domain: p.domain, apply: true, logger });
+        out.written += r.written || 0;
+        out.skipped += r.alreadyHad || 0;
+        out.failed += r.failed || 0;
+        if (r.error) out.errors.push(r.error);
+      }
+      return out;
+    },
+    count(planned) {
+      return planned.reduce((a, p) => a + (p.marketing || 0), 0);
+    },
     describe(planned) {
-      const r = planned[0] || {};
-      const pct = r.attempts ? Math.round((r.withUrl / r.attempts) * 1000) / 10 : null;
-      if (!r.attempts) return `${r.dateKey}: no dials recorded`;
-      return `${r.dateKey}: ${r.withUrl}/${r.attempts} attempt(s) carry a recording URL`
-        + `${pct === null ? "" : ` (${pct}%)`}`
-        + (r.withUrl === 0 ? " — capture is not landing" : "");
+      const p = planned[0] || {};
+      if (!p.calls) return `${p.dateKey || "?"}: no calls`;
+      return `${p.dateKey}: ${p.calls} call(s) · ${p.marketing} marketing · `
+        + `${p.withRecording} with a recording · ${p.alreadyHad} already pooled`;
     },
   },
   {

@@ -239,44 +239,35 @@ test("the night runs in the stated ORDER", () => {
   // queue-rollup freezes the day's per-agent counts so a RANGE never has to
   // ask RingCentral; it sits with the other capture steps, before the report.
   assert.deepEqual(s2.tasks.map((t) => t.key),
-    ["night-persist", "call-urls", "queue-rollup", "logics-source"]);
+    ["night-persist", "call-links", "queue-rollup", "logics-source"]);
 });
 
-test("call-urls is a WATCH, not a backfill — backfill is impossible", () => {
-  // Mickey 2026-07-28: "we wont be able to backfill so only forward looking
-  // post patch will we have phone burner urls." Confirmed live: the service
-  // account cannot enumerate agent-owned sessions, so the backfill indexed 0
-  // sessions on every day tried. Shipping it would have meant a task that
-  // reports "0 to attach" forever and looks healthy doing it.
+test("call-links CAPTURES marketing links; PhoneBurner still cannot", () => {
+  // Superseded the monitor: CallRail links ARE fetchable one call at a time,
+  // so they get pooled. PhoneBurner sessions remain unreachable for the
+  // service account, so those URLs can only come from forward capture.
   const rt = createNightlyHygieneRuntime({});
-  const task = rt.TASKS.find((t) => t.key === "call-urls");
-  assert.equal(task.monitor, true);
-  assert.equal(task.writesArmed(), false, "a monitor can never be armed");
-  assert.equal(task.count([{ attempts: 900, withUrl: 0 }]), 0, "count 0 keeps apply unreachable");
+  const task = rt.TASKS.find((t) => t.key === "call-links");
+  assert.ok(task, "call-links must be registered");
   const src = require("fs").readFileSync(
     require.resolve("../../apps/control-plane/src/services/nightlyHygieneRuntime"), "utf8",
   );
-  const body = src.slice(src.indexOf('key: "call-urls"'), src.indexOf('key: "logics-source"'));
-  assert.ok(!body.includes("backfillRecordingUrls"), "must not call the impossible backfill");
-  assert.ok(!/callrail/i.test(body), "CallRail is pulled live, never copied into our store");
+  const body = src.slice(src.indexOf('key: "call-links"'), src.indexOf('key: "queue-rollup"'));
+  assert.ok(body.includes("marketingCallLinkService"), "must use the link pool service");
+  assert.ok(!body.includes("backfillRecordingUrls"), "must not call the impossible PhoneBurner backfill");
 });
 
-test("the monitor says out loud when capture stops landing", () => {
-  // The real silent failure: dials keep being logged while the URLs quietly
-  // stop. Measured 2026-07-28: 0 of 1,789 attempts carried one.
+test("call-links counts MARKETING calls, not every call", () => {
+  // Live 2026-07-27: 91 calls, 83 marketing, 8 servicing. Counting all 91
+  // would make the task claim work it will not do.
   const rt = createNightlyHygieneRuntime({});
-  const task = rt.TASKS.find((t) => t.key === "call-urls");
-  assert.match(task.describe([{ dateKey: "2026-07-28", attempts: 1789, withUrl: 0 }]),
-    /0\/1789 attempt\(s\) carry a recording URL \(0%\) — capture is not landing/);
-  assert.match(task.describe([{ dateKey: "2026-07-29", attempts: 100, withUrl: 100 }]), /100%/);
-  assert.ok(!task.describe([{ dateKey: "2026-07-29", attempts: 100, withUrl: 100 }]).includes("not landing"));
-  assert.match(task.describe([{ dateKey: "2026-07-30", attempts: 0, withUrl: 0 }]), /no dials recorded/);
-});
-
-test("a monitor is labelled as one, not as a dry-run waiting to be armed", () => {
-  const s2 = createNightlyHygieneRuntime({ config: { enabled: true } }).getState();
-  const t = s2.tasks.find((x) => x.key === "call-urls");
-  assert.equal(t.mode, "monitor (never writes)");
+  const task = rt.TASKS.find((t) => t.key === "call-links");
+  assert.equal(task.count([{ calls: 91, marketing: 83, servicing: 8 }]), 83);
+  assert.equal(task.count([{ calls: 0, marketing: 0 }]), 0);
+  assert.match(
+    task.describe([{ dateKey: "2026-07-27", calls: 91, marketing: 83, withRecording: 83, alreadyHad: 0 }]),
+    /83 marketing/,
+  );
 });
 
 test("every task is gated by its OWN switch", () => {
@@ -287,7 +278,7 @@ test("every task is gated by its OWN switch", () => {
   );
   // Every WRITING task has its own flag. The monitor has none on purpose —
   // it cannot write, so a switch would imply a capability it lacks.
-  for (const flag of ["NIGHT_PERSIST_ENABLED", "LOGICS_SOURCE_WRITER_ENABLED"]) {
+  for (const flag of ["NIGHT_PERSIST_ENABLED", "CALL_LINK_CAPTURE_ENABLED", "QUEUE_ROLLUP_ENABLED", "LOGICS_SOURCE_WRITER_ENABLED"]) {
     assert.ok(src.includes(flag), `${flag} must gate its task`);
   }
   const rt = createNightlyHygieneRuntime({});

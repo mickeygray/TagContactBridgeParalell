@@ -64,7 +64,11 @@ function dayRange(from, to) {
 //   domain=TAG       tenant
 //   minutes>10       call length (recordings)
 //   outcome=no-deal  call did NOT become a deal (recordings)
-const FILTER_KEYS = ["cohort", "source", "officer", "domain", "minutes", "outcome"];
+const FILTER_KEYS = [
+  // Mickey 2026-07-29: "i wanna know about this agent, i wanna know about
+  // this extension, i wanna know about this lead source". An extension is a
+  // property of a PERSON, so it resolves to that person before filtering.
+  "extension","cohort", "source", "officer", "domain", "minutes", "outcome"];
 
 function parseFilters(input) {
   // Accepts { cohort: "2024" } or ["cohort=2024", "minutes>10"].
@@ -703,6 +707,29 @@ async function composeReport({
   // the same population.
   const beforeCounts = { payments: (material.payments || []).length, recordings: (material.recordings || []).length };
   if (filters.length) {
+    // An extension identifies a PERSON. Resolve it to that person's name so
+    // it filters exactly like officer= — no payment carries an extension, so
+    // filtering on it directly would drop every row.
+    const extFilters = filters.filter((f) => f.key === "extension");
+    if (extFilters.length) {
+      try {
+        const UserAccount = require("../../shared-models/src/UserAccount");
+        const users = await UserAccount.find({
+          $or: extFilters.flatMap((f) => ([
+            { extensionNumber: String(f.value) },
+            { extensionId: String(f.value) },
+          ])),
+        }).select("name extensionNumber extensionId").lean();
+        if (users.length) {
+          for (const u of users) filters.push({ key: "officer", op: "=", value: u.name });
+          material.notes = [...(material.notes || []), `extension ${extFilters.map((f) => f.value).join(", ")} → ${users.map((u) => u.name).join(", ")}`];
+        } else {
+          material.notes = [...(material.notes || []), `no user owns extension ${extFilters.map((f) => f.value).join(", ")} — filter had no effect`];
+        }
+      } catch (error) {
+        material.notes = [...(material.notes || []), `extension lookup unavailable — ${String(error.message).slice(0, 70)}`];
+      }
+    }
     if (material.payments) material.payments = filterPayments(material.payments, filters);
     if (material.declines) material.declines = filterPayments(material.declines, filters);
     if (material.recordings) material.recordings = filterRecordings(material.recordings, filters);

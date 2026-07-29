@@ -458,6 +458,7 @@ const reportOps = require("./reportOpsService");
 const reportDefinitions = require("./reportDefinitionService");
 const sourceSanitizer = require("./logicsSourceSanitizerService");
 const queueRollup = require("./queueRollupService");
+const marketingCallLinks = require("./marketingCallLinkService");
 const { createGatherSession, pruneGatherCache } = require("./gatherSessionService");
 const {
   classifyRow,
@@ -1408,6 +1409,7 @@ module.exports = {
   generateReport,
   pruneGatherCache,
   reportDefinitions,
+  marketingCallLinks,
   queueRollup,
   sourceSanitizer,
   reportOps,

@@ -1097,6 +1097,9 @@ const PRESETS = Object.freeze({
   "roi-by-source": ["source"],
   "officer-performance": ["officer", "worked"],
   "profit-loss": ["pl", "money", "spend"],
+  // What the lead VENDOR sees: their sources and what those produced. No mail
+  // spend, no officer detail, no company P/L. Pair with --where source=LD.
+  "vendor-ld": ["source", "money"],
 });
 
 function resolveSelection(selection) {

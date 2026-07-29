@@ -46,6 +46,7 @@ const PaymentLedger = require("./PaymentLedger");
 const ActivityEvent = require("./ActivityEvent");
 const PaymentTruth = require("./PaymentTruth");
 const DailyQueueRollup = require("./DailyQueueRollup");
+const MarketingCallLink = require("./MarketingCallLink");
 const ReportDefinition = require("./ReportDefinition");
 const DailyLoopRun = require("./DailyLoopRun");
 const PaymentsSheetImport = require("./PaymentsSheetImport");
@@ -114,6 +115,7 @@ const MODEL_REGISTRY = Object.freeze({
   ActivityEvent,
   PaymentTruth,
   DailyQueueRollup,
+  MarketingCallLink,
   ReportDefinition,
   DailyLoopRun,
   PaymentsSheetImport,
@@ -188,6 +190,7 @@ module.exports = {
   ActivityEvent,
   PaymentTruth,
   DailyQueueRollup,
+  MarketingCallLink,
   ReportDefinition,
   DailyLoopRun,
   PaymentsSheetImport,
