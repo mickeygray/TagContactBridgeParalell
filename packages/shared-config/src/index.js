@@ -1709,9 +1709,11 @@ function getMarketingFromEmail() {
   return MARKETING_FROM_EMAIL;
 }
 
+const activeSources = require("./activeSources");
 const staffRoster = require("./staffRoster");
 
 module.exports = {
+  ...activeSources,
   ...staffRoster,
   INTERNAL_FROM_EMAIL,
   MARKETING_FROM_EMAIL,

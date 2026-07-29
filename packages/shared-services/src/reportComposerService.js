@@ -120,6 +120,26 @@ function filterPayments(payments = [], filters = []) {
   }));
 }
 
+/**
+ * An officer filter has to reach the QUEUE too.
+ *
+ * Filtering payments alone produced a report headed "officer=Bruce" that
+ * showed Bruce's three deals beside every other officer's call counts — the
+ * slice looked applied and was not. A filter must cut the whole material or
+ * it is lying about its own scope.
+ */
+function filterQueueByAgent(queueByAgent = {}, filters = []) {
+  const applicable = filters.filter((f) => f.key === "officer");
+  if (!applicable.length) return queueByAgent;
+  const { canonicalStaffName } = require("../../shared-config/src/staffRoster");
+  const out = {};
+  for (const [agent, streams] of Object.entries(queueByAgent)) {
+    const name = canonicalStaffName(agent);
+    if (applicable.every((f) => matchOne(name, f.op, f.value))) out[agent] = streams;
+  }
+  return out;
+}
+
 function filterRecordings(recordings = [], filters = []) {
   const applicable = filters.filter((f) => ["minutes", "outcome", "source", "officer"].includes(f.key));
   if (!applicable.length) return recordings;
@@ -208,7 +228,7 @@ async function gatherMaterial({
     const SpendEntry = require("../../shared-models/src/SpendEntry");
     const DailyCallStat = require("../../shared-models/src/DailyCallStat");
     const rows = await SpendEntry.find({ date: { $gte: from, $lte: to }, active: { $ne: false } })
-      .select("channel source spend cost pieces leadsReported").lean();
+      .select("date channel source spend cost pieces leadsReported").lean();
     const bcdRows = await DailyCallStat.find({
       date: { $gte: from, $lte: to }, channel: "bcd", active: { $ne: false },
     }).select("totalCalls").lean();
@@ -216,19 +236,33 @@ async function gatherMaterial({
     const bcdRate = Number(process.env.BCD_COST_PER_CALL) > 0 ? Number(process.env.BCD_COST_PER_CALL) : 4;
     const bcdCalls = bcdRows.reduce((s, r) => s + (Number(r.totalCalls) || 0), 0);
     const spendBySource = {};
+    // Spend keyed by DAY as well as by source: a profit-and-loss over time
+    // needs cost per period, and the aggregate totals cannot be un-summed.
+    const spendByDay = {};
     let ld = 0; let mail = 0; let ldLeads = 0; let mailPieces = 0;
     for (const r of rows) {
       const amt = Number(r.spend || 0);
-      spendBySource[r.source] = spendBySource[r.source] || { spend: 0, leads: 0 };
+      const day = String(r.date || "").slice(0, 10);
+      if (day) {
+        spendByDay[day] = spendByDay[day] || { spend: 0, mail: 0, ld: 0, bcd: 0 };
+        spendByDay[day].spend = round2(spendByDay[day].spend + amt);
+        if (r.channel === "mailer") spendByDay[day].mail = round2(spendByDay[day].mail + amt);
+        else if (r.channel === "lead-data") spendByDay[day].ld = round2(spendByDay[day].ld + amt);
+      }
+      // Carry the sheet's own channel: it is the system of record for what
+      // was bought, and beats any guess made from the source name.
+      spendBySource[r.source] = spendBySource[r.source] || { spend: 0, leads: 0, channel: r.channel || null };
+      if (!spendBySource[r.source].channel && r.channel) spendBySource[r.source].channel = r.channel;
       spendBySource[r.source].spend = round2(spendBySource[r.source].spend + amt);
       spendBySource[r.source].leads += Number(r.leadsReported || 0);
       if (r.channel === "lead-data") { ld = round2(ld + amt); ldLeads += Number(r.leadsReported || 0); }
       else if (r.channel === "mailer") { mail = round2(mail + amt); mailPieces += Number(r.pieces || 0); }
     }
     const bcd = round2(bcdCalls * bcdRate);
-    if (bcdCalls) spendBySource.BCD = { spend: bcd, leads: 0 };
+    if (bcdCalls) spendBySource.BCD = { spend: bcd, leads: 0, channel: "bcd" };
     material.spend = { ld, mail, bcd, bcdCalls, bcdRate, ldLeads, mailPieces, total: round2(ld + mail + bcd) };
     material.spendBySource = spendBySource;
+    material.spendByDay = spendByDay;
     if (!rows.length) notes.push(`no spend rows recorded for ${from}..${to}`);
   }
 
@@ -253,9 +287,36 @@ async function gatherMaterial({
     const streamTotals = {};
     const days = dayRange(from, to);
     if (days.length > QUEUE_DAY_LOOP_MAX) {
-      notes.push(`queue counts skipped — ${days.length} days exceeds QUEUE_DAY_LOOP_MAX (${QUEUE_DAY_LOOP_MAX}); RingCentral is a slow-trickle source`);
-      material.queueByAgent = {};
-      material.queueStreams = {};
+      // Too many days to ask RingCentral — read the nightly rollups instead.
+      // This is the whole reason they are stored.
+      try {
+        const { readQueueRange } = require("./queueRollupService");
+        const stored = await readQueueRange({ from, to });
+        material.queueByAgent = stored.queueByAgent;
+        material.queueStreams = stored.queueStreams;
+        material.queueCoverage = stored.coverage;
+        if (stored.coverage.complete) {
+          notes.push(`queue counts from ${stored.coverage.daysStored} stored nightly rollup(s) — RingCentral not called`);
+        } else if (stored.coverage.daysStored > 0) {
+          // PARTIAL is not COMPLETE. Summing the days that happen to exist and
+          // presenting them as the range is the exact failure this store was
+          // built to end.
+          const miss = stored.coverage.missing.length;
+          material.queueUnavailable = `only ${stored.coverage.daysStored} of ${stored.coverage.daysRequested} day(s) captured`
+            + (miss ? ` — missing ${stored.coverage.missing.slice(0, 5).join(", ")}${miss > 5 ? ` +${miss - 5} more` : ""}` : "")
+            + (stored.coverage.partialDays.length ? ` — partial: ${stored.coverage.partialDays.join(", ")}` : "");
+          notes.push(`queue counts INCOMPLETE — ${material.queueUnavailable}`);
+        } else {
+          material.queueUnavailable = `${days.length} days exceeds QUEUE_DAY_LOOP_MAX (${QUEUE_DAY_LOOP_MAX})`
+            + " and no nightly rollups are stored for this range yet";
+          notes.push(`queue counts unavailable — ${material.queueUnavailable}`);
+        }
+      } catch (error) {
+        material.queueByAgent = {};
+        material.queueStreams = {};
+        material.queueUnavailable = `rollup store unreadable — ${String(error.message).slice(0, 70)}`;
+        notes.push(`queue counts unavailable — ${material.queueUnavailable}`);
+      }
     } else {
       try {
         const { readStreamConnections, normalizePhoneBurnerAgent } = require("./mailerQueueService");
@@ -406,6 +467,12 @@ async function gatherMaterial({
                 folded.set(`${dom}:${Number(r.caseId)}`, {
                   phones: foldCasePhones(info || {}),
                   campaignId,
+                  // Mickey 2026-07-28: "the easiest way to think about it is
+                  // whats the case create date whats the last active call
+                  // from that source date." The create date is what separates
+                  // a return on THIS month's advertising from an upsell to
+                  // someone who came in years ago on a list that is now dead.
+                  caseCreatedDate: String(info?.CreatedDate || "").slice(0, 10) || null,
                   // Registered mail piece first; else any CONFIRMED id label
                   // (LD CUSTOM, BCD, ...) — those are real attribution too,
                   // and their names match the spend keys exactly.
@@ -426,6 +493,7 @@ async function gatherMaterial({
                 phone: r.phone || f.primaryPhone || f.normalizedPhones?.[0] || null,
                 phones: f.normalizedPhones || [],
                 sourceCampaignId: hit.campaignId,
+                caseCreatedDate: hit.caseCreatedDate || null,
               };
               // The stored snapshot still wins: it records who/what the case was
               // at the moment of sale, and Logics can be edited afterwards.
@@ -447,6 +515,51 @@ async function gatherMaterial({
             });
             material.payments = attachPhones(material.payments);
             material.declines = attachPhones(material.declines);
+
+            // A MIDDAY report cannot wait for tonight's snapshot. The night
+            // pass stamps officerAtSale at 19:50, so before then every deal
+            // reads "(no snapshot)" and the whole sales floor shows zero
+            // deals — the exact opposite of what a productivity board is for.
+            // Resolve it live from the case's own assignment history, using
+            // the same parser the night pass uses so the two can never
+            // disagree. Bounded by DEALS, a handful a day.
+            const needOfficer = (material.payments || []).filter(
+              (r) => r.paymentType === "initial" && !r.isChargeback && !r.officerAtSale,
+            );
+            if (needOfficer.length && needOfficer.length <= CASE_CONTACT_MAX) {
+              try {
+                const { classifyRow } = require("./activityEventService");
+                const resolved = new Map();
+                await mapLimit(needOfficer, 3, async (r) => {
+                  const dom = String(r.domain).toUpperCase();
+                  if (!clients.has(dom)) clients.set(dom, createLogicsClient(dom));
+                  try {
+                    const history = unwrapLogics(await clients.get(dom).getActivities(r.caseId));
+                    let best = null;
+                    for (const row of Array.isArray(history) ? history : []) {
+                      const cls = classifyRow({ ActivitySubject: row.Subject, Type: row.ActivityType });
+                      if (cls?.kind !== "assignment" || cls.payload?.role !== "Set. Officer") continue;
+                      const day = String(row.CreatedDate || "").slice(0, 10);
+                      // Whoever held it AT SALE — never someone assigned after.
+                      if (day && r.paymentDateKey && day > r.paymentDateKey) continue;
+                      if (!best || day >= best.day) best = { day, assignee: cls.payload.assignee };
+                    }
+                    if (best?.assignee) resolved.set(`${dom}:${Number(r.caseId)}`, best.assignee);
+                  } catch { /* one unreadable case must not cost the report */ }
+                });
+                if (resolved.size) {
+                  material.payments = material.payments.map((r) => {
+                    const hit = resolved.get(`${String(r.domain).toUpperCase()}:${Number(r.caseId)}`);
+                    return hit && !r.officerAtSale
+                      ? { ...r, officerAtSale: hit, attributionSnapshot: "live" }
+                      : r;
+                  });
+                  notes.push(`${resolved.size} deal(s) had no snapshot yet — officer resolved live from the case history`);
+                }
+              } catch (error) {
+                notes.push(`live officer resolution unavailable — ${String(error.message).slice(0, 70)}`);
+              }
+            }
             if (fromLogics) notes.push(`${fromLogics} payment(s) took their source straight off the Logics case`);
             if (onCatchAll) notes.push(`${onCatchAll} payment(s) sit on the Logics catch-all — run scripts/sanitize-logics-source.js to resolve the piece`);
             if (failed) notes.push(`${failed} case(s) had no reachable Logics contact record`);
@@ -593,6 +706,7 @@ async function composeReport({
     if (material.payments) material.payments = filterPayments(material.payments, filters);
     if (material.declines) material.declines = filterPayments(material.declines, filters);
     if (material.recordings) material.recordings = filterRecordings(material.recordings, filters);
+    if (material.queueByAgent) material.queueByAgent = filterQueueByAgent(material.queueByAgent, filters);
   }
 
   const sections = [];
@@ -638,6 +752,13 @@ function renderText(report) {
   }
   if (report.unknown?.length) L.push(`ignored: ${report.unknown.join(", ")}`);
   for (const n of report.notes) L.push(`note: ${n}`);
+  // TERMS travel with the numbers. Two people can read the same ROI and mean
+  // different things; stating the boundary is what stops that being invisible.
+  const terms = report.sections.filter((s) => s.block?.terms);
+  if (terms.length) {
+    L.push("", "TERMS");
+    for (const s of terms) L.push(`  ${s.label}: ${s.block.terms}`);
+  }
   if (report.gathered?.activityRows) {
     L.push(`\nlive · ${report.gathered.activityRows} activity rows · ${report.gathered.casesConfirmed} case(s) confirmed · ${Math.round((report.gathered.durationMs || 0) / 1000)}s`);
   }
@@ -725,6 +846,9 @@ function renderHtml(report) {
       + ` (${report.filtered.after.payments}/${report.filtered.before.payments} payments)`);
   }
   if (report.unknown?.length) notes.push(`ignored: ${report.unknown.join(", ")}`);
+  for (const s of report.sections) {
+    if (s.block?.terms) notes.push(`${s.label} — ${s.block.terms}`);
+  }
   if (report.gathered?.activityRows) {
     notes.push(`live · ${report.gathered.activityRows} activity rows · ${report.gathered.casesConfirmed} case(s) confirmed`
       + ` · ${Math.round((report.gathered.durationMs || 0) / 1000)}s`);
@@ -743,6 +867,6 @@ module.exports = {
   FILTER_KEYS,
   renderHtml,
   RANGE_DAY_LOOP_MAX,
-  dayRange, composeReport, filterPayments, filterRecordings,
+  dayRange, composeReport, filterPayments, filterQueueByAgent, filterRecordings,
   gatherMaterial, parseFilters, renderText,
 };

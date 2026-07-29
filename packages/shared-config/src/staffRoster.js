@@ -17,8 +17,9 @@
 
 const ROLES = Object.freeze({
   SALES: "sales",     // writes deals; ranked on the board
-  OWNER: "owner",     // runs the business; not ranked
+  OWNER: "owner",     // runs the business; not ranked, never named
   CSERV: "cserv",     // customer service; answers calls, does not sell
+  MGMT: "mgmt",       // management; picks up sometimes, stats are not the point
 });
 
 const parseList = (raw) => String(raw || "")
@@ -43,6 +44,8 @@ const DEFAULT_ROSTER = [
   ["Brad Hansen", ROLES.SALES],
   ["Jonathan Pineda", ROLES.OWNER],
   ["Andrew Wells", ROLES.CSERV],
+  // Mickey 2026-07-29: "hes management we dont care about his answer stats."
+  ["Matthew Anderson", ROLES.MGMT],
 ];
 
 // Aliases seen in the wild. PhoneBurner ids normalize to "Chris Bolt" etc.,
@@ -62,6 +65,7 @@ function buildRoster(env = process.env) {
     ["STAFF_ROSTER_SALES", ROLES.SALES],
     ["STAFF_ROSTER_OWNER", ROLES.OWNER],
     ["STAFF_ROSTER_CSERV", ROLES.CSERV],
+    ["STAFF_ROSTER_MGMT", ROLES.MGMT],
   ]) {
     for (const name of parseList(env[key])) byName.set(normalizeName(name), { name, role });
   }
@@ -109,6 +113,20 @@ function listStaff(role = null) {
   return (role ? all.filter((s) => s.role === role) : all).map((s) => ({ ...s }));
 }
 
+// Queue and system labels that arrive through the same channel as agent
+// names. "Origination Call Qu" appeared on the sales board as a person.
+// Unknown PEOPLE still default to the sales floor so a new hire is visible;
+// these are not people at all.
+const NOT_A_PERSON = /(queue|call qu|origination|voicemail|unassigned|ring group|overflow|after hours|main line|ivr|auto ?attendant|system)/i;
+
+/** Is this label a queue or system rather than a human being? */
+function isNotAPerson(name) {
+  const raw = String(name || "").trim();
+  if (!raw) return true;
+  if (!isUnknownStaff(raw)) return false;   // anyone on the roster is a person
+  return NOT_A_PERSON.test(raw);
+}
+
 /** True when the name is not in the roster at all (prompt an update). */
 function isUnknownStaff(name) {
   const key = normalizeName(name);
@@ -118,6 +136,7 @@ function isUnknownStaff(name) {
 
 module.exports = {
   ROLES,
+  isNotAPerson,
   canonicalStaffName,
   isSalesFloor,
   isUnknownStaff,

@@ -81,3 +81,51 @@ test("the header and the table never quietly disagree", () => {
     "named + off-board must equal the queue's connected count");
   assert.match(text, /2 taken by someone off the sales board/);
 });
+
+test("a range with no call data shows — , never 0", () => {
+  // Live 2026-07-01..28 rendered "Phil Olson 0 taken 0 made" for a month in
+  // which he took 27 calls on the 27th alone. The note explaining it sat at
+  // the bottom of the page, under a table the reader had already believed.
+  const w = blocks.BY_ID.get("worked");
+  const d = w.compute({
+    queueByAgent: {}, queueStreams: {},
+    queueUnavailable: "28 days exceeds QUEUE_DAY_LOOP_MAX (7)",
+    payments: [{ domain: "TAG", caseId: 1, paymentType: "initial", amount: 100, officerAtSale: "Phil Olson", isChargeback: false }],
+  });
+  const text = w.renderText(d);
+  assert.match(text, /CALL DATA UNAVAILABLE/, "the gap must lead, not trail");
+  assert.ok(text.indexOf("CALL DATA UNAVAILABLE") < text.indexOf("PERSON"),
+    "the warning must appear ABOVE the table");
+  const philLine = text.split(String.fromCharCode(10)).find((l) => l.startsWith("Phil Olson"));
+  assert.ok(/—\s+—/.test(philLine), `counts must be em-dashes, got: ${philLine}`);
+  assert.ok(!/\s0\s/.test(philLine), "must never print a zero it does not know");
+  assert.match(philLine, /1/, "deals ARE known and must still show");
+});
+
+test("the CSV exports null, not 0, when calls were not measured", () => {
+  // A spreadsheet will happily average a zero nobody told it to distrust.
+  const w = blocks.BY_ID.get("worked");
+  const d = w.compute({
+    queueByAgent: {}, queueStreams: {}, queueUnavailable: "out of range",
+    payments: [{ domain: "TAG", caseId: 1, paymentType: "initial", amount: 100, officerAtSale: "Phil Olson", isChargeback: false }],
+  });
+  const csv = w.csv(d);
+  const taken = csv.columns.find((c) => c.header === "calls_taken");
+  const made = csv.columns.find((c) => c.header === "calls_made");
+  const deals = csv.columns.find((c) => c.header === "deals_written");
+  assert.equal(taken.get(csv.rows[0]), null);
+  assert.equal(made.get(csv.rows[0]), null);
+  assert.equal(deals.get(csv.rows[0]), 1, "deals are measured and must survive");
+});
+
+test("with real queue data the counts come back", () => {
+  const w = blocks.BY_ID.get("worked");
+  const d = w.compute({
+    queueByAgent: { "Phil Olson": { MAILER: 27, LD: 79 } },
+    queueStreams: { MAILER: { calls: 30, connected: 27, missed: 3 } },
+    payments: [],
+  });
+  const text = w.renderText(d);
+  assert.ok(!text.includes("UNAVAILABLE"));
+  assert.match(text, /Phil Olson\s+27\s+79/);
+});

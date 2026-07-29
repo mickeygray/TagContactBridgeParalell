@@ -45,6 +45,7 @@ const PaymentAlert = require("./PaymentAlert");
 const PaymentLedger = require("./PaymentLedger");
 const ActivityEvent = require("./ActivityEvent");
 const PaymentTruth = require("./PaymentTruth");
+const DailyQueueRollup = require("./DailyQueueRollup");
 const ReportDefinition = require("./ReportDefinition");
 const DailyLoopRun = require("./DailyLoopRun");
 const PaymentsSheetImport = require("./PaymentsSheetImport");
@@ -63,6 +64,8 @@ const UserAccount = require("./UserAccount");
 const WorkflowRecord = require("./WorkflowRecord");
 const ClientProfile = require("./ClientProfile");
 const TrainingCallReview = require("./TrainingCallReview");
+const TrainingEnrollment = require("./TrainingEnrollment");
+const TrainingAttempt = require("./TrainingAttempt");
 
 const MODEL_REGISTRY = Object.freeze({
   AgentState,
@@ -110,6 +113,7 @@ const MODEL_REGISTRY = Object.freeze({
   PaymentLedger,
   ActivityEvent,
   PaymentTruth,
+  DailyQueueRollup,
   ReportDefinition,
   DailyLoopRun,
   PaymentsSheetImport,
@@ -128,6 +132,8 @@ const MODEL_REGISTRY = Object.freeze({
   UserAccount,
   WorkflowRecord,
   TrainingCallReview,
+  TrainingEnrollment,
+  TrainingAttempt,
 });
 
 function listModels() {
@@ -181,6 +187,7 @@ module.exports = {
   PaymentLedger,
   ActivityEvent,
   PaymentTruth,
+  DailyQueueRollup,
   ReportDefinition,
   DailyLoopRun,
   PaymentsSheetImport,
@@ -199,5 +206,7 @@ module.exports = {
   UserAccount,
   WorkflowRecord,
   TrainingCallReview,
+  TrainingEnrollment,
+  TrainingAttempt,
   listModels,
 };

@@ -457,6 +457,7 @@ const { REPORTS, generateReport } = require("./reportingService");
 const reportOps = require("./reportOpsService");
 const reportDefinitions = require("./reportDefinitionService");
 const sourceSanitizer = require("./logicsSourceSanitizerService");
+const queueRollup = require("./queueRollupService");
 const { createGatherSession, pruneGatherCache } = require("./gatherSessionService");
 const {
   classifyRow,
@@ -812,10 +813,12 @@ const { createAiTaskClient } = require("./aiTaskClient");
 const aiTaskRegistry = require("./aiTaskRegistry");
 const leadDeliveryService = require("./leadDeliveryService");
 const dailyDialLedgerService = require("./dailyDialLedgerService");
+const trainingCourseService = require("./trainingCourseService");
 
 module.exports = {
   leadDeliveryService,
   dailyDialLedgerService,
+  trainingCourseService,
   // ── CX lane registry + dispatchers (first-touch drip, appointment clock) ──
   CX_LANES,
   buildLaneExternId,
@@ -1405,6 +1408,7 @@ module.exports = {
   generateReport,
   pruneGatherCache,
   reportDefinitions,
+  queueRollup,
   sourceSanitizer,
   reportOps,
   classifyRow,

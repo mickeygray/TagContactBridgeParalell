@@ -418,7 +418,116 @@ function spendJoin(buckets = [], spendBySource = {}, { officerFiltered = false }
   });
 }
 
+
+// ── THE FUNCTIONS ────────────────────────────────────────────────────────
+//
+// Mickey 2026-07-29 laid the toolkit out as three parts:
+//
+//   substrates        costs · counts · money (initial and total)
+//   factors           piece/source · settlement officer · time range
+//   functions         roi · roas · cost per call · cost per lead ·
+//                     cost per acquisition · profit margin
+//
+// These used to live INSIDE the blocks — `source` computed ROAS privately,
+// `net` computed ROI privately — so every new combination meant another
+// hand-written block. Lifted out here they take a substrate bundle and return
+// a number, which is what makes "combine these factors" a composition rather
+// than a request for more code. It is also the only shape a model can safely
+// drive: it picks from this registry, it never invents arithmetic.
+//
+// EVERY function returns null rather than a number it cannot honestly compute.
+// Dividing by a zero denominator is the difference between "no return" and
+// "infinite return", and this codebase has already shipped a 23,125% once.
+
+// What share of collected money is actually ours. A business assumption, so
+// it is configurable rather than a magic number buried in a formula.
+const PROFIT_MARGIN_RATE = Number(process.env.PROFIT_MARGIN_RATE) > 0
+  ? Number(process.env.PROFIT_MARGIN_RATE)
+  : 0.8;
+
+const pctOrNull = (num, den) => (den > 0 ? Math.round((num / den) * 1000) / 10 : null);
+const moneyOrNull = (num, den) => (den > 0 ? Math.round((num / den) * 100) / 100 : null);
+
+const FUNCTIONS = Object.freeze({
+  roi: {
+    label: "ROI",
+    unit: "%",
+    needs: ["total", "cost"],
+    hint: "net return over cost — (total money − cost) / cost",
+    compute: ({ total = 0, cost = 0 }) => pctOrNull(total - cost, cost),
+  },
+  roas: {
+    label: "ROAS",
+    unit: "%",
+    needs: ["initial", "cost"],
+    hint: "what the spend recouped in NEW business — initial / cost",
+    compute: ({ initial = 0, cost = 0 }) => pctOrNull(initial, cost),
+  },
+  costPerCall: {
+    label: "Cost / call",
+    unit: "$",
+    needs: ["cost", "calls"],
+    hint: "spend divided by calls received",
+    compute: ({ cost = 0, calls = 0 }) => moneyOrNull(cost, calls),
+  },
+  costPerLead: {
+    label: "Cost / lead",
+    unit: "$",
+    needs: ["cost", "leads"],
+    hint: "spend divided by leads delivered",
+    compute: ({ cost = 0, leads = 0 }) => moneyOrNull(cost, leads),
+  },
+  costPerAcquisition: {
+    label: "Cost / acquisition",
+    unit: "$",
+    needs: ["cost", "deals"],
+    hint: "spend divided by SALES closed — the one that decides if a piece pays",
+    compute: ({ cost = 0, deals = 0 }) => moneyOrNull(cost, deals),
+  },
+  profitMargin: {
+    label: "Profit margin",
+    unit: "$",
+    needs: ["total", "cost"],
+    hint: `(total money x ${PROFIT_MARGIN_RATE}) − cost`,
+    // Dollars, not a ratio: this is what is left, not a rate of return.
+    compute: ({ total = 0, cost = 0 }) => Math.round((total * PROFIT_MARGIN_RATE - cost) * 100) / 100,
+  },
+});
+
+/**
+ * Run the named functions over one substrate bundle.
+ *
+ * A bundle is { cost, initial, total, calls, leads, deals } — whatever the
+ * caller has. A function whose inputs are absent returns null instead of
+ * treating a missing count as a zero.
+ */
+function applyFunctions(substrates = {}, names = Object.keys(FUNCTIONS)) {
+  const out = {};
+  for (const name of names) {
+    const fn = FUNCTIONS[name];
+    if (!fn) {
+      throw new Error(`unknown function "${name}" — available: ${Object.keys(FUNCTIONS).join(", ")}`);
+    }
+    const missing = fn.needs.filter((k) => substrates[k] === undefined || substrates[k] === null);
+    out[name] = missing.length ? null : fn.compute(substrates);
+  }
+  return out;
+}
+
+/** Render one function's value the way it should read. */
+function formatFunction(name, value) {
+  if (value === null || value === undefined) return "—";
+  const fn = FUNCTIONS[name];
+  if (!fn) return String(value);
+  if (fn.unit === "%") return `${value}%`;
+  return `$${Number(value).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+}
+
 module.exports = {
+  FUNCTIONS,
+  PROFIT_MARGIN_RATE,
+  applyFunctions,
+  formatFunction,
   pickAttributionCall,
   sourceFitsDomain,
   DIMENSIONS,

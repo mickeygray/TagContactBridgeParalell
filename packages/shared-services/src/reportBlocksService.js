@@ -26,6 +26,10 @@ const pct = (n) => (n == null ? "—" : `${n}%`);
 // id · label · needs · compute · renderText · csv
 const NEWLINE = String.fromCharCode(10);
 
+// Above this revenue-to-spend multiple, believe the SPEND is wrong before
+// believing the campaign is. 50x return = 4,900% ROI.
+const SPEND_SUSPECT_RATIO = Number(process.env.SPEND_SUSPECT_RATIO) || 50;
+
 const LAG_REASON = Object.freeze({
   "no-phone-on-file": "(no phone on file)",
   "no-callrail-match": "(CallRail didn't see it)",
@@ -37,6 +41,7 @@ const BLOCKS = [
     id: "money",
     label: "Money in",
     hint: "Cash collected, split new vs recurring, with deal count",
+    terms: "Money RECEIVED inside the range, SUCCESS only. Declines and chargebacks excluded. New business = first invoice; a first invoice split across instalments is ONE sale.",
     needs: ["payments"],
     compute({ payments }) {
       const ok = payments.filter((p) => !p.isChargeback);
@@ -84,6 +89,7 @@ const BLOCKS = [
     id: "spend",
     label: "Spend",
     hint: "LD, mail and BCD cost for the window",
+    terms: "Spend BOOKED inside the range: mail from the spend sheet, LD per lead, BCD derived from recorded call count x rate.",
     needs: ["spend"],
     compute({ spend }) { return spend; },
     renderText(d) {
@@ -114,6 +120,7 @@ const BLOCKS = [
     id: "net",
     label: "Net / ROI",
     hint: "Cash minus spend, and return on spend",
+    terms: "Money received in the range MINUS spend booked in the range. No cohort carry-forward.",
     needs: ["payments", "spend"],
     compute({ payments, spend }) {
       const cash = round2(payments.filter((p) => !p.isChargeback).reduce((s, p) => s + p.amount, 0));
@@ -135,22 +142,80 @@ const BLOCKS = [
     id: "source",
     label: "By source",
     hint: "Deals, cash, spend and cost-per for each active source",
+    terms: "Self-contained month: spend booked in the range against money from cases SOLD in the range. A case counts when its FIRST payment lands inside the window, so an initial and its follow-on payments in the same month are all valid total; a case sold earlier is residual and is Aged. Within that, the ATTRIBUTABLE CALL is primary - a marketing-line call to the source inside the window keeps the money whatever the lead age, because mail is bulk-loaded and lags. Lead age decides only when no call can be found, so an aged lead that closes with no marketing response is Aged. Aged money is counted but carries no ratio and never reaches a channel total. ROAS = initial payments / spend. ROI = (all money - spend) / spend.",
     // caseContacts is what reads SourceCampaignID off the Logics case. Without
     // it this block only sees stored snapshots and reports attributed deals as
     // "(unsourced)" — 34 of 39 over July 2026.
-    needs: ["payments", "spend", "calls", "caseContacts"],
-    compute({ payments, spendBySource, callsBySource }) {
-      const { canonicalSourceName } = require("./logicsSourceWriterService");
+    // callsRange carries the actual inbound calls (45-day lookback), which is
+    // what the aged rule keys on — the create date is only the fallback.
+    needs: ["payments", "spend", "calls", "caseContacts", "callsRange"],
+    compute({ payments, spendBySource, callsBySource, callsRange = [], from = null, to = null }) {
+      const { canonicalSourceName, isCatchAllName } = require("./logicsSourceWriterService");
+      const {
+        AGED_LABEL, isActiveSource, sourceBucket, sourceChannel,
+      } = require("../../shared-config/src/activeSources");
+      const { applyFunctions, pickAttributionCall } = require("./reportOpsService");
+
+      // Index the window's inbound calls by number so each payment can find
+      // the call that sourced it — same rule the snapshot writer uses, so the
+      // board and the stored attribution can never disagree.
+      const last10 = (x) => {
+        const d = String(x || "").replace(/\D/g, "");
+        return d.length >= 10 ? d.slice(-10) : null;
+      };
+      const callsByPhone = new Map();
+      for (const call of callsRange) {
+        const k = last10(call.phone);
+        if (!k) continue;
+        // Only MARKETING-line calls are evidence of a marketing response.
+        // CallRail also tracks servicing numbers ("Client Contact - TAG",
+        // 26 calls in July), and an existing client ringing support must not
+        // make their case look freshly sourced — that would quietly keep
+        // years-old money attached to a live piece.
+        if (sourceChannel(call.source) === "other") continue;
+        if (!callsByPhone.has(k)) callsByPhone.set(k, []);
+        callsByPhone.get(k).push(call);
+      }
+      const attributionDateFor = (p) => {
+        const keys = [...new Set([p.phone, ...(p.phones || [])].map(last10).filter(Boolean))];
+        if (!keys.length) return null;
+        const calls = keys.flatMap((k) => callsByPhone.get(k) || []);
+        if (!calls.length) return null;
+        const picked = pickAttributionCall(calls, p.paymentDateKey);
+        const c = picked.call || calls[0];
+        return String(c?.dateKey || c?.startedAt || "").slice(0, 10) || null;
+      };
       const by = new Map();
       const row = (k) => {
         if (!by.has(k)) by.set(k, { source: k, deals: 0, dealCases: new Set(), newCash: 0, recurringCash: 0, spend: 0, responses: 0, leads: 0 });
         return by.get(k);
       };
       for (const p of payments.filter((x) => !x.isChargeback)) {
-        const r = row(canonicalSourceName(p.domain, p.sourceAtSale)
-          || (p.sourceOrigin === "catch-all"
+        // A stored snapshot can carry the literal string "ABC" (case 394513),
+        // which is the catch-all bucket wearing a piece's clothes. Route it to
+        // the same row as an id-derived catch-all rather than letting the
+        // mail-house placeholder masquerade as a mail piece.
+        const folded = canonicalSourceName(p.domain, p.sourceAtSale);
+        const label = folded
+          ? (isCatchAllName(folded) ? `${folded} (catch-all)` : folded)
+          : p.sourceOrigin === "catch-all"
             ? (p.catchAllLabel ? `${p.catchAllLabel} (catch-all)` : "(Logics catch-all)")
-            : "(unsourced)"));
+            : "(unsourced)";
+        // Two ways to be Aged: the SOURCE stopped running, or the CASE is
+        // older than a month. The second is what catches an upsell to someone
+        // who came in years ago — it wears the source's name but is not that
+        // source's return, and it is how BCD reached 23,125% on $8.00.
+        const r = row(
+          folded && !isCatchAllName(folded)
+            ? sourceBucket(folded, {
+              firstPaidDateKey: p.metricsTreatment?.firstPaidDateKey || null,
+              caseCreatedDate: p.caseCreatedDate,
+              attributionCallDate: attributionDateFor(p),
+              rangeStart: from,
+              rangeEnd: to,
+            })
+            : label,
+        );
         if (p.paymentType === "initial") {
           r.dealCases.add(`${p.domain}:${p.caseId}`);
           r.deals = r.dealCases.size;                     // sales, not payment rows
@@ -161,42 +226,140 @@ const BLOCKS = [
       // Spend and CallRail responses arrive under their own spellings of the
       // same piece; fold them onto the same row or the money and the calls
       // never meet and every cost-per reads as "—".
+      const bucketFor = (src) => {
+        const f = canonicalSourceName("TAG", src) || src;
+        return isActiveSource(f) || isCatchAllName(f) ? f : AGED_LABEL;
+      };
       for (const [src, v] of Object.entries(spendBySource || {})) {
-        const r = row(canonicalSourceName("TAG", src) || src);
+        const r = row(bucketFor(src));
         r.spend = round2(r.spend + v.spend); r.leads += v.leads || 0;
       }
       for (const [src, v] of Object.entries(callsBySource || {})) {
-        const r = row(canonicalSourceName("TAG", src) || src);
+        const r = row(bucketFor(src));
         r.responses += v.responses || 0;
       }
-      return [...by.values()].map(({ dealCases, ...r }) => {
+      const out = [...by.values()].map(({ dealCases, ...r }) => {
         const totalCash = round2(r.newCash + r.recurringCash);
         const denom = r.responses || r.leads || 0;
-        return { ...r, totalCash, costPer: denom > 0 && r.spend > 0 ? round2(r.spend / denom) : null, net: round2(totalCash - r.spend) };
+        // ROAS vs ROI — Mickey 2026-07-28: "roas = the initial payments
+        // recouped for the ad running and roi the total amount of money made
+        // for a piece in the month. we arent giving urgent third its deals
+        // from last month etc."
+        //
+        // THE MONTH IS SELF-CONTAINED. Spend in the range is set against
+        // money received in the range. No cohort carry-forward, no lifetime
+        // value: a piece is not credited for deals it produced in an earlier
+        // month, so running the same report twice can never inflate it.
+        //
+        //   ROAS — did this ad pay for itself with NEW business?
+        //   ROI  — what did this piece put in the bank this month, all in?
+        //
+        // Both are null when spend is 0: revenue with no spend behind it has
+        // no return to measure, and dividing by zero would print Infinity as
+        // if it were a triumph.
+        return {
+          ...r,
+          totalCash,
+          costPer: denom > 0 && r.spend > 0 ? round2(r.spend / denom) : null,
+          net: round2(totalCash - r.spend),
+          // Mickey 2026-07-28, exactly: "roas is just sum initials / sum costs,
+          // roi is sum totals - sum costs / sum costs".
+          //   ROAS — what the ad recouped in NEW business, gross.
+          //   ROI  — what the piece RETURNED over its cost, net.
+          // ROI is net, so it sits 100 points below the gross multiple; 0%
+          // means the piece exactly paid for itself.
+          // Aged is not a campaign, so it has no return to compute. Printing
+          // one would re-create exactly the number this rule exists to stop.
+          // One implementation of every ratio, shared with the P/L and officer
+          // blocks — a second copy is how ROI came to mean two things.
+          ...(r.source === AGED_LABEL
+            ? { roas: null, roi: null, costPerAcquisition: null, profitMargin: null }
+            : applyFunctions(
+              { cost: r.spend, initial: r.newCash, total: totalCash, deals: r.deals, calls: r.responses, leads: r.leads },
+              ["roas", "roi", "costPerAcquisition", "profitMargin"],
+            )),
+          // BCD showed 23,125% on $8.00 of spend — BCD cost is derived from
+          // recorded call counts and July had 2 on record. That is a hole in
+          // the spend feed, not a spectacular campaign, and a four-digit
+          // percentage printed plainly reads as the latter.
+          spendSuspect: r.spend > 0 && totalCash > 0 && (totalCash / r.spend) > SPEND_SUSPECT_RATIO,
+        };
       })
         // A row that is zero in EVERY column is noise, not a finding. Spend
         // with no deals is kept — that is a source failing to convert, which
         // is exactly what the board is for.
         .filter((r) => r.deals || r.totalCash || r.spend || r.responses || r.leads)
         .sort((a, b) => b.newCash - a.newCash || b.spend - a.spend);
+
+      // CHANNEL TOTALS. A stopped piece has no ratio of its own but its
+      // in-month money is still mail revenue against mail spend, so the
+      // channel is where "did mail work this month" actually gets answered.
+      // Aged money is excluded: it is not this month's advertising at all.
+      const channels = new Map();
+      for (const r of out) {
+        if (r.source === AGED_LABEL) continue;
+        const ch = sourceChannel(r.source, (spendBySource || {})[r.source]?.channel);
+        if (ch === "other") continue;
+        if (!channels.has(ch)) channels.set(ch, { channel: ch, deals: 0, newCash: 0, totalCash: 0, spend: 0, responses: 0 });
+        const t = channels.get(ch);
+        t.deals += r.deals; t.newCash = round2(t.newCash + r.newCash);
+        t.totalCash = round2(t.totalCash + r.totalCash); t.spend = round2(t.spend + r.spend);
+        t.responses += r.responses || 0;
+      }
+      out.channels = [...channels.values()].map((t) => ({
+        ...t,
+        // Same registry as the per-source rows: a channel total that computed
+        // its own ratio could disagree with the rows it is summing.
+        ...applyFunctions(
+          { cost: t.spend, initial: t.newCash, total: t.totalCash, deals: t.deals, calls: t.responses },
+          ["roas", "roi", "costPerAcquisition", "profitMargin"],
+        ),
+      })).sort((x, y) => y.spend - x.spend);
+      return out;
     },
     renderText(rows) {
       // TOTAL $ as well as NEW $: a source carrying only recurring money was
       // rendering as an empty row, which reads as "this piece made nothing"
       // when it is really "this piece made nothing NEW". "what money made and
       // where from" means all of it.
-      const L = ["By source".padEnd(34) + "DEALS".padStart(6) + "NEW $".padStart(13) + "TOTAL $".padStart(13) + "SPEND".padStart(12) + "RESP".padStart(6) + "COST EA".padStart(10)];
-      L.push("-".repeat(94));
+      const L = ["By source".padEnd(30) + "DEALS".padStart(6) + "NEW $".padStart(12) + "TOTAL $".padStart(12)
+        + "SPEND".padStart(11) + "ROAS".padStart(8) + "ROI".padStart(8) + "RESP".padStart(6) + "COST EA".padStart(9)];
+      L.push("-".repeat(102));
       for (const r of rows) {
-        L.push(String(r.source).slice(0, 33).padEnd(34) + String(r.deals).padStart(6)
-          + money(r.newCash).padStart(13) + money(r.totalCash).padStart(13) + money(r.spend).padStart(12)
-          + String(r.responses || 0).padStart(6) + (r.costPer != null ? money(r.costPer) : "—").padStart(10));
+        L.push(String(r.source).slice(0, 29).padEnd(30) + String(r.deals).padStart(6)
+          + money(r.newCash).padStart(12) + money(r.totalCash).padStart(12) + money(r.spend).padStart(11)
+          + (r.roas != null ? `${r.roas}%${r.spendSuspect ? "?" : ""}` : "—").padStart(8)
+          + (r.roi != null ? `${r.roi}%${r.spendSuspect ? "?" : ""}` : "—").padStart(8)
+          + String(r.responses || 0).padStart(6)
+          + (r.costPer != null ? money(r.costPer) : "—").padStart(9));
+      }
+      if (rows.channels?.length) {
+        L.push("", "BY CHANNEL".padEnd(30) + "DEALS".padStart(6) + "NEW $".padStart(12) + "TOTAL $".padStart(12)
+          + "SPEND".padStart(11) + "ROAS".padStart(8) + "ROI".padStart(8));
+        L.push("-".repeat(87));
+        for (const t of rows.channels) {
+          L.push(String(t.channel.toUpperCase()).padEnd(30) + String(t.deals).padStart(6)
+            + money(t.newCash).padStart(12) + money(t.totalCash).padStart(12) + money(t.spend).padStart(11)
+            + (t.roas != null ? `${t.roas}%` : "—").padStart(8)
+            + (t.roi != null ? `${t.roi}%` : "—").padStart(8));
+        }
+      }
+      const suspect = rows.filter((r) => r.spendSuspect);
+      if (suspect.length) {
+        L.push("", `? = spend looks incomplete (over ${SPEND_SUSPECT_RATIO}x return): `
+          + suspect.map((r) => `${r.source} on ${money(r.spend)}`).join(" · ")
+          + " — check the spend feed before quoting these.");
       }
       return L.join("\n");
     },
     csv(rows) {
       return { rows, columns: [
-        { header: "source", get: (x) => x.source }, { header: "deals", get: (x) => x.deals },
+        { header: "source", get: (x) => x.source },
+        { header: "roas_pct", get: (x) => x.roas },
+        { header: "roi_pct", get: (x) => x.roi },
+        { header: "spend_suspect", get: (x) => Boolean(x.spendSuspect) },
+        { header: "roas_pct", get: (x) => x.roas },
+        { header: "roi_pct", get: (x) => x.roi }, { header: "deals", get: (x) => x.deals },
         { header: "new_cash", get: (x) => x.newCash }, { header: "recurring_cash", get: (x) => x.recurringCash },
         { header: "total_cash", get: (x) => x.totalCash }, { header: "spend", get: (x) => x.spend },
         { header: "responses", get: (x) => x.responses }, { header: "leads", get: (x) => x.leads },
@@ -209,8 +372,14 @@ const BLOCKS = [
     id: "officer",
     label: "By settlement officer",
     hint: "Deals and cash closed, alongside calls handled",
-    needs: ["payments", "queue"],
+    terms: "Deals credited to the officer who held the case AT SALE, from the stored snapshot - not whoever holds it today.",
+    needs: ["payments", "queue", "caseContacts"],
     compute({ payments, queueByAgent }) {
+      // The roster resolves name variants and keeps queues off the people
+      // list — the same rules the work log uses, so the two boards agree.
+      const {
+        canonicalStaffName, isNotAPerson,
+      } = require("../../shared-config/src/staffRoster");
       const by = new Map();
       const row = (k) => {
         if (!by.has(k)) by.set(k, { officer: k, deals: 0, dealCases: new Set(), cash: 0, mailCalls: 0, ldDials: 0, bcdCalls: 0 });
@@ -227,10 +396,18 @@ const BLOCKS = [
         }
       }
       for (const [agent, v] of Object.entries(queueByAgent || {})) {
-        const r = row(agent);
+        if (isNotAPerson(agent)) continue;          // a queue is not an officer
+        const r = row(canonicalStaffName(agent));
         r.mailCalls += v.MAILER || 0; r.bcdCalls += v.BCD || 0; r.ldDials += v.LD || 0;
       }
-      return [...by.values()].sort((a, b) => b.cash - a.cash || (b.mailCalls + b.ldDials) - (a.mailCalls + a.ldDials));
+      // Officer performance is the same three parts as everything else:
+      // substrate (their cash and deals), factor (the officer), functions.
+      return [...by.values()]
+        .map(({ dealCases, ...r }) => ({
+          ...r,
+          cashPerDeal: r.deals > 0 ? round2(r.cash / r.deals) : null,
+        }))
+        .sort((a, b) => b.cash - a.cash || (b.mailCalls + b.ldDials) - (a.mailCalls + a.ldDials));
     },
     renderText(rows) {
       const L = ["By settlement officer".padEnd(24) + "DEALS".padStart(6) + "COLLECTED".padStart(13) + "MAIL".padStart(7) + "LD".padStart(8)];
@@ -254,6 +431,7 @@ const BLOCKS = [
     id: "cohort",
     label: "Client since (vintage)",
     hint: "What share of revenue comes from each signing year",
+    terms: "Grouped by the year the client FIRST paid, from the attribution snapshot. Never inferred from the payment date.",
     needs: ["payments"],
     compute({ payments }) {
       const by = new Map();
@@ -297,6 +475,7 @@ const BLOCKS = [
     id: "status",
     label: "Status movement",
     hint: "DNC, post-dates, suspensions and conversions",
+    terms: "Status CHANGES that happened inside the range - not the status a case holds now.",
     needs: ["activity"],
     compute({ events }) {
       const c = { dnc: 0, postdate: 0, suspended: 0, conversions: 0, other: 0 };
@@ -327,6 +506,7 @@ const BLOCKS = [
     id: "recordings",
     label: "Calls to review",
     hint: "Deals, post dates and 10 min+ calls, with listen links",
+    terms: "Calls inside the range worth hearing: deals, post-dates and 10 min+. SOURCE marks the call the attribution came from.",
     // PAYMENTS is required, not optional: a call is only knowable as a DEAL
     // call by matching it to a sale. Declaring only "recordings" meant
     // picking this block alone gathered no payments, so every deal call was
@@ -360,6 +540,7 @@ const BLOCKS = [
     id: "postdates",
     label: "Post-dates: kept or lost",
     hint: "Cases promised for a later date, and whether the money actually arrived",
+    terms: "Cases promised for a later date inside the range, then checked against Billing for money arriving AFTER that date.",
     needs: ["activity", "postdateBilling"],
     compute({ postdateBilling = [] }) {
       return [...postdateBilling]
@@ -404,6 +585,7 @@ const BLOCKS = [
     id: "declines",
     label: "Declines to chase",
     hint: "Money that was attempted and bounced — recoverable if worked today",
+    terms: "Payment attempts that failed inside the range, grouped by case. Not netted against successful payments.",
     needs: ["payments", "caseContacts"],
     compute({ declines = [] }) {
       const by = new Map();
@@ -448,6 +630,7 @@ const BLOCKS = [
     id: "effort",
     label: "Effort to close",
     hint: "How much contact it took before a case paid — inbound for TAG, dials for WYNN",
+    terms: "Contact events up to and including the close day. Inbound touches for TAG, outbound dials for WYNN - never averaged together.",
     // Two lanes, never one median. A WYNN outbound dial attempt and a TAG
     // inbound call are different units with OPPOSITE agency; averaging them
     // is a category error. Routing is by PAYMENT domain, never by dial domain.
@@ -576,6 +759,7 @@ const BLOCKS = [
     // have had a long inbound call on the main DID.
     label: "Call to close lag",
     hint: "Days from first inbound call to the first payment",
+    terms: "Days from the FIRST inbound call to the first payment. Source follows the attribution rule: longest call on the close day.",
     needs: ["payments", "callsRange", "caseContacts"],
     compute({ payments = [], callsRange = [] }) {
       const ops = require("./reportOpsService");
@@ -615,6 +799,7 @@ const BLOCKS = [
     id: "streams",
     label: "Queue performance by stream",
     hint: "Connected calls per paid stream, and who took them",
+    terms: "Per-stream queue totals inside the range: offered, connected, missed.",
     needs: ["queue"],
     compute({ queueStreams = {}, queueByAgent = {} }) {
       const streams = Object.entries(queueStreams).map(([key, v]) => ({
@@ -652,16 +837,20 @@ const BLOCKS = [
     id: "worked",
     label: "Work today",
     hint: "Calls received, taken and made, and deals written, per person",
+    terms: "Calls CONNECTED to an agent (inbound) and dials placed (outbound), inside the range. Missed calls belong to the queue, not a person.",
     // queue carries BOTH sides: MAILER/BCD are inbound calls CONNECTED to an
     // agent, LD is PhoneBurner OUTBOUND dials. Deliberately NOT declaring
     // "dials" as well — readLdDials reads the same DailyDial rows the LD
     // counts come from (verified 2026-07-27: chris_bolt 528, phil_olson 79,
     // bruce_allen 26 identical in both), so using both would double every
     // outbound number.
-    needs: ["queue", "payments"],
-    compute({ queueByAgent = {}, queueStreams = {}, payments = [] }) {
+    // caseContacts is what resolves the officer LIVE for deals whose snapshot
+    // has not been written yet. Without it a midday board shows every
+    // salesperson on zero deals while "(no snapshot)" holds all of them.
+    needs: ["queue", "payments", "caseContacts"],
+    compute({ queueByAgent = {}, queueStreams = {}, payments = [], queueUnavailable = null }) {
       const {
-        ROLES, canonicalStaffName, staffRole,
+        ROLES, canonicalStaffName, isNotAPerson, staffRole,
       } = require("../../shared-config/src/staffRoster");
       const INBOUND = new Set(["MAILER", "BCD"]);
       const by = new Map();
@@ -671,6 +860,8 @@ const BLOCKS = [
       };
 
       for (const [agent, streams] of Object.entries(queueByAgent)) {
+        // A queue answering a call is not a person doing work.
+        if (isNotAPerson(agent)) continue;
         const r = row(canonicalStaffName(agent));
         for (const [key, n] of Object.entries(streams || {})) {
           if (INBOUND.has(key)) r.taken += n || 0;
@@ -714,29 +905,36 @@ const BLOCKS = [
         .filter((r) => r.role === ROLES.CSERV)
         .sort((a, b) => b.touches - a.touches);
 
-      // The owner is not staff being measured. His calls still belong in the
-      // queue totals - those are facts about the queue, not about a person -
-      // but he is not named in a report telling people their work is seen.
-      const offBoard = all.filter((r) => r.role === ROLES.OWNER);
+      // Owner and management are not staff being measured. Their calls still
+      // belong in the queue totals — those are facts about the queue, not
+      // about a person — but they are not named in a report telling people
+      // their work is seen.
+      const offBoard = all.filter((r) => r.role === ROLES.OWNER || r.role === ROLES.MGMT);
 
-      return { rows, alsoAnswering, offBoard, totals };
+      return { rows, alsoAnswering, offBoard, totals, queueUnavailable };
     },
     renderText(data) {
-      const { rows, alsoAnswering = [], offBoard = [], totals } = data;
-      const L = [`Work today · ${totals.received} call(s) received · ${totals.taken} taken · ${totals.missed} missed`];
+      const { rows, alsoAnswering = [], offBoard = [], totals, queueUnavailable = null } = data;
+      // Lead with the gap. A reader who sees the table first has already
+      // drawn a conclusion by the time a footnote corrects them.
+      const L = queueUnavailable
+        ? [`Work — CALL DATA UNAVAILABLE for this range (${queueUnavailable}).`,
+          "Deals below are complete; call counts are not measured and show as —.", ""]
+        : [`Work today · ${totals.received} call(s) received · ${totals.taken} taken · ${totals.missed} missed`];
       if (!rows.length && !alsoAnswering.length) return L[0] + NEWLINE + "  (nothing recorded yet)";
       L.push("");
       L.push("PERSON".padEnd(20) + "TAKEN".padStart(7) + "MADE".padStart(8) + "DEALS".padStart(7) + "CASH".padStart(13));
       L.push("-".repeat(55));
+      const num = (n) => (queueUnavailable ? "—" : String(n));
       for (const r of rows) {
-        L.push(String(r.agent).slice(0, 19).padEnd(20) + String(r.taken).padStart(7)
-          + String(r.made).padStart(8) + String(r.deals).padStart(7) + money(r.cash).padStart(13));
+        L.push(String(r.agent).slice(0, 19).padEnd(20) + num(r.taken).padStart(7)
+          + num(r.made).padStart(8) + String(r.deals).padStart(7) + money(r.cash).padStart(13));
       }
       const sum = rows.reduce((a, r) => ({
         taken: a.taken + r.taken, made: a.made + r.made, deals: a.deals + r.deals, cash: round2(a.cash + r.cash),
       }), { taken: 0, made: 0, deals: 0, cash: 0 });
       L.push("-".repeat(55));
-      L.push("TOTAL".padEnd(20) + String(sum.taken).padStart(7) + String(sum.made).padStart(8)
+      L.push("TOTAL".padEnd(20) + num(sum.taken).padStart(7) + num(sum.made).padStart(8)
         + String(sum.deals).padStart(7) + money(sum.cash).padStart(13));
       if (alsoAnswering.length) {
         L.push("", "Also answering (customer service — not on the sales board):");
@@ -744,6 +942,7 @@ const BLOCKS = [
           L.push(`  ${r.agent} — ${r.taken} taken${r.made ? `, ${r.made} made` : ""}`);
         }
       }
+      if (queueUnavailable) return L.join(NEWLINE);
       if (totals.missed) {
         // Missed calls have no agent, so they belong to the queue, not a person.
         L.push("", `${totals.missed} call(s) rang and were not answered — queue-wide, not attributable to a person.`);
@@ -760,12 +959,96 @@ const BLOCKS = [
       return L.join(NEWLINE);
     },
     csv(data) {
+      const unk = data.queueUnavailable;
       return { rows: data.rows, columns: [
         { header: "person", get: (x) => x.agent },
-        { header: "calls_taken", get: (x) => x.taken },
-        { header: "calls_made", get: (x) => x.made },
+        // null, not 0 — a spreadsheet will happily sum a zero it was never told
+        // to distrust.
+        { header: "calls_taken", get: (x) => (unk ? null : x.taken) },
+        { header: "calls_made", get: (x) => (unk ? null : x.made) },
         { header: "deals_written", get: (x) => x.deals },
         { header: "cash", get: (x) => x.cash },
+      ] };
+    },
+  },
+  {
+    id: "pl",
+    label: "Profit and loss over time",
+    hint: "Cost, money in, net and margin per period",
+    terms: "Money RECEIVED in each period against spend BOOKED in that period. Periods are days for a range up to about two months, months beyond that. Margin is (total money x the configured rate) minus cost, in dollars - not a rate of return. A period with no spend shows no ratio rather than an infinite one.",
+    needs: ["payments", "spend"],
+    compute({ payments = [], spendByDay = {}, from = null, to = null }) {
+      const { applyFunctions } = require("./reportOpsService");
+      const span = from && to
+        ? Math.round((Date.parse(`${to}T00:00:00Z`) - Date.parse(`${from}T00:00:00Z`)) / 86400000) + 1
+        : 1;
+      // Days read well up to about two months; past that a daily table is
+      // noise and the shape people actually want is monthly.
+      const byMonth = span > 62;
+      const period = (key) => (byMonth ? String(key).slice(0, 7) : String(key).slice(0, 10));
+
+      const rows = new Map();
+      const row = (k) => {
+        if (!rows.has(k)) rows.set(k, { period: k, cost: 0, initial: 0, total: 0, deals: 0, cases: new Set() });
+        return rows.get(k);
+      };
+      for (const [day, v] of Object.entries(spendByDay)) {
+        row(period(day)).cost = round2(row(period(day)).cost + (v.spend || 0));
+      }
+      for (const p of payments.filter((x) => !x.isChargeback)) {
+        const r = row(period(p.paymentDateKey));
+        r.total = round2(r.total + p.amount);
+        if (p.paymentType === "initial") {
+          r.initial = round2(r.initial + p.amount);
+          r.cases.add(`${p.domain}:${p.caseId}`);
+          r.deals = r.cases.size;
+        }
+      }
+      return [...rows.values()]
+        .map(({ cases, ...r }) => ({
+          ...r,
+          net: round2(r.total - r.cost),
+          ...applyFunctions(r, ["roi", "roas", "costPerAcquisition", "profitMargin"]),
+        }))
+        .sort((x, y) => String(x.period).localeCompare(String(y.period)));
+    },
+    renderText(rows) {
+      if (!rows.length) return "Profit and loss     (nothing in this range)";
+      const { formatFunction } = require("./reportOpsService");
+      const L = ["PERIOD".padEnd(12) + "COST".padStart(12) + "NEW $".padStart(12) + "TOTAL $".padStart(13)
+        + "NET".padStart(13) + "MARGIN".padStart(13) + "ROI".padStart(9)];
+      L.push("-".repeat(84));
+      for (const r of rows) {
+        L.push(String(r.period).padEnd(12) + money(r.cost).padStart(12) + money(r.initial).padStart(12)
+          + money(r.total).padStart(13) + money(r.net).padStart(13)
+          + formatFunction("profitMargin", r.profitMargin).padStart(13)
+          + formatFunction("roi", r.roi).padStart(9));
+      }
+      const t = rows.reduce((a, r) => ({
+        cost: round2(a.cost + r.cost), initial: round2(a.initial + r.initial),
+        total: round2(a.total + r.total), deals: a.deals + r.deals,
+      }), { cost: 0, initial: 0, total: 0, deals: 0 });
+      const totals = { ...t, net: round2(t.total - t.cost) };
+      const fns = require("./reportOpsService").applyFunctions(totals, ["roi", "profitMargin"]);
+      L.push("-".repeat(84));
+      L.push("TOTAL".padEnd(12) + money(totals.cost).padStart(12) + money(totals.initial).padStart(12)
+        + money(totals.total).padStart(13) + money(totals.net).padStart(13)
+        + formatFunction("profitMargin", fns.profitMargin).padStart(13)
+        + formatFunction("roi", fns.roi).padStart(9));
+      return L.join(NEWLINE);
+    },
+    csv(rows) {
+      return { rows, columns: [
+        { header: "period", get: (x) => x.period },
+        { header: "cost", get: (x) => x.cost },
+        { header: "new_cash", get: (x) => x.initial },
+        { header: "total_cash", get: (x) => x.total },
+        { header: "net", get: (x) => x.net },
+        { header: "profit_margin", get: (x) => x.profitMargin },
+        { header: "deals", get: (x) => x.deals },
+        { header: "roi_pct", get: (x) => x.roi },
+        { header: "roas_pct", get: (x) => x.roas },
+        { header: "cost_per_acquisition", get: (x) => x.costPerAcquisition },
       ] };
     },
   },
@@ -810,6 +1093,10 @@ const PRESETS = Object.freeze({
   people: ["officer", "effort", "streams"],
   health: ["cohort", "money"],
   pipeline: ["postdates", "declines", "lag"],
+  // The three Mickey named on 2026-07-29.
+  "roi-by-source": ["source"],
+  "officer-performance": ["officer", "worked"],
+  "profit-loss": ["pl", "money", "spend"],
 });
 
 function resolveSelection(selection) {

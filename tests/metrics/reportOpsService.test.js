@@ -290,3 +290,59 @@ test("lag reports the attribution call's source, first call's timing", () => {
   assert.equal(row.source, "Affordability Federal", "source follows the attribution rule");
   assert.equal(row.attributionBasis, "longest-close-day");
 });
+
+// ── the six functions ────────────────────────────────────────────────────
+// Mickey 2026-07-29 named these as the toolkit's function layer. They used to
+// live inside individual blocks, which is why ROI once meant two things.
+
+test("the six functions are all present and named", () => {
+  assert.deepEqual(Object.keys(ops.FUNCTIONS).sort(),
+    ["costPerAcquisition", "costPerCall", "costPerLead", "profitMargin", "roas", "roi"]);
+});
+
+test("they reproduce the live July pink-piece numbers", () => {
+  const r = ops.applyFunctions({
+    cost: 13924.35, initial: 18566.54, total: 55387.54, calls: 189, deals: 15,
+  });
+  assert.equal(r.roi, 297.8, "(total - cost) / cost");
+  assert.equal(r.roas, 133.3, "initial / cost");
+  assert.equal(r.costPerCall, 73.67);
+  assert.equal(r.costPerAcquisition, 928.29, "cost / SALES");
+  assert.equal(r.profitMargin, 30385.68, "(total x 0.8) - cost, in dollars");
+});
+
+test("profit margin is DOLLARS, not a rate", () => {
+  // "(total payment*.8 - cost)" — what is left, not a rate of return.
+  assert.equal(ops.applyFunctions({ total: 1000, cost: 500 }, ["profitMargin"]).profitMargin, 300);
+  assert.equal(ops.formatFunction("profitMargin", 300), "$300.00");
+  assert.equal(ops.formatFunction("roi", 297.8), "297.8%");
+});
+
+test("a zero denominator returns null, never Infinity", () => {
+  // A 23,125% already shipped once; an infinite one would read as a triumph.
+  const r = ops.applyFunctions({ cost: 0, initial: 100, total: 100, calls: 0, leads: 0, deals: 0 });
+  for (const k of ["roi", "roas", "costPerCall", "costPerLead", "costPerAcquisition"]) {
+    assert.equal(r[k], null, `${k} must be null on a zero denominator`);
+  }
+  assert.equal(ops.formatFunction("roi", null), "—");
+});
+
+test("a missing substrate is null, not treated as zero", () => {
+  // No lead count is not "zero leads" — it is "we did not measure leads".
+  assert.equal(ops.applyFunctions({ cost: 100 }, ["costPerLead"]).costPerLead, null);
+  assert.equal(ops.applyFunctions({ cost: 100, leads: 0 }, ["costPerLead"]).costPerLead, null);
+});
+
+test("an unknown function fails loudly, listing what exists", () => {
+  // The model layer will drive this registry; it must never silently ignore
+  // a function it was asked for.
+  assert.throws(() => ops.applyFunctions({ cost: 1 }, ["magicNumber"]),
+    /unknown function "magicNumber" — available: roi, roas/);
+});
+
+test("a losing period reports a negative return", () => {
+  const r = ops.applyFunctions({ cost: 8619, initial: 980, total: 980 }, ["roas", "roi", "profitMargin"]);
+  assert.equal(r.roas, 11.4);
+  assert.ok(r.roi < 0);
+  assert.ok(r.profitMargin < 0, "a loss must read as a loss in dollars too");
+});

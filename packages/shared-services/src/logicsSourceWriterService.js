@@ -67,12 +67,33 @@ const CANONICAL_PIECE_BY_ID = Object.freeze(Object.entries(LOGICS_SOURCE_REGISTR
  * library contains genuinely different pieces with similar names, so this
  * folds aliases, never guesses.
  */
-function canonicalSourceName(domain, name) {
+function canonicalSourceName(domain, name, { mailTenant = "TAG" } = {}) {
   const raw = String(name == null ? "" : name).trim();
   if (!raw) return null;
-  const id = resolveLogicsSourceId(domain, raw);
-  if (!id) return raw;
-  return pieceForSourceId(domain, id) || raw;
+  const fold = (dom) => {
+    const id = resolveLogicsSourceId(dom, raw);
+    return id ? (pieceForSourceId(dom, id) || null) : null;
+  };
+  // Mail is bought for ONE tenant, so a piece NAME is a global string. A WYNN
+  // case carrying "Urgent Third Pink State" (case 134815) failed to fold
+  // because WYNN has no registry, and the piece rendered as two rows — the
+  // same mail piece appearing twice, splitting its own ROAS.
+  //
+  // Folding by name is display only; SourceID WRITES stay strictly
+  // per-tenant, since an id means nothing outside its own tenant.
+  return fold(domain) || fold(mailTenant) || raw;
+}
+
+/** Is this source name one of the catch-all buckets rather than a piece? */
+function isCatchAllName(name) {
+  const raw = String(name == null ? "" : name).trim().toLowerCase();
+  if (!raw) return false;
+  for (const table of Object.values(SOURCE_CAMPAIGN_LABELS)) {
+    for (const entry of Object.values(table)) {
+      if (entry.catchAll && entry.label.toLowerCase() === raw) return true;
+    }
+  }
+  return false;
 }
 
 // READ-ONLY identification of every SourceCampaignID we have confirmed, per
@@ -189,6 +210,7 @@ async function mirrorCaseProfileSource(domain, caseId, piece) {
 
 module.exports = {
   CANONICAL_PIECE_BY_ID,
+  isCatchAllName,
   SOURCE_CAMPAIGN_LABELS,
   labelForSourceId,
   canonicalSourceName,

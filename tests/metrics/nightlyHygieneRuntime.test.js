@@ -236,8 +236,10 @@ test("the night runs in the stated ORDER", () => {
   // Sourcing must precede the report; the call-url pass must precede it too,
   // or the board links calls whose URLs were attached a minute later.
   const s2 = createNightlyHygieneRuntime({}).getState();
+  // queue-rollup freezes the day's per-agent counts so a RANGE never has to
+  // ask RingCentral; it sits with the other capture steps, before the report.
   assert.deepEqual(s2.tasks.map((t) => t.key),
-    ["night-persist", "call-urls", "logics-source"]);
+    ["night-persist", "call-urls", "queue-rollup", "logics-source"]);
 });
 
 test("call-urls is a WATCH, not a backfill — backfill is impossible", () => {

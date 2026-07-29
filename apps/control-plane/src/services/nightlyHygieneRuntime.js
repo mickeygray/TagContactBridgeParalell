@@ -204,6 +204,44 @@ const TASKS = [
     },
   },
   {
+    // Freeze the day's queue activity so a RANGE never has to ask RingCentral.
+    //
+    // RC answers per day and rate-limits hard, which is why the work log
+    // refused ranges over 7 days. CallLog cannot substitute: on inbound legs
+    // extensionId is the QUEUE that rang, not the agent who answered (5 of 44
+    // legs mapped on 2026-07-27). Once the day is over, who answered what
+    // stops changing — so a stored copy can never go stale.
+    key: "queue-rollup",
+    label: "Freeze the day's per-agent call counts",
+    writesArmed: () => String(process.env.QUEUE_ROLLUP_ENABLED || "false").toLowerCase() === "true",
+    async plan({ logger }) {
+      const { captureQueueDay } = require("../../../../packages/shared-services/src/queueRollupService");
+      const dateKey = persistTargetDay();
+      // Read-only: shapes the day without writing it.
+      return [{ dateKey, ...(await captureQueueDay({ dateKey, logger })) }];
+    },
+    async apply(planned, { logger }) {
+      const { persistQueueDay } = require("../../../../packages/shared-services/src/queueRollupService");
+      const day = await persistQueueDay({ dateKey: planned[0]?.dateKey, logger });
+      return {
+        written: day.agents.length,
+        skipped: 0,
+        failed: day.partial ? 1 : 0,
+        errors: day.partial ? [`partial: ${day.partialReason}`] : [],
+      };
+    },
+    count(planned) {
+      return Number(planned[0]?.agents?.length) || 0;
+    },
+    describe(planned) {
+      const r = planned[0] || {};
+      const taken = (r.streams || []).reduce((a, x) => a + (x.connected || 0), 0);
+      const made = (r.agents || []).reduce((a, x) => a + (x.made || 0), 0);
+      return `${r.dateKey}: ${r.agents?.length || 0} agent(s) · ${taken} taken · ${made} made`
+        + (r.partial ? ` — PARTIAL (${r.partialReason})` : "");
+    },
+  },
+  {
     key: "logics-source",
     label: "Write the mail piece onto the Logics case",
     // Two switches on purpose: the task may run (and show its plan) long
