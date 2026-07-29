@@ -41,12 +41,17 @@ const TAX_RESOLUTION_HARD_RULES = Object.freeze([
   ),
   hardRule(
     "misrepresent-the-firm",
-    "Never misstate who the firm is — it is a licensed tax representation firm — and never state or imply the call is from the IRS or a government agency.",
-    "Violation = claiming or implying to be the IRS/state, or identifying the firm as something it is not. Choosing not to repeat the full identity mid-conversation is NOT a violation; misstating it is.",
+    "Never misstate who the firm is, and never state or imply the call is from the IRS or a government agency.",
+    "Violation = claiming or implying to be the IRS/state, or describing the firm as something it is not. DECLINING TO VOLUNTEER company specifics is NOT a violation — it is the required posture (see the earned-disclosure ruling); only an untrue statement is. Answering a direct question truthfully and briefly is also not a violation.",
     {
-      type: "approved-script",
-      source: "packages/shared-services/src/taxGroupScript.js",
-      note: "who_we_are beat: \"A LICENSED TAX REPRESENTATION FIRM — enrolled agents, tax preparers, consultants.\" The engraved rule is the negation of the required identity.",
+      type: "field-manual-extract",
+      source: "apps/web-client/src/workspaces/field-manual/content/objections-trust.ts",
+      note:
+        "Grounded in the trust doctrine — impersonating the agency is the exact scam pattern "
+        + "the prospect fears, and a checkable truth is the credibility move. Deliberately NOT "
+        + "grounded in the script's who_we_are beat any more: Mickey's 2026-07-29 ruling "
+        + "(ruling.company-disclosure-is-earned) removed volunteering identity as a taught "
+        + "move, so this rule stands on \"never lie\", never on \"must introduce\".",
     },
   ),
   hardRule(
