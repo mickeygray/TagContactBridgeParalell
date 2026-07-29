@@ -95,7 +95,13 @@ function targetedSessionInstructions(record) {
   ].join("\n");
 }
 
-function coachForRecord(record, prospectText = "") {
+function conciseCoachText(value, maxLength = 180) {
+  const clean = String(value || "").replace(/\s+/g, " ").trim();
+  if (clean.length <= maxLength) return clean;
+  return `${clean.slice(0, maxLength - 1).trimEnd()}…`;
+}
+
+function coachForRecord(record, prospectText = "", learnerText = "") {
   const lower = String(prospectText || "").toLowerCase();
   const signals = record.packet.teaching?.responseSignals || [];
   const signal = signals.find((entry) =>
@@ -105,21 +111,97 @@ function coachForRecord(record, prospectText = "") {
   const pending = activeCriteria(record).find(
     (criterion) => !record.satisfiedCriterionIds.has(criterion.criterionId),
   );
+  const newestProspect = conciseCoachText(prospectText);
+  const newestLearner = conciseCoachText(learnerText);
   return {
     sectionTitle: record.module?.title || record.packet.title,
     objective: record.module?.objective || record.packet.localObjective,
-    notice: signal?.coachNotice || "Listen for what the prospect needs before choosing the next approved move.",
+    notice: newestProspect
+      ? `The prospect's newest response is the key: “${newestProspect}”`
+      : signal?.coachNotice ||
+        "Listen for what the prospect needs before choosing the next move.",
     prospectPattern: signal?.prospectPattern || null,
-    suggestedMove: record.module?.coachNudge ||
-      (signal
-        ? signal.suggestedMove.replace(/^Use the public-record basis[^.]*\./, "Be concise and truthful about why the call is happening.")
-        : pending
-        ? `Think about what the prospect still needs before they will ${pending.description.toLowerCase()}.`
-        : "Use the reading and the prospect's words to choose your next move."),
+    suggestedMove: newestLearner
+      ? `Check whether “${newestLearner}” directly answered that response. If not, address it before advancing.`
+      : record.module?.coachNudge ||
+        (signal
+          ? signal.suggestedMove.replace(
+            /^Use the public-record basis[^.]*\./,
+            "Be concise and truthful about why the call is happening.",
+          )
+          : pending
+          ? `Think about what the prospect still needs before they will ${pending.description.toLowerCase()}.`
+          : "Use the reading and the prospect's words to choose your next move."),
     exactLanguage: null,
     listenFor: record.module?.listenFor || signal?.listenFor ||
       "A direct answer, reduced resistance, or permission to continue.",
   };
+}
+
+async function generateTurnCoach(record, {
+  prospectText = "",
+  learnerText = "",
+} = {}) {
+  const fallback = coachForRecord(record, prospectText, learnerText);
+  if (!anthropicClient) return fallback;
+  const pending = activeCriteria(record).filter(
+    (criterion) => !record.satisfiedCriterionIds.has(criterion.criterionId),
+  );
+  try {
+    const response = await anthropicClient.createMessage({
+      model: PROSPECT_MODEL,
+      maxTokens: 450,
+      temperature: 0.2,
+      timeoutMs: 20_000,
+      system: [
+        "You are the live Coach observing one short tax-resolution sales practice exchange.",
+        "React to the newest prospect and agent utterances, not to a generic lesson template.",
+        "Give one concise observation, one Socratic nudge, and one response signal to listen for.",
+        "Help the learner discover the move. Never supply a script line, approved wording, answer, hidden rubric, score, or grading decision.",
+        "Stay inside this practice module and return only the required tool call.",
+      ].join("\n"),
+      messages: [{
+        role: "user",
+        content: JSON.stringify({
+          moduleTitle: record.module?.title || record.packet.title,
+          moduleObjective: record.module?.objective || record.packet.localObjective,
+          learnerReading: record.module?.reading || null,
+          newestProspectUtterance: conciseCoachText(prospectText, 500),
+          newestLearnerUtterance: conciseCoachText(learnerText, 500),
+          recentConversation: conversationText(record),
+          remainingOutcomes: pending.map((criterion) => criterion.description),
+          prohibitedMoves: record.packet.prohibitedMoves,
+        }),
+      }],
+      tools: [{
+        name: "coach_latest_exchange",
+        description: "Coach the learner on the latest exchange without revealing the answer.",
+        input_schema: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            notice: { type: "string", minLength: 1, maxLength: 300 },
+            nudge: { type: "string", minLength: 1, maxLength: 300 },
+            listenFor: { type: "string", minLength: 1, maxLength: 240 },
+          },
+          required: ["notice", "nudge", "listenFor"],
+        },
+      }],
+      toolChoice: { type: "tool", name: "coach_latest_exchange" },
+    });
+    const tool = extractToolUse(response, "coach_latest_exchange");
+    const input = tool?.input || {};
+    if (!input.notice || !input.nudge || !input.listenFor) return fallback;
+    return {
+      ...fallback,
+      notice: conciseCoachText(input.notice, 300),
+      suggestedMove: conciseCoachText(input.nudge, 300),
+      listenFor: conciseCoachText(input.listenFor, 240),
+      exactLanguage: null,
+    };
+  } catch {
+    return fallback;
+  }
 }
 
 function publicVoiceSession(bundle) {
@@ -196,6 +278,10 @@ async function acceptVoiceTurn(record, {
   const nextCriterion = activeCriteria(record).find(
     (criterion) => !record.satisfiedCriterionIds.has(criterion.criterionId),
   );
+  const coach = await generateTurnCoach(record, {
+    prospectText,
+    learnerText,
+  });
   return {
     voiceTurn,
     gauntlet: gauntletResult(record, {
@@ -204,7 +290,7 @@ async function acceptVoiceTurn(record, {
         ? { text: prospectText, speechActs: ["answer"] }
         : null,
       terminal: passed ? "passed" : exhausted ? "failed" : null,
-      coach: coachForRecord(record, prospectText),
+      coach,
     }),
   };
 }
@@ -792,16 +878,19 @@ app.post(
         includeAudio: true,
         user: { email: "local-targeted-talk-preview" },
       });
+      if (bundle.openingLine) {
+        record.tape.push({ speaker: "prospect", text: bundle.openingLine });
+      }
+      const openingCoach = await generateTurnCoach(record, {
+        prospectText: bundle.openingLine,
+      });
       record.voiceSession = {
         ...bundle,
-        coach: coachForRecord(record, bundle.openingLine),
+        coach: openingCoach,
         messages: bundle.openingLine
           ? [{ role: "assistant", content: bundle.openingLine }]
           : [],
       };
-      if (bundle.openingLine) {
-        record.tape.push({ speaker: "prospect", text: bundle.openingLine });
-      }
       return ok(res, publicVoiceSession(record.voiceSession));
     } catch {
       return res.status(502).json({

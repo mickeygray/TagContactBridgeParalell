@@ -95,6 +95,11 @@ export function TrainerGauntletPlayer({
   const recordingStartedAtRef = useRef(0);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const autoArmTimerRef = useRef<number | null>(null);
+  const runtimeRef = useRef<TrainingGauntletResult | null>(null);
+  const busyRef = useRef(false);
+  const recordingRef = useRef(false);
+  const prospectSpeakingRef = useRef(false);
+  const handsFreeEnabledRef = useRef(true);
   const prospectAudioUrl = playbackUrls[playbackIndex] || null;
   const micSupported =
     typeof navigator !== "undefined" &&
@@ -109,6 +114,26 @@ export function TrainerGauntletPlayer({
       .catch(() => undefined);
     return () => controller.abort();
   }, [attempt, runtime]);
+
+  useEffect(() => {
+    runtimeRef.current = runtime;
+  }, [runtime]);
+
+  useEffect(() => {
+    busyRef.current = busy;
+  }, [busy]);
+
+  useEffect(() => {
+    recordingRef.current = recording;
+  }, [recording]);
+
+  useEffect(() => {
+    prospectSpeakingRef.current = prospectSpeaking;
+  }, [prospectSpeaking]);
+
+  useEffect(() => {
+    handsFreeEnabledRef.current = handsFreeEnabled;
+  }, [handsFreeEnabled]);
 
   useEffect(() => {
     return () => {
@@ -127,25 +152,50 @@ export function TrainerGauntletPlayer({
     player.load();
     void player.play().catch(() => {
       setAudioNotice("Click Replay if browser autoplay is blocked.");
-      setProspectSpeaking(false);
+      finishProspectPlayback(false);
     });
   }, [prospectAudioUrl]);
+
+  function finishProspectPlayback(autoArm = true) {
+    prospectSpeakingRef.current = false;
+    setProspectSpeaking(false);
+    if (autoArmTimerRef.current) {
+      window.clearTimeout(autoArmTimerRef.current);
+      autoArmTimerRef.current = null;
+    }
+    if (
+      !autoArm ||
+      !handsFreeEnabledRef.current ||
+      busyRef.current ||
+      recordingRef.current ||
+      runtimeRef.current?.state.status !== "in_progress"
+    ) {
+      return;
+    }
+    autoArmTimerRef.current = window.setTimeout(() => {
+      autoArmTimerRef.current = null;
+      void startRecording();
+    }, 700);
+  }
 
   function speakWithBrowser(textToSpeak: string) {
     if (!("speechSynthesis" in window) || typeof SpeechSynthesisUtterance === "undefined") {
       setAudioNotice("Prospect audio is unavailable; the line is shown below.");
-      setProspectSpeaking(false);
+      finishProspectPlayback(false);
       return;
     }
     window.speechSynthesis.cancel();
     const utterance = new SpeechSynthesisUtterance(textToSpeak);
     utterance.rate = 1.08;
     utterance.pitch = 0.95;
-    utterance.onstart = () => setProspectSpeaking(true);
-    utterance.onend = () => setProspectSpeaking(false);
+    utterance.onstart = () => {
+      prospectSpeakingRef.current = true;
+      setProspectSpeaking(true);
+    };
+    utterance.onend = () => finishProspectPlayback();
     utterance.onerror = () => {
       setAudioNotice("Prospect audio could not play; the line is shown below.");
-      setProspectSpeaking(false);
+      finishProspectPlayback(false);
     };
     window.speechSynthesis.speak(utterance);
   }
@@ -165,6 +215,7 @@ export function TrainerGauntletPlayer({
       speakWithBrowser(clean);
       return;
     }
+    prospectSpeakingRef.current = true;
     setProspectSpeaking(true);
     setPlaybackIndex(0);
     setPlaybackUrls(urls);
@@ -177,7 +228,7 @@ export function TrainerGauntletPlayer({
       audioRef.current.currentTime = 0;
       void audioRef.current.play().catch(() => {
         setAudioNotice("Browser blocked playback.");
-        setProspectSpeaking(false);
+        finishProspectPlayback(false);
       });
       return;
     }
@@ -189,12 +240,7 @@ export function TrainerGauntletPlayer({
       setPlaybackIndex((current) => current + 1);
       return;
     }
-    setProspectSpeaking(false);
-    if (handsFreeEnabled && !busy && runtime?.state.status === "in_progress") {
-      autoArmTimerRef.current = window.setTimeout(() => {
-        void startRecording();
-      }, 700);
-    }
+    finishProspectPlayback();
   }
 
   async function begin() {
@@ -216,6 +262,7 @@ export function TrainerGauntletPlayer({
       const opening =
         voiceSession.openingLine ||
         "The prospect is ready. Respond to the situation in this section of the call.";
+      runtimeRef.current = result;
       setRuntime(result);
       setCoach(voiceSession.coach || result.coach || null);
       setTape([{ id: "opening", speaker: "prospect", text: opening }]);
@@ -249,14 +296,19 @@ export function TrainerGauntletPlayer({
       );
       turnEventRef.current = null;
       setText("");
-      setRuntime(result.gauntlet);
-      setCoach(result.gauntlet.coach || null);
       const learnerText =
         result.voiceTurn.transcript?.text?.trim() || outbound;
+      if (!learnerText) {
+        setError("No speech was detected. Try the response again.");
+        return;
+      }
+      runtimeRef.current = result.gauntlet;
+      setRuntime(result.gauntlet);
+      setCoach(result.gauntlet.coach || null);
       const reply =
         result.voiceTurn.response?.text?.trim() ||
         result.gauntlet.prospectReply?.text ||
-        "The prospect responds and keeps this section moving.";
+        "";
       setTape((current) => [
         ...current,
         { id: mutation.eventId, speaker: "learner", text: learnerText },
@@ -293,7 +345,18 @@ export function TrainerGauntletPlayer({
   }
 
   async function startRecording() {
-    if (!micSupported || busy || prospectSpeaking || recording) return;
+    if (
+      !micSupported ||
+      busyRef.current ||
+      prospectSpeakingRef.current ||
+      recordingRef.current
+    ) {
+      return;
+    }
+    if (autoArmTimerRef.current) {
+      window.clearTimeout(autoArmTimerRef.current);
+      autoArmTimerRef.current = null;
+    }
     setError("");
     setAudioNotice("");
     try {
@@ -305,6 +368,10 @@ export function TrainerGauntletPlayer({
           autoGainControl: true,
         },
       });
+      if (busyRef.current || prospectSpeakingRef.current || recordingRef.current) {
+        stopTracks(stream);
+        return;
+      }
       stopTracks(mediaStreamRef.current);
       mediaStreamRef.current = stream;
       const mimeType = pickRecordingMimeType();
@@ -324,6 +391,7 @@ export function TrainerGauntletPlayer({
       };
       recorder.onerror = () => {
         setError("Microphone recording failed.");
+        recordingRef.current = false;
         setRecording(false);
         stopTracks(mediaStreamRef.current);
       };
@@ -331,6 +399,7 @@ export function TrainerGauntletPlayer({
         const chunks = audioChunksRef.current.slice();
         const capturedMs = Date.now() - recordingStartedAtRef.current;
         const type = recorder.mimeType || mimeType || "audio/webm";
+        recordingRef.current = false;
         setRecording(false);
         stopTracks(mediaStreamRef.current);
         mediaStreamRef.current = null;
@@ -341,6 +410,7 @@ export function TrainerGauntletPlayer({
         void submitVoiceRecording(new Blob(chunks, { type }), type, capturedMs);
       };
       recorder.start(250);
+      recordingRef.current = true;
       setRecording(true);
     } catch (cause) {
       const name =
@@ -352,6 +422,7 @@ export function TrainerGauntletPlayer({
           ? "Microphone permission denied."
           : "Could not start the microphone.",
       );
+      recordingRef.current = false;
       stopTracks(mediaStreamRef.current);
       mediaStreamRef.current = null;
     }
@@ -393,6 +464,7 @@ export function TrainerGauntletPlayer({
       );
       const opening = voiceSession.openingLine ||
         "The prospect is ready. Respond to the situation in this section of the call.";
+      runtimeRef.current = initialized;
       setRuntime(initialized);
       setTape([{ id: `opening-${initialized.state.runNumber}`, speaker: "prospect", text: opening }]);
       setPlaybackUrls([]);
@@ -546,9 +618,12 @@ export function TrainerGauntletPlayer({
             aria-label="Prospect audio"
             className="sr-only"
             src={prospectAudioUrl}
-            onPlay={() => setProspectSpeaking(true)}
+            onPlay={() => {
+              prospectSpeakingRef.current = true;
+              setProspectSpeaking(true);
+            }}
             onEnded={handlePlaybackEnded}
-            onError={() => setProspectSpeaking(false)}
+            onError={() => finishProspectPlayback(false)}
           />
         ) : null}
 
@@ -557,7 +632,7 @@ export function TrainerGauntletPlayer({
             size="lg"
             variant={recording ? "destructive" : "primary"}
             onClick={recording ? stopRecording : () => void startRecording()}
-            disabled={!micSupported || voiceBusy && !recording || terminal}
+            disabled={!micSupported || (voiceBusy && !recording) || terminal}
           >
             {recording ? <Square className="h-5 w-5" /> : <Mic className="h-5 w-5" />}
             {recording ? "Finish and send" : "Talk"}

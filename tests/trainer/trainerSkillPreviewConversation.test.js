@@ -45,6 +45,17 @@ test("section packets drive local teaching prompts without replacing the voice l
   assert.match(previewSource, /reveal the approved wording/);
 });
 
+test("live Coach guidance is regenerated from the newest two-sided exchange", () => {
+  assert.match(previewSource, /async function generateTurnCoach/);
+  assert.match(previewSource, /newestProspectUtterance/);
+  assert.match(previewSource, /newestLearnerUtterance/);
+  assert.match(previewSource, /recentConversation: conversationText\(record\)/);
+  assert.match(previewSource, /React to the newest prospect and agent utterances/);
+  assert.match(previewSource, /Never supply a script line, approved wording, answer, hidden rubric/);
+  assert.match(previewSource, /coach_latest_exchange/);
+  assert.match(previewSource, /const coach = await generateTurnCoach\(record/);
+});
+
 test("direction-specific criteria are filtered before the short section begins", () => {
   assert.match(previewSource, /function activeCriteria\(record\)/);
   assert.match(

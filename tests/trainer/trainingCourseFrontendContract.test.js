@@ -155,6 +155,12 @@ test("Targeted Talk reuses the one-shot Free Call voice turn behind capability",
   assert.match(gauntlet, /startTargetedVoiceSession/);
   assert.match(gauntlet, /submitTargetedVoiceTurn/);
   assert.match(gauntlet, /result\.voiceTurn\.playback/);
+  assert.match(gauntlet, /function finishProspectPlayback\(autoArm = true\)/);
+  assert.match(gauntlet, /prospectSpeakingRef\.current = false/);
+  assert.match(gauntlet, /utterance\.onend = \(\) => finishProspectPlayback\(\)/);
+  assert.match(gauntlet, /busyRef\.current \|\|[\s\S]*?prospectSpeakingRef\.current/);
+  assert.match(gauntlet, /No speech was detected\. Try the response again\./);
+  assert.doesNotMatch(gauntlet, /The prospect responds and keeps this section moving/);
   assert.match(gauntlet, /Coach · what to notice/);
   assert.match(gauntlet, /Five brief Introduction practices/);
   assert.match(gauntlet, /Short model-graded Q&A/);
