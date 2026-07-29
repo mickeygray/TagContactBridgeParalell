@@ -684,3 +684,69 @@ test("an officer filter cuts the QUEUE, not just the payments", () => {
   assert.deepEqual(filterQueueByAgent(queue, parseFilters(["source=LD"]).filters), queue);
   assert.deepEqual(filterQueueByAgent(queue, []), queue);
 });
+
+// ── casework and long calls ──────────────────────────────────────────────
+
+test("casework lists CASES, not counts, and keeps the lanes apart", () => {
+  // "post dates dncs failed payments as a list of cases ... a heres what
+  // happened with the cases today report."
+  const d = blocks.BY_ID.get("casework").compute({
+    events: [
+      { domain: "TAG", caseId: 1, kind: "status-change", createdBy: "Phil Olson", createdAt: "2026-07-28T10:00:00Z",
+        payload: { safetyClass: "postdate", toStatus: "[Active Prospect]-POST DATE" } },
+      { domain: "WYNN", caseId: 2, kind: "status-change", createdBy: "Sean Lucas", createdAt: "2026-07-28T11:00:00Z",
+        payload: { safetyClass: "dnc", toStatus: "[Bad/Inactive]-DO NOT CALL" } },
+      { domain: "TAG", caseId: 3, kind: "doc-upload", createdAt: "2026-07-28T12:00:00Z", payload: null },
+      { domain: "TAG", caseId: 3, kind: "doc-upload", createdAt: "2026-07-28T12:05:00Z", payload: null },
+      // a case re-saved on the same status is NOT news
+      { domain: "TAG", caseId: 9, kind: "status-change", payload: { safetyClass: "dnc", selfTransition: true } },
+    ],
+    declines: [{ domain: "AMITY", caseId: 4, amount: 250, paymentDateKey: "2026-07-28", name: "A Client" }],
+  });
+  assert.equal(d.postdate.length, 1);
+  assert.equal(d.postdate[0].by, "Phil Olson");
+  assert.equal(d.dnc.length, 1, "a self-transition must not appear");
+  assert.equal(d.docs[0].count, 2, "two uploads on one case is one row, count 2");
+  assert.equal(d.failed[0].amount, 250, "a bounced card is case news even with no status change");
+});
+
+test("long calls are scoped to the RANGE, not the 45-day lookback", () => {
+  // callsRange reaches back 45 days so lag is not clipped. Measured live: a
+  // one-day report listed 319 calls back to 2026-06-15 before this guard.
+  const block = blocks.BY_ID.get("longcalls");
+  const rows = block.compute({
+    from: "2026-07-28", to: "2026-07-28", payments: [],
+    callsRange: [
+      { dateKey: "2026-07-28", durationSec: 4056, source: "3rd Day (Pink) Urgent Third State", phone: "4192170047" },
+      { dateKey: "2026-06-15", durationSec: 3288, source: "Affordability Federal", phone: "5551112222" },
+      { dateKey: "2026-07-28", durationSec: 120, source: "Urgent Third State", phone: "5553334444" },
+    ],
+  });
+  assert.equal(rows.length, 1, "only the in-range call over the threshold");
+  assert.equal(rows[0].minutes, 67.6);
+});
+
+test("a long call with no sale says so rather than being dropped", () => {
+  // The whole point of the list is the long conversations that have NOT
+  // closed — dropping them would leave only the good news.
+  const rows = blocks.BY_ID.get("longcalls").compute({
+    from: "2026-07-28", to: "2026-07-28",
+    callsRange: [{ dateKey: "2026-07-28", durationSec: 1200, source: "Urgent Third State", phone: "4192170047" }],
+    payments: [],
+  });
+  assert.equal(rows[0].outcome, "no outcome yet");
+  assert.equal(rows[0].amount, null);
+});
+
+test("an initial payment outranks a recurring one as the outcome", () => {
+  const rows = blocks.BY_ID.get("longcalls").compute({
+    from: "2026-07-28", to: "2026-07-28",
+    callsRange: [{ dateKey: "2026-07-28", durationSec: 1200, source: "Urgent Third State", phone: "4192170047" }],
+    payments: [
+      { domain: "TAG", caseId: 1, paymentType: "recurring", amount: 100, phone: "4192170047", isChargeback: false },
+      { domain: "TAG", caseId: 1, paymentType: "initial", amount: 3000, phone: "4192170047", isChargeback: false },
+    ],
+  });
+  assert.equal(rows[0].outcome, "DEAL", "became a deal beats paid something");
+  assert.equal(rows[0].amount, 3000);
+});

@@ -1052,6 +1052,210 @@ const BLOCKS = [
       ] };
     },
   },
+  {
+    id: "casework",
+    label: "What happened with the cases",
+    hint: "Post-dates, DNCs, payment failures and documents received — as case lists",
+    terms: "Case EVENTS that happened inside the range, listed rather than counted. A status change is only counted when the status actually moved - a case re-saved on the same status is not news. Documents are inbound uploads only.",
+    // Status movement is the counts; this is the same material as a worklist.
+    needs: ["activity", "payments"],
+    compute({ events = [], declines = [] }) {
+      const lane = () => new Map();
+      const lanes = {
+        postdate: lane(), dnc: lane(), suspended: lane(), docs: lane(), other: lane(),
+      };
+
+      const put = (map, e, extra = {}) => {
+        const key = `${e.domain}:${e.caseId}`;
+        if (!map.has(key)) {
+          map.set(key, {
+            domain: e.domain, caseId: e.caseId, count: 0,
+            at: e.createdAt ? String(e.createdAt).slice(0, 10) : null,
+            by: e.createdBy || null, ...extra,
+          });
+        }
+        const row = map.get(key);
+        row.count += 1;
+        // Keep the LAST thing that happened — a case moved twice should read
+        // as where it ended up, not where it passed through.
+        if (extra.to) row.to = extra.to;
+        if (e.createdBy) row.by = e.createdBy;
+        return row;
+      };
+
+      for (const e of events) {
+        if (e.kind === "doc-upload") { put(lanes.docs, e); continue; }
+        if (e.kind !== "status-change") continue;
+        // A case re-saved on the same status is not news.
+        if (e.payload?.selfTransition) continue;
+        const cls = e.payload?.safetyClass;
+        const extra = { to: e.payload?.toStatus || e.payload?.to || null };
+        if (cls === "postdate") put(lanes.postdate, e, extra);
+        else if (cls === "dnc") put(lanes.dnc, e, extra);
+        else if (cls === "suspended") put(lanes.suspended, e, extra);
+        else put(lanes.other, e, extra);
+      }
+
+      // Failed payments are money events, not status events — a card can
+      // bounce without anyone touching the case. Carried here because the
+      // question is "what happened to my cases today", not "what did staff do".
+      const failed = new Map();
+      for (const d of declines) {
+        const key = `${d.domain}:${d.caseId}`;
+        if (!failed.has(key)) {
+          failed.set(key, {
+            domain: d.domain, caseId: d.caseId, name: d.name || null,
+            count: 0, amount: 0, at: d.paymentDateKey || null,
+          });
+        }
+        const row = failed.get(key);
+        row.count += 1;
+        row.amount = round2(row.amount + Math.abs(Number(d.amount) || 0));
+      }
+
+      const list = (m) => [...m.values()].sort((a, b) => String(a.caseId).localeCompare(String(b.caseId)));
+      return {
+        postdate: list(lanes.postdate),
+        dnc: list(lanes.dnc),
+        suspended: list(lanes.suspended),
+        failed: [...failed.values()].sort((a, b) => b.amount - a.amount),
+        docs: list(lanes.docs),
+        other: list(lanes.other),
+      };
+    },
+    renderText(d) {
+      const L = [];
+      const section = (title, rows, render) => {
+        if (!rows.length) return;
+        L.push(`${title} (${rows.length})`);
+        for (const r of rows.slice(0, 40)) L.push(`  ${render(r)}`);
+        if (rows.length > 40) L.push(`  … and ${rows.length - 40} more`);
+        L.push("");
+      };
+      const who = (r) => (r.by ? ` — ${r.by}` : "");
+      section("POST-DATED", d.postdate, (r) => `${r.domain} ${r.caseId}${r.to ? `  → ${r.to}` : ""}${who(r)}`);
+      section("DO NOT CALL", d.dnc, (r) => `${r.domain} ${r.caseId}${r.to ? `  → ${r.to}` : ""}${who(r)}`);
+      section("SUSPENDED / PAYMENT DEFAULT", d.suspended, (r) => `${r.domain} ${r.caseId}${r.to ? `  → ${r.to}` : ""}${who(r)}`);
+      section("PAYMENTS THAT FAILED", d.failed,
+        (r) => `${r.domain} ${r.caseId}  ${money(r.amount)}  ${r.count} attempt(s)${r.name ? `  ${r.name}` : ""}`);
+      section("DOCUMENTS RECEIVED", d.docs, (r) => `${r.domain} ${r.caseId}  ${r.count} file(s)`);
+      section("OTHER STATUS MOVES", d.other, (r) => `${r.domain} ${r.caseId}${r.to ? `  → ${r.to}` : ""}${who(r)}`);
+      if (!L.length) return "What happened with the cases     (nothing moved in this range)";
+      return L.join(NEWLINE).trimEnd();
+    },
+    csv(d) {
+      const rows = [
+        ...d.postdate.map((r) => ({ ...r, what: "post-date" })),
+        ...d.dnc.map((r) => ({ ...r, what: "dnc" })),
+        ...d.suspended.map((r) => ({ ...r, what: "suspended" })),
+        ...d.failed.map((r) => ({ ...r, what: "payment failed" })),
+        ...d.docs.map((r) => ({ ...r, what: "documents received" })),
+        ...d.other.map((r) => ({ ...r, what: "other status move" })),
+      ];
+      return { rows, columns: [
+        { header: "what", get: (x) => x.what },
+        { header: "domain", get: (x) => x.domain },
+        { header: "case_id", get: (x) => x.caseId },
+        { header: "client", get: (x) => x.name ?? null },
+        { header: "moved_to", get: (x) => x.to ?? null },
+        { header: "amount", get: (x) => x.amount ?? null },
+        { header: "count", get: (x) => x.count },
+        { header: "by", get: (x) => x.by ?? null },
+        { header: "on", get: (x) => x.at },
+      ] };
+    },
+  },
+  {
+    id: "longcalls",
+    label: "Calls worth hearing",
+    hint: "Every call over 10 minutes, with what came of it",
+    terms: "Inbound CallRail calls inside the range at or over the length threshold (10 minutes by default), with the outcome resolved from payments in the same range. A call with no outcome is shown as such - it is a long conversation that has not closed, which is the point of listing it.",
+    needs: ["callsRange", "payments", "caseContacts"],
+    compute({ callsRange = [], payments = [], from = null, to = null }) {
+      const MIN_SEC = Math.max(60, Number(process.env.LONG_CALL_SECONDS) || 600);
+      // callsRange deliberately reaches BACK 45 days so call-to-close lag is
+      // not clipped. THIS report is about the range itself, so the lookback
+      // tail must be dropped — otherwise a one-day report lists six weeks of
+      // calls (measured: 319 calls back to 2026-06-15 for a single day).
+      const inRange = (c) => {
+        const d = String(c.dateKey || "").slice(0, 10);
+        if (from && d < String(from).slice(0, 10)) return false;
+        if (to && d > String(to).slice(0, 10)) return false;
+        return true;
+      };
+      const last10 = (x) => {
+        const dd = String(x || "").replace(/\D/g, "");
+        return dd.length >= 10 ? dd.slice(-10) : null;
+      };
+
+      // Phone -> what became of that person, from payments in the range.
+      const outcomeByPhone = new Map();
+      for (const p of payments.filter((x) => !x.isChargeback)) {
+        for (const ph of [p.phone, ...(p.phones || [])]) {
+          const k = last10(ph);
+          if (!k) continue;
+          const prior = outcomeByPhone.get(k);
+          // An initial payment outranks a recurring one: "became a deal" is
+          // the more useful answer than "paid something".
+          if (!prior || (p.paymentType === "initial" && prior.type !== "initial")) {
+            outcomeByPhone.set(k, {
+              type: p.paymentType, amount: p.amount, caseId: p.caseId,
+              officer: p.officerAtSale || null, on: p.paymentDateKey,
+            });
+          }
+        }
+      }
+
+      return callsRange
+        .filter(inRange)
+        .filter((c) => (Number(c.durationSec) || 0) >= MIN_SEC)
+        .map((c) => {
+          const hit = outcomeByPhone.get(last10(c.phone));
+          return {
+            dateKey: c.dateKey,
+            minutes: Math.round((Number(c.durationSec) || 0) / 6) / 10,
+            source: c.source || null,
+            phone: c.phone || null,
+            outcome: hit ? (hit.type === "initial" ? "DEAL" : "payment") : "no outcome yet",
+            amount: hit ? hit.amount : null,
+            caseId: hit ? hit.caseId : null,
+            officer: hit ? hit.officer : null,
+            listenUrl: c.listenUrl || null,
+            priorCalls: c.priorCalls ?? null,
+          };
+        })
+        .sort((a, b) => b.minutes - a.minutes);
+    },
+    renderText(rows) {
+      if (!rows.length) return "Calls worth hearing     (none over the threshold)";
+      const deals = rows.filter((r) => r.outcome === "DEAL").length;
+      const L = [`${rows.length} call(s) over 10 minutes · ${deals} became a deal`, ""];
+      L.push("WHEN".padEnd(12) + "MINS".padStart(6) + "  " + "SOURCE".padEnd(30) + "OUTCOME".padEnd(16) + "AMOUNT".padStart(11));
+      L.push("-".repeat(77));
+      for (const r of rows.slice(0, 40)) {
+        L.push(String(r.dateKey).padEnd(12) + String(r.minutes).padStart(6) + "  "
+          + String(r.source || "—").slice(0, 29).padEnd(30)
+          + String(r.outcome).padEnd(16)
+          + (r.amount != null ? money(r.amount) : "—").padStart(11));
+        if (r.listenUrl) L.push(`      ${r.listenUrl}`);
+      }
+      if (rows.length > 40) L.push(`… and ${rows.length - 40} more`);
+      return L.join(NEWLINE);
+    },
+    csv(rows) {
+      return { rows, columns: [
+        { header: "on", get: (x) => x.dateKey },
+        { header: "minutes", get: (x) => x.minutes },
+        { header: "source", get: (x) => x.source },
+        { header: "outcome", get: (x) => x.outcome },
+        { header: "amount", get: (x) => x.amount },
+        { header: "case_id", get: (x) => x.caseId },
+        { header: "officer", get: (x) => x.officer },
+        { header: "prior_calls", get: (x) => x.priorCalls },
+        { header: "listen", get: (x) => x.listenUrl },
+      ] };
+    },
+  },
 ];
 
 // Every source name a block may declare. gatherMaterial keys its gathers on
@@ -1100,6 +1304,8 @@ const PRESETS = Object.freeze({
   // What the lead VENDOR sees: their sources and what those produced. No mail
   // spend, no officer detail, no company P/L. Pair with --where source=LD.
   "vendor-ld": ["source", "money"],
+  // "heres every call over 10 minutes and its outcome"
+  "long-calls": ["longcalls"],
 });
 
 function resolveSelection(selection) {

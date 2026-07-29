@@ -12,7 +12,7 @@
 // no opinions about content — the blocks own that.
 
 const ReportDefinition = require("../../shared-models/src/ReportDefinition");
-const { composeReport, renderHtml, renderText } = require("./reportComposerService");
+const { composeReport, renderHtml, renderText, toTemplateData } = require("./reportComposerService");
 const { resolveSelection } = require("./reportBlocksService");
 
 const DAY_MS = 86400000;
@@ -116,6 +116,10 @@ async function runDefinition(def, {
   });
 
   const text = renderText(report);
+  const templateData = toTemplateData(report, {
+    title: def.name,
+    eyebrow: def.description || "Report",
+  });
   const html = renderHtml(report);
   const result = {
     definition: def.name, range, blocks: selection.blocks.map((b) => b.id),
@@ -135,7 +139,12 @@ async function runDefinition(def, {
     await sendMail(def.domain || null, {
       to, from: fromEmail || undefined,
       subject: `${def.name} · ${range.from}${range.to !== range.from ? ` → ${range.to}` : ""}`,
-      text, html,
+      // Branded HBS template so report mail reads as part of the same
+      // family as every other email the app sends. `text` is the plain-text
+      // alternative; renderHtml stays for the standalone --html file path.
+      template: "reports/report",
+      data: templateData,
+      text,
     });
     result.delivered = true;
   } else if (def.sendEmail && !to.length) {

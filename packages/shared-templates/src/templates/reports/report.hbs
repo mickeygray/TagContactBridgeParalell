@@ -1,0 +1,93 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{{title}} {{range}}</title>
+  </head>
+  <body style="margin:0;padding:0;background:#f4f5f7;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#1f2933;">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f4f5f7;padding:24px 12px;">
+      <tr><td align="center">
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:760px;background:#ffffff;border-radius:10px;overflow:hidden;box-shadow:0 1px 3px rgba(16,24,40,.1);">
+
+          {{!-- header: same shape as the daily board so report mail reads as
+                part of the same family --}}
+          <tr>
+            <td style="background:#0f172a;padding:20px 24px;">
+              <div style="color:#94a3b8;font-size:11px;letter-spacing:.09em;text-transform:uppercase;">{{eyebrow}}</div>
+              <div style="color:#ffffff;font-size:22px;font-weight:600;margin-top:2px;">{{title}}</div>
+              <div style="color:#64748b;font-size:12px;margin-top:4px;">{{range}}{{#if domain}} · {{domain}}{{/if}}</div>
+            </td>
+          </tr>
+
+          {{#each sections}}
+            <tr><td style="padding:20px 24px 0;">
+              <div style="font-size:13px;font-weight:600;color:#0f172a;border-bottom:2px solid #0f172a;padding-bottom:6px;">{{this.label}}</div>
+            </td></tr>
+
+            {{#if this.error}}
+              <tr><td style="padding:10px 24px 4px;">
+                <div style="background:#fef2f2;border:1px solid #fecaca;border-radius:6px;padding:10px 12px;color:#991b1b;font-size:13px;">
+                  unavailable — {{this.error}}
+                </div>
+              </td></tr>
+            {{else}}
+              {{#if this.rows.length}}
+                <tr><td style="padding:8px 24px 0;">
+                  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;font-size:12.5px;">
+                    <tr>
+                      {{#each this.columns}}
+                        <th style="text-align:{{#if this.numeric}}right{{else}}left{{/if}};padding:6px 8px 6px 0;border-bottom:1px solid #e2e8f0;color:#64748b;font-size:10.5px;letter-spacing:.05em;text-transform:uppercase;font-weight:600;white-space:nowrap;">{{this.label}}</th>
+                      {{/each}}
+                    </tr>
+                    {{#each this.rows}}
+                      <tr>
+                        {{#each this}}
+                          <td style="padding:5px 8px 5px 0;border-bottom:1px solid #f1f5f9;{{#if this.numeric}}text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap;{{/if}}{{#if this.negative}}color:#b91c1c;{{/if}}{{#if this.muted}}color:#94a3b8;{{/if}}">
+                            {{#if this.link}}<a href="{{this.link}}" style="color:#2563eb;">listen</a>{{else}}{{this.text}}{{/if}}
+                          </td>
+                        {{/each}}
+                      </tr>
+                    {{/each}}
+                  </table>
+                </td></tr>
+              {{else}}
+                <tr><td style="padding:8px 24px 0;">
+                  <div style="color:#94a3b8;font-size:13px;">Nothing in this range.</div>
+                </td></tr>
+              {{/if}}
+            {{/if}}
+
+            {{!-- TERMS travel with the numbers: two people can read the same
+                  ROI and mean different things. --}}
+            {{#if this.terms}}
+              <tr><td style="padding:8px 24px 0;">
+                <div style="background:#fffbeb;border-left:3px solid #d97706;border-radius:3px;padding:8px 11px;color:#78350f;font-size:11.5px;line-height:1.5;">
+                  {{this.terms}}
+                </div>
+              </td></tr>
+            {{/if}}
+          {{/each}}
+
+          {{#if notes.length}}
+            <tr><td style="padding:20px 24px 0;">
+              <div style="border-top:1px solid #e2e8f0;padding-top:12px;">
+                <div style="font-size:10.5px;letter-spacing:.05em;text-transform:uppercase;color:#64748b;font-weight:600;margin-bottom:6px;">Worth knowing</div>
+                {{#each notes}}
+                  <div style="color:#64748b;font-size:12px;line-height:1.5;">· {{this}}</div>
+                {{/each}}
+              </div>
+            </td></tr>
+          {{/if}}
+
+          <tr><td style="padding:16px 24px 22px;">
+            <div style="color:#94a3b8;font-size:11px;border-top:1px solid #f1f5f9;padding-top:10px;">
+              {{footer}}
+            </div>
+          </td></tr>
+
+        </table>
+      </td></tr>
+    </table>
+  </body>
+</html>

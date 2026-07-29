@@ -890,10 +890,78 @@ function renderHtml(report) {
     + `</body></html>`;
 }
 
+
+/**
+ * Shape a composed report for the Handlebars template.
+ *
+ * Handlebars is deliberately dumb, so every decision is made here: which cells
+ * are numeric (right-aligned, tabular figures), which are negative (red), which
+ * are a recording link, and which are absent. The template only places what it
+ * is given, which keeps formatting rules in ONE language rather than split
+ * between JS and template logic.
+ */
+function toTemplateData(report, { title = "Report", eyebrow = "Parallel" } = {}) {
+  const MONEY_COL = /(cash|amount|spend|collected|revenue|cost|net|margin|profit)/i;
+  const money = (n) => "$" + Number(n).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+  const sections = report.sections.map((s) => {
+    if (s.error) return { label: s.label, error: s.error, terms: s.block?.terms || null, columns: [], rows: [] };
+    let table;
+    try {
+      table = s.block.csv(s.data);
+    } catch {
+      return { label: s.label, error: "could not be tabulated", terms: null, columns: [], rows: [] };
+    }
+    const columns = table.columns.map((col) => ({
+      label: String(col.header).replace(/_/g, " "),
+      numeric: false,
+      header: col.header,
+    }));
+    const rows = (table.rows || []).map((r) => table.columns.map((col, i) => {
+      const v = col.get(r);
+      const numeric = typeof v === "number" && Number.isFinite(v);
+      if (numeric) columns[i].numeric = true;
+      if (v === null || v === undefined || v === "") return { text: "—", muted: true, numeric };
+      if (typeof v === "boolean") return { text: v ? "yes" : "no" };
+      // startsWith, not a regex: an escaped pattern written through a
+      // generator has silently lost its backslashes more than once here.
+      if (typeof v === "string" && (v.startsWith("http://") || v.startsWith("https://"))) {
+        return { link: v };
+      }
+      if (numeric) {
+        return {
+          text: MONEY_COL.test(col.header) ? money(v) : v.toLocaleString("en-US"),
+          numeric: true,
+          negative: v < 0,
+        };
+      }
+      return { text: String(v) };
+    }));
+    return { label: s.label, terms: s.block?.terms || null, error: null, columns, rows };
+  });
+
+  const notes = [...(report.notes || [])];
+  if (report.filters?.length) {
+    notes.unshift(`filtered: ${report.filters.map((f) => `${f.key}${f.op}${f.value}`).join(" · ")}`);
+  }
+
+  return {
+    title,
+    eyebrow,
+    range: report.from === report.to ? report.from : `${report.from} → ${report.to}`,
+    domain: report.domain === "ALL" ? null : report.domain,
+    sections,
+    notes,
+    footer: report.gathered?.activityRows
+      ? `Gathered live · ${report.gathered.activityRows.toLocaleString()} activity rows · ${Math.round((report.gathered.durationMs || 0) / 1000)}s`
+      : "Gathered live from the source systems.",
+  };
+}
+
 module.exports = {
   FILTER_KEYS,
   renderHtml,
   RANGE_DAY_LOOP_MAX,
   dayRange, composeReport, filterPayments, filterQueueByAgent, filterRecordings,
-  gatherMaterial, parseFilters, renderText,
+  gatherMaterial, parseFilters, renderText, toTemplateData,
 };
