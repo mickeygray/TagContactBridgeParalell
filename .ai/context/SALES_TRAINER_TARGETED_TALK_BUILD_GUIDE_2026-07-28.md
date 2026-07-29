@@ -1083,6 +1083,49 @@ Proof:
 - no model-only suggestion affects unlock or mastery;
 - rollback flags preserve all durable attempts.
 
+## 16.1 Canonical skill-packet and cached-header contract
+
+Each course part is built around one unique, versioned skill packet. Clicking
+Part 1 does not start a generic chat and then ask the model to improvise what
+success means. The server resolves and pins the Part 1 packet before the first
+turn.
+
+The packet owns:
+
+- the local skill and section objective;
+- approved `ruleId` and `ruleRevision` references;
+- the required success checklist and grading criteria;
+- the persona variant, facts, utterance families, and voice;
+- allowed and prohibited speech acts;
+- section boundaries, turn limits, retry limits, and terminal conditions;
+- reflection and Q&A rubric references.
+
+The server compiles that packet into an immutable Targeted Talk skill header
+with a content-addressed cache key. The same header is silently supplied to the
+prospect dialogue model on every turn. The learner's newest utterance is sent
+separately as untrusted turn input, and the current deterministic node supplies
+only a small turn directive. Learner text may never modify or replace the
+cached header.
+
+Conceptually:
+
+```text
+course part
+  -> pinned skill packet
+     -> cached immutable header (persona + rules + success checklist + bounds)
+     -> turn directive (current node + permitted reaction)
+     -> untrusted learner utterance
+```
+
+The header keeps the prospect model focused on the meaning of success in this
+slice, but it does not give the model grading authority. The evaluator may cite
+evidence against the packet's rubric; only the deterministic controller may
+check boxes, advance nodes, pass the run, update mastery, or unlock work.
+
+A packet change requires a new version and therefore a new cache key. An
+in-progress attempt continues using its pinned packet and must not drift to a
+newly published persona, rule, or rubric.
+
 ## 17. Required adversarial tests
 
 The implementation is not ready without tests for:
