@@ -92,3 +92,35 @@ test("persona difficulty never de-escalates on retry", () => {
   assert.ok(previewSource.includes("Math.min(attempt, ordered.length - 1)"));
   assert.ok(previewSource.includes("foundation: 0, intermediate: 1, advanced: 2"));
 });
+
+test("the draft preview cannot squat a real service port or leave loopback", () => {
+  // A dev tool on the control plane's port already cost a debugging session:
+  // runtime/trainer-course-preview/mock-control-plane.js held 5001 and answered
+  // auth for any email, which looked exactly like lost admin roles.
+  assert.ok(previewSource.includes("const DEFAULT_PREVIEW_PORT = 5099"));
+  assert.ok(previewSource.includes('[5001, "control-plane"]'));
+  assert.ok(previewSource.includes("RESERVED_PORTS.has(PORT)"));
+  assert.ok(previewSource.includes('refusing to bind ${HOST}'));
+  assert.ok(previewSource.includes('const HOST = "127.0.0.1"'));
+  // NODE_ENV is deliberately NOT the guard — this repo's .env sets it to
+  // production, so that check would block the tool on its only machine.
+  assert.doesNotMatch(previewSource, /NODE_ENV\)\.toLowerCase\(\) === "production"/);
+});
+
+test("the preview launcher keeps API port and proxy target in agreement", () => {
+  const launcher = fs.readFileSync(
+    path.join(__dirname, "../../scripts/preview-trainer-skills.js"),
+    "utf8",
+  );
+  assert.ok(launcher.includes("TRAINER_SKILL_PREVIEW_PORT"));
+  assert.ok(launcher.includes("WEB_CLIENT_API_TARGET"));
+  assert.ok(launcher.includes("|| 5099"));
+  // Mismatched halves are the silent failure — warn rather than serve a dead UI.
+  assert.ok(launcher.includes("does not point at port"));
+
+  const vite = fs.readFileSync(
+    path.join(__dirname, "../../apps/web-client/vite.config.ts"),
+    "utf8",
+  );
+  assert.ok(vite.includes("process.env.WEB_CLIENT_API_TARGET"));
+});

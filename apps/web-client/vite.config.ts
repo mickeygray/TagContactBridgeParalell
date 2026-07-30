@@ -13,7 +13,11 @@ export default defineConfig({
     port: 3001,
     strictPort: true,
     proxy: {
-      "/api": "http://127.0.0.1:5001",
+      // Defaults to the real control plane. Point it elsewhere to develop
+      // against a local stand-in — e.g. the trainer draft preview on 5099 —
+      // so a dev tool never has to squat the control plane's port to be
+      // reachable. A hardcoded target is what made that collision tempting.
+      "/api": process.env.WEB_CLIENT_API_TARGET || "http://127.0.0.1:5001",
     },
   },
   build: {

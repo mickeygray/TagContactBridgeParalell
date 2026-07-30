@@ -44,8 +44,48 @@ const ALL_PREVIEW_PACKETS = [
   ...TAX_RESOLUTION_TOPIC_PACKETS,
 ];
 
+// This is a LOCAL DRAFT PREVIEW and must never be mistaken for the app.
+//
+// It used to default to 5001 — the real control plane's port. A dev tool
+// squatting the control plane's port is not theoretical: earlier the same day,
+// runtime/trainer-course-preview/mock-control-plane.js held 5001 while the real
+// service was stopped, and it answered /auth for ANY email with a synthetic
+// preview identity. That looked exactly like lost admin roles and cost real
+// debugging time.
+//
+// NOT guarded on NODE_ENV: this repo's .env sets NODE_ENV=production because the
+// box talks to the real Atlas cluster, so that check would refuse to start on
+// the one machine this tool is for. The guards that actually match the risk are
+// below — loopback only, and never a port another service owns.
 const HOST = "127.0.0.1";
-const PORT = Number(process.env.TRAINER_SKILL_PREVIEW_PORT || 5001);
+const DEFAULT_PREVIEW_PORT = 5099;
+const RESERVED_PORTS = new Map([
+  [5001, "control-plane"],
+  [3001, "web-client"],
+  [4001, "inbound-gateway"],
+  [4002, "outbound-gateway"],
+  [6101, "ringcentral-cx"],
+  [27017, "mongo"],
+]);
+const PORT = Number(process.env.TRAINER_SKILL_PREVIEW_PORT || DEFAULT_PREVIEW_PORT);
+if (!Number.isInteger(PORT) || PORT < 1024 || PORT > 65535) {
+  console.error(`[trainer-preview] TRAINER_SKILL_PREVIEW_PORT must be an integer 1024-65535, got ${PORT}.`);
+  process.exit(1);
+}
+if (RESERVED_PORTS.has(PORT)) {
+  console.error(
+    `[trainer-preview] port ${PORT} belongs to ${RESERVED_PORTS.get(PORT)}. `
+    + `Pick another with TRAINER_SKILL_PREVIEW_PORT (default ${DEFAULT_PREVIEW_PORT}).`,
+  );
+  process.exit(1);
+}
+// The synthetic auth this preview serves must never be reachable off-box. HOST
+// is a constant above, but an override slipping in later is the failure worth
+// catching loudly rather than discovering from the network.
+if (HOST !== "127.0.0.1" && HOST !== "localhost") {
+  console.error(`[trainer-preview] refusing to bind ${HOST} — this preview answers auth synthetically and is loopback-only.`);
+  process.exit(1);
+}
 const COURSE_ID = "tax-resolution-skill-preview";
 const COURSE_VERSION = CONTENT_VERSION;
 const ENROLLMENT_ID = "local-preview-enrollment";
@@ -1200,7 +1240,7 @@ app.use((req, res) => {
 
 const server = app.listen(PORT, HOST, () => {
   console.log(`[trainer-preview] API listening on http://${HOST}:${PORT}`);
-  console.log(`[trainer-preview] Loaded ${TAX_RESOLUTION_SKILL_PACKETS.length} draft section packets`);
+  console.log(`[trainer-preview] Loaded ${ALL_PREVIEW_PACKETS.length} draft packets (${TAX_RESOLUTION_SKILL_PACKETS.length} call-arc + ${TAX_RESOLUTION_TOPIC_PACKETS.length} topic), ${ALL_PREVIEW_PACKETS.reduce((n,k)=>n+(k.practiceModules||[]).length,0)} practice modules`);
   console.log("[trainer-preview] Local-only Free Call voice stack with section-scoped grading; no production persistence");
 });
 
