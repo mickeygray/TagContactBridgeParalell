@@ -176,8 +176,14 @@ test("rollup is everything, in Mickey order", () => {
   // Superseded 2026-07-30: "its the same 4 sections for both email just one is
   // filtered", and "work today and call quality are redundant" — `worked` and
   // `ldcalls` were counting the same dials twice, so `worked` came out.
+  // `ldrecordings` added 2026-07-31, once PhoneBurner recordings started
+  // arriving on the call callback: "identify the person who took the call, the
+  // link and the case and bring it to the ld report." It sits beside ldcalls
+  // deliberately — that table is one row per PERSON, this one is one row per
+  // CALL, and on a WYNN board it is the only call list, because longcalls is
+  // CallRail and CallRail is a single TAG tenant.
   assert.deepEqual(blocks.PRESETS.rollup,
-    ["topline", "source", "ldcalls", "status", "longcalls"]);
+    ["topline", "source", "ldcalls", "ldrecordings", "status", "longcalls"]);
 });
 
 test("both boards are the same sections, differing only by filter", () => {

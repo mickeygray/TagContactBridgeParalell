@@ -186,13 +186,23 @@ const BLOCKS = [
     // mail calls and labelled it their call quality. LD calls are OUTBOUND
     // PhoneBurner dials, so they come from DailyDial attempts instead.
     //
-    // NO LISTEN LINKS, AND NOT BECAUSE OF A PROVIDER LIMIT. DailyDial declares
-    // recordingUrl on both the doc and the attempt subdoc, but measured
-    // 2026-07-30 it is populated on ZERO attempts, all time — and no
-    // inbound event carries a recordingUrl either. We are not capturing
-    // PhoneBurner recordings at all, so this is a gap on our side, not a
-    // historical-enumeration limit. A link column would be empty on every row,
-    // past or future, until capture is built.
+    // LISTEN LINKS, AS OF 2026-07-31. Recordings now ride in on the call
+    // callback and land on the attempt, so this block lists the calls worth
+    // hearing with the agent, the case and the link — the same three facts the
+    // CallRail side carries.
+    //
+    // It took three wrong explanations to get here, all recorded so nobody
+    // re-runs them: it was NOT that PhoneBurner sessions cannot be enumerated
+    // for past days, NOT that we never asked (include_recording=1 was always
+    // sent), and NOT a 15-minute generation delay. The lookup route is simply
+    // closed — the service account 404s on getDialSession for the agents' own
+    // sessions, because they dial on their own seats. Whatever arrives on the
+    // callback is all there will ever be, which is why the callback capture is
+    // the thing that had to be fixed.
+    //
+    // A call with no link yet is still listed, marked pending. The recording
+    // lands after the call ends, so "not yet" is normal and hiding the row
+    // would understate the day.
     // ONE PLACE FOR CALLS BY AGENT. Mickey 2026-07-30: "lets just make ld call
     // quality agent report in one place you can do inbound, dials, connected,
     // talk time (callrail + phone burner), deals, cash so one place for calls
@@ -210,6 +220,7 @@ const BLOCKS = [
       const INBOUND_STREAMS = new Set(["MAILER", "BCD"]);
       let attempts = 0; let attemptsKnown = 0; let connected = 0; let talkSec = 0; let longCalls = 0;
       const byOutcome = {}; const byAgent = new Map(); const cases = new Set();
+      const worthHearing = [];
       const row = (name) => {
         if (!byAgent.has(name)) {
           byAgent.set(name, {
@@ -252,8 +263,25 @@ const BLOCKS = [
           const who = a.agentId ? canonicalStaffName(a.agentId) : "(unknown)";
           row(who).dials += 1;
           if (isConnected) { row(who).connected += 1; row(who).talkSec += sec; }
+
+          // WHO TOOK IT, THE CASE, AND THE LINK. Only calls long enough to be
+          // worth hearing; a link with no conversation behind it is noise.
+          if (sec >= LONG_SEC) {
+            worthHearing.push({
+              agent: who,
+              domain: d.domain ? String(d.domain).toUpperCase() : null,
+              caseId: d.caseId ?? null,
+              dateKey: d.dateKey || null,
+              minutes: Math.round(sec / 6) / 10,
+              outcome: oc,
+              // Attempt first, then the doc-level field the call-log
+              // projection writes. Pending is a real state, not a gap.
+              listenUrl: a.recordingUrl || d.recordingUrl || null,
+            });
+          }
         }
       }
+      worthHearing.sort((x, y) => y.minutes - x.minutes);
 
       // INBOUND — calls the queue connected to a person. A queue answering is
       // not a person working, so pseudo-agents are dropped rather than ranked.
@@ -289,6 +317,8 @@ const BLOCKS = [
           .filter((r) => r.inbound || r.dials || r.deals)
           .sort((a, b) => b.cash - a.cash || b.dials - a.dials),
         longThresholdMinutes: Math.round(LONG_SEC / 60),
+        worthHearing,
+        worthHearingWithLink: worthHearing.filter((c) => c.listenUrl).length,
       };
     },
     renderText(d) {
@@ -324,6 +354,83 @@ const BLOCKS = [
         { header: "deals", get: (x) => x.deals },
         { header: "cash", get: (x) => x.cash },
       ] };
+    },
+  },
+  {
+    // LD CALLS TO HEAR — Mickey 2026-07-31: "identify the person who took the
+    // call, the link and the case and bring it to the ld report but also to
+    // noteable recordings."
+    //
+    // Its own block rather than more columns on LD call quality: that table
+    // answers "how did each agent do", this one answers "which call do I play
+    // next". One row is one CALL; the other is one PERSON.
+    //
+    // The mirror of this on the inbound side is `longcalls` (CallRail). They
+    // stay separate because CallRail is a single TAG tenant and can never be
+    // split by company, while LD dials are per-agent and per-case.
+    id: "ldrecordings",
+    label: "LD calls to hear",
+    hint: "Long outbound dials with the agent, the case and the recording",
+    termsShort: "Outbound LD dials at or over the long-call threshold, with a listen link.",
+    terms: "Outbound PhoneBurner dials inside the range at or over the long-call threshold. AGENT is the seat that placed the dial; CASE is the case the lead belongs to. A call with no link yet is still listed and marked pending - the recording arrives after the call ends, so absence is normal rather than missing.",
+    needs: ["dials"],
+    compute({ dials = [] }) {
+      const LONG_SEC = Math.max(60, Number(process.env.LD_LONG_CALL_SECONDS) || 300);
+      const { canonicalStaffName } = require("../../shared-config/src/staffRoster");
+      const out = [];
+      for (const d of dials) {
+        for (const a of Array.isArray(d.attempts) ? d.attempts : []) {
+          const sec = Number(a.durationSeconds) || 0;
+          if (sec < LONG_SEC) continue;
+          out.push({
+            agent: a.agentId ? canonicalStaffName(a.agentId) : "(unknown)",
+            domain: d.domain ? String(d.domain).toUpperCase() : null,
+            caseId: d.caseId ?? null,
+            dateKey: d.dateKey || null,
+            minutes: Math.round(sec / 6) / 10,
+            outcome: String(a.outcome || d.lastOutcome || "unknown"),
+            listenUrl: a.recordingUrl || d.recordingUrl || null,
+          });
+        }
+      }
+      return out.sort((x, y) => y.minutes - x.minutes);
+    },
+    renderText(rows) {
+      if (!rows.length) return "LD calls to hear    (no long outbound dials in this range)";
+      const withLink = rows.filter((r) => r.listenUrl).length;
+      const L = [`LD calls to hear    ${rows.length} call(s), ${withLink} with a recording`];
+      for (const r of rows.slice(0, 25)) {
+        L.push(`  ${String(r.minutes).padStart(5)} min  ${String(r.agent).padEnd(16)}`
+          + `${r.domain || ""} ${r.caseId ?? "(no case)"}`
+          + (r.listenUrl ? "" : "   [recording pending]"));
+        if (r.listenUrl) L.push(`         ${r.listenUrl}`);
+      }
+      if (rows.length > 25) L.push(`  … and ${rows.length - 25} more`);
+      return L.join(NEWLINE);
+    },
+    csv(rows) {
+      const withLink = rows.filter((r) => r.listenUrl).length;
+      return {
+        summary: `${rows.length} long dial${rows.length === 1 ? "" : "s"} · ${withLink} with a recording`
+          + (rows.length - withLink ? ` · ${rows.length - withLink} still pending` : ""),
+        // The email wants the four things that decide whether to press play.
+        emailColumns: [
+          { header: "minutes", get: (x) => x.minutes },
+          { header: "agent", get: (x) => x.agent },
+          { header: "case", get: (x) => (x.caseId ? `${x.domain || ""} ${x.caseId}`.trim() : null) },
+          { header: "listen", get: (x) => x.listenUrl },
+        ],
+        rows,
+        columns: [
+          { header: "on", get: (x) => x.dateKey },
+          { header: "minutes", get: (x) => x.minutes },
+          { header: "agent", get: (x) => x.agent },
+          { header: "domain", get: (x) => x.domain },
+          { header: "case_id", get: (x) => x.caseId },
+          { header: "outcome", get: (x) => x.outcome },
+          { header: "listen", get: (x) => x.listenUrl },
+        ],
+      };
     },
   },
   {
@@ -1746,7 +1853,7 @@ const PRESETS = Object.freeze({
   // named active pieces only; call quality is LD; status movement is the chase
   // list; then the calls. `worked` is gone — it and LD call quality were
   // reporting the same dials twice.
-  rollup: ["topline", "source", "ldcalls", "status", "longcalls"],
+  rollup: ["topline", "source", "ldcalls", "ldrecordings", "status", "longcalls"],
   // The 1pm nudge and the same lines again in the EOD roll-up.
   worklog: ["worked"],
   daily: ["money", "spend", "net", "source", "officer", "status", "recordings"],
@@ -1765,7 +1872,7 @@ const PRESETS = Object.freeze({
   // VENDOR sees about the leads they sold us — how those calls actually went,
   // what moved, and the day-level totals. Deliberately no per-source ROI table
   // and no officer breakdown: that is our P/L, not theirs.
-  "vendor-ld": ["topline", "source", "ldcalls", "status", "longcalls"],
+  "vendor-ld": ["topline", "source", "ldcalls", "ldrecordings", "status", "longcalls"],
   // "heres every call over 10 minutes and its outcome"
   "long-calls": ["longcalls"],
 });

@@ -81,11 +81,23 @@ async function listCallrailLongCalls({
   return out;
 }
 
-/** PhoneBurner long dials for the day, straight off DailyDial attempts. */
+/**
+ * PhoneBurner long dials for the day, straight off DailyDial attempts.
+ *
+ * The recording now rides in on the call callback (2026-07-31) instead of
+ * needing a dialSession lookup, so these carry a listen link like the CallRail
+ * side does. The lookup route was never viable anyway: the service account
+ * 404s on getDialSession for the agents' own sessions, because they dial on
+ * their own seats.
+ *
+ * The link is taken from the LONGEST attempt on the case — the same attempt
+ * whose agent and duration are already reported here, so the three always
+ * describe one call rather than three different ones.
+ */
 async function listPhoneBurnerLongDials({ dateKey, minDurationSec = 300, limit = 5 } = {}) {
   const DailyDial = require("../../shared-models/src/DailyDial");
   const rows = await DailyDial.find({ dateKey, durationSeconds: { $gte: minDurationSec } })
-    .select("caseId domain durationSeconds lastOutcome attempts")
+    .select("caseId domain durationSeconds lastOutcome attempts recordingUrl")
     .sort({ durationSeconds: -1 }).limit(limit).lean();
   return rows.map((r) => {
     const longest = (r.attempts || [])
@@ -100,12 +112,14 @@ async function listPhoneBurnerLongDials({ dateKey, minDurationSec = 300, limit =
       outcome: r.lastOutcome || null,
       durationSec: Number(r.durationSeconds) || 0,
       minutes: Math.round((Number(r.durationSeconds) || 0) / 6) / 10,
-      // PhoneBurner recording retrieval goes through getDialSession(
-      // dialSessionId, { includeRecording: true }); DailyDial stores the
-      // per-CALL id, not the session id, so a link needs a session lookup.
-      // Not wired: left explicit rather than silently absent.
-      listenUrl: null,
-      listenNote: "phoneburner recording needs a dialSession lookup — not wired",
+      // WIRED 2026-07-31. The recording arrives on the call callback now, so
+      // it is already on the attempt; no session lookup, which was never
+      // going to work — the service account 404s on the agents' sessions.
+      // Attempt first, then the doc-level field the projection also writes.
+      listenUrl: longest?.recordingUrl || r.recordingUrl || null,
+      listenNote: (longest?.recordingUrl || r.recordingUrl)
+        ? null
+        : "no recording on this attempt yet — it arrives after the call ends",
     };
   });
 }

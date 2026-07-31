@@ -641,8 +641,12 @@ async function gatherMaterial({
       const DailyDial = require("../../shared-models/src/DailyDial");
       const q = { dateKey: { $gte: from, $lte: to } };
       if (domain) q.domain = String(domain).toLowerCase();
+      // recordingUrl is selected at BOTH levels: the callback writes it onto
+      // the attempt, and the call-log projection also carries a doc-level one.
+      // Omitting it here is why the LD board had no listen links even once the
+      // recordings started arriving — the data was in Mongo and not in the read.
       material.dials = await DailyDial.find(q)
-        .select("domain caseId dateKey attempts originPool durationSeconds lastOutcome")
+        .select("domain caseId dateKey attempts originPool durationSeconds lastOutcome recordingUrl")
         .lean();
     } catch (error) {
       material.dials = [];
