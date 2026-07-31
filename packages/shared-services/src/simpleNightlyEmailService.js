@@ -283,6 +283,27 @@ async function sendSimpleNightlyEmail({ dateKey, recipients = null, logger = nul
   }
   const summary = await buildSimpleNightlySummary({ dateKey });
   const statusCounts = readActivityStatusCounts(dateKey);
+
+  // REFUSE TO SEND A HOLLOW EMAIL. 2026-07-30: this fired on schedule with
+  // nothing behind it — the 20:00 activity review had not written its rollup,
+  // so the status line read "unavailable", and the money read returned nothing
+  // either. An empty nightly is worse than no nightly: it trains the reader to
+  // ignore the one that matters, and it looks like a quiet day rather than a
+  // broken pipeline. Same principle as the payments-sheet gate — a number
+  // nobody sees is recoverable, a wrong one in the owner's inbox is not.
+  //
+  // Money OR calls is enough to be worth sending; the status counts are a
+  // narrative extra and their absence alone does not block.
+  const t = summary?.totals || {};
+  const hasMoney = Number(t.initialsNet || 0) > 0
+    || Number(t.cashCollected || 0) > 0
+    || Number(t.spend || 0) > 0;
+  const hasCalls = Number(t.totalCalls || 0) > 0 || Number(t.ldLeads || 0) > 0;
+  if (!hasMoney && !hasCalls && !statusCounts) {
+    const reason = "no money, no calls and no activity rollup for this date — nothing to report";
+    logger?.warn?.("simple_nightly.empty_skipped", { dateKey: summary?.dateKey || dateKey, reason });
+    return { sent: false, skipped: true, empty: true, reason, dateKey: summary?.dateKey || dateKey };
+  }
   let longCalls = null;
   try {
     longCalls = await listLongCalls({ dateKey });
