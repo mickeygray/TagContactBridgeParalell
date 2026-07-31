@@ -38,27 +38,345 @@ const LAG_REASON = Object.freeze({
 
 const BLOCKS = [
   {
+    // THE TOP LINE — Mickey 2026-07-30: "so its top line / per source break
+    // down / per agent break down / call links."
+    //
+    // What the whole day was, in the fewest numbers that can carry it: money
+    // in, what it cost, what that leaves, and the volume behind it. Everything
+    // below this block explains one of these numbers.
+    //
+    // ROI is deliberately ABSENT here. Mickey, same message: "roi can only
+    // apply by source." A blended return across mail and LD averages a piece
+    // that pays for itself with one that does not, and the average is a number
+    // nobody can act on.
+    id: "topline",
+    label: "Top line",
+    hint: "Money in, spend, net, and the volume behind them",
+    termsShort: "Money received vs spend booked, same range. No blended ROI — that only means anything per source.",
+    terms: "Money RECEIVED inside the range against spend BOOKED inside the range, with the volume that produced it. LD leads are what the cadence RECEIVED, not what the vendor invoiced. Deliberately carries no blended ROI: a single return across mail and LD hides which piece is paying.",
+    needs: ["payments", "spend", "dials", "calls", "ldLeads", "caseContacts", "activity"],
+    compute({
+      payments = [], spend = null, dials = [], callsBySource = {}, ldLeads = null,
+      domain = null, events = [],
+    }) {
+      // Mickey 2026-07-30: "vendor is ld only for the ld vendor."
+      // Mail is a TAG-tenant channel; CallRail is one TAG account. So a report
+      // scoped to any other tenant must not carry mail spend, mail calls or
+      // pieces mailed — a WYNN vendor board was showing $3,019 of OUR mail
+      // spend against $250 of their revenue and calling it net -$2,773.
+      const MAIL_TENANT = "TAG";
+      const scoped = domain ? String(domain).toUpperCase() : null;
+      const mailApplies = !scoped || scoped === MAIL_TENANT;
+      const live = payments.filter((p) => !p.isChargeback);
+      const dealCases = new Set();
+      let newCash = 0; let recurring = 0;
+      for (const p of live) {
+        if (p.paymentType === "initial") {
+          dealCases.add(`${p.domain}:${p.caseId}`);
+          newCash = round2(newCash + p.amount);
+        } else recurring = round2(recurring + p.amount);
+      }
+      const cash = round2(newCash + recurring);
+      const mailSpend = mailApplies ? (Number(spend?.mail) || 0) : 0;
+      const ldSpend = Number(spend?.ld) || 0;
+      // Rebuild the total from the parts that APPLY rather than trusting the
+      // sheet's grand total, which is cross-tenant.
+      const spendTotal = mailApplies ? (Number(spend?.total) || 0) : round2(ldSpend);
+      let ldDials = 0;
+      for (const d of dials) ldDials += Array.isArray(d.attempts) ? d.attempts.length : 0;
+      let mailCalls = 0; let responses = 0;
+      if (mailApplies) {
+        for (const v of Object.values(callsBySource || {})) {
+          mailCalls += Number(v.calls) || 0;
+          responses += Number(v.responses) || 0;
+        }
+      }
+      return {
+        deals: dealCases.size,
+        cash,
+        newCash,
+        recurring,
+        spend: spendTotal,
+        mailApplies,
+        mailSpend,
+        ldSpend,
+        net: round2(cash - spendTotal),
+        mailCalls,
+        responses,
+        ldDials,
+        // Received, not invoiced. Falls back to the sheet only when the
+        // cadence could not be read, and says so rather than blending.
+        ldLeads: ldLeads ? ldLeads.total : null,
+        // ldSheetLeads, NOT ldLeads: the composer overwrites spend.ldLeads with
+        // the RECEIVED count once the receipt log is read, so reading it here
+        // printed "75 received / 75 billed" on a day the sheet billed nothing.
+        // The sheet's own figure is preserved separately for exactly this.
+        ldLeadsBilled: Number(spend?.ldSheetLeads) || 0,
+        mailPieces: mailApplies ? (Number(spend?.mailPieces) || 0) : 0,
+        // Mickey 2026-07-30: "top line is money in money spent (then you can do
+        // the status count deals, dnc, reds)." The counts ride with the money
+        // so the first thing in the mail answers both questions at once.
+        // Same lane rules as the status block, one row per case per lane.
+        // Mickey 2026-07-30: "we only need dnc/post-date/suspend/deal no other
+        // no to chase." An "other" bucket counts changes nobody acts on, and
+        // "to chase" restated a number the list underneath already shows.
+        ...(() => {
+          const c = { dnc: 0, postdate: 0, suspended: 0 };
+          for (const e of events) {
+            if (e.kind !== "status-change" || e.payload?.selfTransition) continue;
+            const k = e.payload?.safetyClass;
+            if (k in c) c[k] += 1;
+          }
+          return c;
+        })(),
+      };
+    },
+    renderText(d) {
+      const L = [];
+      L.push(`MONEY IN        ${money(d.cash)}   (${d.deals} deal${d.deals === 1 ? "" : "s"}, ${money(d.newCash)} new · ${money(d.recurring)} recurring)`);
+      L.push(`SPEND           ${money(d.spend)}${d.mailApplies ? `   (mail ${money(d.mailSpend)} · LD ${money(d.ldSpend)})` : "   (LD only)"}`);
+      L.push(`NET             ${money(d.net)}`);
+      const leads = d.ldLeads == null
+        ? `${d.ldLeadsBilled} billed (cadence unavailable)`
+        : `${d.ldLeads} received${d.ldLeadsBilled && d.ldLeadsBilled !== d.ldLeads ? ` (${d.ldLeadsBilled} billed)` : ""}`;
+      const mailPart = d.mailApplies ? `${d.responses} mail response(s) of ${d.mailCalls} call(s) · ` : "";
+      L.push(`VOLUME          ${mailPart}${d.ldDials} LD dial(s) · ${leads} LD lead(s)`);
+      if (d.mailPieces) L.push(`                ${d.mailPieces.toLocaleString("en-US")} piece(s) mailed`);
+      return L.join(NEWLINE);
+    },
+    csv(d) {
+      const usd0 = (n) => "$" + Math.round(Number(n) || 0).toLocaleString("en-US");
+      return {
+        // One row of thirteen columns is a table only in the technical sense.
+        // The headline carries the four numbers Mickey actually opens the mail
+        // for; the columns stay for the CSV attachment and the detail reader.
+        summary: `${usd0(d.cash)} in · ${usd0(d.spend)} spent · ${usd0(d.net)} net`
+          + ` · ${d.deals} deal${d.deals === 1 ? "" : "s"}`
+          + ` · ${d.dnc} DNC · ${d.postdate} post-date · ${d.suspended} suspended`,
+        // Headline only. Thirteen columns of breakdown belong in the CSV.
+        emailColumns: [],
+        rows: [d],
+        columns: [
+        { header: "deals", get: (x) => x.deals },
+        { header: "cash", get: (x) => x.cash },
+        { header: "new_cash", get: (x) => x.newCash },
+        // "recurring_cash", not "recurring": toTemplateData decides money
+        // formatting by matching the HEADER against /cash|spend|net|.../, so a
+        // bare "recurring" rendered as 11,925 next to $300.00 in the same row.
+        { header: "recurring_cash", get: (x) => x.recurring },
+        { header: "spend", get: (x) => x.spend },
+        { header: "mail_spend", get: (x) => x.mailSpend },
+        { header: "ld_spend", get: (x) => x.ldSpend },
+        { header: "net", get: (x) => x.net },
+        { header: "mail_calls", get: (x) => x.mailCalls },
+        { header: "mail_responses", get: (x) => x.responses },
+        { header: "ld_dials", get: (x) => x.ldDials },
+        { header: "ld_leads_received", get: (x) => x.ldLeads },
+        { header: "ld_leads_billed", get: (x) => x.ldLeadsBilled },
+        ],
+      };
+    },
+  },
+  {
+    // LD CALL QUALITY — Mickey 2026-07-30: "vendor is call quality" and
+    // "vendor is ld only for the ld vendor."
+    //
+    // longcalls is CallRail, which is ONE TAG tenant carrying inbound MAIL
+    // response calls. Putting it in an LD vendor board showed the vendor our
+    // mail calls and labelled it their call quality. LD calls are OUTBOUND
+    // PhoneBurner dials, so they come from DailyDial attempts instead.
+    //
+    // NO LISTEN LINKS, AND NOT BECAUSE OF A PROVIDER LIMIT. DailyDial declares
+    // recordingUrl on both the doc and the attempt subdoc, but measured
+    // 2026-07-30 it is populated on ZERO attempts, all time — and no
+    // inbound event carries a recordingUrl either. We are not capturing
+    // PhoneBurner recordings at all, so this is a gap on our side, not a
+    // historical-enumeration limit. A link column would be empty on every row,
+    // past or future, until capture is built.
+    // ONE PLACE FOR CALLS BY AGENT. Mickey 2026-07-30: "lets just make ld call
+    // quality agent report in one place you can do inbound, dials, connected,
+    // talk time (callrail + phone burner), deals, cash so one place for calls
+    // by agent." `worked` and this block were two tables of the same people
+    // built from two sources; a reader had to reconcile them by eye.
+    id: "ldcalls",
+    label: "Calls by agent",
+    hint: "Inbound taken, dials placed, what connected, and what closed",
+    termsShort: "Per agent: inbound calls taken, outbound dials, connects, talk time and deals.",
+    terms: "Per agent, inside the range: INBOUND is calls connected to that agent from the queue; DIALS and CONNECTED are outbound PhoneBurner attempts, where connected means the dial reached a person. TALK counts connected outbound time only - inbound talk time is not carried by the queue rollup. DEALS are distinct cases whose first payment landed in range, and CASH is what those cases paid.",
+    needs: ["dials", "queue", "payments", "caseContacts"],
+    compute({ dials = [], queueByAgent = {}, payments = [] }) {
+      const LONG_SEC = Math.max(60, Number(process.env.LD_LONG_CALL_SECONDS) || 300);
+      const { canonicalStaffName, isNotAPerson } = require("../../shared-config/src/staffRoster");
+      const INBOUND_STREAMS = new Set(["MAILER", "BCD"]);
+      let attempts = 0; let attemptsKnown = 0; let connected = 0; let talkSec = 0; let longCalls = 0;
+      const byOutcome = {}; const byAgent = new Map(); const cases = new Set();
+      const row = (name) => {
+        if (!byAgent.has(name)) {
+          byAgent.set(name, {
+            agent: name, inbound: 0, dials: 0, connected: 0, talkSec: 0,
+            deals: 0, dealCases: new Set(), cash: 0,
+          });
+        }
+        return byAgent.get(name);
+      };
+      for (const d of dials) {
+        cases.add(`${d.domain}:${d.caseId}`);
+        for (const a of Array.isArray(d.attempts) ? d.attempts : []) {
+          attempts += 1;
+          const sec = Number(a.durationSeconds) || 0;
+          // `connected` is an explicit field on the attempt — trust ONLY that.
+          // Inferring it from durationSeconds > 0 counts RING TIME as a
+          // conversation: 399 of 400 sampled attempts have a duration, but only
+          // 48 connected. That inference reported a 99.9% connect rate on a
+          // board headed for the vendor.
+          //
+          // But `connected` is ABSENT on a quarter of attempts (July 2026:
+          // 4,570 of 18,505, 24.7%) and is not even declared in
+          // DailyDial's attempt schema — nothing in shared-services writes it,
+          // so it arrives from outside the model and can vanish silently.
+          // Treating absent as false understates the rate (8.6% vs 11.4% over
+          // attempts that actually carry the flag). Unknown is its own bucket:
+          // it is excluded from the denominator and reported, never guessed.
+          // `outcome` cannot stand in — it only ever holds "review"/"dnc",
+          // which is lead state, not call disposition.
+          const known = typeof a.connected === "boolean";
+          if (known) attemptsKnown += 1;
+          const isConnected = a.connected === true;
+          if (isConnected) { connected += 1; talkSec += sec; }
+          if (sec >= LONG_SEC) longCalls += 1;
+          const oc = String(a.outcome || d.lastOutcome || "unknown");
+          byOutcome[oc] = (byOutcome[oc] || 0) + 1;
+          // canonicalStaffName so "brad_hansen" from PhoneBurner, "Brad Hansen"
+          // from the queue and the officer on a payment are ONE row. Two
+          // spellings of the same person is how this became two tables.
+          const who = a.agentId ? canonicalStaffName(a.agentId) : "(unknown)";
+          row(who).dials += 1;
+          if (isConnected) { row(who).connected += 1; row(who).talkSec += sec; }
+        }
+      }
+
+      // INBOUND — calls the queue connected to a person. A queue answering is
+      // not a person working, so pseudo-agents are dropped rather than ranked.
+      for (const [agent, streams] of Object.entries(queueByAgent)) {
+        if (isNotAPerson(agent)) continue;
+        const r = row(canonicalStaffName(agent));
+        for (const [key, n] of Object.entries(streams || {})) {
+          if (INBOUND_STREAMS.has(key)) r.inbound += n || 0;
+        }
+      }
+
+      // DEALS AND CASH — distinct cases whose first payment landed in range.
+      for (const p of payments.filter((x) => !x.isChargeback && x.paymentType === "initial")) {
+        const r = row(p.officerAtSale
+          || (p.attributionSnapshot === "missing" ? "(no snapshot)" : "(unassigned)"));
+        r.dealCases.add(`${p.domain}:${p.caseId}`);
+        r.deals = r.dealCases.size;
+        r.cash = round2(r.cash + p.amount);
+      }
+
+      return {
+        cases: cases.size, attempts, connected, longCalls,
+        attemptsKnown, attemptsUnknown: attempts - attemptsKnown,
+        talkMinutes: Math.round(talkSec / 6) / 10,
+        // Denominator is attempts that CARRY the flag, not all attempts.
+        connectRate: attemptsKnown ? Math.round((connected / attemptsKnown) * 1000) / 10 : null,
+        avgTalkMinutes: connected ? Math.round((talkSec / connected) / 6) / 10 : null,
+        byOutcome,
+        agents: [...byAgent.values()]
+          .map(({ dealCases, ...r }) => ({ ...r, talkMinutes: Math.round(r.talkSec / 6) / 10 }))
+          // Someone with deals and no dials still belongs here, and so does
+          // someone with dials and no deals. Union, never intersect.
+          .filter((r) => r.inbound || r.dials || r.deals)
+          .sort((a, b) => b.cash - a.cash || b.dials - a.dials),
+        longThresholdMinutes: Math.round(LONG_SEC / 60),
+      };
+    },
+    renderText(d) {
+      if (!d.attempts) return "LD call quality     (no dials recorded in this range)";
+      const rate = d.connectRate === null
+        ? "no connect data"
+        : `${d.connectRate}% of ${d.attemptsKnown} measured`;
+      const L = [
+        `LD call quality     ${d.attempts} dial(s) on ${d.cases} case(s) · ${d.connected} connected (${rate})`,
+        `                    ${d.talkMinutes} min talk · avg ${d.avgTalkMinutes} min · ${d.longCalls} over ${d.longThresholdMinutes} min`,
+      ];
+      // Never let the unknown bucket disappear into the rate.
+      if (d.attemptsUnknown > 0) {
+        L.push(`                    ${d.attemptsUnknown} dial(s) carry no connect flag — excluded from the rate`);
+      }
+      const outcomes = Object.entries(d.byOutcome).sort((a, b) => b[1] - a[1]).slice(0, 6);
+      if (outcomes.length) L.push(`                    ${outcomes.map(([k, n]) => `${n} ${k}`).join(" · ")}`);
+      return L.join(NEWLINE);
+    },
+    csv(d) {
+      // Without a summary the email showed a bare per-agent table and dropped
+      // the section's actual headline — dials, connect rate and talk time.
+      const rate = d.connectRate === null ? "no connect data" : `${d.connectRate}% connected`;
+      return { summary: `${d.attempts.toLocaleString()} dial${d.attempts === 1 ? "" : "s"} · ${rate} · ${d.talkMinutes} min talk`
+        + (d.attemptsUnknown ? ` · ${d.attemptsUnknown} without a connect flag` : ""),
+      rows: d.agents,
+      columns: [
+        { header: "agent", get: (x) => x.agent },
+        { header: "inbound", get: (x) => x.inbound },
+        { header: "dials", get: (x) => x.dials },
+        { header: "connected", get: (x) => x.connected },
+        { header: "talk_minutes", get: (x) => x.talkMinutes },
+        { header: "deals", get: (x) => x.deals },
+        { header: "cash", get: (x) => x.cash },
+      ] };
+    },
+  },
+  {
     id: "money",
     label: "Money in",
     hint: "Cash collected, split new vs recurring, with deal count",
+    termsShort: "Money received in range, successful payments only.",
     terms: "Money RECEIVED inside the range, SUCCESS only. Declines and chargebacks excluded. New business = first invoice; a first invoice split across instalments is ONE sale.",
     needs: ["payments"],
     compute({ payments }) {
+      const { netChargebacks } = require("./reportMoneyGuards");
       const ok = payments.filter((p) => !p.isChargeback);
       const initial = ok.filter((p) => p.paymentType === "initial");
-      const recurring = ok.filter((p) => p.paymentType !== "initial");
       const cb = payments.filter((p) => p.isChargeback);
+
+      // CASH IS NET OF CHARGEBACKS. Filtering the reversals away reported
+      // money we gave back as money we kept — July 2026 held $11,956 of it.
+      // The reversal is applied PER CASE and to recurring first, because a
+      // chargeback can only undo money that case actually took; netting the
+      // month's reversals against initials invented a $9,197 hole in new
+      // business. Deals are NOT netted: the sale still happened.
+      const byCase = new Map();
+      for (const p of payments) {
+        const k = `${p.domain}:${p.caseId}`;
+        if (!byCase.has(k)) byCase.set(k, { initial: 0, recurring: 0, chargeback: 0 });
+        const x = byCase.get(k);
+        const amt = Number(p.amount) || 0;
+        if (p.isChargeback) x.chargeback = round2(x.chargeback + Math.abs(amt));
+        else if (p.paymentType === "initial") x.initial = round2(x.initial + amt);
+        else x.recurring = round2(x.recurring + amt);
+      }
+      let newCash = 0; let recurringCash = 0; let unapplied = 0;
+      for (const row of byCase.values()) {
+        const n = netChargebacks(row);
+        newCash = round2(newCash + n.initialNet);
+        recurringCash = round2(recurringCash + n.recurringNet);
+        unapplied = round2(unapplied + n.unapplied);
+      }
       return {
-        cash: round2(ok.reduce((s, p) => s + p.amount, 0)),
+        cash: round2(newCash + recurringCash),
+        grossCash: round2(ok.reduce((s, p) => s + p.amount, 0)),
         payments: ok.length,
         // A SALE, not a payment row. Case 394513 took its first invoice as two
         // $500 installments on the same day; counting rows called that two
         // deals. Doctrine: deals count SALES.
         deals: new Set(initial.map((p) => `${p.domain}:${p.caseId}`)).size,
-        newCash: round2(initial.reduce((s, p) => s + p.amount, 0)),
-        recurringCash: round2(recurring.reduce((s, p) => s + p.amount, 0)),
+        newCash,
+        recurringCash,
         chargebacks: cb.length,
         chargebackAmount: round2(cb.reduce((s, p) => s + Math.abs(p.amount), 0)),
+        // A reversal larger than anything the case paid inside the range: the
+        // original landed in an earlier month. Reported, never swallowed.
+        chargebackUnapplied: unapplied,
       };
     },
     renderText(d) {
@@ -89,6 +407,7 @@ const BLOCKS = [
     id: "spend",
     label: "Spend",
     hint: "LD, mail and BCD cost for the window",
+    termsShort: "Spend booked in range (mail sheet, LD per lead, BCD per call).",
     terms: "Spend BOOKED inside the range: mail from the spend sheet, LD per lead, BCD derived from recorded call count x rate.",
     needs: ["spend"],
     compute({ spend }) { return spend; },
@@ -120,6 +439,7 @@ const BLOCKS = [
     id: "net",
     label: "Net / ROI",
     hint: "Cash minus spend, and return on spend",
+    termsShort: "Money received minus spend booked, same range.",
     terms: "Money received in the range MINUS spend booked in the range. No cohort carry-forward.",
     needs: ["payments", "spend"],
     compute({ payments, spend }) {
@@ -142,6 +462,7 @@ const BLOCKS = [
     id: "source",
     label: "By source",
     hint: "Deals, cash, spend and cost-per for each active source",
+    termsShort: "Spend in range vs money from cases sold in range. Attributable call wins over lead age; aged money carries no ratio.",
     terms: "Self-contained month: spend booked in the range against money from cases SOLD in the range. A case counts when its FIRST payment lands inside the window, so an initial and its follow-on payments in the same month are all valid total; a case sold earlier is residual and is Aged. Within that, the ATTRIBUTABLE CALL is primary - a marketing-line call to the source inside the window keeps the money whatever the lead age, because mail is bulk-loaded and lags. Lead age decides only when no call can be found, so an aged lead that closes with no marketing response is Aged. Aged money is counted but carries no ratio and never reaches a channel total. ROAS = initial payments / spend. ROI = (all money - spend) / spend.",
     // caseContacts is what reads SourceCampaignID off the Logics case. Without
     // it this block only sees stored snapshots and reports attributed deals as
@@ -286,14 +607,23 @@ const BLOCKS = [
       // rendering as an empty row, which reads as "this piece made nothing"
       // when it is really "this piece made nothing NEW". "what money made and
       // where from" means all of it.
+      // Mickey 2026-07-30: "we can smush spend and net roi into one column as
+      // a per source break down." Spend and its return are ONE fact — what the
+      // piece cost and what came back — and reading them across four columns
+      // made the eye do the join. "$17,802 → 321.5%" is the sentence.
+      const spendReturn = (r) => {
+        if (!r.spend) return r.totalCash > 0 ? "no spend" : "—";
+        const roi = r.roi != null ? `${r.roi}%${r.spendSuspect ? "?" : ""}` : "—";
+        return `${money(r.spend)} → ${roi}`;
+      };
       const L = ["By source".padEnd(30) + "DEALS".padStart(6) + "NEW $".padStart(12) + "TOTAL $".padStart(12)
-        + "SPEND".padStart(11) + "ROAS".padStart(8) + "ROI".padStart(8) + "RESP".padStart(6) + "COST EA".padStart(9)];
-      L.push("-".repeat(102));
+        + "SPEND → ROI".padStart(24) + "ROAS".padStart(8) + "RESP".padStart(6) + "COST EA".padStart(9)];
+      L.push("-".repeat(105));
       for (const r of rows) {
         L.push(String(r.source).slice(0, 29).padEnd(30) + String(r.deals).padStart(6)
-          + money(r.newCash).padStart(12) + money(r.totalCash).padStart(12) + money(r.spend).padStart(11)
+          + money(r.newCash).padStart(12) + money(r.totalCash).padStart(12)
+          + spendReturn(r).padStart(24)
           + (r.roas != null ? `${r.roas}%${r.spendSuspect ? "?" : ""}` : "—").padStart(8)
-          + (r.roi != null ? `${r.roi}%${r.spendSuspect ? "?" : ""}` : "—").padStart(8)
           + String(r.responses || 0).padStart(6)
           + (r.costPer != null ? money(r.costPer) : "—").padStart(9));
       }
@@ -317,18 +647,51 @@ const BLOCKS = [
       return L.join("\n");
     },
     csv(rows) {
-      return { rows, columns: [
+      // These columns ARE the HTML email — toTemplateData tabulates csv(), it
+      // does not use renderText. roas_pct/roi_pct were listed twice, so the
+      // emailed table carried 15 columns with two duplicated pairs. Order runs
+      // left-to-right the way the row is read aloud: who, how many, how much
+      // in, how much out, and only then the ratios and the per-unit costs.
+      return {
+        // Mickey 2026-07-30: "very simple by named source only no catch all no
+        // unsourced no aged inactive source. this is just active roi pieces."
+        // A bucket is not a piece you can spend more or less on, so it cannot
+        // have a return — four rows of "—" taught the reader to skip the
+        // table. The buckets stay in the CSV, where reconciliation happens.
+        // AGED_LABEL is destructured inside compute(), not here — reading it
+        // in csv() threw a ReferenceError that the template caught and turned
+        // into a silently empty section.
+        emailRows: rows.filter((r) => {
+          const { AGED_LABEL: AGED } = require("../../shared-config/src/activeSources");
+          const s = String(r.source || "");
+          return s !== AGED && !s.startsWith("(") && !s.endsWith("(catch-all)");
+        }),
+        // Five columns in the mail: who, how many, how much in, how much out,
+        // and the return. The other eight are for the CSV.
+        emailColumns: [
+          { header: "source", get: (x) => x.source },
+          { header: "deals", get: (x) => x.deals },
+          { header: "total_cash", get: (x) => x.totalCash },
+          { header: "spend", get: (x) => x.spend },
+          { header: "roi_pct", get: (x) => x.roi },
+        ],
+        rows,
+        columns: [
         { header: "source", get: (x) => x.source },
-        { header: "roas_pct", get: (x) => x.roas },
+        { header: "deals", get: (x) => x.deals },
+        { header: "new_cash", get: (x) => x.newCash },
+        { header: "recurring_cash", get: (x) => x.recurringCash },
+        { header: "total_cash", get: (x) => x.totalCash },
+        { header: "spend", get: (x) => x.spend },
+        { header: "net", get: (x) => x.net },
         { header: "roi_pct", get: (x) => x.roi },
-        { header: "spend_suspect", get: (x) => Boolean(x.spendSuspect) },
         { header: "roas_pct", get: (x) => x.roas },
-        { header: "roi_pct", get: (x) => x.roi }, { header: "deals", get: (x) => x.deals },
-        { header: "new_cash", get: (x) => x.newCash }, { header: "recurring_cash", get: (x) => x.recurringCash },
-        { header: "total_cash", get: (x) => x.totalCash }, { header: "spend", get: (x) => x.spend },
-        { header: "responses", get: (x) => x.responses }, { header: "leads", get: (x) => x.leads },
-        { header: "cost_per", get: (x) => x.costPer }, { header: "net", get: (x) => x.net },
-      ] };
+        { header: "responses", get: (x) => x.responses },
+        { header: "leads", get: (x) => x.leads },
+        { header: "cost_per", get: (x) => x.costPer },
+        { header: "spend_suspect", get: (x) => Boolean(x.spendSuspect) },
+        ],
+      };
     },
   },
 
@@ -336,6 +699,7 @@ const BLOCKS = [
     id: "officer",
     label: "By settlement officer",
     hint: "Deals and cash closed, alongside calls handled",
+    termsShort: "Credited to the officer who held the case at sale.",
     terms: "Deals credited to the officer who held the case AT SALE, from the stored snapshot - not whoever holds it today.",
     needs: ["payments", "queue", "caseContacts"],
     compute({ payments, queueByAgent }) {
@@ -395,6 +759,7 @@ const BLOCKS = [
     id: "cohort",
     label: "Client since (vintage)",
     hint: "What share of revenue comes from each signing year",
+    termsShort: "Grouped by the year the client first paid.",
     terms: "Grouped by the year the client FIRST paid, from the attribution snapshot. Never inferred from the payment date.",
     needs: ["payments"],
     compute({ payments }) {
@@ -439,10 +804,16 @@ const BLOCKS = [
     id: "status",
     label: "Status movement",
     hint: "DNC, post-dates, suspensions and conversions",
+    termsShort: "Status changes inside the range, not current status.",
     terms: "Status CHANGES that happened inside the range - not the status a case holds now.",
     needs: ["activity"],
     compute({ events }) {
-      const c = { dnc: 0, postdate: 0, suspended: 0, conversions: 0, other: 0 };
+      const c = { dnc: 0, postdate: 0, suspended: 0, conversions: 0, other: 0, keyChanges: [] };
+      // Mickey 2026-07-30: "redlines to chase can be status changes broadly and
+      // then key status changes." The counts say what moved; the list says who
+      // to call. A count alone is a fact nobody can act on tomorrow morning.
+      const KEY = new Set(["dnc", "postdate", "suspended"]);
+      const seen = new Set();
       for (const e of events) {
         if (e.kind === "conversion") { c.conversions += 1; continue; }
         if (e.kind !== "status-change" || e.payload?.selfTransition) continue;
@@ -451,18 +822,66 @@ const BLOCKS = [
         else if (k === "postdate") c.postdate += 1;
         else if (k === "suspended") c.suspended += 1;
         else c.other += 1;
+        if (!KEY.has(k)) continue;
+        // One row per case per lane — a case re-saved twice is not two chases.
+        const key = `${e.domain}:${e.caseId}:${k}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        c.keyChanges.push({
+          domain: e.domain,
+          caseId: e.caseId,
+          lane: k,
+          toStatus: e.payload?.toStatus || null,
+          by: e.createdBy || null,
+          at: e.createdAt ? String(e.createdAt).slice(0, 10) : null,
+        });
       }
+      const ORDER = { suspended: 0, postdate: 1, dnc: 2 };
+      c.keyChanges.sort((a, b) => (ORDER[a.lane] - ORDER[b.lane])
+        || String(a.caseId).localeCompare(String(b.caseId)));
       return c;
     },
     renderText(d) {
-      return `Status              ${d.dnc} DNC · ${d.postdate} post-date · ${d.suspended} suspended · ${d.conversions} converted`;
+      const L = [`Status              ${d.dnc} DNC · ${d.postdate} post-date · ${d.suspended} suspended · ${d.conversions} converted`];
+      const key = d.keyChanges || [];
+      if (key.length) {
+        // Money first: a payment default costs more to ignore than a DNC.
+        const LANE = { suspended: "SUSPENDED", postdate: "POST-DATE", dnc: "DNC" };
+        L.push("", `REDLINES TO CHASE (${key.length})`);
+        for (const r of key.slice(0, 30)) {
+          L.push(`  ${LANE[r.lane].padEnd(10)} ${r.domain} ${String(r.caseId).padEnd(8)}`
+            + `${r.toStatus ? ` → ${r.toStatus}` : ""}${r.by ? `  — ${r.by}` : ""}`);
+        }
+        if (key.length > 30) L.push(`  … and ${key.length - 30} more`);
+      }
+      return L.join(NEWLINE);
     },
     csv(d) {
-      return { rows: [d], columns: [
-        { header: "dnc", get: (x) => x.dnc }, { header: "postdate", get: (x) => x.postdate },
-        { header: "suspended", get: (x) => x.suspended }, { header: "converted", get: (x) => x.conversions },
-        { header: "other_status", get: (x) => x.other },
-      ] };
+      // THE EMAIL IS BUILT FROM csv(), NOT renderText. This returned only the
+      // five counts, so "REDLINES TO CHASE" — the only actionable part of the
+      // section, and half of Mickey's ruling ("status changes broadly and then
+      // key status changes") — existed solely in a plain-text body nobody
+      // reads. The counts move to `summary`; the rows become the chase list.
+      const LANE = { suspended: "SUSPENDED", postdate: "POST-DATE", dnc: "DNC" };
+      const key = d.keyChanges || [];
+      return {
+        // No summary. Mickey 2026-07-30: the counts live "only at the top" —
+        // repeating them over the list is the same fact twice on one screen.
+        rows: key.slice(0, 30),
+        // Mickey 2026-07-30: "dont need moved by or date just case and lane
+        // really." Who moved it and when are lookups, not decisions.
+        emailColumns: [
+          { header: "case", get: (x) => `${x.domain} ${x.caseId}` },
+          { header: "lane", get: (x) => LANE[x.lane] || x.lane },
+        ],
+        columns: [
+          { header: "lane", get: (x) => LANE[x.lane] || x.lane },
+          { header: "case", get: (x) => `${x.domain} ${x.caseId}` },
+          { header: "moved_to", get: (x) => x.toStatus || null },
+          { header: "moved_by", get: (x) => x.by || null },
+          { header: "on", get: (x) => x.at || null },
+        ],
+      };
     },
   },
 
@@ -470,6 +889,7 @@ const BLOCKS = [
     id: "recordings",
     label: "Calls to review",
     hint: "Deals, post dates and 10 min+ calls, with listen links",
+    termsShort: "Deals, post-dates and 10 min+ calls inside the range.",
     terms: "Calls inside the range worth hearing: deals, post-dates and 10 min+. SOURCE marks the call the attribution came from.",
     // PAYMENTS is required, not optional: a call is only knowable as a DEAL
     // call by matching it to a sale. Declaring only "recordings" meant
@@ -504,6 +924,7 @@ const BLOCKS = [
     id: "postdates",
     label: "Post-dates: kept or lost",
     hint: "Cases promised for a later date, and whether the money actually arrived",
+    termsShort: "Promised for a later date, checked against money that actually arrived.",
     terms: "Cases promised for a later date inside the range, then checked against Billing for money arriving AFTER that date.",
     needs: ["activity", "postdateBilling"],
     compute({ postdateBilling = [] }) {
@@ -549,6 +970,7 @@ const BLOCKS = [
     id: "declines",
     label: "Declines to chase",
     hint: "Money that was attempted and bounced — recoverable if worked today",
+    termsShort: "Failed payment attempts, not netted against successes.",
     terms: "Payment attempts that failed inside the range, grouped by case. Not netted against successful payments.",
     needs: ["payments", "caseContacts"],
     compute({ declines = [] }) {
@@ -594,6 +1016,7 @@ const BLOCKS = [
     id: "effort",
     label: "Effort to close",
     hint: "How much contact it took before a case paid — inbound for TAG, dials for WYNN",
+    termsShort: "Contact up to the close day: inbound for TAG, dials for WYNN.",
     terms: "Contact events up to and including the close day. Inbound touches for TAG, outbound dials for WYNN - never averaged together.",
     // Two lanes, never one median. A WYNN outbound dial attempt and a TAG
     // inbound call are different units with OPPOSITE agency; averaging them
@@ -723,6 +1146,7 @@ const BLOCKS = [
     // have had a long inbound call on the main DID.
     label: "Call to close lag",
     hint: "Days from first inbound call to the first payment",
+    termsShort: "Days from first inbound call to first payment.",
     terms: "Days from the FIRST inbound call to the first payment. Source follows the attribution rule: longest call on the close day.",
     needs: ["payments", "callsRange", "caseContacts"],
     compute({ payments = [], callsRange = [] }) {
@@ -763,6 +1187,7 @@ const BLOCKS = [
     id: "streams",
     label: "Queue performance by stream",
     hint: "Connected calls per paid stream, and who took them",
+    termsShort: "Per-stream queue totals: offered, connected, missed.",
     terms: "Per-stream queue totals inside the range: offered, connected, missed.",
     needs: ["queue"],
     compute({ queueStreams = {}, queueByAgent = {} }) {
@@ -801,6 +1226,7 @@ const BLOCKS = [
     id: "worked",
     label: "Work today",
     hint: "Calls received, taken and made, and deals written, per person",
+    termsShort: "Calls connected (inbound) and dials placed (outbound).",
     terms: "Calls CONNECTED to an agent (inbound) and dials placed (outbound), inside the range. Missed calls belong to the queue, not a person.",
     // queue carries BOTH sides: MAILER/BCD are inbound calls CONNECTED to an
     // agent, LD is PhoneBurner OUTBOUND dials. Deliberately NOT declaring
@@ -939,6 +1365,7 @@ const BLOCKS = [
     id: "pl",
     label: "Profit and loss over time",
     hint: "Cost, money in, net and margin per period",
+    termsShort: "Money received per period vs spend booked in that period.",
     terms: "Money RECEIVED in each period against spend BOOKED in that period. Periods are days for a range up to about two months, months beyond that. Margin is (total money x the configured rate) minus cost, in dollars - not a rate of return. A period with no spend shows no ratio rather than an infinite one.",
     needs: ["payments", "spend"],
     compute({ payments = [], spendByDay = {}, from = null, to = null }) {
@@ -1020,6 +1447,7 @@ const BLOCKS = [
     id: "casework",
     label: "What happened with the cases",
     hint: "Post-dates, DNCs, payment failures and documents received — as case lists",
+    termsShort: "Case events inside the range, listed rather than counted.",
     terms: "Case EVENTS that happened inside the range, listed rather than counted. A status change is only counted when the status actually moved - a case re-saved on the same status is not news. Documents are inbound uploads only.",
     // Status movement is the counts; this is the same material as a worklist.
     needs: ["activity", "payments"],
@@ -1133,9 +1561,18 @@ const BLOCKS = [
     id: "longcalls",
     label: "Calls worth hearing",
     hint: "Every call over 10 minutes, with what came of it",
+    termsShort: "Inbound calls at or over 10 minutes, with what came of them.",
     terms: "Inbound CallRail calls inside the range at or over the length threshold (10 minutes by default), with the outcome resolved from payments in the same range. A call with no outcome is shown as such - it is a long conversation that has not closed, which is the point of listing it.",
-    needs: ["callsRange", "payments", "caseContacts"],
-    compute({ callsRange = [], payments = [], from = null, to = null }) {
+    needs: ["callsRange", "payments", "caseContacts", "callRecordings", "callContext"],
+    compute({
+      callsRange = [], payments = [], from = null, to = null, callRecordings = {},
+      domain = null, callContext = {},
+    }) {
+      // CallRail is ONE TAG tenant of inbound mail-response calls. "The same 4
+      // sections for both email just one is filtered" only holds if this
+      // section actually filters — otherwise a WYNN vendor board hands the
+      // lead vendor five recordings of OUR mail callers. Measured: it did.
+      if (domain && String(domain).toUpperCase() !== "TAG") return [];
       const MIN_SEC = Math.max(60, Number(process.env.LONG_CALL_SECONDS) || 600);
       // callsRange deliberately reaches BACK 45 days so call-to-close lag is
       // not clipped. THIS report is about the range itself, so the lookback
@@ -1175,16 +1612,36 @@ const BLOCKS = [
         .filter((c) => (Number(c.durationSec) || 0) >= MIN_SEC)
         .map((c) => {
           const hit = outcomeByPhone.get(last10(c.phone));
+          // Mickey 2026-07-30: "officer is a ring central leg look up" and
+          // "outcome is current logics status."
+          //
+          // Payments answer neither for an OPEN call, which is most of this
+          // list — a conversation that has not closed is exactly the one worth
+          // hearing. The RC leg says who answered regardless of outcome, and
+          // Logics says where the case actually stands now. Payment data stays
+          // as the fallback so a closed call never loses its officer.
+          const leg = callContext.byPhone?.[last10(c.phone)] || null;
+          const caseId = leg?.caseId || (hit ? hit.caseId : null);
+          const caseDomain = leg?.caseDomain || null;
+          const status = caseId
+            ? callContext.statusByCase?.[`${caseDomain || "TAG"}:${caseId}`] || null
+            : null;
           return {
             dateKey: c.dateKey,
             minutes: Math.round((Number(c.durationSec) || 0) / 6) / 10,
             source: c.source || null,
             phone: c.phone || null,
-            outcome: hit ? (hit.type === "initial" ? "DEAL" : "payment") : "no outcome yet",
+            // Current status first; a payment in-range is still worth saying.
+            outcome: status
+              || (hit ? (hit.type === "initial" ? "DEAL" : "payment") : "no outcome yet"),
             amount: hit ? hit.amount : null,
-            caseId: hit ? hit.caseId : null,
-            officer: hit ? hit.officer : null,
-            listenUrl: c.listenUrl || null,
+            caseId,
+            // Settlement officer off the case's assignment activity first —
+            // that is who owns it now. The RC leg says who happened to answer,
+            // and the payment says who closed it; both are fallbacks.
+            officer: (caseId ? callContext.officerByCase?.[`${caseDomain || "TAG"}:${caseId}`] : null)
+              || leg?.agent || (hit ? hit.officer : null),
+            listenUrl: c.listenUrl || callRecordings[c.callId] || null,
             priorCalls: c.priorCalls ?? null,
           };
         })
@@ -1207,17 +1664,33 @@ const BLOCKS = [
       return L.join(NEWLINE);
     },
     csv(rows) {
-      return { rows, columns: [
-        { header: "on", get: (x) => x.dateKey },
-        { header: "minutes", get: (x) => x.minutes },
-        { header: "source", get: (x) => x.source },
-        { header: "outcome", get: (x) => x.outcome },
-        { header: "amount", get: (x) => x.amount },
-        { header: "case_id", get: (x) => x.caseId },
-        { header: "officer", get: (x) => x.officer },
-        { header: "prior_calls", get: (x) => x.priorCalls },
-        { header: "listen", get: (x) => x.listenUrl },
-      ] };
+      return {
+        // No summary: the section label already says "Calls worth hearing",
+        // and a line under it repeating the count is filler.
+        // The point of this section is to press play. Minutes, who, and the
+        // link — everything else is CSV.
+        // Mickey 2026-07-30: "get rid of length ... you can put the settlement
+        // officer ... then just call agent link outcome." Length was the one
+        // column that never changed a decision.
+        emailColumns: [
+          { header: "call", get: (x) => x.source },
+          { header: "agent", get: (x) => x.officer },
+          { header: "outcome", get: (x) => x.outcome },
+          { header: "listen", get: (x) => x.listenUrl },
+        ],
+        rows,
+        columns: [
+          { header: "on", get: (x) => x.dateKey },
+          { header: "minutes", get: (x) => x.minutes },
+          { header: "source", get: (x) => x.source },
+          { header: "outcome", get: (x) => x.outcome },
+          { header: "amount", get: (x) => x.amount },
+          { header: "case_id", get: (x) => x.caseId },
+          { header: "officer", get: (x) => x.officer },
+          { header: "prior_calls", get: (x) => x.priorCalls },
+          { header: "listen", get: (x) => x.listenUrl },
+        ],
+      };
     },
   },
 ];
@@ -1230,6 +1703,16 @@ const BLOCKS = [
 const SOURCES = Object.freeze([
   "payments", "activity", "spend", "calls", "queue",
   "recordings", "dials", "postdateBilling", "callsRange", "caseContacts",
+  // LD leads as the cadence RECEIVED them, not as the vendor invoiced them.
+  "ldLeads",
+  // Who answered a long call (RingCentral leg, from our CallLog mirror) and
+  // where that case stands NOW (Logics, pulled live — status is state).
+  "callContext",
+  // Recording links for the calls a report actually lists. CallRail hands
+  // these out ONE CALL AT A TIME, so this is a separate, bounded gather rather
+  // than a field on callsRange — which is why every long-call row shipped with
+  // no listen link at all.
+  "callRecordings",
 ]);
 
 for (const b of BLOCKS) {
@@ -1253,6 +1736,17 @@ const PRESETS = Object.freeze({
   // and then you can add stuff to it." Four blocks answer exactly that, and
   // adding to it is now editing a saved definition rather than editing code.
   board: ["spend", "money", "net", "source"],
+  // THE NIGHTLY SHAPE — Mickey 2026-07-30, in order:
+  // "so its top line / per source break down / per agent break down / call links"
+  // Status movement rides in BOTH nightly emails — Mickey 2026-07-30: "we also
+  // need status changes in both emails dnc, etc." DNC and post-dates are what
+  // the floor has to act on tomorrow morning.
+  // Mickey 2026-07-30: "its the same 4 sections for both email just one is
+  // filtered." Top line carries the money AND the status counts; by source is
+  // named active pieces only; call quality is LD; status movement is the chase
+  // list; then the calls. `worked` is gone — it and LD call quality were
+  // reporting the same dials twice.
+  rollup: ["topline", "source", "ldcalls", "status", "longcalls"],
   // The 1pm nudge and the same lines again in the EOD roll-up.
   worklog: ["worked"],
   daily: ["money", "spend", "net", "source", "officer", "status", "recordings"],
@@ -1267,7 +1761,11 @@ const PRESETS = Object.freeze({
   "profit-loss": ["pl", "money", "spend"],
   // What the lead VENDOR sees: their sources and what those produced. No mail
   // spend, no officer detail, no company P/L. Pair with --where source=LD.
-  "vendor-ld": ["source", "money"],
+  // Mickey 2026-07-30: "vendor is call quality, and top line." What the LEAD
+  // VENDOR sees about the leads they sold us — how those calls actually went,
+  // what moved, and the day-level totals. Deliberately no per-source ROI table
+  // and no officer breakdown: that is our P/L, not theirs.
+  "vendor-ld": ["topline", "source", "ldcalls", "status", "longcalls"],
   // "heres every call over 10 minutes and its outcome"
   "long-calls": ["longcalls"],
 });

@@ -54,3 +54,8 @@ tmp-alpha-audit-tests.*
 exports/
 live-captures/
 outputs/
+
+# Generated report output — customer phone numbers and CallRail recording
+# links with live access keys. Never commit these. Root-anchored: an
+# unanchored "reports/" also swallows packages/shared-templates/src/templates/reports.
+/reports/

@@ -10,15 +10,9 @@
       <tr><td align="center">
         <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:760px;background:#ffffff;border-radius:10px;overflow:hidden;box-shadow:0 1px 3px rgba(16,24,40,.1);">
 
-          {{!-- header: same shape as the daily board so report mail reads as
-                part of the same family --}}
-          <tr>
-            <td style="background:#0f172a;padding:20px 24px;">
-              <div style="color:#94a3b8;font-size:11px;letter-spacing:.09em;text-transform:uppercase;">{{eyebrow}}</div>
-              <div style="color:#ffffff;font-size:22px;font-weight:600;margin-top:2px;">{{title}}</div>
-              <div style="color:#64748b;font-size:12px;margin-top:4px;">{{range}}{{#if domain}} · {{domain}}{{/if}}</div>
-            </td>
-          </tr>
+          {{!-- No masthead. The subject line already carries the report name,
+                the date range and the tenant; repeating them in a dark banner
+                spent the top of the screen restating the envelope. --}}
 
           {{#each sections}}
             <tr><td style="padding:20px 24px 0;">
@@ -32,6 +26,12 @@
                 </div>
               </td></tr>
             {{else}}
+              {{#if this.summary}}
+                <tr><td style="padding:10px 24px 0;">
+                  <div style="font-size:15px;color:#0f172a;line-height:1.5;font-variant-numeric:tabular-nums;">{{this.summary}}</div>
+                </td></tr>
+              {{/if}}
+
               {{#if this.rows.length}}
                 <tr><td style="padding:8px 24px 0;">
                   <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;font-size:12.5px;">
@@ -52,39 +52,31 @@
                   </table>
                 </td></tr>
               {{else}}
-                <tr><td style="padding:8px 24px 0;">
-                  <div style="color:#94a3b8;font-size:13px;">Nothing in this range.</div>
-                </td></tr>
+                {{!-- A summary already said what happened; "Nothing in this
+                      range" underneath it would contradict the line above. --}}
+                {{#unless this.summary}}
+                  <tr><td style="padding:8px 24px 0;">
+                    <div style="color:#94a3b8;font-size:13px;">Nothing in this range.</div>
+                  </td></tr>
+                {{/unless}}
               {{/if}}
             {{/if}}
 
-            {{!-- TERMS travel with the numbers: two people can read the same
-                  ROI and mean different things. --}}
-            {{#if this.terms}}
-              <tr><td style="padding:8px 24px 0;">
-                <div style="background:#fffbeb;border-left:3px solid #d97706;border-radius:3px;padding:8px 11px;color:#78350f;font-size:11.5px;line-height:1.5;">
-                  {{this.terms}}
-                </div>
-              </td></tr>
-            {{/if}}
+            {{!-- Terms are no longer printed under every section. They still
+                  travel on the report object and into the CSV/text renderings,
+                  where someone auditing a number can find them — but a
+                  paragraph of definition under each table, every night, is
+                  read once and skipped forever. --}}
           {{/each}}
 
-          {{#if notes.length}}
-            <tr><td style="padding:20px 24px 0;">
-              <div style="border-top:1px solid #e2e8f0;padding-top:12px;">
-                <div style="font-size:10.5px;letter-spacing:.05em;text-transform:uppercase;color:#64748b;font-weight:600;margin-bottom:6px;">Worth knowing</div>
-                {{#each notes}}
-                  <div style="color:#64748b;font-size:12px;line-height:1.5;">· {{this}}</div>
-                {{/each}}
-              </div>
-            </td></tr>
-          {{/if}}
-
-          <tr><td style="padding:16px 24px 22px;">
-            <div style="color:#94a3b8;font-size:11px;border-top:1px solid #f1f5f9;padding-top:10px;">
-              {{footer}}
-            </div>
-          </td></tr>
+          {{!-- No "Worth knowing" block. Gather notes are operator telemetry —
+                snapshot coverage, feed syncs, catch-all counts. They still
+                travel on the report object and print in the CLI and the text
+                rendering, which is where someone debugging a number looks. In
+                the mail they were five lines of caveat under the answer. --}}
+          {{!-- No footer. "Gathered live from the source systems" is a claim
+                about the plumbing, not information anyone acts on. --}}
+          <tr><td style="padding:0 0 22px;"></td></tr>
 
         </table>
       </td></tr>

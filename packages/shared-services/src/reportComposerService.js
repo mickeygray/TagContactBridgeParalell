@@ -15,6 +15,10 @@
 const { resolveSelection, neededSources } = require("./reportBlocksService");
 
 const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
+// Module-level so gather-time notes can quote money the same way the renderers
+// do — a note reading "1234.5" next to a table reading "$1,234.50" invites the
+// reader to wonder whether they are the same number.
+const usd = (n) => `$${Number(n || 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
 // Day-scoped gathers (queue, recordings, callsRange) must LOOP or REJECT
 // over a range — never silently report the last day as if it were the whole
@@ -165,7 +169,10 @@ async function gatherMaterial({
   needs, from, to, domain = null, live = true, logger = null, session = null,
 }) {
   const want = new Set(needs);
-  const material = { from, to };
+  // `domain` travels WITH the material so a block can scope itself. Without it
+  // a tenant-scoped report still rendered cross-tenant channel figures — a WYNN
+  // vendor board carried TAG's mail spend against WYNN's revenue.
+  const material = { from, to, domain: domain ? String(domain).toUpperCase() : null };
   const notes = [];
   // ONE session for the whole report: activity pulled for payments is the
   // same activity the recordings / postdate / lag steps want, and without
@@ -244,6 +251,12 @@ async function gatherMaterial({
     // needs cost per period, and the aggregate totals cannot be un-summed.
     const spendByDay = {};
     let ld = 0; let mail = 0; let ldLeads = 0; let mailPieces = 0;
+    // WHICH DAYS THE SHEET ACTUALLY COVERS. SpendEntry is hand-maintained and
+    // lags: on 2026-07-30 it held rows through 07-28 only. Comparing a full
+    // range of lead receipts against a short sheet invents a discrepancy —
+    // it made July look 148 leads under-recorded when the like-for-like gap
+    // was 12. Only days with a real lead-data row count as covered.
+    const ldSheetDays = new Set();
     for (const r of rows) {
       const amt = Number(r.spend || 0);
       const day = String(r.date || "").slice(0, 10);
@@ -259,12 +272,20 @@ async function gatherMaterial({
       if (!spendBySource[r.source].channel && r.channel) spendBySource[r.source].channel = r.channel;
       spendBySource[r.source].spend = round2(spendBySource[r.source].spend + amt);
       spendBySource[r.source].leads += Number(r.leadsReported || 0);
-      if (r.channel === "lead-data") { ld = round2(ld + amt); ldLeads += Number(r.leadsReported || 0); }
+      if (r.channel === "lead-data") {
+        ld = round2(ld + amt); ldLeads += Number(r.leadsReported || 0);
+        // A zero-everything row (e.g. LD GENERAL placeholders) is not coverage.
+        if (day && (amt > 0 || Number(r.leadsReported || 0) > 0)) ldSheetDays.add(day);
+      }
       else if (r.channel === "mailer") { mail = round2(mail + amt); mailPieces += Number(r.pieces || 0); }
     }
     const bcd = round2(bcdCalls * bcdRate);
     if (bcdCalls) spendBySource.BCD = { spend: bcd, leads: 0, channel: "bcd" };
-    material.spend = { ld, mail, bcd, bcdCalls, bcdRate, ldLeads, mailPieces, total: round2(ld + mail + bcd) };
+    material.spend = {
+      ld, mail, bcd, bcdCalls, bcdRate, ldLeads, mailPieces,
+      ldSheetDays: [...ldSheetDays].sort(),
+      total: round2(ld + mail + bcd),
+    };
     material.spendBySource = spendBySource;
     material.spendByDay = spendByDay;
     if (!rows.length) notes.push(`no spend rows recorded for ${from}..${to}`);
@@ -719,6 +740,396 @@ async function gatherMaterial({
     }
   }
 
+  // ── ldLeads: how many LD leads actually ARRIVED ─────────────────────────
+  //
+  // COUNT THE RECEIPT, NOT THE QUEUE. Mickey 2026-07-30: "ld needs to store
+  // summaries per day to do aggregations because cadence is constantly
+  // changing", then "logics never deletes".
+  //
+  // This block used to count rows in LeadDeliveryItem. That is a WORK QUEUE:
+  // items terminate, recycle and drop out, so asking it what arrived last
+  // month is asking a to-do list what you did in July. Measured 2026-07-30 for
+  // July 2026 (WYNN): 4,585 leads genuinely arrived, but only 4,112 cadence
+  // rows still existed — 473 gone, 10.3%, and still moving. That undercount is
+  // what produced a phantom "$987 vendor overbill"; the vendor had in fact
+  // billed 4,437, i.e. 148 FEWER than we received.
+  //
+  // The add loop already writes an immutable receipt per lead:
+  // inbound.lead.received in EventRecord (inboundIntakeService.js:2124). It
+  // carries payload.caseId — the Logics case the lead became — so it is both
+  // our own append-only log AND the join key to Logics, which never deletes.
+  // No TTL index and no pruner exists on EventRecord; receipts go back to
+  // 2026-04-20. So no daily summary table is needed: this is an EVENT log we
+  // already keep, not a parallel stats DB, which is what the faceplate
+  // doctrine actually forbids.
+  //
+  // Count DISTINCT caseId, not events: a vendor retry posts twice (1 duplicate
+  // across 4,586 July posts). Leads rejected before Logics emit a different
+  // subtype and are deliberately not counted here — we did not receive them.
+  if (want.has("ldLeads")) {
+    try {
+      const EventRecord = require("../../event-core/src/models/EventRecord");
+      const q = {
+        eventType: "inbound.lead.received",
+        // Same UTC day bounds every other material in this composer uses. The
+        // business runs PT, so this window is shifted; that is a composer-wide
+        // issue and is NOT silently corrected here, because one material on a
+        // different clock would disagree with every other block on the page.
+        createdAt: {
+          $gte: new Date(`${from}T00:00:00.000Z`),
+          $lt: new Date(`${addDaysKey(to, 1)}T00:00:00.000Z`),
+        },
+      };
+      if (domain) q["payload.domain"] = String(domain).toUpperCase();
+      const grouped = await EventRecord.aggregate([
+        { $match: q },
+        { $group: {
+          _id: {
+            d: "$payload.domain",
+            s: "$payload.sourceName",
+            c: "$payload.caseId",
+            // Same UTC day key the spend rows are compared against below.
+            day: { $dateToString: { date: "$createdAt", format: "%Y-%m-%d", timezone: "UTC" } },
+          },
+        } },
+        { $group: { _id: { d: "$_id.d", s: "$_id.s", day: "$_id.day" }, n: { $sum: 1 } } },
+      ]);
+      const byDomain = {};
+      const byDay = {};
+      const bySource = {};
+      let received = 0;
+      for (const g of grouped) {
+        const d = String(g._id.d || "").toUpperCase() || "-";
+        byDomain[d] = (byDomain[d] || 0) + g.n;
+        byDay[g._id.day] = (byDay[g._id.day] || 0) + g.n;
+        if (g._id.s) bySource[g._id.s] = (bySource[g._id.s] || 0) + g.n;
+        received += g.n;
+      }
+      const rows = { length: received };
+      // LD SPEND IS DERIVED, NOT READ. Mickey 2026-07-30: "spend is cadence
+      // lead count X 3" — the rule is volume x rate; only the volume source
+      // changed, from the queue to the receipt. Same posture as BCD, which has
+      // never had a sheet row. The invoiced count stays visible in the note
+      // below so a divergence in either direction is legible.
+      const rate = Number(process.env.LD_COST_PER_LEAD) > 0
+        ? Number(process.env.LD_COST_PER_LEAD) : 3;
+      const derived = round2(rows.length * rate);
+      material.ldLeads = { total: rows.length, byDomain, rate, derivedSpend: derived };
+
+      if (material.spend) {
+        const billedSpend = Number(material.spend.ld) || 0;
+        const billedLeads = Number(material.spend.ldLeads) || 0;
+        material.spend.ldSheetSpend = billedSpend;
+        material.spend.ldSheetLeads = billedLeads;
+        material.spend.ldRate = rate;
+        material.spend.ld = derived;
+        material.spend.ldLeads = rows.length;
+        material.spend.total = round2(
+          (Number(material.spend.mail) || 0) + derived + (Number(material.spend.bcd) || 0),
+        );
+
+        // PUSH THE DERIVED COST DOWN TO THE SOURCE ROWS TOO. spendBySource is
+        // built purely from sheet rows, so overriding only the topline left the
+        // by-source and by-channel tables reading "no spend" / $0.00 for LD
+        // while the top of the same email said $222 — the report contradicted
+        // itself on one page. Mickey 2026-07-30: "roi can only apply by
+        // source", so a source row with real leads and no cost is not a
+        // cosmetic issue: it is an ROI that cannot be computed.
+        //
+        // Receipts carry payload.sourceName ("LD CUSTOM", "LD CUSTOM 2", ...),
+        // the same names the sheet uses, so cost lands on the piece that
+        // actually produced the leads instead of one lump.
+        if (material.spendBySource) {
+          for (const [src, n] of Object.entries(bySource)) {
+            const prior = material.spendBySource[src] || { channel: "lead-data" };
+            material.spendBySource[src] = {
+              ...prior,
+              channel: prior.channel || "lead-data",
+              spend: round2(n * rate),
+              leads: n,
+            };
+          }
+        }
+        // LIKE-FOR-LIKE ONLY. Compare the sheet against receipts on the days
+        // the sheet actually covers, never against the whole report range.
+        // SpendEntry is legacy hand-maintained marketing data on its way out;
+        // while it still exists, a lagging sheet must read as "behind", not as
+        // a vendor discrepancy. Both numbers stay visible and the difference is
+        // SIGNED — it runs both ways, and a one-directional "overbill" phrasing
+        // is what pointed the finger at the vendor in the first place.
+        const sheetDays = Array.isArray(material.spend.ldSheetDays) ? material.spend.ldSheetDays : [];
+        const covered = sheetDays.length
+          ? sheetDays.reduce((s, day) => s + (byDay[day] || 0), 0)
+          : rows.length;
+        const uncovered = Object.keys(byDay).filter((day) => !sheetDays.includes(day)).sort();
+        if (billedLeads && billedLeads !== covered) {
+          const delta = billedLeads - covered;
+          notes.push(
+            `LD — received ${rows.length} lead(s) = ${usd(derived)} at ${usd(rate)}/lead; `
+            + `spend sheet recorded ${billedLeads} = ${usd(billedSpend)}. `
+            + `Over the ${sheetDays.length || "0"} day(s) the sheet covers we received ${covered} `
+            + `(sheet ${delta > 0 ? `${delta} MORE` : `${-delta} FEWER`})`,
+          );
+        }
+        if (sheetDays.length && uncovered.length) {
+          notes.push(
+            `LD — spend sheet has no rows for ${uncovered.length} day(s) in range `
+            + `(${uncovered.slice(0, 3).join(", ")}${uncovered.length > 3 ? ", …" : ""}); `
+            + `those ${uncovered.reduce((s, day) => s + (byDay[day] || 0), 0)} lead(s) are counted `
+            + `from receipts but carry no sheet cost — the sheet is behind, not the vendor`,
+          );
+        }
+      }
+    } catch (error) {
+      material.ldLeads = null;
+      notes.push(`LD receipt log unavailable — ${String(error.message).slice(0, 70)}`);
+    }
+  }
+
+  // ── callRecordings: listen links for the calls a report will actually list ──
+  //
+  // CallRail returns recordings ONE CALL AT A TIME, so this is deliberately not
+  // a field on callsRange — fetching a URL for every call in a 45-day lookback
+  // would be hundreds of round-trips to print four links.
+  //
+  // Pool first: the nightly capture stores links in MarketingCallLink, so a
+  // populated pool costs one Mongo read. Only the calls long enough to be
+  // listed and still missing a link are fetched, and that fetch is capped.
+  // A report with no links is the failure this closes — every long-call row
+  // shipped without one because nothing ever resolved them.
+  if (want.has("callRecordings")) {
+    const MIN_SEC = Math.max(60, Number(process.env.LONG_CALL_SECONDS) || 600);
+    const MAX_FETCH = Math.max(0, Number(process.env.REPORT_RECORDING_FETCH_MAX) || 25);
+    // callsRange deliberately reaches BACK 45 days so call-to-close lag is not
+    // clipped. The listing only ever shows calls inside the report window, so
+    // resolving links for the lookback burned the fetch cap on calls nobody
+    // would see — and left the ones on screen blank.
+    const wanted = (material.callsRange || [])
+      .filter((c) => (Number(c.durationSec) || 0) >= MIN_SEC && c.callId)
+      .filter((c) => !c.dateKey || (c.dateKey >= from && c.dateKey <= to))
+      .map((c) => String(c.callId));
+    const byCallId = {};
+    if (wanted.length) {
+      try {
+        const MarketingCallLink = require("../../shared-models/src/MarketingCallLink");
+        const pooled = await MarketingCallLink.find({ callId: { $in: wanted } })
+          .select("callId listenUrl").lean();
+        for (const row of pooled) {
+          if (row.listenUrl) byCallId[String(row.callId)] = row.listenUrl;
+        }
+      } catch (error) {
+        notes.push(`call-link pool unavailable — ${String(error.message).slice(0, 70)}`);
+      }
+      const missing = wanted.filter((id) => !byCallId[id]);
+      if (missing.length && live) {
+        const take = missing.slice(0, MAX_FETCH);
+        try {
+          const { createCallrailClient } = require("../../shared-integrations/src");
+          const cr = createCallrailClient("TAG");
+          for (const callId of take) {
+            try {
+              const rec = await cr.getCallRecording(callId);
+              const url = rec?.url || rec?.recording || rec?.player || null;
+              if (url) byCallId[callId] = url;
+            } catch { /* one bad id must not cost the whole section */ }
+          }
+        } catch (error) {
+          notes.push(`recording lookup unavailable — ${String(error.message).slice(0, 70)}`);
+        }
+        if (missing.length > MAX_FETCH) {
+          // Never silently truncate: a missing link should read as missing.
+          notes.push(`${missing.length - MAX_FETCH} long call(s) left without a listen link (fetch cap ${MAX_FETCH})`);
+        }
+      }
+    }
+    material.callRecordings = byCallId;
+    const resolved = Object.keys(byCallId).length;
+    if (wanted.length) {
+      notes.push(`listen links resolved for ${resolved} of ${wanted.length} long call(s)`);
+    }
+  }
+
+  // ── callContext: who took the call, and where the case stands NOW ────────
+  //
+  // Mickey 2026-07-30: "officer is a ring central leg look up" and "outcome is
+  // current logics status."
+  //
+  // The long-call list previously took both from PAYMENTS, so a call only had
+  // an officer if it had already produced money — every open conversation, the
+  // ones actually worth listening to, showed a blank agent and "no outcome
+  // yet". The RC leg knows who answered whether or not it closed.
+  //
+  // Two different kinds of fact, deliberately sourced differently:
+  //   · AGENT is an EVENT (this extension answered this call) — read from our
+  //     own CallLog mirror, no RingCentral round-trip. Re-authing RC per call
+  //     is how you earn 100,000 429s in thirty seconds.
+  //   · STATUS is STATE, so it is never read from a mirror. It is pulled live
+  //     from Logics at send time, for the handful of cases on screen only.
+  if (want.has("callContext")) {
+    const MIN_SEC = Math.max(60, Number(process.env.LONG_CALL_SECONDS) || 600);
+    const shown = (material.callsRange || [])
+      .filter((c) => (Number(c.durationSec) || 0) >= MIN_SEC)
+      .filter((c) => !c.dateKey || (c.dateKey >= from && c.dateKey <= to));
+    // CallLog.normalizedPhone is the last ten digits; CallRail hands back E.164.
+    const last10 = (p) => {
+      const d = String(p || "").replace(/\D/g, "");
+      return d.length >= 10 ? d.slice(-10) : null;
+    };
+    const phones = [...new Set(shown.map((c) => last10(c.phone)).filter(Boolean))];
+    const byPhone = {};
+    if (phones.length) {
+      try {
+        const CallLog = require("../../shared-models/src/CallLog");
+        const legs = await CallLog.find({
+          normalizedPhone: { $in: phones },
+          direction: "inbound",
+          callStartTime: {
+            $gte: new Date(`${from}T00:00:00.000Z`),
+            $lt: new Date(`${addDaysKey(to, 1)}T00:00:00.000Z`),
+          },
+        }).select("normalizedPhone callStartTime agentName extensionId caseId caseDomain durationSec").lean();
+        // RESOLVE THE AGENT BY EXTENSION, NOT BY NAME. callLogService already
+        // solved this: it builds an extensionId -> AgentState map and reads the
+        // agent off that. CallLog.agentName is the call's PARTY name, and on an
+        // inbound leg that party is the CALLER, so it carries caller-ID CNAM —
+        // it rendered "YONKERS NY" as the person who took the call. The
+        // extension is the only field that identifies our side of the call.
+        const { canonicalStaffName, isUnknownStaff } = require("../../shared-config/src/staffRoster");
+        const { AgentState } = require("../../shared-models/src");
+        const roster = new Map(
+          (await AgentState.find({}).select("extensionId name company").lean())
+            .map((a) => [String(a.extensionId || ""), a.name]),
+        );
+        const staffOnly = (name) => {
+          if (!name) return null;
+          const c = canonicalStaffName(name);
+          return c && !isUnknownStaff(c) ? c : null;
+        };
+        // Extension first, party name only as a fallback and only if the roster
+        // recognises it. A single call leaves several legs — queue, ring,
+        // answered — and only the answered one carries our extension.
+        const legAgent = (l) => staffOnly(roster.get(String(l.extensionId || ""))) || staffOnly(l.agentName);
+        // Match by phone, take the LATEST leg that actually names somebody.
+        // Ranking legs by duration was over-thinking it and picked the leg
+        // carrying the caller's name instead of ours.
+        const byPhoneLegs = new Map();
+        for (const leg of legs) {
+          const k = String(leg.normalizedPhone);
+          if (!byPhoneLegs.has(k)) byPhoneLegs.set(k, []);
+          byPhoneLegs.get(k).push(leg);
+        }
+        for (const [k, group] of byPhoneLegs) {
+          group.sort((a, b) => new Date(b.callStartTime || 0) - new Date(a.callStartTime || 0));
+          const named = group.find((l) => legAgent(l));
+          const cased = group.find((l) => l.caseId);
+          byPhone[k] = {
+            agent: named ? legAgent(named) : null,
+            caseId: cased?.caseId || null,
+            caseDomain: cased?.caseDomain || null,
+            durationSec: group[0]?.durationSec || 0,
+          };
+        }
+      } catch (error) {
+        notes.push(`call leg lookup unavailable — ${String(error.message).slice(0, 70)}`);
+      }
+    }
+    // THE PHONE IS THE CASE. Mickey 2026-07-30: "you have the phone number so
+    // you have the case id so you can get the outcome." A leg only carries a
+    // caseId when something upstream already resolved it — 17 of 25 inbound
+    // legs today had none — but our CaseProfile mirror folds every Logics
+    // number into normalizedPhones, which is the same lookup that recovered
+    // the spouse-number deals in July. Logics stays the authority for the
+    // STATUS; this only answers "whose case is this?".
+    const unresolved = phones.filter((p) => !byPhone[p]?.caseId);
+    if (unresolved.length && live) {
+      try {
+        const { createLogicsClient } = require("../../shared-integrations/src");
+        const { mapLimit } = require("./paymentTruthService");
+        const { caseIdsFrom, isNotFound } = require("./logicsSourceSanitizerService");
+        const CaseProfile = require("../../shared-models/src/CaseProfile");
+        const dom = (domain && String(domain).toUpperCase() !== "ALL") ? String(domain).toUpperCase() : "TAG";
+        await mapLimit(unresolved, 3, async (p) => {
+          let ids = [];
+          try {
+            ids = caseIdsFrom(await createLogicsClient(dom).findCaseByPhone(p));
+          } catch (error) {
+            // A 404 is a FINDING, not an error: most people who answer a mail
+            // piece are strangers and have no case at all. Measured 2026-07-30:
+            // 2 of 3 long-call numbers 404, and the third resolved to case
+            // 430083, "[Active Prospect]-Opened".
+            if (!isNotFound(error)) throw error;
+          }
+          if (!ids.length) {
+            // Logics only matches the number in the case's PRIMARY slot, so a
+            // spouse or second line dead-ends. Our mirror folds every number on
+            // the case into normalizedPhones — same trick that recovered the
+            // July spouse-number deals.
+            try {
+              const owner = await CaseProfile.findOne({ normalizedPhones: p }).select("caseId domain").lean();
+              if (owner?.caseId) ids = [Number(owner.caseId)];
+            } catch { /* mirror unavailable — leave unresolved rather than guess */ }
+          }
+          if (ids.length) {
+            byPhone[p] = { ...(byPhone[p] || {}), caseId: ids[0], caseDomain: byPhone[p]?.caseDomain || dom };
+          }
+        });
+      } catch (error) {
+        notes.push(`case lookup by phone unavailable — ${String(error.message).slice(0, 70)}`);
+      }
+    }
+
+    const withAgent = Object.values(byPhone).filter((v) => v.agent).length;
+    if (phones.length && withAgent < phones.length) {
+      notes.push(`${phones.length - withAgent} long call(s) have no answered RingCentral leg — agent unresolved`);
+    }
+
+    // Current Logics status, live, for the cases those calls belong to.
+    const cases = [...new Map(Object.values(byPhone)
+      .filter((v) => v.caseId)
+      .map((v) => [`${v.caseDomain || domain || "TAG"}:${v.caseId}`, v])).values()];
+    const statusByCase = {};
+    const officerByCase = {};
+    if (cases.length && live) {
+      try {
+        const { createLogicsClient } = require("../../shared-integrations/src");
+        const { unwrapLogics, mapLimit } = require("./paymentTruthService");
+        await mapLimit(cases, 3, async (c) => {
+          const key = `${c.caseDomain || "TAG"}:${c.caseId}`;
+          const client = createLogicsClient(c.caseDomain || "TAG");
+          try {
+            const info = unwrapLogics(await client.getCaseInfo(c.caseId));
+            if (info?.StatusName) statusByCase[key] = info.StatusName;
+          } catch { /* one unreadable case must not cost the section */ }
+
+          // SETTLEMENT OFFICER LIVES IN THE ACTIVITIES, NOT ON THE CASE.
+          // Mickey 2026-07-30: "settlement officer" ... "activities". Measured:
+          // getCaseInfo returns 54 fields and not one of them names an officer.
+          // The assignment is an activity whose subject reads
+          // "Assigned to Set. Officer: <name>", the same shape
+          // trainingCallReviewSourceService parses. Latest assignment wins.
+          try {
+            const acts = unwrapLogics(await client.getActivities(c.caseId));
+            const rows = Array.isArray(acts) ? acts : [];
+            const assignments = rows
+              .map((a) => ({
+                subject: String(a?.Subject || a?.ActivitySubject || ""),
+                at: a?.ActivityDate || a?.CreatedDate || a?.Date || null,
+              }))
+              .filter((a) => /^Assigned to\s+Set\.?\s*Officer\s*:/i.test(a.subject))
+              .sort((a, b) => new Date(b.at || 0) - new Date(a.at || 0));
+            const name = assignments[0]?.subject.split(":").slice(1).join(":").trim();
+            // "-- Unassigned --" is a real answer meaning nobody owns it, and
+            // must not be printed as if it were a person's name.
+            if (name && !/^--\s*Unassigned\s*--$/i.test(name)) officerByCase[key] = name;
+          } catch { /* activities unreadable — leave the officer blank */ }
+        });
+      } catch (error) {
+        notes.push(`Logics status lookup unavailable — ${String(error.message).slice(0, 70)}`);
+      }
+    }
+    material.callContext = { byPhone, statusByCase, officerByCase };
+  }
+
   material.notes = notes;
   material.gatherStats = gatherSession.stats();
   return material;
@@ -818,12 +1229,15 @@ function renderText(report) {
   }
   if (report.unknown?.length) L.push(`ignored: ${report.unknown.join(", ")}`);
   for (const n of report.notes) L.push(`note: ${n}`);
-  // TERMS travel with the numbers. Two people can read the same ROI and mean
-  // different things; stating the boundary is what stops that being invisible.
-  const terms = report.sections.filter((s) => s.block?.terms);
+  // TERMS travel with the numbers — two people can read the same ROI and mean
+  // different things. But a reader needs the BOUNDARY, not the doctrine: the
+  // full `terms` ran to 716 characters for one block and turned the email into
+  // paragraphs of explanation. The short line goes to readers; the full text
+  // still ships with the CSV and prints on the console.
+  const terms = report.sections.filter((s) => s.block?.termsShort || s.block?.terms);
   if (terms.length) {
     L.push("", "TERMS");
-    for (const s of terms) L.push(`  ${s.label}: ${s.block.terms}`);
+    for (const s of terms) L.push(`  ${s.label}: ${s.block.termsShort || s.block.terms}`);
   }
   if (report.gathered?.activityRows) {
     L.push(`\nlive · ${report.gathered.activityRows} activity rows · ${report.gathered.casesConfirmed} case(s) confirmed · ${Math.round((report.gathered.durationMs || 0) / 1000)}s`);
@@ -941,22 +1355,36 @@ function renderHtml(report) {
  */
 function toTemplateData(report, { title = "Report", eyebrow = "Parallel" } = {}) {
   const MONEY_COL = /(cash|amount|spend|collected|revenue|cost|net|margin|profit)/i;
-  const money = (n) => "$" + Number(n).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  // Sign OUTSIDE the dollar sign. Number(-1127.75).toLocaleString() yields
+  // "-1,127.75", so naive concatenation printed "$-1,127.75" in the net column.
+  const money = (n) => {
+    const v = Number(n) || 0;
+    const body = Math.abs(v).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    return `${v < 0 ? "-" : ""}$${body}`;
+  };
 
   const sections = report.sections.map((s) => {
-    if (s.error) return { label: s.label, error: s.error, terms: s.block?.terms || null, columns: [], rows: [] };
+    if (s.error) return { label: s.label, error: s.error, terms: s.block?.termsShort || s.block?.terms || null, columns: [], rows: [] };
     let table;
     try {
       table = s.block.csv(s.data);
     } catch {
       return { label: s.label, error: "could not be tabulated", terms: null, columns: [], rows: [] };
     }
-    const columns = table.columns.map((col) => ({
+    // THE EMAIL IS FOR PEOPLE WHO DO NOT WANT TO READ EMAIL. A block may
+    // declare `emailColumns` — a short subset — and an EMPTY array means the
+    // headline alone, no table. The full column set still goes to the CSV
+    // attachment, so nothing is lost, it is just not in the way.
+    const emailCols = Array.isArray(table.emailColumns) ? table.emailColumns : table.columns;
+    // A block may also narrow the ROWS the email shows. The CSV keeps all of
+    // them; the mail keeps the ones somebody can act on.
+    const emailRows = Array.isArray(table.emailRows) ? table.emailRows : (table.rows || []);
+    const columns = emailCols.map((col) => ({
       label: String(col.header).replace(/_/g, " "),
       numeric: false,
       header: col.header,
     }));
-    const rows = (table.rows || []).map((r) => table.columns.map((col, i) => {
+    const rows = emailCols.length === 0 ? [] : emailRows.map((r) => emailCols.map((col, i) => {
       const v = col.get(r);
       const numeric = typeof v === "number" && Number.isFinite(v);
       if (numeric) columns[i].numeric = true;
@@ -976,7 +1404,23 @@ function toTemplateData(report, { title = "Report", eyebrow = "Parallel" } = {})
       }
       return { text: String(v) };
     }));
-    return { label: s.label, terms: s.block?.terms || null, error: null, columns, rows };
+    return {
+      // The masthead is gone, so the first section carries the date — otherwise
+      // nothing inside the mail says which day it covers. Mickey 2026-07-30:
+      // "where topline is write Date Report".
+      label: s.id === "topline"
+        ? `${report.from === report.to ? report.from : `${report.from} → ${report.to}`} Report`
+        : s.label,
+      // A block may hand the email a one-line headline alongside its table.
+      // Without it, a section like Top line becomes a 1-row / 13-column table
+      // that no mail client can render legibly, and a section like Status
+      // movement has to choose between its counts and its chase list.
+      summary: table.summary ? String(table.summary) : null,
+      terms: s.block?.termsShort || s.block?.terms || null,
+      error: null,
+      columns,
+      rows,
+    };
   });
 
   const notes = [...(report.notes || [])];
@@ -991,9 +1435,11 @@ function toTemplateData(report, { title = "Report", eyebrow = "Parallel" } = {})
     domain: report.domain === "ALL" ? null : report.domain,
     sections,
     notes,
-    footer: report.gathered?.activityRows
-      ? `Gathered live · ${report.gathered.activityRows.toLocaleString()} activity rows · ${Math.round((report.gathered.durationMs || 0) / 1000)}s`
-      : "Gathered live from the source systems.",
+    // NO DIAGNOSTICS IN THE EMAIL — settled with Mickey. Row counts and
+    // gather timings are operator telemetry: they belong in the CLI and the
+    // run journal, not under a board someone reads to decide what to chase.
+    // What the reader does need is where the numbers came from.
+    footer: "Gathered live from the source systems at send time.",
   };
 }
 

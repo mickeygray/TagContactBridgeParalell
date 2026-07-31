@@ -35,7 +35,10 @@ test("negatives are flagged so a loss reads as a loss", () => {
     sections: [block("n", "Net", [{ header: "net", get: (r) => r.net }], [{ net: -630 }])],
   });
   assert.equal(d.sections[0].rows[0][0].negative, true);
-  assert.equal(d.sections[0].rows[0][0].text, "$-630.00");
+  // Sign OUTSIDE the dollar sign. This previously asserted "$-630.00", which
+  // is what naive "$" + toLocaleString() produces — the test was encoding the
+  // bug rather than the intent, and the emailed net column read "$-1,127.75".
+  assert.equal(d.sections[0].rows[0][0].text, "-$630.00");
 });
 
 test("absent is an em dash and muted — never a zero", () => {
@@ -93,7 +96,12 @@ test("the template file exists and leaves no unrendered tags", () => {
     require.resolve("../../packages/shared-templates/src/templates/reports/report.hbs"), "utf8",
   );
   assert.ok(tpl.includes("{{#each sections}}"), "sections must be iterated");
-  assert.ok(tpl.includes("{{#if this.terms}}"), "terms must be rendered");
+  // Terms are deliberately NOT rendered in the mail any more — a definition
+  // paragraph under every table each night is read once and skipped forever.
+  // They still travel on the report object (asserted in "terms travel into the
+  // template" above) for the CSV and text renderings.
+  assert.ok(!tpl.includes("{{this.terms}}"), "terms must not be printed in the mail");
+  assert.ok(tpl.includes("{{this.summary}}"), "section headlines must be rendered");
   // Every opened block helper must be closed.
   for (const [open, close] of [["{{#each", "{{/each}}"], ["{{#if", "{{/if}}"]]) {
     const opens = (tpl.match(new RegExp(open.replace(/[{#]/g, "\$&"), "g")) || []).length;
