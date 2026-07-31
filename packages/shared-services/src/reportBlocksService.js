@@ -768,11 +768,45 @@ const BLOCKS = [
         // AGED_LABEL is destructured inside compute(), not here — reading it
         // in csv() threw a ReferenceError that the template caught and turned
         // into a silently empty section.
-        emailRows: rows.filter((r) => {
+        // BUT THE MONEY STILL HAS TO ADD UP. Dropping the buckets outright made
+        // the email contradict itself: on 2026-07-31 the top line read
+        // "$4,836 in · 1 deal" while every row of this table read zero, because
+        // all of it — including a real WYNN deal — sat on Aged and the
+        // catch-alls. Hiding a row must never hide money.
+        //
+        // So they collapse into ONE residual line instead of vanishing. The
+        // table stays about active pieces; the section still reconciles to the
+        // top line; and a large residual is itself the finding — it means the
+        // day's money is not attributed to anything you can buy more of.
+        emailRows: (() => {
           const { AGED_LABEL: AGED } = require("../../shared-config/src/activeSources");
-          const s = String(r.source || "");
-          return s !== AGED && !s.startsWith("(") && !s.endsWith("(catch-all)");
-        }),
+          const isPiece = (r) => {
+            const s = String(r.source || "");
+            return s !== AGED && !s.startsWith("(") && !s.endsWith("(catch-all)");
+          };
+          const pieces = rows.filter(isPiece);
+          const rest = rows.filter((r) => !isPiece(r));
+          if (!rest.length) return pieces;
+          const sum = (k) => round2(rest.reduce((s, r) => s + (Number(r[k]) || 0), 0));
+          const count = (k) => rest.reduce((s, r) => s + (Number(r[k]) || 0), 0);
+          return [...pieces, {
+            source: `Not attributed to a piece (${rest.length})`,
+            deals: count("deals"),
+            newCash: sum("newCash"),
+            recurringCash: sum("recurringCash"),
+            totalCash: sum("totalCash"),
+            spend: sum("spend"),
+            responses: count("responses"),
+            leads: count("leads"),
+            // No ratio: aged and catch-all money has no campaign behind it, so
+            // a return would be meaningless — the rule Aged already follows.
+            roi: null,
+            roas: null,
+            costPer: null,
+            net: round2(sum("totalCash") - sum("spend")),
+            residual: true,
+          }];
+        })(),
         // Five columns in the mail: who, how many, how much in, how much out,
         // and the return. The other eight are for the CSV.
         emailColumns: [
