@@ -71,6 +71,32 @@ function callbackRecordingUrl(value) {
   }
 }
 
+// Field NAMES the body carried, never values. safePayload is a strict
+// whitelist by design — good for PII, blinding for schema drift. When
+// PhoneBurner starts sending something new, this is what lets the next person
+// see it in stored data instead of guessing at key names and probing live.
+//
+// Deliberately narrow: only keys that look like an id, a case, a recording or
+// an agent, capped, and matched case-insensitively across the top level and
+// one level of nesting. No value ever leaves this function.
+const OBSERVED_KEY_RE = /(record|case|agent|lead|contact|session|dispos|connect|durat|call)/i;
+function callbackObservedKeys(body = {}, { maxKeys = 40 } = {}) {
+  if (!body || typeof body !== "object") return [];
+  const seen = new Set();
+  const walk = (obj, prefix, depth) => {
+    if (!obj || typeof obj !== "object" || depth > 1 || seen.size >= maxKeys) return;
+    for (const key of Object.keys(obj)) {
+      if (seen.size >= maxKeys) return;
+      const path = prefix ? `${prefix}.${key}` : key;
+      if (OBSERVED_KEY_RE.test(key)) seen.add(path.slice(0, 64));
+      const child = obj[key];
+      if (child && typeof child === "object" && !Array.isArray(child)) walk(child, path, depth + 1);
+    }
+  };
+  walk(body, "", 0);
+  return [...seen].sort();
+}
+
 function callbackHook(value) {
   const key = String(value || "").trim().toLowerCase().replace(/_/g, "-");
   const hook = CALLBACK_HOOKS[key];
@@ -168,6 +194,48 @@ function normalizePhoneBurnerCallback(sourceHook, body = {}, {
         ?? body.call?.recording_url
         ?? body.audio_url,
       ),
+      // A RECORDING ID IS NOT A URL. callbackRecordingUrl() runs the value
+      // through new URL() and returns null for anything that is not https, so
+      // a bare id arriving in any of those fields was dropped on the floor.
+      // Measured 2026-07-31: 23,722 stored callbacks, every one call_done,
+      // zero with a recordingUrl — and the `recording` / `recording_ready`
+      // hooks the route supports have never once fired.
+      //
+      // The id matters more than the URL here: the service account gets a 404
+      // on getDialSession for the agents' own sessions (they dial on their own
+      // seats), so the session-lookup route is closed and whatever rides on
+      // the callback is all we will ever have.
+      recordingId: opaqueProviderIdentity(
+        body.recording_id
+        ?? body.recordingId
+        ?? body.call_recording_id
+        ?? body.callRecordingId
+        ?? body.recording?.id
+        ?? body.call?.recording_id,
+      ),
+      // The provider now echoes back the CRM case reference it was given with
+      // the lead. Captured verbatim and named neutrally: this route is a
+      // provider boundary and stays ignorant of which CRM the id belongs to —
+      // resolving it is the consumer's job, and a test enforces that.
+      //
+      // Worth capturing because it removes a lookup chain downstream: a dial
+      // is otherwise joined back to its case by phone number, which misses
+      // anyone whose number sits in a spouse or secondary slot.
+      crmCaseId: nonNegativeIntegerOrNull(
+        body.case_id
+        ?? body.caseId
+        ?? body.logics_case_id
+        ?? body.logicsCaseId
+        ?? body.contact?.case_id
+        ?? body.contact?.caseId
+        ?? body.custom?.case_id,
+      ),
+      // WHICH candidate keys the body actually carried — names only, never
+      // values. safePayload is a strict whitelist, so anything PhoneBurner
+      // adds is invisible after capture and the field names above are a
+      // guess until real traffic confirms them. This makes the next one
+      // answerable from stored data instead of another round of probing.
+      observedKeys: callbackObservedKeys(body),
     },
     status: classification.status,
     attempts: 0,
