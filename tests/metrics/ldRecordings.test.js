@@ -23,7 +23,7 @@ const attempt = (over = {}) => ({
   agentId: "phil_olson", durationSeconds: 900, connected: true, outcome: "review", ...over,
 });
 
-const run = (dials) => blocks.BY_ID.get("ldrecordings").compute({ dials });
+const run = (dials, events = []) => blocks.BY_ID.get("ldrecordings").compute({ dials, events });
 
 test("a long dial is reported with the agent, the case and the link", () => {
   const rows = run([dial({
@@ -73,21 +73,87 @@ test("an unknown seat is named as unknown rather than dropped", () => {
   assert.equal(rows[0].agent, "(unknown)");
 });
 
-test("the email shows the four things that decide whether to press play", () => {
+test("the email shows what decides whether to press play", () => {
+  // `outcome` joined the set once the case id gave us the case's real status;
+  // before that the column would only ever have read "review".
   const csv = blocks.BY_ID.get("ldrecordings").csv(run([dial({
     attempts: [attempt({ recordingUrl: "https://media.example.com/r/1.mp3" })],
   })]));
-  assert.deepEqual(csv.emailColumns.map((c) => c.header), ["minutes", "agent", "case", "listen"]);
+  assert.deepEqual(csv.emailColumns.map((c) => c.header),
+    ["minutes", "agent", "case", "outcome", "listen"]);
   // and the full set still reaches the CSV attachment
   assert.ok(csv.columns.length > csv.emailColumns.length);
 });
 
-test("it reads dials only — never CallRail, which cannot be split by company", () => {
-  assert.deepEqual(blocks.BY_ID.get("ldrecordings").needs, ["dials"]);
-  assert.ok(!blocks.BY_ID.get("ldrecordings").needs.includes("callsRange"));
+test("it reads dials and the activity sweep — never CallRail", () => {
+  // CallRail is a single TAG tenant of INBOUND calls and can never be split by
+  // company, so it must not source an LD list. `activity` is here because the
+  // case id joins a dial to its agent and outcome without a Logics call.
+  const needs = blocks.BY_ID.get("ldrecordings").needs;
+  assert.deepEqual(needs, ["dials", "activity"]);
+  assert.ok(!needs.includes("callsRange"));
 });
 
 test("both boards carry it, and it is the vendor board's only call list", () => {
   assert.ok(blocks.PRESETS["vendor-ld"].includes("ldrecordings"));
   assert.ok(blocks.PRESETS.rollup.includes("ldrecordings"));
+});
+
+// Mickey 2026-07-31: "crm case id is how to get agent and outcome from
+// activities." The case id is the join and the sweep is already in memory, so
+// both come without a single extra Logics call.
+
+const ev = (over = {}) => ({
+  domain: "WYNN", caseId: 430083, kind: "status-change",
+  createdAt: "2026-07-31T10:00:00Z", payload: {}, ...over,
+});
+
+test("the outcome is the case's latest status, not the lead-state token", () => {
+  // attempts.outcome only ever holds "review" or "dnc" — that is lead state,
+  // not what came of the conversation.
+  const rows = run(
+    [dial({ attempts: [attempt({ outcome: "review" })] })],
+    [ev({ payload: { toStatus: "[Active Prospect]-POST DATE" } })],
+  );
+  assert.equal(rows[0].outcome, "[Active Prospect]-POST DATE");
+});
+
+test("the latest status wins when a case moved twice", () => {
+  const rows = run([dial({ attempts: [attempt()] })], [
+    ev({ createdAt: "2026-07-31T09:00:00Z", payload: { toStatus: "[Active Prospect]-Opened" } }),
+    ev({ createdAt: "2026-07-31T17:00:00Z", payload: { toStatus: "[TIER 1]-ACTIVE" } }),
+  ]);
+  assert.equal(rows[0].outcome, "[TIER 1]-ACTIVE");
+});
+
+test("with no status change, review reports as no outcome rather than a meaningless word", () => {
+  const rows = run([dial({ attempts: [attempt({ outcome: "review" })] })], []);
+  assert.equal(rows[0].outcome, null, "review is the ABSENCE of a disposition");
+});
+
+test("dnc survives the fallback — it is a real result", () => {
+  const rows = run([dial({ attempts: [attempt({ outcome: "dnc" })] })], []);
+  assert.equal(rows[0].outcome, "DNC");
+});
+
+test("the agent is the case's settlement officer, with the dialling seat behind it", () => {
+  const rows = run([dial({ attempts: [attempt({ agentId: "phil_olson" })] })], [
+    ev({ kind: "assignment", subject: "Assigned to Set. Officer : Chris Bolt" }),
+  ]);
+  assert.equal(rows[0].agent, "Chris Bolt", "the officer owns the case");
+  assert.equal(rows[0].agentSeat, "Phil Olson", "the seat that dialled is kept");
+});
+
+test("--Unassigned-- is never printed as a person", () => {
+  const rows = run([dial({ attempts: [attempt({ agentId: "phil_olson" })] })], [
+    ev({ kind: "assignment", subject: "Assigned to Set. Officer : --Unassigned--" }),
+  ]);
+  assert.equal(rows[0].agent, "Phil Olson", "falls back to the seat, not to the placeholder");
+});
+
+test("activity for a different case never bleeds across", () => {
+  const rows = run([dial({ caseId: 430083, attempts: [attempt()] })], [
+    ev({ caseId: 999999, payload: { toStatus: "[TIER 1]-ACTIVE" } }),
+  ]);
+  assert.equal(rows[0].outcome, null);
 });

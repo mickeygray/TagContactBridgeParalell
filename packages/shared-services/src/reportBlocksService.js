@@ -373,22 +373,67 @@ const BLOCKS = [
     hint: "Long outbound dials with the agent, the case and the recording",
     termsShort: "Outbound LD dials at or over the long-call threshold, with a listen link.",
     terms: "Outbound PhoneBurner dials inside the range at or over the long-call threshold. AGENT is the seat that placed the dial; CASE is the case the lead belongs to. A call with no link yet is still listed and marked pending - the recording arrives after the call ends, so absence is normal rather than missing.",
-    needs: ["dials"],
-    compute({ dials = [] }) {
+    // Mickey 2026-07-31: "crm case id is how to get agent and outcome from
+    // activities." The case id is the join, and the activity sweep is already
+    // gathered — so both come free, with no extra Logics call.
+    //
+    // It matters because the attempt's own fields are poor substitutes:
+    //   outcome  attempts.outcome only ever holds "review" or "dnc". That is
+    //            LEAD state, not what came of the conversation. The case's
+    //            latest status change is the real outcome.
+    //   agent    attempts.agentId is the SEAT that dialled. Usually the same
+    //            person, but the case's settlement officer is who owns it, and
+    //            the seat is absent on some attempts.
+    needs: ["dials", "activity"],
+    compute({ dials = [], events = [] }) {
       const LONG_SEC = Math.max(60, Number(process.env.LD_LONG_CALL_SECONDS) || 300);
       const { canonicalStaffName } = require("../../shared-config/src/staffRoster");
+
+      // Latest status and latest assigned officer per case, from the sweep.
+      const statusOf = new Map();
+      const officerOf = new Map();
+      const seenAt = new Map();
+      for (const e of events) {
+        if (!e?.caseId) continue;
+        const key = `${String(e.domain || "").toUpperCase()}:${e.caseId}`;
+        const at = String(e.createdAt || "");
+        if (e.kind === "status-change" && !e.payload?.selfTransition) {
+          const to = e.payload?.toStatus || null;
+          if (to && (!seenAt.has(key) || at >= seenAt.get(key))) {
+            statusOf.set(key, to);
+            seenAt.set(key, at);
+          }
+        }
+        if (e.kind === "assignment") {
+          const m = String(e.subject || "").match(/^Assigned to\s+Set\.?\s*Officer\s*:\s*(.+)$/i);
+          const name = m ? m[1].trim() : null;
+          // "--Unassigned--" is a real answer meaning nobody owns it; it must
+          // not be printed as though it were a person.
+          if (name && !/^--\s*Unassigned\s*--$/i.test(name)) officerOf.set(key, name);
+        }
+      }
+
       const out = [];
       for (const d of dials) {
         for (const a of Array.isArray(d.attempts) ? d.attempts : []) {
           const sec = Number(a.durationSeconds) || 0;
           if (sec < LONG_SEC) continue;
+          const key = `${String(d.domain || "").toUpperCase()}:${d.caseId}`;
+          const seat = a.agentId ? canonicalStaffName(a.agentId) : null;
           out.push({
-            agent: a.agentId ? canonicalStaffName(a.agentId) : "(unknown)",
+            // Officer first — who owns the case — then the seat that dialled.
+            agent: officerOf.get(key) || seat || "(unknown)",
+            agentSeat: seat,
             domain: d.domain ? String(d.domain).toUpperCase() : null,
             caseId: d.caseId ?? null,
             dateKey: d.dateKey || null,
             minutes: Math.round(sec / 6) / 10,
-            outcome: String(a.outcome || d.lastOutcome || "unknown"),
+            // The case's own latest status, not the lead-state token. Falling
+            // back to "review" would print a word that means nothing to a
+            // reader — it is the ABSENCE of a disposition, not a result. "dnc"
+            // is kept because it is a real one: they asked not to be called.
+            outcome: statusOf.get(key)
+              || (/^dnc$/i.test(String(a.outcome || d.lastOutcome || "")) ? "DNC" : null),
             listenUrl: a.recordingUrl || d.recordingUrl || null,
           });
         }
@@ -413,11 +458,13 @@ const BLOCKS = [
       return {
         summary: `${rows.length} long dial${rows.length === 1 ? "" : "s"} · ${withLink} with a recording`
           + (rows.length - withLink ? ` · ${rows.length - withLink} still pending` : ""),
-        // The email wants the four things that decide whether to press play.
+        // What decides whether to press play: how long, who owns it, which
+        // case, where it stands now, and the link.
         emailColumns: [
           { header: "minutes", get: (x) => x.minutes },
           { header: "agent", get: (x) => x.agent },
           { header: "case", get: (x) => (x.caseId ? `${x.domain || ""} ${x.caseId}`.trim() : null) },
+          { header: "outcome", get: (x) => x.outcome },
           { header: "listen", get: (x) => x.listenUrl },
         ],
         rows,
