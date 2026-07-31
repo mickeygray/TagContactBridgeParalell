@@ -537,6 +537,7 @@ function harness({
   persistDailyDialOutcomes = null,
   reconcileDailyDialCalls = null,
   providerConsumptionOrder = null,
+  refreshSourceStatuses = null,
   logger = null,
 } = {}) {
   const repository = new FakeRepository();
@@ -654,6 +655,7 @@ function harness({
     persistDailyDialOutcomes,
     reconcileDailyDialCalls,
     providerConsumptionOrder,
+    refreshSourceStatuses,
     logger,
   });
   return {
@@ -2029,6 +2031,9 @@ test("duplicate call_done replay is exact-once for attempt and agent decrement",
   assert.equal(cadenceAction.dailyAttemptCount, 1);
   assert.equal(cadenceAction.dailyAttemptDateKey, "2026-07-10");
   assert.equal(cadenceAction.recordingUrl, "https://recordings.example.invalid/call/1.mp3");
+  const completedEvent = h.repository.events.get("done-1");
+  assert.equal(completedEvent.domain, item.domain);
+  assert.equal(completedEvent.caseId, item.caseId);
   assert.equal(
     new Date(cadenceAction.completedAt).toISOString(),
     new Date(START.getTime() + 1_000).toISOString(),
@@ -2066,6 +2071,9 @@ test("restart after item completion reconstructs the exact agent completion metr
   assert.equal((await h.runtime.drainCapturedEvent(copy(failed))).status, "completed");
   assert.equal((await h.repository.getItemById(accepted._id)).totalAttemptCount, 1);
   assert.equal((await h.repository.getAgentById("bruce_allen")).providerCompletedCount, 1);
+  const recoveredEvent = h.repository.events.get(done._id);
+  assert.equal(recoveredEvent.domain, accepted.domain);
+  assert.equal(recoveredEvent.caseId, accepted.caseId);
 });
 
 test("non-authoritative low-water cleanup uses the fixed packet and exhausts a smaller queue", async () => {
@@ -3659,6 +3667,207 @@ test("physical Pool watchdog restores an empty active-agent Pool without a Call 
   assert.equal(repaired.automatic[0].physicalCount, 0);
 });
 
+test("physical Pool watchdog refreshes bounded canonical supply and refills on the next tick", async () => {
+  const rows = Array.from({ length: 20 }, (_, index) => ({
+    ...sourceRow(index + 1),
+    receivedAt: new Date("2026-07-01T17:00:00.000Z"),
+  }));
+  const h = harness({
+    rows,
+    actionsEnabled: true,
+    refillEnabled: true,
+    providerInventoryAuthoritative: true,
+    deliveryWindowEvaluator: () => true,
+    legacyOperatorSurfaceEnabled: false,
+    simpleOperatorDirectAccessEnabled: false,
+  });
+  h.setClock("2026-07-10T14:50:00.000Z");
+  const started = await h.runtime.tick();
+  assert.equal(started.dayStart.status, "completed");
+  assert.equal(h.calls.length, 20);
+
+  h.providerContacts.clear();
+  rows.push(...Array.from({ length: 20 }, (_, index) => ({
+    ...sourceRow(index + 21),
+    receivedAt: new Date("2026-07-02T17:00:00.000Z"),
+  })));
+  h.setClock("2026-07-10T14:51:00.000Z");
+  const refreshStarted = await h.runtime.tick();
+  assert.match(refreshStarted.automatic[0].status, /^supply-refresh-/);
+  for (let attempt = 0; attempt < 20 && h.runtime.getState().watchdogSupplyRefresh.inFlight; attempt += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  const repaired = await h.runtime.tick();
+
+  assert.equal(h.calls.length, 40);
+  assert.equal(h.providerContacts.size, 20);
+  assert.equal(repaired.automatic.length, 1);
+  assert.equal(repaired.automatic[0].status, "posted");
+  assert.equal(repaired.automatic[0].accepted, 20);
+  assert.equal(h.runtime.getState().watchdogSupplyRefresh.status, "completed");
+});
+
+test("physical Pool supply refresh does not recycle unresolved review attempts", async () => {
+  const rows = Array.from({ length: 20 }, (_, index) => ({
+    ...sourceRow(index + 1),
+    receivedAt: new Date("2026-07-01T17:00:00.000Z"),
+  }));
+  const h = harness({
+    rows,
+    actionsEnabled: true,
+    refillEnabled: true,
+    providerInventoryAuthoritative: true,
+    deliveryWindowEvaluator: () => true,
+    legacyOperatorSurfaceEnabled: false,
+    simpleOperatorDirectAccessEnabled: false,
+  });
+  h.setClock("2026-07-10T14:50:00.000Z");
+  await h.runtime.tick();
+  assert.equal(h.calls.length, 20);
+
+  rows.push(...Array.from({ length: 20 }, (_, index) => ({
+    ...sourceRow(index + 21),
+    receivedAt: new Date("2026-07-02T17:00:00.000Z"),
+  })));
+  await h.runtime.ingestOnce();
+  for (const item of h.repository.items.values()) {
+    if (Number(item.caseId) <= 20) continue;
+    item.state = "review";
+    item.lastOutcome = "review";
+    item.totalAttemptCount = 1;
+    item.activeAttempt = true;
+    item.providerContactId = null;
+  }
+  h.providerContacts.clear();
+  h.setClock("2026-07-10T14:51:00.000Z");
+  const result = await h.runtime.tick();
+  for (let attempt = 0; attempt < 20 && h.runtime.getState().watchdogSupplyRefresh.inFlight; attempt += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+
+  assert.equal(h.calls.length, 20);
+  assert.equal(result.automatic.length, 1);
+  assert.match(result.automatic[0].status, /^supply-refresh-/);
+  assert.equal(result.automatic[0].accepted, 0);
+  assert.equal(h.runtime.getState().watchdogSupplyRefresh.status, "completed");
+});
+
+test("physical Pool starvation refreshes status evidence and reclassifies the exact blocked leads", async () => {
+  const rows = Array.from({ length: 20 }, (_, index) => sourceRow(index + 1));
+  let statusRefreshCalls = 0;
+  const h = harness({
+    rows,
+    actionsEnabled: true,
+    refillEnabled: true,
+    providerInventoryAuthoritative: true,
+    deliveryWindowEvaluator: () => true,
+    legacyOperatorSurfaceEnabled: false,
+    simpleOperatorDirectAccessEnabled: false,
+    refreshSourceStatuses: async () => {
+      statusRefreshCalls += 1;
+      const refreshedIdentities = [];
+      for (const row of rows) {
+        if (Number(row.caseId) <= 20) continue;
+        row.eligibility = { ok: true };
+        refreshedIdentities.push({ domain: row.domain, caseId: row.caseId });
+      }
+      return { refreshed: refreshedIdentities.length, failed: 0, refreshedIdentities };
+    },
+  });
+  h.setClock("2026-07-10T14:50:00.000Z");
+  await h.runtime.tick();
+  assert.equal(h.calls.length, 20);
+
+  rows.push(...Array.from({ length: 20 }, (_, index) => sourceRow(index + 21)));
+  await h.runtime.ingestOnce();
+  for (const row of rows) {
+    if (Number(row.caseId) > 20) {
+      row.eligibility = { ok: false, reason: "status-freshness-unproven" };
+    }
+  }
+  await h.runtime.ingestOnce();
+  assert.equal(
+    [...h.repository.items.values()].filter((item) => item.state === "blocked").length,
+    20,
+  );
+  h.providerContacts.clear();
+  h.setClock("2026-07-10T14:51:00.000Z");
+  const started = await h.runtime.tick();
+  assert.match(started.automatic[0].status, /^supply-refresh-/);
+  for (let attempt = 0; attempt < 40 && h.runtime.getState().watchdogSupplyRefresh.inFlight; attempt += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  const state = h.runtime.getState().watchdogSupplyRefresh;
+  assert.equal(statusRefreshCalls, 1);
+  assert.equal(state.status, "completed");
+  assert.equal(state.statusRefreshed, 20);
+  assert.equal(state.statusFailed, 0);
+  assert.equal(state.statusReclassified, 20);
+  assert.equal(state.statusReevaluated, 20);
+  assert.equal(state.statusStillBlocked, 0);
+
+  const repaired = await h.runtime.tick();
+  assert.equal(repaired.automatic[0].status, "posted");
+  assert.equal(repaired.automatic[0].accepted, 20);
+  assert.equal(h.providerContacts.size, 20);
+});
+
+test("physical Pool status-refresh failure remains background-safe and posts nothing", async () => {
+  const h = harness({
+    rows: [],
+    actionsEnabled: true,
+    refillEnabled: true,
+    providerInventoryAuthoritative: true,
+    deliveryWindowEvaluator: () => true,
+    legacyOperatorSurfaceEnabled: false,
+    simpleOperatorDirectAccessEnabled: false,
+    refreshSourceStatuses: async () => {
+      const error = new Error("status-api-unavailable");
+      error.code = "STATUS_API_UNAVAILABLE";
+      throw error;
+    },
+  });
+  h.setClock("2026-07-10T14:50:00.000Z");
+  await h.runtime.tick();
+  h.setClock("2026-07-10T14:51:00.000Z");
+  const started = await h.runtime.tick();
+  assert.match(started.automatic[0].status, /^supply-refresh-/);
+  for (let attempt = 0; attempt < 20 && h.runtime.getState().watchdogSupplyRefresh.inFlight; attempt += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  assert.equal(h.runtime.getState().watchdogSupplyRefresh.status, "failed");
+  assert.equal(h.calls.length, 0);
+  assert.equal(h.providerContacts.size, 0);
+});
+
+test("physical Pool watchdog refills before a later ingestion failure aborts the tick", async () => {
+  const h = harness({
+    rows: Array.from({ length: 60 }, (_, index) => sourceRow(index + 1)),
+    actionsEnabled: true,
+    refillEnabled: true,
+    providerInventoryAuthoritative: true,
+    deliveryWindowEvaluator: () => true,
+    legacyOperatorSurfaceEnabled: false,
+    simpleOperatorDirectAccessEnabled: false,
+  });
+  h.setClock("2026-07-10T14:50:00.000Z");
+  const started = await h.runtime.tick();
+  assert.equal(started.dayStart.status, "completed");
+  assert.equal(h.calls.length, 20);
+
+  h.providerContacts.clear();
+  h.source.readBatch = async () => {
+    const error = new Error("later-stage-source-failure");
+    error.code = "SOURCE_UNAVAILABLE";
+    throw error;
+  };
+  h.setClock("2026-07-10T14:51:00.000Z");
+
+  await assert.rejects(h.runtime.tick(), { code: "SOURCE_UNAVAILABLE" });
+  assert.equal(h.calls.length, 40);
+  assert.equal(h.providerContacts.size, 20);
+});
+
 test("physical Pool watchdog does not refill an operator-paused agent", async () => {
   const h = harness({
     rows: Array.from({ length: 40 }, (_, index) => sourceRow(index + 1)),
@@ -4591,6 +4800,9 @@ test("a historical completion cannot manufacture current agent activity", async 
     receivedAt: new Date("2026-07-11T15:01:00.000Z"),
   });
   assert.equal((await h.runtime.drainCapturedEvent(delayed)).status, "completed");
+  const historicalEvent = h.repository.events.get(delayed._id);
+  assert.equal(historicalEvent.domain, first.domain);
+  assert.equal(historicalEvent.caseId, first.caseId);
   const after = await h.repository.getAgentById("bruce_allen");
   const item = await h.repository.getItemById(first._id);
 

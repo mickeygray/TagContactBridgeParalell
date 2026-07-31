@@ -61,6 +61,36 @@ const leadDeliveryItemSchema = new mongoose.Schema({
   leadCadenceId: { type: String, default: null, index: true },
   normalizedPhone: { type: String, required: true },
   displayName: { type: String, default: null },
+
+  // ── COHORT POLICY (CallRail long-call recovery, work order §15.2/§17) ────
+  //
+  // These exist because the schema is STRICT and every recovery gate keys on
+  // them — isCallRecoveryItem, resolveLeadDeliveryContactPolicy and
+  // resolveSelectionRank all read `inventoryClass` / `contactPolicyId` /
+  // `expiresAt` / `eligibleFrom`. Without a home here mongoose would drop all
+  // six on write, silently, and a recovery item would come back out of Mongo
+  // indistinguishable from ordinary aged filler.
+  //
+  // The dangerous half of that is not the cap — an unrecognised item falls back
+  // to the age-based policy, which is STRICTER for an old case. It is the
+  // EXPIRY: with `expiresAt` gone there is no 120-day stop, so the episode
+  // would never age out of the program. A recovery case is allowed to be called
+  // for 120 days precisely because that limit is enforced somewhere.
+  //
+  // Nullable and defaulted, so an ordinary LD lead is completely unaffected —
+  // `isCallRecoveryItem` keys on contactPolicyId, which stays null for them.
+  inventoryClass: { type: String, default: null, index: true },
+  contactPolicyId: { type: String, default: null },
+  // The episode's own clock. `receivedAt` remains the lead's true age; these
+  // are the PROGRAM's window and must not be conflated with it.
+  eligibleFrom: { type: Date, default: null },
+  expiresAt: { type: Date, default: null },
+  firstQualifyingCallAt: { type: Date, default: null },
+  // Back-reference to the CallRecoveryLead episode that produced this item.
+  episodeId: { type: String, default: null, index: true },
+  // Set when a human actually answered, so the policy can refuse a same-day
+  // retry without inferring it from attempt counts.
+  lastHumanAnsweredAt: { type: Date, default: null },
   sourcePool: {
     type: String,
     enum: ["new_today", "overnight", "older_available", "follow_up_due", null],

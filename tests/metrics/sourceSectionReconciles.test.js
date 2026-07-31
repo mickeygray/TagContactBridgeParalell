@@ -96,3 +96,45 @@ test("the full row set still reaches the CSV, unmerged", () => {
     "reconciliation happens in the CSV, so it keeps every bucket separately");
   assert.ok(csv.rows.length >= csv.emailRows.length);
 });
+
+// 2026-07-31, Mickey: "what they wanna see is roas anyway roi is a month based
+// thing. so initial payments and spend for that percentage on the daily
+// email." The emailed table shipped ROI, which on any single day compares
+// RECURRING cash from cases sold months ago against TODAY's spend — a ratio
+// that swings on when the recurring batch lands and says nothing about the
+// piece. ROI stays in the CSV, where a month-long range makes it mean
+// something.
+
+test("the emailed ratio is ROAS — initials over spend, not ROI", () => {
+  const m = material([payment({ caseId: 11, amount: 250, sourceAtSale: "Urgent Third State" })]);
+  m.spendBySource = { "Urgent Third State": { spend: 1000, leads: 0, channel: "mailer" } };
+  const { csv } = sourceRows(m);
+  const cols = csv.emailColumns.map((c) => c.header);
+  assert.ok(cols.includes("roas_pct"), `expected roas_pct, got ${cols.join(",")}`);
+  assert.equal(cols.includes("roi_pct"), false, "ROI is a month measure — it does not belong in a daily");
+});
+
+test("ROI still reaches the CSV, where a month range makes it mean something", () => {
+  const m = material([payment({ caseId: 11, amount: 250, sourceAtSale: "Urgent Third State" })]);
+  const { csv } = sourceRows(m);
+  const cols = csv.columns.map((c) => c.header);
+  assert.ok(cols.includes("roi_pct"));
+  assert.ok(cols.includes("roas_pct"));
+});
+
+test("ROAS reads initials over spend, ignoring recurring entirely", () => {
+  // The exact thing that makes a daily ROI misleading: recurring cash from
+  // cases sold long ago, landing today, against today's spend.
+  const m = material([
+    payment({ caseId: 11, amount: 250, paymentType: "initial", sourceAtSale: "Urgent Third State" }),
+    payment({ caseId: 12, amount: 9000, paymentType: "recurring", sourceAtSale: "Urgent Third State" }),
+  ]);
+  m.spendBySource = { "Urgent Third State": { spend: 1000, leads: 0, channel: "mailer" } };
+  const row = sourceRows(m).csv.emailRows.find((r) => /Urgent Third/.test(String(r.source)));
+  const roas = csv_get(sourceRows(m).csv, "roas_pct", row);
+  assert.equal(roas, 25, "250 / 1000 — the $9,000 of recurring must not touch it");
+});
+
+function csv_get(csv, header, row) {
+  return csv.emailColumns.find((c) => c.header === header).get(row);
+}

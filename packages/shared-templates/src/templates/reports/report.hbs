@@ -14,6 +14,35 @@
                 the date range and the tenant; repeating them in a dark banner
                 spent the top of the screen restating the envelope. --}}
 
+          {{!-- SOURCES THAT DID NOT ANSWER.
+                Above the numbers, deliberately. A nightly email once went out
+                for weeks reading zero because a gather had failed, and nothing
+                on the page said so — a broken night and a quiet night looked
+                identical. `alerts` is not the notes list (that stayed out, and
+                should); it is only "we could not read this", so a number below
+                is MISSING rather than low. If this band is empty, every source
+                answered and the numbers can be taken at face value. --}}
+          {{#if failures.length}}
+            <tr><td style="padding:20px 24px 0;">
+              <div style="background:#fef2f2;border:1px solid #fecaca;border-radius:6px;padding:10px 12px;color:#991b1b;font-size:13px;line-height:1.5;">
+                <div style="font-weight:600;padding-bottom:2px;">A source did not answer — some numbers below are missing, not low</div>
+                {{#each failures}}<div>· {{this}}</div>{{/each}}
+              </div>
+            </td></tr>
+          {{/if}}
+          {{!-- Amber, not red. This band is mostly the hand-maintained spend
+                sheet, which on a daily board is normally a couple of days
+                behind. It still has to be said — a source row with no spend
+                prints ROAS against a zero denominator and reads as a piece
+                that failed — but it is a data-entry state, not a fault. --}}
+          {{#if advisories.length}}
+            <tr><td style="padding:20px 24px 0;">
+              <div style="background:#fffbeb;border:1px solid #fde68a;border-radius:6px;padding:10px 12px;color:#92400e;font-size:13px;line-height:1.5;">
+                {{#each advisories}}<div>· {{this}}</div>{{/each}}
+              </div>
+            </td></tr>
+          {{/if}}
+
           {{#each sections}}
             <tr><td style="padding:20px 24px 0;">
               <div style="font-size:13px;font-weight:600;color:#0f172a;border-bottom:2px solid #0f172a;padding-bottom:6px;">{{this.label}}</div>

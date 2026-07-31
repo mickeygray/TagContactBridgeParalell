@@ -12,10 +12,13 @@
 // no opinions about content — the blocks own that.
 
 const ReportDefinition = require("../../shared-models/src/ReportDefinition");
-const { composeReport, renderHtml, renderText, toTemplateData } = require("./reportComposerService");
+const { composeReport, renderHtml, renderText, renderCsvs, toTemplateData } = require("./reportComposerService");
 const { resolveSelection } = require("./reportBlocksService");
 
 const DAY_MS = 86400000;
+
+// Three attempts, then wait for tomorrow. See isDue.
+const MAX_ATTEMPTS_PER_DAY = Math.max(1, Number(process.env.REPORT_MAX_ATTEMPTS_PER_DAY) || 3);
 
 /** Pacific day key — every loop on this box is Pacific, so reports are too. */
 function pacificKey(at = new Date()) {
@@ -82,6 +85,16 @@ function isDue(def, now = new Date()) {
   if (nowMins < wantMins) return { due: false, reason: "before scheduled time" };
   const key = pacificKey(now);
   if (def.lastRunKey === key) return { due: false, reason: "already ran today" };
+  // STOP RETRYING AFTER THREE. A failed run deliberately does not stamp
+  // lastRunKey so the next poll retries it — right, but the only other stop was
+  // Pacific midnight. At a 60s poll that is hundreds of attempts, each one a
+  // FULL live gather: a CallRail daily-stat re-sync that WRITES to Mongo, ~46
+  // per-day CallRail pulls, a Logics getCaseInfo per deal, RingCentral queue
+  // paging. Hammering the vendors overnight is how a bad Tuesday makes
+  // Wednesday wrong too, so three tries and then wait for tomorrow.
+  if (def.lastAttemptKey === key && (Number(def.attemptsToday) || 0) >= MAX_ATTEMPTS_PER_DAY) {
+    return { due: false, reason: `failed ${def.attemptsToday} time(s) today — not retrying until tomorrow` };
+  }
   return { due: true, reason: null };
 }
 
@@ -121,10 +134,17 @@ async function runDefinition(def, {
     eyebrow: def.description || "Report",
   });
   const html = renderHtml(report);
+  // A SOURCE THAT DID NOT ANSWER IS AN ERROR, not a footnote. `sections[].error`
+  // only catches a block that THREW; a total Logics outage composes five
+  // perfectly-formed sections of zero and filed as a clean run, which is how a
+  // broken nightly went unnoticed for weeks.
+  const failures = report.failures || [];
   const result = {
     definition: def.name, range, blocks: selection.blocks.map((b) => b.id),
     sections: report.sections.length,
     errors: report.sections.filter((s) => s.error).map((s) => `${s.id}: ${s.error}`),
+    failures,
+    degraded: failures.length > 0,
     notes: report.notes || [],
     text, html, report, delivered: false, durationMs: Date.now() - started,
   };
@@ -132,31 +152,90 @@ async function runDefinition(def, {
   if (dryRun) return result;
 
   const to = (def.recipients || []).filter(Boolean);
-  if (def.sendEmail && to.length && typeof sendMail === "function") {
-    // sendMail(domain, options) — the DOMAIN is the first positional argument,
-    // not a field on the options object. Passing options first silently sends
-    // from the wrong transport at best and throws at worst.
-    await sendMail(def.domain || null, {
-      to, from: fromEmail || undefined,
-      subject: `${def.name} · ${range.from}${range.to !== range.from ? ` → ${range.to}` : ""}`,
-      // Branded HBS template so report mail reads as part of the same
-      // family as every other email the app sends. `text` is the plain-text
-      // alternative; renderHtml stays for the standalone --html file path.
-      template: "reports/report",
-      data: templateData,
-      text,
-    });
-    result.delivered = true;
-  } else if (def.sendEmail && !to.length) {
-    result.notes = [...result.notes, "no recipients on this definition — nothing was sent"];
+  // A definition armed to send, with nobody to send to, is broken — not idle.
+  // It used to fall through to the bookkeeping below, stamp the day as run and
+  // clear lastError, so every status surface reported success while no mail
+  // existed. Throwing hands it to the runtime's catch, which records the error
+  // and deliberately does NOT claim the day, so a fixed recipient list is
+  // picked up on the next poll.
+  if (def.sendEmail && !to.length) {
+    throw new Error(`definition "${def.name}" is scheduled to send but has no recipients`);
+  }
+  if (def.sendEmail && typeof sendMail !== "function") {
+    throw new Error(`definition "${def.name}" is scheduled to send but no mailer was provided`);
+  }
+
+  if (def.sendEmail) {
+    // CLAIM THE DAY BEFORE SENDING, not after. isDue gates only on lastRunKey,
+    // and the gap between "mail accepted" and "day stamped" was wide enough to
+    // matter: a restart, an OOM or a failed save inside it re-sent the whole
+    // board on the next poll, and start() polls immediately. Same ruling as
+    // the night board's claimBoardEmail (since deleted) — a missed email is
+    // recoverable, a duplicate one is not.
+    const key = pacificKey(now);
+    const prior = def.lastRunKey;
+    const claimed = await ReportDefinition.findOneAndUpdate(
+      { _id: def._id, lastRunKey: { $ne: key } },
+      { $set: { lastRunKey: key } },
+      { new: true },
+    );
+    if (!claimed) return { ...result, delivered: false, skipped: "already claimed today" };
+
+    // `attachCsv` was stored on every definition and printed as "+csv" on the
+    // schedule listing, while nothing anywhere honoured it — the string appears
+    // nowhere else in this file. A setting that shows as on and does nothing is
+    // worse than no setting. One file per section; the mailer passes
+    // inline-buffer attachments straight through.
+    const attachments = def.attachCsv
+      ? renderCsvs(report).map((c) => ({
+        filename: c.filename,
+        content: Buffer.from(c.content, "utf8"),
+        contentType: "text/csv",
+      }))
+      : [];
+
+    try {
+      // sendMail(domain, options) — the DOMAIN is the first positional argument,
+      // not a field on the options object. Passing options first silently sends
+      // from the wrong transport at best and throws at worst.
+      await sendMail(def.domain || null, {
+        to, from: fromEmail || undefined,
+        attachments,
+        // A degraded board must announce itself in the SUBJECT. The red banner
+        // inside only helps someone who opened it; the point of a nightly is
+        // that most nights you glance at the subject and move on.
+        subject: `${failures.length ? "[DEGRADED] " : ""}${def.name} · ${range.from}`
+          + `${range.to !== range.from ? ` → ${range.to}` : ""}`,
+        // Branded HBS template so report mail reads as part of the same
+        // family as every other email the app sends. `text` is the plain-text
+        // alternative; renderHtml stays for the standalone --html file path.
+        template: "reports/report",
+        data: templateData,
+        text,
+      });
+      result.delivered = true;
+    } catch (error) {
+      // Give the day back so the next poll retries. Without this a transient
+      // SMTP failure at 20:30 silently costs the whole night.
+      await ReportDefinition.updateOne({ _id: def._id }, { $set: { lastRunKey: prior ?? null } })
+        .catch(() => { /* the throw below is the real signal */ });
+      throw error;
+    }
   }
 
   if (typeof def.save === "function") {
     def.lastRunKey = pacificKey(now);
     def.lastRunAt = new Date();
     def.lastDurationMs = result.durationMs;
-    def.lastError = result.errors.length ? result.errors.join(" | ").slice(0, 400) : null;
+    // lastError from errors UNION failures — see above. A degraded run that
+    // still delivered is worth recording; it is the second and third night in
+    // a row that turn it into something to chase.
+    const problems = [...result.errors, ...failures];
+    def.lastError = problems.length ? problems.join(" | ").slice(0, 400) : null;
     def.runCount = (def.runCount || 0) + 1;
+    // A run that got here delivered (or was not meant to send), so the failure
+    // counter resets. See isDue's attempt cap.
+    def.attemptsToday = 0;
     await def.save();
   }
   return result;

@@ -59,3 +59,7 @@ outputs/
 # links with live access keys. Never commit these. Root-anchored: an
 # unanchored "reports/" also swallows packages/shared-templates/src/templates/reports.
 /reports/
+tmp/
+# Logics activity dumps carry ClientName and emails — never commit them.
+tests/fixtures/activities-*.json
+*.orig

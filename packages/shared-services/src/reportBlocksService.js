@@ -214,7 +214,14 @@ const BLOCKS = [
     termsShort: "Per agent: inbound calls taken, outbound dials, connects, talk time and deals.",
     terms: "Per agent, inside the range: INBOUND is calls connected to that agent from the queue; DIALS and CONNECTED are outbound PhoneBurner attempts, where connected means the dial reached a person. TALK counts connected outbound time only - inbound talk time is not carried by the queue rollup. DEALS are distinct cases whose first payment landed in range, and CASH is what those cases paid.",
     needs: ["dials", "queue", "payments", "caseContacts"],
-    compute({ dials = [], queueByAgent = {}, payments = [] }) {
+    compute({
+      dials = [], queueByAgent = {}, payments = [],
+      // "0 dials" and "we could not read the dials" are the same number and
+      // opposite facts. Carried onto the data so csv() can say which one it is
+      // — the `worked` block has done this for a while, but `worked` is in
+      // neither scheduled preset, so the nightly board never inherited it.
+      dialsUnavailable = null, queueUnavailable = null,
+    }) {
       const LONG_SEC = Math.max(60, Number(process.env.LD_LONG_CALL_SECONDS) || 300);
       const { canonicalStaffName, isNotAPerson } = require("../../shared-config/src/staffRoster");
       const INBOUND_STREAMS = new Set(["MAILER", "BCD"]);
@@ -303,6 +310,7 @@ const BLOCKS = [
       }
 
       return {
+        dialsUnavailable, queueUnavailable,
         cases: cases.size, attempts, connected, longCalls,
         attemptsKnown, attemptsUnknown: attempts - attemptsKnown,
         talkMinutes: Math.round(talkSec / 6) / 10,
@@ -342,146 +350,50 @@ const BLOCKS = [
       // Without a summary the email showed a bare per-agent table and dropped
       // the section's actual headline — dials, connect rate and talk time.
       const rate = d.connectRate === null ? "no connect data" : `${d.connectRate}% connected`;
-      return { summary: `${d.attempts.toLocaleString()} dial${d.attempts === 1 ? "" : "s"} · ${rate} · ${d.talkMinutes} min talk`
-        + (d.attemptsUnknown ? ` · ${d.attemptsUnknown} without a connect flag` : ""),
-      rows: d.agents,
-      columns: [
+      // A DIAL GATHER THAT FAILED MUST NOT READ AS A DAY WITH NO DIALS. Without
+      // this the summary is the literal string "0 dials · no connect data · 0
+      // min talk", which is exactly what a genuinely idle Saturday looks like.
+      const summary = d.dialsUnavailable
+        ? `DIAL DATA UNAVAILABLE — ${d.dialsUnavailable}. Deals and cash below are complete; call counts are not.`
+        : `${d.attempts.toLocaleString()} dial${d.attempts === 1 ? "" : "s"} · ${rate} · ${d.talkMinutes} min talk`
+          + (d.attemptsUnknown ? ` · ${d.attemptsUnknown} without a connect flag` : "");
+      // INBOUND comes from the TAG phone queue, which a vendor board does not
+      // carry (see THE TENANT RULE in the composer). Rather than mail a column
+      // of zeros — which reads as "your leads produced no inbound calls"
+      // instead of "this board has no inbound to show" — drop the column when
+      // no row has one. The CSV keeps it either way.
+      //
+      // But an UNREADABLE queue is not an absent one: keep the column and print
+      // a dash, so nobody reads a RingCentral outage as a quiet phone.
+      const anyInbound = d.queueUnavailable || d.agents.some((a) => (Number(a.inbound) || 0) > 0);
+      const inboundCell = (x) => (d.queueUnavailable ? "—" : x.inbound);
+      // Dials/connected/talk all come from the same gather, so if it failed
+      // they are all unmeasured. Deals and cash come from payments and stay
+      // real — which is why the summary says so rather than blanking the row.
+      const dialCell = (get) => (x) => (d.dialsUnavailable ? "—" : get(x));
+      const columns = [
         { header: "agent", get: (x) => x.agent },
-        { header: "inbound", get: (x) => x.inbound },
-        { header: "dials", get: (x) => x.dials },
-        { header: "connected", get: (x) => x.connected },
-        { header: "talk_minutes", get: (x) => x.talkMinutes },
+        { header: "inbound", get: inboundCell },
+        { header: "dials", get: dialCell((x) => x.dials) },
+        { header: "connected", get: dialCell((x) => x.connected) },
+        { header: "talk_minutes", get: dialCell((x) => x.talkMinutes) },
         { header: "deals", get: (x) => x.deals },
         { header: "cash", get: (x) => x.cash },
-      ] };
-    },
-  },
-  {
-    // LD CALLS TO HEAR — Mickey 2026-07-31: "identify the person who took the
-    // call, the link and the case and bring it to the ld report but also to
-    // noteable recordings."
-    //
-    // Its own block rather than more columns on LD call quality: that table
-    // answers "how did each agent do", this one answers "which call do I play
-    // next". One row is one CALL; the other is one PERSON.
-    //
-    // The mirror of this on the inbound side is `longcalls` (CallRail). They
-    // stay separate because CallRail is a single TAG tenant and can never be
-    // split by company, while LD dials are per-agent and per-case.
-    id: "ldrecordings",
-    label: "LD calls to hear",
-    hint: "Long outbound dials with the agent, the case and the recording",
-    termsShort: "Outbound LD dials at or over the long-call threshold, with a listen link.",
-    terms: "Outbound PhoneBurner dials inside the range at or over the long-call threshold. AGENT is the seat that placed the dial; CASE is the case the lead belongs to. A call with no link yet is still listed and marked pending - the recording arrives after the call ends, so absence is normal rather than missing.",
-    // Mickey 2026-07-31: "crm case id is how to get agent and outcome from
-    // activities." The case id is the join, and the activity sweep is already
-    // gathered — so both come free, with no extra Logics call.
-    //
-    // It matters because the attempt's own fields are poor substitutes:
-    //   outcome  attempts.outcome only ever holds "review" or "dnc". That is
-    //            LEAD state, not what came of the conversation. The case's
-    //            latest status change is the real outcome.
-    //   agent    attempts.agentId is the SEAT that dialled. Usually the same
-    //            person, but the case's settlement officer is who owns it, and
-    //            the seat is absent on some attempts.
-    needs: ["dials", "activity", "ldCaseStatus"],
-    compute({ dials = [], events = [], ldCaseStatus = {} }) {
-      const LONG_SEC = Math.max(60, Number(process.env.LD_LONG_CALL_SECONDS) || 300);
-      const { canonicalStaffName } = require("../../shared-config/src/staffRoster");
-
-      // Latest status and latest assigned officer per case, from the sweep.
-      const statusOf = new Map();
-      const officerOf = new Map();
-      const seenAt = new Map();
-      for (const e of events) {
-        if (!e?.caseId) continue;
-        const key = `${String(e.domain || "").toUpperCase()}:${e.caseId}`;
-        const at = String(e.createdAt || "");
-        if (e.kind === "status-change" && !e.payload?.selfTransition) {
-          const to = e.payload?.toStatus || null;
-          if (to && (!seenAt.has(key) || at >= seenAt.get(key))) {
-            statusOf.set(key, to);
-            seenAt.set(key, at);
-          }
-        }
-        if (e.kind === "assignment") {
-          const m = String(e.subject || "").match(/^Assigned to\s+Set\.?\s*Officer\s*:\s*(.+)$/i);
-          const name = m ? m[1].trim() : null;
-          // "--Unassigned--" is a real answer meaning nobody owns it; it must
-          // not be printed as though it were a person.
-          if (name && !/^--\s*Unassigned\s*--$/i.test(name)) officerOf.set(key, name);
-        }
-      }
-
-      const out = [];
-      for (const d of dials) {
-        for (const a of Array.isArray(d.attempts) ? d.attempts : []) {
-          const sec = Number(a.durationSeconds) || 0;
-          if (sec < LONG_SEC) continue;
-          const key = `${String(d.domain || "").toUpperCase()}:${d.caseId}`;
-          const seat = a.agentId ? canonicalStaffName(a.agentId) : null;
-          out.push({
-            // Officer first — who owns the case — then the seat that dialled.
-            agent: officerOf.get(key) || seat || "(unknown)",
-            agentSeat: seat,
-            domain: d.domain ? String(d.domain).toUpperCase() : null,
-            caseId: d.caseId ?? null,
-            dateKey: d.dateKey || null,
-            minutes: Math.round(sec / 6) / 10,
-            // WHERE THE CASE STANDS NOW, on every row — the same thing the
-            // mail side shows. Live status first: the activity sweep only
-            // answers for cases that moved inside the window, which was 8 of
-            // 66 in July, and a blank on the other 58 reads as a gap rather
-            // than as "nothing happened".
-            //
-            // Falling back to "review" would print a word that means nothing
-            // to a reader — it is the ABSENCE of a disposition, not a result.
-            // "dnc" is kept because it IS one: they asked not to be called.
-            outcome: ldCaseStatus[key]
-              || statusOf.get(key)
-              || (/^dnc$/i.test(String(a.outcome || d.lastOutcome || "")) ? "DNC" : null),
-            listenUrl: a.recordingUrl || d.recordingUrl || null,
-          });
-        }
-      }
-      return out.sort((x, y) => y.minutes - x.minutes);
-    },
-    renderText(rows) {
-      if (!rows.length) return "LD calls to hear    (no long outbound dials in this range)";
-      const withLink = rows.filter((r) => r.listenUrl).length;
-      const L = [`LD calls to hear    ${rows.length} call(s), ${withLink} with a recording`];
-      for (const r of rows.slice(0, 25)) {
-        L.push(`  ${String(r.minutes).padStart(5)} min  ${String(r.agent).padEnd(16)}`
-          + `${r.domain || ""} ${r.caseId ?? "(no case)"}`
-          + (r.listenUrl ? "" : "   [recording pending]"));
-        if (r.listenUrl) L.push(`         ${r.listenUrl}`);
-      }
-      if (rows.length > 25) L.push(`  … and ${rows.length - 25} more`);
-      return L.join(NEWLINE);
-    },
-    csv(rows) {
-      const withLink = rows.filter((r) => r.listenUrl).length;
+      ];
       return {
-        summary: `${rows.length} long dial${rows.length === 1 ? "" : "s"} · ${withLink} with a recording`
-          + (rows.length - withLink ? ` · ${rows.length - withLink} still pending` : ""),
-        // What decides whether to press play: how long, who owns it, which
-        // case, where it stands now, and the link.
-        emailColumns: [
-          { header: "minutes", get: (x) => x.minutes },
-          { header: "agent", get: (x) => x.agent },
-          { header: "case", get: (x) => (x.caseId ? `${x.domain || ""} ${x.caseId}`.trim() : null) },
-          { header: "outcome", get: (x) => x.outcome },
-          { header: "listen", get: (x) => x.listenUrl },
-        ],
-        rows,
+        summary,
+        rows: d.agents,
+        emailColumns: anyInbound ? columns : columns.filter((c) => c.header !== "inbound"),
+        // The CSV keeps the raw numbers — a dash is a reading aid for a person,
+        // not a value a spreadsheet should have to parse.
         columns: [
-          { header: "on", get: (x) => x.dateKey },
-          { header: "minutes", get: (x) => x.minutes },
           { header: "agent", get: (x) => x.agent },
-          { header: "domain", get: (x) => x.domain },
-          { header: "case_id", get: (x) => x.caseId },
-          { header: "outcome", get: (x) => x.outcome },
-          { header: "listen", get: (x) => x.listenUrl },
+          { header: "inbound", get: (x) => x.inbound },
+          { header: "dials", get: (x) => x.dials },
+          { header: "connected", get: (x) => x.connected },
+          { header: "talk_minutes", get: (x) => x.talkMinutes },
+          { header: "deals", get: (x) => x.deals },
+          { header: "cash", get: (x) => x.cash },
         ],
       };
     },
@@ -622,7 +534,7 @@ const BLOCKS = [
     id: "source",
     label: "By source",
     hint: "Deals, cash, spend and cost-per for each active source",
-    termsShort: "Spend in range vs money from cases sold in range. Attributable call wins over lead age; aged money carries no ratio.",
+    termsShort: "ROAS = initials ÷ spend, both inside the range. Attributable call beats lead age; aged money carries no ratio.",
     terms: "Self-contained month: spend booked in the range against money from cases SOLD in the range. A case counts when its FIRST payment lands inside the window, so an initial and its follow-on payments in the same month are all valid total; a case sold earlier is residual and is Aged. Within that, the ATTRIBUTABLE CALL is primary - a marketing-line call to the source inside the window keeps the money whatever the lead age, because mail is bulk-loaded and lags. Lead age decides only when no call can be found, so an aged lead that closes with no marketing response is Aged. Aged money is counted but carries no ratio and never reaches a channel total. ROAS = initial payments / spend. ROI = (all money - spend) / spend.",
     // caseContacts is what reads SourceCampaignID off the Logics case. Without
     // it this block only sees stored snapshots and reports attributed deals as
@@ -884,13 +796,25 @@ const BLOCKS = [
         // a $4,836 deal — it is a $700 deal on WYNN 130897 plus $4,136 of
         // recurring from other clients entirely. Deals and total cash next to
         // each other, with nothing between them, is an invitation to misread.
+        //
+        // THE EMAILED RATIO IS ROAS, NOT ROI. Mickey 2026-07-31: "what they
+        // wanna see is roas anyway roi is a month based thing. so initial
+        // payments and spend for that percentage on the daily email."
+        //
+        // ROI = (all money - spend) / spend, and "all money" on any single day
+        // is mostly RECURRING from cases sold months ago against TODAY's
+        // spend. The two have nothing to do with each other, so a daily ROI
+        // swings on when the recurring batch happens to land. ROAS = initials
+        // / spend compares the money a piece made today to what it cost today.
+        // ROI still ships in the CSV, where a month-long range makes it mean
+        // something.
         emailColumns: [
           { header: "source", get: (x) => x.source },
           { header: "deals", get: (x) => x.deals },
           { header: "new_cash", get: (x) => x.newCash },
           { header: "total_cash", get: (x) => x.totalCash },
           { header: "spend", get: (x) => x.spend },
-          { header: "roi_pct", get: (x) => x.roi },
+          { header: "roas_pct", get: (x) => x.roas },
         ],
         rows,
         columns: [
@@ -1778,18 +1702,32 @@ const BLOCKS = [
     id: "longcalls",
     label: "Calls worth hearing",
     hint: "Every call over 10 minutes, with what came of it",
-    termsShort: "Inbound calls at or over 10 minutes, with what came of them.",
-    terms: "Inbound CallRail calls inside the range at or over the length threshold (10 minutes by default), with the outcome resolved from payments in the same range. A call with no outcome is shown as such - it is a long conversation that has not closed, which is the point of listing it.",
-    needs: ["callsRange", "payments", "caseContacts", "callRecordings", "callContext"],
+    termsShort: "Calls at or over the length threshold, inbound and outbound, with what came of them.",
+    terms: "Long conversations inside the range, both INBOUND CallRail calls and OUTBOUND PhoneBurner dials on bought leads, with where the case stands now. A call with no outcome is shown as such - it is a long conversation that has not closed, which is the point of listing it.",
+    // Mickey 2026-07-31: "the ld calls to hear get mixed into calls to hear.
+    // its the same email one just only prints LD related stuff." One section,
+    // both directions. A separate LD list made two places to look for the same
+    // question — which call do I play next.
+    needs: [
+      "callsRange", "payments", "caseContacts", "callRecordings", "callContext",
+      "dials", "activity", "ldCaseStatus",
+    ],
     compute({
       callsRange = [], payments = [], from = null, to = null, callRecordings = {},
-      domain = null, callContext = {},
+      domain = null, callContext = {}, dials = [], events = [], ldCaseStatus = {},
+      ldCaseSource = {},
+      // Set when CallRail could not be read for part of the lookback. Without
+      // it an outage renders as the template's "Nothing in this range." — the
+      // single most reassuring sentence the email can print about a broken day.
+      callsRangeUnavailable = null,
     }) {
-      // CallRail is ONE TAG tenant of inbound mail-response calls. "The same 4
-      // sections for both email just one is filtered" only holds if this
-      // section actually filters — otherwise a WYNN vendor board hands the
-      // lead vendor five recordings of OUR mail callers. Measured: it did.
-      if (domain && String(domain).toUpperCase() !== "TAG") return [];
+      // THE FILTER IS ON THE INBOUND HALF ONLY. CallRail is ONE TAG tenant of
+      // inbound mail-response calls, so a WYNN board must not carry them —
+      // measured, it once handed the lead vendor five recordings of OUR mail
+      // callers. LD dials are per-case and per-domain, so they travel: on a
+      // WYNN board this section is the LD calls and nothing else, which is
+      // exactly "the same email, one just only prints LD related stuff".
+      const inboundApplies = !domain || String(domain).toUpperCase() === "TAG";
       const MIN_SEC = Math.max(60, Number(process.env.LONG_CALL_SECONDS) || 600);
       // callsRange deliberately reaches BACK 45 days so call-to-close lag is
       // not clipped. THIS report is about the range itself, so the lookback
@@ -1824,7 +1762,54 @@ const BLOCKS = [
         }
       }
 
-      return callsRange
+      // ── OUTBOUND HALF: long LD dials, joined to their case ──────────────
+      // The case id on the dial is the join. The activity sweep gives the
+      // settlement officer, and ldCaseStatus gives where the case stands now,
+      // so an outbound row carries the same three facts an inbound one does.
+      const LD_SEC = Math.max(60, Number(process.env.LD_LONG_CALL_SECONDS) || 300);
+      const { canonicalStaffName } = require("../../shared-config/src/staffRoster");
+      const officerOf = new Map();
+      for (const e of events) {
+        if (!e?.caseId || e.kind !== "assignment") continue;
+        const m = String(e.subject || "").match(/^Assigned to\s+Set\.?\s*Officer\s*:\s*(.+)$/i);
+        const name = m ? m[1].trim() : null;
+        if (name && !/^--\s*Unassigned\s*--$/i.test(name)) {
+          officerOf.set(`${String(e.domain || "").toUpperCase()}:${e.caseId}`, name);
+        }
+      }
+      const outbound = [];
+      for (const d of dials) {
+        for (const a of Array.isArray(d.attempts) ? d.attempts : []) {
+          const sec = Number(a.durationSeconds) || 0;
+          if (sec < LD_SEC) continue;
+          const key = `${String(d.domain || "").toUpperCase()}:${d.caseId}`;
+          const seat = a.agentId ? canonicalStaffName(a.agentId) : null;
+          outbound.push({
+            direction: "outbound",
+            dateKey: d.dateKey,
+            minutes: Math.round(sec / 6) / 10,
+            // The LD campaign the lead was bought on — LD CUSTOM, LD GENERAL,
+            // LD Posting. Mickey 2026-07-31: "for the call name you can just
+            // say LD Custom ... or the source i suppose." A flat "LD" made
+            // every outbound row look identical while inbound rows named their
+            // mail piece; both directions now answer "where did this come
+            // from". Falls back to "LD" when the campaign is unresolvable, so
+            // a row never loses its direction.
+            source: ldCaseSource[key] || "LD",
+            phone: null,
+            outcome: ldCaseStatus[key]
+              || (/^dnc$/i.test(String(a.outcome || d.lastOutcome || "")) ? "DNC" : null),
+            amount: null,
+            caseId: d.caseId ?? null,
+            caseDomain: d.domain ? String(d.domain).toUpperCase() : null,
+            officer: officerOf.get(key) || seat || null,
+            listenUrl: a.recordingUrl || d.recordingUrl || null,
+            priorCalls: null,
+          });
+        }
+      }
+
+      const inbound = !inboundApplies ? [] : callsRange
         .filter(inRange)
         .filter((c) => (Number(c.durationSec) || 0) >= MIN_SEC)
         .map((c) => {
@@ -1844,10 +1829,12 @@ const BLOCKS = [
             ? callContext.statusByCase?.[`${caseDomain || "TAG"}:${caseId}`] || null
             : null;
           return {
+            direction: "inbound",
             dateKey: c.dateKey,
             minutes: Math.round((Number(c.durationSec) || 0) / 6) / 10,
             source: c.source || null,
             phone: c.phone || null,
+            caseDomain,
             // Current status first; a payment in-range is still worth saying.
             outcome: status
               || (hit ? (hit.type === "initial" ? "DEAL" : "payment") : "no outcome yet"),
@@ -1861,8 +1848,18 @@ const BLOCKS = [
             listenUrl: c.listenUrl || callRecordings[c.callId] || null,
             priorCalls: c.priorCalls ?? null,
           };
-        })
-        .sort((a, b) => b.minutes - a.minutes);
+        });
+
+      // ONE LIST, longest first. Direction is a column, not a section: the
+      // question a reader has is "which call do I play next", and that does
+      // not care whether we rang them or they rang us.
+      const out = [...inbound, ...outbound].sort((a, b) => b.minutes - a.minutes);
+      // compute() owes the composer ROWS, so there is nowhere else to hang a
+      // flag — it rides on the array. Only when the inbound half is actually
+      // in play: on a vendor board CallRail is excluded by design, and saying
+      // "incomplete" there would be false.
+      if (inboundApplies && callsRangeUnavailable) out.unavailable = callsRangeUnavailable;
+      return out;
     },
     renderText(rows) {
       if (!rows.length) return "Calls worth hearing     (none over the threshold)";
@@ -1882,6 +1879,11 @@ const BLOCKS = [
     },
     csv(rows) {
       return {
+        // Normally no summary — but an unreadable CallRail has to say so, or
+        // the template prints "Nothing in this range." over a hole.
+        summary: rows.unavailable
+          ? `INBOUND CALLS INCOMPLETE — ${rows.unavailable}. Outbound LD calls below are complete.`
+          : undefined,
         // No summary: the section label already says "Calls worth hearing",
         // and a line under it repeating the count is filler.
         // The point of this section is to press play. Minutes, who, and the
@@ -1889,6 +1891,13 @@ const BLOCKS = [
         // Mickey 2026-07-30: "get rid of length ... you can put the settlement
         // officer ... then just call agent link outcome." Length was the one
         // column that never changed a decision.
+        // `call` identifies WHERE the call came from, one rule for both
+        // directions: the mail piece someone rang in on, or the LD campaign
+        // the lead was bought on. Mickey 2026-07-31: "you can just say LD
+        // Custom ... or the source i suppose." The case id was tried here
+        // first and read as noise — every LD campaign name already begins
+        // with LD, so direction survives without spelling it out, and the
+        // case id is still a column in the CSV.
         emailColumns: [
           { header: "call", get: (x) => x.source },
           { header: "agent", get: (x) => x.officer },
@@ -1927,6 +1936,11 @@ const SOURCES = Object.freeze([
   "callContext",
   // Current Logics status for cases with a long OUTBOUND dial. The LD mirror
   // of callContext: a dial already carries its case id, so no phone hop.
+  //
+  // This gather also fills `ldCaseSource` (the LD campaign per case) off the
+  // SAME getCaseInfo response. It is deliberately NOT a source of its own —
+  // declaring it would key a second gather on it and pay for the case pull
+  // twice. Ask for `ldCaseStatus` and both maps arrive.
   "ldCaseStatus",
   // Recording links for the calls a report actually lists. CallRail hands
   // these out ONE CALL AT A TIME, so this is a separate, bounded gather rather
@@ -1966,7 +1980,7 @@ const PRESETS = Object.freeze({
   // named active pieces only; call quality is LD; status movement is the chase
   // list; then the calls. `worked` is gone — it and LD call quality were
   // reporting the same dials twice.
-  rollup: ["topline", "source", "ldcalls", "ldrecordings", "status", "longcalls"],
+  rollup: ["topline", "source", "ldcalls", "status", "longcalls"],
   // The 1pm nudge and the same lines again in the EOD roll-up.
   worklog: ["worked"],
   daily: ["money", "spend", "net", "source", "officer", "status", "recordings"],
@@ -1985,7 +1999,7 @@ const PRESETS = Object.freeze({
   // VENDOR sees about the leads they sold us — how those calls actually went,
   // what moved, and the day-level totals. Deliberately no per-source ROI table
   // and no officer breakdown: that is our P/L, not theirs.
-  "vendor-ld": ["topline", "source", "ldcalls", "ldrecordings", "status", "longcalls"],
+  "vendor-ld": ["topline", "source", "ldcalls", "status", "longcalls"],
   // "heres every call over 10 minutes and its outcome"
   "long-calls": ["longcalls"],
 });

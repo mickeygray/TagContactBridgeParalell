@@ -12,6 +12,12 @@
 // nightly persistence instead. Ticked blocks share ONE gather.
 
 require("dotenv").config();
+// See scripts/report.js — a stale c-ares nameserver breaks only the SRV
+// lookup behind mongodb+srv://, so this fails as ECONNREFUSED. Opt-in.
+if (process.env.DNS_SERVERS) {
+  try { require("dns").setServers(process.env.DNS_SERVERS.split(",").map((s) => s.trim()).filter(Boolean)); }
+  catch (error) { console.warn(`DNS_SERVERS ignored — ${error.message}`); }
+}
 
 const fs = require("fs");
 const path = require("path");
@@ -19,11 +25,10 @@ const path = require("path");
 const { connectMongo } = require("../packages/event-core/src");
 const { getSharedConfig, ROOT_DIR, getInternalFromEmail } = require("../packages/shared-config/src");
 const { BLOCKS, PRESETS, resolveSelection } = require("../packages/shared-services/src/reportBlocksService");
-const { composeReport, renderHtml, renderText } = require("../packages/shared-services/src/reportComposerService");
+const { composeReport, renderHtml, renderText, renderCsvs } = require("../packages/shared-services/src/reportComposerService");
 const { sendMail } = require("../packages/shared-services/src/mailerService");
 
 const NEWLINE = String.fromCharCode(10);
-const QUOTE = String.fromCharCode(34);
 
 /** Repeatable --where flags: --where cohort=2024 --where minutes>10 */
 function args(name) {
@@ -62,28 +67,20 @@ function resolveRange() {
   return { from: arg("from"), to: arg("to") };
 }
 
-// CSV: raw values, real headers, quotes only where needed.
-function csvCell(v) {
-  if (v == null) return "";
-  const s = String(v);
-  const needsQuote = s.includes(",") || s.includes(QUOTE) || s.includes(NEWLINE);
-  return needsQuote ? QUOTE + s.split(QUOTE).join(QUOTE + QUOTE) + QUOTE : s;
-}
-
 /** One CSV per ticked block — a block is a table, and jamming unrelated
- * tables into one sheet is what makes a CSV useless. */
+ * tables into one sheet is what makes a CSV useless.
+ *
+ * The building is `renderCsvs` in the composer, shared with the scheduler's
+ * --csv attachment. It used to be written out twice, and this repo has twice
+ * paid for a second copy of a shared rule drifting from the first. This half
+ * only decides where the bytes land. */
 function writeCsvs(report, outDir) {
   const written = [];
-  for (const s of report.sections) {
-    if (s.error || typeof s.block.csv !== "function") continue;
-    const { rows, columns } = s.block.csv(s.data);
-    if (!rows || !rows.length) continue;
-    const head = columns.map((c) => csvCell(c.header)).join(",");
-    const body = rows.map((r) => columns.map((c) => csvCell(c.get(r))).join(",")).join(NEWLINE);
-    const file = path.join(outDir, `${s.id}-${report.from}_${report.to}.csv`);
+  for (const csv of renderCsvs(report)) {
+    const file = path.join(outDir, csv.filename);
     fs.mkdirSync(path.dirname(file), { recursive: true });
-    fs.writeFileSync(file, head + NEWLINE + body + NEWLINE);
-    written.push({ file, rows: rows.length });
+    fs.writeFileSync(file, csv.content);
+    written.push({ file, rows: csv.rows });
   }
   return written;
 }
@@ -137,7 +134,7 @@ async function main() {
     const text = renderText(report);
     console.log(`${NEWLINE}${text}${NEWLINE}`);
     if (process.argv.includes("--email")) {
-      const to = String(arg("to-addr", process.env.NIGHT_BOARD_RECIPIENTS || "mgray@taxadvocategroup.com"));
+      const to = String(arg("to-addr", process.env.REPORT_RECIPIENTS || "mgray@taxadvocategroup.com"));
       const from = getInternalFromEmail();
       const res = await sendMail("TAG", {
         to,

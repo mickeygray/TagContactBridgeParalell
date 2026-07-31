@@ -1,0 +1,171 @@
+"use strict";
+
+// CR-6 — the composite source.
+//
+// The integration is one wrapper, so the tests are about the three ways a
+// wrapper can quietly break the loop it wraps: starving the base source,
+// losing its place, or emitting a case the base already owns.
+
+const test = require("node:test");
+const assert = require("node:assert/strict");
+
+const { createCallRecoveryCompositeSource } = require(
+  "../../packages/shared-services/src/callRecoveryCompositeSource");
+
+const NOW = new Date("2026-08-03T18:00:00Z");
+
+const EPISODE = (n) => ({
+  episodeId: `ep:${n}`, programKey: "callrail-mail-long-call-v1",
+  domain: "TAG", caseId: String(1000 + n), normalizedPhone: "7249674387",
+  state: "eligible",
+  firstQualifyingCallAt: new Date("2026-07-30T18:00:00Z"),
+  eligibleFrom: new Date("2026-07-31T14:50:00Z"),
+  expiresAt: new Date("2026-11-27T18:00:00Z"),
+});
+
+const ADMITTABLE = {
+  caseState: { allowedProspectStatus: true, convertedAt: null, paymentCount: 0, totalPaid: 0 },
+  dncState: { result: "clean", checkedAt: new Date("2026-08-02T18:00:00Z") },
+  contactWindowOpen: true,
+  existingWorkItem: null,
+};
+
+function harness({ cadencePages = [[]], episodes = [], delivery = true, inputs = ADMITTABLE } = {}) {
+  let page = 0;
+  const base = {
+    async readBatch() {
+      const items = cadencePages[page] || [];
+      const done = page >= cadencePages.length - 1;
+      page += 1;
+      return { items, nextCursor: done ? null : `c${page}`, done };
+    },
+  };
+  const repository = {
+    async listEpisodesForConsideration({ after, limit }) {
+      const start = after ? episodes.findIndex((e) => e.episodeId === after) + 1 : 0;
+      return episodes.slice(start, start + Math.min(limit, 2));
+    },
+  };
+  const decisions = [];
+  const src = createCallRecoveryCompositeSource({
+    base, repository,
+    activation: { delivery },
+    resolveAdmissionInputs: async () => inputs,
+    onDecision: (d) => decisions.push(d),
+  });
+  return { src, decisions };
+}
+
+async function drain(src) {
+  const all = [];
+  let cursor = null;
+  for (let i = 0; i < 20; i += 1) {
+    const b = await src.readBatch({ cursor, limit: 250, now: NOW });
+    all.push(...(b.items || []));
+    if (b.done) return all;
+    cursor = b.nextCursor;
+  }
+  throw new Error("cursor never completed — the composite is looping");
+}
+
+test("cadence drains FIRST — recovery can never starve fresh leads", async () => {
+  // Fresh bought leads are perishable; a recovery episode is good for 120 days.
+  const { src } = harness({
+    cadencePages: [[{ caseId: "fresh-1" }], [{ caseId: "fresh-2" }]],
+    episodes: [EPISODE(1)],
+  });
+  const items = await drain(src);
+  assert.deepEqual(items.slice(0, 2).map((i) => i.caseId), ["fresh-1", "fresh-2"]);
+  assert.equal(items.at(-1).sourceKind, "call_recovery");
+});
+
+test("the cursor is typed, so a restart resumes in the right half", async () => {
+  const { src } = harness({ cadencePages: [[]], episodes: [EPISODE(1), EPISODE(2), EPISODE(3)] });
+  const first = await src.readBatch({ cursor: null, limit: 250, now: NOW });
+  assert.equal(first.done, false);
+  assert.equal(first.nextCursor.kind, "recovery", "the cursor must say WHICH source it is walking");
+  const second = await src.readBatch({ cursor: first.nextCursor, limit: 250, now: NOW });
+  const ids = [...first.items, ...second.items].map((i) => i.episodeId);
+  assert.equal(new Set(ids).size, ids.length, "a typed cursor must not repeat a row");
+});
+
+test("a legacy bare cursor still resumes the cadence half", async () => {
+  // The composite has to be droppable into a pass that started before it
+  // existed, or arming it mid-day loses whatever the loop was walking.
+  const { src } = harness({ cadencePages: [[{ caseId: "a" }], [{ caseId: "b" }]] });
+  const b = await src.readBatch({ cursor: "legacy-cursor-string", limit: 250, now: NOW });
+  assert.deepEqual(b.items.map((i) => i.caseId), ["a"]);
+});
+
+test("nothing recovery-shaped is emitted while delivery is dark", async () => {
+  const { src } = harness({ episodes: [EPISODE(1), EPISODE(2)], delivery: false });
+  const items = await drain(src);
+  assert.equal(items.filter((i) => i.sourceKind === "call_recovery").length, 0);
+});
+
+test("disarming mid-walk stops on the NEXT page, not the next restart", async () => {
+  // A kill switch that only takes effect on restart is not a kill switch.
+  const base = { async readBatch() { return { items: [], nextCursor: null, done: true }; } };
+  const repository = {
+    async listEpisodesForConsideration() { return [EPISODE(1), EPISODE(2)]; },
+  };
+  const activation = { delivery: true };
+  const src = createCallRecoveryCompositeSource({
+    base, repository, activation,
+    resolveAdmissionInputs: async () => ADMITTABLE,
+  });
+  const first = await src.readBatch({ cursor: null, limit: 250, now: NOW });
+  assert.ok(first.items.length > 0);
+  activation.delivery = false;
+  const second = await src.readBatch({ cursor: first.nextCursor, limit: 250, now: NOW });
+  assert.deepEqual(second.items, []);
+  assert.equal(second.done, true);
+});
+
+test("admission runs on EVERY pass, not once at discovery", async () => {
+  // A clean nightly snapshot cannot authorize a call this afternoon.
+  const { src, decisions } = harness({
+    episodes: [EPISODE(1)],
+    inputs: { ...ADMITTABLE, caseState: { allowedProspectStatus: true, paymentCount: 1 } },
+  });
+  const items = await drain(src);
+  assert.equal(items.length, 0, "a case that has since paid must not be emitted");
+  assert.equal(decisions[0].decision.decision, "terminal");
+  assert.equal(decisions[0].decision.reason, "paid");
+});
+
+test("an unreadable admission input HOLDS — it never falls through as admitted", async () => {
+  const base = { async readBatch() { return { items: [], nextCursor: null, done: true }; } };
+  const repository = { async listEpisodesForConsideration() { return [EPISODE(1)]; } };
+  const seen = [];
+  const src = createCallRecoveryCompositeSource({
+    base, repository, activation: { delivery: true },
+    resolveAdmissionInputs: async () => { throw new Error("Logics timeout"); },
+    onDecision: (d) => seen.push(d.decision),
+  });
+  const b = await src.readBatch({ cursor: null, limit: 250, now: NOW });
+  assert.deepEqual(b.items, []);
+  assert.equal(seen[0].decision, "hold");
+  assert.equal(seen[0].retryable, true);
+});
+
+test("admission cannot be skipped by omitting the resolver", () => {
+  assert.throws(() => createCallRecoveryCompositeSource({
+    base: { readBatch: async () => ({ items: [], done: true }) },
+    repository: {}, activation: { delivery: true },
+  }), /admission cannot be skipped/);
+});
+
+test("the rest of the source interface passes through", async () => {
+  const base = {
+    readBatch: async () => ({ items: [], nextCursor: null, done: true }),
+    readOne: async () => ({ caseId: "one" }),
+    readWindowBatch: async () => ({ items: ["w"] }),
+  };
+  const src = createCallRecoveryCompositeSource({
+    base, repository: { listEpisodesForConsideration: async () => [] },
+    activation: { delivery: true }, resolveAdmissionInputs: async () => ADMITTABLE,
+  });
+  assert.deepEqual(await src.readOne(), { caseId: "one" });
+  assert.deepEqual(await src.readWindowBatch(), { items: ["w"] });
+});

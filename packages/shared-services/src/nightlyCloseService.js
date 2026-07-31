@@ -57,8 +57,8 @@ function normalizeDomain(domain) {
 
 // Master kill switch for the nightly REPORT emails (financial-close,
 // lead-data-vendor, redline-alert, ops-status, aged-refresh). The
-// operational close (payment sweep, cadence refresh, PB reconcile,
-// MetricClose freeze) is NOT affected — this only silences the inbox.
+// operational close (payment sweep, cadence refresh, PB reconcile) is
+// NOT affected — this only silences the inbox.
 // Off while the metrics simplification rebuilds the report one solid
 // number at a time (2026-07-24).
 function nightlyReportEmailsEnabled() {
@@ -385,33 +385,16 @@ async function runNightlyFinalClosePass(domains, options = {}) {
     }
   }
 
-  // Accurate-nightly metrics (docs/CALL_TOTALS_RECONCILIATION_PLAN.md): (1) recompute
-  // the HONEST call-totals reconciliation for month-to-date against live data, then
-  // (2) FREEZE it into an immutable MetricClose so closed periods stop drifting.
-  // Best-effort, env-gated, DEFAULT OFF — writes only the reconciliation + close
-  // collections and can never break the close.
-  let callReconciliation = { skipped: true, reason: "disabled" };
-  let metricClose = { skipped: true, reason: "disabled" };
-  const accurateNightlyEnabled =
-    options.metricCloseFreezeEnabled !== undefined
-      ? Boolean(options.metricCloseFreezeEnabled)
-      : String(process.env.METRIC_CLOSE_FREEZE_ENABLED ?? "false") === "true";
-  if (accurateNightlyEnabled) {
-    try {
-      const { runNightlyCallReconciliation } = require("./callMetricsReconciliationService");
-      callReconciliation = await runNightlyCallReconciliation({ logger: options.logger || null });
-    } catch (error) {
-      callReconciliation = { ok: false, error: error.message };
-      options.logger?.warn?.("nightly-close.call_reconciliation_failed", { error: error.message });
-    }
-    try {
-      const { runMetricCloseFreeze } = require("./metricCloseService");
-      metricClose = await runMetricCloseFreeze({ logger: options.logger || null });
-    } catch (error) {
-      metricClose = { ok: false, error: error.message };
-      options.logger?.warn?.("nightly-close.metric_close_freeze_failed", { error: error.message });
-    }
-  }
+  // The "accurate nightly" pair — a month-to-date call-totals reconciliation
+  // and an immutable MetricClose freeze on top of it — was DELETED 2026-07-31.
+  // It was never armed (METRIC_CLOSE_FREEZE_ENABLED was never set), and both
+  // halves wrote to collections with zero readers anywhere in the repo: the
+  // web client, the API routes, every script and the report blocks were all
+  // grepped. The whole reporting story is live-gathered now, so a frozen
+  // snapshot has nothing to protect against and nothing to feed.
+  //
+  // scripts/reconcile-monthly-call-totals.js is KEPT — it is still a useful
+  // thing to run by hand; it just no longer runs itself every night.
 
   return {
     domains: selectedDomains,
@@ -423,8 +406,6 @@ async function runNightlyFinalClosePass(domains, options = {}) {
     leadQueueStatusRefresh,
     postDateSweep,
     clientCaseDiscovery,
-    callReconciliation,
-    metricClose,
     paymentSweep: summarizePaymentSweepForOps(
       hourlySweep?.phaseA?.paymentReconcile || [],
       selectedDomains,
@@ -850,11 +831,12 @@ async function runGroupedNightlyClose(domains, options = {}) {
   // METRICS EMAILS RETIRED 2026-07-27. The financial + vendor/lead-data
   // close emails and every rollup that fed them (management snapshot,
   // month-to-date, deals/payments-by-case, vendor report, LD cost summary)
-  // are gone: reported money is the payment sheet now, and the snapshot
-  // email is built by simpleNightlyEmailService from that single source.
+  // are gone: reported money is the payment sheet now. The snapshot email
+  // that briefly replaced them (simpleNightlyEmailService) was itself deleted
+  // 2026-07-31 — metrics mail is the 20:00 report scheduler and nothing else.
   // The one thing those emails carried that had to survive — "payments
   // that didn't process today" — is `listFailedPayments()` in
-  // simpleMarketingReadService, rendered in the simple email body.
+  // simpleMarketingReadService.
   //
   // The runtime dispatches the simple email itself; this close does not
   // send it. `results` keeps its shape for callers reading emails.*.

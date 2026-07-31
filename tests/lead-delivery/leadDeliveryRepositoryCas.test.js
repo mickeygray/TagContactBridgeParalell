@@ -678,6 +678,7 @@ test("source batches use newest-first keysets and exact projected case and activ
         caseId: 4,
         statusId: 100,
         statusCategory: "prospect",
+        lastStatusCheckAt: at12,
         convertedAt: null,
         firstPaymentDate: null,
         paymentsCount: 0,
@@ -735,6 +736,7 @@ test("source batches use newest-first keysets and exact projected case and activ
   assert.equal(first.done, false);
   assert.deepEqual(first.nextCursor, { createdAt: at11, id: "cadence-3b" });
   assert.equal(first.items[0].caseProfile._id, "profile-4");
+  assert.deepEqual(first.items[0].caseProfile.lastStatusCheckAt, at12);
   assert.equal(first.items[0].activeAppointment._id, "appointment-active");
   assert.equal(first.items[1].activeAppointment, null);
   assert.equal(Object.hasOwn(first.items[0], "email"), false);
@@ -812,7 +814,7 @@ test("source batches use newest-first keysets and exact projected case and activ
   assert.deepEqual(Object.keys(LeadCadence.findCalls[0].query.selection).sort(), expectedCadenceProjection);
   const expectedCaseProjection = [
     "_id", "aiActivityReview.status", "aiCaseReview.nextEligibleAt", "caseId", "conversationAi.optOutDetected",
-    "convertedAt", "domain", "firstPaymentDate", "paymentsCount", "scrubSummary.status", "statusCategory",
+    "convertedAt", "domain", "firstPaymentDate", "lastStatusCheckAt", "paymentsCount", "scrubSummary.status", "statusCategory",
     "statusId", "totalPaid",
   ].sort();
   assert.deepEqual(Object.keys(CaseProfile.findCalls[0].query.selection).sort(), expectedCaseProjection);

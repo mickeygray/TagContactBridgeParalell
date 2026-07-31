@@ -1,5 +1,7 @@
 "use strict";
 
+require("../../../ops/nssm/node-dns-bootstrap.cjs");
+
 const express = require("express");
 const cors = require("cors");
 const { requireAuth } = require("../../../packages/shared-auth/src");

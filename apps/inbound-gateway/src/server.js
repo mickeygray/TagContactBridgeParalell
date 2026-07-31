@@ -1,5 +1,7 @@
 "use strict";
 
+require("../../../ops/nssm/node-dns-bootstrap.cjs");
+
 const crypto = require("crypto");
 const path = require("path");
 const express = require("express");

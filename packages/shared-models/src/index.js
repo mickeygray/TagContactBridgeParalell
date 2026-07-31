@@ -6,6 +6,7 @@ const CallLedger = require("./CallLedger");
 const CallLog = require("./CallLog");
 const ConsentRecord = require("./ConsentRecord");
 const AuthOtpChallenge = require("./AuthOtpChallenge");
+const CallRecoveryLead = require("./CallRecoveryLead");
 const CaseProfile = require("./CaseProfile");
 const ConversationMessage = require("./ConversationMessage");
 const ConversationWorkflow = require("./ConversationWorkflow");
@@ -34,7 +35,6 @@ const MailImport = require("./MailImport");
 const MailerConfig = require("./MailerConfig");
 const MasterProspectIndex = require("./MasterProspectIndex");
 const MetricsSnapshot = require("./MetricsSnapshot");
-const MetricClose = require("./MetricClose");
 const CallSession = require("./CallSession");
 const LeadActivity = require("./LeadActivity");
 const LiveCoachSession = require("./LiveCoachSession");
@@ -77,6 +77,8 @@ const MODEL_REGISTRY = Object.freeze({
   CallLog,
   ConsentRecord,
   AuthOtpChallenge,
+  CallRecoveryLead,
+
   CaseProfile,
   ConversationMessage,
   ConversationWorkflow,
@@ -105,7 +107,6 @@ const MODEL_REGISTRY = Object.freeze({
   MailerConfig,
   MasterProspectIndex,
   MetricsSnapshot,
-  MetricClose,
   CallSession,
   LeadActivity,
   LiveCoachSession,
@@ -152,6 +153,7 @@ module.exports = {
   CallLog,
   ConsentRecord,
   AuthOtpChallenge,
+  CallRecoveryLead,
   CaseProfile,
   ConversationMessage,
   ConversationWorkflow,
@@ -180,7 +182,6 @@ module.exports = {
   MailerConfig,
   MasterProspectIndex,
   MetricsSnapshot,
-  MetricClose,
   CallSession,
   LeadActivity,
   LiveCoachSession,

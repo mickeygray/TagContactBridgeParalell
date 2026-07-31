@@ -1,8 +1,12 @@
 "use strict";
 
-// THE NIGHT — manual runner. A thin CLI over `runNightPass`, the exact same
-// callable the scheduled nightBoardRuntime uses, so what runs by hand and
-// what runs automatically can never drift apart.
+// THE NIGHT — manual runner. A thin CLI over `runNightPass`.
+//
+// The scheduled night board that used to share this callable was deleted
+// 2026-07-31: metrics mail is the 20:00 report scheduler and nothing else, and
+// a second board 20 minutes later was one env flip from contradicting it. The
+// ENGINE stayed — nightlyHygieneRuntime still drives it persist-only, and this
+// CLI is how a night gets re-run by hand.
 //
 // DRY-RUN BY DEFAULT: no DB writes, no email. Flags opt in.
 //
@@ -68,7 +72,7 @@ async function main() {
   console.log(`wrote runtime/night-run/board-${dateKey}.{txt,json}`);
 
   if (email) {
-    const to = String(arg("to", process.env.NIGHT_BOARD_RECIPIENTS || "mgray@taxadvocategroup.com"));
+    const to = String(arg("to", process.env.REPORT_RECIPIENTS || "mgray@taxadvocategroup.com"));
     const fromEmail = getInternalFromEmail();
     // Pin BOTH domain and transportDomain — a falsy domain routes through
     // WYNN's SendGrid key and marketing From address.

@@ -783,27 +783,24 @@ function getSharedConfig(overrides = {}) {
         process.env.LEXIS_DAILY_DROP_ALERT_TEXT ||
         "",
     },
-    // The night board (pipeline contract Parts I+II). Scheduled AFTER the
-    // activity review (20:20 vs 20:00) so the day's Logics writes have
-    // settled; claims different DailyLoopRun fields, so the two never
-    // collide.
-    nightBoard: {
-      enabled: boolFromEnv(process.env.NIGHT_BOARD_ENABLED, false),
-      hour: Math.max(0, Math.min(23, envInt("NIGHT_BOARD_HOUR", 20))),
-      minute: Math.max(0, Math.min(59, envInt("NIGHT_BOARD_MINUTE", 20))),
-      timezone: process.env.NIGHT_BOARD_TIMEZONE || "America/Los_Angeles",
-      intervalMs: Math.max(10000, envInt("NIGHT_BOARD_INTERVAL_MS", 60000)),
-      activeWeekdays: parseOriginList(process.env.NIGHT_BOARD_ACTIVE_WEEKDAYS || "0,1,2,3,4,5,6"),
-      domains: parseOriginList(process.env.NIGHT_BOARD_DOMAINS || "TAG,WYNN,AMITY")
-        .map((v) => String(v || "").trim().toUpperCase()).filter(Boolean),
-      recipients: process.env.NIGHT_BOARD_RECIPIENTS
-        || process.env.SIMPLE_NIGHTLY_RECIPIENTS
-        || "mgray@taxadvocategroup.com",
-      apply: boolFromEnv(process.env.NIGHT_BOARD_APPLY, true),
-      // Links carry the audio (verified pre-authenticated), so attaching
-      // 20MB files buys nothing and risks the send. Opt in if ever needed.
-      attach: boolFromEnv(process.env.NIGHT_BOARD_ATTACH, false),
-      sendEmail: boolFromEnv(process.env.NIGHT_BOARD_SEND_EMAIL, true),
+    // CallRail long-call recovery (work order §22). ALL DARK by default.
+    //
+    // Flags control ACTIVATION, not business truth. The policy numbers below
+    // are checked-in constants in leadDeliveryService, deliberately NOT env
+    // vars: an operator-tunable daily cap is how a two-attempt program quietly
+    // becomes a six-attempt one, and the whole compliance story rests on those
+    // numbers being reviewable in git.
+    callRecovery: {
+      // Allows evidence/source WRITES only. Discovery still reads and counts
+      // with this off — that is the shadow funnel.
+      discoveryEnabled: boolFromEnv(process.env.CALL_RECOVERY_DISCOVERY_ENABLED, false),
+      // Evaluates admission and classification, performs no provider write.
+      shadowEnabled: boolFromEnv(process.env.CALL_RECOVERY_SHADOW_ENABLED, false),
+      // Permits recovery candidates to enter provider delivery.
+      deliveryEnabled: boolFromEnv(process.env.CALL_RECOVERY_DELIVERY_ENABLED, false),
+      // Narrows delivery to named agents during the canary.
+      agentAllowlist: parseOriginList(process.env.CALL_RECOVERY_AGENT_ALLOWLIST || "")
+        .map((v) => String(v || "").trim().toLowerCase()).filter(Boolean),
     },
     logicsActivityReview: {
       enabled: boolFromEnv(

@@ -38,6 +38,7 @@ $ControlPlanePort     = Get-PortEnv "CONTROL_PLANE_PORT"     5001
 $InboundGatewayPort   = Get-PortEnv "INBOUND_GATEWAY_PORT"   4001
 $OutboundGatewayPort  = Get-PortEnv "OUTBOUND_GATEWAY_PORT"  4002
 $RingcentralCxPort    = Get-PortEnv "RINGCENTRAL_CX_PORT"    6101
+$AiBusPort            = Get-PortEnv "AI_BUS_PORT"             7000
 
 $SkipLocalMongo = [bool]$SkipMongo -or -not [bool]$IncludeMongo
 
@@ -47,6 +48,7 @@ $ServiceCatalog = @{
     ParallelInboundGateway  = @{ Label = "Inbound gateway";  Optional = $false; Ports = @($InboundGatewayPort);  Skip = $false; HealthUrls = @("http://127.0.0.1:${InboundGatewayPort}/health"); HealthRequired = $true }
     ParallelOutboundGateway = @{ Label = "Outbound gateway"; Optional = $false; Ports = @($OutboundGatewayPort); Skip = $false; HealthUrls = @("http://127.0.0.1:${OutboundGatewayPort}/health"); HealthRequired = $true }
     ParallelRingCentralCx   = @{ Label = "RingCentral CX";   Optional = $false; Ports = @($RingcentralCxPort);   Skip = $false; HealthUrls = @("http://127.0.0.1:${RingcentralCxPort}/health"); HealthRequired = $true }
+    ParallelAiBus           = @{ Label = "AI bus";           Optional = $false; Ports = @($AiBusPort);           Skip = $false; HealthUrls = @("http://127.0.0.1:${AiBusPort}/health"); HealthRequired = $true }
     ParallelBlogger         = @{ Label = "Blogger";          Optional = $true;  Ports = @();     Skip = [bool]$SkipBlogger; HealthUrls = @(); HealthRequired = $false }
     ParallelNginx           = @{ Label = "nginx";            Optional = $true;  Ports = @(80, 81); Skip = [bool]$SkipNginx; HealthUrls = @("http://127.0.0.1:81/"); HealthRequired = $true }
     ParallelNgrok           = @{ Label = "ngrok";            Optional = $true;  Ports = @();     Skip = [bool]$SkipNgrok;   HealthUrls = @("https://tag-webhook.ngrok.app/login"); HealthRequired = $false }
@@ -56,6 +58,7 @@ $StopOrder = @(
     "ParallelNgrok",
     "ParallelNginx",
     "ParallelBlogger",
+    "ParallelAiBus",
     "ParallelRingCentralCx",
     "ParallelOutboundGateway",
     "ParallelInboundGateway",
@@ -69,6 +72,7 @@ $StartOrder = @(
     "ParallelInboundGateway",
     "ParallelOutboundGateway",
     "ParallelRingCentralCx",
+    "ParallelAiBus",
     "ParallelBlogger",
     "ParallelNginx",
     "ParallelNgrok"

@@ -61,6 +61,13 @@ const reportDefinitionSchema = new mongoose.Schema(
     lastDurationMs: { type: Number, default: null },
     lastError: { type: String, default: null },
     runCount: { type: Number, default: 0 },
+    // Failed-attempt counter, so a broken definition stops re-gathering every
+    // poll all night. `lastRunKey` records a run that SUCCEEDED and is what
+    // isDue uses to say "already went out"; these two record tries that did
+    // not, and cap them at three per day. Separate keys on purpose — a failed
+    // attempt must never look like a delivered report.
+    lastAttemptKey: { type: String, default: null },
+    attemptsToday: { type: Number, default: 0 },
 
     createdBy: { type: String, default: null },
     archivedAt: { type: Date, default: null, index: true },

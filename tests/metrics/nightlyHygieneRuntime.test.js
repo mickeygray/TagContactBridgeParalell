@@ -238,8 +238,13 @@ test("the night runs in the stated ORDER", () => {
   const s2 = createNightlyHygieneRuntime({}).getState();
   // queue-rollup freezes the day's per-agent counts so a RANGE never has to
   // ask RingCentral; it sits with the other capture steps, before the report.
+  //
+  // call-recovery-discovery sits directly after call-links because both read
+  // the SAME completed day out of the one CallRail account — keeping them
+  // adjacent is what stops a future edit from putting a recovery read on a
+  // different day boundary than the link capture that describes it.
   assert.deepEqual(s2.tasks.map((t) => t.key),
-    ["night-persist", "call-links", "queue-rollup", "logics-source"]);
+    ["night-persist", "call-links", "call-recovery-discovery", "queue-rollup", "logics-source"]);
 });
 
 test("call-links CAPTURES marketing links; PhoneBurner still cannot", () => {

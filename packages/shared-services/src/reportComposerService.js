@@ -178,6 +178,75 @@ async function gatherMaterial({
   // vendor board carried TAG's mail spend against WYNN's revenue.
   const material = { from, to, domain: domain ? String(domain).toUpperCase() : null };
   const notes = [];
+
+  // ── A FAILURE IS NOT A NOTE ──────────────────────────────────────────────
+  //
+  // This distinction is the whole reason a nightly email went out for weeks
+  // with nothing in it. Every degraded gather already pushed a `note`, and the
+  // ruling that notes are operator telemetry — snapshot coverage, feed syncs,
+  // catch-all counts — and do not belong in the mail was CORRECT. But the same
+  // array also carried "the response feed did not refresh", and that is not
+  // telemetry: it means a number below is MISSING rather than zero. Dropping
+  // notes from the email dropped both, so a total outage rendered as a quiet
+  // day and looked perfectly normal.
+  //
+  // So there are two channels. `notes` is everything, for the CLI and the CSV.
+  // `failures` is only "a source did not answer" — it reaches the email as a
+  // banner above the numbers. Push to failures ONLY when a reader would draw a
+  // wrong conclusion from what is printed below it.
+  //
+  // Deliberately NOT failures: a cap we chose to stop at, a tenant-scoping
+  // omission, or a count of rows that legitimately had no snapshot. Those are
+  // us working as designed. A banner that cries every night is a banner nobody
+  // reads, and then this whole mechanism is back to where it started.
+  // TWO KINDS OF "the numbers below are not what they look like".
+  //
+  // `failures` is PLUMBING: a service we call did not answer. It is abnormal,
+  // it is ours to fix, and it marks the subject line [DEGRADED].
+  //
+  // `advisories` is A LIMIT WE CHOSE — a cap that stopped us fetching, so some
+  // rows below are missing a FIELD (a listen link, a case status) while the row
+  // itself is sound. The reader needs to know why a column is blank; nothing is
+  // broken and nobody needs paging.
+  //
+  // The line between them is "would I want to be told at 8pm on a Friday". An
+  // empty spend sheet is a failure and not an advisory, because Mickey fills it
+  // in by 20:00 — so at 20:00 it means something did not happen, and ROAS is
+  // the headline number of the whole board computed against it.
+  //
+  // Both reach the reader. Only failures are an alarm, and only failures put
+  // [DEGRADED] on the subject line — a word that appears every night is a word
+  // that stops being read, which is exactly how the original silent-zero
+  // incident stayed invisible for weeks.
+  const failures = [];
+  const advisories = [];
+  const fail = (message) => { notes.push(message); failures.push(message); return message; };
+  const advise = (message) => { notes.push(message); advisories.push(message); return message; };
+
+  // ── THE TENANT RULE, ONCE ────────────────────────────────────────────────
+  //
+  // Mickey 2026-07-31: "i mean this for the entire email basically gotta solve
+  // that issue." Three of our channels are single-tenant and live under TAG:
+  // the mail pieces (and BCD, which is bought against them), the CallRail
+  // account, and the RingCentral inbound queue. A report scoped to any other
+  // tenant must not carry any of them.
+  //
+  // That rule already existed — inside the `topline` block — and stopped
+  // there, which is precisely how the leak survived: the top line of a WYNN
+  // vendor board correctly read "$507 spent (LD only)" while the By source
+  // table underneath it listed $2,255 of OUR mail spend, and Calls by agent
+  // credited WYNN's board with TAG's inbound calls. A per-block rule gets
+  // copied into two blocks out of four.
+  //
+  // So it lives HERE, on the gather, and every block inherits it for free:
+  // there is no version of a WYNN board where the mail spend is merely hidden
+  // but still summed somewhere. The material simply does not contain it.
+  const MAIL_TENANT = "TAG";
+  const scopedTenant = domain ? String(domain).toUpperCase() : null;
+  const mailApplies = !scopedTenant || scopedTenant === MAIL_TENANT;
+  // Channels the mail tenant owns. LD is deliberately absent — leads are
+  // bought per case and per domain, so LD spend belongs to whichever board.
+  const MAIL_TENANT_CHANNELS = new Set(["mailer", "bcd"]);
   // ONE session for the whole report: activity pulled for payments is the
   // same activity the recordings / postdate / lag steps want, and without
   // this they each paid for it separately.
@@ -212,14 +281,16 @@ async function gatherMaterial({
         const missing = material.payments.filter((x) => x.attributionSnapshot === "missing").length;
         if (missing) notes.push(`${missing} payment(s) have no attribution snapshot yet — shown as (no snapshot), not (unassigned)`);
       } catch (error) {
-        notes.push(`attribution snapshots unavailable — ${String(error.message).slice(0, 70)}`);
+        fail(`attribution snapshots unavailable — ${String(error.message).slice(0, 70)}`);
       }
       material.events = g.activity.events;
       material.gathered = {
         activityRows: g.activity.rows, casesConfirmed: g.totals.casesConfirmed,
         durationMs: g.durationMs, unconfirmed: g.unconfirmed.length,
       };
-      notes.push(...g.errors);
+      // A per-domain gather error means the money numbers below are
+      // INCOMPLETE, not low. This is the one that has to reach the reader.
+      for (const e of g.errors) fail(String(e));
       // (Attribution enrichment happens once, above, immediately after the
       // SUCCESS split — it covers declines too and records why a row has no
       // snapshot. A second pass here re-queried PaymentTruth for the same
@@ -242,9 +313,18 @@ async function gatherMaterial({
   if (want.has("spend") || want.has("source")) {
     const SpendEntry = require("../../shared-models/src/SpendEntry");
     const DailyCallStat = require("../../shared-models/src/DailyCallStat");
-    const rows = await SpendEntry.find({ date: { $gte: from, $lte: to }, active: { $ne: false } })
+    const allRows = await SpendEntry.find({ date: { $gte: from, $lte: to }, active: { $ne: false } })
       .select("date channel source spend cost pieces leadsReported").lean();
-    const bcdRows = await DailyCallStat.find({
+    // Drop the mail tenant's channels on a board that is not its own. Dropped
+    // here rather than at render so nothing downstream can re-sum them into a
+    // total — see THE TENANT RULE above.
+    const rows = mailApplies
+      ? allRows
+      : allRows.filter((r) => !MAIL_TENANT_CHANNELS.has(String(r.channel || "").toLowerCase()));
+    if (!mailApplies && rows.length !== allRows.length) {
+      notes.push(`${allRows.length - rows.length} mail/BCD spend row(s) omitted — they belong to ${MAIL_TENANT}, not ${scopedTenant}`);
+    }
+    const bcdRows = !mailApplies ? [] : await DailyCallStat.find({
       date: { $gte: from, $lte: to }, channel: "bcd", active: { $ne: false },
     }).select("totalCalls").lean();
 
@@ -292,7 +372,7 @@ async function gatherMaterial({
     };
     material.spendBySource = spendBySource;
     material.spendByDay = spendByDay;
-    if (!rows.length) notes.push(`no spend rows recorded for ${from}..${to}`);
+    if (!rows.length) fail(`NO SPEND RECORDED for ${from}..${to} — the sheet is filled in by 20:00, so ROAS below has no denominator and every cost-per reads as free`);
   }
 
   // ── calls: CallRail daily stats (the declared response feed) ──
@@ -312,7 +392,14 @@ async function gatherMaterial({
   // for the whole window), validates completeness BEFORE writing, and upserts
   // — so running it per report is cheap and idempotent. The rows are cached
   // immutable provider facts, which is a storage class the doctrine allows.
-  if (want.has("calls") || want.has("source")) {
+  // CallRail is a single TAG account, so there is no such thing as a WYNN
+  // response — see THE TENANT RULE above. The whole gather is skipped, not
+  // just filtered: the sync inside it is a live API call whose entire output
+  // would be discarded.
+  if ((want.has("calls") || want.has("source")) && !mailApplies) {
+    material.callsBySource = {};
+    notes.push(`CallRail responses omitted — one ${MAIL_TENANT} account, nothing of it belongs to ${scopedTenant}`);
+  } else if (want.has("calls") || want.has("source")) {
     const DailyCallStat = require("../../shared-models/src/DailyCallStat");
     let feedStale = null;
     if (live) {
@@ -328,7 +415,7 @@ async function gatherMaterial({
         // renderers print UNKNOWN — a confident zero is the failure mode this
         // whole path exists to stop.
         feedStale = String(error.message).slice(0, 120);
-        notes.push(`RESPONSE FEED NOT REFRESHED — ${feedStale}; response counts below may be incomplete`);
+        fail(`RESPONSE FEED NOT REFRESHED — ${feedStale}; response counts below may be incomplete`);
       }
     }
     const rows = await DailyCallStat.find({
@@ -345,12 +432,20 @@ async function gatherMaterial({
     // An empty feed over a range that HAS days in it is itself a finding —
     // it means nothing has ever filled it, not that nobody called.
     if (!rows.length && !feedStale) {
-      notes.push(`response feed is EMPTY for ${from}..${to} — mail responses will read 0`);
+      fail(`response feed is EMPTY for ${from}..${to} — mail responses will read 0`);
     }
   }
 
   // ── queue connections: who took the calls (bounded RC trickle + PB) ──
-  if (want.has("queue")) {
+  // The RingCentral inbound queue is the mail tenant's phone system — the
+  // calls it counts are people answering TAG mail. Crediting them to a vendor
+  // board put 27 inbound calls next to an agent's WYNN dial count and read as
+  // though the vendor's leads had produced them. See THE TENANT RULE above.
+  if (want.has("queue") && !mailApplies) {
+    material.queueByAgent = {};
+    material.queueStreams = {};
+    notes.push(`inbound queue omitted — the ${MAIL_TENANT} phone queue answers ${MAIL_TENANT} mail, not ${scopedTenant} leads`);
+  } else if (want.has("queue")) {
     const byAgent = {};
     const streamTotals = {};
     const days = dayRange(from, to);
@@ -373,17 +468,17 @@ async function gatherMaterial({
           material.queueUnavailable = `only ${stored.coverage.daysStored} of ${stored.coverage.daysRequested} day(s) captured`
             + (miss ? ` — missing ${stored.coverage.missing.slice(0, 5).join(", ")}${miss > 5 ? ` +${miss - 5} more` : ""}` : "")
             + (stored.coverage.partialDays.length ? ` — partial: ${stored.coverage.partialDays.join(", ")}` : "");
-          notes.push(`queue counts INCOMPLETE — ${material.queueUnavailable}`);
+          fail(`queue counts INCOMPLETE — ${material.queueUnavailable}`);
         } else {
           material.queueUnavailable = `${days.length} days exceeds QUEUE_DAY_LOOP_MAX (${QUEUE_DAY_LOOP_MAX})`
             + " and no nightly rollups are stored for this range yet";
-          notes.push(`queue counts unavailable — ${material.queueUnavailable}`);
+          fail(`queue counts unavailable — ${material.queueUnavailable}`);
         }
       } catch (error) {
         material.queueByAgent = {};
         material.queueStreams = {};
         material.queueUnavailable = `rollup store unreadable — ${String(error.message).slice(0, 70)}`;
-        notes.push(`queue counts unavailable — ${material.queueUnavailable}`);
+        fail(`queue counts unavailable — ${material.queueUnavailable}`);
       }
     } else {
       try {
@@ -404,7 +499,11 @@ async function gatherMaterial({
               byAgent[agent][key] = (byAgent[agent][key] || 0) + n;
             }
           }
-          if (q.rateLimited) { notes.push(`queue read rate-limited on ${day} — partial`); break; }
+          if (q.rateLimited) {
+            material.queueUnavailable = `RingCentral rate-limited on ${day} — only part of the range was read`;
+            fail(`queue counts PARTIAL — RingCentral rate-limited on ${day}`);
+            break;
+          }
           const ld = await readLdDials(day);
           for (const [id, n] of Object.entries(ld.byAgent || {})) {
             const name = normalizePhoneBurnerAgent(id);
@@ -413,7 +512,8 @@ async function gatherMaterial({
           }
         }
       } catch (error) {
-        notes.push(`queue connections unavailable — ${String(error.message).slice(0, 90)}`);
+        material.queueUnavailable = String(error.message).slice(0, 90);
+        fail(`queue connections unavailable — ${String(error.message).slice(0, 90)}`);
       }
       material.queueByAgent = byAgent;
       material.queueStreams = streamTotals;
@@ -456,7 +556,7 @@ async function gatherMaterial({
       const days = dayRange(from, to);
       if (days.length > RANGE_DAY_LOOP_MAX) {
         material.recordings = [];
-        notes.push(`recordings skipped — ${days.length} days exceeds RANGE_DAY_LOOP_MAX (${RANGE_DAY_LOOP_MAX})`);
+        advise(`recordings skipped — ${days.length} days exceeds RANGE_DAY_LOOP_MAX (${RANGE_DAY_LOOP_MAX})`);
       } else {
         const collected = [];
         for (const day of days) {
@@ -467,7 +567,7 @@ async function gatherMaterial({
       }
     } catch (error) {
       material.recordings = [];
-      notes.push(`recordings unavailable — ${String(error.message).slice(0, 90)}`);
+      fail(`recordings unavailable — ${String(error.message).slice(0, 90)}`);
     }
   }
 
@@ -498,7 +598,7 @@ async function gatherMaterial({
         material.payments = attach(material.payments);
         material.declines = attach(material.declines);
       } catch (error) {
-        notes.push(`case contacts unavailable — ${String(error.message).slice(0, 70)}`);
+        fail(`case contacts unavailable — ${String(error.message).slice(0, 70)}`);
       }
 
       // Our CaseProfile mirror carried a phone for 1 of 8 recent deals, so
@@ -514,7 +614,7 @@ async function gatherMaterial({
       const wanted = [...new Map(needLookup.map((r) => [`${r.domain}:${Number(r.caseId)}`, r])).values()];
       if (wanted.length) {
         if (wanted.length > CASE_CONTACT_MAX) {
-          notes.push(`case phone lookup skipped — ${wanted.length} cases exceeds CASE_CONTACT_MAX (${CASE_CONTACT_MAX})`);
+          advise(`case phone lookup skipped — ${wanted.length} cases exceeds CASE_CONTACT_MAX (${CASE_CONTACT_MAX})`);
         } else {
           try {
             const { createLogicsClient } = require("../../shared-integrations/src");
@@ -625,14 +725,14 @@ async function gatherMaterial({
                   notes.push(`${resolved.size} deal(s) had no snapshot yet — officer resolved live from the case history`);
                 }
               } catch (error) {
-                notes.push(`live officer resolution unavailable — ${String(error.message).slice(0, 70)}`);
+                fail(`live officer resolution unavailable — ${String(error.message).slice(0, 70)}`);
               }
             }
             if (fromLogics) notes.push(`${fromLogics} payment(s) took their source straight off the Logics case`);
             if (onCatchAll) notes.push(`${onCatchAll} payment(s) sit on the Logics catch-all — run scripts/sanitize-logics-source.js to resolve the piece`);
             if (failed) notes.push(`${failed} case(s) had no reachable Logics contact record`);
           } catch (error) {
-            notes.push(`case phone lookup unavailable — ${String(error.message).slice(0, 70)}`);
+            fail(`case phone lookup unavailable — ${String(error.message).slice(0, 70)}`);
           }
         }
       }
@@ -654,7 +754,8 @@ async function gatherMaterial({
         .lean();
     } catch (error) {
       material.dials = [];
-      notes.push(`dials unavailable — ${String(error.message).slice(0, 90)}`);
+      material.dialsUnavailable = String(error.message).slice(0, 90);
+      fail(`dials unavailable — ${String(error.message).slice(0, 90)}`);
     }
   }
 
@@ -718,9 +819,22 @@ async function gatherMaterial({
   // there is no findCaseByPhone hop. Bounded by the long-call threshold, which
   // is a handful a day. Status is STATE, so it is always pulled fresh and
   // never read from a mirror.
+  //
+  // The same fetch also carries the CAMPAIGN. Mickey 2026-07-31: "for the call
+  // name you can just say LD Custom in calls worth hearing or the source i
+  // suppose" — a flat "LD" made every outbound row look alike while the inbound
+  // rows named their mail piece. `SourceCampaignID` is the only place the
+  // campaign lives (findCaseByPhone does not return it), and getCaseInfo is
+  // already in hand here, so the name costs nothing extra.
+  //
+  // The RAW canonical name is what lands on the row, NOT foldSourceKey's — the
+  // fold is a money-table rule that collapses dead campaigns onto Aged, and
+  // "Aged / inactive source" answers the wrong question for someone deciding
+  // which recording to play. LD Posting reads as LD Posting.
   if (want.has("ldCaseStatus")) {
     const LONG_SEC = Math.max(60, Number(process.env.LD_LONG_CALL_SECONDS) || 300);
     const statuses = {};
+    const sources = {};
     try {
       const DailyDial = require("../../shared-models/src/DailyDial");
       const q = { dateKey: { $gte: from, $lte: to }, caseId: { $ne: null } };
@@ -737,21 +851,39 @@ async function gatherMaterial({
       if (list.length && list.length <= LD_STATUS_MAX && live) {
         const { mapLimit, unwrapLogics } = require("./paymentTruthService");
         const { createLogicsClient } = require("../../shared-integrations/src");
+        const { resolveCanonicalSource } = require("./sourceCanonicalService");
+        // The registry is small and the same handful of campaign ids repeat
+        // across every case, so resolve each id once.
+        const campaignCache = new Map();
+        const campaignName = async (dom, id) => {
+          if (!id) return null;
+          const key = `${dom}:${id}`;
+          if (!campaignCache.has(key)) {
+            const hit = await resolveCanonicalSource({ domain: dom.toLowerCase(), sourceId: Number(id) })
+              .catch(() => null);
+            campaignCache.set(key, hit?.internalName || hit?.displayName || null);
+          }
+          return campaignCache.get(key);
+        };
         await mapLimit(list, 3, async (c) => {
           try {
             const info = unwrapLogics(await createLogicsClient(c.domain).getCaseInfo(c.caseId));
-            if (info?.StatusName) statuses[`${c.domain}:${c.caseId}`] = info.StatusName;
+            const key = `${c.domain}:${c.caseId}`;
+            if (info?.StatusName) statuses[key] = info.StatusName;
+            const name = await campaignName(c.domain, info?.SourceCampaignID || info?.CampaignSourceID);
+            if (name) sources[key] = name;
           } catch { /* one unreadable case must not cost the section */ }
         });
       } else if (list.length > LD_STATUS_MAX) {
         // Never silently truncate: a status nobody fetched must read as absent
         // rather than as a case that has not moved.
-        notes.push(`LD case status skipped — ${list.length} long-dialled case(s) exceeds LD_STATUS_MAX (${LD_STATUS_MAX})`);
+        advise(`LD case status skipped — ${list.length} long-dialled case(s) exceeds LD_STATUS_MAX (${LD_STATUS_MAX})`);
       }
     } catch (error) {
-      notes.push(`LD case status unavailable — ${String(error.message).slice(0, 80)}`);
+      fail(`LD case status unavailable — ${String(error.message).slice(0, 80)}`);
     }
     material.ldCaseStatus = statuses;
+    material.ldCaseSource = sources;
   }
 
   if (want.has("callsRange")) {
@@ -759,13 +891,15 @@ async function gatherMaterial({
     const days = dayRange(callsFrom, to);
     if (days.length > CALLS_DAY_MAX) {
       material.callsRange = [];
-      notes.push(`call detail skipped — ${days.length} days exceeds CALLS_DAY_MAX (${CALLS_DAY_MAX})`);
+      advise(`call detail skipped — ${days.length} days exceeds CALLS_DAY_MAX (${CALLS_DAY_MAX})`);
     } else {
       material.callsLookbackFrom = callsFrom;
       notes.push(`inbound calls gathered from ${callsFrom} (${CALLS_LOOKBACK_DAYS}-day lookback) so call-to-close lag is not clipped to the window`);
       const { createCallrailClient } = require("../../shared-integrations/src");
       const cr = createCallrailClient("TAG");
       const all = [];
+      const badDays = [];
+      let lastCallsError = null;
       for (const day of days) {
         try {
           const rows = await gatherSession.fetch("callrail", { domain: "TAG", from: day, to: day },
@@ -786,8 +920,16 @@ async function gatherMaterial({
             });
           }
         } catch (error) {
-          notes.push(`calls ${day} unavailable — ${String(error.message).slice(0, 60)}`);
+          // ONE entry for the whole loop, not one per day. This reaches back 45
+          // days, so a CallRail outage on a single-day board would otherwise
+          // push 46 identical lines and bury every other failure under itself.
+          badDays.push(day);
+          lastCallsError = String(error.message).slice(0, 60);
         }
+      }
+      if (badDays.length) {
+        material.callsRangeUnavailable = `CallRail unreachable for ${badDays.length} of ${days.length} day(s) — ${lastCallsError}`;
+        fail(`inbound calls INCOMPLETE — ${badDays.length} of ${days.length} day(s) unreadable (${badDays[0]}${badDays.length > 1 ? ` … ${badDays[badDays.length - 1]}` : ""}) — ${lastCallsError}`);
       }
       material.callsRange = all;
       // CallRail is a single TAG tenant — say so once, here, rather than
@@ -938,7 +1080,7 @@ async function gatherMaterial({
       }
     } catch (error) {
       material.ldLeads = null;
-      notes.push(`LD receipt log unavailable — ${String(error.message).slice(0, 70)}`);
+      fail(`LD receipt log unavailable — ${String(error.message).slice(0, 70)}`);
     }
   }
 
@@ -974,7 +1116,7 @@ async function gatherMaterial({
           if (row.listenUrl) byCallId[String(row.callId)] = row.listenUrl;
         }
       } catch (error) {
-        notes.push(`call-link pool unavailable — ${String(error.message).slice(0, 70)}`);
+        fail(`call-link pool unavailable — ${String(error.message).slice(0, 70)}`);
       }
       const missing = wanted.filter((id) => !byCallId[id]);
       if (missing.length && live) {
@@ -990,11 +1132,11 @@ async function gatherMaterial({
             } catch { /* one bad id must not cost the whole section */ }
           }
         } catch (error) {
-          notes.push(`recording lookup unavailable — ${String(error.message).slice(0, 70)}`);
+          fail(`recording lookup unavailable — ${String(error.message).slice(0, 70)}`);
         }
         if (missing.length > MAX_FETCH) {
           // Never silently truncate: a missing link should read as missing.
-          notes.push(`${missing.length - MAX_FETCH} long call(s) left without a listen link (fetch cap ${MAX_FETCH})`);
+          advise(`${missing.length - MAX_FETCH} long call(s) left without a listen link (fetch cap ${MAX_FETCH})`);
         }
       }
     }
@@ -1187,6 +1329,8 @@ async function gatherMaterial({
   }
 
   material.notes = notes;
+  material.failures = failures;
+  material.advisories = advisories;
   material.gatherStats = gatherSession.stats();
   return material;
 }
@@ -1264,8 +1408,58 @@ async function composeReport({
     gathered: material.gathered || null,
     gatherStats: material.gatherStats || null,
     notes: material.notes || [],
+    // Sources that did not answer. A caller deciding whether to trust this
+    // report reads THIS, not notes — see "A FAILURE IS NOT A NOTE" above.
+    failures: material.failures || [],
+    // Not a fault — data a person has not entered yet. Shown, never alarmed on.
+    advisories: material.advisories || [],
     sections,
   };
+}
+
+/**
+ * Every section as its own CSV.
+ *
+ * ONE CSV PER BLOCK, never one combined sheet: a block IS a table, and stacking
+ * unrelated tables into one file is what makes a CSV useless to open.
+ *
+ * This is the other half of the email being deliberately short. `emailColumns`
+ * trims each table to what someone acts on — the source table drops to six
+ * columns, the call list to four — and everything trimmed off lives here:
+ * recurring_cash, roi_pct, the spend-suspect flag, case ids, phone numbers,
+ * prior-call counts. The mail answers "what should I look at"; the CSV answers
+ * "show me your work".
+ *
+ * Returns buffers, not paths — the scheduler attaches these to an email and has
+ * no business writing to disk.
+ */
+function renderCsvs(report) {
+  const NL = String.fromCharCode(10);
+  const QUOTE = String.fromCharCode(34);
+  const cell = (v) => {
+    if (v == null) return "";
+    const s = String(v);
+    return s.includes(",") || s.includes(QUOTE) || s.includes(NL)
+      ? QUOTE + s.split(QUOTE).join(QUOTE + QUOTE) + QUOTE
+      : s;
+  };
+  const out = [];
+  for (const s of report.sections || []) {
+    if (s.error || typeof s.block?.csv !== "function") continue;
+    let table;
+    try { table = s.block.csv(s.data); } catch { continue; }
+    const { rows, columns } = table || {};
+    if (!rows?.length || !columns?.length) continue;
+    const head = columns.map((c) => cell(c.header)).join(",");
+    const body = rows.map((r) => columns.map((c) => cell(c.get(r))).join(",")).join(NL);
+    out.push({
+      id: s.id,
+      filename: `${s.id}-${report.from}${report.to !== report.from ? `_${report.to}` : ""}.csv`,
+      content: `${head}${NL}${body}${NL}`,
+      rows: rows.length,
+    });
+  }
+  return out;
 }
 
 /** Plain-text render — every ticked block, in the order ticked. */
@@ -1490,6 +1684,17 @@ function toTemplateData(report, { title = "Report", eyebrow = "Parallel" } = {})
     range: report.from === report.to ? report.from : `${report.from} → ${report.to}`,
     domain: report.domain === "ALL" ? null : report.domain,
     sections,
+    // THE ONE THING THE EMAIL SAYS ABOUT ITSELF. Notes stay out (settled: they
+    // are telemetry). `alerts` is the strict subset meaning "a source did not
+    // answer", and it renders as a red band ABOVE the numbers — because the
+    // reader has to know before he reads them, not after.
+    alerts: [...(report.failures || []), ...(report.advisories || [])],
+    // Rendered as two bands: red for a source that did not answer, amber for
+    // data nobody has entered yet. Same information, different urgency —
+    // colouring a routine spend-sheet lag like an outage is how a warning
+    // stops being read.
+    failures: [...(report.failures || [])],
+    advisories: [...(report.advisories || [])],
     notes,
     // NO DIAGNOSTICS IN THE EMAIL — settled with Mickey. Row counts and
     // gather timings are operator telemetry: they belong in the CLI and the
@@ -1504,5 +1709,5 @@ module.exports = {
   renderHtml,
   RANGE_DAY_LOOP_MAX,
   dayRange, composeReport, filterPayments, filterQueueByAgent, filterRecordings,
-  gatherMaterial, parseFilters, renderText, toTemplateData,
+  gatherMaterial, parseFilters, renderText, renderCsvs, toTemplateData,
 };

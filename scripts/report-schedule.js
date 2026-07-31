@@ -15,6 +15,12 @@
 // sends. Arming a schedule and emailing a person are separate decisions.
 
 require("dotenv").config();
+// See scripts/report.js — a stale c-ares nameserver breaks only the SRV lookup
+// behind mongodb+srv://, so this surfaces as ECONNREFUSED. Opt-in.
+if (process.env.DNS_SERVERS) {
+  try { require("dns").setServers(process.env.DNS_SERVERS.split(",").map((s) => s.trim()).filter(Boolean)); }
+  catch (error) { console.warn(`DNS_SERVERS ignored — ${error.message}`); }
+}
 
 const { connectMongo } = require("../packages/event-core/src");
 const { getSharedConfig, getInternalFromEmail } = require("../packages/shared-config/src");
@@ -125,14 +131,39 @@ async function main() {
     return;
   }
 
+  // ONE-FIELD PATCHES. `--save` rebuilds the whole document from flags, so
+  // omitting --to blanks the recipients, omitting --domain turns the vendor
+  // board into an all-tenant board, and omitting --enable disarms it. Changing
+  // the weekdays should not risk any of that, so it gets a patch arm like
+  // --enable/--disable rather than a full re-save.
+  //
+  //   node scripts/report-schedule.js --weekdays "vendor roll up with calls" --dow 1,2,3,4,5
+  //   node scripts/report-schedule.js --at-time "financial roll up with calls" --at 20:30
+  const dowPatch = () => {
+    const raw = arg("dow");
+    if (raw === null || raw === true) throw new Error("--weekdays needs --dow (e.g. --dow 1,2,3,4,5; 0=Sun)");
+    return { "schedule.daysOfWeek": nums(raw) };
+  };
+  const timePatch = () => {
+    const raw = String(arg("at") || "");
+    const m = raw.match(/^(\d{1,2}):(\d{2})$/);
+    if (!m) throw new Error("--at-time needs --at HH:MM");
+    return { "schedule.hour": Number(m[1]), "schedule.minute": Number(m[2]) };
+  };
+
   for (const [flag, patch, label] of [
     ["enable", { "schedule.enabled": true }, "armed"],
     ["disable", { "schedule.enabled": false }, "disarmed"],
     ["archive", { archivedAt: new Date() }, "archived"],
+    ["weekdays", dowPatch, "weekdays set"],
+    ["at-time", timePatch, "time set"],
   ]) {
     const name = arg(flag);
     if (name && name !== true) {
-      const doc = await ReportDefinition.findOneAndUpdate({ name }, { $set: patch }, { new: true });
+      let $set;
+      try { $set = typeof patch === "function" ? patch() : patch; }
+      catch (error) { console.error(error.message); process.exitCode = 1; return; }
+      const doc = await ReportDefinition.findOneAndUpdate({ name }, { $set }, { new: true });
       if (!doc) { console.error(`no definition named "${name}"`); process.exitCode = 1; return; }
       console.log(`${label}: ${doc.name}`);
       console.log(describe(doc));

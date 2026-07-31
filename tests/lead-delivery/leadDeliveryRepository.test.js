@@ -227,6 +227,8 @@ test("provider-neutral schemas expose the required unique and repair indexes", (
   assert.equal(LeadDeliveryItem.schema.path("version").defaultValue, 0);
   assert.equal(LeadDeliveryAgent.schema.path("refillRequestId").defaultValue, null);
   assert.equal(LeadDeliveryEvent.schema.path("status").defaultValue, "pending");
+  assert.equal(LeadDeliveryEvent.schema.path("domain").defaultValue, null);
+  assert.equal(LeadDeliveryEvent.schema.path("caseId").defaultValue, null);
   assert.equal(LeadDeliveryCheckpoint.schema.path("status").defaultValue, "scheduled");
   for (const piiField of ["caseId", "sourceIdentity", "normalizedPhone", "displayName", "folderId"]) {
     assert.equal(LeadDeliveryCheckpoint.schema.path(piiField), undefined);
@@ -267,6 +269,10 @@ test("provider-neutral schemas expose the required unique and repair indexes", (
   assert.equal(blankEvent.providerCallId, null);
   assert.equal(blankEvent.providerContactId, null);
   assert.equal(blankEvent.providerExternalLeadId, null);
+  blankEvent.domain = " tag ";
+  blankEvent.caseId = " 101 ";
+  assert.equal(blankEvent.domain, "TAG");
+  assert.equal(blankEvent.caseId, "101");
   const invalidAgentCounter = new LeadDeliveryAgent({
     agentId: "brad", estimatedOutstanding: -1, pendingFreshCount: 0.5,
   }).validateSync();

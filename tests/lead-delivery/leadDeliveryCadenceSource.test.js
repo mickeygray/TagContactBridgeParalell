@@ -45,7 +45,12 @@ function sourceRow(overrides = {}) {
   };
 }
 
-function harness({ row = sourceRow(), floor = {}, window = { allowed: true } } = {}) {
+function harness({
+  row = sourceRow(),
+  floor = {},
+  window = { allowed: true },
+  statusMaxAgeMs = 0,
+} = {}) {
   const calls = [];
   const repository = {
     async readSourceBatch(input) {
@@ -72,6 +77,7 @@ function harness({ row = sourceRow(), floor = {}, window = { allowed: true } } =
     domains: ["tag"],
     policyForDomain: () => ({ allowedProspectStatusIds: [1, 2], dncStatusIds: [99] }),
     contactWindowEvaluator: () => window,
+    statusMaxAgeMs,
   });
   return { source, calls };
 }
@@ -158,6 +164,50 @@ test("CaseProfile status is authoritative and conflicting current status fails c
   assert.equal(
     (await currentClosed.source.readOne({ domain: "TAG", caseId: 1001 })).eligibility.reason,
     "logics-nonprospect-status",
+  );
+});
+
+test("status freshness gate accepts projected fresh proof and rejects missing or stale proof", async () => {
+  const now = new Date("2026-07-10T19:00:00.000Z");
+  const maxAge = 24 * 60 * 60 * 1000;
+  const fresh = harness({
+    row: sourceRow({
+      caseProfile: {
+        statusId: 1,
+        statusCategory: "prospect",
+        paymentsCount: 0,
+        totalPaid: 0,
+        lastStatusCheckAt: new Date("2026-07-10T18:00:00.000Z"),
+      },
+    }),
+    statusMaxAgeMs: maxAge,
+  });
+  assert.equal(
+    (await fresh.source.readOne({ domain: "TAG", caseId: 1001, now })).eligibility.ok,
+    true,
+  );
+
+  const missing = harness({ statusMaxAgeMs: maxAge });
+  assert.equal(
+    (await missing.source.readOne({ domain: "TAG", caseId: 1001, now })).eligibility.reason,
+    "status-freshness-unproven",
+  );
+
+  const stale = harness({
+    row: sourceRow({
+      caseProfile: {
+        statusId: 1,
+        statusCategory: "prospect",
+        paymentsCount: 0,
+        totalPaid: 0,
+        lastStatusCheckAt: new Date("2026-07-09T18:59:59.999Z"),
+      },
+    }),
+    statusMaxAgeMs: maxAge,
+  });
+  assert.equal(
+    (await stale.source.readOne({ domain: "TAG", caseId: 1001, now })).eligibility.reason,
+    "status-stale",
   );
 });
 

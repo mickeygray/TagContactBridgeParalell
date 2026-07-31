@@ -14,6 +14,14 @@
 // every report prints its coverage so a thin answer is obvious.
 
 require("dotenv").config();
+// A disconnected VPN can leave Node's c-ares resolver pointed at a dead
+// nameserver. Ordinary lookups still work off the OS cache, so only the SRV
+// query behind mongodb+srv:// fails, and it fails as "ECONNREFUSED" rather
+// than anything that reads like DNS. Opt-in override, unset by default.
+if (process.env.DNS_SERVERS) {
+  try { require("dns").setServers(process.env.DNS_SERVERS.split(",").map((s) => s.trim()).filter(Boolean)); }
+  catch (error) { console.warn(`DNS_SERVERS ignored — ${error.message}`); }
+}
 
 const { connectMongo } = require("../packages/event-core/src");
 const { getSharedConfig } = require("../packages/shared-config/src");

@@ -1,5 +1,7 @@
 "use strict";
 
+require("../../../ops/nssm/node-dns-bootstrap.cjs");
+
 const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
@@ -73,7 +75,6 @@ const { createLexisNightlyRuntime } = require("./services/lexisNightlyService");
 const { createLexisDailyDropRuntime } = require("./services/lexisDailyDropRuntime");
 const { createLogicsActivityReviewRuntime } = require("./services/logicsActivityReviewRuntime");
 const { createNightlyCloseRuntime } = require("./services/nightlyCloseRuntime");
-const { createNightBoardRuntime } = require("./services/nightBoardRuntime");
 const { createReportScheduleRuntime } = require("./services/reportScheduleRuntime");
 const { createNightlyHygieneRuntime } = require("./services/nightlyHygieneRuntime");
 const { createCxNightlyCallGradeRuntime } = require("./services/cxNightlyCallGradeRuntime");
@@ -214,6 +215,7 @@ const {
   validateCompanyTrackingNumbers,
 } = require("../../../packages/shared-integrations/src");
 const { resolveQueueDialTimeWindow } = require("../../../packages/shared-services/src/cxQueuePolicyService");
+const { refreshQueuedLeadStatuses } = require("../../../packages/shared-services/src/leadQueueStatusRefreshService");
 const leadDeliveryConfiguration = require("../../../config/lead-delivery-agents.json");
 const {
   watchCxBoringDialerActiveCalls,
@@ -2019,13 +2021,110 @@ async function startServer() {
     contactWindowEvaluator: (row, at) => resolveQueueDialTimeWindow(row, at),
     overnightBatchResolver: (item, at) => leadDeliveryService.assignPacificMorningBatch(item, { now: at }),
   });
+  // ── CallRail long-call recovery: the live readers admission needs ────────
+  const callRecoveryDiscoveryService = require(
+    "../../../packages/shared-services/src/callRecoveryDiscoveryService");
+  const callRecoveryCompositeSource = require(
+    "../../../packages/shared-services/src/callRecoveryCompositeSource");
+  const {
+    callRecoveryLeadRepository,
+  } = require("../../../packages/shared-repositories/src");
+  // Count-only, per §23 — never a name, phone, case id or call id.
+  const callRecoveryCounters = {};
+
+  /** Current sale/status evidence for one episode (§13). */
+  async function readCallRecoveryCaseState(episode) {
+    try {
+      const { CaseProfile } = require("../../../packages/shared-models/src");
+      const profile = await CaseProfile.findOne({
+        domain: String(episode.domain || "").toUpperCase(),
+        // caseId is a string on delivery items and an int on profiles.
+        caseId: Number(episode.caseId),
+      }).select("convertedAt paymentCount totalPaid statusId dnc").lean();
+      if (!profile) return null;
+      const dncIds = new Set(dncStatusIdsForDomain(episode.domain));
+      return {
+        convertedAt: profile.convertedAt || null,
+        paymentCount: Number(profile.paymentCount) || 0,
+        totalPaid: Number(profile.totalPaid) || 0,
+        dnc: profile.dnc === true || dncIds.has(Number(profile.statusId)),
+        activeAppointment: false,
+        // Unreadable status is NULL, so admission holds rather than guessing.
+        allowedProspectStatus: profile.statusId == null
+          ? null
+          : (Array.isArray(config.logicsProspectStatusIds) && config.logicsProspectStatusIds.length
+            ? config.logicsProspectStatusIds.includes(Number(profile.statusId))
+            : !dncIds.has(Number(profile.statusId))),
+      };
+    } catch { return null; }
+  }
+
+  /**
+   * DNC evidence for one episode (§14).
+   *
+   * Reads only what has been PROVEN and stored on the episode. There is no
+   * RealValidation sweep for this program yet, so a fresh episode carries
+   * `dnc.result = "unknown"` and admission holds on `dnc-unproven` — which is
+   * the correct behaviour, not a gap to paper over: no recovery call may be
+   * placed until a real DNC/litigator result exists for that exact phone.
+   */
+  async function readCallRecoveryDncState(episode) {
+    const stored = episode?.dnc || {};
+    return {
+      result: stored.result || "unknown",
+      checkedAt: stored.checkedAt || null,
+      reason: stored.reason || null,
+      // Entity suppression, checked live and independently of the provider
+      // result — it outranks everything (§14.3).
+      entityDnc: (await readCallRecoveryCaseState(episode))?.dnc === true,
+    };
+  }
+
+  // CallRail long-call recovery joins the SAME ingest loop as a composite
+  // source (work order §15.1) — no second ingest, no second cursor driver, no
+  // second writer.
+  //
+  // While delivery is dark this is a LITERAL PASS-THROUGH: the base source
+  // object itself is handed to the runtime, not a wrapper around it. A wrapper
+  // would change the cursor shape on the live cadence path for no benefit, and
+  // the whole point of a dark flag is that the running system is byte-for-
+  // behaviour identical to one without the feature.
+  const callRecoveryActivation = callRecoveryDiscoveryService
+    .resolveCallRecoveryActivation(config.callRecovery || {});
+  if (!callRecoveryActivation.ok) {
+    logger.error("call_recovery.configuration_invalid", { error: callRecoveryActivation.error });
+  }
+  const leadDeliverySource = callRecoveryActivation.delivery
+    ? callRecoveryCompositeSource.createCallRecoveryCompositeSource({
+      base: leadDeliveryCadenceSource,
+      repository: callRecoveryLeadRepository,
+      activation: callRecoveryActivation,
+      // Admission re-proves status, sale and DNC on EVERY pass. The inputs are
+      // resolved here because this is where the live readers live; the decision
+      // itself stays in callRecoveryAdmissionService.
+      resolveAdmissionInputs: async ({ episode }) => ({
+        caseState: await readCallRecoveryCaseState(episode),
+        dncState: await readCallRecoveryDncState(episode),
+        contactWindowOpen: resolveQueueDialTimeWindow(
+          { normalizedPhone: episode.normalizedPhone, domain: episode.domain }, new Date(),
+        )?.allowed ?? null,
+        existingWorkItem: await leadDeliveryRepository.findItemBySourceIdentity({
+          domain: episode.domain, caseId: episode.caseId,
+        }),
+      }),
+      onDecision: ({ decision }) => {
+        callRecoveryCounters[decision.decision] = (callRecoveryCounters[decision.decision] || 0) + 1;
+      },
+    })
+    : leadDeliveryCadenceSource;
+
   const leadDeliveryActionHandlers = createControlPlaneLeadDeliveryActionHandlers({
     configuration: leadDeliveryConfiguration,
     serviceEmail: leadDeliveryServiceEmail,
   });
   const leadDeliveryRuntime = leadDeliveryService.createLeadDeliveryRuntime({
     repository: leadDeliveryRepository,
-    source: leadDeliveryCadenceSource,
+    source: leadDeliverySource,
     phoneBurner: phoneBurnerClient,
     actionHandlers: leadDeliveryActionHandlers,
     persistDailyDialOutcomes: leadDeliveryActionHandlers.persist_daily_dials_to_cadence,
@@ -2040,6 +2139,27 @@ async function startServer() {
     currentOvernightBatchKey: (at) => leadDeliveryService.resolvePacificMorningBatchWindow(at).batchKey,
     providerInventoryAuthoritative: true,
     providerConsumptionOrder: String(process.env.PHONEBURNER_PROVIDER_CONSUMPTION_ORDER || "").trim() || null,
+    refreshSourceStatuses: async () => {
+      const result = await refreshQueuedLeadStatuses({
+        states: ["blocked"],
+        maxAgeHours: Number(process.env.LEAD_DELIVERY_STATUS_MAX_AGE_HOURS || 24),
+        limit: 250,
+        concurrency: 5,
+        retireDnc: true,
+        newestFirst: true,
+        includeRefreshedIdentities: true,
+        reservationReasons: [
+          "source-blocked-status-freshness-unproven",
+          "source-blocked-status-stale",
+        ],
+        logger: null,
+      });
+      return {
+        refreshed: result.refreshed,
+        failed: result.failed,
+        refreshedIdentities: result.refreshedIdentities,
+      };
+    },
     // SIMPLE LOOP ONLY: legacy seed/fill/preload/refill methods remain in the
     // file for the no-delete proof window but have no production authority.
     legacyOperatorSurfaceEnabled: false,
@@ -2095,10 +2215,6 @@ async function startServer() {
   });
   const logicsActivityReviewRuntime = createLogicsActivityReviewRuntime({
     config: config.logicsActivityReview || {},
-    runtime,
-  });
-  const nightBoardRuntime = createNightBoardRuntime({
-    config: config.nightBoard || {},
     runtime,
   });
   // Saved report shapes on a clock. Default OFF — arm with
@@ -2216,7 +2332,6 @@ async function startServer() {
       logicsActivityReview: logicsActivityReviewRuntime.getState(),
       nightlyClose: nightlyCloseRuntime.getState(),
       cxNightlyCallGrade: cxNightlyCallGradeRuntime.getState(),
-      nightBoard: nightBoardRuntime.getState(),
       reportSchedule: reportScheduleRuntime.getState(),
       nightlyHygiene: nightlyHygieneRuntime.getState(),
       spendSync: spendSyncRuntime.getState(),
@@ -2829,7 +2944,6 @@ async function startServer() {
   await logicsActivityReviewRuntime.start();
   await nightlyCloseRuntime.start();
   await cxNightlyCallGradeRuntime.start();
-  await nightBoardRuntime.start();
   await reportScheduleRuntime.start();
   await nightlyHygieneRuntime.start();
   await spendSyncRuntime.start();

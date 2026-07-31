@@ -85,7 +85,7 @@ function caseIdsFrom(payload) {
  * writes, so it is always safe to run and is what the runtime shows when it
  * is disarmed.
  *
- * @returns {{plan: Array, stats: object, inactivePieces: Array, window: object}}
+ * @returns {{plan: Array, stats: object, inactivePieces: Array, offRosterPieces: Array, window: object}}
  */
 async function planSourceSanitization({
   domain = "TAG", from = null, to = null, days = 7,
@@ -100,11 +100,20 @@ async function planSourceSanitization({
   };
   const stats = {
     calls: 0, callers: 0, noCase: 0, alreadyTarget: 0,
+    // Cases reached only because a secondary number (spouse / second cell /
+    // work line) was on the case — Logics' phone search misses those.
+    matchedBySecondaryPhone: 0,
+    // Calls on a line that is NOT an active mail piece — servicing numbers,
+    // the website pool, social, retired pieces, BCD. Mickey 2026-07-30:
+    // "noise, we only need to track active mail pieces." Counted purely so the
+    // skip is visible; this is the intended outcome, NOT a registry gap to be
+    // closed. Do not register these to make the number go down.
+    offRosterPiece: 0,
     alreadyOtherSpecific: 0, unreadable: 0, planned: 0,
   };
   if (!registry) {
     return {
-      plan: [], stats, inactivePieces: [], window,
+      plan: [], stats, inactivePieces: [], offRosterPieces: [], window,
       skipped: `no source registry for ${dom} — every piece would be skipped`,
     };
   }
@@ -113,6 +122,9 @@ async function planSourceSanitization({
   // ── 1. calls that landed on an ACTIVE piece ──
   const cr = createCallrailClient(dom);
   const byPhone = new Map();
+  // piece name -> call count for lines that are not active mail. Diagnostic
+  // only; these are intentionally never written.
+  const offRoster = new Map();
   const seenSources = new Map();
   for (const day of dayKeys(window.from, window.to)) {
     let res = null;
@@ -128,7 +140,15 @@ async function planSourceSanitization({
       if (!piece) continue;
       seenSources.set(piece, (seenSources.get(piece) || 0) + 1);
       const sourceId = resolveLogicsSourceId(dom, piece);
-      if (!sourceId) continue;
+      if (!sourceId) {
+        // Not an active mail piece — servicing lines, the website pool, social,
+        // BCD, retired pieces. Skipping is the POINT: the registry is the
+        // active-mail roster, so anything absent from it is deliberately not
+        // attributed. Counted only so the skip is visible in the plan.
+        stats.offRosterPiece += 1;
+        offRoster.set(piece, (offRoster.get(piece) || 0) + 1);
+        continue;
+      }
       const key = last10(c.customer_phone_number);
       if (!key) continue;
       const at = c.start_time || day;
@@ -147,9 +167,31 @@ async function planSourceSanitization({
     try {
       ids = caseIdsFrom(await client.findCaseByPhone(hit.phone));
     } catch (error) {
-      if (isNotFound(error)) { stats.noCase += 1; return; }
-      stats.unreadable += 1;
-      return;
+      if (!isNotFound(error)) { stats.unreadable += 1; return; }
+      ids = [];
+    }
+    if (!ids.length) {
+      // THE SPOUSE NUMBER. Logics' phone search only resolves the number in the
+      // case's primary slot, so a call from a spouse / second cell / work line
+      // dead-ends here even though that number is ON the case. Measured on July
+      // 2026: case 394513 sold the day its spouse number made a 55-minute call
+      // to Affordability Federal, and the whole deal stayed in the ABC bucket
+      // because the primary number never rang.
+      //
+      // Our CaseProfile mirror already folds every Logics number into
+      // normalizedPhones, so ask it before giving up. Logics stays the
+      // authority for the WRITE; this only answers "whose case is this?".
+      try {
+        const CaseProfile = require("../../shared-models/src/CaseProfile");
+        const owners = await CaseProfile.find({
+          domain: dom,
+          normalizedPhones: hit.phone,
+        }).select("caseId").limit(5).lean();
+        ids = owners.map((o) => Number(o.caseId)).filter(Boolean);
+        if (ids.length) stats.matchedBySecondaryPhone += ids.length;
+      } catch {
+        // mirror unavailable — fall through to noCase rather than guess
+      }
     }
     if (!ids.length) { stats.noCase += 1; return; }
 
@@ -183,7 +225,11 @@ async function planSourceSanitization({
     .sort((a, b) => b[1] - a[1])
     .map(([piece, calls]) => ({ piece, calls }));
 
-  return { plan, stats, inactivePieces, window };
+  // Lines that took calls but are not active mail. Visible, never actioned.
+  const offRosterPieces = [...offRoster.entries()]
+    .map(([piece, calls]) => ({ piece, calls }))
+    .sort((a, b) => b.calls - a.calls);
+  return { plan, stats, inactivePieces, offRosterPieces, window };
 }
 
 /**

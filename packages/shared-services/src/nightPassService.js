@@ -1,7 +1,7 @@
 "use strict";
 
 // THE NIGHT PASS — one callable, used by both the CLI (scripts/run-night.js)
-// and the scheduled runtime (apps/control-plane/src/services/nightBoardRuntime).
+// and the nightly hygiene runtime's persist-only pass.
 // One implementation, so the thing that runs automatically is byte-identical
 // to the thing that was proven by hand.
 //

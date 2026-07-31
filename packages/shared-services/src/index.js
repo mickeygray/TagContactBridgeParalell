@@ -455,6 +455,11 @@ const { runClientCaseScrub } = require("./clientScrubService");
 const { reviewCaseActivities } = require("./activityAiReviewService");
 const { REPORTS, generateReport } = require("./reportingService");
 const reportOps = require("./reportOpsService");
+const callRecoveryAdmissionService = require("./callRecoveryAdmissionService");
+const callRecoveryCompositeSource = require("./callRecoveryCompositeSource");
+const callRecoveryDiscoveryService = require("./callRecoveryDiscoveryService");
+const callRecoveryDncSweepService = require("./callRecoveryDncSweepService");
+const callrailCallFactService = require("./callrailCallFactService");
 const reportDefinitions = require("./reportDefinitionService");
 const sourceSanitizer = require("./logicsSourceSanitizerService");
 const queueRollup = require("./queueRollupService");
@@ -1240,6 +1245,16 @@ module.exports = {
   reconcileMailerConfigsWithSheet,
   resolveScheduledBlastRule,
   resolveCanonicalAttribution,
+  callRecoveryAdmissionService,
+
+  callRecoveryCompositeSource,
+
+  callRecoveryDiscoveryService,
+
+  callRecoveryDncSweepService,
+
+  callrailCallFactService,
+
   resolveCanonicalSource,
   resolveMailer,
   resolveMailerAt,

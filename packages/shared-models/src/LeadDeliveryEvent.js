@@ -8,6 +8,11 @@ function nullableTrimmed(value) {
   return normalized || null;
 }
 
+function nullableUppercase(value) {
+  const normalized = nullableTrimmed(value);
+  return normalized ? normalized.toUpperCase() : null;
+}
+
 function nonNegativeIntegerField(defaultValue = 0) {
   return {
     type: Number,
@@ -39,6 +44,11 @@ const leadDeliveryEventSchema = new mongoose.Schema({
   nextAttemptAt: { type: Date, default: null, index: true },
   processingLeaseId: { type: String, default: null, index: true, set: nullableTrimmed },
   processingLeaseExpiresAt: { type: Date, default: null, index: true },
+  // Canonical Logics identity is attached only after the provider callback is
+  // resolved to one exact lead-delivery item. Never trust callback-supplied
+  // custom fields as the event's case identity.
+  domain: { type: String, default: null, index: true, set: nullableUppercase },
+  caseId: { type: String, default: null, index: true, set: nullableTrimmed },
   resolvedItemId: { type: String, default: null, index: true, set: nullableTrimmed },
   resolvedAttemptNumber: nonNegativeIntegerField(),
   // Durable, provider-neutral inputs for downstream effects. This is written
@@ -66,6 +76,7 @@ leadDeliveryEventSchema.index(
 );
 leadDeliveryEventSchema.index({ status: 1, nextAttemptAt: 1, receivedAt: 1 });
 leadDeliveryEventSchema.index({ provider: 1, providerCallId: 1, eventType: 1 });
+leadDeliveryEventSchema.index({ domain: 1, caseId: 1, eventType: 1, receivedAt: -1 });
 
 module.exports = mongoose.models.LeadDeliveryEvent
   || mongoose.model("LeadDeliveryEvent", leadDeliveryEventSchema);

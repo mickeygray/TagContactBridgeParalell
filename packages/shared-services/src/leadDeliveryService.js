@@ -23,9 +23,19 @@ const DEFAULT_FALLBACK_POOL_ORDER = Object.freeze([
 ]);
 const SIMPLE_POOL_LOW_WATER = 5;
 const SIMPLE_PACKET_SIZE = 20;
+const SIMPLE_POOL_SUPPLY_REFRESH_MAX_BATCHES = 5;
 const PRODUCTIVITY_REBALANCE_INTERVAL_MS = 15 * 60 * 1000;
 const PRODUCTIVITY_REBALANCE_CUSHION_SIZE = 6;
 const PRODUCTIVITY_REBALANCE_MINIMUM_CUSHION_AGE_DAYS = 17;
+const CALL_RECOVERY_CONTACT_POLICY_ID = "long_call_recovery_120d_2x";
+// Spelled exactly as the work order §16 specifies. It was "call_recovery" here,
+// which nothing would have caught until CR-6 started persisting it onto
+// LeadDeliveryItem — at which point the stored inventory class and the contract
+// that documents it would have disagreed forever, in live rows.
+const CALL_RECOVERY_INVENTORY_CLASS = "callrail_long_call_recovery";
+const CALL_RECOVERY_MAXIMUM_DAILY_ATTEMPTS = 2;
+const CALL_RECOVERY_MINIMUM_RETRY_MINUTES = 120;
+const CALL_RECOVERY_MAXIMUM_PROGRAM_AGE_DAYS = 120;
 const SIMPLE_PROVIDER_STOP_STATUSES = new Set([
   "rate-limited",
   "provider-backpressure",
@@ -106,6 +116,17 @@ const OUTCOME_ALIASES = Object.freeze({
   intercept: "intercept",
   dnc: "dnc",
   "do not call": "dnc",
+  // An opt-out IS a do-not-call. Without these, a provider disposition of
+  // "opt out" / "remove me" normalized to `review` — which stopped the dialling
+  // (fail-closed, so nobody was harmed) but never recorded DURABLE suppression,
+  // so the request died with the work item instead of outliving it. Found while
+  // sweeping the recovery outcome matrix 2026-07-31; it applies to every lead,
+  // not just recovery, which is why it belongs in the shared alias map.
+  optout: "dnc",
+  "opt out": "dnc",
+  "opted out": "dnc",
+  "remove me": "dnc",
+  unsubscribe: "dnc",
   badlead: "bad_lead",
   "bad lead": "bad_lead",
   badnumber: "bad_lead",
@@ -525,6 +546,13 @@ function stableWorkItemId(item = {}) {
   const caseId = String(item.caseId ?? "").trim();
   if (domain && caseId) return `${domain}:${caseId}`;
   throw new TypeError("work item requires a stable identity");
+}
+
+function canonicalSourceIdentity(item = {}) {
+  const domain = String(item.domain || "").trim().toUpperCase();
+  const caseId = String(item.caseId ?? "").trim();
+  if (!domain || !caseId) throw new TypeError("work item requires canonical source identity");
+  return { domain, caseId };
 }
 
 function isActiveAttemptState(value) {
@@ -1031,6 +1059,191 @@ function retryDelayMinutesForLeadAge(item = {}, { now } = {}) {
   return leadAgeInPacificDays(item, now) >= 32 ? 15 * 24 * 60 : 120;
 }
 
+function getPacificWeekday(value) {
+  const label = new Intl.DateTimeFormat("en-US", {
+    timeZone: PACIFIC_TIME_ZONE,
+    weekday: "short",
+  }).format(parseDate(value, "value"));
+  return { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 }[label] ?? -1;
+}
+
+function resolveRecoveryEpisodeTiming(firstQualifyingCallAt, {
+  startHour = 7,
+  startMinute = 50,
+  maximumProgramAgeDays = CALL_RECOVERY_MAXIMUM_PROGRAM_AGE_DAYS,
+  activeWeekdays = [1, 2, 3, 4, 5],
+} = {}) {
+  const firstAt = parseDate(firstQualifyingCallAt, "firstQualifyingCallAt");
+  const hour = nonNegativeInteger(startHour, "startHour");
+  const minute = nonNegativeInteger(startMinute, "startMinute");
+  const ageDays = positiveInteger(maximumProgramAgeDays, "maximumProgramAgeDays");
+  if (hour > 23 || minute > 59) throw new RangeError("recovery start must be a valid Pacific time");
+  const weekdays = [...new Set(activeWeekdays.map((value) => nonNegativeInteger(value, "activeWeekday")))];
+  if (weekdays.length === 0 || weekdays.some((value) => value > 6)) {
+    throw new RangeError("activeWeekdays must contain Pacific weekdays 0 through 6");
+  }
+
+  const firstParts = zonedParts(firstAt, PACIFIC_TIME_ZONE);
+  let eligibleFrom = null;
+  for (let offset = 1; offset <= 14; offset += 1) {
+    const candidate = pacificLocalDateTime(
+      Number(firstParts.year),
+      Number(firstParts.month),
+      Number(firstParts.day) + offset,
+      hour,
+      minute,
+    );
+    if (weekdays.includes(getPacificWeekday(candidate))) {
+      eligibleFrom = candidate;
+      break;
+    }
+  }
+  if (!eligibleFrom) throw new Error("could not resolve the next Pacific business window");
+
+  const expiresAt = pacificLocalDateTime(
+    Number(firstParts.year),
+    Number(firstParts.month),
+    Number(firstParts.day) + ageDays,
+    Number(firstParts.hour),
+    Number(firstParts.minute),
+  );
+  expiresAt.setTime(
+    expiresAt.getTime()
+      + Number(firstParts.second || 0) * 1000
+      + firstAt.getUTCMilliseconds(),
+  );
+
+  return {
+    eligibleFrom,
+    expiresAt,
+    timeZone: PACIFIC_TIME_ZONE,
+  };
+}
+
+function isCallRecoveryItem(item = {}) {
+  return String(item.contactPolicyId || item.contactPolicy || "").trim().toLowerCase()
+    === CALL_RECOVERY_CONTACT_POLICY_ID;
+}
+
+function resolveLeadDeliveryContactPolicy(item = {}, { now = new Date() } = {}) {
+  const at = parseDate(now, "now");
+  if (!isCallRecoveryItem(item)) {
+    return {
+      contactPolicyId: null,
+      maximumDailyAttempts: dailyAttemptLimitForLeadAge(item, { now: at, maximum: 3 }),
+      minimumRetryMinutes: retryDelayMinutesForLeadAge(item, { now: at }),
+      maximumProgramAgeDays: null,
+      allowed: true,
+      reason: "ordinary-age-policy",
+      nextEligibleAt: null,
+    };
+  }
+
+  const expiresAt = parseDate(item.expiresAt, "expiresAt", { nullable: true });
+  if (!expiresAt) {
+    return {
+      contactPolicyId: CALL_RECOVERY_CONTACT_POLICY_ID,
+      maximumDailyAttempts: CALL_RECOVERY_MAXIMUM_DAILY_ATTEMPTS,
+      minimumRetryMinutes: CALL_RECOVERY_MINIMUM_RETRY_MINUTES,
+      maximumProgramAgeDays: CALL_RECOVERY_MAXIMUM_PROGRAM_AGE_DAYS,
+      allowed: false,
+      reason: "recovery-expiration-unproven",
+      nextEligibleAt: null,
+    };
+  }
+  if (at.getTime() >= expiresAt.getTime()) {
+    return {
+      contactPolicyId: CALL_RECOVERY_CONTACT_POLICY_ID,
+      maximumDailyAttempts: CALL_RECOVERY_MAXIMUM_DAILY_ATTEMPTS,
+      minimumRetryMinutes: CALL_RECOVERY_MINIMUM_RETRY_MINUTES,
+      maximumProgramAgeDays: CALL_RECOVERY_MAXIMUM_PROGRAM_AGE_DAYS,
+      allowed: false,
+      reason: "recovery-expired",
+      nextEligibleAt: null,
+    };
+  }
+
+  const eligibleFrom = parseDate(item.eligibleFrom, "eligibleFrom", { nullable: true });
+  if (!eligibleFrom) {
+    return {
+      contactPolicyId: CALL_RECOVERY_CONTACT_POLICY_ID,
+      maximumDailyAttempts: CALL_RECOVERY_MAXIMUM_DAILY_ATTEMPTS,
+      minimumRetryMinutes: CALL_RECOVERY_MINIMUM_RETRY_MINUTES,
+      maximumProgramAgeDays: CALL_RECOVERY_MAXIMUM_PROGRAM_AGE_DAYS,
+      allowed: false,
+      reason: "recovery-start-unproven",
+      nextEligibleAt: null,
+    };
+  }
+  if (eligibleFrom.getTime() > at.getTime()) {
+    return {
+      contactPolicyId: CALL_RECOVERY_CONTACT_POLICY_ID,
+      maximumDailyAttempts: CALL_RECOVERY_MAXIMUM_DAILY_ATTEMPTS,
+      minimumRetryMinutes: CALL_RECOVERY_MINIMUM_RETRY_MINUTES,
+      maximumProgramAgeDays: CALL_RECOVERY_MAXIMUM_PROGRAM_AGE_DAYS,
+      allowed: false,
+      reason: "recovery-not-started",
+      nextEligibleAt: eligibleFrom,
+    };
+  }
+
+  const answeredAt = parseDate(item.lastHumanAnsweredAt, "lastHumanAnsweredAt", { nullable: true });
+  if (answeredAt && getPacificDateKey(answeredAt) === getPacificDateKey(at)) {
+    return {
+      contactPolicyId: CALL_RECOVERY_CONTACT_POLICY_ID,
+      maximumDailyAttempts: CALL_RECOVERY_MAXIMUM_DAILY_ATTEMPTS,
+      minimumRetryMinutes: CALL_RECOVERY_MINIMUM_RETRY_MINUTES,
+      maximumProgramAgeDays: CALL_RECOVERY_MAXIMUM_PROGRAM_AGE_DAYS,
+      allowed: false,
+      reason: "recovery-human-answered-today",
+      nextEligibleAt: null,
+    };
+  }
+
+  const daily = canAttemptToday(item, {
+    now: at,
+    maxDailyAttempts: CALL_RECOVERY_MAXIMUM_DAILY_ATTEMPTS,
+    ageBasedDailyCaps: false,
+  });
+  if (!daily.allowed) {
+    return {
+      contactPolicyId: CALL_RECOVERY_CONTACT_POLICY_ID,
+      maximumDailyAttempts: daily.maximum,
+      minimumRetryMinutes: CALL_RECOVERY_MINIMUM_RETRY_MINUTES,
+      maximumProgramAgeDays: CALL_RECOVERY_MAXIMUM_PROGRAM_AGE_DAYS,
+      allowed: false,
+      reason: daily.reason,
+      nextEligibleAt: null,
+    };
+  }
+
+  const lastContactAt = parseDate(item.lastContactAt, "lastContactAt", { nullable: true });
+  const retryAt = lastContactAt
+    ? new Date(lastContactAt.getTime() + CALL_RECOVERY_MINIMUM_RETRY_MINUTES * 60_000)
+    : null;
+  if (retryAt && retryAt.getTime() > at.getTime()) {
+    return {
+      contactPolicyId: CALL_RECOVERY_CONTACT_POLICY_ID,
+      maximumDailyAttempts: daily.maximum,
+      minimumRetryMinutes: CALL_RECOVERY_MINIMUM_RETRY_MINUTES,
+      maximumProgramAgeDays: CALL_RECOVERY_MAXIMUM_PROGRAM_AGE_DAYS,
+      allowed: false,
+      reason: "recovery-retry-not-due",
+      nextEligibleAt: retryAt,
+    };
+  }
+
+  return {
+    contactPolicyId: CALL_RECOVERY_CONTACT_POLICY_ID,
+    maximumDailyAttempts: daily.maximum,
+    minimumRetryMinutes: CALL_RECOVERY_MINIMUM_RETRY_MINUTES,
+    maximumProgramAgeDays: CALL_RECOVERY_MAXIMUM_PROGRAM_AGE_DAYS,
+    allowed: true,
+    reason: "recovery-attempt-available",
+    nextEligibleAt: null,
+  };
+}
+
 function canAttemptToday(item = {}, {
   now,
   maxDailyAttempts = 3,
@@ -1186,6 +1399,118 @@ function comparePoolItems(pool, left, right) {
   const receivedDelta = parseDate(left.receivedAt, "receivedAt").getTime()
     - parseDate(right.receivedAt, "receivedAt").getTime();
   return receivedDelta || compareStable(left, right);
+}
+
+/**
+ * SELECTION RANK — which candidate an agent should be handed next.
+ *
+ * Mickey 2026-07-31, on where mail recovery belongs: "below brand new 0 contact
+ * but above same day 1 contact until it gets contacted."
+ *
+ * That rule is CROSS-POOL, which is why it cannot live in the pool precedence
+ * list: an uncontacted recovery case has to beat a follow_up_due retry while
+ * still losing to a virgin new_today lead, and those are two different pools.
+ * So pool MEMBERSHIP stays exactly as the contract defines it — four pools, a
+ * recovery case is ordinary `older_available` work — and this adds a ranking
+ * lens on top for the moment of selection.
+ *
+ * Lower is picked first:
+ *
+ *   0  overnight            first-contact barrier; recovery may never bypass it
+ *   1  new_today, 0 touches  a lead nobody has ever called still wins
+ *   2  RECOVERY, 0 touches   a 15-minute conversation outranks a second dial
+ *   3  anything touched      follow_up_due retries, and recovery once contacted
+ *   4  generic aged filler
+ *
+ * The "until it gets contacted" half is the important one: the elevation is
+ * granted by the UNANSWERED conversation, not by membership. The moment the
+ * episode has an attempt against it, it drops to tier 3 and competes on the
+ * same terms as every other retry — otherwise a recovery case would hold the
+ * front of the line all day on the strength of a call it already got.
+ */
+function resolveSelectionRank(item = {}, { now = new Date() } = {}) {
+  const pool = String(item.sourcePool || "").trim().toLowerCase();
+  const touched = nonNegativeInteger(item.totalAttemptCount ?? 0, "totalAttemptCount") > 0
+    || Boolean(item.lastContactAt);
+  const isRecovery = String(item.inventoryClass || "").trim().toLowerCase()
+    === CALL_RECOVERY_INVENTORY_CLASS;
+
+  if (pool === POOLS.OVERNIGHT) return 0;
+  if (pool === POOLS.NEW_TODAY && !touched) return 1;
+  if (isRecovery && !touched) return 2;
+  if (touched) return 3;
+  return pool === POOLS.OLDER_AVAILABLE ? 4 : 3;
+}
+
+/**
+ * Order a MERGED candidate set across pools by the rank above.
+ *
+ * ONE ORDERING KEY PER TIER — never "the pool's comparator when the pools match,
+ * a stable id otherwise". That was the first attempt and it is not a valid
+ * comparator: mixing two orderings inside one tier breaks transitivity, and a
+ * brute force over 1320 triples found 36 violations
+ * (e.g. aaa/follow_up_due < mmm/new_today < zzz/follow_up_due, yet
+ * aaa > zzz because the outer pair fell to a different rule than the inner
+ * ones). `Array.prototype.sort` with an inconsistent comparator is
+ * implementation-defined, so the line an agent is handed could vary between
+ * runs for no visible reason — the worst kind of ordering bug to chase.
+ *
+ * Each tier is homogeneous in MEANING, so each gets the one key that means
+ * something for it, and every key is defined for every item in that tier
+ * regardless of which pool the item belongs to.
+ */
+function compareSelectionCandidates(left, right, { now = new Date() } = {}) {
+  const at = parseDate(now, "now");
+  const leftRank = resolveSelectionRank(left, { now: at });
+  const rightRank = resolveSelectionRank(right, { now: at });
+  if (leftRank !== rightRank) return leftRank - rightRank;
+
+  switch (leftRank) {
+    case 0: { // overnight — the curated first-contact order
+      const delta = nonNegativeInteger(left.overnightOrder ?? left.metadata?.overnightOrder ?? 0, "overnightOrder")
+        - nonNegativeInteger(right.overnightOrder ?? right.metadata?.overnightOrder ?? 0, "overnightOrder");
+      return delta || compareStable(left, right);
+    }
+    case 1: { // brand new, never touched — newest first
+      const delta = nullableTime(right.receivedAt, "receivedAt") - nullableTime(left.receivedAt, "receivedAt");
+      return delta || compareStable(left, right);
+    }
+    case 2: { // uncontacted recovery — §16: earliest expiry, then oldest call
+      const expiryDelta = nullableTime(left.expiresAt, "expiresAt") - nullableTime(right.expiresAt, "expiresAt");
+      if (expiryDelta) return expiryDelta;
+      const callDelta = nullableTime(left.firstQualifyingCallAt, "firstQualifyingCallAt")
+        - nullableTime(right.firstQualifyingCallAt, "firstQualifyingCallAt");
+      return callDelta || compareStable(left, right);
+    }
+    case 3: { // anything already touched — most overdue first, across pools
+      const dueDelta = nullableTime(left.nextContactAt, "nextContactAt")
+        - nullableTime(right.nextContactAt, "nextContactAt");
+      if (dueDelta) return dueDelta;
+      const contactDelta = nullableTime(left.lastContactAt, "lastContactAt")
+        - nullableTime(right.lastContactAt, "lastContactAt");
+      return contactDelta || compareStable(left, right);
+    }
+    default: { // generic aged filler — coldest first
+      const contactDelta = nullableTime(left.lastContactAt, "lastContactAt")
+        - nullableTime(right.lastContactAt, "lastContactAt");
+      if (contactDelta) return contactDelta;
+      const receivedDelta = nullableTime(left.receivedAt, "receivedAt")
+        - nullableTime(right.receivedAt, "receivedAt");
+      return receivedDelta || compareStable(left, right);
+    }
+  }
+}
+
+function compareRecoveryPoolItems(pool, left, right) {
+  if (!POOL_VALUES.includes(pool)) throw new TypeError(`unknown pool: ${pool}`);
+  if (pool === POOLS.OLDER_AVAILABLE) {
+    const leftRecovery = String(left?.inventoryClass || "").trim().toLowerCase()
+      === CALL_RECOVERY_INVENTORY_CLASS;
+    const rightRecovery = String(right?.inventoryClass || "").trim().toLowerCase()
+      === CALL_RECOVERY_INVENTORY_CLASS;
+    if (leftRecovery !== rightRecovery) return leftRecovery ? -1 : 1;
+  }
+  return comparePoolItems(pool, left, right);
 }
 
 function orderPoolItems(pool, items = []) {
@@ -2039,6 +2364,46 @@ function decideOutcomeState({
   };
 }
 
+function decideRecoveryOutcomeState({
+  normalizedOutcome,
+  completedAt,
+  dailyAttemptCount,
+} = {}) {
+  const outcome = normalizeOutcome(normalizedOutcome);
+  const completed = parseDate(completedAt, "completedAt");
+  const count = nonNegativeInteger(dailyAttemptCount, "dailyAttemptCount");
+  if (outcome === "answered") {
+    return {
+      state: "follow_up_wait",
+      activeAttempt: isActiveAttemptState("follow_up_wait"),
+      lastOutcome: "answered",
+      lastHumanAnsweredAt: completed,
+      nextContactAt: null,
+      terminalAt: null,
+      actions: [],
+      reason: "recovery-human-answered-day-hold",
+      policyViolation: count > CALL_RECOVERY_MAXIMUM_DAILY_ATTEMPTS
+        ? "daily-attempt-limit-exceeded"
+        : null,
+    };
+  }
+  const decision = decideOutcomeState({
+    normalizedOutcome: outcome,
+    completedAt: completed,
+    dailyAttemptCount: count,
+    maxDailyAttempts: CALL_RECOVERY_MAXIMUM_DAILY_ATTEMPTS,
+    retryDelayMinutes: CALL_RECOVERY_MINIMUM_RETRY_MINUTES,
+  });
+  if (outcome !== "review") return decision;
+  return {
+    ...decision,
+    state: "review",
+    activeAttempt: isActiveAttemptState("review"),
+    nextContactAt: null,
+    reason: "recovery-outcome-review",
+  };
+}
+
 function transitionCompletedAttempt(item = {}, outcome, options = {}) {
   const priorState = String(item.state || "").trim().toLowerCase();
   if (["terminal", "blocked"].includes(priorState)) {
@@ -2433,11 +2798,12 @@ function createLeadDeliveryCadenceSource({
     caseId,
     now = new Date(),
     deliveryIntent = "dial_ready",
+    includeLegacyFloor = true,
   } = {}) {
     const at = parseDate(now, "now");
     const row = await repository.readSourceLead({ domain, caseId });
     return normalizeRow(row, at, {
-      includeLegacyFloor: true,
+      includeLegacyFloor: includeLegacyFloor !== false,
       // Explicit weekend pre-positioning only places a contact in a dormant,
       // shallow provider pool. Every dial-ready path (including unknown
       // intents) retains the current-clock contact-window gate.
@@ -2537,6 +2903,7 @@ function createLeadDeliveryRuntime({
   persistDailyDialOutcomes = null,
   reconcileDailyDialCalls = null,
   providerConsumptionOrder = null,
+  refreshSourceStatuses = null,
 } = {}) {
   if (!repository || typeof repository !== "object") {
     throw new TypeError("repository is required");
@@ -2589,6 +2956,9 @@ function createLeadDeliveryRuntime({
   }
   if (actionsEnabled === true && typeof phoneBurner?.deleteContact !== "function") {
     throw new TypeError("phoneBurner.deleteContact is required when actions are enabled");
+  }
+  if (refreshSourceStatuses != null && typeof refreshSourceStatuses !== "function") {
+    throw new TypeError("refreshSourceStatuses must be a function when supplied");
   }
   if (actionsEnabled === true && typeof phoneBurner?.listFolderContacts !== "function") {
     throw new TypeError("phoneBurner.listFolderContacts is required when actions are enabled");
@@ -2761,10 +3131,19 @@ function createLeadDeliveryRuntime({
     productivityRebalanceRemovedCount: 0,
     productivityRebalanceRedistributedCount: 0,
     productivityRebalanceAgentResults: [],
+    watchdogSupplyRefreshStatus: "idle",
+    watchdogSupplyRefreshBatches: 0,
+    watchdogSupplyRefreshLastCompletedAt: null,
+    watchdogStatusRefreshRefreshed: 0,
+    watchdogStatusRefreshFailed: 0,
+    watchdogStatusRefreshReclassified: 0,
+    watchdogStatusRefreshReevaluated: 0,
+    watchdogStatusRefreshStillBlocked: 0,
   };
   let timerHandle = null;
   let tickInFlight = null;
   let ingestInFlight = null;
+  let watchdogSupplyRefreshInFlight = null;
   let freshDispatchInFlight = null;
   let providerPostTail = Promise.resolve();
   let providerPostAccepting = true;
@@ -3558,6 +3937,72 @@ function createLeadDeliveryRuntime({
       ingestInFlight = null;
     });
     return ingestInFlight;
+  }
+
+  function launchWatchdogSupplyRefresh() {
+    if (watchdogSupplyRefreshInFlight) return { started: false };
+    runtimeState.watchdogSupplyRefreshStatus = "running";
+    runtimeState.watchdogSupplyRefreshBatches = 0;
+    runtimeState.watchdogStatusRefreshRefreshed = 0;
+    runtimeState.watchdogStatusRefreshFailed = 0;
+    runtimeState.watchdogStatusRefreshReclassified = 0;
+    runtimeState.watchdogStatusRefreshReevaluated = 0;
+    runtimeState.watchdogStatusRefreshStillBlocked = 0;
+    const work = (async () => {
+      if (refreshSourceStatuses) {
+        const statusRefresh = await refreshSourceStatuses();
+        const identities = Array.isArray(statusRefresh?.refreshedIdentities)
+          ? statusRefresh.refreshedIdentities.slice(0, 1000)
+          : [];
+        runtimeState.watchdogStatusRefreshRefreshed = nonNegativeInteger(
+          statusRefresh?.refreshed ?? identities.length,
+          "statusRefresh.refreshed",
+        );
+        runtimeState.watchdogStatusRefreshFailed = nonNegativeInteger(
+          statusRefresh?.failed ?? 0,
+          "statusRefresh.failed",
+        );
+        for (const identity of identities) {
+          const row = await source.readOne({
+            domain: identity?.domain,
+            caseId: identity?.caseId,
+            now: atNow(),
+            deliveryIntent: "dial_ready",
+            includeLegacyFloor: false,
+          });
+          if (!row) continue;
+          const existing = await repository.findItemBySourceIdentity({
+            domain: row.domain,
+            caseId: row.caseId,
+          });
+          if (!existing) continue;
+          const result = await refreshExistingSourceItem(existing, row, atNow());
+          runtimeState.watchdogStatusRefreshReevaluated += 1;
+          if (result.status === "refreshed") {
+            runtimeState.watchdogStatusRefreshReclassified += 1;
+          } else if (result.status === "blocked") {
+            runtimeState.watchdogStatusRefreshStillBlocked += 1;
+          }
+        }
+      }
+      for (let batch = 1; batch <= SIMPLE_POOL_SUPPLY_REFRESH_MAX_BATCHES; batch += 1) {
+        const ingestion = await ingestSerial();
+        runtimeState.watchdogSupplyRefreshBatches = batch;
+        if (ingestion?.done === true || Number(ingestion?.read || 0) === 0) break;
+      }
+      runtimeState.watchdogSupplyRefreshStatus = "completed";
+      runtimeState.watchdogSupplyRefreshLastCompletedAt = atNow();
+    })().catch((error) => {
+      runtimeState.watchdogSupplyRefreshStatus = "failed";
+      log("error", "lead_delivery.supply_refresh_failed", {
+        count: runtimeState.watchdogSupplyRefreshBatches,
+        reason: String(error?.code || error?.name || "supply-refresh-failed").slice(0, 80),
+      });
+    }).finally(() => {
+      if (watchdogSupplyRefreshInFlight === work) watchdogSupplyRefreshInFlight = null;
+    });
+    watchdogSupplyRefreshInFlight = work;
+    return { started: true };
   }
 
   async function listFreshWorkCandidates() {
@@ -5708,6 +6153,7 @@ function createLeadDeliveryRuntime({
         processingLeaseId: event.processingLeaseId,
       },
       set: {
+        ...canonicalSourceIdentity(item),
         resolvedItemId: stableWorkItemId(item),
         resolvedAttemptNumber: resolution.attemptNumber || item.providerAttemptSequence || 0,
         effectContext: {
@@ -5947,6 +6393,7 @@ function createLeadDeliveryRuntime({
         expectedVersion: event.version,
         expected: { status: "processing", processingLeaseId: event.processingLeaseId },
         set: {
+          ...canonicalSourceIdentity(item),
           resolvedItemId: stableWorkItemId(item),
           resolvedAttemptNumber: attemptNumber,
           effectContext: durableEffectContext,
@@ -6048,6 +6495,7 @@ function createLeadDeliveryRuntime({
       expectedVersion: event.version,
       expected: { status: "processing", processingLeaseId: event.processingLeaseId },
       set: {
+        ...canonicalSourceIdentity(item),
         resolvedItemId: stableWorkItemId(item),
         resolvedAttemptNumber: attemptNumber,
         effectContext: durableEffectContext,
@@ -6169,6 +6617,7 @@ function createLeadDeliveryRuntime({
         processingLeaseId: event.processingLeaseId,
       },
       set: {
+        ...canonicalSourceIdentity(item),
         resolvedItemId: stableWorkItemId(item),
         resolvedAttemptNumber: attemptNumber,
         effectContext: {
@@ -8601,19 +9050,9 @@ function createLeadDeliveryRuntime({
     };
   }
 
-  async function runTick() {
-    if (enabled !== true) return { status: "disabled" };
-    const at = atNow();
-    await syncConfiguredAgents();
-    const priorDayDrainResume = await resumeIncompletePriorDayFolderDrain(at);
-    if (priorDayDrainResume.status !== "none") priorDayDrainReleaseDateKey = null;
-    const priorDayDrainRelease = await releaseAllPriorDayWorkingFolderDrains(at);
-    const events = await drainEvents({ waitForRefillCompletion: false });
-    const dayStart = await runDayStart(at);
-    const ingestion = dayStart.queueBuild || await ingestSerial();
-    const productivityRebalance = await runProductivityRebalance(at);
-    const endOfDayDrain = await runEndOfDayFolderDrain(at);
+  async function runPhysicalPoolWatchdog(at) {
     const automatic = [];
+    const starved = [];
     // SIMPLE OPERATOR MODE: Call End and this bounded watchdog share one
     // physical-Pool decision helper and one durable per-agent operation lock.
     // The watchdog is repair-only: it never counts an attempt and never uses
@@ -8630,12 +9069,60 @@ function createLeadDeliveryRuntime({
           || persisted?.enabled !== true
           || persisted?.operatorPaused === true
           || persisted?.shiftEnabled !== true) continue;
-        automatic.push(await refreshAgentCapacity(id, {
+        const result = await refreshAgentCapacity(id, {
           requireActiveShift: true,
           trigger: "physical_pool_watchdog",
-        }));
+        });
+        // A healthy capacity decision can still post zero when the durable
+        // packet ledger has not yet walked far enough through the canonical
+        // source to expose due/unused work. Refill that supply cursor outside
+        // the per-agent Pool lock, then retry the same physical decision once.
+        // Review, DNC, cap, and claim-time eligibility rules remain unchanged.
+        const index = automatic.push(result) - 1;
+        if (String(result?.status || "") === "queue-exhausted"
+          && Number(result?.accepted || 0) === 0
+          && Number(result?.physicalCount) <= SIMPLE_POOL_LOW_WATER) {
+          starved.push({ id, index });
+        }
+      }
+      if (starved.length > 0) {
+        // Advance the shared source cursor once for the whole floor without
+        // holding the minute tick open. Completed batches become eligible for
+        // the next watchdog pass; a single owner prevents five empty agents
+        // from launching five copies of the same scan.
+        const refresh = launchWatchdogSupplyRefresh();
+        for (const entry of starved) {
+          automatic[entry.index] = {
+            ...automatic[entry.index],
+            status: refresh.started ? "supply-refresh-started" : "supply-refresh-in-flight",
+            supplyRefreshBatches: runtimeState.watchdogSupplyRefreshBatches,
+            retryable: true,
+          };
+        }
       }
     }
+    return automatic;
+  }
+
+  async function runTick() {
+    if (enabled !== true) return { status: "disabled" };
+    const at = atNow();
+    await syncConfiguredAgents();
+    const priorDayDrainResume = await resumeIncompletePriorDayFolderDrain(at);
+    if (priorDayDrainResume.status !== "none") priorDayDrainReleaseDateKey = null;
+    const priorDayDrainRelease = await releaseAllPriorDayWorkingFolderDrains(at);
+    // Prior-day drain safety remains first. Once that boundary is reconciled,
+    // repair the physical Pools before unrelated ingestion, event, or
+    // productivity work can fail this tick. A later failure is still surfaced
+    // by tick(), but it can no longer suppress the bounded refill watchdog.
+    const automatic = await runPhysicalPoolWatchdog(at);
+    const events = await drainEvents({ waitForRefillCompletion: false });
+    const dayStart = await runDayStart(at);
+    const ingestion = dayStart.queueBuild || (watchdogSupplyRefreshInFlight
+      ? { status: "supply-refresh-in-flight", done: false }
+      : await ingestSerial());
+    const productivityRebalance = await runProductivityRebalance(at);
+    const endOfDayDrain = await runEndOfDayFolderDrain(at);
     // The former preview / weighted / estimate-driven refill loop remains
     // below as a reference during the no-delete proof window.
     /* if (actionsEnabled === true) {
@@ -8766,6 +9253,17 @@ function createLeadDeliveryRuntime({
         lastAt: clone(runtimeState.freshDispatchLastAt),
         lastStatus: runtimeState.freshDispatchLastStatus,
       },
+      watchdogSupplyRefresh: {
+        status: runtimeState.watchdogSupplyRefreshStatus,
+        inFlight: watchdogSupplyRefreshInFlight != null,
+        batches: runtimeState.watchdogSupplyRefreshBatches,
+        lastCompletedAt: clone(runtimeState.watchdogSupplyRefreshLastCompletedAt),
+        statusRefreshed: runtimeState.watchdogStatusRefreshRefreshed,
+        statusFailed: runtimeState.watchdogStatusRefreshFailed,
+        statusReclassified: runtimeState.watchdogStatusRefreshReclassified,
+        statusReevaluated: runtimeState.watchdogStatusRefreshReevaluated,
+        statusStillBlocked: runtimeState.watchdogStatusRefreshStillBlocked,
+      },
       providerPostConcurrency: 1,
       providerPostMinimumIntervalMs: postMinimumInterval,
       providerPostQueueDepth: runtimeState.providerPostQueueDepth,
@@ -8850,6 +9348,12 @@ function createLeadDeliveryRuntime({
 
 module.exports = {
   AGENT_POOL_OPERATION_KINDS,
+  CALL_RECOVERY_CONTACT_POLICY_ID,
+  CALL_RECOVERY_INVENTORY_CLASS,
+  CALL_RECOVERY_MAXIMUM_DAILY_ATTEMPTS,
+  CALL_RECOVERY_MAXIMUM_PROGRAM_AGE_DAYS,
+  CALL_RECOVERY_MINIMUM_RETRY_MINUTES,
+  DEFAULT_DNC_STATUS_IDS,
   DEFAULT_FALLBACK_POOL_ORDER,
   END_OF_DAY_DELETE_INTERVAL_MS,
   END_OF_DAY_DRAIN_HOUR,
@@ -8876,11 +9380,15 @@ module.exports = {
   classifyPool,
   claimNextFairPick,
   comparePoolItems,
+  compareRecoveryPoolItems,
+  compareSelectionCandidates,
+  resolveSelectionRank,
   composePacketRecipe,
   createLeadDeliveryCadenceSource,
   createLeadDeliveryRuntime,
   computeRefillDecision,
   decideOutcomeState,
+  decideRecoveryOutcomeState,
   dailyAttemptLimitForLeadAge,
   evaluateFreshAgentEligibility,
   fairnessTieBreaker,
@@ -8902,6 +9410,8 @@ module.exports = {
   retryDelayMinutesForLeadAge,
   resolvePacificMorningBatchWindow,
   resolvePacificEndOfDayDrain,
+  resolveLeadDeliveryContactPolicy,
+  resolveRecoveryEpisodeTiming,
   resolveProviderEventItem,
   shouldRequestRefill,
   shouldRetainCompletedProviderContact,

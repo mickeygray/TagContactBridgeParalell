@@ -68,6 +68,195 @@ function pacificHourMinute(at = new Date()) {
 }
 
 /**
+ * Bind the recovery discovery service to real collections.
+ *
+ * The service itself is deliberately dependency-free so its verdicts can be
+ * proved without a database. This is the ONE place the abstract proofs meet
+ * real data, which keeps the qualification rules testable and keeps the query
+ * shapes out of them.
+ *
+ * Returns null rather than throwing when a dependency is missing — a nightly
+ * chore that cannot run must not take the other chores down with it.
+ */
+function buildCallRecoveryDiscoveryDeps({ windowFrom = null, windowTo = null } = {}) {
+  let repository;
+  let resolveRecoveryEpisodeTiming;
+  let gatherMaterial;
+  try {
+    ({ callRecoveryLeadRepository: repository } = require("../../../../packages/shared-repositories/src"));
+    ({ resolveRecoveryEpisodeTiming } = require("../../../../packages/shared-services/src/leadDeliveryService"));
+    ({ gatherMaterial } = require("../../../../packages/shared-services/src/reportComposerService"));
+  } catch { return null; }
+  if (!repository || typeof resolveRecoveryEpisodeTiming !== "function" || typeof gatherMaterial !== "function") {
+    return null;
+  }
+
+  // RECOVERY IS AN OFFSHOOT OF THE METRICS LOOP, NOT A PARALLEL PIPELINE.
+  //
+  // Mickey 2026-07-31: "none of these should be added before they loop through
+  // the metrics and this should just be an offshoot of that by which you will
+  // learn the agent who touched them first, then they will show up in pb as
+  // well."
+  //
+  // The first version re-derived everything from raw CallRail plus its own
+  // CallLog query, and it could never work: on an INBOUND leg `agentName` is
+  // the CALLER's name and `providerAgentId`/`ringcx.agentId`/`connected` are
+  // never populated (measured: 0 of 4,530 July legs). So the human-answer proof
+  // resolved nobody and the funnel qualified zero.
+  //
+  // `callContext` in the report composer already solved exactly this — it
+  // builds an extensionId -> AgentState roster and reads OUR side of the call
+  // off that, because the extension is the only field that identifies us. That
+  // is the same machinery that produces the "Calls worth hearing" agent column.
+  //
+  // So discovery now CONSUMES the metrics gather rather than competing with it:
+  // one source of truth for who touched a call, one place that learns it, and a
+  // candidate cannot be enrolled before the metrics pass has seen it.
+  // ONE GATHER FOR THE WHOLE WINDOW — never one per day.
+  //
+  // The Logics ActivityReport is RANGE-NATIVE: one call per domain covers any
+  // range. Gathering per day turns that into a call per domain PER DAY, and a
+  // 61-day backfill therefore issued 183 ActivityReport requests where 3 would
+  // do — each returning up to 50,000 rows. Measured: ~20 minutes of pointless
+  // load on Logics before Mickey spotted it, for an answer identical either way.
+  // `callsRange` compounds it: each gather also re-pulls a 45-day CallRail
+  // window and throws away all but one day.
+  //
+  // The nightly task asks for a single day and is unaffected. A backfill passes
+  // the whole window here, gathers once, and slices per day below — which is why
+  // `windowFrom/windowTo` exist rather than the caller looping this function.
+  const material = { loaded: false, value: null, from: null, to: null };
+  const covers = (dateKey) => material.loaded
+    && material.from <= dateKey && dateKey <= material.to;
+
+  async function metricsMaterial(dateKey) {
+    if (covers(dateKey)) return material.value;
+    const from = windowFrom && windowFrom <= dateKey ? windowFrom : dateKey;
+    const to = windowTo && windowTo >= dateKey ? windowTo : dateKey;
+    material.value = await gatherMaterial({
+      needs: ["callsRange", "callContext", "payments", "caseContacts"],
+      from, to, domain: null, live: true,
+    });
+    material.loaded = true;
+    material.from = from;
+    material.to = to;
+    return material.value;
+  }
+
+  return {
+    // The metrics pass's OWN call list, not a second CallRail pull. It reaches
+    // back 45 days for lag, so clip to the day being discovered.
+    async listCallsForDay({ dateKey, limit }) {
+      const m = await metricsMaterial(dateKey);
+      return (m.callsRange || [])
+        .filter((c) => String(c.dateKey || "").slice(0, 10) === dateKey)
+        // callsRange is built from CallRail's INBOUND endpoint, so direction is
+        // implicit in the source rather than stamped on the row. Make it
+        // explicit so the pure qualifier can still assert §2.1(2) itself.
+        .map((c) => ({ ...c, direction: "inbound" }))
+        .slice(0, limit || 500);
+    },
+    // THE AGENT COMES FROM THE METRICS PASS, not from a second CallLog read.
+    //
+    // `callContext.byPhone[phone].agent` is a resolved STAFF NAME — the metrics
+    // gather got it by mapping the leg's extensionId through the AgentState
+    // roster, which is the only field on an inbound leg that identifies our
+    // side of the call. If the metrics pass could not name somebody, neither
+    // can we, and the episode holds rather than guessing.
+    //
+    // Shaped as a single synthetic "leg" so proveHumanAnswer's rules (one
+    // non-shared internal answerer, no competing match) apply unchanged.
+    async listInternalLegs({ fact }) {
+      if (!fact?.customerPhone) return [];
+      const m = await metricsMaterial(material.from);
+      const ctx = m.callContext?.byPhone?.[fact.customerPhone];
+      if (!ctx?.caseId) return [];
+      const caseDomain = String(ctx.caseDomain || "TAG").toUpperCase();
+
+      // THE SETTLEMENT OFFICER IS THE PERSON, and the RC leg is the fallback —
+      // the same precedence the "Calls worth hearing" section uses.
+      //
+      // Getting this backwards is what made the first two dry runs report zero.
+      // `byPhone.agent` comes from an answered RingCentral leg carrying our
+      // extension, and on inbound that is almost never populated (measured: 0
+      // resolved on 2026-07-30). The name the email actually prints comes from
+      // `officerByCase` — the settlement officer read out of the activity
+      // sweep — which resolved 6 of 8 long calls that same day.
+      //
+      // This is exactly what Mickey meant by learning the agent from the
+      // metrics loop: the officer is who owns and worked the case, and it is
+      // knowledge the nightly pass has already paid for.
+      const officer = m.callContext?.officerByCase?.[`${caseDomain}:${ctx.caseId}`] || ctx.agent || null;
+      if (!officer) return [];
+
+      return [{
+        _id: `callcontext:${fact.customerPhone}`,
+        direction: "inbound",
+        // A named owner on a 10-minute inbound call IS the human-answer
+        // evidence — the metrics pass would not have a case bound to this
+        // phone, nor an officer on that case, for a call nobody took.
+        answered: true,
+        agentId: officer,
+        agentName: officer,
+        extension: null,
+        caseId: ctx.caseId,
+        caseDomain,
+        callStartTime: fact.startedAt,
+      }];
+    },
+    // §13 — "did not close", read fresh. Discovery only needs to avoid
+    // enrolling an obviously-converted case; admission re-proves all of this
+    // before every provider claim, because a sale posted after this pass still
+    // has to remove the case.
+    // §13 at DISCOVERY time — status from the metrics pass's live Logics read,
+    // payments from the same gather. Admission re-proves all of it before every
+    // provider claim, because a sale posted after this pass still has to remove
+    // the case.
+    async readCaseState({ domain, caseId }) {
+      const m = await metricsMaterial(material.from);
+      const key = `${String(domain || "").toUpperCase()}:${caseId}`;
+      const status = m.callContext?.statusByCase?.[key] || null;
+      // Any money on this case inside the gathered range is a sale signal.
+      const paid = (m.payments || []).filter((p) => !p.isChargeback
+        && String(p.domain || "").toUpperCase() === String(domain || "").toUpperCase()
+        && String(p.caseId ?? "") === String(caseId ?? ""));
+      const totalPaid = paid.reduce((s, p) => s + (Number(p.amount) || 0), 0);
+
+      // LOGICS' OWN BRACKET GROUP IS THE CLASSIFIER, not a regex over the whole
+      // string. Real values look like "[Active Prospect]-Opened",
+      // "[TIER 1]-ACTIVE", "[Bad/Inactive]-DO NOT CALL", "[RESO ONLY]-RESO ONLY".
+      //
+      // The first version tested /\[tier|active|client|retained/ for "is this a
+      // client", which matched the word ACTIVE inside "[Active Prospect]" — so
+      // every live prospect was classified as a client and rejected. Measured:
+      // 7, 6 and 5 false `not-a-prospect` rejections on three consecutive days,
+      // which is most of the candidate pool.
+      //
+      // A TIER is a resolution-pursuit tier on an existing client, so it is
+      // correctly excluded; the only group this program wants is a prospect who
+      // has not converted.
+      const group = (String(status || "").match(/^\s*\[([^\]]+)\]/) || [])[1] || null;
+      const normalizedGroup = group ? group.trim().toLowerCase() : null;
+      const dead = normalizedGroup === "bad/inactive" || /do not call/i.test(status || "");
+      return {
+        convertedAt: null,
+        paymentCount: paid.length,
+        totalPaid,
+        dnc: dead,
+        activeAppointment: false,
+        // Null, never a guess — proveStillOpen holds on anything but an
+        // explicit true, which is what we want when status is unreadable.
+        allowedProspectStatus: normalizedGroup == null
+          ? null
+          : normalizedGroup === "active prospect",
+      };
+    },
+    resolveEpisodeTiming: (at) => resolveRecoveryEpisodeTiming(at),
+    repository,
+  };
+}
+
+/**
  * The chore list. Add a task here rather than adding a runtime.
  *
  * plan()  — read-only; always safe, always run, so `lastRun` shows the work
@@ -214,6 +403,56 @@ const TASKS = [
       if (!p.calls) return `${p.dateKey || "?"}: no calls`;
       return `${p.dateKey}: ${p.calls} call(s) · ${p.marketing} marketing · `
         + `${p.withRecording} with a recording · ${p.alreadyHad} already pooled`;
+    },
+  },
+  {
+    // CallRail long-call recovery discovery (work order CR-4).
+    //
+    // A TASK, not a runtime — §21 forbids a new process, and the completed-day
+    // boundary this loop already computes is exactly the one discovery needs.
+    // plan() is a full dry run: every read, every verdict, every counter, no
+    // write. So the funnel printed on a dark box is what arming it would do.
+    //
+    // This produces EVIDENCE ONLY. Nothing here authorizes a dial — admission
+    // re-proves status, sale and DNC at claim time, because a clean snapshot
+    // taken at 02:00 cannot authorize a call made that afternoon.
+    key: "call-recovery-discovery",
+    label: "Discover CallRail long-call recovery candidates",
+    writesArmed: () => String(process.env.CALL_RECOVERY_DISCOVERY_ENABLED || "false").toLowerCase() === "true",
+    async plan({ logger }) {
+      const deps = buildCallRecoveryDiscoveryDeps();
+      if (!deps) return [{ skipped: true, reason: "discovery-deps-unavailable" }];
+      const { runCallRecoveryDiscovery } = require(
+        "../../../../packages/shared-services/src/callRecoveryDiscoveryService");
+      return [await runCallRecoveryDiscovery({
+        dateKey: persistTargetDay(), apply: false, logger, deps,
+      })];
+    },
+    async apply(planned, { logger }) {
+      const deps = buildCallRecoveryDiscoveryDeps();
+      if (!deps) return { skipped: true, reason: "discovery-deps-unavailable" };
+      const { runCallRecoveryDiscovery } = require(
+        "../../../../packages/shared-services/src/callRecoveryDiscoveryService");
+      const r = await runCallRecoveryDiscovery({
+        dateKey: planned[0]?.dateKey || persistTargetDay(), apply: true, logger, deps,
+      });
+      return {
+        inserted: r.episodesInserted, updated: r.episodesUpdated,
+        qualified: r.qualified, errors: r.errors,
+      };
+    },
+    count(planned) {
+      return planned.reduce((a, p) => a + (p.qualified || 0), 0);
+    },
+    describe(planned) {
+      const p = planned[0] || {};
+      if (p.readFailed) return `${p.dateKey || "?"}: COULD NOT READ THE DAY — ${p.readFailed}`;
+      const top = Object.entries(p.rejectedByReason || {})
+        .filter(([k]) => k !== "would-qualify")
+        .sort((a, b) => b[1] - a[1]).slice(0, 4)
+        .map(([k, n]) => `${n} ${k}`).join(" · ");
+      return `${p.dateKey}: ${p.factsRead} call(s) · ${p.qualified} qualify`
+        + (top ? ` · ${top}` : "");
     },
   },
   {
@@ -434,4 +673,8 @@ function createNightlyHygieneRuntime({ config = {}, runtime = {} } = {}) {
   return { TASKS: tasks, getState, runOnce, start, stop };
 }
 
-module.exports = { createNightlyHygieneRuntime, persistTargetDay };
+module.exports = {
+  createNightlyHygieneRuntime,
+  persistTargetDay,
+  buildCallRecoveryDiscoveryDeps,
+};

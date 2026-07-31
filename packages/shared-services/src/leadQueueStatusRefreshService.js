@@ -53,6 +53,14 @@ function staleBefore(maxAgeHours) {
   return new Date(Date.now() - Math.max(0, hours) * 60 * 60 * 1000);
 }
 
+function statusFreshnessKey(domain, caseId) {
+  const normalizedDomain = String(domain || "").trim().toUpperCase();
+  const normalizedCaseId = Number(caseId);
+  return normalizedDomain && Number.isFinite(normalizedCaseId)
+    ? `${normalizedDomain}:${normalizedCaseId}`
+    : null;
+}
+
 /**
  * Re-verify Logics status for every lead still in the delivery queue.
  * Only refreshes profiles whose lastStatusCheckAt is older than
@@ -121,6 +129,9 @@ async function refreshQueuedLeadStatuses({
   maxAgeHours = 20,
   limit = 20000,
   concurrency = 5,
+  newestFirst = false,
+  includeRefreshedIdentities = false,
+  reservationReasons = null,
   // "If we Logics DNC it, it needs to go away" — retire on discovery.
   retireDnc = true,
   dryRun = false,
@@ -136,30 +147,64 @@ async function refreshQueuedLeadStatuses({
     dncFound: [],
     retired: 0,
     nonProspectFound: 0,
+    ...(includeRefreshedIdentities ? { refreshedIdentities: [] } : {}),
   };
 
-  const items = await db
+  const itemFilter = { state: { $in: [...states] } };
+  if (Array.isArray(reservationReasons) && reservationReasons.length > 0) {
+    itemFilter.reservationReason = { $in: reservationReasons.map((value) => String(value)) };
+  }
+  let itemQuery = db
     .collection("leaddeliveryitems")
-    .find({ state: { $in: [...states] } })
-    .project({ caseId: 1, domain: 1, state: 1, normalizedPhone: 1, deliveryAgentId: 1 })
+    .find(itemFilter)
+    .project({ caseId: 1, domain: 1, state: 1, normalizedPhone: 1, deliveryAgentId: 1 });
+  if (newestFirst === true) {
+    itemQuery = itemQuery.sort({ receivedAt: -1, createdAt: -1, _id: -1 });
+  }
+  const items = await itemQuery
     .limit(Math.max(1, Number(limit) || 20000))
     .toArray();
 
   // Only re-check what is actually stale.
-  const caseIds = items.map((i) => Number(i.caseId)).filter(Number.isFinite);
-  const profiles = await db
-    .collection("controlplanecaseprofiles")
-    .find({ caseId: { $in: caseIds } })
-    .project({ caseId: 1, lastStatusCheckAt: 1 })
-    .toArray();
+  const profileIdentities = [
+    ...new Map(
+      items
+        .map((item) => {
+          const key = statusFreshnessKey(item.domain, item.caseId);
+          return key
+            ? [key, {
+              domain: String(item.domain).trim().toUpperCase(),
+              caseId: Number(item.caseId),
+            }]
+            : null;
+        })
+        .filter(Boolean),
+    ).values(),
+  ];
+  const profiles = profileIdentities.length
+    ? await db
+      .collection("controlplanecaseprofiles")
+      .find({ $or: profileIdentities })
+      .project({ domain: 1, caseId: 1, lastStatusCheckAt: 1 })
+      .toArray()
+    : [];
   const checkedAtByCase = new Map(
-    profiles.map((p) => [Number(p.caseId), p.lastStatusCheckAt ? new Date(p.lastStatusCheckAt) : null]),
+    profiles.map((profile) => [
+      statusFreshnessKey(profile.domain, profile.caseId),
+      profile.lastStatusCheckAt ? new Date(profile.lastStatusCheckAt) : null,
+    ]),
   );
 
   const targets = items.filter((item) => {
-    const checkedAt = checkedAtByCase.get(Number(item.caseId));
+    const checkedAt = checkedAtByCase.get(statusFreshnessKey(item.domain, item.caseId));
     if (checkedAt && checkedAt > cutoff) {
       summary.skippedFresh += 1;
+      if (includeRefreshedIdentities) {
+        summary.refreshedIdentities.push({
+          domain: String(item.domain).trim().toUpperCase(),
+          caseId: Number(item.caseId),
+        });
+      }
       return false;
     }
     return true;
@@ -201,6 +246,9 @@ async function refreshQueuedLeadStatuses({
             lastStatusCheckAt: new Date(),
           });
           summary.refreshed += 1;
+          if (includeRefreshedIdentities) {
+            summary.refreshedIdentities.push({ domain, caseId });
+          }
           if (isLogicsDncStatus(domain, statusId)) {
             const record = {
               caseId,
@@ -245,4 +293,5 @@ module.exports = {
   DEFAULT_STATES,
   refreshQueuedLeadStatuses,
   retireDncLead,
+  statusFreshnessKey,
 };

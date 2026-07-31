@@ -5,6 +5,7 @@ const activityAiReviewRepository = require("./activityAiReviewRepository");
 const authOtpChallengeRepository = require("./authOtpChallengeRepository");
 const callLedgerRepository = require("./callLedgerRepository");
 const callLogRepository = require("./callLogRepository");
+const callRecoveryLeadRepository = require("./callRecoveryLeadRepository");
 const consentRecordRepository = require("./consentRecordRepository");
 const conversationMessageRepository = require("./conversationMessageRepository");
 const conversationWorkflowRepository = require("./conversationWorkflowRepository");
@@ -58,6 +59,8 @@ module.exports = {
   authOtpChallengeRepository,
   callLedgerRepository,
   callLogRepository,
+
+  callRecoveryLeadRepository,
   caseProfileRepository,
   consentRecordRepository,
   conversationMessageRepository,

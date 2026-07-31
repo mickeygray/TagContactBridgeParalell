@@ -210,6 +210,7 @@ const SOURCE_CASE_PROJECTION = Object.freeze({
   caseId: 1,
   statusId: 1,
   statusCategory: 1,
+  lastStatusCheckAt: 1,
   convertedAt: 1,
   firstPaymentDate: 1,
   paymentsCount: 1,

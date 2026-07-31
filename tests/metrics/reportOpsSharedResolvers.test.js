@@ -183,7 +183,7 @@ test("rollup is everything, in Mickey order", () => {
   // CALL, and on a WYNN board it is the only call list, because longcalls is
   // CallRail and CallRail is a single TAG tenant.
   assert.deepEqual(blocks.PRESETS.rollup,
-    ["topline", "source", "ldcalls", "ldrecordings", "status", "longcalls"]);
+    ["topline", "source", "ldcalls", "status", "longcalls"]);
 });
 
 test("both boards are the same sections, differing only by filter", () => {

@@ -20,6 +20,7 @@ const {
   dueDefinitions, isDue, pacificKey, runDefinition,
 } = require("../../../../packages/shared-services/src/reportDefinitionService");
 const { sendMail } = require("../../../../packages/shared-services/src/mailerService");
+const { recordServiceAlert } = require("../../../../packages/shared-services/src");
 const { getInternalFromEmail } = require("../../../../packages/shared-config/src");
 
 const DEFAULT_POLL_MS = 5 * 60 * 1000;
@@ -73,12 +74,38 @@ function createReportScheduleRuntime({ config = {}, runtime = {} } = {}) {
           // One bad definition must not stop the others from going out.
           results.push({ name: def.name, error: String(error.message).slice(0, 300) });
           log?.error?.("report_schedule.failed", { definition: def.name, error: String(error.message) });
+          let attempts = 0;
           try {
             def.lastError = String(error.message).slice(0, 400);
             // Deliberately NOT stamping lastRunKey: a failed run is not a run,
-            // so the next poll retries it rather than skipping the day.
+            // so the next poll retries it rather than skipping the day. The
+            // ATTEMPT counter is what stops that retry from running all night —
+            // isDue gives up after three, because every try is a full live
+            // gather against Logics, CallRail and RingCentral.
+            const key = pacificKey();
+            attempts = def.lastAttemptKey === key ? (Number(def.attemptsToday) || 0) + 1 : 1;
+            def.lastAttemptKey = key;
+            def.attemptsToday = attempts;
             if (typeof def.save === "function") await def.save();
           } catch { /* bookkeeping must not mask the real error */ }
+
+          // TELL A HUMAN. This was the only nightly runtime on the box that
+          // never raised a service alert — three dead nights produced three log
+          // lines and nothing else, and nobody reads logs. Alert on the first
+          // failure (the night may still be recoverable) and again when we give
+          // up, which is the one that means "tomorrow needs you".
+          await recordServiceAlert({
+            domain: def.domain || "TAG",
+            sourceService: "control-plane",
+            category: "report-schedule",
+            severity: attempts >= 3 ? "critical" : "high",
+            title: attempts >= 3
+              ? `Scheduled report GAVE UP: ${def.name}`
+              : `Scheduled report failed: ${def.name}`,
+            summary: `${String(error.message).slice(0, 300)}`
+              + (attempts >= 3 ? " — three attempts today, not retrying until tomorrow." : ` (attempt ${attempts} of 3)`),
+            tags: ["metrics", "report-schedule"],
+          }).catch(() => { /* an alert that cannot be filed must not eat the night */ });
         }
       }
       state.lastRunAt = new Date().toISOString();

@@ -82,12 +82,19 @@ async function main() {
 
   // ── 2. does every block compute without throwing ─────────────────────────
   console.log("");
+  // EACH PRESET UNDER THE DOMAIN IT ACTUALLY RUNS WITH. Checking both with
+  // domain:null meant the vendor path was never exercised — which is exactly
+  // where the tenant leak lived (a WYNN board carrying TAG mail spend). The
+  // two boards share every block; the domain is the only thing separating them,
+  // so a check that ignores it checks the easier half twice.
+  const PRESET_DOMAIN = { rollup: null, "vendor-ld": "WYNN" };
   for (const p of presets) {
+    const dom = PRESET_DOMAIN[p] ?? null;
     for (const b of blocks.resolveSelection([p]).blocks) {
       try {
-        const data = b.compute({ ...material, from, to, domain: null });
+        const data = b.compute({ ...material, from, to, domain: dom });
         const rows = Array.isArray(data) ? data.length : size(data);
-        note(`${rows ? OK : WARN}${(p + "/" + b.id).padEnd(26)} ${rows} row(s)`);
+        note(`${rows ? OK : WARN}${(p + "/" + b.id).padEnd(26)} ${rows} row(s)${dom ? `  [${dom}]` : ""}`);
       } catch (error) {
         note(`${BAD}${(p + "/" + b.id).padEnd(26)} THREW ${String(error.message).slice(0, 60)}`);
         problems.push(`${p}/${b.id} threw`);
@@ -101,15 +108,48 @@ async function main() {
   const defs = await ReportDefinition.find({ archivedAt: null }).lean();
   const scheduled = defs.filter((d) => d.schedule?.enabled);
   note(`${defs.length ? OK : BAD}saved report definitions: ${defs.length}, scheduled: ${scheduled.length}`);
+  const DOW = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+  // "Did last night's email actually go out?" was unanswerable here: the line
+  // printed lastRunKey and never compared it to anything, so a definition
+  // stuck three days back looked identical to one that ran an hour ago.
+  const lastScheduledDayBefore = (def) => {
+    const dows = def.schedule?.daysOfWeek?.length ? def.schedule.daysOfWeek : [0, 1, 2, 3, 4, 5, 6];
+    for (let back = 1; back <= 14; back += 1) {
+      const d = new Date(Date.parse(`${today}T12:00:00Z`) - back * 86400000);
+      if (dows.includes(d.getUTCDay())) return d.toISOString().slice(0, 10);
+    }
+    return null;
+  };
   for (const d of defs) {
+    const s = d.schedule || {};
+    const dows = s.daysOfWeek?.length ? s.daysOfWeek.map((n) => DOW[n]).join(",") : "EVERY DAY";
     note(`         ${String(d.name).padEnd(34)} blocks=${(d.blocks || []).join(",")}`
-      + `  ${d.schedule?.enabled ? `at ${String(d.schedule.hour).padStart(2, "0")}:${String(d.schedule.minute ?? 0).padStart(2, "0")}` : "not scheduled"}`
+      + `  ${s.enabled ? `at ${String(s.hour).padStart(2, "0")}:${String(s.minute ?? 0).padStart(2, "0")} ${dows}` : "not scheduled"}`
+      + `  to=${(d.recipients || []).length}`
       + `  last=${d.lastRunKey || "never"}`);
+    if (!s.enabled) continue;
+    // A definition armed to send with nobody to send to used to file a clean,
+    // successful, entirely imaginary run every night.
+    if (d.sendEmail && !(d.recipients || []).filter(Boolean).length) {
+      problems.push(`"${d.name}" is scheduled to send but has no recipients`);
+    }
+    // An empty daysOfWeek is not "weekdays", it is every day — the single
+    // easiest thing to get wrong here, because it looks like "unset".
+    if (!s.daysOfWeek?.length) {
+      note(`${WARN}${"".padEnd(4)}"${d.name}" has no weekday rule — it will also send Saturday and Sunday`);
+    }
+    const owed = lastScheduledDayBefore(d);
+    if (owed && (!d.lastRunKey || d.lastRunKey < owed)) {
+      problems.push(`"${d.name}" last ran ${d.lastRunKey || "never"} but was due ${owed} — a night was missed`);
+    }
+    if (d.lastError) problems.push(`"${d.name}" last error: ${String(d.lastError).slice(0, 120)}`);
+    if (d.lastAttemptKey === today && (d.attemptsToday || 0) >= 3) {
+      problems.push(`"${d.name}" gave up today after ${d.attemptsToday} failed attempt(s)`);
+    }
   }
   const runtimeFlags = {
     REPORT_SCHEDULER_ENABLED: process.env.REPORT_SCHEDULER_ENABLED,
     NIGHTLY_CLOSE_ENABLED: process.env.NIGHTLY_CLOSE_ENABLED,
-    SIMPLE_NIGHTLY_EMAIL_ENABLED: process.env.SIMPLE_NIGHTLY_EMAIL_ENABLED,
     LEAD_DELIVERY_CALLBACK_CAPTURE_ENABLED: process.env.LEAD_DELIVERY_CALLBACK_CAPTURE_ENABLED,
   };
   console.log("");
@@ -119,9 +159,6 @@ async function main() {
   }
   if (String(runtimeFlags.REPORT_SCHEDULER_ENABLED) !== "true" && scheduled.length) {
     problems.push("definitions are scheduled but REPORT_SCHEDULER_ENABLED is not true — nothing will send");
-  }
-  if (String(runtimeFlags.SIMPLE_NIGHTLY_EMAIL_ENABLED) === "true") {
-    note(`${WARN}SIMPLE_NIGHTLY_EMAIL_ENABLED is true but that email is retired in code — harmless, worth unsetting`);
   }
 
   // ── 4. the collection loop the metrics actually come from ────────────────
