@@ -23,7 +23,7 @@ const attempt = (over = {}) => ({
   agentId: "phil_olson", durationSeconds: 900, connected: true, outcome: "review", ...over,
 });
 
-const run = (dials, events = []) => blocks.BY_ID.get("ldrecordings").compute({ dials, events });
+const run = (dials, events = [], ldCaseStatus = {}) => blocks.BY_ID.get("ldrecordings").compute({ dials, events, ldCaseStatus });
 
 test("a long dial is reported with the agent, the case and the link", () => {
   const rows = run([dial({
@@ -85,12 +85,13 @@ test("the email shows what decides whether to press play", () => {
   assert.ok(csv.columns.length > csv.emailColumns.length);
 });
 
-test("it reads dials and the activity sweep — never CallRail", () => {
+test("it reads dials, the activity sweep and live case status — never CallRail", () => {
   // CallRail is a single TAG tenant of INBOUND calls and can never be split by
-  // company, so it must not source an LD list. `activity` is here because the
-  // case id joins a dial to its agent and outcome without a Logics call.
+  // company, so it must not source an LD list. `activity` gives the agent from
+  // the case id; `ldCaseStatus` gives where the case stands NOW, which is what
+  // puts a status on every row rather than only the ones that moved.
   const needs = blocks.BY_ID.get("ldrecordings").needs;
-  assert.deepEqual(needs, ["dials", "activity"]);
+  assert.deepEqual(needs, ["dials", "activity", "ldCaseStatus"]);
   assert.ok(!needs.includes("callsRange"));
 });
 
@@ -155,5 +156,47 @@ test("activity for a different case never bleeds across", () => {
   const rows = run([dial({ caseId: 430083, attempts: [attempt()] })], [
     ev({ caseId: 999999, payload: { toStatus: "[TIER 1]-ACTIVE" } }),
   ]);
+  assert.equal(rows[0].outcome, null);
+});
+
+// Mickey 2026-07-31: "there should be a case status in every one of those calls
+// like you have for mailer." The inbound side pulls the case live; LD was
+// reading status-change ACTIVITY, which only answers for cases that moved
+// inside the window — 8 of 66 in July. The other 58 showed nothing, and a blank
+// reads as a gap rather than as "nothing happened".
+
+test("the live case status wins over a status change inside the window", () => {
+  // The sweep says where a case MOVED; the live read says where it STANDS.
+  // A case can post-date on Tuesday and be active by Friday.
+  const rows = run(
+    [dial({ attempts: [attempt()] })],
+    [ev({ payload: { toStatus: "[Active Prospect]-POST DATE" } })],
+    { "WYNN:430083": "[TIER 1]-ACTIVE" },
+  );
+  assert.equal(rows[0].outcome, "[TIER 1]-ACTIVE");
+});
+
+test("the sweep still answers when the live read could not", () => {
+  // One unreadable case must not blank the row when the window knows better.
+  const rows = run(
+    [dial({ attempts: [attempt()] })],
+    [ev({ payload: { toStatus: "[Active Prospect]-POST DATE" } })],
+    {},
+  );
+  assert.equal(rows[0].outcome, "[Active Prospect]-POST DATE");
+});
+
+test("every long dial carries a status when the live read answered", () => {
+  const rows = run(
+    [dial({ caseId: 1, attempts: [attempt()] }), dial({ caseId: 2, attempts: [attempt()] })],
+    [],
+    { "WYNN:1": "[TIER 1]-ACTIVE", "WYNN:2": "[Bad/Inactive]-DO NOT CALL" },
+  );
+  assert.equal(rows.length, 2);
+  assert.equal(rows.every((r) => r.outcome), true, "a blank status reads as a gap");
+});
+
+test("status for another case never bleeds across", () => {
+  const rows = run([dial({ caseId: 430083, attempts: [attempt()] })], [], { "WYNN:999999": "[TIER 1]-ACTIVE" });
   assert.equal(rows[0].outcome, null);
 });

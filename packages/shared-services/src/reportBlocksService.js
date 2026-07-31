@@ -384,8 +384,8 @@ const BLOCKS = [
     //   agent    attempts.agentId is the SEAT that dialled. Usually the same
     //            person, but the case's settlement officer is who owns it, and
     //            the seat is absent on some attempts.
-    needs: ["dials", "activity"],
-    compute({ dials = [], events = [] }) {
+    needs: ["dials", "activity", "ldCaseStatus"],
+    compute({ dials = [], events = [], ldCaseStatus = {} }) {
       const LONG_SEC = Math.max(60, Number(process.env.LD_LONG_CALL_SECONDS) || 300);
       const { canonicalStaffName } = require("../../shared-config/src/staffRoster");
 
@@ -428,11 +428,17 @@ const BLOCKS = [
             caseId: d.caseId ?? null,
             dateKey: d.dateKey || null,
             minutes: Math.round(sec / 6) / 10,
-            // The case's own latest status, not the lead-state token. Falling
-            // back to "review" would print a word that means nothing to a
-            // reader — it is the ABSENCE of a disposition, not a result. "dnc"
-            // is kept because it is a real one: they asked not to be called.
-            outcome: statusOf.get(key)
+            // WHERE THE CASE STANDS NOW, on every row — the same thing the
+            // mail side shows. Live status first: the activity sweep only
+            // answers for cases that moved inside the window, which was 8 of
+            // 66 in July, and a blank on the other 58 reads as a gap rather
+            // than as "nothing happened".
+            //
+            // Falling back to "review" would print a word that means nothing
+            // to a reader — it is the ABSENCE of a disposition, not a result.
+            // "dnc" is kept because it IS one: they asked not to be called.
+            outcome: ldCaseStatus[key]
+              || statusOf.get(key)
               || (/^dnc$/i.test(String(a.outcome || d.lastOutcome || "")) ? "DNC" : null),
             listenUrl: a.recordingUrl || d.recordingUrl || null,
           });
@@ -1919,6 +1925,9 @@ const SOURCES = Object.freeze([
   // Who answered a long call (RingCentral leg, from our CallLog mirror) and
   // where that case stands NOW (Logics, pulled live — status is state).
   "callContext",
+  // Current Logics status for cases with a long OUTBOUND dial. The LD mirror
+  // of callContext: a dial already carries its case id, so no phone hop.
+  "ldCaseStatus",
   // Recording links for the calls a report actually lists. CallRail hands
   // these out ONE CALL AT A TIME, so this is a separate, bounded gather rather
   // than a field on callsRange — which is why every long-call row shipped with

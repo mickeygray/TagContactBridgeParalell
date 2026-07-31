@@ -37,6 +37,10 @@ const QUEUE_DAY_PAUSE_MS = Math.max(0, Number(process.env.QUEUE_DAY_PAUSE_MS) ||
 // days, so a month is ~33. Refuse rather than grind if a filter is missing.
 const CASE_CONTACT_MAX = Math.max(1, Number(process.env.CASE_CONTACT_MAX) || 400);
 const CALLS_LOOKBACK_DAYS = Math.max(0, Number(process.env.CALLS_LOOKBACK_DAYS) || 45);
+// Live case-status lookups for long LD dials, one Logics call each. A day holds
+// a handful; a wide range can hold hundreds, and a report is not worth a
+// thousand API calls. Over the cap the section says so rather than truncating.
+const LD_STATUS_MAX = Math.max(0, Number(process.env.LD_STATUS_MAX) || 120);
 const CALLS_DAY_MAX = Math.max(1, Number(process.env.CALLS_DAY_MAX) || 120);
 
 function addDaysKey(key, delta) {
@@ -702,6 +706,54 @@ async function gatherMaterial({
   // Gathering only [from,to] made every lag measure 0 days — an artifact of
   // the window, not a fact about the funnel. So reach back before `from`.
   // CallRail tolerates this: it is the robust API, one cheap call per day.
+  // ── ldCaseStatus: where each long-dialled case stands NOW ────────────────
+  //
+  // Mickey 2026-07-31: "there should be a case status in every one of those
+  // calls like you have for mailer." The inbound side pulls the case live and
+  // shows its current standing; LD was reading status-change ACTIVITY instead,
+  // which only answers for cases that happened to move inside the window — 8
+  // of 66 in July. The other 58 showed nothing, and a blank reads as a gap.
+  //
+  // Cheaper here than on the mail side: a dial already carries its case id, so
+  // there is no findCaseByPhone hop. Bounded by the long-call threshold, which
+  // is a handful a day. Status is STATE, so it is always pulled fresh and
+  // never read from a mirror.
+  if (want.has("ldCaseStatus")) {
+    const LONG_SEC = Math.max(60, Number(process.env.LD_LONG_CALL_SECONDS) || 300);
+    const statuses = {};
+    try {
+      const DailyDial = require("../../shared-models/src/DailyDial");
+      const q = { dateKey: { $gte: from, $lte: to }, caseId: { $ne: null } };
+      if (domain) q.domain = String(domain).toLowerCase();
+      const rows = await DailyDial.find(q).select("domain caseId attempts").lean();
+      const cases = new Map();
+      for (const r of rows) {
+        const longest = (r.attempts || []).some((a) => (Number(a.durationSeconds) || 0) >= LONG_SEC);
+        if (!longest) continue;
+        cases.set(`${String(r.domain || "").toUpperCase()}:${r.caseId}`,
+          { domain: String(r.domain || "TAG").toUpperCase(), caseId: r.caseId });
+      }
+      const list = [...cases.values()];
+      if (list.length && list.length <= LD_STATUS_MAX && live) {
+        const { mapLimit, unwrapLogics } = require("./paymentTruthService");
+        const { createLogicsClient } = require("../../shared-integrations/src");
+        await mapLimit(list, 3, async (c) => {
+          try {
+            const info = unwrapLogics(await createLogicsClient(c.domain).getCaseInfo(c.caseId));
+            if (info?.StatusName) statuses[`${c.domain}:${c.caseId}`] = info.StatusName;
+          } catch { /* one unreadable case must not cost the section */ }
+        });
+      } else if (list.length > LD_STATUS_MAX) {
+        // Never silently truncate: a status nobody fetched must read as absent
+        // rather than as a case that has not moved.
+        notes.push(`LD case status skipped — ${list.length} long-dialled case(s) exceeds LD_STATUS_MAX (${LD_STATUS_MAX})`);
+      }
+    } catch (error) {
+      notes.push(`LD case status unavailable — ${String(error.message).slice(0, 80)}`);
+    }
+    material.ldCaseStatus = statuses;
+  }
+
   if (want.has("callsRange")) {
     const callsFrom = addDaysKey(from, -CALLS_LOOKBACK_DAYS);
     const days = dayRange(callsFrom, to);
