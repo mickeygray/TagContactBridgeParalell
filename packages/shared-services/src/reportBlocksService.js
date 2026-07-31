@@ -576,6 +576,21 @@ const BLOCKS = [
     // "(unsourced)" — 34 of 39 over July 2026.
     // callsRange carries the actual inbound calls (45-day lookback), which is
     // what the aged rule keys on — the create date is only the fallback.
+    // KNOWN GAP, deliberately not patched here (2026-07-31). The aged rule
+    // keys on an attributable CALL, and CallRail only ever sees INBOUND mail
+    // responses — an LD lead is dialled outbound and never rings the mail
+    // line, so it can never produce one and ages out after AGED_AFTER_DAYS.
+    //
+    // An attempt to stand the PhoneBurner dial in as LD's equivalent was
+    // reverted: the case that prompted it, WYNN 130897, has ZERO DailyDial
+    // rows — it was never dialled at all — so the change fixed nothing and
+    // was shipping unverified attribution onto a live board. That case is
+    // genuinely Aged: bought on LD CUSTOM in June, closed in July, so the
+    // money is real but is not a return on THIS window's spend.
+    //
+    // If it is picked up again the test is a case with a dial INSIDE the
+    // lookback, and it needs the same 45-day reach the inbound calls get —
+    // the window alone cannot see the dial that worked an old lead.
     needs: ["payments", "spend", "calls", "caseContacts", "callsRange"],
     compute({ payments, spendBySource, callsBySource, callsRange = [], from = null, to = null }) {
       const { canonicalSourceName, isCatchAllName } = require("./logicsSourceWriterService");
@@ -595,6 +610,7 @@ const BLOCKS = [
       // reportOpsService.attributionDateResolver. A caller that skips it
       // reports a different set of deals for the same range.
       const attributionDateFor = attributionDateResolver(callsRange);
+
       const by = new Map();
       const row = (k) => {
         if (!by.has(k)) by.set(k, { source: k, deals: 0, dealCases: new Set(), newCash: 0, recurringCash: 0, spend: 0, responses: 0, leads: 0 });
@@ -807,11 +823,18 @@ const BLOCKS = [
             residual: true,
           }];
         })(),
-        // Five columns in the mail: who, how many, how much in, how much out,
-        // and the return. The other eight are for the CSV.
+        // Six columns in the mail: who, how many, what the DEALS were worth,
+        // what came in all told, what it cost, and the return.
+        //
+        // new_cash is not a nicety. Without it the row reads
+        // "Not attributed (4) | 1 | $4,836" and a reader joins those two into
+        // a $4,836 deal — it is a $700 deal on WYNN 130897 plus $4,136 of
+        // recurring from other clients entirely. Deals and total cash next to
+        // each other, with nothing between them, is an invitation to misread.
         emailColumns: [
           { header: "source", get: (x) => x.source },
           { header: "deals", get: (x) => x.deals },
+          { header: "new_cash", get: (x) => x.newCash },
           { header: "total_cash", get: (x) => x.totalCash },
           { header: "spend", get: (x) => x.spend },
           { header: "roi_pct", get: (x) => x.roi },
