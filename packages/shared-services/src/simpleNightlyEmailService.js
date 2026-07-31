@@ -1,13 +1,16 @@
 "use strict";
 
-// The reborn nightly email (2026-07-24) — Mickey's spec, verbatim:
-// "spend for the day, calls for the day, initials for the day, total for
-// the day" with calls and initials split by source. One email, one
-// screen, no attachments — rendered from the SAME lean read the metrics
-// board uses, so the inbox and the board can never disagree.
+// RETIRED 2026-07-30 — see sendSimpleNightlyEmail below. The nightly metrics
+// email no longer sends; metrics come from the report blocks and the 20:00
+// activity pull loop. The builders are kept intact so the retirement is
+// reversible, but nothing calls them.
 //
-// Gated by SIMPLE_NIGHTLY_EMAIL_ENABLED (default off). Recipients from
-// SIMPLE_NIGHTLY_RECIPIENTS (comma list, default mgray).
+// Originally (2026-07-24): "spend for the day, calls for the day, initials for
+// the day, total for the day" with calls and initials split by source. It was
+// meant to render from the SAME lean read as the metrics board so the inbox and
+// the board could never disagree — but that board is itself being retired, and
+// the read it used (simpleMarketingReadService) drifted from the report
+// composer, so the two DID disagree.
 
 const fs = require("fs");
 const path = require("path");
@@ -277,7 +280,38 @@ function wynnNightlyRecipients() {
     .filter(Boolean);
 }
 
+// RETIRED 2026-07-30. The last surviving nightly metrics email follows the
+// financial, lead-data and redline emails that went on 2026-07-27.
+//
+// Mickey: "its not even a feature, the things that drive it dont exist and we
+// only collect metrics via activity pull loop." That is the whole case. This
+// email was assembled from simpleMarketingReadService — a read path parallel to
+// the report composer — plus a status narrative handed over on disk by the
+// 20:00 activity review. When that file was missing it printed "activity counts
+// unavailable" and sent anyway, so it arrived nightly saying nothing.
+//
+// WHERE ITS CONTENT LIVES NOW — nothing is lost by retiring it:
+//   spend / calls / initials / totals   the report blocks (topline, source),
+//                                       gathered live at send time
+//   payments that did not process       the `declines` block, "Declines to
+//                                       chase" — the one signal the 07-27
+//                                       retirement deliberately preserved here
+//   case status movement                the `status` block, straight from the
+//                                       activity pull loop rather than a file
+//
+// SIMPLE_NIGHTLY_EMAIL_ENABLED is deliberately NOT honoured any more: it is
+// true in the live environment, so leaving it as the switch would let this come
+// back on the next deploy. Re-arming is a code decision now, not a config one.
+const SIMPLE_NIGHTLY_RETIRED_REASON =
+  "retired-2026-07-30 — metrics come from the report blocks and the activity pull loop";
+
 async function sendSimpleNightlyEmail({ dateKey, recipients = null, logger = null } = {}) {
+  logger?.info?.("simple_nightly.retired", { dateKey, reason: SIMPLE_NIGHTLY_RETIRED_REASON });
+  return { sent: false, skipped: true, retired: true, reason: SIMPLE_NIGHTLY_RETIRED_REASON };
+  /* eslint-disable no-unreachable */
+  // Kept below rather than deleted — retire, never delete. If this is ever
+  // brought back it must be repointed at the report composer first, so the
+  // inbox and the board cannot disagree.
   if (!simpleNightlyEmailEnabled()) {
     return { sent: false, skipped: true, reason: "SIMPLE_NIGHTLY_EMAIL_ENABLED=false" };
   }
@@ -357,6 +391,7 @@ async function sendSimpleNightlyEmail({ dateKey, recipients = null, logger = nul
   }
 
   return { sent: true, recipients: to, messageId: result.messageId, wynn };
+  /* eslint-enable no-unreachable */
 }
 
 module.exports = {

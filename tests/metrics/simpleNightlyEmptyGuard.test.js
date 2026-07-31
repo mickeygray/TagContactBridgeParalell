@@ -55,16 +55,15 @@ test("nothing at all is the case that must not be mailed", () => {
   assert.equal(hasMoney || hasCalls, false);
 });
 
-test("the guard is reachable — sendSimpleNightlyEmail is exported and gated", async () => {
+test("retirement supersedes this guard — the email cannot send at all now", async () => {
+  // The empty-send guard above was written hours before the whole email was
+  // retired (2026-07-30), so it is now unreachable. The field-name assertions
+  // are kept because they are the thing that makes the guard correct if this
+  // is ever re-armed; the reachability assertion is replaced by the truth.
   assert.equal(typeof svc.sendSimpleNightlyEmail, "function");
-  const prior = process.env.SIMPLE_NIGHTLY_EMAIL_ENABLED;
-  process.env.SIMPLE_NIGHTLY_EMAIL_ENABLED = "false";
-  try {
-    const r = await svc.sendSimpleNightlyEmail({ dateKey: "2026-07-30" });
-    assert.equal(r.sent, false);
-    assert.match(r.reason, /SIMPLE_NIGHTLY_EMAIL_ENABLED/);
-  } finally {
-    if (prior === undefined) delete process.env.SIMPLE_NIGHTLY_EMAIL_ENABLED;
-    else process.env.SIMPLE_NIGHTLY_EMAIL_ENABLED = prior;
-  }
+  const r = await svc.sendSimpleNightlyEmail({ dateKey: "2026-07-30" });
+  assert.equal(r.sent, false);
+  assert.equal(r.retired, true);
+  assert.doesNotMatch(r.reason, /SIMPLE_NIGHTLY_EMAIL_ENABLED/,
+    "retirement must not read as a config toggle — the live env sets that flag true");
 });
