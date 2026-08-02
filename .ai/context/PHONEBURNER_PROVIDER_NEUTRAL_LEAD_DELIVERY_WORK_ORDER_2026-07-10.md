@@ -1691,3 +1691,17 @@ This ruling supersedes any earlier weekend pre-positioning language.
   scheduled runtimes may not infer that permission.
 - Monday resumes from durable state without replay bursts or duplicate first
   contact.
+
+## Phase 9 LD pre-ping compute boundary (2026-08-02)
+
+- A vendor pre-ping is transient bid/correlation traffic, not an accepted lead
+  and not durable business state.
+- The inbound gateway keeps accepted pre-ping correlation in one bounded,
+  process-local five-minute cache. It must not write every pre-ping into Mongo
+  or create a TTL write/delete loop.
+- The canonical `LeadCadence` duplicate check remains indexed and fail-closed.
+- A full LD lead remains the only durable intake: it is written normally and
+  retains the first-contact SMS/email and call-queue enrollment contract.
+- Explicit LD routes and the established legacy-forwarder signal remain
+  authoritative routing evidence. A gateway restart may discard transient
+  pre-ping correlation but may not discard or replay an accepted full lead.

@@ -1634,7 +1634,8 @@ async function intakeLdPrePing(payload = {}, options = {}) {
     };
   }
 
-  await prePingRepository.upsertPrePing(domain, emailHash, callbackUrl);
+  const prePingStore = options.prePingStore || prePingRepository;
+  await prePingStore.upsertPrePing(domain, emailHash, callbackUrl);
 
   return {
     ok: true,
@@ -2515,7 +2516,8 @@ async function intakeWebsiteLead(payload, options = {}) {
 async function intakeLdLead(payload, options = {}) {
   const normalized = normalizeWebsiteLeadPayload(payload, options.headers);
   const emailHash = computeEmailHash(normalized.email);
-  const prePing = emailHash ? await prePingRepository.consumePrePing("WYNN", emailHash) : null;
+  const prePingStore = options.prePingStore || prePingRepository;
+  const prePing = emailHash ? await prePingStore.consumePrePing("WYNN", emailHash) : null;
 
   return intakeNormalizedLead(
     normalizeLdLeadPayload(payload, options.headers, { prePing }),

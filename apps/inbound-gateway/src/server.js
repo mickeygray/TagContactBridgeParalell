@@ -20,7 +20,6 @@ const {
   isDetailedHealthRequest,
   safeSecretEquals,
 } = require("../../../packages/shared-utils/src");
-const { prePingRepository } = require("../../../packages/shared-repositories/src");
 const { publishDemoEvent } = require("../../../packages/shared-services/src/demoEventService");
 const {
   intakeAffiliateLead,
@@ -42,6 +41,7 @@ const { initializeServiceRuntime } = require("../../../packages/shared-runtime/s
 const { buildServiceHealth } = require("../../../packages/shared-observability/src");
 const { toErrorResponse } = require("../../../packages/shared-errors/src");
 const { createRateLimiter } = require("../../control-plane/src/middleware/rateLimit");
+const { createPrePingMemoryStore } = require("./prePingMemoryStore");
 
 function captureRawBody(req, _res, buf) {
   if (buf?.length) {
@@ -456,6 +456,7 @@ async function startServer() {
   };
 
   const runtime = await initializeServiceRuntime(config);
+  const prePingStore = createPrePingMemoryStore();
   runtime.installSignalHandlers();
   const requireHealthAccess = buildHealthAccessMiddleware(config);
   const requireMetaWebhookSignature = buildWebhookSignatureMiddleware(
@@ -684,7 +685,7 @@ async function startServer() {
       const domain = String(
         req.body?.company || req.body?.domain || req.headers["x-company"] || "WYNN",
       ).trim().toUpperCase();
-      const prePing = await prePingRepository.findPrePing(
+      const prePing = await prePingStore.findPrePing(
         domain,
         computeEmailHash(req.body?.email),
       );
@@ -705,6 +706,7 @@ async function startServer() {
         headers: req.headers,
         sourceService: config.serviceName,
         skipLogicsCreate: req.skipLogicsCreate === true,
+        prePingStore,
       });
       return res.status(result.statusCode || 202).json({ ok: true, legacyRoute: true, ...result });
     } catch (error) {
@@ -726,6 +728,7 @@ async function startServer() {
         headers: req.headers,
         sourceService: config.serviceName,
         skipLogicsCreate: req.skipLogicsCreate === true,
+        prePingStore,
       });
       return res.status(result.statusCode || 202).json({ ok: true, ...result });
     } catch (error) {
@@ -746,6 +749,7 @@ async function startServer() {
       const result = await intakeLdPrePing(req.body || {}, {
         headers: req.headers,
         sourceService: config.serviceName,
+        prePingStore,
       });
       return res.status(result.statusCode || 200).json(result);
     } catch (error) {
@@ -763,6 +767,7 @@ async function startServer() {
       const result = await intakeLdPrePing(req.body || {}, {
         headers: req.headers,
         sourceService: config.serviceName,
+        prePingStore,
       });
       return res.status(result.statusCode || 200).json({
         ...result,
