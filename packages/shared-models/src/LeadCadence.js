@@ -259,11 +259,11 @@ leadCadenceSchema.index(
   },
   {
     name: "lead_cadence_scheduled_rvm_poll",
-    partialFilterExpression: {
-      "schedule.actions.channel": "rvm",
-      "schedule.actions.status": "completed",
-      "schedule.actions.providerDelivery.activityToken": { $exists: true },
-    },
+    // The query owns an $elemMatch. Mongo's implication checker would not
+    // select the earlier dotted-path partial index for that shape, so use a
+    // sparse time index: only documents carrying a posted RVM are indexed,
+    // and the postedAt range can drive the scan directly.
+    sparse: true,
   },
 );
 leadCadenceSchema.index(
@@ -272,10 +272,7 @@ leadCadenceSchema.index(
   },
   {
     name: "lead_cadence_counter_rvm_poll",
-    partialFilterExpression: {
-      "counterCadence.rvmDeliveries.provider": "drop",
-      "counterCadence.rvmDeliveries.activityToken": { $exists: true },
-    },
+    sparse: true,
   },
 );
 // Daily aged-refresh sweep query. Sparse so the bulk of leads (with

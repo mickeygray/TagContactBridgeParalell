@@ -79,6 +79,12 @@ test("lead cadence declares targeted RVM and tenant email-hash indexes", () => {
   const LeadCadence = require("../../packages/shared-models/src/LeadCadence");
   const byName = new Map(LeadCadence.schema.indexes().map(([keys, options]) => [options.name, { keys, options }]));
   assert.deepEqual(byName.get("lead_cadence_domain_email_hash").keys, { domain: 1, emailHash: 1 });
-  assert.equal(byName.get("lead_cadence_scheduled_rvm_poll").options.partialFilterExpression["schedule.actions.channel"], "rvm");
-  assert.equal(byName.get("lead_cadence_counter_rvm_poll").options.partialFilterExpression["counterCadence.rvmDeliveries.provider"], "drop");
+  assert.deepEqual(byName.get("lead_cadence_scheduled_rvm_poll").keys, {
+    "schedule.actions.providerDelivery.postedAt": 1,
+  });
+  assert.equal(byName.get("lead_cadence_scheduled_rvm_poll").options.sparse, true);
+  assert.deepEqual(byName.get("lead_cadence_counter_rvm_poll").keys, {
+    "counterCadence.rvmDeliveries.postedAt": 1,
+  });
+  assert.equal(byName.get("lead_cadence_counter_rvm_poll").options.sparse, true);
 });
