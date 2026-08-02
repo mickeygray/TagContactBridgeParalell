@@ -243,6 +243,41 @@ leadCadenceSchema.index({ domain: 1, caseId: 1 }, { unique: true });
 leadCadenceSchema.index({ domain: 1, active: 1, "schedule.nextActionAt": 1 });
 leadCadenceSchema.index({ domain: 1, active: 1, cadenceMode: 1, createdAt: 1 });
 leadCadenceSchema.index({ domain: 1, createdAt: 1 });
+// Inbound pre-ping duplicate check. The former emailHash-only index still
+// left tenant-scoped probes under-targeted and was responsible for a large
+// volume of zero-result lookups in Atlas query stats.
+leadCadenceSchema.index(
+  { domain: 1, emailHash: 1 },
+  { name: "lead_cadence_domain_email_hash" },
+);
+// Drop disposition polling reads only recent RVM deliveries. Keep these
+// partial and time-led so the five-minute poll does not walk every cadence
+// document when there is no outstanding provider work.
+leadCadenceSchema.index(
+  {
+    "schedule.actions.providerDelivery.postedAt": 1,
+  },
+  {
+    name: "lead_cadence_scheduled_rvm_poll",
+    partialFilterExpression: {
+      "schedule.actions.channel": "rvm",
+      "schedule.actions.status": "completed",
+      "schedule.actions.providerDelivery.activityToken": { $exists: true },
+    },
+  },
+);
+leadCadenceSchema.index(
+  {
+    "counterCadence.rvmDeliveries.postedAt": 1,
+  },
+  {
+    name: "lead_cadence_counter_rvm_poll",
+    partialFilterExpression: {
+      "counterCadence.rvmDeliveries.provider": "drop",
+      "counterCadence.rvmDeliveries.activityToken": { $exists: true },
+    },
+  },
+);
 // Daily aged-refresh sweep query. Sparse so the bulk of leads (with
 // nextAt === null) don't bloat the index.
 leadCadenceSchema.index(

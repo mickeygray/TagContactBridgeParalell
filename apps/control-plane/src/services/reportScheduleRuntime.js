@@ -25,6 +25,13 @@ const { getInternalFromEmail } = require("../../../../packages/shared-config/src
 
 const DEFAULT_POLL_MS = 5 * 60 * 1000;
 
+function isPacificBusinessDay(value = new Date()) {
+  const weekday = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/Los_Angeles", weekday: "short",
+  }).format(new Date(value));
+  return weekday !== "Sat" && weekday !== "Sun";
+}
+
 function createReportScheduleRuntime({ config = {}, runtime = {} } = {}) {
   const state = {
     // Default OFF. Arming a loop that emails people is Mickey's call, not a
@@ -42,11 +49,12 @@ function createReportScheduleRuntime({ config = {}, runtime = {} } = {}) {
 
   const log = runtime.logger || null;
 
-  async function poll({ force = false } = {}) {
+  async function poll({ force = false, now = new Date() } = {}) {
     // Guard FIRST: every early return below must be unable to skip the
     // release, so the flag can never be left set.
     if (state.running) return { skipped: "already running" };
     if (!state.enabled && !force) return { skipped: "disabled" };
+    if (!force && !isPacificBusinessDay(now)) return { skipped: "pacific-weekend" };
     state.running = true;
     const started = Date.now();
     try {
@@ -167,4 +175,4 @@ function createReportScheduleRuntime({ config = {}, runtime = {} } = {}) {
   return { getState, listDefinitions, poll, start, stop };
 }
 
-module.exports = { createReportScheduleRuntime };
+module.exports = { createReportScheduleRuntime, isPacificBusinessDay };

@@ -1263,7 +1263,10 @@ async function gatherMaterial({
             // the case into normalizedPhones — same trick that recovered the
             // July spouse-number deals.
             try {
-              const owner = await CaseProfile.findOne({ normalizedPhones: p }).select("caseId domain").lean();
+              const owner = await CaseProfile.findOne({
+                domain: dom,
+                normalizedPhones: p,
+              }).select("caseId domain").lean();
               if (owner?.caseId) ids = [Number(owner.caseId)];
             } catch { /* mirror unavailable — leave unresolved rather than guess */ }
           }

@@ -154,6 +154,13 @@ class FakeRepository {
     return copy([...this.items.values()].find((item) => item.sourceIdentity === identity) || null);
   }
 
+  async findItemsBySourceIdentities(rows = []) {
+    const wanted = new Set(rows.map((row) => `${String(row.domain).toUpperCase()}:${String(row.caseId)}`));
+    return [...this.items.values()]
+      .filter((item) => wanted.has(item.sourceIdentity))
+      .map(copy);
+  }
+
   async listAgentDeliveryItems(agentId) {
     return [...this.items.values()]
       .filter((item) => item.activeAttempt && item.deliveryAgentId === agentId)
@@ -677,6 +684,16 @@ async function ingestAndSeed(h) {
   const result = await h.runtime.seedAgent("bruce_allen");
   return result;
 }
+
+test("provider runtime performs no weekend scan, refill, or posting", async () => {
+  const h = harness({ rows: [sourceRow(1)] });
+  h.setClock("2026-08-02T16:00:00.000Z");
+  const result = await h.runtime.tick();
+  assert.equal(result.status, "weekend-paused");
+  assert.equal(h.calls.length, 0);
+  assert.equal(h.repository.agents.size, 0);
+  assert.equal(h.repository.items.size, 0);
+});
 
 function acceptedItems(repository) {
   return [...repository.items.values()].filter((item) => item.state === "provider_accepted");

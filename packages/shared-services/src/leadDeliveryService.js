@@ -429,6 +429,15 @@ function getPacificDateKey(value) {
   return `${parts.year}-${parts.month}-${parts.day}`;
 }
 
+function isPacificBusinessDay(value = new Date()) {
+  const date = parseDate(value, "value");
+  const weekday = new Intl.DateTimeFormat("en-US", {
+    timeZone: PACIFIC_TIME_ZONE,
+    weekday: "short",
+  }).format(date);
+  return weekday !== "Sat" && weekday !== "Sun";
+}
+
 function getPacificHourKey(value) {
   const parts = zonedParts(value, PACIFIC_TIME_ZONE);
   return `${parts.year}-${parts.month}-${parts.day}T${parts.hour}${parts.offset}`;
@@ -510,6 +519,7 @@ function isPacificDeliveryWindowOpen(value, {
   endHour = 17,
   endMinute = 0,
 } = {}) {
+  if (!isPacificBusinessDay(value)) return false;
   const parts = zonedParts(value, PACIFIC_TIME_ZONE);
   const minuteOfDay = (Number(parts.hour) * 60) + Number(parts.minute);
   const start = (nonNegativeInteger(startHour, "startHour") * 60)
@@ -3864,6 +3874,13 @@ function createLeadDeliveryRuntime({
       now: at,
     });
     const rows = Array.isArray(batch?.items) ? batch.items : [];
+    const existingRows = typeof repository.findItemsBySourceIdentities === "function"
+      ? await repository.findItemsBySourceIdentities(rows)
+      : [];
+    const existingBySourceIdentity = new Map((existingRows || []).map((item) => [
+      String(item?.sourceIdentity || `${String(item?.domain || "").toUpperCase()}:${String(item?.caseId || "")}`),
+      item,
+    ]));
     let inserted = 0;
     let skipped = 0;
     let refreshed = 0;
@@ -3879,10 +3896,12 @@ function createLeadDeliveryRuntime({
       if (!classification.pool && classification.reason === "follow-up-not-due" && row.nextContactAt) {
         classification = { ...classification, pool: POOLS.FOLLOW_UP_DUE, deferred: true };
       }
-      const existing = await repository.findItemBySourceIdentity({
-        domain: row.domain,
-        caseId: row.caseId,
-      });
+      const sourceIdentity = `${String(row?.domain || "").toUpperCase()}:${String(row?.caseId || "")}`;
+      const existing = existingBySourceIdentity.get(sourceIdentity) || (
+        typeof repository.findItemsBySourceIdentities === "function"
+          ? null
+          : await repository.findItemBySourceIdentity({ domain: row.domain, caseId: row.caseId })
+      );
       if (existing) {
         const result = await refreshExistingSourceItem(existing, row, at);
         if (result.status === "refreshed") refreshed += 1;
@@ -9107,6 +9126,12 @@ function createLeadDeliveryRuntime({
   async function runTick() {
     if (enabled !== true) return { status: "disabled" };
     const at = atNow();
+    // Weekend intake is handled upstream: accept the lead, send its first
+    // contact, and persist queue enrollment. This provider runtime must not
+    // scan, refill, rebalance, or post PhoneBurner inventory until Monday.
+    if (!isPacificBusinessDay(at)) {
+      return { status: "weekend-paused", at };
+    }
     await syncConfiguredAgents();
     const priorDayDrainResume = await resumeIncompletePriorDayFolderDrain(at);
     if (priorDayDrainResume.status !== "none") priorDayDrainReleaseDateKey = null;
@@ -9395,6 +9420,7 @@ module.exports = {
   getEffectiveDailyAttemptCount,
   getPacificDateKey,
   getPacificHourKey,
+  isPacificBusinessDay,
   isPacificDeliveryWindowOpen,
   leadAgeInPacificDays,
   isFreshReservationProtected,

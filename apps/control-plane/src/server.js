@@ -657,6 +657,17 @@ async function startHourlySweepWorker({ config, runtime, workerState, spendSyncR
     workerState.running = true;
     workerState.lastStartedAt = new Date();
 
+    // New-lead intake and first-contact delivery are owned by the outbound
+    // event path. The hourly sweeper is maintenance/reconciliation work and
+    // stays completely dormant on Pacific weekends.
+    if (!leadDeliveryService.isPacificBusinessDay(workerState.lastStartedAt)) {
+      workerState.lastCompletedAt = new Date();
+      workerState.lastResult = { skipped: true, reason: "pacific-weekend" };
+      workerState.lastError = null;
+      workerState.running = false;
+      return;
+    }
+
     const currentHourKey = `${workerState.lastStartedAt.getUTCFullYear()}-${workerState.lastStartedAt.getUTCMonth()}-${workerState.lastStartedAt.getUTCDate()}-${workerState.lastStartedAt.getUTCHours()}`;
     let runScheduledPhase =
       workerState.lastScheduledHour !== currentHourKey;

@@ -133,6 +133,7 @@ function createFakeModel(kind, initial = []) {
       });
     },
     find(filter) {
+      model.calls.push({ op: "find", filter: structuredClone(filter) });
       return new FakeQuery(() => model.docs.filter((doc) => matches(doc, filter)).map((doc) => structuredClone(doc)));
     },
     findOne(filter) {
@@ -386,6 +387,23 @@ test("insertActiveItemOnce derives one permanent source identity and swallows on
     null,
   );
   assert.equal(Item.docs.length, 1);
+});
+
+test("source identity lookup batches one page into one indexed query", async () => {
+  const { repository, Item } = makeRepository({
+    items: [
+      { _id: "a", domain: "TAG", caseId: "1", sourceIdentity: "TAG:1" },
+      { _id: "b", domain: "WYNN", caseId: "2", sourceIdentity: "WYNN:2" },
+      { _id: "c", domain: "TAG", caseId: "3", sourceIdentity: "TAG:3" },
+    ],
+  });
+  const found = await repository.findItemsBySourceIdentities([
+    { domain: "tag", caseId: 1 },
+    { domain: "WYNN", caseId: "2" },
+    { domain: "tag", caseId: 1 },
+  ]);
+  assert.deepEqual(found.map((row) => row._id).sort(), ["a", "b"]);
+  assert.equal(Item.calls.filter((call) => call.op === "find").length, 1);
 });
 
 test("reservation compare-and-set race has exactly one winner", async () => {

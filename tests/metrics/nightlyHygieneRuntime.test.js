@@ -7,7 +7,7 @@ const { test } = require("node:test");
 const assert = require("node:assert/strict");
 
 const {
-  createNightlyHygieneRuntime, persistTargetDay,
+  createNightlyHygieneRuntime, isPacificBusinessDay, persistTargetDay,
 } = require("../../apps/control-plane/src/services/nightlyHygieneRuntime");
 
 const withEnv = async (vars, fn) => {
@@ -60,6 +60,11 @@ test("the running guard is released by EVERY early return", async () => {
   const rt = createNightlyHygieneRuntime({});
   await rt.runOnce();
   assert.equal(rt.getState().running, false, "wedged — the exact bug from last time");
+});
+
+test("scheduled hygiene is dormant on Pacific weekends", () => {
+  assert.equal(isPacificBusinessDay(new Date("2026-08-02T16:00:00.000Z")), false);
+  assert.equal(isPacificBusinessDay(new Date("2026-08-03T16:00:00.000Z")), true);
 });
 
 test("running the loop is a SEPARATE decision from letting it write", async () => {

@@ -833,6 +833,18 @@ function createLeadDeliveryRepository({
     return lean(query);
   }
 
+  async function findItemsBySourceIdentities(rows = [], { session = null } = {}) {
+    const identities = [...new Set((Array.isArray(rows) ? rows : []).map((row) => {
+      const domain = requireString(row?.domain, "domain").toUpperCase();
+      const caseId = requireString(row?.caseId, "caseId");
+      return `${domain}:${caseId}`;
+    }))];
+    if (!identities.length) return [];
+    let query = LeadDeliveryItem.find({ sourceIdentity: { $in: identities } });
+    query = applySession(query, session);
+    return lean(query);
+  }
+
   async function readCaseProfilesForSources(sourceRows, { session = null } = {}) {
     const identities = new Map();
     for (const row of sourceRows) {
@@ -1723,6 +1735,7 @@ function createLeadDeliveryRepository({
     countAgentCompletedAttempts,
     countAgentCompletedAttemptsSince,
     expireReservationCas,
+    findItemsBySourceIdentities,
     findItemBySourceIdentity,
     findEventByDedupeKey,
     getAgentById,

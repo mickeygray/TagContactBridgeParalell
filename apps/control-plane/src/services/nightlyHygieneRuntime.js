@@ -67,6 +67,13 @@ function pacificHourMinute(at = new Date()) {
   return { hour: get("hour") % 24, minute: get("minute") };
 }
 
+function isPacificBusinessDay(at = new Date()) {
+  const weekday = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/Los_Angeles", weekday: "short",
+  }).format(at);
+  return weekday !== "Sat" && weekday !== "Sun";
+}
+
 /**
  * Bind the recovery discovery service to real collections.
  *
@@ -560,13 +567,14 @@ function createNightlyHygieneRuntime({ config = {}, runtime = {} } = {}) {
     if (!state.enabled && !force) return { skipped: "disabled" };
     const today = pacificKey();
     if (!force) {
+      if (state.lastRunKey === today) return { skipped: "already ran today" };
+      if (!isPacificBusinessDay()) return { skipped: "pacific-weekend" };
       const now = pacificHourMinute();
       if (now.hour * 60 + now.minute < state.hour * 60 + state.minute) {
         return { skipped: "before the scheduled time" };
       }
       // Compared against a stored day key, not a boolean, so a restart cannot
       // re-run the pass (or a second one) later the same night.
-      if (state.lastRunKey === today) return { skipped: "already ran today" };
     }
     state.running = true;
     const started = Date.now();
@@ -677,4 +685,5 @@ module.exports = {
   createNightlyHygieneRuntime,
   persistTargetDay,
   buildCallRecoveryDiscoveryDeps,
+  isPacificBusinessDay,
 };

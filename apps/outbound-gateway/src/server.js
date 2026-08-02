@@ -121,8 +121,92 @@ function createWorkerState() {
       lastRvmPollResult: null,
       lastRvmPollError: null,
     },
+    rvmDisposition: {
+      lastCheckedAt: null,
+      lastResult: null,
+      lastError: null,
+    },
     timer: null,
   };
+}
+
+function intervalDue(lastCheckedAt, now, intervalMs) {
+  if (!lastCheckedAt) return true;
+  const previous = new Date(lastCheckedAt).getTime();
+  const current = new Date(now).getTime();
+  if (!Number.isFinite(previous) || !Number.isFinite(current)) return true;
+  return current - previous >= Math.max(Number(intervalMs) || 0, 1);
+}
+
+function isPacificBusinessDay(value = new Date()) {
+  const weekday = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/Los_Angeles",
+    weekday: "short",
+  }).format(new Date(value));
+  return weekday !== "Sat" && weekday !== "Sun";
+}
+
+async function runRvmDispositionPollIfDue({
+  workerState,
+  now = new Date(),
+  intervalMs = 5 * 60 * 1000,
+  pollCounter = pollCounterCadenceRvmDispositions,
+  pollScheduled = pollOutboundRvmDispositions,
+  logger = null,
+} = {}) {
+  const state = workerState?.rvmDisposition;
+  if (!state) throw new TypeError("workerState.rvmDisposition is required");
+  if (!isPacificBusinessDay(now)) {
+    return { status: "weekend-paused" };
+  }
+  if (!intervalDue(state.lastCheckedAt, now, intervalMs)) {
+    return { status: "not-due" };
+  }
+
+  // Claim the interval before either async query. The outer worker has a
+  // running guard, but this also makes the cadence explicit and testable.
+  state.lastCheckedAt = now;
+  const result = { status: "completed", counter: null, scheduled: null };
+  const errors = [];
+  try {
+    result.counter = await pollCounter({ now, limit: 25 });
+    workerState.counterCadence.lastRvmPollAt = now;
+    workerState.counterCadence.lastRvmPollResult = result.counter;
+    workerState.counterCadence.lastRvmPollError = null;
+    if (result.counter?.polled > 0) {
+      logger?.info?.("outbound.worker.counter_rvm_disposition_poll", {
+        polled: result.counter.polled,
+        terminal: result.counter.terminal,
+        markedDnc: result.counter.markedDnc,
+      });
+    }
+  } catch (error) {
+    const message = String(error?.message || "counter-rvm-poll-failed").slice(0, 240);
+    workerState.counterCadence.lastRvmPollError = message;
+    errors.push({ lane: "counter", error: message });
+    logger?.error?.("outbound.worker.counter_rvm_disposition_poll_failed", { error: message });
+  }
+
+  try {
+    result.scheduled = await pollScheduled({ now, limit: 25 });
+    if (result.scheduled?.polled > 0) {
+      logger?.info?.("outbound.worker.drop_disposition_poll", {
+        polled: result.scheduled.polled,
+        terminal: result.scheduled.terminal,
+        markedDnc: result.scheduled.markedDnc,
+      });
+    }
+  } catch (error) {
+    const message = String(error?.message || "scheduled-rvm-poll-failed").slice(0, 240);
+    errors.push({ lane: "scheduled", error: message });
+    logger?.error?.("outbound.worker.drop_disposition_poll_failed", { error: message });
+  }
+
+  if (errors.length) result.status = "partial";
+  result.errors = errors;
+  state.lastResult = result;
+  state.lastError = errors.length ? errors.map((entry) => entry.lane).join(",") : null;
+  return result;
 }
 
 function asyncHandler(fn) {
@@ -179,6 +263,10 @@ async function startOutboundWorker({ config, runtime, workerState }) {
       2000,
     100,
   );
+  const rvmDispositionPollIntervalMs = Math.max(
+    Number(process.env.RVM_DISPOSITION_POLL_INTERVAL_MS) || 5 * 60 * 1000,
+    60_000,
+  );
 
   workerState.enabled = true;
   workerState.intervalMs = intervalMs;
@@ -189,9 +277,10 @@ async function startOutboundWorker({ config, runtime, workerState }) {
     workerState.lastStartedAt = new Date();
 
     try {
+      const businessDay = isPacificBusinessDay(workerState.lastStartedAt);
       let counterCadenceResult = null;
       let counterRvmPollResult = null;
-      if (config.outboundWorker?.cadenceSweepEnabled) {
+      if (businessDay && config.outboundWorker?.cadenceSweepEnabled) {
         const sweep = await createCadenceSweepEvents({
           sourceService: config.serviceName,
         });
@@ -202,7 +291,7 @@ async function startOutboundWorker({ config, runtime, workerState }) {
           });
         }
       }
-      if (counterCadenceEnabled) {
+      if (businessDay && counterCadenceEnabled) {
         const now = new Date();
         const lastCounterCheck = workerState.counterCadence.lastCheckedAt
           ? new Date(workerState.counterCadence.lastCheckedAt)
@@ -237,27 +326,9 @@ async function startOutboundWorker({ config, runtime, workerState }) {
             });
           }
 
-          try {
-            workerState.counterCadence.lastRvmPollAt = now;
-            counterRvmPollResult = await pollCounterCadenceRvmDispositions({ limit: 25 });
-            workerState.counterCadence.lastRvmPollResult = counterRvmPollResult;
-            workerState.counterCadence.lastRvmPollError = null;
-            if (counterRvmPollResult.polled > 0) {
-              runtime.logger.info("outbound.worker.counter_rvm_disposition_poll", {
-                polled: counterRvmPollResult.polled,
-                terminal: counterRvmPollResult.terminal,
-                markedDnc: counterRvmPollResult.markedDnc,
-              });
-            }
-          } catch (error) {
-            workerState.counterCadence.lastRvmPollError = error.message;
-            runtime.logger.error("outbound.worker.counter_rvm_disposition_poll_failed", {
-              error: error.message,
-            });
-          }
         }
       }
-      if (config.scheduledBlasts?.enabled) {
+      if (businessDay && config.scheduledBlasts?.enabled) {
         workerState.scheduledBlasts.lastCheckedAt = new Date();
         try {
           const blastResult = await runScheduledBlastSweep({
@@ -281,32 +352,28 @@ async function startOutboundWorker({ config, runtime, workerState }) {
           });
         }
       }
-      // Drop.co RVM disposition polling. Sit alongside the cadence
-      // sweep, gated by a per-token minimum interval (5 min) so a
-      // tick-on-every-5s loop doesn't hammer Drop's API. The
-      // function self-rate-limits by the action's lastPolledAt
-      // field, so we can call it on every tick without paging
-      // through the same tokens repeatedly.
-      try {
-        const dropPoll = await pollOutboundRvmDispositions({ limit: 25 });
-        if (dropPoll.polled > 0) {
-          runtime.logger.info("outbound.worker.drop_disposition_poll", {
-            polled: dropPoll.polled,
-            terminal: dropPoll.terminal,
-            markedDnc: dropPoll.markedDnc,
-          });
-        }
-      } catch (error) {
-        runtime.logger.error("outbound.worker.drop_disposition_poll_failed", {
-          error: error.message,
-        });
-      }
-
-      const result = await processOutboundEventBatch({
-        workerName: `${config.serviceName}-worker`,
-        maxAttempts,
-        maxCount: batchSize,
+      // Both RVM disposition stores share one five-minute scheduler. The old
+      // five-second call only rate-limited returned tokens; an empty result
+      // still performed a full cadence-collection scan on every worker tick.
+      const rvmPoll = await runRvmDispositionPollIfDue({
+        workerState,
+        now: new Date(),
+        intervalMs: rvmDispositionPollIntervalMs,
+        logger: runtime.logger,
       });
+      counterRvmPollResult = rvmPoll?.counter || counterRvmPollResult;
+
+      // The intake service dispatches welcome SMS/email and creates the first
+      // call-queue row in-process. Pausing this general event drain on weekends
+      // prevents older follow-up/RVM work from leaking through that narrow
+      // exception; durable events remain queued for Monday.
+      const result = businessDay
+        ? await processOutboundEventBatch({
+            workerName: `${config.serviceName}-worker`,
+            maxAttempts,
+            maxCount: batchSize,
+          })
+        : { processed: 0, handled: 0, weekendPaused: true };
       workerState.lastCompletedAt = new Date();
       workerState.lastResult = {
         ...result,
@@ -851,5 +918,9 @@ if (require.main === module) {
 }
 
 module.exports = {
+  createWorkerState,
+  intervalDue,
+  isPacificBusinessDay,
+  runRvmDispositionPollIfDue,
   startServer,
 };

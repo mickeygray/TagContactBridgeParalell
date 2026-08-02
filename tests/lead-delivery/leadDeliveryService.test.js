@@ -27,6 +27,7 @@ const {
   fairnessTieBreaker,
   getPacificDateKey,
   getPacificHourKey,
+  isPacificBusinessDay,
   isPacificDeliveryWindowOpen,
   isFreshReservationProtected,
   isActiveAttemptState,
@@ -110,6 +111,8 @@ test("floor delivery window is 7:50 inclusive through 5:00 Pacific exclusive", (
   assert.equal(isPacificDeliveryWindowOpen("2026-07-13T14:50:00.000Z"), true);
   assert.equal(isPacificDeliveryWindowOpen("2026-07-13T23:59:59.000Z"), true);
   assert.equal(isPacificDeliveryWindowOpen("2026-07-14T00:00:00.000Z"), false);
+  assert.equal(isPacificBusinessDay("2026-08-02T16:00:00.000Z"), false);
+  assert.equal(isPacificDeliveryWindowOpen("2026-08-02T16:00:00.000Z"), false);
 });
 
 test("end-of-day folder drain is due at 5:30 Pacific across daylight offsets", () => {

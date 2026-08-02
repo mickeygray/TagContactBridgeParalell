@@ -1676,3 +1676,18 @@ pass. No PhoneBurner mutation or Windows service restart was performed.
 - Post-restart replay completed the previously stuck Brad and Chris Call Ends;
   all five durable Pool operation leases were clear, ticks advanced normally,
   and productivity remained enabled without an in-flight stall.
+# Phase 9 weekend compute boundary (2026-08-02)
+
+This ruling supersedes any earlier weekend pre-positioning language.
+
+- Saturday and Sunday are determined in `America/Los_Angeles`.
+- Weekend automation may accept a newly submitted lead, deliver only its
+  initial text/email, and durably enroll it for the next call queue.
+- Weekend automation must not run PhoneBurner scans/refills, provider posting,
+  productivity rebalancing, cadence sweeps, RVM disposition polling, scheduled
+  blasts, hourly reconciliation, reports, nightly close, Lexis drops, or
+  hygiene/recovery discovery.
+- A manual operator-forced action remains possible when explicitly requested;
+  scheduled runtimes may not infer that permission.
+- Monday resumes from durable state without replay bursts or duplicate first
+  contact.

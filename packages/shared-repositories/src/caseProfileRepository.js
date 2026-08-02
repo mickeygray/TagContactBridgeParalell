@@ -253,17 +253,21 @@ async function findCaseProfileByPhone(domain, phone) {
           .limit(1)
           .next()
       : Promise.resolve(null),
-    CaseProfile.find({
-      domain: normalizedDomain,
-      $or: [
-        { normalizedPhones: tenDigit },
-        { primaryPhone: new RegExp(tenDigit + "$") },
-      ],
-    })
-      .sort({ createdAt: -1, updatedAt: -1, _id: -1 })
-      .limit(1)
-      .lean()
-      .then((rows) => rows[0] || null),
+    (async () => {
+      // Keep the exact normalized lookup isolated so Mongo can use the
+      // (domain, normalizedPhones) index. Combining it with the legacy regex
+      // fallback made the planner scan every profile in the tenant.
+      const exact = await CaseProfile.findOne({
+        domain: normalizedDomain,
+        normalizedPhones: tenDigit,
+      })
+        .sort({ createdAt: -1, updatedAt: -1, _id: -1 })
+        .lean();
+      // normalizedPhones is the maintained union of the primary, alternate,
+      // and spouse numbers. Do not fall back to a suffix regex: on a miss it
+      // scans the tenant and was one of the repeat Atlas compute offenders.
+      return exact || null;
+    })(),
   ]);
 
   const normalizedLegacy = normalizeLegacyCaseProfile(legacyDoc);
