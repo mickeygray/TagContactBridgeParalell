@@ -2757,18 +2757,16 @@ async function startServer() {
     runtime.logger.warn("control-plane.cx_appointments.disabled");
   }
 
-  if (config.controlPlaneWorker?.enabled !== false) {
-    await startCxTerminalOutboxWorker({
-      runtime,
-      workerState: cxTerminalOutboxState,
-      wrapQueueEnabled,
-      wrapCards,
-      badNumberHandler,
-    });
-  } else {
-    cxTerminalOutboxState.enabled = false;
-    runtime.logger.warn("control-plane.cx_terminal_outbox.disabled");
-  }
+  // Retired from the live runtime: this legacy recovery loop scanned the
+  // terminal outbox and wrap-card collections every 15 seconds even when both
+  // were empty. Keep the implementation available for post-alpha deletion,
+  // but never schedule it in the control plane.
+  cxTerminalOutboxState.enabled = false;
+  cxTerminalOutboxState.lastResult = {
+    skipped: true,
+    reason: "retired-recurring-poller",
+  };
+  runtime.logger.warn("control-plane.cx_terminal_outbox.retired");
 
   if (config.controlPlaneWorker?.enabled !== false) {
     await startCxBoringWebhookActionWorker({
