@@ -1705,3 +1705,13 @@ This ruling supersedes any earlier weekend pre-positioning language.
 - Explicit LD routes and the established legacy-forwarder signal remain
   authoritative routing evidence. A gateway restart may discard transient
   pre-ping correlation but may not discard or replay an accepted full lead.
+
+Implementation evidence:
+
+- Before the repair, count-only live evidence observed 225 pre-ping TTL rows
+  written in five minutes while only two full cadence leads were created.
+- The bounded cache and injected intake-store contract passed 8/8 focused local
+  tests and 6/6 focused Linux tests; syntax checks passed.
+- After the targeted inbound-gateway restart, 34 real indexed duplicate checks
+  ran during a 30-second proof window with zero examined documents/keys and
+  zero new Mongo pre-ping writes. The gateway health endpoint returned 200.
