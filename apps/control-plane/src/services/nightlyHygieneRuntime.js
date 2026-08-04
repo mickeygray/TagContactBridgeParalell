@@ -858,6 +858,48 @@ const TASKS = [
       return `${p.dateKey || "?"}: review activity across ${(p.domains || []).length} domain(s)`;
     },
   },
+  {
+    // EVERY PROVIDER'S RECORDING LINKS, INTO ONE COLLECTION.
+    //
+    // Metadata is ours, media stays with the vendor — this stores locators, not
+    // audio. It is the successor to dumping recordings into Drive, which is the
+    // storage we are getting away from.
+    //
+    // Runs here rather than as its own timer for the same reason as costing: it
+    // is a data-layer build step that the morning's reads depend on, and a
+    // second clock is a second thing to fail.
+    key: "call-recording-index",
+    label: "Index every provider's recording links",
+    writesArmed: () => String(process.env.CALL_RECORDING_INDEX_ENABLED || "false").toLowerCase() === "true",
+    async plan({ logger }) {
+      const { gatherRecordingLinks } = require(
+        "../../../../packages/shared-services/src/callRecordingIndexService");
+      // plan() is a FULL dry run — every read, every verdict, no write. So the
+      // funnel printed on a dark box is exactly what arming it would do.
+      return [await gatherRecordingLinks({ dateKey: persistTargetDay(), apply: false, logger })];
+    },
+    async apply(planned, { logger }) {
+      const { gatherRecordingLinks } = require(
+        "../../../../packages/shared-services/src/callRecordingIndexService");
+      const p = planned[0] || {};
+      const r = await gatherRecordingLinks({ dateKey: p.dateKey, apply: true, logger });
+      return { written: r.written, skipped: r.kept - r.written, failed: r.errors.length, errors: r.errors.slice(0, 5) };
+    },
+    count(planned) {
+      return Number(planned[0]?.kept || 0);
+    },
+    describe(planned) {
+      const p = planned[0] || {};
+      // A source that could not be READ reports null, not zero — "we could not
+      // look" and "there was nothing" are different days.
+      const src = Object.entries(p.bySource || {})
+        .map(([k, v]) => `${k} ${v === null ? "UNREADABLE" : v}`).join(" · ");
+      return `${p.dateKey || "?"}: ${p.kept || 0} link(s) [${src}]`
+        + ` · ${p.significant || 0} significant · ${p.durable || 0} durable`
+        + (p.mintOnly ? ` · ${p.mintOnly} mint-on-read` : "")
+        + (p.unresolvedProvider ? ` · ${p.unresolvedProvider} UNRESOLVED PROVIDER` : "");
+    },
+  },
 ];
 
 // WHY THERE IS NO "cost-counts" TASK HERE.
