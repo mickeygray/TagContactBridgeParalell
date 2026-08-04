@@ -4718,7 +4718,7 @@ test("5:30 close retries a provider 429 and resumes a crash-after-delete intent"
   assert.equal(item.dailyAttemptCount, 0);
 });
 
-test("the first 7:50 next-day tick resumes a crash, releases old identity, and starts fresh", async () => {
+test("the first 7:50 next-business-day tick resumes a crash, releases old identity, and starts fresh", async () => {
   const h = harness({
     rows: [sourceRow(1)],
     actionsEnabled: true,
@@ -4747,7 +4747,7 @@ test("the first 7:50 next-day tick resumes a crash, releases old identity, and s
   );
 
   h.phoneBurner.deleteContact = realDelete;
-  h.setClock("2026-07-11T14:50:00.000Z");
+  h.setClock("2026-07-13T14:50:00.000Z");
   const tick = await h.runtime.tick();
   const recovered = await h.repository.getItemById(accepted._id);
 
@@ -4784,7 +4784,7 @@ test("a 7:50 next-morning restart catches up a missed close before starting new 
   // Model a service outage spanning the entire 5:30 close. The first next-day
   // tick must infer the missed close from the already-existing runtime owner,
   // drain before events/refill, and release the undialed item safely.
-  h.setClock("2026-07-11T14:50:00.000Z");
+  h.setClock("2026-07-13T14:50:00.000Z");
   const tick = await h.runtime.tick();
   const recovered = await h.repository.getItemById(accepted._id);
   const agent = await h.repository.getAgentById("bruce_allen");
@@ -4802,7 +4802,7 @@ test("a 7:50 next-morning restart catches up a missed close before starting new 
   assert.equal(agent.metadata.workingFolderDrain.status, "completed");
   assert.equal(agent.metadata.workingFolderDrain.dateKey, "2026-07-10");
   assert.equal(agent.metadata.simpleDayStart.status, "completed");
-  assert.equal(agent.metadata.simpleDayStart.dateKey, "2026-07-11");
+  assert.equal(agent.metadata.simpleDayStart.dateKey, "2026-07-13");
 });
 
 test("a late exact Call End after the 5:30 close counts once without reopening delivery", async () => {
