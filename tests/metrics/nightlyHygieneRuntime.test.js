@@ -442,3 +442,61 @@ test("every task is gated by its OWN switch", () => {
   const s2 = createNightlyHygieneRuntime({}).getState();
   assert.equal(new Set(s2.tasks.map((t) => t.key)).size, s2.tasks.length, "no duplicate task keys");
 });
+
+test("a chore that keeps failing is retried, then stepped past so the night finishes", async () => {
+  // The old behaviour aborted the pass on EVERY failure while a durable claim
+  // was held — so one flaky chore took every task behind it, every poll,
+  // forever. The new behaviour has to thread a needle: retry (because
+  // night-persist writes officerAtSale, which a live re-pull can never
+  // reconstruct, so a transient blip must not skip it) but bounded (because the
+  // 20:00 email needs the costing that sits behind it).
+  const originalFind = DailyLoopRun.findOneAndUpdate;
+  const originalUpdate = DailyLoopRun.updateOne;
+  const claimedAt = new Date("2026-08-04T03:00:00Z");
+  let cursor = 0;
+  DailyLoopRun.findOneAndUpdate = async () => ({
+    dateKey: "2026-08-03", nightlyHygieneClaimedAt: claimedAt, nightlyHygieneNextTaskIndex: cursor,
+  });
+  DailyLoopRun.updateOne = async (filter, update) => {
+    const next = update.$set?.nightlyHygieneNextTaskIndex;
+    if (typeof next === "number") cursor = next;
+    return { acknowledged: true, matchedCount: 1 };
+  };
+  try {
+    const rt = createNightlyHygieneRuntime({ config: { enabled: true, hour: 0 } });
+    let healthyRuns = 0;
+    rt.TASKS.length = 0;
+    rt.TASKS.push(
+      // Armed on purpose: an UNARMED task is skipped without planning
+      // ("write-disabled-no-discovery"), so its plan() would never throw and
+      // this test would pass without exercising anything.
+      { key: "flaky", label: "flaky", writesArmed: () => true,
+        plan: async () => { throw new Error("provider unavailable"); },
+        apply: async () => ({}), describe: () => "" },
+      { key: "healthy", label: "healthy", writesArmed: () => true,
+        plan: async () => { healthyRuns += 1; return [{ plan: [] }]; },
+        apply: async () => ({}), describe: () => "ok" },
+    );
+
+    // Polls 1 and 2: the flaky task is retried in place, cursor does not move,
+    // and the healthy task behind it has not run yet.
+    for (const attempt of [1, 2]) {
+      const r = await rt.runOnce({ at: claimedAt });
+      assert.equal(r.retrying, "flaky", `poll ${attempt} should still be retrying`);
+      assert.equal(r.attempt, attempt);
+      assert.equal(cursor, 0, "the cursor stays on the failing task while retries remain");
+      assert.equal(healthyRuns, 0, "downstream work waits during the retry window");
+    }
+
+    // Poll 3 exhausts the attempts: the pass steps past the flaky chore and the
+    // rest of the night finally runs.
+    const final = await rt.runOnce({ at: claimedAt });
+    assert.equal(final.retrying, undefined, "no longer retrying once attempts are spent");
+    assert.equal(healthyRuns, 1, "the healthy task runs after the flaky one is abandoned");
+    assert.equal(final.tasks[0].skippedAfterAttempts, 3, "the skip is recorded, not silent");
+    assert.match(final.tasks[0].error, /provider unavailable/);
+  } finally {
+    DailyLoopRun.findOneAndUpdate = originalFind;
+    DailyLoopRun.updateOne = originalUpdate;
+  }
+});

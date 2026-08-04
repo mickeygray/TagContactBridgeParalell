@@ -45,6 +45,26 @@ const DEFAULT_POLL_MS = 5 * 60 * 1000;
 const LEGACY_QUEUE_ROLLUP_WRITES_ENABLED = false;
 const HYGIENE_CLAIM_LEASE_MS = 45 * 60 * 1000;
 
+// Distinguishes "another pass took this day" from "this chore threw". They land
+// in the same catch and need opposite answers: a lost cursor must abort, because
+// continuing would let two passes write the same night; a failed chore must not,
+// because that is the whole promise of a task registry.
+const CURSOR_LOST = "durable-cursor-lost";
+const cursorLost = () => Object.assign(
+  new Error("nightly hygiene durable cursor was lost"), { code: CURSOR_LOST },
+);
+
+// How many polls one chore may burn before the pass steps past it. Three, with a
+// five-minute poll, is ~15 minutes of retrying — enough to ride out a provider
+// blip, short enough that the rest of the night still runs. In memory on
+// purpose: a restart SHOULD grant fresh attempts, because a restart is itself a
+// plausible cause of the failure.
+//
+// The COUNTER itself lives per runtime instance, not here. Module scope would
+// share it between instances — the same mistake the TASKS array made and was
+// fixed for — and would grow a key per task per day forever.
+const MAX_TASK_ATTEMPTS = Math.max(1, Number(process.env.NIGHTLY_HYGIENE_MAX_TASK_ATTEMPTS) || 3);
+
 async function claimNightlyHygiene(dateKey, at = new Date()) {
   const leaseCutoff = new Date(at.getTime() - HYGIENE_CLAIM_LEASE_MS);
   try {
@@ -880,6 +900,19 @@ function createNightlyHygieneRuntime({ config = {}, runtime = {} } = {}) {
     activityReviewRuntime: config.activityReviewRuntime || runtime.activityReviewRuntime || null,
   };
 
+  // Per-instance retry counter, keyed `${dateKey}:${taskIndex}`. Pruned to the
+  // current day on each pass so it cannot grow unbounded across nights.
+  const taskAttempts = new Map();
+  const countAttempt = (dateKey, taskIndex) => {
+    for (const key of taskAttempts.keys()) {
+      if (!key.startsWith(`${dateKey}:`)) taskAttempts.delete(key);
+    }
+    const key = `${dateKey}:${taskIndex}`;
+    const next = (taskAttempts.get(key) || 0) + 1;
+    taskAttempts.set(key, next);
+    return next;
+  };
+
   const state = {
     enabled: config.enabled === true || String(process.env.NIGHTLY_HYGIENE_ENABLED) === "true",
     hour: Math.min(23, Math.max(0, Number(config.hour ?? process.env.NIGHTLY_HYGIENE_HOUR ?? DEFAULT_HOUR))),
@@ -979,28 +1012,92 @@ function createNightlyHygieneRuntime({ config = {}, runtime = {} } = {}) {
           });
           if (durableClaim && !await advanceNightlyHygiene(
             today, durableClaim.claimedAt, taskIndex + 1, durableCounts(),
-          )) throw new Error("nightly hygiene durable cursor was lost");
+          )) throw cursorLost();
           log?.info?.("nightly_hygiene.task", {
             task: task.key, planned: plannedCount, written: applied?.written ?? 0, dryRun: !armed,
           });
         } catch (error) {
           // One chore failing must never cost the others their night.
+          //
+          // It used to. Until 2026-08-04 this block released the claim and
+          // RETURNED whenever a durable claim was held — i.e. on every live
+          // pass — so a single failing task skipped every task after it. The
+          // comment above has always said otherwise. With more work folded into
+          // this chain that was no longer a small lie: spend-sync and
+          // activity-review sit behind mail-invoice, which is documented as the
+          // task most able to stall, and the poll is five minutes, so from 19:50
+          // there were at most two retries before the 20:00 email.
           results.push({ task: task.key, label: task.label, error: String(error.message).slice(0, 240) });
           log?.error?.("nightly_hygiene.task_failed", { task: task.key, error: String(error.message) });
-          if (durableClaim) {
-            await releaseNightlyHygiene(today, durableClaim.claimedAt, error?.code || error?.name || "task-failed");
-            state.lastError = String(error.message).slice(0, 300);
+          state.lastError = String(error.message).slice(0, 300);
+
+          // A LOST CURSOR IS NOT A TASK FAILURE. It means another pass re-claimed
+          // the day (the lease expired, or two boxes are running). Continuing
+          // would let two passes write the same night. That one still aborts.
+          if (error?.code === CURSOR_LOST) {
+            await releaseNightlyHygiene(today, durableClaim.claimedAt, CURSOR_LOST);
             state.lastRunAt = new Date().toISOString();
             state.lastResult = {
-              at: state.lastRunAt,
-              day: today,
-              durationMs: Date.now() - started,
-              incomplete: true,
-              nextTaskIndex: taskIndex,
-              tasks: results,
+              at: state.lastRunAt, day: today, durationMs: Date.now() - started,
+              incomplete: true, aborted: CURSOR_LOST, nextTaskIndex: taskIndex, tasks: results,
             };
             return state.lastResult;
           }
+
+          // ORDINARY TASK FAILURE — retry it, but a bounded number of times.
+          //
+          // Neither extreme is right here, and both were considered:
+          //
+          //  · Abort every time (the old behaviour) means one flaky network call
+          //    costs every task behind it. With five minutes between polls and a
+          //    19:50 start, a task that keeps failing takes the whole night's
+          //    downstream work with it — including the costing the 20:00 email
+          //    reports.
+          //  · Skip on the first failure is worse in a quieter way. night-persist
+          //    is task 1 and writes officerAtSale/sourceAtSale, which a live
+          //    re-pull can NEVER reconstruct — Logics returns who owns the case
+          //    today, not who closed it in July. Skipping it on a transient blip
+          //    loses that day's attribution permanently.
+          //
+          // So: leave the cursor where it is and let the next poll retry the same
+          // task, exactly as before — until it has had MAX_TASK_ATTEMPTS goes,
+          // after which step past it so the rest of the night is not held hostage
+          // by one chore. The skip is recorded, never silent.
+          const attempts = countAttempt(today, taskIndex);
+          const giveUp = attempts >= MAX_TASK_ATTEMPTS;
+
+          const cursorHeld = !durableClaim || await advanceNightlyHygiene(
+            today, durableClaim.claimedAt, giveUp ? taskIndex + 1 : taskIndex, durableCounts(),
+          );
+          if (!cursorHeld) {
+            await releaseNightlyHygiene(today, durableClaim.claimedAt, CURSOR_LOST);
+            state.lastRunAt = new Date().toISOString();
+            state.lastResult = {
+              at: state.lastRunAt, day: today, durationMs: Date.now() - started,
+              incomplete: true, aborted: CURSOR_LOST, nextTaskIndex: taskIndex, tasks: results,
+            };
+            return state.lastResult;
+          }
+          // Only a CLAIMED pass can retry, because only it has a next poll to
+          // retry on. A forced/unclaimed run (a manual runOnce, a test) has no
+          // second chance, so it carries on to the remaining tasks instead of
+          // returning — otherwise asking for a one-off run would silently do
+          // less work than the scheduled one.
+          if (!giveUp && durableClaim) {
+            // Hand the day back so the next poll can re-claim and retry HERE.
+            await releaseNightlyHygiene(today, durableClaim.claimedAt, error?.code || error?.name || "task-failed");
+            state.lastRunAt = new Date().toISOString();
+            state.lastResult = {
+              at: state.lastRunAt, day: today, durationMs: Date.now() - started,
+              incomplete: true, retrying: task.key, attempt: attempts,
+              nextTaskIndex: taskIndex, tasks: results,
+            };
+            return state.lastResult;
+          }
+          results[results.length - 1].skippedAfterAttempts = attempts;
+          log?.error?.("nightly_hygiene.task_abandoned", {
+            task: task.key, attempts, note: "stepping past so the rest of the night can run",
+          });
         }
       }
       state.totals.passes += 1;
