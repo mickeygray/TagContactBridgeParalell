@@ -7,7 +7,10 @@ const assert = require("node:assert/strict");
 
 const { buildDailyEntry } = require("../../packages/shared-services/src/dailyEntryService");
 
-const fakeModel = (captured) => ({
+// `existingFacts` is what the day already holds — the worker reads it to honour
+// the write-once rule before deciding what to set.
+const fakeModel = (captured, existingFacts = {}) => ({
+  findOne: () => ({ select: () => ({ lean: async () => ({ facts: existingFacts }) }) }),
   findOneAndUpdate: async (filter, update, opts) => {
     captured.push({ filter, update, opts });
     return { revision: 1 };
@@ -103,4 +106,55 @@ test("every section is SANITIZED — the entry is statistics, not a customer sto
     "a per-day ratio must be recomputed by a longer report, never averaged");
   assert.equal(r.facts.calls.links, 73);
   assert.ok(!("phone" in r.facts.calls), "no phone numbers, ever");
+});
+
+test("once the day's spend is set, the day is set", async () => {
+  // Mickey 2026-08-04: "reading the sheet should only read the day, and once the
+  // day is set the day is set — we don't add mail spend to the day more than
+  // once." The mail sheet keeps growing after a day closes, so a later read is
+  // not a better read: 2026-08-03 was reported at $1,584.48 by the email and
+  // read $2,193.96 from the sheet a day later.
+  const writes = [];
+  const model = {
+    findOne: () => ({ select: () => ({ lean: async () => ({ facts: { spend: { total: 1584.48 } } }) }) }),
+    findOneAndUpdate: async (f, u) => { writes.push(u); return { revision: 2 }; },
+  };
+  const r = await buildDailyEntry({
+    dateKey: "2026-08-03", apply: true, Model: model,
+    gatherers: {
+      spend: async () => ({ total: 2193.96 }),
+      calls: async () => ({ links: 12 }),
+    },
+  });
+  assert.deepEqual(r.preserved, ["spend"], "the stored day is reported as kept");
+  assert.ok(!("facts.spend" in writes[0].$set), "spend must not be rewritten");
+  assert.equal(writes[0].$set["facts.calls"].links, 12, "other sections still update");
+});
+
+test("a day with no spend yet accepts one", async () => {
+  const writes = [];
+  const model = {
+    findOne: () => ({ select: () => ({ lean: async () => ({ facts: {} }) }) }),
+    findOneAndUpdate: async (f, u) => { writes.push(u); return { revision: 1 }; },
+  };
+  const r = await buildDailyEntry({
+    dateKey: "2026-08-03", apply: true, Model: model,
+    gatherers: { spend: async () => ({ total: 1584.48 }) },
+  });
+  assert.deepEqual(r.preserved, []);
+  assert.equal(writes[0].$set["facts.spend"].total, 1584.48);
+});
+
+test("a frozen section can be corrected DELIBERATELY, never by accident", async () => {
+  const writes = [];
+  const model = {
+    findOne: () => ({ select: () => ({ lean: async () => ({ facts: { spend: { total: 1 } } }) }) }),
+    findOneAndUpdate: async (f, u) => { writes.push(u); return { revision: 3 }; },
+  };
+  const r = await buildDailyEntry({
+    dateKey: "2026-08-03", apply: true, Model: model, overwrite: ["spend"],
+    gatherers: { spend: async () => ({ total: 2193.96 }) },
+  });
+  assert.deepEqual(r.preserved, [], "nothing preserved when the caller asked to overwrite");
+  assert.equal(writes[0].$set["facts.spend"].total, 2193.96);
 });

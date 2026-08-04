@@ -36,6 +36,23 @@ const { sanitizeFactValue } = require("./dailyReportFactService");
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
+// ── ONCE THE DAY IS SET, THE DAY IS SET ─────────────────────────────────────
+//
+// Mickey 2026-08-04: "reading the sheet should only read the day, and once the
+// day is set the day is set — we don't add mail spend to the day more than
+// once."
+//
+// Spend is the section where a later read is not a better read. The mail sheet
+// keeps growing after a day closes, so re-running a past day would quietly
+// restate what it cost: 2026-08-03 was reported at $1,584.48 by the email and
+// read $2,193.96 from the sheet a day later. Whichever is right, a completed
+// day's cost must not drift every time somebody re-runs the worker, or no
+// report ever reconciles against another.
+//
+// Not immutable — CORRECTABLE. `overwrite: ["spend"]` re-sets it deliberately.
+// The rule is that drift must be an act, not a side effect.
+const WRITE_ONCE = Object.freeze(["spend"]);
+
 /**
  * Run one gatherer into its section without letting it cost the others.
  * Sequential on purpose — these hit Logics, CallRail and Mongo, and the point of
@@ -78,6 +95,9 @@ async function buildDailyEntry({
   dateKey,
   gatherers = {},
   apply = false,
+  // Sections to re-set even though they are write-once. Deliberate correction
+  // of a day, never a default.
+  overwrite = [],
   Model = DailyReportFact,
   logger = null,
 } = {}) {
@@ -85,7 +105,9 @@ async function buildDailyEntry({
     throw new Error(`buildDailyEntry: dateKey must be YYYY-MM-DD, got ${dateKey}`);
   }
 
-  const out = { dateKey, facts: {}, errors: [], posted: false, revision: null };
+  const out = {
+    dateKey, facts: {}, errors: [], posted: false, revision: null, preserved: [],
+  };
 
   // Order matters only in that it is stable and reportable. Nothing here
   // depends on an earlier section's output — if that ever changes, say so
@@ -113,8 +135,25 @@ async function buildDailyEntry({
   // $set of the assembled facts only: `coverage`, `emailAcceptedAt` and the
   // rest belong to the report path and must not be clobbered by a worker that
   // knows nothing about them.
+  // WRITE-ONCE SECTIONS. Read what the day already holds before deciding what
+  // to set. A spend figure that is already recorded stays recorded — the sheet
+  // grows after a day closes, and a completed day's cost must not drift because
+  // somebody re-ran the worker.
+  const existing = await Model.findOne({ dateKey }).select("facts").lean();
+  const forced = new Set(overwrite);
+
   const setFacts = {};
-  for (const [k, v] of Object.entries(out.facts)) setFacts[`facts.${k}`] = v;
+  for (const [k, v] of Object.entries(out.facts)) {
+    const alreadySet = existing?.facts?.[k] != null;
+    if (WRITE_ONCE.includes(k) && alreadySet && !forced.has(k)) {
+      // Keep the stored value AND report it, so a run never quietly disagrees
+      // with what it wrote. The caller sees what it gathered in out.facts and
+      // what the day kept in out.preserved.
+      out.preserved.push(k);
+      continue;
+    }
+    setFacts[`facts.${k}`] = v;
+  }
 
   const res = await Model.findOneAndUpdate(
     { dateKey },
@@ -137,7 +176,10 @@ async function buildDailyEntry({
   out.posted = true;
   out.revision = res?.revision ?? null;
   logger?.info?.("daily_entry.posted", {
-    dateKey, sections: out.sectionsGathered.length, errors: out.errors.length,
+    dateKey,
+    sections: out.sectionsGathered.length,
+    preserved: out.preserved.length,
+    errors: out.errors.length,
   });
   return out;
 }
