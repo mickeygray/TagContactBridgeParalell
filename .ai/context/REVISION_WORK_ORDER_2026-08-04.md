@@ -339,6 +339,44 @@ Build (1) first and read it for a day or two. (2) follows from it.
 
 ### 5c. EVENING — one discrete pass, one gather
 
+**VERIFIED 2026-08-04. `nightlyClose` is NOT the 8pm report.**
+
+- The 8pm email is `reportScheduleRuntime`, which holds no schedule of its own —
+  it asks `dueDefinitions()` what is due and runs it. The schedule lives on
+  each `ReportDefinition` row under **`schedule.enabled` / `schedule.hour`**
+  (note: there is no top-level `enabled` field; querying one reports every
+  definition as off).
+- `nightlyClose` fires at **21:30** — `NIGHTLY_CLOSE_HOUR=21`,
+  `NIGHTLY_CLOSE_MINUTE=30`. Separate thing, ninety minutes later.
+
+**Four definitions are enabled, all at 20:00 — so four emails go out, not two:**
+
+```
+ON  vendor roll up with calls      20:00   last Aug 03 16:56
+ON  financial roll up with calls   20:00   last Aug 04 08:10
+ON  vendor                         20:00   last Aug 03 20:00
+ON  financial                      20:00   last Aug 03 20:00
+```
+
+The duplicate pair is confirmed live and firing. Archive plain `vendor` and
+`financial` **in Mongo**. **Never rename "financial roll up with calls"** —
+`dailyReportFactService.js:9` pins to it by name.
+
+**The night inventory to collapse into ONE service:**
+
+| Time | Thing | Fate |
+| --- | --- | --- |
+| 19:45 | `spendSync` | fold in as a step |
+| 19:50 | `nightlyHygiene` (night-persist, mail-invoice, mail-spend-derive, call-links, queue-rollup, logics-source) | fold in as steps |
+| 20:00 | `reportSchedule` → 4 definitions | becomes the LAST step |
+| 20:00 | `logicsActivityReview` | fold in or drop |
+| 21:30 | `nightlyClose` | operational half folds in; email half already silenced |
+| 23:00 | `recordingArchive` EOD | replaced by call-link capture (§7) |
+| **02:00** | **`lexisDailyDrop`** | **STAYS SEPARATE — Mickey's explicit exception** |
+
+Five separate timers between 19:45 and 23:00 become one pass. Lexis at 02:00 is
+the only other night job that survives on its own clock.
+
 Settled with Mickey. Order is load-bearing:
 
 ```
