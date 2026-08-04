@@ -83,6 +83,31 @@ async function readSpend(dateKey) {
   const sheetRows = await SpendEntry.find({ date: dateKey, active: { $ne: false } })
     .select("date channel source spend cost pieces leadsReported").lean();
 
+  // ── THE SAME LIVE-SHEET FALLBACK THE COMPOSER USES ───────────────────────
+  //
+  // Without this the two paths DISAGREE ON MONEY for the same day: on
+  // 2026-08-03 this board reported mail $0.00 with "last recorded 2026-07-30,
+  // 4 days stale" while the composer reported $1,584.48. Two reporting paths
+  // quoting different numbers is worse than either being wrong alone, because
+  // neither can then be trusted and nothing on the page says which is right.
+  //
+  // Same precedence as the composer: the live CSV is the sheet read NOW, so it
+  // replaces the cached SpendEntry rows for any day it covers. The invoice
+  // still outranks both, in partitionMailSpend below.
+  try {
+    const { readMailSheetCsv } = require("./mailSheetCsvService");
+    const csv = await readMailSheetCsv({ from: dateKey, to: dateKey });
+    if (!csv.unavailable && csv.rows.length) {
+      const csvDays = new Set(csv.rows.map((r) => r.date));
+      for (let i = sheetRows.length - 1; i >= 0; i -= 1) {
+        const r = sheetRows[i];
+        if (String(r.channel || "").toLowerCase() !== "mailer") continue;
+        if (csvDays.has(String(r.date || "").slice(0, 10))) sheetRows.splice(i, 1);
+      }
+      sheetRows.push(...csv.rows);
+    }
+  } catch { /* a hand-run board must not die on an unreachable sheet */ }
+
   // ── THE SAME MAIL MERGE THE COMPOSER DOES ────────────────────────────────
   //
   // This is the SECOND reporting path. reportComposerService merges the

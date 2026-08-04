@@ -45,6 +45,13 @@ function withStubs(run) {
     // the merge. The stub still has to exist: an unstubbed model buffers
     // against a database this suite never connects to.
     "MailSpendDay": { find: () => ({ select: () => ({ lean: async () => [] }) }) },
+    // The live-sheet fallback must be stubbed or this suite makes a REAL
+    // network fetch to the vendor's CSV — 14s per case, and its rows would
+    // displace the fixture's mail spend, which is what these tests measure.
+    // Empty here: the fixtures are about THE TENANT RULE, not the sheet.
+    "mailSheetCsvService": {
+      readMailSheetCsv: async () => ({ rows: [], days: [], unavailable: null }),
+    },
     // LD spend is DERIVED from lead receipts now, not read off the sheet, so
     // the lead-data fixture row above no longer supplies its dollars. 169
     // leads x $3 = $507 keeps the arithmetic below identical to when the

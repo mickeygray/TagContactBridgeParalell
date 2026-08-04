@@ -127,7 +127,10 @@ test("two lines naming the SAME source fold into one row", () => {
 });
 
 test("re-deriving the same file is a no-op, not a duplicate", async () => {
-  const f = fakeModels({ existing: [{ fileSha256: "sha-a" }] });
+  // invoiceNumber is required on a real row. The retire is now SCOPED to the
+  // invoice that owns the rows — clearing the whole day is what silently wiped
+  // a second invoice billing the same drop day.
+  const f = fakeModels({ existing: [{ fileSha256: "sha-a", invoiceNumber: "83648" }] });
   const r = await deriveMailSpend({ from: "2026-07-01", to: "2026-07-31", apply: true, models: f.models });
   assert.equal(r.skipped, 1);
   assert.equal(r.derived, 0);
@@ -138,12 +141,12 @@ test("re-deriving the same file is a no-op, not a duplicate", async () => {
 test("a CORRECTED invoice retires the old rows before writing new ones", async () => {
   // Retire-then-insert, never edit. A corrected bill is a new event, and the
   // unique partial index makes the reverse order fail outright.
-  const f = fakeModels({ existing: [{ fileSha256: "sha-OLD" }] });
+  const f = fakeModels({ existing: [{ fileSha256: "sha-OLD", invoiceNumber: "83648" }] });
   const r = await deriveMailSpend({ from: "2026-07-01", to: "2026-07-31", apply: true, models: f.models });
   assert.equal(r.derived, 1);
   assert.equal(f.calls.retired.length, 1);
   assert.equal(f.calls.retired[0].update.$set.active, false);
-  assert.match(f.calls.retired[0].update.$set.retiredReason, /superseded-by-83648/);
+  assert.match(f.calls.retired[0].update.$set.retiredReason, /reissued-83648/);
   assert.equal(f.calls.inserted.length, 2);
 });
 
@@ -167,4 +170,42 @@ test("every derived row carries the PDF it came from", async () => {
     assert.equal(row.channel, "mailer");
     assert.ok(row.derivationRunId);
   }
+});
+
+test("a SECOND invoice for the same day does not wipe the first", async () => {
+  // The retire used to clear the whole serviceDate, so $1,000 + $600 settled at
+  // $600 forever while the run reported derived:2, retired:2 and looked
+  // healthy. A drop split across two billing runs is real money on both.
+  const second = {
+    ...INVOICE, _id: "inv2", invoiceNumber: "99999", fileSha256: "sha-b",
+    grandTotal: 600,
+    perPiece: [{ source: "TAG C", pieces: 300, postage: 500, service: 100, feeShare: 0, total: 600 }],
+  };
+  const f = fakeModels({
+    invoices: [second],
+    existing: [{ fileSha256: "sha-a", invoiceNumber: "83648", source: "TAG A" }],
+  });
+  await deriveMailSpend({ from: "2026-07-01", to: "2026-07-31", apply: true, models: f.models });
+  assert.equal(f.calls.retired.length, 0, "the OTHER invoice's rows must not be retired");
+  assert.equal(f.calls.inserted.length, 1);
+  assert.equal(f.calls.inserted[0].invoiceNumber, "99999");
+});
+
+test("two invoices claiming the SAME piece on one day is HELD, not silently merged", async () => {
+  // The unique index is (domain, serviceDate, source), so this cannot be
+  // stored. Which invoice is right needs a human — fail loudly and leave the
+  // existing row intact rather than dropping either side.
+  const clashing = {
+    ...INVOICE, _id: "inv3", invoiceNumber: "77777", fileSha256: "sha-c",
+    grandTotal: 610,
+    perPiece: [{ source: "TAG A", pieces: 800, postage: 500, service: 100, feeShare: 10, total: 610 }],
+  };
+  const f = fakeModels({
+    invoices: [clashing],
+    existing: [{ fileSha256: "sha-a", invoiceNumber: "83648", source: "TAG A" }],
+  });
+  const r = await deriveMailSpend({ from: "2026-07-01", to: "2026-07-31", apply: true, models: f.models });
+  assert.equal(f.calls.inserted.length, 0, "nothing is written into a conflict");
+  assert.match(r.held[0].reason, /source-conflict-with-83648/);
+  assert.match(r.held[0].reason, /TAG A/);
 });

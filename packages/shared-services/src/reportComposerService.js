@@ -400,21 +400,51 @@ async function gatherMaterial({
         const { readMailSheetCsv } = require("./mailSheetCsvService");
         const csv = await readMailSheetCsv({ from, to });
         if (csv.unavailable) {
-          // "they did not update it" and "we could not fetch it" are different
-          // problems with different fixes, and must never render the same.
-          // Only worth saying when a day actually lacks mail — a fully covered
-          // range does not need the fallback and should not raise an amber.
-          const covered = csv.days.length === 0 && persistedMailDays.size > 0;
-          if (!covered) advise(`mail sheet not read — ${csv.unavailable}`);
+          // ALWAYS say it. The previous test — "no CSV days AND something is
+          // persisted" — degenerated when the sheet was unreachable, because
+          // csv.days is then always empty: any range containing ONE persisted
+          // day silenced the warning entirely. Measured with the sheet 401ing
+          // over 07-27..08-03: mail reported $12,628.89 against a true
+          // $14,213.37, with no note, no advisory and no failure. The warning
+          // vanished precisely when it mattered most.
+          advise(`mail sheet not read — ${csv.unavailable}`);
         } else {
-          // A day already persisted is the SAME sheet; adding it again would
-          // double the day. Invoices are handled later — partitionMailSpend
-          // displaces whatever the sheet said on any day an invoice covers.
-          const fresh = csv.rows.filter((r) => !persistedMailDays.has(r.date));
-          if (fresh.length) {
-            sheetRows.push(...fresh);
-            const days = [...new Set(fresh.map((r) => r.date))].sort();
-            notes.push(`mail spend read live from the sheet for ${days.join(", ")} — no persisted rows for those days`);
+          // THE CSV IS THE SHEET, READ NOW. SpendEntry is a CACHED COPY of the
+          // same sheet, written by a sync that has been stopped since
+          // 2026-07-30 — so where the two disagree the live read is the newer
+          // truth, and a day the sync only half-finished must not be frozen
+          // partial.
+          //
+          // Gating on "does this day have ANY persisted row" did exactly that:
+          // with one of 08-03's three jobs persisted, the day reported $537.46
+          // instead of $1,584.48 and said nothing. That is live-reachable
+          // right now, because the sync stopped mid-flight.
+          //
+          // So a day the CSV covers is taken FROM the CSV, and its persisted
+          // rows are dropped rather than merged. Invoices still outrank both —
+          // partitionMailSpend displaces whatever the sheet said on any day an
+          // invoice covers.
+          const csvDays = new Set(csv.rows.map((r) => r.date));
+          const displaced = [];
+          for (let i = sheetRows.length - 1; i >= 0; i -= 1) {
+            const r = sheetRows[i];
+            if (String(r.channel || "").toLowerCase() !== "mailer") continue;
+            if (!csvDays.has(String(r.date || "").slice(0, 10))) continue;
+            displaced.push(sheetRows[i]);
+            sheetRows.splice(i, 1);
+          }
+          if (csv.rows.length) {
+            sheetRows.push(...csv.rows);
+            const days = [...csvDays].sort();
+            notes.push(displaced.length
+              ? `mail spend read live from the sheet for ${days.join(", ")} — ${displaced.length} stale persisted row(s) replaced`
+              : `mail spend read live from the sheet for ${days.join(", ")}`);
+          }
+          // A day with persisted rows the live sheet no longer shows is a
+          // finding, not a tidy-up: the vendor removed or moved a drop.
+          const orphanDays = [...persistedMailDays].filter((d) => !csvDays.has(d) && d >= from && d <= to);
+          if (orphanDays.length && csv.rows.length) {
+            notes.push(`${orphanDays.length} day(s) have persisted mail rows the live sheet no longer lists: ${orphanDays.sort().join(", ")}`);
           }
         }
       } catch (error) {
@@ -448,8 +478,18 @@ async function gatherMaterial({
 
     if (supersededSheetRows.length) {
       const sheetTotal = round2(supersededSheetRows.reduce((s, r) => s + Number(r.spend || 0), 0));
+      // Compare LIKE FOR LIKE: only the invoice money for the days whose sheet
+      // rows were actually set aside. `invoiceDays` lives inside
+      // partitionMailSpend and was referenced here after that extraction — a
+      // ReferenceError that killed the WHOLE gather, and with it the 8pm
+      // email, on any day carrying both an invoice and sheet rows. It never
+      // fired only because the single invoice we hold (07-31) landed on the
+      // one business day the sheet skipped.
+      const supersededDays = new Set(
+        supersededSheetRows.map((r) => String(r.date || "").slice(0, 10)).filter(Boolean),
+      );
       const invoiceTotal = round2(derivedMail
-        .filter((r) => invoiceDays.has(r.serviceDate))
+        .filter((r) => supersededDays.has(String(r.serviceDate || "").slice(0, 10)))
         .reduce((s, r) => s + Number(r.spend || 0), 0));
       material.mailSheetSpend = sheetTotal;
       if (Math.abs(sheetTotal - invoiceTotal) >= 0.01) {

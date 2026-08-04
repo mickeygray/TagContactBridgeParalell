@@ -172,12 +172,25 @@ async function deriveMailSpend({
       continue;
     }
 
+    // Rows THIS INVOICE owns, not every row on the day.
+    //
+    // The retire below used to clear the whole serviceDate, so a SECOND
+    // invoice billing the same drop day silently wiped the first: $1,000 +
+    // $600 settled at $600 forever while the run reported derived:2,
+    // retired:2 and looked healthy. Two invoices for one day is real — a drop
+    // split across two billing runs — and must add, not replace.
+    //
+    // A RE-ISSUE (same number, new file hash) still replaces, because that is
+    // the same money restated.
     const existing = await SpendDay.find({
       domain: "TAG", serviceDate: invoice.serviceDate, active: true,
-    }).select({ fileSha256: 1 }).lean();
+    }).select({ fileSha256: 1, invoiceNumber: 1, source: 1 }).lean();
+
+    const mine = existing.filter((r) => r.invoiceNumber === invoice.invoiceNumber);
+    const theirs = existing.filter((r) => r.invoiceNumber !== invoice.invoiceNumber);
 
     // Already derived from this exact file. Not a hold — a no-op.
-    if (existing.length && existing.every((r) => r.fileSha256 === invoice.fileSha256)) {
+    if (mine.length && mine.every((r) => r.fileSha256 === invoice.fileSha256)) {
       out.skipped += 1;
       continue;
     }
@@ -190,18 +203,40 @@ async function deriveMailSpend({
     // Retire THEN insert. The unique partial index makes the reverse order
     // fail, which is the point: it is not possible to end up with two active
     // row sets for one day.
-    if (existing.length) {
+    if (mine.length) {
       const res = await SpendDay.updateMany(
-        { domain: "TAG", serviceDate: invoice.serviceDate, active: true },
+        {
+          domain: "TAG", serviceDate: invoice.serviceDate, active: true,
+          // SCOPED to this invoice. Clearing the whole day is what lost the
+          // other invoice's money.
+          invoiceNumber: invoice.invoiceNumber,
+        },
         {
           $set: {
             active: false,
             retiredAt: new Date(),
-            retiredReason: `superseded-by-${invoice.invoiceNumber}`.slice(0, 200),
+            retiredReason: `reissued-${invoice.invoiceNumber}`.slice(0, 200),
           },
         },
       );
       out.retired += res.modifiedCount || 0;
+    }
+
+    // The unique index is (domain, serviceDate, source) on active rows, so a
+    // second invoice naming a source the first already billed CANNOT be
+    // stored. That is a real conflict, not a bug to route around: two invoices
+    // claiming the same piece on the same day need a human to say which is
+    // right. Fail LOUDLY and leave the existing row intact rather than
+    // silently dropping either side.
+    const clash = rows.filter((r) => theirs.some((t) => t.source === r.source));
+    if (clash.length) {
+      const others = [...new Set(theirs.map((t) => t.invoiceNumber))].join(", ");
+      out.held.push({
+        invoiceNumber: invoice.invoiceNumber,
+        serviceDate: invoice.serviceDate,
+        reason: `source-conflict-with-${others} on ${clash.map((c) => c.source).join("; ")}`,
+      });
+      continue;
     }
 
     await SpendDay.insertMany(rows, { ordered: true });
