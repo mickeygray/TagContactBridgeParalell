@@ -29,8 +29,17 @@
 //   playbackUrl  a URL that works on its own. Null for RingCentral, always.
 //   providerRef  the id to mint from. The only thing RC rows carry.
 //
-// A row with neither is not "a call without a recording" — it should not exist.
-// Rows are only written for calls that HAVE one.
+// A row with neither should not exist. Mickey 2026-08-04: "it's all the
+// SIGNIFICANT links ... a REFINED collection of all the links."
+//
+// So this is not a second copy of CallLog with a URL column. It is curated: a
+// row earns its place by being a call somebody would actually want to pull up
+// later. 816 PhoneBurner dials landed on 2026-08-04 alone — indexing all of them
+// buys a haystack, and the point of the collection is that the needle is
+// already in hand.
+//
+// `significance` records WHY a call was kept, so the bar can be re-tuned later
+// without re-deriving it, and so "why isn't this call in here" has an answer.
 //
 // ── PLATFORM NAMING, WHICH HAS ALREADY COST TIME ─────────────────────────────
 //
@@ -83,6 +92,14 @@ const callRecordingIndexSchema = new mongoose.Schema(
     playbackUrl: { type: String, default: null },
     // The id a signed URL is minted from at read time. RingCentral only.
     providerRef: { type: String, default: null },
+
+    // ── why this call was kept ──────────────────────────────────────────────
+    // Reuses the vocabulary nightRecordingsService already uses to pick notable
+    // calls — LONG (over ten minutes), DEAL (tied to a sale), POSTDATE — rather
+    // than inventing a second idea of "worth hearing" that would drift from the
+    // one the nightly email applies. Empty means the call did not qualify and
+    // no row should have been written.
+    significance: { type: [String], default: [], index: true },
 
     // ── exclusion, enforced HERE ────────────────────────────────────────────
     // Today an excluded agent's recording is kept out by never being
