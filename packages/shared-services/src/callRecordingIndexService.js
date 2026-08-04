@@ -326,6 +326,9 @@ async function readCallLogProviders(dateKey, { CallLog }) {
  */
 async function gatherRecordingLinks({
   dateKey, apply = false, models = {}, logger = null, notableByPhone = new Map(),
+  // Injected so a test can observe the attach without a snapshot, and so the
+  // index stays usable standalone. Defaults to the real writer.
+  attachCallFacts = require("./dailyReportFactService").attachDailyCallFacts,
 } = {}) {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(String(dateKey || ""))) {
     throw new Error(`gatherRecordingLinks: bad dateKey ${dateKey}`);
@@ -414,6 +417,27 @@ async function gatherRecordingLinks({
     errors,
   };
 
+  // The day's call facts, as counts. This is the shape the snapshot has been
+  // waiting on: `coverage.callProjection` sits at "pending" forever because
+  // attachDailyCallFacts has never had a caller, which pins `coverage.complete`
+  // to false on days that are otherwise perfectly good.
+  //
+  // Counts ONLY — no urls, no phones, no call rows. The fact sanitizer strips
+  // those anyway, and the model documents the calls slot as a count-only
+  // projection. What is useful in a stored day is "how many, of what kind",
+  // not a copy of the index that already holds the detail.
+  summary.callFacts = {
+    links: kept.length,
+    significant: summary.significant,
+    byProvider: kept.reduce((acc, c) => { acc[c.provider] = (acc[c.provider] || 0) + 1; return acc; }, {}),
+    bySignificance: summary.bySignificance,
+    durable: summary.durable,
+    mintOnRead: summary.mintOnly,
+    excluded: summary.excluded,
+    longestSec: kept.reduce((m, c) => Math.max(m, Number(c.durationSec || 0)), 0),
+    totalTalkSec: kept.reduce((s, c) => s + Number(c.durationSec || 0), 0),
+  };
+
   if (!apply) return summary;
 
   for (const c of kept) {
@@ -428,6 +452,36 @@ async function gatherRecordingLinks({
       summary.errors.push(`${c.provider}:${c.providerCallId}: ${String(error.message).slice(0, 100)}`);
     }
   }
+
+  // ── Close the snapshot's open question ──────────────────────────────────
+  //
+  // The index has just finished counting the day's calls, so this is the
+  // moment the snapshot's call projection can stop being "pending". Nothing
+  // has ever called attachDailyCallFacts, which is why every stored day marks
+  // itself incomplete however good its data is.
+  //
+  // Deliberately AFTER the writes: the counts describe what actually landed,
+  // not what was planned. And deliberately non-fatal — the index is the
+  // product here, and a missing snapshot must not fail the capture that
+  // produced it. `missing-day` is the ordinary answer on a day whose report
+  // has not run yet, not an error.
+  if (attachCallFacts) {
+    try {
+      const r = await attachCallFacts({
+        dateKey,
+        callFacts: summary.callFacts,
+        // A source we could not READ makes the projection unavailable, not
+        // complete — a partial count must never be recorded as the whole day.
+        status: errors.length ? "unavailable" : "complete",
+      });
+      summary.snapshot = r?.status || null;
+    } catch (error) {
+      summary.snapshot = "failed";
+      summary.errors.push(`snapshot: ${String(error.message).slice(0, 120)}`);
+      logger?.warn?.("recording_index.snapshot_attach_failed", { dateKey });
+    }
+  }
+
   return summary;
 }
 
