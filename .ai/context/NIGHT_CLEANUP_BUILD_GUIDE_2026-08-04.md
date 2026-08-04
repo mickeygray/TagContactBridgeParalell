@@ -196,7 +196,30 @@ minutes.
 **Verify:** exactly one `logics_notice_alerts` write for the day; the review's
 completion timestamp lands in the 19:50 window.
 
-### STEP 5 — Snapshot before send *(the actual goal)*
+### STEP 5 — DEFERRED TO THE NEXT PATCH
+
+Mickey, 2026-08-04: *"create the emails and then do it again and create the
+object ... then next patch move things together."* And: *"to be careful let's
+just run it twice for now."*
+
+So the reorder below is **not in this patch**. Today's order already satisfies
+the safe version of it:
+
+```
+compose ONCE -> send the email -> captureDeliveredDailyFact stores the object
+```
+
+The email is untouched, and the object is stored after it from the same report.
+What DID land this patch is the object's contents: `facts.spend` now carries all
+costs by source (`93d8ffb`), read off `report.spend` rather than a rendered
+section, so nothing about the email changed.
+
+What the hoist below buys, and why it can wait: it stops a send failure from
+costing the day's data. That is a real gap, but it reorders the live email path,
+which is the one thing that must not move while the nightly email is the
+priority.
+
+**When it is picked up, the four edits are:**
 
 Four coordinated edits, ONE change:
 
