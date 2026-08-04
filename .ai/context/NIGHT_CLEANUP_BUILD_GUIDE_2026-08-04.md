@@ -172,7 +172,45 @@ inversion.** Add a test, or compare one night's totals against the prior night.
 **Verify:** `SpendEntry` newest write lands in the 19:50 window, not 19:45; the
 20:00 email's spend total matches the prior night's shape.
 
-### STEP 4 — Activity review handover *(both halves, ONE change)*
+### STEP 4 — CORRECTED: activity review does NOT feed the snapshot
+
+**Verified 2026-08-04, after this step was written on an untested assumption.**
+
+`logicsActivityReviewService.js` is 1,791 lines with **zero persistence** — no
+`updateOne`, `bulkWrite`, `insertMany`, `save`, or model access anywhere. Its
+terminal act is `sendMail` at `:1539`, subject *"<range>: X notices, Y
+suspended"*. The only thing `logicsActivityReviewRuntime` writes is a
+`recordServiceAlert` on failure (`:384`), and neither the report nor the snapshot
+reads ServiceAlert.
+
+**So it is a SECOND EMAIL, not a data-layer build step.** The premise under which
+it was folded into the 19:50 pass — "the review must land before the snapshot
+that reads it" — is false. Nothing reads it.
+
+Consequences:
+
+1. **Its position in the pass is meaningless.** It can run anywhere. Ordering it
+   before `call-recording-index` or the snapshot buys nothing.
+2. **It should be judged as an email, under Mickey's own rule:** *"if it's not in
+   service of the nightly emails as they exist, it probably shouldn't exist, or
+   get reformatted as a piece of that."* Either it is a report somebody reads —
+   in which case it stands on its own and does not belong in a data-layer pass —
+   or it is not, and it goes.
+3. **The double-run risk still stands** and is now worse, because a double run
+   means two identical notice emails, not just wasted work. It shares
+   `LOGICS_ACTIVITY_REVIEW_ENABLED` with the standalone 20:00 runtime, which
+   shared-config defaults to TRUE. The task already has its own
+   `NIGHTLY_ACTIVITY_REVIEW_ENABLED` (default off) for exactly this reason.
+
+**Decision needed before this step runs at all: does anyone read the notice
+email?** If yes, leave the 20:00 runtime alone and drop the folded task. If no,
+retire both. Do not proceed with a "handover" between two things that were never
+part of the data layer.
+
+The handover mechanics below are retained only in case the answer is "keep it and
+move it".
+
+### STEP 4 (mechanics, if it is kept) — both halves, ONE change
 
 - Task 9 already reads its own `NIGHTLY_ACTIVITY_REVIEW_ENABLED` (fixed in
   `7843c36`). Arm it, and in the SAME change make `server.js:2977` skip starting
