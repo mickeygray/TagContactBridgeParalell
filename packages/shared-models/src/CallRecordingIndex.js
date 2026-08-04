@@ -29,17 +29,16 @@
 //   playbackUrl  a URL that works on its own. Null for RingCentral, always.
 //   providerRef  the id to mint from. The only thing RC rows carry.
 //
-// A row with neither should not exist. Mickey 2026-08-04: "it's all the
-// SIGNIFICANT links ... a REFINED collection of all the links."
+// A row with neither should not exist — a call with no link has nothing to
+// index. But every call that HAS one is stored. Mickey 2026-08-04: "the email is
+// a refinement of the highlights, but the database should have everything."
 //
-// So this is not a second copy of CallLog with a URL column. It is curated: a
-// row earns its place by being a call somebody would actually want to pull up
-// later. 816 PhoneBurner dials landed on 2026-08-04 alone — indexing all of them
-// buys a haystack, and the point of the collection is that the needle is
-// already in hand.
-//
-// `significance` records WHY a call was kept, so the bar can be re-tuned later
-// without re-deriving it, and so "why isn't this call in here" has an answer.
+// So `significance` is a LABEL, not an entry requirement. It records why a call
+// is notable (LONG / DEAL / POSTDATE) so a highlights view can ask for it, and
+// so the bar can be re-tuned later — which matters, because the bar is
+// explicitly "for this version of things". Filtering at write time would make
+// the omitted calls unrecoverable: you cannot lower a threshold retroactively
+// over rows you declined to keep.
 //
 // ── PLATFORM NAMING, WHICH HAS ALREADY COST TIME ─────────────────────────────
 //

@@ -293,10 +293,15 @@ async function gatherRecordingLinks({
     c.significance = significanceFor(c, notableByPhone);
   }
 
-  // The refinement. A call with no reason to be kept is not written — the
-  // collection is curated, and an unfiltered copy of every dial would defeat
-  // the point of having it.
-  const kept = candidates.filter((c) => c.significance.length > 0);
+  // EVERYTHING IS STORED. Mickey 2026-08-04: "the email is a refinement of the
+  // highlights, but the database should have everything."
+  //
+  // So significance is a LABEL, not a gate. Every call with a link lands here;
+  // the email asks for the highlights. Filtering at write time would have made
+  // the missing calls unrecoverable — you cannot lower the bar retroactively on
+  // rows you declined to keep, and the bar is explicitly "for this version of
+  // things".
+  const kept = candidates;
 
   const summary = {
     dateKey,
@@ -304,7 +309,9 @@ async function gatherRecordingLinks({
     bySource: perSource,
     candidates: candidates.length,
     kept: kept.length,
-    droppedNotSignificant: candidates.length - kept.length,
+    // How many carry at least one significance tag — the subset a highlights
+    // view would show. Not a count of anything dropped; nothing is dropped.
+    significant: kept.filter((c) => c.significance.length > 0).length,
     bySignificance: kept.reduce((acc, c) => {
       for (const r of c.significance) acc[r] = (acc[r] || 0) + 1;
       return acc;
