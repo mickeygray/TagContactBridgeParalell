@@ -208,39 +208,6 @@ async function attachDailyCallFacts({ dateKey, callFacts, status = "complete" } 
   return { status: "attached", dateKey, complete };
 }
 
-/**
- * Record the nightly Logics activity review's day onto the stored fact.
- *
- * The review has always produced an accurate day — rows scanned, notice uploads,
- * suspended flips, DNC and post-date counts — and then thrown it away at the end
- * of an email. This is the "organize it and get it to record" half.
- *
- * Deliberately does NOT touch `coverage.complete`. Completeness is defined by the
- * rollup sections plus the call projection; activity is additional context, and
- * letting it flip a completeness flag would mean a day's trustworthiness changed
- * because a different service ran. It is recorded, not scored.
- *
- * `missing-day` is an ordinary answer, not an error: the review runs on its own
- * clock and may land before the report has written the day at all.
- */
-async function attachDailyActivityFacts({ dateKey, activityFacts } = {}, {
-  Model = DailyReportFact,
-} = {}) {
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(dateKey || ""))) {
-    throw new Error("daily activity facts dateKey must be YYYY-MM-DD");
-  }
-  const existing = await Model.findOne({ dateKey }).select("dateKey").lean();
-  if (!existing) return { status: "missing-day", dateKey };
-  await Model.updateOne(
-    { dateKey },
-    {
-      $set: { "facts.activity": sanitizeFactValue(activityFacts || {}) },
-      $inc: { revision: 1 },
-    },
-  );
-  return { status: "attached", dateKey };
-}
-
 function dayKeys(from, to) {
   const out = [];
   const start = Date.parse(`${from}T00:00:00.000Z`);
@@ -274,7 +241,6 @@ module.exports = {
   CANONICAL_DEFINITION_NAME,
   CAPTURE_VERSION,
   REQUIRED_SECTIONS,
-  attachDailyActivityFacts,
   attachDailyCallFacts,
   buildDailyReportFact,
   isDailyFactCaptureCandidate,

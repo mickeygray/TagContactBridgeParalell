@@ -1469,6 +1469,38 @@ async function requestActivityReport({
   };
 }
 
+/**
+ * The day's activity, shaped for `facts.activity` on the daily entry.
+ *
+ * These are the same numbers the email prints, which is the point — the email
+ * has been trusted for months, so the record should carry exactly what it says
+ * rather than a second derivation that could drift from it.
+ *
+ * A count that could not be computed is NULL, never 0, and the error is kept
+ * beside it. "We could not look" and "nothing happened" are different days.
+ */
+function buildActivitySection({ domain, dateKey, startDateKey, endDateKey, processed = {} }) {
+  const counts = processed.statusChangeCounts || {};
+  const countsFailed = Boolean(counts.error);
+  return {
+    domain,
+    range: { from: startDateKey || dateKey, to: endDateKey || dateKey },
+    rowsScanned: processed.parsedRows ?? null,
+    documentUploads: processed.documentUploadActivities ?? null,
+    excludedUploads: processed.excludedActivities ?? null,
+    noticeUploadCases: processed.outputRows ?? null,
+    suspendedStatusChanges: processed.suspendedStatusChanges ?? null,
+    suspendedStillCurrent: processed.suspendedCurrentStatusChanges ?? null,
+    // Straight off the activity feed, which is the canonical source for both —
+    // and the reason they are worth storing rather than re-deriving.
+    dncToday: countsFailed ? null : (counts.dnc ?? null),
+    postdateToday: countsFailed ? null : (counts.postdate ?? null),
+    statusCountsError: counts.error || null,
+    aiReviewedCases: processed.aiReview?.reviewedCases ?? null,
+    profilesStamped: processed.clientProfileNoticeAlerts?.updated ?? null,
+  };
+}
+
 function buildEmailText({ domain, dateKey, startDateKey, endDateKey, processed }) {
   const range = startDateKey && endDateKey && startDateKey !== endDateKey
     ? `${startDateKey} to ${endDateKey}`
@@ -1748,44 +1780,27 @@ async function runLogicsActivityReview(options = {}) {
     processed.statusChangeCounts = { error: String(error.message).slice(0, 160) };
   }
 
-  // ── RECORD THE DAY, THEN SEND IT ────────────────────────────────────────
+  // ── THE DAY, AS A SECTION ───────────────────────────────────────────────
   //
   // Mickey 2026-08-04: "the nightly activity service worked to produce an
   // accurate day — all we are doing is organizing it and getting it to record."
   //
-  // Until now this function gathered an accurate day and then spent it entirely
-  // on an email. The numbers below are the same ones the email prints; they are
-  // simply written down first, so a mail failure costs the message and not the
-  // day. Same ordering rule the report path follows.
+  // This function has always gathered an accurate day and then spent all of it
+  // on an email. It now also HANDS THAT DAY BACK, shaped for the entry. It does
+  // not write: an earlier version attached directly to the stored fact, which
+  // required that day's entry to already exist and silently returned
+  // "missing-day" when it did not. The worker assembles sections and posts once.
   //
-  // Non-fatal by construction: recording is not what this service is FOR, and a
-  // storage problem must not cost the review its email.
+  // Building the section cannot fail the review — it is arithmetic over numbers
+  // already computed, but the review's job is the email and a shaping bug must
+  // not cost it.
   try {
-    const { attachDailyActivityFacts } = require("./dailyReportFactService");
-    processed.recorded = await attachDailyActivityFacts({
-      dateKey: endDateKey || dateKey,
-      activityFacts: {
-        domain,
-        range: { from: startDateKey || dateKey, to: endDateKey || dateKey },
-        rowsScanned: processed.parsedRows || 0,
-        documentUploads: processed.documentUploadActivities || 0,
-        excludedUploads: processed.excludedActivities || 0,
-        noticeUploadCases: processed.outputRows || 0,
-        suspendedStatusChanges: processed.suspendedStatusChanges || 0,
-        suspendedStillCurrent: processed.suspendedCurrentStatusChanges || 0,
-        // These two come from the canonical source — the activity feed itself —
-        // which is the whole reason they are worth keeping.
-        dncToday: processed.statusChangeCounts?.dnc ?? null,
-        postdateToday: processed.statusChangeCounts?.postdate ?? null,
-        // A count that could not be computed is NULL, never 0. "We could not
-        // look" and "nothing happened" are different days.
-        statusCountsError: processed.statusChangeCounts?.error || null,
-        aiReviewedCases: processed.aiReview?.reviewedCases ?? null,
-        profilesStamped: processed.clientProfileNoticeAlerts?.updated ?? null,
-      },
+    processed.section = buildActivitySection({
+      domain, dateKey, startDateKey, endDateKey, processed,
     });
   } catch (error) {
-    processed.recorded = { status: "failed", reason: String(error.message).slice(0, 160) };
+    processed.section = null;
+    processed.sectionError = String(error.message).slice(0, 160);
   }
 
   const email = sendEmail
@@ -1821,6 +1836,7 @@ module.exports = {
   DEFAULT_REVIEW_RECIPIENTS,
   buildEmailText,
   classifyActivityRows,
+  buildActivitySection,
   classifySuspendedStatusRows,
   emailActivityReview,
   normalizeDateKey,
