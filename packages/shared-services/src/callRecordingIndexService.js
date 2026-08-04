@@ -44,17 +44,37 @@ const pacificDayWindow = (dateKey) => {
   return { $gte: start, $lt: new Date(start.getTime() + 86400000) };
 };
 
-/** Provider from evidence, never from `platform`. Null when unprovable. */
-function resolveProviderFromUri(uri, platform) {
+/**
+ * Provider from evidence, never from `platform`.
+ *
+ * `recordingArchive.provider` is the authoritative field and is tried FIRST —
+ * the archiver stamped it when it resolved the recording, so it beats anything
+ * inferred afterwards. The URI shape is the fallback for rows that predate it.
+ *
+ * Measured over 90 days, rows carrying a recording URI:
+ *     ex  + provider ringcentral   1,962
+ *     ex  + provider callrail      1,177
+ *     cx  + provider ringcx          296
+ * So `platform: "ex"` is ~38% CallRail — not the ~252 mislabelled rows previously
+ * believed. Trusting `platform` here would file roughly twelve hundred CallRail
+ * recordings as RingCentral and send every one of them through a mint-on-read
+ * path they do not need and would fail.
+ */
+function resolveProvider({ archiveProvider, uri, platform } = {}) {
+  const stamped = String(archiveProvider || "").toLowerCase();
+  if (["callrail", "phoneburner", "ringcentral", "ringcx"].includes(stamped)) return stamped;
   const s = String(uri || "").toLowerCase();
   if (s.includes("callrail")) return "callrail";
   if (s.includes("phoneburner")) return "phoneburner";
   if (s.includes("ringcentral")) return "ringcentral";
-  // No URI to judge by: only "cx" is unambiguous on its own. "ex" is the mixed
-  // bucket and is exactly what must not be guessed.
+  // No stamp and no URI to judge by: only "cx" is unambiguous on its own. "ex"
+  // is the mixed bucket and is exactly what must not be guessed.
   if (String(platform || "").toLowerCase() === "cx") return "ringcx";
   return null;
 }
+
+/** Back-compat shim for the earlier signature. */
+const resolveProviderFromUri = (uri, platform) => resolveProvider({ uri, platform });
 
 // SIGNIFICANCE — what earns a call a place in the collection.
 //
@@ -211,11 +231,19 @@ async function readCallLogProviders(dateKey, { CallLog }) {
   const unresolved = [];
   for (const r of rows) {
     const uri = r.recordingArchive?.sourceUri || r.recordingArchive?.driveWebViewLink || "";
-    const provider = resolveProviderFromUri(uri, r.platform);
+    const provider = resolveProvider({
+      archiveProvider: r.recordingArchive?.provider, uri, platform: r.platform,
+    });
     if (!provider) { unresolved.push(r.providerCallId || r.telephonySessionId); continue; }
     // RingCentral's stored value is an identifier, not a servable URL. Anything
     // else keeps its durable link.
+    //
+    // The one exception that makes RC servable TODAY: if the archiver already
+    // pushed the audio to Drive, driveWebViewLink IS durable and needs no
+    // minting. So an RC row can be either — durable when it was archived,
+    // mint-on-read when only the provider reference survives.
     const isRc = provider === "ringcentral";
+    const drive = r.recordingArchive?.driveWebViewLink || null;
     out.push({
       provider,
       providerCallId: String(r.providerCallId || r.telephonySessionId),
@@ -230,8 +258,12 @@ async function readCallLogProviders(dateKey, { CallLog }) {
       sourceName: r.sourceName || null,
       outcome: r.outcome || null,
       direction: r.direction || null,
-      playbackUrl: isRc ? null : (r.recordingArchive?.driveWebViewLink || uri || null),
-      providerRef: isRc ? (r.recordingArchive?.sourceUri || uri || null) : null,
+      // Durable when an archived Drive copy exists — for ANY provider. Only a
+      // RingCentral row with no Drive copy falls back to mint-on-read, because
+      // only then is the raw provider URI the sole locator, and that URI is not
+      // independently valid.
+      playbackUrl: isRc ? drive : (drive || uri || null),
+      providerRef: isRc && !drive ? (r.recordingArchive?.sourceUri || uri || null) : null,
       captureSource: "calllog",
     });
   }
@@ -317,8 +349,13 @@ async function gatherRecordingLinks({
       return acc;
     }, {}),
     excluded: kept.filter((c) => c.excluded).length,
-    durable: kept.filter((c) => c.playbackUrl && c.provider !== "ringcentral").length,
+    // Three buckets that must sum to `kept`, or a row is being hidden. An
+    // earlier version counted durable as "has a url AND is not RingCentral",
+    // which silently lost RC rows that DO have an archived Drive copy — they
+    // were neither durable nor mint and appeared nowhere.
+    durable: kept.filter((c) => c.playbackUrl).length,
     mintOnly: kept.filter((c) => !c.playbackUrl && c.providerRef).length,
+    noLocator: kept.filter((c) => !c.playbackUrl && !c.providerRef).length,
     unresolvedProvider: unresolved.length,
     written: 0,
     errors,
@@ -343,6 +380,7 @@ async function gatherRecordingLinks({
 
 module.exports = {
   gatherRecordingLinks,
+  resolveProvider,
   resolveProviderFromUri,
   significanceFor,
   INDEX_LONG_CALL_SECONDS,
