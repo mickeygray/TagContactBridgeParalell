@@ -373,9 +373,13 @@ test("the night runs in the stated ORDER", () => {
   // extra gather, which is the opposite of "one shot and just branch". The
   // branch lives in reportDefinitionService, which already composes once and
   // hands that same report to captureDeliveredDailyFact.
+  // call-recording-index is LAST: it reads what the day produced across every
+  // provider, so it wants the rest of the pass to have finished correcting data
+  // first. It is also the only task whose output is a new collection rather
+  // than a fix to an existing one.
   assert.deepEqual(s2.tasks.map((t) => t.key),
     ["night-persist", "mail-invoice", "mail-spend-derive", "call-links", "call-recovery-discovery",
-      "queue-rollup", "logics-source", "spend-sync", "activity-review"]);
+      "queue-rollup", "logics-source", "spend-sync", "activity-review", "call-recording-index"]);
   assert.ok(!s2.tasks.some((t) => t.key === "daily-snapshot"),
     "the snapshot is NOT a hygiene task — it branches off the report's own single gather");
 
