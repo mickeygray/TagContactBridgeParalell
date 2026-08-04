@@ -796,6 +796,10 @@ const TASKS = [
         sheets: Array.isArray(r?.sheets) ? r.sheets.length : 0,
       };
     },
+    // Without a count() the runtime computes plannedCount 0 and NEVER calls
+    // apply() — arming the flag would produce a silently successful no-op pass.
+    // One unit of work: the sync either runs or it does not.
+    count() { return 1; },
     describe(planned) {
       return `${planned[0]?.dateKey || "?"}: upsert spend rows from the configured sheets`;
     },
@@ -806,7 +810,13 @@ const TASKS = [
     // reads it, rather than alongside it.
     key: "activity-review",
     label: "Review Logics activity for the completed day",
-    writesArmed: () => String(process.env.LOGICS_ACTIVITY_REVIEW_ENABLED || "false").toLowerCase() === "true",
+    // Its OWN flag, default off — deliberately NOT LOGICS_ACTIVITY_REVIEW_ENABLED.
+    // shared-config defaults logicsActivityReview.enabled to TRUE, so that flag
+    // already arms the standalone 20:00 runtime. Reusing it here would review
+    // the same activity TWICE a night, at 19:50 and again at 20:00 — the same
+    // trap spend-sync fell into. Arming this flag must, in the SAME change, stop
+    // server.js starting the standalone runtime.
+    writesArmed: () => String(process.env.NIGHTLY_ACTIVITY_REVIEW_ENABLED || "false").toLowerCase() === "true",
     async plan({ domains, logger }) {
       return [{ dateKey: persistTargetDay(), domains: [...domains], logger: Boolean(logger) }];
     },
@@ -821,49 +831,37 @@ const TASKS = [
         failed: Number(r?.failed || 0),
       };
     },
+    // See the note on spend-sync's count(): no count() means apply() never runs.
+    count() { return 1; },
     describe(planned) {
       const p = planned[0] || {};
       return `${p.dateKey || "?"}: review activity across ${(p.domains || []).length} domain(s)`;
     },
   },
-  {
-    // ── TERMINAL. This must be LAST. ────────────────────────────────────
-    //
-    // Mickey 2026-08-04: "one build of the data layer (call links, costing,
-    // activity review => daily snapshot => result email)."
-    //
-    // Every task above CORRECTS data. This one FREEZES what they produced, so
-    // the 20:00 email and the snapshot are the same numbers rather than two
-    // independent gathers that can disagree. Snapshot first, email second,
-    // deliberately: a send failure is not the death of the data.
-    key: "daily-snapshot",
-    label: "Freeze the day's numbers (snapshot before the email)",
-    writesArmed: () => String(process.env.DAILY_SNAPSHOT_ENABLED || "false").toLowerCase() === "true",
-    async plan({ logger }) {
-      const { CANONICAL_DEFINITION_NAME } = require(
-        "../../../../packages/shared-services/src/dailyReportFactService");
-      return [{ dateKey: persistTargetDay(), definition: CANONICAL_DEFINITION_NAME, logger: Boolean(logger) }];
-    },
-    async apply(planned, { logger, captureDailySnapshot = null }) {
-      if (typeof captureDailySnapshot !== "function") {
-        return { written: 0, skipped: 0, failed: 1, errors: ["snapshot-capture-unavailable"] };
-      }
-      const p = planned[0] || {};
-      const r = await captureDailySnapshot({ dateKey: p.dateKey, logger });
-      return {
-        written: r?.persisted ? 1 : 0,
-        skipped: r?.persisted ? 0 : 1,
-        failed: 0,
-        revision: r?.revision ?? null,
-        complete: r?.complete === true,
-      };
-    },
-    describe(planned) {
-      const p = planned[0] || {};
-      return `${p.dateKey || "?"}: freeze "${p.definition}" before the 20:00 send`;
-    },
-  },
 ];
+
+// WHY THERE IS NO "daily-snapshot" TASK HERE.
+//
+// One was added on 2026-08-04 and removed the same day, because a task in THIS
+// registry is the wrong home for it and would have cost exactly what the
+// consolidation was meant to save:
+//
+//  · A task receives no report. Its only possible body was a SECOND live
+//    composeReport at 19:50 — a whole extra gather against Logics, CallRail and
+//    RingCentral ten minutes before the email's own. Mickey's instruction was
+//    the opposite: "do it in one shot and just branch ... so you don't have to
+//    run the activities twice."
+//  · The two gathers would not even describe the same day. persistTargetDay()
+//    here is offset 0 (TODAY, still open at 19:50), while ReportDefinition
+//    defaults range to "yesterday" — so the snapshot would write a DIFFERENT
+//    dateKey, then be silently overwritten 24h later, because
+//    persistDailyReportFact $sets the whole document against a unique dateKey.
+//
+// The branch Mickey asked for ALREADY EXISTS, one level up: reportDefinitionService
+// composes the report ONCE and then calls captureDeliveredDailyFact with that
+// same already-computed report. It simply runs AFTER sendMail today. Moving that
+// call ahead of the send is the entire change — one gather, snapshot first,
+// email second. See §5c of the work order.
 
 function createNightlyHygieneRuntime({ config = {}, runtime = {} } = {}) {
   // Each runtime owns its OWN task list. TASKS is the shared default, and
@@ -880,7 +878,6 @@ function createNightlyHygieneRuntime({ config = {}, runtime = {} } = {}) {
   const collaborators = {
     spendSyncRuntime: config.spendSyncRuntime || runtime.spendSyncRuntime || null,
     activityReviewRuntime: config.activityReviewRuntime || runtime.activityReviewRuntime || null,
-    captureDailySnapshot: config.captureDailySnapshot || runtime.captureDailySnapshot || null,
   };
 
   const state = {

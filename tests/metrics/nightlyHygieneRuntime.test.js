@@ -368,15 +368,32 @@ test("the night runs in the stated ORDER", () => {
   // and activity-review were separate timers at 19:45 and 20:00; folding them
   // in put them BEFORE the thing that reads them instead of beside it.
   //
-  // daily-snapshot is LAST and must stay last. Every task above it corrects
-  // data; it freezes the result so the 20:00 email and the stored fact are the
-  // same numbers. Snapshot before send, because a send failure is not the
-  // death of the data.
+  // There is deliberately NO daily-snapshot task. A task receives no report, so
+  // its only possible body was a second live composeReport at 19:50 — a whole
+  // extra gather, which is the opposite of "one shot and just branch". The
+  // branch lives in reportDefinitionService, which already composes once and
+  // hands that same report to captureDeliveredDailyFact.
   assert.deepEqual(s2.tasks.map((t) => t.key),
     ["night-persist", "mail-invoice", "mail-spend-derive", "call-links", "call-recovery-discovery",
-      "queue-rollup", "logics-source", "spend-sync", "activity-review", "daily-snapshot"]);
-  assert.equal(s2.tasks[s2.tasks.length - 1].key, "daily-snapshot",
-    "the snapshot must be the terminal task — it freezes what the others produced");
+      "queue-rollup", "logics-source", "spend-sync", "activity-review"]);
+  assert.ok(!s2.tasks.some((t) => t.key === "daily-snapshot"),
+    "the snapshot is NOT a hygiene task — it branches off the report's own single gather");
+
+  // Every folded-in task must be REACHABLE. A task with no count() plans an
+  // empty set, so plannedCount is 0 and apply() is never called — arming its
+  // flag would produce a silently successful no-op pass.
+  // Assert against the real task objects, not getState()'s projection — the
+  // projection does not carry count(), so checking it there passes vacuously.
+  // TASKS lives on the runtime INSTANCE (each instance owns its own copy), not
+  // on the module.
+  const instance = createNightlyHygieneRuntime({});
+  for (const key of ["spend-sync", "activity-review"]) {
+    const task = instance.TASKS.find((t) => t.key === key);
+    assert.ok(task, `${key} must be registered`);
+    assert.equal(typeof task.count, "function",
+      `${key} must implement count(), or plannedCount is 0 and apply() never runs`);
+    assert.ok(task.count([{}]) > 0, `${key}.count() must report work to do`);
+  }
 });
 
 test("call-links CAPTURES marketing links; PhoneBurner still cannot", () => {
