@@ -74,7 +74,27 @@ leadDeliveryEventSchema.index(
     name: "uq_lead_delivery_provider_event_id",
   },
 );
-leadDeliveryEventSchema.index({ status: 1, nextAttemptAt: 1, receivedAt: 1 });
+leadDeliveryEventSchema.index(
+  { provider: 1, receivedAt: 1, _id: 1 },
+  {
+    name: "lead_delivery_event_pending_recovery",
+    partialFilterExpression: { status: "pending" },
+  },
+);
+leadDeliveryEventSchema.index(
+  { provider: 1, nextAttemptAt: 1, receivedAt: 1, _id: 1 },
+  {
+    name: "lead_delivery_event_failed_recovery",
+    partialFilterExpression: { status: "failed" },
+  },
+);
+leadDeliveryEventSchema.index(
+  { provider: 1, processingLeaseExpiresAt: 1, receivedAt: 1, _id: 1 },
+  {
+    name: "lead_delivery_event_processing_recovery",
+    partialFilterExpression: { status: "processing" },
+  },
+);
 leadDeliveryEventSchema.index({ provider: 1, providerCallId: 1, eventType: 1 });
 leadDeliveryEventSchema.index({ domain: 1, caseId: 1, eventType: 1, receivedAt: -1 });
 

@@ -146,6 +146,14 @@ function isPacificBusinessDay(value = new Date()) {
   return weekday !== "Sat" && weekday !== "Sun";
 }
 
+function isRvmDispositionPollingEnabled({ env = process.env, config = {} } = {}) {
+  return String(
+    env.RVM_DISPOSITION_POLL_ENABLED ??
+      config.outboundWorker?.rvmDispositionPollEnabled ??
+      "false",
+  ).trim().toLowerCase() === "true";
+}
+
 async function runRvmDispositionPollIfDue({
   workerState,
   now = new Date(),
@@ -267,6 +275,10 @@ async function startOutboundWorker({ config, runtime, workerState }) {
     Number(process.env.RVM_DISPOSITION_POLL_INTERVAL_MS) || 5 * 60 * 1000,
     60_000,
   );
+  // Phase 9 compute boundary: legacy RVM follow-up is retired. Keep the old
+  // implementation hard-gated for weed-whack proof, but do not touch the
+  // embedded schedule arrays unless an operator explicitly re-enables it.
+  const rvmDispositionPollEnabled = isRvmDispositionPollingEnabled({ config });
 
   workerState.enabled = true;
   workerState.intervalMs = intervalMs;
@@ -355,12 +367,14 @@ async function startOutboundWorker({ config, runtime, workerState }) {
       // Both RVM disposition stores share one five-minute scheduler. The old
       // five-second call only rate-limited returned tokens; an empty result
       // still performed a full cadence-collection scan on every worker tick.
-      const rvmPoll = await runRvmDispositionPollIfDue({
-        workerState,
-        now: new Date(),
-        intervalMs: rvmDispositionPollIntervalMs,
-        logger: runtime.logger,
-      });
+      const rvmPoll = rvmDispositionPollEnabled
+        ? await runRvmDispositionPollIfDue({
+            workerState,
+            now: new Date(),
+            intervalMs: rvmDispositionPollIntervalMs,
+            logger: runtime.logger,
+          })
+        : { status: "disabled" };
       counterRvmPollResult = rvmPoll?.counter || counterRvmPollResult;
 
       // The intake service dispatches welcome SMS/email and creates the first
@@ -921,6 +935,7 @@ module.exports = {
   createWorkerState,
   intervalDue,
   isPacificBusinessDay,
+  isRvmDispositionPollingEnabled,
   runRvmDispositionPollIfDue,
   startServer,
 };

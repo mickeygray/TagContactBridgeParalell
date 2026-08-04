@@ -38,9 +38,43 @@ const ldcallsData = (over = {}) => ({
   cases: 0, attempts: 0, connected: 0, longCalls: 0,
   attemptsKnown: 0, attemptsUnknown: 0, talkMinutes: 0,
   connectRate: null, avgTalkMinutes: null, byOutcome: {},
-  agents: [{ agent: "Chris Bolt", inbound: 0, dials: 0, connected: 0, talkMinutes: 0, deals: 1, cash: 700 }],
+  newInventory: 0, newInventoryUntouched: 0, newLeadsTouched: 0, newLeadsKnown: true,
+  attribution: {
+    mailApplies: true,
+    readable: { mail: true, bcd: true, ld: true },
+    mailOffered: 0, mailMissed: 0, bcdOffered: 0, bcdMissed: 0,
+    mailRate: null, bcdRate: null, ldRate: 3, ldLeadsBought: 0,
+    spend: { mail: 0, bcd: 0, ld: 0, applicable: 0 },
+    unattributed: { mail: 0, bcd: 0, ld: 0, total: 0 },
+    unattributedByMissed: { mail: null, bcd: null },
+    reconciliation: { ok: true, expected: 0, attributed: 0, unattributed: 0, drift: 0, failures: [] },
+  },
+  agents: [{
+    agent: "Chris Bolt", inbound: 0, mailerIn: 0, bcdIn: 0, newLeads: 0,
+    dials: 0, connected: 0, talkMinutes: 0, deals: 1, cash: 700,
+    attributedMail: 0, attributedBcd: 0, attributedLd: 0, attributedSpend: 0,
+  }],
   longThresholdMinutes: 5, worthHearing: [], worthHearingWithLink: 0,
   ...over,
+});
+
+// The unreadable variants have to blank the components too, or the fixture
+// asserts a property the real compute() would never produce: a dial outage
+// leaves the LD component UNKNOWN, and an unknown component is what makes
+// attributed_spend a dash.
+const ldcallsBroken = (over = {}) => ldcallsData({
+  ...over,
+  newLeadsKnown: false,
+  attribution: {
+    ...ldcallsData().attribution,
+    readable: { mail: !over.queueUnavailable, bcd: !over.queueUnavailable, ld: false },
+    reconciliation: { ok: null, expected: 0, attributed: null, unattributed: null, drift: null, failures: [] },
+  },
+  agents: [{
+    ...ldcallsData().agents[0],
+    attributedLd: null, attributedSpend: null,
+    ...(over.queueUnavailable ? { attributedMail: null, attributedBcd: null } : {}),
+  }],
 });
 
 test("an unreadable dial gather does NOT render as zero dials", () => {
@@ -58,23 +92,38 @@ test("an unreadable dial gather does NOT render as zero dials", () => {
 });
 
 test("unreadable dial counts print as dashes, but deals and cash stay real", () => {
-  const table = blocks.BY_ID.get("ldcalls").csv(ldcallsData({ dialsUnavailable: "timeout" }));
+  const table = blocks.BY_ID.get("ldcalls").csv(ldcallsBroken({ dialsUnavailable: "timeout" }));
   const row = table.rows[0];
   const cell = (h) => table.emailColumns.find((c) => c.header === h).get(row);
+  const csvCell = (h) => table.columns.find((c) => c.header === h).get(row);
   assert.equal(cell("dials"), "—");
-  assert.equal(cell("connected"), "—");
-  assert.equal(cell("talk_minutes"), "—");
+  // new_ld is CSV-only for now (NEW_LD_EMAIL_HIDDEN); the dash still has to be
+  // a dash there — an outage must never read as zero work.
+  assert.equal(csvCell("new_ld"), null, "a dial outage means we do not know what was worked");
+  assert.equal(cell("attributed_spend"), "—",
+    "an unreadable component must never price out as $0.00 of marketing worked");
   assert.equal(cell("deals"), 1, "deals come from payments — a dial outage does not touch them");
   assert.equal(cell("cash"), 700);
+  // connected and talk_minutes moved to the CSV on 2026-08-03 to make room for
+  // the cost columns. Pinned so a reader of this file is not left looking for
+  // an email column that was deliberately retired.
+  const raw = (h) => table.columns.find((c) => c.header === h);
+  assert.equal(table.emailColumns.some((c) => c.header === "connected"), false);
+  assert.equal(table.emailColumns.some((c) => c.header === "talk_minutes"), false);
+  assert.ok(raw("connected") && raw("talk_minutes"), "both stay in the CSV");
 });
 
 test("the CSV keeps raw numbers even when the email shows dashes", () => {
   // A dash is a reading aid for a person. A spreadsheet should never have to
   // parse one.
-  const table = blocks.BY_ID.get("ldcalls").csv(ldcallsData({ dialsUnavailable: "timeout", queueUnavailable: "429" }));
+  const table = blocks.BY_ID.get("ldcalls").csv(ldcallsBroken({ dialsUnavailable: "timeout", queueUnavailable: "429" }));
   const raw = (h) => table.columns.find((c) => c.header === h).get(table.rows[0]);
   assert.equal(raw("dials"), 0);
   assert.equal(raw("inbound"), 0);
+  // But an unknown DOLLAR figure stays null: an empty cell is a spreadsheet's
+  // own way of saying "not known", and a 0 there is arguable.
+  assert.equal(raw("attributed_spend"), null);
+  assert.equal(raw("attributed_ld"), null);
 });
 
 test("an unreadable queue keeps the inbound column and dashes it", () => {

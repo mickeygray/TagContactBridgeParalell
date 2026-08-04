@@ -1,11 +1,30 @@
 "use strict";
 
 const mongoose = require("mongoose");
+const { resolveMongoPoolConfig } = require("../../../shared-config/src");
 
 let connectionPromise = null;
 let skippedMongo = false;
+let activePoolPolicy = null;
+
+function resolveMongoConnectionOptions(config = {}) {
+  const mongoPool = resolveMongoPoolConfig({ mongoPool: config.mongoPool || {} }, {});
+  return {
+    dbName: config.parallelDbName,
+    serverSelectionTimeoutMS: 5000,
+    ...mongoPool,
+  };
+}
 
 async function connectMongo(config) {
+  const connectionOptions = resolveMongoConnectionOptions(config);
+  activePoolPolicy = {
+    maxPoolSize: connectionOptions.maxPoolSize,
+    minPoolSize: connectionOptions.minPoolSize,
+    maxIdleTimeMS: connectionOptions.maxIdleTimeMS,
+    maxConnecting: connectionOptions.maxConnecting,
+    waitQueueTimeoutMS: connectionOptions.waitQueueTimeoutMS,
+  };
   if (config.skipMongo) {
     skippedMongo = true;
     return { connected: false, skipped: true };
@@ -13,10 +32,7 @@ async function connectMongo(config) {
 
   skippedMongo = false;
   if (!connectionPromise) {
-    connectionPromise = mongoose.connect(config.mongoUri, {
-      dbName: config.parallelDbName,
-      serverSelectionTimeoutMS: 5000,
-    });
+    connectionPromise = mongoose.connect(config.mongoUri, connectionOptions);
   }
 
   await connectionPromise;
@@ -32,8 +48,7 @@ function getMongoState() {
     connected: mongoose.connection.readyState === 1,
     skipped: skippedMongo,
     readyState: mongoose.connection.readyState,
-    host: mongoose.connection.host || null,
-    name: mongoose.connection.name || null,
+    pool: activePoolPolicy ? { ...activePoolPolicy } : null,
   };
 }
 
@@ -58,4 +73,5 @@ module.exports = {
   connectMongo,
   disconnectMongo,
   getMongoState,
+  resolveMongoConnectionOptions,
 };

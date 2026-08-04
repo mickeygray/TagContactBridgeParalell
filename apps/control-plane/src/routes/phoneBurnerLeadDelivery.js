@@ -9,6 +9,9 @@ const {
   classifyCapturedProviderEvent,
   resolveProviderEventItem,
 } = require("../../../../packages/shared-services/src/leadDeliveryService");
+const {
+  normalizeAllowedHttpsRecordingUrl,
+} = require("../../../../packages/shared-services/src/recordingHostPolicyService");
 
 const CALLBACK_HOOKS = Object.freeze({
   "contact-displayed": Object.freeze({ sourceHook: "contact_displayed", eventType: "contact_displayed" }),
@@ -59,16 +62,66 @@ function callbackAgentId(value) {
   return /^[a-z0-9]+(?:_[a-z0-9]+)*$/.test(normalized) ? normalized : null;
 }
 
-function callbackRecordingUrl(value) {
-  const normalized = boundedText(value, 2048);
-  if (!normalized) return null;
-  try {
-    const parsed = new URL(normalized);
-    if (parsed.protocol !== "https:" || parsed.username || parsed.password) return null;
-    return parsed.toString();
-  } catch {
-    return null;
+function callbackRecordingEvidence(body = {}, { allowedRecordingHosts = [] } = {}) {
+  const candidates = [
+    ["recording_url_public", body.recording_url_public],
+    ["recording_link_public", body.recording_link_public],
+    ["recording_url", body.recording_url],
+    ["recording_link", body.recording_link],
+    ["recordingUrlPublic", body.recordingUrlPublic],
+    ["recordingLinkPublic", body.recordingLinkPublic],
+    ["recordingUrl", body.recordingUrl],
+    ["recordingLink", body.recordingLink],
+    ["recording.url_public", body.recording?.url_public],
+    ["recording.link_public", body.recording?.link_public],
+    ["recording.url", body.recording?.url],
+    ["recording.link", body.recording?.link],
+    ["call.recording_url_public", body.call?.recording_url_public],
+    ["call.recording_link_public", body.call?.recording_link_public],
+    ["call.recording_url", body.call?.recording_url],
+    ["call.recording_link", body.call?.recording_link],
+    ["audio_url", body.audio_url],
+    ["recording", body.recording],
+  ];
+  let candidatePresent = false;
+  let recordingReference = null;
+  let recordingReferenceSourceKey = null;
+  for (const [sourceKey, value] of candidates) {
+    if (value == null || value === "") continue;
+    candidatePresent = true;
+    // Preserve the provider's first nonempty scalar recording value when it
+    // is not yet understood as a URL. This is private diagnostic evidence,
+    // not media authority: it is never fetched or projected downstream until
+    // a later parser validates and promotes it.
+    if (recordingReference === null) {
+      const boundedReference = boundedText(value, 4096);
+      if (boundedReference !== null) {
+        recordingReference = boundedReference;
+        recordingReferenceSourceKey = sourceKey;
+      }
+    }
+    const recordingUrl = normalizeAllowedHttpsRecordingUrl(value, {
+      allowedHosts: allowedRecordingHosts,
+    });
+    if (recordingUrl) {
+      return {
+        recordingUrl,
+        recordingSourceKey: sourceKey,
+        recordingCandidateStatus: "captured",
+        recordingReference: null,
+        recordingReferenceSourceKey: null,
+      };
+    }
   }
+  return {
+    recordingUrl: null,
+    recordingSourceKey: null,
+    recordingCandidateStatus: recordingReference !== null
+      ? "retained_unparsed"
+      : (candidatePresent ? "invalid" : "absent"),
+    recordingReference,
+    recordingReferenceSourceKey,
+  };
 }
 
 // Field NAMES the body carried, never values. safePayload is a strict
@@ -115,6 +168,7 @@ function normalizePhoneBurnerCallback(sourceHook, body = {}, {
   receivedAt = new Date(),
   payloadDigest,
   sourceAgentId = null,
+  allowedRecordingHosts = process.env.PHONEBURNER_RECORDING_ALLOWED_HOSTS || "",
 } = {}) {
   if (!body || typeof body !== "object" || Array.isArray(body)) {
     throw new TypeError("callback body must be an object");
@@ -161,6 +215,7 @@ function normalizePhoneBurnerCallback(sourceHook, body = {}, {
   const dispositionDigest = !knownDisposition && dispositionToken
     ? crypto.createHash("sha256").update(dispositionToken).digest("hex")
     : null;
+  const recordingEvidence = callbackRecordingEvidence(body, { allowedRecordingHosts });
   const event = {
     provider: "phoneburner",
     providerEventId,
@@ -186,25 +241,22 @@ function normalizePhoneBurnerCallback(sourceHook, body = {}, {
       // this on call_done meant a URL arriving on any other hook was
       // silently dropped — and since the file is not ready at call end,
       // "later" is the normal case, not the exception.
-      recordingUrl: callbackRecordingUrl(
-        body.recording_url
-        ?? body.recordingUrl
-        ?? body.recording?.url
-        ?? body.recording
-        ?? body.call?.recording_url
-        ?? body.audio_url,
-      ),
-      // A RECORDING ID IS NOT A URL. callbackRecordingUrl() runs the value
-      // through new URL() and returns null for anything that is not https, so
-      // a bare id arriving in any of those fields was dropped on the floor.
+      recordingUrl: recordingEvidence.recordingUrl,
+      recordingSourceKey: recordingEvidence.recordingSourceKey,
+      recordingCandidateStatus: recordingEvidence.recordingCandidateStatus,
+      // Temporary fail-closed capture for provider values whose format is not
+      // yet understood. Private persisted evidence only: consumers must not
+      // treat this as a URL or expose it outside the server-side event.
+      recordingReference: recordingEvidence.recordingReference,
+      recordingReferenceSourceKey: recordingEvidence.recordingReferenceSourceKey,
+      // A recording id is correlation evidence only. It is never promoted to
+      // a URL and never replaces callback-delivered media authority.
       // Measured 2026-07-31: 23,722 stored callbacks, every one call_done,
       // zero with a recordingUrl — and the `recording` / `recording_ready`
       // hooks the route supports have never once fired.
       //
-      // The id matters more than the URL here: the service account gets a 404
-      // on getDialSession for the agents' own sessions (they dial on their own
-      // seats), so the session-lookup route is closed and whatever rides on
-      // the callback is all we will ever have.
+      // Persisted callback evidence is the forward path; report and trainer
+      // consumers do not infer completeness from shared-account sessions.
       recordingId: opaqueProviderIdentity(
         body.recording_id
         ?? body.recordingId
@@ -311,6 +363,9 @@ function createPhoneBurnerLeadDeliveryRuntime(options = {}) {
   const logger = options.logger || null;
   const drain = options.drain || createPhoneBurnerLeadDeliveryDrain({ repository, now, logger });
   const schedule = options.schedule || ((work) => setImmediate(work));
+  const allowedRecordingHosts = options.allowedRecordingHosts
+    ?? process.env.PHONEBURNER_RECORDING_ALLOWED_HOSTS
+    ?? "";
   const allowedAgentIds = new Set((options.allowedAgentIds || [])
     .map(callbackAgentId)
     .filter(Boolean));
@@ -424,6 +479,7 @@ function createPhoneBurnerLeadDeliveryRuntime(options = {}) {
             receivedAt: now(),
             payloadDigest: requestDigest(req),
             sourceAgentId: requestedAgentId,
+            allowedRecordingHosts,
           });
         } catch {
           return res.status(422).json({ ok: false, error: "invalid-phoneburner-callback" });
@@ -438,7 +494,9 @@ function createPhoneBurnerLeadDeliveryRuntime(options = {}) {
             && typeof repository.findEventByDedupeKey === "function"
             && typeof repository.upgradeEventEvidenceCas === "function") {
             const existing = await repository.findEventByDedupeKey(event);
-            const upgrade = existing ? buildCapturedEventUpgrade(existing, event) : null;
+            const upgrade = existing
+              ? buildCapturedEventUpgrade(existing, event, { allowedRecordingHosts })
+              : null;
             if (upgrade) {
               const strengthened = await repository.upgradeEventEvidenceCas({
                 eventId: existing._id,
@@ -566,12 +624,6 @@ function createPhoneBurnerLeadDeliveryRuntime(options = {}) {
         if (!singleOwnerCallEnd && created && ["pending", "failed"].includes(created.status)) {
           scheduleSafely(async () => {
             const result = await drain.drainEvent(created);
-            safeInfo("phoneburner.lead_delivery.callback_drained", safeDrainDetails(result));
-            return result;
-          });
-        } else if (created === null) {
-          scheduleSafely(async () => {
-            const result = await drain.drainOnce({ limit: 50 });
             safeInfo("phoneburner.lead_delivery.callback_drained", safeDrainDetails(result));
             return result;
           });

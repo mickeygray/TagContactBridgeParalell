@@ -346,7 +346,7 @@ async function runNightPass({
   const recordings = { callrail: [], phoneburner: [], notable: [], dealCalls: [], attachments: [], skipped: [] };
   try {
     const {
-      listPhoneBurnerLongDials, listNotableCalls, downloadRecordings,
+      listLdLongDialsFromDials, listNotableCalls, downloadRecordings,
     } = require("./nightRecordingsService");
 
     // POST-DATE cases need a phone before they can be matched to a call —
@@ -370,24 +370,18 @@ async function runNightPass({
 
     // Coaching set: DEALS, POST DATES, and anything over ten minutes —
     // across CallRail AND PhoneBurner (recordings are per-agent feedback).
-    let phoneBurnerClient = null;
-    try {
-      const { createPhoneBurnerClient, createPhoneBurnerDurableCredentialStore } = require("../../shared-integrations/src");
-      const { userAccountRepository } = require("../../shared-repositories/src");
-      phoneBurnerClient = createPhoneBurnerClient({
-        credentialStore: createPhoneBurnerDurableCredentialStore({
-          serviceEmail: String(process.env.PARALLEL_SERVICE_EMAIL || "service@taxadvocategroup.com").trim().toLowerCase(),
-          credentialRepository: userAccountRepository,
-        }),
-        logger,
-      });
-    } catch { /* PhoneBurner is optional; CallRail still carries the set */ }
-
     recordings.notable = await listNotableCalls({
       domain: "TAG", dateKey, deals: night.lanes.deals, postDateCases,
-      phoneBurnerClient, logger,
+      logger,
     });
-    recordings.phoneburner = await listPhoneBurnerLongDials({ dateKey, limit: 5 });
+    // PhoneBurner reads DailyDial, not CallLog. Mickey 2026-08-03: "let call log
+    // be the recording for ring central and daily dial for phone burner".
+    //
+    // CallLog holds 21,038 phoneburner rows and ZERO carrying a recording, all
+    // time, so the previous reader could never return a listen link no matter
+    // what arrived. `domain` is deliberately unset — LD lives under WYNN, and
+    // passing this board's TAG filtered out every dial.
+    recordings.phoneburner = await listLdLongDialsFromDials({ dateKey, domain: null, limit: 5 });
     recordings.callrail = [];
     recordings.dealCalls = recordings.notable.filter((c) => c.reasons?.includes("DEAL"));
     if (attach) {

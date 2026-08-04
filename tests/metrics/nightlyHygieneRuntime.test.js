@@ -9,6 +9,7 @@ const assert = require("node:assert/strict");
 const {
   createNightlyHygieneRuntime, isPacificBusinessDay, persistTargetDay,
 } = require("../../apps/control-plane/src/services/nightlyHygieneRuntime");
+const { DailyLoopRun } = require("../../packages/shared-models/src");
 
 const withEnv = async (vars, fn) => {
   const prior = {};
@@ -32,6 +33,11 @@ test("disabled by default — deploying the code does not start writing", async 
     NIGHTLY_HYGIENE_ENABLED: undefined,
     LOGICS_SOURCE_WRITER_ENABLED: undefined,
     NIGHT_PERSIST_ENABLED: undefined,
+    // Armed in this box's .env on 2026-08-03. The test asserts what a FRESH
+    // deploy does, so every writer flag has to be cleared here — otherwise
+    // this stops testing the default and starts testing the local machine.
+    MAIL_INVOICE_MAILBOX_ENABLED: undefined,
+    MAIL_SPEND_DERIVE_ENABLED: undefined,
   }, async () => {
     const rt = createNightlyHygieneRuntime({});
     const s = rt.getState();
@@ -65,6 +71,104 @@ test("the running guard is released by EVERY early return", async () => {
 test("scheduled hygiene is dormant on Pacific weekends", () => {
   assert.equal(isPacificBusinessDay(new Date("2026-08-02T16:00:00.000Z")), false);
   assert.equal(isPacificBusinessDay(new Date("2026-08-03T16:00:00.000Z")), true);
+});
+
+test("scheduled disabled tasks perform zero discovery after a durable daily claim", async () => {
+  const originalFind = DailyLoopRun.findOneAndUpdate;
+  const originalUpdate = DailyLoopRun.updateOne;
+  DailyLoopRun.findOneAndUpdate = async () => ({ dateKey: "2026-08-03" });
+  DailyLoopRun.updateOne = async () => ({ acknowledged: true });
+  try {
+    const rt = createNightlyHygieneRuntime({ config: { enabled: true, hour: 0 } });
+    let planned = 0;
+    rt.TASKS.length = 0;
+    rt.TASKS.push({
+      key: "disabled", label: "disabled", writesArmed: () => false,
+      plan: async () => { planned += 1; return []; },
+      apply: async () => ({}), describe: () => "",
+    });
+    const result = await rt.runOnce({ at: new Date("2026-08-03T20:00:00Z") });
+    assert.equal(planned, 0);
+    assert.equal(result.tasks[0].reason, "write-disabled-no-discovery");
+  } finally {
+    DailyLoopRun.findOneAndUpdate = originalFind;
+    DailyLoopRun.updateOne = originalUpdate;
+  }
+});
+
+test("scheduled hygiene stops at a failed task and leaves its durable cursor retryable", async () => {
+  const originalFind = DailyLoopRun.findOneAndUpdate;
+  const originalUpdate = DailyLoopRun.updateOne;
+  const writes = [];
+  const claimedAt = new Date("2026-08-04T03:00:00Z");
+  DailyLoopRun.findOneAndUpdate = async () => ({
+    dateKey: "2026-08-03", nightlyHygieneClaimedAt: claimedAt, nightlyHygieneNextTaskIndex: 0,
+  });
+  DailyLoopRun.updateOne = async (filter, update) => {
+    writes.push({ filter, update });
+    return { acknowledged: true, matchedCount: 1 };
+  };
+  try {
+    const rt = createNightlyHygieneRuntime({ config: { enabled: true, hour: 0 } });
+    let laterPlans = 0;
+    rt.TASKS.length = 0;
+    rt.TASKS.push(
+      {
+        key: "failed", label: "failed", writesArmed: () => true,
+        plan: async () => { throw new Error("bounded task failed"); },
+        apply: async () => ({}), describe: () => "",
+      },
+      {
+        key: "later", label: "later", writesArmed: () => true,
+        plan: async () => { laterPlans += 1; return []; },
+        apply: async () => ({}), describe: () => "",
+      },
+    );
+    const result = await rt.runOnce({ at: claimedAt });
+    assert.equal(result.incomplete, true);
+    assert.equal(result.nextTaskIndex, 0);
+    assert.equal(laterPlans, 0);
+    assert.equal(rt.getState().lastRunKey, null);
+    assert.ok(writes.some((row) => row.update.$set?.nightlyHygieneClaimedAt === null));
+    assert.ok(!writes.some((row) => row.update.$set?.nightlyHygieneCompletedAt));
+  } finally {
+    DailyLoopRun.findOneAndUpdate = originalFind;
+    DailyLoopRun.updateOne = originalUpdate;
+  }
+});
+
+test("scheduled hygiene resumes from the durable task cursor after restart", async () => {
+  const originalFind = DailyLoopRun.findOneAndUpdate;
+  const originalUpdate = DailyLoopRun.updateOne;
+  const claimedAt = new Date("2026-08-04T03:00:00Z");
+  DailyLoopRun.findOneAndUpdate = async () => ({
+    dateKey: "2026-08-03", nightlyHygieneClaimedAt: claimedAt, nightlyHygieneNextTaskIndex: 1,
+  });
+  DailyLoopRun.updateOne = async () => ({ acknowledged: true, matchedCount: 1 });
+  try {
+    const rt = createNightlyHygieneRuntime({ config: { enabled: true, hour: 0 } });
+    const planned = [];
+    rt.TASKS.length = 0;
+    rt.TASKS.push(
+      {
+        key: "already-done", label: "already done", writesArmed: () => true,
+        plan: async () => { planned.push("already-done"); return []; },
+        apply: async () => ({}), describe: () => "",
+      },
+      {
+        key: "resume-here", label: "resume here", writesArmed: () => true,
+        plan: async () => { planned.push("resume-here"); return []; },
+        apply: async () => ({}), describe: () => "",
+      },
+    );
+    const result = await rt.runOnce({ at: claimedAt });
+    assert.deepEqual(planned, ["resume-here"]);
+    assert.equal(result.incomplete, undefined);
+    assert.equal(rt.getState().lastRunKey, "2026-08-03");
+  } finally {
+    DailyLoopRun.findOneAndUpdate = originalFind;
+    DailyLoopRun.updateOne = originalUpdate;
+  }
 });
 
 test("running the loop is a SEPARATE decision from letting it write", async () => {
@@ -248,8 +352,18 @@ test("the night runs in the stated ORDER", () => {
   // the SAME completed day out of the one CallRail account — keeping them
   // adjacent is what stops a future edit from putting a recovery read on a
   // different day boundary than the link capture that describes it.
+  //
+  // mail-invoice sits AFTER night-persist and not first. It is a network-bound
+  // mailbox read, so it is the task most able to stall; night-persist writes
+  // officerAtSale/sourceAtSale, which is the one thing here that cannot be
+  // recovered later. The irreplaceable write goes before the stallable read.
+  //
+  // mail-spend-derive follows mail-invoice directly, so a day's invoice can
+  // arrive and become spend in the SAME pass, ten minutes before the board
+  // reads it. It is armed separately because reading the mailbox and believing
+  // the number are different decisions.
   assert.deepEqual(s2.tasks.map((t) => t.key),
-    ["night-persist", "call-links", "call-recovery-discovery", "queue-rollup", "logics-source"]);
+    ["night-persist", "mail-invoice", "mail-spend-derive", "call-links", "call-recovery-discovery", "queue-rollup", "logics-source"]);
 });
 
 test("call-links CAPTURES marketing links; PhoneBurner still cannot", () => {

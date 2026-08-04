@@ -43,8 +43,18 @@ test("money on an unattributed bucket still appears, as a residual line", () => 
   ]);
   const { csv } = sourceRows(m);
   const labels = csv.emailRows.map((r) => String(r.source));
-  assert.ok(labels.some((l) => /Not attributed/i.test(l)),
-    "a bucket row must collapse into a residual, never vanish");
+  // The residual is NAMED FOR WHAT IT HOLDS. With no deals it is the back book
+  // paying instalments ("Recurring (all databases)"). With deals in it — the
+  // Logics catch-alls carry new sales whose source is not resolved yet — it
+  // says so instead, because on 2026-08-03 calling 3 deals worth $2,062.50
+  // "recurring" was simply false and hid a backlog that needs clearing.
+  const residual = csv.emailRows.find((r) => /Recurring|Unattributed/i.test(String(r.source)));
+  assert.ok(residual,
+    `a bucket row must collapse into a residual, never vanish — got ${labels.join(" | ")}`);
+  // The label is cosmetic; THE MONEY SURVIVING IS THE POINT. Assert the amount
+  // too, so a future rename cannot quietly turn this into a test of nothing.
+  assert.equal(Math.round((residual.newCash + residual.recurringCash) * 100) / 100, 700,
+    "the unattributed $700 must still be on the board");
 });
 
 test("the emailed section reconciles to the same cash the top line reports", () => {
@@ -138,3 +148,30 @@ test("ROAS reads initials over spend, ignoring recurring entirely", () => {
 function csv_get(csv, header, row) {
   return csv.emailColumns.find((c) => c.header === header).get(row);
 }
+
+test("a residual holding DEALS is not called recurring", () => {
+  // 2026-08-03: the Logics catch-alls held 3 new sales worth $2,062.50 and the
+  // residual labelled them "Recurring (all databases)". That is false — they
+  // are new business whose source has not been resolved — and it buried a
+  // backlog that scripts/sanitize-logics-source.js exists to clear.
+  const m = material([
+    payment({ caseId: 10, amount: 700, sourceAtSale: null, paymentType: "initial" }),
+    payment({ caseId: 11, amount: 250, sourceAtSale: "Urgent Third State" }),
+  ]);
+  const residual = sourceRows(m).csv.emailRows.find((r) => r.residual);
+  assert.ok(residual, "residual row expected");
+  assert.match(String(residual.source), /Unattributed/i);
+  assert.match(String(residual.source), /1 deal/, "the count makes the backlog visible");
+  assert.equal(/recurring/i.test(String(residual.source)), false);
+});
+
+test("a residual with NO deals is still called recurring", () => {
+  // The 2026-07-31 case, and the common one: pure back-book instalments.
+  const m = material([
+    payment({ caseId: 10, amount: 700, sourceAtSale: null, paymentType: "recurring" }),
+    payment({ caseId: 11, amount: 250, sourceAtSale: "Urgent Third State" }),
+  ]);
+  const residual = sourceRows(m).csv.emailRows.find((r) => r.residual);
+  assert.ok(residual, "residual row expected");
+  assert.match(String(residual.source), /Recurring/i);
+});

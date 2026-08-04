@@ -38,6 +38,11 @@ const DEFAULT_ACTIVE = [
   "3rd Day (Pink) Urgent Third State",
   "Urgent Third State",
   "Affordability Federal",
+  // The rolled-up label itself must be active. Every LD variant folds onto
+  // "LD", so if the fold target is not on this roster the whole channel's cost
+  // buckets to Aged — which is exactly what happened: $318 of LD spend landed
+  // on the Aged row while LD read "no spend".
+  "LD",
   "LD CUSTOM",
   "LD CUSTOM 2",
   "LD CUSTOM 3",
@@ -46,6 +51,34 @@ const DEFAULT_ACTIVE = [
 ];
 
 const AGED_LABEL = "Aged / inactive source";
+
+// ── LD IS ONE ROW ─────────────────────────────────────────────────────────
+//
+// Mickey 2026-08-03: "maybe its custom 2 or something maybe do a roll up on
+// all LD combining general, custom, etc all the stuff thats different names."
+//
+// The vendor's feed names churn — LD CUSTOM, LD CUSTOM 2, LD CUSTOM 3, LD
+// GENERAL, and whatever they add next. They are one purchase, dialled by one
+// mechanism, at one rate, so splitting them across rows fragments the deal
+// count and makes every per-row ROAS too small to read. It also means a NEW
+// variant appearing is a silent split rather than a visible change.
+//
+// Anchored with a boundary so "LD" and "LD CUSTOM 2" match while a source
+// merely beginning with those letters (say "LDR Outreach") does not.
+const LD_LABEL = "LD";
+const LD_PATTERN = /^ld\b/i;
+
+function isLdSource(name) {
+  return LD_PATTERN.test(String(name || "").trim());
+}
+
+/**
+ * The row label a source's money belongs on, before any ageing logic.
+ * Every LD variant folds to "LD"; everything else keeps its own name.
+ */
+function canonicalSourceLabel(name) {
+  return isLdSource(name) ? LD_LABEL : String(name || "").trim();
+}
 
 let cached = null;
 
@@ -150,6 +183,31 @@ function sourceBucket(name, {
   // Deliberately NOT the create date: mail leads are bulk-loaded and sit
   // about a week, so case 368274 was created 2026-05-29 and sold 2026-07-08.
   // Judging it by creation would have aged out a live July sale.
+  // 0. LD IS NEVER AGED.
+  //
+  // Mickey 2026-08-03: "read the name of the source on the case in activities.
+  // its LD so its LD." / "aged is more of a tag thing LD is LD" / "cause its
+  // coming through the same sorta mechanism of hammering with pb until they
+  // close."
+  //
+  // AGED is a MAIL concept. A mail piece stops running, and the money that
+  // trickles in afterwards is not this month's advertising working — that is
+  // what the bucket is for. LD has no equivalent: the leads are dialled in
+  // PhoneBurner until they close, so a lead that converts on day 60 converted
+  // through exactly the same mechanism as one that converted on day 2. Its age
+  // says nothing about what produced the sale.
+  //
+  // What this fixes concretely: a POST-DATED LD sale was landing in Aged. The
+  // gate below reads the FIRST PAYMENT date, and a post-date by definition
+  // puts that outside the window — so a live LD deal aged out and took its
+  // $700 off the LD row. That is the "unattributed deal" on the 2026-07-31
+  // board.
+  //
+  // Deliberately scoped to LD. An earlier attempt exempted every ACTIVE
+  // source, which also stopped mail pieces from ageing and broke eight
+  // standing rules about exactly that.
+  if (isLdSource(name)) return LD_LABEL;
+
   // 1. SOLD IN RANGE is the gate. A case whose first payment landed in an
   //    earlier month is residual: every payment it makes now is last month's
   //    business arriving late, however fresh its calls look.
@@ -238,4 +296,7 @@ module.exports = {
   listActiveSources,
   resetActiveSources,
   sourceBucket,
+  LD_LABEL,
+  isLdSource,
+  canonicalSourceLabel,
 };

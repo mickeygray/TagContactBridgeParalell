@@ -22,19 +22,41 @@ function isWeakOutcome(value) {
   return ["answered", "review"].includes(String(value || "").trim().toLowerCase());
 }
 
+// Shape guard for a locator that has ALREADY passed the exact-host policy
+// upstream (recordingReferencePromotionService). PhoneBurner delivers plain
+// `http:` links, so refusing them here is what kept every live recording out
+// of the attempt — but the ledger still refuses anything that is not a
+// bounded, credential-free, absolute locator, so a caller can never park an
+// arbitrary string in this field.
+//
+// Each refusal names its own cause so a failure is diagnosable. NO message may
+// ever interpolate the value: a thrown error is the classic way a link escapes
+// into a log that no deliberate log site ever touched.
 function normalizeRecordingUrl(value) {
   if (value == null || value === "") return null;
   const normalized = String(value).trim();
-  if (!normalized || normalized.length > 2048) throw new TypeError("recordingUrl is invalid");
+  if (!normalized) throw new TypeError("recordingUrl is blank");
+  if (normalized.length > 2048) throw new TypeError("recordingUrl exceeds the bounded length");
+  let parsed;
   try {
-    const parsed = new URL(normalized);
-    if (parsed.protocol !== "https:" || parsed.username || parsed.password) {
-      throw new TypeError("recordingUrl is invalid");
-    }
-    return parsed.toString();
+    parsed = new URL(normalized);
   } catch {
-    throw new TypeError("recordingUrl is invalid");
+    throw new TypeError("recordingUrl is not an absolute url");
   }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    throw new TypeError("recordingUrl protocol is not http or https");
+  }
+  if (parsed.username || parsed.password) throw new TypeError("recordingUrl carries embedded credentials");
+  if (parsed.href.length > 2048) throw new TypeError("recordingUrl exceeds the bounded length");
+  return parsed.toString();
+}
+
+// Strength, not recency, decides which locator an attempt keeps. A validated
+// https locator outranks a promoted http reference; only two locators of the
+// SAME strength disagreeing is a real conflict.
+function recordingLocatorRank(url) {
+  if (!url) return 0;
+  return String(url).startsWith("https:") ? 2 : 1;
 }
 
 function snapshotLead(cadence = {}) {
@@ -150,6 +172,21 @@ async function recordDailyDialOffload({
       || String(existingAttempt.providerCallId || "").trim() !== callId)) {
     throw new Error("DailyDial provider attempt identity conflict");
   }
+  const existingRecordingUrl = normalizeRecordingUrl(existingAttempt?.recordingUrl);
+  const existingRecordingRank = recordingLocatorRank(existingRecordingUrl);
+  const incomingRecordingRank = recordingLocatorRank(safeRecordingUrl);
+  // A weaker late locator is IGNORED, not a conflict: a promoted reference may
+  // never displace a validated URL already on the attempt. Two locators of the
+  // same strength that disagree are a genuine contradiction and fail closed.
+  if (existingRecordingUrl
+    && safeRecordingUrl
+    && existingRecordingUrl !== safeRecordingUrl
+    && existingRecordingRank === incomingRecordingRank) {
+    throw new Error("DailyDial provider attempt recording conflict");
+  }
+  const attemptRecordingUrl = incomingRecordingRank > existingRecordingRank
+    ? safeRecordingUrl
+    : (existingRecordingUrl || safeRecordingUrl || null);
 
   const existingOutcome = String(existingAttempt?.outcome || "").trim().toLowerCase();
   let outcome = incomingOutcome;
@@ -182,7 +219,7 @@ async function recordDailyDialOffload({
     callStartedAt: attemptStartedAt,
     callEndedAt: attemptEndedAt,
     durationSeconds: seconds == null ? (existingAttempt?.durationSeconds ?? null) : seconds,
-    recordingUrl: safeRecordingUrl || existingAttempt?.recordingUrl || null,
+    recordingUrl: attemptRecordingUrl,
     originPool: pool === "unknown" ? (existingAttempt?.originPool || pool) : pool,
     dailyAttemptCount: Math.max(canonicalCount, Number(existingAttempt?.dailyAttemptCount || 0)),
     totalAttemptCount: Math.max(canonicalTotal, Number(existingAttempt?.totalAttemptCount || 0)),

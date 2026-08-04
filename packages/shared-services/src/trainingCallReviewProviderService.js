@@ -15,6 +15,12 @@ const {
   createCallrailClient,
   createRingCentralClient,
 } = require("../../shared-integrations/src");
+const {
+  hostnameMatchesAllowedRule,
+  isForbiddenHostname,
+  isPublicIp,
+  parseAllowedRecordingHosts,
+} = require("./recordingHostPolicyService");
 
 const DEFAULT_MAX_BYTES = 24 * 1024 * 1024;
 const DEFAULT_TIMEOUT_MS = 60_000;
@@ -43,103 +49,6 @@ function normalizeToken(value) {
 
 function normalizeProvider(value) {
   return normalizeToken(value).toLowerCase();
-}
-
-function parseAllowedRecordingHosts(value) {
-  const values = Array.isArray(value)
-    ? value
-    : String(value || "").split(/[\s,;]+/);
-  return [...new Set(
-    values
-      .map((item) => String(item || "").trim().toLowerCase().replace(/\.$/, ""))
-      .filter(
-        (item) =>
-          item &&
-          item.length <= 253 &&
-          !item.includes("://") &&
-          !item.includes("/") &&
-          !item.includes("@") &&
-          !item.includes(":"),
-      ),
-  )];
-}
-
-function hostnameMatchesAllowedRule(hostname, rule) {
-  const host = String(hostname || "")
-    .trim()
-    .toLowerCase()
-    .replace(/^\[|\]$/g, "")
-    .replace(/\.$/, "");
-  const normalizedRule = String(rule || "").trim().toLowerCase();
-  if (!host || !normalizedRule) return false;
-  if (normalizedRule.startsWith(".")) {
-    return host.endsWith(normalizedRule) && host.length > normalizedRule.length;
-  }
-  return host === normalizedRule;
-}
-
-function isPublicIpv4(address) {
-  const parts = String(address).split(".").map(Number);
-  if (
-    parts.length !== 4 ||
-    parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255)
-  ) {
-    return false;
-  }
-  const [a, b, c] = parts;
-  if (a === 0 || a === 10 || a === 127 || a >= 224) return false;
-  if (a === 100 && b >= 64 && b <= 127) return false;
-  if (a === 169 && b === 254) return false;
-  if (a === 172 && b >= 16 && b <= 31) return false;
-  if (a === 192 && b === 168) return false;
-  if (a === 192 && b === 0) return false;
-  if (a === 192 && b === 0 && c === 2) return false;
-  if (a === 198 && (b === 18 || b === 19)) return false;
-  if (a === 198 && b === 51 && c === 100) return false;
-  if (a === 203 && b === 0 && c === 113) return false;
-  return true;
-}
-
-function isPublicIpv6(address) {
-  const value = String(address || "")
-    .toLowerCase()
-    .split("%")[0]
-    .replace(/^\[|\]$/g, "");
-  if (!value || value === "::" || value === "::1") return false;
-  if (value.startsWith("::ffff:")) {
-    const mapped = value.slice("::ffff:".length);
-    return net.isIP(mapped) === 4 && isPublicIpv4(mapped);
-  }
-  const first = Number.parseInt(value.split(":")[0] || "0", 16);
-  if (!Number.isFinite(first)) return false;
-  if ((first & 0xfe00) === 0xfc00) return false;
-  if ((first & 0xffc0) === 0xfe80) return false;
-  if ((first & 0xff00) === 0xff00) return false;
-  if (value.startsWith("2001:db8:") || value === "2001:db8::") return false;
-  return true;
-}
-
-function isPublicIp(address) {
-  const family = net.isIP(String(address || ""));
-  if (family === 4) return isPublicIpv4(address);
-  if (family === 6) return isPublicIpv6(address);
-  return false;
-}
-
-function isForbiddenHostname(hostname) {
-  const host = String(hostname || "")
-    .toLowerCase()
-    .replace(/^\[|\]$/g, "")
-    .replace(/\.$/, "");
-  return (
-    !host ||
-    host === "localhost" ||
-    host.endsWith(".localhost") ||
-    host.endsWith(".local") ||
-    host.endsWith(".internal") ||
-    host.endsWith(".lan") ||
-    host.endsWith(".home")
-  );
 }
 
 async function assertPublicHttpsUrl(value, { lookup, isHostAllowed }) {
@@ -377,10 +286,10 @@ function createTrainingCallReviewProviderService({
   createRingCentralClientImpl = createRingCentralClient,
   fetchImpl = globalThis.fetch,
   dnsLookup = dns.promises.lookup,
-  allowedRecordingHosts = env(
-    "SALES_TRAINER_CALL_REVIEW_ALLOWED_RECORDING_HOSTS",
-    "",
-  ),
+  allowedRecordingHosts = [
+    env("PHONEBURNER_RECORDING_ALLOWED_HOSTS", ""),
+    env("SALES_TRAINER_CALL_REVIEW_ALLOWED_RECORDING_HOSTS", ""),
+  ].filter(Boolean).join(","),
   tempRoot = path.join(os.tmpdir(), "training-call-review"),
   maxBytes = DEFAULT_MAX_BYTES,
   timeoutMs = DEFAULT_TIMEOUT_MS,

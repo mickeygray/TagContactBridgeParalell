@@ -15,6 +15,50 @@
 const { resolveSelection, neededSources } = require("./reportBlocksService");
 
 const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
+
+/**
+ * Merge the two sources of mail spend WITHOUT double-counting.
+ *
+ * Mail cost can come from the hand-kept spend sheet or from MailSpendDay rows
+ * derived from the vendor's invoice. Summing both doubles the day's mail cost
+ * and halves ROAS, so they are merged as a SET PARTITION: for any day an
+ * invoice covers, the sheet's mail rows are removed and the invoice's rows
+ * stand in their place. Everything else on that day is untouched.
+ *
+ * Whole-day, not per-source, and that is deliberate. A per-source merge needs
+ * both sides to agree on source naming, and any disagreement leaks a PARTIAL
+ * double-count — which sums to something plausible and so goes unnoticed. "Is
+ * this day invoiced?" is a question with an answer.
+ *
+ * Extracted from gatherMaterial so the no-double-count invariant is testable
+ * without a database. It is pure on purpose.
+ */
+function partitionMailSpend({ sheetRows = [], derivedMail = [] } = {}) {
+  const invoiceDays = new Set(derivedMail.map((r) => r.serviceDate));
+  // Lower-cased: the sheet is hand-typed, and a row spelled "Mailer" on an
+  // invoiced day must still be displaced or it double-counts.
+  const isMailer = (r) => String(r.channel || "").toLowerCase() === "mailer";
+  const onInvoiceDay = (r) => isMailer(r) && invoiceDays.has(String(r.date || "").slice(0, 10));
+
+  return {
+    supersededSheetRows: sheetRows.filter(onInvoiceDay),
+    rows: [
+      ...sheetRows.filter((r) => !onInvoiceDay(r)),
+      ...derivedMail.map((r) => ({
+        date: r.serviceDate,
+        channel: "mailer",
+        source: r.source,
+        spend: r.spend,
+        pieces: r.pieces,
+        // `cost` is what the night board sums into its POSTAGE sub-total.
+        // Without it, an invoiced day would report the right total over a $0
+        // postage line — a discrepancy that reads as a parsing failure.
+        cost: r.postage ?? 0,
+        leadsReported: 0,
+      })),
+    ],
+  };
+}
 // Module-level so gather-time notes can quote money the same way the renderers
 // do — a note reading "1234.5" next to a table reading "$1,234.50" invites the
 // reader to wonder whether they are the same number.
@@ -313,23 +357,121 @@ async function gatherMaterial({
   if (want.has("spend") || want.has("source")) {
     const SpendEntry = require("../../shared-models/src/SpendEntry");
     const DailyCallStat = require("../../shared-models/src/DailyCallStat");
+    const MailSpendDay = require("../../shared-models/src/MailSpendDay");
     const allRows = await SpendEntry.find({ date: { $gte: from, $lte: to }, active: { $ne: false } })
       .select("date channel source spend cost pieces leadsReported").lean();
     // Drop the mail tenant's channels on a board that is not its own. Dropped
     // here rather than at render so nothing downstream can re-sum them into a
     // total — see THE TENANT RULE above.
-    const rows = mailApplies
+    const sheetRows = mailApplies
       ? allRows
       : allRows.filter((r) => !MAIL_TENANT_CHANNELS.has(String(r.channel || "").toLowerCase()));
-    if (!mailApplies && rows.length !== allRows.length) {
-      notes.push(`${allRows.length - rows.length} mail/BCD spend row(s) omitted — they belong to ${MAIL_TENANT}, not ${scopedTenant}`);
+    if (!mailApplies && sheetRows.length !== allRows.length) {
+      notes.push(`${allRows.length - sheetRows.length} mail/BCD spend row(s) omitted — they belong to ${MAIL_TENANT}, not ${scopedTenant}`);
     }
-    const bcdRows = !mailApplies ? [] : await DailyCallStat.find({
-      date: { $gte: from, $lte: to }, channel: "bcd", active: { $ne: false },
-    }).select("totalCalls").lean();
 
-    const bcdRate = Number(process.env.BCD_COST_PER_CALL) > 0 ? Number(process.env.BCD_COST_PER_CALL) : 4;
-    const bcdCalls = bcdRows.reduce((s, r) => s + (Number(r.totalCalls) || 0), 0);
+    // ── THE SHEET, READ LIVE, WHEN SpendEntry HAS NO MAIL ────────────────
+    //
+    // Mickey 2026-08-03: "just read the csv if we have no email at 7:50".
+    //
+    // The vendor does one or the other on a given day — invoice OR sheet, not
+    // reliably both. SpendEntry is the sheet's PERSISTED form, written by a
+    // sync that only runs inside the control plane; that service is
+    // Manual+Stopped, so on 2026-08-01..03 the vendor was updating the sheet
+    // and none of it reached the board. Reading the CSV directly removes the
+    // dependency on that service being up.
+    //
+    // Only when SpendEntry has nothing — a live row is already the same sheet,
+    // and reading both would duplicate the day. The INVOICE still wins any day
+    // it covers; partitionMailSpend below decides that, not this.
+    // PER DAY, not per range. The first version skipped the CSV entirely when
+    // ANY mailer row existed anywhere in the range — so a week containing one
+    // persisted day silently dropped every CSV-only day after it. Measured on
+    // 2026-07-30..08-03: the range reported $3,694.52 and omitted 08-03's
+    // $1,584.48, which would understate every weekly and monthly mail figure.
+    if (mailApplies) {
+      const persistedMailDays = new Set(
+        sheetRows
+          .filter((r) => String(r.channel || "").toLowerCase() === "mailer")
+          .map((r) => String(r.date || "").slice(0, 10))
+          .filter(Boolean),
+      );
+      try {
+        const { readMailSheetCsv } = require("./mailSheetCsvService");
+        const csv = await readMailSheetCsv({ from, to });
+        if (csv.unavailable) {
+          // "they did not update it" and "we could not fetch it" are different
+          // problems with different fixes, and must never render the same.
+          // Only worth saying when a day actually lacks mail — a fully covered
+          // range does not need the fallback and should not raise an amber.
+          const covered = csv.days.length === 0 && persistedMailDays.size > 0;
+          if (!covered) advise(`mail sheet not read — ${csv.unavailable}`);
+        } else {
+          // A day already persisted is the SAME sheet; adding it again would
+          // double the day. Invoices are handled later — partitionMailSpend
+          // displaces whatever the sheet said on any day an invoice covers.
+          const fresh = csv.rows.filter((r) => !persistedMailDays.has(r.date));
+          if (fresh.length) {
+            sheetRows.push(...fresh);
+            const days = [...new Set(fresh.map((r) => r.date))].sort();
+            notes.push(`mail spend read live from the sheet for ${days.join(", ")} — no persisted rows for those days`);
+          }
+        }
+      } catch (error) {
+        advise(`mail sheet not read — ${String(error.message).slice(0, 110)}`);
+      }
+    }
+
+    // ── MAIL SPEND: THE INVOICE WINS THE WHOLE DAY ────────────────────────
+    //
+    // Mail cost can now come from two places: the hand-kept spend sheet, and
+    // MailSpendDay rows derived from the vendor's own invoice. Summing both
+    // would DOUBLE the day's mail cost and halve ROAS, so they are merged as a
+    // SET PARTITION rather than added: for any day an invoice covers, the
+    // sheet's mail rows are removed and the invoice's rows stand in their
+    // place. Every other row on that day — LD, anything else — is untouched.
+    //
+    // Whole-day, not per-source, and that is the point. A per-source merge
+    // would need the two sides to agree on source naming, and any disagreement
+    // would leak a partial double-count that sums to something plausible. A
+    // day is either invoiced or it is not, which is a question with an answer.
+    //
+    // The invoice wins because it is what the vendor actually billed; the sheet
+    // is someone typing that number in later. When both exist they should
+    // agree, and where they do not, saying so is more useful than averaging —
+    // hence the drift note below rather than a silent correction.
+    const derivedMail = !mailApplies ? [] : await MailSpendDay.find({
+      domain: MAIL_TENANT, serviceDate: { $gte: from, $lte: to }, active: true,
+    }).select("serviceDate source spend pieces postage invoiceNumber invoiceGrandTotal").lean();
+
+    const { rows, supersededSheetRows } = partitionMailSpend({ sheetRows, derivedMail });
+
+    if (supersededSheetRows.length) {
+      const sheetTotal = round2(supersededSheetRows.reduce((s, r) => s + Number(r.spend || 0), 0));
+      const invoiceTotal = round2(derivedMail
+        .filter((r) => invoiceDays.has(r.serviceDate))
+        .reduce((s, r) => s + Number(r.spend || 0), 0));
+      material.mailSheetSpend = sheetTotal;
+      if (Math.abs(sheetTotal - invoiceTotal) >= 0.01) {
+        // Both sources spoke and disagreed. The invoice is used; the gap is
+        // named rather than averaged away, because a persistent gap means the
+        // sheet is being typed from something other than the invoice.
+        advise(`mail spend: the INVOICE ($${invoiceTotal}) is being used and the spend sheet ($${sheetTotal}) was set aside for the same day(s) — they disagree by $${round2(Math.abs(sheetTotal - invoiceTotal))}`);
+      } else {
+        notes.push(`mail spend taken from the invoice ($${invoiceTotal}); the sheet agreed and was set aside`);
+      }
+    }
+    // BCD — calls x $4, any version of the piece. `channel: "bcd"` alone found
+    // only the LEGACY row, so the board read 0 once the vendor moved to
+    // "BCD V3". See bcdCallsService: it also handles the changeover days where
+    // both rows exist and a naive match would double-count.
+    const { readBcdCalls } = require("./bcdCallsService");
+    const bcdRead = !mailApplies
+      ? { calls: 0, rate: Number(process.env.BCD_COST_PER_CALL) > 0 ? Number(process.env.BCD_COST_PER_CALL) : 4, unavailable: null }
+      : await readBcdCalls({ from, to, DailyCallStat });
+    if (bcdRead.unavailable) fail(`BCD CALLS UNAVAILABLE for ${from}..${to} — ${bcdRead.unavailable} — BCD spend below reads as $0.00`);
+    const bcdRate = bcdRead.rate;
+    const bcdCalls = bcdRead.calls;
     const spendBySource = {};
     // Spend keyed by DAY as well as by source: a profit-and-loss over time
     // needs cost per period, and the aggregate totals cannot be un-summed.
@@ -357,22 +499,141 @@ async function gatherMaterial({
       spendBySource[r.source].spend = round2(spendBySource[r.source].spend + amt);
       spendBySource[r.source].leads += Number(r.leadsReported || 0);
       if (r.channel === "lead-data") {
-        ld = round2(ld + amt); ldLeads += Number(r.leadsReported || 0);
-        // A zero-everything row (e.g. LD GENERAL placeholders) is not coverage.
-        if (day && (amt > 0 || Number(r.leadsReported || 0) > 0)) ldSheetDays.add(day);
+        // The sheet's lead-data DOLLARS are retired — LD spend is derived
+        // below. The row is still walked so its source name survives in the
+        // By-source table, but its amount is deliberately not added, or a
+        // stale sheet row would double LD.
+        if (day && Number(r.leadsReported || 0) > 0) ldSheetDays.add(day);
       }
       else if (r.channel === "mailer") { mail = round2(mail + amt); mailPieces += Number(r.pieces || 0); }
     }
+
+    // ── LD: new leads x rate, off our own receipts ────────────────────────
+    //
+    // Mickey 2026-08-03: "we arent using that sheet at all" / "LD is new leads
+    // * 3" / "bcd is bcd calls * 4".
+    //
+    // That retires the spend sheet completely. All three channels are now
+    // live-sourced and none of them waits on a person typing:
+    //
+    //   mail  the vendor's invoice, scraped from the mailbox
+    //   LD    new leads x $3   (here)
+    //   BCD   bcd calls x $4   (below, already derived)
+    //
+    // This is the SECOND place it had to go. nightReportService has the same
+    // wiring, but the night board runtime was deleted on 2026-07-31, so that
+    // path only runs by hand — THIS is the composer behind the 8pm email, and
+    // fixing only the other one would have left the emailed board unchanged.
+    const { readLdSpend } = require("./ldSpendService");
+    // SCOPED. Mickey 2026-08-03: "amity is just adding to the total payments no
+    // marketing spend."
+    //
+    // Unscoped, every domain board claimed the whole day's LD cost — an AMITY
+    // board read $318 of LD spend against zero LD leads, because all 106 were
+    // WYNN. The ldLeads material below scopes correctly and overwrites this,
+    // but ONLY when a report asks for that material; a report needing "spend"
+    // alone kept the unscoped figure. Passing the domain here makes the number
+    // right regardless of which blocks were selected.
+    const ldDerived = await readLdSpend({ from, to, domain });
+    if (ldDerived.unavailable) {
+      // Never render "we could not ask" as "$0.00 spent".
+      fail(`LD SPEND UNAVAILABLE for ${from}..${to} — ${ldDerived.unavailable} — LD ROAS below has no denominator`);
+    } else {
+      ld = ldDerived.spend;
+      ldLeads = ldDerived.leads;
+      for (const [day, amt] of Object.entries(ldDerived.spendByDay)) {
+        spendByDay[day] = spendByDay[day] || { spend: 0, mail: 0, ld: 0, bcd: 0 };
+        spendByDay[day].spend = round2(spendByDay[day].spend + amt);
+        spendByDay[day].ld = round2(spendByDay[day].ld + amt);
+      }
+      // NO spendBySource row is written here, deliberately. The ldLeads
+      // material below already pushes the derived cost down per receipt
+      // sourceName ("LD CUSTOM", "LD GENERAL", ...), and those now fold onto
+      // the single "LD" row. Writing an "LD" row here as well meant the same
+      // $318 was added twice — once as one lump and once as its parts — which
+      // is what put $315 on LD and $321 on Aged against 106 leads that only
+      // ever cost $318. Spend is counted ONCE, at the source that produced it.
+    }
+
     const bcd = round2(bcdCalls * bcdRate);
     if (bcdCalls) spendBySource.BCD = { spend: bcd, leads: 0, channel: "bcd" };
     material.spend = {
       ld, mail, bcd, bcdCalls, bcdRate, ldLeads, mailPieces,
+      ldRate: ldDerived.rate,
+      ldUnavailable: ldDerived.unavailable,
       ldSheetDays: [...ldSheetDays].sort(),
       total: round2(ld + mail + bcd),
     };
     material.spendBySource = spendBySource;
     material.spendByDay = spendByDay;
-    if (!rows.length) fail(`NO SPEND RECORDED for ${from}..${to} — the sheet is filled in by 20:00, so ROAS below has no denominator and every cost-per reads as free`);
+    // The spend SHEET is retired, so its emptiness is no longer news. What
+    // matters is whether the three live sources produced anything.
+    if (!ld && !mail && !bcd) {
+      fail(`NO SPEND for ${from}..${to} from ANY source (mail invoice, LD receipts, BCD calls) — ROAS below has no denominator and every cost-per reads as free`);
+    }
+
+    // ── did the vendor's mail invoice arrive? ──────────────────────────────
+    //
+    // Mickey 2026-07-31: "the invoice check can run once at the 8 pm thing."
+    //
+    // The INGEST runs at 19:50 in nightly hygiene; this is the CHECK, and it
+    // belongs here because the board is the only 8pm surface an operator reads.
+    // hygiene's describe() goes to the log, and a log nobody opens is not a
+    // check.
+    //
+    // It deliberately does NOT add a second red line when the spend sheet is
+    // already missing entirely — that is one root cause, and two reds for one
+    // cause is the cry-wolf the failure/advisory split exists to stop. It
+    // speaks only when it knows something the spend line does not: the sheet
+    // has rows but mail is absent from them, and here is whether the invoice
+    // that should have supplied it exists.
+    // `!mail && !mailPieces`, not `!mailPieces` alone: a mail row that carries
+    // a Total but a blank Pieces cell yields mailPieces === 0 while mail spend
+    // is real, and testing pieces alone prints "NO MAIL SPEND" directly above
+    // the mail spend it is denying.
+    // NOT gated on `rows.length` any more. That condition was written while
+    // the spend SHEET was still the mail source, so it meant "the sheet has
+    // rows but mail is missing from them". The sheet is retired, so rows is
+    // routinely empty and this whole check stopped running — on 2026-08-03 the
+    // board reported mail $0.00 with ZERO failures, advisories or notes, and
+    // Mickey had to ask whether something was broken. Nothing was: the vendor
+    // had not sent an invoice. That is exactly what the board should have said
+    // for itself.
+    //
+    // A missing day is now always explained, whatever the sheet holds.
+    if (mailApplies && !mail && !mailPieces) {
+      try {
+        const { MailInvoice } = require("../../shared-models/src");
+        const invoices = await MailInvoice.find({
+          serviceDate: { $gte: from, $lte: to },
+          state: { $ne: "superseded" },
+        }).select({ invoiceNumber: 1, serviceDate: 1, grandTotal: 1, state: 1, reviewReasons: 1 }).lean();
+
+        if (!invoices.length) {
+          fail(`NO MAIL SPEND for ${from}..${to} and NO INVOICE was ingested for it — either the vendor did not send one or the mailbox read failed, so mail ROAS has no denominator`);
+        } else {
+          const stuck = invoices.filter((i) => i.state === "review");
+          if (stuck.length) {
+            fail(`MAIL INVOICE NEEDS REVIEW — ${stuck
+              .map((i) => `#${i.invoiceNumber} ${i.serviceDate} $${i.grandTotal} (${(i.reviewReasons || []).join("; ") || "no reason recorded"})`)
+              .join(", ")} — its cost is NOT in the spend below`);
+          } else {
+            // Parsed clean, reconciled, and STILL not in the spend below.
+            //
+            // This was a quiet note while nothing derived spend from invoices,
+            // because back then it described every correctly-ingested invoice
+            // and a permanent amber band is just cry-wolf in another colour.
+            // mailSpendDeriveService changed that: an invoice in this state has
+            // passed every gate the deriver checks and should have produced
+            // MailSpendDay rows. It did not, so either the deriver is disarmed
+            // or it is failing silently — both worth a band.
+            advise(`mail invoice #${invoices.map((i) => i.invoiceNumber).join(", #")} parsed and reconciled ($${round2(invoices.reduce((s, i) => s + Number(i.grandTotal || 0), 0))}) but produced NO derived spend — mail cost is missing from ROAS below`);
+          }
+        }
+      } catch (error) {
+        fail(`COULD NOT CHECK the mail invoice for ${from}..${to} — ${String(error.message).slice(0, 120)}`);
+      }
+    }
   }
 
   // ── calls: CallRail daily stats (the declared response feed) ──
@@ -422,7 +683,14 @@ async function gatherMaterial({
       date: { $gte: from, $lte: to }, syncSource: "callrail-direct", active: { $ne: false },
     }).select("piece totalCalls firstTimeCallers").lean();
     const callsBySource = {};
+    // BCD rides the SAME callrail-direct feed as the mail pieces, so without
+    // this it is counted as a mail response — inflating mail's response count
+    // and deflating every mail cost-per-response computed from it, while BCD's
+    // own line reads zero. It is a bought channel with its own cost basis, not
+    // a mail piece, and it gets its own row further up.
+    const { isBcdPiece } = require("./bcdCallsService");
     for (const r of rows) {
+      if (isBcdPiece(r.piece)) continue;
       callsBySource[r.piece] = callsBySource[r.piece] || { calls: 0, responses: 0 };
       callsBySource[r.piece].calls += Number(r.totalCalls || 0);
       callsBySource[r.piece].responses += Number(r.firstTimeCallers || 0);
@@ -581,8 +849,14 @@ async function gatherMaterial({
     if (ids.length) {
       try {
         const CaseProfile = require("../../shared-models/src/CaseProfile");
+        // sourceName is the LEAD source — how the case entered, e.g.
+        // "ld-posting". It is the third answer to "where did this deal come
+        // from", after the stored source and the attributable call, and it is
+        // the ONLY one an LD deal has: an outbound-dialled lead never rings a
+        // marketing line, so CallRail can never name it. Free here; we are
+        // already reading this document.
         const profiles = await CaseProfile.find({ caseId: { $in: ids } })
-          .select("domain caseId name firstName lastName primaryPhone homePhone").lean();
+          .select("domain caseId name firstName lastName primaryPhone homePhone sourceName").lean();
         const byCase = new Map();
         for (const pr of profiles) byCase.set(`${String(pr.domain).toUpperCase()}:${pr.caseId}`, pr);
         const attach = (list) => (list || []).map((r) => {
@@ -593,6 +867,9 @@ async function gatherMaterial({
             phone: r.phone || pr.primaryPhone || pr.homePhone || null,
             name: r.name || r.clientName || pr.name
               || [pr.firstName, pr.lastName].filter(Boolean).join(" ") || null,
+            // How the case ENTERED. Never overrides a stored source or a call;
+            // it is the last resort, and for LD deals the only one available.
+            leadSourceName: r.leadSourceName || pr.sourceName || null,
           };
         });
         material.payments = attach(material.payments);
@@ -745,13 +1022,77 @@ async function gatherMaterial({
       const DailyDial = require("../../shared-models/src/DailyDial");
       const q = { dateKey: { $gte: from, $lte: to } };
       if (domain) q.domain = String(domain).toLowerCase();
-      // recordingUrl is selected at BOTH levels: the callback writes it onto
-      // the attempt, and the call-log projection also carries a doc-level one.
-      // Omitting it here is why the LD board had no listen links even once the
-      // recordings started arriving — the data was in Mongo and not in the read.
+      // DailyDial supplies the range-native attempt facts. Media authority is
+      // joined below from the persisted CallLog projection only.
       material.dials = await DailyDial.find(q)
-        .select("domain caseId dateKey attempts originPool durationSeconds lastOutcome recordingUrl")
+        // leadAgeDays is what identifies NEW inventory (=== 0), which is the
+        // basis for attributing LD cost to the agent who first worked a lead.
+        // Left out of the projection it is `undefined` on every row, and the
+        // LD half of attributed spend silently reads $0 for everyone.
+        .select("domain caseId dateKey attempts originPool durationSeconds lastOutcome leadAgeDays")
         .lean();
+      // CallLog is the durable analytical projection and the only report
+      // authority for PhoneBurner media. DailyDial still supplies attempt
+      // timing/counts, but its callback locator is never surfaced directly.
+      const callIds = [...new Set(material.dials.flatMap((row) => (
+        (Array.isArray(row.attempts) ? row.attempts : [])
+          .map((attempt) => String(attempt.providerCallId || "").trim())
+          .filter(Boolean)
+      )))];
+      // ── PHONEBURNER RECORDINGS COME FROM THE DIAL, NOT FROM CallLog ──────
+      //
+      // Mickey 2026-08-03: "let call log be the recording for ring central and
+      // daily dial for phone burner instead of trying to blend them."
+      //
+      // This used to look the recording up in CallLog. Measured 2026-08-03,
+      // CallLog holds 21,038 `platform: "phoneburner"` rows and **ZERO**
+      // carrying a `recordingArchive.sourceUri`, all time — so
+      // persistedRecordingUrl was null on every attempt ever, and "Calls worth
+      // hearing" could never print an LD listen link no matter what arrived.
+      // Today's 403 recording-carrying calls had no CallLog row at all.
+      //
+      // Two sources now, in strength order, both on the PhoneBurner side of
+      // the fence:
+      //   1. attempt.recordingUrl — the validated form, written by the ledger.
+      //      Null today because that validator accepts HTTPS only and
+      //      PhoneBurner sends HTTP.
+      //   2. safePayload.recordingReference on the delivery event — the
+      //      retained capture, joined on providerCallId, used AS CAPTURED.
+      //      The capture side is closed and a delivered link was proved to
+      //      work; this must not fetch, rewrite or re-parse it.
+      const persistedByAttempt = new Map();
+      if (callIds.length) {
+        try {
+          const { LeadDeliveryEvent } = require("../../shared-models/src");
+          const events = await LeadDeliveryEvent.find({
+            providerCallId: { $in: callIds },
+            "safePayload.recordingReference": { $type: "string", $ne: "" },
+          }).select("providerCallId safePayload.recordingReference").lean();
+          for (const event of events) {
+            const key = String(event.providerCallId || "").trim();
+            // First one wins — a provider retry posts the same call twice.
+            if (!key || persistedByAttempt.has(key)) continue;
+            persistedByAttempt.set(key, event.safePayload.recordingReference);
+          }
+        } catch (error) {
+          // Say it. A silent catch here is why this read as "no long calls had
+          // recordings" for weeks rather than "we could not look".
+          fail(`dial recordings unavailable - ${String(error.message).slice(0, 70)}`);
+        }
+      }
+      material.dials = material.dials.map((row) => ({
+        ...row,
+        attempts: (Array.isArray(row.attempts) ? row.attempts : []).map((attempt) => ({
+          ...attempt,
+          // Keyed on providerCallId ALONE, not domain:providerCallId. The
+          // delivery event does not carry the report's domain, and the old
+          // composite key would have missed every match even once a link
+          // existed.
+          persistedRecordingUrl: attempt.recordingUrl
+            || persistedByAttempt.get(String(attempt.providerCallId || "").trim())
+            || null,
+        })),
+      }));
     } catch (error) {
       material.dials = [];
       material.dialsUnavailable = String(error.message).slice(0, 90);
@@ -973,9 +1314,11 @@ async function gatherMaterial({
         // business runs PT, so this window is shifted; that is a composer-wide
         // issue and is NOT silently corrected here, because one material on a
         // different clock would disagree with every other block on the page.
+        // Widened by a day each side: the DAY KEY below is Pacific, so a
+        // Pacific day straddles two UTC days and a tight UTC window clips it.
         createdAt: {
-          $gte: new Date(`${from}T00:00:00.000Z`),
-          $lt: new Date(`${addDaysKey(to, 1)}T00:00:00.000Z`),
+          $gte: new Date(`${addDaysKey(from, -1)}T00:00:00.000Z`),
+          $lt: new Date(`${addDaysKey(to, 2)}T00:00:00.000Z`),
         },
       };
       if (domain) q["payload.domain"] = String(domain).toUpperCase();
@@ -987,7 +1330,12 @@ async function gatherMaterial({
             s: "$payload.sourceName",
             c: "$payload.caseId",
             // Same UTC day key the spend rows are compared against below.
-            day: { $dateToString: { date: "$createdAt", format: "%Y-%m-%d", timezone: "UTC" } },
+            // PACIFIC, proven against the vendor bill: for 07-25..07-28 the
+            // Pacific counts (86/111/105/101) reproduce what was billed
+            // exactly; UTC (81/106/103/120) matches none, and 07-28 is off by
+            // 19 leads / $57. A lead arriving 6pm PT belongs to that business
+            // day; UTC has already rolled over.
+            day: { $dateToString: { date: "$createdAt", format: "%Y-%m-%d", timezone: "America/Los_Angeles" } },
           },
         } },
         { $group: { _id: { d: "$_id.d", s: "$_id.s", day: "$_id.day" }, n: { $sum: 1 } } },
@@ -997,6 +1345,8 @@ async function gatherMaterial({
       const bySource = {};
       let received = 0;
       for (const g of grouped) {
+        // Drop the slack days the widened window pulled in.
+        if (g._id.day < from || g._id.day > to) continue;
         const d = String(g._id.d || "").toUpperCase() || "-";
         byDomain[d] = (byDomain[d] || 0) + g.n;
         byDay[g._id.day] = (byDay[g._id.day] || 0) + g.n;
@@ -1038,13 +1388,22 @@ async function gatherMaterial({
         // the same names the sheet uses, so cost lands on the piece that
         // actually produced the leads instead of one lump.
         if (material.spendBySource) {
-          for (const [src, n] of Object.entries(bySource)) {
-            const prior = material.spendBySource[src] || { channel: "lead-data" };
-            material.spendBySource[src] = {
+          // EVERY one of these receipts is an LD lead — they are all
+          // inbound.lead.received — so the whole derived cost belongs on the
+          // LD row regardless of which feed variant the vendor stamped on it.
+          // Keyed per variant, a receipt carrying a name that is not
+          // LD-prefixed leaked its cost onto another row: on 2026-07-31 that
+          // was one lead putting $3 on "Aged", so the LD row read $315 against
+          // a $318 headline. Mickey 2026-08-03: "LD is LD."
+          const { LD_LABEL } = require("../../shared-config/src/activeSources");
+          const totalLeads = Object.values(bySource).reduce((s, n) => s + n, 0);
+          if (totalLeads > 0) {
+            const prior = material.spendBySource[LD_LABEL] || { channel: "lead-data" };
+            material.spendBySource[LD_LABEL] = {
               ...prior,
               channel: prior.channel || "lead-data",
-              spend: round2(n * rate),
-              leads: n,
+              spend: round2(totalLeads * rate),
+              leads: totalLeads,
             };
           }
         }
@@ -1713,4 +2072,5 @@ module.exports = {
   RANGE_DAY_LOOP_MAX,
   dayRange, composeReport, filterPayments, filterQueueByAgent, filterRecordings,
   gatherMaterial, parseFilters, renderText, renderCsvs, toTemplateData,
+  partitionMailSpend,
 };

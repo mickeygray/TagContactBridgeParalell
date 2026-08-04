@@ -184,11 +184,23 @@ async function main() {
     const doc = await ReportDefinition.findOne({ name: runName });
     if (!doc) { console.error(`no definition named "${runName}"`); process.exitCode = 1; return; }
     const send = has("send");
+    // --date re-runs a saved report for a PAST day without editing it. The
+    // saved range ("today", "yesterday", ...) is resolved at run time, so
+    // re-sending a specific day previously meant mutating the definition and
+    // remembering to put it back. The override is per-invocation and never
+    // written to the document.
+    const onDate = arg("date");
+    const overrides = onDate && onDate !== true
+      ? { rangeOverride: { from: String(onDate), to: String(onDate) } }
+      : {};
+    if (overrides.rangeOverride) console.log(NEWLINE + `  range OVERRIDDEN to ${onDate} (the saved "${doc.range}" is untouched)`);
     console.log(NEWLINE + `running "${doc.name}"${send ? " and SENDING" : " (dry — nothing will be sent)"}...` + NEWLINE);
     const result = await runDefinition(doc, {
       dryRun: !send,
       logger: { info: (m) => console.log(m) },
       sendMail, fromEmail: getInternalFromEmail(),
+      force: has("force"),
+      ...overrides,
     });
     console.log(result.text);
     console.log(NEWLINE + `  ${result.range.from} → ${result.range.to} · ${result.sections} section(s) · ${Math.round(result.durationMs / 1000)}s`

@@ -57,11 +57,32 @@ const streamSchema = new mongoose.Schema(
   { _id: false },
 );
 
+const sourceStatusSchema = new mongoose.Schema(
+  {
+    status: {
+      type: String,
+      enum: ["complete", "partial", "unavailable"],
+      required: true,
+    },
+    reason: { type: String, default: null },
+  },
+  { _id: false },
+);
+
 const dailyQueueRollupSchema = new mongoose.Schema(
   {
     dateKey: { type: String, required: true, unique: true, index: true },
     agents: { type: [agentSchema], default: [] },
     streams: { type: [streamSchema], default: [] },
+
+    // v2 is the first capture that uses a complete Pacific calendar-day
+    // RingCentral window. A missing/older version is deliberately not treated
+    // as complete range evidence.
+    captureVersion: { type: Number, default: 2 },
+    sourceStatus: {
+      ringCentral: { type: sourceStatusSchema, default: undefined },
+      phoneBurner: { type: sourceStatusSchema, default: undefined },
+    },
 
     // Provenance, so a thin day is explicable rather than merely suspicious.
     capturedAt: { type: Date, default: Date.now },
@@ -70,6 +91,11 @@ const dailyQueueRollupSchema = new mongoose.Schema(
     // must say so.
     partial: { type: Boolean, default: false },
     partialReason: { type: String, default: null },
+    // `partial` means we received a floor. `unavailable` means at least one
+    // required source returned no usable evidence at all. Both poison range
+    // completeness, but operators need to know which failure occurred.
+    unavailable: { type: Boolean, default: false },
+    unavailableReason: { type: String, default: null },
   },
   { timestamps: true },
 );

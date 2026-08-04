@@ -40,6 +40,7 @@ const {
   reconstructAgentProjection,
   retryDelayMinutesForLeadAge,
   resolvePacificEndOfDayDrain,
+  resolveLeadDeliveryTickMode,
   resolvePacificMorningBatchWindow,
   resolveProviderEventItem,
   shouldRequestRefill,
@@ -132,6 +133,17 @@ test("end-of-day folder drain is due at 5:30 Pacific across daylight offsets", (
     due: true,
     minuteOfDay: 17 * 60 + 30,
   });
+});
+
+test("tick mode is explicit across the Pacific floor day and weekend", () => {
+  assert.equal(resolveLeadDeliveryTickMode("2026-07-10T10:00:00.000Z"), "preopen_event_drain");
+  assert.equal(resolveLeadDeliveryTickMode("2026-07-10T14:50:00.000Z"), "delivery_open");
+  assert.equal(resolveLeadDeliveryTickMode("2026-07-11T00:00:00.000Z"), "postwindow_event_drain");
+  assert.equal(resolveLeadDeliveryTickMode("2026-07-11T00:30:00.000Z"), "close_due");
+  assert.equal(resolveLeadDeliveryTickMode("2026-07-11T00:30:00.000Z", {
+    completedCloseDateKey: "2026-07-10",
+  }), "close_complete_event_drain");
+  assert.equal(resolveLeadDeliveryTickMode("2026-08-02T16:00:00.000Z"), "weekend_event_drain");
 });
 
 test("Pacific morning batch rolls at exactly 7:50 Pacific", () => {

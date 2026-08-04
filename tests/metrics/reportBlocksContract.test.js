@@ -208,7 +208,11 @@ test("a losing piece shows NEGATIVE roi", () => {
     spendBySource: { "LD CUSTOM": { spend: 8619, leads: 0 } },
     callsBySource: {},
   });
-  const r = d.find((x) => x.source === "LD CUSTOM");
+  // The row is "LD", not "LD CUSTOM": every LD feed variant rolls up to one
+  // line (Mickey 2026-08-03, "do a roll up on all LD combining general,
+  // custom, etc"). The money and the ratio are unchanged — only the label.
+  const r = d.find((x) => x.source === "LD");
+  assert.ok(r, `expected a rolled-up LD row, got ${d.map((x) => x.source).join(", ")}`);
   assert.ok(r.roi < 0, `expected a negative return, got ${r.roi}`);
   assert.equal(r.roas, 11.4);
 });

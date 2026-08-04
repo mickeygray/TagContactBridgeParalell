@@ -256,6 +256,43 @@ class FakeRepository {
     return mutate(checkpoint, { set });
   }
 
+  async insertSourceRepairCheckpointOnce({ checkpointKey, provider, source, businessDate }) {
+    const key = String(checkpointKey);
+    if (this.checkpoints.has(key)) return null;
+    const state = {
+      _id: key,
+      kind: "source_repair",
+      provider,
+      source,
+      businessDate,
+      status: "scheduled",
+      repairCursorCreatedAt: null,
+      repairCursorId: null,
+      highWaterCreatedAt: null,
+      highWaterId: null,
+      scannedCount: 0,
+      admittedCount: 0,
+      skippedCount: 0,
+      completedAt: null,
+      lastRunAt: null,
+      lastErrorCode: null,
+      version: 0,
+    };
+    this.checkpoints.set(key, state);
+    return copy(state);
+  }
+
+  async getSourceRepairCheckpoint(checkpointKey) {
+    const row = this.checkpoints.get(String(checkpointKey));
+    return row?.kind === "source_repair" ? copy(row) : null;
+  }
+
+  async compareAndSetSourceRepairCheckpoint({ checkpointKey, expectedVersion, expected, set, increment }) {
+    const state = this.checkpoints.get(String(checkpointKey));
+    if (!state || state.version !== expectedVersion || !matches(state, expected)) return null;
+    return mutate(state, { set, increment });
+  }
+
   async listAgentProjectionItems(agentId) {
     return [...this.items.values()]
       .filter((item) => item.deliveryAgentId === agentId)
@@ -545,9 +582,13 @@ function harness({
   reconcileDailyDialCalls = null,
   providerConsumptionOrder = null,
   refreshSourceStatuses = null,
+  refreshUntouchedSourceStatuses = null,
   logger = null,
+  durableSourceState = false,
+  ingestBatchSize = 250,
+  repositoryOverride = null,
 } = {}) {
-  const repository = new FakeRepository();
+  const repository = repositoryOverride || new FakeRepository();
   let clock = new Date(START);
   const calls = [];
   const moves = [];
@@ -556,6 +597,22 @@ function harness({
   const windowReads = [];
   const source = {
     async readBatch({ cursor, limit }) {
+      if (durableSourceState) {
+        const start = cursor?.id == null ? 0 : Number(cursor.id) + 1;
+        const items = rows.slice(start, start + limit);
+        const nextIndex = start + items.length;
+        const lastIndex = nextIndex - 1;
+        return {
+          items: copy(items),
+          highWater: rows[0]
+            ? { createdAt: new Date(rows[0].createdAt), id: "0" }
+            : null,
+          nextCursor: nextIndex < rows.length && items.length
+            ? { createdAt: new Date(rows[lastIndex].createdAt), id: String(lastIndex) }
+            : null,
+          done: nextIndex >= rows.length,
+        };
+      }
       const start = Number(cursor || 0);
       const items = rows.slice(start, start + limit);
       const nextCursor = start + items.length;
@@ -587,6 +644,30 @@ function harness({
       return { items: copy(items), nextCursor, done: nextCursor >= inWindow.length };
     },
   };
+  if (durableSourceState) {
+    source.readNewerBatch = async ({ after, limit }) => {
+      const highWaterAt = new Date(after.createdAt).getTime();
+      const candidates = rows
+        .map((row, index) => ({ row, index }))
+        .filter(({ row, index }) => {
+          const createdAt = new Date(row.createdAt).getTime();
+          return createdAt > highWaterAt || (createdAt === highWaterAt && index > Number(after.id));
+        })
+        .sort((left, right) => (
+          new Date(left.row.createdAt).getTime() - new Date(right.row.createdAt).getTime()
+          || left.index - right.index
+        ));
+      const page = candidates.slice(0, limit);
+      const last = page.at(-1);
+      return {
+        items: copy(page.map((entry) => entry.row)),
+        nextHighWater: last
+          ? { createdAt: new Date(last.row.createdAt), id: String(last.index) }
+          : copy(after),
+        done: candidates.length <= limit,
+      };
+    };
+  }
   const phoneBurner = {
     async createContact(input) {
       calls.push(copy(input));
@@ -646,6 +727,7 @@ function harness({
     actionsEnabled,
     refillEnabled,
     now: () => new Date(clock),
+    ingestBatchSize,
     providerPostMinimumIntervalMs,
     providerPostSleep,
     providerPostClock,
@@ -663,6 +745,7 @@ function harness({
     reconcileDailyDialCalls,
     providerConsumptionOrder,
     refreshSourceStatuses,
+    refreshUntouchedSourceStatuses,
     logger,
   });
   return {
@@ -689,10 +772,88 @@ test("provider runtime performs no weekend scan, refill, or posting", async () =
   const h = harness({ rows: [sourceRow(1)] });
   h.setClock("2026-08-02T16:00:00.000Z");
   const result = await h.runtime.tick();
-  assert.equal(result.status, "weekend-paused");
+  assert.equal(result.status, "ok");
+  assert.equal(result.tickMode, "weekend_event_drain");
   assert.equal(h.calls.length, 0);
   assert.equal(h.repository.agents.size, 0);
   assert.equal(h.repository.items.size, 0);
+});
+
+test("durable daily repair stays completed across ticks and restart while newer leads still enter", async () => {
+  const rows = [{ ...sourceRow(1), createdAt: new Date("2026-07-10T16:00:00Z") }];
+  const first = harness({ rows, durableSourceState: true, ingestBatchSize: 1 });
+  let repairReads = 0;
+  let newerReads = 0;
+  const firstRepair = first.source.readBatch.bind(first.source);
+  const firstNewer = first.source.readNewerBatch.bind(first.source);
+  first.source.readBatch = async (input) => { repairReads += 1; return firstRepair(input); };
+  first.source.readNewerBatch = async (input) => { newerReads += 1; return firstNewer(input); };
+  const completed = await first.runtime.ingestOnce();
+  assert.equal(completed.lane, "daily-repair");
+  assert.equal(completed.done, true);
+  await first.runtime.ingestOnce();
+  assert.equal(repairReads, 1);
+  assert.equal(newerReads, 1);
+
+  rows.push({ ...sourceRow(2), createdAt: new Date("2026-07-10T16:01:00Z") });
+  const admitted = await first.runtime.ingestOnce();
+  assert.equal(admitted.lane, "new-arrivals");
+  assert.equal(first.repository.items.size, 2);
+
+  const restarted = harness({
+    rows,
+    durableSourceState: true,
+    ingestBatchSize: 1,
+    repositoryOverride: first.repository,
+  });
+  let restartedRepairReads = 0;
+  const restartedRepair = restarted.source.readBatch.bind(restarted.source);
+  restarted.source.readBatch = async (input) => {
+    restartedRepairReads += 1;
+    return restartedRepair(input);
+  };
+  const afterRestart = await restarted.runtime.ingestOnce();
+  assert.equal(afterRestart.lane, "new-arrivals");
+  assert.equal(restartedRepairReads, 0);
+  assert.equal(restarted.repository.items.size, 2);
+});
+
+test("an incomplete daily repair resumes its cursor before polling new arrivals", async () => {
+  const rows = [
+    { ...sourceRow(1), createdAt: new Date("2026-07-10T16:01:00Z") },
+    { ...sourceRow(2), createdAt: new Date("2026-07-10T16:00:00Z") },
+  ];
+  const h = harness({ rows, durableSourceState: true, ingestBatchSize: 1 });
+  let repairReads = 0;
+  let newerReads = 0;
+  const readRepair = h.source.readBatch.bind(h.source);
+  const readNewer = h.source.readNewerBatch.bind(h.source);
+  h.source.readBatch = async (input) => { repairReads += 1; return readRepair(input); };
+  h.source.readNewerBatch = async (input) => { newerReads += 1; return readNewer(input); };
+
+  const first = await h.runtime.ingestOnce();
+  assert.equal(first.lane, "daily-repair");
+  assert.equal(first.done, false);
+  const second = await h.runtime.ingestOnce();
+  assert.equal(second.lane, "daily-repair");
+  assert.equal(second.done, true);
+  assert.equal(repairReads, 2);
+  assert.equal(newerReads, 0);
+  assert.equal(h.repository.items.size, 2);
+});
+
+test("a completed empty daily repair does not restart on the next tick", async () => {
+  const h = harness({ rows: [], durableSourceState: true, ingestBatchSize: 1 });
+  let repairReads = 0;
+  let newerReads = 0;
+  const readRepair = h.source.readBatch.bind(h.source);
+  const readNewer = h.source.readNewerBatch.bind(h.source);
+  h.source.readBatch = async (input) => { repairReads += 1; return readRepair(input); };
+  h.source.readNewerBatch = async (input) => { newerReads += 1; return readNewer(input); };
+  assert.equal((await h.runtime.ingestOnce()).done, true);
+  assert.equal((await h.runtime.ingestOnce()).lane, "new-arrivals");
+  assert.equal(repairReads, 1);
+  assert.equal(newerReads, 1);
 });
 
 function acceptedItems(repository) {
@@ -2170,12 +2331,14 @@ test("completed answered callback may strengthen to DNC but strong outcomes neve
   assert.equal(upgrade.set.status, "pending");
   assert.equal(upgrade.set.localAppliedAt, null);
   const localAppliedAt = new Date("2026-07-10T17:05:00.000Z");
+  const downstreamAppliedAt = new Date("2026-07-10T17:05:01.000Z");
   const recordingUpgrade = buildCapturedEventUpgrade(
     {
       ...common,
       status: "completed",
       normalizedOutcome: "voicemail",
       localAppliedAt,
+      downstreamAppliedAt,
       safePayload: { durationSeconds: 60, recordingUrl: null },
     },
     {
@@ -2187,8 +2350,41 @@ test("completed answered callback may strengthen to DNC but strong outcomes neve
   );
   assert.equal(recordingUpgrade.set.status, "pending");
   assert.equal(recordingUpgrade.set.localAppliedAt, localAppliedAt);
+  assert.equal(recordingUpgrade.set.downstreamAppliedAt, downstreamAppliedAt);
   assert.equal(recordingUpgrade.set.safePayload.durationSeconds, 60);
   assert.equal(recordingUpgrade.set.safePayload.recordingUrl, "https://recordings.example.invalid/call/1.mp3");
+  const identicalRecording = buildCapturedEventUpgrade(
+    {
+      ...common,
+      status: "completed",
+      normalizedOutcome: "voicemail",
+      safePayload: { recordingUrl: "https://recordings.example.invalid/call/1.mp3" },
+    },
+    {
+      ...common,
+      status: "pending",
+      normalizedOutcome: "voicemail",
+      safePayload: { recordingUrl: "https://recordings.example.invalid/call/1.mp3" },
+    },
+  );
+  assert.equal(identicalRecording, null);
+  const conflictingRecording = buildCapturedEventUpgrade(
+    {
+      ...common,
+      status: "completed",
+      normalizedOutcome: "voicemail",
+      safePayload: { recordingUrl: "https://recordings.example.invalid/call/1.mp3" },
+    },
+    {
+      ...common,
+      status: "pending",
+      normalizedOutcome: "voicemail",
+      safePayload: { recordingUrl: "https://recordings.example.invalid/call/other.mp3" },
+    },
+  );
+  assert.equal(conflictingRecording.set.status, "review");
+  assert.equal(conflictingRecording.set.lastError, "recording-evidence-conflict");
+  assert.equal(Object.hasOwn(conflictingRecording.set, "safePayload"), false);
   for (const status of ["failed", "processing"]) {
     const retryUpgrade = buildCapturedEventUpgrade(
       {
@@ -3908,25 +4104,33 @@ test("physical Pool watchdog does not refill an operator-paused agent", async ()
   assert.deepEqual(paused.automatic, []);
 });
 test("automated day lifecycle builds before open, starts once at 7:50, drains results, stops at 5, and closes at 5:30", async () => {
+  let untouchedRefreshes = 0;
   const h = harness({
     rows: Array.from({ length: 25 }, (_, index) => sourceRow(index + 1)),
     actionsEnabled: true,
     refillEnabled: true,
     providerInventoryAuthoritative: true,
     deliveryWindowEvaluator: isPacificDeliveryWindowOpen,
+    refreshUntouchedSourceStatuses: async () => {
+      untouchedRefreshes += 1;
+      return { scanned: 25, refreshed: 25, eligible: 25, blocked: 0 };
+    },
   });
 
   h.setClock("2026-07-10T14:49:00.000Z");
   const beforeOpen = await h.runtime.tick();
-  assert.equal(beforeOpen.dayStart.status, "outside-delivery-window");
+  assert.equal(beforeOpen.tickMode, "preopen_event_drain");
+  assert.equal(beforeOpen.dayStart, undefined);
   assert.equal(h.calls.length, 0);
 
   h.setClock("2026-07-10T14:50:00.000Z");
   const opened = await h.runtime.tick();
   assert.equal(opened.dayStart.status, "completed");
   assert.equal(opened.dayStart.queueBuild.status, "ready");
-  assert.equal(opened.dayStart.queueBuild.fullScan, false);
-  assert.equal(h.calls.length, 20);
+  assert.equal(opened.dayStart.queueBuild.fullScan, true);
+  assert.equal(opened.dayStart.morningStatusRefresh.status, "completed");
+  assert.equal(untouchedRefreshes, 1);
+  assert.equal(h.calls.length, 25);
   const startedAgent = await h.repository.getAgentById("bruce_allen");
   assert.equal(startedAgent.operatorPaused, false);
   assert.equal(startedAgent.shiftEnabled, true);
@@ -3935,7 +4139,8 @@ test("automated day lifecycle builds before open, starts once at 7:50, drains re
   h.setClock("2026-07-10T14:51:00.000Z");
   const secondTick = await h.runtime.tick();
   assert.equal(secondTick.dayStart.status, "already-completed");
-  assert.equal(h.calls.length, 20);
+  assert.equal(untouchedRefreshes, 1);
+  assert.equal(h.calls.length, 25);
 
   const completed = acceptedItems(h.repository)[0];
   h.providerContacts.delete(completed.providerContactId);
@@ -3946,12 +4151,13 @@ test("automated day lifecycle builds before open, starts once at 7:50, drains re
   const finalMinute = await h.runtime.tick();
   assert.equal(finalMinute.events.processed, 1);
   assert.equal(h.repository.events.get(event._id).status, "completed");
-  assert.equal(h.calls.length, 20);
+  assert.equal(h.calls.length, 25);
 
   h.setClock("2026-07-11T00:00:00.000Z");
   const closed = await h.runtime.tick();
-  assert.equal(closed.dayStart.status, "outside-delivery-window");
-  assert.equal(h.calls.length, 20);
+  assert.equal(closed.tickMode, "postwindow_event_drain");
+  assert.equal(closed.dayStart, undefined);
+  assert.equal(h.calls.length, 25);
 
   h.setClock("2026-07-11T00:30:00.000Z");
   const drained = await h.runtime.tick();
@@ -3959,7 +4165,157 @@ test("automated day lifecycle builds before open, starts once at 7:50, drains re
   assert.equal(h.providerContacts.size, 0);
 });
 
-test("day start fills five agents from one bounded source page before background reconciliation", async () => {
+test("off-hours Call End completes without source, folder-capacity, refill, or fresh work", async () => {
+  const h = harness({
+    rows: Array.from({ length: 30 }, (_, index) => sourceRow(index + 1)),
+    actionsEnabled: true,
+    refillEnabled: true,
+    providerInventoryAuthoritative: true,
+    deliveryWindowEvaluator: isPacificDeliveryWindowOpen,
+  });
+  h.setClock("2026-07-10T14:50:00.000Z");
+  await h.runtime.tick();
+  const completed = acceptedItems(h.repository)[0];
+  const event = addDone(h.repository, completed, 88, "voicemail", {
+    receivedAt: new Date("2026-07-11T00:00:00.000Z"),
+  });
+  let sourceReads = 0;
+  let folderReads = 0;
+  const readBatch = h.source.readBatch.bind(h.source);
+  const getFolderCount = h.phoneBurner.getFolderCount.bind(h.phoneBurner);
+  h.source.readBatch = async (input) => { sourceReads += 1; return readBatch(input); };
+  h.phoneBurner.getFolderCount = async (folderId) => {
+    folderReads += 1;
+    return getFolderCount(folderId);
+  };
+  const providerPostsBefore = h.calls.length;
+
+  h.setClock("2026-07-11T00:00:00.000Z");
+  const result = await h.runtime.tick();
+
+  assert.equal(result.tickMode, "postwindow_event_drain");
+  assert.equal(result.events.processed, 1);
+  assert.equal(h.repository.events.get(event._id).status, "completed");
+  assert.equal(sourceReads, 0);
+  assert.equal(folderReads, 0);
+  assert.equal(h.calls.length, providerPostsBefore);
+  assert.equal(h.runtime.getState().sourceReadsSkippedOffHours, 1);
+});
+
+test("actions-disabled off-hours tick does not query the event backlog", async () => {
+  const h = harness({
+    rows: [sourceRow(1)],
+    actionsEnabled: false,
+    refillEnabled: false,
+    deliveryWindowEvaluator: isPacificDeliveryWindowOpen,
+  });
+  let drainReads = 0;
+  const listEventsForDrain = h.repository.listEventsForDrain.bind(h.repository);
+  h.repository.listEventsForDrain = async (input) => {
+    drainReads += 1;
+    return listEventsForDrain(input);
+  };
+  h.setClock("2026-07-10T10:00:00.000Z");
+
+  const result = await h.runtime.tick();
+
+  assert.equal(result.tickMode, "preopen_event_drain");
+  assert.equal(result.events.status, "actions-disabled");
+  assert.equal(drainReads, 0);
+});
+
+test("late recording evidence updates the exact ledger attempt without replaying call effects", async () => {
+  let cadenceWrites = 0;
+  let dncWrites = 0;
+  const h = harness({
+    rows: [sourceRow(1)],
+    actionsEnabled: true,
+    target: 1,
+    refill: 0,
+    handlers: {
+      record_daily_dial: async () => { cadenceWrites += 1; },
+      logics_dnc: async () => { dncWrites += 1; },
+    },
+  });
+  await ingestAndSeed(h);
+  const item = acceptedItems(h.repository)[0];
+  addDone(h.repository, item, 1, "dnc");
+  await h.runtime.drainEvents();
+
+  const afterInitial = await h.repository.getItemById(item._id);
+  const initialAgent = await h.repository.getAgentById("bruce_allen");
+  const initialDeletes = h.deletes.length;
+  const persisted = h.repository.events.get("done-1");
+  const upgrade = buildCapturedEventUpgrade(copy(persisted), {
+    ...copy(persisted),
+    status: "pending",
+    safePayload: {
+      ...(persisted.safePayload || {}),
+      recordingUrl: "https://recordings.example.invalid/call/late.mp3",
+    },
+  });
+  assert.ok(upgrade);
+  mutate(persisted, upgrade);
+
+  assert.equal((await h.runtime.drainCapturedEvent(copy(persisted))).status, "completed");
+  const afterUpgrade = await h.repository.getItemById(item._id);
+  const upgradedAgent = await h.repository.getAgentById("bruce_allen");
+  assert.equal(cadenceWrites, 2, "only the exact DailyDial projection is replayed");
+  assert.equal(dncWrites, 1, "DNC side effect is not replayed");
+  assert.equal(h.deletes.length, initialDeletes, "provider cleanup is not replayed");
+  assert.equal(afterUpgrade.totalAttemptCount, afterInitial.totalAttemptCount);
+  assert.equal(afterUpgrade.dailyAttemptCount, afterInitial.dailyAttemptCount);
+  assert.equal(upgradedAgent.providerCompletedCount, initialAgent.providerCompletedCount);
+  assert.equal(upgradedAgent.estimatedOutstanding, initialAgent.estimatedOutstanding);
+});
+
+test("weekday off-hours matrix remains source-dark before open and before close", async () => {
+  const cases = [
+    ["2026-07-10T10:00:00.000Z", "preopen_event_drain"], // 03:00 PT
+    ["2026-07-10T14:49:00.000Z", "preopen_event_drain"], // 07:49 PT
+    ["2026-07-11T00:00:00.000Z", "postwindow_event_drain"], // 17:00 PT
+    ["2026-07-11T00:29:00.000Z", "postwindow_event_drain"], // 17:29 PT
+  ];
+  for (const [at, expectedMode] of cases) {
+    const h = harness({
+      rows: [sourceRow(1)],
+      actionsEnabled: false,
+      refillEnabled: false,
+      deliveryWindowEvaluator: isPacificDeliveryWindowOpen,
+    });
+    let sourceReads = 0;
+    const readBatch = h.source.readBatch.bind(h.source);
+    h.source.readBatch = async (input) => { sourceReads += 1; return readBatch(input); };
+    h.setClock(at);
+    const result = await h.runtime.tick();
+    assert.equal(result.tickMode, expectedMode, at);
+    assert.equal(sourceReads, 0, at);
+    assert.equal(h.calls.length, 0, at);
+  }
+});
+
+test("a completed 17:30 close uses the same-process fast path at 22:30", async () => {
+  const h = harness({
+    rows: [],
+    actionsEnabled: true,
+    refillEnabled: false,
+    deliveryWindowEvaluator: isPacificDeliveryWindowOpen,
+  });
+  let sourceReads = 0;
+  const readBatch = h.source.readBatch.bind(h.source);
+  h.source.readBatch = async (input) => { sourceReads += 1; return readBatch(input); };
+  h.setClock("2026-07-11T00:30:00.000Z");
+  const closed = await h.runtime.tick();
+  assert.equal(closed.tickMode, "close_due");
+  assert.equal(closed.endOfDayDrain.status, "completed");
+  h.setClock("2026-07-11T05:30:00.000Z");
+  const later = await h.runtime.tick();
+  assert.equal(later.tickMode, "close_complete_event_drain");
+  assert.equal(later.endOfDayDrain, undefined);
+  assert.equal(sourceReads, 0);
+});
+
+test("day start builds the full untouched source and distributes it evenly across five agents", async () => {
   const h = harness({
     rows: Array.from({ length: 1_000 }, (_, index) => sourceRow(index + 1)),
     actionsEnabled: true,
@@ -3980,17 +4336,17 @@ test("day start fills five agents from one bounded source page before background
 
   assert.equal(opened.dayStart.status, "completed");
   assert.equal(opened.dayStart.queueBuild.status, "ready");
-  assert.equal(opened.dayStart.queueBuild.fullScan, false);
-  assert.equal(opened.dayStart.queueBuild.done, false);
-  assert.equal(sourceReads, 1);
-  assert.equal(h.calls.length, 100);
+  assert.equal(opened.dayStart.queueBuild.fullScan, true);
+  assert.equal(opened.dayStart.queueBuild.done, true);
+  assert.equal(sourceReads, 4);
+  assert.equal(h.calls.length, 1_000);
   for (let index = 1; index <= 5; index += 1) {
     assert.equal(
       [...h.providerContacts.values()].filter((contact) => contact.folderId === `pool-${index}`).length,
-      20,
+      200,
     );
   }
-  assert.equal(h.runtime.getState().sourceDone, false);
+  assert.equal(h.runtime.getState().sourceDone, true);
 });
 
 test("a queued provider post is blocked when the clock crosses 5 PM before create", async () => {
@@ -4655,9 +5011,11 @@ test("an exact prior-day DNC counts once and cancels a newer queued attempt with
   h.setClock("2026-07-11T00:30:00.000Z");
   assert.equal((await h.runtime.runEndOfDayFolderDrain()).status, "completed");
 
-  h.setClock("2026-07-11T14:50:00.000Z");
-  assert.equal((await h.runtime.launchAgent("bruce_allen")).accepted, 1);
+  h.setClock("2026-07-13T14:50:00.000Z");
+  const openTick = await h.runtime.tick();
+  assert.equal(openTick.priorDayDrainRelease.released, 1);
   const second = await h.repository.getItemById(first._id);
+  assert.equal(second.state, "provider_accepted");
   const secondIdentity = {
     providerContactId: second.providerContactId,
     providerExternalLeadId: second.providerExternalLeadId,
@@ -4669,7 +5027,7 @@ test("an exact prior-day DNC counts once and cancels a newer queued attempt with
     providerCallId: "prior-day-call-finished-late",
     ...firstIdentity,
     normalizedOutcome: "dnc",
-    receivedAt: new Date("2026-07-11T14:51:00.000Z"),
+    receivedAt: new Date("2026-07-13T14:51:00.000Z"),
   });
   const result = await h.runtime.drainCapturedEvent(late);
   const after = await h.repository.getItemById(first._id);
@@ -4682,7 +5040,7 @@ test("an exact prior-day DNC counts once and cancels a newer queued attempt with
   assert.equal(after.providerAttemptSequence, 2);
   assert.equal(after.providerContactId, null);
   assert.equal(after.providerExternalLeadId, null);
-  assert.equal(after.dailyAttemptDateKey, "2026-07-11");
+  assert.equal(after.dailyAttemptDateKey, "2026-07-13");
   assert.equal(after.dailyAttemptCount, 0);
   assert.equal(after.totalAttemptCount, 1);
   assert.equal(agent.providerCompletedCount, 1);
@@ -4726,35 +5084,37 @@ test("cross-midnight historical completion preserves current-day counters and pr
   h.setClock("2026-07-11T00:30:00.000Z");
   assert.equal((await h.runtime.runEndOfDayFolderDrain()).status, "completed");
 
-  h.setClock("2026-07-11T14:50:00.000Z");
-  assert.equal((await h.runtime.launchAgent("bruce_allen")).accepted, 1);
+  h.setClock("2026-07-13T14:50:00.000Z");
+  const openTick = await h.runtime.tick();
+  assert.equal(openTick.priorDayDrainRelease.released, 1);
   const second = await h.repository.getItemById(first._id);
+  assert.equal(second.state, "provider_accepted");
   const secondDone = h.repository.addEvent({
     _id: "current-day-second-attempt",
     providerCallId: "current-day-second-call",
     providerContactId: second.providerContactId,
     providerExternalLeadId: second.providerExternalLeadId,
     normalizedOutcome: "voicemail",
-    receivedAt: new Date("2026-07-11T14:51:00.000Z"),
+    receivedAt: new Date("2026-07-13T14:51:00.000Z"),
   });
-  h.setClock("2026-07-11T14:51:00.000Z");
+  h.setClock("2026-07-13T14:51:00.000Z");
   assert.equal((await h.runtime.drainCapturedEvent(secondDone)).status, "completed");
   const afterSecond = await h.repository.getItemById(first._id);
   assert.equal(afterSecond.state, "follow_up_wait");
-  assert.equal(afterSecond.dailyAttemptDateKey, "2026-07-11");
+  assert.equal(afterSecond.dailyAttemptDateKey, "2026-07-13");
   assert.equal(afterSecond.dailyAttemptCount, 1);
   assert.equal(afterSecond.totalAttemptCount, 1);
-  assert.equal(new Date(afterSecond.lastContactAt).toISOString(), "2026-07-11T14:51:00.000Z");
-  assert.equal(new Date(afterSecond.nextContactAt).toISOString(), "2026-07-11T16:21:00.000Z");
+  assert.equal(new Date(afterSecond.lastContactAt).toISOString(), "2026-07-13T14:51:00.000Z");
+  assert.equal(new Date(afterSecond.nextContactAt).toISOString(), "2026-07-13T16:51:00.000Z");
 
   const delayedFirst = h.repository.addEvent({
     _id: "prior-day-first-attempt-delayed",
     providerCallId: "prior-day-first-call",
     ...firstIdentity,
     normalizedOutcome: "voicemail",
-    receivedAt: new Date("2026-07-11T15:00:00.000Z"),
+    receivedAt: new Date("2026-07-13T15:00:00.000Z"),
   });
-  h.setClock("2026-07-11T15:00:00.000Z");
+  h.setClock("2026-07-13T15:00:00.000Z");
   const delayedResult = await h.runtime.drainCapturedEvent(delayedFirst);
   assert.equal(
     delayedResult.status,
@@ -4770,11 +5130,11 @@ test("cross-midnight historical completion preserves current-day counters and pr
   assert.ok(historicalAction);
   assert.equal(after.state, "follow_up_wait");
   assert.equal(after.providerAttemptSequence, 2);
-  assert.equal(after.dailyAttemptDateKey, "2026-07-11");
+  assert.equal(after.dailyAttemptDateKey, "2026-07-13");
   assert.equal(after.dailyAttemptCount, 1);
   assert.equal(after.totalAttemptCount, 2);
-  assert.equal(new Date(after.lastContactAt).toISOString(), "2026-07-11T14:51:00.000Z");
-  assert.equal(new Date(after.nextContactAt).toISOString(), "2026-07-11T16:21:00.000Z");
+  assert.equal(new Date(after.lastContactAt).toISOString(), "2026-07-13T14:51:00.000Z");
+  assert.equal(new Date(after.nextContactAt).toISOString(), "2026-07-13T16:51:00.000Z");
   assert.equal(agent.providerCompletedCount, 2);
   assert.equal(historicalAction.dailyAttemptDateKey, "2026-07-10");
   assert.equal(historicalAction.dailyAttemptCount, 1);
@@ -4784,7 +5144,7 @@ test("cross-midnight historical completion preserves current-day counters and pr
   );
   assert.equal(
     new Date(historicalAction.nextContactAt).toISOString(),
-    "2026-07-11T02:00:00.000Z",
+    "2026-07-11T02:30:00.000Z",
   );
 });
 

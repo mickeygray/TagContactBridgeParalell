@@ -156,6 +156,55 @@ test("DailyDial records one exact attempt and later strengthens its outcome with
   assert.equal(model.doc.nextEligibleAt, null);
 });
 
+test("late recording evidence strengthens one exact attempt without recounting", async () => {
+  const model = fakeDailyDialModel();
+  const input = {
+    model,
+    cadence: {
+      domain: "TAG",
+      caseId: 44,
+      receivedAt: new Date("2026-07-14T15:00:00.000Z"),
+    },
+    originPool: "new_today",
+    providerAttemptKey: "attempt-late",
+    providerCallId: "call-late",
+    provider: "phoneburner",
+    agentId: "chris_bolt",
+    normalizedOutcome: "voicemail",
+    connected: false,
+    dailyAttemptDateKey: "2026-07-14",
+    dailyAttemptCount: 1,
+    totalAttemptCount: 1,
+    callEndedAt: new Date("2026-07-14T18:01:00.000Z"),
+  };
+  const first = await recordDailyDialOffload(input);
+  assert.equal(first.counted, true);
+  assert.equal(model.doc.attempts[0].recordingUrl, null);
+
+  const late = await recordDailyDialOffload({
+    ...input,
+    recordingUrl: "https://recordings.example.invalid/call/late.mp3?token=test",
+  });
+  assert.equal(late.counted, false);
+  assert.equal(model.doc.contactedToday, 1);
+  assert.equal(model.doc.attempts.length, 1);
+  assert.equal(model.doc.attempts[0].recordingUrl, "https://recordings.example.invalid/call/late.mp3?token=test");
+
+  const replay = await recordDailyDialOffload({
+    ...input,
+    recordingUrl: "https://recordings.example.invalid/call/late.mp3?token=test",
+  });
+  assert.equal(replay.counted, false);
+  assert.equal(model.doc.attempts.length, 1);
+  await assert.rejects(
+    recordDailyDialOffload({
+      ...input,
+      recordingUrl: "https://recordings.example.invalid/call/conflict.mp3",
+    }),
+    /recording conflict/,
+  );
+});
+
 test("delayed older callbacks append an attempt without regressing the latest daily snapshot", async () => {
   const model = fakeDailyDialModel();
   const common = {

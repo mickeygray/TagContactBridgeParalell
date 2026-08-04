@@ -964,20 +964,30 @@ async function listLongCalls({ dateKey, minDurationSec = 300, limit = 15 } = {})
       normalizedPhone: 1,
       "recordingArchive.status": 1,
       "recordingArchive.driveWebViewLink": 1,
+      "recordingArchive.sourceUri": 1,
     })
     .sort({ durationSec: -1 })
     .limit(Math.max(1, Number(limit) || 15))
     .toArray();
-  return rows.map((row) => ({
+  return rows.map(buildLongCallRow);
+}
+
+function buildLongCallRow(row = {}) {
+  return {
     agentName: row.agentName || "(unknown agent)",
     minutes: Math.round(Number(row.durationSec || 0) / 60),
     platform: row.platform || null,
     contactName: row.contactName || null,
     caseId: row.caseId ?? null,
     domain: row.domain || null,
-    listenUrl: row.recordingArchive?.driveWebViewLink || null,
-    recordingStatus: row.recordingArchive?.status || "unknown",
-  }));
+    listenUrl: row.recordingArchive?.driveWebViewLink
+      || (row.platform === "phoneburner" ? row.recordingArchive?.sourceUri : null)
+      || null,
+    recordingStatus: row.recordingArchive?.driveWebViewLink
+      || (row.platform === "phoneburner" && row.recordingArchive?.sourceUri)
+      ? "available"
+      : (row.recordingArchive?.status || "unknown"),
+  };
 }
 
 module.exports = {
@@ -994,6 +1004,7 @@ module.exports = {
   listFailedPayments,
   LONG_CALL_RECORDING_PLATFORMS,
   buildLongCallFilter,
+  buildLongCallRow,
   listLongCalls,
   buildSimpleNightlyPaymentRollup,
   buildSimpleTotals,

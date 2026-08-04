@@ -129,7 +129,7 @@ test("claim-time read takes MAX legacy evidence and proves the contact window", 
   assert.equal(item.eligibility.ok, true);
 });
 
-test("claim-time source fails closed for DNC, payments, and a closed contact window", async () => {
+test("claim-time source uses cadence DNC and contact window, never CaseProfile payment state", async () => {
   const dnc = harness({ row: sourceRow({
     cadenceState: { channelDnc: { cx: { blocked: true } } },
   }) });
@@ -138,7 +138,7 @@ test("claim-time source fails closed for DNC, payments, and a closed contact win
   const paid = harness({ row: sourceRow({
     caseProfile: { statusId: 1, statusCategory: "prospect", paymentsCount: 1, totalPaid: 100 },
   }) });
-  assert.equal((await paid.source.readOne({ domain: "TAG", caseId: 1001 })).eligibility.reason, "payment-or-converted");
+  assert.equal((await paid.source.readOne({ domain: "TAG", caseId: 1001 })).eligibility.ok, true);
 
   const closed = harness({ window: {
     allowed: false,
@@ -150,21 +150,21 @@ test("claim-time source fails closed for DNC, payments, and a closed contact win
   assert.equal(closedItem.eligibility.retryable, true);
 });
 
-test("CaseProfile status is authoritative and conflicting current status fails closed", async () => {
-  const staleCadence = harness({ row: sourceRow({
+test("LeadCadence Logics evidence is authoritative and CaseProfile is not required", async () => {
+  const cadenceClosed = harness({ row: sourceRow({
     statusId: 99,
     caseProfile: { statusId: 1, statusCategory: "prospect", paymentsCount: 0, totalPaid: 0 },
   }) });
-  assert.equal((await staleCadence.source.readOne({ domain: "TAG", caseId: 1001 })).eligibility.ok, true);
-
-  const currentClosed = harness({ row: sourceRow({
-    statusId: 1,
-    caseProfile: { statusId: 42, statusCategory: "closed", paymentsCount: 0, totalPaid: 0 },
-  }) });
   assert.equal(
-    (await currentClosed.source.readOne({ domain: "TAG", caseId: 1001 })).eligibility.reason,
-    "logics-nonprospect-status",
+    (await cadenceClosed.source.readOne({ domain: "TAG", caseId: 1001 })).eligibility.reason,
+    "logics-dnc-status",
   );
+
+  const noProfile = harness({ row: sourceRow({
+    statusId: 1,
+    caseProfile: null,
+  }) });
+  assert.equal((await noProfile.source.readOne({ domain: "TAG", caseId: 1001 })).eligibility.ok, true);
 });
 
 test("status freshness gate accepts projected fresh proof and rejects missing or stale proof", async () => {
@@ -172,13 +172,9 @@ test("status freshness gate accepts projected fresh proof and rejects missing or
   const maxAge = 24 * 60 * 60 * 1000;
   const fresh = harness({
     row: sourceRow({
-      caseProfile: {
-        statusId: 1,
-        statusCategory: "prospect",
-        paymentsCount: 0,
-        totalPaid: 0,
-        lastStatusCheckAt: new Date("2026-07-10T18:00:00.000Z"),
-      },
+      caseProfile: null,
+      logicsStatusCheckedAt: new Date("2026-07-10T18:00:00.000Z"),
+      logicsProspectEligible: true,
     }),
     statusMaxAgeMs: maxAge,
   });
@@ -195,13 +191,9 @@ test("status freshness gate accepts projected fresh proof and rejects missing or
 
   const stale = harness({
     row: sourceRow({
-      caseProfile: {
-        statusId: 1,
-        statusCategory: "prospect",
-        paymentsCount: 0,
-        totalPaid: 0,
-        lastStatusCheckAt: new Date("2026-07-09T18:59:59.999Z"),
-      },
+      caseProfile: null,
+      logicsStatusCheckedAt: new Date("2026-07-09T18:59:59.999Z"),
+      logicsProspectEligible: true,
     }),
     statusMaxAgeMs: maxAge,
   });
@@ -335,7 +327,7 @@ test("pre-position intent skips only the current-clock window and keeps other cl
   assert.equal(blocked.eligibility.reason, "voice-channel-dnc");
 });
 
-test("long source scans always re-read a small hot head without losing the scan cursor", async () => {
+test("source continuation performs one bounded page without an unconditional hot-head reread", async () => {
   const older = sourceRow({ _id: "cadence-old", caseId: 1002 });
   const newest = sourceRow({ _id: "cadence-new", caseId: 1003 });
   const calls = [];
@@ -354,14 +346,12 @@ test("long source scans always re-read a small hot head without losing the scan 
     repository,
     domains: ["TAG"],
     contactWindowEvaluator: () => ({ allowed: true }),
-    headPageSize: 2,
   });
   const cursor = { createdAt: "2026-01-01T00:00:00.000Z", id: "cursor" };
   const batch = await source.readBatch({ cursor, limit: 5, now: new Date("2026-07-10T19:00:00.000Z") });
 
-  assert.deepEqual(batch.items.map((item) => item.caseId), ["1003", "1002"]);
+  assert.deepEqual(batch.items.map((item) => item.caseId), ["1002"]);
   assert.deepEqual(batch.nextCursor, { createdAt: "older", id: "old" });
-  assert.equal(calls.length, 2);
+  assert.equal(calls.length, 1);
   assert.equal(calls[0].cursor, cursor);
-  assert.equal(calls[1].cursor, null);
 });

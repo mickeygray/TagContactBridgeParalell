@@ -4,8 +4,8 @@
 //
 // Incident: WYNN case 137190 was delivered to an agent twice in one day
 // while its Logics status was "[Bad/Inactive]-DO NOT CALL". The delivery
-// gate (sourceEligibility) decides DNC from CaseProfile.statusId, which is
-// a MIRROR of Logics — and the only thing refreshing it nightly was
+// gate (sourceEligibility) decides status from LeadCadence, which is
+// a MIRROR of Logics — and the only thing refreshing that evidence nightly was
 // runNightlyLeadCadenceCaseRefresh, which is scoped to leads CREATED that
 // same day (createdAtAfter/Before = dateKey). A lead that lives in the
 // queue for weeks therefore got exactly one status check, on its creation
@@ -59,6 +59,96 @@ function statusFreshnessKey(domain, caseId) {
   return normalizedDomain && Number.isFinite(normalizedCaseId)
     ? `${normalizedDomain}:${normalizedCaseId}`
     : null;
+}
+
+function unwrapStatusCaseIds(payload) {
+  const rows = payload?.Data || payload?.data || payload;
+  if (!Array.isArray(rows)) return [];
+  const toCaseId = (value) => {
+    const candidate = value && typeof value === "object"
+      ? value.CaseID ?? value.caseId ?? value.ID ?? value.Id ?? value.id
+      : value;
+    if (typeof candidate === "boolean" || candidate == null || String(candidate).trim() === "") return null;
+    const caseId = Number(candidate);
+    return Number.isInteger(caseId) && caseId > 0 ? caseId : null;
+  };
+  return [...new Set(rows.map(toCaseId).filter((value) => value != null))];
+}
+
+/**
+ * Morning admission proof for cadence rows that have never reached the
+ * delivery ledger. Logics status membership is authoritative; CaseProfile is
+ * intentionally not read because it does not exist until case activity does.
+ */
+async function refreshUntouchedLeadCadenceStatuses({
+  domains,
+  allowedProspectStatusIds = [1, 2],
+  limit = 20000,
+  leadCadenceModel = LeadCadence,
+  logicsClientFactory = createLogicsClient,
+} = {}) {
+  const normalizedDomains = [...new Set((Array.isArray(domains) ? domains : [])
+    .map((value) => String(value || "").trim().toUpperCase())
+    .filter(Boolean))];
+  if (!normalizedDomains.length) throw new TypeError("domains are required");
+  const statusIds = [...new Set((Array.isArray(allowedProspectStatusIds)
+    ? allowedProspectStatusIds
+    : [1, 2]).map(Number).filter(Number.isFinite))];
+  if (!statusIds.length) throw new TypeError("allowedProspectStatusIds are required");
+
+  const rows = await leadCadenceModel.find({
+    domain: { $in: normalizedDomains },
+    active: true,
+    $and: [
+      { $or: [{ totalAttemptCount: 0 }, { totalAttemptCount: null }] },
+      { $or: [{ "cadenceCounters.cx": 0 }, { "cadenceCounters.cx": { $exists: false } }] },
+      { $or: [{ lastContactAt: null }, { lastContactAt: { $exists: false } }] },
+      { $or: [{ "lastTouched.cx": null }, { "lastTouched.cx": { $exists: false } }] },
+      { $or: [{ "counterCadence.lastCxDialedAt": null }, { "counterCadence.lastCxDialedAt": { $exists: false } }] },
+    ],
+  }, { domain: 1, caseId: 1 })
+    .sort({ createdAt: -1, _id: -1 })
+    .limit(Math.max(1, Number(limit) || 20000))
+    .lean();
+
+  const membershipByDomain = new Map();
+  const targetDomains = [...new Set(rows.map((row) => String(row.domain || "").toUpperCase()))];
+  for (const domain of targetDomains) {
+    const membership = new Map();
+    const client = logicsClientFactory(domain);
+    for (const statusId of statusIds) {
+      const caseIds = unwrapStatusCaseIds(await client.getCasesByStatus(statusId));
+      for (const caseId of caseIds) if (!membership.has(caseId)) membership.set(caseId, statusId);
+    }
+    membershipByDomain.set(domain, membership);
+  }
+
+  const checkedAt = new Date();
+  const operations = rows.map((row) => {
+    const domain = String(row.domain || "").toUpperCase();
+    const caseId = Number(row.caseId);
+    const statusId = membershipByDomain.get(domain)?.get(caseId) ?? null;
+    return {
+      updateOne: {
+        filter: { _id: row._id, active: true },
+        update: { $set: {
+          logicsStatusCheckedAt: checkedAt,
+          logicsProspectEligible: statusId != null,
+          ...(statusId == null ? {} : { statusId }),
+        } },
+      },
+    };
+  });
+  if (operations.length) await leadCadenceModel.bulkWrite(operations, { ordered: false });
+  const eligible = rows.filter((row) => (
+    membershipByDomain.get(String(row.domain || "").toUpperCase())?.has(Number(row.caseId))
+  )).length;
+  return {
+    scanned: rows.length,
+    refreshed: rows.length,
+    eligible,
+    blocked: rows.length - eligible,
+  };
 }
 
 /**
@@ -245,6 +335,18 @@ async function refreshQueuedLeadStatuses({
             ...buildCaseProfilePhonePatch(data),
             lastStatusCheckAt: new Date(),
           });
+          await LeadCadence.updateMany(
+            {
+              domain,
+              $or: [{ caseId }, { caseId: String(caseId) }],
+              active: true,
+            },
+            { $set: {
+              statusId: Number.isFinite(statusId) ? statusId : null,
+              logicsStatusCheckedAt: new Date(),
+              logicsProspectEligible: Number.isFinite(statusId) && [1, 2].includes(statusId),
+            } },
+          );
           summary.refreshed += 1;
           if (includeRefreshedIdentities) {
             summary.refreshedIdentities.push({ domain, caseId });
@@ -291,7 +393,9 @@ async function refreshQueuedLeadStatuses({
 
 module.exports = {
   DEFAULT_STATES,
+  refreshUntouchedLeadCadenceStatuses,
   refreshQueuedLeadStatuses,
   retireDncLead,
   statusFreshnessKey,
+  unwrapStatusCaseIds,
 };

@@ -7,8 +7,20 @@ const {
   createWorkerState,
   intervalDue,
   isPacificBusinessDay,
+  isRvmDispositionPollingEnabled,
   runRvmDispositionPollIfDue,
 } = require("../../apps/outbound-gateway/src/server");
+
+test("RVM disposition polling is hard-gated off by default", () => {
+  assert.equal(isRvmDispositionPollingEnabled({ env: {}, config: {} }), false);
+  assert.equal(
+    isRvmDispositionPollingEnabled({
+      env: { RVM_DISPOSITION_POLL_ENABLED: "true" },
+      config: {},
+    }),
+    true,
+  );
+});
 
 test("RVM disposition polling owns one five-minute cadence for both stores", async () => {
   const workerState = createWorkerState();

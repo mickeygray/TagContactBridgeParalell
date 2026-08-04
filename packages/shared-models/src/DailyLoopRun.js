@@ -57,6 +57,15 @@ const dailyLoopRunSchema = new mongoose.Schema(
     // LOOP_CLAIM_LEASE_MINUTES is expired and reclaimable — without this an
     // nssm restart mid-pass would silently lose the night.
     dayDocCompletedAt: { type: Date, default: null },
+
+    // Named nightly-hygiene lease. Unlike the former process-memory flag,
+    // this survives a control-plane restart and is claimed before any task
+    // performs discovery reads.
+    nightlyHygieneClaimedAt: { type: Date, default: null },
+    nightlyHygieneCompletedAt: { type: Date, default: null },
+    nightlyHygieneNextTaskIndex: { type: Number, default: 0, min: 0 },
+    nightlyHygieneCounts: { type: mongoose.Schema.Types.Mixed, default: null },
+    nightlyHygieneLastErrorCode: { type: String, default: null },
   },
   { timestamps: true },
 );

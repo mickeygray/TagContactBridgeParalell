@@ -230,7 +230,12 @@ async function runNightlyFinalClosePass(domains, options = {}) {
   const dateKey = options.dateKey || options.date || formatDateKey(new Date(), options.timezone || "America/Los_Angeles");
   let spendSync = null;
 
-  if (options.spendSyncRuntime?.syncAll) {
+  // Scheduled spend synchronization has one owner: spendSyncRuntime. The
+  // nightly close may invoke the legacy path only as an explicit manual
+  // diagnostic during the no-delete proof window.
+  if (options.scheduled !== true
+    && options.allowLegacySpendSync === true
+    && options.spendSyncRuntime?.syncAll) {
     try {
       spendSync = await options.spendSyncRuntime.syncAll({
         scheduled: Boolean(options.scheduled),
@@ -239,7 +244,7 @@ async function runNightlyFinalClosePass(domains, options = {}) {
       spendSync = { ok: false, error: error.message };
     }
   } else {
-    spendSync = { ok: false, skipped: true, reason: "no-spend-sync-runtime-passed" };
+    spendSync = { ok: true, skipped: true, reason: "dedicated-scheduled-owner" };
   }
 
   // LD spend materializer: lead-cadence counts × per-family rates become
@@ -251,7 +256,9 @@ async function runNightlyFinalClosePass(domains, options = {}) {
   // computes or writes LD dollars anymore.
   const ldSpendMaterializer = { skipped: true, reason: "retired-cpl-in-logics" };
 
-  const hourlySweep = await runHourlySweep({
+  const hourlySweep = options.scheduled === true || options.allowLegacyFullHourlySweep !== true
+    ? { ok: true, skipped: true, reason: "retired-from-nightly-close" }
+    : await runHourlySweep({
     workerName: "nightly-close-final",
     lane: "nightly",
     scheduledPhase: true,
@@ -299,7 +306,7 @@ async function runNightlyFinalClosePass(domains, options = {}) {
     callLogHygieneArchiveRecordings:
       options.callLogHygieneArchiveRecordings !== false,
     logger: options.logger || null,
-  });
+    });
 
   let cxCallActivityBackfill = null;
   try {

@@ -1715,3 +1715,104 @@ Implementation evidence:
 - After the targeted inbound-gateway restart, 34 real indexed duplicate checks
   ran during a 30-second proof window with zero examined documents/keys and
   zero new Mongo pre-ping writes. The gateway health endpoint returned 200.
+## Phase 9 compute-boundary ruling (2026-08-03)
+
+The Mongo/off-hours repair in
+`MONGO_POOL_AND_OFF_HOURS_LEAD_DELIVERY_WORK_ORDER_2026-08-03.md` is an
+approved Phase 9 hardening slice. It does not change allocation, folder,
+packet, fairness, or attempt-cap policy.
+
+- Outside the Pacific delivery window, the minute owner may recover already
+  durable provider events, but it must not scan the cadence source, inspect
+  provider capacity, refill folders, or wake immediate-fresh dispatch.
+- The active cadence source has one durable daily repair cursor and one strict
+  `(createdAt, _id)` new-arrival high-water cursor. A completed daily repair is
+  not replayed after a tick or process restart.
+- CaseProfile and appointment joins retain exact `(domain, caseId)` pairs;
+  provider-event recovery is provider-scoped and split into bounded,
+  index-aligned pending, due-failed, and expired-processing heads.
+- Shared Mongo clients use explicit bounded pool settings. Scheduler ownership
+  consolidation remains a separate patch and must not create another
+  lead-delivery decision owner.
+
+Proof requires focused repository/runtime/route tests plus additive-index
+verification before any Linux restart. Live deployment remains separately
+authorized and is not implied by this ruling.
+
+## Phase 9 PhoneBurner recording-capture recovery ruling (2026-08-03)
+
+The recovery contract in
+`PHONEBURNER_RECORDING_CAPTURE_RECOVERY_WORK_ORDER_2026-08-03.md` is an
+approved Phase 9 hardening slice. It does not change lead selection, folder
+ownership, allocation, refill, outcome, or attempt-cap policy.
+
+- Historical proof shows PhoneBurner-hosted recording URLs were successfully
+  retained in April 2026. Callback recording capture is therefore a required
+  provider evidence path, not a speculative feature.
+- The callback adapter selects the first independently validated HTTPS URL
+  across the measured public/link/url aliases. An empty or invalid early field
+  may not hide a later valid field.
+- A recording-only callback monotonically strengthens the exact provider call.
+  It may update the existing DailyDial attempt and CallLog, but it may not
+  recount the attempt, weaken the outcome, reopen the lead, or replay business
+  effects.
+- `recordingId` remains separate opaque evidence and is never interpolated into
+  a guessed URL.
+- Callback capture retains no raw body. Recording URLs remain private persisted
+  evidence and never appear in logs, health, checkpoints, or client list
+  payloads.
+- Reports and trainer review use exact persisted CallLog evidence. Shared-token
+  PhoneBurner session enumeration is not a correctness dependency.
+- No second scheduler, event drain, attempt ledger, provider writer, collection,
+  or automatic recording backfill is permitted.
+
+The live opaque-reference amendment dated 2026-08-03 temporarily permits the
+callback adapter to retain the first bounded scalar recording candidate as
+private `recordingReference` evidence when no alias validates as a URL. It may
+not be fetched, logged, displayed, projected, or treated as media authority;
+the existing strict `recordingUrl` contract and all single-owner rules remain
+unchanged.
+
+Proof requires the focused callback, event-upgrade, DailyDial, CallLog,
+report, and trainer gates named in the recovery work order, followed by a real
+post-deploy callback canary. Live deployment remains separately authorized and
+is not implied by this ruling.
+
+## Phase 9 7:50 untouched-first admission ruling (2026-08-03)
+
+- The Pacific 7:50 day-start owner scans the complete bounded active cadence
+  source before declaring the morning queue ready.
+- `LeadCadence` is the voice-touch authority. A lead is untouched only when its
+  canonical attempt/contact facts and compatibility voice-touch facts are all
+  empty or zero.
+- Logics prospect-status membership is refreshed directly onto `LeadCadence`
+  before admission. `CaseProfile` remains a secondary safety veto when it
+  exists, but its absence can never strand a brand-new lead before first call.
+- Every admitted untouched non-fresh item is posted one at a time through a
+  durable fair cursor across the configured, enabled day-start agents. The
+  cursor advances only after provider acceptance.
+- Same-day `new_today` work remains exclusively owned by the existing immediate
+  fresh fair cursor; the morning sweep may not create a second fresh allocator.
+- Provider backpressure, Logics failure, an incomplete source scan, or a fair
+  cursor conflict fails the morning build closed and leaves it resumable.
+- An empty/exhausted shared pool is a successful completed build. New arrivals
+  after 7:50 continue through the immediate lane and bounded minute repair.
+
+Proof requires source-eligibility, repository projection/filter, Logics
+membership normalization, full 7:50 source-build, five-agent fair-distribution,
+and production-simple day-start tests before a controlled Linux restart.
+
+## Phase 9 Cadence + Logics pre-serve authority amendment (2026-08-03)
+
+- Lead-delivery pre-serve admission must not query or inspect `CaseProfile`.
+- `LeadCadence` owns persisted attempt/contact/DNC facts and the current
+  Logics-status mirror; a fresh Logics membership refresh proves whether an
+  untouched case is still a prospect.
+- Conversion, payment, post-date, and terminal changes must reach cadence or
+  current Logics evidence through their event/EOD owners. A delayed or absent
+  `CaseProfile` may neither admit nor veto delivery work.
+- Canonical appointment evidence remains a separate explicit safety hold; it
+  is not a `CaseProfile` fallback.
+- The former CaseProfile source join and veto code remain hard-gated during
+  the no-delete proof window and are pending physical deletion after live
+  evidence.

@@ -11,6 +11,11 @@ const DefaultCxAppointment = require("../../shared-models/src/CxAppointment");
 const DefaultCxTerminalOutbox = require("../../shared-models/src/CxTerminalOutbox");
 const DefaultCallLog = require("../../shared-models/src/CallLog");
 const DefaultMasterProspectIndex = require("../../shared-models/src/MasterProspectIndex");
+
+// Phase 9: LeadCadence + current Logics evidence are the pre-serve authority.
+// Preserve the legacy join for the no-delete proof window, but never execute
+// it from the production source reader.
+const CASE_PROFILE_SOURCE_JOIN_ENABLED = false;
 const {
   ACTIVE_APPOINTMENT_STATUSES,
 } = require("./cxAppointmentRepository");
@@ -115,6 +120,20 @@ const CHECKPOINT_DIGEST_FIELDS = new Set([
   "latestAcceptedIdentityDigest",
 ]);
 const CHECKPOINT_STATUSES = new Set(["scheduled", "running", "partial", "completed", "failed"]);
+const SOURCE_REPAIR_STATUSES = new Set(["scheduled", "running", "completed", "failed"]);
+const SOURCE_REPAIR_MUTABLE_FIELDS = new Set([
+  "status",
+  "repairCursorCreatedAt",
+  "repairCursorId",
+  "highWaterCreatedAt",
+  "highWaterId",
+  "scannedCount",
+  "admittedCount",
+  "skippedCount",
+  "completedAt",
+  "lastRunAt",
+  "lastErrorCode",
+]);
 const SHA256_HEX = /^[a-f0-9]{64}$/;
 const ITEM_APPENDABLE_ARRAYS = new Set(["providerAttemptHistory"]);
 const IMMUTABLE_ITEM_FIELDS = new Set(["domain", "caseId", "sourceIdentity", "leadCadenceId"]);
@@ -182,6 +201,8 @@ const SOURCE_LEAD_PROJECTION = Object.freeze({
   city: 1,
   state: 1,
   statusId: 1,
+  logicsStatusCheckedAt: 1,
+  logicsProspectEligible: 1,
   active: 1,
   currentStage: 1,
   createdAt: 1,
@@ -774,6 +795,91 @@ function createLeadDeliveryRepository({
     ));
   }
 
+  function normalizeSourceRepairMutation(input, name = "set") {
+    const source = exactObject(input, SOURCE_REPAIR_MUTABLE_FIELDS, name);
+    const output = { ...source };
+    if (Object.hasOwn(source, "status")) {
+      output.status = requireNonblankString(source.status, `${name}.status`).toLowerCase();
+      if (!SOURCE_REPAIR_STATUSES.has(output.status)) {
+        throw new TypeError(`${name}.status is invalid`);
+      }
+    }
+    for (const field of ["repairCursorCreatedAt", "highWaterCreatedAt", "completedAt", "lastRunAt"]) {
+      if (Object.hasOwn(source, field)) output[field] = source[field] == null ? null : requireDate(source[field], `${name}.${field}`);
+    }
+    for (const field of ["repairCursorId", "highWaterId", "lastErrorCode"]) {
+      if (Object.hasOwn(source, field)) {
+        output[field] = source[field] == null ? null : requireNonblankString(source[field], `${name}.${field}`);
+      }
+    }
+    for (const field of ["scannedCount", "admittedCount", "skippedCount"]) {
+      if (Object.hasOwn(source, field)) output[field] = requireVersion(source[field], `${name}.${field}`);
+    }
+    return output;
+  }
+
+  async function insertSourceRepairCheckpointOnce({
+    checkpointKey,
+    provider,
+    source,
+    businessDate,
+  } = {}, { session = null } = {}) {
+    const row = {
+      _id: requireNonblankString(checkpointKey, "checkpointKey"),
+      kind: "source_repair",
+      provider: requireNonblankString(provider, "provider").toLowerCase(),
+      source: requireNonblankString(source, "source").toLowerCase(),
+      businessDate: requireBusinessDate(businessDate),
+      status: "scheduled",
+      version: 0,
+    };
+    try {
+      return await createWithSession(LeadDeliveryCheckpoint, row, session);
+    } catch (error) {
+      if (isDuplicateKeyError(error) && duplicateIndexName(error) === "_id_") return null;
+      throw error;
+    }
+  }
+
+  async function getSourceRepairCheckpoint(checkpointKey, { session = null } = {}) {
+    const query = applySession(LeadDeliveryCheckpoint.findOne({
+      _id: requireNonblankString(checkpointKey, "checkpointKey"),
+      kind: "source_repair",
+    }), session);
+    return lean(query);
+  }
+
+  async function compareAndSetSourceRepairCheckpoint({
+    checkpointKey,
+    expectedVersion,
+    expected = {},
+    set = {},
+    increment = {},
+    session = null,
+  } = {}) {
+    const expectedFields = normalizeSourceRepairMutation(expected, "expected");
+    const normalizedSet = normalizeSourceRepairMutation(set, "set");
+    const normalizedIncrement = exactObject(
+      increment,
+      new Set(["scannedCount", "admittedCount", "skippedCount"]),
+      "increment",
+    );
+    for (const [field, value] of Object.entries(normalizedIncrement)) {
+      normalizedIncrement[field] = requireVersion(value, `increment.${field}`);
+    }
+    const update = { $set: normalizedSet, $inc: { version: 1, ...normalizedIncrement } };
+    return lean(LeadDeliveryCheckpoint.findOneAndUpdate(
+      {
+        _id: requireNonblankString(checkpointKey, "checkpointKey"),
+        kind: "source_repair",
+        version: requireVersion(expectedVersion),
+        ...expectedFields,
+      },
+      update,
+      { new: true, runValidators: true, session: session || undefined },
+    ));
+  }
+
   async function insertActiveItemOnce(input = {}, { session = null } = {}) {
     const normalized = {
       ...input,
@@ -859,7 +965,16 @@ function createLeadDeliveryRepository({
       identities.set(sourceJoinKey(domain, caseId), { domain, caseId });
     }
     if (!identities.size) return new Map();
-    let query = CaseProfile.find({ $or: [...identities.values()] }).select(SOURCE_CASE_PROJECTION);
+    const caseIdsByDomain = new Map();
+    for (const { domain, caseId } of identities.values()) {
+      if (!caseIdsByDomain.has(domain)) caseIdsByDomain.set(domain, []);
+      caseIdsByDomain.get(domain).push(caseId);
+    }
+    const domainBranches = [...caseIdsByDomain.entries()].map(([domain, caseIds]) => ({
+      domain,
+      caseId: { $in: caseIds },
+    }));
+    let query = CaseProfile.find({ $or: domainBranches }).select(SOURCE_CASE_PROJECTION);
     query = applySession(query, session);
     const profiles = await lean(query);
     return new Map((profiles || []).map((profile) => [
@@ -882,8 +997,16 @@ function createLeadDeliveryRepository({
       identities.set(sourceJoinKey(domain, caseId), { domain, caseId });
     }
     if (!identities.size) return new Map();
+    const caseIdsByDomain = new Map();
+    for (const { domain, caseId } of identities.values()) {
+      if (!caseIdsByDomain.has(domain)) caseIdsByDomain.set(domain, []);
+      caseIdsByDomain.get(domain).push(caseId);
+    }
     let query = CxAppointment.find({
-      $or: [...identities.values()],
+      $or: [...caseIdsByDomain.entries()].map(([domain, caseIds]) => ({
+        domain,
+        caseId: { $in: caseIds },
+      })),
       status: { $in: [...ACTIVE_APPOINTMENT_STATUSES] },
     })
       .select(SOURCE_APPOINTMENT_PROJECTION)
@@ -901,7 +1024,9 @@ function createLeadDeliveryRepository({
   async function joinProjectedSourceRows(sourceRows, { session = null } = {}) {
     // Keep reads sequential when a transaction session is injected; Mongo does
     // not support parallel operations on one session/transaction.
-    const profilesByIdentity = await readCaseProfilesForSources(sourceRows, { session });
+    const profilesByIdentity = CASE_PROFILE_SOURCE_JOIN_ENABLED
+      ? await readCaseProfilesForSources(sourceRows, { session })
+      : new Map();
     const appointmentsByIdentity = await readActiveAppointmentsForSources(sourceRows, { session });
     return sourceRows.map((row) => {
       const cadence = plain(row);
@@ -946,12 +1071,54 @@ function createLeadDeliveryRepository({
     const hasMore = fetched.length > cap;
     const page = hasMore ? fetched.slice(0, cap) : fetched;
     const items = await joinProjectedSourceRows(page, { session });
+    const first = page[0] || null;
     const last = page.at(-1) || null;
     return {
       items,
+      highWater: first
+        ? { createdAt: new Date(first.createdAt), id: String(first._id) }
+        : null,
       nextCursor: hasMore && last
         ? { createdAt: new Date(last.createdAt), id: String(last._id) }
         : null,
+      done: !hasMore,
+    };
+  }
+
+  async function readSourceNewerBatch({
+    after,
+    limit = 250,
+    domains,
+    session = null,
+  } = {}) {
+    const normalizedDomains = normalizeSourceDomains(domains);
+    const highWater = normalizeSourceCursor(after);
+    if (!highWater) throw new TypeError("after is required");
+    const cap = requireVersion(limit, "limit");
+    if (cap < 1 || cap > 1000) throw new TypeError("limit must be between 1 and 1000");
+    const filter = {
+      domain: { $in: normalizedDomains },
+      active: true,
+      $or: [
+        { createdAt: { $gt: highWater.createdAt } },
+        { createdAt: highWater.createdAt, _id: { $gt: highWater.id } },
+      ],
+    };
+    let query = LeadCadence.find(filter)
+      .select(SOURCE_LEAD_PROJECTION)
+      .sort({ createdAt: 1, _id: 1 })
+      .limit(cap + 1);
+    query = applySession(query, session);
+    const fetched = await lean(query);
+    const hasMore = fetched.length > cap;
+    const page = hasMore ? fetched.slice(0, cap) : fetched;
+    const items = await joinProjectedSourceRows(page, { session });
+    const last = page.at(-1) || null;
+    return {
+      items,
+      nextHighWater: last
+        ? { createdAt: new Date(last.createdAt), id: String(last._id) }
+        : highWater,
       done: !hasMore,
     };
   }
@@ -1565,10 +1732,12 @@ function createLeadDeliveryRepository({
   async function listPacketCandidateItems({
     agentId,
     sourcePools,
+    untouchedOnly = false,
     now = null,
     limit = 500,
     session = null,
   } = {}) {
+    if (typeof untouchedOnly !== "boolean") throw new TypeError("untouchedOnly must be a boolean");
     const normalizedAgentId = requireString(agentId, "agentId").toLowerCase();
     if (!Array.isArray(sourcePools) || sourcePools.length === 0) {
       throw new TypeError("sourcePools must be a non-empty array");
@@ -1591,6 +1760,10 @@ function createLeadDeliveryRepository({
       activeAttempt: true,
       providerContactId: null,
       state: { $in: PACKET_CANDIDATE_STATES },
+      ...(untouchedOnly ? {
+        totalAttemptCount: 0,
+        lastContactAt: null,
+      } : {}),
       $and: [
         { $or: poolPredicates },
         { $or: [
@@ -1692,21 +1865,48 @@ function createLeadDeliveryRepository({
     return lean(query);
   }
 
-  async function listEventsForDrain({ limit = 50, now = new Date(), session = null } = {}) {
+  async function listEventsForDrain({
+    provider,
+    limit = 50,
+    now = new Date(),
+    session = null,
+  } = {}) {
+    const providerName = requireNonblankString(provider, "provider").toLowerCase();
     const cap = requireVersion(limit, "limit");
     if (cap < 1 || cap > 500) throw new TypeError("limit must be between 1 and 500");
     const at = requireDate(now, "now");
-    let query = LeadDeliveryEvent.find({
-      $or: [
-        { status: "pending" },
+    const readHead = async (filter, sort) => {
+      let query = LeadDeliveryEvent.find({ provider: providerName, ...filter });
+      if (typeof query.sort === "function") query = query.sort(sort);
+      if (typeof query.limit === "function") query = query.limit(cap);
+      query = applySession(query, session);
+      return lean(query);
+    };
+    const reads = [
+      () => readHead({ status: "pending" }, { receivedAt: 1, _id: 1 }),
+      () => readHead(
         { status: "failed", nextAttemptAt: { $lte: at } },
+        { nextAttemptAt: 1, receivedAt: 1, _id: 1 },
+      ),
+      () => readHead(
         { status: "processing", processingLeaseExpiresAt: { $lte: at } },
-      ],
-    });
-    if (typeof query.sort === "function") query = query.sort({ receivedAt: 1, _id: 1 });
-    if (typeof query.limit === "function") query = query.limit(cap);
-    if (session && typeof query.session === "function") query = query.session(session);
-    return lean(query);
+        { processingLeaseExpiresAt: 1, receivedAt: 1, _id: 1 },
+      ),
+    ];
+    // MongoDB does not permit parallel operations on one transaction
+    // session. Normal drain reads stay concurrent; transaction callers keep
+    // the repository contract by executing the same bounded heads in order.
+    const [pending, failed, processing] = session
+      ? [await reads[0](), await reads[1](), await reads[2]()]
+      : await Promise.all(reads.map((read) => read()));
+    return [...pending, ...failed, ...processing]
+      .sort((left, right) => {
+        const leftAt = requireDate(left.receivedAt, "event.receivedAt").getTime();
+        const rightAt = requireDate(right.receivedAt, "event.receivedAt").getTime();
+        if (leftAt !== rightAt) return leftAt - rightAt;
+        return String(left._id).localeCompare(String(right._id));
+      })
+      .slice(0, cap);
   }
 
   async function withTransaction(work) {
@@ -1729,6 +1929,7 @@ function createLeadDeliveryRepository({
     acquireRefillRequest,
     compareAndSetAgent,
     compareAndSetCheckpoint,
+    compareAndSetSourceRepairCheckpoint,
     compareAndSetEvent,
     compareAndSetFairPickCursor,
     compareAndSetItem,
@@ -1740,11 +1941,13 @@ function createLeadDeliveryRepository({
     findEventByDedupeKey,
     getAgentById,
     getCheckpointByKey,
+    getSourceRepairCheckpoint,
     getOrCreateFairPickCursor,
     getItemById,
     hasUnconsumedOvernightFirstContact,
     insertActiveItemOnce,
     insertCheckpointOnce,
+    insertSourceRepairCheckpointOnce,
     insertEventOnce,
     listAgentDeliveryItems,
     listAgentPendingProviderPosts,
@@ -1758,6 +1961,7 @@ function createLeadDeliveryRepository({
     listProviderIdentityCandidates,
     readLegacyDailyAttemptFloor,
     readSourceBatch,
+    readSourceNewerBatch,
     readSourceWindowBatch,
     readSourceLead,
     releaseRefillRequest,

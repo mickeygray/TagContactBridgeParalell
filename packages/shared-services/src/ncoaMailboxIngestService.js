@@ -4,7 +4,12 @@ const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
 
-const { createGoogleGmailClient } = require("../../shared-integrations/src");
+const {
+  openMailbox,
+  collectAttachmentParts,
+  readAttachmentBuffer,
+  listMessageRefs,
+} = require("./mailboxIngestService");
 const { WorkflowRecord } = require("../../shared-models/src");
 const { getInternalFromEmail, getSharedConfig } = require("../../shared-config/src");
 const { recordWorkflowStage } = require("./workflowStateService");
@@ -67,59 +72,17 @@ function messageHeader(message = {}, name) {
   return cleanText(hit?.value || "", 1000);
 }
 
-function collectAttachmentParts(part = {}, out = []) {
-  if (!part || typeof part !== "object") return out;
-  if (part.filename && (part.body?.attachmentId || part.body?.data)) {
-    out.push(part);
-  }
-  for (const child of part.parts || []) {
-    collectAttachmentParts(child, out);
-  }
-  return out;
-}
 
-async function readAttachmentBuffer(gmail, messageId, part) {
-  if (part.body?.data) return gmail.decodeData(part.body.data);
-  const attachmentId = part.body?.attachmentId;
-  if (!attachmentId) return null;
-  const attachment = await gmail.getAttachment(messageId, attachmentId);
-  if (!attachment?.data) return null;
-  return gmail.decodeData(attachment.data);
-}
 
-async function listMailboxMessageRefs(gmail, config = {}) {
-  const pageSize = Math.max(1, Math.min(500, Number(config.maxMessages || 10) || 10));
-  const maxPages = Math.max(1, Math.min(50, Number(config.maxMessagePages || config.maxPages || 10) || 10));
-  const messages = [];
-  const seen = new Set();
-  let pageToken = "";
-  let pagesScanned = 0;
-
-  for (;;) {
-    const listed = await gmail.listMessages({
-      query: config.gmailQuery,
-      maxResults: pageSize,
-      pageToken,
-    });
-    pagesScanned += 1;
-    for (const message of Array.isArray(listed?.messages) ? listed.messages : []) {
-      const id = cleanText(message?.id || "", 200);
-      if (!id || seen.has(id)) continue;
-      seen.add(id);
-      messages.push({ ...message, id });
-    }
-    pageToken = cleanText(listed?.nextPageToken || "", 500);
-    if (!pageToken || pagesScanned >= maxPages) break;
-  }
-
-  return {
-    messages,
-    pagesScanned,
-    truncated: Boolean(pageToken),
-    pageSize,
-    maxPages,
-  };
-}
+// collectAttachmentParts / readAttachmentBuffer / listMessageRefs used to live
+// here. They are now in mailboxIngestService so this loop and the mail-invoice
+// reader share ONE Gmail path — Mickey 2026-07-31: "turn the open gmail into an
+// agnostic service that is called in both functions."
+const listMailboxMessageRefs = (gmail, config = {}) => listMessageRefs(gmail, {
+  gmailQuery: config.gmailQuery,
+  maxMessages: config.maxMessages,
+  maxPages: config.maxMessagePages || config.maxPages,
+});
 
 async function alreadyProcessed(dedupeKey) {
   if (!dedupeKey) return false;
@@ -387,10 +350,7 @@ async function runNcoaMailboxIngest(options = {}) {
   const dryRun = Boolean(options.dryRun || config.dryRun);
   const dateKey = options.dateKey || formatDateKey(new Date(), config.timezone || DEFAULT_TIMEZONE);
   const runDir = path.join(config.outDir, `run-${timestampForFile()}`);
-  const gmail = options.gmailClient || createGoogleGmailClient({
-    ...(config.gmail || {}),
-    user: config.user,
-  });
+  const gmail = openMailbox({ gmail: options.gmailClient, config });
   const summary = {
     domain,
     dryRun,
@@ -506,10 +466,7 @@ async function runNcoaMailboxIngestIfDue(options = {}) {
   const domain = normalizeDomain(config.domain);
   const dateKey = options.dateKey || formatDateKey(now, timeZone);
   if (await hasCompletedMailboxRun({ domain, dateKey })) {
-    const gmail = options.gmailClient || createGoogleGmailClient({
-      ...(config.gmail || {}),
-      user: config.user,
-    });
+    const gmail = openMailbox({ gmail: options.gmailClient, config });
     const unreadCheck = await listMailboxMessageRefs(gmail, {
       ...config,
       maxMessages: 1,

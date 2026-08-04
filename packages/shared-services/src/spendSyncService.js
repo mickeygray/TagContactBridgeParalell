@@ -31,7 +31,7 @@ function normalizeActiveWeekdays(values = null) {
   const normalized = [...new Set(
     source
       .map((value) => Number(value))
-      .filter((value) => Number.isInteger(value) && value >= 0 && value <= 6),
+      .filter((value) => Number.isInteger(value) && value >= 1 && value <= 5),
   )];
   return normalized.length > 0 ? normalized : [...DEFAULT_WEEKDAYS];
 }

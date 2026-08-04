@@ -215,7 +215,10 @@ const {
   validateCompanyTrackingNumbers,
 } = require("../../../packages/shared-integrations/src");
 const { resolveQueueDialTimeWindow } = require("../../../packages/shared-services/src/cxQueuePolicyService");
-const { refreshQueuedLeadStatuses } = require("../../../packages/shared-services/src/leadQueueStatusRefreshService");
+const {
+  refreshQueuedLeadStatuses,
+  refreshUntouchedLeadCadenceStatuses,
+} = require("../../../packages/shared-services/src/leadQueueStatusRefreshService");
 const leadDeliveryConfiguration = require("../../../config/lead-delivery-agents.json");
 const {
   watchCxBoringDialerActiveCalls,
@@ -668,9 +671,12 @@ async function startHourlySweepWorker({ config, runtime, workerState, spendSyncR
       return;
     }
 
-    const currentHourKey = `${workerState.lastStartedAt.getUTCFullYear()}-${workerState.lastStartedAt.getUTCMonth()}-${workerState.lastStartedAt.getUTCDate()}-${workerState.lastStartedAt.getUTCHours()}`;
-    let runScheduledPhase =
-      workerState.lastScheduledHour !== currentHourKey;
+    // Phase A discovery has named daily owners now. The generic worker owns
+    // only the already-durable hourly retry queue, on every weekday tick.
+    // Keeping this false also prevents spend, cadence, payment, recording,
+    // and CaseProfile discovery from being resurrected by a config default.
+    const runScheduledPhase = false;
+    const currentHourKey = null;
     const mongoState = getMongoReadyState(runtime);
     if (!mongoState.connected) {
       workerState.lastCompletedAt = new Date();
@@ -684,26 +690,8 @@ async function startHourlySweepWorker({ config, runtime, workerState, spendSyncR
       return;
     }
 
-    let businessHoursLiteMode = null;
-    try {
-      const pacingConfig = await getPacingConfig();
-      if (isOperatingNow(pacingConfig, workerState.lastStartedAt)) {
-        businessHoursLiteMode = {
-          mode: "business-hours-lite",
-          timezone: pacingConfig.businessHoursTimezone || "America/Los_Angeles",
-          businessHoursStart: pacingConfig.businessHoursStart,
-          businessHoursEnd: pacingConfig.businessHoursEnd,
-          businessDays: pacingConfig.businessDays,
-        };
-      }
-    } catch (error) {
-      businessHoursLiteMode = {
-        mode: "business-hours-lite",
-        reason: "business-hours-check-failed",
-        error: error.message,
-      };
-    }
-    const scheduledPhaseMode = runScheduledPhase ? businessHoursLiteMode : null;
+    const businessHoursLiteMode = { mode: "durable-retry-drain-only" };
+    const scheduledPhaseMode = null;
 
     try {
       // Claim the hour before running Phase A. If a dependency fails
@@ -712,7 +700,7 @@ async function startHourlySweepWorker({ config, runtime, workerState, spendSyncR
       if (runScheduledPhase) {
         workerState.lastScheduledHour = currentHourKey;
       }
-      const scheduledPhaseLite = businessHoursLiteMode?.mode === "business-hours-lite";
+      const scheduledPhaseLite = true;
       if (scheduledPhaseMode) {
         runtime.logger.info("control-plane.hourly.scheduled_phase_mode", scheduledPhaseMode);
       }
@@ -791,15 +779,11 @@ async function startHourlySweepWorker({ config, runtime, workerState, spendSyncR
         resolutionEmailsEnabled: !scheduledPhaseLite,
         logger: runtime.logger,
       });
-      if (scheduledPhaseMode) {
-        result.scheduledPhaseMode = scheduledPhaseMode;
-      }
-      if (
-        runScheduledPhase &&
-        !scheduledPhaseLite &&
-        config.hourlySweep?.spendSyncEnabled !== false &&
-        spendSyncRuntime?.syncAll
-      ) {
+      result.scheduledPhaseMode = businessHoursLiteMode;
+      // Legacy duplicate spend owner retained behind an unreachable proof
+      // gate for the no-delete window. Dedicated spendSyncRuntime is the only
+      // scheduled owner.
+      if (false) {
         const startedAt = new Date();
         try {
           const spendSync = await spendSyncRuntime.syncAll({ scheduled: true });
@@ -2149,6 +2133,9 @@ async function startServer() {
     deliveryWindowEvaluator: leadDeliveryService.isPacificDeliveryWindowOpen,
     currentOvernightBatchKey: (at) => leadDeliveryService.resolvePacificMorningBatchWindow(at).batchKey,
     providerInventoryAuthoritative: true,
+    // Same non-secret allowlist the callback route uses. One list decides both
+    // strict capture and reference promotion, so the two can never diverge.
+    allowedRecordingHosts: config.phoneburnerRecording?.allowedHosts || [],
     providerConsumptionOrder: String(process.env.PHONEBURNER_PROVIDER_CONSUMPTION_ORDER || "").trim() || null,
     refreshSourceStatuses: async () => {
       const result = await refreshQueuedLeadStatuses({
@@ -2171,6 +2158,11 @@ async function startServer() {
         refreshedIdentities: result.refreshedIdentities,
       };
     },
+    refreshUntouchedSourceStatuses: async () => refreshUntouchedLeadCadenceStatuses({
+      domains: getCompanyKeys(),
+      allowedProspectStatusIds: config.logicsProspectStatusIds,
+      limit: 20000,
+    }),
     // SIMPLE LOOP ONLY: legacy seed/fill/preload/refill methods remain in the
     // file for the no-delete proof window but have no production authority.
     legacyOperatorSurfaceEnabled: false,
@@ -2366,6 +2358,7 @@ async function startServer() {
     captureEnabled: leadDeliveryCallbackCaptureEnabled,
     actionsEnabled: leadDeliveryActionsEnabled,
     logger: runtime.logger,
+    allowedRecordingHosts: config.phoneburnerRecording?.allowedHosts || [],
     allowedAgentIds: Object.entries(leadDeliveryConfiguration.agents)
       .filter(([, agent]) => agent.enabled === true)
       .map(([agentId]) => agentId),
@@ -2728,14 +2721,17 @@ async function startServer() {
       config,
       runtime,
       workerState: hourlySweepState,
-      spendSyncRuntime,
     });
   } else {
     hourlySweepState.enabled = false;
     runtime.logger.warn("control-plane.hourly.disabled");
   }
 
-  if (config.controlPlaneWorker?.enabled !== false) {
+  // The EOD recording archive is the sole scheduled recording/backfill
+  // owner. Keep the former hourly implementation available for the
+  // no-delete proof window, but never arm it automatically.
+  const legacyHourlyRecordingOwnerEnabled = false;
+  if (config.controlPlaneWorker?.enabled !== false && legacyHourlyRecordingOwnerEnabled) {
     await startCxRecordingWorker({
       config,
       runtime,
@@ -2743,7 +2739,8 @@ async function startServer() {
     });
   } else {
     cxRecordingState.enabled = false;
-    runtime.logger.warn("control-plane.cx_recording.disabled");
+    cxRecordingState.lastResult = { skipped: true, reason: "retired-duplicate-owner" };
+    runtime.logger.warn("control-plane.cx_recording.retired_duplicate_owner");
   }
 
   if (config.controlPlaneWorker?.enabled !== false) {

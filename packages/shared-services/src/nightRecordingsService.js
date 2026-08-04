@@ -82,42 +82,137 @@ async function listCallrailLongCalls({
 }
 
 /**
- * PhoneBurner long dials for the day, straight off DailyDial attempts.
+ * LD long dials for the day, read STRAIGHT OFF DailyDial.
  *
- * The recording now rides in on the call callback (2026-07-31) instead of
- * needing a dialSession lookup, so these carry a listen link like the CallRail
- * side does. The lookup route was never viable anyway: the service account
- * 404s on getDialSession for the agents' own sessions, because they dial on
- * their own seats.
+ * Mickey 2026-08-03: "just read daily dials then" / "for LD".
  *
- * The link is taken from the LONGEST attempt on the case — the same attempt
- * whose agent and duration are already reported here, so the three always
- * describe one call rather than three different ones.
+ * ── WHY NOT CallLog ────────────────────────────────────────────────────────
+ *
+ * The sibling reader below goes through CallLog, and for LD that path is dead
+ * on arrival. Measured 2026-08-03: 403 distinct providerCallIds carried a
+ * recording reference, ALL 403 matched a DailyDial attempt, and **ZERO** had a
+ * CallLog row — the newest PhoneBurner CallLog is from 2026-07-31 evening.
+ * CallLog is written by a separate projection that had not run for the day, so
+ * routing LD recordings through it would have produced an empty section while
+ * every part of the feature "worked".
+ *
+ * DailyDial is where the dial actually lands, and it is the same record the
+ * Call End callback writes. One hop, nothing to wait for.
+ *
+ * ── WHERE THE LINK COMES FROM ──────────────────────────────────────────────
+ *
+ * `attempt.recordingUrl` is the strong form and is preferred whenever set. It
+ * is null today for every attempt, because the ledger validator accepts HTTPS
+ * only and PhoneBurner sends HTTP — so the retained reference on the delivery
+ * event is the fallback, joined on `providerCallId`, which is the exact key
+ * both sides already carry.
+ *
+ * The reference is used AS CAPTURED. No fetching, no redirect walking, no
+ * rewriting: the capture side is closed, a delivered link was manually proved
+ * to work, and the work order forbids a second parser or writer.
  */
-async function listPhoneBurnerLongDials({ dateKey, minDurationSec = 300, limit = 5 } = {}) {
-  const DailyDial = require("../../shared-models/src/DailyDial");
-  const rows = await DailyDial.find({ dateKey, durationSeconds: { $gte: minDurationSec } })
-    .select("caseId domain durationSeconds lastOutcome attempts recordingUrl")
-    .sort({ durationSeconds: -1 }).limit(limit).lean();
+async function listLdLongDialsFromDials({
+  domain = null, dateKey, minDurationSec = 300, limit = 5,
+} = {}) {
+  const { DailyDial, LeadDeliveryEvent } = require("../../shared-models/src");
+  const floor = Math.max(60, Number(minDurationSec) || 300);
+
+  const query = { dateKey };
+  if (domain) query.domain = String(domain).trim().toUpperCase();
+  const docs = await DailyDial.find(query)
+    .select("caseId domain attempts").lean();
+
+  // Flatten to attempts long enough to be worth hearing.
+  const calls = [];
+  for (const d of docs) {
+    for (const a of Array.isArray(d.attempts) ? d.attempts : []) {
+      const sec = Number(a.durationSeconds) || 0;
+      if (sec < floor) continue;
+      calls.push({
+        caseId: d.caseId,
+        domain: String(d.domain || "").toUpperCase(),
+        agent: a.agentId || null,
+        providerCallId: a.providerCallId || null,
+        outcome: a.outcome || null,
+        durationSec: sec,
+        minutes: Math.round(sec / 6) / 10,
+        listenUrl: a.recordingUrl || null,
+      });
+    }
+  }
+  calls.sort((x, y) => y.durationSec - x.durationSec);
+  const top = calls.slice(0, Math.max(1, Number(limit) || 5));
+
+  // Fill the gaps from the retained reference, one bounded query for the whole
+  // page rather than a lookup per call.
+  const needs = top.filter((c) => !c.listenUrl && c.providerCallId).map((c) => c.providerCallId);
+  if (needs.length) {
+    const events = await LeadDeliveryEvent.find({
+      providerCallId: { $in: needs },
+      "safePayload.recordingReference": { $type: "string", $ne: "" },
+    }).select("providerCallId safePayload.recordingReference").lean();
+    const byCall = new Map();
+    for (const e of events) {
+      // First one wins; a retry posts the same call twice.
+      if (!byCall.has(String(e.providerCallId))) {
+        byCall.set(String(e.providerCallId), e.safePayload.recordingReference);
+      }
+    }
+    for (const c of top) {
+      if (c.listenUrl) continue;
+      const ref = byCall.get(String(c.providerCallId));
+      if (ref) { c.listenUrl = ref; c.listenFromReference = true; }
+    }
+  }
+
+  return top.map((c) => ({
+    platform: "phoneburner",
+    ...c,
+    // "no recording" and "we have not looked" must not read the same. Before
+    // capture went live on 2026-08-03T20:57:45Z there is genuinely nothing.
+    listenNote: c.listenUrl
+      ? null
+      : "no recording on this attempt — capture began 2026-08-03",
+  }));
+}
+
+/**
+ * PhoneBurner long dials for the day from persisted CallLog rows. The report
+ * never enumerates agent sessions and never treats shared-account visibility
+ * as complete. Duration, attribution, and source URI describe the same exact
+ * projected provider call.
+ */
+async function listPhoneBurnerLongDials({
+  domain = "TAG", dateKey, minDurationSec = 300, limit = 5,
+} = {}) {
+  const { CallLog } = require("../../shared-models/src");
+  const { buildPacificDateRange } = require("./simpleMarketingReadService");
+  const { start, endExclusive } = buildPacificDateRange({ from: dateKey, to: dateKey });
+  const rows = await CallLog.find({
+    domain: String(domain || "TAG").trim().toUpperCase(),
+    platform: "phoneburner",
+    callStartTime: { $gte: start, $lt: endExclusive },
+    durationSec: { $gte: Math.max(60, Number(minDurationSec) || 300) },
+  }).select([
+    "caseId", "domain", "durationSec", "outcome", "providerCallId",
+    "providerAgentId", "agentName", "recordingArchive.sourceUri",
+  ].join(" ")).sort({ durationSec: -1 }).limit(Math.max(1, Number(limit) || 5)).lean();
   return rows.map((r) => {
-    const longest = (r.attempts || [])
-      .slice()
-      .sort((a, b) => Number(b.durationSeconds || 0) - Number(a.durationSeconds || 0))[0] || null;
     return {
       platform: "phoneburner",
       caseId: r.caseId,
       domain: String(r.domain || "").toUpperCase(),
-      agent: longest?.agentId || null,
-      providerCallId: longest?.providerCallId || null,
-      outcome: r.lastOutcome || null,
+      agent: r.providerAgentId || r.agentName || null,
+      providerCallId: r.providerCallId || null,
+      outcome: r.outcome || null,
       durationSec: Number(r.durationSeconds) || 0,
       minutes: Math.round((Number(r.durationSeconds) || 0) / 6) / 10,
       // WIRED 2026-07-31. The recording arrives on the call callback now, so
       // it is already on the attempt; no session lookup, which was never
       // going to work — the service account 404s on the agents' sessions.
       // Attempt first, then the doc-level field the projection also writes.
-      listenUrl: longest?.recordingUrl || r.recordingUrl || null,
-      listenNote: (longest?.recordingUrl || r.recordingUrl)
+      listenUrl: r.recordingArchive?.sourceUri || null,
+      listenNote: r.recordingArchive?.sourceUri
         ? null
         : "no recording on this attempt yet — it arrives after the call ends",
     };
@@ -248,47 +343,42 @@ async function listDealCalls({ domain = "TAG", dateKey, deals = [], minDurationS
 //   LONG      over ten minutes — something happened in there
 const LONG_CALL_SECONDS = 600;
 
-/** PhoneBurner recordings for a day, straight off the dial sessions.
- * recording_url is a PUBLIC mp3 — same link-not-attach treatment as
- * CallRail. Bounded and sequential; PhoneBurner is not a bulk API. */
+/** PhoneBurner recordings for a day from the persisted CallLog projection.
+ * Reports never enumerate agent sessions or depend on provider session
+ * visibility for completeness. */
 async function listPhoneBurnerRecordings({
-  dateKey, client, minDurationSec = 0, maxSessions = 12, logger = null,
+  domain = "TAG", dateKey, minDurationSec = 0, maxSessions = 12, logger = null,
 } = {}) {
-  if (!client) return [];
-  const out = [];
   try {
-    const list = await client.listDialSessions({
-      dateStart: dateKey, dateEnd: dateKey, pageSize: maxSessions,
-    });
-    if (!list?.ok) return [];
-    for (const session of (list.sessions || []).slice(0, maxSessions)) {
-      const detail = await client.getDialSession(session.dialSessionId, { includeRecording: true });
-      if (!detail?.ok) continue;
-      for (const call of detail.session?.calls || []) {
-        if (!call.recordingUrl) continue;
-        const started = Date.parse(String(call.startedAt || "").replace(" ", "T") + "Z");
-        const ended = Date.parse(String(call.endedAt || "").replace(" ", "T") + "Z");
-        const durationSec = Number.isFinite(started) && Number.isFinite(ended)
-          ? Math.max(0, Math.round((ended - started) / 1000)) : 0;
-        if (durationSec < minDurationSec) continue;
-        out.push({
-          platform: "phoneburner",
-          callId: call.callId,
-          agentUserId: call.userId,
-          phone: call.phone,
-          durationSec,
-          minutes: Math.round(durationSec / 6) / 10,
-          connected: call.connected,
-          disposition: call.disposition || null,
-          listenUrl: call.recordingUrl,
-          hasTranscript: Boolean(call.transcript || call.transcriptId),
-        });
-      }
-    }
+    const { CallLog } = require("../../shared-models/src");
+    const { buildPacificDateRange } = require("./simpleMarketingReadService");
+    const { start, endExclusive } = buildPacificDateRange({ from: dateKey, to: dateKey });
+    const rows = await CallLog.find({
+      domain: String(domain || "TAG").trim().toUpperCase(),
+      platform: "phoneburner",
+      callStartTime: { $gte: start, $lt: endExclusive },
+      durationSec: { $gte: Math.max(0, Number(minDurationSec) || 0) },
+      "recordingArchive.sourceUri": { $type: "string", $ne: "" },
+    }).select([
+      "providerCallId", "providerAgentId", "normalizedPhone", "durationSec",
+      "connected", "outcome", "recordingArchive.sourceUri", "transcription.status",
+    ].join(" ")).sort({ durationSec: -1 }).limit(Math.max(1, Number(maxSessions) || 12)).lean();
+    return rows.map((call) => ({
+      platform: "phoneburner",
+      callId: call.providerCallId,
+      agentUserId: call.providerAgentId || null,
+      phone: call.normalizedPhone || null,
+      durationSec: Number(call.durationSec) || 0,
+      minutes: Math.round((Number(call.durationSec) || 0) / 6) / 10,
+      connected: call.connected === true,
+      disposition: call.outcome || null,
+      listenUrl: call.recordingArchive?.sourceUri || null,
+      hasTranscript: call.transcription?.status === "completed",
+    }));
   } catch (error) {
     logger?.warn?.("phoneburner_recordings.failed", { dateKey, error: String(error.message).slice(0, 140) });
+    return [];
   }
-  return out;
 }
 
 /** Digits-only last-10 for phone matching across platforms. */
@@ -302,7 +392,7 @@ function last10(v) { return String(v || "").replace(/[^0-9]/g, "").slice(-10); }
  */
 async function listNotableCalls({
   domain = "TAG", dateKey, deals = [], postDateCases = [],
-  phoneBurnerClient = null, longCallSeconds = LONG_CALL_SECONDS, logger = null,
+  longCallSeconds = LONG_CALL_SECONDS, logger = null,
 } = {}) {
   const reasonByPhone = new Map();
   const tag = (phone, reason, meta) => {
@@ -350,14 +440,65 @@ async function listNotableCalls({
     logger?.warn?.("notable_calls.callrail_failed", { dateKey, error: String(error.message).slice(0, 140) });
   }
 
-  // ── PhoneBurner side (coaching: agent attempts) ──
-  const pb = await listPhoneBurnerRecordings({ dateKey, client: phoneBurnerClient, logger });
-  for (const call of pb) {
-    const hit = reasonByPhone.get(last10(call.phone));
-    const reasons = new Set(hit ? [...hit.reasons] : []);
-    if (call.durationSec >= longCallSeconds) reasons.add("LONG");
-    if (!reasons.size) continue;
-    notable.push({ ...call, reasons: [...reasons], ...(hit?.meta || {}) });
+  // ── PhoneBurner side: DailyDial, and ONLY DailyDial ──────────────────────
+  //
+  // Mickey 2026-08-03: "lets just keep them separate let call log be the
+  // recording for ring central and daily dial for phone burner instead of
+  // trying to blend them."
+  //
+  // ONE SOURCE PER PROVIDER:
+  //   PhoneBurner -> DailyDial   (here)
+  //   RingCentral -> CallLog     (platforms `cx` / `ex`, a different reader)
+  //
+  // An earlier pass read BOTH and deduped on providerCallId. That was worse
+  // than either alone: two readers of the same calls means two sets of
+  // freshness rules, and the dedupe silently decided which won. Separate
+  // sources with separate owners cannot disagree.
+  //
+  // Why DailyDial for PhoneBurner specifically — measured 2026-08-03:
+  //
+  //   CallLog platform=phoneburner   21,038 rows, ZERO with a recording, ALL
+  //                                  TIME. listPhoneBurnerRecordings requires
+  //                                  recordingArchive.sourceUri, so it has
+  //                                  never returned a single call.
+  //   CallLog platform=cx / ex       296 / 3,139 with recordings — these are
+  //                                  the RingCentral sides, and `ex` is
+  //                                  FORBIDDEN by the allow-list at the top of
+  //                                  this file.
+  //   Today's 403 recording-carrying PhoneBurner calls: ZERO CallLog rows at
+  //   all (that projection had not run since 07-31), 403/403 matched a
+  //   DailyDial attempt.
+  //
+  // So CallLog was never going to carry a PhoneBurner recording, and DailyDial
+  // is where the dial actually lands, with nothing needing to have run first.
+  try {
+    const dialCalls = await listLdLongDialsFromDials({
+      // NOT `domain`. LD lives under WYNN while this caller passes TAG (the
+      // mail tenant), so forwarding it filtered out every LD dial and the
+      // section read empty. LD is deliberately not domain-scoped anywhere in
+      // this reporting stack — the all-company board and the vendor board
+      // both carry it.
+      domain: null,
+      dateKey, minDurationSec: longCallSeconds, limit: 12,
+    });
+    for (const call of dialCalls) {
+      // Long by construction — the reader already filtered on duration. A
+      // phone match still upgrades the reason so DEAL and POSTDATE calls are
+      // labelled rather than reading as merely long.
+      const hit = call.phone ? reasonByPhone.get(last10(call.phone)) : null;
+      const reasons = new Set(hit ? [...hit.reasons] : []);
+      reasons.add("LONG");
+      notable.push({
+        ...call, callId: call.providerCallId,
+        reasons: [...reasons], ...(hit?.meta || {}),
+      });
+    }
+  } catch (error) {
+    // A recordings section that cannot read dials must not take the night
+    // down, but it must not pretend the day was quiet either.
+    logger?.warn?.("night_recordings.dial_read_failed", {
+      error: String(error.message).slice(0, 140),
+    });
   }
 
   const rank = (r) => (r.includes("DEAL") ? 0 : r.includes("POSTDATE") ? 1 : 2);
@@ -395,6 +536,7 @@ module.exports = {
   LONG_CALL_SECONDS,
   listNotableCalls,
   listPhoneBurnerRecordings,
+  listLdLongDialsFromDials,
   listDealCalls,
   assertAllowedPlatform,
   downloadRecordings,

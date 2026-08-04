@@ -23,8 +23,15 @@
 // It is a reporting nicety. It must never threaten the phones.
 
 const { createRingCentralClient } = require("../../shared-integrations/src");
+const { buildTimezoneDateWindow } = require("./timezoneDateWindowService");
 
 const DEFAULT_QUEUE_PATTERNS = [/^mailer$/i];
+const PACIFIC_TIME_ZONE = "America/Los_Angeles";
+
+function ringCentralDateWindow(dateKey) {
+  const { start, end } = buildTimezoneDateWindow(dateKey, PACIFIC_TIME_ZONE);
+  return { dateFrom: start.toISOString(), dateTo: end.toISOString() };
+}
 
 // ── STREAMS ─────────────────────────────────────────────────────────────
 // Mickey 2026-07-28: "agent performance by stream." One pass over the same
@@ -128,6 +135,7 @@ async function readMailerQueueConnections({
 } = {}) {
   const rc = client || createRingCentralClient();
   await rc.ensureAuthenticated();
+  const { dateFrom, dateTo } = ringCentralDateWindow(dateKey);
 
   const out = {
     queueCalls: 0,
@@ -144,8 +152,8 @@ async function readMailerQueueConnections({
     try {
       payload = await rc.apiRequest("GET", "/restapi/v1.0/account/~/call-log", {
         query: {
-          dateFrom: `${dateKey}T07:00:00.000Z`,
-          dateTo: `${dateKey}T23:59:59.000Z`,
+          dateFrom,
+          dateTo,
           view: "Detailed",
           direction: "Inbound",
           perPage,
@@ -232,6 +240,7 @@ async function readStreamConnections({
 } = {}) {
   const rc = client || createRingCentralClient();
   await rc.ensureAuthenticated();
+  const { dateFrom, dateTo } = ringCentralDateWindow(dateKey);
 
   const out = {
     dateKey,
@@ -247,7 +256,7 @@ async function readStreamConnections({
     try {
       payload = await rc.apiRequest("GET", "/restapi/v1.0/account/~/call-log", {
         query: {
-          dateFrom: `${dateKey}T07:00:00.000Z`, dateTo: `${dateKey}T23:59:59.000Z`,
+          dateFrom, dateTo,
           view: "Detailed", direction: "Inbound", perPage, page,
         },
       });
@@ -371,4 +380,5 @@ module.exports = {
   isMailerQueueCall,
   normalizeAgentName,
   readMailerQueueConnections,
+  ringCentralDateWindow,
 };

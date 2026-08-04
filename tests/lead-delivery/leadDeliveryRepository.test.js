@@ -34,6 +34,8 @@ function matchesValue(actual, expected) {
     if (Object.hasOwn(expected, "$ne") && comparable(actual) === comparable(expected.$ne)) return false;
     if (Object.hasOwn(expected, "$eq") && comparable(actual) !== comparable(expected.$eq)) return false;
     if (Object.hasOwn(expected, "$lte") && !(comparable(actual) <= comparable(expected.$lte))) return false;
+    if (Object.hasOwn(expected, "$lt") && !(comparable(actual) < comparable(expected.$lt))) return false;
+    if (Object.hasOwn(expected, "$gt") && !(comparable(actual) > comparable(expected.$gt))) return false;
     return true;
   }
   return comparable(actual) === comparable(expected);
@@ -79,11 +81,33 @@ class FakeQuery {
   constructor(run) {
     this.run = run;
     this.selected = null;
+    this.sortFields = null;
+    this.cap = null;
   }
   select(fields) { this.selected = fields; return this; }
+  sort(fields) { this.sortFields = fields; return this; }
+  limit(cap) { this.cap = cap; return this; }
   session() { return this; }
-  async lean() { return this.run(); }
-  then(resolve, reject) { return Promise.resolve(this.run()).then(resolve, reject); }
+  materialize() {
+    const value = this.run();
+    if (!Array.isArray(value)) return value;
+    let rows = value;
+    if (this.sortFields) {
+      const fields = Object.entries(this.sortFields);
+      rows = [...rows].sort((left, right) => {
+        for (const [field, direction] of fields) {
+          const leftValue = comparable(valueAt(left, field));
+          const rightValue = comparable(valueAt(right, field));
+          if (leftValue === rightValue) continue;
+          return (leftValue < rightValue ? -1 : 1) * Number(direction);
+        }
+        return 0;
+      });
+    }
+    return this.cap == null ? rows : rows.slice(0, this.cap);
+  }
+  async lean() { return this.materialize(); }
+  then(resolve, reject) { return Promise.resolve(this.materialize()).then(resolve, reject); }
 }
 
 function duplicateError(indexName) {
@@ -115,7 +139,7 @@ function createFakeModel(kind, initial = []) {
         const providerIdDuplicate = row.providerEventId && model.docs.some((doc) => doc.provider === row.provider && doc.providerEventId === row.providerEventId);
         if (providerIdDuplicate) throw duplicateError(EVENT_PROVIDER_ID_INDEX);
       }
-      if (kind === "checkpoint") {
+      if (kind === "checkpoint" || kind === "source-state") {
         const duplicate = model.docs.some((doc) => doc._id === row._id);
         if (duplicate) throw duplicateError("_id_");
       }
@@ -146,11 +170,16 @@ function createFakeModel(kind, initial = []) {
   return model;
 }
 
-function makeRepository({ items = [], agents = [], checkpoints = [], events = [] } = {}) {
+function makeRepository({
+  items = [], agents = [], checkpoints = [], events = [], cadences = [], profiles = [], appointments = [],
+} = {}) {
   const Item = createFakeModel("item", items);
   const Agent = createFakeModel("agent", agents);
   const Checkpoint = createFakeModel("checkpoint", checkpoints);
   const Event = createFakeModel("event", events);
+  const Cadence = createFakeModel("cadence", cadences);
+  const Profile = createFakeModel("profile", profiles);
+  const Appointment = createFakeModel("appointment", appointments);
   const startSession = async () => {
     const snapshots = () => ({
       item: structuredClone(Item.docs),
@@ -179,11 +208,17 @@ function makeRepository({ items = [], agents = [], checkpoints = [], events = []
     Agent,
     Checkpoint,
     Event,
+    Cadence,
+    Profile,
+    Appointment,
     repository: createLeadDeliveryRepository({
       LeadDeliveryItem: Item,
       LeadDeliveryAgent: Agent,
       LeadDeliveryCheckpoint: Checkpoint,
       LeadDeliveryEvent: Event,
+      LeadCadence: Cadence,
+      CaseProfile: Profile,
+      CxAppointment: Appointment,
       startSession,
     }),
   };
@@ -221,6 +256,9 @@ test("provider-neutral schemas expose the required unique and repair indexes", (
   );
   assert.equal(indexByName(LeadDeliveryEvent, EVENT_DEDUPE_INDEX)[1].unique, true);
   assert.equal(indexByName(LeadDeliveryEvent, EVENT_PROVIDER_ID_INDEX)[1].unique, true);
+  assert.ok(indexByName(LeadDeliveryEvent, "lead_delivery_event_pending_recovery"));
+  assert.ok(indexByName(LeadDeliveryEvent, "lead_delivery_event_failed_recovery"));
+  assert.ok(indexByName(LeadDeliveryEvent, "lead_delivery_event_processing_recovery"));
   assert.equal(LeadDeliveryItem.schema.options.versionKey, false);
   assert.equal(LeadDeliveryAgent.schema.options.versionKey, false);
   assert.equal(LeadDeliveryEvent.schema.options.versionKey, false);
@@ -231,6 +269,9 @@ test("provider-neutral schemas expose the required unique and repair indexes", (
   assert.equal(LeadDeliveryEvent.schema.path("domain").defaultValue, null);
   assert.equal(LeadDeliveryEvent.schema.path("caseId").defaultValue, null);
   assert.equal(LeadDeliveryCheckpoint.schema.path("status").defaultValue, "scheduled");
+  assert.ok(LeadDeliveryCheckpoint.schema.path("repairCursorCreatedAt"));
+  assert.ok(LeadDeliveryCheckpoint.schema.path("highWaterCreatedAt"));
+  assert.ok(LeadDeliveryCheckpoint.schema.path("businessDate"));
   for (const piiField of ["caseId", "sourceIdentity", "normalizedPhone", "displayName", "folderId"]) {
     assert.equal(LeadDeliveryCheckpoint.schema.path(piiField), undefined);
   }
@@ -632,4 +673,130 @@ test("projection read is scoped by permanent delivery agent rather than reservat
   ] });
   const rows = await repository.listAgentProjectionItems("brad");
   assert.deepEqual(rows.map((row) => row._id), ["brad-a"]);
+});
+
+test("event recovery reads are provider-scoped and split across indexable states", async () => {
+  const now = new Date("2026-08-03T18:00:00Z");
+  const { repository, Event } = makeRepository({ events: [
+    { _id: "pending", provider: "phoneburner", status: "pending", receivedAt: new Date("2026-08-03T17:00:00Z") },
+    { _id: "failed", provider: "phoneburner", status: "failed", nextAttemptAt: now, receivedAt: new Date("2026-08-03T17:01:00Z") },
+    { _id: "processing", provider: "phoneburner", status: "processing", processingLeaseExpiresAt: now, receivedAt: new Date("2026-08-03T17:02:00Z") },
+    { _id: "future", provider: "phoneburner", status: "failed", nextAttemptAt: new Date("2026-08-03T18:01:00Z"), receivedAt: new Date("2026-08-03T17:03:00Z") },
+    { _id: "other", provider: "ringcentral", status: "pending", receivedAt: new Date("2026-08-03T16:00:00Z") },
+  ] });
+  const rows = await repository.listEventsForDrain({ provider: "phoneburner", now, limit: 10 });
+  assert.deepEqual(rows.map((row) => row._id), ["pending", "failed", "processing"]);
+  const reads = Event.calls.filter((call) => call.op === "find");
+  assert.equal(reads.length, 3);
+  assert.ok(reads.every((call) => call.filter.provider === "phoneburner"));
+  assert.deepEqual(reads.map((call) => call.filter.status), ["pending", "failed", "processing"]);
+});
+
+test("source projection skips CaseProfile and preserves exact appointment domain and case pairs", async () => {
+  const createdAt = new Date("2026-08-03T17:00:00Z");
+  const { repository, Profile, Appointment } = makeRepository({
+    cadences: [
+      { _id: "cadence-tag", domain: "TAG", caseId: "101", active: true, createdAt },
+      { _id: "cadence-wynn", domain: "WYNN", caseId: "202", active: true, createdAt },
+    ],
+    profiles: [
+      { _id: "profile-tag", domain: "TAG", caseId: 101 },
+      { _id: "cross-product", domain: "TAG", caseId: 202 },
+      { _id: "profile-wynn", domain: "WYNN", caseId: 202 },
+    ],
+    appointments: [
+      { _id: "appointment-tag", domain: "TAG", caseId: 101, status: "scheduled", legalDialAt: createdAt },
+      { _id: "appointment-cross", domain: "WYNN", caseId: 101, status: "scheduled", legalDialAt: createdAt },
+    ],
+  });
+  const result = await repository.readSourceBatch({ domains: ["TAG", "WYNN"], limit: 10 });
+  const rowsByDomain = new Map(result.items.map((row) => [row.domain, row]));
+  assert.equal(rowsByDomain.get("TAG").caseProfile, null);
+  assert.equal(rowsByDomain.get("WYNN").caseProfile, null);
+  assert.equal(rowsByDomain.get("TAG").activeAppointment?._id, "appointment-tag");
+  assert.equal(rowsByDomain.get("WYNN").activeAppointment, null);
+  assert.equal(Profile.calls.filter((call) => call.op === "find").length, 0);
+  assert.equal(Appointment.calls.find((call) => call.op === "find").filter.$or.length, 2);
+});
+
+test("new-arrival source reads are strictly newer across equal timestamps", async () => {
+  const createdAt = new Date("2026-08-03T17:00:00Z");
+  const { repository } = makeRepository({ cadences: [
+    { _id: "a", domain: "TAG", caseId: "101", active: true, createdAt },
+    { _id: "b", domain: "TAG", caseId: "102", active: true, createdAt },
+    { _id: "c", domain: "TAG", caseId: "103", active: true, createdAt },
+  ] });
+  const first = await repository.readSourceNewerBatch({
+    after: { createdAt, id: "a" }, domains: ["TAG"], limit: 1,
+  });
+  assert.deepEqual(first.items.map((row) => row._id), ["b"]);
+  assert.equal(first.nextHighWater.id, "b");
+  assert.equal(first.done, false);
+  const second = await repository.readSourceNewerBatch({
+    after: first.nextHighWater, domains: ["TAG"], limit: 1,
+  });
+  assert.deepEqual(second.items.map((row) => row._id), ["c"]);
+  assert.equal(second.nextHighWater.id, "c");
+  assert.equal(second.done, true);
+});
+
+test("daily source repair reuses the checkpoint collection and advances only under version CAS", async () => {
+  const { repository, Checkpoint } = makeRepository();
+  const input = {
+    checkpointKey: "source-repair:phoneburner:2026-08-03",
+    provider: "phoneburner",
+    source: "leadcadence",
+    businessDate: "2026-08-03",
+  };
+  const inserted = await repository.insertSourceRepairCheckpointOnce(input);
+  assert.equal(inserted.kind, "source_repair");
+  assert.equal(inserted.status, "scheduled");
+  assert.equal(await repository.insertSourceRepairCheckpointOnce(input), null);
+  const advanced = await repository.compareAndSetSourceRepairCheckpoint({
+    checkpointKey: input.checkpointKey,
+    expectedVersion: 0,
+    set: {
+      status: "running",
+      repairCursorCreatedAt: new Date("2026-08-03T17:00:00Z"),
+      repairCursorId: "cursor-a",
+      highWaterCreatedAt: new Date("2026-08-03T18:00:00Z"),
+      highWaterId: "head-z",
+    },
+    increment: { scannedCount: 10, admittedCount: 8, skippedCount: 2 },
+  });
+  assert.equal(advanced.version, 1);
+  assert.equal(advanced.scannedCount, 10);
+  assert.equal(await repository.compareAndSetSourceRepairCheckpoint({
+    checkpointKey: input.checkpointKey, expectedVersion: 0, set: { status: "completed" },
+  }), null);
+  assert.equal(Checkpoint.docs.length, 1);
+});
+
+test("source-repair and source-cutover checkpoints validate in one collection", () => {
+  const repair = new LeadDeliveryCheckpoint({
+    _id: "source-repair:phoneburner:2026-08-03",
+    kind: "source_repair",
+    source: "leadcadence",
+    provider: "phoneburner",
+    businessDate: "2026-08-03",
+    status: "scheduled",
+    version: 0,
+  });
+  assert.equal(repair.validateSync(), undefined);
+  const cutover = new LeadDeliveryCheckpoint({
+    _id: "cutover-proof",
+    kind: "source_cutover",
+    source: "leadcadence",
+    windowStartAt: new Date("2026-08-03T00:00:00Z"),
+    cutoffAt: new Date("2026-08-04T00:00:00Z"),
+    preloadPredicate: "received_at_lt_cutoff",
+    continuationPredicate: "received_at_gte_cutoff",
+    sortContract: "received_at_desc_source_identity_asc_v1",
+    preloadKey: "proof",
+    maxContacts: 1,
+    agentSetDigest: "a".repeat(64),
+    status: "scheduled",
+    version: 0,
+  });
+  assert.equal(cutover.validateSync(), undefined);
 });

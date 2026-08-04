@@ -82,6 +82,11 @@ const leadCadenceSchema = new mongoose.Schema(
     routeCampaignName: { type: String, default: null },
     vendorSourceName: { type: String, default: null },
     statusId: { type: Number, default: null },
+    // Queue admission status evidence belongs with the intake/cadence row.
+    // A CaseProfile is not created until case activity exists, so requiring
+    // one here strands every brand-new lead before its first call.
+    logicsStatusCheckedAt: { type: Date, default: null },
+    logicsProspectEligible: { type: Boolean, default: null },
     active: { type: Boolean, default: true, index: true },
     currentStage: { type: String, default: "new" },
     // Provider-neutral voice-attempt facts. These are dual-written with the
@@ -243,6 +248,13 @@ leadCadenceSchema.index({ domain: 1, caseId: 1 }, { unique: true });
 leadCadenceSchema.index({ domain: 1, active: 1, "schedule.nextActionAt": 1 });
 leadCadenceSchema.index({ domain: 1, active: 1, cadenceMode: 1, createdAt: 1 });
 leadCadenceSchema.index({ domain: 1, createdAt: 1 });
+// Provider-neutral delivery walks active source rows in a stable newest-first
+// order. Keep both pagination keys in the index so continuation and the
+// crash-repair high-water lane do not require a blocking sort.
+leadCadenceSchema.index(
+  { domain: 1, active: 1, createdAt: -1, _id: -1 },
+  { name: "lead_cadence_active_delivery_cursor" },
+);
 // Inbound pre-ping duplicate check. The former emailHash-only index still
 // left tenant-scoped probes under-targeted and was responsible for a large
 // volume of zero-result lookups in Atlas query stats.

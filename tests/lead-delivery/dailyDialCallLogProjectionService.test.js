@@ -104,6 +104,50 @@ test("closed DailyDial attempts replay into one exact PhoneBurner CallLog row", 
   assert.equal(callLog["recordingArchive.sourceUri"], "https://recordings.example.invalid/call/1.mp3?token=test");
 });
 
+test("late recording evidence strengthens the same CallLog and an absent replay cannot erase it", async () => {
+  const rows = [{
+    _id: "daily-late",
+    domain: "tag",
+    caseId: "43",
+    dateKey: "2026-07-16",
+    attempts: [{
+      attemptKey: "attempt-late",
+      provider: "phoneburner",
+      providerCallId: "call-late",
+      outcome: "voicemail",
+      callEndedAt: new Date("2026-07-16T18:02:00.000Z"),
+    }],
+  }];
+  const callLogs = new Map();
+  const reconcile = createDailyDialCallLogProjection({
+    DailyDial: fakeDailyDial(rows),
+    upsertCallLog: async (input) => {
+      const key = `${input.domain}:${input.telephonySessionId}`;
+      callLogs.set(key, { ...(callLogs.get(key) || {}), ...clone(input) });
+      return clone(callLogs.get(key));
+    },
+  });
+
+  await reconcile({ dateKey: "2026-07-16" });
+  assert.equal(callLogs.size, 1);
+  assert.equal([...callLogs.values()][0]["recordingArchive.sourceUri"], undefined);
+
+  rows[0].attempts[0].recordingUrl = "https://recordings.example.invalid/call/late.mp3?token=test";
+  await reconcile({ dateKey: "2026-07-16" });
+  assert.equal(callLogs.size, 1);
+  assert.equal(
+    [...callLogs.values()][0]["recordingArchive.sourceUri"],
+    "https://recordings.example.invalid/call/late.mp3?token=test",
+  );
+
+  delete rows[0].attempts[0].recordingUrl;
+  await reconcile({ dateKey: "2026-07-16" });
+  assert.equal(
+    [...callLogs.values()][0]["recordingArchive.sourceUri"],
+    "https://recordings.example.invalid/call/late.mp3?token=test",
+  );
+});
+
 test("projection reports invalid identities instead of inventing metric rows", async () => {
   const rows = [{
     _id: "daily-bad",

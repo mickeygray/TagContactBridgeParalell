@@ -83,6 +83,71 @@ function boolFromEnv(value, fallback = false) {
   return ["1", "true", "yes", "on"].includes(String(value).toLowerCase());
 }
 
+const DEFAULT_MONGO_POOL_CONFIG = Object.freeze({
+  maxPoolSize: 20,
+  minPoolSize: 0,
+  maxIdleTimeMS: 300000,
+  maxConnecting: 2,
+  waitQueueTimeoutMS: 10000,
+});
+
+function boundedInteger(name, value, fallback, minimum, maximum) {
+  const candidate = value === undefined || value === null || value === ""
+    ? fallback
+    : value;
+  const parsed = typeof candidate === "number" ? candidate : Number(String(candidate).trim());
+  if (!Number.isInteger(parsed) || parsed < minimum || parsed > maximum) {
+    throw new Error(`${name} must be an integer between ${minimum} and ${maximum}`);
+  }
+  return parsed;
+}
+
+function resolveMongoPoolConfig(overrides = {}, environment = process.env) {
+  const source = overrides.mongoPool || {};
+  const maxPoolSize = boundedInteger(
+    "MONGO_MAX_POOL_SIZE",
+    source.maxPoolSize ?? overrides.mongoMaxPoolSize ?? environment.MONGO_MAX_POOL_SIZE,
+    DEFAULT_MONGO_POOL_CONFIG.maxPoolSize,
+    5,
+    100,
+  );
+  const minPoolSize = boundedInteger(
+    "MONGO_MIN_POOL_SIZE",
+    source.minPoolSize ?? overrides.mongoMinPoolSize ?? environment.MONGO_MIN_POOL_SIZE,
+    DEFAULT_MONGO_POOL_CONFIG.minPoolSize,
+    0,
+    maxPoolSize,
+  );
+
+  return {
+    maxPoolSize,
+    minPoolSize,
+    maxIdleTimeMS: boundedInteger(
+      "MONGO_MAX_IDLE_TIME_MS",
+      source.maxIdleTimeMS ?? overrides.mongoMaxIdleTimeMS ?? environment.MONGO_MAX_IDLE_TIME_MS,
+      DEFAULT_MONGO_POOL_CONFIG.maxIdleTimeMS,
+      60000,
+      1800000,
+    ),
+    maxConnecting: boundedInteger(
+      "MONGO_MAX_CONNECTING",
+      source.maxConnecting ?? overrides.mongoMaxConnecting ?? environment.MONGO_MAX_CONNECTING,
+      DEFAULT_MONGO_POOL_CONFIG.maxConnecting,
+      1,
+      10,
+    ),
+    waitQueueTimeoutMS: boundedInteger(
+      "MONGO_WAIT_QUEUE_TIMEOUT_MS",
+      source.waitQueueTimeoutMS
+        ?? overrides.mongoWaitQueueTimeoutMS
+        ?? environment.MONGO_WAIT_QUEUE_TIMEOUT_MS,
+      DEFAULT_MONGO_POOL_CONFIG.waitQueueTimeoutMS,
+      1000,
+      60000,
+    ),
+  };
+}
+
 function parseOriginList(raw) {
   if (!raw) return [];
   return String(raw)
@@ -243,6 +308,7 @@ function getSharedConfig(overrides = {}) {
       overrides.parallelDbName ||
       process.env.PARALLEL_DB_NAME ||
       "tagcontactbridge_parallel",
+    mongoPool: resolveMongoPoolConfig(overrides),
     bindHost:
       overrides.bindHost ||
       process.env.SERVICE_BIND_HOST ||
@@ -1163,6 +1229,16 @@ function getSharedConfig(overrides = {}) {
         process.env.CX_NIGHTLY_CALL_GRADE_PREFER_MODEL ||
         "",
     },
+    phoneburnerRecording: {
+      // Non-secret provider media authority. Callback capture and trainer
+      // playback share this fail-closed allowlist; an empty list captures no
+      // recording URL.
+      allowedHosts: parseOriginList(
+        overrides.phoneburnerRecordingAllowedHosts
+          || process.env.PHONEBURNER_RECORDING_ALLOWED_HOSTS
+          || "",
+      ).map((value) => String(value || "").trim().toLowerCase()).filter(Boolean),
+    },
     phoneburnerRotation: {
       // Bridge runtime — owns the 7am Mon–Fri PhoneBurner folder
       // rotation until PhoneBurner is fully deprecated by CX. Spawns
@@ -1651,6 +1727,7 @@ function validateSharedConfig(config = {}) {
   ensureConfigValue("mongoUri", config.mongoUri);
   ensureConfigValue("parallelDbName", config.parallelDbName);
   ensureConfigValue("serviceName", config.serviceName);
+  resolveMongoPoolConfig({ mongoPool: config.mongoPool || {} }, {});
 
   if (config.startupValidation?.strict) {
     if (!config.jwtSecret || config.jwtSecret === "change-me") {
@@ -1729,6 +1806,7 @@ module.exports = {
   getRingCentralConfig,
   getSharedConfig,
   resolveCompanyFromFbPageId,
+  resolveMongoPoolConfig,
   validateSharedConfig,
   resolveCompanyFromPayload,
   env,

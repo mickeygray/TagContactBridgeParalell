@@ -80,10 +80,48 @@ const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
 
 /** 1 + 2 — spend, split by the two channels that actually exist. */
 async function readSpend(dateKey) {
-  const rows = await SpendEntry.find({ date: dateKey, active: { $ne: false } })
-    .select("channel source spend cost pieces leadsReported").lean();
+  const sheetRows = await SpendEntry.find({ date: dateKey, active: { $ne: false } })
+    .select("date channel source spend cost pieces leadsReported").lean();
+
+  // ── THE SAME MAIL MERGE THE COMPOSER DOES ────────────────────────────────
+  //
+  // This is the SECOND reporting path. reportComposerService merges the
+  // vendor's invoice over the spend sheet; if this one did not, the two boards
+  // would report different mail costs for the same day — which is worse than
+  // either being wrong alone, because it makes both untrustworthy and there is
+  // no way to tell from the emails which is right.
+  //
+  // Shared helper, deliberately, rather than a second copy of the rule. This
+  // repo has twice paid for a duplicated rule drifting; the merge is exactly
+  // the kind of thing that drifts, because the copy that is not being edited
+  // looks fine.
+  const MailSpendDay = require("../../shared-models/src/MailSpendDay");
+  const { partitionMailSpend } = require("./reportComposerService");
+  const derivedMail = await MailSpendDay.find({
+    domain: "TAG", serviceDate: dateKey, active: true,
+  }).select("serviceDate source spend pieces postage").lean();
+  const { rows, supersededSheetRows } = partitionMailSpend({ sheetRows, derivedMail });
+
+  // ── LD: new leads x $3, NOT the sheet ────────────────────────────────────
+  //
+  // Mickey 2026-08-03: "we arent using that sheet at all" / "LD is new leads
+  // * 3". The sheet's lead-data rows are dead, which is why this board read
+  // LD $0.00 for 7-31 — it was reporting the absence of a person's typing as
+  // a fact about spend.
+  //
+  // Counted off EventRecord receipts, never cadence rows — see ldSpendService
+  // for the 10.3% churn that makes the queue the wrong thing to count.
+  const { readLdSpend } = require("./ldSpendService");
+  const ld = await readLdSpend({ from: dateKey, to: dateKey });
+
   const out = {
-    ld: { total: 0, leads: 0, bySource: {} },
+    ldRate: ld.rate,
+    ldUnavailable: ld.unavailable,
+    mailFromInvoice: derivedMail.length > 0,
+    mailSheetSpendSuperseded: supersededSheetRows.length
+      ? round2(supersededSheetRows.reduce((s, r) => s + Number(r.spend || 0), 0))
+      : null,
+    ld: { total: ld.spend, leads: ld.leads, rate: ld.rate, bySource: {} },
     mail: { total: 0, postage: 0, pieces: 0, bySource: {}, lastRecordedDate: null, staleDays: null },
     missing: rows.length === 0,
     corruptDates: [],
@@ -91,9 +129,11 @@ async function readSpend(dateKey) {
   for (const r of rows) {
     const spend = Number(r.spend || 0);
     if (r.channel === "lead-data") {
-      out.ld.total = round2(out.ld.total + spend);
-      out.ld.leads += Number(r.leadsReported || 0);
-      out.ld.bySource[r.source] = round2((out.ld.bySource[r.source] || 0) + spend);
+      // The sheet's lead-data rows are RETIRED as a spend source — LD spend is
+      // computed above. Any surviving row is kept only so its source name
+      // still appears in the By-source table; its dollars are deliberately
+      // dropped rather than added, or a stale sheet row would double LD.
+      out.ld.bySource[r.source] = out.ld.bySource[r.source] || 0;
     } else if (r.channel === "mailer") {
       out.mail.total = round2(out.mail.total + spend);
       out.mail.postage = round2(out.mail.postage + Number(r.cost || 0));
@@ -180,9 +220,18 @@ async function readMailCalls(dateKey, { apply = false } = {}) {
       .select("piece channel totalCalls firstTimeCallers uniqueCallers").lean();
   const out = {
     totalCalls: 0, responses: 0, bySource: {},
-    missing: rows.length === 0, syncError, excludedNonCallrail: 0,
+    missing: rows.length === 0, syncError, excludedNonCallrail: 0, bcdCallsExcluded: 0,
   };
+  // BCD rides the SAME callrail-direct feed as the mail pieces. Counted here
+  // it inflates mail responses and deflates every mail cost-per-response, all
+  // while BCD's own line reads zero — it is a separately-bought channel with
+  // its own cost basis, and it gets its own row.
+  const { isBcdPiece } = require("./bcdCallsService");
   for (const r of rows) {
+    if (isBcdPiece(r.piece)) {
+      out.bcdCallsExcluded += Number(r.totalCalls || 0);
+      continue;
+    }
     out.totalCalls += Number(r.totalCalls || 0);
     out.responses += Number(r.firstTimeCallers || 0);
     out.bySource[r.piece] = {
@@ -200,14 +249,11 @@ async function readMailCalls(dateKey, { apply = false } = {}) {
 /** BCD — pay-per-call vendor. Calls come in on their own channel, and the
  * cost is derived from them rather than read off a spend sheet. */
 async function readBcd(dateKey) {
-  const rows = await DailyCallStat.find({
-    date: dateKey,
-    $or: [{ channel: "bcd" }, { piece: /^bcd$/i }],
-    active: { $ne: false },
-  }).select("piece channel totalCalls firstTimeCallers").lean();
-  const calls = rows.reduce((s, r) => s + (Number(r.totalCalls) || 0), 0);
-  const rate = bcdCostPerCall();
-  return { calls, rate, spend: round2(calls * rate), rows: rows.length };
+  // Shared with the composer — see bcdCallsService for why an exact /^bcd$/i
+  // missed "BCD V3" entirely, and why loosening it naively double-counts on
+  // the changeover days.
+  const { readBcdCalls } = require("./bcdCallsService");
+  return readBcdCalls({ from: dateKey, to: dateKey, DailyCallStat });
 }
 
 /** 8 — long calls. ALLOW-LIST ONLY (phoneburner/callrail). EX recordings
@@ -265,8 +311,12 @@ async function buildNightReport({ dateKey, night, apply = false }) {
   for (const [src, amt] of Object.entries(spend.mail?.bySource || {})) {
     const r = row(rosterLabel(src)); r.spend = round2(r.spend + amt);
   }
-  for (const [src, amt] of Object.entries(spend.ld?.bySource || {})) {
-    const r = row(rosterLabel(src)); r.spend = round2(r.spend + amt);
+  // LD is ONE row by doctrine ("every LD feed variant is one line"), and its
+  // cost is now derived — leads x rate — rather than summed from per-source
+  // sheet rows. So the total lands on the LD label directly; iterating
+  // ld.bySource would add nothing, because those rows no longer carry dollars.
+  if (spend.ld?.total || spend.ld?.leads) {
+    row(LD_LABEL).spend = round2(row(LD_LABEL).spend + (spend.ld.total || 0));
   }
   for (const [src, v] of Object.entries(mailCalls.bySource || {})) {
     const r = row(rosterLabel(src));

@@ -628,7 +628,7 @@ test("agent configuration upsert changes only configuration fields and rejects r
   );
 });
 
-test("source batches use newest-first keysets and exact projected case and active-appointment joins", async () => {
+test("source batches use newest-first keysets, skip CaseProfile, and preserve exact active-appointment joins", async () => {
   const at12 = new Date("2026-07-10T12:00:00Z");
   const at11 = new Date("2026-07-10T11:00:00Z");
   const at10 = new Date("2026-07-10T10:00:00Z");
@@ -735,26 +735,17 @@ test("source batches use newest-first keysets and exact projected case and activ
   assert.deepEqual(first.items.map((row) => row._id), ["cadence-4", "cadence-3b"]);
   assert.equal(first.done, false);
   assert.deepEqual(first.nextCursor, { createdAt: at11, id: "cadence-3b" });
-  assert.equal(first.items[0].caseProfile._id, "profile-4");
-  assert.deepEqual(first.items[0].caseProfile.lastStatusCheckAt, at12);
+  assert.equal(first.items[0].caseProfile, null);
   assert.equal(first.items[0].activeAppointment._id, "appointment-active");
   assert.equal(first.items[1].activeAppointment, null);
   assert.equal(Object.hasOwn(first.items[0], "email"), false);
   assert.equal(Object.hasOwn(first.items[0].payloadSnapshot, "forbidden"), false);
-  assert.equal(Object.hasOwn(first.items[0].caseProfile, "primaryPhone"), false);
-  assert.equal(Object.hasOwn(first.items[0].caseProfile, "firstName"), false);
   assert.equal(Object.hasOwn(first.items[0].activeAppointment, "prospectName"), false);
   assert.equal(Object.hasOwn(first.items[0].activeAppointment, "phone"), false);
-  assert.deepEqual(CaseProfile.findCalls[0].filter, {
-    $or: [
-      { domain: "TAG", caseId: 4 },
-      { domain: "TAG", caseId: 3 },
-    ],
-  });
+  assert.equal(CaseProfile.findCalls.length, 0);
   assert.deepEqual(CxAppointment.findCalls[0].filter, {
     $or: [
-      { domain: "TAG", caseId: 4 },
-      { domain: "TAG", caseId: 3 },
+      { domain: "TAG", caseId: { $in: [4, 3] } },
     ],
     status: { $in: ["scheduled", "due", "fired", "blocked"] },
   });
@@ -807,17 +798,12 @@ test("source batches use newest-first keysets and exact projected case and activ
     "cadenceState.channelDnc.cx.blocked", "cadenceState.channelDnc.cx.reason", "caseId", "city",
     "counterCadence.cxDailyCalls", "counterCadence.cxDailyDateKey", "counterCadence.lastCxDialedAt",
     "counterCadence.lastCxAnsweredAt", "counterCadence.lastCxDncAt", "counterCadence.lastCxTerminalCountedUii", "createdAt", "currentStage",
-    "dncCheckpoints.hit", "domain", "firstName", "lastName", "lastTouched.cx", "name", "normalizedPhone",
+    "dncCheckpoints.hit", "domain", "firstName", "lastName", "lastTouched.cx",
+    "logicsProspectEligible", "logicsStatusCheckedAt", "name", "normalizedPhone",
     "payloadSnapshot.createdAt", "payloadSnapshot.cxAppointment", "payloadSnapshot.state", "payloadSnapshot.timeZone", "payloadSnapshot.timezone",
     "primaryPhone", "state", "statusId", "updatedAt",
   ].sort();
   assert.deepEqual(Object.keys(LeadCadence.findCalls[0].query.selection).sort(), expectedCadenceProjection);
-  const expectedCaseProjection = [
-    "_id", "aiActivityReview.status", "aiCaseReview.nextEligibleAt", "caseId", "conversationAi.optOutDetected",
-    "convertedAt", "domain", "firstPaymentDate", "lastStatusCheckAt", "paymentsCount", "scrubSummary.status", "statusCategory",
-    "statusId", "totalPaid",
-  ].sort();
-  assert.deepEqual(Object.keys(CaseProfile.findCalls[0].query.selection).sort(), expectedCaseProjection);
   const expectedAppointmentProjection = [
     "_id", "appointmentAt", "appointmentId", "caseId", "domain", "legalDialAt", "status", "updatedAt",
   ].sort();
@@ -828,12 +814,12 @@ test("source batches use newest-first keysets and exact projected case and activ
 
   const one = await repository.readSourceLead({ domain: "tag", caseId: "4" });
   assert.equal(one._id, "cadence-4");
-  assert.equal(one.caseProfile._id, "profile-4");
+  assert.equal(one.caseProfile, null);
   assert.equal(one.activeAppointment._id, "appointment-active");
   assert.deepEqual(LeadCadence.findOneCalls[0].filter, { domain: "TAG", caseId: 4 });
-  assert.deepEqual(CaseProfile.findCalls.at(-1).filter, { $or: [{ domain: "TAG", caseId: 4 }] });
+  assert.equal(CaseProfile.findCalls.length, 0);
   assert.deepEqual(CxAppointment.findCalls.at(-1).filter, {
-    $or: [{ domain: "TAG", caseId: 4 }],
+    $or: [{ domain: "TAG", caseId: { $in: [4] } }],
     status: { $in: ["scheduled", "due", "fired", "blocked"] },
   });
 });

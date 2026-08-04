@@ -7,6 +7,8 @@ const CallLog = require("./CallLog");
 const ConsentRecord = require("./ConsentRecord");
 const AuthOtpChallenge = require("./AuthOtpChallenge");
 const CallRecoveryLead = require("./CallRecoveryLead");
+const MailInvoice = require("./MailInvoice");
+const MailSpendDay = require("./MailSpendDay");
 const CaseProfile = require("./CaseProfile");
 const ConversationMessage = require("./ConversationMessage");
 const ConversationWorkflow = require("./ConversationWorkflow");
@@ -78,6 +80,8 @@ const MODEL_REGISTRY = Object.freeze({
   ConsentRecord,
   AuthOtpChallenge,
   CallRecoveryLead,
+  MailInvoice,
+  MailSpendDay,
 
   CaseProfile,
   ConversationMessage,
@@ -154,6 +158,8 @@ module.exports = {
   ConsentRecord,
   AuthOtpChallenge,
   CallRecoveryLead,
+  MailInvoice,
+  MailSpendDay,
   CaseProfile,
   ConversationMessage,
   ConversationWorkflow,

@@ -455,6 +455,9 @@ const { runClientCaseScrub } = require("./clientScrubService");
 const { reviewCaseActivities } = require("./activityAiReviewService");
 const { REPORTS, generateReport } = require("./reportingService");
 const reportOps = require("./reportOpsService");
+const mailboxIngestService = require("./mailboxIngestService");
+const mailInvoiceMailboxHandler = require("./mailInvoiceMailboxHandler");
+const mailInvoiceParseService = require("./mailInvoiceParseService");
 const callRecoveryAdmissionService = require("./callRecoveryAdmissionService");
 const callRecoveryCompositeSource = require("./callRecoveryCompositeSource");
 const callRecoveryDiscoveryService = require("./callRecoveryDiscoveryService");
@@ -1245,6 +1248,12 @@ module.exports = {
   reconcileMailerConfigsWithSheet,
   resolveScheduledBlastRule,
   resolveCanonicalAttribution,
+  mailboxIngestService,
+
+  mailInvoiceMailboxHandler,
+
+  mailInvoiceParseService,
+
   callRecoveryAdmissionService,
 
   callRecoveryCompositeSource,

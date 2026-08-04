@@ -124,6 +124,29 @@ test("the outbound half honours its own, shorter threshold", () => {
   assert.deepEqual(rows.map((r) => r.direction), ["outbound"]);
 });
 
+test("outbound listen availability uses only the persisted CallLog join", () => {
+  const rows = longcalls.compute(material({
+    dials: [ldDial({
+      attempts: [{
+        durationSeconds: 900,
+        recordingUrl: "https://daily-dial.example.test/not-authoritative.mp3",
+        persistedRecordingUrl: "https://recordings.example.test/persisted.mp3",
+      }],
+    })],
+  }));
+  assert.equal(rows[0].listenUrl, "https://recordings.example.test/persisted.mp3");
+
+  const missing = longcalls.compute(material({
+    dials: [ldDial({
+      attempts: [{
+        durationSeconds: 900,
+        recordingUrl: "https://daily-dial.example.test/not-authoritative.mp3",
+      }],
+    })],
+  }));
+  assert.equal(missing[0].listenUrl, null);
+});
+
 test("the lookback tail is dropped — this report is about its own range", () => {
   // callsRange reaches back 45 days so call-to-close lag is not clipped.
   // Measured once: a single-day report listed 319 calls back to 2026-06-15.

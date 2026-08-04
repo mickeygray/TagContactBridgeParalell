@@ -538,20 +538,86 @@ function formatFunction(name, value) {
  * spend landing on only one of them) and lets residual money keep a live
  * piece's name.
  */
-function resolveSourceRow(payment, { rangeStart = null, rangeEnd = null, attributionCallDate = null } = {}) {
+function resolveSourceRow(payment, {
+  rangeStart = null, rangeEnd = null, attributionCallDate = null,
+  // The PIECE the attributable call came in on. See below.
+  attributionCallSource = null,
+} = {}) {
   const {
     canonicalSourceName, isCatchAllName,
   } = require("./logicsSourceWriterService");
   const { sourceBucket } = require("../../shared-config/src/activeSources");
 
+  // ── THE CALL NAMES THE PIECE WHEN LOGICS ONLY HAS A BUCKET ──────────────
+  //
+  // Mickey 2026-08-03: "not attributing deals".
+  //
+  // A case whose Logics SourceCampaignID is a catch-all (ABC is campaign 57)
+  // used to return "(catch-all)" here and stop. But CallRail knows exactly
+  // which mail piece the prospect rang — the same evidence the long-calls
+  // section already uses to label these very cases. On 2026-08-03 all THREE
+  // deals sat on catch-alls while long-calls happily showed case 436545 as
+  // Affordability Federal and 434175 as 3rd Day (Pink).
+  //
+  // So a catch-all is now a MISSING answer, not a final one: if an
+  // attributable marketing call exists, its source is the answer. This is the
+  // same rule logicsSourceSanitizerService applies when it writes the source
+  // back to Logics — doing it at read time means the board is right before
+  // that sanitiser has run, instead of after.
+  //
+  // A stored REAL source still wins; this only fills a blank.
+  const fromCall = canonicalSourceName(payment.domain, attributionCallSource);
+
+  // ── AND THE LEAD SOURCE, WHICH IS ALL AN LD DEAL EVER HAS ───────────────
+  //
+  // Mickey 2026-08-03: "unattributed is the LD deal" / "you need to check both
+  // call and lead source".
+  //
+  // An LD lead is dialled OUTBOUND. It never rings a marketing line, so
+  // CallRail can never name it and the call fallback above is structurally
+  // useless for the entire LD channel. The lead source is how the case
+  // entered — CaseProfile.sourceName, e.g. "ld-posting" — and every LD variant
+  // folds onto the single "LD" row.
+  //
+  // WYNN case 110632 on 2026-08-03: Logics held catch-all campaign 40, there
+  // was no marketing call, and it read as unattributed — while LeadCadence and
+  // CaseProfile both plainly said "ld-posting".
+  const { canonicalSourceLabel, isLdSource } = require("../../shared-config/src/activeSources");
+  const leadRaw = String(payment.leadSourceName || "").trim();
+  const fromLead = leadRaw
+    ? (isLdSource(leadRaw) ? canonicalSourceLabel(leadRaw)
+      : canonicalSourceName(payment.domain, leadRaw))
+    : null;
+
+  // Order is deliberate: a stored source, then the call, then the lead. Each
+  // is only consulted when the one before it has no answer.
+  const fallback = (fromCall && !isCatchAllName(fromCall) ? fromCall : null)
+    || (fromLead && !isCatchAllName(fromLead) ? fromLead : null);
+
   const folded = canonicalSourceName(payment.domain, payment.sourceAtSale);
   if (!folded) {
+    if (fallback) {
+      return sourceBucket(fallback, {
+        firstPaidDateKey: payment.metricsTreatment?.firstPaidDateKey || null,
+        caseCreatedDate: payment.caseCreatedDate,
+        attributionCallDate, rangeStart, rangeEnd,
+      });
+    }
     if (payment.sourceOrigin === "catch-all") {
       return payment.catchAllLabel ? `${payment.catchAllLabel} (catch-all)` : "(Logics catch-all)";
     }
     return "(unsourced)";
   }
-  if (isCatchAllName(folded)) return `${folded} (catch-all)`;
+  if (isCatchAllName(folded)) {
+    if (fallback) {
+      return sourceBucket(fallback, {
+        firstPaidDateKey: payment.metricsTreatment?.firstPaidDateKey || null,
+        caseCreatedDate: payment.caseCreatedDate,
+        attributionCallDate, rangeStart, rangeEnd,
+      });
+    }
+    return `${folded} (catch-all)`;
+  }
   return sourceBucket(folded, {
     firstPaidDateKey: payment.metricsTreatment?.firstPaidDateKey || null,
     caseCreatedDate: payment.caseCreatedDate,
@@ -613,8 +679,43 @@ function attributionDateResolver(callsRange = []) {
   };
 }
 
+/**
+ * Build the payment -> attribution-call SOURCE lookup.
+ *
+ * Sibling of attributionDateResolver, picking the SAME call by the same rule
+ * ("longest call on the day the deal closed") and returning the piece it came
+ * in on rather than its date. Kept as a sibling rather than folded into that
+ * function because attributionDateResolver has other callers whose return
+ * shape must not change.
+ *
+ * MARKETING lines only, inherited from the same `sourceChannel` filter — an
+ * existing client ringing the servicing number must never name a mail piece as
+ * the source of their sale.
+ */
+function attributionSourceResolver(callsRange = []) {
+  const { sourceChannel } = require("../../shared-config/src/activeSources");
+  const byPhone = new Map();
+  for (const call of callsRange) {
+    const k = last10(call.phone);
+    if (!k) continue;
+    if (sourceChannel(call.source) === "other") continue;
+    if (!byPhone.has(k)) byPhone.set(k, []);
+    byPhone.get(k).push(call);
+  }
+  return function attributionSourceFor(payment) {
+    const keys = [...new Set([payment.phone, ...(payment.phones || [])].map(last10).filter(Boolean))];
+    if (!keys.length) return null;
+    const calls = keys.flatMap((k) => byPhone.get(k) || []);
+    if (!calls.length) return null;
+    const picked = pickAttributionCall(calls, payment.paymentDateKey);
+    const c = picked.call || calls[0];
+    return c?.source || null;
+  };
+}
+
 module.exports = {
   attributionDateResolver,
+  attributionSourceResolver,
   foldSourceKey,
   FUNCTIONS,
   resolveSourceRow,

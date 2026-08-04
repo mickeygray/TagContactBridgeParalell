@@ -25,6 +25,14 @@ const path = require("path");
 const { connectMongo } = require("../packages/event-core/src");
 const { getSharedConfig, ROOT_DIR, getInternalFromEmail } = require("../packages/shared-config/src");
 const { runNightPass, pacificDateKey } = require("../packages/shared-services/src/nightPassService");
+// A disconnected VPN can leave Node c-ares pointed at a dead nameserver, so
+// only the SRV query behind mongodb+srv:// fails — and it fails as
+// ECONNREFUSED rather than anything that reads like DNS. Same opt-in override
+// scripts/report.js carries; a no-op unless DNS_SERVERS is set.
+if (process.env.DNS_SERVERS) {
+  try { require("dns").setServers(process.env.DNS_SERVERS.split(",").map((s) => s.trim()).filter(Boolean)); }
+  catch (error) { console.warn(`DNS_SERVERS ignored — ${error.message}`); }
+}
 const { sendMail } = require("../packages/shared-services/src/mailerService");
 
 function arg(name, fallback = null) {

@@ -8,6 +8,12 @@
 
 const { createHash, randomUUID } = require("crypto");
 
+// Pure locator policy. Reads no environment: the allowlist is injected by the
+// caller exactly like every other configuration input in this file.
+const {
+  resolveRecordingLocator,
+} = require("./recordingReferencePromotionService");
+
 const PACIFIC_TIME_ZONE = "America/Los_Angeles";
 const POOLS = Object.freeze({
   NEW_TODAY: "new_today",
@@ -91,6 +97,11 @@ const TERMINAL_OUTCOMES = new Set([
 // policy. 173 = "[Bad/Inactive]-DO NOT CALL" (WYNN 137190, 2026-07-24).
 // Policy may widen this list but can no longer silently empty it.
 const DEFAULT_DNC_STATUS_IDS = Object.freeze([173]);
+
+// Phase 9: pre-serve authority is LeadCadence plus a fresh Logics status
+// mirror. Keep the former CaseProfile veto block intact for the no-delete
+// proof window, but make it unreachable in production admission.
+const CASE_PROFILE_SOURCE_ELIGIBILITY_ENABLED = false;
 const ACTIVE_ATTEMPT_STATES = new Set([
   "eligible",
   "reserved",
@@ -549,6 +560,28 @@ function resolvePacificEndOfDayDrain(value, {
   };
 }
 
+function resolveLeadDeliveryTickMode(value, {
+  deliveryWindowEvaluator = isPacificDeliveryWindowOpen,
+  closeHour = END_OF_DAY_DRAIN_HOUR,
+  closeMinute = END_OF_DAY_DRAIN_MINUTE,
+  completedCloseDateKey = null,
+} = {}) {
+  const at = parseDate(value, "value");
+  if (!isPacificBusinessDay(at)) return "weekend_event_drain";
+  if (deliveryWindowEvaluator(at) === true) return "delivery_open";
+  const close = resolvePacificEndOfDayDrain(at, { hour: closeHour, minute: closeMinute });
+  if (close.due) {
+    return completedCloseDateKey === close.dateKey
+      ? "close_complete_event_drain"
+      : "close_due";
+  }
+  const parts = zonedParts(at, PACIFIC_TIME_ZONE);
+  const minuteOfDay = (Number(parts.hour) * 60) + Number(parts.minute);
+  return minuteOfDay < (7 * 60) + 50
+    ? "preopen_event_drain"
+    : "postwindow_event_drain";
+}
+
 function stableWorkItemId(item = {}) {
   const explicit = String(item.workItemId || item._id || item.id || "").trim();
   if (explicit) return explicit;
@@ -722,18 +755,33 @@ function classifyCapturedProviderEvent(event = {}) {
   };
 }
 
-function buildCapturedEventUpgrade(existing = {}, incoming = {}) {
+function buildCapturedEventUpgrade(existing = {}, incoming = {}, { allowedRecordingHosts = [] } = {}) {
   const existingStatus = String(existing.status || "").trim();
   const existingOutcome = normalizeOutcome(existing.normalizedOutcome);
   const incomingOutcome = normalizeOutcome(incoming.normalizedOutcome);
-  const existingRecordingUrl = String(existing.safePayload?.recordingUrl || "").trim();
-  const incomingRecordingUrl = String(incoming.safePayload?.recordingUrl || "").trim();
-  const recordingEvidenceUpgrade = !existingRecordingUrl && Boolean(incomingRecordingUrl);
+  // A retained provider reference counts as recording evidence on exactly the
+  // same terms as a validated URL, but only ever at the weaker rank — so an
+  // arriving reference can fill an empty slot or be strengthened by a later
+  // validated URL, and can never overwrite one.
+  const existingRecording = resolveRecordingLocator(existing.safePayload, {
+    allowedHosts: allowedRecordingHosts,
+  });
+  const incomingRecording = resolveRecordingLocator(incoming.safePayload, {
+    allowedHosts: allowedRecordingHosts,
+  });
+  const recordingEvidenceUpgrade = Boolean(incomingRecording.recordingUrl)
+    && incomingRecording.rank > existingRecording.rank;
+  const recordingEvidenceConflict = Boolean(
+    existingRecording.recordingUrl
+      && incomingRecording.recordingUrl
+      && incomingRecording.rank === existingRecording.rank
+      && existingRecording.recordingUrl !== incomingRecording.recordingUrl,
+  );
   const strongerCallDoneOutcome = String(existing.eventType || "").trim().toLowerCase() === "call_done"
     && ["answered", "review"].includes(existingOutcome)
     && !["answered", "review"].includes(incomingOutcome);
   const upgradeableWeakStatus = ["pending", "processing", "failed", "completed"].includes(existingStatus)
-    && (strongerCallDoneOutcome || recordingEvidenceUpgrade);
+    && (strongerCallDoneOutcome || recordingEvidenceUpgrade || recordingEvidenceConflict);
   if (existingStatus !== "review" && !upgradeableWeakStatus) return null;
   if (String(incoming.status || "").trim() !== "pending") return null;
   if (String(existing.provider || "").trim().toLowerCase()
@@ -747,6 +795,19 @@ function buildCapturedEventUpgrade(existing = {}, incoming = {}) {
     const after = String(incoming[field] || "").trim();
     if (before && after && before !== after) return null;
     if (!before && after) set[field] = after;
+  }
+  if (recordingEvidenceConflict) {
+    return {
+      expected: { status: existingStatus },
+      set: {
+        ...set,
+        status: "review",
+        nextAttemptAt: null,
+        processingLeaseId: null,
+        processingLeaseExpiresAt: null,
+        lastError: "recording-evidence-conflict",
+      },
+    };
   }
   if (!strongerCallDoneOutcome && !recordingEvidenceUpgrade) return null;
   const outcome = strongerCallDoneOutcome ? incomingOutcome : existingOutcome;
@@ -763,7 +824,13 @@ function buildCapturedEventUpgrade(existing = {}, incoming = {}) {
       safePayload,
       nextAttemptAt: null,
       localAppliedAt: strongerCallDoneOutcome ? null : (existing.localAppliedAt || null),
-      downstreamAppliedAt: null,
+      // A recording-only upgrade reopens only the exact DailyDial evidence
+      // projection. Preserving the prior downstream marker lets the drain
+      // distinguish that narrow replay from an outcome upgrade or a failed
+      // downstream attempt, both of which still need the normal action path.
+      downstreamAppliedAt: recordingEvidenceUpgrade && !strongerCallDoneOutcome
+        ? (existing.downstreamAppliedAt || null)
+        : null,
       processedAt: null,
       processingLeaseId: null,
       processingLeaseExpiresAt: null,
@@ -2459,7 +2526,6 @@ function createLeadDeliveryCadenceSource({
   policyForDomain = () => ({}),
   contactWindowEvaluator = null,
   overnightBatchResolver = null,
-  headPageSize = 25,
   retryDelayMinutes = 120,
   // Max age of the Logics status mirror before a lead is HELD instead of
   // delivered (2026-07-24 DNC incident — see the freshness gate in
@@ -2489,7 +2555,6 @@ function createLeadDeliveryCadenceSource({
   if (contactWindowEvaluator != null && typeof contactWindowEvaluator !== "function") {
     throw new TypeError("contactWindowEvaluator must be a function");
   }
-  const hotPageSize = positiveInteger(headPageSize, "headPageSize");
   const legacyRetryDelayMinutes = positiveInteger(retryDelayMinutes, "retryDelayMinutes");
   if (overnightBatchResolver != null && typeof overnightBatchResolver !== "function") {
     throw new TypeError("overnightBatchResolver must be a function");
@@ -2516,7 +2581,8 @@ function createLeadDeliveryCadenceSource({
 
   function sourceEligibility(row, at, { requireContactWindow = false } = {}) {
     const domain = String(row?.domain || "").trim().toUpperCase();
-    const caseProfile = row?.caseProfile && typeof row.caseProfile === "object"
+    const caseProfile = CASE_PROFILE_SOURCE_ELIGIBILITY_ENABLED
+      && row?.caseProfile && typeof row.caseProfile === "object"
       ? row.caseProfile
       : {};
     const policy = policyForDomain(domain) || {};
@@ -2534,11 +2600,8 @@ function createLeadDeliveryCadenceSource({
         : DEFAULT_DNC_STATUS_IDS)
         .map(Number).filter(Number.isFinite),
     );
-    const profileStatusId = Number(caseProfile.statusId);
     const cadenceStatusId = Number(row?.statusId);
-    const statusIds = Number.isFinite(profileStatusId)
-      ? [profileStatusId]
-      : (Number.isFinite(cadenceStatusId) ? [cadenceStatusId] : []);
+    const statusIds = Number.isFinite(cadenceStatusId) ? [cadenceStatusId] : [];
     if (!domain || row?.caseId == null || String(row.caseId).trim() === "") {
       return { ok: false, reason: "missing-domain-case-identity", retryable: false };
     }
@@ -2571,22 +2634,20 @@ function createLeadDeliveryCadenceSource({
     // Fail CLOSED and retryable: a lead whose status age we cannot prove is
     // held, not dialed, until a refresh proves it.
     //
-    // The gate deliberately does NOT require a profile status to exist. It
-    // used to be guarded by Number.isFinite(profileStatusId), which meant a
-    // lead with no CaseProfile at all fell through to row.statusId — the
-    // cadence row's INTAKE-TIME status, which nothing ever refreshes — and
-    // skipped the freshness check entirely. That is precisely the case the
-    // gate exists to hold. Measured 2026-07-24: 11 live queue leads had no
-    // CaseProfile, 4 of them (TAG 880101-880104) already 11 days old and
-    // sitting in provider_accepted.
+    // LeadCadence owns both the current Logics status and the timestamp that
+    // proves when Logics supplied it. CaseProfile is not queried or inspected
+    // by pre-serve admission.
     if (statusMaxAgeMs > 0) {
-      const checkedAt = Date.parse(caseProfile.lastStatusCheckAt ?? "");
+      const checkedAt = Date.parse(row?.logicsStatusCheckedAt ?? "");
       if (!Number.isFinite(checkedAt)) {
         return { ok: false, reason: "status-freshness-unproven", retryable: true };
       }
       if (at.getTime() - checkedAt > statusMaxAgeMs) {
         return { ok: false, reason: "status-stale", retryable: true };
       }
+    }
+    if (row?.logicsProspectEligible === false) {
+      return { ok: false, reason: "logics-nonprospect-status", retryable: false };
     }
     if (statusIds.some((statusId) => dncStatuses.has(statusId))) {
       return { ok: false, reason: "logics-dnc-status", retryable: false };
@@ -2771,26 +2832,12 @@ function createLeadDeliveryCadenceSource({
   async function readBatch({ cursor = null, limit = 250, now = new Date() } = {}) {
     const at = parseDate(now, "now");
     const cap = positiveInteger(limit, "limit");
-    const scanLimit = cursor ? Math.max(1, cap - Math.min(hotPageSize, Math.max(1, cap - 1))) : cap;
     const scan = await repository.readSourceBatch({
       cursor,
-      limit: scanLimit,
+      limit: cap,
       domains: sourceDomains,
     });
-    let rows = Array.isArray(scan?.items) ? scan.items : [];
-    if (cursor && cap > 1) {
-      const head = await repository.readSourceBatch({
-        cursor: null,
-        limit: Math.min(hotPageSize, cap - 1),
-        domains: sourceDomains,
-      });
-      const byIdentity = new Map();
-      for (const row of [...(head?.items || []), ...rows]) {
-        const identity = `${String(row?.domain || "").toUpperCase()}:${String(row?.caseId ?? "")}`;
-        if (!byIdentity.has(identity)) byIdentity.set(identity, row);
-      }
-      rows = [...byIdentity.values()];
-    }
+    const rows = Array.isArray(scan?.items) ? scan.items : [];
     const items = [];
     for (const row of rows) {
       const normalized = await normalizeRow(row, at);
@@ -2798,7 +2845,30 @@ function createLeadDeliveryCadenceSource({
     }
     return {
       items,
+      highWater: scan?.highWater ?? null,
       nextCursor: scan?.nextCursor ?? null,
+      done: scan?.done === true,
+    };
+  }
+
+  async function readNewerBatch({ after, limit = 250, now = new Date() } = {}) {
+    if (typeof repository.readSourceNewerBatch !== "function") {
+      throw new TypeError("repository.readSourceNewerBatch is required for source high-water repair");
+    }
+    const at = parseDate(now, "now");
+    const scan = await repository.readSourceNewerBatch({
+      after,
+      limit: positiveInteger(limit, "limit"),
+      domains: sourceDomains,
+    });
+    const items = [];
+    for (const row of Array.isArray(scan?.items) ? scan.items : []) {
+      const normalized = await normalizeRow(row, at);
+      if (normalized) items.push(normalized);
+    }
+    return {
+      items,
+      nextHighWater: scan?.nextHighWater ?? after,
       done: scan?.done === true,
     };
   }
@@ -2859,7 +2929,7 @@ function createLeadDeliveryCadenceSource({
     };
   }
 
-  return { readBatch, readOne, readWindowBatch };
+  return { readBatch, readNewerBatch, readOne, readWindowBatch };
 }
 
 function createLeadDeliveryRuntime({
@@ -2914,6 +2984,11 @@ function createLeadDeliveryRuntime({
   reconcileDailyDialCalls = null,
   providerConsumptionOrder = null,
   refreshSourceStatuses = null,
+  refreshUntouchedSourceStatuses = null,
+  // Non-secret exact provider media hosts. Injected, never read from the
+  // environment here. Blank means no retained reference is ever promoted,
+  // which is the correct fail-closed default for a fresh runtime.
+  allowedRecordingHosts = [],
 } = {}) {
   if (!repository || typeof repository !== "object") {
     throw new TypeError("repository is required");
@@ -2951,6 +3026,11 @@ function createLeadDeliveryRuntime({
   if (source != null && typeof source?.readBatch !== "function") {
     throw new TypeError("source.readBatch is required when source is supplied");
   }
+  const durableSourceStateEnabled = source != null
+    && typeof source?.readNewerBatch === "function"
+    && typeof repository.insertSourceRepairCheckpointOnce === "function"
+    && typeof repository.getSourceRepairCheckpoint === "function"
+    && typeof repository.compareAndSetSourceRepairCheckpoint === "function";
   const normalizedProviderConsumptionOrder = providerConsumptionOrder == null
     ? null
     : String(providerConsumptionOrder).trim().toLowerCase();
@@ -2969,6 +3049,9 @@ function createLeadDeliveryRuntime({
   }
   if (refreshSourceStatuses != null && typeof refreshSourceStatuses !== "function") {
     throw new TypeError("refreshSourceStatuses must be a function when supplied");
+  }
+  if (refreshUntouchedSourceStatuses != null && typeof refreshUntouchedSourceStatuses !== "function") {
+    throw new TypeError("refreshUntouchedSourceStatuses must be a function when supplied");
   }
   if (actionsEnabled === true && typeof phoneBurner?.listFolderContacts !== "function") {
     throw new TypeError("phoneBurner.listFolderContacts is required when actions are enabled");
@@ -3008,6 +3091,13 @@ function createLeadDeliveryRuntime({
   }
   const providerName = String(provider || "").trim().toLowerCase();
   if (!providerName) throw new TypeError("provider is required");
+  // ONE resolver for the whole runtime. The link an attempt receives is either
+  // the validated capture URL or a retained provider reference that passed the
+  // exact-host promotion policy — never anything else, and never a value this
+  // runtime went and fetched.
+  const recordingLocatorOf = (event) => resolveRecordingLocator(event?.safePayload, {
+    allowedHosts: allowedRecordingHosts,
+  }).recordingUrl;
   const intervalMs = positiveInteger(tickIntervalMs, "tickIntervalMs");
   const sourceLimit = positiveInteger(ingestBatchSize, "ingestBatchSize");
   const drainLimit = positiveInteger(eventBatchSize, "eventBatchSize");
@@ -3093,6 +3183,12 @@ function createLeadDeliveryRuntime({
     running: false,
     sourceCursor: null,
     sourceDone: false,
+    sourceBusinessDate: null,
+    sourceRepairStatus: durableSourceStateEnabled ? "not-run" : "legacy-cursor",
+    sourceLane: durableSourceStateEnabled ? "repair" : "legacy",
+    tickMode: enabled === true ? "not-run" : "disabled",
+    offHoursTicks: 0,
+    sourceReadsSkippedOffHours: 0,
     lastTickAt: null,
     lastErrorCode: null,
     ticks: 0,
@@ -3165,6 +3261,7 @@ function createLeadDeliveryRuntime({
   let productivityRebalanceStartedAt = null;
   let productivityRebalanceInFlight = null;
   let productivityRebalanceLastWindowKey = null;
+  let priorCloseAuditDateKey = null;
   const backgroundRefills = new Set();
   const backgroundRefillsByAgent = new Map();
   const physicalRefreshesByAgent = new Map();
@@ -3864,16 +3961,7 @@ function createLeadDeliveryRuntime({
     return { status: updated.state === "blocked" ? "blocked" : "refreshed", item: updated, reason: decision.reason };
   }
 
-  async function ingestOnce({ limit = sourceLimit } = {}) {
-    if (enabled !== true) return { status: "disabled", read: 0, inserted: 0, skipped: 0 };
-    if (!source) return { status: "source-unavailable", read: 0, inserted: 0, skipped: 0 };
-    const at = atNow();
-    const batch = await source.readBatch({
-      cursor: runtimeState.sourceCursor,
-      limit: positiveInteger(limit, "limit"),
-      now: at,
-    });
-    const rows = Array.isArray(batch?.items) ? batch.items : [];
+  async function processSourceRows(rows, at) {
     const existingRows = typeof repository.findItemsBySourceIdentities === "function"
       ? await repository.findItemsBySourceIdentities(rows)
       : [];
@@ -3930,24 +4018,124 @@ function createLeadDeliveryRuntime({
         } else skipped += 1;
       }
     }
-    runtimeState.sourceDone = batch?.done === true;
-    runtimeState.sourceCursor = runtimeState.sourceDone
-      ? null
-      : (batch?.nextCursor ?? runtimeState.sourceCursor);
     runtimeState.ingested += inserted;
     // Fresh is not packet inventory. Every source pass wakes the independent
     // immediate lane, including an empty pass after agents become active.
     const freshDispatch = await dispatchImmediateFresh();
     return {
-      status: "ok",
       read: rows.length,
       inserted,
       refreshed,
       blocked,
       skipped,
-      done: runtimeState.sourceDone,
       freshDispatch,
     };
+  }
+
+  async function loadDailySourceState(at) {
+    const businessDate = getPacificDateKey(at);
+    const checkpointKey = `source-repair:${providerName}:${businessDate}`;
+    let state = await repository.getSourceRepairCheckpoint(checkpointKey);
+    if (!state) {
+      await repository.insertSourceRepairCheckpointOnce({
+        checkpointKey,
+        provider: providerName,
+        source: "leadcadence",
+        businessDate,
+      });
+      state = await repository.getSourceRepairCheckpoint(checkpointKey);
+    }
+    if (!state) throw new Error("lead-delivery source state unavailable after insert");
+    return { checkpointKey, state, businessDate };
+  }
+
+  async function ingestDurableSourceOnce({ limit, at }) {
+    const cap = positiveInteger(limit, "limit");
+    const { checkpointKey, state, businessDate } = await loadDailySourceState(at);
+    const highWater = state.highWaterCreatedAt && state.highWaterId
+      ? { createdAt: state.highWaterCreatedAt, id: state.highWaterId }
+      : null;
+    const repairCursor = state.repairCursorCreatedAt && state.repairCursorId
+      ? { createdAt: state.repairCursorCreatedAt, id: state.repairCursorId }
+      : null;
+    const useNewArrivalLane = highWater && (
+      state.status === "completed"
+    );
+    const lane = useNewArrivalLane ? "new-arrivals" : "daily-repair";
+    const batch = useNewArrivalLane
+      ? await source.readNewerBatch({ after: highWater, limit: cap, now: at })
+      : await source.readBatch({ cursor: repairCursor, limit: cap, now: at });
+    const rows = Array.isArray(batch?.items) ? batch.items : [];
+    const outcome = await processSourceRows(rows, at);
+    const set = { lastRunAt: at, lastErrorCode: null };
+    if (lane === "new-arrivals") {
+      if (batch?.nextHighWater) {
+        set.highWaterCreatedAt = batch.nextHighWater.createdAt;
+        set.highWaterId = batch.nextHighWater.id;
+      }
+    } else {
+      if (batch?.done !== true && !batch?.nextCursor) {
+        throw new Error("lead-delivery daily repair returned an incomplete page without a cursor");
+      }
+      set.status = batch?.done === true ? "completed" : "running";
+      set.repairCursorCreatedAt = batch?.done === true ? null : batch?.nextCursor?.createdAt;
+      set.repairCursorId = batch?.done === true ? null : batch?.nextCursor?.id;
+      if (!highWater && batch?.highWater) {
+        set.highWaterCreatedAt = batch.highWater.createdAt;
+        set.highWaterId = batch.highWater.id;
+      } else if (!highWater && batch?.done === true) {
+        // An empty active source still needs a durable boundary; otherwise a
+        // completed empty repair would restart on every minute tick. New full
+        // leads retain their direct intake path, and this strict lower-bound
+        // cursor repairs any later source row without rereading the hot head.
+        set.highWaterCreatedAt = at;
+        set.highWaterId = "000000000000000000000000";
+      }
+      if (batch?.done === true) set.completedAt = at;
+    }
+    const updated = await repository.compareAndSetSourceRepairCheckpoint({
+      checkpointKey,
+      expectedVersion: state.version,
+      set,
+      increment: {
+        scannedCount: outcome.read,
+        admittedCount: outcome.inserted + outcome.refreshed + outcome.blocked,
+        skippedCount: outcome.skipped,
+      },
+    });
+    if (!updated) return { status: "source-state-conflict", lane, ...outcome };
+    runtimeState.sourceBusinessDate = businessDate;
+    runtimeState.sourceRepairStatus = updated.status;
+    runtimeState.sourceLane = updated.status === "completed" ? "new-arrivals" : "daily-repair";
+    runtimeState.sourceDone = updated.status === "completed";
+    runtimeState.sourceCursor = updated.repairCursorCreatedAt && updated.repairCursorId
+      ? { createdAt: updated.repairCursorCreatedAt, id: updated.repairCursorId }
+      : null;
+    return {
+      status: "ok",
+      lane,
+      done: runtimeState.sourceDone,
+      ...outcome,
+    };
+  }
+
+  async function ingestOnce({ limit = sourceLimit } = {}) {
+    if (enabled !== true) return { status: "disabled", read: 0, inserted: 0, skipped: 0 };
+    if (!source) return { status: "source-unavailable", read: 0, inserted: 0, skipped: 0 };
+    const at = atNow();
+    if (durableSourceStateEnabled) return ingestDurableSourceOnce({ limit, at });
+    const batch = await source.readBatch({
+      cursor: runtimeState.sourceCursor,
+      limit: positiveInteger(limit, "limit"),
+      now: at,
+    });
+    const rows = Array.isArray(batch?.items) ? batch.items : [];
+    const outcome = await processSourceRows(rows, at);
+    runtimeState.sourceDone = batch?.done === true;
+    runtimeState.sourceCursor = runtimeState.sourceDone
+      ? null
+      : (batch?.nextCursor ?? runtimeState.sourceCursor);
+    return { status: "ok", done: runtimeState.sourceDone, ...outcome };
   }
 
   async function ingestSerial(options = {}) {
@@ -5157,7 +5345,10 @@ function createLeadDeliveryRuntime({
     return { ...result, status: "inventory-exhausted", inventoryScanBatches: scannedBatches };
   }
 
-  async function postTopOfQueueOnce(agentId, { count = SIMPLE_PACKET_SIZE } = {}) {
+  async function postTopOfQueueOnce(agentId, {
+    count = SIMPLE_PACKET_SIZE,
+    untouchedOnly = false,
+  } = {}) {
     const id = String(agentId || "").trim().toLowerCase();
     const requested = positiveInteger(count, "count");
     if (enabled !== true || actionsEnabled !== true) {
@@ -5179,6 +5370,10 @@ function createLeadDeliveryRuntime({
       String(item.state || "").trim().toLowerCase() === "packetized"
       && !String(item.providerContactId || "").trim()
       && String(item.sourcePool || "").trim().toLowerCase() !== POOLS.NEW_TODAY
+      && (untouchedOnly !== true || (
+        Number(item.totalAttemptCount || 0) === 0
+        && item.lastContactAt == null
+      ))
     ));
     for (const item of pending) {
       if (accepted >= requested) break;
@@ -5214,6 +5409,7 @@ function createLeadDeliveryRuntime({
       let candidates = await repository.listPacketCandidateItems({
         agentId: id,
         sourcePools: [pool],
+        untouchedOnly,
         now: packetAt,
         limit: Math.min(5000, Math.max(requested * 3, 50)),
       });
@@ -7262,7 +7458,7 @@ function createLeadDeliveryRuntime({
           originPool: effectContext?.originPool || local.item?.sourcePool || "unknown",
           callStartedAt: attemptContext?.callBeginAt || attemptContext?.acceptedAt || null,
           durationSeconds: currentEvent.safePayload?.durationSeconds ?? null,
-          recordingUrl: currentEvent.safePayload?.recordingUrl || null,
+          recordingUrl: recordingLocatorOf(currentEvent),
           idempotencyKey: `${providerName}:${providerAttemptKey}:${actionName}`,
         });
       }
@@ -7595,7 +7791,105 @@ function createLeadDeliveryRuntime({
     return handle;
   }
 
-  async function processLeasedEvent(event, { waitForRefillCompletion = true } = {}) {
+  async function completeRecordingEvidenceOnly(event, local) {
+    const handler = actionHandlers.record_daily_dial;
+    const providerAttemptKey = buildProviderAttemptKey(event);
+    const effectContext = local.effectContext || event.effectContext || null;
+    const attemptContext = local.attemptContext || providerAttemptContext(
+      local.item || {},
+      event,
+      event.resolvedAttemptNumber,
+    );
+    try {
+      if (typeof handler !== "function") throw new Error("record-daily-dial-handler-missing");
+      await handler({
+        action: "record_daily_dial",
+        itemId: local.item ? stableWorkItemId(local.item) : event.resolvedItemId,
+        domain: local.item?.domain,
+        caseId: local.item?.caseId,
+        agentId: local.effectAgentId || local.item?.deliveryAgentId,
+        provider: providerName,
+        providerCallId: event.providerCallId,
+        providerAttemptKey,
+        normalizedOutcome: local.actionOutcome || event.normalizedOutcome,
+        connected: event.safePayload?.connected === true
+          ? true
+          : event.safePayload?.connected === false ? false : null,
+        historicalAttempt: local.historicalAttempt === true,
+        resolvedAttemptNumber: Number(event.resolvedAttemptNumber || 0),
+        completedAt: local.historicalAttempt === true
+          ? effectContext?.completedAt
+          : (local.item?.lastContactAt || event.receivedAt),
+        dailyAttemptDateKey: local.historicalAttempt === true
+          ? effectContext?.dailyAttemptDateKey
+          : local.item?.dailyAttemptDateKey,
+        dailyAttemptCount: local.historicalAttempt === true
+          ? effectContext?.dailyAttemptCount
+          : local.item?.dailyAttemptCount,
+        totalAttemptCount: local.item?.totalAttemptCount,
+        nextContactAt: local.historicalAttempt === true
+          ? effectContext?.nextContactAt
+          : local.item?.nextContactAt,
+        leadReceivedAt: local.item?.receivedAt,
+        normalizedPhone: local.item?.normalizedPhone,
+        firstName: local.item?.metadata?.firstName || null,
+        lastName: local.item?.metadata?.lastName || null,
+        originPool: effectContext?.originPool || local.item?.sourcePool || "unknown",
+        callStartedAt: attemptContext?.callBeginAt || attemptContext?.acceptedAt || null,
+        durationSeconds: event.safePayload?.durationSeconds ?? null,
+        recordingUrl: recordingLocatorOf(event),
+        idempotencyKey: `${providerName}:${providerAttemptKey}:record_daily_dial`,
+      });
+      const processedAt = atNow();
+      const completed = await repository.compareAndSetEvent({
+        eventId: String(event._id),
+        expectedVersion: event.version,
+        expected: {
+          status: "processing",
+          processingLeaseId: event.processingLeaseId,
+          localAppliedAt: { $ne: null },
+          downstreamAppliedAt: { $ne: null },
+        },
+        set: {
+          status: "completed",
+          processedAt,
+          nextAttemptAt: null,
+          processingLeaseId: null,
+          processingLeaseExpiresAt: null,
+          lastError: null,
+        },
+      });
+      return { status: completed?.status || "conflict" };
+    } catch (error) {
+      const retryAfterMs = Number(error?.retryAfterMs);
+      const delay = Number.isFinite(retryAfterMs)
+        ? Math.max(retryDuration, retryAfterMs)
+        : retryDuration;
+      await repository.compareAndSetEvent({
+        eventId: String(event._id),
+        expectedVersion: event.version,
+        expected: {
+          status: "processing",
+          processingLeaseId: event.processingLeaseId,
+          localAppliedAt: { $ne: null },
+          downstreamAppliedAt: { $ne: null },
+        },
+        set: {
+          status: "failed",
+          nextAttemptAt: new Date(atNow().getTime() + delay),
+          processingLeaseId: null,
+          processingLeaseExpiresAt: null,
+          lastError: "recording-evidence-projection-failed",
+        },
+      });
+      return { status: "failed" };
+    }
+  }
+
+  async function processLeasedEvent(event, {
+    waitForRefillCompletion = true,
+    allowProviderCapacityWork = true,
+  } = {}) {
     let local;
     try {
       local = await applyEventLocally(event);
@@ -7619,7 +7913,15 @@ function createLeadDeliveryRuntime({
     }
     if (local.status === "review") return { status: "review" };
     if (local.status === "completed") return { status: "completed" };
-    const backgroundRefill = local.needsRefill && providerInventoryAuthoritative !== true
+    if (event.eventType === "call_done"
+      && event.localAppliedAt
+      && event.downstreamAppliedAt
+      && recordingLocatorOf(event)) {
+      return completeRecordingEvidenceOnly(event, local);
+    }
+    const backgroundRefill = allowProviderCapacityWork === true
+      && local.needsRefill
+      && providerInventoryAuthoritative !== true
       ? postTopOfQueue(local.item.deliveryAgentId, { count: SIMPLE_PACKET_SIZE })
       : null;
     if (backgroundRefill) await backgroundRefill;
@@ -7627,7 +7929,7 @@ function createLeadDeliveryRuntime({
       // In provider-authoritative mode, PhoneBurner removes the completed
       // attempt first. Only then may this owner count that agent's Pool and
       // decide whether to refill. The URL route never chooses the agent.
-      onProviderCleanup: providerInventoryAuthoritative === true
+      onProviderCleanup: allowProviderCapacityWork === true && providerInventoryAuthoritative === true
         ? async ({ agentId }) => {
           if (!agentId) {
             const error = new Error("simple-refill-delivery-agent-missing");
@@ -7651,19 +7953,24 @@ function createLeadDeliveryRuntime({
     // A real Call End is fresh activity evidence. Wake the independent fresh
     // lane after the attempt is durable; ordinary refill success or failure
     // does not own this decision.
-    const freshDispatch = wakeImmediateFresh();
+    const freshDispatch = allowProviderCapacityWork === true ? wakeImmediateFresh() : null;
     return { status: completedEvent?.status || "conflict", freshDispatch };
   }
 
-  async function drainEvents({ limit = drainLimit, waitForRefillCompletion = true } = {}) {
+  async function drainEvents({
+    limit = drainLimit,
+    waitForRefillCompletion = true,
+    allowProviderCapacityWork = true,
+  } = {}) {
     if (enabled !== true) return { status: "disabled", seen: 0, processed: 0 };
+    if (actionsEnabled !== true) {
+      return { status: "actions-disabled", seen: 0, processed: 0 };
+    }
     const events = await repository.listEventsForDrain({
+      provider: providerName,
       limit: positiveInteger(limit, "limit"),
       now: atNow(),
     });
-    if (actionsEnabled !== true) {
-      return { status: "actions-disabled", seen: events.length, processed: 0 };
-    }
     let processed = 0;
     const results = [];
     for (const candidate of events) {
@@ -7675,14 +7982,20 @@ function createLeadDeliveryRuntime({
         leaseMs: eventLeaseDuration,
       });
       if (!leased) continue;
-      const result = await processLeasedEvent(leased, { waitForRefillCompletion });
+      const result = await processLeasedEvent(leased, {
+        waitForRefillCompletion,
+        allowProviderCapacityWork,
+      });
       results.push(result);
       processed += 1;
     }
     return { status: "ok", seen: events.length, processed, results };
   }
 
-  async function drainCapturedEvent(event, { waitForRefillCompletion = false } = {}) {
+  async function drainCapturedEvent(event, {
+    waitForRefillCompletion = false,
+    allowProviderCapacityWork = null,
+  } = {}) {
     if (enabled !== true) return { status: "disabled", seen: 1, processed: 0 };
     if (actionsEnabled !== true) return { status: "actions-disabled", seen: 1, processed: 0 };
     const eventId = String(event?._id || "").trim();
@@ -7698,7 +8011,12 @@ function createLeadDeliveryRuntime({
       leaseMs: eventLeaseDuration,
     });
     if (!leased) return { status: "lease-not-acquired", seen: 1, processed: 0 };
-    const result = await processLeasedEvent(leased, { waitForRefillCompletion });
+    const result = await processLeasedEvent(leased, {
+      waitForRefillCompletion,
+      allowProviderCapacityWork: allowProviderCapacityWork == null
+        ? deliveryWindowOpen(atNow()) === true
+        : allowProviderCapacityWork === true,
+    });
     return { status: result.status, seen: 1, processed: 1, results: [result] };
   }
 
@@ -7757,12 +8075,9 @@ function createLeadDeliveryRuntime({
   }
 
   async function buildDayQueue() {
-    // Disabled from the live morning path on 2026-07-15. A process restart
-    // resets the in-memory source cursor, so awaiting this full reconciliation
-    // made five shallow packets wait behind every active LeadCadence row. Keep
-    // the implementation during the no-delete proof window; ordinary minute
-    // ticks perform the same reconciliation incrementally after agents have
-    // work.
+    // The 7:50 build intentionally completes the bounded source scan before
+    // distributing untouched work. This prevents rows beyond the first page
+    // from being permanently stranded while the minute tick remains bounded.
     const summary = {
       status: "building",
       batches: 0,
@@ -7787,6 +8102,52 @@ function createLeadDeliveryRuntime({
       if (Number(batch?.read || 0) === 0) return { ...summary, status: "queue-build-stalled", done: false };
     }
     return { ...summary, status: "queue-build-batch-limit", done: false };
+  }
+
+  async function dispatchMorningUntouched(agentIds) {
+    const available = [...new Set(agentIds.map((value) => String(value || "").trim().toLowerCase()).filter(Boolean))];
+    const exhausted = new Set();
+    const countsByAgent = Object.fromEntries(available.map((agentId) => [agentId, 0]));
+    let accepted = 0;
+    const maximum = 5_000;
+    while (accepted < maximum && exhausted.size < available.length) {
+      const eligible = available.filter((agentId) => !exhausted.has(agentId));
+      const pick = await readNextFairAgent("morning-untouched", eligible);
+      if (pick.status !== "picked") break;
+      const result = await postTopOfQueue(pick.agentId, {
+        count: 1,
+        untouchedOnly: true,
+        operationKind: "day_start",
+      });
+      const posted = nonNegativeInteger(result?.accepted ?? 0, "morning untouched accepted");
+      if (posted > 0) {
+        countsByAgent[pick.agentId] += posted;
+        const committed = await commitAcceptedFairAgent("morning-untouched", pick);
+        if (!committed) {
+          return {
+            status: "accepted-cursor-conflict",
+            accepted: accepted + posted,
+            countsByAgent,
+          };
+        }
+        accepted += posted;
+        continue;
+      }
+      if (["queue-exhausted", "no-candidates"].includes(String(result?.status || ""))) {
+        exhausted.add(pick.agentId);
+        continue;
+      }
+      return {
+        status: String(result?.status || "morning-post-failed"),
+        accepted,
+        countsByAgent,
+      };
+    }
+    return {
+      status: accepted >= maximum ? "bounded" : "completed",
+      accepted,
+      countsByAgent,
+    };
   }
 
   async function runDayStart(value = atNow()) {
@@ -7849,45 +8210,86 @@ function createLeadDeliveryRuntime({
       return { status: "activation-conflict", dateKey, priorDayPersistence, agentResults };
     }
 
-    // Morning launch has a ten-minute service objective. Refresh one bounded,
-    // newest-first active source page so overnight arrivals are visible, then
-    // fill from the already-durable queue. Do not gate agent work on a complete
-    // source-universe sweep; later minute ticks continue from this cursor and
-    // every selected row is still re-read at claim time before provider POST.
-    const sourceRefresh = await ingestSerial();
-    if (sourceRefresh.status !== "ok") {
+    // 7:50 owns the untouched intake sweep. LeadCadence says whether a voice
+    // touch exists; Logics status membership supplies current eligibility.
+    // CaseProfile is deliberately not a prerequisite for a first call.
+    let morningStatusRefresh = { status: "not-configured", scanned: 0, refreshed: 0 };
+    if (refreshUntouchedSourceStatuses) {
+      try {
+        morningStatusRefresh = {
+          status: "completed",
+          ...await refreshUntouchedSourceStatuses({ now: at }),
+        };
+      } catch (error) {
+        runtimeState.dayStartStatus = "morning-status-refresh-failed";
+        runtimeState.dayStartAgentResults = clone(agentResults);
+        return {
+          status: "morning-status-refresh-failed",
+          dateKey,
+          priorDayPersistence,
+          morningStatusRefresh: { status: "failed" },
+          agentResults,
+        };
+      }
+    }
+    const sourceRefresh = await buildDayQueue();
+    if (sourceRefresh.status !== "built") {
       runtimeState.dayStartStatus = sourceRefresh.status;
       runtimeState.dayStartAgentResults = clone(agentResults);
       return {
         status: sourceRefresh.status,
         dateKey,
         priorDayPersistence,
-        queueBuild: { ...sourceRefresh, status: sourceRefresh.status, fullScan: false },
+        morningStatusRefresh,
+        queueBuild: { ...sourceRefresh, fullScan: true },
         agentResults,
       };
     }
-    const queueBuild = { ...sourceRefresh, status: "ready", fullScan: false };
+    const queueBuild = { ...sourceRefresh, status: "ready", fullScan: true };
+    const morningUntouched = await dispatchMorningUntouched(activatedIds);
+    if (morningUntouched.status !== "completed") {
+      runtimeState.dayStartStatus = `morning-untouched-${morningUntouched.status}`;
+      runtimeState.dayStartAgentResults = clone(agentResults);
+      return {
+        status: runtimeState.dayStartStatus,
+        dateKey,
+        priorDayPersistence,
+        morningStatusRefresh,
+        morningUntouched,
+        queueBuild,
+        agentResults,
+      };
+    }
 
     for (const agentId of activatedIds) {
+      const morningAccepted = nonNegativeInteger(
+        morningUntouched.countsByAgent?.[agentId] ?? 0,
+        "morning untouched agent accepted",
+      );
       const physical = await readAgentProviderOutstanding(agentId, { repairEstimate: false });
       if (physical.reliable !== true) {
-        agentResults.push({ agentId, status: physical.status, accepted: 0 });
+        agentResults.push({ agentId, status: physical.status, accepted: morningAccepted });
         continue;
       }
       if (Number(physical.count) > SIMPLE_POOL_LOW_WATER) {
         const marked = await setAgentDayStartState(agentId, dateKey, "completed", at, {
           reason: "already-stocked",
         });
-        agentResults.push({ agentId, status: marked ? "already-stocked" : "marker-conflict", accepted: 0 });
+        agentResults.push({
+          agentId,
+          status: marked ? "already-stocked" : "marker-conflict",
+          accepted: morningAccepted,
+        });
         continue;
       }
       const refill = await postTopOfQueue(agentId, {
         count: SIMPLE_PACKET_SIZE,
         operationKind: "day_start",
       });
-      const accepted = nonNegativeInteger(refill?.accepted ?? 0, "day start refill accepted");
+      const refillAccepted = nonNegativeInteger(refill?.accepted ?? 0, "day start refill accepted");
+      const accepted = morningAccepted + refillAccepted;
       const successful = refill?.status === "posted"
-        || (refill?.status === "queue-exhausted" && accepted > 0);
+        || refill?.status === "queue-exhausted";
       if (!successful) {
         agentResults.push({ agentId, status: String(refill?.status || "start-refill-failed"), accepted });
         continue;
@@ -7912,6 +8314,8 @@ function createLeadDeliveryRuntime({
       status,
       dateKey,
       priorDayPersistence,
+      morningStatusRefresh,
+      morningUntouched,
       queueBuild,
       completedAgents: completed,
       agentResults,
@@ -8512,6 +8916,15 @@ function createLeadDeliveryRuntime({
       dateKey: forcedDateKey || naturalWindow.dateKey,
       due: forcedDateKey ? true : naturalWindow.due,
     };
+    if (runtimeState.endOfDayDrainDateKey === window.dateKey
+      && runtimeState.endOfDayDrainStatus === "completed") {
+      return {
+        status: "already-completed",
+        dateKey: window.dateKey,
+        deleted: 0,
+        remaining: 0,
+      };
+    }
     const requestedAgentIds = Array.isArray(options?.agentIds)
       ? options.agentIds
       : dailyCloseAgentIds();
@@ -8967,13 +9380,21 @@ function createLeadDeliveryRuntime({
     const currentDateKey = getPacificDateKey(at);
     const agents = await repository.listAgents({ enabledOnly: false });
     const currentParts = zonedParts(at, PACIFIC_TIME_ZONE);
-    const priorCloseAt = pacificLocalDateTime(
-      Number(currentParts.year),
-      Number(currentParts.month),
-      Number(currentParts.day) - 1,
-      closeHour,
-      closeMinute,
-    );
+    let priorCloseAt = null;
+    for (let offset = 1; offset <= 7; offset += 1) {
+      const candidate = pacificLocalDateTime(
+        Number(currentParts.year),
+        Number(currentParts.month),
+        Number(currentParts.day) - offset,
+        closeHour,
+        closeMinute,
+      );
+      if (isPacificBusinessDay(candidate)) {
+        priorCloseAt = candidate;
+        break;
+      }
+    }
+    if (!priorCloseAt) return { status: "none", dateKey: null, deleted: 0, remaining: 0 };
     const priorDateKey = getPacificDateKey(priorCloseAt);
     const incomplete = agents.map((agent) => {
       const marker = agent?.metadata?.[END_OF_DAY_DRAIN_METADATA_KEY];
@@ -9126,22 +9547,66 @@ function createLeadDeliveryRuntime({
   async function runTick() {
     if (enabled !== true) return { status: "disabled" };
     const at = atNow();
-    // Weekend intake is handled upstream: accept the lead, send its first
-    // contact, and persist queue enrollment. This provider runtime must not
-    // scan, refill, rebalance, or post PhoneBurner inventory until Monday.
-    if (!isPacificBusinessDay(at)) {
-      return { status: "weekend-paused", at };
+    const dateKey = getPacificDateKey(at);
+    const completedCloseDateKey = runtimeState.endOfDayDrainStatus === "completed"
+      ? runtimeState.endOfDayDrainDateKey
+      : null;
+    const tickMode = resolveLeadDeliveryTickMode(at, {
+      deliveryWindowEvaluator: deliveryWindowOpen,
+      closeHour,
+      closeMinute,
+      completedCloseDateKey,
+    });
+    runtimeState.tickMode = tickMode;
+
+    let priorDayDrainResume = { status: "not-audited", dateKey: null, deleted: 0, remaining: 0 };
+    if (isPacificBusinessDay(at) && priorCloseAuditDateKey !== dateKey) {
+      priorDayDrainResume = await resumeIncompletePriorDayFolderDrain(at);
+      if (["none", "completed", "already-completed"].includes(String(priorDayDrainResume.status || ""))) {
+        priorCloseAuditDateKey = dateKey;
+      }
+      if (priorDayDrainResume.status !== "none") priorDayDrainReleaseDateKey = null;
     }
+
+    const recordTick = (payload) => {
+      runtimeState.lastTickAt = at;
+      runtimeState.lastErrorCode = null;
+      runtimeState.ticks += 1;
+      if (tickMode !== "delivery_open") {
+        runtimeState.offHoursTicks += 1;
+        runtimeState.sourceReadsSkippedOffHours += 1;
+      }
+      return { status: "ok", tickMode, priorDayDrainResume, ...payload };
+    };
+
+    if (tickMode !== "delivery_open" && tickMode !== "close_due") {
+      const events = await drainEvents({
+        waitForRefillCompletion: false,
+        allowProviderCapacityWork: false,
+      });
+      return recordTick({ events });
+    }
+
+    if (tickMode === "close_due") {
+      const events = await drainEvents({
+        waitForRefillCompletion: false,
+        allowProviderCapacityWork: false,
+      });
+      const endOfDayDrain = await runEndOfDayFolderDrain(at);
+      return recordTick({ events, endOfDayDrain });
+    }
+
     await syncConfiguredAgents();
-    const priorDayDrainResume = await resumeIncompletePriorDayFolderDrain(at);
-    if (priorDayDrainResume.status !== "none") priorDayDrainReleaseDateKey = null;
     const priorDayDrainRelease = await releaseAllPriorDayWorkingFolderDrains(at);
     // Prior-day drain safety remains first. Once that boundary is reconciled,
     // repair the physical Pools before unrelated ingestion, event, or
     // productivity work can fail this tick. A later failure is still surfaced
     // by tick(), but it can no longer suppress the bounded refill watchdog.
     const automatic = await runPhysicalPoolWatchdog(at);
-    const events = await drainEvents({ waitForRefillCompletion: false });
+    const events = await drainEvents({
+      waitForRefillCompletion: false,
+      allowProviderCapacityWork: true,
+    });
     const dayStart = await runDayStart(at);
     const ingestion = dayStart.queueBuild || (watchdogSupplyRefreshInFlight
       ? { status: "supply-refresh-in-flight", done: false }
@@ -9183,12 +9648,7 @@ function createLeadDeliveryRuntime({
         }
       }
     } */
-    runtimeState.lastTickAt = at;
-    runtimeState.lastErrorCode = null;
-    runtimeState.ticks += 1;
-    return {
-      status: "ok",
-      priorDayDrainResume,
+    return recordTick({
       priorDayDrainRelease,
       events,
       ingestion,
@@ -9196,7 +9656,7 @@ function createLeadDeliveryRuntime({
       productivityRebalance,
       endOfDayDrain,
       automatic,
-    };
+    });
   }
 
   async function tick() {
@@ -9265,6 +9725,12 @@ function createLeadDeliveryRuntime({
       provider: providerName,
       sourceCursor: runtimeState.sourceCursor,
       sourceDone: runtimeState.sourceDone,
+      sourceBusinessDate: runtimeState.sourceBusinessDate,
+      sourceRepairStatus: runtimeState.sourceRepairStatus,
+      sourceLane: runtimeState.sourceLane,
+      tickMode: runtimeState.tickMode,
+      offHoursTicks: runtimeState.offHoursTicks,
+      sourceReadsSkippedOffHours: runtimeState.sourceReadsSkippedOffHours,
       lastTickAt: clone(runtimeState.lastTickAt),
       lastErrorCode: runtimeState.lastErrorCode,
       ticks: runtimeState.ticks,
@@ -9436,6 +9902,7 @@ module.exports = {
   retryDelayMinutesForLeadAge,
   resolvePacificMorningBatchWindow,
   resolvePacificEndOfDayDrain,
+  resolveLeadDeliveryTickMode,
   resolveLeadDeliveryContactPolicy,
   resolveRecoveryEpisodeTiming,
   resolveProviderEventItem,

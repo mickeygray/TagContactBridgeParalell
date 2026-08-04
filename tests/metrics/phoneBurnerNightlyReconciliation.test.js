@@ -8,6 +8,9 @@ const test = require("node:test");
 const {
   reconcilePhoneBurnerCallsForNightly,
 } = require("../../packages/shared-services/src/nightlyCloseService");
+const {
+  buildLongCallRow,
+} = require("../../packages/shared-services/src/simpleMarketingReadService");
 
 test("nightly close retries the selected day and two preceding DailyDial days", async () => {
   const calls = [];
@@ -68,6 +71,14 @@ test("scheduled reporting reads CallLog and PB reconciliation precedes enrichmen
     path.join(__dirname, "../../apps/control-plane/src/server.js"),
     "utf8",
   );
+  const composerSource = fs.readFileSync(
+    path.join(__dirname, "../../packages/shared-services/src/reportComposerService.js"),
+    "utf8",
+  );
+  const recordingSource = fs.readFileSync(
+    path.join(__dirname, "../../packages/shared-services/src/nightRecordingsService.js"),
+    "utf8",
+  );
 
   assert.match(marketingSource, /collection\("controlplanecalllogs"\)/);
   assert.match(marketingSource, /LONG_CALL_RECORDING_PLATFORMS/);
@@ -80,4 +91,33 @@ test("scheduled reporting reads CallLog and PB reconciliation precedes enrichmen
     serverSource,
     /reconcileDailyDialCalls: leadDeliveryActionHandlers\.reconcile_daily_dials_to_call_log/,
   );
+  assert.match(recordingSource, /CallLog\.find\(/);
+  assert.doesNotMatch(recordingSource, /client\.listDialSessions|client\.getDialSession/);
+  assert.match(composerSource, /persistedRecordingUrl:/);
+  assert.match(composerSource, /recordingArchive\.sourceUri/);
+  assert.doesNotMatch(
+    composerSource,
+    /select\("domain caseId dateKey attempts originPool durationSeconds lastOutcome recordingUrl"\)/,
+  );
+});
+
+test("PhoneBurner report availability comes from persisted CallLog evidence", () => {
+  const available = buildLongCallRow({
+    platform: "phoneburner",
+    durationSec: 601,
+    recordingArchive: {
+      sourceUri: "https://recordings.example.test/call.mp3?opaque=fixture",
+      status: "not_queued",
+    },
+  });
+  assert.equal(available.listenUrl, "https://recordings.example.test/call.mp3?opaque=fixture");
+  assert.equal(available.recordingStatus, "available");
+
+  const unavailable = buildLongCallRow({
+    platform: "phoneburner",
+    durationSec: 601,
+    recordingArchive: { status: "not_queued" },
+  });
+  assert.equal(unavailable.listenUrl, null);
+  assert.equal(unavailable.recordingStatus, "not_queued");
 });

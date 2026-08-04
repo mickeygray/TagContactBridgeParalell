@@ -136,6 +136,28 @@ test("a failed send gives the day back so the next poll retries", async () => {
   assert.equal(model._lastRunKey, null, "back to where it started");
 });
 
+test("a fact-write failure after accepted mail alerts state without releasing the email claim", async () => {
+  const qualifying = {
+    ...CANNED,
+    selection: ["topline", "source", "ldcalls", "status", "longcalls"],
+  };
+  const { svc, model, calls } = loadService({ report: qualifying });
+  const order = [];
+  const result = await svc.runDefinition(def(), {
+    now: NOW,
+    sendMail: async () => { order.push("mail-accepted"); },
+    dailyFactWriter: async () => {
+      order.push("fact-write");
+      throw new Error("fact store unavailable");
+    },
+  });
+  assert.deepEqual(order, ["mail-accepted", "fact-write"]);
+  assert.equal(result.delivered, true);
+  assert.equal(result.dailyFactCapture.status, "failed");
+  assert.deepEqual(calls.map((call) => call.op), ["claim"]);
+  assert.equal(model._lastRunKey, "2026-07-30", "accepted mail must never become sendable again");
+});
+
 test("a degraded board announces itself in the SUBJECT, not just the body", async () => {
   // The banner only helps someone who opened the mail. The point of a nightly
   // is that most nights you read the subject and move on.

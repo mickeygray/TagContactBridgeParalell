@@ -25,6 +25,7 @@
 const {
   applySourceSanitization, pacificKey, planSourceSanitization,
 } = require("../../../../packages/shared-services/src/logicsSourceSanitizerService");
+const { DailyLoopRun } = require("../../../../packages/shared-models/src");
 
 // 19:50 PT. Mickey 2026-07-28 described the night in order: "source the deals,
 // gather the call urls, create the night report for spend, honor any custom
@@ -38,6 +39,83 @@ const {
 const DEFAULT_HOUR = 19;
 const DEFAULT_MINUTE = 50;
 const DEFAULT_POLL_MS = 5 * 60 * 1000;
+// Superseded by the one-document DailyReportFact written from the canonical
+// email build. Keep the legacy task readable for recovery/backfill, but never
+// let a stale QUEUE_ROLLUP_ENABLED value reactivate its separate writer.
+const LEGACY_QUEUE_ROLLUP_WRITES_ENABLED = false;
+const HYGIENE_CLAIM_LEASE_MS = 45 * 60 * 1000;
+
+async function claimNightlyHygiene(dateKey, at = new Date()) {
+  const leaseCutoff = new Date(at.getTime() - HYGIENE_CLAIM_LEASE_MS);
+  try {
+    const claimed = await DailyLoopRun.findOneAndUpdate(
+      {
+        dateKey,
+        $and: [
+          { $or: [
+            { nightlyHygieneCompletedAt: null },
+            { nightlyHygieneCompletedAt: { $exists: false } },
+          ] },
+          { $or: [
+            { nightlyHygieneClaimedAt: null },
+            { nightlyHygieneClaimedAt: { $exists: false } },
+            { nightlyHygieneClaimedAt: { $lt: leaseCutoff } },
+          ] },
+        ],
+      },
+      {
+        $set: { nightlyHygieneClaimedAt: at },
+        $setOnInsert: { dateKey },
+      },
+      { new: true, upsert: true, setDefaultsOnInsert: true },
+    );
+    if (!claimed) return null;
+    return {
+      claimedAt: new Date(claimed.nightlyHygieneClaimedAt || at),
+      nextTaskIndex: Math.max(0, Number(claimed.nightlyHygieneNextTaskIndex || 0)),
+    };
+  } catch (error) {
+    if (Number(error?.code) === 11000) return null;
+    throw error;
+  }
+}
+
+async function advanceNightlyHygiene(dateKey, claimedAt, nextTaskIndex, counts) {
+  const result = await DailyLoopRun.updateOne(
+    { dateKey, nightlyHygieneClaimedAt: claimedAt, nightlyHygieneCompletedAt: null },
+    { $set: {
+      nightlyHygieneNextTaskIndex: nextTaskIndex,
+      nightlyHygieneCounts: counts,
+      nightlyHygieneLastErrorCode: null,
+    } },
+  );
+  const matched = result?.matchedCount ?? result?.n;
+  return matched == null ? result?.acknowledged !== false : Number(matched) === 1;
+}
+
+async function finishNightlyHygiene(dateKey, claimedAt, nextTaskIndex, counts, at = new Date()) {
+  const result = await DailyLoopRun.updateOne(
+    { dateKey, nightlyHygieneClaimedAt: claimedAt, nightlyHygieneCompletedAt: null },
+    { $set: {
+      nightlyHygieneCompletedAt: at,
+      nightlyHygieneNextTaskIndex: nextTaskIndex,
+      nightlyHygieneCounts: counts,
+      nightlyHygieneLastErrorCode: null,
+    } },
+  );
+  const matched = result?.matchedCount ?? result?.n;
+  return matched == null ? result?.acknowledged !== false : Number(matched) === 1;
+}
+
+async function releaseNightlyHygiene(dateKey, claimedAt, errorCode = null) {
+  await DailyLoopRun.updateOne(
+    { dateKey, nightlyHygieneClaimedAt: claimedAt, nightlyHygieneCompletedAt: null },
+    { $set: {
+      nightlyHygieneClaimedAt: null,
+      nightlyHygieneLastErrorCode: errorCode == null ? null : String(errorCode).slice(0, 120),
+    } },
+  );
+}
 
 /**
  * The completed business day this pass should persist.
@@ -270,6 +348,55 @@ function buildCallRecoveryDiscoveryDeps({ windowFrom = null, windowTo = null } =
  *           even when the task may not write.
  * apply() — only called when the task's own write switch is armed.
  */
+/**
+ * Read the invoice mailbox.
+ *
+ * Mickey 2026-08-03: "its the same mail box as nco."
+ *
+ * SAME MAILBOX, BORROWED AUTH, NOTHING ELSE. Only `user` and `gmail` are read
+ * by openMailbox, so those are the only two keys passed. The NCOA config is
+ * deliberately NOT spread in: it carries `markRead` and `archiveProcessed`,
+ * both defaulting true, which are NCOA loop-body behaviour and inert here.
+ * Passing them would imply a coupling that does not exist and would invite
+ * someone to honour them later — which, on a mailbox we share with NCOA, means
+ * archiving the vendor's invoice email out of the inbox.
+ *
+ * `gmail` is passed BY REFERENCE, unmodified. The Gmail client keeps a
+ * single-slot token cache keyed on the config it was built with, so narrowing
+ * the scope here would re-key it and force a re-auth on every alternation
+ * between this task and NCOA's.
+ *
+ * Related guard, in shared-config: NCOA's `acceptedExtensions` defaults to
+ * .csv/.txt, and its archive is gated on having ACCEPTED an attachment — which
+ * is the only reason NCOA does not already archive these PDF-only emails.
+ * Adding .pdf there would break this reader.
+ */
+async function readMailInvoiceMailbox({ apply, logger }) {
+  const {
+    runMailboxIngest,
+  } = require("../../../../packages/shared-services/src/mailboxIngestService");
+  const {
+    createMailInvoiceHandler,
+  } = require("../../../../packages/shared-services/src/mailInvoiceMailboxHandler");
+  const { getSharedConfig } = require("../../../../packages/shared-config/src");
+
+  const shared = getSharedConfig();
+  const ncoaMailbox = shared.ncoaMailbox || {};
+
+  // The invoice for THIS day, identified by its subject — not simply the most
+  // recent mail from the vendor. Those differ the moment they send a
+  // correction or a statement, and the wrong invoice parses just as cleanly as
+  // the right one, so recency would fail silently.
+  return runMailboxIngest({
+    apply,
+    handlers: [createMailInvoiceHandler({ targetDate: persistTargetDay() })],
+    logger,
+    maxMessages: 25,
+    maxPages: 3,
+    config: { user: ncoaMailbox.user, gmail: ncoaMailbox.gmail },
+  });
+}
+
 const TASKS = [
   {
     // THE one that cannot be lost. nightPassService's per-domain loop is the
@@ -353,6 +480,108 @@ const TASKS = [
       const deals = planned[0]?.night?.lanes?.deals?.length || 0;
       return `${planned[0]?.dateKey}: ${c.rows || 0} row(s) · ${deals} deal(s) · `
         + `${p.events.length} event(s) + ${p.truths.length} payment truth(s) to persist`;
+    },
+  },
+  {
+    // The vendor's daily mail invoice, read out of the mailbox.
+    //
+    // Mickey 2026-07-31: "the invoice check can run once at the 8 pm thing."
+    //
+    // It runs HERE, at 19:50, rather than in the 20:00 report — because the
+    // report READS mail spend and this is what produces it. Ten minutes of
+    // headroom is the same ordering rule the rest of this loop follows: fix
+    // the data, then report it. Putting the ingest inside the report would
+    // mean the first board of the day reported a cost it was still fetching.
+    //
+    // The CHECK half is the point as much as the ingest. A day with no email,
+    // or an email with one attachment instead of two, has to be distinguishable
+    // from a quiet day — see the funnel in `describe`, which is what reaches
+    // the operator.
+    key: "mail-invoice",
+    label: "Read the vendor's daily mail invoice",
+    writesArmed: () => String(process.env.MAIL_INVOICE_MAILBOX_ENABLED || "false").toLowerCase() === "true",
+    async plan({ logger }) {
+      const result = await readMailInvoiceMailbox({ apply: false, logger });
+      return [result.handlers["mail-invoice"] || {}];
+    },
+    async apply(planned, { logger }) {
+      const result = await readMailInvoiceMailbox({ apply: true, logger });
+      const stat = result.handlers["mail-invoice"] || {};
+      return { written: stat.processed || 0, skipped: stat.skipped || 0, failed: stat.errors || 0 };
+    },
+    count(planned) {
+      return (planned[0]?.accepted || 0);
+    },
+    describe(planned) {
+      const p = planned[0] || {};
+      // A mailbox we could not read is NOT an empty mailbox, and saying so is
+      // the difference between "they sent nothing" and "we could not look".
+      if (p.listFailed) return `COULD NOT READ THE MAILBOX — ${p.listFailed}`;
+      if (!p.listed) return "no invoice email found for this window";
+      const r = p.results?.[0] || {};
+      if (r.reason === "no-invoice-attachment") {
+        return `email found but NO INVOICE attached (${r.summary?.attachmentsSeen ?? 0} attachment(s))`;
+      }
+      // Vendor mail arrived, but none of it names today. Distinct from silence
+      // on purpose: it says the vendor is emailing and today's invoice is the
+      // thing that is missing, and it prints the subjects so a changed subject
+      // format is diagnosable at a glance rather than after a code read.
+      const mismatched = (p.results || []).filter((x) => x.reason === "subject-date-mismatch");
+      if (mismatched.length && mismatched.length === (p.results || []).length) {
+        return `${p.listed} vendor email(s) but NONE for ${mismatched[0].summary?.wantedDate}`
+          + ` — subjects seen: ${mismatched.map((x) => JSON.stringify(x.summary?.subject || "")).join(", ")}`;
+      }
+      const s = r.summary || {};
+      return `${p.listed} email(s) · ${p.accepted} with an invoice`
+        + (s.invoiceNumber ? ` · #${s.invoiceNumber} ${s.serviceDate} $${s.grandTotal} ${s.state}` : "")
+        + (p.alreadyHandled ? ` · ${p.alreadyHandled} already ingested` : "");
+    },
+  },
+  {
+    // Turn reconciled invoices into mail spend the board can report.
+    //
+    // Separate task from the ingest on purpose, and separately armed. Reading
+    // the mailbox and BELIEVING the number are different decisions: the first
+    // is safe to run for weeks while nobody trusts the output yet, and only
+    // the second changes what gets reported as money.
+    //
+    // Ordered directly after the ingest so a day's invoice can arrive and
+    // become spend in the same 19:50 pass, ten minutes before the board reads
+    // it.
+    key: "mail-spend-derive",
+    label: "Derive mail spend from reconciled invoices",
+    writesArmed: () => String(process.env.MAIL_SPEND_DERIVE_ENABLED || "false").toLowerCase() === "true",
+    async plan({ logger }) {
+      const {
+        deriveMailSpend,
+      } = require("../../../../packages/shared-services/src/mailSpendDeriveService");
+      const dateKey = persistTargetDay();
+      return [await deriveMailSpend({ from: dateKey, to: dateKey, apply: false, logger })];
+    },
+    async apply(planned, { logger }) {
+      const {
+        deriveMailSpend,
+      } = require("../../../../packages/shared-services/src/mailSpendDeriveService");
+      const dateKey = persistTargetDay();
+      const r = await deriveMailSpend({ from: dateKey, to: dateKey, apply: true, logger });
+      return { written: r.derived, skipped: r.skipped, retired: r.retired, held: r.held.length };
+    },
+    count(planned) {
+      return planned[0]?.derived || 0;
+    },
+    describe(planned) {
+      const p = planned[0] || {};
+      if (!p.considered) return "no invoice for this day";
+      const parts = [`${p.considered} invoice(s)`];
+      if (p.derived) parts.push(`${p.derived} to derive`);
+      if (p.skipped) parts.push(`${p.skipped} already derived`);
+      // A HELD invoice is the case worth reading. It is not an error and not a
+      // quiet success — it is the deriver declining to report a number, and
+      // the reason is the only thing that tells an operator what to do.
+      if (p.held?.length) {
+        parts.push(`HELD: ${p.held.map((h) => `#${h.invoiceNumber} ${h.reason}`).join(", ")}`);
+      }
+      return parts.join(" · ");
     },
   },
   {
@@ -471,8 +700,9 @@ const TASKS = [
     // legs mapped on 2026-07-27). Once the day is over, who answered what
     // stops changing — so a stored copy can never go stale.
     key: "queue-rollup",
-    label: "Freeze the day's per-agent call counts",
-    writesArmed: () => String(process.env.QUEUE_ROLLUP_ENABLED || "false").toLowerCase() === "true",
+    label: "Legacy queue-only rollup (superseded by DailyReportFact)",
+    writesArmed: () => LEGACY_QUEUE_ROLLUP_WRITES_ENABLED
+      && String(process.env.QUEUE_ROLLUP_ENABLED || "false").toLowerCase() === "true",
     async plan({ logger }) {
       const { captureQueueDay } = require("../../../../packages/shared-services/src/queueRollupService");
       const dateKey = persistTargetDay();
@@ -481,23 +711,31 @@ const TASKS = [
     },
     async apply(planned, { logger }) {
       const { persistQueueDay } = require("../../../../packages/shared-services/src/queueRollupService");
-      const day = await persistQueueDay({ dateKey: planned[0]?.dateKey, logger });
+      // Persist the exact provider snapshot produced by plan(). Re-reading here
+      // doubles provider traffic and can write different evidence than the row
+      // the dry-run just described.
+      const day = await persistQueueDay({ day: planned[0], logger });
       return {
-        written: day.agents.length,
+        written: 1,
         skipped: 0,
-        failed: day.partial ? 1 : 0,
-        errors: day.partial ? [`partial: ${day.partialReason}`] : [],
+        failed: day.partial || day.unavailable ? 1 : 0,
+        errors: day.unavailable
+          ? [`unavailable: ${day.unavailableReason}`]
+          : (day.partial ? [`partial: ${day.partialReason}`] : []),
       };
     },
     count(planned) {
-      return Number(planned[0]?.agents?.length) || 0;
+      // A clean zero-call day is still a fact. Persisting it is what lets a
+      // range distinguish "quiet" from "the nightly capture never ran".
+      return /^\d{4}-\d{2}-\d{2}$/.test(String(planned[0]?.dateKey || "")) ? 1 : 0;
     },
     describe(planned) {
       const r = planned[0] || {};
       const taken = (r.streams || []).reduce((a, x) => a + (x.connected || 0), 0);
       const made = (r.agents || []).reduce((a, x) => a + (x.made || 0), 0);
       return `${r.dateKey}: ${r.agents?.length || 0} agent(s) · ${taken} taken · ${made} made`
-        + (r.partial ? ` — PARTIAL (${r.partialReason})` : "");
+        + (r.unavailable ? ` — UNAVAILABLE (${r.unavailableReason})`
+          : (r.partial ? ` — PARTIAL (${r.partialReason})` : ""));
     },
   },
   {
@@ -559,30 +797,59 @@ function createNightlyHygieneRuntime({ config = {}, runtime = {} } = {}) {
   const log = runtime.logger || null;
 
   /** One pass over every task. `force` ignores the clock and the once-a-day rule. */
-  async function runOnce({ force = false, apply = null } = {}) {
+  async function runOnce({ force = false, apply = null, at = new Date() } = {}) {
     // Guard FIRST — every early return below must be unable to skip its
     // release. A runtime on this box once wedged permanently because the
     // `finally` belonged to a different `try`.
     if (state.running) return { skipped: "already running" };
     if (!state.enabled && !force) return { skipped: "disabled" };
-    const today = pacificKey();
+    const today = pacificKey(at);
+    let durableClaim = null;
     if (!force) {
       if (state.lastRunKey === today) return { skipped: "already ran today" };
-      if (!isPacificBusinessDay()) return { skipped: "pacific-weekend" };
-      const now = pacificHourMinute();
+      if (!isPacificBusinessDay(at)) return { skipped: "pacific-weekend" };
+      const now = pacificHourMinute(at);
       if (now.hour * 60 + now.minute < state.hour * 60 + state.minute) {
         return { skipped: "before the scheduled time" };
       }
       // Compared against a stored day key, not a boolean, so a restart cannot
       // re-run the pass (or a second one) later the same night.
     }
+    if (!force) {
+      durableClaim = await claimNightlyHygiene(today, at);
+      if (!durableClaim) return { skipped: "already claimed or completed" };
+    }
     state.running = true;
     const started = Date.now();
     try {
       const results = [];
-      for (const task of tasks) {
+      const startTaskIndex = force ? 0 : Math.min(durableClaim.nextTaskIndex, tasks.length);
+      const durableCounts = () => ({
+        tasks: startTaskIndex + results.filter((row) => !row.error).length,
+        planned: results.reduce((sum, row) => sum + Number(row.planned || 0), 0),
+        written: results.reduce((sum, row) => sum + Number(row.applied?.written || 0), 0),
+        failed: results.filter((row) => Boolean(row.error)).length,
+      });
+      for (let taskIndex = startTaskIndex; taskIndex < tasks.length; taskIndex += 1) {
+        const task = tasks[taskIndex];
         const taskStarted = Date.now();
         try {
+          const armed = apply === null ? task.writesArmed() : Boolean(apply);
+          if (!armed && !force) {
+            results.push({
+              task: task.key,
+              label: task.label,
+              skipped: true,
+              reason: "write-disabled-no-discovery",
+              dryRun: true,
+              planned: 0,
+              durationMs: Date.now() - taskStarted,
+            });
+            if (durableClaim && !await advanceNightlyHygiene(
+              today, durableClaim.claimedAt, taskIndex + 1, durableCounts(),
+            )) throw new Error("nightly hygiene durable cursor was lost");
+            continue;
+          }
           const planned = await task.plan({ domains: state.domains, days: state.days, logger: log });
           // Each task decides what "something to do" means; the row-list shape
           // is only the default, not an assumption the runtime may make.
@@ -591,7 +858,6 @@ function createNightlyHygieneRuntime({ config = {}, runtime = {} } = {}) {
             : planned.reduce((acc, p) => acc + (p.plan?.length || 0), 0);
           state.totals.planned += plannedCount;
 
-          const armed = apply === null ? task.writesArmed() : Boolean(apply);
           let applied = null;
           if (armed && plannedCount) {
             applied = await task.apply(planned, { logger: log });
@@ -601,9 +867,11 @@ function createNightlyHygieneRuntime({ config = {}, runtime = {} } = {}) {
             task: task.key, label: task.label, dryRun: !armed,
             planned: plannedCount, summary: task.describe(planned), applied,
             durationMs: Date.now() - taskStarted,
-            sample: planned.flatMap((p) => (p.plan || []).slice(0, 5)
-              .map((r) => ({ caseId: r.caseId, from: r.fromSourceId, to: r.sourceId, piece: r.piece }))).slice(0, 10),
+            sampleCount: planned.reduce((sum, p) => sum + Math.min((p.plan || []).length, 5), 0),
           });
+          if (durableClaim && !await advanceNightlyHygiene(
+            today, durableClaim.claimedAt, taskIndex + 1, durableCounts(),
+          )) throw new Error("nightly hygiene durable cursor was lost");
           log?.info?.("nightly_hygiene.task", {
             task: task.key, planned: plannedCount, written: applied?.written ?? 0, dryRun: !armed,
           });
@@ -611,17 +879,42 @@ function createNightlyHygieneRuntime({ config = {}, runtime = {} } = {}) {
           // One chore failing must never cost the others their night.
           results.push({ task: task.key, label: task.label, error: String(error.message).slice(0, 240) });
           log?.error?.("nightly_hygiene.task_failed", { task: task.key, error: String(error.message) });
+          if (durableClaim) {
+            await releaseNightlyHygiene(today, durableClaim.claimedAt, error?.code || error?.name || "task-failed");
+            state.lastError = String(error.message).slice(0, 300);
+            state.lastRunAt = new Date().toISOString();
+            state.lastResult = {
+              at: state.lastRunAt,
+              day: today,
+              durationMs: Date.now() - started,
+              incomplete: true,
+              nextTaskIndex: taskIndex,
+              tasks: results,
+            };
+            return state.lastResult;
+          }
         }
       }
       state.totals.passes += 1;
       state.lastRunAt = new Date().toISOString();
       state.lastResult = { at: state.lastRunAt, day: today, durationMs: Date.now() - started, tasks: results };
       // Only a completed pass claims the day; a crash retries on the next poll.
+      if (durableClaim) {
+        const finished = await finishNightlyHygiene(
+          today, durableClaim.claimedAt, tasks.length, durableCounts(), at,
+        );
+        if (!finished) throw new Error("nightly hygiene completion claim was lost");
+      }
       state.lastRunKey = today;
       return state.lastResult;
     } catch (error) {
       state.lastError = String(error.message).slice(0, 300);
       log?.error?.("nightly_hygiene.failed", { error: String(error.message) });
+      if (durableClaim) {
+        await releaseNightlyHygiene(
+          today, durableClaim.claimedAt, error?.code || error?.name || "runtime-failed",
+        ).catch(() => {});
+      }
       return { error: state.lastError };
     } finally {
       state.running = false;
@@ -682,7 +975,10 @@ function createNightlyHygieneRuntime({ config = {}, runtime = {} } = {}) {
 }
 
 module.exports = {
+  advanceNightlyHygiene,
+  claimNightlyHygiene,
   createNightlyHygieneRuntime,
+  finishNightlyHygiene,
   persistTargetDay,
   buildCallRecoveryDiscoveryDeps,
   isPacificBusinessDay,

@@ -78,6 +78,20 @@ function createReportScheduleRuntime({ config = {}, runtime = {} } = {}) {
             definition: def.name, from: result.range.from, to: result.range.to,
             delivered: result.delivered, durationMs: result.durationMs,
           });
+          if (result.dailyFactCapture?.status === "failed") {
+            // The email was already accepted, so this is an alert—not a retry.
+            // Retrying runDefinition would duplicate the email just to repair
+            // an internal fact document.
+            await recordServiceAlert({
+              domain: "TAG",
+              sourceService: "control-plane",
+              category: "daily-report-fact",
+              severity: "high",
+              title: "Nightly email sent but daily fact capture failed",
+              summary: String(result.dailyFactCapture.reason || "unknown capture failure").slice(0, 300),
+              tags: ["metrics", "daily-facts"],
+            }).catch(() => {});
+          }
         } catch (error) {
           // One bad definition must not stop the others from going out.
           results.push({ name: def.name, error: String(error.message).slice(0, 300) });

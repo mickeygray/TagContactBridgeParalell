@@ -20,6 +20,12 @@ function normalizeDomains(value, fallback = ["TAG"]) {
   return unique.length ? unique : fallback;
 }
 
+function normalizeBusinessWeekdays(value) {
+  const weekdays = normalizeActiveWeekdays(value || [1, 2, 3, 4, 5])
+    .filter((day) => day >= 1 && day <= 5);
+  return weekdays.length ? weekdays : [1, 2, 3, 4, 5];
+}
+
 function createState(config = {}) {
   const domains = normalizeDomains(config.domains || config.domain || "TAG,WYNN,AMITY", ["TAG"]);
   return {
@@ -32,7 +38,7 @@ function createState(config = {}) {
     minute: Number(config.minute || 0),
     timezone: config.timezone || "America/Los_Angeles",
     intervalMs: Number(config.intervalMs || 60000),
-    activeWeekdays: normalizeActiveWeekdays(config.activeWeekdays || [0, 1, 2, 3, 4, 5, 6]),
+    activeWeekdays: normalizeBusinessWeekdays(config.activeWeekdays),
     concurrency: Math.max(1, Number(config.concurrency || 3) || 3),
     sendEmail: config.sendEmail !== false,
     recipients: Array.isArray(config.recipients) ? config.recipients : [],
@@ -464,4 +470,5 @@ function createLogicsActivityReviewRuntime({ config = {}, runtime }) {
 
 module.exports = {
   createLogicsActivityReviewRuntime,
+  normalizeBusinessWeekdays,
 };

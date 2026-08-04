@@ -40,6 +40,23 @@ function withStubs(run) {
   const chain = () => ({ select: chain, lean: async () => [] });
   const stubs = {
     "SpendEntry": { find: () => ({ select: () => ({ lean: async () => SPEND_ROWS.map((r) => ({ ...r })) }) }) },
+    // No invoice-derived mail spend in these fixtures, so the sheet's mail rows
+    // are the only mail money and the tenant assertions below are unchanged by
+    // the merge. The stub still has to exist: an unstubbed model buffers
+    // against a database this suite never connects to.
+    "MailSpendDay": { find: () => ({ select: () => ({ lean: async () => [] }) }) },
+    // LD spend is DERIVED from lead receipts now, not read off the sheet, so
+    // the lead-data fixture row above no longer supplies its dollars. 169
+    // leads x $3 = $507 keeps the arithmetic below identical to when the
+    // sheet supplied it, so these assertions still test THE TENANT RULE and
+    // not the change of source.
+    "ldSpendService": {
+      readLdSpend: async () => ({
+        leads: 169, rate: 3, spend: 507, byDomain: { WYNN: 169 },
+        byDay: { "2026-07-30": 169 }, spendByDay: { "2026-07-30": 507 }, unavailable: null,
+      }),
+      ldCostPerLead: () => 3,
+    },
     "DailyCallStat": {
       find: (q) => ({
         select: () => ({
@@ -84,6 +101,9 @@ test("the mail tenant's own board keeps everything", () => withStubs(async () =>
   const m = await gather("TAG");
   assert.equal(m.spend.mail, 2255.5);
   assert.ok(m.spend.bcd > 0);
+  // 4, not 5: LD spend is pushed down per receipt sourceName by the ldLeads
+  // material, NOT written as a second lump "LD" row here. Counting it in both
+  // places is exactly the double-count that put $315 on LD and $321 on Aged.
   assert.equal(Object.keys(m.spendBySource).length, 4, "3 sheet rows + BCD");
 }));
 
@@ -135,6 +155,35 @@ test("Calls by agent drops the inbound column when the board has no inbound", ()
   const table = blocks.BY_ID.get("ldcalls").csv(d);
   assert.equal(table.emailColumns.some((c) => c.header === "inbound"), false);
   assert.equal(table.columns.some((c) => c.header === "inbound"), true, "the CSV still carries it");
+});
+
+test("connected and talk time are CSV-only — the email carries the cost instead", () => {
+  // Mickey 2026-08-03: "you can sorta get rid of connected and talk minutes and
+  // do like attributed spend." Retired from the EMAIL table, not from the
+  // report: both are still in the CSV and in the section headline, so the
+  // connect rate is one glance away rather than seven columns wide.
+  const d = {
+    attempts: 959, connected: 80, attemptsKnown: 959, attemptsUnknown: 0,
+    talkMinutes: 45.9, connectRate: 8.3,
+    agents: [{ agent: "Chris Bolt", inbound: 4, dials: 959, connected: 80, talkMinutes: 45.9, deals: 1, cash: 700 }],
+  };
+  const table = blocks.BY_ID.get("ldcalls").csv(d);
+  const emailHas = (h) => table.emailColumns.some((c) => c.header === h);
+  const csvHas = (h) => table.columns.some((c) => c.header === h);
+  // new_ld joined connected/talk_minutes as CSV-only while lead distribution is
+  // fixed — see NEW_LD_EMAIL_HIDDEN in reportBlocksService.
+  for (const h of ["connected", "talk_minutes", "new_ld"]) {
+    assert.equal(emailHas(h), false, `${h} left the email table`);
+    assert.equal(csvHas(h), true, `${h} stays in the CSV`);
+  }
+  for (const h of ["attributed_spend"]) {
+    assert.equal(emailHas(h), true, `${h} took its place`);
+    assert.equal(csvHas(h), true);
+  }
+  for (const h of ["attributed_mail", "attributed_bcd", "attributed_ld"]) {
+    assert.equal(csvHas(h), true, "the components are checkable in the CSV");
+    assert.equal(emailHas(h), false, "but the email carries one number, not four");
+  }
 });
 
 test("Calls by agent keeps the inbound column the moment there is inbound", () => {

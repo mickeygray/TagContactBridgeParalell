@@ -87,6 +87,7 @@ async function createHarness(t, options = {}) {
   const runtimeOptions = {
     repository,
     now: () => new Date(NOW),
+    allowedRecordingHosts: options.allowedRecordingHosts || ["recordings.example.invalid"],
     schedule: options.schedule || ((work) => scheduled.push(work)),
     logger: options.logger || {
       info(event, details) { logs.push({ level: "info", event, details: clone(details) }); },
@@ -174,7 +175,11 @@ test("official callback shapes normalize to safe typed fields only", () => {
     lead_id: "TAG:test:101",
     contact_user_id: 501,
     custom_data: { phone: "5555550101", name: "Private" },
-  }, { receivedAt: NOW, payloadDigest: digest });
+  }, {
+    receivedAt: NOW,
+    payloadDigest: digest,
+    allowedRecordingHosts: ["recordings.example.invalid"],
+  });
   assert.equal(begin.status, "pending");
   assert.equal(begin.eventType, "call_begin");
   assert.equal(begin.providerCallId, "101");
@@ -195,7 +200,11 @@ test("official callback shapes normalize to safe typed fields only", () => {
     },
     recording: "private recording",
     recording_url: "https://recordings.example.invalid/call/102.mp3?token=test",
-  }, { receivedAt: NOW, payloadDigest: digest });
+  }, {
+    receivedAt: NOW,
+    payloadDigest: digest,
+    allowedRecordingHosts: ["recordings.example.invalid"],
+  });
   assert.equal(done.status, "pending");
   assert.equal(done.eventType, "call_done");
   assert.equal(done.normalizedOutcome, "voicemail");
@@ -306,7 +315,9 @@ test("general call-done and disposition callbacks dedupe one physical call", asy
   assert.equal(duplicate.status, 200);
   assert.equal(duplicate.body.duplicate, true);
   assert.equal(harness.repository.events.length, 1);
-  assert.equal(harness.scheduled.length, 2, "new capture previews once and duplicate re-drives the replay scan");
+  assert.equal(harness.scheduled.length, 1, "unchanged duplicate must not launch a backlog scan");
+  await harness.scheduled[0]();
+  assert.equal(harness.repository.calls.drainReads, 0, "exact capture drain must not scan the backlog");
   const accepted = harness.logs.filter((entry) => entry.event === "phoneburner.lead_delivery.callback_accepted");
   assert.equal(accepted.length, 2);
   assert.deepEqual(accepted[0].details, {
@@ -323,6 +334,63 @@ test("general call-done and disposition callbacks dedupe one physical call", asy
     actionsEnabled: false,
   });
   assert.equal(JSON.stringify(accepted).includes("TAG:test:301"), false, "logs must not contain external lead identity");
+});
+
+test("late recording callback strengthens the exact completed event and preserves completion markers", async (t) => {
+  const harness = await createHarness(t);
+  const identity = {
+    call_id: 302,
+    lead_id: "TAG:test:302",
+    contact: { user_id: 1302 },
+    status: "No Answer",
+  };
+  assert.equal((await harness.post("call-done", identity)).body.duplicate, false);
+  const event = harness.repository.events[0];
+  const localAppliedAt = new Date("2026-07-10T22:00:01.000Z");
+  const downstreamAppliedAt = new Date("2026-07-10T22:00:02.000Z");
+  Object.assign(event, {
+    status: "completed",
+    localAppliedAt,
+    downstreamAppliedAt,
+    processedAt: downstreamAppliedAt,
+    version: event.version + 1,
+  });
+
+  const late = await harness.post("recording-ready", {
+    ...identity,
+    recording_url_public: "https://recordings.example.invalid/call/302.mp3?token=test",
+  });
+  assert.equal(late.status, 200);
+  assert.equal(late.body.duplicate, false, "a strengthened event is acknowledged as an upgrade");
+  assert.equal(late.body.upgraded, true);
+  assert.equal(harness.repository.events.length, 1);
+  assert.equal(event.status, "pending");
+  assert.equal(event.safePayload.recordingUrl, "https://recordings.example.invalid/call/302.mp3?token=test");
+  assert.equal(event.safePayload.recordingSourceKey, "recording_url_public");
+  assert.equal(new Date(event.localAppliedAt).toISOString(), localAppliedAt.toISOString());
+  assert.equal(new Date(event.downstreamAppliedAt).toISOString(), downstreamAppliedAt.toISOString());
+  assert.equal(harness.scheduled.length, 2, "initial capture and evidence upgrade each schedule the exact event once");
+  assert.equal(JSON.stringify(harness.logs).includes("302.mp3"), false, "logs never contain the recording URL");
+});
+
+test("callback route retains an unparsed recording scalar privately without logging it", async (t) => {
+  const harness = await createHarness(t);
+  const privateReference = "opaque-provider-recording-value";
+  const response = await harness.post("call-done", {
+    call_id: 303,
+    lead_id: "TAG:test:303",
+    contact: { user_id: 1303 },
+    status: "No Answer",
+    recording_link_public: privateReference,
+  });
+
+  assert.equal(response.status, 200);
+  assert.equal(harness.repository.events.length, 1);
+  assert.equal(harness.repository.events[0].safePayload.recordingUrl, null);
+  assert.equal(harness.repository.events[0].safePayload.recordingCandidateStatus, "retained_unparsed");
+  assert.equal(harness.repository.events[0].safePayload.recordingReference, privateReference);
+  assert.equal(harness.repository.events[0].safePayload.recordingReferenceSourceKey, "recording_link_public");
+  assert.equal(JSON.stringify(harness.logs).includes(privateReference), false);
 });
 
 test("production-default Call End schedules one exact drain and no route refill owner", async (t) => {
@@ -660,7 +728,8 @@ test("a recording URL is captured from ANY callback, not just call_done", () => 
   );
   const gated = /recordingUrl:\s*hook\.eventType\s*===\s*"call_done"/.test(routeSrc);
   assert.equal(gated, false, "extraction must not be gated on the call_done event type");
-  assert.match(routeSrc, /recordingUrl:\s*callbackRecordingUrl\(/, "the URL is taken from the body unconditionally");
+  assert.match(routeSrc, /callbackRecordingEvidence\(body,/, "candidate extraction is independent of event type");
+  assert.match(routeSrc, /for \(const \[sourceKey, value\] of candidates\)/, "aliases are evaluated independently");
 });
 
 test("dedicated recording callbacks are registered and map to call_done", () => {

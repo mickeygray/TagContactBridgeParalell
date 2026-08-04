@@ -26,6 +26,39 @@ const pct = (n) => (n == null ? "—" : `${n}%`);
 // id · label · needs · compute · renderText · csv
 const NEWLINE = String.fromCharCode(10);
 
+// ── WHO APPEARS ON A PER-PERSON TABLE ─────────────────────────────────────
+//
+// Mickey 2026-08-03: "dont do by calls do by name" — then the roster: "just
+// bruce allen, brad hansen, chris bolt, sean lucas, phil olson".
+//
+// Declared, not inferred. The first version dropped rows under a call
+// threshold, which is a proxy for the real question and it drifts both ways: a
+// settlement officer having a quiet day vanishes from his own board, while
+// anyone who touches three calls appears on it. Who settles cases is a fact
+// about the team.
+//
+// TWO tables use this — "By settlement officer" and "Calls by agent". The
+// first pass put it on only one, and the names went out again on the other, so
+// it lives here once rather than as two copies that drift.
+//
+// EMAIL ONLY. Callers apply it to `emailRows`, never `rows`, so the CSV keeps
+// every person — including anyone newly hired and not yet on the list.
+const DEFAULT_SETTLEMENT_OFFICERS = [
+  "Bruce Allen", "Brad Hansen", "Chris Bolt", "Sean Lucas", "Phil Olson",
+];
+
+function settlementOfficerSet() {
+  const fromEnv = String(process.env.SETTLEMENT_OFFICERS || "")
+    .split(",").map((x) => x.trim()).filter(Boolean);
+  return new Set((fromEnv.length ? fromEnv : DEFAULT_SETTLEMENT_OFFICERS)
+    .map((x) => x.toLowerCase()));
+}
+
+function settlementOfficersOnly(rows = [], nameOf = (x) => x.officer) {
+  const roster = settlementOfficerSet();
+  return rows.filter((r) => roster.has(String(nameOf(r) || "").trim().toLowerCase()));
+}
+
 // Above this revenue-to-spend multiple, believe the SPEND is wrong before
 // believing the campaign is. 50x return = 4,900% ROI.
 const SPEND_SUSPECT_RATIO = Number(process.env.SPEND_SUSPECT_RATIO) || 50;
@@ -76,7 +109,26 @@ const BLOCKS = [
           newCash = round2(newCash + p.amount);
         } else recurring = round2(recurring + p.amount);
       }
-      const cash = round2(newCash + recurring);
+      // ── A VENDOR BOARD CARRIES NO RECURRING ──────────────────────────────
+      //
+      // Mickey 2026-08-03: "we dont need total recurring on the vendor".
+      //
+      // A vendor board answers one question: what did the leads WE BOUGHT FROM
+      // YOU produce against what we paid you. Recurring is instalments from
+      // cases sold in earlier periods — last quarter's business arriving on
+      // today's page. Including it flatters the vendor for work their current
+      // leads did not do, and it moves with our collections cadence rather
+      // than with their lead quality.
+      //
+      // Keyed on the SAME signal the tenant rule already uses: a board scoped
+      // to a tenant that is not the mail tenant is somebody else's board.
+      //
+      // NET moves with it, deliberately. The alternative — showing new money
+      // on the top line while NET quietly still nets recurring — is the
+      // "hiding a row hides money" failure this file has a whole test file
+      // about. The board must be explicable from the numbers on it.
+      const vendorBoard = Boolean(scoped) && !mailApplies;
+      const cash = vendorBoard ? newCash : round2(newCash + recurring);
       const mailSpend = mailApplies ? (Number(spend?.mail) || 0) : 0;
       const ldSpend = Number(spend?.ld) || 0;
       // Rebuild the total from the parts that APPLY rather than trusting the
@@ -95,7 +147,12 @@ const BLOCKS = [
         deals: dealCases.size,
         cash,
         newCash,
+        // On a vendor board this is REPORTED but not counted — the renderer
+        // omits it and cash/net exclude it. Kept on the data so the CSV can
+        // still show what was set aside rather than losing it silently.
         recurring,
+        vendorBoard,
+        recurringExcluded: vendorBoard ? recurring : 0,
         spend: spendTotal,
         mailApplies,
         mailSpend,
@@ -133,7 +190,13 @@ const BLOCKS = [
     },
     renderText(d) {
       const L = [];
-      L.push(`MONEY IN        ${money(d.cash)}   (${d.deals} deal${d.deals === 1 ? "" : "s"}, ${money(d.newCash)} new · ${money(d.recurring)} recurring)`);
+      // A vendor board shows NEW money only — no recurring clause, because
+      // recurring is not counted there. Saying "0 recurring" would be a lie
+      // (it exists, it is just not theirs to be credited with) and printing
+      // the real figure would credit them for it.
+      L.push(d.vendorBoard
+        ? `MONEY IN        ${money(d.cash)}   (${d.deals} deal${d.deals === 1 ? "" : "s"}, new business only)`
+        : `MONEY IN        ${money(d.cash)}   (${d.deals} deal${d.deals === 1 ? "" : "s"}, ${money(d.newCash)} new · ${money(d.recurring)} recurring)`);
       L.push(`SPEND           ${money(d.spend)}${d.mailApplies ? `   (mail ${money(d.mailSpend)} · LD ${money(d.ldSpend)})` : "   (LD only)"}`);
       L.push(`NET             ${money(d.net)}`);
       const leads = d.ldLeads == null
@@ -210,12 +273,19 @@ const BLOCKS = [
     // built from two sources; a reader had to reconcile them by eye.
     id: "ldcalls",
     label: "Calls by agent",
-    hint: "Inbound taken, dials placed, what connected, and what closed",
-    termsShort: "Per agent: inbound calls taken, outbound dials, connects, talk time and deals.",
-    terms: "Per agent, inside the range: INBOUND is calls connected to that agent from the queue; DIALS and CONNECTED are outbound PhoneBurner attempts, where connected means the dial reached a person. TALK counts connected outbound time only - inbound talk time is not carried by the queue rollup. DEALS are distinct cases whose first payment landed in range, and CASH is what those cases paid.",
-    needs: ["dials", "queue", "payments", "caseContacts"],
+    hint: "Inbound taken, dials placed, new leads worked, and what it cost",
+    termsShort: "Per agent, in range: inbound, dials, new LD leads first-touched, and cost — mail ALLOCATED by share of calls offered; BCD and LD per unit.",
+    terms: "Per agent, inside the range: INBOUND is calls connected to that agent from the queue; DIALS are outbound PhoneBurner attempts. NEW LD is new lead inventory (leadAgeDays 0) on which that agent placed the EARLIEST attempt — first toucher wins, so one lead is credited to exactly one person. ATTRIBUTED SPEND is what those calls cost. MAIL is an ALLOCATION and not a price: the range's mail spend shared out by each agent's share of the calls the mail queue OFFERED. BCD and LD are PER UNIT — BCD calls x the pay-per-call rate, new leads x the per-lead rate. Cost no agent can be charged with (calls offered and never answered, leads nobody touched) is reported as UNATTRIBUTED rather than spread, so the components sum back to the spend they came from. DEALS are distinct cases whose first payment landed in range, and CASH is what those cases paid.",
+    // "spend" is declared, not gathered twice: the top line already asks for it
+    // in both scheduled presets, and gatherMaterial takes the UNION of needs —
+    // so a call carrying its cost costs nothing extra to gather.
+    needs: ["dials", "queue", "payments", "caseContacts", "spend"],
     compute({
       dials = [], queueByAgent = {}, payments = [],
+      // DEFAULTS ON EVERY KEY. reportBlocksContract calls compute() with a
+      // near-empty material to prove a block renders with nothing to report;
+      // a bare `spend` or `queueStreams` destructure throws there instead.
+      spend = {}, queueStreams = {}, domain = null,
       // "0 dials" and "we could not read the dials" are the same number and
       // opposite facts. Carried onto the data so csv() can say which one it is
       // — the `worked` block has done this for a while, but `worked` is in
@@ -231,12 +301,27 @@ const BLOCKS = [
       const row = (name) => {
         if (!byAgent.has(name)) {
           byAgent.set(name, {
-            agent: name, inbound: 0, dials: 0, connected: 0, talkSec: 0,
+            // mailerIn and bcdIn are kept APART because they are priced apart:
+            // mail is an allocation of a bulk drop, BCD is bought per call.
+            // `inbound` stays their sum so the column already on the board is
+            // unchanged by the split.
+            agent: name, inbound: 0, mailerIn: 0, bcdIn: 0, newLeads: 0,
+            dials: 0, connected: 0, talkSec: 0,
             deals: 0, dealCases: new Set(), cash: 0,
           });
         }
         return byAgent.get(name);
       };
+      // A lead age that is absent, null or unparseable is UNKNOWN. Number(null)
+      // is 0, so a plain `Number(x) === 0` would read every null as brand-new
+      // inventory and charge the whole LD bill to whoever dialled it.
+      const leadAge = (v) => {
+        if (v === null || v === undefined || v === "") return null;
+        const n = Number(v);
+        return Number.isFinite(n) ? n : null;
+      };
+      // NEW INVENTORY, and who got to it first.
+      let newInventory = 0; let newInventoryUntouched = 0;
       for (const d of dials) {
         cases.add(`${d.domain}:${d.caseId}`);
         for (const a of Array.isArray(d.attempts) ? d.attempts : []) {
@@ -283,20 +368,59 @@ const BLOCKS = [
               outcome: oc,
               // Attempt first, then the doc-level field the call-log
               // projection writes. Pending is a real state, not a gap.
-              listenUrl: a.recordingUrl || d.recordingUrl || null,
+              listenUrl: a.persistedRecordingUrl || null,
             });
           }
+        }
+
+        // ── LD COST GOES TO THE FIRST TOUCHER ─────────────────────────────
+        //
+        // We buy new leads, so the cost belongs to whoever WORKED a new lead —
+        // and exactly one person can be charged for one lead, or the board
+        // spends money we never spent. Measured on 2026-07-31: 16 of 32 new
+        // leads were dialled by two or more agents, so crediting every toucher
+        // summed to 52 leads / $156 against a real 32 / $96.
+        //
+        // Three alternatives were tried and are recorded so nobody re-runs
+        // them. Distinct-cases-DIALLED charges the whole back catalogue and
+        // summed to $4,005 on a day that cost $318. `lastAgentId` is exclusive
+        // but wrong: it erased Sean Lucas, who first-touched 9 leads and was
+        // last on none. `originPool` names the feed, not a person.
+        //
+        // Earliest callEndedAt on the doc, resolved ONCE per lead.
+        if (leadAge(d.leadAgeDays) === 0) {
+          newInventory += 1;
+          let firstKey = null; let firstAgent = null;
+          for (const a of Array.isArray(d.attempts) ? d.attempts : []) {
+            if (!a.agentId) continue;
+            const t = a.callEndedAt ? Date.parse(a.callEndedAt) : NaN;
+            // An attempt with no clock cannot WIN the race, but it can still be
+            // the only runner — otherwise a lead somebody plainly worked falls
+            // into unattributed for want of a timestamp.
+            const key = Number.isFinite(t) ? t : Number.POSITIVE_INFINITY;
+            if (firstKey === null || key < firstKey) { firstKey = key; firstAgent = a.agentId; }
+          }
+          if (firstAgent) row(canonicalStaffName(firstAgent)).newLeads += 1;
+          else newInventoryUntouched += 1;
         }
       }
       worthHearing.sort((x, y) => y.minutes - x.minutes);
 
       // INBOUND — calls the queue connected to a person. A queue answering is
       // not a person working, so pseudo-agents are dropped rather than ranked.
+      //
+      // MAILER and BCD land in their OWN counters as well as the shared
+      // `inbound` total. They are two different purchases — a bulk mail drop
+      // and a pay-per-call feed — so one number cannot price both.
       for (const [agent, streams] of Object.entries(queueByAgent)) {
         if (isNotAPerson(agent)) continue;
         const r = row(canonicalStaffName(agent));
         for (const [key, n] of Object.entries(streams || {})) {
-          if (INBOUND_STREAMS.has(key)) r.inbound += n || 0;
+          if (!INBOUND_STREAMS.has(key)) continue;
+          const calls = Number(n) || 0;
+          if (key === "MAILER") r.mailerIn += calls;
+          else if (key === "BCD") r.bcdIn += calls;
+          r.inbound += calls;
         }
       }
 
@@ -309,6 +433,127 @@ const BLOCKS = [
         r.cash = round2(r.cash + p.amount);
       }
 
+      // ── ATTRIBUTED SPEND ─────────────────────────────────────────────────
+      //
+      // Mickey 2026-08-03: "derive a spend per agent basically how many calls
+      // they took of mail, BCD and LD sorta blended together ... read mailer
+      // queue divide by spend multiply total agent calls by that avg cost /
+      // same with bcd queue by agent / for LD you need to sorta track new lead
+      // case ids and see who called them and attribute that way."
+      //
+      // Three channels, three unit costs, one column. Each component is built
+      // so that the agents plus what nobody can be charged with add back up to
+      // the spend they were divided out of — a per-agent cost that does not
+      // reconcile is a number that can be argued with rather than acted on.
+      //
+      // ── A ZERO AND AN UNKNOWN ARE NOT THE SAME NUMBER ────────────────────
+      //
+      // This is the property that matters most here, and the one this stack
+      // keeps being bitten by. "$0.00" is an ANSWER: it says the agent worked
+      // nothing we paid for. A component we could not read must render as a
+      // dash instead, or a RingCentral outage prints as a floor that did no
+      // marketing work — and that reads as a fact about people.
+      const MAIL_TENANT = "TAG";
+      const scoped = domain ? String(domain).toUpperCase() : null;
+      // A vendor board carries no mail and no BCD BY RULE (see THE TENANT RULE
+      // in the composer, which zeroes queueByAgent for a non-mail tenant). That
+      // is "does not apply", not "unknown" — so those components are null, but
+      // they are not a hole in the total the way an outage is.
+      const mailApplies = !scoped || scoped === MAIL_TENANT;
+
+      const finite = (v) => (Number.isFinite(Number(v)) ? Number(v) : null);
+      // `spend: {}` is what a block gets when spend was never gathered. Its
+      // dollars are unknown, not zero.
+      const spendKnown = !!spend && finite(spend.total) !== null;
+      const mailSpend = spendKnown ? (Number(spend.mail) || 0) : 0;
+      const bcdSpend = spendKnown ? (Number(spend.bcd) || 0) : 0;
+      const ldSpend = spendKnown ? (Number(spend.ld) || 0) : 0;
+      const ldRate = spendKnown ? finite(spend.ldRate) : null;
+      const ldLeadsBought = spendKnown ? finite(spend.ldLeads) : null;
+
+      // OFFERED, NOT CONNECTED. The mail spend bought every call that RANG,
+      // including the ones nobody picked up — pricing off connects alone would
+      // divide the same dollars over a smaller denominator and quietly inflate
+      // every agent's cost per call (43 offered vs 40 connected is a 7.5%
+      // overstatement, and it grows with the miss rate).
+      const mailOffered = Number(queueStreams?.MAILER?.calls) || 0;
+      const bcdOffered = Number(queueStreams?.BCD?.calls) || 0;
+      const mailMissed = Number(queueStreams?.MAILER?.missed) || 0;
+      const bcdMissed = Number(queueStreams?.BCD?.missed) || 0;
+
+      const mailReadable = mailApplies && spendKnown && !queueUnavailable;
+      const bcdReadable = mailApplies && spendKnown && !queueUnavailable;
+      // leadAgeDays is what marks NEW inventory. Dropped from the projection it
+      // is `undefined` on every row, no lead looks new, and the LD component
+      // reads $0.00 for the whole floor — the exact zero-that-means-unknown
+      // this block exists to refuse.
+      const ldAgeReadable = !dials.length || dials.some((x) => leadAge(x.leadAgeDays) !== null);
+      const newLeadsKnown = !dialsUnavailable && ldAgeReadable;
+      const ldReadable = newLeadsKnown && spendKnown && !spend.ldUnavailable && ldRate !== null;
+
+      const mailRate = mailReadable && mailOffered ? mailSpend / mailOffered : null;
+      const bcdRate = bcdReadable && bcdOffered ? bcdSpend / bcdOffered : null;
+
+      const attributed = [...byAgent.values()]
+        .map(({ dealCases, ...r }) => ({ ...r, talkMinutes: Math.round(r.talkSec / 6) / 10 }))
+        .map((r) => {
+          const mail = mailReadable ? round2((r.mailerIn || 0) * (mailRate || 0)) : null;
+          const bcd = bcdReadable ? round2((r.bcdIn || 0) * (bcdRate || 0)) : null;
+          const ld = ldReadable ? round2((r.newLeads || 0) * ldRate) : null;
+          // "NEEDED" is the operative word. On a vendor board mail and BCD are
+          // absent by rule, so their nulls do not blank the total; on a mail
+          // board an unreadable queue does.
+          const missing = (mailApplies && (mail === null || bcd === null)) || ld === null;
+          return {
+            ...r,
+            attributedMail: mail, attributedBcd: bcd, attributedLd: ld,
+            attributedSpend: missing ? null : round2((mail || 0) + (bcd || 0) + (ld || 0)),
+          };
+        });
+
+      const sumOf = (key) => round2(attributed.reduce((s, r) => s + (Number(r[key]) || 0), 0));
+      const agentsMail = mailReadable ? sumOf("attributedMail") : null;
+      const agentsBcd = bcdReadable ? sumOf("attributedBcd") : null;
+      const agentsLd = ldReadable ? sumOf("attributedLd") : null;
+      const newLeadsTouched = attributed.reduce((s, r) => s + (Number(r.newLeads) || 0), 0);
+
+      // WHAT NOBODY CAN BE CHARGED WITH. Taken as the RESIDUAL rather than
+      // recomputed from missed calls, so rounding cents land here instead of
+      // opening a gap in the total. On well-formed queue data the two agree:
+      // missed x rate is the same money, and it is reported beside it.
+      const failures = [];
+      const leftOver = (label, spendPart, agentsPart) => {
+        if (agentsPart === null) return null;
+        const rest = round2(spendPart - agentsPart);
+        if (rest < -0.005) {
+          // Agents were credited with more than we spent. Clamped so the column
+          // cannot show money that does not exist, and SAID so — a silent clamp
+          // is how a broken denominator survives a year.
+          failures.push(`${label}: agents credited ${money(agentsPart)} against ${money(spendPart)} of ${label} spend`);
+          return 0;
+        }
+        return rest < 0 ? 0 : rest;
+      };
+      const unattributed = {
+        mail: leftOver("mail", mailSpend, agentsMail),
+        bcd: leftOver("BCD", bcdSpend, agentsBcd),
+        ld: leftOver("LD", ldSpend, agentsLd),
+      };
+      if (ldReadable && ldLeadsBought !== null && newLeadsTouched > ldLeadsBought) {
+        failures.push(`LD: ${newLeadsTouched} new lead(s) first-touched against ${ldLeadsBought} received`);
+      }
+
+      // Spend that could land on this board at all. Rebuilt from the parts that
+      // APPLY rather than trusting a cross-tenant grand total — the same
+      // reasoning the top line uses.
+      const applicableSpend = round2((mailApplies ? mailSpend + bcdSpend : 0) + ldSpend);
+      const allKnown = spendKnown && ldReadable && (!mailApplies || (mailReadable && bcdReadable));
+      const attributedTotal = allKnown
+        ? round2((agentsMail || 0) + (agentsBcd || 0) + (agentsLd || 0)) : null;
+      const unattributedTotal = allKnown
+        ? round2((unattributed.mail || 0) + (unattributed.bcd || 0) + (unattributed.ld || 0)) : null;
+      const drift = allKnown ? round2(attributedTotal + unattributedTotal - applicableSpend) : null;
+
       return {
         dialsUnavailable, queueUnavailable,
         cases: cases.size, attempts, connected, longCalls,
@@ -318,11 +563,43 @@ const BLOCKS = [
         connectRate: attemptsKnown ? Math.round((connected / attemptsKnown) * 1000) / 10 : null,
         avgTalkMinutes: connected ? Math.round((talkSec / connected) / 6) / 10 : null,
         byOutcome,
-        agents: [...byAgent.values()]
-          .map(({ dealCases, ...r }) => ({ ...r, talkMinutes: Math.round(r.talkSec / 6) / 10 }))
+        // NEW INVENTORY, and how much of it anybody actually reached.
+        newInventory, newInventoryUntouched, newLeadsTouched, newLeadsKnown,
+        attribution: {
+          mailApplies,
+          readable: { mail: mailReadable, bcd: bcdReadable, ld: ldReadable },
+          mailOffered, mailMissed, bcdOffered, bcdMissed,
+          // Rounded for display only — the arithmetic above runs at full
+          // precision and the residual absorbs the cents.
+          mailRate: mailRate === null ? null : Math.round(mailRate * 10000) / 10000,
+          bcdRate: bcdRate === null ? null : Math.round(bcdRate * 10000) / 10000,
+          ldRate: ldReadable ? ldRate : null,
+          ldLeadsBought,
+          spend: { mail: mailSpend, bcd: bcdSpend, ld: ldSpend, applicable: applicableSpend },
+          unattributed: { ...unattributed, total: unattributedTotal },
+          // What the missed-call arithmetic says the unattributed mail/BCD
+          // should be. Reported alongside the residual so a divergence between
+          // "calls nobody answered" and "spend nobody was charged" is visible
+          // rather than absorbed.
+          unattributedByMissed: {
+            mail: mailRate === null ? null : round2(mailMissed * mailRate),
+            bcd: bcdRate === null ? null : round2(bcdMissed * bcdRate),
+          },
+          reconciliation: {
+            // null, not false: an unreadable component means the invariant was
+            // not TESTED, which is a different claim from "it failed".
+            ok: allKnown ? (Math.abs(drift) < 0.005 && failures.length === 0) : null,
+            expected: applicableSpend,
+            attributed: attributedTotal,
+            unattributed: unattributedTotal,
+            drift,
+            failures,
+          },
+        },
+        agents: attributed
           // Someone with deals and no dials still belongs here, and so does
           // someone with dials and no deals. Union, never intersect.
-          .filter((r) => r.inbound || r.dials || r.deals)
+          .filter((r) => r.inbound || r.dials || r.deals || r.newLeads)
           .sort((a, b) => b.cash - a.cash || b.dials - a.dials),
         longThresholdMinutes: Math.round(LONG_SEC / 60),
         worthHearing,
@@ -344,6 +621,18 @@ const BLOCKS = [
       }
       const outcomes = Object.entries(d.byOutcome).sort((a, b) => b[1] - a[1]).slice(0, 6);
       if (outcomes.length) L.push(`                    ${outcomes.map(([k, n]) => `${n} ${k}`).join(" · ")}`);
+      // The cost line, and whether it adds up. A per-agent cost that does not
+      // reconcile is worse than no per-agent cost, so the check prints beside
+      // the number rather than hiding in a log.
+      const rec = d.attribution?.reconciliation;
+      if (rec && rec.attributed !== null && rec.attributed !== undefined) {
+        L.push(`                    ${money(rec.attributed)} attributed to agents · ${money(rec.unattributed)} unattributed · ${money(rec.expected)} spent`);
+        if (rec.ok === false) {
+          L.push(`                    ATTRIBUTION DOES NOT RECONCILE — ${(rec.failures || []).join("; ") || `off by ${money(rec.drift)}`}`);
+        }
+      } else if (d.attribution) {
+        L.push("                    attributed spend unavailable — a cost source could not be read");
+      }
       return L.join(NEWLINE);
     },
     csv(d) {
@@ -353,10 +642,23 @@ const BLOCKS = [
       // A DIAL GATHER THAT FAILED MUST NOT READ AS A DAY WITH NO DIALS. Without
       // this the summary is the literal string "0 dials · no connect data · 0
       // min talk", which is exactly what a genuinely idle Saturday looks like.
+      const rec = d.attribution?.reconciliation;
+      // CONNECTED AND TALK TIME LEAVE THE EMAIL TABLE, NOT THE REPORT. Mickey
+      // 2026-08-03: "you can sorta get rid of connected and talk minutes and do
+      // like attributed spend." They stay in this headline and in the CSV, so
+      // the connect rate is still one glance away — the email table is simply
+      // not where seven columns of it belong.
+      const cost = !rec || rec.attributed === null || rec.attributed === undefined
+        ? ""
+        : ` · ${money(rec.attributed)} attributed of ${money(rec.expected)} spent`
+          + (rec.ok === false
+            ? ` — DOES NOT RECONCILE (${(rec.failures || []).join("; ") || `off by ${money(rec.drift)}`})`
+            : "");
       const summary = d.dialsUnavailable
         ? `DIAL DATA UNAVAILABLE — ${d.dialsUnavailable}. Deals and cash below are complete; call counts are not.`
         : `${d.attempts.toLocaleString()} dial${d.attempts === 1 ? "" : "s"} · ${rate} · ${d.talkMinutes} min talk`
-          + (d.attemptsUnknown ? ` · ${d.attemptsUnknown} without a connect flag` : "");
+          + (d.attemptsUnknown ? ` · ${d.attemptsUnknown} without a connect flag` : "")
+          + cost;
       // INBOUND comes from the TAG phone queue, which a vendor board does not
       // carry (see THE TENANT RULE in the composer). Rather than mail a column
       // of zeros — which reads as "your leads produced no inbound calls"
@@ -371,27 +673,94 @@ const BLOCKS = [
       // they are all unmeasured. Deals and cash come from payments and stay
       // real — which is why the summary says so rather than blanking the row.
       const dialCell = (get) => (x) => (d.dialsUnavailable ? "—" : get(x));
+      // NEW LD is a dial fact twice over: it needs the dials AND the lead-age
+      // field on them. Either missing and the count is unknown, not zero.
+      const ldKnown = !d.dialsUnavailable && d.newLeadsKnown !== false;
+      // The header "attributed_spend" matches toTemplateData's money regex, so
+      // it formats as dollars for free — and a null renders as an em-dash by
+      // the same path every other unreadable cell uses.
+      const moneyCell = (get) => (x) => {
+        const v = get(x);
+        return v === null || v === undefined ? "—" : v;
+      };
+      // new_ld is WITHHELD FROM THE EMAIL — see NEW_LD_EMAIL_HIDDEN below.
       const columns = [
         { header: "agent", get: (x) => x.agent },
         { header: "inbound", get: inboundCell },
         { header: "dials", get: dialCell((x) => x.dials) },
-        { header: "connected", get: dialCell((x) => x.connected) },
-        { header: "talk_minutes", get: dialCell((x) => x.talkMinutes) },
+        { header: "new_ld", get: (x) => (ldKnown ? (Number(x.newLeads) || 0) : "—") },
+        { header: "attributed_spend", get: moneyCell((x) => x.attributedSpend) },
         { header: "deals", get: (x) => x.deals },
         { header: "cash", get: (x) => x.cash },
       ];
+
+      // ── new_ld IS HIDDEN FROM THE EMAIL, ON PURPOSE, TEMPORARILY ─────────
+      //
+      // Mickey 2026-08-03: "kinda need you to take out the first touch problem
+      // cause that will get me hella chewed out so lets hide that column for
+      // now while i put the fix in."
+      //
+      // What the column exposes: on 2026-07-31 Brad Hansen was first agent on
+      // 29 of the 32 fresh LD leads, Chris Bolt 3, and the other three ZERO.
+      // That reads as a damning performance table, but it is not one — three
+      // of the five stop dialling by ~13:40 and prefer inbound mailer calls,
+      // so whoever is still on the phones sweeps the fresh queue. It is a
+      // distribution/behaviour problem being fixed separately (see
+      // LEAD_DISTRIBUTION_INVESTIGATION_GUIDE_2026-08-03.md), and publishing
+      // it nightly in the meantime would put people on the wrong end of a
+      // number that describes the queue rather than their effort.
+      //
+      // The COST column stays. attributed_spend blends mail + BCD + LD, and it
+      // does not expose the same story — on 07-31 it ranks Phil $446.50, Sean
+      // $434.50, Bruce $208.90, Brad $91.00, Chris $25.00, because the mail
+      // allocation dominates. Brad's LD concentration is invisible in it.
+      //
+      // NOT A DELETION. The column, the per-component split and the underlying
+      // counts all remain in the CSV, so the fix can be measured. See the note
+      // on that below — the CSV is attached to this email.
+      //
+      // REMOVE THIS BLOCK once distribution is fixed. It is a presentation
+      // hold, not a decision about what is true.
+      const NEW_LD_EMAIL_HIDDEN = true;
       return {
         summary,
         rows: d.agents,
-        emailColumns: anyInbound ? columns : columns.filter((c) => c.header !== "inbound"),
+        // Same roster as By settlement officer. Mickey 2026-08-03: "no jonathan
+        // pineda no matthew anderson no andrew wells no michael gray no
+        // alexander banks ... just bruce allen, brad hansen, chris bolt, sean
+        // lucas, phil olson".
+        //
+        // This table is where he actually saw them — the first pass put the
+        // filter on the OFFICER block, and these rows come from `ldcalls`, so
+        // they went out again unchanged. One shared list now, because two
+        // copies of a roster is how they drift apart.
+        emailRows: settlementOfficersOnly(d.agents, (x) => x.agent),
+        emailColumns: columns.filter((c) => {
+          if (NEW_LD_EMAIL_HIDDEN && c.header === "new_ld") return false;
+          return anyInbound || c.header !== "inbound";
+        }),
         // The CSV keeps the raw numbers — a dash is a reading aid for a person,
-        // not a value a spreadsheet should have to parse.
+        // not a value a spreadsheet should have to parse. It also keeps
+        // connected and talk_minutes, which left the EMAIL table and not the
+        // report, and it breaks attributed spend into its three components so
+        // the total can be checked against the queue and the receipts.
         columns: [
           { header: "agent", get: (x) => x.agent },
           { header: "inbound", get: (x) => x.inbound },
           { header: "dials", get: (x) => x.dials },
           { header: "connected", get: (x) => x.connected },
           { header: "talk_minutes", get: (x) => x.talkMinutes },
+          // NULL, not 0, when the dials could not be read. The email shows an
+          // em-dash; a spreadsheet should get an empty cell rather than a
+          // number, because a confident 0 here reads as "this agent worked no
+          // new leads" when the truth is "we could not look".
+          { header: "new_ld", get: (x) => (ldKnown ? (Number(x.newLeads) || 0) : null) },
+          // A null stays null here: an empty cell is a spreadsheet's own way of
+          // saying "not known", and writing 0 would make it arguable.
+          { header: "attributed_spend", get: (x) => x.attributedSpend },
+          { header: "attributed_mail", get: (x) => x.attributedMail },
+          { header: "attributed_bcd", get: (x) => x.attributedBcd },
+          { header: "attributed_ld", get: (x) => x.attributedLd },
           { header: "deals", get: (x) => x.deals },
           { header: "cash", get: (x) => x.cash },
         ],
@@ -562,7 +931,7 @@ const BLOCKS = [
       const {
         AGED_LABEL, isActiveSource, sourceBucket, sourceChannel,
       } = require("../../shared-config/src/activeSources");
-      const { applyFunctions, pickAttributionCall, resolveSourceRow, attributionDateResolver, foldSourceKey } = require("./reportOpsService");
+      const { applyFunctions, pickAttributionCall, resolveSourceRow, attributionDateResolver, attributionSourceResolver, foldSourceKey } = require("./reportOpsService");
 
       // Index the window's inbound calls by number so each payment can find
       // the call that sourced it — same rule the snapshot writer uses, so the
@@ -575,6 +944,9 @@ const BLOCKS = [
       // reportOpsService.attributionDateResolver. A caller that skips it
       // reports a different set of deals for the same range.
       const attributionDateFor = attributionDateResolver(callsRange);
+      // Same call, picked the same way — its PIECE rather than its date. Fills
+      // the source for a deal Logics only knows as a catch-all.
+      const attributionSourceFor = attributionSourceResolver(callsRange);
 
       const by = new Map();
       const row = (k) => {
@@ -591,6 +963,11 @@ const BLOCKS = [
           rangeStart: from,
           rangeEnd: to,
           attributionCallDate: attributionDateFor(p),
+          // The PIECE the attributable call rang in on. Only consulted when
+          // Logics holds a catch-all or nothing — see resolveSourceRow. Before
+          // this, a deal on the ABC bucket was reported as unattributed even
+          // though CallRail knew exactly which mailer produced it.
+          attributionCallSource: attributionSourceFor(p),
         }));
         if (p.paymentType === "initial") {
           r.dealCases.add(`${p.domain}:${p.caseId}`);
@@ -602,7 +979,15 @@ const BLOCKS = [
       // Spend and CallRail responses arrive under their own spellings of the
       // same piece; fold them onto the same row or the money and the calls
       // never meet and every cost-per reads as "—".
-      const bucketFor = (src) => foldSourceKey(src);
+      // BOTH SIDES MUST FOLD THE SAME WAY. The payment side resolves through
+      // sourceBucket, which now rolls every LD feed variant onto one "LD" row.
+      // If the spend side does not, LD's money and LD's cost land on DIFFERENT
+      // rows — the money row shows spend $0 and no ratio, and a phantom
+      // "LD CUSTOM" row shows pure cost at -100%. That is exactly the split
+      // seen on 2026-07-31, where LD CUSTOM carried $315 and Aged $321 against
+      // 106 leads that only ever cost $318 in total.
+      const { canonicalSourceLabel } = require("../../shared-config/src/activeSources");
+      const bucketFor = (src) => canonicalSourceLabel(foldSourceKey(src));
       for (const [src, v] of Object.entries(spendBySource || {})) {
         const r = row(bucketFor(src));
         r.spend = round2(r.spend + v.spend); r.leads += v.leads || 0;
@@ -611,6 +996,7 @@ const BLOCKS = [
         const r = row(bucketFor(src));
         r.responses += v.responses || 0;
       }
+
       const out = [...by.values()].map(({ dealCases, ...r }) => {
         const totalCash = round2(r.newCash + r.recurringCash);
         const denom = r.responses || r.leads || 0;
@@ -771,7 +1157,28 @@ const BLOCKS = [
           const sum = (k) => round2(rest.reduce((s, r) => s + (Number(r[k]) || 0), 0));
           const count = (k) => rest.reduce((s, r) => s + (Number(r[k]) || 0), 0);
           return [...pieces, {
-            source: `Not attributed to a piece (${rest.length})`,
+            // Mickey 2026-08-03: "you can change attributed to no source to
+            // recurring total of all 3 databases."
+            //
+            // "Not attributed to a piece" described the row by what it LACKS,
+            // which reads like a data-quality defect to be chased. On
+            // 2026-07-31 it was genuinely the back book: $14,396.50 + $750.00
+            // + $685.95 = $15,832.45, to the penny the "recurring" figure the
+            // top line already states.
+            //
+            // BUT "Recurring" IS NOT A SAFE CONSTANT. This bucket also catches
+            // the Logics catch-alls, and those hold NEW DEALS whose source has
+            // not been resolved yet. On 2026-08-03 it swallowed 3 deals worth
+            // $2,062.50 — ABC (catch-all) 2 and (Logics catch-all) 1 — and
+            // labelled them recurring, which is simply false and hid work that
+            // needs doing (scripts/sanitize-logics-source.js resolves them).
+            //
+            // So the row is named for what it actually holds. Deals present
+            // means it is not merely recurring, and the count makes the
+            // backlog visible instead of burying it.
+            source: rest.reduce((s, r) => s + (Number(r.deals) || 0), 0) > 0
+              ? `Unattributed — ${rest.reduce((s, r) => s + (Number(r.deals) || 0), 0)} deal(s) need a source`
+              : "Recurring (all databases)",
             deals: count("deals"),
             newCash: sum("newCash"),
             recurringCash: sum("recurringCash"),
@@ -888,7 +1295,11 @@ const BLOCKS = [
       return L.join("\n");
     },
     csv(rows) {
-      return { rows, columns: [
+      // Roster-filtered, shared with "Calls by agent" — see
+      // settlementOfficersOnly at the top of this file. Email only; the CSV
+      // below keeps every officer.
+      const emailRows = settlementOfficersOnly(rows);
+      return { rows, emailRows, columns: [
         { header: "officer", get: (x) => x.officer }, { header: "deals", get: (x) => x.deals },
         { header: "collected", get: (x) => x.cash }, { header: "mail_calls", get: (x) => x.mailCalls },
         { header: "bcd_calls", get: (x) => x.bcdCalls }, { header: "ld_dials", get: (x) => x.ldDials },
@@ -1005,15 +1416,37 @@ const BLOCKS = [
       // reads. The counts move to `summary`; the rows become the chase list.
       const LANE = { suspended: "SUSPENDED", postdate: "POST-DATE", dnc: "DNC" };
       const key = d.keyChanges || [];
+
+      // Mickey 2026-08-03: "lets see what doing like a 3 column status movement
+      // one for suspend, one for post date one for dnc save a little space."
+      //
+      // The list was one row per case with the lane repeated beside it, so 19
+      // changes cost 19 rows and the word SUSPENDED seven times. Pivoting the
+      // lane into the COLUMN spends the width we already have and costs only
+      // as many rows as the busiest single lane — 19 rows becomes 7 here.
+      //
+      // Column order is money-first, matching the sort: a payment default
+      // costs more to ignore than a DNC.
+      const LANES = ["suspended", "postdate", "dnc"];
+      const byLane = LANES.map((l) => key.filter((r) => r.lane === l));
+      const depth = Math.min(30, Math.max(0, ...byLane.map((c) => c.length)));
+      const laneRows = Array.from({ length: depth }, (_, i) => ({
+        suspended: byLane[0][i] ? `${byLane[0][i].domain} ${byLane[0][i].caseId}` : "",
+        postdate: byLane[1][i] ? `${byLane[1][i].domain} ${byLane[1][i].caseId}` : "",
+        dnc: byLane[2][i] ? `${byLane[2][i].domain} ${byLane[2][i].caseId}` : "",
+      }));
+
       return {
         // No summary. Mickey 2026-07-30: the counts live "only at the top" —
         // repeating them over the list is the same fact twice on one screen.
         rows: key.slice(0, 30),
         // Mickey 2026-07-30: "dont need moved by or date just case and lane
         // really." Who moved it and when are lookups, not decisions.
+        emailRows: laneRows,
         emailColumns: [
-          { header: "case", get: (x) => `${x.domain} ${x.caseId}` },
-          { header: "lane", get: (x) => LANE[x.lane] || x.lane },
+          { header: "SUSPENDED", get: (x) => x.suspended },
+          { header: "POST-DATE", get: (x) => x.postdate },
+          { header: "DNC", get: (x) => x.dnc },
         ],
         columns: [
           { header: "lane", get: (x) => LANE[x.lane] || x.lane },
@@ -1046,18 +1479,37 @@ const BLOCKS = [
         // SOURCE marks the call the attribution actually came from — the
         // longest on the close day. Without it a three-call deal shows three
         // DEAL rows and the reader cannot tell which one earned the source.
-        L.push(`  [${(c.reasons || []).join("·")}] ${c.minutes}m ${c.caller || c.phone || "?"}${c.officer ? ` → ${c.officer}` : ""}`
+        // An outbound dial has no caller — name the AGENT and the case instead
+        // of printing "?", which read as missing data rather than "this is an
+        // outbound call".
+        const who = c.caller || c.phone
+          || (c.agent ? `${c.agent}${c.caseId ? ` → case ${c.caseId}` : ""}` : null)
+          || "?";
+        L.push(`  [${(c.reasons || []).join("·")}] ${c.minutes}m ${who}${c.officer ? ` → ${c.officer}` : ""}`
           + (c.isAttributionCall && c.source ? `  (source: ${c.source})` : ""));
         L.push(`      ${c.listenUrl || "(no link)"}`);
       }
       return L.join("\n");
     },
     csv(rows) {
+      // WHO the row is about differs by platform, and forcing one column to
+      // mean both was producing `undefined` cells. A CallRail row is an
+      // INBOUND call, so the identity is the caller. A PhoneBurner row is an
+      // OUTBOUND dial — there is no caller; the identity is the agent who
+      // placed it and the case they dialled.
+      //
+      // Every getter returns null rather than undefined: undefined reaches the
+      // template as a hole and can render the literal word, while null is a
+      // blank cell in both the mail and the CSV.
       return { rows, columns: [
         { header: "reasons", get: (x) => (x.reasons || []).join("|") },
-        { header: "minutes", get: (x) => x.minutes }, { header: "platform", get: (x) => x.platform },
-        { header: "caller", get: (x) => x.caller || x.phone }, { header: "case_id", get: (x) => x.caseId },
-        { header: "officer", get: (x) => x.officer }, { header: "listen_url", get: (x) => x.listenUrl },
+        { header: "minutes", get: (x) => x.minutes ?? null },
+        { header: "platform", get: (x) => x.platform ?? null },
+        { header: "caller", get: (x) => x.caller || x.phone || null },
+        { header: "agent", get: (x) => x.agent || x.agentUserId || null },
+        { header: "case_id", get: (x) => x.caseId ?? null },
+        { header: "officer", get: (x) => x.officer || null },
+        { header: "listen_url", get: (x) => x.listenUrl || null },
       ] };
     },
   },
@@ -1803,7 +2255,7 @@ const BLOCKS = [
             caseId: d.caseId ?? null,
             caseDomain: d.domain ? String(d.domain).toUpperCase() : null,
             officer: officerOf.get(key) || seat || null,
-            listenUrl: a.recordingUrl || d.recordingUrl || null,
+            listenUrl: a.persistedRecordingUrl || null,
             priorCalls: null,
           });
         }
@@ -1878,12 +2330,32 @@ const BLOCKS = [
       return L.join(NEWLINE);
     },
     csv(rows) {
+      // ── A LISTEN LIST YOU CANNOT LISTEN TO IS NOT A LIST ────────────────
+      //
+      // Mickey 2026-08-03: "i kinda wanna do a filter if we dont have a url
+      // dont include in calls to listen to."
+      //
+      // The section exists to press play. A row with no link costs a line and
+      // offers nothing to do, and right now most rows are linkless: recording
+      // capture only began 2026-08-03T20:57:45Z, so every earlier call has
+      // none and never will.
+      //
+      // BUT THE COUNT IS NOT DISCARDED. Silently dropping them would make a
+      // day where recordings failed look identical to a quiet day — the exact
+      // confusion the rest of this stack keeps being bitten by. The excluded
+      // count is reported, and every row still reaches the CSV.
+      const listenable = (Array.isArray(rows) ? rows : []).filter((r) => r.listenUrl);
+      const withoutLink = (Array.isArray(rows) ? rows.length : 0) - listenable.length;
+
       return {
         // Normally no summary — but an unreadable CallRail has to say so, or
         // the template prints "Nothing in this range." over a hole.
         summary: rows.unavailable
           ? `INBOUND CALLS INCOMPLETE — ${rows.unavailable}. Outbound LD calls below are complete.`
-          : undefined,
+          : (withoutLink
+            ? `${withoutLink} long call${withoutLink === 1 ? "" : "s"} not listed — no recording (capture began 2026-08-03)`
+            : undefined),
+        emailRows: listenable,
         // No summary: the section label already says "Calls worth hearing",
         // and a line under it repeating the count is filler.
         // The point of this section is to press play. Minutes, who, and the

@@ -20,6 +20,28 @@ const DAY_MS = 86400000;
 // Three attempts, then wait for tomorrow. See isDue.
 const MAX_ATTEMPTS_PER_DAY = Math.max(1, Number(process.env.REPORT_MAX_ATTEMPTS_PER_DAY) || 3);
 
+async function captureDeliveredDailyFact({
+  def,
+  report,
+  range,
+  emailAcceptedAt = new Date(),
+  writer = null,
+} = {}) {
+  const {
+    isDailyFactCaptureCandidate,
+    persistDailyReportFact,
+  } = require("./dailyReportFactService");
+  const verdict = isDailyFactCaptureCandidate(def, report, range);
+  if (!verdict.capture) return { status: "skipped", reason: verdict.reason };
+  const persist = writer || persistDailyReportFact;
+  return persist({
+    dateKey: range.from,
+    definitionName: def.name,
+    report,
+    emailAcceptedAt,
+  });
+}
+
 /** Pacific day key — every loop on this box is Pacific, so reports are too. */
 function pacificKey(at = new Date()) {
   return new Intl.DateTimeFormat("en-CA", {
@@ -106,9 +128,19 @@ function isDue(def, now = new Date()) {
  */
 async function runDefinition(def, {
   now = new Date(), dryRun = false, logger = null, sendMail = null, fromEmail = null,
+  // Test/backfill seam only. Production leaves this null and uses the
+  // canonical DailyReportFact writer.
+  dailyFactWriter = null,
+  // Per-invocation range override, used by --date to re-send a PAST day.
+  // Never persisted: the definition's own range is left exactly as saved.
+  rangeOverride = null,
+  // Bypass the once-a-day claim for a MANUAL re-send. The claim exists so the
+  // scheduler cannot double-send a night; a person asking for the same day
+  // again is not that case. Never set by the scheduler.
+  force = false,
 } = {}) {
   const started = Date.now();
-  const range = resolveRange(def.range, now);
+  const range = rangeOverride || resolveRange(def.range, now);
   const selection = resolveSelection(def.blocks && def.blocks.length ? def.blocks : ["daily"]);
   if (selection.unknown.length) {
     // Refuse rather than quietly emailing a report missing the thing that was
@@ -179,7 +211,7 @@ async function runDefinition(def, {
       { $set: { lastRunKey: key } },
       { new: true },
     );
-    if (!claimed) return { ...result, delivered: false, skipped: "already claimed today" };
+    if (!claimed && !force) return { ...result, delivered: false, skipped: "already claimed today" };
 
     // `attachCsv` was stored on every definition and printed as "+csv" on the
     // schedule listing, while nothing anywhere honoured it — the string appears
@@ -214,6 +246,27 @@ async function runDefinition(def, {
         text,
       });
       result.delivered = true;
+      // The email and the daily fact must describe the SAME gather. Persist
+      // only after the mail provider accepts the canonical one-day rollup, and
+      // pass the already-computed report rather than re-reading any source.
+      // A fact-write failure must not throw from this send block: the email is
+      // already accepted, and throwing would give the daily claim back and
+      // resend it on the next scheduler poll.
+      try {
+        result.dailyFactCapture = await captureDeliveredDailyFact({
+          def, report, range, emailAcceptedAt: new Date(), writer: dailyFactWriter,
+        });
+      } catch (error) {
+        result.dailyFactCapture = {
+          status: "failed",
+          reason: String(error.message || error).slice(0, 200),
+        };
+        logger?.error?.("daily_report_fact.capture_failed", {
+          definition: def.name,
+          dateKey: range.from,
+          error: result.dailyFactCapture.reason,
+        });
+      }
     } catch (error) {
       // Give the day back so the next poll retries. Without this a transient
       // SMTP failure at 20:30 silently costs the whole night.
@@ -231,6 +284,9 @@ async function runDefinition(def, {
     // still delivered is worth recording; it is the second and third night in
     // a row that turn it into something to chase.
     const problems = [...result.errors, ...failures];
+    if (result.dailyFactCapture?.status === "failed") {
+      problems.push(`daily fact capture failed: ${result.dailyFactCapture.reason}`);
+    }
     def.lastError = problems.length ? problems.join(" | ").slice(0, 400) : null;
     def.runCount = (def.runCount || 0) + 1;
     // A run that got here delivered (or was not meant to send), so the failure
@@ -248,5 +304,6 @@ async function dueDefinitions(now = new Date()) {
 }
 
 module.exports = {
-  ReportDefinition, dueDefinitions, isDue, pacificKey, pacificParts, resolveRange, runDefinition,
+  ReportDefinition, captureDeliveredDailyFact, dueDefinitions, isDue,
+  pacificKey, pacificParts, resolveRange, runDefinition,
 };
