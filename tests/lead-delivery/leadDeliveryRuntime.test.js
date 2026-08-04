@@ -299,12 +299,16 @@ class FakeRepository {
       .map(copy);
   }
 
-  async listPacketCandidateItems({ agentId, sourcePools, now, limit }) {
+  async listPacketCandidateItems({ agentId, sourcePools, untouchedOnly = false, now, limit }) {
     const at = now == null ? null : new Date(now);
     return [...this.items.values()]
       .filter((item) => item.activeAttempt
         && item.providerContactId == null
         && sourcePools.includes(item.sourcePool)
+        && (untouchedOnly !== true || (
+          Number(item.totalAttemptCount || 0) === 0
+          && item.lastContactAt == null
+        ))
         && (item.sourcePool !== POOLS.FOLLOW_UP_DUE
           || (at && item.nextContactAt && new Date(item.nextContactAt).getTime() <= at.getTime()))
         && ["eligible", "follow_up_wait", "reserved"].includes(item.state)
@@ -3455,6 +3459,45 @@ test("simple bulk packet excludes new-today and fills only from later pools", as
   const posted = acceptedItems(h.repository);
   assert.equal(posted.filter((item) => item.sourcePool === POOLS.NEW_TODAY).length, 0);
   assert.equal(posted.filter((item) => item.sourcePool !== POOLS.NEW_TODAY).length, 5);
+});
+
+test("simple bulk packet posts zero-touch work before a due retry from another pool", async () => {
+  const rows = [];
+  const h = harness({ rows, actionsEnabled: true });
+  await h.runtime.start();
+  await h.runtime.stop();
+  rows.push(
+    sourceRow(8601, {
+      receivedAt: new Date("2026-07-09T17:00:00.000Z"),
+    }),
+    sourceRow(8602, {
+      receivedAt: new Date("2026-07-10T15:00:00.000Z"),
+      totalAttemptCount: 1,
+      lastContactAt: new Date("2026-07-10T16:00:00.000Z"),
+    }),
+  );
+  await h.repository.insertActiveItemOnce({
+    ...rows[0],
+    sourcePool: POOLS.OLDER_AVAILABLE,
+    state: "eligible",
+    version: 0,
+  });
+  await h.repository.insertActiveItemOnce({
+    ...rows[1],
+    sourcePool: POOLS.FOLLOW_UP_DUE,
+    state: "follow_up_wait",
+    nextContactAt: new Date("2026-07-10T17:00:00.000Z"),
+    version: 0,
+  });
+
+  const result = await h.runtime.postTopOfQueue("bruce_allen", { count: 1 });
+
+  assert.equal(result.status, "posted");
+  assert.equal(result.accepted, 1);
+  const posted = acceptedItems(h.repository);
+  assert.equal(posted.length, 1);
+  assert.equal(posted[0].caseId, "8601");
+  assert.equal(posted[0].totalAttemptCount, 0);
 });
 
 test("durable agent Pool operation blocks an overlapping ordinary refill", async () => {

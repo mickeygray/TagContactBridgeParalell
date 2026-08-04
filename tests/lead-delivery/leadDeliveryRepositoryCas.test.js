@@ -799,7 +799,7 @@ test("source batches use newest-first keysets, skip CaseProfile, and preserve ex
     "counterCadence.cxDailyCalls", "counterCadence.cxDailyDateKey", "counterCadence.lastCxDialedAt",
     "counterCadence.lastCxAnsweredAt", "counterCadence.lastCxDncAt", "counterCadence.lastCxTerminalCountedUii", "createdAt", "currentStage",
     "dncCheckpoints.hit", "domain", "firstName", "lastName", "lastTouched.cx",
-    "logicsProspectEligible", "logicsStatusCheckedAt", "name", "normalizedPhone",
+    "logicsProspectEligible", "logicsStatusCheckedAt", "logicsStatusInvalidatedAt", "name", "normalizedPhone",
     "payloadSnapshot.createdAt", "payloadSnapshot.cxAppointment", "payloadSnapshot.state", "payloadSnapshot.timeZone", "payloadSnapshot.timezone",
     "primaryPhone", "state", "statusId", "updatedAt",
   ].sort();

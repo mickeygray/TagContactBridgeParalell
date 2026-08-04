@@ -95,9 +95,10 @@ test("recovery never bypasses the overnight first-contact barrier", () => {
   assert.ok(rank(overnight) < rank(RECOVERY()), "overnight stays on top");
 });
 
-test("an uncontacted recovery case beats generic aged filler", () => {
+test("all zero-touch aged work shares the pre-retry priority band", () => {
   const aged = item({ caseId: "aged", sourcePool: "older_available", receivedAt: ago(400) });
-  assert.ok(rank(RECOVERY()) < rank(aged));
+  assert.equal(rank(RECOVERY()), rank(aged));
+  assert.ok(compareSelectionCandidates(RECOVERY(), aged, { now: NOW }) < 0);
 });
 
 test("the whole line sorts in Mickey's stated order", () => {
@@ -115,8 +116,8 @@ test("the whole line sorts in Mickey's stated order", () => {
     "overnight",
     "brand-new",
     "recovery-uncontacted",
-    "retry-due",
     "aged",
+    "retry-due",
   ]);
 });
 

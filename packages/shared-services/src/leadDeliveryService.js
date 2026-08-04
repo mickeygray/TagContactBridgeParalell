@@ -1509,14 +1509,11 @@ function resolveSelectionRank(item = {}, { now = new Date() } = {}) {
   const pool = String(item.sourcePool || "").trim().toLowerCase();
   const touched = nonNegativeInteger(item.totalAttemptCount ?? 0, "totalAttemptCount") > 0
     || Boolean(item.lastContactAt);
-  const isRecovery = String(item.inventoryClass || "").trim().toLowerCase()
-    === CALL_RECOVERY_INVENTORY_CLASS;
-
   if (pool === POOLS.OVERNIGHT) return 0;
   if (pool === POOLS.NEW_TODAY && !touched) return 1;
-  if (isRecovery && !touched) return 2;
+  if (!touched) return 2;
   if (touched) return 3;
-  return pool === POOLS.OLDER_AVAILABLE ? 4 : 3;
+  return 3;
 }
 
 /**
@@ -1553,11 +1550,21 @@ function compareSelectionCandidates(left, right, { now = new Date() } = {}) {
       return delta || compareStable(left, right);
     }
     case 2: { // uncontacted recovery — §16: earliest expiry, then oldest call
-      const expiryDelta = nullableTime(left.expiresAt, "expiresAt") - nullableTime(right.expiresAt, "expiresAt");
-      if (expiryDelta) return expiryDelta;
-      const callDelta = nullableTime(left.firstQualifyingCallAt, "firstQualifyingCallAt")
-        - nullableTime(right.firstQualifyingCallAt, "firstQualifyingCallAt");
-      return callDelta || compareStable(left, right);
+      const leftRecovery = String(left?.inventoryClass || "").trim().toLowerCase()
+        === CALL_RECOVERY_INVENTORY_CLASS;
+      const rightRecovery = String(right?.inventoryClass || "").trim().toLowerCase()
+        === CALL_RECOVERY_INVENTORY_CLASS;
+      if (leftRecovery && rightRecovery) {
+        const expiryDelta = nullableTime(left.expiresAt, "expiresAt") - nullableTime(right.expiresAt, "expiresAt");
+        if (expiryDelta) return expiryDelta;
+        const callDelta = nullableTime(left.firstQualifyingCallAt, "firstQualifyingCallAt")
+          - nullableTime(right.firstQualifyingCallAt, "firstQualifyingCallAt");
+        return callDelta || compareStable(left, right);
+      }
+      if (leftRecovery !== rightRecovery) return leftRecovery ? -1 : 1;
+      const receiptDelta = nullableTime(right.receivedAt, "receivedAt")
+        - nullableTime(left.receivedAt, "receivedAt");
+      return receiptDelta || compareStable(left, right);
     }
     case 3: { // anything already touched — most overdue first, across pools
       const dueDelta = nullableTime(left.nextContactAt, "nextContactAt")
@@ -2637,10 +2644,22 @@ function createLeadDeliveryCadenceSource({
     // LeadCadence owns both the current Logics status and the timestamp that
     // proves when Logics supplied it. CaseProfile is not queried or inspected
     // by pre-serve admission.
-    if (statusMaxAgeMs > 0) {
+    const voiceTouched = Math.max(
+      nonNegativeInteger(row?.totalAttemptCount ?? 0, "totalAttemptCount"),
+      nonNegativeInteger(row?.cadenceCounters?.cx ?? 0, "cadenceCounters.cx"),
+    ) > 0 || [
+      row?.lastContactAt,
+      row?.lastTouched?.cx,
+      row?.counterCadence?.lastCxDialedAt,
+    ].some((value) => value != null && value !== "");
+    if (statusMaxAgeMs > 0 && voiceTouched) {
       const checkedAt = Date.parse(row?.logicsStatusCheckedAt ?? "");
       if (!Number.isFinite(checkedAt)) {
         return { ok: false, reason: "status-freshness-unproven", retryable: true };
+      }
+      const invalidatedAt = Date.parse(row?.logicsStatusInvalidatedAt ?? "");
+      if (Number.isFinite(invalidatedAt) && invalidatedAt > checkedAt) {
+        return { ok: false, reason: "status-invalidated-after-touch", retryable: true };
       }
       if (at.getTime() - checkedAt > statusMaxAgeMs) {
         return { ok: false, reason: "status-stale", retryable: true };
@@ -5401,58 +5420,75 @@ function createLeadDeliveryRuntime({
 
     const packetAt = atNow();
 
-    for (const pool of packetPoolOrder) {
-      // Fresh is owned exclusively by dispatchImmediateFresh. Bulk low-water
-      // packets never wait for it, claim it, or use it as filler.
-      if (pool === POOLS.NEW_TODAY) continue;
-      if (accepted >= requested) break;
-      let candidates = await repository.listPacketCandidateItems({
+    // Read the non-fresh pools as one candidate line. Walking pools one at a
+    // time let a retry jump ahead of an untouched lead in a later pool.
+    const ordinaryPools = packetPoolOrder.filter((pool) => pool !== POOLS.NEW_TODAY);
+    const candidateLimit = Math.min(5000, Math.max(requested * 10, 250));
+    const untouchedCandidates = await repository.listPacketCandidateItems({
+      agentId: id,
+      sourcePools: ordinaryPools,
+      untouchedOnly: true,
+      now: packetAt,
+      limit: candidateLimit,
+    });
+    let candidates = untouchedCandidates;
+    if (untouchedOnly !== true && untouchedCandidates.length < requested) {
+      const fallbackCandidates = await repository.listPacketCandidateItems({
         agentId: id,
-        sourcePools: [pool],
-        untouchedOnly,
+        sourcePools: ordinaryPools,
+        untouchedOnly: false,
         now: packetAt,
-        limit: Math.min(5000, Math.max(requested * 3, 50)),
+        limit: candidateLimit,
       });
-      for (const item of candidates) {
-        if (accepted >= requested) break;
-        const dailyCap = await holdItemAtDailyCap(item, packetAt);
-        if (dailyCap.held) continue;
-        const state = String(item.state || "").trim().toLowerCase();
-        const expected = { state, sourcePool: pool };
-        if (state === "reserved") expected.reservedAgentId = id;
-        const packetId = `packet-${randomUUID()}`;
-        const claimed = await repository.compareAndSetItem({
-          itemId: stableWorkItemId(item),
-          expectedVersion: item.version,
-          expected,
-          set: {
-            state: "packetized",
-            activeAttempt: true,
-            packetId,
-            deliveryAgentId: id,
-            reservedAgentId: null,
-            speedOverrideAgentId: null,
-            reservedAt: null,
-            reservationExpiresAt: null,
-            reservationReason: "top-of-queue-post",
-            provider: providerName,
-          },
-        });
-        if (!claimed) continue;
-        const posted = await postPacketItem(claimed, policy);
-        results.push({ status: posted.status, accepted: posted.accepted === true });
-        if (posted.accepted === true) accepted += 1;
-        if (posted.accepted !== true && posted.status !== "provider-rejected") {
-          return {
-            status: SIMPLE_PROVIDER_STOP_STATUSES.has(posted.status)
-              ? "provider-backpressure"
-              : "pending-provider-post",
-            agentId: id,
-            requested,
-            accepted,
-            results,
-          };
-        }
+      const seen = new Set(untouchedCandidates.map((item) => stableWorkItemId(item)));
+      candidates = [
+        ...untouchedCandidates,
+        ...fallbackCandidates.filter((item) => !seen.has(stableWorkItemId(item))),
+      ];
+    }
+    candidates = [...candidates]
+      .sort((left, right) => compareSelectionCandidates(left, right, { now: packetAt }));
+    for (const item of candidates) {
+      if (accepted >= requested) break;
+      const pool = String(item.sourcePool || "").trim().toLowerCase();
+      if (!ordinaryPools.includes(pool)) continue;
+      const dailyCap = await holdItemAtDailyCap(item, packetAt);
+      if (dailyCap.held) continue;
+      const state = String(item.state || "").trim().toLowerCase();
+      const expected = { state, sourcePool: pool };
+      if (state === "reserved") expected.reservedAgentId = id;
+      const packetId = `packet-${randomUUID()}`;
+      const claimed = await repository.compareAndSetItem({
+        itemId: stableWorkItemId(item),
+        expectedVersion: item.version,
+        expected,
+        set: {
+          state: "packetized",
+          activeAttempt: true,
+          packetId,
+          deliveryAgentId: id,
+          reservedAgentId: null,
+          speedOverrideAgentId: null,
+          reservedAt: null,
+          reservationExpiresAt: null,
+          reservationReason: "top-of-queue-post",
+          provider: providerName,
+        },
+      });
+      if (!claimed) continue;
+      const posted = await postPacketItem(claimed, policy);
+      results.push({ status: posted.status, accepted: posted.accepted === true });
+      if (posted.accepted === true) accepted += 1;
+      if (posted.accepted !== true && posted.status !== "provider-rejected") {
+        return {
+          status: SIMPLE_PROVIDER_STOP_STATUSES.has(posted.status)
+            ? "provider-backpressure"
+            : "pending-provider-post",
+          agentId: id,
+          requested,
+          accepted,
+          results,
+        };
       }
     }
     return {

@@ -83,9 +83,6 @@ function unwrapStatusCaseIds(payload) {
 async function refreshUntouchedLeadCadenceStatuses({
   domains,
   allowedProspectStatusIds = [1, 2],
-  limit = 20000,
-  leadCadenceModel = LeadCadence,
-  logicsClientFactory = createLogicsClient,
 } = {}) {
   const normalizedDomains = [...new Set((Array.isArray(domains) ? domains : [])
     .map((value) => String(value || "").trim().toUpperCase())
@@ -96,65 +93,26 @@ async function refreshUntouchedLeadCadenceStatuses({
     : [1, 2]).map(Number).filter(Number.isFinite))];
   if (!statusIds.length) throw new TypeError("allowedProspectStatusIds are required");
 
-  const rows = await leadCadenceModel.find({
-    domain: { $in: normalizedDomains },
-    active: true,
-    $and: [
-      { $or: [{ totalAttemptCount: 0 }, { totalAttemptCount: null }] },
-      { $or: [{ "cadenceCounters.cx": 0 }, { "cadenceCounters.cx": { $exists: false } }] },
-      { $or: [{ lastContactAt: null }, { lastContactAt: { $exists: false } }] },
-      { $or: [{ "lastTouched.cx": null }, { "lastTouched.cx": { $exists: false } }] },
-      { $or: [{ "counterCadence.lastCxDialedAt": null }, { "counterCadence.lastCxDialedAt": { $exists: false } }] },
-    ],
-  }, { domain: 1, caseId: 1 })
-    .sort({ createdAt: -1, _id: -1 })
-    .limit(Math.max(1, Number(limit) || 20000))
-    .lean();
-
-  const membershipByDomain = new Map();
-  const targetDomains = [...new Set(rows.map((row) => String(row.domain || "").toUpperCase()))];
-  for (const domain of targetDomains) {
-    const membership = new Map();
-    const client = logicsClientFactory(domain);
-    for (const statusId of statusIds) {
-      const caseIds = unwrapStatusCaseIds(await client.getCasesByStatus(statusId));
-      for (const caseId of caseIds) if (!membership.has(caseId)) membership.set(caseId, statusId);
-    }
-    membershipByDomain.set(domain, membership);
-  }
-
-  const checkedAt = new Date();
-  const operations = rows.map((row) => {
-    const domain = String(row.domain || "").toUpperCase();
-    const caseId = Number(row.caseId);
-    const statusId = membershipByDomain.get(domain)?.get(caseId) ?? null;
-    return {
-      updateOne: {
-        filter: { _id: row._id, active: true },
-        update: { $set: {
-          logicsStatusCheckedAt: checkedAt,
-          logicsProspectEligible: statusId != null,
-          ...(statusId == null ? {} : { statusId }),
-        } },
-      },
-    };
-  });
-  if (operations.length) await leadCadenceModel.bulkWrite(operations, { ordered: false });
-  const eligible = rows.filter((row) => (
-    membershipByDomain.get(String(row.domain || "").toUpperCase())?.has(Number(row.caseId))
-  )).length;
+  // Intake already proves the initial Logics status and persists it on
+  // LeadCadence. Zero voice touches means ship from that intake evidence;
+  // a second morning lookup is neither necessary nor allowed. Once a call is
+  // counted, the cadence action invalidates that proof and the ordinary
+  // blocked-item refresh rechecks the exact case before any retry.
   return {
-    scanned: rows.length,
-    refreshed: rows.length,
-    eligible,
-    blocked: rows.length - eligible,
+    status: "intake-authority",
+    scanned: 0,
+    refreshed: 0,
+    eligible: 0,
+    blocked: 0,
+    failed: 0,
   };
 }
 
 /**
- * Re-verify Logics status for every lead still in the delivery queue.
- * Only refreshes profiles whose lastStatusCheckAt is older than
- * `maxAgeHours` (or missing), so a nightly run is cheap once caught up.
+ * Re-verify Logics status for queued work whose LeadCadence intake proof is
+ * stale or was invalidated by a counted voice attempt. CaseProfile receives
+ * an opportunistic mirror/phone fold, but never decides whether the lead can
+ * be served.
  *
  * Returns a summary including the DNC leads it found sitting in the queue
  * — those are the ones that would otherwise have been dialed.
@@ -271,23 +229,27 @@ async function refreshQueuedLeadStatuses({
         .filter(Boolean),
     ).values(),
   ];
-  const profiles = profileIdentities.length
-    ? await db
-      .collection("controlplanecaseprofiles")
-      .find({ $or: profileIdentities })
-      .project({ domain: 1, caseId: 1, lastStatusCheckAt: 1 })
-      .toArray()
+  const cadenceRows = profileIdentities.length
+    ? await LeadCadence.find({ $or: profileIdentities })
+      .select({ domain: 1, caseId: 1, logicsStatusCheckedAt: 1, logicsStatusInvalidatedAt: 1 })
+      .lean()
     : [];
-  const checkedAtByCase = new Map(
-    profiles.map((profile) => [
-      statusFreshnessKey(profile.domain, profile.caseId),
-      profile.lastStatusCheckAt ? new Date(profile.lastStatusCheckAt) : null,
+  const statusEvidenceByCase = new Map(
+    cadenceRows.map((row) => [
+      statusFreshnessKey(row.domain, row.caseId),
+      {
+        checkedAt: row.logicsStatusCheckedAt ? new Date(row.logicsStatusCheckedAt) : null,
+        invalidatedAt: row.logicsStatusInvalidatedAt ? new Date(row.logicsStatusInvalidatedAt) : null,
+      },
     ]),
   );
 
   const targets = items.filter((item) => {
-    const checkedAt = checkedAtByCase.get(statusFreshnessKey(item.domain, item.caseId));
-    if (checkedAt && checkedAt > cutoff) {
+    const evidence = statusEvidenceByCase.get(statusFreshnessKey(item.domain, item.caseId)) || {};
+    const checkedAt = evidence.checkedAt;
+    const invalidatedAt = evidence.invalidatedAt;
+    const invalidated = invalidatedAt && (!checkedAt || invalidatedAt > checkedAt);
+    if (!invalidated && checkedAt && checkedAt > cutoff) {
       summary.skippedFresh += 1;
       if (includeRefreshedIdentities) {
         summary.refreshedIdentities.push({

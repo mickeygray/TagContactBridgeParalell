@@ -167,12 +167,22 @@ test("LeadCadence Logics evidence is authoritative and CaseProfile is not requir
   assert.equal((await noProfile.source.readOne({ domain: "TAG", caseId: 1001 })).eligibility.ok, true);
 });
 
-test("status freshness gate accepts projected fresh proof and rejects missing or stale proof", async () => {
+test("intake status ships untouched leads and post-touch retries require newer Logics proof", async () => {
   const now = new Date("2026-07-10T19:00:00.000Z");
   const maxAge = 24 * 60 * 60 * 1000;
+  const untouched = {
+    totalAttemptCount: 0,
+    lastContactAt: null,
+    cadenceCounters: { cx: 0 },
+    lastTouched: { cx: null },
+    counterCadence: { cxDailyDateKey: null, cxDailyCalls: 0, lastCxDialedAt: null },
+  };
   const fresh = harness({
     row: sourceRow({
       caseProfile: null,
+      totalAttemptCount: 1,
+      lastContactAt: new Date("2026-07-10T17:30:00.000Z"),
+      logicsStatusInvalidatedAt: new Date("2026-07-10T17:30:00.000Z"),
       logicsStatusCheckedAt: new Date("2026-07-10T18:00:00.000Z"),
       logicsProspectEligible: true,
     }),
@@ -183,14 +193,28 @@ test("status freshness gate accepts projected fresh proof and rejects missing or
     true,
   );
 
-  const missing = harness({ statusMaxAgeMs: maxAge });
+  const missing = harness({ row: sourceRow(untouched), statusMaxAgeMs: maxAge });
   assert.equal(
-    (await missing.source.readOne({ domain: "TAG", caseId: 1001, now })).eligibility.reason,
+    (await missing.source.readOne({ domain: "TAG", caseId: 1001, now })).eligibility.ok,
+    true,
+  );
+
+  const touchedMissing = harness({
+    row: sourceRow({
+      totalAttemptCount: 1,
+      lastContactAt: new Date("2026-07-10T17:30:00.000Z"),
+      logicsStatusInvalidatedAt: new Date("2026-07-10T17:30:00.000Z"),
+    }),
+    statusMaxAgeMs: maxAge,
+  });
+  assert.equal(
+    (await touchedMissing.source.readOne({ domain: "TAG", caseId: 1001, now })).eligibility.reason,
     "status-freshness-unproven",
   );
 
-  const stale = harness({
+  const untouchedStale = harness({
     row: sourceRow({
+      ...untouched,
       caseProfile: null,
       logicsStatusCheckedAt: new Date("2026-07-09T18:59:59.999Z"),
       logicsProspectEligible: true,
@@ -198,8 +222,39 @@ test("status freshness gate accepts projected fresh proof and rejects missing or
     statusMaxAgeMs: maxAge,
   });
   assert.equal(
-    (await stale.source.readOne({ domain: "TAG", caseId: 1001, now })).eligibility.reason,
+    (await untouchedStale.source.readOne({ domain: "TAG", caseId: 1001, now })).eligibility.ok,
+    true,
+  );
+
+  const touchedStale = harness({
+    row: sourceRow({
+      caseProfile: null,
+      totalAttemptCount: 1,
+      lastContactAt: new Date("2026-07-10T17:30:00.000Z"),
+      logicsStatusCheckedAt: new Date("2026-07-09T18:59:59.999Z"),
+      logicsProspectEligible: true,
+    }),
+    statusMaxAgeMs: maxAge,
+  });
+  assert.equal(
+    (await touchedStale.source.readOne({ domain: "TAG", caseId: 1001, now })).eligibility.reason,
     "status-stale",
+  );
+
+  const invalidated = harness({
+    row: sourceRow({
+      caseProfile: null,
+      totalAttemptCount: 1,
+      lastContactAt: new Date("2026-07-10T18:30:00.000Z"),
+      logicsStatusCheckedAt: new Date("2026-07-10T18:00:00.000Z"),
+      logicsStatusInvalidatedAt: new Date("2026-07-10T18:30:00.000Z"),
+      logicsProspectEligible: true,
+    }),
+    statusMaxAgeMs: maxAge,
+  });
+  assert.equal(
+    (await invalidated.source.readOne({ domain: "TAG", caseId: 1001, now })).eligibility.reason,
+    "status-invalidated-after-touch",
   );
 });
 

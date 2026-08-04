@@ -80,6 +80,7 @@ test("a delayed exact attempt counts once without replacing the newer cadence sn
     domain: "WYNN",
     caseId: 42,
     cadenceCounters: { cx: 1 },
+    logicsStatusInvalidatedAt: new Date("2026-07-11T14:51:00.000Z"),
     lastTouched: { cx: new Date("2026-07-11T14:51:00.000Z") },
     counterCadence: {
       lastLeadDeliveryCountedCallId: "new-call",
@@ -115,6 +116,7 @@ test("a delayed exact attempt counts once without replacing the newer cadence sn
   assert.equal(model.doc.counterCadence.cxDailyCalls, 1);
   assert.equal(model.doc.totalAttemptCount, 2);
   assert.equal(model.doc.lastContactAt.toISOString(), "2026-07-11T14:51:00.000Z");
+  assert.equal(model.doc.logicsStatusInvalidatedAt.toISOString(), "2026-07-11T14:51:00.000Z");
 
   assert.deepEqual(await record(historical), { ok: true, counted: false });
   assert.equal(model.doc.cadenceCounters.cx, 2);
@@ -169,6 +171,7 @@ test("a current exact attempt advances both its idempotency ledger and latest sn
     domain: "TAG",
     caseId: 7,
     cadenceCounters: { cx: 0 },
+    logicsStatusInvalidatedAt: null,
     lastTouched: { cx: null },
     counterCadence: {
       lastLeadDeliveryCountedCallId: null,
@@ -199,6 +202,7 @@ test("a current exact attempt advances both its idempotency ledger and latest sn
   assert.equal(model.doc.counterCadence.cxDailyCalls, 1);
   assert.equal(model.doc.totalAttemptCount, 1);
   assert.equal(model.doc.lastContactAt.toISOString(), "2026-07-13T18:00:00.000Z");
+  assert.equal(model.doc.logicsStatusInvalidatedAt.toISOString(), "2026-07-13T18:00:00.000Z");
 });
 
 test("a call without a LeadCadence source is an explicit non-error skip", async () => {

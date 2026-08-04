@@ -82,7 +82,14 @@ function createRecordLeadDeliveryCadenceCall({ LeadCadence } = {}) {
       {
         $addToSet: { "counterCadence.leadDeliveryCountedAttemptKeys": providerAttemptKey },
         $inc: { "cadenceCounters.cx": 1 },
-        $max: { totalAttemptCount, lastContactAt: canonicalLastContactAt },
+        $max: {
+          totalAttemptCount,
+          lastContactAt: canonicalLastContactAt,
+          // Intake status is sufficient for attempt one. Counting a voice
+          // attempt invalidates it monotonically; the next retry must carry a
+          // Logics check at or after this exact completed-at boundary.
+          logicsStatusInvalidatedAt: completedAt,
+        },
       },
     );
 

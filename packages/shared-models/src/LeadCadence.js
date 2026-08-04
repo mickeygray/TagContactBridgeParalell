@@ -86,6 +86,10 @@ const leadCadenceSchema = new mongoose.Schema(
     // A CaseProfile is not created until case activity exists, so requiring
     // one here strands every brand-new lead before its first call.
     logicsStatusCheckedAt: { type: Date, default: null },
+    // Latest voice attempt that requires a new Logics status proof before a
+    // retry. Kept separate from checkedAt so delayed callbacks cannot erase a
+    // newer successful refresh.
+    logicsStatusInvalidatedAt: { type: Date, default: null },
     logicsProspectEligible: { type: Boolean, default: null },
     active: { type: Boolean, default: true, index: true },
     currentStage: { type: String, default: "new" },

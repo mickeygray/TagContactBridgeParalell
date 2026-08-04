@@ -27,64 +27,24 @@ test("morning Logics membership accepts supported response shapes and deduplicat
   assert.deepEqual(unwrapStatusCaseIds({ Data: null }), []);
 });
 
-test("morning first-touch proof reads untouched LeadCadence rows and writes Logics membership", async () => {
-  const rows = [
-    { _id: "a", domain: "TAG", caseId: 101 },
-    { _id: "b", domain: "TAG", caseId: 102 },
-    { _id: "c", domain: "WYNN", caseId: 201 },
-    { _id: "d", domain: "WYNN", caseId: 202 },
-  ];
-  const reads = [];
-  const writes = [];
-  const leadCadenceModel = {
-    find(filter, projection) {
-      reads.push({ filter, projection, sort: null, limit: null });
-      const call = reads.at(-1);
-      return {
-        sort(value) { call.sort = value; return this; },
-        limit(value) { call.limit = value; return this; },
-        async lean() { return rows; },
-      };
-    },
-    async bulkWrite(operations, options) {
-      writes.push({ operations, options });
-    },
-  };
-  const statusMembership = new Map([
-    ["TAG:1", [101]],
-    ["TAG:2", [102]],
-    ["WYNN:1", [201]],
-    ["WYNN:2", []],
-  ]);
+test("morning first-touch proof trusts intake evidence without a second Logics read", async () => {
+  let clientReads = 0;
+  let cadenceReads = 0;
   const result = await refreshUntouchedLeadCadenceStatuses({
     domains: ["tag", "WYNN"],
     allowedProspectStatusIds: [1, 2],
-    leadCadenceModel,
-    logicsClientFactory: (domain) => ({
-      async getCasesByStatus(statusId) {
-        return { Data: statusMembership.get(`${domain}:${statusId}`) || [] };
-      },
-    }),
+    leadCadenceModel: { find() { cadenceReads += 1; throw new Error("must not read cadence"); } },
+    logicsClientFactory: () => { clientReads += 1; throw new Error("must not read Logics"); },
   });
 
-  assert.deepEqual(result, { scanned: 4, refreshed: 4, eligible: 3, blocked: 1 });
-  assert.equal(reads.length, 1);
-  assert.equal(reads[0].filter.active, true);
-  assert.deepEqual(reads[0].sort, { createdAt: -1, _id: -1 });
-  assert.equal(reads[0].limit, 20000);
-  assert.equal(writes.length, 1);
-  assert.equal(writes[0].options.ordered, false);
-  assert.deepEqual(
-    writes[0].operations.map((operation) => ({
-      id: operation.updateOne.filter._id,
-      statusId: operation.updateOne.update.$set.statusId,
-      eligible: operation.updateOne.update.$set.logicsProspectEligible,
-    })),
-    [
-      { id: "a", statusId: 1, eligible: true },
-      { id: "b", statusId: 2, eligible: true },
-      { id: "c", statusId: 1, eligible: true },
-      { id: "d", statusId: undefined, eligible: false },
-    ],
-  );
+  assert.deepEqual(result, {
+    status: "intake-authority",
+    scanned: 0,
+    refreshed: 0,
+    eligible: 0,
+    blocked: 0,
+    failed: 0,
+  });
+  assert.equal(clientReads, 0);
+  assert.equal(cadenceReads, 0);
 });

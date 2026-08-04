@@ -202,6 +202,7 @@ const SOURCE_LEAD_PROJECTION = Object.freeze({
   state: 1,
   statusId: 1,
   logicsStatusCheckedAt: 1,
+  logicsStatusInvalidatedAt: 1,
   logicsProspectEligible: 1,
   active: 1,
   currentStage: 1,

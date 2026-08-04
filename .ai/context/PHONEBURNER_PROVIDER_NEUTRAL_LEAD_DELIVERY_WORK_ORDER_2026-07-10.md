@@ -1816,3 +1816,33 @@ and production-simple day-start tests before a controlled Linux restart.
 - The former CaseProfile source join and veto code remain hard-gated during
   the no-delete proof window and are pending physical deletion after live
   evidence.
+
+## Phase 9 zero-touch priority and status-proof amendment (2026-08-04)
+
+This amendment supersedes the 2026-08-03 requirement to refresh Logics
+membership again before the first call.
+
+- Intake owns the initial Logics status check and persists that evidence on
+  `LeadCadence`. A lead with zero canonical and compatibility voice touches
+  ships from that intake proof without a morning bulk lookup.
+- Zero-touch work is the highest non-fresh priority across all ordinary pools.
+  A touched retry may not jump ahead because it belongs to an earlier pool or
+  because a bounded database read returned it first.
+- Counting the first or any later voice attempt monotonically records
+  `logicsStatusInvalidatedAt` on `LeadCadence` using the attempt completion
+  time. It never erases the prior check timestamp.
+- Before touched work can be served again, an exact-case Logics read must
+  produce `logicsStatusCheckedAt` at or after the latest invalidation and must
+  still prove prospect eligibility. Missing, stale, or older proof fails the
+  retry closed and is eligible for the bounded blocked-item refresher.
+- `CaseProfile` is not an admission or freshness authority. The exact-case
+  refresh may opportunistically fold profile/phone evidence, but delivery
+  decisions read only `LeadCadence`, Logics, explicit DNC evidence, and the
+  separate appointment hold.
+- Durable provider posts already claimed before a wake are recovered before
+  new selection so a timeout cannot duplicate or strand a provider contact.
+
+Proof requires a source-admission test for untouched/touched states, a
+monotonic cadence-invalidation test, a repository projection gate, and a
+production runtime test where zero-touch work in one pool beats a due retry in
+another.
