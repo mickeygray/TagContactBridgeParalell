@@ -5,6 +5,11 @@
 // Defaults to yesterday..today (LA). Idempotent full-day recompute.
 
 require("dotenv").config();
+// This box cannot resolve SRV; without this the mongodb+srv lookup dies as
+// ECONNREFUSED. No-op unless DNS_SERVERS is set.
+if (process.env.DNS_SERVERS) {
+  try { require("dns").setServers(process.env.DNS_SERVERS.split(",").map((x) => x.trim()).filter(Boolean)); } catch { /* ignore */ }
+}
 
 const { connectMongo, disconnectMongo } = require("../packages/event-core/src");
 const { getSharedConfig } = require("../packages/shared-config/src");

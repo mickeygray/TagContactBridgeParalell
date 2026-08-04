@@ -49,6 +49,15 @@ const addDays = (dateKey, n) =>
 
 const PACIFIC = "America/Los_Angeles";
 
+// The LD COST day runs 20:00 -> 20:00 Pacific, matching the hour the board is
+// published. See countLdLeads for why, and for the vendor-invoice trade-off it
+// accepts. Env-overridable so the boundary and the report hour can be moved
+// together rather than drifting apart silently.
+const COST_DAY_CUTOVER_HOUR = (() => {
+  const parsed = Number(process.env.LD_COST_DAY_CUTOVER_HOUR);
+  return Number.isFinite(parsed) && parsed >= 0 && parsed <= 23 ? parsed : 20;
+})();
+
 /**
  * Count new leads received in [from..to], inclusive. PACIFIC days.
  *
@@ -92,11 +101,43 @@ async function countLdLeads({ from, to = from, domain = null, EventRecord = null
     { $match: match },
     // Distinct (domain, day, caseId) first, THEN count — a vendor retry that
     // posts the same lead twice must bill once.
+    //
+    // ── THE COST DAY RUNS 20:00 -> 20:00 ────────────────────────────────
+    //
+    // Mickey 2026-08-04: "i guess we take what it says at 8 pm and go from 8pm
+    // to 8pm for ld costs goign forward."
+    //
+    // A midnight day can never be complete at 8pm — leads keep arriving for
+    // four more hours. On 2026-08-03 the board said 107 leads / $321 at
+    // 16:56 and the finished day was 141 / $423, so the same day reported two
+    // different costs depending on when it ran. Shifting the boundary to the
+    // reporting hour makes the number FINAL at the moment it is published.
+    //
+    // Implemented by subtracting the cutover before taking the day key: a lead
+    // at 21:00 on the 3rd shifts to 01:00 on the 4th and lands on the 4th's
+    // cost day, which is the day whose 8pm board first reports it.
+    //
+    // TRADE-OFF, stated because it was proven the other way: Pacific-MIDNIGHT
+    // days are what reproduce the vendor's billed counts (86/111/105/101 for
+    // 07-25..28). An 8pm day will NOT match their per-day invoice — it
+    // reconciles over a month, not a night. That is a deliberate choice of a
+    // complete daily number over a per-day tie-out.
     { $group: { _id: {
       d: "$payload.domain",
       c: "$payload.caseId",
-      day: { $dateToString: { date: "$createdAt", format: "%Y-%m-%d", timezone: PACIFIC },
-      },
+      // ADD the remainder of the day, do not subtract the cutover. Cost day D
+      // is [D-1 20:00, D 20:00), so shifting FORWARD by 24-20 = 4h maps that
+      // window onto calendar day D:
+      //   D-1 20:00 + 4h = D 00:00   -> D   (first moment of the cost day)
+      //   D   19:59 + 4h = D 23:59   -> D   (last moment)
+      //   D   20:00 + 4h = D+1 00:00 -> D+1 (rolls to tomorrow, correctly)
+      // Subtracting 20h instead pushed a 10am lead back onto the PREVIOUS day
+      // and reported 08-03 as 17 leads.
+      day: { $dateToString: {
+        date: { $add: ["$createdAt", (24 - COST_DAY_CUTOVER_HOUR) * 3600000] },
+        format: "%Y-%m-%d",
+        timezone: PACIFIC,
+      } },
     } } },
     { $group: { _id: { d: "$_id.d", day: "$_id.day" }, n: { $sum: 1 } } },
   ]);

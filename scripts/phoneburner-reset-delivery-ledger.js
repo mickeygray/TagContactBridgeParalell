@@ -6,6 +6,14 @@
 
 const path = require("path");
 
+// This box cannot resolve SRV records, so the mongodb+srv:// lookup fails as
+// ECONNREFUSED and the script dies before it reaches Mongo. Same opt-in
+// override scripts/report.js carries; a no-op unless DNS_SERVERS is set.
+if (process.env.DNS_SERVERS) {
+  try { require("dns").setServers(process.env.DNS_SERVERS.split(",").map((s) => s.trim()).filter(Boolean)); }
+  catch { /* an unusable override must not block the reset */ }
+}
+
 const APPLY_ACK = "RESET-PHONEBURNER-DELIVERY-LEDGER";
 const RESET_STATES = Object.freeze(["packetized", "provider_accepted", "in_call", "delivery_failed"]);
 

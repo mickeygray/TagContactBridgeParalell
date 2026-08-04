@@ -234,3 +234,37 @@ inputs is blank on each. If it is step 3, the fix is upstream — something is
 creating cases without a `sourceName` — not in the report. Do NOT widen the
 call match to non-marketing lines to close the gap; a servicing call naming a
 source is worse than an honest blank.
+
+---
+
+## 9. Direction (TBD) — a morning "clean up the money" email
+
+Mickey 2026-08-04: *"there would eventually be a morning email to Settlement
+officers about where to clean up some money including red lines and overnight
+calls but thats sorta a design tbd."*
+
+Not designed, not built. Recorded so the pieces are not rediscovered.
+
+**What already exists to build it from:**
+
+- `status` block -> `REDLINES TO CHASE` (suspended / post-date / DNC), already
+  one row per case per lane, already deduped.
+- Weekend/overnight callers: measured 2026-08-01..02 as 31 inbound, 0 missed,
+  **19 FIRST-TIME callers**, all 31 carrying a callback number. Concentrated on
+  Urgent Third State (16) and 3rd Day Pink (10). These are mail responses that
+  no board reported, because none runs at a weekend.
+- Saved `ReportDefinition`s already carry blocks + schedule + recipients, so a
+  07:00 M-F definition is configuration rather than code.
+
+**The one real gap, and it is structural:** a definition has a single
+`recipients` list and NO per-person scoping. A board addressed to five
+settlement officers currently sends all five the same page. Per-officer content
+means either (a) one definition per officer with a filter, or (b) a render that
+splits by officer at send time. That decision is the design, and it is the part
+worth thinking about before any block is written.
+
+**Boundary note:** if it covers "overnight", use the same Fri-20:00 -> Mon-20:00
+reach the LD cost day now uses, or Monday's edition silently omits the weekend —
+the exact hole this document already records for LD spend.
+
+**Do NOT** put mail/CallRail facts on a vendor board; CallRail is one TAG tenant.
