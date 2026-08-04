@@ -457,6 +457,58 @@ Missing: the report path never calls the minter; there is no searchable index;
 252 CallRail rows are mislabeled `platform:"ex"`; the EX exclusion (502 rows)
 must be enforced *in the endpoint*, not by the caller.
 
+### 7a. SHAKEDOWN — `recordingArchiveService` (1,666 lines)
+
+Mickey, 2026-08-04: *"the hard downloaded calls is going to translate to a list
+of links so we can actually just store it in mongo, so the searching everywhere
+and getting them part (especially ring central code) and like rules for dividing
+them into the right folder etc these sorts of things are of value, but since we
+are just storing links."*
+
+This is §3b applied to the 23:00 archive. **The finding logic is the asset; the
+fetching is not.** Split the file, keep the top half:
+
+**KEEP — reformat to return a LOCATOR, not a buffer**
+| Lines | What | Why it survives |
+| --- | --- | --- |
+| 471 `resolveRingcxRecording` | RingCX segment → recording | the RC code Mickey named |
+| 721 `resolveCallrailRecording` | CallRail → media url | already link-native (HTTP 200) |
+| 821 `resolveRingcentralRecording` | RC → content uri | pairs with the existing `/rc-play/:id` forwarder |
+| 846 `resolveRecordingArtifact` | the provider-order fan-out | "searching everywhere" |
+| 387 `pickBestSegmentForCallLog` | which segment IS the call | non-obvious, hard-won |
+| 1011 `pickTerminalCandidate` | which candidate wins | same |
+
+**KEEP — the folder rules, unchanged in meaning**
+`normalizeAgentBucketName` (125), `getAscsAgentNameSet` (133),
+`getAlwaysCxAgentNameSet` (141), `getExcludedAgentTokens` (149),
+`findExcludedAgentMatch` (166), `findExcludedCallLogAgentMatch` (188),
+`buildRecordingFileName` (226). These encode who a call belongs to and who must
+never be archived. **The EX exclusion in particular becomes an index-time and
+endpoint-time rule (§7), not a download-time one** — it must not be lost in the
+move, because dropping the download is what currently enforces it.
+
+**DROP — the media half**
+`downloadRecordingBySegment` / buffer plumbing (544-556), `fetchBinary` (645,
+753), and the entire Google Drive destination layer (280-283, 1054-1068:
+`clientEmail`, `privateKey`, per-bucket `folderId`s). Media stays with the
+vendor.
+
+**The refactor in one sentence:** every `resolve*Recording` currently returns
+`{ artifact: { buffer, mimeType } }`; it should return
+`{ provider, providerCallId, locator, bucket }` and never fetch bytes.
+
+**Fate of the 23:00 timer:** retired. Link capture belongs to the 19:50 pass as
+part of `call-links` (task 4), not as a fourth task — one concept, one step.
+Per §5c the handover is two-step: fold in and kill the timer in the same change,
+or it runs in both places.
+
+**Carry forward:** `recordingArchive.driveWebViewLink` is read by
+`nightReportService:300,309` (the report's listenUrl) and
+`trainingCallReviewSourceService:342`. Those readers must be re-pointed at the
+new locator in the same change, or the report's listen links go blank.
+
+---
+
 WORK: authenticated index endpoint returning metadata + opaque ids, minting on
 request; repair the 252 mislabeled rows; point the nightly email at the minter.
 `DailyDial` stays exactly as it is — it works. `MarketingCallLink` folds in.
