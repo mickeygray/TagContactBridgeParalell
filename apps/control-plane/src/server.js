@@ -773,9 +773,36 @@ async function startHourlySweepWorker({ config, runtime, workerState, spendSyncR
         calllogBridgeEnabled: !scheduledPhaseLite,
         staleCadenceSweepEnabled: !scheduledPhaseLite,
         staleNcoaSweepEnabled: !scheduledPhaseLite,
-        dncRecheckEnabled: !scheduledPhaseLite,
-        fillerPoolRefreshEnabled: !scheduledPhaseLite,
-        agedRollingRefreshEnabled: !scheduledPhaseLite,
+        // ── KEPT ON THROUGH LITE MODE ────────────────────────────────────
+        //
+        // Mickey 2026-08-04: "two things that need to stay on are the aged
+        // pool advancement and dnc check ... we may have toggled those off in
+        // recent patches."
+        //
+        // He was right. `scheduledPhaseLite` is hard-coded true above, and it
+        // was switching off EIGHT sweeps at once — including these two, which
+        // are not reporting chores:
+        //   · dncRecheck        keeps DNC'd numbers out of the dialer. Off, we
+        //                       keep calling people who asked us not to.
+        //   · agedRollingRefresh advances the aged pool. Off, the pool stops
+        //                       moving and the floor works a frozen list.
+        //
+        // Both are now independent of lite mode. Everything else it gates
+        // stays off — lite mode is still doing its job for the reporting-side
+        // sweeps, which is what it was introduced for.
+        dncRecheckEnabled: true,
+        // Mickey 2026-08-04: "we started poking at adding old tag yellows to
+        // phone burner is that the thing." It is. This is the MONTHLY
+        // filler-pool refresh: a DNC-scrubbed re-sample of status=2 (opened)
+        // prospects into MasterProspectIndex — for TAG, caseId >= 50000 and
+        // carrying a phone, i.e. exactly the old opened TAG prospects. That
+        // pool is the aged filler the dialer falls back to.
+        //
+        // MPI looks healthy (TAG 4,586 / WYNN 10,548) but that freshness is
+        // the dialer TOUCHING rows, not new ones arriving. Off, nothing
+        // re-samples and the floor grinds a shrinking list.
+        fillerPoolRefreshEnabled: true,
+        agedRollingRefreshEnabled: true,
         resolutionEmailsEnabled: !scheduledPhaseLite,
         logger: runtime.logger,
       });
