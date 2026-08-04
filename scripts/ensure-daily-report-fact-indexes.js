@@ -13,8 +13,9 @@ const DailyReportFact = require("../packages/shared-models/src/DailyReportFact")
 
 async function main() {
   await connectMongo(getSharedConfig());
-  const names = await DailyReportFact.createIndexes();
-  console.log(`daily report fact indexes ready: ${names.length}`);
+  const declared = DailyReportFact.schema.indexes();
+  await DailyReportFact.createIndexes();
+  console.log(`daily report fact indexes ready: ${declared.length}`);
 }
 
 main()
