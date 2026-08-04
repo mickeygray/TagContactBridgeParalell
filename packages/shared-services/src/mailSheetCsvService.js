@@ -18,11 +18,17 @@
 //
 // ── WHY NOT spendSyncService ───────────────────────────────────────────────
 //
-// That path is 1,142 lines across two files, drives nine sheets, and only runs
-// inside the control plane — which is Manual+Stopped, so the sheet had not
-// reached SpendEntry since 2026-07-30 while the vendor was still updating it.
-// A report that needs one CSV should not depend on a scheduled service being
-// up. This reads the sheet at report time, live, and stores nothing.
+// CORRECTED 2026-08-04. An earlier version of this comment said that sync was
+// dead and SpendEntry had not moved since 2026-07-30. **THAT WAS WRONG.** It is
+// LIVE: it wrote three 2026-08-03 mailer rows at 19:45:27 that night, hours
+// after the check that produced the claim. spendSyncService and SpendEntry are
+// NOT deprecated and must not be deleted on the strength of that sentence.
+//
+// This reader still earns its place, for a narrower reason than first written:
+// it reads at REPORT time, so a day the scheduled sync has not reached yet — a
+// midday board, or a day it half-finished — is not blank. Where both exist they
+// agree (08-03 read $1,584.48 from each), and the live read wins simply as the
+// newer of two views of one sheet.
 //
 // It is deliberately NOT a writer. No new collection, no second copy of the
 // numbers to drift — the reader gets rows shaped exactly like the spend rows

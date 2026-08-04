@@ -112,7 +112,7 @@ async function listCallrailLongCalls({
  * to work, and the work order forbids a second parser or writer.
  */
 async function listLdLongDialsFromDials({
-  domain = null, dateKey, minDurationSec = 300, limit = 5,
+  domain = null, dateKey, minDurationSec = 300, limit = 5, logger = null,
 } = {}) {
   const { DailyDial, LeadDeliveryEvent } = require("../../shared-models/src");
   const floor = Math.max(60, Number(minDurationSec) || 300);
@@ -147,21 +147,47 @@ async function listLdLongDialsFromDials({
   // page rather than a lookup per call.
   const needs = top.filter((c) => !c.listenUrl && c.providerCallId).map((c) => c.providerCallId);
   if (needs.length) {
+    // ── THE REFERENCE GOES THROUGH THE GATE, NEVER STRAIGHT OUT ──────────
+    //
+    // An earlier version of this took safePayload.recordingReference and put
+    // it in the email verbatim. recordingReferencePromotionService exists
+    // precisely to stop that: it rejects a private or loopback IP, requires an
+    // EXACT host match (a wildcard rule promotes nothing), and refuses a value
+    // that is not a locator at all rather than falling back to weaker
+    // evidence. Bypassing it meant a bad reference in a provider payload would
+    // have become a link in an outgoing email.
+    //
+    // It also settles precedence in one place: a stored validated URL beats a
+    // retained reference, and a corrupt stored URL is a signal — not licence
+    // to reach for the weaker source.
+    //
+    // NOTE: promotion needs PHONEBURNER_RECORDING_ALLOWED_HOSTS. With it unset
+    // every reference is refused as "recording-host-allowlist-empty" and this
+    // section renders no links — a visible, safe failure rather than a silent
+    // unvalidated one.
     const events = await LeadDeliveryEvent.find({
       providerCallId: { $in: needs },
       "safePayload.recordingReference": { $type: "string", $ne: "" },
-    }).select("providerCallId safePayload.recordingReference").lean();
+    }).select("providerCallId safePayload").lean();
+    const { resolveRecordingLocator } = require("./recordingReferencePromotionService");
+    const allowedHosts = process.env.PHONEBURNER_RECORDING_ALLOWED_HOSTS || "";
     const byCall = new Map();
+    let refused = 0;
     for (const e of events) {
+      const key = String(e.providerCallId);
       // First one wins; a retry posts the same call twice.
-      if (!byCall.has(String(e.providerCallId))) {
-        byCall.set(String(e.providerCallId), e.safePayload.recordingReference);
-      }
+      if (byCall.has(key)) continue;
+      const locator = resolveRecordingLocator(e.safePayload || {}, { allowedHosts });
+      if (locator.recordingUrl) byCall.set(key, locator);
+      else refused += 1;
     }
     for (const c of top) {
       if (c.listenUrl) continue;
-      const ref = byCall.get(String(c.providerCallId));
-      if (ref) { c.listenUrl = ref; c.listenFromReference = true; }
+      const hit = byCall.get(String(c.providerCallId));
+      if (hit) { c.listenUrl = hit.recordingUrl; c.listenStrength = hit.strength; }
+    }
+    if (refused) {
+      logger?.warn?.("night_recordings.reference_refused", { refused });
     }
   }
 

@@ -112,6 +112,20 @@ const SOURCE_CAMPAIGN_LABELS = Object.freeze({
     64: Object.freeze({ label: "BCD", catchAll: false }),
   }),
   WYNN: Object.freeze({
+    // BCD runs under BOTH tenants and the id spaces differ — TAG 64, WYNN 31.
+    // Confirmed 2026-08-04 by Mickey on the first WYNN BCD sale (case 138819,
+    // $166.67), and corroborated by CaseProfile.sourceName === "BCD" on 15
+    // WYNN cases and 275 TAG ones.
+    //
+    // Mickey 2026-08-04: "bcd money will be in wynn under the source bcd or
+    // matching calls in callrail" / "you should also check tag cause people are
+    // lazy and inconsistent but it will potentially be in both but probably
+    // mostly wynn."
+    //
+    // Unregistered, campaign 31 resolved to NOTHING, so that first sale landed
+    // as unattributed while BCD's spend sat on the board with no money against
+    // it — the piece looked like a total loss.
+    31: Object.freeze({ label: "BCD", catchAll: false }),
     45: Object.freeze({ label: "LD CUSTOM", catchAll: false }),
     46: Object.freeze({ label: "LD GENERAL", catchAll: false }),
     47: Object.freeze({ label: "LD CUSTOM 2", catchAll: false }),

@@ -1514,6 +1514,127 @@ const BLOCKS = [
     },
   },
   {
+    id: "offhourscalls",
+    label: "Called while nobody was here",
+    hint: "New prospects who rang outside working hours — a call-back list",
+    termsShort: "First-time inbound callers whose call landed outside working hours.",
+    terms: "FIRST-TIME inbound CallRail callers whose call landed outside working hours (after 17:00, before 08:00, or at a weekend). Only calls INSIDE the reported range count - the call feed reaches back 45 days so call-to-close lag is not clipped, and that lookback is excluded here or a call-back sheet would carry a month of stale callers. The day and hour are the PACIFIC ones the call happened at, not the day it was fetched. Repeat callers are excluded - they are already in somebody's follow-up. Ordered oldest first, because the coldest lead is the one most likely to go away.",
+    needs: ["callsRange"],
+    compute({ callsRange = [], callsRangeUnavailable = null, from = null, to = null }) {
+      // ── WHY THIS EXISTS ─────────────────────────────────────────────────
+      //
+      // Mickey 2026-08-04: a morning email to settlement officers "about where
+      // to clean up some money including red lines and overnight calls".
+      //
+      // Measured over 2026-08-01..02: 31 inbound calls, 19 of them FIRST-TIME
+      // callers, every one carrying a callback number — and no board reported
+      // any of it, because none runs at a weekend. Those 19 raised their hand
+      // and then sat through Monday untouched.
+      //
+      // FIRST-TIME ONLY. A repeat caller is already in someone's follow-up, so
+      // listing them turns a call-back sheet into a call log nobody actions.
+      // CallRail's own `firstCall` is authoritative here: it counts calls we
+      // never matched to a case, which anything we rebuilt would miss.
+      const OPEN_HOUR = Number(process.env.OFF_HOURS_OPEN || 8);
+      const CLOSE_HOUR = Number(process.env.OFF_HOURS_CLOSE || 17);
+      const PACIFIC = "America/Los_Angeles";
+
+      // The DATE must come from the same clock as the hour. `dateKey` is the
+      // day the sync FETCHED, which is not always the Pacific day the call
+      // happened on: a call at 2026-08-03T04:00Z is Sunday 2026-08-02 21:00
+      // Pacific, and pairing dateKey with the Pacific weekday printed
+      // "2026-08-03 Sun" — a date and a day-name that contradict each other on
+      // a sheet somebody is meant to work from.
+      const partsOf = (iso) => {
+        const at = Date.parse(iso);
+        if (!Number.isFinite(at)) return null;
+        const f = new Intl.DateTimeFormat("en-CA", {
+          timeZone: PACIFIC, weekday: "short", hour: "2-digit", hour12: false,
+          year: "numeric", month: "2-digit", day: "2-digit",
+        }).formatToParts(new Date(at));
+        const get = (t) => f.find((x) => x.type === t)?.value;
+        return {
+          weekday: get("weekday"),
+          hour: Number(get("hour")) % 24,
+          dateKey: `${get("year")}-${get("month")}-${get("day")}`,
+        };
+      };
+
+      const rows = [];
+      for (const c of callsRange) {
+        // Only calls INSIDE the reported range. callsRange deliberately reaches
+        // back 45 days so call-to-close lag is not clipped, and that lookback
+        // must not leak a month of old callers into a call-back sheet.
+        if (from && String(c.dateKey || "") < from) continue;
+        if (to && String(c.dateKey || "") > to) continue;
+        if (c.firstCall !== true) continue;
+        const p = partsOf(c.startedAt);
+        if (!p) continue;
+        const weekend = p.weekday === "Sat" || p.weekday === "Sun";
+        const offHours = weekend || p.hour < OPEN_HOUR || p.hour >= CLOSE_HOUR;
+        if (!offHours) continue;
+        rows.push({
+          // The PACIFIC day the call happened, not the day it was fetched.
+          dateKey: p.dateKey,
+          fetchedUnder: c.dateKey,
+          when: `${p.weekday} ${String(p.hour).padStart(2, "0")}:00`,
+          source: c.source || "(unknown)",
+          phone: c.phone || null,
+          durationSec: Number(c.durationSec) || 0,
+          minutes: Math.round((Number(c.durationSec) || 0) / 6) / 10,
+          // A call nobody picked up is the most urgent row on the page.
+          answered: c.answered,
+          weekend,
+        });
+      }
+      // Oldest first — the coldest lead goes stale soonest.
+      rows.sort((a, b) => String(a.dateKey).localeCompare(String(b.dateKey)) || a.when.localeCompare(b.when));
+      rows.unavailable = callsRangeUnavailable || null;
+      return rows;
+    },
+    renderText(rows) {
+      if (rows.unavailable) return `Called while nobody was here   FEED INCOMPLETE — ${rows.unavailable}`;
+      if (!rows.length) return "Called while nobody was here   (none)";
+      const L = [`Called while nobody was here (${rows.length})`];
+      for (const r of rows.slice(0, 40)) {
+        L.push(`  ${r.dateKey} ${r.when}  ${String(r.source).slice(0, 30).padEnd(31)}`
+          + `${r.phone || "(no number)"}  ${r.minutes}m${r.answered === false ? "  MISSED" : ""}`);
+      }
+      if (rows.length > 40) L.push(`  … and ${rows.length - 40} more`);
+      return L.join(NEWLINE);
+    },
+    csv(rows) {
+      const missed = rows.filter((r) => r.answered === false).length;
+      return {
+        // An unreadable feed is NOT a quiet weekend. Say which.
+        summary: rows.unavailable
+          ? `CALL FEED INCOMPLETE — ${rows.unavailable}`
+          : (rows.length
+            ? `${rows.length} first-time caller(s) rang outside working hours`
+              + (missed ? ` · ${missed} went unanswered` : "")
+            : undefined),
+        rows,
+        // The phone IS the deliverable — this is a call-back sheet, not a
+        // report. Everything else is context for deciding who to ring first.
+        emailColumns: [
+          { header: "when", get: (x) => `${x.dateKey} ${x.when}` },
+          { header: "piece", get: (x) => x.source },
+          { header: "call back", get: (x) => x.phone || null },
+          { header: "mins", get: (x) => x.minutes },
+        ],
+        columns: [
+          { header: "date", get: (x) => x.dateKey },
+          { header: "when", get: (x) => x.when },
+          { header: "weekend", get: (x) => (x.weekend ? "yes" : "no") },
+          { header: "piece", get: (x) => x.source },
+          { header: "phone", get: (x) => x.phone || null },
+          { header: "minutes", get: (x) => x.minutes },
+          { header: "answered", get: (x) => (x.answered === null ? null : Boolean(x.answered)) },
+        ],
+      };
+    },
+  },
+  {
     id: "postdates",
     label: "Post-dates: kept or lost",
     hint: "Cases promised for a later date, and whether the money actually arrived",

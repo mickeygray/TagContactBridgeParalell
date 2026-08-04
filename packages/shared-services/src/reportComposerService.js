@@ -375,11 +375,17 @@ async function gatherMaterial({
     // Mickey 2026-08-03: "just read the csv if we have no email at 7:50".
     //
     // The vendor does one or the other on a given day — invoice OR sheet, not
-    // reliably both. SpendEntry is the sheet's PERSISTED form, written by a
-    // sync that only runs inside the control plane; that service is
-    // Manual+Stopped, so on 2026-08-01..03 the vendor was updating the sheet
-    // and none of it reached the board. Reading the CSV directly removes the
-    // dependency on that service being up.
+    // reliably both. SpendEntry is the sheet's PERSISTED form, written by the
+    // nightly spend sync.
+    //
+    // CORRECTED 2026-08-04: this comment previously said that sync was
+    // Manual+Stopped and had written nothing since 07-30. WRONG — it wrote
+    // 08-03 rows at 19:45:27 that night. Do NOT treat spendSyncService or
+    // SpendEntry as dead on the strength of it.
+    //
+    // Reading the CSV here still matters because the sync runs at NIGHT: a
+    // board built before it has run, or on a day it half-finished, would
+    // otherwise report a blank or partial day.
     //
     // Only when SpendEntry has nothing — a live row is already the same sheet,
     // and reading both would duplicate the day. The INVOICE still wins any day
@@ -410,10 +416,11 @@ async function gatherMaterial({
           advise(`mail sheet not read — ${csv.unavailable}`);
         } else {
           // THE CSV IS THE SHEET, READ NOW. SpendEntry is a CACHED COPY of the
-          // same sheet, written by a sync that has been stopped since
-          // 2026-07-30 — so where the two disagree the live read is the newer
-          // truth, and a day the sync only half-finished must not be frozen
-          // partial.
+          // same sheet, written by the nightly sync — so where the two differ
+          // the live read is the newer of two views of one source, and a day
+          // the sync has not reached yet (or only half-finished) must not be
+          // frozen blank or partial. Where both are present they AGREE: 08-03
+          // read $1,584.48 from each.
           //
           // Gating on "does this day have ANY persisted row" did exactly that:
           // with one of 08-03's three jobs persisted, the day reported $537.46
@@ -437,7 +444,7 @@ async function gatherMaterial({
             sheetRows.push(...csv.rows);
             const days = [...csvDays].sort();
             notes.push(displaced.length
-              ? `mail spend read live from the sheet for ${days.join(", ")} — ${displaced.length} stale persisted row(s) replaced`
+              ? `mail spend read live from the sheet for ${days.join(", ")} — ${displaced.length} persisted row(s) superseded by the live read`
               : `mail spend read live from the sheet for ${days.join(", ")}`);
           }
           // A day with persisted rows the live sheet no longer shows is a
@@ -1000,6 +1007,47 @@ async function gatherMaterial({
             });
             material.payments = attachPhones(material.payments);
             material.declines = attachPhones(material.declines);
+
+            // ── A VENDOR BOARD CARRIES ONLY ITS OWN CHANNEL'S MONEY ───────
+            //
+            // THE TENANT RULE dropped mail/BCD SPEND on a non-mail tenant's
+            // board but never touched MONEY. The moment BCD money appeared
+            // under WYNN — 2026-08-04, case 138819, $166.67 — the LD vendor's
+            // board read "MONEY IN $166.67 (1 deal)" while its own spend line
+            // said "(LD only)". That is not merely a disclosure of a channel
+            // that is not theirs: it CREDITS THEM WITH A SALE THEY DID NOT
+            // MAKE, on an email that leaves the company.
+            //
+            // Mickey 2026-08-04: "bcd money will be in wynn under the source
+            // bcd ... it will potentially be in both but probably mostly
+            // wynn." So this is now a live condition, not a hypothetical.
+            //
+            // Done HERE, after the source is enriched and before any block
+            // sees the rows, so the topline, By source and By officer cannot
+            // disagree about which money exists. Dropping it in each block
+            // would be three chances to drift.
+            //
+            // The ALL-COMPANY board is untouched: it is unscoped, so
+            // scopedTenant is null and every channel's money still counts.
+            if (scopedTenant && !mailApplies) {
+              const { isLdSource } = require("../../shared-config/src/activeSources");
+              const isOurs = (p) => {
+                const names = [p.sourceAtSale, p.leadSourceName, p.catchAllLabel];
+                // Unresolvable money STAYS. A blank source is not proof it
+                // belongs to another channel, and silently dropping it would
+                // understate the vendor rather than overstate them — still
+                // wrong, just in the flattering direction.
+                if (!names.some(Boolean)) return true;
+                return names.filter(Boolean).some((n) => isLdSource(n));
+              };
+              const before = material.payments.length;
+              material.payments = material.payments.filter(isOurs);
+              material.declines = (material.declines || []).filter(isOurs);
+              const dropped = before - material.payments.length;
+              if (dropped) {
+                notes.push(`${dropped} payment(s) omitted — they belong to another channel, not ${scopedTenant}'s`);
+              }
+            }
 
             // A MIDDAY report cannot wait for tonight's snapshot. The night
             // pass stamps officerAtSale at 19:50, so before then every deal
