@@ -113,6 +113,43 @@ function significanceFor(row, notableByPhone = new Map()) {
   return [...reasons];
 }
 
+// ── WHAT COUNTS AS A RINGCENTRAL ("ex") CALL WORTH INDEXING ─────────────────
+//
+// Mickey 2026-08-04: "we don't have to work twice, and the ex API is a lot less
+// friendly for rate limiting. So the rules for ex is like calls that are not
+// inter-office or tied to a marketing piece — like when an agent talks to an
+// existing client."
+//
+// Two reasons to be strict here and nowhere else. A marketing-attributed call
+// already belongs to CallRail, which hands out durable links for free; taking it
+// through RingCentral as well is the same call fetched twice, and the second
+// fetch is the expensive one. And inter-office calls are not client contact at
+// all.
+//
+// Measured over 14 days, 1,960 `ex` rows:
+//     marketing-attributed (mailPieceKey / sourceCanonicalId)   1,059
+//     short number, i.e. an extension                             265
+//     carries a caseId                                          1,024
+//     sourceChannel: mail 750 · none 664 · ld-posting 403 · callrail 83 · mailer 19
+//
+// So roughly two thirds are already somebody else's call or not a client at all.
+const MARKETING_CHANNELS = new Set(["mail", "mailer", "callrail", "ld-posting", "ld"]);
+
+/**
+ * @returns {null|string} null to keep, or the reason it is skipped.
+ */
+function exSkipReason(row = {}) {
+  const digits = String(row.normalizedPhone || row.phone || "").replace(/\D/g, "");
+  // An extension, not a phone number — agent to agent.
+  if (digits && digits.length < 10) return "inter-office";
+  // CallRail owns anything attributable to a marketing piece, and it serves
+  // those links without an API call.
+  if (row.mailPieceKey) return "marketing-piece";
+  if (MARKETING_CHANNELS.has(String(row.sourceChannel || "").toLowerCase())) return "marketing-channel";
+  if (row.sourceCanonicalId) return "marketing-source";
+  return null;
+}
+
 /** One row's worth of exclusion verdict, applied identically to every source. */
 function exclusionFor(names = []) {
   const hit = findExcludedAgentMatch(names.filter(Boolean));
@@ -229,12 +266,23 @@ async function readCallLogProviders(dateKey, { CallLog }) {
 
   const out = [];
   const unresolved = [];
+  // Why RingCentral rows were passed over, counted rather than discarded — "we
+  // indexed 40 of 300" needs to be explainable without re-running the query.
+  const skipped = [];
   for (const r of rows) {
     const uri = r.recordingArchive?.sourceUri || r.recordingArchive?.driveWebViewLink || "";
     const provider = resolveProvider({
       archiveProvider: r.recordingArchive?.provider, uri, platform: r.platform,
     });
     if (!provider) { unresolved.push(r.providerCallId || r.telephonySessionId); continue; }
+
+    // The `ex` rule, applied ONLY to RingCentral. A CallRail row that happens to
+    // live in the ex bucket is still a CallRail row and keeps its own handling —
+    // which is the whole reason provider is resolved before this runs.
+    if (provider === "ringcentral") {
+      const skip = exSkipReason(r);
+      if (skip) { skipped.push(skip); continue; }
+    }
     // RingCentral's stored value is an identifier, not a servable URL. Anything
     // else keeps its durable link.
     //
@@ -267,7 +315,7 @@ async function readCallLogProviders(dateKey, { CallLog }) {
       captureSource: "calllog",
     });
   }
-  return { rows: out, unresolved };
+  return { rows: out, unresolved, skipped };
 }
 
 /**
@@ -296,6 +344,7 @@ async function gatherRecordingLinks({
   const candidates = [];
   const errors = [];
   let unresolved = [];
+  let exSkipped = [];
 
   for (const [name, read] of [
     ["phoneburner", () => readPhoneBurner(dateKey, M)],
@@ -303,6 +352,7 @@ async function gatherRecordingLinks({
     ["calllog", async () => {
       const r = await readCallLogProviders(dateKey, M);
       unresolved = r.unresolved;
+      exSkipped = r.skipped;
       return r.rows;
     }],
   ]) {
@@ -357,6 +407,9 @@ async function gatherRecordingLinks({
     mintOnly: kept.filter((c) => !c.playbackUrl && c.providerRef).length,
     noLocator: kept.filter((c) => !c.playbackUrl && !c.providerRef).length,
     unresolvedProvider: unresolved.length,
+    // RingCentral rows deliberately passed over, by reason. Reported so the
+    // count is explainable — a silent filter and an empty day look identical.
+    exSkipped: exSkipped.reduce((acc, r) => { acc[r] = (acc[r] || 0) + 1; return acc; }, {}),
     written: 0,
     errors,
   };
@@ -382,6 +435,7 @@ module.exports = {
   gatherRecordingLinks,
   resolveProvider,
   resolveProviderFromUri,
+  exSkipReason,
   significanceFor,
   INDEX_LONG_CALL_SECONDS,
   PACIFIC,
