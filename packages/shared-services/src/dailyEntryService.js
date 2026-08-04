@@ -32,6 +32,7 @@
 // takes the other sections down with it.
 
 const DailyReportFact = require("../../shared-models/src/DailyReportFact");
+const { sanitizeFactValue } = require("./dailyReportFactService");
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
@@ -44,9 +45,20 @@ async function section(name, fn, out) {
   if (typeof fn !== "function") { out.facts[name] = null; return; }
   try {
     const value = await fn();
+    // EVERY SECTION IS SANITIZED. This is not optional tidying — the sanitizer
+    // is what keeps this collection from becoming a second customer store. It
+    // strips case ids, phones, names, urls and per-day presentation ratios that
+    // a longer report must recompute rather than average.
+    //
+    // Caught by comparing this worker's output against the record the email
+    // produced for the same day: statusMovement arrived carrying
+    // keyChanges[].caseId, and byAgent carried connectRate. The email's own
+    // writer had always sanitized; this one had not, so it would have written
+    // customer case ids into the day.
+    //
     // undefined means "returned nothing" and is stored as null, not dropped —
     // an absent key would be indistinguishable from a key nobody declared.
-    out.facts[name] = value === undefined ? null : value;
+    out.facts[name] = value === undefined ? null : sanitizeFactValue(value);
   } catch (error) {
     out.facts[name] = null;
     out.errors.push(`${name}: ${String(error.message || error).slice(0, 160)}`);
@@ -130,4 +142,35 @@ async function buildDailyEntry({
   return out;
 }
 
-module.exports = { buildDailyEntry };
+/**
+ * The five sections that come from ONE report gather.
+ *
+ * financial / bySource / byAgent / statusMovement are rendered sections; spend
+ * rides along as data on the report because the `spend` block is not in the
+ * rollup preset and adding it there would change the nightly email.
+ *
+ * Composed ONCE and sliced seven ways — the whole point of the consolidation.
+ * Each returned gatherer closes over the same report, so the worker's sequential
+ * calls cost one gather between them, not five.
+ *
+ * @param {Object} report  an already-composed one-day report
+ */
+function gatherersFromReport(report) {
+  const byId = new Map((report?.sections || []).map((s) => [String(s.id), s]));
+  // A section that ERRORED is null, not its partial data. The worker's null
+  // means "could not read", which is exactly what a section error is.
+  const section = (id) => {
+    const s = byId.get(id);
+    if (!s || s.error) return null;
+    return s.data ?? null;
+  };
+  return {
+    financial: async () => section("topline"),
+    spend: async () => report?.spend ?? null,
+    bySource: async () => section("source"),
+    byAgent: async () => section("ldcalls"),
+    statusMovement: async () => section("status"),
+  };
+}
+
+module.exports = { buildDailyEntry, gatherersFromReport };

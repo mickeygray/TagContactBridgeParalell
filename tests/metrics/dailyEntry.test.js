@@ -79,3 +79,28 @@ test("a malformed dateKey throws rather than writing somewhere unexpected", asyn
   await assert.rejects(() => buildDailyEntry({ dateKey: "8/3/2026" }), /YYYY-MM-DD/);
   await assert.rejects(() => buildDailyEntry({}), /YYYY-MM-DD/);
 });
+
+test("every section is SANITIZED — the entry is statistics, not a customer store", async () => {
+  // Caught by comparing the worker against the record the email produced for the
+  // same day: statusMovement arrived carrying keyChanges[].caseId and byAgent
+  // carried connectRate. The email's writer had always sanitized; this one had
+  // not, so it would have written customer case ids into the day.
+  const r = await buildDailyEntry({
+    dateKey: "2026-08-03",
+    gatherers: {
+      statusMovement: async () => ({
+        suspended: 4,
+        keyChanges: [{ domain: "WYNN", caseId: 103266, lane: "suspended" }],
+      }),
+      byAgent: async () => ({ dials: 120, connectRate: 10.6 }),
+      calls: async () => ({ links: 73, phone: "5625551234" }),
+    },
+  });
+  assert.equal(r.facts.statusMovement.suspended, 4, "the statistic survives");
+  assert.ok(!("keyChanges" in r.facts.statusMovement), "customer rows must not");
+  assert.equal(r.facts.byAgent.dials, 120);
+  assert.ok(!("connectRate" in r.facts.byAgent),
+    "a per-day ratio must be recomputed by a longer report, never averaged");
+  assert.equal(r.facts.calls.links, 73);
+  assert.ok(!("phone" in r.facts.calls), "no phone numbers, ever");
+});
