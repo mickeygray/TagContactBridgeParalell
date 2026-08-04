@@ -1663,4 +1663,15 @@ module.exports = {
   processCallRecordingArchive,
   queueCallRecordingArchiveJob,
   resolveRingcxRecording,
+  // THE EXCLUSION RULE, exported 2026-08-04 so it has exactly one definition.
+  //
+  // Today it is enforced by never downloading an excluded agent's recording.
+  // The recording INDEX stores links instead of files, so "we simply never
+  // fetched it" stops being enforcement — the rule has to be applied at index
+  // time and at read time. Exporting beats reimplementing: two copies of who
+  // may not be recorded is two things to keep in step, and the failure mode is
+  // publishing a call that was meant to be excluded.
+  findExcludedAgentMatch,
+  findExcludedCallLogAgentMatch,
+  getExcludedAgentTokens,
 };
