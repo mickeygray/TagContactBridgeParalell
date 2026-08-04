@@ -362,8 +362,21 @@ test("the night runs in the stated ORDER", () => {
   // arrive and become spend in the SAME pass, ten minutes before the board
   // reads it. It is armed separately because reading the mailbox and believing
   // the number are different decisions.
+  //
+  // Mickey 2026-08-04: "one build of the data layer (call links, costing,
+  // activity review => daily snapshot => result email)." spend-sync (costing)
+  // and activity-review were separate timers at 19:45 and 20:00; folding them
+  // in put them BEFORE the thing that reads them instead of beside it.
+  //
+  // daily-snapshot is LAST and must stay last. Every task above it corrects
+  // data; it freezes the result so the 20:00 email and the stored fact are the
+  // same numbers. Snapshot before send, because a send failure is not the
+  // death of the data.
   assert.deepEqual(s2.tasks.map((t) => t.key),
-    ["night-persist", "mail-invoice", "mail-spend-derive", "call-links", "call-recovery-discovery", "queue-rollup", "logics-source"]);
+    ["night-persist", "mail-invoice", "mail-spend-derive", "call-links", "call-recovery-discovery",
+      "queue-rollup", "logics-source", "spend-sync", "activity-review", "daily-snapshot"]);
+  assert.equal(s2.tasks[s2.tasks.length - 1].key, "daily-snapshot",
+    "the snapshot must be the terminal task — it freezes what the others produced");
 });
 
 test("call-links CAPTURES marketing links; PhoneBurner still cannot", () => {

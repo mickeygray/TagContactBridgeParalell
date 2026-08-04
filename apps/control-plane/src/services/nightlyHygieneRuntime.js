@@ -763,6 +763,106 @@ const TASKS = [
       return `${callers} caller(s) on an active piece → ${n} case(s) to move off the catch-all`;
     },
   },
+  {
+    // COSTING. Was its own 19:45 timer; folded in here 2026-08-04 because it
+    // is a data-layer build step, not a service — the spend it syncs is read
+    // by the 20:00 email forty minutes later, and two clocks for one
+    // dependency is how the email came to read a sheet the sync had not
+    // finished writing.
+    key: "spend-sync",
+    label: "Sync marketing spend (costing)",
+    // Its OWN flag, default off — deliberately NOT HOURLY_SPEND_SYNC_ENABLED,
+    // which is already true. Reusing that one would arm this task the moment
+    // the code deployed and sync spend TWICE a night: once from the 19:45
+    // timer that still owns it, once from here. Arming this flag is the second
+    // half of a two-step handover — turn the 19:45 timer off in the same
+    // change, or the double-write is the whole cost of the consolidation.
+    writesArmed: () => String(process.env.NIGHTLY_SPEND_SYNC_ENABLED || "false").toLowerCase() === "true",
+    async plan({ logger }) {
+      // No dry-run mode exists upstream: syncAll is an upsert-by-key against
+      // the sheet. Reporting the intent is honest; claiming a count we did not
+      // compute would not be.
+      return [{ dateKey: persistTargetDay(), mode: "upsert-by-key", logger: Boolean(logger) }];
+    },
+    async apply(planned, { logger, spendSyncRuntime = null }) {
+      if (!spendSyncRuntime) {
+        return { written: 0, skipped: 0, failed: 1, errors: ["spend-sync-runtime-unavailable"] };
+      }
+      const r = await spendSyncRuntime.syncAll({ scheduled: true, logger });
+      return {
+        written: Number(r?.totalUpserted || 0),
+        skipped: Number(r?.totalSkipped || 0),
+        failed: 0,
+        sheets: Array.isArray(r?.sheets) ? r.sheets.length : 0,
+      };
+    },
+    describe(planned) {
+      return `${planned[0]?.dateKey || "?"}: upsert spend rows from the configured sheets`;
+    },
+  },
+  {
+    // ACTIVITY REVIEW. Was a separate 20:00 runtime racing the email it feeds.
+    // Moved here 2026-08-04 so the review lands BEFORE the snapshot that
+    // reads it, rather than alongside it.
+    key: "activity-review",
+    label: "Review Logics activity for the completed day",
+    writesArmed: () => String(process.env.LOGICS_ACTIVITY_REVIEW_ENABLED || "false").toLowerCase() === "true",
+    async plan({ domains, logger }) {
+      return [{ dateKey: persistTargetDay(), domains: [...domains], logger: Boolean(logger) }];
+    },
+    async apply(planned, { logger, activityReviewRuntime = null }) {
+      if (!activityReviewRuntime) {
+        return { written: 0, skipped: 0, failed: 1, errors: ["activity-review-runtime-unavailable"] };
+      }
+      const r = await activityReviewRuntime.runActivityReview({ scheduled: true, logger });
+      return {
+        written: Number(r?.written || r?.reviewed || 0),
+        skipped: Number(r?.skipped || 0),
+        failed: Number(r?.failed || 0),
+      };
+    },
+    describe(planned) {
+      const p = planned[0] || {};
+      return `${p.dateKey || "?"}: review activity across ${(p.domains || []).length} domain(s)`;
+    },
+  },
+  {
+    // ── TERMINAL. This must be LAST. ────────────────────────────────────
+    //
+    // Mickey 2026-08-04: "one build of the data layer (call links, costing,
+    // activity review => daily snapshot => result email)."
+    //
+    // Every task above CORRECTS data. This one FREEZES what they produced, so
+    // the 20:00 email and the snapshot are the same numbers rather than two
+    // independent gathers that can disagree. Snapshot first, email second,
+    // deliberately: a send failure is not the death of the data.
+    key: "daily-snapshot",
+    label: "Freeze the day's numbers (snapshot before the email)",
+    writesArmed: () => String(process.env.DAILY_SNAPSHOT_ENABLED || "false").toLowerCase() === "true",
+    async plan({ logger }) {
+      const { CANONICAL_DEFINITION_NAME } = require(
+        "../../../../packages/shared-services/src/dailyReportFactService");
+      return [{ dateKey: persistTargetDay(), definition: CANONICAL_DEFINITION_NAME, logger: Boolean(logger) }];
+    },
+    async apply(planned, { logger, captureDailySnapshot = null }) {
+      if (typeof captureDailySnapshot !== "function") {
+        return { written: 0, skipped: 0, failed: 1, errors: ["snapshot-capture-unavailable"] };
+      }
+      const p = planned[0] || {};
+      const r = await captureDailySnapshot({ dateKey: p.dateKey, logger });
+      return {
+        written: r?.persisted ? 1 : 0,
+        skipped: r?.persisted ? 0 : 1,
+        failed: 0,
+        revision: r?.revision ?? null,
+        complete: r?.complete === true,
+      };
+    },
+    describe(planned) {
+      const p = planned[0] || {};
+      return `${p.dateKey || "?"}: freeze "${p.definition}" before the 20:00 send`;
+    },
+  },
 ];
 
 function createNightlyHygieneRuntime({ config = {}, runtime = {} } = {}) {
@@ -771,6 +871,17 @@ function createNightlyHygieneRuntime({ config = {}, runtime = {} } = {}) {
   // (a test, a future config path) silently reconfigured every other
   // instance — including, in principle, the live one.
   const tasks = Array.isArray(config.tasks) ? [...config.tasks] : [...TASKS];
+
+  // Collaborators the folded-in tasks need. They are INJECTED rather than
+  // required at module load because each one is constructed by server.js with
+  // live config — and because a task whose collaborator is missing must report
+  // that plainly (failed + a named error) instead of throwing and taking the
+  // rest of the pass down with it.
+  const collaborators = {
+    spendSyncRuntime: config.spendSyncRuntime || runtime.spendSyncRuntime || null,
+    activityReviewRuntime: config.activityReviewRuntime || runtime.activityReviewRuntime || null,
+    captureDailySnapshot: config.captureDailySnapshot || runtime.captureDailySnapshot || null,
+  };
 
   const state = {
     enabled: config.enabled === true || String(process.env.NIGHTLY_HYGIENE_ENABLED) === "true",
@@ -860,7 +971,7 @@ function createNightlyHygieneRuntime({ config = {}, runtime = {} } = {}) {
 
           let applied = null;
           if (armed && plannedCount) {
-            applied = await task.apply(planned, { logger: log });
+            applied = await task.apply(planned, { logger: log, ...collaborators });
             state.totals.written += applied.written || 0;
           }
           results.push({
