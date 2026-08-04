@@ -108,53 +108,60 @@ test("every section is SANITIZED — the entry is statistics, not a customer sto
   assert.ok(!("phone" in r.facts.calls), "no phone numbers, ever");
 });
 
-test("once the day's spend is set, the day is set", async () => {
-  // Mickey 2026-08-04: "reading the sheet should only read the day, and once the
-  // day is set the day is set — we don't add mail spend to the day more than
-  // once." The mail sheet keeps growing after a day closes, so a later read is
-  // not a better read: 2026-08-03 was reported at $1,584.48 by the email and
-  // read $2,193.96 from the sheet a day later.
+test("mail is frozen once set; LD and BCD still correct themselves", async () => {
+  // Mickey 2026-08-04: "we dont add mail spend to the day more than once" — and
+  // then: "the stored spend might include bcd and ld". Freezing the whole
+  // section would freeze the wrong two. Mail arrives from a sheet that keeps
+  // growing after the day closes; LD and BCD are counted from events we already
+  // hold, so a recount is a BETTER answer, not merely a later one.
   const writes = [];
   const model = {
-    findOne: () => ({ select: () => ({ lean: async () => ({ facts: { spend: { total: 1584.48 } } }) }) }),
+    findOne: () => ({ select: () => ({ lean: async () => ({ facts: {
+      spend: { total: 2039.48, mail: 1584.48, mailPieces: 1800, ld: 423, bcd: 32 },
+    } }) }) }),
     findOneAndUpdate: async (f, u) => { writes.push(u); return { revision: 2 }; },
   };
   const r = await buildDailyEntry({
     dateKey: "2026-08-03", apply: true, Model: model,
     gatherers: {
-      spend: async () => ({ total: 2193.96 }),
-      calls: async () => ({ links: 12 }),
+      // The sheet grew AND a late lead event landed.
+      spend: async () => ({ total: 2675.96, mail: 2193.96, mailPieces: 2438, ld: 450, bcd: 32 }),
     },
   });
-  assert.deepEqual(r.preserved, ["spend"], "the stored day is reported as kept");
-  assert.ok(!("facts.spend" in writes[0].$set), "spend must not be rewritten");
-  assert.equal(writes[0].$set["facts.calls"].links, 12, "other sections still update");
+  const stored = writes[0].$set["facts.spend"];
+  assert.equal(stored.mail, 1584.48, "mail holds — a later sheet read is not a better one");
+  assert.equal(stored.mailPieces, 1800);
+  assert.equal(stored.ld, 450, "LD corrects — a late lead event is a better count");
+  assert.deepEqual(r.preserved, ["spend.mail", "spend.mailPieces"], "and it says what it kept");
+
+  // The whole point of recomputing rather than freezing the total: a frozen
+  // mail figure beside a fresh LD figure makes any stored total wrong.
+  assert.equal(stored.total, 2066.48);
+  assert.equal(stored.total, Math.round((stored.mail + stored.ld + stored.bcd) * 100) / 100,
+    "total must always equal its own parts");
 });
 
-test("a day with no spend yet accepts one", async () => {
+test("a day with no spend yet accepts one whole", async () => {
   const writes = [];
-  const model = {
-    findOne: () => ({ select: () => ({ lean: async () => ({ facts: {} }) }) }),
-    findOneAndUpdate: async (f, u) => { writes.push(u); return { revision: 1 }; },
-  };
   const r = await buildDailyEntry({
-    dateKey: "2026-08-03", apply: true, Model: model,
-    gatherers: { spend: async () => ({ total: 1584.48 }) },
+    dateKey: "2026-08-03", apply: true, Model: fakeModel(writes),
+    gatherers: { spend: async () => ({ total: 1584.48, mail: 1584.48 }) },
   });
   assert.deepEqual(r.preserved, []);
-  assert.equal(writes[0].$set["facts.spend"].total, 1584.48);
+  // fakeModel captures {filter, update, opts} — the raw update is one level in.
+  assert.equal(writes[0].update.$set["facts.spend"].mail, 1584.48);
 });
 
-test("a frozen section can be corrected DELIBERATELY, never by accident", async () => {
+test("a frozen field can be corrected DELIBERATELY, never by accident", async () => {
   const writes = [];
   const model = {
-    findOne: () => ({ select: () => ({ lean: async () => ({ facts: { spend: { total: 1 } } }) }) }),
+    findOne: () => ({ select: () => ({ lean: async () => ({ facts: { spend: { mail: 1, total: 1 } } }) }) }),
     findOneAndUpdate: async (f, u) => { writes.push(u); return { revision: 3 }; },
   };
   const r = await buildDailyEntry({
     dateKey: "2026-08-03", apply: true, Model: model, overwrite: ["spend"],
-    gatherers: { spend: async () => ({ total: 2193.96 }) },
+    gatherers: { spend: async () => ({ total: 2193.96, mail: 2193.96 }) },
   });
-  assert.deepEqual(r.preserved, [], "nothing preserved when the caller asked to overwrite");
-  assert.equal(writes[0].$set["facts.spend"].total, 2193.96);
+  assert.deepEqual(r.preserved, []);
+  assert.equal(writes[0].$set["facts.spend"].mail, 2193.96);
 });

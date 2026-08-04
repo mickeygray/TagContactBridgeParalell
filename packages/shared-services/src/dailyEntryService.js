@@ -51,7 +51,51 @@ const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 //
 // Not immutable — CORRECTABLE. `overwrite: ["spend"]` re-sets it deliberately.
 // The rule is that drift must be an act, not a side effect.
-const WRITE_ONCE = Object.freeze(["spend"]);
+//
+// FROZEN AT FIELD LEVEL, NOT SECTION LEVEL. `spend` is three sources with
+// different volatility, and freezing the whole section would freeze the wrong
+// two:
+//
+//   mail   arrives from a sheet that keeps growing after the day closes. This
+//          is the one Mickey's rule is about.
+//   ld     new leads x rate on a closed 20:00->20:00 Pacific day.
+//   bcd    calls x rate on a closed day.
+//
+// LD and BCD are counted from events we already hold, so a recount is a better
+// answer, not a later one — a late-arriving lead event SHOULD correct them.
+// Freezing them would pin a day to whatever happened to have landed by 19:50.
+//
+// `total` is therefore never frozen: it is recomputed from the frozen mail plus
+// the fresh LD and BCD, so it always equals its own parts. Storing a frozen
+// total beside fresh components is how a day starts disagreeing with itself.
+const FROZEN_SPEND_FIELDS = Object.freeze(["mail", "mailPieces"]);
+
+const round2 = (n) => Math.round(Number(n || 0) * 100) / 100;
+
+/**
+ * Merge a freshly gathered spend section over the stored one.
+ *
+ * Mail fields keep their stored value — the sheet grows after a day closes, so
+ * a later read is not a better read. LD and BCD take the fresh count, because
+ * those are counted from events we already hold and a recount genuinely is
+ * better. `total` is recomputed so it always equals its own parts.
+ */
+function mergeSpend(stored, fresh, out) {
+  const merged = { ...fresh };
+  const kept = [];
+  for (const f of FROZEN_SPEND_FIELDS) {
+    if (stored[f] == null) continue;
+    if (JSON.stringify(stored[f]) !== JSON.stringify(fresh[f])) kept.push(f);
+    merged[f] = stored[f];
+  }
+  // Recompute rather than trusting either total. A frozen mail figure beside a
+  // fresh LD figure makes the stored total wrong under both readings.
+  if (["mail", "ld", "bcd"].some((k) => merged[k] != null)) {
+    merged.total = round2(Number(merged.mail || 0) + Number(merged.ld || 0) + Number(merged.bcd || 0));
+  }
+  if (kept.length) out.preserved.push(...kept.map((f) => `spend.${f}`));
+  return merged;
+}
 
 /**
  * Run one gatherer into its section without letting it cost the others.
@@ -144,12 +188,8 @@ async function buildDailyEntry({
 
   const setFacts = {};
   for (const [k, v] of Object.entries(out.facts)) {
-    const alreadySet = existing?.facts?.[k] != null;
-    if (WRITE_ONCE.includes(k) && alreadySet && !forced.has(k)) {
-      // Keep the stored value AND report it, so a run never quietly disagrees
-      // with what it wrote. The caller sees what it gathered in out.facts and
-      // what the day kept in out.preserved.
-      out.preserved.push(k);
+    if (k === "spend" && v && existing?.facts?.spend && !forced.has("spend")) {
+      setFacts["facts.spend"] = mergeSpend(existing.facts.spend, v, out);
       continue;
     }
     setFacts[`facts.${k}`] = v;
