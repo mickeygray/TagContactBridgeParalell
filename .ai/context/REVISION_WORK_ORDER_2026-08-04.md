@@ -14,7 +14,37 @@ the commit.
 part of the app: *is anything actually drinking from this?* Two pools are
 already known to fail it in opposite directions — the TAG filler pool is full
 and nobody drinks (§3), and the CX dial queue is being filled by live traffic
-that nobody drinks (§4). Expect more of this shape in §5 and §9.
+that nobody drinks (§4). Expect more of this shape in §5 and §8.
+
+---
+
+## The yardstick — what this system is actually for
+
+Mickey, 2026-08-04, and this governs every KEEP/REMOVE call below:
+
+> "cx ... shouldn't be there if it isn't being used, and currently no one
+> really logs in. Maybe eventually we get to the point where there's a live
+> call assistant, if people want it. But for now it's holding a trainer for
+> when we need to hire someone, and will be my ability to generate reports for
+> people, and that's about it."
+
+So the system has **two products and one spine**:
+
+1. **A trainer** — held for a future hire.
+2. **Report generation** — Mickey producing reports for people.
+3. **The live operational spine**, which must keep running regardless: lead
+   delivery into PhoneBurner, inbound lead intake, DNC safety, aged-pool
+   advancement, blogs.
+
+A *possible* fourth someday: a live call assistant, if people want it. Dormant
+is acceptable — dishonestly-dormant is not. Anything serving none of these is a
+removal candidate, and CX is the largest instance of exactly that.
+
+**Scope note (Mickey, same day):** "when I say app I mean the front end —
+everything else with processes running and the server doing server things still
+applies." §8 is therefore a **front-end** deprecate-and-rebuild. The server, its
+routes, and its scheduled processes are not in that section's scope; they are
+handled in §4 and §5.
 
 ---
 
@@ -322,18 +352,33 @@ next morning. Decision owed below.
 
 ---
 
-## 8. Admin panel / app review
+## 8. The front end — deprecate and rebuild
 
-GOAL: every screen and function on the admin panel is either used or gone.
+**Scope: `apps/web-client` only.** Server processes and routes are §4/§5.
 
-STATE: not started. This is the section most likely to expand.
+GOAL: every screen in the app is either serving the trainer, serving reports,
+or gone.
 
-WORK: inventory routes and screens; for each, the §0-through-§7 question —
-*does anything actually drink from this?* Deprecate, then rebuild what's left
-worth keeping.
+STATE: under investigation (front-end surface map running). The expectation
+going in — to be confirmed or refuted, not assumed — is that the front end is
+mostly **CX-era**: agent floor, dial queue, wrap cards, call notes, agent
+login. That whole concept has no users. Meanwhile the two things the app is
+actually *for* may have little or no front end at all, which would make this
+section largely greenfield rather than a cleanup.
 
-DONE WHEN: Mickey can open the panel and everything on it is something he'd
-use.
+WORK (sequence depends on the map):
+1. Inventory every screen: routed-and-linked / routed-not-linked / orphaned.
+2. Classify each against the yardstick.
+3. Find screens whose backing endpoints no longer exist — already broken, and
+   the easiest removals to justify.
+4. Cut the CX-era surface.
+5. Build what the two real purposes need and don't have.
+
+DONE WHEN: Mickey can open the app and everything on it is something he'd use.
+
+WATCH OUT: a screen with no nav link is not necessarily dead — the nightly
+emails link into the app. Check the server's email templates for front-end URLs
+before removing anything that looks orphaned.
 
 ---
 
