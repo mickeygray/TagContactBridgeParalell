@@ -85,19 +85,23 @@ function createReportScheduleRuntime({ config = {}, runtime = {} } = {}) {
           // THE SNAPSHOT, AFTER THE EMAIL. Moved out of runDefinition on
           // 2026-08-04 so sending carries no persistence concern.
           //
-          // It composes its own report — a second gather, accepted knowingly for
-          // one patch ("to be careful let's just run it twice for now"), merged
-          // into one pipe next patch. It is handed `result.range`, NOT a day it
-          // computes itself: the fact is keyed on range.from, and an
-          // independently-derived day produced TODAY where the email produced
-          // YESTERDAY, writing a second document that silently overwrote the
-          // first.
+          // ONE PIPE as of 2026-08-04: it is handed the report the email was
+          // built from (runDefinition already returns it), so the night asks
+          // Logics, CallRail and RingCentral ONCE and the snapshot describes
+          // exactly what was sent. The writer keeps a compose fallback for a
+          // missed night or a backfill; it is simply not used here.
+          //
+          // Both `range` and `report` come from the RUN, never re-derived: the
+          // fact is keyed on range.from, and an independently-derived day
+          // produced TODAY where the email produced YESTERDAY, writing a second
+          // document that silently overwrote the first.
           //
           // Deliberately only for a DELIVERED email. A day whose mail never went
           // out should not acquire a snapshot claiming it did.
           if (result.delivered) {
             result.dailyFactCapture = await writeDailySnapshot({
-              def, range: result.range, emailAcceptedAt: new Date(), logger: log,
+              def, range: result.range, report: result.report,
+              emailAcceptedAt: new Date(), logger: log,
             }).catch((error) => ({
               status: "failed", reason: String(error.message || error).slice(0, 200),
             }));

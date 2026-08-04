@@ -46,6 +46,7 @@ const {
 async function writeDailySnapshot({
   def,
   range,
+  report: suppliedReport = null,
   emailAcceptedAt = new Date(),
   compose = composeReport,
   writer = persistDailyReportFact,
@@ -53,35 +54,57 @@ async function writeDailySnapshot({
 } = {}) {
   if (!def || !range?.from) return { status: "skipped", reason: "no-definition-or-range" };
 
-  // Cheap gate FIRST, before paying for a gather. Every check in the candidate
-  // gate except the section check reads only `def` and `range` — so pass a stub
-  // selection that satisfies the section check, and the definition-level reasons
-  // (email-disabled, not-canonical, not-one-day, tenant-scoped, filtered) still
-  // bite. There is no sense composing a report we will then decline to store.
-  const preVerdict = isDailyFactCaptureCandidate(def, { selection: [...REQUIRED_SECTIONS] }, range);
-  if (!preVerdict.capture) return { status: "skipped", reason: preVerdict.reason };
+  // ONE PIPE. The scheduler hands over the report the email was built from, so
+  // the snapshot and the email describe the same gather and Logics/CallRail/
+  // RingCentral are asked once for the night instead of twice.
+  let report = suppliedReport;
 
-  let report;
-  try {
-    report = await compose({
-      from: range.from,
-      to: range.to,
-      selection: def.selection,
-      preset: def.preset,
-      domain: def.domain || null,
-      filters: def.filters || [],
-      live: true,
-    });
-  } catch (error) {
-    logger?.error?.("daily_snapshot.compose_failed", {
-      definition: def.name, dateKey: range.from, error: String(error.message).slice(0, 200),
-    });
-    return { status: "failed", reason: `compose: ${String(error.message).slice(0, 160)}` };
+  if (!report) {
+    // NO REPORT SUPPLIED — compose one. This path is NOT dead weight: it is what
+    // makes a missed night or a backfill runnable on its own, without sending an
+    // email to produce a fact. Removing it turns the snapshot back into a side
+    // effect of a send, which is what it was extracted from.
+    //
+    // Cheap gate FIRST here, because a gather is about to be paid for. Every
+    // check in the candidate gate except the section check reads only `def` and
+    // `range`, so a stub selection lets the definition-level reasons
+    // (email-disabled, not-canonical, not-one-day, tenant-scoped, filtered) bite
+    // before the cost is incurred.
+    const preVerdict = isDailyFactCaptureCandidate(def, { selection: [...REQUIRED_SECTIONS] }, range);
+    if (!preVerdict.capture) return { status: "skipped", reason: preVerdict.reason };
+
+    try {
+      // MIRRORS runDefinition EXACTLY. A definition stores its blocks on
+      // `def.blocks` and defaults to ["daily"] — it has no `selection` and no
+      // `preset`, and the live canonical row has neither field set at all. An
+      // earlier version of this passed def.selection/def.preset, so compose fell
+      // back to a default that produced two of the five required sections and
+      // the writer skipped with "missing-rollup-sections". It failed politely
+      // and stored nothing, which is exactly the shape of bug that survives
+      // review.
+      //
+      // composeReport also destructures `where`, not `filters`; passing the
+      // wrong key silently applies no filter at all.
+      report = await compose({
+        from: range.from,
+        to: range.to,
+        selection: def.blocks && def.blocks.length ? def.blocks : ["daily"],
+        domain: def.domain || null,
+        where: def.filters || [],
+        live: true,
+      });
+    } catch (error) {
+      logger?.error?.("daily_snapshot.compose_failed", {
+        definition: def.name, dateKey: range.from, error: String(error.message).slice(0, 200),
+      });
+      return { status: "failed", reason: `compose: ${String(error.message).slice(0, 160)}` };
+    }
   }
 
-  // Now the real gate, with the composed report's ACTUAL selection — a preset
-  // can expand to something different from def.selection, and the stub above
-  // deliberately said nothing about that.
+  // The real gate, against the report's ACTUAL selection — a preset can expand
+  // to something different from def.selection, and the pre-gate above
+  // deliberately said nothing about that. Runs on both paths: a supplied report
+  // has skipped the pre-gate entirely, so this is its only check.
   const verdict = isDailyFactCaptureCandidate(def, report, range);
   if (!verdict.capture) return { status: "skipped", reason: verdict.reason };
 

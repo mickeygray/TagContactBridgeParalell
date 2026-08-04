@@ -206,15 +206,6 @@ test("the delivered-email hook passes the already-built report to one writer", a
 });
 
 test("sending carries NO persistence concern", () => {
-  // Was: "the fact hook occurs after mail acceptance and never re-gathers",
-  // asserting the capture sat inside runDefinition just after sendMail and
-  // reused the report.
-  //
-  // Changed deliberately on 2026-08-04. The snapshot moved OUT of the send path
-  // into dailySnapshotService, which composes its own report — a second gather,
-  // taken knowingly for one patch ("to be careful let's just run it twice for
-  // now") so the email path stops carrying persistence at all. Next patch merges
-  // them back into one gather, and this test flips back to asserting reuse.
   const src = fs.readFileSync(
     require.resolve("../../packages/shared-services/src/reportDefinitionService"), "utf8",
   );
@@ -222,6 +213,48 @@ test("sending carries NO persistence concern", () => {
     "the send path must not write the daily fact");
   assert.ok(src.includes("await sendMail(def.domain || null"),
     "but it must still send");
+});
+
+test("ONE gather feeds both the email and the snapshot", async () => {
+  // The snapshot briefly composed its own report — deliberately, so the send
+  // path could shed persistence first. This is the merge: the report the email
+  // was built from is handed over, so the night asks Logics, CallRail and
+  // RingCentral once rather than twice.
+  const { writeDailySnapshot } = require("../../packages/shared-services/src/dailySnapshotService");
+  const def = {
+    name: "financial roll up with calls", sendEmail: true,
+    preset: "rollup", selection: null, domain: null, filters: [],
+  };
+  const range = { from: "2026-08-03", to: "2026-08-03" };
+  const report = {
+    from: "2026-08-03", to: "2026-08-03",
+    selection: ["topline", "source", "ldcalls", "status", "longcalls"],
+    sections: [
+      { id: "topline", data: { cash: 1 } }, { id: "source", data: [] },
+      { id: "ldcalls", data: [] }, { id: "status", data: {} }, { id: "longcalls", data: [] },
+    ],
+    failures: [],
+    spend: { total: 471, ld: 423, ldLeads: 141, mail: 0, mailPieces: 0, bcd: 48, bcdCalls: 12 },
+  };
+
+  let composes = 0;
+  let saved = null;
+  const out = await writeDailySnapshot({
+    def, range, report,
+    compose: async () => { composes += 1; return report; },
+    writer: async (fact) => { saved = fact; return { revision: 1 }; },
+  });
+  assert.equal(composes, 0, "a supplied report must never trigger a second gather");
+  assert.equal(out.status, "written");
+  assert.equal(saved.facts.spend.ldLeads, 141, "costs by source survive the merge");
+
+  // The fallback stays, and is what makes a backfill runnable without a send.
+  await writeDailySnapshot({
+    def, range,
+    compose: async () => { composes += 1; return report; },
+    writer: async () => ({ revision: 1 }),
+  });
+  assert.equal(composes, 1, "with no report supplied it still composes one");
 });
 
 test("the snapshot writer is ordered after the email, and only for a delivered one", () => {
@@ -235,10 +268,12 @@ test("the snapshot writer is ordered after the email, and only for a delivered o
   const between = src.slice(ran, snapshot);
   assert.ok(between.includes("if (result.delivered)"),
     "the snapshot must be gated on actual delivery");
-  // The range must come from the RUN, never re-derived — an independently
-  // computed day produced TODAY where the email produced YESTERDAY, writing a
-  // second document that silently overwrote the first.
+  // Range AND report must come from the RUN, never re-derived — an
+  // independently computed day produced TODAY where the email produced
+  // YESTERDAY, writing a second document that silently overwrote the first.
   const call = src.slice(snapshot, snapshot + 240);
   assert.ok(call.includes("range: result.range"),
     "the snapshot must key on the range the email actually used");
+  assert.ok(call.includes("report: result.report"),
+    "and must be built from the report the email was built from — one gather");
 });
