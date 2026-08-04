@@ -860,6 +860,20 @@ const TASKS = [
   },
 ];
 
+// WHY THERE IS NO "cost-counts" TASK HERE.
+//
+// One was written on 2026-08-04 and removed the same day. It counted LD leads
+// and BCD calls into SpendEntry rows — a second store for numbers the report
+// already derives. Mickey's correction: "think of it, instead of making its own
+// collection, it's making its section of the nightly snapshot that's just all
+// the costs by source."
+//
+// The `spend` report block (reportBlocksService, id "spend") ALREADY computes
+// exactly that — total, ld, ldLeads, mail, mailPieces, bcd, bcdCalls — from the
+// one gather. The gap was never the counting; it was that the snapshot captured
+// topline/source/ldcalls/status and dropped spend on the floor. So the fix is a
+// line in dailyReportFactService, not a task here.
+
 // WHY THERE IS NO "daily-snapshot" TASK HERE.
 //
 // One was added on 2026-08-04 and removed the same day, because a task in THIS

@@ -31,6 +31,10 @@ const dailyReportFactSchema = new mongoose.Schema(
     // daily ROI/ROAS percentages.
     facts: {
       financial: { type: mongoose.Schema.Types.Mixed, default: null },
+      // The day's cost denominator by source. Declared explicitly because the
+      // schema is strict — an undeclared facts.spend would be silently dropped
+      // on write and the fact would look like it stored fine.
+      spend: { type: mongoose.Schema.Types.Mixed, default: null },
       bySource: { type: mongoose.Schema.Types.Mixed, default: null },
       byAgent: { type: mongoose.Schema.Types.Mixed, default: null },
       statusMovement: { type: mongoose.Schema.Types.Mixed, default: null },

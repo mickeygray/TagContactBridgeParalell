@@ -137,6 +137,15 @@ function buildDailyReportFact({
     capturedAt: new Date(),
     facts: {
       financial: sanitizeFactValue(sections.get("topline")?.data ?? null),
+      // ALL COSTS BY SOURCE — total, LD (with lead count), mail (with pieces),
+      // BCD (with call count and rate). Added 2026-08-04: a stored day used to
+      // carry revenue with no denominator, so cost-per-lead could never be
+      // recomputed from the fact alone.
+      //
+      // Read off report.spend, NOT a rendered section: the `spend` block is not
+      // in the rollup preset, and putting it there to reach the number would
+      // have added a section to the nightly email.
+      spend: sanitizeFactValue(report.spend ?? null),
       bySource: sanitizeFactValue(sections.get("source")?.data ?? null),
       byAgent: sanitizeFactValue(sections.get("ldcalls")?.data ?? null),
       statusMovement: sanitizeFactValue(sections.get("status")?.data ?? null),

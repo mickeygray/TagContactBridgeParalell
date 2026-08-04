@@ -1863,6 +1863,16 @@ async function composeReport({
     failures: material.failures || [],
     // Not a fault — data a person has not entered yet. Shown, never alarmed on.
     advisories: material.advisories || [],
+    // ALL COSTS BY SOURCE, carried as DATA rather than as a rendered section.
+    //
+    // The nightly snapshot needs the day's cost denominator (total, LD + lead
+    // count, mail + pieces, BCD + call count). The `spend` BLOCK computes
+    // exactly that, but it is not in the rollup preset — the email shows spend
+    // folded into `topline` instead. Adding the block to the preset to reach the
+    // number would have changed what the email looks like, and the email is the
+    // one thing that must not move. So the material rides along here and the
+    // renderer never sees it.
+    spend: material.spend || null,
     sections,
   };
 }
