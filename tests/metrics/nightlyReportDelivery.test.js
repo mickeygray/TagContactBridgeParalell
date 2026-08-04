@@ -136,24 +136,34 @@ test("a failed send gives the day back so the next poll retries", async () => {
   assert.equal(model._lastRunKey, null, "back to where it started");
 });
 
-test("a fact-write failure after accepted mail alerts state without releasing the email claim", async () => {
+test("the send path cannot be broken by the fact store — it never touches it", async () => {
+  // This used to assert the ordering ["mail-accepted","fact-write"] INSIDE
+  // runDefinition, and that a throwing fact writer still left the claim held.
+  // The snapshot moved out of the send path on 2026-08-04, so the guarantee is
+  // now structural rather than defended by a try/catch: runDefinition cannot
+  // release the claim over a fact failure because it does not write the fact.
+  //
+  // The property being protected is unchanged and is the important one — a mail
+  // provider has accepted this email, and nothing afterwards may make the day
+  // sendable again, or the next five-minute poll sends it a second time.
   const qualifying = {
     ...CANNED,
     selection: ["topline", "source", "ldcalls", "status", "longcalls"],
   };
   const { svc, model, calls } = loadService({ report: qualifying });
   const order = [];
+  let factWriterCalled = false;
   const result = await svc.runDefinition(def(), {
     now: NOW,
     sendMail: async () => { order.push("mail-accepted"); },
     dailyFactWriter: async () => {
-      order.push("fact-write");
+      factWriterCalled = true;
       throw new Error("fact store unavailable");
     },
   });
-  assert.deepEqual(order, ["mail-accepted", "fact-write"]);
+  assert.deepEqual(order, ["mail-accepted"]);
+  assert.equal(factWriterCalled, false, "sending must not write the daily fact");
   assert.equal(result.delivered, true);
-  assert.equal(result.dailyFactCapture.status, "failed");
   assert.deepEqual(calls.map((call) => call.op), ["claim"]);
   assert.equal(model._lastRunKey, "2026-07-30", "accepted mail must never become sendable again");
 });

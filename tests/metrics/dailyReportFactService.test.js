@@ -205,13 +205,40 @@ test("the delivered-email hook passes the already-built report to one writer", a
   assert.equal(input.dateKey, "2026-08-03");
 });
 
-test("the fact hook occurs after mail acceptance and never re-gathers", () => {
+test("sending carries NO persistence concern", () => {
+  // Was: "the fact hook occurs after mail acceptance and never re-gathers",
+  // asserting the capture sat inside runDefinition just after sendMail and
+  // reused the report.
+  //
+  // Changed deliberately on 2026-08-04. The snapshot moved OUT of the send path
+  // into dailySnapshotService, which composes its own report — a second gather,
+  // taken knowingly for one patch ("to be careful let's just run it twice for
+  // now") so the email path stops carrying persistence at all. Next patch merges
+  // them back into one gather, and this test flips back to asserting reuse.
   const src = fs.readFileSync(
     require.resolve("../../packages/shared-services/src/reportDefinitionService"), "utf8",
   );
-  const send = src.indexOf("await sendMail(def.domain || null");
-  const capture = src.indexOf("result.dailyFactCapture = await captureDeliveredDailyFact", send);
-  assert.ok(send >= 0 && capture > send, "daily capture must occur after provider acceptance");
-  const between = src.slice(send, capture);
-  assert.ok(!between.includes("composeReport("), "capture must reuse the report, never gather again");
+  assert.ok(!src.includes("result.dailyFactCapture = await captureDeliveredDailyFact"),
+    "the send path must not write the daily fact");
+  assert.ok(src.includes("await sendMail(def.domain || null"),
+    "but it must still send");
+});
+
+test("the snapshot writer is ordered after the email, and only for a delivered one", () => {
+  const src = fs.readFileSync(
+    require.resolve("../../apps/control-plane/src/services/reportScheduleRuntime"), "utf8",
+  );
+  const ran = src.indexOf("await runDefinition(def");
+  const snapshot = src.indexOf("await writeDailySnapshot(", ran);
+  assert.ok(ran >= 0 && snapshot > ran, "the snapshot must follow the send");
+  // A day whose mail never went out must not acquire a snapshot claiming it did.
+  const between = src.slice(ran, snapshot);
+  assert.ok(between.includes("if (result.delivered)"),
+    "the snapshot must be gated on actual delivery");
+  // The range must come from the RUN, never re-derived — an independently
+  // computed day produced TODAY where the email produced YESTERDAY, writing a
+  // second document that silently overwrote the first.
+  const call = src.slice(snapshot, snapshot + 240);
+  assert.ok(call.includes("range: result.range"),
+    "the snapshot must key on the range the email actually used");
 });

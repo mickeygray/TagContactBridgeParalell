@@ -19,6 +19,9 @@
 const {
   dueDefinitions, isDue, pacificKey, runDefinition,
 } = require("../../../../packages/shared-services/src/reportDefinitionService");
+const {
+  writeDailySnapshot,
+} = require("../../../../packages/shared-services/src/dailySnapshotService");
 const { sendMail } = require("../../../../packages/shared-services/src/mailerService");
 const { recordServiceAlert } = require("../../../../packages/shared-services/src");
 const { getInternalFromEmail } = require("../../../../packages/shared-config/src");
@@ -78,6 +81,28 @@ function createReportScheduleRuntime({ config = {}, runtime = {} } = {}) {
             definition: def.name, from: result.range.from, to: result.range.to,
             delivered: result.delivered, durationMs: result.durationMs,
           });
+
+          // THE SNAPSHOT, AFTER THE EMAIL. Moved out of runDefinition on
+          // 2026-08-04 so sending carries no persistence concern.
+          //
+          // It composes its own report — a second gather, accepted knowingly for
+          // one patch ("to be careful let's just run it twice for now"), merged
+          // into one pipe next patch. It is handed `result.range`, NOT a day it
+          // computes itself: the fact is keyed on range.from, and an
+          // independently-derived day produced TODAY where the email produced
+          // YESTERDAY, writing a second document that silently overwrote the
+          // first.
+          //
+          // Deliberately only for a DELIVERED email. A day whose mail never went
+          // out should not acquire a snapshot claiming it did.
+          if (result.delivered) {
+            result.dailyFactCapture = await writeDailySnapshot({
+              def, range: result.range, emailAcceptedAt: new Date(), logger: log,
+            }).catch((error) => ({
+              status: "failed", reason: String(error.message || error).slice(0, 200),
+            }));
+          }
+
           if (result.dailyFactCapture?.status === "failed") {
             // The email was already accepted, so this is an alert—not a retry.
             // Retrying runDefinition would duplicate the email just to repair

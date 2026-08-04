@@ -252,21 +252,19 @@ async function runDefinition(def, {
       // A fact-write failure must not throw from this send block: the email is
       // already accepted, and throwing would give the daily claim back and
       // resend it on the next scheduler poll.
-      try {
-        result.dailyFactCapture = await captureDeliveredDailyFact({
-          def, report, range, emailAcceptedAt: new Date(), writer: dailyFactWriter,
-        });
-      } catch (error) {
-        result.dailyFactCapture = {
-          status: "failed",
-          reason: String(error.message || error).slice(0, 200),
-        };
-        logger?.error?.("daily_report_fact.capture_failed", {
-          definition: def.name,
-          dateKey: range.from,
-          error: result.dailyFactCapture.reason,
-        });
-      }
+      // THE SNAPSHOT MOVED OUT — 2026-08-04. Sending is sending; persistence is
+      // its own job, in dailySnapshotService, run after this returns.
+      //
+      // The try/catch that used to be here is still load-bearing as a PATTERN
+      // and must not come back without it: this block sits inside the outer
+      // catch that hands the day back on failure, so anything that throws AFTER
+      // sendMail resolves would release the claim and re-send four emails on the
+      // next five-minute poll. That is why the capture was wrapped, and it is
+      // why the replacement lives outside this block entirely rather than being
+      // moved a few lines down.
+      //
+      // `result.dailyFactCapture` is intentionally still populated by the
+      // caller, because reportScheduleRuntime alerts on that exact field name.
     } catch (error) {
       // Give the day back so the next poll retries. Without this a transient
       // SMTP failure at 20:30 silently costs the whole night.
