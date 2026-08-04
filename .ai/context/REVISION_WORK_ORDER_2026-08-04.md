@@ -377,6 +377,62 @@ The duplicate pair is confirmed live and firing. Archive plain `vendor` and
 Five separate timers between 19:45 and 23:00 become one pass. Lexis at 02:00 is
 the only other night job that survives on its own clock.
 
+### IT IS ALL ONE PROCESS
+
+Mickey, 2026-08-04, asked whether the email re-gathers or reads the stored fact:
+*"its all one process."*
+
+So this is **not** "a 19:50 writer and a 20:00 reader that hand off through
+Mongo." It is one process that gathers once and ends with the send:
+
+```
+   ONE PROCESS
+   ├─ get the links
+   ├─ pull the cost
+   ├─ run activities
+   ├─ gather  ← ONCE, in memory
+   ├─ save the snapshot   (from that gather)
+   └─ send the email      (from THAT SAME gather)
+```
+
+**NOW vs EVENTUALLY — Mickey, same exchange:** *"for now building the email from
+the snapshot isnt how it exists but eventually we will get there."*
+
+So the diagram above is the DESTINATION. Do not build the email off the snapshot
+in this pass.
+
+**BUILD NOW — one process, ordering enforced:**
+
+```
+   ONE PROCESS
+   ├─ links → cost → activities
+   ├─ save the snapshot        ← happens FIRST
+   └─ send the email           ← still gathers the way it does today
+```
+
+The only thing being changed now is **that these live in one process, in this
+order.** The email keeps building itself exactly as it currently does. That is
+the whole point of "thinning out, not rebuilding."
+
+**BUILD EVENTUALLY — the email renders from the snapshot**, at which point the
+two provably cannot disagree because they are one object.
+
+**Be honest about the intermediate state:** until that rewire happens, the
+snapshot and the email are two reads taken minutes apart, so they CAN differ at
+the edges. That is accepted for now — it is strictly better than today, where
+they are two reads taken *ninety minutes* apart on two different clocks. Do not
+paper over the gap by claiming they match; if a report ever has to be
+reconciled against a stored fact before the rewire lands, the timestamps are the
+explanation.
+
+Two consequences that DO apply immediately:
+
+1. **`reportScheduleRuntime` stops being its own loop** and becomes the tail of
+   the pass. That kills the "fired randomly at 11:30pm" drift — the send cannot
+   wander if it is the last step of something that starts at a fixed time.
+2. **Ordering is load-bearing: snapshot first, send second.** A send failure is
+   not the death of the data.
+
 Settled with Mickey. Order is load-bearing:
 
 ```
