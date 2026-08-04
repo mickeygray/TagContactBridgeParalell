@@ -20,11 +20,28 @@ const dailyReportFactSchema = new mongoose.Schema(
     captureVersion: { type: Number, required: true, default: 1 },
 
     // Provenance names the build that produced the facts, never recipients.
-    definitionName: { type: String, required: true, maxlength: 160 },
+    // Also relaxed: the worker creates entries that no definition produced.
+    // Defaulted rather than left blank so a row always says where it came from.
+    definitionName: { type: String, default: "daily entry", maxlength: 160 },
     selection: { type: [String], default: [] },
-    emailAcceptedAt: { type: Date, required: true },
+    // NO LONGER REQUIRED, as of 2026-08-04.
+    //
+    // This document began as "the record of a delivered email", so an accepted
+    // mail timestamp was rightly mandatory. It is now THE DAY'S ENTRY, assembled
+    // by a worker from several gatherers, and the entry can legitimately exist
+    // before — or without — any email being sent.
+    //
+    // Keeping it required meant the worker could not create a day at all: a
+    // fresh upsert would insert a document missing a required field. Null here
+    // means "no mail accepted yet", which is a true statement about that day and
+    // strictly better than refusing to record it.
+    emailAcceptedAt: { type: Date, default: null },
     capturedAt: { type: Date, required: true, default: Date.now },
     revision: { type: Number, required: true, default: 0 },
+    // When the daily-entry worker last assembled this day. Declared explicitly:
+    // the schema is strict, so an undeclared field is dropped on write without
+    // erroring, and the document would look like it saved cleanly.
+    entryBuiltAt: { type: Date, default: null },
 
     // Each member contains the BASE daily values from one rollup section. The
     // range reader must sum bases and recompute ratios; it must never average
