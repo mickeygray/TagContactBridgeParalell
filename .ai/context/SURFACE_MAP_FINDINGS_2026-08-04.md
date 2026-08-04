@@ -78,6 +78,28 @@ mount the field manual outside `/cx`, repoint the recordings library — not an
 
 ---
 
+## DISPOSITIONS — Mickey, 2026-08-04
+
+Settled. Do not re-raise these.
+
+- **Facebook/Instagram responder: FINE AS IS.** Leave the bot running and leave
+  `SocialWorkspace` parked. Do not restore the screen, do not touch the
+  responder. (Item 1 below stands as documentation of where the off switch
+  went, not as a recommendation.)
+- **Trainer being dark: FINE. Nobody is using it.** Do not spend effort lighting
+  the Course / Case Review flags or wiring the Gauntlet and Free Call configs.
+  **But it must still SURVIVE the CX teardown** — it is purpose #1, held for a
+  future hire. And the gauntlet/free-call services still **cannot be deleted**:
+  they are required at module load by `shared-services/src/index.js` and own
+  live persistence contracts (see "The trainer is half-dark" below). Dark is
+  fine; deleted is a boot failure.
+- **STILL OPEN — not addressed:** the CxTerminalOutbox dial-frequency floor
+  (item 2 below). This is a **constraint on the CX work**, not a task: whoever
+  does the teardown must not drop that collection without replacing the read,
+  or lead delivery silently starts over-dialing.
+
+---
+
 ## URGENT — surfaced in passing, unrelated to CX
 
 **1. A live public-facing bot has no off switch.**
