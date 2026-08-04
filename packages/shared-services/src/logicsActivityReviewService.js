@@ -1472,9 +1472,11 @@ async function requestActivityReport({
 /**
  * The day's activity, shaped for `facts.activity` on the daily entry.
  *
- * These are the same numbers the email prints, which is the point — the email
- * has been trusted for months, so the record should carry exactly what it says
- * rather than a second derivation that could drift from it.
+ * These are the same numbers the email prints, which is the point: the record
+ * should carry exactly what the email says rather than a second derivation that
+ * could drift from it. Not because the email is long-proven — it first produced
+ * an accurate day on 2026-08-03 — but because one derivation that can be checked
+ * against a sent email beats two that can disagree with each other.
  *
  * A count that could not be computed is NULL, never 0, and the error is kept
  * beside it. "We could not look" and "nothing happened" are different days.
