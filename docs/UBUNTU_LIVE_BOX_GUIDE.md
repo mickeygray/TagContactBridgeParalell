@@ -7,7 +7,18 @@ This is the working map for the TagContactBridge Parallel Ubuntu live box. It is
 From Windows PowerShell:
 
 ```powershell
-ssh -i C:\Users\micke\.ssh\id_ed25519_contactbridge_ubuntu ubuntu@tagcontactbridge
+powershell -NoProfile -ExecutionPolicy Bypass -File "C:\Users\micke\.codex\skills\tagcontactbridge-live-linux\scripts\live-box.ps1" -Mode Shell
+```
+
+The helper tries the current LAN address (`192.168.1.59`) first and the
+`tagcontactbridge` hostname second. Use the helper instead of copying a
+hostname-only SSH command: the Windows hostname alias may disappear after a
+VPN or VLAN change even while the server remains reachable.
+
+Connection-only check:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File "C:\Users\micke\.codex\skills\tagcontactbridge-live-linux\scripts\live-box.ps1" -Mode Probe
 ```
 
 Useful first move after login:
@@ -50,7 +61,7 @@ from pathlib import Path
 for line in Path("/var/log/nginx/access.log").read_text(errors="ignore").splitlines():
     if "/api/read/clients/case/" in line and " 500 " in line:
         print(line[:180])
-'@ | ssh -i C:\Users\micke\.ssh\id_ed25519_contactbridge_ubuntu ubuntu@tagcontactbridge "python3 -"
+'@ | ssh -i C:\Users\micke\.ssh\id_ed25519_contactbridge_ubuntu ubuntu@192.168.1.59 "python3 -"
 ```
 
 For Node diagnostics that need repo code, change directory on the remote side
@@ -60,7 +71,7 @@ and pipe the script:
 @'
 process.chdir("/opt/tagcontactbridge-parallel");
 console.log(JSON.stringify({ ok: true }));
-'@ | ssh -i C:\Users\micke\.ssh\id_ed25519_contactbridge_ubuntu ubuntu@tagcontactbridge "cd /opt/tagcontactbridge-parallel && node -"
+'@ | ssh -i C:\Users\micke\.ssh\id_ed25519_contactbridge_ubuntu ubuntu@192.168.1.59 "cd /opt/tagcontactbridge-parallel && node -"
 ```
 
 Rules of thumb from 2026-07-03 live checks:
