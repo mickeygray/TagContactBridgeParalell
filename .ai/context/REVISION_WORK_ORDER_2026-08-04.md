@@ -146,11 +146,35 @@ STATE — half done, and the missing half is the one that matters:
 
 So the pool fills monthly and nobody drinks from it.
 
-WORK:
-1. Build a TAG filler **admission/composite source** modeled on
-   `callRecoveryAdmissionService.js` + `callRecoveryCompositeSource.js` — that
-   pair is the existing, proven pattern for admitting a non-standard population
-   into the delivery pool.
+**CORRECTED 2026-08-04 by `scripts/tag-filler-admission-audit.js` — the intake
+is NOT the binding gate. The DNC scrub is.**
+
+```
+4,586 TAG rows — every one with a phone, every one past the caseId floor
+    7 have EVER been DNC-checked
+    1 on national DNC, 1 on state DNC
+    6 clean and admissible
+4,579 pool.tag=filler-retry-2026-08, pool.source=dnc-lookup-pending-retry
+```
+
+The sampler deferred the DNC lookup for **99.8% of the pool** and the retry has
+never run. Building an intake today would admit **six rows**. Fix the scrub
+first — the intake question cannot be answered until there is a population to
+answer it about.
+
+Field-shape note that cost a wrong reading once already: there is **no
+`dnc.result` field** in MasterProspectIndex, on either domain. The verdict is
+discrete flags (`onNationalDnc`, `onStateDnc`, `onDma`, `isLitigator`) with
+`checkedAt` proving the lookup happened. Query `dnc.result` and every row looks
+undialable for the wrong reason.
+
+WORK (revised):
+0. **Find out why 4,579 rows are stuck in `dnc-lookup-pending-retry`** and get
+   the scrub through them. Everything else in this section waits on that.
+1. Then, if a real population exists: build a TAG filler
+   **admission/composite source** modeled on `callRecoveryAdmissionService.js` +
+   `callRecoveryCompositeSource.js` — the proven pattern for admitting a
+   non-standard population into the delivery pool.
 2. Land them in tier 4 of the existing selection rank
    (`leadDeliveryService.js:1500` — "generic aged filler", coldest first). The
    slot already exists; nothing new needs inventing in the ranker.
@@ -166,6 +190,32 @@ PhoneBurner folders, and the per-day attempt cap demonstrably holds.
 WATCH OUT: this puts a genuinely new population in front of agents. Cap the
 first day low and look at it before opening up. DNC recheck (§2) must be
 confirmed running *before* TAG yellows start dialing — these are old records.
+
+---
+
+## 3b. STANDING RULE — CX as a data source
+
+Mickey, 2026-08-04: *"anything that relies on cx as data should immediately be
+shaken down for its value and reformatted."*
+
+This applies wherever a **kept** surface reads a `Cx*` collection or a `cx*`
+service for its facts. For each: ask what the read is worth, then either drop it
+or re-source it from a non-CX origin. Do not leave a kept feature drinking from
+a dying well.
+
+The known list, from the surface map:
+
+| Reader (kept) | CX data it drinks | Shakedown |
+| --- | --- | --- |
+| `leadDeliveryService:2764` → `readLegacyDailyAttemptFloor` (`leadDeliveryRepository:1200`) | **CxTerminalOutbox** — folds `terminalOutboxCallCount` into a `Math.max` dial-frequency floor | **HIGHEST VALUE, HIGHEST RISK.** Frozen since Jul 10, so it contributes nothing new — but removing it *lowers* a contact-safety floor. Failure mode is invisible over-dialing. Re-source from DailyDial / LeadDeliveryEvent, then drop. |
+| `nightReportService:300,309` (report listenUrl) and `trainingCallReviewSourceService:342` | `recordingArchive.*`, written by **`cxRecordingInboxDrainService`** (SFTP push path) | §7 replaces recordings with links. Decide whether the SFTP fallback still recovers anything; if not, drop both sides together. |
+| Trainer "My calls" tab (`TrainingCenterPanels.tsx:303`) | `/api/read/cx/recordings/library` → `readCx.js:971` | Handler reads Google Drive, touches no `Cx*` model — so this is CX **in name only**. Re-point the path; no data migration. |
+| `hourlySweeperService` | `cxRecordingHourlyService`, `cxCallActivityBackfillService` | Pull RingCX recordings into CallLog. If RingCX dialing is dead these recover nothing — verify with a live count before deleting, per §5. |
+| `frontendReadService:699-707` | `agent.cxRouting` field | Field read off an already-loaded doc, not a CX collection. Cheap to keep, cheap to drop. |
+| `taxResolutionSalesTrainerService:355-356` | `account.cxAuth` / `account.cxSession` emails | Widens an allowlist; degrades to "fewer emails". Drop with the auth severing (§4 EDIT 4). |
+
+Order: the dial-frequency floor first — it is the only one where getting it
+wrong dials somebody who asked us to stop.
 
 ---
 
