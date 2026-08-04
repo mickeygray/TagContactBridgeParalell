@@ -192,3 +192,38 @@ Everything below reviewed with Mickey this morning. 609 tests green.
 - Nightly automated PB drain: yes or no?
 - Where does the control plane HOST? (decides whether .env/server.js edits are
   live after a restart — the four re-enables depend on this)
+
+---
+
+## 7. THE REVISION PLAN — Mickey's ordering, 2026-08-04 (supersedes §6 order)
+
+Goal: "making the app a coherent only useful surface." May extend past today.
+
+1. **Blogger on** — ✔ `BLOGGER_ENABLED=true` (env). Fires 08:00 once the
+   hosting process restarts with this repo's .env.
+2. **Lead aging on** — ✔ `agedRollingRefreshEnabled: true` (committed eecc0bf).
+   Same restart caveat.
+3. **TAG yellows → PhoneBurner groundwork — HALF DONE, half MISSING.**
+   ✔ The sampler runs: fillerPoolRefresh re-samples status=2 TAG cases
+     (caseId>=50000, has phone) into MasterProspectIndex — 4,586 TAG rows.
+   ✘ NOTHING DELIVERS THEM. LeadDeliveryItem is effectively WYNN-only:
+     11,493 WYNN rows vs SIX Tag rows (2 from July). The delivery loop that
+     fills PhoneBurner folders never ingests TAG MPI rows. The repo touches
+     MPI only as a per-case findOne (enrichment), not as a source.
+   The missing piece is an INTAKE: admit TAG MPI rows into the delivery pool
+   the way callRecoveryCompositeSource admits recovery episodes. Real build.
+4. **CX phase-out** — move 66 services + 8 models to their own branch.
+5. **Service workers → 3x/day:**
+   - MORNING: set up the floor (rotation-era chores, blogs at 08:00)
+   - MIDDAY: honest LD accounting — is everything getting touched, does the
+     pool need reorienting so new stuff gets a SECOND touch
+   - EVENING (one shot): drain/reset, capture call links (agent+source+case),
+     gather once, SNAPSHOT FIRST, then send. Folds nightlyClose's operational
+     half.
+6. **Vendor email tightening** (listen col, CSV, officer names, phones-not-ids).
+7. **CallLog → recording-forward surface** (index + minter on the report path;
+   EX fenced; 252 mislabeled rows repaired).
+8. **Admin panel / app review** — deprecate and rebuild toward "coherent only
+   useful surface."
+
+Committed so far: 665029a, b33412a, eecc0bf.
