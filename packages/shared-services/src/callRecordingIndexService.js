@@ -63,7 +63,16 @@ function resolveProviderFromUri(uri, platform) {
 // haystack. So the same vocabulary nightRecordingsService already uses to pick
 // notable calls applies here — LONG / DEAL / POSTDATE — rather than a second
 // idea of "worth hearing" that would drift from the one the email applies.
-const { LONG_CALL_SECONDS } = require("./nightRecordingsService");
+// ITS OWN THRESHOLD, deliberately not nightRecordingsService.LONG_CALL_SECONDS.
+//
+// Mickey 2026-08-04: "5 minutes is significant enough for this version of
+// things." The email's bar is ten minutes, and importing that constant to lower
+// it here would have moved the nightly email's "calls worth hearing" list at the
+// same time — the one thing that must not change. Two consumers, two bars, one
+// vocabulary.
+const INDEX_LONG_CALL_SECONDS = Math.max(
+  1, Number(process.env.CALL_INDEX_LONG_CALL_SECONDS) || 300,
+);
 
 const last10 = (p) => String(p || "").replace(/\D/g, "").slice(-10);
 
@@ -78,7 +87,7 @@ const last10 = (p) => String(p || "").replace(/\D/g, "").slice(-10);
  */
 function significanceFor(row, notableByPhone = new Map()) {
   const reasons = new Set();
-  if (Number(row.durationSec || 0) >= LONG_CALL_SECONDS) reasons.add("LONG");
+  if (Number(row.durationSec || 0) >= INDEX_LONG_CALL_SECONDS) reasons.add("LONG");
   const hit = notableByPhone.get(last10(row.phone));
   if (hit) for (const r of hit) reasons.add(r);
   return [...reasons];
@@ -328,5 +337,7 @@ async function gatherRecordingLinks({
 module.exports = {
   gatherRecordingLinks,
   resolveProviderFromUri,
+  significanceFor,
+  INDEX_LONG_CALL_SECONDS,
   PACIFIC,
 };
