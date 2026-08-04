@@ -8,6 +8,32 @@ it. Line numbers are from the working tree at commit `7843c36`.
 
 ---
 
+## WHAT "DONE" MEANS FOR THIS PASS
+
+Mickey, 2026-08-04: *"it's important to touch everything here — we don't have to
+complete the implementation in one pass, but sorta moving things around so it's
+one thing on and we are in a place to do the next part is more the goal."*
+
+So the acceptance test is **not** "every feature works." It is:
+
+1. **One thing is on at night.** One process owns the evening. No second timer
+   doing overlapping work on its own clock.
+2. **Everything has been touched and has a home.** Every night job is either a
+   task in the registry, explicitly parked with a written reason, or retired.
+   Nothing is left un-inventoried.
+3. **The next pass can finish it.** A piece may land DARK or PARTIAL, as long as
+   it is in the right place and its remaining work is written down.
+
+**Breadth beats depth here.** A dark task in the right place is a better outcome
+than a finished feature in the wrong one — the point of this pass is position,
+not completeness.
+
+**The one exception, and it is absolute:** anything governing whether we may
+dial a person is *complete or untouched*. There is no acceptable dark or partial
+state for the DNC queue refresh (see §3 below). Everything else may land unfinished.
+
+---
+
 ## THE SHAPE
 
 ```
@@ -264,6 +290,29 @@ Fix these deliberately, in their own change, not folded into the consolidation:
 
 ---
 
+### STEP 8 — Touch nightlyClose: sort its jobs, move what moves, park the rest
+
+Under the "position, not completeness" rule this no longer blocks. nightlyClose
+(21:30) holds roughly eight jobs. Sort every one into **move / park / drop**,
+land them dark, and write down what is left:
+
+| Job | Disposition |
+| --- | --- |
+| `refreshQueuedLeadStatuses` (DNC) | **ALL-OR-NOTHING.** Opt-OUT today (`nightlyCloseService.js:348`) and the caller of `retireDncLead` (`leadQueueStatusRefreshService.js:180-214`). Either it is running and observed in the new pass, or the 21:30 timer stays on. **Never dark, never partial.** |
+| payment sweep | move — task, dark |
+| `runNightlyLeadCadenceCaseRefresh` (`:136-226`) | move, dark — but it walks up to 20k leads × 3 domains with a per-case Logics GET. **Raise `HYGIENE_CLAIM_LEASE_MS` (`:46`, 45 min) before arming.** |
+| `ensureClientCaseProfiles` | move — task, dark |
+| `recoverCxCallLogsForDate` | **drop** — CX, per the CX-as-data shakedown |
+| resolution-bank-close (`:881-884`) | move LAST, dark — documented "can run ~25 minutes" |
+| PhoneBurner reconcile | move — task, dark. Touches invariant #2; observe before arming |
+| `HourlyJobEvent` prune | **decide before Step 8 lands.** It is stranded behind an email that never sends (`:805`, `NIGHTLY_CLOSE_SEND_EMAIL=false`), so retiring the close silently removes it |
+
+**The timer comes off only when the DNC row above is satisfied.** Everything else
+can sit dark behind its own flag — that is what "in a place to do the next part"
+means.
+
+---
+
 ## Order of operations, one line each
 
 ```
@@ -275,8 +324,30 @@ Fix these deliberately, in their own change, not folded into the consolidation:
 5. snapshot before send           (the goal)
 6. archive the duplicate pair     (Mongo, enabled=false too)
 7. link capture in, 23:00 out     (carry the readers + EX rule)
-8. thinning                       (dead code, separately)
+8. touch nightlyClose             (sort 8 jobs; DNC all-or-nothing)
+9. thinning                       (dead code, separately)
 ```
+
+**After this pass, the night is:** one process at 19:50 that ends with the send,
+plus lexis at 02:00. Some of what it carries will be dark. That is the intended
+end state for THIS pass — one thing on, everything homed, the next part
+unblocked.
+
+### What the next pass picks up (written down so it is not rediscovered)
+
+- Arm the tasks that landed dark, one at a time, each with an observed night.
+- The recording INDEX (serving side): add `provider` + `providerRef` to
+  `MarketingCallLink`; keep `listenUrl` only for providers whose URLs are durable
+  (CallRail serves `HTTP 200 audio/mpeg` unauthenticated); leave it **null** for
+  RingCentral and mint at read time through the existing HMAC forwarder
+  `/api/recordings/rc-play/:recordingId`, which already mints a fresh RC bearer
+  per request. An RC URL with a token baked in is not a durable artifact and must
+  never be cached as one — the model's "the URL never changes" premise
+  (`MarketingCallLink.js:11`) holds for CallRail and fails for RC.
+- Repair the 252 CallRail rows mislabeled `platform:"ex"`, and enforce the EX
+  exclusion at the endpoint.
+- The email renders FROM the snapshot rather than from sibling material.
+- The composer bugs listed above, in their own change.
 
 **Never in the same change as anything else:** a TASKS array reorder (positional
 cursor), and retiring nightlyClose (DNC refresh).
