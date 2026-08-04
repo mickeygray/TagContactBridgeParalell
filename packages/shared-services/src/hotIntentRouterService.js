@@ -172,61 +172,32 @@ async function queueSmsCallbackForWorkflow(workflow, options = {}) {
     return { queued: false, skipped: true, reason: "no-case-id" };
   }
 
-  const { queueCxDialRequest } = require("./cxCadenceService");
-  const result = await queueCxDialRequest({
-    domain,
-    caseId,
-    phone: workflow.phone || null,
-    name: workflow.metadata?.name || workflow.metadata?.leadName || null,
-    intakeSource: "sms-hot-intent",
-    intakeRoute: "sms-hot-intent-now",
-    sourceName: "Wynn SMS callback",
-    queueFamily: "fresh-day1",
-    priorityLane: "sms-hot-intent",
-    priorityScore: 500,
-    requestedBy: "sms-opus-triage",
-    executionOwner: "ringcentral-cx",
-    workflowId,
-    actionKey,
-    metadata: {
+  // CX dial queue RETIRED 2026-08-04. This used to write a CxDialQueue row so a
+  // RingCX agent would call the hot lead back. Nobody works that queue: in the
+  // fourteen days before it was cut, live traffic created 1,444 rows and not one
+  // was ever claimed, completed or dialled.
+  //
+  // Everything upstream is untouched — the workflow is still classified, still
+  // marked hot, still recorded on the conversation. Only the write into a queue
+  // with no readers is gone.
+  await conversationWorkflowRepository.updateConversationWorkflowById(workflowId, {
+    "metadata.callbackQueue": {
+      queued: false,
+      skipped: true,
       actionKey,
-      source: "sms-opus-triage",
-      smsCallbackQueued: true,
-      workflowId,
       callbackWindow: callbackWindow || null,
-      callbackQueueMode: callbackQueueMode.mode,
-      callbackQueueTimingReason: callbackQueueMode.reason,
-      smsCallbackUrgency: "immediate-hot",
-      reason: options.reason || null,
-      classificationTier: options.classification?.tier || null,
-      prospectState: options.classification?.prospectState || null,
-      hotIntentReason: options.classification?.hotIntent?.reason || null,
+      mode: callbackQueueMode.mode,
+      reason: "cx-dial-queue-retired",
+      observedAt: new Date(),
     },
-  });
-
-  const queueItem = result?.queueItem || null;
-  if (queueItem?._id) {
-    await conversationWorkflowRepository.updateConversationWorkflowById(workflowId, {
-      routedQueueItemId: String(queueItem._id),
-      "metadata.callbackQueue": {
-        queued: true,
-        queueItemId: String(queueItem._id),
-        actionKey,
-        callbackWindow: callbackWindow || null,
-        mode: callbackQueueMode.mode,
-        queuedAt: new Date(),
-      },
-    }).catch(() => null);
-  }
+  }).catch(() => null);
 
   return {
-    queued: Boolean(result?.queued),
-    deduped: Boolean(result?.deduped),
-    queueItemId: queueItem?._id ? String(queueItem._id) : null,
+    queued: false,
+    skipped: true,
+    reason: "cx-dial-queue-retired",
+    queueItemId: null,
     actionKey,
-    skipped: Boolean(result?.skipped),
-    reason: result?.reason || null,
-    detail: result?.detail || null,
     mode: callbackQueueMode.mode,
     timingReason: callbackQueueMode.reason,
   };

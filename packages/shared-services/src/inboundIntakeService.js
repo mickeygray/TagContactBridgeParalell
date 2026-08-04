@@ -2421,12 +2421,21 @@ async function fireImmediateContact(leadCadence, validation = {}, options = {}) 
     result.email = { ok: false, skipped: true, reason: "email-cannot-send" };
   }
 
-  // ── CX queue: write the dial-queue item so an agent sees it ─────
-  // Only enqueue when the phone is callable. The cadence schedule's
-  // cx-day0-1 action carries the actionKey + scheduling intent; we
-  // pass it through so the queue item is keyed correctly and the
-  // cadence sweep's reconciliation later finds the same row.
-  if (validation.phoneCanCall) {
+  // ── CX queue: RETIRED 2026-08-04 ────────────────────────────────
+  // This used to enqueue a CxDialQueue item so a RingCX agent would see the
+  // lead. Nobody works that queue any more: over the fourteen days before this
+  // was cut, live intake created 1,444 rows and NOT ONE was claimed, completed
+  // or dialled. It was ~100 writes a day onto the shared cluster off the back
+  // of real lead traffic, feeding a surface with no consumer.
+  //
+  // The enqueue is gone; the SHAPE of `result.cx` is preserved because the
+  // caller logs it below and `forwardFirstContactCxQueue` keyed off it. Leads
+  // reach agents through PhoneBurner via lead delivery, which this function
+  // does not touch.
+  const CX_DIAL_QUEUE_RETIRED = true;
+  if (CX_DIAL_QUEUE_RETIRED) {
+    result.cx = { ok: true, queued: false, skipped: true, reason: "cx-dial-queue-retired" };
+  } else if (validation.phoneCanCall) {
     try {
       const { queueCxDialRequest } = require("./cxCadenceService");
       result.cx = await queueCxDialRequest({
