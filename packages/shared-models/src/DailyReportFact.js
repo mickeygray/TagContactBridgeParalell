@@ -41,6 +41,11 @@ const dailyReportFactSchema = new mongoose.Schema(
       // Reserved for Claude's call/dial projection. The core writer records a
       // count-only pending marker and never copies URLs, phones, or call rows.
       calls: { type: mongoose.Schema.Types.Mixed, default: null },
+      // The nightly Logics activity review's own day: rows scanned, notice
+      // uploads, suspended flips, DNC and post-date counts. That review has
+      // always produced an accurate day and then thrown it away at the end of
+      // an email. This is where it lands.
+      activity: { type: mongoose.Schema.Types.Mixed, default: null },
     },
 
     coverage: {

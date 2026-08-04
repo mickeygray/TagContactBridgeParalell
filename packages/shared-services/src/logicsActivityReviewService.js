@@ -1747,6 +1747,47 @@ async function runLogicsActivityReview(options = {}) {
   } catch (error) {
     processed.statusChangeCounts = { error: String(error.message).slice(0, 160) };
   }
+
+  // ── RECORD THE DAY, THEN SEND IT ────────────────────────────────────────
+  //
+  // Mickey 2026-08-04: "the nightly activity service worked to produce an
+  // accurate day — all we are doing is organizing it and getting it to record."
+  //
+  // Until now this function gathered an accurate day and then spent it entirely
+  // on an email. The numbers below are the same ones the email prints; they are
+  // simply written down first, so a mail failure costs the message and not the
+  // day. Same ordering rule the report path follows.
+  //
+  // Non-fatal by construction: recording is not what this service is FOR, and a
+  // storage problem must not cost the review its email.
+  try {
+    const { attachDailyActivityFacts } = require("./dailyReportFactService");
+    processed.recorded = await attachDailyActivityFacts({
+      dateKey: endDateKey || dateKey,
+      activityFacts: {
+        domain,
+        range: { from: startDateKey || dateKey, to: endDateKey || dateKey },
+        rowsScanned: processed.parsedRows || 0,
+        documentUploads: processed.documentUploadActivities || 0,
+        excludedUploads: processed.excludedActivities || 0,
+        noticeUploadCases: processed.outputRows || 0,
+        suspendedStatusChanges: processed.suspendedStatusChanges || 0,
+        suspendedStillCurrent: processed.suspendedCurrentStatusChanges || 0,
+        // These two come from the canonical source — the activity feed itself —
+        // which is the whole reason they are worth keeping.
+        dncToday: processed.statusChangeCounts?.dnc ?? null,
+        postdateToday: processed.statusChangeCounts?.postdate ?? null,
+        // A count that could not be computed is NULL, never 0. "We could not
+        // look" and "nothing happened" are different days.
+        statusCountsError: processed.statusChangeCounts?.error || null,
+        aiReviewedCases: processed.aiReview?.reviewedCases ?? null,
+        profilesStamped: processed.clientProfileNoticeAlerts?.updated ?? null,
+      },
+    });
+  } catch (error) {
+    processed.recorded = { status: "failed", reason: String(error.message).slice(0, 160) };
+  }
+
   const email = sendEmail
     ? await emailActivityReview(
         { request, processed },
