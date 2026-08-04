@@ -193,6 +193,35 @@ confirmed running *before* TAG yellows start dialing — these are old records.
 
 ---
 
+## 3a. STANDING RULE — the two invariants, and permission to break the rest
+
+Mickey, 2026-08-04: *"as long as the night services run and phone burner keeps
+churning there can be construction everywhere else where things temporarily are
+wonky and don't work, because well they aren't being used. so don't be afraid to
+yank some wires out."*
+
+**Protect exactly two things:**
+
+1. **The night services run.**
+2. **PhoneBurner keeps churning** (lead delivery in, dials out).
+
+Everything else may be temporarily broken. Screens can 404, admin panels can be
+half-wired, dark features can stay dark. Do not gold-plate a migration path for
+a surface nobody opens — cut it and move on.
+
+**The one exception, and it is not timidity:** anything that could cause us to
+**dial someone who asked us to stop** is not covered by "wonky is fine." A
+broken screen is visible and reversible; over-dialing is neither. That is why
+the CxTerminalOutbox dial-frequency floor (§3b) gets re-sourced before it gets
+removed, while the CX dial queue got cut the same afternoon it was measured.
+
+Also settled: **the 4,579 aged TAG rows are NOT the target.** They are aged out
+of the ~4-month window, and PhoneBurner already has an aged folder for manual
+selection. §3 is about *going forward*, not backfilling that pool — so the
+pending-retry DNC scrub is a curiosity, not a blocker.
+
+---
+
 ## 3b. STANDING RULE — CX as a data source
 
 Mickey, 2026-08-04: *"anything that relies on cx as data should immediately be
