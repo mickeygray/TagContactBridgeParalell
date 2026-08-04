@@ -172,16 +172,25 @@ inversion.** Add a test, or compare one night's totals against the prior night.
 **Verify:** `SpendEntry` newest write lands in the 19:50 window, not 19:45; the
 20:00 email's spend total matches the prior night's shape.
 
-### STEP 4 — CORRECTED: activity review does NOT feed the snapshot
+### STEP 4 — CORRECTED TWICE. Read both corrections.
 
-**Verified 2026-08-04, after this step was written on an untested assumption.**
+**Correction 1 was itself wrong.** It claimed
+`logicsActivityReviewService.js` has "zero persistence — no `updateOne`,
+`bulkWrite`, `insertMany`, `save`, or model access anywhere." That came from a
+grep of the file, and the file writes through a REPOSITORY:
+`recordNoticeAlertsOnClientProfiles` (`:1118-1173`, called unconditionally at
+`:1379`) → `mergeShorthandFields` (`clientProfileRepository.js:110-157`) →
+`ClientProfile.updateOne` at `:147` and `findOneAndUpdate` at `:152`. It stores
+the last 25 notice alerts per case. No financial fields, and skipped entirely
+when no client profile exists — but it is a real write, and this document
+contradicted itself about it (`:179` vs `:222`) before anyone noticed.
 
-`logicsActivityReviewService.js` is 1,791 lines with **zero persistence** — no
-`updateOne`, `bulkWrite`, `insertMany`, `save`, or model access anywhere. Its
-terminal act is `sendMail` at `:1539`, subject *"<range>: X notices, Y
-suspended"*. The only thing `logicsActivityReviewRuntime` writes is a
-`recordServiceAlert` on failure (`:384`), and neither the report nor the snapshot
-reads ServiceAlert.
+The lesson, twice-learned today: **a grep for write verbs cannot see a write made
+through a repository or a barrel.** Trace the imports.
+
+**What IS true:** its terminal act is `sendMail` at `:1539`, subject
+*"<range>: X notices, Y suspended"*, and neither the report nor the snapshot
+reads anything it writes.
 
 **So it is a SECOND EMAIL, not a data-layer build step.** The premise under which
 it was folded into the 19:50 pass — "the review must land before the snapshot
@@ -201,6 +210,41 @@ Consequences:
    `LOGICS_ACTIVITY_REVIEW_ENABLED` with the standalone 20:00 runtime, which
    shared-config defaults to TRUE. The task already has its own
    `NIGHTLY_ACTIVITY_REVIEW_ENABLED` (default off) for exactly this reason.
+
+### THE DURABLE FINANCIAL RECORD ALREADY EXISTS
+
+Mickey asked for "a durable financial record" from the activity service. It is
+already built, in a sibling path reading the same feed:
+
+- `activityEventService.js` — typed events including **`payment-claim`**, with a
+  LastModified-proof dedupeKey.
+- `paymentTruthService.js` — Billing-confirmed `PaymentTruth` rows.
+- Wired by `nightPassService.js`, which is already gather → persist.
+
+**So the gap is not a missing store. It is a duplicated gather.**
+`nightPassService.js:90-94` makes its OWN `requestActivityReport` call for the
+same day the review service already pulled at
+`logicsActivityReviewService.js:1458-1464`. Two range-native calls, same report,
+same day, three domains each.
+
+That is the "one after the other" that should become one gather feeding both.
+
+**Three facts that shape any design here:**
+
+1. **The ActivityReport has NO financial columns.** Nine fields — CaseID,
+   ClientName, Type, ActivitySubject, Created, CreatedBy, TaskOrActivity,
+   LastModifiedDate, LastModifiedBy. Every dollar in the feed is *free text
+   inside `ActivitySubject`* on Payment/CaseAccount/LOAN rows
+   (`ACTIVITY_FEED_SHAPE_MAP_2026-07-27.md:21-23`, `:99-108`).
+2. **The review service reads none of the money lane.** It filters to document
+   uploads (`:589`) and suspended flips (`:633`) and discards the payment rows
+   entirely.
+3. **`Billing/CasePayment` — the actual ledger, with CasePaymentID, Amount,
+   PaidDate, TransactionStatus — is never called by it**, though both
+   `logicsFacadeService.js:65-69` and `logicsClient.js:172-174` expose it. The
+   money it *does* hold is per-case STATE (TotalFees, PaidAmount, Balance,
+   AmountDue at `:663-673`) — precisely the thing the events-not-state rule says
+   not to freeze.
 
 **Decision needed before this step runs at all: does anyone read the notice
 email?** If yes, leave the 20:00 runtime alone and drop the folded task. If no,
