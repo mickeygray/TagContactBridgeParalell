@@ -2176,6 +2176,7 @@ async function startServer() {
         reservationReasons: [
           "source-blocked-status-freshness-unproven",
           "source-blocked-status-stale",
+          "source-blocked-status-invalidated-after-touch",
         ],
         logger: null,
       });
@@ -2253,16 +2254,30 @@ async function startServer() {
     config: config.reportSchedule || {},
     runtime,
   });
+  // Constructed BEFORE nightlyHygieneRuntime as of 2026-08-04, because the
+  // hygiene pass now takes it as a collaborator. Still constructed before
+  // nightlyCloseRuntime, which has the same dependency for its reconcile step.
+  const spendSyncRuntime = createSpendSyncRuntime({
+    config: config.spendSync || {},
+    runtime,
+  });
   // THE nightly service: one loop, a registry of hygiene chores (today:
   // writing the mail piece onto the Logics case so reports READ attribution
   // instead of rebuilding it). Default OFF; each task needs its own write
   // switch on top of NIGHTLY_HYGIENE_ENABLED.
+  //
+  // The two injected runtimes are for the folded-in costing and activity-review
+  // tasks. Injecting them does NOT arm them: both sit behind their own flags
+  // (NIGHTLY_SPEND_SYNC_ENABLED, NIGHTLY_ACTIVITY_REVIEW_ENABLED), which default
+  // off precisely so this wiring can land without changing what runs tonight.
+  // Arming either one must retire its standalone timer in the SAME change, or
+  // the work runs twice.
   const nightlyHygieneRuntime = createNightlyHygieneRuntime({
-    config: config.nightlyHygiene || {},
-    runtime,
-  });
-  const spendSyncRuntime = createSpendSyncRuntime({
-    config: config.spendSync || {},
+    config: {
+      ...(config.nightlyHygiene || {}),
+      spendSyncRuntime,
+      activityReviewRuntime: logicsActivityReviewRuntime,
+    },
     runtime,
   });
   const nightlyCloseRuntime = createNightlyCloseRuntime({
