@@ -92,3 +92,35 @@ small — the top eight extensions carry most of the volume.
    into the per-agent CPL you actually asked for.
 2. **Why 07-28 to 07-31 lost five payments** — the same window where three WYNN
    deals vanished.
+
+---
+
+## The routing, and what it means for the join (Mickey, 2026-08-05)
+
+> "They call an 800 number (in RingCentral). That 800 number rings a local number
+> in CallRail (tracking). That tracking number rings the mailer queue (ext 500
+> forwards to agent)."
+
+This explains every failed join above. The call **leaves** RingCentral to
+CallRail and **re-enters** at ext 500, so it is never indexed under the caller's
+number — which is why a per-number RC pull returned zero for all 570, and zero
+for the tracking numbers too. Both were the wrong key.
+
+**The right key is the mailer queue leg.** Pull ext 500's call log for the range
+and read the onward leg: queue → agent. One extension, paged by date, instead of
+570 lookups.
+
+Corroborating evidence already in hand: the stored-legs trace surfaced **"Mailer"
+as the top "agent" with 256 leads** before it was filtered out as a queue name.
+Those 256 ARE these calls. The agent is the leg after Mailer, not the Mailer leg.
+
+**Blocked on one thing:** `listExtensions` returns 45 extensions, all of type
+`User`, and ext 500 is not among them. So either the queue lives on a different
+RC account, or the endpoint needs a type filter to return `Department` /
+`CallQueue` extensions. Resolve that and the pull is straightforward.
+
+### Best answer until then
+
+The stored-legs trace, which does not depend on any of this: **299 of 570 tied**,
+Phil Olson 136, Bruce Allen 102, Sean Lucas 76. Those three took 314 of 366 tied
+leads, matching their 41-of-42 share of July's TAG deals.
