@@ -29,6 +29,32 @@
 // A missing day is NOT a zero day. merge() sees only the values it was given;
 // deciding whether an absent day is "nothing happened" or "we never looked" is
 // the reader's job, and readEntryRange reports coverage separately for it.
+//
+// ── AGGREGATABLE vs NEEDS CONFIRMING ────────────────────────────────────────
+//
+// Mickey 2026-08-05: "for stuff like that you can aggregate certain facts, but
+// need to run activities over the range to confirm certain things that may have
+// been cleaned up."
+//
+// This is the events-vs-state rule reaching the range case. Summing a month of
+// daily snapshots is correct for anything that HAPPENED — money collected,
+// calls placed, leads received. Each is an event, and an event does not stop
+// having happened.
+//
+// It is WRONG for anything that describes an outstanding condition. A case that
+// went DNC on the 3rd may have been worked and cleared by the 30th. The EVENT
+// ("went DNC on the 3rd") is durable and sums correctly; the IMPLICATION ("is a
+// redline to chase") is current state, and current state is exactly what this
+// system refuses to serve from Mongo.
+//
+// So a section declares `confirms: [...]` naming the fields whose merged value
+// is a claim about NOW rather than a count of what happened. A range read
+// surfaces that rather than quietly presenting a month-old chase list as live
+// work — the same list is honest as history and dishonest as a to-do.
+//
+// The activity review already models this correctly for one day, which is why
+// it reports `suspendedStatusChanges` beside `suspendedStillCurrent`: what
+// moved, and what is still that way.
 
 const round2 = (n) => Math.round(Number(n || 0) * 100) / 100;
 const num = (v) => (v == null ? null : Number(v));
@@ -199,11 +225,29 @@ const BUILDERS = Object.freeze([
     key: "statusMovement",
     label: "Status movement",
     build: (ctx) => ctx.section("status"),
+    // The COUNTS are events and sum correctly: a case that went DNC on the 3rd
+    // went DNC on the 3rd, whatever happened afterwards. The redline LIST is a
+    // claim about now — those cases may since have been worked — so over a range
+    // it is history, not a to-do, until confirmed against live status.
+    confirms: Object.freeze(["keyChanges"]),
     merge(values) {
       return {
         suspended: sumField(values, "suspended"),
         postdate: sumField(values, "postdate"),
         dnc: sumField(values, "dnc"),
+        // De-duplicated by domain+case+LANE, not by case: one case can go
+        // suspended AND dnc in a range, and those are two different chases.
+        //
+        // Only ever populated when folding the `detail` view — the sanitizer
+        // strips keyChanges from `facts`, which is correct, because a range
+        // summing facts should not be dragging customer case rows through it.
+        keyChanges: mergeRowsBy(
+          values
+            .map((v) => v?.keyChanges)
+            .filter(Array.isArray)
+            .map((rows) => rows.map((r) => ({ ...r, _k: `${r.domain}:${r.caseId}:${r.lane}` }))),
+          "_k", [],
+        ),
       };
     },
   },
@@ -217,6 +261,38 @@ const SECTION_KEYS = Object.freeze(BUILDERS.map((b) => b.key));
 /** Fields that must not be restated once a day has them. */
 function frozenFieldsFor(key) {
   return BY_KEY.get(key)?.frozen || null;
+}
+
+/**
+ * Fields whose merged value is a claim about NOW, not a count of what happened.
+ *
+ * Summing them across a range is arithmetically fine and semantically wrong: the
+ * cases in a month-old redline list may have been worked since. A caller
+ * presenting one of these as outstanding work must confirm it against live
+ * status first — over a single day the gap is minutes and the risk is small;
+ * over a month it is the difference between a to-do list and a history.
+ */
+function confirmFieldsFor(key) {
+  return BY_KEY.get(key)?.confirms || null;
+}
+
+/**
+ * Which sections in a merged result carry an unconfirmed claim, and which
+ * fields. Empty when the range is a single day, because a day's snapshot and
+ * that day's live state are the same thing to within the pass that wrote it.
+ */
+function unconfirmedIn(sections = {}, { days = 1 } = {}) {
+  const out = [];
+  for (const [key, value] of Object.entries(sections)) {
+    const fields = confirmFieldsFor(key);
+    if (!fields || value == null) continue;
+    const present = fields.filter((f) => {
+      const v = value[f];
+      return Array.isArray(v) ? v.length > 0 : v != null;
+    });
+    if (present.length && days > 1) out.push({ section: key, fields: present, days });
+  }
+  return out;
 }
 
 /**
@@ -241,6 +317,8 @@ module.exports = {
   BUILDERS,
   SECTION_KEYS,
   frozenFieldsFor,
+  confirmFieldsFor,
+  unconfirmedIn,
   mergeSection,
   // exported for tests and for reuse by any future section
   sumField,

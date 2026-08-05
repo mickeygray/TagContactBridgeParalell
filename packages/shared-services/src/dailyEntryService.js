@@ -33,7 +33,9 @@
 
 const DailyReportFact = require("../../shared-models/src/DailyReportFact");
 const { sanitizeFactValue } = require("./dailyReportFactService");
-const { SECTION_KEYS, mergeSection, frozenFieldsFor } = require("./dailySectionBuilders");
+const {
+  SECTION_KEYS, mergeSection, frozenFieldsFor, unconfirmedIn,
+} = require("./dailySectionBuilders");
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
@@ -361,6 +363,11 @@ async function readEntryRange({
     days: [...byDay.keys()],
     missingDays,
     sections,
+    // Sections whose merged value claims something about NOW rather than
+    // counting what happened — a month-old redline list may since have been
+    // worked. Reported so a caller must decide to present it as history or
+    // confirm it live, rather than defaulting into showing stale chases.
+    unconfirmed: unconfirmedIn(sections, { days: wanted.length }),
     coverage: {
       daysRequested: wanted.length,
       daysStored: byDay.size,

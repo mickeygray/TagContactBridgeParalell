@@ -118,3 +118,57 @@ test("the detail view is opt-in; facts is the default a range reads", async () =
   );
   assert.equal(dayKeysBetween("2026-08-03", "2026-08-05").length, 3);
 });
+
+test("counts sum across a range, but the redline LIST is flagged unconfirmed", async () => {
+  // Mickey 2026-08-05: "you can aggregate certain facts, but need to run
+  // activities over the range to confirm certain things that may have been
+  // cleaned up." The event (went DNC on the 3rd) is durable; the implication
+  // (is a chase today) is current state, which this system never serves stored.
+  const days = {
+    "2026-08-03": {
+      statusMovement: { dnc: 3, suspended: 4, keyChanges: [{ domain: "TAG", caseId: 1, lane: "dnc" }] },
+    },
+    "2026-08-04": {
+      statusMovement: { dnc: 2, suspended: 1, keyChanges: [{ domain: "TAG", caseId: 2, lane: "dnc" }] },
+    },
+  };
+  const range = await readEntryRange({ from: "2026-08-03", to: "2026-08-04", view: "detail", Model: {
+    find: (q) => ({ select: () => ({ sort: () => ({ lean: async () => Object.entries(days)
+      .filter(([d]) => q.dateKey.$in.includes(d))
+      .map(([dateKey, detail]) => ({ dateKey, detail })) }) }) }),
+  } });
+
+  assert.equal(range.sections.statusMovement.dnc, 5, "counts sum — those events happened");
+  assert.equal(range.sections.statusMovement.keyChanges.length, 2);
+  assert.deepEqual(range.unconfirmed, [{ section: "statusMovement", fields: ["keyChanges"], days: 2 }],
+    "the list is reported as a claim about now, not silently shown as work");
+});
+
+test("a SINGLE day needs no confirmation — the snapshot and now are the same", async () => {
+  const days = {
+    "2026-08-03": { statusMovement: { dnc: 3, keyChanges: [{ domain: "TAG", caseId: 1, lane: "dnc" }] } },
+  };
+  const range = await readEntryRange({ from: "2026-08-03", to: "2026-08-03", view: "detail", Model: {
+    find: (q) => ({ select: () => ({ sort: () => ({ lean: async () => Object.entries(days)
+      .filter(([d]) => q.dateKey.$in.includes(d))
+      .map(([dateKey, detail]) => ({ dateKey, detail })) }) }) }),
+  } });
+  assert.deepEqual(range.unconfirmed, [], "one day's snapshot IS that day's state");
+});
+
+test("one case in two lanes is two chases, not one", async () => {
+  const merged = mergeSection("statusMovement", [
+    { dnc: 1, keyChanges: [{ domain: "TAG", caseId: 500, lane: "dnc" }] },
+    { suspended: 1, keyChanges: [{ domain: "TAG", caseId: 500, lane: "suspended" }] },
+  ]);
+  assert.equal(merged.keyChanges.length, 2, "same case, different lanes — both need chasing");
+});
+
+test("the same case flipping the same lane twice is ONE chase", async () => {
+  const merged = mergeSection("statusMovement", [
+    { dnc: 1, keyChanges: [{ domain: "TAG", caseId: 500, lane: "dnc" }] },
+    { dnc: 1, keyChanges: [{ domain: "TAG", caseId: 500, lane: "dnc" }] },
+  ]);
+  assert.equal(merged.dnc, 2, "two events happened");
+  assert.equal(merged.keyChanges.length, 1, "but there is one case to call");
+});
