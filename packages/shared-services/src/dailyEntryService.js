@@ -33,6 +33,7 @@
 
 const DailyReportFact = require("../../shared-models/src/DailyReportFact");
 const { sanitizeFactValue } = require("./dailyReportFactService");
+const { SECTION_KEYS, mergeSection, frozenFieldsFor } = require("./dailySectionBuilders");
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
@@ -52,9 +53,9 @@ const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 // Not immutable — CORRECTABLE. `overwrite: ["spend"]` re-sets it deliberately.
 // The rule is that drift must be an act, not a side effect.
 //
-// FROZEN AT FIELD LEVEL, NOT SECTION LEVEL. `spend` is three sources with
-// different volatility, and freezing the whole section would freeze the wrong
-// two:
+// FROZEN AT FIELD LEVEL, NOT SECTION LEVEL, and declared BY THE SECTION.
+// `spend` is three sources with different volatility, and freezing the whole
+// section would freeze the wrong two:
 //
 //   mail   arrives from a sheet that keeps growing after the day closes. This
 //          is the one Mickey's rule is about.
@@ -68,32 +69,37 @@ const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 // `total` is therefore never frozen: it is recomputed from the frozen mail plus
 // the fresh LD and BCD, so it always equals its own parts. Storing a frozen
 // total beside fresh components is how a day starts disagreeing with itself.
-const FROZEN_SPEND_FIELDS = Object.freeze(["mail", "mailPieces"]);
+//
+// The field list itself lives in dailySectionBuilders, beside the builder that
+// owns it — see frozenFieldsFor(). A copy here would drift from it.
 
 const round2 = (n) => Math.round(Number(n || 0) * 100) / 100;
 
 /**
- * Merge a freshly gathered spend section over the stored one.
+ * Merge a freshly gathered section over the stored one, honouring the fields the
+ * section declared frozen.
  *
- * Mail fields keep their stored value — the sheet grows after a day closes, so
- * a later read is not a better read. LD and BCD take the fresh count, because
- * those are counted from events we already hold and a recount genuinely is
- * better. `total` is recomputed so it always equals its own parts.
+ * A frozen field keeps its stored value — for spend that is `mail`, because the
+ * sheet grows after a day closes and a later read is not a better read. Every
+ * other field takes the fresh value, because it is counted from events we
+ * already hold and a recount genuinely IS better.
+ *
+ * `total` is then RECOMPUTED rather than frozen or copied. A frozen mail figure
+ * beside a fresh LD figure makes any stored total wrong under both readings, and
+ * a day that disagrees with its own parts poisons every range that includes it.
  */
-function mergeSpend(stored, fresh, out) {
+function mergeFrozen(key, frozenFields, stored, fresh, out) {
   const merged = { ...fresh };
   const kept = [];
-  for (const f of FROZEN_SPEND_FIELDS) {
+  for (const f of frozenFields) {
     if (stored[f] == null) continue;
     if (JSON.stringify(stored[f]) !== JSON.stringify(fresh[f])) kept.push(f);
     merged[f] = stored[f];
   }
-  // Recompute rather than trusting either total. A frozen mail figure beside a
-  // fresh LD figure makes the stored total wrong under both readings.
-  if (["mail", "ld", "bcd"].some((k) => merged[k] != null)) {
+  if (key === "spend" && ["mail", "ld", "bcd"].some((k) => merged[k] != null)) {
     merged.total = round2(Number(merged.mail || 0) + Number(merged.ld || 0) + Number(merged.bcd || 0));
   }
-  if (kept.length) out.preserved.push(...kept.map((f) => `spend.${f}`));
+  if (kept.length) out.preserved.push(...kept.map((f) => `${key}.${f}`));
   return merged;
 }
 
@@ -164,16 +170,18 @@ async function buildDailyEntry({
     detail: {},
   };
 
-  // Order matters only in that it is stable and reportable. Nothing here
-  // depends on an earlier section's output — if that ever changes, say so
-  // explicitly rather than relying on this list.
-  await section("spend", gatherers.spend, out);
-  await section("activity", gatherers.activity, out);
-  await section("financial", gatherers.financial, out);
-  await section("calls", gatherers.calls, out);
-  await section("bySource", gatherers.bySource, out);
-  await section("byAgent", gatherers.byAgent, out);
-  await section("statusMovement", gatherers.statusMovement, out);
+  // Driven by the REGISTRY, not a list maintained here. Adding a section is one
+  // entry in dailySectionBuilders — the worker, the range reader and the email
+  // all pick it up without another edit, which is the point of making the
+  // builders atomic.
+  //
+  // Sequential on purpose: these hit Logics, CallRail and Mongo, and the whole
+  // consolidation was about not asking those the same thing twice at once.
+  // Nothing depends on an earlier section's output; if that ever changes, say so
+  // explicitly rather than relying on registry order.
+  for (const key of SECTION_KEYS) {
+    await section(key, gatherers[key], out);
+  }
 
   out.sectionsGathered = Object.entries(out.facts)
     .filter(([, v]) => v !== null).map(([k]) => k);
@@ -199,8 +207,11 @@ async function buildDailyEntry({
 
   const setFacts = {};
   for (const [k, v] of Object.entries(out.facts)) {
-    if (k === "spend" && v && existing?.facts?.spend && !forced.has("spend")) {
-      setFacts["facts.spend"] = mergeSpend(existing.facts.spend, v, out);
+    // Which fields a section refuses to restate is declared BY THE SECTION, in
+    // the registry, rather than by a list here that would drift from it.
+    const frozen = frozenFieldsFor(k);
+    if (frozen && v && existing?.facts?.[k] && !forced.has(k)) {
+      setFacts[`facts.${k}`] = mergeFrozen(k, frozen, existing.facts[k], v, out);
       continue;
     }
     setFacts[`facts.${k}`] = v;
@@ -279,4 +290,86 @@ function gatherersFromReport(report) {
   };
 }
 
-module.exports = { buildDailyEntry, gatherersFromReport };
+/** Every Pacific day key from `from` to `to`, inclusive. */
+function dayKeysBetween(from, to) {
+  const out = [];
+  const start = Date.parse(`${from}T00:00:00.000Z`);
+  const end = Date.parse(`${to}T00:00:00.000Z`);
+  if (!Number.isFinite(start) || !Number.isFinite(end) || start > end) return out;
+  for (let t = start; t <= end; t += 86400000) {
+    out.push(new Date(t).toISOString().slice(0, 10));
+  }
+  return out;
+}
+
+/**
+ * Read a range of entries and fold them into ONE object.
+ *
+ * This is the "1 to infinity" half. A day is one record, a week is seven, a year
+ * is 365 — and the caller gets the same shape from all three, because every
+ * section's merge lives beside its builder in dailySectionBuilders.
+ *
+ * `view` picks which of the two stored views to fold:
+ *   "facts"  sanitized, additive — what a range should almost always read.
+ *   "detail" complete, with urls and case ids — right for ONE day, and a
+ *            deliberate choice for more, since it drags customer rows into a
+ *            range query.
+ *
+ * COVERAGE IS REPORTED, NEVER INFERRED. A day with no stored entry is listed in
+ * `missingDays` rather than folded in as zero. Thirty days of data and one
+ * missing day is a different answer from thirty-one days of data, and only the
+ * caller can decide whether the difference matters.
+ */
+async function readEntryRange({
+  from,
+  to = from,
+  view = "facts",
+  Model = DailyReportFact,
+} = {}) {
+  if (!DATE_RE.test(String(from || "")) || !DATE_RE.test(String(to || ""))) {
+    throw new Error(`readEntryRange: from/to must be YYYY-MM-DD, got ${from}..${to}`);
+  }
+  if (!["facts", "detail"].includes(view)) {
+    throw new Error(`readEntryRange: view must be "facts" or "detail", got ${view}`);
+  }
+  const wanted = dayKeysBetween(from, to);
+  if (!wanted.length) {
+    // Reversed or unparsable ranges resolve to no days. Returning "complete"
+    // for that is the bug this codebase already shipped once in the fact
+    // reader; here it is an explicit refusal.
+    return {
+      from, to, days: [], missingDays: [], sections: {},
+      coverage: { daysRequested: 0, daysStored: 0, complete: false, reason: "degenerate-range" },
+    };
+  }
+
+  const stored = await Model.find({ dateKey: { $in: wanted } })
+    .select(`dateKey ${view}`).sort({ dateKey: 1 }).lean();
+
+  const byDay = new Map(stored.map((d) => [d.dateKey, d[view] || {}]));
+  const missingDays = wanted.filter((d) => !byDay.has(d));
+
+  const sections = {};
+  for (const key of SECTION_KEYS) {
+    sections[key] = mergeSection(key, wanted.map((d) => byDay.get(d)?.[key] ?? null));
+  }
+
+  return {
+    from,
+    to,
+    view,
+    days: [...byDay.keys()],
+    missingDays,
+    sections,
+    coverage: {
+      daysRequested: wanted.length,
+      daysStored: byDay.size,
+      // Every requested day is present. Says nothing about whether each of
+      // those days was itself complete — that is per-day `coverage`.
+      complete: missingDays.length === 0,
+      reason: missingDays.length ? `missing-days:${missingDays.length}` : null,
+    },
+  };
+}
+
+module.exports = { buildDailyEntry, gatherersFromReport, readEntryRange, dayKeysBetween };

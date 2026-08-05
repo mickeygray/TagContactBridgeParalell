@@ -37,6 +37,14 @@ const { findExcludedAgentMatch } = require("./recordingArchiveService");
 
 const PACIFIC = "America/Los_Angeles";
 
+// Off by default as of 2026-08-05. Flip CALL_INDEX_INCLUDE_RINGCENTRAL=true to
+// bring RC back once the nginx bypass is live and a signed link has been proven
+// to play — until then its rows would be indexed with no way to serve them
+// except the Drive copy we are trying to stop keeping.
+const SKIP_RINGCENTRAL = String(
+  process.env.CALL_INDEX_INCLUDE_RINGCENTRAL || "false",
+).toLowerCase() !== "true";
+
 const pacificDayWindow = (dateKey) => {
   // Stored timestamps are UTC. A string prefix match on them shifts the day by
   // up to eight hours, which silently moves evening calls into tomorrow.
@@ -276,10 +284,15 @@ async function readCallLogProviders(dateKey, { CallLog }) {
     });
     if (!provider) { unresolved.push(r.providerCallId || r.telephonySessionId); continue; }
 
-    // The `ex` rule, applied ONLY to RingCentral. A CallRail row that happens to
-    // live in the ex bucket is still a CallRail row and keeps its own handling —
-    // which is the whole reason provider is resolved before this runs.
+    // RINGCENTRAL IS SKIPPED FOR NOW (Mickey, 2026-08-05). Its recordings are a
+    // perk rather than a feature, its API is the least friendly to rate limits,
+    // and every RC recording still has a Drive copy — so nothing is lost today
+    // by leaving it out. The resolution and the `ex` rule below stay, because
+    // they are what make the exclusion CORRECT: ~38% of the ex bucket is
+    // CallRail, and skipping the bucket rather than the provider would drop
+    // twelve hundred CallRail recordings with it.
     if (provider === "ringcentral") {
+      if (SKIP_RINGCENTRAL) { skipped.push("ringcentral-skipped"); continue; }
       const skip = exSkipReason(r);
       if (skip) { skipped.push(skip); continue; }
     }
