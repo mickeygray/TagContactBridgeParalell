@@ -119,9 +119,16 @@ async function section(name, fn, out) {
     //
     // undefined means "returned nothing" and is stored as null, not dropped —
     // an absent key would be indistinguishable from a key nobody declared.
-    out.facts[name] = value === undefined ? null : sanitizeFactValue(value);
+    const raw = value === undefined ? null : value;
+    // TWO VIEWS OF ONE GATHER. detail keeps the urls, case ids and rows that
+    // make a stored day worth opening; facts is the same thing with customer
+    // identifiers and per-day ratios stripped, so a year-long rollup never has
+    // to drag them through it.
+    out.detail[name] = raw;
+    out.facts[name] = raw === null ? null : sanitizeFactValue(raw);
   } catch (error) {
     out.facts[name] = null;
+    out.detail[name] = null;
     out.errors.push(`${name}: ${String(error.message || error).slice(0, 160)}`);
   }
 }
@@ -151,6 +158,10 @@ async function buildDailyEntry({
 
   const out = {
     dateKey, facts: {}, errors: [], posted: false, revision: null, preserved: [],
+    // The SAME sections, unsanitized. `facts` is what a range sums; `detail` is
+    // what one day is opened for, and what the email renders from. Both are
+    // built from one gather, so they cannot disagree.
+    detail: {},
   };
 
   // Order matters only in that it is stable and reportable. Nothing here
@@ -195,10 +206,23 @@ async function buildDailyEntry({
     setFacts[`facts.${k}`] = v;
   }
 
+  // `detail` carries the SAME freeze decisions, so the two views of a day can
+  // never disagree about what it cost. Copying the merged facts.spend across
+  // rather than re-deriving it is what guarantees that.
+  const setDetail = {};
+  for (const [k, v] of Object.entries(out.detail)) {
+    if (k === "spend" && setFacts["facts.spend"]) {
+      setDetail["detail.spend"] = setFacts["facts.spend"];
+      continue;
+    }
+    if (k === "spend" && !("facts.spend" in setFacts)) continue; // frozen whole
+    setDetail[`detail.${k}`] = v;
+  }
+
   const res = await Model.findOneAndUpdate(
     { dateKey },
     {
-      $set: { ...setFacts, entryBuiltAt: new Date() },
+      $set: { ...setFacts, ...setDetail, entryBuiltAt: new Date() },
       $inc: { revision: 1 },
       // Only on CREATE. The report path owns these once it has run, and a
       // worker re-run must never overwrite a real definitionName or an accepted

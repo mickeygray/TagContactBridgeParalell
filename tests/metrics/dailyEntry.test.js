@@ -165,3 +165,47 @@ test("a frozen field can be corrected DELIBERATELY, never by accident", async ()
   assert.deepEqual(r.preserved, []);
   assert.equal(writes[0].$set["facts.spend"].mail, 2193.96);
 });
+
+test("the entry keeps BOTH views: facts aggregates, detail is complete", async () => {
+  // Mickey 2026-08-04: "it needs to be a complete useful snapshot — needs the
+  // urls, needs the case ids, because if it works for a day ... it'll work for a
+  // week or a month or a year."
+  //
+  // Kept as two views rather than by relaxing `facts`, because they are read for
+  // different reasons: `facts` is summed across a range, and that path should
+  // not drag customer identifiers through it; `detail` is opened for ONE day,
+  // when somebody wants the calls and cases behind a number.
+  const writes = [];
+  await buildDailyEntry({
+    dateKey: "2026-08-03", apply: true, Model: fakeModel(writes),
+    gatherers: {
+      statusMovement: async () => ({ suspended: 4, keyChanges: [{ caseId: 103266 }] }),
+      calls: async () => ({ links: 73, rows: [{ caseId: 812345, listenUrl: "https://x/rec" }] }),
+    },
+  });
+  const set = writes[0].update.$set;
+  assert.equal(set["facts.statusMovement"].suspended, 4);
+  assert.ok(!("keyChanges" in set["facts.statusMovement"]), "facts stays aggregation-safe");
+  assert.equal(set["detail.statusMovement"].keyChanges[0].caseId, 103266, "detail is complete");
+  assert.equal(set["detail.calls"].rows[0].listenUrl, "https://x/rec", "and keeps the urls");
+});
+
+test("both views agree about a frozen day's cost", async () => {
+  // The two views must never disagree about money. detail copies the MERGED
+  // spend rather than re-deriving it, so a frozen mail figure is frozen in both.
+  const writes = [];
+  const model = {
+    findOne: () => ({ select: () => ({ lean: async () => ({ facts: {
+      spend: { total: 2039.48, mail: 1584.48, ld: 423, bcd: 32 },
+    } }) }) }),
+    findOneAndUpdate: async (f, u) => { writes.push(u); return { revision: 2 }; },
+  };
+  await buildDailyEntry({
+    dateKey: "2026-08-03", apply: true, Model: model,
+    gatherers: { spend: async () => ({ total: 2675.96, mail: 2193.96, ld: 450, bcd: 32 }) },
+  });
+  const set = writes[0].$set;
+  assert.equal(set["facts.spend"].mail, 1584.48);
+  assert.deepEqual(set["detail.spend"], set["facts.spend"],
+    "detail must carry the same frozen cost, not a re-derived one");
+});

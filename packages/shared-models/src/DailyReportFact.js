@@ -43,6 +43,30 @@ const dailyReportFactSchema = new mongoose.Schema(
     // erroring, and the document would look like it saved cleanly.
     entryBuiltAt: { type: Date, default: null },
 
+    // ── THE COMPLETE DAY ────────────────────────────────────────────────────
+    //
+    // Mickey 2026-08-04: "it needs to be a complete useful snapshot — needs the
+    // urls, needs the case ids, because the point of all of this is if it works
+    // for a day and we can record a day, it'll work for a week or a month or a
+    // year once we record for that length of time."
+    //
+    // So this holds what `facts` deliberately strips: listen urls, case ids,
+    // phones, the actionable rows. It is what makes a stored day worth opening
+    // rather than merely worth counting, and it is what the email renders from.
+    //
+    // WHY BOTH, RATHER THAN JUST RELAXING `facts`. They are read by different
+    // things for different reasons. `facts` is summed across a range — a year of
+    // days aggregated for a trend — and that path should never have to carry
+    // customer identifiers through it. `detail` is opened for ONE day, when
+    // somebody wants the calls and cases behind a number. Keeping them apart
+    // means a year-long rollup stays a rollup.
+    //
+    // Consequence to be deliberate about: CallRail and PhoneBurner recording
+    // URLs are durable and serve unauthenticated, so a stored year of them is a
+    // stored year of playable customer calls. That is a retention decision, not
+    // an accident.
+    detail: { type: mongoose.Schema.Types.Mixed, default: null },
+
     // Each member contains the BASE daily values from one rollup section. The
     // range reader must sum bases and recompute ratios; it must never average
     // daily ROI/ROAS percentages.
