@@ -18,6 +18,8 @@
 // Live by default, per the faceplate thesis: blocks read from the
 // authoritative services, not from a stats table.
 
+const { groupCaseIds } = require("./caseListFormatter");
+
 const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
 const money = (n) => `$${(Number(n) || 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 const pct = (n) => (n == null ? "—" : `${n}%`);
@@ -1427,14 +1429,35 @@ const BLOCKS = [
       //
       // Column order is money-first, matching the sort: a payment default
       // costs more to ignore than a DNC.
-      const LANES = ["suspended", "postdate", "dnc"];
-      const byLane = LANES.map((l) => key.filter((r) => r.lane === l));
-      const depth = Math.min(30, Math.max(0, ...byLane.map((c) => c.length)));
-      const laneRows = Array.from({ length: depth }, (_, i) => ({
-        suspended: byLane[0][i] ? `${byLane[0][i].domain} ${byLane[0][i].caseId}` : "",
-        postdate: byLane[1][i] ? `${byLane[1][i].domain} ${byLane[1][i].caseId}` : "",
-        dnc: byLane[2][i] ? `${byLane[2][i].domain} ${byLane[2][i].caseId}` : "",
-      }));
+      // Mickey 2026-08-05: "instead of one row per thing it's a list sorted by
+      // database — tag: 1234, 5678 / wynn: 3456 — so instead of a thing that's
+      // 50 lines long you can fit maybe 10 keys per row."
+      //
+      // The three-column pivot above already turned 19 rows into 7, and that is
+      // enough for ONE day. It stops being enough the moment this block renders
+      // a range: a month of redlines is hundreds deep, and one case per cell
+      // makes a wall nobody reads. Packing ten ids per row costs the same width
+      // and turns a month into a handful of lines.
+      //
+      // De-duplicated per lane, because a case that flipped twice in a range is
+      // still one case to chase — printing it twice implies two.
+      const LANES = [["suspended", "SUSPENDED"], ["postdate", "POST-DATE"], ["dnc", "DNC"]];
+      const PER_ROW = 10;
+      const laneRows = [];
+      for (const [lane, laneLabel] of LANES) {
+        const grouped = groupCaseIds(key.filter((r) => r.lane === lane));
+        for (const [domain, ids] of Object.entries(grouped)) {
+          for (let i = 0; i < ids.length; i += PER_ROW) {
+            laneRows.push({
+              // Lane and database label the FIRST row of their run only, so the
+              // eye follows one list rather than re-reading the same word.
+              lane: i === 0 ? laneLabel : "",
+              db: i === 0 ? domain.toLowerCase() : "",
+              cases: ids.slice(i, i + PER_ROW).join(", "),
+            });
+          }
+        }
+      }
 
       return {
         // No summary. Mickey 2026-07-30: the counts live "only at the top" —
@@ -1444,9 +1467,9 @@ const BLOCKS = [
         // really." Who moved it and when are lookups, not decisions.
         emailRows: laneRows,
         emailColumns: [
-          { header: "SUSPENDED", get: (x) => x.suspended },
-          { header: "POST-DATE", get: (x) => x.postdate },
-          { header: "DNC", get: (x) => x.dnc },
+          { header: "", get: (x) => x.lane },
+          { header: "", get: (x) => x.db },
+          { header: "cases", get: (x) => x.cases },
         ],
         columns: [
           { header: "lane", get: (x) => LANE[x.lane] || x.lane },
