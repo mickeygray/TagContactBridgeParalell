@@ -59,6 +59,11 @@ const TASKS = [
         dncRecheckEnabled: true,
         fillerPoolRefreshEnabled: true,
         agedRollingRefreshEnabled: true,
+        // This pass fires at 08:00 under a durable once-per-day claim. The
+        // 05:00/06:00 hour equalities inside the filler and aged gates are an
+        // hourly caller's substitute for that claim — kept, the monthly
+        // refresh and the aged ladder would never run from here at all.
+        requireHour: false,
         logger,
         impls: floorImpls,
       });
@@ -96,8 +101,11 @@ const TASKS = [
     },
     count() { return 1; },
     async apply(planned, { logger, cadenceImpl = null }) {
+      // The DRAIN loop, not the single sweep. One sweep caps at maxDispatches
+      // and a durable pass runs once a day, so a single call would send one
+      // batch and silently postpone the rest of the backlog to tomorrow.
       const run = cadenceImpl
-        || require("../../../../packages/shared-services/src/counterCadenceService").runCounterCadenceSweep;
+        || require("../../../../packages/shared-services/src/counterCadenceService").drainCounterCadenceSweep;
       const p = planned[0] || {};
       const r = await run({
         domains: p.domains,
@@ -116,6 +124,10 @@ const TASKS = [
         selected: Number(r?.selected) || 0,
         skipped: Number(r?.skipped) || 0,
         failed: Number(r?.failed) || 0,
+        rounds: Number(r?.rounds) || 1,
+        // False means the loop stopped on its round cap or a stuck provider —
+        // items remain due, and the summary must not read as a finished day.
+        drained: r?.drained !== false,
       };
     },
     describe(planned) {

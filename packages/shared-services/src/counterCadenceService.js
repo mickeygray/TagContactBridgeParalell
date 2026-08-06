@@ -779,6 +779,48 @@ async function pollCounterCadenceRvmDispositions({
   return { polled, terminal, markedDnc, results };
 }
 
+/**
+ * Run the sweep REPEATEDLY until the day's backlog is drained.
+ *
+ * One sweep selects at most `maxDispatches` items — the selector returns
+ * mid-loop the moment it hits that limit. A pass that calls the sweep once and
+ * completes its durable day therefore sends one batch and silently postpones
+ * the rest of the backlog to tomorrow: 900 due sms/email items meant 200 sent
+ * and 700 deferred with nothing saying so.
+ *
+ * The loop is safe because every successful dispatch stamps the lead's
+ * per-channel lastDailyBatchKey, so the next round selects DIFFERENT leads.
+ * Two independent stops guard the pathological cases:
+ *  - a round that sends nothing ends the loop (persistent failures must not
+ *    spin — the failed items are still due, and retrying them in a tight loop
+ *    against a failing provider is the RC-429 shape all over again);
+ *  - maxRounds bounds the wall clock inside the pass's lease.
+ */
+async function drainCounterCadenceSweep({ maxRounds = 20, ...options } = {}) {
+  const totals = {
+    ok: true, rounds: 0, selected: 0, sent: 0, failed: 0, skipped: 0,
+    drained: false, roundResults: [],
+  };
+  const perRound = Math.max(Number(options.maxDispatches) || 25, 1);
+  for (let round = 0; round < Math.max(1, maxRounds); round += 1) {
+    const r = await runCounterCadenceSweep(options);
+    totals.rounds += 1;
+    totals.selected += Number(r?.selected) || 0;
+    totals.sent += Number(r?.sent) || 0;
+    totals.failed += Number(r?.failed) || 0;
+    totals.skipped += Number(r?.skipped) || 0;
+    totals.roundResults.push({
+      selected: r?.selected ?? 0, sent: r?.sent ?? 0, failed: r?.failed ?? 0,
+    });
+    // Fewer selected than the cap means the selector ran out of due items:
+    // the backlog is drained.
+    if ((Number(r?.selected) || 0) < perRound) { totals.drained = true; break; }
+    // A full selection that sent nothing is a stuck provider, not a backlog.
+    if ((Number(r?.sent) || 0) === 0 && !options.dryRun) break;
+  }
+  return totals;
+}
+
 module.exports = {
   CHAINS,
   DAY_OFFSETS,
@@ -791,6 +833,7 @@ module.exports = {
   isWeekdayBatchTime,
   pollCounterCadenceRvmDispositions,
   recordCounterCadenceTouch,
+  drainCounterCadenceSweep,
   runCounterCadenceSweep,
   selectCounterCadenceDueItems,
 };

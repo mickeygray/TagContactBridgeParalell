@@ -326,7 +326,7 @@ test("the record is saved BEFORE the email is sent, from the same gather", () =>
   // Anchored on where the report is PRODUCED, not on composeReport specifically:
   // there are two producers now (live compose, or a render from the stored day),
   // and the ordering this test protects is the same for both.
-  const produced = src.indexOf("const recordVerdict = canRenderFromRecord(def);");
+  const produced = src.indexOf("const recordVerdict = canRenderFromRecord(def, range);");
   const composed = src.indexOf("composeReport({", produced);
   const hook = src.indexOf("onComposed", produced);
   const send = src.indexOf("await sendMail(", produced);

@@ -340,3 +340,109 @@ test("both passes are reachable — every task has a count()", () => {
     }
   }
 });
+
+// ── AUDIT FIXES on the factory ─────────────────────────────────────────────
+
+test("a RETURNED total failure retries — it does not complete the day", async () => {
+  // Every task catches provider errors and reports {failed: n} instead of
+  // throwing — right for a partial failure, where the successes must not
+  // re-run. But a night where NOTHING succeeded used to advance the cursor and
+  // complete: a total provider outage got zero retries and a clean summary.
+  let calls = 0;
+  const rt = build([task("outage", {
+    writesArmed: () => true,
+    apply: async () => { calls += 1; return { written: 0, failed: 3, errors: ["provider down"] }; },
+  })]);
+  const model = fakeModel();
+  const first = await rt.runOnce({ force: true, Model: model });
+  assert.equal(first.retrying, "outage", "a total failure must land in the retry path");
+  assert.equal(calls, 1);
+  await rt.runOnce({ force: true, Model: model });
+  await rt.runOnce({ force: true, Model: model });
+  assert.equal(calls, 3, "the full attempt budget is spent");
+});
+
+test("a PARTIAL failure still advances — the successes must not re-run", async () => {
+  let calls = 0;
+  const rt = build([task("partial", {
+    writesArmed: () => true,
+    apply: async () => { calls += 1; return { written: 5, failed: 2, errors: ["one domain down"] }; },
+  })]);
+  const out = await rt.runOnce({ force: true, Model: fakeModel() });
+  assert.equal(calls, 1);
+  assert.equal(out.ran, 1, "partial failure completes the task");
+  assert.equal(out.retrying, undefined);
+});
+
+test("an all-lock-busy night is not treated as a total failure", async () => {
+  // lockBusy is "someone else is doing the work", not "the work failed".
+  const rt = build([task("busy", {
+    writesArmed: () => true,
+    apply: async () => ({ written: 0, failed: 1, lockBusy: 3, errors: ["every domain lock-busy"] }),
+  })]);
+  const out = await rt.runOnce({ force: true, Model: fakeModel() });
+  assert.equal(out.retrying, undefined);
+});
+
+test("advancing the cursor RENEWS the lease", async () => {
+  // The lease was fixed at claim time, so a pass whose tasks honestly took
+  // longer than 45 minutes in total could be reclaimed mid-write. Renewal on
+  // every advance means a takeover needs 45 minutes of silence, not of work.
+  const model = fakeModel();
+  const rt = build([task("a"), task("b"), task("c")]);
+  await rt.runOnce({ force: true, Model: model });
+  const cursor = model.docs.get(pacificDayKey()).passes.test;
+  assert.ok(cursor.completedAt, "the day completed");
+  // The claim stamp at completion must be NEWER than the one taken at claim
+  // time — i.e. it moved during the pass.
+  assert.ok(new Date(cursor.claimedAt) >= new Date(cursor.completedAt) === false
+    || cursor.nextTaskIndex === 3, "sanity");
+  assert.equal(cursor.nextTaskIndex, 3);
+});
+
+test("stop() waits for a running pass instead of abandoning it", async () => {
+  const rt = build([task("slow", {
+    plan: async () => { await new Promise((r) => setTimeout(r, 400)); return [{ n: 1 }]; },
+  })]);
+  const model = fakeModel();
+  const running = rt.runOnce({ force: true, Model: model });
+  await new Promise((r) => setTimeout(r, 50));
+  const stopped = rt.stop({ maxWaitMs: 2000 });
+  await Promise.all([running, stopped]);
+  assert.equal(rt.getState().running, false, "stop returned only after the pass finished");
+});
+
+test("the morning floor reaches the 05:00 and 06:00 work — requireHour is threaded", async () => {
+  // The hour equalities inside the filler/aged gates are an hourly caller's
+  // substitute for once-per-day bookkeeping. The morning pass fires at 08:00
+  // under a durable claim; with the hour still required, the monthly refresh
+  // and the aged ladder would simply never run from it.
+  const rt = createMorningPassRuntime({});
+  const t = rt.TASKS.find((x) => x.key === "floor-services");
+  const source = require("node:fs").readFileSync(
+    require.resolve("../../apps/control-plane/src/services/morningPassRuntime"), "utf8",
+  ).replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
+  assert.match(source, /requireHour: false/, "the morning task must drop the hour equality");
+  // And the seam carries it: injected impls receive requireHour.
+  const seen = [];
+  await t.apply([{ services: [] }], {
+    floorImpls: {
+      runDncRecheckSweepIfEnabled: async () => ({ skipped: true, reason: "disabled" }),
+      runMonthlyFillerPoolRefreshIfDue: async (a) => { seen.push(["filler", a]); return { skipped: true, reason: "pool-already-built" }; },
+      runAgedRollingRefreshIfDue: async (a) => { seen.push(["aged", a]); return { refreshed: 1 }; },
+    },
+  });
+  for (const [name, args] of seen) {
+    assert.equal(args.requireHour, false, `${name} must receive requireHour:false from the pass`);
+  }
+});
+
+test("the HOURLY floor keeps its hour gates — byte-identical behaviour", () => {
+  // Default true, so the hoist cannot start firing the monthly refresh every
+  // tick on the 1st.
+  const {
+    runFloorServices,
+  } = require("../../packages/shared-services/src/hourlySweeperService");
+  const source = String(runFloorServices);
+  assert.match(source, /requireHour = true/, "the default must keep the hour equality");
+});

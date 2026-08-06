@@ -31,6 +31,12 @@ const jiraTaskLinkSchema = new mongoose.Schema(
       type: String,
       required: true,
       enum: [
+        "pending",        // CLAIMED: a delivery holds this issue and the create
+                          //   may be in flight. The insert of this row is the
+                          //   arbiter — the unique _id makes the second
+                          //   concurrent delivery lose at the database, which
+                          //   is the only place a race can be lost safely when
+                          //   the destination is create-only.
         "created",        // a Logics task now exists because of this issue
         "skipped",        // deliberately not created; `reason` says why
         "failed",         // Logics rejected it; safe to retry

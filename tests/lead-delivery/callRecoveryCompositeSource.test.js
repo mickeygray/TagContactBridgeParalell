@@ -85,14 +85,40 @@ test("cadence drains FIRST — recovery can never starve fresh leads", async () 
   assert.equal(items.at(-1).sourceKind, "call_recovery");
 });
 
-test("the cursor is typed, so a restart resumes in the right half", async () => {
+test("the cursor SURVIVES the runtime's two-scalar persistence and resumes in the right half", async () => {
+  // leadDeliveryService does not store the cursor object — it stores
+  // repairCursorCreatedAt (Date) and repairCursorId (String) and rebuilds
+  // {createdAt, id} on resume. The first codec returned {kind, inner}, which
+  // has neither field: both scalars persisted as undefined, every incomplete
+  // page lost its position, and recovery restarted at page one each tick. So
+  // the assertion here is the ROUND TRIP, not the in-memory shape.
   const { src } = harness({ cadencePages: [[]], episodes: [EPISODE(1), EPISODE(2), EPISODE(3)] });
   const first = await src.readBatch({ cursor: null, limit: 250, now: NOW });
   assert.equal(first.done, false);
-  assert.equal(first.nextCursor.kind, "recovery", "the cursor must say WHICH source it is walking");
-  const second = await src.readBatch({ cursor: first.nextCursor, limit: 250, now: NOW });
+  assert.equal(typeof first.nextCursor.id, "string", "the cursor must fit repairCursorId");
+  assert.ok(first.nextCursor.createdAt instanceof Date, "and repairCursorCreatedAt");
+  assert.match(first.nextCursor.id, /^recovery:/, "the id prefix says WHICH half it is walking");
+
+  // The exact persistence round trip the runtime performs.
+  const persisted = {
+    createdAt: new Date(first.nextCursor.createdAt),
+    id: String(first.nextCursor.id),
+  };
+  const second = await src.readBatch({ cursor: persisted, limit: 250, now: NOW });
   const ids = [...first.items, ...second.items].map((i) => i.episodeId);
-  assert.equal(new Set(ids).size, ids.length, "a typed cursor must not repeat a row");
+  assert.equal(new Set(ids).size, ids.length, "a persisted-and-rebuilt cursor must not repeat a row");
+});
+
+test("a cadence cursor passes through UNMARKED — the persisted legacy shape resumes", async () => {
+  // The cadence inner cursor already IS {createdAt, id}; wrapping it would
+  // break every cursor persisted before the composite existed.
+  const { src } = harness({
+    cadencePages: [[{ caseId: "a" }], [{ caseId: "b" }]], episodes: [],
+  });
+  const first = await src.readBatch({ cursor: null, limit: 250, now: NOW });
+  // Whatever the base emits passes through IDENTICALLY — no wrapper object, so
+  // nothing exists for the two-scalar persistence to drop.
+  assert.equal(first.nextCursor, "c1", "the base's own cursor, untouched");
 });
 
 test("a legacy bare cursor still resumes the cadence half", async () => {

@@ -203,14 +203,32 @@ async function processAttachment({
     };
   }
 
-  ensureDir(runDir);
-  const localPath = path.join(runDir, `${contentHash.slice(0, 12)}-${filename}`);
-  fs.writeFileSync(localPath, buffer);
-
+  // PARSE FIRST, PERSIST AFTER THE GATE. This used to create the run
+  // directory, write the attachment to disk and record a Mongo workflow row
+  // BEFORE looking at dryRun — so a "read-only" preview left a file and a
+  // database row behind on every attachment. The nightly pass made that a
+  // standing cost: plan() runs every night whether or not the task is armed,
+  // which meant a DARK task wrote evidence nightly. Parsing is in-memory and
+  // stays above the gate; everything durable moves below it.
   const csvText = buffer.toString("utf8").replace(/^\uFEFF/, "");
   const rows = parseNcoaCsv(csvText);
   const importBatch = `mailbox-${path.parse(filename).name}-${contentHash.slice(0, 12)}`;
   const aggregateId = `${message.id}:${part.body?.attachmentId || contentHash.slice(0, 12)}`;
+  const localPath = path.join(runDir, `${contentHash.slice(0, 12)}-${filename}`);
+
+  if (dryRun) {
+    return {
+      filename,
+      localPath,
+      contentHash,
+      importBatch,
+      total: rows.length,
+      dryRun: true,
+    };
+  }
+
+  ensureDir(runDir);
+  fs.writeFileSync(localPath, buffer);
 
   await recordWorkflowStage({
     domain,
@@ -234,17 +252,6 @@ async function processAttachment({
       date: messageHeader(message, "date"),
     },
   });
-
-  if (dryRun) {
-    return {
-      filename,
-      localPath,
-      contentHash,
-      importBatch,
-      total: rows.length,
-      dryRun: true,
-    };
-  }
 
   let uploadResult = null;
   try {

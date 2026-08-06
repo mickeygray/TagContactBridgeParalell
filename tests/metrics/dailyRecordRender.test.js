@@ -226,7 +226,7 @@ test("runDefinition routes a record-sourced definition to the renderer, not the 
   const source = require("node:fs").readFileSync(
     require.resolve("../../packages/shared-services/src/reportDefinitionService"), "utf8",
   );
-  assert.match(source, /canRenderFromRecord\(def\)/,
+  assert.match(source, /canRenderFromRecord\(def, range\)/,
     "the guard decides, so a tenant-scoped definition cannot reach the record");
   assert.match(source, /renderFromRecord\(\{/);
   // The composer must remain the DEFAULT — a definition with no renderSource
@@ -235,4 +235,42 @@ test("runDefinition routes a record-sourced definition to the renderer, not the 
     "compose is the else branch, not the removed branch");
   // A missing record must throw rather than send.
   assert.match(source, /no DailyReportFact exists for/);
+});
+
+// ── AUDIT FIXES ────────────────────────────────────────────────────────────
+
+test("a multi-day range refuses the record and routes back to the live composer", () => {
+  // The record is a day. A last7 or monthly definition pointed at it would
+  // silently render range.from alone and mail a one-day report under a
+  // seven-day subject line.
+  const def = { renderSource: "record", domain: null, filters: [] };
+  assert.equal(canRenderFromRecord(def, { from: "2026-08-01", to: "2026-08-07" }).reason,
+    "record-renders-one-day-only");
+  assert.equal(canRenderFromRecord(def, { from: "2026-08-05", to: "2026-08-05" }).ok, true);
+  assert.equal(canRenderFromRecord(def).ok, true, "no range supplied means the caller checks");
+});
+
+test("emailAcceptedAt null STAYS null — never the Unix epoch", () => {
+  // The scheduler writes the record before the send with emailAcceptedAt: null
+  // on purpose; new Date(null) is 1970-01-01, so a bounced night carried an
+  // "acceptance" that reads as delivered to anything checking presence.
+  const { buildDailyReportFact, REQUIRED_SECTIONS, CANONICAL_DEFINITION_NAME } = require(
+    "../../packages/shared-services/src/dailyReportFactService",
+  );
+  const report = {
+    from: "2026-08-05", to: "2026-08-05", domain: "ALL",
+    selection: REQUIRED_SECTIONS.slice(),
+    sections: REQUIRED_SECTIONS.map((id) => ({ id, label: id, data: {} })),
+    failures: [], advisories: [], notes: [], spend: null,
+  };
+  const fact = buildDailyReportFact({
+    dateKey: "2026-08-05", definitionName: CANONICAL_DEFINITION_NAME,
+    report, emailAcceptedAt: null,
+  });
+  assert.equal(fact.emailAcceptedAt, null);
+  const stamped = buildDailyReportFact({
+    dateKey: "2026-08-05", definitionName: CANONICAL_DEFINITION_NAME,
+    report, emailAcceptedAt: new Date("2026-08-06T03:10:00Z"),
+  });
+  assert.equal(stamped.emailAcceptedAt.toISOString(), "2026-08-06T03:10:00.000Z");
 });

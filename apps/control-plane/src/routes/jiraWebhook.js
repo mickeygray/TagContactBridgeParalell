@@ -111,10 +111,17 @@ function buildDeps({ logger } = {}) {
             dayStr(now + from * 86400000), dayStr(now + to * 86400000),
           );
         } catch (error) {
+          // REFUSE, do not narrow. The dedupe evidence exists to stop a second
+          // un-deletable task; a window we could not read is evidence we do not
+          // have, and continuing would let partial evidence authorize a create.
+          // Throwing lands the decision in `failed`, which is retryable — the
+          // safe direction against a create-only destination.
           logger?.warn?.("jira.webhook.open_tasks_window_failed", {
             tenant, error: String(error.message).slice(0, 120),
           });
-          continue;
+          throw new Error(
+            `open-task window ${dayStr(now + from * 86400000)}..${dayStr(now + to * 86400000)} unreadable — refusing to create on partial dedupe evidence`,
+          );
         }
         const rows = res?.Data ?? res?.data ?? res;
         if (!Array.isArray(rows)) continue;
@@ -176,11 +183,65 @@ function buildDeps({ logger } = {}) {
 
     recordLink: async (link) => {
       const { jiraKey, payload, ...rest } = link;
-      await JiraTaskLink.findByIdAndUpdate(
-        jiraKey,
+      // `created` IS TERMINAL. Without this guard, the bridge's own
+      // "already created -> skipped" decision overwrote the stored `created`
+      // with `skipped` on every retry — after which the ledger no longer knew a
+      // task existed, and the NEXT retry was free to create a duplicate that
+      // cannot be deleted. The one legal write over `created` is `created`
+      // itself (idempotent re-record of the same fact).
+      const query = rest.outcome === "created"
+        ? { _id: jiraKey }
+        : { _id: jiraKey, outcome: { $ne: "created" } };
+      await JiraTaskLink.findOneAndUpdate(
+        query,
         { $set: { ...rest, lastAttemptAt: new Date() }, $inc: { attempts: 1 } },
-        { upsert: true, setDefaultsOnInsert: true },
+        { upsert: rest.outcome === "created", setDefaultsOnInsert: true },
+      ).catch((error) => {
+        // The non-created upsert:false path can race a created write; losing
+        // that race is the desired outcome, not an error.
+        if (Number(error?.code) !== 11000) throw error;
+      });
+    },
+
+    /**
+     * Claim the issue BEFORE anything irreversible happens.
+     *
+     * The destination is create-only, so the ordering ack -> create -> record
+     * had two fatal shapes: a crash after the 200 lost the event with nothing
+     * durable to show it ever arrived, and two concurrent deliveries could both
+     * see no link and both create. The claim is an INSERT against the unique
+     * _id — the second delivery loses at the database.
+     *
+     * Returns { ok: true } when this delivery owns the issue, or
+     * { ok: false, reason } when someone else does or the work is already done.
+     */
+    claimIssue: async (jiraKey, trigger) => {
+      const STALE_CLAIM_MS = 10 * 60 * 1000;
+      try {
+        await JiraTaskLink.create({
+          _id: jiraKey, outcome: "pending", trigger,
+          reason: "claimed — bridge decision in flight",
+        });
+        return { ok: true };
+      } catch (error) {
+        if (Number(error?.code) !== 11000) throw error;
+      }
+      const existing = await JiraTaskLink.findById(jiraKey).lean();
+      if (!existing) return { ok: false, reason: "claim raced and vanished" };
+      if (existing.outcome === "created") {
+        return { ok: false, reason: `already created as Logics task ${existing.logicsTaskId}` };
+      }
+      if (existing.outcome === "pending"
+          && Date.now() - new Date(existing.lastAttemptAt || 0).getTime() < STALE_CLAIM_MS) {
+        return { ok: false, reason: "another delivery holds the claim" };
+      }
+      // skipped / failed / stale-pending: take over, but only via CAS on the
+      // outcome we just read — if it moved under us, the mover owns it.
+      const taken = await JiraTaskLink.findOneAndUpdate(
+        { _id: jiraKey, outcome: existing.outcome, lastAttemptAt: existing.lastAttemptAt },
+        { $set: { outcome: "pending", trigger, lastAttemptAt: new Date(), reason: "re-claimed" } },
       );
+      return taken ? { ok: true } : { ok: false, reason: "lost the re-claim race" };
     },
   };
 }
@@ -200,11 +261,35 @@ function createJiraWebhookRouter(auth, runtime = {}) {
     const event = String(req.body?.webhookEvent || "");
     const issue = req.body?.issue;
 
-    // Acknowledge FIRST. Jira retries anything it does not get a 2xx for, and a
-    // retry against a create-only destination is a duplicate that cannot be undone.
-    res.json({ ok: true, received: event, key: issue?.key || null });
+    if (!HANDLED.has(event) || !issue?.key) {
+      return res.json({ ok: true, received: event, key: issue?.key || null, ignored: true });
+    }
 
-    if (!HANDLED.has(event) || !issue?.key) return;
+    // CLAIM BEFORE ACK, ACK BEFORE WORK.
+    //
+    // The previous order acknowledged first, on the theory that a Jira retry
+    // against a create-only destination is an un-deletable duplicate. But the
+    // claim row is what makes a retry SAFE — it converges on "already claimed" —
+    // and acknowledging before anything durable existed meant a crash after the
+    // 200 lost the event with no trace, while two concurrent deliveries could
+    // both create. One Mongo insert of ack latency buys both properties back.
+    let claim;
+    try {
+      claim = await deps.claimIssue(issue.key, event);
+    } catch (error) {
+      // No durable claim, no ack: a 500 makes Jira RETRY, which is now the
+      // correct recovery — the retry will claim.
+      logger?.error?.("jira.webhook.claim_failed", {
+        key: issue.key, error: String(error.message).slice(0, 200),
+      });
+      return res.status(500).json({ ok: false, error: "claim failed — retry expected" });
+    }
+
+    res.json({ ok: true, received: event, key: issue.key, claimed: claim.ok });
+    if (!claim.ok) {
+      logger?.info?.("jira.webhook.already_handled", { key: issue.key, reason: claim.reason });
+      return;
+    }
 
     try {
       const decision = await bridgeJiraIssue({

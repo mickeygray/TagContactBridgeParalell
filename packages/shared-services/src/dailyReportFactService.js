@@ -164,7 +164,12 @@ function buildDailyReportFact({
     captureVersion: CAPTURE_VERSION,
     definitionName: safeText(definitionName || "nightly rollup", 160),
     selection: [...new Set(report.selection || [])].map((id) => safeText(id, 80)),
-    emailAcceptedAt: new Date(emailAcceptedAt),
+    // null STAYS null. The scheduler passes emailAcceptedAt: null on purpose —
+    // the record is written BEFORE the send, and the acceptance is stamped
+    // separately once the provider takes it. `new Date(null)` is the Unix
+    // epoch, so a night whose mail bounced carried "accepted 1970-01-01",
+    // which reads as delivered to anything that only checks for presence.
+    emailAcceptedAt: emailAcceptedAt == null ? null : new Date(emailAcceptedAt),
     capturedAt: new Date(),
     facts: {
       financial: sanitizeFactValue(sections.get("topline")?.data ?? null),

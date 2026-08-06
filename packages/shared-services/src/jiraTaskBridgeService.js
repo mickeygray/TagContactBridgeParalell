@@ -305,7 +305,13 @@ async function bridgeJiraIssue({ issue, deps, apply = false, trigger = "manual",
   //    only one that survives a Jira retry storm.
   const existing = await deps.findLink(key);
   if (existing && existing.outcome === "created") {
-    return done("skipped", { reason: `already created as Logics task ${existing.logicsTaskId}` });
+    // Preserve the terminal fact rather than emitting a fresh `skipped` that
+    // would overwrite it in the ledger — recordLink also refuses that write,
+    // but the decision itself should not ask for it.
+    return done("skipped", {
+      reason: `already created as Logics task ${existing.logicsTaskId}`,
+      logicsTaskId: existing.logicsTaskId,
+    });
   }
 
   // 2. Where does it point, and is that verified?

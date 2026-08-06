@@ -3158,10 +3158,10 @@ async function startServer() {
     await waitForHourlySweepIdle();
   });
   runtime.registerCleanup("control-plane-morning-pass", async () => {
-    morningPassRuntime.stop();
+    await morningPassRuntime.stop();
   });
   runtime.registerCleanup("control-plane-midday-pass", async () => {
-    middayPassRuntime.stop();
+    await middayPassRuntime.stop();
   });
   runtime.registerCleanup("control-plane-cx-appointments", async () => {
     if (cxAppointmentState.timer) {

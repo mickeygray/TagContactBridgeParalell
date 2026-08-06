@@ -761,8 +761,11 @@ async function sendResolutionEmails({
 // The hourly sweeper calls this every tick; it short-circuits to a
 // skipped result outside the 1st-of-month-5am-PT window, and after
 // the refresh has already produced rows for the current tag.
-async function runMonthlyFillerPoolRefreshIfDue({ logger, now = new Date() } = {}) {
-  if (!isAtMonthlyRefreshBoundary(now)) {
+async function runMonthlyFillerPoolRefreshIfDue({ logger, now = new Date(), requireHour = true } = {}) {
+  // requireHour:false is for a caller that owns its own once-per-day guarantee
+  // (the morning pass's durable claim). The hourly floor must keep the hour
+  // check or it would fire this every tick on the 1st.
+  if (!isAtMonthlyRefreshBoundary(now, { requireHour })) {
     return { skipped: true, reason: "not-at-monthly-boundary" };
   }
   const tag = defaultMonthTag(now);
@@ -799,11 +802,11 @@ function isFirstOfMonthPT(now = new Date()) {
   return day === "01";
 }
 
-async function runAgedRollingRefreshIfDue({ logger, now = new Date() } = {}) {
+async function runAgedRollingRefreshIfDue({ logger, now = new Date(), requireHour = true } = {}) {
   if (!isAgedRollingRefreshEnabled()) {
     return { skipped: true, reason: "disabled" };
   }
-  if (!isAtDailyAgedRefreshBoundary(now)) {
+  if (!isAtDailyAgedRefreshBoundary(now, { requireHour })) {
     return { skipped: true, reason: "not-at-daily-boundary" };
   }
 
@@ -913,6 +916,13 @@ async function runFloorServices({
   dncRecheckEnabled = true,
   fillerPoolRefreshEnabled = true,
   agedRollingRefreshEnabled = true,
+  // The 05:00 (monthly filler) and 06:00 (aged ladder) gates exist to make an
+  // HOURLY caller fire once. A pass runtime already fires once per day under a
+  // durable claim, and it does not run at 05:00 or 06:00 — so with the hour
+  // still required, folding the floor into the morning pass would mean the
+  // monthly refresh and the aged ladder simply never run again. Default true:
+  // the hourly hoist is byte-identical.
+  requireHour = true,
   logger = null,
   impls = null,
 } = {}) {
@@ -965,7 +975,7 @@ async function runFloorServices({
     // steady-state. Until then both run — the daily sweep adds 30-day-old
     // leads incrementally while the monthly burst rebuilds from Logics.
     fillerPoolRefresh: fillerPoolRefreshEnabled
-      ? await fillerRefresh({ logger }).catch((error) => ({
+      ? await fillerRefresh({ logger, requireHour }).catch((error) => ({
           error: error.message,
         }))
       : { skipped: true, reason: "floor-service-disabled" },
@@ -974,7 +984,7 @@ async function runFloorServices({
     // sweep additionally on day-1), behind AGED_ROLLING_REFRESH_ENABLED.
     // Returns { skipped, reason } outside the window or when the flag is off.
     agedRollingRefresh: agedRollingRefreshEnabled
-      ? await agedRefresh({ logger }).catch((error) => ({
+      ? await agedRefresh({ logger, requireHour }).catch((error) => ({
           error: error.message,
         }))
       : { skipped: true, reason: "floor-service-disabled" },

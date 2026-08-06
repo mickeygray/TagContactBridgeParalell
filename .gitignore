@@ -63,3 +63,10 @@ tmp/
 # Logics activity dumps carry ClientName and emails — never commit them.
 tests/fixtures/activities-*.json
 *.orig
+
+# Analysis DATA artifacts: case ids, client names, assignees, notes. The
+# scripts that produce and consume them are code and stay tracked; their
+# OUTPUT is customer data and must never be committed. (Audit 2026-08-06, P0.)
+scripts/analysis/*.json
+scripts/analysis/*.out.json
+scripts/analysis/tmp*/

@@ -6,6 +6,65 @@ Status: OPEN. Sections run in dependency order, not theme order.
 ```
 ⟳ BUILD STATUS — read this first after any compaction or re-entry
 ────────────────────────────────────────────────────────────────────
+2026-08-06 (13): AUDIT RESPONSE — 11 findings, all verified against
+code before acting, 9 fixed, 2 deliberate-and-recorded. 1008 tests
+pass across every touched suite.
+
+FIXED (each with a test that pins it):
+  * P0 Jira: the route now CLAIMS the issue durably (new `pending`
+    outcome, insert against the unique _id) BEFORE acking, and acks
+    before the slow work. A failed claim 500s so Jira retries into the
+    claim. `created` is TERMINAL — recordLink refuses to overwrite it
+    (the bridge's own already-created->skipped decision used to erase
+    the ledger's memory of the task, re-arming the duplicate). An
+    unreadable open-task window now REFUSES the create instead of
+    letting partial dedupe evidence authorize it.
+  * P0 cursor: callRecoveryCompositeSource's codec now speaks the
+    runtime's persistence dialect — cadence cursors pass through
+    unmarked, recovery cursors ride {createdAt: epoch, id:
+    "recovery:<episodeId>"} — because leadDeliveryService stores TWO
+    TYPED SCALARS, not the cursor object. {kind, inner} persisted as
+    undefined/undefined and every incomplete page restarted at one;
+    the held-head starvation was this bug's shadow, not a second bug.
+  * P0 data: 30 tracked analysis artifacts (case ids, names, notes)
+    UNTRACKED + gitignored. ⚠ THEY REMAIN IN HISTORY — before any
+    push, the branch needs `git filter-repo --path scripts/analysis
+    --invert-paths` (or a rebuild). That rewrites all ~160 hashes
+    referenced in these work orders — Mickey's call, not a commit's.
+  * P1 floor gates: requireHour threaded through runFloorServices ->
+    the two IfDue fns -> the gates; morning passes false. Without it
+    the 05:00 monthly filler and 06:00 aged ladder would simply never
+    run from an 08:00 pass.
+  * P1 cadence truncation: drainCounterCadenceSweep loops until the
+    selector runs dry (bounded by maxRounds, stops on a zero-sent
+    round). Both passes drain; 900 due items no longer become 200
+    sent + 700 silently postponed.
+  * P1 returned failures: the factory now treats {failed>0, written 0,
+    skipped 0, lockBusy 0} as a TOTAL failure and routes it through
+    the retry path. Partial failure still advances.
+  * P1 lease: advancePass RENEWS the lease per task (takeover now
+    needs 45min of silence, not of work); finishPass's result is
+    checked (unacknowledged completion = cursor lost); stop() waits
+    bounded for a running pass.
+  * P1 NCOA: count() sums invoice + ncoa acceptance, so an NCOA-only
+    mailbox reaches apply(); processAttachment moved every durable
+    write (run dir, file, workflow row) BELOW the dryRun gate — the
+    dark nightly plan() was writing evidence every night.
+  * P1 epoch: emailAcceptedAt null stays null (was new Date(null) =
+    1970-01-01, reading as delivered); canRenderFromRecord now takes
+    the range and refuses multi-day (a last7 pointed at the record
+    would have mailed one day under a seven-day subject).
+
+DELIBERATE, NOT FIXED:
+  * Duplicate-owner/missed-job on the floor (finding 4's first half):
+    the hoist SURVIVES until the arming commit — deleting it while
+    morning is dark is a gap, not a safety (two services live today).
+    The requireHour fix is what makes the arming-commit handover able
+    to work at all. A test pins the hoist's existence.
+  * Midday/evening hygiene overlap (finding 11): stays dark; the
+    non-idempotent writes are the recorded arming blocker. The audit
+    concurs.
+
 2026-08-06 (12): CODE COMPLETE for the buildable set. E13 + the
 whole morning and midday pass, all DARK. 850 tests pass.
 SHIPPED THIS ROUND:

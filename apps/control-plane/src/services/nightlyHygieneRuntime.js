@@ -724,7 +724,14 @@ const TASKS = [
       };
     },
     count(planned) {
-      return (planned[0]?.accepted || 0);
+      // BOTH documents count. This read only the invoice's accepted number, so
+      // a night whose mailbox held an NCOA CSV but no invoice planned 0 — and a
+      // plannedCount of 0 means apply() never runs, so the CSV sat unprocessed
+      // while the task reported a quiet, successful night. The arming widened
+      // to either flag for exactly this case; the count has to match it.
+      const invoice = Number(planned[0]?.accepted) || 0;
+      const ncoa = Number(planned[0]?.ncoa?.accepted) || 0;
+      return invoice + ncoa;
     },
     describe(planned) {
       const p = planned[0] || {};

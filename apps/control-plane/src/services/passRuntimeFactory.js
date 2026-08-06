@@ -94,15 +94,33 @@ async function claimPass(passKey, dateKey, { leaseMs, at = new Date(), Model = D
   }
 }
 
-/** Advance the cursor, still holding the claim. False means we lost it. */
-async function advancePass(passKey, dateKey, claimedAt, nextTaskIndex, counts, { Model = DailyLoopRun } = {}) {
+/**
+ * Advance the cursor, still holding the claim. Returns the RENEWED claimedAt,
+ * or null when the claim was lost.
+ *
+ * Advancing also renews the lease. The lease was fixed at claim time, so a
+ * pass whose tasks legitimately took longer than 45 minutes IN TOTAL could be
+ * reclaimed by another process while its original worker was mid-write — the
+ * takeover predicate only knows claimedAt. Bumping claimedAt on every advance
+ * makes the lease per-task rather than per-pass: a takeover now needs 45
+ * minutes of genuine silence, not 45 minutes of honest work.
+ */
+async function advancePass(passKey, dateKey, claimedAt, nextTaskIndex, counts, { at = new Date(), Model = DailyLoopRun } = {}) {
   const base = `passes.${passKey}`;
   const result = await Model.updateOne(
     { dateKey, [`${base}.claimedAt`]: claimedAt, [`${base}.completedAt`]: { $in: [null, undefined] } },
-    { $set: { [`${base}.nextTaskIndex`]: nextTaskIndex, [`${base}.counts`]: counts, [`${base}.lastErrorCode`]: null } },
+    {
+      $set: {
+        [`${base}.claimedAt`]: at,
+        [`${base}.nextTaskIndex`]: nextTaskIndex,
+        [`${base}.counts`]: counts,
+        [`${base}.lastErrorCode`]: null,
+      },
+    },
   );
   const matched = result?.matchedCount ?? result?.n;
-  return matched == null ? result?.acknowledged !== false : Number(matched) === 1;
+  const ok = matched == null ? result?.acknowledged !== false : Number(matched) === 1;
+  return ok ? at : null;
 }
 
 /**
@@ -233,6 +251,25 @@ function createPassRuntime({
           if (armed && plannedCount) {
             applied = await task.apply(planned, { logger: log, ...(config.collaborators || {}) });
             totals.written += applied?.written || 0;
+
+            // A RETURNED total failure is still a failure. Every task here
+            // catches provider errors and reports them as {failed: n} rather
+            // than throwing — the right shape for a PARTIAL failure, where the
+            // successes must not be re-run. But a night where NOTHING succeeded
+            // used to sail through this loop, advance the cursor, and complete
+            // the day: a total provider outage got zero retries and a clean
+            // summary. Written and skipped both zero with failures present
+            // means no work happened at all, and re-running loses nothing.
+            const totalFailure = Number(applied?.failed) > 0
+              && !(Number(applied?.written) > 0)
+              && !(Number(applied?.skipped) > 0)
+              && !(Number(applied?.lockBusy) > 0);
+            if (totalFailure) {
+              const first = Array.isArray(applied?.errors) ? applied.errors[0] : null;
+              throw new Error(
+                `${task.key} failed completely — ${String(first || `${applied.failed} failure(s)`).slice(0, 160)}`,
+              );
+            }
           }
 
           results.push({
@@ -251,9 +288,9 @@ function createPassRuntime({
 
           index += 1;
           attempts.delete(task.key);
-          if (!await advancePass(passKey, dateKey, claim.claimedAt, index, totals, { Model })) {
-            throw cursorLost(passKey);
-          }
+          const renewed = await advancePass(passKey, dateKey, claim.claimedAt, index, totals, { Model });
+          if (!renewed) throw cursorLost(passKey);
+          claim.claimedAt = renewed;
         } catch (error) {
           if (error?.code === CURSOR_LOST) throw error;
           const tried = (attempts.get(task.key) || 0) + 1;
@@ -271,13 +308,18 @@ function createPassRuntime({
           // Out of attempts — step past it so the rest of the day still runs.
           index += 1;
           attempts.delete(task.key);
-          if (!await advancePass(passKey, dateKey, claim.claimedAt, index, totals, { Model })) {
-            throw cursorLost(passKey);
-          }
+          const renewed = await advancePass(passKey, dateKey, claim.claimedAt, index, totals, { Model });
+          if (!renewed) throw cursorLost(passKey);
+          claim.claimedAt = renewed;
         }
       }
 
-      await finishPass(passKey, dateKey, claim.claimedAt, index, totals, { at: new Date(), Model });
+      // An unacknowledged completion means the claim moved under us — the same
+      // condition as a lost cursor, and marking the day done in memory anyway
+      // would hide that a second process may be re-running it right now.
+      if (!await finishPass(passKey, dateKey, claim.claimedAt, index, totals, { at: new Date(), Model })) {
+        throw cursorLost(passKey);
+      }
       state.lastRunKey = dateKey;
       state.lastRunAt = new Date().toISOString();
       state.lastResults = results;
@@ -310,9 +352,19 @@ function createPassRuntime({
     await runOnce();
   }
 
-  function stop() {
+  async function stop({ maxWaitMs = 25_000 } = {}) {
     if (state.timer) clearInterval(state.timer);
     state.timer = null;
+    // A shutdown that returns while a pass is mid-task hands the process
+    // manager a green light to kill writes in flight. Bounded, because a
+    // shutdown that never returns is the other failure.
+    const deadline = Date.now() + maxWaitMs;
+    while (state.running && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+    if (state.running) {
+      log?.warn?.(`${passKey}.shutdown_timeout`, { waitedMs: maxWaitMs });
+    }
   }
 
   function getState() {

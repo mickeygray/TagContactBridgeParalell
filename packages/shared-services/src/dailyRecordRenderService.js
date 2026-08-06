@@ -196,11 +196,16 @@ async function renderReportFromRecord({
  * leak the block's own comment records having happened once — it "handed the
  * lead vendor five recordings of OUR mail callers".
  */
-function canRenderFromRecord(def) {
+function canRenderFromRecord(def, range = null) {
   if (!def) return { ok: false, reason: "no-definition" };
   if (String(def.renderSource || "") !== "record") return { ok: false, reason: "not-record-sourced" };
   if (def.domain) return { ok: false, reason: "tenant-scoped-definition-cannot-use-an-all-domain-record" };
   if ((def.filters || []).filter(Boolean).length) return { ok: false, reason: "filtered-definition" };
+  // ONE DAY ONLY. The record is a day; a last7 or monthly definition pointed at
+  // it would silently render range.from alone and mail a one-day report under a
+  // seven-day subject line. Refusing here routes it back to the live composer,
+  // which is correct for any range the record cannot express.
+  if (range && range.from !== range.to) return { ok: false, reason: "record-renders-one-day-only" };
   return { ok: true, reason: null };
 }
 

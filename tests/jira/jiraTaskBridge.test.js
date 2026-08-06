@@ -300,3 +300,68 @@ test("the notify payload carries everything the alert text needs", async () => {
   assert.equal(d.caseId, 401656);
   assert.equal(d.tenant, "TAG");
 });
+
+// ── AUDIT FIXES: claim-before-ack, terminal created, refuse-on-partial ─────
+
+test("the link model knows the in-flight state", () => {
+  const JiraTaskLink = require("../../packages/shared-models/src/JiraTaskLink");
+  const outcomes = JiraTaskLink.schema.path("outcome").enumValues;
+  assert.ok(outcomes.includes("pending"), "the claim needs a durable in-flight state");
+  assert.ok(outcomes.includes("created"));
+});
+
+test("the webhook claims BEFORE acknowledging, and acknowledges before working", () => {
+  // The old order (ack -> create -> record) had two fatal shapes: a crash after
+  // the 200 lost the event with nothing durable, and two concurrent deliveries
+  // could both see no link and both create against a destination with no
+  // delete. The claim insert against the unique _id is the arbiter.
+  const src = require("node:fs").readFileSync(
+    require.resolve("../../apps/control-plane/src/routes/jiraWebhook"), "utf8",
+  );
+  const handler = src.slice(src.indexOf('router.post("/webhook"'));
+  const claim = handler.indexOf("deps.claimIssue(");
+  const ack = handler.indexOf("res.json({ ok: true, received: event, key: issue.key");
+  const work = handler.indexOf("bridgeJiraIssue({");
+  assert.ok(claim > 0 && ack > 0 && work > 0);
+  assert.ok(claim < ack, "the claim must be durable before Jira hears a 2xx");
+  assert.ok(ack < work, "and the 2xx must precede the slow external work");
+  // A failed claim must NOT ack — a 500 makes Jira retry, which now converges
+  // on the claim instead of duplicating.
+  assert.match(handler.slice(0, ack), /status\(500\)/);
+});
+
+test("recordLink cannot overwrite the terminal created outcome", () => {
+  // The bridge's own "already created -> skipped" decision used to overwrite
+  // the stored `created` with `skipped`, after which the ledger no longer knew
+  // a task existed and the next retry was free to duplicate it.
+  const src = require("node:fs").readFileSync(
+    require.resolve("../../apps/control-plane/src/routes/jiraWebhook"), "utf8",
+  );
+  const record = src.slice(src.indexOf("recordLink: async"), src.indexOf("claimIssue:"));
+  assert.match(record, /outcome: \{ \$ne: "created" \}/,
+    "a non-created write must be conditional on the row not being created");
+});
+
+test("an unreadable open-task window REFUSES the create instead of narrowing it", async () => {
+  // The dedupe evidence exists to stop a second un-deletable task. A window we
+  // could not read is evidence we do not have.
+  const src = require("node:fs").readFileSync(
+    require.resolve("../../apps/control-plane/src/routes/jiraWebhook"), "utf8",
+  );
+  const lookup = src.slice(src.indexOf("listOpenTasks: async"), src.indexOf("createTask:"));
+  assert.match(lookup, /throw new Error\(/, "a failed window must throw, not continue");
+  assert.doesNotMatch(lookup, /\n\s*continue;/, "the silent continue is the defect");
+});
+
+test("an already-created decision carries the task id forward, not just a reason", async () => {
+  const decision = await bridgeJiraIssue({
+    issue: { key: "ASSIGNMENT-9001", fields: {} },
+    deps: {
+      findLink: async () => ({ outcome: "created", logicsTaskId: 5150 }),
+    },
+    apply: true,
+  });
+  assert.equal(decision.outcome, "skipped");
+  assert.equal(decision.logicsTaskId, 5150,
+    "the terminal fact rides the decision so no writer can lose it");
+});

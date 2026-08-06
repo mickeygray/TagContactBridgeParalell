@@ -33,15 +33,44 @@ const { admitEpisode, buildRecoverySourceRow } = require("./callRecoveryAdmissio
 const RECOVERY_KIND = "recovery";
 const CADENCE_KIND = "cadence";
 
+// ── THE CURSOR MUST SURVIVE THE RUNTIME'S PERSISTENCE, WHICH IS TWO SCALARS ─
+//
+// leadDeliveryService does not store the cursor object. It stores
+// `repairCursorCreatedAt` (a Date) and `repairCursorId` (a String) and rebuilds
+// `{createdAt, id}` on resume — that is the WHOLE contract, typed by the
+// LeadDeliverySourceState schema. The first version of this codec returned
+// `{kind, inner}`, which has neither field: both scalars persisted as
+// undefined, mongoose dropped them from the $set, and every incomplete page
+// lost its position and restarted at page one. Recovery's held-head then
+// re-ran forever and later candidates starved — not because pagination was
+// wrong, but because its cursor never survived a tick.
+//
+// So the codec speaks the runtime's own dialect:
+//   cadence   -> the inner {createdAt, id} passes through UNMARKED (this is
+//                also the legacy shape, so old persisted cursors still resume)
+//   recovery  -> {createdAt: epoch sentinel, id: "recovery:<episodeId>"}
+//                — both fields valid for the schema, and the id prefix is the
+//                discriminator on the way back in.
+const RECOVERY_ID_PREFIX = "recovery:";
+
 function decodeCursor(cursor) {
   if (!cursor) return { kind: CADENCE_KIND, inner: null };
+  // In-memory callers (and tests) may still hand over the object shape.
   if (typeof cursor === "object" && cursor.kind) return { kind: cursor.kind, inner: cursor.inner ?? null };
-  // A bare cursor is a legacy cadence cursor — the composite must be able to
-  // resume a pass that started before it was wired in.
+  if (typeof cursor === "object" && typeof cursor.id === "string"
+      && cursor.id.startsWith(RECOVERY_ID_PREFIX)) {
+    return { kind: RECOVERY_KIND, inner: cursor.id.slice(RECOVERY_ID_PREFIX.length) };
+  }
+  // A bare {createdAt, id} is a cadence cursor — the persisted shape, and the
+  // legacy one from before the composite existed.
   return { kind: CADENCE_KIND, inner: cursor };
 }
 
-const encodeCursor = (kind, inner) => (inner == null && kind === CADENCE_KIND ? null : { kind, inner });
+function encodeCursor(kind, inner) {
+  if (inner == null) return null;
+  if (kind === CADENCE_KIND) return inner;
+  return { createdAt: new Date(0), id: `${RECOVERY_ID_PREFIX}${inner}` };
+}
 
 /**
  * @param base       the existing cadence source (must expose readBatch)

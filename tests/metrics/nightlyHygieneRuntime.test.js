@@ -744,3 +744,41 @@ test("the mailbox task counts NCOA's work, not only the invoice's", async () => 
   assert.match(source, /handlers\.ncoa/, "apply must read the ncoa handler's stat");
   assert.match(source, /ncoa\.processed/, "and add its processed count to written");
 });
+
+// ── AUDIT FIXES on the NCOA fold ───────────────────────────────────────────
+
+test("a mailbox holding ONLY an NCOA csv still reaches apply", () => {
+  // count() used to read only the invoice's accepted number, so an NCOA-only
+  // night planned 0 — and plannedCount 0 means apply() never runs. The CSV sat
+  // unprocessed while the task reported a quiet, successful night. The arming
+  // was widened to either flag for exactly this case; the count must match it.
+  const task = createNightlyHygieneRuntime({}).TASKS.find((t) => t.key === "mail-invoice");
+  assert.equal(task.count([{ accepted: 0, ncoa: { accepted: 2 } }]), 2,
+    "NCOA acceptance alone must open apply()");
+  assert.equal(task.count([{ accepted: 1, ncoa: { accepted: 2 } }]), 3);
+  assert.equal(task.count([{ accepted: 1, ncoa: null }]), 1);
+  assert.equal(task.count([{ accepted: 0, ncoa: null }]), 0);
+});
+
+test("the NCOA dry run is READ-ONLY — nothing durable before the gate", () => {
+  // processAttachment used to create the run directory, write the attachment to
+  // disk and record a Mongo workflow row BEFORE checking dryRun. plan() runs
+  // every night whether or not the task is armed, so a DARK task wrote a file
+  // and a database row per attachment per night.
+  const src = require("node:fs").readFileSync(
+    require.resolve("../../packages/shared-services/src/ncoaMailboxIngestService"), "utf8",
+  );
+  const fn = src.slice(src.indexOf("async function processAttachment"));
+  const gate = fn.indexOf("if (dryRun)");
+  assert.ok(gate > 0);
+  const beforeGate = fn.slice(0, gate);
+  for (const write of ["ensureDir(", "writeFileSync(", "recordWorkflowStage("]) {
+    assert.equal(beforeGate.includes(write), false,
+      `${write} must not run before the dryRun gate`);
+  }
+  // And all three still happen on the real path.
+  const afterGate = fn.slice(gate);
+  for (const write of ["ensureDir(", "writeFileSync(", "recordWorkflowStage("]) {
+    assert.ok(afterGate.includes(write), `${write} must still run when applying`);
+  }
+});

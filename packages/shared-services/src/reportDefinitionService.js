@@ -182,7 +182,7 @@ async function runDefinition(def, {
   // this throws rather than emailing a confident page of zeroes. The runtime
   // already treats a throw as "not a run", so the day is retried instead of
   // being stamped delivered.
-  const recordVerdict = canRenderFromRecord(def);
+  const recordVerdict = canRenderFromRecord(def, range);
   let report;
   if (recordVerdict.ok) {
     report = await renderFromRecord({
