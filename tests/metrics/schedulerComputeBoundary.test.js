@@ -29,12 +29,25 @@ test("recording and spend owners reject configured weekend days", () => {
   }
 });
 
-test("generic hourly and duplicate recording owners remain hard-gated", () => {
+test("generic hourly stays hard-gated, and the cx recording owner is GONE", () => {
   const source = fs.readFileSync(require.resolve("../../apps/control-plane/src/server"), "utf8");
   assert.match(source, /const runScheduledPhase = false/);
   assert.match(source, /mode: "durable-retry-drain-only"/);
-  assert.match(source, /const legacyHourlyRecordingOwnerEnabled = false/);
   assert.doesNotMatch(source, /workerState:\s*hourlySweepState,\s*spendSyncRuntime/);
+
+  // The cx recording worker used to be pinned here as "hard-gated" by a
+  // hardcoded `legacyHourlyRecordingOwnerEnabled = false`. It is deleted now,
+  // so the assertion flips: a gated duplicate can be re-armed by editing one
+  // word, and this repo has twice found a "dark" trigger that was not.
+  // Matched against CODE, not prose: the tombstone comment left at the call
+  // site names the deleted function on purpose, so a bare word match would
+  // fail on the very comment that explains the deletion.
+  assert.doesNotMatch(source, /const legacyHourlyRecordingOwnerEnabled/);
+  assert.doesNotMatch(source, /async function startCxRecordingWorker/);
+  assert.doesNotMatch(source, /await startCxRecordingWorker\(/);
+  assert.doesNotMatch(source, /cxRecordingState\./);
+  assert.doesNotMatch(source, /runCxRecordingHourly\(/,
+    "the service survives for the admin route and the backfill scripts, but nothing in server.js calls it");
 });
 
 test("nightly close cannot invoke duplicate spend or full hourly discovery when scheduled", () => {

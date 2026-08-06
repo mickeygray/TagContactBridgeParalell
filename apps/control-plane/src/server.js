@@ -175,7 +175,6 @@ const {
   isOperatingNow,
   runHourlySweep,
   runDueCxAppointments,
-  runCxRecordingHourly,
   summarizeHourlySweepResult,
   completeCxQueueItem,
   createCxQueueReservationService,
@@ -778,7 +777,6 @@ async function startHourlySweepWorker({ config, runtime, workerState, spendSyncR
           config.hourlySweep?.cxTerminalRectificationMinAgeMs,
         cxTerminalRectificationLimit:
           config.hourlySweep?.cxTerminalRectificationLimit,
-        cxRecordingHourlyEnabled: !scheduledPhaseLite,
         calllogBridgeEnabled: !scheduledPhaseLite,
         staleCadenceSweepEnabled: !scheduledPhaseLite,
         staleNcoaSweepEnabled: !scheduledPhaseLite,
@@ -882,102 +880,6 @@ async function startHourlySweepWorker({ config, runtime, workerState, spendSyncR
   setImmediate(() => {
     tick().catch((error) => {
       runtime.logger.error("control-plane.hourly.first_tick_failed", {
-        error: error.message,
-      });
-    });
-  });
-}
-
-/**
- * RingCX/WEM recording downloader. Runs once per hour on a separate
- * minute mark from the RingCentral call-log hygiene sweep so the two
- * heavy RC surfaces do not stack on the same tick.
- */
-async function startCxRecordingWorker({ config, runtime, workerState }) {
-  const intervalMs = 60_000;
-  const scheduleMinute = Math.max(
-    0,
-    Math.min(59, Number(config.hourlySweep?.cxRecordingMinute ?? 30) || 30),
-  );
-  workerState.enabled = true;
-  workerState.intervalMs = intervalMs;
-  workerState.scheduleMinute = scheduleMinute;
-  workerState.lastScheduledSlot = null;
-
-  const slotKeyFor = (date) => {
-    const slot = new Date(date);
-    slot.setUTCMinutes(scheduleMinute, 0, 0);
-    return `${slot.getUTCFullYear()}-${slot.getUTCMonth()}-${slot.getUTCDate()}-${slot.getUTCHours()}-${scheduleMinute}`;
-  };
-
-  const tick = async () => {
-    const now = new Date();
-    if (now.getUTCMinutes() < scheduleMinute) return;
-    const slotKey = slotKeyFor(now);
-    if (workerState.running || workerState.lastScheduledSlot === slotKey) return;
-
-    const mongoState = getMongoReadyState(runtime);
-    if (!mongoState.connected) {
-      workerState.lastCompletedAt = new Date();
-      workerState.lastResult = {
-        skipped: true,
-        reason: "mongo-not-connected",
-        mongo: mongoState,
-      };
-      workerState.lastError = "mongo-not-connected";
-      return;
-    }
-
-    workerState.running = true;
-    workerState.lastStartedAt = now;
-    workerState.lastScheduledSlot = slotKey;
-    try {
-      const result = await runCxRecordingHourly({
-        fireTime: now,
-        scheduleMinute,
-        logger: runtime.logger,
-      });
-      workerState.lastCompletedAt = new Date();
-      workerState.lastResult = result;
-      workerState.lastError = null;
-      runtime.logger.info("control-plane.cx_recording.tick", {
-        scheduleMinute,
-        windowStart: result.windowStart,
-        windowEnd: result.windowEnd,
-        minDurationSec: result.minDurationSec,
-        metadata: result.metadata,
-        domains: Object.fromEntries(
-          Object.entries(result.domains || {}).map(([domain, value]) => [
-            domain,
-            {
-              candidateRows: value.candidateRows,
-              processedCompleted: value.processedCompleted,
-              processedNoRecording: value.processedNoRecording,
-              processedErrors: value.processedErrors,
-            },
-          ]),
-        ),
-      });
-    } catch (error) {
-      workerState.lastCompletedAt = new Date();
-      workerState.lastError = error.message;
-      runtime.logger.error("control-plane.cx_recording.tick_failed", {
-        scheduleMinute,
-        error: error.message,
-      });
-    } finally {
-      workerState.running = false;
-    }
-  };
-
-  workerState.timer = setInterval(tick, intervalMs);
-  if (typeof workerState.timer.unref === "function") {
-    workerState.timer.unref();
-  }
-
-  setImmediate(() => {
-    tick().catch((error) => {
-      runtime.logger.error("control-plane.cx_recording.first_tick_failed", {
         error: error.message,
       });
     });
@@ -2429,7 +2331,6 @@ async function startServer() {
   const requireSmsWebhookSignature = buildCallrailWebhookVerifier(config, runtime);
   runtime.installSignalHandlers();
   const hourlySweepState = createWorkerState();
-  const cxRecordingState = createWorkerState();
   const cxAppointmentState = createWorkerState();
   const cxTerminalOutboxState = createWorkerState();
   const cxBoringWebhookActionState = createWorkerState();
@@ -2469,7 +2370,6 @@ async function startServer() {
         hourlySweepState,
         config.hourlySweep || {},
       ),
-      cxRecording: summarizeWorkerState(cxRecordingState),
       cxAppointments: summarizeWorkerState(cxAppointmentState),
       cxTerminalOutbox: summarizeWorkerState(cxTerminalOutboxState),
       cxBoringWebhookActions: summarizeWorkerState(cxBoringWebhookActionState),
@@ -2876,21 +2776,21 @@ async function startServer() {
     runtime.logger.warn("control-plane.hourly.disabled");
   }
 
-  // The EOD recording archive is the sole scheduled recording/backfill
-  // owner. Keep the former hourly implementation available for the
-  // no-delete proof window, but never arm it automatically.
-  const legacyHourlyRecordingOwnerEnabled = false;
-  if (config.controlPlaneWorker?.enabled !== false && legacyHourlyRecordingOwnerEnabled) {
-    await startCxRecordingWorker({
-      config,
-      runtime,
-      workerState: cxRecordingState,
-    });
-  } else {
-    cxRecordingState.enabled = false;
-    cxRecordingState.lastResult = { skipped: true, reason: "retired-duplicate-owner" };
-    runtime.logger.warn("control-plane.cx_recording.retired_duplicate_owner");
-  }
+  // startCxRecordingWorker lived here, behind a hardcoded false for a
+  // no-delete proof window. Deleted 2026-08-06: its input is gone. The service
+  // it drove reads CallLog {platform:"cx"} on a 60-minute trailing window, and
+  // the cx lane's newest row is 2026-07-16 — every tick since has taken the
+  // no-eligible-rows early return without ever calling RingCX.
+  //
+  // The service itself SURVIVES, and deliberately: routes/metrics.js still
+  // exposes POST /cx-recording/run and GET /cx-recording/preview-window, which
+  // are the only way to re-pull a specific RingCX hour, and both backfill
+  // scripts call it. What went is the clock, not the capability.
+  //
+  // The old else-branch's reason string, "retired-duplicate-owner", was not
+  // true: the EOD recording archive never queries platform:"cx" and never calls
+  // RingCX, so it was never a functional successor. The honest reason is that
+  // there is nothing left to record.
 
   if (config.controlPlaneWorker?.enabled !== false) {
     await startCxAppointmentWorker({
@@ -3121,10 +3021,6 @@ async function startServer() {
       clearInterval(hourlySweepState.timer);
       hourlySweepState.timer = null;
     }
-    if (cxRecordingState.timer) {
-      clearInterval(cxRecordingState.timer);
-      cxRecordingState.timer = null;
-    }
     if (cxAppointmentState.timer) {
       clearInterval(cxAppointmentState.timer);
       cxAppointmentState.timer = null;
@@ -3162,17 +3058,6 @@ async function startServer() {
     }
     if (hourlySweepState.running) {
       runtime.logger.warn("control-plane.hourly_sweep.shutdown.tick_timeout", {
-        waitedMs: maxWaitMs,
-      });
-    }
-  }
-  async function waitForCxRecordingIdle(maxWaitMs = 25_000) {
-    const deadline = Date.now() + maxWaitMs;
-    while (cxRecordingState.running && Date.now() < deadline) {
-      await new Promise((resolve) => setTimeout(resolve, 250));
-    }
-    if (cxRecordingState.running) {
-      runtime.logger.warn("control-plane.cx_recording.shutdown.tick_timeout", {
         waitedMs: maxWaitMs,
       });
     }
@@ -3252,13 +3137,6 @@ async function startServer() {
       hourlySweepState.timer = null;
     }
     await waitForHourlySweepIdle();
-  });
-  runtime.registerCleanup("control-plane-cx-recording", async () => {
-    if (cxRecordingState.timer) {
-      clearInterval(cxRecordingState.timer);
-      cxRecordingState.timer = null;
-    }
-    await waitForCxRecordingIdle();
   });
   runtime.registerCleanup("control-plane-cx-appointments", async () => {
     if (cxAppointmentState.timer) {

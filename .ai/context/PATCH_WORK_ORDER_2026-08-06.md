@@ -6,6 +6,25 @@ Status: OPEN. Sections run in dependency order, not theme order.
 ```
 ⟳ BUILD STATUS — read this first after any compaction or re-entry
 ────────────────────────────────────────────────────────────────────
+2026-08-06 (9): E10 IS DONE - cx recording worker DELETED, service
+KEPT for the admin route and backfill scripts. 754 pass.
+CORRECTION TO (7) AND (8): I wrote that cx.call.placed had NEVER
+been emitted. It has - 33,105 times, newest 2026-07-08. My probe read
+a missing FIELD (happenedAt is unset on all of them) as a missing
+RECORD. D10 was also the wrong gate: cx.call.placed is not this
+service's input. The delete verdict stands on the right evidence -
+CallLog platform:"cx" newest row is 2026-07-16 and the worker's
+trailing window holds 0.
+The Phase A entry was NOT dead: POST /api/hygiene/hourly-sweep/run
+defaults scheduledPhase TRUE and the flag fell to its `= true`
+default, so an admin ran the RingCX pull today. Third surviving
+trigger this patch has found.
+SEPARATE LIVE OUTAGE, found while proving the deletion safe: the EOD
+recording archive has archived NOTHING since 2026-08-03T14:13Z. It is
+armed and DEADLOCKED - its idle gate waits on 27 permanently-stale
+processing rows, polls 12h, then throws. See the E10 entry.
+Next action: E11 (arm one at a time) or E12/E13.
+
 2026-08-06 (8): E8 IS DONE - call-log-hygiene-evening landed dark
 before call-recording-index, with a DST-safe pacificMsSinceToday. 17
 tests, 754 pass. The window turned out to BE the step: PhoneBurner
@@ -17,8 +36,7 @@ consistent with Phase A stopping on the live host, not two provider
 faults. Five arming blockers in the E8 entry; the critical one is that
 MD2 MUST NOT SHIP until replay is safe (an overlapping window can
 rewrite a resolved CallLog row to pending-retry with a null source).
-Next action: E10 (cxRecordingHourly) - note D10 is already answered,
-cx.call.placed has never been emitted.
+Next action: E10 (cxRecordingHourly).
 
 2026-08-06 (7): E7 IS DONE — the reconciliation trio landed dark
 between activity-review and call-recording-index (NOT before
@@ -32,8 +50,8 @@ TWO FINDINGS BIGGER THAN THE STEP ITSELF:
     its telephony-session writer stopped 37 days ago; the reconciler
     returned scanned=0 on every run until it too stopped 2026-08-03.
     Someone must decide: fix the writer, or retire the service.
-  * cx.call.placed has NEVER been emitted — that answers D10 and
-    gates E10.
+  * cx.call.placed looked never-emitted — WRONG, see (9). It has
+    33,105 records; my probe misread an unset field.
 Next action: E8 (call log hygiene, evening half).
 
 2026-08-06 (6): E9 IS DONE — NCOA folded into the nightly mailbox
@@ -515,7 +533,9 @@ Probed 2026-08-06 against the shared cluster:
   **alive** — it wrote `family:cx` cadence-queue rows the same day. So this is a
   dead feed inside a live service, not a stopped service.
 - No RC-sourced CallLog rows in 7 days (all 10,300 carry `source: null`).
-- `cx.call.placed`: never emitted — **this also answers D10 / gates E10.**
+- `cx.call.placed`: **CORRECTED (see E10)** — 33,105 records exist, newest
+  2026-07-08. The probe that said "never" read an unset `happenedAt` field as a
+  missing record. D10 was also the wrong gate for E10.
 
 So session-reconcile has nothing to reconcile. It is built anyway, but its
 `plan()` counts the FEED rather than calling the service, and `describe()` says
@@ -667,9 +687,91 @@ ncoaMailboxIngestService + the two server.js-loading suites.
 **VERIFY-LIVE (open):** nightly mailbox_ingest log shows handler=ncoa
 listed>0; hourly worker log stops showing ncoaMailbox.
 
-**E10. cxRecordingHourly** — gate on D10 (`cx.call.placed` still emitted?).
-If dead: delete worker + task in one commit. If alive: fold as a dark
-evening task, delete `startCxRecordingWorker` in the same commit.
+**E10. cxRecordingHourly** - **DONE** (deleted). Worker + Phase A entry gone,
+service KEPT.
+
+**THE STATED GATE (D10) WAS THE WRONG QUESTION, AND MY ANSWER TO IT WAS WRONG.**
+D10 asks "is `cx.call.placed` still emitted?" Two errors:
+
+1. `cx.call.placed` is not this service's input at all. `runCxRecordingHourly`
+   reads `CallLog {platform:"cx", callEndTime in [t-75m, t-15m], durationSec >=
+   min, recordingArchive.status not terminal}`. `cx.call.placed` is
+   cxCallActivityBackfill's input.
+2. I recorded "never emitted" in two earlier status blocks. **It is emitted
+   33,105 times.** My probe read `newest[0]?.happenedAt` and printed "(never)"
+   when that came back undefined - and `happenedAt` is set on **zero** of those
+   33,105 records, so I reported a missing FIELD as a missing RECORD. Newest by
+   `createdAt` is 2026-07-08T22:58:45Z: dormant, not never. Exactly the
+   unknown-vs-zero trap this order polices, committed by its own probe.
+
+**The right evidence, and it still says DELETE.** CallLog `platform:"cx"`:
+62,971 rows, newest `callStartTime` **2026-07-16T00:05:36Z**, newest
+`createdAt` 2026-07-17. Rows in the worker's 60-minute trailing window right
+now: **0**. Every tick since mid-July has taken the `no-eligible-calllog-rows`
+early return without ever calling RingCX.
+
+**What was deleted** (one commit): `startCxRecordingWorker` (~96 lines) and its
+call site; the hardcoded `legacyHourlyRecordingOwnerEnabled = false` and its
+else-branch; `cxRecordingState` and its health-payload line, close handler,
+`waitForCxRecordingIdle`, and `registerCleanup`; the `runCxRecordingHourly`
+import; the Phase A `cxRecordingHourly` entry and its `cxRecordingHourlyEnabled`
+param and the server.js arg feeding it.
+
+**What was KEPT, deliberately:** `cxRecordingHourlyService.js` entire.
+`POST /api/metrics/cx-recording/run` and `GET /cx-recording/preview-window` are
+the only way to re-pull a specific RingCX hour, and both backfill scripts call
+the service. What went is the clock, not the capability. Also kept:
+`RINGCX_RECORDING_HOURLY_MINUTE` (read directly by
+scripts/backfill-cx-wem-recordings.js, not via the config key).
+
+**THE PHASE A ENTRY WAS NOT DEAD CODE.** Third time this patch has found a
+surviving trigger the plan did not know about.
+`POST /api/hygiene/hourly-sweep/run` defaults `scheduledPhase` **TRUE** and
+never passes `cxRecordingHourlyEnabled`, so the param fell to its `= true`
+default - an admin hitting that route ran the RingCX pull today. Deleting the
+entry and the param together is what closes it.
+
+**The old reason string was false.** `retired-duplicate-owner` claimed the EOD
+recording archive superseded this. It does not: that runtime's sources are
+legacy contact-activity docs + RingCentral `getAccountCallLog` + CallRail. It
+never queries `platform:"cx"` and never calls RingCX. It was a successor only in
+the sense that the lane it replaced is empty. The commit records the honest
+reason instead.
+
+**FOUND WHILE PROVING THE DELETION SAFE - A LIVE OUTAGE, NOT PART OF E10**
+
+The EOD recording archive - the *actual* scheduled owner for the lanes that
+still have traffic (`ex`, CallRail) - **has archived nothing since
+2026-08-03T14:13:02Z**. Run summaries in `ops/end-of-day-recordings/` stop at
+dateKey 2026-07-29. Upload counts collapse: 90d 3,430 / 30d 946 / 7d 30 / 3d
+**0**.
+
+Named cause: `waitForRecordingPipelineIdle` (added 2026-08-03) requires
+`transcriptionProcessing === 0 && archiveProcessing === 0 && jobProcessing ===
+0` before archiving. Live counts are **11 / 7 / 9**, and all are permanently
+stale - archive-processing newest `updatedAt` 2026-07-09, transcription-
+processing newest 2026-05-05. With `RECORDING_PIPELINE_IDLE_WAIT_ENABLED=true`
+and a 12h max wait, every run polls for 12 hours and then throws.
+`runArchiveEodRecordings` is never reached. **It is armed and deadlocked.**
+
+Two follow-ups, both independent of this step: clear the 27 stale `processing`
+rows (or make the idle gate ignore rows older than N hours), and confirm which
+host actually runs `eodRecordingArchiveRuntime`.
+
+**THE 2026-08-03 CLUSTER.** Three independent things last ran within 13 minutes
+of each other that afternoon: attribution-reconcile 14:00Z (E7), CallLog
+`platform:"ex"` last write 14:04Z (E8), EOD archive last upload 14:13Z. A fourth
+writer - the PhoneBurner projection - is still going (2026-08-06T04:32Z). That
+pattern is consistent with one process stopping that afternoon while another
+kept running. **Not diagnosed, and deliberately not asserted as a cause** - the
+standing rule is never to call something down without checking newest writes per
+model, and the per-model check is what produced this list, not a conclusion from
+it.
+
+**TEST:** the boundary test flipped from pinning the hard gate to pinning the
+absence, matched against CODE not prose (the tombstone comment names the deleted
+function on purpose). 754 metrics tests pass; the four server.js-loading suites
+pass; the kept service, metrics route, server and sweeper all still load.
 
 **E11. Arm E7-E10 one at a time**, each after its own observed dark cycle.
 Never the group.

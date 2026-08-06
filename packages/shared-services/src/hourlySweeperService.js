@@ -26,9 +26,6 @@ const {
   runHourlyCallLogHygiene,
 } = require("./hourlyCallLogHygieneService");
 const {
-  runCxRecordingHourly,
-} = require("./cxRecordingHourlyService");
-const {
   recoverCxCallLogs,
 } = require("./cxCallActivityBackfillService");
 const {
@@ -1087,7 +1084,6 @@ async function runHourlySweep({
   cxTerminalRectificationSinceMs,
   cxTerminalRectificationMinAgeMs,
   cxTerminalRectificationLimit,
-  cxRecordingHourlyEnabled = true,
   calllogBridgeEnabled = true,
   staleCadenceSweepEnabled = true,
   staleNcoaSweepEnabled = true,
@@ -1190,24 +1186,15 @@ async function runHourlySweep({
       metricsRefresh: { skipped: true, reason: "retired" },
       // callrailStatSync MOVED to runFloorServices — it is a floor service and
       // must not depend on Phase A running. See the note there.
-      // CX recording archive - pulls the previous :45-to-:45 hour of
-      // CX-platform calls from RingCX's interaction-metadata, downloads
-      // the WAV per segment, and hands off to the existing archive ->
-      // transcription -> scoring pipeline. Gated by
-      // RINGCX_RECORDING_ENABLED (default false until RC activates
-      // recording on the account). Bottom-of-window is exactly 15
-      // minutes before this tick fires, which matches RingCX's stated
-      // post-call media-readiness threshold. Idempotent: rows already
-      // at terminal recordingArchive.status are skipped.
-      cxRecordingHourly: cxRecordingHourlyEnabled
-        ? await runCxRecordingHourly({
-            fireTime: new Date(),
-            logger,
-          }).catch((error) => ({
-            ok: false,
-            error: error.message,
-          }))
-        : { skipped: true, reason: "business-hours-lite" },
+      // cxRecordingHourly DELETED 2026-08-06 with its worker. The cx lane it
+      // read stopped producing on 2026-07-16, so the pull could only ever
+      // return no-eligible-rows.
+      //
+      // This entry was NOT dead code. POST /api/hygiene/hourly-sweep/run
+      // defaults scheduledPhase TRUE and never passes cxRecordingHourlyEnabled,
+      // so the param fell to its `= true` default and an admin hitting that
+      // route ran the RingCX pull today. Removing the entry and the param
+      // together is what closes that, per the two-step handover rule.
       leadCadenceEnforcement: leadCadenceEnforcementEnabled
         ? await runLeadCadenceEnforcement({
             logger,

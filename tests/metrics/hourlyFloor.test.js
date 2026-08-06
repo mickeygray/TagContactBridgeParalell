@@ -189,7 +189,6 @@ test("the floor still runs when Phase A DOES run — no double-call, no gap", as
     callLogHygieneEnabled: false,
     cxCallActivityBackfillEnabled: false,
     cxTerminalRectificationEnabled: false,
-    cxRecordingHourlyEnabled: false,
     leadCadenceEnforcementEnabled: false,
     staleCadenceSweepEnabled: false,
     staleNcoaSweepEnabled: false,
