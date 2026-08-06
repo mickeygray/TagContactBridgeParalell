@@ -6,6 +6,15 @@ Status: OPEN. Sections run in dependency order, not theme order.
 ```
 ⟳ BUILD STATUS — read this first after any compaction or re-entry
 ────────────────────────────────────────────────────────────────────
+2026-08-06 (10): E11 - RUNBOOK WRITTEN, NOTHING ARMED, and it
+cannot be: the code has never shipped, so there has been no dark cycle
+to observe, and three hard blockers survive. Arming is also a live
+action on a host this box does not govern. See
+.ai/context/EVENING_PASS_ARMING_RUNBOOK_2026-08-06.md for the order
+(payment-reconcile is the only stage ready), what to watch, the stop
+conditions, and what "resolved" means for each blocker.
+Next action: E12 (the side-by-side - the point of the patch).
+
 2026-08-06 (9): E10 IS DONE - cx recording worker DELETED, service
 KEPT for the admin route and backfill scripts. 754 pass.
 CORRECTION TO (7) AND (8): I wrote that cx.call.placed had NEVER
@@ -773,8 +782,43 @@ absence, matched against CODE not prose (the tombstone comment names the deleted
 function on purpose). 754 metrics tests pass; the four server.js-loading suites
 pass; the kept service, metrics route, server and sweeper all still load.
 
-**E11. Arm E7-E10 one at a time**, each after its own observed dark cycle.
-Never the group.
+**E11. Arm E7-E10 one at a time** - **RUNBOOK WRITTEN, NOTHING ARMED.**
+See `.ai/context/EVENING_PASS_ARMING_RUNBOOK_2026-08-06.md`.
+
+E11 cannot execute today and the reason is structural, not a judgement call:
+
+1. **There has been no dark cycle to observe, because the code has never
+   shipped.** This branch extends cleaned-metrics, which has never been
+   deployed. E11's own precondition is unmet.
+2. **Three hard blockers survive** the E7/E8 reviews. Two of them corrupt data
+   or stall the night when armed, and neither is fixable from the task - both
+   need a change inside the underlying service.
+3. **Arming is a live action on client money records and external API spend,
+   on a host this box does not govern.** Setting a flag in this working copy
+   proves nothing: NCOA ran in production on a day this box had
+   `NCOA_MAILBOX_ENABLED=false`. Which host runs nightlyHygieneRuntime is still
+   unverified.
+
+All four new flags are UNSET here and stay that way. The runbook carries: the
+prerequisites (deploy BETWEEN nights - the cursor is a positional index and
+E7/E8 both inserted mid-array), how to read the dark pass per task, the arming
+ORDER with the reasoning, what to watch and what should stop you, the rollback,
+and each blocker with a concrete definition of "resolved".
+
+Order, shortest form - **one per night, never two**:
+
+| stage | flag | state |
+|---|---|---|
+| 1 | `NIGHTLY_PAYMENT_RECONCILE_ENABLED` | **ready** - bounded, no open blocker, retry handler has a claimer |
+| 2 | `NIGHTLY_CALL_LOG_HYGIENE_ENABLED` | blocked on the wall-clock question (B) - highest value, most likely to blow the 45-min lease |
+| 3 | `NIGHTLY_SESSION_RECONCILE_ENABLED` | pointless until the cx telephony-session writer is fixed; unsafe until the 429 back-off is reachable (C) |
+| 4 | `NIGHTLY_PAYMENT_FIELDS_SYNC_ENABLED` | **hard blocked** (A) - it stamps reconcile's checkpoint on cases it never pulled |
+
+The single most informative line in the first dark pass is
+`call-log-hygiene-evening`'s summary. Its call count is a live measurement, and
+a NON-ZERO count is the proof that the widened window sees PhoneBurner where 65
+minutes saw nothing. If it reads `0 call(s)`, E8's premise did not hold on the
+live host and Stage 2 should not proceed.
 
 **E12. The side-by-side *(large — the point of the patch)***
 1. New packages/shared-services/src/dailyRecordRenderService.js:
