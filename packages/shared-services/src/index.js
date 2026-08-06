@@ -820,6 +820,7 @@ const { createAiProviders, createAnthropicAdapter, createOpenAiAdapter, REASONIN
 const { createAiPrimitives, toCall } = require("./aiPrimitives");
 const { createAiTaskClient } = require("./aiTaskClient");
 const aiTaskRegistry = require("./aiTaskRegistry");
+const jiraTaskBridgeService = require("./jiraTaskBridgeService");
 const leadDeliveryService = require("./leadDeliveryService");
 const dailyDialLedgerService = require("./dailyDialLedgerService");
 const trainingCourseService = require("./trainingCourseService");
@@ -834,6 +835,7 @@ const trainingProspectDialogueService = require("./trainingProspectDialogueServi
 const trainingDispositionReviewService = require("./trainingDispositionReviewService");
 
 module.exports = {
+  jiraTaskBridgeService,
   leadDeliveryService,
   dailyDialLedgerService,
   trainingCourseService,
