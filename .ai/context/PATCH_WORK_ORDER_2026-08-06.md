@@ -6,6 +6,43 @@ Status: OPEN. Sections run in dependency order, not theme order.
 ```
 ⟳ BUILD STATUS — read this first after any compaction or re-entry
 ────────────────────────────────────────────────────────────────────
+2026-08-06 (12): CODE COMPLETE for the buildable set. E13 + the
+whole morning and midday pass, all DARK. 850 tests pass.
+SHIPPED THIS ROUND:
+  * E13/D7 - completeness is COMPUTED ON READ (isFactComplete). A day
+    stamped complete under an older required-section list now reads
+    incomplete, which re-gathers rather than serving a report that
+    silently lacks a section.
+  * M4 - counterCadenceService gains `channels`; the sweep STOPPED
+    hardcoding includeAgeRelative/includeDaily. That hardcode meant the
+    work order's own M4.2 and M4.3 edits were silent no-ops: they would
+    have compiled, read correctly, and changed nothing.
+  * M2 - the two hour-gates gain `requireHour` instead of being loosened
+    globally. The aged gate has NO day check to keep, so "drop the hour
+    equality" there would have DELETED it and re-run the aged ladder
+    every hour, emailing the report each time.
+  * M1/MD1 - passRuntimeFactory + morningPassRuntime + middayPassRuntime,
+    wired into server.js, default off. DailyLoopRun gains a `passes`
+    Mixed cursor so a new pass cannot be silently dropped by strict mode.
+  * MD2/MD3 - midday rvm cadence and the midday hygiene half.
+NOT DONE, DELIBERATELY:
+  * M3's hoist deletion. Deleting it while morning is dark creates a GAP,
+    not a double-run: a dark runtime never makes a timer, and
+    callrailStatSync + agedRollingRefresh are LIVE today. The hoist is
+    deleted in the same commit that ARMS the morning floor task. A test
+    pins that it still exists.
+  * X1 (retire hourly) - same reason, one level up. It is gated on the
+    passes being armed.
+  * Any flag flip. Nothing here is armed.
+FOUND WHILE BUILDING: the morning pass at 08:00 and the midday pass at
+12:00 are BOTH outside the cadence daily window (09:00-11:59 PT), so
+both must pass forceDaily or they would select nothing every day and
+report a confident zero. And forceDaily bypasses the WINDOW only - the
+per-channel lastDailyBatchKey is what actually makes the sms/email vs
+rvm split safe.
+Next: the audit, then close the gaps (OMIT_KEYS for E12, the E7/E8
+arming blockers, M3's handover-at-arming).
+
 2026-08-06 (11): E12 - BUILT, NOT FLIPPED. Renderer, schema field,
 runtime branch and comparison script are in; pointing a definition at
 the record is deliberately not done (it is a live email change on a

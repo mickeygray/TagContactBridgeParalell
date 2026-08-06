@@ -214,8 +214,23 @@ test("range reads return ordered daily inputs and refuse to hide missing or pend
     find: () => ({
       sort: () => ({
         lean: async () => [
-          { dateKey: "2026-08-01", coverage: { complete: true, callProjection: "complete" } },
-          { dateKey: "2026-08-03", coverage: { complete: false, callProjection: "pending" } },
+          // capturedSections is what completeness is COMPUTED from now (E13).
+          // A stub carrying only `complete: true` is a day with no evidence
+          // behind the claim, and it correctly reads incomplete.
+          {
+            dateKey: "2026-08-01",
+            coverage: {
+              complete: true, callProjection: "complete",
+              capturedSections: [...service.REQUIRED_SECTIONS], sectionErrors: [],
+            },
+          },
+          {
+            dateKey: "2026-08-03",
+            coverage: {
+              complete: false, callProjection: "pending",
+              capturedSections: [...service.REQUIRED_SECTIONS], sectionErrors: [],
+            },
+          },
         ],
       }),
     }),
@@ -441,4 +456,60 @@ test("the snapshot writer default can persist what the snapshot built", async ()
   assert.equal(result.status, "written",
     `the default writer must persist, not rebuild — got ${result.status}: ${result.reason || ""}`);
   assert.equal(writes.length, 1);
+});
+
+// ── E13 / D7: completeness is COMPUTED ON READ ─────────────────────────────
+
+test("a day stamped complete under an OLDER required-section list reads incomplete", () => {
+  // This is the whole point of computing it. REQUIRED_SECTIONS is derived from
+  // the rollup preset; the day that preset gains a section, every document
+  // written before it still carries `complete: true` and is now lying. The
+  // computed answer moves with the definition, and it moves toward re-gathering
+  // rather than toward serving a report that silently lacks a section.
+  const stale = {
+    dateKey: "2026-07-31",
+    coverage: {
+      complete: true,
+      callProjection: "complete",
+      capturedSections: ["topline", "source"], // an older, shorter list
+      sectionErrors: [],
+    },
+  };
+  assert.equal(stale.coverage.complete, true, "the STORED flag still says complete");
+  assert.equal(service.isFactComplete(stale), false, "the COMPUTED answer does not");
+});
+
+test("a day whose sections are all present and clean is complete", () => {
+  assert.equal(service.isFactComplete({
+    coverage: {
+      complete: false, // even if the stored flag disagrees
+      callProjection: "complete",
+      capturedSections: [...service.REQUIRED_SECTIONS],
+      sectionErrors: [],
+    },
+  }), true);
+});
+
+test("a section error anywhere makes the day incomplete, whatever was stored", () => {
+  assert.equal(service.isFactComplete({
+    coverage: {
+      complete: true, callProjection: "complete",
+      capturedSections: [...service.REQUIRED_SECTIONS],
+      sectionErrors: ["source:logics timed out"],
+    },
+  }), false);
+});
+
+test("calls still pending keeps the day incomplete", () => {
+  assert.equal(service.isFactComplete({
+    coverage: {
+      complete: true, callProjection: "pending",
+      capturedSections: [...service.REQUIRED_SECTIONS], sectionErrors: [],
+    },
+  }), false);
+});
+
+test("no fact at all is not complete", () => {
+  assert.equal(service.isFactComplete(null), false);
+  assert.equal(service.isFactComplete({}), false);
 });

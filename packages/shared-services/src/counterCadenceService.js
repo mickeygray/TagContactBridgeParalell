@@ -242,12 +242,35 @@ function baseDueItem(lead, channel, nextIndex, reason, now) {
   };
 }
 
+// CHANNELS SPLIT ACROSS PASSES.
+//
+// Mickey 2026-08-06: "all the texts and emails at 8 and all the rvms at noon
+// kinda thing." So a caller must be able to ask for a subset of the chain
+// without the others firing.
+//
+// `channels: null` is today's behaviour EXACTLY — every existing caller passes
+// nothing and every existing caller keeps its full three-channel sweep. The
+// filter is applied at the push, not at the candidate query, so the per-channel
+// counters, per-channel locks and per-channel daily keys all keep their meaning.
+const normalizeChannelFilter = (channels) => {
+  if (channels == null) return null;
+  const set = new Set(
+    (Array.isArray(channels) ? channels : [channels])
+      .map((c) => String(c || "").trim().toLowerCase())
+      .filter(Boolean),
+  );
+  return set.size ? set : null;
+};
+
 function evaluateCounterCadenceDueItems(lead = {}, {
   now = new Date(),
   includeAgeRelative = true,
   includeDaily = true,
   forceDaily = false,
+  channels = null,
 } = {}) {
+  const channelFilter = normalizeChannelFilter(channels);
+  const channelAllowed = (channel) => !channelFilter || channelFilter.has(channel);
   const counters = getCounterCadenceCounters(lead);
   const lastTouched = getCounterCadenceLastTouched(lead);
   const receivedAt = getReceiptDate(lead, now);
@@ -258,6 +281,7 @@ function evaluateCounterCadenceDueItems(lead = {}, {
 
   if (
     includeAgeRelative &&
+    channelAllowed("sms") &&
     counters.sms === 1 &&
     hasChannelContactPoint(lead, "sms") &&
     validationAllowsChannel(lead, "sms") &&
@@ -272,6 +296,7 @@ function evaluateCounterCadenceDueItems(lead = {}, {
   if (!dailyAllowed) return due.filter((item) => item.templateKey);
 
   for (const channel of ["sms", "email", "rvm"]) {
+    if (!channelAllowed(channel)) continue;
     if (!hasChannelContactPoint(lead, channel)) continue;
     if (!validationAllowsChannel(lead, channel)) continue;
     if (isChannelBlocked(lead, channel)) continue;
@@ -532,6 +557,7 @@ async function selectCounterCadenceDueItems({
   includeAgeRelative = true,
   includeDaily = true,
   forceDaily = false,
+  channels = null,
   scanLimit = DEFAULT_SCAN_LIMIT,
   limit = 100,
 } = {}) {
@@ -549,6 +575,7 @@ async function selectCounterCadenceDueItems({
         includeAgeRelative,
         includeDaily,
         forceDaily,
+        channels,
       });
       for (const item of items) {
         due.push(item);
@@ -567,6 +594,16 @@ async function runCounterCadenceSweep({
   scanLimit = DEFAULT_SCAN_LIMIT,
   dryRun = false,
   forceDaily = false,
+  // THESE TWO USED TO BE HARDCODED `true` INSIDE THIS FUNCTION.
+  //
+  // The selector has accepted them for a long time, but the sweep overrode
+  // whatever a caller asked for. So `runCounterCadenceSweep({includeDaily:
+  // false})` compiled, read correctly, changed nothing, and would have passed a
+  // smoke test — the worst shape a flag can have. Defaulting them true here
+  // keeps every existing caller byte-identical while making the option real.
+  includeAgeRelative = true,
+  includeDaily = true,
+  channels = null,
   logger = null,
   sourceService = "outbound-gateway",
 } = {}) {
@@ -574,9 +611,10 @@ async function runCounterCadenceSweep({
     domains,
     domain,
     now,
-    includeAgeRelative: true,
-    includeDaily: true,
+    includeAgeRelative,
+    includeDaily,
     forceDaily,
+    channels,
     scanLimit,
     limit: Math.max(Number(maxDispatches) || 25, 1),
   });
@@ -620,6 +658,15 @@ async function runCounterCadenceSweep({
     ok: true,
     checkedAt: now,
     dailyWindow: isWeekdayBatchTime(now),
+    // What this sweep was ASKED for, so a pass that selected nothing can be told
+    // apart from a pass that was never allowed to look. `dailyWindow` above is
+    // the raw clock and says nothing about forceDaily or a channel filter.
+    asked: {
+      channels: normalizeChannelFilter(channels) ? [...normalizeChannelFilter(channels)] : null,
+      includeAgeRelative: Boolean(includeAgeRelative),
+      includeDaily: Boolean(includeDaily),
+      forceDaily: Boolean(forceDaily),
+    },
     selected: dueItems.length,
     sent: results.filter((entry) => entry.ok && !entry.dryRun).length,
     failed: results.filter((entry) => !entry.ok && !entry.skipped).length,

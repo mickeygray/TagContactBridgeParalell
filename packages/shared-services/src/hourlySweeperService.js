@@ -1283,6 +1283,12 @@ module.exports = {
   DEFAULT_RESOLUTION_LOOKBACK_MS,
   RESOLUTION_NOTE_MARKER,
   drainHourlyJobQueue,
+  // Exported for the morning pass, which registers the same four services as
+  // tasks. The pass calls runFloorServices whole rather than re-implementing
+  // its four members: two of them (runMonthlyFillerPoolRefreshIfDue,
+  // runAgedRollingRefreshIfDue) were module-private, and callrailStatSync is
+  // not a function at all but an inline body with its own day helper. A second
+  // copy of any of that is the drift this repo has already paid for twice.
   runFloorServices,
   runHourlySweep,
   sendResolutionEmails,

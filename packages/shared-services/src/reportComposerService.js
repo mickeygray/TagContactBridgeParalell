@@ -773,7 +773,11 @@ async function gatherMaterial({
         material.queueByAgent = stored.queueByAgent;
         material.queueStreams = stored.queueStreams;
         material.queueCoverage = stored.coverage;
-        if (stored.coverage.complete) {
+        const { isFactComplete } = require("./dailyReportFactService");
+        // Computed, not the stored flag: a day captured under an older
+        // required-section list must not serve as a cache hit for a report
+        // that now needs a section it never had. See isFactComplete.
+        if (isFactComplete(stored)) {
           notes.push(`queue counts from ${stored.coverage.daysStored} stored nightly rollup(s) — RingCentral not called`);
         } else if (stored.coverage.daysStored > 0) {
           // PARTIAL is not COMPLETE. Summing the days that happen to exist and

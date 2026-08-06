@@ -78,6 +78,8 @@ const { createLogicsActivityReviewRuntime } = require("./services/logicsActivity
 const { createNightlyCloseRuntime } = require("./services/nightlyCloseRuntime");
 const { createReportScheduleRuntime } = require("./services/reportScheduleRuntime");
 const { createNightlyHygieneRuntime } = require("./services/nightlyHygieneRuntime");
+const { createMorningPassRuntime } = require("./services/morningPassRuntime");
+const { createMiddayPassRuntime } = require("./services/middayPassRuntime");
 const { createCxNightlyCallGradeRuntime } = require("./services/cxNightlyCallGradeRuntime");
 const { createEodRecordingArchiveRuntime } = require("./services/eodRecordingArchiveRuntime");
 const { createPhoneburnerRotationRuntime } = require("./services/phoneburnerRotationRuntime");
@@ -2288,6 +2290,19 @@ async function startServer() {
     },
     runtime,
   });
+  // THE OTHER TWO PASSES. Both default OFF and both start() into an immediate
+  // return while dark, so constructing them here costs nothing until somebody
+  // sets MORNING_PASS_ENABLED / MIDDAY_PASS_ENABLED. They take their own
+  // durable claims under DailyLoopRun.passes.<key>, so they cannot collide with
+  // each other or with the nightly cursor.
+  const morningPassRuntime = createMorningPassRuntime({
+    config: config.morningPass || {},
+    runtime,
+  });
+  const middayPassRuntime = createMiddayPassRuntime({
+    config: config.middayPass || {},
+    runtime,
+  });
   const nightlyCloseRuntime = createNightlyCloseRuntime({
     config: config.nightlyClose || {},
     runtime,
@@ -2385,6 +2400,8 @@ async function startServer() {
       cxNightlyCallGrade: cxNightlyCallGradeRuntime.getState(),
       reportSchedule: reportScheduleRuntime.getState(),
       nightlyHygiene: nightlyHygieneRuntime.getState(),
+      morningPass: morningPassRuntime.getState(),
+      middayPass: middayPassRuntime.getState(),
       spendSync: spendSyncRuntime.getState(),
       eodRecordingArchive: eodRecordingArchiveRuntime.getState(),
       leadDelivery: {
@@ -3001,6 +3018,8 @@ async function startServer() {
   await cxNightlyCallGradeRuntime.start();
   await reportScheduleRuntime.start();
   await nightlyHygieneRuntime.start();
+  await morningPassRuntime.start();
+  await middayPassRuntime.start();
   await spendSyncRuntime.start();
   await eodRecordingArchiveRuntime.start();
   await phoneburnerRotationRuntime.start();
@@ -3137,6 +3156,12 @@ async function startServer() {
       hourlySweepState.timer = null;
     }
     await waitForHourlySweepIdle();
+  });
+  runtime.registerCleanup("control-plane-morning-pass", async () => {
+    morningPassRuntime.stop();
+  });
+  runtime.registerCleanup("control-plane-midday-pass", async () => {
+    middayPassRuntime.stop();
   });
   runtime.registerCleanup("control-plane-cx-appointments", async () => {
     if (cxAppointmentState.timer) {

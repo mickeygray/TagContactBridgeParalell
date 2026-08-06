@@ -858,7 +858,22 @@ async function runFillerPoolRefresh(options = {}) {
  * @param {Date} now - current time
  * @returns {boolean}
  */
-function isAtMonthlyRefreshBoundary(now = new Date()) {
+/**
+ * Is this the monthly filler-pool refresh moment?
+ *
+ * `requireHour` exists because the hour equality is a SUBSTITUTE for
+ * once-per-day bookkeeping, not a business rule. An hourly caller has no other
+ * way to fire exactly once, so it pins 05:00. A pass runtime already holds a
+ * durable per-day claim, so for that caller the hour is noise — and keeping it
+ * would mean the monthly refresh only ever happens if the pass's clock is set
+ * to exactly 05:00 PT.
+ *
+ * Default TRUE, so every existing caller is byte-identical. Loosening this
+ * globally instead would have let the hourly floor fire the monthly refresh
+ * every hour on the 1st, which is the window between the work order's M2 and
+ * M3 steps.
+ */
+function isAtMonthlyRefreshBoundary(now = new Date(), { requireHour = true } = {}) {
   const fmt = new Intl.DateTimeFormat("en-US", {
     timeZone: "America/Los_Angeles",
     day: "2-digit",
@@ -868,7 +883,8 @@ function isAtMonthlyRefreshBoundary(now = new Date()) {
   const parts = fmt.formatToParts(now);
   const day = parts.find((p) => p.type === "day")?.value;
   const hour = parts.find((p) => p.type === "hour")?.value;
-  return day === "01" && hour === "05";
+  if (day !== "01") return false;
+  return requireHour ? hour === "05" : true;
 }
 
 /**
@@ -905,7 +921,20 @@ async function hasFreshPoolForTag(tag) {
 // excluded.
 // ─────────────────────────────────────────────────────────────────────
 
-function isAtDailyAgedRefreshBoundary(now = new Date()) {
+/**
+ * Is this the daily aged-ladder refresh moment?
+ *
+ * NOTE THE ASYMMETRY WITH THE MONTHLY GATE ABOVE: this one has NO day check to
+ * keep. Its entire body is the hour equality, so "drop the hour equality" here
+ * does not loosen it, it DELETES it — the function would become unconditionally
+ * true and the hourly floor would re-run the aged ladder every hour, sending
+ * the report email each time.
+ *
+ * So requireHour:false is only ever safe for a caller that owns its own
+ * once-per-day guarantee. Default TRUE keeps every existing caller identical.
+ */
+function isAtDailyAgedRefreshBoundary(now = new Date(), { requireHour = true } = {}) {
+  if (!requireHour) return true;
   const fmt = new Intl.DateTimeFormat("en-US", {
     timeZone: "America/Los_Angeles",
     hour: "2-digit",

@@ -66,6 +66,23 @@ const dailyLoopRunSchema = new mongoose.Schema(
     nightlyHygieneNextTaskIndex: { type: Number, default: 0, min: 0 },
     nightlyHygieneCounts: { type: mongoose.Schema.Types.Mixed, default: null },
     nightlyHygieneLastErrorCode: { type: String, default: null },
+
+    // EVERY OTHER PASS'S CURSOR, keyed by pass name.
+    //
+    // The nightly hygiene cursor above is five flat fields. A second and third
+    // pass on that pattern is ten more, and — because this schema is strict, as
+    // the note at the top of this file says — a field somebody forgets to
+    // declare is stripped from the $set in SILENCE. That failure mode has
+    // already cost this repo twice. One Mixed subdocument keyed by pass name
+    // lets a new pass add a cursor without a schema edit it can forget.
+    //
+    // Shape: passes.<passKey> = { claimedAt, completedAt, nextTaskIndex,
+    // counts, lastErrorCode }. Mixed on purpose — this is a cursor, not
+    // reportable data, and nothing queries inside it except its own claim.
+    //
+    // The nightly keeps its flat fields rather than migrating: a live cursor is
+    // the wrong thing to move house while it is holding a claim.
+    passes: { type: mongoose.Schema.Types.Mixed, default: null },
   },
   { timestamps: true },
 );

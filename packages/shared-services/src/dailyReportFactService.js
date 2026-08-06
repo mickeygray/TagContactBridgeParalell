@@ -79,6 +79,32 @@ function sanitizeFactValue(value, depth = 0) {
   return out;
 }
 
+/**
+ * Is this stored day complete? — E13 / decision D7, answered COMPUTE ON READ.
+ *
+ * `coverage.complete` is stored too, and stays stored, because a document
+ * written by an older captureVersion has to keep meaning what it meant. But
+ * every READER goes through here instead of trusting the field, for one
+ * reason: completeness is a function of REQUIRED_SECTIONS, and that list is
+ * derived from the rollup preset. The day the preset gains a section, every
+ * document written before it is still stamped `complete: true` and is now
+ * lying — it is missing a section nobody had heard of when it was written.
+ *
+ * Computing it on read means the answer moves when the definition of complete
+ * moves, which is the only version that stays true. A stored `complete: true`
+ * on a day that no longer satisfies the current required set now reads as
+ * INCOMPLETE, which is the safe direction: it re-gathers rather than serving a
+ * report that silently lacks a section.
+ */
+function isFactComplete(fact) {
+  if (!fact) return false;
+  const captured = new Set(fact.coverage?.capturedSections || []);
+  const errors = (fact.coverage?.sectionErrors || []).length;
+  const core = REQUIRED_SECTIONS.filter((id) => id !== CALL_SECTION);
+  const coreComplete = core.every((id) => captured.has(id)) && errors === 0;
+  return coreComplete && fact.coverage?.callProjection === "complete";
+}
+
 function sectionMap(report) {
   return new Map((report?.sections || []).map((section) => [String(section.id), section]));
 }
@@ -291,7 +317,9 @@ async function readDailyReportFactRange({ from, to } = {}, { Model = DailyReport
   const docs = await Model.find({ dateKey: { $gte: from, $lte: to } }).sort({ dateKey: 1 }).lean();
   const have = new Set(docs.map((doc) => doc.dateKey));
   const missing = wanted.filter((day) => !have.has(day));
-  const incomplete = docs.filter((doc) => !doc.coverage?.complete).map((doc) => doc.dateKey);
+  // COMPUTED, not read off the document — see isFactComplete. A day stamped
+  // complete under an older required-section list is not complete now.
+  const incomplete = docs.filter((doc) => !isFactComplete(doc)).map((doc) => doc.dateKey);
   const callsPending = docs.filter((doc) => doc.coverage?.callProjection === "pending").map((doc) => doc.dateKey);
   return {
     days: docs,
@@ -314,6 +342,7 @@ module.exports = {
   buildDailyReportFact,
   flattenFactUpdate,
   isDailyFactCaptureCandidate,
+  isFactComplete,
   persistBuiltDailyReportFact,
   persistDailyReportFact,
   readDailyReportFactRange,

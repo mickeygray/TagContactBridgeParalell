@@ -318,6 +318,26 @@ async function startOutboundWorker({ config, runtime, workerState }) {
               sourceService: config.serviceName,
               maxDispatches: counterCadenceBatchSize,
               scanLimit: counterCadenceScanLimit,
+              // THE DAILY CHAIN MOVES TO THE PASSES; THIS WORKER KEEPS REAL TIME.
+              //
+              // Mickey 2026-08-06: "the first round of communication still goes
+              // out as the lead comes in." So this 5s worker keeps first-touch
+              // and the age-relative SMS-2 — which is evaluated BEFORE the daily
+              // gate and is therefore unaffected — while the morning and midday
+              // passes own the daily batch.
+              //
+              // This flag was a NO-OP until the sweep stopped hardcoding it:
+              // runCounterCadenceSweep overrode includeDaily to true inside
+              // itself, so passing false here compiled, read correctly, and
+              // changed nothing.
+              //
+              // DARK UNTIL A PASS IS ARMED. Turning the daily chain off here
+              // before the morning pass owns it would simply stop the daily
+              // batch, so it stays on until OUTBOUND_DAILY_CADENCE_TO_PASSES
+              // says a pass has taken it.
+              includeDaily: String(
+                process.env.OUTBOUND_DAILY_CADENCE_TO_PASSES || "false",
+              ).toLowerCase() !== "true",
               logger: runtime.logger,
             });
             workerState.counterCadence.lastResult = counterCadenceResult;
