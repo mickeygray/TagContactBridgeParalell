@@ -209,6 +209,32 @@ function flattenFactUpdate(fact) {
   return set;
 }
 
+/**
+ * Persist a fact that is ALREADY BUILT.
+ *
+ * Split out because the two callers hand over different things and one of them
+ * was silently failing. writeDailySnapshot builds the fact itself — it needs
+ * `coverage.complete` for its own return value — and then handed that fact to
+ * its `writer`, whose default was persistDailyReportFact, whose first line
+ * builds AGAIN. The second build receives a fact, a fact has no `report` key,
+ * and buildDailyReportFact rejects that: "daily fact requires a one-day
+ * report". Every night, caught by writeDailySnapshot's own try, downgraded to
+ * {status:"failed"}, and raised as a high-severity alert.
+ *
+ * It survived because production is the ONLY caller that takes the default
+ * writer — the dry-run script and every test inject their own, so the broken
+ * path was the one path with no coverage.
+ */
+async function persistBuiltDailyReportFact(fact, { Model = DailyReportFact } = {}) {
+  if (!fact || !fact.dateKey) throw new Error("a built daily fact requires a dateKey");
+  await Model.updateOne(
+    { dateKey: fact.dateKey },
+    { $set: flattenFactUpdate(fact), $inc: { revision: 1 } },
+    { upsert: true },
+  );
+  return { status: "captured", dateKey: fact.dateKey };
+}
+
 async function persistDailyReportFact(input, { Model = DailyReportFact } = {}) {
   const fact = buildDailyReportFact(input);
   await Model.updateOne(
@@ -288,6 +314,7 @@ module.exports = {
   buildDailyReportFact,
   flattenFactUpdate,
   isDailyFactCaptureCandidate,
+  persistBuiltDailyReportFact,
   persistDailyReportFact,
   readDailyReportFactRange,
   sanitizeFactValue,

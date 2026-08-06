@@ -371,3 +371,68 @@ test("real call facts ARE written when this path is given them", async () => {
   assert.deepEqual(write[1].$set["facts.calls"], { links: 12, significant: 3 });
   assert.equal(write[1].$set["coverage"].callProjection, "complete");
 });
+
+// ── THE DEFAULT WRITER REBUILT AN ALREADY-BUILT FACT ───────────────────────
+//
+// writeDailySnapshot builds a fact and hands it to `writer`. The default writer
+// was persistDailyReportFact, whose first line builds AGAIN — and the second
+// build gets a fact, which has no `report` key, so it threw
+// "daily fact requires a one-day report" every single night.
+//
+// Nothing caught it because every existing exercise injects a writer: the
+// dry-run script and the tests. Production is the only caller that takes the
+// default, and production is the one path with no coverage.
+
+test("persisting an already-built fact does not rebuild it", async () => {
+  const {
+    buildDailyReportFact, persistBuiltDailyReportFact,
+  } = require("../../packages/shared-services/src/dailyReportFactService");
+
+  const report = {
+    from: "2026-08-05", to: "2026-08-05", domain: "ALL",
+    selection: ["topline"],
+    sections: [{ id: "topline", label: "Top line", data: { cash: 1200, deals: 3 } }],
+    failures: [], advisories: [], notes: [], spend: null,
+  };
+  const fact = buildDailyReportFact({
+    dateKey: "2026-08-05", definitionName: "financial roll up with calls",
+    report, emailAcceptedAt: null,
+  });
+  assert.equal("report" in fact, false, "a built fact carries no report — that is the trap");
+
+  const seen = [];
+  const Model = { updateOne: async (...a) => { seen.push(a); return { acknowledged: true }; } };
+  const out = await persistBuiltDailyReportFact(fact, { Model });
+  assert.equal(out.status, "captured");
+  assert.equal(seen.length, 1, "one write");
+  assert.deepEqual(seen[0][0], { dateKey: "2026-08-05" }, "keyed on the day");
+});
+
+test("the snapshot writer default can persist what the snapshot built", async () => {
+  // The end-to-end shape of the production call: writeDailySnapshot with NO
+  // writer injected. Before the fix this returned {status:"failed"} and raised
+  // a high-severity alert every night.
+  const { writeDailySnapshot } = require("../../packages/shared-services/src/dailySnapshotService");
+  const {
+    REQUIRED_SECTIONS, CANONICAL_DEFINITION_NAME,
+  } = require("../../packages/shared-services/src/dailyReportFactService");
+
+  const sections = REQUIRED_SECTIONS.map((id) => ({ id, label: id, data: {} }));
+  const report = {
+    from: "2026-08-05", to: "2026-08-05", domain: "ALL",
+    selection: REQUIRED_SECTIONS.slice(), sections,
+    failures: [], advisories: [], notes: [], spend: null,
+  };
+
+  const writes = [];
+  const result = await writeDailySnapshot({
+    def: { name: CANONICAL_DEFINITION_NAME, domain: null, sendEmail: true, filters: [] },
+    range: { from: "2026-08-05", to: "2026-08-05" },
+    report,
+    emailAcceptedAt: null,
+    Model: { updateOne: async (...a) => { writes.push(a); return { acknowledged: true }; } },
+  });
+  assert.equal(result.status, "written",
+    `the default writer must persist, not rebuild — got ${result.status}: ${result.reason || ""}`);
+  assert.equal(writes.length, 1);
+});

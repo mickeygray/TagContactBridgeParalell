@@ -28,7 +28,7 @@ const { composeReport } = require("./reportComposerService");
 const {
   buildDailyReportFact,
   isDailyFactCaptureCandidate,
-  persistDailyReportFact,
+  persistBuiltDailyReportFact,
   CANONICAL_DEFINITION_NAME,
   REQUIRED_SECTIONS,
 } = require("./dailyReportFactService");
@@ -41,6 +41,12 @@ const {
  * @param {Date}     [emailAcceptedAt] when the mail provider accepted, if it did
  * @param {Function} [compose]        injectable for tests
  * @param {Function} [writer]         injectable persistence
+ * @param {Object}   [Model]          injectable model, threaded to the DEFAULT
+ *                                    writer. Without this the default path is
+ *                                    untestable without touching live Mongo —
+ *                                    which is exactly how its rebuild bug
+ *                                    survived: every caller that could reach it
+ *                                    in a test injected `writer` and skipped it.
  * @returns {{status:string, reason?:string, dateKey?:string, revision?:number}}
  */
 async function writeDailySnapshot({
@@ -49,7 +55,10 @@ async function writeDailySnapshot({
   report: suppliedReport = null,
   emailAcceptedAt = new Date(),
   compose = composeReport,
-  writer = persistDailyReportFact,
+  // persistBUILT, not persistDailyReportFact: this function already built the
+  // fact above and the rebuild throws. See the note on persistBuiltDailyReportFact.
+  writer = persistBuiltDailyReportFact,
+  Model = null,
   logger = null,
 } = {}) {
   if (!def || !range?.from) return { status: "skipped", reason: "no-definition-or-range" };
@@ -115,7 +124,7 @@ async function writeDailySnapshot({
       report,
       emailAcceptedAt,
     });
-    const saved = await writer(fact);
+    const saved = await writer(fact, Model ? { Model } : undefined);
     logger?.info?.("daily_snapshot.written", {
       dateKey: range.from, revision: saved?.revision ?? null, complete: fact.coverage?.complete,
     });
