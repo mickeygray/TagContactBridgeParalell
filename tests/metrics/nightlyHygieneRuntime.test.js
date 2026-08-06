@@ -399,7 +399,7 @@ test("the night runs in the stated ORDER", () => {
     ["night-persist", "mail-invoice", "mail-spend-derive", "call-links", "call-recovery-discovery",
       "call-recovery-eligibility-hygiene", "queue-rollup", "logics-source", "spend-sync",
       "activity-review", "session-reconcile", "payment-reconcile", "payment-fields-sync",
-      "call-recording-index"]);
+      "call-log-hygiene-evening", "call-recording-index"]);
   assert.ok(!s2.tasks.some((t) => t.key === "daily-snapshot"),
     "the snapshot is NOT a hygiene task — it branches off the report's own single gather");
 

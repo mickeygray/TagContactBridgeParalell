@@ -6,6 +6,20 @@ Status: OPEN. Sections run in dependency order, not theme order.
 ```
 ⟳ BUILD STATUS — read this first after any compaction or re-entry
 ────────────────────────────────────────────────────────────────────
+2026-08-06 (8): E8 IS DONE - call-log-hygiene-evening landed dark
+before call-recording-index, with a DST-safe pacificMsSinceToday. 17
+tests, 754 pass. The window turned out to BE the step: PhoneBurner
+rows are created ~5.4h after callStartTime, so the 65-minute default
+could never see the only live feed (0 rows in 65 min vs 947 in 24h).
+Three of four inputs are dead; CallLog platform ex stopped
+2026-08-03T14:04Z, the same hour attribution-reconcile last ran -
+consistent with Phase A stopping on the live host, not two provider
+faults. Five arming blockers in the E8 entry; the critical one is that
+MD2 MUST NOT SHIP until replay is safe (an overlapping window can
+rewrite a resolved CallLog row to pending-retry with a null source).
+Next action: E10 (cxRecordingHourly) - note D10 is already answered,
+cx.call.placed has never been emitted.
+
 2026-08-06 (7): E7 IS DONE — the reconciliation trio landed dark
 between activity-review and call-recording-index (NOT before
 night-persist; the produce/consume edge the order assumed does not
@@ -527,15 +541,105 @@ verified failing with the whitelist entry removed.
 **VERIFY-LIVE (open):** one dark cycle — confirm the three dry-run rows appear
 with sane summaries and that session-reconcile prints the DEAD banner.
 
-**E8. Call log hygiene, EVENING half *(medium)*** — new task, DARK:
-`sinceMs` = ms since 12:00 PT today (compute from persistTargetDay's zone
-helpers; DEFAULT_SINCE_MS at hourlyCallLogHygieneService.js:917 stays
-untouched for other callers). Include nativeSweep. The MIDDAY half is MD2;
-the hourly trigger (Phase A `callLogHygiene`) is deleted by X1. Overlap with
-MD2's window is deliberate — upsertCallLog dedupes on sessionId (:1057).
-**TEST:** task passes its sinceMs through (injected service spy); window
-helper unit-tested against a fixed clock (12:00 PT boundary, DST-safe via
-the Intl pattern already in the sweeper :1123-1128).
+**E8. Call log hygiene, EVENING half *(medium)*** - **DONE**, 17 tests.
+Task `call-log-hygiene-evening` behind `NIGHTLY_CALL_LOG_HYGIENE_ENABLED`,
+placed before call-recording-index. New DST-safe helper `pacificMsSinceToday`.
+
+**THE WINDOW IS THE SUBSTANCE, not a scheduling detail.** The service filters on
+`callStartTime` with a 65-minute default, and the only feed still producing -
+PhoneBurner, ~2,245 rows/day - is projected off a CLOSED DailyDial date, so its
+rows are created an average of **5.4h** after the call started (min 0.7h, tail
+32.9h). A 65-minute `callStartTime` window can therefore *never* see them.
+Measured 2026-08-06: outbound preview finds **0 rows in 65 minutes, 947 in 24
+hours**. Widening to a half-day is what makes the live feed visible at all.
+
+**Three of the four inputs are dead** (probed 2026-08-06):
+
+| input | newest | note |
+|---|---|---|
+| `rb_contactactivities` | 2026-05-04 | legacy ringBridge writer gone; also OFF by env, so the mirror to ledger-sync to promotion to case-refresh to metrics-date chain is a **structural no-op** |
+| CallLog platform cx | 2026-07-17 | 20 days |
+| CallLog platform ex | **2026-08-03T14:04Z** | self-inflicted - ex rows are written BY this service's own native sweep |
+| CallLog platform phoneburner | today | the only live feed, 2,245/day |
+
+That ex date is the **same hour** attribution-reconcile last ran (2026-08-03
+14:00Z, see E7). Both are Phase A jobs, which is consistent with the live host
+having stopped running Phase A entirely at that point - not with two independent
+provider faults. Arming this task is what restarts the native sweep.
+
+**Scope corrections**
+
+1. **`DEFAULT_SINCE_MS` is at :45, not :917** (:918 is the use-site), and it is
+   module-private with every real caller passing `sinceMs` explicitly - so
+   "stays untouched for other callers" is true but nearly vacuous.
+2. **The cited Intl pattern at hourlySweeperService:1123-1128 does not exist** -
+   those lines are the payment-reconcile argument block. The right primitive was
+   already in this file: `pacificHourMinute` (:250). `pacificMsSinceToday` is
+   built on it.
+3. **`plan()` must not call the service.** It has no dryRun of any kind, and its
+   read path upserts CallLog, syncs the ledger, promotes case profiles, queues
+   archives and bills Whisper and Claude. plan() runs nightly armed or not, so a
+   dark task would write to five providers every night and an armed one would
+   pay the whole burst twice. plan() counts the window instead.
+4. **A wider window is NOT wider coverage.** callLogRepository:386 clamps the
+   preview query to 500 rows **newest-first**, and that clamp is not raisable
+   from the task. Measured WYNN outbound afternoons: 1,015 rows/day average,
+   1,521 max - so ~515/day are never previewed, and because of the sort the
+   dropped rows are the OLDEST, i.e. exactly the ones nearest the midday seam.
+   The task now reports the remainder rather than letting it vanish.
+5. **`now` is passed explicitly.** Left unset the service derives it inside its
+   per-domain body, so domain N's window starts N domains' runtime later than
+   domain 0's - and a wall-clock-anchored sinceMs has none of the 5 minutes of
+   slack the 65-minute default carried against an hourly cadence.
+6. **`totals.ledgerSynced` does not exist.** The service accumulates it per
+   domain and never rolls it up, which is why Phase A's summarizer has always
+   printed `ledgerSynced: 0`. The task sums it from the per-domain summaries.
+
+**ARMING BLOCKERS**
+
+- **MD2 MUST NOT SHIP UNTIL REPLAY IS SAFE (critical).** The order's premise
+  that overlap is harmless because "upsertCallLog dedupes on sessionId" is
+  wrong twice over: the dedupe key is compound `{domain, telephonySessionId}`,
+  and that line only runs inside the legacy-mirror loop, which is empty. Real
+  replay defects: (a) `emitMissingSourceAlert` passes a `dedupeKey` into
+  `createReviewQueueItem`, but ReviewQueueItem has **no dedupeKey field and no
+  unique index**, so mongoose strict mode silently drops it and every replay
+  inserts another "Missing source attribution" row - which the deep-cut and
+  frontend reads count; (b) `persistCallLog` `$set`s strategy/confidence/status
+  every pass and the prior-CallLog lookup does not exclude the row's own record,
+  so a call stamped `callrail` at midday returns as `prior-calllog` in the
+  evening, and **a pass that fails to match rewrites a resolved row to
+  `status: "pending-retry"` with a null sourceCanonicalId**. E8 alone has no
+  overlap partner, so this is latent - MD2 is where it bites.
+- **The preview lane's output is DISCARDED (high).** `operationsBySession` is
+  read in exactly one place: inside the empty legacy-mirror loop. Both preview
+  calls still pay full external cost - up to 500 rows x 3 candidate domains of
+  serial CallRail GETs plus up to 3 serial Logics `findCaseByPhone` per
+  unmatched row, and 100% of measured WYNN afternoon rows fall through. Decide
+  whether to wire it to patch CallLog directly or stop calling it, before
+  arming. `limitPerDomain` is deliberately left at 200: raising it buys cost,
+  not coverage.
+- **Wall clock vs the 45-minute lease (high).** Nothing wraps `task.plan()` or
+  `task.apply()` in a timeout, and the lease is only consulted at claim time. A
+  full pass at measured volumes is plausibly 10-50 min. Exceeding the lease
+  makes `advanceNightlyHygiene` stop matching, throws `cursorLost()` and
+  **abandons every remaining task for the night**; an ordinary failure re-runs
+  the same task from the top up to `MAX_TASK_ATTEMPTS`, i.e. three full bursts.
+- **CallRail ignores the window entirely (medium).** The lookup passes
+  `dateRange: "this_month"`, so on the 1st its window is hours and on the 31st a
+  month. A caller-supplied window is a lie for that sub-job.
+- **X1 does not remove every trigger.** Two live admin routes call this service:
+  `POST /api/hygiene/hourly-call-log/run`, and `POST /hygiene/hourly-sweep/run`
+  whose `scheduledPhase` **defaults TRUE**. X1 removes the worker, not the
+  routes - the same class of surviving second trigger E9 found.
+
+**TEST:** 17 in tests/metrics/callLogHygieneEvening.test.js, incl. both DST
+transitions. Both are at 02:00 local, so a NOON anchor never straddles one and
+the helper is exact on both days - an earlier anchor would not be, and the tests
+pin that so moving the anchor cannot silently break it. 754 pass.
+**VERIFY-LIVE (open):** one dark cycle - the dry-run row should show a ~8h
+window and a non-zero call count, which is itself the proof that the widened
+window sees PhoneBurner where 65 minutes did not.
 
 **E9. NCOA handover *(small, ONE commit)*** — **DONE**, 7 tests.
 Shipped as scoped, plus three things the scope missed:

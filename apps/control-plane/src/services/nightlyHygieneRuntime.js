@@ -155,6 +155,23 @@ const nightlyPaymentFieldsSyncMaxCases = () => Math.max(
   1, Number(process.env.NIGHTLY_PAYMENT_FIELDS_SYNC_MAX_CASES) || 500,
 );
 
+// ── CALL LOG HYGIENE, EVENING HALF ─────────────────────────────────────────
+//
+// Noon Pacific, so the evening pass covers 12:00 → now and the midday pass
+// (MD2, not built yet) covers the previous evening → midday.
+const HYGIENE_EVENING_ANCHOR_HOUR = 12;
+
+// The service's preview lane asks for `limitPerDomain` rows per direction and
+// the REPOSITORY then clamps to 500 (callLogRepository:386), newest-first. That
+// clamp is not raisable from here — MAX_LIMIT_PER_DOMAIN of 20,000 in the
+// service is an invitation to a widening that changes the preview by nothing.
+// Kept at the service's own 200 default deliberately: the preview's operations
+// are consumed only inside the legacy-mirror loop, which is empty (see the task
+// comment), so every row it previews costs external lookups for a result that
+// is discarded. Raising it buys cost, not coverage.
+const HYGIENE_EVENING_LIMIT_PER_DOMAIN = 200;
+const HYGIENE_PREVIEW_ROW_CLAMP = 500;
+
 async function claimNightlyHygiene(dateKey, at = new Date()) {
   const leaseCutoff = new Date(at.getTime() - HYGIENE_CLAIM_LEASE_MS);
   try {
@@ -253,6 +270,39 @@ function pacificHourMinute(at = new Date()) {
   }).formatToParts(at);
   const get = (t) => Number(parts.find((x) => x.type === t)?.value);
   return { hour: get("hour") % 24, minute: get("minute") };
+}
+
+/**
+ * Milliseconds elapsed since a Pacific WALL-CLOCK time today.
+ *
+ * The call-log hygiene service takes no from/to — only `sinceMs` — so a window
+ * anchored to "noon Pacific" has to be expressed as a duration. Doing that by
+ * arithmetic on a UTC offset breaks twice a year; this reads the Pacific hour
+ * and minute through Intl and subtracts, which is correct across both
+ * transitions because the offset never enters the calculation.
+ *
+ * For a NOON anchor it is exactly right on both DST days, and the reason is
+ * worth writing down rather than rediscovering: both US transitions happen at
+ * 02:00 local, so a window that starts at noon never straddles one — the anchor
+ * and `now` are always in the same offset. Verified against 2026-03-08 and
+ * 2026-11-01; the tests pin both.
+ *
+ * An anchor EARLIER than 02:00 would straddle, and there the wall-clock delta
+ * and the true elapsed time diverge by an hour. Nothing needs that today; if
+ * something ever does, this helper is not enough for it.
+ *
+ * Never returns less than a minute, so a run at exactly the anchor still asks
+ * the service for a legal window rather than zero.
+ */
+function pacificMsSinceToday(hour, minute = 0, at = new Date()) {
+  const nowPt = pacificHourMinute(at);
+  const elapsedMin = (nowPt.hour * 60 + nowPt.minute) - (hour * 60 + minute);
+  // Before the anchor (an early re-run, or a forced pass), the anchor has not
+  // happened yet today. Fall back to the same anchor YESTERDAY rather than
+  // returning a negative window — a task that asks for a negative duration gets
+  // the service's 5-minute floor and silently examines almost nothing.
+  const minutes = elapsedMin >= 0 ? elapsedMin : elapsedMin + 24 * 60;
+  return Math.max(minutes, 1) * 60 * 1000;
 }
 
 function isPacificBusinessDay(at = new Date()) {
@@ -1446,6 +1496,159 @@ const TASKS = [
     },
   },
   {
+    // CALL LOG HYGIENE, EVENING HALF — 12:00 PT to now.
+    //
+    // Mickey 2026-08-06: "call log hygiene could be the thing thats split
+    // between 1 and 7." This is the 7 o'clock half; MD2 is the midday half.
+    //
+    // THE WINDOW IS THE WHOLE POINT, not a scheduling detail. The service
+    // filters on `callStartTime` with a 65-minute default, and the only feed
+    // still producing — PhoneBurner, ~2,245 rows/day — is projected off a
+    // CLOSED DailyDial date, so its rows are created an average of 5.4 hours
+    // after the call started. A 65-minute callStartTime window can therefore
+    // never see them: measured 2026-08-06, the outbound preview lane finds 0
+    // rows in 65 minutes and 947 in 24 hours. Widening to a half-day is what
+    // makes the live feed visible at all.
+    //
+    // WHAT THE PASS WILL AND WILL NOT SEE. Three of the four inputs are dead:
+    // rb_contactactivities last wrote 2026-05-04 (and legacy mirroring is off
+    // by env anyway, so the mirror → ledger-sync → promotion → case-refresh →
+    // metrics-date chain is a structural no-op), CallLog platform "cx" last
+    // wrote 2026-07-17, and platform "ex" last wrote 2026-08-03T14:04Z. That
+    // last one is self-inflicted: "ex" rows are written BY this service's own
+    // native sweep, so it stopped when Phase A went dark. Arming this task is
+    // what restarts it.
+    key: "call-log-hygiene-evening",
+    label: "Call log hygiene — afternoon half (noon PT onward)",
+    writesArmed: () => String(process.env.NIGHTLY_CALL_LOG_HYGIENE_ENABLED || "false").toLowerCase() === "true",
+    async plan({ domains, logger }) {
+      // COUNTS, NEVER CALLS THE SERVICE — the same rule session-reconcile
+      // follows, for a stronger reason. plan() runs every night whether or not
+      // this is armed, and runHourlyCallLogHygiene has no dryRun of any kind:
+      // its read path upserts CallLog rows, syncs the ledger, promotes case
+      // profiles, queues recording archives and bills Whisper and Claude. A
+      // dark task that called it would write to five providers nightly, and an
+      // armed one would pay the entire burst twice.
+      const { CallLog } = require("../../../../packages/shared-models/src");
+      const sinceMs = pacificMsSinceToday(HYGIENE_EVENING_ANCHOR_HOUR);
+      const windowStart = new Date(Date.now() - sinceMs);
+      const out = [];
+      for (const domain of domains) {
+        try {
+          const [inbound, outbound] = await Promise.all([
+            CallLog.countDocuments({ domain, direction: "inbound", callStartTime: { $gte: windowStart } }),
+            CallLog.countDocuments({ domain, direction: "outbound", callStartTime: { $gte: windowStart } }),
+          ]);
+          out.push({
+            domain, sinceMs, windowStart: windowStart.toISOString(),
+            inbound: Number(inbound) || 0, outbound: Number(outbound) || 0,
+          });
+        } catch (error) {
+          // Counted nothing is not "there was nothing".
+          logger?.warn?.(`call-log-hygiene plan failed for ${domain}: ${error.message}`);
+          out.push({
+            domain, sinceMs, windowStart: windowStart.toISOString(),
+            inbound: null, outbound: null, error: String(error.message).slice(0, 160),
+          });
+        }
+      }
+      return out;
+    },
+    count(planned) {
+      return planned.reduce(
+        (acc, p) => acc + (Number(p.inbound) || 0) + (Number(p.outbound) || 0), 0,
+      );
+    },
+    async apply(planned, { logger, callLogHygieneImpl = null }) {
+      const run = callLogHygieneImpl
+        || require("../../../../packages/shared-services/src/hourlyCallLogHygieneService")
+          .runHourlyCallLogHygiene;
+      const readable = planned.filter((p) => p.inbound !== null);
+      const unreadable = planned.filter((p) => p.inbound === null);
+      const out = {
+        written: 0, mirrored: 0, ledgerSynced: 0, scored: 0, archived: 0,
+        nativeInserted: 0, failed: 0, errors: [], truncatedDomains: [],
+      };
+      for (const p of unreadable) {
+        out.failed += 1;
+        out.errors.push(`${p.domain}: NOT EXAMINED — ${p.error || "window count failed"}`);
+      }
+      if (!readable.length) return out;
+      try {
+        const r = await run({
+          domains: readable.map((p) => p.domain),
+          // ONE window end for every domain. Left unset, the service derives
+          // `now` inside its per-domain body, so domain N's window starts N
+          // domains' worth of runtime later than domain 0's — and a wall-clock
+          // anchored sinceMs has none of the 5 minutes of slack the 65-minute
+          // default carried against an hourly cadence.
+          now: new Date(),
+          sinceMs: readable[0].sinceMs,
+          nativeSweepEnabled: true,
+          limitPerDomain: HYGIENE_EVENING_LIMIT_PER_DOMAIN,
+          lane: "hourly",
+          logger,
+        });
+        const t = r?.totals || {};
+        out.written = (Number(t.mirrored) || 0) + (Number(t.nativeInserted) || 0);
+        out.mirrored = Number(t.mirrored) || 0;
+        out.nativeInserted = Number(t.nativeInserted) || 0;
+        out.scored = Number(t.scoringCompleted) || 0;
+        out.archived = Number(t.archiveQueued) || 0;
+        out.failed += (Number(t.nativeErrors) || 0) + (Number(t.metricsErrors) || 0)
+          + (Number(t.promotionErrors) || 0) + (Number(t.caseRefreshErrors) || 0)
+          + (Number(t.scoringFailed) || 0) + (Number(t.archiveFailed) || 0);
+        // ledgerSynced is NOT in totals — the service accumulates it per domain
+        // and never rolls it up, which is why Phase A's summarizer has always
+        // printed ledgerSynced: 0. Sum it here rather than repeat that.
+        for (const d of Array.isArray(r?.domains) ? r.domains : []) {
+          out.ledgerSynced += Number(d?.result?.counts?.ledgerSynced) || 0;
+          if (d?.ok === false) {
+            out.failed += 1;
+            out.errors.push(`${d.domain}: ${String(d.error || "domain failed").slice(0, 160)}`);
+          }
+        }
+      } catch (error) {
+        // The service fans out over every domain in one call, so a throw here
+        // is the whole half-day, not one tenant.
+        out.failed += 1;
+        out.errors.push(`hygiene pass failed: ${String(error.message).slice(0, 200)}`);
+      }
+      // Say what the preview lane could not reach. The repository clamps its
+      // query to 500 rows newest-first, so on a busy afternoon the OLDEST rows
+      // in the window — the ones nearest the midday seam — are the ones dropped,
+      // and nothing in the service's own output says so.
+      for (const p of readable) {
+        for (const dir of ["inbound", "outbound"]) {
+          if ((Number(p[dir]) || 0) > HYGIENE_PREVIEW_ROW_CLAMP) {
+            out.truncatedDomains.push(`${p.domain}/${dir} ${p[dir] - HYGIENE_PREVIEW_ROW_CLAMP} unpreviewed`);
+          }
+        }
+      }
+      return out;
+    },
+    describe(planned) {
+      const unreadable = planned.filter((p) => p.inbound === null);
+      if (unreadable.length && unreadable.length === planned.length) {
+        return `COULD NOT COUNT THE CALL WINDOW — ${unreadable[0]?.error || "unknown"}`;
+      }
+      const readable = planned.filter((p) => p.inbound !== null);
+      const hours = ((readable[0]?.sinceMs ?? planned[0]?.sinceMs ?? 0) / 3600000).toFixed(1);
+      const start = String(readable[0]?.windowStart ?? planned[0]?.windowStart ?? "").slice(11, 16);
+      const total = readable.reduce((a, p) => a + p.inbound + p.outbound, 0);
+      const per = readable
+        .map((p) => `${p.domain} ${p.inbound}in/${p.outbound}out`).join(" · ");
+      const truncated = readable
+        .filter((p) => p.inbound > HYGIENE_PREVIEW_ROW_CLAMP || p.outbound > HYGIENE_PREVIEW_ROW_CLAMP)
+        .map((p) => p.domain);
+      return `${hours}h since ${start}Z: ${total} call(s) [${per || "none"}]`
+        + (unreadable.length ? ` · ${unreadable.map((p) => p.domain).join(", ")} NOT COUNTED` : "")
+        + (truncated.length
+          ? ` · PREVIEW CAPPED at ${HYGIENE_PREVIEW_ROW_CLAMP}/direction for ${truncated.join(", ")}`
+          : "");
+    },
+  },
+  {
     // EVERY PROVIDER'S RECORDING LINKS, INTO ONE COLLECTION.
     //
     // Metadata is ours, media stays with the vendor — this stores locators, not
@@ -1845,6 +2048,7 @@ function createNightlyHygieneRuntime({ config = {}, runtime = {} } = {}) {
 module.exports = {
   advanceNightlyHygiene,
   buildMailboxHandlers,
+  pacificMsSinceToday,
   claimNightlyHygiene,
   createNightlyHygieneRuntime,
   finishNightlyHygiene,
