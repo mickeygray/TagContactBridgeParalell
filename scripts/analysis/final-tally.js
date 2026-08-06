@@ -1,0 +1,22 @@
+const fs=require("fs");
+const overlap=JSON.parse(fs.readFileSync("scripts/analysis/logics-task-overlap.json","utf8")).items;
+const conflictKeys=new Set(JSON.parse(fs.readFileSync("scripts/analysis/conflict-keys.json","utf8")));
+const dup=overlap.filter(s=>s.overlap);
+const noDup=overlap.filter(s=>!s.overlap);
+const conflicted=noDup.filter(s=>conflictKeys.has(s.jiraKey));
+const clean=noDup.filter(s=>!conflictKeys.has(s.jiraKey));
+const unconf=clean.filter(s=>s.userIdVerified&&s.userIdVerified!=="confirmed");
+const gold=clean.filter(s=>!(s.userIdVerified&&s.userIdVerified!=="confirmed"));
+console.log(`  proposed                        ${overlap.length}`);
+console.log(`  - already tracked in Logics     ${dup.length}`);
+console.log(`  - note contradicts the subject  ${conflicted.length}`);
+console.log(`  - unconfirmed Logics UserID     ${unconf.length}`);
+console.log(`  = CONFIDENT                     ${gold.length}`);
+const s={};for(const g of gold) s[g.subject.replace(/ For The Years.*/,"")]=(s[g.subject.replace(/ For The Years.*/,"")]||0)+1;
+console.log(`\n  the confident set:`);
+for(const [k,v] of Object.entries(s).sort((a,b)=>b[1]-a[1])) console.log(`    ${String(v).padStart(4)}  ${k}`);
+const t={},p={};
+for(const g of gold){t[g.tenant]=(t[g.tenant]||0)+1;p[g.assignee]=(p[g.assignee]||0)+1;}
+console.log(`\n  tenant: ${Object.entries(t).map(([a,b])=>`${a}=${b}`).join("  ")}`);
+console.log(`  person: ${Object.entries(p).sort((a,b)=>b[1]-a[1]).map(([a,b])=>`${a}=${b}`).join("  ")}`);
+console.log(`  live ${gold.filter(g=>!g.stale).length}   expired-with-a-week ${gold.filter(g=>g.stale).length}`);

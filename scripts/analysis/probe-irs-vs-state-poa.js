@@ -1,0 +1,11 @@
+const fs=require("fs");
+const items=JSON.parse(fs.readFileSync("scripts/analysis/missing-years-poa-check.json","utf8")).items;
+const STATE=/state poa|poa.*\bstate\b/i;
+const filed=items.filter(i=>i.poaFiled);
+const stateOnly=filed.filter(i=>STATE.test(i.poaFiled));
+const irs=filed.filter(i=>!STATE.test(i.poaFiled));
+console.log(`  of ${filed.length} with a POA-filed activity:`);
+console.log(`    IRS POA ("Filed Poa")        ${irs.length}`);
+console.log(`    STATE POA only               ${stateOnly.length}`);
+console.log(`\n  STATE-only cases — a state POA does not unlock IRS transcripts:`);
+for(const i of stateOnly) console.log(`    ${i.jiraKey.padEnd(16)}case ${String(i.caseId).padEnd(8)}${i.poaFiledOn}  "${i.poaFiled.trim()}"`);

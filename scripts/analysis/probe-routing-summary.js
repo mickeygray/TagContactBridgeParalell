@@ -1,0 +1,17 @@
+const r=require("./jira-roadblock-routing.json");
+const b=r.buckets;
+const n=k=>(b[k]||[]).length;
+console.log(`  blocked open: ${r.totals.blockedOpen}\n`);
+console.log(`  IS THE WORK (retitle + migrate)   ${n("isWork")}`);
+console.log(`  already owned by an open POAREQ   ${n("covered")}`);
+console.log(`  POA already filed (stale?)        ${n("stale")}`);
+console.log(`  create new POA task               ${n("create")}`);
+console.log(`  blocked on something external     ${n("notPoa")}`);
+console.log(`  no case id                        ${n("noCase")}`);
+const s={}; for(const x of b.isWork) s[x.proposedSubject]=(s[x.proposedSubject]||0)+1;
+console.log(`\n  IS-THE-WORK proposed subjects:`);
+for(const [k,v] of Object.entries(s).sort((a,c)=>c[1]-a[1]).slice(0,14)) console.log(`    ${String(v).padStart(4)}  ${k}`);
+console.log(`\n  sample:`);
+for(const x of b.isWork.slice(0,8)) console.log(`    ${x.jiraKey.padEnd(16)}${x.project.padEnd(11)}${String(x.proposedSubject).padEnd(20)}"${x.description.slice(0,32)}"`);
+const e={}; for(const x of b.notPoa) e[x.waitingOn]=(e[x.waitingOn]||0)+1;
+console.log(`\n  EXTERNAL/unroutable breakdown: ${JSON.stringify(e)}`);

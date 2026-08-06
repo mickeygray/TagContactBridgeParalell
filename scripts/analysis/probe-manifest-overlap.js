@@ -1,0 +1,17 @@
+const m=require("./jira-migration-manifest.json");
+const I=m.items;
+const STATE=new Set(["ROADBLOCK","roadblock","To Do","TO DO'S","STATE","IRS"]);
+const isState=i=>STATE.has(i.status);
+const w=I.filter(i=>i.blockers.includes("subject-needs-wording"));
+const a=I.filter(i=>i.blockers.includes("no-assignee"));
+const both=I.filter(i=>i.blockers.includes("subject-needs-wording")&&i.blockers.includes("no-assignee"));
+console.log(`  needs-wording ${w.length}   no-assignee ${a.length}   BOTH ${both.length}`);
+const rest=I.filter(i=>!isState(i));
+const soft=new Set(["no-description","userid-unexercised"]);
+const restReady=rest.filter(i=>i.blockers.filter(b=>!soft.has(b)).length===0);
+console.log(`\n  If the state-y statuses are dropped:`);
+console.log(`    remaining issues      ${rest.length}`);
+console.log(`    migratable now        ${restReady.length}  (treating no-description / unexercised-id as non-blocking)`);
+const s={}; for(const i of rest) s[i.status]=(s[i.status]||0)+1;
+console.log("    by status: "+Object.entries(s).sort((x,y)=>y[1]-x[1]).map(([k,n])=>`${k}=${n}`).join(", "));
+console.log(`    still unassigned      ${rest.filter(i=>i.blockers.includes("no-assignee")).length}`);
