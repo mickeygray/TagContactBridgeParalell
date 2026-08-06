@@ -6,6 +6,27 @@ Status: OPEN. Sections run in dependency order, not theme order.
 ```
 ⟳ BUILD STATUS — read this first after any compaction or re-entry
 ────────────────────────────────────────────────────────────────────
+2026-08-06 (16): ADVERSARIAL PASS LANDED — 30 CONFIRMED findings,
+23 dismissed. NOT READY TO PATCH. Full detail with scenarios and
+evidence: .ai/context/ADVERSARIAL_FINDINGS_2026-08-06.md.
+The five that matter most, all in code written THIS session:
+  * CRITICAL cadence: pass drain + gateway 09:00 sweep can send the
+    SAME template twice to one lead during the documented cutover.
+  * HIGH jira x2: no ownership re-check between the claim CAS and the
+    irreversible createTask (a stalled-but-alive holder and the drain
+    can BOTH create); and recordLink's non-created predicate carries no
+    ownership token, so the webhook catch writes terminal `failed` over
+    a claim the drain now owns.
+  * HIGH recovery: the held-head page loop I added can make up to 1,000
+    live Logics getCaseInfo calls per MINUTE TICK, inline, unpaced.
+  * HIGH test: the lease-renewal test is TAUTOLOGICAL — deleting the
+    renewal it exists to pin still passes 26/26. My own suspicion,
+    confirmed.
+29 refute agents died on the session limit, hitting the test-mutation
+lens hardest — its findings are UNDER-judged and some were never voted
+on. RE-RUN THAT LENS.
+Nothing was fixed; the branch is unchanged from (14) plus these docs.
+
 2026-08-06 (15): SESSION CUT SHORT mid-adversarial-pass. A 7-lens
 self-review of the WHOLE branch was running when the session ended:
 jira claim machine, recovery cursor/paging, pass factory, cadence
