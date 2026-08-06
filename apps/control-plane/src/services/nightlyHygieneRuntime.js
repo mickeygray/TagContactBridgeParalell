@@ -321,6 +321,7 @@ function buildCallRecoveryDiscoveryDeps({ windowFrom = null, windowTo = null } =
       const m = await metricsMaterial(material.from);
       const key = `${String(domain || "").toUpperCase()}:${caseId}`;
       const status = m.callContext?.statusByCase?.[key] || null;
+      const name = m.callContext?.nameByCase?.[key] || null;
       // Any money on this case inside the gathered range is a sale signal.
       const paid = (m.payments || []).filter((p) => !p.isChargeback
         && String(p.domain || "").toUpperCase() === String(domain || "").toUpperCase()
@@ -340,20 +341,21 @@ function buildCallRecoveryDiscoveryDeps({ windowFrom = null, windowTo = null } =
       // A TIER is a resolution-pursuit tier on an existing client, so it is
       // correctly excluded; the only group this program wants is a prospect who
       // has not converted.
-      const group = (String(status || "").match(/^\s*\[([^\]]+)\]/) || [])[1] || null;
-      const normalizedGroup = group ? group.trim().toLowerCase() : null;
-      const dead = normalizedGroup === "bad/inactive" || /do not call/i.test(status || "");
+      const { resolveCallRecoveryLogicsEligibility } = require(
+        "../../../../packages/shared-services/src/leadDeliveryService");
+      const recoveryLogics = resolveCallRecoveryLogicsEligibility({ domain, statusText: status });
       return {
+        firstName: name?.firstName || null,
+        lastName: name?.lastName || null,
+        displayName: name?.displayName || null,
         convertedAt: null,
         paymentCount: paid.length,
         totalPaid,
-        dnc: dead,
+        dnc: recoveryLogics.entityDnc === true,
         activeAppointment: false,
         // Null, never a guess — proveStillOpen holds on anything but an
         // explicit true, which is what we want when status is unreadable.
-        allowedProspectStatus: normalizedGroup == null
-          ? null
-          : normalizedGroup === "active prospect",
+        allowedProspectStatus: recoveryLogics.allowedProspectStatus,
       };
     },
     resolveEpisodeTiming: (at) => resolveRecoveryEpisodeTiming(at),
@@ -689,16 +691,39 @@ const TASKS = [
       if (!deps) return { skipped: true, reason: "discovery-deps-unavailable" };
       const { runCallRecoveryDiscovery } = require(
         "../../../../packages/shared-services/src/callRecoveryDiscoveryService");
-      const r = await runCallRecoveryDiscovery({
-        dateKey: planned[0]?.dateKey || persistTargetDay(), apply: true, logger, deps,
+      // A failed read still gets one INCOMPLETE daily manifest. That is how a
+      // missing day remains visible instead of being rounded down to zero.
+      // Successful (including legitimately empty) days run apply exactly once.
+      const r = planned[0]?.readFailed
+        ? planned[0]
+        : await runCallRecoveryDiscovery({
+          dateKey: planned[0]?.dateKey || persistTargetDay(), apply: true, logger, deps,
+        });
+      const { callRecoveryDailyCohortRepository } = require(
+        "../../../../packages/shared-repositories/src");
+      const cohort = await callRecoveryDailyCohortRepository.captureCompletedDay({
+        dateKey: r.dateKey,
+        discoveryResult: r,
+        policyIds: {
+          cadence: require("../../../../packages/shared-services/src/leadDeliveryService")
+            .CALL_RECOVERY_CONTACT_POLICY_ID,
+          dnc: require("../../../../packages/shared-services/src/leadDeliveryService")
+            .CALL_RECOVERY_DNC_POLICY_ID,
+          logics: require("../../../../packages/shared-services/src/leadDeliveryService")
+            .CALL_RECOVERY_LOGICS_POLICY_ID,
+        },
       });
       return {
         inserted: r.episodesInserted, updated: r.episodesUpdated,
         qualified: r.qualified, errors: r.errors,
+        cohortCandidates: Number(cohort.cohort?.candidateCount || 0),
+        cohortStatus: cohort.cohort?.status || "incomplete",
+        cohortRevision: Number(cohort.cohort?.revision || 0),
       };
     },
     count(planned) {
-      return planned.reduce((a, p) => a + (p.qualified || 0), 0);
+      // One manifest per attempted completed day, even when zero calls qualify.
+      return planned.length ? 1 : 0;
     },
     describe(planned) {
       const p = planned[0] || {};
@@ -709,6 +734,72 @@ const TASKS = [
         .map(([k, n]) => `${n} ${k}`).join(" · ");
       return `${p.dateKey}: ${p.factsRead} call(s) · ${p.qualified} qualify`
         + (top ? ` · ${top}` : "");
+    },
+  },
+  {
+    // CR-5 hygiene: lift only freshly proven DNC-clean episodes into the
+    // recovery source, recheck day 30/60/90, and close expired episodes. This
+    // is the existing nightly owner, not a new scheduler or process.
+    key: "call-recovery-eligibility-hygiene",
+    label: "Refresh recovery DNC/status eligibility",
+    writesArmed: () => String(process.env.CALL_RECOVERY_DISCOVERY_ENABLED || "false").toLowerCase() === "true",
+    async plan() {
+      if (!isPacificBusinessDay(new Date())) return [{ skipped: true, reason: "non-business-day" }];
+      return [{ ready: true }];
+    },
+    async apply(planned, { logger }) {
+      if (planned[0]?.skipped) return { skipped: true, reason: planned[0].reason };
+      const { callRecoveryLeadRepository: repository } = require(
+        "../../../../packages/shared-repositories/src");
+      const {
+        runCallRecoveryDncSweep,
+        runCallRecoveryLogicsDncCheck,
+      } = require("../../../../packages/shared-services/src/callRecoveryDncSweepService");
+      const { createLogicsClient } = require("../../../../packages/shared-integrations/src");
+      const { resolveCallRecoveryLogicsEligibility } = require(
+        "../../../../packages/shared-services/src/leadDeliveryService");
+      const clients = new Map();
+      const readCaseDnc = async ({ domain, caseId }) => {
+        const dom = String(domain || "").trim().toUpperCase();
+        if (!clients.has(dom)) clients.set(dom, createLogicsClient(dom));
+        const payload = await clients.get(dom).getCaseInfo(Number(caseId));
+        const raw = payload?.Data ?? payload?.data ?? payload;
+        const data = Array.isArray(raw) ? (raw[0] || null) : raw;
+        if (!data || typeof data !== "object") return null;
+        const statusId = Number(data.StatusID ?? data.Status ?? NaN);
+        return resolveCallRecoveryLogicsEligibility({
+          domain: dom,
+          statusId: Number.isFinite(statusId) ? statusId : null,
+        }).entityDnc;
+      };
+      const dnc = await runCallRecoveryDncSweep({
+        repository, now: new Date(), limit: 100, apply: true, mode: "all", logger,
+      });
+      const logics = await runCallRecoveryLogicsDncCheck({
+        repository, readCaseDnc, now: new Date(), limit: 200, apply: true, logger,
+      });
+      const expiredRows = await repository.listExpiredEpisodes({ asOf: new Date(), limit: 200 });
+      let expired = 0;
+      for (const episode of expiredRows) {
+        const moved = await repository.expireEpisode(episode.episodeId, {
+          from: episode.state,
+          expectedVersion: episode.version,
+          reason: "program-expired",
+        }).catch(() => ({ ok: false }));
+        if (moved.ok) expired += 1;
+      }
+      return {
+        checked: dnc.checked,
+        clean: dnc.clean,
+        dncHits: dnc.hit + logics.dnc,
+        failed: dnc.failed + dnc.errors + logics.errors,
+        terminated: dnc.terminated + logics.terminated,
+        expired,
+      };
+    },
+    count(planned) { return planned[0]?.ready === true ? 1 : 0; },
+    describe(planned) {
+      return planned[0]?.skipped ? "non-business day; no recovery eligibility work" : "bounded recovery eligibility pass";
     },
   },
   {

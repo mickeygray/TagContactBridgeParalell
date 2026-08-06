@@ -6,6 +6,11 @@ const { PRESETS } = require("./reportBlocksService");
 const CAPTURE_VERSION = 1;
 const REQUIRED_SECTIONS = Object.freeze([...(PRESETS.rollup || [])]);
 const CALL_SECTION = "longcalls";
+/**
+ * The key inside `facts`, which is NOT the same string as the report section that
+ * feeds it. `longcalls` is a block in the nightly email; `calls` is the stored slot.
+ */
+const CALL_SECTION_FACT = "calls";
 const CANONICAL_DEFINITION_NAME = "financial roll up with calls";
 
 // Daily facts are statistics, not a second customer/call store. The report may
@@ -166,11 +171,49 @@ function buildDailyReportFact({
   };
 }
 
+/**
+ * Flatten the fact into an update that touches only the keys this path owns.
+ *
+ * `$set: { facts: {...} }` REPLACES the whole `facts` subdocument in Mongo — every
+ * key not in the new object disappears. That was harmless while this was the only
+ * writer, and stops being harmless the moment anything else contributes a section:
+ * `facts.activity` is produced by the activity review and by nothing here, so a
+ * whole-object write silently deletes it, and any frozen `facts.spend` merge goes
+ * with it.
+ *
+ * Writing `facts.<key>` instead means the two writers can share a day.
+ *
+ * Dropping a key no longer clears it, which is a real difference — but not one that
+ * bites here, because buildDailyReportFact always emits all six keys, using null for
+ * a section it could not gather. There is no path where a key silently keeps a stale
+ * value; an absent section writes an explicit null.
+ */
+function flattenFactUpdate(fact) {
+  const { facts, ...rest } = fact;
+  const set = { ...rest };
+  for (const [key, value] of Object.entries(facts || {})) {
+    // A PLACEHOLDER MUST NOT OVERWRITE REAL DATA.
+    //
+    // This path never has call facts — the call index produces them and the daily
+    // entry worker posts them. What it writes here is a marker, {status:"pending"},
+    // saying "somebody else owns this". Writing that marker over counts the worker
+    // already stored would destroy the only real numbers in the document, and on a
+    // nightly schedule it would do so every single night.
+    //
+    // Leaving the key absent loses nothing: coverage.callProjection already records
+    // "pending" for the day, so the state is still stated, just not stated twice in
+    // a place another writer owns.
+    if (key === CALL_SECTION_FACT && value && value.status === "pending") continue;
+    set[`facts.${key}`] = value;
+  }
+  return set;
+}
+
 async function persistDailyReportFact(input, { Model = DailyReportFact } = {}) {
   const fact = buildDailyReportFact(input);
   await Model.updateOne(
     { dateKey: fact.dateKey },
-    { $set: fact, $inc: { revision: 1 } },
+    { $set: flattenFactUpdate(fact), $inc: { revision: 1 } },
     { upsert: true },
   );
   return {
@@ -243,6 +286,7 @@ module.exports = {
   REQUIRED_SECTIONS,
   attachDailyCallFacts,
   buildDailyReportFact,
+  flattenFactUpdate,
   isDailyFactCaptureCandidate,
   persistDailyReportFact,
   readDailyReportFactRange,

@@ -34,7 +34,7 @@
 const DailyReportFact = require("../../shared-models/src/DailyReportFact");
 const { sanitizeFactValue } = require("./dailyReportFactService");
 const {
-  SECTION_KEYS, mergeSection, frozenFieldsFor, unconfirmedIn,
+  BUILDERS, SECTION_KEYS, mergeSection, frozenFieldsFor, unconfirmedIn,
 } = require("./dailySectionBuilders");
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
@@ -274,8 +274,25 @@ async function buildDailyEntry({
  *
  * @param {Object} report  an already-composed one-day report
  */
-function gatherersFromReport(report) {
-  const byId = new Map((report?.sections || []).map((s) => [String(s.id), s]));
+/**
+ * A gatherer per registry section, produced BY the registry.
+ *
+ * This replaces a hand-maintained list that named five sections and silently
+ * omitted `calls` and `activity` — the two that decide whether a day is complete.
+ * Every builder already declared `build(ctx)` and not one was ever called, so the
+ * registry's promise ("adding a section is one entry") was only half true: the merge
+ * half worked and the build half was dead code beside a parallel copy that could
+ * drift from it.
+ *
+ * Driving `build(ctx)` means a new section needs no edit here at all.
+ *
+ * @param {Object} ctx
+ * @param {Object} ctx.report           an already-composed one-day report
+ * @param {Object} [ctx.callFacts]      counts from the call recording index
+ * @param {Object} [ctx.activitySection] the activity review's section
+ */
+function gatherersFromContext(ctx = {}) {
+  const byId = new Map((ctx.report?.sections || []).map((s) => [String(s.id), s]));
   // A section that ERRORED is null, not its partial data. The worker's null
   // means "could not read", which is exactly what a section error is.
   const section = (id) => {
@@ -283,13 +300,22 @@ function gatherersFromReport(report) {
     if (!s || s.error) return null;
     return s.data ?? null;
   };
-  return {
-    financial: async () => section("topline"),
-    spend: async () => report?.spend ?? null,
-    bySource: async () => section("source"),
-    byAgent: async () => section("ldcalls"),
-    statusMovement: async () => section("status"),
-  };
+  const full = { ...ctx, section };
+  const out = {};
+  for (const builder of BUILDERS) {
+    // A builder whose input is absent returns null, and null already means
+    // "could not read" — so an absent callFacts needs no special case here.
+    out[builder.key] = async () => builder.build(full) ?? null;
+  }
+  return out;
+}
+
+/**
+ * Report-only convenience. Yields `calls: null` and `activity: null`, which is
+ * honest: a report gather alone genuinely cannot see either.
+ */
+function gatherersFromReport(report) {
+  return gatherersFromContext({ report });
 }
 
 /** Every Pacific day key from `from` to `to`, inclusive. */
@@ -379,4 +405,10 @@ async function readEntryRange({
   };
 }
 
-module.exports = { buildDailyEntry, gatherersFromReport, readEntryRange, dayKeysBetween };
+module.exports = {
+  buildDailyEntry,
+  gatherersFromContext,
+  gatherersFromReport,
+  readEntryRange,
+  dayKeysBetween,
+};

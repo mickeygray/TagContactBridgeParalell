@@ -209,3 +209,41 @@ test("both views agree about a frozen day's cost", async () => {
   assert.deepEqual(set["detail.spend"], set["facts.spend"],
     "detail must carry the same frozen cost, not a re-derived one");
 });
+
+test("the gatherers come from the registry, so no section can be silently omitted", async () => {
+  // The hand-maintained list this replaced named five sections and dropped `calls`
+  // and `activity` — the two that decide whether a day is complete. A registry-driven
+  // list cannot drift from the registry.
+  const { gatherersFromContext } = require("../../packages/shared-services/src/dailyEntryService");
+  const { SECTION_KEYS } = require("../../packages/shared-services/src/dailySectionBuilders");
+  const g = gatherersFromContext({ report: { spend: null, sections: [] } });
+  assert.deepEqual(Object.keys(g).sort(), [...SECTION_KEYS].sort());
+});
+
+test("calls and activity reach the day when the context carries them", async () => {
+  const { gatherersFromContext } = require("../../packages/shared-services/src/dailyEntryService");
+  const g = gatherersFromContext({
+    report: { spend: { mail: 10 }, sections: [{ id: "topline", data: { cash: 100 } }] },
+    callFacts: { links: 12, significant: 3 },
+    activitySection: { rowsScanned: 44 },
+  });
+  assert.deepEqual(await g.calls(), { links: 12, significant: 3 });
+  assert.deepEqual(await g.activity(), { rowsScanned: 44 });
+  assert.deepEqual(await g.financial(), { cash: 100 });
+});
+
+test("a report-only gather reports calls and activity as unread, not as empty", async () => {
+  // null means "could not look". Returning {} would claim we looked and found none.
+  const { gatherersFromReport } = require("../../packages/shared-services/src/dailyEntryService");
+  const g = gatherersFromReport({ spend: null, sections: [] });
+  assert.equal(await g.calls(), null);
+  assert.equal(await g.activity(), null);
+});
+
+test("a section that errored in the report is null, not its partial data", async () => {
+  const { gatherersFromContext } = require("../../packages/shared-services/src/dailyEntryService");
+  const g = gatherersFromContext({
+    report: { sections: [{ id: "topline", data: { cash: 100 }, error: "logics timeout" }] },
+  });
+  assert.equal(await g.financial(), null);
+});

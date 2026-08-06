@@ -379,7 +379,8 @@ test("the night runs in the stated ORDER", () => {
   // than a fix to an existing one.
   assert.deepEqual(s2.tasks.map((t) => t.key),
     ["night-persist", "mail-invoice", "mail-spend-derive", "call-links", "call-recovery-discovery",
-      "queue-rollup", "logics-source", "spend-sync", "activity-review", "call-recording-index"]);
+      "call-recovery-eligibility-hygiene", "queue-rollup", "logics-source", "spend-sync",
+      "activity-review", "call-recording-index"]);
   assert.ok(!s2.tasks.some((t) => t.key === "daily-snapshot"),
     "the snapshot is NOT a hygiene task — it branches off the report's own single gather");
 
@@ -391,13 +392,16 @@ test("the night runs in the stated ORDER", () => {
   // TASKS lives on the runtime INSTANCE (each instance owns its own copy), not
   // on the module.
   const instance = createNightlyHygieneRuntime({});
-  for (const key of ["spend-sync", "activity-review"]) {
+  for (const key of ["call-recovery-discovery", "spend-sync", "activity-review"]) {
     const task = instance.TASKS.find((t) => t.key === key);
     assert.ok(task, `${key} must be registered`);
     assert.equal(typeof task.count, "function",
       `${key} must implement count(), or plannedCount is 0 and apply() never runs`);
     assert.ok(task.count([{}]) > 0, `${key}.count() must report work to do`);
   }
+  const recovery = instance.TASKS.find((t) => t.key === "call-recovery-discovery");
+  assert.equal(recovery.count([{ qualified: 0, errors: 0 }]), 1,
+    "a legitimately empty completed day still needs one daily cohort manifest");
 });
 
 test("call-links CAPTURES marketing links; PhoneBurner still cannot", () => {

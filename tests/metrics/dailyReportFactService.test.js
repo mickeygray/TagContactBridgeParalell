@@ -145,6 +145,46 @@ test("persistence is one upsert per day and increments its revision", async () =
   assert.equal(write[2].upsert, true);
 });
 
+test("the nightly write touches facts.<key>, never the whole facts object", async () => {
+  // $set: { facts: {...} } REPLACES the subdocument in Mongo. That is fine while
+  // this is the only writer and destructive the moment anything else contributes a
+  // section — facts.activity comes from the activity review and from nowhere here.
+  let write = null;
+  const Model = { updateOne: async (...args) => { write = args; return { acknowledged: true }; } };
+  await service.persistDailyReportFact({
+    dateKey: "2026-08-03",
+    definitionName: "financial roll up with calls",
+    report: report(),
+  }, { Model });
+
+  const $set = write[1].$set;
+  assert.equal("facts" in $set, false, "must not write the whole facts object");
+  for (const key of ["financial", "spend", "bySource", "byAgent", "statusMovement"]) {
+    assert.ok(`facts.${key}` in $set, `expected a dotted path for facts.${key}`);
+  }
+  // Sections this path does not own are left alone rather than nulled or stamped:
+  // `activity` comes from the activity review, and `calls` only when this path is
+  // actually handed call facts — see the placeholder test below.
+  assert.equal("facts.activity" in $set, false);
+  assert.equal("facts.calls" in $set, false);
+});
+
+test("an ungatherable section writes an explicit null rather than leaving a stale value", async () => {
+  // This is what makes dotted paths safe here: every key is always written, so
+  // dropping one can never leave yesterday's number sitting in today's document.
+  let write = null;
+  const Model = { updateOne: async (...args) => { write = args; return { acknowledged: true }; } };
+  const bare = report();
+  bare.sections = bare.sections.filter((s) => s.id !== "source");
+  await service.persistDailyReportFact({
+    dateKey: "2026-08-03",
+    definitionName: "financial roll up with calls",
+    report: bare,
+  }, { Model });
+  assert.ok("facts.bySource" in write[1].$set);
+  assert.equal(write[1].$set["facts.bySource"], null);
+});
+
 test("the collection enforces exactly one document per dateKey", () => {
   assert.equal(DailyReportFact.schema.path("dateKey").options.unique, true);
 });
@@ -276,4 +316,33 @@ test("the snapshot writer is ordered after the email, and only for a delivered o
     "the snapshot must key on the range the email actually used");
   assert.ok(call.includes("report: result.report"),
     "and must be built from the report the email was built from — one gather");
+});
+
+test("a pending calls placeholder is not written over another writer's real counts", async () => {
+  // This path never has call facts — the call index produces them and the daily
+  // entry worker posts them. Stamping {status:"pending"} here would erase real
+  // counts every night, on a schedule.
+  let write = null;
+  const Model = { updateOne: async (...args) => { write = args; return { acknowledged: true }; } };
+  await service.persistDailyReportFact({
+    dateKey: "2026-08-03",
+    definitionName: "financial roll up with calls",
+    report: report(),
+  }, { Model });
+  assert.equal("facts.calls" in write[1].$set, false);
+  // The state is still recorded — just in the block this path does own.
+  assert.equal(write[1].$set["coverage"].callProjection, "pending");
+});
+
+test("real call facts ARE written when this path is given them", async () => {
+  let write = null;
+  const Model = { updateOne: async (...args) => { write = args; return { acknowledged: true }; } };
+  await service.persistDailyReportFact({
+    dateKey: "2026-08-03",
+    definitionName: "financial roll up with calls",
+    report: report(),
+    callFacts: { links: 12, significant: 3 },
+  }, { Model });
+  assert.deepEqual(write[1].$set["facts.calls"], { links: 12, significant: 3 });
+  assert.equal(write[1].$set["coverage"].callProjection, "complete");
 });
