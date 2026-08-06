@@ -73,7 +73,7 @@ test("scheduled hygiene is dormant on Pacific weekends", () => {
   assert.equal(isPacificBusinessDay(new Date("2026-08-03T16:00:00.000Z")), true);
 });
 
-test("scheduled disabled tasks perform zero discovery after a durable daily claim", async () => {
+test("an unarmed task still discovers under a durable daily claim", async () => {
   const originalFind = DailyLoopRun.findOneAndUpdate;
   const originalUpdate = DailyLoopRun.updateOne;
   DailyLoopRun.findOneAndUpdate = async () => ({ dateKey: "2026-08-03" });
@@ -88,8 +88,12 @@ test("scheduled disabled tasks perform zero discovery after a durable daily clai
       apply: async () => ({}), describe: () => "",
     });
     const result = await rt.runOnce({ at: new Date("2026-08-03T20:00:00Z") });
-    assert.equal(planned, 0);
-    assert.equal(result.tasks[0].reason, "write-disabled-no-discovery");
+    // THE STANDING DRY RUN. plan() is read-only, so an unarmed task still runs
+    // it and still reports what it WOULD have done — that report is the only
+    // evidence the "land dark, observe one cycle, then arm" discipline has.
+    assert.equal(planned, 1, "an unarmed task must still plan");
+    assert.equal(result.tasks[0].dryRun, true);
+    assert.equal(result.tasks[0].reason, "standing-dry-run");
   } finally {
     DailyLoopRun.findOneAndUpdate = originalFind;
     DailyLoopRun.updateOne = originalUpdate;
@@ -475,9 +479,9 @@ test("a chore that keeps failing is retried, then stepped past so the night fini
     let healthyRuns = 0;
     rt.TASKS.length = 0;
     rt.TASKS.push(
-      // Armed on purpose: an UNARMED task is skipped without planning
-      // ("write-disabled-no-discovery"), so its plan() would never throw and
-      // this test would pass without exercising anything.
+      // Armed on purpose. Unarmed would now plan too (the standing dry run),
+      // but an unarmed task never reaches apply() — and the retry behaviour
+      // under test is about a task that is genuinely trying to do work.
       { key: "flaky", label: "flaky", writesArmed: () => true,
         plan: async () => { throw new Error("provider unavailable"); },
         apply: async () => ({}), describe: () => "" },
@@ -503,6 +507,117 @@ test("a chore that keeps failing is retried, then stepped past so the night fini
     assert.equal(healthyRuns, 1, "the healthy task runs after the flaky one is abandoned");
     assert.equal(final.tasks[0].skippedAfterAttempts, 3, "the skip is recorded, not silent");
     assert.match(final.tasks[0].error, /provider unavailable/);
+  } finally {
+    DailyLoopRun.findOneAndUpdate = originalFind;
+    DailyLoopRun.updateOne = originalUpdate;
+  }
+});
+
+test("an unarmed task plans but never applies", async () => {
+  // The contract at the top of the registry says plan() is "read-only; always
+  // safe, always run, so `lastRun` shows the work even when the task may not
+  // write." The loop used to skip plan() entirely for unarmed tasks, which made
+  // every dark task report planned:0 and left arming decisions blind.
+  const originalFind = DailyLoopRun.findOneAndUpdate;
+  const originalUpdate = DailyLoopRun.updateOne;
+  DailyLoopRun.findOneAndUpdate = async () => ({ dateKey: "2026-08-03" });
+  DailyLoopRun.updateOne = async () => ({ acknowledged: true });
+  try {
+    const rt = createNightlyHygieneRuntime({ config: { enabled: true, hour: 0 } });
+    let plans = 0; let applies = 0;
+    rt.TASKS.length = 0;
+    rt.TASKS.push({
+      key: "dark", label: "dark", writesArmed: () => false,
+      plan: async () => { plans += 1; return [{ plan: [1, 2, 3] }]; },
+      apply: async () => { applies += 1; return { written: 3 }; },
+      describe: () => "would do three things",
+    });
+    const result = await rt.runOnce({ at: new Date("2026-08-03T20:00:00Z") });
+    assert.equal(plans, 1, "plan runs exactly once");
+    assert.equal(applies, 0, "apply must never run unarmed");
+    assert.equal(result.tasks[0].planned, 3, "the dark task reports real work");
+    assert.equal(result.tasks[0].summary, "would do three things");
+    assert.equal(rt.getState().totals.planned, 3, "dark work counts toward the pass total");
+  } finally {
+    DailyLoopRun.findOneAndUpdate = originalFind;
+    DailyLoopRun.updateOne = originalUpdate;
+  }
+});
+
+test("an armed task with nothing planned does not apply", async () => {
+  // The count() trap: a task whose count is 0 must not call apply(). This is the
+  // guard that made spend-sync silently no-op when it had no count() at all.
+  const originalFind = DailyLoopRun.findOneAndUpdate;
+  const originalUpdate = DailyLoopRun.updateOne;
+  DailyLoopRun.findOneAndUpdate = async () => ({ dateKey: "2026-08-03" });
+  DailyLoopRun.updateOne = async () => ({ acknowledged: true });
+  try {
+    const rt = createNightlyHygieneRuntime({ config: { enabled: true, hour: 0 } });
+    let applies = 0;
+    rt.TASKS.length = 0;
+    rt.TASKS.push({
+      key: "empty", label: "empty", writesArmed: () => true,
+      plan: async () => [{ plan: [] }],
+      apply: async () => { applies += 1; return { written: 0 }; },
+      describe: () => "nothing to do",
+    });
+    const result = await rt.runOnce({ at: new Date("2026-08-03T20:00:00Z") });
+    assert.equal(applies, 0);
+    assert.equal(result.tasks[0].planned, 0);
+    assert.equal(result.tasks[0].dryRun, false, "armed is armed even with nothing to do");
+  } finally {
+    DailyLoopRun.findOneAndUpdate = originalFind;
+    DailyLoopRun.updateOne = originalUpdate;
+  }
+});
+
+test("a dark task whose plan throws is a task failure, not a silent skip", async () => {
+  // Consequence of always planning: a dark task with a broken read side now
+  // surfaces. That is the point — a task that cannot even look should be
+  // visible before somebody arms it.
+  const originalFind = DailyLoopRun.findOneAndUpdate;
+  const originalUpdate = DailyLoopRun.updateOne;
+  DailyLoopRun.findOneAndUpdate = async () => ({ dateKey: "2026-08-03" });
+  DailyLoopRun.updateOne = async () => ({ acknowledged: true, matchedCount: 1 });
+  try {
+    const rt = createNightlyHygieneRuntime({ config: { enabled: true, hour: 0 } });
+    rt.TASKS.length = 0;
+    rt.TASKS.push({
+      key: "darkbroken", label: "darkbroken", writesArmed: () => false,
+      plan: async () => { throw new Error("logics unreachable"); },
+      apply: async () => ({}), describe: () => "",
+    });
+    const result = await rt.runOnce({ at: new Date("2026-08-03T20:00:00Z") });
+    const row = result.tasks[0];
+    assert.ok(row.error, "the failure is reported rather than swallowed");
+    assert.match(row.error, /logics unreachable/);
+  } finally {
+    DailyLoopRun.findOneAndUpdate = originalFind;
+    DailyLoopRun.updateOne = originalUpdate;
+  }
+});
+
+test("losing the cursor on a DARK task aborts the pass, it does not retry", async () => {
+  // A lost cursor means another pass re-claimed the day. Continuing would let two
+  // passes write the same night, which is why the armed path aborts on it.
+  // The dark branch used to throw a plain Error with no CURSOR_LOST code, so the
+  // catch treated it as an ordinary task failure and retried — the one case where
+  // the guard silently did not apply.
+  const originalFind = DailyLoopRun.findOneAndUpdate;
+  const originalUpdate = DailyLoopRun.updateOne;
+  DailyLoopRun.findOneAndUpdate = async () => ({ dateKey: "2026-08-03" });
+  // matchedCount 0 = the claim is gone.
+  DailyLoopRun.updateOne = async () => ({ acknowledged: true, matchedCount: 0 });
+  try {
+    const rt = createNightlyHygieneRuntime({ config: { enabled: true, hour: 0 } });
+    rt.TASKS.length = 0;
+    rt.TASKS.push({
+      key: "dark", label: "dark", writesArmed: () => false,
+      plan: async () => [{ plan: [] }], apply: async () => ({}), describe: () => "",
+    });
+    const result = await rt.runOnce({ at: new Date("2026-08-03T20:00:00Z") });
+    assert.equal(result.aborted, "durable-cursor-lost");
+    assert.notEqual(result.retrying, "dark", "a lost cursor must not be retried");
   } finally {
     DailyLoopRun.findOneAndUpdate = originalFind;
     DailyLoopRun.updateOne = originalUpdate;

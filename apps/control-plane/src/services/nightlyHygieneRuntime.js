@@ -1123,21 +1123,21 @@ function createNightlyHygieneRuntime({ config = {}, runtime = {} } = {}) {
         const taskStarted = Date.now();
         try {
           const armed = apply === null ? task.writesArmed() : Boolean(apply);
-          if (!armed && !force) {
-            results.push({
-              task: task.key,
-              label: task.label,
-              skipped: true,
-              reason: "write-disabled-no-discovery",
-              dryRun: true,
-              planned: 0,
-              durationMs: Date.now() - taskStarted,
-            });
-            if (durableClaim && !await advanceNightlyHygiene(
-              today, durableClaim.claimedAt, taskIndex + 1, durableCounts(),
-            )) throw new Error("nightly hygiene durable cursor was lost");
-            continue;
-          }
+
+          // THE STANDING DRY RUN. plan() runs for every task, armed or not.
+          //
+          // This branch used to skip plan() entirely when a task was unarmed and
+          // report planned: 0 — while the contract above says "plan() — read-only;
+          // always safe, always run, so `lastRun` shows the work even when the task
+          // may not write." The code did the opposite of its own promise, and the
+          // cost was not cosmetic: every task landed dark reported nothing, so the
+          // "observe one cycle, then arm" discipline this chain depends on had no
+          // evidence to observe. Arming was a guess.
+          //
+          // The price is real and accepted: eleven plan() calls a night whether or
+          // not anything is armed, and some of them are not cheap — mail-invoice
+          // opens a mailbox, call-recovery-discovery consumes a full gather. That
+          // is what a standing dry run costs, and it fits inside the claim lease.
           const planned = await task.plan({ domains: state.domains, days: state.days, logger: log });
           // Each task decides what "something to do" means; the row-list shape
           // is only the default, not an assumption the runtime may make.
@@ -1145,6 +1145,26 @@ function createNightlyHygieneRuntime({ config = {}, runtime = {} } = {}) {
             ? Number(task.count(planned)) || 0
             : planned.reduce((acc, p) => acc + (p.plan?.length || 0), 0);
           state.totals.planned += plannedCount;
+
+          if (!armed && !force) {
+            results.push({
+              task: task.key,
+              label: task.label,
+              dryRun: true,
+              reason: "standing-dry-run",
+              planned: plannedCount,
+              summary: task.describe(planned),
+              durationMs: Date.now() - taskStarted,
+            });
+            // cursorLost() rather than a bare Error: the catch discriminates on
+            // `code`, and a plain Error reaches the abort only by bouncing through
+            // the retry path, whose own durable write then fails too. Same outcome,
+            // one indirection — say it directly.
+            if (durableClaim && !await advanceNightlyHygiene(
+              today, durableClaim.claimedAt, taskIndex + 1, durableCounts(),
+            )) throw cursorLost();
+            continue;
+          }
 
           let applied = null;
           if (armed && plannedCount) {
