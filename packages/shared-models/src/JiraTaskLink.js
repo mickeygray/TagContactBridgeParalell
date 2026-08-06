@@ -68,6 +68,16 @@ const jiraTaskLinkSchema = new mongoose.Schema(
 
     attempts: { type: Number, default: 1, min: 0 },
     lastAttemptAt: { type: Date, default: Date.now },
+
+    // The webhook's issue payload, stored AT CLAIM TIME. Without it a pending
+    // claim was a tombstone: the crash the claim exists to survive also lost
+    // the only copy of the work, so "pending" could never become anything —
+    // durable ownership of a job nobody could ever run. The drain re-drives
+    // stale pending claims from this snapshot. Mixed because the shape is
+    // Jira's, not ours, and this schema is strict — an undeclared field would
+    // be dropped in silence, which is the exact bug class this branch has now
+    // hit three times.
+    issueSnapshot: { type: mongoose.Schema.Types.Mixed, default: null },
   },
   { timestamps: true, collection: "jiratasklinks" },
 );

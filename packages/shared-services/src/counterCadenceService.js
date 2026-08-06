@@ -812,9 +812,14 @@ async function drainCounterCadenceSweep({ maxRounds = 20, ...options } = {}) {
     totals.roundResults.push({
       selected: r?.selected ?? 0, sent: r?.sent ?? 0, failed: r?.failed ?? 0,
     });
-    // Fewer selected than the cap means the selector ran out of due items:
-    // the backlog is drained.
-    if ((Number(r?.selected) || 0) < perRound) { totals.drained = true; break; }
+    // Fewer selected than the cap means the selector ran out of due items —
+    // but items that FAILED to dispatch are still due, so a round with
+    // failures can never certify the backlog drained. The first version did,
+    // and a day with 40 failures and 10 quiet leads reported itself finished.
+    if ((Number(r?.selected) || 0) < perRound) {
+      totals.drained = totals.failed === 0;
+      break;
+    }
     // A full selection that sent nothing is a stuck provider, not a backlog.
     if ((Number(r?.sent) || 0) === 0 && !options.dryRun) break;
   }

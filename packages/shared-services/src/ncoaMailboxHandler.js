@@ -152,10 +152,19 @@ function createNcoaHandler({
         }
       }
 
+      const attachmentFailures = files.filter((f) => /^failed:/.test(String(f.skipReason || ""))).length;
       return {
         // The loop only claims a message as handled when this is true, so a dry
         // run stays repeatable and a message whose files all failed comes back.
         written: apply && written > 0,
+        // A PARTIAL message must come back too. One CSV succeeding while its
+        // sibling failed used to leave written true, the outer ledger stamped
+        // the whole MESSAGE handled, and the failed CSV was skipped on every
+        // future scan — permanently, since mark-read also refuses an unclean
+        // pass, so the message sat unread and re-listed nightly while its
+        // remaining file was invisible. The dedupe ledger on the SUCCESSFUL
+        // attachment's content hash is what makes the re-visit safe.
+        failed: attachmentFailures,
         summary: {
           // The RESOLVED domain, not the parameter — that is null unless a caller
           // overrode it, and the config default is what actually got uploaded to.

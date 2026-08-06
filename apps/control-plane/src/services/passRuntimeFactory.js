@@ -270,6 +270,20 @@ function createPassRuntime({
                 `${task.key} failed completely — ${String(first || `${applied.failed} failure(s)`).slice(0, 160)}`,
               );
             }
+
+            // A task may return drained:false to say "work remains that I could
+            // not finish" — a stuck provider mid-backlog, a round cap hit. That
+            // is an INCOMPLETE task, not a done one: advancing the cursor over
+            // it marks the day complete with items still due and nothing ever
+            // comes back for them. Routing it through the retry path re-runs
+            // the task, which CONTINUES the work rather than repeating it (the
+            // per-lead daily keys advance with every success), bounded by the
+            // same attempt budget as a throw.
+            if (applied?.drained === false) {
+              throw new Error(
+                `${task.key} did not drain — ${Number(applied.failed) || 0} failure(s), work remains due`,
+              );
+            }
           }
 
           results.push({

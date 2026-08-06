@@ -215,12 +215,17 @@ function buildDeps({ logger } = {}) {
      * Returns { ok: true } when this delivery owns the issue, or
      * { ok: false, reason } when someone else does or the work is already done.
      */
-    claimIssue: async (jiraKey, trigger) => {
+    claimIssue: async (jiraKey, trigger, issue = null) => {
       const STALE_CLAIM_MS = 10 * 60 * 1000;
+      // The snapshot rides the claim, so a crash between the 200 and the
+      // terminal record leaves a job the drain can actually FINISH rather than
+      // a tombstone that says only that work once existed.
+      const snapshot = issue ? { key: issue.key, fields: issue.fields || {} } : null;
       try {
         await JiraTaskLink.create({
           _id: jiraKey, outcome: "pending", trigger,
           reason: "claimed — bridge decision in flight",
+          issueSnapshot: snapshot,
         });
         return { ok: true };
       } catch (error) {
@@ -239,11 +244,83 @@ function buildDeps({ logger } = {}) {
       // outcome we just read — if it moved under us, the mover owns it.
       const taken = await JiraTaskLink.findOneAndUpdate(
         { _id: jiraKey, outcome: existing.outcome, lastAttemptAt: existing.lastAttemptAt },
-        { $set: { outcome: "pending", trigger, lastAttemptAt: new Date(), reason: "re-claimed" } },
+        {
+          $set: {
+            outcome: "pending", trigger, lastAttemptAt: new Date(), reason: "re-claimed",
+            ...(snapshot ? { issueSnapshot: snapshot } : {}),
+          },
+        },
       );
       return taken ? { ok: true } : { ok: false, reason: "lost the re-claim race" };
     },
   };
+}
+
+/**
+ * Finish what a crash interrupted.
+ *
+ * The claim made a lost webhook VISIBLE; this makes it RECOVERABLE. A claim
+ * still `pending` past the stale window means the process died between the 200
+ * and the terminal record — the drain re-drives it from the stored snapshot,
+ * through the same CAS takeover the webhook uses, so a live delivery and the
+ * drain cannot both run one issue. Bounded attempts, then a terminal `failed`
+ * with a reason a human can act on. A pre-snapshot pending row (there is no
+ * issue to re-run) goes straight to `failed` rather than pending forever.
+ */
+async function drainStaleJiraClaims({
+  deps,
+  apply,
+  logger = null,
+  limit = 10,
+  staleMs = 10 * 60 * 1000,
+  maxAttempts = 5,
+  Model = JiraTaskLink,
+  bridge = bridgeJiraIssue,
+} = {}) {
+  const cutoff = new Date(Date.now() - staleMs);
+  const stuck = await Model.find({ outcome: "pending", lastAttemptAt: { $lt: cutoff } })
+    .sort({ lastAttemptAt: 1 }).limit(limit).lean();
+  const out = { examined: stuck.length, redriven: 0, exhausted: 0, unrecoverable: 0, errors: 0 };
+
+  for (const claim of stuck) {
+    try {
+      if (!claim.issueSnapshot?.key) {
+        await Model.updateOne(
+          { _id: claim._id, outcome: "pending", lastAttemptAt: claim.lastAttemptAt },
+          { $set: { outcome: "failed", reason: "pending with no snapshot — replay manually with the issue payload" } },
+        );
+        out.unrecoverable += 1;
+        continue;
+      }
+      if (Number(claim.attempts) >= maxAttempts) {
+        await Model.updateOne(
+          { _id: claim._id, outcome: "pending", lastAttemptAt: claim.lastAttemptAt },
+          { $set: { outcome: "failed", reason: `drain gave up after ${claim.attempts} attempt(s)` } },
+        );
+        out.exhausted += 1;
+        continue;
+      }
+      // CAS the claim to NOW so a concurrent delivery (or second drain) loses.
+      const taken = await Model.findOneAndUpdate(
+        { _id: claim._id, outcome: "pending", lastAttemptAt: claim.lastAttemptAt },
+        { $set: { lastAttemptAt: new Date(), reason: "re-driven by the claim drain" }, $inc: { attempts: 1 } },
+      );
+      if (!taken) continue;
+
+      const decision = await bridge({
+        issue: claim.issueSnapshot, deps, apply, trigger: "claim-drain",
+      });
+      await deps.recordLink(decision);
+      out.redriven += 1;
+      logger?.info?.("jira.claim_drain.redriven", { key: claim._id, outcome: decision.outcome });
+    } catch (error) {
+      out.errors += 1;
+      logger?.warn?.("jira.claim_drain.failed", {
+        key: claim._id, error: String(error.message).slice(0, 160),
+      });
+    }
+  }
+  return out;
 }
 
 /** Only these events produce work. Everything else is acknowledged and ignored. */
@@ -275,7 +352,7 @@ function createJiraWebhookRouter(auth, runtime = {}) {
     // both create. One Mongo insert of ack latency buys both properties back.
     let claim;
     try {
-      claim = await deps.claimIssue(issue.key, event);
+      claim = await deps.claimIssue(issue.key, event, issue);
     } catch (error) {
       // No durable claim, no ack: a 500 makes Jira RETRY, which is now the
       // correct recovery — the retry will claim.
@@ -364,6 +441,15 @@ function createJiraWebhookRouter(auth, runtime = {}) {
       if (!issue?.key) {
         return res.status(400).json({ ok: false, error: "an issue payload is required" });
       }
+      // THE SAME GATE AS THE WEBHOOK. Replay used to go straight to the bridge,
+      // which meant an admin replaying while a webhook delivery (or the claim
+      // drain) was mid-flight could create the task twice — the exact race the
+      // claim exists to lose safely. A refused claim is a 409 with the reason,
+      // not a silent second create.
+      const claim = await deps.claimIssue(issue.key, "replay", issue);
+      if (!claim.ok) {
+        return res.status(409).json({ ok: false, error: claim.reason });
+      }
       const decision = await bridgeJiraIssue({
         issue, deps, apply: req.query.apply === "true" && enabled(), trigger: "replay",
       });
@@ -377,4 +463,4 @@ function createJiraWebhookRouter(auth, runtime = {}) {
   return router;
 }
 
-module.exports = { createJiraWebhookRouter, buildDeps, buildVerifier };
+module.exports = { createJiraWebhookRouter, buildDeps, buildVerifier, drainStaleJiraClaims };

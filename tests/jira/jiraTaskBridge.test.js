@@ -365,3 +365,110 @@ test("an already-created decision carries the task id forward, not just a reason
   assert.equal(decision.logicsTaskId, 5150,
     "the terminal fact rides the decision so no writer can lose it");
 });
+
+// ── ROUND 2: durable completion ────────────────────────────────────────────
+
+test("the claim stores the issue snapshot, or pending is a tombstone", () => {
+  const JiraTaskLink = require("../../packages/shared-models/src/JiraTaskLink");
+  assert.ok(JiraTaskLink.schema.path("issueSnapshot"),
+    "declared on the strict schema BEFORE anything writes it");
+  const src = require("node:fs").readFileSync(
+    require.resolve("../../apps/control-plane/src/routes/jiraWebhook"), "utf8",
+  );
+  assert.match(src, /claimIssue\(issue\.key, event, issue\)/,
+    "the webhook must hand the claim the payload a drain would need");
+});
+
+test("the drain re-drives a stale pending claim from its snapshot", async () => {
+  const { drainStaleJiraClaims } = require("../../apps/control-plane/src/routes/jiraWebhook");
+  const stale = new Date(Date.now() - 30 * 60 * 1000);
+  const rows = [{
+    _id: "ASSIGNMENT-7001", outcome: "pending", attempts: 2, lastAttemptAt: stale,
+    issueSnapshot: { key: "ASSIGNMENT-7001", fields: { summary: "x" } },
+  }];
+  const updates = [];
+  const Model = {
+    find: () => ({ sort: () => ({ limit: () => ({ lean: async () => rows }) }) }),
+    updateOne: async (...a) => { updates.push(a); return { matchedCount: 1 }; },
+    findOneAndUpdate: async (q) => (q._id === "ASSIGNMENT-7001" ? rows[0] : null),
+  };
+  const recorded = [];
+  const out = await drainStaleJiraClaims({
+    deps: { recordLink: async (d) => recorded.push(d) },
+    apply: false,
+    Model,
+    bridge: async ({ issue, trigger }) => ({
+      jiraKey: issue.key, outcome: "skipped", reason: "dry run", trigger,
+    }),
+  });
+  assert.equal(out.redriven, 1);
+  assert.equal(recorded[0].jiraKey, "ASSIGNMENT-7001");
+  assert.equal(recorded[0].trigger, "claim-drain");
+});
+
+test("a pending claim with NO snapshot terminates as failed, not pending forever", async () => {
+  const { drainStaleJiraClaims } = require("../../apps/control-plane/src/routes/jiraWebhook");
+  const stale = new Date(Date.now() - 30 * 60 * 1000);
+  const updates = [];
+  const Model = {
+    find: () => ({ sort: () => ({ limit: () => ({ lean: async () => [
+      { _id: "ASSIGNMENT-7002", outcome: "pending", attempts: 1, lastAttemptAt: stale, issueSnapshot: null },
+    ] }) }) }),
+    updateOne: async (...a) => { updates.push(a); return { matchedCount: 1 }; },
+    findOneAndUpdate: async () => null,
+  };
+  const out = await drainStaleJiraClaims({ deps: { recordLink: async () => {} }, apply: false, Model });
+  assert.equal(out.unrecoverable, 1);
+  assert.equal(updates[0][1].$set.outcome, "failed");
+  assert.match(updates[0][1].$set.reason, /no snapshot/);
+});
+
+test("the drain gives up after its attempt budget — terminally, with a reason", async () => {
+  const { drainStaleJiraClaims } = require("../../apps/control-plane/src/routes/jiraWebhook");
+  const stale = new Date(Date.now() - 30 * 60 * 1000);
+  const updates = [];
+  const Model = {
+    find: () => ({ sort: () => ({ limit: () => ({ lean: async () => [
+      { _id: "ASSIGNMENT-7003", outcome: "pending", attempts: 5, lastAttemptAt: stale,
+        issueSnapshot: { key: "ASSIGNMENT-7003", fields: {} } },
+    ] }) }) }),
+    updateOne: async (...a) => { updates.push(a); return { matchedCount: 1 }; },
+    findOneAndUpdate: async () => null,
+  };
+  const out = await drainStaleJiraClaims({ deps: { recordLink: async () => {} }, apply: false, Model });
+  assert.equal(out.exhausted, 1);
+  assert.match(updates[0][1].$set.reason, /gave up after 5/);
+});
+
+test("a lost CAS means another delivery owns it — the drain walks away", async () => {
+  const { drainStaleJiraClaims } = require("../../apps/control-plane/src/routes/jiraWebhook");
+  const stale = new Date(Date.now() - 30 * 60 * 1000);
+  let bridged = 0;
+  const Model = {
+    find: () => ({ sort: () => ({ limit: () => ({ lean: async () => [
+      { _id: "ASSIGNMENT-7004", outcome: "pending", attempts: 1, lastAttemptAt: stale,
+        issueSnapshot: { key: "ASSIGNMENT-7004", fields: {} } },
+    ] }) }) }),
+    updateOne: async () => ({ matchedCount: 1 }),
+    findOneAndUpdate: async () => null, // CAS lost
+  };
+  const out = await drainStaleJiraClaims({
+    deps: { recordLink: async () => {} }, apply: false, Model,
+    bridge: async () => { bridged += 1; return {}; },
+  });
+  assert.equal(bridged, 0, "no bridge run without the CAS");
+  assert.equal(out.redriven, 0);
+});
+
+test("the replay route goes through the SAME claim gate as the webhook", () => {
+  // Replay used to go straight to the bridge — an admin replaying while a
+  // webhook delivery was mid-flight could create the task twice.
+  const src = require("node:fs").readFileSync(
+    require.resolve("../../apps/control-plane/src/routes/jiraWebhook"), "utf8",
+  );
+  const replay = src.slice(src.indexOf('router.post("/replay/:key"'));
+  const claim = replay.indexOf("deps.claimIssue(");
+  const bridge = replay.indexOf("bridgeJiraIssue({");
+  assert.ok(claim > 0 && bridge > 0 && claim < bridge, "claim before bridge, in replay too");
+  assert.match(replay.slice(0, bridge), /status\(409\)/, "a refused claim is a 409, not a second create");
+});

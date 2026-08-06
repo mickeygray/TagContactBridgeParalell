@@ -239,8 +239,15 @@ async function runMailboxIngest({
           });
           stat.results.push(result);
           if (result?.written) stat.processed += 1;
-          // Only a real write claims the message. A dry run must be repeatable.
-          if (apply && result?.written) await recordHandled(key, { handlerKey: handler.key, messageId: ref.id, summary: result.summary || {} });
+          if (Number(result?.failed) > 0) stat.errors += Number(result.failed);
+          // Only a COMPLETE write claims the message. A dry run must be
+          // repeatable — and so must a partial one: a message where one
+          // attachment succeeded and another failed must come back on the next
+          // scan for its remaining file. Per-attachment dedupe (the content
+          // hash ledger) is what stops the successful half re-processing.
+          if (apply && result?.written && !(Number(result?.failed) > 0)) {
+            await recordHandled(key, { handlerKey: handler.key, messageId: ref.id, summary: result.summary || {} });
+          }
         } catch (error) {
           stat.errors += 1;
           out.errors += 1;

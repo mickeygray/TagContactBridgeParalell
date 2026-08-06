@@ -44,7 +44,7 @@ const { createEventsRouter } = require("./routes/events");
 const { createHealthRouter } = require("./routes/health");
 const { createHygieneRouter } = require("./routes/hygiene");
 const { createLiveCoachProxyRouter } = require("./routes/liveCoachProxy");
-const { createJiraWebhookRouter } = require("./routes/jiraWebhook");
+const { createJiraWebhookRouter, drainStaleJiraClaims } = require("./routes/jiraWebhook");
 const { createLogicsRouter } = require("./routes/logics");
 const { createLexisRouter } = require("./routes/lexis");
 const { createResolutionIntelligenceRouter } = require("./routes/resolutionIntelligence");
@@ -2713,6 +2713,34 @@ async function startServer() {
   );
   app.use("/api/ai/live-coach", createLiveCoachProxyRouter(auth, { config, logger: runtime.logger }));
   app.use("/api/jira", createJiraWebhookRouter(auth, runtime));
+
+  // THE CLAIM DRAIN. The webhook's durable claim makes a crash between the 200
+  // and the terminal record VISIBLE; this timer is what makes it RECOVERABLE —
+  // a pending claim past the stale window is re-driven from its stored issue
+  // snapshot, through the same CAS the webhook uses. Runs regardless of the
+  // bridge flag: while dark it resolves the claim as a recorded dry-run
+  // decision rather than leaving `pending` rows to age forever, and `apply`
+  // follows the same flag the webhook honours, so the drain can never write
+  // where the webhook would not.
+  {
+    const { buildDeps } = require("./routes/jiraWebhook");
+    const jiraDrainDeps = buildDeps({ logger: runtime.logger });
+    const jiraClaimDrainTimer = setInterval(() => {
+      drainStaleJiraClaims({
+        deps: jiraDrainDeps,
+        apply: String(process.env.JIRA_TASK_BRIDGE_ENABLED || "").toLowerCase() === "true",
+        logger: runtime.logger,
+      }).catch((error) => {
+        runtime.logger.warn("jira.claim_drain.tick_failed", {
+          error: String(error.message).slice(0, 160),
+        });
+      });
+    }, 5 * 60 * 1000);
+    if (jiraClaimDrainTimer.unref) jiraClaimDrainTimer.unref();
+    runtime.registerCleanup("control-plane-jira-claim-drain", async () => {
+      clearInterval(jiraClaimDrainTimer);
+    });
+  }
   app.use("/api/logics", createLogicsRouter(auth));
   app.use("/api/lexis", createLexisRouter(auth, lexisNightlyRuntime, lexisDailyDropRuntime));
   // Resolution intelligence (secondary-sales panel) — per-user permission

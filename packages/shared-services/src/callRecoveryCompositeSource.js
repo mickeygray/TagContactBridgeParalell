@@ -196,19 +196,50 @@ function createCallRecoveryCompositeSource({
     const cadence = await base.readNewerBatch({ after, limit, now });
     const cadenceItems = Array.isArray(cadence?.items) ? cadence.items : [];
     if (!activation?.delivery || cadenceItems.length >= limit) return cadence;
-    const recovery = await readRecoveryBatch({
-      inner: null,
-      limit: Math.max(1, limit - cadenceItems.length),
-      now,
-    });
+
+    // PAGE THROUGH THE HELD HEAD. This path has no durable cursor on purpose —
+    // holds must be re-evaluated every tick, and an admitted episode is linked
+    // on insert and drops out of the unlinked listing, so re-scanning from the
+    // top is self-truncating. But ONE page from the top is not: fifty held
+    // episodes at the head meant every tick read the same fifty holds, admitted
+    // nothing, and returned — later eligible episodes were never reached at
+    // all. So walk pages within the tick until the ask is filled or the
+    // listing is exhausted, bounded so a pathological backlog cannot eat the
+    // tick's wall clock.
+    const want = Math.max(1, limit - cadenceItems.length);
+    const recoveryItems = [];
+    let inner = null;
+    let recoveryDone = false;
+    for (let page = 0; page < 20; page += 1) {
+      const recovery = await readRecoveryBatch({
+        inner,
+        limit: Math.max(1, want - recoveryItems.length),
+        now,
+      });
+      if (recovery.done) {
+        recoveryItems.push(...recovery.items);
+        recoveryDone = true;
+        break;
+      }
+      // A non-done page that did not MOVE the cursor is a listing that is not
+      // paging — and its rows are RE-READS of the tail we already walked, so
+      // they are dropped, not appended. A real `after`-scoped listing can never
+      // return a last id equal to the id it was asked to read past; equality
+      // only happens on a broken listing, and appending its rows would emit
+      // the same episode once per page until the bound.
+      if (recovery.nextCursor == null || recovery.nextCursor === inner) break;
+      recoveryItems.push(...recovery.items);
+      if (recoveryItems.length >= want) break;
+      inner = recovery.nextCursor;
+    }
     return {
       ...cadence,
-      items: [...cadenceItems, ...recovery.items],
+      items: [...cadenceItems, ...recoveryItems],
       // Recovery rows are linked as soon as the canonical item is inserted;
       // they need no second source high-water and cannot move the cadence
       // arrival cursor backward.
       nextHighWater: cadence?.nextHighWater ?? after ?? null,
-      done: cadence?.done === true && recovery.done === true,
+      done: cadence?.done === true && recoveryDone,
     };
   }
 

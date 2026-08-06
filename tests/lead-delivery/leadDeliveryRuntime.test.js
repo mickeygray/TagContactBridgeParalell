@@ -2886,10 +2886,28 @@ test("automatic packet recovery never claims a refill deficit while refill is of
   stranded.packetId = "packet-before-restart";
   stranded.provider = "phoneburner";
 
+  // The subject of this test is the TITLE, not a delivery count: recovery must
+  // not open a refill claim while refill is off. It used to also assert that
+  // the tick delivered ONLY the stranded packet — but immediate-fresh delivery
+  // is deliberately independent of the refill flag (refill is the callback-
+  // driven top-up; fresh rows flow to an active shift on their own), so a tick
+  // that recovers the packet AND delivers the four fresh eligible rows is the
+  // intended behaviour, not a deficit claim.
+  const refillClaims = [];
+  const originalAcquireRefill = h.repository.acquireRefillRequest.bind(h.repository);
+  h.repository.acquireRefillRequest = async (input) => {
+    refillClaims.push(copy(input));
+    return originalAcquireRefill(input);
+  };
+
   await h.runtime.tick();
-  assert.equal(h.calls.length, 1);
-  assert.equal(acceptedItems(h.repository).length, 1);
-  assert.equal([...h.repository.items.values()].filter((item) => item.state === "eligible").length, 4);
+  assert.equal(refillClaims.length, 0,
+    "recovery with refill OFF must never open a refill claim — the title's whole point");
+  assert.equal(h.calls.length, 5, "the stranded packet plus the four fresh rows");
+  assert.equal(acceptedItems(h.repository).length, 5);
+  assert.equal([...h.repository.items.values()].filter((item) => item.state === "eligible").length, 0);
+  const recoveredAgent = await h.repository.getAgentById("bruce_allen");
+  assert.equal(recoveredAgent.openRefillRequest, false, "and no refill request may be left open");
 });
 
 test("automatic recover-only posting heals a failed pre-position without inventing shift activity", async () => {
@@ -5594,8 +5612,20 @@ test("a late historical voicemail counts but cannot reopen a source-blocked item
     callable: false,
     eligibility: { ok: false, reason: "source-dnc" },
   });
-  h.setClock("2026-07-11T07:00:00.000Z");
-  await h.runtime.tick();
+  // The EOD drain leaves the item `provider_absent` but still provider_accepted
+  // — and sourceRefreshDecision PRESERVES provider_accepted on purpose (an item
+  // already handed to the dialer is not the source sweep's to move). The
+  // release of the prior-day tombstone belongs to the day-boundary seed, which
+  // re-reads the source the moment it releases — and THAT is the path that
+  // blocks a DNC'd item. This test used to expect tick() to do it, which was
+  // the old owner.
+  // 2026-07-11 is a SATURDAY, so the ordinary seed refuses (delivery window is
+  // business-days-only). The preposition seed is the sanctioned off-window
+  // entry, and the release sweep runs before any posting could happen — the
+  // item blocks at the release's own source recheck, so there is nothing left
+  // to post.
+  h.setClock("2026-07-11T17:00:00.000Z");
+  await h.runtime.seedAgent("bruce_allen", { preposition: true });
   const blocked = await h.repository.getItemById(first._id);
   assert.equal(blocked.state, "blocked");
   assert.equal(blocked.activeAttempt, false);

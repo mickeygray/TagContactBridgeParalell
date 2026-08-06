@@ -252,3 +252,41 @@ test("durable new-arrival reads retain the cadence high-water and append recover
   assert.deepEqual(result.items.map((item) => item.caseId), ["fresh", episode.caseId]);
   assert.equal(result.nextHighWater.id, "fresh-1");
 });
+
+test("a held HEAD cannot starve eligible episodes behind it", async () => {
+  // Steady-state readNewerBatch re-scans from the top every tick on purpose —
+  // holds must be re-evaluated, and admitted episodes drop out of the unlinked
+  // listing on their own. But one page from the top meant fifty held episodes
+  // at the head were the ONLY thing any tick ever read: nothing admitted, same
+  // fifty holds tomorrow, and the eligible episode behind them invisible
+  // forever. The walk now pages through the held head within the tick.
+  const held = Array.from({ length: 120 }, (_, i) => ({
+    ...EPISODE(i), episodeId: `held:${String(i).padStart(3, "0")}`, caseId: `held-${i}`,
+  }));
+  const eligible = { ...EPISODE(999), episodeId: "zz:eligible", caseId: "8999" };
+  const all = [...held, eligible];
+
+  const base = {
+    readBatch: async () => ({ items: [], nextCursor: null, done: true }),
+    readNewerBatch: async () => ({ items: [], nextHighWater: null, done: true }),
+  };
+  const src = createCallRecoveryCompositeSource({
+    base,
+    repository: {
+      // A REAL after-scoped listing: strictly past the cursor, page-sized.
+      listEpisodesForConsideration: async ({ after, limit }) => {
+        const start = after ? all.findIndex((e) => e.episodeId === after) + 1 : 0;
+        return all.slice(start, start + Math.min(limit, 50));
+      },
+    },
+    activation: { delivery: true },
+    // Every held:* episode holds; the one behind them admits.
+    resolveAdmissionInputs: async ({ episode }) => (episode.episodeId.startsWith("held:")
+      ? { ...ADMITTABLE, contactWindowOpen: false }
+      : ADMITTABLE),
+  });
+
+  const result = await src.readNewerBatch({ after: null, limit: 10, now: NOW });
+  assert.deepEqual(result.items.map((i) => i.caseId), ["8999"],
+    "the eligible episode behind 120 holds must be reached in ONE tick");
+});
