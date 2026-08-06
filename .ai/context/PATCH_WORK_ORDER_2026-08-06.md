@@ -6,6 +6,33 @@ Status: OPEN. Sections run in dependency order, not theme order.
 ```
 ⟳ BUILD STATUS — read this first after any compaction or re-entry
 ────────────────────────────────────────────────────────────────────
+2026-08-06 (14): AUDIT ROUND TWO — six blockers, all closed. 1026
+tests pass; the two Phase 9 tests pass in isolation.
+  * HISTORY WAS REWRITTEN on this date: filter-branch dropped the 30
+    data artifacts from every one of 160 branch commits. EVERY COMMIT
+    HASH CITED BELOW THIS LINE IS STALE — the content is identical
+    (HEAD tree hash unchanged: a2806e5), but the ids moved. Navigate
+    by commit MESSAGE, not by hash. The offending commit (9bc264d) is
+    unreachable from the branch; a push publishes clean history.
+  * Jira: claims carry the issue snapshot; a 5-minute drain re-drives
+    stale pending claims (bounded, terminal on exhaustion or a missing
+    snapshot); replay goes through the same claim gate (409 on refusal).
+  * Recovery: readNewerBatch pages past a held head within the tick,
+    dropping rows of a listing that stops advancing.
+  * Cadence: drained requires zero failures; the factory retries a
+    drained:false task instead of completing the day over it.
+  * NCOA: a partial message is NOT marked handled — it comes back for
+    its failed attachment; per-attachment content-hash dedupe protects
+    the half that succeeded.
+  * Phase 9: both tests were stale setups, reconciled to documented
+    intent (refill-independence of fresh delivery; the day-boundary
+    release owning the source re-block — and the scenario date is a
+    Saturday, so it enters via the preposition seed).
+  * NOT this patch's: "low-water refill stays contact-window strict"
+    and "paced callback refill ownership" also fail — verified failing
+    at the PRE-round-2 commit too; pre-existing suite reds, outside
+    the audit's blocker list.
+
 2026-08-06 (13): AUDIT RESPONSE — 11 findings, all verified against
 code before acting, 9 fixed, 2 deliberate-and-recorded. 1008 tests
 pass across every touched suite.
