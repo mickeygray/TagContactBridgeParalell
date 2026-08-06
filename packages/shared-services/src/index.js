@@ -569,6 +569,7 @@ require("./hourlyJobResolutionChecks");
 require("./hourlyJobHandlers");
 const {
   drainHourlyJobQueue,
+  runFloorServices,
   runHourlySweep,
   sendResolutionEmails,
   summarizeHourlySweepResult,
@@ -1419,6 +1420,7 @@ module.exports = {
   runHourlyLeadCadenceEnforcement,
   runHourlyCallLogHygiene,
   runHourlyCallLogHygieneForDomain,
+  runFloorServices,
   runHourlySweep,
   runFillerPoolRefresh,
   runDailyAgedRefresh,

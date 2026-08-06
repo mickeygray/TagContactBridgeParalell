@@ -905,6 +905,97 @@ async function runDncRecheckSweepIfEnabled() {
   return runDncRecheckSweep({});
 }
 
+/**
+ * THE FLOOR — the four jobs that run whatever else is retired.
+ *
+ * These used to live inside Phase A. That was survivable while Phase A ran, and
+ * became a silent outage when `runScheduledPhase` went hardcoded-false in the
+ * control plane: the caller still passes `dncRecheckEnabled: true`, and nothing
+ * reads it. DNC rechecking stopping is the specific failure this codebase has
+ * already paid for once, so the floor now runs on its own footing and cannot be
+ * switched off by a decision about reconciliation scans.
+ *
+ * Every entry keeps the gate it already had — an env flag, a monthly boundary, a
+ * 06:00-PT window, a pool-freshness check — so calling this on every tick cannot
+ * make any of them run more often than they intend to.
+ *
+ * Each entry also keeps its own `.catch()`. A floor that fails all-or-nothing
+ * would be worse than the bug it replaces.
+ *
+ * @param {Object} [impls] test injection. Null uses the real implementations.
+ */
+async function runFloorServices({
+  dncRecheckEnabled = true,
+  fillerPoolRefreshEnabled = true,
+  agedRollingRefreshEnabled = true,
+  logger = null,
+  impls = null,
+} = {}) {
+  const dncSweep = impls?.runDncRecheckSweepIfEnabled || runDncRecheckSweepIfEnabled;
+  const fillerRefresh = impls?.runMonthlyFillerPoolRefreshIfDue || runMonthlyFillerPoolRefreshIfDue;
+  const agedRefresh = impls?.runAgedRollingRefreshIfDue || runAgedRollingRefreshIfDue;
+
+  return {
+    // CallRail → DailyCallStat: the declared response-call feeder
+    // (marker-stamped rows; see callrailDailyStatSyncService). Syncs
+    // yesterday+today each pass — full-day recompute, idempotent, one
+    // CallRail API pull. Env-gated HERE rather than via caller params, so no
+    // caller's phase split can silently starve it.
+    callrailStatSync:
+      String(process.env.CALLRAIL_STAT_SYNC_ENABLED ?? "false") === "true"
+        ? await (async () => {
+            try {
+              const syncCallrailDailyStats = impls?.syncCallrailDailyStats
+                || require("./callrailDailyStatSyncService").syncCallrailDailyStats;
+              const dayMs = 24 * 60 * 60 * 1000;
+              const laDay = (offsetDays) =>
+                new Intl.DateTimeFormat("en-CA", {
+                  timeZone: "America/Los_Angeles",
+                  year: "numeric",
+                  month: "2-digit",
+                  day: "2-digit",
+                }).format(new Date(Date.now() - offsetDays * dayMs));
+              return await syncCallrailDailyStats({ from: laDay(1), to: laDay(0) });
+            } catch (error) {
+              logger?.warn?.("callrail.stat_sync.failed", { error: error.message });
+              return { error: error.message };
+            }
+          })()
+        : { skipped: true, reason: "disabled" },
+
+    dncRecheck: dncRecheckEnabled
+      ? await dncSweep().catch((error) => ({
+          error: error.message,
+        }))
+      : { skipped: true, reason: "floor-service-disabled" },
+
+    // Monthly filler-pool refresh — fires once a month on the 1st-of-month at
+    // 5am PT. Pulls fresh status=2 candidates from Logics for both tenants,
+    // DNC-scrubs them, atomic-ish swaps the prior month's pool tag, GCs MPI
+    // rows whose case is no longer status=2. Idempotent across multiple ticks
+    // in the 5am window via `hasFreshPoolForTag`.
+    //
+    // Will be retired after AGED_ROLLING_REFRESH_ENABLED is on for both
+    // tenants and the rolling sweep is verified to maintain the pool
+    // steady-state. Until then both run — the daily sweep adds 30-day-old
+    // leads incrementally while the monthly burst rebuilds from Logics.
+    fillerPoolRefresh: fillerPoolRefreshEnabled
+      ? await fillerRefresh({ logger }).catch((error) => ({
+          error: error.message,
+        }))
+      : { skipped: true, reason: "floor-service-disabled" },
+
+    // Rolling aged-pool refresh — fires daily at 06:00 PT (and the graduation
+    // sweep additionally on day-1), behind AGED_ROLLING_REFRESH_ENABLED.
+    // Returns { skipped, reason } outside the window or when the flag is off.
+    agedRollingRefresh: agedRollingRefreshEnabled
+      ? await agedRefresh({ logger }).catch((error) => ({
+          error: error.message,
+        }))
+      : { skipped: true, reason: "floor-service-disabled" },
+  };
+}
+
 async function runCxCallActivityBackfill({
   logger,
   domains,
@@ -1015,6 +1106,8 @@ async function runHourlySweep({
   dncRecheckEnabled = true,
   fillerPoolRefreshEnabled = true,
   agedRollingRefreshEnabled = true,
+  // Test injection for the floor services only. Production passes nothing.
+  floorImpls = null,
   resolutionEmailsEnabled = true,
   metricsRefreshEnabled = true,
   metricsRefreshPreferLegacyContactActivities = false,
@@ -1107,32 +1200,8 @@ async function runHourlySweep({
       // Legacy hourly metrics recompute RETIRED 2026-07-27: the board and
       // emails read the payment sheet, not callStat/snapshot rollups.
       metricsRefresh: { skipped: true, reason: "retired" },
-      // CallRail → DailyCallStat: the declared response-call feeder
-      // (marker-stamped rows; see callrailDailyStatSyncService). Syncs
-      // yesterday+today each pass — full-day recompute, idempotent, one
-      // CallRail API pull. Env-gated here (not via caller params) so the
-      // lite/full phase split can't silently starve it: it runs on EVERY
-      // scheduled tick, business hours included.
-      callrailStatSync:
-        String(process.env.CALLRAIL_STAT_SYNC_ENABLED ?? "false") === "true"
-          ? await (async () => {
-              try {
-                const { syncCallrailDailyStats } = require("./callrailDailyStatSyncService");
-                const dayMs = 24 * 60 * 60 * 1000;
-                const laDay = (offsetDays) =>
-                  new Intl.DateTimeFormat("en-CA", {
-                    timeZone: "America/Los_Angeles",
-                    year: "numeric",
-                    month: "2-digit",
-                    day: "2-digit",
-                  }).format(new Date(Date.now() - offsetDays * dayMs));
-                return await syncCallrailDailyStats({ from: laDay(1), to: laDay(0) });
-              } catch (error) {
-                logger?.warn?.("callrail.stat_sync.failed", { error: error.message });
-                return { error: error.message };
-              }
-            })()
-          : { skipped: true, reason: "disabled" },
+      // callrailStatSync MOVED to runFloorServices — it is a floor service and
+      // must not depend on Phase A running. See the note there.
       // CX recording archive - pulls the previous :45-to-:45 hour of
       // CX-platform calls from RingCX's interaction-metadata, downloads
       // the WAV per segment, and hands off to the existing archive ->
@@ -1181,11 +1250,8 @@ async function runHourlySweep({
       })),
       // Disabled by default: RealValidation spending is limited to
       // intake-time validation plus the once-monthly filler rebuild.
-      dncRecheck: dncRecheckEnabled
-        ? await runDncRecheckSweepIfEnabled().catch((error) => ({
-            error: error.message,
-          }))
-        : { skipped: true, reason: "business-hours-lite" },
+      // dncRecheck MOVED to runFloorServices. It is the floor service this
+      // whole extraction exists for: it stopped when Phase A did.
       // CallLog → CaseProfile bridge — self-healing sweep for cases
       // where a call landed (CallLog row written, caseId resolved)
       // but the CaseProfile promotion never produced a row. Without
@@ -1197,39 +1263,30 @@ async function runHourlySweep({
             error: error.message,
           }))
         : { skipped: true, reason: "business-hours-lite" },
-      // Monthly filler-pool refresh — fires once a month on the
-      // 1st-of-month at 5am PT. Pulls fresh status=2 candidates from
-      // Logics for both tenants, DNC-scrubs them, atomic-ish swaps
-      // the prior month's pool tag, GCs MPI rows whose case is no
-      // longer status=2. Idempotent across multiple ticks in the 5am
-      // window via `hasFreshPoolForTag`.
-      //
-      // Will be retired after AGED_ROLLING_REFRESH_ENABLED is on for
-      // both tenants and we've verified the rolling sweep maintains the
-      // pool steady-state. Until then both run — the daily sweep adds
-      // 30-day-old leads incrementally while the monthly burst rebuilds
-      // from Logics.
-      fillerPoolRefresh: fillerPoolRefreshEnabled
-        ? await runMonthlyFillerPoolRefreshIfDue({ logger }).catch((error) => ({
-            error: error.message,
-          }))
-        : { skipped: true, reason: "business-hours-lite" },
-      // Rolling aged-pool refresh — fires daily at 06:00 PT (and the
-      // graduation sweep additionally on day-1). Gated behind the
-      // AGED_ROLLING_REFRESH_ENABLED env flag. Returns
-      // { skipped: true, reason: ... } outside the 06:00 window or when
-      // the flag is off. Emails the agedPool recipient list with the
-      // checked / promoted / retired summary + per-domain breakdown.
-      agedRollingRefresh: agedRollingRefreshEnabled
-        ? await runAgedRollingRefreshIfDue({ logger }).catch((error) => ({
-            error: error.message,
-          }))
-        : { skipped: true, reason: "business-hours-lite" },
+      // fillerPoolRefresh and agedRollingRefresh MOVED to runFloorServices —
+      // the pool must keep being rebuilt and advanced whatever else retires.
       resolutionEmails: resolutionEmailsEnabled
         ? await sendResolutionEmails({ logger })
         : { skipped: true, reason: "business-hours-lite" },
     };
   }
+
+  // THE FLOOR — outside `if (scheduledPhase)` on purpose.
+  //
+  // These four ran inside Phase A until the control plane hardcoded
+  // `runScheduledPhase = false`, at which point they silently stopped while the
+  // caller went on passing `dncRecheckEnabled: true`. DNC rechecking must never
+  // be gated on a decision about reconciliation scans again.
+  //
+  // Every entry keeps its own internal gate, so running this on every tick
+  // cannot make any of them fire more often than it intends to.
+  summary.floor = await runFloorServices({
+    dncRecheckEnabled,
+    fillerPoolRefreshEnabled,
+    agedRollingRefreshEnabled,
+    logger,
+    impls: floorImpls,
+  });
 
   summary.phaseB = await drainHourlyJobQueue({
     workerName,
@@ -1249,6 +1306,7 @@ module.exports = {
   DEFAULT_RESOLUTION_LOOKBACK_MS,
   RESOLUTION_NOTE_MARKER,
   drainHourlyJobQueue,
+  runFloorServices,
   runHourlySweep,
   sendResolutionEmails,
   summarizeHourlySweepResult,
