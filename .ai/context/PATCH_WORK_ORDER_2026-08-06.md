@@ -6,6 +6,12 @@ Status: OPEN. Sections run in dependency order, not theme order.
 ```
 ⟳ BUILD STATUS — read this first after any compaction or re-entry
 ────────────────────────────────────────────────────────────────────
+2026-08-06 (3): B1 IS DONE — commit 9730cfa, 9 tests, awaiting the
+first post-deploy cycle for VERIFY-LIVE. Next action: B2 (the plan()
+fix in nightlyHygieneRuntime). One correction from doing B1:
+summarizeHourlySweepResult never read the four floor keys, so the
+planned step-3 summarize edit was a no-op and was skipped.
+
 2026-08-06 (2): EXECUTION DETAIL ADDED. Every near-term step now
 carries PATCH / TEST / VERIFY blocks with file:line anchors verified
 against code (not docs) on this date. Branch: jira/hourly-migration,
@@ -125,7 +131,21 @@ No pushing until Mickey says push.
 
 ## §2. Hard blockers — before any pass work
 
-### B1. Restore the four floor services *(medium)*
+### B1. Restore the four floor services — ✅ DONE (9730cfa)
+
+Landed as specified, with two deviations worth recording:
+- Step 3 (summarize reads) was a NO-OP: `summarizeHourlySweepResult`
+  never read the four keys. Verified by grepping its whole body before
+  skipping it. Smaller diff than planned.
+- Skip reasons for the three flag-gated entries changed from
+  "business-hours-lite" to "floor-service-disabled" — the old string
+  named a mode these no longer participate in and would have misled
+  whoever next read a summary.
+Nine tests in tests/metrics/hourlyFloor.test.js, including the exact
+flag shape server.js sends and a both-directions no-double-call check.
+VERIFY-LIVE still outstanding (see below).
+
+
 
 **Cause (verified):** server.js:810-822 passes `dncRecheckEnabled: true`,
 `fillerPoolRefreshEnabled: true`, `agedRollingRefreshEnabled: true` into
