@@ -936,10 +936,24 @@ const TASKS = [
         return { written: 0, skipped: 0, failed: 1, errors: ["activity-review-runtime-unavailable"] };
       }
       const r = await activityReviewRuntime.runActivityReview({ scheduled: true, logger });
+      // READ THE SHAPE THE SERVICE ACTUALLY RETURNS.
+      //
+      // This used to read `r.written || r.reviewed`, neither of which exists on
+      // it: runActivityReview hands back the raw service result, whose counts live
+      // under `processed` (see logicsActivityReviewRuntime's lastResult mapping —
+      // parsedRows / outputRows / suspendedOutputRows / aiReview.reviewedCases).
+      // So a review that did a full night's work reported written: 0, and the
+      // hygiene summary said nothing happened.
+      const p = r?.processed || {};
       return {
-        written: Number(r?.written || r?.reviewed || 0),
-        skipped: Number(r?.skipped || 0),
-        failed: Number(r?.failed || 0),
+        // What it WROTE: the notice and suspended rows it emitted.
+        written: Number(p.outputRows || 0) + Number(p.suspendedOutputRows || 0),
+        // What the AI looked at — reported separately because reviewing is not writing.
+        reviewed: Number(p.aiReview?.reviewedCases || 0)
+          + Number(p.suspendedAiReview?.reviewedCases || 0),
+        rows: Number(p.parsedRows || 0),
+        skipped: 0,
+        failed: r ? 0 : 1,
       };
     },
     // See the note on spend-sync's count(): no count() means apply() never runs.

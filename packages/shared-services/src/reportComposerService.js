@@ -783,11 +783,19 @@ async function gatherMaterial({
           material.queueUnavailable = `only ${stored.coverage.daysStored} of ${stored.coverage.daysRequested} day(s) captured`
             + (miss ? ` — missing ${stored.coverage.missing.slice(0, 5).join(", ")}${miss > 5 ? ` +${miss - 5} more` : ""}` : "")
             + (stored.coverage.partialDays.length ? ` — partial: ${stored.coverage.partialDays.join(", ")}` : "");
-          fail(`queue counts INCOMPLETE — ${material.queueUnavailable}`);
+          // ADVISORY, not a failure. The capture that fills this store is
+          // disarmed in code (LEGACY_QUEUE_ROLLUP_WRITES_ENABLED), superseded by
+          // DailyReportFact — so incomplete coverage is now the expected steady
+          // state, not a fault, and failing on it marked every monthly report
+          // [DEGRADED] for a condition nobody intends to fix. The number is still
+          // withheld and still said out loud; it just no longer condemns the report.
+          advise(`queue counts INCOMPLETE — ${material.queueUnavailable}`);
         } else {
           material.queueUnavailable = `${days.length} days exceeds QUEUE_DAY_LOOP_MAX (${QUEUE_DAY_LOOP_MAX})`
             + " and no nightly rollups are stored for this range yet";
-          fail(`queue counts unavailable — ${material.queueUnavailable}`);
+          // Same reasoning as the partial case above: no stored rollups at all is
+          // now the expected state for a long range, not a fault.
+          advise(`queue counts unavailable — ${material.queueUnavailable}`);
         }
       } catch (error) {
         material.queueByAgent = {};

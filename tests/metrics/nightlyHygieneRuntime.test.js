@@ -623,3 +623,34 @@ test("losing the cursor on a DARK task aborts the pass, it does not retry", asyn
     DailyLoopRun.updateOne = originalUpdate;
   }
 });
+
+test("activity-review reports the counts the service actually returns", async () => {
+  // It used to read r.written / r.reviewed, neither of which the service returns —
+  // so a full night's review reported written: 0 and the summary said nothing
+  // happened. The real counts live under `processed`.
+  const s = createNightlyHygieneRuntime({}).getState();
+  const task = createNightlyHygieneRuntime({}).TASKS.find((t) => t.key === "activity-review");
+  assert.ok(task, "activity-review must be registered");
+  const applied = await task.apply([{ dateKey: "2026-08-05" }], {
+    activityReviewRuntime: {
+      runActivityReview: async () => ({
+        processed: {
+          parsedRows: 5, outputRows: 3, suspendedOutputRows: 1,
+          aiReview: { reviewedCases: 2 }, suspendedAiReview: { reviewedCases: 1 },
+        },
+      }),
+    },
+  });
+  assert.equal(applied.written, 4, "3 notice + 1 suspended rows written");
+  assert.equal(applied.reviewed, 3, "2 + 1 cases reviewed by AI");
+  assert.equal(applied.rows, 5, "5 activity rows parsed");
+  assert.equal(applied.failed, 0);
+  assert.ok(s, "state readable");
+});
+
+test("activity-review with no runtime injected is a failure, not a silent zero", async () => {
+  const task = createNightlyHygieneRuntime({}).TASKS.find((t) => t.key === "activity-review");
+  const applied = await task.apply([{ dateKey: "2026-08-05" }], {});
+  assert.equal(applied.failed, 1);
+  assert.equal(applied.written, 0);
+});
