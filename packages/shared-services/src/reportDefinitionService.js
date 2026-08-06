@@ -138,6 +138,19 @@ async function runDefinition(def, {
   // scheduler cannot double-send a night; a person asking for the same day
   // again is not that case. Never set by the scheduler.
   force = false,
+  // Called with the composed report AFTER the day is claimed and BEFORE the
+  // mail goes out.
+  //
+  // Mickey 2026-08-06: "email logic works so why change what works, just put it
+  // in the flow so that it saves a copy then generates the email."
+  //
+  // A HOOK rather than a persistence call, deliberately. The 2026-08-04 split
+  // moved persistence out of here so that sending carries no persistence
+  // concern, and that ruling still holds — this function does not know what a
+  // DailyReportFact is. It just offers the one moment where the report exists
+  // and the mail has not yet been sent, and lets its caller decide what to do
+  // with it.
+  onComposed = null,
 } = {}) {
   const started = Date.now();
   const range = rangeOverride || resolveRange(def.range, now);
@@ -212,6 +225,31 @@ async function runDefinition(def, {
       { new: true },
     );
     if (!claimed && !force) return { ...result, delivered: false, skipped: "already claimed today" };
+
+    // SAVE THE DAY, THEN SEND IT.
+    //
+    // The report exists, the day is claimed, the mail has not gone yet. This is
+    // the only moment where a record can be written from the SAME gather the
+    // email will use — which is the whole point: one ask of Logics, CallRail
+    // and RingCentral, two consumers.
+    //
+    // It runs before the send rather than after because the record is the day's
+    // record, not a receipt for an email. A night where the mail bounced still
+    // happened and its numbers are still worth keeping.
+    //
+    // NOTHING HERE MAY STOP THE MAIL. The 2026-08-04 split existed to keep
+    // persistence off the sending path, and reordering must not quietly undo
+    // that: a save that throws is recorded on the result and the send proceeds.
+    // A missing fact document is a repairable inconvenience; a nightly board
+    // that stopped going out because a Mongo write failed is not.
+    if (typeof onComposed === "function") {
+      try {
+        result.onComposed = await onComposed({ def, range, report });
+      } catch (error) {
+        result.onComposedError = String(error.message || error).slice(0, 200);
+        logger?.info?.(`daily record save failed, sending anyway: ${result.onComposedError}`);
+      }
+    }
 
     // `attachCsv` was stored on every definition and printed as "+csv" on the
     // schedule listing, while nothing anywhere honoured it — the string appears

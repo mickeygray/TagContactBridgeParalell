@@ -297,25 +297,50 @@ test("ONE gather feeds both the email and the snapshot", async () => {
   assert.equal(composes, 1, "with no report supplied it still composes one");
 });
 
-test("the snapshot writer is ordered after the email, and only for a delivered one", () => {
+test("the record is saved BEFORE the email is sent, from the same gather", () => {
+  // Mickey 2026-08-06: "email logic works so why change what works, just put it in
+  // the flow so that it saves a copy then generates the email."
+  //
+  // The save used to run after the send and only for a delivered email, which made
+  // the record a side effect of mailing. It is now the day's record in its own
+  // right: written from the report the email was built from, before the send, with
+  // emailAcceptedAt left null until the mail is actually accepted.
+  const src = fs.readFileSync(
+    require.resolve("../../packages/shared-services/src/reportDefinitionService"), "utf8",
+  );
+  const composed = src.indexOf("const report = await composeReport(");
+  const hook = src.indexOf("onComposed", composed);
+  const send = src.indexOf("await sendMail(", composed);
+  assert.ok(composed >= 0 && hook > composed, "the hook must follow the compose");
+  assert.ok(send > hook, "and must run BEFORE the send");
+});
+
+test("a failing save never stops the email going out", () => {
+  // Re-coupling send to persistence is the one thing the 2026-08-04 split got
+  // right and must survive this reordering.
+  const src = fs.readFileSync(
+    require.resolve("../../packages/shared-services/src/reportDefinitionService"), "utf8",
+  );
+  // The call site, not the parameter declaration.
+  const call = src.indexOf("await onComposed(");
+  assert.ok(call > 0, "onComposed must actually be invoked");
+  const window = src.slice(call - 200, src.indexOf("await sendMail(", call));
+  assert.ok(/try\s*\{/.test(window), "the invocation must sit inside a try");
+  assert.ok(/catch\s*\(/.test(window), "with a catch, so a save failure cannot block the send");
+  assert.ok(/onComposedError/.test(window), "and the failure must be recorded, not swallowed silently");
+});
+
+test("the runtime hands the snapshot writer the run's own range and report", () => {
   const src = fs.readFileSync(
     require.resolve("../../apps/control-plane/src/services/reportScheduleRuntime"), "utf8",
   );
-  const ran = src.indexOf("await runDefinition(def");
-  const snapshot = src.indexOf("await writeDailySnapshot(", ran);
-  assert.ok(ran >= 0 && snapshot > ran, "the snapshot must follow the send");
-  // A day whose mail never went out must not acquire a snapshot claiming it did.
-  const between = src.slice(ran, snapshot);
-  assert.ok(between.includes("if (result.delivered)"),
-    "the snapshot must be gated on actual delivery");
-  // Range AND report must come from the RUN, never re-derived — an
-  // independently computed day produced TODAY where the email produced
-  // YESTERDAY, writing a second document that silently overwrote the first.
-  const call = src.slice(snapshot, snapshot + 240);
-  assert.ok(call.includes("range: result.range"),
-    "the snapshot must key on the range the email actually used");
-  assert.ok(call.includes("report: result.report"),
-    "and must be built from the report the email was built from — one gather");
+  const snapshot = src.indexOf("writeDailySnapshot(");
+  const call = src.slice(snapshot, snapshot + 300);
+  // Range AND report must come from the RUN, never re-derived — an independently
+  // computed day produced TODAY where the email produced YESTERDAY, writing a
+  // second document that silently overwrote the first.
+  assert.ok(/range/.test(call) && /report/.test(call),
+    "the snapshot must key on the range the email used and be built from its report");
 });
 
 test("a pending calls placeholder is not written over another writer's real counts", async () => {

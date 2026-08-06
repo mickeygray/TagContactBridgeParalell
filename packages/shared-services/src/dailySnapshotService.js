@@ -133,7 +133,30 @@ async function writeDailySnapshot({
   }
 }
 
+/**
+ * Record WHEN the mail was accepted, on a day already written.
+ *
+ * The record is now saved before the send, so at write time nothing has been
+ * accepted and emailAcceptedAt is null. This stamps it afterwards, and only when
+ * a provider actually took the message — leaving it null is the honest state for
+ * a night whose mail bounced: the day still happened, the email did not.
+ *
+ * Deliberately its own tiny write rather than a re-save. Rebuilding the fact to
+ * set one timestamp would re-derive every section against a day that has since
+ * moved on, and a stored day must not drift because an email was delivered.
+ */
+async function stampEmailAccepted(dateKey, acceptedAt = new Date(), { Model = null } = {}) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(dateKey || ""))) {
+    throw new Error("stampEmailAccepted needs a YYYY-MM-DD dateKey");
+  }
+  const M = Model || require("../../shared-models/src/DailyReportFact");
+  const res = await M.updateOne({ dateKey }, { $set: { emailAcceptedAt: acceptedAt } });
+  const matched = res?.matchedCount ?? res?.n;
+  return { dateKey, stamped: matched == null ? true : Number(matched) === 1 };
+}
+
 module.exports = {
   writeDailySnapshot,
+  stampEmailAccepted,
   CANONICAL_DEFINITION_NAME,
 };

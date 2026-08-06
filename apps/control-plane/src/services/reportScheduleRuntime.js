@@ -21,6 +21,7 @@ const {
 } = require("../../../../packages/shared-services/src/reportDefinitionService");
 const {
   writeDailySnapshot,
+  stampEmailAccepted,
 } = require("../../../../packages/shared-services/src/dailySnapshotService");
 const { sendMail } = require("../../../../packages/shared-services/src/mailerService");
 const { recordServiceAlert } = require("../../../../packages/shared-services/src");
@@ -72,6 +73,20 @@ function createReportScheduleRuntime({ config = {}, runtime = {} } = {}) {
             logger: log ? { info: (m) => log.info?.("report_schedule.step", { message: String(m).slice(0, 200) }) } : null,
             sendMail,
             fromEmail: getInternalFromEmail(),
+            // SAVE A COPY, THEN GENERATE THE EMAIL — Mickey 2026-08-06.
+            //
+            // runDefinition calls this after claiming the day and before
+            // sending, handing over the report the mail is about to be built
+            // from. So the night gathers ONCE and the record describes exactly
+            // what went out, without a second pass at Logics/CallRail/RingCentral.
+            //
+            // emailAcceptedAt is null here on purpose: at this moment nothing
+            // has been accepted, and a record that claimed delivery before the
+            // send would lie on any night the mail bounced. It is stamped below,
+            // once the provider has actually taken it.
+            onComposed: ({ def: d, range, report }) => writeDailySnapshot({
+              def: d, range, report, emailAcceptedAt: null, logger: log,
+            }),
           });
           results.push({
             name: def.name, range: result.range, delivered: result.delivered,
@@ -82,41 +97,53 @@ function createReportScheduleRuntime({ config = {}, runtime = {} } = {}) {
             delivered: result.delivered, durationMs: result.durationMs,
           });
 
-          // THE SNAPSHOT, AFTER THE EMAIL. Moved out of runDefinition on
-          // 2026-08-04 so sending carries no persistence concern.
+          // THE SNAPSHOT NOW RUNS BEFORE THE EMAIL — see onComposed above.
           //
-          // ONE PIPE as of 2026-08-04: it is handed the report the email was
-          // built from (runDefinition already returns it), so the night asks
-          // Logics, CallRail and RingCentral ONCE and the snapshot describes
-          // exactly what was sent. The writer keeps a compose fallback for a
-          // missed night or a backfill; it is simply not used here.
+          // It used to run here, after the send and only for a delivered one, on
+          // the 2026-08-04 ruling that sending should carry no persistence
+          // concern. That ruling still holds and is preserved differently:
+          // runDefinition takes a HOOK and knows nothing about DailyReportFact,
+          // and a save that throws is recorded without blocking the mail.
           //
-          // Both `range` and `report` come from the RUN, never re-derived: the
-          // fact is keyed on range.from, and an independently-derived day
+          // What changed is what the record IS. It was a receipt for an email;
+          // it is now the day's own record, written from the same single gather
+          // the mail is built from. A night whose mail bounced still happened.
+          //
+          // Both `range` and `report` still come from the RUN, never re-derived:
+          // the fact is keyed on range.from, and an independently-derived day
           // produced TODAY where the email produced YESTERDAY, writing a second
           // document that silently overwrote the first.
           //
-          // Deliberately only for a DELIVERED email. A day whose mail never went
-          // out should not acquire a snapshot claiming it did.
-          if (result.delivered) {
-            result.dailyFactCapture = await writeDailySnapshot({
-              def, range: result.range, report: result.report,
-              emailAcceptedAt: new Date(), logger: log,
-            }).catch((error) => ({
-              status: "failed", reason: String(error.message || error).slice(0, 200),
-            }));
+          // The save already happened, before the send (see onComposed above).
+          // All that is left is to stamp WHEN the mail was accepted — and only
+          // if it actually was. A day whose mail never went out keeps its record
+          // and keeps emailAcceptedAt null, which is the honest shape: the day
+          // happened, the email did not.
+          result.dailyFactCapture = result.onComposed
+            || (result.onComposedError
+              ? { status: "failed", reason: result.onComposedError }
+              : { status: "skipped", reason: "no capture attempted" });
+
+          if (result.delivered && result.dailyFactCapture?.status === "written") {
+            await stampEmailAccepted(result.range.from, new Date()).catch((error) => {
+              log?.warn?.("report_schedule.email_stamp_failed", {
+                definition: def.name, dateKey: result.range.from,
+                error: String(error.message).slice(0, 160),
+              });
+            });
           }
 
           if (result.dailyFactCapture?.status === "failed") {
-            // The email was already accepted, so this is an alert—not a retry.
-            // Retrying runDefinition would duplicate the email just to repair
-            // an internal fact document.
+            // An alert, never a retry. The save runs before the send now, but the
+            // send still happened — deliberately, since a failed Mongo write must
+            // not cost the board its night. Re-running the definition to repair an
+            // internal document would email everybody a second time.
             await recordServiceAlert({
               domain: "TAG",
               sourceService: "control-plane",
               category: "daily-report-fact",
               severity: "high",
-              title: "Nightly email sent but daily fact capture failed",
+              title: "Daily fact capture failed; the nightly email was sent anyway",
               summary: String(result.dailyFactCapture.reason || "unknown capture failure").slice(0, 300),
               tags: ["metrics", "daily-facts"],
             }).catch(() => {});
