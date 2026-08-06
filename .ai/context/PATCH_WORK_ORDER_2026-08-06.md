@@ -6,6 +6,16 @@ Status: OPEN. Sections run in dependency order, not theme order.
 ```
 ⟳ BUILD STATUS — read this first after any compaction or re-entry
 ────────────────────────────────────────────────────────────────────
+2026-08-06 (4): B2 IS DONE — commit 6ef75d7, hygiene suite 28/28.
+"Land dark, observe one cycle, arm" now actually produces evidence, so
+E3/E7-E10 and every new pass task can follow it. Next action: B3
+(queue-rollup, needs decision D2 first — every monthly report is
+[DEGRADED] until then). One correction from doing B2: I claimed the
+dark branch's bare-Error cursor throw was a live bug; it was not.
+Probed it — the abort already happened, one indirection later, via the
+retry path's own failing durable write. Changed to cursorLost() for
+directness, not as a fix.
+
 2026-08-06 (3): B1 IS DONE — commit 9730cfa, 9 tests, awaiting the
 first post-deploy cycle for VERIFY-LIVE. Next action: B2 (the plan()
 fix in nightlyHygieneRuntime). One correction from doing B1:
@@ -217,7 +227,23 @@ the ground-truth probe (scripts/analysis re-use: tag-filler-admission-audit).
 **COMMIT:** "Floor services run on every tick, independent of the retired
 Phase A" — note in the message that Phase A remains dark deliberately.
 
-### B2. Restore the standing dry-run in the evening pass *(small)*
+### B2. Restore the standing dry-run — ✅ DONE (6ef75d7)
+
+Landed as specified. Notes for whoever reads a dark cycle next:
+- Dark rows now carry `reason: "standing-dry-run"` (was
+  "write-disabled-no-discovery"), their real `planned` count, and their
+  describe() summary. No external consumer read the old string —
+  grepped apps/ packages/ scripts/ tests/ before changing it.
+- A dark task whose plan() THROWS is now a visible task failure rather
+  than a silent skip. Intended: a task that cannot look should surface
+  before it is armed. It also means a broken dark task now consumes the
+  bounded-retry budget, which it did not before.
+- Cost is live from the next cycle: eleven plan() calls nightly
+  regardless of arming, of which mail-invoice opens a mailbox and
+  call-recovery-discovery consumes a gather.
+- Five tests, four of which failed on the old code.
+
+
 
 **Cause (verified):** nightlyHygieneRuntime.js:1125-1140 — when
 `!armed && !force` the loop pushes `{ skipped: true, reason:
