@@ -401,29 +401,31 @@ the snapshot isnt how it exists but eventually we will get there."*
 So the diagram above is the DESTINATION. Do not build the email off the snapshot
 in this pass.
 
-**BUILD NOW — one process, ordering enforced:**
+**BUILD NOW — one shot, then BRANCH.** Mickey: *"you can do it in one shot and
+just branch — just do both, save the report and send the email separately, so
+you don't have to run the activities twice."*
 
 ```
    ONE PROCESS
    ├─ links → cost → activities
-   ├─ save the snapshot        ← happens FIRST
-   └─ send the email           ← still gathers the way it does today
+   ├─ gather                    ← ONCE. The activities run one time.
+   └─ branch, both from THAT material:
+      ├─ save the snapshot      ← first
+      └─ send the email         ← second
 ```
 
-The only thing being changed now is **that these live in one process, in this
-order.** The email keeps building itself exactly as it currently does. That is
-the whole point of "thinning out, not rebuilding."
+The two branches are **siblings off one gather**, not a writer and a reader. So:
 
-**BUILD EVENTUALLY — the email renders from the snapshot**, at which point the
-two provably cannot disagree because they are one object.
+- The activities never run twice. That is the point of the branch.
+- The snapshot and the email **cannot disagree** — they consume the same
+  in-memory material, so there is no timing gap to reconcile.
+- The email is still *rendered the way it is rendered today*; it is simply fed
+  the material that was already gathered instead of gathering again.
 
-**Be honest about the intermediate state:** until that rewire happens, the
-snapshot and the email are two reads taken minutes apart, so they CAN differ at
-the edges. That is accepted for now — it is strictly better than today, where
-they are two reads taken *ninety minutes* apart on two different clocks. Do not
-paper over the gap by claiming they match; if a report ever has to be
-reconciled against a stored fact before the rewire lands, the timestamps are the
-explanation.
+**BUILD EVENTUALLY — the email renders from the persisted snapshot document**
+rather than from sibling material. Mickey: *"for now building the email from the
+snapshot isn't how it exists, but eventually we will get there."* That is a
+later change and is NOT in scope for this pass.
 
 Two consequences that DO apply immediately:
 
