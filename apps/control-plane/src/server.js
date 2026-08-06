@@ -349,6 +349,15 @@ const BUSINESS_HOURS_LITE_HOURLY_HANDLER_KEYS = Object.freeze([
   "renewRingcentralSubscription",
   "investigateRingcentralSilence",
   "retryLexisDailyDrop",
+  // Added with the nightly payment-reconcile task. That task's service emits a
+  // per-case retry on any non-404 Logics failure (paymentReconcileService:301)
+  // on the "hourly" lane — which IS drained every 60s, but through this
+  // whitelist, and a handler missing from it is filtered out silently. Without
+  // this line those jobs sit `pending` forever: never claimed, so never
+  // dead-lettered either, since markHourlyJobFailed only dead-letters a claimed
+  // attempt. Same shape as the Logics retries already listed above — one case,
+  // one call.
+  "reconcileCasePayments",
 ]);
 
 function summarizeHourlySweepConfig(config = {}) {

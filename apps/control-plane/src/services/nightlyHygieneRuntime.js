@@ -65,6 +65,96 @@ const cursorLost = () => Object.assign(
 // fixed for — and would grow a key per task per day forever.
 const MAX_TASK_ATTEMPTS = Math.max(1, Number(process.env.NIGHTLY_HYGIENE_MAX_TASK_ATTEMPTS) || 3);
 
+// ── RECONCILIATION TRIO WINDOWS AND CAPS ───────────────────────────────────
+//
+// All five of these exist because the three services were written for a pass
+// that ran every hour. Their defaults are hourly-shaped and none of them was
+// forwarded from the Phase A call site, so moving the work to one nightly run
+// without restating them is how a job keeps its name and loses its coverage.
+
+// 26h, not 24h. The window must OVERLAP the previous night's, or a session that
+// arrives between one pass finishing and the next starting falls in the seam.
+// The service floors sinceMs at 5 minutes and imposes no ceiling
+// (ringcentralReconcileService:40), so a day-wide window is legal.
+const SESSION_LOOKBACK_MS = 26 * 60 * 60 * 1000;
+
+// 166 is an RC-CALL BUDGET, not a truncation boundary — an earlier version of
+// this comment claimed the latter and was wrong.
+//
+// The mechanics: the service fetches `min(max(limit,1),500) * 3` rows
+// (ringcentralReconcileService:63), the repository clamps that to 500
+// (workflowRecordRepository:35), and the scan loop then breaks on the RAW limit
+// (:90). So limit=500 would fetch the same ~500 rows and examine up to 500
+// sessions — three times the coverage, no pagination required. The ×3 is a
+// de-dupe buffer for repeated stage rows per session.
+//
+// What actually binds is RingCentral. Each session costs up to two call-log
+// GETs, unpaced, and `fetchCallRecordWithRetry` is invoked with maxRetries:1,
+// which makes the 429 back-off branch unreachable (ringcentralAttributionService
+// :319 tests `attempt < maxRetries`). The first 429 therefore throws AND opens a
+// process-wide circuit in the shared client, which would fail the rest of this
+// pass, not just this task. 166 caps one domain at ~332 GETs. Raising it to 500
+// triples coverage and triples that exposure; make that trade deliberately, and
+// give the retry a real back-off first.
+// The repository clamp is shared by nine callers — do not widen it.
+const SESSION_SCAN_LIMIT = 166;
+
+// 26h so the window overlaps the previous night's; a 6h default run once a day
+// sees a quarter of the day.
+const FIELDS_SYNC_LOOKBACK_HOURS = 26;
+
+// DELIBERATELY LARGE, and it started out small for a reason that turned out to
+// be backwards.
+//
+// staleCheckMs drives the LAST clause of the candidate query
+// (caseProfilePaymentSyncService:290): `paymentReconcile.lastCheckedAt < now -
+// staleCheckMs`. Setting it BELOW the run interval — 20h for a nightly pass —
+// makes that clause match every profile in the domain, because every profile was
+// last stamped a night ago. Measured against the live cluster: 93,076 of 93,076
+// TAG profiles, 20,229 of 20,229 WYNN.
+//
+// That is not a wider audit, it is a broken one. The candidates are a union of
+// two `distinct()` results with NO sort and no cursor, and the service takes
+// `candidateIds.slice(0, cap)` (:561) — so the same head-500 case ids are swept
+// every night forever and the tail is never reached. Worse, every case it
+// touches gets `paymentReconcile.lastCheckedAt` stamped (:397/:438) even on the
+// no-drift path, which does no Logics call at all — and payment-reconcile
+// SELECTS on that same field, oldest-first. A degenerate sweep therefore stamps
+// "Logics has been asked" onto hundreds of cases Logics was never asked about,
+// pushing them to the back of reconcile's wheel.
+//
+// So the nightly pass targets CHANGE, not audit: 30 days leaves the stale clause
+// matching only genuinely-neglected cases, and the two real drift signals — a
+// PaymentLedger row written in the last 26h, and a CaseProfile touched in the
+// last 26h (which includes everything payment-reconcile just wrote) — select the
+// candidates. Those are exactly the cases whose derived fields can have moved.
+//
+// STILL BROKEN, and blocking the arm of this task: the `lastCheckedAt: null`
+// clause matches every never-stamped profile regardless of this value, so the
+// first armed nights are degenerate no matter what. Fixing that needs an ordered
+// cursor in the service, not a constant here.
+const FIELDS_SYNC_STALE_CHECK_MS = 30 * 24 * 60 * 60 * 1000;
+
+// 40m, up from a 10m default the service never extends — runLockRepository
+// exposes extendRunLock but this service never calls it, so a run longer than
+// its TTL loses mutual exclusion. A stale lock now outlives the runtime's whole
+// retry budget (3 attempts × 5-minute poll), which is why a lock-busy sweep of
+// EVERY domain is reported as a failure below rather than as a quiet skip.
+const FIELDS_SYNC_LOCK_TTL_MS = 40 * 60 * 1000;
+
+// Read at call time, never cached, so the cap can be raised on a running box
+// after a cycle has been observed. Separate functions on purpose: Phase A fed
+// ONE maxCasesPerDomain to both services (hourlySweeperService:1125 and :1136),
+// which meant any widening for the reconciler silently widened the fields sync
+// too — and its own default is 500, so inheriting 10,000 would have multiplied
+// it twentyfold without anybody choosing that.
+const nightlyPaymentReconcileMaxCases = () => Math.max(
+  1, Number(process.env.NIGHTLY_PAYMENT_RECONCILE_MAX_CASES) || 500,
+);
+const nightlyPaymentFieldsSyncMaxCases = () => Math.max(
+  1, Number(process.env.NIGHTLY_PAYMENT_FIELDS_SYNC_MAX_CASES) || 500,
+);
+
 async function claimNightlyHygiene(dateKey, at = new Date()) {
   const leaseCutoff = new Date(at.getTime() - HYGIENE_CLAIM_LEASE_MS);
   try {
@@ -1013,6 +1103,346 @@ const TASKS = [
     describe(planned) {
       const p = planned[0] || {};
       return `${p.dateKey || "?"}: review activity across ${(p.domains || []).length} domain(s)`;
+    },
+  },
+  // ── THE RECONCILIATION TRIO ────────────────────────────────────────────────
+  //
+  // These three ran in the hourly sweeper's Phase A. They do NOT run anywhere
+  // today: server.js:703 hardcodes `scheduledPhaseLite = true`, which passes
+  // through as `sessionReconcileEnabled: !scheduledPhaseLite` and friends, so
+  // all three have been off since that line landed. This is therefore
+  // "off → once a night", not "14× → 1×", and the risk to weigh is the burst
+  // one night creates, not the coverage one night loses.
+  //
+  // WHY HERE AND NOT FIRST. The work order put them ahead of night-persist, on
+  // the theory that payment-reconcile produces the rows night-persist stamps.
+  // It does not: night-persist runs runNightPass → runMoneyLoop → pullCaseBilling,
+  // a LIVE Logics pull (paymentTruthService:265), so it never reads a
+  // PaymentLedger row this pass wrote. With no produce/consume edge, the two
+  // stated ordering rules win instead — night-persist keeps index 0 because its
+  // write is the one that cannot be recovered later, and call-recording-index
+  // keeps the last slot because it wants the pass to have finished correcting
+  // data. That also keeps the two longest serial Logics loops out of the front
+  // of the pass, and shifts only ONE existing index (call-recording-index).
+  //
+  // THE CURSOR IS POSITIONAL. nightlyHygieneNextTaskIndex is an array index, not
+  // a key, so a pass half-finished under the old array resumes at the wrong
+  // chore under the new one. Deploy BETWEEN nights, not mid-pass.
+  {
+    // WHAT IT IS: RingCentral sessions that were logged but never attributed to
+    // a source. The service re-asks RC for the call record and resolves it.
+    //
+    // ⚠ THIS TASK'S INPUT IS DEAD, AND THAT IS WHY IT REPORTS RATHER THAN ZEROES.
+    //
+    // Probed 2026-08-06 against the shared cluster: the newest
+    // family:ringcentral / telephony-session workflow record is 2026-06-30, and
+    // there have been zero `ringcentral.attribution.resolved` events since. The
+    // writer is the ringcentral-cx app (ringcentralExService:773), which is
+    // still ALIVE — it wrote family:cx cadence-queue rows today — so this is a
+    // dead feed inside a live service, not a stopped service. The reconciler
+    // itself ran hourly × 3 domains until 2026-08-03 14:00Z and returned
+    // scanned=0 on every single run for 37 days.
+    //
+    // A task that wraps this and reports "0 sessions reconciled" would say
+    // attribution is clean when it means the feed is gone. So plan() counts the
+    // FEED, not the service, and describe() names a dead feed as dead. That also
+    // keeps the standing dry-run cheap: plan() must run every night whether or
+    // not this is armed, and the service cannot be dry-run safely — its
+    // resolveInboundCallSource call sits OUTSIDE the dryRun guard
+    // (ringcentralReconcileService:140) and would burn RC quota nightly on a
+    // dark task.
+    key: "session-reconcile",
+    label: "Reconcile unattributed RingCentral sessions",
+    writesArmed: () => String(process.env.NIGHTLY_SESSION_RECONCILE_ENABLED || "false").toLowerCase() === "true",
+    async plan({ domains, logger }) {
+      const { WorkflowRecord } = require("../../../../packages/shared-models/src");
+      const cutoff = new Date(Date.now() - SESSION_LOOKBACK_MS);
+      const out = [];
+      for (const domain of domains) {
+        const feed = {
+          domain, family: "ringcentral", subtype: "call",
+          stage: "completed", aggregateType: "telephony-session",
+        };
+        try {
+          const [inWindow, newest] = await Promise.all([
+            WorkflowRecord.countDocuments({ ...feed, happenedAt: { $gte: cutoff } }),
+            WorkflowRecord.findOne(feed).sort({ happenedAt: -1 }).select({ happenedAt: 1 }).lean(),
+          ]);
+          out.push({
+            domain,
+            sessions: Number(inWindow) || 0,
+            newestEver: newest?.happenedAt || null,
+            examineCap: SESSION_SCAN_LIMIT,
+          });
+        } catch (error) {
+          // A feed we could not COUNT is not an empty feed.
+          logger?.warn?.(`session-reconcile plan failed for ${domain}: ${error.message}`);
+          out.push({ domain, sessions: null, newestEver: null, error: String(error.message).slice(0, 160) });
+        }
+      }
+      return out;
+    },
+    count(planned) {
+      return planned.reduce((acc, p) => acc + (Number(p.sessions) || 0), 0);
+    },
+    async apply(planned, { logger, sessionReconcileImpl = null }) {
+      const reconcile = sessionReconcileImpl
+        || require("../../../../packages/shared-services/src/ringcentralReconcileService")
+          .reconcileUnattributedSessions;
+      const out = { written: 0, scanned: 0, unmatched: 0, truncated: 0, skipped: 0, failed: 0, errors: [] };
+      for (const row of planned) {
+        // A domain we could not COUNT is not a domain with nothing in it, and
+        // it must not land in the same bucket. `skipped` means "asked, empty";
+        // this is "never asked", and it is a failure.
+        if (row.sessions === null) {
+          out.failed += 1;
+          out.errors.push(`${row.domain}: NOT EXAMINED — ${row.error || "feed count failed"}`);
+          continue;
+        }
+        // Nothing to look at, and nothing to learn by asking RC.
+        if (!row.sessions) { out.skipped += 1; continue; }
+        try {
+          const r = await reconcile({
+            domain: row.domain,
+            sinceMs: SESSION_LOOKBACK_MS,
+            limit: SESSION_SCAN_LIMIT,
+            logger,
+          });
+          const s = r?.stats || {};
+          out.written += Number(s.resolved) || 0;
+          out.scanned += Number(s.scanned) || 0;
+          out.unmatched += Number(s.unmatched) || 0;
+          out.failed += Number(s.errors) || 0;
+          // The service stops at `limit` and says nothing about it. Anything
+          // above the cap was never examined — count it so the summary can.
+          if ((Number(s.scanned) || 0) >= SESSION_SCAN_LIMIT) {
+            out.truncated += Math.max(0, (Number(row.sessions) || 0) - SESSION_SCAN_LIMIT);
+          }
+        } catch (error) {
+          out.failed += 1;
+          out.errors.push(`${row.domain}: ${String(error.message).slice(0, 160)}`);
+        }
+      }
+      return out;
+    },
+    describe(planned) {
+      const unreadable = planned.filter((p) => p.sessions === null);
+      if (unreadable.length && unreadable.length === planned.length) {
+        return `COULD NOT COUNT THE SESSION FEED — ${unreadable[0]?.error || "unknown"}`;
+      }
+      // A PARTIAL failure has to lead, not be folded into the count.
+      //
+      // The all-or-nothing guard above used to be the only one, so one domain's
+      // Mongo hiccup rendered as "no unattributed sessions in the window" — or,
+      // when the other domains were legitimately empty, as the confident
+      // "THE SESSION FEED IS DEAD". Both are the exact could-not-look /
+      // was-not-there conflation this task exists to avoid, and a dead-feed
+      // banner is not a claim to make on partial evidence.
+      const partial = unreadable.length
+        ? `${unreadable.map((p) => p.domain).join(", ")} NOT COUNTED (${unreadable[0]?.error || "unknown"})`
+        : "";
+      const readable = planned.filter((p) => p.sessions !== null);
+      const total = readable.reduce((acc, p) => acc + (Number(p.sessions) || 0), 0);
+      if (partial) {
+        return `${partial} — of the ${readable.length} domain(s) read, ${total} session(s)`;
+      }
+      if (!total) {
+        // The whole reason this task describes rather than reports a number.
+        const newest = planned
+          .map((p) => p.newestEver).filter(Boolean)
+          .sort((a, b) => new Date(b) - new Date(a))[0] || null;
+        if (!newest) return "THE SESSION FEED IS DEAD — no telephony-session has EVER been recorded";
+        const days = Math.floor((Date.now() - new Date(newest).getTime()) / 86400000);
+        if (days >= 2) {
+          // toISOString, NOT String(). plan() reads through .lean(), so
+          // newestEver is a Date — and String(date).slice(0,10) renders
+          // "Tue Jun 30", dropping the year from the one line whose whole job
+          // is to say how long this feed has been dead.
+          return `THE SESSION FEED IS DEAD — nothing written since ${new Date(newest).toISOString().slice(0, 10)}`
+            + ` (${days} days). ringcentral-cx is still running; its telephony-session writer is not.`;
+        }
+        return "no unattributed sessions in the window";
+      }
+      const capped = readable.filter((p) => (Number(p.sessions) || 0) > SESSION_SCAN_LIMIT);
+      return `${total} session(s) across ${readable.length} domain(s)`
+        + (capped.length
+          ? ` — CAP ${SESSION_SCAN_LIMIT}/domain, ${capped.map((p) => `${p.domain} leaves ${p.sessions - SESSION_SCAN_LIMIT} unexamined`).join(", ")}`
+          : "");
+    },
+  },
+  {
+    // Pulls each case's billing from Logics and writes any ledger row we do not
+    // already have. This is the money reconciler; payment-fields-sync below
+    // reads what it writes, which is why it runs FIRST.
+    //
+    // THE CAP IS 500/DOMAIN, NOT 10,000. The work order proposed inheriting
+    // nightlyCloseService:267's 10,000, on the reasoning that a nightly pass
+    // needs a nightly-sized cap. Two problems. The loop is strictly serial and
+    // unpaced (paymentReconcileService:600) at one Logics round-trip per case
+    // plus one more per new SUCCESS row, and logicsClient has no rate limiter,
+    // no concurrency cap and a 20s timeout (logicsClient:107) — so 10,000 ×
+    // three domains is hours, against a 45-minute claim lease
+    // (HYGIENE_CLAIM_LEASE_MS). And that 10,000 is dead code anyway:
+    // nightlyCloseService:259 short-circuits to "retired-from-nightly-close"
+    // before ever reaching it. 500 × 3 is ~1,500 serial calls, which fits the
+    // lease with room for the timeout tail. Raise it deliberately, after a
+    // cycle has been observed — that is what the env override is for.
+    key: "payment-reconcile",
+    label: "Reconcile payments against Logics (ledger truth)",
+    writesArmed: () => String(process.env.NIGHTLY_PAYMENT_RECONCILE_ENABLED || "false").toLowerCase() === "true",
+    async plan({ domains }) {
+      // Deliberately does NOT enumerate candidates. The only honest count would
+      // come from re-running the service's own candidate queries, which drifts
+      // the moment the service changes its lanes — and the service has no
+      // Logics-free dry run. One indivisible unit, per the spend-sync idiom.
+      return [{ domains: [...domains], maxCases: nightlyPaymentReconcileMaxCases() }];
+    },
+    count() { return 1; },
+    async apply(planned, { logger, paymentReconcileImpl = null }) {
+      const reconcile = paymentReconcileImpl
+        || require("../../../../packages/shared-services/src/paymentReconcileService")
+          .reconcilePaymentsForDomain;
+      const p = planned[0] || {};
+      const out = {
+        written: 0, casesScanned: 0, casesWithPayments: 0,
+        flaggedFailures: 0, reversals: 0, capSaturated: 0, failed: 0, errors: [], domains: [],
+      };
+      for (const domain of p.domains || []) {
+        try {
+          const r = await reconcile({
+            domain,
+            maxCases: p.maxCases,
+            // "hourly" is correct even from the nightly pass. Retry jobs are
+            // claimed by drainHourlyJobQueue, which runs every 60s OUTSIDE the
+            // dead scheduledPhase gate (hourlySweeperService:1281) — so an
+            // hourly-lane job is picked up within the hour. The "nightly" lane
+            // would hardcode 02:00 (hourlyJobEventService:26), which is not
+            // when this pass fires and has no claimer.
+            lane: "hourly",
+            logger,
+          });
+          out.written += Number(r?.newLedgerRows) || 0;
+          out.casesScanned += Number(r?.casesScanned) || 0;
+          out.casesWithPayments += Number(r?.casesWithPayments) || 0;
+          out.flaggedFailures += Number(r?.flaggedFailures) || 0;
+          out.reversals += Number(r?.reversals) || 0;
+          out.failed += Number(r?.errors) || 0;
+          // SAY WHEN THE CAP BOUND. staleAfterMs stays at the service's 1-hour
+          // default, so run once a night every profile is "due" and the due lane
+          // fills to maxCases on any domain bigger than the cap — measured at
+          // 93,076 profiles for TAG. A saturated night is a partial night, and
+          // total/maxCases nights to complete one wheel, which the operator can
+          // only weigh if the saturation is reported rather than inferred.
+          const saturated = (Number(r?.due ?? r?.casesScanned) || 0) >= p.maxCases;
+          if (saturated) out.capSaturated += 1;
+          out.domains.push({
+            domain, newLedgerRows: Number(r?.newLedgerRows) || 0, capSaturated: saturated,
+          });
+        } catch (error) {
+          // One domain's Logics outage must not cost the other two.
+          out.failed += 1;
+          out.errors.push(`${domain}: ${String(error.message).slice(0, 160)}`);
+          out.domains.push({ domain, error: true });
+        }
+      }
+      return out;
+    },
+    describe(planned) {
+      const p = planned[0] || {};
+      return `up to ${p.maxCases} case(s) per domain across ${(p.domains || []).join(", ") || "no domains"}`
+        + " — serial Logics pulls, ledger rows written only where Logics has one we do not";
+    },
+  },
+  {
+    // Recomputes the CaseProfile payment-derived fields from the ledger. Runs
+    // AFTER payment-reconcile, and that order is load-bearing for a reason the
+    // work order did not name: BOTH services stamp the same checkpoint,
+    // `paymentReconcile.lastCheckedAt` (paymentReconcileService:485,
+    // caseProfilePaymentSyncService:397/438), and reconcile SELECTS on it
+    // (caseProfileRepository:852). Reversed, this task stamps the checkpoint to
+    // now and suppresses reconcile's own candidate query for exactly the cases
+    // it just touched. Nothing in the code enforces the order — only this
+    // position and the test that pins it.
+    //
+    // THREE WINDOWS ARE WIDENED FOR NIGHTLY, all of which Phase A left at their
+    // hourly defaults because it never forwarded them (hourlySweeperService:529):
+    //   lookbackHours 6 → 26   a 6h window run once a day sees a quarter of it
+    //   staleCheckMs  24h → 20h a case stamped at 20:45 is not `< 20:20` the next
+    //                           night, so a 24h check silently becomes ~47h
+    //   lockTtlMs   10m → 40m   the lock is never extended
+    //                           (runLockRepository.extendRunLock is never called),
+    //                           so a run longer than its TTL loses mutual exclusion
+    key: "payment-fields-sync",
+    label: "Sync CaseProfile payment fields from the ledger",
+    writesArmed: () => String(process.env.NIGHTLY_PAYMENT_FIELDS_SYNC_ENABLED || "false").toLowerCase() === "true",
+    async plan({ domains }) {
+      // Same reasoning as payment-reconcile: listCandidateCaseIds is the
+      // service's own query and re-running it here would drift.
+      return [{
+        domains: [...domains],
+        maxCases: nightlyPaymentFieldsSyncMaxCases(),
+        lookbackHours: FIELDS_SYNC_LOOKBACK_HOURS,
+        staleCheckMs: FIELDS_SYNC_STALE_CHECK_MS,
+      }];
+    },
+    count() { return 1; },
+    async apply(planned, { logger, paymentFieldsSyncImpl = null }) {
+      const sync = paymentFieldsSyncImpl
+        || require("../../../../packages/shared-services/src/caseProfilePaymentSyncService")
+          .runPaymentFieldsSync;
+      const p = planned[0] || {};
+      const out = {
+        written: 0, casesScanned: 0, casesWithDrift: 0, driftDollars: 0,
+        lockBusy: 0, failed: 0, errors: [],
+      };
+      for (const domain of p.domains || []) {
+        try {
+          const r = await sync({
+            domain,
+            lookbackHours: p.lookbackHours,
+            staleCheckMs: p.staleCheckMs,
+            maxCases: p.maxCases,
+            lockTtlMs: FIELDS_SYNC_LOCK_TTL_MS,
+            // Its own owner string. "hourly-sweep" is hardcoded at the Phase A
+            // call site, and a lock held under that name from a nightly pass is
+            // unattributable the one time somebody has to ask who holds it.
+            lockedBy: "nightly-hygiene",
+            logger,
+          });
+          // A skipped run is NOT a clean run — it did no work and must not
+          // read as zero drift.
+          if (r?.skipped) {
+            if (r.reason === "lock-busy") out.lockBusy += 1;
+            else out.errors.push(`${domain}: skipped — ${r.reason || "unknown"}`);
+            continue;
+          }
+          out.written += Number(r?.casesUpdated) || 0;
+          out.casesScanned += Number(r?.casesScanned) || 0;
+          out.casesWithDrift += Number(r?.casesWithDrift) || 0;
+          out.driftDollars += Number(r?.totalDriftDollars) || 0;
+          out.failed += Number(r?.errors) || 0;
+        } catch (error) {
+          out.failed += 1;
+          out.errors.push(`${domain}: ${String(error.message).slice(0, 160)}`);
+        }
+      }
+      // A NIGHT THAT SWEPT NOTHING IS NOT A CLEAN NIGHT. The run lock is global
+      // rather than per-domain, so one stale lock — a deploy that killed the
+      // process before its `finally` released it — blocks every domain for the
+      // full 40-minute TTL, which outlives the runtime's whole retry budget
+      // (3 attempts x 5-minute poll). Reported as a skip that would render
+      // `casesWithDrift: 0`, indistinguishable from a night with no drift.
+      const domainCount = (p.domains || []).length;
+      if (domainCount && out.lockBusy === domainCount) {
+        out.failed += 1;
+        out.errors.push(`every domain was lock-busy — no fields were synced tonight`);
+      }
+      return out;
+    },
+    describe(planned) {
+      const p = planned[0] || {};
+      return `up to ${p.maxCases} case(s) per domain across ${(p.domains || []).join(", ") || "no domains"}`
+        + ` — ${p.lookbackHours}h lookback, ${Math.round(p.staleCheckMs / 86400000)}d stale check`;
     },
   },
   {

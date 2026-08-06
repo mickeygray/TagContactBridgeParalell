@@ -6,6 +6,22 @@ Status: OPEN. Sections run in dependency order, not theme order.
 ```
 ⟳ BUILD STATUS — read this first after any compaction or re-entry
 ────────────────────────────────────────────────────────────────────
+2026-08-06 (7): E7 IS DONE — the reconciliation trio landed dark
+between activity-review and call-recording-index (NOT before
+night-persist; the produce/consume edge the order assumed does not
+exist). 24 tests, 737 pass. Five scope corrections and three ARMING
+BLOCKERS are recorded in the E7 entry — read them before setting any
+of the three flags.
+TWO FINDINGS BIGGER THAN THE STEP ITSELF:
+  * THE RC TELEPHONY-SESSION FEED IS DEAD since 2026-06-30. The
+    ringcentral-cx app is alive and still writing family:cx rows, but
+    its telephony-session writer stopped 37 days ago; the reconciler
+    returned scanned=0 on every run until it too stopped 2026-08-03.
+    Someone must decide: fix the writer, or retire the service.
+  * cx.call.placed has NEVER been emitted — that answers D10 and
+    gates E10.
+Next action: E8 (call log hygiene, evening half).
+
 2026-08-06 (6): E9 IS DONE — NCOA folded into the nightly mailbox
 visit; both old hourly triggers deleted. 7 new tests, 727 pass.
 Next action: E7 (reconciliation trio into the evening, dark).
@@ -409,22 +425,107 @@ construction :2367 (the hygiene task receives it as
 `activityReviewRuntime` — verified in apply()'s deps). Requires E2 landed and
 D6 answered (the 20:00 notice email dies with the standalone runtime).
 
-**E7. Reconciliation trio into the pass, DARK *(large)***
-Three new tasks in this order BEFORE night-persist: session-reconcile,
-payment-reconcile, payment-fields-sync (ordering contract:
-caseProfilePaymentSyncService.js:494+ — fields sync AFTER ledger reconcile).
-Each wraps the same service call Phase A makes today (hourlySweeperService
-:1037-1060), each behind its own default-off flag
-(`NIGHTLY_SESSION_RECONCILE_ENABLED` etc.), each with count().
-Widen `maxCasesPerDomain` for payment-reconcile — 250/domain was sized for
-14 passes/night; nightly needs the 10,000 cap nightlyCloseService used
-(:267). Phase A copies stay until X1 deletes Phase A whole — they are dead
-code on this branch already (runScheduledPhase=false), so no double-run risk
-BEFORE deploy; the X1 commit is where they physically go.
-**TEST:** registry order test (three keys before night-persist); per-task:
-injected service fake, plan/count/apply contract; payment-fields-sync task
-asserts it is ordered after payment-reconcile *(the :494 contract as a
-failable check)*.
+**E7. Reconciliation trio into the pass, DARK *(large)*** — **DONE**, 24 tests.
+Landed as three tasks behind three independent default-off flags
+(`NIGHTLY_SESSION_RECONCILE_ENABLED`, `NIGHTLY_PAYMENT_RECONCILE_ENABLED`,
+`NIGHTLY_PAYMENT_FIELDS_SYNC_ENABLED`). Five things in the original scope were
+wrong and are corrected below; three defects survive that this task cannot fix
+and they are **hard arming blockers**.
+
+**Corrections to the scope as written**
+
+1. **NOT before night-persist.** The stated reason (payment-reconcile produces
+   the rows night-persist stamps) does not hold: night-persist runs
+   runNightPass → runMoneyLoop → `pullCaseBilling`, a LIVE Logics pull
+   (paymentTruthService:265), so it never reads a PaymentLedger row this pass
+   wrote. With no produce/consume edge, the trio sits between activity-review
+   and call-recording-index — which keeps night-persist's irreplaceable write
+   first, keeps the recording index on a corrected day, keeps the two long
+   serial Logics loops out of the front of the pass, and shifts only ONE
+   existing task index. *The cursor is positional: deploy between nights.*
+2. **The ordering citation was wrong.** caseProfilePaymentSyncService:494 is
+   just the function signature. The contract is in the file header at :9-11,
+   and its stated downstream (metricsRefresh) is retired
+   (hourlySweeperService:1190). The reason the order actually matters was never
+   named: BOTH services stamp `paymentReconcile.lastCheckedAt` and reconcile
+   SELECTS on it (caseProfileRepository:852). Now pinned by a test.
+3. **Cap is 500/domain, NOT 10,000.** The 10,000 at nightlyCloseService:267 is
+   dead code (`:259` short-circuits to "retired-from-nightly-close") and the
+   loop is serial and unpaced at ~2 Logics GETs per case against a 45-minute
+   claim lease. Measured: TAG 93,076 profiles, WYNN 20,229, and only 1.3% of
+   TAG carries a ledger row so most cases take the 2-request 404 path. Each cap
+   is also now its OWN env var — Phase A fed one `maxCasesPerDomain` to both
+   services, so widening the reconciler silently widened the fields sync too.
+4. **`staleCheckMs` goes UP to 30d, not down to 20h.** Shrinking it below the
+   run interval makes the candidate query's stale clause match every profile in
+   the domain (measured 93,076/93,076 TAG), and the service slices an UNSORTED
+   union to the cap — the same head-500 ids forever. The nightly pass now
+   targets CHANGE (ledger row or CaseProfile touched in 26h), not audit.
+5. **The retry lane had no claimer.** payment-reconcile's service emits
+   `handlerKey: "reconcileCasePayments"` on the `hourly` lane. That lane IS
+   drained every 60s outside the dead gate — but through
+   `BUSINESS_HOURS_LITE_HOURLY_HANDLER_KEYS`, which did not list that handler,
+   so the jobs would sit `pending` forever and never dead-letter either
+   (markHourlyJobFailed only dead-letters a CLAIMED attempt). Key added to the
+   whitelist in the same commit, per the two-step-handover rule.
+
+**⚠ ARMING BLOCKERS — do not set these flags until each is resolved**
+
+- **payment-fields-sync (BLOCKER, critical).** The service stamps
+  `paymentReconcile.lastCheckedAt` on every case it touches *including the
+  no-drift path, which makes no Logics call at all* (:397/:438). Since
+  payment-reconcile selects on that field oldest-first, a fields-sync pass
+  stamps "Logics has been asked" onto cases Logics was never asked about and
+  pushes them to the back of a 93k-deep wheel. The 30d staleCheck shrinks the
+  blast radius but does not close it: the `lastCheckedAt: null` clause still
+  matches every never-stamped profile, so the first armed nights are degenerate
+  regardless. **Fix needs an ordered cursor in the service, and fields-sync must
+  stop writing reconcile's checkpoint.** Arm payment-reconcile first and alone.
+- **session-reconcile (BLOCKER, medium).** `fetchCallRecordWithRetry` is called
+  with `maxRetries: 1`, which makes the 429 back-off branch unreachable
+  (`attempt < maxRetries` is never true — ringcentralAttributionService:319).
+  The first 429 therefore throws AND opens a **process-wide** circuit in the
+  shared RC client, which would fail every later task in the same pass, not just
+  this one. Give it a real back-off before arming.
+- **session-reconcile has no input anyway (see below).**
+
+**⚠ THE RC SESSION FEED IS DEAD — a finding bigger than E7**
+
+Probed 2026-08-06 against the shared cluster:
+- Newest `family:ringcentral` / `telephony-session` workflow record: **2026-06-30**.
+  The whole `family:ringcentral` namespace stopped that day.
+- `ringcentral.attribution.resolved` events since 2026-06-30: **0** (581 ever).
+- The reconciler ran hourly × 3 domains until 2026-08-03 14:00Z and returned
+  `scanned=0` on **every run for 37 days**.
+- The writer is the **ringcentral-cx** app (ringcentralExService), which is
+  **alive** — it wrote `family:cx` cadence-queue rows the same day. So this is a
+  dead feed inside a live service, not a stopped service.
+- No RC-sourced CallLog rows in 7 days (all 10,300 carry `source: null`).
+- `cx.call.placed`: never emitted — **this also answers D10 / gates E10.**
+
+So session-reconcile has nothing to reconcile. It is built anyway, but its
+`plan()` counts the FEED rather than calling the service, and `describe()` says
+`THE SESSION FEED IS DEAD — nothing written since 2026-06-30` instead of
+rendering 0. Wrapping it naively would have reported "attribution is clean"
+every night forever. **Someone needs to decide whether that writer gets fixed or
+the service gets retired.**
+
+**Also fixed during review** (all found by adversarial pass, all now tested):
+a `String(date).slice(0,10)` in the dead-feed banner that rendered "Tue Jun 30",
+dropping the year off the one line whose job is to show staleness — and the test
+that passed vacuously because it fed an ISO string where `plan()` emits a Date;
+a partial-failure hole where ONE domain's failed feed count rendered as
+"no unattributed sessions" or as a confident dead-feed verdict; `skipped`
+conflating "asked, empty" with "never asked"; a lock-busy sweep of every domain
+reporting as a clean zero; and no signal when payment-reconcile's cap bound the
+night.
+
+**TEST:** 24 in tests/metrics/nightlyReconciliationTrio.test.js, plus the
+registry-order assertion in nightlyHygieneRuntime.test.js. 737 pass across the
+metrics suite; the three server.js-loading suites pass. The claimer test was
+verified failing with the whitelist entry removed.
+**VERIFY-LIVE (open):** one dark cycle — confirm the three dry-run rows appear
+with sane summaries and that session-reconcile prints the DEAD banner.
 
 **E8. Call log hygiene, EVENING half *(medium)*** — new task, DARK:
 `sinceMs` = ms since 12:00 PT today (compute from persistTargetDay's zone

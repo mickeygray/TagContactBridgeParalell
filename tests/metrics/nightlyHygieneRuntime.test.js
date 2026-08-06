@@ -384,10 +384,22 @@ test("the night runs in the stated ORDER", () => {
   // provider, so it wants the rest of the pass to have finished correcting data
   // first. It is also the only task whose output is a new collection rather
   // than a fix to an existing one.
+  // The reconciliation trio sits between activity-review and
+  // call-recording-index, NOT ahead of night-persist as first scoped. There is
+  // no produce/consume edge to force it forward — night-persist pulls its own
+  // money live from Logics (runNightPass -> runMoneyLoop -> pullCaseBilling)
+  // and never reads a PaymentLedger row this pass wrote. So both existing
+  // ordering rules keep their reason: the irreplaceable write stays first, and
+  // the index that wants a corrected day stays last.
+  //
+  // Within the trio, payment-fields-sync MUST follow payment-reconcile — see
+  // the shared-checkpoint test below, which is the failable version of a
+  // contract that until now lived only in a comment.
   assert.deepEqual(s2.tasks.map((t) => t.key),
     ["night-persist", "mail-invoice", "mail-spend-derive", "call-links", "call-recovery-discovery",
       "call-recovery-eligibility-hygiene", "queue-rollup", "logics-source", "spend-sync",
-      "activity-review", "call-recording-index"]);
+      "activity-review", "session-reconcile", "payment-reconcile", "payment-fields-sync",
+      "call-recording-index"]);
   assert.ok(!s2.tasks.some((t) => t.key === "daily-snapshot"),
     "the snapshot is NOT a hygiene task — it branches off the report's own single gather");
 
