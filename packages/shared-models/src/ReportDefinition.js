@@ -69,6 +69,24 @@ const reportDefinitionSchema = new mongoose.Schema(
     lastAttemptKey: { type: String, default: null },
     attemptsToday: { type: Number, default: 0 },
 
+    // WHERE THE NUMBERS COME FROM. null (the default) means compose live, which
+    // is what every definition has always done. "record" means render from the
+    // stored DailyReportFact for the day instead — the side-by-side that proves
+    // the stored day can stand in for a live gather.
+    //
+    // DECLARED BEFORE ANY WRITER SETS IT, deliberately. This schema is strict
+    // (mongoose's default; the options below are timestamps only), so an
+    // updateOne setting a field the schema does not declare is dropped in
+    // silence — and reports modifiedCount: 1 anyway if any other field in the
+    // same $set did change. The failure that produces is worse than a crash:
+    // renderSource never lands, both definitions keep composing, the two emails
+    // come out identical, and a parity check reports 100% agreement for a
+    // renderer that never ran once. The verification would certify the bug.
+    //
+    // Anything that flips this must read the value back and assert it, not
+    // trust modifiedCount.
+    renderSource: { type: String, enum: ["record", null], default: null },
+
     createdBy: { type: String, default: null },
     archivedAt: { type: Date, default: null, index: true },
   },

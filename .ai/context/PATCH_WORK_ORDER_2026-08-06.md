@@ -6,6 +6,29 @@ Status: OPEN. Sections run in dependency order, not theme order.
 ```
 ⟳ BUILD STATUS — read this first after any compaction or re-entry
 ────────────────────────────────────────────────────────────────────
+2026-08-06 (11): E12 - BUILT, NOT FLIPPED. Renderer, schema field,
+runtime branch and comparison script are in; pointing a definition at
+the record is deliberately not done (it is a live email change on a
+host this branch has never shipped to).
+THE RESULT OF E12 IS A LIST, and it is not good news: the stored day
+reproduces ONE of the nightly email's five sections in full. longcalls
+is never stored at all; source, ldcalls and status each lose the exact
+field their email column reads, because OMIT_KEYS strips ratios and
+keyChanges by name. status renders 0 rows, which reads as "no status
+movement". Closing that is a change to the fact builders, NOT to the
+renderer.
+Caught before it could bite: renderSource was undeclared on a strict
+schema, so setting it would have been dropped in silence while
+reporting modifiedCount 1 - both definitions keep composing, the emails
+match every night, and the 7-day parity check certifies a renderer that
+never ran. Schema field landed first; the compare script now refuses to
+report parity unless it can prove two producers.
+Also fixed, live bug found on the way: the nightly snapshot writer
+rebuilt an already-built fact and threw EVERY night. Only 3 of the last
+8 days have a record.
+Next action: E13/D7, or close the OMIT_KEYS gap so the side-by-side can
+converge.
+
 2026-08-06 (10): E11 - RUNBOOK WRITTEN, NOTHING ARMED, and it
 cannot be: the code has never shipped, so there has been no dark cycle
 to observe, and three hard blockers survive. Arming is also a live
@@ -820,29 +843,99 @@ a NON-ZERO count is the proof that the widened window sees PhoneBurner where 65
 minutes saw nothing. If it reads `0 call(s)`, E8's premise did not hold on the
 live host and Stage 2 should not proceed.
 
-**E12. The side-by-side *(large — the point of the patch)***
-1. New packages/shared-services/src/dailyRecordRenderService.js:
-   `renderReportFromRecord({ dateKey })` reads the stored day
-   (readEntryRange detail view + the record's own coverage) and returns an
-   object SHAPED IDENTICALLY to what runDefinition's compose returns for the
-   nightly email — same sections array, same block ids — so the existing
-   email template renders it unchanged. A section null in the record renders
-   as UNKNOWN (invariant 4), never as zero.
-2. reportScheduleRuntime: when a definition carries `renderSource:"record"`,
-   call the renderer instead of composing. One flag on ONE definition.
-3. Point the stray `financial` definition (blocks=["rollup"], fires 20:00
-   daily — currently a pure duplicate) at `renderSource:"record"` via a
-   one-shot script scripts/analysis/point-definition-at-record.js (named
-   Mongo write: ReportDefinition.updateOne on that name only).
-4. scripts/analysis/compare-nightly-emails.js: diff the two sends' numbers
-   per section per day; write a parity line into this file's status block.
-5. After 7 agreeing days: disable BOTH stray definitions
-   (`financial`, `vendor` — schedule.enabled=false, named write). The
-   two-email duplication Mickey noticed ends here, deliberately.
-**TEST:** renderer unit tests — a fixture day renders every section; a day
-with facts.calls null renders UNKNOWN not 0; the renderer never touches the
-network (assert no client construction). Schedule-runtime test: definition
-with renderSource:"record" routes to the renderer (injected fake).
+**E12. The side-by-side *(large - the point of the patch)*** - **BUILT, NOT
+FLIPPED.** Two commits. Steps 1, 2 and 4 are done; step 3 is deliberately not
+done and step 5 is far off, for reasons the recon settled.
+
+**THE HEADLINE: the stored day CANNOT reproduce the nightly email today.**
+Measured against the live collection. The email is the `rollup` preset, and of
+its five sections the record reproduces exactly one in full:
+
+| section | verdict | why |
+|---|---|---|
+| `topline` | FULL | facts.financial carries every field the summary reads |
+| `source` | PARTIAL | `roas` stripped by OMIT_KEYS - the column renders an em-dash |
+| `ldcalls` | PARTIAL | table whole; `connectRate` stripped, so the section SUMMARY cannot be rebuilt |
+| `status` | PARTIAL | `keyChanges` stripped BY NAME - and that IS the section's entire email body. **Renders 0 rows, which reads as "no status movement".** |
+| `longcalls` | **NONE** | the rows are never stored at all; facts.calls holds counts or a "pending" placeholder that flattenFactUpdate deliberately skips |
+
+Verified live by `scripts/analysis/compare-nightly-emails.js`:
+`topline RENDERED 3 / source RENDERED 3 / ldcalls RENDERED 3 / status RENDERED 3
+(0 rows every day) / longcalls UNKNOWN 3`.
+
+Those gaps are not the renderer's bug. The sanitizer strips ratios ON PURPOSE so
+a range report recomputes them from stored parts instead of averaging averages -
+the cost is that a ONE-DAY render simply lacks them. **This list is the result
+of E12**: it is what the record must start storing before it can stand in for a
+gather. Closing it is a change to the fact builders and OMIT_KEYS, not to the
+renderer.
+
+**Also found: only 3 of 8 days have a record at all** (07-31, 08-03, 08-05).
+That is the write-path bug, fixed in its own commit - see below.
+
+**What was built**
+
+1. `packages/shared-services/src/dailyRecordRenderService.js` -
+   `renderReportFromRecord({dateKey})`, returning composeReport's exact envelope
+   (all 15 keys) with `source: "record"`. Re-attaches the live block object from
+   `reportBlocksService.BY_ID`, because `sections[].block` carries FUNCTIONS
+   (`csv`, `termsShort`) that toTemplateData calls and that cannot survive
+   Mongo - the report is not plain data and does not JSON round-trip.
+   A section the record cannot supply is emitted in the composer's OWN failed
+   shape (`error` present, `data` ABSENT), because `block.csv(null)` yields a
+   zero-row table and a zero-row "Calls worth hearing" reads as
+   "nothing worth hearing happened".
+   A MISSING record returns null, never a day of zeroes.
+2. `renderSource` DECLARED on the ReportDefinition schema, before anything
+   writes it - see the blocker below.
+3. `runDefinition` branches on `canRenderFromRecord(def)`; live compose stays
+   the default and untouched. A record-sourced definition with no record for
+   that day THROWS rather than sending.
+4. `scripts/analysis/compare-nightly-emails.js` - read-only, per day per
+   section.
+
+**THE BLOCKER THAT WOULD HAVE CERTIFIED ITS OWN BUG**
+
+`renderSource` did not exist on the schema, and ReportDefinition is strict
+(mongoose default; its only option is `timestamps`). An `updateOne` setting an
+undeclared field is **dropped in silence** and still reports `modifiedCount: 1`
+if anything else in the same `$set` changed. `isModified` does not even flag it.
+
+Had step 3 been done first: the field never lands, the definition keeps
+composing, the two emails are identical every night, and the 7-day comparison in
+step 4 reports **100% parity for a renderer that never executed once**. The
+verification step would have certified the bug.
+
+So the schema field landed first, and `compare-nightly-emails.js` refuses to
+report parity unless it can PROVE two distinct producers - the record side must
+return `source: "record"`, and the schema must know the field. Otherwise it
+prints NOT COMPARABLE and exits non-zero.
+
+**WHY STEP 3 IS NOT DONE.** Pointing `financial` at the record is a live change
+to what one of the two nightly emails contains, on a host this branch has never
+shipped to. The renderer would not exist there. Do it after deploy, with a
+read-back assertion rather than `modifiedCount`.
+
+**AND ONLY `financial` IS EVER A CANDIDATE.** `isDailyFactCaptureCandidate`
+refuses a tenant-scoped definition, so a WYNN record cannot exist. `vendor-ld`
+and `rollup` expand to the same five section ids; the only thing separating them
+is `domain`, which `longcalls.compute` reads
+(`inboundApplies = !domain || domain === "TAG"`). Rendering either vendor
+definition from the all-domain record would reinstate the leak that block's own
+comment records having happened once - it "handed the lead vendor five
+recordings of OUR mail callers". `canRenderFromRecord` refuses a tenant-scoped
+definition for exactly this reason, and a test pins it.
+
+**Step 5** (disable both stray definitions) waits on 7 agreeing days, which
+cannot begin until step 3, which cannot begin until deploy.
+
+**TEST:** 18 in tests/metrics/dailyRecordRender.test.js - envelope key set,
+live block re-attachment, UNKNOWN-not-zero on every path, empty-is-a-real-answer
+vs null-is-not, a section that failed on capture night stays failed, missing
+record returns null, the domain guard, the schema field, and a source-level
+assertion that the renderer requires exactly two modules and never reaches for a
+provider client. Plus 2 in dailyReportFactService.test.js for the write-path
+fix. 774 pass.
 
 **E13** = decision D7 (coverage.complete owner; default compute-on-read).
 

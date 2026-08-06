@@ -308,10 +308,16 @@ test("the record is saved BEFORE the email is sent, from the same gather", () =>
   const src = fs.readFileSync(
     require.resolve("../../packages/shared-services/src/reportDefinitionService"), "utf8",
   );
-  const composed = src.indexOf("const report = await composeReport(");
-  const hook = src.indexOf("onComposed", composed);
-  const send = src.indexOf("await sendMail(", composed);
-  assert.ok(composed >= 0 && hook > composed, "the hook must follow the compose");
+  // Anchored on where the report is PRODUCED, not on composeReport specifically:
+  // there are two producers now (live compose, or a render from the stored day),
+  // and the ordering this test protects is the same for both.
+  const produced = src.indexOf("const recordVerdict = canRenderFromRecord(def);");
+  const composed = src.indexOf("composeReport({", produced);
+  const hook = src.indexOf("onComposed", produced);
+  const send = src.indexOf("await sendMail(", produced);
+  assert.ok(produced >= 0, "the report-production branch must exist");
+  assert.ok(composed > produced, "live compose is still the default branch");
+  assert.ok(hook > produced, "the hook must follow the report being produced");
   assert.ok(send > hook, "and must run BEFORE the send");
 });
 

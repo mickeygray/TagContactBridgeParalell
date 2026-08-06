@@ -13,6 +13,10 @@
 
 const ReportDefinition = require("../../shared-models/src/ReportDefinition");
 const { composeReport, renderHtml, renderText, renderCsvs, toTemplateData } = require("./reportComposerService");
+const {
+  canRenderFromRecord,
+  renderReportFromRecord: renderFromRecord,
+} = require("./dailyRecordRenderService");
 const { resolveSelection } = require("./reportBlocksService");
 
 const DAY_MS = 86400000;
@@ -161,17 +165,48 @@ async function runDefinition(def, {
     throw new Error(`definition "${def.name}" names unknown block(s): ${selection.unknown.join(", ")}`);
   }
 
-  const report = await composeReport({
-    selection: def.blocks && def.blocks.length ? def.blocks : ["daily"],
-    from: range.from, to: range.to,
-    domain: def.domain || null,
-    // composeReport destructures `where`, not `filters`. Passing the wrong key
-    // did not throw — it silently dropped every saved filter, so a definition
-    // saved as "cohort=2024 only" emailed the UNFILTERED numbers and looked
-    // perfectly fine doing it.
-    where: def.filters || [],
-    live: true, logger,
-  });
+  // TWO PRODUCERS OF ONE SHAPE.
+  //
+  // The default is unchanged: compose live. A definition carrying
+  // renderSource:"record" renders from the stored DailyReportFact instead —
+  // the side-by-side that shows whether a stored day can stand in for a live
+  // gather.
+  //
+  // canRenderFromRecord, not a bare field check: it also refuses a
+  // tenant-scoped or filtered definition. The record has no domain dimension
+  // and the longcalls block filters on one, so rendering a WYNN board from an
+  // all-domain record would hand the lead vendor recordings of our own mail
+  // callers — which that block's comment records having happened once already.
+  //
+  // A MISSING RECORD IS NOT AN EMPTY DAY. renderFromRecord returns null and
+  // this throws rather than emailing a confident page of zeroes. The runtime
+  // already treats a throw as "not a run", so the day is retried instead of
+  // being stamped delivered.
+  const recordVerdict = canRenderFromRecord(def);
+  let report;
+  if (recordVerdict.ok) {
+    report = await renderFromRecord({
+      dateKey: range.from,
+      selection: selection.blocks.map((b) => b.id),
+    });
+    if (!report) {
+      throw new Error(
+        `definition "${def.name}" is record-sourced but no DailyReportFact exists for ${range.from}`,
+      );
+    }
+  } else {
+    report = await composeReport({
+      selection: def.blocks && def.blocks.length ? def.blocks : ["daily"],
+      from: range.from, to: range.to,
+      domain: def.domain || null,
+      // composeReport destructures `where`, not `filters`. Passing the wrong key
+      // did not throw — it silently dropped every saved filter, so a definition
+      // saved as "cohort=2024 only" emailed the UNFILTERED numbers and looked
+      // perfectly fine doing it.
+      where: def.filters || [],
+      live: true, logger,
+    });
+  }
 
   const text = renderText(report);
   const templateData = toTemplateData(report, {
