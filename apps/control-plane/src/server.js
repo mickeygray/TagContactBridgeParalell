@@ -44,6 +44,7 @@ const { createEventsRouter } = require("./routes/events");
 const { createHealthRouter } = require("./routes/health");
 const { createHygieneRouter } = require("./routes/hygiene");
 const { createLiveCoachProxyRouter } = require("./routes/liveCoachProxy");
+const { createJiraWebhookRouter } = require("./routes/jiraWebhook");
 const { createLogicsRouter } = require("./routes/logics");
 const { createLexisRouter } = require("./routes/lexis");
 const { createResolutionIntelligenceRouter } = require("./routes/resolutionIntelligence");
@@ -173,6 +174,7 @@ const {
   getPacingConfig,
   isOperatingNow,
   runHourlySweep,
+  runNcoaMailboxIngestIfDue,
   runDueCxAppointments,
   runCxRecordingHourly,
   summarizeHourlySweepResult,
@@ -234,6 +236,16 @@ function createWorkerState() {
     lastResult: null,
     lastError: null,
     timer: null,
+  };
+}
+
+function resolveHourlyNcoaSlot(lastScheduledHour, at = new Date()) {
+  const instant = at instanceof Date ? at : new Date(at);
+  if (!Number.isFinite(instant.getTime())) throw new TypeError("at must be a valid date");
+  const hourKey = instant.toISOString().slice(0, 13);
+  return {
+    hourKey,
+    due: String(lastScheduledHour || "") !== hourKey,
   };
 }
 
@@ -676,7 +688,14 @@ async function startHourlySweepWorker({ config, runtime, workerState, spendSyncR
     // Keeping this false also prevents spend, cadence, payment, recording,
     // and CaseProfile discovery from being resurrected by a config default.
     const runScheduledPhase = false;
-    const currentHourKey = null;
+    // NCOA is an intake owner, not one of the retired broad Phase A scans.
+    // Give it one guarded slot per hour while leaving the expensive generic
+    // scheduled phase dark. The mailbox service itself owns the weekday,
+    // daily-completion, unread-message, and attachment-hash gates.
+    const ncoaSlot = resolveHourlyNcoaSlot(
+      workerState.lastScheduledHour,
+      workerState.lastStartedAt,
+    );
     const mongoState = getMongoReadyState(runtime);
     if (!mongoState.connected) {
       workerState.lastCompletedAt = new Date();
@@ -697,9 +716,7 @@ async function startHourlySweepWorker({ config, runtime, workerState, spendSyncR
       // Claim the hour before running Phase A. If a dependency fails
       // mid-sweep, we still do not retry external hourly work every
       // 60 seconds for the rest of the hour.
-      if (runScheduledPhase) {
-        workerState.lastScheduledHour = currentHourKey;
-      }
+      if (ncoaSlot.due) workerState.lastScheduledHour = ncoaSlot.hourKey;
       const scheduledPhaseLite = true;
       if (scheduledPhaseMode) {
         runtime.logger.info("control-plane.hourly.scheduled_phase_mode", scheduledPhaseMode);
@@ -806,6 +823,12 @@ async function startHourlySweepWorker({ config, runtime, workerState, spendSyncR
         resolutionEmailsEnabled: !scheduledPhaseLite,
         logger: runtime.logger,
       });
+      if (ncoaSlot.due) {
+        result.phaseA = result.phaseA || {};
+        result.phaseA.ncoaMailbox = await runNcoaMailboxIngestIfDue({}).catch((error) => ({
+          error: String(error?.code || error?.name || "ncoa-mailbox-failed").slice(0, 80),
+        }));
+      }
       result.scheduledPhaseMode = businessHoursLiteMode;
       // Legacy duplicate spend owner retained behind an unreachable proof
       // gate for the no-delete window. Dedicated spendSyncRuntime is the only
@@ -846,7 +869,7 @@ async function startHourlySweepWorker({ config, runtime, workerState, spendSyncR
       workerState.lastResult = result;
       workerState.lastError = null;
       const resultSummary = summarizeHourlySweepResult(result);
-      if (result.phaseB?.claimed > 0 || runScheduledPhase) {
+      if (result.phaseB?.claimed > 0 || runScheduledPhase || ncoaSlot.due) {
         runtime.logger.info("control-plane.hourly.tick", {
           features: summarizeHourlySweepConfig(config.hourlySweep || {}),
           summary: resultSummary,
@@ -2048,6 +2071,8 @@ async function startServer() {
     "../../../packages/shared-services/src/callRecoveryDiscoveryService");
   const callRecoveryCompositeSource = require(
     "../../../packages/shared-services/src/callRecoveryCompositeSource");
+  const callRecoveryAdmissionService = require(
+    "../../../packages/shared-services/src/callRecoveryAdmissionService");
   const {
     callRecoveryLeadRepository,
   } = require("../../../packages/shared-repositories/src");
@@ -2057,26 +2082,34 @@ async function startServer() {
   /** Current sale/status evidence for one episode (§13). */
   async function readCallRecoveryCaseState(episode) {
     try {
-      const { CaseProfile } = require("../../../packages/shared-models/src");
-      const profile = await CaseProfile.findOne({
-        domain: String(episode.domain || "").toUpperCase(),
-        // caseId is a string on delivery items and an int on profiles.
-        caseId: Number(episode.caseId),
-      }).select("convertedAt paymentCount totalPaid statusId dnc").lean();
-      if (!profile) return null;
-      const dncIds = new Set(dncStatusIdsForDomain(episode.domain));
+      const { CaseProfile, ClientProfile } = require("../../../packages/shared-models/src");
+      const domain = String(episode.domain || "").toUpperCase();
+      const caseId = Number(episode.caseId);
+      if (!domain || !Number.isSafeInteger(caseId) || caseId < 1) return null;
+      const [profile, retained, payload] = await Promise.all([
+        CaseProfile.findOne({ domain, caseId })
+          .select("convertedAt paymentCount paymentsCount totalPaid initialPayment statusId dnc").lean(),
+        ClientProfile.findOne({ domain, caseNumber: String(caseId) }).select("_id").lean(),
+        createLogicsClient(domain).getCaseInfo(caseId),
+      ]);
+      const raw = payload?.Data ?? payload?.data ?? payload;
+      const current = Array.isArray(raw) ? (raw[0] || null) : raw;
+      if (!current || typeof current !== "object") return null;
+      const statusId = Number(current.StatusID ?? current.Status ?? NaN);
+      const recoveryLogics = leadDeliveryService.resolveCallRecoveryLogicsEligibility({
+        domain,
+        statusId: Number.isFinite(statusId) ? statusId : null,
+      });
       return {
-        convertedAt: profile.convertedAt || null,
-        paymentCount: Number(profile.paymentCount) || 0,
-        totalPaid: Number(profile.totalPaid) || 0,
-        dnc: profile.dnc === true || dncIds.has(Number(profile.statusId)),
+        firstName: String(current.FirstName || current.firstName || "").trim() || null,
+        lastName: String(current.LastName || current.lastName || "").trim() || null,
+        convertedAt: current.SaleDate || profile?.convertedAt || null,
+        paymentCount: Number(profile?.paymentCount || profile?.paymentsCount || 0),
+        totalPaid: Number(profile?.totalPaid || profile?.initialPayment || 0),
+        retainedClient: Boolean(retained),
+        dnc: profile?.dnc === true || recoveryLogics.entityDnc === true,
         activeAppointment: false,
-        // Unreadable status is NULL, so admission holds rather than guessing.
-        allowedProspectStatus: profile.statusId == null
-          ? null
-          : (Array.isArray(config.logicsProspectStatusIds) && config.logicsProspectStatusIds.length
-            ? config.logicsProspectStatusIds.includes(Number(profile.statusId))
-            : !dncIds.has(Number(profile.statusId))),
+        allowedProspectStatus: recoveryLogics.allowedProspectStatus,
       };
     } catch { return null; }
   }
@@ -2090,7 +2123,7 @@ async function startServer() {
    * the correct behaviour, not a gap to paper over: no recovery call may be
    * placed until a real DNC/litigator result exists for that exact phone.
    */
-  async function readCallRecoveryDncState(episode) {
+  async function readCallRecoveryDncState(episode, caseState = null) {
     const stored = episode?.dnc || {};
     return {
       result: stored.result || "unknown",
@@ -2098,7 +2131,7 @@ async function startServer() {
       reason: stored.reason || null,
       // Entity suppression, checked live and independently of the provider
       // result — it outranks everything (§14.3).
-      entityDnc: (await readCallRecoveryCaseState(episode))?.dnc === true,
+      entityDnc: caseState?.dnc === true,
     };
   }
 
@@ -2116,6 +2149,22 @@ async function startServer() {
   if (!callRecoveryActivation.ok) {
     logger.error("call_recovery.configuration_invalid", { error: callRecoveryActivation.error });
   }
+  async function persistCallRecoveryDecision({ episode, decision }) {
+    callRecoveryCounters[decision.decision] = (callRecoveryCounters[decision.decision] || 0) + 1;
+    const current = String(episode?.state || "");
+    let target = null;
+    if (decision.decision === "terminal") target = decision.expire === true ? "expired" : "terminal";
+    else if (decision.decision === "review") target = "review";
+    else if (decision.decision === "hold" && ["awaiting_start", "eligible"].includes(current)) target = "held";
+    else if (decision.decision === "admit" && ["awaiting_start", "held"].includes(current)) target = "eligible";
+    if (!target || target === current) return;
+    await callRecoveryLeadRepository.transitionState(episode.episodeId, {
+      from: current,
+      to: target,
+      expectedVersion: episode.version,
+      reason: decision.reason || "admission-clean",
+    }).catch(() => ({ ok: false }));
+  }
   const leadDeliverySource = callRecoveryActivation.delivery
     ? callRecoveryCompositeSource.createCallRecoveryCompositeSource({
       base: leadDeliveryCadenceSource,
@@ -2124,21 +2173,89 @@ async function startServer() {
       // Admission re-proves status, sale and DNC on EVERY pass. The inputs are
       // resolved here because this is where the live readers live; the decision
       // itself stays in callRecoveryAdmissionService.
-      resolveAdmissionInputs: async ({ episode }) => ({
-        caseState: await readCallRecoveryCaseState(episode),
-        dncState: await readCallRecoveryDncState(episode),
-        contactWindowOpen: resolveQueueDialTimeWindow(
-          { normalizedPhone: episode.normalizedPhone, domain: episode.domain }, new Date(),
-        )?.allowed ?? null,
-        existingWorkItem: await leadDeliveryRepository.findItemBySourceIdentity({
-          domain: episode.domain, caseId: episode.caseId,
-        }),
-      }),
-      onDecision: ({ decision }) => {
-        callRecoveryCounters[decision.decision] = (callRecoveryCounters[decision.decision] || 0) + 1;
+      resolveAdmissionInputs: async ({ episode }) => {
+        const caseState = await readCallRecoveryCaseState(episode);
+        return {
+          caseState,
+          dncState: await readCallRecoveryDncState(episode, caseState),
+          contactWindowOpen: resolveQueueDialTimeWindow(
+            { normalizedPhone: episode.normalizedPhone, domain: episode.domain }, new Date(),
+          )?.allowed ?? null,
+          existingWorkItem: await leadDeliveryRepository.findItemBySourceIdentity({
+            domain: episode.domain, caseId: episode.caseId,
+          }),
+        };
       },
+      onDecision: persistCallRecoveryDecision,
     })
     : leadDeliveryCadenceSource;
+
+  async function linkRecoveryWorkItem({ row, item }) {
+    if (String(row?.sourceKind || "") !== "call_recovery" || !item?.episodeId || !item?._id) return;
+    const linked = await callRecoveryLeadRepository.linkLeadDeliveryItem(item.episodeId, item._id);
+    let episode = linked.episode;
+    if (!linked.ok || !episode) return;
+    if (["awaiting_start", "held"].includes(String(episode.state || ""))) {
+      const staged = await callRecoveryLeadRepository.transitionState(episode.episodeId, {
+        from: episode.state,
+        to: "eligible",
+        expectedVersion: episode.version,
+        reason: "canonical-work-item-created",
+      });
+      if (staged.ok) episode = staged.episode;
+    }
+    callRecoveryCounters.linked = (callRecoveryCounters.linked || 0) + 1;
+  }
+
+  async function activateRecoveryWorkItem({ item }) {
+    if (!item?.episodeId || !item?._id) return;
+    const linked = await callRecoveryLeadRepository.linkLeadDeliveryItem(item.episodeId, item._id);
+    let episode = linked.episode;
+    if (!linked.ok || !episode) return;
+    if (["awaiting_start", "held"].includes(String(episode.state || ""))) {
+      const staged = await callRecoveryLeadRepository.transitionState(episode.episodeId, {
+        from: episode.state,
+        to: "eligible",
+        expectedVersion: episode.version,
+        reason: "provider-acceptance-staging",
+      });
+      if (staged.ok) episode = staged.episode;
+    }
+    if (String(episode?.state || "") === "eligible") {
+      const activated = await callRecoveryLeadRepository.transitionState(episode.episodeId, {
+        from: "eligible",
+        to: "active",
+        expectedVersion: episode.version,
+        reason: "provider-accepted",
+      });
+      if (activated.ok) callRecoveryCounters.providerAccepted = (callRecoveryCounters.providerAccepted || 0) + 1;
+    }
+  }
+
+  async function completeRecoveryAttempt({ item, event, completedAt }) {
+    if (!item?.episodeId || !item?._id) return;
+    const linked = await callRecoveryLeadRepository.linkLeadDeliveryItem(item.episodeId, item._id);
+    const episode = linked.episode;
+    if (!linked.ok || !episode || ["terminal", "expired"].includes(String(episode.state || ""))) return;
+    const effect = callRecoveryAdmissionService.applyCallEndToEpisode({
+      episode,
+      normalizedOutcome: item.lastOutcome,
+      completedAt,
+      dailyAttemptCount: item.dailyAttemptCount,
+      providerCallId: event?.providerCallId || item.providerCallId,
+    });
+    const target = effect.episodeTransition?.to;
+    if (!target || target === episode.state) return;
+    const set = { lastEligibilityCheckedAt: completedAt };
+    const moved = await callRecoveryLeadRepository.transitionState(episode.episodeId, {
+      from: episode.state,
+      to: target,
+      expectedVersion: episode.version,
+      reason: effect.episodeTransition.reason,
+      set,
+    });
+    if (moved.ok) callRecoveryCounters.attemptsCounted = (callRecoveryCounters.attemptsCounted || 0) + 1;
+  }
 
   const leadDeliveryActionHandlers = createControlPlaneLeadDeliveryActionHandlers({
     configuration: leadDeliveryConfiguration,
@@ -2191,6 +2308,9 @@ async function startServer() {
       allowedProspectStatusIds: config.logicsProspectStatusIds,
       limit: 20000,
     }),
+    onSourceItemPersisted: linkRecoveryWorkItem,
+    onProviderAccepted: activateRecoveryWorkItem,
+    onAttemptCompleted: completeRecoveryAttempt,
     // SIMPLE LOOP ONLY: legacy seed/fill/preload/refill methods remain in the
     // file for the no-delete proof window but have no production authority.
     legacyOperatorSurfaceEnabled: false,
@@ -2689,6 +2809,7 @@ async function startServer() {
     }),
   );
   app.use("/api/ai/live-coach", createLiveCoachProxyRouter(auth, { config, logger: runtime.logger }));
+  app.use("/api/jira", createJiraWebhookRouter(auth, runtime));
   app.use("/api/logics", createLogicsRouter(auth));
   app.use("/api/lexis", createLexisRouter(auth, lexisNightlyRuntime, lexisDailyDropRuntime));
   // Resolution intelligence (secondary-sales panel) — per-user permission
@@ -3243,6 +3364,7 @@ module.exports = {
   collectLogicsTaskRows,
   createControlPlaneLeadDeliveryActionHandlers,
   findArmedLegacyVoiceWriters,
+  resolveHourlyNcoaSlot,
   runCxActiveCallOwnersOnce,
   startServer,
 };

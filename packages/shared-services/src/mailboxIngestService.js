@@ -171,7 +171,7 @@ async function recordHandled(key, { handlerKey, messageId, summary }) {
  * Run one pass.
  *
  * A handler is `{ key, gmailQuery, accepts(attachments) -> boolean,
- * process({ message, attachments, subject, from, receivedAt, apply }) }`.
+ * process({ gmail, message, attachments, subject, from, receivedAt, apply }) }`.
  *
  * `apply: false` lists, downloads and classifies but never writes — the same
  * dry-run discipline every other ingest here has, so the funnel can be read
@@ -221,6 +221,12 @@ async function runMailboxIngest({
           stat.accepted += 1;
 
           const result = await handler.process({
+            // The client, so a handler can act on the message itself — mark it
+            // read, archive it — rather than only on its bytes. NCOA needs this:
+            // its Gmail query is unread-scoped, so a handler that never clears
+            // the flag would re-list the same growing set every night and lean
+            // on the dedupe ledger to do nothing with it.
+            gmail: client,
             message,
             attachments,
             messageId: ref.id,

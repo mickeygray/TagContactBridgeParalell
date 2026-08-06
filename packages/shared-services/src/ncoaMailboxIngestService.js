@@ -169,13 +169,21 @@ async function processAttachment({
   gmail,
   message,
   part,
+  // Already downloaded, when the caller has it. The shared mailbox ingest loop
+  // fetches every attachment on a message before handing them to a handler — so
+  // a handler that let this refetch would pull the same bytes from Gmail twice
+  // per file, for no gain and against the same quota.
+  //
+  // Left null the original behaviour is unchanged: fetch it here. That keeps the
+  // standalone runner working exactly as before.
+  buffer: providedBuffer = null,
   config,
   runDir,
   dryRun = false,
 }) {
   const domain = normalizeDomain(config.domain);
   const filename = safeFileName(part.filename || "attachment.csv");
-  const buffer = await readAttachmentBuffer(gmail, message.id, part);
+  const buffer = providedBuffer || await readAttachmentBuffer(gmail, message.id, part);
   if (!buffer || buffer.length === 0) {
     return {
       filename,
@@ -525,4 +533,8 @@ module.exports = {
   listMailboxMessageRefs,
   runNcoaMailboxIngest,
   runNcoaMailboxIngestIfDue,
+  // Exported so the shared mailbox loop can drive NCOA as a handler rather than
+  // opening the mailbox a second time on its own schedule. See ncoaMailboxHandler.
+  buildConfig,
+  processAttachment,
 };
