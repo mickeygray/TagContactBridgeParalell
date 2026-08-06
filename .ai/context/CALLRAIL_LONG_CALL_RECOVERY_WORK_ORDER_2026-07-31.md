@@ -932,6 +932,36 @@ Existing owners:
 - existing drain: outcome/business effects;
 - existing report scheduler: read-only reporting only.
 
+### 21.1 Daily cohort manifest (2026-08-05 ruling)
+
+The completed-day discovery task materializes one idempotent
+`CallRecoveryDailyCohort` document per Pacific date. The manifest contains only
+episode references, aggregate funnel counts, completeness, a digest, and a
+revision. It is not a queue and contains no copied customer/provider data.
+
+- A legitimately empty completed day is stored as `complete` with zero
+  candidates.
+- An unreadable or partially failed day is stored as `incomplete`, never as a
+  confident zero.
+- Replaying identical evidence is a no-op; a deliberate correction updates the
+  same date and increments its revision.
+- Delivery does not read this manifest yet. Connecting it to the provider-neutral
+  source is a separate proof-gated change.
+- The case-level `CallRecoveryLead` remains the evidence authority. The daily
+  manifest only groups those episode references by the date of qualifying call
+  evidence.
+
+Each manifest also stamps the three checked-in policy identifiers that govern
+the cohort. They are business contracts, not environment configuration:
+
+- cadence: voice-only, two attempts per Pacific day, 120-minute retry floor,
+  120-day lifetime, and no same-day retry after a human answer;
+- DNC: full national/state/litigator check at load-in, repeat at days 30/60/90,
+  plus daily Logics DNC suppression;
+- Logics eligibility: TAG Active Prospect only. Proven DNC or a mapped
+  non-prospect state terminates; missing, unmapped, wrong-tenant, or conflicting
+  evidence holds and never authorizes a call.
+
 Bound every pass by count, cursor, time budget, and provider concurrency. A large
 historical backlog cannot starve fresh delivery or Call End draining.
 

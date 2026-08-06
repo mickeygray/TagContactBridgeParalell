@@ -1737,6 +1737,7 @@ async function gatherMaterial({
       .map((v) => [`${v.caseDomain || domain || "TAG"}:${v.caseId}`, v])).values()];
     const statusByCase = {};
     const officerByCase = {};
+    const nameByCase = {};
     if (cases.length && live) {
       try {
         const { createLogicsClient } = require("../../shared-integrations/src");
@@ -1747,6 +1748,15 @@ async function gatherMaterial({
           try {
             const info = unwrapLogics(await client.getCaseInfo(c.caseId));
             if (info?.StatusName) statusByCase[key] = info.StatusName;
+            const firstName = String(info?.FirstName || info?.firstName || "").trim() || null;
+            const lastName = String(info?.LastName || info?.lastName || "").trim() || null;
+            if (firstName || lastName) {
+              nameByCase[key] = {
+                firstName,
+                lastName,
+                displayName: [firstName, lastName].filter(Boolean).join(" "),
+              };
+            }
           } catch { /* one unreadable case must not cost the section */ }
 
           // SETTLEMENT OFFICER LIVES IN THE ACTIVITIES, NOT ON THE CASE.
@@ -1775,7 +1785,7 @@ async function gatherMaterial({
         notes.push(`Logics status lookup unavailable — ${String(error.message).slice(0, 70)}`);
       }
     }
-    material.callContext = { byPhone, statusByCase, officerByCase };
+    material.callContext = { byPhone, statusByCase, officerByCase, nameByCase };
   }
 
   material.notes = notes;

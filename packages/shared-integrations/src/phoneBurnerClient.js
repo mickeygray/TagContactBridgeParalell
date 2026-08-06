@@ -858,6 +858,24 @@ function createPhoneBurnerClient({
       : { ok: false, httpStatus: response.status, reason: response.reason || "provider_rejected" };
   }
 
+  async function updateContactName(contactId, input = {}) {
+    const id = positiveId(contactId, "contactId");
+    const firstName = optionalText(input.firstName, "firstName");
+    const lastName = optionalText(input.lastName, "lastName");
+    if (!firstName && !lastName) throw new TypeError("firstName or lastName is required");
+    const payload = {};
+    if (firstName) payload.first_name = firstName;
+    if (lastName) payload.last_name = lastName;
+    const response = await readOperation({
+      method: "PUT",
+      url: buildUrl(restBase, `contacts/${encodeURIComponent(id)}`),
+      json: payload,
+    }, "update_contact_name");
+    return response.ok && response.data?.status === "success"
+      ? { ok: true, httpStatus: response.status, contactId: id }
+      : { ok: false, httpStatus: response.status, reason: response.reason || "provider_rejected" };
+  }
+
   async function deleteContact(contactId) {
     const id = positiveId(contactId, "contactId");
     const response = await readOperation({ method: "DELETE", url: buildUrl(restBase, `contacts/${encodeURIComponent(id)}`) }, "delete_contact");
@@ -948,6 +966,7 @@ function createPhoneBurnerClient({
     listDialSessions,
     listFolderContacts,
     moveContact,
+    updateContactName,
     refreshAccessToken,
   };
 }

@@ -289,7 +289,8 @@ async function runCallRecoveryDiscovery({
       if (identity.status !== "proved") { funnel.bump(identity.reason); continue; }
       if (identity.domain !== fact.tenantDomain) { funnel.bump("cross-tenant-case"); continue; }
 
-      const open = proveStillOpen(await readCaseState({ domain: identity.domain, caseId: identity.caseId }));
+      const caseState = await readCaseState({ domain: identity.domain, caseId: identity.caseId });
+      const open = proveStillOpen(caseState);
       if (open.status !== "proved") { funnel.bump(open.reason); continue; }
 
       result.qualified += 1;
@@ -300,6 +301,10 @@ async function runCallRecoveryDiscovery({
         domain: identity.domain,
         caseId: identity.caseId,
         normalizedPhone: fact.customerPhone,
+        displayName: caseState?.displayName
+          || [caseState?.firstName, caseState?.lastName].filter(Boolean).join(" ")
+          || null,
+        sourceDateKey: dateKey,
         providerCallId: fact.providerCallId,
         callAt: fact.startedAt,
         durationSec: fact.durationSec,

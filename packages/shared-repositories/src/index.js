@@ -6,6 +6,7 @@ const authOtpChallengeRepository = require("./authOtpChallengeRepository");
 const callLedgerRepository = require("./callLedgerRepository");
 const callLogRepository = require("./callLogRepository");
 const callRecoveryLeadRepository = require("./callRecoveryLeadRepository");
+const callRecoveryDailyCohortRepository = require("./callRecoveryDailyCohortRepository");
 const consentRecordRepository = require("./consentRecordRepository");
 const conversationMessageRepository = require("./conversationMessageRepository");
 const conversationWorkflowRepository = require("./conversationWorkflowRepository");
@@ -61,6 +62,7 @@ module.exports = {
   callLogRepository,
 
   callRecoveryLeadRepository,
+  callRecoveryDailyCohortRepository,
   caseProfileRepository,
   consentRecordRepository,
   conversationMessageRepository,

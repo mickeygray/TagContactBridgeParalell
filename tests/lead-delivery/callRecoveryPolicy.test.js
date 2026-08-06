@@ -10,13 +10,16 @@ const {
 } = require("../../packages/shared-services/src/callrailCallFactService");
 const {
   CALL_RECOVERY_CONTACT_POLICY_ID,
+  CALL_RECOVERY_DNC_POLICY_ID,
   CALL_RECOVERY_INVENTORY_CLASS,
+  CALL_RECOVERY_LOGICS_POLICY_ID,
   POOLS,
   comparePoolItems,
   compareRecoveryPoolItems,
   dailyAttemptLimitForLeadAge,
   decideRecoveryOutcomeState,
   resolveLeadDeliveryContactPolicy,
+  resolveCallRecoveryLogicsEligibility,
   resolveRecoveryEpisodeTiming,
   retryDelayMinutesForLeadAge,
 } = require("../../packages/shared-services/src/leadDeliveryService");
@@ -310,6 +313,38 @@ test("the inventory class is spelled the way the work order specifies", () => {
   // and the stored value would be invisible until it was in live rows.
   assert.equal(CALL_RECOVERY_INVENTORY_CLASS, "callrail_long_call_recovery");
   assert.equal(CALL_RECOVERY_CONTACT_POLICY_ID, "long_call_recovery_120d_2x");
+  assert.equal(CALL_RECOVERY_DNC_POLICY_ID, "full_dnc_loadin_30_60_90_logics_daily_v1");
+  assert.equal(CALL_RECOVERY_LOGICS_POLICY_ID, "tag_active_prospect_only_v1");
+});
+
+test("recovery Logics policy allows only a proved TAG active prospect", () => {
+  const byId = resolveCallRecoveryLogicsEligibility({ domain: "TAG", statusId: 1 });
+  const byText = resolveCallRecoveryLogicsEligibility({
+    domain: "TAG", statusText: "[Active Prospect]-Opened",
+  });
+  assert.deepEqual([byId.decision, byId.allowedProspectStatus, byId.entityDnc], ["allow", true, false]);
+  assert.deepEqual([byText.decision, byText.allowedProspectStatus], ["allow", true]);
+});
+
+test("recovery Logics policy terminates proved DNC and non-prospect states", () => {
+  const dnc = resolveCallRecoveryLogicsEligibility({ domain: "TAG", statusId: 39 });
+  const client = resolveCallRecoveryLogicsEligibility({ domain: "TAG", statusId: 210 });
+  assert.deepEqual([dnc.decision, dnc.entityDnc, dnc.reason], ["terminal", true, "logics-dnc"]);
+  assert.deepEqual(
+    [client.decision, client.allowedProspectStatus, client.reason],
+    ["terminal", false, "not-active-prospect"],
+  );
+});
+
+test("recovery Logics policy holds wrong-tenant, unmapped, and conflicting evidence", () => {
+  for (const input of [
+    { domain: "WYNN", statusId: 1 },
+    { domain: "TAG", statusId: 99999 },
+    { domain: "TAG", statusId: 1, statusText: "[TIER 1]-ACTIVE" },
+  ]) {
+    const result = resolveCallRecoveryLogicsEligibility(input);
+    assert.deepEqual([result.decision, result.allowedProspectStatus], ["hold", null]);
+  }
 });
 
 test("CR-1 stays pure — no Mongo, HTTP, flags or provider code", () => {

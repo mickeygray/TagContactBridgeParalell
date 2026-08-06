@@ -1846,3 +1846,22 @@ Proof requires a source-admission test for untouched/touched states, a
 monotonic cadence-invalidation test, a repository projection gate, and a
 production runtime test where zero-touch work in one pool beats a due retry in
 another.
+
+## Phase 9 one-off stale-review cadence recovery (2026-08-06)
+
+- The reconciled WYNN cohort with one exact completed attempt may be returned
+  from historical `review` to ordinary `follow_up_wait` only when current
+  LeadCadence evidence still proves an allowed prospect, the Logics status
+  check is at or after the reconciled attempt invalidation, and no provider
+  contact remains attached.
+- Preserve the canonical LeadCadence intake timestamp. For this bounded
+  operator recovery only, retain the delivery item's prior `receivedAt` in
+  audit metadata and set its operational delivery age to Pacific day 16 so the
+  existing age policy permits two attempts per business day instead of one.
+- Keep stale/missing status proof, DNC/non-prospect evidence, provider-present
+  rows, terminal rows, and already-normal follow-up rows unchanged.
+- Release through versioned compare-and-set into `follow_up_due`; do not create
+  a second scheduler, provider writer, attempt counter, or recurring override.
+- Prove the exact count-only cohort before and after the write. Original lead
+  identity, source receipt history, status, DNC facts, and provider identities
+  must not be printed or rewritten.

@@ -52,13 +52,25 @@ function nextCheckpointAt(firstQualifyingCallAt, now = new Date()) {
  */
 function classifyRecoveryDnc(result) {
   if (!result || typeof result !== "object") return { result: "failed", reason: "no-response" };
+  if (result.skipped === true) return { result: "failed", reason: "lookup-skipped" };
+  if (result.error) return { result: "failed", reason: "provider-error" };
+  if (result.status && result.status !== "ok") {
+    return { result: "failed", reason: "invalid-response-status" };
+  }
+  if (result.mode === "dnc-lookup" && result.dncFieldsComplete !== true) {
+    return { result: "failed", reason: "incomplete-response" };
+  }
   if (result.isLitigator === true) return { result: "hit", reason: "known-litigator" };
   if (result.onNationalDNC === true) return { result: "hit", reason: "national-dnc" };
   if (result.onStateDNC === true) return { result: "hit", reason: "state-dnc" };
-  // Require the fields to be present and false, not merely absent.
-  const answered = result.onNationalDNC === false || result.onStateDNC === false
-    || result.isLitigator === false;
-  return answered ? { result: "clean", reason: null } : { result: "failed", reason: "incomplete-response" };
+  // Require every disqualifier to be explicitly answered false. A partial
+  // provider response is not permission to call, even when one field is clean.
+  const explicitlyClean = result.onNationalDNC === false
+    && result.onStateDNC === false
+    && result.isLitigator === false;
+  return explicitlyClean
+    ? { result: "clean", reason: null }
+    : { result: "failed", reason: "incomplete-response" };
 }
 
 /**

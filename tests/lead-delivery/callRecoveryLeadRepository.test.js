@@ -156,6 +156,7 @@ const CALL = (over = {}) => ({
   providerCallId: "CAL-1", callAt: new Date("2026-07-30T18:00:00Z"), durationSec: 900,
   eligibleFrom: new Date("2026-07-31T15:00:00Z"),
   expiresAt: new Date("2026-11-27T18:00:00Z"),
+  sourceDateKey: "2026-07-30",
   ...over,
 });
 
@@ -168,6 +169,18 @@ test("the same CallRail call twice is one episode and one piece of evidence", as
   assert.equal(second.duplicate, true);
   assert.equal(model._rows.length, 1);
   assert.deepEqual(model._rows[0].qualifyingCallIds, ["CAL-1"]);
+  assert.deepEqual(model._rows[0].qualifyingDateKeys, ["2026-07-30"]);
+});
+
+test("a later qualifying day joins the same episode and remains daily-queryable", async () => {
+  const { repo, model } = loadRepo();
+  await repo.recordQualifyingCall(CALL());
+  await repo.recordQualifyingCall(CALL({
+    providerCallId: "CAL-2",
+    sourceDateKey: "2026-08-05",
+    callAt: new Date("2026-08-05T18:00:00Z"),
+  }));
+  assert.deepEqual(model._rows[0].qualifyingDateKeys, ["2026-07-30", "2026-08-05"]);
 });
 
 test("a second qualifying call joins the OPEN episode without extending its clock", async () => {
@@ -294,6 +307,18 @@ test("an unchecked episode reads as unknown, not clean", async () => {
   const { repo, model } = loadRepo();
   await repo.recordQualifyingCall(CALL());
   assert.equal(model._rows[0].dnc?.result ?? "unknown", "unknown");
+});
+
+test("linking the same canonical work item is idempotent", async () => {
+  const { repo } = loadRepo();
+  const created = await repo.recordQualifyingCall(CALL());
+  const first = await repo.linkLeadDeliveryItem(created.episode.episodeId, "work-1");
+  const second = await repo.linkLeadDeliveryItem(created.episode.episodeId, "work-1");
+  assert.equal(first.ok, true);
+  assert.equal(first.unchanged, false);
+  assert.equal(second.ok, true);
+  assert.equal(second.unchanged, true);
+  assert.equal(second.episode.version, first.episode.version);
 });
 
 test("the consideration cursor is deterministic and keyset-paged", async () => {

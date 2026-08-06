@@ -68,27 +68,33 @@ function createCallRecoveryCompositeSource({
 
   async function readRecoveryBatch({ inner, limit, now }) {
     const episodes = await repository.listEpisodesForConsideration({
-      states: ["eligible", "awaiting_start"],
+      states: ["eligible", "awaiting_start", "held"],
       asOf: now,
       limit: Math.min(limit, recoveryPageSize),
       after: inner,
+      unlinkedOnly: true,
     });
     const items = [];
     for (const episode of episodes) {
       // ADMISSION RUNS HERE, on every pass, not once at discovery. A clean
       // nightly snapshot cannot authorize a call this afternoon.
       let decision;
+      let inputs = null;
       try {
-        const inputs = await resolveAdmissionInputs({ episode });
+        inputs = await resolveAdmissionInputs({ episode });
         decision = admitEpisode({ episode, now, ...inputs });
       } catch (error) {
         // An admission input that could not be read is a HOLD, never a pass.
         decision = { decision: "hold", reason: "admission-inputs-unavailable", retryable: true };
         void error;
       }
-      onDecision?.({ episode, decision });
+      await onDecision?.({ episode, decision });
       if (decision.decision !== "admit") continue;
-      items.push(buildRecoverySourceRow(episode, { now }));
+      items.push(buildRecoverySourceRow(episode, {
+        now,
+        firstName: inputs?.caseState?.firstName,
+        lastName: inputs?.caseState?.lastName,
+      }));
     }
     const done = episodes.length === 0;
     return {
@@ -128,11 +134,61 @@ function createCallRecoveryCompositeSource({
     };
   }
 
+  async function readOne({ domain, caseId, now = new Date(), ...rest } = {}) {
+    const cadence = typeof base.readOne === "function"
+      ? await base.readOne({ domain, caseId, now, ...rest })
+      : null;
+    if (cadence) return cadence;
+    if (!activation?.delivery || typeof repository.findActiveEpisode !== "function") return null;
+
+    const episode = await repository.findActiveEpisode(domain, caseId);
+    if (!episode || !["eligible", "awaiting_start"].includes(String(episode.state || ""))) return null;
+    let decision;
+    let inputs = null;
+    try {
+      inputs = await resolveAdmissionInputs({ episode });
+      decision = admitEpisode({ episode, now, ...inputs });
+    } catch (error) {
+      decision = { decision: "hold", reason: "admission-inputs-unavailable", retryable: true };
+      void error;
+    }
+    await onDecision?.({ episode, decision });
+    return decision.decision === "admit" ? buildRecoverySourceRow(episode, {
+      now,
+      firstName: inputs?.caseState?.firstName,
+      lastName: inputs?.caseState?.lastName,
+    }) : null;
+  }
+
+  async function readNewerBatch({ after, limit = 250, now = new Date() } = {}) {
+    if (typeof base.readNewerBatch !== "function") {
+      throw new TypeError("base.readNewerBatch is required for durable composite ingestion");
+    }
+    const cadence = await base.readNewerBatch({ after, limit, now });
+    const cadenceItems = Array.isArray(cadence?.items) ? cadence.items : [];
+    if (!activation?.delivery || cadenceItems.length >= limit) return cadence;
+    const recovery = await readRecoveryBatch({
+      inner: null,
+      limit: Math.max(1, limit - cadenceItems.length),
+      now,
+    });
+    return {
+      ...cadence,
+      items: [...cadenceItems, ...recovery.items],
+      // Recovery rows are linked as soon as the canonical item is inserted;
+      // they need no second source high-water and cannot move the cadence
+      // arrival cursor backward.
+      nextHighWater: cadence?.nextHighWater ?? after ?? null,
+      done: cadence?.done === true && recovery.done === true,
+    };
+  }
+
   return {
     readBatch,
     // Pass the rest of the source interface straight through — the ingest loop
     // is not the only caller, and a partial wrapper would break the others.
-    readOne: base.readOne ? (...args) => base.readOne(...args) : undefined,
+    readOne,
+    readNewerBatch: typeof base.readNewerBatch === "function" ? readNewerBatch : undefined,
     readWindowBatch: base.readWindowBatch ? (...args) => base.readWindowBatch(...args) : undefined,
   };
 }

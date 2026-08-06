@@ -135,6 +135,7 @@ function createRealPhoneValidationClient() {
         isLitigator: false,
         isCell: false,
         isValid: false,
+        dncFieldsComplete: false,
         error: "Invalid phone length",
       };
     }
@@ -150,6 +151,7 @@ function createRealPhoneValidationClient() {
         isLitigator: false,
         isCell: true,
         isValid: true,
+        dncFieldsComplete: false,
         skipped: true,
         reason: "missing-api-key",
         error: null,
@@ -186,6 +188,9 @@ function createRealPhoneValidationClient() {
       );
     }
 
+    const dncFieldsComplete = ["national_dnc", "state_dnc", "litigator"]
+      .every((key) => data[key] === "Y" || data[key] === "N");
+
     return {
       mode: "dnc-lookup",
       phone: digits,
@@ -197,6 +202,7 @@ function createRealPhoneValidationClient() {
       isLitigator: data.litigator === "Y",
       isCell: data.iscell === "Y",
       isValid: responseCode === "OK" || responseCode === "",
+      dncFieldsComplete,
       error: null,
     };
   }

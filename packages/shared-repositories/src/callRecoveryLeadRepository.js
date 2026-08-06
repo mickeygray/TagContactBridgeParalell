@@ -83,6 +83,7 @@ async function recordQualifyingCall({
   caseId,
   normalizedPhone,
   displayName = null,
+  sourceDateKey = null,
   providerCallId,
   callAt,
   durationSec,
@@ -110,10 +111,30 @@ async function recordQualifyingCall({
   if (!Number.isInteger(duration) || duration < 0) {
     throw new Error("recordQualifyingCall requires an integer durationSec");
   }
+  const dateKey = sourceDateKey == null ? null : String(sourceDateKey).trim();
+  if (dateKey != null && !/^\d{4}-\d{2}-\d{2}$/.test(dateKey)) {
+    throw new Error("recordQualifyingCall sourceDateKey must be YYYY-MM-DD");
+  }
 
   // Already recorded — replay is a no-op that returns the owning episode.
   const seen = await findEpisodeByQualifyingCallId(callId, { programKey });
-  if (seen) return { episode: seen, inserted: false, evidenceAdded: false, duplicate: true };
+  if (seen) {
+    const needsDateKey = Boolean(dateKey) && !(seen.qualifyingDateKeys || []).includes(dateKey);
+    const safeDisplayName = String(displayName || "").trim() || null;
+    const needsDisplayName = Boolean(safeDisplayName) && !String(seen.displayName || "").trim();
+    if (!needsDateKey && !needsDisplayName) {
+      return { episode: seen, inserted: false, evidenceAdded: false, duplicate: true };
+    }
+    const update = {};
+    if (needsDateKey) update.$addToSet = { qualifyingDateKeys: dateKey };
+    if (needsDisplayName) update.$set = { displayName: safeDisplayName };
+    const repaired = await CallRecoveryLead.findOneAndUpdate(
+      { _id: seen._id },
+      update,
+      { new: true },
+    ).lean();
+    return { episode: repaired || seen, inserted: false, evidenceAdded: false, duplicate: true };
+  }
 
   const open = await findActiveEpisode(dom, cid, { programKey });
   if (open) {
@@ -122,9 +143,15 @@ async function recordQualifyingCall({
     const updated = await CallRecoveryLead.findOneAndUpdate(
       { _id: open._id, state: { $nin: ["terminal", "expired"] } },
       {
-        $addToSet: { qualifyingCallIds: callId },
+        $addToSet: {
+          qualifyingCallIds: callId,
+          ...(dateKey ? { qualifyingDateKeys: dateKey } : {}),
+        },
         $max: { latestQualifyingCallAt: at, maximumObservedDurationSec: duration },
-        $set: { updatedAt: new Date() },
+        $set: {
+          updatedAt: new Date(),
+          ...(displayName ? { displayName: String(displayName).trim() } : {}),
+        },
       },
       { new: true },
     ).lean();
@@ -161,6 +188,7 @@ async function recordQualifyingCall({
       firstQualifyingCallAt: at,
       latestQualifyingCallAt: at,
       qualifyingCallIds: [callId],
+      qualifyingDateKeys: dateKey ? [dateKey] : [],
       maximumObservedDurationSec: duration,
       mailSourceCanonicalId,
       mailSourceName,
@@ -184,7 +212,10 @@ async function recordQualifyingCall({
     const updated = await CallRecoveryLead.findOneAndUpdate(
       { _id: winner._id, state: { $nin: ["terminal", "expired"] } },
       {
-        $addToSet: { qualifyingCallIds: callId },
+        $addToSet: {
+          qualifyingCallIds: callId,
+          ...(dateKey ? { qualifyingDateKeys: dateKey } : {}),
+        },
         $max: { latestQualifyingCallAt: at, maximumObservedDurationSec: duration },
       },
       { new: true },
@@ -285,6 +316,7 @@ async function listEpisodesForConsideration({
   after = null,
   programKey = PROGRAM_KEY,
   domain = null,
+  unlinkedOnly = false,
 } = {}) {
   const query = {
     programKey,
@@ -293,6 +325,7 @@ async function listEpisodesForConsideration({
     expiresAt: { $gt: asOf },
   };
   if (domain) query.domain = String(domain).trim().toUpperCase();
+  if (unlinkedOnly === true) query.linkedLeadDeliveryItemId = null;
   // Keyset pagination on the sort key itself — skip/limit would repeat rows as
   // the set mutates underneath the pass.
   if (after) query.episodeId = { $gt: String(after) };
@@ -373,12 +406,19 @@ async function countByState({ programKey = PROGRAM_KEY } = {}) {
 
 /** Attach the canonical work item this episode produced. */
 async function linkLeadDeliveryItem(episodeId, leadDeliveryItemId) {
+  const itemId = leadDeliveryItemId || null;
   const episode = await CallRecoveryLead.findOneAndUpdate(
-    { episodeId },
-    { $set: { linkedLeadDeliveryItemId: leadDeliveryItemId || null }, $inc: { version: 1 } },
+    { episodeId, linkedLeadDeliveryItemId: { $ne: itemId } },
+    { $set: { linkedLeadDeliveryItemId: itemId }, $inc: { version: 1 } },
     { new: true },
   ).lean();
-  return episode ? { ok: true, episode } : { ok: false, episode: null };
+  if (episode) return { ok: true, episode, unchanged: false };
+  const existing = await CallRecoveryLead.findOne({ episodeId }).lean();
+  const unchanged = Boolean(existing)
+    && String(existing.linkedLeadDeliveryItemId || "") === String(itemId || "");
+  return unchanged
+    ? { ok: true, episode: existing, unchanged: true }
+    : { ok: false, episode: existing || null, unchanged: false };
 }
 
 module.exports = {

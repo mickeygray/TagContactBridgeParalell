@@ -45,6 +45,12 @@ function harness({ cadencePages = [[]], episodes = [], delivery = true, inputs =
       const start = after ? episodes.findIndex((e) => e.episodeId === after) + 1 : 0;
       return episodes.slice(start, start + Math.min(limit, 2));
     },
+    async findActiveEpisode(domain, caseId) {
+      return episodes.find((episode) => (
+        episode.domain === String(domain).toUpperCase()
+        && String(episode.caseId) === String(caseId)
+      )) || null;
+    },
   };
   const decisions = [];
   const src = createCallRecoveryCompositeSource({
@@ -168,4 +174,55 @@ test("the rest of the source interface passes through", async () => {
   });
   assert.deepEqual(await src.readOne(), { caseId: "one" });
   assert.deepEqual(await src.readWindowBatch(), { items: ["w"] });
+});
+
+test("claim-time readOne falls back to an admitted recovery episode", async () => {
+  const episode = EPISODE(7);
+  const { src } = harness({ episodes: [episode] });
+  const row = await src.readOne({ domain: episode.domain, caseId: episode.caseId, now: NOW });
+  assert.equal(row.episodeId, episode.episodeId);
+  assert.equal(row.sourceKind, "call_recovery");
+  assert.equal(row.state, "eligible");
+});
+
+test("claim-time readOne fails closed when recovery admission no longer passes", async () => {
+  const episode = EPISODE(8);
+  const { src } = harness({
+    episodes: [episode],
+    inputs: { ...ADMITTABLE, caseState: { ...ADMITTABLE.caseState, paymentCount: 1 } },
+  });
+  assert.equal(await src.readOne({ domain: episode.domain, caseId: episode.caseId, now: NOW }), null);
+});
+
+test("durable new-arrival reads retain the cadence high-water and append recovery", async () => {
+  const episode = EPISODE(9);
+  const base = {
+    readBatch: async () => ({ items: [], nextCursor: null, done: true }),
+    readNewerBatch: async ({ after }) => ({
+      items: [{ caseId: "fresh" }],
+      nextHighWater: { createdAt: NOW, id: "fresh-1" },
+      done: true,
+      after,
+    }),
+  };
+  const repository = {
+    listEpisodesForConsideration: async (input) => {
+      assert.equal(input.unlinkedOnly, true);
+      return [episode];
+    },
+    findActiveEpisode: async () => episode,
+  };
+  const src = createCallRecoveryCompositeSource({
+    base,
+    repository,
+    activation: { delivery: true },
+    resolveAdmissionInputs: async () => ADMITTABLE,
+  });
+  const result = await src.readNewerBatch({
+    after: { createdAt: new Date("2026-08-03T17:00:00Z"), id: "old" },
+    limit: 10,
+    now: NOW,
+  });
+  assert.deepEqual(result.items.map((item) => item.caseId), ["fresh", episode.caseId]);
+  assert.equal(result.nextHighWater.id, "fresh-1");
 });

@@ -7,6 +7,7 @@ const CallLog = require("./CallLog");
 const ConsentRecord = require("./ConsentRecord");
 const AuthOtpChallenge = require("./AuthOtpChallenge");
 const CallRecoveryLead = require("./CallRecoveryLead");
+const CallRecoveryDailyCohort = require("./CallRecoveryDailyCohort");
 const MailInvoice = require("./MailInvoice");
 const MailSpendDay = require("./MailSpendDay");
 const CaseProfile = require("./CaseProfile");
@@ -59,6 +60,7 @@ const QualityReview = require("./QualityReview");
 const QueueItem = require("./QueueItem");
 const AgentSlice = require("./AgentSlice");
 const ReviewQueueItem = require("./ReviewQueueItem");
+const JiraTaskLink = require("./JiraTaskLink");
 const RunLock = require("./RunLock");
 const SocialResponderConfig = require("./SocialResponderConfig");
 const SourceCanonical = require("./SourceCanonical");
@@ -80,6 +82,7 @@ const MODEL_REGISTRY = Object.freeze({
   ConsentRecord,
   AuthOtpChallenge,
   CallRecoveryLead,
+  CallRecoveryDailyCohort,
   MailInvoice,
   MailSpendDay,
 
@@ -133,6 +136,7 @@ const MODEL_REGISTRY = Object.freeze({
   AgentSlice,
   RcOAuthState,
   ReviewQueueItem,
+  JiraTaskLink,
   RunLock,
   SocialResponderConfig,
   SourceCanonical,
@@ -158,6 +162,7 @@ module.exports = {
   ConsentRecord,
   AuthOtpChallenge,
   CallRecoveryLead,
+  CallRecoveryDailyCohort,
   MailInvoice,
   MailSpendDay,
   CaseProfile,
@@ -211,6 +216,7 @@ module.exports = {
   AgentSlice,
   RcOAuthState,
   ReviewQueueItem,
+  JiraTaskLink,
   RunLock,
   SocialResponderConfig,
   SourceCanonical,

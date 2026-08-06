@@ -683,6 +683,25 @@ test("move and delete use category update and soft-delete path only", async () =
   assert.equal(new URL(requests[1].url).search, "");
 });
 
+test("contact names can be repaired in place without moving or recreating the contact", async () => {
+  const { client, requests } = createHarness(async () => ({
+    ok: true,
+    status: 200,
+    data: { status: "success" },
+  }));
+  const result = await client.updateContactName("9001", {
+    firstName: "Private",
+    lastName: "Example Person",
+  });
+  assert.equal(result.ok, true);
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].method, "PUT");
+  assert.deepEqual(requests[0].json, {
+    first_name: "Private",
+    last_name: "Example Person",
+  });
+});
+
 test("delete does not report an error-shaped 2xx response as success", async () => {
   const { client } = createHarness(async () => ({ ok: true, status: 200, data: { status: "error" } }));
   const result = await client.deleteContact("9001");

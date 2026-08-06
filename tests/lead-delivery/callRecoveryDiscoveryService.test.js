@@ -39,7 +39,14 @@ const LEG = (over = {}) => ({
   ...over,
 });
 
-const OPEN_CASE = { allowedProspectStatus: true, convertedAt: null, paymentCount: 0, totalPaid: 0 };
+const OPEN_CASE = {
+  allowedProspectStatus: true,
+  convertedAt: null,
+  paymentCount: 0,
+  totalPaid: 0,
+  firstName: "Private",
+  lastName: "Example",
+};
 
 function harness(over = {}) {
   const episodes = [];
@@ -179,6 +186,8 @@ test("a clean qualifying day writes exactly one episode", async () => {
   assert.equal(ep.domain, "TAG");
   assert.equal(ep.caseId, "421385");
   assert.equal(ep.normalizedPhone, "7249674387");
+  assert.equal(ep.displayName, "Private Example");
+  assert.equal(ep.sourceDateKey, r.dateKey);
   assert.equal(ep.state, "awaiting_start", "discovered has no legal edge to expired — start past it");
   assert.ok(ep.eligibleFrom > ep.callAt, "start is the NEXT business morning, never same-day");
 });

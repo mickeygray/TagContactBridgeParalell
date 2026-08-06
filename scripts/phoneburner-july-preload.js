@@ -347,7 +347,7 @@ function createProgressReporter({ write = (line) => process.stdout.write(line) }
   };
 }
 
-async function bootstrapRuntime({ configuration, options, env = process.env }) {
+async function bootstrapRuntime({ configuration, options, env = process.env, sourceOverride = null }) {
   const { connectMongo, disconnectMongo } = require("../packages/event-core/src");
   const { getCompanyKeys, getSharedConfig } = require("../packages/shared-config/src");
   const { dncStatusIdsForDomain } = require("../packages/shared-config/src/statusMap");
@@ -389,7 +389,7 @@ async function bootstrapRuntime({ configuration, options, env = process.env }) {
       phoneBurner = createPhoneBurnerClient({ credentialStore });
     }
 
-    const source = createLeadDeliveryCadenceSource({
+    const source = sourceOverride || createLeadDeliveryCadenceSource({
       repository: leadDeliveryRepository,
       domains: getCompanyKeys(),
       // Per-domain DNC off the status catalog — see the same note in
@@ -417,6 +417,10 @@ async function bootstrapRuntime({ configuration, options, env = process.env }) {
       enabled: true,
       actionsEnabled: !options.dryRun,
       refillEnabled: false,
+      // The bounded preload is a compatibility operator and stays disabled
+      // unless an isolated one-off caller explicitly opts in. Production does
+      // not pass this flag and continues to use the simple delivery loop.
+      legacyOperatorSurfaceEnabled: options.legacyOperatorSurfaceEnabled === true,
       // One-off recovery callers must opt in explicitly. Production never
       // passes this flag; its only provider writer remains the simple loop.
       simpleOperatorDirectAccessEnabled: options.simpleOperatorDirectAccessEnabled === true,

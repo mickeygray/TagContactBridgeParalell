@@ -39,7 +39,22 @@ test("ANY hit signal terminates", () => {
 test("a missing, empty or partial answer is FAILED — never clean", () => {
   // The one thing this function must never do is turn "I could not tell" into
   // permission. Absence of a hit is not evidence of a clean read.
-  for (const payload of [null, undefined, {}, "ok", 0, { someOtherField: true }]) {
+  for (const payload of [
+    null,
+    undefined,
+    {},
+    "ok",
+    0,
+    { someOtherField: true },
+    { onNationalDNC: false },
+    { onNationalDNC: false, onStateDNC: false },
+    { onNationalDNC: false, isLitigator: false },
+    { onStateDNC: false, isLitigator: false },
+    { status: "skipped", skipped: true, onNationalDNC: false, onStateDNC: false, isLitigator: false },
+    { status: "invalid", onNationalDNC: false, onStateDNC: false, isLitigator: false },
+    { status: "ok", error: "provider-error", onNationalDNC: false, onStateDNC: false, isLitigator: false },
+    { mode: "dnc-lookup", status: "ok", dncFieldsComplete: false, onNationalDNC: false, onStateDNC: false, isLitigator: false },
+  ]) {
     assert.equal(svc.classifyRecoveryDnc(payload).result, "failed", JSON.stringify(payload));
   }
 });

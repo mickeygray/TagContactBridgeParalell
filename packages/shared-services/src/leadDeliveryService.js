@@ -7,6 +7,7 @@
 // and downstream action ports; it reads no environment or legacy queue state.
 
 const { createHash, randomUUID } = require("crypto");
+const { resolveStatus, STATUS_TABLES } = require("../../shared-config/src/statusMap");
 
 // Pure locator policy. Reads no environment: the allowlist is injected by the
 // caller exactly like every other configuration input in this file.
@@ -34,6 +35,8 @@ const PRODUCTIVITY_REBALANCE_INTERVAL_MS = 15 * 60 * 1000;
 const PRODUCTIVITY_REBALANCE_CUSHION_SIZE = 6;
 const PRODUCTIVITY_REBALANCE_MINIMUM_CUSHION_AGE_DAYS = 17;
 const CALL_RECOVERY_CONTACT_POLICY_ID = "long_call_recovery_120d_2x";
+const CALL_RECOVERY_DNC_POLICY_ID = "full_dnc_loadin_30_60_90_logics_daily_v1";
+const CALL_RECOVERY_LOGICS_POLICY_ID = "tag_active_prospect_only_v1";
 // Spelled exactly as the work order §16 specifies. It was "call_recovery" here,
 // which nothing would have caught until CR-6 started persisting it onto
 // LeadDeliveryItem — at which point the stored inventory class and the contract
@@ -1200,6 +1203,81 @@ function resolveRecoveryEpisodeTiming(firstQualifyingCallAt, {
 function isCallRecoveryItem(item = {}) {
   return String(item.contactPolicyId || item.contactPolicy || "").trim().toLowerCase()
     === CALL_RECOVERY_CONTACT_POLICY_ID;
+}
+
+/**
+ * Recovery's own current-Logics policy.
+ *
+ * The ordinary cadence accepts a configured list of prospect status ids. This
+ * program must not inherit that list: it is a TAG-only recovery program and
+ * the current Logics state is a claim-time safety gate. A mapped Active
+ * Prospect is callable, a proved DNC/non-prospect is terminal, and missing,
+ * unmapped, or contradictory evidence holds.
+ */
+function resolveCallRecoveryLogicsEligibility({
+  domain,
+  statusId = null,
+  statusText = null,
+} = {}) {
+  const normalizedDomain = String(domain || "").trim().toUpperCase();
+  const base = {
+    logicsPolicyId: CALL_RECOVERY_LOGICS_POLICY_ID,
+    allowedProspectStatus: null,
+    entityDnc: null,
+    decision: "hold",
+  };
+  if (normalizedDomain !== "TAG") {
+    return { ...base, reason: "recovery-tenant-unproven" };
+  }
+
+  const numericStatusId = Number(statusId);
+  const hasStatusId = statusId != null && statusId !== "" && Number.isFinite(numericStatusId);
+  const table = STATUS_TABLES[normalizedDomain] || {};
+  const idMapped = hasStatusId
+    && Object.prototype.hasOwnProperty.call(table, numericStatusId);
+  const idCategory = idMapped ? resolveStatus(normalizedDomain, numericStatusId).category : null;
+
+  const text = String(statusText || "").trim();
+  const bracketGroup = (text.match(/^\s*\[([^\]]+)\]/) || [])[1] || null;
+  const normalizedGroup = bracketGroup ? bracketGroup.trim().toLowerCase() : null;
+  let textCategory = null;
+  if (normalizedGroup === "active prospect") textCategory = "prospect";
+  else if (normalizedGroup === "bad/inactive" || /\b(?:dnc|do not call)\b/i.test(text)) {
+    textCategory = "dnc";
+  } else if (normalizedGroup) textCategory = "other";
+
+  // DNC outranks a stale or conflicting prospect label.
+  if (idCategory === "dnc" || textCategory === "dnc") {
+    return {
+      ...base,
+      allowedProspectStatus: false,
+      entityDnc: true,
+      decision: "terminal",
+      reason: "logics-dnc",
+    };
+  }
+  if (idCategory && textCategory && idCategory !== textCategory) {
+    return { ...base, reason: "logics-status-conflict" };
+  }
+
+  const category = idCategory || textCategory;
+  if (!category) return { ...base, reason: "logics-status-unproven" };
+  if (category === "prospect") {
+    return {
+      ...base,
+      allowedProspectStatus: true,
+      entityDnc: false,
+      decision: "allow",
+      reason: "active-prospect",
+    };
+  }
+  return {
+    ...base,
+    allowedProspectStatus: false,
+    entityDnc: false,
+    decision: "terminal",
+    reason: "not-active-prospect",
+  };
 }
 
 function resolveLeadDeliveryContactPolicy(item = {}, { now = new Date() } = {}) {
@@ -3004,6 +3082,9 @@ function createLeadDeliveryRuntime({
   providerConsumptionOrder = null,
   refreshSourceStatuses = null,
   refreshUntouchedSourceStatuses = null,
+  onSourceItemPersisted = null,
+  onProviderAccepted = null,
+  onAttemptCompleted = null,
   // Non-secret exact provider media hosts. Injected, never read from the
   // environment here. Blank means no retained reference is ever promoted,
   // which is the correct fail-closed default for a fresh runtime.
@@ -3071,6 +3152,15 @@ function createLeadDeliveryRuntime({
   }
   if (refreshUntouchedSourceStatuses != null && typeof refreshUntouchedSourceStatuses !== "function") {
     throw new TypeError("refreshUntouchedSourceStatuses must be a function when supplied");
+  }
+  if (onSourceItemPersisted != null && typeof onSourceItemPersisted !== "function") {
+    throw new TypeError("onSourceItemPersisted must be a function when supplied");
+  }
+  if (onProviderAccepted != null && typeof onProviderAccepted !== "function") {
+    throw new TypeError("onProviderAccepted must be a function when supplied");
+  }
+  if (onAttemptCompleted != null && typeof onAttemptCompleted !== "function") {
+    throw new TypeError("onAttemptCompleted must be a function when supplied");
   }
   if (actionsEnabled === true && typeof phoneBurner?.listFolderContacts !== "function") {
     throw new TypeError("phoneBurner.listFolderContacts is required when actions are enabled");
@@ -3770,6 +3860,17 @@ function createLeadDeliveryRuntime({
       leadCadenceId: row.leadCadenceId == null ? null : String(row.leadCadenceId),
       normalizedPhone: String(row.normalizedPhone || "").trim(),
       displayName: String(row.displayName || "").trim() || null,
+      inventoryClass: String(row.inventoryClass || "").trim().toLowerCase() || null,
+      contactPolicyId: String(row.contactPolicyId || "").trim().toLowerCase() || null,
+      eligibleFrom: row.eligibleFrom == null ? null : parseDate(row.eligibleFrom, "eligibleFrom"),
+      expiresAt: row.expiresAt == null ? null : parseDate(row.expiresAt, "expiresAt"),
+      firstQualifyingCallAt: row.firstQualifyingCallAt == null
+        ? null
+        : parseDate(row.firstQualifyingCallAt, "firstQualifyingCallAt"),
+      episodeId: String(row.episodeId || "").trim() || null,
+      lastHumanAnsweredAt: row.lastHumanAnsweredAt == null
+        ? null
+        : parseDate(row.lastHumanAnsweredAt, "lastHumanAnsweredAt"),
       sourcePool: classification.pool,
       receivedAt: parseDate(row.receivedAt, "receivedAt"),
       overnightBatchKey: String(row.overnightBatchKey || "").trim() || null,
@@ -3980,6 +4081,17 @@ function createLeadDeliveryRuntime({
     return { status: updated.state === "blocked" ? "blocked" : "refreshed", item: updated, reason: decision.reason };
   }
 
+  async function runLifecycleHook(hook, eventName, input) {
+    if (typeof hook !== "function") return;
+    try {
+      await hook(input);
+    } catch (error) {
+      log("warn", `lead_delivery.${eventName}_hook_failed`, {
+        reason: String(error?.code || error?.name || "hook-failed").slice(0, 80),
+      });
+    }
+  }
+
   async function processSourceRows(rows, at) {
     const existingRows = typeof repository.findItemsBySourceIdentities === "function"
       ? await repository.findItemsBySourceIdentities(rows)
@@ -4011,6 +4123,11 @@ function createLeadDeliveryRuntime({
       );
       if (existing) {
         const result = await refreshExistingSourceItem(existing, row, at);
+        if (result.item) {
+          await runLifecycleHook(onSourceItemPersisted, "source_item_persisted", {
+            row: clone(row), item: clone(result.item), created: false,
+          });
+        }
         if (result.status === "refreshed") refreshed += 1;
         else if (result.status === "blocked") blocked += 1;
         else skipped += 1;
@@ -4023,7 +4140,12 @@ function createLeadDeliveryRuntime({
       const created = await repository.insertActiveItemOnce(
         sourceItemForInsert(row, classification),
       );
-      if (created) inserted += 1;
+      if (created) {
+        inserted += 1;
+        await runLifecycleHook(onSourceItemPersisted, "source_item_persisted", {
+          row: clone(row), item: clone(created), created: true,
+        });
+      }
       else {
         const raced = await repository.findItemBySourceIdentity({
           domain: row.domain,
@@ -4031,6 +4153,11 @@ function createLeadDeliveryRuntime({
         });
         if (raced) {
           const result = await refreshExistingSourceItem(raced, row, at);
+          if (result.item) {
+            await runLifecycleHook(onSourceItemPersisted, "source_item_persisted", {
+              row: clone(row), item: clone(result.item), created: false,
+            });
+          }
           if (result.status === "refreshed") refreshed += 1;
           else if (result.status === "blocked") blocked += 1;
           else skipped += 1;
@@ -4924,6 +5051,9 @@ function createLeadDeliveryRuntime({
         ...transition,
       });
       if (!acceptedItem) return { status: "acceptance-commit-conflict", accepted: false };
+      await runLifecycleHook(onProviderAccepted, "provider_accepted", {
+        item: clone(acceptedItem), acceptedAt,
+      });
       const freshAgent = await repository.getAgentById(policy.agentId);
       if (freshAgent) {
         await repository.compareAndSetAgent({
@@ -6881,6 +7011,13 @@ function createLeadDeliveryRuntime({
       },
     });
     if (!updatedEvent) throw new Error("completion-event-conflict");
+    await runLifecycleHook(onAttemptCompleted, "attempt_completed", {
+      item: clone(updatedItem),
+      event: clone(updatedEvent),
+      transition: clone(transition),
+      attemptNumber,
+      completedAt: at,
+    });
     const committed = { item: updatedItem, agent: updatedAgent, event: updatedEvent };
     runtimeState.completed += 1;
     const refill = computeRefillDecision({
@@ -9876,7 +10013,9 @@ function createLeadDeliveryRuntime({
 module.exports = {
   AGENT_POOL_OPERATION_KINDS,
   CALL_RECOVERY_CONTACT_POLICY_ID,
+  CALL_RECOVERY_DNC_POLICY_ID,
   CALL_RECOVERY_INVENTORY_CLASS,
+  CALL_RECOVERY_LOGICS_POLICY_ID,
   CALL_RECOVERY_MAXIMUM_DAILY_ATTEMPTS,
   CALL_RECOVERY_MAXIMUM_PROGRAM_AGE_DAYS,
   CALL_RECOVERY_MINIMUM_RETRY_MINUTES,
@@ -9940,6 +10079,7 @@ module.exports = {
   resolvePacificEndOfDayDrain,
   resolveLeadDeliveryTickMode,
   resolveLeadDeliveryContactPolicy,
+  resolveCallRecoveryLogicsEligibility,
   resolveRecoveryEpisodeTiming,
   resolveProviderEventItem,
   shouldRequestRefill,

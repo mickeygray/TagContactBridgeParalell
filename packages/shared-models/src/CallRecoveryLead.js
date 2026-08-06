@@ -112,6 +112,10 @@ const callRecoveryLeadSchema = new mongoose.Schema(
     firstQualifyingCallAt: { type: Date, required: true },
     latestQualifyingCallAt: { type: Date, required: true },
     qualifyingCallIds: { type: [String], default: [] },
+    // Pacific dates on which qualifying evidence was observed. Daily cohort
+    // manifests reference the episode; this key makes rebuilding one day
+    // deterministic without turning the manifest into another customer store.
+    qualifyingDateKeys: { type: [String], default: [], match: /^\d{4}-\d{2}-\d{2}$/ },
     maximumObservedDurationSec: {
       type: Number, required: true, min: 0,
       validate: { validator: Number.isInteger, message: "{PATH} must be an integer" },
@@ -165,6 +169,7 @@ callRecoveryLeadSchema.index({ "dnc.nextCheckAt": 1, state: 1 });
 callRecoveryLeadSchema.index({ normalizedPhone: 1, state: 1 });
 // Idempotent evidence lookup: "have I already recorded this CallRail id?"
 callRecoveryLeadSchema.index({ qualifyingCallIds: 1 });
+callRecoveryLeadSchema.index({ programKey: 1, qualifyingDateKeys: 1 });
 
 module.exports =
   mongoose.models.ControlPlaneCallRecoveryLead ||

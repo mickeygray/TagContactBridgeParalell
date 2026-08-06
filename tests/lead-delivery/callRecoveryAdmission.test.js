@@ -203,11 +203,27 @@ test("the source row uses the episode's own clock, not today", () => {
 });
 
 test("the source row carries the contract's inventory class and policy id", () => {
-  const row = svc.buildRecoverySourceRow(EPISODE(), { now: NOW });
+  const row = svc.buildRecoverySourceRow(EPISODE({ displayName: "Private Example Person" }), { now: NOW });
   assert.equal(row.inventoryClass, "callrail_long_call_recovery");
   assert.equal(row.contactPolicyId, "long_call_recovery_120d_2x");
+  assert.equal(row.state, "eligible");
+  assert.equal(row.activeAttempt, true);
   assert.equal(row.sourceKind, "call_recovery");
   assert.equal(row.episodeId, EPISODE().episodeId);
+  assert.equal(row.firstQualifyingCallAt.getTime(), EPISODE().firstQualifyingCallAt.getTime());
+  assert.equal(row.firstName, "Private");
+  assert.equal(row.lastName, "Example Person");
+});
+
+test("fresh authoritative case names populate a recovery row when discovery had none", () => {
+  const row = svc.buildRecoverySourceRow(EPISODE(), {
+    now: NOW,
+    firstName: "Private",
+    lastName: "Example Person",
+  });
+  assert.equal(row.displayName, "Private Example Person");
+  assert.equal(row.firstName, "Private");
+  assert.equal(row.lastName, "Example Person");
 });
 
 test("policy numbers come from checked-in code, never from the episode", () => {

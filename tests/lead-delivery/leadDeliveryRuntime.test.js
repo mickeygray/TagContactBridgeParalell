@@ -9,6 +9,7 @@ const {
   createLeadDeliveryRuntime,
   isPacificDeliveryWindowOpen,
   planProductivityPoolCull,
+  resolveLeadDeliveryContactPolicy,
 } = require("../../packages/shared-services/src/leadDeliveryService");
 
 const START = new Date("2026-07-10T17:00:00.000Z");
@@ -587,6 +588,9 @@ function harness({
   providerConsumptionOrder = null,
   refreshSourceStatuses = null,
   refreshUntouchedSourceStatuses = null,
+  onSourceItemPersisted = null,
+  onProviderAccepted = null,
+  onAttemptCompleted = null,
   logger = null,
   durableSourceState = false,
   ingestBatchSize = 250,
@@ -750,6 +754,9 @@ function harness({
     providerConsumptionOrder,
     refreshSourceStatuses,
     refreshUntouchedSourceStatuses,
+    onSourceItemPersisted,
+    onProviderAccepted,
+    onAttemptCompleted,
     logger,
   });
   return {
@@ -820,6 +827,54 @@ test("durable daily repair stays completed across ticks and restart while newer 
   assert.equal(afterRestart.lane, "new-arrivals");
   assert.equal(restartedRepairReads, 0);
   assert.equal(restarted.repository.items.size, 2);
+});
+
+test("recovery source policy survives generic runtime ingestion", async () => {
+  const row = {
+    ...sourceRow(1),
+    inventoryClass: "callrail_long_call_recovery",
+    contactPolicyId: "long_call_recovery_120d_2x",
+    eligibleFrom: new Date("2026-07-09T14:50:00.000Z"),
+    expiresAt: new Date("2026-11-06T15:00:00.000Z"),
+    firstQualifyingCallAt: new Date("2026-07-08T18:00:00.000Z"),
+    episodeId: "callrail-mail-long-call-v1:TAG:1:1",
+  };
+  const h = harness({ rows: [row] });
+  const result = await h.runtime.ingestOnce();
+  assert.equal(result.inserted, 1);
+  const stored = [...h.repository.items.values()][0];
+  assert.equal(stored.inventoryClass, row.inventoryClass);
+  assert.equal(stored.contactPolicyId, row.contactPolicyId);
+  assert.equal(new Date(stored.eligibleFrom).getTime(), row.eligibleFrom.getTime());
+  assert.equal(new Date(stored.expiresAt).getTime(), row.expiresAt.getTime());
+  assert.equal(new Date(stored.firstQualifyingCallAt).getTime(), row.firstQualifyingCallAt.getTime());
+  assert.equal(stored.episodeId, row.episodeId);
+  const policy = resolveLeadDeliveryContactPolicy(stored, { now: new Date(START) });
+  assert.equal(policy.maximumDailyAttempts, 2);
+  assert.equal(policy.minimumRetryMinutes, 120);
+});
+
+test("lifecycle hooks observe canonical persistence and provider acceptance", async () => {
+  const persisted = [];
+  const accepted = [];
+  const completed = [];
+  const h = harness({
+    rows: [sourceRow(1)],
+    actionsEnabled: true,
+    onSourceItemPersisted: async (event) => persisted.push(event),
+    onProviderAccepted: async (event) => accepted.push(event),
+    onAttemptCompleted: async (event) => completed.push(event),
+  });
+  await h.runtime.ingestOnce();
+  await h.runtime.seedAgent("bruce_allen");
+  assert.equal(persisted.length, 1);
+  assert.equal(persisted[0].created, true);
+  assert.equal(accepted.length, 1);
+  assert.equal(accepted[0].item.state, "provider_accepted");
+  addDone(h.repository, acceptedItems(h.repository)[0], 1, "voicemail");
+  await h.runtime.drainEvents();
+  assert.equal(completed.length, 1);
+  assert.equal(completed[0].item.totalAttemptCount, 1);
 });
 
 test("an incomplete daily repair resumes its cursor before polling new arrivals", async () => {

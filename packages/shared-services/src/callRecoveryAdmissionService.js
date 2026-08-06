@@ -22,6 +22,8 @@
 // asked us to stop.
 
 const {
+  CALL_RECOVERY_CONTACT_POLICY_ID,
+  CALL_RECOVERY_INVENTORY_CLASS,
   decideRecoveryOutcomeState,
   resolveLeadDeliveryContactPolicy,
 } = require("./leadDeliveryService");
@@ -156,14 +158,17 @@ function admitEpisode({
  * so a code path that reaches for the ordinary age-based cap is a test failure
  * rather than a silent six-attempt day (§17).
  */
-function buildRecoverySourceRow(episode, { now = new Date() } = {}) {
+function buildRecoverySourceRow(episode, { now = new Date(), firstName: suppliedFirstName = null, lastName: suppliedLastName = null } = {}) {
   if (!episode) throw new Error("buildRecoverySourceRow requires an episode");
+  const nameParts = String(episode.displayName || "").trim().split(/\s+/).filter(Boolean);
+  const firstName = String(suppliedFirstName || "").trim() || nameParts.shift() || null;
+  const lastName = String(suppliedLastName || "").trim() || (nameParts.length ? nameParts.join(" ") : null);
   // Shaped as the WORK ITEM the resolver expects, then handed to it — the
   // policy numbers are re-derived from checked-in code every time and never
   // trusted from stored metadata (§17).
   const policy = resolveLeadDeliveryContactPolicy({
-    inventoryClass: "callrail_long_call_recovery",
-    contactPolicyId: "long_call_recovery_120d_2x",
+    inventoryClass: CALL_RECOVERY_INVENTORY_CLASS,
+    contactPolicyId: CALL_RECOVERY_CONTACT_POLICY_ID,
     receivedAt: episode.firstQualifyingCallAt,
     eligibleFrom: episode.eligibleFrom,
     expiresAt: episode.expiresAt,
@@ -176,16 +181,27 @@ function buildRecoverySourceRow(episode, { now = new Date() } = {}) {
     domain: String(episode.domain || "").toUpperCase(),
     caseId: String(episode.caseId ?? ""),
     normalizedPhone: episode.normalizedPhone,
-    displayName: episode.displayName || null,
+    displayName: episode.displayName || [firstName, lastName].filter(Boolean).join(" ") || null,
+    firstName,
+    lastName,
     // The episode's own clock, NOT today. Pretending an old case arrived this
     // morning would put it in new_today and jump the queue ahead of genuinely
     // fresh leads (§7 of the design).
     receivedAt: asDate(episode.firstQualifyingCallAt),
+    firstQualifyingCallAt: asDate(episode.firstQualifyingCallAt),
     eligibleFrom: asDate(episode.eligibleFrom),
     expiresAt: asDate(episode.expiresAt),
-    inventoryClass: "callrail_long_call_recovery",
+    inventoryClass: CALL_RECOVERY_INVENTORY_CLASS,
     contactPolicyId: policy.contactPolicyId,
     policy,
+    // classifyPool runs before persistence and therefore needs the source row
+    // to carry its eligible state. The generic ingester still owns the final
+    // persisted state and active-attempt fields.
+    state: "eligible",
+    activeAttempt: true,
+    dailyAttemptCount: Number(episode.dailyAttemptCount || 0),
+    totalAttemptCount: Number(episode.totalAttemptCount || 0),
+    lastContactAt: episode.lastContactAt || null,
     // No leadCadenceId — see above. Voice-only is structural here.
     leadCadenceId: null,
   };
