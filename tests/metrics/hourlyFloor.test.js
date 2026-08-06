@@ -211,3 +211,30 @@ test("the floor still runs when Phase A DOES run — no double-call, no gap", as
   assert.equal("agedRollingRefresh" in summary.phaseA, false);
   assert.equal("callrailStatSync" in summary.phaseA, false);
 });
+
+// ── E9: THE HOURLY SWEEP NO LONGER OWNS NCOA ───────────────────────────────
+//
+// NCOA had TWO hourly triggers: server.js's own hour slot, and an ungated call
+// inside the sweep's scheduled phase. Both are retired in favour of the nightly
+// mailbox visit. This is the guard against a re-armed Phase A quietly becoming
+// a second owner of a job that already has one.
+
+test("the hourly sweep does not run the NCOA mailbox — the nightly task owns it", () => {
+  const source = require("node:fs").readFileSync(
+    require.resolve("../../packages/shared-services/src/hourlySweeperService"),
+    "utf8",
+  );
+  // The require is gone, so the sweeper cannot call it even by accident.
+  assert.doesNotMatch(
+    source.replace(/\/\/[^\n]*/g, ""),
+    /runNcoaMailboxIngestIfDue/,
+    "the sweeper must not import or call the NCOA mailbox ingest",
+  );
+});
+
+test("the NCOA service itself is untouched — folded, not deleted", () => {
+  // The fold moved the TRIGGER. The service still exists and still runs from
+  // scripts/run-ncoa-mailbox-ingest.js, which is how a missed day is repaired.
+  const svc = require("../../packages/shared-services/src/ncoaMailboxIngestService");
+  assert.equal(typeof svc.runNcoaMailboxIngestIfDue, "function");
+});

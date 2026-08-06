@@ -174,7 +174,6 @@ const {
   getPacingConfig,
   isOperatingNow,
   runHourlySweep,
-  runNcoaMailboxIngestIfDue,
   runDueCxAppointments,
   runCxRecordingHourly,
   summarizeHourlySweepResult,
@@ -239,15 +238,12 @@ function createWorkerState() {
   };
 }
 
-function resolveHourlyNcoaSlot(lastScheduledHour, at = new Date()) {
-  const instant = at instanceof Date ? at : new Date(at);
-  if (!Number.isFinite(instant.getTime())) throw new TypeError("at must be a valid date");
-  const hourKey = instant.toISOString().slice(0, 13);
-  return {
-    hourKey,
-    due: String(lastScheduledHour || "") !== hourKey,
-  };
-}
+// resolveHourlyNcoaSlot lived here. It gave NCOA one guarded slot per hour off
+// the generic worker's tick. NCOA now rides the nightly mailbox task, which
+// opens the mailbox once for both the vendor invoice and the NCOA returns —
+// see buildMailboxHandlers in nightlyHygieneRuntime. The hour-slot bookkeeping
+// goes with it: leaving a dead trigger next to a live one is how the same job
+// ends up running twice.
 
 function summarizeWorkerState(workerState) {
   return {
@@ -665,7 +661,6 @@ async function startHourlySweepWorker({ config, runtime, workerState, spendSyncR
   const drainIntervalMs = 60_000;
   workerState.enabled = true;
   workerState.intervalMs = drainIntervalMs;
-  workerState.lastScheduledHour = null;
 
   const tick = async () => {
     if (workerState.running) return;
@@ -688,14 +683,6 @@ async function startHourlySweepWorker({ config, runtime, workerState, spendSyncR
     // Keeping this false also prevents spend, cadence, payment, recording,
     // and CaseProfile discovery from being resurrected by a config default.
     const runScheduledPhase = false;
-    // NCOA is an intake owner, not one of the retired broad Phase A scans.
-    // Give it one guarded slot per hour while leaving the expensive generic
-    // scheduled phase dark. The mailbox service itself owns the weekday,
-    // daily-completion, unread-message, and attachment-hash gates.
-    const ncoaSlot = resolveHourlyNcoaSlot(
-      workerState.lastScheduledHour,
-      workerState.lastStartedAt,
-    );
     const mongoState = getMongoReadyState(runtime);
     if (!mongoState.connected) {
       workerState.lastCompletedAt = new Date();
@@ -713,10 +700,6 @@ async function startHourlySweepWorker({ config, runtime, workerState, spendSyncR
     const scheduledPhaseMode = null;
 
     try {
-      // Claim the hour before running Phase A. If a dependency fails
-      // mid-sweep, we still do not retry external hourly work every
-      // 60 seconds for the rest of the hour.
-      if (ncoaSlot.due) workerState.lastScheduledHour = ncoaSlot.hourKey;
       const scheduledPhaseLite = true;
       if (scheduledPhaseMode) {
         runtime.logger.info("control-plane.hourly.scheduled_phase_mode", scheduledPhaseMode);
@@ -823,12 +806,6 @@ async function startHourlySweepWorker({ config, runtime, workerState, spendSyncR
         resolutionEmailsEnabled: !scheduledPhaseLite,
         logger: runtime.logger,
       });
-      if (ncoaSlot.due) {
-        result.phaseA = result.phaseA || {};
-        result.phaseA.ncoaMailbox = await runNcoaMailboxIngestIfDue({}).catch((error) => ({
-          error: String(error?.code || error?.name || "ncoa-mailbox-failed").slice(0, 80),
-        }));
-      }
       result.scheduledPhaseMode = businessHoursLiteMode;
       // Legacy duplicate spend owner retained behind an unreachable proof
       // gate for the no-delete window. Dedicated spendSyncRuntime is the only
@@ -869,7 +846,7 @@ async function startHourlySweepWorker({ config, runtime, workerState, spendSyncR
       workerState.lastResult = result;
       workerState.lastError = null;
       const resultSummary = summarizeHourlySweepResult(result);
-      if (result.phaseB?.claimed > 0 || runScheduledPhase || ncoaSlot.due) {
+      if (result.phaseB?.claimed > 0 || runScheduledPhase) {
         runtime.logger.info("control-plane.hourly.tick", {
           features: summarizeHourlySweepConfig(config.hourlySweep || {}),
           summary: resultSummary,
@@ -3364,7 +3341,6 @@ module.exports = {
   collectLogicsTaskRows,
   createControlPlaneLeadDeliveryActionHandlers,
   findArmedLegacyVoiceWriters,
-  resolveHourlyNcoaSlot,
   runCxActiveCallOwnersOnce,
   startServer,
 };

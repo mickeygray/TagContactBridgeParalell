@@ -41,9 +41,6 @@ const {
   sweepStaleNcoaBatches,
 } = require("./ncoaUploadService");
 const {
-  runNcoaMailboxIngestIfDue,
-} = require("./ncoaMailboxIngestService");
-const {
   runDncRecheckSweep,
 } = require("./dncRecheckService");
 const {
@@ -274,19 +271,10 @@ function summarizeHourlySweepResult(result = null) {
             modified: Number(result.phaseA?.staleCadenceSweep?.modified || 0),
             error: result.phaseA?.staleCadenceSweep?.error || null,
           },
-          ncoaMailbox: result.phaseA?.ncoaMailbox
-            ? {
-                skipped: Boolean(result.phaseA.ncoaMailbox.skipped),
-                reason: result.phaseA.ncoaMailbox.reason || null,
-                messagesScanned: Number(result.phaseA.ncoaMailbox.messagesScanned || 0),
-                attachments: Array.isArray(result.phaseA.ncoaMailbox.attachments)
-                  ? result.phaseA.ncoaMailbox.attachments.length
-                  : 0,
-                errors: Array.isArray(result.phaseA.ncoaMailbox.attachments)
-                  ? result.phaseA.ncoaMailbox.attachments.filter((item) => item?.error).length
-                  : 0,
-              }
-            : null,
+          // ncoaMailbox dropped from the summary with its call. Leaving the
+          // key would have printed `ncoaMailbox: null` on every tick forever,
+          // which an operator reads as "it ran and found nothing" rather than
+          // "the hourly sweep does not do this any more". Absent is honest.
           resolutionEmails: {
             candidates: Number(result.phaseA?.resolutionEmails?.candidates || 0),
             sent: Number(result.phaseA?.resolutionEmails?.sent || 0),
@@ -1240,14 +1228,16 @@ async function runHourlySweep({
             error: error.message,
           }))
         : { skipped: true, reason: "business-hours-lite" },
-      // NCOA mailbox ingest â€” checks documents@ for unread CSV/TXT
-      // attachments on weekdays until one file is processed for the
-      // Pacific business day, then self-skips until tomorrow.
-      // If NCOA_MAILBOX_COMPLETE_ON_NO_UNREAD is enabled, an empty
-      // unread mailbox also writes a same-day skip marker.
-      ncoaMailbox: await runNcoaMailboxIngestIfDue({}).catch((error) => ({
-        error: error.message,
-      })),
+      // ncoaMailbox MOVED to the nightly mailbox task. It read documents@ for
+      // unread CSV/TXT attachments and self-skipped once a day's file landed —
+      // which meant it was a DAILY job wearing an hourly trigger, and it was
+      // the second such trigger (server.js had its own hour slot). Both are
+      // gone: the nightly task opens that mailbox once and reads the vendor
+      // invoice and the NCOA returns on the same visit.
+      //
+      // Deleted rather than gated. A dark duplicate of a live job is the thing
+      // that comes back when someone re-arms Phase A and cannot tell that the
+      // work already has an owner.
       // Disabled by default: RealValidation spending is limited to
       // intake-time validation plus the once-monthly filler rebuild.
       // dncRecheck MOVED to runFloorServices. It is the floor service this

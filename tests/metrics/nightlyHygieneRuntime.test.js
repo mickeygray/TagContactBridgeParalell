@@ -38,6 +38,9 @@ test("disabled by default — deploying the code does not start writing", async 
     // this stops testing the default and starts testing the local machine.
     MAIL_INVOICE_MAILBOX_ENABLED: undefined,
     MAIL_SPEND_DERIVE_ENABLED: undefined,
+    // The mailbox task now arms on EITHER document, so NCOA's flag has to be
+    // cleared here too or this test reads the local box instead of the default.
+    NCOA_MAILBOX_ENABLED: undefined,
   }, async () => {
     const rt = createNightlyHygieneRuntime({});
     const s = rt.getState();
@@ -653,4 +656,79 @@ test("activity-review with no runtime injected is a failure, not a silent zero",
   const applied = await task.apply([{ dateKey: "2026-08-05" }], {});
   assert.equal(applied.failed, 1);
   assert.equal(applied.written, 0);
+});
+
+// ── E9: NCOA FOLDED INTO THE MAILBOX VISIT ─────────────────────────────────
+//
+// NCOA had its own hourly trigger in server.js. It now rides the nightly
+// mailbox task, which is the only change that makes "get into the mailbox
+// once" true. The risk of that fold is a SILENT OUTAGE: NCOA answering to a
+// flag it no longer sees, on a host whose .env is not this box's. These tests
+// pin the two places that could drop it.
+
+test("the mailbox visit carries the NCOA handler when NCOA is enabled", () => {
+  const { buildMailboxHandlers } = require("../../apps/control-plane/src/services/nightlyHygieneRuntime");
+  const keys = buildMailboxHandlers({ ncoaEnabled: true, targetDate: "2026-08-06" }).map((h) => h.key);
+  assert.deepEqual(keys, ["mail-invoice", "ncoa"], "one visit reads both documents");
+});
+
+test("NCOA keeps its own flag — disabled means the handler is absent, not idle", () => {
+  const { buildMailboxHandlers } = require("../../apps/control-plane/src/services/nightlyHygieneRuntime");
+  const keys = buildMailboxHandlers({ ncoaEnabled: false, targetDate: "2026-08-06" }).map((h) => h.key);
+  assert.deepEqual(keys, ["mail-invoice"], "folding the job must not arm it where it was off");
+});
+
+test("the two handlers cannot fight over one message", () => {
+  // The invoice accepts on PDF content, NCOA on .csv/.txt extension. If that
+  // ever overlapped, one email would be processed twice by two writers.
+  const { buildMailboxHandlers } = require("../../apps/control-plane/src/services/nightlyHygieneRuntime");
+  const [invoice, ncoa] = buildMailboxHandlers({ ncoaEnabled: true, targetDate: "2026-08-06" });
+  const csv = [{ filename: "ncoa-returns.csv", mimeType: "text/csv", buffer: Buffer.from("a,b\n1,2\n") }];
+  assert.equal(ncoa.accepts(csv, { message: {} }), true, "NCOA takes the csv");
+  assert.equal(
+    invoice.accepts(csv, { message: { payload: { headers: [] } } }),
+    false,
+    "the invoice reader must not take a csv",
+  );
+});
+
+test("either document arms the mailbox visit — NCOA alone is enough", async () => {
+  // The handover's real hazard. NCOA was armed by NCOA_MAILBOX_ENABLED; if the
+  // folded task armed only on MAIL_INVOICE_MAILBOX_ENABLED, then any host with
+  // the invoice reader dark would have stopped running NCOA the night this
+  // shipped, and nothing would have said so.
+  await withEnv({
+    MAIL_INVOICE_MAILBOX_ENABLED: "false",
+    NCOA_MAILBOX_ENABLED: "true",
+  }, async () => {
+    const task = createNightlyHygieneRuntime({}).TASKS.find((t) => t.key === "mail-invoice");
+    assert.equal(task.writesArmed(), true, "NCOA alone must open the mailbox");
+  });
+
+  await withEnv({
+    MAIL_INVOICE_MAILBOX_ENABLED: "true",
+    NCOA_MAILBOX_ENABLED: undefined,
+  }, async () => {
+    const task = createNightlyHygieneRuntime({}).TASKS.find((t) => t.key === "mail-invoice");
+    assert.equal(task.writesArmed(), true, "the invoice alone still opens it");
+  });
+
+  await withEnv({
+    MAIL_INVOICE_MAILBOX_ENABLED: undefined,
+    NCOA_MAILBOX_ENABLED: undefined,
+  }, async () => {
+    const task = createNightlyHygieneRuntime({}).TASKS.find((t) => t.key === "mail-invoice");
+    assert.equal(task.writesArmed(), false, "neither wanted — do not open it");
+  });
+});
+
+test("the mailbox task counts NCOA's work, not only the invoice's", async () => {
+  // A night that filed 40 NCOA returns and found no invoice reported written: 0.
+  // Both handlers write; both have to be visible in the totals, or the nightly
+  // summary understates what happened.
+  const rt = createNightlyHygieneRuntime({});
+  const task = rt.TASKS.find((t) => t.key === "mail-invoice");
+  const source = String(task.apply);
+  assert.match(source, /handlers\.ncoa/, "apply must read the ncoa handler's stat");
+  assert.match(source, /ncoa\.processed/, "and add its processed count to written");
 });

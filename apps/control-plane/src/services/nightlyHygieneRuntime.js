@@ -393,13 +393,46 @@ function buildCallRecoveryDiscoveryDeps({ windowFrom = null, windowTo = null } =
  * is the only reason NCOA does not already archive these PDF-only emails.
  * Adding .pdf there would break this reader.
  */
+/**
+ * Which documents this mailbox visit is looking for.
+ *
+ * ONE VISIT, TWO DOCUMENTS.
+ *
+ * Mickey 2026-08-06: "move the ncoa check up to this point so you get into the
+ * mailbox once and then send the right email to invoice scraping and the right
+ * csv to logics, instead of checking and blasting emails."
+ *
+ * runMailboxIngest opens the Gmail client once, outside its handler loop, so a
+ * second handler costs a QUERY rather than a second connection and a second
+ * schedule. The two cannot collide over a message: the invoice handler accepts
+ * on PDF content, NCOA on .csv/.txt extension, and each brings its own query.
+ *
+ * Each handler is included per ITS OWN flag. NCOA's flag gated
+ * runNcoaMailboxIngestIfDue before this fold and it gates inclusion here, so
+ * moving the work between schedules cannot quietly turn NCOA on somewhere it
+ * was off — nor off somewhere it was on.
+ *
+ * Separate from the task's arming (see `writesArmed`) on purpose: arming
+ * decides whether the mailbox is opened at all, this decides what is read once
+ * it is.
+ */
+function buildMailboxHandlers({ ncoaEnabled = false, targetDate = null } = {}) {
+  const {
+    createMailInvoiceHandler,
+  } = require("../../../../packages/shared-services/src/mailInvoiceMailboxHandler");
+  const {
+    createNcoaHandler,
+  } = require("../../../../packages/shared-services/src/ncoaMailboxHandler");
+
+  const handlers = [createMailInvoiceHandler({ targetDate: targetDate || persistTargetDay() })];
+  if (ncoaEnabled) handlers.push(createNcoaHandler());
+  return handlers;
+}
+
 async function readMailInvoiceMailbox({ apply, logger }) {
   const {
     runMailboxIngest,
   } = require("../../../../packages/shared-services/src/mailboxIngestService");
-  const {
-    createMailInvoiceHandler,
-  } = require("../../../../packages/shared-services/src/mailInvoiceMailboxHandler");
   const { getSharedConfig } = require("../../../../packages/shared-config/src");
 
   const shared = getSharedConfig();
@@ -411,7 +444,7 @@ async function readMailInvoiceMailbox({ apply, logger }) {
   // the right one, so recency would fail silently.
   return runMailboxIngest({
     apply,
-    handlers: [createMailInvoiceHandler({ targetDate: persistTargetDay() })],
+    handlers: buildMailboxHandlers({ ncoaEnabled: ncoaMailbox.enabled }),
     logger,
     maxMessages: 25,
     maxPages: 3,
@@ -520,16 +553,35 @@ const TASKS = [
     // from a quiet day — see the funnel in `describe`, which is what reaches
     // the operator.
     key: "mail-invoice",
-    label: "Read the vendor's daily mail invoice",
-    writesArmed: () => String(process.env.MAIL_INVOICE_MAILBOX_ENABLED || "false").toLowerCase() === "true",
+    label: "Read the shared mailbox — vendor invoice, and NCOA returns",
+    // EITHER document arms the visit.
+    //
+    // The two ride the same mailbox but answer to different flags, and NCOA was
+    // on its own hourly trigger until this task absorbed it. Arming on the
+    // invoice flag alone would have stopped NCOA anywhere the invoice reader is
+    // dark — which is exactly the silent outage the handover rule exists to
+    // prevent. Each handler is still included per its own flag; this only
+    // decides whether the mailbox is opened at all.
+    writesArmed: () => {
+      const invoice = String(process.env.MAIL_INVOICE_MAILBOX_ENABLED || "false").toLowerCase() === "true";
+      const ncoa = String(process.env.NCOA_MAILBOX_ENABLED || "false").toLowerCase() === "true";
+      return invoice || ncoa;
+    },
     async plan({ logger }) {
       const result = await readMailInvoiceMailbox({ apply: false, logger });
-      return [result.handlers["mail-invoice"] || {}];
+      // The invoice funnel is what `describe` reads; NCOA's is carried alongside
+      // so a dry run shows both without the describe having to know about it.
+      return [{ ...(result.handlers["mail-invoice"] || {}), ncoa: result.handlers.ncoa || null }];
     },
     async apply(planned, { logger }) {
       const result = await readMailInvoiceMailbox({ apply: true, logger });
       const stat = result.handlers["mail-invoice"] || {};
-      return { written: stat.processed || 0, skipped: stat.skipped || 0, failed: stat.errors || 0 };
+      const ncoa = result.handlers.ncoa || {};
+      return {
+        written: (stat.processed || 0) + (ncoa.processed || 0),
+        skipped: (stat.skipped || 0) + (ncoa.skipped || 0),
+        failed: (stat.errors || 0) + (ncoa.errors || 0),
+      };
     },
     count(planned) {
       return (planned[0]?.accepted || 0);
@@ -1362,6 +1414,7 @@ function createNightlyHygieneRuntime({ config = {}, runtime = {} } = {}) {
 
 module.exports = {
   advanceNightlyHygiene,
+  buildMailboxHandlers,
   claimNightlyHygiene,
   createNightlyHygieneRuntime,
   finishNightlyHygiene,

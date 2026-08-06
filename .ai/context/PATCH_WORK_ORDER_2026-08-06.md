@@ -6,6 +6,21 @@ Status: OPEN. Sections run in dependency order, not theme order.
 ```
 ⟳ BUILD STATUS — read this first after any compaction or re-entry
 ────────────────────────────────────────────────────────────────────
+2026-08-06 (6): E9 IS DONE — NCOA folded into the nightly mailbox
+visit; both old hourly triggers deleted. 7 new tests, 727 pass.
+Next action: E7 (reconciliation trio into the evening, dark).
+Two corrections from doing E9, both recorded in the E9 entry: there
+were TWO old NCOA triggers (server.js AND hourlySweeperService:1248,
+the second ungated inside the dark scheduledPhase block), and the
+mailbox task's arming had to widen to EITHER flag or the fold would
+have silently disarmed NCOA on any host running the invoice reader
+dark.
+
+2026-08-06 (5): SAVE-THEN-SEND landed (842b581) — reportDefinition
+takes an onComposed hook, the runtime writes the day's record from the
+same gather the mail is built from, then stamps emailAcceptedAt only
+if the provider took it. B3 + E2 landed with it (c36f15f).
+
 2026-08-06 (4): B2 IS DONE — commit 6ef75d7, hygiene suite 28/28.
 "Land dark, observe one cycle, arm" now actually produces evidence, so
 E3/E7-E10 and every new pass task can follow it. Next action: B3
@@ -421,20 +436,31 @@ MD2's window is deliberate — upsertCallLog dedupes on sessionId (:1057).
 helper unit-tested against a fixed clock (12:00 PT boundary, DST-safe via
 the Intl pattern already in the sweeper :1123-1128).
 
-**E9. NCOA handover *(small, ONE commit)***
-Add `createNcoaHandler()` to the handlers array in readMailInvoiceMailbox
-(nightlyHygieneRuntime ~:413, `handlers: [createMailInvoiceHandler(...)]`)
-AND delete from server.js: the `resolveHourlyNcoaSlot` function, the
-`ncoaSlot` const (:695-698), the post-sweep `if (ncoaSlot.due)` block
-(~:826-830), and `workerState.lastScheduledHour` writes — one commit. Delete
-tests/ncoaHourlyScheduling.test.js in the same commit (it tests the deleted
-function).
-**TEST:** hygiene mail-invoice task plan/apply against a fake gmail with one
-invoice email + one CSV email → both handler stat blocks present; ncoa
-touches only the CSV (extension gate — already pinned by
-ncoaMailboxHandler.test.js, 9 tests). **VERIFY-LIVE:** nightly
-mailbox_ingest log shows handler=ncoa listed>0; hourly worker log stops
-showing ncoaMailbox.
+**E9. NCOA handover *(small, ONE commit)*** — **DONE**, 7 tests.
+Shipped as scoped, plus three things the scope missed:
+
+1. **There were TWO old triggers, not one.** server.js had its hour slot;
+   `hourlySweeperService.js:1248` ALSO called `runNcoaMailboxIngestIfDue`,
+   ungated, inside the `if (scheduledPhase)` block. Dark today (Phase A is
+   off) but it would have become a second owner the moment anyone re-armed
+   Phase A. Deleted, not gated.
+2. **Arming had to widen or the fold would have disarmed NCOA.** The task
+   armed on `MAIL_INVOICE_MAILBOX_ENABLED` alone; NCOA answered to
+   `NCOA_MAILBOX_ENABLED`. On any host with the invoice reader dark, folding
+   would have silently stopped NCOA. `writesArmed` now returns true for
+   EITHER flag — arming decides whether the mailbox is opened; each handler
+   is still included per its own flag (`buildMailboxHandlers`).
+3. **`summarizeHourlySweepResult` kept an `ncoaMailbox` key** that would
+   now be `null` on every tick forever — which reads as "ran, found nothing"
+   rather than "not this job's any more". Key removed.
+
+`buildMailboxHandlers({ncoaEnabled, targetDate})` was extracted and exported
+so handler selection is testable without a Gmail client.
+**TEST:** 5 in nightlyHygieneRuntime.test.js (all 5 verified failing on the
+pre-fold code), 2 in hourlyFloor.test.js. 727 pass across metrics +
+ncoaMailboxIngestService + the two server.js-loading suites.
+**VERIFY-LIVE (open):** nightly mailbox_ingest log shows handler=ncoa
+listed>0; hourly worker log stops showing ncoaMailbox.
 
 **E10. cxRecordingHourly** — gate on D10 (`cx.call.placed` still emitted?).
 If dead: delete worker + task in one commit. If alive: fold as a dark
