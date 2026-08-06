@@ -6,6 +6,26 @@ Status: OPEN. Sections run in dependency order, not theme order.
 ```
 ⟳ BUILD STATUS — read this first after any compaction or re-entry
 ────────────────────────────────────────────────────────────────────
+2026-08-06 (15): SESSION CUT SHORT mid-adversarial-pass. A 7-lens
+self-review of the WHOLE branch was running when the session ended:
+jira claim machine, recovery cursor/paging, pass factory, cadence
+drain blast radius, the integrated 19:50->20:00 night, a comment-
+claims audit, and test mutation. Its per-agent results (findings +
+3-skeptic verdicts) persist in the session dir under
+subagents/workflows/wf_4e822c3d-b79/journal.jsonl — READ THAT FIRST
+next session; verify survivors against code before fixing (both
+audit rounds had findings that did not survive verification).
+Known open threads it was probing: the weekend behaviour change
+(floor ran 7 days hourly, passes refuse weekends — D11 never ruled),
+the OUTBOUND_DAILY_CADENCE_TO_PASSES + dark-morning forbidden state,
+the lease-renewal test's possibly-tautological assertion, and the
+drain's worst-case provider burst under the factory retry.
+Branch state: tip 847b65a "Record audit round two closure", 161
+commits, UNPUSHED, tracked tree clean, history REWRITTEN (hashes
+below stale — navigate by message). All flags off. Both external
+audit rounds closed; two pre-existing Phase-9-adjacent refill test
+reds recorded as not-this-patch.
+
 2026-08-06 (14): AUDIT ROUND TWO — six blockers, all closed. 1026
 tests pass; the two Phase 9 tests pass in isolation.
   * HISTORY WAS REWRITTEN on this date: filter-branch dropped the 30
