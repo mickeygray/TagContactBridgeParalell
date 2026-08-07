@@ -106,3 +106,54 @@ test("a slow but COMPLETING body inside the budget is not aborted", async () => 
     await s.close();
   }
 });
+
+test("an aborted POST is NEVER retried — a duplicate message beats no message", async () => {
+  // Arming the timer through the body read made a stalled response abortable,
+  // which is right — but it also made it CATCHABLE, and a caught abort on a
+  // POST fell straight into the retry. The outcome of an aborted POST is
+  // UNKNOWN: the provider may have accepted it and simply failed to finish
+  // answering. sendgridClient (email) and callFireClient (sms/rvm) both POST
+  // with retries: 1, so that retry was a duplicate message to a real person.
+  let posts = 0;
+  const held = [];
+  const s = await listen((req, res) => {
+    posts += 1;
+    res.writeHead(200, { "Content-Type": "application/json", "Content-Length": "99" });
+    res.write('{"accepted":');
+    held.push(res); // accepted, then the response stalls
+  });
+  try {
+    await assert.rejects(
+      () => requestJson(s.url, { method: "POST", body: "{}" }, { timeoutMs: 500, retries: 1 }),
+      (error) => /abort/i.test(`${error.name} ${error.message}`),
+    );
+    assert.equal(posts, 1, "the message must be sent ONCE, never re-sent on an unknown outcome");
+  } finally {
+    for (const res of held) res.destroy();
+    await s.close();
+  }
+});
+
+test("an aborted GET still retries — re-reading is free", async () => {
+  let gets = 0;
+  const held = [];
+  const s = await listen((req, res) => {
+    gets += 1;
+    if (gets === 1) {
+      res.writeHead(200, { "Content-Type": "application/json", "Content-Length": "99" });
+      res.write('{"partial":');
+      held.push(res);
+      return;
+    }
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ ok: true }));
+  });
+  try {
+    const out = await requestJson(s.url, { method: "GET" }, { timeoutMs: 500, retries: 1 });
+    assert.equal(gets, 2, "an idempotent read may be retried");
+    assert.deepEqual(out.data, { ok: true });
+  } finally {
+    for (const res of held) res.destroy();
+    await s.close();
+  }
+});

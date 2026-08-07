@@ -59,6 +59,26 @@ async function requestJson(url, options = {}, policy = {}) {
       };
     } catch (error) {
       lastError = error;
+      // AN ABORTED NON-IDEMPOTENT REQUEST IS NEVER RETRIED.
+      //
+      // Arming the timer through the body read (above) made a stalled response
+      // abortable — which is right, but it also made it CATCHABLE, and a caught
+      // abort on a POST used to fall straight into the retry below. The outcome
+      // of an aborted POST is UNKNOWN: the provider may have accepted it and
+      // simply failed to finish answering. Retrying then sends it twice.
+      //
+      // That is not theoretical here. sendgridClient (email) and callFireClient
+      // (sms and rvm) both POST with retries: 1, so the retry would have been a
+      // duplicate message to a real person. Before the timer moved, the same
+      // stall hung forever instead — worse operationally, but it never sent
+      // twice, and this must not trade a hang for a duplicate.
+      //
+      // GETs stay retryable: re-reading is free.
+      const method = String(options.method || "GET").toUpperCase();
+      const aborted = error?.name === "AbortError" || /abort/i.test(String(error?.message || ""));
+      if (aborted && !["GET", "HEAD", "OPTIONS"].includes(method)) {
+        throw error;
+      }
       if (attempt >= retries) {
         throw error;
       }
