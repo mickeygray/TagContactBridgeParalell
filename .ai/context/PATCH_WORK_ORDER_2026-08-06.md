@@ -6,6 +6,28 @@ Status: OPEN. Sections run in dependency order, not theme order.
 ```
 ⟳ BUILD STATUS — read this first after any compaction or re-entry
 ────────────────────────────────────────────────────────────────────
+2026-08-06 (18): SHIPPED DARK. Mickey's call: the core ideas work and
+carry redundancy, hiccups get patched. Committed at 3c3f0e3, 172
+commits, NOT pushed, all 12 flags off, 1094 tests pass.
+Three review rounds total (two external audits + one 7-lens self-
+adversarial pass). Critical and all high-severity items in the areas
+the patch owns are fixed.
+KNOWN AND ACCEPTED, so nobody re-derives it: four core guarantees have
+no test that fails when the code breaks — the three Jira fencing
+layers (takeover CAS, recordLink token fence, pre-create ownership
+re-check) and the weekdaysOnly task gate. Mutation-verified against a
+control that fails 7 tests, so the gap is real, not a harness artefact.
+Accepted on redundancy grounds, and a probe backs it: for a duplicate
+Logics task and for a duplicate text, FOUR independent layers each hold
+ALONE, with a control confirming the bad outcome is reachable once all
+of them are off. If a hiccup ever does land here, write the failing
+test first — the layers are the reason it is safe to defer, not a
+reason it is unnecessary.
+STILL OWED BY MICKEY: which host runs the nightly stack (gates arming);
+the EOD recording archive deadlock (nothing archived since
+2026-08-03, waiting on 27 stuck processing rows); D11's weekend
+question.
+
 2026-08-06 (17): AUDIT WORKED — 10 of the 30 fixed, 20 open, still
 NOT ready to patch. Each fix verified against code first, each with a
 test that fails on the unfixed code, each its own commit. See the ⟳
