@@ -28,7 +28,19 @@ async function requestJson(url, options = {}, policy = {}) {
         ...options,
         signal: controller.signal,
       });
-      clearTimeout(timer);
+      // THE TIMER STAYS ARMED THROUGH THE BODY READ.
+      //
+      // It used to be cleared here, one line before parseResponse — which
+      // disarmed the abort exactly when the remaining work was unbounded.
+      // `response.text()` streams: a server that sends headers and then stalls
+      // the body left this await hanging FOREVER, with no timeout and no retry,
+      // wedging whatever worker called it. Every integration goes through this
+      // client, so that was a hang available to Logics, RingCentral, CallRail
+      // and PhoneBurner alike.
+      //
+      // Aborting mid-body rejects text() with an AbortError, which the catch
+      // below already treats as a normal timeout — so the retry policy now
+      // covers a stalled body the same way it covers a stalled connection.
       const data = await parseResponse(response);
       const retryAfter = typeof response.headers?.get === "function"
         ? response.headers.get("retry-after")
@@ -46,12 +58,15 @@ async function requestJson(url, options = {}, policy = {}) {
         ...(retryAfter == null ? {} : { headers: { "retry-after": retryAfter } }),
       };
     } catch (error) {
-      clearTimeout(timer);
       lastError = error;
       if (attempt >= retries) {
         throw error;
       }
       await pause((attempt + 1) * 500);
+    } finally {
+      // Every exit from the attempt — return, continue, throw — disarms it
+      // here, so moving the clear past the body read cannot leak a timer.
+      clearTimeout(timer);
     }
   }
 
