@@ -499,6 +499,23 @@ async function recordCounterCadenceFailure(item, result = {}, now = new Date()) 
   if (!deferUntil && reason === "missing-tracking-number") {
     deferUntil = new Date(now.getTime() + 60 * 60 * 1000);
   }
+  // A FAILURE THE PROVIDER DID NOT DATE STILL EARNS A BACKOFF.
+  //
+  // The candidate query sorts on counterCadence.lastDispatchAt ascending, and
+  // only a SUCCESS advances that. So a lead whose dispatch threw kept its old
+  // sort key and came back at the head of the very next round, seconds later —
+  // and with a drain looping up to twenty rounds, a flaky provider meant the
+  // same few hundred leads hammered twenty times in a couple of minutes. The
+  // trickle of successes that a throttling provider returns is exactly what
+  // defeats the loop's sent===0 stop.
+  //
+  // Short, because this is a transient-failure backoff and not a decision about
+  // the lead: long enough to clear the current drain, not so long that a real
+  // recovery waits for tomorrow.
+  const skippedNotFailed = Boolean(result?.skipped || result?.result?.skipped);
+  if (!deferUntil && !skippedNotFailed) {
+    deferUntil = new Date(now.getTime() + 15 * 60 * 1000);
+  }
   const set = {
     currentStage: `${channel}-counter-failed`,
     "counterCadence.lastFailureAt": now,
@@ -575,10 +592,21 @@ async function dispatchCounterCadenceItem(item, {
   }
 
   await recordCounterCadenceFailure(item, dispatchResult.result || dispatchResult, now);
+  // HOIST THE SKIP. dispatchForLead NESTS it — {ok:false, result:{skipped:true,
+  // reason:"rate-limited"}} — while the sweep's failure counter reads only the
+  // TOP level, so correct pacing was recorded as failure. Not cosmetic: each
+  // rate-limited item wrote a failedByChannel increment, a
+  // "<channel>-counter-failed" stage and a workflow row; the drain saw a wall
+  // of failures and refused to certify drained; and the pass factory then
+  // retried the whole thing three times. Any rvm backlog past the shaper's
+  // ~40-token window did that every day.
+  const nested = dispatchResult.result || dispatchResult;
+  const skipped = Boolean(dispatchResult.skipped || nested?.skipped);
   return {
     ok: false,
+    ...(skipped ? { skipped: true, reason: nested?.reason || "skipped" } : {}),
     item: summarizeDueItem(item),
-    result: dispatchResult.result || dispatchResult,
+    result: nested,
   };
 }
 
@@ -839,7 +867,11 @@ async function pollCounterCadenceRvmDispositions({
  *    against a failing provider is the RC-429 shape all over again);
  *  - maxRounds bounds the wall clock inside the pass's lease.
  */
-async function drainCounterCadenceSweep({ maxRounds = 20, ...options } = {}) {
+async function drainCounterCadenceSweep({
+  maxRounds = 20,
+  roundPauseMs = Math.max(0, Number(process.env.COUNTER_CADENCE_DRAIN_ROUND_PAUSE_MS) || 2000),
+  ...options
+} = {}) {
   const totals = {
     ok: true, rounds: 0, selected: 0, sent: 0, failed: 0, skipped: 0,
     drained: false, roundResults: [],
@@ -865,6 +897,18 @@ async function drainCounterCadenceSweep({ maxRounds = 20, ...options } = {}) {
     }
     // A full selection that sent nothing is a stuck provider, not a backlog.
     if ((Number(r?.sent) || 0) === 0 && !options.dryRun) break;
+    // A round that is MOSTLY failure is a struggling provider, not a backlog
+    // either. The sent===0 stop only catches a hard-down one; a trickle of
+    // successes — which is precisely what a throttling provider returns —
+    // sailed past it and kept the loop going for its full round budget.
+    if (!options.dryRun && (Number(r?.failed) || 0) > (Number(r?.sent) || 0) * 2) {
+      break;
+    }
+    // PACE BETWEEN ROUNDS. sms and email have no rate shaper at all
+    // (outboundRateShaper.channels covers rvm and cx only), so nothing else in
+    // this path throttles them. The gateway loop this replaces was naturally
+    // paced at one batch per 60-second tick; a bare for-loop is not.
+    if (roundPauseMs > 0) await new Promise((resolve) => setTimeout(resolve, roundPauseMs));
   }
   return totals;
 }

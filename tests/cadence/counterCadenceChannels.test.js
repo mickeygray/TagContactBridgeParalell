@@ -347,3 +347,52 @@ test("claimCounterCadenceItem uses the guarded filter, not an inline one", () =>
   assert.match(body, /buildCounterCadenceClaimFilter\(item, now\)/);
   assert.doesNotMatch(body, /\$or:/, "the filter must not be rebuilt inline and drift from the guard");
 });
+
+// ── THE DRAIN'S BLAST RADIUS (adversarial pass, two HIGH) ──────────────────
+
+test("a rate-limited dispatch is a SKIP, not a failure", () => {
+  // dispatchForLead nests it: {ok:false, result:{skipped:true,
+  // reason:"rate-limited"}}. The sweep's failure counter reads the TOP level,
+  // so correct pacing was recorded as failure — writing a failedByChannel
+  // increment, a "-counter-failed" stage and a workflow row per item, refusing
+  // to certify drained, and making the factory retry the whole thing.
+  const source = require("node:fs")
+    .readFileSync(require.resolve("../../packages/shared-services/src/counterCadenceService"), "utf8")
+    .replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
+  const fn = source.slice(source.indexOf("async function dispatchCounterCadenceItem"));
+  const body = fn.slice(0, fn.slice(1).search(/\n(async )?function /));
+  assert.match(body, /nested\?\.skipped/, "the nested skip must be hoisted");
+  assert.match(body, /skipped \? \{ skipped: true/, "and surfaced at the top level");
+});
+
+test("a failed dispatch backs off so it cannot pin the head of the next round", () => {
+  // The candidate query sorts on lastDispatchAt ascending and only a SUCCESS
+  // advances it, so a lead whose dispatch threw kept its sort key and returned
+  // at the head seconds later — hammered once per round, twenty rounds deep.
+  const source = require("node:fs")
+    .readFileSync(require.resolve("../../packages/shared-services/src/counterCadenceService"), "utf8")
+    .replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
+  const fn = source.slice(source.indexOf("async function recordCounterCadenceFailure"));
+  const body = fn.slice(0, fn.slice(1).search(/\n(async )?function /));
+  assert.match(body, /skippedNotFailed/, "a skip must not be given a failure backoff");
+  assert.match(body, /15 \* 60 \* 1000/, "a genuine failure gets a short defer");
+});
+
+test("the drain stops on a MOSTLY-failing round, not just a fully dead one", () => {
+  // sent===0 only catches a hard-down provider. A throttling one returns a
+  // trickle of successes, which sailed past that stop and let the loop run its
+  // whole round budget against a struggling provider.
+  const { drainCounterCadenceSweep } = require(
+    "../../packages/shared-services/src/counterCadenceService",
+  );
+  const src = String(drainCounterCadenceSweep);
+  assert.match(src, /failed\)[\s\S]{0,40}>[\s\S]{0,40}sent/, "a failure-dominated round must stop it");
+  assert.match(src, /roundPauseMs/, "and rounds must pace — sms/email have no rate shaper at all");
+});
+
+test("the drain's round pause is configurable and defaults on", () => {
+  const { drainCounterCadenceSweep } = require(
+    "../../packages/shared-services/src/counterCadenceService",
+  );
+  assert.match(String(drainCounterCadenceSweep), /COUNTER_CADENCE_DRAIN_ROUND_PAUSE_MS/);
+});
