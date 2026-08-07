@@ -7,7 +7,7 @@ const { test } = require("node:test");
 const assert = require("node:assert/strict");
 
 const {
-  createNightlyHygieneRuntime, isPacificBusinessDay, persistTargetDay,
+  createNightlyHygieneRuntime, isPacificBusinessDay, nightlyReportDueAt, persistTargetDay,
 } = require("../../apps/control-plane/src/services/nightlyHygieneRuntime");
 const { DailyLoopRun } = require("../../packages/shared-models/src");
 
@@ -41,6 +41,7 @@ test("disabled by default — deploying the code does not start writing", async 
     // The mailbox task now arms on EITHER document, so NCOA's flag has to be
     // cleared here too or this test reads the local box instead of the default.
     NCOA_MAILBOX_ENABLED: undefined,
+    REPORT_SCHEDULER_ENABLED: undefined,
   }, async () => {
     const rt = createNightlyHygieneRuntime({});
     const s = rt.getState();
@@ -195,7 +196,7 @@ test("running the loop is a SEPARATE decision from letting it write", async () =
   });
 });
 
-test("a task that throws does not cost the other tasks their night", async () => {
+test("a task that throws aborts the close before a partial report can run", async () => {
   const rt = createNightlyHygieneRuntime({ config: { enabled: true } });
   const ran = [];
   rt.TASKS.length = 0;
@@ -208,9 +209,10 @@ test("a task that throws does not cost the other tasks their night", async () =>
       apply: async () => ({}), describe: () => "ok" },
   );
   const result = await rt.runOnce({ force: true });
-  assert.deepEqual(ran, ["fine"], "the healthy task still ran");
+  assert.deepEqual(ran, [], "nothing downstream may build a partly-correct report");
   assert.match(result.tasks[0].error, /upstream on fire/);
-  assert.equal(result.tasks[1].error, undefined);
+  assert.equal(result.aborted, "Error");
+  assert.equal(result.nextTaskIndex, 0);
 });
 
 test("a completed pass claims the day; a failed one does not", async () => {
@@ -285,14 +287,17 @@ test("the offset stays configurable so hour and day can never drift apart", () =
   }
 });
 
-test("hygiene runs BEFORE the 20:20 board, with headroom", () => {
-  // The order is the requirement: attribution must be sourced before any
-  // report reads it, or the board shows tonight's deals unattributed.
+test("the one nightly run starts at 19:50 and ends at the 20:00 report", () => {
+  // 20:00 is the final task's due point, not a second scheduler racing the
+  // cleanup. The ten-minute gap is work time inside one durable run.
   const s = createNightlyHygieneRuntime({}).getState();
   const hygiene = s.hour * 60 + s.minute;
   assert.equal(hygiene, 19 * 60 + 50, "19:50 PT");
-  assert.ok(hygiene < 20 * 60 + 20, "must finish before the night board fires");
-  assert.ok((20 * 60 + 20) - hygiene >= 30, "at least half an hour of headroom");
+  assert.equal((20 * 60) - hygiene, 10, "ten minutes until the final delivery point");
+  assert.equal(
+    nightlyReportDueAt(new Date("2026-08-04T02:50:00.000Z")).toISOString(),
+    "2026-08-04T03:00:00.000Z",
+  );
 });
 
 test("all three tenants persist by default, not TAG alone", () => {
@@ -380,7 +385,7 @@ test("the night runs in the stated ORDER", () => {
   // extra gather, which is the opposite of "one shot and just branch". The
   // branch lives in reportDefinitionService, which already composes once and
   // hands that same report to captureDeliveredDailyFact.
-  // call-recording-index is LAST: it reads what the day produced across every
+  // call-recording-index is the last PREPARATION step: it reads what the day produced across every
   // provider, so it wants the rest of the pass to have finished correcting data
   // first. It is also the only task whose output is a new collection rather
   // than a fix to an existing one.
@@ -399,7 +404,9 @@ test("the night runs in the stated ORDER", () => {
     ["night-persist", "mail-invoice", "mail-spend-derive", "call-links", "call-recovery-discovery",
       "call-recovery-eligibility-hygiene", "queue-rollup", "logics-source", "spend-sync",
       "activity-review", "session-reconcile", "payment-reconcile", "payment-fields-sync",
-      "call-log-hygiene-evening", "call-recording-index"]);
+      "call-log-hygiene-evening", "call-recording-index", "report-delivery"]);
+  assert.equal(s2.tasks.at(-1).key, "report-delivery",
+    "email delivery must be the final step of the same durable nightly cursor");
   assert.ok(!s2.tasks.some((t) => t.key === "daily-snapshot"),
     "the snapshot is NOT a hygiene task — it branches off the report's own single gather");
 
@@ -421,6 +428,65 @@ test("the night runs in the stated ORDER", () => {
   const recovery = instance.TASKS.find((t) => t.key === "call-recovery-discovery");
   assert.equal(recovery.count([{ qualified: 0, errors: 0 }]), 1,
     "a legitimately empty completed day still needs one daily cohort manifest");
+});
+
+test("every nightly task pins its business date to the run's original clock", () => {
+  const source = require("node:fs").readFileSync(
+    require.resolve("../../apps/control-plane/src/services/nightlyHygieneRuntime"),
+    "utf8",
+  );
+  const registry = source
+    .slice(source.indexOf("const TASKS ="), source.indexOf("function createNightlyHygieneRuntime"))
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/\/\/[^\n]*/g, "");
+  assert.doesNotMatch(
+    registry,
+    /persistTargetDay\(\)/,
+    "a task must use the captured `at` or its planned date, never the later wall clock",
+  );
+});
+
+test("report delivery reuses the report executor at the final 20:00 Pacific anchor", async () => {
+  const calls = [];
+  const reportScheduleRuntime = {
+    async poll(options) {
+      calls.push(options);
+      return { ran: 2, results: [{ delivered: true }, { delivered: true }] };
+    },
+  };
+  const rt = createNightlyHygieneRuntime({ config: { reportScheduleRuntime } });
+  const task = rt.TASKS.find((row) => row.key === "report-delivery");
+  assert.equal(rt.TASKS.at(-1), task, "delivery must be the final nightly task");
+
+  const planned = task.plan({ at: new Date("2026-08-04T02:50:00.000Z") });
+  const result = await task.apply(planned, { reportScheduleRuntime });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].force, true);
+  assert.equal(calls[0].now.toISOString(), "2026-08-04T03:00:00.000Z");
+  assert.deepEqual(result, { written: 2, skipped: 0, failed: 0, ran: 2 });
+});
+
+test("report delivery fails loudly when its executor is absent or a definition fails", async () => {
+  const task = createNightlyHygieneRuntime({}).TASKS.find((row) => row.key === "report-delivery");
+  const planned = task.plan({ at: new Date("2026-08-04T03:10:00.000Z") });
+  await assert.rejects(
+    task.apply(planned, {}),
+    (error) => error.code === "REPORT_SCHEDULE_RUNTIME_MISSING",
+  );
+  await assert.rejects(
+    task.apply(planned, {
+      reportScheduleRuntime: {
+        poll: async () => ({ ran: 1, results: [{ error: "mail failed" }] }),
+      },
+    }),
+    (error) => error.code === "REPORT_DELIVERY_FAILED",
+  );
+  await assert.rejects(
+    task.apply(planned, {
+      reportScheduleRuntime: { poll: async () => ({ ran: 0, results: [] }) },
+    }),
+    (error) => error.code === "REPORT_DELIVERY_EMPTY",
+  );
 });
 
 test("call-links CAPTURES marketing links; PhoneBurner still cannot", () => {
@@ -470,13 +536,7 @@ test("every task is gated by its OWN switch", () => {
   assert.equal(new Set(s2.tasks.map((t) => t.key)).size, s2.tasks.length, "no duplicate task keys");
 });
 
-test("a chore that keeps failing is retried, then stepped past so the night finishes", async () => {
-  // The old behaviour aborted the pass on EVERY failure while a durable claim
-  // was held — so one flaky chore took every task behind it, every poll,
-  // forever. The new behaviour has to thread a needle: retry (because
-  // night-persist writes officerAtSale, which a live re-pull can never
-  // reconstruct, so a transient blip must not skip it) but bounded (because the
-  // 20:00 email needs the costing that sits behind it).
+test("a failed chore launches the emergency close once and never steps past it", async () => {
   const originalFind = DailyLoopRun.findOneAndUpdate;
   const originalUpdate = DailyLoopRun.updateOne;
   const claimedAt = new Date("2026-08-04T03:00:00Z");
@@ -490,7 +550,20 @@ test("a chore that keeps failing is retried, then stepped past so the night fini
     return { acknowledged: true, matchedCount: 1 };
   };
   try {
-    const rt = createNightlyHygieneRuntime({ config: { enabled: true, hour: 0 } });
+    const launches = [];
+    const rt = createNightlyHygieneRuntime({
+      config: {
+        enabled: true,
+        hour: 0,
+        emergencyCloseEnabled: true,
+        emergencyClose: {
+          readCheckpoint: () => null,
+          markStarted: () => ({}),
+          markCompleted: () => ({}),
+          launch: (args) => { launches.push(args); return { launched: true }; },
+        },
+      },
+    });
     let healthyRuns = 0;
     rt.TASKS.length = 0;
     rt.TASKS.push(
@@ -505,23 +578,13 @@ test("a chore that keeps failing is retried, then stepped past so the night fini
         apply: async () => ({}), describe: () => "ok" },
     );
 
-    // Polls 1 and 2: the flaky task is retried in place, cursor does not move,
-    // and the healthy task behind it has not run yet.
-    for (const attempt of [1, 2]) {
-      const r = await rt.runOnce({ at: claimedAt });
-      assert.equal(r.retrying, "flaky", `poll ${attempt} should still be retrying`);
-      assert.equal(r.attempt, attempt);
-      assert.equal(cursor, 0, "the cursor stays on the failing task while retries remain");
-      assert.equal(healthyRuns, 0, "downstream work waits during the retry window");
-    }
-
-    // Poll 3 exhausts the attempts: the pass steps past the flaky chore and the
-    // rest of the night finally runs.
     const final = await rt.runOnce({ at: claimedAt });
-    assert.equal(final.retrying, undefined, "no longer retrying once attempts are spent");
-    assert.equal(healthyRuns, 1, "the healthy task runs after the flaky one is abandoned");
-    assert.equal(final.tasks[0].skippedAfterAttempts, 3, "the skip is recorded, not silent");
+    assert.equal(final.aborted, "Error");
+    assert.equal(cursor, 0, "the failed durable cursor is never advanced");
+    assert.equal(healthyRuns, 0, "downstream work never runs after the failure");
     assert.match(final.tasks[0].error, /provider unavailable/);
+    assert.equal(launches.length, 1);
+    assert.equal(launches[0].taskKey, "flaky");
   } finally {
     DailyLoopRun.findOneAndUpdate = originalFind;
     DailyLoopRun.updateOne = originalUpdate;
@@ -688,6 +751,117 @@ test("NCOA keeps its own flag — disabled means the handler is absent, not idle
   const { buildMailboxHandlers } = require("../../apps/control-plane/src/services/nightlyHygieneRuntime");
   const keys = buildMailboxHandlers({ ncoaEnabled: false, targetDate: "2026-08-06" }).map((h) => h.key);
   assert.deepEqual(keys, ["mail-invoice"], "folding the job must not arm it where it was off");
+});
+
+test("startup recovers an interrupted close before the nightly timer is considered", async () => {
+  const launches = [];
+  const rt = createNightlyHygieneRuntime({
+    config: {
+      enabled: false,
+      emergencyCloseEnabled: true,
+      emergencyClose: {
+        readCheckpoint: () => ({
+          dateKey: "2026-08-06",
+          status: "running",
+          taskKey: "call-links",
+        }),
+        launch: (args) => { launches.push(args); return { launched: true }; },
+      },
+    },
+  });
+
+  await rt.start();
+  assert.equal(launches.length, 1);
+  assert.equal(launches[0].dateKey, "2026-08-06");
+  assert.equal(launches[0].reasonCode, "process-restart-recovery");
+  assert.equal(launches[0].taskKey, "call-links");
+});
+
+test("graceful shutdown sends the data-free close while a nightly pass is active", async () => {
+  let releasePlan;
+  const planGate = new Promise((resolve) => { releasePlan = resolve; });
+  const sends = [];
+  const rt = createNightlyHygieneRuntime({
+    config: {
+      enabled: true,
+      hour: 0,
+      emergencyCloseEnabled: true,
+      emergencyClose: {
+        readCheckpoint: () => null,
+        markStarted: () => ({}),
+        markCompleted: () => ({}),
+        launch: () => ({ launched: true }),
+        send: async (args) => { sends.push(args); return { sent: true }; },
+      },
+    },
+  });
+  rt.TASKS.length = 0;
+  rt.TASKS.push({
+    key: "waiting", label: "waiting", writesArmed: () => false,
+    plan: async () => planGate,
+    apply: async () => ({}), count: () => 0, describe: () => "waiting",
+  });
+
+  const run = rt.runOnce({ force: true, at: new Date("2026-08-07T03:00:00Z") });
+  await new Promise((resolve) => setImmediate(resolve));
+  await rt.stop();
+  assert.equal(sends.length, 1);
+  assert.equal(sends[0].reasonCode, "process-shutdown");
+  assert.equal(sends[0].dateKey, "2026-08-06");
+
+  releasePlan([]);
+  await run;
+});
+
+test("a long nightly task renews its durable claim before the lease can expire", async () => {
+  const originalFind = DailyLoopRun.findOneAndUpdate;
+  const originalUpdate = DailyLoopRun.updateOne;
+  const writes = [];
+  const claimedAt = new Date("2026-08-04T03:00:00Z");
+  DailyLoopRun.findOneAndUpdate = async () => ({
+    dateKey: "2026-08-03",
+    nightlyHygieneClaimedAt: claimedAt,
+    nightlyHygieneNextTaskIndex: 0,
+  });
+  DailyLoopRun.updateOne = async (filter, update) => {
+    writes.push({ filter, update });
+    return { acknowledged: true, matchedCount: 1 };
+  };
+  try {
+    const rt = createNightlyHygieneRuntime({
+      config: { enabled: true, hour: 0, claimHeartbeatMs: 10 },
+    });
+    rt.TASKS.length = 0;
+    rt.TASKS.push({
+      key: "slow",
+      label: "slow",
+      writesArmed: () => false,
+      plan: async () => {
+        await new Promise((resolve) => setTimeout(resolve, 35));
+        return [];
+      },
+      apply: async () => ({}),
+      describe: () => "",
+    });
+    await rt.runOnce({ at: claimedAt });
+    assert.ok(writes.some((row) => (
+      row.update.$set?.nightlyHygieneClaimedAt instanceof Date
+      && row.update.$set?.nightlyHygieneNextTaskIndex === undefined
+    )), "the in-task heartbeat must renew without advancing the cursor");
+  } finally {
+    DailyLoopRun.findOneAndUpdate = originalFind;
+    DailyLoopRun.updateOne = originalUpdate;
+  }
+});
+
+test("NCOA alone does not smuggle the invoice writer past its own flag", () => {
+  const { buildMailboxHandlers } = require("../../apps/control-plane/src/services/nightlyHygieneRuntime");
+  const keys = buildMailboxHandlers({
+    invoiceEnabled: false,
+    ncoaEnabled: true,
+    targetDate: "2026-08-06",
+  }).map((handler) => handler.key);
+  assert.deepEqual(keys, ["ncoa"]);
 });
 
 test("the two handlers cannot fight over one message", () => {

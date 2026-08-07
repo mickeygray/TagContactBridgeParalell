@@ -769,6 +769,7 @@ async function dispatchForLead(lead, {
   audioUrl = null,
   updateCadence = true,
   queueDepth = 1,
+  initialContact = false,
 }) {
   const action = updateCadence ? pickAction(lead, channel, actionType) : null;
   const actionKey = action?.key || `${channel}-${actionType || "manual"}`;
@@ -1074,7 +1075,7 @@ async function dispatchForLead(lead, {
         reason: "bypass-test-lead",
         policy: {},
       }
-    : evaluateChannelContactTime(domain, channel, new Date());
+    : evaluateChannelContactTime(domain, channel, new Date(), { initialContact });
   if (!timing.allowed) {
     if (action) {
       await leadCadenceRepository.rescheduleScheduledAction(

@@ -782,9 +782,13 @@ async function ingestAndSeed(h) {
 test("provider runtime performs no weekend scan, refill, or posting", async () => {
   const h = harness({ rows: [sourceRow(1)] });
   h.setClock("2026-08-02T16:00:00.000Z");
+  let eventReads = 0;
+  h.repository.listEventsForDrain = async () => { eventReads += 1; return []; };
   const result = await h.runtime.tick();
   assert.equal(result.status, "ok");
-  assert.equal(result.tickMode, "weekend_event_drain");
+  assert.equal(result.tickMode, "weekend_idle");
+  assert.equal(result.events.status, "weekend-paused");
+  assert.equal(eventReads, 0, "durable callbacks wait for the next business day");
   assert.equal(h.calls.length, 0);
   assert.equal(h.repository.agents.size, 0);
   assert.equal(h.repository.items.size, 0);
@@ -929,6 +933,19 @@ function addDone(repository, item, number, outcome, extra = {}) {
     receivedAt: new Date(START.getTime() + number * 1_000),
     ...extra,
   });
+}
+
+async function insertEligibleRows(repository, rows) {
+  for (const row of rows) {
+    await repository.insertActiveItemOnce({
+      ...copy(row),
+      sourcePool: POOLS.OLDER_AVAILABLE,
+      state: "eligible",
+      activeAttempt: true,
+      version: 0,
+      metadata: {},
+    });
+  }
 }
 
 test("productivity cull keeps exactly six yellow/red contacts", () => {
@@ -1359,6 +1376,7 @@ test("start arms the scheduler without waiting for the first tick, and stop drai
   const drainEntered = new Promise((resolve) => { markDrainEntered = resolve; });
   const handle = { unref() { unrefCount += 1; } };
   const h = harness({
+    actionsEnabled: true,
     scheduler: {
       setInterval() { return handle; },
       clearInterval(value) { assert.equal(value, handle); clearCount += 1; },
@@ -2210,7 +2228,7 @@ test("MVP mode treats every identified call end as capacity while only DNC invok
   const first = acceptedItems(h.repository)[0];
   addDone(h.repository, first, 1, "something new");
   await h.runtime.drainEvents();
-  assert.equal(h.calls.length, 3);
+  assert.equal(h.calls.length, 2);
   assert.equal((await h.repository.getItemById(first._id)).state, "follow_up_wait");
 
   const second = acceptedItems(h.repository).find((item) => item._id !== first._id);
@@ -2321,8 +2339,8 @@ test("non-authoritative low-water cleanup uses the fixed packet and exhausts a s
     addDone(h.repository, initial[index], index + 1, "review");
     await h.runtime.drainEvents();
   }
-  assert.equal(h.calls.length, 10);
-  assert.equal((await h.repository.getAgentById("bruce_allen")).estimatedOutstanding, 6);
+  assert.equal(h.calls.length, 9);
+  assert.equal((await h.repository.getAgentById("bruce_allen")).estimatedOutstanding, 5);
 });
 
 test("DNC downstream retries do not recount local completion", async () => {
@@ -2588,7 +2606,7 @@ test("retryable Call Ends delete the PhoneBurner contact and are reposted when d
   assert.equal(waiting.providerContactId, null);
   assert.equal(waiting.providerExternalLeadId, null);
   assert.equal(waiting.providerCallId, null);
-  h.setClock(new Date(START.getTime() + 91 * 60_000));
+  h.setClock(new Date(START.getTime() + 121 * 60_000));
 
   const result = await h.runtime.seedAgent("bruce_allen");
   assert.equal(result.accepted, 1);
@@ -2854,7 +2872,8 @@ test("provider 429 preserves the exact item for a cooled retry instead of termin
   providerClock = 30_000;
   const retryTick = await h.runtime.tick();
   const accepted = [...h.repository.items.values()][0];
-  assert.equal(retryTick.automatic[0].accepted, 1);
+  assert.equal(retryTick.status, "ok");
+  assert.equal(h.calls.length, 2);
   assert.equal(accepted.state, "provider_accepted");
   assert.equal(accepted.providerExternalLeadId, externalId);
   assert.equal(h.calls[1].externalLeadId, externalId);
@@ -2935,7 +2954,7 @@ test("automatic recover-only posting heals a failed pre-position without inventi
   assert.equal(limited.status, "provider-backpressure");
   assert.equal((await h.repository.getAgentById("bruce_allen")).shiftEnabled, false);
   providerClock = 30_000;
-  await h.runtime.tick();
+  await h.runtime.seedAgent("bruce_allen", { preposition: true });
 
   assert.equal(acceptedItems(h.repository).length, 1);
   assert.equal((await h.repository.getAgentById("bruce_allen")).shiftEnabled, false);
@@ -2997,6 +3016,8 @@ test("production callback drain completes its event after durable packetization,
   await providerStarted;
   const drained = await drain;
   assert.equal(drained.results[0].status, "completed");
+  assert.equal(Object.hasOwn(drained.results[0], "deferredRefillAgentId"), false);
+  assert.equal(Object.hasOwn(drained.results[0], "deferredFreshDispatch"), false);
   assert.equal(h.repository.events.get("done-1").status, "completed");
   assert.equal((await h.repository.getAgentById("bruce_allen")).openRefillRequest, false);
   assert.equal(h.runtime.getState().backgroundRefillCount, 1);
@@ -3036,8 +3057,8 @@ test("partial refill keeps one durable owner while provider work is outstanding"
   };
 
   const drain = h.runtime.drainEvents({ waitForRefillCompletion: false });
-  await providerStarted;
   await drain;
+  await providerStarted;
   assert.equal(h.repository.events.get("done-1").status, "completed");
   assert.equal(h.repository.events.get("done-2").status, "completed");
   assert.equal(h.calls.length, 3);
@@ -3381,6 +3402,8 @@ test("drainCapturedEvent leases and processes only the supplied exact event", as
   assert.deepEqual(leasedIds, [secondEvent._id]);
   assert.equal(result.seen, 1);
   assert.equal(result.processed, 1);
+  assert.equal(Object.hasOwn(result.results[0], "deferredRefillAgentId"), false);
+  assert.equal(Object.hasOwn(result.results[0], "deferredFreshDispatch"), false);
   assert.equal(h.repository.events.get(secondEvent._id).status, "completed");
   assert.equal(h.repository.events.get(firstEvent._id).status, "pending");
   assert.equal((await h.repository.getItemById(second._id)).state, "follow_up_wait");
@@ -3452,7 +3475,7 @@ test("an old Call End cannot mutate or delete a newer provider attempt", async (
   await h.runtime.drainEvents();
   h.setClock("2026-07-11T00:30:00.000Z");
   assert.equal((await h.runtime.runEndOfDayFolderDrain()).status, "completed");
-  h.setClock("2026-07-11T14:50:00.000Z");
+  h.setClock("2026-07-13T14:50:00.000Z");
   assert.equal((await h.runtime.launchAgent("bruce_allen")).accepted, 1);
   const newerAttempt = await h.repository.getItemById(firstAttempt._id);
   const newerContactId = newerAttempt.providerContactId;
@@ -3463,7 +3486,7 @@ test("an old Call End cannot mutate or delete a newer provider attempt", async (
     providerCallId: "call-first",
     ...oldIdentity,
     normalizedOutcome: "voicemail",
-    receivedAt: new Date("2026-07-11T14:51:00.000Z"),
+    receivedAt: new Date("2026-07-13T14:51:00.000Z"),
   });
 
   const result = await h.runtime.drainCapturedEvent(oldCallEnd);
@@ -3934,7 +3957,7 @@ test("simple Call End keeps its durable event retryable when the Pool count fail
 
 test("provider-authoritative simple Call End refills when Pool reaches exactly five", async () => {
   const h = harness({
-    rows: Array.from({ length: 40 }, (_, index) => sourceRow(index + 1)),
+    rows: Array.from({ length: 20 }, (_, index) => sourceRow(index + 1)),
     actionsEnabled: true,
     refillEnabled: true,
     providerInventoryAuthoritative: true,
@@ -3946,6 +3969,10 @@ test("provider-authoritative simple Call End refills when Pool reaches exactly f
   const started = await h.runtime.tick();
   assert.equal(started.dayStart.status, "completed");
   assert.equal(h.calls.length, 20);
+  await insertEligibleRows(
+    h.repository,
+    Array.from({ length: 20 }, (_, index) => sourceRow(index + 21)),
+  );
 
   const initial = acceptedItems(h.repository).slice(0, 20);
   const completed = initial[0];
@@ -3972,7 +3999,7 @@ test("provider-authoritative simple Call End refills when Pool reaches exactly f
 
 test("physical Pool watchdog restores an empty active-agent Pool without a Call End", async () => {
   const h = harness({
-    rows: Array.from({ length: 60 }, (_, index) => sourceRow(index + 1)),
+    rows: Array.from({ length: 20 }, (_, index) => sourceRow(index + 1)),
     actionsEnabled: true,
     refillEnabled: true,
     providerInventoryAuthoritative: true,
@@ -3984,6 +4011,10 @@ test("physical Pool watchdog restores an empty active-agent Pool without a Call 
   const started = await h.runtime.tick();
   assert.equal(started.dayStart.status, "completed");
   assert.equal(h.calls.length, 20);
+  await insertEligibleRows(
+    h.repository,
+    Array.from({ length: 20 }, (_, index) => sourceRow(index + 21)),
+  );
 
   h.providerContacts.clear();
   h.setClock("2026-07-10T14:51:00.000Z");
@@ -4171,7 +4202,7 @@ test("physical Pool status-refresh failure remains background-safe and posts not
 
 test("physical Pool watchdog refills before a later ingestion failure aborts the tick", async () => {
   const h = harness({
-    rows: Array.from({ length: 60 }, (_, index) => sourceRow(index + 1)),
+    rows: Array.from({ length: 20 }, (_, index) => sourceRow(index + 1)),
     actionsEnabled: true,
     refillEnabled: true,
     providerInventoryAuthoritative: true,
@@ -4183,6 +4214,10 @@ test("physical Pool watchdog refills before a later ingestion failure aborts the
   const started = await h.runtime.tick();
   assert.equal(started.dayStart.status, "completed");
   assert.equal(h.calls.length, 20);
+  await insertEligibleRows(
+    h.repository,
+    Array.from({ length: 20 }, (_, index) => sourceRow(index + 21)),
+  );
 
   h.providerContacts.clear();
   h.source.readBatch = async () => {
@@ -4199,7 +4234,7 @@ test("physical Pool watchdog refills before a later ingestion failure aborts the
 
 test("physical Pool watchdog does not refill an operator-paused agent", async () => {
   const h = harness({
-    rows: Array.from({ length: 40 }, (_, index) => sourceRow(index + 1)),
+    rows: Array.from({ length: 20 }, (_, index) => sourceRow(index + 1)),
     actionsEnabled: true,
     refillEnabled: true,
     providerInventoryAuthoritative: true,
@@ -4465,6 +4500,65 @@ test("day start builds the full untouched source and distributes it evenly acros
   assert.equal(h.runtime.getState().sourceDone, true);
 });
 
+test("day start continues after an all-held page advances the repair cursor", async () => {
+  const row = { ...sourceRow(1), createdAt: new Date("2026-07-10T14:40:00.000Z") };
+  const h = harness({
+    rows: [row],
+    durableSourceState: true,
+    actionsEnabled: true,
+    refillEnabled: true,
+    providerInventoryAuthoritative: true,
+    configuration: fiveAgentConfig(),
+    deliveryWindowEvaluator: isPacificDeliveryWindowOpen,
+  });
+  h.setClock("2026-07-10T14:50:00.000Z");
+  let reads = 0;
+  h.source.readBatch = async () => {
+    reads += 1;
+    if (reads === 1) {
+      return {
+        items: [],
+        highWater: { createdAt: row.createdAt, id: "0" },
+        nextCursor: { createdAt: row.createdAt, id: "recovery:held-page" },
+        done: false,
+      };
+    }
+    return { items: [row], nextCursor: null, done: true };
+  };
+
+  const opened = await h.runtime.tick();
+  assert.equal(opened.dayStart.status, "completed");
+  assert.equal(opened.dayStart.queueBuild.done, true);
+  assert.equal(reads, 2, "zero admissions are progress when the durable cursor moved");
+  assert.equal(h.calls.length, 1);
+});
+
+test("recovery paging identity stays private on the runtime health surface", async () => {
+  const row = { ...sourceRow(1), createdAt: new Date("2026-07-10T14:40:00.000Z") };
+  const h = harness({
+    rows: [row],
+    durableSourceState: true,
+    actionsEnabled: false,
+    refillEnabled: false,
+  });
+  h.setClock("2026-07-10T14:50:00.000Z");
+  h.source.readBatch = async () => ({
+    items: [],
+    highWater: { createdAt: row.createdAt, id: "0" },
+    nextCursor: {
+      createdAt: new Date(0),
+      id: "recovery:callrail-long-call-recovery:TAG:private-case:1",
+    },
+    done: false,
+  });
+
+  await h.runtime.ingestOnce();
+  const exposed = h.runtime.getState().sourceCursor;
+  assert.deepEqual(exposed, { kind: "recovery", positioned: true });
+  assert.equal(JSON.stringify(exposed).includes("private-case"), false);
+  assert.equal(JSON.stringify(exposed).includes("1970"), false);
+});
+
 test("a queued provider post is blocked when the clock crosses 5 PM before create", async () => {
   const cutoff = new Date("2026-07-11T00:00:00.000Z");
   const h = harness({
@@ -4516,14 +4610,14 @@ test("a reused providerCallId counts distinct contact/external attempts and acti
   await h.runtime.drainEvents();
   h.setClock("2026-07-11T00:30:00.000Z");
   assert.equal((await h.runtime.runEndOfDayFolderDrain()).status, "completed");
-  h.setClock("2026-07-11T14:50:00.000Z");
+  h.setClock("2026-07-13T14:50:00.000Z");
   assert.equal((await h.runtime.launchAgent("bruce_allen")).accepted, 1);
   const secondAttempt = await h.repository.getItemById(firstAttempt._id);
   assert.notEqual(secondAttempt.providerContactId, firstContactId);
   assert.notEqual(secondAttempt.providerExternalLeadId, firstExternalLeadId);
   const secondEvent = addDone(h.repository, secondAttempt, 2, "voicemail", {
     providerCallId: "reused-session-call-id",
-    receivedAt: new Date("2026-07-11T14:51:00.000Z"),
+    receivedAt: new Date("2026-07-13T14:51:00.000Z"),
   });
 
   await h.runtime.drainCapturedEvent(secondEvent);
@@ -4612,7 +4706,7 @@ test("next-day launch releases end-of-day tombstones without counting and create
   h.setClock("2026-07-11T00:30:00.000Z");
   assert.equal((await h.runtime.runEndOfDayFolderDrain()).status, "completed");
 
-  h.setClock("2026-07-11T14:50:00.000Z");
+  h.setClock("2026-07-13T14:50:00.000Z");
   const launched = await h.runtime.launchAgent("bruce_allen");
   const second = await h.repository.getItemById(first._id);
   assert.equal(launched.accepted, 1);
@@ -4990,7 +5084,8 @@ test("weekend preposition without call-begin counts on the later close day", asy
     },
   });
   h.setClock("2026-07-12T16:00:00.000Z"); // Sunday 09:00 Pacific.
-  await ingestAndSeed(h);
+  await h.runtime.ingestOnce();
+  await h.runtime.seedAgent("bruce_allen", { preposition: true });
   const accepted = acceptedItems(h.repository)[0];
   const identity = {
     providerContactId: accepted.providerContactId,
@@ -5050,11 +5145,12 @@ test("a delayed call_begin cannot resurrect an attempt removed by the 5:30 close
   assert.equal(afterPresence.metadata.workingFolderDrain.status, "provider_absent");
   assert.equal(h.repository.events.get(lateBegin._id).status, "completed");
 
-  h.setClock("2026-07-11T07:00:00.000Z");
+  h.setClock("2026-07-13T14:50:00.000Z");
   await h.runtime.tick();
   const released = await h.repository.getItemById(accepted._id);
-  assert.equal(released.state, "eligible");
-  assert.equal(released.providerContactId, null);
+  assert.equal(released.state, "provider_accepted");
+  assert.notEqual(released.providerContactId, identity.providerContactId);
+  assert.equal(released.providerAttemptSequence, 2);
   assert.equal(released.totalAttemptCount, 0);
 });
 
@@ -5092,15 +5188,16 @@ test("the first next-day tick releases every agent's undialed close tombstones",
   h.setClock("2026-07-11T00:30:00.000Z");
   assert.equal((await h.runtime.runEndOfDayFolderDrain()).status, "completed");
 
-  h.setClock("2026-07-11T07:00:00.000Z");
+  h.setClock("2026-07-13T14:50:00.000Z");
   const tick = await h.runtime.tick();
   const released = await h.repository.getItemById("item-1");
 
   assert.equal(tick.priorDayDrainRelease.status, "released");
   assert.equal(tick.priorDayDrainRelease.released, 1);
-  assert.equal(released.state, "eligible");
-  assert.equal(released.deliveryAgentId, null);
-  assert.equal(released.providerContactId, null);
+  assert.equal(released.state, "provider_accepted");
+  assert.equal(released.deliveryAgentId, "bruce_allen");
+  assert.equal(Boolean(released.providerContactId), true);
+  assert.equal(released.providerAttemptSequence, 2);
   assert.equal(released.dailyAttemptCount, 0);
   assert.equal(released.totalAttemptCount, 0);
 });
@@ -5279,18 +5376,18 @@ test("a historical completion cannot manufacture current agent activity", async 
   };
   h.setClock("2026-07-11T00:30:00.000Z");
   assert.equal((await h.runtime.runEndOfDayFolderDrain()).status, "completed");
-  h.setClock("2026-07-11T14:50:00.000Z");
+  h.setClock("2026-07-13T14:50:00.000Z");
   assert.equal((await h.runtime.launchAgent("bruce_allen")).accepted, 1);
   const before = await h.repository.getAgentById("bruce_allen");
-  assert.equal(new Date(before.activeUntil).toISOString(), "2026-07-11T15:00:00.000Z");
+  assert.equal(new Date(before.activeUntil).toISOString(), "2026-07-13T15:00:00.000Z");
 
-  h.setClock("2026-07-11T15:01:00.000Z");
+  h.setClock("2026-07-13T15:01:00.000Z");
   const delayed = h.repository.addEvent({
     _id: "historical-after-activity-expired",
     providerCallId: "historical-expired-agent-call",
     ...firstIdentity,
     normalizedOutcome: "voicemail",
-    receivedAt: new Date("2026-07-11T15:01:00.000Z"),
+    receivedAt: new Date("2026-07-13T15:01:00.000Z"),
   });
   assert.equal((await h.runtime.drainCapturedEvent(delayed)).status, "completed");
   const historicalEvent = h.repository.events.get(delayed._id);
@@ -5323,7 +5420,7 @@ test("a historical appointment cancels a newer queued attempt without counting i
   };
   h.setClock("2026-07-11T00:30:00.000Z");
   assert.equal((await h.runtime.runEndOfDayFolderDrain()).status, "completed");
-  h.setClock("2026-07-11T14:50:00.000Z");
+  h.setClock("2026-07-13T14:50:00.000Z");
   assert.equal((await h.runtime.launchAgent("bruce_allen")).accepted, 1);
   const second = await h.repository.getItemById(first._id);
 
@@ -5332,7 +5429,7 @@ test("a historical appointment cancels a newer queued attempt without counting i
     providerCallId: "historical-appointment-call",
     ...firstIdentity,
     normalizedOutcome: "appointment",
-    receivedAt: new Date("2026-07-11T14:51:00.000Z"),
+    receivedAt: new Date("2026-07-13T14:51:00.000Z"),
   });
   assert.equal((await h.runtime.drainCapturedEvent(historicalAppointment)).status, "completed");
   const after = await h.repository.getItemById(first._id);
@@ -5369,7 +5466,7 @@ test("a historical appointment defers through a newer in-call attempt and remain
   };
   h.setClock("2026-07-11T00:30:00.000Z");
   assert.equal((await h.runtime.runEndOfDayFolderDrain()).status, "completed");
-  h.setClock("2026-07-11T14:50:00.000Z");
+  h.setClock("2026-07-13T14:50:00.000Z");
   assert.equal((await h.runtime.launchAgent("bruce_allen")).accepted, 1);
   const second = await h.repository.getItemById(first._id);
   const secondIdentity = {
@@ -5382,9 +5479,9 @@ test("a historical appointment defers through a newer in-call attempt and remain
     providerCallId: "second-attempt-live-call",
     ...secondIdentity,
     normalizedOutcome: null,
-    receivedAt: new Date("2026-07-11T14:50:30.000Z"),
+    receivedAt: new Date("2026-07-13T14:50:30.000Z"),
   });
-  h.setClock("2026-07-11T14:50:30.000Z");
+  h.setClock("2026-07-13T14:50:30.000Z");
   assert.equal((await h.runtime.drainCapturedEvent(began)).status, "completed");
   assert.equal((await h.repository.getItemById(first._id)).state, "in_call");
 
@@ -5393,9 +5490,9 @@ test("a historical appointment defers through a newer in-call attempt and remain
     providerCallId: "historical-appointment-before-new-call",
     ...firstIdentity,
     normalizedOutcome: "appointment",
-    receivedAt: new Date("2026-07-11T14:51:00.000Z"),
+    receivedAt: new Date("2026-07-13T14:51:00.000Z"),
   });
-  h.setClock("2026-07-11T14:51:00.000Z");
+  h.setClock("2026-07-13T14:51:00.000Z");
   assert.equal((await h.runtime.drainCapturedEvent(historical)).status, "completed");
   const deferred = await h.repository.getItemById(first._id);
   assert.equal(deferred.state, "in_call");
@@ -5407,9 +5504,9 @@ test("a historical appointment defers through a newer in-call attempt and remain
     providerCallId: "second-attempt-live-call",
     ...secondIdentity,
     normalizedOutcome: "voicemail",
-    receivedAt: new Date("2026-07-11T14:52:00.000Z"),
+    receivedAt: new Date("2026-07-13T14:52:00.000Z"),
   });
-  h.setClock("2026-07-11T14:52:00.000Z");
+  h.setClock("2026-07-13T14:52:00.000Z");
   assert.equal((await h.runtime.drainCapturedEvent(currentDone)).status, "completed");
   const after = await h.repository.getItemById(first._id);
   const agent = await h.repository.getAgentById("bruce_allen");
@@ -5452,7 +5549,7 @@ test("an older exact DNC completes after a later close marker and terminally can
 
   h.setClock("2026-07-11T00:30:00.000Z");
   assert.equal((await h.runtime.runEndOfDayFolderDrain()).status, "completed");
-  h.setClock("2026-07-11T14:50:00.000Z");
+  h.setClock("2026-07-13T14:50:00.000Z");
   assert.equal((await h.runtime.launchAgent("bruce_allen")).accepted, 1);
   const second = await h.repository.getItemById(first._id);
   const secondIdentity = {
@@ -5460,11 +5557,11 @@ test("an older exact DNC completes after a later close marker and terminally can
     providerExternalLeadId: second.providerExternalLeadId,
   };
 
-  h.setClock("2026-07-12T00:30:00.000Z");
+  h.setClock("2026-07-14T00:30:00.000Z");
   assert.equal((await h.runtime.runEndOfDayFolderDrain()).status, "completed");
   const afterSecondClose = await h.repository.getItemById(first._id);
   assert.equal(afterSecondClose.metadata.workingFolderDrain.attemptNumber, 2);
-  assert.equal(afterSecondClose.metadata.workingFolderDrain.dateKey, "2026-07-11");
+  assert.equal(afterSecondClose.metadata.workingFolderDrain.dateKey, "2026-07-13");
   assert.equal(afterSecondClose.metadata.workingFolderDrain.status, "provider_absent");
   const deletesBeforeCallback = [...h.deletes];
 
@@ -5473,9 +5570,9 @@ test("an older exact DNC completes after a later close marker and terminally can
     providerCallId: "first-call-after-second-close",
     ...firstIdentity,
     normalizedOutcome: "dnc",
-    receivedAt: new Date("2026-07-12T14:00:00.000Z"),
+    receivedAt: new Date("2026-07-14T14:00:00.000Z"),
   });
-  h.setClock("2026-07-12T14:00:00.000Z");
+  h.setClock("2026-07-14T14:00:00.000Z");
   const result = await h.runtime.drainCapturedEvent(delayedFirst);
   const after = await h.repository.getItemById(first._id);
   const agent = await h.repository.getAgentById("bruce_allen");
@@ -5494,7 +5591,7 @@ test("an older exact DNC completes after a later close marker and terminally can
   assert.equal(after.providerContactId, null);
   assert.equal(after.providerExternalLeadId, null);
   assert.equal(after.metadata.workingFolderDrain.attemptNumber, 2);
-  assert.equal(after.metadata.workingFolderDrain.dateKey, "2026-07-11");
+  assert.equal(after.metadata.workingFolderDrain.dateKey, "2026-07-13");
   assert.equal(after.metadata.workingFolderDrain.status, "provider_absent");
   assert.equal(after.totalAttemptCount, 1);
   assert.equal(historicalCompletions.length, 1);
@@ -5527,11 +5624,9 @@ test("a historical review can strengthen to DNC without recounting", async () =>
   };
   h.setClock("2026-07-11T00:30:00.000Z");
   assert.equal((await h.runtime.runEndOfDayFolderDrain()).status, "completed");
-  h.setClock("2026-07-11T07:00:00.000Z");
-  await h.runtime.tick();
-  const released = await h.repository.getItemById(first._id);
-  assert.equal(released.state, "eligible");
-  assert.equal(released.providerAttemptHistory.some((entry) => (
+  const closed = await h.repository.getItemById(first._id);
+  assert.equal(closed.metadata.workingFolderDrain.status, "provider_absent");
+  assert.equal(closed.providerAttemptHistory.some((entry) => (
     entry.providerContactId === firstIdentity.providerContactId
     && entry.providerExternalLeadId === firstIdentity.providerExternalLeadId
   )), true);
@@ -5541,9 +5636,9 @@ test("a historical review can strengthen to DNC without recounting", async () =>
     providerCallId: "historical-review-call",
     ...firstIdentity,
     normalizedOutcome: "review",
-    receivedAt: new Date("2026-07-11T07:01:00.000Z"),
+    receivedAt: new Date("2026-07-11T00:31:00.000Z"),
   });
-  h.setClock("2026-07-11T07:01:00.000Z");
+  h.setClock("2026-07-11T00:31:00.000Z");
   const weakResult = await h.runtime.drainCapturedEvent(weak);
   assert.equal(
     weakResult.status,
@@ -5575,7 +5670,7 @@ test("a historical review can strengthen to DNC without recounting", async () =>
   assert.equal(afterStrong.activeAttempt, false);
   assert.equal(afterStrong.lastOutcome, "dnc");
   assert.equal(afterStrong.totalAttemptCount, 1);
-  assert.equal(afterStrong.dailyAttemptCount, 0);
+  assert.equal(afterStrong.dailyAttemptCount, 1);
   assert.equal(new Date(afterStrong.terminalAt).toISOString(), "2026-07-11T00:30:00.000Z");
   assert.equal(agent.providerCompletedCount, 1);
   assert.equal(dncHistory.length, 1);

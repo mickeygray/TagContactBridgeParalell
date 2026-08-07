@@ -129,6 +129,21 @@ test("a legacy bare cursor still resumes the cadence half", async () => {
   assert.deepEqual(b.items.map((i) => i.caseId), ["a"]);
 });
 
+test("cadence-to-recovery handoff preserves the base high-water", async () => {
+  const highWater = { createdAt: NOW, id: "cadence-high-water" };
+  const src = createCallRecoveryCompositeSource({
+    base: {
+      readBatch: async () => ({ items: [], nextCursor: null, done: true, highWater }),
+    },
+    repository: { listEpisodesForConsideration: async () => [] },
+    activation: { delivery: true },
+    resolveAdmissionInputs: async () => ADMITTABLE,
+  });
+  const batch = await src.readBatch({ now: NOW });
+  assert.deepEqual(batch.highWater, highWater);
+  assert.equal(batch.done, true);
+});
+
 test("nothing recovery-shaped is emitted while delivery is dark", async () => {
   const { src } = harness({ episodes: [EPISODE(1), EPISODE(2)], delivery: false });
   const items = await drain(src);
@@ -289,4 +304,3 @@ test("the tick's recovery walk is BOUNDED — it is a provider budget", async ()
   assert.ok(evaluated <= 100,
     `a tick may not evaluate the whole backlog inline; evaluated ${evaluated}`);
 });
-

@@ -53,7 +53,7 @@ test("payment-fields-sync runs AFTER payment-reconcile — the shared checkpoint
   );
 });
 
-test("the trio does not displace night-persist or call-recording-index", () => {
+test("the trio does not displace night-persist or the final preparation/delivery pair", () => {
   // The work order put the trio ahead of night-persist on the theory that
   // payment-reconcile produces the rows night-persist stamps. It does not:
   // night-persist runs runNightPass -> runMoneyLoop -> pullCaseBilling, a live
@@ -61,7 +61,8 @@ test("the trio does not displace night-persist or call-recording-index", () => {
   // produce/consume edge, both existing ordering rules keep their reason.
   const keys = createNightlyHygieneRuntime({}).TASKS.map((t) => t.key);
   assert.equal(keys[0], "night-persist", "the irreplaceable write goes first");
-  assert.equal(keys[keys.length - 1], "call-recording-index", "the index wants a corrected day");
+  assert.deepEqual(keys.slice(-2), ["call-recording-index", "report-delivery"],
+    "the index wants a corrected day, and email delivery ends the same run");
   assert.ok(keys.indexOf("session-reconcile") > keys.indexOf("activity-review"));
   assert.ok(keys.indexOf("payment-fields-sync") < keys.indexOf("call-recording-index"));
 });

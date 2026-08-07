@@ -9,6 +9,18 @@ const { ringCentralDateWindow } = require("../../packages/shared-services/src/ma
 const {
   createNightlyHygieneRuntime,
 } = require("../../apps/control-plane/src/services/nightlyHygieneRuntime");
+const {
+  flattenFactUpdate,
+} = require("../../packages/shared-services/src/dailyReportFactService");
+
+test("pending or unavailable call markers never overwrite projected call facts", () => {
+  for (const status of ["pending", "unavailable"]) {
+    const set = flattenFactUpdate({ dateKey: "2026-08-03", facts: { calls: { status } } });
+    assert.equal(Object.hasOwn(set, "facts.calls"), false, status);
+  }
+  const real = flattenFactUpdate({ dateKey: "2026-08-03", facts: { calls: { total: 12 } } });
+  assert.deepEqual(real["facts.calls"], { total: 12 });
+});
 
 test("RingCentral capture covers the full Pacific calendar day", () => {
   assert.deepEqual(ringCentralDateWindow("2026-07-31"), {

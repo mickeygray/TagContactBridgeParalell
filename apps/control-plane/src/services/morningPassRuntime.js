@@ -94,6 +94,7 @@ const TASKS = [
     // cannot double-send, and it is also what lets the midday rvm pass be the
     // day's FIRST rvm batch rather than a blocked second one.
     key: "cadence-morning",
+    weekdaysOnly: true,
     label: "Lead cadence — texts and emails",
     writesArmed: () => flag("MORNING_CADENCE_ENABLED"),
     async plan({ domains }) {

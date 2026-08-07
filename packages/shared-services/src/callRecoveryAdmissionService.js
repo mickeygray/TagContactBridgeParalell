@@ -108,7 +108,21 @@ function admitEpisode({
   // A stale clean result is not a current clean result.
   const checkedAt = asDate(dncState.checkedAt);
   if (!checkedAt) return hold("dnc-unproven");
-  if (now.getTime() - checkedAt.getTime() > DNC_REUSE_WINDOW_MS) return hold("dnc-stale");
+  const nextCheckAt = asDate(dncState.nextCheckAt);
+  const firstQualifyingCallAt = asDate(episode.firstQualifyingCallAt);
+  const finalCheckpointAt = firstQualifyingCallAt
+    ? new Date(firstQualifyingCallAt.getTime() + Math.max(...DNC_CHECKPOINT_DAYS) * DAY_MS)
+    : null;
+  const finalCheckpointComplete = finalCheckpointAt && checkedAt >= finalCheckpointAt;
+  if (nextCheckAt) {
+    if (nextCheckAt <= now) return hold("dnc-stale");
+  } else if (!finalCheckpointComplete
+    && now.getTime() - checkedAt.getTime() > DNC_REUSE_WINDOW_MS) {
+    // Legacy/incomplete records without a durable checkpoint keep the strict
+    // seven-day fallback. A normal recovery episode carries nextCheckAt and is
+    // valid exactly until its 30/60/90 checkpoint becomes due.
+    return hold("dnc-stale");
+  }
 
   // 2. Identity and reachability.
   if (!/^\d{10}$/.test(String(episode.normalizedPhone || ""))) return review("phone-invalid");

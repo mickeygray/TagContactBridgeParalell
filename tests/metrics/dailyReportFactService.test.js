@@ -303,7 +303,8 @@ test("ONE gather feeds both the email and the snapshot", async () => {
   assert.equal(out.status, "written");
   assert.equal(saved.facts.spend.ldLeads, 141, "costs by source survive the merge");
 
-  // The fallback stays, and is what makes a backfill runnable without a send.
+  // The explicit standalone fallback stays, and is what makes a delayed
+  // missed-day/backfill repair runnable without turning it into a scheduler.
   await writeDailySnapshot({
     def, range,
     compose: async () => { composes += 1; return report; },

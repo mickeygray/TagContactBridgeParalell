@@ -37,10 +37,20 @@ function isPacificBusinessDay(value = new Date()) {
 }
 
 function createReportScheduleRuntime({ config = {}, runtime = {} } = {}) {
+  const configuredEnabled = config.enabled === true
+    || String(process.env.REPORT_SCHEDULER_ENABLED) === "true";
+  // When the nightly pipeline is armed, this object remains the executor but
+  // surrenders its independent timer. The same existing switches own the
+  // handoff, so two clocks can never both own the nightly email.
+  const managedByNightly = config.managedByNightly === true
+    || (config.managedByNightly !== false
+      && String(process.env.NIGHTLY_HYGIENE_ENABLED) === "true");
   const state = {
     // Default OFF. Arming a loop that emails people is Mickey's call, not a
     // side effect of deploying the code.
-    enabled: config.enabled === true || String(process.env.REPORT_SCHEDULER_ENABLED) === "true",
+    configuredEnabled,
+    enabled: configuredEnabled && !managedByNightly,
+    owner: managedByNightly ? "nightly-hygiene" : "standalone",
     pollMs: Math.max(60000, Number(config.pollMs || process.env.REPORT_SCHEDULER_POLL_MS) || DEFAULT_POLL_MS),
     running: false,
     timer: null,
@@ -52,6 +62,8 @@ function createReportScheduleRuntime({ config = {}, runtime = {} } = {}) {
   };
 
   const log = runtime.logger || null;
+  const listDueDefinitions = runtime.dueDefinitions || dueDefinitions;
+  const executeDefinition = runtime.runDefinition || runDefinition;
 
   async function poll({ force = false, now = new Date() } = {}) {
     // Guard FIRST: every early return below must be unable to skip the
@@ -63,13 +75,14 @@ function createReportScheduleRuntime({ config = {}, runtime = {} } = {}) {
     const started = Date.now();
     try {
       state.lastPollAt = new Date().toISOString();
-      const due = await dueDefinitions();
+      const due = await listDueDefinitions(now);
       if (!due.length) return { ran: 0 };
 
       const results = [];
       for (const def of due) {
         try {
-          const result = await runDefinition(def, {
+          const result = await executeDefinition(def, {
+            now,
             logger: log ? { info: (m) => log.info?.("report_schedule.step", { message: String(m).slice(0, 200) }) } : null,
             sendMail,
             fromEmail: getInternalFromEmail(),
@@ -160,7 +173,7 @@ function createReportScheduleRuntime({ config = {}, runtime = {} } = {}) {
             // ATTEMPT counter is what stops that retry from running all night —
             // isDue gives up after three, because every try is a full live
             // gather against Logics, CallRail and RingCentral.
-            const key = pacificKey();
+            const key = pacificKey(now);
             attempts = def.lastAttemptKey === key ? (Number(def.attemptsToday) || 0) + 1 : 1;
             def.lastAttemptKey = key;
             def.attemptsToday = attempts;
@@ -201,7 +214,12 @@ function createReportScheduleRuntime({ config = {}, runtime = {} } = {}) {
 
   async function start() {
     if (!state.enabled) {
-      log?.info?.("report_schedule.disabled", { hint: "set REPORT_SCHEDULER_ENABLED=true to arm" });
+      log?.info?.("report_schedule.disabled", {
+        reason: state.owner === "nightly-hygiene" ? "owned-by-nightly-hygiene" : "not-armed",
+        hint: state.owner === "nightly-hygiene"
+          ? "report delivery is the final nightly-hygiene task"
+          : "set REPORT_SCHEDULER_ENABLED=true to arm",
+      });
       return;
     }
     if (state.timer) return;
@@ -220,7 +238,8 @@ function createReportScheduleRuntime({ config = {}, runtime = {} } = {}) {
   // is a sync handler and must not be made to await a database round-trip.
   function getState() {
     return {
-      enabled: state.enabled, running: state.running, pollMs: state.pollMs,
+      configuredEnabled: state.configuredEnabled,
+      enabled: state.enabled, owner: state.owner, running: state.running, pollMs: state.pollMs,
       today: pacificKey(), lastPollAt: state.lastPollAt, lastRunAt: state.lastRunAt,
       lastResults: state.lastResults, lastError: state.lastError,
     };

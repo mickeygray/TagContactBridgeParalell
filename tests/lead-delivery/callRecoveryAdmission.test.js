@@ -69,6 +69,55 @@ test("a stale clean DNC result is not a current one", () => {
   assert.equal(r.reason, "dnc-stale");
 });
 
+test("a clean recovery DNC result remains valid until its durable checkpoint", () => {
+  const episode = EPISODE();
+  const nextCheckAt = new Date(new Date(episode.firstQualifyingCallAt).getTime() + 30 * 86400000);
+  const r = svc.admitEpisode({
+    episode,
+    ...OK,
+    now: new Date(new Date(episode.firstQualifyingCallAt).getTime() + 20 * 86400000),
+    dncState: {
+      result: "clean",
+      checkedAt: new Date(episode.firstQualifyingCallAt),
+      nextCheckAt,
+    },
+  });
+  assert.equal(r.decision, "admit");
+});
+
+test("an overdue recovery DNC checkpoint holds until it is refreshed", () => {
+  const episode = EPISODE();
+  const nextCheckAt = new Date(new Date(episode.firstQualifyingCallAt).getTime() + 30 * 86400000);
+  const r = svc.admitEpisode({
+    episode,
+    ...OK,
+    now: new Date(nextCheckAt.getTime() + 1),
+    dncState: {
+      result: "clean",
+      checkedAt: new Date(episode.firstQualifyingCallAt),
+      nextCheckAt,
+    },
+  });
+  assert.equal(r.decision, "hold");
+  assert.equal(r.reason, "dnc-stale");
+});
+
+test("a completed day-90 DNC checkpoint stays valid until program expiry", () => {
+  const episode = EPISODE();
+  const first = new Date(episode.firstQualifyingCallAt);
+  const r = svc.admitEpisode({
+    episode,
+    ...OK,
+    now: new Date(first.getTime() + 100 * 86400000),
+    dncState: {
+      result: "clean",
+      checkedAt: new Date(first.getTime() + 90 * 86400000),
+      nextCheckAt: null,
+    },
+  });
+  assert.equal(r.decision, "admit");
+});
+
 test("entity suppression outranks everything and terminates", () => {
   // §14.3 — entity-specific DNC always wins over inquiry/relationship timing.
   for (const [patch, reason] of [

@@ -14,19 +14,82 @@ const { toErrorResponse } = require("../../../../packages/shared-errors/src");
 /**
  * Jira -> Logics task bridge.
  *
- * ── WHY IT ACKNOWLEDGES BEFORE IT WORKS ─────────────────────────────────────
+ * ── WHY IT CLAIMS BEFORE IT ACKNOWLEDGES ────────────────────────────────
  *
  * Jira retries any webhook it does not get a prompt 2xx for. The destination is
  * create-only — no update, no delete — so a retry that arrives while the first
  * attempt is still talking to Logics would create the task twice, and neither copy
  * could be withdrawn.
  *
- * So the handler answers 200 the moment the payload is validated and does the work
- * afterwards. The response means "received", never "created". The durable record of
- * what actually happened is JiraTaskLink, whose unique key is the Jira issue key —
- * so even two genuinely concurrent deliveries converge on one task at the database
- * rather than in application logic that could race with itself.
+ * The handler first inserts a durable JiraTaskLink claim, then answers 200 and
+ * performs the slow work. A delivery that collides with live work receives a 500 so
+ * Jira retries its newer issue snapshot after the current owner finishes. Terminal
+ * `created` deliveries remain idempotent. The unique issue key makes concurrent
+ * deliveries converge at the database rather than in application logic.
  */
+
+const LINK_DECISION_FIELDS = Object.freeze([
+  "tenant", "caseId", "logicsTaskId", "subject", "userIds", "userNames",
+  "jiraProject", "jiraStatus", "jiraAssignee", "reason", "retryable",
+]);
+
+function buildLinkUpdate(rest, at = new Date()) {
+  const set = { ...rest, lastAttemptAt: at };
+  const unset = {};
+  for (const field of LINK_DECISION_FIELDS) {
+    if (!Object.prototype.hasOwnProperty.call(rest, field) || rest[field] === undefined) {
+      delete set[field];
+      unset[field] = 1;
+    }
+  }
+  const update = { $set: set, $inc: { attempts: 1 } };
+  if (Object.keys(unset).length) update.$unset = unset;
+  return update;
+}
+
+function buildRecordLinkQuery(jiraKey, outcome, claimToken = null) {
+  const query = outcome === "created"
+    ? { _id: jiraKey }
+    : { _id: jiraKey, outcome: { $ne: "created" } };
+  if (claimToken && outcome !== "created") query.claimToken = claimToken;
+  return query;
+}
+
+function buildClaimCursorQuery(claim) {
+  return {
+    _id: claim._id,
+    outcome: claim.outcome,
+    lastAttemptAt: claim.lastAttemptAt,
+  };
+}
+
+function decisionNotificationText(decision) {
+  const n = decision?.notify;
+  if (!n) return null;
+  return [
+    `A new Task in Jira was posted in your name, for ${n.notes || n.wouldHaveBeen}`,
+    "",
+    `Please Update ${decision.caseId} in ${decision.tenant} with ${n.wouldHaveBeen}`,
+  ].join("\n");
+}
+
+async function notifyJiraDecision({ deps, decision, jiraKey, apply, logger, path }) {
+  const text = decisionNotificationText(decision);
+  if (!text) return { status: "not-requested" };
+  if (apply !== true) return { status: "dry-run" };
+  try {
+    await deps.commentOnIssue(jiraKey, text);
+    logger?.info?.("jira.bridge.notified", { key: jiraKey, path });
+    return { status: "notified" };
+  } catch (error) {
+    // The task decision is already durable. A comment failure must not replay
+    // a create-only Logics write; it remains visible as its own safe warning.
+    logger?.warn?.("jira.bridge.notify_failed", {
+      key: jiraKey, path, error: String(error.message).slice(0, 160),
+    });
+    return { status: "failed" };
+  }
+}
 
 const unwrap = (res) => {
   const d = res?.data ?? res;
@@ -207,16 +270,18 @@ function buildDeps({ logger } = {}) {
     },
 
     recordLink: async (link, { claimToken = null } = {}) => {
-      const { jiraKey, payload, ...rest } = link;
+      const { jiraKey, ...rest } = link;
+      // These are execution-only artifacts. The strict model would drop them,
+      // but removing them explicitly keeps the durable boundary obvious.
+      delete rest.payload;
+      delete rest.notify;
       // `created` IS TERMINAL. Without this guard, the bridge's own
       // "already created -> skipped" decision overwrote the stored `created`
       // with `skipped` on every retry — after which the ledger no longer knew a
       // task existed, and the NEXT retry was free to create a duplicate that
       // cannot be deleted. The one legal write over `created` is `created`
       // itself (idempotent re-record of the same fact).
-      const query = rest.outcome === "created"
-        ? { _id: jiraKey }
-        : { _id: jiraKey, outcome: { $ne: "created" } };
+      const query = buildRecordLinkQuery(jiraKey, rest.outcome, claimToken);
       // FENCE. A writer that no longer owns the claim must not land its
       // terminal state. The webhook's catch block used to stamp `failed` over
       // a claim the drain had already taken and was mid-create on — which both
@@ -224,16 +289,17 @@ function buildDeps({ logger } = {}) {
       // opened the door to a duplicate create. `created` is exempt: an
       // irreversible task that DOES exist must always be recordable, whoever
       // won the race to make it.
-      if (claimToken && rest.outcome !== "created") query.claimToken = claimToken;
-      await JiraTaskLink.findOneAndUpdate(
+      const recorded = await JiraTaskLink.findOneAndUpdate(
         query,
-        { $set: { ...rest, lastAttemptAt: new Date() }, $inc: { attempts: 1 } },
-        { upsert: rest.outcome === "created", setDefaultsOnInsert: true },
+        buildLinkUpdate(rest),
+        { upsert: rest.outcome === "created", setDefaultsOnInsert: true, new: true },
       ).catch((error) => {
         // The non-created upsert:false path can race a created write; losing
         // that race is the desired outcome, not an error.
         if (Number(error?.code) !== 11000) throw error;
+        return null;
       });
+      return Boolean(recorded);
     },
 
     /**
@@ -288,6 +354,14 @@ function buildDeps({ logger } = {}) {
             claimToken,
             ...(snapshot ? { issueSnapshot: snapshot } : {}),
           },
+          // Pending describes this claim, not the previous cycle's decision.
+          // Clear derived fields so a fresh reason cannot be displayed beside
+          // a stale tenant, subject, assignee, or task id.
+          $unset: Object.fromEntries(
+            LINK_DECISION_FIELDS
+              .filter((field) => field !== "reason")
+              .map((field) => [field, 1]),
+          ),
         },
       );
       return taken
@@ -334,7 +408,7 @@ async function drainStaleJiraClaims({
     try {
       if (!claim.issueSnapshot?.key) {
         await Model.updateOne(
-          { _id: claim._id, outcome: claim.outcome, lastAttemptAt: claim.lastAttemptAt },
+          buildClaimCursorQuery(claim),
           {
             $set: {
               outcome: "failed",
@@ -352,7 +426,7 @@ async function drainStaleJiraClaims({
       // this ever having re-driven it once.
       if (Number(claim.drainAttempts || 0) >= maxAttempts) {
         await Model.updateOne(
-          { _id: claim._id, outcome: claim.outcome, lastAttemptAt: claim.lastAttemptAt },
+          buildClaimCursorQuery(claim),
           {
             $set: {
               outcome: "failed",
@@ -369,7 +443,7 @@ async function drainStaleJiraClaims({
       // still has in flight.
       const claimToken = `${Date.now().toString(36)}-${crypto.randomBytes(8).toString("hex")}`;
       const taken = await Model.findOneAndUpdate(
-        { _id: claim._id, outcome: claim.outcome, lastAttemptAt: claim.lastAttemptAt },
+        buildClaimCursorQuery(claim),
         {
           $set: {
             outcome: "pending", claimToken, retryable: false,
@@ -383,7 +457,12 @@ async function drainStaleJiraClaims({
       const decision = await bridge({
         issue: claim.issueSnapshot, deps, apply, trigger: "claim-drain", claimToken,
       });
-      await deps.recordLink(decision, { claimToken });
+      const recorded = await deps.recordLink(decision, { claimToken });
+      if (recorded !== false) {
+        await notifyJiraDecision({
+          deps, decision, jiraKey: claim._id, apply, logger, path: "claim-drain",
+        });
+      }
       out.redriven += 1;
       logger?.info?.("jira.claim_drain.redriven", { key: claim._id, outcome: decision.outcome });
     } catch (error) {
@@ -435,11 +514,19 @@ function createJiraWebhookRouter(auth, runtime = {}) {
       return res.status(500).json({ ok: false, error: "claim failed — retry expected" });
     }
 
-    res.json({ ok: true, received: event, key: issue.key, claimed: claim.ok });
     if (!claim.ok) {
       logger?.info?.("jira.webhook.already_handled", { key: issue.key, reason: claim.reason });
-      return;
+      if (claim.reason === "another delivery holds the claim"
+          || claim.reason === "claim raced and vanished"
+          || claim.reason === "lost the re-claim race") {
+        // This payload was not captured by the current owner. Do not tell Jira
+        // it was delivered: a 500 makes the newest issue snapshot retry after
+        // the live owner completes instead of disappearing behind stale work.
+        return res.status(500).json({ ok: false, error: "issue is busy; retry expected" });
+      }
+      return res.json({ ok: true, received: event, key: issue.key, claimed: false });
     }
+    res.json({ ok: true, received: event, key: issue.key, claimed: true });
 
     try {
       const decision = await bridgeJiraIssue({
@@ -451,7 +538,7 @@ function createJiraWebhookRouter(auth, runtime = {}) {
         trigger: event,
         claimToken: claim.claimToken,
       });
-      await deps.recordLink(decision, { claimToken: claim.claimToken });
+      const recorded = await deps.recordLink(decision, { claimToken: claim.claimToken });
       logger?.info?.("jira.webhook.bridged", {
         key: issue.key, outcome: decision.outcome, tenant: decision.tenant || null,
         subject: decision.subject || null, taskId: decision.logicsTaskId || null,
@@ -462,24 +549,10 @@ function createJiraWebhookRouter(auth, runtime = {}) {
       // Jira issue — otherwise the person who raised it hears nothing and reasonably
       // concludes the bridge dropped it. Failing to comment must not fail the run:
       // the task decision is already made and recorded.
-      if (decision.notify) {
-        const n = decision.notify;
-        // Addressed to the person who already holds the task, and says the one thing
-        // they need to do. The Logics task id is deliberately absent — they will find
-        // it on the case, and naming it invites correcting the wrong one.
-        const text = [
-          `A new Task in Jira was posted in your name, for ${n.notes || n.wouldHaveBeen}`,
-          "",
-          `Please Update ${decision.caseId} in ${decision.tenant} with ${n.wouldHaveBeen}`,
-        ].join("\n");
-        try {
-          if (enabled()) await deps.commentOnIssue(issue.key, text);
-          logger?.info?.("jira.webhook.notified", { key: issue.key, taskId: n.taskId, owner: n.owner || null });
-        } catch (error) {
-          logger?.warn?.("jira.webhook.notify_failed", {
-            key: issue.key, error: String(error.message).slice(0, 160),
-          });
-        }
+      if (recorded !== false) {
+        await notifyJiraDecision({
+          deps, decision, jiraKey: issue.key, apply: enabled(), logger, path: "webhook",
+        });
       }
     } catch (error) {
       logger?.error?.("jira.webhook.failed", {
@@ -527,11 +600,17 @@ function createJiraWebhookRouter(auth, runtime = {}) {
       if (!claim.ok) {
         return res.status(409).json({ ok: false, error: claim.reason });
       }
+      const shouldApply = req.query.apply === "true" && enabled();
       const decision = await bridgeJiraIssue({
-        issue, deps, apply: req.query.apply === "true" && enabled(), trigger: "replay",
+        issue, deps, apply: shouldApply, trigger: "replay",
         claimToken: claim.claimToken,
       });
-      await deps.recordLink(decision, { claimToken: claim.claimToken });
+      const recorded = await deps.recordLink(decision, { claimToken: claim.claimToken });
+      if (recorded !== false) {
+        await notifyJiraDecision({
+          deps, decision, jiraKey: issue.key, apply: shouldApply, logger, path: "replay",
+        });
+      }
       return res.json({ ok: true, decision });
     } catch (error) {
       return res.status(error.status || 500).json(toErrorResponse(error));
@@ -541,4 +620,14 @@ function createJiraWebhookRouter(auth, runtime = {}) {
   return router;
 }
 
-module.exports = { createJiraWebhookRouter, buildDeps, buildVerifier, drainStaleJiraClaims };
+module.exports = {
+  createJiraWebhookRouter,
+  buildDeps,
+  buildVerifier,
+  buildClaimCursorQuery,
+  buildLinkUpdate,
+  buildRecordLinkQuery,
+  decisionNotificationText,
+  notifyJiraDecision,
+  drainStaleJiraClaims,
+};

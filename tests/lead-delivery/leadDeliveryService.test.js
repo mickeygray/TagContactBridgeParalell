@@ -143,7 +143,7 @@ test("tick mode is explicit across the Pacific floor day and weekend", () => {
   assert.equal(resolveLeadDeliveryTickMode("2026-07-11T00:30:00.000Z", {
     completedCloseDateKey: "2026-07-10",
   }), "close_complete_event_drain");
-  assert.equal(resolveLeadDeliveryTickMode("2026-08-02T16:00:00.000Z"), "weekend_event_drain");
+  assert.equal(resolveLeadDeliveryTickMode("2026-08-02T16:00:00.000Z"), "weekend_idle");
 });
 
 test("Pacific morning batch rolls at exactly 7:50 Pacific", () => {

@@ -173,6 +173,30 @@ test("one task throwing does not cost the others — it retries, then steps past
   const third = await rt.runOnce({ force: true, Model: model });
   assert.equal(ran, 1, "the rest of the day still runs");
   assert.ok(third.results.some((r) => r.task === "fine"));
+  assert.equal(third.degraded, true, "an abandoned task must keep the day visibly degraded");
+  assert.deepEqual(third.failedTasks, ["boom"]);
+  const cursor = model.docs.get(pacificDayKey()).passes.test;
+  assert.equal(cursor.degraded, true);
+  assert.equal(cursor.lastErrorCode, "completed-with-task-failures");
+  assert.equal(cursor.failedTasks.boom.attempts, 3);
+});
+
+test("the retry budget survives a restart and a different process", async () => {
+  const model = fakeModel();
+  const failing = () => build([
+    task("boom", { plan: async () => { throw new Error("still down"); } }),
+    task("fine"),
+  ]);
+
+  const first = await failing().runOnce({ force: true, Model: model });
+  const second = await failing().runOnce({ force: true, Model: model });
+  const third = await failing().runOnce({ force: true, Model: model });
+
+  assert.equal(first.attempt, 1);
+  assert.equal(second.attempt, 2, "a new runtime must adopt the durable attempt count");
+  assert.equal(third.degraded, true);
+  assert.ok(third.results.some((row) => row.task === "fine"), "the bounded failure still steps past");
+  assert.equal(model.docs.get(pacificDayKey()).passes.test.failedTasks.boom.attempts, 3);
 });
 
 test("losing the cursor ABORTS the pass; it does not carry on", async () => {
@@ -221,6 +245,16 @@ test("weekends are refused unless forced", async () => {
   assert.equal(out.skipped, "pacific-weekend");
   assert.equal(isPacificBusinessDay(new Date("2026-08-08T18:00:00Z")), false);
   assert.equal(isPacificBusinessDay(new Date("2026-08-06T18:00:00Z")), true);
+});
+
+test("the entire morning pass stays dark on weekends", async () => {
+  const rt = createMorningPassRuntime({ config: { enabled: true } });
+  const out = await rt.runOnce({
+    now: new Date("2026-08-08T18:00:00Z"),
+    Model: fakeModel(),
+  });
+  assert.equal(out.skipped, "pacific-weekend");
+  assert.equal(out.results, undefined, "no maintenance or cadence task starts");
 });
 
 test("a pass will not run before its scheduled Pacific hour", async () => {
@@ -510,4 +544,47 @@ test("the HOURLY floor keeps its hour gates — byte-identical behaviour", () =>
   } = require("../../packages/shared-services/src/hourlySweeperService");
   const source = String(runFloorServices);
   assert.match(source, /requireHour = true/, "the default must keep the hour equality");
+});
+
+test("a task abandoned EARLIER in the day stays abandoned across a re-claim", async () => {
+  // The durable trace is the whole point of persisting failedTasks: a pass that
+  // gave up on a chore must not finish the day reporting clean. The retry
+  // budget (attemptsByTask) is seeded from the claim and tested; the TRACE is
+  // seeded the same way and was not, so dropping `{...claim.failedTasks}` broke
+  // the guarantee with every test still green.
+  //
+  // A pass resumes mid-day on any retry-return, restart, or lease takeover, and
+  // on resume the earlier abandonment lives only in the cursor.
+  const model = fakeModel();
+  const dateKey = pacificDayKey();
+  const claimedAt = new Date(Date.now() - 60_000);
+  model.docs.set(dateKey, {
+    dateKey,
+    passes: {
+      test: {
+        claimedAt: null,
+        nextTaskIndex: 0,
+        attemptsByTask: {},
+        // Abandoned by an earlier poll of THIS day.
+        failedTasks: {
+          "earlier-chore": { attempts: 3, errorCode: "task-failed", failedAt: claimedAt },
+        },
+      },
+    },
+  });
+
+  const rt = build([task("later-chore")]);
+  const out = await rt.runOnce({ force: true, Model: model });
+  assert.equal(out.ran, 1, "the remaining chore still runs");
+
+  const cursor = model.docs.get(dateKey).passes.test;
+  assert.ok(cursor.completedAt, "the day completed");
+  assert.ok(
+    Object.keys(cursor.failedTasks || {}).includes("earlier-chore"),
+    "the earlier abandonment must survive the re-claim",
+  );
+  assert.equal(cursor.degraded, true,
+    "a day that abandoned a chore must not finish reporting clean");
+  assert.equal(cursor.lastErrorCode, "completed-with-task-failures");
+  assert.equal(out.degraded, true, "and the in-memory result must agree");
 });

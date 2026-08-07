@@ -156,6 +156,7 @@ function createCallRecoveryCompositeSource({
       if (!activation?.delivery) return { ...batch, nextCursor: null, done: true };
       const recovery = await readRecoveryBatch({ inner: null, limit, now });
       return {
+        ...batch,
         items: [...(batch.items || []), ...recovery.items],
         nextCursor: recovery.done ? null : encodeCursor(RECOVERY_KIND, recovery.nextCursor),
         done: recovery.done,

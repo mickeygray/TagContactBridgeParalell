@@ -43,11 +43,8 @@ test("a run BEFORE the anchor reaches back to yesterday, not to a negative windo
   assert.ok(ms > 0);
 });
 
-// BOTH DST transitions happen at 02:00 local, so a window anchored at NOON
-// never straddles one — the anchor and `now` are always in the same offset, and
-// the helper is exact on both days. These two pin that, because the obvious
-// worry (a half-day window silently losing or gaining an hour twice a year) is
-// real for an earlier anchor and would be easy to reintroduce by moving it.
+// Noon-to-evening never straddles the transition. The midday task's prior-day
+// 20:00 anchor does, so both shapes are pinned below.
 
 test("DST spring forward: a noon anchor is exact", () => {
   // 2026-03-08. 02:00 PST becomes 03:00 PDT, so the day is 23 hours long — but
@@ -67,6 +64,18 @@ test("DST fall back: a noon anchor is exact", () => {
   const at = new Date("2026-11-02T03:00:00Z");
   assert.equal(hours(at - start), 7, "7 real hours elapsed");
   assert.equal(hours(pacificMsSinceToday(12, 0, at)), 7);
+});
+
+test("DST spring forward: the prior-20:00 midday window loses the skipped hour", () => {
+  // Saturday 20:00 PST = 04:00Z; Sunday noon PDT = 19:00Z.
+  const at = new Date("2026-03-08T19:00:00Z");
+  assert.equal(hours(pacificMsSinceToday(20, 0, at)), 15);
+});
+
+test("DST fall back: the prior-20:00 midday window includes the repeated hour", () => {
+  // Saturday 20:00 PDT = 03:00Z; Sunday noon PST = 20:00Z.
+  const at = new Date("2026-11-01T20:00:00Z");
+  assert.equal(hours(pacificMsSinceToday(20, 0, at)), 17);
 });
 
 // ── registration and arming ────────────────────────────────────────────────

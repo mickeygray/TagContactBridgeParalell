@@ -11,7 +11,9 @@ const assert = require("node:assert/strict");
 
 const {
   evaluateCounterCadenceDueItems,
+  recordCounterCadenceSkipAttempt,
 } = require("../../packages/shared-services/src/counterCadenceService");
+const { LeadCadence } = require("../../packages/shared-models/src");
 
 // A lead old enough for the daily push on all three chains, with every channel
 // contactable and nothing blocked or deferred.
@@ -210,8 +212,83 @@ test("the drain loop keeps sweeping until the backlog is gone", async () => {
   // arithmetic instead through its stop conditions using dryRun selection.)
   const source = String(drainCounterCadenceSweep);
   assert.match(source, /selected.*< perRound/s, "stops when the selector runs dry");
-  assert.match(source, /sent.*=== 0/s, "stops on a stuck provider instead of spinning");
+  assert.match(source, /attemptsConsumed/s, "a consumed skip advances the drain without claiming a send");
   assert.match(source, /maxRounds/, "bounded wall clock inside the pass lease");
+});
+
+test("a SKIP is reported but does not withhold drained — it must not order a retry", async () => {
+  // drained is consumed by passRuntimeFactory, which turns false into a throw
+  // and three attempts five minutes apart. That is the right answer for a
+  // FAILURE and the wrong one for a skip: three attempts across fifteen minutes
+  // cannot outrun a token bucket, and no number of retries fixes a bad phone
+  // number or a stop-contact status.
+  //
+  // Worse, the counter is cumulative across rounds and most skip reasons never
+  // leave the due set, so requiring skipped===0 made drained:true unreachable
+  // for that pass FOREVER after a single such lead — the cadence task failing
+  // every armed day, at three times the provider volume.
+  //
+  // What is still due is carried by `skipped` and surfaced in the summary,
+  // which informs an operator without ordering work that cannot succeed.
+  const { drainCounterCadenceSweep } = require(
+    "../../packages/shared-services/src/counterCadenceService",
+  );
+  const out = await drainCounterCadenceSweep({
+    maxDispatches: 200,
+    roundPauseMs: 0,
+    sweepImpl: async () => ({ selected: 1, sent: 0, failed: 0, skipped: 1 }),
+  });
+  assert.equal(out.drained, true, "a paced or refused item is not undone work");
+  assert.equal(out.skipped, 1, "but it is still REPORTED, so nothing is hidden");
+});
+
+test("a FAILURE does withhold drained — that is what the retry is for", async () => {
+  const { drainCounterCadenceSweep } = require(
+    "../../packages/shared-services/src/counterCadenceService",
+  );
+  const out = await drainCounterCadenceSweep({
+    maxDispatches: 200,
+    roundPauseMs: 0,
+    sweepImpl: async () => ({ selected: 1, sent: 0, failed: 1, skipped: 0 }),
+  });
+  assert.equal(out.drained, false);
+  assert.equal(out.failed, 1);
+});
+
+test("a permanently-skippable lead cannot make drained unreachable forever", async () => {
+  // The cumulative counter is the trap: one lead that can never be sent — an
+  // invalid phone, a suppression, a stop-contact status — is skipped on every
+  // round of every run, so a cumulative skipped>0 test would fail every day.
+  const { drainCounterCadenceSweep } = require(
+    "../../packages/shared-services/src/counterCadenceService",
+  );
+  let round = 0;
+  const out = await drainCounterCadenceSweep({
+    maxDispatches: 2,
+    roundPauseMs: 0,
+    // Round 1 fills the cap with one send and one permanent skip; round 2 finds
+    // only the permanent skip left, so the selector runs dry.
+    sweepImpl: async () => {
+      round += 1;
+      return round === 1
+        ? { selected: 2, sent: 1, failed: 0, skipped: 1 }
+        : { selected: 1, sent: 0, failed: 0, skipped: 1 };
+    },
+  });
+  assert.equal(out.drained, true, "the day finished; one lead is simply unsendable");
+  assert.equal(out.skipped, 2, "and both skips are on the record");
+});
+
+test("an actually empty cadence selection certifies the backlog drained", async () => {
+  const { drainCounterCadenceSweep } = require(
+    "../../packages/shared-services/src/counterCadenceService",
+  );
+  const out = await drainCounterCadenceSweep({
+    maxDispatches: 200,
+    roundPauseMs: 0,
+    sweepImpl: async () => ({ selected: 0, sent: 0, failed: 0, skipped: 0 }),
+  });
+  assert.equal(out.drained, true);
 });
 
 test("both passes call the DRAIN, not the single sweep", () => {
@@ -362,7 +439,31 @@ test("a rate-limited dispatch is a SKIP, not a failure", () => {
   const fn = source.slice(source.indexOf("async function dispatchCounterCadenceItem"));
   const body = fn.slice(0, fn.slice(1).search(/\n(async )?function /));
   assert.match(body, /nested\?\.skipped/, "the nested skip must be hoisted");
-  assert.match(body, /skipped \? \{ skipped: true/, "and surfaced at the top level");
+  assert.match(body, /attemptConsumed: true/, "and surfaced as a consumed attempt at the top level");
+  assert.match(body, /recordCounterCadenceSkipAttempt/, "a skip must advance cadence without claiming delivery");
+});
+
+test("a skipped channel advances the attempt without claiming a delivery", async () => {
+  const original = LeadCadence.findOneAndUpdate;
+  let captured = null;
+  LeadCadence.findOneAndUpdate = (filter, update, options) => ({
+    lean: async () => { captured = { filter, update, options }; return {}; },
+  });
+  try {
+    await recordCounterCadenceSkipAttempt({
+      lead: { _id: "lead-1" },
+      channel: "email",
+      templateIndex: 2,
+    }, { reason: "rate-limited" }, IN_WINDOW, "2026-08-06");
+    assert.equal(captured.update.$set["cadenceCounters.email"], 2);
+    assert.equal(captured.update.$set["counterCadence.lastDailyBatchKey.email"], "2026-08-06");
+    assert.equal(captured.update.$set["counterCadence.lastResult.email"].skipped, true);
+    assert.equal(captured.update.$set["lastTouched.email"], undefined);
+    assert.equal(captured.update.$set["cadenceState.completedByChannel.email"], undefined);
+    assert.equal(captured.update.$inc["cadenceState.skippedByChannel.email"], 1);
+  } finally {
+    LeadCadence.findOneAndUpdate = original;
+  }
 });
 
 test("a failed dispatch backs off so it cannot pin the head of the next round", () => {

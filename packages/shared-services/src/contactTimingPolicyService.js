@@ -125,7 +125,7 @@ function makeZonedDate(year, month, day, hour = 0, minute = 0, second = 0, timeZ
   return new Date(utcMs);
 }
 
-function buildChannelPolicy(domain, channel) {
+function buildChannelPolicy(domain, channel, { initialContact = false } = {}) {
   const companyConfig = getCompanyConfig(domain);
   const cadence = companyConfig?.cadence || {};
   const normalizedChannel = String(channel || "").trim().toLowerCase();
@@ -133,7 +133,13 @@ function buildChannelPolicy(domain, channel) {
   // TCPA applies Mon-Sun but we keep weekdays-only for proactive outreach
   // by default. `activeWeekdays` can be overridden per company; only
   // email gets the full week by default.
-  const activeWeekdays = cadence.activeWeekdays || "1,2,3,4,5";
+  // A newly accepted lead is the one proactive-contact exception on a
+  // weekend. Keep the normal clock/holiday protections, but make the initial
+  // SMS eligible on all seven days. Follow-up SMS, voice and RVM retain the
+  // configured weekday policy and their schedulers remain weekend-dark.
+  const activeWeekdays = initialContact && ["sms", "email"].includes(normalizedChannel)
+    ? "0,1,2,3,4,5,6"
+    : (cadence.activeWeekdays || "1,2,3,4,5");
   const startHour = Math.max(
     EARLIEST_CONFIGURED_START_HOUR,
     Math.min(23, Number(cadence.contactStartHour) || DEFAULT_CONTACT_START_HOUR),
@@ -215,8 +221,8 @@ function findNextAllowedTime(date, policy) {
   return cursor;
 }
 
-function evaluateChannelContactTime(domain, channel, at = new Date()) {
-  const policy = buildChannelPolicy(domain, channel);
+function evaluateChannelContactTime(domain, channel, at = new Date(), options = {}) {
+  const policy = buildChannelPolicy(domain, channel, options);
   const target = new Date(at);
   const nextAllowedAt = findNextAllowedTime(target, policy);
   // `findNextAllowedTime` zeroes seconds/ms on its starting cursor, so an

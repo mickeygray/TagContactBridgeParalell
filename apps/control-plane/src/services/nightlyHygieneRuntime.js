@@ -8,24 +8,35 @@
 // report designer and thats it." Plus: "this thing is part time report
 // generator part time database sanitizer."
 //
-// So the shape is deliberately two services, not five: THIS one keeps the
-// upstream systems clean, and reportScheduleRuntime sends what people asked
-// for. Anything nightly that FIXES data belongs here as a task; anything that
-// REPORTS belongs in a saved ReportDefinition.
+// The saved ReportDefinition still owns report shape, recipients, and its
+// durable per-day send claim. This runtime owns the NIGHT: it performs the
+// upstream corrections and invokes reportScheduleRuntime as its final task.
+// That makes 19:50 cleanup -> 20:00 email one resumable run instead of two
+// timers racing over partially-corrected data.
 //
 // Tasks are a registry, not a hard-coded sequence, because the whole point is
 // that the next chore is a few lines rather than a fourth runtime. Each task:
 //   · is individually gated by its own env flag (default OFF)
 //   · reports what it WOULD do when its write switch is off
-//   · cannot stop the others by failing
+//   · fails the close into a Mongo-independent emergency email rather than
+//     allowing a partly-corrected report to masquerade as success
 //
-// Ordering rule: hygiene runs BEFORE the report scheduler's usual hours, so a
-// morning report reads data this pass already corrected.
+// Ordering rule: every correction precedes report delivery. If the corrections
+// finish before 20:00, the final task waits for 20:00; if they finish later, it
+// sends immediately from the corrected result.
 
 const {
   applySourceSanitization, pacificKey, planSourceSanitization,
 } = require("../../../../packages/shared-services/src/logicsSourceSanitizerService");
 const { DailyLoopRun } = require("../../../../packages/shared-models/src");
+const {
+  checkpointNeedsRecovery,
+  launchEmergencyNightlyClose,
+  markNightlyCloseCompleted,
+  markNightlyCloseStarted,
+  readCheckpoint: readEmergencyCloseCheckpoint,
+  sendEmergencyNightlyClose,
+} = require("../../../../packages/shared-services/src/nightlyEmergencyCloseService");
 
 // 19:50 PT. Mickey 2026-07-28 described the night in order: "source the deals,
 // gather the call urls, create the night report for spend, honor any custom
@@ -33,7 +44,8 @@ const { DailyLoopRun } = require("../../../../packages/shared-models/src");
 //
 // The ORDER is the requirement: attribution must be sourced before any report
 // reads it, or the board reports the day with tonight's deals unattributed.
-// Running at 19:50 leaves the 20:20 board half an hour of headroom, and means
+// Running at 19:50 gives the pipeline ten minutes before its nominal 20:00
+// delivery step. That also means
 // the target day is TODAY — the day that just finished selling — which is how
 // the old board always worked.
 const DEFAULT_HOUR = 19;
@@ -54,16 +66,29 @@ const cursorLost = () => Object.assign(
   new Error("nightly hygiene durable cursor was lost"), { code: CURSOR_LOST },
 );
 
-// How many polls one chore may burn before the pass steps past it. Three, with a
-// five-minute poll, is ~15 minutes of retrying — enough to ride out a provider
-// blip, short enough that the rest of the night still runs. In memory on
-// purpose: a restart SHOULD grant fresh attempts, because a restart is itself a
-// plausible cause of the failure.
-//
-// The COUNTER itself lives per runtime instance, not here. Module scope would
-// share it between instances — the same mistake the TASKS array made and was
-// fixed for — and would grow a key per task per day forever.
-const MAX_TASK_ATTEMPTS = Math.max(1, Number(process.env.NIGHTLY_HYGIENE_MAX_TASK_ATTEMPTS) || 3);
+// One bound per phase. A timeout follows the same fail-closed route as a thrown
+// error: stop this report run and launch the Mongo-independent emergency close.
+const DEFAULT_TASK_TIMEOUT_MS = 20 * 60 * 1000;
+const TASK_TIMEOUT = "nightly-task-timeout";
+
+function withTimeout(work, timeoutMs, { taskKey, phase } = {}) {
+  const boundedMs = Math.max(1000, Number(timeoutMs) || DEFAULT_TASK_TIMEOUT_MS);
+  let timer = null;
+  return Promise.race([
+    Promise.resolve().then(work),
+    new Promise((resolve, reject) => {
+      timer = setTimeout(() => {
+        const error = new Error(`${taskKey || "nightly task"} ${phase || "work"} timed out`);
+        error.code = TASK_TIMEOUT;
+        error.taskKey = taskKey || null;
+        reject(error);
+      }, boundedMs);
+      timer.unref?.();
+    }),
+  ]).finally(() => {
+    if (timer) clearTimeout(timer);
+  });
+}
 
 // ── RECONCILIATION TRIO WINDOWS AND CAPS ───────────────────────────────────
 //
@@ -157,8 +182,8 @@ const nightlyPaymentFieldsSyncMaxCases = () => Math.max(
 
 // ── CALL LOG HYGIENE, EVENING HALF ─────────────────────────────────────────
 //
-// Noon Pacific, so the evening pass covers 12:00 → now and the midday pass
-// (MD2, not built yet) covers the previous evening → midday.
+// Noon Pacific, so the evening pass covers 12:00 → now and the built MD2
+// task in middayPassRuntime covers the previous evening → midday.
 const HYGIENE_EVENING_ANCHOR_HOUR = 12;
 
 // The service's preview lane asks for `limitPerDomain` rows per direction and
@@ -207,17 +232,29 @@ async function claimNightlyHygiene(dateKey, at = new Date()) {
   }
 }
 
-async function advanceNightlyHygiene(dateKey, claimedAt, nextTaskIndex, counts) {
+async function advanceNightlyHygiene(dateKey, claimedAt, nextTaskIndex, counts, at = new Date()) {
   const result = await DailyLoopRun.updateOne(
     { dateKey, nightlyHygieneClaimedAt: claimedAt, nightlyHygieneCompletedAt: null },
     { $set: {
+      nightlyHygieneClaimedAt: at,
       nightlyHygieneNextTaskIndex: nextTaskIndex,
       nightlyHygieneCounts: counts,
       nightlyHygieneLastErrorCode: null,
     } },
   );
   const matched = result?.matchedCount ?? result?.n;
-  return matched == null ? result?.acknowledged !== false : Number(matched) === 1;
+  const ok = matched == null ? result?.acknowledged !== false : Number(matched) === 1;
+  return ok ? at : null;
+}
+
+async function renewNightlyHygiene(dateKey, claimedAt, at = new Date()) {
+  const result = await DailyLoopRun.updateOne(
+    { dateKey, nightlyHygieneClaimedAt: claimedAt, nightlyHygieneCompletedAt: null },
+    { $set: { nightlyHygieneClaimedAt: at } },
+  );
+  const matched = result?.matchedCount ?? result?.n;
+  const ok = matched == null ? result?.acknowledged !== false : Number(matched) === 1;
+  return ok ? at : null;
 }
 
 async function finishNightlyHygiene(dateKey, claimedAt, nextTaskIndex, counts, at = new Date()) {
@@ -247,10 +284,9 @@ async function releaseNightlyHygiene(dateKey, claimedAt, errorCode = null) {
 /**
  * The completed business day this pass should persist.
  *
- * Offset -1 by default: at the 02:00 default hour the current Pacific day is
- * only two hours old, so "today" would mean overnight noise while yesterday's
- * deals never got stamped. A completed day is also restart-proof - it does
- * not matter what time the pass actually runs.
+ * Offset 0 by default: the pass runs at 19:50 Pacific, so the current Pacific
+ * date is the business day being closed. The explicit offset remains available
+ * for a deliberately rescheduled early-hours pass.
  */
 function persistTargetDay(at = new Date()) {
   // Offset 0 because the pass runs in the EVENING: at 19:50 the current
@@ -272,37 +308,89 @@ function pacificHourMinute(at = new Date()) {
   return { hour: get("hour") % 24, minute: get("minute") };
 }
 
+function pacificDateParts(at = new Date()) {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/Los_Angeles",
+    year: "numeric", month: "2-digit", day: "2-digit",
+    hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23",
+  }).formatToParts(at);
+  const get = (type) => Number(parts.find((part) => part.type === type)?.value);
+  return {
+    year: get("year"), month: get("month"), day: get("day"),
+    hour: get("hour") % 24, minute: get("minute"), second: get("second"),
+  };
+}
+
+function addPacificCalendarDays(parts, days) {
+  const cursor = new Date(Date.UTC(parts.year, parts.month - 1, parts.day + days));
+  return {
+    year: cursor.getUTCFullYear(),
+    month: cursor.getUTCMonth() + 1,
+    day: cursor.getUTCDate(),
+  };
+}
+
+function pacificWallClockToUtc(parts) {
+  const guessMs = Date.UTC(
+    parts.year, parts.month - 1, parts.day, parts.hour, parts.minute, parts.second || 0,
+  );
+  let resolvedMs = guessMs;
+  // Two passes cover an offset change between the UTC guess and the resolved
+  // instant. Our anchors (noon and 20:00) never occupy the transition gap.
+  for (let pass = 0; pass < 2; pass += 1) {
+    const observed = pacificDateParts(new Date(resolvedMs));
+    const observedAsUtc = Date.UTC(
+      observed.year, observed.month - 1, observed.day,
+      observed.hour, observed.minute, observed.second,
+    );
+    resolvedMs = guessMs - (observedAsUtc - resolvedMs);
+  }
+  return new Date(resolvedMs);
+}
+
+/** The nominal 20:00 Pacific delivery point for the nightly run's day. */
+function nightlyReportDueAt(at = new Date()) {
+  const parts = pacificDateParts(at);
+  return pacificWallClockToUtc({
+    year: parts.year,
+    month: parts.month,
+    day: parts.day,
+    hour: 20,
+    minute: 0,
+    second: 0,
+  });
+}
+
+async function waitUntil(at) {
+  const delayMs = Math.max(0, new Date(at).getTime() - Date.now());
+  if (!delayMs) return;
+  await new Promise((resolve) => {
+    setTimeout(resolve, delayMs);
+  });
+}
+
 /**
- * Milliseconds elapsed since a Pacific WALL-CLOCK time today.
+ * Milliseconds elapsed since the most recent Pacific wall-clock anchor.
  *
  * The call-log hygiene service takes no from/to — only `sinceMs` — so a window
- * anchored to "noon Pacific" has to be expressed as a duration. Doing that by
- * arithmetic on a UTC offset breaks twice a year; this reads the Pacific hour
- * and minute through Intl and subtracts, which is correct across both
- * transitions because the offset never enters the calculation.
- *
- * For a NOON anchor it is exactly right on both DST days, and the reason is
- * worth writing down rather than rediscovering: both US transitions happen at
- * 02:00 local, so a window that starts at noon never straddles one — the anchor
- * and `now` are always in the same offset. Verified against 2026-03-08 and
- * 2026-11-01; the tests pin both.
- *
- * An anchor EARLIER than 02:00 would straddle, and there the wall-clock delta
- * and the true elapsed time diverge by an hour. Nothing needs that today; if
- * something ever does, this helper is not enough for it.
+ * anchored to a Pacific time has to be expressed as a duration. The anchor is
+ * converted to its real UTC instant so a window crossing either DST transition
+ * gains or loses the correct hour. This matters to the midday pass, whose
+ * 20:00-yesterday anchor can straddle the 02:00 transition.
  *
  * Never returns less than a minute, so a run at exactly the anchor still asks
  * the service for a legal window rather than zero.
  */
 function pacificMsSinceToday(hour, minute = 0, at = new Date()) {
-  const nowPt = pacificHourMinute(at);
-  const elapsedMin = (nowPt.hour * 60 + nowPt.minute) - (hour * 60 + minute);
-  // Before the anchor (an early re-run, or a forced pass), the anchor has not
-  // happened yet today. Fall back to the same anchor YESTERDAY rather than
-  // returning a negative window — a task that asks for a negative duration gets
-  // the service's 5-minute floor and silently examines almost nothing.
-  const minutes = elapsedMin >= 0 ? elapsedMin : elapsedMin + 24 * 60;
-  return Math.max(minutes, 1) * 60 * 1000;
+  const now = new Date(at);
+  const nowPt = pacificDateParts(now);
+  let day = { year: nowPt.year, month: nowPt.month, day: nowPt.day };
+  let anchor = pacificWallClockToUtc({ ...day, hour, minute, second: 0 });
+  if (anchor.getTime() > now.getTime()) {
+    day = addPacificCalendarDays(day, -1);
+    anchor = pacificWallClockToUtc({ ...day, hour, minute, second: 0 });
+  }
+  return Math.max(now.getTime() - anchor.getTime(), 60 * 1000);
 }
 
 function isPacificBusinessDay(at = new Date()) {
@@ -556,7 +644,7 @@ function buildCallRecoveryDiscoveryDeps({ windowFrom = null, windowTo = null } =
  * decides whether the mailbox is opened at all, this decides what is read once
  * it is.
  */
-function buildMailboxHandlers({ ncoaEnabled = false, targetDate = null } = {}) {
+function buildMailboxHandlers({ invoiceEnabled = true, ncoaEnabled = false, targetDate = null } = {}) {
   const {
     createMailInvoiceHandler,
   } = require("../../../../packages/shared-services/src/mailInvoiceMailboxHandler");
@@ -564,12 +652,15 @@ function buildMailboxHandlers({ ncoaEnabled = false, targetDate = null } = {}) {
     createNcoaHandler,
   } = require("../../../../packages/shared-services/src/ncoaMailboxHandler");
 
-  const handlers = [createMailInvoiceHandler({ targetDate: targetDate || persistTargetDay() })];
+  const handlers = [];
+  if (invoiceEnabled) {
+    handlers.push(createMailInvoiceHandler({ targetDate: targetDate || persistTargetDay() }));
+  }
   if (ncoaEnabled) handlers.push(createNcoaHandler());
   return handlers;
 }
 
-async function readMailInvoiceMailbox({ apply, logger }) {
+async function readMailInvoiceMailbox({ apply, logger, targetDate = null }) {
   const {
     runMailboxIngest,
   } = require("../../../../packages/shared-services/src/mailboxIngestService");
@@ -577,6 +668,13 @@ async function readMailInvoiceMailbox({ apply, logger }) {
 
   const shared = getSharedConfig();
   const ncoaMailbox = shared.ncoaMailbox || {};
+  const invoiceEnabled = String(process.env.MAIL_INVOICE_MAILBOX_ENABLED || "false").toLowerCase() === "true";
+  const handlers = buildMailboxHandlers({
+    invoiceEnabled,
+    ncoaEnabled: ncoaMailbox.enabled,
+    targetDate,
+  });
+  if (!handlers.length) return { status: "disabled", handlers: {} };
 
   // The invoice for THIS day, identified by its subject — not simply the most
   // recent mail from the vendor. Those differ the moment they send a
@@ -584,7 +682,7 @@ async function readMailInvoiceMailbox({ apply, logger }) {
   // the right one, so recency would fail silently.
   return runMailboxIngest({
     apply,
-    handlers: buildMailboxHandlers({ ncoaEnabled: ncoaMailbox.enabled }),
+    handlers,
     logger,
     maxMessages: 25,
     maxPages: 3,
@@ -605,15 +703,12 @@ const TASKS = [
     // ordering inside that loop is the SAME code the old board ran, not a
     // reimplementation that could drift.
     writesArmed: () => String(process.env.NIGHT_PERSIST_ENABLED || "false").toLowerCase() === "true",
-    async plan({ domains, logger }) {
+    async plan({ domains, logger, at }) {
       const { runNightPass } = require("../../../../packages/shared-services/src/nightPassService");
-      // THE COMPLETED business day, not "today". The old board ran at 20:20,
-      // where pacificDateKey() is the day nearly finished. This service runs
-      // at 02:00, where pacificDateKey() is a day only two hours old - so it
-      // would pull overnight noise and never stamp YESTERDAY's deals.
-      // Targeting the completed day also makes the result independent of when
-      // the pass fires, so a restart at 14:00 still persists a whole day.
-      const dateKey = persistTargetDay();
+      // The business day being closed. This service runs at 19:50, so offset 0
+      // names the current Pacific day; an intentionally rescheduled early-hours
+      // run can select yesterday through NIGHT_PERSIST_DAY_OFFSET.
+      const dateKey = persistTargetDay(at);
       // apply:false reads and counts everything, writes nothing, and collects
       // the pending writes so apply() persists exactly THOSE.
       const { night } = await runNightPass({
@@ -707,14 +802,22 @@ const TASKS = [
       const ncoa = String(process.env.NCOA_MAILBOX_ENABLED || "false").toLowerCase() === "true";
       return invoice || ncoa;
     },
-    async plan({ logger }) {
-      const result = await readMailInvoiceMailbox({ apply: false, logger });
+    async plan({ logger, at }) {
+      const result = await readMailInvoiceMailbox({
+        apply: false,
+        logger,
+        targetDate: persistTargetDay(at),
+      });
       // The invoice funnel is what `describe` reads; NCOA's is carried alongside
       // so a dry run shows both without the describe having to know about it.
       return [{ ...(result.handlers["mail-invoice"] || {}), ncoa: result.handlers.ncoa || null }];
     },
-    async apply(planned, { logger }) {
-      const result = await readMailInvoiceMailbox({ apply: true, logger });
+    async apply(planned, { logger, at }) {
+      const result = await readMailInvoiceMailbox({
+        apply: true,
+        logger,
+        targetDate: persistTargetDay(at),
+      });
       const stat = result.handlers["mail-invoice"] || {};
       const ncoa = result.handlers.ncoa || {};
       return {
@@ -772,18 +875,18 @@ const TASKS = [
     key: "mail-spend-derive",
     label: "Derive mail spend from reconciled invoices",
     writesArmed: () => String(process.env.MAIL_SPEND_DERIVE_ENABLED || "false").toLowerCase() === "true",
-    async plan({ logger }) {
+    async plan({ logger, at }) {
       const {
         deriveMailSpend,
       } = require("../../../../packages/shared-services/src/mailSpendDeriveService");
-      const dateKey = persistTargetDay();
+      const dateKey = persistTargetDay(at);
       return [await deriveMailSpend({ from: dateKey, to: dateKey, apply: false, logger })];
     },
     async apply(planned, { logger }) {
       const {
         deriveMailSpend,
       } = require("../../../../packages/shared-services/src/mailSpendDeriveService");
-      const dateKey = persistTargetDay();
+      const dateKey = planned[0]?.dateKey;
       const r = await deriveMailSpend({ from: dateKey, to: dateKey, apply: true, logger });
       return { written: r.derived, skipped: r.skipped, retired: r.retired, held: r.held.length };
     },
@@ -828,9 +931,9 @@ const TASKS = [
     key: "call-links",
     label: "Capture marketing call recording links",
     writesArmed: () => String(process.env.CALL_LINK_CAPTURE_ENABLED || "false").toLowerCase() === "true",
-    async plan({ domains, logger }) {
+    async plan({ domains, logger, at }) {
       const { captureCallLinks } = require("../../../../packages/shared-services/src/marketingCallLinkService");
-      const dateKey = persistTargetDay();
+      const dateKey = persistTargetDay(at);
       const out = [];
       for (const domain of domains) {
         // CallRail is ONE tenant; asking per domain is the same account
@@ -872,17 +975,17 @@ const TASKS = [
     //
     // This produces EVIDENCE ONLY. Nothing here authorizes a dial — admission
     // re-proves status, sale and DNC at claim time, because a clean snapshot
-    // taken at 02:00 cannot authorize a call made that afternoon.
+    // captured during the evening pass cannot authorize a later call.
     key: "call-recovery-discovery",
     label: "Discover CallRail long-call recovery candidates",
     writesArmed: () => String(process.env.CALL_RECOVERY_DISCOVERY_ENABLED || "false").toLowerCase() === "true",
-    async plan({ logger }) {
+    async plan({ logger, at }) {
       const deps = buildCallRecoveryDiscoveryDeps();
       if (!deps) return [{ skipped: true, reason: "discovery-deps-unavailable" }];
       const { runCallRecoveryDiscovery } = require(
         "../../../../packages/shared-services/src/callRecoveryDiscoveryService");
       return [await runCallRecoveryDiscovery({
-        dateKey: persistTargetDay(), apply: false, logger, deps,
+        dateKey: persistTargetDay(at), apply: false, logger, deps,
       })];
     },
     async apply(planned, { logger }) {
@@ -896,7 +999,7 @@ const TASKS = [
       const r = planned[0]?.readFailed
         ? planned[0]
         : await runCallRecoveryDiscovery({
-          dateKey: planned[0]?.dateKey || persistTargetDay(), apply: true, logger, deps,
+          dateKey: planned[0]?.dateKey, apply: true, logger, deps,
         });
       const { callRecoveryDailyCohortRepository } = require(
         "../../../../packages/shared-repositories/src");
@@ -1013,9 +1116,9 @@ const TASKS = [
     label: "Legacy queue-only rollup (superseded by DailyReportFact)",
     writesArmed: () => LEGACY_QUEUE_ROLLUP_WRITES_ENABLED
       && String(process.env.QUEUE_ROLLUP_ENABLED || "false").toLowerCase() === "true",
-    async plan({ logger }) {
+    async plan({ logger, at }) {
       const { captureQueueDay } = require("../../../../packages/shared-services/src/queueRollupService");
-      const dateKey = persistTargetDay();
+      const dateKey = persistTargetDay(at);
       // Read-only: shapes the day without writing it.
       return [{ dateKey, ...(await captureQueueDay({ dateKey, logger })) }];
     },
@@ -1088,11 +1191,11 @@ const TASKS = [
     // half of a two-step handover — turn the 19:45 timer off in the same
     // change, or the double-write is the whole cost of the consolidation.
     writesArmed: () => String(process.env.NIGHTLY_SPEND_SYNC_ENABLED || "false").toLowerCase() === "true",
-    async plan({ logger }) {
+    async plan({ logger, at }) {
       // No dry-run mode exists upstream: syncAll is an upsert-by-key against
       // the sheet. Reporting the intent is honest; claiming a count we did not
       // compute would not be.
-      return [{ dateKey: persistTargetDay(), mode: "upsert-by-key", logger: Boolean(logger) }];
+      return [{ dateKey: persistTargetDay(at), mode: "upsert-by-key", logger: Boolean(logger) }];
     },
     async apply(planned, { logger, spendSyncRuntime = null }) {
       if (!spendSyncRuntime) {
@@ -1127,8 +1230,8 @@ const TASKS = [
     // trap spend-sync fell into. Arming this flag must, in the SAME change, stop
     // server.js starting the standalone runtime.
     writesArmed: () => String(process.env.NIGHTLY_ACTIVITY_REVIEW_ENABLED || "false").toLowerCase() === "true",
-    async plan({ domains, logger }) {
-      return [{ dateKey: persistTargetDay(), domains: [...domains], logger: Boolean(logger) }];
+    async plan({ domains, logger, at }) {
+      return [{ dateKey: persistTargetDay(at), domains: [...domains], logger: Boolean(logger) }];
     },
     async apply(planned, { logger, activityReviewRuntime = null }) {
       if (!activityReviewRuntime) {
@@ -1668,12 +1771,12 @@ const TASKS = [
     key: "call-recording-index",
     label: "Index every provider's recording links",
     writesArmed: () => String(process.env.CALL_RECORDING_INDEX_ENABLED || "false").toLowerCase() === "true",
-    async plan({ logger }) {
+    async plan({ logger, at }) {
       const { gatherRecordingLinks } = require(
         "../../../../packages/shared-services/src/callRecordingIndexService");
       // plan() is a FULL dry run — every read, every verdict, no write. So the
       // funnel printed on a dark box is exactly what arming it would do.
-      return [await gatherRecordingLinks({ dateKey: persistTargetDay(), apply: false, logger })];
+      return [await gatherRecordingLinks({ dateKey: persistTargetDay(at), apply: false, logger })];
     },
     async apply(planned, { logger }) {
       const { gatherRecordingLinks } = require(
@@ -1695,6 +1798,69 @@ const TASKS = [
         + ` · ${p.significant || 0} significant · ${p.durable || 0} durable`
         + (p.mintOnly ? ` · ${p.mintOnly} mint-on-read` : "")
         + (p.unresolvedProvider ? ` · ${p.unresolvedProvider} UNRESOLVED PROVIDER` : "");
+    },
+  },
+  {
+    // THE EMAIL IS THE LAST STEP OF THIS RUN, NOT A SECOND SCHEDULER.
+    //
+    // ReportDefinition still owns recipient/range/shape policy and the durable
+    // lastRunKey that prevents a retry from emailing a successful report twice.
+    // reportScheduleRuntime's standalone timer surrenders when this nightly
+    // pipeline is armed, leaving this shared cursor as the sole clock owner.
+    key: "report-delivery",
+    label: "Send scheduled nightly summary reports",
+    writesArmed: () => String(process.env.REPORT_SCHEDULER_ENABLED || "false").toLowerCase() === "true",
+    plan({ at }) {
+      return [{ dueAt: nightlyReportDueAt(at) }];
+    },
+    async apply(planned, { reportScheduleRuntime }) {
+      if (!reportScheduleRuntime || typeof reportScheduleRuntime.poll !== "function") {
+        const error = new Error("nightly report delivery requires reportScheduleRuntime.poll");
+        error.code = "REPORT_SCHEDULE_RUNTIME_MISSING";
+        throw error;
+      }
+      const dueAt = new Date(planned[0]?.dueAt);
+      if (Number.isNaN(dueAt.getTime())) {
+        const error = new Error("nightly report delivery planned an invalid due time");
+        error.code = "REPORT_DELIVERY_DUE_AT_INVALID";
+        throw error;
+      }
+      await waitUntil(dueAt);
+      const result = await reportScheduleRuntime.poll({ force: true, now: dueAt });
+      if (result?.error) {
+        const error = new Error(`nightly report scheduler failed: ${result.error}`);
+        error.code = "REPORT_SCHEDULE_POLL_FAILED";
+        throw error;
+      }
+      const failed = (result?.results || []).filter((row) => row?.error);
+      if (failed.length) {
+        const error = new Error(`${failed.length} scheduled nightly report(s) failed`);
+        error.code = "REPORT_DELIVERY_FAILED";
+        throw error;
+      }
+      const delivered = (result?.results || []).filter((row) => row?.delivered).length;
+      if (delivered === 0) {
+        const error = new Error("nightly report scheduler delivered no reports");
+        error.code = "REPORT_DELIVERY_EMPTY";
+        throw error;
+      }
+      return {
+        written: delivered,
+        skipped: Math.max(0, Number(result?.ran || 0) - delivered),
+        failed: 0,
+        ran: Number(result?.ran || 0),
+      };
+    },
+    count() {
+      // One orchestration step even when no ReportDefinition is due. The
+      // executor decides due-ness from each definition's durable daily claim.
+      return 1;
+    },
+    describe(planned) {
+      const dueAt = planned[0]?.dueAt;
+      return dueAt instanceof Date && !Number.isNaN(dueAt.getTime())
+        ? `scheduled definitions due by ${dueAt.toISOString().slice(11, 16)}Z`
+        : "scheduled nightly definitions";
     },
   },
 ];
@@ -1741,7 +1907,12 @@ function createNightlyHygieneRuntime({ config = {}, runtime = {} } = {}) {
   // handing the module-level array out directly meant any caller mutating it
   // (a test, a future config path) silently reconfigured every other
   // instance — including, in principle, the live one.
-  const tasks = Array.isArray(config.tasks) ? [...config.tasks] : [...TASKS];
+  const reportDeliveryEnabled = config.reportDeliveryEnabled === true
+    || String(process.env.REPORT_SCHEDULER_ENABLED || "false").toLowerCase() === "true";
+  const tasks = (Array.isArray(config.tasks) ? [...config.tasks] : [...TASKS])
+    .map((task) => (task.key === "report-delivery"
+      ? { ...task, writesArmed: () => reportDeliveryEnabled }
+      : task));
 
   // Collaborators the folded-in tasks need. They are INJECTED rather than
   // required at module load because each one is constructed by server.js with
@@ -1751,27 +1922,36 @@ function createNightlyHygieneRuntime({ config = {}, runtime = {} } = {}) {
   const collaborators = {
     spendSyncRuntime: config.spendSyncRuntime || runtime.spendSyncRuntime || null,
     activityReviewRuntime: config.activityReviewRuntime || runtime.activityReviewRuntime || null,
+    reportScheduleRuntime: config.reportScheduleRuntime || runtime.reportScheduleRuntime || null,
+  };
+
+  // The emergency close is intentionally local-file + SMTP only. It is armed
+  // by server.js only when the nightly pipeline owns report delivery; direct
+  // unit instances remain side-effect free unless a test opts in explicitly.
+  const emergencyCloseEnabled = config.emergencyCloseEnabled === true;
+  const emergencyClose = {
+    stateFile: config.emergencyClose?.stateFile,
+    recipients: config.emergencyClose?.recipients || null,
+    readCheckpoint: config.emergencyClose?.readCheckpoint || readEmergencyCloseCheckpoint,
+    markStarted: config.emergencyClose?.markStarted || markNightlyCloseStarted,
+    markCompleted: config.emergencyClose?.markCompleted || markNightlyCloseCompleted,
+    launch: config.emergencyClose?.launch || launchEmergencyNightlyClose,
+    send: config.emergencyClose?.send || sendEmergencyNightlyClose,
   };
 
   // Per-instance retry counter, keyed `${dateKey}:${taskIndex}`. Pruned to the
   // current day on each pass so it cannot grow unbounded across nights.
-  const taskAttempts = new Map();
-  const countAttempt = (dateKey, taskIndex) => {
-    for (const key of taskAttempts.keys()) {
-      if (!key.startsWith(`${dateKey}:`)) taskAttempts.delete(key);
-    }
-    const key = `${dateKey}:${taskIndex}`;
-    const next = (taskAttempts.get(key) || 0) + 1;
-    taskAttempts.set(key, next);
-    return next;
-  };
-
   const state = {
     enabled: config.enabled === true || String(process.env.NIGHTLY_HYGIENE_ENABLED) === "true",
     hour: Math.min(23, Math.max(0, Number(config.hour ?? process.env.NIGHTLY_HYGIENE_HOUR ?? DEFAULT_HOUR))),
     minute: Math.min(59, Math.max(0, Number(config.minute ?? process.env.NIGHTLY_HYGIENE_MINUTE ?? DEFAULT_MINUTE))),
     pollMs: Math.max(60000, Number(config.pollMs || process.env.NIGHTLY_HYGIENE_POLL_MS) || DEFAULT_POLL_MS),
     days: Math.max(1, Number(config.days || process.env.NIGHTLY_HYGIENE_DAYS) || 3),
+    taskTimeoutMs: Math.max(
+      1000,
+      Number(config.taskTimeoutMs || process.env.NIGHTLY_HYGIENE_TASK_TIMEOUT_MS)
+        || DEFAULT_TASK_TIMEOUT_MS,
+    ),
     // ALL tenants by default, matching runNightPass. Defaulting to TAG meant
     // WYNN and AMITY activity events and payment truths were never written -
     // two thirds of the tenants silently dropped. A task that only applies to
@@ -1785,10 +1965,102 @@ function createNightlyHygieneRuntime({ config = {}, runtime = {} } = {}) {
     lastRunAt: null,
     lastResult: null,
     lastError: null,
+    activeDay: null,
+    fallback: null,
     totals: { passes: 0, planned: 0, written: 0 },
   };
 
   const log = runtime.logger || null;
+  const claimHeartbeatMs = Math.max(
+    10,
+    Number(config.claimHeartbeatMs) || Math.floor(HYGIENE_CLAIM_LEASE_MS / 3),
+  );
+
+  function emergencyArgs(dateKey, reasonCode, taskKey = null) {
+    return {
+      dateKey,
+      reasonCode,
+      taskKey,
+      ...(emergencyClose.stateFile ? { stateFile: emergencyClose.stateFile } : {}),
+      ...(emergencyClose.recipients ? { recipients: emergencyClose.recipients } : {}),
+    };
+  }
+
+  async function triggerEmergencyClose(dateKey, reasonCode, taskKey = null, { detached = true } = {}) {
+    if (!emergencyCloseEnabled) return { skipped: true, reason: "emergency-close-disabled" };
+    try {
+      const result = detached
+        ? emergencyClose.launch(emergencyArgs(dateKey, reasonCode, taskKey))
+        : await emergencyClose.send(emergencyArgs(dateKey, reasonCode, taskKey));
+      state.fallback = {
+        at: new Date().toISOString(),
+        day: dateKey,
+        reasonCode,
+        task: taskKey,
+        result,
+      };
+      return result;
+    } catch (error) {
+      state.fallback = {
+        at: new Date().toISOString(),
+        day: dateKey,
+        reasonCode,
+        task: taskKey,
+        error: error?.code || error?.name || "fallback-failed",
+      };
+      log?.error?.("nightly_hygiene.emergency_close_failed", {
+        day: dateKey,
+        reasonCode,
+        task: taskKey,
+        error: String(error?.message || error).slice(0, 160),
+      });
+      return { sent: false, error: state.fallback.error };
+    }
+  }
+
+  async function withClaimHeartbeat(dateKey, claim, work) {
+    if (!claim) return work();
+    let stopped = false;
+    let timer = null;
+    let inFlight = null;
+    let lost = null;
+
+    const beat = async () => {
+      if (stopped || lost) return;
+      inFlight = (async () => {
+        try {
+          const renewed = await renewNightlyHygiene(dateKey, claim.claimedAt, new Date());
+          if (!renewed) lost = cursorLost();
+          else claim.claimedAt = renewed;
+        } catch {
+          lost = cursorLost();
+        }
+      })();
+      await inFlight;
+      inFlight = null;
+      if (!stopped && !lost) {
+        timer = setTimeout(beat, claimHeartbeatMs);
+        timer.unref?.();
+      }
+    };
+
+    timer = setTimeout(beat, claimHeartbeatMs);
+    timer.unref?.();
+    let value;
+    let workError = null;
+    try {
+      value = await work();
+    } catch (error) {
+      workError = error;
+    } finally {
+      stopped = true;
+      if (timer) clearTimeout(timer);
+      if (inFlight) await inFlight;
+    }
+    if (lost) throw lost;
+    if (workError) throw workError;
+    return value;
+  }
 
   /** One pass over every task. `force` ignores the clock and the once-a-day rule. */
   async function runOnce({ force = false, apply = null, at = new Date() } = {}) {
@@ -1798,6 +2070,26 @@ function createNightlyHygieneRuntime({ config = {}, runtime = {} } = {}) {
     if (state.running) return { skipped: "already running" };
     if (!state.enabled && !force) return { skipped: "disabled" };
     const today = pacificKey(at);
+    if (emergencyCloseEnabled && !force) {
+      const checkpoint = emergencyClose.readCheckpoint(emergencyClose.stateFile);
+      if (checkpoint?.dateKey === today && checkpoint.fallbackSentAt) {
+        state.lastRunKey = today;
+        return { skipped: "emergency close already sent" };
+      }
+      if (checkpoint?.dateKey === today
+        && ["fallback-launched", "fallback-sending"].includes(checkpoint.status)) {
+        const lastAttemptAt = new Date(
+          checkpoint.fallbackStartedAt || checkpoint.fallbackLaunchedAt || 0,
+        ).getTime();
+        if (Number.isFinite(lastAttemptAt) && Date.now() - lastAttemptAt < 5 * 60 * 1000) {
+          return { skipped: "emergency close in progress" };
+        }
+      }
+      if (checkpoint?.dateKey === today && checkpointNeedsRecovery(checkpoint)) {
+        await triggerEmergencyClose(today, "fallback-retry", checkpoint.taskKey || "runtime");
+        return { skipped: "emergency close recovery launched" };
+      }
+    }
     let durableClaim = null;
     if (!force) {
       if (state.lastRunKey === today) return { skipped: "already ran today" };
@@ -1814,8 +2106,16 @@ function createNightlyHygieneRuntime({ config = {}, runtime = {} } = {}) {
       if (!durableClaim) return { skipped: "already claimed or completed" };
     }
     state.running = true;
+    state.activeDay = today;
     const started = Date.now();
     try {
+      if (emergencyCloseEnabled) {
+        emergencyClose.markStarted({
+          dateKey: today,
+          at,
+          ...(emergencyClose.stateFile ? { stateFile: emergencyClose.stateFile } : {}),
+        });
+      }
       const results = [];
       const startTaskIndex = force ? 0 : Math.min(durableClaim.nextTaskIndex, tasks.length);
       const durableCounts = () => ({
@@ -1844,13 +2144,33 @@ function createNightlyHygieneRuntime({ config = {}, runtime = {} } = {}) {
           // not anything is armed, and some of them are not cheap — mail-invoice
           // opens a mailbox, call-recovery-discovery consumes a full gather. That
           // is what a standing dry run costs, and it fits inside the claim lease.
-          const planned = await task.plan({ domains: state.domains, days: state.days, logger: log });
+          const planned = await withClaimHeartbeat(today, durableClaim, () => withTimeout(
+            () => task.plan({
+              domains: state.domains,
+              days: state.days,
+              logger: log,
+              at,
+            }),
+            task.timeoutMs || state.taskTimeoutMs,
+            { taskKey: task.key, phase: "plan" },
+          ));
           // Each task decides what "something to do" means; the row-list shape
           // is only the default, not an assumption the runtime may make.
           const plannedCount = typeof task.count === "function"
             ? Number(task.count(planned)) || 0
             : planned.reduce((acc, p) => acc + (p.plan?.length || 0), 0);
           state.totals.planned += plannedCount;
+          const plannedFailures = planned.reduce((sum, row) => (
+            sum
+              + Number(row?.failed || 0)
+              + (Array.isArray(row?.errors) ? row.errors.length : 0)
+              + (row?.readFailed ? 1 : 0)
+          ), 0);
+          if (plannedFailures > 0) {
+            const error = new Error(`${task.key} planning reported ${plannedFailures} failure(s)`);
+            error.code = "task-reported-failure";
+            throw error;
+          }
 
           if (!armed && !force) {
             results.push({
@@ -1866,15 +2186,33 @@ function createNightlyHygieneRuntime({ config = {}, runtime = {} } = {}) {
             // `code`, and a plain Error reaches the abort only by bouncing through
             // the retry path, whose own durable write then fails too. Same outcome,
             // one indirection — say it directly.
-            if (durableClaim && !await advanceNightlyHygiene(
-              today, durableClaim.claimedAt, taskIndex + 1, durableCounts(),
-            )) throw cursorLost();
+            if (durableClaim) {
+              const renewed = await advanceNightlyHygiene(
+                today, durableClaim.claimedAt, taskIndex + 1, durableCounts(),
+              );
+              if (!renewed) throw cursorLost();
+              durableClaim.claimedAt = renewed;
+            }
             continue;
           }
 
           let applied = null;
           if (armed && plannedCount) {
-            applied = await task.apply(planned, { logger: log, ...collaborators });
+            applied = await withClaimHeartbeat(today, durableClaim, () => withTimeout(
+              () => task.apply(
+                planned,
+                { logger: log, at, ...collaborators },
+              ),
+              task.timeoutMs || state.taskTimeoutMs,
+              { taskKey: task.key, phase: "apply" },
+            ));
+            const reportedFailures = Number(applied?.failed || 0);
+            const reportedErrors = Array.isArray(applied?.errors) ? applied.errors.length : 0;
+            if (reportedFailures > 0 || reportedErrors > 0) {
+              const error = new Error(`${task.key} reported ${Math.max(reportedFailures, reportedErrors)} failure(s)`);
+              error.code = "task-reported-failure";
+              throw error;
+            }
             state.totals.written += applied.written || 0;
           }
           results.push({
@@ -1883,94 +2221,43 @@ function createNightlyHygieneRuntime({ config = {}, runtime = {} } = {}) {
             durationMs: Date.now() - taskStarted,
             sampleCount: planned.reduce((sum, p) => sum + Math.min((p.plan || []).length, 5), 0),
           });
-          if (durableClaim && !await advanceNightlyHygiene(
-            today, durableClaim.claimedAt, taskIndex + 1, durableCounts(),
-          )) throw cursorLost();
+          if (durableClaim) {
+            const renewed = await advanceNightlyHygiene(
+              today, durableClaim.claimedAt, taskIndex + 1, durableCounts(),
+            );
+            if (!renewed) throw cursorLost();
+            durableClaim.claimedAt = renewed;
+          }
           log?.info?.("nightly_hygiene.task", {
             task: task.key, planned: plannedCount, written: applied?.written ?? 0, dryRun: !armed,
           });
         } catch (error) {
-          // One chore failing must never cost the others their night.
-          //
-          // It used to. Until 2026-08-04 this block released the claim and
-          // RETURNED whenever a durable claim was held — i.e. on every live
-          // pass — so a single failing task skipped every task after it. The
-          // comment above has always said otherwise. With more work folded into
-          // this chain that was no longer a small lie: spend-sync and
-          // activity-review sit behind mail-invoice, which is documented as the
-          // task most able to stall, and the poll is five minutes, so from 19:50
-          // there were at most two retries before the 20:00 email.
+          // One chore failure ends this close. The old retry/step-past behavior
+          // could either miss 20:00 or mail a clean-looking report after an
+          // upstream correction failed. The emergency path sends a deliberately
+          // data-free degraded close and leaves the failed cursor retryable for
+          // an operator instead.
           results.push({ task: task.key, label: task.label, error: String(error.message).slice(0, 240) });
           log?.error?.("nightly_hygiene.task_failed", { task: task.key, error: String(error.message) });
           state.lastError = String(error.message).slice(0, 300);
 
-          // A LOST CURSOR IS NOT A TASK FAILURE. It means another pass re-claimed
-          // the day (the lease expired, or two boxes are running). Continuing
-          // would let two passes write the same night. That one still aborts.
-          if (error?.code === CURSOR_LOST) {
-            await releaseNightlyHygiene(today, durableClaim.claimedAt, CURSOR_LOST);
-            state.lastRunAt = new Date().toISOString();
-            state.lastResult = {
-              at: state.lastRunAt, day: today, durationMs: Date.now() - started,
-              incomplete: true, aborted: CURSOR_LOST, nextTaskIndex: taskIndex, tasks: results,
-            };
-            return state.lastResult;
+          const failureCode = error?.code || error?.name || "task-failed";
+          if (durableClaim) {
+            await releaseNightlyHygiene(today, durableClaim.claimedAt, failureCode).catch(() => {});
           }
-
-          // ORDINARY TASK FAILURE — retry it, but a bounded number of times.
-          //
-          // Neither extreme is right here, and both were considered:
-          //
-          //  · Abort every time (the old behaviour) means one flaky network call
-          //    costs every task behind it. With five minutes between polls and a
-          //    19:50 start, a task that keeps failing takes the whole night's
-          //    downstream work with it — including the costing the 20:00 email
-          //    reports.
-          //  · Skip on the first failure is worse in a quieter way. night-persist
-          //    is task 1 and writes officerAtSale/sourceAtSale, which a live
-          //    re-pull can NEVER reconstruct — Logics returns who owns the case
-          //    today, not who closed it in July. Skipping it on a transient blip
-          //    loses that day's attribution permanently.
-          //
-          // So: leave the cursor where it is and let the next poll retry the same
-          // task, exactly as before — until it has had MAX_TASK_ATTEMPTS goes,
-          // after which step past it so the rest of the night is not held hostage
-          // by one chore. The skip is recorded, never silent.
-          const attempts = countAttempt(today, taskIndex);
-          const giveUp = attempts >= MAX_TASK_ATTEMPTS;
-
-          const cursorHeld = !durableClaim || await advanceNightlyHygiene(
-            today, durableClaim.claimedAt, giveUp ? taskIndex + 1 : taskIndex, durableCounts(),
-          );
-          if (!cursorHeld) {
-            await releaseNightlyHygiene(today, durableClaim.claimedAt, CURSOR_LOST);
-            state.lastRunAt = new Date().toISOString();
-            state.lastResult = {
-              at: state.lastRunAt, day: today, durationMs: Date.now() - started,
-              incomplete: true, aborted: CURSOR_LOST, nextTaskIndex: taskIndex, tasks: results,
-            };
-            return state.lastResult;
-          }
-          // Only a CLAIMED pass can retry, because only it has a next poll to
-          // retry on. A forced/unclaimed run (a manual runOnce, a test) has no
-          // second chance, so it carries on to the remaining tasks instead of
-          // returning — otherwise asking for a one-off run would silently do
-          // less work than the scheduled one.
-          if (!giveUp && durableClaim) {
-            // Hand the day back so the next poll can re-claim and retry HERE.
-            await releaseNightlyHygiene(today, durableClaim.claimedAt, error?.code || error?.name || "task-failed");
-            state.lastRunAt = new Date().toISOString();
-            state.lastResult = {
-              at: state.lastRunAt, day: today, durationMs: Date.now() - started,
-              incomplete: true, retrying: task.key, attempt: attempts,
-              nextTaskIndex: taskIndex, tasks: results,
-            };
-            return state.lastResult;
-          }
-          results[results.length - 1].skippedAfterAttempts = attempts;
-          log?.error?.("nightly_hygiene.task_abandoned", {
-            task: task.key, attempts, note: "stepping past so the rest of the night can run",
-          });
+          const fallback = await triggerEmergencyClose(today, failureCode, task.key);
+          state.lastRunAt = new Date().toISOString();
+          state.lastResult = {
+            at: state.lastRunAt,
+            day: today,
+            durationMs: Date.now() - started,
+            incomplete: true,
+            aborted: failureCode,
+            nextTaskIndex: taskIndex,
+            fallback,
+            tasks: results,
+          };
+          return state.lastResult;
         }
       }
       state.totals.passes += 1;
@@ -1983,6 +2270,13 @@ function createNightlyHygieneRuntime({ config = {}, runtime = {} } = {}) {
         );
         if (!finished) throw new Error("nightly hygiene completion claim was lost");
       }
+      if (emergencyCloseEnabled) {
+        emergencyClose.markCompleted({
+          dateKey: today,
+          at: new Date(),
+          ...(emergencyClose.stateFile ? { stateFile: emergencyClose.stateFile } : {}),
+        });
+      }
       state.lastRunKey = today;
       return state.lastResult;
     } catch (error) {
@@ -1993,13 +2287,26 @@ function createNightlyHygieneRuntime({ config = {}, runtime = {} } = {}) {
           today, durableClaim.claimedAt, error?.code || error?.name || "runtime-failed",
         ).catch(() => {});
       }
-      return { error: state.lastError };
+      const failureCode = error?.code || error?.name || "runtime-failed";
+      const fallback = await triggerEmergencyClose(today, failureCode, "runtime");
+      return { error: state.lastError, fallback };
     } finally {
       state.running = false;
+      state.activeDay = null;
     }
   }
 
   async function start() {
+    if (emergencyCloseEnabled) {
+      const checkpoint = emergencyClose.readCheckpoint(emergencyClose.stateFile);
+      if (checkpointNeedsRecovery(checkpoint)) {
+        await triggerEmergencyClose(
+          checkpoint.dateKey,
+          "process-restart-recovery",
+          checkpoint.taskKey || "runtime",
+        );
+      }
+    }
     if (!state.enabled) {
       log?.info?.("nightly_hygiene.disabled", {
         hint: "set NIGHTLY_HYGIENE_ENABLED=true to run; each task still needs its own write switch",
@@ -2016,9 +2323,17 @@ function createNightlyHygieneRuntime({ config = {}, runtime = {} } = {}) {
     await runOnce();
   }
 
-  function stop() {
+  async function stop() {
     if (state.timer) clearInterval(state.timer);
     state.timer = null;
+    if (emergencyCloseEnabled && state.running && state.activeDay) {
+      await triggerEmergencyClose(
+        state.activeDay,
+        "process-shutdown",
+        "runtime",
+        { detached: false },
+      );
+    }
   }
 
   function getState() {
@@ -2031,11 +2346,13 @@ function createNightlyHygieneRuntime({ config = {}, runtime = {} } = {}) {
       targetDay: persistTargetDay(),
       domains: state.domains,
       days: state.days,
+      taskTimeoutMs: state.taskTimeoutMs,
       running: state.running,
       today: pacificKey(),
       lastRunKey: state.lastRunKey,
       lastRunAt: state.lastRunAt,
       lastError: state.lastError,
+      fallback: state.fallback,
       totals: { ...state.totals },
       tasks: tasks.map((t) => ({
         key: t.key, label: t.label,
@@ -2053,13 +2370,17 @@ function createNightlyHygieneRuntime({ config = {}, runtime = {} } = {}) {
 }
 
 module.exports = {
+  TASK_TIMEOUT,
   advanceNightlyHygiene,
   buildMailboxHandlers,
   pacificMsSinceToday,
   claimNightlyHygiene,
   createNightlyHygieneRuntime,
   finishNightlyHygiene,
+  nightlyReportDueAt,
   persistTargetDay,
   buildCallRecoveryDiscoveryDeps,
   isPacificBusinessDay,
+  renewNightlyHygiene,
+  withTimeout,
 };

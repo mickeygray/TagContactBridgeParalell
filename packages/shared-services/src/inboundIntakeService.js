@@ -2364,9 +2364,33 @@ async function fireImmediateContact(leadCadence, validation = {}, options = {}) 
   // ── SMS + Email: dispatch directly via outboundDispatchService ──
   const {
     getCounterCadenceTemplateKey,
+    recordCounterCadenceSkipAttempt,
     recordCounterCadenceTouch,
   } = require("./counterCadenceService");
   const { dispatchForLead } = require("./outboundDispatchService");
+
+  const consumeSkippedFirstContact = async (channel, dispatchResult, reason) => {
+    const nested = dispatchResult?.result || dispatchResult || {};
+    if (!(dispatchResult?.skipped || nested?.skipped || reason)) return;
+    try {
+      await recordCounterCadenceSkipAttempt({
+        lead: lc,
+        channel,
+        templateIndex: 1,
+      }, {
+        ...nested,
+        skipped: true,
+        reason: nested?.reason || reason || "skipped",
+      });
+    } catch (error) {
+      logger?.warn?.(`first-contact.${channel}.skip_attempt_failed`, {
+        domain,
+        caseId,
+        error: error.message,
+      });
+    }
+  };
+
   if (validation.phoneCanText) {
     try {
       result.sms = await dispatchForLead(lc, {
@@ -2375,6 +2399,7 @@ async function fireImmediateContact(leadCadence, validation = {}, options = {}) 
         templateKey: getCounterCadenceTemplateKey("sms", 1),
         updateCadence: false,
         queueDepth: 1,
+        initialContact: true,
       });
       if (result.sms?.ok) {
         await recordCounterCadenceTouch({
@@ -2385,6 +2410,8 @@ async function fireImmediateContact(leadCadence, validation = {}, options = {}) 
           reason: "receipt-instant",
           result: result.sms.result || result.sms,
         });
+      } else {
+        await consumeSkippedFirstContact("sms", result.sms);
       }
     } catch (error) {
       result.sms = { ok: false, error: error.message };
@@ -2392,6 +2419,7 @@ async function fireImmediateContact(leadCadence, validation = {}, options = {}) 
     }
   } else {
     result.sms = { ok: false, skipped: true, reason: "phone-cannot-text" };
+    await consumeSkippedFirstContact("sms", result.sms, "phone-cannot-text");
   }
 
   if (validation.emailCanSend) {
@@ -2402,6 +2430,7 @@ async function fireImmediateContact(leadCadence, validation = {}, options = {}) 
         templateKey: getCounterCadenceTemplateKey("email", 1),
         updateCadence: false,
         queueDepth: 1,
+        initialContact: true,
       });
       if (result.email?.ok) {
         await recordCounterCadenceTouch({
@@ -2412,6 +2441,8 @@ async function fireImmediateContact(leadCadence, validation = {}, options = {}) 
           reason: "receipt-instant",
           result: result.email.result || result.email,
         });
+      } else {
+        await consumeSkippedFirstContact("email", result.email);
       }
     } catch (error) {
       result.email = { ok: false, error: error.message };
@@ -2419,6 +2450,7 @@ async function fireImmediateContact(leadCadence, validation = {}, options = {}) 
     }
   } else {
     result.email = { ok: false, skipped: true, reason: "email-cannot-send" };
+    await consumeSkippedFirstContact("email", result.email, "email-cannot-send");
   }
 
   // ── CX queue: RETIRED 2026-08-04 ────────────────────────────────

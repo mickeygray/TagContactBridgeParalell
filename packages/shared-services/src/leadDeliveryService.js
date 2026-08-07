@@ -570,7 +570,7 @@ function resolveLeadDeliveryTickMode(value, {
   completedCloseDateKey = null,
 } = {}) {
   const at = parseDate(value, "value");
-  if (!isPacificBusinessDay(at)) return "weekend_event_drain";
+  if (!isPacificBusinessDay(at)) return "weekend_idle";
   if (deliveryWindowEvaluator(at) === true) return "delivery_open";
   const close = resolvePacificEndOfDayDrain(at, { hour: closeHour, minute: closeMinute });
   if (close.due) {
@@ -1203,6 +1203,18 @@ function resolveRecoveryEpisodeTiming(firstQualifyingCallAt, {
 function isCallRecoveryItem(item = {}) {
   return String(item.contactPolicyId || item.contactPolicy || "").trim().toLowerCase()
     === CALL_RECOVERY_CONTACT_POLICY_ID;
+}
+
+function observableSourceCursor(cursor) {
+  if (!cursor) return null;
+  // The composite recovery source deliberately encodes its paging position as
+  // `recovery:<episode id>` with Date(0). That sentinel is valid internally,
+  // but the episode id can contain case identity and the epoch timestamp looks
+  // like a dead runtime on health dashboards. Keep the codec private.
+  if (String(cursor.id || "").startsWith("recovery:")) {
+    return { kind: "recovery", positioned: true };
+  }
+  return clone(cursor);
 }
 
 /**
@@ -3386,15 +3398,25 @@ function createLeadDeliveryRuntime({
   }
 
   async function listPendingProviderPosts(agentId) {
-    if (typeof repository.listAgentPendingProviderPosts === "function") {
-      return repository.listAgentPendingProviderPosts(agentId);
-    }
-    // Compatibility only for test/in-memory repositories. Production uses the
-    // narrow Mongo query above rather than scanning a day's active cadence rows.
-    return (await repository.listAgentDeliveryItems(agentId)).filter((item) => (
+    const items = typeof repository.listAgentPendingProviderPosts === "function"
+      ? await repository.listAgentPendingProviderPosts(agentId)
+      // Compatibility only for test/in-memory repositories. Production uses
+      // the narrow Mongo query rather than scanning a day's active cadence rows.
+      : await repository.listAgentDeliveryItems(agentId);
+    const observedAt = atNow().getTime();
+    return items.filter((item) => {
+      const postState = String(item.providerPostState || "").trim().toLowerCase();
+      const leaseExpiresAt = item.providerPostLeaseExpiresAt
+        ? new Date(item.providerPostLeaseExpiresAt).getTime()
+        : Number.NaN;
+      const recoverablePostState = ["", "prepared", "reconcile_required"].includes(postState)
+        || (postState === "posting" && (!Number.isFinite(leaseExpiresAt) || leaseExpiresAt <= observedAt));
+      return (
       String(item.state || "") === "packetized"
       && !String(item.providerContactId || "").trim()
-    ));
+      && recoverablePostState
+      );
+    });
   }
 
   function atNow() {
@@ -3583,10 +3605,9 @@ function createLeadDeliveryRuntime({
     runtimeState.providerPostQueueDepth += 1;
     const previous = providerPostTail.catch(() => {});
     let releaseTurn;
-    const turnComplete = new Promise((resolve) => {
+    providerPostTail = new Promise((resolve) => {
       releaseTurn = resolve;
     });
-    providerPostTail = previous.then(() => turnComplete);
     await previous;
     runtimeState.providerPostQueueDepth = Math.max(0, runtimeState.providerPostQueueDepth - 1);
 
@@ -4261,6 +4282,12 @@ function createLeadDeliveryRuntime({
       status: "ok",
       lane,
       done: runtimeState.sourceDone,
+      // A repair page can legitimately admit zero rows while still advancing
+      // past held or terminal source records. Day-start must distinguish that
+      // from a source which returned neither work nor a continuation cursor.
+      progressed: lane === "daily-repair"
+        ? batch?.done === true || Boolean(batch?.nextCursor)
+        : Boolean(batch?.nextHighWater),
       ...outcome,
     };
   }
@@ -5290,11 +5317,7 @@ function createLeadDeliveryRuntime({
         return { status: "activity-not-proven", agentId: id, accepted: 0 };
       }
     }
-    const recoverable = (await listPendingProviderPosts(id)).filter((item) => (
-      String(item.state || "") === "packetized"
-      && !String(item.providerContactId || "").trim()
-      && ["", "prepared", "posting", "reconcile_required"].includes(String(item.providerPostState || ""))
-    ));
+    const recoverable = await listPendingProviderPosts(id);
     const results = [];
     let accepted = 0;
     const forcedRequest = requestedCount == null
@@ -6489,7 +6512,10 @@ function createLeadDeliveryRuntime({
     });
   }
 
-  async function repairAgentAfterCompletion(agentId, at, { refreshActivity = true } = {}) {
+  async function repairAgentAfterCompletion(agentId, at, {
+    refreshActivity = true,
+    completedItemId = null,
+  } = {}) {
     const policy = agentPolicy(agentId);
     for (let attempt = 0; attempt < 3; attempt += 1) {
       const agent = await repository.getAgentById(agentId);
@@ -6498,7 +6524,10 @@ function createLeadDeliveryRuntime({
       const set = { providerCompletedCount: completedCount };
       if (providerInventoryAuthoritative !== true) {
         const items = await repository.listAgentDeliveryItems(agentId);
-        const projection = reconstructAgentProjection(items, { agentId });
+        const projectionItems = completedItemId
+          ? items.filter((candidate) => stableWorkItemId(candidate) !== completedItemId)
+          : items;
+        const projection = reconstructAgentProjection(projectionItems, { agentId });
         if (!projection.reliable) throw new Error("completion-projection-unreliable");
         set.estimatedOutstanding = projection.estimatedOutstanding;
       }
@@ -6524,7 +6553,9 @@ function createLeadDeliveryRuntime({
   async function recoverCountedCompletion(event, item, resolution, at) {
     const agentId = String(item.deliveryAgentId || "").trim().toLowerCase();
     if (!agentId) return { status: "review", event: await markEventReview(event, "delivery-agent-missing") };
-    const agent = await repairAgentAfterCompletion(agentId, at);
+    const agent = await repairAgentAfterCompletion(agentId, at, {
+      completedItemId: stableWorkItemId(item),
+    });
     if (!agent) throw new Error("completion-agent-repair-conflict");
     const updatedEvent = await repository.compareAndSetEvent({
       eventId: String(event._id),
@@ -6988,7 +7019,9 @@ function createLeadDeliveryRuntime({
       ...completionMutation(item, transition, event, attemptNumber, at),
     });
     if (!updatedItem) throw new Error("completion-item-conflict");
-    const updatedAgent = await repairAgentAfterCompletion(agentId, at);
+    const updatedAgent = await repairAgentAfterCompletion(agentId, at, {
+      completedItemId: stableWorkItemId(updatedItem),
+    });
     if (!updatedAgent) throw new Error("completion-agent-conflict");
     const updatedEvent = await repository.compareAndSetEvent({
       eventId: String(event._id),
@@ -7512,10 +7545,28 @@ function createLeadDeliveryRuntime({
           && currentContactId === contactId
           && currentExternalId === externalId
           && currentAttemptNumber === Number(currentEvent.resolvedAttemptNumber || 0)) {
-          // PhoneBurner owns physical contact deletion. The backend only clears
-          // the completed provider identity and preserves the durable cadence
-          // timer/counts used to create a fresh contact when due.
-          const retainForNativeRecycle = false;
+          // Production lets PhoneBurner recycle an ordinary nonterminal contact
+          // while another same-day attempt remains. Terminal/capped/ineligible
+          // contacts are removed here by exact provider identity. The legacy
+          // estimate-only compatibility surface cannot account for native
+          // recycling, so it retains its old delete/repost lifecycle.
+          const retainForNativeRecycle = providerInventoryAuthoritative === true
+            && shouldRetainCompletedProviderContact(currentItem, {
+              now: local.effectContext?.completedAt || currentEvent.receivedAt || atNow(),
+              evaluatedAt: atNow(),
+              maximumDailyAttempts,
+            });
+          if (!retainForNativeRecycle) {
+            const removed = await runProviderPostTurn(() => phoneBurner.deleteContact(contactId));
+            if (removed?.ok !== true && Number(removed?.httpStatus) !== 404) {
+              noteProviderInventoryBackpressure(removed);
+              const error = new Error("provider-contact-delete-failed");
+              if (Number.isFinite(Number(removed?.retryAfterMs))) {
+                error.retryAfterMs = Number(removed.retryAfterMs);
+              }
+              throw error;
+            }
+          }
           const clearedProviderFields = retainForNativeRecycle
             ? { providerCallId: null }
             : {
@@ -8062,6 +8113,8 @@ function createLeadDeliveryRuntime({
   async function processLeasedEvent(event, {
     waitForRefillCompletion = true,
     allowProviderCapacityWork = true,
+    deferAsyncCapacityWork = false,
+    deferredCapacity = null,
   } = {}) {
     let local;
     try {
@@ -8092,12 +8145,6 @@ function createLeadDeliveryRuntime({
       && recordingLocatorOf(event)) {
       return completeRecordingEvidenceOnly(event, local);
     }
-    const backgroundRefill = allowProviderCapacityWork === true
-      && local.needsRefill
-      && providerInventoryAuthoritative !== true
-      ? postTopOfQueue(local.item.deliveryAgentId, { count: SIMPLE_PACKET_SIZE })
-      : null;
-    if (backgroundRefill) await backgroundRefill;
     const completedEvent = await completeDownstream(local.event, local, {
       // In provider-authoritative mode, PhoneBurner removes the completed
       // attempt first. Only then may this owner count that agent's Pool and
@@ -8122,11 +8169,33 @@ function createLeadDeliveryRuntime({
         }
         : null,
     });
-    if (backgroundRefill && waitForRefillCompletion) await backgroundRefill;
+    const refillAgentId = allowProviderCapacityWork === true
+      && local.needsRefill
+      && providerInventoryAuthoritative !== true
+      ? String(local.item.deliveryAgentId || "").trim().toLowerCase()
+      : null;
+    const backgroundRefill = refillAgentId && deferAsyncCapacityWork !== true
+      ? launchBackgroundRefill(refillAgentId)
+      : null;
+    // The caller may return once replacement work is durably packetized; it
+    // never has to wait through provider latency. stop() still drains the full
+    // tracked completion before shutdown.
+    if (backgroundRefill) await backgroundRefill.durable;
+    if (backgroundRefill && waitForRefillCompletion) await backgroundRefill.completion;
     // A real Call End is fresh activity evidence. Wake the independent fresh
     // lane after the attempt is durable; ordinary refill success or failure
     // does not own this decision.
-    const freshDispatch = allowProviderCapacityWork === true ? wakeImmediateFresh() : null;
+    const freshDispatchNeeded = allowProviderCapacityWork === true;
+    const freshDispatch = freshDispatchNeeded && deferAsyncCapacityWork !== true
+      ? wakeImmediateFresh()
+      : null;
+    if (deferAsyncCapacityWork === true) {
+      if (!(deferredCapacity?.refillAgentIds instanceof Set)) {
+        throw new TypeError("deferred capacity collector is required");
+      }
+      if (refillAgentId) deferredCapacity.refillAgentIds.add(refillAgentId);
+      deferredCapacity.freshDispatch ||= freshDispatchNeeded;
+    }
     return { status: completedEvent?.status || "conflict", freshDispatch };
   }
 
@@ -8146,6 +8215,7 @@ function createLeadDeliveryRuntime({
     });
     let processed = 0;
     const results = [];
+    const deferredCapacity = { refillAgentIds: new Set(), freshDispatch: false };
     for (const candidate of events) {
       const leased = await repository.acquireEventProcessingLease({
         eventId: String(candidate._id),
@@ -8158,10 +8228,24 @@ function createLeadDeliveryRuntime({
       const result = await processLeasedEvent(leased, {
         waitForRefillCompletion,
         allowProviderCapacityWork,
+        // Finish every exact completion cleanup before replacement provider
+        // work enters the shared writer lane. Otherwise one slow refill post
+        // can sit ahead of the next event's exact contact deletion.
+        deferAsyncCapacityWork: true,
+        deferredCapacity,
       });
       results.push(result);
       processed += 1;
     }
+    const refillHandles = [...deferredCapacity.refillAgentIds]
+      .map((agentId) => launchBackgroundRefill(agentId));
+    if (refillHandles.length) {
+      await Promise.all(refillHandles.map((handle) => handle.durable));
+      if (waitForRefillCompletion) {
+        await Promise.all(refillHandles.map((handle) => handle.completion));
+      }
+    }
+    if (deferredCapacity.freshDispatch) wakeImmediateFresh();
     return { status: "ok", seen: events.length, processed, results };
   }
 
@@ -8272,7 +8356,9 @@ function createLeadDeliveryRuntime({
         return { ...summary, status: String(batch?.status || "queue-build-failed") };
       }
       if (batch?.done === true) return { ...summary, status: "built", done: true };
-      if (Number(batch?.read || 0) === 0) return { ...summary, status: "queue-build-stalled", done: false };
+      if (Number(batch?.read || 0) === 0 && batch?.progressed !== true) {
+        return { ...summary, status: "queue-build-stalled", done: false };
+      }
     }
     return { ...summary, status: "queue-build-batch-limit", done: false };
   }
@@ -9089,15 +9175,6 @@ function createLeadDeliveryRuntime({
       dateKey: forcedDateKey || naturalWindow.dateKey,
       due: forcedDateKey ? true : naturalWindow.due,
     };
-    if (runtimeState.endOfDayDrainDateKey === window.dateKey
-      && runtimeState.endOfDayDrainStatus === "completed") {
-      return {
-        status: "already-completed",
-        dateKey: window.dateKey,
-        deleted: 0,
-        remaining: 0,
-      };
-    }
     const requestedAgentIds = Array.isArray(options?.agentIds)
       ? options.agentIds
       : dailyCloseAgentIds();
@@ -9107,6 +9184,20 @@ function createLeadDeliveryRuntime({
     if (!window.due) return { status: "not-due", dateKey: window.dateKey, deleted: 0, remaining: null };
     if (enabled !== true || actionsEnabled !== true) {
       return { status: "disabled", dateKey: window.dateKey, deleted: 0, remaining: null };
+    }
+    if (runtimeState.endOfDayDrainDateKey === window.dateKey
+      && runtimeState.endOfDayDrainStatus === "completed") {
+      // Reassert the safety posture even after the destructive portion has
+      // completed. An accidental same-evening launch must not defeat the close
+      // merely because the folder work is already idempotently finished.
+      await syncConfiguredAgents();
+      for (const agentId of targetAgentIds) await pauseAgentForEndOfDayDrain(agentId, at);
+      return {
+        status: "completed",
+        dateKey: window.dateKey,
+        deleted: 0,
+        remaining: 0,
+      };
     }
     await syncConfiguredAgents();
     if (endOfDayDrainInFlight) return endOfDayDrainInFlight;
@@ -9752,6 +9843,16 @@ function createLeadDeliveryRuntime({
       return { status: "ok", tickMode, priorDayDrainResume, ...payload };
     };
 
+    // Weekend intake is owned upstream and has already persisted the cadence
+    // row, sent only the initial SMS/email, and enrolled the lead for Monday.
+    // This runtime must not scan source/provider state or even drain callbacks
+    // on Saturday/Sunday; those durable events wait for the next business day.
+    if (tickMode === "weekend_idle") {
+      return recordTick({
+        events: { status: "weekend-paused", seen: 0, processed: 0 },
+      });
+    }
+
     if (tickMode !== "delivery_open" && tickMode !== "close_due") {
       const events = await drainEvents({
         waitForRefillCompletion: false,
@@ -9896,7 +9997,7 @@ function createLeadDeliveryRuntime({
       simpleOperatorDirectAccessEnabled: simpleOperatorDirectAccessEnabled === true,
       providerInventoryAuthoritative: providerInventoryAuthoritative === true,
       provider: providerName,
-      sourceCursor: runtimeState.sourceCursor,
+      sourceCursor: observableSourceCursor(runtimeState.sourceCursor),
       sourceDone: runtimeState.sourceDone,
       sourceBusinessDate: runtimeState.sourceBusinessDate,
       sourceRepairStatus: runtimeState.sourceRepairStatus,

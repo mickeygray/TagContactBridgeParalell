@@ -234,7 +234,11 @@ function flattenFactUpdate(fact) {
     // Leaving the key absent loses nothing: coverage.callProjection already records
     // "pending" for the day, so the state is still stated, just not stated twice in
     // a place another writer owns.
-    if (key === CALL_SECTION_FACT && value && value.status === "pending") continue;
+    if (key === CALL_SECTION_FACT
+      && value
+      && ["pending", "unavailable"].includes(String(value.status || "").toLowerCase())) {
+      continue;
+    }
     set[`facts.${key}`] = value;
   }
   return set;

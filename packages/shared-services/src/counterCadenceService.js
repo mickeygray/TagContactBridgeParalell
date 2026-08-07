@@ -539,6 +539,52 @@ async function recordCounterCadenceFailure(item, result = {}, now = new Date()) 
   ).lean();
 }
 
+/**
+ * Consume a low-priority channel attempt that was deliberately skipped after
+ * this worker owned the item. This advances the cadence without claiming a
+ * delivery: lastTouched/completedByChannel remain unchanged.
+ */
+async function recordCounterCadenceSkipAttempt(
+  item,
+  result = {},
+  now = new Date(),
+  dailyBatchKey = null,
+) {
+  const channel = normalizeChannel(item.channel);
+  const templateIndex = Number(item.templateIndex);
+  const reason = result?.reason || result?.result?.reason || "skipped";
+  const set = {
+    cadenceMode: "legacy-time-count",
+    currentStage: `${channel}-counter-skipped`,
+    [`cadenceCounters.${channel}`]: templateIndex,
+    [`cadenceState.lastAttemptAtByChannel.${channel}`]: now,
+    "cadenceState.lastEvaluatedAt": now,
+    "counterCadence.lastDispatchAt": now,
+    [`counterCadence.lastResult.${channel}`]: {
+      ok: false,
+      skipped: true,
+      reason,
+      templateIndex,
+      at: now,
+    },
+  };
+  if (dailyBatchKey) {
+    set[`counterCadence.lastDailyBatchKey.${channel}`] = dailyBatchKey;
+  }
+  return LeadCadence.findOneAndUpdate(
+    { _id: item.lead._id },
+    {
+      $set: set,
+      $inc: { [`cadenceState.skippedByChannel.${channel}`]: 1 },
+      $unset: {
+        [`counterCadence.locks.${channel}`]: "",
+        [`counterCadence.deferUntil.${channel}`]: "",
+      },
+    },
+    { new: true },
+  ).lean();
+}
+
 async function dispatchCounterCadenceItem(item, {
   now = new Date(),
   queueDepth = 1,
@@ -591,7 +637,6 @@ async function dispatchCounterCadenceItem(item, {
     };
   }
 
-  await recordCounterCadenceFailure(item, dispatchResult.result || dispatchResult, now);
   // HOIST THE SKIP. dispatchForLead NESTS it — {ok:false, result:{skipped:true,
   // reason:"rate-limited"}} — while the sweep's failure counter reads only the
   // TOP level, so correct pacing was recorded as failure. Not cosmetic: each
@@ -602,9 +647,16 @@ async function dispatchCounterCadenceItem(item, {
   // ~40-token window did that every day.
   const nested = dispatchResult.result || dispatchResult;
   const skipped = Boolean(dispatchResult.skipped || nested?.skipped);
+  if (skipped) {
+    await recordCounterCadenceSkipAttempt(item, nested, now, dailyBatchKey);
+  } else {
+    await recordCounterCadenceFailure(item, nested, now);
+  }
   return {
     ok: false,
-    ...(skipped ? { skipped: true, reason: nested?.reason || "skipped" } : {}),
+    ...(skipped
+      ? { skipped: true, attemptConsumed: true, reason: nested?.reason || "skipped" }
+      : {}),
     item: summarizeDueItem(item),
     result: nested,
   };
@@ -703,12 +755,13 @@ async function runCounterCadenceSweep({
         domain: item.domain,
         family: "outbound",
         subtype: "counter-cadence",
-        stage: result.ok ? (dryRun ? "previewed" : "completed") : "failed",
+        stage: result.ok ? (dryRun ? "previewed" : "completed")
+          : (result.skipped ? "skipped" : "failed"),
         aggregateType: "lead-cadence",
         aggregateId: String(item.caseId),
         caseId: item.caseId,
         sourceService,
-        summary: `${item.channel} counter cadence ${result.ok ? "sent" : "failed"} (${item.templateKey})`,
+        summary: `${item.channel} counter cadence ${result.ok ? "sent" : (result.skipped ? "skipped" : "failed")} (${item.templateKey})`,
         payload: {
           item: summarizeDueItem(item),
           dryRun: Boolean(dryRun),
@@ -742,6 +795,7 @@ async function runCounterCadenceSweep({
     sent: results.filter((entry) => entry.ok && !entry.dryRun).length,
     failed: results.filter((entry) => !entry.ok && !entry.skipped).length,
     skipped: results.filter((entry) => entry.skipped).length,
+    attemptsConsumed: results.filter((entry) => entry.attemptConsumed).length,
     dryRun: Boolean(dryRun),
     results,
   };
@@ -870,33 +924,61 @@ async function pollCounterCadenceRvmDispositions({
 async function drainCounterCadenceSweep({
   maxRounds = 20,
   roundPauseMs = Math.max(0, Number(process.env.COUNTER_CADENCE_DRAIN_ROUND_PAUSE_MS) || 2000),
+  sweepImpl = runCounterCadenceSweep,
   ...options
 } = {}) {
   const totals = {
     ok: true, rounds: 0, selected: 0, sent: 0, failed: 0, skipped: 0,
-    drained: false, roundResults: [],
+    attemptsConsumed: 0, drained: false, roundResults: [],
   };
   const perRound = Math.max(Number(options.maxDispatches) || 25, 1);
   for (let round = 0; round < Math.max(1, maxRounds); round += 1) {
-    const r = await runCounterCadenceSweep(options);
+    const r = await sweepImpl(options);
     totals.rounds += 1;
     totals.selected += Number(r?.selected) || 0;
     totals.sent += Number(r?.sent) || 0;
     totals.failed += Number(r?.failed) || 0;
     totals.skipped += Number(r?.skipped) || 0;
+    totals.attemptsConsumed += Number(r?.attemptsConsumed) || 0;
     totals.roundResults.push({
       selected: r?.selected ?? 0, sent: r?.sent ?? 0, failed: r?.failed ?? 0,
+      skipped: r?.skipped ?? 0, attemptsConsumed: r?.attemptsConsumed ?? 0,
     });
     // Fewer selected than the cap means the selector ran out of due items —
     // but items that FAILED to dispatch are still due, so a round with
-    // failures can never certify the backlog drained. The first version did,
-    // and a day with 40 failures and 10 quiet leads reported itself finished.
+    // failures can never certify the backlog drained. A day with 40 failures
+    // and 10 quiet leads must not report itself finished.
+    //
+    // SKIPS ARE NOT FAILURES, and requiring skipped===0 here was wrong three
+    // ways. The counter is CUMULATIVE across rounds, so one skip anywhere in a
+    // run poisons the whole run. Most skip reasons never leave the due set —
+    // an invalid phone, a suppression, a stop-contact status — so a single such
+    // lead makes drained:true unreachable for that pass FOREVER. And the
+    // consumer treats drained:false as a reason to retry: passRuntimeFactory
+    // throws, the task burns all three attempts five minutes apart, and each
+    // attempt re-runs the full drain — live Logics eligibility calls, phantom
+    // failedByChannel increments and "failed" workflow rows for what was
+    // correct pacing or correct policy. That is verbatim the storm the skip
+    // hoist above was written to remove, re-entering by a different counter.
+    //
+    // So drained means "nothing FAILED and the selector ran dry". What is still
+    // due because it was paced or refused is carried by `skipped` and surfaced
+    // in the summary, where it informs an operator without ordering a retry
+    // that cannot help: three attempts across fifteen minutes cannot outrun a
+    // token bucket, and no number of retries fixes a bad phone number.
     if ((Number(r?.selected) || 0) < perRound) {
       totals.drained = totals.failed === 0;
       break;
     }
-    // A full selection that sent nothing is a stuck provider, not a backlog.
-    if ((Number(r?.sent) || 0) === 0 && !options.dryRun) break;
+    // A full selection with neither a send nor a consumed skip made no progress.
+    // Claim conflicts land here: another worker owns those rows, so this pass
+    // stops without retrying or rewriting them. A provider/policy skip advanced
+    // the cadence attempt above and may safely continue to the next page.
+    if ((Number(r?.sent) || 0) + (Number(r?.attemptsConsumed) || 0) === 0
+      && !options.dryRun) {
+      totals.drained = totals.failed === 0 && (Number(r?.skipped) || 0) > 0;
+      break;
+    }
     // A round that is MOSTLY failure is a struggling provider, not a backlog
     // either. The sent===0 stop only catches a hard-down one; a trickle of
     // successes — which is precisely what a throttling provider returns —
@@ -925,6 +1007,7 @@ module.exports = {
   getCounterCadenceTemplateKey,
   isWeekdayBatchTime,
   pollCounterCadenceRvmDispositions,
+  recordCounterCadenceSkipAttempt,
   recordCounterCadenceTouch,
   drainCounterCadenceSweep,
   runCounterCadenceSweep,

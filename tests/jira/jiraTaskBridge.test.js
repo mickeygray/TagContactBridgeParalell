@@ -301,6 +301,45 @@ test("the notify payload carries everything the alert text needs", async () => {
   assert.equal(d.tenant, "TAG");
 });
 
+test("every execution path can render the same Jira notification", async () => {
+  const {
+    decisionNotificationText,
+    notifyJiraDecision,
+  } = require("../../apps/control-plane/src/routes/jiraWebhook");
+  const decision = {
+    caseId: 401656,
+    tenant: "TAG",
+    notify: { notes: "documents received", wouldHaveBeen: "Prep Return" },
+  };
+  assert.match(decisionNotificationText(decision), /Please Update 401656 in TAG/);
+  const comments = [];
+  const result = await notifyJiraDecision({
+    deps: { commentOnIssue: async (...args) => comments.push(args) },
+    decision,
+    jiraKey: "ASSIGNMENT-9001",
+    apply: true,
+    path: "claim-drain",
+  });
+  assert.equal(result.status, "notified");
+  assert.equal(comments.length, 1);
+});
+
+test("terminal link updates clear fields omitted by the new decision", () => {
+  const { buildLinkUpdate } = require("../../apps/control-plane/src/routes/jiraWebhook");
+  const update = buildLinkUpdate({
+    outcome: "skipped",
+    reason: "case not found",
+    trigger: "jira:issue_updated",
+    jiraStatus: "To Do",
+  }, new Date("2026-08-07T16:00:00.000Z"));
+  assert.equal(update.$set.reason, "case not found");
+  assert.equal(update.$set.jiraStatus, "To Do");
+  assert.equal(update.$unset.tenant, 1);
+  assert.equal(update.$unset.subject, 1);
+  assert.equal(update.$unset.logicsTaskId, 1);
+  assert.equal(update.$unset.jiraStatus, undefined);
+});
+
 // ── AUDIT FIXES: claim-before-ack, terminal created, refuse-on-partial ─────
 
 test("the link model knows the in-flight state", () => {
@@ -320,7 +359,7 @@ test("the webhook claims BEFORE acknowledging, and acknowledges before working",
   );
   const handler = src.slice(src.indexOf('router.post("/webhook"'));
   const claim = handler.indexOf("deps.claimIssue(");
-  const ack = handler.indexOf("res.json({ ok: true, received: event, key: issue.key");
+  const ack = handler.indexOf("res.json({ ok: true, received: event, key: issue.key, claimed: true");
   const work = handler.indexOf("bridgeJiraIssue({");
   assert.ok(claim > 0 && ack > 0 && work > 0);
   assert.ok(claim < ack, "the claim must be durable before Jira hears a 2xx");
@@ -328,6 +367,18 @@ test("the webhook claims BEFORE acknowledging, and acknowledges before working",
   // A failed claim must NOT ack — a 500 makes Jira retry, which now converges
   // on the claim instead of duplicating.
   assert.match(handler.slice(0, ack), /status\(500\)/);
+});
+
+test("a concurrent delivery is not acknowledged when its newer payload was not captured", () => {
+  const src = require("node:fs").readFileSync(
+    require.resolve("../../apps/control-plane/src/routes/jiraWebhook"), "utf8",
+  );
+  const handler = src.slice(src.indexOf('router.post("/webhook"'));
+  const busy = handler.indexOf('claim.reason === "another delivery holds the claim"');
+  const retry = handler.indexOf('status(500).json({ ok: false, error: "issue is busy; retry expected"');
+  const ack = handler.indexOf("claimed: true");
+  assert.ok(busy > 0 && retry > busy && ack > retry,
+    "busy work must ask Jira to retry before the success acknowledgement");
 });
 
 test("recordLink cannot overwrite the terminal created outcome", () => {
@@ -338,8 +389,21 @@ test("recordLink cannot overwrite the terminal created outcome", () => {
     require.resolve("../../apps/control-plane/src/routes/jiraWebhook"), "utf8",
   );
   const record = src.slice(src.indexOf("recordLink: async"), src.indexOf("claimIssue:"));
-  assert.match(record, /outcome: \{ \$ne: "created" \}/,
-    "a non-created write must be conditional on the row not being created");
+  assert.match(record, /buildRecordLinkQuery\(jiraKey, rest\.outcome, claimToken\)/,
+    "recordLink must use the executable guarded-query builder");
+});
+
+test("recordLink's executable predicate fences every non-created terminal write", () => {
+  const { buildRecordLinkQuery } = require("../../apps/control-plane/src/routes/jiraWebhook");
+  assert.deepEqual(
+    buildRecordLinkQuery("ASSIGNMENT-1", "failed", "owner-token"),
+    { _id: "ASSIGNMENT-1", outcome: { $ne: "created" }, claimToken: "owner-token" },
+  );
+  assert.deepEqual(
+    buildRecordLinkQuery("ASSIGNMENT-1", "created", "stale-token"),
+    { _id: "ASSIGNMENT-1" },
+    "an irreversible task that exists must remain recordable after a takeover",
+  );
 });
 
 test("an unreadable open-task window REFUSES the create instead of narrowing it", async () => {
@@ -464,6 +528,16 @@ test("a lost CAS means another delivery owns it — the drain walks away", async
   assert.equal(out.redriven, 0);
 });
 
+test("the drain claim CAS includes outcome and the observed millisecond timestamp", () => {
+  const { buildClaimCursorQuery } = require("../../apps/control-plane/src/routes/jiraWebhook");
+  const lastAttemptAt = new Date("2026-08-07T16:00:00.123Z");
+  assert.deepEqual(buildClaimCursorQuery({
+    _id: "ASSIGNMENT-7005", outcome: "failed", lastAttemptAt,
+  }), {
+    _id: "ASSIGNMENT-7005", outcome: "failed", lastAttemptAt,
+  });
+});
+
 test("the replay route goes through the SAME claim gate as the webhook", () => {
   // Replay used to go straight to the bridge — an admin replaying while a
   // webhook delivery was mid-flight could create the task twice.
@@ -516,11 +590,8 @@ test("recordLink FENCES a non-created write on the claim token", () => {
     require.resolve("../../apps/control-plane/src/routes/jiraWebhook"), "utf8",
   );
   const record = src.slice(src.indexOf("recordLink: async"), src.indexOf("claimIssue: async"));
-  assert.match(record, /if \(claimToken && rest\.outcome !== "created"\) query\.claimToken = claimToken;/,
-    "a non-created write must CAS on the token");
-  // `created` stays exempt: an irreversible task that DOES exist must always be
-  // recordable, whoever won the race to make it.
-  assert.match(record, /rest\.outcome !== "created"/);
+  assert.match(record, /buildRecordLinkQuery\(jiraKey, rest\.outcome, claimToken\)/,
+    "a non-created write must route through the token-fenced query builder");
 });
 
 test("every write path hands recordLink its token", () => {

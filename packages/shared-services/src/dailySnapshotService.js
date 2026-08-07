@@ -1,21 +1,15 @@
 "use strict";
 
-// THE DAILY SNAPSHOT WRITER — end to end, and deliberately on its own.
+// THE DAILY SNAPSHOT WRITER — one cheap automated write, with one explicit
+// standalone repair escape hatch.
 //
-// Mickey 2026-08-04: "keep exactly what's there without changing it and move the
-// snapshot out of it and make an end-to-end snapshot writer that combines and
-// simplifies to run after the email. then make it one pipe on the next patch."
-// And, on the cost of doing so: "to be careful let's just run it twice for now."
+// The scheduled nightly path MUST supply the report it already gathered for the
+// email. That path builds the fact in memory and performs one upsert; it must not
+// compose again, start another scan, or arm a retry scheduler.
 //
-// So this composes its OWN report rather than borrowing the email's. That is a
-// second gather, accepted knowingly for one patch, and it buys two things:
-//
-//   1. The email path stops carrying a persistence concern. Sending is sending.
-//   2. The snapshot becomes runnable on its own — for a missed night, or a
-//      backfill — instead of only ever existing as a side effect of a send.
-//
-// Next patch merges them back into one gather. When that happens, DELETE the
-// compose here and take the report as an argument; everything else stays.
+// An explicit missed-day/backfill caller may omit the report and pay for one
+// independent compose. That delayed repair is knowingly heavier and is the
+// accepted "risk it for the biscuit" path; it is not automatic nightly work.
 //
 // THE ONE THING THAT MUST NOT DRIFT: the day. The email's fact is keyed on the
 // definition's resolved range.from, so this must resolve the SAME range from the
@@ -69,10 +63,9 @@ async function writeDailySnapshot({
   let report = suppliedReport;
 
   if (!report) {
-    // NO REPORT SUPPLIED — compose one. This path is NOT dead weight: it is what
-    // makes a missed night or a backfill runnable on its own, without sending an
-    // email to produce a fact. Removing it turns the snapshot back into a side
-    // effect of a send, which is what it was extracted from.
+    // NO REPORT SUPPLIED — compose one for an EXPLICIT standalone missed-day or
+    // backfill request. Scheduled automation supplies the report and never
+    // reaches this heavier branch.
     //
     // Cheap gate FIRST here, because a gather is about to be paid for. Every
     // check in the candidate gate except the section check reads only `def` and

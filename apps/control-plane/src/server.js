@@ -2018,6 +2018,7 @@ async function startServer() {
     return {
       result: stored.result || "unknown",
       checkedAt: stored.checkedAt || null,
+      nextCheckAt: stored.nextCheckAt || null,
       reason: stored.reason || null,
       // Entity suppression, checked live and independently of the provider
       // result — it outranks everything (§14.3).
@@ -2288,9 +2289,18 @@ async function startServer() {
     runtime,
   });
   // Saved report shapes on a clock. Default OFF — arm with
-  // REPORT_SCHEDULER_ENABLED=true once the definitions read right.
+  // REPORT_SCHEDULER_ENABLED=true once the definitions read right. When the
+  // nightly pipeline is enabled, this becomes its final executor and does not
+  // start a competing timer.
+  const nightlyHygieneConfigured = config.nightlyHygiene?.enabled === true
+    || String(process.env.NIGHTLY_HYGIENE_ENABLED) === "true";
   const reportScheduleRuntime = createReportScheduleRuntime({
-    config: config.reportSchedule || {},
+    config: {
+      ...(config.reportSchedule || {}),
+      // The report executor gives up its independent timer when the 19:50
+      // pipeline owns delivery as its final durable task.
+      managedByNightly: nightlyHygieneConfigured,
+    },
     runtime,
   });
   // Constructed BEFORE nightlyHygieneRuntime as of 2026-08-04, because the
@@ -2300,13 +2310,12 @@ async function startServer() {
     config: config.spendSync || {},
     runtime,
   });
-  // THE nightly service: one loop, a registry of hygiene chores (today:
-  // writing the mail piece onto the Logics case so reports READ attribution
-  // instead of rebuilding it). Default OFF; each task needs its own write
-  // switch on top of NIGHTLY_HYGIENE_ENABLED.
+  // THE nightly service: one loop from 19:50 cleanup through report delivery.
+  // Default OFF; each task needs its own write switch on top of
+  // NIGHTLY_HYGIENE_ENABLED.
   //
-  // The two injected runtimes are for the folded-in costing and activity-review
-  // tasks. Injecting them does NOT arm them: both sit behind their own flags
+  // The injected runtimes execute folded-in costing, activity-review, and final
+  // report tasks. Injecting them does NOT arm them: each sits behind its own flag
   // (NIGHTLY_SPEND_SYNC_ENABLED, NIGHTLY_ACTIVITY_REVIEW_ENABLED), which default
   // off precisely so this wiring can land without changing what runs tonight.
   // Arming either one must retire its standalone timer in the SAME change, or
@@ -2316,6 +2325,15 @@ async function startServer() {
       ...(config.nightlyHygiene || {}),
       spendSyncRuntime,
       activityReviewRuntime: logicsActivityReviewRuntime,
+      reportScheduleRuntime,
+      reportDeliveryEnabled: config.reportSchedule?.enabled === true
+        || String(process.env.REPORT_SCHEDULER_ENABLED) === "true",
+      emergencyCloseEnabled: nightlyHygieneConfigured
+        && (config.reportSchedule?.enabled === true
+          || String(process.env.REPORT_SCHEDULER_ENABLED) === "true"),
+      emergencyClose: {
+        recipients: config.nightlyClose?.opsRecipients || config.nightlyClose?.recipients || null,
+      },
     },
     runtime,
   });
@@ -3270,6 +3288,12 @@ async function startServer() {
   });
   runtime.registerCleanup("control-plane-logics-activity-review", async () => {
     await logicsActivityReviewRuntime.stop();
+  });
+  runtime.registerCleanup("control-plane-nightly-hygiene", async () => {
+    await nightlyHygieneRuntime.stop();
+  });
+  runtime.registerCleanup("control-plane-report-schedule", async () => {
+    await reportScheduleRuntime.stop();
   });
   runtime.registerCleanup("control-plane-nightly-close", async () => {
     await nightlyCloseRuntime.stop();

@@ -27,6 +27,7 @@ const TASKS = [
     // 12:00 PT is outside the 09:00–11:59 daily window (`720 < 720` is false),
     // so without it the sweep selects nothing and reports a confident zero.
     key: "cadence-midday",
+    weekdaysOnly: true,
     label: "Lead cadence — ringless voicemail",
     writesArmed: () => flag("MIDDAY_CADENCE_ENABLED"),
     async plan({ domains }) {

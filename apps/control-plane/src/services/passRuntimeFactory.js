@@ -78,7 +78,7 @@ async function claimPass(passKey, dateKey, { leaseMs, at = new Date(), Model = D
         ],
         [`${base}.completedAt`]: { $in: [null, undefined] },
       },
-      { $set: { [`${base}.claimedAt`]: at, [`${base}.lastErrorCode`]: null } },
+      { $set: { [`${base}.claimedAt`]: at } },
       { new: true, upsert: true, setDefaultsOnInsert: true },
     ).lean();
     if (!claimed) return null;
@@ -86,6 +86,8 @@ async function claimPass(passKey, dateKey, { leaseMs, at = new Date(), Model = D
     return {
       claimedAt: new Date(cursor.claimedAt || at),
       nextTaskIndex: Math.max(0, Number(cursor.nextTaskIndex || 0)),
+      attemptsByTask: { ...(cursor.attemptsByTask || {}) },
+      failedTasks: { ...(cursor.failedTasks || {}) },
     };
   } catch (error) {
     // A duplicate-key race means the other side won the upsert.
@@ -105,7 +107,12 @@ async function claimPass(passKey, dateKey, { leaseMs, at = new Date(), Model = D
  * makes the lease per-task rather than per-pass: a takeover now needs 45
  * minutes of genuine silence, not 45 minutes of honest work.
  */
-async function advancePass(passKey, dateKey, claimedAt, nextTaskIndex, counts, { at = new Date(), Model = DailyLoopRun } = {}) {
+async function advancePass(passKey, dateKey, claimedAt, nextTaskIndex, counts, {
+  at = new Date(),
+  Model = DailyLoopRun,
+  attemptsByTask = {},
+  failedTasks = {},
+} = {}) {
   const base = `passes.${passKey}`;
   const result = await Model.updateOne(
     { dateKey, [`${base}.claimedAt`]: claimedAt, [`${base}.completedAt`]: { $in: [null, undefined] } },
@@ -114,7 +121,9 @@ async function advancePass(passKey, dateKey, claimedAt, nextTaskIndex, counts, {
         [`${base}.claimedAt`]: at,
         [`${base}.nextTaskIndex`]: nextTaskIndex,
         [`${base}.counts`]: counts,
-        [`${base}.lastErrorCode`]: null,
+        [`${base}.attemptsByTask`]: attemptsByTask,
+        [`${base}.failedTasks`]: failedTasks,
+        [`${base}.lastErrorCode`]: Object.keys(failedTasks).length ? "task-failures" : null,
       },
     },
   );
@@ -132,15 +141,27 @@ async function advancePass(passKey, dateKey, claimedAt, nextTaskIndex, counts, {
  * would silently become one attempt every 45 minutes, and a chore that needed
  * two tries would not get its second until most of the window was gone.
  */
-async function releasePass(passKey, dateKey, claimedAt, errorCode = null, { Model = DailyLoopRun } = {}) {
+async function releasePass(passKey, dateKey, claimedAt, errorCode = null, {
+  Model = DailyLoopRun,
+  attemptsByTask = {},
+} = {}) {
   const base = `passes.${passKey}`;
   await Model.updateOne(
     { dateKey, [`${base}.claimedAt`]: claimedAt, [`${base}.completedAt`]: { $in: [null, undefined] } },
-    { $set: { [`${base}.claimedAt`]: null, [`${base}.lastErrorCode`]: errorCode } },
+    { $set: {
+      [`${base}.claimedAt`]: null,
+      [`${base}.attemptsByTask`]: attemptsByTask,
+      [`${base}.lastErrorCode`]: errorCode,
+    } },
   );
 }
 
-async function finishPass(passKey, dateKey, claimedAt, nextTaskIndex, counts, { at = new Date(), Model = DailyLoopRun } = {}) {
+async function finishPass(passKey, dateKey, claimedAt, nextTaskIndex, counts, {
+  at = new Date(),
+  Model = DailyLoopRun,
+  attemptsByTask = {},
+  failedTasks = {},
+} = {}) {
   const base = `passes.${passKey}`;
   const result = await Model.updateOne(
     { dateKey, [`${base}.claimedAt`]: claimedAt, [`${base}.completedAt`]: { $in: [null, undefined] } },
@@ -149,7 +170,12 @@ async function finishPass(passKey, dateKey, claimedAt, nextTaskIndex, counts, { 
         [`${base}.completedAt`]: at,
         [`${base}.nextTaskIndex`]: nextTaskIndex,
         [`${base}.counts`]: counts,
-        [`${base}.lastErrorCode`]: null,
+        [`${base}.attemptsByTask`]: attemptsByTask,
+        [`${base}.failedTasks`]: failedTasks,
+        [`${base}.degraded`]: Object.keys(failedTasks).length > 0,
+        [`${base}.lastErrorCode`]: Object.keys(failedTasks).length
+          ? "completed-with-task-failures"
+          : null,
       },
     },
   );
@@ -205,18 +231,19 @@ function createPassRuntime({
     totals: { planned: 0, written: 0 },
   };
 
-  // Per INSTANCE, not module scope: two instances must not share a counter,
-  // and a restart SHOULD grant fresh attempts because a restart is itself a
-  // plausible cause of the failure.
-  const attempts = new Map();
-
   async function runOnce({ apply = null, force = false, now = new Date(), Model = DailyLoopRun } = {}) {
     // Guard FIRST. Every early return below must be unable to skip the release.
     if (state.running) return { skipped: "already running" };
     if (!state.enabled && !force) return { skipped: "disabled" };
     const dateKey = pacificDayKey(now);
     if (!force && state.lastRunKey === dateKey) return { skipped: "already ran today" };
-    if (!force && !isPacificBusinessDay(now)) return { skipped: "pacific-weekend" };
+    // Scheduled passes are always dark on Pacific weekends. The only weekend
+    // automation boundary is inbound intake: persist the new lead, deliver its
+    // initial SMS/email, and leave it durably enrolled for Monday. `force`
+    // remains the explicit operator escape hatch.
+    if (!force && !isPacificBusinessDay(now)) {
+      return { skipped: "pacific-weekend" };
+    }
     const pt = pacificParts(now);
     if (!force && (pt.hour * 60 + pt.minute) < (state.hour * 60 + state.minute)) {
       return { skipped: "before the scheduled time" };
@@ -231,11 +258,33 @@ function createPassRuntime({
       const results = [];
       const totals = { planned: 0, written: 0 };
       let index = claim.nextTaskIndex;
+      const attemptsByTask = { ...claim.attemptsByTask };
+      const failedTasks = { ...claim.failedTasks };
 
       while (index < TASKS.length) {
         const task = TASKS[index];
         const taskStarted = Date.now();
         try {
+          // A pass admitted here is a business-day pass. Keep the per-task gate
+          // as defense in depth for explicitly forced/custom runtimes; scheduled
+          // automation never reaches it on a weekend.
+          if (!force && task.weekdaysOnly === true && !isPacificBusinessDay(now)) {
+            results.push({
+              task: task.key,
+              label: task.label,
+              skipped: "pacific-weekend",
+              planned: 0,
+              durationMs: Date.now() - taskStarted,
+            });
+            index += 1;
+            delete attemptsByTask[task.key];
+            const renewed = await advancePass(passKey, dateKey, claim.claimedAt, index, totals, {
+              Model, attemptsByTask, failedTasks,
+            });
+            if (!renewed) throw cursorLost(passKey);
+            claim.claimedAt = renewed;
+            continue;
+          }
           const armed = apply === null ? task.writesArmed() : Boolean(apply);
 
           // THE STANDING DRY RUN. plan() runs for every task, armed or not —
@@ -301,28 +350,40 @@ function createPassRuntime({
           });
 
           index += 1;
-          attempts.delete(task.key);
-          const renewed = await advancePass(passKey, dateKey, claim.claimedAt, index, totals, { Model });
+          delete attemptsByTask[task.key];
+          const renewed = await advancePass(passKey, dateKey, claim.claimedAt, index, totals, {
+            Model, attemptsByTask, failedTasks,
+          });
           if (!renewed) throw cursorLost(passKey);
           claim.claimedAt = renewed;
         } catch (error) {
           if (error?.code === CURSOR_LOST) throw error;
-          const tried = (attempts.get(task.key) || 0) + 1;
-          attempts.set(task.key, tried);
+          const tried = Math.max(0, Number(attemptsByTask[task.key]) || 0) + 1;
+          attemptsByTask[task.key] = tried;
           results.push({ task: task.key, label: task.label, error: String(error.message).slice(0, 240) });
           log?.error?.(`${passKey}.task_failed`, { task: task.key, attempt: tried, error: String(error.message) });
           if (tried < maxTaskAttempts) {
             // Leave the CURSOR where it is so the next poll retries this chore —
             // but hand the CLAIM back, or the lease locks the day out for 45
             // minutes and the retry budget never actually spends itself.
-            await releasePass(passKey, dateKey, claim.claimedAt, error?.code || "task-failed", { Model });
+            await releasePass(passKey, dateKey, claim.claimedAt, error?.code || "task-failed", {
+              Model, attemptsByTask,
+            });
             state.lastResults = results;
             return { ran: results.length, results, retrying: task.key, attempt: tried, durationMs: Date.now() - started };
           }
           // Out of attempts — step past it so the rest of the day still runs.
+          failedTasks[task.key] = {
+            attempts: tried,
+            errorCode: String(error?.code || error?.name || "task-failed").slice(0, 120),
+            failedAt: new Date(),
+          };
+          results[results.length - 1].skippedAfterAttempts = tried;
           index += 1;
-          attempts.delete(task.key);
-          const renewed = await advancePass(passKey, dateKey, claim.claimedAt, index, totals, { Model });
+          delete attemptsByTask[task.key];
+          const renewed = await advancePass(passKey, dateKey, claim.claimedAt, index, totals, {
+            Model, attemptsByTask, failedTasks,
+          });
           if (!renewed) throw cursorLost(passKey);
           claim.claimedAt = renewed;
         }
@@ -331,16 +392,25 @@ function createPassRuntime({
       // An unacknowledged completion means the claim moved under us — the same
       // condition as a lost cursor, and marking the day done in memory anyway
       // would hide that a second process may be re-running it right now.
-      if (!await finishPass(passKey, dateKey, claim.claimedAt, index, totals, { at: new Date(), Model })) {
+      if (!await finishPass(passKey, dateKey, claim.claimedAt, index, totals, {
+        at: new Date(), Model, attemptsByTask, failedTasks,
+      })) {
         throw cursorLost(passKey);
       }
       state.lastRunKey = dateKey;
       state.lastRunAt = new Date().toISOString();
       state.lastResults = results;
       state.totals = totals;
-      state.lastError = null;
+      state.lastError = Object.keys(failedTasks).length ? "completed-with-task-failures" : null;
       log?.info?.(`${passKey}.completed`, { dateKey, ...totals, tasks: results.length });
-      return { ran: results.length, results, totals, durationMs: Date.now() - started };
+      return {
+        ran: results.length,
+        results,
+        totals,
+        degraded: Object.keys(failedTasks).length > 0,
+        failedTasks: Object.keys(failedTasks),
+        durationMs: Date.now() - started,
+      };
     } catch (error) {
       state.lastError = String(error.message).slice(0, 300);
       if (error?.code === CURSOR_LOST) {

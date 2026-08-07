@@ -38,6 +38,18 @@ const {
 const { initializeServiceRuntime } = require("../../../packages/shared-runtime/src");
 const { buildServiceHealth } = require("../../../packages/shared-observability/src");
 
+const envTrue = (env, key) => String(env?.[key] || "false").toLowerCase() === "true";
+
+function dailyCadenceOwnedByPasses(env = process.env) {
+  if (!envTrue(env, "OUTBOUND_DAILY_CADENCE_TO_PASSES")) return false;
+  return [
+    "MORNING_PASS_ENABLED",
+    "MORNING_CADENCE_ENABLED",
+    "MIDDAY_PASS_ENABLED",
+    "MIDDAY_CADENCE_ENABLED",
+  ].every((key) => envTrue(env, key));
+}
+
 function buildInternalAccessMiddleware(config) {
   if (!config.outboundRequireInternalAuth) {
     return (_req, _res, next) => next();
@@ -335,9 +347,7 @@ async function startOutboundWorker({ config, runtime, workerState }) {
               // before the morning pass owns it would simply stop the daily
               // batch, so it stays on until OUTBOUND_DAILY_CADENCE_TO_PASSES
               // says a pass has taken it.
-              includeDaily: String(
-                process.env.OUTBOUND_DAILY_CADENCE_TO_PASSES || "false",
-              ).toLowerCase() !== "true",
+              includeDaily: !dailyCadenceOwnedByPasses(),
               logger: runtime.logger,
             });
             workerState.counterCadence.lastResult = counterCadenceResult;
@@ -602,14 +612,24 @@ async function startServer() {
   }));
 
   app.post("/api/outbound/counter-cadence/run", requireInternalAccess, asyncHandler(async (req, res) => {
+    const now = req.body?.now ? new Date(req.body.now) : new Date();
+    const dryRun = Boolean(req.body?.dryRun);
+    const forceDaily = Boolean(req.body?.forceDaily);
+    if (forceDaily && !dryRun && !isPacificBusinessDay(now)) {
+      return res.status(409).json({
+        ok: false,
+        skipped: true,
+        reason: "pacific-weekend",
+      });
+    }
     const result = await runCounterCadenceSweep({
       domain: req.body?.domain || null,
       domains: Array.isArray(req.body?.domains) ? req.body.domains : null,
-      now: req.body?.now ? new Date(req.body.now) : new Date(),
+      now,
       maxDispatches: req.body?.maxDispatches || req.body?.limit || 25,
       scanLimit: req.body?.scanLimit || undefined,
-      dryRun: Boolean(req.body?.dryRun),
-      forceDaily: Boolean(req.body?.forceDaily),
+      dryRun,
+      forceDaily,
       sourceService: `${config.serviceName}-manual`,
       logger: runtime.logger,
     });
@@ -953,6 +973,7 @@ if (require.main === module) {
 
 module.exports = {
   createWorkerState,
+  dailyCadenceOwnedByPasses,
   intervalDue,
   isPacificBusinessDay,
   isRvmDispositionPollingEnabled,
