@@ -6,6 +6,28 @@ Status: OPEN. Sections run in dependency order, not theme order.
 ```
 ⟳ BUILD STATUS — read this first after any compaction or re-entry
 ────────────────────────────────────────────────────────────────────
+2026-08-06 (17): AUDIT WORKED — 10 of the 30 fixed, 20 open, still
+NOT ready to patch. Each fix verified against code first, each with a
+test that fails on the unfixed code, each its own commit. See the ⟳
+block atop ADVERSARIAL_FINDINGS_2026-08-06.md for the per-finding map.
+Fixed: the CRITICAL cadence double-send (the claim is now the day
+guard); both HIGH Jira ownership gaps plus two mediums (a fencing
+token, a pre-create ownership re-check, retryable failures, and the
+drain spending its own budget); the isFactComplete type confusion I
+introduced in E13; my tautological lease test and three fake-model
+divergences hiding behind it; the 1,000-Logics-calls-per-tick I
+introduced fixing starvation (now a durable hold cooldown); and the
+drain counting its own pacing as failure plus having no brake at all.
+BONUS, not on the list: the shared HTTP client cleared its abort timer
+before reading the body, so a stalled body hung forever — every
+integration went through that.
+FOUR HIGH REMAIN, three with a dissenting skeptic. One needs a RULING
+not a fix: D11's weekend question, because the floor ran 7 days on the
+hourly tick and the passes refuse weekends, which silently drops the
+monthly filler refresh whenever the 1st is a weekend.
+The test-mutation lens is STILL under-judged — 29 refuters died on a
+session limit; only its lease finding was adjudicated. Re-run it.
+
 2026-08-06 (16): ADVERSARIAL PASS LANDED — 30 CONFIRMED findings,
 23 dismissed. NOT READY TO PATCH. Full detail with scenarios and
 evidence: .ai/context/ADVERSARIAL_FINDINGS_2026-08-06.md.

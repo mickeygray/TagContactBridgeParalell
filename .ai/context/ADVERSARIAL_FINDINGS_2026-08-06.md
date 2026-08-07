@@ -1,5 +1,64 @@
 # Self-adversarial pass — confirmed findings (2026-08-06)
 
+```
+⟳ STATUS 2026-08-06 evening — 10 of 30 FIXED, 20 OPEN.
+────────────────────────────────────────────────────────────────────
+Every fix below was VERIFIED against code first, carries a test that
+fails on the unfixed code, and is its own commit. Two of the ten were
+regressions I introduced while fixing the earlier audits, and one fix
+(the recovery cooldown) exposed a further hole in itself that its own
+replaced test caught.
+
+FIXED — all CRITICAL, and every HIGH in the areas this session owns:
+  * 6175f3d  Daily-chain double-send during the documented cutover
+              -> the claim is now the day guard
+  * 477f175  No ownership re-check between claim CAS and the irreversible cre
+              -> claim token + pre-create re-verify; root cause was the HTTP body read, 0e35537
+  * 477f175  recordLink's non-created predicate carries no ownership token
+              -> fenced on the token
+  * 477f175  Bridge-returned `failed` is never retried by anything
+              -> retryable flag; drain selects it
+  * 477f175  attempts is a lifetime counter
+              -> drain spends drainAttempts
+  * d178323  isFactComplete is fed a queue-rollup range object
+              -> the range's own computed gate
+  * 055a9a9  Lease-renewal test is tautological
+              -> 3 real tests; mutation now fails 5
+  * 6ff3c9e  readNewerBatch's held-head page loop performs up to 1,000 live L
+              -> durable hold cooldown; walk bounded to 2 pages
+  * 1ee3ecc  Dispatch-level skips (rate-limited, quiet-hours, caps) are count
+              -> skip hoisted
+  * 1ee3ecc  Drain loop has zero provider pacing for sms/email
+              -> failure backoff + failure-dominated stop + round pause
+
+BONUS ROOT CAUSE, not on the original list: the shared HTTP client
+cleared its abort timer one line before reading the body, so a stalled
+response body hung FOREVER — no timeout, no retry, worker wedged. Every
+integration went through it (0e35537).
+
+STILL OPEN — 20, and 4 of them are HIGH:
+  * recovery: an all-held page returns read=0/done=false and runDayStart
+    reads that as a stall. MAY be moot now the cooldown drains the held
+    head — VERIFY, do not assume.
+  * pass factory: step-past after exhausted retries erases the durable
+    trace; the day completes clean with undrained work. (1 skeptic
+    dissented.)
+  * pass factory: weekend guard + hoist deletion skips the monthly
+    filler refresh whenever the 1st is a Sat/Sun. NEEDS D11 RULED —
+    the floor ran 7 days hourly and the passes refuse weekends.
+  * cadence: OUTBOUND_DAILY_CADENCE_TO_PASSES=true with the pass
+    cadence dark kills the daily chain silently. Wants a guard or at
+    least a startup warning. (1 skeptic dissented.)
+  ...plus 9 medium and 7 low, including 4 comment-accuracy findings and
+  the recovery DNC-staleness interaction, all listed below untouched.
+
+THE test-mutation LENS IS STILL UNDER-JUDGED. 29 refute agents died on
+a session limit and that lens took the brunt; some of its findings were
+never voted on at all. Only its lease-renewal finding was adjudicated
+and fixed. RE-RUN IT.
+────────────────────────────────────────────────────────────────────
+```
+
 Run `wf_4e822c3d-b79`. 7 attack lenses, each finding judged by 3 independent
 skeptics; a finding is listed here only if 2+ said it was REAL.
 
@@ -12,6 +71,8 @@ contained findings that did not survive verification.
 
 
 ## [CRITICAL] Daily-chain double-send during the documented cutover: pass drain and gateway 09:00 sweep can send the SAME template twice to one lead
+
+> **FIXED — 6175f3d.** the claim is now the day guard.
 **counterCadenceService.js:347** · lens `cadence-drain-blast` · no dissent
 
 **Scenario.** Transition state the gateway comment itself prescribes (arm MORNING_CADENCE_ENABLED first, flip OUTBOUND_DAILY_CADENCE_TO_PASSES only after observing): both the morning-pass drain and the gateway's 60s worker (includeDaily still true, window 09:00-11:59 PT) are live daily senders. The drain materializes its due list up front (selectCounterCadenceDueItems returns up to 200 stale .lean() snapshots), then dispatches sequentially over minutes. If the drain is still running past 09:00 — attempt 2/3 of the drained:false retry path, a control-plane restart at ~08:50, or the 45-min lease forcing a killed pass to resume ~09:35 — the gateway sweep (same sort: counterCadence.lastDispatchAt asc, so the SAME head leads) claims lead X's sms lock, sends daily sms-3, and recordCounterCadenceTouch UNSETS the lock and stamps lastDailyBatchKey. Two minutes later the drain reaches X in its pre-built list: the lock is gone, claimCounterCadenceItem succeeds, and it sends prospect-follow-up-text-3 AGAIN. Each gateway sweep during the overlap converts up to 25 leads into duplicate texts/emails; afterwards the DB is byte-identical to a single send (counter set to the same absolute value, same batch key), so the duplicates are invisible. The sms-2-vs-sms-3 same-tick pair specifically CANNOT both fire (age-relative needs counters.sms===1, daily sms needs >=2, and the touch writes counters+lastTouched atomically), but same-index double-fire can.
@@ -20,6 +81,8 @@ contained findings that did not survive verification.
 
 
 ## [HIGH] No ownership re-check between claim CAS and the irreversible createTask — a stalled-but-alive holder and the drain can both create
+
+> **FIXED — 477f175.** claim token + pre-create re-verify; root cause was the HTTP body read, 0e35537.
 **jiraWebhook.js:304** · lens `jira-claim-machine` · no dissent
 
 **Scenario.** JIRA_TASK_BRIDGE_ENABLED=true. Webhook claims ASSIGNMENT-2100 at T0 and starts the bridge. In listOpenTasks' third window call, Logics returns headers, then the response BODY stalls — requestJson has already cleared its abort timer, so the await hangs unbounded and the row stays pending. At T0+10m the drain's CAS (matching only {outcome:'pending', lastAttemptAt}) succeeds — the predicate proves the holder hasn't WRITTEN, not that it died — and the drain re-runs the bridge from the snapshot; its createTask commits at ~T0+12m. At T0+13m the original run's stalled body finally completes carrying pre-create data; heldBySameOwner/alreadyOpen see no duplicate (their evidence was read before the drain's create), and the original calls createTask: a SECOND un-deletable Logics task on a live client case. The same shape works replay-vs-drain: if the drain's own bridge stalls past staleMs its row goes stale again and POST /replay/:key passes claimIssue's gate while the drain's create is still in flight.
@@ -28,6 +91,8 @@ contained findings that did not survive verification.
 
 
 ## [HIGH] recordLink's non-created predicate carries no ownership token — the webhook catch block writes terminal `failed` over a claim the drain now owns
+
+> **FIXED — 477f175.** fenced on the token.
 **jiraWebhook.js:194** · lens `jira-claim-machine` · no dissent
 
 **Scenario.** Webhook claims at T0; its bridge stalls. Drain CAS-takes at T0+10m (lastAttemptAt=T1) and is mid-bridge with apply=true. At T0+12m the webhook's stalled call throws; the catch at jiraWebhook.js:415 calls recordLink({outcome:'failed'}), whose predicate {_id, outcome:{$ne:'created'}} matches the DRAIN-owned pending row — no lastAttemptAt CAS, unlike every takeover path. The row flips to terminal `failed` with a misattributed reason while the drain's createTask is in flight. Consequences: (1) `failed` is takeover-eligible, so a replay at T0+13m passes the claim gate and re-runs the bridge; its listOpenTasks can read Logics before the drain's create commits, producing a duplicate un-deletable task; (2) if the drain's bridge then throws, its catch writes nothing, leaving the ledger asserting `failed` for an attempt that never reported, with attempts inflated by a dispossessed writer. Symmetric hazard: the drain's own recordLink at line 313 can overwrite a webhook's FRESH re-claim if the drain's bridge run itself exceeded staleMs.
@@ -44,6 +109,8 @@ contained findings that did not survive verification.
 
 
 ## [HIGH] readNewerBatch's held-head page loop performs up to 1,000 live Logics getCaseInfo calls per minute tick, inline in the tick, with no rate limit or cache
+
+> **FIXED — 6ff3c9e.** durable hold cooldown; walk bounded to 2 pages.
 **callRecoveryCompositeSource.js:213** · lens `recovery-cursor-and-paging` · no dissent
 
 **Scenario.** Once the daily repair completes, every delivery_open tick (floor 60s: server.js:1902-1905) runs ingestSerial in the new-arrivals lane (leadDeliveryService.js:9786, awaited inline in tick()). Cadence arrivals trickle, so cadenceItems.length < limit essentially always (composite:198) and the loop runs: 20 pages x recoveryPageSize 50 = up to 1,000 episodes, and for EACH episode resolveAdmissionInputs performs CaseProfile.findOne + ClientProfile.findOne + a live Logics HTTP getCaseInfo (server.js:1979-1984) + findItemBySourceIdentity (server.js:2074-2076), sequentially. With a persistent held head H (the dnc-stale mismatch keeps ~77-100% of open episodes unadmittable and unlinked, so they never leave the listing), every tick re-evaluates min(H,1000) episodes, discards every result, and admits nothing. At ~300ms per Logics call, H=500 makes one ingest pass ~2.5 minutes inside a 60-second tick — the tick body stretches, delaying productivityRebalance and runEndOfDayFolderDrain (9787-9788) every cycle, and Logics absorbs a sustained ~3-6 req/s all business day (~100k+ calls/day ceiling) from a path with no throttle, unlike the DNC sweep's deliberate 8/s cap (callRecoveryDncSweepService.js:27). callEndPulse (leadDeliveryService.js:5479-5493) runs the same full-head walk synchronously while an agent waits for a refill. The upstream code explicitly assumes this call is cheap: 'the minute tick remains bounded' (leadDeliveryService.js:8252-8253) — pre-composite readNewerBatch was one indexed Mongo query.
@@ -72,6 +139,8 @@ contained findings that did not survive verification.
 
 
 ## [HIGH] Drain loop has zero provider pacing for sms/email — the rate shaper has NO sms/email channels, and failed leads pin the head of every round
+
+> **FIXED — 1ee3ecc.** failure backoff + failure-dominated stop + round pause.
 **counterCadenceService.js:805** · lens `cadence-drain-blast` · no dissent
 
 **Scenario.** Morning pass, provider flaky (e.g., SMS API returning 429/500 with a trickle of successes — exactly what a throttling provider does). Round 1: 200 selected, 2 sent, 198 dispatch-exception failures. Failures write NO deferUntil (recordCounterCadenceFailure only defers on result.deferUntil/rateLimit.nextAllowedAt/'missing-tracking-number', lines 451-457) and never touch counterCadence.lastDispatchAt, so the 198 failed leads sort FIRST in the next candidate query and are re-selected seconds later. sent>0 and selected==perRound keep the loop running: 20 rounds x 200 = 4,000 back-to-back provider calls with no sleep between items or rounds, each failed lead hammered up to 20 times in minutes. drained:false then routes through the factory retry: 3 attempts x 20 rounds x 200 = up to 12,000 provider calls in one pass, per channel. The gateway path this replaces was naturally paced at <=25 dispatches per 60s tick. The sent===0 stop only saves the hard-down case (600 calls); any trickle of success defeats it — the 'RC-429 shape' the comment at lines 793-797 claims to prevent.
@@ -80,6 +149,8 @@ contained findings that did not survive verification.
 
 
 ## [HIGH] Dispatch-level skips (rate-limited, quiet-hours, caps) are counted as FAILED — the midday rvm drain fights its own token bucket and burns the attempt budget every backlog day
+
+> **FIXED — 1ee3ecc.** skip hoisted.
 **counterCadenceService.js:534** · lens `cadence-drain-blast` · no dissent
 
 **Scenario.** Midday pass, 200+ rvm due (MIDDAY_CADENCE_MAX_DISPATCHES default 200). The rvm shaper allows ~40 tokens/15min (baseTokens 20, maxTokens 40). Round 1: 40 sent, 160 rate-limited. dispatchForLead returns those as {ok:false, result:{skipped:true, reason:'rate-limited', rateLimit}}, but dispatchCounterCadenceItem returns `{ok:false, item, result}` WITHOUT hoisting the nested skipped flag, so runCounterCadenceSweep's `failed` filter (`!entry.ok && !entry.skipped`) counts all 160 as failures. Each 'failure' writes recordCounterCadenceFailure: $inc cadenceState.failedByChannel.rvm, currentStage 'rvm-counter-failed', plus a workflow-stage 'failed' row — for what was correct pacing. deferUntil (~22s deficit) expires between rounds, so rounds 2-20 re-select and re-'fail' the same leads: one attempt accumulates thousands of phantom failure writes to send ~40-116 rvms. drained ends false, the factory throws 'did not drain — N failure(s)', retries 3x (5-min gaps refill ~13 tokens each), then steps past with the task marked failed. Outcome: every day the rvm backlog exceeds ~40, the midday cadence task reports failure, leads accrue bogus failedByChannel counts and 'rvm-counter-failed' stages, and workflow events get thousands of junk rows — while the actual chain advances only at the shaper's trickle.
@@ -98,6 +169,8 @@ contained findings that did not survive verification.
 
 
 ## [HIGH] isFactComplete is fed a queue-rollup range object, so the stored-rollup cache gate is always false and complete data is withheld
+
+> **FIXED — d178323.** the range's own computed gate.
 **reportComposerService.js:780** · lens `nightly-and-render-seams` · no dissent
 
 **Scenario.** A range report longer than QUEUE_DAY_LOOP_MAX (7 days, e.g. a July monthly) with every day present in DailyQueueRollup: line 772 sets `stored = await readQueueRange({ from, to })`, whose coverage is {daysRequested, daysStored, missing, partialDays, unavailableDays, legacyDays, complete} (queueRollupService.js:255-266) — no capturedSections, no sectionErrors, no callProjection. isFactComplete (dailyReportFactService.js:99-106) computes `captured = new Set(fact.coverage?.capturedSections || [])` (empty) then `core.every((id) => captured.has(id))` (false) and `fact.coverage?.callProjection === "complete"` (undefined), so it returns false for EVERY possible readQueueRange result. The `if (isFactComplete(stored))` branch at :780 ("queue counts from N stored nightly rollup(s) — RingCentral not called") is unreachable dead code; a fully-covered range falls into the `daysStored > 0` branch at :782, which sets material.queueUnavailable = "only 30 of 30 day(s) captured" (:787) and advises INCOMPLETE (:796). Downstream, queueUnavailable makes reportBlocksService blank the call columns: `mailReadable = mailApplies && spendKnown && !queueUnavailable` (:486-487), `inboundCell = (x) => (d.queueUnavailable ? "—" : x.inbound)` (:673), and the work block prints "CALL DATA UNAVAILABLE for this range" (:2047-2049). Net: every long-range report renders complete stored queue data as unavailable, with a self-contradictory reason string.
@@ -106,6 +179,8 @@ contained findings that did not survive verification.
 
 
 ## [HIGH] Lease-renewal test is tautological — deleting the renewal passes 26/26
+
+> **FIXED — 055a9a9.** 3 real tests; mutation now fails 5.
 **passRuntime.test.js:398** · lens `test-mutation` · no dissent
 
 **Scenario.** PROVEN BY MUTATION: removing `[base.claimedAt]: at` from advancePass's $set (apps/control-plane/src/services/passRuntimeFactory.js:114) — the exact audit fix this test exists to pin — leaves all 26 tests green. In production that mutation means the lease is fixed at claim time again: a pass whose tasks honestly exceed 45 minutes is reclaimed mid-write by a second process and the day runs twice (or, with real Mongo ms-equality, every multi-task day aborts CURSOR_LOST after task 1).
@@ -114,6 +189,8 @@ contained findings that did not survive verification.
 
 
 ## [MEDIUM] Bridge-returned `failed` is never retried by anything — the drain selects only `pending`, contradicting the model's own 'safe to retry' contract
+
+> **FIXED — 477f175.** retryable flag; drain selects it.
 **jiraWebhook.js:281** · lens `jira-claim-machine` · no dissent
 
 **Scenario.** Flag armed. ASSIGNMENT-2200 is valid, verified, unheld. createTask hits one transient 20s timeout (Logics POSTs get timeoutMs 20000, retries 0 — logicsClient.js:107-108); bridgeJiraIssue catches it and returns a `failed` decision (jiraTaskBridgeService.js:407-412); recordLink parks the row as `failed`. Jira already received its 200 (sent before the bridge ran, jiraWebhook.js:365), so no webhook redelivery ever comes; the drain's query never selects `failed`; nobody edits the issue. The Logics task silently never exists and nobody is notified — recovery requires a human noticing in /links and replaying. Same terminal-parking applies to a thrown bridge error in the webhook path (unreadable open-task window): the catch records `failed`, despite the comment at jiraWebhook.js:122 claiming the throw lands in a retryable state.
@@ -122,6 +199,8 @@ contained findings that did not survive verification.
 
 
 ## [MEDIUM] attempts is a lifetime counter — takeover never resets it and every terminal write increments it, so successful skip cycles consume the drain's crash-recovery budget
+
+> **FIXED — 477f175.** drain spends drainAttempts.
 **jiraWebhook.js:249** · lens `jira-claim-machine` · no dissent
 
 **Scenario.** Dark mode. An issue is edited 4 times; each cycle is claim/takeover then recordLink skipped 'dry run — nothing written', and each recordLink $incs attempts: 1 (insert default) + 4 = 5. Fifth edit: takeover succeeds (attempts still 5 — the takeover $set carries no reset), then the process restarts before the terminal write. The drain finds the stale pending row and at line 295 (`Number(claim.attempts) >= maxAttempts`) immediately writes `failed` with reason 'drain gave up after 5 attempt(s)' — the drain made ZERO redrives; the crash-recovery machinery (claim + snapshot + drain) is denied precisely on the most-edited issues, and the recorded reason misstates what happened. Additionally each real drain redrive costs 2 attempts (CAS $inc at line 306 plus recordLink $inc at line 197), so even a clean pending row gets at most 2 redrives from a nominal budget of 5.
