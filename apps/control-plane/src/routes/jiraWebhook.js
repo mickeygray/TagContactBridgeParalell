@@ -181,7 +181,32 @@ function buildDeps({ logger } = {}) {
 
     findLink: (jiraKey) => JiraTaskLink.findById(jiraKey).lean(),
 
-    recordLink: async (link) => {
+    /**
+     * Do we still own this claim? Asked immediately before the irreversible
+     * create, so a dispossessed run aborts instead of making a second task.
+     *
+     * This narrows the window rather than closing it — the destination has no
+     * idempotency key, so a true fence is impossible there. Combined with the
+     * heartbeat below and the bounded HTTP body read, the remaining window is
+     * one round trip rather than the ten minutes it used to be.
+     */
+    stillOwnClaim: async (jiraKey, claimToken) => {
+      if (!claimToken) return true;
+      const row = await JiraTaskLink.findById(jiraKey).select({ claimToken: 1 }).lean();
+      return Boolean(row) && row.claimToken === claimToken;
+    },
+
+    /** Keep a long-running claim fresh so a LIVE holder is never declared stale. */
+    touchClaim: async (jiraKey, claimToken) => {
+      if (!claimToken) return false;
+      const row = await JiraTaskLink.findOneAndUpdate(
+        { _id: jiraKey, claimToken, outcome: "pending" },
+        { $set: { lastAttemptAt: new Date() } },
+      );
+      return Boolean(row);
+    },
+
+    recordLink: async (link, { claimToken = null } = {}) => {
       const { jiraKey, payload, ...rest } = link;
       // `created` IS TERMINAL. Without this guard, the bridge's own
       // "already created -> skipped" decision overwrote the stored `created`
@@ -192,6 +217,14 @@ function buildDeps({ logger } = {}) {
       const query = rest.outcome === "created"
         ? { _id: jiraKey }
         : { _id: jiraKey, outcome: { $ne: "created" } };
+      // FENCE. A writer that no longer owns the claim must not land its
+      // terminal state. The webhook's catch block used to stamp `failed` over
+      // a claim the drain had already taken and was mid-create on — which both
+      // misattributed the row and, because `failed` is takeover-eligible,
+      // opened the door to a duplicate create. `created` is exempt: an
+      // irreversible task that DOES exist must always be recordable, whoever
+      // won the race to make it.
+      if (claimToken && rest.outcome !== "created") query.claimToken = claimToken;
       await JiraTaskLink.findOneAndUpdate(
         query,
         { $set: { ...rest, lastAttemptAt: new Date() }, $inc: { attempts: 1 } },
@@ -221,13 +254,16 @@ function buildDeps({ logger } = {}) {
       // terminal record leaves a job the drain can actually FINISH rather than
       // a tombstone that says only that work once existed.
       const snapshot = issue ? { key: issue.key, fields: issue.fields || {} } : null;
+      const claimToken = `${Date.now().toString(36)}-${crypto.randomBytes(8).toString("hex")}`;
       try {
         await JiraTaskLink.create({
           _id: jiraKey, outcome: "pending", trigger,
           reason: "claimed — bridge decision in flight",
           issueSnapshot: snapshot,
+          claimToken,
+          retryable: false,
         });
-        return { ok: true };
+        return { ok: true, claimToken };
       } catch (error) {
         if (Number(error?.code) !== 11000) throw error;
       }
@@ -247,11 +283,16 @@ function buildDeps({ logger } = {}) {
         {
           $set: {
             outcome: "pending", trigger, lastAttemptAt: new Date(), reason: "re-claimed",
+            // A fresh token dispossesses the previous holder: any write it
+            // still has in flight now fails its fence.
+            claimToken,
             ...(snapshot ? { issueSnapshot: snapshot } : {}),
           },
         },
       );
-      return taken ? { ok: true } : { ok: false, reason: "lost the re-claim race" };
+      return taken
+        ? { ok: true, claimToken }
+        : { ok: false, reason: "lost the re-claim race" };
     },
   };
 }
@@ -278,39 +319,71 @@ async function drainStaleJiraClaims({
   bridge = bridgeJiraIssue,
 } = {}) {
   const cutoff = new Date(Date.now() - staleMs);
-  const stuck = await Model.find({ outcome: "pending", lastAttemptAt: { $lt: cutoff } })
-    .sort({ lastAttemptAt: 1 }).limit(limit).lean();
+  // PENDING **and** RETRYABLE-FAILED. A pending row past the window is a crash;
+  // a retryable failure is a transient Logics reject that nothing else will
+  // ever pick up — the webhook already returned its 200, so no redelivery is
+  // coming. Selecting only `pending` left every such row parked forever,
+  // contradicting the model's own "safe to retry".
+  const stuck = await Model.find({
+    lastAttemptAt: { $lt: cutoff },
+    $or: [{ outcome: "pending" }, { outcome: "failed", retryable: true }],
+  }).sort({ lastAttemptAt: 1 }).limit(limit).lean();
   const out = { examined: stuck.length, redriven: 0, exhausted: 0, unrecoverable: 0, errors: 0 };
 
   for (const claim of stuck) {
     try {
       if (!claim.issueSnapshot?.key) {
         await Model.updateOne(
-          { _id: claim._id, outcome: "pending", lastAttemptAt: claim.lastAttemptAt },
-          { $set: { outcome: "failed", reason: "pending with no snapshot — replay manually with the issue payload" } },
+          { _id: claim._id, outcome: claim.outcome, lastAttemptAt: claim.lastAttemptAt },
+          {
+            $set: {
+              outcome: "failed",
+              retryable: false,
+              reason: "pending with no snapshot — replay manually with the issue payload",
+            },
+          },
         );
         out.unrecoverable += 1;
         continue;
       }
-      if (Number(claim.attempts) >= maxAttempts) {
+      // The DRAIN's budget, not the row's lifetime write count. `attempts`
+      // increments on every write including ordinary skip cycles, so a
+      // much-edited issue used to exhaust the crash-recovery budget without
+      // this ever having re-driven it once.
+      if (Number(claim.drainAttempts || 0) >= maxAttempts) {
         await Model.updateOne(
-          { _id: claim._id, outcome: "pending", lastAttemptAt: claim.lastAttemptAt },
-          { $set: { outcome: "failed", reason: `drain gave up after ${claim.attempts} attempt(s)` } },
+          { _id: claim._id, outcome: claim.outcome, lastAttemptAt: claim.lastAttemptAt },
+          {
+            $set: {
+              outcome: "failed",
+              retryable: false,
+              reason: `drain gave up after ${claim.drainAttempts} re-drive(s)`,
+            },
+          },
         );
         out.exhausted += 1;
         continue;
       }
-      // CAS the claim to NOW so a concurrent delivery (or second drain) loses.
+      // CAS the claim to NOW with a FRESH TOKEN, so a concurrent delivery (or a
+      // second drain) both loses the race and fails its fence on any write it
+      // still has in flight.
+      const claimToken = `${Date.now().toString(36)}-${crypto.randomBytes(8).toString("hex")}`;
       const taken = await Model.findOneAndUpdate(
-        { _id: claim._id, outcome: "pending", lastAttemptAt: claim.lastAttemptAt },
-        { $set: { lastAttemptAt: new Date(), reason: "re-driven by the claim drain" }, $inc: { attempts: 1 } },
+        { _id: claim._id, outcome: claim.outcome, lastAttemptAt: claim.lastAttemptAt },
+        {
+          $set: {
+            outcome: "pending", claimToken, retryable: false,
+            lastAttemptAt: new Date(), reason: "re-driven by the claim drain",
+          },
+          $inc: { drainAttempts: 1 },
+        },
       );
       if (!taken) continue;
 
       const decision = await bridge({
-        issue: claim.issueSnapshot, deps, apply, trigger: "claim-drain",
+        issue: claim.issueSnapshot, deps, apply, trigger: "claim-drain", claimToken,
       });
-      await deps.recordLink(decision);
+      await deps.recordLink(decision, { claimToken });
       out.redriven += 1;
       logger?.info?.("jira.claim_drain.redriven", { key: claim._id, outcome: decision.outcome });
     } catch (error) {
@@ -376,8 +449,9 @@ function createJiraWebhookRouter(auth, runtime = {}) {
         // until somebody turns it on deliberately.
         apply: enabled(),
         trigger: event,
+        claimToken: claim.claimToken,
       });
-      await deps.recordLink(decision);
+      await deps.recordLink(decision, { claimToken: claim.claimToken });
       logger?.info?.("jira.webhook.bridged", {
         key: issue.key, outcome: decision.outcome, tenant: decision.tenant || null,
         subject: decision.subject || null, taskId: decision.logicsTaskId || null,
@@ -412,10 +486,13 @@ function createJiraWebhookRouter(auth, runtime = {}) {
         key: issue.key, error: String(error.message).slice(0, 200),
       });
       try {
+        // Fenced on the claim: if the drain took this issue over while we were
+        // stalled, our failure is not the current truth and must not land.
+        // Retryable, because a thrown bridge means no task was created.
         await deps.recordLink({
-          jiraKey: issue.key, outcome: "failed",
+          jiraKey: issue.key, outcome: "failed", retryable: true,
           reason: String(error.message).slice(0, 200), trigger: event,
-        });
+        }, { claimToken: claim.claimToken });
       } catch { /* the log above is the record of last resort */ }
     }
   });
@@ -452,8 +529,9 @@ function createJiraWebhookRouter(auth, runtime = {}) {
       }
       const decision = await bridgeJiraIssue({
         issue, deps, apply: req.query.apply === "true" && enabled(), trigger: "replay",
+        claimToken: claim.claimToken,
       });
-      await deps.recordLink(decision);
+      await deps.recordLink(decision, { claimToken: claim.claimToken });
       return res.json({ ok: true, decision });
     } catch (error) {
       return res.status(error.status || 500).json(toErrorResponse(error));

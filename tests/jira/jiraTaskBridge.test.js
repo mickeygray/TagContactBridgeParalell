@@ -429,15 +429,19 @@ test("the drain gives up after its attempt budget — terminally, with a reason"
   const updates = [];
   const Model = {
     find: () => ({ sort: () => ({ limit: () => ({ lean: async () => [
-      { _id: "ASSIGNMENT-7003", outcome: "pending", attempts: 5, lastAttemptAt: stale,
-        issueSnapshot: { key: "ASSIGNMENT-7003", fields: {} } },
+      // drainAttempts, NOT attempts. `attempts` counts every write to the row
+      // including ordinary skip cycles, so a much-edited issue used to exhaust
+      // the crash-recovery budget without the drain re-driving it even once.
+      { _id: "ASSIGNMENT-7003", outcome: "pending", attempts: 12, drainAttempts: 5,
+        lastAttemptAt: stale, issueSnapshot: { key: "ASSIGNMENT-7003", fields: {} } },
     ] }) }) }),
     updateOne: async (...a) => { updates.push(a); return { matchedCount: 1 }; },
     findOneAndUpdate: async () => null,
   };
   const out = await drainStaleJiraClaims({ deps: { recordLink: async () => {} }, apply: false, Model });
   assert.equal(out.exhausted, 1);
-  assert.match(updates[0][1].$set.reason, /gave up after 5/);
+  assert.match(updates[0][1].$set.reason, /gave up after 5 re-drive/);
+  assert.equal(updates[0][1].$set.retryable, false, "a give-up is terminal");
 });
 
 test("a lost CAS means another delivery owns it — the drain walks away", async () => {
@@ -471,4 +475,114 @@ test("the replay route goes through the SAME claim gate as the webhook", () => {
   const bridge = replay.indexOf("bridgeJiraIssue({");
   assert.ok(claim > 0 && bridge > 0 && claim < bridge, "claim before bridge, in replay too");
   assert.match(replay.slice(0, bridge), /status\(409\)/, "a refused claim is a 409, not a second create");
+});
+
+// ── THE FENCE (adversarial pass: two HIGH ownership gaps) ──────────────────
+
+test("the bridge ABORTS before creating if the claim moved under it", async () => {
+  // Everything up to createTask is reversible; that call is not — Logics tasks
+  // are create-only. A holder whose response stalled past the stale window
+  // could resume after the drain took over and create a SECOND un-deletable
+  // task on a live client case.
+  const deps = fakeDeps({ stillOwnClaim: async () => false });
+  const decision = await bridgeJiraIssue({
+    issue: issueOf({ key: "ASSIGNMENT-8001" }),
+    deps,
+    apply: true,
+    claimToken: "token-we-no-longer-hold",
+  });
+  assert.equal(deps.created.length, 0, "a dispossessed run must NOT create");
+  assert.equal(decision.outcome, "skipped");
+  assert.match(decision.reason, /lost the claim/);
+});
+
+test("the bridge proceeds when the claim is still ours", async () => {
+  const deps = fakeDeps({ stillOwnClaim: async () => true });
+  const decision = await bridgeJiraIssue({
+    issue: issueOf({ key: "ASSIGNMENT-8002" }),
+    deps,
+    apply: true,
+    claimToken: "token-we-hold",
+  });
+  assert.equal(deps.created.length, 1);
+  assert.equal(decision.outcome, "created");
+});
+
+test("recordLink FENCES a non-created write on the claim token", () => {
+  // The webhook's catch used to stamp terminal `failed` over a claim the drain
+  // had taken and was mid-create on — misattributing the row and, because
+  // `failed` is takeover-eligible, opening the door to a duplicate create.
+  const src = require("node:fs").readFileSync(
+    require.resolve("../../apps/control-plane/src/routes/jiraWebhook"), "utf8",
+  );
+  const record = src.slice(src.indexOf("recordLink: async"), src.indexOf("claimIssue: async"));
+  assert.match(record, /if \(claimToken && rest\.outcome !== "created"\) query\.claimToken = claimToken;/,
+    "a non-created write must CAS on the token");
+  // `created` stays exempt: an irreversible task that DOES exist must always be
+  // recordable, whoever won the race to make it.
+  assert.match(record, /rest\.outcome !== "created"/);
+});
+
+test("every write path hands recordLink its token", () => {
+  const src = require("node:fs").readFileSync(
+    require.resolve("../../apps/control-plane/src/routes/jiraWebhook"), "utf8",
+  );
+  // A window after each call site, rather than balanced-paren matching: the
+  // catch-block call spans lines and contains its own inner parens.
+  const sites = [...src.matchAll(/deps\.recordLink\(/g)].map((m) => m.index);
+  assert.ok(sites.length >= 4, `expected webhook, catch, replay and drain — found ${sites.length}`);
+  for (const at of sites) {
+    const window = src.slice(at, at + 320);
+    const upToStatement = window.slice(0, window.indexOf(";") + 1 || window.length);
+    assert.match(upToStatement, /claimToken/,
+      `an unfenced recordLink call: ${upToStatement.slice(0, 100)}`);
+  }
+});
+
+test("a claim mints a token, and a takeover mints a NEW one", () => {
+  const src = require("node:fs").readFileSync(
+    require.resolve("../../apps/control-plane/src/routes/jiraWebhook"), "utf8",
+  );
+  const claim = src.slice(src.indexOf("claimIssue: async"), src.indexOf("drainStaleJiraClaims"));
+  assert.match(claim, /const claimToken = /, "a fresh token per claim");
+  assert.match(claim, /return \{ ok: true, claimToken \}/, "the caller needs it to fence with");
+  // The takeover writes the new token, dispossessing the previous holder.
+  const takeover = claim.slice(claim.indexOf("skipped / failed / stale-pending"));
+  assert.match(takeover, /claimToken,/);
+  const JiraTaskLink = require("../../packages/shared-models/src/JiraTaskLink");
+  assert.ok(JiraTaskLink.schema.path("claimToken"), "declared on the strict schema");
+  assert.ok(JiraTaskLink.schema.path("drainAttempts"));
+  assert.ok(JiraTaskLink.schema.path("retryable"));
+});
+
+test("a retryable failure IS re-driven; a give-up is not", async () => {
+  // Nothing re-drove a `failed` row: the webhook already returned its 200 so no
+  // redelivery comes, and the drain selected only `pending`. A transient Logics
+  // timeout parked forever, despite the model calling `failed` safe to retry.
+  const { drainStaleJiraClaims } = require("../../apps/control-plane/src/routes/jiraWebhook");
+  let queried = null;
+  const Model = {
+    find: (q) => { queried = q; return { sort: () => ({ limit: () => ({ lean: async () => [] }) }) }; },
+    updateOne: async () => ({ matchedCount: 1 }),
+    findOneAndUpdate: async () => null,
+  };
+  await drainStaleJiraClaims({ deps: { recordLink: async () => {} }, apply: false, Model });
+  const branches = JSON.stringify(queried.$or);
+  assert.match(branches, /"outcome":"pending"/);
+  assert.match(branches, /"retryable":true/, "a retryable failure must be selectable");
+  assert.doesNotMatch(branches, /"outcome":"created"/, "created is terminal, never re-driven");
+});
+
+test("a bridge-thrown Logics failure is marked retryable", async () => {
+  const decision = await bridgeJiraIssue({
+    issue: issueOf({ key: "ASSIGNMENT-8003" }),
+    deps: fakeDeps({
+      stillOwnClaim: async () => true,
+      createTask: async () => { throw new Error("Logics 504"); },
+    }),
+    apply: true,
+    claimToken: "t",
+  });
+  assert.equal(decision.outcome, "failed");
+  assert.equal(decision.retryable, true, "no task exists, so trying again is safe");
 });

@@ -289,7 +289,9 @@ function alreadyOpen(subject, openTasks) {
  * @param {Function} deps.recordLink       (link) -> void
  * @param {boolean}  apply                 false leaves Logics untouched
  */
-async function bridgeJiraIssue({ issue, deps, apply = false, trigger = "manual", now = Date.now() }) {
+async function bridgeJiraIssue({
+  issue, deps, apply = false, trigger = "manual", now = Date.now(), claimToken = null,
+}) {
   const key = issue?.key;
   if (!key) return { outcome: "skipped", reason: "no issue key" };
   const f = issue.fields || {};
@@ -396,6 +398,26 @@ async function bridgeJiraIssue({ issue, deps, apply = false, trigger = "manual",
     });
   }
 
+  // LAST CHECK BEFORE THE IRREVERSIBLE ACT.
+  //
+  // Logics tasks are create-only — no update route, no delete route — so a
+  // duplicate has to be removed by hand from the back office. Everything up to
+  // here is reversible; this call is not. If the claim moved while we were
+  // reading Logics (a stalled response, a slow dedupe sweep), the new owner is
+  // doing this work now and we must not do it twice.
+  //
+  // This narrows the window to one round trip rather than closing it: the
+  // destination offers no idempotency key, so no fence can be perfect there.
+  if (claimToken && typeof deps.stillOwnClaim === "function") {
+    const mine = await deps.stillOwnClaim(key, claimToken);
+    if (!mine) {
+      return done("skipped", {
+        tenant: where.tenant, caseId: parsed.caseId, subject,
+        reason: "lost the claim before creating — another delivery owns this issue",
+      });
+    }
+  }
+
   try {
     const res = await deps.createTask(where.tenant, payload);
     const body = res?.Data ?? res?.data ?? res;
@@ -405,8 +427,12 @@ async function bridgeJiraIssue({ issue, deps, apply = false, trigger = "manual",
       logicsTaskId: taskId, userIds: payload.UserID, userNames: who.users.map((u) => u.name),
     });
   } catch (error) {
+    // RETRYABLE. Logics rejected or timed out; the task does not exist and
+    // trying again is safe. The drain selects on this — without it a transient
+    // failure parked forever, because nothing re-drives a `failed` row.
     return done("failed", {
       tenant: where.tenant, caseId: parsed.caseId, subject,
+      retryable: true,
       reason: String(error.message).slice(0, 200),
     });
   }

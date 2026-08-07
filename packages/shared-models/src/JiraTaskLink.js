@@ -69,6 +69,42 @@ const jiraTaskLinkSchema = new mongoose.Schema(
     attempts: { type: Number, default: 1, min: 0 },
     lastAttemptAt: { type: Date, default: Date.now },
 
+    /**
+     * THE FENCING TOKEN — who currently owns this issue.
+     *
+     * Minted fresh by every successful claim or takeover. Every later write
+     * CASes on it, so a writer that lost ownership loses its write too.
+     *
+     * Without it the claim was a lease with no fence: the takeover CAS proved
+     * only that the previous holder had not WRITTEN recently, not that it was
+     * dead. A live-but-stalled holder could resume after the drain took over
+     * and both would proceed — and against a create-only destination that is a
+     * second Logics task nobody can delete. It also let the loser's catch block
+     * stamp terminal `failed` over the winner's in-flight claim.
+     */
+    claimToken: { type: String, default: null },
+
+    /**
+     * The DRAIN's own attempt budget, separate from `attempts`.
+     *
+     * `attempts` counts every write to the row, including successful skip
+     * cycles from ordinary issue edits — so a much-edited issue exhausted the
+     * crash-recovery budget without the drain ever having run once. This
+     * counts only re-drives, which is what the budget is actually for.
+     */
+    drainAttempts: { type: Number, default: 0, min: 0 },
+
+    /**
+     * Is this terminal state worth another go?
+     *
+     * A `failed` from a transient Logics timeout or an unreadable dedupe window
+     * is retryable; a `failed` because the drain gave up is not. Without the
+     * distinction the drain could only select `pending`, so every webhook-path
+     * failure parked forever with nothing to re-drive it — despite the model's
+     * own comment calling `failed` safe to retry.
+     */
+    retryable: { type: Boolean, default: false },
+
     // The webhook's issue payload, stored AT CLAIM TIME. Without it a pending
     // claim was a tombstone: the crash the claim exists to survive also lost
     // the only copy of the work, so "pending" could never become anything —
