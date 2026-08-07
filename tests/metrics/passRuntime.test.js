@@ -9,7 +9,7 @@ const { test } = require("node:test");
 const assert = require("node:assert/strict");
 
 const {
-  CURSOR_LOST, createPassRuntime, isPacificBusinessDay, pacificDayKey,
+  CURSOR_LOST, advancePass, createPassRuntime, isPacificBusinessDay, pacificDayKey,
 } = require("../../apps/control-plane/src/services/passRuntimeFactory");
 const {
   createMorningPassRuntime,
@@ -72,7 +72,12 @@ function fakeModel() {
       const cursor = doc?.passes?.[passKey];
       const wanted = query[`passes.${passKey}.claimedAt`];
       // The claim must still be ours.
-      if (!cursor || String(cursor.claimedAt) !== String(wanted)) return { matchedCount: 0 };
+      // Compare by INSTANT. String(Date) is second-resolution, which made this
+      // fake accept a stale stamp that real Mongo would reject — a fake more
+      // permissive than production hides exactly the races it is here to model.
+      const same = cursor && wanted
+        && new Date(cursor.claimedAt).getTime() === new Date(wanted).getTime();
+      if (!same) return { matchedCount: 0 };
       if (cursor.completedAt) return { matchedCount: 0 };
       for (const [path, value] of Object.entries(update.$set)) {
         cursor[path.split(".")[2]] = value;
@@ -384,20 +389,80 @@ test("an all-lock-busy night is not treated as a total failure", async () => {
   assert.equal(out.retrying, undefined);
 });
 
-test("advancing the cursor RENEWS the lease", async () => {
+test("advancePass RENEWS the lease and returns the new stamp", async () => {
   // The lease was fixed at claim time, so a pass whose tasks honestly took
-  // longer than 45 minutes in total could be reclaimed mid-write. Renewal on
-  // every advance means a takeover needs 45 minutes of silence, not of work.
+  // longer than the lease could be reclaimed mid-write. Renewal on every
+  // advance means a takeover needs that long of SILENCE, not of work.
+  //
+  // The previous version of this test was tautological: its assertion reduced
+  // to `(claimedAt >= completedAt) === false || nextTaskIndex === 3`, and the
+  // escape clause was guaranteed by the very next line. Deleting the renewal
+  // from advancePass left it green. This one asserts the stamp MOVED.
   const model = fakeModel();
-  const rt = build([task("a"), task("b"), task("c")]);
-  await rt.runOnce({ force: true, Model: model });
-  const cursor = model.docs.get(pacificDayKey()).passes.test;
-  assert.ok(cursor.completedAt, "the day completed");
-  // The claim stamp at completion must be NEWER than the one taken at claim
-  // time — i.e. it moved during the pass.
-  assert.ok(new Date(cursor.claimedAt) >= new Date(cursor.completedAt) === false
-    || cursor.nextTaskIndex === 3, "sanity");
-  assert.equal(cursor.nextTaskIndex, 3);
+  const dateKey = pacificDayKey();
+  const claimedAt = new Date("2026-08-06T15:00:00.000Z");
+  model.docs.set(dateKey, { dateKey, passes: { test: { claimedAt, nextTaskIndex: 0 } } });
+
+  const renewed = await advancePass("test", dateKey, claimedAt, 1, { planned: 0 }, {
+    at: new Date("2026-08-06T15:20:00.000Z"), Model: model,
+  });
+
+  assert.ok(renewed instanceof Date, "the caller needs the new stamp to keep CASing with");
+  assert.equal(renewed.toISOString(), "2026-08-06T15:20:00.000Z");
+  const cursor = model.docs.get(dateKey).passes.test;
+  assert.equal(String(cursor.claimedAt), String(renewed),
+    "the STORED claim must move, or the lease is still measured from claim time");
+  assert.notEqual(String(cursor.claimedAt), String(claimedAt));
+});
+
+test("after a renewal the OLD stamp no longer owns the claim", async () => {
+  // The other half of the guarantee: renewal is only useful if the stale stamp
+  // stops working, so a dispossessed writer loses its next CAS.
+  const model = fakeModel();
+  const dateKey = pacificDayKey();
+  const claimedAt = new Date("2026-08-06T15:00:00.000Z");
+  model.docs.set(dateKey, { dateKey, passes: { test: { claimedAt, nextTaskIndex: 0 } } });
+
+  const renewed = await advancePass("test", dateKey, claimedAt, 1, {}, {
+    at: new Date("2026-08-06T15:20:00.000Z"), Model: model,
+  });
+  assert.ok(renewed);
+
+  const stale = await advancePass("test", dateKey, claimedAt, 2, {}, {
+    at: new Date("2026-08-06T15:40:00.000Z"), Model: model,
+  });
+  assert.equal(stale, null, "the old stamp must lose — that is what makes it a lease");
+});
+
+test("the pass loop ADOPTS each renewed stamp across every task", async () => {
+  // A loop that renewed the stored value but kept CASing with the original
+  // would lose its own claim on task two. Proven by watching the predicate.
+  const model = fakeModel();
+  const seen = [];
+  const realUpdate = model.updateOne.bind(model);
+  model.updateOne = async (query, update) => {
+    // toISOString, NOT String(): String(Date) renders to SECONDS, so two
+    // stamps milliseconds apart compare equal and the whole assertion goes
+    // blind. The same trap is why the fake's own CAS compares by getTime.
+    seen.push(new Date(query["passes.test.claimedAt"]).toISOString());
+    return realUpdate(query, update);
+  };
+  // Real elapsed time between tasks: three no-op tasks finish inside one
+  // millisecond, and renewals in the same millisecond are legitimately equal.
+  const slow = (key) => task(key, {
+    plan: async () => { await new Promise((r) => setTimeout(r, 4)); return [{ n: 1 }]; },
+  });
+  const rt = build([slow("a"), slow("b"), slow("c")]);
+  const out = await rt.runOnce({ force: true, Model: model });
+  assert.equal(out.ran, 3, "all three tasks ran");
+  assert.ok(seen.length >= 3);
+  // Three advances must each carry a distinct stamp. finishPass legitimately
+  // reuses the third — it is the same owner closing the day it just advanced —
+  // so the count is "at least three distinct", not "all distinct".
+  assert.ok(new Set(seen).size >= 3,
+    `each advance must CAS with its OWN renewed stamp; saw ${new Set(seen).size} distinct in ${seen.length}`);
+  assert.notEqual(seen[0], seen[seen.length - 1],
+    "the last CAS must not still be using the original claim stamp");
 });
 
 test("stop() waits for a running pass instead of abandoning it", async () => {
