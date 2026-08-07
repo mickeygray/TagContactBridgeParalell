@@ -336,24 +336,67 @@ async function listCounterCadenceCandidates({ domain, scanLimit = DEFAULT_SCAN_L
     .lean();
 }
 
+/**
+ * The claim filter — and it is the DAY GUARD, not just a mutex.
+ *
+ * The lock alone was never enough. A sweep materialises its due list up front
+ * (up to `limit` stale .lean() snapshots) and then dispatches over minutes, so
+ * between evaluation and dispatch another sender can complete the same item:
+ * the lock it took is UNSET by recordCounterCadenceTouch, and the second
+ * claimant then finds it free and sends the same template again. The evidence
+ * of the first send lives in fields the claim never looked at.
+ *
+ * With two daily senders live at once — which the documented cutover
+ * deliberately creates, morning pass armed while the gateway still has
+ * includeDaily true — that is a duplicate text or email to a real person, and
+ * it is INVISIBLE afterwards: both writes set the same absolute counter and the
+ * same batch key, so the row ends byte-identical to a single send.
+ *
+ * So the claim now asserts the state the DECISION rested on, and loses at the
+ * database if it moved:
+ *
+ *  - the counter has not already reached this template index. Expressed as
+ *    "not >= templateIndex" rather than "=== templateIndex - 1" on purpose:
+ *    getCounterCadenceCounters falls back to cadenceState/payloadSnapshot for
+ *    leads this service has never touched, so an equality CAS would refuse
+ *    their genuine first send. A missing field does not match $gte, so $not
+ *    passes exactly when nobody has sent this index or later.
+ *  - for a DAILY item, today's batch key is not already stamped for this
+ *    channel. dailyAlreadyTouched checks this at evaluation time; this is the
+ *    same predicate moved to the moment it can actually be enforced.
+ *
+ * The age-relative push needs no day key — it is bounded by the counter clause
+ * above, which is what already stops the sms-2/sms-3 pair double-firing.
+ */
+function buildCounterCadenceClaimFilter(item, now = new Date()) {
+  const channel = normalizeChannel(item.channel);
+  const claimUntilPath = `counterCadence.locks.${channel}.claimUntil`;
+  const filter = {
+    _id: item.lead._id,
+    active: true,
+    $or: [
+      { [claimUntilPath]: { $exists: false } },
+      { [claimUntilPath]: null },
+      { [claimUntilPath]: { $lte: now } },
+    ],
+    // Nobody has already sent this index or later.
+    [`cadenceCounters.${channel}`]: { $not: { $gte: Number(item.templateIndex) } },
+  };
+  if (String(item.reason || "") === "daily-time-of-day") {
+    filter[`counterCadence.lastDailyBatchKey.${channel}`] = { $ne: formatDateInZone(now) };
+  }
+  return filter;
+}
+
 async function claimCounterCadenceItem(item, {
   now = new Date(),
   claimTtlMs = CLAIM_TTL_MS,
   runKey = null,
 } = {}) {
   const channel = normalizeChannel(item.channel);
-  const claimUntilPath = `counterCadence.locks.${channel}.claimUntil`;
   const token = runKey || `counter:${item.domain}:${item.caseId}:${channel}:${Date.now()}`;
   return LeadCadence.findOneAndUpdate(
-    {
-      _id: item.lead._id,
-      active: true,
-      $or: [
-        { [claimUntilPath]: { $exists: false } },
-        { [claimUntilPath]: null },
-        { [claimUntilPath]: { $lte: now } },
-      ],
-    },
+    buildCounterCadenceClaimFilter(item, now),
     {
       $set: {
         [`counterCadence.locks.${channel}`]: {
@@ -827,6 +870,7 @@ async function drainCounterCadenceSweep({ maxRounds = 20, ...options } = {}) {
 }
 
 module.exports = {
+  buildCounterCadenceClaimFilter,
   CHAINS,
   DAY_OFFSETS,
   DAILY_START_INDEX,

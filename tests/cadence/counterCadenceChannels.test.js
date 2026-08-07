@@ -224,3 +224,126 @@ test("both passes call the DRAIN, not the single sweep", () => {
     assert.match(src, /drainCounterCadenceSweep/, `${mod} must drain`);
   }
 });
+
+// ── THE CLAIM IS THE DAY GUARD (adversarial pass, CRITICAL) ────────────────
+//
+// A sweep materialises its due list up front and dispatches over minutes. The
+// lock it takes is UNSET when a send completes, so a second sender arriving
+// later found it free and re-sent the same template — and afterwards the row is
+// byte-identical to a single send (same absolute counter, same batch key), so
+// the duplicate is invisible. With two daily senders live at once, which the
+// documented cutover deliberately creates, that is a duplicate text to a real
+// person.
+
+const { buildCounterCadenceClaimFilter } = require(
+  "../../packages/shared-services/src/counterCadenceService",
+);
+
+/** Enough of Mongo's matcher to evaluate the claim filter against a document. */
+const valueAt = (doc, path) => path.split(".").reduce((o, k) => (o == null ? o : o[k]), doc);
+function matches(filter, doc) {
+  return Object.entries(filter).every(([key, cond]) => {
+    if (key === "$or") return cond.some((c) => matches(c, doc));
+    const v = valueAt(doc, key);
+    if (cond === null || typeof cond !== "object") return v === cond;
+    if ("$exists" in cond) return (v !== undefined) === cond.$exists;
+    if ("$ne" in cond) return v !== cond.$ne;
+    if ("$lte" in cond) return v != null && v <= cond.$lte;
+    if ("$not" in cond) return !matches({ [key]: cond.$not }, doc);
+    if ("$gte" in cond) return v != null && v >= cond.$gte;
+    return false;
+  });
+}
+
+const NOW = new Date("2026-08-06T17:30:00Z"); // 10:30 PT
+const TODAY = "2026-08-06";
+const dailyItem = (over = {}) => ({
+  lead: { _id: "lead-1" }, domain: "TAG", caseId: 4242,
+  channel: "sms", templateIndex: 3, reason: "daily-time-of-day", ...over,
+});
+
+test("a lead already batched today for this channel CANNOT be claimed again", () => {
+  const filter = buildCounterCadenceClaimFilter(dailyItem(), NOW);
+  const alreadySent = {
+    _id: "lead-1", active: true,
+    cadenceCounters: { sms: 3 },
+    counterCadence: { lastDailyBatchKey: { sms: TODAY } },
+  };
+  assert.equal(matches(filter, alreadySent), false,
+    "the second sender must lose at the database, not re-send");
+});
+
+test("the lock being FREE is not enough — that was the whole defect", () => {
+  // recordCounterCadenceTouch $unsets the lock on a completed send, so the
+  // second claimant always finds it free. Only the counter and the day key
+  // carry the evidence that the work is done.
+  const filter = buildCounterCadenceClaimFilter(dailyItem(), NOW);
+  const lockFreeButSent = {
+    _id: "lead-1", active: true,
+    cadenceCounters: { sms: 3 },
+    counterCadence: { locks: {}, lastDailyBatchKey: { sms: TODAY } },
+  };
+  assert.equal(matches(filter, lockFreeButSent), false);
+});
+
+test("a lead that has NOT been sent today is still claimable", () => {
+  const filter = buildCounterCadenceClaimFilter(dailyItem(), NOW);
+  const due = {
+    _id: "lead-1", active: true,
+    cadenceCounters: { sms: 2 },
+    counterCadence: { lastDailyBatchKey: { sms: "2026-08-05" } },
+  };
+  assert.equal(matches(filter, due), true, "yesterday's key must not block today");
+});
+
+test("a LEGACY lead whose counter lives elsewhere keeps its first send", () => {
+  // getCounterCadenceCounters falls back to cadenceState/payloadSnapshot, so an
+  // equality CAS on cadenceCounters would refuse a genuine first send. A missing
+  // field does not match $gte, so $not passes.
+  const filter = buildCounterCadenceClaimFilter(dailyItem(), NOW);
+  const legacy = {
+    _id: "lead-1", active: true,
+    payloadSnapshot: { legacyCounters: { textsSent: 2 } },
+  };
+  assert.equal(matches(filter, legacy), true);
+});
+
+test("the counter clause alone stops a same-index double fire", () => {
+  // Belt and braces for the age-relative push, which carries no day key.
+  const filter = buildCounterCadenceClaimFilter(
+    dailyItem({ templateIndex: 2, reason: "text-2-age-relative" }), NOW,
+  );
+  assert.equal("counterCadence.lastDailyBatchKey.sms" in filter, false,
+    "an age-relative item needs no day key");
+  assert.equal(matches(filter, {
+    _id: "lead-1", active: true, cadenceCounters: { sms: 2 },
+  }), false, "sms-2 already sent — refuse");
+  assert.equal(matches(filter, {
+    _id: "lead-1", active: true, cadenceCounters: { sms: 1 },
+  }), true, "sms-1 sent, sms-2 due — allow");
+});
+
+test("the day guard is per CHANNEL — rvm at midday is not blocked by the morning sms", () => {
+  const filter = buildCounterCadenceClaimFilter(
+    dailyItem({ channel: "rvm", templateIndex: 1 }), NOW,
+  );
+  const morningRan = {
+    _id: "lead-1", active: true,
+    cadenceCounters: { sms: 3, email: 2 },
+    counterCadence: { lastDailyBatchKey: { sms: TODAY, email: TODAY } },
+  };
+  assert.equal(matches(filter, morningRan), true, "the split must still work");
+});
+
+test("claimCounterCadenceItem uses the guarded filter, not an inline one", () => {
+  const source = require("node:fs")
+    .readFileSync(require.resolve("../../packages/shared-services/src/counterCadenceService"), "utf8")
+    .replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
+  const fn = source.slice(source.indexOf("async function claimCounterCadenceItem"));
+  // Up to the NEXT top-level declaration. Not the first "\n}" — that one is the
+  // options destructure's closing brace, not the function's.
+  const next = fn.slice(1).search(/\n(async )?function /);
+  const body = next > 0 ? fn.slice(0, next) : fn;
+  assert.match(body, /buildCounterCadenceClaimFilter\(item, now\)/);
+  assert.doesNotMatch(body, /\$or:/, "the filter must not be rebuilt inline and drift from the guard");
+});
