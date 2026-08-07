@@ -146,6 +146,22 @@ const callRecoveryLeadSchema = new mongoose.Schema(
     // §7.4 — every state mutation is a versioned compare-and-set. Named `version`
     // rather than reusing mongoose's __v because we increment it deliberately on
     // business transitions, not on every save.
+    /**
+     * Do not re-consider this episode before this instant.
+     *
+     * Admission re-proves status, sale and DNC on EVERY pass, deliberately — a
+     * clean nightly snapshot cannot authorize a call this afternoon. But that
+     * only needs to be true at the moment of ADMITTING. A HELD episode is not
+     * being called, and re-proving it every 60-second tick meant the held head
+     * of the queue was re-read from Logics all day: a live getCaseInfo per
+     * episode per tick, admitting nothing, and starving the eligible episodes
+     * behind it because the walk never got past them.
+     *
+     * Stamped when a hold is recorded, cleared by the sweeps that change the
+     * inputs a hold depends on. `null` means consider immediately.
+     */
+    nextConsiderAt: { type: Date, default: null, index: true },
+
     version: { type: Number, required: true, default: 0, min: 0 },
   },
   { timestamps: true, minimize: false },

@@ -309,6 +309,27 @@ async function recordDncResult(episodeId, {
  * merging independent cursors by natural order, and a non-deterministic page
  * boundary silently drops or repeats rows under concurrent writes.
  */
+/**
+ * Push an episode's next consideration out, WITHOUT a state change.
+ *
+ * The transition path cannot carry this: an episode that is held and holds
+ * again does not transition, so the caller returns before stamping anything —
+ * which left the cooldown applying only to the FIRST hold and every repeat
+ * hold re-reading Logics on every tick, exactly the cost it exists to stop.
+ *
+ * No version check: this is a scheduling hint, not a state machine edge. Two
+ * writers agreeing to wait is not a conflict.
+ */
+async function deferConsideration(episodeId, until) {
+  if (!episodeId || !(until instanceof Date)) return { ok: false };
+  const result = await CallRecoveryLead.updateOne(
+    { episodeId: String(episodeId) },
+    { $set: { nextConsiderAt: until } },
+  );
+  const matched = result?.matchedCount ?? result?.n;
+  return { ok: matched == null ? true : Number(matched) === 1 };
+}
+
 async function listEpisodesForConsideration({
   states = ["eligible"],
   asOf = new Date(),
@@ -326,6 +347,15 @@ async function listEpisodesForConsideration({
   };
   if (domain) query.domain = String(domain).trim().toUpperCase();
   if (unlinkedOnly === true) query.linkedLeadDeliveryItemId = null;
+  // COOLDOWN. Without this a held episode stays in the listing forever and is
+  // re-admitted — a live Logics getCaseInfo apiece — on every tick, which both
+  // burns the provider all day and keeps the walk pinned to a head that can
+  // never advance. Missing/null means never held, so consider it now.
+  query.$or = [
+    { nextConsiderAt: { $exists: false } },
+    { nextConsiderAt: null },
+    { nextConsiderAt: { $lte: asOf } },
+  ];
   // Keyset pagination on the sort key itself — skip/limit would repeat rows as
   // the set mutates underneath the pass.
   if (after) query.episodeId = { $gt: String(after) };
@@ -433,6 +463,7 @@ module.exports = {
   transitionState,
   expireEpisode,
   recordDncResult,
+  deferConsideration,
   listEpisodesForConsideration,
   listDncCheckpointsDue,
   listExpiredEpisodes,

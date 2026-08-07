@@ -29,10 +29,16 @@ const real = require(MODEL_PATH);
 function makeFakeModel() {
   const rows = [];
   const match = (row, q) => Object.entries(q).every(([k, v]) => {
+    // Logical operators first — a matcher that treats "$or" as a FIELD NAME
+    // silently matches nothing, so the fake cannot express queries the
+    // repository really issues and the test goes blind rather than red.
+    if (k === "$or") return v.some((sub) => match(row, sub));
+    if (k === "$and") return v.every((sub) => match(row, sub));
     const actual = k.includes(".")
       ? k.split(".").reduce((o, part) => (o == null ? o : o[part]), row)
       : row[k];
     if (v && typeof v === "object" && !(v instanceof Date) && !Array.isArray(v)) {
+      if ("$exists" in v) return (actual !== undefined) === v.$exists;
       if ("$in" in v) return v.$in.includes(actual);
       if ("$nin" in v) return !v.$nin.includes(actual);
       if ("$ne" in v) return actual !== v.$ne;
@@ -98,7 +104,28 @@ function makeFakeModel() {
       const snapshot = { ...row };
       return Object.assign(Promise.resolve(snapshot), { lean: async () => ({ ...snapshot }) });
     },
-    async updateOne() { return { acknowledged: true }; },
+    // A REAL updateOne. It used to return acknowledged:true and write nothing,
+    // so any repository function built on it appeared to succeed while the
+    // fake's rows never moved — a test could then assert an effect that had
+    // not happened, or (as here) fail to observe one that had.
+    async updateOne(q, update = {}) {
+      const hits = rows.filter((r) => match(r, q));
+      for (const row of hits) {
+        for (const [path, value] of Object.entries(update.$set || {})) {
+          if (!path.includes(".")) { row[path] = value; continue; }
+          const parts = path.split(".");
+          const leaf = parts.pop();
+          let node = row;
+          for (const part of parts) { node[part] = node[part] || {}; node = node[part]; }
+          node[leaf] = value;
+        }
+        for (const path of Object.keys(update.$unset || {})) delete row[path];
+        for (const [path, by] of Object.entries(update.$inc || {})) {
+          row[path] = (Number(row[path]) || 0) + Number(by);
+        }
+      }
+      return { acknowledged: true, matchedCount: hits.length, modifiedCount: hits.length };
+    },
     find(q) {
       let list = rows.filter((r) => match(r, q));
       const api = {
@@ -365,4 +392,69 @@ test("the state machine matches the contract exactly", async () => {
   // Absorbing states have no exits at all — that is what makes them absorbing.
   assert.deepEqual(real.TRANSITIONS.terminal, []);
   assert.deepEqual(real.TRANSITIONS.expired, []);
+});
+
+test("a held episode's cooldown keeps it OUT of the consideration listing", async () => {
+  // This is what stops a held head starving the episodes behind it, and it
+  // replaced paging past that head every tick. Each episode on a page costs a
+  // live Logics getCaseInfo, so re-reading a permanent head all day was both a
+  // provider burn and a walk that could never advance.
+  const { repo, model } = loadRepo();
+  for (let i = 1; i <= 3; i += 1) {
+    await repo.recordQualifyingCall(CALL({ caseId: `case-${i}`, providerCallId: `CAL-${i}` }));
+    model._rows.at(-1).state = "eligible";
+  }
+  const asOf = new Date("2026-08-01T18:00:00Z");
+  assert.equal((await repo.listEpisodesForConsideration({ asOf })).length, 3);
+
+  // Hold the first two for an hour.
+  const [a, b] = model._rows;
+  await repo.deferConsideration(a.episodeId, new Date(asOf.getTime() + 3600000));
+  await repo.deferConsideration(b.episodeId, new Date(asOf.getTime() + 3600000));
+
+  const visible = await repo.listEpisodesForConsideration({ asOf });
+  assert.equal(visible.length, 1, "the held head must drop out");
+  assert.equal(visible[0].episodeId, model._rows[2].episodeId,
+    "and the episode BEHIND it becomes reachable");
+});
+
+test("a cooldown that has expired lets the episode be considered again", async () => {
+  const { repo, model } = loadRepo();
+  await repo.recordQualifyingCall(CALL({ caseId: "case-1", providerCallId: "CAL-1" }));
+  model._rows.at(-1).state = "eligible";
+  const asOf = new Date("2026-08-01T18:00:00Z");
+
+  await repo.deferConsideration(model._rows[0].episodeId, new Date(asOf.getTime() - 60000));
+  const visible = await repo.listEpisodesForConsideration({ asOf });
+  assert.equal(visible.length, 1, "a lapsed cooldown must not exclude forever");
+});
+
+test("an episode that was never held is considered immediately", async () => {
+  // Missing/null must mean "consider now", or the cooldown would silently
+  // exclude every episode that predates the field.
+  const { repo, model } = loadRepo();
+  await repo.recordQualifyingCall(CALL({ caseId: "case-1", providerCallId: "CAL-1" }));
+  model._rows.at(-1).state = "eligible";
+  delete model._rows[0].nextConsiderAt;
+  const asOf = new Date("2026-08-01T18:00:00Z");
+  assert.equal((await repo.listEpisodesForConsideration({ asOf })).length, 1);
+  model._rows[0].nextConsiderAt = null;
+  assert.equal((await repo.listEpisodesForConsideration({ asOf })).length, 1);
+});
+
+test("EVERY hold defers, including a repeat hold that does not transition", () => {
+  // The first cut stamped the cooldown inside transitionState, which returns
+  // early when the state does not change — so an episode already `held` that
+  // held again got no cooldown and went back to being re-read every tick,
+  // which is the entire cost the cooldown exists to remove.
+  const src = require("node:fs").readFileSync(
+    require.resolve("../../apps/control-plane/src/server"), "utf8",
+  );
+  const fn = src.slice(src.indexOf("async function persistCallRecoveryDecision"));
+  const body = fn.slice(0, fn.indexOf("\n  const leadDeliverySource"));
+  const defer = body.indexOf("deferConsideration");
+  const earlyReturn = body.indexOf("if (!target || target === current) return;");
+  assert.ok(defer > 0 && earlyReturn > 0, "both paths must exist");
+  assert.ok(defer < earlyReturn,
+    "the cooldown must be stamped BEFORE the no-transition early return");
 });

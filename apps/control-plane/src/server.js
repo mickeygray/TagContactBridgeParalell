@@ -2047,6 +2047,35 @@ async function startServer() {
     else if (decision.decision === "review") target = "review";
     else if (decision.decision === "hold" && ["awaiting_start", "eligible"].includes(current)) target = "held";
     else if (decision.decision === "admit" && ["awaiting_start", "held"].includes(current)) target = "eligible";
+    // THE COOLDOWN IS STAMPED FIRST, and independently of any transition.
+    //
+    // Re-proving a held episode every 60s costs a live Logics call and can only
+    // ever produce the same hold: the inputs a hold waits on — a DNC recheck, a
+    // status change, a contact window — move on their own schedule, not the
+    // tick's. The safety property is untouched, because admission still
+    // re-proves at the moment it ADMITS.
+    //
+    // Separate from transitionState deliberately. An episode that is already
+    // `held` and holds again does not transition, so the early return below
+    // would skip the stamp — leaving the cooldown to cover only the FIRST hold
+    // while every repeat re-read Logics on every tick, which is the whole cost
+    // this exists to remove.
+    //
+    // A retryable hold (an input we could not read) comes back soon; a settled
+    // one waits longer.
+    if (decision.decision === "hold") {
+      const cooldownMs = decision.retryable === true ? 5 * 60 * 1000 : 60 * 60 * 1000;
+      await callRecoveryLeadRepository.deferConsideration(
+        episode.episodeId, new Date(Date.now() + cooldownMs),
+      ).catch(() => ({ ok: false }));
+    } else if (decision.decision === "admit") {
+      // Admitted: it leaves the unlinked listing anyway, but clear the stamp so
+      // a later re-entry is considered immediately rather than inheriting an
+      // old hold's cooldown.
+      await callRecoveryLeadRepository.deferConsideration(episode.episodeId, new Date(0))
+        .catch(() => ({ ok: false }));
+    }
+
     if (!target || target === current) return;
     await callRecoveryLeadRepository.transitionState(episode.episodeId, {
       from: current,

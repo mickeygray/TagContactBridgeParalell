@@ -53,6 +53,16 @@ const CADENCE_KIND = "cadence";
 //                discriminator on the way back in.
 const RECOVERY_ID_PREFIX = "recovery:";
 
+/**
+ * How many recovery pages one tick may walk.
+ *
+ * Every episode on a page costs a live Logics getCaseInfo through
+ * resolveAdmissionInputs, so this is a PROVIDER budget, not a pagination
+ * detail. Kept small because the durable hold cooldown, not paging, is what
+ * stops a held head starving the episodes behind it.
+ */
+const RECOVERY_PAGE_WALK_LIMIT = 2;
+
 function decodeCursor(cursor) {
   if (!cursor) return { kind: CADENCE_KIND, inner: null };
   // In-memory callers (and tests) may still hand over the object shape.
@@ -197,20 +207,23 @@ function createCallRecoveryCompositeSource({
     const cadenceItems = Array.isArray(cadence?.items) ? cadence.items : [];
     if (!activation?.delivery || cadenceItems.length >= limit) return cadence;
 
-    // PAGE THROUGH THE HELD HEAD. This path has no durable cursor on purpose —
-    // holds must be re-evaluated every tick, and an admitted episode is linked
-    // on insert and drops out of the unlinked listing, so re-scanning from the
-    // top is self-truncating. But ONE page from the top is not: fifty held
-    // episodes at the head meant every tick read the same fifty holds, admitted
-    // nothing, and returned — later eligible episodes were never reached at
-    // all. So walk pages within the tick until the ask is filled or the
-    // listing is exhausted, bounded so a pathological backlog cannot eat the
-    // tick's wall clock.
+    // BOUNDED. A held episode now carries a cooldown (see
+    // CallRecoveryLead.nextConsiderAt), so the head drains out of the listing
+    // on its own and the walk reaches eligible episodes behind it without
+    // having to page past them every tick.
+    //
+    // The first cut of the starvation fix walked up to 20 pages inline. That
+    // traded starvation for a thundering herd: each episode costs a live Logics
+    // getCaseInfo, so a persistent held head meant up to a thousand provider
+    // calls per 60-second tick, admitting nothing — and callEndPulse runs this
+    // same walk while an agent waits for a refill. Two pages is enough to cross
+    // a short run of freshly-held episodes within one tick; the cooldown does
+    // the rest.
     const want = Math.max(1, limit - cadenceItems.length);
     const recoveryItems = [];
     let inner = null;
     let recoveryDone = false;
-    for (let page = 0; page < 20; page += 1) {
+    for (let page = 0; page < RECOVERY_PAGE_WALK_LIMIT; page += 1) {
       const recovery = await readRecoveryBatch({
         inner,
         limit: Math.max(1, want - recoveryItems.length),
