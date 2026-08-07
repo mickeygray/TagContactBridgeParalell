@@ -513,3 +513,39 @@ test("no fact at all is not complete", () => {
   assert.equal(service.isFactComplete(null), false);
   assert.equal(service.isFactComplete({}), false);
 });
+
+test("isFactComplete is NOT the gate for a queue-rollup range — different type", () => {
+  // E13 made DailyReportFact completeness computed-on-read, and the composer's
+  // long-range cache gate briefly borrowed that predicate. readQueueRange
+  // returns a different coverage shape entirely — no capturedSections, no
+  // callProjection — so isFactComplete returned false for EVERY possible
+  // result. The cache branch became dead code and a fully-stored month
+  // rendered as "call data unavailable".
+  const fullyCoveredRange = {
+    coverage: {
+      daysRequested: 30, daysStored: 30,
+      missing: [], partialDays: [], unavailableDays: [], legacyDays: [],
+      complete: true,
+    },
+  };
+  assert.equal(service.isFactComplete(fullyCoveredRange), false,
+    "a queue range is not a daily fact — this predicate cannot judge it");
+
+  const src = fs.readFileSync(
+    require.resolve("../../packages/shared-services/src/reportComposerService"), "utf8",
+  );
+  const gate = src.slice(src.indexOf("const stored = await readQueueRange"));
+  const branch = gate.slice(0, gate.indexOf("else if"));
+  assert.match(branch, /if \(stored\.coverage\.complete\)/,
+    "the range must be judged by its own computed completeness");
+  assert.doesNotMatch(branch, /isFactComplete\(stored\)/);
+});
+
+test("a stored range that is present but not usable does not say 'only N of N'", () => {
+  // daysStored can equal daysRequested while partial/unavailable/legacy days
+  // make the range incomplete, so the old message contradicted itself.
+  const src = fs.readFileSync(
+    require.resolve("../../packages/shared-services/src/reportComposerService"), "utf8",
+  );
+  assert.match(src, /captured but not all usable/);
+});

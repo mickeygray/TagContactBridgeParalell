@@ -773,18 +773,36 @@ async function gatherMaterial({
         material.queueByAgent = stored.queueByAgent;
         material.queueStreams = stored.queueStreams;
         material.queueCoverage = stored.coverage;
-        const { isFactComplete } = require("./dailyReportFactService");
-        // Computed, not the stored flag: a day captured under an older
-        // required-section list must not serve as a cache hit for a report
-        // that now needs a section it never had. See isFactComplete.
-        if (isFactComplete(stored)) {
+        // `stored.coverage.complete` — this range's OWN gate, not
+        // isFactComplete.
+        //
+        // E13 made DailyReportFact completeness computed-on-read, and this line
+        // briefly borrowed that predicate. Wrong type: readQueueRange returns
+        // {daysRequested, daysStored, missing, partialDays, unavailableDays,
+        // legacyDays, complete} — no capturedSections, no callProjection — so
+        // isFactComplete returned false for EVERY possible result. The cache
+        // branch became dead code and every long-range report rendered fully
+        // stored queue data as unavailable, under the self-contradicting reason
+        // "only 30 of 30 day(s) captured".
+        //
+        // E13's principle is already honoured here anyway: `complete` is
+        // computed at read time from the day set (queueRollupService:262-265),
+        // not read off a document.
+        if (stored.coverage.complete) {
           notes.push(`queue counts from ${stored.coverage.daysStored} stored nightly rollup(s) — RingCentral not called`);
         } else if (stored.coverage.daysStored > 0) {
           // PARTIAL is not COMPLETE. Summing the days that happen to exist and
           // presenting them as the range is the exact failure this store was
           // built to end.
           const miss = stored.coverage.missing.length;
-          material.queueUnavailable = `only ${stored.coverage.daysStored} of ${stored.coverage.daysRequested} day(s) captured`
+          // "captured" counts days PRESENT; a day can be stored and still be
+          // partial, unavailable or legacy — which is why daysStored can equal
+          // daysRequested on a range that is not complete. Saying "only N of N"
+          // read as a contradiction, so name the actual shortfall.
+          const shortfall = stored.coverage.daysRequested - stored.coverage.daysStored;
+          material.queueUnavailable = (shortfall > 0
+            ? `only ${stored.coverage.daysStored} of ${stored.coverage.daysRequested} day(s) captured`
+            : `${stored.coverage.daysRequested} day(s) captured but not all usable`)
             + (miss ? ` — missing ${stored.coverage.missing.slice(0, 5).join(", ")}${miss > 5 ? ` +${miss - 5} more` : ""}` : "")
             + (stored.coverage.partialDays.length ? ` — partial: ${stored.coverage.partialDays.join(", ")}` : "");
           // ADVISORY, not a failure. The capture that fills this store is
