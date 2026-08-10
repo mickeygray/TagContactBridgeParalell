@@ -11,6 +11,8 @@ const assert = require("node:assert/strict");
 
 const { createCallRecoveryCompositeSource } = require(
   "../../packages/shared-services/src/callRecoveryCompositeSource");
+const { classifyPool } = require(
+  "../../packages/shared-services/src/leadDeliveryService");
 
 const NOW = new Date("2026-08-03T18:00:00Z");
 
@@ -83,6 +85,18 @@ test("cadence drains FIRST — recovery can never starve fresh leads", async () 
   const items = await drain(src);
   assert.deepEqual(items.slice(0, 2).map((i) => i.caseId), ["fresh-1", "fresh-2"]);
   assert.equal(items.at(-1).sourceKind, "call_recovery");
+});
+
+test("an admitted recovery row carries the proof the canonical pool classifier requires", async () => {
+  const { src } = harness({ cadencePages: [[]], episodes: [EPISODE(1)] });
+  const [row] = await drain(src);
+  const classification = classifyPool(row, {
+    now: NOW,
+    eligibility: row.eligibility,
+    ageBasedDailyCaps: true,
+  });
+  assert.equal(classification.pool, "older_available");
+  assert.equal(classification.reason, "older-callable");
 });
 
 test("the cursor SURVIVES the runtime's two-scalar persistence and resumes in the right half", async () => {

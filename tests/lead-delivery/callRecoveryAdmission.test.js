@@ -257,6 +257,12 @@ test("the source row carries the contract's inventory class and policy id", () =
   assert.equal(row.contactPolicyId, "long_call_recovery_120d_2x");
   assert.equal(row.state, "eligible");
   assert.equal(row.activeAttempt, true);
+  assert.equal(row.callable, true);
+  assert.deepEqual(row.eligibility, {
+    ok: true,
+    reason: "call-recovery-admitted",
+    retryable: false,
+  });
   assert.equal(row.sourceKind, "call_recovery");
   assert.equal(row.episodeId, EPISODE().episodeId);
   assert.equal(row.firstQualifyingCallAt.getTime(), EPISODE().firstQualifyingCallAt.getTime());

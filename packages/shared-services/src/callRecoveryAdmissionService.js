@@ -213,6 +213,17 @@ function buildRecoverySourceRow(episode, { now = new Date(), firstName: supplied
     // persisted state and active-attempt fields.
     state: "eligible",
     activeAttempt: true,
+    // The admission decision has already re-proved current Logics status,
+    // DNC, contact window, program clock, and canonical-item ownership. The
+    // generic pool classifier still requires that proof on the normalized
+    // source row; dropping it here turns every admitted recovery episode into
+    // an `eligibility-not-proven` skip.
+    callable: true,
+    eligibility: {
+      ok: true,
+      reason: "call-recovery-admitted",
+      retryable: false,
+    },
     dailyAttemptCount: Number(episode.dailyAttemptCount || 0),
     totalAttemptCount: Number(episode.totalAttemptCount || 0),
     lastContactAt: episode.lastContactAt || null,
