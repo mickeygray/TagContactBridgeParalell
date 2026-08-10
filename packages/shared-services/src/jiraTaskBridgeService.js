@@ -41,6 +41,7 @@
 const { resolveLogicsUser } = require("../../shared-data/src/jiraLogicsUserMap");
 
 const TENANTS = ["TAG", "AMITY", "WYNN"];
+const PROJECTS = new Set(["ASSIGNMENT", "POAREQ", "RESO"]);
 
 /** The approved subjects. Anything else is a skip, not a guess. */
 const SUBJECTS = [
@@ -314,6 +315,15 @@ async function bridgeJiraIssue({
       reason: `already created as Logics task ${existing.logicsTaskId}`,
       logicsTaskId: existing.logicsTaskId,
     });
+  }
+
+  // The Jira site carries work outside the tax-prep bridge. The admin webhook
+  // is filtered to these projects too, but that external filter is not a safety
+  // boundary: an edit or replacement webhook must not turn an unrelated Jira
+  // issue into an irreversible Logics task. This follows the ledger lookup so
+  // an old terminal fact remains reportable even when Jira sends a thin update.
+  if (!PROJECTS.has(String(project || "").toUpperCase())) {
+    return done("skipped", { reason: "project is outside the Jira-to-Logics bridge" });
   }
 
   // 2. Where does it point, and is that verified?

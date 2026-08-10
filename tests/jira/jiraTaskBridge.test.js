@@ -114,6 +114,23 @@ test("creates a task for a well-formed issue", async () => {
   assert.equal(payload.Comments, "2023-2025 client sending W-2s");
 });
 
+test("refuses projects outside the Jira-to-Logics bridge before any Logics read", async () => {
+  let logicsReads = 0;
+  const deps = fakeDeps({
+    findLink: async () => null,
+    fetchCase: async () => { logicsReads += 1; return null; },
+  });
+  const d = await bridgeJiraIssue({
+    issue: issueOf({ key: "MARKETING-1", fields: { project: { key: "MARKETING" } } }),
+    deps,
+    apply: true,
+  });
+  assert.equal(d.outcome, "skipped");
+  assert.match(d.reason, /outside/);
+  assert.equal(logicsReads, 0);
+  assert.equal(deps.created.length, 0);
+});
+
 test("refuses when the client name does not match the case in that database", async () => {
   const deps = fakeDeps({
     fetchCase: async () => ({ CaseID: 401656, FirstName: "SOMEONE", LastName: "ELSE" }),
