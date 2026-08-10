@@ -107,6 +107,7 @@ function main() {
   if (nginxConf) {
     checkTextIncludes(nginxConf, "proxy_pass http://parallel_cp/api/auth/check;", "nginx auth gate");
     checkTextIncludes(nginxConf, "location /api/inbound/", "nginx inbound api route");
+    checkTextIncludes(nginxConf, "location = /api/jira/webhook", "nginx Jira webhook route");
     checkTextIncludes(nginxConf, "location = /fb/webhook", "nginx facebook route");
     checkTextIncludes(nginxConf, "location = /tt/webhook", "nginx tiktok route");
     checkTextIncludes(nginxConf, "location = /lead-contact", "nginx lead-contact route");
