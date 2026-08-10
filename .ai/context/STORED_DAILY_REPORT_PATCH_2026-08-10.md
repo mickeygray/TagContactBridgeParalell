@@ -42,6 +42,7 @@ change):
 - `packages/shared-services/src/mailboxIngestService.js`
 - `packages/shared-services/src/ncoaMailboxHandler.js`
 - `packages/shared-services/src/ncoaMailboxIngestService.js`
+- `packages/shared-services/src/nightlyEmergencyCloseService.js`
 
 Tests:
 
@@ -53,6 +54,7 @@ Tests:
 - `tests/metrics/hourlyFloor.test.js`
 - `tests/metrics/nightlyHygieneRuntime.test.js`
 - `tests/metrics/ncoaMailboxHandler.test.js`
+- `tests/metrics/nightlyEmergencyClose.test.js`
 - `tests/ncoaMailboxIngestService.test.js`
 
 No other dirty worktree file belongs to this patch.
@@ -89,7 +91,7 @@ No other dirty worktree file belongs to this patch.
 - `node --check` passed for every patch JavaScript file.
 - Focused stored-report contract/entry/fact/renderer tests passed.
 - Full `tests/metrics/*.test.js` gate passed before final packaging.
-- The focused NCOA handoff gate passed 67/67, including removal of both hourly
+- The focused NCOA handoff/emergency-close gate passed 72/72, including removal of both hourly
   owners, independent flagging, NCOA-only apply, partial-message retry, and the
   read-only discovery gate.
 - A read-only Friday 2026-08-07 real-data dry run completed with all five report
@@ -131,7 +133,7 @@ data but does not persist the snapshot.
    listed above, and record which listed files were absent so rollback removes
    only files introduced by this patch.
 7. Install only this patch's files and verify their exact hashes.
-8. Run `node --check` on every changed JavaScript file and run the nine focused
+8. Run `node --check` on every changed JavaScript file and run the ten focused
    test files.
 9. Run the full metrics gate.
 10. Restart only `parallel-control-plane`.
