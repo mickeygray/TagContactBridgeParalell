@@ -881,6 +881,29 @@ test("lifecycle hooks observe canonical persistence and provider acceptance", as
   assert.equal(completed[0].item.totalAttemptCount, 1);
 });
 
+test("lifecycle hooks preserve BSON ObjectId identity as a canonical string", async () => {
+  const persisted = [];
+  const repository = new FakeRepository();
+  const insert = repository.insertActiveItemOnce.bind(repository);
+  repository.insertActiveItemOnce = async (input) => {
+    const created = await insert(input);
+    if (!created) return null;
+    created._id = {
+      _bsontype: "ObjectId",
+      toHexString: () => "507f1f77bcf86cd799439011",
+    };
+    return created;
+  };
+  const h = harness({
+    rows: [sourceRow(1)],
+    repositoryOverride: repository,
+    onSourceItemPersisted: async (event) => persisted.push(event),
+  });
+  await h.runtime.ingestOnce();
+  assert.equal(persisted.length, 1);
+  assert.equal(persisted[0].item._id, "507f1f77bcf86cd799439011");
+});
+
 test("an incomplete daily repair resumes its cursor before polling new arrivals", async () => {
   const rows = [
     { ...sourceRow(1), createdAt: new Date("2026-07-10T16:01:00Z") },

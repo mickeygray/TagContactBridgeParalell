@@ -192,6 +192,14 @@ function canMutateAgentPool({
 function clone(value) {
   if (value == null || typeof value !== "object") return value;
   if (value instanceof Date) return new Date(value.getTime());
+  // Mongoose lean rows carry BSON ObjectIds. Lifecycle hooks receive cloned
+  // snapshots so they cannot mutate canonical runtime state, but recursively
+  // cloning an ObjectId turns it into a plain object that Mongoose cannot cast
+  // back for an exact identity update. Preserve the identity as its canonical
+  // hex string at the hook boundary.
+  if (value._bsontype === "ObjectId" && typeof value.toHexString === "function") {
+    return value.toHexString();
+  }
   if (Array.isArray(value)) return value.map(clone);
   return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, clone(entry)]));
 }
