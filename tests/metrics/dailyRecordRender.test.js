@@ -9,7 +9,7 @@ const { test } = require("node:test");
 const assert = require("node:assert/strict");
 
 const {
-  ROLLUP, canRenderFromRecord, renderReportFromRecord, sectionsFromFact,
+  ROLLUP, canRenderFromRecord, renderReportFromRecord, sectionsFromFact, sectionsFromRange,
 } = require("../../packages/shared-services/src/dailyRecordRenderService");
 const { BY_ID } = require("../../packages/shared-services/src/reportBlocksService");
 
@@ -30,6 +30,17 @@ const factDoc = (over = {}) => ({
 });
 
 const modelReturning = (doc) => ({ findOne: () => ({ lean: async () => doc }) });
+const rangeModelReturning = (docs) => ({
+  find: (query) => ({
+    select: () => ({
+      sort: () => ({
+        lean: async () => docs.filter((doc) => (
+          doc.dateKey >= query.dateKey.$gte && doc.dateKey <= query.dateKey.$lte
+        )),
+      }),
+    }),
+  }),
+});
 
 // ── the shape the template consumes ────────────────────────────────────────
 
@@ -79,15 +90,99 @@ test("source says 'record', which is what tells the two producers apart", async 
   assert.equal(report.source, "record");
 });
 
+test("a stored range keeps source and agent metrics while compressing everything else", async () => {
+  const day = (dateKey, cash, minutes) => ({
+    dateKey,
+    captureVersion: 2,
+    facts: {
+      financial: { cash, spend: 10, newCash: cash, deals: 1, ldDials: 5, mailCalls: 2 },
+      spend: { mail: 5, ld: 5, bcd: 0 },
+      bySource: [{ source: "LD", deals: 1, newCash: cash, recurringCash: 0, totalCash: cash, spend: 5, leads: 2 }],
+      byAgent: {
+        cases: 1, attempts: 5, attemptsKnown: 5, attemptsUnknown: 0,
+        connected: 1, talkMinutes: minutes, newLeadsKnown: true,
+        agents: [{ agent: "Agent A", dials: 5, connected: 1, talkMinutes: minutes, cash }],
+      },
+      statusMovement: { dnc: 1, postdate: 0, suspended: 0, conversions: 1, other: 0 },
+      callHighlights: { total: 1, over30Minutes: minutes >= 30 ? 1 : 0, withRecording: 1, totalMinutes: minutes },
+    },
+    detail: {
+      callHighlights: [{
+        officer: "Agent A", minutes, direction: "outbound",
+        listenUrl: `https://example.invalid/${dateKey}`,
+      }],
+    },
+    coverage: { complete: true, reportDegraded: false, sectionErrors: [] },
+  });
+  const report = await renderReportFromRecord({
+    from: "2026-08-04", to: "2026-08-05",
+    Model: rangeModelReturning([day("2026-08-04", 100, 25), day("2026-08-05", 200, 35)]),
+  });
+
+  assert.equal(report.from, "2026-08-04");
+  assert.equal(report.to, "2026-08-05");
+  assert.equal(report.sections.find((s) => s.id === "topline").data.cash, 300);
+  assert.equal(report.sections.find((s) => s.id === "source").data[0].newCash, 300);
+  assert.equal(report.sections.find((s) => s.id === "ldcalls").data.attempts, 10);
+  const status = report.sections.find((s) => s.id === "status").data;
+  assert.equal(status.conversions, 2);
+  assert.equal(status.rangeSummary, true);
+  const calls = report.sections.find((s) => s.id === "longcalls").data;
+  assert.equal(calls.totalObserved, 2);
+  assert.equal(calls.over30Minutes, 1);
+  assert.equal(calls.length, 2);
+  assert.equal(report.failures.length, 0);
+});
+
+test("mixed-format ranges count every fact day but show only retained call rows", () => {
+  const sections = sectionsFromRange({
+    sections: {
+      callHighlights: { total: 3, over30Minutes: 2, withRecording: 2, totalMinutes: 95 },
+    },
+    detailSections: {
+      callHighlights: {
+        total: 1, over30Minutes: 1, withRecording: 1, topPerAgent: 5,
+        rows: [{ officer: "Agent A", minutes: 35, listenUrl: "https://example.invalid/a" }],
+      },
+    },
+  }, ["longcalls"]);
+  const rows = sections[0].data;
+  assert.equal(rows.totalObserved, 3, "facts cover legacy and current days");
+  assert.equal(rows.over30Minutes, 2);
+  assert.equal(rows.withRecording, 2);
+  assert.equal(rows.length, 1, "only the retained current-day row is presented");
+});
+
+test("a range with counts but no retained call rows still says what happened", () => {
+  const sections = sectionsFromRange({
+    sections: { callHighlights: { total: 4, over30Minutes: 2, withRecording: 0 } },
+    detailSections: {},
+  }, ["longcalls"]);
+  const text = sections[0].block.renderText(sections[0].data);
+  assert.match(text, /4 long call\(s\) observed/);
+  assert.match(text, /no retained review rows/);
+  assert.doesNotMatch(text, /none over the threshold/);
+});
+
 // ── unknown, never zero ────────────────────────────────────────────────────
 
-test("longcalls renders UNKNOWN — its rows are never stored", async () => {
+test("a legacy day without call-highlight detail renders UNKNOWN", async () => {
   // facts.calls holds counts or a "pending" placeholder; the block renders
   // rows. block.csv(null) would emit a zero-row table, and a zero-row "Calls
   // worth hearing" reads as "nothing worth hearing happened".
   const report = await renderReportFromRecord({ dateKey: "2026-08-05", Model: modelReturning(factDoc()) });
   const longcalls = report.sections.find((s) => s.id === "longcalls");
-  assert.match(longcalls.error, /never stored|placeholder/);
+  assert.match(longcalls.error, /callHighlights is empty/);
+});
+
+test("a new day renders call rows from detail, not aggregate call statistics", async () => {
+  const row = { officer: "Agent A", minutes: 35, listenUrl: "https://example.invalid/call" };
+  const report = await renderReportFromRecord({
+    dateKey: "2026-08-05",
+    Model: modelReturning(factDoc({ detail: { callHighlights: [row] } })),
+  });
+  const longcalls = report.sections.find((s) => s.id === "longcalls");
+  assert.deepEqual(longcalls.data, [row]);
 });
 
 test("a fact key that is null renders UNKNOWN, not an empty table", () => {
@@ -151,6 +246,13 @@ test("a malformed dateKey throws rather than reading the wrong day", async () =>
   );
 });
 
+test("an impossible calendar date throws rather than normalizing", async () => {
+  await assert.rejects(
+    () => renderReportFromRecord({ dateKey: "2026-02-31", Model: modelReturning(null) }),
+    /YYYY-MM-DD/,
+  );
+});
+
 // ── it must not gather ─────────────────────────────────────────────────────
 
 test("the renderer never touches the network", () => {
@@ -171,10 +273,11 @@ test("the renderer never touches the network", () => {
   ]) {
     assert.doesNotMatch(source, forbidden, `must not reach for ${forbidden}`);
   }
-  // And it must require exactly two things: the block registry and the model.
+  // And it may require only local, pure contracts plus the block registry and
+  // model. The shared vocabulary is data-only and cannot gather anything.
   const requires = [...source.matchAll(/require\("([^"]+)"\)/g)].map((m) => m[1]);
   assert.deepEqual(requires.sort(),
-    ["../../shared-models/src/DailyReportFact", "./reportBlocksService"]);
+    ["../../shared-models/src/DailyReportFact", "./dailyEntryService", "./dailyReportContract", "./reportBlocksService"]);
 });
 
 // ── the domain guard ───────────────────────────────────────────────────────
@@ -239,13 +342,12 @@ test("runDefinition routes a record-sourced definition to the renderer, not the 
 
 // ── AUDIT FIXES ────────────────────────────────────────────────────────────
 
-test("a multi-day range refuses the record and routes back to the live composer", () => {
+test("a multi-day range is eligible for the stored long-tail reader", () => {
   // The record is a day. A last7 or monthly definition pointed at it would
   // silently render range.from alone and mail a one-day report under a
   // seven-day subject line.
   const def = { renderSource: "record", domain: null, filters: [] };
-  assert.equal(canRenderFromRecord(def, { from: "2026-08-01", to: "2026-08-07" }).reason,
-    "record-renders-one-day-only");
+  assert.equal(canRenderFromRecord(def, { from: "2026-08-01", to: "2026-08-07" }).ok, true);
   assert.equal(canRenderFromRecord(def, { from: "2026-08-05", to: "2026-08-05" }).ok, true);
   assert.equal(canRenderFromRecord(def).ok, true, "no range supplied means the caller checks");
 });

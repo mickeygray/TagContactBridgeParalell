@@ -76,10 +76,12 @@ test("ONE post, upserted on the day, with report-owned fields set only on insert
   assert.ok(!("emailAcceptedAt" in update.$set));
   assert.equal(update.$setOnInsert.definitionName, "daily entry");
   assert.equal(update.$setOnInsert.emailAcceptedAt, null);
+  assert.equal(update.$setOnInsert.captureVersion, 2);
 });
 
 test("a malformed dateKey throws rather than writing somewhere unexpected", async () => {
   await assert.rejects(() => buildDailyEntry({ dateKey: "8/3/2026" }), /YYYY-MM-DD/);
+  await assert.rejects(() => buildDailyEntry({ dateKey: "2026-02-31" }), /YYYY-MM-DD/);
   await assert.rejects(() => buildDailyEntry({}), /YYYY-MM-DD/);
 });
 

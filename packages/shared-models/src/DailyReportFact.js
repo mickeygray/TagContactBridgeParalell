@@ -1,6 +1,20 @@
 "use strict";
 
 const mongoose = require("mongoose");
+const {
+  DAILY_SECTION_KEYS,
+  isValidDateKey,
+} = require("../../shared-config/src/dailyReportContract");
+
+const dailyDetailSchema = new mongoose.Schema(
+  Object.fromEntries(
+    Object.values(DAILY_SECTION_KEYS).map((key) => [key, {
+      type: mongoose.Schema.Types.Mixed,
+      default: null,
+    }]),
+  ),
+  { _id: false, minimize: false },
+);
 
 // ONE COMBINE-READY DOCUMENT PER PACIFIC DAY.
 //
@@ -16,8 +30,9 @@ const dailyReportFactSchema = new mongoose.Schema(
       unique: true,
       index: true,
       match: /^\d{4}-\d{2}-\d{2}$/,
+      validate: { validator: isValidDateKey, message: "dateKey must be a real YYYY-MM-DD date" },
     },
-    captureVersion: { type: Number, required: true, default: 1 },
+    captureVersion: { type: Number, required: true, default: 2 },
 
     // Provenance names the build that produced the facts, never recipients.
     // Also relaxed: the worker creates entries that no definition produced.
@@ -57,36 +72,40 @@ const dailyReportFactSchema = new mongoose.Schema(
     // WHY BOTH, RATHER THAN JUST RELAXING `facts`. They are read by different
     // things for different reasons. `facts` is summed across a range — a year of
     // days aggregated for a trend — and that path should never have to carry
-    // customer identifiers through it. `detail` is opened for ONE day, when
-    // somebody wants the calls and cases behind a number. Keeping them apart
-    // means a year-long rollup stays a rollup.
+    // customer identifiers through it. `detail` is opened in full for one day;
+    // multi-day reporting projects only its bounded call-review slice. Keeping
+    // them apart means a year-long rollup stays a rollup.
     //
     // Consequence to be deliberate about: CallRail and PhoneBurner recording
     // URLs are durable and serve unauthenticated, so a stored year of them is a
     // stored year of playable customer calls. That is a retention decision, not
     // an accident.
-    detail: { type: mongoose.Schema.Types.Mixed, default: null },
+    detail: { type: dailyDetailSchema, default: null },
 
     // Each member contains the BASE daily values from one rollup section. The
     // range reader must sum bases and recompute ratios; it must never average
     // daily ROI/ROAS percentages.
     facts: {
-      financial: { type: mongoose.Schema.Types.Mixed, default: null },
+      [DAILY_SECTION_KEYS.FINANCIAL]: { type: mongoose.Schema.Types.Mixed, default: null },
       // The day's cost denominator by source. Declared explicitly because the
       // schema is strict — an undeclared facts.spend would be silently dropped
       // on write and the fact would look like it stored fine.
-      spend: { type: mongoose.Schema.Types.Mixed, default: null },
-      bySource: { type: mongoose.Schema.Types.Mixed, default: null },
-      byAgent: { type: mongoose.Schema.Types.Mixed, default: null },
-      statusMovement: { type: mongoose.Schema.Types.Mixed, default: null },
-      // Reserved for Claude's call/dial projection. The core writer records a
-      // count-only pending marker and never copies URLs, phones, or call rows.
-      calls: { type: mongoose.Schema.Types.Mixed, default: null },
+      [DAILY_SECTION_KEYS.SPEND]: { type: mongoose.Schema.Types.Mixed, default: null },
+      [DAILY_SECTION_KEYS.BY_SOURCE]: { type: mongoose.Schema.Types.Mixed, default: null },
+      [DAILY_SECTION_KEYS.BY_AGENT]: { type: mongoose.Schema.Types.Mixed, default: null },
+      [DAILY_SECTION_KEYS.STATUS]: { type: mongoose.Schema.Types.Mixed, default: null },
+      // Optional aggregate call/dial projection. The report writer leaves this
+      // alone when the dedicated index has not supplied it; report call rows
+      // live separately in callHighlights.
+      [DAILY_SECTION_KEYS.CALLS]: { type: mongoose.Schema.Types.Mixed, default: null },
+      // Counts and bounded grouping inputs for the report's actionable call
+      // rows. This is intentionally separate from aggregate recording stats.
+      [DAILY_SECTION_KEYS.CALL_HIGHLIGHTS]: { type: mongoose.Schema.Types.Mixed, default: null },
       // The nightly Logics activity review's own day: rows scanned, notice
       // uploads, suspended flips, DNC and post-date counts. That review has
       // always produced an accurate day and then thrown it away at the end of
       // an email. This is where it lands.
-      activity: { type: mongoose.Schema.Types.Mixed, default: null },
+      [DAILY_SECTION_KEYS.ACTIVITY]: { type: mongoose.Schema.Types.Mixed, default: null },
     },
 
     coverage: {
@@ -95,11 +114,15 @@ const dailyReportFactSchema = new mongoose.Schema(
       missingSections: { type: [String], default: [] },
       sectionErrors: { type: [String], default: [] },
       reportDegraded: { type: Boolean, default: false },
+      // The five sections needed to render the stored email were captured
+      // cleanly. Aggregate call-index coverage is tracked independently below
+      // and must not make an otherwise renderable report look incomplete.
+      reportComplete: { type: Boolean, default: false },
       coreComplete: { type: Boolean, default: false },
       callProjection: {
         type: String,
         enum: ["pending", "complete", "unavailable"],
-        default: "pending",
+        default: "unavailable",
       },
       complete: { type: Boolean, default: false },
     },

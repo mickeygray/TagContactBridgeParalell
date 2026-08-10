@@ -1,5 +1,17 @@
 "use strict";
 
+const { AGED_LABEL } = require("../../shared-config/src/activeSources");
+const { applyFunctions } = require("./reportOpsService");
+const {
+  AGENT_ROW_ADDITIVE_FIELDS,
+  AGENT_SUMMARY_ADDITIVE_FIELDS,
+  DAILY_SECTION_KEYS,
+  REPORT_SECTION_IDS,
+  SOURCE_ROW_ADDITIVE_FIELDS,
+  STATUS_ADDITIVE_FIELDS,
+  TOPLINE_ADDITIVE_FIELDS,
+} = require("./dailyReportContract");
+
 // THE ATOMIC SECTION BUILDERS.
 //
 // Mickey 2026-08-05: "since we know we have working parts, let's just one-shot
@@ -57,16 +69,22 @@
 // moved, and what is still that way.
 
 const round2 = (n) => Math.round(Number(n || 0) * 100) / 100;
-const num = (v) => (v == null ? null : Number(v));
+const round4 = (n) => Math.round(Number(n || 0) * 10000) / 10000;
+const finiteNumber = (v) => {
+  if (v == null) return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+};
+const num = finiteNumber;
 
 /** Sum a field across values, ignoring nulls. Returns null if NOTHING had it. */
 function sumField(values, field) {
   let total = 0;
   let seen = false;
   for (const v of values) {
-    const n = v?.[field];
-    if (n == null || Number.isNaN(Number(n))) continue;
-    total += Number(n);
+    const n = finiteNumber(v?.[field]);
+    if (n == null) continue;
+    total += n;
     seen = true;
   }
   return seen ? round2(total) : null;
@@ -76,24 +94,28 @@ function sumField(values, field) {
 function maxField(values, field) {
   let best = null;
   for (const v of values) {
-    const n = v?.[field];
+    const n = finiteNumber(v?.[field]);
     if (n == null) continue;
-    best = best == null ? Number(n) : Math.max(best, Number(n));
+    best = best == null ? n : Math.max(best, n);
   }
   return best;
 }
 
 /** Merge {key: count} maps by summing. */
 function mergeCountMaps(values, field) {
-  const out = {};
+  const out = new Map();
   let seen = false;
   for (const v of values) {
     const map = v?.[field];
     if (!map || typeof map !== "object") continue;
     seen = true;
-    for (const [k, n] of Object.entries(map)) out[k] = (out[k] || 0) + Number(n || 0);
+    for (const [k, n] of Object.entries(map)) {
+      const numeric = Number(n);
+      if (!Number.isFinite(numeric)) continue;
+      out.set(k, (out.get(k) || 0) + numeric);
+    }
   }
-  return seen ? out : null;
+  return seen ? Object.fromEntries(out) : null;
 }
 
 /**
@@ -110,12 +132,19 @@ function mergeRowsBy(values, identity, numericFields) {
     for (const row of rows) {
       const key = String(row?.[identity] ?? "");
       if (!key) continue;
-      if (!byKey.has(key)) byKey.set(key, { ...row });
+      if (!byKey.has(key)) {
+        const initial = { ...row };
+        for (const field of numericFields) {
+          if (initial[field] != null && finiteNumber(initial[field]) == null) initial[field] = null;
+        }
+        byKey.set(key, initial);
+      }
       else {
         const acc = byKey.get(key);
         for (const f of numericFields) {
-          if (row[f] == null) continue;
-          acc[f] = round2(Number(acc[f] || 0) + Number(row[f]));
+          const incoming = finiteNumber(row[f]);
+          if (incoming == null) continue;
+          acc[f] = round2((finiteNumber(acc[f]) || 0) + incoming);
         }
       }
     }
@@ -123,9 +152,157 @@ function mergeRowsBy(values, identity, numericFields) {
   return seen ? [...byKey.values()] : null;
 }
 
+const presentObjects = (values) => values.filter((v) => v && typeof v === "object");
+
+function mergeAgentAttribution(values) {
+  const days = presentObjects(values);
+  const attrs = presentObjects(days.map((v) => v?.attribution));
+  if (!attrs.length) return null;
+  const everyDayAttributed = attrs.length === days.length;
+
+  // Nested attribution values are not top-level section fields, so sum them by
+  // an explicit dotted path rather than teaching the generic helper two shapes.
+  const sumPath = (path) => {
+    const parts = path.split(".");
+    let total = 0; let seen = false;
+    for (const a of attrs) {
+      const value = finiteNumber(parts.reduce((v, p) => v?.[p], a));
+      if (value == null) continue;
+      total += value; seen = true;
+    }
+    return seen ? round2(total) : null;
+  };
+
+  const spend = {
+    mail: sumPath("spend.mail"),
+    bcd: sumPath("spend.bcd"),
+    ld: sumPath("spend.ld"),
+    applicable: sumPath("spend.applicable"),
+  };
+  const mailOffered = sumPath("mailOffered");
+  const bcdOffered = sumPath("bcdOffered");
+  const ldLeadsBought = sumPath("ldLeadsBought");
+  const expected = sumPath("reconciliation.expected");
+  const attributed = sumPath("reconciliation.attributed");
+  const unattributedTotal = sumPath("reconciliation.unattributed");
+  const drift = expected == null || attributed == null || unattributedTotal == null
+    ? null : round2(attributed + unattributedTotal - expected);
+  const failures = [...new Set(attrs.flatMap((a) => a.reconciliation?.failures || []))];
+  const tested = attrs.every((a) => a.reconciliation?.ok !== null
+    && a.reconciliation?.ok !== undefined);
+  const everyDayPassed = attrs.every((a) => a.reconciliation?.ok === true);
+
+  return {
+    mailApplies: attrs.some((a) => a.mailApplies === true),
+    readable: {
+      mail: everyDayAttributed && attrs.every((a) => a.readable?.mail === true),
+      bcd: everyDayAttributed && attrs.every((a) => a.readable?.bcd === true),
+      ld: everyDayAttributed && attrs.every((a) => a.readable?.ld === true),
+    },
+    mailOffered,
+    mailMissed: sumPath("mailMissed"),
+    bcdOffered,
+    bcdMissed: sumPath("bcdMissed"),
+    mailRate: mailOffered > 0 && spend.mail != null ? round4(spend.mail / mailOffered) : null,
+    bcdRate: bcdOffered > 0 && spend.bcd != null ? round4(spend.bcd / bcdOffered) : null,
+    ldRate: ldLeadsBought > 0 && spend.ld != null ? round4(spend.ld / ldLeadsBought) : null,
+    ldLeadsBought,
+    spend,
+    unattributed: {
+      mail: sumPath("unattributed.mail"),
+      bcd: sumPath("unattributed.bcd"),
+      ld: sumPath("unattributed.ld"),
+      total: unattributedTotal,
+    },
+    unattributedByMissed: {
+      mail: sumPath("unattributedByMissed.mail"),
+      bcd: sumPath("unattributedByMissed.bcd"),
+    },
+    reconciliation: {
+      ok: !everyDayAttributed
+        ? false
+        : tested && drift != null
+          ? everyDayPassed && Math.abs(drift) < 0.005 && failures.length === 0
+          : null,
+      expected,
+      attributed,
+      unattributed: unattributedTotal,
+      drift,
+      failures,
+    },
+  };
+}
+
+function callHighlightAgent(row) {
+  return String(row?.officer || row?.agent || "(unassigned)").trim() || "(unassigned)";
+}
+
+function callHighlightMinutes(row) {
+  const minutes = Number(row?.minutes);
+  return Number.isFinite(minutes) && minutes >= 0 ? minutes : 0;
+}
+
+function summarizeCallHighlights(rows = []) {
+  const safeRows = Array.isArray(rows) ? rows.filter((row) => row && typeof row === "object") : [];
+  const byDirection = new Map();
+  const byAgent = new Map();
+  let over30Minutes = 0;
+  let withRecording = 0;
+  let totalMinutes = 0;
+  for (const row of safeRows) {
+    const minutes = callHighlightMinutes(row);
+    totalMinutes += minutes;
+    if (minutes >= 30) over30Minutes += 1;
+    if (row.listenUrl) withRecording += 1;
+    const direction = String(row.direction || "unknown");
+    byDirection.set(direction, (byDirection.get(direction) || 0) + 1);
+    const agent = callHighlightAgent(row);
+    byAgent.set(agent, (byAgent.get(agent) || 0) + 1);
+  }
+  return {
+    total: safeRows.length,
+    over30Minutes,
+    withRecording,
+    totalMinutes: round2(totalMinutes),
+    byDirection: Object.fromEntries(byDirection),
+    byAgent: Object.fromEntries(byAgent),
+  };
+}
+
+function mergeCallHighlights(values) {
+  // Detail carries the complete rows. A range turns them into a bounded review
+  // list: five longest calls per agent, while counts still cover every row.
+  if (values.some(Array.isArray)) {
+    const all = values.flatMap((rows) => (Array.isArray(rows) ? rows : []));
+    const summary = summarizeCallHighlights(all);
+    const byAgent = new Map();
+    for (const row of all) {
+      const agent = callHighlightAgent(row);
+      if (!byAgent.has(agent)) byAgent.set(agent, []);
+      byAgent.get(agent).push(row);
+    }
+    const rows = [...byAgent.entries()]
+      .sort(([a], [b]) => a.localeCompare(b))
+      .flatMap(([, agentRows]) => agentRows
+        .filter((row) => row.listenUrl)
+        .sort((a, b) => callHighlightMinutes(b) - callHighlightMinutes(a))
+        .slice(0, 5));
+    return { ...summary, topPerAgent: 5, rows };
+  }
+
+  return {
+    total: sumField(values, "total"),
+    over30Minutes: sumField(values, "over30Minutes"),
+    withRecording: sumField(values, "withRecording"),
+    totalMinutes: sumField(values, "totalMinutes"),
+    byDirection: mergeCountMaps(values, "byDirection") || {},
+    byAgent: mergeCountMaps(values, "byAgent") || {},
+  };
+}
+
 const BUILDERS = Object.freeze([
   {
-    key: "spend",
+    key: DAILY_SECTION_KEYS.SPEND,
     label: "Spend",
     // Mail arrives from a sheet that keeps growing after a day closes, so a
     // later read is not a better read. LD and BCD are counted from events we
@@ -148,20 +325,15 @@ const BUILDERS = Object.freeze([
     },
   },
   {
-    key: "financial",
+    key: DAILY_SECTION_KEYS.FINANCIAL,
     label: "Money",
-    build: (ctx) => ctx.section("topline"),
+    build: (ctx) => ctx.section(REPORT_SECTION_IDS.TOPLINE),
     merge(values) {
-      const out = {
-        cash: sumField(values, "cash"),
-        spend: sumField(values, "spend"),
-        mailSpend: sumField(values, "mailSpend"),
-        deals: sumField(values, "deals"),
-        recurring: sumField(values, "recurring"),
-        ldLeads: sumField(values, "ldLeads"),
-        dials: sumField(values, "dials"),
-        calls: sumField(values, "calls"),
-      };
+      const out = Object.fromEntries(
+        TOPLINE_ADDITIVE_FIELDS.map((field) => [field, sumField(values, field)]),
+      );
+      out.mailApplies = values.some((v) => v?.mailApplies === true);
+      out.vendorBoard = values.every((v) => v?.vendorBoard === true);
       out.net = round2(Number(out.cash || 0) - Number(out.spend || 0));
       // Derived HERE from summed parts, deliberately not carried from any day.
       // A zero denominator yields null, never Infinity or 0 — "no spend" is not
@@ -172,7 +344,7 @@ const BUILDERS = Object.freeze([
     },
   },
   {
-    key: "calls",
+    key: DAILY_SECTION_KEYS.CALLS,
     label: "Calls",
     build: (ctx) => ctx.callFacts ?? null,
     merge(values) {
@@ -191,7 +363,14 @@ const BUILDERS = Object.freeze([
     },
   },
   {
-    key: "activity",
+    key: DAILY_SECTION_KEYS.CALL_HIGHLIGHTS,
+    label: "Call highlights",
+    build: (ctx) => ctx.section(REPORT_SECTION_IDS.LONG_CALLS),
+    facts: summarizeCallHighlights,
+    merge: mergeCallHighlights,
+  },
+  {
+    key: DAILY_SECTION_KEYS.ACTIVITY,
     label: "Activity",
     build: (ctx) => ctx.activitySection ?? null,
     merge(values) {
@@ -210,21 +389,80 @@ const BUILDERS = Object.freeze([
     },
   },
   {
-    key: "bySource",
+    key: DAILY_SECTION_KEYS.BY_SOURCE,
     label: "By source",
-    build: (ctx) => ctx.section("source"),
-    merge: (values) => mergeRowsBy(values, "source", ["cash", "spend", "deals", "leads", "calls"]),
+    build: (ctx) => ctx.section(REPORT_SECTION_IDS.BY_SOURCE),
+    merge(values) {
+      // `cash` and `calls` are retained for old stored days. New report rows
+      // use newCash/recurringCash/totalCash and responses. One contract can
+      // read both without renaming the live report's actual fields.
+      const rows = mergeRowsBy(
+        values,
+        "source",
+        [...SOURCE_ROW_ADDITIVE_FIELDS, "cash", "calls"],
+      );
+      if (!rows) return null;
+      return rows.map((row) => {
+        const hasSplitCash = row.newCash != null || row.recurringCash != null;
+        const totalCash = hasSplitCash
+          ? round2(Number(row.newCash || 0) + Number(row.recurringCash || 0))
+          : num(row.totalCash ?? row.cash);
+        const denom = Number(row.responses || row.calls || row.leads || 0);
+        return {
+          ...row,
+          totalCash,
+          costPer: denom > 0 && Number(row.spend) > 0
+            ? round2(Number(row.spend) / denom) : null,
+          net: totalCash == null ? null : round2(totalCash - Number(row.spend || 0)),
+          ...(row.source === AGED_LABEL
+            ? { roas: null, roi: null, costPerAcquisition: null, profitMargin: null }
+            : applyFunctions(
+              {
+                cost: row.spend,
+                initial: row.newCash ?? row.cash,
+                total: totalCash,
+                deals: row.deals,
+                calls: row.responses ?? row.calls,
+                leads: row.leads,
+              },
+              ["roas", "roi", "costPerAcquisition", "profitMargin"],
+            )),
+        };
+      });
+    },
   },
   {
-    key: "byAgent",
+    key: DAILY_SECTION_KEYS.BY_AGENT,
     label: "By officer",
-    build: (ctx) => ctx.section("ldcalls"),
-    merge: (values) => mergeRowsBy(values, "agent", ["dials", "connects", "talkSec", "deals", "cash"]),
+    build: (ctx) => ctx.section(REPORT_SECTION_IDS.BY_AGENT),
+    merge(values) {
+      const out = Object.fromEntries(
+        AGENT_SUMMARY_ADDITIVE_FIELDS.map((field) => [field, sumField(values, field)]),
+      );
+      out.connectRate = Number(out.attemptsKnown) > 0
+        ? Math.round((Number(out.connected || 0) / Number(out.attemptsKnown)) * 1000) / 10
+        : null;
+      out.avgTalkMinutes = Number(out.connected) > 0
+        ? Math.round((Number(out.talkMinutes || 0) / Number(out.connected)) * 10) / 10
+        : null;
+      out.byOutcome = mergeCountMaps(values, "byOutcome") || {};
+      out.newLeadsKnown = values.every((v) => v?.newLeadsKnown === true);
+      out.dialsUnavailable = [...new Set(values.map((v) => v?.dialsUnavailable).filter(Boolean))].join("; ") || null;
+      out.queueUnavailable = [...new Set(values.map((v) => v?.queueUnavailable).filter(Boolean))].join("; ") || null;
+      out.longThresholdMinutes = maxField(values, "longThresholdMinutes");
+      out.attribution = mergeAgentAttribution(values);
+      out.agents = mergeRowsBy(
+        values.map((v) => v?.agents),
+        "agent",
+        AGENT_ROW_ADDITIVE_FIELDS,
+      ) || [];
+      return out;
+    },
   },
   {
-    key: "statusMovement",
+    key: DAILY_SECTION_KEYS.STATUS,
     label: "Status movement",
-    build: (ctx) => ctx.section("status"),
+    build: (ctx) => ctx.section(REPORT_SECTION_IDS.STATUS),
     // The COUNTS are events and sum correctly: a case that went DNC on the 3rd
     // went DNC on the 3rd, whatever happened afterwards. The redline LIST is a
     // claim about now — those cases may since have been worked — so over a range
@@ -232,9 +470,9 @@ const BUILDERS = Object.freeze([
     confirms: Object.freeze(["keyChanges"]),
     merge(values) {
       return {
-        suspended: sumField(values, "suspended"),
-        postdate: sumField(values, "postdate"),
-        dnc: sumField(values, "dnc"),
+        ...Object.fromEntries(
+          STATUS_ADDITIVE_FIELDS.map((field) => [field, sumField(values, field)]),
+        ),
         // De-duplicated by domain+case+LANE, not by case: one case can go
         // suspended AND dnc in a range, and those are two different chases.
         //
@@ -261,6 +499,39 @@ const SECTION_KEYS = Object.freeze(BUILDERS.map((b) => b.key));
 /** Fields that must not be restated once a day has them. */
 function frozenFieldsFor(key) {
   return BY_KEY.get(key)?.frozen || null;
+}
+
+/**
+ * Preserve a section's write-once fields while allowing its event-backed
+ * fields to correct themselves on a later pass.
+ *
+ * Kept beside the registry so every writer applies the same rule. Returning a
+ * new object prevents a persistence retry from mutating the in-memory report
+ * that is about to be emailed.
+ */
+function preserveFrozenFields(key, stored, fresh) {
+  const frozen = frozenFieldsFor(key);
+  if (!frozen || !stored || !fresh || typeof stored !== "object" || typeof fresh !== "object") {
+    return { value: fresh, preserved: [] };
+  }
+  const value = { ...fresh };
+  const preserved = [];
+  for (const field of frozen) {
+    if (stored[field] == null) continue;
+    if (JSON.stringify(stored[field]) !== JSON.stringify(fresh[field])) {
+      preserved.push(`${key}.${field}`);
+    }
+    value[field] = stored[field];
+  }
+  if (key === DAILY_SECTION_KEYS.SPEND
+    && ["mail", "ld", "bcd"].some((field) => value[field] != null)) {
+    value.total = round2(
+      (finiteNumber(value.mail) || 0)
+      + (finiteNumber(value.ld) || 0)
+      + (finiteNumber(value.bcd) || 0),
+    );
+  }
+  return { value, preserved };
 }
 
 /**
@@ -317,6 +588,7 @@ module.exports = {
   BUILDERS,
   SECTION_KEYS,
   frozenFieldsFor,
+  preserveFrozenFields,
   confirmFieldsFor,
   unconfirmedIn,
   mergeSection,
@@ -325,4 +597,5 @@ module.exports = {
   maxField,
   mergeCountMaps,
   mergeRowsBy,
+  summarizeCallHighlights,
 };

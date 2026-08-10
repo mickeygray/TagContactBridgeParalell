@@ -1,16 +1,27 @@
 "use strict";
 
 const DailyReportFact = require("../../shared-models/src/DailyReportFact");
-const { PRESETS } = require("./reportBlocksService");
+const { preserveFrozenFields, summarizeCallHighlights } = require("./dailySectionBuilders");
+const {
+  AUXILIARY_DAILY_SECTION_KEYS,
+  DAILY_SECTION_KEYS,
+  REPORT_SECTION_IDS,
+  REPORT_TO_DAILY_SECTION,
+  ROLLUP_SECTION_IDS,
+  isValidDateKey,
+} = require("./dailyReportContract");
 
-const CAPTURE_VERSION = 1;
-const REQUIRED_SECTIONS = Object.freeze([...(PRESETS.rollup || [])]);
-const CALL_SECTION = "longcalls";
+// Version 2 adds the canonical section vocabulary, split facts/detail views,
+// callHighlights, and report-complete semantics independent of optional call
+// aggregates. Readers can identify older rows instead of assuming parity.
+const CAPTURE_VERSION = 2;
+const REQUIRED_SECTIONS = Object.freeze([...ROLLUP_SECTION_IDS]);
+const CALL_SECTION = REPORT_SECTION_IDS.LONG_CALLS;
 /**
  * The key inside `facts`, which is NOT the same string as the report section that
  * feeds it. `longcalls` is a block in the nightly email; `calls` is the stored slot.
  */
-const CALL_SECTION_FACT = "calls";
+const CALL_SECTION_FACT = DAILY_SECTION_KEYS.CALLS;
 const CANONICAL_DEFINITION_NAME = "financial roll up with calls";
 
 // Daily facts are statistics, not a second customer/call store. The report may
@@ -100,22 +111,15 @@ function isFactComplete(fact) {
   if (!fact) return false;
   const captured = new Set(fact.coverage?.capturedSections || []);
   const errors = (fact.coverage?.sectionErrors || []).length;
-  const core = REQUIRED_SECTIONS.filter((id) => id !== CALL_SECTION);
-  const coreComplete = core.every((id) => captured.has(id)) && errors === 0;
-  return coreComplete && fact.coverage?.callProjection === "complete";
+  // Completeness here means "can the stored report render every required
+  // email section?" The aggregate recording-index projection is useful extra
+  // evidence and has its own callProjection status, but it is not one of the
+  // five report sections and therefore cannot veto an otherwise complete day.
+  return REQUIRED_SECTIONS.every((id) => captured.has(id)) && errors === 0;
 }
 
 function sectionMap(report) {
   return new Map((report?.sections || []).map((section) => [String(section.id), section]));
-}
-
-function sectionRowCount(section) {
-  const value = section?.data;
-  if (Array.isArray(value)) return value.length;
-  for (const key of ["rows", "agents", "calls", "emailRows"]) {
-    if (Array.isArray(value?.[key])) return value[key].length;
-  }
-  return 0;
 }
 
 function isDailyFactCaptureCandidate(def, report, range) {
@@ -138,9 +142,10 @@ function buildDailyReportFact({
   report,
   emailAcceptedAt = new Date(),
   callFacts = null,
+  dailyEntry = null,
 } = {}) {
   const key = String(dateKey || "").trim();
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(key)) throw new Error("daily fact dateKey must be YYYY-MM-DD");
+  if (!isValidDateKey(key)) throw new Error("daily fact dateKey must be YYYY-MM-DD");
   if (report?.from !== key || report?.to !== key) throw new Error("daily fact requires a one-day report");
 
   const sections = sectionMap(report);
@@ -150,14 +155,30 @@ function buildDailyReportFact({
     .filter((id) => sections.get(id)?.error)
     .map((id) => `${id}:${safeText(sections.get(id).error, 160)}`);
   if ((report?.failures || []).length) sectionErrors.push(`source-failures:${report.failures.length}`);
+  if ((dailyEntry?.errors || []).length) {
+    sectionErrors.push(...dailyEntry.errors.map((error) => `entry:${safeText(error, 160)}`));
+  }
 
   const coreRequired = REQUIRED_SECTIONS.filter((id) => id !== CALL_SECTION);
   const coreComplete = coreRequired.every((id) => capturedSections.includes(id))
     && sectionErrors.length === 0;
+  const reportComplete = REQUIRED_SECTIONS.every((id) => capturedSections.includes(id))
+    && sectionErrors.length === 0;
   const callSection = sections.get(CALL_SECTION);
-  const callProjection = callFacts
+  // The report already gathered the call-highlight section. Capturing that
+  // section cleanly is a completed report projection, including the legitimate
+  // zero-row case. `callFacts` is an optional richer aggregate supplied by the
+  // recording index; its absence is not unfinished work.
+  const callProjection = callSection && !callSection.error
     ? "complete"
-    : (callSection?.error ? "unavailable" : "pending");
+    : "unavailable";
+  const entryFacts = dailyEntry?.facts && typeof dailyEntry.facts === "object"
+    ? dailyEntry.facts : null;
+  const fromEntry = (key, fallback) => (
+    entryFacts && Object.prototype.hasOwnProperty.call(entryFacts, key)
+      ? entryFacts[key]
+      : fallback
+  );
 
   return {
     dateKey: key,
@@ -171,8 +192,12 @@ function buildDailyReportFact({
     // which reads as delivered to anything that only checks for presence.
     emailAcceptedAt: emailAcceptedAt == null ? null : new Date(emailAcceptedAt),
     capturedAt: new Date(),
+    ...(dailyEntry ? { entryBuiltAt: new Date(), detail: dailyEntry.detail || {} } : {}),
     facts: {
-      financial: sanitizeFactValue(sections.get("topline")?.data ?? null),
+      [DAILY_SECTION_KEYS.FINANCIAL]: fromEntry(
+        DAILY_SECTION_KEYS.FINANCIAL,
+        sanitizeFactValue(sections.get(REPORT_SECTION_IDS.TOPLINE)?.data ?? null),
+      ),
       // ALL COSTS BY SOURCE — total, LD (with lead count), mail (with pieces),
       // BCD (with call count and rate). Added 2026-08-04: a stored day used to
       // carry revenue with no denominator, so cost-per-lead could never be
@@ -181,13 +206,35 @@ function buildDailyReportFact({
       // Read off report.spend, NOT a rendered section: the `spend` block is not
       // in the rollup preset, and putting it there to reach the number would
       // have added a section to the nightly email.
-      spend: sanitizeFactValue(report.spend ?? null),
-      bySource: sanitizeFactValue(sections.get("source")?.data ?? null),
-      byAgent: sanitizeFactValue(sections.get("ldcalls")?.data ?? null),
-      statusMovement: sanitizeFactValue(sections.get("status")?.data ?? null),
-      calls: callFacts
+      [DAILY_SECTION_KEYS.SPEND]: fromEntry(
+        DAILY_SECTION_KEYS.SPEND,
+        sanitizeFactValue(report.spend ?? null),
+      ),
+      [REPORT_TO_DAILY_SECTION[REPORT_SECTION_IDS.BY_SOURCE]]: fromEntry(
+        DAILY_SECTION_KEYS.BY_SOURCE,
+        sanitizeFactValue(sections.get(REPORT_SECTION_IDS.BY_SOURCE)?.data ?? null),
+      ),
+      [REPORT_TO_DAILY_SECTION[REPORT_SECTION_IDS.BY_AGENT]]: fromEntry(
+        DAILY_SECTION_KEYS.BY_AGENT,
+        sanitizeFactValue(sections.get(REPORT_SECTION_IDS.BY_AGENT)?.data ?? null),
+      ),
+      [REPORT_TO_DAILY_SECTION[REPORT_SECTION_IDS.STATUS]]: fromEntry(
+        DAILY_SECTION_KEYS.STATUS,
+        sanitizeFactValue(sections.get(REPORT_SECTION_IDS.STATUS)?.data ?? null),
+      ),
+      [DAILY_SECTION_KEYS.CALLS]: callFacts
         ? sanitizeFactValue(callFacts)
-        : { status: callProjection, rowsObservedInEmail: sectionRowCount(callSection) },
+        : fromEntry(
+          DAILY_SECTION_KEYS.CALLS,
+          null,
+        ),
+      [DAILY_SECTION_KEYS.CALL_HIGHLIGHTS]: fromEntry(
+        DAILY_SECTION_KEYS.CALL_HIGHLIGHTS,
+        sanitizeFactValue(summarizeCallHighlights(
+          sections.get(REPORT_SECTION_IDS.LONG_CALLS)?.data ?? [],
+        )),
+      ),
+      [DAILY_SECTION_KEYS.ACTIVITY]: fromEntry(DAILY_SECTION_KEYS.ACTIVITY, null),
     },
     coverage: {
       requiredSections: [...REQUIRED_SECTIONS],
@@ -195,9 +242,10 @@ function buildDailyReportFact({
       missingSections,
       sectionErrors,
       reportDegraded: Boolean((report?.failures || []).length || sectionErrors.length),
+      reportComplete,
       coreComplete,
       callProjection,
-      complete: coreComplete && callProjection === "complete",
+      complete: reportComplete,
     },
   };
 }
@@ -220,26 +268,29 @@ function buildDailyReportFact({
  * value; an absent section writes an explicit null.
  */
 function flattenFactUpdate(fact) {
-  const { facts, ...rest } = fact;
+  const { facts, detail, ...rest } = fact;
   const set = { ...rest };
+  const auxiliary = new Set(AUXILIARY_DAILY_SECTION_KEYS);
   for (const [key, value] of Object.entries(facts || {})) {
-    // A PLACEHOLDER MUST NOT OVERWRITE REAL DATA.
-    //
+    // ABSENT AUXILIARY FACTS MUST NOT OVERWRITE REAL DATA.
     // This path never has call facts — the call index produces them and the daily
-    // entry worker posts them. What it writes here is a marker, {status:"pending"},
-    // saying "somebody else owns this". Writing that marker over counts the worker
-    // already stored would destroy the only real numbers in the document, and on a
-    // nightly schedule it would do so every single night.
-    //
-    // Leaving the key absent loses nothing: coverage.callProjection already records
-    // "pending" for the day, so the state is still stated, just not stated twice in
-    // a place another writer owns.
-    if (key === CALL_SECTION_FACT
+    // call projection lives in facts.callHighlights. facts.calls is optional,
+    // richer aggregate evidence owned by the recording index.
+    if ((auxiliary.has(key) && value == null)
+      || (key === CALL_SECTION_FACT
       && value
-      && ["pending", "unavailable"].includes(String(value.status || "").toLowerCase())) {
+      && ["pending", "unavailable"].includes(String(value.status || "").toLowerCase()))) {
       continue;
     }
     set[`facts.${key}`] = value;
+  }
+  // Flatten detail for the same reason as facts: a whole-object write would
+  // erase call/activity detail attached by their dedicated writers. Core
+  // report sections may write null to clear stale partial output; auxiliary
+  // nulls mean this gather could not see the section and therefore do nothing.
+  for (const [key, value] of Object.entries(detail || {})) {
+    if (auxiliary.has(key) && value == null) continue;
+    set[`detail.${key}`] = value;
   }
   return set;
 }
@@ -262,9 +313,36 @@ function flattenFactUpdate(fact) {
  */
 async function persistBuiltDailyReportFact(fact, { Model = DailyReportFact } = {}) {
   if (!fact || !fact.dateKey) throw new Error("a built daily fact requires a dateKey");
+  let writeFact = fact;
+  // The snapshot path is a second writer of the same daily entry. It must obey
+  // the same write-once mail-spend rule as buildDailyEntry: an operator rerun
+  // may refresh event-backed LD/BCD values, but it must not silently restate a
+  // closed day's sheet-backed mail cost. The scheduler's day claim prevents
+  // ordinary overlap; this indexed read protects explicit reruns.
+  if (typeof Model.findOne === "function" && fact.facts?.[DAILY_SECTION_KEYS.SPEND]) {
+    const existing = await Model.findOne({ dateKey: fact.dateKey })
+      .select("facts.spend detail.spend")
+      .lean();
+    const storedSpend = existing?.facts?.[DAILY_SECTION_KEYS.SPEND]
+      || existing?.detail?.[DAILY_SECTION_KEYS.SPEND];
+    if (storedSpend) {
+      const merged = preserveFrozenFields(
+        DAILY_SECTION_KEYS.SPEND,
+        storedSpend,
+        fact.facts[DAILY_SECTION_KEYS.SPEND],
+      );
+      writeFact = {
+        ...fact,
+        facts: { ...fact.facts, [DAILY_SECTION_KEYS.SPEND]: merged.value },
+        detail: fact.detail
+          ? { ...fact.detail, [DAILY_SECTION_KEYS.SPEND]: merged.value }
+          : fact.detail,
+      };
+    }
+  }
   await Model.updateOne(
     { dateKey: fact.dateKey },
-    { $set: flattenFactUpdate(fact), $inc: { revision: 1 } },
+    { $set: flattenFactUpdate(writeFact), $inc: { revision: 1 } },
     { upsert: true },
   );
   return { status: "captured", dateKey: fact.dateKey };
@@ -272,15 +350,12 @@ async function persistBuiltDailyReportFact(fact, { Model = DailyReportFact } = {
 
 async function persistDailyReportFact(input, { Model = DailyReportFact } = {}) {
   const fact = buildDailyReportFact(input);
-  await Model.updateOne(
-    { dateKey: fact.dateKey },
-    { $set: flattenFactUpdate(fact), $inc: { revision: 1 } },
-    { upsert: true },
-  );
+  await persistBuiltDailyReportFact(fact, { Model });
   return {
     status: "captured",
     dateKey: fact.dateKey,
     complete: fact.coverage.complete,
+    reportComplete: fact.coverage.reportComplete,
     coreComplete: fact.coverage.coreComplete,
     callProjection: fact.coverage.callProjection,
   };
@@ -289,22 +364,23 @@ async function persistDailyReportFact(input, { Model = DailyReportFact } = {}) {
 async function attachDailyCallFacts({ dateKey, callFacts, status = "complete" } = {}, {
   Model = DailyReportFact,
 } = {}) {
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(dateKey || ""))) {
+  if (!isValidDateKey(dateKey)) {
     throw new Error("daily call facts dateKey must be YYYY-MM-DD");
   }
   if (!new Set(["complete", "unavailable"]).has(status)) {
     throw new Error("daily call facts status must be complete or unavailable");
   }
-  const existing = await Model.findOne({ dateKey }).select("coverage.coreComplete").lean();
+  const existing = await Model.findOne({ dateKey })
+    .select("coverage.complete coverage.reportComplete coverage.capturedSections coverage.sectionErrors")
+    .lean();
   if (!existing) return { status: "missing-day", dateKey };
-  const complete = Boolean(existing.coverage?.coreComplete) && status === "complete";
+  const complete = isFactComplete(existing);
   await Model.updateOne(
     { dateKey },
     {
       $set: {
         "facts.calls": sanitizeFactValue(callFacts || {}),
         "coverage.callProjection": status,
-        "coverage.complete": complete,
       },
       $inc: { revision: 1 },
     },
@@ -322,7 +398,19 @@ function dayKeys(from, to) {
 }
 
 async function readDailyReportFactRange({ from, to } = {}, { Model = DailyReportFact } = {}) {
+  if (!isValidDateKey(from) || !isValidDateKey(to)) {
+    throw new Error("daily fact range requires real YYYY-MM-DD from/to dates");
+  }
   const wanted = dayKeys(from, to);
+  if (!wanted.length) {
+    return {
+      days: [],
+      coverage: {
+        daysRequested: 0, daysStored: 0, missing: [], incomplete: [], callsPending: [],
+        complete: false, reason: "degenerate-range",
+      },
+    };
+  }
   const docs = await Model.find({ dateKey: { $gte: from, $lte: to } }).sort({ dateKey: 1 }).lean();
   const have = new Set(docs.map((doc) => doc.dateKey));
   const missing = wanted.filter((day) => !have.has(day));

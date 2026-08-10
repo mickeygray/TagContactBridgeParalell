@@ -19,6 +19,10 @@
 // authoritative services, not from a stats table.
 
 const { groupCaseIds } = require("./caseListFormatter");
+const {
+  REPORT_SECTION_IDS,
+  ROLLUP_SECTION_IDS,
+} = require("./dailyReportContract");
 
 const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
 const money = (n) => `$${(Number(n) || 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
@@ -84,7 +88,7 @@ const BLOCKS = [
     // apply by source." A blended return across mail and LD averages a piece
     // that pays for itself with one that does not, and the average is a number
     // nobody can act on.
-    id: "topline",
+    id: REPORT_SECTION_IDS.TOPLINE,
     label: "Top line",
     hint: "Money in, spend, net, and the volume behind them",
     termsShort: "Money received vs spend booked, same range. No blended ROI — that only means anything per source.",
@@ -273,7 +277,7 @@ const BLOCKS = [
     // talk time (callrail + phone burner), deals, cash so one place for calls
     // by agent." `worked` and this block were two tables of the same people
     // built from two sources; a reader had to reconcile them by eye.
-    id: "ldcalls",
+    id: REPORT_SECTION_IDS.BY_AGENT,
     label: "Calls by agent",
     hint: "Inbound taken, dials placed, new leads worked, and what it cost",
     termsShort: "Per agent, in range: inbound, dials, new LD leads first-touched, and cost — mail ALLOCATED by share of calls offered; BCD and LD per unit.",
@@ -902,7 +906,7 @@ const BLOCKS = [
   },
 
   {
-    id: "source",
+    id: REPORT_SECTION_IDS.BY_SOURCE,
     label: "By source",
     hint: "Deals, cash, spend and cost-per for each active source",
     termsShort: "ROAS = initials ÷ spend, both inside the range. Attributable call beats lead age; aged money carries no ratio.",
@@ -1355,7 +1359,7 @@ const BLOCKS = [
   },
 
   {
-    id: "status",
+    id: REPORT_SECTION_IDS.STATUS,
     label: "Status movement",
     hint: "DNC, post-dates, suspensions and conversions",
     termsShort: "Status changes inside the range, not current status.",
@@ -1462,6 +1466,9 @@ const BLOCKS = [
       return {
         // No summary. Mickey 2026-07-30: the counts live "only at the top" —
         // repeating them over the list is the same fact twice on one screen.
+        summary: d.rangeSummary
+          ? `${d.dnc || 0} DNC · ${d.postdate || 0} post-date · ${d.suspended || 0} suspended · ${d.conversions || 0} converted · ${d.other || 0} other`
+          : undefined,
         rows: key.slice(0, 30),
         // Mickey 2026-07-30: "dont need moved by or date just case and lane
         // really." Who moved it and when are lookups, not decisions.
@@ -2295,7 +2302,7 @@ const BLOCKS = [
     },
   },
   {
-    id: "longcalls",
+    id: REPORT_SECTION_IDS.LONG_CALLS,
     label: "Calls worth hearing",
     hint: "Every call over 10 minutes, with what came of it",
     termsShort: "Calls at or over the length threshold, inbound and outbound, with what came of them.",
@@ -2458,9 +2465,15 @@ const BLOCKS = [
       return out;
     },
     renderText(rows) {
+      if (!rows.length && rows.rangeSummary) {
+        return `${rows.totalObserved || 0} long call(s) observed Â· ${rows.over30Minutes || 0} at least 30 minutes`
+          + ` Â· ${rows.withRecording || 0} with recording evidence Â· no retained review rows`;
+      }
       if (!rows.length) return "Calls worth hearing     (none over the threshold)";
       const deals = rows.filter((r) => r.outcome === "DEAL").length;
-      const L = [`${rows.length} call(s) over 10 minutes · ${deals} became a deal`, ""];
+      const L = [rows.rangeSummary
+        ? `${rows.totalObserved || 0} long call(s) observed · ${rows.over30Minutes || 0} at least 30 minutes · showing up to ${rows.topPerAgent || 5} longest recording(s) per agent`
+        : `${rows.length} call(s) over 10 minutes · ${deals} became a deal`, ""];
       L.push("WHEN".padEnd(12) + "MINS".padStart(6) + "  " + "SOURCE".padEnd(30) + "OUTCOME".padEnd(16) + "AMOUNT".padStart(11));
       L.push("-".repeat(77));
       for (const r of rows.slice(0, 40)) {
@@ -2494,7 +2507,9 @@ const BLOCKS = [
       return {
         // Normally no summary — but an unreadable CallRail has to say so, or
         // the template prints "Nothing in this range." over a hole.
-        summary: rows.unavailable
+        summary: rows.rangeSummary
+          ? `${rows.totalObserved || 0} long call(s) observed · ${rows.over30Minutes || 0} at least 30 minutes · ${rows.withRecording || 0} with recordings · showing up to ${rows.topPerAgent || 5} longest per agent`
+          : rows.unavailable
           ? `INBOUND CALLS INCOMPLETE — ${rows.unavailable}. Outbound LD calls below are complete.`
           : (withoutLink
             ? `${withoutLink} long call${withoutLink === 1 ? "" : "s"} not listed — no recording (capture began 2026-08-03)`
@@ -2596,7 +2611,7 @@ const PRESETS = Object.freeze({
   // named active pieces only; call quality is LD; status movement is the chase
   // list; then the calls. `worked` is gone — it and LD call quality were
   // reporting the same dials twice.
-  rollup: ["topline", "source", "ldcalls", "status", "longcalls"],
+  rollup: [...ROLLUP_SECTION_IDS],
   // The 1pm nudge and the same lines again in the EOD roll-up.
   worklog: ["worked"],
   daily: ["money", "spend", "net", "source", "officer", "status", "recordings"],
@@ -2615,9 +2630,9 @@ const PRESETS = Object.freeze({
   // VENDOR sees about the leads they sold us — how those calls actually went,
   // what moved, and the day-level totals. Deliberately no per-source ROI table
   // and no officer breakdown: that is our P/L, not theirs.
-  "vendor-ld": ["topline", "source", "ldcalls", "status", "longcalls"],
+  "vendor-ld": [...ROLLUP_SECTION_IDS],
   // "heres every call over 10 minutes and its outcome"
-  "long-calls": ["longcalls"],
+  "long-calls": [REPORT_SECTION_IDS.LONG_CALLS],
 });
 
 function resolveSelection(selection) {

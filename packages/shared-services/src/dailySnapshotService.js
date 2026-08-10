@@ -26,6 +26,11 @@ const {
   CANONICAL_DEFINITION_NAME,
   REQUIRED_SECTIONS,
 } = require("./dailyReportFactService");
+const {
+  buildDailyEntry,
+  gatherersFromReport,
+} = require("./dailyEntryService");
+const { isValidDateKey } = require("./dailyReportContract");
 
 /**
  * Write one day's snapshot from a freshly composed report.
@@ -111,11 +116,21 @@ async function writeDailySnapshot({
   if (!verdict.capture) return { status: "skipped", reason: verdict.reason };
 
   try {
+    // ONE IN-MEMORY DAY. Every report-owned section is sliced from the exact
+    // report that is about to become the email. This creates both views at the
+    // same time: sanitized additive facts and complete one-day detail. No
+    // service writes while the object is being assembled.
+    const dailyEntry = await buildDailyEntry({
+      dateKey: range.from,
+      gatherers: gatherersFromReport(report),
+      apply: false,
+    });
     const fact = buildDailyReportFact({
       dateKey: range.from,
       definitionName: def.name,
       report,
       emailAcceptedAt,
+      dailyEntry,
     });
     const saved = await writer(fact, Model ? { Model } : undefined);
     logger?.info?.("daily_snapshot.written", {
@@ -148,7 +163,7 @@ async function writeDailySnapshot({
  * moved on, and a stored day must not drift because an email was delivered.
  */
 async function stampEmailAccepted(dateKey, acceptedAt = new Date(), { Model = null } = {}) {
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(dateKey || ""))) {
+  if (!isValidDateKey(dateKey)) {
     throw new Error("stampEmailAccepted needs a YYYY-MM-DD dateKey");
   }
   const M = Model || require("../../shared-models/src/DailyReportFact");

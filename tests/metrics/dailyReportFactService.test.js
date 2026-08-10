@@ -61,7 +61,7 @@ test("only the canonical unfiltered one-day rollup captures a daily fact", () =>
   ).reason, "not-one-day");
 });
 
-test("one combined day stores all non-call sections and reserves Claude's call slot", () => {
+test("one combined day is report-complete while reserving the aggregate call slot", () => {
   const fact = service.buildDailyReportFact({
     dateKey: "2026-08-03",
     definitionName: "financial roll up with calls",
@@ -75,9 +75,12 @@ test("one combined day stores all non-call sections and reserves Claude's call s
   assert.equal(fact.facts.byAgent.cases, 14);
   assert.equal("worthHearing" in fact.facts.byAgent, false);
   assert.equal(fact.facts.statusMovement.dnc, 2);
-  assert.deepEqual(fact.facts.calls, { status: "pending", rowsObservedInEmail: 1 });
+  assert.equal(fact.facts.calls, null,
+    "optional aggregate counts stay empty instead of leaving unfinished work");
   assert.equal(fact.coverage.coreComplete, true);
-  assert.equal(fact.coverage.complete, false, "the day stays explicit until Claude attaches call facts");
+  assert.equal(fact.coverage.reportComplete, true);
+  assert.equal(fact.coverage.complete, true,
+    "a clean long-call section completes the report without waiting on auxiliary aggregate counts");
 
   const encoded = JSON.stringify(fact);
   assert.doesNotMatch(encoded, /redacted|example\.invalid/);
@@ -145,6 +148,39 @@ test("persistence is one upsert per day and increments its revision", async () =
   assert.equal(write[2].upsert, true);
 });
 
+test("a snapshot rerun preserves closed mail spend but refreshes event-backed spend", async () => {
+  let write = null;
+  const Model = {
+    findOne: () => ({
+      select: () => ({
+        lean: async () => ({
+          facts: { spend: { mail: 100, mailPieces: 50, ld: 20, bcd: 5, total: 125 } },
+          detail: { spend: { mail: 100, mailPieces: 50, ld: 20, bcd: 5, total: 125 } },
+        }),
+      }),
+    }),
+    updateOne: async (...args) => { write = args; return { acknowledged: true }; },
+  };
+  const fact = service.buildDailyReportFact({
+    dateKey: "2026-08-03",
+    definitionName: service.CANONICAL_DEFINITION_NAME,
+    report: report({ spend: { mail: 999, mailPieces: 999, ld: 30, bcd: 7, total: 1036 } }),
+    dailyEntry: {
+      errors: [],
+      facts: { spend: { mail: 999, mailPieces: 999, ld: 30, bcd: 7, total: 1036 } },
+      detail: { spend: { mail: 999, mailPieces: 999, ld: 30, bcd: 7, total: 1036 } },
+    },
+  });
+
+  await service.persistBuiltDailyReportFact(fact, { Model });
+  const factsSpend = write[1].$set["facts.spend"];
+  assert.deepEqual(factsSpend, {
+    mail: 100, mailPieces: 50, ld: 30, bcd: 7, total: 137,
+  });
+  assert.deepEqual(write[1].$set["detail.spend"], factsSpend,
+    "the complete and additive views must agree about the frozen day");
+});
+
 test("the nightly write touches facts.<key>, never the whole facts object", async () => {
   // $set: { facts: {...} } REPLACES the subdocument in Mongo. That is fine while
   // this is the only writer and destructive the moment anything else contributes a
@@ -189,12 +225,20 @@ test("the collection enforces exactly one document per dateKey", () => {
   assert.equal(DailyReportFact.schema.path("dateKey").options.unique, true);
 });
 
-test("Claude can attach aggregate call facts without creating another daily document", async () => {
+test("aggregate call facts attach without changing report completeness", async () => {
   let update = null;
   const Model = {
     findOne: () => ({
       select: () => ({
-        lean: async () => ({ dateKey: "2026-08-03", coverage: { coreComplete: true } }),
+        lean: async () => ({
+          dateKey: "2026-08-03",
+          coverage: {
+            complete: true,
+            reportComplete: true,
+            capturedSections: [...service.REQUIRED_SECTIONS],
+            sectionErrors: [],
+          },
+        }),
       }),
     }),
     updateOne: async (...args) => { update = args; return { acknowledged: true }; },
@@ -206,10 +250,11 @@ test("Claude can attach aggregate call facts without creating another daily docu
   assert.equal(result.complete, true);
   assert.deepEqual(update[0], { dateKey: "2026-08-03" });
   assert.deepEqual(update[1].$set["facts.calls"], { total: 12, long: 3 });
-  assert.equal(update[1].$set["coverage.complete"], true);
+  assert.equal("coverage.complete" in update[1].$set, false,
+    "an auxiliary writer must not rewrite the report readiness decision");
 });
 
-test("range reads return ordered daily inputs and refuse to hide missing or pending days", async () => {
+test("range reads report missing days without inventing pending work", async () => {
   const Model = {
     find: () => ({
       sort: () => ({
@@ -227,7 +272,7 @@ test("range reads return ordered daily inputs and refuse to hide missing or pend
           {
             dateKey: "2026-08-03",
             coverage: {
-              complete: false, callProjection: "pending",
+              complete: true, callProjection: "complete",
               capturedSections: [...service.REQUIRED_SECTIONS], sectionErrors: [],
             },
           },
@@ -240,8 +285,9 @@ test("range reads return ordered daily inputs and refuse to hide missing or pend
   }, { Model });
   assert.deepEqual(result.days.map((day) => day.dateKey), ["2026-08-01", "2026-08-03"]);
   assert.deepEqual(result.coverage.missing, ["2026-08-02"]);
-  assert.deepEqual(result.coverage.incomplete, ["2026-08-03"]);
-  assert.deepEqual(result.coverage.callsPending, ["2026-08-03"]);
+  assert.deepEqual(result.coverage.incomplete, [],
+    "a fully captured email is complete without an auxiliary dependency");
+  assert.deepEqual(result.coverage.callsPending, []);
   assert.equal(result.coverage.complete, false);
 });
 
@@ -286,7 +332,9 @@ test("ONE gather feeds both the email and the snapshot", async () => {
     selection: ["topline", "source", "ldcalls", "status", "longcalls"],
     sections: [
       { id: "topline", data: { cash: 1 } }, { id: "source", data: [] },
-      { id: "ldcalls", data: [] }, { id: "status", data: {} }, { id: "longcalls", data: [] },
+      { id: "ldcalls", data: [] },
+      { id: "status", data: { dnc: 1, keyChanges: [{ caseId: 9, lane: "dnc" }] } },
+      { id: "longcalls", data: [] },
     ],
     failures: [],
     spend: { total: 471, ld: 423, ldLeads: 141, mail: 0, mailPieces: 0, bcd: 48, bcdCalls: 12 },
@@ -302,6 +350,12 @@ test("ONE gather feeds both the email and the snapshot", async () => {
   assert.equal(composes, 0, "a supplied report must never trigger a second gather");
   assert.equal(out.status, "written");
   assert.equal(saved.facts.spend.ldLeads, 141, "costs by source survive the merge");
+  assert.equal(saved.facts.statusMovement.dnc, 1);
+  assert.equal("keyChanges" in saved.facts.statusMovement, false,
+    "the additive view stays sanitized");
+  assert.equal(saved.detail.statusMovement.keyChanges[0].caseId, 9,
+    "the same in-memory build also carries the complete one-day view");
+  assert.ok(saved.entryBuiltAt instanceof Date);
 
   // The explicit standalone fallback stays, and is what makes a delayed
   // missed-day/backfill repair runnable without turning it into a scheduler.
@@ -365,7 +419,7 @@ test("the runtime hands the snapshot writer the run's own range and report", () 
     "the snapshot must key on the range the email used and be built from its report");
 });
 
-test("a pending calls placeholder is not written over another writer's real counts", async () => {
+test("a completed report without optional aggregate counts does not overwrite them", async () => {
   // This path never has call facts — the call index produces them and the daily
   // entry worker posts them. Stamping {status:"pending"} here would erase real
   // counts every night, on a schedule.
@@ -378,7 +432,7 @@ test("a pending calls placeholder is not written over another writer's real coun
   }, { Model });
   assert.equal("facts.calls" in write[1].$set, false);
   // The state is still recorded — just in the block this path does own.
-  assert.equal(write[1].$set["coverage"].callProjection, "pending");
+  assert.equal(write[1].$set["coverage"].callProjection, "complete");
 });
 
 test("real call facts ARE written when this path is given them", async () => {
@@ -457,6 +511,13 @@ test("the snapshot writer default can persist what the snapshot built", async ()
   assert.equal(result.status, "written",
     `the default writer must persist, not rebuild — got ${result.status}: ${result.reason || ""}`);
   assert.equal(writes.length, 1);
+  const set = writes[0][1].$set;
+  assert.ok("detail.financial" in set, "the atomic write carries the complete report view");
+  assert.equal("detail" in set, false, "detail is field-flattened, never whole-object replaced");
+  assert.equal("facts.calls" in set, false, "an unseen call section cannot erase real call facts");
+  assert.equal("facts.activity" in set, false, "an unseen activity section cannot erase its writer");
+  assert.equal("detail.calls" in set, false, "the same protection applies to call detail");
+  assert.equal("detail.activity" in set, false, "the same protection applies to activity detail");
 });
 
 // ── E13 / D7: completeness is COMPUTED ON READ ─────────────────────────────
@@ -501,13 +562,13 @@ test("a section error anywhere makes the day incomplete, whatever was stored", (
   }), false);
 });
 
-test("calls still pending keeps the day incomplete", () => {
+test("pending aggregate calls do not veto a complete stored report", () => {
   assert.equal(service.isFactComplete({
     coverage: {
       complete: true, callProjection: "pending",
       capturedSections: [...service.REQUIRED_SECTIONS], sectionErrors: [],
     },
-  }), false);
+  }), true);
 });
 
 test("no fact at all is not complete", () => {

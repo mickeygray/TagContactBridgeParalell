@@ -32,12 +32,13 @@
 // takes the other sections down with it.
 
 const DailyReportFact = require("../../shared-models/src/DailyReportFact");
-const { sanitizeFactValue } = require("./dailyReportFactService");
+const { CAPTURE_VERSION, sanitizeFactValue } = require("./dailyReportFactService");
 const {
-  BUILDERS, SECTION_KEYS, mergeSection, frozenFieldsFor, unconfirmedIn,
+  BUILDERS, SECTION_KEYS, mergeSection, frozenFieldsFor, preserveFrozenFields, unconfirmedIn,
 } = require("./dailySectionBuilders");
+const { isValidDateKey } = require("./dailyReportContract");
 
-const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+const MAX_RANGE_DAYS = 3660;
 
 // ── ONCE THE DAY IS SET, THE DAY IS SET ─────────────────────────────────────
 //
@@ -75,8 +76,6 @@ const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 // The field list itself lives in dailySectionBuilders, beside the builder that
 // owns it — see frozenFieldsFor(). A copy here would drift from it.
 
-const round2 = (n) => Math.round(Number(n || 0) * 100) / 100;
-
 /**
  * Merge a freshly gathered section over the stored one, honouring the fields the
  * section declared frozen.
@@ -91,18 +90,12 @@ const round2 = (n) => Math.round(Number(n || 0) * 100) / 100;
  * a day that disagrees with its own parts poisons every range that includes it.
  */
 function mergeFrozen(key, frozenFields, stored, fresh, out) {
-  const merged = { ...fresh };
-  const kept = [];
-  for (const f of frozenFields) {
-    if (stored[f] == null) continue;
-    if (JSON.stringify(stored[f]) !== JSON.stringify(fresh[f])) kept.push(f);
-    merged[f] = stored[f];
-  }
-  if (key === "spend" && ["mail", "ld", "bcd"].some((k) => merged[k] != null)) {
-    merged.total = round2(Number(merged.mail || 0) + Number(merged.ld || 0) + Number(merged.bcd || 0));
-  }
-  if (kept.length) out.preserved.push(...kept.map((f) => `${key}.${f}`));
-  return merged;
+  // `frozenFields` remains an argument because this function documents the
+  // caller's decision; the canonical registry still owns the actual list.
+  if (!frozenFields?.length) return fresh;
+  const merged = preserveFrozenFields(key, stored, fresh);
+  if (merged.preserved.length) out.preserved.push(...merged.preserved);
+  return merged.value;
 }
 
 /**
@@ -110,7 +103,8 @@ function mergeFrozen(key, frozenFields, stored, fresh, out) {
  * Sequential on purpose — these hit Logics, CallRail and Mongo, and the point of
  * the consolidation was to stop asking those the same thing twice at once.
  */
-async function section(name, fn, out) {
+async function section(builder, fn, out) {
+  const name = builder.key;
   if (typeof fn !== "function") { out.facts[name] = null; return; }
   try {
     const value = await fn();
@@ -133,7 +127,11 @@ async function section(name, fn, out) {
     // identifiers and per-day ratios stripped, so a year-long rollup never has
     // to drag them through it.
     out.detail[name] = raw;
-    out.facts[name] = raw === null ? null : sanitizeFactValue(raw);
+    out.facts[name] = raw === null
+      ? null
+      : (typeof builder.facts === "function"
+        ? builder.facts(raw)
+        : sanitizeFactValue(raw));
   } catch (error) {
     out.facts[name] = null;
     out.detail[name] = null;
@@ -160,7 +158,7 @@ async function buildDailyEntry({
   Model = DailyReportFact,
   logger = null,
 } = {}) {
-  if (!DATE_RE.test(String(dateKey || ""))) {
+  if (!isValidDateKey(dateKey)) {
     throw new Error(`buildDailyEntry: dateKey must be YYYY-MM-DD, got ${dateKey}`);
   }
 
@@ -181,8 +179,8 @@ async function buildDailyEntry({
   // consolidation was about not asking those the same thing twice at once.
   // Nothing depends on an earlier section's output; if that ever changes, say so
   // explicitly rather than relying on registry order.
-  for (const key of SECTION_KEYS) {
-    await section(key, gatherers[key], out);
+  for (const builder of BUILDERS) {
+    await section(builder, gatherers[builder.key], out);
   }
 
   out.sectionsGathered = Object.entries(out.facts)
@@ -243,7 +241,7 @@ async function buildDailyEntry({
       $setOnInsert: {
         dateKey,
         definitionName: "daily entry",
-        captureVersion: 1,
+        captureVersion: CAPTURE_VERSION,
         capturedAt: new Date(),
         emailAcceptedAt: null,
       },
@@ -321,9 +319,14 @@ function gatherersFromReport(report) {
 /** Every Pacific day key from `from` to `to`, inclusive. */
 function dayKeysBetween(from, to) {
   const out = [];
+  if (!isValidDateKey(from) || !isValidDateKey(to)) return out;
   const start = Date.parse(`${from}T00:00:00.000Z`);
   const end = Date.parse(`${to}T00:00:00.000Z`);
   if (!Number.isFinite(start) || !Number.isFinite(end) || start > end) return out;
+  const days = Math.floor((end - start) / 86400000) + 1;
+  if (days > MAX_RANGE_DAYS) {
+    throw new Error(`readEntryRange: range exceeds ${MAX_RANGE_DAYS} days`);
+  }
   for (let t = start; t <= end; t += 86400000) {
     out.push(new Date(t).toISOString().slice(0, 10));
   }
@@ -352,13 +355,23 @@ async function readEntryRange({
   from,
   to = from,
   view = "facts",
+  // Multi-day report rendering needs actionable call rows, not every customer
+  // detail field from every day. Null preserves the generic full-detail API;
+  // an explicit list narrows the Mongo projection before data enters memory.
+  detailKeys = null,
   Model = DailyReportFact,
 } = {}) {
-  if (!DATE_RE.test(String(from || "")) || !DATE_RE.test(String(to || ""))) {
+  if (!isValidDateKey(from) || !isValidDateKey(to)) {
     throw new Error(`readEntryRange: from/to must be YYYY-MM-DD, got ${from}..${to}`);
   }
-  if (!["facts", "detail"].includes(view)) {
-    throw new Error(`readEntryRange: view must be "facts" or "detail", got ${view}`);
+  if (!["facts", "detail", "both"].includes(view)) {
+    throw new Error(`readEntryRange: view must be "facts", "detail" or "both", got ${view}`);
+  }
+  if (detailKeys !== null) {
+    if (view !== "both" || !Array.isArray(detailKeys)
+      || detailKeys.some((key) => !SECTION_KEYS.includes(key))) {
+      throw new Error("readEntryRange: detailKeys requires view=both and known section keys");
+    }
   }
   const wanted = dayKeysBetween(from, to);
   if (!wanted.length) {
@@ -371,24 +384,48 @@ async function readEntryRange({
     };
   }
 
-  const stored = await Model.find({ dateKey: { $in: wanted } })
-    .select(`dateKey ${view}`).sort({ dateKey: 1 }).lean();
+  const detailProjection = detailKeys === null
+    ? "detail"
+    : detailKeys.map((key) => `detail.${key}`).join(" ");
+  const projection = view === "both"
+    ? `dateKey captureVersion facts ${detailProjection} coverage`
+    : `dateKey captureVersion ${view} coverage`;
+  // dateKey is YYYY-MM-DD and indexed, so lexical range order is calendar
+  // order. A bounded range query avoids a giant $in array for long reports.
+  const stored = await Model.find({ dateKey: { $gte: from, $lte: to } })
+    .select(projection).sort({ dateKey: 1 }).lean();
 
-  const byDay = new Map(stored.map((d) => [d.dateKey, d[view] || {}]));
-  const missingDays = wanted.filter((d) => !byDay.has(d));
+  const presentDays = new Set(stored.map((d) => d.dateKey));
+  const missingDays = wanted.filter((d) => !presentDays.has(d));
 
-  const sections = {};
-  for (const key of SECTION_KEYS) {
-    sections[key] = mergeSection(key, wanted.map((d) => byDay.get(d)?.[key] ?? null));
-  }
+  const mergeView = (name) => {
+    const byDay = new Map(stored.map((d) => [d.dateKey, d[name] || {}]));
+    return Object.fromEntries(SECTION_KEYS.map((key) => [
+      key,
+      mergeSection(key, wanted.map((d) => byDay.get(d)?.[key] ?? null)),
+    ]));
+  };
+  const sections = mergeView(view === "both" ? "facts" : view);
+  const detailSections = view === "both" ? mergeView("detail") : null;
+  const incompleteDays = stored
+    .filter((day) => day.coverage?.complete !== true)
+    .map((day) => day.dateKey);
+  const degradedDays = stored
+    .filter((day) => day.coverage?.reportDegraded === true
+      || (day.coverage?.sectionErrors || []).length > 0)
+    .map((day) => day.dateKey);
+  const legacyDays = stored
+    .filter((day) => Number(day.captureVersion || 0) !== CAPTURE_VERSION)
+    .map((day) => day.dateKey);
 
   return {
     from,
     to,
     view,
-    days: [...byDay.keys()],
+    days: [...presentDays],
     missingDays,
     sections,
+    ...(detailSections ? { detailSections } : {}),
     // Sections whose merged value claims something about NOW rather than
     // counting what happened — a month-old redline list may since have been
     // worked. Reported so a caller must decide to present it as history or
@@ -396,7 +433,10 @@ async function readEntryRange({
     unconfirmed: unconfirmedIn(sections, { days: wanted.length }),
     coverage: {
       daysRequested: wanted.length,
-      daysStored: byDay.size,
+      daysStored: presentDays.size,
+      incompleteDays,
+      degradedDays,
+      legacyDays,
       // Every requested day is present. Says nothing about whether each of
       // those days was itself complete — that is per-day `coverage`.
       complete: missingDays.length === 0,

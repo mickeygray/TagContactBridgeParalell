@@ -15,8 +15,10 @@ const modelOf = (days) => ({
     select: () => ({
       sort: () => ({
         lean: async () => Object.entries(days)
-          .filter(([d]) => q.dateKey.$in.includes(d))
-          .map(([dateKey, facts]) => ({ dateKey, facts })),
+          .filter(([d]) => d >= q.dateKey.$gte && d <= q.dateKey.$lte)
+          .map(([dateKey, facts]) => ({
+            dateKey, captureVersion: 2, facts, coverage: { complete: true },
+          })),
       }),
     }),
   }),
@@ -79,6 +81,17 @@ test("rows merge by identity, summing numbers and keeping names", () => {
   assert.equal(merged.length, 2, "BCD survives as its own row");
 });
 
+test("non-finite source values cannot poison a merged range", () => {
+  const merged = mergeSection("bySource", [
+    [{ source: "LD Custom", newCash: Infinity, spend: "not-a-number", deals: 1 }],
+    [{ source: "LD Custom", newCash: 200, spend: 20, deals: 2 }],
+  ]);
+  assert.equal(merged[0].newCash, 200);
+  assert.equal(merged[0].spend, 20);
+  assert.equal(merged[0].deals, 3);
+  assert.ok(Number.isFinite(merged[0].totalCash));
+});
+
 test("one record and many records return the same shape", async () => {
   const days = {
     "2026-08-03": { spend: { mail: 100, ld: 30, bcd: 4 }, calls: { links: 10 } },
@@ -111,12 +124,65 @@ test("a reversed range refuses rather than reporting complete", async () => {
   assert.deepEqual(r.days, []);
 });
 
+test("an impossible calendar date cannot normalize into a different day", async () => {
+  await assert.rejects(
+    () => readEntryRange({ from: "2026-02-31", to: "2026-03-01", Model: modelOf({}) }),
+    /YYYY-MM-DD/,
+  );
+});
+
+test("an unbounded multi-year request is rejected before allocating a day list", async () => {
+  await assert.rejects(
+    () => readEntryRange({ from: "2000-01-01", to: "2020-01-01", Model: modelOf({}) }),
+    /range exceeds 3660 days/,
+  );
+});
+
 test("the detail view is opt-in; facts is the default a range reads", async () => {
   await assert.rejects(
     () => readEntryRange({ from: "2026-08-03", view: "everything", Model: modelOf({}) }),
     /view must be/,
   );
   assert.equal(dayKeysBetween("2026-08-03", "2026-08-05").length, 3);
+});
+
+test("the combined long-tail view reads facts and detail with ONE bounded query", async () => {
+  let queries = 0;
+  const docs = [
+    {
+      dateKey: "2026-08-03",
+      facts: { statusMovement: { dnc: 2 } },
+      detail: { callHighlights: [{ officer: "Agent A", minutes: 31, listenUrl: "https://example.invalid/a" }] },
+      coverage: { complete: true },
+    },
+    {
+      dateKey: "2026-08-04",
+      facts: { statusMovement: { dnc: 3 } },
+      detail: { callHighlights: [{ officer: "Agent A", minutes: 42, listenUrl: "https://example.invalid/b" }] },
+      coverage: { complete: true },
+    },
+  ];
+  const Model = {
+    find: (query) => {
+      queries += 1;
+      assert.deepEqual(query.dateKey, { $gte: "2026-08-03", $lte: "2026-08-04" });
+      return {
+        select: (projection) => {
+          assert.equal(projection, "dateKey captureVersion facts detail.callHighlights coverage");
+          return { sort: () => ({ lean: async () => docs }) };
+        },
+      };
+    },
+  };
+
+  const range = await readEntryRange({
+    from: "2026-08-03", to: "2026-08-04", view: "both",
+    detailKeys: ["callHighlights"], Model,
+  });
+  assert.equal(queries, 1);
+  assert.equal(range.sections.statusMovement.dnc, 5);
+  assert.equal(range.detailSections.callHighlights.total, 2);
+  assert.equal(range.detailSections.callHighlights.rows.length, 2);
 });
 
 test("counts sum across a range, but the redline LIST is flagged unconfirmed", async () => {
@@ -134,7 +200,7 @@ test("counts sum across a range, but the redline LIST is flagged unconfirmed", a
   };
   const range = await readEntryRange({ from: "2026-08-03", to: "2026-08-04", view: "detail", Model: {
     find: (q) => ({ select: () => ({ sort: () => ({ lean: async () => Object.entries(days)
-      .filter(([d]) => q.dateKey.$in.includes(d))
+      .filter(([d]) => d >= q.dateKey.$gte && d <= q.dateKey.$lte)
       .map(([dateKey, detail]) => ({ dateKey, detail })) }) }) }),
   } });
 
@@ -150,7 +216,7 @@ test("a SINGLE day needs no confirmation — the snapshot and now are the same",
   };
   const range = await readEntryRange({ from: "2026-08-03", to: "2026-08-03", view: "detail", Model: {
     find: (q) => ({ select: () => ({ sort: () => ({ lean: async () => Object.entries(days)
-      .filter(([d]) => q.dateKey.$in.includes(d))
+      .filter(([d]) => d >= q.dateKey.$gte && d <= q.dateKey.$lte)
       .map(([dateKey, detail]) => ({ dateKey, detail })) }) }) }),
   } });
   assert.deepEqual(range.unconfirmed, [], "one day's snapshot IS that day's state");

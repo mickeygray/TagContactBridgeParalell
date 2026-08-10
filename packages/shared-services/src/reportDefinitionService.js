@@ -186,7 +186,8 @@ async function runDefinition(def, {
   let report;
   if (recordVerdict.ok) {
     report = await renderFromRecord({
-      dateKey: range.from,
+      from: range.from,
+      to: range.to,
       selection: selection.blocks.map((b) => b.id),
     });
     if (!report) {
