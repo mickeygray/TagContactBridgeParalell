@@ -38,7 +38,10 @@ change):
 
 - `apps/control-plane/src/server.js`
 - `apps/control-plane/src/services/nightlyHygieneRuntime.js`
+- `apps/control-plane/src/services/morningPassRuntime.js`
+- `apps/control-plane/src/services/middayPassRuntime.js`
 - `packages/shared-services/src/hourlySweeperService.js`
+- `packages/shared-services/src/callRecordingIndexService.js`
 - `packages/shared-services/src/mailboxIngestService.js`
 - `packages/shared-services/src/ncoaMailboxHandler.js`
 - `packages/shared-services/src/ncoaMailboxIngestService.js`
@@ -55,6 +58,8 @@ Tests:
 - `tests/metrics/nightlyHygieneRuntime.test.js`
 - `tests/metrics/ncoaMailboxHandler.test.js`
 - `tests/metrics/nightlyEmergencyClose.test.js`
+- `tests/metrics/passRuntime.test.js`
+- `tests/metrics/callRecordingIndex.test.js`
 - `tests/ncoaMailboxIngestService.test.js`
 
 No other dirty worktree file belongs to this patch.
@@ -133,7 +138,7 @@ data but does not persist the snapshot.
    listed above, and record which listed files were absent so rollback removes
    only files introduced by this patch.
 7. Install only this patch's files and verify their exact hashes.
-8. Run `node --check` on every changed JavaScript file and run the ten focused
+8. Run `node --check` on every changed JavaScript file and run the twelve focused
    test files.
 9. Run the full metrics gate.
 10. Restart only `parallel-control-plane`.
