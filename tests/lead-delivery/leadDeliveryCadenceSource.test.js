@@ -35,6 +35,9 @@ function sourceRow(overrides = {}) {
     },
     cadenceCounters: { cx: 7 },
     lastTouched: { cx: new Date("2026-07-10T18:00:00.000Z") },
+    logicsStatusInvalidatedAt: new Date("2026-07-10T18:00:00.000Z"),
+    logicsStatusCheckedAt: new Date("2026-07-10T18:01:00.000Z"),
+    logicsProspectEligible: true,
     caseProfile: {
       statusId: 1,
       statusCategory: "prospect",
@@ -204,6 +207,7 @@ test("intake status ships untouched leads and post-touch retries require newer L
       totalAttemptCount: 1,
       lastContactAt: new Date("2026-07-10T17:30:00.000Z"),
       logicsStatusInvalidatedAt: new Date("2026-07-10T17:30:00.000Z"),
+      logicsStatusCheckedAt: null,
     }),
     statusMaxAgeMs: maxAge,
   });
@@ -232,6 +236,7 @@ test("intake status ships untouched leads and post-touch retries require newer L
       totalAttemptCount: 1,
       lastContactAt: new Date("2026-07-10T17:30:00.000Z"),
       logicsStatusCheckedAt: new Date("2026-07-09T18:59:59.999Z"),
+      logicsStatusInvalidatedAt: null,
       logicsProspectEligible: true,
     }),
     statusMaxAgeMs: maxAge,
@@ -254,6 +259,21 @@ test("intake status ships untouched leads and post-touch retries require newer L
   });
   assert.equal(
     (await invalidated.source.readOne({ domain: "TAG", caseId: 1001, now })).eligibility.reason,
+    "status-invalidated-after-touch",
+  );
+
+  const invalidatedWithoutAgeGate = harness({
+    row: sourceRow({
+      totalAttemptCount: 1,
+      lastContactAt: new Date("2026-07-10T18:30:00.000Z"),
+      logicsStatusCheckedAt: new Date("2026-07-10T18:00:00.000Z"),
+      logicsStatusInvalidatedAt: new Date("2026-07-10T18:30:00.000Z"),
+      logicsProspectEligible: true,
+    }),
+    statusMaxAgeMs: 0,
+  });
+  assert.equal(
+    (await invalidatedWithoutAgeGate.source.readOne({ domain: "TAG", caseId: 1001, now })).eligibility.reason,
     "status-invalidated-after-touch",
   );
 });

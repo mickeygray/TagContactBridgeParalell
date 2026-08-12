@@ -1847,6 +1847,46 @@ monotonic cadence-invalidation test, a repository projection gate, and a
 production runtime test where zero-touch work in one pool beats a due retry in
 another.
 
+## Phase 9 just-in-time touched-retry status gate (2026-08-12)
+
+- Broad hourly discovery is not the source of truth for a retry. When a
+  touched item becomes due and reaches claim time, the delivery owner must
+  re-read its LeadCadence status proof before it can become `packetized`.
+- If the proof is missing, stale under the configured age policy, or older
+  than `logicsStatusInvalidatedAt`, perform one exact-case Logics refresh and
+  write the result to LeadCadence before re-reading eligibility.
+- Coalesce concurrent refreshes for the same tenant/case inside the runtime.
+  The work-item compare-and-set remains the cross-agent claim fence.
+- A failed, missing, contradictory, DNC, or non-prospect response fails the
+  retry closed. It never posts a PhoneBurner contact and remains eligible for
+  the bounded blocked-item repair backstop.
+- A zero-touch item does not make this second Logics call. Intake proof remains
+  authoritative until the first exact counted voice attempt invalidates it.
+- The broad blocked-item refresher remains repair-only. It may recover held
+  work, but correctness may not depend on waiting for a starved Pool or an
+  hourly/batch scan.
+
+Proof requires one production-simple-path test for successful exact refresh,
+one fail-closed refresh test, one no-extra-read zero-touch test, and source
+proof that post-touch invalidation remains mandatory even when the optional
+maximum-age policy is disabled.
+
+Local proof (2026-08-12):
+
+- the production simple-post path now passes every new claim through the
+  canonical claim-time source re-read before it can become `packetized`;
+- touched source evidence cannot be hidden by an older zero-touch delivery
+  projection, while zero-touch and already-current touched work make no extra
+  Logics request;
+- one exact refresh is coalesced per tenant/case inside the runtime and a
+  failed refresh blocks before any provider POST;
+- LeadCadence is written before the optional CaseProfile mirror. A missing
+  cadence authority makes no mirror write, and a mirror failure cannot block a
+  Logics-proven retry;
+- focused syntax/runtime/source/wiring proof passed 170/170 and the complete
+  provider-neutral lead-delivery suite passed 562/562. No PhoneBurner write,
+  flag change, deployment, or service restart occurred.
+
 ## Phase 9 one-off stale-review cadence recovery (2026-08-06)
 
 - The reconciled WYNN cohort with one exact completed attempt may be returned

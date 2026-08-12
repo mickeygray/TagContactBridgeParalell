@@ -586,6 +586,7 @@ function harness({
   persistDailyDialOutcomes = null,
   reconcileDailyDialCalls = null,
   providerConsumptionOrder = null,
+  refreshSourceStatus = null,
   refreshSourceStatuses = null,
   refreshUntouchedSourceStatuses = null,
   onSourceItemPersisted = null,
@@ -752,6 +753,7 @@ function harness({
     persistDailyDialOutcomes,
     reconcileDailyDialCalls,
     providerConsumptionOrder,
+    refreshSourceStatus,
     refreshSourceStatuses,
     refreshUntouchedSourceStatuses,
     onSourceItemPersisted,
@@ -768,6 +770,7 @@ function harness({
     deletes,
     providerContacts,
     windowReads,
+    rows,
     runtime,
     setClock(value) { clock = new Date(value); },
   };
@@ -958,9 +961,10 @@ function addDone(repository, item, number, outcome, extra = {}) {
   });
 }
 
-async function insertEligibleRows(repository, rows) {
+async function insertEligibleRows(harnessState, rows) {
   for (const row of rows) {
-    await repository.insertActiveItemOnce({
+    harnessState.rows.push(copy(row));
+    await harnessState.repository.insertActiveItemOnce({
       ...copy(row),
       sourcePool: POOLS.OLDER_AVAILABLE,
       state: "eligible",
@@ -1253,8 +1257,10 @@ test("productivity rebalance moves culled Pool contacts to active agents and lea
   assert.equal((await h.phoneBurner.getFolderCount("pool-5")).count, 2);
   assert.equal(h.calls.length, 0, "rebalance must move existing contacts instead of creating uploads");
 
+  const normalSource = sourceRow(999, { receivedAt: new Date("2026-06-01T17:00:00.000Z") });
+  h.rows.push(normalSource);
   await h.repository.insertActiveItemOnce({
-    ...sourceRow(999, { receivedAt: new Date("2026-06-01T17:00:00.000Z") }),
+    ...normalSource,
     sourcePool: POOLS.OLDER_AVAILABLE,
     state: "eligible",
     activeAttempt: true,
@@ -3619,6 +3625,226 @@ test("simple bulk packet posts zero-touch work before a due retry from another p
   assert.equal(posted[0].totalAttemptCount, 0);
 });
 
+test("simple due retry refreshes exact Logics status before provider claim", async () => {
+  const row = sourceRow(8603, {
+    receivedAt: new Date("2026-07-09T17:00:00.000Z"),
+    totalAttemptCount: 1,
+    dailyAttemptCount: 1,
+    lastContactAt: new Date("2026-07-10T14:00:00.000Z"),
+    nextContactAt: new Date("2026-07-10T16:00:00.000Z"),
+    eligibility: { ok: false, reason: "status-invalidated-after-touch", retryable: true },
+  });
+  const refreshes = [];
+  const h = harness({
+    rows: [row],
+    actionsEnabled: true,
+    refreshSourceStatus: async (input) => {
+      refreshes.push({ domain: input.domain, caseId: input.caseId });
+      row.eligibility = { ok: true, reason: "contactable", retryable: false };
+      return { status: "refreshed", refreshed: 1, failed: 0 };
+    },
+  });
+  await h.repository.insertActiveItemOnce({
+    ...row,
+    sourcePool: POOLS.FOLLOW_UP_DUE,
+    state: "follow_up_wait",
+    activeAttempt: true,
+    version: 0,
+  });
+
+  const result = await h.runtime.postTopOfQueue("bruce_allen", { count: 1 });
+
+  assert.equal(result.status, "posted");
+  assert.equal(result.accepted, 1);
+  assert.deepEqual(refreshes, [{ domain: "TAG", caseId: "8603" }]);
+  assert.equal(h.calls.length, 1);
+  assert.deepEqual(h.runtime.getState().claimTimeStatusRefresh, {
+    inFlight: 0,
+    attempts: 1,
+    succeeded: 1,
+    failed: 0,
+  });
+});
+
+test("concurrent agent claims coalesce one exact due-status refresh", async () => {
+  const row = sourceRow(8606, {
+    receivedAt: new Date("2026-07-09T17:00:00.000Z"),
+    totalAttemptCount: 1,
+    dailyAttemptCount: 1,
+    lastContactAt: new Date("2026-07-10T14:00:00.000Z"),
+    nextContactAt: new Date("2026-07-10T16:00:00.000Z"),
+    eligibility: { ok: false, reason: "status-invalidated-after-touch", retryable: true },
+  });
+  let releaseRefresh;
+  const refreshGate = new Promise((resolve) => { releaseRefresh = resolve; });
+  let refreshes = 0;
+  const h = harness({
+    rows: [row],
+    actionsEnabled: true,
+    configuration: fiveAgentConfig(),
+    refreshSourceStatus: async () => {
+      refreshes += 1;
+      await refreshGate;
+      row.eligibility = { ok: true, reason: "contactable", retryable: false };
+      return { status: "refreshed", refreshed: 1, failed: 0 };
+    },
+  });
+  await h.repository.insertActiveItemOnce({
+    ...row,
+    sourcePool: POOLS.FOLLOW_UP_DUE,
+    state: "follow_up_wait",
+    activeAttempt: true,
+    version: 0,
+  });
+
+  const claims = [
+    h.runtime.postTopOfQueue("bruce_allen", { count: 1 }),
+    h.runtime.postTopOfQueue("brad_hansen", { count: 1 }),
+  ];
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(refreshes, 1);
+  releaseRefresh();
+  const results = await Promise.all(claims);
+
+  assert.equal(results.reduce((sum, result) => sum + result.accepted, 0), 1);
+  assert.equal(h.calls.length, 1);
+  assert.equal(h.runtime.getState().claimTimeStatusRefresh.attempts, 1);
+});
+
+test("simple due retry fails closed when exact Logics refresh fails", async () => {
+  const row = sourceRow(8604, {
+    receivedAt: new Date("2026-07-09T17:00:00.000Z"),
+    totalAttemptCount: 1,
+    dailyAttemptCount: 1,
+    lastContactAt: new Date("2026-07-10T14:00:00.000Z"),
+    nextContactAt: new Date("2026-07-10T16:00:00.000Z"),
+    eligibility: { ok: false, reason: "status-freshness-unproven", retryable: true },
+  });
+  const h = harness({
+    rows: [row],
+    actionsEnabled: true,
+    refreshSourceStatus: async () => {
+      throw new Error("test-logics-unavailable");
+    },
+  });
+  await h.repository.insertActiveItemOnce({
+    ...row,
+    sourcePool: POOLS.FOLLOW_UP_DUE,
+    state: "follow_up_wait",
+    activeAttempt: true,
+    version: 0,
+  });
+
+  const result = await h.runtime.postTopOfQueue("bruce_allen", { count: 1 });
+  const held = await h.repository.findItemBySourceIdentity({ domain: "TAG", caseId: "8604" });
+
+  assert.equal(result.status, "queue-exhausted");
+  assert.equal(result.accepted, 0);
+  assert.equal(held.state, "blocked");
+  assert.equal(held.activeAttempt, false);
+  assert.equal(held.reservationReason, "source-blocked-status-refresh-failed");
+  assert.equal(h.calls.length, 0);
+  assert.equal(h.runtime.getState().claimTimeStatusRefresh.failed, 1);
+});
+
+test("simple zero-touch claim uses intake proof without an exact Logics refresh", async () => {
+  const row = sourceRow(8605, {
+    receivedAt: new Date("2026-07-09T17:00:00.000Z"),
+  });
+  let refreshes = 0;
+  const h = harness({
+    rows: [row],
+    actionsEnabled: true,
+    refreshSourceStatus: async () => {
+      refreshes += 1;
+      return { status: "refreshed", refreshed: 1, failed: 0 };
+    },
+  });
+  await h.repository.insertActiveItemOnce({
+    ...row,
+    sourcePool: POOLS.OLDER_AVAILABLE,
+    state: "eligible",
+    activeAttempt: true,
+    version: 0,
+  });
+
+  const result = await h.runtime.postTopOfQueue("bruce_allen", { count: 1 });
+
+  assert.equal(result.accepted, 1);
+  assert.equal(refreshes, 0);
+  assert.equal(h.calls.length, 1);
+});
+
+test("simple touched claim with current source proof makes no extra Logics refresh", async () => {
+  const row = sourceRow(8607, {
+    receivedAt: new Date("2026-07-09T17:00:00.000Z"),
+    totalAttemptCount: 1,
+    dailyAttemptCount: 1,
+    lastContactAt: new Date("2026-07-10T14:00:00.000Z"),
+    nextContactAt: new Date("2026-07-10T16:00:00.000Z"),
+    eligibility: { ok: true, reason: "contactable", retryable: false },
+  });
+  let refreshes = 0;
+  const h = harness({
+    rows: [row],
+    actionsEnabled: true,
+    refreshSourceStatus: async () => {
+      refreshes += 1;
+      return { status: "refreshed", refreshed: 1, failed: 0 };
+    },
+  });
+  await h.repository.insertActiveItemOnce({
+    ...row,
+    sourcePool: POOLS.FOLLOW_UP_DUE,
+    state: "follow_up_wait",
+    activeAttempt: true,
+    version: 0,
+  });
+
+  const result = await h.runtime.postTopOfQueue("bruce_allen", { count: 1 });
+
+  assert.equal(result.accepted, 1);
+  assert.equal(refreshes, 0);
+  assert.equal(h.calls.length, 1);
+});
+
+test("source touch evidence cannot bypass refresh through a stale zero-touch item projection", async () => {
+  const row = sourceRow(8608, {
+    receivedAt: new Date("2026-07-09T17:00:00.000Z"),
+    totalAttemptCount: 1,
+    dailyAttemptCount: 1,
+    lastContactAt: new Date("2026-07-10T14:00:00.000Z"),
+    nextContactAt: new Date("2026-07-10T16:00:00.000Z"),
+    eligibility: { ok: false, reason: "status-invalidated-after-touch", retryable: true },
+  });
+  let refreshes = 0;
+  const h = harness({
+    rows: [row],
+    actionsEnabled: true,
+    refreshSourceStatus: async () => {
+      refreshes += 1;
+      row.eligibility = { ok: true, reason: "contactable", retryable: false };
+      return { status: "refreshed", refreshed: 1, failed: 0 };
+    },
+  });
+  await h.repository.insertActiveItemOnce({
+    ...row,
+    totalAttemptCount: 0,
+    dailyAttemptCount: 0,
+    lastContactAt: null,
+    sourcePool: POOLS.FOLLOW_UP_DUE,
+    state: "follow_up_wait",
+    activeAttempt: true,
+    version: 0,
+  });
+
+  const result = await h.runtime.postTopOfQueue("bruce_allen", { count: 1 });
+
+  assert.equal(result.accepted, 1);
+  assert.equal(refreshes, 1);
+  assert.equal(h.calls.length, 1);
+});
+
 test("durable agent Pool operation blocks an overlapping ordinary refill", async () => {
   const h = harness({
     rows: [],
@@ -3664,8 +3890,10 @@ test("ordinary refill completes while productivity waits for the same agent Pool
   });
   await h.runtime.tick();
   for (let index = 0; index < 6; index += 1) {
+    const source = sourceRow(8803 + index, { receivedAt: new Date("2026-06-01T17:00:00.000Z") });
+    h.rows.push(source);
     await h.repository.insertActiveItemOnce({
-      ...sourceRow(8803 + index, { receivedAt: new Date("2026-06-01T17:00:00.000Z") }),
+      ...source,
       sourcePool: POOLS.OLDER_AVAILABLE,
       state: "eligible",
       activeAttempt: true,
@@ -3993,7 +4221,7 @@ test("provider-authoritative simple Call End refills when Pool reaches exactly f
   assert.equal(started.dayStart.status, "completed");
   assert.equal(h.calls.length, 20);
   await insertEligibleRows(
-    h.repository,
+    h,
     Array.from({ length: 20 }, (_, index) => sourceRow(index + 21)),
   );
 
@@ -4035,7 +4263,7 @@ test("physical Pool watchdog restores an empty active-agent Pool without a Call 
   assert.equal(started.dayStart.status, "completed");
   assert.equal(h.calls.length, 20);
   await insertEligibleRows(
-    h.repository,
+    h,
     Array.from({ length: 20 }, (_, index) => sourceRow(index + 21)),
   );
 
@@ -4238,7 +4466,7 @@ test("physical Pool watchdog refills before a later ingestion failure aborts the
   assert.equal(started.dayStart.status, "completed");
   assert.equal(h.calls.length, 20);
   await insertEligibleRows(
-    h.repository,
+    h,
     Array.from({ length: 20 }, (_, index) => sourceRow(index + 21)),
   );
 

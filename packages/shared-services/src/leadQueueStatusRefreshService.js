@@ -128,10 +128,17 @@ async function refreshUntouchedLeadCadenceStatuses({
  * attempt closed). Deactivating the LeadCadence row also drops it from
  * the delivery universe, since readSourceBatch filters on active: true.
  */
-async function retireDncLead({ db, item, statusName = null, dryRun = false }) {
+async function retireDncLead({
+  db,
+  item,
+  statusName = null,
+  dryRun = false,
+  leadCadenceModel = LeadCadence,
+  retiredAt = new Date(),
+}) {
   const caseIdText = String(item.caseId);
   const domain = String(item.domain || "").toUpperCase();
-  const now = new Date();
+  const now = new Date(retiredAt);
   if (dryRun) return { retired: false, dryRun: true };
 
   await db.collection("leaddeliveryitems").updateOne(
@@ -161,7 +168,7 @@ async function retireDncLead({ db, item, statusName = null, dryRun = false }) {
   // collection (3,942 docs, tenant keyed as `company`, domain null) that
   // is NOT what the delivery path reads — writing there is a silent no-op.
   // caseId is stored numeric here; match both forms defensively.
-  const cadenceResult = await LeadCadence.updateMany(
+  const cadenceResult = await leadCadenceModel.updateMany(
     {
       domain,
       $or: [{ caseId: Number(caseIdText) }, { caseId: caseIdText }],
@@ -170,6 +177,122 @@ async function retireDncLead({ db, item, statusName = null, dryRun = false }) {
     { $set: { active: false, updatedAt: now } },
   );
   return { retired: true, cadenceDeactivated: cadenceResult?.modifiedCount || 0 };
+}
+
+/**
+ * Refresh one exact queued case from Logics before a touched retry is claimed.
+ * LeadCadence is the delivery authority. CaseProfile receives an opportunistic
+ * mirror/phone fold, but it never decides whether the case can be served.
+ */
+async function refreshExactLeadStatus({
+  domain,
+  caseId,
+  item = null,
+  retireDnc = true,
+  dryRun = false,
+  db = mongoose.connection.db,
+  leadCadenceModel = LeadCadence,
+  profileRepository = caseProfileRepository,
+  logicsClientFactory = createLogicsClient,
+  allowedProspectStatusIds = [1, 2],
+  checkedAt = new Date(),
+} = {}) {
+  const normalizedDomain = String(domain || "").trim().toUpperCase();
+  const normalizedCaseId = Number(caseId);
+  const at = new Date(checkedAt);
+  if (!normalizedDomain) throw new TypeError("domain is required");
+  if (!Number.isInteger(normalizedCaseId) || normalizedCaseId < 1) {
+    throw new TypeError("caseId must be a positive integer");
+  }
+  if (!Number.isFinite(at.getTime())) throw new TypeError("checkedAt must be a valid date");
+  if (typeof logicsClientFactory !== "function") throw new TypeError("logicsClientFactory is required");
+  if (typeof leadCadenceModel?.updateMany !== "function") {
+    throw new TypeError("leadCadenceModel.updateMany is required");
+  }
+  const canMirrorProfile = typeof profileRepository?.upsertCaseProfile === "function";
+  const allowedStatuses = new Set((Array.isArray(allowedProspectStatusIds)
+    ? allowedProspectStatusIds
+    : [1, 2]).map(Number).filter(Number.isFinite));
+  if (allowedStatuses.size < 1) throw new TypeError("allowedProspectStatusIds are required");
+
+  const info = await logicsClientFactory(normalizedDomain).getCaseInfo(normalizedCaseId);
+  const data = info?.Data || info?.data || null;
+  const statusId = Number(data?.StatusID ?? data?.Status ?? NaN);
+  if (!data || !Number.isFinite(statusId)) {
+    return {
+      status: "failed",
+      refreshed: 0,
+      failed: 1,
+      reason: "logics-status-unproven",
+    };
+  }
+
+  // LeadCadence is the pre-serve authority. Prove that exact authority exists
+  // before touching the optional CaseProfile mirror, and never make a mirror
+  // outage a reason to block otherwise proven delivery work.
+  const cadenceWrite = await leadCadenceModel.updateMany(
+    {
+      domain: normalizedDomain,
+      $or: [{ caseId: normalizedCaseId }, { caseId: String(normalizedCaseId) }],
+      active: true,
+    },
+    { $set: {
+      statusId,
+      logicsStatusCheckedAt: at,
+      logicsProspectEligible: allowedStatuses.has(statusId),
+    } },
+  );
+  const matchedCount = Number(cadenceWrite?.matchedCount ?? cadenceWrite?.n ?? 0);
+  if (matchedCount < 1) {
+    return {
+      status: "failed",
+      refreshed: 0,
+      failed: 1,
+      reason: "lead-cadence-not-found",
+    };
+  }
+
+  let profileMirrored = false;
+  let profileMirrorFailed = false;
+  if (canMirrorProfile) {
+    try {
+      await profileRepository.upsertCaseProfile(normalizedDomain, normalizedCaseId, {
+        statusId,
+        statusCategory: isLogicsDncStatus(normalizedDomain, statusId) ? "dnc" : undefined,
+        firstName: data.FirstName || undefined,
+        lastName: data.LastName || undefined,
+        ...buildCaseProfilePhonePatch(data),
+        lastStatusCheckAt: at,
+      });
+      profileMirrored = true;
+    } catch {
+      profileMirrorFailed = true;
+    }
+  }
+
+  const dnc = isLogicsDncStatus(normalizedDomain, statusId);
+  let retirement = { retired: false, cadenceDeactivated: 0 };
+  if (dnc && retireDnc === true && item && db) {
+    retirement = await retireDncLead({
+      db,
+      item,
+      statusName: data.StatusName || null,
+      dryRun,
+      leadCadenceModel,
+      retiredAt: at,
+    });
+  }
+  return {
+    status: "refreshed",
+    refreshed: 1,
+    failed: 0,
+    dnc,
+    nonProspect: !dnc && !allowedStatuses.has(statusId),
+    retired: retirement.retired === true,
+    cadenceDeactivated: Number(retirement.cadenceDeactivated || 0),
+    profileMirrored,
+    profileMirrorFailed,
+  };
 }
 
 async function refreshQueuedLeadStatuses({
@@ -355,6 +478,7 @@ async function refreshQueuedLeadStatuses({
 
 module.exports = {
   DEFAULT_STATES,
+  refreshExactLeadStatus,
   refreshUntouchedLeadCadenceStatuses,
   refreshQueuedLeadStatuses,
   retireDncLead,

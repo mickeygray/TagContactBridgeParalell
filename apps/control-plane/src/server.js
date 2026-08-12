@@ -218,6 +218,7 @@ const {
 } = require("../../../packages/shared-integrations/src");
 const { resolveQueueDialTimeWindow } = require("../../../packages/shared-services/src/cxQueuePolicyService");
 const {
+  refreshExactLeadStatus,
   refreshQueuedLeadStatuses,
   refreshUntouchedLeadCadenceStatuses,
 } = require("../../../packages/shared-services/src/leadQueueStatusRefreshService");
@@ -2201,6 +2202,14 @@ async function startServer() {
     // strict capture and reference promotion, so the two can never diverge.
     allowedRecordingHosts: config.phoneburnerRecording?.allowedHosts || [],
     providerConsumptionOrder: String(process.env.PHONEBURNER_PROVIDER_CONSUMPTION_ORDER || "").trim() || null,
+    refreshSourceStatus: async ({ domain, caseId, item, now }) => refreshExactLeadStatus({
+      domain,
+      caseId,
+      item,
+      checkedAt: now,
+      retireDnc: true,
+      allowedProspectStatusIds: config.logicsProspectStatusIds,
+    }),
     refreshSourceStatuses: async () => {
       const result = await refreshQueuedLeadStatuses({
         states: ["blocked"],
@@ -2214,6 +2223,8 @@ async function startServer() {
           "source-blocked-status-freshness-unproven",
           "source-blocked-status-stale",
           "source-blocked-status-invalidated-after-touch",
+          "source-blocked-status-refresh-failed",
+          "source-blocked-status-refresh-not-configured",
         ],
         logger: null,
       });

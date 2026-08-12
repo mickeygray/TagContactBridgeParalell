@@ -40,6 +40,9 @@ test("control plane wires one gated runtime, durable credentials, safe controls,
   assert.match(source, /createPhoneBurnerDurableCredentialStore\(\{/);
   assert.match(source, /createLeadDeliveryCadenceSource\(\{/);
   assert.match(source, /createLeadDeliveryRuntime\(\{/);
+  assert.match(source, /refreshExactLeadStatus/);
+  assert.match(source, /refreshSourceStatus: async \(\{ domain, caseId, item, now \}\)/);
+  assert.match(source, /allowedProspectStatusIds: config\.logicsProspectStatusIds/);
   assert.match(source, /LEAD_DELIVERY_PROVIDER_POST_MIN_INTERVAL_MS/);
   assert.match(source, /LEAD_DELIVERY_TICK_INTERVAL_MS/);
   assert.match(source, /LEAD_DELIVERY_TICK_INTERVAL_MS\) \|\| 60 \* 1000/);

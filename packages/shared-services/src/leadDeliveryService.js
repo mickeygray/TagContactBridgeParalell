@@ -56,6 +56,11 @@ const SIMPLE_REFILL_RETRY_STATUSES = new Set([
   "pending-provider-post",
   "pool-operation-busy",
 ]);
+const CLAIM_TIME_STATUS_REFRESH_REASONS = new Set([
+  "status-freshness-unproven",
+  "status-invalidated-after-touch",
+  "status-stale",
+]);
 const MAX_PRELOAD_WINDOW_CONTACTS = 5_000;
 const END_OF_DAY_DRAIN_HOUR = 17;
 const END_OF_DAY_DRAIN_MINUTE = 30;
@@ -2750,7 +2755,7 @@ function createLeadDeliveryCadenceSource({
       row?.lastTouched?.cx,
       row?.counterCadence?.lastCxDialedAt,
     ].some((value) => value != null && value !== "");
-    if (statusMaxAgeMs > 0 && voiceTouched) {
+    if (voiceTouched) {
       const checkedAt = Date.parse(row?.logicsStatusCheckedAt ?? "");
       if (!Number.isFinite(checkedAt)) {
         return { ok: false, reason: "status-freshness-unproven", retryable: true };
@@ -2759,7 +2764,7 @@ function createLeadDeliveryCadenceSource({
       if (Number.isFinite(invalidatedAt) && invalidatedAt > checkedAt) {
         return { ok: false, reason: "status-invalidated-after-touch", retryable: true };
       }
-      if (at.getTime() - checkedAt > statusMaxAgeMs) {
+      if (statusMaxAgeMs > 0 && at.getTime() - checkedAt > statusMaxAgeMs) {
         return { ok: false, reason: "status-stale", retryable: true };
       }
     }
@@ -3101,6 +3106,7 @@ function createLeadDeliveryRuntime({
   reconcileDailyDialCalls = null,
   providerConsumptionOrder = null,
   refreshSourceStatuses = null,
+  refreshSourceStatus = null,
   refreshUntouchedSourceStatuses = null,
   onSourceItemPersisted = null,
   onProviderAccepted = null,
@@ -3169,6 +3175,9 @@ function createLeadDeliveryRuntime({
   }
   if (refreshSourceStatuses != null && typeof refreshSourceStatuses !== "function") {
     throw new TypeError("refreshSourceStatuses must be a function when supplied");
+  }
+  if (refreshSourceStatus != null && typeof refreshSourceStatus !== "function") {
+    throw new TypeError("refreshSourceStatus must be a function when supplied");
   }
   if (refreshUntouchedSourceStatuses != null && typeof refreshUntouchedSourceStatuses !== "function") {
     throw new TypeError("refreshUntouchedSourceStatuses must be a function when supplied");
@@ -3374,11 +3383,15 @@ function createLeadDeliveryRuntime({
     watchdogStatusRefreshReclassified: 0,
     watchdogStatusRefreshReevaluated: 0,
     watchdogStatusRefreshStillBlocked: 0,
+    claimTimeStatusRefreshAttempts: 0,
+    claimTimeStatusRefreshSucceeded: 0,
+    claimTimeStatusRefreshFailed: 0,
   };
   let timerHandle = null;
   let tickInFlight = null;
   let ingestInFlight = null;
   let watchdogSupplyRefreshInFlight = null;
+  const sourceStatusRefreshByIdentity = new Map();
   let freshDispatchInFlight = null;
   let providerPostTail = Promise.resolve();
   let providerPostAccepting = true;
@@ -4795,12 +4808,76 @@ function createLeadDeliveryRuntime({
     } = {},
   ) {
     const item = selection.item;
-    const currentSource = await source.readOne({
+    let currentSource = await source.readOne({
       domain: item.domain,
       caseId: item.caseId,
       now: claimedAt,
       deliveryIntent: preposition === true ? "preposition" : "dial_ready",
     });
+    // The source is the cadence authority. Include its touch evidence so an
+    // older delivery-item projection cannot accidentally masquerade as a
+    // zero-touch lead and skip the exact status gate.
+    const touched = Math.max(
+      nonNegativeInteger(item.totalAttemptCount ?? 0, "totalAttemptCount"),
+      nonNegativeInteger(item.dailyAttemptCount ?? 0, "dailyAttemptCount"),
+      nonNegativeInteger(currentSource?.totalAttemptCount ?? 0, "source totalAttemptCount"),
+      nonNegativeInteger(currentSource?.dailyAttemptCount ?? 0, "source dailyAttemptCount"),
+    ) > 0 || item.lastContactAt != null || currentSource?.lastContactAt != null;
+    const freshnessReason = String(currentSource?.eligibility?.reason || "").trim().toLowerCase();
+    const requiresExactStatusRefresh = touched
+      && CLAIM_TIME_STATUS_REFRESH_REASONS.has(freshnessReason);
+    if (requiresExactStatusRefresh) {
+      if (!refreshSourceStatus) {
+        currentSource = currentSource && {
+          ...currentSource,
+          eligibility: { ok: false, reason: "status-refresh-not-configured", retryable: true },
+        };
+      } else {
+        const identityKey = `${String(item.domain || "").trim().toUpperCase()}:${String(item.caseId || "").trim()}`;
+        let refresh = sourceStatusRefreshByIdentity.get(identityKey);
+        if (!refresh) {
+          runtimeState.claimTimeStatusRefreshAttempts += 1;
+          refresh = Promise.resolve()
+            .then(() => refreshSourceStatus({
+              domain: item.domain,
+              caseId: item.caseId,
+              item: clone(item),
+              now: claimedAt,
+            }))
+            .then((result) => {
+              const status = String(result?.status || "").trim().toLowerCase();
+              if (["refreshed", "current"].includes(status) && Number(result?.failed || 0) === 0) {
+                runtimeState.claimTimeStatusRefreshSucceeded += 1;
+                return { ok: true };
+              }
+              runtimeState.claimTimeStatusRefreshFailed += 1;
+              return { ok: false };
+            })
+            .catch(() => {
+              runtimeState.claimTimeStatusRefreshFailed += 1;
+              return { ok: false };
+            })
+            .finally(() => {
+              if (sourceStatusRefreshByIdentity.get(identityKey) === refresh) {
+                sourceStatusRefreshByIdentity.delete(identityKey);
+              }
+            });
+          sourceStatusRefreshByIdentity.set(identityKey, refresh);
+        }
+        const refreshed = await refresh;
+        currentSource = refreshed.ok === true
+          ? await source.readOne({
+            domain: item.domain,
+            caseId: item.caseId,
+            now: claimedAt,
+            deliveryIntent: preposition === true ? "preposition" : "dial_ready",
+          })
+          : (currentSource && {
+            ...currentSource,
+            eligibility: { ok: false, reason: "status-refresh-failed", retryable: true },
+          });
+      }
+    }
     if (!currentSource) return null;
     if (requireSourceActive === true && currentSource.sourceActive !== true) return null;
     if (receivedFrom != null || receivedBefore != null) {
@@ -4894,7 +4971,9 @@ function createLeadDeliveryRuntime({
         speedOverrideAgentId: null,
         reservedAt: null,
         reservationExpiresAt: null,
-        reservationReason: `packet-${selection.selectionType}`,
+        reservationReason: selection.selectionType === "top-of-queue-post"
+          ? "top-of-queue-post"
+          : `packet-${selection.selectionType}`,
         provider: providerName,
         dailyAttemptDateKey: claimDateKey,
         dailyAttemptCount: mergedDailyCount,
@@ -5615,27 +5694,13 @@ function createLeadDeliveryRuntime({
       if (!ordinaryPools.includes(pool)) continue;
       const dailyCap = await holdItemAtDailyCap(item, packetAt);
       if (dailyCap.held) continue;
-      const state = String(item.state || "").trim().toLowerCase();
-      const expected = { state, sourcePool: pool };
-      if (state === "reserved") expected.reservedAgentId = id;
       const packetId = `packet-${randomUUID()}`;
-      const claimed = await repository.compareAndSetItem({
-        itemId: stableWorkItemId(item),
-        expectedVersion: item.version,
-        expected,
-        set: {
-          state: "packetized",
-          activeAttempt: true,
-          packetId,
-          deliveryAgentId: id,
-          reservedAgentId: null,
-          speedOverrideAgentId: null,
-          reservedAt: null,
-          reservationExpiresAt: null,
-          reservationReason: "top-of-queue-post",
-          provider: providerName,
-        },
-      });
+      const claimed = await claimPacketSelection(
+        id,
+        { item, pool, selectionType: "top-of-queue-post" },
+        packetId,
+        packetAt,
+      );
       if (!claimed) continue;
       const posted = await postPacketItem(claimed, policy);
       results.push({ status: posted.status, accepted: posted.accepted === true });
@@ -10036,6 +10101,12 @@ function createLeadDeliveryRuntime({
         statusReclassified: runtimeState.watchdogStatusRefreshReclassified,
         statusReevaluated: runtimeState.watchdogStatusRefreshReevaluated,
         statusStillBlocked: runtimeState.watchdogStatusRefreshStillBlocked,
+      },
+      claimTimeStatusRefresh: {
+        inFlight: sourceStatusRefreshByIdentity.size,
+        attempts: runtimeState.claimTimeStatusRefreshAttempts,
+        succeeded: runtimeState.claimTimeStatusRefreshSucceeded,
+        failed: runtimeState.claimTimeStatusRefreshFailed,
       },
       providerPostConcurrency: 1,
       providerPostMinimumIntervalMs: postMinimumInterval,
