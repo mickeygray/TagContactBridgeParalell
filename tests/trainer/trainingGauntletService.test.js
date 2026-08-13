@@ -85,6 +85,93 @@ test("flag-off keeps persisted Gauntlet state readable but blocks mutations", as
   );
 });
 
+test("targeted practice exposes and grades every server-owned module question", async () => {
+  const content = buildValidTrainingContentFixture();
+  content.scenarioBlueprints[0].presentation = {
+    moduleId: "fixture-module",
+    title: "Fixture module",
+    objective: "Practice the fixture skill.",
+    reading: "Read the fixture guidance.",
+    questions: [
+      {
+        questionId: "fixture-question-1",
+        prompt: "What should happen first?",
+        gradingPoints: ["first"],
+      },
+      {
+        questionId: "fixture-question-2",
+        prompt: "What should happen second?",
+        gradingPoints: ["second"],
+      },
+    ],
+  };
+  const stored = {
+    ...attempt(),
+    gauntletState: {
+      schemaVersion: "1",
+      experienceMode: "gauntlet",
+      direction: "inbound",
+      sectionId: "fixture-section-listen-clarify",
+      status: "passed",
+      stateVersion: 1,
+      runNumber: 0,
+      nextTurn: 2,
+      currentNodeId: "fixture-node-pass",
+      blueprintId: "fixture-scenario",
+      blueprintVersion: "1.0.0-test",
+      variantId: "fixture-variant-calm",
+      variantVersion: "1.0.0-test",
+      promptVersion: "fixture-prompt",
+      graderVersion: "fixture-grader",
+      voiceProfileId: "fixture-voice-calm",
+      audioManifestId: "fixture-audio-manifest",
+      criteria: [],
+      retryByNode: {},
+      hintLevelByNode: {},
+      completedVariantIds: ["fixture-variant-calm"],
+      lastAcceptedEventId: "fixture-pass",
+      invalidationReasonCode: null,
+    },
+  };
+  const graded = [];
+  const service = createTrainingGauntletService({
+    repository: { findAttemptById: async () => structuredClone(stored) },
+    contentProvider: async () => content,
+    authorizeAttempt: async () => {},
+    flagsProvider: () => ({ gauntletV1Enabled: true }),
+    gradeAnswer: async (input) => {
+      graded.push(input);
+      return { passed: true, score: 1, feedback: "Understood." };
+    },
+  });
+
+  const visible = await service.getAttempt({ attemptId: "attempt-1", principal: {} });
+  assert.deepEqual(
+    visible.module.questions.map((question) => question.prompt),
+    ["What should happen first?", "What should happen second?"],
+  );
+
+  const result = await service.gradeModuleAnswer({
+    attemptId: "attempt-1",
+    answer: "The second move.",
+    questionIndex: 1,
+    principal: {},
+  });
+  assert.equal(graded[0].question.questionId, "fixture-question-2");
+  assert.equal(result.questionIndex, 1);
+  assert.equal(result.questionCount, 2);
+
+  await assert.rejects(
+    service.gradeModuleAnswer({
+      attemptId: "attempt-1",
+      answer: "A forged future answer.",
+      questionIndex: 2,
+      principal: {},
+    }),
+    { code: "TRAINER_GAUNTLET_QUESTION_INVALID" },
+  );
+});
+
 test("text turn keeps evaluation and prospect dialogue behind server-owned adapters", async () => {
   let stored = attempt();
   const seen = {};

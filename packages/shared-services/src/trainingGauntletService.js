@@ -51,7 +51,12 @@ function publicAttempt(attempt) {
 
 function publicModule(scenario) {
   const value = scenario?.presentation || {};
-  const question = Array.isArray(value.questions) ? value.questions[0] : null;
+  const questions = (Array.isArray(value.questions) ? value.questions : [])
+    .filter((question) => question?.prompt)
+    .map((question, questionIndex) => ({
+      questionIndex,
+      prompt: String(question.prompt),
+    }));
   return {
     moduleId: String(value.moduleId || scenario.id),
     title: String(value.title || scenario.localObjective || scenario.id),
@@ -60,7 +65,9 @@ function publicModule(scenario) {
     moduleNumber: 1,
     moduleAttempt: 1,
     moduleCount: 1,
-    question: question?.prompt ? { prompt: String(question.prompt) } : null,
+    // `question` remains during the alpha transition for older cached clients.
+    question: questions[0] || null,
+    questions,
   };
 }
 
@@ -369,13 +376,17 @@ function createTrainingGauntletService({
     });
   }
 
-  async function gradeModuleAnswer({ attemptId, answer, principal }) {
+  async function gradeModuleAnswer({ attemptId, answer, questionIndex = 0, principal }) {
     requireMutationEnabled();
     if (typeof gradeAnswer !== "function") {
       throw gauntletError(503, "TRAINER_GAUNTLET_GRADER_UNAVAILABLE");
     }
     const safeAnswer = String(answer || "").trim();
     if (!safeAnswer) throw gauntletError(422, "TRAINER_GAUNTLET_INPUT_INVALID");
+    const safeQuestionIndex = Number(questionIndex);
+    if (!Number.isInteger(safeQuestionIndex) || safeQuestionIndex < 0) {
+      throw gauntletError(422, "TRAINER_GAUNTLET_QUESTION_INVALID");
+    }
     const attempt = await owned(attemptId, principal);
     if (!attempt.gauntletState) {
       throw gauntletError(422, "TRAINER_GAUNTLET_NOT_INITIALIZED");
@@ -385,13 +396,24 @@ function createTrainingGauntletService({
       throw gauntletError(409, "TRAINER_GAUNTLET_NOT_COMPLETE");
     }
     const scenario = scenarioForAttempt(await contentProvider(attempt), attempt);
-    const question = scenario.presentation?.questions?.[0];
+    const questions = Array.isArray(scenario.presentation?.questions)
+      ? scenario.presentation.questions
+      : [];
+    const question = questions[safeQuestionIndex];
+    if (questions.length && !question) {
+      throw gauntletError(422, "TRAINER_GAUNTLET_QUESTION_INVALID");
+    }
     if (!question) return { passed: true, score: 1, feedback: "Practice complete." };
-    return gradeAnswer({
+    const grade = await gradeAnswer({
       answer: safeAnswer,
       question,
       scenario,
     });
+    return {
+      ...grade,
+      questionIndex: safeQuestionIndex,
+      questionCount: questions.length,
+    };
   }
   return Object.freeze({
     gradeModuleAnswer,

@@ -87,3 +87,25 @@ test("a passed run can practice another unused variant", () => {
   assert.equal(repeated.variantId, "fixture-variant-direct");
   assert.equal(repeated.status, "ready");
 });
+
+test("practice cycles variants after every persona has been used", () => {
+  const base = buildValidTrainingContentFixture().scenarioBlueprints[0];
+  const scenario = {
+    ...base,
+    retryPolicy: { ...base.retryPolicy, runRetryLimit: 20 },
+  };
+  const { canStartAnotherRun, startRetryRun } = require("../../packages/shared-services/src/trainingGauntletController");
+  const exhausted = {
+    ...initialState(scenario),
+    status: "failed",
+    runNumber: 2,
+    currentNodeId: "fixture-node-terminal",
+    variantId: "fixture-variant-direct",
+    completedVariantIds: ["fixture-variant-calm", "fixture-variant-direct"],
+  };
+  assert.equal(canStartAnotherRun(scenario, exhausted), true);
+  const cycled = startRetryRun({ scenario, state: exhausted, eventId: "cycle-1" });
+  assert.equal(cycled.runNumber, 3);
+  assert.equal(cycled.variantId, "fixture-variant-calm");
+  assert.equal(cycled.status, "ready");
+});

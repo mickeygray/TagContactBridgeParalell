@@ -42,6 +42,8 @@ test("every packet is a bounded draft with persona parity and cited grading auth
     assert.ok(packet.prohibitedMoves.length >= 3);
     assert.ok(packet.reflectionPrompt);
     assert.ok(packet.questions.length >= 2);
+    assert.ok(packet.retryPolicy.runRetryLimit >= 20, `${packet.id}: repeatable practice`);
+    assert.equal(packet.retryPolicy.variantStrategy, "unused-first");
     for (const persona of packet.personas) {
       assert.equal(persona.gatePolicy, "identical-required-criteria");
       assert.equal(persona.protectedTraitPolicy, "no-gate-effect");

@@ -48,11 +48,20 @@ function allRequiredCriteriaSatisfied(scenario, criteria) {
   return (scenario.nodes || []).flatMap((node) => node.requiredCriteria || []).filter((criterion) => criterion.required).every((criterion) => criteria[criterion.criterionId]?.status === "satisfied");
 }
 
+function nextPracticeVariant(scenario, state) {
+  const variants = scenario.variants || [];
+  if (variants.length === 0) return null;
+  const used = new Set([...(state.completedVariantIds || []), state.variantId]);
+  const unused = variants.find((variant) => !used.has(variant.variantId));
+  if (unused) return unused;
+  const currentIndex = Math.max(0, variants.findIndex((variant) => variant.variantId === state.variantId));
+  return variants[(currentIndex + 1) % variants.length] || null;
+}
+
 function canStartAnotherRun(scenario, state) {
   if (!["failed", "run_failed", "passed"].includes(state?.status)) return false;
   if ((state.runNumber + 1) > scenario.retryPolicy.runRetryLimit) return false;
-  const used = new Set([...(state.completedVariantIds || []), state.variantId]);
-  return (scenario.variants || []).some((variant) => !used.has(variant.variantId));
+  return Boolean(nextPracticeVariant(scenario, state));
 }
 
 function applyEvidence({ scenario, state, turnId, evidence }) {
@@ -134,7 +143,7 @@ function startRetryRun({ scenario, state, eventId }) {
     throw controllerError("GAUNTLET_TURN_ID_INVALID");
   }
   const used = new Set([...(state.completedVariantIds || []), state.variantId]);
-  const nextVariant = (scenario.variants || []).find((variant) => !used.has(variant.variantId));
+  const nextVariant = nextPracticeVariant(scenario, state);
   if (!nextVariant) throw controllerError("GAUNTLET_VARIANTS_EXHAUSTED");
   return Object.freeze({
     ...state,
@@ -154,4 +163,4 @@ function startRetryRun({ scenario, state, eventId }) {
   });
 }
 
-module.exports = { advanceGauntletTurn, canStartAnotherRun, evaluateCondition, startRetryRun };
+module.exports = { advanceGauntletTurn, canStartAnotherRun, evaluateCondition, nextPracticeVariant, startRetryRun };

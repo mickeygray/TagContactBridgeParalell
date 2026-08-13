@@ -198,7 +198,7 @@ function packet(definition) {
     prohibitedMoves: Object.freeze(definition.prohibitedMoves),
     retryPolicy: Object.freeze({
       nodeRetryLimit: 1,
-      runRetryLimit: 2,
+      runRetryLimit: 20,
       variantStrategy: "unused-first",
     }),
     reflectionPrompt: definition.reflectionPrompt,
@@ -290,7 +290,7 @@ function manualPacket(definition) {
     prohibitedMoves: Object.freeze(definition.prohibitedMoves),
     retryPolicy: Object.freeze({
       nodeRetryLimit: 1,
-      runRetryLimit: 2,
+      runRetryLimit: 20,
       variantStrategy: "unused-first",
     }),
     reflectionPrompt: definition.reflectionPrompt,

@@ -118,6 +118,7 @@ export function TrainerGauntletPlayer({
   const [handsFreeEnabled, setHandsFreeEnabled] = useState(true);
   const [coach, setCoach] = useState<TrainingTargetedCoach | null>(null);
   const [reflectionAnswer, setReflectionAnswer] = useState("");
+  const [reflectionQuestionIndex, setReflectionQuestionIndex] = useState(0);
   const [reflectionGrade, setReflectionGrade] = useState<{
     passed: boolean;
     score: number;
@@ -546,6 +547,7 @@ export function TrainerGauntletPlayer({
       setLastProspectText(opening);
       setCoach(reset.coach || null);
       setReflectionAnswer("");
+      setReflectionQuestionIndex(0);
       setReflectionGrade(null);
       await playVoicedProspect(opening);
     } catch (cause) {
@@ -564,9 +566,22 @@ export function TrainerGauntletPlayer({
       const grade = await trainingCourseApi.gradeTargetedModuleAnswer(
         currentAttempt.attemptId,
         reflectionAnswer.trim(),
+        reflectionQuestionIndex,
       );
       setReflectionGrade(grade);
-      if (grade.passed && onComplete) await onComplete();
+      const questions = runtime?.module?.questions?.length
+        ? runtime.module.questions
+        : runtime?.module?.question
+          ? [runtime.module.question]
+          : [];
+      const isLastQuestion = reflectionQuestionIndex >= questions.length - 1;
+      if (grade.passed && !isLastQuestion) {
+        setReflectionQuestionIndex((current) => current + 1);
+        setReflectionAnswer("");
+        setReflectionGrade(null);
+      } else if (grade.passed && onComplete) {
+        await onComplete();
+      }
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Could not grade that answer.");
     } finally {
@@ -782,12 +797,28 @@ export function TrainerGauntletPlayer({
           <h3 className="font-semibold">
             {runtime.state.status === "passed" ? "Talk practice complete" : "Run complete"}
           </h3>
-          {runtime.state.status === "passed" && runtime.module?.question ? (
+          {runtime.state.status === "passed" &&
+          (runtime.module?.questions?.length || runtime.module?.question) ? (
             <div className="mt-4 space-y-3">
               <div className="text-xs font-semibold uppercase text-muted-foreground">
                 Short model-graded Q&A
               </div>
-              <p className="text-sm font-medium">{runtime.module.question.prompt}</p>
+              {(() => {
+                const questions = runtime.module?.questions?.length
+                  ? runtime.module.questions
+                  : runtime.module?.question
+                    ? [runtime.module.question]
+                    : [];
+                const currentQuestion = questions[reflectionQuestionIndex];
+                return (
+                  <>
+                    <p className="text-xs text-muted-foreground">
+                      Question {reflectionQuestionIndex + 1} of {questions.length}
+                    </p>
+                    <p className="text-sm font-medium">{currentQuestion?.prompt}</p>
+                  </>
+                );
+              })()}
               <textarea
                 aria-label="Module reflection answer"
                 value={reflectionAnswer}

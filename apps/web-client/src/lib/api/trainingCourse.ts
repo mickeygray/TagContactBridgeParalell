@@ -287,8 +287,13 @@ export interface TrainingGauntletResult {
     moduleAttempt?: number;
     moduleCount: number;
     question?: {
+      questionIndex?: number;
       prompt: string;
     } | null;
+    questions?: Array<{
+      questionIndex: number;
+      prompt: string;
+    }>;
   } | null;
 }
 
@@ -530,14 +535,16 @@ export const trainingCourseApi = {
       { method: "POST", body: form },
     );
   },
-  gradeTargetedModuleAnswer(attemptId: string, answer: string) {
+  gradeTargetedModuleAnswer(attemptId: string, answer: string, questionIndex = 0) {
     return courseRequest<{
       passed: boolean;
       score: number;
       feedback: string;
+      questionIndex?: number;
+      questionCount?: number;
     }>(
       `/course/gauntlet/attempts/${encodeURIComponent(attemptId)}/module-answer`,
-      { method: "POST", body: { answer } },
+      { method: "POST", body: { answer, questionIndex } },
     );
   },
 };

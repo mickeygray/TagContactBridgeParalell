@@ -223,10 +223,11 @@ test("Gauntlet turn route accepts only learner text and server CAS fields", asyn
   const reflection = await requestJson(
     baseUrl,
     "/course/gauntlet/attempts/attempt-1/module-answer",
-    { method: "POST", body: { answer: "Synthetic reflection." } },
+    { method: "POST", body: { answer: "Synthetic reflection.", questionIndex: 1 } },
   );
   assert.equal(reflection.status, 200);
   assert.equal(calls.at(-1).answer, "Synthetic reflection.");
+  assert.equal(calls.at(-1).questionIndex, 1);
   assert.deepEqual(calls.at(-1).principal, {
     email: "learner@example.test",
     company: "TAG",

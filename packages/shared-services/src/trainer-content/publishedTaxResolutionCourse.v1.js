@@ -241,7 +241,10 @@ for (const packet of TAX_RESOLUTION_SKILL_PACKETS) {
       prohibitedSpeechActs: [...(packet.prohibitedMoves || [])],
       retryPolicy: {
         nodeRetryLimit: maxTurns - 1,
-        runRetryLimit: Math.min(2, Math.max(0, variants.length - 1)),
+        // Use every persona before cycling. The safety bound prevents one
+        // malformed client from growing an attempt forever without stranding
+        // a real learner after only two misses.
+        runRetryLimit: 20,
         variantStrategy: "unused-first",
       },
       hintPolicy: { steps: [] },
