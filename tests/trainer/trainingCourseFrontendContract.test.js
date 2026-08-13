@@ -156,6 +156,9 @@ test("Targeted Talk reuses authenticated Trainer STT with server-owned turns", (
   assert.match(gauntlet, /runtime\.canPracticeAgain/);
   assert.match(gauntlet, /reflectionComplete && runtime\.state\.status === "failed"/);
   assert.match(gauntlet, /Practice again/);
+  assert.match(gauntlet, /Coach debrief · learn before retrying/);
+  assert.match(gauntlet, /You should have tried:/);
+  assert.match(gauntlet, /Success looks like:/);
   assert.match(gauntlet, /Continue to knowledge check/);
   assert.doesNotMatch(gauntlet, /disabled=\{!micSupported \|\| \(voiceBusy && !recording\) \|\| terminal\}/);
   assert.doesNotMatch(client, /submitGauntletTurn[\s\S]{0,500}evidence:/);

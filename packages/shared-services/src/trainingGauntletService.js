@@ -86,6 +86,45 @@ function publicCoach(scenario, prospectText = "") {
   };
 }
 
+function publicDebrief(scenario, state) {
+  if (state?.status !== "failed") return null;
+  const criterionDefinitions = new Map();
+  for (const node of scenario?.nodes || []) {
+    for (const criterion of node.requiredCriteria || []) {
+      if (!criterion?.criterionId || !criterion?.description) continue;
+      criterionDefinitions.set(criterion.criterionId, criterion);
+    }
+  }
+  const missingMoves = [];
+  const demonstratedMoves = [];
+  for (const criterion of state.criteria || []) {
+    const definition = criterionDefinitions.get(criterion.criterionId);
+    if (!definition) continue;
+    const description = String(definition.description).slice(0, 500);
+    if (criterion.status === "satisfied") demonstratedMoves.push(description);
+    else missingMoves.push(description);
+  }
+  const reasonByKind = {
+    "hard-rule": "A hard rule ended this attempt before the required move was complete.",
+    "prohibited-move": "A prohibited move ended this attempt.",
+    "turns-exhausted": "The conversation ended before every required move was demonstrated.",
+  };
+  const presentation = scenario?.presentation || {};
+  return {
+    summary: reasonByKind[state.failureReason?.kind] ||
+      "The required move was not demonstrated clearly enough in this attempt.",
+    missingMoves: missingMoves.slice(0, 6),
+    demonstratedMoves: demonstratedMoves.slice(0, 6),
+    tryNext: String(
+      presentation.coachNudge || missingMoves[0] || presentation.objective ||
+      scenario?.localObjective || "Try the required move directly.",
+    ).slice(0, 500),
+    successLooksLike: String(
+      presentation.listenFor || "The prospect gives the response this practice is designed to earn.",
+    ).slice(0, 500),
+  };
+}
+
 function publicResult({ attempt, state, duplicate = false, scenario, prospectReply = null,
   reactionIntent = null, terminal = null }) {
   const variant = (scenario?.variants || []).find((entry) =>
@@ -105,6 +144,7 @@ function publicResult({ attempt, state, duplicate = false, scenario, prospectRep
       variant?.situation || scenario?.presentation?.openingLine || "The prospect is ready.",
     ),
     coach: publicCoach(scenario, prospectReply?.text || ""),
+    debrief: publicDebrief(scenario, state),
     module: publicModule(scenario),
   };
 }
@@ -429,4 +469,5 @@ module.exports = {
   createTrainingGauntletService,
   gauntletError,
   inputFingerprint,
+  publicDebrief,
 };

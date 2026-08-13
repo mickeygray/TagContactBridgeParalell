@@ -150,6 +150,9 @@ test("targeted practice exposes and grades every server-owned module question", 
     visible.module.questions.map((question) => question.prompt),
     ["What should happen first?", "What should happen second?"],
   );
+  assert.match(visible.debrief.summary, /required move was not demonstrated/i);
+  assert.equal(visible.debrief.missingMoves.length, 0);
+  assert.match(visible.debrief.tryNext, /Practice the fixture skill/i);
 
   const result = await service.gradeModuleAnswer({
     attemptId: "attempt-1",

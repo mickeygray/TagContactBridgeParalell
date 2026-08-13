@@ -789,6 +789,42 @@ export function TrainerGauntletPlayer({
         </details>
       ) : null}
 
+      {runtime.state.status === "failed" && runtime.debrief ? (
+        <section className="rounded-lg border border-warning/40 bg-warning/10 p-5">
+          <div className="text-xs font-semibold uppercase tracking-[0.12em] text-warning-foreground">
+            Coach debrief · learn before retrying
+          </div>
+          <h3 className="mt-2 font-semibold">Why this attempt did not pass</h3>
+          <p className="mt-2 text-sm">{runtime.debrief.summary}</p>
+          {runtime.debrief.demonstratedMoves.length ? (
+            <div className="mt-4">
+              <div className="text-sm font-semibold">What you did demonstrate</div>
+              <ul className="mt-2 list-disc space-y-1 pl-5 text-sm text-muted-foreground">
+                {runtime.debrief.demonstratedMoves.map((move) => <li key={move}>{move}</li>)}
+              </ul>
+            </div>
+          ) : null}
+          {runtime.debrief.missingMoves.length ? (
+            <div className="mt-4">
+              <div className="text-sm font-semibold">What was still missing</div>
+              <ul className="mt-2 list-disc space-y-1 pl-5 text-sm text-muted-foreground">
+                {runtime.debrief.missingMoves.map((move) => <li key={move}>{move}</li>)}
+              </ul>
+            </div>
+          ) : null}
+          <div className="mt-4 rounded-md border border-warning/30 bg-background p-4">
+            <p className="text-sm">
+              <span className="font-semibold">You should have tried: </span>
+              {runtime.debrief.tryNext}
+            </p>
+            <p className="mt-2 text-sm text-muted-foreground">
+              <span className="font-semibold text-foreground">Success looks like: </span>
+              {runtime.debrief.successLooksLike}
+            </p>
+          </div>
+        </section>
+      ) : null}
+
       {error ? <p role="alert" className="text-sm text-destructive">{error}</p> : null}
       {terminal ? (
         <div id="targeted-talk-knowledge-check" className="rounded-lg border border-border p-4">

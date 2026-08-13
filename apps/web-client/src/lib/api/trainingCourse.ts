@@ -277,6 +277,13 @@ export interface TrainingGauntletResult {
   canPracticeAgain?: boolean;
   openingLine?: string | null;
   coach?: TrainingTargetedCoach | null;
+  debrief?: {
+    summary: string;
+    missingMoves: string[];
+    demonstratedMoves: string[];
+    tryNext: string;
+    successLooksLike: string;
+  } | null;
   module?: {
     moduleId: string;
     title: string;
