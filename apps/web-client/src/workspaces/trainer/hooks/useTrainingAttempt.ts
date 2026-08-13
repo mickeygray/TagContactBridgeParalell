@@ -129,17 +129,18 @@ export function useTrainingAttempt(courseId: string, itemId: string) {
     [action, attempt],
   );
 
-  const complete = useCallback(async () => {
-    if (!attempt || action) return null;
+  const complete = useCallback(async (attemptOverride?: TrainingAttempt) => {
+    const completionAttempt = attemptOverride || attempt;
+    if (!completionAttempt || action) return null;
     setAction("completing");
     setError("");
     const eventId =
       completeEventIdRef.current ||
       (completeEventIdRef.current = createTrainingRequestId("complete"));
     try {
-      const result = await trainingCourseApi.complete(attempt.attemptId, {
+      const result = await trainingCourseApi.complete(completionAttempt.attemptId, {
         eventId,
-        expectedVersion: attempt.version,
+        expectedVersion: completionAttempt.version,
       });
       if (mountedRef.current) {
         setCompletion(result);

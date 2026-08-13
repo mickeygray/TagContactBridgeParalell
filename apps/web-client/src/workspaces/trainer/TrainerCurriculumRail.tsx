@@ -4,6 +4,7 @@ import {
   Dot,
   LockKeyhole,
   PlayCircle,
+  RotateCcw,
 } from "lucide-react";
 import { cn } from "@/lib/utils/cn";
 import type {
@@ -25,6 +26,9 @@ interface TrainerCurriculumRailProps {
 
 function statusIcon(item: TrainingCourseRailItem) {
   if (item.status === "completed") {
+    if (item.completionOutcome === "failed") {
+      return <RotateCcw aria-hidden="true" className="h-4 w-4 text-warning" />;
+    }
     return <CheckCircle2 aria-hidden="true" className="h-4 w-4 text-success" />;
   }
   if (item.status === "locked" || item.status === "unavailable") {
@@ -107,6 +111,9 @@ export function TrainerCurriculumRail({
                       ? `${item.modules.length} practices`
                       : readableType(item.type)}
                     {item.required ? " - Required" : " - Optional"}
+                    {item.status === "completed" && item.completionOutcome === "failed"
+                      ? " - Revisit"
+                      : ""}
                   </span>
                 </span>
               </button>

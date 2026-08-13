@@ -151,11 +151,16 @@ test("Targeted Talk reuses authenticated Trainer STT with server-owned turns", (
   assert.match(gauntlet, /salesTrainerApi\.speech\(\{ text: clean \}\)/);
   assert.match(gauntlet, /playbackForAudio\(audio\)/);
   assert.match(gauntlet, /result = await trainingCourseApi\.gauntlet\(started\.attemptId\)/);
+  assert.match(gauntlet, /if \(!attempt && item\.completedAttemptId\)/);
   assert.match(gauntlet, /if \(status !== 422\) throw cause/);
   assert.match(gauntlet, /Conversation complete — answer the check below/);
   assert.match(gauntlet, /runtime\.canPracticeAgain/);
   assert.match(gauntlet, /reflectionComplete && runtime\.state\.status === "failed"/);
   assert.match(gauntlet, /Practice again/);
+  assert.match(gauntlet, /Review failed practice/);
+  assert.match(gauntlet, /answer the check to continue/);
+  assert.match(gauntlet, /const completionAccepted = onComplete/);
+  assert.doesNotMatch(gauntlet, /runtime\?\.state\.status === "passed" && onComplete/);
   assert.match(gauntlet, /Coach debrief · learn before retrying/);
   assert.match(gauntlet, /You should have tried:/);
   assert.match(gauntlet, /Success looks like:/);

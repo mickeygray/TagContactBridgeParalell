@@ -35,6 +35,7 @@ export interface TrainingCourseRailItem {
   title: string;
   type: TrainingCourseItemType;
   status: TrainingCourseItemState;
+  completionOutcome?: "passed" | "failed" | null;
   required: boolean;
   /**
    * The section's own label ("4B"), kept out of `title` so the rail can number
@@ -112,6 +113,7 @@ export interface TrainingCourseItem {
   title: string;
   required: boolean;
   status: TrainingCourseItemState;
+  completionOutcome?: "passed" | "failed" | null;
   completedAttemptId?: string | null;
   content: {
     summary: string | null;
@@ -213,7 +215,8 @@ export interface TrainingAttemptResult {
       grade?: {
         passed: boolean;
         score: number;
-        evidence: string[];
+        evidence?: string[];
+        feedback?: string;
         gradingVersion?: string;
       } | null;
       reflection?: string;
@@ -542,16 +545,26 @@ export const trainingCourseApi = {
       { method: "POST", body: form },
     );
   },
-  gradeTargetedModuleAnswer(attemptId: string, answer: string, questionIndex = 0) {
+  gradeTargetedModuleAnswer(
+    attemptId: string,
+    body: {
+      answer: string;
+      questionIndex?: number;
+      eventId: string;
+      expectedVersion: number;
+    },
+  ) {
     return courseRequest<{
       passed: boolean;
       score: number;
       feedback: string;
       questionIndex?: number;
       questionCount?: number;
+      version: number;
+      duplicate: boolean;
     }>(
       `/course/gauntlet/attempts/${encodeURIComponent(attemptId)}/module-answer`,
-      { method: "POST", body: { answer, questionIndex } },
+      { method: "POST", body },
     );
   },
 };

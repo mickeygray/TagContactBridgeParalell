@@ -88,11 +88,12 @@ export function TrainerCoursePlayer({
         )
     : undefined;
 
-  async function complete() {
-    const result = await attemptState.complete();
+  async function complete(attemptOverride?: Parameters<typeof attemptState.complete>[0]) {
+    const result = await attemptState.complete(attemptOverride);
     if (result?.attemptId) {
       navigate(`${basePath}/attempt/${encodeURIComponent(result.attemptId)}/results`);
     }
+    return Boolean(result?.attemptId);
   }
 
   return (

@@ -31,7 +31,7 @@ interface TrainerGauntletPlayerProps {
   attempt: TrainingAttempt | null;
   onStart: () => Promise<TrainingAttempt | null>;
   onAttemptChange?: (attempt: TrainingAttempt) => void;
-  onComplete?: () => Promise<void>;
+  onComplete?: (attemptOverride?: TrainingAttempt) => Promise<boolean>;
   /**
    * Reports which practice is live so the curriculum rail can show this
    * section's own modules (4B.1-4B.4) instead of the section list again.
@@ -131,6 +131,12 @@ export function TrainerGauntletPlayer({
   const [error, setError] = useState("");
   const initializeEventRef = useRef<string | null>(null);
   const turnEventRef = useRef<{ input: string; eventId: string } | null>(null);
+  const reflectionEventRef = useRef<{
+    input: string;
+    questionIndex: number;
+    runNumber: number;
+    eventId: string;
+  } | null>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
@@ -310,25 +316,29 @@ export function TrainerGauntletPlayer({
     setBusy(true);
     setError("");
     try {
-      const started = attempt || await onStart();
-      if (!started) return;
       let result: TrainingGauntletResult;
-      try {
-        // startAttempt intentionally reuses a learner's unfinished attempt.
-        // Resume that durable state before attempting a new initialization so
-        // reloads and fast clicks cannot race a second initializer.
-        result = await trainingCourseApi.gauntlet(started.attemptId);
-      } catch (cause) {
-        const status = cause && typeof cause === "object" && "status" in cause
-          ? Number((cause as { status?: unknown }).status)
-          : 0;
-        if (status !== 422) throw cause;
-        const eventId = initializeEventRef.current ||
-          (initializeEventRef.current = createTrainingRequestId("talk-init"));
-        result = await trainingCourseApi.initializeGauntlet(
-          started.attemptId,
-          { eventId, expectedVersion: started.version },
-        );
+      if (!attempt && item.completedAttemptId) {
+        result = await trainingCourseApi.gauntlet(item.completedAttemptId);
+      } else {
+        const started = attempt || await onStart();
+        if (!started) return;
+        try {
+          // startAttempt intentionally reuses a learner's unfinished attempt.
+          // Resume that durable state before attempting a new initialization so
+          // reloads and fast clicks cannot race a second initializer.
+          result = await trainingCourseApi.gauntlet(started.attemptId);
+        } catch (cause) {
+          const status = cause && typeof cause === "object" && "status" in cause
+            ? Number((cause as { status?: unknown }).status)
+            : 0;
+          if (status !== 422) throw cause;
+          const eventId = initializeEventRef.current ||
+            (initializeEventRef.current = createTrainingRequestId("talk-init"));
+          result = await trainingCourseApi.initializeGauntlet(
+            started.attemptId,
+            { eventId, expectedVersion: started.version },
+          );
+        }
       }
       initializeEventRef.current = null;
       const opening =
@@ -338,6 +348,10 @@ export function TrainerGauntletPlayer({
       setRuntime(result);
       if (result.attempt) onAttemptChange?.(result.attempt);
       setCoach(result.coach || null);
+      setReflectionComplete(
+        result.attempt?.status === "completed" &&
+          ["passed", "failed"].includes(result.state.status),
+      );
       setTape([{ id: "opening", speaker: "prospect", text: opening }]);
       if (result.state.status === "ready" && result.state.nextTurn === 1) {
         await playVoicedProspect(opening);
@@ -551,6 +565,7 @@ export function TrainerGauntletPlayer({
       setReflectionQuestionIndex(0);
       setReflectionComplete(false);
       setReflectionGrade(null);
+      reflectionEventRef.current = null;
       await playVoicedProspect(opening);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Could not begin another run.");
@@ -565,11 +580,38 @@ export function TrainerGauntletPlayer({
     setGradingReflection(true);
     setError("");
     try {
+      const outboundAnswer = reflectionAnswer.trim();
+      const runNumber = Number(runtime?.state.runNumber) || 0;
+      const priorMutation = reflectionEventRef.current;
+      const mutation =
+        priorMutation?.input === outboundAnswer &&
+        priorMutation.questionIndex === reflectionQuestionIndex &&
+        priorMutation.runNumber === runNumber
+          ? priorMutation
+          : {
+              input: outboundAnswer,
+              questionIndex: reflectionQuestionIndex,
+              runNumber,
+              eventId: createTrainingRequestId("module-answer"),
+            };
+      reflectionEventRef.current = mutation;
       const grade = await trainingCourseApi.gradeTargetedModuleAnswer(
         currentAttempt.attemptId,
-        reflectionAnswer.trim(),
-        reflectionQuestionIndex,
+        {
+          answer: outboundAnswer,
+          questionIndex: reflectionQuestionIndex,
+          eventId: mutation.eventId,
+          expectedVersion: currentAttempt.version,
+        },
       );
+      reflectionEventRef.current = null;
+      const updatedAttempt = { ...currentAttempt, version: grade.version };
+      setRuntime((current) =>
+        current
+          ? { ...current, version: grade.version, attempt: updatedAttempt }
+          : current,
+      );
+      onAttemptChange?.(updatedAttempt);
       setReflectionGrade(grade);
       const questions = runtime?.module?.questions?.length
         ? runtime.module.questions
@@ -582,10 +624,10 @@ export function TrainerGauntletPlayer({
         setReflectionAnswer("");
         setReflectionGrade(null);
       } else if (grade.passed) {
-        setReflectionComplete(true);
-        if (runtime?.state.status === "passed" && onComplete) {
-          await onComplete();
-        }
+        const completionAccepted = onComplete
+          ? await onComplete(updatedAttempt)
+          : true;
+        setReflectionComplete(completionAccepted);
       }
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Could not grade that answer.");
@@ -633,7 +675,11 @@ export function TrainerGauntletPlayer({
         {error ? <p role="alert" className="mt-3 text-sm text-destructive">{error}</p> : null}
         <Button className="mt-5" onClick={() => void begin()} disabled={busy}>
           {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Headphones className="h-4 w-4" />}
-          Start voice session
+          {item.status === "completed"
+            ? item.completionOutcome === "failed"
+              ? "Review failed practice"
+              : "Practice again"
+            : "Start voice session"}
         </Button>
       </div>
     );
@@ -675,7 +721,7 @@ export function TrainerGauntletPlayer({
           {terminal
             ? runtime.state.status === "passed"
               ? "Conversation complete — answer the check below"
-              : "Run complete — try this conversation again"
+              : "Run complete — answer the check to continue"
             : prospectSpeaking
             ? "Prospect speaking"
             : busy

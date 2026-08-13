@@ -143,17 +143,32 @@ export function TrainerAttemptResults({ attemptId, basePath }: TrainerAttemptRes
     .map((event) => event.payload.grade)
     .filter((grade): grade is NonNullable<typeof grade> => Boolean(grade));
   const next = result.nextAssignment || null;
+  const passed = result.terminalSummary.status !== "failed";
 
   return (
     <div className="mx-auto max-w-4xl space-y-6">
       <section className="rounded-xl border border-border bg-card p-7 shadow-soft">
         <div className="flex items-start gap-4">
-          <div className="rounded-full bg-success/10 p-3 text-success">
-            <CheckCircle2 className="h-6 w-6" />
+          <div
+            className={
+              passed
+                ? "rounded-full bg-success/10 p-3 text-success"
+                : "rounded-full bg-warning/10 p-3 text-warning"
+            }
+          >
+            {passed ? (
+              <CheckCircle2 className="h-6 w-6" />
+            ) : (
+              <RotateCcw className="h-6 w-6" />
+            )}
           </div>
           <div>
-            <div className="text-xs font-semibold uppercase tracking-[0.16em] text-success">
-              Attempt {result.attempt.status}
+            <div
+              className={`text-xs font-semibold uppercase tracking-[0.16em] ${
+                passed ? "text-success" : "text-warning"
+              }`}
+            >
+              {passed ? "Practice passed" : "Practice completed — revisit recommended"}
             </div>
             <h1 className="mt-2 text-2xl font-semibold">Review your rep</h1>
             <p className="mt-2 text-sm text-muted-foreground">
@@ -172,7 +187,12 @@ export function TrainerAttemptResults({ attemptId, basePath }: TrainerAttemptRes
                 <div className="font-medium">
                   Score {grade.score} - {grade.passed ? "Passed" : "Keep practicing"}
                 </div>
-                {grade.evidence.length ? (
+                {grade.feedback ? (
+                  <p className="mt-2 text-sm text-muted-foreground">
+                    {grade.feedback}
+                  </p>
+                ) : null}
+                {grade.evidence?.length ? (
                   <ul className="mt-2 list-disc space-y-1 pl-5 text-sm text-muted-foreground">
                     {grade.evidence.map((line, lineIndex) => (
                       <li key={`${lineIndex}-${line}`}>{line}</li>
@@ -233,9 +253,24 @@ export function TrainerAttemptResults({ attemptId, basePath }: TrainerAttemptRes
       )}
 
       <div className="flex flex-wrap justify-between gap-3">
-        <Button variant="secondary" onClick={() => navigate(basePath)}>
-          Course home
-        </Button>
+        <div className="flex flex-wrap gap-2">
+          <Button variant="secondary" onClick={() => navigate(basePath)}>
+            Course home
+          </Button>
+          {!passed ? (
+            <Button
+              variant="secondary"
+              onClick={() =>
+                navigate(
+                  `${basePath}/course/${encodeURIComponent(result.attempt.courseId)}/item/${encodeURIComponent(result.attempt.itemId)}`,
+                )
+              }
+            >
+              <RotateCcw className="h-4 w-4" />
+              Retry this practice
+            </Button>
+          ) : null}
+        </div>
         {next ? (
           <Button
             onClick={() =>

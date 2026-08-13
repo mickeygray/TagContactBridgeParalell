@@ -14,6 +14,11 @@ const itemStateSchema = new mongoose.Schema(
       required: true,
     },
     attemptId: { type: String, default: null, trim: true },
+    completionOutcome: {
+      type: String,
+      enum: ["passed", "failed"],
+      default: null,
+    },
     completedAt: { type: Date, default: null },
     updatedAt: { type: Date, required: true },
   },

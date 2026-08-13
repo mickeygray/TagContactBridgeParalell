@@ -1193,3 +1193,138 @@ test("Gauntlet availability honors its own feature flag without enabling Free Ca
   assert.equal(enrolled.enrollment.items.find((item) => item.itemId === "fixture-item-gauntlet").status, "available");
   assert.equal(enrolled.enrollment.items.find((item) => item.itemId === "fixture-item-free").status, "locked");
 });
+
+test("Gauntlet completion unlocks after the knowledge check while preserving retryable outcomes", async () => {
+  const content = contentFixture();
+  content.scenarioBlueprints[0].presentation = {
+    questions: [
+      {
+        questionId: "fixture-question",
+        prompt: "What should the learner do?",
+      },
+    ],
+  };
+  content.courseManifest.items[0].prerequisiteItemIds = [
+    "fixture-item-gauntlet",
+  ];
+  content.courseManifest.items.unshift({
+    id: "fixture-item-gauntlet",
+    version: "1.0.0-test",
+    status: "published",
+    type: "gauntlet",
+    ruleIds: ["fixture-rule-alpha"],
+    prerequisiteItemIds: [],
+    blueprintId: "fixture-scenario",
+    blueprintVersion: "1.0.0-test",
+    presentation: { title: "Synthetic targeted practice" },
+  });
+  const repository = createMemoryRepository();
+  const { service } = serviceFixture({
+    repository,
+    contentProvider: () => content,
+    flags: {
+      courseV1Enabled: true,
+      gauntletV1Enabled: true,
+      callReviewV1Enabled: false,
+    },
+  });
+  await service.enroll({
+    principal: LEARNER,
+    requestId: "gauntlet-outcome-enroll",
+  });
+  const started = await service.startAttempt({
+    principal: LEARNER,
+    itemId: "fixture-item-gauntlet",
+    requestId: "gauntlet-outcome-attempt",
+  });
+  const attemptId = started.attempt.attemptId;
+  const firstRun = repository.attempts.get(attemptId);
+  repository.attempts.set(attemptId, {
+    ...firstRun,
+    gauntletState: { status: "failed", runNumber: 0 },
+    version: 1,
+    eventIds: ["knowledge-failed-run"],
+    events: [
+      {
+        eventId: "knowledge-failed-run",
+        sequence: 1,
+        type: "gauntlet_module_answer_graded",
+        occurredAt: new Date(),
+        expectedPriorVersion: 0,
+        payload: {
+          runNumber: 0,
+          questionIndex: 0,
+          grade: { passed: true, score: 1 },
+        },
+      },
+    ],
+  });
+
+  const failedCompletion = await service.completeAttempt({
+    principal: LEARNER,
+    attemptId,
+    eventId: "complete-failed-run",
+    expectedVersion: 1,
+  });
+  assert.equal(failedCompletion.terminalSummary.status, "failed");
+  assert.equal(
+    failedCompletion.enrollment.items.find(
+      (item) => item.itemId === "fixture-item-gauntlet",
+    ).completionOutcome,
+    "failed",
+  );
+  assert.equal(
+    failedCompletion.enrollment.items.find(
+      (item) => item.itemId === "fixture-item-learn",
+    ).status,
+    "available",
+  );
+
+  const completedAttempt = repository.attempts.get(attemptId);
+  repository.attempts.set(attemptId, {
+    ...completedAttempt,
+    gauntletState: { status: "passed", runNumber: 1 },
+    version: 4,
+    eventIds: [
+      ...completedAttempt.eventIds,
+      "retry-run",
+      "knowledge-passed-run",
+    ],
+    events: [
+      ...completedAttempt.events,
+      {
+        eventId: "retry-run",
+        sequence: 3,
+        type: "gauntlet_retry_started",
+        occurredAt: new Date(),
+        expectedPriorVersion: 2,
+        payload: {},
+      },
+      {
+        eventId: "knowledge-passed-run",
+        sequence: 4,
+        type: "gauntlet_module_answer_graded",
+        occurredAt: new Date(),
+        expectedPriorVersion: 3,
+        payload: {
+          runNumber: 1,
+          questionIndex: 0,
+          grade: { passed: true, score: 1 },
+        },
+      },
+    ],
+  });
+  const passedCompletion = await service.completeAttempt({
+    principal: LEARNER,
+    attemptId,
+    eventId: "complete-passed-run",
+    expectedVersion: 4,
+  });
+  assert.equal(passedCompletion.terminalSummary.status, "passed");
+  assert.equal(
+    passedCompletion.enrollment.items.find(
+      (item) => item.itemId === "fixture-item-gauntlet",
+    ).completionOutcome,
+    "passed",
+  );
+});

@@ -8,7 +8,7 @@ const attemptEventSchema = new mongoose.Schema(
     sequence: { type: Number, required: true, min: 1 },
     type: {
       type: String,
-      enum: ["answer_submitted", "attempt_completed", "reflection_added", "gauntlet_initialized", "gauntlet_turn_accepted", "gauntlet_turn_rejected", "gauntlet_hint_revealed", "gauntlet_run_failed", "gauntlet_retry_started", "gauntlet_invalidated"],
+      enum: ["answer_submitted", "attempt_completed", "reflection_added", "gauntlet_initialized", "gauntlet_turn_accepted", "gauntlet_turn_rejected", "gauntlet_hint_revealed", "gauntlet_run_failed", "gauntlet_retry_started", "gauntlet_module_answer_graded", "gauntlet_invalidated"],
       required: true,
     },
     occurredAt: { type: Date, required: true },

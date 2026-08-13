@@ -416,7 +416,14 @@ function createTrainingGauntletService({
     });
   }
 
-  async function gradeModuleAnswer({ attemptId, answer, questionIndex = 0, principal }) {
+  async function gradeModuleAnswer({
+    attemptId,
+    answer,
+    questionIndex = 0,
+    eventId,
+    expectedVersion,
+    principal,
+  }) {
     requireMutationEnabled();
     if (typeof gradeAnswer !== "function") {
       throw gauntletError(503, "TRAINER_GAUNTLET_GRADER_UNAVAILABLE");
@@ -427,7 +434,41 @@ function createTrainingGauntletService({
     if (!Number.isInteger(safeQuestionIndex) || safeQuestionIndex < 0) {
       throw gauntletError(422, "TRAINER_GAUNTLET_QUESTION_INVALID");
     }
+    const safeEventId = String(eventId || "").trim();
+    const safeExpectedVersion = Number(expectedVersion);
+    if (
+      !safeEventId ||
+      !Number.isInteger(safeExpectedVersion) ||
+      safeExpectedVersion < 0
+    ) {
+      throw gauntletError(422, "TRAINER_GAUNTLET_INPUT_INVALID");
+    }
     const attempt = await owned(attemptId, principal);
+    const fingerprint = inputFingerprint({
+      answer: safeAnswer,
+      questionIndex: safeQuestionIndex,
+    });
+    const existing = (attempt.events || []).find(
+      (event) => event?.eventId === safeEventId,
+    );
+    if (existing) {
+      if (
+        existing.type !== "gauntlet_module_answer_graded" ||
+        existing.payload?.inputFingerprint !== fingerprint
+      ) {
+        throw gauntletError(409, "TRAINER_GAUNTLET_CONFLICT");
+      }
+      return {
+        ...(existing.payload?.grade || {}),
+        questionIndex: Number(existing.payload?.questionIndex) || 0,
+        questionCount: Number(existing.payload?.questionCount) || 0,
+        version: Number(attempt.version) || 0,
+        duplicate: true,
+      };
+    }
+    if (Number(attempt.version) !== safeExpectedVersion) {
+      throw gauntletError(409, "TRAINER_GAUNTLET_CONFLICT");
+    }
     if (!attempt.gauntletState) {
       throw gauntletError(422, "TRAINER_GAUNTLET_NOT_INITIALIZED");
     }
@@ -443,16 +484,56 @@ function createTrainingGauntletService({
     if (questions.length && !question) {
       throw gauntletError(422, "TRAINER_GAUNTLET_QUESTION_INVALID");
     }
-    if (!question) return { passed: true, score: 1, feedback: "Practice complete." };
+    if (!question) {
+      return {
+        passed: true,
+        score: 1,
+        feedback: "Practice complete.",
+        questionIndex: safeQuestionIndex,
+        questionCount: 0,
+        version: Number(attempt.version) || 0,
+        duplicate: false,
+      };
+    }
     const grade = await gradeAnswer({
       answer: safeAnswer,
       question,
       scenario,
     });
+    const result = await repository.appendAttemptEvent({
+      attemptId,
+      eventId: safeEventId,
+      expectedVersion: safeExpectedVersion,
+      event: {
+        eventId: safeEventId,
+        sequence: safeExpectedVersion + 1,
+        type: "gauntlet_module_answer_graded",
+        occurredAt: now(),
+        expectedPriorVersion: safeExpectedVersion,
+        payload: {
+          inputFingerprint: fingerprint,
+          runNumber: Number(state.runNumber) || 0,
+          questionIndex: safeQuestionIndex,
+          questionCount: questions.length,
+          questionId: String(question.questionId || ""),
+          answer: safeAnswer,
+          grade,
+        },
+        provenance: {
+          authority: "server_owned_content",
+          graderVersion: state.graderVersion,
+        },
+      },
+    });
+    if (!result.attempt || result.conflict) {
+      throw gauntletError(409, "TRAINER_GAUNTLET_CONFLICT");
+    }
     return {
       ...grade,
       questionIndex: safeQuestionIndex,
       questionCount: questions.length,
+      version: Number(result.attempt.version) || 0,
+      duplicate: result.duplicate === true,
     };
   }
   return Object.freeze({

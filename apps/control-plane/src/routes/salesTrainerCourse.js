@@ -22,7 +22,12 @@ const BODY_KEYS = Object.freeze({
     "text",
   ]),
   gauntletRetry: new Set(["eventId", "expectedVersion"]),
-  gauntletModuleAnswer: new Set(["answer", "questionIndex"]),
+  gauntletModuleAnswer: new Set([
+    "answer",
+    "questionIndex",
+    "eventId",
+    "expectedVersion",
+  ]),
   freeCallMint: new Set(["requestId"]),
   freeCallTurn: new Set(["eventId", "expectedVersion", "expectedTurn", "text"]),
   freeCallObserver: new Set(["eventId", "expectedVersion", "expectedTurn", "prospectState"]),
@@ -396,6 +401,8 @@ function createSalesTrainerCourseRouter(options = {}) {
           attemptId: req.params.attemptId,
           answer: req.body.answer,
           questionIndex: req.body.questionIndex,
+          eventId: req.body.eventId,
+          expectedVersion: req.body.expectedVersion,
         });
       }),
     );

@@ -105,7 +105,7 @@ test("targeted practice exposes and grades every server-owned module question", 
       },
     ],
   };
-  const stored = {
+  let stored = {
     ...attempt(),
     gauntletState: {
       schemaVersion: "1",
@@ -135,7 +135,23 @@ test("targeted practice exposes and grades every server-owned module question", 
   };
   const graded = [];
   const service = createTrainingGauntletService({
-    repository: { findAttemptById: async () => structuredClone(stored) },
+    repository: {
+      findAttemptById: async () => structuredClone(stored),
+      appendAttemptEvent: async ({ event, expectedVersion }) => {
+        assert.equal(expectedVersion, stored.version);
+        stored = {
+          ...stored,
+          version: stored.version + 1,
+          events: [...stored.events, event],
+          eventIds: [...stored.eventIds, event.eventId],
+        };
+        return {
+          attempt: structuredClone(stored),
+          duplicate: false,
+          conflict: false,
+        };
+      },
+    },
     contentProvider: async () => content,
     authorizeAttempt: async () => {},
     flagsProvider: () => ({ gauntletV1Enabled: true }),
@@ -158,17 +174,48 @@ test("targeted practice exposes and grades every server-owned module question", 
     attemptId: "attempt-1",
     answer: "The second move.",
     questionIndex: 1,
+    eventId: "module-answer-1",
+    expectedVersion: 0,
     principal: {},
   });
   assert.equal(graded[0].question.questionId, "fixture-question-2");
   assert.equal(result.questionIndex, 1);
   assert.equal(result.questionCount, 2);
+  assert.equal(result.version, 1);
+  assert.equal(
+    stored.events.at(-1).type,
+    "gauntlet_module_answer_graded",
+  );
+  const duplicate = await service.gradeModuleAnswer({
+    attemptId: "attempt-1",
+    answer: "The second move.",
+    questionIndex: 1,
+    eventId: "module-answer-1",
+    expectedVersion: 0,
+    principal: {},
+  });
+  assert.equal(duplicate.duplicate, true);
+  assert.equal(duplicate.version, 1);
+  assert.equal(graded.length, 1);
+  await assert.rejects(
+    service.gradeModuleAnswer({
+      attemptId: "attempt-1",
+      answer: "A changed answer.",
+      questionIndex: 1,
+      eventId: "module-answer-1",
+      expectedVersion: 1,
+      principal: {},
+    }),
+    { code: "TRAINER_GAUNTLET_CONFLICT" },
+  );
 
   await assert.rejects(
     service.gradeModuleAnswer({
       attemptId: "attempt-1",
       answer: "A forged future answer.",
       questionIndex: 2,
+      eventId: "module-answer-2",
+      expectedVersion: 1,
       principal: {},
     }),
     { code: "TRAINER_GAUNTLET_QUESTION_INVALID" },

@@ -238,6 +238,7 @@ function initialItemStates(bundle, company, now, flags) {
           ? "available"
           : "locked",
       attemptId: null,
+      completionOutcome: null,
       completedAt: null,
       updatedAt: now,
     };
@@ -264,6 +265,7 @@ function recomputeAvailability(enrollment, bundle, flags, now) {
         required: item.required !== false,
         status: "locked",
         attemptId: null,
+        completionOutcome: null,
         completedAt: null,
         updatedAt: now,
       };
@@ -364,6 +366,10 @@ function publicEnrollment(enrollment, bundle, flags) {
       title: String(item.presentation?.title || item.title || item.id),
       required: state?.required !== false,
       status: ITEM_STATUSES.has(state?.status) ? state.status : "locked",
+      completionOutcome:
+        state?.status === "completed" && ["passed", "failed"].includes(state?.completionOutcome)
+          ? state.completionOutcome
+          : null,
     };
   });
   const requiredItems = items.filter((item) => item.required);
@@ -456,6 +462,10 @@ function publicItem(item, state) {
     title: String(presentation.title || item.title || item.id),
     required: state?.required !== false,
     status: state?.status || "locked",
+    completionOutcome:
+      state?.status === "completed" && ["passed", "failed"].includes(state?.completionOutcome)
+        ? state.completionOutcome
+        : null,
     completedAttemptId:
       state?.status === "completed" ? state.attemptId || null : null,
     content: {
@@ -518,6 +528,21 @@ function publicEvent(event) {
       occurredAt: iso(event.occurredAt),
       payload: {
         reflection: String(payload.reflection || "").slice(0, 8_000),
+      },
+    };
+  }
+  if (event?.type === "gauntlet_module_answer_graded") {
+    return {
+      eventId: event.eventId,
+      sequence: event.sequence,
+      type: event.type,
+      occurredAt: iso(event.occurredAt),
+      payload: {
+        runNumber: Number(payload.runNumber) || 0,
+        questionIndex: Number(payload.questionIndex) || 0,
+        questionCount: Number(payload.questionCount) || 0,
+        answer: String(payload.answer || "").slice(0, 8_000),
+        grade: clone(payload.grade || null),
       },
     };
   }
@@ -618,6 +643,37 @@ function latestAnswerEvent(attempt) {
   return [...(attempt?.events || [])]
     .reverse()
     .find((event) => event?.type === "answer_submitted");
+}
+
+function gauntletQuestions(bundle, attempt) {
+  const scenario = (bundle?.scenarioBlueprints || []).find(
+    (candidate) =>
+      candidate?.id === attempt?.blueprintId &&
+      candidate?.version === attempt?.blueprintVersion,
+  );
+  return Array.isArray(scenario?.presentation?.questions)
+    ? scenario.presentation.questions.filter((question) => question?.prompt)
+    : [];
+}
+
+function gauntletKnowledgeCheckComplete(attempt, questionCount) {
+  if (questionCount === 0) return true;
+  const runNumber = Number(attempt?.gauntletState?.runNumber) || 0;
+  const latestByQuestion = new Map();
+  for (const event of attempt?.events || []) {
+    if (
+      event?.type !== "gauntlet_module_answer_graded" ||
+      Number(event?.payload?.runNumber) !== runNumber
+    ) {
+      continue;
+    }
+    const questionIndex = Number(event?.payload?.questionIndex);
+    if (Number.isInteger(questionIndex)) {
+      latestByQuestion.set(questionIndex, event);
+    }
+  }
+  return Array.from({ length: questionCount }, (_, questionIndex) => questionIndex)
+    .every((questionIndex) => latestByQuestion.get(questionIndex)?.payload?.grade?.passed === true);
 }
 
 function ensureOwnedEnrollment(enrollment, principal) {
@@ -790,12 +846,18 @@ function createTrainingCourseService(options = {}) {
         const currentState = (current.itemStates || []).find(
           (state) => state.itemId === attempt.itemId,
         );
+        const completionOutcome = ["passed", "failed"].includes(
+          attempt.terminalSummary?.status,
+        )
+          ? attempt.terminalSummary.status
+          : "passed";
         const alreadyApplied =
           currentState?.status === "completed" &&
-          currentState?.attemptId === attempt.attemptId;
+          currentState?.attemptId === attempt.attemptId &&
+          currentState?.completionOutcome === completionOutcome;
         if (alreadyApplied) return null;
         if (
-          currentState?.status !== "in_progress" ||
+          !["in_progress", "completed"].includes(currentState?.status) ||
           currentState?.attemptId !== attempt.attemptId
         ) {
           throw trainingCourseError(409, "TRAINER_COURSE_CONFLICT");
@@ -806,7 +868,8 @@ function createTrainingCourseService(options = {}) {
                 ...state,
                 status: "completed",
                 attemptId: attempt.attemptId,
-                completedAt: occurredAt,
+                completionOutcome,
+                completedAt: state.completedAt || occurredAt,
                 updatedAt: occurredAt,
               }
             : state,
@@ -1620,7 +1683,8 @@ function createTrainingCourseService(options = {}) {
     if (existingEvent && existingEvent.type !== "attempt_completed") {
       throw trainingCourseError(409, "TRAINER_COURSE_EVENT_REUSED");
     }
-    if (attempt.terminalSummary && !existingEvent) {
+    const isGauntlet = attempt.itemType === "gauntlet";
+    if (attempt.terminalSummary && !existingEvent && !isGauntlet) {
       throw trainingCourseError(422, "TRAINER_COURSE_ATTEMPT_TERMINAL");
     }
     if (!existingEvent && attempt.version !== safeExpectedVersion) {
@@ -1666,17 +1730,34 @@ function createTrainingCourseService(options = {}) {
         "TRAINER_COURSE_ATTEMPT_NOT_COMPLETE",
       );
     }
+    const gauntletStatus = String(attempt.gauntletState?.status || "");
+    const questions = isGauntlet ? gauntletQuestions(bundle, attempt) : [];
+    if (
+      !existingEvent &&
+      isGauntlet &&
+      (!["passed", "failed"].includes(gauntletStatus) ||
+        !gauntletKnowledgeCheckComplete(attempt, questions.length))
+    ) {
+      throw trainingCourseError(
+        422,
+        "TRAINER_COURSE_ATTEMPT_NOT_COMPLETE",
+      );
+    }
     let occurredAt =
       asDate(existingEvent?.occurredAt) ||
-      asDate(attempt.terminalSummary?.completedAt) ||
       clock();
-    const terminalSummary =
-      attempt.terminalSummary ||
-      Object.freeze({
-        status: "passed",
-        completedAt: occurredAt,
-        score: answer?.payload?.grade?.score ?? null,
-      });
+    const currentOutcome = isGauntlet ? gauntletStatus : "passed";
+    const priorOutcome = String(attempt.terminalSummary?.status || "");
+    const terminalSummary = Object.freeze({
+      ...(attempt.terminalSummary || {}),
+      status:
+        priorOutcome === "passed" || currentOutcome === "passed"
+          ? "passed"
+          : "failed",
+      latestRunStatus: currentOutcome,
+      completedAt: occurredAt,
+      score: answer?.payload?.grade?.score ?? attempt.terminalSummary?.score ?? null,
+    });
     const appendResult = existingEvent
       ? { attempt, duplicate: true, conflict: false }
       : await repository.appendAttemptEvent({
