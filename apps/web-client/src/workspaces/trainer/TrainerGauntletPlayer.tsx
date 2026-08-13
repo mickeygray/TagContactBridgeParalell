@@ -652,7 +652,11 @@ export function TrainerGauntletPlayer({
           )}
         </div>
         <h2 className="mt-4 text-lg font-semibold">
-          {prospectSpeaking
+          {terminal
+            ? runtime.state.status === "passed"
+              ? "Conversation complete — answer the check below"
+              : "Run complete — try this conversation again"
+            : prospectSpeaking
             ? "Prospect speaking"
             : busy
                 ? "Prospect is responding"
@@ -704,15 +708,34 @@ export function TrainerGauntletPlayer({
         ) : null}
 
         <div className="mt-6 flex flex-wrap justify-center gap-3">
-          <Button
-            size="lg"
-            variant={recording ? "destructive" : "primary"}
-            onClick={recording ? stopRecording : () => void startRecording()}
-            disabled={!micSupported || (voiceBusy && !recording) || terminal}
-          >
-            {recording ? <Square className="h-5 w-5" /> : <Mic className="h-5 w-5" />}
-            {recording ? "Finish and send" : "Talk"}
-          </Button>
+          {terminal ? (
+            <>
+              <Button size="lg" onClick={() => void retry()} disabled={busy}>
+                {runtime.state.status === "passed" ? "Practice another version" : "Practice again"}
+              </Button>
+              {runtime.state.status === "passed" ? (
+                <Button
+                  size="lg"
+                  variant="secondary"
+                  onClick={() => document.getElementById("targeted-talk-knowledge-check")
+                    ?.scrollIntoView({ behavior: "smooth", block: "center" })}
+                  disabled={busy}
+                >
+                  Continue to knowledge check
+                </Button>
+              ) : null}
+            </>
+          ) : (
+            <Button
+              size="lg"
+              variant={recording ? "destructive" : "primary"}
+              onClick={recording ? stopRecording : () => void startRecording()}
+              disabled={!micSupported || (voiceBusy && !recording)}
+            >
+              {recording ? <Square className="h-5 w-5" /> : <Mic className="h-5 w-5" />}
+              {recording ? "Finish and send" : "Talk"}
+            </Button>
+          )}
           <Button
             size="lg"
             variant="secondary"
@@ -753,7 +776,7 @@ export function TrainerGauntletPlayer({
 
       {error ? <p role="alert" className="text-sm text-destructive">{error}</p> : null}
       {terminal ? (
-        <div className="rounded-lg border border-border p-4">
+        <div id="targeted-talk-knowledge-check" className="rounded-lg border border-border p-4">
           <h3 className="font-semibold">
             {runtime.state.status === "passed" ? "Talk practice complete" : "Run complete"}
           </h3>
