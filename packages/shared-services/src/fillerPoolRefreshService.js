@@ -343,7 +343,22 @@ async function loadCachedDncByPhone(phones) {
 // instead of returning a poisonous "isCell: false" stub. After max
 // retries, returns null which the scrub interprets as "skip caching,
 // keep cautiously in pool, retry next refresh."
-async function lookupDncWithRetry(rpv, phone, logger) {
+function classifyDncLookupFailure(error) {
+  const message = String(error?.message || error || "").toLowerCase();
+  if (/\b402\b|insufficient\s+balance|payment\s+required|credit|quota|fund/.test(message)) {
+    return "paymentRequired";
+  }
+  if (/\b429\b|rate.?limit|too many/.test(message)) return "rateLimited";
+  if (/\b401\b|\b403\b|api.?key|token|auth|unauthor|forbidden/.test(message)) {
+    return "authentication";
+  }
+  if (/time.?out|timed out|econn|enotfound|eai_again|getaddrinfo|socket|network|fetch failed/.test(message)) {
+    return "network";
+  }
+  return "other";
+}
+
+async function lookupDncWithRetry(rpv, phone, logger, onFailure = null) {
   const maxAttempts = 4;
   let delay = 500;
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
@@ -352,6 +367,7 @@ async function lookupDncWithRetry(rpv, phone, logger) {
     } catch (error) {
       const is429 = /\b429\b/.test(error.message || "");
       if (!is429 || attempt === maxAttempts) {
+        onFailure?.(classifyDncLookupFailure(error));
         logger?.warn?.("filler.dnc-lookup.failed", {
           phone,
           attempt,
@@ -851,7 +867,7 @@ async function runFillerPoolRefresh(options = {}) {
 /**
  * Should the monthly refresh fire on this hourly tick?
  *
- * Fires once per month, on the 1st of the month between 5:00 and
+ * Fires once per month, on the first Pacific business day between 5:00 and
  * 5:59 PT. Idempotent across multiple ticks in that hour because
  * the caller checks `hasFreshPoolForTag` before invoking.
  *
@@ -870,21 +886,44 @@ async function runFillerPoolRefresh(options = {}) {
  *
  * Default TRUE, so every existing caller is byte-identical. Loosening this
  * globally instead would have let the hourly floor fire the monthly refresh
- * every hour on the 1st, which is the window between the work order's M2 and
+ * every hour on the boundary day, which is the window between the work order's M2 and
  * M3 steps.
  */
-function isAtMonthlyRefreshBoundary(now = new Date(), { requireHour = true } = {}) {
+function pacificCalendarParts(now = new Date()) {
   const fmt = new Intl.DateTimeFormat("en-US", {
     timeZone: "America/Los_Angeles",
+    year: "numeric",
+    month: "2-digit",
     day: "2-digit",
     hour: "2-digit",
     hour12: false,
   });
   const parts = fmt.formatToParts(now);
-  const day = parts.find((p) => p.type === "day")?.value;
-  const hour = parts.find((p) => p.type === "hour")?.value;
-  if (day !== "01") return false;
-  return requireHour ? hour === "05" : true;
+  const value = (type) => Number(parts.find((part) => part.type === type)?.value);
+  return {
+    year: value("year"),
+    month: value("month"),
+    day: value("day"),
+    hour: value("hour"),
+  };
+}
+
+function isFirstPacificBusinessDayOfMonth(now = new Date()) {
+  const { year, month, day } = pacificCalendarParts(now);
+  if (![year, month, day].every(Number.isFinite)) return false;
+  const weekday = new Date(Date.UTC(year, month - 1, day)).getUTCDay();
+  if (weekday === 0 || weekday === 6) return false;
+  for (let earlier = 1; earlier < day; earlier += 1) {
+    const earlierWeekday = new Date(Date.UTC(year, month - 1, earlier)).getUTCDay();
+    if (earlierWeekday !== 0 && earlierWeekday !== 6) return false;
+  }
+  return true;
+}
+
+function isAtMonthlyRefreshBoundary(now = new Date(), { requireHour = true } = {}) {
+  const { hour } = pacificCalendarParts(now);
+  if (!isFirstPacificBusinessDayOfMonth(now)) return false;
+  return requireHour ? hour === 5 : true;
 }
 
 /**
@@ -1179,6 +1218,13 @@ async function runDailyAgedRefresh(options = {}) {
     evicted: 0,
     droppedAtIntake: 0,
     dncLookupFailures: 0,
+    dncLookupFailureReasons: {
+      paymentRequired: 0,
+      rateLimited: 0,
+      authentication: 0,
+      network: 0,
+      other: 0,
+    },
     noPhone: 0,
     perDomain: {},
     retiredToday: [], // for email body — capped list of DNC drops/evictions
@@ -1217,6 +1263,13 @@ async function runDailyAgedRefresh(options = {}) {
       evicted: 0,
       droppedAtIntake: 0,
       dncLookupFailures: 0,
+      dncLookupFailureReasons: {
+        paymentRequired: 0,
+        rateLimited: 0,
+        authentication: 0,
+        network: 0,
+        other: 0,
+      },
       noPhone: 0,
     };
 
@@ -1229,7 +1282,14 @@ async function runDailyAgedRefresh(options = {}) {
     const lookupResults = await runConcurrent(
       phones,
       concurrency,
-      async (phone) => lookupDncWithRetry(rpv, phone, logger),
+      async (phone) => lookupDncWithRetry(rpv, phone, logger, (reason) => {
+        const safeReason = Object.prototype.hasOwnProperty.call(
+          summary.dncLookupFailureReasons,
+          reason,
+        ) ? reason : "other";
+        summary.dncLookupFailureReasons[safeReason] += 1;
+        perDom.dncLookupFailureReasons[safeReason] += 1;
+      }),
     );
     for (let i = 0; i < phones.length; i += 1) {
       lookups.set(phones[i], lookupResults[i] || null);
@@ -1434,6 +1494,7 @@ async function runDailyAgedRefresh(options = {}) {
     evicted: summary.evicted + summary.droppedAtIntake,
     expiredRetired: summary.expiredRetirement?.retired || 0,
     dncLookupFailures: summary.dncLookupFailures,
+    dncLookupFailureReasons: summary.dncLookupFailureReasons,
     durationMs: summary.durationMs,
     dryRun,
   });
@@ -1589,11 +1650,13 @@ module.exports = {
   retireExpiredAgedCadence,
   runMonthlyGraduationSweep,
   isAtMonthlyRefreshBoundary,
+  isFirstPacificBusinessDayOfMonth,
   isAtDailyAgedRefreshBoundary,
   isAgedRollingRefreshEnabled,
   hasFreshPoolForTag,
   defaultMonthTag,
   computeNextCheckpoint,
+  classifyDncLookupFailure,
   // exported for tests / introspection
   WYNN_DIGITAL_FLOOR_DATE,
   TAG_CASE_ID_FLOOR,

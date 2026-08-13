@@ -107,10 +107,17 @@ test("Introduction is four practices — identity teaching was removed by ruling
     assert.ok(module.questions[0].gradingPoints.length >= 3);
   }
 });
-test("draft packets are not silently imported into the production registry", () => {
+test("approved call-arc packets are explicitly compiled without mutating their draft records", () => {
   const production = require("../../packages/shared-services/src/trainer-content/publishedTrainingContent.v1");
-  assert.equal(production.courseManifest.items.length, 0);
-  assert.equal(production.scenarioBlueprints.length, 0);
+  const expectedModules = TAX_RESOLUTION_SKILL_PACKETS.reduce(
+    (total, packet) => total + packet.practiceModules.length,
+    0,
+  );
+  assert.equal(production.status, "published");
+  assert.equal(production.courseManifest.items.length, expectedModules);
+  assert.equal(production.scenarioBlueprints.length, expectedModules);
+  assert.ok(TAX_RESOLUTION_SKILL_PACKETS.every((packet) => packet.status === "draft"));
+  assert.ok(production.courseManifest.items.every((item) => item.status === "published"));
 });
 
 

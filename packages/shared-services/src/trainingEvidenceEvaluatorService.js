@@ -19,7 +19,7 @@ function createTrainingEvidenceEvaluatorService({ evaluateSemantic }) {
       throw evaluatorError("TRAINER_EVIDENCE_NODE_INVALID");
     }
     const criteria = new Map(
-      (node.requiredCriteria || []).map((criterion) => [
+      (scenario.nodes || []).flatMap((entry) => entry.requiredCriteria || []).map((criterion) => [
         criterion.criterionId,
         criterion,
       ]),
@@ -33,6 +33,8 @@ function createTrainingEvidenceEvaluatorService({ evaluateSemantic }) {
         criterionId: criterion.criterionId,
         ruleId: criterion.ruleId,
         ruleRevision: criterion.ruleRevision,
+        description: criterion.description || null,
+        evidenceGuidance: criterion.evidenceGuidance || null,
       })),
     });
     if (!Array.isArray(proposed)) {

@@ -968,6 +968,39 @@ test("red leads from day 32 onward are held for fifteen days between attempts", 
   }).pool, POOLS.OLDER_AVAILABLE);
 });
 
+test("ordinary leads phase out to a fifteen-day retry at attempt fifteen", () => {
+  const highTouch = item("high-touch", {
+    receivedAt: "2026-07-08T17:00:00.000Z",
+    totalAttemptCount: 15,
+    lastContactAt: "2026-07-09T17:00:00.000Z",
+    nextContactAt: null,
+  });
+  assert.equal(retryDelayMinutesForLeadAge(highTouch, { now: NOW }), 15 * 24 * 60);
+  const held = classifyPool(highTouch, {
+    now: NOW,
+    ageBasedDailyCaps: true,
+    eligibility: { ok: true },
+  });
+  assert.equal(held.reason, "follow-up-not-due");
+  assert.equal(held.nextEligibleAt.toISOString(), "2026-07-24T17:00:00.000Z");
+
+  const crossing = transitionCompletedAttempt(item("crossing", {
+    state: "provider_accepted",
+    receivedAt: "2026-07-08T17:00:00.000Z",
+    dailyAttemptCount: 0,
+    totalAttemptCount: 14,
+  }), "no_answer", {
+    attemptedAt: NOW,
+    completedAt: NOW,
+    providerCallId: "call-crossing",
+    maxDailyAttempts: 3,
+    retryDelayMinutes: 120,
+  });
+  assert.equal(crossing.totalAttemptCount, 15);
+  assert.equal(crossing.nextContactAt.toISOString(), "2026-07-25T17:00:00.000Z",
+    "the fifteenth completed attempt starts phase-out immediately");
+});
+
 test("third no-connect remains waiting but same-day cap blocks it; fourth attempt stays visible", () => {
   const third = transitionCompletedAttempt(item("third", { state: "provider_accepted", dailyAttemptCount: 2, totalAttemptCount: 2 }), "no_answer", {
     attemptedAt: NOW,

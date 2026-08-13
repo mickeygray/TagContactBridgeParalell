@@ -161,6 +161,10 @@ async function deriveMailSpend({
   const out = {
     runId, apply, considered: invoices.length,
     derived: 0, skipped: 0, retired: 0, rows: [], held: [],
+    // Planned dates let the dry-run describe which historical days WOULD
+    // change. Changed dates are emitted only after an applied insert succeeds;
+    // the nightly owner uses that list to rebuild exactly those old facts.
+    plannedDateKeys: [], changedDateKeys: [],
   };
 
   for (const invoice of invoices) {
@@ -197,6 +201,9 @@ async function deriveMailSpend({
 
     const rows = rowsForInvoice(invoice, runId);
     out.rows.push(...rows);
+    if (!out.plannedDateKeys.includes(invoice.serviceDate)) {
+      out.plannedDateKeys.push(invoice.serviceDate);
+    }
 
     if (!apply) { out.derived += 1; continue; }
 
@@ -242,6 +249,9 @@ async function deriveMailSpend({
     await SpendDay.insertMany(rows, { ordered: true });
     await Invoice.updateOne({ _id: invoice._id }, { $set: { spendDerivedAt: new Date() } });
     out.derived += 1;
+    if (!out.changedDateKeys.includes(invoice.serviceDate)) {
+      out.changedDateKeys.push(invoice.serviceDate);
+    }
 
     logger?.info?.("mail_spend.derived", {
       invoiceNumber: invoice.invoiceNumber,

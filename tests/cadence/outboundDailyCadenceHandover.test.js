@@ -4,8 +4,13 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 
 const {
+  RECURRING_COUNTER_CADENCE_AUTOMATION_ENABLED,
   dailyCadenceOwnedByPasses,
 } = require("../../apps/outbound-gateway/src/server");
+
+test("the unattended recurring counter-cadence worker is retired", () => {
+  assert.equal(RECURRING_COUNTER_CADENCE_AUTOMATION_ENABLED, false);
+});
 
 const armed = {
   OUTBOUND_DAILY_CADENCE_TO_PASSES: "true",

@@ -12,6 +12,7 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/Button";
 import {
+  salesTrainerApi,
   type TrainerPlayback,
 } from "@/lib/api/salesTrainer";
 import {
@@ -27,6 +28,8 @@ interface TrainerGauntletPlayerProps {
   item: TrainingCourseItem;
   attempt: TrainingAttempt | null;
   onStart: () => Promise<TrainingAttempt | null>;
+  onAttemptChange?: (attempt: TrainingAttempt) => void;
+  onComplete?: () => Promise<void>;
   /**
    * Reports which practice is live so the curriculum rail can show this
    * section's own modules (4B.1-4B.4) instead of the section list again.
@@ -74,6 +77,8 @@ export function TrainerGauntletPlayer({
   item,
   attempt,
   onStart,
+  onAttemptChange,
+  onComplete,
   onModuleProgress,
 }: TrainerGauntletPlayerProps) {
   const [runtime, setRuntime] = useState<TrainingGauntletResult | null>(null);
@@ -190,7 +195,7 @@ export function TrainerGauntletPlayer({
       !handsFreeEnabledRef.current ||
       busyRef.current ||
       recordingRef.current ||
-      runtimeRef.current?.state.status !== "in_progress"
+      !["ready", "in_progress"].includes(runtimeRef.current?.state.status || "")
     ) {
       return;
     }
@@ -277,18 +282,16 @@ export function TrainerGauntletPlayer({
         started.attemptId,
         { eventId, expectedVersion: started.version },
       );
-      const voiceSession = await trainingCourseApi.startTargetedVoiceSession(
-        started.attemptId,
-      );
       initializeEventRef.current = null;
       const opening =
-        voiceSession.openingLine ||
+        result.openingLine ||
         "The prospect is ready. Respond to the situation in this section of the call.";
       runtimeRef.current = result;
       setRuntime(result);
-      setCoach(voiceSession.coach || result.coach || null);
+      if (result.attempt) onAttemptChange?.(result.attempt);
+      setCoach(result.coach || null);
       setTape([{ id: "opening", speaker: "prospect", text: opening }]);
-      playProspect(opening, voiceSession.openingPlayback);
+      playProspect(opening);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Could not start this Talk Session.");
     } finally {
@@ -297,7 +300,7 @@ export function TrainerGauntletPlayer({
   }
 
   async function submit(outboundOverride?: string, voiceBlob?: Blob, filename?: string) {
-    const outbound = (outboundOverride ?? text).trim();
+    let outbound = (outboundOverride ?? text).trim();
     const currentAttempt = runtime?.attempt || attempt;
     if ((!outbound && !voiceBlob) || !runtime?.state || !currentAttempt || busy) return;
     setBusy(true);
@@ -308,28 +311,36 @@ export function TrainerGauntletPlayer({
       : { input: mutationInput, eventId: createTrainingRequestId("talk-turn") };
     turnEventRef.current = mutation;
     try {
-      const result = await trainingCourseApi.submitTargetedVoiceTurn(
-        currentAttempt.attemptId,
-        {
+      if (voiceBlob) {
+        const transcript = await salesTrainerApi.transcribeAudio({
           blob: voiceBlob,
           filename,
+          prompt: `Sales training, ${item.title}. Transcribe only the learner.`,
+        });
+        outbound = String(transcript.text || "").trim();
+      }
+      if (!outbound) {
+        setError("No speech was detected. Try the response again.");
+        return;
+      }
+      const result = await trainingCourseApi.submitGauntletTurn(
+        currentAttempt.attemptId,
+        {
+          eventId: mutation.eventId,
+          expectedVersion: runtime.version ?? currentAttempt.version,
+          expectedTurn: runtime.state.nextTurn,
           text: outbound,
         },
       );
       turnEventRef.current = null;
       setText("");
-      const learnerText =
-        result.voiceTurn.transcript?.text?.trim() || outbound;
-      if (!learnerText) {
-        setError("No speech was detected. Try the response again.");
-        return;
-      }
-      runtimeRef.current = result.gauntlet;
-      setRuntime(result.gauntlet);
-      setCoach(result.gauntlet.coach || null);
+      const learnerText = outbound;
+      runtimeRef.current = result;
+      setRuntime(result);
+      if (result.attempt) onAttemptChange?.(result.attempt);
+      setCoach(result.coach || null);
       const reply =
-        result.voiceTurn.response?.text?.trim() ||
-        result.gauntlet.prospectReply?.text ||
+        result.prospectReply?.text ||
         "";
       setTape((current) => [
         ...current,
@@ -340,7 +351,7 @@ export function TrainerGauntletPlayer({
           text: reply,
         }]),
       ]);
-      if (reply) playProspect(reply, result.voiceTurn.playback);
+      if (reply) playProspect(reply);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Could not submit this turn.");
     } finally {
@@ -474,28 +485,19 @@ export function TrainerGauntletPlayer({
           expectedVersion: currentAttempt.version || runtime?.version || 0,
         },
       );
-      const initialized = await trainingCourseApi.initializeGauntlet(
-        currentAttempt.attemptId,
-        {
-          eventId: createTrainingRequestId("talk-init"),
-          expectedVersion: reset.attempt?.version || reset.version || 0,
-        },
-      );
-      const voiceSession = await trainingCourseApi.startTargetedVoiceSession(
-        currentAttempt.attemptId,
-      );
-      const opening = voiceSession.openingLine ||
+      const opening = reset.openingLine ||
         "The prospect is ready. Respond to the situation in this section of the call.";
-      runtimeRef.current = initialized;
-      setRuntime(initialized);
-      setTape([{ id: `opening-${initialized.state.runNumber}`, speaker: "prospect", text: opening }]);
+      runtimeRef.current = reset;
+      setRuntime(reset);
+      if (reset.attempt) onAttemptChange?.(reset.attempt);
+      setTape([{ id: `opening-${reset.state.runNumber}`, speaker: "prospect", text: opening }]);
       setPlaybackUrls([]);
       setPlaybackIndex(0);
       setLastProspectText(opening);
-      setCoach(voiceSession.coach || initialized.coach || null);
+      setCoach(reset.coach || null);
       setReflectionAnswer("");
       setReflectionGrade(null);
-      playProspect(opening, voiceSession.openingPlayback);
+      playProspect(opening);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Could not begin another run.");
     } finally {
@@ -514,6 +516,7 @@ export function TrainerGauntletPlayer({
         reflectionAnswer.trim(),
       );
       setReflectionGrade(grade);
+      if (grade.passed && onComplete) await onComplete();
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Could not grade that answer.");
     } finally {

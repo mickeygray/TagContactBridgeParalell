@@ -65,7 +65,14 @@ const dailyLoopRunSchema = new mongoose.Schema(
     nightlyHygieneCompletedAt: { type: Date, default: null },
     nightlyHygieneNextTaskIndex: { type: Number, default: 0, min: 0 },
     nightlyHygieneCounts: { type: mongoose.Schema.Types.Mixed, default: null },
+    // Count-only task receipts needed when a restarted pass resumes near the
+    // end. Never stores plans, case/provider identities, subjects, payloads,
+    // or raw errors.
+    nightlyHygieneTaskResults: { type: mongoose.Schema.Types.Mixed, default: null },
     nightlyHygieneLastErrorCode: { type: String, default: null },
+    // At-most-once claim for the operator receipt. Set before SMTP just like a
+    // ReportDefinition's lastRunKey; a caught send failure gives it back.
+    nightlyHygieneSummarySentAt: { type: Date, default: null },
 
     // EVERY OTHER PASS'S CURSOR, keyed by pass name.
     //

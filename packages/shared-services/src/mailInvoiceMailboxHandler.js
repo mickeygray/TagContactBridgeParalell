@@ -2,8 +2,8 @@
 
 // The mail-invoice handler for `mailboxIngestService`.
 //
-// The vendor emails one message a day carrying TWO PDFs: the cost invoice and
-// the card receipt for it. This turns that message into one MailInvoice.
+// The vendor may send one or several paid days in a message. Each day is an
+// invoice/receipt group and becomes its own MailInvoice.
 //
 // ── WHY IT TAKES THE WHOLE MESSAGE ─────────────────────────────────────────
 //
@@ -19,6 +19,9 @@
 // what we managed to parse.
 
 const S = require("./mailInvoiceParseService");
+const {
+  HISTORICAL_REPAIR_MAX_AGE_DAYS,
+} = require("../../shared-config/src/dailyReportContract");
 
 // Mickey 2026-08-03: "we wont be getting the last email but
 // WBS.accounting@wizbangsolutions.com where the subject includes todays date."
@@ -33,8 +36,12 @@ const S = require("./mailInvoiceParseService");
 // a statement, or anything else; picking by recency would file the wrong PDF
 // against today's spend and be invisible, because the wrong invoice parses
 // just as cleanly as the right one.
+// Gmail recency includes the current close, while the repair contract names
+// the seven COMPLETED days before it. Search all eight calendar dates so a
+// previously missed message is still discoverable anywhere in that window.
 const DEFAULT_QUERY =
-  "from:WBS.accounting@wizbangsolutions.com has:attachment filename:pdf newer_than:3d";
+  `from:WBS.accounting@wizbangsolutions.com has:attachment filename:pdf newer_than:${HISTORICAL_REPAIR_MAX_AGE_DAYS + 1}d`;
+const MULTI_DAY_ATTACHMENT_GROUPING_ENABLED = true;
 
 const MONTHS = [
   "january", "february", "march", "april", "may", "june",
@@ -124,6 +131,306 @@ function resolveServiceDate({ jobName, receipt, receivedAt, subject }) {
   return { serviceDate: null, serviceDateSource: null };
 }
 
+function resolveServiceDateWithinWindow({ jobName, wantedDates = [], ...fallback }) {
+  const windowMatches = [...new Set(wantedDates)].filter((dateKey) => (
+    S.serviceDateFromJobName(jobName, Number(String(dateKey).slice(0, 4))) === dateKey
+  ));
+  if (windowMatches.length === 1) {
+    return { serviceDate: windowMatches[0], serviceDateSource: "window" };
+  }
+  return resolveServiceDate({ jobName, ...fallback });
+}
+
+const moneyKey = (value) => (
+  Number.isFinite(Number(value)) ? Number(value).toFixed(2) : null
+);
+
+/**
+ * Pair a batch of receipts without trusting attachment order or filenames.
+ * Invoice number is the strongest join when the receipt exposes it; an exact
+ * grand-total match is next. A final one-to-one remainder preserves the old
+ * single-invoice mismatch evidence. Many-to-many matches remain ambiguous.
+ */
+function pairInvoiceReceipts(invoiceRows = [], receiptRows = []) {
+  const pairs = new Map();
+  const ambiguous = new Set();
+  const usedReceipts = new Set();
+
+  const pairUniqueGroups = (invoiceKey, receiptKey) => {
+    const invoicesByKey = new Map();
+    const receiptsByKey = new Map();
+    for (const row of invoiceRows) {
+      if (pairs.has(row.index) || ambiguous.has(row.index)) continue;
+      const key = invoiceKey(row);
+      if (!key) continue;
+      if (!invoicesByKey.has(key)) invoicesByKey.set(key, []);
+      invoicesByKey.get(key).push(row);
+    }
+    for (const row of receiptRows) {
+      if (usedReceipts.has(row.index)) continue;
+      const key = receiptKey(row);
+      if (!key) continue;
+      if (!receiptsByKey.has(key)) receiptsByKey.set(key, []);
+      receiptsByKey.get(key).push(row);
+    }
+    for (const [key, invoices] of invoicesByKey) {
+      const receipts = receiptsByKey.get(key) || [];
+      if (invoices.length === 1 && receipts.length === 1) {
+        pairs.set(invoices[0].index, receipts[0]);
+        usedReceipts.add(receipts[0].index);
+      } else if (receipts.length > 0) {
+        for (const invoice of invoices) ambiguous.add(invoice.index);
+      }
+    }
+  };
+
+  pairUniqueGroups(
+    (row) => String(row.parsed?.invoiceNumber || "").trim() || null,
+    (row) => String(row.parsed?.invoiceNumber || "").trim() || null,
+  );
+  pairUniqueGroups(
+    (row) => moneyKey(row.parsed?.grandTotal),
+    (row) => moneyKey(row.parsed?.total),
+  );
+
+  const remainingInvoices = invoiceRows.filter((row) => (
+    !pairs.has(row.index) && !ambiguous.has(row.index)
+  ));
+  const remainingReceipts = receiptRows.filter((row) => !usedReceipts.has(row.index));
+  if (remainingInvoices.length === 1 && remainingReceipts.length === 1) {
+    pairs.set(remainingInvoices[0].index, remainingReceipts[0]);
+    usedReceipts.add(remainingReceipts[0].index);
+  }
+
+  return { pairs, ambiguous, unmatchedReceipts: receiptRows.length - usedReceipts.size };
+}
+
+async function processMailInvoiceBatch({
+  attachments = [], messageId, threadId, subject, from, receivedAt, apply,
+  wantedDates = [], model,
+}) {
+  const classified = attachments.map((attachment, index) => ({
+    ...attachment,
+    index,
+    kind: S.classifyMailPdf(attachment.buffer),
+  }));
+  const invoiceFiles = classified.filter((attachment) => attachment.kind === "invoice");
+  const receiptFiles = classified.filter((attachment) => attachment.kind === "receipt");
+  const unknown = classified.filter((attachment) => !["invoice", "receipt"].includes(attachment.kind));
+  const subjectTargetDate = wantedDates.find((dateKey) => subjectMatchesDate(subject, dateKey)) || null;
+  const summary = {
+    attachmentsSeen: attachments.length,
+    invoice: invoiceFiles.length > 0,
+    receipt: receiptFiles.length > 0,
+    invoicesFound: invoiceFiles.length,
+    receiptsFound: receiptFiles.length,
+    unknown: unknown.length,
+  };
+
+  // With no invoice bytes, keep the old wrong-day diagnostic. When invoices
+  // exist, their own job names own their dates: a single paid email may contain
+  // several days and the message subject cannot describe every attachment.
+  if (!invoiceFiles.length) {
+    if (wantedDates.length && !subjectTargetDate) {
+      return {
+        written: false,
+        reason: "subject-date-mismatch",
+        summary: {
+          ...summary,
+          wantedDate: wantedDates.at(-1),
+          wantedDates,
+          subject,
+        },
+      };
+    }
+    return { written: false, reason: "no-invoice-attachment", summary };
+  }
+
+  const invoiceRows = invoiceFiles.map((file) => ({
+    file,
+    index: file.index,
+    parsed: S.parseMailInvoice(file.buffer),
+  }));
+  const validInvoiceRows = invoiceRows.filter((row) => row.parsed?.ok);
+  const receiptRows = receiptFiles.map((file) => ({
+    file,
+    index: file.index,
+    parsed: S.parseMailReceipt(file.buffer),
+  }));
+  const pairing = pairInvoiceReceipts(validInvoiceRows, receiptRows);
+  const docs = [];
+  const results = [];
+  let writtenCount = 0;
+  let failed = 0;
+  let skipped = 0;
+
+  for (const row of invoiceRows) {
+    const { file, parsed } = row;
+    if (!parsed?.ok) {
+      failed += 1;
+      results.push({ status: "failed", reason: parsed?.reason || "unparseable" });
+      continue;
+    }
+
+    const receiptRow = pairing.pairs.get(row.index) || null;
+    const receiptFile = receiptRow?.file || null;
+    const parsedReceipt = receiptRow?.parsed || null;
+    const receipt = parsedReceipt ? {
+      total: parsedReceipt.total,
+      capturedAt: parsedReceipt.capturedAt,
+      method: parsedReceipt.method,
+      authCode: parsedReceipt.authCode,
+      transactionId: parsedReceipt.transactionId,
+      matchesInvoice: parsedReceipt.total != null
+        && Math.abs(parsedReceipt.total - parsed.grandTotal) <= 0.01,
+      fileSha256: receiptFile.sha256,
+    } : null;
+
+    // The subject describes the batch. It is date evidence only when there is
+    // exactly one invoice; receipt/email evidence resolves every batch member.
+    const { serviceDate, serviceDateSource } = resolveServiceDateWithinWindow({
+      jobName: parsed.jobName,
+      wantedDates,
+      receipt,
+      receivedAt,
+      subject: invoiceFiles.length === 1 ? subject : null,
+    });
+    if (!serviceDate) {
+      failed += 1;
+      results.push({ status: "failed", reason: "no-service-date" });
+      continue;
+    }
+    if (wantedDates.length && !wantedDates.includes(serviceDate)) {
+      skipped += 1;
+      results.push({ status: "skipped", reason: "service-date-outside-window", serviceDate });
+      continue;
+    }
+
+    const derived = S.derivePerPiece(parsed);
+    const reviewReasons = [];
+    if (!parsed.reconciled || !derived.allocationBalances) reviewReasons.push("totals-disagree");
+    if (!derived.allPiecesMapped) reviewReasons.push("unmapped-piece");
+    if (receipt && receipt.matchesInvoice === false) reviewReasons.push("receipt-total-mismatch");
+    if (pairing.ambiguous.has(row.index)) reviewReasons.push("ambiguous-receipt-match");
+    else if (!receiptFile && receiptFiles.length) reviewReasons.push("no-matching-receipt");
+    else if (!receiptFile) reviewReasons.push("no-receipt");
+
+    const groupedFiles = [file, receiptFile].filter(Boolean);
+    const doc = {
+      vendor: parsed.vendor || "wizbang",
+      invoiceNumber: parsed.invoiceNumber,
+      fileSha256: file.sha256,
+      jobName: parsed.jobName,
+      serviceDate,
+      serviceDateSource,
+      postageTotal: parsed.postageTotal,
+      servicesTotal: parsed.servicesTotal,
+      grandTotal: parsed.grandTotal,
+      cardFee: derived.cardFee,
+      lineItems: derived.lineItems.map((item) => ({
+        description: item.description,
+        quantity: item.quantity,
+        unitPrice: item.unitPrice,
+        extendedPrice: item.extendedPrice,
+        section: item.section,
+        confident: item.confident,
+        source: item.source,
+      })),
+      perPiece: derived.perPiece,
+      reconciled: Boolean(parsed.reconciled && derived.allocationBalances),
+      allPiecesMapped: derived.allPiecesMapped,
+      unmapped: derived.unmapped,
+      state: reviewReasons.length ? "review" : "reconciled",
+      reviewReasons,
+      receipt,
+      source: {
+        channel: "gmail",
+        messageId,
+        threadId,
+        subject,
+        from,
+        receivedAt,
+        // Count this invoice/receipt group, not every file in the batch.
+        attachmentCount: groupedFiles.length,
+        attachmentNames: groupedFiles.map((attachment) => attachment.filename).slice(0, 2),
+      },
+      receivedAt: receivedAt || new Date(),
+    };
+    docs.push(doc);
+
+    if (!apply) {
+      results.push({ status: "dry-run", reason: "dry-run", serviceDate, doc });
+      continue;
+    }
+    if (!doc.invoiceNumber) {
+      failed += 1;
+      results.push({ status: "failed", reason: "no-invoice-number", serviceDate });
+      continue;
+    }
+
+    try {
+      const MailInvoiceModel = model();
+      const existing = await MailInvoiceModel
+        .findOne({ vendor: doc.vendor, invoiceNumber: doc.invoiceNumber }).lean();
+      const reissued = Boolean(existing && existing.fileSha256 !== doc.fileSha256);
+      const saved = await MailInvoiceModel.findOneAndUpdate(
+        { vendor: doc.vendor, invoiceNumber: doc.invoiceNumber },
+        { $set: doc },
+        { new: true, upsert: true, setDefaultsOnInsert: true, runValidators: true },
+      ).lean();
+      writtenCount += 1;
+      results.push({
+        status: "written",
+        created: !existing,
+        reissued,
+        invoiceNumber: saved.invoiceNumber,
+        serviceDate: saved.serviceDate,
+      });
+    } catch (error) {
+      failed += 1;
+      results.push({ status: "failed", reason: String(error?.code || error?.name || "write-failed") });
+    }
+  }
+
+  Object.assign(summary, {
+    invoicesEligible: docs.length,
+    invoicesWritten: writtenCount,
+    invoicesFailed: failed,
+    invoicesSkipped: skipped,
+    unmatchedReceipts: pairing.unmatchedReceipts,
+    serviceDates: [...new Set(docs.map((doc) => doc.serviceDate))].sort(),
+  });
+  if (docs.length === 1) {
+    Object.assign(summary, {
+      invoiceNumber: docs[0].invoiceNumber,
+      serviceDate: docs[0].serviceDate,
+      matchedTargetDate: wantedDates.includes(docs[0].serviceDate)
+        ? docs[0].serviceDate
+        : subjectTargetDate,
+      grandTotal: docs[0].grandTotal,
+      pieces: docs[0].perPiece.length,
+      state: docs[0].state,
+    });
+  }
+
+  return {
+    written: apply && writtenCount > 0,
+    writtenCount,
+    failed,
+    reason: failed ? "partial" : (apply ? (writtenCount ? "completed" : "not-written") : "dry-run"),
+    ...(docs.length === 1 ? { doc: docs[0] } : {}),
+    docs,
+    results,
+    summary,
+    ...(results.length === 1 ? {
+      created: results[0].created,
+      reissued: results[0].reissued,
+      invoiceNumber: results[0].invoiceNumber,
+      serviceDate: results[0].serviceDate,
+    } : {}),
+  };
+}
+
 function createMailInvoiceHandler({
   gmailQuery = process.env.MAIL_INVOICE_GMAIL_QUERY || DEFAULT_QUERY,
   MailInvoice = null,
@@ -131,8 +438,16 @@ function createMailInvoiceHandler({
   // day is ingested. Left null (the manual script) any vendor invoice is taken,
   // which is what a human running it by hand means.
   targetDate = null,
+  // The nightly owner may accept a small completed-day window so an invoice
+  // delayed by a card hold or vendor timing can repair the day it belongs to.
+  // `targetDate` remains for the standalone/current-day callers.
+  targetDates = null,
 } = {}) {
   const model = () => MailInvoice || require("../../shared-models/src/MailInvoice");
+  const wantedDates = [...new Set([
+    ...(Array.isArray(targetDates) ? targetDates : []),
+    ...(targetDate ? [targetDate] : []),
+  ].map((value) => String(value || "").trim()).filter(Boolean))];
 
   return {
     key: "mail-invoice",
@@ -146,18 +461,38 @@ function createMailInvoiceHandler({
     },
 
     async process({ attachments = [], messageId, threadId, subject, from, receivedAt, apply }) {
+      if (MULTI_DAY_ATTACHMENT_GROUPING_ENABLED) {
+        return processMailInvoiceBatch({
+          attachments,
+          messageId,
+          threadId,
+          subject,
+          from,
+          receivedAt,
+          apply,
+          wantedDates,
+          model,
+        });
+      }
+
+      // Legacy single-invoice body retained for the proof-gated weed-whack.
+      // It is unreachable and can be deleted after the batch path proves live.
       // THE DAY GATE. Checked here rather than in accepts() so a vendor email
       // for the WRONG day is reported as exactly that, with the subject it
       // actually had. Rejected inside accepts() it would land in the same
       // `skipped` bucket as junk, and "the invoice for today never came"
       // would look identical to "nothing from the vendor at all".
-      if (targetDate && !subjectMatchesDate(subject, targetDate)) {
+      const matchedTargetDate = wantedDates.find((dateKey) => subjectMatchesDate(subject, dateKey)) || null;
+      if (wantedDates.length && !matchedTargetDate) {
         return {
           written: false,
           reason: "subject-date-mismatch",
           summary: {
             attachmentsSeen: attachments.length,
-            wantedDate: targetDate,
+            // Keep wantedDate for existing diagnostics while exposing the full
+            // bounded late-arrival window to newer callers.
+            wantedDate: wantedDates.at(-1),
+            wantedDates,
             subject,
           },
         };
@@ -257,6 +592,7 @@ function createMailInvoiceHandler({
       Object.assign(summary, {
         invoiceNumber: parsed.invoiceNumber,
         serviceDate,
+        matchedTargetDate,
         grandTotal: parsed.grandTotal,
         pieces: derived.perPiece.length,
         state: doc.state,
@@ -299,5 +635,7 @@ function createMailInvoiceHandler({
 }
 
 module.exports = {
-  createMailInvoiceHandler, resolveServiceDate, subjectMatchesDate, subjectYear, DEFAULT_QUERY,
+  createMailInvoiceHandler, pairInvoiceReceipts, processMailInvoiceBatch,
+  resolveServiceDate, resolveServiceDateWithinWindow,
+  subjectMatchesDate, subjectYear, DEFAULT_QUERY,
 };

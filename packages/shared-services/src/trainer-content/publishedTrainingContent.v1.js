@@ -7,7 +7,7 @@ const scenarioBlueprints = require("./scenarioBlueprints");
 module.exports = Object.freeze({
   id: "trainer-published-content",
   version: "1.0.0",
-  status: "draft",
+  status: "published",
   testOnly: false,
   ruleRegistry,
   courseManifest,

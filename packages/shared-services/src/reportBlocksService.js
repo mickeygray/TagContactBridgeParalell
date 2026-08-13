@@ -909,8 +909,8 @@ const BLOCKS = [
     id: REPORT_SECTION_IDS.BY_SOURCE,
     label: "By source",
     hint: "Deals, cash, spend and cost-per for each active source",
-    termsShort: "ROAS = initials ÷ spend, both inside the range. Attributable call beats lead age; aged money carries no ratio.",
-    terms: "Self-contained month: spend booked in the range against money from cases SOLD in the range. A case counts when its FIRST payment lands inside the window, so an initial and its follow-on payments in the same month are all valid total; a case sold earlier is residual and is Aged. Within that, the ATTRIBUTABLE CALL is primary - a marketing-line call to the source inside the window keeps the money whatever the lead age, because mail is bulk-loaded and lags. Lead age decides only when no call can be found, so an aged lead that closes with no marketing response is Aged. Aged money is counted but carries no ratio and never reaches a channel total. ROAS = initial payments / spend. ROI = (all money - spend) / spend.",
+    termsShort: "ROAS = initials ÷ spend. Current month + prior 14-day tail; any post-date agreement preserves attribution.",
+    terms: "Self-contained month: spend booked in the range against money from cases SOLD in the range. A case counts when its FIRST payment lands inside the window, so an initial and its follow-on payments in the same month are all valid total; a case sold earlier is residual and is Aged. Within that, the ATTRIBUTABLE CALL is primary. Creation or CallRail evidence in the sale month or the final 14 calendar days of the prior month keeps the source; one POST DATE status also keeps it because the agreement may intentionally delay the first charge by 35 days or more. Lead age decides only when neither conversion signal exists. Aged money is counted but carries no ratio and never reaches a channel total. ROAS = initial payments / spend. ROI = (all money - spend) / spend.",
     // caseContacts is what reads SourceCampaignID off the Logics case. Without
     // it this block only sees stored snapshots and reports attributed deals as
     // "(unsourced)" — 34 of 39 over July 2026.
@@ -935,7 +935,7 @@ const BLOCKS = [
     compute({ payments, spendBySource, callsBySource, callsRange = [], from = null, to = null }) {
       const { canonicalSourceName, isCatchAllName } = require("./logicsSourceWriterService");
       const {
-        AGED_LABEL, isActiveSource, sourceBucket, sourceChannel,
+        AGED_CASE_REFS, AGED_LABEL, isActiveSource, sourceBucket, sourceChannel,
       } = require("../../shared-config/src/activeSources");
       const { applyFunctions, pickAttributionCall, resolveSourceRow, attributionDateResolver, attributionSourceResolver, foldSourceKey } = require("./reportOpsService");
 
@@ -955,6 +955,7 @@ const BLOCKS = [
       const attributionSourceFor = attributionSourceResolver(callsRange);
 
       const by = new Map();
+      const agedCaseRefs = new Map();
       const row = (k) => {
         if (!by.has(k)) by.set(k, { source: k, deals: 0, dealCases: new Set(), newCash: 0, recurringCash: 0, spend: 0, responses: 0, leads: 0 });
         return by.get(k);
@@ -965,20 +966,36 @@ const BLOCKS = [
         // mail-house placeholder to the catch-all, and applies the aged
         // rule. Two copies of this logic is exactly how the same question
         // came to have two different answers.
-        const r = row(resolveSourceRow(p, {
+        const resolvedRow = resolveSourceRow(p, {
           rangeStart: from,
           rangeEnd: to,
+          hasPostdateStatus: Boolean(p.hasPostdateStatus),
           attributionCallDate: attributionDateFor(p),
           // The PIECE the attributable call rang in on. Only consulted when
           // Logics holds a catch-all or nothing — see resolveSourceRow. Before
           // this, a deal on the ABC bucket was reported as unattributed even
           // though CallRail knew exactly which mailer produced it.
           attributionCallSource: attributionSourceFor(p),
-        }));
+        });
+        const r = row(resolvedRow);
         if (p.paymentType === "initial") {
           r.dealCases.add(`${p.domain}:${p.caseId}`);
           r.deals = r.dealCases.size;                     // sales, not payment rows
           r.newCash = round2(r.newCash + p.amount);
+          if (resolvedRow === AGED_LABEL) {
+            const domain = String(p.domain || "").trim().toUpperCase();
+            const caseId = Number(p.caseId);
+            if (domain && Number.isFinite(caseId) && caseId > 0) {
+              agedCaseRefs.set(`${domain}:${caseId}`, {
+                domain,
+                caseId,
+                expectedSource: String(p.sourceAtSale || "").trim() || null,
+                expectedSourceId: Number.isFinite(Number(p.sourceCampaignId))
+                  ? Number(p.sourceCampaignId)
+                  : null,
+              });
+            }
+          }
         }
         else r.recurringCash = round2(r.recurringCash + p.amount);
       }
@@ -1080,6 +1097,12 @@ const BLOCKS = [
           ["roas", "roi", "costPerAcquisition", "profitMargin"],
         ),
       })).sort((x, y) => y.spend - x.spend);
+      Object.defineProperty(out, AGED_CASE_REFS, {
+        value: [...agedCaseRefs.values()],
+        enumerable: false,
+        configurable: false,
+        writable: false,
+      });
       return out;
     },
     renderText(rows) {
@@ -1160,8 +1183,63 @@ const BLOCKS = [
           const pieces = rows.filter(isPiece);
           const rest = rows.filter((r) => !isPiece(r));
           if (!rest.length) return pieces;
-          const sum = (k) => round2(rest.reduce((s, r) => s + (Number(r[k]) || 0), 0));
-          const count = (k) => rest.reduce((s, r) => s + (Number(r[k]) || 0), 0);
+
+          // Do not call an AGED deal unattributed. Aged is a real attribution:
+          // it says the case came from a known piece that is no longer active.
+          // The old single residual folded Aged together with catch-alls and
+          // blanks, then labelled the combined deal count "need a source". On
+          // 2026-08-10 that turned one properly attributed Aged sale plus one
+          // catch-all sale into "2 unattributed deals" in the email.
+          //
+          // Keep the compact table, but split the residual by meaning:
+          //   - Aged rows that contain a deal keep the Aged label;
+          //   - catch-all/blank rows containing deals are genuinely unresolved;
+          //   - rows with no deals are the recurring back book.
+          const agedDeals = rest.filter(
+            (r) => String(r.source || "") === AGED && Number(r.deals || 0) > 0,
+          );
+          const unresolvedDeals = rest.filter(
+            (r) => String(r.source || "") !== AGED && Number(r.deals || 0) > 0,
+          );
+          const recurringOnly = rest.filter((r) => Number(r.deals || 0) <= 0);
+
+          const residualRow = (source, group) => {
+            const sum = (k) => round2(group.reduce((s, r) => s + (Number(r[k]) || 0), 0));
+            const count = (k) => group.reduce((s, r) => s + (Number(r[k]) || 0), 0);
+            return {
+              source,
+              deals: count("deals"),
+              newCash: sum("newCash"),
+              recurringCash: sum("recurringCash"),
+              totalCash: sum("totalCash"),
+              spend: sum("spend"),
+              responses: count("responses"),
+              leads: count("leads"),
+              // No ratio: none of these residual groups has current campaign
+              // spend against which a return would be meaningful.
+              roi: null,
+              roas: null,
+              costPer: null,
+              net: round2(sum("totalCash") - sum("spend")),
+              residual: true,
+            };
+          };
+
+          const residuals = [];
+          if (agedDeals.length) residuals.push(residualRow(AGED, agedDeals));
+          if (unresolvedDeals.length) {
+            const deals = unresolvedDeals.reduce((s, r) => s + (Number(r.deals) || 0), 0);
+            residuals.push(residualRow(
+              `Unattributed — ${deals} deal(s) need a source`,
+              unresolvedDeals,
+            ));
+          }
+          if (recurringOnly.length) {
+            residuals.push(residualRow("Recurring (all databases)", recurringOnly));
+          }
+
+          return [...pieces, ...residuals];
+          /* istanbul ignore next -- retained commentary documents the replaced shape
           return [...pieces, {
             // Mickey 2026-08-03: "you can change attributed to no source to
             // recurring total of all 3 databases."
@@ -1199,7 +1277,7 @@ const BLOCKS = [
             costPer: null,
             net: round2(sum("totalCash") - sum("spend")),
             residual: true,
-          }];
+          }]; */
         })(),
         // Six columns in the mail: who, how many, what the DEALS were worth,
         // what came in all told, what it cost, and the return.

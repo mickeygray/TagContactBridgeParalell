@@ -140,6 +140,8 @@ export function TrainerCoursePlayer({
               item={item}
               attempt={attemptState.attempt}
               onStart={attemptState.start}
+              onAttemptChange={attemptState.syncAttempt}
+              onComplete={complete}
               onModuleProgress={handleModuleProgress}
             />
           ) : isLesson ? (

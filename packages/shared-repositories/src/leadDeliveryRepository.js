@@ -1734,11 +1734,19 @@ function createLeadDeliveryRepository({
     agentId,
     sourcePools,
     untouchedOnly = false,
+    attemptBand = "all",
     now = null,
     limit = 500,
     session = null,
   } = {}) {
     if (typeof untouchedOnly !== "boolean") throw new TypeError("untouchedOnly must be a boolean");
+    const normalizedAttemptBand = String(attemptBand || "").trim().toLowerCase();
+    if (!["all", "standard", "age_sorted", "phase_out"].includes(normalizedAttemptBand)) {
+      throw new TypeError("attemptBand must be all, standard, age_sorted, or phase_out");
+    }
+    if (untouchedOnly === true && normalizedAttemptBand !== "all") {
+      throw new TypeError("untouchedOnly cannot be combined with an attemptBand");
+    }
     const normalizedAgentId = requireString(agentId, "agentId").toLowerCase();
     if (!Array.isArray(sourcePools) || sourcePools.length === 0) {
       throw new TypeError("sourcePools must be a non-empty array");
@@ -1764,6 +1772,15 @@ function createLeadDeliveryRepository({
       ...(untouchedOnly ? {
         totalAttemptCount: 0,
         lastContactAt: null,
+      } : normalizedAttemptBand === "standard" ? {
+        $or: [
+          { totalAttemptCount: { $gte: 1, $lt: 10 } },
+          { totalAttemptCount: 0, lastContactAt: { $ne: null } },
+        ],
+      } : normalizedAttemptBand === "age_sorted" ? {
+        totalAttemptCount: { $gte: 10, $lt: 15 },
+      } : normalizedAttemptBand === "phase_out" ? {
+        totalAttemptCount: { $gte: 15 },
       } : {}),
       $and: [
         { $or: poolPredicates },
@@ -1775,14 +1792,18 @@ function createLeadDeliveryRepository({
     });
     if (typeof query.sort === "function") {
       const pool = normalizedPools.length === 1 ? normalizedPools[0] : null;
-      const sort = pool === "new_today"
+      const sort = normalizedAttemptBand === "age_sorted"
+        ? { receivedAt: -1, totalAttemptCount: 1, nextContactAt: 1, _id: 1 }
+        : normalizedAttemptBand === "phase_out"
+          ? { receivedAt: -1, nextContactAt: 1, totalAttemptCount: 1, _id: 1 }
+          : pool === "new_today"
         ? { receivedAt: -1, _id: 1 }
         : pool === "overnight"
           ? { overnightOrder: 1, _id: 1 }
           : pool === "follow_up_due"
-            ? { nextContactAt: 1, lastContactAt: 1, _id: 1 }
+            ? { totalAttemptCount: 1, nextContactAt: 1, lastContactAt: 1, _id: 1 }
             : pool === "older_available"
-              ? { lastContactAt: 1, receivedAt: 1, _id: 1 }
+              ? { totalAttemptCount: 1, lastContactAt: 1, receivedAt: 1, _id: 1 }
               : { _id: 1 };
       query = query.sort(sort);
     }
@@ -1804,6 +1825,58 @@ function createLeadDeliveryRepository({
     if (typeof query.limit === "function") query = query.limit(cap);
     query = applySession(query, session);
     return lean(query);
+  }
+
+  async function listNightlyLeadHealthRepairCandidates({
+    now = new Date(),
+    limit = 100,
+    session = null,
+  } = {}) {
+    const at = requireDate(now, "now");
+    const cap = requireVersion(limit, "limit");
+    if (cap < 1 || cap > 500) throw new TypeError("limit must be between 1 and 500");
+    const fetchCap = cap + 1;
+    const noProviderOwnership = {
+      providerContactId: null,
+      providerExternalLeadId: null,
+      providerCallId: null,
+      providerPostState: null,
+      packetId: null,
+      deliveryAgentId: null,
+    };
+
+    let expiredQuery = LeadDeliveryItem.find({
+      state: "reserved",
+      activeAttempt: true,
+      reservationExpiresAt: { $ne: null, $lte: at },
+      ...noProviderOwnership,
+    }).sort({ reservationExpiresAt: 1, _id: 1 }).limit(fetchCap);
+    expiredQuery = applySession(expiredQuery, session);
+    const expiredRows = await lean(expiredQuery);
+
+    let phaseOutQuery = LeadDeliveryItem.find({
+      state: { $in: ["eligible", "follow_up_wait"] },
+      activeAttempt: true,
+      sourcePool: { $in: ["new_today", "overnight", "older_available", "follow_up_due"] },
+      inventoryClass: { $ne: "callrail_long_call_recovery" },
+      totalAttemptCount: { $gte: 15 },
+      lastContactAt: { $ne: null },
+      reservedAgentId: null,
+      ...noProviderOwnership,
+    // Prefer the most recently contacted phase-out rows. Those are the rows
+    // whose old short retry date can still put them back in front of an agent;
+    // an old row whose 15-day hold has already elapsed is observation-only and
+    // must not consume the entire bounded repair window every night.
+    }).sort({ lastContactAt: -1, _id: 1 }).limit(fetchCap);
+    phaseOutQuery = applySession(phaseOutQuery, session);
+    const phaseOutRows = await lean(phaseOutQuery);
+
+    return {
+      expiredReservations: expiredRows.slice(0, cap),
+      phaseOutCandidates: phaseOutRows.slice(0, cap),
+      expiredReservationsTruncated: expiredRows.length > cap,
+      phaseOutCandidatesTruncated: phaseOutRows.length > cap,
+    };
   }
 
   async function hasUnconsumedOvernightFirstContact({ session = null } = {}) {
@@ -1958,6 +2031,7 @@ function createLeadDeliveryRepository({
     listAgents,
     listEventsForDrain,
     listImmediateFreshItems,
+    listNightlyLeadHealthRepairCandidates,
     listPacketCandidateItems,
     listProviderIdentityCandidates,
     readLegacyDailyAttemptFloor,

@@ -13,6 +13,7 @@ const {
 } = require("../../apps/control-plane/src/services/passRuntimeFactory");
 const {
   createMorningPassRuntime,
+  floorServicesOwnedByMorningPass,
 } = require("../../apps/control-plane/src/services/morningPassRuntime");
 const {
   createMiddayPassRuntime,
@@ -121,6 +122,7 @@ test("every task of every pass lands dark", async () => {
   await withEnv({
     MORNING_FLOOR_SERVICES_ENABLED: undefined, MORNING_CADENCE_ENABLED: undefined,
     MIDDAY_CADENCE_ENABLED: undefined, MIDDAY_CALL_LOG_HYGIENE_ENABLED: undefined,
+    MIDDAY_LEAD_DELIVERY_HEALTH_ENABLED: undefined,
   }, async () => {
     for (const rt of [createMorningPassRuntime({}), createMiddayPassRuntime({})]) {
       for (const t of rt.getState().tasks) {
@@ -289,18 +291,11 @@ test("the two passes take SEPARATE claims on the same day", async () => {
 
 // ── the morning pass's specifics ───────────────────────────────────────────
 
-test("the morning cadence asks for sms+email only, and FORCES past the daily window", async () => {
-  // 08:00 PT is before the cadence window (09:00-11:59). Without forceDaily the
-  // sweep selects nothing every day and reports a confident zero.
+test("the retired morning message blast cannot be armed", async () => {
   const rt = createMorningPassRuntime({});
   const t = rt.TASKS.find((x) => x.key === "cadence-morning");
-  const seen = [];
-  const planned = await t.plan({ domains: ["TAG", "WYNN"] });
-  await t.apply(planned, { cadenceImpl: async (a) => { seen.push(a); return { sent: 3, selected: 4 }; } });
-  assert.deepEqual(seen[0].channels, ["sms", "email"]);
-  assert.equal(seen[0].forceDaily, true, "08:00 is outside the daily window");
-  assert.equal(seen[0].includeAgeRelative, false, "the real-time SMS-2 stays with the gateway");
-  assert.equal(seen[0].sourceService, "morning-pass");
+  assert.equal(t.writesArmed(), false);
+  assert.deepEqual(await t.plan({ domains: ["TAG", "WYNN"] }), []);
 });
 
 test("the floor task calls runFloorServices whole, not four re-implementations", async () => {
@@ -313,60 +308,72 @@ test("the floor task calls runFloorServices whole, not four re-implementations",
   }
 });
 
-test("the B1 hoist SURVIVES until the morning floor task is armed", () => {
-  // Deleting it in the same commit would create a GAP, not prevent a double
-  // run: a dark runtime never creates a timer, so nothing would own the four
-  // services between deploy and arming. Two of them are live today.
+test("the hourly floor handoff requires all three ownership flags", () => {
+  const armed = {
+    MORNING_FLOOR_FROM_HOURLY_HANDOFF: "true",
+    MORNING_PASS_ENABLED: "true",
+    MORNING_FLOOR_SERVICES_ENABLED: "true",
+  };
+  assert.equal(floorServicesOwnedByMorningPass(armed), true);
+  for (const name of Object.keys(armed)) {
+    assert.equal(
+      floorServicesOwnedByMorningPass({ ...armed, [name]: "false" }),
+      false,
+      `${name} must be present before the hourly owner stands down`,
+    );
+  }
+});
+
+test("the B1 hoist remains as the fallback owner during the no-delete window", () => {
+  // The old code stays hard-gated rather than physically deleted. That makes
+  // rollback a flag change and prevents a gap while the morning pass is dark.
   const sweeper = require("node:fs").readFileSync(
     require.resolve("../../packages/shared-services/src/hourlySweeperService"), "utf8",
   );
-  assert.match(sweeper, /summary\.floor = await runFloorServices\(/,
-    "the hourly floor must remain the owner while the morning pass is dark");
+  assert.match(sweeper, /floorServicesEnabled[\s\S]*runFloorServices\(/,
+    "the hourly floor must remain available while the morning pass is dark");
 });
 
 // ── the midday pass's specifics ────────────────────────────────────────────
 
-test("the midday cadence asks for rvm only", async () => {
+test("the retired midday RVM blast cannot be armed", async () => {
   const rt = createMiddayPassRuntime({});
   const t = rt.TASKS.find((x) => x.key === "cadence-midday");
-  const seen = [];
-  const planned = await t.plan({ domains: ["TAG"] });
-  await t.apply(planned, { cadenceImpl: async (a) => { seen.push(a); return { sent: 1 }; } });
-  assert.deepEqual(seen[0].channels, ["rvm"]);
-  assert.equal(seen[0].includeAgeRelative, false, "an rvm pass must not text anybody");
-  assert.equal(seen[0].forceDaily, true, "12:00 is outside the window too");
-  assert.equal(seen[0].sourceService, "midday-pass");
+  assert.equal(t.writesArmed(), false);
+  assert.deepEqual(await t.plan({ domains: ["TAG"] }), []);
 });
 
-test("the midday hygiene half does NOT run the account-wide RC sweep", async () => {
-  // That belongs to the evening half only. Twice a day doubles the exposure to
-  // a 429, and a 429 in that client opens a process-wide circuit that would
-  // fail every later task in the pass.
+test("the unsafe overlapping midday hygiene writer cannot be armed or planned", async () => {
   const rt = createMiddayPassRuntime({});
   const t = rt.TASKS.find((x) => x.key === "call-log-hygiene-midday");
-  const seen = [];
-  await t.apply(
-    [{ domain: "TAG", sinceMs: 16 * 3600000, inbound: 2, outbound: 30 }],
-    { callLogHygieneImpl: async (a) => { seen.push(a); return { totals: {} }; } },
-  );
-  assert.equal(seen[0].nativeSweepEnabled, false);
-  assert.equal(seen[0].sinceMs, 16 * 3600000);
+  assert.equal(t.writesArmed(), false);
+  assert.deepEqual(await t.plan({ domains: ["TAG"], logger: null }), []);
 });
 
-test("an uncounted domain is a failure in the midday hygiene half too", async () => {
+test("the noon pass performs exactly one read-only lead-delivery checkpoint", async () => {
   const rt = createMiddayPassRuntime({});
-  const t = rt.TASKS.find((x) => x.key === "call-log-hygiene-midday");
-  const seen = [];
-  const applied = await t.apply(
-    [
-      { domain: "TAG", sinceMs: 3600000, inbound: null, error: "conn lost" },
-      { domain: "WYNN", sinceMs: 3600000, inbound: 1, outbound: 1 },
-    ],
-    { callLogHygieneImpl: async (a) => { seen.push(a); return { totals: {} }; } },
-  );
-  assert.deepEqual(seen[0].domains, ["WYNN"]);
-  assert.equal(applied.failed, 1);
-  assert.match(applied.errors[0], /TAG: NOT EXAMINED/);
+  const t = rt.TASKS.find((x) => x.key === "lead-delivery-health");
+  const planned = await t.plan();
+  const applied = await t.apply(planned, {
+    leadDeliveryRuntime: {
+      getState: () => ({
+        running: true,
+        enabled: true,
+        actionsEnabled: true,
+        refillEnabled: true,
+        lastErrorCode: null,
+        accepted: 17,
+        providerPostQueueDepth: 0,
+        providerPostInFlight: 0,
+        freshDispatch: { lastStatus: "accepted" },
+        watchdogSupplyRefresh: { status: "completed" },
+      }),
+    },
+  });
+  assert.equal(planned.length, 1);
+  assert.equal(applied.status, "healthy");
+  assert.equal(applied.written, 0);
+  assert.equal(applied.accepted, 17);
 });
 
 test("both passes are reachable — every task has a count()", () => {
@@ -526,13 +533,21 @@ test("the morning floor reaches the 05:00 and 06:00 work — requireHour is thre
   const seen = [];
   await t.apply([{ services: [] }], {
     floorImpls: {
-      runDncRecheckSweepIfEnabled: async () => ({ skipped: true, reason: "disabled" }),
+      runDncRecheckSweepIfEnabled: async (a) => { seen.push(["dnc", a]); return { skipped: true, reason: "disabled" }; },
       runMonthlyFillerPoolRefreshIfDue: async (a) => { seen.push(["filler", a]); return { skipped: true, reason: "pool-already-built" }; },
       runAgedRollingRefreshIfDue: async (a) => { seen.push(["aged", a]); return { refreshed: 1 }; },
     },
   });
   for (const [name, args] of seen) {
-    assert.equal(args.requireHour, false, `${name} must receive requireHour:false from the pass`);
+    if (name !== "dnc") {
+      assert.equal(args.requireHour, false, `${name} must receive requireHour:false from the pass`);
+    }
+    if (name === "dnc") {
+      assert.equal(args.limit, 2500, "the once-daily owner must not inherit the one-tick DNC page");
+    }
+    if (name === "aged") {
+      assert.equal(args.limitPerDomain, 2500, "the once-daily owner must not inherit a one-tick page");
+    }
   }
 });
 

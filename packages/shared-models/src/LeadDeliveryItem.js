@@ -170,6 +170,18 @@ leadDeliveryItemSchema.index(
   },
 );
 leadDeliveryItemSchema.index({ state: 1, sourcePool: 1, nextContactAt: 1, receivedAt: -1 });
+// Phase 9 packet selection and the once-nightly count-only health receipt use
+// the same contact bands. Keeping those fields on one covered index prevents
+// both paths from fetching the full active inventory merely to count/rank it.
+leadDeliveryItemSchema.index({
+  state: 1,
+  sourcePool: 1,
+  totalAttemptCount: 1,
+  nextContactAt: 1,
+  lastContactAt: 1,
+  receivedAt: -1,
+  inventoryClass: 1,
+}, { name: "idx_lead_delivery_contact_band_health" });
 leadDeliveryItemSchema.index({ reservedAgentId: 1, state: 1, reservationExpiresAt: 1 });
 leadDeliveryItemSchema.index({ deliveryAgentId: 1, state: 1 });
 leadDeliveryItemSchema.index(

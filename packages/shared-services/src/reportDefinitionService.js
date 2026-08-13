@@ -18,7 +18,10 @@ const {
   renderReportFromRecord: renderFromRecord,
 } = require("./dailyRecordRenderService");
 const { resolveSelection } = require("./reportBlocksService");
-const { nightlyReportRecipients } = require("../../shared-config/src/dailyReportContract");
+const {
+  isRetiredNightlyReportName,
+  nightlyReportRecipients,
+} = require("../../shared-config/src/dailyReportContract");
 
 const DAY_MS = 86400000;
 
@@ -97,6 +100,9 @@ function resolveRange(token, now = new Date()) {
  * plane restarts often and must not re-send a report that already went out.
  */
 function isDue(def, now = new Date()) {
+  if (isRetiredNightlyReportName(def?.name)) {
+    return { due: false, reason: "retired nightly report" };
+  }
   if (!def?.schedule?.enabled || def.archivedAt) return { due: false, reason: "not scheduled" };
   const { hour, minute, dayOfWeek, dayOfMonth } = pacificParts(now);
   const dows = def.schedule.daysOfWeek || [];
@@ -373,7 +379,21 @@ async function runDefinition(def, {
 /** Every definition due right now, oldest-scheduled first. */
 async function dueDefinitions(now = new Date()) {
   const defs = await ReportDefinition.find({ "schedule.enabled": true, archivedAt: null });
-  return defs.filter((d) => isDue(d, now).due);
+  return defs
+    .filter((d) => isDue(d, now).due)
+    .sort((left, right) => {
+      const leftMinute = (Number(left?.schedule?.hour) || 0) * 60
+        + (Number(left?.schedule?.minute) || 0);
+      const rightMinute = (Number(right?.schedule?.hour) || 0) * 60
+        + (Number(right?.schedule?.minute) || 0);
+      if (leftMinute !== rightMinute) return leftMinute - rightMinute;
+      // A record-backed parity definition depends on the canonical live
+      // definition having persisted the day's snapshot first.
+      const sourceOrder = Number(left?.renderSource === "record")
+        - Number(right?.renderSource === "record");
+      if (sourceOrder) return sourceOrder;
+      return String(left?.name || "").localeCompare(String(right?.name || ""));
+    });
 }
 
 module.exports = {

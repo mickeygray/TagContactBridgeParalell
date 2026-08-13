@@ -30,7 +30,7 @@ const reportWith = (spend) => ({
 test("the snapshot stores all costs by source", () => {
   const fact = buildDailyReportFact({
     dateKey: "2026-08-03",
-    definitionName: "financial roll up with calls",
+    definitionName: "financial",
     report: reportWith({
       total: 471, ld: 423, ldLeads: 141, mail: 0, mailPieces: 0, bcd: 48, bcdCalls: 12, bcdRate: 4,
     }),
@@ -43,7 +43,7 @@ test("the snapshot stores all costs by source", () => {
 test("a missing spend material stores null, never a zero-cost day", () => {
   const fact = buildDailyReportFact({
     dateKey: "2026-08-03",
-    definitionName: "financial roll up with calls",
+    definitionName: "financial",
     report: reportWith(undefined),
   });
   assert.equal(fact.facts.spend, null, "unknown cost must not render as $0");
@@ -61,7 +61,7 @@ test("capturing spend does NOT add a section to the email", () => {
   // it there would have changed what the nightly email renders.
   const fact = buildDailyReportFact({
     dateKey: "2026-08-03",
-    definitionName: "financial roll up with calls",
+    definitionName: "financial",
     report: reportWith({ total: 100, ld: 100, ldLeads: 33, mail: 0, mailPieces: 0, bcd: 0, bcdCalls: 0 }),
   });
   assert.ok(!fact.selection.includes("spend"),

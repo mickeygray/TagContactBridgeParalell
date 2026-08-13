@@ -48,8 +48,12 @@ function allRequiredCriteriaSatisfied(scenario, criteria) {
   return (scenario.nodes || []).flatMap((node) => node.requiredCriteria || []).filter((criterion) => criterion.required).every((criterion) => criteria[criterion.criterionId]?.status === "satisfied");
 }
 
-function applyEvidence({ state, node, turnId, evidence }) {
-  const allowed = new Map((node.requiredCriteria || []).map((criterion) => [criterion.criterionId, criterion]));
+function applyEvidence({ scenario, state, turnId, evidence }) {
+  const allowed = new Map(
+    (scenario.nodes || [])
+      .flatMap((node) => node.requiredCriteria || [])
+      .map((criterion) => [criterion.criterionId, criterion]),
+  );
   const criteria = Object.fromEntries((state.criteria || []).map((criterion) => [criterion.criterionId, { ...criterion, evidenceTurnIds: [...criterion.evidenceTurnIds] }]));
   for (const proposal of evidence || []) {
     const criterion = allowed.get(proposal.criterionId);
@@ -69,9 +73,11 @@ function advanceGauntletTurn({ scenario, state, turnId, evidence = [] }) {
   if (typeof turnId !== "string" || !turnId.trim()) throw controllerError("GAUNTLET_TURN_ID_INVALID");
   const currentNode = (scenario.nodes || []).find((node) => node.id === state.currentNodeId);
   if (!currentNode || currentNode.sectionId !== scenario.sectionId || currentNode.type === "terminal") throw controllerError("GAUNTLET_CURRENT_NODE_INVALID");
-  const criteria = applyEvidence({ state, node: currentNode, turnId, evidence });
+  const criteria = applyEvidence({ scenario, state, turnId, evidence });
   const retryByNode = { ...state.retryByNode };
-  const required = currentNode.requiredCriteria || [];
+  const required = (scenario.nodes || [])
+    .flatMap((node) => node.requiredCriteria || [])
+    .filter((criterion) => criterion.required !== false);
   if (required.some((criterion) => criteria[criterion.criterionId]?.status !== "satisfied")) {
     retryByNode[currentNode.id] = (retryByNode[currentNode.id] || 0) + 1;
   }

@@ -4,6 +4,10 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 
 const sweeper = require("../../packages/shared-services/src/hourlySweeperService");
+const {
+  isAtMonthlyRefreshBoundary,
+  isFirstPacificBusinessDayOfMonth,
+} = require("../../packages/shared-services/src/fillerPoolRefreshService");
 
 /**
  * THE FLOOR SERVICES.
@@ -44,6 +48,27 @@ const ALL_ON = {
   fillerPoolRefreshEnabled: true,
   agedRollingRefreshEnabled: true,
 };
+
+test("a weekend month-start rolls monthly floor work to the first Pacific business morning", () => {
+  // August 1, 2026 was Saturday. The old exact-day check forfeited the entire
+  // month's filler rebuild because scheduled passes are intentionally quiet on
+  // weekends.
+  const saturday = new Date("2026-08-01T12:00:00-07:00");
+  const mondayBeforeFive = new Date("2026-08-03T04:59:00-07:00");
+  const mondayAtFive = new Date("2026-08-03T05:00:00-07:00");
+  assert.equal(isFirstPacificBusinessDayOfMonth(saturday), false);
+  assert.equal(isFirstPacificBusinessDayOfMonth(mondayAtFive), true);
+  assert.equal(isAtMonthlyRefreshBoundary(mondayBeforeFive), false);
+  assert.equal(isAtMonthlyRefreshBoundary(mondayAtFive), true);
+  assert.equal(isAtMonthlyRefreshBoundary(mondayBeforeFive, { requireHour: false }), true);
+});
+
+test("a weekday month-start remains the monthly boundary", () => {
+  const first = new Date("2026-09-01T05:00:00-07:00");
+  const second = new Date("2026-09-02T05:00:00-07:00");
+  assert.equal(isAtMonthlyRefreshBoundary(first), true);
+  assert.equal(isAtMonthlyRefreshBoundary(second), false);
+});
 
 test("runFloorServices is exported — the floor is reachable without Phase A", () => {
   assert.equal(typeof sweeper.runFloorServices, "function");
@@ -134,6 +159,26 @@ test("the sweep runs the floor even with Phase A off — the whole point", async
     ["agedRollingRefresh", "callrailStatSync", "dncRecheck", "fillerPoolRefresh"],
   );
   assert.equal(impls.calls.some((c) => c.name === "dnc"), true);
+});
+
+test("the narrow retry worker can hand the floor to the morning pass without losing Phase B", async () => {
+  const impls = fakeImpls();
+  const summary = await sweeper.runHourlySweep({
+    workerName: "durable-retry-drain",
+    lane: "hourly",
+    scheduledPhase: false,
+    floorServicesEnabled: false,
+    handlerKeys: [],
+    batchCap: 0,
+    floorImpls: impls,
+    ...ALL_ON,
+  });
+  assert.deepEqual(summary.floor, {
+    skipped: true,
+    reason: "owned-by-morning-pass",
+  });
+  assert.equal(impls.calls.length, 0, "no scheduled floor service may run from the retry clock");
+  assert.ok(summary.phaseB, "the durable retry drain remains alive");
 });
 
 test("the floor survives the exact call the control plane makes", async () => {

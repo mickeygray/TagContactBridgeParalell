@@ -142,7 +142,7 @@ test("ambiguous mutation retries bind IDs to the exact outbound payload", () => 
   );
 });
 
-test("Targeted Talk reuses the one-shot Free Call voice turn behind capability", () => {
+test("Targeted Talk reuses authenticated Trainer STT with server-owned turns", () => {
   const client = source("apps/web-client/src/lib/api/trainingCourse.ts");
   const player = source("apps/web-client/src/workspaces/trainer/TrainerCoursePlayer.tsx");
   const gauntlet = source("apps/web-client/src/workspaces/trainer/TrainerGauntletPlayer.tsx");
@@ -152,9 +152,9 @@ test("Targeted Talk reuses the one-shot Free Call voice turn behind capability",
   assert.match(gauntlet, /turnEventRef\.current\?\.input === mutationInput/);
   assert.match(gauntlet, /Practice only this part of the call/);
   assert.match(gauntlet, /navigator\.mediaDevices\.getUserMedia/);
-  assert.match(gauntlet, /startTargetedVoiceSession/);
-  assert.match(gauntlet, /submitTargetedVoiceTurn/);
-  assert.match(gauntlet, /result\.voiceTurn\.playback/);
+  assert.match(gauntlet, /salesTrainerApi\.transcribeAudio/);
+  assert.match(gauntlet, /submitGauntletTurn/);
+  assert.match(gauntlet, /expectedVersion: runtime\.version/);
   assert.match(gauntlet, /function finishProspectPlayback\(autoArm = true\)/);
   assert.match(gauntlet, /prospectSpeakingRef\.current = false/);
   assert.match(gauntlet, /utterance\.onend = \(\) => finishProspectPlayback\(\)/);
@@ -171,7 +171,6 @@ test("Targeted Talk reuses the one-shot Free Call voice turn behind capability",
   assert.match(gauntlet, /gradeTargetedModuleAnswer/);
   assert.match(gauntlet, /Listen for:/);
   assert.doesNotMatch(gauntlet, /coach\.exactLanguage/);
-  assert.doesNotMatch(gauntlet, /salesTrainerApi\.transcribeAudio/);
   assert.doesNotMatch(gauntlet, /salesTrainerApi\.speech/);
   assert.match(gauntlet, /Start voice session/);
   assert.match(gauntlet, /Text fallback and transcript/);

@@ -45,6 +45,7 @@ const {
   runDailyAgedRefresh,
   runMonthlyGraduationSweep,
   isAtMonthlyRefreshBoundary,
+  isFirstPacificBusinessDayOfMonth,
   isAtDailyAgedRefreshBoundary,
   isAgedRollingRefreshEnabled,
   hasFreshPoolForTag,
@@ -759,12 +760,12 @@ async function sendResolutionEmails({
 //   { error: <message> }  (caught upstream)
 //
 // The hourly sweeper calls this every tick; it short-circuits to a
-// skipped result outside the 1st-of-month-5am-PT window, and after
+// skipped result outside the first-business-day 05:00 PT window, and after
 // the refresh has already produced rows for the current tag.
 async function runMonthlyFillerPoolRefreshIfDue({ logger, now = new Date(), requireHour = true } = {}) {
   // requireHour:false is for a caller that owns its own once-per-day guarantee
   // (the morning pass's durable claim). The hourly floor must keep the hour
-  // check or it would fire this every tick on the 1st.
+  // check or it would fire this every tick on the boundary day.
   if (!isAtMonthlyRefreshBoundary(now, { requireHour })) {
     return { skipped: true, reason: "not-at-monthly-boundary" };
   }
@@ -786,23 +787,19 @@ async function runMonthlyFillerPoolRefreshIfDue({ logger, now = new Date(), requ
 //
 // Daily 06:00 PT — runDailyAgedRefresh sweeps LeadCadence rows whose
 // dncCheckpoints.nextAt has passed and runs them through the 30/60/90
-// day re-scrub ladder. Day-1 of each month at 06:00 PT also fires the
+// day re-scrub ladder. The first business day of each month also fires the
 // graduation sweep (8+ qualifying CX connects in trailing 4 months →
 // drop from red). Both report by email via sendAgedRefreshReportEmail.
 //
 // Gated behind AGED_ROLLING_REFRESH_ENABLED so the legacy monthly burst
 // can keep running until cutover is verified.
 
-function isFirstOfMonthPT(now = new Date()) {
-  const fmt = new Intl.DateTimeFormat("en-US", {
-    timeZone: "America/Los_Angeles",
-    day: "2-digit",
-  });
-  const day = fmt.formatToParts(now).find((p) => p.type === "day")?.value;
-  return day === "01";
-}
-
-async function runAgedRollingRefreshIfDue({ logger, now = new Date(), requireHour = true } = {}) {
+async function runAgedRollingRefreshIfDue({
+  logger,
+  now = new Date(),
+  requireHour = true,
+  limitPerDomain,
+} = {}) {
   if (!isAgedRollingRefreshEnabled()) {
     return { skipped: true, reason: "disabled" };
   }
@@ -810,10 +807,10 @@ async function runAgedRollingRefreshIfDue({ logger, now = new Date(), requireHou
     return { skipped: true, reason: "not-at-daily-boundary" };
   }
 
-  // Day-1 also fires graduation. Graduation runs FIRST so freed pool
+  // The first business day also fires graduation. Graduation runs FIRST so freed pool
   // slots are available before promotions land.
   let monthlySummary = null;
-  if (isFirstOfMonthPT(now)) {
+  if (isFirstPacificBusinessDayOfMonth(now)) {
     try {
       logger?.info?.("aged-rolling-refresh.graduation.starting");
       monthlySummary = await runMonthlyGraduationSweep({ now, logger });
@@ -830,7 +827,17 @@ async function runAgedRollingRefreshIfDue({ logger, now = new Date(), requireHou
   let dailySummary = null;
   try {
     logger?.info?.("aged-rolling-refresh.daily.starting");
-    dailySummary = await runDailyAgedRefresh({ now, logger });
+    dailySummary = await runDailyAgedRefresh({ now, logger, limitPerDomain });
+    try {
+      const { recordAgedRefreshBatch } = require("./nightlyOperationalReceiptService");
+      await recordAgedRefreshBatch(dailySummary, { at: dailySummary?.finishedAt || now });
+    } catch (error) {
+      // The refresh remains authoritative even when its count-only receipt
+      // cannot be written. The nightly email will surface a missing receipt.
+      logger?.warn?.("aged-rolling-refresh.receipt.failed", {
+        error: error.message,
+      });
+    }
     logger?.info?.("aged-rolling-refresh.daily.completed", {
       checked: dailySummary?.checked,
       promoted: dailySummary?.promoted,
@@ -851,7 +858,10 @@ async function runAgedRollingRefreshIfDue({ logger, now = new Date(), requireHou
     (!dailySummary || (dailySummary.checked === 0 && expiredRetired === 0)) &&
     (!monthlySummary || monthlySummary.graduated === 0);
   let emailResult = null;
-  if (!skipEmail) {
+  const immediateEmailEnabled = String(
+    process.env.AGED_REFRESH_IMMEDIATE_EMAIL_ENABLED || "false",
+  ).trim().toLowerCase() === "true";
+  if (!skipEmail && immediateEmailEnabled) {
     try {
       // Lazy require to avoid the hourlySweeper ↔ nightlyClose require
       // cycle (nightlyClose imports runHourlySweep from this module).
@@ -867,7 +877,10 @@ async function runAgedRollingRefreshIfDue({ logger, now = new Date(), requireHou
       emailResult = { ok: false, error: error.message };
     }
   } else {
-    emailResult = { skipped: true, reason: "no-activity" };
+    emailResult = {
+      skipped: true,
+      reason: skipEmail ? "no-activity" : "consolidated-nightly-summary",
+    };
   }
 
   return {
@@ -882,7 +895,7 @@ function isDncRecheckEnabled() {
   return String(process.env.DNC_RECHECK_SWEEP_ENABLED || "false").trim().toLowerCase() === "true";
 }
 
-async function runDncRecheckSweepIfEnabled() {
+async function runDncRecheckSweepIfEnabled({ limit } = {}) {
   if (!isDncRecheckEnabled()) {
     return {
       skipped: true,
@@ -890,7 +903,7 @@ async function runDncRecheckSweepIfEnabled() {
       detail: "RealValidation DNC checks are limited to intake and the monthly filler refresh.",
     };
   }
-  return runDncRecheckSweep({});
+  return runDncRecheckSweep({ limit });
 }
 
 /**
@@ -916,6 +929,8 @@ async function runFloorServices({
   dncRecheckEnabled = true,
   fillerPoolRefreshEnabled = true,
   agedRollingRefreshEnabled = true,
+  dncRecheckLimit,
+  agedRefreshLimitPerDomain,
   // The 05:00 (monthly filler) and 06:00 (aged ladder) gates exist to make an
   // HOURLY caller fire once. A pass runtime already fires once per day under a
   // durable claim, and it does not run at 05:00 or 06:00 — so with the hour
@@ -959,13 +974,13 @@ async function runFloorServices({
         : { skipped: true, reason: "disabled" },
 
     dncRecheck: dncRecheckEnabled
-      ? await dncSweep().catch((error) => ({
+      ? await dncSweep({ limit: dncRecheckLimit }).catch((error) => ({
           error: error.message,
         }))
       : { skipped: true, reason: "floor-service-disabled" },
 
-    // Monthly filler-pool refresh — fires once a month on the 1st-of-month at
-    // 5am PT. Pulls fresh status=2 candidates from Logics for both tenants,
+    // Monthly filler-pool refresh — fires once a month on the first Pacific
+    // business day at 5am PT. Pulls fresh status=2 candidates from Logics for both tenants,
     // DNC-scrubs them, atomic-ish swaps the prior month's pool tag, GCs MPI
     // rows whose case is no longer status=2. Idempotent across multiple ticks
     // in the 5am window via `hasFreshPoolForTag`.
@@ -984,7 +999,11 @@ async function runFloorServices({
     // sweep additionally on day-1), behind AGED_ROLLING_REFRESH_ENABLED.
     // Returns { skipped, reason } outside the window or when the flag is off.
     agedRollingRefresh: agedRollingRefreshEnabled
-      ? await agedRefresh({ logger, requireHour }).catch((error) => ({
+      ? await agedRefresh({
+          logger,
+          requireHour,
+          limitPerDomain: agedRefreshLimitPerDomain,
+        }).catch((error) => ({
           error: error.message,
         }))
       : { skipped: true, reason: "floor-service-disabled" },
@@ -1100,6 +1119,7 @@ async function runHourlySweep({
   dncRecheckEnabled = true,
   fillerPoolRefreshEnabled = true,
   agedRollingRefreshEnabled = true,
+  floorServicesEnabled = true,
   // Test injection for the floor services only. Production passes nothing.
   floorImpls = null,
   resolutionEmailsEnabled = true,
@@ -1267,13 +1287,18 @@ async function runHourlySweep({
   //
   // Every entry keeps its own internal gate, so running this on every tick
   // cannot make any of them fire more often than it intends to.
-  summary.floor = await runFloorServices({
-    dncRecheckEnabled,
-    fillerPoolRefreshEnabled,
-    agedRollingRefreshEnabled,
-    logger,
-    impls: floorImpls,
-  });
+  summary.floor = floorServicesEnabled
+    ? await runFloorServices({
+        dncRecheckEnabled,
+        fillerPoolRefreshEnabled,
+        agedRollingRefreshEnabled,
+        logger,
+        impls: floorImpls,
+      })
+    : {
+        skipped: true,
+        reason: "owned-by-morning-pass",
+      };
 
   summary.phaseB = await drainHourlyJobQueue({
     workerName,

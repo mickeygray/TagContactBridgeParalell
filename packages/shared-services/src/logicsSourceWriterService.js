@@ -165,13 +165,56 @@ function resolveLogicsSourceId(domain, piece) {
  *   { written: false, skipped: <reason> }  — unmapped piece/tenant
  * Throws on real Logics errors (caller decides best-effort vs fail).
  */
-async function writeLogicsCaseSource({ domain, caseId, piece, logger = null } = {}) {
+async function writeLogicsCaseSourceId({
+  domain, caseId, sourceId, sourceName, sourceChannel = "mail", logger = null,
+  clientFactory = createLogicsClient,
+} = {}) {
   const normalizedDomain = String(domain || "").trim().toUpperCase();
   if (String(process.env.LOGICS_SOURCE_WRITER_ENABLED || "false").toLowerCase() !== "true") {
     return { written: false, skipped: "disabled", domain: normalizedDomain };
   }
   const id = Number(caseId);
   if (!Number.isFinite(id) || id <= 0) throw new Error("caseId is required");
+  const targetSourceId = Number(sourceId);
+  if (!Number.isFinite(targetSourceId) || targetSourceId <= 0) {
+    throw new Error("a confirmed numeric sourceId is required");
+  }
+  const piece = String(sourceName || "").trim();
+
+  const client = clientFactory(normalizedDomain);
+  let result;
+  try {
+    result = await client.updateCase({ CaseID: id, SourceID: targetSourceId });
+  } catch (error) {
+    const message = String(error?.details?.responseBody?.Message || error.message || "");
+    // Logics answers "no updates passed" when the case already carries the
+    // value (or the field is on its ignore list) — treat as already-ok.
+    if (/no updates passed|ignore list/i.test(message)) {
+      logger?.info?.("logics.source_writer.already_ok", {
+        domain: normalizedDomain, caseId: id, sourceId: targetSourceId,
+      });
+      await mirrorCaseProfileSource(normalizedDomain, id, piece, sourceChannel).catch(() => null);
+      return { written: false, alreadyOk: true, sourceId: targetSourceId };
+    }
+    throw error;
+  }
+
+  logger?.info?.("logics.source_writer.written", {
+    domain: normalizedDomain,
+    caseId: id,
+    piece,
+    sourceId: targetSourceId,
+    message: result?.Message || null,
+  });
+  await mirrorCaseProfileSource(normalizedDomain, id, piece, sourceChannel).catch(() => null);
+  return { written: true, sourceId: targetSourceId };
+}
+
+async function writeLogicsCaseSource({ domain, caseId, piece, logger = null } = {}) {
+  const normalizedDomain = String(domain || "").trim().toUpperCase();
+  if (String(process.env.LOGICS_SOURCE_WRITER_ENABLED || "false").toLowerCase() !== "true") {
+    return { written: false, skipped: "disabled", domain: normalizedDomain };
+  }
   const sourceId = resolveLogicsSourceId(normalizedDomain, piece);
   if (!sourceId) {
     // Surface it. A silent skip is how a one-word rename in CallRail took the
@@ -182,42 +225,24 @@ async function writeLogicsCaseSource({ domain, caseId, piece, logger = null } = 
     });
     return { written: false, skipped: "unmapped-piece", domain: normalizedDomain, piece };
   }
-
-  const client = createLogicsClient(normalizedDomain);
-  let result;
-  try {
-    result = await client.updateCase({ CaseID: id, SourceID: sourceId });
-  } catch (error) {
-    const message = String(error?.details?.responseBody?.Message || error.message || "");
-    // Logics answers "no updates passed" when the case already carries the
-    // value (or the field is on its ignore list) — treat as already-ok.
-    if (/no updates passed|ignore list/i.test(message)) {
-      logger?.info?.("logics.source_writer.already_ok", { domain: normalizedDomain, caseId: id, sourceId });
-      await mirrorCaseProfileSource(normalizedDomain, id, piece).catch(() => null);
-      return { written: false, alreadyOk: true, sourceId };
-    }
-    throw error;
-  }
-
-  logger?.info?.("logics.source_writer.written", {
+  return writeLogicsCaseSourceId({
     domain: normalizedDomain,
-    caseId: id,
-    piece,
+    caseId,
     sourceId,
-    message: result?.Message || null,
+    sourceName: piece,
+    sourceChannel: "mail",
+    logger,
   });
-  await mirrorCaseProfileSource(normalizedDomain, id, piece).catch(() => null);
-  return { written: true, sourceId };
 }
 
 // Keep our CaseProfile mirror in step so local reads agree with Logics
 // without waiting for the next case refresh.
-async function mirrorCaseProfileSource(domain, caseId, piece) {
+async function mirrorCaseProfileSource(domain, caseId, piece, sourceChannel = "mail") {
   const profile = await caseProfileRepository.findCaseProfileByCaseId?.(domain, caseId);
   const { CaseProfile } = require("../../shared-models/src");
   await CaseProfile.updateOne(
     { domain, caseId: Number(caseId) },
-    { $set: { sourceName: String(piece || "").trim(), sourceChannel: "mail" } },
+    { $set: { sourceName: String(piece || "").trim(), sourceChannel } },
   );
   return profile;
 }
@@ -232,7 +257,6 @@ module.exports = {
   pieceForSourceId,
   UNMAPPED_SEEN,
   resolveLogicsSourceId,
-  LOGICS_SOURCE_REGISTRY,
-  resolveLogicsSourceId,
+  writeLogicsCaseSourceId,
   writeLogicsCaseSource,
 };

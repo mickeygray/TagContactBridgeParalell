@@ -30,6 +30,12 @@ const {
 } = require("../../../../packages/shared-services/src/logicsSourceSanitizerService");
 const { DailyLoopRun } = require("../../../../packages/shared-models/src");
 const {
+  HISTORICAL_REPAIR_MAX_AGE_DAYS,
+} = require("../../../../packages/shared-config/src/dailyReportContract");
+const {
+  nightlyLookbackDateKeys,
+} = require("../../../../packages/shared-services/src/dailyDialNightlyLookbackService");
+const {
   checkpointNeedsRecovery,
   launchEmergencyNightlyClose,
   markNightlyCloseCompleted,
@@ -56,6 +62,14 @@ const DEFAULT_POLL_MS = 5 * 60 * 1000;
 // let a stale QUEUE_ROLLUP_ENABLED value reactivate its separate writer.
 const LEGACY_QUEUE_ROLLUP_WRITES_ENABLED = false;
 const HYGIENE_CLAIM_LEASE_MS = 45 * 60 * 1000;
+
+// The current close is handled normally. The seven dates before it are the
+// bounded repair window, so mailbox discovery and spend derivation both need
+// eight inclusive date keys. Historical snapshot repair still excludes the
+// current date before it recomposes anything.
+function nightlyInvoiceRepairDateKeys(dateKey) {
+  return nightlyLookbackDateKeys(dateKey, HISTORICAL_REPAIR_MAX_AGE_DAYS + 1);
+}
 
 // Distinguishes "another pass took this day" from "this chore threw". They land
 // in the same catch and need opposite answers: a lost cursor must abort, because
@@ -225,6 +239,9 @@ async function claimNightlyHygiene(dateKey, at = new Date()) {
     return {
       claimedAt: new Date(claimed.nightlyHygieneClaimedAt || at),
       nextTaskIndex: Math.max(0, Number(claimed.nightlyHygieneNextTaskIndex || 0)),
+      taskResults: Array.isArray(claimed.nightlyHygieneTaskResults)
+        ? claimed.nightlyHygieneTaskResults
+        : [],
     };
   } catch (error) {
     if (Number(error?.code) === 11000) return null;
@@ -232,13 +249,21 @@ async function claimNightlyHygiene(dateKey, at = new Date()) {
   }
 }
 
-async function advanceNightlyHygiene(dateKey, claimedAt, nextTaskIndex, counts, at = new Date()) {
+async function advanceNightlyHygiene(
+  dateKey,
+  claimedAt,
+  nextTaskIndex,
+  counts,
+  taskResults = [],
+  at = new Date(),
+) {
   const result = await DailyLoopRun.updateOne(
     { dateKey, nightlyHygieneClaimedAt: claimedAt, nightlyHygieneCompletedAt: null },
     { $set: {
       nightlyHygieneClaimedAt: at,
       nightlyHygieneNextTaskIndex: nextTaskIndex,
       nightlyHygieneCounts: counts,
+      nightlyHygieneTaskResults: taskResults,
       nightlyHygieneLastErrorCode: null,
     } },
   );
@@ -257,18 +282,138 @@ async function renewNightlyHygiene(dateKey, claimedAt, at = new Date()) {
   return ok ? at : null;
 }
 
-async function finishNightlyHygiene(dateKey, claimedAt, nextTaskIndex, counts, at = new Date()) {
+async function finishNightlyHygiene(
+  dateKey,
+  claimedAt,
+  nextTaskIndex,
+  counts,
+  taskResults = [],
+  at = new Date(),
+) {
   const result = await DailyLoopRun.updateOne(
     { dateKey, nightlyHygieneClaimedAt: claimedAt, nightlyHygieneCompletedAt: null },
     { $set: {
       nightlyHygieneCompletedAt: at,
       nightlyHygieneNextTaskIndex: nextTaskIndex,
       nightlyHygieneCounts: counts,
+      nightlyHygieneTaskResults: taskResults,
       nightlyHygieneLastErrorCode: null,
     } },
   );
   const matched = result?.matchedCount ?? result?.n;
   return matched == null ? result?.acknowledged !== false : Number(matched) === 1;
+}
+
+async function claimNightlyRunSummary(dateKey, at = new Date()) {
+  const claimed = await DailyLoopRun.findOneAndUpdate(
+    {
+      dateKey,
+      $or: [
+        { nightlyHygieneSummarySentAt: null },
+        { nightlyHygieneSummarySentAt: { $exists: false } },
+      ],
+    },
+    { $set: { nightlyHygieneSummarySentAt: at } },
+    { new: true },
+  );
+  return claimed ? at : null;
+}
+
+async function releaseNightlyRunSummary(dateKey, claimedAt) {
+  await DailyLoopRun.updateOne(
+    { dateKey, nightlyHygieneSummarySentAt: claimedAt },
+    { $set: { nightlyHygieneSummarySentAt: null } },
+  );
+}
+
+function durableTaskResults(results = []) {
+  return (Array.isArray(results) ? results : []).map((row) => {
+    const applied = row?.applied || {};
+    const safeApplied = {
+      written: Number(applied.written || 0),
+      skipped: Number(applied.skipped || 0),
+      failed: Number(applied.failed || 0),
+      repaired: Number(applied.repaired || 0),
+      held: Number(applied.held || 0),
+      attention: Number(applied.attention || 0),
+      ncoaProcessed: Number(applied.ncoaProcessed || 0),
+      ncoaSkipped: Number(applied.ncoaSkipped || 0),
+      ncoaFailed: Number(applied.ncoaFailed || 0),
+      invoiceProcessed: Number(applied.invoiceProcessed || 0),
+    };
+    if (Array.isArray(applied.reports)) {
+      safeApplied.reports = applied.reports.map((report) => ({
+        name: String(report?.name || "").slice(0, 100),
+        delivered: Boolean(report?.delivered),
+        agedSourceWrite: report?.agedSourceWrite
+          ? {
+              status: String(report.agedSourceWrite.status || "").slice(0, 30),
+              written: Number(report.agedSourceWrite.written || 0),
+              failed: Number(report.agedSourceWrite.failed || 0),
+              deferred: Number(report.agedSourceWrite.deferred || 0),
+            }
+          : null,
+      }));
+    }
+    if (applied.leadHealth) {
+      const health = applied.leadHealth;
+      const inventory = health.inventory || {};
+      const attempts = health.attempts || {};
+      const alerts = health.alerts || {};
+      safeApplied.leadHealth = {
+        inventory: {
+          total: Number(inventory.total || 0),
+          zeroTouch: Number(inventory.zeroTouch || 0),
+          lowTouch: Number(inventory.lowTouch || 0),
+          highTouch: Number(inventory.highTouch || 0),
+          phaseOut: Number(inventory.phaseOut || 0),
+          zeroTouchOlderThanToday: Number(inventory.zeroTouchOlderThanToday || 0),
+          zeroTouchProviderHeld: Number(inventory.zeroTouchProviderHeld || 0),
+          review: Number(inventory.review || 0),
+          due: {
+            zeroTouch: Number(inventory.due?.zeroTouch || 0),
+            lowTouch: Number(inventory.due?.lowTouch || 0),
+            highTouch: Number(inventory.due?.highTouch || 0),
+            phaseOut: Number(inventory.due?.phaseOut || 0),
+          },
+        },
+        attempts: {
+          total: Number(attempts.total || 0),
+          firstTouches: Number(attempts.firstTouches || 0),
+          lowTouch: Number(attempts.lowTouch || 0),
+          highTouch: Number(attempts.highTouch || 0),
+          phaseOut: Number(attempts.phaseOut || 0),
+        },
+        alerts: {
+          staleZeroTouch: Boolean(alerts.staleZeroTouch),
+          zeroTouchDue: Boolean(alerts.zeroTouchDue),
+          lightWorkBacklog: Boolean(alerts.lightWorkBacklog),
+          highTouchWhileLightDue: Boolean(alerts.highTouchWhileLightDue),
+          noCallsWithOpenWork: Boolean(alerts.noCallsWithOpenWork),
+          attention: Boolean(alerts.attention),
+        },
+        repair: {
+          scanned: Number(health.repair?.scanned || 0),
+          expiredReservationsReleased: Number(health.repair?.expiredReservationsReleased || 0),
+          phaseOutDatesRepaired: Number(health.repair?.phaseOutDatesRepaired || 0),
+          alreadyHealthy: Number(health.repair?.alreadyHealthy || 0),
+          conflicts: Number(health.repair?.conflicts || 0),
+          skippedContradictory: Number(health.repair?.skippedContradictory || 0),
+          truncated: Boolean(health.repair?.truncated),
+        },
+      };
+    }
+    return {
+      task: String(row?.task || "").slice(0, 80),
+      label: String(row?.label || row?.task || "task").slice(0, 140),
+      dryRun: Boolean(row?.dryRun),
+      planned: Number(row?.planned || 0),
+      ...(row?.error || row?.errorCode
+        ? { errorCode: String(row.errorCode || "task-failed").slice(0, 80) }
+        : {}),
+      applied: safeApplied,
+    };
+  });
 }
 
 async function releaseNightlyHygiene(dateKey, claimedAt, errorCode = null) {
@@ -644,7 +789,12 @@ function buildCallRecoveryDiscoveryDeps({ windowFrom = null, windowTo = null } =
  * decides whether the mailbox is opened at all, this decides what is read once
  * it is.
  */
-function buildMailboxHandlers({ invoiceEnabled = true, ncoaEnabled = false, targetDate = null } = {}) {
+function buildMailboxHandlers({
+  invoiceEnabled = true,
+  ncoaEnabled = false,
+  targetDate = null,
+  targetDates = null,
+} = {}) {
   const {
     createMailInvoiceHandler,
   } = require("../../../../packages/shared-services/src/mailInvoiceMailboxHandler");
@@ -654,13 +804,16 @@ function buildMailboxHandlers({ invoiceEnabled = true, ncoaEnabled = false, targ
 
   const handlers = [];
   if (invoiceEnabled) {
-    handlers.push(createMailInvoiceHandler({ targetDate: targetDate || persistTargetDay() }));
+    handlers.push(createMailInvoiceHandler({
+      targetDate: targetDate || persistTargetDay(),
+      targetDates,
+    }));
   }
   if (ncoaEnabled) handlers.push(createNcoaHandler());
   return handlers;
 }
 
-async function readMailInvoiceMailbox({ apply, logger, targetDate = null }) {
+async function readMailInvoiceMailbox({ apply, logger, targetDate = null, targetDates = null }) {
   const {
     runMailboxIngest,
   } = require("../../../../packages/shared-services/src/mailboxIngestService");
@@ -673,6 +826,7 @@ async function readMailInvoiceMailbox({ apply, logger, targetDate = null }) {
     invoiceEnabled,
     ncoaEnabled: ncoaMailbox.enabled,
     targetDate,
+    targetDates,
   });
   if (!handlers.length) return { status: "disabled", handlers: {} };
 
@@ -803,25 +957,34 @@ const TASKS = [
       return invoice || ncoa;
     },
     async plan({ logger, at }) {
+      const targetDate = persistTargetDay(at);
       const result = await readMailInvoiceMailbox({
         apply: false,
         logger,
-        targetDate: persistTargetDay(at),
+        targetDate,
+        targetDates: nightlyInvoiceRepairDateKeys(targetDate),
       });
       // The invoice funnel is what `describe` reads; NCOA's is carried alongside
       // so a dry run shows both without the describe having to know about it.
       return [{ ...(result.handlers["mail-invoice"] || {}), ncoa: result.handlers.ncoa || null }];
     },
     async apply(planned, { logger, at }) {
+      const targetDate = persistTargetDay(at);
       const result = await readMailInvoiceMailbox({
         apply: true,
         logger,
-        targetDate: persistTargetDay(at),
+        targetDate,
+        targetDates: nightlyInvoiceRepairDateKeys(targetDate),
       });
       const stat = result.handlers["mail-invoice"] || {};
       const ncoa = result.handlers.ncoa || {};
+      const invoiceDocuments = Number(stat.documentsProcessed ?? stat.processed) || 0;
       return {
-        written: (stat.processed || 0) + (ncoa.processed || 0),
+        written: invoiceDocuments + (ncoa.processed || 0),
+        invoiceProcessed: invoiceDocuments,
+        ncoaProcessed: ncoa.processed || 0,
+        ncoaSkipped: (ncoa.skipped || 0) + (ncoa.alreadyHandled || 0),
+        ncoaFailed: ncoa.errors || 0,
         skipped: (stat.skipped || 0) + (ncoa.skipped || 0),
         failed: (stat.errors || 0) + (ncoa.errors || 0),
       };
@@ -856,7 +1019,11 @@ const TASKS = [
           + ` — subjects seen: ${mismatched.map((x) => JSON.stringify(x.summary?.subject || "")).join(", ")}`;
       }
       const s = r.summary || {};
-      return `${p.listed} email(s) · ${p.accepted} with an invoice`
+      const invoiceDocuments = (p.results || []).reduce(
+        (total, row) => total + (Number(row?.summary?.invoicesFound) || 0),
+        0,
+      );
+      return `${p.listed} email(s) · ${invoiceDocuments || p.accepted} invoice attachment(s)`
         + (s.invoiceNumber ? ` · #${s.invoiceNumber} ${s.serviceDate} $${s.grandTotal} ${s.state}` : "")
         + (p.alreadyHandled ? ` · ${p.alreadyHandled} already ingested` : "");
     },
@@ -880,15 +1047,43 @@ const TASKS = [
         deriveMailSpend,
       } = require("../../../../packages/shared-services/src/mailSpendDeriveService");
       const dateKey = persistTargetDay(at);
-      return [await deriveMailSpend({ from: dateKey, to: dateKey, apply: false, logger })];
+      const dateKeys = nightlyInvoiceRepairDateKeys(dateKey);
+      const from = dateKeys[0];
+      const to = dateKeys.at(-1);
+      const result = await deriveMailSpend({ from, to, apply: false, logger });
+      return [{ ...result, dateKey, from, to }];
     },
     async apply(planned, { logger }) {
       const {
         deriveMailSpend,
       } = require("../../../../packages/shared-services/src/mailSpendDeriveService");
+      const { findSpendRepairDateKeys, repairDailySnapshots } = require(
+        "../../../../packages/shared-services/src/dailySnapshotService"
+      );
       const dateKey = planned[0]?.dateKey;
-      const r = await deriveMailSpend({ from: dateKey, to: dateKey, apply: true, logger });
-      return { written: r.derived, skipped: r.skipped, retired: r.retired, held: r.held.length };
+      const from = planned[0]?.from || dateKey;
+      const to = planned[0]?.to || dateKey;
+      const r = await deriveMailSpend({ from, to, apply: true, logger });
+      // The current day is composed once by report-delivery later in this same
+      // cursor. Only newly changed OLDER days need the explicit heavy repair.
+      const pendingHistorical = await findSpendRepairDateKeys({
+        from, to, currentDateKey: dateKey,
+      });
+      const historical = [...new Set([
+        ...(r.changedDateKeys || []),
+        ...pendingHistorical,
+      ])].filter((key) => key && key !== dateKey).sort();
+      const repair = historical.length
+        ? await repairDailySnapshots({ dateKeys: historical, logger })
+        : { status: "skipped", repaired: 0, failed: 0 };
+      return {
+        written: r.derived,
+        skipped: r.skipped,
+        retired: r.retired,
+        held: r.held.length,
+        repaired: repair.repaired || 0,
+        failed: repair.failed || 0,
+      };
     },
     count(planned) {
       return planned[0]?.derived || 0;
@@ -1801,7 +1996,9 @@ const TASKS = [
     },
   },
   {
-    // THE EMAIL IS THE LAST STEP OF THIS RUN, NOT A SECOND SCHEDULER.
+    // THE DATA EMAILS ARE THE LAST BUSINESS STEP OF THIS RUN, NOT A SECOND
+    // SCHEDULER. A count-only operator receipt follows them and changes no
+    // business data.
     //
     // ReportDefinition still owns recipient/range/shape policy and the durable
     // lastRunKey that prevents a retry from emailing a successful report twice.
@@ -1809,6 +2006,13 @@ const TASKS = [
     // pipeline is armed, leaving this shared cursor as the sole clock owner.
     key: "report-delivery",
     label: "Send scheduled nightly summary reports",
+    // Unlike the earlier hygiene chores, this is not an optional writer. Once
+    // this runtime owns the nightly close, completing the cursor without this
+    // task would falsely record a successful night with no report. The loop
+    // turns a disarmed required task into the same bounded emergency close used
+    // for a timeout/crash instead of treating it as a standing dry run.
+    requiredForClose: true,
+    requiredDueAt: (planned) => planned[0]?.dueAt,
     writesArmed: () => String(process.env.REPORT_SCHEDULER_ENABLED || "false").toLowerCase() === "true",
     plan({ at }) {
       return [{ dueAt: nightlyReportDueAt(at) }];
@@ -1849,6 +2053,11 @@ const TASKS = [
         skipped: Math.max(0, Number(result?.ran || 0) - delivered),
         failed: 0,
         ran: Number(result?.ran || 0),
+        reports: (result?.results || []).map((row) => ({
+          name: row?.name || null,
+          delivered: Boolean(row?.delivered),
+          agedSourceWrite: row?.agedSourceWrite || null,
+        })),
       };
     },
     count() {
@@ -1861,6 +2070,141 @@ const TASKS = [
       return dueAt instanceof Date && !Number.isNaN(dueAt.getTime())
         ? `scheduled definitions due by ${dueAt.toISOString().slice(11, 16)}Z`
         : "scheduled nightly definitions";
+    },
+  },
+  {
+    // Repair prior stored days only AFTER the current financial/vendor boards
+    // are safely claimed and sent. A late invoice or unresolved attribution
+    // can therefore never delay or invalidate tonight's email. The plan is the
+    // cheap indexed seven-day scan; apply recomposes only those exact dates.
+    key: "historical-report-repair",
+    label: "Repair unresolved report facts from the prior seven days",
+    writesArmed: () => String(process.env.REPORT_SCHEDULER_ENABLED || "false").toLowerCase() === "true",
+    continueOnFailure: true,
+    async plan({ at, logger }) {
+      const { findHistoricalDailyFactRepairs } = require(
+        "../../../../packages/shared-services/src/dailySnapshotService"
+      );
+      const currentDateKey = persistTargetDay(at);
+      const candidates = await findHistoricalDailyFactRepairs({
+        currentDateKey,
+        includeMailSheet: true,
+        logger,
+      });
+      return [{ currentDateKey, candidates }];
+    },
+    async apply(planned, { logger }) {
+      const { repairHistoricalDailyFacts } = require(
+        "../../../../packages/shared-services/src/dailySnapshotService"
+      );
+      const row = planned[0] || {};
+      const result = await repairHistoricalDailyFacts({
+        currentDateKey: row.currentDateKey,
+        candidates: row.candidates || [],
+        logger,
+      });
+      return {
+        written: Number(result.repaired || 0),
+        skipped: 0,
+        failed: 0,
+        attention: Number(result.failed || 0),
+      };
+    },
+    count(planned) {
+      return Array.isArray(planned[0]?.candidates) ? planned[0].candidates.length : 0;
+    },
+    describe(planned) {
+      return `${Array.isArray(planned[0]?.candidates) ? planned[0].candidates.length : 0} prior day(s) need repair`;
+    },
+  },
+  {
+    // One indexed operator check after the business reports. It may make only
+    // the two bounded, CAS-protected repairs owned by the lead-delivery
+    // runtime: release an expired reservation that never reached the provider,
+    // or extend a legacy 15+ attempt retry date to the current phase-out floor.
+    // It never selects, reserves, posts, or requalifies leads. The recount feeds
+    // the run-summary receipt immediately below.
+    key: "lead-health",
+    label: "Measure nightly lead-delivery health",
+    writesArmed: () => true,
+    continueOnFailure: true,
+    async plan({ at }) {
+      const { gatherLeadDeliveryHealth } = require(
+        "../../../../packages/shared-services/src/leadDeliveryHealthService"
+      );
+      return [await gatherLeadDeliveryHealth({ dateKey: persistTargetDay(at), at })];
+    },
+    async apply(planned, { at, leadDeliveryRuntime = null }) {
+      if (!leadDeliveryRuntime
+        || typeof leadDeliveryRuntime.repairNightlyLeadHealth !== "function") {
+        const error = new Error("nightly lead-health repair runtime is unavailable");
+        error.code = "LEAD_HEALTH_REPAIR_RUNTIME_MISSING";
+        throw error;
+      }
+      const repair = await leadDeliveryRuntime.repairNightlyLeadHealth(at, { limit: 100 });
+      const { gatherLeadDeliveryHealth } = require(
+        "../../../../packages/shared-services/src/leadDeliveryHealthService"
+      );
+      const after = await gatherLeadDeliveryHealth({ dateKey: persistTargetDay(at), at });
+      return {
+        written: Number(repair.expiredReservationsReleased || 0)
+          + Number(repair.phaseOutDatesRepaired || 0),
+        skipped: 0,
+        failed: 0,
+        leadHealth: {
+          ...after,
+          before: planned[0],
+          repair,
+        },
+      };
+    },
+    count() {
+      return 1;
+    },
+    describe(planned) {
+      const health = planned[0] || {};
+      return `${Number(health.attempts?.total || 0)} call(s); `
+        + `${Number(health.inventory?.zeroTouch || 0)} zero-touch open; `
+        + `${Number(health.inventory?.due?.lowTouch || 0)} lightly worked due`;
+    },
+  },
+  {
+    // A receipt, not another reporting gather. It reads only the aggregate
+    // task results already in memory and tells the operator what changed and
+    // what still needs attention. Keeping it on its own durable cursor step
+    // means a mail failure retries only this receipt, never the NCOA/source
+    // writes or the already-claimed financial/vendor reports.
+    key: "run-summary",
+    label: "Email the nightly run summary",
+    writesArmed: () => String(process.env.REPORT_SCHEDULER_ENABLED || "false").toLowerCase() === "true",
+    plan() {
+      return [{ planned: 1 }];
+    },
+    suppressEmergencyFallback: true,
+    async apply(planned, { priorResults, at, runSummarySender = null }) {
+      const sendNightlyRunSummary = runSummarySender || require(
+        "../../../../packages/shared-services/src/nightlyRunSummaryService"
+      ).sendNightlyRunSummary;
+      const dateKey = persistTargetDay(at);
+      const claimedAt = await claimNightlyRunSummary(dateKey, at);
+      if (!claimedAt) return { written: 0, skipped: 1, failed: 0 };
+      try {
+        const sent = await sendNightlyRunSummary({
+          dateKey,
+          results: priorResults,
+          recipients: ["mgray@taxadvocategroup.com"],
+        });
+        return { written: sent.sent ? 1 : 0, skipped: 0, failed: sent.sent ? 0 : 1 };
+      } catch (error) {
+        await releaseNightlyRunSummary(dateKey, claimedAt).catch(() => {});
+        throw error;
+      }
+    },
+    count() {
+      return 1;
+    },
+    describe() {
+      return "count-only completion and follow-up receipt";
     },
   },
 ];
@@ -1910,7 +2254,7 @@ function createNightlyHygieneRuntime({ config = {}, runtime = {} } = {}) {
   const reportDeliveryEnabled = config.reportDeliveryEnabled === true
     || String(process.env.REPORT_SCHEDULER_ENABLED || "false").toLowerCase() === "true";
   const tasks = (Array.isArray(config.tasks) ? [...config.tasks] : [...TASKS])
-    .map((task) => (task.key === "report-delivery"
+    .map((task) => (["report-delivery", "historical-report-repair", "lead-health", "run-summary"].includes(task.key)
       ? { ...task, writesArmed: () => reportDeliveryEnabled }
       : task));
 
@@ -1923,6 +2267,8 @@ function createNightlyHygieneRuntime({ config = {}, runtime = {} } = {}) {
     spendSyncRuntime: config.spendSyncRuntime || runtime.spendSyncRuntime || null,
     activityReviewRuntime: config.activityReviewRuntime || runtime.activityReviewRuntime || null,
     reportScheduleRuntime: config.reportScheduleRuntime || runtime.reportScheduleRuntime || null,
+    leadDeliveryRuntime: config.leadDeliveryRuntime || runtime.leadDeliveryRuntime || null,
+    runSummarySender: config.runSummarySender || runtime.runSummarySender || null,
   };
 
   // The emergency close is intentionally local-file + SMTP only. It is armed
@@ -2107,6 +2453,7 @@ function createNightlyHygieneRuntime({ config = {}, runtime = {} } = {}) {
     }
     state.running = true;
     state.activeDay = today;
+    state.lastError = null;
     const started = Date.now();
     try {
       if (emergencyCloseEnabled) {
@@ -2116,13 +2463,16 @@ function createNightlyHygieneRuntime({ config = {}, runtime = {} } = {}) {
           ...(emergencyClose.stateFile ? { stateFile: emergencyClose.stateFile } : {}),
         });
       }
-      const results = [];
+      // A resumed pass starts with the count-only receipts written alongside
+      // its durable cursor. Without them, resuming directly at run-summary
+      // would claim that the earlier NCOA/repair/source tasks did nothing.
+      const results = force ? [] : [...(durableClaim.taskResults || [])];
       const startTaskIndex = force ? 0 : Math.min(durableClaim.nextTaskIndex, tasks.length);
       const durableCounts = () => ({
-        tasks: startTaskIndex + results.filter((row) => !row.error).length,
+        tasks: results.filter((row) => !row.error && !row.errorCode).length,
         planned: results.reduce((sum, row) => sum + Number(row.planned || 0), 0),
         written: results.reduce((sum, row) => sum + Number(row.applied?.written || 0), 0),
-        failed: results.filter((row) => Boolean(row.error)).length,
+        failed: results.filter((row) => Boolean(row.error || row.errorCode)).length,
       });
       for (let taskIndex = startTaskIndex; taskIndex < tasks.length; taskIndex += 1) {
         const task = tasks[taskIndex];
@@ -2172,6 +2522,26 @@ function createNightlyHygieneRuntime({ config = {}, runtime = {} } = {}) {
             throw error;
           }
 
+          if (!armed && !force && task.requiredForClose) {
+            // Preserve the public 20:00 delivery contract even for a bad flag
+            // combination. The run begins at 19:50, but a configuration
+            // fallback should not arrive ten minutes early and masquerade as
+            // the ordinary report.
+            const requiredDueAt = typeof task.requiredDueAt === "function"
+              ? new Date(task.requiredDueAt(planned))
+              : null;
+            if (requiredDueAt && !Number.isNaN(requiredDueAt.getTime())) {
+              await withTimeout(
+                () => waitUntil(requiredDueAt),
+                task.timeoutMs || state.taskTimeoutMs,
+                { taskKey: task.key, phase: "required-gate" },
+              );
+            }
+            const error = new Error(`${task.key} is required for the nightly close but is disarmed`);
+            error.code = "NIGHTLY_REQUIRED_TASK_DISARMED";
+            throw error;
+          }
+
           if (!armed && !force) {
             results.push({
               task: task.key,
@@ -2188,7 +2558,11 @@ function createNightlyHygieneRuntime({ config = {}, runtime = {} } = {}) {
             // one indirection — say it directly.
             if (durableClaim) {
               const renewed = await advanceNightlyHygiene(
-                today, durableClaim.claimedAt, taskIndex + 1, durableCounts(),
+                today,
+                durableClaim.claimedAt,
+                taskIndex + 1,
+                durableCounts(),
+                durableTaskResults(results),
               );
               if (!renewed) throw cursorLost();
               durableClaim.claimedAt = renewed;
@@ -2201,7 +2575,7 @@ function createNightlyHygieneRuntime({ config = {}, runtime = {} } = {}) {
             applied = await withClaimHeartbeat(today, durableClaim, () => withTimeout(
               () => task.apply(
                 planned,
-                { logger: log, at, ...collaborators },
+                { logger: log, at, priorResults: [...results], ...collaborators },
               ),
               task.timeoutMs || state.taskTimeoutMs,
               { taskKey: task.key, phase: "apply" },
@@ -2223,7 +2597,11 @@ function createNightlyHygieneRuntime({ config = {}, runtime = {} } = {}) {
           });
           if (durableClaim) {
             const renewed = await advanceNightlyHygiene(
-              today, durableClaim.claimedAt, taskIndex + 1, durableCounts(),
+              today,
+              durableClaim.claimedAt,
+              taskIndex + 1,
+              durableCounts(),
+              durableTaskResults(results),
             );
             if (!renewed) throw cursorLost();
             durableClaim.claimedAt = renewed;
@@ -2237,15 +2615,57 @@ function createNightlyHygieneRuntime({ config = {}, runtime = {} } = {}) {
           // upstream correction failed. The emergency path sends a deliberately
           // data-free degraded close and leaves the failed cursor retryable for
           // an operator instead.
-          results.push({ task: task.key, label: task.label, error: String(error.message).slice(0, 240) });
+          const failureCode = error?.code || error?.name || "task-failed";
+          results.push({
+            task: task.key,
+            label: task.label,
+            error: String(error.message).slice(0, 240),
+            errorCode: failureCode,
+          });
           log?.error?.("nightly_hygiene.task_failed", { task: task.key, error: String(error.message) });
+          if (task.continueOnFailure) {
+            if (durableClaim) {
+              const renewed = await advanceNightlyHygiene(
+                today,
+                durableClaim.claimedAt,
+                taskIndex + 1,
+                durableCounts(),
+                durableTaskResults(results),
+              );
+              if (!renewed) throw cursorLost();
+              durableClaim.claimedAt = renewed;
+            }
+            log?.warn?.("nightly_hygiene.task_degraded", {
+              task: task.key,
+              errorCode: failureCode,
+            });
+            continue;
+          }
+
           state.lastError = String(error.message).slice(0, 300);
 
-          const failureCode = error?.code || error?.name || "task-failed";
           if (durableClaim) {
             await releaseNightlyHygiene(today, durableClaim.claimedAt, failureCode).catch(() => {});
           }
-          const fallback = await triggerEmergencyClose(today, failureCode, task.key);
+          const fallback = task.suppressEmergencyFallback
+            ? { skipped: true, reason: "post-report-receipt-failed" }
+            : await triggerEmergencyClose(today, failureCode, task.key);
+          if (task.suppressEmergencyFallback && emergencyCloseEnabled) {
+            // The business close and both data emails are already complete.
+            // Mark the emergency checkpoint complete so a restart retries only
+            // this cursor step instead of launching a misleading fallback.
+            try {
+              emergencyClose.markCompleted({
+                dateKey: today,
+                at: new Date(),
+                ...(emergencyClose.stateFile ? { stateFile: emergencyClose.stateFile } : {}),
+              });
+            } catch (checkpointError) {
+              log?.warn?.("nightly_hygiene.summary_checkpoint_failed", {
+                errorCode: checkpointError?.code || checkpointError?.name || "checkpoint-failed",
+              });
+            }
+          }
           state.lastRunAt = new Date().toISOString();
           state.lastResult = {
             at: state.lastRunAt,
@@ -2266,7 +2686,12 @@ function createNightlyHygieneRuntime({ config = {}, runtime = {} } = {}) {
       // Only a completed pass claims the day; a crash retries on the next poll.
       if (durableClaim) {
         const finished = await finishNightlyHygiene(
-          today, durableClaim.claimedAt, tasks.length, durableCounts(), at,
+          today,
+          durableClaim.claimedAt,
+          tasks.length,
+          durableCounts(),
+          durableTaskResults(results),
+          at,
         );
         if (!finished) throw new Error("nightly hygiene completion claim was lost");
       }
@@ -2337,8 +2762,19 @@ function createNightlyHygieneRuntime({ config = {}, runtime = {} } = {}) {
   }
 
   function getState() {
+    const requiredTasks = tasks.filter((task) => task.requiredForClose);
+    const disarmedRequiredTasks = state.enabled
+      ? requiredTasks.filter((task) => !task.writesArmed()).map((task) => task.key)
+      : [];
+    const closeIssues = [
+      ...disarmedRequiredTasks.map((key) => `required-task-disarmed:${key}`),
+      ...(state.enabled && !emergencyCloseEnabled ? ["emergency-close-disabled"] : []),
+    ];
     return {
       enabled: state.enabled,
+      closeReady: !state.enabled || closeIssues.length === 0,
+      closeIssues,
+      emergencyCloseEnabled,
       hour: state.hour,
       minute: state.minute,
       at: `${String(state.hour).padStart(2, "0")}:${String(state.minute).padStart(2, "0")} PT`,
@@ -2381,6 +2817,7 @@ module.exports = {
   persistTargetDay,
   buildCallRecoveryDiscoveryDeps,
   isPacificBusinessDay,
+  nightlyInvoiceRepairDateKeys,
   renewNightlyHygiene,
   withTimeout,
 };

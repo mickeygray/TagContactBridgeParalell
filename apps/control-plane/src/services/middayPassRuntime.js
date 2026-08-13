@@ -1,6 +1,6 @@
 "use strict";
 
-// THE MIDDAY PASS — recalibrate, then send the rvm half of cadence.
+// THE MIDDAY PASS — one read-only lead-delivery health checkpoint.
 //
 // Mickey 2026-08-06: "2) recalibrate at noon and run a second cadence blast."
 //
@@ -11,8 +11,49 @@ const { createPassRuntime } = require("./passRuntimeFactory");
 
 const flag = (name) => String(process.env[name] || "false").toLowerCase() === "true";
 const middayCadenceCap = () => Math.max(1, Number(process.env.MIDDAY_CADENCE_MAX_DISPATCHES) || 200);
+const RECURRING_MIDDAY_CADENCE_WRITES_ENABLED = false;
+const MIDDAY_CALL_LOG_HYGIENE_WRITES_ENABLED = false;
 
 const TASKS = [
+  {
+    key: "lead-delivery-health",
+    label: "Lead delivery — noon health checkpoint",
+    // Read-only. Enabling the midday pass is the complete authorization for
+    // this check; it neither posts provider contacts nor changes lead state.
+    writesArmed: () => flag("MIDDAY_LEAD_DELIVERY_HEALTH_ENABLED"),
+    async plan() {
+      return [{ check: "lead-delivery-runtime" }];
+    },
+    count() { return 1; },
+    async apply(_planned, { leadDeliveryRuntime = null }) {
+      const state = leadDeliveryRuntime?.getState?.();
+      if (!state) {
+        return { written: 0, checked: 1, failed: 1, reason: "runtime-unavailable" };
+      }
+      const healthy = state.running === true
+        && state.enabled === true
+        && !String(state.lastErrorCode || "").trim();
+      return {
+        written: 0,
+        checked: 1,
+        failed: healthy ? 0 : 1,
+        status: healthy ? "healthy" : "unhealthy",
+        running: state.running === true,
+        enabled: state.enabled === true,
+        actionsEnabled: state.actionsEnabled === true,
+        refillEnabled: state.refillEnabled === true,
+        lastErrorCode: String(state.lastErrorCode || "").slice(0, 80) || null,
+        accepted: Math.max(0, Number(state.accepted) || 0),
+        providerPostQueueDepth: Math.max(0, Number(state.providerPostQueueDepth) || 0),
+        providerPostInFlight: Math.max(0, Number(state.providerPostInFlight) || 0),
+        freshDispatchStatus: String(state.freshDispatch?.lastStatus || "unknown").slice(0, 80),
+        watchdogStatus: String(state.watchdogSupplyRefresh?.status || "unknown").slice(0, 80),
+      };
+    },
+    describe() {
+      return "one read-only health checkpoint; no provider or lead mutation";
+    },
+  },
   {
     // THE RVM HALF.
     //
@@ -28,9 +69,11 @@ const TASKS = [
     // so without it the sweep selects nothing and reports a confident zero.
     key: "cadence-midday",
     weekdaysOnly: true,
-    label: "Lead cadence — ringless voicemail",
-    writesArmed: () => flag("MIDDAY_CADENCE_ENABLED"),
+    label: "RETIRED — recurring lead-cadence ringless voicemail",
+    writesArmed: () => RECURRING_MIDDAY_CADENCE_WRITES_ENABLED
+      && flag("MIDDAY_CADENCE_ENABLED"),
     async plan({ domains }) {
+      if (!RECURRING_MIDDAY_CADENCE_WRITES_ENABLED) return [];
       return [{ domains: [...domains], channels: ["rvm"], maxDispatches: middayCadenceCap() }];
     },
     count() { return 1; },
@@ -89,9 +132,11 @@ const TASKS = [
     // that has no such field, so mongoose strict drops it and every replay adds
     // another row. All of that is recorded as an arming blocker in the E8 entry.
     key: "call-log-hygiene-midday",
-    label: "Call log hygiene — morning half (since 20:00 PT yesterday)",
-    writesArmed: () => flag("MIDDAY_CALL_LOG_HYGIENE_ENABLED"),
+    label: "BLOCKED — overlapping midday call-log hygiene",
+    writesArmed: () => MIDDAY_CALL_LOG_HYGIENE_WRITES_ENABLED
+      && flag("MIDDAY_CALL_LOG_HYGIENE_ENABLED"),
     async plan({ domains, logger }) {
+      if (!MIDDAY_CALL_LOG_HYGIENE_WRITES_ENABLED) return [];
       const { CallLog } = require("../../../../packages/shared-models/src");
       const {
         pacificMsSinceToday,
@@ -196,4 +241,9 @@ function createMiddayPassRuntime({ config = {}, runtime = {} } = {}) {
   });
 }
 
-module.exports = { TASKS, createMiddayPassRuntime };
+module.exports = {
+  MIDDAY_CALL_LOG_HYGIENE_WRITES_ENABLED,
+  RECURRING_MIDDAY_CADENCE_WRITES_ENABLED,
+  TASKS,
+  createMiddayPassRuntime,
+};

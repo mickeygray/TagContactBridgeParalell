@@ -4,6 +4,8 @@ const DailyReportFact = require("../../shared-models/src/DailyReportFact");
 const { preserveFrozenFields, summarizeCallHighlights } = require("./dailySectionBuilders");
 const {
   AUXILIARY_DAILY_SECTION_KEYS,
+  CANONICAL_NIGHTLY_REPORT_NAMES,
+  DAILY_REPAIR_REASONS,
   DAILY_SECTION_KEYS,
   REPORT_SECTION_IDS,
   REPORT_TO_DAILY_SECTION,
@@ -22,7 +24,7 @@ const CALL_SECTION = REPORT_SECTION_IDS.LONG_CALLS;
  * feeds it. `longcalls` is a block in the nightly email; `calls` is the stored slot.
  */
 const CALL_SECTION_FACT = DAILY_SECTION_KEYS.CALLS;
-const CANONICAL_DEFINITION_NAME = "financial roll up with calls";
+const CANONICAL_DEFINITION_NAME = CANONICAL_NIGHTLY_REPORT_NAMES.FINANCIAL;
 
 // Daily facts are statistics, not a second customer/call store. The report may
 // contain actionable rows, phones, case ids, and listen links; those already
@@ -180,6 +182,31 @@ function buildDailyReportFact({
       : fallback
   );
 
+  const spendFact = fromEntry(
+    DAILY_SECTION_KEYS.SPEND,
+    sanitizeFactValue(report.spend ?? null),
+  );
+  const financialFact = fromEntry(
+    DAILY_SECTION_KEYS.FINANCIAL,
+    sanitizeFactValue(sections.get(REPORT_SECTION_IDS.TOPLINE)?.data ?? null),
+  );
+  const bySourceFact = fromEntry(
+    DAILY_SECTION_KEYS.BY_SOURCE,
+    sanitizeFactValue(sections.get(REPORT_SECTION_IDS.BY_SOURCE)?.data ?? null),
+  );
+  const byAgentFact = fromEntry(
+    DAILY_SECTION_KEYS.BY_AGENT,
+    sanitizeFactValue(sections.get(REPORT_SECTION_IDS.BY_AGENT)?.data ?? null),
+  );
+  const failureText = (report?.failures || []).map((failure) => String(failure)).join("\n");
+  const repairHints = [];
+  if (/NO MAIL SPEND|MAIL INVOICE|NO derived spend|SPEND UNAVAILABLE|NO SPEND/i.test(failureText)) {
+    repairHints.push(DAILY_REPAIR_REASONS.MARKETING_COST);
+  }
+  if (/officer resolution unavailable/i.test(failureText)) {
+    repairHints.push(DAILY_REPAIR_REASONS.OFFICER);
+  }
+
   return {
     dateKey: key,
     captureVersion: CAPTURE_VERSION,
@@ -192,11 +219,11 @@ function buildDailyReportFact({
     // which reads as delivered to anything that only checks for presence.
     emailAcceptedAt: emailAcceptedAt == null ? null : new Date(emailAcceptedAt),
     capturedAt: new Date(),
+    spendCapturedAt: spendFact == null ? null : new Date(),
     ...(dailyEntry ? { entryBuiltAt: new Date(), detail: dailyEntry.detail || {} } : {}),
     facts: {
       [DAILY_SECTION_KEYS.FINANCIAL]: fromEntry(
-        DAILY_SECTION_KEYS.FINANCIAL,
-        sanitizeFactValue(sections.get(REPORT_SECTION_IDS.TOPLINE)?.data ?? null),
+        DAILY_SECTION_KEYS.FINANCIAL, financialFact,
       ),
       // ALL COSTS BY SOURCE — total, LD (with lead count), mail (with pieces),
       // BCD (with call count and rate). Added 2026-08-04: a stored day used to
@@ -207,16 +234,13 @@ function buildDailyReportFact({
       // in the rollup preset, and putting it there to reach the number would
       // have added a section to the nightly email.
       [DAILY_SECTION_KEYS.SPEND]: fromEntry(
-        DAILY_SECTION_KEYS.SPEND,
-        sanitizeFactValue(report.spend ?? null),
+        DAILY_SECTION_KEYS.SPEND, spendFact,
       ),
       [REPORT_TO_DAILY_SECTION[REPORT_SECTION_IDS.BY_SOURCE]]: fromEntry(
-        DAILY_SECTION_KEYS.BY_SOURCE,
-        sanitizeFactValue(sections.get(REPORT_SECTION_IDS.BY_SOURCE)?.data ?? null),
+        DAILY_SECTION_KEYS.BY_SOURCE, bySourceFact,
       ),
       [REPORT_TO_DAILY_SECTION[REPORT_SECTION_IDS.BY_AGENT]]: fromEntry(
-        DAILY_SECTION_KEYS.BY_AGENT,
-        sanitizeFactValue(sections.get(REPORT_SECTION_IDS.BY_AGENT)?.data ?? null),
+        DAILY_SECTION_KEYS.BY_AGENT, byAgentFact,
       ),
       [REPORT_TO_DAILY_SECTION[REPORT_SECTION_IDS.STATUS]]: fromEntry(
         DAILY_SECTION_KEYS.STATUS,
@@ -241,6 +265,7 @@ function buildDailyReportFact({
       capturedSections,
       missingSections,
       sectionErrors,
+      repairHints,
       reportDegraded: Boolean((report?.failures || []).length || sectionErrors.length),
       reportComplete,
       coreComplete,
@@ -311,7 +336,13 @@ function flattenFactUpdate(fact) {
  * writer — the dry-run script and every test inject their own, so the broken
  * path was the one path with no coverage.
  */
-async function persistBuiltDailyReportFact(fact, { Model = DailyReportFact } = {}) {
+async function persistBuiltDailyReportFact(fact, {
+  Model = DailyReportFact,
+  // Frozen fields protect a closed day from incidental reruns. A late vendor
+  // document is a deliberate correction, so its bounded repair caller may
+  // explicitly reopen only the named section.
+  overwriteFrozen = [],
+} = {}) {
   if (!fact || !fact.dateKey) throw new Error("a built daily fact requires a dateKey");
   let writeFact = fact;
   // The snapshot path is a second writer of the same daily entry. It must obey
@@ -319,9 +350,12 @@ async function persistBuiltDailyReportFact(fact, { Model = DailyReportFact } = {
   // may refresh event-backed LD/BCD values, but it must not silently restate a
   // closed day's sheet-backed mail cost. The scheduler's day claim prevents
   // ordinary overlap; this indexed read protects explicit reruns.
-  if (typeof Model.findOne === "function" && fact.facts?.[DAILY_SECTION_KEYS.SPEND]) {
+  const forced = new Set(overwriteFrozen || []);
+  if (!forced.has(DAILY_SECTION_KEYS.SPEND)
+    && typeof Model.findOne === "function"
+    && fact.facts?.[DAILY_SECTION_KEYS.SPEND]) {
     const existing = await Model.findOne({ dateKey: fact.dateKey })
-      .select("facts.spend detail.spend")
+      .select("facts.spend detail.spend spendCapturedAt")
       .lean();
     const storedSpend = existing?.facts?.[DAILY_SECTION_KEYS.SPEND]
       || existing?.detail?.[DAILY_SECTION_KEYS.SPEND];
@@ -333,6 +367,9 @@ async function persistBuiltDailyReportFact(fact, { Model = DailyReportFact } = {
       );
       writeFact = {
         ...fact,
+        // A general rerun did not refresh frozen spend, so it must not advance
+        // the spend-specific freshness marker either.
+        spendCapturedAt: existing?.spendCapturedAt ?? null,
         facts: { ...fact.facts, [DAILY_SECTION_KEYS.SPEND]: merged.value },
         detail: fact.detail
           ? { ...fact.detail, [DAILY_SECTION_KEYS.SPEND]: merged.value }

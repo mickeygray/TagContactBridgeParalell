@@ -35,7 +35,7 @@ const { gatherRecordingLinks } = require("../packages/shared-services/src/callRe
 const DailyReportFact = require("../packages/shared-models/src/DailyReportFact");
 const ReportDefinition = require("../packages/shared-models/src/ReportDefinition");
 
-const CANONICAL = "financial roll up with calls";
+const CANONICAL = "financial";
 const pad = (s, n) => String(s).padEnd(n);
 
 const pacificYesterday = () => new Intl.DateTimeFormat("en-CA", {

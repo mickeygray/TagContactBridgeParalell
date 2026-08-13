@@ -69,6 +69,52 @@ test("the report scheduler remains standalone when nightly ownership is off", ()
   assert.equal(state.owner, "standalone");
 });
 
+test("report delivery does not wait on historical repair work", async () => {
+  const runtime = createReportScheduleRuntime({
+    config: { enabled: true, managedByNightly: true },
+    runtime: {
+      dueDefinitions: async () => [{ name: "financial" }],
+      runDefinition: async () => ({
+        range: { from: "2026-08-11", to: "2026-08-11" },
+        delivered: false,
+        sections: 5,
+        errors: [],
+        durationMs: 1,
+        onComposed: { status: "written" },
+      }),
+    },
+  });
+  const out = await runtime.poll({ force: true, now: new Date("2026-08-12T03:00:00.000Z") });
+  assert.equal(out.ran, 1);
+  assert.equal("historicalRepair" in out.results[0], false,
+    "late repair is a separate post-report cursor step and cannot delay delivery");
+});
+
+test("Aged source writes happen only after report delivery is accepted", async () => {
+  const order = [];
+  const runtime = createReportScheduleRuntime({
+    config: { enabled: true, managedByNightly: true },
+    runtime: {
+      dueDefinitions: async () => [{ name: "financial" }],
+      runDefinition: async () => {
+        order.push("mail-accepted");
+        return {
+          range: { from: "2026-08-11", to: "2026-08-11" },
+          report: { sections: [] }, delivered: true, sections: 5, errors: [], durationMs: 1,
+          onComposed: { status: "skipped" },
+        };
+      },
+      syncAgedLogicsSourcesFromReport: async () => {
+        order.push("aged-write");
+        return { status: "completed", written: 1, failed: 0 };
+      },
+    },
+  });
+  const out = await runtime.poll({ force: true, now: new Date("2026-08-12T03:00:00.000Z") });
+  assert.deepEqual(order, ["mail-accepted", "aged-write"]);
+  assert.equal(out.results[0].agedSourceWrite.written, 1);
+});
+
 test("nightly close and Lexis schedules cannot arm Saturday or Sunday", () => {
   assert.deepEqual(normalizeCloseWeekdays([0, 1, 5, 6]), [1, 5]);
   assert.deepEqual(normalizeLexisWeekdays([0, 2, 6]), [2]);

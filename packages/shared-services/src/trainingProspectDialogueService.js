@@ -52,6 +52,14 @@ function buildTargetedTalkSkillHeader({ scenario, state }) {
       factSetId: variant.factSetId,
       utteranceSetIds: Object.freeze([...(variant.utteranceSetIds || [])]),
       voiceProfileId: variant.voiceProfileId,
+      posture: String(variant.posture || ""),
+      behavior: String(variant.behavior || ""),
+      situation: String(variant.situation || ""),
+    }),
+    practice: Object.freeze({
+      title: String(scenario.presentation?.title || ""),
+      objective: String(scenario.presentation?.objective || scenario.localObjective || ""),
+      listenFor: String(scenario.presentation?.listenFor || ""),
     }),
   });
   return Object.freeze({

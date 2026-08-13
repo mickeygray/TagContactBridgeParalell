@@ -137,8 +137,8 @@ async function main() {
   // the weekdays should not risk any of that, so it gets a patch arm like
   // --enable/--disable rather than a full re-save.
   //
-  //   node scripts/report-schedule.js --weekdays "vendor roll up with calls" --dow 1,2,3,4,5
-  //   node scripts/report-schedule.js --at-time "financial roll up with calls" --at 20:30
+  //   node scripts/report-schedule.js --weekdays "vendor" --dow 1,2,3,4,5
+  //   node scripts/report-schedule.js --at-time "financial" --at 20:30
   const dowPatch = () => {
     const raw = arg("dow");
     if (raw === null || raw === true) throw new Error("--weekdays needs --dow (e.g. --dow 1,2,3,4,5; 0=Sun)");

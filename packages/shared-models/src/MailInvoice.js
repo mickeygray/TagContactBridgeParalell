@@ -95,7 +95,7 @@ const mailInvoiceSchema = new mongoose.Schema(
     // at after the fact.
     serviceDateSource: {
       type: String,
-      enum: ["receipt", "email", "assumed-current-year", null],
+      enum: ["window", "subject", "receipt", "email", "assumed-current-year", null],
       default: null,
     },
 
@@ -114,10 +114,10 @@ const mailInvoiceSchema = new mongoose.Schema(
 
     // How it arrived. Provenance, so any stored number traces back to an email.
     //
-    // `attachmentCount` is kept even on a clean day: both PDFs ride ONE email,
-    // so the realistic failure is a SHORT email rather than a late second file,
-    // and that is only visible if we record how many were seen — not just how
-    // many we managed to parse.
+    // `attachmentCount` describes the files assigned to this invoice group.
+    // A single email may contain several service days, so recording the grouped
+    // names/count preserves which receipt was paired with which invoice without
+    // incorrectly attaching the entire email to every stored day.
     source: {
       type: new mongoose.Schema({
         channel: { type: String, default: "gmail", trim: true },

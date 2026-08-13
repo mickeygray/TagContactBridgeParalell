@@ -411,6 +411,44 @@ function publicItem(item, state) {
         label: String(choice?.label || ""),
       }))
     : [];
+  const sourceGuide =
+    presentation.coachingGuide && typeof presentation.coachingGuide === "object"
+      ? presentation.coachingGuide
+      : null;
+  const coachingGuide = sourceGuide
+    ? {
+        objective: String(sourceGuide.objective || "").slice(0, 4_000),
+        exactMoves: (Array.isArray(sourceGuide.exactMoves) ? sourceGuide.exactMoves : [])
+          .slice(0, 50)
+          .map((move) => ({
+            beatId: String(move?.beatId || "").slice(0, 200),
+            label: String(move?.label || "").slice(0, 500),
+            language: String(move?.language || "").slice(0, 2_000),
+          })),
+        responseSignals: (Array.isArray(sourceGuide.responseSignals)
+          ? sourceGuide.responseSignals
+          : [])
+          .slice(0, 50)
+          .map((signal) => ({
+            signalId: String(signal?.signalId || "").slice(0, 200),
+            prospectPattern: String(signal?.prospectPattern || "").slice(0, 1_000),
+            coachNotice: String(signal?.coachNotice || "").slice(0, 2_000),
+            suggestedMove: String(signal?.suggestedMove || "").slice(0, 2_000),
+            listenFor: String(signal?.listenFor || "").slice(0, 1_000),
+          })),
+        practiceModules: (Array.isArray(sourceGuide.practiceModules)
+          ? sourceGuide.practiceModules
+          : [])
+          .slice(0, 100)
+          .map((moduleDef) => ({
+            moduleId: String(moduleDef?.moduleId || "").slice(0, 200),
+            title: String(moduleDef?.title || "").slice(0, 500),
+            objective: String(moduleDef?.objective || "").slice(0, 2_000),
+            reading: String(moduleDef?.reading || "").slice(0, 20_000),
+            questionCount: Math.max(0, Math.min(100, Number(moduleDef?.questionCount) || 0)),
+          })),
+      }
+    : null;
   return {
     itemId: item.id,
     itemVersion: item.version,
@@ -437,6 +475,7 @@ function publicItem(item, state) {
       estimatedMinutes: Number.isFinite(Number(presentation.estimatedMinutes))
         ? Math.max(0, Math.min(480, Number(presentation.estimatedMinutes)))
         : null,
+      coachingGuide,
     },
   };
 }

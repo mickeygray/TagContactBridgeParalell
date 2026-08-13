@@ -34,6 +34,9 @@ const SIMPLE_POOL_SUPPLY_REFRESH_MAX_BATCHES = 5;
 const PRODUCTIVITY_REBALANCE_INTERVAL_MS = 15 * 60 * 1000;
 const PRODUCTIVITY_REBALANCE_CUSHION_SIZE = 6;
 const PRODUCTIVITY_REBALANCE_MINIMUM_CUSHION_AGE_DAYS = 17;
+const HIGH_TOUCH_AGE_SORT_START = 10;
+const ORDINARY_PHASE_OUT_ATTEMPT_COUNT = 15;
+const ORDINARY_PHASE_OUT_RETRY_MINUTES = 15 * 24 * 60;
 const CALL_RECOVERY_CONTACT_POLICY_ID = "long_call_recovery_120d_2x";
 const CALL_RECOVERY_DNC_POLICY_ID = "full_dnc_loadin_30_60_90_logics_daily_v1";
 const CALL_RECOVERY_LOGICS_POLICY_ID = "tag_active_prospect_only_v1";
@@ -1149,7 +1152,11 @@ function dailyAttemptLimitForLeadAge(item = {}, { now, maximum = 3 } = {}) {
 }
 
 function retryDelayMinutesForLeadAge(item = {}, { now } = {}) {
-  return leadAgeInPacificDays(item, now) >= 32 ? 15 * 24 * 60 : 120;
+  const attempts = nonNegativeInteger(item.totalAttemptCount ?? 0, "totalAttemptCount");
+  return (!isCallRecoveryItem(item) && attempts >= ORDINARY_PHASE_OUT_ATTEMPT_COUNT)
+    || leadAgeInPacificDays(item, now) >= 32
+    ? ORDINARY_PHASE_OUT_RETRY_MINUTES
+    : 120;
 }
 
 function getPacificWeekday(value) {
@@ -1599,8 +1606,9 @@ function comparePoolItems(pool, left, right) {
  *   0  overnight            first-contact barrier; recovery may never bypass it
  *   1  new_today, 0 touches  a lead nobody has ever called still wins
  *   2  RECOVERY, 0 touches   a 15-minute conversation outranks a second dial
- *   3  anything touched      follow_up_due retries, and recovery once contacted
- *   4  generic aged filler
+ *   3  1-9 touches           fewest prior attempts first, then most overdue
+ *   4  10-14 touches         newer leads first; age begins deciding the line
+ *   5  15+ touches           phase-out inventory, eligible only weeks apart
  *
  * The "until it gets contacted" half is the important one: the elevation is
  * granted by the UNANSWERED conversation, not by membership. The moment the
@@ -1615,8 +1623,10 @@ function resolveSelectionRank(item = {}, { now = new Date() } = {}) {
   if (pool === POOLS.OVERNIGHT) return 0;
   if (pool === POOLS.NEW_TODAY && !touched) return 1;
   if (!touched) return 2;
-  if (touched) return 3;
-  return 3;
+  const attempts = nonNegativeInteger(item.totalAttemptCount ?? 0, "totalAttemptCount");
+  if (attempts < HIGH_TOUCH_AGE_SORT_START) return 3;
+  if (attempts < ORDINARY_PHASE_OUT_ATTEMPT_COUNT) return 4;
+  return 5;
 }
 
 /**
@@ -1669,7 +1679,20 @@ function compareSelectionCandidates(left, right, { now = new Date() } = {}) {
         - nullableTime(left.receivedAt, "receivedAt");
       return receiptDelta || compareStable(left, right);
     }
-    case 3: { // anything already touched — most overdue first, across pools
+    case 3: { // anything already touched — fewest attempts, then most overdue
+      // Do not let an old due timestamp turn a heavily recycled lead into a
+      // permanent front-of-line resident. Once first-contact work is clear,
+      // spread the available dialing capacity across the floor by completing
+      // the second attempt before the third, the third before the fourth, and
+      // so on. Due time still decides which lead wins within an attempt band.
+      const attemptDelta = nonNegativeInteger(
+        left.totalAttemptCount ?? 0,
+        "totalAttemptCount",
+      ) - nonNegativeInteger(
+        right.totalAttemptCount ?? 0,
+        "totalAttemptCount",
+      );
+      if (attemptDelta) return attemptDelta;
       const dueDelta = nullableTime(left.nextContactAt, "nextContactAt")
         - nullableTime(right.nextContactAt, "nextContactAt");
       if (dueDelta) return dueDelta;
@@ -1677,13 +1700,29 @@ function compareSelectionCandidates(left, right, { now = new Date() } = {}) {
         - nullableTime(right.lastContactAt, "lastContactAt");
       return contactDelta || compareStable(left, right);
     }
-    default: { // generic aged filler — coldest first
-      const contactDelta = nullableTime(left.lastContactAt, "lastContactAt")
-        - nullableTime(right.lastContactAt, "lastContactAt");
-      if (contactDelta) return contactDelta;
-      const receivedDelta = nullableTime(left.receivedAt, "receivedAt")
-        - nullableTime(right.receivedAt, "receivedAt");
-      return receivedDelta || compareStable(left, right);
+    case 4: { // 10-14 touches — newer lead age decides before attempt count
+      const receivedDelta = nullableTime(right.receivedAt, "receivedAt")
+        - nullableTime(left.receivedAt, "receivedAt");
+      if (receivedDelta) return receivedDelta;
+      const attemptDelta = nonNegativeInteger(
+        left.totalAttemptCount ?? 0,
+        "totalAttemptCount",
+      ) - nonNegativeInteger(
+        right.totalAttemptCount ?? 0,
+        "totalAttemptCount",
+      );
+      if (attemptDelta) return attemptDelta;
+      const dueDelta = nullableTime(left.nextContactAt, "nextContactAt")
+        - nullableTime(right.nextContactAt, "nextContactAt");
+      return dueDelta || compareStable(left, right);
+    }
+    default: { // 15+ touches — newer phase-out work first once its long timer is due
+      const receivedDelta = nullableTime(right.receivedAt, "receivedAt")
+        - nullableTime(left.receivedAt, "receivedAt");
+      if (receivedDelta) return receivedDelta;
+      const dueDelta = nullableTime(left.nextContactAt, "nextContactAt")
+        - nullableTime(right.nextContactAt, "nextContactAt");
+      return dueDelta || compareStable(left, right);
     }
   }
 }
@@ -2616,12 +2655,21 @@ function transitionCompletedAttempt(item = {}, outcome, options = {}) {
     throw new Error(`first completion requires provider_accepted or in_call state, received ${priorState || "missing"}`);
   }
   const attempt = projectAttemptCompletion(item, options);
+  const retryDelayMinutes = isCallRecoveryItem(item)
+    ? positiveInteger(options.retryDelayMinutes ?? 120, "retryDelayMinutes")
+    : Math.max(
+      positiveInteger(options.retryDelayMinutes ?? 120, "retryDelayMinutes"),
+      retryDelayMinutesForLeadAge({
+        ...item,
+        totalAttemptCount: attempt.totalAttemptCount,
+      }, { now: attempt.lastContactAt }),
+    );
   const decision = decideOutcomeState({
     normalizedOutcome: outcome,
     completedAt: attempt.lastContactAt,
     dailyAttemptCount: attempt.dailyAttemptCount,
     maxDailyAttempts: options.maxDailyAttempts,
-    retryDelayMinutes: options.retryDelayMinutes,
+    retryDelayMinutes,
   });
   return {
     ...clone(item),
@@ -5660,26 +5708,32 @@ function createLeadDeliveryRuntime({
 
     const packetAt = atNow();
 
-    // Read the non-fresh pools as one candidate line. Walking pools one at a
-    // time let a retry jump ahead of an untouched lead in a later pool.
+    // Read a bounded head from every non-fresh pool, then merge them into one
+    // candidate line. A single multi-pool query is limited before this service
+    // can apply its cross-pool comparator; with Mongo's stable-id fallback that
+    // allowed the first 250 old documents to hide a lower-attempt lead in a
+    // different pool. Per-pool heads preserve the bound without reintroducing
+    // pool precedence: the merged comparator still owns the final order.
     const ordinaryPools = packetPoolOrder.filter((pool) => pool !== POOLS.NEW_TODAY);
     const candidateLimit = Math.min(5000, Math.max(requested * 10, 250));
-    const untouchedCandidates = await repository.listPacketCandidateItems({
-      agentId: id,
-      sourcePools: ordinaryPools,
-      untouchedOnly: true,
-      now: packetAt,
-      limit: candidateLimit,
-    });
-    let candidates = untouchedCandidates;
-    if (untouchedOnly !== true && untouchedCandidates.length < requested) {
-      const fallbackCandidates = await repository.listPacketCandidateItems({
+    const readCandidateHeads = async ({ untouchedOnly = false, attemptBand = "all" } = {}) => (
+      await Promise.all(ordinaryPools.map((pool) => repository.listPacketCandidateItems({
         agentId: id,
-        sourcePools: ordinaryPools,
-        untouchedOnly: false,
+        sourcePools: [pool],
+        untouchedOnly,
+        attemptBand,
         now: packetAt,
         limit: candidateLimit,
-      });
+      })))
+    ).flat();
+    const untouchedCandidates = await readCandidateHeads({ untouchedOnly: true });
+    let candidates = untouchedCandidates;
+    if (untouchedOnly !== true && untouchedCandidates.length < requested) {
+      const fallbackCandidates = (await Promise.all([
+        readCandidateHeads({ attemptBand: "standard" }),
+        readCandidateHeads({ attemptBand: "age_sorted" }),
+        readCandidateHeads({ attemptBand: "phase_out" }),
+      ])).flat();
       const seen = new Set(untouchedCandidates.map((item) => stableWorkItemId(item)));
       candidates = [
         ...untouchedCandidates,
@@ -9712,6 +9766,108 @@ function createLeadDeliveryRuntime({
     return endOfDayDrainInFlight;
   }
 
+  async function repairNightlyLeadHealth(value = atNow(), options = {}) {
+    const at = parseDate(value, "value");
+    const limit = Math.min(500, Math.max(1, Number(options.limit || 100)));
+    if (!Number.isInteger(limit)) throw new TypeError("nightly lead-health repair limit must be an integer");
+    if (typeof repository.listNightlyLeadHealthRepairCandidates !== "function") {
+      const error = new Error("nightly lead-health repair repository is unavailable");
+      error.code = "LEAD_HEALTH_REPAIR_REPOSITORY_MISSING";
+      throw error;
+    }
+    const candidates = await repository.listNightlyLeadHealthRepairCandidates({ now: at, limit });
+    const summary = {
+      scanned: Number(candidates.expiredReservations?.length || 0)
+        + Number(candidates.phaseOutCandidates?.length || 0),
+      expiredReservationsReleased: 0,
+      phaseOutDatesRepaired: 0,
+      alreadyHealthy: 0,
+      conflicts: 0,
+      skippedContradictory: 0,
+      truncated: Boolean(
+        candidates.expiredReservationsTruncated || candidates.phaseOutCandidatesTruncated
+      ),
+    };
+
+    for (const item of candidates.expiredReservations || []) {
+      const sourcePool = String(item.sourcePool || "").trim().toLowerCase();
+      const owner = String(item.reservedAgentId || "").trim().toLowerCase();
+      const expiresAt = parseDate(item.reservationExpiresAt, "reservationExpiresAt", { nullable: true });
+      if (!POOL_VALUES.includes(sourcePool) || !owner || !expiresAt) {
+        summary.skippedContradictory += 1;
+        continue;
+      }
+      const released = await repository.expireReservationCas({
+        itemId: stableWorkItemId(item),
+        expectedVersion: item.version,
+        expectedAgentId: owner,
+        expectedExpiresAt: expiresAt,
+        now: at,
+        set: {
+          state: "eligible",
+          activeAttempt: true,
+          reservedAgentId: null,
+          speedOverrideAgentId: null,
+          reservedAt: null,
+          reservationExpiresAt: null,
+          freshDeadlineAt: null,
+          reservationReason: "nightly-expired-reservation-release",
+        },
+      });
+      if (!released) {
+        summary.conflicts += 1;
+        continue;
+      }
+      summary.expiredReservationsReleased += 1;
+      if (sourcePool === POOLS.NEW_TODAY) await decrementPendingFresh(owner);
+    }
+
+    for (const item of candidates.phaseOutCandidates || []) {
+      const lastContactAt = parseDate(item.lastContactAt, "lastContactAt", { nullable: true });
+      if (!lastContactAt || nonNegativeInteger(item.totalAttemptCount ?? 0, "totalAttemptCount") < 15) {
+        summary.skippedContradictory += 1;
+        continue;
+      }
+      const minimumNextContactAt = new Date(
+        lastContactAt.getTime() + ORDINARY_PHASE_OUT_RETRY_MINUTES * 60_000,
+      );
+      const existingNext = parseDate(item.nextContactAt, "nextContactAt", { nullable: true });
+      if (minimumNextContactAt.getTime() <= at.getTime()
+        || (existingNext && existingNext.getTime() >= minimumNextContactAt.getTime())) {
+        summary.alreadyHealthy += 1;
+        continue;
+      }
+      const repaired = await repository.compareAndSetItem({
+        itemId: stableWorkItemId(item),
+        expectedVersion: item.version,
+        expected: {
+          state: item.state,
+          sourcePool: item.sourcePool,
+          totalAttemptCount: item.totalAttemptCount,
+          lastContactAt,
+          providerContactId: null,
+          providerExternalLeadId: null,
+          providerPostState: null,
+          packetId: null,
+          deliveryAgentId: null,
+        },
+        set: {
+          state: "follow_up_wait",
+          activeAttempt: true,
+          sourcePool: POOLS.FOLLOW_UP_DUE,
+          nextContactAt: minimumNextContactAt,
+          reservationReason: "nightly-phase-out-date-repair",
+        },
+      });
+      if (!repaired) {
+        summary.conflicts += 1;
+        continue;
+      }
+      summary.phaseOutDatesRepaired += 1;
+    }
+    return summary;
+  }
+
   async function resumeIncompletePriorDayFolderDrain(value = atNow()) {
     const at = parseDate(value, "value");
     const currentDateKey = getPacificDateKey(at);
@@ -10185,6 +10341,7 @@ function createLeadDeliveryRuntime({
     runDayStart,
     runProductivityRebalance,
     runEndOfDayFolderDrain,
+    repairNightlyLeadHealth,
     reconcileAgent,
     getState,
   };

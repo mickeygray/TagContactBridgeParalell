@@ -19,10 +19,10 @@
 // ── THE MESSAGE IS THE UNIT, NOT THE ATTACHMENT ────────────────────────────
 //
 // NCOA processes attachments independently — each CSV stands alone. The mail
-// invoice does NOT: the vendor sends the invoice and its card receipt on the
-// SAME email, and the receipt states the invoice's grand total. Handled one at
-// a time, a receipt seen without its invoice has no way to know it is not a
-// cost, and misfiling it would double the day's mail spend.
+// invoice does NOT: each invoice and its card receipt must be considered as a
+// pair, and one message may carry several such days. Handled one attachment at
+// a time, a receipt has no way to know it is not a cost, and misfiling it would
+// double the day's mail spend.
 //
 // So a handler receives every attachment on the message at once and decides as
 // a set. That also makes "the email arrived but one attachment is missing"
@@ -192,7 +192,8 @@ async function runMailboxIngest({
 
   for (const handler of handlers) {
     const stat = {
-      listed: 0, alreadyHandled: 0, accepted: 0, processed: 0, skipped: 0, errors: 0, results: [],
+      listed: 0, alreadyHandled: 0, accepted: 0, processed: 0,
+      documentsProcessed: 0, skipped: 0, errors: 0, results: [],
     };
     out.handlers[handler.key] = stat;
     try {
@@ -238,13 +239,18 @@ async function runMailboxIngest({
             logger,
           });
           stat.results.push(result);
-          if (result?.written) stat.processed += 1;
+          if (result?.written) {
+            stat.processed += 1;
+            stat.documentsProcessed += Number.isFinite(Number(result?.writtenCount))
+              ? Number(result.writtenCount)
+              : 1;
+          }
           if (Number(result?.failed) > 0) stat.errors += Number(result.failed);
           // Only a COMPLETE write claims the message. A dry run must be
           // repeatable — and so must a partial one: a message where one
           // attachment succeeded and another failed must come back on the next
-          // scan for its remaining file. Per-attachment dedupe (the content
-          // hash ledger) is what stops the successful half re-processing.
+          // scan. The invoice-number upsert makes the successful half
+          // idempotent while the failed half remains retryable.
           if (apply && result?.written && !(Number(result?.failed) > 0)) {
             await recordHandled(key, { handlerKey: handler.key, messageId: ref.id, summary: result.summary || {} });
           }

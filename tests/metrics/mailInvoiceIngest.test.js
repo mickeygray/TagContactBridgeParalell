@@ -17,7 +17,7 @@ const assert = require("node:assert/strict");
 const zlib = require("zlib");
 
 const S = require("../../packages/shared-services/src/mailInvoiceParseService");
-const { createMailInvoiceHandler, resolveServiceDate } = require(
+const { createMailInvoiceHandler, resolveServiceDate, resolveServiceDateWithinWindow } = require(
   "../../packages/shared-services/src/mailInvoiceMailboxHandler");
 const {
   collectAttachmentParts, readAttachmentBuffer, openMailbox, runMailboxIngest,
@@ -49,6 +49,17 @@ const INVOICE_LINES = [
 
 const invoicePdf = () => makePdf(INVOICE_LINES);
 const receiptPdf = () => makePdf(["Total: USD 730.64"], { producer: "Skia/PDF m150" });
+const invoicePdfFor = ({ invoiceNumber, jobName }) => makePdf(
+  INVOICE_LINES.map((line) => {
+    if (line === "90001") return String(invoiceNumber);
+    if (line === "Daily Mail 8-04") return String(jobName);
+    return line;
+  }),
+);
+const receiptPdfFor = ({ invoiceNumber, total = "730.64" }) => makePdf(
+  [`N6mber:${invoiceNumber}`, `Total: USD ${total}`],
+  { producer: "Skia/PDF m150" },
+);
 
 // ── classification: the failure that would double a day ───────────────────
 
@@ -191,6 +202,23 @@ test("without a receipt it falls back to the email, then to today — and says w
     "a guessed year must be recorded as guessed");
 });
 
+test("the bounded repair window resolves a prior-year day paid in January", () => {
+  const resolved = resolveServiceDateWithinWindow({
+    jobName: "Daily Mail 12-31",
+    wantedDates: [
+      "2026-12-27", "2026-12-28", "2026-12-29", "2026-12-30",
+      "2026-12-31", "2027-01-01", "2027-01-02", "2027-01-03",
+    ],
+    receipt: { capturedAt: new Date("2027-01-03T18:00:00Z") },
+    receivedAt: new Date("2027-01-03T18:00:00Z"),
+    subject: "Paid mail invoices 1-03-2027",
+  });
+  assert.deepEqual(resolved, {
+    serviceDate: "2026-12-31",
+    serviceDateSource: "window",
+  });
+});
+
 // ── the mailbox loop ──────────────────────────────────────────────────────
 
 function fakeGmail({ attachments, inline = false } = {}) {
@@ -265,6 +293,124 @@ test("a full message becomes one costed invoice", async () => {
   assert.equal(doc.state, "reconciled");
   assert.equal(doc.receipt.matchesInvoice, true);
   assert.equal(doc.source.attachmentCount, 2);
+});
+
+test("one paid email is divided into one invoice document per service day", async () => {
+  const handler = createMailInvoiceHandler({
+    targetDates: [
+      "2026-08-03", "2026-08-04", "2026-08-05", "2026-08-06",
+      "2026-08-07", "2026-08-08", "2026-08-09", "2026-08-10",
+    ],
+  });
+  const result = await handler.process({
+    attachments: [
+      { filename: "day-a-invoice.pdf", sha256: "invoice-a", buffer: invoicePdfFor({
+        invoiceNumber: "91003", jobName: "Daily Mail 8-03",
+      }) },
+      { filename: "day-b-receipt.pdf", sha256: "receipt-b", buffer: receiptPdfFor({
+        invoiceNumber: "91010",
+      }) },
+      { filename: "day-a-receipt.pdf", sha256: "receipt-a", buffer: receiptPdfFor({
+        invoiceNumber: "91003",
+      }) },
+      { filename: "day-b-invoice.pdf", sha256: "invoice-b", buffer: invoicePdfFor({
+        invoiceNumber: "91010", jobName: "Daily Mail 8-10",
+      }) },
+    ],
+    messageId: "batch-1",
+    threadId: "thread-1",
+    subject: "Paid mail invoices",
+    from: "billing@wizbang",
+    receivedAt: new Date("2026-08-10T18:00:00Z"),
+    apply: false,
+  });
+
+  assert.equal(result.reason, "dry-run");
+  assert.equal(result.writtenCount, 0);
+  assert.equal(result.docs.length, 2);
+  assert.deepEqual(result.docs.map((doc) => doc.serviceDate).sort(), ["2026-08-03", "2026-08-10"]);
+  assert.deepEqual(result.docs.map((doc) => doc.invoiceNumber).sort(), ["91003", "91010"]);
+  for (const doc of result.docs) {
+    assert.equal(doc.state, "reconciled");
+    assert.equal(doc.receipt.matchesInvoice, true);
+    assert.equal(doc.source.attachmentCount, 2, "each day owns its invoice/receipt pair, not all four files");
+  }
+  assert.deepEqual(result.summary.serviceDates, ["2026-08-03", "2026-08-10"]);
+  assert.equal(result.summary.unmatchedReceipts, 0);
+});
+
+test("ambiguous same-total receipts are held instead of assigned to a random day", async () => {
+  const handler = createMailInvoiceHandler({
+    targetDates: ["2026-08-03", "2026-08-10"],
+  });
+  const result = await handler.process({
+    attachments: [
+      { filename: "a-invoice.pdf", sha256: "invoice-a", buffer: invoicePdfFor({
+        invoiceNumber: "92003", jobName: "Daily Mail 8-03",
+      }) },
+      { filename: "b-invoice.pdf", sha256: "invoice-b", buffer: invoicePdfFor({
+        invoiceNumber: "92010", jobName: "Daily Mail 8-10",
+      }) },
+      { filename: "receipt-1.pdf", sha256: "receipt-1", buffer: receiptPdf() },
+      { filename: "receipt-2.pdf", sha256: "receipt-2", buffer: receiptPdf() },
+    ],
+    subject: "Paid mail invoices",
+    receivedAt: new Date("2026-08-10T18:00:00Z"),
+    apply: false,
+  });
+
+  assert.equal(result.docs.length, 2);
+  for (const doc of result.docs) {
+    assert.equal(doc.receipt, null);
+    assert.equal(doc.state, "review");
+    assert.ok(doc.reviewReasons.includes("ambiguous-receipt-match"));
+  }
+  assert.equal(result.summary.unmatchedReceipts, 2);
+});
+
+test("replaying a multi-day message upserts the same two invoice records", async () => {
+  const stored = new Map();
+  const MailInvoice = {
+    findOne(filter) {
+      return { lean: async () => stored.get(filter.invoiceNumber) || null };
+    },
+    findOneAndUpdate(filter, update) {
+      const saved = { ...(stored.get(filter.invoiceNumber) || {}), ...update.$set };
+      stored.set(filter.invoiceNumber, saved);
+      return { lean: async () => saved };
+    },
+  };
+  const handler = createMailInvoiceHandler({
+    MailInvoice,
+    targetDates: ["2026-08-03", "2026-08-10"],
+  });
+  const args = {
+    attachments: [
+      { filename: "a-invoice.pdf", sha256: "invoice-a", buffer: invoicePdfFor({
+        invoiceNumber: "93003", jobName: "Daily Mail 8-03",
+      }) },
+      { filename: "a-receipt.pdf", sha256: "receipt-a", buffer: receiptPdfFor({ invoiceNumber: "93003" }) },
+      { filename: "b-invoice.pdf", sha256: "invoice-b", buffer: invoicePdfFor({
+        invoiceNumber: "93010", jobName: "Daily Mail 8-10",
+      }) },
+      { filename: "b-receipt.pdf", sha256: "receipt-b", buffer: receiptPdfFor({ invoiceNumber: "93010" }) },
+    ],
+    messageId: "batch-retry",
+    subject: "Paid mail invoices",
+    receivedAt: new Date("2026-08-10T18:00:00Z"),
+    apply: true,
+  };
+
+  const first = await handler.process(args);
+  const second = await handler.process(args);
+  assert.equal(first.written, true);
+  assert.equal(second.written, true);
+  assert.equal(first.writtenCount, 2);
+  assert.equal(second.writtenCount, 2);
+  assert.equal(first.failed, 0);
+  assert.equal(second.failed, 0);
+  assert.equal(stored.size, 2, "message retry must not create a third invoice document");
+  assert.deepEqual([...stored.values()].map((doc) => doc.serviceDate).sort(), ["2026-08-03", "2026-08-10"]);
 });
 
 test("a SHORT email is a distinct failure, not an empty day", async () => {
@@ -405,6 +551,34 @@ test("the day gate reports a WRONG-DAY email distinctly from silence", async () 
   assert.equal(result.reason, "subject-date-mismatch");
   assert.equal(result.summary.wantedDate, "2026-07-31");
   assert.equal(result.summary.subject, "Invoice 83648 - Daily Mail 7-30");
+});
+
+test("the nightly gate accepts a bounded late-arrival date window", async () => {
+  const handler = createMailInvoiceHandler({
+    targetDates: [
+      "2026-07-24", "2026-07-25", "2026-07-26", "2026-07-27",
+      "2026-07-28", "2026-07-29", "2026-07-30", "2026-07-31",
+    ],
+  });
+  const late = await handler.process({
+    attachments: [], subject: "Invoice 83648 - Daily Mail 7-24", apply: false,
+  });
+  assert.equal(late.reason, "no-invoice-attachment",
+    "the older completed day passed the date gate and reached invoice validation");
+
+  const tooOld = await handler.process({
+    attachments: [], subject: "Invoice 83647 - Daily Mail 7-23", apply: false,
+  });
+  assert.equal(tooOld.reason, "subject-date-mismatch");
+  assert.deepEqual(tooOld.summary.wantedDates, [
+    "2026-07-24", "2026-07-25", "2026-07-26", "2026-07-27",
+    "2026-07-28", "2026-07-29", "2026-07-30", "2026-07-31",
+  ]);
+  assert.equal(tooOld.summary.wantedDate, "2026-07-31");
+});
+
+test("the default mailbox query can rediscover every date in the repair window", () => {
+  assert.match(DEFAULT_QUERY, /newer_than:8d\b/);
 });
 
 test("with NO target date any vendor invoice is taken — the manual script", () => {

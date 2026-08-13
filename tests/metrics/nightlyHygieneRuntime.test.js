@@ -7,7 +7,8 @@ const { test } = require("node:test");
 const assert = require("node:assert/strict");
 
 const {
-  createNightlyHygieneRuntime, isPacificBusinessDay, nightlyReportDueAt, persistTargetDay,
+  createNightlyHygieneRuntime, isPacificBusinessDay, nightlyInvoiceRepairDateKeys,
+  nightlyReportDueAt, persistTargetDay,
 } = require("../../apps/control-plane/src/services/nightlyHygieneRuntime");
 const { DailyLoopRun } = require("../../packages/shared-models/src");
 
@@ -41,6 +42,15 @@ test("disabled by default — deploying the code does not start writing", async 
     // The mailbox task now arms on EITHER document, so NCOA's flag has to be
     // cleared here too or this test reads the local box instead of the default.
     NCOA_MAILBOX_ENABLED: undefined,
+    CALL_LINK_CAPTURE_ENABLED: undefined,
+    CALL_RECOVERY_DISCOVERY_ENABLED: undefined,
+    NIGHTLY_SPEND_SYNC_ENABLED: undefined,
+    NIGHTLY_ACTIVITY_REVIEW_ENABLED: undefined,
+    NIGHTLY_SESSION_RECONCILE_ENABLED: undefined,
+    NIGHTLY_PAYMENT_RECONCILE_ENABLED: undefined,
+    NIGHTLY_PAYMENT_FIELDS_SYNC_ENABLED: undefined,
+    NIGHTLY_CALL_LOG_HYGIENE_ENABLED: undefined,
+    CALL_RECORDING_INDEX_ENABLED: undefined,
     REPORT_SCHEDULER_ENABLED: undefined,
   }, async () => {
     const rt = createNightlyHygieneRuntime({});
@@ -188,7 +198,11 @@ test("running the loop is a SEPARATE decision from letting it write", async () =
     assert.equal(taskByKey(s, "logics-source").writesArmed, false);
     assert.equal(taskByKey(s, "logics-source").mode, "standing dry-run");
   });
-  await withEnv({ NIGHTLY_HYGIENE_ENABLED: "true", LOGICS_SOURCE_WRITER_ENABLED: "true" }, () => {
+  await withEnv({
+    NIGHTLY_HYGIENE_ENABLED: "true",
+    LOGICS_SOURCE_WRITER_ENABLED: "true",
+    NIGHT_PERSIST_ENABLED: undefined,
+  }, () => {
     const s = createNightlyHygieneRuntime({}).getState();
     assert.equal(taskByKey(s, "logics-source").mode, "writing");
     // Arming one task must never arm another.
@@ -404,9 +418,10 @@ test("the night runs in the stated ORDER", () => {
     ["night-persist", "mail-invoice", "mail-spend-derive", "call-links", "call-recovery-discovery",
       "call-recovery-eligibility-hygiene", "queue-rollup", "logics-source", "spend-sync",
       "activity-review", "session-reconcile", "payment-reconcile", "payment-fields-sync",
-      "call-log-hygiene-evening", "call-recording-index", "report-delivery"]);
-  assert.equal(s2.tasks.at(-1).key, "report-delivery",
-    "email delivery must be the final step of the same durable nightly cursor");
+      "call-log-hygiene-evening", "call-recording-index", "report-delivery",
+      "historical-report-repair", "lead-health", "run-summary"]);
+  assert.equal(s2.tasks.at(-1).key, "run-summary",
+    "the count-only receipt must follow the data emails on the same durable cursor");
   assert.ok(!s2.tasks.some((t) => t.key === "daily-snapshot"),
     "the snapshot is NOT a hygiene task — it branches off the report's own single gather");
 
@@ -428,6 +443,196 @@ test("the night runs in the stated ORDER", () => {
   const recovery = instance.TASKS.find((t) => t.key === "call-recovery-discovery");
   assert.equal(recovery.count([{ qualified: 0, errors: 0 }]), 1,
     "a legitimately empty completed day still needs one daily cohort manifest");
+});
+
+test("an enabled night reports not-ready when required delivery is disarmed", async () => {
+  await withEnv({
+    NIGHTLY_HYGIENE_ENABLED: "true",
+    REPORT_SCHEDULER_ENABLED: undefined,
+  }, () => {
+    const state = createNightlyHygieneRuntime({
+      config: { emergencyCloseEnabled: true },
+    }).getState();
+    assert.equal(state.enabled, true);
+    assert.equal(state.closeReady, false);
+    assert.deepEqual(state.closeIssues, ["required-task-disarmed:report-delivery"]);
+    assert.equal(state.emergencyCloseEnabled, true);
+  });
+});
+
+test("a scheduled night cannot complete when required report delivery is disarmed", async () => {
+  const priorReportFlag = process.env.REPORT_SCHEDULER_ENABLED;
+  delete process.env.REPORT_SCHEDULER_ENABLED;
+  const originalFind = DailyLoopRun.findOneAndUpdate;
+  const originalUpdate = DailyLoopRun.updateOne;
+  const claimedAt = new Date("2026-08-04T03:00:00.000Z");
+  let completed = false;
+  const launches = [];
+  DailyLoopRun.findOneAndUpdate = async () => ({
+    dateKey: "2026-08-03",
+    nightlyHygieneClaimedAt: claimedAt,
+    nightlyHygieneNextTaskIndex: 0,
+  });
+  DailyLoopRun.updateOne = async (_filter, update) => {
+    if (update?.$set?.nightlyHygieneCompletedAt) completed = true;
+    return { acknowledged: true, matchedCount: 1 };
+  };
+  try {
+    const rt = createNightlyHygieneRuntime({
+      config: {
+        enabled: true,
+        hour: 0,
+        reportDeliveryEnabled: false,
+        emergencyCloseEnabled: true,
+        tasks: [{
+          key: "report-delivery",
+          label: "required report",
+          requiredForClose: true,
+          requiredDueAt: () => claimedAt,
+          writesArmed: () => false,
+          plan: () => [{ dueAt: claimedAt }],
+          count: () => 1,
+          apply: async () => { throw new Error("must remain unreachable"); },
+          describe: () => "required report",
+        }],
+        emergencyClose: {
+          readCheckpoint: () => null,
+          markStarted: () => ({}),
+          markCompleted: () => { completed = true; },
+          launch: (args) => { launches.push(args); return { launched: true }; },
+        },
+      },
+    });
+    const result = await rt.runOnce({ at: claimedAt });
+    assert.equal(result.incomplete, true);
+    assert.equal(result.aborted, "NIGHTLY_REQUIRED_TASK_DISARMED");
+    assert.equal(completed, false, "a disarmed report can never mark the night complete");
+    assert.equal(launches.length, 1);
+    assert.equal(launches[0].reasonCode, "NIGHTLY_REQUIRED_TASK_DISARMED");
+    assert.equal(launches[0].taskKey, "report-delivery");
+  } finally {
+    DailyLoopRun.findOneAndUpdate = originalFind;
+    DailyLoopRun.updateOne = originalUpdate;
+    if (priorReportFlag === undefined) delete process.env.REPORT_SCHEDULER_ENABLED;
+    else process.env.REPORT_SCHEDULER_ENABLED = priorReportFlag;
+  }
+});
+
+test("a resumed final step receives the earlier count-only task receipts", async () => {
+  const originalFind = DailyLoopRun.findOneAndUpdate;
+  const originalUpdate = DailyLoopRun.updateOne;
+  const claimedAt = new Date("2026-08-12T03:00:00Z");
+  DailyLoopRun.findOneAndUpdate = async () => ({
+    dateKey: "2026-08-11",
+    nightlyHygieneClaimedAt: claimedAt,
+    nightlyHygieneNextTaskIndex: 1,
+    nightlyHygieneTaskResults: [{
+      task: "mail-invoice",
+      label: "Mailbox",
+      planned: 1,
+      applied: { written: 1, ncoaProcessed: 1 },
+    }],
+  });
+  DailyLoopRun.updateOne = async () => ({ acknowledged: true, matchedCount: 1 });
+  try {
+    const rt = createNightlyHygieneRuntime({ config: { enabled: true, hour: 0 } });
+    let prior = null;
+    rt.TASKS.length = 0;
+    rt.TASKS.push(
+      {
+        key: "already-done", label: "already done", writesArmed: () => true,
+        plan: async () => { throw new Error("must not replay"); },
+        apply: async () => ({}), describe: () => "",
+      },
+      {
+        key: "resume-here", label: "resume here", writesArmed: () => true,
+        plan: async () => [{ ready: true }], count: () => 1,
+        apply: async (_planned, context) => {
+          prior = context.priorResults;
+          return { written: 1 };
+        },
+        describe: () => "receipt",
+      },
+    );
+    await rt.runOnce({ at: claimedAt });
+    assert.equal(prior.length, 1);
+    assert.equal(prior[0].task, "mail-invoice");
+    assert.equal(prior[0].applied.ncoaProcessed, 1);
+  } finally {
+    DailyLoopRun.findOneAndUpdate = originalFind;
+    DailyLoopRun.updateOne = originalUpdate;
+  }
+});
+
+test("the final run receipt is claimed at most once", async () => {
+  const originalFind = DailyLoopRun.findOneAndUpdate;
+  const originalUpdate = DailyLoopRun.updateOne;
+  let claims = 0;
+  let sends = 0;
+  DailyLoopRun.findOneAndUpdate = async (_filter, update) => {
+    if (update?.$set?.nightlyHygieneSummarySentAt) {
+      claims += 1;
+      return claims === 1 ? { dateKey: "2026-08-11" } : null;
+    }
+    return null;
+  };
+  DailyLoopRun.updateOne = async () => ({ acknowledged: true, matchedCount: 1 });
+  try {
+    const rt = createNightlyHygieneRuntime({
+      config: {
+        enabled: true,
+        reportDeliveryEnabled: true,
+        runSummarySender: async () => { sends += 1; return { sent: true }; },
+      },
+    });
+    const summary = rt.TASKS.find((task) => task.key === "run-summary");
+    rt.TASKS.length = 0;
+    rt.TASKS.push(summary);
+    await rt.runOnce({ force: true, at: new Date("2026-08-12T03:00:00Z") });
+    await rt.runOnce({ force: true, at: new Date("2026-08-12T03:01:00Z") });
+    assert.equal(claims, 2);
+    assert.equal(sends, 1, "a lost cursor after SMTP cannot duplicate the receipt");
+  } finally {
+    DailyLoopRun.findOneAndUpdate = originalFind;
+    DailyLoopRun.updateOne = originalUpdate;
+  }
+});
+
+test("a run-summary mail failure retries only the receipt, never emergency close", async () => {
+  const originalFind = DailyLoopRun.findOneAndUpdate;
+  const originalUpdate = DailyLoopRun.updateOne;
+  let fallbackLaunches = 0;
+  let checkpointCompletions = 0;
+  DailyLoopRun.findOneAndUpdate = async () => ({ dateKey: "2026-08-11" });
+  DailyLoopRun.updateOne = async () => ({ acknowledged: true, matchedCount: 1 });
+  try {
+    const rt = createNightlyHygieneRuntime({
+      config: {
+        enabled: true,
+        reportDeliveryEnabled: true,
+        runSummarySender: async () => { throw new Error("SMTP unavailable"); },
+        emergencyCloseEnabled: true,
+        emergencyClose: {
+          readCheckpoint: () => null,
+          markStarted: () => {},
+          markCompleted: () => { checkpointCompletions += 1; },
+          launch: () => { fallbackLaunches += 1; return { launched: true }; },
+          send: async () => { fallbackLaunches += 1; return { sent: true }; },
+        },
+      },
+    });
+    const summary = rt.TASKS.find((task) => task.key === "run-summary");
+    rt.TASKS.length = 0;
+    rt.TASKS.push(summary);
+    const result = await rt.runOnce({ force: true, at: new Date("2026-08-12T03:00:00Z") });
+    assert.equal(result.incomplete, true);
+    assert.equal(result.fallback.reason, "post-report-receipt-failed");
+    assert.equal(fallbackLaunches, 0);
+    assert.equal(checkpointCompletions, 1);
+  } finally {
+    DailyLoopRun.findOneAndUpdate = originalFind;
+    DailyLoopRun.updateOne = originalUpdate;
+  }
 });
 
 test("every nightly task pins its business date to the run's original clock", () => {
@@ -456,14 +661,24 @@ test("report delivery reuses the report executor at the final 20:00 Pacific anch
   };
   const rt = createNightlyHygieneRuntime({ config: { reportScheduleRuntime } });
   const task = rt.TASKS.find((row) => row.key === "report-delivery");
-  assert.equal(rt.TASKS.at(-1), task, "delivery must be the final nightly task");
+  assert.equal(rt.TASKS.at(-4), task,
+    "data delivery must precede only bounded late repair, lead health, and its count-only receipt");
 
   const planned = task.plan({ at: new Date("2026-08-04T02:50:00.000Z") });
   const result = await task.apply(planned, { reportScheduleRuntime });
   assert.equal(calls.length, 1);
   assert.equal(calls[0].force, true);
   assert.equal(calls[0].now.toISOString(), "2026-08-04T03:00:00.000Z");
-  assert.deepEqual(result, { written: 2, skipped: 0, failed: 0, ran: 2 });
+  assert.deepEqual(result, {
+    written: 2,
+    skipped: 0,
+    failed: 0,
+    ran: 2,
+    reports: [
+      { name: null, delivered: true, agedSourceWrite: null },
+      { name: null, delivered: true, agedSourceWrite: null },
+    ],
+  });
 });
 
 test("report delivery fails loudly when its executor is absent or a definition fails", async () => {
@@ -878,6 +1093,130 @@ test("the two handlers cannot fight over one message", () => {
   );
 });
 
+test("the nightly mailbox task receives the full seven-day repair window", async () => {
+  const mailboxService = require("../../packages/shared-services/src/mailboxIngestService");
+  const originalRunMailboxIngest = mailboxService.runMailboxIngest;
+  let observed = null;
+  try {
+    mailboxService.runMailboxIngest = async ({ handlers }) => {
+      const invoice = handlers.find((handler) => handler.key === "mail-invoice");
+      assert.ok(invoice, "the explicitly armed invoice handler must be present");
+      const oldestAllowed = await invoice.process({
+        attachments: [], subject: "Invoice - Daily Mail 8-03", apply: false,
+      });
+      const tooOld = await invoice.process({
+        attachments: [], subject: "Invoice - Daily Mail 8-02", apply: false,
+      });
+      observed = { oldestAllowed: oldestAllowed.reason, tooOld: tooOld.reason };
+      return {
+        status: "completed",
+        handlers: {
+          "mail-invoice": { accepted: 0, processed: 0, skipped: 0, errors: 0, results: [] },
+        },
+      };
+    };
+
+    await withEnv({
+      MAIL_INVOICE_MAILBOX_ENABLED: "true",
+      NCOA_MAILBOX_ENABLED: "false",
+    }, async () => {
+      const task = createNightlyHygieneRuntime({}).TASKS.find((row) => row.key === "mail-invoice");
+      await task.plan({
+        at: new Date("2026-08-11T02:50:00.000Z"), // 19:50 Pacific Aug 10
+        logger: null,
+      });
+    });
+
+    assert.deepEqual(observed, {
+      oldestAllowed: "no-invoice-attachment",
+      tooOld: "subject-date-mismatch",
+    });
+  } finally {
+    mailboxService.runMailboxIngest = originalRunMailboxIngest;
+  }
+});
+
+test("mail spend scans the bounded late window and repairs only changed older days", async () => {
+  const spendService = require("../../packages/shared-services/src/mailSpendDeriveService");
+  const snapshotService = require("../../packages/shared-services/src/dailySnapshotService");
+  const originalDerive = spendService.deriveMailSpend;
+  const originalRepair = snapshotService.repairDailySnapshots;
+  const originalFindPending = snapshotService.findSpendRepairDateKeys;
+  const calls = [];
+  try {
+    spendService.deriveMailSpend = async (args) => {
+      calls.push({ kind: "derive", ...args });
+      return args.apply
+        ? {
+          derived: 2, skipped: 0, retired: 0, held: [],
+          changedDateKeys: ["2026-08-08", "2026-08-10"],
+        }
+        : {
+          derived: 2, skipped: 0, retired: 0, held: [],
+          plannedDateKeys: ["2026-08-08", "2026-08-10"],
+        };
+    };
+    snapshotService.repairDailySnapshots = async (args) => {
+      calls.push({ kind: "repair", ...args });
+      return { status: "completed", repaired: args.dateKeys.length, failed: 0 };
+    };
+    snapshotService.findSpendRepairDateKeys = async (args) => {
+      calls.push({ kind: "find-pending", ...args });
+      return ["2026-08-08"];
+    };
+
+    const task = createNightlyHygieneRuntime({}).TASKS.find((t) => t.key === "mail-spend-derive");
+    const at = new Date("2026-08-11T02:50:00.000Z"); // 19:50 Pacific Aug 10
+    const planned = await task.plan({ at, logger: null });
+    assert.equal(planned[0].dateKey, "2026-08-10");
+    assert.equal(planned[0].from, "2026-08-03");
+    assert.equal(planned[0].to, "2026-08-10");
+
+    const applied = await task.apply(planned, { at, logger: null });
+    assert.deepEqual(
+      calls.find((row) => row.kind === "repair").dateKeys,
+      ["2026-08-08"],
+      "the current day is captured by report-delivery; only the older changed day is rebuilt",
+    );
+    assert.equal(applied.repaired, 1);
+    assert.equal(applied.failed, 0);
+  } finally {
+    spendService.deriveMailSpend = originalDerive;
+    snapshotService.repairDailySnapshots = originalRepair;
+    snapshotService.findSpendRepairDateKeys = originalFindPending;
+  }
+});
+
+test("invoice repair reads the current close plus the previous seven completed days", () => {
+  assert.deepEqual(nightlyInvoiceRepairDateKeys("2026-08-10"), [
+    "2026-08-03", "2026-08-04", "2026-08-05", "2026-08-06",
+    "2026-08-07", "2026-08-08", "2026-08-09", "2026-08-10",
+  ]);
+});
+
+test("the nightly historical repair explicitly inspects late sheet updates", async () => {
+  const snapshotService = require("../../packages/shared-services/src/dailySnapshotService");
+  const original = snapshotService.findHistoricalDailyFactRepairs;
+  let seen = null;
+  try {
+    snapshotService.findHistoricalDailyFactRepairs = async (args) => {
+      seen = args;
+      return [];
+    };
+    const task = createNightlyHygieneRuntime({}).TASKS.find((row) => (
+      row.key === "historical-report-repair"
+    ));
+    await task.plan({
+      at: new Date("2026-08-12T02:50:00.000Z"),
+      logger: null,
+    });
+    assert.equal(seen.currentDateKey, "2026-08-11");
+    assert.equal(seen.includeMailSheet, true);
+  } finally {
+    snapshotService.findHistoricalDailyFactRepairs = original;
+  }
+});
+
 test("either document arms the mailbox visit — NCOA alone is enough", async () => {
   // The handover's real hazard. NCOA was armed by NCOA_MAILBOX_ENABLED; if the
   // folded task armed only on MAIL_INVOICE_MAILBOX_ENABLED, then any host with
@@ -919,7 +1258,91 @@ test("the mailbox task counts NCOA's work, not only the invoice's", async () => 
   assert.match(source, /ncoa\.processed/, "and add its processed count to written");
 });
 
+test("the mailbox task reports invoice documents, not only batch messages", async () => {
+  const mailboxService = require("../../packages/shared-services/src/mailboxIngestService");
+  const originalRunMailboxIngest = mailboxService.runMailboxIngest;
+  try {
+    mailboxService.runMailboxIngest = async () => ({
+      handlers: {
+        "mail-invoice": {
+          processed: 1,
+          documentsProcessed: 3,
+          skipped: 0,
+          errors: 0,
+        },
+      },
+    });
+    await withEnv({
+      MAIL_INVOICE_MAILBOX_ENABLED: "true",
+      NCOA_MAILBOX_ENABLED: "false",
+    }, async () => {
+      const task = createNightlyHygieneRuntime({}).TASKS.find((row) => row.key === "mail-invoice");
+      const applied = await task.apply([], {
+        at: new Date("2026-08-11T02:50:00.000Z"),
+        logger: null,
+      });
+      assert.equal(applied.invoiceProcessed, 3);
+      assert.equal(applied.written, 3);
+    });
+  } finally {
+    mailboxService.runMailboxIngest = originalRunMailboxIngest;
+  }
+});
+
 // ── AUDIT FIXES on the NCOA fold ───────────────────────────────────────────
+
+test("lead health repairs through the decision-owning runtime and recounts afterward", async () => {
+  const healthService = require("../../packages/shared-services/src/leadDeliveryHealthService");
+  const originalGather = healthService.gatherLeadDeliveryHealth;
+  const recounts = [];
+  const repairCalls = [];
+  try {
+    healthService.gatherLeadDeliveryHealth = async (input) => {
+      recounts.push(input);
+      return {
+        inventory: { total: 4, zeroTouch: 0, lowTouch: 4, highTouch: 0, phaseOut: 0 },
+        attempts: { total: 2, firstTouches: 1, lowTouch: 1, highTouch: 0, phaseOut: 0 },
+        alerts: { attention: false },
+      };
+    };
+    const task = createNightlyHygieneRuntime({}).TASKS.find((row) => row.key === "lead-health");
+    const at = new Date("2026-08-14T03:05:00.000Z");
+    const applied = await task.apply([{ inventory: { total: 6 } }], {
+      at,
+      leadDeliveryRuntime: {
+        async repairNightlyLeadHealth(value, options) {
+          repairCalls.push({ value, options });
+          return {
+            scanned: 2,
+            expiredReservationsReleased: 1,
+            phaseOutDatesRepaired: 1,
+            alreadyHealthy: 0,
+            conflicts: 0,
+            skippedContradictory: 0,
+            truncated: false,
+          };
+        },
+      },
+    });
+    assert.equal(applied.written, 2);
+    assert.equal(applied.leadHealth.inventory.total, 4, "the receipt uses the post-repair recount");
+    assert.equal(applied.leadHealth.before.inventory.total, 6);
+    assert.equal(applied.leadHealth.repair.scanned, 2);
+    assert.deepEqual(repairCalls, [{ value: at, options: { limit: 100 } }]);
+    assert.equal(recounts.length, 1);
+    assert.equal(recounts[0].dateKey, "2026-08-13");
+  } finally {
+    healthService.gatherLeadDeliveryHealth = originalGather;
+  }
+});
+
+test("lead health fails by name when its repair runtime was not injected", async () => {
+  const task = createNightlyHygieneRuntime({}).TASKS.find((row) => row.key === "lead-health");
+  await assert.rejects(
+    task.apply([], { at: new Date("2026-08-14T03:05:00.000Z") }),
+    (error) => error?.code === "LEAD_HEALTH_REPAIR_RUNTIME_MISSING",
+  );
+});
 
 test("a mailbox holding ONLY an NCOA csv still reaches apply", () => {
   // count() used to read only the invoice's accepted number, so an NCOA-only

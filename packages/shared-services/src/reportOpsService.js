@@ -540,6 +540,7 @@ function formatFunction(name, value) {
  */
 function resolveSourceRow(payment, {
   rangeStart = null, rangeEnd = null, attributionCallDate = null,
+  hasPostdateStatus = Boolean(payment?.hasPostdateStatus),
   // The PIECE the attributable call came in on. See below.
   attributionCallSource = null,
 } = {}) {
@@ -600,6 +601,7 @@ function resolveSourceRow(payment, {
       return sourceBucket(fallback, {
         firstPaidDateKey: payment.metricsTreatment?.firstPaidDateKey || null,
         caseCreatedDate: payment.caseCreatedDate,
+        hasPostdateStatus,
         attributionCallDate, rangeStart, rangeEnd,
       });
     }
@@ -613,6 +615,7 @@ function resolveSourceRow(payment, {
       return sourceBucket(fallback, {
         firstPaidDateKey: payment.metricsTreatment?.firstPaidDateKey || null,
         caseCreatedDate: payment.caseCreatedDate,
+        hasPostdateStatus,
         attributionCallDate, rangeStart, rangeEnd,
       });
     }
@@ -621,6 +624,7 @@ function resolveSourceRow(payment, {
   return sourceBucket(folded, {
     firstPaidDateKey: payment.metricsTreatment?.firstPaidDateKey || null,
     caseCreatedDate: payment.caseCreatedDate,
+    hasPostdateStatus,
     attributionCallDate,
     rangeStart,
     rangeEnd,

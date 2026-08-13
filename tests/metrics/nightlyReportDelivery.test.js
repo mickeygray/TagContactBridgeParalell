@@ -24,7 +24,7 @@ const CANNED = {
  * Load reportDefinitionService with its two heavy dependencies replaced.
  * `model` records every write so a test can assert on ordering.
  */
-function loadService({ report = CANNED } = {}) {
+function loadService({ report = CANNED, definitions = [] } = {}) {
   const calls = [];
   const model = {
     _lastRunKey: null,
@@ -44,7 +44,7 @@ function loadService({ report = CANNED } = {}) {
       model._lastRunKey = update.$set.lastRunKey;
       return { acknowledged: true };
     },
-    find: async () => [],
+    find: async () => definitions,
   };
 
   const realLoad = Module._load;
@@ -73,7 +73,7 @@ function loadService({ report = CANNED } = {}) {
 }
 
 const def = (o = {}) => ({
-  _id: 1, name: "financial roll up with calls", blocks: ["rollup"], range: "today",
+  _id: 1, name: "financial", blocks: ["rollup"], range: "today",
   domain: null, sendEmail: true, recipients: ["mgray@taxadvocategroup.com"],
   filters: [], lastRunKey: null, save: async () => {}, ...o,
 });
@@ -110,13 +110,53 @@ test("the two nightly boards use their fixed recipient audiences", async () => {
 
   const vendor = loadService();
   await vendor.svc.runDefinition(def({
-    name: "vendor roll up with calls",
+    name: "vendor",
     recipients: ["stale@example.test"],
   }), {
     now: NOW,
     sendMail: async (_domain, options) => sends.push(options.to),
   });
   assert.deepEqual(sends[1], ["mgray@taxadvocategroup.com", "liz@lizdev.com"]);
+});
+
+test("retired duplicate nightly definitions can neither become due nor send", async () => {
+  for (const name of ["financial roll up with calls", "vendor roll up with calls"]) {
+    const { svc } = loadService();
+    const legacy = def({
+      name,
+      recipients: ["stale@example.test"],
+      schedule: { enabled: true, hour: 20, minute: 0, daysOfWeek: [4] },
+    });
+    assert.deepEqual(svc.isDue(legacy, NOW), {
+      due: false,
+      reason: "retired nightly report",
+    });
+    let sends = 0;
+    await assert.rejects(
+      () => svc.runDefinition(legacy, {
+        now: NOW,
+        sendMail: async () => { sends += 1; },
+      }),
+      /no recipients/,
+    );
+    assert.equal(sends, 0);
+  }
+});
+
+test("a same-time record shadow is ordered after the live snapshot owner", async () => {
+  const schedule = { enabled: true, hour: 20, minute: 0, daysOfWeek: [4] };
+  const definitions = [
+    def({ _id: 3, name: "financial stored verification", renderSource: "record", schedule }),
+    def({ _id: 2, name: "vendor", renderSource: null, schedule }),
+    def({ _id: 1, name: "financial", renderSource: null, schedule }),
+  ];
+  const { svc } = loadService({ definitions });
+  const due = await svc.dueDefinitions(NOW);
+  assert.deepEqual(due.map((item) => item.name), [
+    "financial",
+    "vendor",
+    "financial stored verification",
+  ]);
 });
 
 test("the day is claimed BEFORE the mail goes out", async () => {
@@ -207,7 +247,7 @@ test("a clean board carries no marker", async () => {
   let subject = null;
   await svc.runDefinition(def(), { now: NOW, sendMail: async (d, o) => { subject = o.subject; } });
   assert.doesNotMatch(subject, /DEGRADED/);
-  assert.match(subject, /^financial roll up with calls · 2026-07-30/);
+  assert.match(subject, /^financial · 2026-07-30/);
 });
 
 test("lastError records a source that did not answer, not only a block that threw", async () => {

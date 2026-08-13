@@ -174,6 +174,10 @@ test("Gauntlet turn route accepts only learner text and server CAS fields", asyn
         calls.push(input);
         return { state: { status: "in_progress", nextTurn: 2 } };
       },
+      async gradeModuleAnswer(input) {
+        calls.push(input);
+        return { passed: true, score: 1, feedback: "Synthetic feedback." };
+      },
     },
   });
   const baseUrl = await listen(t, router);
@@ -209,6 +213,28 @@ test("Gauntlet turn route accepts only learner text and server CAS fields", asyn
     },
   );
   assert.equal(rejected.status, 422);
+
+  const reflection = await requestJson(
+    baseUrl,
+    "/course/gauntlet/attempts/attempt-1/module-answer",
+    { method: "POST", body: { answer: "Synthetic reflection." } },
+  );
+  assert.equal(reflection.status, 200);
+  assert.equal(calls.at(-1).answer, "Synthetic reflection.");
+  assert.deepEqual(calls.at(-1).principal, {
+    email: "learner@example.test",
+    company: "TAG",
+  });
+
+  const forgedReflection = await requestJson(
+    baseUrl,
+    "/course/gauntlet/attempts/attempt-1/module-answer",
+    {
+      method: "POST",
+      body: { answer: "Synthetic.", gradingPoints: ["browser-owned"] },
+    },
+  );
+  assert.equal(forgedReflection.status, 422);
 });
 
 test("sealed Free Call routes reject browser profile and recording authority", async (t) => {

@@ -90,6 +90,38 @@ const CALLS_DAY_MAX = Math.max(1, Number(process.env.CALLS_DAY_MAX) || 120);
 function addDaysKey(key, delta) {
   return new Date(Date.parse(`${key}T00:00:00Z`) + delta * 86400000).toISOString().slice(0, 10);
 }
+function evidenceDateKey(value) {
+  if (!value) return null;
+  const direct = String(value).slice(0, 10);
+  if (/^\d{4}-\d{2}-\d{2}$/.test(direct)) return direct;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? new Date(parsed).toISOString().slice(0, 10) : null;
+}
+
+function summarizeDealHistory(rows = [], paymentDateKey = null) {
+  const { classifyRow } = require("./activityEventService");
+  let bestOfficer = null;
+  let earliestActivityDate = null;
+  let hasPostdateStatus = false;
+  for (const row of Array.isArray(rows) ? rows : []) {
+    const day = evidenceDateKey(row?.CreatedDate);
+    if (day && (!earliestActivityDate || day < earliestActivityDate)) earliestActivityDate = day;
+    const cls = classifyRow({ ActivitySubject: row?.Subject, Type: row?.ActivityType });
+    if (cls?.kind === "status-change" && cls.payload?.safetyClass === "postdate") {
+      hasPostdateStatus = true;
+    }
+    if (cls?.kind !== "assignment" || cls.payload?.role !== "Set. Officer") continue;
+    if (day && paymentDateKey && day > paymentDateKey) continue;
+    if (!bestOfficer || day >= bestOfficer.day) {
+      bestOfficer = { day, assignee: cls.payload.assignee };
+    }
+  }
+  return {
+    officer: bestOfficer?.assignee || null,
+    earliestActivityDate,
+    hasPostdateStatus,
+  };
+}
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 function dayRange(from, to) {
@@ -933,7 +965,7 @@ async function gatherMaterial({
         // marketing line, so CallRail can never name it. Free here; we are
         // already reading this document.
         const profiles = await CaseProfile.find({ caseId: { $in: ids } })
-          .select("domain caseId name firstName lastName primaryPhone homePhone sourceName").lean();
+          .select("domain caseId name firstName lastName primaryPhone homePhone sourceName caseCreatedDate").lean();
         const byCase = new Map();
         for (const pr of profiles) byCase.set(`${String(pr.domain).toUpperCase()}:${pr.caseId}`, pr);
         const attach = (list) => (list || []).map((r) => {
@@ -947,6 +979,9 @@ async function gatherMaterial({
             // How the case ENTERED. Never overrides a stored source or a call;
             // it is the last resort, and for LD deals the only one available.
             leadSourceName: r.leadSourceName || pr.sourceName || null,
+            // Cheap indexed fallback. CaseInfo below remains authoritative;
+            // earliest activity is the final fallback when neither has it.
+            caseCreatedDate: r.caseCreatedDate || pr.caseCreatedDate || null,
           };
         });
         material.payments = attach(material.payments);
@@ -994,7 +1029,7 @@ async function gatherMaterial({
                   // from that source date." The create date is what separates
                   // a return on THIS month's advertising from an upsell to
                   // someone who came in years ago on a list that is now dead.
-                  caseCreatedDate: String(info?.CreatedDate || "").slice(0, 10) || null,
+                  caseCreatedDate: evidenceDateKey(info?.CreatedDate),
                   // Registered mail piece first; else any CONFIRMED id label
                   // (LD CUSTOM, BCD, ...) — those are real attribution too,
                   // and their names match the spend keys exactly.
@@ -1015,7 +1050,7 @@ async function gatherMaterial({
                 phone: r.phone || f.primaryPhone || f.normalizedPhones?.[0] || null,
                 phones: f.normalizedPhones || [],
                 sourceCampaignId: hit.campaignId,
-                caseCreatedDate: hit.caseCreatedDate || null,
+                caseCreatedDate: hit.caseCreatedDate || r.caseCreatedDate || null,
               };
               // The stored snapshot still wins: it records who/what the case was
               // at the moment of sale, and Logics can be edited afterwards.
@@ -1079,45 +1114,47 @@ async function gatherMaterial({
               }
             }
 
-            // A MIDDAY report cannot wait for tonight's snapshot. The night
-            // pass stamps officerAtSale at 19:50, so before then every deal
-            // reads "(no snapshot)" and the whole sales floor shows zero
-            // deals — the exact opposite of what a productivity board is for.
-            // Resolve it live from the case's own assignment history, using
-            // the same parser the night pass uses so the two can never
-            // disagree. Bounded by DEALS, a handful a day.
-            const needOfficer = (material.payments || []).filter(
-              (r) => r.paymentType === "initial" && !r.isChargeback && !r.officerAtSale,
+            // A MIDDAY report cannot wait for tonight's snapshot. The same
+            // bounded case-history read now answers THREE deal-time facts:
+            // officer at sale, earliest activity when CreatedDate is absent,
+            // and whether the case ever reached POST DATE. A post-date is a
+            // close even when the agreed charge lands 35 days later, so it is
+            // explicit evidence that the deal must not be aged out.
+            const needHistory = (material.payments || []).filter(
+              (r) => r.paymentType === "initial" && !r.isChargeback,
             );
-            if (needOfficer.length && needOfficer.length <= CASE_CONTACT_MAX) {
+            if (needHistory.length && needHistory.length <= CASE_CONTACT_MAX) {
               try {
-                const { classifyRow } = require("./activityEventService");
                 const resolved = new Map();
-                await mapLimit(needOfficer, 3, async (r) => {
+                await mapLimit(needHistory, 3, async (r) => {
                   const dom = String(r.domain).toUpperCase();
                   if (!clients.has(dom)) clients.set(dom, createLogicsClient(dom));
                   try {
                     const history = unwrapLogics(await clients.get(dom).getActivities(r.caseId));
-                    let best = null;
-                    for (const row of Array.isArray(history) ? history : []) {
-                      const cls = classifyRow({ ActivitySubject: row.Subject, Type: row.ActivityType });
-                      if (cls?.kind !== "assignment" || cls.payload?.role !== "Set. Officer") continue;
-                      const day = String(row.CreatedDate || "").slice(0, 10);
-                      // Whoever held it AT SALE — never someone assigned after.
-                      if (day && r.paymentDateKey && day > r.paymentDateKey) continue;
-                      if (!best || day >= best.day) best = { day, assignee: cls.payload.assignee };
-                    }
-                    if (best?.assignee) resolved.set(`${dom}:${Number(r.caseId)}`, best.assignee);
+                    resolved.set(
+                      `${dom}:${Number(r.caseId)}`,
+                      summarizeDealHistory(history, r.paymentDateKey),
+                    );
                   } catch { /* one unreadable case must not cost the report */ }
                 });
                 if (resolved.size) {
+                  let officerApplied = 0;
                   material.payments = material.payments.map((r) => {
                     const hit = resolved.get(`${String(r.domain).toUpperCase()}:${Number(r.caseId)}`);
-                    return hit && !r.officerAtSale
-                      ? { ...r, officerAtSale: hit, attributionSnapshot: "live" }
-                      : r;
+                    if (!hit) return r;
+                    if (!r.officerAtSale && hit.officer) officerApplied += 1;
+                    return {
+                      ...r,
+                      caseCreatedDate: r.caseCreatedDate || hit.earliestActivityDate || null,
+                      hasPostdateStatus: Boolean(r.hasPostdateStatus || hit.hasPostdateStatus),
+                      ...(!r.officerAtSale && hit.officer
+                        ? { officerAtSale: hit.officer, attributionSnapshot: "live" }
+                        : {}),
+                    };
                   });
-                  notes.push(`${resolved.size} deal(s) had no snapshot yet — officer resolved live from the case history`);
+                  if (officerApplied) {
+                    notes.push(`${officerApplied} deal(s) had no snapshot yet — officer resolved live from the case history`);
+                  }
                 }
               } catch (error) {
                 fail(`live officer resolution unavailable — ${String(error.message).slice(0, 70)}`);
@@ -2210,5 +2247,5 @@ module.exports = {
   RANGE_DAY_LOOP_MAX,
   dayRange, composeReport, filterPayments, filterQueueByAgent, filterRecordings,
   gatherMaterial, parseFilters, renderText, renderCsvs, toTemplateData,
-  partitionMailSpend,
+  partitionMailSpend, summarizeDealHistory,
 };

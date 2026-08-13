@@ -68,7 +68,7 @@ const DEFAULT_LEXIS_VENDOR_RECIPIENTS =
 const DEFAULT_LEXIS_ALERT_RECIPIENTS =
   "mgray@taxadvocategroup.com,manderson@taxadvocategroup.com,abanks@taxadvocategroup.com,jonathan13pineda@yahoo.com";
 const DEFAULT_NIGHTLY_LEAD_DATA_RECIPIENTS =
-  "mgray@taxadvocategroup.com,manderson@taxadvocategroup.com,liz@lizdev.com,beth@lizdev.com";
+  "mgray@taxadvocategroup.com,liz@lizdev.com";
 const DEFAULT_NIGHTLY_OPS_RECIPIENTS = "mgray@taxadvocategroup.com";
 const DEFAULT_LOGICS_ACTIVITY_REVIEW_RECIPIENTS =
   "mgray@taxadvocategroup.com,manderson@taxadvocategroup.com";

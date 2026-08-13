@@ -175,3 +175,28 @@ test("a residual with NO deals is still called recurring", () => {
   assert.ok(residual, "residual row expected");
   assert.match(String(residual.source), /Recurring/i);
 });
+
+test("an Aged deal stays attributed while only the catch-all deal is unresolved", () => {
+  // 2026-08-10: one properly attributed Aged sale and one catch-all sale were
+  // collapsed into the same residual and emailed as "2 unattributed deals".
+  // Aged is not missing evidence; it is a known source outside the active set.
+  const m = material([
+    payment({ caseId: 10, amount: 600, sourceAtSale: "Aged / inactive source", caseCreatedDate: "2024-01-01" }),
+    payment({ caseId: 11, amount: 200, sourceAtSale: "ABC", sourceOrigin: "catch-all" }),
+    payment({ caseId: 12, amount: 900, sourceAtSale: null, paymentType: "recurring" }),
+  ]);
+  const { csv } = sourceRows(m);
+  const aged = csv.emailRows.find((r) => r.source === "Aged / inactive source");
+  const unresolved = csv.emailRows.find((r) => /^Unattributed/.test(String(r.source)));
+  const recurring = csv.emailRows.find((r) => /^Recurring/.test(String(r.source)));
+
+  assert.equal(aged?.deals, 1, "the known Aged sale keeps its attribution");
+  assert.equal(unresolved?.deals, 1, "only the catch-all sale needs a source");
+  assert.match(String(unresolved?.source), /1 deal/);
+  assert.equal(recurring?.recurringCash, 900);
+  assert.equal(
+    csv.emailRows.reduce((sum, row) => sum + Number(row.totalCash || 0), 0),
+    1700,
+    "splitting the residual must still reconcile to the topline",
+  );
+});

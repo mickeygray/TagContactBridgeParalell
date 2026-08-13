@@ -8,6 +8,7 @@ const { test } = require("node:test");
 const assert = require("node:assert/strict");
 
 const blocks = require("../../packages/shared-services/src/reportBlocksService");
+const { summarizeDealHistory } = require("../../packages/shared-services/src/reportComposerService");
 
 const EMPTY = {
   payments: [], declines: [], dials: [], events: [], callsRange: [],
@@ -307,7 +308,8 @@ test("the source block's terms pin BOTH ratios", () => {
   // The aged rule is part of the terms: which money is eligible to be a
   // return at all is as load-bearing as the formula applied to it.
   assert.match(t, /ATTRIBUTABLE CALL is primary/);
-  assert.match(t, /Lead age decides only when no call can be found/);
+  assert.match(t, /final 14 calendar days of the prior month/);
+  assert.match(t, /one POST DATE status also keeps it/);
   assert.match(t, /a case sold earlier is residual and is Aged/);
 });
 
@@ -315,13 +317,93 @@ test("the source block's terms pin BOTH ratios", () => {
 
 const active = require("../../packages/shared-config/src/activeSources");
 
-test("more than a month old is aged", () => {
-  // Mickey 2026-07-28: "more than a month old its aged."
-  assert.equal(active.AGED_AFTER_DAYS, 30);
+test("the current month plus the prior month's final fourteen days stays current", () => {
+  assert.equal(active.AGED_AFTER_DAYS, 14);
   assert.equal(active.isCaseRecent("2026-07-15", "2026-07-01"), true);
-  assert.equal(active.isCaseRecent("2026-06-05", "2026-07-01"), true, "just inside a month");
+  assert.equal(active.isCaseRecent("2026-06-16", "2026-07-01"), false);
+  assert.equal(active.isCaseRecent("2026-06-17", "2026-07-01"), true,
+    "June 17 begins the final fourteen days of a 30-day prior month");
+  assert.equal(active.isCaseRecent("2026-06-30", "2026-07-31"), true,
+    "the boundary is anchored to the calendar month, not the report day");
   assert.equal(active.isCaseRecent("2026-05-01", "2026-07-01"), false);
   assert.equal(active.isCaseRecent("2024-03-02", "2026-07-01"), false);
+});
+
+test("one post-date agreement keeps a delayed first payment attributed", () => {
+  assert.equal(
+    active.sourceBucket("Urgent Third State", {
+      firstPaidDateKey: "2026-08-10",
+      rangeStart: "2026-08-10",
+      rangeEnd: "2026-08-10",
+      caseCreatedDate: "2024-01-01",
+      attributionCallDate: "2026-07-06",
+      hasPostdateStatus: true,
+    }),
+    "Urgent Third State",
+    "a 35-day delayed charge does not erase the call that closed the case",
+  );
+});
+
+test("one post-date agreement also keeps an old BCD case attributed to BCD", () => {
+  assert.equal(
+    active.sourceBucket("BCD", {
+      firstPaidDateKey: "2026-08-10",
+      rangeStart: "2026-08-10",
+      rangeEnd: "2026-08-10",
+      caseCreatedDate: "2024-01-01",
+      attributionCallDate: "2026-07-06",
+      hasPostdateStatus: true,
+    }),
+    "BCD",
+    "a real post-date close must not be reported as an aged BCD residual",
+  );
+});
+
+test("the source report passes post-date evidence through for the actual deal row", () => {
+  const rows = blocks.BY_ID.get("source").compute({
+    from: "2026-08-10",
+    to: "2026-08-10",
+    payments: [{
+      domain: "TAG", caseId: 35, paymentType: "initial", amount: 900,
+      sourceAtSale: "Urgent Third State", caseCreatedDate: "2024-01-01",
+      hasPostdateStatus: true, metricsTreatment: { firstPaidDateKey: "2026-08-10" },
+      isChargeback: false,
+    }],
+    spendBySource: {}, callsBySource: {}, callsRange: [],
+  });
+  assert.equal(rows.find((row) => row.source === "Urgent Third State")?.deals, 1);
+  assert.equal(rows.some((row) => row.source === active.AGED_LABEL), false);
+});
+
+test("an old post-dated BCD deal never enters the private Aged write queue", () => {
+  const rows = blocks.BY_ID.get("source").compute({
+    from: "2026-08-10",
+    to: "2026-08-10",
+    payments: [{
+      domain: "TAG", caseId: 36, paymentType: "initial", amount: 900,
+      sourceAtSale: "BCD", sourceCampaignId: 64, caseCreatedDate: "2024-01-01",
+      hasPostdateStatus: true, metricsTreatment: { firstPaidDateKey: "2026-08-10" },
+      isChargeback: false,
+    }],
+    spendBySource: {}, callsBySource: {}, callsRange: [],
+  });
+  assert.equal(rows.find((row) => row.source === "BCD")?.deals, 1);
+  assert.equal(rows.some((row) => row.source === active.AGED_LABEL), false);
+  assert.deepEqual(rows[active.AGED_CASE_REFS], []);
+});
+
+test("deal history supplies earliest activity and preserves a single post-date close", () => {
+  const history = summarizeDealHistory([
+    { CreatedDate: "7/2/2026 9:00:00 AM", ActivityType: "General", Subject: "Case created" },
+    {
+      CreatedDate: "7/6/2026 11:00:00 AM", ActivityType: "General",
+      Subject: 'Status changed from "[Active Prospect]-ACTIVE"  to  "[Active Prospect]-POST DATE"',
+    },
+    { CreatedDate: "8/9/2026 9:00:00 AM", ActivityType: "General", Subject: "Assigned to Set. Officer : Later Owner" },
+  ], "2026-08-10");
+  assert.equal(history.earliestActivityDate, "2026-07-02");
+  assert.equal(history.hasPostdateStatus, true);
+  assert.equal(history.officer, "Later Owner");
 });
 
 test("an unknown create date is UNKNOWN, never assumed recent", () => {
@@ -573,6 +655,33 @@ test("case 275341: an aged lead with NO call is Aged, even sold in-month", () =>
     }),
     active.AGED_LABEL,
   );
+});
+
+test("the Aged row carries private case references for the nightly Logics writer", () => {
+  const rows = blocks.BY_ID.get("source").compute({
+    from: "2026-07-01",
+    to: "2026-07-31",
+    payments: [{
+      domain: "TAG",
+      caseId: 275341,
+      paymentType: "initial",
+      amount: 5000,
+      sourceAtSale: "BCD",
+      sourceCampaignId: 64,
+      caseCreatedDate: "2026-01-21",
+      metricsTreatment: { firstPaidDateKey: "2026-07-17" },
+      isChargeback: false,
+    }],
+    spendBySource: {},
+    callsBySource: {},
+    callsRange: [],
+  });
+  const refs = rows[active.AGED_CASE_REFS];
+  assert.deepEqual(refs, [{
+    domain: "TAG", caseId: 275341, expectedSource: "BCD", expectedSourceId: 64,
+  }]);
+  assert.equal(Object.keys(rows).includes(String(active.AGED_CASE_REFS)), false);
+  assert.doesNotMatch(JSON.stringify(rows), /275341/, "private write evidence must not enter report JSON");
 });
 
 test("a fresh lead sold in-month needs no call to count", () => {

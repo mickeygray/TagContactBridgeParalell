@@ -161,6 +161,9 @@ export function useTrainingAttempt(courseId: string, itemId: string) {
   }, [action, attempt]);
 
   const clearLastAnswer = useCallback(() => setLastAnswer(null), []);
+  const syncAttempt = useCallback((nextAttempt: TrainingAttempt) => {
+    if (mountedRef.current) setAttempt(nextAttempt);
+  }, []);
 
   return {
     status,
@@ -174,6 +177,7 @@ export function useTrainingAttempt(courseId: string, itemId: string) {
     start,
     answer,
     complete,
+    syncAttempt,
     clearLastAnswer,
   };
 }

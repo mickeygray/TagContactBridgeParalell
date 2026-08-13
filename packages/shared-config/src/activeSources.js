@@ -51,6 +51,11 @@ const DEFAULT_ACTIVE = [
 ];
 
 const AGED_LABEL = "Aged / inactive source";
+// Private in-memory bridge between the source calculation and the nightly
+// Logics writer. A Symbol keeps case references out of JSON, Mongo facts,
+// email templates and API responses while allowing the exact calculation
+// that produced the Aged row to identify its own write candidates.
+const AGED_CASE_REFS = Symbol.for("tagcontactbridge.report.agedCaseRefs");
 
 // ── LD IS ONE ROW ─────────────────────────────────────────────────────────
 //
@@ -108,27 +113,31 @@ function isActiveSource(name) {
   return activeSet().has(key);
 }
 
-// Mickey 2026-07-28: "more than a month old its aged."
-//
-// One month, measured back from the start of the reporting window — so a July
-// report counts cases created from roughly June onward and treats anything
-// older as residual. Tight on purpose: an ROI report is this month's money,
-// and a case that has been on the books for a year is not this month's
-// advertising working.
-const AGED_AFTER_DAYS = Math.max(1, Number(process.env.AGED_AFTER_DAYS) || 30);
+// Compatibility export: the actual boundary is not a rolling N-day window.
+// A sale belongs to current marketing when its case began in the sale month
+// or in the FINAL 14 calendar days of the prior month. This fixed 14-day tail
+// handles mail lag without letting July 17 behave differently on August 1
+// versus August 16.
+const AGED_AFTER_DAYS = 14;
 
 /**
- * Is a case young enough for its money to count as campaign return?
+ * Is the evidence in the sale month or the final 14 days of its prior month?
  *
  * Unknown create date returns null — UNKNOWN, not young and not old. The
  * caller decides, and must not silently treat "we did not look" as "recent".
  */
-function isCaseRecent(caseCreatedDate, rangeStart) {
-  if (!caseCreatedDate || !rangeStart) return null;
-  const created = Date.parse(`${String(caseCreatedDate).slice(0, 10)}T00:00:00Z`);
-  const start = Date.parse(`${String(rangeStart).slice(0, 10)}T00:00:00Z`);
-  if (!Number.isFinite(created) || !Number.isFinite(start)) return null;
-  return created >= start - AGED_AFTER_DAYS * 86400000;
+function isCaseRecent(caseCreatedDate, monthAnchor) {
+  if (!caseCreatedDate || !monthAnchor) return null;
+  const evidenceKey = String(caseCreatedDate).slice(0, 10);
+  const anchorKey = String(monthAnchor).slice(0, 10);
+  const evidence = Date.parse(`${evidenceKey}T00:00:00Z`);
+  const anchor = Date.parse(`${anchorKey}T00:00:00Z`);
+  if (!Number.isFinite(evidence) || !Number.isFinite(anchor)) return null;
+  const anchorDate = new Date(anchor);
+  const monthStart = Date.UTC(anchorDate.getUTCFullYear(), anchorDate.getUTCMonth(), 1);
+  const nextMonth = Date.UTC(anchorDate.getUTCFullYear(), anchorDate.getUTCMonth() + 1, 1);
+  const priorTailStart = monthStart - AGED_AFTER_DAYS * 86400000;
+  return evidence >= priorTailStart && evidence < nextMonth;
 }
 
 /**
@@ -137,10 +146,9 @@ function isCaseRecent(caseCreatedDate, rangeStart) {
  * Mickey 2026-07-28, in order of precedence:
  *
  *   "attributable call to the source = attributed to the source if its in the
- *    month its sold regardless of the create date"
- *   "create date in month = sold this month if you cant find call evidence
- *    but you should be able to find it"
- *   "sourced call older than a month, create date older than a month aged"
+ *    sale month or the prior month's final fourteen days"
+ *   "create date follows the same calendar boundary if there is no call"
+ *   "one post-date agreement means they closed, even if payment is 35 days out"
  *
  * CALL EVIDENCE WINS. Mail leads are bulk-loaded into Logics and then sit for
  * about a week, so the create date is a loading artefact, not the moment the
@@ -167,6 +175,7 @@ function isSoldInRange(firstPaidDateKey, rangeStart, rangeEnd) {
 
 function sourceBucket(name, {
   caseCreatedDate = null, attributionCallDate = null,
+  hasPostdateStatus = false,
   firstPaidDateKey = null, rangeStart = null, rangeEnd = null,
 } = {}) {
   // NOT active is no longer enough to be Aged. A stopped mail piece still
@@ -214,18 +223,21 @@ function sourceBucket(name, {
   const sold = isSoldInRange(firstPaidDateKey, rangeStart, rangeEnd);
   if (sold === false) return AGED_LABEL;
 
-  // 2. THE ATTRIBUTABLE CALL is primary. Mickey 2026-07-28: "lead age is
-  //    secondary to attributable call." A marketing-line call to the source
-  //    inside the window IS the response, whatever the lead's age — case
-  //    368274 was created 2026-05-29 and called the mail line for 27 minutes
-  //    on the day it sold.
-  const callRecent = isCaseRecent(attributionCallDate, rangeStart);
+  // A post-date is already a close, not an untouched old lead. The agreement
+  // may intentionally put the first charge 35+ days after the one call that
+  // converted them; judging it by charge month would erase that conversion.
+  if (hasPostdateStatus === true) return String(name);
+
+  // 2. THE ATTRIBUTABLE CALL is primary. The sale month plus the prior
+  //    month's final fourteen days is the accepted mail-response tail.
+  const monthAnchor = firstPaidDateKey || rangeStart;
+  const callRecent = isCaseRecent(attributionCallDate, monthAnchor);
   if (callRecent === true) return String(name);
 
   // 3. LEAD AGE decides only when no call can be found. Case 275341 was a
   //    January BCD lead with ZERO calls in the window that closed in July —
   //    real revenue, but not a return on this month's advertising.
-  const createRecent = isCaseRecent(caseCreatedDate, rangeStart);
+  const createRecent = isCaseRecent(caseCreatedDate, monthAnchor);
   if (createRecent === true) return String(name);
   if (createRecent === false) return AGED_LABEL;
 
@@ -286,6 +298,7 @@ function listActiveSources() {
 
 module.exports = {
   AGED_AFTER_DAYS,
+  AGED_CASE_REFS,
   isSoldInRange,
   INACTIVE_MAIL,
   sourceChannel,

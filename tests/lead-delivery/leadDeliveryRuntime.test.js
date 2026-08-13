@@ -300,7 +300,14 @@ class FakeRepository {
       .map(copy);
   }
 
-  async listPacketCandidateItems({ agentId, sourcePools, untouchedOnly = false, now, limit }) {
+  async listPacketCandidateItems({
+    agentId,
+    sourcePools,
+    untouchedOnly = false,
+    attemptBand = "all",
+    now,
+    limit,
+  }) {
     const at = now == null ? null : new Date(now);
     return [...this.items.values()]
       .filter((item) => item.activeAttempt
@@ -310,6 +317,15 @@ class FakeRepository {
           Number(item.totalAttemptCount || 0) === 0
           && item.lastContactAt == null
         ))
+        && (attemptBand !== "standard" || (
+          (Number(item.totalAttemptCount || 0) >= 1 && Number(item.totalAttemptCount || 0) < 10)
+          || (Number(item.totalAttemptCount || 0) === 0 && item.lastContactAt != null)
+        ))
+        && (attemptBand !== "age_sorted" || (
+          Number(item.totalAttemptCount || 0) >= 10
+          && Number(item.totalAttemptCount || 0) < 15
+        ))
+        && (attemptBand !== "phase_out" || Number(item.totalAttemptCount || 0) >= 15)
         && (item.sourcePool !== POOLS.FOLLOW_UP_DUE
           || (at && item.nextContactAt && new Date(item.nextContactAt).getTime() <= at.getTime()))
         && ["eligible", "follow_up_wait", "reserved"].includes(item.state)
@@ -330,6 +346,63 @@ class FakeRepository {
       ))
       .slice(0, limit)
       .map(copy);
+  }
+
+  async listNightlyLeadHealthRepairCandidates({ now, limit }) {
+    const at = new Date(now).getTime();
+    const expiredReservations = [...this.items.values()]
+      .filter((item) => item.state === "reserved"
+        && item.activeAttempt === true
+        && item.reservationExpiresAt
+        && new Date(item.reservationExpiresAt).getTime() <= at
+        && item.providerContactId == null
+        && item.providerExternalLeadId == null
+        && item.providerCallId == null
+        && item.providerPostState == null
+        && item.packetId == null
+        && item.deliveryAgentId == null)
+      .sort((left, right) => new Date(left.reservationExpiresAt) - new Date(right.reservationExpiresAt));
+    const phaseOutCandidates = [...this.items.values()]
+      .filter((item) => ["eligible", "follow_up_wait"].includes(item.state)
+        && item.activeAttempt === true
+        && Object.values(POOLS).includes(item.sourcePool)
+        && item.inventoryClass !== "callrail_long_call_recovery"
+        && Number(item.totalAttemptCount || 0) >= 15
+        && item.lastContactAt
+        && item.reservedAgentId == null
+        && item.providerContactId == null
+        && item.providerExternalLeadId == null
+        && item.providerCallId == null
+        && item.providerPostState == null
+        && item.packetId == null
+        && item.deliveryAgentId == null)
+      .sort((left, right) => new Date(left.lastContactAt) - new Date(right.lastContactAt));
+    return {
+      expiredReservations: expiredReservations.slice(0, limit).map(copy),
+      phaseOutCandidates: phaseOutCandidates.slice(0, limit).map(copy),
+      expiredReservationsTruncated: expiredReservations.length > limit,
+      phaseOutCandidatesTruncated: phaseOutCandidates.length > limit,
+    };
+  }
+
+  async expireReservationCas({
+    itemId,
+    expectedVersion,
+    expectedAgentId,
+    expectedExpiresAt,
+    now,
+    set,
+  }) {
+    return this.compareAndSetItem({
+      itemId,
+      expectedVersion,
+      expected: {
+        state: "reserved",
+        reservedAgentId: expectedAgentId,
+        reservationExpiresAt: { $eq: expectedExpiresAt, $lte: now },
+      },
+      set,
+    });
   }
 
   async hasUnconsumedOvernightFirstContact() {
@@ -3625,6 +3698,47 @@ test("simple bulk packet posts zero-touch work before a due retry from another p
   assert.equal(posted[0].totalAttemptCount, 0);
 });
 
+test("bounded pool reads cannot hide a low-attempt retry behind 250 recycled leads", async () => {
+  const rows = [];
+  const h = harness({ rows, actionsEnabled: true });
+  await h.runtime.start();
+  await h.runtime.stop();
+
+  for (let index = 0; index < 250; index += 1) {
+    await h.repository.insertActiveItemOnce({
+      ...sourceRow(9000 + index, {
+        receivedAt: new Date("2026-06-01T17:00:00.000Z"),
+        totalAttemptCount: 12,
+        lastContactAt: new Date("2026-07-01T17:00:00.000Z"),
+      }),
+      sourcePool: POOLS.OLDER_AVAILABLE,
+      state: "eligible",
+      version: 0,
+    });
+  }
+  const lowAttemptSource = sourceRow(9901, {
+    receivedAt: new Date("2026-07-09T17:00:00.000Z"),
+    totalAttemptCount: 1,
+    lastContactAt: new Date("2026-07-10T14:00:00.000Z"),
+  });
+  rows.push(lowAttemptSource);
+  await h.repository.insertActiveItemOnce({
+    ...lowAttemptSource,
+    sourcePool: POOLS.FOLLOW_UP_DUE,
+    state: "follow_up_wait",
+    nextContactAt: new Date("2026-07-10T16:00:00.000Z"),
+    version: 0,
+  });
+
+  const result = await h.runtime.postTopOfQueue("bruce_allen", { count: 1 });
+
+  assert.equal(result.status, "posted");
+  const posted = acceptedItems(h.repository);
+  assert.equal(posted.length, 1);
+  assert.equal(posted[0].caseId, "9901");
+  assert.equal(posted[0].totalAttemptCount, 1);
+});
+
 test("simple due retry refreshes exact Logics status before provider claim", async () => {
   const row = sourceRow(8603, {
     receivedAt: new Date("2026-07-09T17:00:00.000Z"),
@@ -6045,4 +6159,111 @@ test("explicit preposition may refill a paused agent after the final daily close
   // explicitly staged post-close packet.
   assert.equal((await h.runtime.runEndOfDayFolderDrain()).status, "completed");
   assert.equal(h.providerContacts.size, 1);
+});
+
+test("nightly lead-health repair releases only expired unposted reservations and fixes too-soon phase-out dates", async () => {
+  const h = harness();
+  const at = new Date("2026-08-14T03:10:00.000Z");
+  h.repository.items.set("expired", {
+    _id: "expired",
+    version: 0,
+    state: "reserved",
+    activeAttempt: true,
+    sourcePool: POOLS.OLDER_AVAILABLE,
+    reservedAgentId: "brad_hansen",
+    reservationExpiresAt: new Date("2026-08-14T03:00:00.000Z"),
+    providerContactId: null,
+    providerExternalLeadId: null,
+    providerCallId: null,
+    providerPostState: null,
+    packetId: null,
+    deliveryAgentId: null,
+  });
+  h.repository.items.set("phase-out", {
+    _id: "phase-out",
+    version: 0,
+    state: "eligible",
+    activeAttempt: true,
+    sourcePool: POOLS.OLDER_AVAILABLE,
+    totalAttemptCount: 15,
+    lastContactAt: new Date("2026-08-10T17:00:00.000Z"),
+    nextContactAt: new Date("2026-08-10T19:00:00.000Z"),
+    reservedAgentId: null,
+    providerContactId: null,
+    providerExternalLeadId: null,
+    providerCallId: null,
+    providerPostState: null,
+    packetId: null,
+    deliveryAgentId: null,
+  });
+  h.repository.items.set("provider-held", {
+    _id: "provider-held",
+    version: 0,
+    state: "follow_up_wait",
+    activeAttempt: true,
+    sourcePool: POOLS.FOLLOW_UP_DUE,
+    totalAttemptCount: 20,
+    lastContactAt: new Date("2026-08-10T17:00:00.000Z"),
+    nextContactAt: new Date("2026-08-10T19:00:00.000Z"),
+    reservedAgentId: null,
+    providerContactId: "provider-contact",
+    providerExternalLeadId: "provider-external",
+    providerCallId: null,
+    providerPostState: "accepted",
+    packetId: "packet",
+    deliveryAgentId: "brad_hansen",
+  });
+
+  const result = await h.runtime.repairNightlyLeadHealth(at, { limit: 25 });
+  const expired = await h.repository.getItemById("expired");
+  const phaseOut = await h.repository.getItemById("phase-out");
+  const held = await h.repository.getItemById("provider-held");
+
+  assert.deepEqual(result, {
+    scanned: 2,
+    expiredReservationsReleased: 1,
+    phaseOutDatesRepaired: 1,
+    alreadyHealthy: 0,
+    conflicts: 0,
+    skippedContradictory: 0,
+    truncated: false,
+  });
+  assert.equal(expired.state, "eligible");
+  assert.equal(expired.reservedAgentId, null);
+  assert.equal(expired.reservationReason, "nightly-expired-reservation-release");
+  assert.equal(phaseOut.state, "follow_up_wait");
+  assert.equal(phaseOut.sourcePool, POOLS.FOLLOW_UP_DUE);
+  assert.equal(phaseOut.nextContactAt.toISOString(), "2026-08-25T17:00:00.000Z");
+  assert.equal(phaseOut.reservationReason, "nightly-phase-out-date-repair");
+  assert.equal(held.version, 0, "provider-owned work is observation-only");
+});
+
+test("nightly lead-health repair does not postpone a phase-out lead whose fifteen-day hold already elapsed", async () => {
+  const h = harness();
+  h.repository.items.set("elapsed", {
+    _id: "elapsed",
+    version: 0,
+    state: "eligible",
+    activeAttempt: true,
+    sourcePool: POOLS.FOLLOW_UP_DUE,
+    totalAttemptCount: 18,
+    lastContactAt: new Date("2026-07-01T17:00:00.000Z"),
+    nextContactAt: null,
+    reservedAgentId: null,
+    providerContactId: null,
+    providerExternalLeadId: null,
+    providerCallId: null,
+    providerPostState: null,
+    packetId: null,
+    deliveryAgentId: null,
+  });
+  const result = await h.runtime.repairNightlyLeadHealth(
+    new Date("2026-08-14T03:10:00.000Z"),
+    { limit: 25 },
+  );
+  const elapsed = await h.repository.getItemById("elapsed");
+  assert.equal(result.alreadyHealthy, 1);
+  assert.equal(result.phaseOutDatesRepaired, 0);
+  assert.equal(elapsed.version, 0);
+  assert.equal(elapsed.nextContactAt, null);
 });

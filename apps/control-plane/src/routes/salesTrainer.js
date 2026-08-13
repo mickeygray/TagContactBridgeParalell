@@ -38,6 +38,9 @@ const {
 const {
   getSalesTrainerFeatureFlags,
 } = require("../../../../packages/shared-services/src/salesTrainerFeatureFlags");
+const {
+  createTrainingGauntletRuntimeService,
+} = require("../../../../packages/shared-services/src/trainingGauntletRuntimeService");
 const { toErrorResponse } = require("../../../../packages/shared-errors/src");
 const { createRateLimiter } = require("../middleware/rateLimit");
 const {
@@ -204,6 +207,8 @@ async function resolveSalesTrainerOtpAccount(email) {
 
 function createSalesTrainerRouter(auth, config = {}) {
   const router = express.Router();
+  const trainingGauntletService =
+    config.trainingGauntletService || createTrainingGauntletRuntimeService();
 
   async function requireSalesTrainerAccess(req, res, next) {
     const token = getBearerToken(req);
@@ -288,7 +293,7 @@ function createSalesTrainerRouter(auth, config = {}) {
     createSalesTrainerCourseRouter({
       requireSalesTrainerAccess,
       courseLimit,
-      gauntletService: config.trainingGauntletService || null,
+      gauntletService: trainingGauntletService,
       freeCallService: config.trainingFreeCallService || null,
     }),
   );

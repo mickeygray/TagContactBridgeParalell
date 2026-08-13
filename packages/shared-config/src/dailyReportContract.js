@@ -32,24 +32,52 @@ const DAILY_SECTION_KEYS = Object.freeze({
   STATUS: "statusMovement",
 });
 
+const DAILY_REPAIR_REASONS = Object.freeze({
+  OFFICER: "officer-attribution",
+  MARKETING_SOURCE: "marketing-attribution",
+  MARKETING_COST: "marketing-cost",
+});
+
+// A nightly close may repair the seven completed Pacific days immediately
+// before it. Callers that also need the current close should request this many
+// historical days plus one; keeping the number here prevents mailbox ingest,
+// spend derivation, and snapshot repair from quietly using different windows.
+const HISTORICAL_REPAIR_MAX_AGE_DAYS = 7;
+
+const CANONICAL_NIGHTLY_REPORT_NAMES = Object.freeze({
+  FINANCIAL: "financial",
+  VENDOR: "vendor",
+});
+
+const RETIRED_NIGHTLY_REPORT_NAMES = Object.freeze([
+  "financial roll up with calls",
+  "vendor roll up with calls",
+]);
+
 // These two nightly boards have fixed audiences. Keep the policy beside the
 // report vocabulary instead of trusting an old saved ReportDefinition to
 // remember who should receive financial or vendor information.
 const NIGHTLY_REPORT_RECIPIENTS = Object.freeze({
-  "financial roll up with calls": Object.freeze([
+  [CANONICAL_NIGHTLY_REPORT_NAMES.FINANCIAL]: Object.freeze([
     "mgray@taxadvocategroup.com",
     "abanks@taxadvocategroup.com",
     "manderson@taxadvocategroup.com",
     "jonathan13pineda@yahoo.com",
   ]),
-  "vendor roll up with calls": Object.freeze([
+  [CANONICAL_NIGHTLY_REPORT_NAMES.VENDOR]: Object.freeze([
     "mgray@taxadvocategroup.com",
     "liz@lizdev.com",
   ]),
 });
 
+function isRetiredNightlyReportName(definitionName) {
+  const key = String(definitionName || "").trim().toLowerCase();
+  return RETIRED_NIGHTLY_REPORT_NAMES.includes(key);
+}
+
 function nightlyReportRecipients(definitionName, fallback = []) {
   const key = String(definitionName || "").trim().toLowerCase();
+  if (isRetiredNightlyReportName(key)) return [];
   const fixed = NIGHTLY_REPORT_RECIPIENTS[key];
   if (fixed) return [...fixed];
   return (Array.isArray(fallback) ? fallback : [])
@@ -126,8 +154,11 @@ module.exports = {
   AGENT_ROW_ADDITIVE_FIELDS,
   AGENT_SUMMARY_ADDITIVE_FIELDS,
   AUXILIARY_DAILY_SECTION_KEYS,
+  CANONICAL_NIGHTLY_REPORT_NAMES,
   DAILY_SECTION_KEYS,
+  DAILY_REPAIR_REASONS,
   DAILY_TO_REPORT_SECTION,
+  HISTORICAL_REPAIR_MAX_AGE_DAYS,
   REPORT_SECTION_IDS,
   REPORT_OWNED_DAILY_SECTION_KEYS,
   REPORT_TO_DAILY_SECTION,
@@ -137,5 +168,7 @@ module.exports = {
   TOPLINE_ADDITIVE_FIELDS,
   isValidDateKey,
   NIGHTLY_REPORT_RECIPIENTS,
+  RETIRED_NIGHTLY_REPORT_NAMES,
+  isRetiredNightlyReportName,
   nightlyReportRecipients,
 };

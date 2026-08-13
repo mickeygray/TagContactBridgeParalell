@@ -12,6 +12,7 @@ const {
   ROLLUP, canRenderFromRecord, renderReportFromRecord, sectionsFromFact, sectionsFromRange,
 } = require("../../packages/shared-services/src/dailyRecordRenderService");
 const { BY_ID } = require("../../packages/shared-services/src/reportBlocksService");
+const { AGED_LABEL } = require("../../packages/shared-config/src/activeSources");
 
 const factDoc = (over = {}) => ({
   dateKey: "2026-08-05",
@@ -97,7 +98,10 @@ test("a stored range keeps source and agent metrics while compressing everything
     facts: {
       financial: { cash, spend: 10, newCash: cash, deals: 1, ldDials: 5, mailCalls: 2 },
       spend: { mail: 5, ld: 5, bcd: 0 },
-      bySource: [{ source: "LD", deals: 1, newCash: cash, recurringCash: 0, totalCash: cash, spend: 5, leads: 2 }],
+      bySource: [
+        { source: "LD", deals: 1, newCash: cash, recurringCash: 0, totalCash: cash, spend: 5, leads: 2 },
+        { source: AGED_LABEL, deals: 1, newCash: cash / 10, recurringCash: 5, totalCash: cash / 10 + 5, spend: 0, leads: 0 },
+      ],
       byAgent: {
         cases: 1, attempts: 5, attemptsKnown: 5, attemptsUnknown: 0,
         connected: 1, talkMinutes: minutes, newLeadsKnown: true,
@@ -123,6 +127,18 @@ test("a stored range keeps source and agent metrics while compressing everything
   assert.equal(report.to, "2026-08-05");
   assert.equal(report.sections.find((s) => s.id === "topline").data.cash, 300);
   assert.equal(report.sections.find((s) => s.id === "source").data[0].newCash, 300);
+  const sourceRows = report.sections.find((s) => s.id === "source").data;
+  const aged = sourceRows.find((row) => row.source === AGED_LABEL);
+  assert.equal(aged.deals, 2, "Aged deals remain a named additive daily fact");
+  assert.equal(aged.newCash, 30);
+  assert.equal(aged.recurringCash, 10);
+  assert.equal(aged.totalCash, 40);
+  assert.equal(aged.roas, null);
+  assert.equal(aged.roi, null);
+  assert.ok(
+    BY_ID.get("source").csv(sourceRows).emailRows.some((row) => row.source === AGED_LABEL),
+    "the record-sourced rollup email must render Aged as its own line",
+  );
   assert.equal(report.sections.find((s) => s.id === "ldcalls").data.attempts, 10);
   const status = report.sections.find((s) => s.id === "status").data;
   assert.equal(status.conversions, 2);

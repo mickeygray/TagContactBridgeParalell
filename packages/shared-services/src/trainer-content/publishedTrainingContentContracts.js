@@ -28,6 +28,7 @@ const SCENARIO_NODE_TYPES = Object.freeze([
 const SCENARIO_EXPERIENCE_MODES = Object.freeze(["gauntlet", "free"]);
 const SCENARIO_DELIVERY_MODES = Object.freeze([
   "voice-required",
+  "voice-dynamic",
   "text-only-test",
 ]);
 const TRANSITION_FACTS = Object.freeze([

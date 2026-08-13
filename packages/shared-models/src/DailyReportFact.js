@@ -2,6 +2,7 @@
 
 const mongoose = require("mongoose");
 const {
+  DAILY_REPAIR_REASONS,
   DAILY_SECTION_KEYS,
   isValidDateKey,
 } = require("../../shared-config/src/dailyReportContract");
@@ -52,6 +53,11 @@ const dailyReportFactSchema = new mongoose.Schema(
     // strictly better than refusing to record it.
     emailAcceptedAt: { type: Date, default: null },
     capturedAt: { type: Date, required: true, default: Date.now },
+    // When the spend section in THIS document was actually refreshed. This is
+    // separate from updatedAt because call/activity writers may touch the day
+    // without replacing frozen mail spend. Late-invoice repair compares this
+    // marker with MailInvoice.spendDerivedAt so a failed rebuild is retryable.
+    spendCapturedAt: { type: Date, default: null },
     revision: { type: Number, required: true, default: 0 },
     // When the daily-entry worker last assembled this day. Declared explicitly:
     // the schema is strict, so an undeclared field is dropped on write without
@@ -91,6 +97,9 @@ const dailyReportFactSchema = new mongoose.Schema(
       // schema is strict — an undeclared facts.spend would be silently dropped
       // on write and the fact would look like it stored fine.
       [DAILY_SECTION_KEYS.SPEND]: { type: mongoose.Schema.Types.Mixed, default: null },
+      // Includes the explicit "Aged / inactive source" row. Aged is known
+      // attribution, not an unresolved deal: it remains additive across days
+      // but carries no ROAS/ROI when a stored range is reconstructed.
       [DAILY_SECTION_KEYS.BY_SOURCE]: { type: mongoose.Schema.Types.Mixed, default: null },
       [DAILY_SECTION_KEYS.BY_AGENT]: { type: mongoose.Schema.Types.Mixed, default: null },
       [DAILY_SECTION_KEYS.STATUS]: { type: mongoose.Schema.Types.Mixed, default: null },
@@ -113,6 +122,12 @@ const dailyReportFactSchema = new mongoose.Schema(
       capturedSections: { type: [String], default: [] },
       missingSections: { type: [String], default: [] },
       sectionErrors: { type: [String], default: [] },
+      // Safe, value-free hints for the bounded seven-day repair. These say
+      // WHICH calculation was incomplete, never which customer/case caused it.
+      repairHints: {
+        type: [{ type: String, enum: Object.values(DAILY_REPAIR_REASONS) }],
+        default: [],
+      },
       reportDegraded: { type: Boolean, default: false },
       // The five sections needed to render the stored email were captured
       // cleanly. Aggregate call-index coverage is tracked independently below

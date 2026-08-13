@@ -22,6 +22,7 @@ const BODY_KEYS = Object.freeze({
     "text",
   ]),
   gauntletRetry: new Set(["eventId", "expectedVersion"]),
+  gauntletModuleAnswer: new Set(["answer"]),
   freeCallMint: new Set(["requestId"]),
   freeCallTurn: new Set(["eventId", "expectedVersion", "expectedTurn", "text"]),
   freeCallObserver: new Set(["eventId", "expectedVersion", "expectedTurn", "prospectState"]),
@@ -366,6 +367,24 @@ function createSalesTrainerCourseRouter(options = {}) {
           attemptId: req.params.attemptId,
           eventId: req.body.eventId,
           expectedVersion: req.body.expectedVersion,
+        });
+      }),
+    );
+
+    router.post(
+      "/course/gauntlet/attempts/:attemptId/module-answer",
+      courseLimit,
+      requireSalesTrainerAccess,
+      handler(async (req) => {
+        if (!exactBody(req.body, BODY_KEYS.gauntletModuleAnswer)) {
+          const error = new Error("Invalid Gauntlet reflection request");
+          error.status = 422;
+          throw error;
+        }
+        return gauntletService.gradeModuleAnswer({
+          principal: await principal(req),
+          attemptId: req.params.attemptId,
+          answer: req.body.answer,
         });
       }),
     );

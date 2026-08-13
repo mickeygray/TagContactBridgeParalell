@@ -1,6 +1,6 @@
 "use strict";
 
-// THE MORNING PASS — set the day up, then send the sms/email half of cadence.
+// THE MORNING PASS — one durable owner sets the day up.
 //
 // Mickey 2026-08-06: "1) set up the morning and run lead cadence for the day
 // ... all the texts and emails at 8 and all the rvms at noon kinda thing."
@@ -30,7 +30,23 @@
 
 const { createPassRuntime } = require("./passRuntimeFactory");
 
-const flag = (name) => String(process.env[name] || "false").toLowerCase() === "true";
+const envTrue = (env, name) => String(env?.[name] || "false").trim().toLowerCase() === "true";
+const flag = (name) => envTrue(process.env, name);
+const positiveInt = (name, fallback) => Math.max(1, Number(process.env[name]) || fallback);
+const RECURRING_MORNING_CADENCE_WRITES_ENABLED = false;
+
+/**
+ * The retry clock gives up the floor only after its replacement owner is
+ * fully armed. The explicit handoff key keeps enabling some other morning
+ * task from accidentally disabling DNC/aged maintenance.
+ */
+function floorServicesOwnedByMorningPass(env = process.env) {
+  return [
+    "MORNING_FLOOR_FROM_HOURLY_HANDOFF",
+    "MORNING_PASS_ENABLED",
+    "MORNING_FLOOR_SERVICES_ENABLED",
+  ].every((name) => envTrue(env, name));
+}
 
 const TASKS = [
   {
@@ -64,6 +80,15 @@ const TASKS = [
         // hourly caller's substitute for that claim — kept, the monthly
         // refresh and the aged ladder would never run from here at all.
         requireHour: false,
+        // The old owner called these on every minute of their due hour. A
+        // once-daily owner must take a larger, still-bounded page or it would
+        // silently process only the first 100/500 rows and declare the day
+        // complete. Operators can lower either cap without changing code.
+        dncRecheckLimit: positiveInt("MORNING_DNC_RECHECK_LIMIT", 2500),
+        agedRefreshLimitPerDomain: positiveInt(
+          "MORNING_AGED_REFRESH_LIMIT_PER_DOMAIN",
+          2500,
+        ),
         logger,
         impls: floorImpls,
       });
@@ -95,9 +120,11 @@ const TASKS = [
     // day's FIRST rvm batch rather than a blocked second one.
     key: "cadence-morning",
     weekdaysOnly: true,
-    label: "Lead cadence — texts and emails",
-    writesArmed: () => flag("MORNING_CADENCE_ENABLED"),
+    label: "RETIRED — recurring lead-cadence texts and emails",
+    writesArmed: () => RECURRING_MORNING_CADENCE_WRITES_ENABLED
+      && flag("MORNING_CADENCE_ENABLED"),
     async plan({ domains }) {
+      if (!RECURRING_MORNING_CADENCE_WRITES_ENABLED) return [];
       return [{ domains: [...domains], channels: ["sms", "email"], maxDispatches: morningCadenceCap() }];
     },
     count() { return 1; },
@@ -156,4 +183,9 @@ function createMorningPassRuntime({ config = {}, runtime = {} } = {}) {
   });
 }
 
-module.exports = { TASKS, createMorningPassRuntime };
+module.exports = {
+  TASKS,
+  RECURRING_MORNING_CADENCE_WRITES_ENABLED,
+  createMorningPassRuntime,
+  floorServicesOwnedByMorningPass,
+};

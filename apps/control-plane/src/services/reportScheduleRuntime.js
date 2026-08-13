@@ -24,8 +24,14 @@ const {
   stampEmailAccepted,
 } = require("../../../../packages/shared-services/src/dailySnapshotService");
 const { sendMail } = require("../../../../packages/shared-services/src/mailerService");
+const {
+  syncAgedLogicsSourcesFromReport,
+} = require("../../../../packages/shared-services/src/logicsAgedSourceWriterService");
 const { recordServiceAlert } = require("../../../../packages/shared-services/src");
 const { getInternalFromEmail } = require("../../../../packages/shared-config/src");
+const {
+  nightlyReportRecipients,
+} = require("../../../../packages/shared-config/src/dailyReportContract");
 
 const DEFAULT_POLL_MS = 5 * 60 * 1000;
 
@@ -64,6 +70,8 @@ function createReportScheduleRuntime({ config = {}, runtime = {} } = {}) {
   const log = runtime.logger || null;
   const listDueDefinitions = runtime.dueDefinitions || dueDefinitions;
   const executeDefinition = runtime.runDefinition || runDefinition;
+  const writeAgedSources = runtime.syncAgedLogicsSourcesFromReport
+    || syncAgedLogicsSourcesFromReport;
 
   async function poll({ force = false, now = new Date() } = {}) {
     // Guard FIRST: every early return below must be unable to skip the
@@ -97,14 +105,37 @@ function createReportScheduleRuntime({ config = {}, runtime = {} } = {}) {
             // has been accepted, and a record that claimed delivery before the
             // send would lie on any night the mail bounced. It is stamped below,
             // once the provider has actually taken it.
-            onComposed: ({ def: d, range, report }) => writeDailySnapshot({
-              def: d, range, report, emailAcceptedAt: null, logger: log,
-            }),
+            onComposed: async ({ def: d, range, report }) => {
+              return writeDailySnapshot({
+                def: d, range, report, emailAcceptedAt: null, logger: log,
+              });
+            },
           });
-          results.push({
+          // The report has already made the Aged decision. Reuse that exact
+          // in-memory evidence only AFTER SMTP accepts the report. This used
+          // to sit inside onComposed, where up to 200 sequential Logics reads
+          // and writes could delay the email despite being labelled
+          // best-effort. The writer has its own bounded budget as a second
+          // guard against holding the nightly cursor open.
+          let agedSourceWrite = { status: "skipped", reason: "email-not-delivered" };
+          if (result.delivered) {
+            try {
+              agedSourceWrite = await writeAgedSources({
+                def, range: result.range, report: result.report, logger: log,
+              });
+            } catch (error) {
+              agedSourceWrite = { status: "failed", reason: "aged-source-write-failed", failed: 1 };
+              log?.error?.("report_schedule.aged_source_write_failed", {
+                error: String(error.message).slice(0, 160),
+              });
+            }
+          }
+          const resultSummary = {
             name: def.name, range: result.range, delivered: result.delivered,
             sections: result.sections, errors: result.errors, durationMs: result.durationMs,
-          });
+            agedSourceWrite,
+          };
+          results.push(resultSummary);
           log?.info?.("report_schedule.ran", {
             definition: def.name, from: result.range.from, to: result.range.to,
             delivered: result.delivered, durationMs: result.durationMs,
@@ -136,6 +167,9 @@ function createReportScheduleRuntime({ config = {}, runtime = {} } = {}) {
             || (result.onComposedError
               ? { status: "failed", reason: result.onComposedError }
               : { status: "skipped", reason: "no capture attempted" });
+          resultSummary.dailyFactCapture = {
+            status: result.dailyFactCapture?.status || "skipped",
+          };
 
           if (result.delivered && result.dailyFactCapture?.status === "written") {
             await stampEmailAccepted(result.range.from, new Date()).catch((error) => {
@@ -161,6 +195,7 @@ function createReportScheduleRuntime({ config = {}, runtime = {} } = {}) {
               tags: ["metrics", "daily-facts"],
             }).catch(() => {});
           }
+
         } catch (error) {
           // One bad definition must not stop the others from going out.
           results.push({ name: def.name, error: String(error.message).slice(0, 300) });
@@ -256,7 +291,8 @@ function createReportScheduleRuntime({ config = {}, runtime = {} } = {}) {
         at: `${String(d.schedule?.hour ?? 0).padStart(2, "0")}:${String(d.schedule?.minute ?? 0).padStart(2, "0")} PT`,
         enabled: Boolean(d.schedule?.enabled),
         lastRunKey: d.lastRunKey, lastRunAt: d.lastRunAt, lastError: d.lastError || null,
-        due: verdict.due, reason: verdict.reason, recipients: d.recipients || [],
+        due: verdict.due, reason: verdict.reason,
+        recipients: nightlyReportRecipients(d.name, d.recipients),
       };
     });
   }

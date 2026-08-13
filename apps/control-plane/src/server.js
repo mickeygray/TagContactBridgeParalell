@@ -78,8 +78,12 @@ const { createLogicsActivityReviewRuntime } = require("./services/logicsActivity
 const { createNightlyCloseRuntime } = require("./services/nightlyCloseRuntime");
 const { createReportScheduleRuntime } = require("./services/reportScheduleRuntime");
 const { createNightlyHygieneRuntime } = require("./services/nightlyHygieneRuntime");
-const { createMorningPassRuntime } = require("./services/morningPassRuntime");
+const {
+  createMorningPassRuntime,
+  floorServicesOwnedByMorningPass,
+} = require("./services/morningPassRuntime");
 const { createMiddayPassRuntime } = require("./services/middayPassRuntime");
+const { nightlyOwnsStandaloneTask } = require("./services/scheduledPassOwnership");
 const { createCxNightlyCallGradeRuntime } = require("./services/cxNightlyCallGradeRuntime");
 const { createEodRecordingArchiveRuntime } = require("./services/eodRecordingArchiveRuntime");
 const { createPhoneburnerRotationRuntime } = require("./services/phoneburnerRotationRuntime");
@@ -783,6 +787,10 @@ async function startHourlySweepWorker({ config, runtime, workerState, spendSyncR
         calllogBridgeEnabled: !scheduledPhaseLite,
         staleCadenceSweepEnabled: !scheduledPhaseLite,
         staleNcoaSweepEnabled: !scheduledPhaseLite,
+        // This clock remains the narrow durable retry drain. It relinquishes
+        // scheduled floor work only after the morning runtime, its floor task,
+        // and the explicit ownership handoff are all armed.
+        floorServicesEnabled: !floorServicesOwnedByMorningPass(process.env),
         // ── KEPT ON THROUGH LITE MODE ────────────────────────────────────
         //
         // Mickey 2026-08-04: "two things that need to stay on are the aged
@@ -2295,16 +2303,23 @@ async function startServer() {
     config: config.lexisDailyDrop || {},
     runtime,
   });
+  const nightlyHygieneConfigured = config.nightlyHygiene?.enabled === true
+    || String(process.env.NIGHTLY_HYGIENE_ENABLED) === "true";
   const logicsActivityReviewRuntime = createLogicsActivityReviewRuntime({
-    config: config.logicsActivityReview || {},
+    config: {
+      ...(config.logicsActivityReview || {}),
+      // The object remains available to the nightly collaborator, but its own
+      // timer stands down only when the replacement task is also armed.
+      enabled: nightlyOwnsStandaloneTask("NIGHTLY_ACTIVITY_REVIEW_ENABLED", {
+        nightlyConfigured: nightlyHygieneConfigured,
+      }) ? false : config.logicsActivityReview?.enabled,
+    },
     runtime,
   });
   // Saved report shapes on a clock. Default OFF — arm with
   // REPORT_SCHEDULER_ENABLED=true once the definitions read right. When the
   // nightly pipeline is enabled, this becomes its final executor and does not
   // start a competing timer.
-  const nightlyHygieneConfigured = config.nightlyHygiene?.enabled === true
-    || String(process.env.NIGHTLY_HYGIENE_ENABLED) === "true";
   const reportScheduleRuntime = createReportScheduleRuntime({
     config: {
       ...(config.reportSchedule || {}),
@@ -2318,7 +2333,12 @@ async function startServer() {
   // hygiene pass now takes it as a collaborator. Still constructed before
   // nightlyCloseRuntime, which has the same dependency for its reconcile step.
   const spendSyncRuntime = createSpendSyncRuntime({
-    config: config.spendSync || {},
+    config: {
+      ...(config.spendSync || {}),
+      enabled: nightlyOwnsStandaloneTask("NIGHTLY_SPEND_SYNC_ENABLED", {
+        nightlyConfigured: nightlyHygieneConfigured,
+      }) ? false : config.spendSync?.enabled,
+    },
     runtime,
   });
   // THE nightly service: one loop from 19:50 cleanup through report delivery.
@@ -2337,11 +2357,14 @@ async function startServer() {
       spendSyncRuntime,
       activityReviewRuntime: logicsActivityReviewRuntime,
       reportScheduleRuntime,
+      leadDeliveryRuntime,
       reportDeliveryEnabled: config.reportSchedule?.enabled === true
         || String(process.env.REPORT_SCHEDULER_ENABLED) === "true",
-      emergencyCloseEnabled: nightlyHygieneConfigured
-        && (config.reportSchedule?.enabled === true
-          || String(process.env.REPORT_SCHEDULER_ENABLED) === "true"),
+      // Arm the Mongo-independent fallback whenever this runtime owns the
+      // night. In particular, REPORT_SCHEDULER_ENABLED=false is itself a close
+      // failure; tying the fallback to that same flag made the one state that
+      // most needed a degraded email silently complete without any email.
+      emergencyCloseEnabled: nightlyHygieneConfigured,
       emergencyClose: {
         recipients: config.nightlyClose?.opsRecipients || config.nightlyClose?.recipients || null,
       },
@@ -2358,7 +2381,13 @@ async function startServer() {
     runtime,
   });
   const middayPassRuntime = createMiddayPassRuntime({
-    config: config.middayPass || {},
+    config: {
+      ...(config.middayPass || {}),
+      collaborators: {
+        ...(config.middayPass?.collaborators || {}),
+        leadDeliveryRuntime,
+      },
+    },
     runtime,
   });
   const nightlyCloseRuntime = createNightlyCloseRuntime({

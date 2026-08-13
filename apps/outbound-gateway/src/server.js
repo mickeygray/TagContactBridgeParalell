@@ -40,6 +40,11 @@ const { buildServiceHealth } = require("../../../packages/shared-observability/s
 
 const envTrue = (env, key) => String(env?.[key] || "false").toLowerCase() === "true";
 
+// Mickey's current rule is first-contact SMS/email plus voice-queue enrollment.
+// Keep the old counter-cadence implementation for the no-delete window, but
+// remove its unattended owner. Manual/admin routes remain explicit actions.
+const RECURRING_COUNTER_CADENCE_AUTOMATION_ENABLED = false;
+
 function dailyCadenceOwnedByPasses(env = process.env) {
   if (!envTrue(env, "OUTBOUND_DAILY_CADENCE_TO_PASSES")) return false;
   return [
@@ -262,7 +267,7 @@ async function startOutboundWorker({ config, runtime, workerState }) {
   const intervalMs = Math.max(Number(config.outboundWorker?.intervalMs) || 5000, 1000);
   const batchSize = Math.max(Number(config.outboundWorker?.batchSize) || 25, 1);
   const maxAttempts = Math.max(Number(config.outboundWorker?.maxAttempts) || 5, 1);
-  const counterCadenceEnabled = String(
+  const counterCadenceEnabled = RECURRING_COUNTER_CADENCE_AUTOMATION_ENABLED && String(
     process.env.COUNTER_CADENCE_ENABLED ?? config.outboundWorker?.counterCadenceEnabled ?? "true",
   ).toLowerCase() !== "false";
   const counterCadenceIntervalMs = Math.max(
@@ -972,6 +977,7 @@ if (require.main === module) {
 }
 
 module.exports = {
+  RECURRING_COUNTER_CADENCE_AUTOMATION_ENABLED,
   createWorkerState,
   dailyCadenceOwnedByPasses,
   intervalDue,

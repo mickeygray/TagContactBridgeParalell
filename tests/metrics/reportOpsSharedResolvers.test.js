@@ -68,6 +68,22 @@ test("an old case on a dead source demotes to Aged", () => {
   assert.equal(row, AGED_LABEL);
 });
 
+test("resolveSourceRow carries post-date conversion evidence into the aging decision", () => {
+  const row = ops.resolveSourceRow(
+    {
+      domain: "TAG",
+      sourceAtSale: "Urgent Third State",
+      caseId: 35,
+      caseCreatedDate: "2024-01-01",
+      paymentDateKey: "2026-08-10",
+      metricsTreatment: { firstPaidDateKey: "2026-08-10" },
+      hasPostdateStatus: true,
+    },
+    { rangeStart: "2026-08-10", rangeEnd: "2026-08-10", attributionCallDate: "2026-07-06" },
+  );
+  assert.equal(row, "Urgent Third State");
+});
+
 test("foldSourceKey lands spend on the row the money landed on", () => {
   const moneyRow = ops.resolveSourceRow(
     {

@@ -21,13 +21,19 @@ function issueCodes(content, options = { allowTestContent: true }) {
   return collectPublishedTrainingContentIssues(content, options).map((issue) => issue.code);
 }
 
-test("production Trainer registries remain empty and unpublished", () => {
-  assert.equal(publishedTrainingContent.status, "draft");
+test("production Trainer registry publishes the approved call-arc course", () => {
+  assert.equal(publishedTrainingContent.status, "published");
   assert.equal(publishedTrainingContent.testOnly, false);
-  assert.deepEqual(publishedTrainingContent.ruleRegistry.rules, []);
-  assert.deepEqual(publishedTrainingContent.courseManifest.items, []);
+  assert.equal(publishedTrainingContent.ruleRegistry.status, "published");
+  assert.ok(publishedTrainingContent.ruleRegistry.rules.length > 0);
+  assert.equal(publishedTrainingContent.courseManifest.status, "published");
+  assert.ok(publishedTrainingContent.courseManifest.items.length > 0);
   assert.deepEqual(publishedTrainingContent.courseManifest.overlays, []);
-  assert.deepEqual(publishedTrainingContent.scenarioBlueprints, []);
+  assert.equal(
+    publishedTrainingContent.scenarioBlueprints.length,
+    publishedTrainingContent.courseManifest.items.length,
+  );
+  assert.equal(validatePublishedTrainingContent(publishedTrainingContent), true);
 });
 
 test("synthetic versioned content passes only with explicit test-content authority", () => {

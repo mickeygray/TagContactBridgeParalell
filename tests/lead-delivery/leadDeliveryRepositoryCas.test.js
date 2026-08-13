@@ -22,6 +22,7 @@ function comparable(value) {
 function matchesValue(actual, expected) {
   if (Array.isArray(actual)) return actual.some((value) => matchesValue(value, expected));
   if (expected && typeof expected === "object" && !Array.isArray(expected) && !(expected instanceof Date)) {
+    if (Object.hasOwn(expected, "$ne") && comparable(actual) === comparable(expected.$ne)) return false;
     if (Object.hasOwn(expected, "$eq") && comparable(actual) !== comparable(expected.$eq)) return false;
     if (Object.hasOwn(expected, "$lt") && !(comparable(actual) < comparable(expected.$lt))) return false;
     if (Object.hasOwn(expected, "$lte") && !(comparable(actual) <= comparable(expected.$lte))) return false;
@@ -503,8 +504,8 @@ test("runtime reads normalize identities and return only time-eligible storage c
   for (const [pool, order] of [
     ["new_today", { receivedAt: -1, _id: 1 }],
     ["overnight", { overnightOrder: 1, _id: 1 }],
-    ["follow_up_due", { nextContactAt: 1, lastContactAt: 1, _id: 1 }],
-    ["older_available", { lastContactAt: 1, receivedAt: 1, _id: 1 }],
+    ["follow_up_due", { totalAttemptCount: 1, nextContactAt: 1, lastContactAt: 1, _id: 1 }],
+    ["older_available", { totalAttemptCount: 1, lastContactAt: 1, receivedAt: 1, _id: 1 }],
   ]) {
     await repository.listPacketCandidateItems({
       agentId: "BRUCE",
@@ -514,10 +515,109 @@ test("runtime reads normalize identities and return only time-eligible storage c
     });
     assert.deepEqual(Item.findCalls.at(-1).query.order, order);
   }
+  for (const [attemptBand, expectedFilter, expectedOrder] of [
+    ["standard", {
+      $or: [
+        { totalAttemptCount: { $gte: 1, $lt: 10 } },
+        { totalAttemptCount: 0, lastContactAt: { $ne: null } },
+      ],
+    }, { totalAttemptCount: 1, nextContactAt: 1, lastContactAt: 1, _id: 1 }],
+    ["age_sorted", {
+      totalAttemptCount: { $gte: 10, $lt: 15 },
+    }, { receivedAt: -1, totalAttemptCount: 1, nextContactAt: 1, _id: 1 }],
+    ["phase_out", {
+      totalAttemptCount: { $gte: 15 },
+    }, { receivedAt: -1, nextContactAt: 1, totalAttemptCount: 1, _id: 1 }],
+  ]) {
+    await repository.listPacketCandidateItems({
+      agentId: "BRUCE",
+      sourcePools: ["follow_up_due"],
+      attemptBand,
+      now: new Date("2026-07-10T23:00:00Z"),
+      limit: 3,
+    });
+    const read = Item.findCalls.at(-1);
+    for (const [key, value] of Object.entries(expectedFilter)) {
+      assert.deepEqual(read.filter[key], value);
+    }
+    assert.deepEqual(read.query.order, expectedOrder);
+  }
+  await assert.rejects(() => repository.listPacketCandidateItems({
+    agentId: "BRUCE",
+    sourcePools: ["follow_up_due"],
+    untouchedOnly: true,
+    attemptBand: "phase_out",
+    now: new Date("2026-07-10T23:00:00Z"),
+  }), /untouchedOnly cannot be combined/);
   assert.deepEqual(Item.findOneCalls[0].filter, { _id: "candidate-c" });
   assert.deepEqual(Item.findOneCalls[1].filter, { sourceIdentity: "TAG:case-a" });
   assert.deepEqual(Agent.findOneCalls[0].filter, { agentId: "bruce" });
   await assert.rejects(() => repository.listAgents({ enabledOnly: "true" }), /enabledOnly must be a boolean/);
+});
+
+test("nightly health repair candidates are bounded to unowned expired reservations and ordinary phase-out rows", async () => {
+  const at = new Date("2026-08-14T03:10:00.000Z");
+  const common = {
+    activeAttempt: true,
+    providerContactId: null,
+    providerExternalLeadId: null,
+    providerCallId: null,
+    providerPostState: null,
+    packetId: null,
+    deliveryAgentId: null,
+  };
+  const { repository, Item } = makeRepository({ items: [
+    {
+      _id: "expired-unposted",
+      version: 0,
+      ...common,
+      state: "reserved",
+      sourcePool: "older_available",
+      reservedAgentId: "brad",
+      reservationExpiresAt: new Date("2026-08-14T03:00:00.000Z"),
+    },
+    {
+      _id: "reserved-provider-owned",
+      version: 0,
+      ...common,
+      state: "reserved",
+      sourcePool: "older_available",
+      reservedAgentId: "brad",
+      reservationExpiresAt: new Date("2026-08-14T03:00:00.000Z"),
+      providerContactId: "contact",
+    },
+    {
+      _id: "ordinary-phase-out",
+      version: 0,
+      ...common,
+      state: "eligible",
+      sourcePool: "older_available",
+      reservedAgentId: null,
+      totalAttemptCount: 15,
+      lastContactAt: new Date("2026-08-10T17:00:00.000Z"),
+    },
+    {
+      _id: "recovery-phase-out",
+      version: 0,
+      ...common,
+      state: "eligible",
+      sourcePool: "older_available",
+      inventoryClass: "callrail_long_call_recovery",
+      reservedAgentId: null,
+      totalAttemptCount: 20,
+      lastContactAt: new Date("2026-08-10T17:00:00.000Z"),
+    },
+  ] });
+
+  const result = await repository.listNightlyLeadHealthRepairCandidates({ now: at, limit: 1 });
+  assert.deepEqual(result.expiredReservations.map((row) => row._id), ["expired-unposted"]);
+  assert.deepEqual(result.phaseOutCandidates.map((row) => row._id), ["ordinary-phase-out"]);
+  assert.equal(result.expiredReservationsTruncated, false);
+  assert.equal(result.phaseOutCandidatesTruncated, false);
+  assert.equal(Item.findCalls.at(-2).query.maximum, 2, "limit+1 proves truncation without an unbounded read");
+  assert.equal(Item.findCalls.at(-1).query.maximum, 2);
+  assert.deepEqual(Item.findCalls.at(-2).query.order, { reservationExpiresAt: 1, _id: 1 });
+  assert.deepEqual(Item.findCalls.at(-1).query.order, { lastContactAt: -1, _id: 1 });
 });
 
 test("agent configuration upsert changes only configuration fields and rejects runtime or secret material", async () => {

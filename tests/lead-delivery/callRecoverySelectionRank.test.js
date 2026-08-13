@@ -82,6 +82,63 @@ test("the elevation ENDS the moment the recovery case is contacted", () => {
   assert.equal(rank(contacted), rank(retry), "afterwards it competes on the same terms as any retry");
 });
 
+test("touched work is spread by fewest prior attempts before due-time age", () => {
+  const once = item({
+    caseId: "once", sourcePool: "follow_up_due", totalAttemptCount: 1,
+    lastContactAt: new Date(NOW.getTime() - 3600000),
+    nextContactAt: new Date(NOW.getTime() - 60000),
+  });
+  const heavilyRecycled = item({
+    caseId: "many", sourcePool: "follow_up_due", totalAttemptCount: 12,
+    lastContactAt: ago(30), nextContactAt: ago(20),
+  });
+
+  assert.ok(compareSelectionCandidates(once, heavilyRecycled, { now: NOW }) < 0,
+    "a lead awaiting attempt two must beat a lead awaiting attempt thirteen");
+});
+
+test("due time still orders leads inside the same attempt band", () => {
+  const olderDue = item({
+    caseId: "older-due", sourcePool: "follow_up_due", totalAttemptCount: 2,
+    lastContactAt: ago(2), nextContactAt: ago(1),
+  });
+  const newerDue = item({
+    caseId: "newer-due", sourcePool: "follow_up_due", totalAttemptCount: 2,
+    lastContactAt: ago(1), nextContactAt: new Date(NOW.getTime() - 60000),
+  });
+
+  assert.ok(compareSelectionCandidates(olderDue, newerDue, { now: NOW }) < 0,
+    "overdue age remains the tie-breaker when attempt counts match");
+});
+
+test("10-14 touch work favors newer leads over older ones", () => {
+  const olderTen = item({
+    caseId: "older-ten", totalAttemptCount: 10, receivedAt: ago(90),
+    lastContactAt: ago(1), nextContactAt: new Date(NOW.getTime() - 60000),
+  });
+  const newerFourteen = item({
+    caseId: "newer-fourteen", totalAttemptCount: 14, receivedAt: ago(5),
+    lastContactAt: ago(1), nextContactAt: new Date(NOW.getTime() - 60000),
+  });
+
+  assert.ok(compareSelectionCandidates(newerFourteen, olderTen, { now: NOW }) < 0,
+    "lead age, not the small attempt-count difference, orders the 10-14 band");
+});
+
+test("15 touches enters the phase-out tier behind ordinary retries", () => {
+  const fourteen = item({
+    caseId: "fourteen", totalAttemptCount: 14, receivedAt: ago(30),
+    lastContactAt: ago(1), nextContactAt: ago(1),
+  });
+  const fifteen = item({
+    caseId: "fifteen", totalAttemptCount: 15, receivedAt: ago(1),
+    lastContactAt: ago(20), nextContactAt: ago(5),
+  });
+
+  assert.ok(rank(fourteen) < rank(fifteen));
+  assert.ok(compareSelectionCandidates(fourteen, fifteen, { now: NOW }) < 0);
+});
+
 test("lastContactAt alone ends the elevation, even with a zero counter", () => {
   // A counter that failed to increment must not silently re-grant priority.
   const ghost = RECOVERY({ totalAttemptCount: 0, lastContactAt: new Date(NOW.getTime() - 600000) });

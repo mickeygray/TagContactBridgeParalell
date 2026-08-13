@@ -59,6 +59,9 @@ test("a reconciled invoice becomes one row per piece, summing to the bill", asyn
   assert.ok(Math.abs(sum - 1234.11) < 0.01, `rows must sum to the bill, got ${sum}`);
   // The invoice is stamped so a second pass can tell it is done.
   assert.equal(f.calls.stamped.length, 1);
+  assert.deepEqual(r.plannedDateKeys, ["2026-07-31"]);
+  assert.deepEqual(r.changedDateKeys, ["2026-07-31"],
+    "an applied change names the historical day that must be repaired");
 });
 
 test("an invoice in review NEVER becomes money", async () => {
@@ -157,6 +160,8 @@ test("a dry run writes NOTHING but still reports what it would do", async () => 
   assert.equal(r.rows.length, 2);
   assert.equal(f.calls.inserted.length, 0);
   assert.equal(f.calls.stamped.length, 0);
+  assert.deepEqual(r.plannedDateKeys, ["2026-07-31"]);
+  assert.deepEqual(r.changedDateKeys, [], "a preview cannot claim it changed a day");
 });
 
 test("every derived row carries the PDF it came from", async () => {

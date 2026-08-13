@@ -7,6 +7,7 @@ const fs = require("node:fs");
 const DailyReportFact = require("../../packages/shared-models/src/DailyReportFact");
 const service = require("../../packages/shared-services/src/dailyReportFactService");
 const { captureDeliveredDailyFact } = require("../../packages/shared-services/src/reportDefinitionService");
+const { AGED_LABEL } = require("../../packages/shared-config/src/activeSources");
 
 const report = (overrides = {}) => ({
   from: "2026-08-03",
@@ -35,7 +36,7 @@ const report = (overrides = {}) => ({
 });
 
 const definition = (overrides = {}) => ({
-  name: "financial roll up with calls",
+  name: "financial",
   sendEmail: true,
   domain: null,
   filters: [],
@@ -47,9 +48,14 @@ test("only the canonical unfiltered one-day rollup captures a daily fact", () =>
     definition(), report(), { from: "2026-08-03", to: "2026-08-03" },
   ).capture, true);
   assert.equal(service.isDailyFactCaptureCandidate(
-    definition({ name: "vendor roll up with calls" }), report(),
+    definition({ name: "vendor" }), report(),
     { from: "2026-08-03", to: "2026-08-03" },
   ).reason, "not-canonical-definition");
+  assert.equal(service.isDailyFactCaptureCandidate(
+    definition({ name: "financial stored verification", renderSource: "record" }), report(),
+    { from: "2026-08-03", to: "2026-08-03" },
+  ).reason, "not-canonical-definition",
+  "the parity shadow reads the canonical snapshot and must never write a second one");
   assert.equal(service.isDailyFactCaptureCandidate(
     definition({ domain: "WYNN" }), report(), { from: "2026-08-03", to: "2026-08-03" },
   ).reason, "tenant-scoped");
@@ -64,7 +70,7 @@ test("only the canonical unfiltered one-day rollup captures a daily fact", () =>
 test("one combined day is report-complete while reserving the aggregate call slot", () => {
   const fact = service.buildDailyReportFact({
     dateKey: "2026-08-03",
-    definitionName: "financial roll up with calls",
+    definitionName: "financial",
     report: report(),
     emailAcceptedAt: new Date("2026-08-04T03:01:00.000Z"),
   });
@@ -87,6 +93,47 @@ test("one combined day is report-complete while reserving the aggregate call slo
   assert.equal("caseId" in fact.facts.financial, false);
   assert.equal("roi" in fact.facts.financial, false, "range reports must recompute ratios");
   assert.equal("keyChanges" in fact.facts.statusMovement, false);
+});
+
+test("the daily fact preserves Aged as a named source row", () => {
+  const sections = report().sections.map((section) => (
+    section.id === "source"
+      ? {
+        ...section,
+        data: {
+          rows: [
+            { source: "LD", deals: 2, newCash: 2000, totalCash: 2000, spend: 300 },
+            {
+              source: AGED_LABEL,
+              deals: 1,
+              newCash: 500,
+              recurringCash: 100,
+              totalCash: 600,
+              spend: 0,
+              roas: null,
+              roi: null,
+            },
+          ],
+        },
+      }
+      : section
+  ));
+  const fact = service.buildDailyReportFact({
+    dateKey: "2026-08-03",
+    definitionName: service.CANONICAL_DEFINITION_NAME,
+    report: report({ sections }),
+  });
+  const aged = fact.facts.bySource.rows.find((row) => row.source === AGED_LABEL);
+  assert.deepEqual(aged, {
+    source: AGED_LABEL,
+    deals: 1,
+    newCash: 500,
+    recurringCash: 100,
+    totalCash: 600,
+    spend: 0,
+  });
+  assert.equal("roas" in aged, false, "daily facts store inputs, not rendered ratios");
+  assert.equal("roi" in aged, false, "daily facts store inputs, not rendered ratios");
 });
 
 test("daily facts discard unfamiliar locator and provider/customer identity aliases", () => {
@@ -126,7 +173,7 @@ test("daily facts discard unfamiliar locator and provider/customer identity alia
 test("source failures persist an incomplete day instead of a confident zero", () => {
   const fact = service.buildDailyReportFact({
     dateKey: "2026-08-03",
-    definitionName: "financial roll up with calls",
+    definitionName: "financial",
     report: report({ failures: ["queue unavailable"] }),
   });
   assert.equal(fact.coverage.coreComplete, false);
@@ -139,7 +186,7 @@ test("persistence is one upsert per day and increments its revision", async () =
   const Model = { updateOne: async (...args) => { write = args; return { acknowledged: true }; } };
   const result = await service.persistDailyReportFact({
     dateKey: "2026-08-03",
-    definitionName: "financial roll up with calls",
+    definitionName: "financial",
     report: report(),
   }, { Model });
   assert.equal(result.status, "captured");
@@ -150,12 +197,14 @@ test("persistence is one upsert per day and increments its revision", async () =
 
 test("a snapshot rerun preserves closed mail spend but refreshes event-backed spend", async () => {
   let write = null;
+  const originalSpendCapture = new Date("2026-08-04T03:00:00.000Z");
   const Model = {
     findOne: () => ({
       select: () => ({
         lean: async () => ({
           facts: { spend: { mail: 100, mailPieces: 50, ld: 20, bcd: 5, total: 125 } },
           detail: { spend: { mail: 100, mailPieces: 50, ld: 20, bcd: 5, total: 125 } },
+          spendCapturedAt: originalSpendCapture,
         }),
       }),
     }),
@@ -179,6 +228,43 @@ test("a snapshot rerun preserves closed mail spend but refreshes event-backed sp
   });
   assert.deepEqual(write[1].$set["detail.spend"], factsSpend,
     "the complete and additive views must agree about the frozen day");
+  assert.equal(write[1].$set.spendCapturedAt.getTime(), originalSpendCapture.getTime(),
+    "an unrelated rerun must not claim frozen spend was refreshed");
+});
+
+test("a late-document repair may deliberately replace the frozen spend section", async () => {
+  let write = null;
+  let readExisting = false;
+  const Model = {
+    findOne: () => ({
+      select: () => ({
+        lean: async () => {
+          readExisting = true;
+          return { facts: { spend: { mail: 100, mailPieces: 50, ld: 20, bcd: 5, total: 125 } } };
+        },
+      }),
+    }),
+    updateOne: async (...args) => { write = args; return { acknowledged: true }; },
+  };
+  const fact = service.buildDailyReportFact({
+    dateKey: "2026-08-03",
+    definitionName: service.CANONICAL_DEFINITION_NAME,
+    report: report({ spend: { mail: 999, mailPieces: 400, ld: 30, bcd: 7, total: 1036 } }),
+    dailyEntry: {
+      errors: [],
+      facts: { spend: { mail: 999, mailPieces: 400, ld: 30, bcd: 7, total: 1036 } },
+      detail: { spend: { mail: 999, mailPieces: 400, ld: 30, bcd: 7, total: 1036 } },
+    },
+  });
+
+  await service.persistBuiltDailyReportFact(fact, { Model, overwriteFrozen: ["spend"] });
+  assert.equal(readExisting, false, "an explicit repair must not merge the stale frozen value back in");
+  assert.deepEqual(write[1].$set["facts.spend"], {
+    mail: 999, mailPieces: 400, ld: 30, bcd: 7, total: 1036,
+  });
+  assert.deepEqual(write[1].$set["detail.spend"], write[1].$set["facts.spend"]);
+  assert.ok(write[1].$set.spendCapturedAt instanceof Date,
+    "a deliberate late repair advances the spend-specific freshness marker");
 });
 
 test("the nightly write touches facts.<key>, never the whole facts object", async () => {
@@ -189,7 +275,7 @@ test("the nightly write touches facts.<key>, never the whole facts object", asyn
   const Model = { updateOne: async (...args) => { write = args; return { acknowledged: true }; } };
   await service.persistDailyReportFact({
     dateKey: "2026-08-03",
-    definitionName: "financial roll up with calls",
+    definitionName: "financial",
     report: report(),
   }, { Model });
 
@@ -214,7 +300,7 @@ test("an ungatherable section writes an explicit null rather than leaving a stal
   bare.sections = bare.sections.filter((s) => s.id !== "source");
   await service.persistDailyReportFact({
     dateKey: "2026-08-03",
-    definitionName: "financial roll up with calls",
+    definitionName: "financial",
     report: bare,
   }, { Model });
   assert.ok("facts.bySource" in write[1].$set);
@@ -323,7 +409,7 @@ test("ONE gather feeds both the email and the snapshot", async () => {
   // RingCentral once rather than twice.
   const { writeDailySnapshot } = require("../../packages/shared-services/src/dailySnapshotService");
   const def = {
-    name: "financial roll up with calls", sendEmail: true,
+    name: "financial", sendEmail: true,
     preset: "rollup", selection: null, domain: null, filters: [],
   };
   const range = { from: "2026-08-03", to: "2026-08-03" };
@@ -365,6 +451,291 @@ test("ONE gather feeds both the email and the snapshot", async () => {
     writer: async () => ({ revision: 1 }),
   });
   assert.equal(composes, 1, "with no report supplied it still composes one");
+});
+
+test("a late document repairs only its historical day and preserves the old email stamp", async () => {
+  const { repairDailySnapshots } = require("../../packages/shared-services/src/dailySnapshotService");
+  const acceptedAt = new Date("2026-08-04T03:00:00.000Z");
+  let write = null;
+  let composes = 0;
+  const Model = {
+    findOne: () => ({
+      select: () => ({ lean: async () => ({ emailAcceptedAt: acceptedAt }) }),
+    }),
+    updateOne: async (...args) => { write = args; return { acknowledged: true }; },
+  };
+  const repairedReport = report({
+    spend: { mail: 1200, mailPieces: 5000, ld: 30, bcd: 8, total: 1238 },
+  });
+  const out = await repairDailySnapshots({
+    dateKeys: ["2026-08-03", "2026-08-03"],
+    def: {
+      name: service.CANONICAL_DEFINITION_NAME,
+      sendEmail: true,
+      blocks: ["daily"],
+      domain: null,
+      filters: [],
+    },
+    compose: async ({ from, to }) => {
+      composes += 1;
+      assert.deepEqual({ from, to }, { from: "2026-08-03", to: "2026-08-03" });
+      return repairedReport;
+    },
+    Model,
+  });
+
+  assert.equal(composes, 1, "duplicate affected dates pay for one repair gather");
+  assert.equal(out.repaired, 1);
+  assert.equal(out.failed, 0);
+  assert.equal(write[1].$set.emailAcceptedAt.getTime(), acceptedAt.getTime(),
+    "repairing factors must not pretend a new email was accepted");
+  assert.equal(write[1].$set["facts.spend"].mail, 1200);
+  assert.equal(write[1].$set["facts.spend"].mailPieces, 5000);
+});
+
+test("a failed late repair remains discoverable until spend is actually recaptured", async () => {
+  const { findSpendRepairDateKeys } = require(
+    "../../packages/shared-services/src/dailySnapshotService"
+  );
+  const chain = (rows) => ({ select: () => ({ lean: async () => rows }) });
+  const InvoiceModel = {
+    find: () => chain([
+      { serviceDate: "2026-08-08", spendDerivedAt: new Date("2026-08-11T02:51:00Z") },
+      { serviceDate: "2026-08-09", spendDerivedAt: new Date("2026-08-10T02:51:00Z") },
+      { serviceDate: "2026-08-10", spendDerivedAt: new Date("2026-08-11T02:51:00Z") },
+    ]),
+  };
+  const FactModel = {
+    find: () => chain([
+      { dateKey: "2026-08-08", spendCapturedAt: new Date("2026-08-10T03:00:00Z") },
+      { dateKey: "2026-08-09", spendCapturedAt: new Date("2026-08-11T03:00:00Z") },
+    ]),
+  };
+  const pending = await findSpendRepairDateKeys({
+    from: "2026-08-08", to: "2026-08-10", currentDateKey: "2026-08-10",
+    InvoiceModel, FactModel,
+  });
+  assert.deepEqual(pending, ["2026-08-08"],
+    "stale spend retries, already-repaired spend and the current close do not");
+});
+
+test("daily repair hints identify only unresolved officer, source, and cost facts", () => {
+  const {
+    REPAIR_REASON, dailyFactRepairReasons,
+  } = require("../../packages/shared-services/src/dailySnapshotService");
+  const reasons = dailyFactRepairReasons({
+    dateKey: "2026-08-10",
+    coverage: { reportDegraded: true, repairHints: [] },
+    facts: {
+      financial: { mailApplies: true },
+      spend: { mail: 0, mailPieces: 0, ld: 30, bcd: 4, total: 34 },
+      byAgent: { agents: [{ agent: "(no snapshot)", deals: 1, cash: 900 }] },
+      bySource: [
+        { source: "(unsourced)", deals: 1, newCash: 900, spend: 0 },
+        { source: "LD", leads: 4, spend: 0 },
+        { source: "Aged / inactive source", deals: 1, newCash: 500, spend: 0 },
+      ],
+    },
+  });
+  assert.deepEqual(new Set(reasons), new Set([
+    REPAIR_REASON.OFFICER,
+    REPAIR_REASON.MARKETING_SOURCE,
+    REPAIR_REASON.MARKETING_COST,
+  ]));
+  assert.equal(reasons.filter((reason) => reason === REPAIR_REASON.MARKETING_COST).length, 1,
+    "Aged carries no cost by design and must not create a second repair reason");
+});
+
+test("historical repair scans only the prior seven days and excludes the current close", async () => {
+  const {
+    findHistoricalDailyFactRepairs,
+  } = require("../../packages/shared-services/src/dailySnapshotService");
+  let query = null;
+  const FactModel = {
+    find: (value) => {
+      query = value;
+      return {
+        select: () => ({
+          sort: () => ({
+            lean: async () => [{
+              dateKey: "2026-08-10",
+              coverage: { repairHints: ["marketing-cost"] },
+              facts: {},
+            }],
+          }),
+        }),
+      };
+    },
+  };
+  const rows = await findHistoricalDailyFactRepairs({
+    currentDateKey: "2026-08-11", maxAgeDays: 99, FactModel,
+  });
+  assert.deepEqual(query, { dateKey: { $gte: "2026-08-04", $lte: "2026-08-10" } });
+  assert.deepEqual(rows, [{ dateKey: "2026-08-10", reasons: ["marketing-cost"] }]);
+});
+
+test("one late sheet read identifies every changed service day, not the fetch day", async () => {
+  const { findMailSheetRepairDateKeys } = require(
+    "../../packages/shared-services/src/dailySnapshotService"
+  );
+  const MailSpendModel = {
+    find: () => ({
+      select: () => ({
+        lean: async () => [{ serviceDate: "2026-08-10" }],
+      }),
+    }),
+  };
+  const out = await findMailSheetRepairDateKeys({
+    from: "2026-08-04",
+    to: "2026-08-10",
+    currentDateKey: "2026-08-11",
+    sheetReader: async () => ({
+      unavailable: null,
+      rows: [
+        { date: "2026-08-07", spend: 400, pieces: 800 },
+        { date: "2026-08-07", spend: 600, pieces: 1200 },
+        { date: "2026-08-08", spend: 500, pieces: 900 },
+        { date: "2026-08-09", spend: 700, pieces: 1300 },
+        { date: "2026-08-10", spend: 999, pieces: 999 },
+      ],
+    }),
+    facts: [
+      { dateKey: "2026-08-07", facts: { spend: { mail: 400, mailPieces: 800 } } },
+      { dateKey: "2026-08-08", facts: { spend: { mail: 500, mailPieces: 900 } } },
+      { dateKey: "2026-08-10", facts: { spend: { mail: 1, mailPieces: 1 } } },
+    ],
+    MailSpendModel,
+  });
+  assert.deepEqual(out.dateKeys, ["2026-08-07", "2026-08-09"],
+    "a changed day and a newly supplied day repair independently");
+  assert.equal(out.daysSeen, 4);
+  assert.equal(out.invoiceDaysExcluded, 1,
+    "the hand-kept sheet never displaces an invoice-backed day");
+});
+
+test("the bounded historical scan folds late sheet dates into its repair plan", async () => {
+  const {
+    findHistoricalDailyFactRepairs,
+  } = require("../../packages/shared-services/src/dailySnapshotService");
+  const FactModel = {
+    find: () => ({
+      select: () => ({
+        sort: () => ({
+          lean: async () => [{
+            dateKey: "2026-08-07",
+            coverage: { reportDegraded: false, repairHints: [] },
+            facts: {
+              financial: { mailApplies: true },
+              spend: { mail: 100, mailPieces: 100, ld: 30, bcd: 4 },
+              byAgent: { agents: [] },
+              bySource: [],
+            },
+          }],
+        }),
+      }),
+    }),
+  };
+  const MailSpendModel = {
+    find: () => ({ select: () => ({ lean: async () => [] }) }),
+  };
+  const rows = await findHistoricalDailyFactRepairs({
+    currentDateKey: "2026-08-11",
+    includeMailSheet: true,
+    FactModel,
+    MailSpendModel,
+    sheetReader: async () => ({
+      unavailable: null,
+      rows: [
+        { date: "2026-08-07", spend: 250, pieces: 300 },
+        { date: "2026-08-09", spend: 900, pieces: 1200 },
+      ],
+    }),
+  });
+  assert.deepEqual(rows, [
+    { dateKey: "2026-08-07", reasons: ["marketing-cost"] },
+    { dateKey: "2026-08-09", reasons: ["marketing-cost"] },
+  ]);
+});
+
+test("post-close repair reopens spend only for an uncosted historical day", async () => {
+  const {
+    REPAIR_REASON, repairHistoricalDailyFacts,
+  } = require("../../packages/shared-services/src/dailySnapshotService");
+  let repairArgs = null;
+  const out = await repairHistoricalDailyFacts({
+    currentDateKey: "2026-08-11",
+    finder: async () => [
+      { dateKey: "2026-08-09", reasons: [REPAIR_REASON.OFFICER] },
+      { dateKey: "2026-08-10", reasons: [REPAIR_REASON.MARKETING_COST] },
+    ],
+    repair: async (args) => {
+      repairArgs = args;
+      return { status: "completed", repaired: 2, failed: 0 };
+    },
+  });
+  assert.deepEqual(repairArgs.dateKeys, ["2026-08-09", "2026-08-10"]);
+  assert.deepEqual(repairArgs.overwriteFrozenByDate, {
+    "2026-08-09": [],
+    "2026-08-10": ["spend"],
+  });
+  assert.equal(out.repaired, 2);
+  assert.deepEqual(out.countsByReason, {
+    "officer-attribution": 1,
+    "marketing-cost": 1,
+  });
+});
+
+test("a resumed historical-repair plan cannot escape its seven-day window", async () => {
+  const {
+    REPAIR_REASON, repairHistoricalDailyFacts,
+  } = require("../../packages/shared-services/src/dailySnapshotService");
+  let repairArgs = null;
+  const out = await repairHistoricalDailyFacts({
+    currentDateKey: "2026-08-11",
+    maxAgeDays: 99,
+    candidates: [
+      { dateKey: "2026-08-03", reasons: [REPAIR_REASON.OFFICER] },
+      { dateKey: "2026-08-04", reasons: [REPAIR_REASON.OFFICER] },
+      { dateKey: "2026-08-10", reasons: [REPAIR_REASON.MARKETING_COST] },
+      { dateKey: "2026-08-11", reasons: [REPAIR_REASON.OFFICER] },
+    ],
+    repair: async (args) => {
+      repairArgs = args;
+      return { status: "completed", repaired: args.dateKeys.length, failed: 0 };
+    },
+  });
+  assert.deepEqual(repairArgs.dateKeys, ["2026-08-04", "2026-08-10"]);
+  assert.equal(out.scannedDays, 7);
+  assert.equal(out.candidates, 2);
+});
+
+test("historical repair rejects a supplied plan without a valid close date", async () => {
+  const {
+    REPAIR_REASON, repairHistoricalDailyFacts,
+  } = require("../../packages/shared-services/src/dailySnapshotService");
+  let repairs = 0;
+  const out = await repairHistoricalDailyFacts({
+    currentDateKey: "not-a-date",
+    candidates: [{ dateKey: "2026-08-10", reasons: [REPAIR_REASON.OFFICER] }],
+    repair: async () => { repairs += 1; },
+  });
+  assert.equal(out.status, "skipped");
+  assert.equal(out.reason, "invalid-current-date");
+  assert.equal(out.candidates, 0);
+  assert.equal(repairs, 0);
+});
+
+test("a missing invoice writes a value-free marketing repair hint", () => {
+  const fact = service.buildDailyReportFact({
+    dateKey: "2026-08-03",
+    definitionName: service.CANONICAL_DEFINITION_NAME,
+    report: report({
+      spend: { mail: 0, mailPieces: 0, ld: 30, bcd: 4, total: 34 },
+      failures: ["NO MAIL SPEND for the day and NO INVOICE was ingested"],
+    }),
+    emailAcceptedAt: null,
+  });
+  assert.deepEqual(fact.coverage.repairHints, ["marketing-cost"]);
 });
 
 test("the record is saved BEFORE the email is sent, from the same gather", () => {
@@ -427,7 +798,7 @@ test("a completed report without optional aggregate counts does not overwrite th
   const Model = { updateOne: async (...args) => { write = args; return { acknowledged: true }; } };
   await service.persistDailyReportFact({
     dateKey: "2026-08-03",
-    definitionName: "financial roll up with calls",
+    definitionName: "financial",
     report: report(),
   }, { Model });
   assert.equal("facts.calls" in write[1].$set, false);
@@ -440,7 +811,7 @@ test("real call facts ARE written when this path is given them", async () => {
   const Model = { updateOne: async (...args) => { write = args; return { acknowledged: true }; } };
   await service.persistDailyReportFact({
     dateKey: "2026-08-03",
-    definitionName: "financial roll up with calls",
+    definitionName: "financial",
     report: report(),
     callFacts: { links: 12, significant: 3 },
   }, { Model });
@@ -471,7 +842,7 @@ test("persisting an already-built fact does not rebuild it", async () => {
     failures: [], advisories: [], notes: [], spend: null,
   };
   const fact = buildDailyReportFact({
-    dateKey: "2026-08-05", definitionName: "financial roll up with calls",
+    dateKey: "2026-08-05", definitionName: "financial",
     report, emailAcceptedAt: null,
   });
   assert.equal("report" in fact, false, "a built fact carries no report — that is the trap");
