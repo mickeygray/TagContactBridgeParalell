@@ -12,7 +12,9 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/Button";
 import {
+  audioDataUrl,
   salesTrainerApi,
+  type TrainerAudio,
   type TrainerPlayback,
 } from "@/lib/api/salesTrainer";
 import {
@@ -71,6 +73,30 @@ function extensionForMimeType(mimeType: string) {
 
 function stopTracks(stream: MediaStream | null) {
   stream?.getTracks().forEach((track) => track.stop());
+}
+
+function playbackForAudio(audio: TrainerAudio): TrainerPlayback | null {
+  const sourceChunks = audio.chunks?.length ? audio.chunks : [audio];
+  const chunks = sourceChunks
+    .filter((chunk) => Boolean(chunk.audioBase64 && chunk.mimeType))
+    .map((chunk, index) => ({
+      index,
+      text: "",
+      mimeType: chunk.mimeType,
+      format: chunk.format,
+      audioBase64: chunk.audioBase64,
+      dataUrl: audioDataUrl(chunk),
+    }));
+  if (!chunks.length) return null;
+  return {
+    autoplay: true,
+    mimeType: chunks[0].mimeType,
+    format: chunks[0].format,
+    voice: audio.voice,
+    audioBase64: chunks[0].audioBase64,
+    dataUrl: chunks[0].dataUrl,
+    chunks,
+  };
 }
 
 export function TrainerGauntletPlayer({
@@ -248,6 +274,23 @@ export function TrainerGauntletPlayer({
     setPlaybackUrls(urls);
   }
 
+  async function playVoicedProspect(textToSpeak: string) {
+    const clean = textToSpeak.trim();
+    if (!clean) return;
+    try {
+      const audio = await salesTrainerApi.speech({ text: clean });
+      const playback = playbackForAudio(audio);
+      if (playback) {
+        playProspect(clean, playback);
+        return;
+      }
+    } catch {
+      // The course remains usable during a TTS outage. Browser speech is a
+      // deliberately visible last-mile fallback, not the primary voice path.
+    }
+    playProspect(clean);
+  }
+
   function replayProspect() {
     if (playbackUrls.length && audioRef.current) {
       setAudioNotice("");
@@ -291,7 +334,7 @@ export function TrainerGauntletPlayer({
       if (result.attempt) onAttemptChange?.(result.attempt);
       setCoach(result.coach || null);
       setTape([{ id: "opening", speaker: "prospect", text: opening }]);
-      playProspect(opening);
+      await playVoicedProspect(opening);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Could not start this Talk Session.");
     } finally {
@@ -351,7 +394,7 @@ export function TrainerGauntletPlayer({
           text: reply,
         }]),
       ]);
-      if (reply) playProspect(reply);
+      if (reply) await playVoicedProspect(reply);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Could not submit this turn.");
     } finally {
@@ -497,7 +540,7 @@ export function TrainerGauntletPlayer({
       setCoach(reset.coach || null);
       setReflectionAnswer("");
       setReflectionGrade(null);
-      playProspect(opening);
+      await playVoicedProspect(opening);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Could not begin another run.");
     } finally {

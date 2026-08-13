@@ -212,10 +212,16 @@ function createTrainingGauntletService({
     if (state.nextTurn !== expectedTurn) throw gauntletError(409, "TRAINER_GAUNTLET_CONFLICT");
     const scenario = scenarioForAttempt(await contentProvider(attempt), attempt);
     const decision = advanceGauntletTurn({ scenario, state, turnId, evidence });
-    const prospectReply = dialogueService && !decision.terminal
+    // A terminal transition still needs a final prospect reaction. Otherwise a
+    // learner who succeeds on the first turn hears silence and the voice
+    // exercise looks broken even though the state machine correctly passed it.
+    // Terminal nodes intentionally cannot speak, so generate that closing
+    // reaction from the last bounded, non-terminal node.
+    const dialogueState = decision.terminal ? state : decision.nextState;
+    const prospectReply = dialogueService
       ? await dialogueService.respond({
           scenario,
-          state: decision.nextState,
+          state: dialogueState,
           reactionIntent: decision.reactionIntent,
           learnerText,
         })

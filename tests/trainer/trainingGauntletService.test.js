@@ -158,6 +158,68 @@ test("text turn keeps evaluation and prospect dialogue behind server-owned adapt
   }), { code: "TRAINER_GAUNTLET_CONFLICT" });
 });
 
+test("a terminal Gauntlet turn still returns the prospect's closing reaction", async () => {
+  let stored = attempt();
+  const seenStates = [];
+  const service = createTrainingGauntletService({
+    repository: {
+      findAttemptById: async () => structuredClone(stored),
+      appendAttemptEvent: async ({ event, gauntletState }) => {
+        stored = {
+          ...stored,
+          version: stored.version + 1,
+          gauntletState,
+          events: [...stored.events, event],
+          eventIds: [...stored.eventIds, event.eventId],
+        };
+        return { attempt: structuredClone(stored), duplicate: false, conflict: false };
+      },
+    },
+    contentProvider: async () => buildValidTrainingContentFixture(),
+    authorizeAttempt: async () => {},
+    flagsProvider: () => ({ gauntletV1Enabled: true }),
+    dialogueService: {
+      respond: async ({ state }) => {
+        seenStates.push(state.currentNodeId);
+        return { text: "That answers my concern.", speechActs: ["answer-clarification"] };
+      },
+    },
+  });
+  await service.initialize({
+    attemptId: "attempt-1",
+    eventId: "init-terminal",
+    expectedVersion: 0,
+    principal: {},
+  });
+  await service.submitTurn({
+    attemptId: "attempt-1",
+    eventId: "turn-terminal-setup",
+    expectedVersion: 1,
+    expectedTurn: 1,
+    turnId: "learner-terminal-setup",
+    evidence: [],
+    learnerText: "Let me understand the concern.",
+    principal: {},
+  });
+  const result = await service.submitTurn({
+    attemptId: "attempt-1",
+    eventId: "turn-terminal-pass",
+    expectedVersion: 2,
+    expectedTurn: 2,
+    turnId: "learner-terminal-pass",
+    evidence: [
+      { criterionId: "fixture-criterion-acknowledge", ruleId: "fixture-rule-alpha", ruleRevision: "1.0.0-test", status: "satisfied", citedTurnIds: ["learner-terminal-pass"] },
+      { criterionId: "fixture-criterion-clarify", ruleId: "fixture-rule-beta", ruleRevision: "1.0.0-test", status: "satisfied", citedTurnIds: ["learner-terminal-pass"] },
+    ],
+    learnerText: "I hear you. What part worries you most?",
+    principal: {},
+  });
+  assert.equal(result.terminal, "passed");
+  assert.equal(result.prospectReply.text, "That answers my concern.");
+  assert.equal(seenStates.at(-1), "fixture-node-check");
+  assert.equal(stored.events.at(-1).payload.prospectReply.text, "That answers my concern.");
+});
+
 test("rollback flag-off retains and reconstructs durable Talk Session state", async () => {
   const checkpoint = {
     schemaVersion: "1",
