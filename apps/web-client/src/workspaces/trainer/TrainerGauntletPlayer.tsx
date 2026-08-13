@@ -710,9 +710,11 @@ export function TrainerGauntletPlayer({
         <div className="mt-6 flex flex-wrap justify-center gap-3">
           {terminal ? (
             <>
-              <Button size="lg" onClick={() => void retry()} disabled={busy}>
-                {runtime.state.status === "passed" ? "Practice another version" : "Practice again"}
-              </Button>
+              {runtime.canPracticeAgain ? (
+                <Button size="lg" onClick={() => void retry()} disabled={busy}>
+                  {runtime.state.status === "passed" ? "Practice another version" : "Practice again"}
+                </Button>
+              ) : null}
               {runtime.state.status === "passed" ? (
                 <Button
                   size="lg"

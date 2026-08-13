@@ -153,6 +153,7 @@ test("Targeted Talk reuses authenticated Trainer STT with server-owned turns", (
   assert.match(gauntlet, /result = await trainingCourseApi\.gauntlet\(started\.attemptId\)/);
   assert.match(gauntlet, /if \(status !== 422\) throw cause/);
   assert.match(gauntlet, /Conversation complete — answer the check below/);
+  assert.match(gauntlet, /runtime\.canPracticeAgain/);
   assert.match(gauntlet, /Practice another version/);
   assert.match(gauntlet, /Continue to knowledge check/);
   assert.doesNotMatch(gauntlet, /disabled=\{!micSupported \|\| \(voiceBusy && !recording\) \|\| terminal\}/);

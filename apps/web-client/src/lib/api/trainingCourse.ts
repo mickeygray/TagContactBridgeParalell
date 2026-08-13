@@ -274,6 +274,7 @@ export interface TrainingGauntletResult {
   reactionIntent?: string | null;
   prospectReply?: { text: string; speechActs: string[] } | null;
   terminal?: "passed" | "failed" | null;
+  canPracticeAgain?: boolean;
   openingLine?: string | null;
   coach?: TrainingTargetedCoach | null;
   module?: {

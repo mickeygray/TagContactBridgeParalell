@@ -5,7 +5,11 @@ const {
   normalizeGauntletState,
   reconstructGauntletState,
 } = require("./trainerGauntletState");
-const { advanceGauntletTurn, startRetryRun } = require("./trainingGauntletController");
+const {
+  advanceGauntletTurn,
+  canStartAnotherRun,
+  startRetryRun,
+} = require("./trainingGauntletController");
 
 function stableStringify(value) {
   if (Array.isArray(value)) return `[${value.map(stableStringify).join(",")}]`;
@@ -89,6 +93,7 @@ function publicResult({ attempt, state, duplicate = false, scenario, prospectRep
     prospectReply,
     reactionIntent,
     terminal,
+    canPracticeAgain: canStartAnotherRun(scenario, state),
     openingLine: String(
       variant?.situation || scenario?.presentation?.openingLine || "The prospect is ready.",
     ),

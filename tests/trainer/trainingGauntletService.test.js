@@ -220,6 +220,53 @@ test("a terminal Gauntlet turn still returns the prospect's closing reaction", a
   assert.equal(stored.events.at(-1).payload.prospectReply.text, "That answers my concern.");
 });
 
+test("a passed Gauntlet attempt can repeat with another prospect variant", async () => {
+  let stored = attempt();
+  const service = createTrainingGauntletService({
+    repository: {
+      findAttemptById: async () => structuredClone(stored),
+      appendAttemptEvent: async ({ event, gauntletState }) => {
+        stored = {
+          ...stored,
+          version: stored.version + 1,
+          gauntletState,
+          events: [...stored.events, event],
+          eventIds: [...stored.eventIds, event.eventId],
+        };
+        return { attempt: structuredClone(stored), duplicate: false, conflict: false };
+      },
+    },
+    contentProvider: async () => buildValidTrainingContentFixture(),
+    authorizeAttempt: async () => {},
+    flagsProvider: () => ({ gauntletV1Enabled: true }),
+  });
+  await service.initialize({ attemptId: "attempt-1", eventId: "init-repeat", expectedVersion: 0, principal: {} });
+  await service.submitTurn({ attemptId: "attempt-1", eventId: "repeat-setup", expectedVersion: 1, expectedTurn: 1, turnId: "repeat-setup-turn", evidence: [], principal: {} });
+  const passed = await service.submitTurn({
+    attemptId: "attempt-1",
+    eventId: "repeat-pass",
+    expectedVersion: 2,
+    expectedTurn: 2,
+    turnId: "repeat-pass-turn",
+    evidence: [
+      { criterionId: "fixture-criterion-acknowledge", ruleId: "fixture-rule-alpha", ruleRevision: "1.0.0-test", status: "satisfied", citedTurnIds: ["repeat-pass-turn"] },
+      { criterionId: "fixture-criterion-clarify", ruleId: "fixture-rule-beta", ruleRevision: "1.0.0-test", status: "satisfied", citedTurnIds: ["repeat-pass-turn"] },
+    ],
+    principal: {},
+  });
+  assert.equal(passed.state.status, "passed");
+  assert.equal(passed.canPracticeAgain, true);
+  const repeated = await service.retry({
+    attemptId: "attempt-1",
+    eventId: "repeat-next",
+    expectedVersion: 3,
+    principal: {},
+  });
+  assert.equal(repeated.state.status, "ready");
+  assert.equal(repeated.state.runNumber, 1);
+  assert.equal(repeated.state.variantId, "fixture-variant-direct");
+});
+
 test("rollback flag-off retains and reconstructs durable Talk Session state", async () => {
   const checkpoint = {
     schemaVersion: "1",

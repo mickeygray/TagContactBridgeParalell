@@ -71,3 +71,19 @@ test("a failed run stays inside its attempt and can restart on an unused variant
   assert.equal(retried.variantId, "fixture-variant-direct");
   assert.equal(retried.status, "ready");
 });
+
+test("a passed run can practice another unused variant", () => {
+  const scenario = buildValidTrainingContentFixture().scenarioBlueprints[0];
+  const { canStartAnotherRun, startRetryRun } = require("../../packages/shared-services/src/trainingGauntletController");
+  const passed = {
+    ...initialState(scenario),
+    status: "passed",
+    currentNodeId: "fixture-node-terminal",
+  };
+  assert.equal(canStartAnotherRun(scenario, passed), true);
+  const repeated = startRetryRun({ scenario, state: passed, eventId: "repeat-1" });
+  assert.equal(repeated.runNumber, 1);
+  assert.equal(repeated.nextTurn, 1);
+  assert.equal(repeated.variantId, "fixture-variant-direct");
+  assert.equal(repeated.status, "ready");
+});

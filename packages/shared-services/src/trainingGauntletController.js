@@ -48,6 +48,13 @@ function allRequiredCriteriaSatisfied(scenario, criteria) {
   return (scenario.nodes || []).flatMap((node) => node.requiredCriteria || []).filter((criterion) => criterion.required).every((criterion) => criteria[criterion.criterionId]?.status === "satisfied");
 }
 
+function canStartAnotherRun(scenario, state) {
+  if (!["failed", "run_failed", "passed"].includes(state?.status)) return false;
+  if ((state.runNumber + 1) > scenario.retryPolicy.runRetryLimit) return false;
+  const used = new Set([...(state.completedVariantIds || []), state.variantId]);
+  return (scenario.variants || []).some((variant) => !used.has(variant.variantId));
+}
+
 function applyEvidence({ scenario, state, turnId, evidence }) {
   const allowed = new Map(
     (scenario.nodes || [])
@@ -117,7 +124,7 @@ function advanceGauntletTurn({ scenario, state, turnId, evidence = [] }) {
 
 function startRetryRun({ scenario, state, eventId }) {
   assertScenarioAndState(scenario, state);
-  if (state.status !== "failed" && state.status !== "run_failed") {
+  if (!["failed", "run_failed", "passed"].includes(state.status)) {
     throw controllerError("GAUNTLET_RETRY_NOT_AVAILABLE");
   }
   if ((state.runNumber + 1) > scenario.retryPolicy.runRetryLimit) {
@@ -147,4 +154,4 @@ function startRetryRun({ scenario, state, eventId }) {
   });
 }
 
-module.exports = { advanceGauntletTurn, evaluateCondition, startRetryRun };
+module.exports = { advanceGauntletTurn, canStartAnotherRun, evaluateCondition, startRetryRun };
