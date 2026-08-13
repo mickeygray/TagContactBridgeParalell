@@ -119,6 +119,7 @@ export function TrainerGauntletPlayer({
   const [coach, setCoach] = useState<TrainingTargetedCoach | null>(null);
   const [reflectionAnswer, setReflectionAnswer] = useState("");
   const [reflectionQuestionIndex, setReflectionQuestionIndex] = useState(0);
+  const [reflectionComplete, setReflectionComplete] = useState(false);
   const [reflectionGrade, setReflectionGrade] = useState<{
     passed: boolean;
     score: number;
@@ -548,6 +549,7 @@ export function TrainerGauntletPlayer({
       setCoach(reset.coach || null);
       setReflectionAnswer("");
       setReflectionQuestionIndex(0);
+      setReflectionComplete(false);
       setReflectionGrade(null);
       await playVoicedProspect(opening);
     } catch (cause) {
@@ -579,8 +581,11 @@ export function TrainerGauntletPlayer({
         setReflectionQuestionIndex((current) => current + 1);
         setReflectionAnswer("");
         setReflectionGrade(null);
-      } else if (grade.passed && onComplete) {
-        await onComplete();
+      } else if (grade.passed) {
+        setReflectionComplete(true);
+        if (runtime?.state.status === "passed" && onComplete) {
+          await onComplete();
+        }
       }
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Could not grade that answer.");
@@ -725,22 +730,15 @@ export function TrainerGauntletPlayer({
         <div className="mt-6 flex flex-wrap justify-center gap-3">
           {terminal ? (
             <>
-              {runtime.canPracticeAgain ? (
-                <Button size="lg" onClick={() => void retry()} disabled={busy}>
-                  {runtime.state.status === "passed" ? "Practice another version" : "Practice again"}
-                </Button>
-              ) : null}
-              {runtime.state.status === "passed" ? (
-                <Button
-                  size="lg"
-                  variant="secondary"
-                  onClick={() => document.getElementById("targeted-talk-knowledge-check")
-                    ?.scrollIntoView({ behavior: "smooth", block: "center" })}
-                  disabled={busy}
-                >
-                  Continue to knowledge check
-                </Button>
-              ) : null}
+              <Button
+                size="lg"
+                variant="secondary"
+                onClick={() => document.getElementById("targeted-talk-knowledge-check")
+                  ?.scrollIntoView({ behavior: "smooth", block: "center" })}
+                disabled={busy}
+              >
+                Continue to knowledge check
+              </Button>
             </>
           ) : (
             <Button
@@ -797,8 +795,7 @@ export function TrainerGauntletPlayer({
           <h3 className="font-semibold">
             {runtime.state.status === "passed" ? "Talk practice complete" : "Run complete"}
           </h3>
-          {runtime.state.status === "passed" &&
-          (runtime.module?.questions?.length || runtime.module?.question) ? (
+          {(runtime.module?.questions?.length || runtime.module?.question) ? (
             <div className="mt-4 space-y-3">
               <div className="text-xs font-semibold uppercase text-muted-foreground">
                 Short model-graded Q&A
@@ -825,11 +822,11 @@ export function TrainerGauntletPlayer({
                 onChange={(event) => setReflectionAnswer(event.target.value)}
                 className="min-h-24 w-full rounded-md border border-input bg-background p-3 text-sm"
                 placeholder="Explain your reasoning in your own words..."
-                disabled={gradingReflection || reflectionGrade?.passed === true}
+                disabled={gradingReflection || reflectionComplete}
               />
               <Button
                 onClick={() => void gradeReflection()}
-                disabled={!reflectionAnswer.trim() || gradingReflection}
+                disabled={!reflectionAnswer.trim() || gradingReflection || reflectionComplete}
               >
                 {gradingReflection ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
                 Grade my answer
@@ -846,10 +843,10 @@ export function TrainerGauntletPlayer({
                   <p className="mt-1">{reflectionGrade.feedback}</p>
                 </div>
               ) : null}
-              {reflectionGrade?.passed &&
-              (runtime.module.moduleNumber || 0) < (runtime.module.moduleCount || 0) ? (
+              {reflectionComplete && runtime.state.status === "failed" && runtime.canPracticeAgain ? (
                 <Button variant="secondary" onClick={() => void retry()} disabled={busy}>
-                  Next brief practice
+                  <RotateCcw className="h-4 w-4" />
+                  Practice again
                 </Button>
               ) : null}
             </div>
@@ -858,12 +855,6 @@ export function TrainerGauntletPlayer({
               Review what happened before trying another variation.
             </p>
           )}
-          {runtime.state.status === "failed" ? (
-            <Button className="mt-3" variant="secondary" onClick={() => void retry()} disabled={busy}>
-              <RotateCcw className="h-4 w-4" />
-              Try another variation
-            </Button>
-          ) : null}
         </div>
       ) : (
         <details className="rounded-lg border border-border bg-muted/10 p-4">

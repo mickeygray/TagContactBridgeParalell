@@ -392,7 +392,7 @@ function createTrainingGauntletService({
       throw gauntletError(422, "TRAINER_GAUNTLET_NOT_INITIALIZED");
     }
     const state = normalizeGauntletState(attempt.gauntletState);
-    if (state.status !== "passed") {
+    if (!["passed", "failed"].includes(state.status)) {
       throw gauntletError(409, "TRAINER_GAUNTLET_NOT_COMPLETE");
     }
     const scenario = scenarioForAttempt(await contentProvider(attempt), attempt);
