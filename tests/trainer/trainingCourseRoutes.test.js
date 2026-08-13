@@ -166,6 +166,39 @@ test("course routes derive learner/company from authenticated server state", asy
   assert.equal(courseService.calls.at(-1).input.answer, "a");
 });
 
+test("course routes observe successful and failed attempt activity without changing responses", async (t) => {
+  const observed = [];
+  const courseService = serviceStub();
+  const router = createSalesTrainerCourseRouter({
+    requireSalesTrainerAccess(req, _res, next) {
+      req.salesTrainerUser = { email: "learner@example.test", company: "TAG" };
+      req.user = req.salesTrainerUser;
+      next();
+    },
+    courseService,
+    sessionAuditService: {
+      async observeCourseResult(input) { observed.push({ type: "success", input }); },
+      async observeCourseError(input) { observed.push({ type: "error", input }); },
+    },
+  });
+  const baseUrl = await listen(t, router);
+  const success = await requestJson(baseUrl, "/attempts/attempt-1/answers", {
+    method: "POST",
+    body: { answer: "My answer", eventId: "answer-1", expectedVersion: 0 },
+  });
+  assert.equal(success.status, 200);
+  assert.equal(observed[0].type, "success");
+  assert.equal(observed[0].input.body.answer, "My answer");
+
+  const failure = await requestJson(baseUrl, "/attempts/attempt-1/answers", {
+    method: "POST",
+    body: { answer: "Browser-owned extra field", eventId: "answer-2", expectedVersion: 1, score: 100 },
+  });
+  assert.equal(failure.status, 422);
+  assert.equal(observed[1].type, "error");
+  assert.equal(observed[1].input.status, 422);
+});
+
 test("Gauntlet turn route accepts only learner text and server CAS fields", async (t) => {
   const calls = [];
   const router = createSalesTrainerCourseRouter({

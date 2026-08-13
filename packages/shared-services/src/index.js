@@ -834,6 +834,7 @@ const trainingReviewCoachService = require("./trainingReviewCoachService");
 const trainingFreeCallCourseService = require("./trainingFreeCallCourseService");
 const trainingProspectDialogueService = require("./trainingProspectDialogueService");
 const trainingDispositionReviewService = require("./trainingDispositionReviewService");
+const trainerSessionAuditService = require("./trainerSessionAuditService");
 
 module.exports = {
   jiraTaskBridgeService,
@@ -849,6 +850,7 @@ module.exports = {
   trainingFreeCallCourseService,
   trainingProspectDialogueService,
   trainingDispositionReviewService,
+  trainerSessionAuditService,
   // ── CX lane registry + dispatchers (first-touch drip, appointment clock) ──
   CX_LANES,
   buildLaneExternId,

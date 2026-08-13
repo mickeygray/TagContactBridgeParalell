@@ -283,7 +283,7 @@ function createTrainingGauntletService({
       expectedTurn,
       text: String(learnerText),
     });
-    const result = await repository.appendAttemptEvent({ attemptId, eventId, expectedVersion, expectedGauntletStateVersion: state.stateVersion, expectedTurn, gauntletState: decision.nextState, event: { eventId, sequence: expectedVersion + 1, type: "gauntlet_turn_accepted", occurredAt: now(), expectedPriorVersion: expectedVersion, payload: { turnId, inputFingerprint: fingerprint, textInputFingerprint, selectedEdgeId: decision.selectedEdgeId, prospectReply, reactionIntent: decision.reactionIntent, terminal: decision.terminal, stateAfter: decision.nextState } } });
+    const result = await repository.appendAttemptEvent({ attemptId, eventId, expectedVersion, expectedGauntletStateVersion: state.stateVersion, expectedTurn, gauntletState: decision.nextState, event: { eventId, sequence: expectedVersion + 1, type: "gauntlet_turn_accepted", occurredAt: now(), expectedPriorVersion: expectedVersion, payload: { turnId, inputFingerprint: fingerprint, textInputFingerprint, learnerText: learnerText == null ? null : String(learnerText).slice(0, 4000), selectedEdgeId: decision.selectedEdgeId, prospectReply, reactionIntent: decision.reactionIntent, terminal: decision.terminal, stateAfter: decision.nextState } } });
     if (!result.attempt || result.conflict) throw gauntletError(409, "TRAINER_GAUNTLET_CONFLICT");
     return publicResult({
       attempt: result.attempt,

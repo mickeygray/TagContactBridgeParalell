@@ -53,6 +53,7 @@ const workflowRecordRepository = require("./workflowRecordRepository");
 const trainingCallReviewRepository = require("./trainingCallReviewRepository");
 const trainingCourseRepository = require("./trainingCourseRepository");
 const trainingFreeCallSessionRepository = require("./trainingFreeCallSessionRepository");
+const trainerSessionAuditRepository = require("./trainerSessionAuditRepository");
 
 module.exports = {
   agentStateRepository,
@@ -109,4 +110,5 @@ module.exports = {
   trainingCallReviewRepository,
   trainingCourseRepository,
   trainingFreeCallSessionRepository,
+  trainerSessionAuditRepository,
 };

@@ -121,6 +121,7 @@ function createSalesTrainerCourseRouter(options = {}) {
     createTrainingCourseService(options.courseServiceOptions);
   const gauntletService = options.gauntletService || null;
   const freeCallService = options.freeCallService || null;
+  const sessionAuditService = options.sessionAuditService || null;
   const userAccountRepository =
     options.userAccountRepository || defaultUserAccountRepository;
   const courseLimit =
@@ -171,12 +172,34 @@ function createSalesTrainerCourseRouter(options = {}) {
   function handler(fn) {
     return async (req, res) => {
       try {
-        return res.json({
-          ok: true,
-          result: await fn(req),
-        });
+        const result = await fn(req);
+        if (sessionAuditService) {
+          try {
+            await sessionAuditService.observeCourseResult({
+              user: req.salesTrainerUser || req.user,
+              path: req.path,
+              body: req.body,
+              result,
+            });
+          } catch {
+            // Session telemetry must never block the course experience.
+          }
+        }
+        return res.json({ ok: true, result });
       } catch (error) {
         const safe = safeError(error);
+        if (sessionAuditService) {
+          try {
+            await sessionAuditService.observeCourseError({
+              user: req.salesTrainerUser || req.user,
+              path: req.path,
+              status: safe.status,
+              code: safe.body?.code,
+            });
+          } catch {
+            // The primary course error remains authoritative.
+          }
+        }
         return res.status(safe.status).json(safe.body);
       }
     };

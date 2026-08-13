@@ -1767,6 +1767,13 @@ export function SalesTrainerWorkspace() {
     setProspectAudioPending(false);
     setProspectAudioPlaying(false);
     try {
+      if (session?.sessionId) {
+        try {
+          await salesTrainerApi.endSession(session.sessionId, "new_session");
+        } catch {
+          // The server-side inactivity closer remains the fallback.
+        }
+      }
       const persona = TRAINER_PERSONAS.find((p) => p.id === personaId) || null;
       const personaNote = persona
         ? `The caller's name is exactly ${persona.name} — use this name, do not invent another. Temperament: ${persona.blurb}`
@@ -1990,6 +1997,7 @@ export function SalesTrainerWorkspace() {
     setMessages(outbound);
     try {
       const result = await salesTrainerApi.respond({
+        sessionId: session?.sessionId,
         messages: modelMessages(outbound),
         profile,
         playbook,
@@ -2041,6 +2049,26 @@ export function SalesTrainerWorkspace() {
       setCoach(null);
     }
     await submitTrainerMessage(command);
+  }
+
+  async function endCurrentSession(reason: "user_ended" | "signed_out" | "navigated" = "user_ended") {
+    const activeSessionId = session?.sessionId;
+    if (activeSessionId) {
+      try {
+        await salesTrainerApi.endSession(activeSessionId, reason);
+      } catch {
+        // The durable inactivity closer will finalize it if this request fails.
+      }
+    }
+    setSession(null);
+    setMessages([]);
+    setCoach(null);
+    setPhaseNotes(null);
+    setScorecard(null);
+    setSetupCollapsed(false);
+    setHandsFreeEnabled(false);
+    setProspectAudio(null);
+    stopMicTracks();
   }
 
   function stopMicTracks() {
@@ -2499,7 +2527,9 @@ export function SalesTrainerWorkspace() {
                 Course home
               </Button>
             ) : null}
-            <Button variant="ghost" size="sm" onClick={() => navigate(-1)}>
+            <Button variant="ghost" size="sm" onClick={() => {
+              void endCurrentSession("navigated").finally(() => navigate(-1));
+            }}>
               <ArrowLeft className="h-3.5 w-3.5" />
               Back
             </Button>
@@ -2507,6 +2537,7 @@ export function SalesTrainerWorkspace() {
               variant="ghost"
               size="sm"
               onClick={() => {
+                void endCurrentSession("signed_out");
                 clearTrainerToken();
                 setTrainerConfig(null);
                 setAuthState("signed-out");
@@ -2520,6 +2551,11 @@ export function SalesTrainerWorkspace() {
       </header>
 
       <main className="mx-auto max-w-[1500px] space-y-4 px-6 py-6">
+        {trainerConfig?.sessionReviewNotice ? (
+          <div className="text-xs text-muted-foreground" role="note">
+            {trainerConfig.sessionReviewNotice}
+          </div>
+        ) : null}
         {/* Training Center tabs — the learning environment around the call bot */}
         {!courseEnabled ? (
           <nav className="flex flex-wrap gap-2">
@@ -2559,9 +2595,14 @@ export function SalesTrainerWorkspace() {
                   {String(profile?.mood ?? "").trim()}
                 </span>
               </div>
-              <Button size="sm" variant="secondary" onClick={() => setSetupCollapsed(false)}>
-                New call
-              </Button>
+              <div className="flex items-center gap-2">
+                <Button size="sm" variant="secondary" onClick={() => void endCurrentSession("user_ended")}>
+                  End call
+                </Button>
+                <Button size="sm" variant="secondary" onClick={() => setSetupCollapsed(false)}>
+                  New call
+                </Button>
+              </div>
             </div>
           ) : (
           <div className="space-y-3">

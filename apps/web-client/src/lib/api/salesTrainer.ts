@@ -84,6 +84,7 @@ export interface TrainerConfig {
     gauntletV1Enabled: boolean;
     callReviewV1Enabled: boolean;
   };
+  sessionReviewNotice?: string | null;
   modes: string[];
 }
 
@@ -434,6 +435,7 @@ export const salesTrainerApi = {
     );
   },
   async respond(body: {
+    sessionId?: string;
     messages: TrainerMessage[];
     scenario?: string;
     profile?: Record<string, unknown> | null;
@@ -447,6 +449,12 @@ export const salesTrainerApi = {
         "/api/sales-trainer/respond",
         { method: "POST", body: { mode: "roleplay", ...body } },
       ),
+    );
+  },
+  async endSession(sessionId: string, reason: "completed" | "user_ended" | "new_session" | "signed_out" | "navigated" = "user_ended") {
+    return trainerRequest<{ ok: true }>(
+      `/api/sales-trainer/session/${encodeURIComponent(sessionId)}/end`,
+      { method: "POST", body: { reason } },
     );
   },
   async transcribeAudio(body: {

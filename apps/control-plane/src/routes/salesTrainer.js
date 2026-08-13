@@ -41,6 +41,9 @@ const {
 const {
   createTrainingGauntletRuntimeService,
 } = require("../../../../packages/shared-services/src/trainingGauntletRuntimeService");
+const {
+  createTrainerSessionAuditService,
+} = require("../../../../packages/shared-services/src/trainerSessionAuditService");
 const { toErrorResponse } = require("../../../../packages/shared-errors/src");
 const { createRateLimiter } = require("../middleware/rateLimit");
 const {
@@ -207,6 +210,11 @@ async function resolveSalesTrainerOtpAccount(email) {
 
 function createSalesTrainerRouter(auth, config = {}) {
   const router = express.Router();
+  const sessionAuditService =
+    config.trainerSessionAuditService || createTrainerSessionAuditService();
+  if (typeof sessionAuditService.start === "function") {
+    sessionAuditService.start();
+  }
   const trainingGauntletService =
     config.trainingGauntletService || createTrainingGauntletRuntimeService();
 
@@ -295,6 +303,7 @@ function createSalesTrainerRouter(auth, config = {}) {
       courseLimit,
       gauntletService: trainingGauntletService,
       freeCallService: config.trainingFreeCallService || null,
+      sessionAuditService,
     }),
   );
   router.use(
@@ -372,7 +381,7 @@ function createSalesTrainerRouter(auth, config = {}) {
     });
   });
 
-  router.get("/config", requireSalesTrainerAccess, async (_req, res) => {
+  router.get("/config", requireSalesTrainerAccess, async (req, res) => {
     const config = getSalesTrainerConfig();
     const features = getSalesTrainerFeatureFlags();
     return res.json({
@@ -415,6 +424,9 @@ function createSalesTrainerRouter(auth, config = {}) {
         // environment keys and all private policy/configuration stay
         // server-side.
         features,
+        sessionReviewNotice: sessionAuditService.isMonitored?.(req.salesTrainerUser || req.user)
+          ? "Training sessions are reviewed for coaching and product improvement."
+          : null,
         // Two-station trainer: when enabled, the server-side observer owns
         // the coach panel (published via ui-state) — clients must NOT fire
         // the legacy per-turn /coach call on top of it.
@@ -459,6 +471,14 @@ function createSalesTrainerRouter(auth, config = {}) {
         audio: req.body?.audio,
         user: req.salesTrainerUser || req.user,
       });
+      try {
+        await sessionAuditService.openFreeConversation({
+          user: req.salesTrainerUser || req.user,
+          result,
+        });
+      } catch {
+        // Session telemetry is fail-open by design.
+      }
       return res.json({ ok: true, result });
     } catch (error) {
       return res.status(error.status || 500).json(toErrorResponse(error));
@@ -621,9 +641,69 @@ function createSalesTrainerRouter(auth, config = {}) {
           };
         }
       }
+      if (req.body?.sessionId) {
+        try {
+          const inputMessages = Array.isArray(req.body?.messages) ? req.body.messages : [];
+          const learnerMessage = [...inputMessages]
+            .reverse()
+            .find((message) => message?.role === "user");
+          await sessionAuditService.recordFreeConversationTurn({
+            user: req.salesTrainerUser || req.user,
+            sessionId: req.body.sessionId,
+            turnNumber: Math.max(1, Math.ceil(inputMessages.length / 2)),
+            eventId: `text:${inputMessages.length}`,
+            result: {
+              transcript: { text: learnerMessage?.content || "" },
+              response: result,
+              audioError: responseResult.audio?.ok === false ? responseResult.audio : null,
+              elapsedMs: null,
+            },
+          });
+        } catch {
+          // Session telemetry is fail-open by design.
+        }
+      }
       return res.json({ ok: true, result: responseResult });
     } catch (error) {
+      try {
+        await sessionAuditService.recordFreeConversationError({
+          user: req.salesTrainerUser || req.user,
+          sourceId: req.body?.sessionId,
+          stage: error?.stage || "respond",
+          status: error?.status || 500,
+        });
+      } catch {
+        // Preserve the primary request error.
+      }
       return res.status(error.status || 500).json(toErrorResponse(error));
+    }
+  });
+
+  router.post("/session/:sessionId/end", requireSalesTrainerAccess, async (req, res) => {
+    const bodyKeys = Object.keys(req.body || {});
+    if (bodyKeys.some((key) => key !== "reason")) {
+      return res.status(422).json({
+        ok: false,
+        error: "Invalid Trainer session end request.",
+        code: "TRAINER_SESSION_END_INVALID",
+      });
+    }
+    const allowedReasons = new Set(["completed", "user_ended", "new_session", "signed_out", "navigated"]);
+    const requested = String(req.body?.reason || "user_ended");
+    const reason = allowedReasons.has(requested) ? requested : "user_ended";
+    try {
+      await sessionAuditService.endFreeConversation({
+        user: req.salesTrainerUser || req.user,
+        sourceId: req.params.sessionId,
+        reason,
+      });
+      return res.json({ ok: true });
+    } catch {
+      return res.status(503).json({
+        ok: false,
+        error: "Trainer session could not be finalized.",
+        code: "TRAINER_SESSION_END_FAILED",
+      });
     }
   });
 
@@ -721,8 +801,30 @@ function createSalesTrainerRouter(auth, config = {}) {
           recordTurn: payload.recordTurn === false ? false : true,
           archiveToDrive: payload.archiveToDrive === false ? false : true,
         });
+        try {
+          await sessionAuditService.recordFreeConversationTurn({
+            user: req.salesTrainerUser || req.user,
+            sessionId: payload.sessionId,
+            turnNumber: Number.isFinite(Number(payload.turnNumber)) ? Number(payload.turnNumber) : null,
+            eventId: `voice:${Number.isFinite(Number(payload.turnNumber)) ? Number(payload.turnNumber) : "unknown"}`,
+            result,
+          });
+        } catch {
+          // Session telemetry is fail-open by design.
+        }
         return res.json({ ok: true, result });
       } catch (error) {
+        try {
+          const payload = parseTurnPayload(req.body);
+          await sessionAuditService.recordFreeConversationError({
+            user: req.salesTrainerUser || req.user,
+            sourceId: payload.sessionId,
+            stage: error?.stage || "turn",
+            status: error?.status || 500,
+          });
+        } catch {
+          // Preserve the primary request error.
+        }
         return res.status(error.status || 500).json(toErrorResponse(error));
       }
     },
