@@ -87,11 +87,36 @@ test("a definition armed to send with NO recipients throws instead of filing a c
   const { svc } = loadService();
   let saved = false;
   await assert.rejects(
-    () => svc.runDefinition(def({ recipients: [], save: async () => { saved = true; } }),
+    () => svc.runDefinition(def({ name: "ad hoc report", recipients: [], save: async () => { saved = true; } }),
       { now: NOW, sendMail: async () => {} }),
     /no recipients/,
   );
   assert.equal(saved, false, "a run that sent nothing must not record itself at all");
+});
+
+test("the two nightly boards use their fixed recipient audiences", async () => {
+  const { svc } = loadService();
+  const sends = [];
+  await svc.runDefinition(def({ recipients: ["stale@example.test"] }), {
+    now: NOW,
+    sendMail: async (_domain, options) => sends.push(options.to),
+  });
+  assert.deepEqual(sends[0], [
+    "mgray@taxadvocategroup.com",
+    "abanks@taxadvocategroup.com",
+    "manderson@taxadvocategroup.com",
+    "jonathan13pineda@yahoo.com",
+  ]);
+
+  const vendor = loadService();
+  await vendor.svc.runDefinition(def({
+    name: "vendor roll up with calls",
+    recipients: ["stale@example.test"],
+  }), {
+    now: NOW,
+    sendMail: async (_domain, options) => sends.push(options.to),
+  });
+  assert.deepEqual(sends[1], ["mgray@taxadvocategroup.com", "liz@lizdev.com"]);
 });
 
 test("the day is claimed BEFORE the mail goes out", async () => {

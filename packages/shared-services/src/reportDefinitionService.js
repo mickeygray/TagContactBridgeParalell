@@ -18,6 +18,7 @@ const {
   renderReportFromRecord: renderFromRecord,
 } = require("./dailyRecordRenderService");
 const { resolveSelection } = require("./reportBlocksService");
+const { nightlyReportRecipients } = require("../../shared-config/src/dailyReportContract");
 
 const DAY_MS = 86400000;
 
@@ -232,7 +233,7 @@ async function runDefinition(def, {
 
   if (dryRun) return result;
 
-  const to = (def.recipients || []).filter(Boolean);
+  const to = nightlyReportRecipients(def.name, def.recipients);
   // A definition armed to send, with nobody to send to, is broken — not idle.
   // It used to fall through to the bookkeeping below, stamp the day as run and
   // clear lastError, so every status surface reported success while no mail

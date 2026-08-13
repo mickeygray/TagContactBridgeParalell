@@ -32,6 +32,31 @@ const DAILY_SECTION_KEYS = Object.freeze({
   STATUS: "statusMovement",
 });
 
+// These two nightly boards have fixed audiences. Keep the policy beside the
+// report vocabulary instead of trusting an old saved ReportDefinition to
+// remember who should receive financial or vendor information.
+const NIGHTLY_REPORT_RECIPIENTS = Object.freeze({
+  "financial roll up with calls": Object.freeze([
+    "mgray@taxadvocategroup.com",
+    "abanks@taxadvocategroup.com",
+    "manderson@taxadvocategroup.com",
+    "jonathan13pineda@yahoo.com",
+  ]),
+  "vendor roll up with calls": Object.freeze([
+    "mgray@taxadvocategroup.com",
+    "liz@lizdev.com",
+  ]),
+});
+
+function nightlyReportRecipients(definitionName, fallback = []) {
+  const key = String(definitionName || "").trim().toLowerCase();
+  const fixed = NIGHTLY_REPORT_RECIPIENTS[key];
+  if (fixed) return [...fixed];
+  return (Array.isArray(fallback) ? fallback : [])
+    .map((value) => String(value || "").trim().toLowerCase())
+    .filter(Boolean);
+}
+
 // The nightly report gather owns these sections. Calls and activity are
 // contributed by their dedicated index/review paths and must never be erased
 // merely because the report gather cannot see them.
@@ -111,4 +136,6 @@ module.exports = {
   STATUS_ADDITIVE_FIELDS,
   TOPLINE_ADDITIVE_FIELDS,
   isValidDateKey,
+  NIGHTLY_REPORT_RECIPIENTS,
+  nightlyReportRecipients,
 };
