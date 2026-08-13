@@ -30,6 +30,21 @@ function leanValue(value) {
     : value;
 }
 
+// Both course models use Mongoose timestamps. During an upsert Mongoose writes
+// `updatedAt` through $set and `createdAt` through $setOnInsert. Passing the
+// service-owned timestamp fields through $setOnInsert as well makes MongoDB
+// reject the operation with ConflictingUpdateOperators (code 40). Keep the
+// service clock on in-memory/fake repositories, but let the real persistence
+// model own its timestamp fields.
+function withoutManagedTimestamps(value = {}) {
+  const {
+    createdAt: _createdAt,
+    updatedAt: _updatedAt,
+    ...insert
+  } = value || {};
+  return insert;
+}
+
 async function findActiveEnrollment({
   learnerEmailNormalized,
   courseId = null,
@@ -74,7 +89,7 @@ async function findOrCreateEnrollment({
   try {
     return await TrainingEnrollment.findOneAndUpdate(
       query,
-      { $setOnInsert: create },
+      { $setOnInsert: withoutManagedTimestamps(create) },
       {
         upsert: true,
         new: true,
@@ -138,7 +153,7 @@ async function findOrCreateAttempt({
   try {
     return await TrainingAttempt.findOneAndUpdate(
       itemQuery,
-      { $setOnInsert: create },
+      { $setOnInsert: withoutManagedTimestamps(create) },
       {
         upsert: true,
         new: true,
@@ -248,4 +263,5 @@ module.exports = {
   findOrCreateAttempt,
   findOrCreateEnrollment,
   updateEnrollmentCas,
+  withoutManagedTimestamps,
 };
