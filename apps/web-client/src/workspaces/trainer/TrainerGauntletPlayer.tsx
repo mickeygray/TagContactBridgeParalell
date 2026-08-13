@@ -147,15 +147,6 @@ export function TrainerGauntletPlayer({
     typeof MediaRecorder !== "undefined";
 
   useEffect(() => {
-    if (!attempt || runtime) return;
-    const controller = new AbortController();
-    void trainingCourseApi.gauntlet(attempt.attemptId, controller.signal)
-      .then(setRuntime)
-      .catch(() => undefined);
-    return () => controller.abort();
-  }, [attempt, runtime]);
-
-  useEffect(() => {
     runtimeRef.current = runtime;
   }, [runtime]);
 
@@ -319,12 +310,24 @@ export function TrainerGauntletPlayer({
     try {
       const started = attempt || await onStart();
       if (!started) return;
-      const eventId = initializeEventRef.current ||
-        (initializeEventRef.current = createTrainingRequestId("talk-init"));
-      const result = await trainingCourseApi.initializeGauntlet(
-        started.attemptId,
-        { eventId, expectedVersion: started.version },
-      );
+      let result: TrainingGauntletResult;
+      try {
+        // startAttempt intentionally reuses a learner's unfinished attempt.
+        // Resume that durable state before attempting a new initialization so
+        // reloads and fast clicks cannot race a second initializer.
+        result = await trainingCourseApi.gauntlet(started.attemptId);
+      } catch (cause) {
+        const status = cause && typeof cause === "object" && "status" in cause
+          ? Number((cause as { status?: unknown }).status)
+          : 0;
+        if (status !== 422) throw cause;
+        const eventId = initializeEventRef.current ||
+          (initializeEventRef.current = createTrainingRequestId("talk-init"));
+        result = await trainingCourseApi.initializeGauntlet(
+          started.attemptId,
+          { eventId, expectedVersion: started.version },
+        );
+      }
       initializeEventRef.current = null;
       const opening =
         result.openingLine ||
@@ -334,7 +337,11 @@ export function TrainerGauntletPlayer({
       if (result.attempt) onAttemptChange?.(result.attempt);
       setCoach(result.coach || null);
       setTape([{ id: "opening", speaker: "prospect", text: opening }]);
-      await playVoicedProspect(opening);
+      if (result.state.status === "ready" && result.state.nextTurn === 1) {
+        await playVoicedProspect(opening);
+      } else {
+        setAudioNotice(`Session resumed at turn ${result.state.nextTurn}.`);
+      }
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Could not start this Talk Session.");
     } finally {

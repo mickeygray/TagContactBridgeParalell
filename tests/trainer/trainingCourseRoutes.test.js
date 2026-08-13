@@ -40,7 +40,11 @@ async function requestJson(
     },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   });
-  return { status: response.status, body: await response.json() };
+  return {
+    status: response.status,
+    cacheControl: response.headers.get("cache-control"),
+    body: await response.json(),
+  };
 }
 
 function serviceStub() {
@@ -118,6 +122,8 @@ test("course routes derive learner/company from authenticated server state", asy
 
   const home = await requestJson(baseUrl, "/course/home");
   assert.equal(home.status, 200);
+  assert.match(home.cacheControl, /no-store/);
+  assert.match(home.cacheControl, /no-cache/);
   assert.deepEqual(middleware, ["limit", "auth"]);
   assert.deepEqual(courseService.calls[0], {
     operation: "getHome",

@@ -123,6 +123,16 @@ function createSalesTrainerCourseRouter(options = {}) {
       ? options.courseLimit
       : (_req, _res, next) => next();
 
+  // Enrollment, attempt, and Gauntlet state are private mutable projections.
+  // A cached 304 has no JSON body and can leave the browser holding a stale
+  // version, which then turns a harmless resume into a 409 conflict.
+  router.use((_req, res, next) => {
+    res.set("Cache-Control", "private, no-store, no-cache, must-revalidate");
+    res.set("Pragma", "no-cache");
+    res.set("Expires", "0");
+    next();
+  });
+
   async function principal(req) {
     const email = String(
       req.salesTrainerUser?.email || req.user?.email || "",

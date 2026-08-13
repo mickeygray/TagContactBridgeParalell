@@ -341,6 +341,7 @@ async function courseRequest<T>(
   const formBody = typeof FormData !== "undefined" && body instanceof FormData;
   const response = await fetch(`${API_BASE_URL}/api/sales-trainer${path}`, {
     method,
+    cache: "no-store",
     credentials: "include",
     signal,
     headers: {

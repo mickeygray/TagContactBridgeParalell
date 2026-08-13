@@ -147,8 +147,11 @@ test("Targeted Talk reuses authenticated Trainer STT with server-owned turns", (
   const player = source("apps/web-client/src/workspaces/trainer/TrainerCoursePlayer.tsx");
   const gauntlet = source("apps/web-client/src/workspaces/trainer/TrainerGauntletPlayer.tsx");
   assert.match(client, /expectedTurn: number;[\s\S]*?text: string/);
+  assert.match(client, /cache: "no-store"/);
   assert.match(gauntlet, /salesTrainerApi\.speech\(\{ text: clean \}\)/);
   assert.match(gauntlet, /playbackForAudio\(audio\)/);
+  assert.match(gauntlet, /result = await trainingCourseApi\.gauntlet\(started\.attemptId\)/);
+  assert.match(gauntlet, /if \(status !== 422\) throw cause/);
   assert.doesNotMatch(client, /submitGauntletTurn[\s\S]{0,500}evidence:/);
   assert.match(player, /isGauntlet && home\?\.capabilities\.gauntletV1Enabled === true/);
   assert.match(gauntlet, /turnEventRef\.current\?\.input === mutationInput/);
