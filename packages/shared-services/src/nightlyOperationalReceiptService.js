@@ -1,6 +1,9 @@
 "use strict";
 
 const { WorkflowRecord } = require("../../shared-models/src");
+const {
+  buildWorkflowDedupeFilter,
+} = require("../../shared-repositories/src/workflowRecordRepository");
 const { buildTimezoneDateWindow } = require("./timezoneDateWindowService");
 
 const PACIFIC_TIME_ZONE = "America/Los_Angeles";
@@ -24,14 +27,7 @@ function pacificDateKey(value = new Date()) {
 // includes the partial predicate. A plain `{ dedupeKey }` upsert therefore
 // scans the entire workflow collection on every receipt update.
 function workflowDedupeFilter(value) {
-  const dedupeKey = String(value || "").trim();
-  if (!dedupeKey) throw new TypeError("dedupeKey is required");
-  return {
-    $and: [
-      { dedupeKey },
-      { dedupeKey: { $type: "string" } },
-    ],
-  };
+  return buildWorkflowDedupeFilter(value);
 }
 
 function buildAgedReceiptIncrement(summary = {}) {

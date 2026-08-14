@@ -11,6 +11,9 @@ const {
   listMessageRefs,
 } = require("./mailboxIngestService");
 const { WorkflowRecord } = require("../../shared-models/src");
+const {
+  buildWorkflowDedupeFilter,
+} = require("../../shared-repositories/src/workflowRecordRepository");
 const { getInternalFromEmail, getSharedConfig } = require("../../shared-config/src");
 const { recordWorkflowStage } = require("./workflowStateService");
 const { parseNcoaCsv, uploadNcoaRows } = require("./ncoaUploadService");
@@ -87,7 +90,7 @@ const listMailboxMessageRefs = (gmail, config = {}) => listMessageRefs(gmail, {
 async function alreadyProcessed(dedupeKey) {
   if (!dedupeKey) return false;
   const existing = await WorkflowRecord.findOne({
-    dedupeKey,
+    ...buildWorkflowDedupeFilter(dedupeKey),
     family: "lexis",
     subtype: "ncoa-mailbox-attachment",
     stage: "completed",

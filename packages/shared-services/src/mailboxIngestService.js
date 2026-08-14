@@ -32,6 +32,9 @@ const crypto = require("crypto");
 
 const { createGoogleGmailClient } = require("../../shared-integrations/src");
 const { WorkflowRecord } = require("../../shared-models/src");
+const {
+  buildWorkflowDedupeFilter,
+} = require("../../shared-repositories/src/workflowRecordRepository");
 
 const clean = (v, max = 500) => String(v || "").trim().slice(0, max);
 const sha256 = (buf) => crypto.createHash("sha256").update(buf).digest("hex");
@@ -145,13 +148,15 @@ async function listMessageRefs(gmail, { gmailQuery, maxMessages = 25, maxPages =
  */
 async function alreadyHandled(handlerKey, messageId) {
   const key = `mailbox:${handlerKey}:${messageId}`;
-  const existing = await WorkflowRecord.findOne({ dedupeKey: key }).lean().catch(() => null);
+  const existing = await WorkflowRecord.findOne(buildWorkflowDedupeFilter(key))
+    .lean()
+    .catch(() => null);
   return { handled: Boolean(existing), key };
 }
 
 async function recordHandled(key, { handlerKey, messageId, summary }) {
   await WorkflowRecord.updateOne(
-    { dedupeKey: key },
+    buildWorkflowDedupeFilter(key),
     {
       $set: {
         dedupeKey: key,

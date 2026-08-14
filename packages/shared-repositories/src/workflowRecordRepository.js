@@ -2,18 +2,34 @@
 
 const { WorkflowRecord } = require("../../shared-models/src");
 
+// WorkflowRecord's unique dedupe index is partial so legacy rows without a
+// string key can coexist. Mongo will not use that index unless every lookup
+// includes its partial predicate. A plain `{ dedupeKey }` query scans the
+// million-row workflow journal to find one receipt.
+function buildWorkflowDedupeFilter(value) {
+  const dedupeKey = String(value || "").trim();
+  if (!dedupeKey) throw new TypeError("dedupeKey is required");
+  return {
+    $and: [
+      { dedupeKey },
+      { dedupeKey: { $type: "string" } },
+    ],
+  };
+}
+
 async function createWorkflowRecord(payload) {
   const dedupeKey = payload?.dedupeKey ? String(payload.dedupeKey) : "";
   if (dedupeKey) {
+    const filter = buildWorkflowDedupeFilter(dedupeKey);
     try {
       return await WorkflowRecord.findOneAndUpdate(
-        { dedupeKey },
+        filter,
         { $setOnInsert: { ...payload, dedupeKey } },
         { upsert: true, new: true, setDefaultsOnInsert: true },
       );
     } catch (error) {
       if (error?.code === 11000) {
-        const existing = await WorkflowRecord.findOne({ dedupeKey });
+        const existing = await WorkflowRecord.findOne(filter);
         if (existing) return existing;
       }
       throw error;
@@ -37,6 +53,7 @@ async function listWorkflowRecords(filters = {}) {
 }
 
 module.exports = {
+  buildWorkflowDedupeFilter,
   createWorkflowRecord,
   listWorkflowRecords,
 };
