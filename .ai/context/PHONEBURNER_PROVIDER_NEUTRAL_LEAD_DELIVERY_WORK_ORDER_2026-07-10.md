@@ -1887,6 +1887,116 @@ Local proof (2026-08-12):
   provider-neutral lead-delivery suite passed 562/562. No PhoneBurner write,
   flag change, deployment, or service restart occurred.
 
+## Phase 9 contact-count and age phase-out amendment (2026-08-13)
+
+- Keep zero-touch work ahead of every touched ordinary lead.
+- Within ordinary touched work below ten completed voice attempts, serve the
+  lowest attempt count first. Due time remains the tie-breaker; an old retry
+  with many calls may not hide a lightly worked lead.
+- From ten through fourteen completed voice attempts, treat the lead as the
+  high-touch band and prefer newer intake dates over older ones. Attempt count
+  and due time break ties within that age order.
+- The fifteenth completed voice attempt moves the lead into the existing
+  weeks-apart phase-out behavior immediately. Ordinary eligibility is delayed
+  fifteen days, and phase-out work remains behind every eligible lead with
+  fewer than fifteen attempts.
+- Call-recovery work keeps its explicit recovery ranking and is not silently
+  converted into this ordinary-lead phase-out policy.
+- Bounded repository reads must query zero-touch, sub-ten, ten-to-fourteen,
+  and fifteen-plus bands separately per source pool. A database limit applied
+  to a mixed touched population may not erase the lower-contact or newer
+  candidates before the decision owner ranks them.
+
+Local proof (2026-08-13):
+
+- the fifteenth-completion boundary schedules the first fifteen-day hold from
+  the actual completion time;
+- repository and runtime tests cover the attempt bands, age order, and bounded
+  read starvation regression;
+- the complete provider-neutral lead-delivery suite passed 568/568. This
+  amendment is local-only pending the authorized nightly patch; no additional
+  live deploy or service restart occurred.
+
+## Phase 9 nightly lead-health receipt and gentle repair amendment (2026-08-13)
+
+- The existing nightly hygiene run owns one bounded lead-health step
+  immediately before its operator receipt. It does not create another timer,
+  email, report gather, allocation owner, or provider writer.
+- Current ordinary inventory is reported in the same four decision bands used
+  by live selection: zero touch, one through nine, ten through fourteen, and
+  fifteen-plus phase-out. Recovery-program inventory remains separate.
+- The receipt also reports exact PhoneBurner Call Ends for the business day as
+  first touches, attempts ending at two through nine, ten through fourteen,
+  and fifteen-plus. Provider placement is never represented as a contact.
+- Operator attention is required when a zero-touch lead remains due, a
+  zero-touch lead has carried from an earlier day, no calls were recorded while
+  zero/low-touch work was due, or ten-plus calls coexist with a due sub-ten
+  backlog. The latter is a starvation warning, not a claim about event order.
+- Only bounded counts and booleans may enter the nightly cursor or email. No
+  case, person, phone, provider-contact, or payload identity is retained.
+- Inventory counts use the same explicit contact-band index as packet
+  selection and carry a query time limit. This is one nightly observation, not
+  a return to broad hourly auditing.
+- Automatic repair is deliberately limited to two mechanically provable
+  states: an expired reservation that has no packet, provider identity, post
+  state, or delivery owner; and an ordinary non-recovery 15+ attempt row whose
+  legacy retry date is earlier than the current fifteen-day phase-out floor.
+- Both writes use the delivery item's versioned compare-and-set boundary, stop
+  after 100 candidates per class, and recount after applying. A conflict,
+  contradictory row, provider-owned row, recovery row, or safety-cap hit is
+  left unchanged and named count-only in the operator receipt.
+- Due zero/low-touch backlog remains observation-only. This night step may not
+  call Logics, make a DNC decision, select or reserve work, post to a provider,
+  requalify a lead, or synthesize an attempt.
+
+Local proof (2026-08-13): focused repair/repository/runtime/nightly proof passed
+256/256; the final coordinator and receipt proof passed 234/234; and the
+combined metrics plus provider-neutral lead-delivery gate passed 1490/1490.
+No live deploy, flag change, provider write, or service restart occurred.
+
+## Phase 9 three-pass retry ownership amendment (2026-08-14)
+
+- The generic 60-second/hourly sweeper is not a production scheduler. Its
+  recurring startup path is hard-gated during the no-delete window.
+- Morning (08:00 PT), noon (12:00 PT), and night (19:50 PT) each drain the
+  indexed durable retry queue once as part of their existing daily claim.
+- A claimed job receives at most three bounded handler attempts inside that
+  pass. Permanent/unknown-handler failures are not pointlessly retried.
+- A transient job that still fails is returned to durable state with its next
+  attempt at the next Pacific business pass, not the next minute or hour.
+- Night drains retries before report delivery. Its operator receipt reports
+  count-only completed, auto-resolved, in-pass retry, deferred, and exhausted
+  results. Retry backlog does not suppress the financial/vendor close.
+- New-lead intake, first-contact dispatch, provider callbacks, exact Call End
+  refill, and low-water repair remain event-driven. This amendment removes a
+  polling business/retry owner; it does not slow those paths.
+
+## Phase 9 links-only recording evidence amendment (2026-08-14)
+
+- The application retains recording locators supplied by CallRail and
+  PhoneBurner. The recording index and report readers may persist and combine
+  those references, but no unattended runtime downloads or stores audio.
+- The legacy Drive archive producer, EOD archive timer, night-hygiene scoring
+  and archive switches, and durable recording download/transcription retries
+  are hard-gated during the no-delete proof window.
+- The three named daily retry passes exclude the retired recording handlers
+  both when counting due work and when claiming it. A stale job cannot reopen
+  the RingCentral EX call-log cooldown path.
+- An explicit user Analyze action may fetch an authorized recording reference
+  for the duration of that request and must clean up its temporary file. A
+  failed explicit action reports failure to that user; it may not schedule an
+  unattended retry.
+- The pre-cutover recording retry backlog is operator-cancelled with its audit
+  history intact. It is not deleted or replayed.
+- CallRail and PhoneBurner link capture, exact-attempt projection, report
+  inclusion, and trainer call-review reads remain active. This amendment
+  changes background ownership, not provider evidence capture.
+
+Proof requires source and runtime tests showing that the old EOD timer cannot
+arm even when configured on, automatic archive producers return links-only,
+night hygiene passes both recording work switches off, and retry count/claim
+queries exclude both retired handler keys.
+
 ## Phase 9 one-off stale-review cadence recovery (2026-08-06)
 
 - The reconciled WYNN cohort with one exact completed attempt may be returned

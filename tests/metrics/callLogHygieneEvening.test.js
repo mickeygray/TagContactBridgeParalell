@@ -123,6 +123,8 @@ test("apply passes ONE window end for every domain", async () => {
   assert.equal(seen[0].sinceMs, 8 * 3600000);
   assert.deepEqual(seen[0].domains, ["TAG", "WYNN"]);
   assert.equal(seen[0].nativeSweepEnabled, true, "the native sweep is the half that repopulates ex");
+  assert.equal(seen[0].scorePendingCalls, false, "night hygiene does not transcribe or score calls");
+  assert.equal(seen[0].archiveRecordings, false, "night hygiene does not download or archive audio");
 });
 
 test("apply sums ledgerSynced itself — the service never rolls it up", async () => {

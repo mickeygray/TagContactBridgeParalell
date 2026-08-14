@@ -15,6 +15,10 @@ const { emitHourlyJobEvent } = require("./hourlyJobEventService");
 const { syncCallLedgerBySession } = require("./callLedgerService");
 const { syncCaseCallRollup } = require("./caseCallRollupService");
 
+// Explicit Analyze actions may still run the bounded in-memory pipeline, but
+// a failure must not create an unattended future download/transcription job.
+const BACKGROUND_RECORDING_RETRY_ENABLED = false;
+
 // Google Drive config — mirrors recordingStorageService.getDriveConfig so
 // transcription can pull from the already-archived file when the
 // recording-archive pipeline beat us to it. Avoids the RingCentral
@@ -619,37 +623,39 @@ async function processCallLogRecording({
       telephonySessionId,
       error: err.message,
     });
-    await emitHourlyJobEvent({
-      lane: String(lane || "hourly").toLowerCase() === "nightly" ? "nightly" : "hourly",
-      domain,
-      eventType: "call.recording.pipeline.retry",
-      targetService: "control-plane",
-      handlerKey: "retryCallRecordingPipeline",
-      aggregateType: "call-log",
-      aggregateId: String(telephonySessionId),
-      caseId: callLog.caseId != null ? Number(callLog.caseId) : null,
-      payload: {
+    if (BACKGROUND_RECORDING_RETRY_ENABLED) {
+      await emitHourlyJobEvent({
+        lane: String(lane || "hourly").toLowerCase() === "nightly" ? "nightly" : "hourly",
         domain,
-        telephonySessionId,
-        callLogId: String(callLog._id),
-        failStatus,
-      },
-      resolutionCheckKey: "recording-ready-state",
-      resolutionContext: {
-        telephonySessionId,
-        extensionId: callLog.extensionId || null,
-      },
-      dedupeKey: `${String(domain || "").toUpperCase()}:recording:${String(telephonySessionId)}`,
-      emittedBy: "control-plane",
-      priority: 60,
-      severity: "warning",
-      alertSummary: `Call recording pipeline failed with ${failStatus}; hourly retry queued`,
-      immediateRetryAttempts: 1,
-      immediateRetryDelayMs: 1000,
-      provideSummary: false,
-      firstError: err.message,
-      notify: false,
-    }).catch(() => null);
+        eventType: "call.recording.pipeline.retry",
+        targetService: "control-plane",
+        handlerKey: "retryCallRecordingPipeline",
+        aggregateType: "call-log",
+        aggregateId: String(telephonySessionId),
+        caseId: callLog.caseId != null ? Number(callLog.caseId) : null,
+        payload: {
+          domain,
+          telephonySessionId,
+          callLogId: String(callLog._id),
+          failStatus,
+        },
+        resolutionCheckKey: "recording-ready-state",
+        resolutionContext: {
+          telephonySessionId,
+          extensionId: callLog.extensionId || null,
+        },
+        dedupeKey: `${String(domain || "").toUpperCase()}:recording:${String(telephonySessionId)}`,
+        emittedBy: "control-plane",
+        priority: 60,
+        severity: "warning",
+        alertSummary: `Call recording pipeline failed with ${failStatus}; retry queued`,
+        immediateRetryAttempts: 1,
+        immediateRetryDelayMs: 1000,
+        provideSummary: false,
+        firstError: err.message,
+        notify: false,
+      }).catch(() => null);
+    }
     return { status: failStatus, error: err.message };
   } finally {
     if (audioPath && fs.existsSync(audioPath)) {
@@ -663,6 +669,7 @@ async function processCallLogRecording({
 }
 
 module.exports = {
+  BACKGROUND_RECORDING_RETRY_ENABLED,
   isConfigured,
   isScoringConfigured,
   processCallLogRecording,

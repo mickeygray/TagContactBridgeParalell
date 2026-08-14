@@ -450,15 +450,11 @@ function createHygieneRouter(auth, options = {}) {
           scorePendingCalls:
             req.body?.scorePendingCalls !== undefined
               ? Boolean(req.body.scorePendingCalls)
-              : req.query.scorePendingCalls === "false"
-                ? false
-                : hourlySweepConfig.callLogHygieneScorePendingCalls !== false,
+              : false,
           archiveRecordings:
             req.body?.archiveRecordings !== undefined
               ? Boolean(req.body.archiveRecordings)
-              : req.query.archiveRecordings === "false"
-                ? false
-                : hourlySweepConfig.callLogHygieneArchiveRecordings !== false,
+              : false,
           syncMetricsDates:
             req.body?.syncMetricsDates !== undefined
               ? Boolean(req.body.syncMetricsDates)

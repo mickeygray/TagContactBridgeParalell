@@ -35,6 +35,10 @@ const DailyLoopRun = require("../../../../packages/shared-models/src/DailyLoopRu
 const { HourlyJobEvent } = require("../../../../packages/shared-models/src");
 
 const CURSOR_LOST = "durable-cursor-lost";
+const RETIRED_RECORDING_DOWNLOAD_HANDLER_KEYS = Object.freeze([
+  "retryCallRecordingPipeline",
+  "retryCallRecordingArchive",
+]);
 const cursorLost = (passKey) => Object.assign(
   new Error(`${passKey} durable cursor was lost`), { code: CURSOR_LOST },
 );
@@ -79,6 +83,7 @@ function createPassRetryDrainTask({
           lane,
           status: { $in: ["pending", "failed"] },
           nextAttemptAt: { $lte: at },
+          handlerKey: { $nin: RETIRED_RECORDING_DOWNLOAD_HANDLER_KEYS },
         })) || 0,
       })));
     },
@@ -107,6 +112,7 @@ function createPassRetryDrainTask({
             workerName: `${owner}-pass`,
             lane: row.lane,
             batchCap,
+            excludedHandlerKeys: RETIRED_RECORDING_DOWNLOAD_HANDLER_KEYS,
             inlineRetryAttempts: 2,
             inlineRetryDelayMs: 500,
             logger,
@@ -567,6 +573,7 @@ function createPassRuntime({
 
 module.exports = {
   CURSOR_LOST,
+  RETIRED_RECORDING_DOWNLOAD_HANDLER_KEYS,
   advancePass,
   claimPass,
   createPassRetryDrainTask,

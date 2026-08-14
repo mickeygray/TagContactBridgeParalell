@@ -250,6 +250,9 @@ async function claimNextHourlyJobEvent(workerName, options = {}) {
   const allowedHandlerKeys = Array.isArray(options.handlerKeys)
     ? options.handlerKeys.map((value) => String(value || "").trim()).filter(Boolean)
     : [];
+  const excludedHandlerKeys = Array.isArray(options.excludedHandlerKeys)
+    ? options.excludedHandlerKeys.map((value) => String(value || "").trim()).filter(Boolean)
+    : [];
 
   const query = {
     lane,
@@ -257,7 +260,11 @@ async function claimNextHourlyJobEvent(workerName, options = {}) {
     nextAttemptAt: { $lte: now },
   };
   if (allowedHandlerKeys.length > 0) {
-    query.handlerKey = { $in: allowedHandlerKeys };
+    query.handlerKey = {
+      $in: allowedHandlerKeys.filter((key) => !excludedHandlerKeys.includes(key)),
+    };
+  } else if (excludedHandlerKeys.length > 0) {
+    query.handlerKey = { $nin: excludedHandlerKeys };
   }
 
   return HourlyJobEvent.findOneAndUpdate(

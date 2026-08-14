@@ -16,6 +16,13 @@ const {
 } = require("../../shared-repositories/src");
 const { emitHourlyJobEvent } = require("./hourlyJobEventService");
 
+// 2026-08-14 links-only recording policy. Provider recording locators are
+// retained and indexed, but the application no longer queues unattended audio
+// downloads or Drive archival. Keep the implementation during the no-delete
+// proof window so explicit/manual recovery remains possible without restoring
+// an automatic producer.
+const AUTOMATED_RECORDING_ARCHIVE_ENABLED = false;
+
 const CALLRAIL_RECORDING_FIELDS = [
   "id",
   "customer_phone_number",
@@ -1277,6 +1284,9 @@ async function queueCallRecordingArchiveJob(callLogDoc, {
   force = false,
   lane = "hourly",
 } = {}) {
+  if (!AUTOMATED_RECORDING_ARCHIVE_ENABLED) {
+    return { queued: false, reason: "retired-links-only" };
+  }
   const config = getArchiveConfig();
   if (!config.enabled || !isRecordingArchiveConfigured()) {
     return { queued: false, reason: "archive-not-configured" };
@@ -1346,6 +1356,9 @@ async function processCallRecordingArchive({
   logger = null,
   ringcxMetadataCache = null,
 } = {}) {
+  if (!AUTOMATED_RECORDING_ARCHIVE_ENABLED) {
+    return { status: "skipped", reason: "retired-links-only" };
+  }
   const normalizedDomain = normalizeDomain(domain);
   const config = getArchiveConfig();
 
@@ -1656,6 +1669,7 @@ async function processCallRecordingArchive({
 }
 
 module.exports = {
+  AUTOMATED_RECORDING_ARCHIVE_ENABLED,
   isRecordingArchiveConfigured,
   isRingcxRecordingEnabled,
   isTerminalArchiveStatus,

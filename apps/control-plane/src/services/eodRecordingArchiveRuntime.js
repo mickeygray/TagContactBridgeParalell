@@ -8,6 +8,9 @@ const {
 } = require("../../../../packages/shared-services/src/recordingPipelineIdleService");
 
 const DEFAULT_WEEKDAYS = Object.freeze([1, 2, 3, 4, 5]);
+// Retained only for rollback during the no-delete proof window. Production is
+// links-only: this runtime may neither arm its timer nor download audio.
+const AUTOMATED_RECORDING_DOWNLOADS_ENABLED = false;
 
 function normalizeActiveWeekdays(values = null) {
   const source = Array.isArray(values) && values.length > 0
@@ -62,7 +65,7 @@ function computeNextRunAt(
 
 function createState(config = {}) {
   return {
-    enabled: Boolean(config.enabled),
+    enabled: Boolean(config.enabled) && AUTOMATED_RECORDING_DOWNLOADS_ENABLED,
     running: false,
     hour: Number(config.hour || 21),
     minute: Number(config.minute || 30),
@@ -118,6 +121,14 @@ function createEodRecordingArchiveRuntime({ config = {}, runtime }) {
   const state = createState(config);
 
   async function runArchive(options = {}) {
+    if (!AUTOMATED_RECORDING_DOWNLOADS_ENABLED) {
+      return {
+        ok: true,
+        skipped: true,
+        reason: "retired-links-only",
+        state: summarizeState(state),
+      };
+    }
     if (state.running) {
       return {
         ok: false,
@@ -209,7 +220,7 @@ function createEodRecordingArchiveRuntime({ config = {}, runtime }) {
   }
 
   async function start() {
-    state.enabled = Boolean(config.enabled);
+    state.enabled = Boolean(config.enabled) && AUTOMATED_RECORDING_DOWNLOADS_ENABLED;
     state.nextRunAt = computeNextRunAt(state.hour, state.minute, state.timezone, new Date(), {
       activeWeekdays: state.activeWeekdays,
     });
@@ -264,6 +275,7 @@ function createEodRecordingArchiveRuntime({ config = {}, runtime }) {
 }
 
 module.exports = {
+  AUTOMATED_RECORDING_DOWNLOADS_ENABLED,
   computeNextRunAt,
   createEodRecordingArchiveRuntime,
   normalizeActiveWeekdays,

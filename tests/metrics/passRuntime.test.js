@@ -9,7 +9,8 @@ const { test } = require("node:test");
 const assert = require("node:assert/strict");
 
 const {
-  CURSOR_LOST, advancePass, createPassRetryDrainTask, createPassRuntime,
+  CURSOR_LOST, RETIRED_RECORDING_DOWNLOAD_HANDLER_KEYS,
+  advancePass, createPassRetryDrainTask, createPassRuntime,
   isPacificBusinessDay, pacificDayKey,
 } = require("../../apps/control-plane/src/services/passRuntimeFactory");
 const {
@@ -403,15 +404,19 @@ test("a RETURNED total failure spends all retries inside one pass", async () => 
 
 test("the shared retry task retries its queue call inline and combines both lanes", async () => {
   const Model = {
-    async countDocuments(query) { return query.lane === "hourly" ? 2 : 1; },
+    async countDocuments(query) {
+      assert.deepEqual(query.handlerKey, { $nin: RETIRED_RECORDING_DOWNLOAD_HANDLER_KEYS });
+      return query.lane === "hourly" ? 2 : 1;
+    },
   };
   const retryTask = createPassRetryDrainTask({ passKey: "test", Model, batchCap: 7 });
   const planned = await retryTask.plan({ at: new Date("2026-08-14T19:00:00.000Z") });
   assert.equal(retryTask.count(planned), 3);
   const calls = new Map();
   const applied = await retryTask.apply(planned, {
-    retryDrainImpl: async ({ lane, batchCap }) => {
+    retryDrainImpl: async ({ lane, batchCap, excludedHandlerKeys }) => {
       assert.equal(batchCap, 7);
+      assert.deepEqual(excludedHandlerKeys, RETIRED_RECORDING_DOWNLOAD_HANDLER_KEYS);
       const n = (calls.get(lane) || 0) + 1;
       calls.set(lane, n);
       if (n === 1) throw new Error("temporary database interruption");

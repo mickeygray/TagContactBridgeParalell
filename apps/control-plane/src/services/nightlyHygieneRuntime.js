@@ -1891,6 +1891,11 @@ const TASKS = [
           now: new Date(),
           sinceMs: readable[0].sinceMs,
           nativeSweepEnabled: true,
+          // Recording evidence is provider-link metadata. The night pass may
+          // reconcile call rows, but it must not download, archive, transcribe,
+          // score, or enqueue future recording work.
+          scorePendingCalls: false,
+          archiveRecordings: false,
           limitPerDomain: HYGIENE_EVENING_LIMIT_PER_DOMAIN,
           lane: "hourly",
           logger,

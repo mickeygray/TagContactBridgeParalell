@@ -42,6 +42,10 @@ const {
 const { syncCaseCallRollup } = require("./caseCallRollupService");
 const { syncCallLedgerFromCallLog } = require("./callLedgerService");
 
+// The hygiene owner reconciles call metadata only. Batch downloading,
+// transcription/scoring, and archival were retired in favor of provider links.
+const BACKGROUND_CALL_RECORDING_PROCESSING_ENABLED = false;
+
 const DEFAULT_SINCE_MS = 65 * 60 * 1000;
 const DEFAULT_LIMIT_PER_DOMAIN = 200;
 const DEFAULT_MIN_DURATION_SEC = 180;
@@ -942,8 +946,10 @@ async function runHourlyCallLogHygieneForDomain(domain, options = {}) {
     0,
   );
   const syncMetricsDates = options.syncMetricsDates !== false;
-  const scorePendingCalls = options.scorePendingCalls !== false;
-  const archiveRecordings = options.archiveRecordings !== false;
+  const scorePendingCalls = BACKGROUND_CALL_RECORDING_PROCESSING_ENABLED
+    && options.scorePendingCalls === true;
+  const archiveRecordings = BACKGROUND_CALL_RECORDING_PROCESSING_ENABLED
+    && options.archiveRecordings === true;
   const mirrorLegacyContactActivities =
     options.mirrorLegacyContactActivities === true;
   const lane = String(options.lane || "hourly").toLowerCase() === "nightly"

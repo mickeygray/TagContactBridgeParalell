@@ -310,6 +310,7 @@ async function drainHourlyJobQueue({
   lane = "hourly",
   batchCap = DEFAULT_BATCH_CAP,
   handlerKeys = null,
+  excludedHandlerKeys = null,
   handlerTimeoutMs = DEFAULT_HANDLER_TIMEOUT_MS,
   inlineRetryAttempts = 2,
   inlineRetryDelayMs = 500,
@@ -330,6 +331,7 @@ async function drainHourlyJobQueue({
     const job = await claimNextHourlyJobEvent(workerName, {
       lane,
       handlerKeys: Array.isArray(handlerKeys) ? handlerKeys : undefined,
+      excludedHandlerKeys: Array.isArray(excludedHandlerKeys) ? excludedHandlerKeys : undefined,
     });
     if (!job) break;
     summary.claimed += 1;
@@ -628,8 +630,8 @@ async function runCallLogHygiene({
   maxCaseRefreshesPerDomain,
   maxScoringPerDomain,
   maxArchivePerDomain,
-  scorePendingCalls = true,
-  archiveRecordings = true,
+  scorePendingCalls = false,
+  archiveRecordings = false,
   syncMetricsDates = false,
   preferLegacyContactActivities = false,
 } = {}) {
