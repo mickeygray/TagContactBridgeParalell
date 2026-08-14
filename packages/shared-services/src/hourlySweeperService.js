@@ -5,6 +5,7 @@ const {
   claimNextHourlyJobEvent,
   markHourlyJobCompleted,
   markHourlyJobFailed,
+  runWithImmediateRetries,
 } = require("./hourlyJobEventService");
 const {
   dispatch: dispatchJob,
@@ -310,6 +311,8 @@ async function drainHourlyJobQueue({
   batchCap = DEFAULT_BATCH_CAP,
   handlerKeys = null,
   handlerTimeoutMs = DEFAULT_HANDLER_TIMEOUT_MS,
+  inlineRetryAttempts = 2,
+  inlineRetryDelayMs = 500,
   logger = null,
 } = {}) {
   const summary = {
@@ -318,6 +321,8 @@ async function drainHourlyJobQueue({
     autoResolved: 0,
     failed: 0,
     deadLettered: 0,
+    deferred: 0,
+    inlineRetries: 0,
     errors: [],
   };
 
@@ -350,20 +355,42 @@ async function drainHourlyJobQueue({
       continue;
     }
 
-    try {
-      const result = await withTimeout(
-        Promise.resolve(dispatchJob(job)),
+    const retryOutcome = await runWithImmediateRetries(
+      () => withTimeout(
+        Promise.resolve().then(() => dispatchJob(job)),
         handlerTimeoutMs,
         `handler "${job.handlerKey}"`,
+      ),
+      {
+        immediateRetryAttempts: Math.min(
+          2,
+          Math.max(Number(inlineRetryAttempts) || 0, Number(job.immediateRetryAttempts) || 0),
+        ),
+        immediateRetryDelayMs: Math.min(
+          5_000,
+          Math.max(0, Number(job.immediateRetryDelayMs) || Number(inlineRetryDelayMs) || 0),
+        ),
+        shouldRetry: (error) => !(error instanceof UnknownHandlerError) && !error?.deadLetter,
+      },
+    );
+    summary.inlineRetries += Number(retryOutcome.attemptsUsed) || 0;
+    if (retryOutcome.attemptsUsed > 0) {
+      await HourlyJobEvent.updateOne(
+        { _id: job._id, status: "processing" },
+        { $inc: { immediateRetryUsed: retryOutcome.attemptsUsed } },
       );
-      await markHourlyJobCompleted(job._id, workerName, result ?? null);
+    }
+
+    if (retryOutcome.ok) {
+      await markHourlyJobCompleted(job._id, workerName, retryOutcome.result ?? null);
       summary.completed += 1;
       logger?.info?.("hourly.job.completed", {
         jobId: String(job._id),
         handlerKey: job.handlerKey,
         attempts: job.attemptCount,
       });
-    } catch (error) {
+    } else {
+      const error = retryOutcome.error;
       const isUnknownHandler = error instanceof UnknownHandlerError;
       const forceDeadLetter = Boolean(error?.deadLetter);
       const timedOut = Boolean(error?.handlerTimedOut);
@@ -379,6 +406,7 @@ async function drainHourlyJobQueue({
         summary.deadLettered += 1;
       } else {
         summary.failed += 1;
+        summary.deferred += 1;
       }
       summary.errors.push({
         jobId: String(job._id),

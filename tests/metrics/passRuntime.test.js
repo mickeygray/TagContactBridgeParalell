@@ -9,7 +9,8 @@ const { test } = require("node:test");
 const assert = require("node:assert/strict");
 
 const {
-  CURSOR_LOST, advancePass, createPassRuntime, isPacificBusinessDay, pacificDayKey,
+  CURSOR_LOST, advancePass, createPassRetryDrainTask, createPassRuntime,
+  isPacificBusinessDay, pacificDayKey,
 } = require("../../apps/control-plane/src/services/passRuntimeFactory");
 const {
   createMorningPassRuntime,
@@ -123,6 +124,7 @@ test("every task of every pass lands dark", async () => {
     MORNING_FLOOR_SERVICES_ENABLED: undefined, MORNING_CADENCE_ENABLED: undefined,
     MIDDAY_CADENCE_ENABLED: undefined, MIDDAY_CALL_LOG_HYGIENE_ENABLED: undefined,
     MIDDAY_LEAD_DELIVERY_HEALTH_ENABLED: undefined,
+    THREE_PASS_RETRY_DRAIN_ENABLED: undefined,
   }, async () => {
     for (const rt of [createMorningPassRuntime({}), createMiddayPassRuntime({})]) {
       for (const t of rt.getState().tasks) {
@@ -159,20 +161,16 @@ test("an armed task with nothing planned does not apply", async () => {
   assert.equal(applied, 0);
 });
 
-test("one task throwing does not cost the others — it retries, then steps past", async () => {
+test("one task throwing spends its retries in the same pass, then steps past", async () => {
   let ran = 0;
+  let failedPlans = 0;
   const rt = build([
-    task("boom", { plan: async () => { throw new Error("nope"); } }),
+    task("boom", { plan: async () => { failedPlans += 1; throw new Error("nope"); } }),
     task("fine", { plan: async () => { ran += 1; return [{ n: 1 }]; } }),
   ]);
   const model = fakeModel();
-  // Attempts 1 and 2 retry and return early, leaving the cursor put.
-  const first = await rt.runOnce({ force: true, Model: model });
-  assert.equal(first.retrying, "boom");
-  assert.equal(ran, 0, "the pass stops at the failing chore while it has attempts left");
-  await rt.runOnce({ force: true, Model: model });
-  // Third attempt exhausts the budget and steps past.
   const third = await rt.runOnce({ force: true, Model: model });
+  assert.equal(failedPlans, 3, "the complete retry budget is spent before runOnce returns");
   assert.equal(ran, 1, "the rest of the day still runs");
   assert.ok(third.results.some((r) => r.task === "fine"));
   assert.equal(third.degraded, true, "an abandoned task must keep the day visibly degraded");
@@ -183,21 +181,19 @@ test("one task throwing does not cost the others — it retries, then steps past
   assert.equal(cursor.failedTasks.boom.attempts, 3);
 });
 
-test("the retry budget survives a restart and a different process", async () => {
+test("a completed degraded pass is not replayed by another process", async () => {
   const model = fakeModel();
+  let calls = 0;
   const failing = () => build([
-    task("boom", { plan: async () => { throw new Error("still down"); } }),
+    task("boom", { plan: async () => { calls += 1; throw new Error("still down"); } }),
     task("fine"),
   ]);
 
   const first = await failing().runOnce({ force: true, Model: model });
   const second = await failing().runOnce({ force: true, Model: model });
-  const third = await failing().runOnce({ force: true, Model: model });
-
-  assert.equal(first.attempt, 1);
-  assert.equal(second.attempt, 2, "a new runtime must adopt the durable attempt count");
-  assert.equal(third.degraded, true);
-  assert.ok(third.results.some((row) => row.task === "fine"), "the bounded failure still steps past");
+  assert.equal(calls, 3);
+  assert.equal(first.degraded, true);
+  assert.deepEqual(second, { skipped: "claimed by another pass" });
   assert.equal(model.docs.get(pacificDayKey()).passes.test.failedTasks.boom.attempts, 3);
 });
 
@@ -389,7 +385,7 @@ test("both passes are reachable — every task has a count()", () => {
 
 // ── AUDIT FIXES on the factory ─────────────────────────────────────────────
 
-test("a RETURNED total failure retries — it does not complete the day", async () => {
+test("a RETURNED total failure spends all retries inside one pass", async () => {
   // Every task catches provider errors and reports {failed: n} instead of
   // throwing — right for a partial failure, where the successes must not
   // re-run. But a night where NOTHING succeeded used to advance the cursor and
@@ -401,11 +397,32 @@ test("a RETURNED total failure retries — it does not complete the day", async 
   })]);
   const model = fakeModel();
   const first = await rt.runOnce({ force: true, Model: model });
-  assert.equal(first.retrying, "outage", "a total failure must land in the retry path");
-  assert.equal(calls, 1);
-  await rt.runOnce({ force: true, Model: model });
-  await rt.runOnce({ force: true, Model: model });
+  assert.equal(first.degraded, true);
   assert.equal(calls, 3, "the full attempt budget is spent");
+});
+
+test("the shared retry task retries its queue call inline and combines both lanes", async () => {
+  const Model = {
+    async countDocuments(query) { return query.lane === "hourly" ? 2 : 1; },
+  };
+  const retryTask = createPassRetryDrainTask({ passKey: "test", Model, batchCap: 7 });
+  const planned = await retryTask.plan({ at: new Date("2026-08-14T19:00:00.000Z") });
+  assert.equal(retryTask.count(planned), 3);
+  const calls = new Map();
+  const applied = await retryTask.apply(planned, {
+    retryDrainImpl: async ({ lane, batchCap }) => {
+      assert.equal(batchCap, 7);
+      const n = (calls.get(lane) || 0) + 1;
+      calls.set(lane, n);
+      if (n === 1) throw new Error("temporary database interruption");
+      return { claimed: 1, completed: 1, failed: 0, inlineRetries: 1 };
+    },
+  });
+  assert.deepEqual(Object.fromEntries(calls), { hourly: 2, nightly: 2 });
+  assert.equal(applied.completed, 2);
+  assert.equal(applied.written, 2);
+  assert.equal(applied.inlineRetries, 4);
+  assert.equal(applied.deferred, 0);
 });
 
 test("a PARTIAL failure still advances — the successes must not re-run", async () => {

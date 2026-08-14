@@ -14,6 +14,9 @@ const {
   normalizeActiveWeekdays: normalizeSpendWeekdays,
 } = require("../../packages/shared-services/src/spendSyncService");
 const DailyLoopRun = require("../../packages/shared-models/src/DailyLoopRun");
+const {
+  computeNextLaneRunAt,
+} = require("../../packages/shared-services/src/hourlyJobEventService");
 
 test("Logics review is fail-closed to Pacific weekdays", () => {
   assert.deepEqual(normalizeBusinessWeekdays(), [1, 2, 3, 4, 5]);
@@ -32,6 +35,8 @@ test("recording and spend owners reject configured weekend days", () => {
 test("generic hourly stays hard-gated, and the cx recording owner is GONE", () => {
   const source = fs.readFileSync(require.resolve("../../apps/control-plane/src/server"), "utf8");
   assert.match(source, /const runScheduledPhase = false/);
+  assert.match(source, /const RECURRING_HOURLY_SWEEP_ENABLED = false/);
+  assert.match(source, /enabled !== false && RECURRING_HOURLY_SWEEP_ENABLED/);
   assert.match(source, /mode: "durable-retry-drain-only"/);
   assert.doesNotMatch(source, /workerState:\s*hourlySweepState,\s*spendSyncRuntime/);
 
@@ -48,6 +53,33 @@ test("generic hourly stays hard-gated, and the cx recording owner is GONE", () =
   assert.doesNotMatch(source, /cxRecordingState\./);
   assert.doesNotMatch(source, /runCxRecordingHourly\(/,
     "the service survives for the admin route and the backfill scripts, but nothing in server.js calls it");
+});
+
+test("durable retry timing advances only to named Pacific business passes", () => {
+  assert.equal(
+    computeNextLaneRunAt("hourly", new Date("2026-08-14T16:00:00.000Z")).toISOString(),
+    "2026-08-14T19:00:00.000Z",
+    "09:00 PT advances to noon PT",
+  );
+  assert.equal(
+    computeNextLaneRunAt("nightly", new Date("2026-08-14T20:00:00.000Z")).toISOString(),
+    "2026-08-15T02:50:00.000Z",
+    "13:00 PT advances to the 19:50 PT night pass",
+  );
+  assert.equal(
+    computeNextLaneRunAt("hourly", new Date("2026-08-15T03:00:00.000Z")).toISOString(),
+    "2026-08-17T15:00:00.000Z",
+    "after Friday night advances to Monday morning",
+  );
+});
+
+test("new retry jobs are due in their current pass; a failed claim advances to the next pass", () => {
+  const source = fs.readFileSync(
+    require.resolve("../../packages/shared-services/src/hourlyJobEventService"),
+    "utf8",
+  );
+  assert.match(source, /const nextAttemptAt = input\.nextAttemptAt[\s\S]*: happenedAt;/);
+  assert.match(source, /markHourlyJobFailed[\s\S]*computeNextLaneRunAt\(job\.lane, now\)/);
 });
 
 test("nightly close cannot invoke duplicate spend or full hourly discovery when scheduled", () => {

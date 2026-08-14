@@ -36,6 +36,11 @@ test("the nightly receipt distinguishes completed work from follow-ups", () => {
       applied: { written: 1, attention: 1 },
     },
     {
+      task: "retry-drain",
+      label: "Durable retries",
+      applied: { completed: 4, autoResolved: 1, inlineRetries: 2, deferred: 3, deadLettered: 1 },
+    },
+    {
       task: "lead-health",
       label: "Lead health",
       applied: {
@@ -88,6 +93,9 @@ test("the nightly receipt distinguishes completed work from follow-ups", () => {
   assert.ok(summary.followUps.some((line) => /Activity review: failed/.test(line)));
   assert.ok(summary.followUps.some((line) => /insufficient provider credit/.test(line)));
   assert.ok(summary.completed.some((line) => /Blogger completed successfully/.test(line)));
+  assert.ok(summary.completed.some((line) => /Durable retries: 4 completed, 1 auto-resolved/.test(line)));
+  assert.ok(summary.followUps.some((line) => /3 job\(s\).*remain deferred/.test(line)));
+  assert.ok(summary.followUps.some((line) => /1 job\(s\).*exhausted/.test(line)));
   assert.ok(summary.leadHealth.some((line) => /12 first touch/.test(line)));
   assert.ok(summary.leadHealth.some((line) => /8 zero-touch/.test(line)));
   assert.ok(summary.leadHealth.some((line) => /2 expired reservation\(s\) released/.test(line)));

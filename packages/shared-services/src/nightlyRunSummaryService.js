@@ -93,6 +93,29 @@ function buildNightlyRunSummary(results = [], operational = {}) {
       continue;
     }
 
+    if (task === "retry-drain") {
+      const completedRetries = count(applied.completed);
+      const autoResolved = count(applied.autoResolved);
+      const deferred = count(applied.deferred);
+      const deadLettered = count(applied.deadLettered);
+      const retriedInPass = count(applied.inlineRetries);
+      if (completedRetries + autoResolved > 0) {
+        completed.push(
+          `Durable retries: ${completedRetries} completed, ${autoResolved} auto-resolved; `
+          + `${retriedInPass} bounded in-pass retry attempt(s).`,
+        );
+      } else {
+        completed.push("Durable retry queue checked; no due job completed in this pass.");
+      }
+      if (deferred > 0) {
+        followUps.push(`Durable retries: ${deferred} job(s) failed this pass and remain deferred.`);
+      }
+      if (deadLettered > 0) {
+        followUps.push(`Durable retries: ${deadLettered} job(s) exhausted their retry budget.`);
+      }
+      continue;
+    }
+
     if (task === "lead-health") {
       const health = applied.leadHealth;
       if (!health) {

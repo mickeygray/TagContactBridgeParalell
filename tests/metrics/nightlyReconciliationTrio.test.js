@@ -62,9 +62,9 @@ test("the trio does not displace night-persist or final preparation/delivery/rec
   const keys = createNightlyHygieneRuntime({}).TASKS.map((t) => t.key);
   assert.equal(keys[0], "night-persist", "the irreplaceable write goes first");
   assert.deepEqual(
-    keys.slice(-5),
-    ["call-recording-index", "report-delivery", "historical-report-repair", "lead-health", "run-summary"],
-    "the index and data email finish first; late repair, lead health, and its count-only receipt follow",
+    keys.slice(-6),
+    ["call-recording-index", "retry-drain", "report-delivery", "historical-report-repair", "lead-health", "run-summary"],
+    "the index and retry drain finish before the data email; late repair, lead health, and receipt follow",
   );
   assert.ok(keys.indexOf("session-reconcile") > keys.indexOf("activity-review"));
   assert.ok(keys.indexOf("payment-fields-sync") < keys.indexOf("call-recording-index"));
@@ -237,24 +237,20 @@ test("payment-reconcile emits retry jobs on the lane something actually drains",
 });
 
 test("the retry those jobs ride on has a CLAIMER, not just a live lane", () => {
-  // The lane being drained is only half of it. server.js drains through a
-  // handler whitelist (scheduledPhaseLite is hardcoded true), and a handler
-  // missing from that list is filtered out with no error — the job sits
-  // `pending` forever, and never dead-letters either, because
-  // markHourlyJobFailed only dead-letters a CLAIMED attempt.
-  //
-  // paymentReconcileService:301 emits handlerKey "reconcileCasePayments" on any
-  // non-404 Logics failure. Folding that service into the nightly pass without
-  // this key in the whitelist would have stranded every retry it produces.
-  const source = require("node:fs").readFileSync(
-    require.resolve("../../apps/control-plane/src/server"), "utf8",
+  // The recurring server sweep is retired. The nightly cursor must carry an
+  // unfiltered durable retry drain after payment reconciliation and before the
+  // report, so a job emitted during this pass can retry in this same loop.
+  const keys = createNightlyHygieneRuntime({}).TASKS.map((task) => task.key);
+  assert.ok(keys.indexOf("retry-drain") > keys.indexOf("payment-reconcile"));
+  assert.ok(keys.indexOf("retry-drain") < keys.indexOf("report-delivery"));
+  const passSource = require("node:fs").readFileSync(
+    require.resolve("../../apps/control-plane/src/services/passRuntimeFactory"), "utf8",
   );
-  const list = source.match(/BUSINESS_HOURS_LITE_HOURLY_HANDLER_KEYS = Object\.freeze\(\[([\s\S]*?)\]\)/);
-  assert.ok(list, "the lite handler whitelist must still exist");
-  assert.match(list[1], /"reconcileCasePayments"/,
-    "payment-reconcile's retry handler must be drainable");
+  assert.match(passSource, /drainHourlyJobQueue/);
+  assert.doesNotMatch(passSource, /handlerKeys:/,
+    "the three-pass drain must not strand a valid handler behind the retired whitelist");
 
-  // And it must actually be registered, or the whitelist entry is a dead name.
+  // The durable handler itself must still be registered.
   const handlerSource = require("node:fs").readFileSync(
     require.resolve("../../packages/shared-services/src/hourlyJobHandlers"), "utf8",
   );

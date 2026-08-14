@@ -7,7 +7,7 @@
 // Everything lands DARK behind MIDDAY_PASS_ENABLED, each task behind its own
 // flag on top.
 
-const { createPassRuntime } = require("./passRuntimeFactory");
+const { createPassRetryDrainTask, createPassRuntime } = require("./passRuntimeFactory");
 
 const flag = (name) => String(process.env[name] || "false").toLowerCase() === "true";
 const middayCadenceCap = () => Math.max(1, Number(process.env.MIDDAY_CADENCE_MAX_DISPATCHES) || 200);
@@ -54,6 +54,7 @@ const TASKS = [
       return "one read-only health checkpoint; no provider or lead mutation";
     },
   },
+  createPassRetryDrainTask({ passKey: "midday" }),
   {
     // THE RVM HALF.
     //

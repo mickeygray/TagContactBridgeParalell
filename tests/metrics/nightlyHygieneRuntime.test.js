@@ -52,6 +52,7 @@ test("disabled by default — deploying the code does not start writing", async 
     NIGHTLY_CALL_LOG_HYGIENE_ENABLED: undefined,
     CALL_RECORDING_INDEX_ENABLED: undefined,
     REPORT_SCHEDULER_ENABLED: undefined,
+    THREE_PASS_RETRY_DRAIN_ENABLED: undefined,
   }, async () => {
     const rt = createNightlyHygieneRuntime({});
     const s = rt.getState();
@@ -418,7 +419,7 @@ test("the night runs in the stated ORDER", () => {
     ["night-persist", "mail-invoice", "mail-spend-derive", "call-links", "call-recovery-discovery",
       "call-recovery-eligibility-hygiene", "queue-rollup", "logics-source", "spend-sync",
       "activity-review", "session-reconcile", "payment-reconcile", "payment-fields-sync",
-      "call-log-hygiene-evening", "call-recording-index", "report-delivery",
+      "call-log-hygiene-evening", "call-recording-index", "retry-drain", "report-delivery",
       "historical-report-repair", "lead-health", "run-summary"]);
   assert.equal(s2.tasks.at(-1).key, "run-summary",
     "the count-only receipt must follow the data emails on the same durable cursor");

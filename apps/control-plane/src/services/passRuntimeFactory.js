@@ -32,6 +32,7 @@
 //  * THE GUARD IS TAKEN BEFORE ANY EARLY RETURN CAN SKIP IT.
 
 const DailyLoopRun = require("../../../../packages/shared-models/src/DailyLoopRun");
+const { HourlyJobEvent } = require("../../../../packages/shared-models/src");
 
 const CURSOR_LOST = "durable-cursor-lost";
 const cursorLost = (passKey) => Object.assign(
@@ -57,6 +58,80 @@ const isPacificBusinessDay = (at = new Date()) => {
   const { weekday } = pacificParts(at);
   return weekday !== "Sat" && weekday !== "Sun";
 };
+
+/** One shared durable-retry task for the three named daily passes. */
+function createPassRetryDrainTask({
+  passKey,
+  Model = HourlyJobEvent,
+  batchCap = 50,
+} = {}) {
+  const owner = String(passKey || "pass");
+  return {
+    key: "retry-drain",
+    label: "Drain durable retries",
+    writesArmed: () => String(
+      process.env.THREE_PASS_RETRY_DRAIN_ENABLED || "false"
+    ).trim().toLowerCase() === "true",
+    async plan({ at = new Date() } = {}) {
+      return Promise.all(["hourly", "nightly"].map(async (lane) => ({
+        lane,
+        due: Number(await Model.countDocuments({
+          lane,
+          status: { $in: ["pending", "failed"] },
+          nextAttemptAt: { $lte: at },
+        })) || 0,
+      })));
+    },
+    count(planned) {
+      return planned.reduce((sum, row) => sum + Math.max(0, Number(row?.due) || 0), 0);
+    },
+    async apply(planned, { logger, retryDrainImpl = null }) {
+      const drain = retryDrainImpl
+        || require("../../../../packages/shared-services/src/hourlySweeperService").drainHourlyJobQueue;
+      const { runWithImmediateRetries } = require(
+        "../../../../packages/shared-services/src/hourlyJobEventService"
+      );
+      const combined = {
+        written: 0,
+        claimed: 0,
+        completed: 0,
+        autoResolved: 0,
+        deferred: 0,
+        deadLettered: 0,
+        inlineRetries: 0,
+        failed: 0,
+      };
+      for (const row of planned.filter((entry) => Number(entry?.due) > 0)) {
+        const outcome = await runWithImmediateRetries(
+          () => drain({
+            workerName: `${owner}-pass`,
+            lane: row.lane,
+            batchCap,
+            inlineRetryAttempts: 2,
+            inlineRetryDelayMs: 500,
+            logger,
+          }),
+          { immediateRetryAttempts: 2, immediateRetryDelayMs: 500 },
+        );
+        if (!outcome.ok) throw outcome.error;
+        const result = outcome.result || {};
+        combined.claimed += Number(result.claimed) || 0;
+        combined.completed += Number(result.completed) || 0;
+        combined.autoResolved += Number(result.autoResolved) || 0;
+        combined.deferred += Number(result.deferred ?? result.failed) || 0;
+        combined.deadLettered += Number(result.deadLettered) || 0;
+        combined.inlineRetries += (Number(result.inlineRetries) || 0)
+          + (Number(outcome.attemptsUsed) || 0);
+      }
+      combined.written = combined.completed;
+      return combined;
+    },
+    describe(planned) {
+      const due = planned.reduce((sum, row) => sum + Math.max(0, Number(row?.due) || 0), 0);
+      return `${due} durable retry job(s) due at this pass`;
+    },
+  };
+}
 
 /**
  * Claim the day for one pass. Returns null if somebody else holds it.
@@ -290,7 +365,7 @@ function createPassRuntime({
           // THE STANDING DRY RUN. plan() runs for every task, armed or not —
           // otherwise a task landed dark reports nothing and there is no
           // evidence to arm on.
-          const planned = await task.plan({ domains: state.domains, logger: log });
+          const planned = await task.plan({ domains: state.domains, logger: log, at: now, passKey });
           const plannedCount = typeof task.count === "function"
             ? Number(task.count(planned)) || 0
             : planned.reduce((acc, p) => acc + (p.plan?.length || 0), 0);
@@ -363,14 +438,15 @@ function createPassRuntime({
           results.push({ task: task.key, label: task.label, error: String(error.message).slice(0, 240) });
           log?.error?.(`${passKey}.task_failed`, { task: task.key, attempt: tried, error: String(error.message) });
           if (tried < maxTaskAttempts) {
-            // Leave the CURSOR where it is so the next poll retries this chore —
-            // but hand the CLAIM back, or the lease locks the day out for 45
-            // minutes and the retry budget never actually spends itself.
-            await releasePass(passKey, dateKey, claim.claimedAt, error?.code || "task-failed", {
-              Model, attemptsByTask,
+            // Spend the bounded budget now. The scheduler poll is only a clock,
+            // never the retry engine: renew this cursor without advancing it,
+            // then immediately re-plan the failed task.
+            const renewed = await advancePass(passKey, dateKey, claim.claimedAt, index, totals, {
+              Model, attemptsByTask, failedTasks,
             });
-            state.lastResults = results;
-            return { ran: results.length, results, retrying: task.key, attempt: tried, durationMs: Date.now() - started };
+            if (!renewed) throw cursorLost(passKey);
+            claim.claimedAt = renewed;
+            continue;
           }
           // Out of attempts — step past it so the rest of the day still runs.
           failedTasks[task.key] = {
@@ -493,6 +569,7 @@ module.exports = {
   CURSOR_LOST,
   advancePass,
   claimPass,
+  createPassRetryDrainTask,
   createPassRuntime,
   finishPass,
   releasePass,

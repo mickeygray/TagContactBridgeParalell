@@ -8,6 +8,10 @@ const {
 const { getInternalFromEmail } = require("../../shared-config/src");
 const { sendPlainEmail } = require("./sendgridMailService");
 const { recordWorkflowStage } = require("./workflowStateService");
+const {
+  addLocalDays,
+  zonedTimeToUtc,
+} = require("./timezoneDateWindowService");
 
 const DEFAULT_ALERT_EMAIL = "mgray@taxadvocategroup.com";
 const EMAIL_ALERT_SEVERITIES = new Set(["critical"]);
@@ -20,21 +24,47 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, Math.max(Number(ms) || 0, 0)));
 }
 
-function computeNextLaneRunAt(lane = "hourly", fromDate = new Date()) {
+const PACIFIC_TIME_ZONE = "America/Los_Angeles";
+const THREE_PASS_TIMES = Object.freeze([
+  { hour: 8, minute: 0 },
+  { hour: 12, minute: 0 },
+  { hour: 19, minute: 50 },
+]);
+
+function pacificCalendarParts(at) {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: PACIFIC_TIME_ZONE,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(at);
+  const value = (type) => Number(parts.find((part) => part.type === type)?.value);
+  return { year: value("year"), month: value("month"), day: value("day") };
+}
+
+/** Durable failures are revisited by the next named business pass. */
+function computeNextPassRunAt(fromDate = new Date()) {
   const base = new Date(fromDate);
-  if (lane === "nightly") {
-    const next = new Date(base);
-    next.setHours(2, 0, 0, 0);
-    if (next <= base) {
-      next.setDate(next.getDate() + 1);
+  const start = pacificCalendarParts(base);
+
+  for (let offset = 0; offset < 8; offset += 1) {
+    const localDay = addLocalDays(start, offset);
+    const weekday = new Date(Date.UTC(localDay.year, localDay.month - 1, localDay.day)).getUTCDay();
+    if (weekday === 0 || weekday === 6) continue;
+    for (const pass of THREE_PASS_TIMES) {
+      const candidate = zonedTimeToUtc(
+        { ...localDay, hour: pass.hour, minute: pass.minute, second: 0, millisecond: 0 },
+        PACIFIC_TIME_ZONE,
+      );
+      if (candidate > base) return candidate;
     }
-    return next;
   }
 
-  const next = new Date(base);
-  next.setMinutes(0, 0, 0);
-  next.setHours(next.getHours() + 1);
-  return next;
+  throw new Error("unable to find the next three-pass retry boundary");
+}
+
+function computeNextLaneRunAt(_lane = "hourly", fromDate = new Date()) {
+  return computeNextPassRunAt(fromDate);
 }
 
 function buildAlertSubject(job) {
@@ -99,9 +129,13 @@ async function notifyHourlyJobAlert(job, options = {}) {
 async function emitHourlyJobEvent(input = {}) {
   const lane = input.lane === "nightly" ? "nightly" : "hourly";
   const domain = normalizeDomain(input.domain);
+  const happenedAt = input.happenedAt ? new Date(input.happenedAt) : new Date();
   const nextAttemptAt = input.nextAttemptAt
     ? new Date(input.nextAttemptAt)
-    : computeNextLaneRunAt(lane, input.happenedAt ? new Date(input.happenedAt) : new Date());
+    // Newly emitted work is immediately due. If it was emitted by morning or
+    // night, that same pass's later retry-drain step can handle it. Work born
+    // between passes simply waits durably until the next pass; no poller runs.
+    : happenedAt;
 
   const doc = {
     lane,
@@ -340,7 +374,10 @@ async function runWithImmediateRetries(task, options = {}) {
       };
     } catch (error) {
       lastError = error;
-      if (attempt >= maxAttempts) {
+      const retryAllowed = typeof options.shouldRetry === "function"
+        ? options.shouldRetry(error, attempt) !== false
+        : true;
+      if (attempt >= maxAttempts || !retryAllowed) {
         break;
       }
       attemptsUsed += 1;
@@ -362,6 +399,7 @@ module.exports = {
   EMAIL_ALERT_SEVERITIES,
   claimNextHourlyJobEvent,
   computeNextLaneRunAt,
+  computeNextPassRunAt,
   emitHourlyJobEvent,
   listHourlyJobEvents,
   markHourlyJobCompleted,

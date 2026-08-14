@@ -661,8 +661,13 @@ function attachWebClientBuild(app, runtime) {
   });
 }
 
+// No unattended business or retry work may start from the generic minute/hour
+// sweeper. The implementation remains for authenticated manual recovery during
+// the no-delete window; morning, noon and night own durable retry draining.
+const RECURRING_HOURLY_SWEEP_ENABLED = false;
+
 /**
- * Hourly sweeper worker. Two separate cadences on one state object:
+ * Retired recurring sweeper. Two historical cadences on one state object:
  *  - Every 60s: run `drainHourlyJobQueue` via Phase B only. Keeps the
  *    retry backlog moving without waiting for the top of the hour.
  *  - At the top of every hour: also run Phase A (session reconcile +
@@ -2897,7 +2902,7 @@ async function startServer() {
 
   // Hourly sweeper runs on its own state object so its cadence and
   // health are independent from the primary event-drain worker.
-  if (config.controlPlaneWorker?.enabled !== false) {
+  if (config.controlPlaneWorker?.enabled !== false && RECURRING_HOURLY_SWEEP_ENABLED) {
     await startHourlySweepWorker({
       config,
       runtime,
@@ -2905,7 +2910,11 @@ async function startServer() {
     });
   } else {
     hourlySweepState.enabled = false;
-    runtime.logger.warn("control-plane.hourly.disabled");
+    hourlySweepState.lastResult = {
+      skipped: true,
+      reason: "retired-to-three-pass-retry-ownership",
+    };
+    runtime.logger.warn("control-plane.hourly.retired_to_three_passes");
   }
 
   // startCxRecordingWorker lived here, behind a hardcoded false for a

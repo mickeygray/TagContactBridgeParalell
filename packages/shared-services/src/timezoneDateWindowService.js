@@ -122,5 +122,8 @@ function buildTimezoneDateWindow(dateKey, timeZone = "America/Los_Angeles") {
 }
 
 module.exports = {
+  addLocalDays,
   buildTimezoneDateWindow,
+  parseDateKey,
+  zonedTimeToUtc,
 };

@@ -28,6 +28,7 @@
 const {
   applySourceSanitization, pacificKey, planSourceSanitization,
 } = require("../../../../packages/shared-services/src/logicsSourceSanitizerService");
+const { createPassRetryDrainTask } = require("./passRuntimeFactory");
 const { DailyLoopRun } = require("../../../../packages/shared-models/src");
 const {
   HISTORICAL_REPAIR_MAX_AGE_DAYS,
@@ -1994,6 +1995,12 @@ const TASKS = [
         + (p.mintOnly ? ` · ${p.mintOnly} mint-on-read` : "")
         + (p.unresolvedProvider ? ` · ${p.unresolvedProvider} UNRESOLVED PROVIDER` : "");
     },
+  },
+  {
+    ...createPassRetryDrainTask({ passKey: "nightly" }),
+    // A retry backlog belongs in the receipt, but may not suppress the
+    // financial/vendor close. Unresolved jobs remain durable for next pass.
+    continueOnFailure: true,
   },
   {
     // THE DATA EMAILS ARE THE LAST BUSINESS STEP OF THIS RUN, NOT A SECOND

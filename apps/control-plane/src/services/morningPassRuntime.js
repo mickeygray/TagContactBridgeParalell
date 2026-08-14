@@ -28,7 +28,7 @@
 // tasks are dark and the hoist is the only owner, which is exactly one owner.
 // The runbook records it.
 
-const { createPassRuntime } = require("./passRuntimeFactory");
+const { createPassRetryDrainTask, createPassRuntime } = require("./passRuntimeFactory");
 
 const envTrue = (env, name) => String(env?.[name] || "false").trim().toLowerCase() === "true";
 const flag = (name) => envTrue(process.env, name);
@@ -105,6 +105,7 @@ const TASKS = [
       return `${(planned[0]?.services || []).join(", ")} — each still gated by its own env flag`;
     },
   },
+  createPassRetryDrainTask({ passKey: "morning" }),
   {
     // THE MORNING CADENCE HALF: sms and email only.
     //
