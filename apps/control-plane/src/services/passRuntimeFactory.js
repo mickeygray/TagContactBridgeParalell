@@ -430,10 +430,22 @@ function createPassRuntime({
       return;
     }
     if (state.timer) return;
-    state.timer = setInterval(() => { runOnce().catch(() => {}); }, state.pollMs);
+    const scheduledModel = runtime.Model || DailyLoopRun;
+    state.timer = setInterval(() => {
+      runOnce({ Model: scheduledModel }).catch(() => {});
+    }, state.pollMs);
     if (state.timer.unref) state.timer.unref();
     log?.info?.(`${passKey}.started`, { hour: state.hour, minute: state.minute, pollMs: state.pollMs });
-    await runOnce();
+    // A missed scheduled pass is caught up when a process starts after its
+    // clock. Do not make that bounded-but-potentially-long maintenance work a
+    // prerequisite for opening the control-plane listener: the durable claim
+    // already prevents a second writer, and stop() still waits for an active
+    // pass during shutdown. This keeps health and webhook intake available
+    // while a legitimate catch-up completes in the background.
+    void runOnce({ Model: scheduledModel }).catch((error) => {
+      state.lastError = String(error?.message || error).slice(0, 300);
+      log?.error?.(`${passKey}.initial_run_failed`, { error: state.lastError });
+    });
   }
 
   async function stop({ maxWaitMs = 25_000 } = {}) {

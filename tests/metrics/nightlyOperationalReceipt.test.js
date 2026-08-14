@@ -5,7 +5,9 @@ const assert = require("node:assert/strict");
 
 const {
   buildAgedReceiptIncrement,
+  recordAgedRefreshBatch,
   summarizeOperationalRecords,
+  workflowDedupeFilter,
 } = require("../../packages/shared-services/src/nightlyOperationalReceiptService");
 const {
   classifyDncLookupFailure,
@@ -25,6 +27,32 @@ test("aged receipt keeps count-only totals and payment failures", () => {
   assert.equal(increment["result.retired"], 6);
   assert.equal(increment["result.lookupFailures"], 9);
   assert.equal(increment["result.lookupFailureReasons.paymentRequired"], 9);
+});
+
+test("aged receipt states the partial-index predicate on its dedupe lookup", async () => {
+  const expected = {
+    $and: [
+      { dedupeKey: "nightly-ops:aged-refresh:2026-08-14" },
+      { dedupeKey: { $type: "string" } },
+    ],
+  };
+  assert.deepEqual(
+    workflowDedupeFilter("nightly-ops:aged-refresh:2026-08-14"),
+    expected,
+  );
+
+  let observedFilter = null;
+  const model = {
+    async updateOne(filter) {
+      observedFilter = filter;
+      return { acknowledged: true };
+    },
+  };
+  await recordAgedRefreshBatch(
+    { checked: 1, finishedAt: new Date("2026-08-14T13:59:42.419Z") },
+    { model, dateKey: "2026-08-14" },
+  );
+  assert.deepEqual(observedFilter, expected);
 });
 
 test("provider failure classifier distinguishes credit exhaustion", () => {

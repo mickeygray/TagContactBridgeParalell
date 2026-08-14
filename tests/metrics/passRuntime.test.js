@@ -518,6 +518,39 @@ test("stop() waits for a running pass instead of abandoning it", async () => {
   assert.equal(rt.getState().running, false, "stop returned only after the pass finished");
 });
 
+test("start() does not hold service startup behind a due catch-up pass", async () => {
+  let releasePlan;
+  const planGate = new Promise((resolve) => { releasePlan = resolve; });
+  const rt = createPassRuntime({
+    passKey: "startup-catch-up",
+    label: "startup catch-up",
+    enabledEnv: "TEST_PASS_ENABLED",
+    defaultHour: 0,
+    tasks: [task("slow", {
+      plan: async () => {
+        await planGate;
+        return [{ n: 1 }];
+      },
+    })],
+    config: { enabled: true, pollMs: 60_000 },
+    runtime: { Model: fakeModel() },
+  });
+
+  const started = rt.start();
+  await Promise.race([
+    started,
+    new Promise((_, reject) => setTimeout(
+      () => reject(new Error("start waited for the catch-up pass")),
+      100,
+    )),
+  ]);
+  assert.equal(rt.getState().running, true, "the catch-up continues after start returns");
+
+  releasePlan();
+  await rt.stop({ maxWaitMs: 2_000 });
+  assert.equal(rt.getState().running, false);
+});
+
 test("the morning floor reaches the 05:00 and 06:00 work — requireHour is threaded", async () => {
   // The hour equalities inside the filler/aged gates are an hourly caller's
   // substitute for once-per-day bookkeeping. The morning pass fires at 08:00

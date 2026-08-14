@@ -18,6 +18,22 @@ function pacificDateKey(value = new Date()) {
   }).format(new Date(value));
 }
 
+// WorkflowRecord's dedupeKey index is intentionally partial so legacy rows
+// without a string key are not forced into the uniqueness constraint. Mongo
+// will not use that partial index for an upsert unless the query explicitly
+// includes the partial predicate. A plain `{ dedupeKey }` upsert therefore
+// scans the entire workflow collection on every receipt update.
+function workflowDedupeFilter(value) {
+  const dedupeKey = String(value || "").trim();
+  if (!dedupeKey) throw new TypeError("dedupeKey is required");
+  return {
+    $and: [
+      { dedupeKey },
+      { dedupeKey: { $type: "string" } },
+    ],
+  };
+}
+
 function buildAgedReceiptIncrement(summary = {}) {
   const reasons = summary.dncLookupFailureReasons || {};
   return {
@@ -45,7 +61,7 @@ async function recordAgedRefreshBatch(summary = {}, options = {}) {
   const dateKey = options.dateKey || pacificDateKey(at);
   const dedupeKey = `nightly-ops:aged-refresh:${dateKey}`;
   await (options.model || WorkflowRecord).updateOne(
-    { dedupeKey },
+    workflowDedupeFilter(dedupeKey),
     {
       $setOnInsert: {
         domain: "SYSTEM",
@@ -113,7 +129,7 @@ async function loadNightlyOperationalSummary(dateKey, options = {}) {
   const model = options.model || WorkflowRecord;
   const { start, end } = buildTimezoneDateWindow(dateKey, PACIFIC_TIME_ZONE);
   const [agedRecord, bloggerRecord] = await Promise.all([
-    model.findOne({ dedupeKey: `nightly-ops:aged-refresh:${dateKey}` })
+    model.findOne(workflowDedupeFilter(`nightly-ops:aged-refresh:${dateKey}`))
       .select("stage status result happenedAt")
       .lean(),
     model.findOne({
@@ -135,4 +151,5 @@ module.exports = {
   pacificDateKey,
   recordAgedRefreshBatch,
   summarizeOperationalRecords,
+  workflowDedupeFilter,
 };
